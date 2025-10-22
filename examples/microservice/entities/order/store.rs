@@ -45,11 +45,7 @@ impl Default for OrderStore {
 /// when enriching links.
 #[async_trait::async_trait]
 impl EntityFetcher for OrderStore {
-    async fn fetch_as_json(
-        &self,
-        tenant_id: &Uuid,
-        entity_id: &Uuid,
-    ) -> Result<serde_json::Value> {
+    async fn fetch_as_json(&self, tenant_id: &Uuid, entity_id: &Uuid) -> Result<serde_json::Value> {
         let order = self
             .get(entity_id)
             .ok_or_else(|| anyhow::anyhow!("Order not found: {}", entity_id))?;

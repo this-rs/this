@@ -140,9 +140,7 @@ impl LinkService for InMemoryLinkService {
             .write()
             .map_err(|e| anyhow!("Failed to acquire write lock: {}", e))?;
 
-        let link = links
-            .get_mut(id)
-            .ok_or_else(|| anyhow!("Link not found"))?;
+        let link = links.get_mut(id).ok_or_else(|| anyhow!("Link not found"))?;
 
         // Verify tenant ownership
         if &link.tenant_id != tenant_id {

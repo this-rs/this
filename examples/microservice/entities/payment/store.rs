@@ -45,11 +45,7 @@ impl Default for PaymentStore {
 /// when enriching links.
 #[async_trait::async_trait]
 impl EntityFetcher for PaymentStore {
-    async fn fetch_as_json(
-        &self,
-        tenant_id: &Uuid,
-        entity_id: &Uuid,
-    ) -> Result<serde_json::Value> {
+    async fn fetch_as_json(&self, tenant_id: &Uuid, entity_id: &Uuid) -> Result<serde_json::Value> {
         let payment = self
             .get(entity_id)
             .ok_or_else(|| anyhow::anyhow!("Payment not found: {}", entity_id))?;

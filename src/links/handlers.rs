@@ -79,28 +79,28 @@ pub struct ListLinksResponse {
 pub struct EnrichedLink {
     /// Unique identifier for this link
     pub id: Uuid,
-    
+
     /// Tenant ID for multi-tenant isolation
     pub tenant_id: Uuid,
-    
+
     /// The type of relationship (e.g., "has_invoice", "payment")
     pub link_type: String,
-    
+
     /// Full source entity as JSON (omitted when querying from source)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source: Option<serde_json::Value>,
-    
+
     /// Full target entity as JSON (omitted when querying from target)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub target: Option<serde_json::Value>,
-    
+
     /// Optional metadata for the relationship
     #[serde(skip_serializing_if = "Option::is_none")]
     pub metadata: Option<serde_json::Value>,
-    
+
     /// When this link was created
     pub created_at: DateTime<Utc>,
-    
+
     /// When this link was last updated
     pub updated_at: DateTime<Utc>,
 }
@@ -129,11 +129,11 @@ enum EnrichmentContext {
     /// Query from source entity (e.g., /orders/{id}/invoices)
     /// Only target entities are included
     FromSource,
-    
+
     /// Query from target entity (reverse navigation)
     /// Only source entities are included
     FromTarget,
-    
+
     /// Direct link access (e.g., /links/{id})
     /// Both source and target entities are included
     DirectLink,
@@ -238,33 +238,19 @@ async fn enrich_links_with_entities(
         // Fetch source entity only if needed
         let source_entity = match context {
             EnrichmentContext::FromSource => None, // Already known from URL
-            EnrichmentContext::FromTarget | EnrichmentContext::DirectLink => {
-                Some(
-                    fetch_entity_by_type(
-                        state,
-                        tenant_id,
-                        &link.source.entity_type,
-                        &link.source.id,
-                    )
+            EnrichmentContext::FromTarget | EnrichmentContext::DirectLink => Some(
+                fetch_entity_by_type(state, tenant_id, &link.source.entity_type, &link.source.id)
                     .await?,
-                )
-            }
+            ),
         };
 
         // Fetch target entity only if needed
         let target_entity = match context {
             EnrichmentContext::FromTarget => None, // Already known from URL
-            EnrichmentContext::FromSource | EnrichmentContext::DirectLink => {
-                Some(
-                    fetch_entity_by_type(
-                        state,
-                        tenant_id,
-                        &link.target.entity_type,
-                        &link.target.id,
-                    )
+            EnrichmentContext::FromSource | EnrichmentContext::DirectLink => Some(
+                fetch_entity_by_type(state, tenant_id, &link.target.entity_type, &link.target.id)
                     .await?,
-                )
-            }
+            ),
         };
 
         enriched.push(EnrichedLink {
@@ -290,15 +276,12 @@ async fn fetch_entity_by_type(
     entity_id: &Uuid,
 ) -> Result<serde_json::Value, ExtractorError> {
     // Look up the fetcher for this entity type
-    let fetcher = state
-        .entity_fetchers
-        .get(entity_type)
-        .ok_or_else(|| {
-            ExtractorError::JsonError(format!(
-                "No entity fetcher registered for type: {}",
-                entity_type
-            ))
-        })?;
+    let fetcher = state.entity_fetchers.get(entity_type).ok_or_else(|| {
+        ExtractorError::JsonError(format!(
+            "No entity fetcher registered for type: {}",
+            entity_type
+        ))
+    })?;
 
     // Fetch the entity as JSON
     fetcher
@@ -332,9 +315,11 @@ pub async fn get_link(
         .ok_or_else(|| ExtractorError::LinkNotFound)?;
 
     // Find the link definition to check permissions
-    let _link_def = state
-        .config
-        .find_link_definition(&link.link_type, &link.source.entity_type, &link.target.entity_type);
+    let _link_def = state.config.find_link_definition(
+        &link.link_type,
+        &link.source.entity_type,
+        &link.target.entity_type,
+    );
 
     // TODO: Check authorization for getting a link
     // if let Some(def) = link_def {

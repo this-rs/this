@@ -45,11 +45,7 @@ impl Default for InvoiceStore {
 /// when enriching links.
 #[async_trait::async_trait]
 impl EntityFetcher for InvoiceStore {
-    async fn fetch_as_json(
-        &self,
-        tenant_id: &Uuid,
-        entity_id: &Uuid,
-    ) -> Result<serde_json::Value> {
+    async fn fetch_as_json(&self, tenant_id: &Uuid, entity_id: &Uuid) -> Result<serde_json::Value> {
         let invoice = self
             .get(entity_id)
             .ok_or_else(|| anyhow::anyhow!("Invoice not found: {}", entity_id))?;

@@ -23,11 +23,7 @@ pub trait EntityFetcher: Send + Sync {
     ///
     /// # Returns
     /// The entity serialized as JSON, or an error if not found
-    async fn fetch_as_json(
-        &self,
-        tenant_id: &Uuid,
-        entity_id: &Uuid,
-    ) -> Result<serde_json::Value>;
+    async fn fetch_as_json(&self, tenant_id: &Uuid, entity_id: &Uuid) -> Result<serde_json::Value>;
 }
 
 /// Trait for a microservice module

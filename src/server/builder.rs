@@ -55,14 +55,14 @@ impl ServerBuilder {
     /// 3. Store the module for entity fetching
     pub fn register_module(mut self, module: impl Module + 'static) -> Result<Self> {
         let module = Arc::new(module);
-        
+
         // Load the module's configuration
         let config = module.links_config()?;
         self.configs.push(config);
 
         // Register entities from the module
         module.register_entities(&mut self.entity_registry);
-        
+
         // Store module for fetchers
         self.modules.push(module);
 
