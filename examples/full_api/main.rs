@@ -167,7 +167,10 @@ async fn main() -> Result<()> {
             post(create_link).delete(delete_link),
         )
         // Introspection
-        .route("/{entity_type}/{entity_id}/links", get(list_available_links))
+        .route(
+            "/{entity_type}/{entity_id}/links",
+            get(list_available_links),
+        )
         .with_state(app_state);
 
     // Start the server
