@@ -3,8 +3,12 @@
 //! This microservice manages orders, invoices, and payments.
 //! It demonstrates how to structure a real-world microservice using the this-rs framework.
 
+use crate::entities::{
+    invoice::InvoiceDescriptor, order::OrderDescriptor, payment::PaymentDescriptor,
+};
+use crate::store::EntityStore;
 use anyhow::Result;
-use this::prelude::{LinksConfig, Module};
+use this::prelude::{EntityRegistry, LinksConfig, Module};
 
 /// Billing microservice module
 ///
@@ -12,7 +16,15 @@ use this::prelude::{LinksConfig, Module};
 /// - Orders: Customer orders
 /// - Invoices: Billing documents generated from orders
 /// - Payments: Payment transactions for invoices
-pub struct BillingModule;
+pub struct BillingModule {
+    store: EntityStore,
+}
+
+impl BillingModule {
+    pub fn new(store: EntityStore) -> Self {
+        Self { store }
+    }
+}
 
 impl Module for BillingModule {
     fn name(&self) -> &str {
@@ -34,5 +46,20 @@ impl Module for BillingModule {
             "/examples/microservice/config/links.yaml"
         );
         LinksConfig::from_yaml_file(config_path)
+    }
+
+    fn register_entities(&self, registry: &mut EntityRegistry) {
+        // Register Order entity
+        registry.register(Box::new(OrderDescriptor::new(self.store.orders.clone())));
+
+        // Register Invoice entity
+        registry.register(Box::new(InvoiceDescriptor::new(
+            self.store.invoices.clone(),
+        )));
+
+        // Register Payment entity
+        registry.register(Box::new(PaymentDescriptor::new(
+            self.store.payments.clone(),
+        )));
     }
 }

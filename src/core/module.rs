@@ -3,6 +3,7 @@
 //! Defines traits for microservice modules
 
 use crate::config::LinksConfig;
+use crate::server::entity_registry::EntityRegistry;
 use anyhow::Result;
 
 /// Trait for a microservice module
@@ -20,4 +21,10 @@ pub trait Module: Send + Sync {
 
     /// Load links configuration
     fn links_config(&self) -> Result<LinksConfig>;
+
+    /// Register entities with the entity registry
+    ///
+    /// This method should register all entity descriptors for the module.
+    /// Each entity descriptor provides the CRUD routes for that entity.
+    fn register_entities(&self, registry: &mut EntityRegistry);
 }

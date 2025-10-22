@@ -32,6 +32,7 @@ pub mod config;
 pub mod core;
 pub mod entities;
 pub mod links;
+pub mod server;
 
 /// Re-exports of commonly used types and traits
 pub mod prelude {
@@ -53,6 +54,8 @@ pub mod prelude {
     };
 
     pub use crate::config::{EntityAuthConfig, EntityConfig, LinksConfig, ValidationRule};
+
+    pub use crate::server::{EntityDescriptor, EntityRegistry, ServerBuilder};
 
     // Re-export common external dependencies
     pub use anyhow::Result;
