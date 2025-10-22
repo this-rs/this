@@ -160,14 +160,14 @@ async fn main() -> Result<()> {
     // Build the router
     let app = Router::new()
         // Link routes - list (forward and reverse)
-        .route("/:entity_type/:entity_id/:route_name", get(list_links))
+        .route("/{entity_type}/{entity_id}/{route_name}", get(list_links))
         // Link routes - create and delete (direct)
         .route(
-            "/:source_type/:source_id/:link_type/:target_type/:target_id",
+            "/{source_type}/{source_id}/{link_type}/{target_type}/{target_id}",
             post(create_link).delete(delete_link),
         )
         // Introspection
-        .route("/:entity_type/:entity_id/links", get(list_available_links))
+        .route("/{entity_type}/{entity_id}/links", get(list_available_links))
         .with_state(app_state);
 
     // Start the server

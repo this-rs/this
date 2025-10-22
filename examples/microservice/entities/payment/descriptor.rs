@@ -33,7 +33,7 @@ impl EntityDescriptor for PaymentDescriptor {
 
         Router::new()
             .route("/payments", get(list_payments).post(create_payment))
-            .route("/payments/:id", get(get_payment))
+            .route("/payments/{id}", get(get_payment))
             .with_state(state)
     }
 }

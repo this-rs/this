@@ -33,7 +33,7 @@ impl EntityDescriptor for InvoiceDescriptor {
 
         Router::new()
             .route("/invoices", get(list_invoices).post(create_invoice))
-            .route("/invoices/:id", get(get_invoice))
+            .route("/invoices/{id}", get(get_invoice))
             .with_state(state)
     }
 }

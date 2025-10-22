@@ -312,7 +312,7 @@ pub async fn get_link(
         .get(&tenant_id, &link_id)
         .await
         .map_err(|e| ExtractorError::JsonError(e.to_string()))?
-        .ok_or_else(|| ExtractorError::LinkNotFound)?;
+        .ok_or(ExtractorError::LinkNotFound)?;
 
     // Find the link definition to check permissions
     let _link_def = state.config.find_link_definition(
@@ -340,7 +340,7 @@ pub async fn get_link(
     let enriched_link = enriched_links
         .into_iter()
         .next()
-        .ok_or_else(|| ExtractorError::LinkNotFound)?;
+        .ok_or(ExtractorError::LinkNotFound)?;
 
     Ok(Json(enriched_link).into_response())
 }
