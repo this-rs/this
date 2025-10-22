@@ -1,11 +1,11 @@
 [package]
 name = "this-rs"
-version = "0.1.0"
+version = "0.0.1"
 edition = "2021"
-authors = ["Your Name <your.email@example.com>"]
+authors = ["Riviere Théotime <t@ffs.holdings>"]
 license = "MIT OR Apache-2.0"
 description = "A generic entity and relationship management framework for Rust"
-repository = "https://github.com/yourusername/this-rs"
+repository = "https://github.com/this-rs/this"
 keywords = ["entity", "relationship", "rest", "api", "framework"]
 categories = ["web-programming", "database"]
 readme = "README.md"
