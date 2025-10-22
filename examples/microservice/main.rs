@@ -56,29 +56,29 @@ async fn main() -> Result<()> {
     println!("\n  🔷 Entity CRUD Routes:");
     println!("    GET    /orders                          - List all orders");
     println!("    POST   /orders                          - Create a new order");
-    println!("    GET    /orders/:id                      - Get a specific order");
+    println!("    GET    /orders/{{id}}                      - Get a specific order");
     println!("    GET    /invoices                        - List all invoices");
     println!("    POST   /invoices                        - Create a new invoice");
-    println!("    GET    /invoices/:id                    - Get a specific invoice");
+    println!("    GET    /invoices/{{id}}                    - Get a specific invoice");
     println!("    GET    /payments                        - List all payments");
     println!("    POST   /payments                        - Create a new payment");
-    println!("    GET    /payments/:id                    - Get a specific payment");
+    println!("    GET    /payments/{{id}}                    - Get a specific payment");
     println!("\n  🔗 Link Routes (Generic for all entities):");
-    println!("    GET    /links/:link_id                  - Get a specific link by ID");
+    println!("    GET    /links/{{link_id}}                  - Get a specific link by ID");
     println!(
-        "    GET    /:entity/:id/:link_route         - List links (e.g. /orders/123/invoices)"
+        "    GET    /{{entity}}/{{id}}/{{link_route}}         - List links (e.g. /orders/123/invoices)"
     );
-    println!("    POST   /:source/:id/:link/:target/:id   - Create a link");
-    println!("    PUT    /:source/:id/:link/:target/:id   - Update link metadata");
-    println!("    DELETE /:source/:id/:link/:target/:id   - Delete a link");
+    println!("    POST   /{{source}}/{{id}}/{{link}}/{{target}}/{{id}}   - Create a link");
+    println!("    PUT    /{{source}}/{{id}}/{{link}}/{{target}}/{{id}}   - Update link metadata");
+    println!("    DELETE /{{source}}/{{id}}/{{link}}/{{target}}/{{id}}   - Delete a link");
     println!(
-        "    GET    /:entity/:id/links               - Introspection (list available link types)"
+        "    GET    /{{entity}}/{{id}}/links               - Introspection (list available link types)"
     );
     println!("\n  📋 Specific Link Routes (from config):");
-    println!("    GET    /orders/:id/invoices             - Get invoices for an order");
-    println!("    GET    /invoices/:id/order              - Get order for an invoice");
-    println!("    GET    /invoices/:id/payments           - Get payments for an invoice");
-    println!("    GET    /payments/:id/invoice            - Get invoice for a payment");
+    println!("    GET    /orders/{{id}}/invoices             - Get invoices for an order");
+    println!("    GET    /invoices/{{id}}/order              - Get order for an invoice");
+    println!("    GET    /invoices/{{id}}/payments           - Get payments for an invoice");
+    println!("    GET    /payments/{{id}}/invoice            - Get invoice for a payment");
 
     axum::serve(listener, app).await.unwrap();
 

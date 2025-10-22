@@ -31,7 +31,7 @@ impl EntityDescriptor for OrderDescriptor {
 
         Router::new()
             .route("/orders", get(list_orders).post(create_order))
-            .route("/orders/:id", get(get_order))
+            .route("/orders/{id}", get(get_order))
             .with_state(state)
     }
 }

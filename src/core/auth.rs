@@ -133,7 +133,7 @@ impl AuthPolicy {
     }
 
     /// Parse policy from string (for YAML config)
-    pub fn from_str(s: &str) -> Self {
+    pub fn parse_policy(s: &str) -> Self {
         match s {
             "public" => AuthPolicy::Public,
             "authenticated" => AuthPolicy::Authenticated,
@@ -212,12 +212,12 @@ mod tests {
 
     #[test]
     fn test_policy_from_str() {
-        match AuthPolicy::from_str("public") {
+        match AuthPolicy::parse_policy("public") {
             AuthPolicy::Public => (),
             _ => panic!("Expected Public"),
         }
 
-        match AuthPolicy::from_str("role:admin") {
+        match AuthPolicy::parse_policy("role:admin") {
             AuthPolicy::HasRole(roles) => assert_eq!(roles, vec!["admin"]),
             _ => panic!("Expected HasRole"),
         }
