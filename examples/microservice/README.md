@@ -205,11 +205,13 @@ Ces routes sont également **automatiquement créées** et fonctionnent pour tou
 | Méthode | Route | Description |
 |---------|-------|-------------|
 | GET | `/orders/{id}/invoices` | Liste les factures d'une commande |
+| GET | `/orders/{id}/invoices/{inv_id}` | Récupère un lien spécifique order→invoice (🆕) |
 | GET | `/invoices/{id}/order` | Récupère la commande d'une facture |
 | GET | `/invoices/{id}/payments` | Liste les paiements d'une facture |
 | GET | `/payments/{id}/invoice` | Récupère la facture d'un paiement |
-| POST | `/orders/{id}/has_invoice/invoices/{inv_id}` | Crée un lien |
-| DELETE | `/orders/{id}/has_invoice/invoices/{inv_id}` | Supprime un lien |
+| POST | `/orders/{id}/invoices/{inv_id}` | Crée un lien order→invoice (🆕 semantic URL) |
+| PUT | `/orders/{id}/invoices/{inv_id}` | Met à jour la metadata du lien (🆕) |
+| DELETE | `/orders/{id}/invoices/{inv_id}` | Supprime un lien (🆕 semantic URL) |
 | GET | `/orders/{id}/links` | Introspection des liens disponibles |
 
 ## Exemples de Requêtes
@@ -265,9 +267,13 @@ curl http://127.0.0.1:3000/payments
 ### Link Navigation
 
 ```bash
-# Liste les factures d'une commande
+# Liste les factures d'une commande (avec enrichissement automatique)
 curl -H 'X-Tenant-ID: <TENANT_ID>' \
   http://127.0.0.1:3000/orders/<ORDER_ID>/invoices
+
+# Récupère un lien spécifique order→invoice (🆕 avec les deux entités complètes)
+curl -H 'X-Tenant-ID: <TENANT_ID>' \
+  http://127.0.0.1:3000/orders/<ORDER_ID>/invoices/<INVOICE_ID>
 
 # Récupère la commande d'une facture
 curl -H 'X-Tenant-ID: <TENANT_ID>' \
@@ -277,6 +283,36 @@ curl -H 'X-Tenant-ID: <TENANT_ID>' \
 curl -H 'X-Tenant-ID: <TENANT_ID>' \
   http://127.0.0.1:3000/orders/<ORDER_ID>/links
 ```
+
+### Link Manipulation (🆕 Semantic URLs)
+
+```bash
+# Crée un lien order → invoice (nouveau format sémantique)
+curl -X POST -H 'X-Tenant-ID: <TENANT_ID>' \
+  -H 'Content-Type: application/json' \
+  -d '{"metadata": {"created_by": "admin", "note": "Initial invoice"}}' \
+  http://127.0.0.1:3000/orders/<ORDER_ID>/invoices/<INVOICE_ID>
+
+# Met à jour la metadata d'un lien
+curl -X PUT -H 'X-Tenant-ID: <TENANT_ID>' \
+  -H 'Content-Type: application/json' \
+  -d '{"metadata": {"status": "verified", "verified_by": "manager"}}' \
+  http://127.0.0.1:3000/orders/<ORDER_ID>/invoices/<INVOICE_ID>
+
+# Supprime un lien (nouveau format sémantique)
+curl -X DELETE -H 'X-Tenant-ID: <TENANT_ID>' \
+  http://127.0.0.1:3000/orders/<ORDER_ID>/invoices/<INVOICE_ID>
+
+# Crée un lien invoice → payment
+curl -X POST -H 'X-Tenant-ID: <TENANT_ID>' \
+  -H 'Content-Type: application/json' \
+  -d '{"metadata": {"payment_method": "card", "transaction_id": "txn_123"}}' \
+  http://127.0.0.1:3000/invoices/<INVOICE_ID>/payments/<PAYMENT_ID>
+```
+
+**Note** : Le nouveau format utilise `route_name` au lieu de `link_type` pour des URLs plus sémantiques :
+- ✅ `/orders/{id}/invoices/{invoice_id}` (semantic, auto-documenté)
+- ❌ `/orders/{id}/has_invoice/invoices/{invoice_id}` (ancien format, plus verbeux)
 
 ## Ce Que Vous Apprendrez
 
