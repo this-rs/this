@@ -60,8 +60,12 @@ path = "src/lib.rs"
 
 [[example]]
 name = "simple_api"
-path = "examples/simple_api.rs"
+path = "examples/simple_api/main.rs"
 
 [[example]]
 name = "full_api"
-path = "examples/full_api.rs"
+path = "examples/full_api/main.rs"
+
+[[example]]
+name = "microservice"
+path = "examples/microservice/main.rs"

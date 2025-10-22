@@ -5,6 +5,61 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+/// Authorization configuration for an entity
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EntityAuthConfig {
+    /// Policy for listing entities (GET /{entities})
+    #[serde(default = "default_auth_policy")]
+    pub list: String,
+
+    /// Policy for getting a single entity (GET /{entities}/{id})
+    #[serde(default = "default_auth_policy")]
+    pub get: String,
+
+    /// Policy for creating an entity (POST /{entities})
+    #[serde(default = "default_auth_policy")]
+    pub create: String,
+
+    /// Policy for updating an entity (PUT /{entities}/{id})
+    #[serde(default = "default_auth_policy")]
+    pub update: String,
+
+    /// Policy for deleting an entity (DELETE /{entities}/{id})
+    #[serde(default = "default_auth_policy")]
+    pub delete: String,
+
+    /// Policy for listing links (GET /{entities}/{id}/{link_route})
+    #[serde(default = "default_auth_policy")]
+    pub list_links: String,
+
+    /// Policy for creating links (POST /{entities}/{id}/{link_type}/{target_type}/{target_id})
+    #[serde(default = "default_auth_policy")]
+    pub create_link: String,
+
+    /// Policy for deleting links (DELETE /{entities}/{id}/{link_type}/{target_type}/{target_id})
+    #[serde(default = "default_auth_policy")]
+    pub delete_link: String,
+}
+
+fn default_auth_policy() -> String {
+    "authenticated".to_string()
+}
+
+impl Default for EntityAuthConfig {
+    fn default() -> Self {
+        Self {
+            list: default_auth_policy(),
+            get: default_auth_policy(),
+            create: default_auth_policy(),
+            update: default_auth_policy(),
+            delete: default_auth_policy(),
+            list_links: default_auth_policy(),
+            create_link: default_auth_policy(),
+            delete_link: default_auth_policy(),
+        }
+    }
+}
+
 /// Configuration for an entity type
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EntityConfig {
@@ -13,6 +68,10 @@ pub struct EntityConfig {
 
     /// Plural form (e.g., "users", "companies")
     pub plural: String,
+
+    /// Authorization configuration
+    #[serde(default)]
+    pub auth: EntityAuthConfig,
 }
 
 /// Validation rule for a link type
@@ -94,14 +153,17 @@ impl LinksConfig {
                 EntityConfig {
                     singular: "user".to_string(),
                     plural: "users".to_string(),
+                    auth: EntityAuthConfig::default(),
                 },
                 EntityConfig {
                     singular: "company".to_string(),
                     plural: "companies".to_string(),
+                    auth: EntityAuthConfig::default(),
                 },
                 EntityConfig {
                     singular: "car".to_string(),
                     plural: "cars".to_string(),
+                    auth: EntityAuthConfig::default(),
                 },
             ],
             links: vec![

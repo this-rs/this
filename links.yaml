@@ -4,15 +4,51 @@
 entities:
   - singular: user
     plural: users
+    auth:
+      list: authenticated
+      get: authenticated
+      create: service_only
+      update: owner
+      delete: owner
+      list_links: authenticated
+      create_link: owner
+      delete_link: owner
   
   - singular: company
     plural: companies
+    auth:
+      list: authenticated
+      get: authenticated
+      create: authenticated
+      update: owner_or_role:admin
+      delete: owner_or_role:admin
+      list_links: authenticated
+      create_link: owner
+      delete_link: owner
   
   - singular: car
     plural: cars
+    auth:
+      list: authenticated
+      get: authenticated
+      create: authenticated
+      update: owner
+      delete: owner
+      list_links: authenticated
+      create_link: owner
+      delete_link: owner
   
   - singular: address
     plural: addresses
+    auth:
+      list: authenticated
+      get: public
+      create: authenticated
+      update: owner
+      delete: owner
+      list_links: authenticated
+      create_link: owner
+      delete_link: owner
 
 links:
   # User owns cars

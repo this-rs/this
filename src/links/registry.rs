@@ -130,10 +130,12 @@ mod tests {
                 EntityConfig {
                     singular: "user".to_string(),
                     plural: "users".to_string(),
+                    auth: crate::config::EntityAuthConfig::default(),
                 },
                 EntityConfig {
                     singular: "car".to_string(),
                     plural: "cars".to_string(),
+                    auth: crate::config::EntityAuthConfig::default(),
                 },
             ],
             links: vec![

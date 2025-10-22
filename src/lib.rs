@@ -36,10 +36,12 @@ pub mod links;
 /// Re-exports of commonly used types and traits
 pub mod prelude {
     pub use crate::core::{
+        auth::{AuthContext, AuthPolicy, AuthProvider, NoAuthProvider},
         entity::{Data, Entity},
         extractors::{extract_tenant_id, DirectLinkExtractor, ExtractorError, LinkExtractor},
         field::{FieldFormat, FieldValue},
         link::{EntityReference, Link, LinkDefinition},
+        module::Module,
         pluralize::Pluralizer,
         service::{DataService, LinkService},
     };
@@ -50,7 +52,7 @@ pub mod prelude {
         service::InMemoryLinkService,
     };
 
-    pub use crate::config::{EntityConfig, LinksConfig};
+    pub use crate::config::{EntityAuthConfig, EntityConfig, LinksConfig, ValidationRule};
 
     // Re-export common external dependencies
     pub use anyhow::Result;

@@ -1,0 +1,66 @@
+# Configuration for the billing microservice
+# This microservice manages orders, invoices, and payments
+
+entities:
+  - singular: order
+    plural: orders
+    auth:
+      list: authenticated
+      get: authenticated
+      create: authenticated
+      update: owner
+      delete: owner_or_role:admin
+      list_links: authenticated
+      create_link: owner
+      delete_link: owner
+
+  - singular: invoice
+    plural: invoices
+    auth:
+      list: authenticated
+      get: authenticated
+      create: service_only
+      update: service_only
+      delete: admin_only
+      list_links: authenticated
+      create_link: service_only
+      delete_link: service_only
+
+  - singular: payment
+    plural: payments
+    auth:
+      list: owner
+      get: owner
+      create: authenticated
+      update: service_only
+      delete: admin_only
+      list_links: owner
+      create_link: service_only
+      delete_link: service_only
+
+links:
+  # Order has invoices
+  - link_type: has_invoice
+    source_type: order
+    target_type: invoice
+    forward_route_name: invoices
+    reverse_route_name: order
+    description: "Order has invoices"
+
+  # Invoice has payments
+  - link_type: payment
+    source_type: invoice
+    target_type: payment
+    forward_route_name: payments
+    reverse_route_name: invoice
+    description: "Payment for invoice"
+
+validation_rules:
+  has_invoice:
+    - source: order
+      targets: [invoice]
+  
+  payment:
+    - source: invoice
+      targets: [payment]
+
