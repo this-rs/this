@@ -8,7 +8,8 @@ use crate::entities::{
 };
 use crate::store::EntityStore;
 use anyhow::Result;
-use this::prelude::{EntityRegistry, LinksConfig, Module};
+use std::sync::Arc;
+use this::prelude::{EntityFetcher, EntityRegistry, LinksConfig, Module};
 
 /// Billing microservice module
 ///
@@ -61,5 +62,14 @@ impl Module for BillingModule {
         registry.register(Box::new(PaymentDescriptor::new(
             self.store.payments.clone(),
         )));
+    }
+
+    fn get_entity_fetcher(&self, entity_type: &str) -> Option<Arc<dyn EntityFetcher>> {
+        match entity_type {
+            "order" => Some(Arc::new(self.store.orders.clone()) as Arc<dyn EntityFetcher>),
+            "invoice" => Some(Arc::new(self.store.invoices.clone()) as Arc<dyn EntityFetcher>),
+            "payment" => Some(Arc::new(self.store.payments.clone()) as Arc<dyn EntityFetcher>),
+            _ => None,
+        }
     }
 }

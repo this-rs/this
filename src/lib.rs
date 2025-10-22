@@ -42,7 +42,7 @@ pub mod prelude {
         extractors::{extract_tenant_id, DirectLinkExtractor, ExtractorError, LinkExtractor},
         field::{FieldFormat, FieldValue},
         link::{EntityReference, Link, LinkAuthConfig, LinkDefinition},
-        module::Module,
+        module::{EntityFetcher, Module},
         pluralize::Pluralizer,
         service::{DataService, LinkService},
     };

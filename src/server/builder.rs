@@ -5,10 +5,12 @@ use super::router::build_link_routes;
 use crate::config::LinksConfig;
 use crate::core::module::Module;
 use crate::core::service::LinkService;
+use crate::core::EntityFetcher;
 use crate::links::handlers::AppState;
 use crate::links::registry::LinkRouteRegistry;
 use anyhow::Result;
 use axum::Router;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 /// Builder for creating HTTP servers with auto-registered routes
@@ -25,6 +27,7 @@ pub struct ServerBuilder {
     link_service: Option<Arc<dyn LinkService>>,
     entity_registry: EntityRegistry,
     configs: Vec<LinksConfig>,
+    modules: Vec<Arc<dyn Module>>,
 }
 
 impl ServerBuilder {
@@ -34,6 +37,7 @@ impl ServerBuilder {
             link_service: None,
             entity_registry: EntityRegistry::new(),
             configs: Vec::new(),
+            modules: Vec::new(),
         }
     }
 
@@ -48,13 +52,19 @@ impl ServerBuilder {
     /// This will:
     /// 1. Load the module's configuration
     /// 2. Register all entities from the module
+    /// 3. Store the module for entity fetching
     pub fn register_module(mut self, module: impl Module + 'static) -> Result<Self> {
+        let module = Arc::new(module);
+        
         // Load the module's configuration
         let config = module.links_config()?;
         self.configs.push(config);
 
         // Register entities from the module
         module.register_entities(&mut self.entity_registry);
+        
+        // Store module for fetchers
+        self.modules.push(module);
 
         Ok(self)
     }
@@ -79,11 +89,22 @@ impl ServerBuilder {
         // Create link registry
         let registry = Arc::new(LinkRouteRegistry::new(config.clone()));
 
+        // Build entity fetchers map from all modules
+        let mut fetchers_map: HashMap<String, Arc<dyn EntityFetcher>> = HashMap::new();
+        for module in &self.modules {
+            for entity_type in module.entity_types() {
+                if let Some(fetcher) = module.get_entity_fetcher(entity_type) {
+                    fetchers_map.insert(entity_type.to_string(), fetcher);
+                }
+            }
+        }
+
         // Create link app state
         let link_state = AppState {
             link_service,
             config,
             registry,
+            entity_fetchers: Arc::new(fetchers_map),
         };
 
         // Build entity routes

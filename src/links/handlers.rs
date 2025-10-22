@@ -9,7 +9,9 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -17,7 +19,7 @@ use crate::config::LinksConfig;
 use crate::core::extractors::{
     extract_tenant_id, DirectLinkExtractor, ExtractorError, LinkExtractor,
 };
-use crate::core::{EntityReference, Link, LinkDefinition, LinkService};
+use crate::core::{EntityFetcher, EntityReference, Link, LinkDefinition, LinkService};
 use crate::links::registry::{LinkDirection, LinkRouteRegistry};
 
 /// Application state shared across handlers
@@ -26,6 +28,8 @@ pub struct AppState {
     pub link_service: Arc<dyn LinkService>,
     pub config: Arc<LinksConfig>,
     pub registry: Arc<LinkRouteRegistry>,
+    /// Entity fetchers for enriching links with full entity data
+    pub entity_fetchers: Arc<HashMap<String, Arc<dyn EntityFetcher>>>,
 }
 
 impl AppState {
@@ -62,10 +66,77 @@ pub struct ListLinksResponse {
     pub description: Option<String>,
 }
 
+/// Link with full entity data instead of just references
+///
+/// This enriched version includes the complete source and target entities
+/// as JSON, avoiding the need for additional API calls.
+///
+/// Depending on the context:
+/// - From source route (e.g., /orders/{id}/invoices): only `target` is populated
+/// - From target route (reverse): only `source` is populated
+/// - Direct link access (e.g., /links/{id}): both `source` and `target` are populated
+#[derive(Debug, Serialize)]
+pub struct EnrichedLink {
+    /// Unique identifier for this link
+    pub id: Uuid,
+    
+    /// Tenant ID for multi-tenant isolation
+    pub tenant_id: Uuid,
+    
+    /// The type of relationship (e.g., "has_invoice", "payment")
+    pub link_type: String,
+    
+    /// Full source entity as JSON (omitted when querying from source)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<serde_json::Value>,
+    
+    /// Full target entity as JSON (omitted when querying from target)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target: Option<serde_json::Value>,
+    
+    /// Optional metadata for the relationship
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<serde_json::Value>,
+    
+    /// When this link was created
+    pub created_at: DateTime<Utc>,
+    
+    /// When this link was last updated
+    pub updated_at: DateTime<Utc>,
+}
+
+/// Response for enriched list links endpoint
+#[derive(Debug, Serialize)]
+pub struct EnrichedListLinksResponse {
+    pub links: Vec<EnrichedLink>,
+    pub count: usize,
+    pub link_type: String,
+    pub direction: String,
+    pub description: Option<String>,
+}
+
 /// Request body for creating a link
 #[derive(Debug, Deserialize)]
 pub struct CreateLinkRequest {
     pub metadata: Option<serde_json::Value>,
+}
+
+/// Context for link enrichment
+///
+/// Determines which entities should be fetched and included in the response
+#[derive(Debug, Clone, Copy)]
+enum EnrichmentContext {
+    /// Query from source entity (e.g., /orders/{id}/invoices)
+    /// Only target entities are included
+    FromSource,
+    
+    /// Query from target entity (reverse navigation)
+    /// Only source entities are included
+    FromTarget,
+    
+    /// Direct link access (e.g., /links/{id})
+    /// Both source and target entities are included
+    DirectLink,
 }
 
 /// List links using named routes (forward or reverse)
@@ -75,11 +146,13 @@ pub struct CreateLinkRequest {
 /// Examples:
 /// - GET /users/{id}/cars-owned  → Forward navigation
 /// - GET /cars/{id}/users-owners → Reverse navigation
+///
+/// This endpoint automatically enriches links with full entity data.
 pub async fn list_links(
     State(state): State<AppState>,
     Path((entity_type_plural, entity_id, route_name)): Path<(String, Uuid, String)>,
     headers: HeaderMap,
-) -> Result<Json<ListLinksResponse>, ExtractorError> {
+) -> Result<Json<EnrichedListLinksResponse>, ExtractorError> {
     let tenant_id = extract_tenant_id(&headers)?;
 
     let extractor = LinkExtractor::from_path_and_registry(
@@ -129,13 +202,109 @@ pub async fn list_links(
         }
     };
 
-    Ok(Json(ListLinksResponse {
-        count: links.len(),
-        links,
+    // Determine enrichment context based on direction
+    let context = match extractor.direction {
+        LinkDirection::Forward => EnrichmentContext::FromSource,
+        LinkDirection::Reverse => EnrichmentContext::FromTarget,
+    };
+
+    // Enrich links with full entity data (only the relevant side)
+    let enriched_links = enrich_links_with_entities(&state, links, &tenant_id, context).await?;
+
+    Ok(Json(EnrichedListLinksResponse {
+        count: enriched_links.len(),
+        links: enriched_links,
         link_type: extractor.link_definition.link_type,
         direction: format!("{:?}", extractor.direction),
         description: extractor.link_definition.description,
     }))
+}
+
+/// Helper function to enrich links with full entity data
+///
+/// Depending on the context, only the necessary entities are fetched:
+/// - FromSource: only target entities
+/// - FromTarget: only source entities  
+/// - DirectLink: both source and target entities
+async fn enrich_links_with_entities(
+    state: &AppState,
+    links: Vec<Link>,
+    tenant_id: &Uuid,
+    context: EnrichmentContext,
+) -> Result<Vec<EnrichedLink>, ExtractorError> {
+    let mut enriched = Vec::new();
+
+    for link in links {
+        // Fetch source entity only if needed
+        let source_entity = match context {
+            EnrichmentContext::FromSource => None, // Already known from URL
+            EnrichmentContext::FromTarget | EnrichmentContext::DirectLink => {
+                Some(
+                    fetch_entity_by_type(
+                        state,
+                        tenant_id,
+                        &link.source.entity_type,
+                        &link.source.id,
+                    )
+                    .await?,
+                )
+            }
+        };
+
+        // Fetch target entity only if needed
+        let target_entity = match context {
+            EnrichmentContext::FromTarget => None, // Already known from URL
+            EnrichmentContext::FromSource | EnrichmentContext::DirectLink => {
+                Some(
+                    fetch_entity_by_type(
+                        state,
+                        tenant_id,
+                        &link.target.entity_type,
+                        &link.target.id,
+                    )
+                    .await?,
+                )
+            }
+        };
+
+        enriched.push(EnrichedLink {
+            id: link.id,
+            tenant_id: link.tenant_id,
+            link_type: link.link_type,
+            source: source_entity,
+            target: target_entity,
+            metadata: link.metadata,
+            created_at: link.created_at,
+            updated_at: link.updated_at,
+        });
+    }
+
+    Ok(enriched)
+}
+
+/// Fetch an entity dynamically by type
+async fn fetch_entity_by_type(
+    state: &AppState,
+    tenant_id: &Uuid,
+    entity_type: &str,
+    entity_id: &Uuid,
+) -> Result<serde_json::Value, ExtractorError> {
+    // Look up the fetcher for this entity type
+    let fetcher = state
+        .entity_fetchers
+        .get(entity_type)
+        .ok_or_else(|| {
+            ExtractorError::JsonError(format!(
+                "No entity fetcher registered for type: {}",
+                entity_type
+            ))
+        })?;
+
+    // Fetch the entity as JSON
+    fetcher
+        .fetch_as_json(tenant_id, entity_id)
+        .await
+        .map_err(|e| ExtractorError::JsonError(format!("Failed to fetch entity: {}", e)))
 }
 
 /// Get a specific link by ID
@@ -144,6 +313,9 @@ pub async fn list_links(
 ///
 /// Example:
 /// - GET /links/abc-123-def-456
+///
+/// This endpoint returns the link enriched with BOTH source and target entities,
+/// since the caller doesn't know which entities are involved.
 pub async fn get_link(
     State(state): State<AppState>,
     Path(link_id): Path<Uuid>,
@@ -160,7 +332,7 @@ pub async fn get_link(
         .ok_or_else(|| ExtractorError::LinkNotFound)?;
 
     // Find the link definition to check permissions
-    let link_def = state
+    let _link_def = state
         .config
         .find_link_definition(&link.link_type, &link.source.entity_type, &link.target.entity_type);
 
@@ -171,7 +343,21 @@ pub async fn get_link(
     //     }
     // }
 
-    Ok(Json(link).into_response())
+    // Enrich with both source and target entities (DirectLink context)
+    let enriched_links = enrich_links_with_entities(
+        &state,
+        vec![link],
+        &tenant_id,
+        EnrichmentContext::DirectLink,
+    )
+    .await?;
+
+    let enriched_link = enriched_links
+        .into_iter()
+        .next()
+        .ok_or_else(|| ExtractorError::LinkNotFound)?;
+
+    Ok(Json(enriched_link).into_response())
 }
 
 /// Create a link using direct path
