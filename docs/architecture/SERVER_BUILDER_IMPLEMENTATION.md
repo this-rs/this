@@ -242,20 +242,29 @@ POST   /payments         → create_payment
 GET    /payments/:id     → get_payment
 ```
 
-### Routes de Liens (génériques)
+### Routes de Liens (génériques, semantic URLs)
 
 ```
 GET    /:entity_type/:entity_id/:route_name
        → Liste les liens (ex: /orders/123/invoices)
 
-POST   /:source_type/:source_id/:link_type/:target_type/:target_id
-       → Crée un lien (ex: /orders/123/has_invoice/invoices/456)
+GET    /:source_type/:source_id/:route_name/:target_id
+       → Récupère un lien spécifique (ex: /orders/123/invoices/456)
 
-DELETE /:source_type/:source_id/:link_type/:target_type/:target_id
-       → Supprime un lien
+POST   /:source_type/:source_id/:route_name/:target_id
+       → Crée un lien (ex: /orders/123/invoices/456)
+
+PUT    /:source_type/:source_id/:route_name/:target_id
+       → Met à jour la metadata (ex: /orders/123/invoices/456)
+
+DELETE /:source_type/:source_id/:route_name/:target_id
+       → Supprime un lien (ex: /orders/123/invoices/456)
 
 GET    /:entity_type/:entity_id/links
        → Liste les types de liens disponibles
+
+Note: Le route_name (ex: "invoices") est résolu automatiquement vers le
+      link_type technique (ex: "has_invoice") par le LinkRouteRegistry.
 ```
 
 ---

@@ -182,11 +182,13 @@ links:
     reverse_route_name: order
 ```
 
-Framework generates:
-- `GET /orders/:id/invoices` - Forward navigation
-- `GET /invoices/:id/order` - Reverse navigation
-- `POST /orders/:id/has_invoice/invoices/:invoice_id` - Create link
-- `DELETE /orders/:id/has_invoice/invoices/:invoice_id` - Delete link
+Framework generates (semantic URLs):
+- `GET /orders/:id/invoices` - List invoices for an order
+- `GET /orders/:id/invoices/:invoice_id` - Get specific link with both entities
+- `POST /orders/:id/invoices/:invoice_id` - Create link
+- `PUT /orders/:id/invoices/:invoice_id` - Update link metadata
+- `DELETE /orders/:id/invoices/:invoice_id` - Delete link
+- `GET /invoices/:id/order` - Reverse navigation (invoice → order)
 
 ---
 

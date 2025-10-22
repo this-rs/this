@@ -269,8 +269,11 @@ pub fn build_link_routes(state: AppState) -> Router {
         )
         
         .route(
-            "/:source_type/:source_id/:link_type/:target_type/:target_id",
-            post(create_link).delete(delete_link)
+            "/:source_type/:source_id/:route_name/:target_id",
+            get(get_link_by_route)
+                .post(create_link)
+                .put(update_link)
+                .delete(delete_link)
         )
         .route("/:entity_type/:entity_id/links", get(list_available_links))
         .with_state(state)
