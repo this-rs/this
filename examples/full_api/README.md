@@ -25,10 +25,12 @@ Le serveur démarre sur `http://127.0.0.1:3000`
 
 ## Routes Disponibles
 
-### Navigation de Liens
+### Navigation de Liens (Semantic URLs)
 - `GET /:entity_type/:entity_id/:route_name` - Liste les entités liées
-- `POST /:source_type/:source_id/:link_type/:target_type/:target_id` - Crée un lien
-- `DELETE /:source_type/:source_id/:link_type/:target_type/:target_id` - Supprime un lien
+- `GET /:source_type/:source_id/:route_name/:target_id` - Récupère un lien spécifique
+- `POST /:source_type/:source_id/:route_name/:target_id` - Crée un lien
+- `PUT /:source_type/:source_id/:route_name/:target_id` - Met à jour la metadata
+- `DELETE /:source_type/:source_id/:route_name/:target_id` - Supprime un lien
 - `GET /:entity_type/:entity_id/links` - Introspection (découvre tous les liens)
 
 ## Exemples de Requêtes

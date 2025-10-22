@@ -91,9 +91,12 @@ async fn main() -> Result<()> {
         .route("/:entity_type/:entity_id/:route_name", 
             get(list_links))
         
-        // Routes pour créer et supprimer des liens
-        .route("/:source_type/:source_id/:link_type/:target_type/:target_id",
-            post(create_link).delete(delete_link))
+        // Routes pour manipuler des liens (semantic URLs)
+        .route("/:source_type/:source_id/:route_name/:target_id",
+            get(get_link_by_route)
+                .post(create_link)
+                .put(update_link)
+                .delete(delete_link))
         
         // Route d'introspection
         .route("/:entity_type/:entity_id/links", 
