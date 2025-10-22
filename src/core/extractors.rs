@@ -120,28 +120,38 @@ impl LinkExtractor {
     }
 }
 
-/// Extractor for direct link creation/deletion
+/// Extractor for direct link creation/deletion/update
 ///
-/// Format: `/{source_type}/{source_id}/{link_type}/{target_type}/{target_id}`
+/// NEW Format: `/{source_type}/{source_id}/{route_name}/{target_id}`
+/// Example: `/users/123.../cars-owned/456...`
+///
+/// This uses the route_name (e.g., "cars-owned") instead of link_type (e.g., "owner")
+/// to provide more semantic and RESTful URLs.
 #[derive(Debug, Clone)]
 pub struct DirectLinkExtractor {
     pub tenant_id: Uuid,
-    pub link_type: String,
     pub source: EntityReference,
     pub target: EntityReference,
-    pub link_definition: Option<LinkDefinition>,
+    pub link_definition: LinkDefinition,
+    pub direction: LinkDirection,
 }
 
 impl DirectLinkExtractor {
-    /// Parse a direct link path
+    /// Parse a direct link path using route_name
+    ///
+    /// NEW: path_parts = (source_type_plural, source_id, route_name, target_id)
+    ///
+    /// The route_name is resolved to a link definition using the LinkRouteRegistry,
+    /// which handles both forward and reverse navigation automatically.
     pub fn from_path(
-        path_parts: (String, Uuid, String, String, Uuid),
+        path_parts: (String, Uuid, String, Uuid),
+        registry: &LinkRouteRegistry,
         config: &LinksConfig,
         tenant_id: Uuid,
     ) -> Result<Self, ExtractorError> {
-        let (source_type_plural, source_id, link_type, target_type_plural, target_id) = path_parts;
+        let (source_type_plural, source_id, route_name, target_id) = path_parts;
 
-        // Convert plurals to singulars
+        // Convert plural to singular
         let source_type = config
             .entities
             .iter()
@@ -149,33 +159,26 @@ impl DirectLinkExtractor {
             .map(|e| e.singular.clone())
             .unwrap_or(source_type_plural);
 
-        let target_type = config
-            .entities
-            .iter()
-            .find(|e| e.plural == target_type_plural)
-            .map(|e| e.singular.clone())
-            .unwrap_or(target_type_plural);
+        // Resolve the route to get link definition and direction
+        let (link_definition, direction) = registry
+            .resolve_route(&source_type, &route_name)
+            .map_err(|_| ExtractorError::RouteNotFound(route_name.clone()))?;
 
-        let source = EntityReference::new(source_id, source_type.clone());
-        let target = EntityReference::new(target_id, target_type.clone());
+        // Determine target type based on direction
+        let target_type = match direction {
+            LinkDirection::Forward => link_definition.target_type.clone(),
+            LinkDirection::Reverse => link_definition.source_type.clone(),
+        };
 
-        // Try to find the link definition
-        let link_definition = config
-            .links
-            .iter()
-            .find(|def| {
-                def.link_type == link_type
-                    && def.source_type == source_type
-                    && def.target_type == target_type
-            })
-            .cloned();
+        let source = EntityReference::new(source_id, source_type);
+        let target = EntityReference::new(target_id, target_type);
 
         Ok(Self {
             tenant_id,
-            link_type,
             source,
             target,
             link_definition,
+            direction,
         })
     }
 }

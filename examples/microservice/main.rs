@@ -66,18 +66,27 @@ async fn main() -> Result<()> {
     println!("\n  🔗 Link Routes (Generic for all entities):");
     println!("    GET    /links/{{link_id}}                  - Get a specific link by ID");
     println!(
-        "    GET    /{{entity}}/{{id}}/{{link_route}}         - List links (e.g. /orders/123/invoices)"
+        "    GET    /{{entity}}/{{id}}/{{route_name}}        - List links (e.g. /orders/123/invoices)"
     );
-    println!("    POST   /{{source}}/{{id}}/{{link}}/{{target}}/{{id}}   - Create a link");
-    println!("    PUT    /{{source}}/{{id}}/{{link}}/{{target}}/{{id}}   - Update link metadata");
-    println!("    DELETE /{{source}}/{{id}}/{{link}}/{{target}}/{{id}}   - Delete a link");
+    println!("    GET    /{{source}}/{{id}}/{{route_name}}/{{target_id}}  - Get a specific link");
+    println!("    POST   /{{source}}/{{id}}/{{route_name}}/{{target_id}}  - Create a link");
+    println!("    PUT    /{{source}}/{{id}}/{{route_name}}/{{target_id}}  - Update link metadata");
+    println!("    DELETE /{{source}}/{{id}}/{{route_name}}/{{target_id}}  - Delete a link");
     println!(
         "    GET    /{{entity}}/{{id}}/links               - Introspection (list available link types)"
     );
     println!("\n  📋 Specific Link Routes (from config):");
-    println!("    GET    /orders/{{id}}/invoices             - Get invoices for an order");
+    println!("    GET    /orders/{{id}}/invoices             - List invoices for an order");
+    println!("    GET    /orders/{{id}}/invoices/{{invoice_id}} - Get specific order→invoice link");
+    println!("    POST   /orders/{{id}}/invoices/{{invoice_id}} - Create order→invoice link");
+    println!("    PUT    /orders/{{id}}/invoices/{{invoice_id}} - Update order→invoice link");
+    println!("    DELETE /orders/{{id}}/invoices/{{invoice_id}} - Delete order→invoice link");
     println!("    GET    /invoices/{{id}}/order              - Get order for an invoice");
-    println!("    GET    /invoices/{{id}}/payments           - Get payments for an invoice");
+    println!("    GET    /invoices/{{id}}/payments           - List payments for an invoice");
+    println!(
+        "    GET    /invoices/{{id}}/payments/{{payment_id}} - Get specific invoice→payment link"
+    );
+    println!("    POST   /invoices/{{id}}/payments/{{payment_id}} - Create invoice→payment link");
     println!("    GET    /payments/{{id}}/invoice            - Get invoice for a payment");
 
     axum::serve(listener, app).await.unwrap();
@@ -266,16 +275,53 @@ async fn populate_test_data(
         .await?;
     println!("   ✅ Invoice INV-002 → Payment PAY-002 (partial)");
 
-    println!("\n🎉 Test data ready! You can now:");
-    println!("   💡 Use header: X-Tenant-ID: {}", tenant_id);
+    println!("\n🎉 Test data ready! You can now test the API:");
+    println!("\n   💡 Tenant ID: {}", tenant_id);
+    println!("\n   📋 List Links:");
     println!("   • GET /orders/{}/invoices", order1.id);
     println!("   • GET /invoices/{}/order", invoice1.id);
     println!("   • GET /invoices/{}/payments", invoice2.id);
     println!("   • GET /payments/{}/invoice", payment1.id);
-    println!("\n   📝 Example curl command:");
+    println!("\n   🔗 Manipulate Links (NEW semantic URLs):");
+    println!("   • POST   /orders/{}/invoices/{{invoice_id}}", order1.id);
+    println!("   • PUT    /orders/{}/invoices/{}", order1.id, invoice1.id);
+    println!("   • DELETE /orders/{}/invoices/{}", order1.id, invoice1.id);
+    println!("\n   📝 Example curl commands:");
+    println!("\n   # List invoices for an order");
     println!(
-        "   curl -H 'X-Tenant-ID: {}' http://127.0.0.1:3000/orders/{}/invoices",
+        "   curl -H 'X-Tenant-ID: {}' http://127.0.0.1:3000/orders/{}/invoices | jq .",
         tenant_id, order1.id
+    );
+    println!("\n   # Get a specific link (order → invoice)");
+    println!(
+        "   curl -H 'X-Tenant-ID: {}' http://127.0.0.1:3000/orders/{}/invoices/{} | jq .",
+        tenant_id, order1.id, invoice1.id
+    );
+    println!("\n   # Create a new link (order → invoice)");
+    println!(
+        "   curl -X POST -H 'X-Tenant-ID: {}' -H 'Content-Type: application/json' \\",
+        tenant_id
+    );
+    println!("     -d '{{\"metadata\": {{\"note\": \"Test link\"}}}}' \\",);
+    println!(
+        "     http://127.0.0.1:3000/orders/{}/invoices/{{new_invoice_id}}",
+        order1.id
+    );
+    println!("\n   # Update link metadata");
+    println!(
+        "   curl -X PUT -H 'X-Tenant-ID: {}' -H 'Content-Type: application/json' \\",
+        tenant_id
+    );
+    println!("     -d '{{\"metadata\": {{\"status\": \"verified\"}}}}' \\",);
+    println!(
+        "     http://127.0.0.1:3000/orders/{}/invoices/{}",
+        order1.id, invoice1.id
+    );
+    println!("\n   # Delete a link");
+    println!("   curl -X DELETE -H 'X-Tenant-ID: {}' \\", tenant_id);
+    println!(
+        "     http://127.0.0.1:3000/orders/{}/invoices/{}",
+        order1.id, invoice1.id
     );
 
     Ok(())

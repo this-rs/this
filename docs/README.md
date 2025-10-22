@@ -10,6 +10,7 @@
 ### 🔗 Gestion des Liens
 
 - **[Enriched Links](guides/ENRICHED_LINKS.md)** - Entités complètes dans les liens (auto-enrichissement)
+- **[Semantic URLs](changes/SEMANTIC_URLS.md)** - 🆕 URLs cohérentes et intuitives pour les liens
 - **[Link Authorization](guides/LINK_AUTHORIZATION.md)** - Permissions au niveau des liens
 - **[Link Metadata](guides/LINK_METADATA.md)** - Métadonnées et mises à jour des liens
 - **[Multi-Level Navigation](guides/MULTI_LEVEL_NAVIGATION.md)** - Navigation multi-niveaux
@@ -22,6 +23,8 @@
 
 ### 📝 Historique des Changements
 
+- **[Semantic URLs](changes/SEMANTIC_URLS.md)** - 🆕 URLs cohérentes pour les opérations de liens
+- **[Enriched Links Implementation](changes/ENRICHED_LINKS_IMPLEMENTATION.md)** - Implémentation de l'enrichissement
 - **[Auto-Routing Success](changes/AUTO_ROUTING_SUCCESS.md)** - Implémentation de l'auto-routing
 - **[Latest Changes](changes/LATEST_CHANGES.md)** - Derniers changements majeurs
 - **[Module Restructuring](changes/MODULE_RESTRUCTURING.md)** - Restructuration des modules
@@ -60,11 +63,13 @@ docs/
 ├── guides/                      # Guides d'utilisation
 │   ├── GETTING_STARTED.md
 │   ├── QUICK_START.md
-│   ├── ENRICHED_LINKS.md       # 🆕 Auto-enrichissement des liens
+│   ├── ENRICHED_LINKS.md       # Auto-enrichissement des liens
 │   ├── LINK_AUTHORIZATION.md
 │   ├── LINK_METADATA.md
 │   └── MULTI_LEVEL_NAVIGATION.md
 └── changes/                     # Historique des modifications
+    ├── SEMANTIC_URLS.md        # 🆕 URLs sémantiques pour les liens
+    ├── ENRICHED_LINKS_IMPLEMENTATION.md
     ├── AUTO_ROUTING_SUCCESS.md
     ├── LATEST_CHANGES.md
     ├── MODULE_RESTRUCTURING.md
