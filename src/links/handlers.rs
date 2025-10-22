@@ -637,6 +637,7 @@ mod tests {
             link_service,
             config,
             registry,
+            entity_fetchers: Arc::new(HashMap::new()),
         }
     }
 

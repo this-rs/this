@@ -7,6 +7,7 @@
 //! - Bidirectional navigation
 //! - Multi-tenant isolation
 
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use this::prelude::*;
@@ -59,6 +60,7 @@ async fn main() -> Result<()> {
         link_service: link_service.clone(),
         config: config.clone(),
         registry: registry.clone(),
+        entity_fetchers: Arc::new(HashMap::new()),
     };
 
     // Setup some test data
