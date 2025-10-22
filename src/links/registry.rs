@@ -147,6 +147,7 @@ mod tests {
                     reverse_route_name: "users-owners".to_string(),
                     description: Some("User owns a car".to_string()),
                     required_fields: None,
+                    auth: None,
                 },
                 LinkDefinition {
                     link_type: "driver".to_string(),
@@ -156,6 +157,7 @@ mod tests {
                     reverse_route_name: "users-drivers".to_string(),
                     description: Some("User drives a car".to_string()),
                     required_fields: None,
+                    auth: None,
                 },
             ],
             validation_rules: None,

@@ -12,7 +12,7 @@ pub mod service;
 pub use auth::{AuthContext, AuthPolicy, AuthProvider, NoAuthProvider};
 pub use entity::{Data, Entity};
 pub use field::{FieldFormat, FieldValue};
-pub use link::{EntityReference, Link, LinkDefinition};
+pub use link::{EntityReference, Link, LinkAuthConfig, LinkDefinition};
 pub use module::Module;
 pub use pluralize::Pluralizer;
 pub use service::{DataService, LinkService};

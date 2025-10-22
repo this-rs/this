@@ -41,7 +41,7 @@ pub mod prelude {
         entity::{Data, Entity},
         extractors::{extract_tenant_id, DirectLinkExtractor, ExtractorError, LinkExtractor},
         field::{FieldFormat, FieldValue},
-        link::{EntityReference, Link, LinkDefinition},
+        link::{EntityReference, Link, LinkAuthConfig, LinkDefinition},
         module::Module,
         pluralize::Pluralizer,
         service::{DataService, LinkService},

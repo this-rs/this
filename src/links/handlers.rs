@@ -17,7 +17,7 @@ use crate::config::LinksConfig;
 use crate::core::extractors::{
     extract_tenant_id, DirectLinkExtractor, ExtractorError, LinkExtractor,
 };
-use crate::core::{EntityReference, Link, LinkService};
+use crate::core::{EntityReference, Link, LinkDefinition, LinkService};
 use crate::links::registry::{LinkDirection, LinkRouteRegistry};
 
 /// Application state shared across handlers
@@ -26,6 +26,28 @@ pub struct AppState {
     pub link_service: Arc<dyn LinkService>,
     pub config: Arc<LinksConfig>,
     pub registry: Arc<LinkRouteRegistry>,
+}
+
+impl AppState {
+    /// Get the authorization policy for a link operation
+    ///
+    /// Returns the link-specific auth policy if defined, otherwise returns None
+    /// to indicate that entity-level permissions should be used.
+    ///
+    /// # Arguments
+    /// * `link_definition` - The link definition to check
+    /// * `operation` - The operation type: "list", "create", or "delete"
+    pub fn get_link_auth_policy(
+        link_definition: &LinkDefinition,
+        operation: &str,
+    ) -> Option<String> {
+        link_definition.auth.as_ref().map(|auth| match operation {
+            "list" => auth.list.clone(),
+            "create" => auth.create.clone(),
+            "delete" => auth.delete.clone(),
+            _ => "authenticated".to_string(),
+        })
+    }
 }
 
 /// Response for list links endpoint
@@ -64,6 +86,14 @@ pub async fn list_links(
         &state.config,
         tenant_id,
     )?;
+
+    // TODO: Check authorization - use link-specific auth if available, fallback to entity auth
+    // if let Some(link_auth) = &extractor.link_definition.auth {
+    //     check_auth_policy(&headers, &link_auth.list, &extractor)?;
+    // } else {
+    //     // Fallback to entity-level link permissions
+    //     check_entity_link_auth(&headers, &extractor.entity_type, "list_links")?;
+    // }
 
     // Query links based on direction
     let links = match extractor.direction {
@@ -138,6 +168,16 @@ pub async fn create_link(
         tenant_id,
     )?;
 
+    // TODO: Check authorization for link creation
+    // if let Some(link_def) = &extractor.link_definition {
+    //     if let Some(link_auth) = &link_def.auth {
+    //         check_auth_policy(&headers, &link_auth.create, &extractor)?;
+    //     } else {
+    //         // Fallback to entity-level link permissions
+    //         check_entity_link_auth(&headers, &extractor.source.entity_type, "create_link")?;
+    //     }
+    // }
+
     // Validate the link definition exists
     if extractor.link_definition.is_none() {
         return Err(ExtractorError::RouteNotFound(format!(
@@ -192,6 +232,16 @@ pub async fn delete_link(
         &state.config,
         tenant_id,
     )?;
+
+    // TODO: Check authorization for link deletion
+    // if let Some(link_def) = &extractor.link_definition {
+    //     if let Some(link_auth) = &link_def.auth {
+    //         check_auth_policy(&headers, &link_auth.delete, &extractor)?;
+    //     } else {
+    //         // Fallback to entity-level link permissions
+    //         check_entity_link_auth(&headers, &extractor.source.entity_type, "delete_link")?;
+    //     }
+    // }
 
     // Delete the link
     state
@@ -295,6 +345,7 @@ mod tests {
                 reverse_route_name: "users-owners".to_string(),
                 description: Some("User owns a car".to_string()),
                 required_fields: None,
+                auth: None,
             }],
             validation_rules: None,
         });

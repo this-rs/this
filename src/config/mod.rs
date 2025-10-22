@@ -175,6 +175,7 @@ impl LinksConfig {
                     reverse_route_name: "users-owners".to_string(),
                     description: Some("User owns a car".to_string()),
                     required_fields: None,
+                    auth: None,
                 },
                 LinkDefinition {
                     link_type: "driver".to_string(),
@@ -184,6 +185,7 @@ impl LinksConfig {
                     reverse_route_name: "users-drivers".to_string(),
                     description: Some("User drives a car".to_string()),
                     required_fields: None,
+                    auth: None,
                 },
                 LinkDefinition {
                     link_type: "worker".to_string(),
@@ -193,6 +195,7 @@ impl LinksConfig {
                     reverse_route_name: "users-workers".to_string(),
                     description: Some("User works at a company".to_string()),
                     required_fields: Some(vec!["role".to_string()]),
+                    auth: None,
                 },
             ],
             validation_rules: None,
@@ -221,5 +224,103 @@ mod tests {
         let parsed = LinksConfig::from_yaml_str(&yaml).unwrap();
         assert_eq!(parsed.entities.len(), config.entities.len());
         assert_eq!(parsed.links.len(), config.links.len());
+    }
+
+    #[test]
+    fn test_link_auth_config_parsing() {
+        let yaml = r#"
+entities:
+  - singular: order
+    plural: orders
+  - singular: invoice
+    plural: invoices
+
+links:
+  - link_type: has_invoice
+    source_type: order
+    target_type: invoice
+    forward_route_name: invoices
+    reverse_route_name: order
+    auth:
+      list: authenticated
+      create: service_only
+      delete: admin_only
+"#;
+
+        let config = LinksConfig::from_yaml_str(yaml).unwrap();
+        assert_eq!(config.links.len(), 1);
+
+        let link_def = &config.links[0];
+        assert!(link_def.auth.is_some());
+
+        let auth = link_def.auth.as_ref().unwrap();
+        assert_eq!(auth.list, "authenticated");
+        assert_eq!(auth.create, "service_only");
+        assert_eq!(auth.delete, "admin_only");
+    }
+
+    #[test]
+    fn test_link_without_auth_config() {
+        let yaml = r#"
+entities:
+  - singular: invoice
+    plural: invoices
+  - singular: payment
+    plural: payments
+
+links:
+  - link_type: payment
+    source_type: invoice
+    target_type: payment
+    forward_route_name: payments
+    reverse_route_name: invoice
+"#;
+
+        let config = LinksConfig::from_yaml_str(yaml).unwrap();
+        assert_eq!(config.links.len(), 1);
+
+        let link_def = &config.links[0];
+        assert!(link_def.auth.is_none());
+    }
+
+    #[test]
+    fn test_mixed_link_auth_configs() {
+        let yaml = r#"
+entities:
+  - singular: order
+    plural: orders
+  - singular: invoice
+    plural: invoices
+  - singular: payment
+    plural: payments
+
+links:
+  - link_type: has_invoice
+    source_type: order
+    target_type: invoice
+    forward_route_name: invoices
+    reverse_route_name: order
+    auth:
+      list: authenticated
+      create: service_only
+      delete: admin_only
+  
+  - link_type: payment
+    source_type: invoice
+    target_type: payment
+    forward_route_name: payments
+    reverse_route_name: invoice
+"#;
+
+        let config = LinksConfig::from_yaml_str(yaml).unwrap();
+        assert_eq!(config.links.len(), 2);
+
+        // First link has auth
+        assert!(config.links[0].auth.is_some());
+        let auth1 = config.links[0].auth.as_ref().unwrap();
+        assert_eq!(auth1.create, "service_only");
+
+        // Second link has no auth
+        assert!(config.links[1].auth.is_none());
     }
 }

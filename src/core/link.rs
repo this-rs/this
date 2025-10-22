@@ -91,6 +91,42 @@ impl Link {
     }
 }
 
+/// Authorization configuration for link operations
+///
+/// This allows fine-grained control over who can perform operations
+/// on specific link types, independent of entity-level permissions.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LinkAuthConfig {
+    /// Policy for listing links (GET /{source}/{id}/{route_name})
+    /// Examples: "authenticated", "owner", "public", "role:admin"
+    #[serde(default = "default_link_auth_policy")]
+    pub list: String,
+
+    /// Policy for creating a link (POST /{source}/{id}/{link_type}/{target}/{id})
+    /// Examples: "owner", "service_only", "role:manager", "source_owner"
+    #[serde(default = "default_link_auth_policy")]
+    pub create: String,
+
+    /// Policy for deleting a link (DELETE /{source}/{id}/{link_type}/{target}/{id})
+    /// Examples: "owner", "admin_only", "source_owner_or_target_owner"
+    #[serde(default = "default_link_auth_policy")]
+    pub delete: String,
+}
+
+fn default_link_auth_policy() -> String {
+    "authenticated".to_string()
+}
+
+impl Default for LinkAuthConfig {
+    fn default() -> Self {
+        Self {
+            list: default_link_auth_policy(),
+            create: default_link_auth_policy(),
+            delete: default_link_auth_policy(),
+        }
+    }
+}
+
 /// Configuration for a specific type of link between two entity types
 ///
 /// This defines how entities can be related and how those relationships
@@ -121,6 +157,18 @@ pub struct LinkDefinition {
 
     /// Optional list of required metadata fields
     pub required_fields: Option<Vec<String>>,
+
+    /// Authorization configuration specific to this link type
+    ///
+    /// When specified, these permissions override entity-level link permissions.
+    /// This allows different link types between the same entities to have
+    /// different permission requirements.
+    ///
+    /// Examples:
+    /// - order → invoice: create=service_only (auto-created by system)
+    /// - order → approval: create=owner (manually created by user)
+    #[serde(default)]
+    pub auth: Option<LinkAuthConfig>,
 }
 
 impl LinkDefinition {
@@ -221,5 +269,53 @@ mod tests {
 
         let reverse = LinkDefinition::default_reverse_route_name("company", "worker");
         assert_eq!(reverse, "companies-workers");
+    }
+
+    #[test]
+    fn test_link_auth_config_default() {
+        let auth = LinkAuthConfig::default();
+        assert_eq!(auth.list, "authenticated");
+        assert_eq!(auth.create, "authenticated");
+        assert_eq!(auth.delete, "authenticated");
+    }
+
+    #[test]
+    fn test_link_definition_with_auth() {
+        let yaml = r#"
+            link_type: has_invoice
+            source_type: order
+            target_type: invoice
+            forward_route_name: invoices
+            reverse_route_name: order
+            auth:
+                list: authenticated
+                create: service_only
+                delete: admin_only
+        "#;
+
+        let def: LinkDefinition = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(def.link_type, "has_invoice");
+        assert_eq!(def.source_type, "order");
+        assert_eq!(def.target_type, "invoice");
+
+        let auth = def.auth.unwrap();
+        assert_eq!(auth.list, "authenticated");
+        assert_eq!(auth.create, "service_only");
+        assert_eq!(auth.delete, "admin_only");
+    }
+
+    #[test]
+    fn test_link_definition_without_auth() {
+        let yaml = r#"
+            link_type: payment
+            source_type: invoice
+            target_type: payment
+            forward_route_name: payments
+            reverse_route_name: invoice
+        "#;
+
+        let def: LinkDefinition = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(def.link_type, "payment");
+        assert!(def.auth.is_none());
     }
 }
