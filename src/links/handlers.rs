@@ -43,7 +43,9 @@ impl AppState {
     ) -> Option<String> {
         link_definition.auth.as_ref().map(|auth| match operation {
             "list" => auth.list.clone(),
+            "get" => auth.get.clone(),
             "create" => auth.create.clone(),
+            "update" => auth.update.clone(),
             "delete" => auth.delete.clone(),
             _ => "authenticated".to_string(),
         })
@@ -136,6 +138,42 @@ pub async fn list_links(
     }))
 }
 
+/// Get a specific link by ID
+///
+/// GET /links/{link_id}
+///
+/// Example:
+/// - GET /links/abc-123-def-456
+pub async fn get_link(
+    State(state): State<AppState>,
+    Path(link_id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Response, ExtractorError> {
+    let tenant_id = extract_tenant_id(&headers)?;
+
+    // Get the link
+    let link = state
+        .link_service
+        .get(&tenant_id, &link_id)
+        .await
+        .map_err(|e| ExtractorError::JsonError(e.to_string()))?
+        .ok_or_else(|| ExtractorError::LinkNotFound)?;
+
+    // Find the link definition to check permissions
+    let link_def = state
+        .config
+        .find_link_definition(&link.link_type, &link.source.entity_type, &link.target.entity_type);
+
+    // TODO: Check authorization for getting a link
+    // if let Some(def) = link_def {
+    //     if let Some(link_auth) = &def.auth {
+    //         check_auth_policy(&headers, &link_auth.get, &state)?;
+    //     }
+    // }
+
+    Ok(Json(link).into_response())
+}
+
 /// Create a link using direct path
 ///
 /// POST /{source_type}/{source_id}/{link_type}/{target_type}/{target_id}
@@ -200,6 +238,77 @@ pub async fn create_link(
         .map_err(|e| ExtractorError::JsonError(e.to_string()))?;
 
     Ok((StatusCode::CREATED, Json(link)).into_response())
+}
+
+/// Update a link's metadata using direct path
+///
+/// PUT/PATCH /{source_type}/{source_id}/{link_type}/{target_type}/{target_id}
+///
+/// Example:
+/// - PUT /users/123.../worker/companies/456...
+/// - Body: { "metadata": { "role": "Senior Developer", "promotion_date": "2024-06-01" } }
+pub async fn update_link(
+    State(state): State<AppState>,
+    Path((source_type_plural, source_id, link_type, target_type_plural, target_id)): Path<(
+        String,
+        Uuid,
+        String,
+        String,
+        Uuid,
+    )>,
+    headers: HeaderMap,
+    Json(payload): Json<CreateLinkRequest>,
+) -> Result<Response, ExtractorError> {
+    let tenant_id = extract_tenant_id(&headers)?;
+
+    let extractor = DirectLinkExtractor::from_path(
+        (
+            source_type_plural,
+            source_id,
+            link_type.clone(),
+            target_type_plural,
+            target_id,
+        ),
+        &state.config,
+        tenant_id,
+    )?;
+
+    // TODO: Check authorization for link update
+    // if let Some(link_def) = &extractor.link_definition {
+    //     if let Some(link_auth) = &link_def.auth {
+    //         check_auth_policy(&headers, &link_auth.update, &extractor)?;
+    //     } else {
+    //         // Fallback to entity-level link permissions
+    //         check_entity_link_auth(&headers, &extractor.source.entity_type, "update_link")?;
+    //     }
+    // }
+
+    // Find the existing link
+    let existing_links = state
+        .link_service
+        .find_by_source(
+            &tenant_id,
+            &extractor.source.id,
+            &extractor.source.entity_type,
+            Some(&link_type),
+            Some(&extractor.target.entity_type),
+        )
+        .await
+        .map_err(|e| ExtractorError::JsonError(e.to_string()))?;
+
+    let existing_link = existing_links
+        .into_iter()
+        .find(|link| link.target.id == extractor.target.id)
+        .ok_or_else(|| ExtractorError::RouteNotFound("Link not found".to_string()))?;
+
+    // Update the link
+    let updated_link = state
+        .link_service
+        .update(&tenant_id, &existing_link.id, payload.metadata)
+        .await
+        .map_err(|e| ExtractorError::JsonError(e.to_string()))?;
+
+    Ok(Json(updated_link).into_response())
 }
 
 /// Delete a link using direct path

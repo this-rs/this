@@ -76,6 +76,18 @@ pub trait LinkService: Send + Sync {
         source_type: Option<&str>,
     ) -> Result<Vec<Link>>;
 
+    /// Update a link's metadata
+    ///
+    /// This allows updating the metadata associated with a link without
+    /// recreating it. Useful for adding/modifying contextual information
+    /// like status, dates, permissions, etc.
+    async fn update(
+        &self,
+        tenant_id: &Uuid,
+        id: &Uuid,
+        metadata: Option<serde_json::Value>,
+    ) -> Result<Link>;
+
     /// Delete a link
     async fn delete(&self, tenant_id: &Uuid, id: &Uuid) -> Result<()>;
 

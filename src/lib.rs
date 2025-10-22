@@ -48,7 +48,10 @@ pub mod prelude {
     };
 
     pub use crate::links::{
-        handlers::{create_link, delete_link, list_available_links, list_links, AppState},
+        handlers::{
+            create_link, delete_link, get_link, list_available_links, list_links, update_link,
+            AppState,
+        },
         registry::{LinkDirection, LinkRouteRegistry, RouteInfo},
         service::InMemoryLinkService,
     };

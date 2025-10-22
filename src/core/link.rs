@@ -102,10 +102,20 @@ pub struct LinkAuthConfig {
     #[serde(default = "default_link_auth_policy")]
     pub list: String,
 
+    /// Policy for getting a specific link by ID (GET /links/{link_id})
+    /// Examples: "authenticated", "owner", "source_owner_or_target_owner"
+    #[serde(default = "default_link_auth_policy")]
+    pub get: String,
+
     /// Policy for creating a link (POST /{source}/{id}/{link_type}/{target}/{id})
     /// Examples: "owner", "service_only", "role:manager", "source_owner"
     #[serde(default = "default_link_auth_policy")]
     pub create: String,
+
+    /// Policy for updating a link (PUT/PATCH /{source}/{id}/{link_type}/{target}/{id})
+    /// Examples: "owner", "source_owner", "source_owner_or_target_owner"
+    #[serde(default = "default_link_auth_policy")]
+    pub update: String,
 
     /// Policy for deleting a link (DELETE /{source}/{id}/{link_type}/{target}/{id})
     /// Examples: "owner", "admin_only", "source_owner_or_target_owner"
@@ -121,7 +131,9 @@ impl Default for LinkAuthConfig {
     fn default() -> Self {
         Self {
             list: default_link_auth_policy(),
+            get: default_link_auth_policy(),
             create: default_link_auth_policy(),
+            update: default_link_auth_policy(),
             delete: default_link_auth_policy(),
         }
     }
@@ -275,7 +287,9 @@ mod tests {
     fn test_link_auth_config_default() {
         let auth = LinkAuthConfig::default();
         assert_eq!(auth.list, "authenticated");
+        assert_eq!(auth.get, "authenticated");
         assert_eq!(auth.create, "authenticated");
+        assert_eq!(auth.update, "authenticated");
         assert_eq!(auth.delete, "authenticated");
     }
 
@@ -289,7 +303,9 @@ mod tests {
             reverse_route_name: order
             auth:
                 list: authenticated
+                get: owner
                 create: service_only
+                update: owner
                 delete: admin_only
         "#;
 
@@ -300,7 +316,9 @@ mod tests {
 
         let auth = def.auth.unwrap();
         assert_eq!(auth.list, "authenticated");
+        assert_eq!(auth.get, "owner");
         assert_eq!(auth.create, "service_only");
+        assert_eq!(auth.update, "owner");
         assert_eq!(auth.delete, "admin_only");
     }
 

@@ -129,6 +129,33 @@ impl LinkService for InMemoryLinkService {
             .collect())
     }
 
+    async fn update(
+        &self,
+        tenant_id: &Uuid,
+        id: &Uuid,
+        metadata: Option<serde_json::Value>,
+    ) -> Result<Link> {
+        let mut links = self
+            .links
+            .write()
+            .map_err(|e| anyhow!("Failed to acquire write lock: {}", e))?;
+
+        let link = links
+            .get_mut(id)
+            .ok_or_else(|| anyhow!("Link not found"))?;
+
+        // Verify tenant ownership
+        if &link.tenant_id != tenant_id {
+            return Err(anyhow!("Link not found or access denied"));
+        }
+
+        // Update metadata and timestamp
+        link.metadata = metadata;
+        link.updated_at = chrono::Utc::now();
+
+        Ok(link.clone())
+    }
+
     async fn delete(&self, tenant_id: &Uuid, id: &Uuid) -> Result<()> {
         let mut links = self
             .links
@@ -245,6 +272,80 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_update_link() {
+        let service = InMemoryLinkService::new();
+        let tenant_id = Uuid::new_v4();
+        let user_id = Uuid::new_v4();
+        let company_id = Uuid::new_v4();
+
+        // Create a link with initial metadata
+        let initial_metadata = serde_json::json!({
+            "role": "Developer",
+            "start_date": "2024-01-01"
+        });
+
+        let link = service
+            .create(
+                &tenant_id,
+                "worker",
+                EntityReference::new(user_id, "user"),
+                EntityReference::new(company_id, "company"),
+                Some(initial_metadata.clone()),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(link.metadata, Some(initial_metadata));
+
+        // Update the metadata
+        let updated_metadata = serde_json::json!({
+            "role": "Senior Developer",
+            "start_date": "2024-01-01",
+            "promotion_date": "2024-06-01"
+        });
+
+        let updated_link = service
+            .update(&tenant_id, &link.id, Some(updated_metadata.clone()))
+            .await
+            .unwrap();
+
+        assert_eq!(updated_link.metadata, Some(updated_metadata.clone()));
+        assert_ne!(updated_link.updated_at, link.updated_at);
+
+        // Verify the update persisted
+        let fetched = service.get(&tenant_id, &link.id).await.unwrap();
+        assert!(fetched.is_some());
+        assert_eq!(fetched.unwrap().metadata, Some(updated_metadata));
+    }
+
+    #[tokio::test]
+    async fn test_update_link_removes_metadata() {
+        let service = InMemoryLinkService::new();
+        let tenant_id = Uuid::new_v4();
+        let user_id = Uuid::new_v4();
+        let car_id = Uuid::new_v4();
+
+        // Create link with metadata
+        let link = service
+            .create(
+                &tenant_id,
+                "owner",
+                EntityReference::new(user_id, "user"),
+                EntityReference::new(car_id, "car"),
+                Some(serde_json::json!({"purchase_date": "2024-01-01"})),
+            )
+            .await
+            .unwrap();
+
+        assert!(link.metadata.is_some());
+
+        // Remove metadata by setting to None
+        let updated = service.update(&tenant_id, &link.id, None).await.unwrap();
+
+        assert!(updated.metadata.is_none());
+    }
+
+    #[tokio::test]
     async fn test_tenant_isolation() {
         let service = InMemoryLinkService::new();
         let tenant1_id = Uuid::new_v4();
@@ -270,6 +371,51 @@ mod tests {
 
         // Tenant2 cannot see it
         let result = service.get(&tenant2_id, &link.id).await.unwrap();
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_get_link_by_id() {
+        let service = InMemoryLinkService::new();
+        let tenant_id = Uuid::new_v4();
+        let user_id = Uuid::new_v4();
+        let company_id = Uuid::new_v4();
+
+        // Create a link
+        let link = service
+            .create(
+                &tenant_id,
+                "worker",
+                EntityReference::new(user_id, "user"),
+                EntityReference::new(company_id, "company"),
+                Some(serde_json::json!({ "role": "Developer" })),
+            )
+            .await
+            .unwrap();
+
+        // Get the link by ID
+        let retrieved = service.get(&tenant_id, &link.id).await.unwrap();
+        assert!(retrieved.is_some());
+
+        let retrieved_link = retrieved.unwrap();
+        assert_eq!(retrieved_link.id, link.id);
+        assert_eq!(retrieved_link.link_type, "worker");
+        assert_eq!(retrieved_link.source.id, user_id);
+        assert_eq!(retrieved_link.target.id, company_id);
+        assert_eq!(
+            retrieved_link.metadata,
+            Some(serde_json::json!({ "role": "Developer" }))
+        );
+    }
+
+    #[tokio::test]
+    async fn test_get_nonexistent_link() {
+        let service = InMemoryLinkService::new();
+        let tenant_id = Uuid::new_v4();
+        let fake_id = Uuid::new_v4();
+
+        // Try to get a link that doesn't exist
+        let result = service.get(&tenant_id, &fake_id).await.unwrap();
         assert!(result.is_none());
     }
 }

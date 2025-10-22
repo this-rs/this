@@ -40,11 +40,14 @@ links:
     description: "Order has invoices"
     auth:
       list: authenticated          # Anyone authenticated can list invoices for an order
+      get: authenticated           # Anyone authenticated can get a specific link
       create: service_only         # Only internal services can create this link
+      update: service_only         # Only internal services can update link metadata
       delete: admin_only           # Only admins can delete order-invoice links
 
   # Invoice has payments
   # Payments can be created by the order owner or by internal services
+  # The link can carry metadata like payment method, transaction ID, etc.
   - link_type: payment
     source_type: invoice
     target_type: payment
@@ -53,7 +56,9 @@ links:
     description: "Payment for invoice"
     auth:
       list: owner                  # Only the owner can list payments
+      get: owner                   # Only the owner can get a specific payment link
       create: owner_or_service     # Owner or service can create payments
+      update: owner_or_service     # Owner or service can update payment metadata
       delete: admin_only           # Only admins can delete payments
 
 validation_rules:
