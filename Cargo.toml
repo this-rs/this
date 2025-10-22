@@ -46,7 +46,7 @@ validator = { version = "0.20", features = ["derive"] }
 
 [dev-dependencies]
 tokio-test = "0.4"
-axum-test = "15.0"
+axum-test = "18.1"
 
 [features]
 default = ["in-memory"]
