@@ -14,6 +14,7 @@
 - 🤖 **Auto-Generated Routes** - Declare a module, routes are created automatically
 - 🔗 **Flexible Relationships** - Multiple link types between same entities
 - ↔️ **Bidirectional Navigation** - Query relationships from both directions
+- ✨ **Auto-Enriched Links** - Full entities in responses, no N+1 queries
 - 📝 **Auto-Pluralization** - Smart plural forms (company → companies)
 - ⚙️ **YAML Configuration** - Declarative entity and link definitions
 - 🏢 **Multi-Tenant** - Built-in tenant isolation
@@ -191,6 +192,7 @@ Framework generates:
 
 - **[Getting Started](docs/guides/GETTING_STARTED.md)** - Step-by-step tutorial
 - **[Quick Start](docs/guides/QUICK_START.md)** - Fast introduction
+- **[Enriched Links](docs/guides/ENRICHED_LINKS.md)** - Auto-enrichment & performance
 - **[Architecture](docs/architecture/ARCHITECTURE.md)** - Technical deep dive
 - **[ServerBuilder](docs/architecture/SERVER_BUILDER_IMPLEMENTATION.md)** - Auto-routing details
 - **[Full Documentation](docs/)** - Complete documentation index

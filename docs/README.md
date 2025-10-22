@@ -7,6 +7,13 @@
 - **[Getting Started](guides/GETTING_STARTED.md)** - Premier pas avec This-RS
 - **[Quick Start](guides/QUICK_START.md)** - Guide de démarrage rapide
 
+### 🔗 Gestion des Liens
+
+- **[Enriched Links](guides/ENRICHED_LINKS.md)** - Entités complètes dans les liens (auto-enrichissement)
+- **[Link Authorization](guides/LINK_AUTHORIZATION.md)** - Permissions au niveau des liens
+- **[Link Metadata](guides/LINK_METADATA.md)** - Métadonnées et mises à jour des liens
+- **[Multi-Level Navigation](guides/MULTI_LEVEL_NAVIGATION.md)** - Navigation multi-niveaux
+
 ### 🏗️ Architecture
 
 - **[Architecture](architecture/ARCHITECTURE.md)** - Vue d'ensemble de l'architecture
@@ -35,6 +42,12 @@
 ### Je veux comprendre l'auto-routing
 → [ServerBuilder Implementation](architecture/SERVER_BUILDER_IMPLEMENTATION.md)
 
+### Je veux comprendre les liens enrichis
+→ [Enriched Links](guides/ENRICHED_LINKS.md)
+
+### Je veux gérer les permissions des liens
+→ [Link Authorization](guides/LINK_AUTHORIZATION.md)
+
 ## 📂 Structure de la Documentation
 
 ```
@@ -46,7 +59,11 @@ docs/
 │   └── ROUTING_EXPLANATION.md
 ├── guides/                      # Guides d'utilisation
 │   ├── GETTING_STARTED.md
-│   └── QUICK_START.md
+│   ├── QUICK_START.md
+│   ├── ENRICHED_LINKS.md       # 🆕 Auto-enrichissement des liens
+│   ├── LINK_AUTHORIZATION.md
+│   ├── LINK_METADATA.md
+│   └── MULTI_LEVEL_NAVIGATION.md
 └── changes/                     # Historique des modifications
     ├── AUTO_ROUTING_SUCCESS.md
     ├── LATEST_CHANGES.md
