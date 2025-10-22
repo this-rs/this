@@ -24,6 +24,9 @@ pub fn build_link_routes(state: AppState) -> Router {
                 .put(update_link)
                 .delete(delete_link),
         )
-        .route("/{entity_type}/{entity_id}/links", get(list_available_links))
+        .route(
+            "/{entity_type}/{entity_id}/links",
+            get(list_available_links),
+        )
         .with_state(state)
 }

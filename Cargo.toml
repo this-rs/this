@@ -26,7 +26,8 @@ serde_json = "1.0"
 serde_yaml = "0.9"
 
 # Database (optional features)
-sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "postgres", "uuid", "chrono"], optional = true }
+# TODO: Re-enable when moving to ScyllaDB/DynamoDB
+# sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "postgres", "uuid", "chrono"], optional = true }
 
 # UUID and datetime
 uuid = { version = "1.10", features = ["v4", "serde"] }
@@ -51,8 +52,8 @@ axum-test = "18.1"
 [features]
 default = ["in-memory"]
 in-memory = []
-postgres = ["sqlx"]
-all = ["in-memory", "postgres"]
+# postgres = ["sqlx"]  # Disabled until ScyllaDB implementation
+# all = ["in-memory", "postgres"]
 
 [lib]
 name = "this"
