@@ -3,6 +3,7 @@
 use std::sync::Arc;
 use this::prelude::*;
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct User {
     id: Uuid,
@@ -11,6 +12,7 @@ struct User {
     email: String,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Car {
     id: Uuid,

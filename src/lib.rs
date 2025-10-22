@@ -77,4 +77,3 @@ pub mod prelude {
 }
 
 // Re-export macros at crate root for easier access
-pub use entities::macros::*;

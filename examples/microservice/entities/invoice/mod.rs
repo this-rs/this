@@ -8,4 +8,3 @@ pub mod store;
 pub use descriptor::InvoiceDescriptor;
 pub use handlers::*;
 pub use model::Invoice;
-pub use store::InvoiceStore;

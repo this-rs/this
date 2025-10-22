@@ -2,7 +2,6 @@
 
 use crate::core::field::FieldValue;
 use anyhow::Result;
-use async_trait::async_trait;
 use std::sync::Arc;
 use uuid::Uuid;
 

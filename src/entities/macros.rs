@@ -83,6 +83,7 @@ macro_rules! impl_data_entity {
 mod tests {
     use crate::prelude::*;
 
+    #[allow(dead_code)]
     #[derive(Debug, Clone, Serialize, Deserialize)]
     struct TestUser {
         id: Uuid,

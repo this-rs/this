@@ -5,16 +5,13 @@
 //! - Extract tenant IDs from headers
 //! - Parse link routes and resolve definitions
 
-use axum::extract::{FromRequest, Path, Request};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
-use serde::{Deserialize, Serialize};
-use std::sync::Arc;
 use uuid::Uuid;
 
 use crate::config::LinksConfig;
-use crate::core::{EntityReference, Link, LinkDefinition};
+use crate::core::{EntityReference, LinkDefinition};
 use crate::links::registry::{LinkDirection, LinkRouteRegistry};
 
 /// Extract tenant ID from request headers

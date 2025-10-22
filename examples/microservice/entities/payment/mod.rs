@@ -8,4 +8,3 @@ pub mod store;
 pub use descriptor::PaymentDescriptor;
 pub use handlers::*;
 pub use model::Payment;
-pub use store::PaymentStore;

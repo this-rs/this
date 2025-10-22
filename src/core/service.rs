@@ -108,6 +108,7 @@ mod tests {
     use crate::core::entity::Entity;
 
     // Mock entity for testing
+    #[allow(dead_code)]
     #[derive(Clone, Debug)]
     struct TestEntity {
         id: Uuid,
@@ -145,6 +146,7 @@ mod tests {
     }
 
     // The traits compile and can be used in generic contexts
+    #[allow(dead_code)]
     async fn generic_create<T, S>(service: &S, tenant_id: &Uuid, entity: T) -> Result<T>
     where
         T: Data,
