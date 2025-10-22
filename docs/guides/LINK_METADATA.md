@@ -374,17 +374,25 @@ pub trait LinkService: Send + Sync {
 ```rust
 pub async fn update_link(
     State(state): State<AppState>,
-    Path((source_type, source_id, link_type, target_type, target_id)): Path<(String, Uuid, String, String, Uuid)>,
+    Path((source_type, source_id, route_name, target_id)): Path<(String, Uuid, String, Uuid)>,
     headers: HeaderMap,
     Json(payload): Json<CreateLinkRequest>,
 ) -> Result<Response, ExtractorError> {
     // 1. Extraire tenant_id
     let tenant_id = extract_tenant_id(&headers)?;
     
-    // 2. Vérifier les permissions (TODO)
-    // check_auth_policy(&headers, &link_def.auth.update, ...)?;
+    // 2. Résoudre le route_name vers link_definition
+    let extractor = DirectLinkExtractor::from_path(
+        (source_type, source_id, route_name, target_id),
+        &state.registry,
+        &state.config,
+        tenant_id,
+    )?;
     
-    // 3. Trouver le lien existant
+    // 3. Vérifier les permissions (TODO)
+    // check_auth_policy(&headers, &extractor.link_definition.auth.update, ...)?;
+    
+    // 4. Trouver le lien existant
     let existing_link = find_link(...).await?;
     
     // 4. Mettre à jour la metadata
