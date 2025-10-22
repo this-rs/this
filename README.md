@@ -2,8 +2,10 @@
 
 > A generic entity and relationship management framework for building RESTful APIs in Rust with **zero boilerplate**.
 
+[![CI](https://github.com/this-rs/this/actions/workflows/ci.yml/badge.svg)](https://github.com/this-rs/this/actions/workflows/ci.yml)
+[![Documentation](https://github.com/this-rs/this/actions/workflows/docs.yml/badge.svg)](https://github.com/this-rs/this/actions/workflows/docs.yml)
 [![Crates.io](https://img.shields.io/crates/v/this-rs.svg)](https://crates.io/crates/this-rs)
-[![Documentation](https://docs.rs/this-rs/badge.svg)](https://docs.rs/this-rs)
+[![docs.rs](https://docs.rs/this-rs/badge.svg)](https://docs.rs/this-rs)
 [![License](https://img.shields.io/crates/l/this-rs.svg)](LICENSE-MIT)
 
 ---
