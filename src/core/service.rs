@@ -1,6 +1,6 @@
 //! Service traits for data and link operations
 
-use crate::core::{Data, EntityReference, Link};
+use crate::core::{Data, link::LinkEntity};
 use anyhow::Result;
 use async_trait::async_trait;
 use uuid::Uuid;
@@ -12,134 +12,145 @@ use uuid::Uuid;
 #[async_trait]
 pub trait DataService<T: Data>: Send + Sync {
     /// Create a new entity
-    async fn create(&self, tenant_id: &Uuid, entity: T) -> Result<T>;
+    async fn create(&self, entity: T) -> Result<T>;
 
     /// Get an entity by ID
-    async fn get(&self, tenant_id: &Uuid, id: &Uuid) -> Result<Option<T>>;
+    async fn get(&self, id: &Uuid) -> Result<Option<T>>;
 
-    /// List all entities for a tenant
-    async fn list(&self, tenant_id: &Uuid) -> Result<Vec<T>>;
+    /// List all entities
+    async fn list(&self) -> Result<Vec<T>>;
 
     /// Update an existing entity
-    async fn update(&self, tenant_id: &Uuid, id: &Uuid, entity: T) -> Result<T>;
+    async fn update(&self, id: &Uuid, entity: T) -> Result<T>;
 
     /// Delete an entity
-    async fn delete(&self, tenant_id: &Uuid, id: &Uuid) -> Result<()>;
+    async fn delete(&self, id: &Uuid) -> Result<()>;
 
     /// Search entities by field values
-    async fn search(&self, tenant_id: &Uuid, field: &str, value: &str) -> Result<Vec<T>>;
+    async fn search(&self, field: &str, value: &str) -> Result<Vec<T>>;
 }
 
 /// Service trait for managing links between entities
 ///
-/// This service is completely agnostic to entity types - it only knows
-/// about EntityReferences and link types (both Strings).
+/// This service is completely agnostic to entity types - it only manages
+/// relationships using UUIDs and string identifiers.
 #[async_trait]
 pub trait LinkService: Send + Sync {
     /// Create a new link between two entities
-    async fn create(
-        &self,
-        tenant_id: &Uuid,
-        link_type: &str,
-        source: EntityReference,
-        target: EntityReference,
-        metadata: Option<serde_json::Value>,
-    ) -> Result<Link>;
+    async fn create(&self, link: LinkEntity) -> Result<LinkEntity>;
 
     /// Get a specific link by ID
-    async fn get(&self, tenant_id: &Uuid, id: &Uuid) -> Result<Option<Link>>;
+    async fn get(&self, id: &Uuid) -> Result<Option<LinkEntity>>;
 
-    /// List all links for a tenant
-    async fn list(&self, tenant_id: &Uuid) -> Result<Vec<Link>>;
+    /// List all links
+    async fn list(&self) -> Result<Vec<LinkEntity>>;
 
     /// Find links by source entity
     ///
     /// Optionally filter by link_type and/or target_type
     async fn find_by_source(
         &self,
-        tenant_id: &Uuid,
         source_id: &Uuid,
-        source_type: &str,
         link_type: Option<&str>,
         target_type: Option<&str>,
-    ) -> Result<Vec<Link>>;
+    ) -> Result<Vec<LinkEntity>>;
 
     /// Find links by target entity
     ///
     /// Optionally filter by link_type and/or source_type
     async fn find_by_target(
         &self,
-        tenant_id: &Uuid,
         target_id: &Uuid,
-        target_type: &str,
         link_type: Option<&str>,
         source_type: Option<&str>,
-    ) -> Result<Vec<Link>>;
+    ) -> Result<Vec<LinkEntity>>;
 
     /// Update a link's metadata
     ///
     /// This allows updating the metadata associated with a link without
     /// recreating it. Useful for adding/modifying contextual information
     /// like status, dates, permissions, etc.
-    async fn update(
-        &self,
-        tenant_id: &Uuid,
-        id: &Uuid,
-        metadata: Option<serde_json::Value>,
-    ) -> Result<Link>;
+    async fn update(&self, id: &Uuid, link: LinkEntity) -> Result<LinkEntity>;
 
     /// Delete a link
-    async fn delete(&self, tenant_id: &Uuid, id: &Uuid) -> Result<()>;
+    async fn delete(&self, id: &Uuid) -> Result<()>;
 
     /// Delete all links involving a specific entity
     ///
     /// Used when deleting an entity to maintain referential integrity
-    async fn delete_by_entity(
-        &self,
-        tenant_id: &Uuid,
-        entity_id: &Uuid,
-        entity_type: &str,
-    ) -> Result<()>;
+    async fn delete_by_entity(&self, entity_id: &Uuid) -> Result<()>;
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::core::entity::Entity;
+    use chrono::{DateTime, Utc};
 
     // Mock entity for testing
     #[allow(dead_code)]
     #[derive(Clone, Debug)]
     struct TestEntity {
         id: Uuid,
-        tenant_id: Uuid,
+        entity_type: String,
+        created_at: DateTime<Utc>,
+        updated_at: DateTime<Utc>,
+        deleted_at: Option<DateTime<Utc>>,
+        status: String,
+        name: String,
     }
 
     impl Entity for TestEntity {
         type Service = ();
+        
         fn resource_name() -> &'static str {
             "tests"
         }
+        
         fn resource_name_singular() -> &'static str {
             "test"
         }
+        
         fn service_from_host(
             _: &std::sync::Arc<dyn std::any::Any + Send + Sync>,
         ) -> Result<std::sync::Arc<Self::Service>> {
             Ok(std::sync::Arc::new(()))
         }
-    }
 
-    impl Data for TestEntity {
         fn id(&self) -> Uuid {
             self.id
         }
-        fn tenant_id(&self) -> Uuid {
-            self.tenant_id
+
+        fn entity_type(&self) -> &str {
+            &self.entity_type
         }
+
+        fn created_at(&self) -> DateTime<Utc> {
+            self.created_at
+        }
+
+        fn updated_at(&self) -> DateTime<Utc> {
+            self.updated_at
+        }
+
+        fn deleted_at(&self) -> Option<DateTime<Utc>> {
+            self.deleted_at
+        }
+
+        fn status(&self) -> &str {
+            &self.status
+        }
+    }
+
+    impl Data for TestEntity {
+        fn name(&self) -> &str {
+            &self.name
+        }
+
         fn indexed_fields() -> &'static [&'static str] {
             &[]
         }
+
         fn field_value(&self, _field: &str) -> Option<crate::core::field::FieldValue> {
             None
         }
@@ -147,12 +158,12 @@ mod tests {
 
     // The traits compile and can be used in generic contexts
     #[allow(dead_code)]
-    async fn generic_create<T, S>(service: &S, tenant_id: &Uuid, entity: T) -> Result<T>
+    async fn generic_create<T, S>(service: &S, entity: T) -> Result<T>
     where
         T: Data,
         S: DataService<T>,
     {
-        service.create(tenant_id, entity).await
+        service.create(entity).await
     }
 
     #[test]

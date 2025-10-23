@@ -1,6 +1,9 @@
 //! Entity descriptor for Order
 
-use super::{create_order, get_order, handlers::OrderAppState, list_orders, store::OrderStore};
+use super::{
+    create_order, delete_order, get_order, handlers::OrderAppState, list_orders, store::OrderStore,
+    update_order,
+};
 use axum::{routing::get, Router};
 use this::prelude::EntityDescriptor;
 
@@ -31,7 +34,10 @@ impl EntityDescriptor for OrderDescriptor {
 
         Router::new()
             .route("/orders", get(list_orders).post(create_order))
-            .route("/orders/{id}", get(get_order))
+            .route(
+                "/orders/{id}",
+                get(get_order).put(update_order).delete(delete_order),
+            )
             .with_state(state)
     }
 }

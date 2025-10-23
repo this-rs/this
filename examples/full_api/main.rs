@@ -5,40 +5,26 @@
 //! - Multiple entity types (User, Car, Company)
 //! - Multiple link types between same entities (owner, driver)
 //! - Bidirectional navigation
-//! - Multi-tenant isolation
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use this::prelude::*;
 
-#[allow(dead_code)]
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct User {
-    id: Uuid,
-    tenant_id: Uuid,
-    name: String,
+// Using the new macro-based entity definitions
+impl_data_entity!(User, "user", ["name", "email"], {
     email: String,
-}
+});
 
-#[allow(dead_code)]
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct Car {
-    id: Uuid,
-    tenant_id: Uuid,
+impl_data_entity!(Car, "car", ["name", "brand", "model"], {
     brand: String,
     model: String,
     year: i32,
-}
+});
 
-#[allow(dead_code)]
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct Company {
-    id: Uuid,
-    tenant_id: Uuid,
-    name: String,
+impl_data_entity!(Company, "company", ["name", "registration_number"], {
     registration_number: String,
-}
+});
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -67,94 +53,92 @@ async fn main() -> Result<()> {
     };
 
     // Setup some test data
-    let tenant_id = Uuid::new_v4();
-    println!("📋 Setting up test data...");
-    println!("   Tenant ID: {}\n", tenant_id);
+    println!("📋 Setting up test data...\n");
 
-    let alice_id = Uuid::new_v4();
-    let bob_id = Uuid::new_v4();
-    let tesla_id = Uuid::new_v4();
-    let bmw_id = Uuid::new_v4();
-    let acme_corp_id = Uuid::new_v4();
+    // Create entities using the new macro-generated methods
+    let alice = User::new(
+        "Alice".to_string(),
+        "active".to_string(),
+        "alice@example.com".to_string(),
+    );
+    let bob = User::new(
+        "Bob".to_string(),
+        "active".to_string(),
+        "bob@example.com".to_string(),
+    );
+    let tesla = Car::new(
+        "Tesla Model 3".to_string(),
+        "active".to_string(),
+        "Tesla".to_string(),
+        "Model 3".to_string(),
+        2024,
+    );
+    let bmw = Car::new(
+        "BMW 330i".to_string(),
+        "active".to_string(),
+        "BMW".to_string(),
+        "330i".to_string(),
+        2023,
+    );
+    let acme_corp = Company::new(
+        "ACME Corp".to_string(),
+        "active".to_string(),
+        "123456789".to_string(),
+    );
 
     println!("👥 Users:");
-    println!("   - Alice: {}", alice_id);
-    println!("   - Bob:   {}\n", bob_id);
+    println!("   - Alice: {}", alice.id);
+    println!("   - Bob:   {}\n", bob.id);
 
     println!("🚗 Cars:");
-    println!("   - Tesla: {}", tesla_id);
-    println!("   - BMW:   {}\n", bmw_id);
+    println!("   - Tesla: {}", tesla.id);
+    println!("   - BMW:   {}\n", bmw.id);
 
     println!("🏢 Companies:");
-    println!("   - ACME Corp: {}\n", acme_corp_id);
+    println!("   - ACME Corp: {}\n", acme_corp.id);
 
     // Create links
     println!("🔗 Creating links...");
 
     // Alice owns Tesla
-    link_service
-        .create(
-            &tenant_id,
-            "owner",
-            EntityReference::new(alice_id, "user"),
-            EntityReference::new(tesla_id, "car"),
-            None,
-        )
-        .await?;
+    let link1 = LinkEntity::new("owner", alice.id, tesla.id, None);
+    link_service.create(link1).await?;
     println!("   ✓ Alice owns Tesla");
 
     // Alice drives Tesla
-    link_service
-        .create(
-            &tenant_id,
-            "driver",
-            EntityReference::new(alice_id, "user"),
-            EntityReference::new(tesla_id, "car"),
-            None,
-        )
-        .await?;
+    let link2 = LinkEntity::new("driver", alice.id, tesla.id, None);
+    link_service.create(link2).await?;
     println!("   ✓ Alice drives Tesla");
 
     // Bob drives Tesla (shared car!)
-    link_service
-        .create(
-            &tenant_id,
-            "driver",
-            EntityReference::new(bob_id, "user"),
-            EntityReference::new(tesla_id, "car"),
-            Some(serde_json::json!({
-                "permission_level": "limited",
-                "max_speed": 120
-            })),
-        )
-        .await?;
+    let link3 = LinkEntity::new(
+        "driver",
+        bob.id,
+        tesla.id,
+        Some(serde_json::json!({
+            "permission_level": "limited",
+            "max_speed": 120
+        })),
+    );
+    link_service.create(link3).await?;
     println!("   ✓ Bob drives Tesla (with metadata)");
 
     // Bob owns BMW
-    link_service
-        .create(
-            &tenant_id,
-            "owner",
-            EntityReference::new(bob_id, "user"),
-            EntityReference::new(bmw_id, "car"),
-            None,
-        )
-        .await?;
+    let link4 = LinkEntity::new("owner", bob.id, bmw.id, None);
+    link_service.create(link4).await?;
     println!("   ✓ Bob owns BMW");
 
     // Alice works at ACME Corp
-    link_service
-        .create(
-            &tenant_id,
-            "worker",
-            EntityReference::new(alice_id, "user"),
-            EntityReference::new(acme_corp_id, "company"),
-            Some(serde_json::json!({
-                "role": "Senior Developer",
-                "start_date": "2024-01-01"
-            })),
-        )
-        .await?;
+    let link5 = LinkEntity::new(
+        "worker",
+        alice.id,
+        acme_corp.id,
+        Some(serde_json::json!({
+            "role": "Senior Developer",
+            "start_date": "2024-01-01"
+        })),
+    );
+    link_service.create(link5).await?;
     println!("   ✓ Alice works at ACME Corp\n");
 
     // Build the router
@@ -190,20 +174,20 @@ async fn main() -> Result<()> {
     println!("💡 Example requests:");
     println!("   # List cars owned by Alice");
     println!(
-        "   curl -H 'X-Tenant-ID: {}' http://localhost:3000/users/{}/cars-owned",
-        tenant_id, alice_id
+        "   curl http://localhost:3000/users/{}/cars-owned",
+        alice.id
     );
     println!();
     println!("   # List drivers of Tesla");
     println!(
-        "   curl -H 'X-Tenant-ID: {}' http://localhost:3000/cars/{}/users-drivers",
-        tenant_id, tesla_id
+        "   curl http://localhost:3000/cars/{}/users-drivers",
+        tesla.id
     );
     println!();
     println!("   # Discover available routes for Alice");
     println!(
-        "   curl -H 'X-Tenant-ID: {}' http://localhost:3000/users/{}/links",
-        tenant_id, alice_id
+        "   curl http://localhost:3000/users/{}/links",
+        alice.id
     );
     println!();
 

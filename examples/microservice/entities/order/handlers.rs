@@ -35,15 +35,66 @@ pub async fn create_order(
     State(state): State<OrderAppState>,
     Json(payload): Json<Value>,
 ) -> Result<Json<Order>, StatusCode> {
-    let order = Order {
-        id: Uuid::new_v4(),
-        tenant_id: Uuid::new_v4(), // In real app, extract from auth context
-        number: payload["number"].as_str().unwrap_or("ORD-000").to_string(),
-        amount: payload["amount"].as_f64().unwrap_or(0.0),
-        status: payload["status"].as_str().unwrap_or("pending").to_string(),
-        customer_name: payload["customer_name"].as_str().map(String::from),
-        notes: payload["notes"].as_str().map(String::from),
-    };
+    // Use the generated new() method from impl_data_entity!
+    let order = Order::new(
+        payload["number"].as_str().unwrap_or("ORD-000").to_string(), // name
+        payload["status"].as_str().unwrap_or("active").to_string(),  // status
+        payload["number"].as_str().unwrap_or("ORD-000").to_string(), // number
+        payload["amount"].as_f64().unwrap_or(0.0),                   // amount
+        payload["customer_name"].as_str().map(String::from),         // customer_name
+        payload["notes"].as_str().map(String::from),                 // notes
+    );
+    
     state.store.add(order.clone());
     Ok(Json(order))
+}
+
+pub async fn update_order(
+    State(state): State<OrderAppState>,
+    Path(id): Path<String>,
+    Json(payload): Json<Value>,
+) -> Result<Json<Order>, StatusCode> {
+    let id = Uuid::parse_str(&id).map_err(|_| StatusCode::BAD_REQUEST)?;
+    
+    let mut order = state
+        .store
+        .get(&id)
+        .ok_or(StatusCode::NOT_FOUND)?;
+    
+    // Update fields if provided
+    if let Some(name) = payload["name"].as_str() {
+        order.name = name.to_string();
+    }
+    if let Some(number) = payload["number"].as_str() {
+        order.number = number.to_string();
+    }
+    if let Some(amount) = payload["amount"].as_f64() {
+        order.amount = amount;
+    }
+    if let Some(status) = payload["status"].as_str() {
+        order.status = status.to_string();
+    }
+    if let Some(customer_name) = payload["customer_name"].as_str() {
+        order.customer_name = Some(customer_name.to_string());
+    }
+    if let Some(notes) = payload["notes"].as_str() {
+        order.notes = Some(notes.to_string());
+    }
+    
+    order.touch(); // Update timestamp
+    state.store.update(order.clone());
+    Ok(Json(order))
+}
+
+pub async fn delete_order(
+    State(state): State<OrderAppState>,
+    Path(id): Path<String>,
+) -> Result<StatusCode, StatusCode> {
+    let id = Uuid::parse_str(&id).map_err(|_| StatusCode::BAD_REQUEST)?;
+    
+    state
+        .store
+        .delete(&id)
+        .map(|_| StatusCode::NO_CONTENT)
+        .ok_or(StatusCode::NOT_FOUND)
 }

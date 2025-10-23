@@ -4,28 +4,51 @@
 //!
 //! ## Features
 //!
-//! - **Generic Entity System**: Define entities without modifying core framework code
-//! - **Flexible Relationships**: Support multiple link types between same entities
+//! - **Entity/Data/Link Architecture**: Clean hierarchy with macro-based implementation
+//! - **Flexible Relationships**: Support multiple link types between entities
 //! - **Bidirectional Navigation**: Query relationships from both directions
 //! - **Auto-Pluralization**: Intelligent plural forms (company → companies)
 //! - **Configuration-Based**: Define relationships via YAML configuration
-//! - **Multi-tenant Support**: Built-in tenant isolation
 //! - **Type-Safe**: Leverage Rust's type system for compile-time guarantees
+//! - **Soft Delete Support**: Built-in soft deletion with deleted_at
+//! - **Automatic Timestamps**: created_at and updated_at managed automatically
 //!
 //! ## Quick Start
 //!
 //! ```rust,ignore
 //! use this::prelude::*;
 //!
-//! #[derive(Debug, Clone, Serialize, Deserialize)]
-//! struct User {
-//!     id: Uuid,
-//!     tenant_id: Uuid,
-//!     name: String,
-//!     email: String,
-//! }
+//! // Define a Data entity (extends Entity base)
+//! impl_data_entity!(
+//!     User,
+//!     "user",
+//!     ["name", "email"],
+//!     {
+//!         email: String,
+//!         password_hash: String,
+//!     }
+//! );
 //!
-//! impl_data_entity!(User, "user", ["name", "email"]);
+//! // Define a Link entity (extends Entity base)
+//! impl_link_entity!(
+//!     UserCompanyLink,
+//!     "user_company_link",
+//!     {
+//!         role: String,
+//!         start_date: DateTime<Utc>,
+//!     }
+//! );
+//!
+//! // Usage
+//! let user = User::new(
+//!     "John Doe".to_string(),
+//!     "active".to_string(),
+//!     "john@example.com".to_string(),
+//!     "$argon2$...".to_string(),
+//! );
+//!
+//! user.soft_delete(); // Soft delete support
+//! user.restore();     // Restore support
 //! ```
 
 pub mod config;
@@ -37,17 +60,23 @@ pub mod storage;
 
 /// Re-exports of commonly used types and traits
 pub mod prelude {
+    // === Core Traits ===
     pub use crate::core::{
         auth::{AuthContext, AuthPolicy, AuthProvider, NoAuthProvider},
-        entity::{Data, Entity},
-        extractors::{extract_tenant_id, DirectLinkExtractor, ExtractorError, LinkExtractor},
+        entity::{Data, Entity, Link},
         field::{FieldFormat, FieldValue},
-        link::{EntityReference, Link, LinkAuthConfig, LinkDefinition},
-        module::{EntityFetcher, Module},
+        link::{LinkEntity, LinkAuthConfig, LinkDefinition},
+        module::{EntityCreator, EntityFetcher, Module},
         pluralize::Pluralizer,
         service::{DataService, LinkService},
     };
 
+    // === Macros ===
+    pub use crate::{
+        data_fields, entity_fields, impl_data_entity, impl_link_entity, link_fields,
+    };
+
+    // === Link Handlers ===
     pub use crate::links::{
         handlers::{
             create_link, delete_link, get_link, list_available_links, list_links, update_link,
@@ -56,28 +85,29 @@ pub mod prelude {
         registry::{LinkDirection, LinkRouteRegistry, RouteInfo},
     };
 
+    // === Storage ===
     pub use crate::storage::InMemoryLinkService;
     #[cfg(feature = "dynamodb")]
     pub use crate::storage::{DynamoDBDataService, DynamoDBLinkService};
 
+    // === Config ===
     pub use crate::config::{EntityAuthConfig, EntityConfig, LinksConfig, ValidationRule};
 
+    // === Server ===
     pub use crate::server::{EntityDescriptor, EntityRegistry, ServerBuilder};
 
-    // Re-export common external dependencies
+    // === External dependencies ===
     pub use anyhow::Result;
     pub use async_trait::async_trait;
     pub use chrono::{DateTime, Utc};
     pub use serde::{Deserialize, Serialize};
     pub use uuid::Uuid;
 
-    // Re-export Axum types for convenience
+    // === Axum ===
     pub use axum::{
         extract::{Path, State},
         http::HeaderMap,
-        routing::{delete, get, post},
+        routing::{delete, get, post, put},
         Router,
     };
 }
-
-// Re-export macros at crate root for easier access
