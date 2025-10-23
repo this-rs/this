@@ -1,7 +1,8 @@
 //! Entity descriptor for Payment
 
 use super::{
-    create_payment, get_payment, handlers::PaymentAppState, list_payments, store::PaymentStore,
+    create_payment, delete_payment, get_payment, handlers::PaymentAppState, list_payments,
+    store::PaymentStore, update_payment,
 };
 use axum::{routing::get, Router};
 use this::prelude::EntityDescriptor;
@@ -33,7 +34,10 @@ impl EntityDescriptor for PaymentDescriptor {
 
         Router::new()
             .route("/payments", get(list_payments).post(create_payment))
-            .route("/payments/{id}", get(get_payment))
+            .route(
+                "/payments/{id}",
+                get(get_payment).put(update_payment).delete(delete_payment),
+            )
             .with_state(state)
     }
 }

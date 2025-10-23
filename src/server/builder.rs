@@ -5,7 +5,7 @@ use super::router::build_link_routes;
 use crate::config::LinksConfig;
 use crate::core::module::Module;
 use crate::core::service::LinkService;
-use crate::core::EntityFetcher;
+use crate::core::{EntityCreator, EntityFetcher};
 use crate::links::handlers::AppState;
 use crate::links::registry::LinkRouteRegistry;
 use anyhow::Result;
@@ -99,12 +99,23 @@ impl ServerBuilder {
             }
         }
 
+        // Build entity creators map from all modules
+        let mut creators_map: HashMap<String, Arc<dyn EntityCreator>> = HashMap::new();
+        for module in &self.modules {
+            for entity_type in module.entity_types() {
+                if let Some(creator) = module.get_entity_creator(entity_type) {
+                    creators_map.insert(entity_type.to_string(), creator);
+                }
+            }
+        }
+
         // Create link app state
         let link_state = AppState {
             link_service,
             config,
             registry,
             entity_fetchers: Arc::new(fetchers_map),
+            entity_creators: Arc::new(creators_map),
         };
 
         // Build entity routes

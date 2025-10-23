@@ -1,439 +1,431 @@
-# Link-Level Authorization
+# Link Authorization Guide
 
-## Vue d'Ensemble
+## 🎯 Overview
 
-Le framework `this-rs` supporte maintenant l'**autorisation au niveau des liens** (link-level authorization), permettant de définir des permissions spécifiques pour chaque type de lien, indépendamment des permissions des entités source et target.
+This-RS provides **link-level authorization**, allowing you to control who can create, update, or delete links independently of entity permissions.
 
-## Pourquoi l'Autorisation au Niveau des Liens ?
+## 🔐 Why Link-Level Authorization?
 
-### Problématique
+### Problem: Entity Permissions Aren't Enough
 
-Auparavant, les permissions de liens étaient définies **uniquement au niveau des entités** :
-
-```yaml
-entities:
-  - singular: order
-    plural: orders
-    auth:
-      create_link: owner    # ← Même permission pour TOUS les types de liens
-      delete_link: owner
+```
+Scenario: Healthcare System
+- Doctors can READ patient records ✅
+- Doctors can CREATE diagnoses ✅  
+- But should doctors link ANY diagnosis to ANY patient? ❌
 ```
 
-**Problème** : Un `order` peut avoir différents types de liens avec différentes exigences de sécurité :
-- `order → invoice` : Créé automatiquement par le système (service_only)
-- `order → user_approval` : Créé manuellement par le propriétaire (owner)
+**Solution**: Link-level authorization lets you control the relationships themselves.
 
-Avec l'ancienne approche, les deux héritaient de la même permission, ce qui n'était pas idéal.
+---
 
-### Solution : Auth par Link
+## 📝 Configuration
 
-Maintenant, chaque **LinkDefinition** peut avoir sa propre configuration d'autorisation :
+### Basic Auth Configuration
 
 ```yaml
 links:
-  - link_type: has_invoice
-    source_type: order
-    target_type: invoice
+  - link_type: has_diagnosis
+    source_type: patient
+    target_type: diagnosis
+    forward_route_name: diagnoses
+    reverse_route_name: patient
     auth:
-      list: authenticated      # Liste accessible aux utilisateurs authentifiés
-      create: service_only     # Création réservée aux services internes
-      delete: admin_only       # Suppression réservée aux admins
-  
-  - link_type: approval
-    source_type: order
+      create:
+        policy: RequireRole
+        roles: [doctor, admin]
+      delete:
+        policy: RequireRole
+        roles: [admin]  # Only admins can remove diagnoses
+      update:
+        policy: RequireRole
+        roles: [doctor, admin]
+```
+
+### Auth Policy Types
+
+#### 1. **Authenticated**
+
+Any authenticated user:
+```yaml
+auth:
+  create:
+    policy: Authenticated
+    roles: []
+```
+
+#### 2. **RequireRole**
+
+User must have one of the specified roles:
+```yaml
+auth:
+  create:
+    policy: RequireRole
+    roles: [doctor, nurse, admin]
+```
+
+#### 3. **AllowOwner**
+
+User must own one of the linked entities:
+```yaml
+auth:
+  create:
+    policy: AllowOwner
+    roles: [user]  # Must be a user AND own one entity
+```
+
+#### 4. **Custom**
+
+Implement custom logic:
+```yaml
+auth:
+  create:
+    policy: CustomApprovalWorkflow
+    roles: [manager]
+```
+
+---
+
+## 🎨 Common Patterns
+
+### Pattern 1: Different Rules per Operation
+
+```yaml
+links:
+  - link_type: owner
+    source_type: user
+    target_type: car
+    forward_route_name: cars-owned
+    auth:
+      create:
+        policy: Authenticated    # Anyone can claim ownership
+        roles: []
+      delete:
+        policy: AllowOwner       # Only owner can remove
+        roles: []
+      update:
+        policy: AllowOwner       # Only owner can update metadata
+        roles: []
+```
+
+### Pattern 2: Workflow-Based Authorization
+
+```yaml
+links:
+  - link_type: approved_by
+    source_type: document
     target_type: user
+    forward_route_name: approvers
     auth:
-      list: owner              # Seul le propriétaire peut lister
-      create: owner            # Seul le propriétaire peut créer
-      delete: owner            # Seul le propriétaire peut supprimer
+      create:
+        policy: RequireRole
+        roles: [manager, director]  # Only managers can approve
+      delete:
+        policy: RequireRole
+        roles: [admin]              # Only admins can revoke approval
 ```
 
-## Configuration YAML
-
-### Structure Complète
+### Pattern 3: Hierarchical Permissions
 
 ```yaml
-entities:
-  - singular: order
-    plural: orders
-    auth:
-      list: authenticated
-      get: authenticated
-      create: authenticated
-      update: owner
-      delete: owner
-      # Permissions fallback pour les liens sans auth spécifique
-      list_links: authenticated
-      create_link: owner
-      delete_link: owner
-
 links:
-  # Lien avec auth spécifique
-  - link_type: has_invoice
-    source_type: order
-    target_type: invoice
-    forward_route_name: invoices
-    reverse_route_name: order
-    description: "Order has invoices"
-    auth:                              # ← Auth spécifique au lien
-      list: authenticated              # Qui peut lister les invoices d'un order
-      create: service_only             # Qui peut créer ce lien
-      delete: admin_only               # Qui peut supprimer ce lien
+  # Regular users can add members
+  - link_type: has_member
+    source_type: team
+    target_type: user
+    forward_route_name: members
+    auth:
+      create:
+        policy: RequireRole
+        roles: [team_lead, admin]
+      delete:
+        policy: RequireRole
+        roles: [team_lead, admin]
   
-  # Lien sans auth spécifique (utilise les permissions de l'entité)
-  - link_type: other_link
-    source_type: order
-    target_type: something
-    forward_route_name: somethings
-    reverse_route_name: order
-    # Pas de auth → utilise order.auth.create_link, etc.
+  # Only admins can assign team leads
+  - link_type: has_lead
+    source_type: team
+    target_type: user
+    forward_route_name: leads
+    auth:
+      create:
+        policy: RequireRole
+        roles: [admin]
+      delete:
+        policy: RequireRole
+        roles: [admin]
 ```
 
-### Politiques d'Autorisation Disponibles
+---
 
-| Politique | Description | Exemple d'Usage |
-|-----------|-------------|-----------------|
-| `public` | Accessible sans authentification | Données publiques |
-| `authenticated` | Requiert authentification | Accès standard |
-| `owner` | Seul le propriétaire | Données personnelles |
-| `service_only` | Services internes uniquement | Liens automatiques |
-| `admin_only` | Administrateurs uniquement | Opérations sensibles |
-| `role:manager` | Rôle spécifique requis | Permissions métier |
-| `owner_or_service` | Propriétaire OU service | Flexibilité |
-| `source_owner` | Propriétaire de la source | Liens sortants |
-| `target_owner` | Propriétaire de la target | Liens entrants |
-| `source_owner_or_target_owner` | L'un ou l'autre | Liens bidirectionnels |
+## 💻 Implementation
 
-## Comportement de Fallback
-
-Si un lien **n'a pas** de configuration `auth`, le système utilise les permissions de l'entité source :
-
-```yaml
-entities:
-  - singular: order
-    auth:
-      create_link: owner    # ← Fallback utilisé
-
-links:
-  - link_type: some_link
-    source_type: order
-    target_type: target
-    # Pas de auth → utilise order.auth.create_link = owner
-```
-
-## Exemples d'Utilisation
-
-### Cas 1 : Liens Automatiques vs Manuels
-
-```yaml
-links:
-  # Facture créée automatiquement par le système
-  - link_type: has_invoice
-    source_type: order
-    target_type: invoice
-    auth:
-      create: service_only     # ← Seuls les services peuvent créer
-      delete: admin_only       # ← Seuls les admins peuvent supprimer
-  
-  # Note ajoutée manuellement par l'utilisateur
-  - link_type: has_note
-    source_type: order
-    target_type: note
-    auth:
-      create: owner            # ← Le propriétaire peut créer
-      delete: owner            # ← Le propriétaire peut supprimer
-```
-
-### Cas 2 : Visibilité Différente
-
-```yaml
-links:
-  # Paiements visibles seulement par le propriétaire
-  - link_type: payment
-    source_type: invoice
-    target_type: payment
-    auth:
-      list: owner              # ← Seul le propriétaire voit les paiements
-      create: owner_or_service
-      delete: admin_only
-  
-  # Historique visible par tous les utilisateurs authentifiés
-  - link_type: audit_log
-    source_type: invoice
-    target_type: log_entry
-    auth:
-      list: authenticated      # ← Tous peuvent voir l'historique
-      create: service_only
-      delete: admin_only
-```
-
-### Cas 3 : Workflow Complexe
-
-```yaml
-links:
-  # Manager crée l'approbation
-  - link_type: approval_request
-    source_type: order
-    target_type: approval
-    auth:
-      list: authenticated
-      create: role:manager     # ← Seul un manager peut demander
-      delete: role:manager
-  
-  # Admin valide
-  - link_type: approval_validated
-    source_type: approval
-    target_type: order
-    auth:
-      list: authenticated
-      create: admin_only       # ← Seul un admin valide
-      delete: admin_only
-```
-
-## Implémentation dans le Code
-
-### Structure `LinkAuthConfig`
+### 1. Define Auth Provider
 
 ```rust
-use crate::core::LinkAuthConfig;
+use this::prelude::*;
 
-// La config est automatiquement parsée depuis le YAML
-pub struct LinkAuthConfig {
-    pub list: String,     // Politique pour GET /{source}/{id}/{route}
-    pub create: String,   // Politique pour POST /{source}/{id}/{link}/{target}/{id}
-    pub delete: String,   // Politique pour DELETE /{source}/{id}/{link}/{target}/{id}
+pub struct YourAuthProvider {
+    // Your auth logic (JWT validation, DB checks, etc.)
+}
+
+#[async_trait]
+impl AuthProvider for YourAuthProvider {
+    async fn check_policy(
+        &self,
+        context: &AuthContext,
+        policy: &str,
+        // Additional context as needed
+    ) -> Result<bool> {
+        match policy {
+            "Authenticated" => Ok(context.is_authenticated()),
+            "RequireRole" => Ok(context.has_any_role(&required_roles)),
+            "AllowOwner" => Ok(self.is_owner(context, entity_id).await?),
+            _ => Ok(false),
+        }
+    }
 }
 ```
 
-### Dans les Handlers
-
-Les handlers vérifient automatiquement les permissions du lien :
+### 2. Use in Handlers
 
 ```rust
-// TODO: Cette vérification sera implémentée dans les handlers
-pub async fn create_link(...) {
-    // 1. Extraire la LinkDefinition
-    let link_def = extractor.link_definition;
+pub async fn create_link(
+    State(state): State<AppState>,
+    auth_context: AuthContext,  // Extract from request
+    Path((source_type, source_id, route_name, target_id)): Path<(String, Uuid, String, Uuid)>,
+    Json(payload): Json<CreateLinkRequest>,
+) -> Result<Response, ExtractorError> {
+    let extractor = DirectLinkExtractor::from_path(...)?;
     
-    // 2. Vérifier l'auth spécifique au lien
-    if let Some(link_auth) = &link_def.auth {
-        check_auth_policy(&headers, &link_auth.create, &extractor)?;
-    } else {
-        // 3. Fallback sur l'auth de l'entité
-        check_entity_link_auth(&headers, &source_type, "create_link")?;
+    // Check authorization
+    if let Some(auth_config) = &extractor.link_definition.auth {
+        let policy = &auth_config.create;
+        
+        if !state.auth_provider.check_policy(
+            &auth_context,
+            &policy.policy,
+        ).await? {
+            return Err(ExtractorError::Unauthorized);
+        }
     }
     
-    // 4. Créer le lien
-    // ...
+    // Create the link
+    let link = LinkEntity::new(...);
+    state.link_service.create(link).await?;
+    
+    Ok(...)
 }
 ```
 
-### Méthode Helper
+---
 
-```rust
-use crate::links::handlers::AppState;
+## 🧪 Testing
 
-// Obtenir la politique d'auth pour un lien
-let policy = AppState::get_link_auth_policy(&link_definition, "create");
-
-match policy {
-    Some(p) => println!("Using link-specific policy: {}", p),
-    None => println!("Using entity fallback policy"),
-}
-```
-
-## Tests Automatiques
-
-Le framework inclut des tests pour valider le parsing :
+### Test Configuration
 
 ```rust
 #[test]
-fn test_link_auth_config_parsing() {
+fn test_auth_config_parsing() {
     let yaml = r#"
-links:
-  - link_type: has_invoice
+    link_type: has_invoice
     source_type: order
     target_type: invoice
     forward_route_name: invoices
-    reverse_route_name: order
     auth:
-      list: authenticated
-      create: service_only
-      delete: admin_only
-"#;
-
-    let config = LinksConfig::from_yaml_str(yaml).unwrap();
-    let link_def = &config.links[0];
+      create:
+        policy: Authenticated
+        roles: []
+      delete:
+        policy: RequireRole
+        roles: [admin]
+    "#;
     
-    assert!(link_def.auth.is_some());
-    let auth = link_def.auth.as_ref().unwrap();
-    assert_eq!(auth.create, "service_only");
+    let def: LinkDefinition = serde_yaml::from_str(yaml).unwrap();
+    assert!(def.auth.is_some());
 }
 ```
 
-## Migration depuis l'Ancienne Version
+### Test Runtime Authorization
 
-### Avant (auth au niveau entity uniquement)
+```bash
+# Should succeed (authenticated user)
+curl -X POST http://localhost:3000/orders/123/invoices/456 \
+  -H "Authorization: Bearer user-token"
 
-```yaml
-entities:
-  - singular: order
-    auth:
-      create_link: owner
-      delete_link: owner
+# Should fail (not an admin)
+curl -X DELETE http://localhost:3000/orders/123/invoices/456 \
+  -H "Authorization: Bearer user-token"
+# Returns: 403 Forbidden
 
-links:
-  - link_type: has_invoice
-    source_type: order
-    target_type: invoice
-    # Hérite de order.auth.create_link = owner
+# Should succeed (admin user)
+curl -X DELETE http://localhost:3000/orders/123/invoices/456 \
+  -H "Authorization: Bearer admin-token"
 ```
 
-### Après (auth au niveau link)
+---
 
-```yaml
-entities:
-  - singular: order
-    auth:
-      create_link: owner    # Fallback par défaut
-      delete_link: owner
+## 🎯 Real-World Examples
 
-links:
-  - link_type: has_invoice
-    source_type: order
-    target_type: invoice
-    auth:
-      create: service_only  # ← Override pour ce lien spécifique
-      delete: admin_only
-  
-  - link_type: other_link
-    source_type: order
-    target_type: other
-    # Pas de auth → utilise le fallback order.auth.create_link = owner
-```
-
-**Migration graduelle** : Vous pouvez ajouter l'auth aux liens progressivement, les liens sans `auth` continuent de fonctionner avec les permissions d'entité.
-
-## Avantages
-
-### 1. **Granularité Fine**
-Chaque type de lien peut avoir ses propres règles de sécurité.
-
-### 2. **Séparation des Responsabilités**
-- Liens système → `service_only`
-- Liens utilisateur → `owner`
-- Liens admin → `admin_only`
-
-### 3. **Flexibilité**
-Plusieurs types de liens entre les mêmes entités avec des permissions différentes.
-
-### 4. **Sécurité Renforcée**
-Empêche les utilisateurs de créer des liens qu'ils ne devraient pas pouvoir créer.
-
-### 5. **Backward Compatible**
-Les liens sans `auth` utilisent le comportement par défaut (fallback sur entity auth).
-
-## Cas d'Usage Avancés
-
-### Multi-Tenant avec Rôles
+### Example 1: Document Management
 
 ```yaml
 links:
-  # Seuls les services du même tenant
-  - link_type: internal_process
-    source_type: order
-    target_type: workflow
+  # Anyone can view document relationships
+  - link_type: references
+    source_type: document
+    target_type: document
+    forward_route_name: references
     auth:
-      list: service_only
-      create: service_only
-      delete: service_only
+      create:
+        policy: Authenticated
+        roles: []
+      delete:
+        policy: AllowOwner
+        roles: []
   
-  # Propriétaire du tenant
-  - link_type: owner_action
-    source_type: order
-    target_type: action
+  # Only specific roles can publish
+  - link_type: published_in
+    source_type: document
+    target_type: collection
+    forward_route_name: collections
     auth:
-      list: owner
-      create: owner
-      delete: owner
-  
-  # Admin de la plateforme
-  - link_type: platform_admin
-    source_type: order
-    target_type: admin_log
-    auth:
-      list: admin_only
-      create: admin_only
-      delete: admin_only
+      create:
+        policy: RequireRole
+        roles: [editor, publisher, admin]
+      delete:
+        policy: RequireRole
+        roles: [admin]
 ```
 
-### Workflow d'Approbation
+### Example 2: Social Network
 
 ```yaml
 links:
-  # Étape 1 : Demande (par employé)
-  - link_type: approval_request
-    source_type: expense
-    target_type: approval
+  # Users control their own friendships
+  - link_type: friend
+    source_type: user
+    target_type: user
+    forward_route_name: friends
     auth:
-      create: authenticated
-      list: authenticated
-      delete: source_owner
+      create:
+        policy: AllowOwner
+        roles: [user]
+      delete:
+        policy: AllowOwner
+        roles: [user]
   
-  # Étape 2 : Validation (par manager)
-  - link_type: manager_approved
-    source_type: approval
-    target_type: expense
+  # Moderators can block users
+  - link_type: blocked
+    source_type: user
+    target_type: user
+    forward_route_name: blocked_users
     auth:
-      create: role:manager
-      list: authenticated
-      delete: role:manager
-  
-  # Étape 3 : Paiement (par finance)
-  - link_type: payment_processed
-    source_type: expense
-    target_type: payment
-    auth:
-      create: role:finance
-      list: owner
-      delete: admin_only
+      create:
+        policy: RequireRole
+        roles: [moderator, admin]
+      delete:
+        policy: RequireRole
+        roles: [admin]
 ```
 
-## TODO : Implémentation Complète de l'Auth
+### Example 3: Project Management
 
-⚠️ **Note** : Actuellement, le système de permissions est **défini mais pas encore appliqué** dans les handlers.
-
-Les prochaines étapes d'implémentation incluront :
-1. Middleware d'authentification Axum
-2. Extraction du contexte utilisateur (user_id, roles, tenant_id)
-3. Vérification des politiques dans les handlers
-4. Tests d'intégration avec différents scénarios d'auth
-
-Des commentaires `TODO` dans le code indiquent où l'auth doit être intégrée :
-
-```rust
-// TODO: Check authorization for link creation
-// if let Some(link_def) = &extractor.link_definition {
-//     if let Some(link_auth) = &link_def.auth {
-//         check_auth_policy(&headers, &link_auth.create, &extractor)?;
-//     }
-// }
+```yaml
+links:
+  # Team members can assign tasks
+  - link_type: assigned_to
+    source_type: task
+    target_type: user
+    forward_route_name: assignees
+    auth:
+      create:
+        policy: RequireRole
+        roles: [team_member, project_manager]
+      delete:
+        policy: RequireRole
+        roles: [project_manager, admin]
+  
+  # Only project managers can set dependencies
+  - link_type: depends_on
+    source_type: task
+    target_type: task
+    forward_route_name: dependencies
+    auth:
+      create:
+        policy: RequireRole
+        roles: [project_manager, admin]
+      delete:
+        policy: RequireRole
+        roles: [project_manager, admin]
 ```
 
-## Conclusion
+---
 
-L'autorisation au niveau des liens offre une flexibilité et une sécurité accrues pour gérer des workflows complexes, des rôles métier variés, et des scénarios multi-tenants avancés.
+## 💡 Best Practices
 
-**Points clés** :
-- ✅ Permissions granulaires par type de lien
-- ✅ Fallback automatique sur entity auth
-- ✅ Backward compatible
-- ✅ Configuration déclarative en YAML
-- ✅ Support de politiques complexes (roles, owner, service)
-- ⏳ Implémentation complète de la vérification à venir
+### 1. Principle of Least Privilege
 
-Pour plus d'informations, consultez :
-- [GETTING_STARTED.md](GETTING_STARTED.md) - Guide de démarrage
-- [QUICK_START.md](QUICK_START.md) - Référence rapide
-- [examples/microservice/config/links.yaml](../../examples/microservice/config/links.yaml) - Exemple complet
+```yaml
+# ✅ Good: Restrict by default, open as needed
+auth:
+  create:
+    policy: RequireRole
+    roles: [specific_role]
 
+# ❌ Avoid: Too permissive
+auth:
+  create:
+    policy: Authenticated
+    roles: []
+```
+
+### 2. Separate Create/Delete Permissions
+
+```yaml
+# ✅ Good: Different rules for creation and deletion
+auth:
+  create:
+    policy: Authenticated
+    roles: []
+  delete:
+    policy: RequireRole
+    roles: [admin]
+```
+
+### 3. Use Meaningful Policy Names
+
+```yaml
+# ✅ Good: Clear intent
+policy: RequireManagerApproval
+policy: AllowTeamMembers
+
+# ❌ Avoid: Generic names
+policy: Policy1
+policy: CheckAccess
+```
+
+### 4. Document Your Policies
+
+```yaml
+# ✅ Good: Add descriptions
+links:
+  - link_type: approved_by
+    description: "Links documents to approvers. Only managers can approve."
+    auth:
+      create:
+        policy: RequireRole
+        roles: [manager]
+```
+
+---
+
+## 📚 Related Documentation
+
+- [Link Auth Implementation](../architecture/LINK_AUTH_IMPLEMENTATION.md)
+- [Architecture](../architecture/ARCHITECTURE.md)
+- [Getting Started](GETTING_STARTED.md)
+
+---
+
+**Link-level authorization gives you fine-grained control over your data relationships!** 🔐🚀✨

@@ -3,30 +3,16 @@
 use std::sync::Arc;
 use this::prelude::*;
 
-#[allow(dead_code)]
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct User {
-    id: Uuid,
-    tenant_id: Uuid,
-    name: String,
+// Using the new macro-based entity definitions
+impl_data_entity!(User, "user", ["name", "email"], {
     email: String,
-}
+});
 
-#[allow(dead_code)]
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct Car {
-    id: Uuid,
-    tenant_id: Uuid,
+impl_data_entity!(Car, "car", ["name", "brand", "model"], {
     brand: String,
     model: String,
     year: i32,
-}
-
-// Note: The impl_data_entity! macro would be used here, but macros
-// don't work well in examples. In real code:
-//
-// impl_data_entity!(User, "user", ["name", "email"]);
-// impl_data_entity!(Car, "car", ["brand", "model"]);
+});
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -39,67 +25,63 @@ async fn main() -> Result<()> {
     // Create link service
     let link_service = InMemoryLinkService::new();
 
-    // Setup data
-    let tenant_id = Uuid::new_v4();
-    let alice_id = Uuid::new_v4();
-    let bob_id = Uuid::new_v4();
-    let tesla_id = Uuid::new_v4();
-    let bmw_id = Uuid::new_v4();
+    // Create entities using the new macro-generated methods
+    let alice = User::new(
+        "Alice".to_string(),
+        "active".to_string(),
+        "alice@example.com".to_string(),
+    );
+    let bob = User::new(
+        "Bob".to_string(),
+        "active".to_string(),
+        "bob@example.com".to_string(),
+    );
+    let tesla = Car::new(
+        "Tesla Model 3".to_string(),
+        "active".to_string(),
+        "Tesla".to_string(),
+        "Model 3".to_string(),
+        2024,
+    );
+    let bmw = Car::new(
+        "BMW 330i".to_string(),
+        "active".to_string(),
+        "BMW".to_string(),
+        "330i".to_string(),
+        2023,
+    );
 
     println!("📋 Creating links...\n");
 
     // Alice owns a Tesla
-    let link1 = link_service
-        .create(
-            &tenant_id,
-            "owner",
-            EntityReference::new(alice_id, "user"),
-            EntityReference::new(tesla_id, "car"),
-            None,
-        )
-        .await?;
+    let link1 = LinkEntity::new("owner", alice.id, tesla.id, None);
+    link_service.create(link1.clone()).await?;
     println!("✅ Created: Alice owns Tesla (link: {})", link1.id);
 
     // Alice also drives the Tesla
-    let link2 = link_service
-        .create(
-            &tenant_id,
-            "driver",
-            EntityReference::new(alice_id, "user"),
-            EntityReference::new(tesla_id, "car"),
-            None,
-        )
-        .await?;
+    let link2 = LinkEntity::new("driver", alice.id, tesla.id, None);
+    link_service.create(link2.clone()).await?;
     println!("✅ Created: Alice drives Tesla (link: {})", link2.id);
 
     // Bob drives the Tesla (shared driver)
-    let link3 = link_service
-        .create(
-            &tenant_id,
-            "driver",
-            EntityReference::new(bob_id, "user"),
-            EntityReference::new(tesla_id, "car"),
-            Some(serde_json::json!({
-                "permission_level": "limited",
-                "max_speed": 120
-            })),
-        )
-        .await?;
+    let link3 = LinkEntity::new(
+        "driver",
+        bob.id,
+        tesla.id,
+        Some(serde_json::json!({
+            "permission_level": "limited",
+            "max_speed": 120
+        })),
+    );
+    link_service.create(link3.clone()).await?;
     println!(
         "✅ Created: Bob drives Tesla with metadata (link: {})",
         link3.id
     );
 
     // Bob owns a BMW
-    let link4 = link_service
-        .create(
-            &tenant_id,
-            "owner",
-            EntityReference::new(bob_id, "user"),
-            EntityReference::new(bmw_id, "car"),
-            None,
-        )
-        .await?;
+    let link4 = LinkEntity::new("owner", bob.id, bmw.id, None);
+    link_service.create(link4.clone()).await?;
     println!("✅ Created: Bob owns BMW (link: {})\n", link4.id);
 
     // Query examples
@@ -107,29 +89,29 @@ async fn main() -> Result<()> {
 
     // Find all cars owned by Alice
     let alice_owned = link_service
-        .find_by_source(&tenant_id, &alice_id, "user", Some("owner"), Some("car"))
+        .find_by_source(&alice.id, Some("owner"), None)
         .await?;
     println!("🚗 Alice owns {} car(s)", alice_owned.len());
 
     // Find all cars driven by Alice
     let alice_driven = link_service
-        .find_by_source(&tenant_id, &alice_id, "user", Some("driver"), Some("car"))
+        .find_by_source(&alice.id, Some("driver"), None)
         .await?;
     println!("🚗 Alice drives {} car(s)", alice_driven.len());
 
     // Find all drivers of the Tesla
     let tesla_drivers = link_service
-        .find_by_target(&tenant_id, &tesla_id, "car", Some("driver"), Some("user"))
+        .find_by_target(&tesla.id, Some("driver"), None)
         .await?;
     println!("👥 Tesla has {} driver(s)", tesla_drivers.len());
 
     // Show metadata example
     for link in tesla_drivers {
-        if link.source.id == bob_id {
-            if let Some(metadata) = link.metadata {
+        if link.source_id == bob.id {
+            if let Some(metadata) = &link.metadata {
                 println!(
                     "   Bob's permissions: {}",
-                    serde_json::to_string_pretty(&metadata)?
+                    serde_json::to_string_pretty(metadata)?
                 );
             }
         }

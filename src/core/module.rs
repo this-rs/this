@@ -18,12 +18,27 @@ pub trait EntityFetcher: Send + Sync {
     /// Fetch an entity by ID and return it as JSON
     ///
     /// # Arguments
-    /// * `tenant_id` - The tenant ID for isolation
     /// * `entity_id` - The unique ID of the entity to fetch
     ///
     /// # Returns
     /// The entity serialized as JSON, or an error if not found
-    async fn fetch_as_json(&self, tenant_id: &Uuid, entity_id: &Uuid) -> Result<serde_json::Value>;
+    async fn fetch_as_json(&self, entity_id: &Uuid) -> Result<serde_json::Value>;
+}
+
+/// Trait for creating entities dynamically
+///
+/// This allows the link system to create new entities with automatic linking
+/// without knowing the concrete entity types at compile time.
+#[async_trait]
+pub trait EntityCreator: Send + Sync {
+    /// Create a new entity from JSON data
+    ///
+    /// # Arguments
+    /// * `entity_data` - The entity data as JSON
+    ///
+    /// # Returns
+    /// The created entity serialized as JSON (with generated ID, timestamps, etc.)
+    async fn create_from_json(&self, entity_data: serde_json::Value) -> Result<serde_json::Value>;
 }
 
 /// Trait for a microservice module
@@ -58,4 +73,15 @@ pub trait Module: Send + Sync {
     /// # Returns
     /// An `EntityFetcher` implementation, or `None` if the entity type is not managed by this module
     fn get_entity_fetcher(&self, entity_type: &str) -> Option<Arc<dyn EntityFetcher>>;
+
+    /// Get an entity creator for a specific entity type
+    ///
+    /// This allows the framework to create new entities dynamically when creating linked entities.
+    ///
+    /// # Arguments
+    /// * `entity_type` - The type of entity (e.g., "order", "invoice")
+    ///
+    /// # Returns
+    /// An `EntityCreator` implementation, or `None` if the entity type is not managed by this module
+    fn get_entity_creator(&self, entity_type: &str) -> Option<Arc<dyn EntityCreator>>;
 }

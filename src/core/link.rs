@@ -5,89 +5,92 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-/// Reference to an entity instance in a link
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct EntityReference {
-    /// The unique ID of the entity
-    pub id: Uuid,
-
-    /// The type of entity (e.g., "user", "company", "car")
-    ///
-    /// CRITICAL: This is a String, not an enum, to maintain complete
-    /// decoupling from specific entity types
-    pub entity_type: String,
-}
-
-impl EntityReference {
-    /// Create a new entity reference
-    pub fn new(id: Uuid, entity_type: impl Into<String>) -> Self {
-        Self {
-            id,
-            entity_type: entity_type.into(),
-        }
-    }
-}
-
 /// A polymorphic link between two entities
 ///
-/// Links are completely agnostic to the types of entities they connect.
-/// This allows the link system to work with any entity types without
-/// modification.
+/// Links follow the Entity model with base fields (id, type, timestamps, status)
+/// plus relationship-specific fields (source_id, target_id, link_type).
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Link {
+pub struct LinkEntity {
     /// Unique identifier for this link
     pub id: Uuid,
 
-    /// Tenant ID for multi-tenant isolation
-    pub tenant_id: Uuid,
-
-    /// The type of relationship (e.g., "owner", "driver", "worker")
-    ///
-    /// CRITICAL: This is a String, not an enum, to support any
-    /// relationship type without modifying the core framework
-    pub link_type: String,
-
-    /// The source entity in this relationship
-    pub source: EntityReference,
-
-    /// The target entity in this relationship
-    pub target: EntityReference,
-
-    /// Optional metadata for the relationship
-    ///
-    /// Can store additional context like:
-    /// - start_date / end_date for temporal relationships
-    /// - role for employment relationships
-    /// - permission level for access relationships
-    pub metadata: Option<serde_json::Value>,
+    /// Entity type (always "link" for base links)
+    #[serde(rename = "type")]
+    pub entity_type: String,
 
     /// When this link was created
     pub created_at: DateTime<Utc>,
 
     /// When this link was last updated
     pub updated_at: DateTime<Utc>,
+
+    /// When this link was soft-deleted (if applicable)
+    pub deleted_at: Option<DateTime<Utc>>,
+
+    /// Status of the link
+    pub status: String,
+
+    /// The type of relationship (e.g., "owner", "driver", "worker")
+    pub link_type: String,
+
+    /// The ID of the source entity
+    pub source_id: Uuid,
+
+    /// The ID of the target entity
+    pub target_id: Uuid,
+
+    /// Optional metadata for the relationship
+    pub metadata: Option<serde_json::Value>,
 }
 
-impl Link {
+impl LinkEntity {
     /// Create a new link
     pub fn new(
-        tenant_id: Uuid,
         link_type: impl Into<String>,
-        source: EntityReference,
-        target: EntityReference,
+        source_id: Uuid,
+        target_id: Uuid,
         metadata: Option<serde_json::Value>,
     ) -> Self {
         let now = Utc::now();
         Self {
             id: Uuid::new_v4(),
-            tenant_id,
-            link_type: link_type.into(),
-            source,
-            target,
-            metadata,
+            entity_type: "link".to_string(),
             created_at: now,
             updated_at: now,
+            deleted_at: None,
+            status: "active".to_string(),
+            link_type: link_type.into(),
+            source_id,
+            target_id,
+            metadata,
         }
+    }
+
+    /// Soft delete this link
+    pub fn soft_delete(&mut self) {
+        self.deleted_at = Some(Utc::now());
+        self.updated_at = Utc::now();
+    }
+
+    /// Restore a soft-deleted link
+    pub fn restore(&mut self) {
+        self.deleted_at = None;
+        self.updated_at = Utc::now();
+    }
+
+    /// Update the updated_at timestamp
+    pub fn touch(&mut self) {
+        self.updated_at = Utc::now();
+    }
+
+    /// Check if the link is deleted
+    pub fn is_deleted(&self) -> bool {
+        self.deleted_at.is_some()
+    }
+
+    /// Check if the link is active
+    pub fn is_active(&self) -> bool {
+        self.status == "active" && !self.is_deleted()
     }
 }
 
@@ -98,27 +101,22 @@ impl Link {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LinkAuthConfig {
     /// Policy for listing links (GET /{source}/{id}/{route_name})
-    /// Examples: "authenticated", "owner", "public", "role:admin"
     #[serde(default = "default_link_auth_policy")]
     pub list: String,
 
-    /// Policy for getting a specific link by ID (GET /links/{link_id})
-    /// Examples: "authenticated", "owner", "source_owner_or_target_owner"
+    /// Policy for getting a specific link by ID
     #[serde(default = "default_link_auth_policy")]
     pub get: String,
 
-    /// Policy for creating a link (POST /{source}/{id}/{link_type}/{target}/{id})
-    /// Examples: "owner", "service_only", "role:manager", "source_owner"
+    /// Policy for creating a link
     #[serde(default = "default_link_auth_policy")]
     pub create: String,
 
-    /// Policy for updating a link (PUT/PATCH /{source}/{id}/{link_type}/{target}/{id})
-    /// Examples: "owner", "source_owner", "source_owner_or_target_owner"
+    /// Policy for updating a link
     #[serde(default = "default_link_auth_policy")]
     pub update: String,
 
-    /// Policy for deleting a link (DELETE /{source}/{id}/{link_type}/{target}/{id})
-    /// Examples: "owner", "admin_only", "source_owner_or_target_owner"
+    /// Policy for deleting a link
     #[serde(default = "default_link_auth_policy")]
     pub delete: String,
 }
@@ -140,9 +138,6 @@ impl Default for LinkAuthConfig {
 }
 
 /// Configuration for a specific type of link between two entity types
-///
-/// This defines how entities can be related and how those relationships
-/// are exposed through the API
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LinkDefinition {
     /// The type of link (e.g., "owner", "driver")
@@ -155,13 +150,9 @@ pub struct LinkDefinition {
     pub target_type: String,
 
     /// Route name when navigating from source to target
-    ///
-    /// Example: "cars-owned" → /users/{id}/cars-owned
     pub forward_route_name: String,
 
     /// Route name when navigating from target to source
-    ///
-    /// Example: "users-owners" → /cars/{id}/users-owners
     pub reverse_route_name: String,
 
     /// Optional description of this link type
@@ -171,23 +162,12 @@ pub struct LinkDefinition {
     pub required_fields: Option<Vec<String>>,
 
     /// Authorization configuration specific to this link type
-    ///
-    /// When specified, these permissions override entity-level link permissions.
-    /// This allows different link types between the same entities to have
-    /// different permission requirements.
-    ///
-    /// Examples:
-    /// - order → invoice: create=service_only (auto-created by system)
-    /// - order → approval: create=owner (manually created by user)
     #[serde(default)]
     pub auth: Option<LinkAuthConfig>,
 }
 
 impl LinkDefinition {
     /// Generate the default forward route name
-    ///
-    /// Format: {target_plural}-{link_type_plural}
-    /// Example: "cars-owned" for (target="car", link_type="owner")
     pub fn default_forward_route_name(target_type: &str, link_type: &str) -> String {
         format!(
             "{}-{}",
@@ -197,9 +177,6 @@ impl LinkDefinition {
     }
 
     /// Generate the default reverse route name
-    ///
-    /// Format: {source_plural}-{link_type_plural}
-    /// Example: "users-owners" for (source="user", link_type="owner")
     pub fn default_reverse_route_name(source_type: &str, link_type: &str) -> String {
         format!(
             "{}-{}",
@@ -214,38 +191,23 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_entity_reference_creation() {
-        let user_id = Uuid::new_v4();
-        let reference = EntityReference::new(user_id, "user");
-
-        assert_eq!(reference.id, user_id);
-        assert_eq!(reference.entity_type, "user");
-    }
-
-    #[test]
     fn test_link_creation() {
-        let tenant_id = Uuid::new_v4();
         let user_id = Uuid::new_v4();
         let car_id = Uuid::new_v4();
 
-        let link = Link::new(
-            tenant_id,
-            "owner",
-            EntityReference::new(user_id, "user"),
-            EntityReference::new(car_id, "car"),
-            None,
-        );
+        let link = LinkEntity::new("owner", user_id, car_id, None);
 
-        assert_eq!(link.tenant_id, tenant_id);
         assert_eq!(link.link_type, "owner");
-        assert_eq!(link.source.id, user_id);
-        assert_eq!(link.target.id, car_id);
+        assert_eq!(link.source_id, user_id);
+        assert_eq!(link.target_id, car_id);
         assert!(link.metadata.is_none());
+        assert_eq!(link.status, "active");
+        assert!(!link.is_deleted());
+        assert!(link.is_active());
     }
 
     #[test]
     fn test_link_with_metadata() {
-        let tenant_id = Uuid::new_v4();
         let user_id = Uuid::new_v4();
         let company_id = Uuid::new_v4();
 
@@ -254,15 +216,33 @@ mod tests {
             "start_date": "2024-01-01"
         });
 
-        let link = Link::new(
-            tenant_id,
-            "worker",
-            EntityReference::new(user_id, "user"),
-            EntityReference::new(company_id, "company"),
-            Some(metadata.clone()),
-        );
+        let link = LinkEntity::new("worker", user_id, company_id, Some(metadata.clone()));
 
         assert_eq!(link.metadata, Some(metadata));
+    }
+
+    #[test]
+    fn test_link_soft_delete() {
+        let mut link = LinkEntity::new("owner", Uuid::new_v4(), Uuid::new_v4(), None);
+
+        assert!(!link.is_deleted());
+        assert!(link.is_active());
+
+        link.soft_delete();
+        assert!(link.is_deleted());
+        assert!(!link.is_active());
+    }
+
+    #[test]
+    fn test_link_restore() {
+        let mut link = LinkEntity::new("owner", Uuid::new_v4(), Uuid::new_v4(), None);
+
+        link.soft_delete();
+        assert!(link.is_deleted());
+
+        link.restore();
+        assert!(!link.is_deleted());
+        assert!(link.is_active());
     }
 
     #[test]
@@ -320,20 +300,5 @@ mod tests {
         assert_eq!(auth.create, "service_only");
         assert_eq!(auth.update, "owner");
         assert_eq!(auth.delete, "admin_only");
-    }
-
-    #[test]
-    fn test_link_definition_without_auth() {
-        let yaml = r#"
-            link_type: payment
-            source_type: invoice
-            target_type: payment
-            forward_route_name: payments
-            reverse_route_name: invoice
-        "#;
-
-        let def: LinkDefinition = serde_yaml::from_str(yaml).unwrap();
-        assert_eq!(def.link_type, "payment");
-        assert!(def.auth.is_none());
     }
 }

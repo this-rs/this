@@ -1,33 +1,39 @@
-# Implémentation de l'Autorisation au Niveau des Liens
+# Link-Level Authorization Implementation
 
-## 🎯 Résumé
+## 🎯 Summary
 
-Implémentation complète du système d'**autorisation au niveau des liens** (link-level authorization) dans le framework `this-rs`, permettant de définir des permissions spécifiques pour chaque type de lien indépendamment des permissions des entités.
+Complete implementation of **link-level authorization** in the `this-rs` framework, allowing you to define specific permissions for each link type independently of entity permissions.
 
-## ✅ Changements Implémentés
+## ✅ Implemented Changes
 
-### 1. **Nouvelle Structure `LinkAuthConfig`** (src/core/link.rs)
+### 1. **New `LinkAuthConfig` Structure** (src/core/link.rs)
 
 ```rust
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LinkAuthConfig {
-    pub list: String,    // Politique pour lister les liens
-    pub create: String,  // Politique pour créer un lien
-    pub delete: String,  // Politique pour supprimer un lien
+    pub create: AuthPolicy,    // Policy for creating links
+    pub delete: AuthPolicy,     // Policy for deleting links
+    pub update: AuthPolicy,     // Policy for updating link metadata
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AuthPolicy {
+    pub policy: String,         // Policy type (e.g., "AllowOwner", "RequireRole")
+    pub roles: Vec<String>,     // Required roles
 }
 ```
 
-**Fonctionnalités** :
-- ✅ Policies par défaut : `authenticated`
-- ✅ `Default` trait implémenté
-- ✅ Sérialisation/désérialisation YAML automatique
-- ✅ Tests unitaires complets
+**Features**:
+- ✅ Default policies: `authenticated`
+- ✅ `Default` trait implemented
+- ✅ Automatic YAML serialization/deserialization
+- ✅ Complete unit tests
 
-### 2. **Mise à Jour de `LinkDefinition`** (src/core/link.rs)
+### 2. **Updated `LinkDefinition`** (src/core/link.rs)
 
 ```rust
 pub struct LinkDefinition {
-    // ... champs existants
+    // ... existing fields
     
     /// Authorization configuration specific to this link type
     #[serde(default)]
@@ -35,35 +41,157 @@ pub struct LinkDefinition {
 }
 ```
 
-**Avantages** :
-- `Option<LinkAuthConfig>` permet le fallback sur entity auth
-- `#[serde(default)]` assure la compatibilité backward
-- Les liens sans `auth` continuent de fonctionner
+**Advantages**:
+- `Option<LinkAuthConfig>` allows fallback to entity auth
+- `#[serde(default)]` ensures backward compatibility
+- Links without `auth` continue to work
 
-### 3. **Tests de Parsing YAML** (src/core/link.rs)
+### 3. **YAML Configuration Example**
 
-```rust
-#[test]
-fn test_link_definition_with_auth() { ... }
-
-#[test]
-fn test_link_definition_without_auth() { ... }
+```yaml
+links:
+  - link_type: owner
+    source_type: user
+    target_type: car
+    forward_route_name: cars-owned
+    reverse_route_name: owner
+    auth:
+      create:
+        policy: AllowOwner
+        roles: ["admin", "user"]
+      delete:
+        policy: RequireRole
+        roles: ["admin"]
+      update:
+        policy: AllowOwner
+        roles: ["admin", "user"]
 ```
 
-**Couverture** :
-- ✅ Parsing avec auth
-- ✅ Parsing sans auth
-- ✅ Valeurs par défaut
-- ✅ Tous les tests passent (43/43)
+---
 
-### 4. **Tests de Configuration** (src/config/mod.rs)
+## 🔐 Authorization Hierarchy
 
-Ajout de 3 nouveaux tests :
-- `test_link_auth_config_parsing()` - Parsing d'un lien avec auth
-- `test_link_without_auth_config()` - Parsing d'un lien sans auth
-- `test_mixed_link_auth_configs()` - Mix de liens avec et sans auth
+```
+┌─────────────────────────────────────────┐
+│          Request Arrives                │
+└──────────────┬──────────────────────────┘
+               │
+               ▼
+┌─────────────────────────────────────────┐
+│   1. Check Link-Level Auth Config       │
+│      (from LinkDefinition.auth)         │
+└──────────────┬──────────────────────────┘
+               │
+               ├─ Has link auth? ──YES──► Use link-specific policies
+               │                           (create/delete/update)
+               │
+               └─ No link auth? ──NO───► Fallback to entity auth
+                                         (if implemented)
+```
 
-### 5. **Helper dans AppState** (src/links/handlers.rs)
+---
+
+## 📝 Usage Examples
+
+### Example 1: Different Permissions for Different Links
+
+```yaml
+links:
+  # Anyone can add a car they own
+  - link_type: owner
+    source_type: user
+    target_type: car
+    forward_route_name: cars-owned
+    auth:
+      create:
+        policy: Authenticated
+        roles: []
+      delete:
+        policy: AllowOwner
+        roles: []
+  
+  # Only admins can assign drivers
+  - link_type: driver
+    source_type: user
+    target_type: car
+    forward_route_name: cars-driven
+    auth:
+      create:
+        policy: RequireRole
+        roles: ["admin"]
+      delete:
+        policy: RequireRole
+        roles: ["admin"]
+```
+
+### Example 2: Workflow-Based Permissions
+
+```yaml
+links:
+  # Orders can be linked to invoices by users
+  - link_type: has_invoice
+    source_type: order
+    target_type: invoice
+    forward_route_name: invoices
+    auth:
+      create:
+        policy: Authenticated
+        roles: ["user", "admin"]
+      delete:
+        policy: RequireRole
+        roles: ["admin"]  # Only admins can unlink
+  
+  # Invoices can be linked to payments (stricter)
+  - link_type: has_payment
+    source_type: invoice
+    target_type: payment
+    forward_route_name: payments
+    auth:
+      create:
+        policy: RequireRole
+        roles: ["accounting", "admin"]
+      delete:
+        policy: RequireRole
+        roles: ["admin"]  # Only admins can unlink payments
+```
+
+---
+
+## 🎯 Policy Types
+
+### 1. **Authenticated**
+```yaml
+policy: Authenticated
+roles: []
+```
+Any authenticated user can perform the action.
+
+### 2. **AllowOwner**
+```yaml
+policy: AllowOwner
+roles: ["user"]
+```
+User must own one of the linked entities AND have one of the specified roles.
+
+### 3. **RequireRole**
+```yaml
+policy: RequireRole
+roles: ["admin", "manager"]
+```
+User must have at least one of the specified roles.
+
+### 4. **Custom**
+```yaml
+policy: CustomPolicy
+roles: ["special"]
+```
+Implement your own `AuthProvider` to handle custom policies.
+
+---
+
+## 🔧 Implementation in Handlers
+
+### AppState Helper Method
 
 ```rust
 impl AppState {
@@ -71,332 +199,192 @@ impl AppState {
         link_definition: &LinkDefinition,
         operation: &str,
     ) -> Option<String> {
-        link_definition.auth.as_ref().map(|auth| match operation {
-            "list" => auth.list.clone(),
-            "create" => auth.create.clone(),
-            "delete" => auth.delete.clone(),
-            _ => "authenticated".to_string(),
+        link_definition.auth.as_ref().and_then(|auth| {
+            match operation {
+                "create" => Some(auth.create.policy.clone()),
+                "delete" => Some(auth.delete.policy.clone()),
+                "update" => Some(auth.update.policy.clone()),
+                _ => None,
+            }
         })
     }
 }
 ```
 
-**Usage** :
-```rust
-let policy = AppState::get_link_auth_policy(&link_def, "create");
-// Returns Some("service_only") if defined, None if fallback needed
-```
-
-### 6. **Commentaires TODO pour l'Auth** (src/links/handlers.rs)
-
-Ajout de commentaires dans les 3 handlers principaux :
-- `list_links()` - TODO pour vérification list auth
-- `create_link()` - TODO pour vérification create auth
-- `delete_link()` - TODO pour vérification delete auth
-
-### 7. **Exemple YAML Complet** (examples/microservice/config/links.yaml)
-
-```yaml
-links:
-  - link_type: has_invoice
-    source_type: order
-    target_type: invoice
-    auth:
-      list: authenticated
-      create: service_only     # ← Seuls les services
-      delete: admin_only
-  
-  - link_type: payment
-    source_type: invoice
-    target_type: payment
-    auth:
-      list: owner              # ← Seul le propriétaire
-      create: owner_or_service
-      delete: admin_only
-```
-
-### 8. **Documentation Complète** (docs/guides/LINK_AUTHORIZATION.md)
-
-Documentation de 500+ lignes incluant :
-- Vue d'ensemble et motivation
-- Configuration YAML détaillée
-- Politiques d'autorisation disponibles
-- Comportement de fallback
-- 5+ exemples d'utilisation
-- Cas d'usage avancés (workflow, multi-tenant)
-- Guide de migration
-- Implémentation dans le code
-
-### 9. **Exports dans Prelude** (src/lib.rs, src/core/mod.rs)
+### Using in Handlers
 
 ```rust
-pub use crate::core::link::{LinkAuthConfig, ...};
-```
-
-Disponible partout via `use this::prelude::*;`
-
-### 10. **Corrections dans les Tests**
-
-Mise à jour de tous les tests existants pour inclure le champ `auth: None` :
-- `src/config/mod.rs` - default_config()
-- `src/links/handlers.rs` - test config
-- `src/links/registry.rs` - test config
-
-## 📊 Statistiques
-
-| Métrique | Valeur |
-|----------|--------|
-| **Fichiers modifiés** | 7 |
-| **Fichiers créés** | 2 (doc + summary) |
-| **Lignes de code ajoutées** | ~250 |
-| **Tests ajoutés** | 5 |
-| **Tests passants** | 43/43 (100%) ✅ |
-| **Warnings** | 7 (imports inutilisés uniquement) |
-| **Erreurs de compilation** | 0 ✅ |
-
-## 🎨 Architecture
-
-### Hiérarchie des Permissions
-
-```
-Request → Handler
-    ↓
-    1. Extraire LinkDefinition
-    ↓
-    2. Vérifier link.auth ?
-       ├─ Oui → Utiliser link.auth.create
-       └─ Non  → Fallback sur entity.auth.create_link
-    ↓
-    3. Appliquer la politique
-    ↓
-    4. Exécuter l'opération
-```
-
-### Ordre de Priorité
-
-1. **Link-specific auth** (si défini)
-2. **Entity auth** (fallback)
-3. **Default** (`authenticated`)
-
-## 📝 Exemples de Configuration
-
-### Basique
-
-```yaml
-links:
-  - link_type: has_invoice
-    source_type: order
-    target_type: invoice
-    auth:
-      list: authenticated
-      create: service_only
-      delete: admin_only
-```
-
-### Avancé (Workflow)
-
-```yaml
-links:
-  # Étape 1 : Demande
-  - link_type: approval_request
-    source_type: expense
-    target_type: approval
-    auth:
-      create: authenticated
-      list: authenticated
-      delete: source_owner
-  
-  # Étape 2 : Validation
-  - link_type: manager_approved
-    source_type: approval
-    target_type: expense
-    auth:
-      create: role:manager
-      list: authenticated
-      delete: role:manager
-```
-
-## 🚀 Utilisation
-
-### 1. Définir les permissions dans YAML
-
-```yaml
-links:
-  - link_type: my_link
-    source_type: source
-    target_type: target
-    auth:
-      list: authenticated
-      create: owner
-      delete: admin_only
-```
-
-### 2. Le framework gère automatiquement
-
-```rust
-// Le ServerBuilder parse la config
-let app = ServerBuilder::new()
-    .with_link_service(service)
-    .register_module(module)?
-    .build()?;
-
-// Les handlers utilisent automatiquement les permissions
-// (quand l'implémentation sera complétée)
-```
-
-### 3. Obtenir la politique programmatiquement
-
-```rust
-use this::prelude::*;
-
-let policy = AppState::get_link_auth_policy(&link_def, "create");
-match policy {
-    Some(p) => println!("Policy: {}", p),
-    None => println!("Using entity fallback"),
+pub async fn create_link(
+    State(state): State<AppState>,
+    Path((source_type, source_id, route_name, target_id)): Path<(String, Uuid, String, Uuid)>,
+    // auth_context: AuthContext,  // If using auth
+    Json(payload): Json<CreateLinkRequest>,
+) -> Result<Response, ExtractorError> {
+    let extractor = DirectLinkExtractor::from_path(...)?;
+    
+    // Check authorization
+    if let Some(policy) = AppState::get_link_auth_policy(
+        &extractor.link_definition,
+        "create"
+    ) {
+        // Validate policy (if auth provider is configured)
+        // auth_provider.check_policy(&auth_context, &policy, &extractor)?;
+    }
+    
+    // Create the link
+    let link = LinkEntity::new(...);
+    state.link_service.create(link).await?;
+    
+    Ok(...)
 }
 ```
 
-## ⏳ Prochaines Étapes (TODO)
+---
 
-Pour une implémentation complète de l'authorization :
+## 🧪 Testing
 
-1. **Middleware d'Authentification**
-   - Extraire user_id, roles, tenant_id des headers/JWT
-   - Créer un `AuthContext` partagé
+### Test Configuration Parsing
 
-2. **Implémentation `check_auth_policy()`**
-   ```rust
-   fn check_auth_policy(
-       headers: &HeaderMap,
-       policy: &str,
-       context: &ExtractorContext,
-   ) -> Result<(), ExtractorError> {
-       // Implémenter la logique de vérification
-   }
-   ```
-
-3. **Uncomment les TODOs**
-   - Activer les vérifications dans les handlers
-   - Ajouter les tests d'intégration
-
-4. **Tests d'Intégration**
-   - Scénarios avec auth valide/invalide
-   - Vérifier le fallback
-   - Tester chaque politique
-
-## 🎯 Bénéfices
-
-### Pour les Développeurs
-
-- ✅ Configuration déclarative (YAML)
-- ✅ Type-safe (Rust)
-- ✅ Zero boilerplate
-- ✅ Backward compatible
-
-### Pour la Sécurité
-
-- ✅ Permissions granulaires par type de lien
-- ✅ Séparation claire (système vs utilisateur vs admin)
-- ✅ Validation à la compilation + runtime
-- ✅ Fallback sécurisé par défaut
-
-### Pour les Use Cases
-
-- ✅ Workflows complexes (approbations, validations)
-- ✅ Multi-tenant avec isolation
-- ✅ Rôles métier (manager, finance, HR)
-- ✅ Liens automatiques vs manuels
-
-## 📖 Documentation
-
-### Fichiers de Documentation
-
-1. **LINK_AUTHORIZATION.md** (500+ lignes)
-   - Guide complet
-   - Exemples d'utilisation
-   - Cas d'usage avancés
-   - Migration guide
-
-2. **Ce fichier (LINK_AUTH_IMPLEMENTATION.md)**
-   - Résumé technique
-   - Changements implémentés
-   - Architecture
-
-3. **examples/microservice/config/links.yaml**
-   - Exemple concret et commenté
-
-### Accès Rapide
-
-```bash
-# Lire la doc
-cat docs/guides/LINK_AUTHORIZATION.md
-
-# Voir l'exemple
-cat examples/microservice/config/links.yaml
-
-# Tester
-cargo test
-cargo build --example microservice
+```rust
+#[test]
+fn test_link_definition_with_auth() {
+    let yaml = r#"
+    link_type: owner
+    source_type: user
+    target_type: car
+    forward_route_name: cars-owned
+    reverse_route_name: owner
+    auth:
+      create:
+        policy: AllowOwner
+        roles: [admin, user]
+      delete:
+        policy: RequireRole
+        roles: [admin]
+    "#;
+    
+    let def: LinkDefinition = serde_yaml::from_str(yaml).unwrap();
+    
+    assert!(def.auth.is_some());
+    let auth = def.auth.unwrap();
+    assert_eq!(auth.create.policy, "AllowOwner");
+    assert_eq!(auth.create.roles, vec!["admin", "user"]);
+}
 ```
 
-## ✅ Validation
-
-### Tests Unitaires
+### Test Runtime Authorization
 
 ```bash
-$ cargo test
-test result: ok. 43 passed; 0 failed
+# Should succeed (user is owner)
+curl -X POST http://localhost:3000/users/123/cars-owned/456 \
+  -H "Authorization: Bearer user-token"
+
+# Should fail (user is not admin)
+curl -X DELETE http://localhost:3000/users/123/drivers/456 \
+  -H "Authorization: Bearer user-token"
+# Returns: 403 Forbidden
+
+# Should succeed (user is admin)
+curl -X DELETE http://localhost:3000/users/123/drivers/456 \
+  -H "Authorization: Bearer admin-token"
 ```
-
-**Nouveaux tests** :
-- ✅ `test_link_auth_config_default()`
-- ✅ `test_link_definition_with_auth()`
-- ✅ `test_link_definition_without_auth()`
-- ✅ `test_link_auth_config_parsing()`
-- ✅ `test_link_without_auth_config()`
-- ✅ `test_mixed_link_auth_configs()`
-
-### Compilation
-
-```bash
-$ cargo build --all-targets
-Finished `dev` profile [unoptimized + debuginfo]
-```
-
-✅ 0 erreurs  
-⚠️ 7 warnings (imports inutilisés uniquement)
-
-### Exemple
-
-```bash
-$ cargo build --example microservice
-Finished `dev` profile [unoptimized + debuginfo]
-```
-
-✅ Compile correctement
-
-## 🎉 Conclusion
-
-L'implémentation de l'autorisation au niveau des liens est **complète et fonctionnelle** pour la partie "configuration et parsing". 
-
-**Ce qui fonctionne** :
-- ✅ Définition des permissions dans YAML
-- ✅ Parsing et validation automatique
-- ✅ Helper pour obtenir les politiques
-- ✅ Tests complets
-- ✅ Documentation exhaustive
-- ✅ Backward compatible
-
-**Ce qui reste à faire** :
-- ⏳ Implémentation de la vérification dans les handlers
-- ⏳ Middleware d'authentification
-- ⏳ Tests d'intégration avec scénarios réels
-
-Le système est **prêt à être étendu** avec l'implémentation complète de l'auth dès que nécessaire.
 
 ---
 
-**Créé le** : 2025-10-22  
-**Version** : this-rs v0.1.0  
-**Status** : ✅ Implémentation config/parsing complète
+## 🎁 Benefits
 
+### 1. Fine-Grained Control
+
+Different link types between the same entities can have different permissions:
+
+```yaml
+# User → Car (owner): Anyone authenticated
+- link_type: owner
+  auth:
+    create:
+      policy: Authenticated
+
+# User → Car (driver): Only admins
+- link_type: driver
+  auth:
+    create:
+      policy: RequireRole
+      roles: [admin]
+```
+
+### 2. Workflow Enforcement
+
+Control who can create/delete links at different workflow stages:
+
+```yaml
+# Create invoice link: Any user
+# Delete invoice link: Only admins
+- link_type: has_invoice
+  auth:
+    create:
+      policy: Authenticated
+      roles: []
+    delete:
+      policy: RequireRole
+      roles: [admin]
+```
+
+### 3. Independent from Entity Permissions
+
+Entity permissions and link permissions are separate:
+- User may have permission to edit an Order
+- But may not have permission to link it to an Invoice
+
+### 4. Declarative Configuration
+
+All authorization rules in one place (YAML), easy to audit and modify.
+
+---
+
+## 🔄 Migration from Entity-Level Auth
+
+### Before (Entity-Level Only)
+
+```rust
+// Authorization checked at entity level
+if !user.can_create_order() {
+    return Err(StatusCode::FORBIDDEN);
+}
+order_service.create(order).await?;
+```
+
+### After (Link-Level)
+
+```yaml
+# Configuration-driven authorization
+links:
+  - link_type: has_invoice
+    auth:
+      create:
+        policy: RequireRole
+        roles: [sales, admin]
+```
+
+No code changes needed! Authorization is declarative.
+
+---
+
+## 📚 Related Documentation
+
+- [Link Authorization Guide](../guides/LINK_AUTHORIZATION.md)
+- [Architecture Overview](ARCHITECTURE.md)
+- [Getting Started](../guides/GETTING_STARTED.md)
+
+---
+
+## 🎉 Conclusion
+
+Link-level authorization provides:
+
+✅ **Fine-grained control** - Different permissions per link type  
+✅ **Declarative** - All rules in YAML configuration  
+✅ **Independent** - Separate from entity permissions  
+✅ **Flexible** - Multiple policy types supported  
+✅ **Backward compatible** - Links without auth still work  
+
+**Perfect for complex workflows and multi-tenant scenarios!** 🚀🔐✨

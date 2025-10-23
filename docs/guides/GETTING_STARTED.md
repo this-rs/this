@@ -1,283 +1,614 @@
-# This-RS - Guide de Démarrage pour le Développement
+# Getting Started with This-RS
 
-## 🎯 Vue d'ensemble
+## 🎯 Overview
 
-Tu as maintenant la structure de base du framework **this-rs**. Voici comment continuer le développement.
+This-RS is a framework for building RESTful APIs with complex entity relationships and **zero boilerplate**. This guide will walk you through building your first API.
 
-## 📁 Structure Actuelle
+## 📋 Prerequisites
 
-```
-this-rs/
-├── Cargo.toml              ✅ Configuration du projet
-├── README.md               ✅ Documentation utilisateur
-├── links.yaml              ✅ Exemple de configuration
-├── .gitignore              ✅ Fichiers à ignorer
-├── src/
-│   ├── lib.rs             ✅ Point d'entrée de la bibliothèque
-│   ├── core/              ✅ Code générique du framework
-│   │   ├── mod.rs         ✅ Module principal
-│   │   ├── entity.rs      ✅ Traits Entity et Data
-│   │   ├── pluralize.rs   ✅ Gestion des pluriels
-│   │   ├── field.rs       ✅ Validation des champs
-│   │   ├── link.rs        ✅ Structures Link
-│   │   ├── service.rs     ✅ Traits de service
-│   │   └── extractors.rs  ⚠️  À implémenter (stub)
-│   ├── links/             ✅ Gestion des liens
-│   │   ├── mod.rs         ✅ Module principal
-│   │   ├── service.rs     ✅ InMemoryLinkService
-│   │   └── registry.rs    ✅ Résolution des routes
-│   ├── entities/          ⚠️  Macros à améliorer
-│   │   ├── mod.rs         ✅ Module principal
-│   │   └── macros.rs      ⚠️  Macro basique
-│   └── config/            ✅ Configuration YAML
-│       └── mod.rs         ✅ Chargement config
-└── examples/              ✅ Exemples d'utilisation
-    └── simple_api.rs      ✅ Exemple simple
+- Rust 1.70+ installed
+- Basic knowledge of Rust and async programming
+- Familiarity with REST APIs
 
-✅ = Implémenté
-⚠️  = À améliorer/compléter
-❌ = Manquant
+## 🚀 Quick Setup
+
+### 1. Add This-RS to Your Project
+
+```toml
+[dependencies]
+this-rs = "0.0.2"
+tokio = { version = "1", features = ["full"] }
+axum = "0.7"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+anyhow = "1"
 ```
 
-## 🚀 Prochaines Étapes
+### 2. Create Project Structure
 
-### Phase 1 : Validation et Tests (Priorité Haute)
+```
+your-project/
+├── Cargo.toml
+├── config/
+│   └── links.yaml
+└── src/
+    ├── main.rs
+    └── entities/
+        ├── mod.rs
+        └── user/
+            ├── mod.rs
+            ├── model.rs
+            ├── store.rs
+            ├── handlers.rs
+            └── descriptor.rs
+```
 
-1. **Tester la compilation** sur ta machine locale :
-   ```bash
-   cd this-rs
-   cargo check
-   cargo test
-   ```
+## 📝 Step-by-Step Tutorial
 
-2. **Corriger les erreurs de compilation** :
-   - Les macros nécessitent probablement des ajustements
-   - Certaines imports peuvent manquer
-   - Les tests doivent compiler
+### Step 1: Define Your Entity with Macros
 
-3. **Améliorer les tests** :
-   - Ajouter plus de tests d'intégration dans `tests/`
-   - Tester les cas limites (pluriels complexes, tenant isolation, etc.)
-
-### Phase 2 : Fonctionnalités Manquantes (Priorité Haute)
-
-#### 2.1 Extracteurs HTTP (Axum)
-
-Implémenter `src/core/extractors.rs` :
+Create `src/entities/user/model.rs`:
 
 ```rust
-// Extraire automatiquement les entités des requêtes HTTP
-use axum::{extract::FromRequest, http::Request, async_trait};
+use this::prelude::*;
 
-pub struct DataExtractor<T: Data> {
-    pub tenant_id: Uuid,
-    pub data: T,
-}
+// Macro generates complete entity with all base fields!
+impl_data_entity!(User, "user", ["name", "email"], {
+    email: String,
+    age: Option<i32>,
+});
 
-#[async_trait]
-impl<T: Data> FromRequest<S> for DataExtractor<T> {
-    // Implémentation pour extraire T du body JSON
-    // + extraire tenant_id des headers
-}
+// That's it! You now have:
+// - id: Uuid (auto-generated)
+// - type: String (auto-set to "user")
+// - name: String (required)
+// - created_at: DateTime<Utc> (auto-generated)
+// - updated_at: DateTime<Utc> (auto-managed)
+// - deleted_at: Option<DateTime<Utc>> (soft delete support)
+// - status: String (required)
+// - email: String (your custom field)
+// - age: Option<i32> (your custom field)
+//
+// Plus:
+// - Constructor: User::new(name, status, email, age)
+// - Methods: soft_delete(), touch(), set_status(), restore()
+// - Trait implementations: Entity, Data, Clone, Serialize, Deserialize
 ```
 
-#### 2.2 Handlers HTTP Génériques
+### Step 2: Create Entity Store
 
-Créer `src/links/handlers.rs` :
+Create `src/entities/user/store.rs`:
 
 ```rust
-// Handlers HTTP pour les opérations CRUD sur les liens
-pub async fn create_link_handler(...) -> Result<Json<Link>, StatusCode> {
-    // POST /users/{id}/{link_type}/cars/{target_id}
+use super::model::User;
+use anyhow::Result;
+use std::collections::HashMap;
+use std::sync::{Arc, RwLock};
+use this::prelude::*;
+use uuid::Uuid;
+
+#[derive(Clone)]
+pub struct UserStore {
+    data: Arc<RwLock<HashMap<Uuid, User>>>,
 }
 
-pub async fn list_forward_links(...) -> Result<Json<Vec<Link>>, StatusCode> {
-    // GET /users/{id}/cars-owned
-}
-
-pub async fn list_reverse_links(...) -> Result<Json<Vec<Link>>, StatusCode> {
-    // GET /cars/{id}/users-owners
-}
-```
-
-#### 2.3 Macro Procédurale pour CRUD
-
-Améliorer `src/entities/macros.rs` pour générer les handlers :
-
-```rust
-#[macro_export]
-macro_rules! impl_crud_handlers {
-    ($type:ty, $service:ty) => {
-        // Générer les handlers HTTP pour GET, POST, PUT, DELETE
-        pub async fn list_handler(...) { ... }
-        pub async fn get_handler(...) { ... }
-        pub async fn create_handler(...) { ... }
-        pub async fn update_handler(...) { ... }
-        pub async fn delete_handler(...) { ... }
-    };
-}
-```
-
-### Phase 3 : Implémentation PostgreSQL (Priorité Moyenne)
-
-Créer `src/links/postgres_service.rs` :
-
-```rust
-pub struct PostgresLinkService {
-    pool: PgPool,
-}
-
-#[async_trait]
-impl LinkService for PostgresLinkService {
-    // Implémentation avec requêtes SQL
-}
-```
-
-Table SQL suggérée :
-
-```sql
-CREATE TABLE links (
-    id UUID PRIMARY KEY,
-    tenant_id UUID NOT NULL,
-    link_type VARCHAR(50) NOT NULL,
-    source_id UUID NOT NULL,
-    source_type VARCHAR(50) NOT NULL,
-    target_id UUID NOT NULL,
-    target_type VARCHAR(50) NOT NULL,
-    metadata JSONB,
-    created_at TIMESTAMP NOT NULL,
-    updated_at TIMESTAMP NOT NULL,
+impl UserStore {
+    pub fn new() -> Self {
+        Self {
+            data: Arc::new(RwLock::new(HashMap::new())),
+        }
+    }
     
-    INDEX idx_source (tenant_id, source_id, source_type),
-    INDEX idx_target (tenant_id, target_id, target_type),
-    INDEX idx_link_type (tenant_id, link_type)
-);
+    pub fn get(&self, id: &Uuid) -> Option<User> {
+        self.data.read().unwrap().get(id).cloned()
+    }
+    
+    pub fn list(&self) -> Vec<User> {
+        self.data.read().unwrap().values().cloned().collect()
+    }
+    
+    pub fn add(&self, user: User) {
+        self.data.write().unwrap().insert(user.id, user);
+    }
+    
+    pub fn update(&self, user: User) {
+        self.data.write().unwrap().insert(user.id, user);
+    }
+    
+    pub fn delete(&self, id: &Uuid) -> Option<User> {
+        self.data.write().unwrap().remove(id)
+    }
+}
+
+// Implement EntityFetcher for link enrichment
+#[async_trait::async_trait]
+impl EntityFetcher for UserStore {
+    async fn fetch_as_json(&self, entity_id: &Uuid) -> Result<serde_json::Value> {
+        let user = self.get(entity_id)
+            .ok_or_else(|| anyhow::anyhow!("User not found: {}", entity_id))?;
+        Ok(serde_json::to_value(user)?)
+    }
+}
+
+// Implement EntityCreator for automatic entity creation with links
+#[async_trait::async_trait]
+impl EntityCreator for UserStore {
+    async fn create_from_json(&self, entity_data: serde_json::Value) -> Result<serde_json::Value> {
+        let user = User::new(
+            entity_data["name"].as_str().unwrap_or("").to_string(),
+            entity_data["status"].as_str().unwrap_or("active").to_string(),
+            entity_data["email"].as_str().unwrap_or("").to_string(),
+            entity_data["age"].as_i64().map(|a| a as i32),
+        );
+        
+        self.add(user.clone());
+        Ok(serde_json::to_value(user)?)
+    }
+}
 ```
 
-### Phase 4 : API Complète (Priorité Moyenne)
+### Step 3: Create HTTP Handlers
 
-Créer `examples/full_api.rs` avec :
+Create `src/entities/user/handlers.rs`:
 
-- Un serveur Axum complet
-- Routes CRUD pour entités
-- Routes pour liens bidirectionnels
-- Middleware tenant_id
-- Gestion des erreurs
-- Documentation OpenAPI
+```rust
+use super::{model::User, store::UserStore};
+use axum::{
+    extract::{Path, State},
+    http::StatusCode,
+    Json,
+};
+use serde_json::Value;
+use uuid::Uuid;
 
-### Phase 5 : Documentation et Publication (Priorité Basse)
+#[derive(Clone)]
+pub struct UserAppState {
+    pub store: UserStore,
+}
 
-1. **Documentation inline** :
-   ```rust
-   /// Documentation détaillée avec exemples
-   ```
+pub async fn list_users(
+    State(state): State<UserAppState>,
+) -> Result<Json<Vec<User>>, StatusCode> {
+    Ok(Json(state.store.list()))
+}
 
-2. **Docs.rs** :
-   ```bash
-   cargo doc --open
-   ```
+pub async fn get_user(
+    State(state): State<UserAppState>,
+    Path(id): Path<String>,
+) -> Result<Json<User>, StatusCode> {
+    let id = Uuid::parse_str(&id).map_err(|_| StatusCode::BAD_REQUEST)?;
+    state.store.get(&id).map(Json).ok_or(StatusCode::NOT_FOUND)
+}
 
-3. **Publication sur crates.io** :
-   ```bash
-   cargo publish
-   ```
+pub async fn create_user(
+    State(state): State<UserAppState>,
+    Json(payload): Json<Value>,
+) -> Result<Json<User>, StatusCode> {
+    let user = User::new(
+        payload["name"].as_str().unwrap_or("").to_string(),
+        payload["status"].as_str().unwrap_or("active").to_string(),
+        payload["email"].as_str().unwrap_or("").to_string(),
+        payload["age"].as_i64().map(|a| a as i32),
+    );
+    
+    state.store.add(user.clone());
+    Ok(Json(user))
+}
 
-## 🛠️ Commandes Utiles
+pub async fn update_user(
+    State(state): State<UserAppState>,
+    Path(id): Path<String>,
+    Json(payload): Json<Value>,
+) -> Result<Json<User>, StatusCode> {
+    let id = Uuid::parse_str(&id).map_err(|_| StatusCode::BAD_REQUEST)?;
+    let mut user = state.store.get(&id).ok_or(StatusCode::NOT_FOUND)?;
+    
+    if let Some(name) = payload["name"].as_str() {
+        user.name = name.to_string();
+    }
+    if let Some(email) = payload["email"].as_str() {
+        user.email = email.to_string();
+    }
+    if let Some(age) = payload["age"].as_i64() {
+        user.age = Some(age as i32);
+    }
+    
+    user.touch(); // Updates updated_at timestamp
+    state.store.update(user.clone());
+    Ok(Json(user))
+}
+
+pub async fn delete_user(
+    State(state): State<UserAppState>,
+    Path(id): Path<String>,
+) -> Result<StatusCode, StatusCode> {
+    let id = Uuid::parse_str(&id).map_err(|_| StatusCode::BAD_REQUEST)?;
+    state.store.delete(&id).ok_or(StatusCode::NOT_FOUND)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+```
+
+### Step 4: Create Entity Descriptor
+
+Create `src/entities/user/descriptor.rs`:
+
+```rust
+use super::{handlers::*, store::UserStore};
+use axum::{routing::get, Router};
+use this::prelude::*;
+
+pub struct UserDescriptor {
+    store: UserStore,
+}
+
+impl UserDescriptor {
+    pub fn new(store: UserStore) -> Self {
+        Self { store }
+    }
+}
+
+impl EntityDescriptor for UserDescriptor {
+    fn entity_type(&self) -> &str {
+        "user"
+    }
+    
+    fn plural(&self) -> &str {
+        "users"
+    }
+    
+    fn build_routes(&self) -> Router {
+        let state = UserAppState {
+            store: self.store.clone(),
+        };
+        
+        Router::new()
+            .route("/users", get(list_users).post(create_user))
+            .route(
+                "/users/{id}",
+                get(get_user).put(update_user).delete(delete_user),
+            )
+            .with_state(state)
+    }
+}
+```
+
+### Step 5: Create Module
+
+Create `src/entities/mod.rs`:
+
+```rust
+pub mod user;
+
+use anyhow::Result;
+use std::sync::Arc;
+use this::prelude::*;
+use user::{descriptor::UserDescriptor, store::UserStore};
+
+pub struct AppModule {
+    user_store: Arc<UserStore>,
+}
+
+impl AppModule {
+    pub fn new(user_store: Arc<UserStore>) -> Self {
+        Self { user_store }
+    }
+}
+
+impl Module for AppModule {
+    fn name(&self) -> &str {
+        "app-service"
+    }
+    
+    fn entity_types(&self) -> Vec<&str> {
+        vec!["user"]
+    }
+    
+    fn links_config(&self) -> Result<LinksConfig> {
+        LinksConfig::from_file("config/links.yaml")
+    }
+    
+    fn register_entities(&self, registry: &mut EntityRegistry) {
+        registry.register(Box::new(UserDescriptor::new((*self.user_store).clone())));
+    }
+    
+    fn get_entity_fetcher(&self, entity_type: &str) -> Option<Arc<dyn EntityFetcher>> {
+        match entity_type {
+            "user" => Some(Arc::new((*self.user_store).clone()) as Arc<dyn EntityFetcher>),
+            _ => None,
+        }
+    }
+    
+    fn get_entity_creator(&self, entity_type: &str) -> Option<Arc<dyn EntityCreator>> {
+        match entity_type {
+            "user" => Some(Arc::new((*self.user_store).clone()) as Arc<dyn EntityCreator>),
+            _ => None,
+        }
+    }
+}
+```
+
+### Step 6: Configure Links
+
+Create `config/links.yaml`:
+
+```yaml
+entities:
+  - singular: user
+    plural: users
+  - singular: car
+    plural: cars
+
+links:
+  - link_type: owner
+    source_type: user
+    target_type: car
+    forward_route_name: cars-owned
+    reverse_route_name: owner
+    description: "User owns a car"
+```
+
+### Step 7: Create Main Server
+
+Create `src/main.rs`:
+
+```rust
+use anyhow::Result;
+use std::sync::Arc;
+use this::prelude::*;
+
+mod entities;
+use entities::{user::store::UserStore, AppModule};
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    // Create stores
+    let user_store = Arc::new(UserStore::new());
+    
+    // Create module
+    let module = AppModule::new(user_store);
+    
+    // Build server - all routes auto-generated!
+    let app = ServerBuilder::new()
+        .with_link_service(InMemoryLinkService::new())
+        .register_module(module)?
+        .build()?;
+    
+    // Start server
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:3000").await?;
+    println!("🚀 Server running on http://127.0.0.1:3000");
+    println!("\n✨ Auto-generated routes:");
+    println!("  GET    /users              - List all users");
+    println!("  POST   /users              - Create a new user");
+    println!("  GET    /users/{{id}}          - Get a specific user");
+    println!("  PUT    /users/{{id}}          - Update a user");
+    println!("  DELETE /users/{{id}}          - Delete a user");
+    println!("  GET    /users/{{id}}/links    - List available link types");
+    
+    axum::serve(listener, app).await?;
+    Ok(())
+}
+```
+
+### Step 8: Run Your Server!
 
 ```bash
-# Vérifier le code sans compiler
-cargo check
-
-# Compiler
-cargo build
-
-# Compiler en mode release
-cargo build --release
-
-# Lancer les tests
-cargo test
-
-# Tests avec output
-cargo test -- --nocapture
-
-# Lancer un exemple
-cargo run --example simple_api
-
-# Générer la documentation
-cargo doc --open
-
-# Vérifier le style du code
-cargo fmt --check
-cargo clippy
-
-# Coverage (nécessite tarpaulin)
-cargo tarpaulin --out Html
+cargo run
 ```
 
-## 🎨 Améliorations Possibles
+## 🧪 Testing Your API
 
-### Court Terme
-- [ ] Ajouter plus de tests unitaires
-- [ ] Améliorer la gestion des erreurs
-- [ ] Documenter tous les types publics
-- [ ] Créer plus d'exemples
+### Create a User
 
-### Moyen Terme
-- [ ] Implémentation PostgreSQL
-- [ ] Génération automatique des routes Axum
-- [ ] Validation des règles métier (via YAML)
-- [ ] Système de migration de schéma
+```bash
+curl -X POST http://localhost:3000/users \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "name": "Alice",
+    "email": "alice@example.com",
+    "age": 30,
+    "status": "active"
+  }'
+```
 
-### Long Terme
-- [ ] Support GraphQL
-- [ ] Support gRPC
-- [ ] CLI pour scaffolding
-- [ ] Générateur de clients (TypeScript, Python)
-- [ ] Admin UI générique
+### Get All Users
 
-## 📚 Ressources
+```bash
+curl http://localhost:3000/users | jq .
+```
 
-### Dépendances Importantes
+### Update a User
 
-- **Axum** : Framework web asynchrone
-- **SQLx** : Client SQL async avec compile-time checking
-- **Serde** : Sérialisation/désérialisation
-- **Tokio** : Runtime async
+```bash
+curl -X PUT http://localhost:3000/users/{user_id} \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "name": "Alice Smith",
+    "age": 31
+  }'
+```
 
-### Références
+## 🔗 Adding Relationships
 
-- [The Rust Book](https://doc.rust-lang.org/book/)
-- [Async Rust](https://rust-lang.github.io/async-book/)
-- [Axum Documentation](https://docs.rs/axum/)
-- [SQLx Documentation](https://docs.rs/sqlx/)
+### Add a Second Entity (Car)
 
-## 🤔 Questions Fréquentes
+Follow the same steps to create:
+- `entities/car/model.rs`
+- `entities/car/store.rs`
+- `entities/car/handlers.rs`
+- `entities/car/descriptor.rs`
 
-**Q: Pourquoi utiliser String au lieu d'enum pour les types ?**
-R: Pour permettre une extensibilité totale. Le module `links/` ne doit pas connaître les types d'entités.
+   ```rust
+// entities/car/model.rs
+impl_data_entity!(Car, "car", ["name", "brand", "model"], {
+    brand: String,
+    model: String,
+    year: i32,
+});
+```
 
-**Q: Comment gérer les validations complexes ?**
-R: Via le fichier YAML avec `required_fields` et des validateurs custom.
+### Create Links
 
-**Q: Peut-on avoir plusieurs bases de données ?**
-R: Oui, implémenter `LinkService` pour chaque backend (Postgres, MySQL, MongoDB, etc.)
+#### Method 1: Link Existing Entities
+   ```bash
+curl -X POST http://localhost:3000/users/{user_id}/cars-owned/{car_id} \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "metadata": {
+      "purchase_date": "2024-01-15",
+      "price": 45000
+    }
+  }'
+```
 
-**Q: Comment gérer les permissions ?**
-R: Ajouter un middleware qui vérifie les droits avant d'accéder aux services.
+#### Method 2: Create New Entity + Link
+   ```bash
+curl -X POST http://localhost:3000/users/{user_id}/cars-owned \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "entity": {
+      "name": "Tesla Model 3",
+      "brand": "Tesla",
+      "model": "Model 3",
+      "year": 2023,
+      "status": "active"
+    },
+    "metadata": {
+      "purchase_date": "2024-03-20",
+      "price": 55000
+    }
+  }'
 
-## 💡 Conseils
+# Returns BOTH the created car AND the link!
+```
 
-1. **Commence petit** : Fait fonctionner l'exemple simple d'abord
-2. **Tests d'abord** : Écris des tests avant d'implémenter les features
-3. **Documentation** : Documente au fur et à mesure
-4. **Itération** : N'essaie pas de tout faire d'un coup
+### Query Links (Auto-Enriched!)
 
-## 📞 Support
+```bash
+# List cars owned by user (includes full car data!)
+curl http://localhost:3000/users/{user_id}/cars-owned | jq .
 
-- Ouvre une issue sur GitHub
-- Consulte la documentation : `cargo doc --open`
-- Regarde les exemples dans `examples/`
+# Response includes enriched entities:
+{
+  "links": [
+    {
+      "id": "link-uuid",
+      "source_id": "user-uuid",
+      "target_id": "car-uuid",
+      "target": {
+        "id": "car-uuid",
+        "type": "car",
+        "name": "Tesla Model 3",
+        "brand": "Tesla",
+        "model": "Model 3",
+        "year": 2023,
+        ...
+      },
+      "metadata": {
+        "purchase_date": "2024-01-15",
+        "price": 45000
+      }
+    }
+  ]
+}
 
----
+# Reverse navigation: Get owner of a car
+curl http://localhost:3000/cars/{car_id}/owner | jq .
+```
 
-Bonne chance avec **this-rs** ! 🚀
+## 🎯 Key Concepts
+
+### 1. Entity Hierarchy
+
+```
+Entity (Base)
+  ├─► Data (Business objects: User, Car, Order, etc.)
+  └─► Link (Relationships between entities)
+```
+
+### 2. Macros Eliminate Boilerplate
+
+```rust
+// Just 4 lines
+impl_data_entity!(User, "user", ["name", "email"], {
+    email: String,
+});
+
+// Generates 100+ lines of code!
+```
+
+### 3. Module System
+
+- Groups related entities
+- Provides EntityFetcher for link enrichment
+- Provides EntityCreator for auto-creation
+- Registers routes automatically
+
+### 4. Auto-Generated Routes
+
+- CRUD routes for entities
+- Generic link routes
+- Bidirectional navigation
+- Auto-enriched responses
+
+## 📚 Next Steps
+
+- [Quick Start Guide](QUICK_START.md) - Fast intro
+- [Enriched Links](ENRICHED_LINKS.md) - Link enrichment details
+- [Multi-Level Navigation](MULTI_LEVEL_NAVIGATION.md) - Complex relationships
+- [Architecture](../architecture/ARCHITECTURE.md) - Technical deep dive
+- [Microservice Example](../../examples/microservice/README.md) - Production patterns
+
+## 💡 Tips & Best Practices
+
+### Use Macros for All Entities
+
+```rust
+// ✅ Do this
+impl_data_entity!(Order, "order", ["name"], {
+    amount: f64,
+});
+
+// ❌ Don't manually define entities
+```
+
+### Implement Both EntityFetcher and EntityCreator
+
+```rust
+// ✅ Enables link enrichment AND auto-creation
+impl EntityFetcher for OrderStore { /* ... */ }
+impl EntityCreator for OrderStore { /* ... */ }
+```
+
+### Keep Module Configuration in YAML
+
+```yaml
+# ✅ Easy to change, no recompilation needed
+links:
+  - link_type: owner
+    source_type: user
+    target_type: car
+```
+
+### Use Soft Deletes
+
+```rust
+// ✅ Never lose data
+user.soft_delete();  // Sets deleted_at timestamp
+
+// ✅ Can be restored later
+user.restore();  // Clears deleted_at
+```
+
+## 🎉 Congratulations!
+
+You've built a complete RESTful API with:
+- ✅ Auto-generated CRUD routes
+- ✅ Auto-generated link routes
+- ✅ Bidirectional navigation
+- ✅ Link enrichment (no N+1 queries!)
+- ✅ Automatic entity creation with linking
+- ✅ Zero boilerplate code
+
+**Welcome to the This-RS community!** 🚀🦀✨

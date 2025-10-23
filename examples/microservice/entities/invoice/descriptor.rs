@@ -1,7 +1,8 @@
 //! Entity descriptor for Invoice
 
 use super::{
-    create_invoice, get_invoice, handlers::InvoiceAppState, list_invoices, store::InvoiceStore,
+    create_invoice, delete_invoice, get_invoice, handlers::InvoiceAppState, list_invoices,
+    store::InvoiceStore, update_invoice,
 };
 use axum::{routing::get, Router};
 use this::prelude::EntityDescriptor;
@@ -33,7 +34,10 @@ impl EntityDescriptor for InvoiceDescriptor {
 
         Router::new()
             .route("/invoices", get(list_invoices).post(create_invoice))
-            .route("/invoices/{id}", get(get_invoice))
+            .route(
+                "/invoices/{id}",
+                get(get_invoice).put(update_invoice).delete(delete_invoice),
+            )
             .with_state(state)
     }
 }
