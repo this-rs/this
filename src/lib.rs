@@ -56,9 +56,9 @@ pub mod prelude {
         registry::{LinkDirection, LinkRouteRegistry, RouteInfo},
     };
 
+    pub use crate::storage::InMemoryLinkService;
     #[cfg(feature = "dynamodb")]
     pub use crate::storage::{DynamoDBDataService, DynamoDBLinkService};
-    pub use crate::storage::InMemoryLinkService;
 
     pub use crate::config::{EntityAuthConfig, EntityConfig, LinksConfig, ValidationRule};
 

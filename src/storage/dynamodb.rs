@@ -3,8 +3,8 @@
 use crate::core::{Data, DataService, EntityReference, Link, LinkService};
 use anyhow::Result;
 use async_trait::async_trait;
-use aws_sdk_dynamodb::Client as DynamoDBClient;
 use aws_sdk_dynamodb::types::AttributeValue;
+use aws_sdk_dynamodb::Client as DynamoDBClient;
 use std::collections::HashMap;
 use uuid::Uuid;
 
@@ -29,15 +29,18 @@ impl<T: Data + serde::Serialize + for<'de> serde::Deserialize<'de>> DynamoDBData
         // Simple implementation - convert to JSON first, then to DynamoDB format
         let json = serde_json::to_value(entity)?;
         let mut item = HashMap::new();
-        
+
         // Add basic fields
         if let Some(id) = json.get("id").and_then(|v| v.as_str()) {
             item.insert("id".to_string(), AttributeValue::S(id.to_string()));
         }
         if let Some(tenant_id) = json.get("tenant_id").and_then(|v| v.as_str()) {
-            item.insert("tenant_id".to_string(), AttributeValue::S(tenant_id.to_string()));
+            item.insert(
+                "tenant_id".to_string(),
+                AttributeValue::S(tenant_id.to_string()),
+            );
         }
-        
+
         // Add other fields as strings for now (simplified)
         for (key, value) in json.as_object().unwrap_or(&serde_json::Map::new()) {
             if key != "id" && key != "tenant_id" {
@@ -50,14 +53,14 @@ impl<T: Data + serde::Serialize + for<'de> serde::Deserialize<'de>> DynamoDBData
                 }
             }
         }
-        
+
         Ok(item)
     }
 
     async fn item_to_entity(&self, item: &HashMap<String, AttributeValue>) -> Result<T> {
         // Simple implementation - convert from DynamoDB format to JSON
         let mut json = serde_json::Map::new();
-        
+
         for (key, value) in item {
             match value {
                 AttributeValue::S(s) => {
@@ -65,7 +68,10 @@ impl<T: Data + serde::Serialize + for<'de> serde::Deserialize<'de>> DynamoDBData
                 }
                 AttributeValue::N(n) => {
                     if let Ok(num) = n.parse::<f64>() {
-                        json.insert(key.clone(), serde_json::Value::Number(serde_json::Number::from_f64(num).unwrap()));
+                        json.insert(
+                            key.clone(),
+                            serde_json::Value::Number(serde_json::Number::from_f64(num).unwrap()),
+                        );
                     }
                 }
                 AttributeValue::Bool(b) => {
@@ -76,37 +82,45 @@ impl<T: Data + serde::Serialize + for<'de> serde::Deserialize<'de>> DynamoDBData
                 }
             }
         }
-        
+
         Ok(serde_json::from_value(serde_json::Value::Object(json))?)
     }
 }
 
 #[async_trait]
-impl<T: Data + serde::Serialize + for<'de> serde::Deserialize<'de>> DataService<T> for DynamoDBDataService<T> {
+impl<T: Data + serde::Serialize + for<'de> serde::Deserialize<'de>> DataService<T>
+    for DynamoDBDataService<T>
+{
     async fn create(&self, tenant_id: &Uuid, entity: T) -> Result<T> {
         let mut item = self.entity_to_item(&entity).await?;
-        
+
         // Add tenant_id to the item
-        item.insert("tenant_id".to_string(), 
-                   AttributeValue::S(tenant_id.to_string()));
-        
+        item.insert(
+            "tenant_id".to_string(),
+            AttributeValue::S(tenant_id.to_string()),
+        );
+
         self.client
             .put_item()
             .table_name(&self.table_name)
             .set_item(Some(item))
             .send()
             .await?;
-            
+
         Ok(entity)
     }
 
     async fn get(&self, tenant_id: &Uuid, id: &Uuid) -> Result<Option<T>> {
         let key = HashMap::from([
-            ("tenant_id".to_string(), AttributeValue::S(tenant_id.to_string())),
+            (
+                "tenant_id".to_string(),
+                AttributeValue::S(tenant_id.to_string()),
+            ),
             ("id".to_string(), AttributeValue::S(id.to_string())),
         ]);
 
-        let result = self.client
+        let result = self
+            .client
             .get_item()
             .table_name(&self.table_name)
             .set_key(Some(key))
@@ -120,12 +134,12 @@ impl<T: Data + serde::Serialize + for<'de> serde::Deserialize<'de>> DataService<
     }
 
     async fn list(&self, tenant_id: &Uuid) -> Result<Vec<T>> {
-        let result = self.client
+        let result = self
+            .client
             .query()
             .table_name(&self.table_name)
             .key_condition_expression("tenant_id = :tenant_id")
-            .expression_attribute_values(":tenant_id", 
-                                       AttributeValue::S(tenant_id.to_string()))
+            .expression_attribute_values(":tenant_id", AttributeValue::S(tenant_id.to_string()))
             .send()
             .await?;
 
@@ -140,22 +154,27 @@ impl<T: Data + serde::Serialize + for<'de> serde::Deserialize<'de>> DataService<
 
     async fn update(&self, tenant_id: &Uuid, _id: &Uuid, entity: T) -> Result<T> {
         let mut item = self.entity_to_item(&entity).await?;
-        item.insert("tenant_id".to_string(), 
-                   AttributeValue::S(tenant_id.to_string()));
-        
+        item.insert(
+            "tenant_id".to_string(),
+            AttributeValue::S(tenant_id.to_string()),
+        );
+
         self.client
             .put_item()
             .table_name(&self.table_name)
             .set_item(Some(item))
             .send()
             .await?;
-            
+
         Ok(entity)
     }
 
     async fn delete(&self, tenant_id: &Uuid, id: &Uuid) -> Result<()> {
         let key = HashMap::from([
-            ("tenant_id".to_string(), AttributeValue::S(tenant_id.to_string())),
+            (
+                "tenant_id".to_string(),
+                AttributeValue::S(tenant_id.to_string()),
+            ),
             ("id".to_string(), AttributeValue::S(id.to_string())),
         ]);
 
@@ -165,20 +184,19 @@ impl<T: Data + serde::Serialize + for<'de> serde::Deserialize<'de>> DataService<
             .set_key(Some(key))
             .send()
             .await?;
-            
+
         Ok(())
     }
 
     async fn search(&self, tenant_id: &Uuid, field: &str, value: &str) -> Result<Vec<T>> {
         // Use scan with filter for general search
-        let result = self.client
+        let result = self
+            .client
             .scan()
             .table_name(&self.table_name)
             .filter_expression(format!("tenant_id = :tenant_id AND {} = :value", field))
-            .expression_attribute_values(":tenant_id", 
-                                       AttributeValue::S(tenant_id.to_string()))
-            .expression_attribute_values(":value", 
-                                       AttributeValue::S(value.to_string()))
+            .expression_attribute_values(":tenant_id", AttributeValue::S(tenant_id.to_string()))
+            .expression_attribute_values(":value", AttributeValue::S(value.to_string()))
             .send()
             .await?;
 
@@ -207,18 +225,24 @@ impl DynamoDBLinkService {
         // Simple implementation - convert to JSON first, then to DynamoDB format
         let json = serde_json::to_value(link)?;
         let mut item = HashMap::new();
-        
+
         // Add basic fields
         if let Some(id) = json.get("id").and_then(|v| v.as_str()) {
             item.insert("id".to_string(), AttributeValue::S(id.to_string()));
         }
         if let Some(tenant_id) = json.get("tenant_id").and_then(|v| v.as_str()) {
-            item.insert("tenant_id".to_string(), AttributeValue::S(tenant_id.to_string()));
+            item.insert(
+                "tenant_id".to_string(),
+                AttributeValue::S(tenant_id.to_string()),
+            );
         }
         if let Some(link_type) = json.get("link_type").and_then(|v| v.as_str()) {
-            item.insert("link_type".to_string(), AttributeValue::S(link_type.to_string()));
+            item.insert(
+                "link_type".to_string(),
+                AttributeValue::S(link_type.to_string()),
+            );
         }
-        
+
         // Add source and target as JSON strings
         if let Some(source) = json.get("source") {
             item.insert("source".to_string(), AttributeValue::S(source.to_string()));
@@ -226,29 +250,38 @@ impl DynamoDBLinkService {
         if let Some(target) = json.get("target") {
             item.insert("target".to_string(), AttributeValue::S(target.to_string()));
         }
-        
+
         // Add timestamps
         if let Some(created_at) = json.get("created_at").and_then(|v| v.as_str()) {
-            item.insert("created_at".to_string(), AttributeValue::S(created_at.to_string()));
+            item.insert(
+                "created_at".to_string(),
+                AttributeValue::S(created_at.to_string()),
+            );
         }
         if let Some(updated_at) = json.get("updated_at").and_then(|v| v.as_str()) {
-            item.insert("updated_at".to_string(), AttributeValue::S(updated_at.to_string()));
+            item.insert(
+                "updated_at".to_string(),
+                AttributeValue::S(updated_at.to_string()),
+            );
         }
-        
+
         // Add metadata if present
         if let Some(metadata) = json.get("metadata") {
             if !metadata.is_null() {
-                item.insert("metadata".to_string(), AttributeValue::S(metadata.to_string()));
+                item.insert(
+                    "metadata".to_string(),
+                    AttributeValue::S(metadata.to_string()),
+                );
             }
         }
-        
+
         Ok(item)
     }
 
     async fn item_to_link(&self, item: &HashMap<String, AttributeValue>) -> Result<Link> {
         // Simple implementation - convert from DynamoDB format to JSON
         let mut json = serde_json::Map::new();
-        
+
         for (key, value) in item {
             match value {
                 AttributeValue::S(s) => {
@@ -263,7 +296,10 @@ impl DynamoDBLinkService {
                 }
                 AttributeValue::N(n) => {
                     if let Ok(num) = n.parse::<f64>() {
-                        json.insert(key.clone(), serde_json::Value::Number(serde_json::Number::from_f64(num).unwrap()));
+                        json.insert(
+                            key.clone(),
+                            serde_json::Value::Number(serde_json::Number::from_f64(num).unwrap()),
+                        );
                     }
                 }
                 AttributeValue::Bool(b) => {
@@ -274,7 +310,7 @@ impl DynamoDBLinkService {
                 }
             }
         }
-        
+
         Ok(serde_json::from_value(serde_json::Value::Object(json))?)
     }
 }
@@ -291,24 +327,28 @@ impl LinkService for DynamoDBLinkService {
     ) -> Result<Link> {
         let link = Link::new(*tenant_id, link_type, source, target, metadata);
         let item = self.link_to_item(&link).await?;
-        
+
         self.client
             .put_item()
             .table_name(&self.table_name)
             .set_item(Some(item))
             .send()
             .await?;
-            
+
         Ok(link)
     }
 
     async fn get(&self, tenant_id: &Uuid, id: &Uuid) -> Result<Option<Link>> {
         let key = HashMap::from([
-            ("tenant_id".to_string(), AttributeValue::S(tenant_id.to_string())),
+            (
+                "tenant_id".to_string(),
+                AttributeValue::S(tenant_id.to_string()),
+            ),
             ("id".to_string(), AttributeValue::S(id.to_string())),
         ]);
 
-        let result = self.client
+        let result = self
+            .client
             .get_item()
             .table_name(&self.table_name)
             .set_key(Some(key))
@@ -322,12 +362,12 @@ impl LinkService for DynamoDBLinkService {
     }
 
     async fn list(&self, tenant_id: &Uuid) -> Result<Vec<Link>> {
-        let result = self.client
+        let result = self
+            .client
             .query()
             .table_name(&self.table_name)
             .key_condition_expression("tenant_id = :tenant_id")
-            .expression_attribute_values(":tenant_id", 
-                                       AttributeValue::S(tenant_id.to_string()))
+            .expression_attribute_values(":tenant_id", AttributeValue::S(tenant_id.to_string()))
             .send()
             .await?;
 
@@ -349,12 +389,12 @@ impl LinkService for DynamoDBLinkService {
         target_type: Option<&str>,
     ) -> Result<Vec<Link>> {
         // Simplified implementation using scan
-        let result = self.client
+        let result = self
+            .client
             .scan()
             .table_name(&self.table_name)
             .filter_expression("tenant_id = :tenant_id")
-            .expression_attribute_values(":tenant_id", 
-                                       AttributeValue::S(tenant_id.to_string()))
+            .expression_attribute_values(":tenant_id", AttributeValue::S(tenant_id.to_string()))
             .send()
             .await?;
 
@@ -362,7 +402,7 @@ impl LinkService for DynamoDBLinkService {
         if let Some(items) = result.items {
             for item in items {
                 let link = self.item_to_link(&item).await?;
-                
+
                 // Apply filters
                 if link.source.id == *source_id && link.source.entity_type == source_type {
                     if let Some(lt) = link_type {
@@ -391,12 +431,12 @@ impl LinkService for DynamoDBLinkService {
         source_type: Option<&str>,
     ) -> Result<Vec<Link>> {
         // Simplified implementation using scan
-        let result = self.client
+        let result = self
+            .client
             .scan()
             .table_name(&self.table_name)
             .filter_expression("tenant_id = :tenant_id")
-            .expression_attribute_values(":tenant_id", 
-                                       AttributeValue::S(tenant_id.to_string()))
+            .expression_attribute_values(":tenant_id", AttributeValue::S(tenant_id.to_string()))
             .send()
             .await?;
 
@@ -404,7 +444,7 @@ impl LinkService for DynamoDBLinkService {
         if let Some(items) = result.items {
             for item in items {
                 let link = self.item_to_link(&item).await?;
-                
+
                 // Apply filters
                 if link.target.id == *target_id && link.target.entity_type == target_type {
                     if let Some(lt) = link_type {
@@ -431,13 +471,15 @@ impl LinkService for DynamoDBLinkService {
         metadata: Option<serde_json::Value>,
     ) -> Result<Link> {
         // Get existing link
-        let mut link = self.get(tenant_id, id).await?
+        let mut link = self
+            .get(tenant_id, id)
+            .await?
             .ok_or_else(|| anyhow::anyhow!("Link not found"))?;
-        
+
         // Update metadata
         link.metadata = metadata;
         link.updated_at = chrono::Utc::now();
-        
+
         // Save back
         let item = self.link_to_item(&link).await?;
         self.client
@@ -446,13 +488,16 @@ impl LinkService for DynamoDBLinkService {
             .set_item(Some(item))
             .send()
             .await?;
-            
+
         Ok(link)
     }
 
     async fn delete(&self, tenant_id: &Uuid, id: &Uuid) -> Result<()> {
         let key = HashMap::from([
-            ("tenant_id".to_string(), AttributeValue::S(tenant_id.to_string())),
+            (
+                "tenant_id".to_string(),
+                AttributeValue::S(tenant_id.to_string()),
+            ),
             ("id".to_string(), AttributeValue::S(id.to_string())),
         ]);
 
@@ -462,7 +507,7 @@ impl LinkService for DynamoDBLinkService {
             .set_key(Some(key))
             .send()
             .await?;
-            
+
         Ok(())
     }
 
@@ -473,14 +518,18 @@ impl LinkService for DynamoDBLinkService {
         entity_type: &str,
     ) -> Result<()> {
         // Find all links involving this entity
-        let links = self.find_by_source(tenant_id, entity_id, entity_type, None, None).await?;
-        let target_links = self.find_by_target(tenant_id, entity_id, entity_type, None, None).await?;
-        
+        let links = self
+            .find_by_source(tenant_id, entity_id, entity_type, None, None)
+            .await?;
+        let target_links = self
+            .find_by_target(tenant_id, entity_id, entity_type, None, None)
+            .await?;
+
         // Delete all found links
         for link in links.into_iter().chain(target_links.into_iter()) {
             self.delete(tenant_id, &link.id).await?;
         }
-        
+
         Ok(())
     }
 }

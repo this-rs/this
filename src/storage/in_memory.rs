@@ -1,6 +1,6 @@
 //! In-memory implementation of LinkService
 
-use crate::core::{Link, LinkService, EntityReference};
+use crate::core::{EntityReference, Link, LinkService};
 use anyhow::Result;
 use async_trait::async_trait;
 use std::collections::HashMap;
@@ -17,6 +17,12 @@ impl InMemoryLinkService {
         Self {
             links: std::sync::Arc::new(tokio::sync::RwLock::new(HashMap::new())),
         }
+    }
+}
+
+impl Default for InMemoryLinkService {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -43,7 +49,11 @@ impl LinkService for InMemoryLinkService {
 
     async fn list(&self, tenant_id: &Uuid) -> Result<Vec<Link>> {
         let links = self.links.read().await;
-        Ok(links.values().filter(|link| link.tenant_id == *tenant_id).cloned().collect())
+        Ok(links
+            .values()
+            .filter(|link| link.tenant_id == *tenant_id)
+            .cloned()
+            .collect())
     }
 
     async fn find_by_source(
@@ -61,8 +71,8 @@ impl LinkService for InMemoryLinkService {
                 link.tenant_id == *tenant_id
                     && link.source.id == *source_id
                     && link.source.entity_type == source_type
-                    && link_type.map_or(true, |lt| link.link_type == lt)
-                    && target_type.map_or(true, |tt| link.target.entity_type == tt)
+                    && link_type.is_none_or(|lt| link.link_type == lt)
+                    && target_type.is_none_or(|tt| link.target.entity_type == tt)
             })
             .cloned()
             .collect())
@@ -83,8 +93,8 @@ impl LinkService for InMemoryLinkService {
                 link.tenant_id == *tenant_id
                     && link.target.id == *target_id
                     && link.target.entity_type == target_type
-                    && link_type.map_or(true, |lt| link.link_type == lt)
-                    && source_type.map_or(true, |st| link.source.entity_type == st)
+                    && link_type.is_none_or(|lt| link.link_type == lt)
+                    && source_type.is_none_or(|st| link.source.entity_type == st)
             })
             .cloned()
             .collect())
