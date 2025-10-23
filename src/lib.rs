@@ -33,6 +33,7 @@ pub mod core;
 pub mod entities;
 pub mod links;
 pub mod server;
+pub mod storage;
 
 /// Re-exports of commonly used types and traits
 pub mod prelude {
@@ -53,8 +54,11 @@ pub mod prelude {
             AppState,
         },
         registry::{LinkDirection, LinkRouteRegistry, RouteInfo},
-        service::InMemoryLinkService,
     };
+
+    #[cfg(feature = "dynamodb")]
+    pub use crate::storage::{DynamoDBDataService, DynamoDBLinkService};
+    pub use crate::storage::InMemoryLinkService;
 
     pub use crate::config::{EntityAuthConfig, EntityConfig, LinksConfig, ValidationRule};
 
