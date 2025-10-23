@@ -44,7 +44,7 @@ pub async fn create_payment(
         payload["method"].as_str().unwrap_or("card").to_string(),    // method
         payload["transaction_id"].as_str().map(String::from),        // transaction_id
     );
-    
+
     state.store.add(payment.clone());
     Ok(Json(payment))
 }
@@ -55,12 +55,9 @@ pub async fn update_payment(
     Json(payload): Json<Value>,
 ) -> Result<Json<Payment>, StatusCode> {
     let id = Uuid::parse_str(&id).map_err(|_| StatusCode::BAD_REQUEST)?;
-    
-    let mut payment = state
-        .store
-        .get(&id)
-        .ok_or(StatusCode::NOT_FOUND)?;
-    
+
+    let mut payment = state.store.get(&id).ok_or(StatusCode::NOT_FOUND)?;
+
     // Update fields if provided
     if let Some(name) = payload["name"].as_str() {
         payment.name = name.to_string();
@@ -80,7 +77,7 @@ pub async fn update_payment(
     if let Some(transaction_id) = payload["transaction_id"].as_str() {
         payment.transaction_id = Some(transaction_id.to_string());
     }
-    
+
     payment.touch(); // Update timestamp
     state.store.update(payment.clone());
     Ok(Json(payment))
@@ -91,7 +88,7 @@ pub async fn delete_payment(
     Path(id): Path<String>,
 ) -> Result<StatusCode, StatusCode> {
     let id = Uuid::parse_str(&id).map_err(|_| StatusCode::BAD_REQUEST)?;
-    
+
     state
         .store
         .delete(&id)

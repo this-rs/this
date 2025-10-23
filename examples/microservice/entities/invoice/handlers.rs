@@ -44,7 +44,7 @@ pub async fn create_invoice(
         payload["due_date"].as_str().map(String::from),              // due_date
         payload["paid_at"].as_str().map(String::from),               // paid_at
     );
-    
+
     state.store.add(invoice.clone());
     Ok(Json(invoice))
 }
@@ -55,12 +55,9 @@ pub async fn update_invoice(
     Json(payload): Json<Value>,
 ) -> Result<Json<Invoice>, StatusCode> {
     let id = Uuid::parse_str(&id).map_err(|_| StatusCode::BAD_REQUEST)?;
-    
-    let mut invoice = state
-        .store
-        .get(&id)
-        .ok_or(StatusCode::NOT_FOUND)?;
-    
+
+    let mut invoice = state.store.get(&id).ok_or(StatusCode::NOT_FOUND)?;
+
     // Update fields if provided
     if let Some(name) = payload["name"].as_str() {
         invoice.name = name.to_string();
@@ -80,7 +77,7 @@ pub async fn update_invoice(
     if let Some(paid_at) = payload["paid_at"].as_str() {
         invoice.paid_at = Some(paid_at.to_string());
     }
-    
+
     invoice.touch(); // Update timestamp
     state.store.update(invoice.clone());
     Ok(Json(invoice))
@@ -91,7 +88,7 @@ pub async fn delete_invoice(
     Path(id): Path<String>,
 ) -> Result<StatusCode, StatusCode> {
     let id = Uuid::parse_str(&id).map_err(|_| StatusCode::BAD_REQUEST)?;
-    
+
     state
         .store
         .delete(&id)

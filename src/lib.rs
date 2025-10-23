@@ -65,16 +65,14 @@ pub mod prelude {
         auth::{AuthContext, AuthPolicy, AuthProvider, NoAuthProvider},
         entity::{Data, Entity, Link},
         field::{FieldFormat, FieldValue},
-        link::{LinkEntity, LinkAuthConfig, LinkDefinition},
+        link::{LinkAuthConfig, LinkDefinition, LinkEntity},
         module::{EntityCreator, EntityFetcher, Module},
         pluralize::Pluralizer,
         service::{DataService, LinkService},
     };
 
     // === Macros ===
-    pub use crate::{
-        data_fields, entity_fields, impl_data_entity, impl_link_entity, link_fields,
-    };
+    pub use crate::{data_fields, entity_fields, impl_data_entity, impl_link_entity, link_fields};
 
     // === Link Handlers ===
     pub use crate::links::{

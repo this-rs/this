@@ -1,6 +1,6 @@
 //! Service traits for data and link operations
 
-use crate::core::{Data, link::LinkEntity};
+use crate::core::{link::LinkEntity, Data};
 use anyhow::Result;
 use async_trait::async_trait;
 use uuid::Uuid;
@@ -102,15 +102,15 @@ mod tests {
 
     impl Entity for TestEntity {
         type Service = ();
-        
+
         fn resource_name() -> &'static str {
             "tests"
         }
-        
+
         fn resource_name_singular() -> &'static str {
             "test"
         }
-        
+
         fn service_from_host(
             _: &std::sync::Arc<dyn std::any::Any + Send + Sync>,
         ) -> Result<std::sync::Arc<Self::Service>> {

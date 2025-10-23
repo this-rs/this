@@ -26,9 +26,8 @@ pub trait Entity: Clone + Send + Sync + 'static {
     fn resource_name_singular() -> &'static str;
 
     /// Extract the service instance from the application host/state
-    fn service_from_host(
-        host: &Arc<dyn std::any::Any + Send + Sync>,
-    ) -> Result<Arc<Self::Service>>;
+    fn service_from_host(host: &Arc<dyn std::any::Any + Send + Sync>)
+        -> Result<Arc<Self::Service>>;
 
     // === Core Entity Fields ===
 

@@ -1,6 +1,6 @@
 //! DynamoDB implementation of DataService and LinkService
 
-use crate::core::{Data, DataService, link::LinkEntity, LinkService};
+use crate::core::{link::LinkEntity, Data, DataService, LinkService};
 use anyhow::Result;
 use async_trait::async_trait;
 use aws_sdk_dynamodb::types::AttributeValue;

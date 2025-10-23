@@ -96,7 +96,9 @@ async fn main() -> Result<()> {
     println!(
         "    GET    /invoices/{{id}}/payments/{{payment_id}} - Get specific invoice→payment link"
     );
-    println!("    POST   /invoices/{{id}}/payments/{{payment_id}} - Link existing invoice & payment");
+    println!(
+        "    POST   /invoices/{{id}}/payments/{{payment_id}} - Link existing invoice & payment"
+    );
     println!("    GET    /payments/{{id}}/invoice            - Get invoice for a payment");
 
     axum::serve(listener, app).await.unwrap();
@@ -111,21 +113,21 @@ async fn populate_test_data(
 ) -> Result<()> {
     // Create orders using the generated new() method
     let order1 = Order::new(
-        "ORD-001".to_string(),                           // name
-        "pending".to_string(),                            // status
-        "ORD-001".to_string(),                           // number
-        1500.00,                                          // amount
-        Some("Alice Smith".to_string()),                  // customer_name
-        Some("Rush delivery".to_string()),                // notes
+        "ORD-001".to_string(),             // name
+        "pending".to_string(),             // status
+        "ORD-001".to_string(),             // number
+        1500.00,                           // amount
+        Some("Alice Smith".to_string()),   // customer_name
+        Some("Rush delivery".to_string()), // notes
     );
 
     let order2 = Order::new(
-        "ORD-002".to_string(),                           // name
-        "confirmed".to_string(),                          // status
-        "ORD-002".to_string(),                           // number
-        2300.00,                                          // amount
-        Some("Bob Johnson".to_string()),                  // customer_name
-        None,                                             // notes
+        "ORD-002".to_string(),           // name
+        "confirmed".to_string(),         // status
+        "ORD-002".to_string(),           // number
+        2300.00,                         // amount
+        Some("Bob Johnson".to_string()), // customer_name
+        None,                            // notes
     );
 
     store.orders.add(order1.clone());
@@ -133,30 +135,30 @@ async fn populate_test_data(
 
     // Create invoices using the generated new() method
     let invoice1 = Invoice::new(
-        "INV-001".to_string(),                            // name
-        "sent".to_string(),                               // status
-        "INV-001".to_string(),                            // number
-        1500.00,                                          // amount
-        Some("2025-11-15".to_string()),                   // due_date
-        None,                                             // paid_at
+        "INV-001".to_string(),          // name
+        "sent".to_string(),             // status
+        "INV-001".to_string(),          // number
+        1500.00,                        // amount
+        Some("2025-11-15".to_string()), // due_date
+        None,                           // paid_at
     );
 
     let invoice2 = Invoice::new(
-        "INV-002".to_string(),                            // name
-        "paid".to_string(),                               // status
-        "INV-002".to_string(),                            // number
-        1500.00,                                          // amount
-        Some("2025-11-20".to_string()),                   // due_date
-        Some("2025-10-20".to_string()),                   // paid_at
+        "INV-002".to_string(),          // name
+        "paid".to_string(),             // status
+        "INV-002".to_string(),          // number
+        1500.00,                        // amount
+        Some("2025-11-20".to_string()), // due_date
+        Some("2025-10-20".to_string()), // paid_at
     );
 
     let invoice3 = Invoice::new(
-        "INV-003".to_string(),                            // name
-        "draft".to_string(),                              // status
-        "INV-003".to_string(),                            // number
-        2300.00,                                          // amount
-        Some("2025-12-01".to_string()),                   // due_date
-        None,                                             // paid_at
+        "INV-003".to_string(),          // name
+        "draft".to_string(),            // status
+        "INV-003".to_string(),          // number
+        2300.00,                        // amount
+        Some("2025-12-01".to_string()), // due_date
+        None,                           // paid_at
     );
 
     store.invoices.add(invoice1.clone());
@@ -165,21 +167,21 @@ async fn populate_test_data(
 
     // Create payments using the generated new() method
     let payment1 = Payment::new(
-        "PAY-001".to_string(),                            // name
-        "completed".to_string(),                          // status
-        "PAY-001".to_string(),                            // number
-        1500.00,                                          // amount
-        "card".to_string(),                               // method
-        Some("txn_1234567890".to_string()),               // transaction_id
+        "PAY-001".to_string(),              // name
+        "completed".to_string(),            // status
+        "PAY-001".to_string(),              // number
+        1500.00,                            // amount
+        "card".to_string(),                 // method
+        Some("txn_1234567890".to_string()), // transaction_id
     );
 
     let payment2 = Payment::new(
-        "PAY-002".to_string(),                            // name
-        "completed".to_string(),                          // status
-        "PAY-002".to_string(),                            // number
-        750.00,                                           // amount
-        "bank_transfer".to_string(),                      // method
-        Some("txn_0987654321".to_string()),               // transaction_id
+        "PAY-002".to_string(),              // name
+        "completed".to_string(),            // status
+        "PAY-002".to_string(),              // number
+        750.00,                             // amount
+        "bank_transfer".to_string(),        // method
+        Some("txn_0987654321".to_string()), // transaction_id
     );
 
     store.payments.add(payment1.clone());
@@ -271,10 +273,22 @@ async fn populate_test_data(
     println!("   • GET /invoices/{}/payments", invoice2.id);
     println!("   • GET /payments/{}/invoice", payment1.id);
     println!("\n   🔗 Manipulate Links (NEW semantic URLs):");
-    println!("   • POST   /orders/{}/invoices/{{invoice_id}}  - Link existing entities", order1.id);
-    println!("   • POST   /orders/{}/invoices                 - Create new invoice + link ✅", order1.id);
-    println!("   • PUT    /orders/{}/invoices/{}              - Update link metadata", order1.id, invoice1.id);
-    println!("   • DELETE /orders/{}/invoices/{}              - Delete link", order1.id, invoice1.id);
+    println!(
+        "   • POST   /orders/{}/invoices/{{invoice_id}}  - Link existing entities",
+        order1.id
+    );
+    println!(
+        "   • POST   /orders/{}/invoices                 - Create new invoice + link ✅",
+        order1.id
+    );
+    println!(
+        "   • PUT    /orders/{}/invoices/{}              - Update link metadata",
+        order1.id, invoice1.id
+    );
+    println!(
+        "   • DELETE /orders/{}/invoices/{}              - Delete link",
+        order1.id, invoice1.id
+    );
     println!("\n   📝 Example curl commands:");
     println!("\n   # List invoices for an order (with enriched entities)");
     println!(
@@ -296,10 +310,7 @@ async fn populate_test_data(
     println!("       }},");
     println!("       \"metadata\": {{\"note\": \"Auto-created invoice\", \"priority\": \"high\"}}");
     println!("     }}' \\");
-    println!(
-        "     http://127.0.0.1:3000/orders/{}/invoices",
-        order1.id
-    );
+    println!("     http://127.0.0.1:3000/orders/{}/invoices", order1.id);
     println!("\n   # Create a link between existing order and invoice");
     println!("   curl -X POST -H 'Content-Type: application/json' \\");
     println!("     -d '{{\"metadata\": {{\"note\": \"Test link\", \"priority\": \"high\"}}}}' \\");

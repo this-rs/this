@@ -111,9 +111,7 @@ impl LinkService for InMemoryLinkService {
             .write()
             .map_err(|e| anyhow!("Failed to acquire write lock: {}", e))?;
 
-        links
-            .get_mut(id)
-            .ok_or_else(|| anyhow!("Link not found"))?;
+        links.get_mut(id).ok_or_else(|| anyhow!("Link not found"))?;
 
         links.insert(*id, updated_link.clone());
 
@@ -137,9 +135,7 @@ impl LinkService for InMemoryLinkService {
             .write()
             .map_err(|e| anyhow!("Failed to acquire write lock: {}", e))?;
 
-        links.retain(|_, link| {
-            &link.source_id != entity_id && &link.target_id != entity_id
-        });
+        links.retain(|_, link| &link.source_id != entity_id && &link.target_id != entity_id);
 
         Ok(())
     }
@@ -179,7 +175,7 @@ mod tests {
     #[tokio::test]
     async fn test_list_links() {
         let service = InMemoryLinkService::new();
-        
+
         let link1 = LinkEntity::new("owner", Uuid::new_v4(), Uuid::new_v4(), None);
         let link2 = LinkEntity::new("driver", Uuid::new_v4(), Uuid::new_v4(), None);
 
@@ -286,7 +282,7 @@ mod tests {
         let link = LinkEntity::new("owner", Uuid::new_v4(), Uuid::new_v4(), None);
 
         service.create(link.clone()).await.unwrap();
-        
+
         let retrieved = service.get(&link.id).await.unwrap();
         assert!(retrieved.is_some());
 

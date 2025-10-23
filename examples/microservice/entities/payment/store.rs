@@ -2,10 +2,10 @@
 
 use super::model::Payment;
 use anyhow::Result;
+use serde_json;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use this::prelude::*;
-use serde_json;
 use uuid::Uuid;
 
 /// In-memory store for Payment entities
@@ -66,9 +66,18 @@ impl EntityFetcher for PaymentStore {
 impl EntityCreator for PaymentStore {
     async fn create_from_json(&self, entity_data: serde_json::Value) -> Result<serde_json::Value> {
         let payment = Payment::new(
-            entity_data["number"].as_str().unwrap_or("PAY-000").to_string(),
-            entity_data["status"].as_str().unwrap_or("active").to_string(),
-            entity_data["number"].as_str().unwrap_or("PAY-000").to_string(),
+            entity_data["number"]
+                .as_str()
+                .unwrap_or("PAY-000")
+                .to_string(),
+            entity_data["status"]
+                .as_str()
+                .unwrap_or("active")
+                .to_string(),
+            entity_data["number"]
+                .as_str()
+                .unwrap_or("PAY-000")
+                .to_string(),
             entity_data["amount"].as_f64().unwrap_or(0.0),
             entity_data["method"].as_str().unwrap_or("card").to_string(),
             entity_data["transaction_id"].as_str().map(String::from),

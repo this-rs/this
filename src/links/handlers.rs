@@ -17,7 +17,7 @@ use uuid::Uuid;
 
 use crate::config::LinksConfig;
 use crate::core::extractors::{DirectLinkExtractor, ExtractorError, LinkExtractor};
-use crate::core::{EntityCreator, EntityFetcher, link::LinkEntity, LinkDefinition, LinkService};
+use crate::core::{link::LinkEntity, EntityCreator, EntityFetcher, LinkDefinition, LinkService};
 use crate::links::registry::{LinkDirection, LinkRouteRegistry};
 
 /// Application state shared across handlers
@@ -149,28 +149,24 @@ pub async fn list_links(
 
     // Query links based on direction
     let links = match extractor.direction {
-        LinkDirection::Forward => {
-            state
-                .link_service
-                .find_by_source(
-                    &extractor.entity_id,
-                    Some(&extractor.link_definition.link_type),
-                    Some(&extractor.link_definition.target_type),
-                )
-                .await
-                .map_err(|e| ExtractorError::JsonError(e.to_string()))?
-        }
-        LinkDirection::Reverse => {
-            state
-                .link_service
-                .find_by_target(
-                    &extractor.entity_id,
-                    Some(&extractor.link_definition.link_type),
-                    Some(&extractor.link_definition.source_type),
-                )
-                .await
-                .map_err(|e| ExtractorError::JsonError(e.to_string()))?
-        }
+        LinkDirection::Forward => state
+            .link_service
+            .find_by_source(
+                &extractor.entity_id,
+                Some(&extractor.link_definition.link_type),
+                Some(&extractor.link_definition.target_type),
+            )
+            .await
+            .map_err(|e| ExtractorError::JsonError(e.to_string()))?,
+        LinkDirection::Reverse => state
+            .link_service
+            .find_by_target(
+                &extractor.entity_id,
+                Some(&extractor.link_definition.link_type),
+                Some(&extractor.link_definition.source_type),
+            )
+            .await
+            .map_err(|e| ExtractorError::JsonError(e.to_string()))?,
     };
 
     // Determine enrichment context based on direction
@@ -180,7 +176,8 @@ pub async fn list_links(
     };
 
     // Enrich links with full entity data
-    let enriched_links = enrich_links_with_entities(&state, links, context, &extractor.link_definition).await?;
+    let enriched_links =
+        enrich_links_with_entities(&state, links, context, &extractor.link_definition).await?;
 
     Ok(Json(EnrichedListLinksResponse {
         count: enriched_links.len(),
@@ -206,10 +203,9 @@ async fn enrich_links_with_entities(
             EnrichmentContext::FromSource => None,
             EnrichmentContext::FromTarget | EnrichmentContext::DirectLink => {
                 // Fetch source entity using the type from link definition
-                match fetch_entity_by_type(state, &link_definition.source_type, &link.source_id).await {
-                    Ok(entity) => Some(entity),
-                    Err(_) => None, // Silently skip if entity not found
-                }
+                fetch_entity_by_type(state, &link_definition.source_type, &link.source_id)
+                    .await
+                    .ok()
             }
         };
 
@@ -218,10 +214,9 @@ async fn enrich_links_with_entities(
             EnrichmentContext::FromTarget => None,
             EnrichmentContext::FromSource | EnrichmentContext::DirectLink => {
                 // Fetch target entity using the type from link definition
-                match fetch_entity_by_type(state, &link_definition.target_type, &link.target_id).await {
-                    Ok(entity) => Some(entity),
-                    Err(_) => None, // Silently skip if entity not found
-                }
+                fetch_entity_by_type(state, &link_definition.target_type, &link.target_id)
+                    .await
+                    .ok()
             }
         };
 
@@ -290,8 +285,13 @@ pub async fn get_link(
         })?;
 
     // Enrich with both source and target entities
-    let enriched_links =
-        enrich_links_with_entities(&state, vec![link], EnrichmentContext::DirectLink, link_definition).await?;
+    let enriched_links = enrich_links_with_entities(
+        &state,
+        vec![link],
+        EnrichmentContext::DirectLink,
+        link_definition,
+    )
+    .await?;
 
     let enriched_link = enriched_links
         .into_iter()
@@ -336,8 +336,13 @@ pub async fn get_link_by_route(
         .ok_or(ExtractorError::LinkNotFound)?;
 
     // Enrich with both source and target entities
-    let enriched_links =
-        enrich_links_with_entities(&state, vec![link], EnrichmentContext::DirectLink, &extractor.link_definition).await?;
+    let enriched_links = enrich_links_with_entities(
+        &state,
+        vec![link],
+        EnrichmentContext::DirectLink,
+        &extractor.link_definition,
+    )
+    .await?;
 
     let enriched_link = enriched_links
         .into_iter()
@@ -429,9 +434,9 @@ pub async fn create_linked_entity(
         .map_err(|e| ExtractorError::JsonError(format!("Failed to create entity: {}", e)))?;
 
     // Extract the ID from the created entity
-    let target_entity_id = created_entity["id"]
-        .as_str()
-        .ok_or_else(|| ExtractorError::JsonError("Created entity missing 'id' field".to_string()))?;
+    let target_entity_id = created_entity["id"].as_str().ok_or_else(|| {
+        ExtractorError::JsonError("Created entity missing 'id' field".to_string())
+    })?;
     let target_entity_id = Uuid::parse_str(target_entity_id)
         .map_err(|e| ExtractorError::JsonError(format!("Invalid UUID in created entity: {}", e)))?;
 

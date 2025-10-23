@@ -433,17 +433,20 @@ macro_rules! impl_link_entity {
             }
 
             /// Restore a soft-deleted link
+            #[allow(dead_code)]
             pub fn restore(&mut self) {
                 self.deleted_at = None;
                 self.updated_at = ::chrono::Utc::now();
             }
 
             /// Update the updated_at timestamp
+            #[allow(dead_code)]
             pub fn touch(&mut self) {
                 self.updated_at = ::chrono::Utc::now();
             }
 
             /// Change the link status
+            #[allow(dead_code)]
             pub fn set_status(&mut self, status: String) {
                 self.status = status;
                 self.touch();
@@ -552,7 +555,7 @@ mod tests {
 
         let mut link = link;
         assert!(!link.is_deleted());
-        
+
         link.soft_delete();
         assert!(link.is_deleted());
     }
@@ -566,7 +569,7 @@ mod tests {
         );
 
         assert_eq!(user.status(), "active");
-        
+
         user.set_status("inactive".to_string());
         assert_eq!(user.status(), "inactive");
     }

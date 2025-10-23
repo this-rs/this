@@ -50,6 +50,7 @@ async fn main() -> Result<()> {
         config: config.clone(),
         registry: registry.clone(),
         entity_fetchers: Arc::new(HashMap::new()),
+        entity_creators: Arc::new(HashMap::new()),
     };
 
     // Setup some test data
@@ -185,10 +186,7 @@ async fn main() -> Result<()> {
     );
     println!();
     println!("   # Discover available routes for Alice");
-    println!(
-        "   curl http://localhost:3000/users/{}/links",
-        alice.id
-    );
+    println!("   curl http://localhost:3000/users/{}/links", alice.id);
     println!();
 
     let listener = tokio::net::TcpListener::bind(addr).await?;

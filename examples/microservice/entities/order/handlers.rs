@@ -44,7 +44,7 @@ pub async fn create_order(
         payload["customer_name"].as_str().map(String::from),         // customer_name
         payload["notes"].as_str().map(String::from),                 // notes
     );
-    
+
     state.store.add(order.clone());
     Ok(Json(order))
 }
@@ -55,12 +55,9 @@ pub async fn update_order(
     Json(payload): Json<Value>,
 ) -> Result<Json<Order>, StatusCode> {
     let id = Uuid::parse_str(&id).map_err(|_| StatusCode::BAD_REQUEST)?;
-    
-    let mut order = state
-        .store
-        .get(&id)
-        .ok_or(StatusCode::NOT_FOUND)?;
-    
+
+    let mut order = state.store.get(&id).ok_or(StatusCode::NOT_FOUND)?;
+
     // Update fields if provided
     if let Some(name) = payload["name"].as_str() {
         order.name = name.to_string();
@@ -80,7 +77,7 @@ pub async fn update_order(
     if let Some(notes) = payload["notes"].as_str() {
         order.notes = Some(notes.to_string());
     }
-    
+
     order.touch(); // Update timestamp
     state.store.update(order.clone());
     Ok(Json(order))
@@ -91,7 +88,7 @@ pub async fn delete_order(
     Path(id): Path<String>,
 ) -> Result<StatusCode, StatusCode> {
     let id = Uuid::parse_str(&id).map_err(|_| StatusCode::BAD_REQUEST)?;
-    
+
     state
         .store
         .delete(&id)

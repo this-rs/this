@@ -2,10 +2,10 @@
 
 use super::model::Order;
 use anyhow::Result;
+use serde_json;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use this::prelude::*;
-use serde_json;
 use uuid::Uuid;
 
 /// In-memory store for Order entities
@@ -72,9 +72,18 @@ impl EntityFetcher for OrderStore {
 impl EntityCreator for OrderStore {
     async fn create_from_json(&self, entity_data: serde_json::Value) -> Result<serde_json::Value> {
         let order = Order::new(
-            entity_data["number"].as_str().unwrap_or("ORD-000").to_string(),
-            entity_data["status"].as_str().unwrap_or("active").to_string(),
-            entity_data["number"].as_str().unwrap_or("ORD-000").to_string(),
+            entity_data["number"]
+                .as_str()
+                .unwrap_or("ORD-000")
+                .to_string(),
+            entity_data["status"]
+                .as_str()
+                .unwrap_or("active")
+                .to_string(),
+            entity_data["number"]
+                .as_str()
+                .unwrap_or("ORD-000")
+                .to_string(),
             entity_data["amount"].as_f64().unwrap_or(0.0),
             entity_data["customer_name"].as_str().map(String::from),
             entity_data["notes"].as_str().map(String::from),
