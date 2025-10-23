@@ -1,242 +1,374 @@
-# Contributing to This-RS 🦀
+# Contributing to This-RS
 
-Merci de votre intérêt pour contribuer à This-RS ! Ce document explique comment participer au projet.
+Thank you for your interest in contributing to This-RS! This document provides guidelines and instructions for contributing.
 
-## 🚀 Quick Start
+## 🎯 Code of Conduct
 
-1. **Fork le repository**
-2. **Clone votre fork**
+Be respectful, inclusive, and constructive. We're building something great together!
+
+## 🚀 Getting Started
+
+### Prerequisites
+
+- Rust 1.70 or higher
+- Git
+- Basic knowledge of Rust and async programming
+
+### Setup
+
+```bash
+# Clone the repository
+git clone https://github.com/your-org/this-rs.git
+cd this-rs
+
+# Check that everything compiles
+cargo check
+
+# Run tests
+cargo test
+
+# Run examples
+cargo run --example microservice
+```
+
+## 📝 How to Contribute
+
+### 1. Reporting Bugs
+
+**Before submitting:**
+- Check if the bug has already been reported in [Issues](https://github.com/your-org/this-rs/issues)
+- Make sure you're using the latest version
+
+**Bug Report Template:**
+```markdown
+**Describe the bug**
+A clear and concise description of what the bug is.
+
+**To Reproduce**
+Steps to reproduce the behavior:
+1. Create entity '...'
+2. Create link '...'
+3. Query '...'
+4. See error
+
+**Expected behavior**
+What you expected to happen.
+
+**Actual behavior**
+What actually happened.
+
+**Environment:**
+- OS: [e.g., macOS 14.0]
+- Rust version: [e.g., 1.75.0]
+- This-RS version: [e.g., 0.0.2]
+
+**Additional context**
+Add any other context about the problem here.
+```
+
+### 2. Suggesting Features
+
+**Feature Request Template:**
+```markdown
+**Is your feature request related to a problem?**
+A clear description of the problem. Ex. I'm always frustrated when [...]
+
+**Describe the solution you'd like**
+A clear description of what you want to happen.
+
+**Describe alternatives you've considered**
+Other solutions or features you've considered.
+
+**Additional context**
+Any other context or screenshots about the feature request.
+```
+
+### 3. Submitting Code
+
+#### Fork and Clone
+
+```bash
+# Fork the repository on GitHub, then clone your fork
+git clone https://github.com/YOUR_USERNAME/this-rs.git
+cd this-rs
+
+# Add upstream remote
+git remote add upstream https://github.com/your-org/this-rs.git
+```
+
+#### Create a Branch
+
+```bash
+# Create a feature branch
+git checkout -b feature/your-feature-name
+
+# Or a bugfix branch
+git checkout -b fix/bug-description
+```
+
+#### Make Your Changes
+
+1. **Write Code**
+   - Follow Rust conventions
+   - Add tests for new functionality
+   - Update documentation
+
+2. **Run Tests**
    ```bash
-   git clone https://github.com/VOTRE_USERNAME/this-rs.git
-   cd this-rs
+   cargo test
+   cargo clippy -- -D warnings
+   cargo fmt --check
    ```
-3. **Créer une branche**
-   ```bash
-   git checkout -b feature/ma-fonctionnalite
-   ```
-4. **Faire vos modifications**
-5. **Tester**
-   ```bash
-   cargo test --all-features
-   cargo fmt --all -- --check
-   cargo clippy --all-targets --all-features -- -D warnings
-   ```
-6. **Commit et push**
+
+3. **Commit Changes**
    ```bash
    git add .
-   git commit -m "feat: description de ma fonctionnalité"
-   git push origin feature/ma-fonctionnalite
+   git commit -m "feat: add new feature X"
    ```
-7. **Ouvrir une Pull Request**
 
-## 📋 Types de Contributions
+   **Commit Message Format:**
+   ```
+   <type>: <description>
 
-### 🐛 Bug Reports
-Ouvrez une issue avec:
-- Description claire du bug
-- Steps to reproduce
-- Version de This-RS
-- Version de Rust (`rustc --version`)
-- OS et version
+   [optional body]
 
-### ✨ Feature Requests
-Ouvrez une issue avec:
-- Description de la fonctionnalité
-- Use case concret
-- Exemple d'API souhaitée (si applicable)
+   [optional footer]
+   ```
 
-### 📝 Documentation
-- Corriger des typos
-- Améliorer les explications
-- Ajouter des exemples
-- Traduire la documentation
+   **Types:**
+   - `feat`: New feature
+   - `fix`: Bug fix
+   - `docs`: Documentation only
+   - `style`: Code style changes (formatting, etc.)
+   - `refactor`: Code refactoring
+   - `test`: Adding or updating tests
+   - `chore`: Maintenance tasks
 
-### 💻 Code Contributions
-- Nouvelles fonctionnalités
-- Corrections de bugs
-- Améliorations de performance
-- Refactoring
+#### Submit a Pull Request
 
-## 🏗️ Architecture du Projet
-
-```
-this-rs/
-├── src/
-│   ├── core/           # Traits et types fondamentaux
-│   ├── links/          # Système de gestion des liens
-│   ├── config/         # Configuration YAML
-│   ├── server/         # ServerBuilder et routing
-│   └── entities/       # Macros et helpers
-├── examples/           # Exemples d'utilisation
-├── docs/              # Documentation
-└── tests/             # Tests d'intégration
-```
-
-### Principes d'Architecture
-
-1. **Généricité**: Le core ne doit pas référencer de types concrets d'entités
-2. **Flexibilité**: Les utilisateurs doivent pouvoir étendre sans modifier le framework
-3. **Type Safety**: Utiliser le système de types de Rust au maximum
-4. **NoSQL-First**: Design pensé pour DynamoDB/ScyllaDB
-
-## 🧪 Tests
-
-### Exécuter tous les tests
 ```bash
-cargo test --all-features
+# Push to your fork
+git push origin feature/your-feature-name
 ```
 
-### Tests unitaires
-```bash
-cargo test --lib
-```
+Then create a Pull Request on GitHub with:
+- Clear title and description
+- Reference to related issues (if any)
+- Screenshots/examples (if applicable)
 
-### Tests d'intégration
-```bash
-cargo test --test '*'
-```
+## 🏗️ Architecture Guidelines
 
-### Tests des exemples
-```bash
-cargo test --examples
-```
+### Adding a New Entity
 
-### Doc tests
-```bash
-cargo test --doc
-```
+To add a new entity to the examples:
 
-## 🎨 Style de Code
+1. **Create Entity Folder**
+   ```
+   examples/microservice/entities/new_entity/
+   ├── mod.rs
+   ├── model.rs       # Use impl_data_entity! macro
+   ├── store.rs       # Implement EntityFetcher + EntityCreator
+   ├── handlers.rs    # HTTP handlers
+   └── descriptor.rs  # EntityDescriptor implementation
+   ```
 
-### Formatting
-Utilisez `rustfmt`:
+2. **Use Macro for Entity Definition**
+   ```rust
+   // model.rs
+   use this::prelude::*;
+
+   impl_data_entity!(NewEntity, "new_entity", ["name", "field"], {
+       field: String,
+       another_field: i32,
+   });
+   ```
+
+3. **Implement Fetcher and Creator**
+   ```rust
+   // store.rs
+   #[async_trait]
+   impl EntityFetcher for NewEntityStore {
+       async fn fetch_as_json(&self, entity_id: &Uuid) -> Result<serde_json::Value> {
+           // Implementation
+       }
+   }
+
+   #[async_trait]
+   impl EntityCreator for NewEntityStore {
+       async fn create_from_json(&self, entity_data: serde_json::Value) -> Result<serde_json::Value> {
+           // Implementation
+       }
+   }
+   ```
+
+4. **Register in Module**
+   ```rust
+   impl Module for YourModule {
+       fn register_entities(&self, registry: &mut EntityRegistry) {
+           registry.register(Box::new(NewEntityDescriptor::new(...)));
+       }
+
+       fn get_entity_fetcher(&self, entity_type: &str) -> Option<Arc<dyn EntityFetcher>> {
+           match entity_type {
+               "new_entity" => Some(Arc::new(self.store.new_entities.clone())),
+               _ => None,
+           }
+       }
+
+       fn get_entity_creator(&self, entity_type: &str) -> Option<Arc<dyn EntityCreator>> {
+           match entity_type {
+               "new_entity" => Some(Arc::new(self.store.new_entities.clone())),
+               _ => None,
+           }
+       }
+   }
+   ```
+
+### Adding a New Storage Backend
+
+To add a new storage backend (e.g., PostgreSQL, MongoDB):
+
+1. **Create Storage Module**
+   ```
+   src/storage/
+   └── postgresql.rs  # or mongodb.rs
+   ```
+
+2. **Implement Traits**
+   ```rust
+   pub struct PostgresDataService<T: Data> {
+       pool: Pool<Postgres>,
+       _phantom: PhantomData<T>,
+   }
+
+   #[async_trait]
+   impl<T: Data> DataService<T> for PostgresDataService<T> {
+       async fn create(&self, entity: T) -> Result<T> {
+           // Implementation
+       }
+       // ... other methods
+   }
+
+   pub struct PostgresLinkService {
+       pool: Pool<Postgres>,
+   }
+
+   #[async_trait]
+   impl LinkService for PostgresLinkService {
+       async fn create(&self, link: LinkEntity) -> Result<LinkEntity> {
+           // Implementation
+       }
+       // ... other methods
+   }
+   ```
+
+3. **Add Tests**
+   ```rust
+   #[cfg(test)]
+   mod tests {
+       use super::*;
+
+       #[tokio::test]
+       async fn test_create_entity() {
+           // Test implementation
+       }
+   }
+   ```
+
+## ✅ Code Quality Standards
+
+### Testing
+
+- Write unit tests for all new functionality
+- Aim for at least 80% code coverage
+- Include integration tests for examples
+
 ```bash
-cargo fmt --all
+# Run all tests
+cargo test
+
+# Run specific test
+cargo test test_name
+
+# Run with output
+cargo test -- --nocapture
 ```
 
 ### Linting
-Utilisez `clippy`:
+
 ```bash
-cargo clippy --all-targets --all-features -- -D warnings
+# Run clippy
+cargo clippy -- -D warnings
+
+# Auto-fix what can be fixed
+cargo clippy --fix
 ```
 
-### Conventions de Nommage
-- **Types**: `PascalCase` (ex: `EntityDescriptor`)
-- **Fonctions/Variables**: `snake_case` (ex: `build_routes`)
-- **Constantes**: `SCREAMING_SNAKE_CASE` (ex: `DEFAULT_TIMEOUT`)
-- **Traits**: `PascalCase` (ex: `LinkService`)
+### Formatting
+
+```bash
+# Check formatting
+cargo fmt --check
+
+# Format code
+cargo fmt
+```
 
 ### Documentation
-- Chaque fonction publique doit avoir un doc comment
-- Utiliser `///` pour la documentation
-- Inclure des exemples dans la doc quand pertinent
 
-Exemple:
+- Add doc comments to public APIs
+- Update README.md if adding features
+- Add examples for new functionality
+
 ```rust
-/// Fetches an entity by ID as JSON
+/// Creates a new entity of type T.
 ///
 /// # Arguments
-/// * `tenant_id` - The tenant ID for isolation
-/// * `entity_id` - The unique ID of the entity
+///
+/// * `entity` - The entity to create
 ///
 /// # Returns
-/// The entity serialized as JSON, or an error if not found
 ///
-/// # Example
-/// ```ignore
-/// let entity = fetcher.fetch_as_json(&tenant_id, &entity_id).await?;
+/// The created entity with generated ID and timestamps
+///
+/// # Examples
+///
 /// ```
-async fn fetch_as_json(
-    &self,
-    tenant_id: &Uuid,
-    entity_id: &Uuid,
-) -> Result<serde_json::Value>;
+/// let order = Order::new("ORD-123", "active", 1500.00);
+/// let created = service.create(order).await?;
+/// ```
+pub async fn create(&self, entity: T) -> Result<T> {
+    // Implementation
+}
 ```
 
-## 📝 Commit Messages
+## 🔍 Review Process
 
-Suivre la convention [Conventional Commits](https://www.conventionalcommits.org/):
+1. **Automated Checks**: CI runs tests, clippy, and formatting checks
+2. **Code Review**: A maintainer reviews your code
+3. **Discussion**: Address any feedback or questions
+4. **Approval**: Once approved, your PR will be merged
 
-```
-<type>(<scope>): <description>
+## 📚 Resources
 
-[optional body]
+- [Rust Book](https://doc.rust-lang.org/book/)
+- [Async Book](https://rust-lang.github.io/async-book/)
+- [Axum Documentation](https://docs.rs/axum/)
+- [Project Documentation](docs/)
 
-[optional footer]
-```
+## 🎁 Recognition
 
-### Types
-- `feat`: Nouvelle fonctionnalité
-- `fix`: Correction de bug
-- `docs`: Documentation uniquement
-- `style`: Formatage, point-virgules manquants, etc.
-- `refactor`: Refactoring (ni feat ni fix)
-- `perf`: Amélioration de performance
-- `test`: Ajout ou correction de tests
-- `chore`: Maintenance (dependencies, build, etc.)
-- `ci`: Modifications CI/CD
+Contributors will be:
+- Listed in CONTRIBUTORS.md
+- Mentioned in release notes
+- Celebrated in our community!
 
-### Exemples
-```bash
-feat(links): add batch fetching for entity enrichment
-fix(server): handle missing tenant_id gracefully
-docs(readme): update quick start example
-refactor(core): simplify EntityRegistry implementation
-```
+## ❓ Questions?
 
-## 🔄 Pull Request Process
-
-1. **Assurez-vous que les tests passent**
-   ```bash
-   cargo test --all-features
-   cargo clippy --all-targets --all-features -- -D warnings
-   cargo fmt --all -- --check
-   ```
-
-2. **Mettez à jour la documentation** si nécessaire
-
-3. **Ajoutez des tests** pour les nouvelles fonctionnalités
-
-4. **Remplissez le template de PR** avec:
-   - Description des changements
-   - Issue liée (si applicable)
-   - Type de changement (feat/fix/docs/etc.)
-   - Checklist des vérifications
-
-5. **Attendez la review**
-   - Au moins 1 approbation requise
-   - La CI doit passer (tous les jobs verts ✅)
-
-## 🚫 Ce qui N'est PAS Accepté
-
-- ❌ Code non formaté (`cargo fmt`)
-- ❌ Warnings clippy non résolus
-- ❌ Tests cassés
-- ❌ Breaking changes sans discussion préalable
-- ❌ Fonctionnalités sans tests
-- ❌ Code sans documentation
-
-## 🎯 Roadmap
-
-Consultez les [GitHub Issues](https://github.com/triviere/this-rs/issues) pour voir les tâches planifiées.
-
-### Priorités Actuelles
-1. 🚧 Storage abstraction layer
-2. 🚧 DynamoDB/ScyllaDB implementation
-3. 🚧 Batch operations
-4. 📅 Macros procédurales pour entités
-5. 📅 Exemples avancés
-
-## 💬 Questions ?
-
-- Ouvrez une [Discussion GitHub](https://github.com/triviere/this-rs/discussions)
-- Rejoignez le Discord (lien à venir)
-- Contactez les maintainers
-
-## 📜 License
-
-En contribuant à This-RS, vous acceptez que vos contributions soient sous [MIT License](LICENSE-MIT).
+- Open a [Discussion](https://github.com/your-org/this-rs/discussions)
+- Join our community chat
+- Email the maintainers
 
 ---
 
-Merci de contribuer à This-RS ! 🦀✨
+**Thank you for contributing to This-RS!** 🚀🦀✨

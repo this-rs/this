@@ -1,259 +1,85 @@
-# Liens Enrichis avec Entités Complètes
+# Enriched Links Guide
 
-## Vue d'Ensemble
+## 🎯 Overview
 
-Par défaut, les liens dans `this-rs` retournent maintenant **automatiquement les entités complètes** au lieu de simples références, évitant ainsi le problème des requêtes N+1.
+This-RS automatically **enriches link responses** with full entity data, eliminating the need for separate queries and preventing N+1 query problems.
 
-De plus, le système est **intelligent** : il n'inclut que les entités dont vous avez besoin selon le contexte de votre requête.
+## ✨ What Are Enriched Links?
 
-## Les Trois Contextes d'Enrichissement
+When you query links, instead of just getting IDs, you get **complete entity objects** embedded in the response.
 
-### 1. Navigation depuis la Source (Forward)
+### Without Enrichment (Traditional APIs)
 
-**Route** : `GET /{source_type}/{source_id}/{route_name}`
-
-**Exemple** : `GET /orders/123/invoices`
-
-Puisque vous connaissez déjà l'order (il est dans l'URL), seules les **entités target** (invoices) sont retournées.
-
-#### Requête
-```bash
-curl -H 'X-Tenant-ID: abc-123' \
-  http://localhost:3000/orders/962b87e4-65cf-4802-bc3c-d1866923f137/invoices
-```
-
-#### Réponse
 ```json
 {
   "links": [
     {
-      "id": "link-789",
-      "tenant_id": "abc-123",
-      "link_type": "has_invoice",
+      "id": "link-123",
+      "source_id": "order-abc",
+      "target_id": "invoice-xyz"
+    }
+  ]
+}
+// Now you need 2 more queries:
+// GET /orders/order-abc
+// GET /invoices/invoice-xyz
+```
+
+### With Enrichment (This-RS)
+
+```json
+{
+  "links": [
+    {
+      "id": "link-123",
+      "source_id": "order-abc",
+      "target_id": "invoice-xyz",
       "target": {
-        "id": "7c885c25-6797-43b5-af64-f256d284d152",
-        "number": "INV-001",
-        "amount": 1500.0,
-        "status": "sent",
-        "due_date": "2025-11-15",
-        "paid_at": null
+        "id": "invoice-xyz",
+        "type": "invoice",
+        "name": "INV-001",
+        "amount": 1500.00,
+        "due_date": "2024-12-31",
+        "status": "pending"
       },
       "metadata": {
-        "created_at": "2025-10-20T10:00:00Z",
-        "created_by": "system",
-        "invoice_type": "standard"
-      },
-      "created_at": "2025-10-22T13:18:22.289068Z",
-      "updated_at": "2025-10-22T13:18:22.289068Z"
+        "created_at": "2024-01-15",
+        "priority": "high"
+      }
     }
-  ],
-  "count": 1,
-  "link_type": "has_invoice",
-  "direction": "Forward"
+  ]
 }
+// ✅ All data in one response!
 ```
-
-**Note** : Pas de champ `source` car vous connaissez déjà l'order !
 
 ---
 
-### 2. Navigation depuis la Target (Reverse)
+## 🚀 How It Works
 
-**Route** : `GET /{target_type}/{target_id}/{route_name}`
+### 1. EntityFetcher Trait
 
-**Exemple** : `GET /payments/456/invoice`
-
-Puisque vous connaissez déjà le payment (il est dans l'URL), seule l'**entité source** (invoice) est retournée.
-
-#### Requête
-```bash
-curl -H 'X-Tenant-ID: abc-123' \
-  http://localhost:3000/payments/ee24aec0-c27d-41e0-a61f-3e0a5d5a62ab/invoice
-```
-
-#### Réponse
-```json
-{
-  "links": [
-    {
-      "id": "link-456",
-      "tenant_id": "abc-123",
-      "link_type": "payment",
-      "source": {
-        "id": "b0f8c69e-8d2c-4969-87da-0682a7440bd5",
-        "number": "INV-002",
-        "amount": 1500.0,
-        "status": "paid",
-        "due_date": "2025-11-20",
-        "paid_at": "2025-10-20"
-      },
-      "metadata": {
-        "payment_date": "2025-10-20T15:45:00Z",
-        "payment_method": "card",
-        "transaction_id": "txn_1234567890"
-      },
-      "created_at": "2025-10-22T13:18:22.289347Z",
-      "updated_at": "2025-10-22T13:18:22.289347Z"
-    }
-  ],
-  "count": 1,
-  "link_type": "payment",
-  "direction": "Reverse"
-}
-```
-
-**Note** : Pas de champ `target` car vous connaissez déjà le payment !
-
----
-
-### 3. Accès Direct au Lien
-
-**Route** : `GET /links/{link_id}`
-
-**Exemple** : `GET /links/12b283f7-de7d-41d0-9249-3c108d6453fa`
-
-Quand vous accédez directement à un lien par son ID, vous ne savez pas quelles entités sont concernées. Donc **les deux entités complètes** (source ET target) sont retournées.
-
-#### Requête
-```bash
-curl -H 'X-Tenant-ID: abc-123' \
-  http://localhost:3000/links/12b283f7-de7d-41d0-9249-3c108d6453fa
-```
-
-#### Réponse
-```json
-{
-  "id": "12b283f7-de7d-41d0-9249-3c108d6453fa",
-  "tenant_id": "abc-123",
-  "link_type": "payment",
-  "source": {
-    "id": "b0f8c69e-8d2c-4969-87da-0682a7440bd5",
-    "number": "INV-002",
-    "amount": 1500.0,
-    "status": "paid",
-    "due_date": "2025-11-20",
-    "paid_at": "2025-10-20"
-  },
-  "target": {
-    "id": "ee24aec0-c27d-41e0-a61f-3e0a5d5a62ab",
-    "number": "PAY-001",
-    "amount": 1500.0,
-    "method": "card",
-    "status": "completed",
-    "transaction_id": "txn_1234567890"
-  },
-  "metadata": {
-    "payment_date": "2025-10-20T15:45:00Z",
-    "payment_method": "card",
-    "transaction_id": "txn_1234567890"
-  },
-  "created_at": "2025-10-22T13:18:22.289347Z",
-  "updated_at": "2025-10-22T13:18:22.289347Z"
-}
-```
-
-**Note** : Les deux champs `source` et `target` sont présents !
-
----
-
-## Avantages
-
-### ✅ Performance
-
-**Avant** (sans enrichissement) :
-```javascript
-// Récupérer les invoices d'un order
-const response = await fetch('/orders/123/invoices');
-const { links } = await response.json();
-
-// Pour chaque invoice, faire une requête supplémentaire
-for (const link of links) {
-  const invoice = await fetch(`/invoices/${link.target.id}`);
-  // ... utiliser invoice
-}
-// Total: 1 + N requêtes
-```
-
-**Après** (avec enrichissement) :
-```javascript
-// Une seule requête suffit !
-const response = await fetch('/orders/123/invoices');
-const { links } = await response.json();
-
-// Les invoices complètes sont déjà là
-for (const link of links) {
-  console.log(link.target); // Entité complète !
-}
-// Total: 1 requête
-```
-
-### ✅ Pas de Redondance
-
-Le système n'envoie **jamais** de données redondantes :
-- Si vous naviguez depuis `/orders/{id}/invoices`, vous connaissez déjà l'order
-- Si vous naviguez depuis `/payments/{id}/invoice`, vous connaissez déjà le payment
-
-### ✅ Bande Passante Optimisée
-
-Pour 10 liens :
-
-| Contexte | Entités chargées | Économie |
-|----------|------------------|----------|
-| Forward Navigation | 0 sources + 10 targets = **10 entités** | 50% |
-| Reverse Navigation | 10 sources + 0 targets = **10 entités** | 50% |
-| Direct Link | 1 source + 1 target = **2 entités** | N/A |
-
-**Avant** : 20 entités chargées
-**Après** : 10 entités chargées (en moyenne)
-
----
-
-## Structure `EnrichedLink`
-
-```rust
-pub struct EnrichedLink {
-    pub id: Uuid,
-    pub tenant_id: Uuid,
-    pub link_type: String,
-    
-    /// Entité source complète (omise si navigation depuis source)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub source: Option<serde_json::Value>,
-    
-    /// Entité target complète (omise si navigation depuis target)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub target: Option<serde_json::Value>,
-    
-    pub metadata: Option<serde_json::Value>,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
-}
-```
-
-Les champs `source` et `target` sont **optionnels** et automatiquement omis du JSON si `None`.
-
----
-
-## Comment ça Marche ?
-
-### Architecture
-
-Le système utilise le **trait `EntityFetcher`** pour charger dynamiquement n'importe quelle entité :
+Each entity store implements `EntityFetcher`:
 
 ```rust
 #[async_trait]
 pub trait EntityFetcher: Send + Sync {
-    async fn fetch_as_json(
-        &self,
-        tenant_id: &Uuid,
-        entity_id: &Uuid,
-    ) -> Result<serde_json::Value>;
+    async fn fetch_as_json(&self, entity_id: &Uuid) -> Result<serde_json::Value>;
+}
+
+// Implementation example
+#[async_trait]
+impl EntityFetcher for OrderStore {
+    async fn fetch_as_json(&self, entity_id: &Uuid) -> Result<serde_json::Value> {
+        let order = self.get(entity_id)
+            .ok_or_else(|| anyhow::anyhow!("Order not found"))?;
+        Ok(serde_json::to_value(order)?)
+    }
 }
 ```
 
-### Enregistrement des Fetchers
+### 2. Module Registration
 
-Chaque module expose ses fetchers via la méthode `get_entity_fetcher()` :
+Modules provide entity fetchers:
 
 ```rust
 impl Module for BillingModule {
@@ -268,153 +94,195 @@ impl Module for BillingModule {
 }
 ```
 
-### Implémentation pour un Store
+### 3. Automatic Enrichment
+
+ServerBuilder collects all fetchers:
 
 ```rust
-#[async_trait]
-impl EntityFetcher for OrderStore {
-    async fn fetch_as_json(
-        &self,
-        tenant_id: &Uuid,
-        entity_id: &Uuid,
-    ) -> Result<serde_json::Value> {
-        let order = self.get(entity_id)
-            .ok_or_else(|| anyhow!("Order not found"))?;
-        
-        // Vérifier l'isolation tenant
-        if order.tenant_id != *tenant_id {
-            anyhow::bail!("Access denied");
+// ServerBuilder.build()
+let mut fetchers_map: HashMap<String, Arc<dyn EntityFetcher>> = HashMap::new();
+for module in &self.modules {
+    for entity_type in module.entity_types() {
+        if let Some(fetcher) = module.get_entity_fetcher(entity_type) {
+            fetchers_map.insert(entity_type.to_string(), fetcher);
         }
-        
-        // Sérialiser en JSON
-        Ok(serde_json::to_value(order)?)
     }
 }
-```
 
-### Enrichissement Contextuel
-
-Le handler `list_links` détermine automatiquement le contexte :
-
-```rust
-let context = match extractor.direction {
-    LinkDirection::Forward => EnrichmentContext::FromSource,
-    LinkDirection::Reverse => EnrichmentContext::FromTarget,
+// AppState has access to all fetchers
+let link_state = AppState {
+    entity_fetchers: Arc::new(fetchers_map),
+    // ...
 };
-
-let enriched_links = enrich_links_with_entities(
-    &state,
-    links,
-    &tenant_id,
-    context  // 🔥 Contexte intelligent !
-).await?;
 ```
 
-La fonction `enrich_links_with_entities()` charge uniquement les entités nécessaires :
+### 4. Smart Context-Aware Enrichment
 
 ```rust
-for link in links {
-    let source_entity = match context {
-        EnrichmentContext::FromSource => None,  // Déjà connu
-        _ => Some(fetch_entity_by_type(...).await?)
-    };
-    
-    let target_entity = match context {
-        EnrichmentContext::FromTarget => None,  // Déjà connu
-        _ => Some(fetch_entity_by_type(...).await?)
-    };
-    
-    enriched.push(EnrichedLink {
-        source: source_entity,
-        target: target_entity,
-        ...
-    });
+pub enum EnrichmentContext {
+    FromSource,   // Query from source -> only enrich target
+    FromTarget,   // Query from target -> only enrich source
+    DirectLink,   // Direct link access -> enrich both
+}
+
+async fn enrich_links_with_entities(
+    state: &AppState,
+    links: Vec<LinkEntity>,
+    context: EnrichmentContext,
+    link_definition: &LinkDefinition,
+) -> Result<Vec<EnrichedLink>> {
+    for link in links {
+        let source_entity = match context {
+            EnrichmentContext::FromSource => None,  // Skip, we came from source
+            _ => fetch_entity(state, &link_definition.source_type, &link.source_id).await,
+        };
+        
+        let target_entity = match context {
+            EnrichmentContext::FromTarget => None,  // Skip, we came from target
+            _ => fetch_entity(state, &link_definition.target_type, &link.target_id).await,
+        };
+        
+        enriched.push(EnrichedLink {
+            source: source_entity,
+            target: target_entity,
+            // ...
+        });
+    }
 }
 ```
 
 ---
 
-## Ajouter le Support pour une Nouvelle Entité
+## 🎨 Enrichment Patterns
 
-### 1. Implémenter `EntityFetcher`
+### Pattern 1: Forward Navigation (From Source)
 
-```rust
-// Dans votre store
-#[async_trait]
-impl EntityFetcher for ProductStore {
-    async fn fetch_as_json(
-        &self,
-        tenant_id: &Uuid,
-        entity_id: &Uuid,
-    ) -> Result<serde_json::Value> {
-        let product = self.get(entity_id)
-            .ok_or_else(|| anyhow!("Product not found"))?;
-        
-        if product.tenant_id != *tenant_id {
-            anyhow::bail!("Access denied");
-        }
-        
-        Ok(serde_json::to_value(product)?)
-    }
-}
+```bash
+GET /orders/123/invoices
 ```
 
-### 2. Enregistrer dans le Module
+**Enrichment**: Only `target` (invoices) included
 
-```rust
-impl Module for YourModule {
-    fn get_entity_fetcher(&self, entity_type: &str) -> Option<Arc<dyn EntityFetcher>> {
-        match entity_type {
-            "product" => Some(Arc::new(self.store.products.clone())),
-            _ => None,
-        }
-    }
-}
-```
-
-C'est tout ! Le système gère automatiquement l'enrichissement.
-
----
-
-## Cas d'Usage Avancés
-
-### Filtrer les Champs Retournés
-
-Si vous voulez retourner une vue partielle d'une entité :
-
-```rust
-#[async_trait]
-impl EntityFetcher for UserStore {
-    async fn fetch_as_json(&self, tenant_id: &Uuid, entity_id: &Uuid) 
-        -> Result<serde_json::Value> 
+```json
+{
+  "links": [
     {
-        let user = self.get(entity_id)?;
-        
-        // Retourner seulement les champs publics
-        Ok(json!({
-            "id": user.id,
-            "name": user.name,
-            "email": user.email,
-            // ❌ Pas de password, pas de internal_notes, etc.
-        }))
+      "source_id": "order-123",
+      "target_id": "invoice-456",
+      "target": { /* Full invoice data */ }
+      // No "source" field (we came from the order)
     }
+  ]
 }
 ```
 
-### Inclure des Champs Calculés
+**Rationale**: You already have the order (you queried from it), only need invoice data.
+
+### Pattern 2: Reverse Navigation (From Target)
+
+```bash
+GET /invoices/456/order
+```
+
+**Enrichment**: Only `source` (order) included
+
+```json
+{
+  "links": [
+    {
+      "source_id": "order-123",
+      "target_id": "invoice-456",
+      "source": { /* Full order data */ }
+      // No "target" field (we came from the invoice)
+    }
+  ]
+}
+```
+
+**Rationale**: You already have the invoice, only need order data.
+
+### Pattern 3: Direct Link Access
+
+```bash
+GET /orders/123/invoices/456
+# or
+GET /links/link-uuid
+```
+
+**Enrichment**: Both `source` and `target` included
+
+```json
+{
+  "id": "link-uuid",
+  "source_id": "order-123",
+  "target_id": "invoice-456",
+  "source": { /* Full order data */ },
+  "target": { /* Full invoice data */ }
+}
+```
+
+**Rationale**: Direct link access, provide complete context.
+
+---
+
+## 🔥 Performance Optimization
+
+### No N+1 Queries
+
+**Traditional Approach (N+1 Problem)**:
+```
+1 query: Get links (N results)
+N queries: Get each target entity
+Total: N+1 queries ❌
+```
+
+**This-RS Approach**:
+```
+1 query: Get links
+1 batch operation: Fetch all entities efficiently
+Total: Effectively 2 operations ✅
+```
+
+### Efficient Fetching
+
+```rust
+// Entities are fetched in parallel when possible
+async fn enrich_links_with_entities(...) {
+    let mut tasks = vec![];
+    
+    for link in links {
+        if need_source {
+            tasks.push(fetch_entity(..., link.source_id));
+        }
+        if need_target {
+            tasks.push(fetch_entity(..., link.target_id));
+        }
+    }
+    
+    // Execute all fetches concurrently
+    let results = join_all(tasks).await;
+}
+```
+
+### Caching (Optional)
+
+You can add caching in your `EntityFetcher` implementation:
 
 ```rust
 #[async_trait]
 impl EntityFetcher for OrderStore {
-    async fn fetch_as_json(&self, tenant_id: &Uuid, entity_id: &Uuid) 
-        -> Result<serde_json::Value> 
-    {
-        let order = self.get(entity_id)?;
+    async fn fetch_as_json(&self, entity_id: &Uuid) -> Result<serde_json::Value> {
+        // Check cache first
+        if let Some(cached) = self.cache.get(entity_id) {
+            return Ok(cached);
+        }
         
-        // Ajouter des champs calculés
-        let mut json = serde_json::to_value(&order)?;
-        json["total_with_tax"] = json!(order.amount * 1.20);
-        json["is_overdue"] = json!(order.due_date < Utc::now());
+        // Fetch from storage
+        let order = self.get(entity_id)?;
+        let json = serde_json::to_value(order)?;
+        
+        // Cache for next time
+        self.cache.put(entity_id, json.clone());
         
         Ok(json)
     }
@@ -423,29 +291,178 @@ impl EntityFetcher for OrderStore {
 
 ---
 
-## Comparaison avec GraphQL
+## 💡 Usage Examples
 
-L'enrichissement automatique de `this-rs` offre des avantages similaires à GraphQL, mais **sans la complexité** :
+### Example 1: Get All Invoices for an Order
 
-| Feature | this-rs | GraphQL |
-|---------|---------|---------|
-| Évite N+1 | ✅ Automatique | ✅ Via DataLoader |
-| Pas de redondance | ✅ Contextuel | ⚠️ Dépend du query |
-| Configuration | ✅ Zero config | ❌ Schema complexe |
-| Type-safety | ✅ Rust | ⚠️ Codegen requis |
-| Courbe d'apprentissage | ✅ Simple | ❌ Élevée |
+```bash
+curl http://localhost:3000/orders/abc-123/invoices | jq .
+```
+
+Response:
+```json
+{
+  "links": [
+    {
+      "id": "link-1",
+      "source_id": "abc-123",
+      "target_id": "inv-001",
+      "target": {
+        "id": "inv-001",
+        "type": "invoice",
+        "name": "INV-001",
+        "amount": 1500.00,
+        "status": "pending"
+      }
+    },
+    {
+      "id": "link-2",
+      "source_id": "abc-123",
+      "target_id": "inv-002",
+      "target": {
+        "id": "inv-002",
+        "type": "invoice",
+        "name": "INV-002",
+        "amount": 2500.00,
+        "status": "paid"
+      }
+    }
+  ],
+  "count": 2
+}
+```
+
+### Example 2: Get Order for an Invoice (Reverse)
+
+```bash
+curl http://localhost:3000/invoices/inv-001/order | jq .
+```
+
+Response:
+```json
+{
+  "links": [
+    {
+      "id": "link-1",
+      "source_id": "abc-123",
+      "target_id": "inv-001",
+      "source": {
+        "id": "abc-123",
+        "type": "order",
+        "name": "ORD-123",
+        "amount": 5000.00,
+        "customer_name": "Acme Corp"
+      }
+    }
+  ]
+}
+```
+
+### Example 3: Get Specific Link with Both Entities
+
+```bash
+curl http://localhost:3000/orders/abc-123/invoices/inv-001 | jq .
+```
+
+Response:
+```json
+{
+  "id": "link-1",
+  "source_id": "abc-123",
+  "target_id": "inv-001",
+  "source": {
+    "id": "abc-123",
+    "type": "order",
+    "name": "ORD-123",
+    "amount": 5000.00
+  },
+  "target": {
+    "id": "inv-001",
+    "type": "invoice",
+    "name": "INV-001",
+    "amount": 1500.00
+  },
+  "metadata": {
+    "created_at": "2024-01-15"
+  }
+}
+```
 
 ---
 
-## Conclusion
+## 🎯 Best Practices
 
-L'enrichissement automatique des liens est une fonctionnalité **puissante et transparente** qui :
+### 1. Implement EntityFetcher for All Entities
 
-- ✅ Élimine les requêtes N+1
-- ✅ Optimise la bande passante
-- ✅ Simplifie le code client
-- ✅ Préserve la généricité du framework
-- ✅ S'adapte intelligemment au contexte
+```rust
+// ✅ Do this
+#[async_trait]
+impl EntityFetcher for YourStore {
+    async fn fetch_as_json(&self, entity_id: &Uuid) -> Result<serde_json::Value> {
+        // Implementation
+    }
+}
+```
 
-Tout cela **sans configuration** et **sans boilerplate** ! 🚀
+### 2. Register Fetchers in Module
 
+```rust
+// ✅ Do this
+impl Module for YourModule {
+    fn get_entity_fetcher(&self, entity_type: &str) -> Option<Arc<dyn EntityFetcher>> {
+        match entity_type {
+            "your_entity" => Some(Arc::new(self.store.clone())),
+            _ => None,
+        }
+    }
+}
+```
+
+### 3. Handle Missing Entities Gracefully
+
+```rust
+// ✅ Do this - return None instead of error
+async fn fetch_entity(...) -> Option<serde_json::Value> {
+    match fetcher.fetch_as_json(entity_id).await {
+        Ok(entity) => Some(entity),
+        Err(_) => None,  // Entity not found or deleted
+    }
+}
+
+// Enriched link with missing entity
+{
+  "source_id": "abc-123",
+  "target_id": "deleted-entity",
+  "target": null  // Entity was deleted or not found
+}
+```
+
+### 4. Use Appropriate Enrichment Context
+
+The framework automatically chooses the right context:
+- `/orders/123/invoices` → `FromSource`
+- `/invoices/456/order` → `FromTarget`
+- `/orders/123/invoices/456` → `DirectLink`
+
+---
+
+## 🎁 Benefits
+
+✅ **No N+1 Queries** - All data fetched efficiently  
+✅ **Better UX** - Clients get complete data in one request  
+✅ **Reduced Network** - Fewer round trips  
+✅ **Type-Safe** - EntityFetcher trait ensures correctness  
+✅ **Context-Aware** - Smart enrichment based on query direction  
+✅ **Flexible** - Easy to customize per entity  
+
+---
+
+## 📚 Related Documentation
+
+- [Architecture](../architecture/ARCHITECTURE.md)
+- [Getting Started](GETTING_STARTED.md)
+- [Multi-Level Navigation](MULTI_LEVEL_NAVIGATION.md)
+
+---
+
+**Enriched links make your API fast, efficient, and delightful to use!** 🚀✨

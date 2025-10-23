@@ -1,479 +1,406 @@
-# Navigation Multi-Niveaux
+# Multi-Level Navigation Guide
 
-## Question Initiale
+## 🎯 Overview
 
-> Il me semble que les permissions de création de lien devraient être au niveau des links et pas des entités.
-> Mais que faudrait-il faire pour avoir la capacité de créer plusieurs niveaux d'imbrication :
-> - company > section > employee
+This-RS supports **multi-level entity relationships** through semantic URLs, allowing you to navigate complex entity graphs naturally.
 
-## Réponse
+## 🌳 Entity Relationship Examples
 
-### Partie 1 : Permissions au Niveau des Links ✅
+### Example 1: Order → Invoice → Payment
 
-**Statut** : ✅ **IMPLÉMENTÉ**
+```
+Order
+  └─► Invoice
+        └─► Payment
+```
 
-Les permissions sont maintenant définies **directement dans les liens** via le champ `auth` dans `LinkDefinition`.
-
+**Configuration**:
 ```yaml
 links:
   - link_type: has_invoice
     source_type: order
     target_type: invoice
-    auth:                        # ← Permissions au niveau du lien
-      list: authenticated
-      create: service_only
-      delete: admin_only
+    forward_route_name: invoices
+    reverse_route_name: order
+    
+  - link_type: has_payment
+    source_type: invoice
+    target_type: payment
+    forward_route_name: payments
+    reverse_route_name: invoice
 ```
 
-**Voir** : [LINK_AUTHORIZATION.md](LINK_AUTHORIZATION.md) pour la documentation complète.
+**Generated Routes**:
+```bash
+# Level 1: Order → Invoice
+GET /orders/{order_id}/invoices
+GET /orders/{order_id}/invoices/{invoice_id}
+
+# Level 2: Invoice → Payment  
+GET /invoices/{invoice_id}/payments
+GET /invoices/{invoice_id}/payments/{payment_id}
+
+# Reverse: Payment → Invoice → Order
+GET /payments/{payment_id}/invoice
+GET /invoices/{invoice_id}/order
+```
 
 ---
 
-### Partie 2 : Navigation Multi-Niveaux ⏳
+## 🔄 Navigation Patterns
 
-**Statut** : ⏳ **À IMPLÉMENTER**
+### Pattern 1: Forward Navigation (Source → Target)
 
-Pour supporter la navigation `company > section > employee`, deux approches sont possibles :
-
-## Approche 1 : Path Traversal (Recommandée) 🌟
-
-### Concept
-
-Permettre de traverser plusieurs niveaux de liens en une seule requête HTTP.
-
-### Routes Désirées
-
-```
-GET /companies/{id}/sections                           # 1 niveau
-GET /companies/{id}/sections/{section_id}/employees    # 2 niveaux
-GET /sections/{id}/employees                           # 1 niveau
-```
-
-### Configuration YAML
-
-```yaml
-entities:
-  - singular: company
-    plural: companies
-  - singular: section
-    plural: sections
-  - singular: employee
-    plural: employees
-
-links:
-  # Company has sections
-  - link_type: has_section
-    source_type: company
-    target_type: section
-    forward_route_name: sections
-    reverse_route_name: company
-    auth:
-      list: authenticated
-      create: role:admin
-      delete: role:admin
-  
-  # Section has employees
-  - link_type: has_employee
-    source_type: section
-    target_type: employee
-    forward_route_name: employees
-    reverse_route_name: section
-    auth:
-      list: authenticated
-      create: role:manager
-      delete: role:hr
-```
-
-### Implémentation
-
-#### 1. Handler de Traversal
-
-```rust
-// src/links/traversal.rs
-
-/// Traverse multiple levels of links
-///
-/// Path format: /{entity1}/{id1}/{entity2}/{id2}/{entity3}
-///
-/// Example: /companies/123/sections/456/employees
-pub async fn traverse_links(
-    State(state): State<AppState>,
-    Path(segments): Path<Vec<String>>,
-    headers: HeaderMap,
-) -> Result<Json<Vec<serde_json::Value>>, ExtractorError> {
-    let tenant_id = extract_tenant_id(&headers)?;
-    
-    // Parse segments: ["companies", "123", "sections", "456", "employees"]
-    if segments.len() < 3 || segments.len() % 2 == 0 {
-        return Err(ExtractorError::InvalidPath(
-            "Path must be: /{type1}/{id1}/{type2} or /{type1}/{id1}/{type2}/{id2}/{type3}".into()
-        ));
-    }
-    
-    let mut current_entity_type = &segments[0];
-    let mut current_entity_id = parse_uuid(&segments[1])?;
-    
-    // Start with the first entity
-    let mut path_index = 2;
-    
-    // Traverse to the final level
-    while path_index < segments.len() - 1 {
-        let next_type = &segments[path_index];
-        let next_id = parse_uuid(&segments[path_index + 1])?;
-        
-        // Find the link definition between current and next
-        let link_def = find_link_between(
-            current_entity_type,
-            next_type,
-            &state.config,
-        )?;
-        
-        // Verify the link exists
-        verify_link_exists(
-            &state.link_service,
-            tenant_id,
-            current_entity_id,
-            current_entity_type,
-            next_id,
-            next_type,
-            &link_def.link_type,
-        ).await?;
-        
-        // Move to next level
-        current_entity_type = next_type;
-        current_entity_id = next_id;
-        path_index += 2;
-    }
-    
-    // Final segment is the target type to list
-    let target_type = segments.last().unwrap();
-    let link_def = find_link_between(
-        current_entity_type,
-        target_type,
-        &state.config,
-    )?;
-    
-    // Check authorization for listing
-    if let Some(auth) = &link_def.auth {
-        check_auth_policy(&headers, &auth.list, &state)?;
-    }
-    
-    // Get all links from current entity to target
-    let links = state.link_service
-        .find_by_source(
-            &tenant_id,
-            &current_entity_id,
-            current_entity_type,
-            Some(&link_def.link_type),
-            Some(target_type),
-        )
-        .await?;
-    
-    // Convert to JSON response
-    let results = links.into_iter()
-        .map(|link| {
-            serde_json::json!({
-                "id": link.target.id,
-                "type": link.target.entity_type,
-                "link_type": link.link_type,
-            })
-        })
-        .collect();
-    
-    Ok(Json(results))
-}
-
-/// Find a link definition between two entity types
-fn find_link_between(
-    source_type: &str,
-    target_type: &str,
-    config: &LinksConfig,
-) -> Result<LinkDefinition, ExtractorError> {
-    // Convert plurals to singulars
-    let source_singular = config
-        .entities
-        .iter()
-        .find(|e| e.plural == source_type)
-        .map(|e| e.singular.as_str())
-        .unwrap_or(source_type);
-    
-    let target_singular = config
-        .entities
-        .iter()
-        .find(|e| e.plural == target_type)
-        .map(|e| e.singular.as_str())
-        .unwrap_or(target_type);
-    
-    // Find link definition
-    config
-        .links
-        .iter()
-        .find(|def| {
-            def.source_type == source_singular && def.target_type == target_singular
-        })
-        .cloned()
-        .ok_or_else(|| {
-            ExtractorError::RouteNotFound(format!(
-                "No link definition found between {} and {}",
-                source_type, target_type
-            ))
-        })
-}
-
-/// Verify a link exists between two specific entities
-async fn verify_link_exists(
-    link_service: &Arc<dyn LinkService>,
-    tenant_id: Uuid,
-    source_id: Uuid,
-    source_type: &str,
-    target_id: Uuid,
-    target_type: &str,
-    link_type: &str,
-) -> Result<(), ExtractorError> {
-    let links = link_service
-        .find_by_source(&tenant_id, &source_id, source_type, Some(link_type), Some(target_type))
-        .await
-        .map_err(|e| ExtractorError::JsonError(e.to_string()))?;
-    
-    // Check if the specific target exists in the links
-    let exists = links.iter().any(|link| link.target.id == target_id);
-    
-    if !exists {
-        return Err(ExtractorError::RouteNotFound(format!(
-            "Link not found: {} {} -> {} {}",
-            source_type, source_id, target_type, target_id
-        )));
-    }
-    
-    Ok(())
-}
-```
-
-#### 2. Enregistrer la Route
-
-```rust
-// src/server/router.rs
-
-pub fn build_link_routes(state: AppState) -> Router {
-    Router::new()
-        .route("/:entity_type/:entity_id/:route_name", get(list_links))
-        
-        // 🆕 Routes multi-niveaux
-        .route(
-            "/:entity1/:id1/:entity2/:id2/:entity3",
-            get(traversal::traverse_links)
-        )
-        .route(
-            "/:entity1/:id1/:entity2/:id2/:entity3/:id3/:entity4",
-            get(traversal::traverse_links)
-        )
-        
-        .route(
-            "/:source_type/:source_id/:route_name/:target_id",
-            get(get_link_by_route)
-                .post(create_link)
-                .put(update_link)
-                .delete(delete_link)
-        )
-        .route("/:entity_type/:entity_id/links", get(list_available_links))
-        .with_state(state)
-}
-```
-
-### Utilisation
-
-#### Exemples de Requêtes
+Navigate from parent to children:
 
 ```bash
-# 1 niveau : Lister les sections d'une company
-GET /companies/123e4567-e89b-12d3-a456-426614174000/sections
+# Get all invoices for an order
+GET /orders/abc-123/invoices
 
-# 2 niveaux : Lister les employees d'une section spécifique d'une company
-GET /companies/123e4567-e89b-12d3-a456-426614174000/sections/789e4567-e89b-12d3-a456-426614174000/employees
-
-# 1 niveau : Lister les employees d'une section (sans passer par company)
-GET /sections/789e4567-e89b-12d3-a456-426614174000/employees
+# Get all payments for an invoice
+GET /invoices/inv-456/payments
 ```
 
-#### Réponse
-
+**Response includes target entities**:
 ```json
 {
-  "results": [
+  "links": [
     {
-      "id": "abc12345-e89b-12d3-a456-426614174000",
-      "type": "employee",
-      "link_type": "has_employee"
-    },
-    {
-      "id": "def67890-e89b-12d3-a456-426614174000",
-      "type": "employee",
-      "link_type": "has_employee"
+      "target_id": "inv-456",
+      "target": {
+        "id": "inv-456",
+        "amount": 1500.00,
+        // Full invoice data
+      }
     }
-  ],
-  "path": "/companies/123.../sections/789.../employees",
-  "depth": 2
+  ]
 }
 ```
 
-### Avantages
+### Pattern 2: Reverse Navigation (Target → Source)
 
-✅ **Flexibilité** : Supporte n'importe quelle profondeur  
-✅ **RESTful** : URLs claires et intuitives  
-✅ **Sécurité** : Vérifie que chaque lien existe  
-✅ **Authorization** : Respecte les permissions de chaque lien  
-✅ **Performance** : Peut être optimisé avec des JOINs  
-
-### Inconvénients
-
-⚠️ **Complexité** : Parsing d'URL dynamique  
-⚠️ **N+1 queries** : Peut nécessiter plusieurs appels DB  
-⚠️ **Limite de profondeur** : À définir (max 5 niveaux ?)  
-
----
-
-## Approche 2 : Nested Resources (Plus Complexe)
-
-### Concept
-
-Définir explicitement les routes imbriquées dans la configuration.
-
-### Configuration YAML
-
-```yaml
-nested_routes:
-  - name: company_section_employees
-    path: /companies/{company_id}/sections/{section_id}/employees
-    chain:
-      - from: company
-        to: section
-        link_type: has_section
-      - from: section
-        to: employee
-        link_type: has_employee
-    auth: authenticated
-```
-
-### Avantages
-
-✅ **Explicite** : Routes documentées dans la config  
-✅ **Optimisable** : Peut générer des requêtes SQL optimisées  
-✅ **Contrôle fin** : Auth globale sur la route complète  
-
-### Inconvénients
-
-⚠️ **Verbosité** : Chaque route imbriquée doit être définie  
-⚠️ **Rigidité** : Pas de traversal dynamique  
-⚠️ **Maintenance** : Plus de configuration à maintenir  
-
----
-
-## Recommandation Finale
-
-### Phase 1 : Implémenter Path Traversal ✅
-
-**Priorité** : Haute  
-**Effort** : Moyen (3-5 jours)  
-**Bénéfice** : Résout 90% des cas d'usage
-
-### Phase 2 : Optimisations (Optionnel)
-
-**Priorité** : Basse  
-**Effort** : Élevé  
-**Bénéfice** : Performance pour cas complexes
-
-Options d'optimisation :
-1. **Batching** : Récupérer plusieurs niveaux en une seule query
-2. **Caching** : Mettre en cache les chemins fréquents
-3. **GraphQL** : Exposer une API GraphQL pour queries complexes
-
----
-
-## Exemple Complet
-
-### Configuration
-
-```yaml
-entities:
-  - singular: company
-    plural: companies
-  - singular: section
-    plural: sections
-  - singular: employee
-    plural: employees
-
-links:
-  - link_type: has_section
-    source_type: company
-    target_type: section
-    forward_route_name: sections
-    reverse_route_name: company
-    auth:
-      list: authenticated
-      create: role:admin
-  
-  - link_type: has_employee
-    source_type: section
-    target_type: employee
-    forward_route_name: employees
-    reverse_route_name: section
-    auth:
-      list: authenticated
-      create: role:manager
-```
-
-### Utilisation
+Navigate from child back to parent:
 
 ```bash
-# Créer les entités
-POST /companies
-POST /sections
-POST /employees
+# Get the order for an invoice
+GET /invoices/inv-456/order
 
-# Créer les liens
-POST /companies/{company_id}/has_section/sections/{section_id}
-POST /sections/{section_id}/has_employee/employees/{employee_id}
-
-# Naviguer (1 niveau)
-GET /companies/{company_id}/sections
-GET /sections/{section_id}/employees
-
-# Naviguer (2 niveaux) - Avec traversal implémenté
-GET /companies/{company_id}/sections/{section_id}/employees
+# Get the invoice for a payment
+GET /payments/pay-789/invoice
 ```
 
-### Vérifications de Sécurité
+**Response includes source entities**:
+```json
+{
+  "links": [
+    {
+      "source_id": "abc-123",
+      "source": {
+        "id": "abc-123",
+        "number": "ORD-123",
+        // Full order data
+      }
+    }
+  ]
+}
+```
 
-Le système vérifie :
-1. ✅ Le lien `company → section` existe
-2. ✅ Le lien `section → employee` existe
-3. ✅ L'utilisateur a la permission `list` sur `has_employee`
-4. ✅ Le `tenant_id` est isolé
+### Pattern 3: Multi-Hop Navigation
+
+Navigate multiple levels:
+
+```bash
+# Step 1: Get order
+GET /orders/abc-123
+
+# Step 2: Get invoices for order
+GET /orders/abc-123/invoices
+# Returns: [{ "target": { "id": "inv-456", ... } }]
+
+# Step 3: Get payments for invoice
+GET /invoices/inv-456/payments  
+# Returns: [{ "target": { "id": "pay-789", ... } }]
+
+# Or reverse: payment → invoice → order
+GET /payments/pay-789/invoice
+GET /invoices/inv-456/order
+```
 
 ---
 
-## Conclusion
+## 🎨 Complex Relationship Examples
 
-### ✅ Déjà Implémenté
+### Example 2: Multiple Link Types
 
-- **Permissions au niveau des liens** : Complètement fonctionnel
-- **Navigation 1 niveau** : Fonctionnel (GET /companies/{id}/sections)
+```
+User
+  ├─(owner)─► Car
+  └─(driver)─► Car
+```
 
-### ⏳ À Implémenter
+**Configuration**:
+```yaml
+links:
+  - link_type: owner
+    source_type: user
+    target_type: car
+    forward_route_name: cars-owned
+    reverse_route_name: owner
+    
+  - link_type: driver
+    source_type: user
+    target_type: car
+    forward_route_name: cars-driven
+    reverse_route_name: drivers
+```
 
-- **Path Traversal** : Pour navigation multi-niveaux
-- **Middleware Auth** : Pour vérifier les permissions
+**Routes**:
+```bash
+# Cars owned by user
+GET /users/123/cars-owned
 
-### 📝 Prochaines Étapes
+# Cars driven by user  
+GET /users/123/cars-driven
 
-1. Implémenter `traverse_links()` handler
-2. Ajouter les routes dans `server/router.rs`
-3. Tester avec des scénarios réels
-4. Optimiser les performances (si nécessaire)
+# Owner of car
+GET /cars/456/owner
+
+# Drivers of car
+GET /cars/456/drivers
+```
+
+### Example 3: Many-to-Many Relationships
+
+```
+Project
+  └─(has_member)─► User
+                    └─(has_skill)─► Skill
+```
+
+**Configuration**:
+```yaml
+links:
+  - link_type: has_member
+    source_type: project
+    target_type: user
+    forward_route_name: members
+    reverse_route_name: projects
+    
+  - link_type: has_skill
+    source_type: user
+    target_type: skill
+    forward_route_name: skills
+    reverse_route_name: users
+```
+
+**Navigation**:
+```bash
+# Get all members of a project
+GET /projects/proj-1/members
+
+# Get all projects for a user
+GET /users/user-1/projects
+
+# Get all skills for a user
+GET /users/user-1/skills
+
+# Get all users with a skill
+GET /skills/skill-1/users
+```
 
 ---
 
-**Voir aussi** :
-- [LINK_AUTHORIZATION.md](LINK_AUTHORIZATION.md) - Documentation auth complète
-- [LINK_AUTH_IMPLEMENTATION.md](../../LINK_AUTH_IMPLEMENTATION.md) - Détails techniques
+## 🔗 Creating Links at Multiple Levels
 
+### Method 1: Link Existing Entities
+
+```bash
+# Link order → invoice
+POST /orders/abc-123/invoices/inv-456
+Body: { "metadata": { "created_by": "system" } }
+
+# Link invoice → payment
+POST /invoices/inv-456/payments/pay-789
+Body: { "metadata": { "method": "credit_card" } }
+```
+
+### Method 2: Create Entity + Link Automatically
+
+```bash
+# Create new invoice and link to order
+POST /orders/abc-123/invoices
+Body: {
+  "entity": {
+    "number": "INV-999",
+    "amount": 2000.00,
+    "status": "pending"
+  },
+  "metadata": {
+    "created_by": "api"
+  }
+}
+
+# Then create payment and link to invoice
+POST /invoices/{new_invoice_id}/payments
+Body: {
+  "entity": {
+    "amount": 2000.00,
+    "method": "wire_transfer"
+  }
+}
+```
+
+---
+
+## 📊 Querying Strategies
+
+### Strategy 1: Top-Down (Parent → Children)
+
+Start from the root entity and navigate down:
+
+```bash
+# 1. Get order
+GET /orders/abc-123
+
+# 2. Get its invoices (enriched)
+GET /orders/abc-123/invoices
+
+# 3. For each invoice, get payments
+GET /invoices/inv-1/payments
+GET /invoices/inv-2/payments
+```
+
+### Strategy 2: Bottom-Up (Child → Parents)
+
+Start from a leaf entity and navigate up:
+
+```bash
+# 1. Get payment
+GET /payments/pay-789
+
+# 2. Get its invoice (enriched)
+GET /payments/pay-789/invoice
+
+# 3. Get the order (enriched)
+GET /invoices/inv-456/order
+```
+
+### Strategy 3: Breadth-First
+
+Get all entities at one level before moving to the next:
+
+```bash
+# Level 1: All orders
+GET /orders
+
+# Level 2: All invoices for each order
+for each order:
+  GET /orders/{order_id}/invoices
+
+# Level 3: All payments for each invoice
+for each invoice:
+  GET /invoices/{invoice_id}/payments
+```
+
+---
+
+## 💡 Best Practices
+
+### 1. Design Clear Hierarchies
+
+```yaml
+# ✅ Good: Clear parent-child relationships
+Order → Invoice → Payment
+User → Post → Comment
+
+# ❌ Avoid: Circular dependencies
+A → B → C → A
+```
+
+### 2. Use Semantic Route Names
+
+```yaml
+# ✅ Good: Descriptive names
+forward_route_name: invoices      # /orders/123/invoices
+forward_route_name: members       # /projects/456/members
+
+# ❌ Avoid: Generic names
+forward_route_name: links         # /orders/123/links (unclear)
+forward_route_name: relations     # /projects/456/relations (unclear)
+```
+
+### 3. Leverage Auto-Enrichment
+
+```bash
+# ✅ Good: Use enriched responses
+GET /orders/123/invoices
+# Returns invoices with full data in one request
+
+# ❌ Avoid: Multiple separate queries
+GET /orders/123/invoices  # Get link IDs
+GET /invoices/id1         # Then fetch each invoice
+GET /invoices/id2
+GET /invoices/id3
+```
+
+### 4. Index for Performance
+
+```rust
+// ✅ Good: Index frequently queried fields
+impl_data_entity!(Order, "order", ["number", "customer_name"], {
+    number: String,
+    customer_name: String,
+});
+```
+
+---
+
+## 🎯 Real-World Example
+
+### E-Commerce Order Fulfillment
+
+```
+Customer
+  └─► Order
+        ├─► OrderItem (product, quantity)
+        ├─► Invoice
+        │     └─► Payment
+        └─► Shipment
+              └─► TrackingEvent
+```
+
+**Configuration**:
+```yaml
+links:
+  - { link_type: has_order, source_type: customer, target_type: order, forward_route_name: orders }
+  - { link_type: has_item, source_type: order, target_type: order_item, forward_route_name: items }
+  - { link_type: has_invoice, source_type: order, target_type: invoice, forward_route_name: invoices }
+  - { link_type: has_payment, source_type: invoice, target_type: payment, forward_route_name: payments }
+  - { link_type: has_shipment, source_type: order, target_type: shipment, forward_route_name: shipments }
+  - { link_type: has_tracking, source_type: shipment, target_type: tracking_event, forward_route_name: tracking }
+```
+
+**Navigation**:
+```bash
+# Customer journey
+GET /customers/cust-1/orders
+GET /orders/ord-123/items
+GET /orders/ord-123/invoices
+GET /invoices/inv-456/payments
+
+# Fulfillment tracking  
+GET /orders/ord-123/shipments
+GET /shipments/ship-789/tracking
+```
+
+---
+
+## 📚 Related Documentation
+
+- [Enriched Links](ENRICHED_LINKS.md)
+- [Getting Started](GETTING_STARTED.md)
+- [Architecture](../architecture/ARCHITECTURE.md)
+
+---
+
+**Multi-level navigation makes complex data relationships simple and intuitive!** 🚀🌳✨
