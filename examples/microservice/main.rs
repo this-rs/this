@@ -17,7 +17,6 @@ use module::BillingModule;
 use std::sync::Arc;
 use store::EntityStore;
 use this::prelude::*;
-use uuid::Uuid;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -57,19 +56,28 @@ async fn main() -> Result<()> {
     println!("    GET    /orders                          - List all orders");
     println!("    POST   /orders                          - Create a new order");
     println!("    GET    /orders/{{id}}                      - Get a specific order");
+    println!("    PUT    /orders/{{id}}                      - Update an order");
+    println!("    DELETE /orders/{{id}}                      - Delete an order");
     println!("    GET    /invoices                        - List all invoices");
     println!("    POST   /invoices                        - Create a new invoice");
     println!("    GET    /invoices/{{id}}                    - Get a specific invoice");
+    println!("    PUT    /invoices/{{id}}                    - Update an invoice");
+    println!("    DELETE /invoices/{{id}}                    - Delete an invoice");
     println!("    GET    /payments                        - List all payments");
     println!("    POST   /payments                        - Create a new payment");
     println!("    GET    /payments/{{id}}                    - Get a specific payment");
+    println!("    PUT    /payments/{{id}}                    - Update a payment");
+    println!("    DELETE /payments/{{id}}                    - Delete a payment");
     println!("\n  🔗 Link Routes (Generic for all entities):");
     println!("    GET    /links/{{link_id}}                  - Get a specific link by ID");
     println!(
         "    GET    /{{entity}}/{{id}}/{{route_name}}        - List links (e.g. /orders/123/invoices)"
     );
+    println!(
+        "    POST   /{{entity}}/{{id}}/{{route_name}}        - Create new entity + link automatically ✅"
+    );
     println!("    GET    /{{source}}/{{id}}/{{route_name}}/{{target_id}}  - Get a specific link");
-    println!("    POST   /{{source}}/{{id}}/{{route_name}}/{{target_id}}  - Create a link");
+    println!("    POST   /{{source}}/{{id}}/{{route_name}}/{{target_id}}  - Create link between existing entities");
     println!("    PUT    /{{source}}/{{id}}/{{route_name}}/{{target_id}}  - Update link metadata");
     println!("    DELETE /{{source}}/{{id}}/{{route_name}}/{{target_id}}  - Delete a link");
     println!(
@@ -77,16 +85,20 @@ async fn main() -> Result<()> {
     );
     println!("\n  📋 Specific Link Routes (from config):");
     println!("    GET    /orders/{{id}}/invoices             - List invoices for an order");
+    println!("    POST   /orders/{{id}}/invoices             - Create new invoice + link ✅");
     println!("    GET    /orders/{{id}}/invoices/{{invoice_id}} - Get specific order→invoice link");
-    println!("    POST   /orders/{{id}}/invoices/{{invoice_id}} - Create order→invoice link");
+    println!("    POST   /orders/{{id}}/invoices/{{invoice_id}} - Link existing order & invoice");
     println!("    PUT    /orders/{{id}}/invoices/{{invoice_id}} - Update order→invoice link");
     println!("    DELETE /orders/{{id}}/invoices/{{invoice_id}} - Delete order→invoice link");
     println!("    GET    /invoices/{{id}}/order              - Get order for an invoice");
     println!("    GET    /invoices/{{id}}/payments           - List payments for an invoice");
+    println!("    POST   /invoices/{{id}}/payments           - Create new payment + link ✅");
     println!(
         "    GET    /invoices/{{id}}/payments/{{payment_id}} - Get specific invoice→payment link"
     );
-    println!("    POST   /invoices/{{id}}/payments/{{payment_id}} - Create invoice→payment link");
+    println!(
+        "    POST   /invoices/{{id}}/payments/{{payment_id}} - Link existing invoice & payment"
+    );
     println!("    GET    /payments/{{id}}/invoice            - Get invoice for a payment");
 
     axum::serve(listener, app).await.unwrap();
@@ -99,226 +111,222 @@ async fn populate_test_data(
     store: &EntityStore,
     link_service: Arc<InMemoryLinkService>,
 ) -> Result<()> {
-    // Use a fixed tenant ID for easier testing
-    let tenant_id = Uuid::parse_str("e2e92411-5568-4436-a388-464c649a5a97").expect("Invalid UUID");
+    // Create orders using the generated new() method
+    let order1 = Order::new(
+        "ORD-001".to_string(),             // name
+        "pending".to_string(),             // status
+        "ORD-001".to_string(),             // number
+        1500.00,                           // amount
+        Some("Alice Smith".to_string()),   // customer_name
+        Some("Rush delivery".to_string()), // notes
+    );
 
-    // Create orders
-    let order1 = Order {
-        id: Uuid::new_v4(),
-        tenant_id,
-        number: "ORD-001".to_string(),
-        amount: 1500.00,
-        status: "pending".to_string(),
-        customer_name: Some("Alice Smith".to_string()),
-        notes: Some("Rush delivery".to_string()),
-    };
-
-    let order2 = Order {
-        id: Uuid::new_v4(),
-        tenant_id,
-        number: "ORD-002".to_string(),
-        amount: 2300.00,
-        status: "confirmed".to_string(),
-        customer_name: Some("Bob Johnson".to_string()),
-        notes: None,
-    };
+    let order2 = Order::new(
+        "ORD-002".to_string(),           // name
+        "confirmed".to_string(),         // status
+        "ORD-002".to_string(),           // number
+        2300.00,                         // amount
+        Some("Bob Johnson".to_string()), // customer_name
+        None,                            // notes
+    );
 
     store.orders.add(order1.clone());
     store.orders.add(order2.clone());
 
-    // Create invoices
-    let invoice1 = Invoice {
-        id: Uuid::new_v4(),
-        tenant_id,
-        number: "INV-001".to_string(),
-        amount: 1500.00,
-        status: "sent".to_string(),
-        due_date: Some("2025-11-15".to_string()),
-        paid_at: None,
-    };
+    // Create invoices using the generated new() method
+    let invoice1 = Invoice::new(
+        "INV-001".to_string(),          // name
+        "sent".to_string(),             // status
+        "INV-001".to_string(),          // number
+        1500.00,                        // amount
+        Some("2025-11-15".to_string()), // due_date
+        None,                           // paid_at
+    );
 
-    let invoice2 = Invoice {
-        id: Uuid::new_v4(),
-        tenant_id,
-        number: "INV-002".to_string(),
-        amount: 1500.00,
-        status: "paid".to_string(),
-        due_date: Some("2025-11-20".to_string()),
-        paid_at: Some("2025-10-20".to_string()),
-    };
+    let invoice2 = Invoice::new(
+        "INV-002".to_string(),          // name
+        "paid".to_string(),             // status
+        "INV-002".to_string(),          // number
+        1500.00,                        // amount
+        Some("2025-11-20".to_string()), // due_date
+        Some("2025-10-20".to_string()), // paid_at
+    );
 
-    let invoice3 = Invoice {
-        id: Uuid::new_v4(),
-        tenant_id,
-        number: "INV-003".to_string(),
-        amount: 2300.00,
-        status: "draft".to_string(),
-        due_date: Some("2025-12-01".to_string()),
-        paid_at: None,
-    };
+    let invoice3 = Invoice::new(
+        "INV-003".to_string(),          // name
+        "draft".to_string(),            // status
+        "INV-003".to_string(),          // number
+        2300.00,                        // amount
+        Some("2025-12-01".to_string()), // due_date
+        None,                           // paid_at
+    );
 
     store.invoices.add(invoice1.clone());
     store.invoices.add(invoice2.clone());
     store.invoices.add(invoice3.clone());
 
-    // Create payments
-    let payment1 = Payment {
-        id: Uuid::new_v4(),
-        tenant_id,
-        number: "PAY-001".to_string(),
-        amount: 1500.00,
-        status: "completed".to_string(),
-        method: "card".to_string(),
-        transaction_id: Some("txn_1234567890".to_string()),
-    };
+    // Create payments using the generated new() method
+    let payment1 = Payment::new(
+        "PAY-001".to_string(),              // name
+        "completed".to_string(),            // status
+        "PAY-001".to_string(),              // number
+        1500.00,                            // amount
+        "card".to_string(),                 // method
+        Some("txn_1234567890".to_string()), // transaction_id
+    );
 
-    let payment2 = Payment {
-        id: Uuid::new_v4(),
-        tenant_id,
-        number: "PAY-002".to_string(),
-        amount: 750.00,
-        status: "completed".to_string(),
-        method: "bank_transfer".to_string(),
-        transaction_id: Some("txn_0987654321".to_string()),
-    };
+    let payment2 = Payment::new(
+        "PAY-002".to_string(),              // name
+        "completed".to_string(),            // status
+        "PAY-002".to_string(),              // number
+        750.00,                             // amount
+        "bank_transfer".to_string(),        // method
+        Some("txn_0987654321".to_string()), // transaction_id
+    );
 
     store.payments.add(payment1.clone());
     store.payments.add(payment2.clone());
 
     println!("\n✅ Test data created:");
     println!("   📦 2 orders, 3 invoices, 2 payments");
-    println!("   🔑 Tenant ID: {}", tenant_id);
 
-    // Create links between entities
+    // Create links between entities using LinkEntity
     println!("\n🔗 Creating links between entities...");
 
     // Link order1 -> invoice1 (ORD-001 has invoice INV-001)
-    link_service
-        .create(
-            &tenant_id,
-            "has_invoice",
-            EntityReference::new(order1.id, "order"),
-            EntityReference::new(invoice1.id, "invoice"),
-            Some(serde_json::json!({
-                "created_at": "2025-10-20T10:00:00Z",
-                "created_by": "system",
-                "invoice_type": "standard"
-            })),
-        )
-        .await?;
+    let link1 = LinkEntity::new(
+        "has_invoice",
+        order1.id,
+        invoice1.id,
+        Some(serde_json::json!({
+            "created_at": "2025-10-20T10:00:00Z",
+            "created_by": "system",
+            "invoice_type": "standard"
+        })),
+    );
+    link_service.create(link1).await?;
     println!("   ✅ Order ORD-001 → Invoice INV-001");
 
     // Link order1 -> invoice2 (ORD-001 has another invoice INV-002)
-    link_service
-        .create(
-            &tenant_id,
-            "has_invoice",
-            EntityReference::new(order1.id, "order"),
-            EntityReference::new(invoice2.id, "invoice"),
-            Some(serde_json::json!({
-                "created_at": "2025-10-21T14:30:00Z",
-                "created_by": "system",
-                "invoice_type": "partial"
-            })),
-        )
-        .await?;
+    let link2 = LinkEntity::new(
+        "has_invoice",
+        order1.id,
+        invoice2.id,
+        Some(serde_json::json!({
+            "created_at": "2025-10-21T14:30:00Z",
+            "created_by": "system",
+            "invoice_type": "partial"
+        })),
+    );
+    link_service.create(link2).await?;
     println!("   ✅ Order ORD-001 → Invoice INV-002");
 
     // Link order2 -> invoice3 (ORD-002 has invoice INV-003)
-    link_service
-        .create(
-            &tenant_id,
-            "has_invoice",
-            EntityReference::new(order2.id, "order"),
-            EntityReference::new(invoice3.id, "invoice"),
-            Some(serde_json::json!({
-                "created_at": "2025-10-22T09:15:00Z",
-                "created_by": "system",
-                "invoice_type": "standard"
-            })),
-        )
-        .await?;
+    let link3 = LinkEntity::new(
+        "has_invoice",
+        order2.id,
+        invoice3.id,
+        Some(serde_json::json!({
+            "created_at": "2025-10-22T09:15:00Z",
+            "created_by": "system",
+            "invoice_type": "standard"
+        })),
+    );
+    link_service.create(link3).await?;
     println!("   ✅ Order ORD-002 → Invoice INV-003");
 
     // Link invoice2 -> payment1 (INV-002 is paid by PAY-001)
-    link_service
-        .create(
-            &tenant_id,
-            "payment",
-            EntityReference::new(invoice2.id, "invoice"),
-            EntityReference::new(payment1.id, "payment"),
-            Some(serde_json::json!({
-                "payment_date": "2025-10-20T15:45:00Z",
-                "payment_status": "completed",
-                "payment_method": "card",
-                "transaction_id": "txn_1234567890"
-            })),
-        )
-        .await?;
+    let link4 = LinkEntity::new(
+        "payment",
+        invoice2.id,
+        payment1.id,
+        Some(serde_json::json!({
+            "payment_date": "2025-10-20T15:45:00Z",
+            "payment_status": "completed",
+            "payment_method": "card",
+            "transaction_id": "txn_1234567890"
+        })),
+    );
+    link_service.create(link4).await?;
     println!("   ✅ Invoice INV-002 → Payment PAY-001");
 
     // Link invoice2 -> payment2 (INV-002 has partial payment PAY-002)
-    link_service
-        .create(
-            &tenant_id,
-            "payment",
-            EntityReference::new(invoice2.id, "invoice"),
-            EntityReference::new(payment2.id, "payment"),
-            Some(serde_json::json!({
-                "payment_date": "2025-10-21T11:20:00Z",
-                "payment_status": "completed",
-                "payment_method": "bank_transfer",
-                "transaction_id": "txn_0987654321",
-                "note": "Partial payment"
-            })),
-        )
-        .await?;
+    let link5 = LinkEntity::new(
+        "payment",
+        invoice2.id,
+        payment2.id,
+        Some(serde_json::json!({
+            "payment_date": "2025-10-21T11:20:00Z",
+            "payment_status": "completed",
+            "payment_method": "bank_transfer",
+            "transaction_id": "txn_0987654321",
+            "note": "Partial payment"
+        })),
+    );
+    link_service.create(link5).await?;
     println!("   ✅ Invoice INV-002 → Payment PAY-002 (partial)");
 
     println!("\n🎉 Test data ready! You can now test the API:");
-    println!("\n   💡 Tenant ID: {}", tenant_id);
     println!("\n   📋 List Links:");
     println!("   • GET /orders/{}/invoices", order1.id);
     println!("   • GET /invoices/{}/order", invoice1.id);
     println!("   • GET /invoices/{}/payments", invoice2.id);
     println!("   • GET /payments/{}/invoice", payment1.id);
     println!("\n   🔗 Manipulate Links (NEW semantic URLs):");
-    println!("   • POST   /orders/{}/invoices/{{invoice_id}}", order1.id);
-    println!("   • PUT    /orders/{}/invoices/{}", order1.id, invoice1.id);
-    println!("   • DELETE /orders/{}/invoices/{}", order1.id, invoice1.id);
-    println!("\n   📝 Example curl commands:");
-    println!("\n   # List invoices for an order");
     println!(
-        "   curl -H 'X-Tenant-ID: {}' http://127.0.0.1:3000/orders/{}/invoices | jq .",
-        tenant_id, order1.id
+        "   • POST   /orders/{}/invoices/{{invoice_id}}  - Link existing entities",
+        order1.id
+    );
+    println!(
+        "   • POST   /orders/{}/invoices                 - Create new invoice + link ✅",
+        order1.id
+    );
+    println!(
+        "   • PUT    /orders/{}/invoices/{}              - Update link metadata",
+        order1.id, invoice1.id
+    );
+    println!(
+        "   • DELETE /orders/{}/invoices/{}              - Delete link",
+        order1.id, invoice1.id
+    );
+    println!("\n   📝 Example curl commands:");
+    println!("\n   # List invoices for an order (with enriched entities)");
+    println!(
+        "   curl http://127.0.0.1:3000/orders/{}/invoices | jq .",
+        order1.id
     );
     println!("\n   # Get a specific link (order → invoice)");
     println!(
-        "   curl -H 'X-Tenant-ID: {}' http://127.0.0.1:3000/orders/{}/invoices/{} | jq .",
-        tenant_id, order1.id, invoice1.id
+        "   curl http://127.0.0.1:3000/orders/{}/invoices/{} | jq .",
+        order1.id, invoice1.id
     );
-    println!("\n   # Create a new link (order → invoice)");
+    println!("\n   # Create a NEW invoice and link it to an order automatically");
+    println!("   curl -X POST -H 'Content-Type: application/json' \\");
+    println!("     -d '{{");
+    println!("       \"entity\": {{");
+    println!("         \"number\": \"INV-999\",");
+    println!("         \"amount\": 999.99,");
+    println!("         \"status\": \"active\"");
+    println!("       }},");
+    println!("       \"metadata\": {{\"note\": \"Auto-created invoice\", \"priority\": \"high\"}}");
+    println!("     }}' \\");
+    println!("     http://127.0.0.1:3000/orders/{}/invoices", order1.id);
+    println!("\n   # Create a link between existing order and invoice");
+    println!("   curl -X POST -H 'Content-Type: application/json' \\");
+    println!("     -d '{{\"metadata\": {{\"note\": \"Test link\", \"priority\": \"high\"}}}}' \\");
     println!(
-        "   curl -X POST -H 'X-Tenant-ID: {}' -H 'Content-Type: application/json' \\",
-        tenant_id
-    );
-    println!("     -d '{{\"metadata\": {{\"note\": \"Test link\"}}}}' \\",);
-    println!(
-        "     http://127.0.0.1:3000/orders/{}/invoices/{{new_invoice_id}}",
-        order1.id
+        "     http://127.0.0.1:3000/orders/{}/invoices/{}",
+        order1.id, invoice3.id
     );
     println!("\n   # Update link metadata");
-    println!(
-        "   curl -X PUT -H 'X-Tenant-ID: {}' -H 'Content-Type: application/json' \\",
-        tenant_id
-    );
-    println!("     -d '{{\"metadata\": {{\"status\": \"verified\"}}}}' \\",);
+    println!("   curl -X PUT -H 'Content-Type: application/json' \\");
+    println!("     -d '{{\"metadata\": {{\"status\": \"verified\"}}}}' \\");
     println!(
         "     http://127.0.0.1:3000/orders/{}/invoices/{}",
         order1.id, invoice1.id
     );
     println!("\n   # Delete a link");
-    println!("   curl -X DELETE -H 'X-Tenant-ID: {}' \\", tenant_id);
+    println!("   curl -X DELETE \\");
     println!(
         "     http://127.0.0.1:3000/orders/{}/invoices/{}",
         order1.id, invoice1.id

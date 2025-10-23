@@ -2,7 +2,6 @@
 //!
 //! This module provides HTTP extractors that automatically:
 //! - Deserialize and validate entities from request bodies
-//! - Extract tenant IDs from headers
 //! - Parse link routes and resolve definitions
 
 use axum::http::StatusCode;
@@ -11,27 +10,12 @@ use axum::Json;
 use uuid::Uuid;
 
 use crate::config::LinksConfig;
-use crate::core::{EntityReference, LinkDefinition};
+use crate::core::LinkDefinition;
 use crate::links::registry::{LinkDirection, LinkRouteRegistry};
-
-/// Extract tenant ID from request headers
-///
-/// Expected header: `X-Tenant-ID: <uuid>`
-pub fn extract_tenant_id(headers: &axum::http::HeaderMap) -> Result<Uuid, ExtractorError> {
-    let tenant_id_str = headers
-        .get("X-Tenant-ID")
-        .ok_or(ExtractorError::MissingTenantId)?
-        .to_str()
-        .map_err(|_| ExtractorError::InvalidTenantId)?;
-
-    Uuid::parse_str(tenant_id_str).map_err(|_| ExtractorError::InvalidTenantId)
-}
 
 /// Errors that can occur during extraction
 #[derive(Debug, Clone)]
 pub enum ExtractorError {
-    MissingTenantId,
-    InvalidTenantId,
     InvalidPath,
     InvalidEntityId,
     RouteNotFound(String),
@@ -42,8 +26,6 @@ pub enum ExtractorError {
 impl std::fmt::Display for ExtractorError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ExtractorError::MissingTenantId => write!(f, "Missing X-Tenant-ID header"),
-            ExtractorError::InvalidTenantId => write!(f, "Invalid tenant ID format"),
             ExtractorError::InvalidPath => write!(f, "Invalid path format"),
             ExtractorError::InvalidEntityId => write!(f, "Invalid entity ID format"),
             ExtractorError::RouteNotFound(route) => write!(f, "Route not found: {}", route),
@@ -58,8 +40,6 @@ impl std::error::Error for ExtractorError {}
 impl IntoResponse for ExtractorError {
     fn into_response(self) -> Response {
         let (status, message) = match self {
-            ExtractorError::MissingTenantId => (StatusCode::BAD_REQUEST, self.to_string()),
-            ExtractorError::InvalidTenantId => (StatusCode::BAD_REQUEST, self.to_string()),
             ExtractorError::InvalidPath => (StatusCode::BAD_REQUEST, self.to_string()),
             ExtractorError::InvalidEntityId => (StatusCode::BAD_REQUEST, self.to_string()),
             ExtractorError::RouteNotFound(_) => (StatusCode::NOT_FOUND, self.to_string()),
@@ -77,7 +57,6 @@ impl IntoResponse for ExtractorError {
 /// Supports both forward and reverse navigation.
 #[derive(Debug, Clone)]
 pub struct LinkExtractor {
-    pub tenant_id: Uuid,
     pub entity_id: Uuid,
     pub entity_type: String,
     pub link_definition: LinkDefinition,
@@ -93,7 +72,6 @@ impl LinkExtractor {
         path_parts: (String, Uuid, String),
         registry: &LinkRouteRegistry,
         config: &LinksConfig,
-        tenant_id: Uuid,
     ) -> Result<Self, ExtractorError> {
         let (entity_type_plural, entity_id, route_name) = path_parts;
 
@@ -111,7 +89,6 @@ impl LinkExtractor {
             .map_err(|_| ExtractorError::RouteNotFound(route_name.clone()))?;
 
         Ok(Self {
-            tenant_id,
             entity_id,
             entity_type,
             link_definition,
@@ -122,16 +99,17 @@ impl LinkExtractor {
 
 /// Extractor for direct link creation/deletion/update
 ///
-/// NEW Format: `/{source_type}/{source_id}/{route_name}/{target_id}`
+/// Format: `/{source_type}/{source_id}/{route_name}/{target_id}`
 /// Example: `/users/123.../cars-owned/456...`
 ///
 /// This uses the route_name (e.g., "cars-owned") instead of link_type (e.g., "owner")
 /// to provide more semantic and RESTful URLs.
 #[derive(Debug, Clone)]
 pub struct DirectLinkExtractor {
-    pub tenant_id: Uuid,
-    pub source: EntityReference,
-    pub target: EntityReference,
+    pub source_id: Uuid,
+    pub source_type: String,
+    pub target_id: Uuid,
+    pub target_type: String,
     pub link_definition: LinkDefinition,
     pub direction: LinkDirection,
 }
@@ -139,7 +117,7 @@ pub struct DirectLinkExtractor {
 impl DirectLinkExtractor {
     /// Parse a direct link path using route_name
     ///
-    /// NEW: path_parts = (source_type_plural, source_id, route_name, target_id)
+    /// path_parts = (source_type_plural, source_id, route_name, target_id)
     ///
     /// The route_name is resolved to a link definition using the LinkRouteRegistry,
     /// which handles both forward and reverse navigation automatically.
@@ -147,7 +125,6 @@ impl DirectLinkExtractor {
         path_parts: (String, Uuid, String, Uuid),
         registry: &LinkRouteRegistry,
         config: &LinksConfig,
-        tenant_id: Uuid,
     ) -> Result<Self, ExtractorError> {
         let (source_type_plural, source_id, route_name, target_id) = path_parts;
 
@@ -170,13 +147,11 @@ impl DirectLinkExtractor {
             LinkDirection::Reverse => link_definition.source_type.clone(),
         };
 
-        let source = EntityReference::new(source_id, source_type);
-        let target = EntityReference::new(target_id, target_type);
-
         Ok(Self {
-            tenant_id,
-            source,
-            target,
+            source_id,
+            source_type,
+            target_id,
+            target_type,
             link_definition,
             direction,
         })

@@ -9,7 +9,7 @@ use crate::entities::{
 use crate::store::EntityStore;
 use anyhow::Result;
 use std::sync::Arc;
-use this::prelude::{EntityFetcher, EntityRegistry, LinksConfig, Module};
+use this::prelude::{EntityCreator, EntityFetcher, EntityRegistry, LinksConfig, Module};
 
 /// Billing microservice module
 ///
@@ -69,6 +69,15 @@ impl Module for BillingModule {
             "order" => Some(Arc::new(self.store.orders.clone()) as Arc<dyn EntityFetcher>),
             "invoice" => Some(Arc::new(self.store.invoices.clone()) as Arc<dyn EntityFetcher>),
             "payment" => Some(Arc::new(self.store.payments.clone()) as Arc<dyn EntityFetcher>),
+            _ => None,
+        }
+    }
+
+    fn get_entity_creator(&self, entity_type: &str) -> Option<Arc<dyn EntityCreator>> {
+        match entity_type {
+            "order" => Some(Arc::new(self.store.orders.clone()) as Arc<dyn EntityCreator>),
+            "invoice" => Some(Arc::new(self.store.invoices.clone()) as Arc<dyn EntityCreator>),
+            "payment" => Some(Arc::new(self.store.payments.clone()) as Arc<dyn EntityCreator>),
             _ => None,
         }
     }
