@@ -42,7 +42,7 @@ async fn main() -> Result<()> {
     // Build the application with auto-generated routes
     // Important: Use the same link service instance with the test data
     let app = ServerBuilder::new()
-        .with_link_service(link_service_arc.as_ref().clone())
+        .with_link_service((*link_service_arc).clone())
         .register_module(module)?
         .build()?;
 
