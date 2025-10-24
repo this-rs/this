@@ -319,20 +319,40 @@ pub async fn get_link_by_route(
         &state.config,
     )?;
 
-    // Find the specific link
-    let existing_links = state
-        .link_service
-        .find_by_source(
-            &extractor.source_id,
-            Some(&extractor.link_definition.link_type),
-            Some(&extractor.target_type),
-        )
-        .await
-        .map_err(|e| ExtractorError::JsonError(e.to_string()))?;
+    // Find the specific link based on direction
+    let existing_links = match extractor.direction {
+        LinkDirection::Forward => {
+            // Forward: search by source_id in URL
+            state
+                .link_service
+                .find_by_source(
+                    &extractor.source_id,
+                    Some(&extractor.link_definition.link_type),
+                    Some(&extractor.target_type),
+                )
+                .await
+                .map_err(|e| ExtractorError::JsonError(e.to_string()))?
+        }
+        LinkDirection::Reverse => {
+            // Reverse: search by target_id in URL (which is the actual source in DB)
+            state
+                .link_service
+                .find_by_source(
+                    &extractor.target_id,
+                    Some(&extractor.link_definition.link_type),
+                    Some(&extractor.source_type),
+                )
+                .await
+                .map_err(|e| ExtractorError::JsonError(e.to_string()))?
+        }
+    };
 
     let link = existing_links
         .into_iter()
-        .find(|link| link.target_id == extractor.target_id)
+        .find(|link| match extractor.direction {
+            LinkDirection::Forward => link.target_id == extractor.target_id,
+            LinkDirection::Reverse => link.target_id == extractor.source_id,
+        })
         .ok_or(ExtractorError::LinkNotFound)?;
 
     // Enrich with both source and target entities
