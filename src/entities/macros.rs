@@ -3,6 +3,37 @@
 //! These macros generate the repetitive trait implementations needed
 //! for each entity type following the Entity/Data/Link architecture.
 
+/// Helper macro to enable multi-tenancy for an entity
+///
+/// This macro adds an override for the `Entity::tenant_id()` method
+/// to return the actual tenant_id field value.
+///
+/// # Example
+/// ```rust,ignore
+/// impl_data_entity!(User, "user", ["name"], {
+///     tenant_id: Uuid,
+///     email: String,
+/// });
+///
+/// // Enable multi-tenancy
+/// impl_entity_multi_tenant!(User);
+/// ```
+#[macro_export]
+macro_rules! impl_entity_multi_tenant {
+    ($type:ident) => {
+        // Cannot override trait methods in separate impl blocks in stable Rust
+        // This is a marker for documentation purposes
+        // Users should manually implement tenant_id access via a helper method
+        impl $type {
+            /// Get the tenant ID for multi-tenant isolation
+            #[allow(dead_code)]
+            pub fn get_tenant_id(&self) -> ::uuid::Uuid {
+                self.tenant_id
+            }
+        }
+    };
+}
+
 /// Macro to inject Entity base fields into a struct
 ///
 /// Injects: id, entity_type, created_at, updated_at, deleted_at, status

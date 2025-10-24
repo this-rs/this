@@ -30,6 +30,13 @@ pub struct LinkEntity {
     /// Status of the link
     pub status: String,
 
+    /// Optional tenant ID for multi-tenant isolation
+    ///
+    /// When set, this link belongs to a specific tenant.
+    /// When None, the link is treated as system-wide or single-tenant.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tenant_id: Option<Uuid>,
+
     /// The type of relationship (e.g., "owner", "driver", "worker")
     pub link_type: String,
 
@@ -44,7 +51,9 @@ pub struct LinkEntity {
 }
 
 impl LinkEntity {
-    /// Create a new link
+    /// Create a new link without tenant context
+    ///
+    /// For multi-tenant applications, use `new_with_tenant()` instead.
     pub fn new(
         link_type: impl Into<String>,
         source_id: Uuid,
@@ -59,6 +68,48 @@ impl LinkEntity {
             updated_at: now,
             deleted_at: None,
             status: "active".to_string(),
+            tenant_id: None,
+            link_type: link_type.into(),
+            source_id,
+            target_id,
+            metadata,
+        }
+    }
+
+    /// Create a new link with tenant context for multi-tenant applications
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// use uuid::Uuid;
+    /// use this::core::link::LinkEntity;
+    ///
+    /// let tenant_id = Uuid::new_v4();
+    /// let link = LinkEntity::new_with_tenant(
+    ///     tenant_id,
+    ///     "has_invoice",
+    ///     order_id,
+    ///     invoice_id,
+    ///     None,
+    /// );
+    /// assert_eq!(link.tenant_id, Some(tenant_id));
+    /// ```
+    pub fn new_with_tenant(
+        tenant_id: Uuid,
+        link_type: impl Into<String>,
+        source_id: Uuid,
+        target_id: Uuid,
+        metadata: Option<serde_json::Value>,
+    ) -> Self {
+        let now = Utc::now();
+        Self {
+            id: Uuid::new_v4(),
+            entity_type: "link".to_string(),
+            created_at: now,
+            updated_at: now,
+            deleted_at: None,
+            status: "active".to_string(),
+            tenant_id: Some(tenant_id),
             link_type: link_type.into(),
             source_id,
             target_id,
@@ -201,9 +252,82 @@ mod tests {
         assert_eq!(link.source_id, user_id);
         assert_eq!(link.target_id, car_id);
         assert!(link.metadata.is_none());
+        assert!(link.tenant_id.is_none());
         assert_eq!(link.status, "active");
         assert!(!link.is_deleted());
         assert!(link.is_active());
+    }
+
+    #[test]
+    fn test_link_creation_without_tenant() {
+        let user_id = Uuid::new_v4();
+        let car_id = Uuid::new_v4();
+
+        let link = LinkEntity::new("owner", user_id, car_id, None);
+
+        // Default behavior: no tenant
+        assert!(link.tenant_id.is_none());
+    }
+
+    #[test]
+    fn test_link_creation_with_tenant() {
+        let tenant_id = Uuid::new_v4();
+        let user_id = Uuid::new_v4();
+        let car_id = Uuid::new_v4();
+
+        let link = LinkEntity::new_with_tenant(tenant_id, "owner", user_id, car_id, None);
+
+        assert_eq!(link.link_type, "owner");
+        assert_eq!(link.source_id, user_id);
+        assert_eq!(link.target_id, car_id);
+        assert_eq!(link.tenant_id, Some(tenant_id));
+        assert_eq!(link.status, "active");
+    }
+
+    #[test]
+    fn test_link_with_tenant_and_metadata() {
+        let tenant_id = Uuid::new_v4();
+        let user_id = Uuid::new_v4();
+        let company_id = Uuid::new_v4();
+
+        let metadata = serde_json::json!({
+            "role": "Senior Developer",
+            "start_date": "2024-01-01"
+        });
+
+        let link = LinkEntity::new_with_tenant(
+            tenant_id,
+            "worker",
+            user_id,
+            company_id,
+            Some(metadata.clone()),
+        );
+
+        assert_eq!(link.tenant_id, Some(tenant_id));
+        assert_eq!(link.metadata, Some(metadata));
+    }
+
+    #[test]
+    fn test_link_serialization_without_tenant() {
+        let link = LinkEntity::new("owner", Uuid::new_v4(), Uuid::new_v4(), None);
+        let json = serde_json::to_value(&link).unwrap();
+
+        // tenant_id should not appear in JSON when None (skip_serializing_if)
+        assert!(json.get("tenant_id").is_none());
+    }
+
+    #[test]
+    fn test_link_serialization_with_tenant() {
+        let tenant_id = Uuid::new_v4();
+        let link =
+            LinkEntity::new_with_tenant(tenant_id, "owner", Uuid::new_v4(), Uuid::new_v4(), None);
+        let json = serde_json::to_value(&link).unwrap();
+
+        // tenant_id should appear in JSON when Some
+        assert_eq!(
+            json.get("tenant_id").and_then(|v| v.as_str()),
+            Some(tenant_id.to_string().as_str())
+        );
     }
 
     #[test]

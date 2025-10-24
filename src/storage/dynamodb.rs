@@ -25,6 +25,85 @@ impl<T: Data + serde::Serialize + for<'de> serde::Deserialize<'de>> DynamoDBData
         }
     }
 
+    /// List entities by tenant ID using DynamoDB Query (efficient for multi-tenant tables)
+    ///
+    /// This method uses Query instead of Scan, which is much more efficient when
+    /// `tenant_id` is the partition key or part of a GSI.
+    ///
+    /// # Arguments
+    /// * `tenant_id` - The tenant ID to query for
+    ///
+    /// # Table Structure Requirements
+    /// This method assumes one of the following table structures:
+    /// - Partition key: `tenant_id`, Sort key: `id` (or any other)
+    /// - A Global Secondary Index (GSI) with `tenant_id` as partition key
+    ///
+    /// # Example
+    /// ```rust,ignore
+    /// let service = DynamoDBDataService::new(client, "users".to_string());
+    /// let tenant_id = Uuid::parse_str("...")?;
+    /// let users = service.list_by_tenant(&tenant_id).await?;
+    /// ```
+    pub async fn list_by_tenant(&self, tenant_id: &Uuid) -> Result<Vec<T>>
+    where
+        T: Data + Send + Sync + 'static,
+    {
+        let result = self
+            .client
+            .query()
+            .table_name(&self.table_name)
+            .key_condition_expression("tenant_id = :tenant_id")
+            .expression_attribute_values(":tenant_id", AttributeValue::S(tenant_id.to_string()))
+            .send()
+            .await?;
+
+        let mut entities = Vec::new();
+        if let Some(items) = result.items {
+            for item in items {
+                entities.push(self.item_to_entity(&item).await?);
+            }
+        }
+        Ok(entities)
+    }
+
+    /// List entities by tenant ID using a specific GSI (Global Secondary Index)
+    ///
+    /// Use this method when `tenant_id` is indexed via a GSI rather than being
+    /// the primary partition key.
+    ///
+    /// # Arguments
+    /// * `tenant_id` - The tenant ID to query for
+    /// * `index_name` - Name of the GSI with tenant_id as partition key
+    ///
+    /// # Example
+    /// ```rust,ignore
+    /// let service = DynamoDBDataService::new(client, "users".to_string());
+    /// let tenant_id = Uuid::parse_str("...")?;
+    /// let users = service.list_by_tenant_gsi(&tenant_id, "tenant_id-index").await?;
+    /// ```
+    pub async fn list_by_tenant_gsi(&self, tenant_id: &Uuid, index_name: &str) -> Result<Vec<T>>
+    where
+        T: Data + Send + Sync + 'static,
+    {
+        let result = self
+            .client
+            .query()
+            .table_name(&self.table_name)
+            .index_name(index_name)
+            .key_condition_expression("tenant_id = :tenant_id")
+            .expression_attribute_values(":tenant_id", AttributeValue::S(tenant_id.to_string()))
+            .send()
+            .await?;
+
+        let mut entities = Vec::new();
+        if let Some(items) = result.items {
+            for item in items {
+                entities.push(self.item_to_entity(&item).await?);
+            }
+        }
+        Ok(entities)
+    }
+
     async fn entity_to_item(&self, entity: &T) -> Result<HashMap<String, AttributeValue>> {
         // Convert entity to JSON first, then to DynamoDB format
         let json = serde_json::to_value(entity)?;
@@ -188,6 +267,115 @@ pub struct DynamoDBLinkService {
 impl DynamoDBLinkService {
     pub fn new(client: DynamoDBClient, table_name: String) -> Self {
         Self { client, table_name }
+    }
+
+    /// List links by tenant ID using DynamoDB Query (efficient for multi-tenant link tables)
+    ///
+    /// This method uses Query instead of Scan, which is much more efficient when
+    /// `tenant_id` is the partition key of the links table.
+    ///
+    /// # Arguments
+    /// * `tenant_id` - The tenant ID to query for
+    ///
+    /// # Table Structure Requirements
+    /// - Partition key: `tenant_id`, Sort key: `id` (recommended for multi-tenant)
+    /// - Or a GSI with `tenant_id` as partition key (use `list_links_by_tenant_gsi` instead)
+    ///
+    /// # Example
+    /// ```rust,ignore
+    /// let service = DynamoDBLinkService::new(client, "links".to_string());
+    /// let tenant_id = Uuid::parse_str("...")?;
+    /// let links = service.list_links_by_tenant(&tenant_id).await?;
+    /// ```
+    pub async fn list_links_by_tenant(&self, tenant_id: &Uuid) -> Result<Vec<LinkEntity>> {
+        let result = self
+            .client
+            .query()
+            .table_name(&self.table_name)
+            .key_condition_expression("tenant_id = :tenant_id")
+            .expression_attribute_values(":tenant_id", AttributeValue::S(tenant_id.to_string()))
+            .send()
+            .await?;
+
+        let mut links = Vec::new();
+        if let Some(items) = result.items {
+            for item in items {
+                links.push(self.item_to_link(&item).await?);
+            }
+        }
+        Ok(links)
+    }
+
+    /// List links by tenant ID using a specific GSI
+    ///
+    /// # Arguments
+    /// * `tenant_id` - The tenant ID to query for
+    /// * `index_name` - Name of the GSI with tenant_id as partition key
+    pub async fn list_links_by_tenant_gsi(
+        &self,
+        tenant_id: &Uuid,
+        index_name: &str,
+    ) -> Result<Vec<LinkEntity>> {
+        let result = self
+            .client
+            .query()
+            .table_name(&self.table_name)
+            .index_name(index_name)
+            .key_condition_expression("tenant_id = :tenant_id")
+            .expression_attribute_values(":tenant_id", AttributeValue::S(tenant_id.to_string()))
+            .send()
+            .await?;
+
+        let mut links = Vec::new();
+        if let Some(items) = result.items {
+            for item in items {
+                links.push(self.item_to_link(&item).await?);
+            }
+        }
+        Ok(links)
+    }
+
+    /// Find links by source entity within a specific tenant (using Query)
+    ///
+    /// More efficient than `find_by_source` when used in multi-tenant context.
+    /// Requires a composite GSI with (tenant_id, source_id) or table structure
+    /// that supports this query pattern.
+    pub async fn find_by_source_and_tenant(
+        &self,
+        tenant_id: &Uuid,
+        source_id: &Uuid,
+        link_type: Option<&str>,
+    ) -> Result<Vec<LinkEntity>> {
+        // Build the filter expression for link_type if provided
+        let mut query = self
+            .client
+            .query()
+            .table_name(&self.table_name)
+            .key_condition_expression("tenant_id = :tenant_id")
+            .expression_attribute_values(":tenant_id", AttributeValue::S(tenant_id.to_string()));
+
+        // Add filter for source_id
+        let mut filter_parts = vec!["source_id = :source_id".to_string()];
+        query = query
+            .expression_attribute_values(":source_id", AttributeValue::S(source_id.to_string()));
+
+        // Add optional link_type filter
+        if let Some(lt) = link_type {
+            filter_parts.push("link_type = :link_type".to_string());
+            query =
+                query.expression_attribute_values(":link_type", AttributeValue::S(lt.to_string()));
+        }
+
+        let filter_expression = filter_parts.join(" AND ");
+        let result = query.filter_expression(filter_expression).send().await?;
+
+        let mut links = Vec::new();
+        if let Some(items) = result.items {
+            for item in items {
+                links.push(self.item_to_link(&item).await?);
+            }
+        }
+        Ok(links)
     }
 
     async fn link_to_item(&self, link: &LinkEntity) -> Result<HashMap<String, AttributeValue>> {

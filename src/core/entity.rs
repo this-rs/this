@@ -51,6 +51,24 @@ pub trait Entity: Clone + Send + Sync + 'static {
 
     // === Utility Methods ===
 
+    /// Get the tenant ID for multi-tenant isolation.
+    ///
+    /// Returns None by default for single-tenant applications or system-wide entities.
+    /// Override this method to enable multi-tenancy for specific entity types.
+    ///
+    /// # Multi-Tenant Usage
+    ///
+    /// ```rust,ignore
+    /// impl Entity for MyEntity {
+    ///     fn tenant_id(&self) -> Option<Uuid> {
+    ///         self.tenant_id  // Return actual tenant_id field
+    ///     }
+    /// }
+    /// ```
+    fn tenant_id(&self) -> Option<Uuid> {
+        None
+    }
+
     /// Check if the entity has been soft-deleted
     fn is_deleted(&self) -> bool {
         self.deleted_at().is_some()
