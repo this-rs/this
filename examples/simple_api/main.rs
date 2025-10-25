@@ -107,13 +107,13 @@ async fn main() -> Result<()> {
 
     // Show metadata example
     for link in tesla_drivers {
-        if link.source_id == bob.id {
-            if let Some(metadata) = &link.metadata {
-                println!(
-                    "   Bob's permissions: {}",
-                    serde_json::to_string_pretty(metadata)?
-                );
-            }
+        if link.source_id == bob.id
+            && let Some(metadata) = &link.metadata
+        {
+            println!(
+                "   Bob's permissions: {}",
+                serde_json::to_string_pretty(metadata)?
+            );
         }
     }
 

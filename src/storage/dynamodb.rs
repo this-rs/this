@@ -1,10 +1,10 @@
 //! DynamoDB implementation of DataService and LinkService
 
-use crate::core::{link::LinkEntity, Data, DataService, LinkService};
+use crate::core::{Data, DataService, LinkService, link::LinkEntity};
 use anyhow::Result;
 use async_trait::async_trait;
-use aws_sdk_dynamodb::types::AttributeValue;
 use aws_sdk_dynamodb::Client as DynamoDBClient;
+use aws_sdk_dynamodb::types::AttributeValue;
 use std::collections::HashMap;
 use uuid::Uuid;
 

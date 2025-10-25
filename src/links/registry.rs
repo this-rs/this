@@ -5,7 +5,7 @@
 
 use crate::config::LinksConfig;
 use crate::core::LinkDefinition;
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use std::collections::HashMap;
 use std::sync::Arc;
 

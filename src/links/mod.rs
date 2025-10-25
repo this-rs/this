@@ -6,5 +6,5 @@
 pub mod handlers;
 pub mod registry;
 
-pub use handlers::{create_link, delete_link, list_available_links, list_links, AppState};
+pub use handlers::{AppState, create_link, delete_link, list_available_links, list_links};
 pub use registry::{LinkDirection, LinkRouteRegistry, RouteInfo};
