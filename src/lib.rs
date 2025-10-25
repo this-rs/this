@@ -77,8 +77,8 @@ pub mod prelude {
     // === Link Handlers ===
     pub use crate::links::{
         handlers::{
-            create_link, delete_link, get_link, list_available_links, list_links, update_link,
-            AppState,
+            AppState, create_link, delete_link, get_link, list_available_links, list_links,
+            update_link,
         },
         registry::{LinkDirection, LinkRouteRegistry, RouteInfo},
     };
@@ -103,9 +103,9 @@ pub mod prelude {
 
     // === Axum ===
     pub use axum::{
+        Router,
         extract::{Path, State},
         http::HeaderMap,
         routing::{delete, get, post, put},
-        Router,
     };
 }

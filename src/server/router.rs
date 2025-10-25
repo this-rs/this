@@ -1,10 +1,10 @@
 //! Router builder utilities for link routes
 
 use crate::links::handlers::{
-    create_link, create_linked_entity, delete_link, get_link, get_link_by_route,
-    list_available_links, list_links, update_link, AppState,
+    AppState, create_link, create_linked_entity, delete_link, get_link, get_link_by_route,
+    list_available_links, list_links, update_link,
 };
-use axum::{routing::get, Router};
+use axum::{Router, routing::get};
 
 /// Build link routes from configuration
 ///

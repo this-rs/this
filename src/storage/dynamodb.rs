@@ -1,10 +1,10 @@
 //! DynamoDB implementation of DataService and LinkService
 
-use crate::core::{link::LinkEntity, Data, DataService, LinkService};
+use crate::core::{Data, DataService, LinkService, link::LinkEntity};
 use anyhow::Result;
 use async_trait::async_trait;
-use aws_sdk_dynamodb::types::AttributeValue;
 use aws_sdk_dynamodb::Client as DynamoDBClient;
+use aws_sdk_dynamodb::types::AttributeValue;
 use std::collections::HashMap;
 use uuid::Uuid;
 
@@ -66,6 +66,45 @@ impl<T: Data + serde::Serialize + for<'de> serde::Deserialize<'de>> DynamoDBData
         Ok(entities)
     }
 
+    /// Get an entity by tenant_id and id (for tables with composite keys)
+    ///
+    /// This method is used when the table has a composite primary key:
+    /// - Partition key: `tenant_id`
+    /// - Sort key: `id`
+    ///
+    /// # Example
+    /// ```rust,ignore
+    /// let service = DynamoDBDataService::new(client, "tenants".to_string());
+    /// let tenant_id = Uuid::parse_str("...")?;
+    /// let id = Uuid::parse_str("...")?;
+    /// let tenant = service.get_with_tenant(&tenant_id, &id).await?;
+    /// ```
+    pub async fn get_with_tenant(&self, tenant_id: &Uuid, id: &Uuid) -> Result<Option<T>>
+    where
+        T: Data + Send + Sync + 'static,
+    {
+        let key = HashMap::from([
+            (
+                "tenant_id".to_string(),
+                AttributeValue::S(tenant_id.to_string()),
+            ),
+            ("id".to_string(), AttributeValue::S(id.to_string())),
+        ]);
+
+        let result = self
+            .client
+            .get_item()
+            .table_name(&self.table_name)
+            .set_key(Some(key))
+            .send()
+            .await?;
+
+        match result.item() {
+            Some(item) => Ok(Some(self.item_to_entity(item).await?)),
+            None => Ok(None),
+        }
+    }
+
     /// List entities by tenant ID using a specific GSI (Global Secondary Index)
     ///
     /// Use this method when `tenant_id` is indexed via a GSI rather than being
@@ -123,6 +162,28 @@ impl<T: Data + serde::Serialize + for<'de> serde::Deserialize<'de>> DynamoDBData
                     item.insert(key.clone(), AttributeValue::N(num_val.to_string()));
                 } else if let Some(bool_val) = value.as_bool() {
                     item.insert(key.clone(), AttributeValue::Bool(bool_val));
+                } else if let Some(arr) = value.as_array() {
+                    // Handle arrays by converting to DynamoDB List
+                    let list_items: Vec<AttributeValue> = arr
+                        .iter()
+                        .filter_map(|v| {
+                            if let Some(s) = v.as_str() {
+                                Some(AttributeValue::S(s.to_string()))
+                            } else if let Some(n) = v.as_f64() {
+                                Some(AttributeValue::N(n.to_string()))
+                            } else {
+                                v.as_bool().map(AttributeValue::Bool)
+                            }
+                        })
+                        .collect();
+                    if !list_items.is_empty() {
+                        item.insert(key.clone(), AttributeValue::L(list_items));
+                    }
+                } else if value.is_null() {
+                    // Skip null values
+                } else {
+                    // For complex types (objects, etc.), serialize as JSON string
+                    item.insert(key.clone(), AttributeValue::S(value.to_string()));
                 }
             }
         }
@@ -150,8 +211,25 @@ impl<T: Data + serde::Serialize + for<'de> serde::Deserialize<'de>> DynamoDBData
                 AttributeValue::Bool(b) => {
                     json.insert(key.clone(), serde_json::Value::Bool(*b));
                 }
+                AttributeValue::L(list) => {
+                    // Handle DynamoDB lists by converting to JSON array
+                    let json_array: Vec<serde_json::Value> = list
+                        .iter()
+                        .filter_map(|item| match item {
+                            AttributeValue::S(s) => Some(serde_json::Value::String(s.clone())),
+                            AttributeValue::N(n) => n
+                                .parse::<f64>()
+                                .ok()
+                                .and_then(serde_json::Number::from_f64)
+                                .map(serde_json::Value::Number),
+                            AttributeValue::Bool(b) => Some(serde_json::Value::Bool(*b)),
+                            _ => None,
+                        })
+                        .collect();
+                    json.insert(key.clone(), serde_json::Value::Array(json_array));
+                }
                 _ => {
-                    // Skip complex types for now
+                    // Skip other complex types for now
                 }
             }
         }
