@@ -4,7 +4,7 @@ use super::{
     create_invoice, delete_invoice, get_invoice, handlers::InvoiceAppState, list_invoices,
     store::InvoiceStore, update_invoice,
 };
-use axum::{routing::get, Router};
+use axum::{Router, routing::get};
 use this::prelude::EntityDescriptor;
 
 /// Descriptor for the Invoice entity

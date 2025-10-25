@@ -4,7 +4,7 @@ use super::{
     create_order, delete_order, get_order, handlers::OrderAppState, list_orders, store::OrderStore,
     update_order,
 };
-use axum::{routing::get, Router};
+use axum::{Router, routing::get};
 use this::prelude::EntityDescriptor;
 
 /// Descriptor for the Order entity

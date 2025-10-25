@@ -4,7 +4,7 @@ use super::{
     create_payment, delete_payment, get_payment, handlers::PaymentAppState, list_payments,
     store::PaymentStore, update_payment,
 };
-use axum::{routing::get, Router};
+use axum::{Router, routing::get};
 use this::prelude::EntityDescriptor;
 
 /// Descriptor for the Payment entity

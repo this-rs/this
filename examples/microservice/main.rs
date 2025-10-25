@@ -77,7 +77,9 @@ async fn main() -> Result<()> {
         "    POST   /{{entity}}/{{id}}/{{route_name}}        - Create new entity + link automatically ✅"
     );
     println!("    GET    /{{source}}/{{id}}/{{route_name}}/{{target_id}}  - Get a specific link");
-    println!("    POST   /{{source}}/{{id}}/{{route_name}}/{{target_id}}  - Create link between existing entities");
+    println!(
+        "    POST   /{{source}}/{{id}}/{{route_name}}/{{target_id}}  - Create link between existing entities"
+    );
     println!("    PUT    /{{source}}/{{id}}/{{route_name}}/{{target_id}}  - Update link metadata");
     println!("    DELETE /{{source}}/{{id}}/{{route_name}}/{{target_id}}  - Delete a link");
     println!(

@@ -1,6 +1,6 @@
 //! Service traits for data and link operations
 
-use crate::core::{link::LinkEntity, Data};
+use crate::core::{Data, link::LinkEntity};
 use anyhow::Result;
 use async_trait::async_trait;
 use uuid::Uuid;

@@ -1,7 +1,7 @@
 //! In-memory implementation of LinkService for testing and development
 
-use crate::core::{link::LinkEntity, LinkService};
-use anyhow::{anyhow, Result};
+use crate::core::{LinkService, link::LinkEntity};
+use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};

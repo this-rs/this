@@ -4,9 +4,9 @@
 //! - Deserialize and validate entities from request bodies
 //! - Parse link routes and resolve definitions
 
+use axum::Json;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use axum::Json;
 use uuid::Uuid;
 
 use crate::config::LinksConfig;

@@ -4,10 +4,10 @@
 //! All handlers are completely entity-agnostic.
 
 use axum::{
+    Json,
     extract::{Path, State},
     http::StatusCode,
     response::{IntoResponse, Response},
-    Json,
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -17,7 +17,7 @@ use uuid::Uuid;
 
 use crate::config::LinksConfig;
 use crate::core::extractors::{DirectLinkExtractor, ExtractorError, LinkExtractor};
-use crate::core::{link::LinkEntity, EntityCreator, EntityFetcher, LinkDefinition, LinkService};
+use crate::core::{EntityCreator, EntityFetcher, LinkDefinition, LinkService, link::LinkEntity};
 use crate::links::registry::{LinkDirection, LinkRouteRegistry};
 
 /// Application state shared across handlers
