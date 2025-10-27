@@ -9,7 +9,8 @@
 
 ### ✅ Validation and Filtering
 
-- **[Validation and Filtering](guides/VALIDATION_AND_FILTERING.md)** - 🆕 Automatic data validation and filtering
+- **[Validation and Filtering](guides/VALIDATION_AND_FILTERING.md)** - Automatic data validation and filtering
+- **[Pagination and Filtering](guides/PAGINATION_AND_FILTERING.md)** - 🆕 Generic pagination and query filtering
 
 ### 🔗 Link Management
 
@@ -27,10 +28,10 @@
 
 ### 📝 Change History
 
-- **[Semantic URLs](changes/SEMANTIC_URLS.md)** - 🆕 Coherent URLs for link operations
+- **[Latest Changes](changes/LATEST_CHANGES.md)** - 🆕 Latest major changes (Pagination & Validation)
+- **[Semantic URLs](changes/SEMANTIC_URLS.md)** - Coherent URLs for link operations
 - **[Enriched Links Implementation](changes/ENRICHED_LINKS_IMPLEMENTATION.md)** - Enrichment implementation
 - **[Auto-Routing Success](changes/AUTO_ROUTING_SUCCESS.md)** - Auto-routing implementation
-- **[Latest Changes](changes/LATEST_CHANGES.md)** - Latest major changes
 - **[Module Restructuring](changes/MODULE_RESTRUCTURING.md)** - Module restructuring
 - **[Store Simplification](changes/STORE_SIMPLIFICATION.md)** - Store simplification
 - **[Entity Folders Structure](changes/ENTITY_FOLDERS_STRUCTURE.md)** - Folder organization
@@ -67,7 +68,8 @@ docs/
 ├── guides/                      # User guides
 │   ├── GETTING_STARTED.md
 │   ├── QUICK_START.md
-│   ├── VALIDATION_AND_FILTERING.md  # 🆕 Validation and filtering
+│   ├── VALIDATION_AND_FILTERING.md  # Data validation and filtering
+│   ├── PAGINATION_AND_FILTERING.md  # 🆕 Pagination and query filtering
 │   ├── ENRICHED_LINKS.md       # Auto-enrichment of links
 │   ├── LINK_AUTHORIZATION.md
 │   ├── LINK_METADATA.md

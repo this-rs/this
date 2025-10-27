@@ -185,12 +185,12 @@ Create `src/entities/user/handlers.rs`:
 ```rust
 use super::{model::User, store::UserStore};
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     Json,
 };
 use serde_json::Value;
-use this::prelude::Validated;
+use this::prelude::{Validated, QueryParams, PaginatedResponse, PaginationMeta};
 use uuid::Uuid;
 
 #[derive(Clone)]
@@ -200,8 +200,34 @@ pub struct UserAppState {
 
 pub async fn list_users(
     State(state): State<UserAppState>,
-) -> Result<Json<Vec<User>>, StatusCode> {
-    Ok(Json(state.store.list()))
+    Query(params): Query<QueryParams>,
+) -> Json<PaginatedResponse<Value>> {
+    let page = params.page();
+    let limit = params.limit();
+    
+    // Get all users
+    let mut users = state.store.list();
+    
+    // Apply filters if provided
+    if let Some(filter) = params.filter_value() {
+        users = state.store.apply_filters(users, &filter);
+    }
+    
+    let total = users.len();
+    
+    // ALWAYS paginate
+    let start = (page - 1) * limit;
+    let paginated: Vec<Value> = users
+        .into_iter()
+        .skip(start)
+        .take(limit)
+        .map(|user| serde_json::to_value(user).unwrap())
+        .collect();
+    
+    Json(PaginatedResponse {
+        data: paginated,
+        pagination: PaginationMeta::new(page, limit, total),
+    })
 }
 
 pub async fn get_user(
@@ -588,7 +614,8 @@ impl_data_entity!(User, "user", ["name", "email"], {
 ## 📚 Next Steps
 
 - [Quick Start Guide](QUICK_START.md) - Fast intro
-- [Validation & Filtering](VALIDATION_AND_FILTERING.md) - 🆕 Automatic data validation
+- [Validation & Filtering](VALIDATION_AND_FILTERING.md) - Automatic data validation
+- [Pagination & Filtering](PAGINATION_AND_FILTERING.md) - 🆕 Generic pagination and query filtering
 - [Enriched Links](ENRICHED_LINKS.md) - Link enrichment details
 - [Multi-Level Navigation](MULTI_LEVEL_NAVIGATION.md) - Complex relationships
 - [Architecture](../architecture/ARCHITECTURE.md) - Technical deep dive

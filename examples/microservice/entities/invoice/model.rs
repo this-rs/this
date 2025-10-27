@@ -16,7 +16,6 @@ impl_data_entity_validated!(
     // Validation rules per operation
     validate: {
         create: {
-
             number: [required string_length(3, 50)],
             amount: [required positive max_value(1_000_000.0)],
             status: [required in_list("draft", "sent", "paid", "cancelled")],

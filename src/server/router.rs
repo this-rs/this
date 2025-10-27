@@ -1,10 +1,11 @@
 //! Router builder utilities for link routes
 
+use crate::core::query::QueryParams;
 use crate::links::handlers::{
     AppState, create_link, create_linked_entity, delete_link, get_link, get_link_by_route,
     handle_nested_path_get, list_available_links, list_links, update_link,
 };
-use axum::{Router, routing::get};
+use axum::{Router, extract::Query, routing::get};
 
 /// Build link routes from configuration
 ///
@@ -38,31 +39,35 @@ pub fn build_link_routes(state: AppState) -> Router {
         Uuid,
         String,
     )>,
+                         Query(params): Query<QueryParams>,
                          req: Request| async move {
         let path = req.uri().path();
         let segments: Vec<&str> = path.trim_matches('/').split('/').collect();
 
         // Si plus de 3 segments, c'est une route imbriquée à 3+ niveaux
         if segments.len() >= 5 {
-            // Utiliser le handler générique pour chemins profonds
-            handle_nested_path_get(AxumState(state), AxumPath(path.to_string()))
+            // Utiliser le handler générique pour chemins profonds (with pagination)
+            handle_nested_path_get(AxumState(state), AxumPath(path.to_string()), Query(params))
                 .await
                 .map(|r| r.into_response())
         } else {
-            // Route classique à 2 niveaux
+            // Route classique à 2 niveaux - with pagination
             list_links(
                 AxumState(state),
                 AxumPath((entity_type_plural, entity_id, route_name)),
+                Query(params),
             )
             .await
             .map(|r| r.into_response())
         }
     };
 
-    // Handler fallback pour les autres cas
-    let fallback_handler = |AxumState(state): AxumState<AppState>, req: Request| async move {
+    // Handler fallback pour les autres cas (with pagination)
+    let fallback_handler = |AxumState(state): AxumState<AppState>,
+                            Query(params): Query<QueryParams>,
+                            req: Request| async move {
         let path = req.uri().path().to_string();
-        handle_nested_path_get(AxumState(state), AxumPath(path))
+        handle_nested_path_get(AxumState(state), AxumPath(path), Query(params))
             .await
             .map(|r| r.into_response())
     };
