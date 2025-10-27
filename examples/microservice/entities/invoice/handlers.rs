@@ -7,6 +7,7 @@ use axum::{
     response::Json,
 };
 use serde_json::{Value, json};
+use this::prelude::Validated;
 use uuid::Uuid;
 
 /// Invoice-specific AppState
@@ -33,9 +34,15 @@ pub async fn get_invoice(
 
 pub async fn create_invoice(
     State(state): State<InvoiceAppState>,
-    Json(payload): Json<Value>,
+    validated: Validated<Invoice>,
 ) -> Result<Json<Invoice>, StatusCode> {
-    // Use the generated new() method from impl_data_entity!
+    // validated payload is already filtered and validated!
+    // - number: trimmed and uppercased
+    // - status: trimmed and lowercased
+    // - amount: rounded to 2 decimals, validated positive and < 1M
+    // - All required fields validated
+    let payload = &*validated;
+
     let invoice = Invoice::new(
         payload["number"].as_str().unwrap_or("INV-000").to_string(), // name
         payload["status"].as_str().unwrap_or("active").to_string(),  // status
@@ -52,13 +59,17 @@ pub async fn create_invoice(
 pub async fn update_invoice(
     State(state): State<InvoiceAppState>,
     Path(id): Path<String>,
-    Json(payload): Json<Value>,
+    validated: Validated<Invoice>,
 ) -> Result<Json<Invoice>, StatusCode> {
     let id = Uuid::parse_str(&id).map_err(|_| StatusCode::BAD_REQUEST)?;
 
     let mut invoice = state.store.get(&id).ok_or(StatusCode::NOT_FOUND)?;
 
-    // Update fields if provided
+    // Update fields if provided (already validated and filtered!)
+    // - status: trimmed and lowercased, validated in_list
+    // - amount: rounded to 2 decimals, validated positive
+    let payload = &*validated;
+
     if let Some(name) = payload["name"].as_str() {
         invoice.name = name.to_string();
     }
