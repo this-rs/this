@@ -23,7 +23,7 @@ use serde_json::Value;
 /// GET /items?filter={"status": "active"}
 /// GET /items?page=1&limit=20&filter={"amount>": 100}&sort=created_at:desc
 /// ```
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct QueryParams {
     /// Page number (starts at 1)
@@ -41,7 +41,7 @@ pub struct QueryParams {
     /// - Comparison: `{"field>": value, "field<": value, "field>=": value, "field<=": value}`
     ///
     /// # Example
-    /// ```
+    /// ```text
     /// filter={"status": "active", "amount>": 100, "customer_name": "Acme"}
     /// ```
     pub filter: Option<String>,
@@ -53,7 +53,7 @@ pub struct QueryParams {
     /// - `field:desc` (descending)
     ///
     /// # Example
-    /// ```
+    /// ```text
     /// sort=amount:desc
     /// sort=created_at:asc
     /// ```
@@ -66,6 +66,17 @@ fn default_page() -> usize {
 
 fn default_limit() -> usize {
     20
+}
+
+impl Default for QueryParams {
+    fn default() -> Self {
+        Self {
+            page: default_page(),
+            limit: default_limit(),
+            filter: None,
+            sort: None,
+        }
+    }
 }
 
 impl QueryParams {
