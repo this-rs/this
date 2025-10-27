@@ -2,12 +2,13 @@
 
 use super::{model::Invoice, store::InvoiceStore};
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     response::Json,
 };
-use serde_json::{Value, json};
+use serde_json::Value;
 use this::prelude::Validated;
+use this::prelude::*;
 use uuid::Uuid;
 
 /// Invoice-specific AppState
@@ -16,12 +17,41 @@ pub struct InvoiceAppState {
     pub store: InvoiceStore,
 }
 
-pub async fn list_invoices(State(state): State<InvoiceAppState>) -> Json<Value> {
-    let invoices = state.store.list();
-    Json(json!({
-        "invoices": invoices,
-        "count": invoices.len()
-    }))
+pub async fn list_invoices(
+    State(state): State<InvoiceAppState>,
+    Query(params): Query<QueryParams>,
+) -> Json<PaginatedResponse<Value>> {
+    let page = params.page();
+    let limit = params.limit();
+
+    // Get all invoices
+    let mut invoices = state.store.list();
+
+    // Apply filters if provided
+    if let Some(filter) = params.filter_value() {
+        invoices = state.store.apply_filters(invoices, &filter);
+    }
+
+    // Apply sort if provided
+    if let Some(sort) = &params.sort {
+        invoices = state.store.apply_sort(invoices, sort);
+    }
+
+    let total = invoices.len();
+
+    // ALWAYS paginate
+    let start = (page - 1) * limit;
+    let paginated: Vec<Value> = invoices
+        .into_iter()
+        .skip(start)
+        .take(limit)
+        .map(|invoice| serde_json::to_value(invoice).unwrap())
+        .collect();
+
+    Json(PaginatedResponse {
+        data: paginated,
+        pagination: PaginationMeta::new(page, limit, total),
+    })
 }
 
 pub async fn get_invoice(

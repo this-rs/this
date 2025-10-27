@@ -5,12 +5,13 @@
 
 use axum::{
     Json,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     response::{IntoResponse, Response},
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
 use uuid::Uuid;
@@ -19,7 +20,11 @@ use crate::config::LinksConfig;
 use crate::core::extractors::{
     DirectLinkExtractor, ExtractorError, LinkExtractor, RecursiveLinkExtractor,
 };
-use crate::core::{EntityCreator, EntityFetcher, LinkDefinition, LinkService, link::LinkEntity};
+use crate::core::{
+    EntityCreator, EntityFetcher, LinkDefinition, LinkService,
+    link::LinkEntity,
+    query::{PaginationMeta, QueryParams},
+};
 use crate::links::registry::{LinkDirection, LinkRouteRegistry};
 
 /// Application state shared across handlers
@@ -102,11 +107,21 @@ pub struct EnrichedLink {
     pub status: String,
 }
 
-/// Response for enriched list links endpoint
+/// Response for enriched list links endpoint (legacy, without pagination)
 #[derive(Debug, Serialize)]
 pub struct EnrichedListLinksResponse {
     pub links: Vec<EnrichedLink>,
     pub count: usize,
+    pub link_type: String,
+    pub direction: String,
+    pub description: Option<String>,
+}
+
+/// Paginated response for enriched list links endpoint
+#[derive(Debug, Serialize)]
+pub struct PaginatedEnrichedLinksResponse {
+    pub data: Vec<EnrichedLink>,
+    pub pagination: PaginationMeta,
     pub link_type: String,
     pub direction: String,
     pub description: Option<String>,
@@ -136,13 +151,14 @@ pub enum EnrichmentContext {
     DirectLink,
 }
 
-/// List links using named routes (forward or reverse)
+/// List links using named routes (forward or reverse) - WITH PAGINATION
 ///
 /// GET /{entity_type}/{entity_id}/{route_name}
 pub async fn list_links(
     State(state): State<AppState>,
     Path((entity_type_plural, entity_id, route_name)): Path<(String, Uuid, String)>,
-) -> Result<Json<EnrichedListLinksResponse>, ExtractorError> {
+    Query(params): Query<QueryParams>,
+) -> Result<Json<PaginatedEnrichedLinksResponse>, ExtractorError> {
     let extractor = LinkExtractor::from_path_and_registry(
         (entity_type_plural, entity_id, route_name),
         &state.registry,
@@ -177,13 +193,28 @@ pub async fn list_links(
         LinkDirection::Reverse => EnrichmentContext::FromTarget,
     };
 
-    // Enrich links with full entity data
-    let enriched_links =
+    // Enrich ALL links with full entity data first
+    let mut all_enriched =
         enrich_links_with_entities(&state, links, context, &extractor.link_definition).await?;
 
-    Ok(Json(EnrichedListLinksResponse {
-        count: enriched_links.len(),
-        links: enriched_links,
+    // Apply filters if provided
+    if let Some(filter_value) = params.filter_value() {
+        all_enriched = apply_link_filters(all_enriched, &filter_value);
+    }
+
+    let total = all_enriched.len();
+
+    // Apply pagination (ALWAYS paginate for links)
+    let page = params.page();
+    let limit = params.limit();
+    let start = (page - 1) * limit;
+
+    let paginated_links: Vec<EnrichedLink> =
+        all_enriched.into_iter().skip(start).take(limit).collect();
+
+    Ok(Json(PaginatedEnrichedLinksResponse {
+        data: paginated_links,
+        pagination: PaginationMeta::new(page, limit, total),
         link_type: extractor.link_definition.link_type,
         direction: format!("{:?}", extractor.direction),
         description: extractor.link_definition.description,
@@ -257,6 +288,68 @@ async fn fetch_entity_by_type(
         .fetch_as_json(entity_id)
         .await
         .map_err(|e| ExtractorError::JsonError(format!("Failed to fetch entity: {}", e)))
+}
+
+/// Apply filtering to enriched links based on query parameters
+///
+/// Supports filtering on:
+/// - link fields (id, link_type, source_id, target_id, status, metadata)
+/// - nested entity fields (source.*, target.*)
+fn apply_link_filters(enriched_links: Vec<EnrichedLink>, filter: &Value) -> Vec<EnrichedLink> {
+    if filter.is_null() || !filter.is_object() {
+        return enriched_links;
+    }
+
+    let filter_obj = filter.as_object().unwrap();
+
+    enriched_links
+        .into_iter()
+        .filter(|link| {
+            let mut matches = true;
+
+            // Convert link to JSON for easy filtering
+            let link_json = match serde_json::to_value(link) {
+                Ok(v) => v,
+                Err(_) => return false,
+            };
+
+            for (key, value) in filter_obj.iter() {
+                // Check if the field exists in the link or in nested entities
+                let field_value = get_nested_value(&link_json, key);
+
+                match field_value {
+                    Some(field_val) => {
+                        // Simple equality match for now
+                        if field_val != *value {
+                            matches = false;
+                            break;
+                        }
+                    }
+                    None => {
+                        matches = false;
+                        break;
+                    }
+                }
+            }
+
+            matches
+        })
+        .collect()
+}
+
+/// Get a nested value from JSON using dot notation
+/// E.g., "source.name" or "target.amount"
+fn get_nested_value(json: &Value, key: &str) -> Option<Value> {
+    let parts: Vec<&str> = key.split('.').collect();
+
+    match parts.len() {
+        1 => json.get(key).cloned(),
+        2 => {
+            let (parent, child) = (parts[0], parts[1]);
+            json.get(parent).and_then(|v| v.get(child)).cloned()
+        }
+        _ => None,
+    }
 }
 
 /// Get a specific link by ID
@@ -658,6 +751,7 @@ pub async fn list_available_links(
 pub async fn handle_nested_path_get(
     State(state): State<AppState>,
     Path(path): Path<String>,
+    Query(params): Query<QueryParams>,
 ) -> Result<Json<serde_json::Value>, ExtractorError> {
     // Parser le path en segments
     let segments: Vec<String> = path
@@ -808,13 +902,38 @@ pub async fn handle_nested_path_get(
                 }
             };
 
-            // Enrichir les liens
-            let enriched_links =
+            // Enrichir TOUS les liens
+            let mut all_enriched =
                 enrich_links_with_entities(&state, links, enrichment_context, link_def).await?;
 
+            // Apply filters if provided
+            if let Some(filter_value) = params.filter_value() {
+                all_enriched = apply_link_filters(all_enriched, &filter_value);
+            }
+
+            let total = all_enriched.len();
+
+            // Apply pagination (ALWAYS paginate for nested links too)
+            let page = params.page();
+            let limit = params.limit();
+            let start = (page - 1) * limit;
+
+            let paginated_links: Vec<EnrichedLink> =
+                all_enriched.into_iter().skip(start).take(limit).collect();
+
             Ok(Json(serde_json::json!({
-                "links": enriched_links,
-                "count": enriched_links.len()
+                "data": paginated_links,
+                "pagination": {
+                    "page": page,
+                    "limit": limit,
+                    "total": total,
+                    "total_pages": PaginationMeta::new(page, limit, total).total_pages,
+                    "has_next": PaginationMeta::new(page, limit, total).has_next,
+                    "has_prev": PaginationMeta::new(page, limit, total).has_prev
+                },
+                "link_type": link_def.link_type,
+                "direction": format!("{:?}", penultimate.link_direction),
+                "description": link_def.description
             })))
         } else {
             Err(ExtractorError::InvalidPath)

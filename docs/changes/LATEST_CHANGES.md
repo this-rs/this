@@ -1,6 +1,72 @@
 # 🎯 Latest Changes
 
-## v0.0.5 - Automatic Validation and Filtering (Latest)
+## v0.0.6 - Generic Pagination and Filtering (Latest)
+
+### Summary
+
+New feature introducing **generic pagination and filtering** for all list endpoints (entities and links), with automatic pagination by default to prevent returning all data at once.
+
+**Date**: December 2024  
+**Version**: 0.0.6  
+**Impact**: Enhancement - Default pagination applied
+
+### New Features
+
+- ✅ **Generic Pagination** - Automatic pagination for all list endpoints (entities and links)
+- ✅ **Default Pagination** - Always active (page=1, limit=20) to prevent overwhelming responses
+- ✅ **Generic Filtering** - Query parameter filtering on entity and link fields
+- ✅ **Nested Field Filtering** - Filter on nested entity fields (`target.status`, `source.name`, etc.)
+- ✅ **Filter on Links** - Filter link lists based on properties of linked entities
+- ✅ **Unified Response Format** - Consistent `PaginatedResponse<T>` structure
+- ✅ **QueryParams** - Standardized query parameter handling
+- ✅ **Works on All Link Levels** - Pagination and filtering for 2+ level routes
+
+### Migration Guide
+
+No breaking changes! Pagination is now automatic:
+
+```rust
+// Before - would return ALL entities
+GET /orders
+
+// After - automatically paginated
+GET /orders
+Response: { "data": [...], "pagination": { "page": 1, "limit": 20, ... } }
+
+// You can still get all data with explicit pagination
+GET /orders?limit=1000
+```
+
+### Documentation
+
+- ✅ [Pagination and Filtering Guide](../guides/PAGINATION_AND_FILTERING.md) - Complete guide
+- ✅ Updated examples to show pagination usage
+
+### Example Usage
+
+```bash
+# List entities with default pagination (20 per page)
+curl 'http://127.0.0.1:3000/orders'
+
+# Custom pagination
+curl 'http://127.0.0.1:3000/orders?page=2&limit=10'
+
+# With filters
+curl 'http://127.0.0.1:3000/orders?filter={"status":"pending"}'
+
+# Links with pagination
+curl 'http://127.0.0.1:3000/orders/{id}/invoices?page=1&limit=5'
+
+# Links with filters on nested entities
+curl 'http://127.0.0.1:3000/orders/{id}/invoices?filter={"target.status":"paid"}'
+
+# Nested links (3+ levels) with pagination
+curl 'http://127.0.0.1:3000/orders/{id}/invoices/{id}/payments?page=1&limit=10'
+```
+
+---
+
+## v0.0.5 - Automatic Validation and Filtering
 
 ### Summary
 

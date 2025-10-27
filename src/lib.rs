@@ -68,7 +68,9 @@ pub mod prelude {
         link::{LinkAuthConfig, LinkDefinition, LinkEntity},
         module::{EntityCreator, EntityFetcher, Module},
         pluralize::Pluralizer,
+        query::{PaginatedResponse, PaginationMeta, QueryParams},
         service::{DataService, LinkService},
+        store::QueryableStore,
         validation::{EntityValidationConfig, Validated},
     };
 
