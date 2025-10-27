@@ -69,10 +69,14 @@ pub mod prelude {
         module::{EntityCreator, EntityFetcher, Module},
         pluralize::Pluralizer,
         service::{DataService, LinkService},
+        validation::{EntityValidationConfig, Validated},
     };
 
     // === Macros ===
-    pub use crate::{data_fields, entity_fields, impl_data_entity, impl_link_entity, link_fields};
+    pub use crate::{
+        add_filters_for_field, add_validators_for_field, data_fields, entity_fields,
+        impl_data_entity, impl_data_entity_validated, impl_link_entity, link_fields,
+    };
 
     // === Link Handlers ===
     pub use crate::links::{
