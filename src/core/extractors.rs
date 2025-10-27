@@ -157,3 +157,176 @@ impl DirectLinkExtractor {
         })
     }
 }
+
+/// Segment d'une chaîne de liens imbriqués
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct LinkPathSegment {
+    /// Type d'entité (singulier)
+    pub entity_type: String,
+    /// ID de l'entité
+    pub entity_id: Uuid,
+    /// Nom de la route (si présent)
+    pub route_name: Option<String>,
+    /// Définition du lien (si présent)
+    pub link_definition: Option<LinkDefinition>,
+    /// Direction du lien (Forward ou Reverse)
+    #[serde(skip_serializing)]
+    pub link_direction: Option<LinkDirection>,
+}
+
+/// Extractor pour chemins imbriqués de profondeur illimitée
+/// 
+/// Parse dynamiquement des chemins comme:
+/// - /users/123/invoices/456/orders
+/// - /users/123/invoices/456/orders/789/payments/101
+#[derive(Debug, Clone)]
+pub struct RecursiveLinkExtractor {
+    pub chain: Vec<LinkPathSegment>,
+    /// True si le chemin se termine par une route (liste)
+    /// False si le chemin se termine par un ID (item spécifique)
+    pub is_list: bool,
+}
+
+impl RecursiveLinkExtractor {
+    /// Parse un chemin complet dynamiquement
+    pub fn from_segments(
+        segments: Vec<String>,
+        registry: &LinkRouteRegistry,
+        config: &LinksConfig,
+    ) -> Result<Self, ExtractorError> {
+        
+        if segments.len() < 2 {
+            return Err(ExtractorError::InvalidPath);
+        }
+
+        let mut chain = Vec::new();
+        let mut i = 0;
+        let mut current_entity_type: Option<String> = None;
+        
+        // Pattern attendu: type/id/route/id/route/id...
+        // Premier segment: toujours un type d'entité
+        while i < segments.len() {
+            // 1. Type d'entité (soit depuis URL pour le 1er, soit depuis link_def pour les suivants)
+            let entity_type_singular = if let Some(ref entity_type) = current_entity_type {
+                // Type connu depuis la résolution précédente
+                entity_type.clone()
+            } else {
+                // Premier segment: lire le type depuis l'URL
+                let entity_type_plural = &segments[i];
+                let singular = config
+                    .entities
+                    .iter()
+                    .find(|e| e.plural == *entity_type_plural)
+                    .map(|e| e.singular.clone())
+                    .ok_or_else(|| ExtractorError::InvalidPath)?;
+                i += 1;
+                singular
+            };
+            
+            // Reset pour la prochaine itération
+            current_entity_type = None;
+            
+            // 2. ID de l'entité (peut ne pas exister si fin du chemin)
+            let entity_id = if i < segments.len() {
+                segments[i].parse::<Uuid>()
+                    .map_err(|_| ExtractorError::InvalidEntityId)?
+            } else {
+                // Pas d'ID = liste finale
+                chain.push(LinkPathSegment {
+                    entity_type: entity_type_singular,
+                    entity_id: Uuid::nil(),
+                    route_name: None,
+                    link_definition: None,
+                    link_direction: None,
+                });
+                break;
+            };
+            i += 1;
+            
+            // 3. Nom de route (peut ne pas exister si fin du chemin)
+            let route_name = if i < segments.len() {
+                Some(segments[i].clone())
+            } else {
+                None
+            };
+            
+            if route_name.is_some() {
+                i += 1;
+            }
+            
+            // Résoudre la définition du lien si on a une route
+            let (link_def, link_dir) = if let Some(route_name) = &route_name {
+                let (link_def, direction) = registry
+                    .resolve_route(&entity_type_singular, route_name)
+                    .map_err(|_| ExtractorError::RouteNotFound(route_name.clone()))?;
+                
+                // Préparer le type pour la prochaine itération
+                // Pour Forward: on va vers target_type
+                // Pour Reverse: on va vers source_type (car on remonte la chaîne)
+                current_entity_type = Some(match direction {
+                    crate::links::registry::LinkDirection::Forward => link_def.target_type.clone(),
+                    crate::links::registry::LinkDirection::Reverse => link_def.source_type.clone(),
+                });
+                
+                (Some(link_def), Some(direction))
+            } else {
+                (None, None)
+            };
+            
+            chain.push(LinkPathSegment {
+                entity_type: entity_type_singular,
+                entity_id,
+                route_name,
+                link_definition: link_def,
+                link_direction: link_dir,
+            });
+        }
+        
+        // Si current_entity_type est défini, cela signifie que le chemin se termine par une route
+        // et qu'on doit ajouter un segment final pour l'entité cible (liste)
+        if let Some(final_entity_type) = current_entity_type {
+            chain.push(LinkPathSegment {
+                entity_type: final_entity_type,
+                entity_id: Uuid::nil(), // Pas d'ID spécifique = liste
+                route_name: None,
+                link_definition: None,
+                link_direction: None,
+            });
+        }
+        
+        // Déterminer si c'est une liste ou un item spécifique
+        // Format: type/id/route/id/route → 5 segments → liste
+        // Format: type/id/route/id/route/id → 6 segments → item
+        // Si impair ≥ 5: liste, si pair ≥ 6: item spécifique
+        let is_list = (segments.len() % 2 == 1) && (segments.len() >= 5);
+        
+        Ok(Self { chain, is_list })
+    }
+    
+    /// Obtenir l'ID final et le type pour la requête finale
+    pub fn final_target(&self) -> (Uuid, String) {
+        let last = self.chain.last().unwrap();
+        (last.entity_id, last.entity_type.clone())
+    }
+    
+    /// Obtenir la définition du dernier lien
+    pub fn final_link_def(&self) -> Option<&LinkDefinition> {
+        // Le dernier segment n'a pas de link_def, le pénultième oui
+        if self.chain.len() >= 2 {
+            self.chain
+                .get(self.chain.len() - 2)
+                .and_then(|s| s.link_definition.as_ref())
+        } else {
+            None
+        }
+    }
+    
+    /// Obtenir l'avant-dernier segment (celui qui a le lien)
+    pub fn penultimate_segment(&self) -> Option<&LinkPathSegment> {
+        if self.chain.len() >= 2 {
+            self.chain.get(self.chain.len() - 2)
+        } else {
+            None
+        }
+    }
+}

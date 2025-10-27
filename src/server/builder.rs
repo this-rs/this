@@ -121,11 +121,12 @@ impl ServerBuilder {
         // Build entity routes
         let entity_routes = self.entity_registry.build_routes();
 
-        // Build link routes
-        let link_routes = build_link_routes(link_state);
+        // Build standard link routes (2 levels)
+        let link_routes = build_link_routes(link_state.clone());
 
         // Merge all routes
-        let app = entity_routes.merge(link_routes);
+        let app = entity_routes
+            .merge(link_routes);
 
         Ok(app)
     }
