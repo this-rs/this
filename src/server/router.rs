@@ -2,8 +2,7 @@
 
 use crate::links::handlers::{
     AppState, create_link, create_linked_entity, delete_link, get_link, get_link_by_route,
-    list_available_links, list_links, update_link,
-    handle_nested_path_get,
+    handle_nested_path_get, list_available_links, list_links, update_link,
 };
 use axum::{Router, routing::get};
 
@@ -28,46 +27,46 @@ use axum::{Router, routing::get};
 /// The route_name (e.g., "cars-owned", "cars-driven") is resolved to the appropriate
 /// link_type (e.g., "owner", "driver") automatically by the LinkRouteRegistry.
 pub fn build_link_routes(state: AppState) -> Router {
-    use axum::extract::{Request, State as AxumState, Path as AxumPath};
+    use axum::extract::{Path as AxumPath, Request, State as AxumState};
     use axum::response::IntoResponse;
-    use axum::http::Method;
     use uuid::Uuid;
-    
+
     // Handler intelligent qui route vers list_links OU handle_nested_path_get selon la profondeur
-    let state_clone = state.clone();
-    let smart_handler = |AxumState(state): AxumState<AppState>, AxumPath((entity_type_plural, entity_id, route_name)): AxumPath<(String, Uuid, String)>, req: Request| async move {
+    let smart_handler = |AxumState(state): AxumState<AppState>,
+                         AxumPath((entity_type_plural, entity_id, route_name)): AxumPath<(
+        String,
+        Uuid,
+        String,
+    )>,
+                         req: Request| async move {
         let path = req.uri().path();
         let segments: Vec<&str> = path.trim_matches('/').split('/').collect();
-        
+
         // Si plus de 3 segments, c'est une route imbriquée à 3+ niveaux
         if segments.len() >= 5 {
             // Utiliser le handler générique pour chemins profonds
-            handle_nested_path_get(
-                AxumState(state),
-                AxumPath(path.to_string())
-            ).await
-            .map(|r| r.into_response())
+            handle_nested_path_get(AxumState(state), AxumPath(path.to_string()))
+                .await
+                .map(|r| r.into_response())
         } else {
             // Route classique à 2 niveaux
             list_links(
                 AxumState(state),
-                AxumPath((entity_type_plural, entity_id, route_name))
-            ).await
+                AxumPath((entity_type_plural, entity_id, route_name)),
+            )
+            .await
             .map(|r| r.into_response())
         }
     };
-    
+
     // Handler fallback pour les autres cas
-    let fallback_state = state.clone();
     let fallback_handler = |AxumState(state): AxumState<AppState>, req: Request| async move {
         let path = req.uri().path().to_string();
-        handle_nested_path_get(
-            AxumState(state),
-            AxumPath(path)
-        ).await
-        .map(|r| r.into_response())
+        handle_nested_path_get(AxumState(state), AxumPath(path))
+            .await
+            .map(|r| r.into_response())
     };
-    
+
     Router::new()
         .route("/links/{link_id}", get(get_link))
         .route(

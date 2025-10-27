@@ -175,7 +175,7 @@ pub struct LinkPathSegment {
 }
 
 /// Extractor pour chemins imbriqués de profondeur illimitée
-/// 
+///
 /// Parse dynamiquement des chemins comme:
 /// - /users/123/invoices/456/orders
 /// - /users/123/invoices/456/orders/789/payments/101
@@ -194,7 +194,6 @@ impl RecursiveLinkExtractor {
         registry: &LinkRouteRegistry,
         config: &LinksConfig,
     ) -> Result<Self, ExtractorError> {
-        
         if segments.len() < 2 {
             return Err(ExtractorError::InvalidPath);
         }
@@ -202,7 +201,7 @@ impl RecursiveLinkExtractor {
         let mut chain = Vec::new();
         let mut i = 0;
         let mut current_entity_type: Option<String> = None;
-        
+
         // Pattern attendu: type/id/route/id/route/id...
         // Premier segment: toujours un type d'entité
         while i < segments.len() {
@@ -218,17 +217,18 @@ impl RecursiveLinkExtractor {
                     .iter()
                     .find(|e| e.plural == *entity_type_plural)
                     .map(|e| e.singular.clone())
-                    .ok_or_else(|| ExtractorError::InvalidPath)?;
+                    .ok_or(ExtractorError::InvalidPath)?;
                 i += 1;
                 singular
             };
-            
+
             // Reset pour la prochaine itération
             current_entity_type = None;
-            
+
             // 2. ID de l'entité (peut ne pas exister si fin du chemin)
             let entity_id = if i < segments.len() {
-                segments[i].parse::<Uuid>()
+                segments[i]
+                    .parse::<Uuid>()
                     .map_err(|_| ExtractorError::InvalidEntityId)?
             } else {
                 // Pas d'ID = liste finale
@@ -242,24 +242,24 @@ impl RecursiveLinkExtractor {
                 break;
             };
             i += 1;
-            
+
             // 3. Nom de route (peut ne pas exister si fin du chemin)
             let route_name = if i < segments.len() {
                 Some(segments[i].clone())
             } else {
                 None
             };
-            
+
             if route_name.is_some() {
                 i += 1;
             }
-            
+
             // Résoudre la définition du lien si on a une route
             let (link_def, link_dir) = if let Some(route_name) = &route_name {
                 let (link_def, direction) = registry
                     .resolve_route(&entity_type_singular, route_name)
                     .map_err(|_| ExtractorError::RouteNotFound(route_name.clone()))?;
-                
+
                 // Préparer le type pour la prochaine itération
                 // Pour Forward: on va vers target_type
                 // Pour Reverse: on va vers source_type (car on remonte la chaîne)
@@ -267,12 +267,12 @@ impl RecursiveLinkExtractor {
                     crate::links::registry::LinkDirection::Forward => link_def.target_type.clone(),
                     crate::links::registry::LinkDirection::Reverse => link_def.source_type.clone(),
                 });
-                
+
                 (Some(link_def), Some(direction))
             } else {
                 (None, None)
             };
-            
+
             chain.push(LinkPathSegment {
                 entity_type: entity_type_singular,
                 entity_id,
@@ -281,7 +281,7 @@ impl RecursiveLinkExtractor {
                 link_direction: link_dir,
             });
         }
-        
+
         // Si current_entity_type est défini, cela signifie que le chemin se termine par une route
         // et qu'on doit ajouter un segment final pour l'entité cible (liste)
         if let Some(final_entity_type) = current_entity_type {
@@ -293,22 +293,22 @@ impl RecursiveLinkExtractor {
                 link_direction: None,
             });
         }
-        
+
         // Déterminer si c'est une liste ou un item spécifique
         // Format: type/id/route/id/route → 5 segments → liste
         // Format: type/id/route/id/route/id → 6 segments → item
         // Si impair ≥ 5: liste, si pair ≥ 6: item spécifique
         let is_list = (segments.len() % 2 == 1) && (segments.len() >= 5);
-        
+
         Ok(Self { chain, is_list })
     }
-    
+
     /// Obtenir l'ID final et le type pour la requête finale
     pub fn final_target(&self) -> (Uuid, String) {
         let last = self.chain.last().unwrap();
         (last.entity_id, last.entity_type.clone())
     }
-    
+
     /// Obtenir la définition du dernier lien
     pub fn final_link_def(&self) -> Option<&LinkDefinition> {
         // Le dernier segment n'a pas de link_def, le pénultième oui
@@ -320,7 +320,7 @@ impl RecursiveLinkExtractor {
             None
         }
     }
-    
+
     /// Obtenir l'avant-dernier segment (celui qui a le lien)
     pub fn penultimate_segment(&self) -> Option<&LinkPathSegment> {
         if self.chain.len() >= 2 {

@@ -125,8 +125,7 @@ impl ServerBuilder {
         let link_routes = build_link_routes(link_state.clone());
 
         // Merge all routes
-        let app = entity_routes
-            .merge(link_routes);
+        let app = entity_routes.merge(link_routes);
 
         Ok(app)
     }

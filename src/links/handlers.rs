@@ -16,7 +16,9 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 use crate::config::LinksConfig;
-use crate::core::extractors::{DirectLinkExtractor, ExtractorError, LinkExtractor, RecursiveLinkExtractor};
+use crate::core::extractors::{
+    DirectLinkExtractor, ExtractorError, LinkExtractor, RecursiveLinkExtractor,
+};
 use crate::core::{EntityCreator, EntityFetcher, LinkDefinition, LinkService, link::LinkEntity};
 use crate::links::registry::{LinkDirection, LinkRouteRegistry};
 
@@ -649,7 +651,7 @@ pub async fn list_available_links(
 }
 
 /// Handler générique pour GET sur chemins imbriqués illimités
-/// 
+///
 /// Supporte des chemins comme:
 /// - GET /users/123/invoices/456/orders (liste les orders)
 /// - GET /users/123/invoices/456/orders/789 (get un order spécifique)
@@ -671,27 +673,27 @@ pub async fn handle_nested_path_get(
     }
 
     // Utiliser l'extracteur récursif
-    let extractor = RecursiveLinkExtractor::from_segments(segments, &state.registry, &state.config)?;
-
+    let extractor =
+        RecursiveLinkExtractor::from_segments(segments, &state.registry, &state.config)?;
 
     // Si is_list, récupérer les liens depuis la dernière entité
     if extractor.is_list {
         // Valider toute la chaîne de liens avant de retourner les résultats
         // Pour chaque segment avec un link_definition, vérifier que le lien existe
         // SAUF pour le dernier segment si c'est une liste (ID = Uuid::nil())
-        
+
         use crate::links::registry::LinkDirection;
-        
+
         // VALIDATION COMPLÈTE DE LA CHAÎNE
         for i in 0..extractor.chain.len() - 1 {
             let current = &extractor.chain[i];
             let next = &extractor.chain[i + 1];
-            
+
             // Si next.entity_id est Uuid::nil(), c'est une liste finale, on ne valide pas ce lien
             if next.entity_id.is_nil() {
                 continue;
             }
-            
+
             // Cas 1: Le segment a un link_definition → validation normale
             if let Some(link_def) = &current.link_definition {
                 let link_exists = match current.link_direction {
@@ -707,25 +709,21 @@ pub async fn handle_nested_path_get(
                             .await
                             .map_err(|e| ExtractorError::JsonError(e.to_string()))?;
                         links.iter().any(|l| l.target_id == next.entity_id)
-                    },
+                    }
                     Some(LinkDirection::Reverse) => {
                         // Reverse: current est le target, next est la source
                         let links = state
                             .link_service
-                            .find_by_target(
-                                &current.entity_id,
-                                None,
-                                Some(&link_def.link_type),
-                            )
+                            .find_by_target(&current.entity_id, None, Some(&link_def.link_type))
                             .await
                             .map_err(|e| ExtractorError::JsonError(e.to_string()))?;
                         links.iter().any(|l| l.source_id == next.entity_id)
-                    },
+                    }
                     None => {
                         return Err(ExtractorError::InvalidPath);
                     }
                 };
-                
+
                 if !link_exists {
                     return Err(ExtractorError::LinkNotFound);
                 }
@@ -746,7 +744,7 @@ pub async fn handle_nested_path_get(
                             .await
                             .map_err(|e| ExtractorError::JsonError(e.to_string()))?;
                         links.iter().any(|l| l.target_id == next.entity_id)
-                    },
+                    }
                     Some(LinkDirection::Reverse) => {
                         // Reverse depuis current: current ← next (donc next est source)
                         let links = state
@@ -759,26 +757,28 @@ pub async fn handle_nested_path_get(
                             .await
                             .map_err(|e| ExtractorError::JsonError(e.to_string()))?;
                         links.iter().any(|l| l.source_id == next.entity_id)
-                    },
+                    }
                     None => {
                         return Err(ExtractorError::InvalidPath);
                     }
                 };
-                
+
                 if !link_exists {
                     return Err(ExtractorError::LinkNotFound);
                 }
             }
         }
-        
+
         // Toute la chaîne est valide, récupérer les liens finaux
         if let Some(link_def) = extractor.final_link_def() {
             // Pour une liste, on veut l'ID du segment pénultième (celui qui a le lien)
-            let penultimate = extractor.penultimate_segment().ok_or(ExtractorError::InvalidPath)?;
+            let penultimate = extractor
+                .penultimate_segment()
+                .ok_or(ExtractorError::InvalidPath)?;
             let entity_id = penultimate.entity_id;
-            
+
             use crate::links::registry::LinkDirection;
-            
+
             // Récupérer les liens selon la direction
             let (links, enrichment_context) = match penultimate.link_direction {
                 Some(LinkDirection::Forward) => {
@@ -793,33 +793,24 @@ pub async fn handle_nested_path_get(
                         .await
                         .map_err(|e| ExtractorError::JsonError(e.to_string()))?;
                     (links, EnrichmentContext::FromSource)
-                },
+                }
                 Some(LinkDirection::Reverse) => {
                     // Reverse: entity_id est le target, on cherche les sources
                     let links = state
                         .link_service
-                        .find_by_target(
-                            &entity_id,
-                            None,
-                            Some(&link_def.link_type),
-                        )
+                        .find_by_target(&entity_id, None, Some(&link_def.link_type))
                         .await
                         .map_err(|e| ExtractorError::JsonError(e.to_string()))?;
                     (links, EnrichmentContext::FromTarget)
-                },
+                }
                 None => {
                     return Err(ExtractorError::InvalidPath);
                 }
             };
 
             // Enrichir les liens
-            let enriched_links = enrich_links_with_entities(
-                &state,
-                links,
-                enrichment_context,
-                link_def,
-            )
-            .await?;
+            let enriched_links =
+                enrich_links_with_entities(&state, links, enrichment_context, link_def).await?;
 
             Ok(Json(serde_json::json!({
                 "links": enriched_links,
@@ -830,14 +821,14 @@ pub async fn handle_nested_path_get(
         }
     } else {
         // Item spécifique - récupérer le lien spécifique
-        
+
         use crate::links::registry::LinkDirection;
-        
+
         // VALIDATION COMPLÈTE DE LA CHAÎNE (aussi pour items spécifiques)
         for i in 0..extractor.chain.len() - 1 {
             let current = &extractor.chain[i];
             let next = &extractor.chain[i + 1];
-            
+
             // Cas 1: Le segment a un link_definition → validation normale
             if let Some(link_def) = &current.link_definition {
                 let link_exists = match current.link_direction {
@@ -852,24 +843,20 @@ pub async fn handle_nested_path_get(
                             .await
                             .map_err(|e| ExtractorError::JsonError(e.to_string()))?;
                         links.iter().any(|l| l.target_id == next.entity_id)
-                    },
+                    }
                     Some(LinkDirection::Reverse) => {
                         let links = state
                             .link_service
-                            .find_by_target(
-                                &current.entity_id,
-                                None,
-                                Some(&link_def.link_type),
-                            )
+                            .find_by_target(&current.entity_id, None, Some(&link_def.link_type))
                             .await
                             .map_err(|e| ExtractorError::JsonError(e.to_string()))?;
                         links.iter().any(|l| l.source_id == next.entity_id)
-                    },
+                    }
                     None => {
                         return Err(ExtractorError::InvalidPath);
                     }
                 };
-                
+
                 if !link_exists {
                     return Err(ExtractorError::LinkNotFound);
                 }
@@ -888,7 +875,7 @@ pub async fn handle_nested_path_get(
                             .await
                             .map_err(|e| ExtractorError::JsonError(e.to_string()))?;
                         links.iter().any(|l| l.target_id == next.entity_id)
-                    },
+                    }
                     Some(LinkDirection::Reverse) => {
                         let links = state
                             .link_service
@@ -900,23 +887,23 @@ pub async fn handle_nested_path_get(
                             .await
                             .map_err(|e| ExtractorError::JsonError(e.to_string()))?;
                         links.iter().any(|l| l.source_id == next.entity_id)
-                    },
+                    }
                     None => {
                         return Err(ExtractorError::InvalidPath);
                     }
                 };
-                
+
                 if !link_exists {
                     return Err(ExtractorError::LinkNotFound);
                 }
             }
         }
-        
+
         // Toute la chaîne est validée, récupérer le lien final
         if let Some(link_def) = extractor.final_link_def() {
             let (target_id, _) = extractor.final_target();
             let penultimate = extractor.penultimate_segment().unwrap();
-            
+
             // Récupérer le lien selon la direction
             let link = match penultimate.link_direction {
                 Some(LinkDirection::Forward) => {
@@ -930,29 +917,25 @@ pub async fn handle_nested_path_get(
                         )
                         .await
                         .map_err(|e| ExtractorError::JsonError(e.to_string()))?;
-                    
+
                     links
                         .into_iter()
                         .find(|l| l.target_id == target_id)
                         .ok_or(ExtractorError::LinkNotFound)?
-                },
+                }
                 Some(LinkDirection::Reverse) => {
                     // Reverse: penultimate est le target, target_id est la source
                     let links = state
                         .link_service
-                        .find_by_target(
-                            &penultimate.entity_id,
-                            None,
-                            Some(&link_def.link_type),
-                        )
+                        .find_by_target(&penultimate.entity_id, None, Some(&link_def.link_type))
                         .await
                         .map_err(|e| ExtractorError::JsonError(e.to_string()))?;
-                    
+
                     links
                         .into_iter()
                         .find(|l| l.source_id == target_id)
                         .ok_or(ExtractorError::LinkNotFound)?
-                },
+                }
                 None => {
                     return Err(ExtractorError::InvalidPath);
                 }
@@ -977,7 +960,7 @@ pub async fn handle_nested_path_get(
 }
 
 /// Handler générique pour POST sur chemins imbriqués
-/// 
+///
 /// Supporte des chemins comme:
 /// - POST /users/123/invoices/456/orders (crée un nouvel order + link)
 pub async fn handle_nested_path_post(
@@ -997,12 +980,14 @@ pub async fn handle_nested_path_post(
         return Err(ExtractorError::InvalidPath);
     }
 
-    let extractor = RecursiveLinkExtractor::from_segments(segments, &state.registry, &state.config)?;
+    let extractor =
+        RecursiveLinkExtractor::from_segments(segments, &state.registry, &state.config)?;
 
     // Récupérer le dernier lien
-    let link_def = extractor.final_link_def()
-        .ok_or_else(|| ExtractorError::InvalidPath)?;
-    
+    let link_def = extractor
+        .final_link_def()
+        .ok_or(ExtractorError::InvalidPath)?;
+
     let (source_id, _) = extractor.final_target();
     let target_entity_type = &link_def.target_type;
 
@@ -1010,10 +995,12 @@ pub async fn handle_nested_path_post(
     let entity_creator = state
         .entity_creators
         .get(target_entity_type)
-        .ok_or_else(|| ExtractorError::JsonError(format!(
-            "No entity creator registered for type: {}",
-            target_entity_type
-        )))?;
+        .ok_or_else(|| {
+            ExtractorError::JsonError(format!(
+                "No entity creator registered for type: {}",
+                target_entity_type
+            ))
+        })?;
 
     // Créer la nouvelle entité
     let created_entity = entity_creator

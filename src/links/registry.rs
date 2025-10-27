@@ -98,15 +98,15 @@ impl LinkRouteRegistry {
     pub fn config(&self) -> &LinksConfig {
         &self.config
     }
-    
+
     /// Detect all possible link chains from the configuration (forward and reverse)
-    /// 
+    ///
     /// Returns a list of chains like: (source_type, [(route_name, target_type), ...])
     /// Example: (order, [("invoices", invoice), ("payments", payment)]) for the chain:
     /// Order → Invoice → Payment
     pub fn detect_link_chains(&self, max_depth: usize) -> Vec<LinkChain> {
         let mut chains = Vec::new();
-        
+
         // Pour chaque type d'entité, trouver toutes les chaînes possibles (forward)
         for entity_config in &self.config.entities {
             self.find_chains_from_entity(
@@ -121,7 +121,7 @@ impl LinkRouteRegistry {
                 &mut std::collections::HashSet::new(),
             );
         }
-        
+
         // Pour chaque type d'entité, trouver toutes les chaînes inverses (reverse)
         for entity_config in &self.config.entities {
             self.find_reverse_chains_from_entity(
@@ -136,10 +136,10 @@ impl LinkRouteRegistry {
                 &mut std::collections::HashSet::new(),
             );
         }
-        
+
         chains
     }
-    
+
     /// Helper to recursively find chains from an entity (forward direction)
     fn find_chains_from_entity(
         &self,
@@ -152,28 +152,28 @@ impl LinkRouteRegistry {
         if remaining_depth == 0 {
             return;
         }
-        
+
         // Trouver tous les liens sortants de cette entité
         for link_def in &self.config.links {
             if link_def.source_type == entity_type {
                 let edge = format!("{}->{}", link_def.source_type, link_def.target_type);
-                
+
                 // Éviter les cycles
                 if visited.contains(&edge) {
                     continue;
                 }
-                
+
                 visited.insert(edge.clone());
-                
+
                 // Ajouter cette étape à la chaîne
                 let route_name = Some(link_def.forward_route_name.clone());
-                
+
                 current_chain.push(LinkChainStep {
                     entity_type: link_def.target_type.clone(),
                     route_name,
                     direction: LinkDirection::Forward,
                 });
-                
+
                 // Si c'est une chaîne valide (au moins 2 steps), l'ajouter
                 if current_chain.len() >= 2 {
                     chains.push(LinkChain {
@@ -181,7 +181,7 @@ impl LinkRouteRegistry {
                         config: self.config.clone(),
                     });
                 }
-                
+
                 // Continuer récursivement
                 self.find_chains_from_entity(
                     &link_def.target_type,
@@ -190,14 +190,14 @@ impl LinkRouteRegistry {
                     remaining_depth - 1,
                     visited,
                 );
-                
+
                 // Retirer cette étape
                 visited.remove(&edge);
                 current_chain.pop();
             }
         }
     }
-    
+
     /// Helper to recursively find chains from an entity (reverse direction)
     fn find_reverse_chains_from_entity(
         &self,
@@ -210,28 +210,28 @@ impl LinkRouteRegistry {
         if remaining_depth == 0 {
             return;
         }
-        
+
         // Trouver tous les liens entrants de cette entité
         for link_def in &self.config.links {
             if link_def.target_type == entity_type {
                 let edge = format!("{}<-{}", link_def.source_type, link_def.target_type);
-                
+
                 // Éviter les cycles
                 if visited.contains(&edge) {
                     continue;
                 }
-                
+
                 visited.insert(edge.clone());
-                
+
                 // Ajouter cette étape à la chaîne (avec reverse route name)
                 let route_name = Some(link_def.reverse_route_name.clone());
-                
+
                 current_chain.push(LinkChainStep {
                     entity_type: link_def.source_type.clone(),
                     route_name,
                     direction: LinkDirection::Reverse,
                 });
-                
+
                 // Si c'est une chaîne valide (au moins 2 steps), l'ajouter
                 if current_chain.len() >= 2 {
                     chains.push(LinkChain {
@@ -239,7 +239,7 @@ impl LinkRouteRegistry {
                         config: self.config.clone(),
                     });
                 }
-                
+
                 // Continuer récursivement
                 self.find_reverse_chains_from_entity(
                     &link_def.source_type,
@@ -248,7 +248,7 @@ impl LinkRouteRegistry {
                     remaining_depth - 1,
                     visited,
                 );
-                
+
                 // Retirer cette étape
                 visited.remove(&edge);
                 current_chain.pop();
@@ -274,16 +274,16 @@ pub struct LinkChainStep {
 
 impl LinkChain {
     /// Génère le pattern de route Axum pour cette chaîne
-    /// 
+    ///
     /// Exemple forward: order → invoice → payment
     ///   "/orders/{order_id}/invoices/{invoice_id}/payments"
-    /// 
+    ///
     /// Exemple reverse: payment ← invoice ← order
     ///   "/payments/{payment_id}/invoice/{invoice_id}/orders"
     pub fn to_route_pattern(&self) -> String {
         let mut pattern = String::new();
         let steps_count = self.steps.len();
-        
+
         for (idx, step) in self.steps.iter().enumerate() {
             if step.route_name.is_none() {
                 // Premier step: entité source
@@ -301,7 +301,7 @@ impl LinkChain {
                     route_name.clone()
                 };
                 pattern.push_str(&format!("/{segment}"));
-                
+
                 // Ajouter le param ID pour ce step
                 // SAUF si c'est le dernier step (pour la route de liste)
                 if idx < steps_count - 1 {
@@ -310,17 +310,18 @@ impl LinkChain {
                 }
             }
         }
-        
+
         pattern
     }
-    
+
     /// Indique si cette chaîne est en sens inverse
     pub fn is_reverse(&self) -> bool {
-        self.steps.first()
+        self.steps
+            .first()
             .map(|s| s.direction == LinkDirection::Reverse)
             .unwrap_or(false)
     }
-    
+
     fn get_plural(&self, singular: &str) -> String {
         self.config
             .entities

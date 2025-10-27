@@ -102,48 +102,68 @@ async fn main() -> Result<()> {
         "    POST   /invoices/{{id}}/payments/{{payment_id}} - Link existing invoice & payment"
     );
     println!("    GET    /payments/{{id}}/invoice            - Get invoice for a payment");
-    
+
     println!("\n  🔗 Nested Link Routes (3+ levels - UNLIMITED depth):");
     println!("    📋 Forward Routes (3 levels - Lists):");
-    println!("    GET    /orders/{{id}}/invoices/{{id}}/payments        - List payments for invoice under order");
-    println!("    POST   /orders/{{id}}/invoices/{{id}}/payments        - Create payment + link (3 levels)");
+    println!(
+        "    GET    /orders/{{id}}/invoices/{{id}}/payments        - List payments for invoice under order"
+    );
+    println!(
+        "    POST   /orders/{{id}}/invoices/{{id}}/payments        - Create payment + link (3 levels)"
+    );
     println!("\n    🎯 Forward Routes (3 levels - Specific items):");
-    println!("    GET    /orders/{{id}}/invoices/{{id}}/payments/{{id}}  - Get specific payment link (3 levels)");
+    println!(
+        "    GET    /orders/{{id}}/invoices/{{id}}/payments/{{id}}  - Get specific payment link (3 levels)"
+    );
     println!("\n    📋 Reverse Routes (3 levels - Lists):");
-    println!("    GET    /payments/{{id}}/invoice/{{id}}/order           - Get order for payment via invoice");
+    println!(
+        "    GET    /payments/{{id}}/invoice/{{id}}/order           - Get order for payment via invoice"
+    );
     println!("\n    🎯 Reverse Routes (3 levels - Specific items):");
-    println!("    GET    /payments/{{id}}/invoice/{{id}}/order/{{id}}    - Get specific order link (reverse 3 levels)");
+    println!(
+        "    GET    /payments/{{id}}/invoice/{{id}}/order/{{id}}    - Get specific order link (reverse 3 levels)"
+    );
     println!("\n    ✨ The system supports UNLIMITED depth (4, 5, 6+ levels)!");
     println!("       Just follow the pattern: /entity1/{{id}}/route/{{id}}/route/...");
     println!("       All routes are auto-validated: only valid link chains return data.");
-    
+
     println!("\n  📝 Example curl commands for 3-level routes:");
     println!("\n    # List payments for a specific order→invoice chain:");
-    println!("    curl http://127.0.0.1:3000/orders/11111111-1111-1111-1111-111111111111/invoices/bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb/payments | jq .");
+    println!(
+        "    curl http://127.0.0.1:3000/orders/11111111-1111-1111-1111-111111111111/invoices/bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb/payments | jq ."
+    );
     println!("\n    # Get a specific payment in an order→invoice→payment chain:");
-    println!("    curl http://127.0.0.1:3000/orders/11111111-1111-1111-1111-111111111111/invoices/bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb/payments/dddddddd-dddd-dddd-dddd-dddddddddddd | jq .");
+    println!(
+        "    curl http://127.0.0.1:3000/orders/11111111-1111-1111-1111-111111111111/invoices/bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb/payments/dddddddd-dddd-dddd-dddd-dddddddddddd | jq ."
+    );
     println!("\n    # Reverse navigation: get order from payment:");
-    println!("    curl http://127.0.0.1:3000/payments/dddddddd-dddd-dddd-dddd-dddddddddddd/invoice/bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb/order/11111111-1111-1111-1111-111111111111 | jq .");
+    println!(
+        "    curl http://127.0.0.1:3000/payments/dddddddd-dddd-dddd-dddd-dddddddddddd/invoice/bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb/order/11111111-1111-1111-1111-111111111111 | jq ."
+    );
     println!("\n    # List order from payment (reverse navigation):");
-    println!("    curl http://127.0.0.1:3000/payments/eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee/invoice/bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb/order | jq .");
+    println!(
+        "    curl http://127.0.0.1:3000/payments/eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee/invoice/bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb/order | jq ."
+    );
     println!("\n    # Invalid ID will be rejected with full chain validation:");
-    println!("    curl http://127.0.0.1:3000/payments/dddddddd-dddd-dddd-dddd-dddddddddddc/invoice/bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb/order/11111111-1111-1111-1111-111111111111");
+    println!(
+        "    curl http://127.0.0.1:3000/payments/dddddddd-dddd-dddd-dddd-dddddddddddc/invoice/bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb/order/11111111-1111-1111-1111-111111111111"
+    );
     println!("    # → Returns: {{\"error\": \"Link not found\"}}");
-    
+
     axum::serve(listener, app).await.unwrap();
 
     Ok(())
 }
 
 /// Populate the store with test data
-/// 
+///
 /// Utilise des UUID fixes pour simplifier les tests
 async fn populate_test_data(
     store: &EntityStore,
     link_service: Arc<InMemoryLinkService>,
 ) -> Result<()> {
     use uuid::Uuid;
-    
+
     // UUIDs fixes pour les tests
     let order1_id = Uuid::parse_str("11111111-1111-1111-1111-111111111111").unwrap();
     let order2_id = Uuid::parse_str("22222222-2222-2222-2222-222222222222").unwrap();
@@ -152,7 +172,7 @@ async fn populate_test_data(
     let invoice3_id = Uuid::parse_str("cccccccc-cccc-cccc-cccc-cccccccccccc").unwrap();
     let payment1_id = Uuid::parse_str("dddddddd-dddd-dddd-dddd-dddddddddddd").unwrap();
     let payment2_id = Uuid::parse_str("eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee").unwrap();
-    
+
     // Create orders using the generated new() method
     let mut order1 = Order::new(
         "ORD-001".to_string(),             // name
@@ -242,7 +262,10 @@ async fn populate_test_data(
     println!("      Order #1: {} (ORD-001)", order1_id);
     println!("      Order #2: {} (ORD-002)", order2_id);
     println!("      Invoice #1: {} (INV-001)", invoice1_id);
-    println!("      Invoice #2: {} (INV-002 - avec payments)", invoice2_id);
+    println!(
+        "      Invoice #2: {} (INV-002 - avec payments)",
+        invoice2_id
+    );
     println!("      Invoice #3: {} (INV-003)", invoice3_id);
     println!("      Payment #1: {} (PAY-001)", payment1_id);
     println!("      Payment #2: {} (PAY-002)", payment2_id);
@@ -388,10 +411,14 @@ async fn populate_test_data(
         "     http://127.0.0.1:3000/orders/{}/invoices/{}",
         order1.id, invoice1.id
     );
-    
+
     println!("\n   🔗 Nested Link Routes (3+ levels):");
-    println!("   GET    /orders/{{order_id}}/invoices/{{invoice_id}}/payments - List payments for invoice under order");
-    println!("   POST   /orders/{{order_id}}/invoices/{{invoice_id}}/payments - Create payment + link");
+    println!(
+        "   GET    /orders/{{order_id}}/invoices/{{invoice_id}}/payments - List payments for invoice under order"
+    );
+    println!(
+        "   POST   /orders/{{order_id}}/invoices/{{invoice_id}}/payments - Create payment + link"
+    );
 
     Ok(())
 }
