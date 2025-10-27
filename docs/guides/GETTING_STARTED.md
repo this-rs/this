@@ -54,11 +54,40 @@ Create `src/entities/user/model.rs`:
 ```rust
 use this::prelude::*;
 
-// Macro generates complete entity with all base fields!
-impl_data_entity!(User, "user", ["name", "email"], {
-    email: String,
-    age: Option<i32>,
-});
+// Macro generates complete entity with automatic validation!
+impl_data_entity_validated!(
+    User, 
+    "user", 
+    ["name", "email"], 
+    {
+        email: String,
+        age: Option<i32>,
+    },
+    // Validation rules
+    validate: {
+        create: {
+            name: [required string_length(2, 100)],
+            email: [required],
+            age: [optional positive],
+        },
+        update: {
+            name: [optional string_length(2, 100)],
+            email: [optional],
+            age: [optional positive],
+        },
+    },
+    // Filters (data transformation)
+    filters: {
+        create: {
+            name: [trim],
+            email: [trim lowercase],
+        },
+        update: {
+            name: [trim],
+            email: [trim lowercase],
+        },
+    }
+);
 
 // That's it! You now have:
 // - id: Uuid (auto-generated)
@@ -71,7 +100,7 @@ impl_data_entity!(User, "user", ["name", "email"], {
 // - email: String (your custom field)
 // - age: Option<i32> (your custom field)
 //
-// Plus:
+// Plus automatic validation and filtering before handlers receive data!
 // - Constructor: User::new(name, status, email, age)
 // - Methods: soft_delete(), touch(), set_status(), restore()
 // - Trait implementations: Entity, Data, Clone, Serialize, Deserialize
@@ -161,6 +190,7 @@ use axum::{
     Json,
 };
 use serde_json::Value;
+use this::prelude::Validated;
 use uuid::Uuid;
 
 #[derive(Clone)]
@@ -184,12 +214,14 @@ pub async fn get_user(
 
 pub async fn create_user(
     State(state): State<UserAppState>,
-    Json(payload): Json<Value>,
+    validated: Validated<User>,  // ← Data already validated!
 ) -> Result<Json<User>, StatusCode> {
+    let payload = &*validated;
+    
     let user = User::new(
-        payload["name"].as_str().unwrap_or("").to_string(),
+        payload["name"].as_str().unwrap().to_string(),
         payload["status"].as_str().unwrap_or("active").to_string(),
-        payload["email"].as_str().unwrap_or("").to_string(),
+        payload["email"].as_str().unwrap().to_string(),
         payload["age"].as_i64().map(|a| a as i32),
     );
     
@@ -200,10 +232,11 @@ pub async fn create_user(
 pub async fn update_user(
     State(state): State<UserAppState>,
     Path(id): Path<String>,
-    Json(payload): Json<Value>,
+    validated: Validated<User>,  // ← Data already validated!
 ) -> Result<Json<User>, StatusCode> {
     let id = Uuid::parse_str(&id).map_err(|_| StatusCode::BAD_REQUEST)?;
     let mut user = state.store.get(&id).ok_or(StatusCode::NOT_FOUND)?;
+    let payload = &*validated;
     
     if let Some(name) = payload["name"].as_str() {
         user.name = name.to_string();
@@ -555,6 +588,7 @@ impl_data_entity!(User, "user", ["name", "email"], {
 ## 📚 Next Steps
 
 - [Quick Start Guide](QUICK_START.md) - Fast intro
+- [Validation & Filtering](VALIDATION_AND_FILTERING.md) - 🆕 Automatic data validation
 - [Enriched Links](ENRICHED_LINKS.md) - Link enrichment details
 - [Multi-Level Navigation](MULTI_LEVEL_NAVIGATION.md) - Complex relationships
 - [Architecture](../architecture/ARCHITECTURE.md) - Technical deep dive
@@ -565,10 +599,19 @@ impl_data_entity!(User, "user", ["name", "email"], {
 ### Use Macros for All Entities
 
 ```rust
-// ✅ Do this
-impl_data_entity!(Order, "order", ["name"], {
-    amount: f64,
-});
+// ✅ Do this with validation
+impl_data_entity_validated!(
+    Order, 
+    "order", 
+    ["name"], 
+    { amount: f64 },
+    validate: {
+        create: { amount: [required positive] },
+    },
+    filters: {
+        create: { amount: [round_decimals(2)] },
+    }
+);
 
 // ❌ Don't manually define entities
 ```
