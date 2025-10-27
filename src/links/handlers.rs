@@ -16,7 +16,9 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 use crate::config::LinksConfig;
-use crate::core::extractors::{DirectLinkExtractor, ExtractorError, LinkExtractor};
+use crate::core::extractors::{
+    DirectLinkExtractor, ExtractorError, LinkExtractor, RecursiveLinkExtractor,
+};
 use crate::core::{EntityCreator, EntityFetcher, LinkDefinition, LinkService, link::LinkEntity};
 use crate::links::registry::{LinkDirection, LinkRouteRegistry};
 
@@ -125,7 +127,7 @@ pub struct CreateLinkedEntityRequest {
 
 /// Context for link enrichment
 #[derive(Debug, Clone, Copy)]
-enum EnrichmentContext {
+pub enum EnrichmentContext {
     /// Query from source entity - only target entities are included
     FromSource,
     /// Query from target entity - only source entities are included
@@ -646,6 +648,393 @@ pub async fn list_available_links(
         entity_id,
         available_routes,
     }))
+}
+
+/// Handler générique pour GET sur chemins imbriqués illimités
+///
+/// Supporte des chemins comme:
+/// - GET /users/123/invoices/456/orders (liste les orders)
+/// - GET /users/123/invoices/456/orders/789 (get un order spécifique)
+pub async fn handle_nested_path_get(
+    State(state): State<AppState>,
+    Path(path): Path<String>,
+) -> Result<Json<serde_json::Value>, ExtractorError> {
+    // Parser le path en segments
+    let segments: Vec<String> = path
+        .trim_matches('/')
+        .split('/')
+        .map(|s| s.to_string())
+        .collect();
+
+    // Cette route ne gère QUE les chemins imbriqués à 3+ niveaux (5+ segments)
+    // Les chemins à 2 niveaux sont gérés par les routes spécifiques
+    if segments.len() < 5 {
+        return Err(ExtractorError::InvalidPath);
+    }
+
+    // Utiliser l'extracteur récursif
+    let extractor =
+        RecursiveLinkExtractor::from_segments(segments, &state.registry, &state.config)?;
+
+    // Si is_list, récupérer les liens depuis la dernière entité
+    if extractor.is_list {
+        // Valider toute la chaîne de liens avant de retourner les résultats
+        // Pour chaque segment avec un link_definition, vérifier que le lien existe
+        // SAUF pour le dernier segment si c'est une liste (ID = Uuid::nil())
+
+        use crate::links::registry::LinkDirection;
+
+        // VALIDATION COMPLÈTE DE LA CHAÎNE
+        for i in 0..extractor.chain.len() - 1 {
+            let current = &extractor.chain[i];
+            let next = &extractor.chain[i + 1];
+
+            // Si next.entity_id est Uuid::nil(), c'est une liste finale, on ne valide pas ce lien
+            if next.entity_id.is_nil() {
+                continue;
+            }
+
+            // Cas 1: Le segment a un link_definition → validation normale
+            if let Some(link_def) = &current.link_definition {
+                let link_exists = match current.link_direction {
+                    Some(LinkDirection::Forward) => {
+                        // Forward: current est la source, next est le target
+                        let links = state
+                            .link_service
+                            .find_by_source(
+                                &current.entity_id,
+                                Some(&link_def.link_type),
+                                Some(&link_def.target_type),
+                            )
+                            .await
+                            .map_err(|e| ExtractorError::JsonError(e.to_string()))?;
+                        links.iter().any(|l| l.target_id == next.entity_id)
+                    }
+                    Some(LinkDirection::Reverse) => {
+                        // Reverse: current est le target, next est la source
+                        let links = state
+                            .link_service
+                            .find_by_target(&current.entity_id, None, Some(&link_def.link_type))
+                            .await
+                            .map_err(|e| ExtractorError::JsonError(e.to_string()))?;
+                        links.iter().any(|l| l.source_id == next.entity_id)
+                    }
+                    None => {
+                        return Err(ExtractorError::InvalidPath);
+                    }
+                };
+
+                if !link_exists {
+                    return Err(ExtractorError::LinkNotFound);
+                }
+            }
+            // Cas 2: Premier segment sans link_definition mais next a un link_definition
+            // → C'est le début d'une chaîne, on doit vérifier que current est lié à next
+            else if let Some(next_link_def) = &next.link_definition {
+                let link_exists = match next.link_direction {
+                    Some(LinkDirection::Forward) => {
+                        // Forward depuis current: current → next
+                        let links = state
+                            .link_service
+                            .find_by_source(
+                                &current.entity_id,
+                                Some(&next_link_def.link_type),
+                                Some(&next_link_def.target_type),
+                            )
+                            .await
+                            .map_err(|e| ExtractorError::JsonError(e.to_string()))?;
+                        links.iter().any(|l| l.target_id == next.entity_id)
+                    }
+                    Some(LinkDirection::Reverse) => {
+                        // Reverse depuis current: current ← next (donc next est source)
+                        let links = state
+                            .link_service
+                            .find_by_target(
+                                &current.entity_id,
+                                None,
+                                Some(&next_link_def.link_type),
+                            )
+                            .await
+                            .map_err(|e| ExtractorError::JsonError(e.to_string()))?;
+                        links.iter().any(|l| l.source_id == next.entity_id)
+                    }
+                    None => {
+                        return Err(ExtractorError::InvalidPath);
+                    }
+                };
+
+                if !link_exists {
+                    return Err(ExtractorError::LinkNotFound);
+                }
+            }
+        }
+
+        // Toute la chaîne est valide, récupérer les liens finaux
+        if let Some(link_def) = extractor.final_link_def() {
+            // Pour une liste, on veut l'ID du segment pénultième (celui qui a le lien)
+            let penultimate = extractor
+                .penultimate_segment()
+                .ok_or(ExtractorError::InvalidPath)?;
+            let entity_id = penultimate.entity_id;
+
+            use crate::links::registry::LinkDirection;
+
+            // Récupérer les liens selon la direction
+            let (links, enrichment_context) = match penultimate.link_direction {
+                Some(LinkDirection::Forward) => {
+                    // Forward: entity_id est la source
+                    let links = state
+                        .link_service
+                        .find_by_source(
+                            &entity_id,
+                            Some(&link_def.link_type),
+                            Some(&link_def.target_type),
+                        )
+                        .await
+                        .map_err(|e| ExtractorError::JsonError(e.to_string()))?;
+                    (links, EnrichmentContext::FromSource)
+                }
+                Some(LinkDirection::Reverse) => {
+                    // Reverse: entity_id est le target, on cherche les sources
+                    let links = state
+                        .link_service
+                        .find_by_target(&entity_id, None, Some(&link_def.link_type))
+                        .await
+                        .map_err(|e| ExtractorError::JsonError(e.to_string()))?;
+                    (links, EnrichmentContext::FromTarget)
+                }
+                None => {
+                    return Err(ExtractorError::InvalidPath);
+                }
+            };
+
+            // Enrichir les liens
+            let enriched_links =
+                enrich_links_with_entities(&state, links, enrichment_context, link_def).await?;
+
+            Ok(Json(serde_json::json!({
+                "links": enriched_links,
+                "count": enriched_links.len()
+            })))
+        } else {
+            Err(ExtractorError::InvalidPath)
+        }
+    } else {
+        // Item spécifique - récupérer le lien spécifique
+
+        use crate::links::registry::LinkDirection;
+
+        // VALIDATION COMPLÈTE DE LA CHAÎNE (aussi pour items spécifiques)
+        for i in 0..extractor.chain.len() - 1 {
+            let current = &extractor.chain[i];
+            let next = &extractor.chain[i + 1];
+
+            // Cas 1: Le segment a un link_definition → validation normale
+            if let Some(link_def) = &current.link_definition {
+                let link_exists = match current.link_direction {
+                    Some(LinkDirection::Forward) => {
+                        let links = state
+                            .link_service
+                            .find_by_source(
+                                &current.entity_id,
+                                Some(&link_def.link_type),
+                                Some(&link_def.target_type),
+                            )
+                            .await
+                            .map_err(|e| ExtractorError::JsonError(e.to_string()))?;
+                        links.iter().any(|l| l.target_id == next.entity_id)
+                    }
+                    Some(LinkDirection::Reverse) => {
+                        let links = state
+                            .link_service
+                            .find_by_target(&current.entity_id, None, Some(&link_def.link_type))
+                            .await
+                            .map_err(|e| ExtractorError::JsonError(e.to_string()))?;
+                        links.iter().any(|l| l.source_id == next.entity_id)
+                    }
+                    None => {
+                        return Err(ExtractorError::InvalidPath);
+                    }
+                };
+
+                if !link_exists {
+                    return Err(ExtractorError::LinkNotFound);
+                }
+            }
+            // Cas 2: Premier segment sans link_definition mais next a un link_definition
+            else if let Some(next_link_def) = &next.link_definition {
+                let link_exists = match next.link_direction {
+                    Some(LinkDirection::Forward) => {
+                        let links = state
+                            .link_service
+                            .find_by_source(
+                                &current.entity_id,
+                                Some(&next_link_def.link_type),
+                                Some(&next_link_def.target_type),
+                            )
+                            .await
+                            .map_err(|e| ExtractorError::JsonError(e.to_string()))?;
+                        links.iter().any(|l| l.target_id == next.entity_id)
+                    }
+                    Some(LinkDirection::Reverse) => {
+                        let links = state
+                            .link_service
+                            .find_by_target(
+                                &current.entity_id,
+                                None,
+                                Some(&next_link_def.link_type),
+                            )
+                            .await
+                            .map_err(|e| ExtractorError::JsonError(e.to_string()))?;
+                        links.iter().any(|l| l.source_id == next.entity_id)
+                    }
+                    None => {
+                        return Err(ExtractorError::InvalidPath);
+                    }
+                };
+
+                if !link_exists {
+                    return Err(ExtractorError::LinkNotFound);
+                }
+            }
+        }
+
+        // Toute la chaîne est validée, récupérer le lien final
+        if let Some(link_def) = extractor.final_link_def() {
+            let (target_id, _) = extractor.final_target();
+            let penultimate = extractor.penultimate_segment().unwrap();
+
+            // Récupérer le lien selon la direction
+            let link = match penultimate.link_direction {
+                Some(LinkDirection::Forward) => {
+                    // Forward: penultimate est la source, target_id est le target
+                    let links = state
+                        .link_service
+                        .find_by_source(
+                            &penultimate.entity_id,
+                            Some(&link_def.link_type),
+                            Some(&link_def.target_type),
+                        )
+                        .await
+                        .map_err(|e| ExtractorError::JsonError(e.to_string()))?;
+
+                    links
+                        .into_iter()
+                        .find(|l| l.target_id == target_id)
+                        .ok_or(ExtractorError::LinkNotFound)?
+                }
+                Some(LinkDirection::Reverse) => {
+                    // Reverse: penultimate est le target, target_id est la source
+                    let links = state
+                        .link_service
+                        .find_by_target(&penultimate.entity_id, None, Some(&link_def.link_type))
+                        .await
+                        .map_err(|e| ExtractorError::JsonError(e.to_string()))?;
+
+                    links
+                        .into_iter()
+                        .find(|l| l.source_id == target_id)
+                        .ok_or(ExtractorError::LinkNotFound)?
+                }
+                None => {
+                    return Err(ExtractorError::InvalidPath);
+                }
+            };
+
+            // Enrichir le lien
+            let enriched = enrich_links_with_entities(
+                &state,
+                vec![link],
+                EnrichmentContext::DirectLink,
+                link_def,
+            )
+            .await?;
+
+            Ok(Json(serde_json::json!({
+                "link": enriched.first()
+            })))
+        } else {
+            Err(ExtractorError::InvalidPath)
+        }
+    }
+}
+
+/// Handler générique pour POST sur chemins imbriqués
+///
+/// Supporte des chemins comme:
+/// - POST /users/123/invoices/456/orders (crée un nouvel order + link)
+pub async fn handle_nested_path_post(
+    State(state): State<AppState>,
+    Path(path): Path<String>,
+    Json(payload): Json<CreateLinkedEntityRequest>,
+) -> Result<Response, ExtractorError> {
+    let segments: Vec<String> = path
+        .trim_matches('/')
+        .split('/')
+        .map(|s| s.to_string())
+        .collect();
+
+    // Cette route ne gère QUE les chemins imbriqués à 3+ niveaux (5+ segments)
+    // Les chemins à 2 niveaux sont gérés par les routes spécifiques
+    if segments.len() < 5 {
+        return Err(ExtractorError::InvalidPath);
+    }
+
+    let extractor =
+        RecursiveLinkExtractor::from_segments(segments, &state.registry, &state.config)?;
+
+    // Récupérer le dernier lien
+    let link_def = extractor
+        .final_link_def()
+        .ok_or(ExtractorError::InvalidPath)?;
+
+    let (source_id, _) = extractor.final_target();
+    let target_entity_type = &link_def.target_type;
+
+    // Récupérer le creator pour l'entité target
+    let entity_creator = state
+        .entity_creators
+        .get(target_entity_type)
+        .ok_or_else(|| {
+            ExtractorError::JsonError(format!(
+                "No entity creator registered for type: {}",
+                target_entity_type
+            ))
+        })?;
+
+    // Créer la nouvelle entité
+    let created_entity = entity_creator
+        .create_from_json(payload.entity)
+        .await
+        .map_err(|e| ExtractorError::JsonError(format!("Failed to create entity: {}", e)))?;
+
+    // Extraire l'ID de l'entité créée
+    let target_entity_id = created_entity["id"].as_str().ok_or_else(|| {
+        ExtractorError::JsonError("Created entity missing 'id' field".to_string())
+    })?;
+    let target_entity_id = Uuid::parse_str(target_entity_id)
+        .map_err(|e| ExtractorError::JsonError(format!("Invalid UUID in created entity: {}", e)))?;
+
+    // Créer le lien
+    let link = LinkEntity::new(
+        link_def.link_type.clone(),
+        source_id,
+        target_entity_id,
+        payload.metadata,
+    );
+
+    let created_link = state
+        .link_service
+        .create(link)
+        .await
+        .map_err(|e| ExtractorError::JsonError(e.to_string()))?;
+
+    let response = serde_json::json!({
+        "entity": created_entity,
+        "link": created_link,
+    });
+
+    Ok((StatusCode::CREATED, Json(response)).into_response())
 }
 
 #[cfg(test)]
