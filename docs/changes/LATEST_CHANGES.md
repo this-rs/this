@@ -1,6 +1,61 @@
-# 🎯 Latest Changes - Entity System Refactoring (v0.0.2)
+# 🎯 Latest Changes
 
-## Summary
+## v0.0.5 - Automatic Validation and Filtering (Latest)
+
+### Summary
+
+Major new feature introducing **automatic validation and filtering** with declarative rules defined directly in entity models.
+
+**Date**: December 2024  
+**Version**: 0.0.5  
+**Impact**: New feature - No breaking changes
+
+### New Features
+
+- ✅ **Automatic Validation** - Declarative validation rules in entity definitions
+- ✅ **Data Filtering** - Automatic data transformation (trim, lowercase, uppercase, round)
+- ✅ **`impl_data_entity_validated!` Macro** - Extended entity macro with validation support
+- ✅ **`Validated<T>` Extractor** - Axum extractor for automatic validation
+- ✅ **Reusable Validators** - `required`, `optional`, `positive`, `string_length`, `max_value`, `in_list`, `date_format`
+- ✅ **Reusable Filters** - `trim`, `uppercase`, `lowercase`, `round_decimals`
+- ✅ **Operation-Specific Rules** - Different validation/filter rules for create vs update
+
+### Migration Guide
+
+If you're using `impl_data_entity!`, you can continue using it. However, we recommend upgrading to `impl_data_entity_validated!`:
+
+```rust
+// Old way (still works)
+impl_data_entity!(Invoice, "invoice", ["number"], { amount: f64 });
+
+// New way with validation
+impl_data_entity_validated!(
+    Invoice, "invoice", ["number"], { amount: f64 },
+    validate: {
+        create: {
+            amount: [required positive max_value(1_000_000.0)],
+        },
+    },
+    filters: {
+        create: {
+            amount: [round_decimals(2)],
+        },
+    }
+);
+```
+
+### Documentation
+
+- ✅ [Validation and Filtering Guide](../guides/VALIDATION_AND_FILTERING.md) - Complete guide
+- ✅ Updated [Getting Started](../guides/GETTING_STARTED.md) with validation examples
+- ✅ Updated [Quick Start](../guides/QUICK_START.md) with validation examples
+- ✅ Updated main [README](../../README.md) with validation feature
+
+---
+
+## v0.0.2 - Entity System Refactoring
+
+### Summary
 
 Major architectural refactoring introducing a **macro-driven entity system**, **automatic entity creation with linking**, and removal of multi-tenancy in favor of a cleaner, simpler architecture.
 
@@ -425,11 +480,11 @@ All documentation has been updated to reflect these changes:
 
 ## 🔮 Future Enhancements
 
-Planned for v0.0.3:
+Planned for v0.0.3+:
 
 - [ ] ScyllaDB storage backend
 - [ ] PostgreSQL storage backend
-- [ ] Advanced validation rules
+- [ ] Additional validators and filters
 - [ ] Webhook system for entity events
 - [ ] GraphQL support
 - [ ] Performance optimizations for large datasets

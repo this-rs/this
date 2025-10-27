@@ -1,21 +1,21 @@
-# Validation et Filtrage Automatique
+# Automatic Validation and Filtering
 
-## Vue d'ensemble
+## Overview
 
-Ce guide explique comment utiliser le système de validation et de filtrage automatique intégré dans le framework. Le système applique automatiquement les validators et les filters **avant** que vos handlers ne reçoivent les données, garantissant ainsi que les données sont toujours propres et valides.
+This guide explains how to use the automatic validation and filtering system built into the framework. The system automatically applies validators and filters **before** your handlers receive the data, ensuring that data is always clean and valid.
 
 ## Architecture
 
-Le système est composé de :
+The system consists of:
 
-1. **Validators** - Fonctions réutilisables qui valident des champs
-2. **Filters** - Fonctions réutilisables qui transforment des valeurs
-3. **Macro `impl_data_entity_validated!`** - Définition déclarative dans `model.rs`
-4. **Extractor `Validated<T>`** - Extraction automatique dans les handlers
+1. **Validators** - Reusable functions that validate fields
+2. **Filters** - Reusable functions that transform values
+3. **Macro `impl_data_entity_validated!`** - Declarative definition in `model.rs`
+4. **Extractor `Validated<T>`** - Automatic extraction in handlers
 
 ## 🚀 Quick Start
 
-### 1. Définir l'entité avec validation
+### 1. Define Entity with Validation
 
 ```rust
 // entities/invoice/model.rs
@@ -32,7 +32,7 @@ impl_data_entity_validated!(
         paid_at: Option<String>,
     },
     
-    // Validation rules par opération
+    // Validation rules by operation
     validate: {
         create: {
             number: [required string_length(3, 50)],
@@ -46,7 +46,7 @@ impl_data_entity_validated!(
         },
     },
     
-    // Filters par opération
+    // Filters by operation
     filters: {
         create: {
             number: [trim uppercase],
@@ -61,7 +61,7 @@ impl_data_entity_validated!(
 );
 ```
 
-### 2. Utiliser dans les handlers
+### 2. Use in Handlers
 
 ```rust
 // entities/invoice/handlers.rs
@@ -69,9 +69,9 @@ use this::prelude::Validated;
 
 pub async fn create_invoice(
     State(state): State<InvoiceAppState>,
-    validated: Validated<Invoice>,  // ← Validation automatique !
+    validated: Validated<Invoice>,  // ← Automatic validation!
 ) -> Result<Json<Invoice>, StatusCode> {
-    // Les données sont déjà filtrées et validées !
+    // Data is already filtered and validated!
     let payload = &*validated;
     
     let invoice = Invoice::new(
@@ -88,90 +88,90 @@ pub async fn create_invoice(
 }
 ```
 
-## 📋 Validators Disponibles
+## 📋 Available Validators
 
 ### `required`
-Vérifie que le champ n'est pas null.
+Checks that the field is not null.
 
 ```rust
 number: [required]
 ```
 
 ### `optional`
-Marque le champ comme optionnel (toujours valide).
+Marks the field as optional (always valid).
 
 ```rust
 due_date: [optional]
 ```
 
 ### `positive`
-Vérifie que le nombre est positif (> 0).
+Checks that the number is positive (> 0).
 
 ```rust
 amount: [positive]
 ```
 
 ### `string_length(min, max)`
-Vérifie la longueur d'une chaîne.
+Checks the length of a string.
 
 ```rust
 number: [string_length(3, 50)]
 ```
 
 ### `max_value(max)`
-Vérifie que le nombre ne dépasse pas une valeur maximale.
+Checks that the number does not exceed a maximum value.
 
 ```rust
 amount: [max_value(1_000_000.0)]
 ```
 
 ### `in_list("val1", "val2", ...)`
-Vérifie que la valeur est dans une liste autorisée.
+Checks that the value is in an allowed list.
 
 ```rust
 status: [in_list("draft", "sent", "paid", "cancelled")]
 ```
 
 ### `date_format(format)`
-Vérifie qu'une date correspond au format spécifié.
+Checks that a date matches the specified format.
 
 ```rust
 due_date: [date_format("%Y-%m-%d")]
 ```
 
-## 🔧 Filters Disponibles
+## 🔧 Available Filters
 
 ### `trim`
-Supprime les espaces au début et à la fin d'une chaîne.
+Removes spaces at the beginning and end of a string.
 
 ```rust
 number: [trim]
 ```
 
 ### `uppercase`
-Convertit une chaîne en majuscules.
+Converts a string to uppercase.
 
 ```rust
 number: [uppercase]
 ```
 
 ### `lowercase`
-Convertit une chaîne en minuscules.
+Converts a string to lowercase.
 
 ```rust
 status: [lowercase]
 ```
 
 ### `round_decimals(decimals)`
-Arrondit un nombre au nombre de décimales spécifié.
+Rounds a number to the specified number of decimals.
 
 ```rust
 amount: [round_decimals(2)]
 ```
 
-## 🎯 Exemples d'Usage
+## 🎯 Usage Examples
 
-### Exemple 1: Validation de base
+### Example 1: Basic Validation
 
 ```rust
 impl_data_entity_validated!(
@@ -198,7 +198,7 @@ impl_data_entity_validated!(
 );
 ```
 
-### Exemple 2: Chaînage de validators et filters
+### Example 2: Chaining Validators and Filters
 
 ```rust
 impl_data_entity_validated!(
@@ -227,7 +227,7 @@ impl_data_entity_validated!(
 );
 ```
 
-### Exemple 3: Validation différente par opération
+### Example 3: Different Validation by Operation
 
 ```rust
 impl_data_entity_validated!(
@@ -262,35 +262,35 @@ impl_data_entity_validated!(
 );
 ```
 
-## ⚙️ Fonctionnement Interne
+## ⚙️ Internal Functioning
 
-### 1. Ordre d'exécution
+### 1. Execution Order
 
-Lorsqu'une requête arrive :
+When a request arrives:
 
-1. **Extraction JSON** : Le JSON est parsé
-2. **Détermination de l'opération** : Basée sur la méthode HTTP (POST = create, PUT = update)
-3. **Application des filters** : Les transformations sont appliquées
-4. **Application des validators** : Les validations sont exécutées
-5. **Handler** : Le handler reçoit les données propres et validées
+1. **JSON Extraction** : JSON is parsed
+2. **Operation Determination** : Based on HTTP method (POST = create, PUT = update)
+3. **Filter Application** : Transformations are applied
+4. **Validator Application** : Validations are executed
+5. **Handler** : The handler receives clean and validated data
 
-### 2. Gestion des erreurs
+### 2. Error Handling
 
-Si la validation échoue, une réponse HTTP 422 est retournée avec les détails :
+If validation fails, an HTTP 422 response is returned with details:
 
 ```json
 {
   "error": "Validation failed",
   "errors": [
-    "Le champ 'amount' doit être positif (valeur: -100)",
-    "'status' doit être l'une des valeurs: [\"draft\", \"sent\", \"paid\"] (valeur actuelle: invalid)"
+    "Field 'amount' must be positive (value: -100)",
+    "'status' must be one of: [\"draft\", \"sent\", \"paid\"] (current value: invalid)"
   ]
 }
 ```
 
-### 3. Extensibilité
+### 3. Extensibility
 
-#### Créer un validator personnalisé
+#### Create a Custom Validator
 
 ```rust
 // src/core/validation/validators.rs
@@ -301,7 +301,7 @@ pub fn email_format() -> impl Fn(&str, &Value) -> Result<(), String> + Send + Sy
             if s.contains('@') && s.contains('.') {
                 Ok(())
             } else {
-                Err(format!("'{}' doit être une adresse email valide", field))
+                Err(format!("'{}' must be a valid email address", field))
             }
         } else {
             Ok(())
@@ -310,7 +310,7 @@ pub fn email_format() -> impl Fn(&str, &Value) -> Result<(), String> + Send + Sy
 }
 ```
 
-Puis ajoutez-le à la macro helper :
+Then add it to the macro helper:
 
 ```rust
 // src/entities/macros.rs - add_validators_for_field!
@@ -321,7 +321,7 @@ Puis ajoutez-le à la macro helper :
 };
 ```
 
-#### Créer un filter personnalisé
+#### Create a Custom Filter
 
 ```rust
 // src/core/validation/filters.rs
@@ -343,53 +343,52 @@ pub fn slugify() -> impl Fn(&str, Value) -> Result<Value> + Send + Sync + Clone 
 
 ## 🔍 Debugging
 
-### Activer les logs
+### Enable Logs
 
 ```rust
-// Dans main.rs
+// In main.rs
 tracing_subscriber::fmt()
     .with_max_level(tracing::Level::DEBUG)
     .init();
 ```
 
-### Tester manuellement
+### Manual Testing
 
 ```bash
-# Test avec des données invalides
+# Test with invalid data
 curl -X POST http://127.0.0.1:3000/invoices \
   -H "Content-Type: application/json" \
   -d '{"number": "  inv-test  ", "status": " DRAFT ", "amount": 1234.567}'
 
-# Résultat attendu:
-# - number: "INV-TEST" (trimé et uppercasé)
-# - status: "draft" (trimé et lowercasé)
-# - amount: 1234.57 (arrondi à 2 décimales)
+# Expected result:
+# - number: "INV-TEST" (trimmed and uppercased)
+# - status: "draft" (trimmed and lowercased)
+# - amount: 1234.57 (rounded to 2 decimals)
 ```
 
 ## ✅ Best Practices
 
-1. **Séparez validation et filtrage** : Les filters transforment, les validators vérifient
-2. **Utilisez optional pour les champs optionnels** : Évite les faux positifs
-3. **Ordonnez logiquement** : Trim avant validation de longueur
-4. **Validations spécifiques par opération** : Create peut être plus strict qu'Update
-5. **Messages d'erreur clairs** : Les validators incluent la valeur problématique
+1. **Separate validation and filtering** : Filters transform, validators verify
+2. **Use optional for optional fields** : Avoids false positives
+3. **Order logically** : Trim before length validation
+4. **Operation-specific validations** : Create can be stricter than Update
+5. **Clear error messages** : Validators include the problematic value
 
-## 📚 Ressources
+## 📚 Resources
 
 - [Validators source](../../src/core/validation/validators.rs)
 - [Filters source](../../src/core/validation/filters.rs)
 - [Macro implementation](../../src/entities/macros.rs)
-- [Exemple microservice](../../examples/microservice/)
+- [Microservice example](../../examples/microservice/)
 
 ## 🎉 Conclusion
 
-Le système de validation et filtrage automatique vous permet de :
+The automatic validation and filtering system allows you to:
 
-- ✅ Déclarer vos règles directement dans `model.rs`
-- ✅ Garantir que les handlers reçoivent toujours des données valides
-- ✅ Réutiliser des validators/filters à travers toutes vos entités
-- ✅ Maintenir un code propre et maintenable
-- ✅ Avoir des messages d'erreur détaillés automatiquement
+- ✅ Declare your rules directly in `model.rs`
+- ✅ Guarantee that handlers always receive valid data
+- ✅ Reuse validators/filters across all your entities
+- ✅ Maintain clean and maintainable code
+- ✅ Have detailed error messages automatically
 
-**Le système est 100% intégré au framework et suit sa philosophie déclarative !**
-
+**The system is 100% integrated with the framework and follows its declarative philosophy!**

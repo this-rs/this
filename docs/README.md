@@ -1,74 +1,79 @@
-# Documentation This-RS
+# This-RS Documentation
 
-## 📚 Guide de Navigation
+## 📚 Navigation Guide
 
-### 🚀 Démarrage Rapide
+### 🚀 Quick Start
 
-- **[Getting Started](guides/GETTING_STARTED.md)** - Premier pas avec This-RS
-- **[Quick Start](guides/QUICK_START.md)** - Guide de démarrage rapide
+- **[Getting Started](guides/GETTING_STARTED.md)** - First steps with This-RS
+- **[Quick Start](guides/QUICK_START.md)** - Quick start guide
 
-### 🔗 Gestion des Liens
+### ✅ Validation and Filtering
 
-- **[Enriched Links](guides/ENRICHED_LINKS.md)** - Entités complètes dans les liens (auto-enrichissement)
-- **[Semantic URLs](changes/SEMANTIC_URLS.md)** - 🆕 URLs cohérentes et intuitives pour les liens
-- **[Link Authorization](guides/LINK_AUTHORIZATION.md)** - Permissions au niveau des liens
-- **[Link Metadata](guides/LINK_METADATA.md)** - Métadonnées et mises à jour des liens
-- **[Multi-Level Navigation](guides/MULTI_LEVEL_NAVIGATION.md)** - Navigation multi-niveaux
+- **[Validation and Filtering](guides/VALIDATION_AND_FILTERING.md)** - 🆕 Automatic data validation and filtering
+
+### 🔗 Link Management
+
+- **[Enriched Links](guides/ENRICHED_LINKS.md)** - Complete entities in links (auto-enrichment)
+- **[Semantic URLs](changes/SEMANTIC_URLS.md)** - 🆕 Coherent and intuitive URLs for links
+- **[Link Authorization](guides/LINK_AUTHORIZATION.md)** - Permissions at link level
+- **[Link Metadata](guides/LINK_METADATA.md)** - Metadata and link updates
+- **[Multi-Level Navigation](guides/MULTI_LEVEL_NAVIGATION.md)** - Multi-level navigation
 
 ### 🏗️ Architecture
 
-- **[Architecture](architecture/ARCHITECTURE.md)** - Vue d'ensemble de l'architecture
-- **[ServerBuilder Implementation](architecture/SERVER_BUILDER_IMPLEMENTATION.md)** - Auto-génération des routes
-- **[Routing Explanation](architecture/ROUTING_EXPLANATION.md)** - Explications sur le routing
+- **[Architecture](architecture/ARCHITECTURE.md)** - Architecture overview
+- **[ServerBuilder Implementation](architecture/SERVER_BUILDER_IMPLEMENTATION.md)** - Auto-generated routes
+- **[Routing Explanation](architecture/ROUTING_EXPLANATION.md)** - Routing explanations
 
-### 📝 Historique des Changements
+### 📝 Change History
 
-- **[Semantic URLs](changes/SEMANTIC_URLS.md)** - 🆕 URLs cohérentes pour les opérations de liens
-- **[Enriched Links Implementation](changes/ENRICHED_LINKS_IMPLEMENTATION.md)** - Implémentation de l'enrichissement
-- **[Auto-Routing Success](changes/AUTO_ROUTING_SUCCESS.md)** - Implémentation de l'auto-routing
-- **[Latest Changes](changes/LATEST_CHANGES.md)** - Derniers changements majeurs
-- **[Module Restructuring](changes/MODULE_RESTRUCTURING.md)** - Restructuration des modules
-- **[Store Simplification](changes/STORE_SIMPLIFICATION.md)** - Simplification du store
-- **[Entity Folders Structure](changes/ENTITY_FOLDERS_STRUCTURE.md)** - Organisation par dossiers
+- **[Semantic URLs](changes/SEMANTIC_URLS.md)** - 🆕 Coherent URLs for link operations
+- **[Enriched Links Implementation](changes/ENRICHED_LINKS_IMPLEMENTATION.md)** - Enrichment implementation
+- **[Auto-Routing Success](changes/AUTO_ROUTING_SUCCESS.md)** - Auto-routing implementation
+- **[Latest Changes](changes/LATEST_CHANGES.md)** - Latest major changes
+- **[Module Restructuring](changes/MODULE_RESTRUCTURING.md)** - Module restructuring
+- **[Store Simplification](changes/STORE_SIMPLIFICATION.md)** - Store simplification
+- **[Entity Folders Structure](changes/ENTITY_FOLDERS_STRUCTURE.md)** - Folder organization
 
-## 🎯 Par Cas d'Usage
+## 🎯 By Use Case
 
-### Je veux commencer avec This-RS
+### I want to get started with This-RS
 → [Getting Started](guides/GETTING_STARTED.md)
 
-### Je veux comprendre l'architecture
+### I want to understand the architecture
 → [Architecture](architecture/ARCHITECTURE.md)
 
-### Je veux créer un microservice
-→ [Examples README](/examples/microservice/README.md)
+### I want to create a microservice
+→ [Examples README](../examples/microservice/README.md)
 
-### Je veux comprendre l'auto-routing
+### I want to understand auto-routing
 → [ServerBuilder Implementation](architecture/SERVER_BUILDER_IMPLEMENTATION.md)
 
-### Je veux comprendre les liens enrichis
+### I want to understand enriched links
 → [Enriched Links](guides/ENRICHED_LINKS.md)
 
-### Je veux gérer les permissions des liens
+### I want to manage link permissions
 → [Link Authorization](guides/LINK_AUTHORIZATION.md)
 
-## 📂 Structure de la Documentation
+## 📂 Documentation Structure
 
 ```
 docs/
-├── README.md                    # Ce fichier (index)
-├── architecture/                # Documentation technique
+├── README.md                    # This file (index)
+├── architecture/                # Technical documentation
 │   ├── ARCHITECTURE.md
 │   ├── SERVER_BUILDER_IMPLEMENTATION.md
 │   └── ROUTING_EXPLANATION.md
-├── guides/                      # Guides d'utilisation
+├── guides/                      # User guides
 │   ├── GETTING_STARTED.md
 │   ├── QUICK_START.md
-│   ├── ENRICHED_LINKS.md       # Auto-enrichissement des liens
+│   ├── VALIDATION_AND_FILTERING.md  # 🆕 Validation and filtering
+│   ├── ENRICHED_LINKS.md       # Auto-enrichment of links
 │   ├── LINK_AUTHORIZATION.md
 │   ├── LINK_METADATA.md
 │   └── MULTI_LEVEL_NAVIGATION.md
-└── changes/                     # Historique des modifications
-    ├── SEMANTIC_URLS.md        # 🆕 URLs sémantiques pour les liens
+└── changes/                     # Change history
+    ├── SEMANTIC_URLS.md        # 🆕 Semantic URLs for links
     ├── ENRICHED_LINKS_IMPLEMENTATION.md
     ├── AUTO_ROUTING_SUCCESS.md
     ├── LATEST_CHANGES.md
@@ -77,9 +82,8 @@ docs/
     └── ENTITY_FOLDERS_STRUCTURE.md
 ```
 
-## 🔗 Liens Utiles
+## 🔗 Useful Links
 
-- [README Principal](../README.md)
+- [Main README](../README.md)
 - [Examples](../examples/)
-- [Code Source](../src/)
-
+- [Source Code](../src/)
