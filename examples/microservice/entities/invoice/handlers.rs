@@ -2,11 +2,13 @@
 
 use super::{model::Invoice, store::InvoiceStore};
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     response::Json,
 };
-use serde_json::{Value, json};
+use serde_json::Value;
+use this::prelude::Validated;
+use this::prelude::*;
 use uuid::Uuid;
 
 /// Invoice-specific AppState
@@ -15,12 +17,41 @@ pub struct InvoiceAppState {
     pub store: InvoiceStore,
 }
 
-pub async fn list_invoices(State(state): State<InvoiceAppState>) -> Json<Value> {
-    let invoices = state.store.list();
-    Json(json!({
-        "invoices": invoices,
-        "count": invoices.len()
-    }))
+pub async fn list_invoices(
+    State(state): State<InvoiceAppState>,
+    Query(params): Query<QueryParams>,
+) -> Json<PaginatedResponse<Value>> {
+    let page = params.page();
+    let limit = params.limit();
+
+    // Get all invoices
+    let mut invoices = state.store.list();
+
+    // Apply filters if provided
+    if let Some(filter) = params.filter_value() {
+        invoices = state.store.apply_filters(invoices, &filter);
+    }
+
+    // Apply sort if provided
+    if let Some(sort) = &params.sort {
+        invoices = state.store.apply_sort(invoices, sort);
+    }
+
+    let total = invoices.len();
+
+    // ALWAYS paginate
+    let start = (page - 1) * limit;
+    let paginated: Vec<Value> = invoices
+        .into_iter()
+        .skip(start)
+        .take(limit)
+        .map(|invoice| serde_json::to_value(invoice).unwrap())
+        .collect();
+
+    Json(PaginatedResponse {
+        data: paginated,
+        pagination: PaginationMeta::new(page, limit, total),
+    })
 }
 
 pub async fn get_invoice(
@@ -33,9 +64,15 @@ pub async fn get_invoice(
 
 pub async fn create_invoice(
     State(state): State<InvoiceAppState>,
-    Json(payload): Json<Value>,
+    validated: Validated<Invoice>,
 ) -> Result<Json<Invoice>, StatusCode> {
-    // Use the generated new() method from impl_data_entity!
+    // validated payload is already filtered and validated!
+    // - number: trimmed and uppercased
+    // - status: trimmed and lowercased
+    // - amount: rounded to 2 decimals, validated positive and < 1M
+    // - All required fields validated
+    let payload = &*validated;
+
     let invoice = Invoice::new(
         payload["number"].as_str().unwrap_or("INV-000").to_string(), // name
         payload["status"].as_str().unwrap_or("active").to_string(),  // status
@@ -52,13 +89,17 @@ pub async fn create_invoice(
 pub async fn update_invoice(
     State(state): State<InvoiceAppState>,
     Path(id): Path<String>,
-    Json(payload): Json<Value>,
+    validated: Validated<Invoice>,
 ) -> Result<Json<Invoice>, StatusCode> {
     let id = Uuid::parse_str(&id).map_err(|_| StatusCode::BAD_REQUEST)?;
 
     let mut invoice = state.store.get(&id).ok_or(StatusCode::NOT_FOUND)?;
 
-    // Update fields if provided
+    // Update fields if provided (already validated and filtered!)
+    // - status: trimmed and lowercased, validated in_list
+    // - amount: rounded to 2 decimals, validated positive
+    let payload = &*validated;
+
     if let Some(name) = payload["name"].as_str() {
         invoice.name = name.to_string();
     }

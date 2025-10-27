@@ -2,7 +2,7 @@
 
 use super::model::Order;
 use anyhow::Result;
-use serde_json;
+use serde_json::{self, Value};
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use this::prelude::*;
@@ -91,5 +91,104 @@ impl EntityCreator for OrderStore {
 
         self.add(order.clone());
         Ok(serde_json::to_value(order)?)
+    }
+}
+
+/// Implement QueryableStore for OrderStore
+///
+/// This allows filtering and sorting of orders with generic query parameters.
+impl QueryableStore<Order> for OrderStore {
+    fn apply_filters(&self, data: Vec<Order>, filter: &Value) -> Vec<Order> {
+        let mut result = data;
+
+        if let Some(obj) = filter.as_object() {
+            for (key, value) in obj {
+                result = match key.as_str() {
+                    // Exact matches
+                    "number" => result
+                        .into_iter()
+                        .filter(|o| o.number == value.as_str().unwrap_or(""))
+                        .collect(),
+
+                    "status" => result
+                        .into_iter()
+                        .filter(|o| o.status == value.as_str().unwrap_or(""))
+                        .collect(),
+
+                    "customer_name" => result
+                        .into_iter()
+                        .filter(|o| {
+                            o.customer_name
+                                .as_ref()
+                                .map(|n| n == value.as_str().unwrap_or(""))
+                                .unwrap_or(false)
+                        })
+                        .collect(),
+
+                    // Comparisons
+                    "amount>" => {
+                        let threshold = value.as_f64().unwrap_or(0.0);
+                        result
+                            .into_iter()
+                            .filter(|o| o.amount > threshold)
+                            .collect()
+                    }
+
+                    "amount<" => {
+                        let threshold = value.as_f64().unwrap_or(f64::MAX);
+                        result
+                            .into_iter()
+                            .filter(|o| o.amount < threshold)
+                            .collect()
+                    }
+
+                    "amount>=" => {
+                        let threshold = value.as_f64().unwrap_or(0.0);
+                        result
+                            .into_iter()
+                            .filter(|o| o.amount >= threshold)
+                            .collect()
+                    }
+
+                    "amount<=" => {
+                        let threshold = value.as_f64().unwrap_or(f64::MAX);
+                        result
+                            .into_iter()
+                            .filter(|o| o.amount <= threshold)
+                            .collect()
+                    }
+
+                    _ => result,
+                };
+            }
+        }
+
+        result
+    }
+
+    fn apply_sort(&self, mut data: Vec<Order>, sort: &str) -> Vec<Order> {
+        match sort {
+            "number" | "number:asc" => data.sort_by(|a, b| a.number.cmp(&b.number)),
+            "number:desc" => data.sort_by(|a, b| b.number.cmp(&a.number)),
+
+            "amount" | "amount:asc" => {
+                data.sort_by(|a, b| a.amount.partial_cmp(&b.amount).unwrap())
+            }
+            "amount:desc" => data.sort_by(|a, b| b.amount.partial_cmp(&a.amount).unwrap()),
+
+            "created_at" | "created_at:asc" => data.sort_by(|a, b| a.created_at.cmp(&b.created_at)),
+            "created_at:desc" => data.sort_by(|a, b| b.created_at.cmp(&a.created_at)),
+
+            "updated_at" | "updated_at:asc" => data.sort_by(|a, b| a.updated_at.cmp(&b.updated_at)),
+            "updated_at:desc" => data.sort_by(|a, b| b.updated_at.cmp(&a.updated_at)),
+
+            _ => {}
+        }
+
+        data
+    }
+
+    fn list_all(&self) -> Vec<Order> {
+        self.list()
     }
 }

@@ -2,7 +2,7 @@
 
 use super::model::Invoice;
 use anyhow::Result;
-use serde_json;
+use serde_json::{self, Value};
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use this::prelude::*;
@@ -85,5 +85,71 @@ impl EntityCreator for InvoiceStore {
 
         self.add(invoice.clone());
         Ok(serde_json::to_value(invoice)?)
+    }
+}
+
+/// Implement QueryableStore for InvoiceStore
+impl QueryableStore<Invoice> for InvoiceStore {
+    fn apply_filters(&self, data: Vec<Invoice>, filter: &Value) -> Vec<Invoice> {
+        let mut result = data;
+
+        if let Some(obj) = filter.as_object() {
+            for (key, value) in obj {
+                result = match key.as_str() {
+                    "number" => result
+                        .into_iter()
+                        .filter(|i| i.number == value.as_str().unwrap_or(""))
+                        .collect(),
+
+                    "status" => result
+                        .into_iter()
+                        .filter(|i| i.status == value.as_str().unwrap_or(""))
+                        .collect(),
+
+                    "amount>" => {
+                        let threshold = value.as_f64().unwrap_or(0.0);
+                        result
+                            .into_iter()
+                            .filter(|i| i.amount > threshold)
+                            .collect()
+                    }
+
+                    "amount<" => {
+                        let threshold = value.as_f64().unwrap_or(f64::MAX);
+                        result
+                            .into_iter()
+                            .filter(|i| i.amount < threshold)
+                            .collect()
+                    }
+
+                    _ => result,
+                };
+            }
+        }
+
+        result
+    }
+
+    fn apply_sort(&self, mut data: Vec<Invoice>, sort: &str) -> Vec<Invoice> {
+        match sort {
+            "number" | "number:asc" => data.sort_by(|a, b| a.number.cmp(&b.number)),
+            "number:desc" => data.sort_by(|a, b| b.number.cmp(&a.number)),
+
+            "amount" | "amount:asc" => {
+                data.sort_by(|a, b| a.amount.partial_cmp(&b.amount).unwrap())
+            }
+            "amount:desc" => data.sort_by(|a, b| b.amount.partial_cmp(&a.amount).unwrap()),
+
+            "created_at" | "created_at:asc" => data.sort_by(|a, b| a.created_at.cmp(&b.created_at)),
+            "created_at:desc" => data.sort_by(|a, b| b.created_at.cmp(&a.created_at)),
+
+            _ => {}
+        }
+
+        data
+    }
+
+    fn list_all(&self) -> Vec<Invoice> {
+        self.list()
     }
 }

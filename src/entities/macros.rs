@@ -486,6 +486,195 @@ macro_rules! impl_link_entity {
     };
 }
 
+/// Extended macro to create a Data entity with validation and filtering
+///
+/// This macro extends `impl_data_entity!` with declarative validation and filtering support.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// use this::prelude::*;
+///
+/// impl_data_entity_validated!(
+///     Invoice,
+///     "invoice",
+///     ["name", "number"],
+///     {
+///         number: String,
+///         amount: f64,
+///         due_date: Option<String>,
+///     },
+///     validate: {
+///         create: {
+///             number: [required, string_length(3, 50)],
+///             amount: [required, positive],
+///         },
+///         update: {
+///             amount: [optional, positive],
+///         },
+///     },
+///     filters: {
+///         create: {
+///             number: [trim, uppercase],
+///             amount: [round_decimals(2)],
+///         },
+///     }
+/// );
+/// ```
+#[macro_export]
+macro_rules! impl_data_entity_validated {
+    (
+        $type:ident,
+        $type_name:expr,
+        [ $( $indexed_field:expr ),* $(,)? ],
+        {
+            $( $specific_field:ident : $specific_type:ty ),* $(,)?
+        }
+        $(,)?
+        validate: {
+            $(
+                $op:ident: {
+                    $(
+                        $val_field:ident: [ $( $validator:tt )* ]
+                    ),* $(,)?
+                }
+            ),* $(,)?
+        }
+        $(,)?
+        filters: {
+            $(
+                $fop:ident: {
+                    $(
+                        $fil_field:ident: [ $( $filter:tt )* ]
+                    ),* $(,)?
+                }
+            ),* $(,)?
+        }
+        $(,)?
+    ) => {
+        // 1. Generate the base entity (reuse existing macro)
+        $crate::impl_data_entity!(
+            $type,
+            $type_name,
+            [ $( $indexed_field ),* ],
+            {
+                $( $specific_field : $specific_type ),*
+            }
+        );
+
+        // 2. Implement ValidatableEntity trait for validation support
+        impl $crate::core::validation::extractor::ValidatableEntity for $type {
+            fn validation_config(operation: &str) -> $crate::core::validation::EntityValidationConfig {
+                use $crate::core::validation::*;
+
+                let mut config = EntityValidationConfig::new($type_name);
+
+                // Generate validation rules per operation
+                $(
+                    if operation == stringify!($op) {
+                        $(
+                            // Add validators for each field
+                            $crate::add_validators_for_field!(config, stringify!($val_field), $( $validator )*);
+                        )*
+                    }
+                )*
+
+                // Generate filters per operation
+                $(
+                    if operation == stringify!($fop) {
+                        $(
+                            // Add filters for each field
+                            $crate::add_filters_for_field!(config, stringify!($fil_field), $( $filter )*);
+                        )*
+                    }
+                )*
+
+                config
+            }
+        }
+    };
+}
+
+/// Helper macro to add validators to a field
+#[macro_export]
+macro_rules! add_validators_for_field {
+    // Base case: empty
+    ($config:expr, $field:expr,) => {};
+
+    // required
+    ($config:expr, $field:expr, required $( $rest:tt )*) => {
+        $config.add_validator($field, $crate::core::validation::validators::required());
+        $crate::add_validators_for_field!($config, $field, $( $rest )*);
+    };
+
+    // optional
+    ($config:expr, $field:expr, optional $( $rest:tt )*) => {
+        $config.add_validator($field, $crate::core::validation::validators::optional());
+        $crate::add_validators_for_field!($config, $field, $( $rest )*);
+    };
+
+    // positive
+    ($config:expr, $field:expr, positive $( $rest:tt )*) => {
+        $config.add_validator($field, $crate::core::validation::validators::positive());
+        $crate::add_validators_for_field!($config, $field, $( $rest )*);
+    };
+
+    // string_length with parameters
+    ($config:expr, $field:expr, string_length($min:expr, $max:expr) $( $rest:tt )*) => {
+        $config.add_validator($field, $crate::core::validation::validators::string_length($min, $max));
+        $crate::add_validators_for_field!($config, $field, $( $rest )*);
+    };
+
+    // max_value with parameter
+    ($config:expr, $field:expr, max_value($max:expr) $( $rest:tt )*) => {
+        $config.add_validator($field, $crate::core::validation::validators::max_value($max));
+        $crate::add_validators_for_field!($config, $field, $( $rest )*);
+    };
+
+    // in_list with values
+    ($config:expr, $field:expr, in_list($( $value:expr ),* $(,)?) $( $rest:tt )*) => {
+        $config.add_validator($field, $crate::core::validation::validators::in_list(vec![$( $value.to_string() ),*]));
+        $crate::add_validators_for_field!($config, $field, $( $rest )*);
+    };
+
+    // date_format with format string
+    ($config:expr, $field:expr, date_format($format:expr) $( $rest:tt )*) => {
+        $config.add_validator($field, $crate::core::validation::validators::date_format($format));
+        $crate::add_validators_for_field!($config, $field, $( $rest )*);
+    };
+}
+
+/// Helper macro to add filters to a field
+#[macro_export]
+macro_rules! add_filters_for_field {
+    // Base case: empty
+    ($config:expr, $field:expr,) => {};
+
+    // trim
+    ($config:expr, $field:expr, trim $( $rest:tt )*) => {
+        $config.add_filter($field, $crate::core::validation::filters::trim());
+        $crate::add_filters_for_field!($config, $field, $( $rest )*);
+    };
+
+    // uppercase
+    ($config:expr, $field:expr, uppercase $( $rest:tt )*) => {
+        $config.add_filter($field, $crate::core::validation::filters::uppercase());
+        $crate::add_filters_for_field!($config, $field, $( $rest )*);
+    };
+
+    // lowercase
+    ($config:expr, $field:expr, lowercase $( $rest:tt )*) => {
+        $config.add_filter($field, $crate::core::validation::filters::lowercase());
+        $crate::add_filters_for_field!($config, $field, $( $rest )*);
+    };
+
+    // round_decimals with parameter
+    ($config:expr, $field:expr, round_decimals($decimals:expr) $( $rest:tt )*) => {
+        $config.add_filter($field, $crate::core::validation::filters::round_decimals($decimals));
+        $crate::add_filters_for_field!($config, $field, $( $rest )*);
+    };
+}
+
 #[cfg(test)]
 mod tests {
     use crate::prelude::*;

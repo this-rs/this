@@ -2,11 +2,12 @@
 
 use super::{model::Payment, store::PaymentStore};
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     response::Json,
 };
-use serde_json::{Value, json};
+use serde_json::Value;
+use this::prelude::*;
 use uuid::Uuid;
 
 /// Payment-specific AppState
@@ -15,12 +16,41 @@ pub struct PaymentAppState {
     pub store: PaymentStore,
 }
 
-pub async fn list_payments(State(state): State<PaymentAppState>) -> Json<Value> {
-    let payments = state.store.list();
-    Json(json!({
-        "payments": payments,
-        "count": payments.len()
-    }))
+pub async fn list_payments(
+    State(state): State<PaymentAppState>,
+    Query(params): Query<QueryParams>,
+) -> Json<PaginatedResponse<Value>> {
+    let page = params.page();
+    let limit = params.limit();
+
+    // Get all payments
+    let mut payments = state.store.list();
+
+    // Apply filters if provided
+    if let Some(filter) = params.filter_value() {
+        payments = state.store.apply_filters(payments, &filter);
+    }
+
+    // Apply sort if provided
+    if let Some(sort) = &params.sort {
+        payments = state.store.apply_sort(payments, sort);
+    }
+
+    let total = payments.len();
+
+    // ALWAYS paginate
+    let start = (page - 1) * limit;
+    let paginated: Vec<Value> = payments
+        .into_iter()
+        .skip(start)
+        .take(limit)
+        .map(|payment| serde_json::to_value(payment).unwrap())
+        .collect();
+
+    Json(PaginatedResponse {
+        data: paginated,
+        pagination: PaginationMeta::new(page, limit, total),
+    })
 }
 
 pub async fn get_payment(

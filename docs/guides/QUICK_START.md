@@ -42,16 +42,51 @@ links:
 ```rust
 use this::prelude::*;
 
-// Macro automatically generates complete entity with all base fields
-impl_data_entity!(User, "user", ["name", "email"], {
-    email: String,
-});
+// Macro automatically generates complete entity with automatic validation
+impl_data_entity_validated!(
+    User, 
+    "user", 
+    ["name", "email"], 
+    { email: String, },
+    validate: {
+        create: {
+            name: [required string_length(2, 100)],
+            email: [required],
+        },
+    },
+    filters: {
+        create: {
+            name: [trim],
+            email: [trim lowercase],
+        },
+    }
+);
 
-impl_data_entity!(Car, "car", ["name", "brand", "model"], {
-    brand: String,
-    model: String,
-    year: i32,
-});
+impl_data_entity_validated!(
+    Car, 
+    "car", 
+    ["name", "brand", "model"], 
+    { 
+        brand: String, 
+        model: String, 
+        year: i32, 
+    },
+    validate: {
+        create: {
+            name: [required string_length(2, 100)],
+            brand: [required],
+            model: [required],
+            year: [required positive],
+        },
+    },
+    filters: {
+        create: {
+            name: [trim],
+            brand: [trim],
+            model: [trim],
+        },
+    }
+);
 
 // Each entity automatically includes:
 // - id: Uuid (auto-generated)
@@ -61,6 +96,8 @@ impl_data_entity!(Car, "car", ["name", "brand", "model"], {
 // - updated_at: DateTime<Utc> (auto-managed)
 // - deleted_at: Option<DateTime<Utc>> (soft delete support)
 // - status: String (required)
+//
+// Plus automatic validation and filtering before handlers receive data!
 ```
 
 ### 3. Create Entity Stores with EntityFetcher & EntityCreator
@@ -451,6 +488,7 @@ links:
 For more details, see:
 - [README.md](../../README.md) - Complete overview
 - [ARCHITECTURE.md](../architecture/ARCHITECTURE.md) - Detailed architecture
+- [VALIDATION_AND_FILTERING.md](VALIDATION_AND_FILTERING.md) - 🆕 Automatic data validation
 - [ENRICHED_LINKS.md](ENRICHED_LINKS.md) - Link enrichment guide
 - [GETTING_STARTED.md](GETTING_STARTED.md) - Step-by-step tutorial
 
