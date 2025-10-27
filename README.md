@@ -14,6 +14,8 @@
 
 - 🔌 **Generic Entity System** - Add entities without modifying framework code
 - 🤖 **Auto-Generated Routes** - Declare a module, routes are created automatically
+- ✅ **Automatic Validation & Filtering** - Zero-boilerplate data validation with declarative rules
+- 📄 **Generic Pagination & Query Filtering** - 🆕 Automatic pagination for all list endpoints
 - 🔗 **Flexible Relationships** - Multiple link types between same entities
 - ↔️ **Bidirectional Navigation** - Query relationships from both directions
 - ✨ **Auto-Enriched Links** - Full entities in responses, no N+1 queries
@@ -332,6 +334,8 @@ Entity (Base Trait)
 
 - **[Quick Start](docs/guides/QUICK_START.md)** - Fast introduction
 - **[Getting Started](docs/guides/GETTING_STARTED.md)** - Step-by-step tutorial
+- **[Validation & Filtering](docs/guides/VALIDATION_AND_FILTERING.md)** - Automatic data validation
+- **[Pagination & Filtering](docs/guides/PAGINATION_AND_FILTERING.md)** - 🆕 Generic pagination and query filtering
 - **[Enriched Links](docs/guides/ENRICHED_LINKS.md)** - Auto-enrichment & performance
 - **[Architecture](docs/architecture/ARCHITECTURE.md)** - Technical deep dive
 - **[ServerBuilder](docs/architecture/SERVER_BUILDER_IMPLEMENTATION.md)** - Auto-routing details

@@ -1,6 +1,127 @@
-# 🎯 Latest Changes - Entity System Refactoring (v0.0.2)
+# 🎯 Latest Changes
 
-## Summary
+## v0.0.6 - Generic Pagination and Filtering (Latest)
+
+### Summary
+
+New feature introducing **generic pagination and filtering** for all list endpoints (entities and links), with automatic pagination by default to prevent returning all data at once.
+
+**Date**: December 2024  
+**Version**: 0.0.6  
+**Impact**: Enhancement - Default pagination applied
+
+### New Features
+
+- ✅ **Generic Pagination** - Automatic pagination for all list endpoints (entities and links)
+- ✅ **Default Pagination** - Always active (page=1, limit=20) to prevent overwhelming responses
+- ✅ **Generic Filtering** - Query parameter filtering on entity and link fields
+- ✅ **Nested Field Filtering** - Filter on nested entity fields (`target.status`, `source.name`, etc.)
+- ✅ **Filter on Links** - Filter link lists based on properties of linked entities
+- ✅ **Unified Response Format** - Consistent `PaginatedResponse<T>` structure
+- ✅ **QueryParams** - Standardized query parameter handling
+- ✅ **Works on All Link Levels** - Pagination and filtering for 2+ level routes
+
+### Migration Guide
+
+No breaking changes! Pagination is now automatic:
+
+```rust
+// Before - would return ALL entities
+GET /orders
+
+// After - automatically paginated
+GET /orders
+Response: { "data": [...], "pagination": { "page": 1, "limit": 20, ... } }
+
+// You can still get all data with explicit pagination
+GET /orders?limit=1000
+```
+
+### Documentation
+
+- ✅ [Pagination and Filtering Guide](../guides/PAGINATION_AND_FILTERING.md) - Complete guide
+- ✅ Updated examples to show pagination usage
+
+### Example Usage
+
+```bash
+# List entities with default pagination (20 per page)
+curl 'http://127.0.0.1:3000/orders'
+
+# Custom pagination
+curl 'http://127.0.0.1:3000/orders?page=2&limit=10'
+
+# With filters
+curl 'http://127.0.0.1:3000/orders?filter={"status":"pending"}'
+
+# Links with pagination
+curl 'http://127.0.0.1:3000/orders/{id}/invoices?page=1&limit=5'
+
+# Links with filters on nested entities
+curl 'http://127.0.0.1:3000/orders/{id}/invoices?filter={"target.status":"paid"}'
+
+# Nested links (3+ levels) with pagination
+curl 'http://127.0.0.1:3000/orders/{id}/invoices/{id}/payments?page=1&limit=10'
+```
+
+---
+
+## v0.0.5 - Automatic Validation and Filtering
+
+### Summary
+
+Major new feature introducing **automatic validation and filtering** with declarative rules defined directly in entity models.
+
+**Date**: December 2024  
+**Version**: 0.0.5  
+**Impact**: New feature - No breaking changes
+
+### New Features
+
+- ✅ **Automatic Validation** - Declarative validation rules in entity definitions
+- ✅ **Data Filtering** - Automatic data transformation (trim, lowercase, uppercase, round)
+- ✅ **`impl_data_entity_validated!` Macro** - Extended entity macro with validation support
+- ✅ **`Validated<T>` Extractor** - Axum extractor for automatic validation
+- ✅ **Reusable Validators** - `required`, `optional`, `positive`, `string_length`, `max_value`, `in_list`, `date_format`
+- ✅ **Reusable Filters** - `trim`, `uppercase`, `lowercase`, `round_decimals`
+- ✅ **Operation-Specific Rules** - Different validation/filter rules for create vs update
+
+### Migration Guide
+
+If you're using `impl_data_entity!`, you can continue using it. However, we recommend upgrading to `impl_data_entity_validated!`:
+
+```rust
+// Old way (still works)
+impl_data_entity!(Invoice, "invoice", ["number"], { amount: f64 });
+
+// New way with validation
+impl_data_entity_validated!(
+    Invoice, "invoice", ["number"], { amount: f64 },
+    validate: {
+        create: {
+            amount: [required positive max_value(1_000_000.0)],
+        },
+    },
+    filters: {
+        create: {
+            amount: [round_decimals(2)],
+        },
+    }
+);
+```
+
+### Documentation
+
+- ✅ [Validation and Filtering Guide](../guides/VALIDATION_AND_FILTERING.md) - Complete guide
+- ✅ Updated [Getting Started](../guides/GETTING_STARTED.md) with validation examples
+- ✅ Updated [Quick Start](../guides/QUICK_START.md) with validation examples
+- ✅ Updated main [README](../../README.md) with validation feature
+
+---
+
+## v0.0.2 - Entity System Refactoring
+
+### Summary
 
 Major architectural refactoring introducing a **macro-driven entity system**, **automatic entity creation with linking**, and removal of multi-tenancy in favor of a cleaner, simpler architecture.
 
@@ -425,11 +546,11 @@ All documentation has been updated to reflect these changes:
 
 ## 🔮 Future Enhancements
 
-Planned for v0.0.3:
+Planned for v0.0.3+:
 
 - [ ] ScyllaDB storage backend
 - [ ] PostgreSQL storage backend
-- [ ] Advanced validation rules
+- [ ] Additional validators and filters
 - [ ] Webhook system for entity events
 - [ ] GraphQL support
 - [ ] Performance optimizations for large datasets
