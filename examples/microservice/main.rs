@@ -40,18 +40,13 @@ async fn main() -> Result<()> {
 
     // Build the application with auto-generated routes
     // Important: Use the same link service instance with the test data
-    let app = ServerBuilder::new()
-        .with_link_service((*link_service_arc).clone())
-        .register_module(module)?
-        .build()?;
-
-    // Start the server
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:3000")
-        .await
-        .unwrap();
-
     println!("\n🌐 Server running on http://127.0.0.1:3000");
     println!("\n📚 All routes auto-generated:");
+    println!("\n  ❤️  Health Check Routes:");
+    println!(
+        "    GET    /health                          - Health check (returns {{\"status\":\"ok\"}}"
+    );
+    println!("    GET    /healthz                         - Health check (Kubernetes style)");
     println!("\n  🔷 Entity CRUD Routes:");
     println!("    GET    /orders                          - List all orders");
     println!("    POST   /orders                          - Create a new order");
@@ -150,7 +145,12 @@ async fn main() -> Result<()> {
     );
     println!("    # → Returns: {{\"error\": \"Link not found\"}}");
 
-    axum::serve(listener, app).await.unwrap();
+    // Start server with graceful shutdown (handles Ctrl+C and SIGTERM)
+    ServerBuilder::new()
+        .with_link_service((*link_service_arc).clone())
+        .register_module(module)?
+        .serve("127.0.0.1:3000")
+        .await?;
 
     Ok(())
 }
