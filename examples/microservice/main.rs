@@ -42,6 +42,11 @@ async fn main() -> Result<()> {
     // Important: Use the same link service instance with the test data
     println!("\n🌐 Server running on http://127.0.0.1:3000");
     println!("\n📚 All routes auto-generated:");
+    println!("\n  ❤️  Health Check Routes:");
+    println!(
+        "    GET    /health                          - Health check (returns {{\"status\":\"ok\"}}"
+    );
+    println!("    GET    /healthz                         - Health check (Kubernetes style)");
     println!("\n  🔷 Entity CRUD Routes:");
     println!("    GET    /orders                          - List all orders");
     println!("    POST   /orders                          - Create a new order");

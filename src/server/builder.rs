@@ -9,7 +9,8 @@ use crate::core::{EntityCreator, EntityFetcher};
 use crate::links::handlers::AppState;
 use crate::links::registry::LinkRouteRegistry;
 use anyhow::Result;
-use axum::Router;
+use axum::{Json, Router, routing::get};
+use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::net::TcpListener;
@@ -29,6 +30,7 @@ pub struct ServerBuilder {
     entity_registry: EntityRegistry,
     configs: Vec<LinksConfig>,
     modules: Vec<Arc<dyn Module>>,
+    custom_routes: Vec<Router>,
 }
 
 impl ServerBuilder {
@@ -39,12 +41,43 @@ impl ServerBuilder {
             entity_registry: EntityRegistry::new(),
             configs: Vec::new(),
             modules: Vec::new(),
+            custom_routes: Vec::new(),
         }
     }
 
     /// Set the link service (required)
     pub fn with_link_service(mut self, service: impl LinkService + 'static) -> Self {
         self.link_service = Some(Arc::new(service));
+        self
+    }
+
+    /// Add custom routes to the server
+    ///
+    /// Use this to add routes that don't fit the CRUD pattern, such as:
+    /// - Authentication endpoints (/login, /logout)
+    /// - OAuth flows (/oauth/token, /oauth/callback)
+    /// - Webhooks (/webhooks/stripe)
+    /// - Custom business logic endpoints
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use axum::{Router, routing::{post, get}, Json};
+    /// use serde_json::json;
+    ///
+    /// let auth_routes = Router::new()
+    ///     .route("/login", post(login_handler))
+    ///     .route("/logout", post(logout_handler))
+    ///     .route("/oauth/token", post(oauth_token_handler));
+    ///
+    /// ServerBuilder::new()
+    ///     .with_link_service(service)
+    ///     .with_custom_routes(auth_routes)
+    ///     .register_module(module)?
+    ///     .build()?;
+    /// ```
+    pub fn with_custom_routes(mut self, routes: Router) -> Self {
+        self.custom_routes.push(routes);
         self
     }
 
@@ -119,14 +152,26 @@ impl ServerBuilder {
             entity_creators: Arc::new(creators_map),
         };
 
+        // Add health check routes FIRST (before fallback catches them)
+        let health_routes = Router::new()
+            .route("/health", get(health_check))
+            .route("/healthz", get(health_check));
+
         // Build entity routes
         let entity_routes = self.entity_registry.build_routes();
 
         // Build standard link routes (2 levels)
         let link_routes = build_link_routes(link_state.clone());
 
-        // Merge all routes
-        let app = entity_routes.merge(link_routes);
+        // Merge custom routes (before link routes to avoid fallback override)
+        let mut app = health_routes.merge(entity_routes);
+
+        for custom_router in self.custom_routes {
+            app = app.merge(custom_router);
+        }
+
+        // Add link routes last (they have a fallback that catches everything)
+        app = app.merge(link_routes);
 
         Ok(app)
     }
@@ -170,6 +215,14 @@ impl Default for ServerBuilder {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Health check endpoint handler
+async fn health_check() -> Json<Value> {
+    Json(json!({
+        "status": "ok",
+        "service": "this-rs"
+    }))
 }
 
 /// Wait for shutdown signal (SIGTERM or Ctrl+C)
