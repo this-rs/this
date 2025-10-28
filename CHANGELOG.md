@@ -15,10 +15,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Security audits with cargo-audit
 - Contribution guidelines and templates
 - Pull request and issue templates
+- **Multi-module configuration merging**
+  - `LinksConfig::merge()` method for intelligent config merging
+  - Support for multiple modules with automatic configuration merge
+  - Entities: last definition wins for duplicates
+  - Links: last definition wins for duplicates
+  - Validation rules: combined for same link_type
+  - Comprehensive tests for all merge scenarios
+  - Documentation guide for multi-module setup
 
 ### Changed
+- `ServerBuilder::merge_configs()` now uses proper config merging instead of just taking first config
 
 ### Fixed
+- **Config merging TODO**: Implemented proper multi-module configuration merging (was marked as TODO)
 
 ### Removed
 
