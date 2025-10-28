@@ -12,6 +12,7 @@ use anyhow::Result;
 use axum::Router;
 use std::collections::HashMap;
 use std::sync::Arc;
+use tokio::net::TcpListener;
 
 /// Builder for creating HTTP servers with auto-registered routes
 ///
@@ -134,10 +135,70 @@ impl ServerBuilder {
     fn merge_configs(&self) -> Result<LinksConfig> {
         Ok(LinksConfig::merge(self.configs.clone()))
     }
+
+    /// Serve the application with graceful shutdown
+    ///
+    /// This will:
+    /// - Bind to the provided address
+    /// - Start serving requests
+    /// - Handle SIGTERM and SIGINT (Ctrl+C) for graceful shutdown
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// ServerBuilder::new()
+    ///     .with_link_service(service)
+    ///     .register_module(module)?
+    ///     .serve("127.0.0.1:3000").await?;
+    /// ```
+    pub async fn serve(self, addr: &str) -> Result<()> {
+        let app = self.build()?;
+        let listener = TcpListener::bind(addr).await?;
+
+        tracing::info!("Server listening on {}", addr);
+
+        axum::serve(listener, app)
+            .with_graceful_shutdown(shutdown_signal())
+            .await?;
+
+        tracing::info!("Server shutdown complete");
+        Ok(())
+    }
 }
 
 impl Default for ServerBuilder {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Wait for shutdown signal (SIGTERM or Ctrl+C)
+async fn shutdown_signal() {
+    use tokio::signal;
+
+    let ctrl_c = async {
+        signal::ctrl_c()
+            .await
+            .expect("failed to install Ctrl+C handler");
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        signal::unix::signal(signal::unix::SignalKind::terminate())
+            .expect("failed to install SIGTERM handler")
+            .recv()
+            .await;
+    };
+
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => {
+            tracing::info!("Received Ctrl+C signal, initiating graceful shutdown...");
+        },
+        _ = terminate => {
+            tracing::info!("Received SIGTERM signal, initiating graceful shutdown...");
+        },
     }
 }
