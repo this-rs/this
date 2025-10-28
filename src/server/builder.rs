@@ -132,17 +132,7 @@ impl ServerBuilder {
 
     /// Merge all configurations from registered modules
     fn merge_configs(&self) -> Result<LinksConfig> {
-        if self.configs.is_empty() {
-            return Ok(LinksConfig {
-                entities: vec![],
-                links: vec![],
-                validation_rules: None,
-            });
-        }
-
-        // For now, just use the first config
-        // TODO: Implement proper config merging
-        Ok(self.configs[0].clone())
+        Ok(LinksConfig::merge(self.configs.clone()))
     }
 }
 
