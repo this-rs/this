@@ -86,7 +86,7 @@ async fn create_entity_mutation(
         )
         .await?;
 
-        return Ok(resolved);
+        Ok(resolved)
     } else {
         bail!("Unknown entity type: {}", entity_type);
     }
@@ -120,7 +120,7 @@ async fn update_entity_mutation(
         )
         .await?;
 
-        return Ok(resolved);
+        Ok(resolved)
     } else {
         bail!("Unknown entity type: {}", entity_type);
     }
@@ -142,7 +142,7 @@ async fn delete_entity_mutation(
     // Delete the entity
     if let Some(creator) = host.entity_creators.get(&entity_type) {
         creator.delete(&uuid).await?;
-        return Ok(Value::Bool(true));
+        Ok(Value::Bool(true))
     } else {
         bail!("Unknown entity type: {}", entity_type);
     }

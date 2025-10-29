@@ -156,19 +156,18 @@ async fn resolve_relation_field_inner(
                 .await?;
 
             // Fetch the source entity (should be only one for singular relations)
-            if let Some(link) = links.first() {
-                if let Some(fetcher) = host.entity_fetchers.get(&link_config.source_type) {
-                    if let Ok(source_entity) = fetcher.fetch_as_json(&link.source_id).await {
-                        let resolved = resolve_entity_fields_impl(
-                            host,
-                            source_entity,
-                            &field.selection_set.items,
-                            &link_config.source_type,
-                        )
-                        .await?;
-                        return Ok(Some(resolved));
-                    }
-                }
+            if let Some(link) = links.first()
+                && let Some(fetcher) = host.entity_fetchers.get(&link_config.source_type)
+                && let Ok(source_entity) = fetcher.fetch_as_json(&link.source_id).await
+            {
+                let resolved = resolve_entity_fields_impl(
+                    host,
+                    source_entity,
+                    &field.selection_set.items,
+                    &link_config.source_type,
+                )
+                .await?;
+                return Ok(Some(resolved));
             }
         }
     }

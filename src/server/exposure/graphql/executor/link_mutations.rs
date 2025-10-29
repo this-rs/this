@@ -120,7 +120,7 @@ pub async fn create_and_link_mutation(
         )
         .await?;
 
-        return Ok(resolved);
+        Ok(resolved)
     } else {
         bail!("Unknown entity type: {}", entity_type);
     }

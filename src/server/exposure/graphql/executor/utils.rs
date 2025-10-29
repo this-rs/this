@@ -66,8 +66,8 @@ pub fn gql_value_to_json(value: &GqlValue<String>) -> Value {
 
 /// Simple pluralization (can be improved)
 pub fn pluralize(word: &str) -> String {
-    if word.ends_with('y') {
-        format!("{}ies", &word[..word.len() - 1])
+    if let Some(stripped) = word.strip_suffix('y') {
+        format!("{}ies", stripped)
     } else if word.ends_with('s') || word.ends_with("sh") || word.ends_with("ch") {
         format!("{}es", word)
     } else {

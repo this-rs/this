@@ -87,10 +87,7 @@ fn get_entity_type_from_singular<'a>(
     host: &'a Arc<ServerHost>,
     field_name: &str,
 ) -> Option<&'a str> {
-    for entity_type in host.entity_types() {
-        if entity_type == field_name {
-            return Some(entity_type);
-        }
-    }
-    None
+    host.entity_types()
+        .into_iter()
+        .find(|&entity_type| entity_type == field_name)
 }

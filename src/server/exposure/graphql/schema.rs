@@ -20,6 +20,7 @@ use uuid::Uuid;
 ///
 /// This type represents any entity in the system and includes
 /// methods to access related entities through links.
+#[allow(dead_code)]
 pub struct Entity {
     /// Entity ID
     pub id: String,
@@ -158,6 +159,7 @@ impl Entity {
 #[cfg(feature = "graphql")]
 impl Entity {
     /// Helper method to get linked entities
+    #[allow(dead_code)]
     async fn get_linked_entities(&self, link_type: &str, target_type: &str) -> Result<Vec<Entity>> {
         if let Some(host) = &self.host {
             let uuid = Uuid::parse_str(&self.id)
@@ -208,6 +210,7 @@ impl Entity {
 #[cfg(feature = "graphql")]
 /// Link between entities
 #[derive(SimpleObject)]
+#[allow(dead_code)]
 pub struct Link {
     /// Link ID
     pub id: String,
@@ -239,6 +242,7 @@ pub struct Link {
 }
 
 #[cfg(feature = "graphql")]
+#[allow(dead_code)]
 pub struct QueryRoot {
     pub(super) host: Arc<crate::server::host::ServerHost>,
 }
@@ -383,6 +387,7 @@ impl QueryRoot {
 #[cfg(feature = "graphql")]
 impl QueryRoot {
     /// Helper to get entity by type
+    #[allow(dead_code)]
     async fn get_entity_by_type(&self, id: String, entity_type: String) -> Result<Option<Entity>> {
         if let Some(fetcher) = self.host.entity_fetchers.get(&entity_type) {
             let uuid =
@@ -408,7 +413,7 @@ impl QueryRoot {
     }
 
     /// Helper to list entities of a given type
-    async fn list_entities(&self, entity_type: &str) -> Result<Vec<Entity>> {
+    async fn list_entities(&self, _entity_type: &str) -> Result<Vec<Entity>> {
         // For now, return empty vec as we need pagination support
         // This will be implemented when we add proper list support to EntityFetcher
         Ok(vec![])
@@ -416,6 +421,7 @@ impl QueryRoot {
 }
 
 #[cfg(feature = "graphql")]
+#[allow(dead_code)]
 pub struct MutationRoot {
     pub(super) host: Arc<crate::server::host::ServerHost>,
 }
@@ -424,6 +430,7 @@ pub struct MutationRoot {
 #[Object]
 impl MutationRoot {
     /// Create a link between entities
+    #[allow(dead_code)]
     async fn create_link(
         &self,
         source_id: String,
@@ -461,6 +468,7 @@ impl MutationRoot {
     }
 
     /// Delete a link
+    #[allow(dead_code)]
     async fn delete_link(&self, id: String) -> Result<bool> {
         let uuid = Uuid::parse_str(&id).map_err(|e| Error::new(format!("Invalid UUID: {}", e)))?;
 
@@ -472,15 +480,17 @@ impl MutationRoot {
 }
 
 #[cfg(feature = "graphql")]
+#[allow(dead_code)]
 pub type SubscriptionRoot = EmptySubscription;
 
 #[cfg(feature = "graphql")]
 /// Build the GraphQL schema from the host
+#[allow(dead_code)]
 pub fn build_schema(
     host: Arc<crate::server::host::ServerHost>,
 ) -> Schema<QueryRoot, MutationRoot, EmptySubscription> {
     let query = QueryRoot { host: host.clone() };
     let mutation = MutationRoot { host: host.clone() };
 
-    Schema::build(query, mutation, EmptySubscription::default()).finish()
+    Schema::build(query, mutation, EmptySubscription).finish()
 }

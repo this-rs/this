@@ -17,6 +17,7 @@ pub struct FieldInfo {
     pub name: String,
     pub graphql_type: String,
     pub nullable: bool,
+    #[allow(dead_code)]
     pub description: Option<String>,
 }
 
@@ -27,6 +28,7 @@ pub struct RelationInfo {
     pub name: String,
     pub target_type: String,
     pub is_list: bool,
+    #[allow(dead_code)]
     pub link_type: String,
 }
 
@@ -82,12 +84,11 @@ impl SchemaGenerator {
             let mut sample = fetcher.get_sample_entity().await?;
 
             // If sample is empty, try to get the first entity from the list
-            if sample.as_object().map_or(true, |obj| obj.is_empty()) {
-                if let Ok(entities) = fetcher.list_as_json(Some(1), None).await {
-                    if let Some(first_entity) = entities.first() {
-                        sample = first_entity.clone();
-                    }
-                }
+            if sample.as_object().is_none_or(|obj| obj.is_empty())
+                && let Ok(entities) = fetcher.list_as_json(Some(1), None).await
+                && let Some(first_entity) = entities.first()
+            {
+                sample = first_entity.clone();
             }
 
             let fields = Self::extract_fields_from_json(&sample);
@@ -112,7 +113,7 @@ impl SchemaGenerator {
             }
         }
 
-        type_def.push_str("}");
+        type_def.push('}');
         Ok(type_def)
     }
 
@@ -135,7 +136,7 @@ impl SchemaGenerator {
             ));
         }
 
-        query.push_str("}");
+        query.push('}');
         query
     }
 
@@ -192,7 +193,7 @@ impl SchemaGenerator {
             ));
         }
 
-        mutation.push_str("}");
+        mutation.push('}');
         mutation
     }
 

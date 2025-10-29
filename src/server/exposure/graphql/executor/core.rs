@@ -14,6 +14,7 @@ use crate::server::host::ServerHost;
 /// GraphQL executor that executes queries against the dynamic schema
 pub struct GraphQLExecutor {
     host: Arc<ServerHost>,
+    #[allow(dead_code)]
     schema_sdl: String,
 }
 

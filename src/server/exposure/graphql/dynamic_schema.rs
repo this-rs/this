@@ -21,6 +21,7 @@ use crate::server::host::ServerHost;
 /// Wrapper type for JSON values to satisfy orphan rules
 #[cfg(feature = "graphql")]
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct JsonValue(pub Value);
 
 /// JSON scalar type for dynamic fields
@@ -101,6 +102,7 @@ impl ScalarType for JsonValue {
 
 /// Dynamic Query Root that creates resolvers for all registered entities
 #[cfg(feature = "graphql")]
+#[allow(dead_code)]
 pub struct DynamicQueryRoot {
     pub host: Arc<ServerHost>,
 }
@@ -186,6 +188,7 @@ impl DynamicQueryRoot {
 
 /// Dynamic Mutation Root for CRUD operations
 #[cfg(feature = "graphql")]
+#[allow(dead_code)]
 pub struct DynamicMutationRoot {
     pub host: Arc<ServerHost>,
 }
@@ -295,6 +298,7 @@ impl DynamicMutationRoot {
 
 /// Build the dynamic GraphQL schema
 #[cfg(feature = "graphql")]
+#[allow(dead_code)]
 pub fn build_dynamic_schema(
     host: Arc<ServerHost>,
 ) -> Schema<DynamicQueryRoot, DynamicMutationRoot, EmptySubscription> {
