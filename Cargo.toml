@@ -4,16 +4,17 @@ version = "0.0.6"
 edition = "2024"
 authors = ["Riviere Théotime <t@ffs.holdings>"]
 license = "MIT OR Apache-2.0"
-description = "A generic entity and relationship management framework for Rust"
+description = "Framework for building complex multi-entity REST and GraphQL APIs with many relationships"
 repository = "https://github.com/this-rs/this"
-keywords = ["entity", "relationship", "rest", "api", "framework"]
-categories = ["web-programming", "database"]
+keywords = ["entity", "relationship", "rest", "graphql", "api"]
+categories = ["web-programming", "web-programming::http-server", "database"]
 readme = "README.md"
 
 [dependencies]
 # Async runtime
 tokio = { version = "1.40", features = ["full"] }
 async-trait = "0.1"
+futures = "0.3"
 
 # Web framework
 axum = { version = "0.8", features = ["macros"] }
@@ -49,6 +50,11 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 regex = "1.10"
 validator = { version = "0.20", features = ["derive"] }
 
+# GraphQL support (optional)
+async-graphql = { version = "7", optional = true }
+async-graphql-axum = { version = "7", optional = true }
+graphql-parser = { version = "0.4", optional = true }
+
 [dev-dependencies]
 tokio-test = "0.4"
 axum-test = "18.1"
@@ -57,8 +63,9 @@ axum-test = "18.1"
 default = ["in-memory"]
 in-memory = []
 dynamodb = ["aws-sdk-dynamodb", "serde_dynamo"]
+graphql = ["async-graphql", "async-graphql-axum", "graphql-parser"]
 # postgres = ["sqlx"]  # Disabled until ScyllaDB implementation
-all = ["in-memory", "dynamodb"]
+all = ["in-memory", "dynamodb", "graphql"]
 
 [lib]
 name = "this"
@@ -75,3 +82,8 @@ path = "examples/full_api/main.rs"
 [[example]]
 name = "microservice"
 path = "examples/microservice/main.rs"
+
+[[example]]
+name = "microservice_graphql"
+path = "examples/microservice/main_graphql.rs"
+required-features = ["graphql"]

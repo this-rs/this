@@ -1,16 +1,14 @@
 //! ServerBuilder for fluent API to build HTTP servers
 
 use super::entity_registry::EntityRegistry;
-use super::router::build_link_routes;
+use super::exposure::RestExposure;
+use super::host::ServerHost;
 use crate::config::LinksConfig;
 use crate::core::module::Module;
 use crate::core::service::LinkService;
 use crate::core::{EntityCreator, EntityFetcher};
-use crate::links::handlers::AppState;
-use crate::links::registry::LinkRouteRegistry;
 use anyhow::Result;
-use axum::{Json, Router, routing::get};
-use serde_json::{Value, json};
+use axum::Router;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::net::TcpListener;
@@ -103,25 +101,23 @@ impl ServerBuilder {
         Ok(self)
     }
 
-    /// Build the final router
+    /// Build the transport-agnostic host
     ///
-    /// This generates:
-    /// - CRUD routes for all registered entities
-    /// - Link routes (bidirectional)
-    /// - Introspection routes
-    pub fn build(mut self) -> Result<Router> {
+    /// This generates a `ServerHost` that can be used with any exposure type
+    /// (REST, GraphQL, gRPC, etc.).
+    ///
+    /// # Returns
+    ///
+    /// Returns a `ServerHost` containing all framework state.
+    pub fn build_host(mut self) -> Result<ServerHost> {
         // Merge all configs
         let merged_config = self.merge_configs()?;
-        let config = Arc::new(merged_config);
 
         // Extract link service
         let link_service = self
             .link_service
             .take()
             .ok_or_else(|| anyhow::anyhow!("LinkService is required. Call .with_link_service()"))?;
-
-        // Create link registry
-        let registry = Arc::new(LinkRouteRegistry::new(config.clone()));
 
         // Build entity fetchers map from all modules
         let mut fetchers_map: HashMap<String, Arc<dyn EntityFetcher>> = HashMap::new();
@@ -143,37 +139,29 @@ impl ServerBuilder {
             }
         }
 
-        // Create link app state
-        let link_state = AppState {
+        // Build and return the host
+        ServerHost::from_builder_components(
             link_service,
-            config,
-            registry,
-            entity_fetchers: Arc::new(fetchers_map),
-            entity_creators: Arc::new(creators_map),
-        };
+            merged_config,
+            self.entity_registry,
+            fetchers_map,
+            creators_map,
+        )
+    }
 
-        // Add health check routes FIRST (before fallback catches them)
-        let health_routes = Router::new()
-            .route("/health", get(health_check))
-            .route("/healthz", get(health_check));
-
-        // Build entity routes
-        let entity_routes = self.entity_registry.build_routes();
-
-        // Build standard link routes (2 levels)
-        let link_routes = build_link_routes(link_state.clone());
-
-        // Merge custom routes (before link routes to avoid fallback override)
-        let mut app = health_routes.merge(entity_routes);
-
-        for custom_router in self.custom_routes {
-            app = app.merge(custom_router);
-        }
-
-        // Add link routes last (they have a fallback that catches everything)
-        app = app.merge(link_routes);
-
-        Ok(app)
+    /// Build the final REST router
+    ///
+    /// This generates:
+    /// - CRUD routes for all registered entities
+    /// - Link routes (bidirectional)
+    /// - Introspection routes
+    ///
+    /// Note: This is a convenience method that builds the host and immediately
+    /// exposes it via REST. For other exposure types, use `build_host_arc()`.
+    pub fn build(mut self) -> Result<Router> {
+        let custom_routes = std::mem::take(&mut self.custom_routes);
+        let host = Arc::new(self.build_host()?);
+        RestExposure::build_router(host, custom_routes)
     }
 
     /// Merge all configurations from registered modules
@@ -215,14 +203,6 @@ impl Default for ServerBuilder {
     fn default() -> Self {
         Self::new()
     }
-}
-
-/// Health check endpoint handler
-async fn health_check() -> Json<Value> {
-    Json(json!({
-        "status": "ok",
-        "service": "this-rs"
-    }))
 }
 
 /// Wait for shutdown signal (SIGTERM or Ctrl+C)
