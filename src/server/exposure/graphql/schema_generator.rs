@@ -162,9 +162,35 @@ impl SchemaGenerator {
             mutation.push_str(&format!("  delete{}(id: ID!): Boolean!\n", type_name));
         }
 
-        // Add link mutations
+        // Add generic link mutations
+        mutation.push_str("\n  # Generic link mutations\n");
         mutation.push_str("  createLink(sourceId: ID!, targetId: ID!, linkType: String!, metadata: JSON): Link!\n");
         mutation.push_str("  deleteLink(id: ID!): Boolean!\n");
+
+        // Add typed link mutations for each entity combination
+        mutation.push_str("\n  # Typed link mutations\n");
+        for link_config in &self.host.config.links {
+            let source_type = Self::to_pascal_case(&link_config.source_type);
+            let target_type = Self::to_pascal_case(&link_config.target_type);
+
+            // createInvoiceForOrder(parentId: ID!, data: JSON!): Invoice!
+            mutation.push_str(&format!(
+                "  create{}For{}(parentId: ID!, data: JSON!, linkType: String): {}!\n",
+                target_type, source_type, target_type
+            ));
+
+            // linkInvoiceToOrder(sourceId: ID!, targetId: ID!, metadata: JSON): Link!
+            mutation.push_str(&format!(
+                "  link{}To{}(sourceId: ID!, targetId: ID!, linkType: String, metadata: JSON): Link!\n",
+                target_type, source_type
+            ));
+
+            // unlinkInvoiceFromOrder(sourceId: ID!, targetId: ID!): Boolean!
+            mutation.push_str(&format!(
+                "  unlink{}From{}(sourceId: ID!, targetId: ID!, linkType: String): Boolean!\n",
+                target_type, source_type
+            ));
+        }
 
         mutation.push_str("}");
         mutation
