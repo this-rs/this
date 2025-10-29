@@ -1,5 +1,26 @@
 # This-RS Documentation
 
+> **Framework for building complex multi-entity REST and GraphQL APIs with many relationships.**
+
+## 🎯 Is This Framework Right for You?
+
+This-RS is designed for **APIs with 5+ entities and complex relationships**.
+
+**✅ Use This-RS if you have:**
+- Many entities (5+) with CRUD operations
+- Complex relationships (many-to-many, bidirectional)
+- Need for both REST and GraphQL
+- Microservices architecture
+
+**⚠️ Consider alternatives if you have:**
+- Simple CRUD (< 5 entities)
+- No/few relationships
+- Learning Rust/Axum (start with Axum directly)
+
+See the main [README](../README.md#is-this-rs-right-for-you) for detailed comparison.
+
+---
+
 ## 📚 Navigation Guide
 
 ### 🚀 Quick Start
@@ -20,11 +41,21 @@
 - **[Link Metadata](guides/LINK_METADATA.md)** - Metadata and link updates
 - **[Multi-Level Navigation](guides/MULTI_LEVEL_NAVIGATION.md)** - Multi-level navigation
 
+### 📡 API Exposure
+
+- **[GraphQL](guides/GRAPHQL.md)** - 🆕 Dynamic GraphQL API with automatic schema generation
+- **[GraphQL Implementation](architecture/GRAPHQL_IMPLEMENTATION.md)** - Technical details of GraphQL exposure
+
+### 🔄 Comparison & Alternatives
+
+- **[Alternatives](ALTERNATIVES.md)** - 🆕 Honest comparison with other solutions (Axum, async-graphql, SeaORM, etc.)
+
 ### 🏗️ Architecture
 
 - **[Architecture](architecture/ARCHITECTURE.md)** - Architecture overview
 - **[ServerBuilder Implementation](architecture/SERVER_BUILDER_IMPLEMENTATION.md)** - Auto-generated routes
 - **[Routing Explanation](architecture/ROUTING_EXPLANATION.md)** - Routing explanations
+- **[GraphQL Implementation](architecture/GRAPHQL_IMPLEMENTATION.md)** - GraphQL exposure architecture
 
 ### 📝 Change History
 
@@ -56,6 +87,12 @@
 ### I want to manage link permissions
 → [Link Authorization](guides/LINK_AUTHORIZATION.md)
 
+### I want to use GraphQL
+→ [GraphQL Guide](guides/GRAPHQL.md)
+
+### I want to compare This-RS with alternatives
+→ [Alternatives Comparison](ALTERNATIVES.md)
+
 ## 📂 Documentation Structure
 
 ```
@@ -64,12 +101,14 @@ docs/
 ├── architecture/                # Technical documentation
 │   ├── ARCHITECTURE.md
 │   ├── SERVER_BUILDER_IMPLEMENTATION.md
-│   └── ROUTING_EXPLANATION.md
+│   ├── ROUTING_EXPLANATION.md
+│   └── GRAPHQL_IMPLEMENTATION.md  # 🆕 GraphQL technical details
 ├── guides/                      # User guides
 │   ├── GETTING_STARTED.md
 │   ├── QUICK_START.md
 │   ├── VALIDATION_AND_FILTERING.md  # Data validation and filtering
 │   ├── PAGINATION_AND_FILTERING.md  # 🆕 Pagination and query filtering
+│   ├── GRAPHQL.md              # 🆕 GraphQL API guide
 │   ├── ENRICHED_LINKS.md       # Auto-enrichment of links
 │   ├── LINK_AUTHORIZATION.md
 │   ├── LINK_METADATA.md

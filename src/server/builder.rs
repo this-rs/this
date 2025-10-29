@@ -1,17 +1,17 @@
 //! ServerBuilder for fluent API to build HTTP servers
 
 use super::entity_registry::EntityRegistry;
-use super::router::build_link_routes;
+use super::exposure::RestExposure;
+use super::host::ServerHost;
 use crate::config::LinksConfig;
 use crate::core::module::Module;
 use crate::core::service::LinkService;
 use crate::core::{EntityCreator, EntityFetcher};
-use crate::links::handlers::AppState;
-use crate::links::registry::LinkRouteRegistry;
 use anyhow::Result;
 use axum::Router;
 use std::collections::HashMap;
 use std::sync::Arc;
+use tokio::net::TcpListener;
 
 /// Builder for creating HTTP servers with auto-registered routes
 ///
@@ -28,6 +28,7 @@ pub struct ServerBuilder {
     entity_registry: EntityRegistry,
     configs: Vec<LinksConfig>,
     modules: Vec<Arc<dyn Module>>,
+    custom_routes: Vec<Router>,
 }
 
 impl ServerBuilder {
@@ -38,12 +39,43 @@ impl ServerBuilder {
             entity_registry: EntityRegistry::new(),
             configs: Vec::new(),
             modules: Vec::new(),
+            custom_routes: Vec::new(),
         }
     }
 
     /// Set the link service (required)
     pub fn with_link_service(mut self, service: impl LinkService + 'static) -> Self {
         self.link_service = Some(Arc::new(service));
+        self
+    }
+
+    /// Add custom routes to the server
+    ///
+    /// Use this to add routes that don't fit the CRUD pattern, such as:
+    /// - Authentication endpoints (/login, /logout)
+    /// - OAuth flows (/oauth/token, /oauth/callback)
+    /// - Webhooks (/webhooks/stripe)
+    /// - Custom business logic endpoints
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use axum::{Router, routing::{post, get}, Json};
+    /// use serde_json::json;
+    ///
+    /// let auth_routes = Router::new()
+    ///     .route("/login", post(login_handler))
+    ///     .route("/logout", post(logout_handler))
+    ///     .route("/oauth/token", post(oauth_token_handler));
+    ///
+    /// ServerBuilder::new()
+    ///     .with_link_service(service)
+    ///     .with_custom_routes(auth_routes)
+    ///     .register_module(module)?
+    ///     .build()?;
+    /// ```
+    pub fn with_custom_routes(mut self, routes: Router) -> Self {
+        self.custom_routes.push(routes);
         self
     }
 
@@ -69,25 +101,23 @@ impl ServerBuilder {
         Ok(self)
     }
 
-    /// Build the final router
+    /// Build the transport-agnostic host
     ///
-    /// This generates:
-    /// - CRUD routes for all registered entities
-    /// - Link routes (bidirectional)
-    /// - Introspection routes
-    pub fn build(mut self) -> Result<Router> {
+    /// This generates a `ServerHost` that can be used with any exposure type
+    /// (REST, GraphQL, gRPC, etc.).
+    ///
+    /// # Returns
+    ///
+    /// Returns a `ServerHost` containing all framework state.
+    pub fn build_host(mut self) -> Result<ServerHost> {
         // Merge all configs
         let merged_config = self.merge_configs()?;
-        let config = Arc::new(merged_config);
 
         // Extract link service
         let link_service = self
             .link_service
             .take()
             .ok_or_else(|| anyhow::anyhow!("LinkService is required. Call .with_link_service()"))?;
-
-        // Create link registry
-        let registry = Arc::new(LinkRouteRegistry::new(config.clone()));
 
         // Build entity fetchers map from all modules
         let mut fetchers_map: HashMap<String, Arc<dyn EntityFetcher>> = HashMap::new();
@@ -109,45 +139,99 @@ impl ServerBuilder {
             }
         }
 
-        // Create link app state
-        let link_state = AppState {
+        // Build and return the host
+        ServerHost::from_builder_components(
             link_service,
-            config,
-            registry,
-            entity_fetchers: Arc::new(fetchers_map),
-            entity_creators: Arc::new(creators_map),
-        };
+            merged_config,
+            self.entity_registry,
+            fetchers_map,
+            creators_map,
+        )
+    }
 
-        // Build entity routes
-        let entity_routes = self.entity_registry.build_routes();
-
-        // Build standard link routes (2 levels)
-        let link_routes = build_link_routes(link_state.clone());
-
-        // Merge all routes
-        let app = entity_routes.merge(link_routes);
-
-        Ok(app)
+    /// Build the final REST router
+    ///
+    /// This generates:
+    /// - CRUD routes for all registered entities
+    /// - Link routes (bidirectional)
+    /// - Introspection routes
+    ///
+    /// Note: This is a convenience method that builds the host and immediately
+    /// exposes it via REST. For other exposure types, use `build_host_arc()`.
+    pub fn build(mut self) -> Result<Router> {
+        let custom_routes = std::mem::take(&mut self.custom_routes);
+        let host = Arc::new(self.build_host()?);
+        RestExposure::build_router(host, custom_routes)
     }
 
     /// Merge all configurations from registered modules
     fn merge_configs(&self) -> Result<LinksConfig> {
-        if self.configs.is_empty() {
-            return Ok(LinksConfig {
-                entities: vec![],
-                links: vec![],
-                validation_rules: None,
-            });
-        }
+        Ok(LinksConfig::merge(self.configs.clone()))
+    }
 
-        // For now, just use the first config
-        // TODO: Implement proper config merging
-        Ok(self.configs[0].clone())
+    /// Serve the application with graceful shutdown
+    ///
+    /// This will:
+    /// - Bind to the provided address
+    /// - Start serving requests
+    /// - Handle SIGTERM and SIGINT (Ctrl+C) for graceful shutdown
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// ServerBuilder::new()
+    ///     .with_link_service(service)
+    ///     .register_module(module)?
+    ///     .serve("127.0.0.1:3000").await?;
+    /// ```
+    pub async fn serve(self, addr: &str) -> Result<()> {
+        let app = self.build()?;
+        let listener = TcpListener::bind(addr).await?;
+
+        tracing::info!("Server listening on {}", addr);
+
+        axum::serve(listener, app)
+            .with_graceful_shutdown(shutdown_signal())
+            .await?;
+
+        tracing::info!("Server shutdown complete");
+        Ok(())
     }
 }
 
 impl Default for ServerBuilder {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Wait for shutdown signal (SIGTERM or Ctrl+C)
+async fn shutdown_signal() {
+    use tokio::signal;
+
+    let ctrl_c = async {
+        signal::ctrl_c()
+            .await
+            .expect("failed to install Ctrl+C handler");
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        signal::unix::signal(signal::unix::SignalKind::terminate())
+            .expect("failed to install SIGTERM handler")
+            .recv()
+            .await;
+    };
+
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => {
+            tracing::info!("Received Ctrl+C signal, initiating graceful shutdown...");
+        },
+        _ = terminate => {
+            tracing::info!("Received SIGTERM signal, initiating graceful shutdown...");
+        },
     }
 }
