@@ -14,9 +14,9 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 #[cfg(feature = "graphql")]
-use crate::server::host::ServerHost;
-#[cfg(feature = "graphql")]
 use crate::core::link::LinkEntity;
+#[cfg(feature = "graphql")]
+use crate::server::host::ServerHost;
 
 /// Wrapper type for JSON values to satisfy orphan rules
 #[cfg(feature = "graphql")]
@@ -76,7 +76,7 @@ impl ScalarType for JsonValue {
                         async_graphql::Value::Number(i.into())
                     } else if let Some(f) = n.as_f64() {
                         async_graphql::Value::Number(
-                            async_graphql::Number::from_f64(f).unwrap_or(0.into())
+                            async_graphql::Number::from_f64(f).unwrap_or(0.into()),
                         )
                     } else {
                         async_graphql::Value::Null
@@ -110,13 +110,21 @@ pub struct DynamicQueryRoot {
 impl DynamicQueryRoot {
     /// Get a list of all registered entity types
     async fn entity_types(&self) -> Vec<String> {
-        self.host.entity_types().into_iter().map(|s| s.to_string()).collect()
+        self.host
+            .entity_types()
+            .into_iter()
+            .map(|s| s.to_string())
+            .collect()
     }
 
     /// Get an entity by ID and type - returns the full JSON object
-    async fn entity(&self, id: ID, entity_type: String) -> async_graphql::Result<Option<JsonValue>> {
+    async fn entity(
+        &self,
+        id: ID,
+        entity_type: String,
+    ) -> async_graphql::Result<Option<JsonValue>> {
         let uuid = Uuid::parse_str(&id).map_err(|e| Error::new(format!("Invalid UUID: {}", e)))?;
-        
+
         if let Some(fetcher) = self.host.entity_fetchers.get(&entity_type) {
             match fetcher.fetch_as_json(&uuid).await {
                 Ok(json) => Ok(Some(JsonValue(json))),
@@ -147,8 +155,8 @@ impl DynamicQueryRoot {
 
     /// Get links for an entity (as source)
     async fn entity_links(&self, entity_id: ID) -> async_graphql::Result<Vec<JsonValue>> {
-        let uuid = Uuid::parse_str(&entity_id)
-            .map_err(|e| Error::new(format!("Invalid UUID: {}", e)))?;
+        let uuid =
+            Uuid::parse_str(&entity_id).map_err(|e| Error::new(format!("Invalid UUID: {}", e)))?;
 
         let links = self
             .host
@@ -186,7 +194,11 @@ pub struct DynamicMutationRoot {
 #[Object]
 impl DynamicMutationRoot {
     /// Create a new entity of the specified type
-    async fn create_entity(&self, entity_type: String, data: JsonValue) -> async_graphql::Result<JsonValue> {
+    async fn create_entity(
+        &self,
+        entity_type: String,
+        data: JsonValue,
+    ) -> async_graphql::Result<JsonValue> {
         if let Some(creator) = self.host.entity_creators.get(&entity_type) {
             creator
                 .create_from_json(data.0)
@@ -199,7 +211,12 @@ impl DynamicMutationRoot {
     }
 
     /// Update an existing entity
-    async fn update_entity(&self, id: ID, entity_type: String, data: JsonValue) -> async_graphql::Result<JsonValue> {
+    async fn update_entity(
+        &self,
+        id: ID,
+        entity_type: String,
+        data: JsonValue,
+    ) -> async_graphql::Result<JsonValue> {
         let uuid = Uuid::parse_str(&id).map_err(|e| Error::new(format!("Invalid UUID: {}", e)))?;
 
         if let Some(creator) = self.host.entity_creators.get(&entity_type) {
@@ -243,12 +260,7 @@ impl DynamicMutationRoot {
 
         let metadata_value = metadata.map(|j| j.0);
 
-        let link_entity = LinkEntity::new(
-            link_type,
-            source_uuid,
-            target_uuid,
-            metadata_value,
-        );
+        let link_entity = LinkEntity::new(link_type, source_uuid, target_uuid, metadata_value);
 
         let link = self
             .host
@@ -269,8 +281,8 @@ impl DynamicMutationRoot {
 
     /// Delete a link
     async fn delete_link(&self, link_id: ID) -> async_graphql::Result<bool> {
-        let uuid = Uuid::parse_str(&link_id)
-            .map_err(|e| Error::new(format!("Invalid UUID: {}", e)))?;
+        let uuid =
+            Uuid::parse_str(&link_id).map_err(|e| Error::new(format!("Invalid UUID: {}", e)))?;
 
         self.host
             .link_service
@@ -293,4 +305,3 @@ pub fn build_dynamic_schema(
     )
     .finish()
 }
-

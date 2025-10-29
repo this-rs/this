@@ -3,36 +3,30 @@
 //! This module provides GraphQL-specific routing and schema generation.
 //! It is completely separate from the core framework logic.
 
-mod schema;
-mod schema_generator;
 mod dynamic_schema;
 mod executor;
+mod schema;
+mod schema_generator; // Now a directory with sub-modules
 
 #[cfg(feature = "graphql")]
 use crate::server::host::ServerHost;
 #[cfg(feature = "graphql")]
 use anyhow::Result;
 #[cfg(feature = "graphql")]
-use async_graphql::{
-    Request as GraphQLRequest, Schema, EmptySubscription,
-    http::{GraphQLPlaygroundConfig, playground_source},
-};
+use async_graphql::http::{GraphQLPlaygroundConfig, playground_source};
 #[cfg(feature = "graphql")]
 use axum::{
     Router,
     extract::{Extension, Json as AxumJson},
     response::{Html, IntoResponse},
     routing::{get, post},
-    body::Body,
 };
-#[cfg(feature = "graphql")]
-use dynamic_schema::{DynamicQueryRoot, DynamicMutationRoot, build_dynamic_schema};
 #[cfg(feature = "graphql")]
 use executor::GraphQLExecutor;
 #[cfg(feature = "graphql")]
-use std::sync::Arc;
+use serde::Deserialize;
 #[cfg(feature = "graphql")]
-use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 
 #[cfg(feature = "graphql")]
 #[derive(Debug, Deserialize)]
@@ -89,9 +83,6 @@ impl GraphQLExposure {
 }
 
 #[cfg(feature = "graphql")]
-type GraphQLSchema = Schema<DynamicQueryRoot, DynamicMutationRoot, EmptySubscription>;
-
-#[cfg(feature = "graphql")]
 /// Handler for GraphQL queries and mutations using custom executor
 async fn graphql_handler_custom(
     Extension(host): Extension<Arc<ServerHost>>,
@@ -99,7 +90,7 @@ async fn graphql_handler_custom(
 ) -> impl IntoResponse {
     // Create executor on each request (or we could cache it)
     let executor = GraphQLExecutor::new(host).await;
-    
+
     match executor.execute(&request.query, request.variables).await {
         Ok(response) => AxumJson(response),
         Err(e) => AxumJson(serde_json::json!({
