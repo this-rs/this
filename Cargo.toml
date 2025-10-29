@@ -4,10 +4,10 @@ version = "0.0.6"
 edition = "2024"
 authors = ["Riviere Théotime <t@ffs.holdings>"]
 license = "MIT OR Apache-2.0"
-description = "A generic entity and relationship management framework for Rust"
+description = "Framework for building complex multi-entity REST and GraphQL APIs with many relationships"
 repository = "https://github.com/this-rs/this"
-keywords = ["entity", "relationship", "rest", "api", "framework"]
-categories = ["web-programming", "database"]
+keywords = ["entity", "relationship", "rest", "graphql", "api"]
+categories = ["web-programming", "web-programming::http-server", "database"]
 readme = "README.md"
 
 [dependencies]

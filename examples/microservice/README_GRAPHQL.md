@@ -1,125 +1,136 @@
-# Exemple Microservice avec GraphQL
+# GraphQL Microservice Example
 
-Cet exemple démontre l'utilisation de l'exposition GraphQL du framework `this-rs` aux côtés de l'API REST.
+This example demonstrates the use of GraphQL exposure in the `this-rs` framework alongside the REST API.
 
-## 🎯 Fonctionnalités
+## 🎯 Features
 
-- ✅ **Queries nommées par type d'entité** : `order(id)`, `invoice(id)`, `payment(id)`
-- ✅ **Relations automatiques** : Accès aux entités liées via des champs (`order.invoices`, `invoice.payments`)
-- ✅ **Relations imbriquées** : Navigation profonde (`order.invoices.payments`)
-- ✅ **Schéma généré automatiquement** : Basé sur les entités enregistrées par les modules
-- ✅ **Playground GraphQL** : Interface interactive pour tester les requêtes
+- ✅ **Named queries by entity type**: `order(id)`, `invoice(id)`, `payment(id)`
+- ✅ **List queries**: `orders`, `invoices`, `payments` with pagination support
+- ✅ **Automatic relations**: Access related entities via fields (`order.invoices`, `invoice.payments`)
+- ✅ **Nested relations**: Deep navigation (`order.invoices.payments`)
+- ✅ **Automatically generated schema**: Based on entities registered by modules
+- ✅ **GraphQL Playground**: Interactive interface for testing queries
+- ✅ **Full CRUD mutations**: Create, update, and delete entities via GraphQL
+- ✅ **Link mutations**: Create, link, and unlink entities with specialized mutations
 
-## Démarrage
+## Getting Started
 
 ```bash
 cargo run --example microservice_graphql --features graphql
 ```
 
-Le serveur démarre sur `http://127.0.0.1:3000` avec :
+The server starts on `http://127.0.0.1:3000` with both REST and GraphQL endpoints.
 
-## Tests automatiques
+## Available Endpoints
 
-Un script de test est fourni pour valider toutes les fonctionnalités GraphQL :
-
-```bash
-# Démarrer le serveur dans un terminal
-cargo run --example microservice_graphql --features graphql
-
-# Dans un autre terminal, lancer les tests
-cd examples/microservice
-./test_graphql.sh
-```
-
-Le script teste :
-- ✅ Récupération du schéma SDL
-- ✅ Liste des types d'entités
-- ✅ Queries par nom d'entité
-- ✅ Relations simples (order->invoices)
-- ✅ Relations imbriquées (order->invoices->payments)
-- ✅ Mutations (création de liens)
-
-## Endpoints disponibles
-- **API REST** : Tous les endpoints CRUD standards
-- **API GraphQL** : 
+- **REST API**: All standard CRUD endpoints
+- **GraphQL API**: 
   - Endpoint `/graphql` (POST)
   - Playground `/graphql/playground` (GET)
   - Schema SDL `/graphql/schema` (GET)
 
 ## GraphQL Playground
 
-Accédez au playground interactif : http://127.0.0.1:3000/graphql/playground
+Access the interactive playground: http://127.0.0.1:3000/graphql/playground
 
 ## GraphQL Schema
 
-**Téléchargez le schéma SDL :** http://127.0.0.1:3000/graphql/schema
+**Download the SDL schema**: http://127.0.0.1:3000/graphql/schema
 
-Le schéma est **généré automatiquement** à partir des entités enregistrées :
-- ✅ Types GraphQL spécifiques pour chaque entité (`Order`, `Invoice`, `Payment`)
-- ✅ Tous les champs découverts automatiquement depuis les données
-- ✅ Relations automatiques depuis `links.yaml`
-- ✅ Queries et mutations CRUD complètes
-- ✅ **100% générique** - aucun code hardcodé dans le framework
+The schema is **automatically generated** from registered entities:
+- ✅ Specific GraphQL types for each entity (`Order`, `Invoice`, `Payment`)
+- ✅ All fields automatically discovered from data
+- ✅ Automatic relations from `links.yaml`
+- ✅ Complete CRUD queries and mutations
+- ✅ **100% generic** - no hardcoded code in the framework
 
-Le schéma SDL (Schema Definition Language) est utile pour :
-- Générer des clients GraphQL typés
-- Documentation automatique
-- Validation des requêtes
-- Intégration avec des outils comme GraphQL Code Generator
+The SDL (Schema Definition Language) is useful for:
+- Generating typed GraphQL clients
+- Automatic documentation
+- Query validation
+- Integration with tools like GraphQL Code Generator
 
-## Requêtes GraphQL disponibles
+## Available GraphQL Queries
 
-### ⭐ Nouveauté : Queries par nom d'entité
-
-Au lieu d'utiliser `entity(id, entityType)`, vous pouvez maintenant interroger directement par type :
+### List entities with pagination
 
 ```graphql
 query {
-  order(id: "UUID") {
+  orders(limit: 10, offset: 0) {
     id
-    name
+    number
+    customerName
+    amount
     status
-    data
+    invoices {
+      id
+      number
+      amount
+    }
   }
 }
 ```
 
-### 🔗 Relations automatiques
+### Get entity by ID
 
-Les entités exposent automatiquement leurs relations via des champs :
+Instead of using `entity(id, entityType)`, you can query directly by type:
 
 ```graphql
 query {
   order(id: "UUID") {
     id
-    name
+    number
+    customerName
+    amount
+    status
+    createdAt
+    updatedAt
+  }
+}
+```
+
+### Automatic relations
+
+Entities automatically expose their relations via fields:
+
+```graphql
+query {
+  order(id: "UUID") {
+    id
+    number
+    customerName
     invoices {
       id
-      name
+      number
+      amount
+      dueDate
       payments {
         id
-        name
+        amount
+        method
+        transactionId
       }
     }
   }
 }
 ```
 
-**Résultat** :
+**Result**:
 ```json
 {
   "data": {
     "order": {
       "id": "d16e72cf-d7f7-41f4-aa86-ca428967fa0a",
-      "name": "ORD-001",
+      "number": "ORD-001",
       "invoices": [
         {
           "id": "b5ef6156-0dcb-49fd-b425-5805044ddbc4",
-          "name": "INV-002",
+          "number": "INV-002",
           "payments": [
             {
               "id": "90164a77-d517-4c27-8677-ac56a665cb9c",
-              "name": "PAY-002"
+              "amount": 500.0,
+              "method": "credit_card"
             }
           ]
         }
@@ -129,95 +140,129 @@ query {
 }
 ```
 
-### Lister les types d'entités
+## Available GraphQL Mutations
+
+### Create entity
 
 ```graphql
-query {
-  entityTypes
-}
-```
-
-**Résultat** :
-```json
-{
-  "data": {
-    "entityTypes": ["order", "invoice", "payment"]
-  }
-}
-```
-
-### Récupérer une entité par ID (méthode générique)
-
-```graphql
-query {
-  entity(id: "UUID", entityType: "order") {
+mutation {
+  createOrder(data: {
+    number: "ORD-001"
+    customerName: "John Doe"
+    amount: 1000.0
+    status: "active"
+    notes: "First order"
+  }) {
     id
-    type
-    name
+    number
+    customerName
+    amount
     status
-    createdAt
-    updatedAt
-    data
   }
 }
 ```
 
-### Récupérer les liens d'une entité
+### Update entity
 
 ```graphql
-query {
-  entityLinks(entityId: "UUID") {
+mutation {
+  updateOrder(
+    id: "UUID"
+    data: {
+      amount: 1500.0
+      status: "completed"
+    }
+  ) {
     id
-    linkType
-    sourceId
-    targetId
-    metadata
-    createdAt
+    amount
+    status
   }
 }
 ```
 
-**Avec filtres** :
+### Delete entity
+
 ```graphql
-query {
-  entityLinks(
-    entityId: "UUID"
-    linkType: "invoices"
-    targetType: "invoice"
+mutation {
+  deleteOrder(id: "UUID")
+}
+```
+
+Returns `true` if deleted successfully, `false` otherwise.
+
+### Create and link entity
+
+Create a new entity and automatically link it to a parent:
+
+```graphql
+mutation {
+  createInvoiceForOrder(
+    parentId: "ORDER_UUID"
+    data: {
+      number: "INV-001"
+      amount: 500.0
+      status: "pending"
+      dueDate: "2024-12-31"
+    }
+  ) {
+    id
+    number
+    amount
+    order {
+      id
+      number
+    }
+  }
+}
+```
+
+### Link existing entities
+
+Link two existing entities together:
+
+```graphql
+mutation {
+  linkPaymentToInvoice(
+    sourceId: "PAYMENT_UUID"
+    targetId: "INVOICE_UUID"
+    linkType: "payment"
+    metadata: {
+      processed: true
+      timestamp: "2024-01-15T10:30:00Z"
+    }
   ) {
     id
     linkType
-    targetId
-    metadata
-  }
-}
-```
-
-### Récupérer un lien spécifique
-
-```graphql
-query {
-  link(id: "UUID") {
-    id
-    linkType
     sourceId
     targetId
     metadata
-    createdAt
   }
 }
 ```
 
-## Mutations GraphQL disponibles
+### Unlink entities
 
-### Créer un lien
+Remove a link between two entities:
+
+```graphql
+mutation {
+  unlinkPaymentFromInvoice(
+    sourceId: "PAYMENT_UUID"
+    targetId: "INVOICE_UUID"
+  )
+}
+```
+
+### Generic link mutations
+
+#### Create a link
 
 ```graphql
 mutation {
   createLink(
     sourceId: "UUID"
     targetId: "UUID"
-    linkType: "invoices"
+    linkType: "has_invoice"
     metadata: {note: "Test link", priority: "high"}
   ) {
     id
@@ -230,13 +275,13 @@ mutation {
 }
 ```
 
-**Sans metadata** :
+**Without metadata**:
 ```graphql
 mutation {
   createLink(
     sourceId: "UUID"
     targetId: "UUID"
-    linkType: "invoices"
+    linkType: "has_invoice"
   ) {
     id
     linkType
@@ -244,7 +289,7 @@ mutation {
 }
 ```
 
-### Supprimer un lien
+#### Delete a link
 
 ```graphql
 mutation {
@@ -252,59 +297,69 @@ mutation {
 }
 ```
 
-**Résultat** : `true` si supprimé, `false` sinon.
+Returns `true` if deleted, `false` otherwise.
 
-## Exemples avec curl
+## Examples with curl
 
-### Récupérer le schéma SDL
+### Get the SDL schema
 
 ```bash
 curl http://127.0.0.1:3000/graphql/schema
 ```
 
-Cela retourne le schéma complet au format SDL, incluant tous les types, queries, et mutations disponibles.
+Returns the complete schema in SDL format, including all available types, queries, and mutations.
 
-### Lister les types
+### List orders
 
 ```bash
 curl -X POST http://127.0.0.1:3000/graphql \
   -H "Content-Type: application/json" \
-  -d '{"query": "query { entityTypes }"}'
+  -d '{"query": "query { orders(limit: 5) { id number customerName amount } }"}'
 ```
 
-### Récupérer un order avec ses relations
+### Get an order with relations
 
 ```bash
-# Récupérer un ID depuis REST
+# Get an ID from REST
 ORDER_ID=$(curl -s http://127.0.0.1:3000/orders | jq -r '.data[0].id')
 
-# Query GraphQL avec relations
+# GraphQL query with relations
 curl -X POST http://127.0.0.1:3000/graphql \
   -H "Content-Type: application/json" \
-  -d "{\"query\": \"query { order(id: \\\"$ORDER_ID\\\") { id name invoices { id name payments { id name } } } }\"}"
+  -d "{\"query\": \"query { order(id: \\\"$ORDER_ID\\\") { id number customerName invoices { id number amount payments { id amount method } } } }\"}"
 ```
 
-### Récupérer une invoice avec ses payments
+### Get an invoice with payments
 
 ```bash
 INVOICE_ID=$(curl -s http://127.0.0.1:3000/invoices | jq -r '.data[0].id')
 
 curl -X POST http://127.0.0.1:3000/graphql \
   -H "Content-Type: application/json" \
-  -d "{\"query\": \"query { invoice(id: \\\"$INVOICE_ID\\\") { id name payments { id name } } }\"}"
+  -d "{\"query\": \"query { invoice(id: \\\"$INVOICE_ID\\\") { id number amount payments { id amount method } } }\"}"
 ```
 
-### Récupérer les liens (méthode générique)
+### Create an order
+
+```bash
+curl -X POST http://127.0.0.1:3000/graphql \
+  -H "Content-Type: application/json" \
+  -d '{
+    "query": "mutation { createOrder(data: { number: \"ORD-999\", customerName: \"Jane Doe\", amount: 2000.0, status: \"active\", notes: \"Test order\" }) { id number customerName amount } }"
+  }'
+```
+
+### Create and link invoice
 
 ```bash
 ORDER_ID=$(curl -s http://127.0.0.1:3000/orders | jq -r '.data[0].id')
 
 curl -X POST http://127.0.0.1:3000/graphql \
   -H "Content-Type: application/json" \
-  -d "{\"query\": \"query { entityLinks(entityId: \\\"$ORDER_ID\\\") { id linkType targetId metadata } }\"}"
+  -d "{\"query\": \"mutation { createInvoiceForOrder(parentId: \\\"$ORDER_ID\\\", data: { number: \\\"INV-999\\\", amount: 1500.0, status: \\\"pending\\\", dueDate: \\\"2024-12-31\\\" }) { id number amount } }\"}"
 ```
 
-### Créer un lien
+### Link entities
 
 ```bash
 ORDER_ID=$(curl -s http://127.0.0.1:3000/orders | jq -r '.data[0].id')
@@ -312,54 +367,56 @@ INVOICE_ID=$(curl -s http://127.0.0.1:3000/invoices | jq -r '.data[0].id')
 
 curl -X POST http://127.0.0.1:3000/graphql \
   -H "Content-Type: application/json" \
-  -d "{\"query\": \"mutation { createLink(sourceId: \\\"$ORDER_ID\\\", targetId: \\\"$INVOICE_ID\\\", linkType: \\\"test_link\\\") { id linkType } }\"}"
+  -d "{\"query\": \"mutation { createLink(sourceId: \\\"$ORDER_ID\\\", targetId: \\\"$INVOICE_ID\\\", linkType: \\\"has_invoice\\\") { id linkType } }\"}"
 ```
 
 ## Architecture
 
-L'exemple combine deux expositions du framework :
+This example combines two framework exposures:
 
-1. **REST Exposure** (`RestExposure`) : Fournit l'API REST classique
-2. **GraphQL Exposure** (`GraphQLExposure`) : Fournit l'API GraphQL
+1. **REST Exposure** (`RestExposure`): Provides the classic REST API
+2. **GraphQL Exposure** (`GraphQLExposure`): Provides the GraphQL API
 
-Les deux expositions partagent le même `ServerHost`, qui contient :
-- Configuration des liens
-- Service de liens
-- Registre des entités
-- Fetchers et creators d'entités
+Both exposures share the same `ServerHost`, which contains:
+- Link configuration
+- Link service
+- Entity registry
+- Entity fetchers and creators
 
-## Notes techniques
+## Technical Notes
 
-- Le schema GraphQL est généré automatiquement à partir des entités enregistrées
-- Les types GraphQL sont génériques (`Entity`, `Link`) pour supporter toutes les entités
-- Le champ `data` de l'entité contient tous les champs custom en JSON
-- Les metadata des liens sont aussi en JSON pour flexibilité maximale
-- Le playground GraphQL est disponible uniquement en mode développement
+- The GraphQL schema is automatically generated from registered entities
+- GraphQL types are specific to each entity (`Order`, `Invoice`, `Payment`) - not generic
+- Fields are automatically discovered from entity data
+- Relations are automatically added from `links.yaml` configuration
+- Entity metadata is in JSON format for maximum flexibility
+- Link metadata is also in JSON format
+- GraphQL Playground is available for interactive testing
 
-## ✅ Fonctionnalités implémentées
+## ✅ Implemented Features
 
-- ✅ Queries nommées par type d'entité (`order`, `invoice`, `payment`)
-- ✅ Relations automatiques entre entités
-- ✅ Navigation imbriquée (relations de relations)
-- ✅ Mutations pour créer/supprimer des liens
-- ✅ Query générique `entity(id, entityType)` pour flexibilité
-- ✅ GraphQL Playground pour tests interactifs
-- ✅ Export du schéma SDL via `/graphql/schema`
+- ✅ Named queries by entity type (`order`, `invoice`, `payment`)
+- ✅ List queries with pagination (`orders`, `invoices`, `payments`)
+- ✅ Automatic relations between entities
+- ✅ Nested navigation (relations of relations)
+- ✅ Full CRUD mutations for entities (`createOrder`, `updateOrder`, `deleteOrder`)
+- ✅ Link mutations (create, link, unlink)
+- ✅ Specialized mutations (`createInvoiceForOrder`, `linkPaymentToInvoice`)
+- ✅ Generic `createLink` and `deleteLink` mutations
+- ✅ GraphQL Playground for interactive testing
+- ✅ SDL schema export via `/graphql/schema`
 
-## Limitations actuelles
+## Current Limitations
 
-- ⚠️ Les queries `orders`, `invoices`, `payments` (listes) ne sont pas encore implémentées
-- ⚠️ Pas de pagination GraphQL (à venir)
-- ⚠️ Pas de filtres GraphQL sur les entités (à venir)
-- ⚠️ Pas de création/mise à jour d'entités via GraphQL (à venir)
-- ⚠️ Subscriptions GraphQL non implémentées
-- ⚠️ Les types d'entités sont hardcodés (`order`, `invoice`, `payment`) - à générer dynamiquement
+- ⚠️ GraphQL Subscriptions not implemented
+- ⚠️ Advanced filtering on list queries (to be added)
+- ⚠️ Sorting on list queries (to be added)
 
-## Prochaines étapes
+## Next Steps
 
-- [ ] Générer dynamiquement les queries pour tous les types d'entités enregistrés
-- [ ] Ajouter la pagination dans les requêtes GraphQL
-- [ ] Ajouter les mutations CRUD pour les entités
-- [ ] Ajouter les filtres et le tri
-- [ ] Ajouter les subscriptions pour les changements en temps réel
+- [ ] Add advanced filtering support in GraphQL queries
+- [ ] Add sorting capabilities
+- [ ] Implement GraphQL Subscriptions for real-time updates
+- [ ] Add field-level authorization policies
+- [ ] Support for GraphQL directives (`@deprecated`, `@skip`, etc.)
 
