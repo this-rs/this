@@ -62,6 +62,23 @@ impl EntityFetcher for OrderStore {
         // Serialize to JSON
         Ok(serde_json::to_value(order)?)
     }
+
+    async fn list_as_json(
+        &self,
+        limit: Option<i32>,
+        offset: Option<i32>,
+    ) -> Result<Vec<serde_json::Value>> {
+        let all_orders = self.list();
+        let offset = offset.unwrap_or(0) as usize;
+        let limit = limit.unwrap_or(20) as usize;
+
+        let orders: Vec<Order> = all_orders.into_iter().skip(offset).take(limit).collect();
+
+        orders
+            .into_iter()
+            .map(|order| serde_json::to_value(order).map_err(Into::into))
+            .collect()
+    }
 }
 
 /// Implement EntityCreator for OrderStore

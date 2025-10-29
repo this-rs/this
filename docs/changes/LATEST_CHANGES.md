@@ -1,6 +1,126 @@
 # 🎯 Latest Changes
 
-## v0.0.6 - Generic Pagination and Filtering (Latest)
+## v0.0.7 - GraphQL API Exposure (Latest)
+
+### Summary
+
+Major new feature introducing **dynamic GraphQL API exposure** with automatic schema generation from registered entities.
+
+**Date**: January 2025  
+**Version**: 0.0.7  
+**Impact**: New feature - No breaking changes
+
+### New Features
+
+- ✅ **Dynamic GraphQL Schema** - Automatically generated from entity definitions
+- ✅ **Specific Entity Types** - Each entity gets its own GraphQL type (`Order`, `Invoice`, etc.)
+- ✅ **Automatic Relations** - Relations discovered from `links.yaml` configuration
+- ✅ **Full CRUD Operations** - Create, Read, Update, Delete via GraphQL mutations
+- ✅ **List Queries with Pagination** - `orders`, `invoices`, `payments` queries with limit/offset
+- ✅ **Single Entity Queries** - `order(id)`, `invoice(id)`, `payment(id)` queries
+- ✅ **Nested Relations** - Query entities with their relations recursively
+- ✅ **Specialized Link Mutations** - `createInvoiceForOrder`, `linkPaymentToInvoice`, `unlinkPaymentFromInvoice`
+- ✅ **Generic Link Mutations** - `createLink`, `deleteLink` for flexible link management
+- ✅ **GraphQL Playground** - Interactive query interface at `/graphql/playground`
+- ✅ **SDL Schema Export** - Download complete schema at `/graphql/schema`
+- ✅ **Custom Executor** - Runtime query execution with dynamic field resolution
+- ✅ **Modular Architecture** - Clean separation with executor sub-modules
+
+### Implementation
+
+The GraphQL exposure is built with:
+
+- **Custom Executor**: Parses and executes queries at runtime (not compile-time)
+- **Schema Generator**: Dynamically creates SDL from entities and links configuration
+- **Field Resolver**: Recursively resolves fields and relations
+- **Modular Design**: Separated into 6 executor modules for maintainability
+
+### Usage
+
+Enable GraphQL feature:
+
+```toml
+[dependencies]
+this-rs = { version = "0.0.7", features = ["graphql"] }
+```
+
+Build server with GraphQL:
+
+```rust
+let host = Arc::new(
+    ServerBuilder::new()
+        .with_link_service(InMemoryLinkService::new())
+        .register_module(module)?
+        .build_host()?
+);
+
+let graphql_router = GraphQLExposure::build_router(host)?;
+```
+
+### Documentation
+
+- ✅ [GraphQL Guide](../guides/GRAPHQL.md) - Complete user guide
+- ✅ [GraphQL Implementation](../architecture/GRAPHQL_IMPLEMENTATION.md) - Technical details
+- ✅ [GraphQL Example](../../examples/microservice/README_GRAPHQL.md) - Complete example
+
+### Example Queries
+
+**List entities:**
+```graphql
+query {
+  orders(limit: 10) {
+    id
+    number
+    customerName
+    amount
+  }
+}
+```
+
+**Get with relations:**
+```graphql
+query {
+  order(id: "UUID") {
+    id
+    number
+    invoices {
+      id
+      amount
+      payments {
+        id
+        method
+      }
+    }
+  }
+}
+```
+
+**Create entity:**
+```graphql
+mutation {
+  createOrder(data: {
+    number: "ORD-001"
+    customerName: "John Doe"
+    amount: 1000.0
+    status: "active"
+  }) {
+    id
+    number
+  }
+}
+```
+
+### Next Steps
+
+- [ ] GraphQL Subscriptions (WebSocket support)
+- [ ] Advanced filtering in queries
+- [ ] Schema caching for performance
+- [ ] Field-level authorization
+- [ ] GraphQL directive support
+
+---
+
+## v0.0.6 - Generic Pagination and Filtering
 
 ### Summary
 
@@ -552,7 +672,8 @@ Planned for v0.0.3+:
 - [ ] PostgreSQL storage backend
 - [ ] Additional validators and filters
 - [ ] Webhook system for entity events
-- [ ] GraphQL support
+- [x] GraphQL support ✅ (v0.0.7)
+- [ ] GraphQL Subscriptions
 - [ ] Performance optimizations for large datasets
 
 ---

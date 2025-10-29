@@ -59,6 +59,23 @@ impl EntityFetcher for InvoiceStore {
         // Serialize to JSON
         Ok(serde_json::to_value(invoice)?)
     }
+
+    async fn list_as_json(
+        &self,
+        limit: Option<i32>,
+        offset: Option<i32>,
+    ) -> Result<Vec<serde_json::Value>> {
+        let all_invoices = self.list();
+        let offset = offset.unwrap_or(0) as usize;
+        let limit = limit.unwrap_or(20) as usize;
+
+        let invoices: Vec<_> = all_invoices.into_iter().skip(offset).take(limit).collect();
+
+        invoices
+            .into_iter()
+            .map(|invoice| serde_json::to_value(invoice).map_err(Into::into))
+            .collect()
+    }
 }
 
 /// Implement EntityCreator for InvoiceStore

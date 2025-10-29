@@ -1,5 +1,11 @@
 # 🚀 Quick Start Guide - This-RS
 
+> **⚠️ Before You Start**: This-RS is designed for **complex APIs with 5+ entities and many relationships**.  
+> If you're building a simple CRUD API (< 5 entities), consider using [Axum](https://github.com/tokio-rs/axum) directly.  
+> See [Is This-RS Right for You?](../../README.md#is-this-rs-right-for-you) in the main README.
+
+---
+
 ## Quick Installation
 
 ```bash

@@ -1,6 +1,9 @@
 # This-RS 🦀
 
-> A generic entity and relationship management framework for building RESTful APIs in Rust with **zero boilerplate**.
+> A framework for building **complex multi-entity REST and GraphQL APIs** with **many relationships** in Rust.
+>
+> **Designed for APIs with 5+ entities and complex relationships.**  
+> For simple CRUD APIs, consider using Axum directly.
 
 [![CI](https://github.com/this-rs/this/actions/workflows/ci.yml/badge.svg)](https://github.com/this-rs/this/actions/workflows/ci.yml)
 [![Documentation](https://github.com/this-rs/this/actions/workflows/docs.yml/badge.svg)](https://github.com/this-rs/this/actions/workflows/docs.yml)
@@ -12,49 +15,105 @@
 
 ## ✨ Highlights
 
+### 🚀 Core Features
 - 🔌 **Generic Entity System** - Add entities without modifying framework code
 - 🤖 **Auto-Generated Routes** - Declare a module, routes are created automatically
-- ✅ **Automatic Validation & Filtering** - Zero-boilerplate data validation with declarative rules
-- 📄 **Generic Pagination & Query Filtering** - 🆕 Automatic pagination for all list endpoints
+- 🏗️ **Macro-Driven Entities** - Define entities with zero boilerplate using macros
+- 🔒 **Type-Safe** - Full Rust compile-time guarantees
+
+### 🔗 Relationship Management
 - 🔗 **Flexible Relationships** - Multiple link types between same entities
 - ↔️ **Bidirectional Navigation** - Query relationships from both directions
 - ✨ **Auto-Enriched Links** - Full entities in responses, no N+1 queries
-- 🏗️ **Macro-Driven Entities** - Define entities with zero boilerplate using macros
 - 🎯 **Smart Entity Creation** - Create new entities + links in one API call
+
+### 🌐 Multi-Protocol Support
+- 🆕 **REST API** - Traditional RESTful endpoints with auto-routing
+- 🆕 **GraphQL API** - Dynamic schema generation with full CRUD and relations
+- 🔜 **gRPC** (planned) - Extensible architecture for future protocols
+
+### ⚡ Developer Experience
+- ✅ **Automatic Validation & Filtering** - Zero-boilerplate data validation with declarative rules
+- 📄 **Generic Pagination & Query Filtering** - Automatic pagination for all list endpoints
 - 📝 **Auto-Pluralization** - Smart plural forms (company → companies)
 - ⚙️ **YAML Configuration** - Declarative entity and link definitions
-- 🔒 **Type-Safe** - Full Rust compile-time guarantees
 
 ---
 
-## 🎯 The Vision
+## 🎯 Is This-RS Right for You?
 
-### Traditional Framework (❌)
+### ✅ **Perfect Fit** - You Should Use This-RS
+
+- **Many entities** (5+ entities with CRUD operations)
+- **Complex relationships** (multiple link types between entities)
+- **Bidirectional navigation** (need to query relationships from both directions)
+- **Multi-protocol APIs** (want both REST and GraphQL from same codebase)
+- **Microservices architecture** (building multiple interconnected services)
+- **Rapid iteration** (adding entities frequently, need consistency)
+
+**Example use cases**: CMS, ERP, e-commerce platforms, social networks, project management tools
+
+### ⚠️ **Probably Overkill** - Consider Alternatives
+
+- **Simple CRUD** (< 5 entities with basic operations)
+- **No relationships** (entities are independent)
+- **Single small API** (not planning to scale)
+- **Learning Rust/Axum** (start with Axum directly, add This-RS later if needed)
+- **Maximum performance critical** (framework adds small overhead)
+
+**For simple projects, use [Axum](https://github.com/tokio-rs/axum) + [utoipa](https://github.com/juhaku/utoipa) directly.**
+
+**📖 See [Alternatives Comparison](docs/ALTERNATIVES.md) for detailed analysis of when to use what.**
+
+### 📊 ROI by Project Size
+
+| Entities | Relationships | Recommended | Time Saved |
+|----------|---------------|-------------|------------|
+| 1-3 | Few | ❌ Axum directly | - |
+| 3-5 | Some | ⚠️ Consider This-RS | ~20% |
+| 5-10 | Many | ✅ This-RS recommended | ~40% |
+| 10+ | Complex | ✅✅ This-RS highly recommended | ~60% |
+
+---
+
+## 💡 What This-RS Actually Saves
+
+### Without This-RS (Pure Axum)
 ```rust
-// Add new entity = Modify 10+ files
-// - Update routing module (30+ lines)
-// - Modify link handlers
-// - Update entity registry
-// - Write CRUD boilerplate
-// - Maintain consistency manually
+// For each entity, you write:
+// 1. Entity definition (✓ same in both)
+// 2. CRUD handlers (✓ same in both - you still write business logic)
+// 3. Routes registration (❌ REPETITIVE - 30+ lines per entity)
+// 4. Link routes (❌ REPETITIVE - 50+ lines per relationship)
+// 5. Link enrichment (❌ MANUAL - N+1 queries if not careful)
+// 6. GraphQL schema (❌ MANUAL - duplicate type definitions)
+
+// Example: 10 entities with 15 relationships
+// = ~500 lines of repetitive routing code
 ```
 
-### This-RS (✅)
+### With This-RS (✅)
 ```rust
-// Add new entity = Just use a macro!
+// 1. Entity definition (✓ with macro helpers)
 impl_data_entity!(Product, "product", ["name", "sku"], {
     sku: String,
     price: f64,
-    description: Option<String>,
 });
 
-// Main.rs stays unchanged!
+// 2. CRUD handlers (✓ you still write these - it's your business logic)
+// 3. Routes registration (✅ AUTO-GENERATED)
+// 4. Link routes (✅ AUTO-GENERATED from YAML)
+// 5. Link enrichment (✅ AUTOMATIC - no N+1 queries)
+// 6. GraphQL schema (✅ AUTO-GENERATED from entities)
+
+// Main.rs for 10 entities with 15 relationships
 let app = ServerBuilder::new()
-    .register_module(module)?  // ← Everything auto-generated
+    .register_module(module)?  // ← ~40 lines total
     .build()?;
 ```
 
-**Result**: Zero boilerplate, maximum productivity.
+**What you save**: Routing boilerplate, link management, GraphQL schema duplication.  
+**What you still write**: Business logic handlers (as you should!).
 
 ---
 
@@ -154,13 +213,14 @@ impl Module for CatalogModule {
 
 ### 4. Launch Server (Auto-Generated Routes!)
 
+#### REST API (Default)
 ```rust
 #[tokio::main]
 async fn main() -> Result<()> {
     let app = ServerBuilder::new()
         .with_link_service(InMemoryLinkService::new())
         .register_module(CatalogModule::new(store))?
-        .build()?;  // ← All routes created automatically!
+        .build()?;  // ← All REST routes created automatically!
     
     let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await?;
     axum::serve(listener, app).await?;
@@ -168,7 +228,28 @@ async fn main() -> Result<()> {
 }
 ```
 
+#### GraphQL API (Optional, feature flag)
+```rust
+use this::server::GraphQLExposure;
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    let host = ServerBuilder::new()
+        .with_link_service(InMemoryLinkService::new())
+        .register_module(CatalogModule::new(store))?
+        .build_host()?;  // ← Build transport-agnostic host
+    
+    let graphql_app = GraphQLExposure::build_router(Arc::new(host))?;
+    
+    let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await?;
+    axum::serve(listener, graphql_app).await?;
+    Ok(())
+}
+```
+
 **That's it!** Routes are auto-generated:
+
+**REST API:**
 - ✅ `GET /products` - List all
 - ✅ `POST /products` - Create new product
 - ✅ `GET /products/:id` - Get by ID
@@ -176,6 +257,15 @@ async fn main() -> Result<()> {
 - ✅ `DELETE /products/:id` - Delete product
 - ✅ `GET /products/:id/links` - Introspection
 - ✅ Link routes (if configured in YAML)
+
+**GraphQL API:**
+- ✅ `POST /graphql` - GraphQL endpoint with full CRUD
+- ✅ `GET /graphql/playground` - Interactive GraphQL playground
+- ✅ `GET /graphql/schema` - Dynamic schema introspection
+- ✅ Auto-generated types (`Product`, `Order`, etc.)
+- ✅ Auto-generated queries (`products`, `product(id)`)
+- ✅ Auto-generated mutations (`createProduct`, `updateProduct`, `deleteProduct`)
+- ✅ Auto-resolved relations (follow links automatically)
 
 ---
 
@@ -255,8 +345,9 @@ When you query links, you automatically get full entity data:
 
 ### [Microservice Example](examples/microservice/)
 
-Complete billing microservice with **auto-generated routes**:
+Complete billing microservice with **auto-generated routes** for both REST and GraphQL:
 
+#### REST API
 ```bash
 cargo run --example microservice
 ```
@@ -282,7 +373,42 @@ Output:
   DELETE /orders/{id}/invoices/{inv_id} - Delete link
 ```
 
-See [examples/microservice/README.md](examples/microservice/README.md) for full details.
+See [examples/microservice/README.md](examples/microservice/README.md) for full REST API details.
+
+#### GraphQL API
+```bash
+cargo run --example microservice_graphql --features graphql
+```
+
+The same entities are exposed via GraphQL with:
+- **Dynamic Schema Generation** - Types (`Order`, `Invoice`, `Payment`) auto-generated
+- **Full CRUD** - Queries and mutations for all entities
+- **Automatic Relations** - Navigate `order.invoices`, `invoice.payments` automatically
+- **Interactive Playground** - Test queries at `http://127.0.0.1:3000/graphql/playground`
+
+Example query:
+```graphql
+query {
+  orders {
+    id
+    number
+    customerName
+    amount
+    invoices {
+      id
+      number
+      amount
+      payments {
+        id
+        amount
+        method
+      }
+    }
+  }
+}
+```
+
+See [examples/microservice/README_GRAPHQL.md](examples/microservice/README_GRAPHQL.md) for full GraphQL details.
 
 ---
 
@@ -332,13 +458,24 @@ Entity (Base Trait)
 
 ## 📖 Documentation
 
+### 🚀 Getting Started
 - **[Quick Start](docs/guides/QUICK_START.md)** - Fast introduction
 - **[Getting Started](docs/guides/GETTING_STARTED.md)** - Step-by-step tutorial
+
+### 🌐 API Exposure
+- **[GraphQL Guide](docs/guides/GRAPHQL.md)** - 🆕 Dynamic GraphQL API with auto-generated schema
+- **[Custom Routes](docs/guides/CUSTOM_ROUTES.md)** - Adding custom endpoints alongside auto-routes
+
+### 🔗 Features
 - **[Validation & Filtering](docs/guides/VALIDATION_AND_FILTERING.md)** - Automatic data validation
-- **[Pagination & Filtering](docs/guides/PAGINATION_AND_FILTERING.md)** - 🆕 Generic pagination and query filtering
+- **[Pagination & Filtering](docs/guides/PAGINATION_AND_FILTERING.md)** - Generic pagination and query filtering
 - **[Enriched Links](docs/guides/ENRICHED_LINKS.md)** - Auto-enrichment & performance
+- **[Link Authorization](docs/guides/LINK_AUTHORIZATION.md)** - Securing relationships
+
+### 🏗️ Architecture
 - **[Architecture](docs/architecture/ARCHITECTURE.md)** - Technical deep dive
 - **[ServerBuilder](docs/architecture/SERVER_BUILDER_IMPLEMENTATION.md)** - Auto-routing details
+- **[GraphQL Implementation](docs/architecture/GRAPHQL_IMPLEMENTATION.md)** - 🆕 Custom executor design
 - **[Full Documentation](docs/)** - Complete documentation index
 
 ---
@@ -347,11 +484,13 @@ Entity (Base Trait)
 
 ### For Developers
 
-✅ **-88% less boilerplate** (340 → 40 lines in main.rs)  
-✅ **Add entity in minutes** - Just one macro call  
+✅ **-88% less routing boilerplate** (340 → 40 lines in microservice example)  
+✅ **Add entity quickly** - Macro helpers + module registration  
 ✅ **Consistent patterns** - Same structure for all entities  
 ✅ **Type-safe** - Full Rust compile-time checks  
-✅ **Scalable** - 3 or 300 entities = same simplicity  
+✅ **Scales well** - Adding the 10th entity is as easy as the 1st  
+✅ **Multi-protocol** - 🆕 Same entities exposed via REST and GraphQL  
+⚠️ **Learning curve** - Framework abstractions to understand (traits, registry)  
 
 ### For Teams
 
@@ -359,6 +498,7 @@ Entity (Base Trait)
 ✅ **Easier onboarding** - Clear patterns and conventions  
 ✅ **Reduced errors** - Less manual work = fewer mistakes  
 ✅ **Better consistency** - Framework enforces best practices  
+✅ **Flexible APIs** - 🆕 Choose REST, GraphQL, or both  
 
 ### For Production
 
@@ -367,6 +507,7 @@ Entity (Base Trait)
 ✅ **Extensible** - Plugin architecture via modules  
 ✅ **Performance** - Efficient link enrichment with no N+1 queries  
 ✅ **Soft Deletes** - Built-in soft delete support  
+✅ **Dynamic Schema** - 🆕 GraphQL schema auto-generated from entities  
 
 ---
 
@@ -384,15 +525,55 @@ This project is licensed under the MIT License - see the [LICENSE-MIT](LICENSE-M
 
 ## 🌟 Why This-RS?
 
-> "The best code is the code you don't have to write."
+> "The best code is the code you don't have to write... *if you're writing it 50 times.*"
 
-This-RS eliminates boilerplate while maintaining type safety and flexibility. Perfect for:
-- 🏢 Microservices architectures
-- 🔌 REST APIs with complex relationships
-- 🚀 Rapid prototyping
-- 📊 Data-rich applications with interconnected entities
+This-RS eliminates **repetitive routing and relationship boilerplate** while maintaining type safety. 
 
-**Built with Rust. Designed for productivity. Ready for production.** 🦀✨
+**Perfect for**:
+- 🏢 **Microservices architectures** with many entities
+- 🔗 **Complex relationship graphs** (many-to-many, bidirectional)
+- 🔮 **Dynamic GraphQL + REST** from same definitions
+- 🚀 **Rapidly evolving domains** (adding entities frequently)
+- 📊 **Data-rich applications** with interconnected entities
+
+**NOT ideal for**:
+- ❌ Simple CRUD APIs (< 5 entities)
+- ❌ Maximum performance critical paths (framework adds overhead)
+- ❌ Learning projects (start with Axum first)
+
+### 🆕 What's New in v0.0.6
+
+- ✨ **GraphQL Support** - Auto-generated GraphQL schema from your entities
+- 🔄 **Dynamic Schema** - Types, queries, and mutations created at runtime
+- 🔗 **Automatic Relations** - Navigate entity relationships in GraphQL
+- 🎯 **Full CRUD** - Complete create, read, update, delete via GraphQL
+- 🏗️ **Modular Architecture** - Choose REST, GraphQL, or both
+
+---
+
+## 🤔 Honest Trade-offs
+
+### What This-RS Adds ✅
+- Auto-generated routing for entities and links
+- Bidirectional relationship navigation
+- Link enrichment (no N+1 queries)
+- GraphQL schema from REST entities
+- YAML-based relationship configuration
+
+### What You Still Write ✍️
+- Entity definitions (with macro helpers)
+- Business logic handlers (create, update, delete, custom queries)
+- Validation rules
+- Authorization logic
+- Error handling
+
+### The Cost ⚠️
+- Learning curve (framework patterns and traits)
+- Some abstraction overhead (dynamic dispatch, registry lookups)
+- YAML configuration to maintain
+- Smaller ecosystem than pure Axum
+
+**Built with Rust. Designed for complex APIs. Best for scale.** 🦀✨
 
 ---
 

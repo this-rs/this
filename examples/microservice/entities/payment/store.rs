@@ -59,6 +59,23 @@ impl EntityFetcher for PaymentStore {
         // Serialize to JSON
         Ok(serde_json::to_value(payment)?)
     }
+
+    async fn list_as_json(
+        &self,
+        limit: Option<i32>,
+        offset: Option<i32>,
+    ) -> Result<Vec<serde_json::Value>> {
+        let all_payments = self.list();
+        let offset = offset.unwrap_or(0) as usize;
+        let limit = limit.unwrap_or(20) as usize;
+
+        let payments: Vec<_> = all_payments.into_iter().skip(offset).take(limit).collect();
+
+        payments
+            .into_iter()
+            .map(|payment| serde_json::to_value(payment).map_err(Into::into))
+            .collect()
+    }
 }
 
 /// Implement EntityCreator for PaymentStore

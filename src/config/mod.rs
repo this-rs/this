@@ -112,6 +112,76 @@ impl LinksConfig {
         Ok(config)
     }
 
+    /// Merge multiple configurations into one
+    ///
+    /// Rules:
+    /// - Entities: Combined from all configs, duplicates (by singular name) use last definition
+    /// - Links: Combined from all configs, duplicates (by link_type+source+target) use last definition
+    /// - Validation rules: Merged by link_type, rules combined for each link type
+    pub fn merge(configs: Vec<LinksConfig>) -> Self {
+        if configs.is_empty() {
+            return Self {
+                entities: vec![],
+                links: vec![],
+                validation_rules: None,
+            };
+        }
+
+        if configs.len() == 1 {
+            return configs.into_iter().next().unwrap();
+        }
+
+        let mut entities_map: HashMap<String, EntityConfig> = HashMap::new();
+        let mut links_map: HashMap<(String, String, String), LinkDefinition> = HashMap::new();
+        let mut validation_rules_map: HashMap<String, Vec<ValidationRule>> = HashMap::new();
+
+        // Merge entities (last one wins for duplicates)
+        for config in &configs {
+            for entity in &config.entities {
+                entities_map.insert(entity.singular.clone(), entity.clone());
+            }
+        }
+
+        // Merge links (last one wins for duplicates)
+        for config in &configs {
+            for link in &config.links {
+                let key = (
+                    link.link_type.clone(),
+                    link.source_type.clone(),
+                    link.target_type.clone(),
+                );
+                links_map.insert(key, link.clone());
+            }
+        }
+
+        // Merge validation rules (combine rules for same link_type)
+        for config in &configs {
+            if let Some(rules) = &config.validation_rules {
+                for (link_type, link_rules) in rules {
+                    validation_rules_map
+                        .entry(link_type.clone())
+                        .or_default()
+                        .extend(link_rules.clone());
+                }
+            }
+        }
+
+        // Convert back to vectors
+        let entities: Vec<EntityConfig> = entities_map.into_values().collect();
+        let links: Vec<LinkDefinition> = links_map.into_values().collect();
+        let validation_rules = if validation_rules_map.is_empty() {
+            None
+        } else {
+            Some(validation_rules_map)
+        };
+
+        Self {
+            entities,
+            links,
+            validation_rules,
+        }
+    }
+
     /// Validate if a link combination is allowed
     ///
     /// If no validation rules are defined, all combinations are allowed (permissive mode)
@@ -322,5 +392,125 @@ links:
 
         // Second link has no auth
         assert!(config.links[1].auth.is_none());
+    }
+
+    #[test]
+    fn test_merge_empty() {
+        let merged = LinksConfig::merge(vec![]);
+        assert_eq!(merged.entities.len(), 0);
+        assert_eq!(merged.links.len(), 0);
+    }
+
+    #[test]
+    fn test_merge_single() {
+        let config = LinksConfig::default_config();
+        let merged = LinksConfig::merge(vec![config.clone()]);
+        assert_eq!(merged.entities.len(), config.entities.len());
+        assert_eq!(merged.links.len(), config.links.len());
+    }
+
+    #[test]
+    fn test_merge_disjoint_configs() {
+        let config1 = LinksConfig {
+            entities: vec![EntityConfig {
+                singular: "order".to_string(),
+                plural: "orders".to_string(),
+                auth: EntityAuthConfig::default(),
+            }],
+            links: vec![],
+            validation_rules: None,
+        };
+
+        let config2 = LinksConfig {
+            entities: vec![EntityConfig {
+                singular: "invoice".to_string(),
+                plural: "invoices".to_string(),
+                auth: EntityAuthConfig::default(),
+            }],
+            links: vec![],
+            validation_rules: None,
+        };
+
+        let merged = LinksConfig::merge(vec![config1, config2]);
+        assert_eq!(merged.entities.len(), 2);
+    }
+
+    #[test]
+    fn test_merge_overlapping_entities() {
+        let auth1 = EntityAuthConfig {
+            list: "public".to_string(),
+            ..Default::default()
+        };
+
+        let config1 = LinksConfig {
+            entities: vec![EntityConfig {
+                singular: "user".to_string(),
+                plural: "users".to_string(),
+                auth: auth1,
+            }],
+            links: vec![],
+            validation_rules: None,
+        };
+
+        let auth2 = EntityAuthConfig {
+            list: "authenticated".to_string(),
+            ..Default::default()
+        };
+
+        let config2 = LinksConfig {
+            entities: vec![EntityConfig {
+                singular: "user".to_string(),
+                plural: "users".to_string(),
+                auth: auth2,
+            }],
+            links: vec![],
+            validation_rules: None,
+        };
+
+        let merged = LinksConfig::merge(vec![config1, config2]);
+
+        // Should have only 1 entity (last wins)
+        assert_eq!(merged.entities.len(), 1);
+        assert_eq!(merged.entities[0].auth.list, "authenticated");
+    }
+
+    #[test]
+    fn test_merge_validation_rules() {
+        let mut rules1 = HashMap::new();
+        rules1.insert(
+            "works_at".to_string(),
+            vec![ValidationRule {
+                source: "user".to_string(),
+                targets: vec!["company".to_string()],
+            }],
+        );
+
+        let config1 = LinksConfig {
+            entities: vec![],
+            links: vec![],
+            validation_rules: Some(rules1),
+        };
+
+        let mut rules2 = HashMap::new();
+        rules2.insert(
+            "works_at".to_string(),
+            vec![ValidationRule {
+                source: "user".to_string(),
+                targets: vec!["project".to_string()],
+            }],
+        );
+
+        let config2 = LinksConfig {
+            entities: vec![],
+            links: vec![],
+            validation_rules: Some(rules2),
+        };
+
+        let merged = LinksConfig::merge(vec![config1, config2]);
+
+        // Validation rules should be combined
+        assert!(merged.validation_rules.is_some());
+        let rules = merged.validation_rules.unwrap();
+        assert_eq!(rules["works_at"].len(), 2);
     }
 }

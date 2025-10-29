@@ -2,7 +2,24 @@
 
 ## 🎯 Overview
 
-This-RS is a framework for building RESTful APIs with complex entity relationships and **zero boilerplate**. This guide will walk you through building your first API.
+This-RS is a framework for building **complex multi-entity REST and GraphQL APIs** with **many relationships**. This guide will walk you through building your first API.
+
+> **⚠️ Is This Guide for You?**
+> 
+> This-RS is designed for APIs with **5+ entities and complex relationships**.  
+> If you're building a simple CRUD API (< 5 entities, few relationships), you might be better served by using [Axum](https://github.com/tokio-rs/axum) directly.
+>
+> **What This-RS actually saves:**
+> - ✅ Routing boilerplate (auto-generated routes)
+> - ✅ Link management (bidirectional navigation, enrichment)
+> - ✅ GraphQL schema (auto-generated from entities)
+> 
+> **What you still write:**
+> - ✍️ Business logic handlers
+> - ✍️ Entity definitions (with macro helpers)
+> - ✍️ Validation rules
+>
+> See [Is This-RS Right for You?](../../README.md#is-this-rs-right-for-you) for a detailed comparison.
 
 ## 📋 Prerequisites
 
