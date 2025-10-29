@@ -23,6 +23,34 @@ pub trait EntityFetcher: Send + Sync {
     /// # Returns
     /// The entity serialized as JSON, or an error if not found
     async fn fetch_as_json(&self, entity_id: &Uuid) -> Result<serde_json::Value>;
+
+    /// Get a sample entity for schema introspection
+    ///
+    /// This method returns an entity with all fields populated (can be dummy data)
+    /// to allow the GraphQL schema generator to discover the entity structure.
+    ///
+    /// Default implementation returns an empty object.
+    async fn get_sample_entity(&self) -> Result<serde_json::Value> {
+        Ok(serde_json::json!({}))
+    }
+
+    /// List entities with pagination
+    ///
+    /// # Arguments
+    /// * `limit` - Maximum number of entities to return
+    /// * `offset` - Number of entities to skip
+    ///
+    /// # Returns
+    /// A vector of entities serialized as JSON
+    ///
+    /// Default implementation returns an empty list.
+    async fn list_as_json(
+        &self,
+        _limit: Option<i32>,
+        _offset: Option<i32>,
+    ) -> Result<Vec<serde_json::Value>> {
+        Ok(vec![])
+    }
 }
 
 /// Trait for creating entities dynamically
@@ -39,6 +67,41 @@ pub trait EntityCreator: Send + Sync {
     /// # Returns
     /// The created entity serialized as JSON (with generated ID, timestamps, etc.)
     async fn create_from_json(&self, entity_data: serde_json::Value) -> Result<serde_json::Value>;
+
+    /// Update an existing entity from JSON data
+    ///
+    /// # Arguments
+    /// * `entity_id` - The ID of the entity to update
+    /// * `entity_data` - The updated entity data as JSON
+    ///
+    /// # Returns
+    /// The updated entity serialized as JSON
+    ///
+    /// Default implementation returns an error.
+    async fn update_from_json(
+        &self,
+        _entity_id: &Uuid,
+        _entity_data: serde_json::Value,
+    ) -> Result<serde_json::Value> {
+        Err(anyhow::anyhow!(
+            "Update operation not implemented for this entity type"
+        ))
+    }
+
+    /// Delete an entity by ID
+    ///
+    /// # Arguments
+    /// * `entity_id` - The ID of the entity to delete
+    ///
+    /// # Returns
+    /// Ok(()) if successful, error otherwise
+    ///
+    /// Default implementation returns an error.
+    async fn delete(&self, _entity_id: &Uuid) -> Result<()> {
+        Err(anyhow::anyhow!(
+            "Delete operation not implemented for this entity type"
+        ))
+    }
 }
 
 /// Trait for a microservice module

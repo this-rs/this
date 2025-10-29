@@ -14,6 +14,7 @@ readme = "README.md"
 # Async runtime
 tokio = { version = "1.40", features = ["full"] }
 async-trait = "0.1"
+futures = "0.3"
 
 # Web framework
 axum = { version = "0.8", features = ["macros"] }
@@ -49,6 +50,11 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 regex = "1.10"
 validator = { version = "0.20", features = ["derive"] }
 
+# GraphQL support (optional)
+async-graphql = { version = "7", optional = true }
+async-graphql-axum = { version = "7", optional = true }
+graphql-parser = { version = "0.4", optional = true }
+
 [dev-dependencies]
 tokio-test = "0.4"
 axum-test = "18.1"
@@ -57,8 +63,9 @@ axum-test = "18.1"
 default = ["in-memory"]
 in-memory = []
 dynamodb = ["aws-sdk-dynamodb", "serde_dynamo"]
+graphql = ["async-graphql", "async-graphql-axum", "graphql-parser"]
 # postgres = ["sqlx"]  # Disabled until ScyllaDB implementation
-all = ["in-memory", "dynamodb"]
+all = ["in-memory", "dynamodb", "graphql"]
 
 [lib]
 name = "this"
@@ -75,3 +82,8 @@ path = "examples/full_api/main.rs"
 [[example]]
 name = "microservice"
 path = "examples/microservice/main.rs"
+
+[[example]]
+name = "microservice_graphql"
+path = "examples/microservice/main_graphql.rs"
+required-features = ["graphql"]
