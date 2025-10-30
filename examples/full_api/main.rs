@@ -31,7 +31,7 @@ async fn main() -> Result<()> {
     // Initialize tracing
     tracing_subscriber::fmt::init();
 
-    println!("🚀 This-RS Full API Example");
+    println!("🚀 this-rs Full API Example");
     println!("============================\n");
 
     // Load configuration

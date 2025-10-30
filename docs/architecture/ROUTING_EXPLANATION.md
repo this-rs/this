@@ -1,12 +1,12 @@
-# Explanation: How Routing Works in This-RS
+# Explanation: How Routing Works in this-rs
 
 ## 🎯 Question
 
-> How does This-RS achieve automatic route generation?
+> How does this-rs achieve automatic route generation?
 
 ## 📝 Answer
 
-This-RS uses a **two-tier routing system**: entity-specific routes (declared per entity) and generic link routes (fully automatic). Here's how it works.
+this-rs uses a **two-tier routing system**: entity-specific routes (declared per entity) and generic link routes (fully automatic). Here's how it works.
 
 ---
 
@@ -260,7 +260,7 @@ route_name="invoices" + source_type="order"
 
 ## 🎯 Conclusion
 
-This-RS uses a **hybrid approach**:
+this-rs uses a **hybrid approach**:
 
 1. **Entity CRUD routes**: Declared per entity via `EntityDescriptor`
    - Maintains type safety
