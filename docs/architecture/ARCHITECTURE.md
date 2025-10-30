@@ -1,4 +1,4 @@
-# This-RS Framework Architecture
+# this-rs Framework Architecture
 
 ## 📐 Overview
 

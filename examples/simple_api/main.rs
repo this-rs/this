@@ -16,7 +16,7 @@ impl_data_entity!(Car, "car", ["name", "brand", "model"], {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    println!("🚀 This-RS Simple Example\n");
+    println!("🚀 this-rs Simple Example\n");
 
     // Load configuration
     let config = Arc::new(LinksConfig::default_config());

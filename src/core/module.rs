@@ -1,4 +1,4 @@
-//! Module system for This-RS
+//! Module system for this-rs
 //!
 //! Defines traits for microservice modules
 
