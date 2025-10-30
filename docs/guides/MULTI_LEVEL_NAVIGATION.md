@@ -2,7 +2,7 @@
 
 ## 🎯 Overview
 
-This-RS supports **multi-level entity relationships** through semantic URLs, allowing you to navigate complex entity graphs naturally.
+this-rs supports **multi-level entity relationships** through semantic URLs, allowing you to navigate complex entity graphs naturally.
 
 ## 🌳 Entity Relationship Examples
 

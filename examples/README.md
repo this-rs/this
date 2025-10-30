@@ -1,6 +1,6 @@
-# This-RS Examples
+# this-rs Examples
 
-Ce dossier contient des exemples progressifs pour apprendre à utiliser This-RS.
+Ce dossier contient des exemples progressifs pour apprendre à utiliser this-rs.
 
 ## 📚 Exemples Disponibles
 

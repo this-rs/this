@@ -1,4 +1,4 @@
-# This-RS 🦀
+# this-rs 🦀
 
 > A framework for building **complex multi-entity REST and GraphQL APIs** with **many relationships** in Rust.
 >
@@ -40,9 +40,9 @@
 
 ---
 
-## 🎯 Is This-RS Right for You?
+## 🎯 Is this-rs Right for You?
 
-### ✅ **Perfect Fit** - You Should Use This-RS
+### ✅ **Perfect Fit** - You Should Use this-rs
 
 - **Many entities** (5+ entities with CRUD operations)
 - **Complex relationships** (multiple link types between entities)
@@ -58,7 +58,7 @@
 - **Simple CRUD** (< 5 entities with basic operations)
 - **No relationships** (entities are independent)
 - **Single small API** (not planning to scale)
-- **Learning Rust/Axum** (start with Axum directly, add This-RS later if needed)
+- **Learning Rust/Axum** (start with Axum directly, add this-rs later if needed)
 - **Maximum performance critical** (framework adds small overhead)
 
 **For simple projects, use [Axum](https://github.com/tokio-rs/axum) + [utoipa](https://github.com/juhaku/utoipa) directly.**
@@ -70,15 +70,15 @@
 | Entities | Relationships | Recommended | Time Saved |
 |----------|---------------|-------------|------------|
 | 1-3 | Few | ❌ Axum directly | - |
-| 3-5 | Some | ⚠️ Consider This-RS | ~20% |
-| 5-10 | Many | ✅ This-RS recommended | ~40% |
-| 10+ | Complex | ✅✅ This-RS highly recommended | ~60% |
+| 3-5 | Some | ⚠️ Consider this-rs | ~20% |
+| 5-10 | Many | ✅ this-rs recommended | ~40% |
+| 10+ | Complex | ✅✅ this-rs highly recommended | ~60% |
 
 ---
 
-## 💡 What This-RS Actually Saves
+## 💡 What this-rs Actually Saves
 
-### Without This-RS (Pure Axum)
+### Without this-rs (Pure Axum)
 ```rust
 // For each entity, you write:
 // 1. Entity definition (✓ same in both)
@@ -92,7 +92,7 @@
 // = ~500 lines of repetitive routing code
 ```
 
-### With This-RS (✅)
+### With this-rs (✅)
 ```rust
 // 1. Entity definition (✓ with macro helpers)
 impl_data_entity!(Product, "product", ["name", "sku"], {
@@ -523,11 +523,11 @@ This project is licensed under the MIT License - see the [LICENSE-MIT](LICENSE-M
 
 ---
 
-## 🌟 Why This-RS?
+## 🌟 Why this-rs?
 
 > "The best code is the code you don't have to write... *if you're writing it 50 times.*"
 
-This-RS eliminates **repetitive routing and relationship boilerplate** while maintaining type safety. 
+this-rs eliminates **repetitive routing and relationship boilerplate** while maintaining type safety. 
 
 **Perfect for**:
 - 🏢 **Microservices architectures** with many entities
@@ -553,7 +553,7 @@ This-RS eliminates **repetitive routing and relationship boilerplate** while mai
 
 ## 🤔 Honest Trade-offs
 
-### What This-RS Adds ✅
+### What this-rs Adds ✅
 - Auto-generated routing for entities and links
 - Bidirectional relationship navigation
 - Link enrichment (no N+1 queries)
@@ -578,5 +578,5 @@ This-RS eliminates **repetitive routing and relationship boilerplate** while mai
 ---
 
 <p align="center">
-  Made with ❤️ and 🦀 by the This-RS community
+  Made with ❤️ and 🦀 by the this-rs community
 </p>

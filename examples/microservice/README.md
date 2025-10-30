@@ -395,7 +395,7 @@ links:
 
 ## Architecture Benefits
 
-### Before This-RS (❌)
+### Before this-rs (❌)
 ```
 - 300+ lines of manual routing
 - Duplicate CRUD logic per entity
@@ -404,7 +404,7 @@ links:
 - Inconsistent patterns
 ```
 
-### With This-RS (✅)
+### With this-rs (✅)
 ```
 - 40 lines in main.rs
 - Zero routing code

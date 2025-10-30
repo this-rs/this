@@ -1,6 +1,6 @@
-# Contributing to This-RS
+# Contributing to this-rs
 
-Thank you for your interest in contributing to This-RS! This document provides guidelines and instructions for contributing.
+Thank you for your interest in contributing to this-rs! This document provides guidelines and instructions for contributing.
 
 ## 🎯 Code of Conduct
 
@@ -60,7 +60,7 @@ What actually happened.
 **Environment:**
 - OS: [e.g., macOS 14.0]
 - Rust version: [e.g., 1.75.0]
-- This-RS version: [e.g., 0.0.2]
+- this-rs version: [e.g., 0.0.2]
 
 **Additional context**
 Add any other context about the problem here.
@@ -371,4 +371,4 @@ Contributors will be:
 
 ---
 
-**Thank you for contributing to This-RS!** 🚀🦀✨
+**Thank you for contributing to this-rs!** 🚀🦀✨

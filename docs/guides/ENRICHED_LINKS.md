@@ -2,7 +2,7 @@
 
 ## 🎯 Overview
 
-This-RS automatically **enriches link responses** with full entity data, eliminating the need for separate queries and preventing N+1 query problems.
+this-rs automatically **enriches link responses** with full entity data, eliminating the need for separate queries and preventing N+1 query problems.
 
 ## ✨ What Are Enriched Links?
 
@@ -25,7 +25,7 @@ When you query links, instead of just getting IDs, you get **complete entity obj
 // GET /invoices/invoice-xyz
 ```
 
-### With Enrichment (This-RS)
+### With Enrichment (this-rs)
 
 ```json
 {
@@ -236,7 +236,7 @@ N queries: Get each target entity
 Total: N+1 queries ❌
 ```
 
-**This-RS Approach**:
+**this-rs Approach**:
 ```
 1 query: Get links
 1 batch operation: Fetch all entities efficiently

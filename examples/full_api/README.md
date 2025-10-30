@@ -64,7 +64,7 @@ impl_data_entity!(Company, "company", ["name", "registration_number"], {
 When you run the server, you'll see:
 
 ```
-🚀 Full API Example - This-RS
+🚀 Full API Example - this-rs
 🌐 Server running on http://127.0.0.1:3000
 
 📚 Auto-generated Entity Routes:

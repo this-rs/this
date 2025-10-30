@@ -2,7 +2,7 @@
 
 ## Description
 
-Basic example demonstrating the fundamental concepts of This-RS:
+Basic example demonstrating the fundamental concepts of this-rs:
 - Entity definition using macros
 - Link creation between entities
 - In-memory link service usage
@@ -144,7 +144,7 @@ for link in bmw_owners {
 ## Output Example
 
 ```
-🚀 Simple API Example - This-RS
+🚀 Simple API Example - this-rs
 
 👤 Created users:
   - Alice (alice@example.com)

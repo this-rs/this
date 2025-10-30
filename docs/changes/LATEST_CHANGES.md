@@ -692,7 +692,7 @@ Planned for v0.0.3+:
 
 ## 🎉 Conclusion
 
-This refactoring makes This-RS:
+This refactoring makes this-rs:
 - ✅ **Simpler** - Removed complexity (tenant_id)
 - ✅ **More powerful** - Added features (EntityCreator, enrichment)
 - ✅ **Easier to use** - Macros eliminate boilerplate
@@ -710,4 +710,4 @@ Questions or issues with migration?
 - 🐛 Report bugs in GitHub Issues
 - 📧 Contact the maintainers
 
-**Welcome to This-RS v0.0.2!** 🎊
+**Welcome to this-rs v0.0.2!** 🎊

@@ -37,7 +37,7 @@ Fixes #(issue)
 **Environnement de test:**
 - OS: 
 - Rust version: 
-- This-RS version: 
+- this-rs version: 
 
 ## Captures d'écran (si applicable)
 

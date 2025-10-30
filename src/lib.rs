@@ -1,4 +1,4 @@
-//! # This-RS Framework
+//! # this-rs Framework
 //!
 //! A generic entity and relationship management framework for building RESTful APIs in Rust.
 //!

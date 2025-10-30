@@ -1,4 +1,4 @@
-//! Authorization system for This-RS
+//! Authorization system for this-rs
 //!
 //! Provides context-based authorization with multiple auth types:
 //! - User authentication
