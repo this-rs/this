@@ -4,12 +4,14 @@ use crate::core::{LinkService, link::LinkEntity};
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
+use tokio::sync::RwLock;
 use uuid::Uuid;
 
 /// In-memory link service implementation
 ///
-/// Useful for testing and development. Uses RwLock for thread-safe access.
+/// Useful for testing and development. Uses tokio's async RwLock for
+/// non-blocking access in async contexts.
 #[derive(Clone)]
 pub struct InMemoryLinkService {
     links: Arc<RwLock<HashMap<Uuid, LinkEntity>>>,
@@ -33,31 +35,18 @@ impl Default for InMemoryLinkService {
 #[async_trait]
 impl LinkService for InMemoryLinkService {
     async fn create(&self, link: LinkEntity) -> Result<LinkEntity> {
-        let mut links = self
-            .links
-            .write()
-            .map_err(|e| anyhow!("Failed to acquire write lock: {}", e))?;
-
+        let mut links = self.links.write().await;
         links.insert(link.id, link.clone());
-
         Ok(link)
     }
 
     async fn get(&self, id: &Uuid) -> Result<Option<LinkEntity>> {
-        let links = self
-            .links
-            .read()
-            .map_err(|e| anyhow!("Failed to acquire read lock: {}", e))?;
-
+        let links = self.links.read().await;
         Ok(links.get(id).cloned())
     }
 
     async fn list(&self) -> Result<Vec<LinkEntity>> {
-        let links = self
-            .links
-            .read()
-            .map_err(|e| anyhow!("Failed to acquire read lock: {}", e))?;
-
+        let links = self.links.read().await;
         Ok(links.values().cloned().collect())
     }
 
@@ -67,10 +56,7 @@ impl LinkService for InMemoryLinkService {
         link_type: Option<&str>,
         target_type: Option<&str>,
     ) -> Result<Vec<LinkEntity>> {
-        let links = self
-            .links
-            .read()
-            .map_err(|e| anyhow!("Failed to acquire read lock: {}", e))?;
+        let links = self.links.read().await;
 
         Ok(links
             .values()
@@ -89,10 +75,7 @@ impl LinkService for InMemoryLinkService {
         link_type: Option<&str>,
         source_type: Option<&str>,
     ) -> Result<Vec<LinkEntity>> {
-        let links = self
-            .links
-            .read()
-            .map_err(|e| anyhow!("Failed to acquire read lock: {}", e))?;
+        let links = self.links.read().await;
 
         Ok(links
             .values()
@@ -106,37 +89,25 @@ impl LinkService for InMemoryLinkService {
     }
 
     async fn update(&self, id: &Uuid, updated_link: LinkEntity) -> Result<LinkEntity> {
-        let mut links = self
-            .links
-            .write()
-            .map_err(|e| anyhow!("Failed to acquire write lock: {}", e))?;
+        let mut links = self.links.write().await;
 
-        links.get_mut(id).ok_or_else(|| anyhow!("Link not found"))?;
+        if !links.contains_key(id) {
+            return Err(anyhow!("Link not found"));
+        }
 
         links.insert(*id, updated_link.clone());
-
         Ok(updated_link)
     }
 
     async fn delete(&self, id: &Uuid) -> Result<()> {
-        let mut links = self
-            .links
-            .write()
-            .map_err(|e| anyhow!("Failed to acquire write lock: {}", e))?;
-
+        let mut links = self.links.write().await;
         links.remove(id);
-
         Ok(())
     }
 
     async fn delete_by_entity(&self, entity_id: &Uuid) -> Result<()> {
-        let mut links = self
-            .links
-            .write()
-            .map_err(|e| anyhow!("Failed to acquire write lock: {}", e))?;
-
+        let mut links = self.links.write().await;
         links.retain(|_, link| &link.source_id != entity_id && &link.target_id != entity_id);
-
         Ok(())
     }
 }
@@ -322,5 +293,138 @@ mod tests {
         assert_eq!(remaining.len(), 1);
         assert_ne!(remaining[0].source_id, user_id);
         assert_ne!(remaining[0].target_id, user_id);
+    }
+
+    /// Test concurrent access with tokio's async RwLock
+    /// This test verifies that the service handles multiple concurrent operations correctly
+    #[tokio::test]
+    async fn test_concurrent_writes() {
+        use std::sync::Arc;
+
+        let service = Arc::new(InMemoryLinkService::new());
+        let mut handles = vec![];
+
+        // Spawn 100 concurrent write tasks
+        for i in 0..100 {
+            let service_clone = Arc::clone(&service);
+            let handle = tokio::spawn(async move {
+                let link = LinkEntity::new(
+                    &format!("link_type_{}", i),
+                    Uuid::new_v4(),
+                    Uuid::new_v4(),
+                    None,
+                );
+                service_clone.create(link).await.unwrap()
+            });
+            handles.push(handle);
+        }
+
+        // Wait for all tasks to complete
+        for handle in handles {
+            handle.await.unwrap();
+        }
+
+        // Verify all links were created
+        let links = service.list().await.unwrap();
+        assert_eq!(links.len(), 100);
+    }
+
+    /// Test concurrent reads don't block each other
+    #[tokio::test]
+    async fn test_concurrent_reads() {
+        use std::sync::Arc;
+
+        let service = Arc::new(InMemoryLinkService::new());
+
+        // Create some links first
+        for i in 0..10 {
+            let link = LinkEntity::new(
+                &format!("link_type_{}", i),
+                Uuid::new_v4(),
+                Uuid::new_v4(),
+                None,
+            );
+            service.create(link).await.unwrap();
+        }
+
+        let mut handles = vec![];
+
+        // Spawn 50 concurrent read tasks
+        for _ in 0..50 {
+            let service_clone = Arc::clone(&service);
+            let handle = tokio::spawn(async move {
+                let links = service_clone.list().await.unwrap();
+                assert_eq!(links.len(), 10);
+                links.len()
+            });
+            handles.push(handle);
+        }
+
+        // All reads should complete successfully
+        for handle in handles {
+            let count = handle.await.unwrap();
+            assert_eq!(count, 10);
+        }
+    }
+
+    /// Test mixed concurrent reads and writes
+    #[tokio::test]
+    async fn test_concurrent_read_write() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let service = Arc::new(InMemoryLinkService::new());
+        let write_count = Arc::new(AtomicUsize::new(0));
+
+        let mut handles = vec![];
+
+        // Spawn writer tasks
+        for i in 0..20 {
+            let service_clone = Arc::clone(&service);
+            let write_count_clone = Arc::clone(&write_count);
+            let handle = tokio::spawn(async move {
+                let link = LinkEntity::new(
+                    &format!("concurrent_{}", i),
+                    Uuid::new_v4(),
+                    Uuid::new_v4(),
+                    None,
+                );
+                service_clone.create(link).await.unwrap();
+                write_count_clone.fetch_add(1, Ordering::SeqCst);
+            });
+            handles.push(handle);
+        }
+
+        // Spawn reader tasks
+        for _ in 0..30 {
+            let service_clone = Arc::clone(&service);
+            let handle = tokio::spawn(async move {
+                // Just read, the count may vary as writes are happening
+                let _ = service_clone.list().await.unwrap();
+            });
+            handles.push(handle);
+        }
+
+        // Wait for all tasks
+        for handle in handles {
+            handle.await.unwrap();
+        }
+
+        // Verify final state
+        let final_links = service.list().await.unwrap();
+        assert_eq!(final_links.len(), 20);
+        assert_eq!(write_count.load(Ordering::SeqCst), 20);
+    }
+
+    /// Test that update on non-existent link returns error
+    #[tokio::test]
+    async fn test_update_nonexistent_link() {
+        let service = InMemoryLinkService::new();
+        let fake_id = Uuid::new_v4();
+        let link = LinkEntity::new("test", Uuid::new_v4(), Uuid::new_v4(), None);
+
+        let result = service.update(&fake_id, link).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Link not found"));
     }
 }

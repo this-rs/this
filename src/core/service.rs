@@ -101,20 +101,12 @@ mod tests {
     }
 
     impl Entity for TestEntity {
-        type Service = ();
-
         fn resource_name() -> &'static str {
             "tests"
         }
 
         fn resource_name_singular() -> &'static str {
             "test"
-        }
-
-        fn service_from_host(
-            _: &std::sync::Arc<dyn std::any::Any + Send + Sync>,
-        ) -> Result<std::sync::Arc<Self::Service>> {
-            Ok(std::sync::Arc::new(()))
         }
 
         fn id(&self) -> Uuid {

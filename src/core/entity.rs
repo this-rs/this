@@ -1,8 +1,6 @@
 //! Entity traits defining the core abstraction for all data types
 
-use anyhow::Result;
 use chrono::{DateTime, Utc};
-use std::sync::Arc;
 use uuid::Uuid;
 
 /// Base trait for all entities in the system.
@@ -15,19 +13,15 @@ use uuid::Uuid;
 /// - updated_at: Last modification timestamp
 /// - deleted_at: Soft deletion timestamp (optional)
 /// - status: Current status of the entity
+///
+/// Note: Service access is handled separately via EntityFetcher/EntityCreator traits
+/// to maintain single responsibility principle.
 pub trait Entity: Clone + Send + Sync + 'static {
-    /// The service type that handles operations for this entity
-    type Service: Send + Sync;
-
     /// The plural resource name used in URLs (e.g., "users", "companies")
     fn resource_name() -> &'static str;
 
     /// The singular resource name (e.g., "user", "company")
     fn resource_name_singular() -> &'static str;
-
-    /// Extract the service instance from the application host/state
-    fn service_from_host(host: &Arc<dyn std::any::Any + Send + Sync>)
-    -> Result<Arc<Self::Service>>;
 
     // === Core Entity Fields ===
 
@@ -154,20 +148,12 @@ mod tests {
     }
 
     impl Entity for TestEntity {
-        type Service = ();
-
         fn resource_name() -> &'static str {
             "test_entities"
         }
 
         fn resource_name_singular() -> &'static str {
             "test_entity"
-        }
-
-        fn service_from_host(
-            _host: &Arc<dyn std::any::Any + Send + Sync>,
-        ) -> Result<Arc<Self::Service>> {
-            Ok(Arc::new(()))
         }
 
         fn id(&self) -> Uuid {

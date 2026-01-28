@@ -188,27 +188,16 @@ macro_rules! impl_data_entity {
 
         // Implement Entity trait
         impl $crate::core::entity::Entity for $type {
-            type Service = ();
-
             fn resource_name() -> &'static str {
                 use std::sync::OnceLock;
-                static PLURAL: OnceLock<&'static str> = OnceLock::new();
+                static PLURAL: OnceLock<String> = OnceLock::new();
                 PLURAL.get_or_init(|| {
-                    Box::leak(
-                        $crate::core::pluralize::Pluralizer::pluralize($type_name)
-                            .into_boxed_str()
-                    )
-                })
+                    $crate::core::pluralize::Pluralizer::pluralize($type_name)
+                }).as_str()
             }
 
             fn resource_name_singular() -> &'static str {
                 $type_name
-            }
-
-            fn service_from_host(
-                _host: &::std::sync::Arc<dyn ::std::any::Any + Send + Sync>
-            ) -> ::anyhow::Result<::std::sync::Arc<Self::Service>> {
-                unimplemented!("service_from_host must be implemented by user")
             }
 
             fn id(&self) -> ::uuid::Uuid {
@@ -370,27 +359,16 @@ macro_rules! impl_link_entity {
 
         // Implement Entity trait
         impl $crate::core::entity::Entity for $type {
-            type Service = ();
-
             fn resource_name() -> &'static str {
                 use std::sync::OnceLock;
-                static PLURAL: OnceLock<&'static str> = OnceLock::new();
+                static PLURAL: OnceLock<String> = OnceLock::new();
                 PLURAL.get_or_init(|| {
-                    Box::leak(
-                        $crate::core::pluralize::Pluralizer::pluralize($type_name)
-                            .into_boxed_str()
-                    )
-                })
+                    $crate::core::pluralize::Pluralizer::pluralize($type_name)
+                }).as_str()
             }
 
             fn resource_name_singular() -> &'static str {
                 $type_name
-            }
-
-            fn service_from_host(
-                _host: &::std::sync::Arc<dyn ::std::any::Any + Send + Sync>
-            ) -> ::anyhow::Result<::std::sync::Arc<Self::Service>> {
-                unimplemented!("service_from_host must be implemented by user")
             }
 
             fn id(&self) -> ::uuid::Uuid {
