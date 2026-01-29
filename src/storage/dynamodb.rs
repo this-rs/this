@@ -1,7 +1,7 @@
 //! DynamoDB implementation of DataService and LinkService
 
+use crate::core::error::{LinkError, StorageError, ThisError, ThisResult};
 use crate::core::{Data, DataService, LinkService, link::LinkEntity};
-use anyhow::Result;
 use async_trait::async_trait;
 use aws_sdk_dynamodb::Client as DynamoDBClient;
 use aws_sdk_dynamodb::types::AttributeValue;
@@ -44,7 +44,7 @@ impl<T: Data + serde::Serialize + for<'de> serde::Deserialize<'de>> DynamoDBData
     /// let tenant_id = Uuid::parse_str("...")?;
     /// let users = service.list_by_tenant(&tenant_id).await?;
     /// ```
-    pub async fn list_by_tenant(&self, tenant_id: &Uuid) -> Result<Vec<T>>
+    pub async fn list_by_tenant(&self, tenant_id: &Uuid) -> ThisResult<Vec<T>>
     where
         T: Data + Send + Sync + 'static,
     {
@@ -55,7 +55,11 @@ impl<T: Data + serde::Serialize + for<'de> serde::Deserialize<'de>> DynamoDBData
             .key_condition_expression("tenant_id = :tenant_id")
             .expression_attribute_values(":tenant_id", AttributeValue::S(tenant_id.to_string()))
             .send()
-            .await?;
+            .await
+            .map_err(|e| ThisError::Storage(StorageError::QueryError {
+                backend: "DynamoDB".to_string(),
+                message: e.to_string(),
+            }))?;
 
         let mut entities = Vec::new();
         if let Some(items) = result.items {
@@ -79,7 +83,7 @@ impl<T: Data + serde::Serialize + for<'de> serde::Deserialize<'de>> DynamoDBData
     /// let id = Uuid::parse_str("...")?;
     /// let tenant = service.get_with_tenant(&tenant_id, &id).await?;
     /// ```
-    pub async fn get_with_tenant(&self, tenant_id: &Uuid, id: &Uuid) -> Result<Option<T>>
+    pub async fn get_with_tenant(&self, tenant_id: &Uuid, id: &Uuid) -> ThisResult<Option<T>>
     where
         T: Data + Send + Sync + 'static,
     {
@@ -97,7 +101,11 @@ impl<T: Data + serde::Serialize + for<'de> serde::Deserialize<'de>> DynamoDBData
             .table_name(&self.table_name)
             .set_key(Some(key))
             .send()
-            .await?;
+            .await
+            .map_err(|e| ThisError::Storage(StorageError::QueryError {
+                backend: "DynamoDB".to_string(),
+                message: e.to_string(),
+            }))?;
 
         match result.item() {
             Some(item) => Ok(Some(self.item_to_entity(item).await?)),
@@ -120,7 +128,7 @@ impl<T: Data + serde::Serialize + for<'de> serde::Deserialize<'de>> DynamoDBData
     /// let tenant_id = Uuid::parse_str("...")?;
     /// let users = service.list_by_tenant_gsi(&tenant_id, "tenant_id-index").await?;
     /// ```
-    pub async fn list_by_tenant_gsi(&self, tenant_id: &Uuid, index_name: &str) -> Result<Vec<T>>
+    pub async fn list_by_tenant_gsi(&self, tenant_id: &Uuid, index_name: &str) -> ThisResult<Vec<T>>
     where
         T: Data + Send + Sync + 'static,
     {
@@ -132,7 +140,11 @@ impl<T: Data + serde::Serialize + for<'de> serde::Deserialize<'de>> DynamoDBData
             .key_condition_expression("tenant_id = :tenant_id")
             .expression_attribute_values(":tenant_id", AttributeValue::S(tenant_id.to_string()))
             .send()
-            .await?;
+            .await
+            .map_err(|e| ThisError::Storage(StorageError::QueryError {
+                backend: "DynamoDB".to_string(),
+                message: e.to_string(),
+            }))?;
 
         let mut entities = Vec::new();
         if let Some(items) = result.items {
@@ -143,7 +155,7 @@ impl<T: Data + serde::Serialize + for<'de> serde::Deserialize<'de>> DynamoDBData
         Ok(entities)
     }
 
-    async fn entity_to_item(&self, entity: &T) -> Result<HashMap<String, AttributeValue>> {
+    async fn entity_to_item(&self, entity: &T) -> ThisResult<HashMap<String, AttributeValue>> {
         // Convert entity to JSON first, then to DynamoDB format
         let json = serde_json::to_value(entity)?;
         let mut item = HashMap::new();
@@ -191,7 +203,7 @@ impl<T: Data + serde::Serialize + for<'de> serde::Deserialize<'de>> DynamoDBData
         Ok(item)
     }
 
-    async fn item_to_entity(&self, item: &HashMap<String, AttributeValue>) -> Result<T> {
+    async fn item_to_entity(&self, item: &HashMap<String, AttributeValue>) -> ThisResult<T> {
         // Convert from DynamoDB format to JSON
         let mut json = serde_json::Map::new();
 
@@ -242,7 +254,7 @@ impl<T: Data + serde::Serialize + for<'de> serde::Deserialize<'de>> DynamoDBData
 impl<T: Data + serde::Serialize + for<'de> serde::Deserialize<'de>> DataService<T>
     for DynamoDBDataService<T>
 {
-    async fn create(&self, entity: T) -> Result<T> {
+    async fn create(&self, entity: T) -> ThisResult<T> {
         let item = self.entity_to_item(&entity).await?;
 
         self.client
@@ -250,12 +262,16 @@ impl<T: Data + serde::Serialize + for<'de> serde::Deserialize<'de>> DataService<
             .table_name(&self.table_name)
             .set_item(Some(item))
             .send()
-            .await?;
+            .await
+            .map_err(|e| ThisError::Storage(StorageError::QueryError {
+                backend: "DynamoDB".to_string(),
+                message: e.to_string(),
+            }))?;
 
         Ok(entity)
     }
 
-    async fn get(&self, id: &Uuid) -> Result<Option<T>> {
+    async fn get(&self, id: &Uuid) -> ThisResult<Option<T>> {
         let key = HashMap::from([("id".to_string(), AttributeValue::S(id.to_string()))]);
 
         let result = self
@@ -264,7 +280,11 @@ impl<T: Data + serde::Serialize + for<'de> serde::Deserialize<'de>> DataService<
             .table_name(&self.table_name)
             .set_key(Some(key))
             .send()
-            .await?;
+            .await
+            .map_err(|e| ThisError::Storage(StorageError::QueryError {
+                backend: "DynamoDB".to_string(),
+                message: e.to_string(),
+            }))?;
 
         match result.item() {
             Some(item) => Ok(Some(self.item_to_entity(item).await?)),
@@ -272,13 +292,17 @@ impl<T: Data + serde::Serialize + for<'de> serde::Deserialize<'de>> DataService<
         }
     }
 
-    async fn list(&self) -> Result<Vec<T>> {
+    async fn list(&self) -> ThisResult<Vec<T>> {
         let result = self
             .client
             .scan()
             .table_name(&self.table_name)
             .send()
-            .await?;
+            .await
+            .map_err(|e| ThisError::Storage(StorageError::QueryError {
+                backend: "DynamoDB".to_string(),
+                message: e.to_string(),
+            }))?;
 
         let mut entities = Vec::new();
         if let Some(items) = result.items {
@@ -289,7 +313,7 @@ impl<T: Data + serde::Serialize + for<'de> serde::Deserialize<'de>> DataService<
         Ok(entities)
     }
 
-    async fn update(&self, _id: &Uuid, entity: T) -> Result<T> {
+    async fn update(&self, _id: &Uuid, entity: T) -> ThisResult<T> {
         let item = self.entity_to_item(&entity).await?;
 
         self.client
@@ -297,12 +321,16 @@ impl<T: Data + serde::Serialize + for<'de> serde::Deserialize<'de>> DataService<
             .table_name(&self.table_name)
             .set_item(Some(item))
             .send()
-            .await?;
+            .await
+            .map_err(|e| ThisError::Storage(StorageError::QueryError {
+                backend: "DynamoDB".to_string(),
+                message: e.to_string(),
+            }))?;
 
         Ok(entity)
     }
 
-    async fn delete(&self, id: &Uuid) -> Result<()> {
+    async fn delete(&self, id: &Uuid) -> ThisResult<()> {
         let key = HashMap::from([("id".to_string(), AttributeValue::S(id.to_string()))]);
 
         self.client
@@ -310,12 +338,16 @@ impl<T: Data + serde::Serialize + for<'de> serde::Deserialize<'de>> DataService<
             .table_name(&self.table_name)
             .set_key(Some(key))
             .send()
-            .await?;
+            .await
+            .map_err(|e| ThisError::Storage(StorageError::QueryError {
+                backend: "DynamoDB".to_string(),
+                message: e.to_string(),
+            }))?;
 
         Ok(())
     }
 
-    async fn search(&self, field: &str, value: &str) -> Result<Vec<T>> {
+    async fn search(&self, field: &str, value: &str) -> ThisResult<Vec<T>> {
         // Use scan with filter for general search
         let result = self
             .client
@@ -324,7 +356,11 @@ impl<T: Data + serde::Serialize + for<'de> serde::Deserialize<'de>> DataService<
             .filter_expression(format!("{} = :value", field))
             .expression_attribute_values(":value", AttributeValue::S(value.to_string()))
             .send()
-            .await?;
+            .await
+            .map_err(|e| ThisError::Storage(StorageError::QueryError {
+                backend: "DynamoDB".to_string(),
+                message: e.to_string(),
+            }))?;
 
         let mut entities = Vec::new();
         if let Some(items) = result.items {
@@ -365,7 +401,7 @@ impl DynamoDBLinkService {
     /// let tenant_id = Uuid::parse_str("...")?;
     /// let links = service.list_links_by_tenant(&tenant_id).await?;
     /// ```
-    pub async fn list_links_by_tenant(&self, tenant_id: &Uuid) -> Result<Vec<LinkEntity>> {
+    pub async fn list_links_by_tenant(&self, tenant_id: &Uuid) -> ThisResult<Vec<LinkEntity>> {
         let result = self
             .client
             .query()
@@ -373,7 +409,11 @@ impl DynamoDBLinkService {
             .key_condition_expression("tenant_id = :tenant_id")
             .expression_attribute_values(":tenant_id", AttributeValue::S(tenant_id.to_string()))
             .send()
-            .await?;
+            .await
+            .map_err(|e| ThisError::Storage(StorageError::QueryError {
+                backend: "DynamoDB".to_string(),
+                message: e.to_string(),
+            }))?;
 
         let mut links = Vec::new();
         if let Some(items) = result.items {
@@ -393,7 +433,7 @@ impl DynamoDBLinkService {
         &self,
         tenant_id: &Uuid,
         index_name: &str,
-    ) -> Result<Vec<LinkEntity>> {
+    ) -> ThisResult<Vec<LinkEntity>> {
         let result = self
             .client
             .query()
@@ -402,7 +442,11 @@ impl DynamoDBLinkService {
             .key_condition_expression("tenant_id = :tenant_id")
             .expression_attribute_values(":tenant_id", AttributeValue::S(tenant_id.to_string()))
             .send()
-            .await?;
+            .await
+            .map_err(|e| ThisError::Storage(StorageError::QueryError {
+                backend: "DynamoDB".to_string(),
+                message: e.to_string(),
+            }))?;
 
         let mut links = Vec::new();
         if let Some(items) = result.items {
@@ -423,7 +467,7 @@ impl DynamoDBLinkService {
         tenant_id: &Uuid,
         source_id: &Uuid,
         link_type: Option<&str>,
-    ) -> Result<Vec<LinkEntity>> {
+    ) -> ThisResult<Vec<LinkEntity>> {
         // Build the filter expression for link_type if provided
         let mut query = self
             .client
@@ -445,7 +489,11 @@ impl DynamoDBLinkService {
         }
 
         let filter_expression = filter_parts.join(" AND ");
-        let result = query.filter_expression(filter_expression).send().await?;
+        let result = query.filter_expression(filter_expression).send().await
+            .map_err(|e| ThisError::Storage(StorageError::QueryError {
+                backend: "DynamoDB".to_string(),
+                message: e.to_string(),
+            }))?;
 
         let mut links = Vec::new();
         if let Some(items) = result.items {
@@ -456,7 +504,7 @@ impl DynamoDBLinkService {
         Ok(links)
     }
 
-    async fn link_to_item(&self, link: &LinkEntity) -> Result<HashMap<String, AttributeValue>> {
+    async fn link_to_item(&self, link: &LinkEntity) -> ThisResult<HashMap<String, AttributeValue>> {
         // Convert link to JSON first, then to DynamoDB format
         let json = serde_json::to_value(link)?;
         let mut item = HashMap::new();
@@ -488,7 +536,7 @@ impl DynamoDBLinkService {
         Ok(item)
     }
 
-    async fn item_to_link(&self, item: &HashMap<String, AttributeValue>) -> Result<LinkEntity> {
+    async fn item_to_link(&self, item: &HashMap<String, AttributeValue>) -> ThisResult<LinkEntity> {
         // Convert from DynamoDB format to JSON
         let mut json = serde_json::Map::new();
 
@@ -529,7 +577,7 @@ impl DynamoDBLinkService {
 
 #[async_trait]
 impl LinkService for DynamoDBLinkService {
-    async fn create(&self, link: LinkEntity) -> Result<LinkEntity> {
+    async fn create(&self, link: LinkEntity) -> ThisResult<LinkEntity> {
         let item = self.link_to_item(&link).await?;
 
         self.client
@@ -537,12 +585,16 @@ impl LinkService for DynamoDBLinkService {
             .table_name(&self.table_name)
             .set_item(Some(item))
             .send()
-            .await?;
+            .await
+            .map_err(|e| ThisError::Storage(StorageError::QueryError {
+                backend: "DynamoDB".to_string(),
+                message: e.to_string(),
+            }))?;
 
         Ok(link)
     }
 
-    async fn get(&self, id: &Uuid) -> Result<Option<LinkEntity>> {
+    async fn get(&self, id: &Uuid) -> ThisResult<Option<LinkEntity>> {
         let key = HashMap::from([("id".to_string(), AttributeValue::S(id.to_string()))]);
 
         let result = self
@@ -551,7 +603,11 @@ impl LinkService for DynamoDBLinkService {
             .table_name(&self.table_name)
             .set_key(Some(key))
             .send()
-            .await?;
+            .await
+            .map_err(|e| ThisError::Storage(StorageError::QueryError {
+                backend: "DynamoDB".to_string(),
+                message: e.to_string(),
+            }))?;
 
         match result.item() {
             Some(item) => Ok(Some(self.item_to_link(item).await?)),
@@ -559,13 +615,17 @@ impl LinkService for DynamoDBLinkService {
         }
     }
 
-    async fn list(&self) -> Result<Vec<LinkEntity>> {
+    async fn list(&self) -> ThisResult<Vec<LinkEntity>> {
         let result = self
             .client
             .scan()
             .table_name(&self.table_name)
             .send()
-            .await?;
+            .await
+            .map_err(|e| ThisError::Storage(StorageError::QueryError {
+                backend: "DynamoDB".to_string(),
+                message: e.to_string(),
+            }))?;
 
         let mut links = Vec::new();
         if let Some(items) = result.items {
@@ -581,7 +641,7 @@ impl LinkService for DynamoDBLinkService {
         source_id: &Uuid,
         link_type: Option<&str>,
         _target_type: Option<&str>,
-    ) -> Result<Vec<LinkEntity>> {
+    ) -> ThisResult<Vec<LinkEntity>> {
         // Use scan with filter
         let mut filter_expr = "source_id = :source_id".to_string();
         let mut attr_values = HashMap::new();
@@ -605,7 +665,11 @@ impl LinkService for DynamoDBLinkService {
             scan = scan.expression_attribute_values(key, value);
         }
 
-        let result = scan.send().await?;
+        let result = scan.send().await
+            .map_err(|e| ThisError::Storage(StorageError::QueryError {
+                backend: "DynamoDB".to_string(),
+                message: e.to_string(),
+            }))?;
 
         let mut links = Vec::new();
         if let Some(items) = result.items {
@@ -621,7 +685,7 @@ impl LinkService for DynamoDBLinkService {
         target_id: &Uuid,
         link_type: Option<&str>,
         _source_type: Option<&str>,
-    ) -> Result<Vec<LinkEntity>> {
+    ) -> ThisResult<Vec<LinkEntity>> {
         // Use scan with filter
         let mut filter_expr = "target_id = :target_id".to_string();
         let mut attr_values = HashMap::new();
@@ -645,7 +709,11 @@ impl LinkService for DynamoDBLinkService {
             scan = scan.expression_attribute_values(key, value);
         }
 
-        let result = scan.send().await?;
+        let result = scan.send().await
+            .map_err(|e| ThisError::Storage(StorageError::QueryError {
+                backend: "DynamoDB".to_string(),
+                message: e.to_string(),
+            }))?;
 
         let mut links = Vec::new();
         if let Some(items) = result.items {
@@ -656,11 +724,11 @@ impl LinkService for DynamoDBLinkService {
         Ok(links)
     }
 
-    async fn update(&self, id: &Uuid, updated_link: LinkEntity) -> Result<LinkEntity> {
+    async fn update(&self, id: &Uuid, updated_link: LinkEntity) -> ThisResult<LinkEntity> {
         // Verify the link exists first
         self.get(id)
             .await?
-            .ok_or_else(|| anyhow::anyhow!("Link not found"))?;
+            .ok_or_else(|| ThisError::Link(LinkError::NotFoundById { id: *id }))?;
 
         // Save the updated link
         let item = self.link_to_item(&updated_link).await?;
@@ -669,12 +737,16 @@ impl LinkService for DynamoDBLinkService {
             .table_name(&self.table_name)
             .set_item(Some(item))
             .send()
-            .await?;
+            .await
+            .map_err(|e| ThisError::Storage(StorageError::QueryError {
+                backend: "DynamoDB".to_string(),
+                message: e.to_string(),
+            }))?;
 
         Ok(updated_link)
     }
 
-    async fn delete(&self, id: &Uuid) -> Result<()> {
+    async fn delete(&self, id: &Uuid) -> ThisResult<()> {
         let key = HashMap::from([("id".to_string(), AttributeValue::S(id.to_string()))]);
 
         self.client
@@ -682,12 +754,16 @@ impl LinkService for DynamoDBLinkService {
             .table_name(&self.table_name)
             .set_key(Some(key))
             .send()
-            .await?;
+            .await
+            .map_err(|e| ThisError::Storage(StorageError::QueryError {
+                backend: "DynamoDB".to_string(),
+                message: e.to_string(),
+            }))?;
 
         Ok(())
     }
 
-    async fn delete_by_entity(&self, entity_id: &Uuid) -> Result<()> {
+    async fn delete_by_entity(&self, entity_id: &Uuid) -> ThisResult<()> {
         // Find all links involving this entity (as source or target)
         let source_links = self.find_by_source(entity_id, None, None).await?;
         let target_links = self.find_by_target(entity_id, None, None).await?;

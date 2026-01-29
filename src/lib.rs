@@ -64,6 +64,10 @@ pub mod prelude {
     pub use crate::core::{
         auth::{AuthContext, AuthPolicy, AuthProvider, NoAuthProvider},
         entity::{Data, Entity, Link},
+        error::{
+            ConfigError, EntityError, FieldValidationError, GraphQLError, LinkError, RequestError,
+            StorageError, ThisError, ThisResult, ValidationError,
+        },
         field::{FieldFormat, FieldValue},
         link::{LinkAuthConfig, LinkDefinition, LinkEntity},
         module::{EntityCreator, EntityFetcher, Module},

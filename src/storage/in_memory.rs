@@ -1,7 +1,7 @@
 //! In-memory implementation of LinkService for testing and development
 
+use crate::core::error::{LinkError, ThisError, ThisResult};
 use crate::core::{LinkService, link::LinkEntity};
-use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -34,18 +34,18 @@ impl Default for InMemoryLinkService {
 
 #[async_trait]
 impl LinkService for InMemoryLinkService {
-    async fn create(&self, link: LinkEntity) -> Result<LinkEntity> {
+    async fn create(&self, link: LinkEntity) -> ThisResult<LinkEntity> {
         let mut links = self.links.write().await;
         links.insert(link.id, link.clone());
         Ok(link)
     }
 
-    async fn get(&self, id: &Uuid) -> Result<Option<LinkEntity>> {
+    async fn get(&self, id: &Uuid) -> ThisResult<Option<LinkEntity>> {
         let links = self.links.read().await;
         Ok(links.get(id).cloned())
     }
 
-    async fn list(&self) -> Result<Vec<LinkEntity>> {
+    async fn list(&self) -> ThisResult<Vec<LinkEntity>> {
         let links = self.links.read().await;
         Ok(links.values().cloned().collect())
     }
@@ -55,7 +55,7 @@ impl LinkService for InMemoryLinkService {
         source_id: &Uuid,
         link_type: Option<&str>,
         target_type: Option<&str>,
-    ) -> Result<Vec<LinkEntity>> {
+    ) -> ThisResult<Vec<LinkEntity>> {
         let links = self.links.read().await;
 
         Ok(links
@@ -74,7 +74,7 @@ impl LinkService for InMemoryLinkService {
         target_id: &Uuid,
         link_type: Option<&str>,
         source_type: Option<&str>,
-    ) -> Result<Vec<LinkEntity>> {
+    ) -> ThisResult<Vec<LinkEntity>> {
         let links = self.links.read().await;
 
         Ok(links
@@ -88,24 +88,24 @@ impl LinkService for InMemoryLinkService {
             .collect())
     }
 
-    async fn update(&self, id: &Uuid, updated_link: LinkEntity) -> Result<LinkEntity> {
+    async fn update(&self, id: &Uuid, updated_link: LinkEntity) -> ThisResult<LinkEntity> {
         let mut links = self.links.write().await;
 
         if !links.contains_key(id) {
-            return Err(anyhow!("Link not found"));
+            return Err(ThisError::Link(LinkError::NotFoundById { id: *id }));
         }
 
         links.insert(*id, updated_link.clone());
         Ok(updated_link)
     }
 
-    async fn delete(&self, id: &Uuid) -> Result<()> {
+    async fn delete(&self, id: &Uuid) -> ThisResult<()> {
         let mut links = self.links.write().await;
         links.remove(id);
         Ok(())
     }
 
-    async fn delete_by_entity(&self, entity_id: &Uuid) -> Result<()> {
+    async fn delete_by_entity(&self, entity_id: &Uuid) -> ThisResult<()> {
         let mut links = self.links.write().await;
         links.retain(|_, link| &link.source_id != entity_id && &link.target_id != entity_id);
         Ok(())
@@ -419,12 +419,21 @@ mod tests {
     /// Test that update on non-existent link returns error
     #[tokio::test]
     async fn test_update_nonexistent_link() {
+        use crate::core::error::{LinkError, ThisError};
+
         let service = InMemoryLinkService::new();
         let fake_id = Uuid::new_v4();
         let link = LinkEntity::new("test", Uuid::new_v4(), Uuid::new_v4(), None);
 
         let result = service.update(&fake_id, link).await;
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Link not found"));
+
+        // Verify it's the correct typed error
+        match result.unwrap_err() {
+            ThisError::Link(LinkError::NotFoundById { id }) => {
+                assert_eq!(id, fake_id);
+            }
+            other => panic!("Expected LinkError::NotFoundById, got {:?}", other),
+        }
     }
 }

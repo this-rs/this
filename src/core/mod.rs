@@ -2,6 +2,7 @@
 
 pub mod auth;
 pub mod entity;
+pub mod error;
 pub mod extractors;
 pub mod field;
 pub mod link;
@@ -14,6 +15,10 @@ pub mod validation;
 
 pub use auth::{AuthContext, AuthPolicy, AuthProvider, NoAuthProvider};
 pub use entity::{Data, Entity, Link};
+pub use error::{
+    ConfigError, EntityError, FieldValidationError, GraphQLError, LinkError, RequestError,
+    StorageError, ThisError, ThisResult, ValidationError,
+};
 pub use field::{FieldFormat, FieldValue};
 pub use link::{LinkAuthConfig, LinkDefinition};
 pub use module::{EntityCreator, EntityFetcher, Module};

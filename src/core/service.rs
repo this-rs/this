@@ -1,7 +1,7 @@
 //! Service traits for data and link operations
 
-use crate::core::{Data, link::LinkEntity};
-use anyhow::Result;
+use crate::core::error::{LinkError, ThisError, ThisResult};
+use crate::core::{link::LinkEntity, Data};
 use async_trait::async_trait;
 use uuid::Uuid;
 
@@ -12,38 +12,71 @@ use uuid::Uuid;
 #[async_trait]
 pub trait DataService<T: Data>: Send + Sync {
     /// Create a new entity
-    async fn create(&self, entity: T) -> Result<T>;
+    async fn create(&self, entity: T) -> ThisResult<T>;
 
     /// Get an entity by ID
-    async fn get(&self, id: &Uuid) -> Result<Option<T>>;
+    async fn get(&self, id: &Uuid) -> ThisResult<Option<T>>;
 
     /// List all entities
-    async fn list(&self) -> Result<Vec<T>>;
+    async fn list(&self) -> ThisResult<Vec<T>>;
 
     /// Update an existing entity
-    async fn update(&self, id: &Uuid, entity: T) -> Result<T>;
+    async fn update(&self, id: &Uuid, entity: T) -> ThisResult<T>;
 
     /// Delete an entity
-    async fn delete(&self, id: &Uuid) -> Result<()>;
+    async fn delete(&self, id: &Uuid) -> ThisResult<()>;
 
     /// Search entities by field values
-    async fn search(&self, field: &str, value: &str) -> Result<Vec<T>>;
+    async fn search(&self, field: &str, value: &str) -> ThisResult<Vec<T>>;
 }
 
 /// Service trait for managing links between entities
 ///
 /// This service is completely agnostic to entity types - it only manages
 /// relationships using UUIDs and string identifiers.
+///
+/// # Error Handling
+///
+/// All methods return `ThisResult<T>` which provides typed errors:
+/// - `LinkError::NotFoundById` when a link ID doesn't exist
+/// - `LinkError::NotFound` when a specific link relationship doesn't exist
+/// - `StorageError::*` for underlying storage issues
+///
+/// # Example
+///
+/// ```rust,ignore
+/// use this::prelude::*;
+///
+/// async fn example(service: &impl LinkService) -> ThisResult<()> {
+///     let link = LinkEntity::new("owner", user_id, car_id, None);
+///
+///     match service.create(link).await {
+///         Ok(created) => println!("Created link: {}", created.id),
+///         Err(ThisError::Link(LinkError::AlreadyExists { .. })) => {
+///             println!("Link already exists");
+///         }
+///         Err(e) => return Err(e),
+///     }
+///     Ok(())
+/// }
+/// ```
 #[async_trait]
 pub trait LinkService: Send + Sync {
     /// Create a new link between two entities
-    async fn create(&self, link: LinkEntity) -> Result<LinkEntity>;
+    ///
+    /// # Errors
+    ///
+    /// - `LinkError::AlreadyExists` if a link with the same source, target, and type exists
+    /// - `StorageError::*` for storage failures
+    async fn create(&self, link: LinkEntity) -> ThisResult<LinkEntity>;
 
     /// Get a specific link by ID
-    async fn get(&self, id: &Uuid) -> Result<Option<LinkEntity>>;
+    ///
+    /// Returns `Ok(None)` if the link doesn't exist.
+    async fn get(&self, id: &Uuid) -> ThisResult<Option<LinkEntity>>;
 
     /// List all links
-    async fn list(&self) -> Result<Vec<LinkEntity>>;
+    async fn list(&self) -> ThisResult<Vec<LinkEntity>>;
 
     /// Find links by source entity
     ///
@@ -53,7 +86,7 @@ pub trait LinkService: Send + Sync {
         source_id: &Uuid,
         link_type: Option<&str>,
         target_type: Option<&str>,
-    ) -> Result<Vec<LinkEntity>>;
+    ) -> ThisResult<Vec<LinkEntity>>;
 
     /// Find links by target entity
     ///
@@ -63,22 +96,36 @@ pub trait LinkService: Send + Sync {
         target_id: &Uuid,
         link_type: Option<&str>,
         source_type: Option<&str>,
-    ) -> Result<Vec<LinkEntity>>;
+    ) -> ThisResult<Vec<LinkEntity>>;
 
     /// Update a link's metadata
     ///
-    /// This allows updating the metadata associated with a link without
-    /// recreating it. Useful for adding/modifying contextual information
-    /// like status, dates, permissions, etc.
-    async fn update(&self, id: &Uuid, link: LinkEntity) -> Result<LinkEntity>;
+    /// # Errors
+    ///
+    /// - `LinkError::NotFoundById` if the link doesn't exist
+    /// - `StorageError::*` for storage failures
+    async fn update(&self, id: &Uuid, link: LinkEntity) -> ThisResult<LinkEntity>;
 
     /// Delete a link
-    async fn delete(&self, id: &Uuid) -> Result<()>;
+    ///
+    /// This operation is idempotent - deleting a non-existent link succeeds.
+    async fn delete(&self, id: &Uuid) -> ThisResult<()>;
 
     /// Delete all links involving a specific entity
     ///
-    /// Used when deleting an entity to maintain referential integrity
-    async fn delete_by_entity(&self, entity_id: &Uuid) -> Result<()>;
+    /// Used when deleting an entity to maintain referential integrity.
+    /// This operation is idempotent.
+    async fn delete_by_entity(&self, entity_id: &Uuid) -> ThisResult<()>;
+
+    /// Get a link by ID, returning an error if not found
+    ///
+    /// This is a convenience method that wraps `get()` and returns
+    /// `LinkError::NotFoundById` instead of `None`.
+    async fn get_or_error(&self, id: &Uuid) -> ThisResult<LinkEntity> {
+        self.get(id).await?.ok_or_else(|| {
+            ThisError::Link(LinkError::NotFoundById { id: *id })
+        })
+    }
 }
 
 #[cfg(test)]
@@ -150,7 +197,7 @@ mod tests {
 
     // The traits compile and can be used in generic contexts
     #[allow(dead_code)]
-    async fn generic_create<T, S>(service: &S, entity: T) -> Result<T>
+    async fn generic_create<T, S>(service: &S, entity: T) -> ThisResult<T>
     where
         T: Data,
         S: DataService<T>,

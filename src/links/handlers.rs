@@ -165,7 +165,7 @@ pub async fn list_links(
         &state.config,
     )?;
 
-    // Query links based on direction
+    // Query links based on direction - now uses typed errors via From<ThisError>
     let links = match extractor.direction {
         LinkDirection::Forward => state
             .link_service
@@ -174,8 +174,7 @@ pub async fn list_links(
                 Some(&extractor.link_definition.link_type),
                 Some(&extractor.link_definition.target_type),
             )
-            .await
-            .map_err(|e| ExtractorError::JsonError(e.to_string()))?,
+            .await?,
         LinkDirection::Reverse => state
             .link_service
             .find_by_target(
@@ -183,8 +182,7 @@ pub async fn list_links(
                 Some(&extractor.link_definition.link_type),
                 Some(&extractor.link_definition.source_type),
             )
-            .await
-            .map_err(|e| ExtractorError::JsonError(e.to_string()))?,
+            .await?,
     };
 
     // Determine enrichment context based on direction
@@ -359,12 +357,11 @@ pub async fn get_link(
     State(state): State<AppState>,
     Path(link_id): Path<Uuid>,
 ) -> Result<Response, ExtractorError> {
+    // Use get_or_error for automatic typed error on not found
     let link = state
         .link_service
-        .get(&link_id)
-        .await
-        .map_err(|e| ExtractorError::JsonError(e.to_string()))?
-        .ok_or(ExtractorError::LinkNotFound)?;
+        .get_or_error(&link_id)
+        .await?;
 
     // Find the link definition from config
     let link_definition = state
@@ -426,7 +423,7 @@ pub async fn get_link_by_route(
                     Some(&extractor.target_type),
                 )
                 .await
-                .map_err(|e| ExtractorError::JsonError(e.to_string()))?
+                ?
         }
         LinkDirection::Reverse => {
             // Reverse: search by target_id in URL (which is the actual source in DB)
@@ -438,7 +435,7 @@ pub async fn get_link_by_route(
                     Some(&extractor.source_type),
                 )
                 .await
-                .map_err(|e| ExtractorError::JsonError(e.to_string()))?
+                ?
         }
     };
 
@@ -499,7 +496,7 @@ pub async fn create_link(
         .link_service
         .create(link)
         .await
-        .map_err(|e| ExtractorError::JsonError(e.to_string()))?;
+        ?;
 
     Ok((StatusCode::CREATED, Json(created_link)).into_response())
 }
@@ -581,7 +578,7 @@ pub async fn create_linked_entity(
         .link_service
         .create(link)
         .await
-        .map_err(|e| ExtractorError::JsonError(e.to_string()))?;
+        ?;
 
     // Return both the created entity and the link
     let response = serde_json::json!({
@@ -620,7 +617,7 @@ pub async fn update_link(
             Some(&extractor.target_type),
         )
         .await
-        .map_err(|e| ExtractorError::JsonError(e.to_string()))?;
+        ?;
 
     let mut existing_link = existing_links
         .into_iter()
@@ -637,7 +634,7 @@ pub async fn update_link(
         .link_service
         .update(&link_id, existing_link)
         .await
-        .map_err(|e| ExtractorError::JsonError(e.to_string()))?;
+        ?;
 
     Ok(Json(updated_link).into_response())
 }
@@ -669,7 +666,7 @@ pub async fn delete_link(
             Some(&extractor.target_type),
         )
         .await
-        .map_err(|e| ExtractorError::JsonError(e.to_string()))?;
+        ?;
 
     let existing_link = existing_links
         .into_iter()
@@ -681,7 +678,7 @@ pub async fn delete_link(
         .link_service
         .delete(&existing_link.id)
         .await
-        .map_err(|e| ExtractorError::JsonError(e.to_string()))?;
+        ?;
 
     Ok(StatusCode::NO_CONTENT.into_response())
 }
@@ -801,7 +798,7 @@ pub async fn handle_nested_path_get(
                                 Some(&link_def.target_type),
                             )
                             .await
-                            .map_err(|e| ExtractorError::JsonError(e.to_string()))?;
+                            ?;
                         links.iter().any(|l| l.target_id == next.entity_id)
                     }
                     Some(LinkDirection::Reverse) => {
@@ -810,7 +807,7 @@ pub async fn handle_nested_path_get(
                             .link_service
                             .find_by_target(&current.entity_id, None, Some(&link_def.link_type))
                             .await
-                            .map_err(|e| ExtractorError::JsonError(e.to_string()))?;
+                            ?;
                         links.iter().any(|l| l.source_id == next.entity_id)
                     }
                     None => {
@@ -836,7 +833,7 @@ pub async fn handle_nested_path_get(
                                 Some(&next_link_def.target_type),
                             )
                             .await
-                            .map_err(|e| ExtractorError::JsonError(e.to_string()))?;
+                            ?;
                         links.iter().any(|l| l.target_id == next.entity_id)
                     }
                     Some(LinkDirection::Reverse) => {
@@ -849,7 +846,7 @@ pub async fn handle_nested_path_get(
                                 Some(&next_link_def.link_type),
                             )
                             .await
-                            .map_err(|e| ExtractorError::JsonError(e.to_string()))?;
+                            ?;
                         links.iter().any(|l| l.source_id == next.entity_id)
                     }
                     None => {
@@ -885,7 +882,7 @@ pub async fn handle_nested_path_get(
                             Some(&link_def.target_type),
                         )
                         .await
-                        .map_err(|e| ExtractorError::JsonError(e.to_string()))?;
+                        ?;
                     (links, EnrichmentContext::FromSource)
                 }
                 Some(LinkDirection::Reverse) => {
@@ -894,7 +891,7 @@ pub async fn handle_nested_path_get(
                         .link_service
                         .find_by_target(&entity_id, None, Some(&link_def.link_type))
                         .await
-                        .map_err(|e| ExtractorError::JsonError(e.to_string()))?;
+                        ?;
                     (links, EnrichmentContext::FromTarget)
                 }
                 None => {
@@ -960,7 +957,7 @@ pub async fn handle_nested_path_get(
                                 Some(&link_def.target_type),
                             )
                             .await
-                            .map_err(|e| ExtractorError::JsonError(e.to_string()))?;
+                            ?;
                         links.iter().any(|l| l.target_id == next.entity_id)
                     }
                     Some(LinkDirection::Reverse) => {
@@ -968,7 +965,7 @@ pub async fn handle_nested_path_get(
                             .link_service
                             .find_by_target(&current.entity_id, None, Some(&link_def.link_type))
                             .await
-                            .map_err(|e| ExtractorError::JsonError(e.to_string()))?;
+                            ?;
                         links.iter().any(|l| l.source_id == next.entity_id)
                     }
                     None => {
@@ -992,7 +989,7 @@ pub async fn handle_nested_path_get(
                                 Some(&next_link_def.target_type),
                             )
                             .await
-                            .map_err(|e| ExtractorError::JsonError(e.to_string()))?;
+                            ?;
                         links.iter().any(|l| l.target_id == next.entity_id)
                     }
                     Some(LinkDirection::Reverse) => {
@@ -1004,7 +1001,7 @@ pub async fn handle_nested_path_get(
                                 Some(&next_link_def.link_type),
                             )
                             .await
-                            .map_err(|e| ExtractorError::JsonError(e.to_string()))?;
+                            ?;
                         links.iter().any(|l| l.source_id == next.entity_id)
                     }
                     None => {
@@ -1035,7 +1032,7 @@ pub async fn handle_nested_path_get(
                             Some(&link_def.target_type),
                         )
                         .await
-                        .map_err(|e| ExtractorError::JsonError(e.to_string()))?;
+                        ?;
 
                     links
                         .into_iter()
@@ -1048,7 +1045,7 @@ pub async fn handle_nested_path_get(
                         .link_service
                         .find_by_target(&penultimate.entity_id, None, Some(&link_def.link_type))
                         .await
-                        .map_err(|e| ExtractorError::JsonError(e.to_string()))?;
+                        ?;
 
                     links
                         .into_iter()
@@ -1146,7 +1143,7 @@ pub async fn handle_nested_path_post(
         .link_service
         .create(link)
         .await
-        .map_err(|e| ExtractorError::JsonError(e.to_string()))?;
+        ?;
 
     let response = serde_json::json!({
         "entity": created_entity,

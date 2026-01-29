@@ -10,6 +10,7 @@ use axum::response::{IntoResponse, Response};
 use uuid::Uuid;
 
 use crate::config::LinksConfig;
+use crate::core::error::{ErrorResponse, LinkError, RequestError, ThisError};
 use crate::core::LinkDefinition;
 use crate::links::registry::{LinkDirection, LinkRouteRegistry};
 
@@ -21,6 +22,34 @@ pub enum ExtractorError {
     RouteNotFound(String),
     LinkNotFound,
     JsonError(String),
+    /// Wrapper for typed errors
+    Typed(String, StatusCode, String),
+}
+
+impl ExtractorError {
+    /// Get the error code for this error
+    pub fn error_code(&self) -> &str {
+        match self {
+            ExtractorError::InvalidPath => "INVALID_PATH",
+            ExtractorError::InvalidEntityId => "INVALID_ENTITY_ID",
+            ExtractorError::RouteNotFound(_) => "ROUTE_NOT_FOUND",
+            ExtractorError::LinkNotFound => "LINK_NOT_FOUND",
+            ExtractorError::JsonError(_) => "JSON_ERROR",
+            ExtractorError::Typed(code, _, _) => code,
+        }
+    }
+
+    /// Get the HTTP status code for this error
+    pub fn status_code(&self) -> StatusCode {
+        match self {
+            ExtractorError::InvalidPath => StatusCode::BAD_REQUEST,
+            ExtractorError::InvalidEntityId => StatusCode::BAD_REQUEST,
+            ExtractorError::RouteNotFound(_) => StatusCode::NOT_FOUND,
+            ExtractorError::LinkNotFound => StatusCode::NOT_FOUND,
+            ExtractorError::JsonError(_) => StatusCode::BAD_REQUEST,
+            ExtractorError::Typed(_, status, _) => *status,
+        }
+    }
 }
 
 impl std::fmt::Display for ExtractorError {
@@ -31,6 +60,7 @@ impl std::fmt::Display for ExtractorError {
             ExtractorError::RouteNotFound(route) => write!(f, "Route not found: {}", route),
             ExtractorError::LinkNotFound => write!(f, "Link not found"),
             ExtractorError::JsonError(msg) => write!(f, "JSON error: {}", msg),
+            ExtractorError::Typed(_, _, msg) => write!(f, "{}", msg),
         }
     }
 }
@@ -39,15 +69,56 @@ impl std::error::Error for ExtractorError {}
 
 impl IntoResponse for ExtractorError {
     fn into_response(self) -> Response {
-        let (status, message) = match self {
-            ExtractorError::InvalidPath => (StatusCode::BAD_REQUEST, self.to_string()),
-            ExtractorError::InvalidEntityId => (StatusCode::BAD_REQUEST, self.to_string()),
-            ExtractorError::RouteNotFound(_) => (StatusCode::NOT_FOUND, self.to_string()),
-            ExtractorError::LinkNotFound => (StatusCode::NOT_FOUND, self.to_string()),
-            ExtractorError::JsonError(_) => (StatusCode::BAD_REQUEST, self.to_string()),
+        let status = self.status_code();
+        let response = ErrorResponse {
+            code: self.error_code().to_string(),
+            message: self.to_string(),
+            details: None,
         };
 
-        (status, Json(serde_json::json!({ "error": message }))).into_response()
+        (status, Json(response)).into_response()
+    }
+}
+
+/// Convert from ThisError to ExtractorError
+impl From<ThisError> for ExtractorError {
+    fn from(err: ThisError) -> Self {
+        let status = err.status_code();
+        let code = err.error_code().to_string();
+        let message = err.to_string();
+        ExtractorError::Typed(code, status, message)
+    }
+}
+
+/// Convert from LinkError to ExtractorError
+impl From<LinkError> for ExtractorError {
+    fn from(err: LinkError) -> Self {
+        match err {
+            LinkError::NotFoundById { .. } | LinkError::NotFound { .. } => {
+                ExtractorError::LinkNotFound
+            }
+            LinkError::RouteNotFound { route_name, .. } => ExtractorError::RouteNotFound(route_name),
+            _ => ExtractorError::Typed(
+                err.error_code().to_string(),
+                err.status_code(),
+                err.to_string(),
+            ),
+        }
+    }
+}
+
+/// Convert from RequestError to ExtractorError
+impl From<RequestError> for ExtractorError {
+    fn from(err: RequestError) -> Self {
+        match err {
+            RequestError::InvalidPath { .. } => ExtractorError::InvalidPath,
+            RequestError::InvalidEntityId { .. } => ExtractorError::InvalidEntityId,
+            _ => ExtractorError::Typed(
+                err.error_code().to_string(),
+                err.status_code(),
+                err.to_string(),
+            ),
+        }
     }
 }
 
