@@ -1,8 +1,8 @@
-# Alternatives to This-RS
+# Alternatives to this-rs
 
-> **Honest comparison**: When to use This-RS vs other solutions
+> **Honest comparison**: When to use this-rs vs other solutions
 
-This document provides an honest comparison of This-RS with alternative approaches. We believe in helping you choose the **right tool for your specific use case**, even if that means recommending something else.
+This document provides an honest comparison of this-rs with alternative approaches. We believe in helping you choose the **right tool for your specific use case**, even if that means recommending something else.
 
 ---
 
@@ -15,11 +15,11 @@ How many entities in your API?
 │
 ├─ 3-5 entities
 │  ├─ Few relationships → ⚠️ Probably use Axum directly
-│  └─ Many relationships → 🤔 Consider This-RS
+│  └─ Many relationships → 🤔 Consider this-rs
 │
 └─ 5+ entities
-   ├─ Few relationships → ⚠️ Consider This-RS (marginal benefit)
-   └─ Many relationships → ✅✅ This-RS is a great fit
+   ├─ Few relationships → ⚠️ Consider this-rs (marginal benefit)
+   └─ Many relationships → ✅✅ this-rs is a great fit
 ```
 
 ---
@@ -122,7 +122,7 @@ let schema = Schema::new(QueryRoot, MutationRoot, SubscriptionRoot);
 
 **When to choose**: GraphQL-only, types known at compile-time
 
-**vs This-RS**: This-RS generates GraphQL schema dynamically from entity definitions, allowing runtime schema changes. Use `async-graphql` if you prefer compile-time types and don't need REST.
+**vs this-rs**: this-rs generates GraphQL schema dynamically from entity definitions, allowing runtime schema changes. Use `async-graphql` if you prefer compile-time types and don't need REST.
 
 ---
 
@@ -184,13 +184,13 @@ let users = Users::find()
 
 **When to choose**: Database-heavy application, complex SQL queries
 
-**vs This-RS**: This-RS focuses on API layer (routing, links, multi-protocol). You can **combine** SeaORM with This-RS: use SeaORM for data access, This-RS for API exposure.
+**vs this-rs**: this-rs focuses on API layer (routing, links, multi-protocol). You can **combine** SeaORM with this-rs: use SeaORM for data access, this-rs for API exposure.
 
 ---
 
 ## 📊 Feature Comparison Matrix
 
-| Feature | This-RS | Pure Axum | Axum + utoipa | async-graphql | Poem-openapi | SeaORM |
+| Feature | this-rs | Pure Axum | Axum + utoipa | async-graphql | Poem-openapi | SeaORM |
 |---------|---------|-----------|---------------|---------------|--------------|--------|
 | **REST API** | ✅ Auto | ✍️ Manual | ✍️ Manual | ❌ | ✅ Auto | ❌ |
 | **GraphQL API** | ✅ Auto | ❌ | ❌ | ✅ Manual | ❌ | ❌ |
@@ -214,9 +214,9 @@ let users = Users::find()
 
 ---
 
-## 🎯 When to Use This-RS
+## 🎯 When to Use this-rs
 
-### ✅ **This-RS is the Best Choice**
+### ✅ **this-rs is the Best Choice**
 
 1. **Many entities with complex relationships**
    - 10+ entities with many-to-many relationships
@@ -238,7 +238,7 @@ let users = Users::find()
    - Want consistent routing across services
    - Example: Microservices architecture with entity-based services
 
-### ⚠️ **This-RS Might Be Overkill**
+### ⚠️ **this-rs Might Be Overkill**
 
 1. **Simple CRUD API**
    - 1-5 entities with basic operations
@@ -258,7 +258,7 @@ let users = Users::find()
 4. **Learning Rust web development**
    - First Rust web project
    - Want to understand fundamentals
-   - Start with **pure Axum**, add This-RS later if needed
+   - Start with **pure Axum**, add this-rs later if needed
 
 ---
 
@@ -269,7 +269,7 @@ let users = Users::find()
 | Approach | Lines of Code | Dev Time | Maintenance | Learning |
 |----------|---------------|----------|-------------|----------|
 | **Pure Axum** | ~300 lines | 2-3 hours | Easy | Low |
-| **This-RS** | ~350 lines | 4-5 hours | Medium | Medium |
+| **this-rs** | ~350 lines | 4-5 hours | Medium | Medium |
 
 **Verdict**: Pure Axum wins for small APIs
 
@@ -278,18 +278,18 @@ let users = Users::find()
 | Approach | Lines of Code | Dev Time | Maintenance | Learning |
 |----------|---------------|----------|-------------|----------|
 | **Pure Axum** | ~2000 lines | 20 hours | Hard (repetitive) | Low |
-| **This-RS** | ~400 lines | 10 hours | Easy (consistent) | Medium |
+| **this-rs** | ~400 lines | 10 hours | Easy (consistent) | Medium |
 
-**Verdict**: This-RS provides significant value
+**Verdict**: this-rs provides significant value
 
 ### For a 20-Entity Microservices Architecture
 
 | Approach | Lines of Code | Dev Time | Maintenance | Learning |
 |----------|---------------|----------|-------------|----------|
 | **Pure Axum** | ~5000 lines | 50+ hours | Very hard | Low |
-| **This-RS** | ~800 lines | 20 hours | Easy | Medium |
+| **this-rs** | ~800 lines | 20 hours | Easy | Medium |
 
-**Verdict**: This-RS is highly recommended
+**Verdict**: this-rs is highly recommended
 
 ---
 
@@ -307,14 +307,14 @@ let users = Users::find()
    - Create your own macros for repetitive code
    - Add utoipa for OpenAPI docs
 
-3. **Consider This-RS** (5+ entities)
+3. **Consider this-rs** (5+ entities)
    - When relationships become complex
    - When boilerplate becomes painful
    - When you need multi-protocol support
 
-### Migrating TO This-RS
+### Migrating TO this-rs
 
-This-RS is designed to **complement** existing code:
+this-rs is designed to **complement** existing code:
 
 - ✅ Keep your existing handlers
 - ✅ Keep your entity definitions (wrap with macros)
@@ -323,9 +323,9 @@ This-RS is designed to **complement** existing code:
 
 You don't need to rewrite everything!
 
-### Migrating FROM This-RS
+### Migrating FROM this-rs
 
-If This-RS isn't working for you:
+If this-rs isn't working for you:
 
 - ✅ Handlers are standard Axum handlers (reusable)
 - ✅ Entity types are standard Rust structs (portable)
@@ -340,18 +340,18 @@ If This-RS isn't working for you:
 - **Entities**: User, Post, Comment (3 entities)
 - **Relationships**: Few, simple
 - **Recommendation**: **Pure Axum** or **Axum + utoipa**
-- **Reasoning**: This-RS adds unnecessary complexity
+- **Reasoning**: this-rs adds unnecessary complexity
 
 ### Scenario 2: E-commerce Platform
 - **Entities**: Product, Category, Order, OrderItem, User, Address, Payment, Review, Cart, Wishlist (10+ entities)
 - **Relationships**: Many, complex (many-to-many)
-- **Recommendation**: **This-RS**
+- **Recommendation**: **this-rs**
 - **Reasoning**: Significant routing boilerplate, many relationships
 
 ### Scenario 3: Social Network
 - **Entities**: User, Post, Comment, Like, Follow, Message, Group, Event (8+ entities)
 - **Relationships**: Complex, bidirectional
-- **Recommendation**: **This-RS**
+- **Recommendation**: **this-rs**
 - **Reasoning**: Bidirectional navigation, link enrichment valuable
 
 ### Scenario 4: GraphQL-only Admin Dashboard
@@ -370,7 +370,7 @@ If This-RS isn't working for you:
 
 ## 🏆 Final Recommendations
 
-### Use This-RS if:
+### Use this-rs if:
 - ✅ 5+ entities with CRUD
 - ✅ Many relationships (especially many-to-many)
 - ✅ Need bidirectional navigation
@@ -403,27 +403,27 @@ If This-RS isn't working for you:
 
 ## 💬 Questions to Ask Yourself
 
-Before choosing This-RS, ask:
+Before choosing this-rs, ask:
 
 1. **How many entities will I have?**
    - < 5 → Consider alternatives
-   - 5-10 → This-RS could help
-   - 10+ → This-RS highly recommended
+   - 5-10 → this-rs could help
+   - 10+ → this-rs highly recommended
 
 2. **How many relationships?**
    - Few/simple → Consider alternatives
-   - Many/complex → This-RS helps a lot
+   - Many/complex → this-rs helps a lot
 
 3. **Do I need both REST and GraphQL?**
-   - Yes → This-RS is great
+   - Yes → this-rs is great
    - No → Consider specialized tools
 
 4. **Am I learning Rust?**
    - Yes → Start with Axum
-   - No → This-RS is fine
+   - No → this-rs is fine
 
 5. **Is my domain rapidly changing?**
-   - Yes → This-RS consistency helps
+   - Yes → this-rs consistency helps
    - No → Less critical
 
 ---
@@ -435,11 +435,11 @@ Before choosing This-RS, ask:
 - 🐛 Check [GitHub Issues](https://github.com/triviere/this-rs/issues) for common questions
 - 📧 Contact maintainers
 
-**We're happy to help you choose the right tool, even if it's not This-RS!** 🎯
+**We're happy to help you choose the right tool, even if it's not this-rs!** 🎯
 
 ---
 
 <p align="center">
-  Made with ❤️ and honesty by the This-RS community
+  Made with ❤️ and honesty by the this-rs community
 </p>
 

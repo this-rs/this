@@ -173,5 +173,5 @@ Le framework `this-rs` est maintenant encore plus élégant et professionnel ! �
 
 **Date** : 22 octobre 2025  
 **Version** : v0.0.1  
-**Auteur** : This-RS Team
+**Auteur** : this-rs Team
 

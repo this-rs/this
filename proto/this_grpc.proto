@@ -1,0 +1,137 @@
+syntax = "proto3";
+
+package this_grpc;
+
+import "google/protobuf/struct.proto";
+
+// ============================================================================
+// Entity Service — Generic CRUD operations for any entity type
+// ============================================================================
+
+service EntityService {
+  // Get a single entity by type and ID
+  rpc GetEntity(GetEntityRequest) returns (EntityResponse);
+
+  // List entities of a given type with pagination
+  rpc ListEntities(ListEntitiesRequest) returns (ListEntitiesResponse);
+
+  // Create a new entity of a given type
+  rpc CreateEntity(CreateEntityRequest) returns (EntityResponse);
+
+  // Update an existing entity
+  rpc UpdateEntity(UpdateEntityRequest) returns (EntityResponse);
+
+  // Delete an entity
+  rpc DeleteEntity(DeleteEntityRequest) returns (DeleteEntityResponse);
+}
+
+// ============================================================================
+// Link Service — Relationship management between entities
+// ============================================================================
+
+service LinkService {
+  // Create a link between two entities
+  rpc CreateLink(CreateLinkRequest) returns (LinkResponse);
+
+  // Get a specific link by ID
+  rpc GetLink(GetLinkRequest) returns (LinkResponse);
+
+  // Find links by source entity
+  rpc FindLinksBySource(FindLinksRequest) returns (LinkListResponse);
+
+  // Find links by target entity
+  rpc FindLinksByTarget(FindLinksRequest) returns (LinkListResponse);
+
+  // Delete a link
+  rpc DeleteLink(DeleteLinkRequest) returns (DeleteLinkResponse);
+}
+
+// ============================================================================
+// Entity Messages
+// ============================================================================
+
+message GetEntityRequest {
+  string entity_type = 1;
+  string entity_id = 2;  // UUID as string
+}
+
+message ListEntitiesRequest {
+  string entity_type = 1;
+  int32 limit = 2;
+  int32 offset = 3;
+}
+
+message CreateEntityRequest {
+  string entity_type = 1;
+  google.protobuf.Struct data = 2;
+}
+
+message UpdateEntityRequest {
+  string entity_type = 1;
+  string entity_id = 2;  // UUID as string
+  google.protobuf.Struct data = 3;
+}
+
+message DeleteEntityRequest {
+  string entity_type = 1;
+  string entity_id = 2;  // UUID as string
+}
+
+message EntityResponse {
+  google.protobuf.Struct data = 1;
+}
+
+message ListEntitiesResponse {
+  repeated google.protobuf.Struct entities = 1;
+  int32 total = 2;
+}
+
+message DeleteEntityResponse {
+  bool success = 1;
+}
+
+// ============================================================================
+// Link Messages
+// ============================================================================
+
+message CreateLinkRequest {
+  string link_type = 1;
+  string source_id = 2;   // UUID as string
+  string target_id = 3;   // UUID as string
+  google.protobuf.Struct metadata = 4;  // Optional metadata
+}
+
+message GetLinkRequest {
+  string link_id = 1;  // UUID as string
+}
+
+message FindLinksRequest {
+  string entity_id = 1;    // UUID as string
+  string link_type = 2;    // Optional: filter by link type
+  string entity_type = 3;  // Optional: filter by source/target entity type
+}
+
+message DeleteLinkRequest {
+  string link_id = 1;  // UUID as string
+}
+
+message LinkResponse {
+  string id = 1;
+  string link_type = 2;
+  string source_id = 3;
+  string target_id = 4;
+  google.protobuf.Struct metadata = 5;
+  string created_at = 6;
+  string updated_at = 7;
+  // Enriched entity data (optional, populated when available)
+  google.protobuf.Struct source_data = 8;
+  google.protobuf.Struct target_data = 9;
+}
+
+message LinkListResponse {
+  repeated LinkResponse links = 1;
+}
+
+message DeleteLinkResponse {
+  bool success = 1;
+}

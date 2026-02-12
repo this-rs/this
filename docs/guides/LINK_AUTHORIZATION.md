@@ -2,7 +2,7 @@
 
 ## 🎯 Overview
 
-This-RS provides **link-level authorization**, allowing you to control who can create, update, or delete links independently of entity permissions.
+this-rs provides **link-level authorization**, allowing you to control who can create, update, or delete links independently of entity permissions.
 
 ## 🔐 Why Link-Level Authorization?
 

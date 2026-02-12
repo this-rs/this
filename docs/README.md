@@ -1,12 +1,12 @@
-# This-RS Documentation
+# this-rs Documentation
 
 > **Framework for building complex multi-entity REST and GraphQL APIs with many relationships.**
 
 ## 🎯 Is This Framework Right for You?
 
-This-RS is designed for **APIs with 5+ entities and complex relationships**.
+this-rs is designed for **APIs with 5+ entities and complex relationships**.
 
-**✅ Use This-RS if you have:**
+**✅ Use this-rs if you have:**
 - Many entities (5+) with CRUD operations
 - Complex relationships (many-to-many, bidirectional)
 - Need for both REST and GraphQL
@@ -25,7 +25,7 @@ See the main [README](../README.md#is-this-rs-right-for-you) for detailed compar
 
 ### 🚀 Quick Start
 
-- **[Getting Started](guides/GETTING_STARTED.md)** - First steps with This-RS
+- **[Getting Started](guides/GETTING_STARTED.md)** - First steps with this-rs
 - **[Quick Start](guides/QUICK_START.md)** - Quick start guide
 
 ### ✅ Validation and Filtering
@@ -69,7 +69,7 @@ See the main [README](../README.md#is-this-rs-right-for-you) for detailed compar
 
 ## 🎯 By Use Case
 
-### I want to get started with This-RS
+### I want to get started with this-rs
 → [Getting Started](guides/GETTING_STARTED.md)
 
 ### I want to understand the architecture
@@ -90,7 +90,7 @@ See the main [README](../README.md#is-this-rs-right-for-you) for detailed compar
 ### I want to use GraphQL
 → [GraphQL Guide](guides/GRAPHQL.md)
 
-### I want to compare This-RS with alternatives
+### I want to compare this-rs with alternatives
 → [Alternatives Comparison](ALTERNATIVES.md)
 
 ## 📂 Documentation Structure

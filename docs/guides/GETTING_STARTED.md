@@ -1,15 +1,15 @@
-# Getting Started with This-RS
+# Getting Started with this-rs
 
 ## 🎯 Overview
 
-This-RS is a framework for building **complex multi-entity REST and GraphQL APIs** with **many relationships**. This guide will walk you through building your first API.
+this-rs is a framework for building **complex multi-entity REST and GraphQL APIs** with **many relationships**. This guide will walk you through building your first API.
 
 > **⚠️ Is This Guide for You?**
 > 
-> This-RS is designed for APIs with **5+ entities and complex relationships**.  
+> this-rs is designed for APIs with **5+ entities and complex relationships**.  
 > If you're building a simple CRUD API (< 5 entities, few relationships), you might be better served by using [Axum](https://github.com/tokio-rs/axum) directly.
 >
-> **What This-RS actually saves:**
+> **What this-rs actually saves:**
 > - ✅ Routing boilerplate (auto-generated routes)
 > - ✅ Link management (bidirectional navigation, enrichment)
 > - ✅ GraphQL schema (auto-generated from entities)
@@ -19,7 +19,7 @@ This-RS is a framework for building **complex multi-entity REST and GraphQL APIs
 > - ✍️ Entity definitions (with macro helpers)
 > - ✍️ Validation rules
 >
-> See [Is This-RS Right for You?](../../README.md#is-this-rs-right-for-you) for a detailed comparison.
+> See [Is this-rs Right for You?](../../README.md#is-this-rs-right-for-you) for a detailed comparison.
 
 ## 📋 Prerequisites
 
@@ -29,7 +29,7 @@ This-RS is a framework for building **complex multi-entity REST and GraphQL APIs
 
 ## 🚀 Quick Setup
 
-### 1. Add This-RS to Your Project
+### 1. Add this-rs to Your Project
 
 ```toml
 [dependencies]
@@ -698,4 +698,4 @@ You've built a complete RESTful API with:
 - ✅ Automatic entity creation with linking
 - ✅ Zero boilerplate code
 
-**Welcome to the This-RS community!** 🚀🦀✨
+**Welcome to the this-rs community!** 🚀🦀✨

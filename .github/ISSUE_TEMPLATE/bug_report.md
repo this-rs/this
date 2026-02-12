@@ -37,7 +37,7 @@ assignees: ''
 
 - **OS**: [e.g. macOS 14.0, Ubuntu 22.04]
 - **Rust Version**: [output de `rustc --version`]
-- **This-RS Version**: [e.g. 0.1.0]
+- **this-rs Version**: [e.g. 0.1.0]
 - **Cargo.toml dependencies**:
 ```toml
 [dependencies]
