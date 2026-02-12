@@ -17,6 +17,7 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 use crate::config::LinksConfig;
+use crate::core::events::{EventBus, FrameworkEvent, LinkEvent};
 use crate::core::extractors::{
     DirectLinkExtractor, ExtractorError, LinkExtractor, RecursiveLinkExtractor,
 };
@@ -37,9 +38,21 @@ pub struct AppState {
     pub entity_fetchers: Arc<HashMap<String, Arc<dyn EntityFetcher>>>,
     /// Entity creators for creating new entities with automatic linking
     pub entity_creators: Arc<HashMap<String, Arc<dyn EntityCreator>>>,
+    /// Optional event bus for publishing real-time events
+    pub event_bus: Option<Arc<EventBus>>,
 }
 
 impl AppState {
+    /// Publish an event to the event bus (if configured)
+    ///
+    /// This is non-blocking and fire-and-forget. If there are no subscribers
+    /// or no event bus configured, the event is silently dropped.
+    pub fn publish_event(&self, event: FrameworkEvent) {
+        if let Some(ref bus) = self.event_bus {
+            bus.publish(event);
+        }
+    }
+
     /// Get the authorization policy for a link operation
     pub fn get_link_auth_policy(
         link_definition: &LinkDefinition,
@@ -501,6 +514,15 @@ pub async fn create_link(
         .await
         .map_err(|e| ExtractorError::JsonError(e.to_string()))?;
 
+    // Emit link created event
+    state.publish_event(FrameworkEvent::Link(LinkEvent::Created {
+        link_type: created_link.link_type.clone(),
+        link_id: created_link.id,
+        source_id: created_link.source_id,
+        target_id: created_link.target_id,
+        metadata: created_link.metadata.clone(),
+    }));
+
     Ok((StatusCode::CREATED, Json(created_link)).into_response())
 }
 
@@ -582,6 +604,24 @@ pub async fn create_linked_entity(
         .create(link)
         .await
         .map_err(|e| ExtractorError::JsonError(e.to_string()))?;
+
+    // Emit entity created event
+    state.publish_event(FrameworkEvent::Entity(
+        crate::core::events::EntityEvent::Created {
+            entity_type: target_entity_type.clone(),
+            entity_id: target_entity_id,
+            data: created_entity.clone(),
+        },
+    ));
+
+    // Emit link created event
+    state.publish_event(FrameworkEvent::Link(LinkEvent::Created {
+        link_type: created_link.link_type.clone(),
+        link_id: created_link.id,
+        source_id: created_link.source_id,
+        target_id: created_link.target_id,
+        metadata: created_link.metadata.clone(),
+    }));
 
     // Return both the created entity and the link
     let response = serde_json::json!({
@@ -682,6 +722,14 @@ pub async fn delete_link(
         .delete(&existing_link.id)
         .await
         .map_err(|e| ExtractorError::JsonError(e.to_string()))?;
+
+    // Emit link deleted event
+    state.publish_event(FrameworkEvent::Link(LinkEvent::Deleted {
+        link_type: existing_link.link_type.clone(),
+        link_id: existing_link.id,
+        source_id: existing_link.source_id,
+        target_id: existing_link.target_id,
+    }));
 
     Ok(StatusCode::NO_CONTENT.into_response())
 }
@@ -1148,6 +1196,24 @@ pub async fn handle_nested_path_post(
         .await
         .map_err(|e| ExtractorError::JsonError(e.to_string()))?;
 
+    // Emit entity created event
+    state.publish_event(FrameworkEvent::Entity(
+        crate::core::events::EntityEvent::Created {
+            entity_type: target_entity_type.clone(),
+            entity_id: target_entity_id,
+            data: created_entity.clone(),
+        },
+    ));
+
+    // Emit link created event
+    state.publish_event(FrameworkEvent::Link(LinkEvent::Created {
+        link_type: created_link.link_type.clone(),
+        link_id: created_link.id,
+        source_id: created_link.source_id,
+        target_id: created_link.target_id,
+        metadata: created_link.metadata.clone(),
+    }));
+
     let response = serde_json::json!({
         "entity": created_entity,
         "link": created_link,
@@ -1199,6 +1265,7 @@ mod tests {
             registry,
             entity_fetchers: Arc::new(HashMap::new()),
             entity_creators: Arc::new(HashMap::new()),
+            event_bus: None,
         }
     }
 

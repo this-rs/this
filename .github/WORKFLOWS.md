@@ -1,6 +1,6 @@
 # GitHub Actions Workflows
 
-Ce dossier contient les workflows CI/CD pour This-RS.
+Ce dossier contient les workflows CI/CD pour this-rs.
 
 ## 📋 Workflows Disponibles
 

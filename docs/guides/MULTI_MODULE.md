@@ -1,10 +1,10 @@
 # Multi-Module Configuration
 
-This guide explains how to use multiple modules in a single This-RS application and how configuration merging works.
+This guide explains how to use multiple modules in a single this-rs application and how configuration merging works.
 
 ## Overview
 
-This-RS supports registering multiple modules in a single application. Each module can define its own entities, links, and validation rules. The framework automatically merges all configurations intelligently.
+this-rs supports registering multiple modules in a single application. Each module can define its own entities, links, and validation rules. The framework automatically merges all configurations intelligently.
 
 ## Basic Multi-Module Setup
 

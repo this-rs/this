@@ -7,6 +7,7 @@
 //! single source of truth for the application state.
 
 use crate::config::LinksConfig;
+use crate::core::events::EventBus;
 use crate::core::{EntityCreator, EntityFetcher, service::LinkService};
 use crate::links::registry::LinkRouteRegistry;
 use crate::server::entity_registry::EntityRegistry;
@@ -53,6 +54,12 @@ pub struct ServerHost {
 
     /// Entity creators map (for automatic entity + link creation)
     pub entity_creators: Arc<HashMap<String, Arc<dyn EntityCreator>>>,
+
+    /// Optional event bus for real-time notifications (WebSocket, SSE)
+    ///
+    /// When present, REST/GraphQL handlers will publish events for mutations.
+    /// WebSocket and other real-time exposures subscribe to this bus.
+    pub event_bus: Option<Arc<EventBus>>,
 }
 
 impl ServerHost {
@@ -89,6 +96,7 @@ impl ServerHost {
             entity_registry,
             entity_fetchers: Arc::new(fetchers),
             entity_creators: Arc::new(creators),
+            event_bus: None,
         })
     }
 
@@ -100,5 +108,16 @@ impl ServerHost {
     /// Check if host is properly initialized
     pub fn is_ready(&self) -> bool {
         !self.entity_fetchers.is_empty()
+    }
+
+    /// Set the event bus for real-time notifications
+    pub fn with_event_bus(mut self, event_bus: EventBus) -> Self {
+        self.event_bus = Some(Arc::new(event_bus));
+        self
+    }
+
+    /// Get a reference to the event bus (if configured)
+    pub fn event_bus(&self) -> Option<&Arc<EventBus>> {
+        self.event_bus.as_ref()
     }
 }

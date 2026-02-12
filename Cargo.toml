@@ -1,6 +1,6 @@
 [package]
 name = "this-rs"
-version = "0.0.6"
+version = "0.0.7"
 edition = "2024"
 authors = ["Riviere Théotime <t@ffs.holdings>"]
 license = "MIT OR Apache-2.0"
@@ -17,7 +17,7 @@ async-trait = "0.1"
 futures = "0.3"
 
 # Web framework
-axum = { version = "0.8", features = ["macros"] }
+axum = { version = "0.8", features = ["macros", "ws"] }
 tower = "0.5"
 tower-http = { version = "0.6", features = ["trace", "cors"] }
 
@@ -55,17 +55,30 @@ async-graphql = { version = "7", optional = true }
 async-graphql-axum = { version = "7", optional = true }
 graphql-parser = { version = "0.4", optional = true }
 
+# gRPC support (optional)
+tonic = { version = "0.14", optional = true }
+tonic-prost = { version = "0.14", optional = true }
+prost = { version = "0.14", optional = true }
+prost-types = { version = "0.14", optional = true }
+
+[build-dependencies]
+tonic-prost-build = { version = "0.14" }
+
 [dev-dependencies]
 tokio-test = "0.4"
 axum-test = "18.1"
+tokio-tungstenite = "0.28"
+futures-util = "0.3"
 
 [features]
 default = ["in-memory"]
 in-memory = []
 dynamodb = ["aws-sdk-dynamodb", "serde_dynamo"]
 graphql = ["async-graphql", "async-graphql-axum", "graphql-parser"]
+grpc = ["tonic", "tonic-prost", "prost", "prost-types"]
+websocket = []
 # postgres = ["sqlx"]  # Disabled until ScyllaDB implementation
-all = ["in-memory", "dynamodb", "graphql"]
+all = ["in-memory", "dynamodb", "graphql", "grpc", "websocket"]
 
 [lib]
 name = "this"
