@@ -4,6 +4,7 @@ use super::entity_registry::EntityRegistry;
 use super::exposure::RestExposure;
 use super::host::ServerHost;
 use crate::config::LinksConfig;
+use crate::core::events::EventBus;
 use crate::core::module::Module;
 use crate::core::service::LinkService;
 use crate::core::{EntityCreator, EntityFetcher};
@@ -29,6 +30,7 @@ pub struct ServerBuilder {
     configs: Vec<LinksConfig>,
     modules: Vec<Arc<dyn Module>>,
     custom_routes: Vec<Router>,
+    event_bus: Option<EventBus>,
 }
 
 impl ServerBuilder {
@@ -40,6 +42,7 @@ impl ServerBuilder {
             configs: Vec::new(),
             modules: Vec::new(),
             custom_routes: Vec::new(),
+            event_bus: None,
         }
     }
 
@@ -76,6 +79,29 @@ impl ServerBuilder {
     /// ```
     pub fn with_custom_routes(mut self, routes: Router) -> Self {
         self.custom_routes.push(routes);
+        self
+    }
+
+    /// Enable the event bus for real-time notifications
+    ///
+    /// When enabled, REST/GraphQL handlers will publish events for mutations,
+    /// and real-time exposures (WebSocket, SSE) can subscribe to receive them.
+    ///
+    /// # Arguments
+    ///
+    /// * `capacity` - Buffer size for the broadcast channel (recommended: 1024)
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// ServerBuilder::new()
+    ///     .with_link_service(service)
+    ///     .with_event_bus(1024)
+    ///     .register_module(module)?
+    ///     .build_host()?;
+    /// ```
+    pub fn with_event_bus(mut self, capacity: usize) -> Self {
+        self.event_bus = Some(EventBus::new(capacity));
         self
     }
 
@@ -139,14 +165,21 @@ impl ServerBuilder {
             }
         }
 
-        // Build and return the host
-        ServerHost::from_builder_components(
+        // Build the host
+        let mut host = ServerHost::from_builder_components(
             link_service,
             merged_config,
             self.entity_registry,
             fetchers_map,
             creators_map,
-        )
+        )?;
+
+        // Attach event bus if configured
+        if let Some(event_bus) = self.event_bus.take() {
+            host = host.with_event_bus(event_bus);
+        }
+
+        Ok(host)
     }
 
     /// Build the final REST router
