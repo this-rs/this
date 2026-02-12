@@ -47,6 +47,7 @@ impl RestExposure {
             registry: host.registry.clone(),
             entity_fetchers: host.entity_fetchers.clone(),
             entity_creators: host.entity_creators.clone(),
+            event_bus: host.event_bus.clone(),
         };
 
         // Build all routes

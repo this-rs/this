@@ -24,3 +24,6 @@ pub use host::ServerHost;
 
 #[cfg(feature = "graphql")]
 pub use exposure::GraphQLExposure;
+
+#[cfg(feature = "websocket")]
+pub use exposure::WebSocketExposure;
