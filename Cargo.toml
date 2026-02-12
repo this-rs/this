@@ -58,6 +58,8 @@ graphql-parser = { version = "0.4", optional = true }
 [dev-dependencies]
 tokio-test = "0.4"
 axum-test = "18.1"
+tokio-tungstenite = "0.28"
+futures-util = "0.3"
 
 [features]
 default = ["in-memory"]
