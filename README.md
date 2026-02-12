@@ -10,6 +10,7 @@
 [![Crates.io](https://img.shields.io/crates/v/this-rs.svg)](https://crates.io/crates/this-rs)
 [![docs.rs](https://docs.rs/this-rs/badge.svg)](https://docs.rs/this-rs)
 [![License](https://img.shields.io/crates/l/this-rs.svg)](LICENSE-MIT)
+[![codecov](https://codecov.io/gh/this-rs/this/graph/badge.svg)](https://codecov.io/gh/this-rs/this)
 
 ---
 
