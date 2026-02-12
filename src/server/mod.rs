@@ -27,3 +27,6 @@ pub use exposure::GraphQLExposure;
 
 #[cfg(feature = "websocket")]
 pub use exposure::WebSocketExposure;
+
+#[cfg(feature = "grpc")]
+pub use exposure::GrpcExposure;

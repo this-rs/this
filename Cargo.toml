@@ -55,6 +55,15 @@ async-graphql = { version = "7", optional = true }
 async-graphql-axum = { version = "7", optional = true }
 graphql-parser = { version = "0.4", optional = true }
 
+# gRPC support (optional)
+tonic = { version = "0.14", optional = true }
+tonic-prost = { version = "0.14", optional = true }
+prost = { version = "0.14", optional = true }
+prost-types = { version = "0.14", optional = true }
+
+[build-dependencies]
+tonic-prost-build = { version = "0.14" }
+
 [dev-dependencies]
 tokio-test = "0.4"
 axum-test = "18.1"
@@ -66,9 +75,10 @@ default = ["in-memory"]
 in-memory = []
 dynamodb = ["aws-sdk-dynamodb", "serde_dynamo"]
 graphql = ["async-graphql", "async-graphql-axum", "graphql-parser"]
+grpc = ["tonic", "tonic-prost", "prost", "prost-types"]
 websocket = []
 # postgres = ["sqlx"]  # Disabled until ScyllaDB implementation
-all = ["in-memory", "dynamodb", "graphql", "websocket"]
+all = ["in-memory", "dynamodb", "graphql", "grpc", "websocket"]
 
 [lib]
 name = "this"
