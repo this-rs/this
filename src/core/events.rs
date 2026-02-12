@@ -311,10 +311,7 @@ mod tests {
         let deserialized: EventEnvelope = serde_json::from_str(&json).unwrap();
 
         assert_eq!(envelope.id, deserialized.id);
-        assert_eq!(
-            envelope.event.event_kind(),
-            deserialized.event.event_kind()
-        );
+        assert_eq!(envelope.event.event_kind(), deserialized.event.event_kind());
     }
 
     #[tokio::test]

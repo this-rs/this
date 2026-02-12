@@ -14,6 +14,12 @@ pub use rest::RestExposure;
 #[cfg(feature = "graphql")]
 pub use graphql::GraphQLExposure;
 
+#[cfg(feature = "websocket")]
+pub mod websocket;
+
+#[cfg(feature = "websocket")]
+pub use websocket::WebSocketExposure;
+
 // Future expositions
 // pub mod grpc;
 // pub mod openapi;
