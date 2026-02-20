@@ -16,6 +16,8 @@
 
 #[macro_use]
 pub mod data_service_tests;
+#[macro_use]
+pub mod link_service_tests;
 
 use anyhow::Result;
 use chrono::{DateTime, Utc};
