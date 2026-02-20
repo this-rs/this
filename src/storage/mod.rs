@@ -16,9 +16,6 @@ pub mod postgres;
 #[cfg(feature = "scylladb")]
 pub mod scylladb;
 
-#[cfg(feature = "dynamodb")]
-pub use dynamodb::{DynamoDBDataService, DynamoDBLinkService};
-pub use in_memory::{InMemoryDataService, InMemoryLinkService};
 #[cfg(feature = "lmdb")]
 pub use self::lmdb::{LmdbDataService, LmdbLinkService};
 #[cfg(feature = "mongodb_backend")]
@@ -27,6 +24,9 @@ pub use self::mongodb::{MongoDataService, MongoLinkService};
 pub use self::mysql::{MysqlDataService, MysqlLinkService};
 #[cfg(feature = "neo4j")]
 pub use self::neo4j::{Neo4jDataService, Neo4jLinkService};
+#[cfg(feature = "dynamodb")]
+pub use dynamodb::{DynamoDBDataService, DynamoDBLinkService};
+pub use in_memory::{InMemoryDataService, InMemoryLinkService};
 #[cfg(feature = "postgres")]
 pub use postgres::{PostgresDataService, PostgresLinkService};
 #[cfg(feature = "scylladb")]

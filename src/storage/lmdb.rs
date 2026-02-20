@@ -267,8 +267,7 @@ impl LmdbLinkService {
         };
 
         let mut wtxn = env.write_txn()?;
-        let links_db: Database<Str, Bytes> =
-            env.create_database(&mut wtxn, Some("links"))?;
+        let links_db: Database<Str, Bytes> = env.create_database(&mut wtxn, Some("links"))?;
         let by_source_db: Database<Str, Bytes> =
             env.create_database(&mut wtxn, Some("links_by_source"))?;
         let by_target_db: Database<Str, Bytes> =

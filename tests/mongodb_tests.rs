@@ -26,6 +26,7 @@ mod storage_harness;
 
 use mongodb::Client;
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU64, Ordering};
 use storage_harness::*;
 use testcontainers::runners::AsyncRunner;
 use testcontainers_modules::mongo::Mongo;
@@ -70,16 +71,20 @@ async fn init_mongo_env() -> &'static MongoTestEnv {
     TEST_ENV.get().unwrap()
 }
 
-/// Database name used for all tests.
-const TEST_DB: &str = "this_test";
+/// Atomic counter to generate unique database names per test.
+static DB_COUNTER: AtomicU64 = AtomicU64::new(0);
 
-/// Create a fresh MongoDB client connected to the shared container.
+/// Create a fresh MongoDB client with a unique database for test isolation.
+///
+/// Each call returns a **different** database so tests can safely run in
+/// parallel without interfering with each other.
 async fn mongo_database() -> mongodb::Database {
     let env = init_mongo_env().await;
     let client = Client::with_uri_str(&env.connection_url)
         .await
         .expect("Failed to connect to MongoDB");
-    client.database(TEST_DB)
+    let db_num = DB_COUNTER.fetch_add(1, Ordering::SeqCst);
+    client.database(&format!("this_test_{}", db_num))
 }
 
 // ---------------------------------------------------------------------------

@@ -25,11 +25,11 @@
 use crate::core::field::FieldValue;
 use crate::core::link::LinkEntity;
 use crate::core::{Data, DataService, LinkService};
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use scylla::client::session::Session;
-use serde::de::DeserializeOwned;
 use serde::Serialize;
+use serde::de::DeserializeOwned;
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -106,10 +106,7 @@ pub async fn ensure_schema(session: &Session, keyspace: &str) -> Result<()> {
         "CREATE INDEX IF NOT EXISTS ON {}.links (target_id)",
         keyspace
     );
-    let idx_name = format!(
-        "CREATE INDEX IF NOT EXISTS ON {}.entities (name)",
-        keyspace
-    );
+    let idx_name = format!("CREATE INDEX IF NOT EXISTS ON {}.entities (name)", keyspace);
 
     for idx in [&idx_source, &idx_target, &idx_name] {
         session
@@ -180,10 +177,26 @@ impl<T: Data + Serialize + DeserializeOwned> DataService<T> for ScyllaDataServic
             .map_err(|e| anyhow!("Failed to serialize entity: {}", e))?;
 
         let id = entity.id().to_string();
-        let name = json_val.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
-        let status = json_val.get("status").and_then(|v| v.as_str()).unwrap_or("").to_string();
-        let created_at = json_val.get("created_at").and_then(|v| v.as_str()).unwrap_or("").to_string();
-        let updated_at = json_val.get("updated_at").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let name = json_val
+            .get("name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let status = json_val
+            .get("status")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let created_at = json_val
+            .get("created_at")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let updated_at = json_val
+            .get("updated_at")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
         let entity_type = Self::entity_type_name().to_string();
 
         let cql = format!(
@@ -273,7 +286,7 @@ impl<T: Data + Serialize + DeserializeOwned> DataService<T> for ScyllaDataServic
         }
 
         // Sort by created_at DESC (CQL doesn't support ORDER BY on non-clustering columns)
-        entities.sort_by(|a, b| b.created_at().cmp(&a.created_at()));
+        entities.sort_by_key(|b| std::cmp::Reverse(b.created_at()));
 
         Ok(entities)
     }
@@ -290,9 +303,21 @@ impl<T: Data + Serialize + DeserializeOwned> DataService<T> for ScyllaDataServic
         let json_val: serde_json::Value = serde_json::to_value(&entity)
             .map_err(|e| anyhow!("Failed to serialize entity: {}", e))?;
 
-        let name = json_val.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
-        let status = json_val.get("status").and_then(|v| v.as_str()).unwrap_or("").to_string();
-        let updated_at = json_val.get("updated_at").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let name = json_val
+            .get("name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let status = json_val
+            .get("status")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let updated_at = json_val
+            .get("updated_at")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
 
         let cql = format!(
             "UPDATE {}.entities SET name = ?, status = ?, entity_data = ?, updated_at = ? \
@@ -430,12 +455,15 @@ impl ScyllaLinkService {
 
     /// Parse a link from its entity_data JSON string.
     fn parse_link(data: &str) -> Result<LinkEntity> {
-        serde_json::from_str(data)
-            .map_err(|e| anyhow!("Failed to deserialize link: {}", e))
+        serde_json::from_str(data).map_err(|e| anyhow!("Failed to deserialize link: {}", e))
     }
 
     /// Collect links from a query result.
-    async fn collect_links(&self, cql: String, values: impl scylla::serialize::row::SerializeRow) -> Result<Vec<LinkEntity>> {
+    async fn collect_links(
+        &self,
+        cql: String,
+        values: impl scylla::serialize::row::SerializeRow,
+    ) -> Result<Vec<LinkEntity>> {
         let result = self
             .session
             .query_unpaged(cql, values)
@@ -458,7 +486,7 @@ impl ScyllaLinkService {
         }
 
         // Sort by created_at DESC
-        links.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        links.sort_by_key(|b| std::cmp::Reverse(b.created_at));
 
         Ok(links)
     }
@@ -467,8 +495,8 @@ impl ScyllaLinkService {
 #[async_trait]
 impl LinkService for ScyllaLinkService {
     async fn create(&self, link: LinkEntity) -> Result<LinkEntity> {
-        let json_str = serde_json::to_string(&link)
-            .map_err(|e| anyhow!("Failed to serialize link: {}", e))?;
+        let json_str =
+            serde_json::to_string(&link).map_err(|e| anyhow!("Failed to serialize link: {}", e))?;
 
         let cql = format!(
             "INSERT INTO {}.links (id, entity_type, source_id, target_id, link_type, \
@@ -532,10 +560,7 @@ impl LinkService for ScyllaLinkService {
     }
 
     async fn list(&self) -> Result<Vec<LinkEntity>> {
-        let cql = format!(
-            "SELECT entity_data FROM {}.links",
-            self.keyspace
-        );
+        let cql = format!("SELECT entity_data FROM {}.links", self.keyspace);
         self.collect_links(cql, ()).await
     }
 
@@ -550,7 +575,9 @@ impl LinkService for ScyllaLinkService {
             self.keyspace
         );
 
-        let mut links = self.collect_links(cql, (source_id.to_string().as_str(),)).await?;
+        let mut links = self
+            .collect_links(cql, (source_id.to_string().as_str(),))
+            .await?;
 
         // Apply optional filters client-side
         if let Some(lt) = link_type {
@@ -571,7 +598,9 @@ impl LinkService for ScyllaLinkService {
             self.keyspace
         );
 
-        let mut links = self.collect_links(cql, (target_id.to_string().as_str(),)).await?;
+        let mut links = self
+            .collect_links(cql, (target_id.to_string().as_str(),))
+            .await?;
 
         if let Some(lt) = link_type {
             links.retain(|l| l.link_type == lt);
@@ -587,8 +616,8 @@ impl LinkService for ScyllaLinkService {
             return Err(anyhow!("Link not found: {}", id));
         }
 
-        let json_str = serde_json::to_string(&link)
-            .map_err(|e| anyhow!("Failed to serialize link: {}", e))?;
+        let json_str =
+            serde_json::to_string(&link).map_err(|e| anyhow!("Failed to serialize link: {}", e))?;
 
         let cql = format!(
             "UPDATE {}.links SET entity_type = ?, source_id = ?, target_id = ?, \
@@ -617,10 +646,7 @@ impl LinkService for ScyllaLinkService {
     }
 
     async fn delete(&self, id: &Uuid) -> Result<()> {
-        let cql = format!(
-            "DELETE FROM {}.links WHERE id = ?",
-            self.keyspace
-        );
+        let cql = format!("DELETE FROM {}.links WHERE id = ?", self.keyspace);
 
         self.session
             .query_unpaged(cql, (id.to_string().as_str(),))
@@ -634,10 +660,7 @@ impl LinkService for ScyllaLinkService {
         let eid = entity_id.to_string();
 
         // Find all links where entity is source
-        let source_cql = format!(
-            "SELECT id FROM {}.links WHERE source_id = ?",
-            self.keyspace
-        );
+        let source_cql = format!("SELECT id FROM {}.links WHERE source_id = ?", self.keyspace);
         let source_result = self
             .session
             .query_unpaged(source_cql, (eid.as_str(),))
@@ -645,10 +668,7 @@ impl LinkService for ScyllaLinkService {
             .map_err(|e| anyhow!("Failed to find source links: {}", e))?;
 
         // Find all links where entity is target
-        let target_cql = format!(
-            "SELECT id FROM {}.links WHERE target_id = ?",
-            self.keyspace
-        );
+        let target_cql = format!("SELECT id FROM {}.links WHERE target_id = ?", self.keyspace);
         let target_result = self
             .session
             .query_unpaged(target_cql, (eid.as_str(),))
@@ -685,10 +705,7 @@ impl LinkService for ScyllaLinkService {
         }
 
         // Delete each link
-        let delete_cql = format!(
-            "DELETE FROM {}.links WHERE id = ?",
-            self.keyspace
-        );
+        let delete_cql = format!("DELETE FROM {}.links WHERE id = ?", self.keyspace);
         for link_id in &ids_to_delete {
             self.session
                 .query_unpaged(delete_cql.clone(), (link_id.as_str(),))

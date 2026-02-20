@@ -270,9 +270,9 @@ pub fn sample_batch(n: usize) -> Vec<TestDataEntity> {
             create_test_entity(
                 &format!("Entity_{}", i),
                 &format!("entity_{}@test.com", i),
-                (20 + i as i64) % 100,           // ages: 20, 21, 22, ..., wraps at 100
-                (i as f64) * 1.5 + 0.5,          // scores: 0.5, 2.0, 3.5, 5.0, ...
-                i % 2 == 0,                       // alternating active: true, false, true, ...
+                (20 + i as i64) % 100,  // ages: 20, 21, 22, ..., wraps at 100
+                (i as f64) * 1.5 + 0.5, // scores: 0.5, 2.0, 3.5, 5.0, ...
+                i % 2 == 0,             // alternating active: true, false, true, ...
             )
         })
         .collect()
@@ -285,11 +285,7 @@ pub fn sample_batch(n: usize) -> Vec<TestDataEntity> {
 /// Create a `LinkEntity` (for use with `LinkService`).
 ///
 /// This wraps `LinkEntity::new()` with a simpler signature for tests.
-pub fn create_test_link(
-    source_id: Uuid,
-    target_id: Uuid,
-    link_type: &str,
-) -> LinkEntity {
+pub fn create_test_link(source_id: Uuid, target_id: Uuid, link_type: &str) -> LinkEntity {
     LinkEntity::new(link_type, source_id, target_id, None)
 }
 
@@ -351,14 +347,20 @@ pub fn assert_count<T>(list: &[T], expected: usize) {
 pub fn assert_field_value_string(fv: &FieldValue, expected: &str) {
     match fv {
         FieldValue::String(s) => assert_eq!(s, expected),
-        other => panic!("Expected FieldValue::String(\"{}\"), got {:?}", expected, other),
+        other => panic!(
+            "Expected FieldValue::String(\"{}\"), got {:?}",
+            expected, other
+        ),
     }
 }
 
 pub fn assert_field_value_integer(fv: &FieldValue, expected: i64) {
     match fv {
         FieldValue::Integer(i) => assert_eq!(*i, expected),
-        other => panic!("Expected FieldValue::Integer({}), got {:?}", expected, other),
+        other => panic!(
+            "Expected FieldValue::Integer({}), got {:?}",
+            expected, other
+        ),
     }
 }
 
@@ -377,7 +379,10 @@ pub fn assert_field_value_float(fv: &FieldValue, expected: f64) {
 pub fn assert_field_value_boolean(fv: &FieldValue, expected: bool) {
     match fv {
         FieldValue::Boolean(b) => assert_eq!(*b, expected),
-        other => panic!("Expected FieldValue::Boolean({}), got {:?}", expected, other),
+        other => panic!(
+            "Expected FieldValue::Boolean({}), got {:?}",
+            expected, other
+        ),
     }
 }
 

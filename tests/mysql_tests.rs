@@ -55,26 +55,20 @@ async fn init_mysql_env() -> &'static MysqlTestEnv {
     // MySQL needs a bit of time to become ready after port mapping
     let mut pool = None;
     for attempt in 0..60 {
-        let connect = tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            MySqlPool::connect(&url),
-        )
-        .await;
+        let connect =
+            tokio::time::timeout(std::time::Duration::from_secs(5), MySqlPool::connect(&url)).await;
 
-        match connect {
-            Ok(Ok(p)) => {
-                // Verify with a simple query
-                let ping = tokio::time::timeout(
-                    std::time::Duration::from_secs(5),
-                    sqlx::query("SELECT 1").execute(&p),
-                )
-                .await;
-                if matches!(ping, Ok(Ok(_))) {
-                    pool = Some(p);
-                    break;
-                }
+        if let Ok(Ok(p)) = connect {
+            // Verify with a simple query
+            let ping = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                sqlx::query("SELECT 1").execute(&p),
+            )
+            .await;
+            if matches!(ping, Ok(Ok(_))) {
+                pool = Some(p);
+                break;
             }
-            _ => {}
         }
 
         if attempt % 10 == 0 && attempt > 0 {

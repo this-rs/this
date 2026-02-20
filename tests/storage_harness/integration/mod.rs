@@ -28,11 +28,11 @@ pub mod grpc_tests;
 pub mod ws_tests;
 
 use super::{TestDataEntity, create_test_entity};
+use axum::Router;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Json};
 use axum::routing::get;
-use axum::Router;
 use serde_json::Value;
 use std::sync::Arc;
 use this::core::entity::Data;
@@ -93,7 +93,13 @@ async fn get_handler(
 ) -> impl IntoResponse {
     let id = match Uuid::parse_str(&id) {
         Ok(id) => id,
-        Err(_) => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "Invalid UUID"}))).into_response(),
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "Invalid UUID"})),
+            )
+                .into_response();
+        }
     };
 
     match state.data_service.get(&id).await {
@@ -101,12 +107,16 @@ async fn get_handler(
             let json = serde_json::to_value(entity).unwrap();
             (StatusCode::OK, Json(json)).into_response()
         }
-        Ok(None) => {
-            (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "Not found"}))).into_response()
-        }
-        Err(e) => {
-            (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()}))).into_response()
-        }
+        Ok(None) => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "Not found"})),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e.to_string()})),
+        )
+            .into_response(),
     }
 }
 
@@ -124,26 +134,26 @@ async fn list_handler(
     match state.data_service.list().await {
         Ok(mut entities) => {
             // Apply filter if provided
-            if let Some(filter) = params.filter_value() {
-                if let Some(obj) = filter.as_object() {
-                    for (key, value) in obj {
-                        entities.retain(|e| {
-                            e.field_value(key)
-                                .map(|fv| match &fv {
-                                    this::core::field::FieldValue::String(s) => {
-                                        value.as_str().is_some_and(|v| s == v)
-                                    }
-                                    this::core::field::FieldValue::Integer(i) => {
-                                        value.as_i64().is_some_and(|v| *i == v)
-                                    }
-                                    this::core::field::FieldValue::Boolean(b) => {
-                                        value.as_bool().is_some_and(|v| *b == v)
-                                    }
-                                    _ => false,
-                                })
-                                .unwrap_or(false)
-                        });
-                    }
+            if let Some(filter) = params.filter_value()
+                && let Some(obj) = filter.as_object()
+            {
+                for (key, value) in obj {
+                    entities.retain(|e| {
+                        e.field_value(key)
+                            .map(|fv| match &fv {
+                                this::core::field::FieldValue::String(s) => {
+                                    value.as_str().is_some_and(|v| s == v)
+                                }
+                                this::core::field::FieldValue::Integer(i) => {
+                                    value.as_i64().is_some_and(|v| *i == v)
+                                }
+                                this::core::field::FieldValue::Boolean(b) => {
+                                    value.as_bool().is_some_and(|v| *b == v)
+                                }
+                                _ => false,
+                            })
+                            .unwrap_or(false)
+                    });
                 }
             }
 
@@ -175,9 +185,11 @@ async fn list_handler(
 
             (StatusCode::OK, Json(response)).into_response()
         }
-        Err(e) => {
-            (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()}))).into_response()
-        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e.to_string()})),
+        )
+            .into_response(),
     }
 }
 
@@ -191,17 +203,31 @@ async fn update_handler(
 ) -> impl IntoResponse {
     let id = match Uuid::parse_str(&id) {
         Ok(id) => id,
-        Err(_) => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "Invalid UUID"}))).into_response(),
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "Invalid UUID"})),
+            )
+                .into_response();
+        }
     };
 
     // Get existing entity
     let existing = match state.data_service.get(&id).await {
         Ok(Some(e)) => e,
         Ok(None) => {
-            return (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "Not found"}))).into_response();
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"error": "Not found"})),
+            )
+                .into_response();
         }
         Err(e) => {
-            return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()}))).into_response();
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": e.to_string()})),
+            )
+                .into_response();
         }
     };
 
@@ -216,10 +242,7 @@ async fn update_handler(
             .as_str()
             .unwrap_or(&existing.status)
             .to_string(),
-        name: body["name"]
-            .as_str()
-            .unwrap_or(&existing.name)
-            .to_string(),
+        name: body["name"].as_str().unwrap_or(&existing.name).to_string(),
         email: body["email"]
             .as_str()
             .unwrap_or(&existing.email)
@@ -234,9 +257,11 @@ async fn update_handler(
             let json = serde_json::to_value(entity).unwrap();
             (StatusCode::OK, Json(json)).into_response()
         }
-        Err(e) => {
-            (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()}))).into_response()
-        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e.to_string()})),
+        )
+            .into_response(),
     }
 }
 
@@ -254,12 +279,10 @@ async fn delete_handler(
 
     // Check existence first for consistent 404 behavior
     match state.data_service.get(&id).await {
-        Ok(Some(_)) => {
-            match state.data_service.delete(&id).await {
-                Ok(()) => StatusCode::NO_CONTENT.into_response(),
-                Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
-            }
-        }
+        Ok(Some(_)) => match state.data_service.delete(&id).await {
+            Ok(()) => StatusCode::NO_CONTENT.into_response(),
+            Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+        },
         Ok(None) => StatusCode::NOT_FOUND.into_response(),
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }

@@ -29,13 +29,13 @@
 
 use crate::core::link::LinkEntity;
 use crate::core::{Data, DataService, LinkService};
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use futures::TryStreamExt;
-use mongodb::bson::{doc, Bson, Document};
 use mongodb::Database;
-use serde::de::DeserializeOwned;
+use mongodb::bson::{Bson, Document, doc};
 use serde::Serialize;
+use serde::de::DeserializeOwned;
 use uuid::Uuid;
 
 // ---------------------------------------------------------------------------
@@ -265,10 +265,10 @@ impl<T: Data + Serialize + DeserializeOwned> DataService<T> for MongoDataService
                 if let Ok(i) = value.parse::<i64>() {
                     variants.push(Bson::Int64(i));
                 }
-                if value.contains('.') {
-                    if let Ok(f) = value.parse::<f64>() {
-                        variants.push(Bson::Double(f));
-                    }
+                if value.contains('.')
+                    && let Ok(f) = value.parse::<f64>()
+                {
+                    variants.push(Bson::Double(f));
                 }
             }
         }
@@ -348,12 +348,8 @@ impl MongoLinkService {
         use mongodb::IndexModel;
 
         let indexes = vec![
-            IndexModel::builder()
-                .keys(doc! { "source_id": 1 })
-                .build(),
-            IndexModel::builder()
-                .keys(doc! { "target_id": 1 })
-                .build(),
+            IndexModel::builder().keys(doc! { "source_id": 1 }).build(),
+            IndexModel::builder().keys(doc! { "target_id": 1 }).build(),
             IndexModel::builder()
                 .keys(doc! { "source_id": 1, "link_type": 1 })
                 .build(),
@@ -372,8 +368,8 @@ impl MongoLinkService {
 
     /// Convert a `LinkEntity` into a MongoDB document.
     fn link_to_document(link: &LinkEntity) -> Result<Document> {
-        let json = serde_json::to_value(link)
-            .map_err(|e| anyhow!("Failed to serialize link: {}", e))?;
+        let json =
+            serde_json::to_value(link).map_err(|e| anyhow!("Failed to serialize link: {}", e))?;
         json_to_document(json)
     }
 

@@ -113,7 +113,10 @@ macro_rules! data_service_tests {
                 let service = $factory;
 
                 let all = service.list().await.unwrap();
-                assert!(all.is_empty(), "List on empty store should return empty vec");
+                assert!(
+                    all.is_empty(),
+                    "List on empty store should return empty vec"
+                );
             }
 
             // ==================================================================
@@ -252,7 +255,13 @@ macro_rules! data_service_tests {
                     .await
                     .unwrap();
                 service
-                    .create(create_test_entity("Charlie", "charlie@test.com", 35, 5.0, false))
+                    .create(create_test_entity(
+                        "Charlie",
+                        "charlie@test.com",
+                        35,
+                        5.0,
+                        false,
+                    ))
                     .await
                     .unwrap();
 
@@ -275,7 +284,13 @@ macro_rules! data_service_tests {
                     .await
                     .unwrap();
                 service
-                    .create(create_test_entity("Also25", "also25@test.com", 25, 2.0, true))
+                    .create(create_test_entity(
+                        "Also25",
+                        "also25@test.com",
+                        25,
+                        2.0,
+                        true,
+                    ))
                     .await
                     .unwrap();
                 service
@@ -327,7 +342,13 @@ macro_rules! data_service_tests {
                     .await
                     .unwrap();
                 service
-                    .create(create_test_entity("Inactive", "inactive@test.com", 30, 3.0, false))
+                    .create(create_test_entity(
+                        "Inactive",
+                        "inactive@test.com",
+                        30,
+                        3.0,
+                        false,
+                    ))
                     .await
                     .unwrap();
 
@@ -455,10 +476,9 @@ macro_rules! data_service_tests {
                 let h1 = tokio::spawn(async move { s1.create(e1).await });
                 let h2 = tokio::spawn(async move { s2.create(e2).await });
 
-                let (r1, r2) = tokio::time::timeout(
-                    std::time::Duration::from_secs(30),
-                    async { tokio::try_join!(h1, h2).unwrap() },
-                )
+                let (r1, r2) = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+                    tokio::try_join!(h1, h2).unwrap()
+                })
                 .await
                 .expect("Concurrent creates timed out after 30s — possible deadlock");
 

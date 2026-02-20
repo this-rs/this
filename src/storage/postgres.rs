@@ -31,8 +31,8 @@ use crate::core::{Data, DataService, LinkService};
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use serde::de::DeserializeOwned;
 use serde::Serialize;
+use serde::de::DeserializeOwned;
 use sqlx::{FromRow, PgPool};
 use uuid::Uuid;
 
