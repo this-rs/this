@@ -32,7 +32,7 @@ mongodb = { version = "3", optional = true }
 neo4rs = { version = "0.8", optional = true }
 scylla = { version = "1.4", optional = true }
 heed = { version = "0.22", optional = true }
-bincode = { version = "2", optional = true }
+bincode = { version = "2", optional = true, features = ["serde"] }
 
 # DynamoDB support
 aws-sdk-dynamodb = { version = "1.93", optional = true }
@@ -86,7 +86,7 @@ mongodb_backend = ["mongodb"]
 neo4j = ["neo4rs"]
 scylladb = ["scylla"]
 mysql = ["sqlx", "sqlx/macros", "sqlx/runtime-tokio-rustls", "sqlx/mysql", "sqlx/uuid", "sqlx/chrono", "sqlx/json", "sqlx/migrate"]
-lmdb = ["heed", "bincode"]
+lmdb = ["heed"]
 graphql = ["async-graphql", "async-graphql-axum", "graphql-parser"]
 grpc = ["tonic", "tonic-prost", "prost", "prost-types"]
 websocket = []
