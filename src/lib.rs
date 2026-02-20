@@ -93,8 +93,18 @@ pub mod prelude {
     #[cfg(feature = "dynamodb")]
     pub use crate::storage::{DynamoDBDataService, DynamoDBLinkService};
     pub use crate::storage::{InMemoryDataService, InMemoryLinkService};
+    #[cfg(feature = "lmdb")]
+    pub use crate::storage::{LmdbDataService, LmdbLinkService};
+    #[cfg(feature = "mongodb_backend")]
+    pub use crate::storage::{MongoDataService, MongoLinkService};
+    #[cfg(feature = "mysql")]
+    pub use crate::storage::{MysqlDataService, MysqlLinkService};
+    #[cfg(feature = "neo4j")]
+    pub use crate::storage::{Neo4jDataService, Neo4jLinkService};
     #[cfg(feature = "postgres")]
     pub use crate::storage::{PostgresDataService, PostgresLinkService};
+    #[cfg(feature = "scylladb")]
+    pub use crate::storage::{ScyllaDataService, ScyllaLinkService};
 
     // === Config ===
     pub use crate::config::{EntityAuthConfig, EntityConfig, LinksConfig, ValidationRule};
