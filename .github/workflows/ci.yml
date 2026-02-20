@@ -53,8 +53,11 @@ jobs:
           path: target
           key: ${{ runner.os }}-cargo-build-target-${{ matrix.rust }}-${{ hashFiles('**/Cargo.lock') }}
 
-      - name: Run tests
-        run: cargo test --all-features --verbose
+      - name: Run unit tests
+        run: cargo test --lib --all-features --verbose
+
+      - name: Run integration tests (sequential for DB isolation)
+        run: cargo test --all-features --test '*' -- --test-threads=1
 
       - name: Run doc tests
         run: cargo test --doc --all-features
@@ -89,7 +92,7 @@ jobs:
           restore-keys: ${{ runner.os }}-cargo-coverage-
 
       - name: Generate code coverage
-        run: cargo llvm-cov --all-features --workspace --lcov --output-path lcov.info
+        run: cargo llvm-cov --all-features --workspace --lcov --output-path lcov.info -- --test-threads=1
 
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v5
@@ -212,7 +215,10 @@ jobs:
         run: cargo install cargo-audit
 
       - name: Run security audit
-        run: cargo audit
+        # Ignore known unfixable transitive advisories:
+        # RUSTSEC-2023-0071: RSA Marvin Attack (rsa via sqlx-mysql) - no fix available
+        # RUSTSEC-2025-0111: tokio-tar PAX headers (testcontainers) - no fix available
+        run: cargo audit --ignore RUSTSEC-2023-0071 --ignore RUSTSEC-2025-0111
 
   # Vérification de la documentation
   docs:
@@ -275,27 +281,14 @@ jobs:
       - name: Build
         run: cargo build --all-features
 
-      - name: Run tests
-        run: cargo test --all-features
+      # Unit tests run on all platforms (no Docker needed).
+      # Integration tests (testcontainers) only run on Linux where Docker is available.
+      - name: Run unit tests
+        run: cargo test --lib --all-features
 
-  # Vérification minimum des versions de dépendances
-  minimal-versions:
-    name: Minimal Versions
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v6
+      - name: Run integration tests (Linux only)
+        if: runner.os == 'Linux'
+        run: cargo test --all-features --test '*' -- --test-threads=1
 
-      - name: Install protoc
-        uses: arduino/setup-protoc@v3
-        with:
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@nightly
-
-      - name: Install cargo-hack
-        run: cargo install cargo-hack
-
-      - name: Check minimal versions
-        run: cargo hack check --feature-powerset --no-dev-deps
+  # Note: Minimal Versions (feature-powerset) check moved to release.yml
+  # as it's too slow for PR/push CI (~10+ min) and only needed before release.
