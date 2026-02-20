@@ -31,8 +31,8 @@ use crate::core::{Data, DataService, LinkService};
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use serde::de::DeserializeOwned;
 use serde::Serialize;
+use serde::de::DeserializeOwned;
 use sqlx::MySqlPool;
 use uuid::Uuid;
 
@@ -177,6 +177,7 @@ impl<T: Data + Serialize + DeserializeOwned> MysqlDataService<T> {
     ///
     /// Merges common columns back into the JSON data, then deserializes
     /// the combined JSON into the target type `T`.
+    #[allow(clippy::too_many_arguments)]
     fn reconstruct_entity(
         id: String,
         entity_type: String,
@@ -204,18 +205,9 @@ impl<T: Data + Serialize + DeserializeOwned> MysqlDataService<T> {
             }
             obj.insert("name".into(), serde_json::json!(name));
             obj.insert("status".into(), serde_json::json!(status));
-            obj.insert(
-                "created_at".into(),
-                serde_json::to_value(created_at)?,
-            );
-            obj.insert(
-                "updated_at".into(),
-                serde_json::to_value(updated_at)?,
-            );
-            obj.insert(
-                "deleted_at".into(),
-                serde_json::to_value(deleted_at)?,
-            );
+            obj.insert("created_at".into(), serde_json::to_value(created_at)?);
+            obj.insert("updated_at".into(), serde_json::to_value(updated_at)?);
+            obj.insert("deleted_at".into(), serde_json::to_value(deleted_at)?);
             if let Some(tid) = tenant_id {
                 obj.insert("tenant_id".into(), serde_json::json!(tid));
             }
@@ -274,9 +266,9 @@ impl<T: Data + Serialize + DeserializeOwned> DataService<T> for MysqlDataService
         .map_err(|e| anyhow!("Failed to get entity: {}", e))?;
 
         match row {
-            Some((id, etype, name, status, tid, data, cat, uat, dat)) => {
-                Ok(Some(Self::reconstruct_entity(id, etype, name, status, tid, data, cat, uat, dat)?))
-            }
+            Some((id, etype, name, status, tid, data, cat, uat, dat)) => Ok(Some(
+                Self::reconstruct_entity(id, etype, name, status, tid, data, cat, uat, dat)?,
+            )),
             None => Ok(None),
         }
     }
@@ -352,12 +344,25 @@ impl<T: Data + Serialize + DeserializeOwned> DataService<T> for MysqlDataService
                  FROM entities WHERE entity_type = ? AND {} = ?",
                 field
             );
-            sqlx::query_as::<_, (String, String, String, String, Option<String>, serde_json::Value, DateTime<Utc>, DateTime<Utc>, Option<DateTime<Utc>>)>(&sql)
-                .bind(Self::entity_type_name())
-                .bind(value)
-                .fetch_all(&self.pool)
-                .await
-                .map_err(|e| anyhow!("Failed to search entities: {}", e))?
+            sqlx::query_as::<
+                _,
+                (
+                    String,
+                    String,
+                    String,
+                    String,
+                    Option<String>,
+                    serde_json::Value,
+                    DateTime<Utc>,
+                    DateTime<Utc>,
+                    Option<DateTime<Utc>>,
+                ),
+            >(&sql)
+            .bind(Self::entity_type_name())
+            .bind(value)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| anyhow!("Failed to search entities: {}", e))?
         } else {
             // Search in JSON data column using JSON_EXTRACT
             // JSON_UNQUOTE(JSON_EXTRACT(data, '$.field')) returns the text value
@@ -416,6 +421,7 @@ impl MysqlLinkService {
     }
 
     /// Parse a link row tuple into a LinkEntity.
+    #[allow(clippy::too_many_arguments)]
     fn row_to_link(
         id: String,
         entity_type: String,
@@ -440,8 +446,7 @@ impl MysqlLinkService {
             updated_at,
             deleted_at,
             status,
-            tenant_id: tenant_id
-                .and_then(|t| t.parse().ok()),
+            tenant_id: tenant_id.and_then(|t| t.parse().ok()),
             link_type,
             source_id: source_id
                 .parse()
@@ -458,7 +463,21 @@ impl MysqlLinkService {
     }
 }
 
-type LinkTuple = (String, String, String, String, String, Option<String>, Option<String>, String, Option<String>, serde_json::Value, DateTime<Utc>, DateTime<Utc>, Option<DateTime<Utc>>);
+type LinkTuple = (
+    String,
+    String,
+    String,
+    String,
+    String,
+    Option<String>,
+    Option<String>,
+    String,
+    Option<String>,
+    serde_json::Value,
+    DateTime<Utc>,
+    DateTime<Utc>,
+    Option<DateTime<Utc>>,
+);
 
 const LINK_SELECT: &str = "SELECT id, entity_type, link_type, source_id, target_id, source_type, target_type, status, tenant_id, metadata, created_at, updated_at, deleted_at FROM links";
 
@@ -504,7 +523,9 @@ impl LinkService for MysqlLinkService {
 
         match row {
             Some((id, etype, lt, sid, tid, st, tt, status, tenant, meta, cat, uat, dat)) => {
-                Ok(Some(Self::row_to_link(id, etype, lt, sid, tid, st, tt, status, tenant, meta, cat, uat, dat)?))
+                Ok(Some(Self::row_to_link(
+                    id, etype, lt, sid, tid, st, tt, status, tenant, meta, cat, uat, dat,
+                )?))
             }
             None => Ok(None),
         }
@@ -518,9 +539,13 @@ impl LinkService for MysqlLinkService {
             .map_err(|e| anyhow!("Failed to list links: {}", e))?;
 
         rows.into_iter()
-            .map(|(id, etype, lt, sid, tid, st, tt, status, tenant, meta, cat, uat, dat)| {
-                Self::row_to_link(id, etype, lt, sid, tid, st, tt, status, tenant, meta, cat, uat, dat)
-            })
+            .map(
+                |(id, etype, lt, sid, tid, st, tt, status, tenant, meta, cat, uat, dat)| {
+                    Self::row_to_link(
+                        id, etype, lt, sid, tid, st, tt, status, tenant, meta, cat, uat, dat,
+                    )
+                },
+            )
             .collect()
     }
 
@@ -536,8 +561,7 @@ impl LinkService for MysqlLinkService {
         }
         sql.push_str(" ORDER BY created_at DESC");
 
-        let mut query = sqlx::query_as::<_, LinkTuple>(&sql)
-            .bind(source_id.to_string());
+        let mut query = sqlx::query_as::<_, LinkTuple>(&sql).bind(source_id.to_string());
 
         if let Some(lt) = link_type {
             query = query.bind(lt);
@@ -549,9 +573,13 @@ impl LinkService for MysqlLinkService {
             .map_err(|e| anyhow!("Failed to find links by source: {}", e))?;
 
         rows.into_iter()
-            .map(|(id, etype, lt, sid, tid, st, tt, status, tenant, meta, cat, uat, dat)| {
-                Self::row_to_link(id, etype, lt, sid, tid, st, tt, status, tenant, meta, cat, uat, dat)
-            })
+            .map(
+                |(id, etype, lt, sid, tid, st, tt, status, tenant, meta, cat, uat, dat)| {
+                    Self::row_to_link(
+                        id, etype, lt, sid, tid, st, tt, status, tenant, meta, cat, uat, dat,
+                    )
+                },
+            )
             .collect()
     }
 
@@ -567,8 +595,7 @@ impl LinkService for MysqlLinkService {
         }
         sql.push_str(" ORDER BY created_at DESC");
 
-        let mut query = sqlx::query_as::<_, LinkTuple>(&sql)
-            .bind(target_id.to_string());
+        let mut query = sqlx::query_as::<_, LinkTuple>(&sql).bind(target_id.to_string());
 
         if let Some(lt) = link_type {
             query = query.bind(lt);
@@ -580,9 +607,13 @@ impl LinkService for MysqlLinkService {
             .map_err(|e| anyhow!("Failed to find links by target: {}", e))?;
 
         rows.into_iter()
-            .map(|(id, etype, lt, sid, tid, st, tt, status, tenant, meta, cat, uat, dat)| {
-                Self::row_to_link(id, etype, lt, sid, tid, st, tt, status, tenant, meta, cat, uat, dat)
-            })
+            .map(
+                |(id, etype, lt, sid, tid, st, tt, status, tenant, meta, cat, uat, dat)| {
+                    Self::row_to_link(
+                        id, etype, lt, sid, tid, st, tt, status, tenant, meta, cat, uat, dat,
+                    )
+                },
+            )
             .collect()
     }
 

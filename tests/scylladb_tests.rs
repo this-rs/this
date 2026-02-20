@@ -78,19 +78,16 @@ async fn init_scylla_env() -> &'static ScyllaTestEnv {
         )
         .await;
 
-        match connect {
-            Ok(Ok(s)) => {
-                let ping = tokio::time::timeout(
-                    std::time::Duration::from_secs(5),
-                    s.query_unpaged("SELECT now() FROM system.local", ()),
-                )
-                .await;
-                if matches!(ping, Ok(Ok(_))) {
-                    session = Some(s);
-                    break;
-                }
+        if let Ok(Ok(s)) = connect {
+            let ping = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                s.query_unpaged("SELECT now() FROM system.local", ()),
+            )
+            .await;
+            if matches!(ping, Ok(Ok(_))) {
+                session = Some(s);
+                break;
             }
-            _ => {}
         }
 
         if attempt % 10 == 0 && attempt > 0 {

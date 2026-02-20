@@ -24,11 +24,11 @@
 
 use crate::core::link::LinkEntity;
 use crate::core::{Data, DataService, LinkService};
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use neo4rs::{BoltMap, BoltString, BoltType, Graph, Node, query};
-use serde::de::DeserializeOwned;
 use serde::Serialize;
+use serde::de::DeserializeOwned;
 use uuid::Uuid;
 
 // ---------------------------------------------------------------------------
@@ -66,8 +66,8 @@ fn json_value_to_bolt(value: &serde_json::Value) -> BoltType {
 /// All scalar fields become typed properties. Null fields are included
 /// as BoltType::Null. A `__data` property is added with the full JSON string.
 fn entity_to_bolt_props<T: Serialize>(entity: &T) -> Result<BoltType> {
-    let json = serde_json::to_value(entity)
-        .map_err(|e| anyhow!("Failed to serialize entity: {}", e))?;
+    let json =
+        serde_json::to_value(entity).map_err(|e| anyhow!("Failed to serialize entity: {}", e))?;
 
     let obj = json
         .as_object()
@@ -107,10 +107,10 @@ fn parse_search_value(value: &str) -> BoltType {
             if let Ok(i) = value.parse::<i64>() {
                 return BoltType::from(i);
             }
-            if value.contains('.') {
-                if let Ok(f) = value.parse::<f64>() {
-                    return BoltType::from(f);
-                }
+            if value.contains('.')
+                && let Ok(f) = value.parse::<f64>()
+            {
+                return BoltType::from(f);
             }
             BoltType::from(value.to_string())
         }
@@ -181,10 +181,7 @@ impl<T: Data + Serialize + DeserializeOwned> Neo4jDataService<T> {
             .map_err(|e| anyhow!("Failed to create uniqueness constraint: {}", e))?;
 
         // Index on name for search
-        let name_idx = format!(
-            "CREATE INDEX IF NOT EXISTS FOR (n:`{}`) ON (n.name)",
-            label
-        );
+        let name_idx = format!("CREATE INDEX IF NOT EXISTS FOR (n:`{}`) ON (n.name)", label);
         self.graph
             .run(query(&name_idx))
             .await
@@ -238,10 +235,7 @@ impl<T: Data + Serialize + DeserializeOwned> DataService<T> for Neo4jDataService
     }
 
     async fn get(&self, id: &Uuid) -> Result<Option<T>> {
-        let cypher = format!(
-            "MATCH (n:`{}` {{id: $id}}) RETURN n",
-            Self::label()
-        );
+        let cypher = format!("MATCH (n:`{}` {{id: $id}}) RETURN n", Self::label());
 
         let mut result = self
             .graph
@@ -324,10 +318,7 @@ impl<T: Data + Serialize + DeserializeOwned> DataService<T> for Neo4jDataService
     }
 
     async fn delete(&self, id: &Uuid) -> Result<()> {
-        let cypher = format!(
-            "MATCH (n:`{}` {{id: $id}}) DELETE n",
-            Self::label()
-        );
+        let cypher = format!("MATCH (n:`{}` {{id: $id}}) DELETE n", Self::label());
 
         self.graph
             .run(query(&cypher).param("id", id.to_string()))
@@ -439,9 +430,7 @@ impl LinkService for Neo4jLinkService {
 
         let mut result = self
             .graph
-            .execute(
-                query("CREATE (l:`_Link`) SET l = $props RETURN l").param("props", props),
-            )
+            .execute(query("CREATE (l:`_Link`) SET l = $props RETURN l").param("props", props))
             .await
             .map_err(|e| anyhow!("Failed to create link: {}", e))?;
 
@@ -461,9 +450,7 @@ impl LinkService for Neo4jLinkService {
     async fn get(&self, id: &Uuid) -> Result<Option<LinkEntity>> {
         let mut result = self
             .graph
-            .execute(
-                query("MATCH (l:`_Link` {id: $id}) RETURN l").param("id", id.to_string()),
-            )
+            .execute(query("MATCH (l:`_Link` {id: $id}) RETURN l").param("id", id.to_string()))
             .await
             .map_err(|e| anyhow!("Failed to get link: {}", e))?;
 
@@ -619,10 +606,8 @@ impl LinkService for Neo4jLinkService {
         let eid = entity_id.to_string();
         self.graph
             .run(
-                query(
-                    "MATCH (l:`_Link`) WHERE l.source_id = $eid OR l.target_id = $eid DELETE l",
-                )
-                .param("eid", eid),
+                query("MATCH (l:`_Link`) WHERE l.source_id = $eid OR l.target_id = $eid DELETE l")
+                    .param("eid", eid),
             )
             .await
             .map_err(|e| anyhow!("Failed to delete links by entity: {}", e))?;

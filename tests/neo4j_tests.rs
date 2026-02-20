@@ -66,19 +66,16 @@ async fn init_neo4j_env() -> &'static Neo4jTestEnv {
         )
         .await;
 
-        match connect {
-            Ok(Ok(g)) => {
-                let ping = tokio::time::timeout(
-                    std::time::Duration::from_secs(5),
-                    g.run(neo4rs::query("RETURN 1")),
-                )
-                .await;
-                if matches!(ping, Ok(Ok(_))) {
-                    graph = Some(g);
-                    break;
-                }
+        if let Ok(Ok(g)) = connect {
+            let ping = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                g.run(neo4rs::query("RETURN 1")),
+            )
+            .await;
+            if matches!(ping, Ok(Ok(_))) {
+                graph = Some(g);
+                break;
             }
-            _ => {}
         }
         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
     }
