@@ -436,7 +436,12 @@ macro_rules! data_service_tests {
             ///
             /// Requires the service to be `Clone + Send + 'static` (which is the
             /// standard pattern: Clone shares the backing store via Arc).
-            #[tokio::test]
+            ///
+            /// Uses multi-thread runtime because `tokio::spawn` with concurrent
+            /// database connections (neo4rs pool) can deadlock on a single-thread
+            /// runtime: the RowStream holds a pooled connection until dropped,
+            /// starving the second task that awaits a connection from the same pool.
+            #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
             async fn test_concurrent_access() {
                 let service = $factory;
                 let s1 = service.clone();
@@ -450,8 +455,15 @@ macro_rules! data_service_tests {
                 let h1 = tokio::spawn(async move { s1.create(e1).await });
                 let h2 = tokio::spawn(async move { s2.create(e2).await });
 
-                h1.await.unwrap().unwrap();
-                h2.await.unwrap().unwrap();
+                let (r1, r2) = tokio::time::timeout(
+                    std::time::Duration::from_secs(30),
+                    async { tokio::try_join!(h1, h2).unwrap() },
+                )
+                .await
+                .expect("Concurrent creates timed out after 30s — possible deadlock");
+
+                r1.unwrap();
+                r2.unwrap();
 
                 let all = service.list().await.unwrap();
                 assert_eq!(
