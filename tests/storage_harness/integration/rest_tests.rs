@@ -35,7 +35,7 @@ macro_rules! rest_integration_tests {
             use std::sync::Arc;
             use this::core::service::DataService;
 
-            fn make_server() -> TestServer {
+            async fn make_server() -> TestServer {
                 let data_service = $data_factory;
                 let ds: Arc<dyn DataService<TestDataEntity> + Send + Sync> = Arc::new(data_service);
                 let router = storage_harness::integration::build_test_router(ds);
@@ -48,7 +48,7 @@ macro_rules! rest_integration_tests {
 
             #[tokio::test]
             async fn test_rest_create() {
-                let server = make_server();
+                let server = make_server().await;
 
                 let response = server
                     .post("/test_data_entities")
@@ -81,7 +81,7 @@ macro_rules! rest_integration_tests {
 
             #[tokio::test]
             async fn test_rest_get() {
-                let server = make_server();
+                let server = make_server().await;
 
                 // Create first
                 let create_resp = server
@@ -119,7 +119,7 @@ macro_rules! rest_integration_tests {
 
             #[tokio::test]
             async fn test_rest_list() {
-                let server = make_server();
+                let server = make_server().await;
 
                 // Create 3 entities
                 for name in &["Alpha", "Beta", "Gamma"] {
@@ -150,7 +150,7 @@ macro_rules! rest_integration_tests {
 
             #[tokio::test]
             async fn test_rest_update() {
-                let server = make_server();
+                let server = make_server().await;
 
                 // Create
                 let create_resp = server
@@ -193,7 +193,7 @@ macro_rules! rest_integration_tests {
 
             #[tokio::test]
             async fn test_rest_delete() {
-                let server = make_server();
+                let server = make_server().await;
 
                 // Create
                 let create_resp = server
@@ -229,7 +229,7 @@ macro_rules! rest_integration_tests {
 
             #[tokio::test]
             async fn test_rest_list_pagination() {
-                let server = make_server();
+                let server = make_server().await;
 
                 // Create 5 entities
                 for i in 0..5 {
@@ -268,7 +268,7 @@ macro_rules! rest_integration_tests {
 
             #[tokio::test]
             async fn test_rest_list_filter() {
-                let server = make_server();
+                let server = make_server().await;
 
                 // Create active and inactive entities
                 server
@@ -303,7 +303,7 @@ macro_rules! rest_integration_tests {
 
             #[tokio::test]
             async fn test_rest_list_sort() {
-                let server = make_server();
+                let server = make_server().await;
 
                 // Create entities with different names
                 for name in &["Charlie", "Alice", "Bob"] {
@@ -339,7 +339,7 @@ macro_rules! rest_integration_tests {
 
             #[tokio::test]
             async fn test_rest_error_not_found() {
-                let server = make_server();
+                let server = make_server().await;
                 let fake_id = uuid::Uuid::new_v4();
 
                 let resp = server
@@ -355,7 +355,7 @@ macro_rules! rest_integration_tests {
 
             #[tokio::test]
             async fn test_rest_error_invalid_uuid() {
-                let server = make_server();
+                let server = make_server().await;
 
                 let resp = server
                     .get("/test_data_entities/not-a-valid-uuid")

@@ -58,10 +58,13 @@ struct EntityRow {
 }
 
 /// Common entity fields stored in dedicated columns (excluded from JSONB data).
+///
+/// Note: `entity_type` and `type` are intentionally NOT in this list.
+/// They are preserved in the JSONB `data` column so that the original
+/// `entity_type()` value survives the round-trip (the SQL column uses
+/// `resource_name_singular()` for query scoping, which may differ).
 const ENTITY_COMMON_FIELDS: &[&str] = &[
     "id",
-    "entity_type",
-    "type", // serde rename alias used by some entity types
     "name",
     "status",
     "tenant_id",
@@ -171,15 +174,22 @@ impl<T: Data + Serialize + DeserializeOwned> PostgresDataService<T> {
             serde_json::json!({})
         };
 
-        // Merge common fields back into the JSON
+        // Merge common fields back into the JSON.
+        // entity_type/type are already in the JSONB (preserved from the original entity),
+        // so only inject them as fallback if missing.
         if let Some(obj) = json.as_object_mut() {
             obj.insert("id".into(), serde_json::to_value(row.id)?);
-            obj.insert(
-                "entity_type".into(),
-                serde_json::to_value(&row.entity_type)?,
-            );
-            // Also set "type" for entities using #[serde(rename = "type")]
-            obj.insert("type".into(), serde_json::to_value(&row.entity_type)?);
+            // Only inject entity_type/type if not already present in JSONB
+            // (the JSONB preserves the original value from the entity)
+            if !obj.contains_key("entity_type") {
+                obj.insert(
+                    "entity_type".into(),
+                    serde_json::to_value(&row.entity_type)?,
+                );
+            }
+            if !obj.contains_key("type") {
+                obj.insert("type".into(), serde_json::to_value(&row.entity_type)?);
+            }
             obj.insert("name".into(), serde_json::to_value(&row.name)?);
             obj.insert("status".into(), serde_json::to_value(&row.status)?);
             obj.insert("created_at".into(), serde_json::to_value(row.created_at)?);
@@ -489,22 +499,22 @@ impl LinkService for PostgresLinkService {
 
     /// Find links by source entity, with optional filters.
     ///
-    /// Dynamically builds WHERE clauses for link_type and target_type filters.
+    /// Dynamically builds WHERE clauses for link_type filter.
+    ///
+    /// **Note:** `target_type` is currently ignored because `LinkEntity` does not
+    /// carry entity-type metadata — the `target_type` column is always NULL.
+    /// This matches the `InMemoryLinkService` behavior. When/if `LinkEntity`
+    /// gains a `target_type` field, re-enable the SQL filter here.
     async fn find_by_source(
         &self,
         source_id: &Uuid,
         link_type: Option<&str>,
-        target_type: Option<&str>,
+        _target_type: Option<&str>,
     ) -> Result<Vec<LinkEntity>> {
         let mut sql = String::from("SELECT * FROM links WHERE source_id = $1");
-        let mut param_idx = 2u32;
 
         if link_type.is_some() {
-            sql.push_str(&format!(" AND link_type = ${}", param_idx));
-            param_idx += 1;
-        }
-        if target_type.is_some() {
-            sql.push_str(&format!(" AND target_type = ${}", param_idx));
+            sql.push_str(" AND link_type = $2");
         }
         sql.push_str(" ORDER BY created_at DESC");
 
@@ -512,9 +522,6 @@ impl LinkService for PostgresLinkService {
 
         if let Some(lt) = link_type {
             query = query.bind(lt);
-        }
-        if let Some(tt) = target_type {
-            query = query.bind(tt);
         }
 
         let rows = query
@@ -527,22 +534,22 @@ impl LinkService for PostgresLinkService {
 
     /// Find links by target entity, with optional filters.
     ///
-    /// Dynamically builds WHERE clauses for link_type and source_type filters.
+    /// Dynamically builds WHERE clauses for link_type filter.
+    ///
+    /// **Note:** `source_type` is currently ignored because `LinkEntity` does not
+    /// carry entity-type metadata — the `source_type` column is always NULL.
+    /// This matches the `InMemoryLinkService` behavior. When/if `LinkEntity`
+    /// gains a `source_type` field, re-enable the SQL filter here.
     async fn find_by_target(
         &self,
         target_id: &Uuid,
         link_type: Option<&str>,
-        source_type: Option<&str>,
+        _source_type: Option<&str>,
     ) -> Result<Vec<LinkEntity>> {
         let mut sql = String::from("SELECT * FROM links WHERE target_id = $1");
-        let mut param_idx = 2u32;
 
         if link_type.is_some() {
-            sql.push_str(&format!(" AND link_type = ${}", param_idx));
-            param_idx += 1;
-        }
-        if source_type.is_some() {
-            sql.push_str(&format!(" AND source_type = ${}", param_idx));
+            sql.push_str(" AND link_type = $2");
         }
         sql.push_str(" ORDER BY created_at DESC");
 
@@ -550,9 +557,6 @@ impl LinkService for PostgresLinkService {
 
         if let Some(lt) = link_type {
             query = query.bind(lt);
-        }
-        if let Some(st) = source_type {
-            query = query.bind(st);
         }
 
         let rows = query
