@@ -517,7 +517,10 @@ mod tests {
         service.create(TestDataEntity::new("Alice")).await.unwrap();
 
         // Unknown field returns no results (field_value returns None)
-        let results = service.search("nonexistent_field", "anything").await.unwrap();
+        let results = service
+            .search("nonexistent_field", "anything")
+            .await
+            .unwrap();
         assert!(results.is_empty());
     }
 
