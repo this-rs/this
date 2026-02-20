@@ -335,6 +335,41 @@ impl MongoLinkService {
         self.database.collection("links")
     }
 
+    /// Create indexes on the links collection for efficient querying.
+    ///
+    /// Creates the following indexes:
+    /// - `source_id: 1` — fast `find_by_source` lookups
+    /// - `target_id: 1` — fast `find_by_target` lookups
+    /// - `source_id: 1, link_type: 1` — fast filtered source queries
+    /// - `target_id: 1, link_type: 1` — fast filtered target queries
+    ///
+    /// This method is idempotent — safe to call on every startup.
+    pub async fn ensure_indexes(&self) -> Result<()> {
+        use mongodb::IndexModel;
+
+        let indexes = vec![
+            IndexModel::builder()
+                .keys(doc! { "source_id": 1 })
+                .build(),
+            IndexModel::builder()
+                .keys(doc! { "target_id": 1 })
+                .build(),
+            IndexModel::builder()
+                .keys(doc! { "source_id": 1, "link_type": 1 })
+                .build(),
+            IndexModel::builder()
+                .keys(doc! { "target_id": 1, "link_type": 1 })
+                .build(),
+        ];
+
+        self.collection()
+            .create_indexes(indexes)
+            .await
+            .map_err(|e| anyhow!("Failed to create indexes on links collection: {}", e))?;
+
+        Ok(())
+    }
+
     /// Convert a `LinkEntity` into a MongoDB document.
     fn link_to_document(link: &LinkEntity) -> Result<Document> {
         let json = serde_json::to_value(link)
