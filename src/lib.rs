@@ -90,7 +90,7 @@ pub mod prelude {
     };
 
     // === Storage ===
-    pub use crate::storage::InMemoryLinkService;
+    pub use crate::storage::{InMemoryDataService, InMemoryLinkService};
     #[cfg(feature = "dynamodb")]
     pub use crate::storage::{DynamoDBDataService, DynamoDBLinkService};
 
