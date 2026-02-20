@@ -212,7 +212,10 @@ jobs:
         run: cargo install cargo-audit
 
       - name: Run security audit
-        run: cargo audit
+        # Ignore known unfixable transitive advisories:
+        # RUSTSEC-2023-0071: RSA Marvin Attack (rsa via sqlx-mysql) - no fix available
+        # RUSTSEC-2025-0111: tokio-tar PAX headers (testcontainers) - no fix available
+        run: cargo audit --ignore RUSTSEC-2023-0071 --ignore RUSTSEC-2025-0111
 
   # Vérification de la documentation
   docs:
