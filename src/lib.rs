@@ -93,6 +93,8 @@ pub mod prelude {
     #[cfg(feature = "dynamodb")]
     pub use crate::storage::{DynamoDBDataService, DynamoDBLinkService};
     pub use crate::storage::{InMemoryDataService, InMemoryLinkService};
+    #[cfg(feature = "postgres")]
+    pub use crate::storage::{PostgresDataService, PostgresLinkService};
 
     // === Config ===
     pub use crate::config::{EntityAuthConfig, EntityConfig, LinksConfig, ValidationRule};
