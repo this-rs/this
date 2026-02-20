@@ -6,4 +6,4 @@ pub mod in_memory;
 
 #[cfg(feature = "dynamodb")]
 pub use dynamodb::{DynamoDBDataService, DynamoDBLinkService};
-pub use in_memory::InMemoryLinkService;
+pub use in_memory::{InMemoryDataService, InMemoryLinkService};
