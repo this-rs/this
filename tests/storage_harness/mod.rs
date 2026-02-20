@@ -14,6 +14,9 @@
 
 #![allow(dead_code)]
 
+#[macro_use]
+pub mod data_service_tests;
+
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
