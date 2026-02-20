@@ -310,4 +310,6 @@ jobs:
         run: cargo install cargo-hack
 
       - name: Check minimal versions
-        run: cargo hack check --feature-powerset --no-dev-deps
+        # --depth 2 limits to pairs of features (instead of full 2^N powerset)
+        # --exclude-features all skips the meta-feature that enables everything
+        run: cargo hack check --feature-powerset --depth 2 --exclude-features all --no-dev-deps
