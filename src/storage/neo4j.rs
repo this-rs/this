@@ -158,6 +158,50 @@ impl<T: Data + Serialize + DeserializeOwned> Neo4jDataService<T> {
     fn label() -> &'static str {
         T::resource_name_singular()
     }
+
+    /// Create indexes and constraints for this entity type.
+    ///
+    /// Creates:
+    /// - Uniqueness constraint on `id` (also serves as an index)
+    /// - Index on `name` for common lookups
+    /// - Index on `entity_type` for type-scoped queries
+    ///
+    /// This method is idempotent — safe to call on every startup.
+    pub async fn ensure_indexes(&self) -> Result<()> {
+        let label = Self::label();
+
+        // Uniqueness constraint on id (implicitly creates an index)
+        let constraint = format!(
+            "CREATE CONSTRAINT IF NOT EXISTS FOR (n:`{}`) REQUIRE n.id IS UNIQUE",
+            label
+        );
+        self.graph
+            .run(query(&constraint))
+            .await
+            .map_err(|e| anyhow!("Failed to create uniqueness constraint: {}", e))?;
+
+        // Index on name for search
+        let name_idx = format!(
+            "CREATE INDEX IF NOT EXISTS FOR (n:`{}`) ON (n.name)",
+            label
+        );
+        self.graph
+            .run(query(&name_idx))
+            .await
+            .map_err(|e| anyhow!("Failed to create name index: {}", e))?;
+
+        // Index on entity_type for filtered listing
+        let type_idx = format!(
+            "CREATE INDEX IF NOT EXISTS FOR (n:`{}`) ON (n.entity_type)",
+            label
+        );
+        self.graph
+            .run(query(&type_idx))
+            .await
+            .map_err(|e| anyhow!("Failed to create entity_type index: {}", e))?;
+
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -356,6 +400,35 @@ impl Neo4jLinkService {
 
     pub fn graph(&self) -> &Graph {
         &self.graph
+    }
+
+    /// Create indexes on the `_Link` nodes for efficient querying.
+    ///
+    /// Creates:
+    /// - Uniqueness constraint on `id`
+    /// - Index on `source_id` for `find_by_source`
+    /// - Index on `target_id` for `find_by_target`
+    /// - Composite index on `source_id, link_type` for filtered queries
+    /// - Composite index on `target_id, link_type` for filtered queries
+    ///
+    /// This method is idempotent — safe to call on every startup.
+    pub async fn ensure_indexes(&self) -> Result<()> {
+        let queries = [
+            "CREATE CONSTRAINT IF NOT EXISTS FOR (l:`_Link`) REQUIRE l.id IS UNIQUE",
+            "CREATE INDEX IF NOT EXISTS FOR (l:`_Link`) ON (l.source_id)",
+            "CREATE INDEX IF NOT EXISTS FOR (l:`_Link`) ON (l.target_id)",
+            "CREATE INDEX IF NOT EXISTS FOR (l:`_Link`) ON (l.source_id, l.link_type)",
+            "CREATE INDEX IF NOT EXISTS FOR (l:`_Link`) ON (l.target_id, l.link_type)",
+        ];
+
+        for cypher in &queries {
+            self.graph
+                .run(query(cypher))
+                .await
+                .map_err(|e| anyhow!("Failed to create _Link index: {}", e))?;
+        }
+
+        Ok(())
     }
 }
 
