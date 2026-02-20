@@ -290,26 +290,5 @@ jobs:
         if: runner.os == 'Linux'
         run: cargo test --all-features --test '*' -- --test-threads=1
 
-  # Vérification minimum des versions de dépendances
-  minimal-versions:
-    name: Minimal Versions
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v6
-
-      - name: Install protoc
-        uses: arduino/setup-protoc@v3
-        with:
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@nightly
-
-      - name: Install cargo-hack
-        run: cargo install cargo-hack
-
-      - name: Check minimal versions
-        # --depth 2 limits to pairs of features (instead of full 2^N powerset)
-        # --exclude-features all skips the meta-feature that enables everything
-        run: cargo hack check --feature-powerset --depth 2 --exclude-features all --no-dev-deps
+  # Note: Minimal Versions (feature-powerset) check moved to release.yml
+  # as it's too slow for PR/push CI (~10+ min) and only needed before release.
