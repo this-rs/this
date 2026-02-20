@@ -1,0 +1,13 @@
+# cargo-audit configuration
+# Ignore known advisories in transitive dependencies with no fix available.
+
+[advisories]
+ignore = [
+    # RSA Marvin Attack (medium severity) — transitive via sqlx-mysql → rsa 0.9.x
+    # No fixed version available upstream.
+    "RUSTSEC-2023-0071",
+
+    # tokio-tar PAX extended header parsing — transitive via testcontainers
+    # Only affects dev/test dependencies. No fixed version available.
+    "RUSTSEC-2025-0111",
+]

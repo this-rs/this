@@ -27,8 +27,12 @@ serde_json = "1.0"
 serde_yaml = "0.9"
 
 # Database (optional features)
-# TODO: Re-enable when moving to ScyllaDB/DynamoDB
-# sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "postgres", "uuid", "chrono"], optional = true }
+sqlx = { version = "0.8", optional = true, default-features = false }
+mongodb = { version = "3", optional = true }
+neo4rs = { version = "0.8", optional = true }
+scylla = { version = "1.4", optional = true }
+heed = { version = "0.22", optional = true }
+bincode = { version = "2", optional = true, features = ["serde"] }
 
 # DynamoDB support
 aws-sdk-dynamodb = { version = "1.93", optional = true }
@@ -69,16 +73,24 @@ tokio-test = "0.4"
 axum-test = "18.1"
 tokio-tungstenite = "0.28"
 futures-util = "0.3"
+testcontainers = "0.23"
+testcontainers-modules = { version = "0.11", features = ["postgres", "mongo", "neo4j", "mysql"] }
+tempfile = "3"
 
 [features]
 default = ["in-memory"]
 in-memory = []
 dynamodb = ["aws-sdk-dynamodb", "serde_dynamo"]
+postgres = ["sqlx", "sqlx/macros", "sqlx/runtime-tokio-rustls", "sqlx/postgres", "sqlx/uuid", "sqlx/chrono", "sqlx/json", "sqlx/migrate"]
+mongodb_backend = ["mongodb"]
+neo4j = ["neo4rs"]
+scylladb = ["scylla"]
+mysql = ["sqlx", "sqlx/macros", "sqlx/runtime-tokio-rustls", "sqlx/mysql", "sqlx/uuid", "sqlx/chrono", "sqlx/json", "sqlx/migrate"]
+lmdb = ["heed"]
 graphql = ["async-graphql", "async-graphql-axum", "graphql-parser"]
 grpc = ["tonic", "tonic-prost", "prost", "prost-types"]
 websocket = []
-# postgres = ["sqlx"]  # Disabled until ScyllaDB implementation
-all = ["in-memory", "dynamodb", "graphql", "grpc", "websocket"]
+all = ["in-memory", "dynamodb", "postgres", "mongodb_backend", "neo4j", "scylladb", "mysql", "lmdb", "graphql", "grpc", "websocket"]
 
 [lib]
 name = "this"
