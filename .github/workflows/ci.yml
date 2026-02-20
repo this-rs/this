@@ -53,8 +53,11 @@ jobs:
           path: target
           key: ${{ runner.os }}-cargo-build-target-${{ matrix.rust }}-${{ hashFiles('**/Cargo.lock') }}
 
-      - name: Run tests
-        run: cargo test --all-features --verbose
+      - name: Run unit tests
+        run: cargo test --lib --all-features --verbose
+
+      - name: Run integration tests (sequential for DB isolation)
+        run: cargo test --all-features --test '*' -- --test-threads=1
 
       - name: Run doc tests
         run: cargo test --doc --all-features
@@ -89,7 +92,7 @@ jobs:
           restore-keys: ${{ runner.os }}-cargo-coverage-
 
       - name: Generate code coverage
-        run: cargo llvm-cov --all-features --workspace --lcov --output-path lcov.info
+        run: cargo llvm-cov --all-features --workspace --lcov --output-path lcov.info -- --test-threads=1
 
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v5
@@ -279,7 +282,7 @@ jobs:
         run: cargo build --all-features
 
       - name: Run tests
-        run: cargo test --all-features
+        run: cargo test --all-features -- --test-threads=1
 
   # Vérification minimum des versions de dépendances
   minimal-versions:
