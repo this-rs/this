@@ -8,15 +8,17 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
+permissions:
+  contents: write
+
 jobs:
-  # Vérification des versions minimales de dépendances (feature-powerset)
-  # Bloque la release si des combinaisons de features sont incompatibles
+  # ── Feature compatibility check (gates the release) ────────────────
   minimal-versions:
     name: Minimal Versions Check
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@v4
 
       - name: Install protoc
         uses: arduino/setup-protoc@v3
@@ -34,100 +36,46 @@ jobs:
         # --exclude-features all skips the meta-feature that enables everything
         run: cargo hack check --feature-powerset --depth 2 --exclude-features all --no-dev-deps
 
-  # Créer la release GitHub
+  # ── Create GitHub Release ──────────────────────────────────────────
   create-release:
     name: Create GitHub Release
     runs-on: ubuntu-latest
     needs: minimal-versions
-    outputs:
-      upload_url: ${{ steps.create_release.outputs.upload_url }}
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6
-
-      - name: Extract release notes
-        id: extract_notes
-        run: |
-          VERSION=${GITHUB_REF#refs/tags/v}
-          echo "version=$VERSION" >> $GITHUB_OUTPUT
+        uses: actions/checkout@v4
 
       - name: Create Release
-        id: create_release
-        uses: actions/create-release@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.ref }}
-          release_name: Release ${{ github.ref }}
+          tag_name: ${{ github.ref_name }}
+          name: Release ${{ github.ref_name }}
           draft: false
           prerelease: false
+          generate_release_notes: true
 
-  # Publier sur crates.io
+  # ── Publish to crates.io ───────────────────────────────────────────
   publish-crate:
     name: Publish to crates.io
     runs-on: ubuntu-latest
     needs: create-release
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@v4
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Cache cargo registry
-        uses: actions/cache@v5
+      - name: Cache cargo
+        uses: actions/cache@v4
         with:
-          path: ~/.cargo/registry
-          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
-
-      - name: Cache cargo index
-        uses: actions/cache@v5
-        with:
-          path: ~/.cargo/git
-          key: ${{ runner.os }}-cargo-index-${{ hashFiles('**/Cargo.lock') }}
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-publish-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Verify package
         run: cargo package --allow-dirty
 
       - name: Publish to crates.io
         run: cargo publish --token ${{ secrets.CARGO_TOKEN }}
-        continue-on-error: true
-
-  # Build binaries pour différentes plateformes (optionnel, si vous avez des binaires)
-  build-binaries:
-    name: Build Release Binaries
-    runs-on: ${{ matrix.os }}
-    needs: create-release
-    strategy:
-      matrix:
-        include:
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-            artifact_name: this-rs-linux-amd64
-          - os: ubuntu-latest
-            target: aarch64-unknown-linux-gnu
-            artifact_name: this-rs-linux-arm64
-          - os: macos-latest
-            target: x86_64-apple-darwin
-            artifact_name: this-rs-macos-amd64
-          - os: macos-latest
-            target: aarch64-apple-darwin
-            artifact_name: this-rs-macos-arm64
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
-            artifact_name: this-rs-windows-amd64.exe
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v6
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.target }}
-
-      - name: Build release binary
-        run: cargo build --release --target ${{ matrix.target }}
-
-      # Note: Adapter selon vos besoins si vous n'avez pas de binaires à distribuer
-      # Pour l'instant, ce job est optionnel pour une library
