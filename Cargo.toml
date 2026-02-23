@@ -74,7 +74,7 @@ axum-test = "18.1"
 tokio-tungstenite = "0.28"
 futures-util = "0.3"
 testcontainers = "0.23"
-testcontainers-modules = { version = "0.11", features = ["postgres", "mongo", "neo4j", "mysql"] }
+testcontainers-modules = { version = "0.15", features = ["postgres", "mongo", "neo4j", "mysql"] }
 tempfile = "3"
 
 [features]
