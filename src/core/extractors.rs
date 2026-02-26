@@ -330,3 +330,522 @@ impl RecursiveLinkExtractor {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{EntityAuthConfig, EntityConfig, LinksConfig};
+    use crate::core::LinkDefinition;
+    use crate::links::registry::LinkRouteRegistry;
+    use std::sync::Arc;
+    use uuid::Uuid;
+
+    /// Build a minimal LinksConfig + LinkRouteRegistry for testing.
+    /// Entities: user (users), order (orders), invoice (invoices)
+    /// Links: user->order (ownership), order->invoice (billing)
+    fn test_config_and_registry() -> (Arc<LinksConfig>, LinkRouteRegistry) {
+        let config = Arc::new(LinksConfig {
+            entities: vec![
+                EntityConfig {
+                    singular: "user".to_string(),
+                    plural: "users".to_string(),
+                    auth: EntityAuthConfig::default(),
+                },
+                EntityConfig {
+                    singular: "order".to_string(),
+                    plural: "orders".to_string(),
+                    auth: EntityAuthConfig::default(),
+                },
+                EntityConfig {
+                    singular: "invoice".to_string(),
+                    plural: "invoices".to_string(),
+                    auth: EntityAuthConfig::default(),
+                },
+            ],
+            links: vec![
+                LinkDefinition {
+                    link_type: "ownership".to_string(),
+                    source_type: "user".to_string(),
+                    target_type: "order".to_string(),
+                    forward_route_name: "orders-owned".to_string(),
+                    reverse_route_name: "owner".to_string(),
+                    description: None,
+                    required_fields: None,
+                    auth: None,
+                },
+                LinkDefinition {
+                    link_type: "billing".to_string(),
+                    source_type: "order".to_string(),
+                    target_type: "invoice".to_string(),
+                    forward_route_name: "invoices".to_string(),
+                    reverse_route_name: "order".to_string(),
+                    description: None,
+                    required_fields: None,
+                    auth: None,
+                },
+            ],
+            validation_rules: None,
+        });
+        let registry = LinkRouteRegistry::new(config.clone());
+        (config, registry)
+    }
+
+    // === ExtractorError Display + IntoResponse ===
+
+    #[test]
+    fn test_extractor_error_display_invalid_path() {
+        let err = ExtractorError::InvalidPath;
+        assert_eq!(err.to_string(), "Invalid path format");
+    }
+
+    #[test]
+    fn test_extractor_error_display_invalid_entity_id() {
+        let err = ExtractorError::InvalidEntityId;
+        assert_eq!(err.to_string(), "Invalid entity ID format");
+    }
+
+    #[test]
+    fn test_extractor_error_display_route_not_found() {
+        let err = ExtractorError::RouteNotFound("my-route".to_string());
+        assert_eq!(err.to_string(), "Route not found: my-route");
+    }
+
+    #[test]
+    fn test_extractor_error_display_link_not_found() {
+        let err = ExtractorError::LinkNotFound;
+        assert_eq!(err.to_string(), "Link not found");
+    }
+
+    #[test]
+    fn test_extractor_error_display_json_error() {
+        let err = ExtractorError::JsonError("bad json".to_string());
+        assert_eq!(err.to_string(), "JSON error: bad json");
+    }
+
+    #[test]
+    fn test_extractor_error_into_response_invalid_path_400() {
+        let err = ExtractorError::InvalidPath;
+        let response = err.into_response();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn test_extractor_error_into_response_invalid_entity_id_400() {
+        let err = ExtractorError::InvalidEntityId;
+        let response = err.into_response();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn test_extractor_error_into_response_route_not_found_404() {
+        let err = ExtractorError::RouteNotFound("test".to_string());
+        let response = err.into_response();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[test]
+    fn test_extractor_error_into_response_link_not_found_404() {
+        let err = ExtractorError::LinkNotFound;
+        let response = err.into_response();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[test]
+    fn test_extractor_error_into_response_json_error_400() {
+        let err = ExtractorError::JsonError("oops".to_string());
+        let response = err.into_response();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    // === LinkExtractor ===
+
+    #[test]
+    fn test_link_extractor_forward_route() {
+        let (config, registry) = test_config_and_registry();
+        let id = Uuid::new_v4();
+        let result = LinkExtractor::from_path_and_registry(
+            ("users".to_string(), id, "orders-owned".to_string()),
+            &registry,
+            &config,
+        );
+        assert!(result.is_ok());
+        let ext = result.expect("should succeed");
+        assert_eq!(ext.entity_type, "user");
+        assert_eq!(ext.entity_id, id);
+        assert_eq!(ext.link_definition.link_type, "ownership");
+        assert!(matches!(ext.direction, LinkDirection::Forward));
+    }
+
+    #[test]
+    fn test_link_extractor_reverse_route() {
+        let (config, registry) = test_config_and_registry();
+        let id = Uuid::new_v4();
+        let result = LinkExtractor::from_path_and_registry(
+            ("orders".to_string(), id, "owner".to_string()),
+            &registry,
+            &config,
+        );
+        assert!(result.is_ok());
+        let ext = result.expect("should succeed");
+        assert_eq!(ext.entity_type, "order");
+        assert!(matches!(ext.direction, LinkDirection::Reverse));
+    }
+
+    #[test]
+    fn test_link_extractor_route_not_found() {
+        let (config, registry) = test_config_and_registry();
+        let id = Uuid::new_v4();
+        let result = LinkExtractor::from_path_and_registry(
+            ("users".to_string(), id, "nonexistent".to_string()),
+            &registry,
+            &config,
+        );
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            ExtractorError::RouteNotFound(_)
+        ));
+    }
+
+    #[test]
+    fn test_link_extractor_plural_to_singular_conversion() {
+        let (config, registry) = test_config_and_registry();
+        let id = Uuid::new_v4();
+        let result = LinkExtractor::from_path_and_registry(
+            ("users".to_string(), id, "orders-owned".to_string()),
+            &registry,
+            &config,
+        );
+        let ext = result.expect("should succeed");
+        // "users" converted to "user"
+        assert_eq!(ext.entity_type, "user");
+    }
+
+    #[test]
+    fn test_link_extractor_unknown_plural_used_as_is() {
+        let (config, registry) = test_config_and_registry();
+        let id = Uuid::new_v4();
+        // "widgets" not in config → used as-is as entity_type
+        let result = LinkExtractor::from_path_and_registry(
+            ("widgets".to_string(), id, "orders-owned".to_string()),
+            &registry,
+            &config,
+        );
+        // Route resolution will likely fail since "widgets" is not a known entity
+        assert!(result.is_err());
+    }
+
+    // === DirectLinkExtractor ===
+
+    #[test]
+    fn test_direct_link_extractor_forward() {
+        let (config, registry) = test_config_and_registry();
+        let source_id = Uuid::new_v4();
+        let target_id = Uuid::new_v4();
+        let result = DirectLinkExtractor::from_path(
+            ("users".to_string(), source_id, "orders-owned".to_string(), target_id),
+            &registry,
+            &config,
+        );
+        assert!(result.is_ok());
+        let ext = result.expect("should succeed");
+        assert_eq!(ext.source_type, "user");
+        assert_eq!(ext.source_id, source_id);
+        assert_eq!(ext.target_id, target_id);
+        assert_eq!(ext.target_type, "order"); // Forward → target_type
+        assert!(matches!(ext.direction, LinkDirection::Forward));
+    }
+
+    #[test]
+    fn test_direct_link_extractor_reverse() {
+        let (config, registry) = test_config_and_registry();
+        let source_id = Uuid::new_v4();
+        let target_id = Uuid::new_v4();
+        let result = DirectLinkExtractor::from_path(
+            ("orders".to_string(), source_id, "owner".to_string(), target_id),
+            &registry,
+            &config,
+        );
+        assert!(result.is_ok());
+        let ext = result.expect("should succeed");
+        assert_eq!(ext.source_type, "order");
+        assert_eq!(ext.target_type, "user"); // Reverse → source_type
+        assert!(matches!(ext.direction, LinkDirection::Reverse));
+    }
+
+    #[test]
+    fn test_direct_link_extractor_route_not_found() {
+        let (config, registry) = test_config_and_registry();
+        let result = DirectLinkExtractor::from_path(
+            ("users".to_string(), Uuid::new_v4(), "nope".to_string(), Uuid::new_v4()),
+            &registry,
+            &config,
+        );
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            ExtractorError::RouteNotFound(_)
+        ));
+    }
+
+    // === RecursiveLinkExtractor ===
+
+    #[test]
+    fn test_recursive_too_few_segments_error() {
+        let (config, registry) = test_config_and_registry();
+        let result = RecursiveLinkExtractor::from_segments(
+            vec!["users".to_string()],
+            &registry,
+            &config,
+        );
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), ExtractorError::InvalidPath));
+    }
+
+    #[test]
+    fn test_recursive_entity_type_and_id() {
+        let (config, registry) = test_config_and_registry();
+        let id = Uuid::new_v4();
+        let result = RecursiveLinkExtractor::from_segments(
+            vec!["users".to_string(), id.to_string()],
+            &registry,
+            &config,
+        );
+        assert!(result.is_ok());
+        let ext = result.expect("should succeed");
+        assert_eq!(ext.chain.len(), 1);
+        assert_eq!(ext.chain[0].entity_type, "user");
+        assert_eq!(ext.chain[0].entity_id, id);
+    }
+
+    #[test]
+    fn test_recursive_invalid_uuid_error() {
+        let (config, registry) = test_config_and_registry();
+        let result = RecursiveLinkExtractor::from_segments(
+            vec!["users".to_string(), "not-a-uuid".to_string()],
+            &registry,
+            &config,
+        );
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            ExtractorError::InvalidEntityId
+        ));
+    }
+
+    #[test]
+    fn test_recursive_unknown_entity_type_error() {
+        let (config, registry) = test_config_and_registry();
+        let result = RecursiveLinkExtractor::from_segments(
+            vec!["widgets".to_string(), Uuid::new_v4().to_string()],
+            &registry,
+            &config,
+        );
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), ExtractorError::InvalidPath));
+    }
+
+    #[test]
+    fn test_recursive_entity_id_route_forward() {
+        let (config, registry) = test_config_and_registry();
+        let user_id = Uuid::new_v4();
+        let result = RecursiveLinkExtractor::from_segments(
+            vec![
+                "users".to_string(),
+                user_id.to_string(),
+                "orders-owned".to_string(),
+            ],
+            &registry,
+            &config,
+        );
+        assert!(result.is_ok());
+        let ext = result.expect("should succeed");
+        // Chain: user(user_id, route=orders-owned) → order(nil, list)
+        assert_eq!(ext.chain.len(), 2);
+        assert_eq!(ext.chain[0].entity_type, "user");
+        assert_eq!(ext.chain[0].entity_id, user_id);
+        assert_eq!(ext.chain[0].route_name.as_deref(), Some("orders-owned"));
+        assert_eq!(ext.chain[0].link_definition.as_ref().expect("should have link_def").link_type, "ownership");
+        assert_eq!(ext.chain[1].entity_type, "order");
+        assert!(ext.chain[1].entity_id.is_nil()); // list segment
+    }
+
+    #[test]
+    fn test_recursive_multi_level_chain() {
+        let (config, registry) = test_config_and_registry();
+        let user_id = Uuid::new_v4();
+        let order_id = Uuid::new_v4();
+        let result = RecursiveLinkExtractor::from_segments(
+            vec![
+                "users".to_string(),
+                user_id.to_string(),
+                "orders-owned".to_string(),
+                order_id.to_string(),
+                "invoices".to_string(),
+            ],
+            &registry,
+            &config,
+        );
+        assert!(result.is_ok());
+        let ext = result.expect("should succeed");
+        // Chain: user(user_id) → order(order_id) → invoice(nil, list)
+        assert_eq!(ext.chain.len(), 3);
+        assert_eq!(ext.chain[0].entity_type, "user");
+        assert_eq!(ext.chain[0].entity_id, user_id);
+        assert_eq!(ext.chain[1].entity_type, "order");
+        assert_eq!(ext.chain[1].entity_id, order_id);
+        assert_eq!(ext.chain[2].entity_type, "invoice");
+        assert!(ext.is_list); // 5 segments → list
+    }
+
+    #[test]
+    fn test_recursive_multi_level_specific_item() {
+        let (config, registry) = test_config_and_registry();
+        let user_id = Uuid::new_v4();
+        let order_id = Uuid::new_v4();
+        let invoice_id = Uuid::new_v4();
+        let result = RecursiveLinkExtractor::from_segments(
+            vec![
+                "users".to_string(),
+                user_id.to_string(),
+                "orders-owned".to_string(),
+                order_id.to_string(),
+                "invoices".to_string(),
+                invoice_id.to_string(),
+            ],
+            &registry,
+            &config,
+        );
+        assert!(result.is_ok());
+        let ext = result.expect("should succeed");
+        assert_eq!(ext.chain.len(), 3);
+        assert_eq!(ext.chain[2].entity_id, invoice_id);
+        assert!(!ext.is_list); // 6 segments → specific item
+    }
+
+    #[test]
+    fn test_recursive_route_not_found_mid_chain() {
+        let (config, registry) = test_config_and_registry();
+        let result = RecursiveLinkExtractor::from_segments(
+            vec![
+                "users".to_string(),
+                Uuid::new_v4().to_string(),
+                "nonexistent-route".to_string(),
+            ],
+            &registry,
+            &config,
+        );
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            ExtractorError::RouteNotFound(_)
+        ));
+    }
+
+    #[test]
+    fn test_recursive_reverse_direction_propagation() {
+        let (config, registry) = test_config_and_registry();
+        let order_id = Uuid::new_v4();
+        // orders/{id}/owner → reverse → navigates to user
+        let result = RecursiveLinkExtractor::from_segments(
+            vec![
+                "orders".to_string(),
+                order_id.to_string(),
+                "owner".to_string(),
+            ],
+            &registry,
+            &config,
+        );
+        assert!(result.is_ok());
+        let ext = result.expect("should succeed");
+        assert_eq!(ext.chain.len(), 2);
+        assert_eq!(ext.chain[0].entity_type, "order");
+        assert!(matches!(ext.chain[0].link_direction, Some(LinkDirection::Reverse)));
+        // Reverse direction → target entity is source_type (user)
+        assert_eq!(ext.chain[1].entity_type, "user");
+    }
+
+    // === final_target / final_link_def / penultimate_segment ===
+
+    #[test]
+    fn test_final_target_returns_last_segment() {
+        let (config, registry) = test_config_and_registry();
+        let user_id = Uuid::new_v4();
+        let ext = RecursiveLinkExtractor::from_segments(
+            vec![
+                "users".to_string(),
+                user_id.to_string(),
+                "orders-owned".to_string(),
+            ],
+            &registry,
+            &config,
+        )
+        .expect("should succeed");
+        let (id, entity_type) = ext.final_target();
+        assert_eq!(entity_type, "order");
+        assert!(id.is_nil()); // list target
+    }
+
+    #[test]
+    fn test_final_link_def_returns_penultimate_link() {
+        let (config, registry) = test_config_and_registry();
+        let user_id = Uuid::new_v4();
+        let ext = RecursiveLinkExtractor::from_segments(
+            vec![
+                "users".to_string(),
+                user_id.to_string(),
+                "orders-owned".to_string(),
+            ],
+            &registry,
+            &config,
+        )
+        .expect("should succeed");
+        let link_def = ext.final_link_def();
+        assert!(link_def.is_some());
+        assert_eq!(link_def.expect("should have link").link_type, "ownership");
+    }
+
+    #[test]
+    fn test_final_link_def_single_segment_returns_none() {
+        let (config, registry) = test_config_and_registry();
+        let ext = RecursiveLinkExtractor::from_segments(
+            vec!["users".to_string(), Uuid::new_v4().to_string()],
+            &registry,
+            &config,
+        )
+        .expect("should succeed");
+        assert!(ext.final_link_def().is_none());
+    }
+
+    #[test]
+    fn test_penultimate_segment_returns_correct() {
+        let (config, registry) = test_config_and_registry();
+        let user_id = Uuid::new_v4();
+        let ext = RecursiveLinkExtractor::from_segments(
+            vec![
+                "users".to_string(),
+                user_id.to_string(),
+                "orders-owned".to_string(),
+            ],
+            &registry,
+            &config,
+        )
+        .expect("should succeed");
+        let pen = ext.penultimate_segment();
+        assert!(pen.is_some());
+        assert_eq!(pen.expect("should exist").entity_type, "user");
+        assert_eq!(pen.expect("should exist").entity_id, user_id);
+    }
+
+    #[test]
+    fn test_penultimate_segment_single_segment_returns_none() {
+        let (config, registry) = test_config_and_registry();
+        let ext = RecursiveLinkExtractor::from_segments(
+            vec!["users".to_string(), Uuid::new_v4().to_string()],
+            &registry,
+            &config,
+        )
+        .expect("should succeed");
+        assert!(ext.penultimate_segment().is_none());
+    }
+}

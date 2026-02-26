@@ -104,3 +104,161 @@ where
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::body::Body;
+    use axum::extract::FromRequest;
+    use axum::http::Request;
+    use serde_json::json;
+
+    /// Dummy entity that implements ValidatableEntity for testing.
+    /// - "create" operation: requires "name" (not null), min length 2
+    /// - "update" operation: no validators (everything passes)
+    struct TestEntity;
+
+    impl ValidatableEntity for TestEntity {
+        fn validation_config(operation: &str) -> EntityValidationConfig {
+            let mut config = EntityValidationConfig::new("test_entity");
+            if operation == "create" {
+                config.add_validator("name", |field, value| {
+                    if value.is_null() {
+                        Err(format!("{} is required", field))
+                    } else {
+                        Ok(())
+                    }
+                });
+                config.add_validator("name", |field, value| {
+                    if let Some(s) = value.as_str() {
+                        if s.len() < 2 {
+                            return Err(format!("{} too short", field));
+                        }
+                    }
+                    Ok(())
+                });
+                config.add_filter("name", |_field, value| {
+                    if let Some(s) = value.as_str() {
+                        Ok(Value::String(s.trim().to_string()))
+                    } else {
+                        Ok(value)
+                    }
+                });
+            }
+            config
+        }
+    }
+
+    /// Helper: build an HTTP request with JSON body and given method.
+    fn json_request(method: &str, body: Value) -> Request<Body> {
+        Request::builder()
+            .method(method)
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap()
+    }
+
+    // === Validated::new / into_inner / Deref ===
+
+    #[test]
+    fn test_validated_new_and_into_inner() {
+        let val = json!({"name": "test"});
+        let validated = Validated::<TestEntity>::new(val.clone());
+        assert_eq!(validated.into_inner(), val);
+    }
+
+    #[test]
+    fn test_validated_deref() {
+        let val = json!({"key": 42});
+        let validated = Validated::<TestEntity>::new(val);
+        // Deref allows accessing Value methods directly
+        assert_eq!(validated["key"], 42);
+        assert!(validated.is_object());
+    }
+
+    // === FromRequest ===
+
+    #[tokio::test]
+    async fn test_from_request_post_valid_payload() {
+        let req = json_request("POST", json!({"name": "  Alice  "}));
+        let result = Validated::<TestEntity>::from_request(req, &()).await;
+        assert!(result.is_ok());
+        let validated = result.unwrap();
+        // Filter should have trimmed whitespace
+        assert_eq!(validated.0["name"], "Alice");
+    }
+
+    #[tokio::test]
+    async fn test_from_request_post_validation_failure() {
+        // "name" is null → required validator fails
+        let req = json_request("POST", json!({"name": null}));
+        let result = Validated::<TestEntity>::from_request(req, &()).await;
+        assert!(result.is_err());
+        match result {
+            Err(response) => assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY),
+            Ok(_) => panic!("expected error"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_from_request_post_too_short_after_trim() {
+        // "  a  " → trim → "a" (length 1 < 2) → fails
+        let req = json_request("POST", json!({"name": "  a  "}));
+        let result = Validated::<TestEntity>::from_request(req, &()).await;
+        assert!(result.is_err());
+        match result {
+            Err(response) => assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY),
+            Ok(_) => panic!("expected error"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_from_request_put_uses_update_operation() {
+        // "update" operation has no validators → everything passes
+        let req = json_request("PUT", json!({"name": null}));
+        let result = Validated::<TestEntity>::from_request(req, &()).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_from_request_patch_uses_update_operation() {
+        let req = json_request("PATCH", json!({"name": null}));
+        let result = Validated::<TestEntity>::from_request(req, &()).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_from_request_get_defaults_to_create_operation() {
+        // GET defaults to "create" operation → name=null fails validation
+        let req = json_request("GET", json!({"name": null}));
+        let result = Validated::<TestEntity>::from_request(req, &()).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_from_request_invalid_json_returns_400() {
+        let req = Request::builder()
+            .method("POST")
+            .header("content-type", "application/json")
+            .body(Body::from("not valid json {{{"))
+            .unwrap();
+        let result = Validated::<TestEntity>::from_request(req, &()).await;
+        match result {
+            Err(response) => assert_eq!(response.status(), StatusCode::BAD_REQUEST),
+            Ok(_) => panic!("expected error"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_from_request_missing_content_type_returns_400() {
+        let req = Request::builder()
+            .method("POST")
+            .body(Body::from(r#"{"name": "test"}"#))
+            .unwrap();
+        let result = Validated::<TestEntity>::from_request(req, &()).await;
+        match result {
+            Err(response) => assert_eq!(response.status(), StatusCode::BAD_REQUEST),
+            Ok(_) => panic!("expected error"),
+        }
+    }
+}
