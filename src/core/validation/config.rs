@@ -99,3 +99,268 @@ impl EntityValidationConfig {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    // === EntityValidationConfig::new ===
+
+    #[test]
+    fn test_new_creates_empty_config() {
+        let config = EntityValidationConfig::new("order");
+        assert_eq!(config.entity_type, "order");
+    }
+
+    // === validate_and_filter: validators only ===
+
+    #[test]
+    fn test_validate_valid_payload_returns_ok() {
+        let mut config = EntityValidationConfig::new("order");
+        config.add_validator("name", |_field, value| {
+            if value.is_null() {
+                Err("required".to_string())
+            } else {
+                Ok(())
+            }
+        });
+        let payload = json!({"name": "Test Order"});
+        let result = config.validate_and_filter(payload);
+        assert!(result.is_ok());
+        assert_eq!(result.expect("should be ok")["name"], "Test Order");
+    }
+
+    #[test]
+    fn test_validate_invalid_payload_returns_errors() {
+        let mut config = EntityValidationConfig::new("order");
+        config.add_validator("name", |field, value| {
+            if value.is_null() {
+                Err(format!("{} is required", field))
+            } else {
+                Ok(())
+            }
+        });
+        let payload = json!({"name": null});
+        let result = config.validate_and_filter(payload);
+        assert!(result.is_err());
+        let errors = result.unwrap_err();
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].contains("required"));
+    }
+
+    #[test]
+    fn test_validate_multiple_errors_accumulated() {
+        let mut config = EntityValidationConfig::new("order");
+        config.add_validator("name", |field, value| {
+            if value.is_null() {
+                Err(format!("{} is required", field))
+            } else {
+                Ok(())
+            }
+        });
+        config.add_validator("price", |field, value| {
+            if let Some(n) = value.as_f64() {
+                if n <= 0.0 {
+                    return Err(format!("{} must be positive", field));
+                }
+            }
+            Ok(())
+        });
+        let payload = json!({"name": null, "price": -5.0});
+        let result = config.validate_and_filter(payload);
+        assert!(result.is_err());
+        let errors = result.unwrap_err();
+        assert_eq!(errors.len(), 2);
+    }
+
+    #[test]
+    fn test_validate_multiple_validators_same_field() {
+        let mut config = EntityValidationConfig::new("order");
+        config.add_validator("name", |field, value| {
+            if value.is_null() {
+                Err(format!("{} is required", field))
+            } else {
+                Ok(())
+            }
+        });
+        config.add_validator("name", |field, value| {
+            if let Some(s) = value.as_str() {
+                if s.len() < 3 {
+                    return Err(format!("{} too short", field));
+                }
+            }
+            Ok(())
+        });
+        let payload = json!({"name": "ab"});
+        let result = config.validate_and_filter(payload);
+        assert!(result.is_err());
+        let errors = result.unwrap_err();
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].contains("too short"));
+    }
+
+    // === validate_and_filter: filters only ===
+
+    #[test]
+    fn test_filter_transforms_value() {
+        let mut config = EntityValidationConfig::new("order");
+        config.add_filter("name", |_field, value| {
+            if let Some(s) = value.as_str() {
+                Ok(Value::String(s.trim().to_string()))
+            } else {
+                Ok(value)
+            }
+        });
+        let payload = json!({"name": "  hello  "});
+        let result = config.validate_and_filter(payload);
+        assert!(result.is_ok());
+        assert_eq!(result.expect("should be ok")["name"], "hello");
+    }
+
+    #[test]
+    fn test_filter_chaining_multiple_filters_same_field() {
+        let mut config = EntityValidationConfig::new("order");
+        config.add_filter("code", |_field, value| {
+            if let Some(s) = value.as_str() {
+                Ok(Value::String(s.trim().to_string()))
+            } else {
+                Ok(value)
+            }
+        });
+        config.add_filter("code", |_field, value| {
+            if let Some(s) = value.as_str() {
+                Ok(Value::String(s.to_uppercase()))
+            } else {
+                Ok(value)
+            }
+        });
+        let payload = json!({"code": "  hello  "});
+        let result = config.validate_and_filter(payload);
+        assert!(result.is_ok());
+        assert_eq!(result.expect("should be ok")["code"], "HELLO");
+    }
+
+    // === validate_and_filter: filters THEN validators ===
+
+    #[test]
+    fn test_filters_applied_before_validators() {
+        let mut config = EntityValidationConfig::new("order");
+        // Filter: trim whitespace
+        config.add_filter("name", |_field, value| {
+            if let Some(s) = value.as_str() {
+                Ok(Value::String(s.trim().to_string()))
+            } else {
+                Ok(value)
+            }
+        });
+        // Validator: min length 3
+        config.add_validator("name", |field, value| {
+            if let Some(s) = value.as_str() {
+                if s.len() < 3 {
+                    return Err(format!("{} too short", field));
+                }
+            }
+            Ok(())
+        });
+        // "  ab  " -> trim -> "ab" -> validator fails (len 2 < 3)
+        let payload = json!({"name": "  ab  "});
+        let result = config.validate_and_filter(payload);
+        assert!(result.is_err());
+        assert!(result.unwrap_err()[0].contains("too short"));
+    }
+
+    #[test]
+    fn test_filters_transform_before_validation_passes() {
+        let mut config = EntityValidationConfig::new("order");
+        config.add_filter("name", |_field, value| {
+            if let Some(s) = value.as_str() {
+                Ok(Value::String(s.trim().to_string()))
+            } else {
+                Ok(value)
+            }
+        });
+        config.add_validator("name", |field, value| {
+            if let Some(s) = value.as_str() {
+                if s.len() < 3 {
+                    return Err(format!("{} too short", field));
+                }
+            }
+            Ok(())
+        });
+        // "  hello  " -> trim -> "hello" -> validator passes (len 5 >= 3)
+        let payload = json!({"name": "  hello  "});
+        let result = config.validate_and_filter(payload);
+        assert!(result.is_ok());
+        assert_eq!(result.expect("should be ok")["name"], "hello");
+    }
+
+    // === validate_and_filter: passthrough ===
+
+    #[test]
+    fn test_fields_without_validators_pass_through() {
+        let mut config = EntityValidationConfig::new("order");
+        config.add_validator("name", |_, _| Ok(()));
+        let payload = json!({"name": "Test", "extra_field": "untouched", "count": 42});
+        let result = config.validate_and_filter(payload);
+        assert!(result.is_ok());
+        let val = result.expect("should be ok");
+        assert_eq!(val["extra_field"], "untouched");
+        assert_eq!(val["count"], 42);
+    }
+
+    #[test]
+    fn test_empty_config_passes_everything() {
+        let config = EntityValidationConfig::new("order");
+        let payload = json!({"name": "anything", "price": -100});
+        let result = config.validate_and_filter(payload.clone());
+        assert!(result.is_ok());
+        assert_eq!(result.expect("should be ok"), payload);
+    }
+
+    // === validate_and_filter: non-object payload ===
+
+    #[test]
+    fn test_non_object_payload_string() {
+        let mut config = EntityValidationConfig::new("order");
+        config.add_validator("name", |_, _| Err("should not be called".to_string()));
+        let payload = json!("not an object");
+        // Non-object: filters and validators don't iterate, so no errors
+        let result = config.validate_and_filter(payload.clone());
+        assert!(result.is_ok());
+        assert_eq!(result.expect("should be ok"), payload);
+    }
+
+    #[test]
+    fn test_non_object_payload_array() {
+        let config = EntityValidationConfig::new("order");
+        let payload = json!([1, 2, 3]);
+        let result = config.validate_and_filter(payload.clone());
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_non_object_payload_null() {
+        let config = EntityValidationConfig::new("order");
+        let payload = json!(null);
+        let result = config.validate_and_filter(payload);
+        assert!(result.is_ok());
+    }
+
+    // === filter error handling ===
+
+    #[test]
+    fn test_filter_error_is_captured() {
+        let mut config = EntityValidationConfig::new("order");
+        config.add_filter("name", |_field, _value| {
+            Err(anyhow::anyhow!("filter exploded"))
+        });
+        let payload = json!({"name": "test"});
+        let result = config.validate_and_filter(payload);
+        assert!(result.is_err());
+        let errors = result.unwrap_err();
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].contains("filtrage"));
+        assert!(errors[0].contains("filter exploded"));
+    }
+}
