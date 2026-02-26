@@ -202,6 +202,41 @@ impl ServerBuilder {
         Ok(LinksConfig::merge(self.configs.clone()))
     }
 
+    /// Build a combined REST + gRPC router
+    ///
+    /// This is a convenience method that builds both REST and gRPC routers
+    /// from the registered modules and merges them safely into a single router.
+    ///
+    /// Internally, it uses [`GrpcExposure::build_router_no_fallback`](super::GrpcExposure::build_router_no_fallback) for the
+    /// gRPC side (no fallback) and [`RestExposure::build_router`] for REST
+    /// (with its nested link path fallback), then merges them via
+    /// [`combine_rest_and_grpc`](super::router::combine_rest_and_grpc).
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let app = ServerBuilder::new()
+    ///     .with_link_service(InMemoryLinkService::new())
+    ///     .register_module(MyModule)?
+    ///     .build_with_grpc()?;
+    ///
+    /// let listener = TcpListener::bind("127.0.0.1:3000").await?;
+    /// axum::serve(listener, app).await?;
+    /// ```
+    #[cfg(feature = "grpc")]
+    pub fn build_with_grpc(mut self) -> Result<Router> {
+        use super::exposure::grpc::GrpcExposure;
+        use super::router::combine_rest_and_grpc;
+
+        let custom_routes = std::mem::take(&mut self.custom_routes);
+        let host = Arc::new(self.build_host()?);
+
+        let rest_router = RestExposure::build_router(host.clone(), custom_routes)?;
+        let grpc_router = GrpcExposure::build_router_no_fallback(host)?;
+
+        Ok(combine_rest_and_grpc(rest_router, grpc_router))
+    }
+
     /// Serve the application with graceful shutdown
     ///
     /// This will:
@@ -222,6 +257,34 @@ impl ServerBuilder {
         let listener = TcpListener::bind(addr).await?;
 
         tracing::info!("Server listening on {}", addr);
+
+        axum::serve(listener, app)
+            .with_graceful_shutdown(shutdown_signal())
+            .await?;
+
+        tracing::info!("Server shutdown complete");
+        Ok(())
+    }
+
+    /// Serve the application with REST + gRPC and graceful shutdown
+    ///
+    /// This is the gRPC equivalent of [`serve`](Self::serve). It builds a combined
+    /// REST+gRPC router and serves it on the given address.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// ServerBuilder::new()
+    ///     .with_link_service(service)
+    ///     .register_module(module)?
+    ///     .serve_with_grpc("127.0.0.1:3000").await?;
+    /// ```
+    #[cfg(feature = "grpc")]
+    pub async fn serve_with_grpc(self, addr: &str) -> Result<()> {
+        let app = self.build_with_grpc()?;
+        let listener = TcpListener::bind(addr).await?;
+
+        tracing::info!("Server listening on {} (REST + gRPC)", addr);
 
         axum::serve(listener, app)
             .with_graceful_shutdown(shutdown_signal())

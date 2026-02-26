@@ -1076,20 +1076,21 @@ async fn test_grpc_link_invalid_uuid() {
 // Cohabitation Tests — REST + gRPC on the same server
 // ============================================================================
 
-#[tokio::test]
-async fn test_grpc_and_rest_cohabitation() {
-    use this::server::exposure::grpc::proto::{CreateEntityRequest, GetEntityRequest};
+/// Start a combined REST+gRPC server using build_router_no_fallback + merge
+async fn start_rest_grpc_server() -> (
+    SocketAddr,
+    Arc<ServerHost>,
+    TestEntityStore,
+    TestEntityStore,
+) {
+    use this::server::exposure::rest::RestExposure;
+    use this::server::router::combine_rest_and_grpc;
 
-    let (host, _order_store, _invoice_store) = build_test_host();
+    let (host, order_store, invoice_store) = build_test_host();
 
-    let grpc_router = GrpcExposure::build_router(host.clone()).unwrap();
-
-    // Verify gRPC router can coexist with custom HTTP routes.
-    // Note: REST and gRPC both set a fallback, so direct merge panics.
-    // In production, users should build a combined router carefully.
-    // Here we prove gRPC + a plain HTTP route work on the same server.
-    let app =
-        grpc_router.merge(Router::new().route("/health", axum::routing::get(|| async { "ok" })));
+    let rest_router = RestExposure::build_router(host.clone(), vec![]).unwrap();
+    let grpc_router = GrpcExposure::build_router_no_fallback(host.clone()).unwrap();
+    let app = combine_rest_and_grpc(rest_router, grpc_router);
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -1100,7 +1101,16 @@ async fn test_grpc_and_rest_cohabitation() {
 
     tokio::time::sleep(Duration::from_millis(50)).await;
 
-    // Test gRPC: create an entity via gRPC client
+    (addr, host, order_store, invoice_store)
+}
+
+#[tokio::test]
+async fn test_grpc_and_rest_cohabitation() {
+    use this::server::exposure::grpc::proto::{CreateEntityRequest, GetEntityRequest};
+
+    let (addr, _host, _order_store, _invoice_store) = start_rest_grpc_server().await;
+
+    // --- gRPC: create an entity ---
     let mut grpc_client = entity_client(addr).await;
 
     let data = json_to_struct(&json!({
@@ -1119,8 +1129,311 @@ async fn test_grpc_and_rest_cohabitation() {
 
     let entity_id = get_string_field(created.data.as_ref().unwrap(), "id").unwrap();
 
-    // Verify via gRPC get — proves gRPC works within merged router
+    // --- gRPC: verify via get ---
     let fetched = grpc_client
+        .get_entity(GetEntityRequest {
+            entity_type: "order".to_string(),
+            entity_id: entity_id.clone(),
+        })
+        .await
+        .unwrap()
+        .into_inner();
+
+    assert_eq!(
+        get_string_field(&fetched.data.unwrap(), "number").unwrap(),
+        "ORD-COHAB"
+    );
+
+    // --- REST: health check works alongside gRPC ---
+    let http_client = reqwest::Client::new();
+    let resp = http_client
+        .get(format!("http://{}/health", addr))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+}
+
+#[tokio::test]
+async fn test_no_fallback_router_can_merge_with_rest() {
+    // Prove that build_router_no_fallback produces a router without fallback,
+    // which can be merged with a router that has a fallback.
+    use this::server::exposure::rest::RestExposure;
+    use this::server::router::combine_rest_and_grpc;
+
+    let (host, _order_store, _invoice_store) = build_test_host();
+
+    let rest_router = RestExposure::build_router(host.clone(), vec![]).unwrap();
+    let grpc_router = GrpcExposure::build_router_no_fallback(host).unwrap();
+
+    // This MUST NOT panic — the whole point of this fix
+    let _app = combine_rest_and_grpc(rest_router, grpc_router);
+}
+
+#[tokio::test]
+#[should_panic(expected = "Cannot merge two `Router`s that both have a fallback")]
+async fn test_build_router_with_fallback_panics_on_rest_merge() {
+    // Prove that the OLD build_router (with fallback) panics when merged with REST
+    use this::server::exposure::rest::RestExposure;
+
+    let (host, _order_store, _invoice_store) = build_test_host();
+
+    let rest_router = RestExposure::build_router(host.clone(), vec![]).unwrap();
+    let grpc_router = GrpcExposure::build_router(host).unwrap();
+
+    // This MUST panic — proves the problem still exists with build_router()
+    let _app = rest_router.merge(grpc_router);
+}
+
+#[tokio::test]
+async fn test_rest_nested_paths_with_grpc() {
+    // Verify that REST's nested link path fallback still works when gRPC is merged
+    let (addr, _host, _order_store, _invoice_store) = start_rest_grpc_server().await;
+
+    let http_client = reqwest::Client::new();
+
+    // Health check — basic REST route
+    let resp = http_client
+        .get(format!("http://{}/health", addr))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    // Deeply nested path — should hit the REST fallback handler, not 404
+    // The fallback handles paths with 5+ segments for link traversal
+    let resp = http_client
+        .get(format!(
+            "http://{}/orders/{}/invoices/{}/payments",
+            addr,
+            Uuid::new_v4(),
+            Uuid::new_v4()
+        ))
+        .send()
+        .await
+        .unwrap();
+    // The response may be 400/404/500 depending on entity resolution,
+    // but it should NOT be a 405 Method Not Allowed or connection error —
+    // the request should reach the REST fallback handler.
+    assert_ne!(resp.status(), 405);
+}
+
+#[tokio::test]
+async fn test_grpc_services_work_in_combined_router() {
+    // Full gRPC CRUD via the combined REST+gRPC router
+    use this::server::exposure::grpc::proto::{
+        CreateEntityRequest, CreateLinkRequest, FindLinksRequest, GetEntityRequest,
+        ListEntitiesRequest,
+    };
+
+    let (addr, _host, _order_store, _invoice_store) = start_rest_grpc_server().await;
+    let mut eclient = entity_client(addr).await;
+    let mut lclient = link_client(addr).await;
+
+    // Create order via gRPC
+    let order = eclient
+        .create_entity(CreateEntityRequest {
+            entity_type: "order".to_string(),
+            data: Some(json_to_struct(&json!({"number": "ORD-COMBINED"}))),
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    let order_id = get_string_field(order.data.as_ref().unwrap(), "id").unwrap();
+
+    // Create invoice via gRPC
+    let invoice = eclient
+        .create_entity(CreateEntityRequest {
+            entity_type: "invoice".to_string(),
+            data: Some(json_to_struct(&json!({"number": "INV-COMBINED"}))),
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    let invoice_id = get_string_field(invoice.data.as_ref().unwrap(), "id").unwrap();
+
+    // Get entity via gRPC
+    let fetched = eclient
+        .get_entity(GetEntityRequest {
+            entity_type: "order".to_string(),
+            entity_id: order_id.clone(),
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(
+        get_string_field(&fetched.data.unwrap(), "number").unwrap(),
+        "ORD-COMBINED"
+    );
+
+    // List entities via gRPC
+    let list = eclient
+        .list_entities(ListEntitiesRequest {
+            entity_type: "order".to_string(),
+            limit: 10,
+            offset: 0,
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(list.entities.len(), 1);
+
+    // Create link via gRPC
+    let link = lclient
+        .create_link(CreateLinkRequest {
+            link_type: "has_invoice".to_string(),
+            source_id: order_id.clone(),
+            target_id: invoice_id.clone(),
+            metadata: None,
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(!link.id.is_empty());
+
+    // Find links via gRPC
+    let links = lclient
+        .find_links_by_source(FindLinksRequest {
+            entity_id: order_id,
+            link_type: String::new(),
+            entity_type: String::new(),
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(links.links.len(), 1);
+    assert_eq!(links.links[0].link_type, "has_invoice");
+}
+
+#[tokio::test]
+async fn test_grpc_proto_endpoint_in_combined_router() {
+    // Verify /grpc/proto works in the combined REST+gRPC router
+    let (addr, _host, _order_store, _invoice_store) = start_rest_grpc_server().await;
+
+    let http_client = reqwest::Client::new();
+    let resp = http_client
+        .get(format!("http://{}/grpc/proto", addr))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), 200);
+    let body = resp.text().await.unwrap();
+    assert!(body.contains("syntax = \"proto3\""));
+    assert!(body.contains("package this_api"));
+    assert!(body.contains("service LinkService"));
+}
+
+#[tokio::test]
+async fn test_build_with_grpc_convenience() {
+    // Test the ServerBuilder::build_with_grpc() convenience method
+    use this::config::LinksConfig;
+    use this::core::module::Module;
+    use this::server::ServerBuilder;
+    use this::server::entity_registry::EntityRegistry;
+    use this::storage::InMemoryLinkService;
+
+    // Minimal module for testing
+    struct MinimalModule;
+
+    impl Module for MinimalModule {
+        fn name(&self) -> &str {
+            "test"
+        }
+
+        fn entity_types(&self) -> Vec<&str> {
+            vec!["item"]
+        }
+
+        fn links_config(&self) -> Result<LinksConfig> {
+            Ok(LinksConfig::default_config())
+        }
+
+        fn register_entities(&self, registry: &mut EntityRegistry) {
+            registry.register(Box::new(TestEntityDescriptor::new("item", "items")));
+        }
+
+        fn get_entity_fetcher(
+            &self,
+            entity_type: &str,
+        ) -> Option<Arc<dyn this::core::EntityFetcher>> {
+            if entity_type == "item" {
+                Some(Arc::new(TestEntityStore::new("item")))
+            } else {
+                None
+            }
+        }
+
+        fn get_entity_creator(
+            &self,
+            entity_type: &str,
+        ) -> Option<Arc<dyn this::core::EntityCreator>> {
+            if entity_type == "item" {
+                Some(Arc::new(TestEntityStore::new("item")))
+            } else {
+                None
+            }
+        }
+    }
+
+    // build_with_grpc() must not panic (no double-fallback)
+    let app = ServerBuilder::new()
+        .with_link_service(InMemoryLinkService::new())
+        .register_module(MinimalModule)
+        .unwrap()
+        .build_with_grpc()
+        .unwrap();
+
+    // Verify the router works
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // REST health check
+    let http_client = reqwest::Client::new();
+    let resp = http_client
+        .get(format!("http://{}/health", addr))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    // gRPC proto export
+    let resp = http_client
+        .get(format!("http://{}/grpc/proto", addr))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+}
+
+#[tokio::test]
+async fn test_grpc_standalone_still_works() {
+    // Regression test: build_router() (with fallback) still works for standalone gRPC
+    use this::server::exposure::grpc::proto::{CreateEntityRequest, GetEntityRequest};
+
+    let (addr, _host, _order_store, _invoice_store) = start_grpc_server().await;
+    let mut client = entity_client(addr).await;
+
+    // Create
+    let created = client
+        .create_entity(CreateEntityRequest {
+            entity_type: "order".to_string(),
+            data: Some(json_to_struct(&json!({"number": "ORD-STANDALONE"}))),
+        })
+        .await
+        .unwrap()
+        .into_inner();
+
+    let entity_id = get_string_field(created.data.as_ref().unwrap(), "id").unwrap();
+
+    // Get
+    let fetched = client
         .get_entity(GetEntityRequest {
             entity_type: "order".to_string(),
             entity_id,
@@ -1131,7 +1444,7 @@ async fn test_grpc_and_rest_cohabitation() {
 
     assert_eq!(
         get_string_field(&fetched.data.unwrap(), "number").unwrap(),
-        "ORD-COHAB"
+        "ORD-STANDALONE"
     );
 }
 
