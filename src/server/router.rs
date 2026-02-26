@@ -1,4 +1,4 @@
-//! Router builder utilities for link routes
+//! Router builder utilities for link routes and protocol merging
 
 use crate::core::query::QueryParams;
 use crate::links::handlers::{
@@ -6,6 +6,47 @@ use crate::links::handlers::{
     handle_nested_path_get, list_available_links, list_links, update_link,
 };
 use axum::{Router, extract::Query, routing::get};
+
+/// Combine a REST router and a gRPC router into a single router.
+///
+/// This function safely merges the two routers by taking advantage of the fact
+/// that the gRPC router was built with
+/// [`GrpcExposure::build_router_no_fallback`](crate::server::exposure::grpc::GrpcExposure::build_router_no_fallback),
+/// which does **not** install a fallback handler.
+///
+/// The REST router's fallback (used for deeply nested link paths) is preserved,
+/// ensuring that both REST and gRPC routes work correctly on the same server.
+///
+/// # Arguments
+///
+/// * `rest_router` - The REST router (from [`RestExposure::build_router`](crate::server::exposure::RestExposure::build_router)),
+///   which includes a fallback for nested link paths.
+/// * `grpc_router` - The gRPC router (from [`GrpcExposure::build_router_no_fallback`](crate::server::exposure::grpc::GrpcExposure::build_router_no_fallback)),
+///   which has **no** fallback.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// use this::server::exposure::{RestExposure, grpc::GrpcExposure};
+/// use this::server::router::combine_rest_and_grpc;
+///
+/// let host = Arc::new(builder.build_host()?);
+/// let rest_router = RestExposure::build_router(host.clone(), vec![])?;
+/// let grpc_router = GrpcExposure::build_router_no_fallback(host)?;
+/// let app = combine_rest_and_grpc(rest_router, grpc_router);
+///
+/// axum::serve(listener, app).await?;
+/// ```
+///
+/// # Panics
+///
+/// Panics if `grpc_router` has a fallback installed (e.g., if built with
+/// `GrpcExposure::build_router()` instead of `build_router_no_fallback()`).
+/// Always use `build_router_no_fallback()` for the gRPC side.
+#[cfg(feature = "grpc")]
+pub fn combine_rest_and_grpc(rest_router: Router, grpc_router: Router) -> Router {
+    rest_router.merge(grpc_router)
+}
 
 /// Build link routes from configuration
 ///
