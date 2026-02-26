@@ -628,6 +628,7 @@ impl LinkService for PostgresLinkService {
 
 #[cfg(test)]
 #[cfg(feature = "postgres")]
+#[allow(dead_code)]
 mod tests {
     use super::*;
     use serde_json::json;

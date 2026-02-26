@@ -703,6 +703,7 @@ impl LinkService for DynamoDBLinkService {
 
 #[cfg(test)]
 #[cfg(feature = "dynamodb")]
+#[allow(dead_code)]
 mod tests {
     use super::*;
     use serde_json::json;

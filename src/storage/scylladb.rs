@@ -719,6 +719,7 @@ impl LinkService for ScyllaLinkService {
 
 #[cfg(test)]
 #[cfg(feature = "scylladb")]
+#[allow(dead_code)]
 mod tests {
     use super::*;
     use crate::core::link::LinkEntity;

@@ -315,7 +315,6 @@ pub fn build_dynamic_schema(
 mod tests {
     use super::*;
     use crate::config::{EntityAuthConfig, EntityConfig, LinksConfig};
-    use crate::core::link::LinkDefinition;
     use crate::core::{EntityCreator, EntityFetcher};
     use crate::server::entity_registry::{EntityDescriptor, EntityRegistry};
     use crate::server::host::ServerHost;

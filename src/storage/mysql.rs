@@ -673,6 +673,7 @@ impl LinkService for MysqlLinkService {
 
 #[cfg(test)]
 #[cfg(feature = "mysql")]
+#[allow(dead_code)]
 mod tests {
     use super::*;
     use chrono::Utc;
