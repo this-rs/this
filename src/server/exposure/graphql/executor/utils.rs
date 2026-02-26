@@ -130,3 +130,328 @@ pub fn find_link_type(
         target_type
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ---- gql_value_to_json tests ----
+
+    #[cfg(feature = "graphql")]
+    #[test]
+    fn test_gql_value_to_json_null() {
+        let result = gql_value_to_json(&GqlValue::Null);
+        assert_eq!(result, Value::Null);
+    }
+
+    #[cfg(feature = "graphql")]
+    #[test]
+    fn test_gql_value_to_json_int() {
+        let num = graphql_parser::query::Number::from(42i32);
+        let result = gql_value_to_json(&GqlValue::Int(num));
+        assert_eq!(result, serde_json::json!(42));
+    }
+
+    #[cfg(feature = "graphql")]
+    #[test]
+    fn test_gql_value_to_json_float() {
+        let result = gql_value_to_json(&GqlValue::Float(3.14));
+        assert_eq!(result, serde_json::json!(3.14));
+    }
+
+    #[cfg(feature = "graphql")]
+    #[test]
+    fn test_gql_value_to_json_string() {
+        let result = gql_value_to_json(&GqlValue::String("hello".to_string()));
+        assert_eq!(result, serde_json::json!("hello"));
+    }
+
+    #[cfg(feature = "graphql")]
+    #[test]
+    fn test_gql_value_to_json_boolean() {
+        let result_true = gql_value_to_json(&GqlValue::Boolean(true));
+        let result_false = gql_value_to_json(&GqlValue::Boolean(false));
+        assert_eq!(result_true, serde_json::json!(true));
+        assert_eq!(result_false, serde_json::json!(false));
+    }
+
+    #[cfg(feature = "graphql")]
+    #[test]
+    fn test_gql_value_to_json_enum() {
+        let result = gql_value_to_json(&GqlValue::Enum("ACTIVE".to_string()));
+        assert_eq!(result, serde_json::json!("ACTIVE"));
+    }
+
+    #[cfg(feature = "graphql")]
+    #[test]
+    fn test_gql_value_to_json_list() {
+        let list = GqlValue::List(vec![
+            GqlValue::Int(graphql_parser::query::Number::from(1i32)),
+            GqlValue::Int(graphql_parser::query::Number::from(2i32)),
+        ]);
+        let result = gql_value_to_json(&list);
+        assert_eq!(result, serde_json::json!([1, 2]));
+    }
+
+    #[cfg(feature = "graphql")]
+    #[test]
+    fn test_gql_value_to_json_object() {
+        let mut obj = std::collections::BTreeMap::new();
+        obj.insert("name".to_string(), GqlValue::String("Alice".to_string()));
+        obj.insert(
+            "age".to_string(),
+            GqlValue::Int(graphql_parser::query::Number::from(30i32)),
+        );
+        let result = gql_value_to_json(&GqlValue::Object(obj));
+        assert_eq!(result, serde_json::json!({"name": "Alice", "age": 30}));
+    }
+
+    #[cfg(feature = "graphql")]
+    #[test]
+    fn test_gql_value_to_json_variable() {
+        let result = gql_value_to_json(&GqlValue::Variable("myVar".to_string()));
+        assert_eq!(result, Value::Null);
+    }
+
+    // ---- pluralize tests ----
+
+    #[cfg(feature = "graphql")]
+    #[test]
+    fn test_pluralize_regular() {
+        assert_eq!(pluralize("order"), "orders");
+    }
+
+    #[cfg(feature = "graphql")]
+    #[test]
+    fn test_pluralize_ending_in_y() {
+        assert_eq!(pluralize("baby"), "babies");
+    }
+
+    #[cfg(feature = "graphql")]
+    #[test]
+    fn test_pluralize_ending_in_s() {
+        assert_eq!(pluralize("bus"), "buses");
+    }
+
+    #[cfg(feature = "graphql")]
+    #[test]
+    fn test_pluralize_ending_in_ch() {
+        assert_eq!(pluralize("church"), "churches");
+    }
+
+    #[cfg(feature = "graphql")]
+    #[test]
+    fn test_pluralize_ending_in_sh() {
+        assert_eq!(pluralize("dish"), "dishes");
+    }
+
+    // ---- pascal_to_snake tests ----
+
+    #[cfg(feature = "graphql")]
+    #[test]
+    fn test_pascal_to_snake_multi_word() {
+        assert_eq!(pascal_to_snake("OrderItem"), "order_item");
+    }
+
+    #[cfg(feature = "graphql")]
+    #[test]
+    fn test_pascal_to_snake_single_char() {
+        assert_eq!(pascal_to_snake("A"), "a");
+    }
+
+    #[cfg(feature = "graphql")]
+    #[test]
+    fn test_pascal_to_snake_empty() {
+        assert_eq!(pascal_to_snake(""), "");
+    }
+
+    #[cfg(feature = "graphql")]
+    #[test]
+    fn test_pascal_to_snake_already_lower() {
+        assert_eq!(pascal_to_snake("order"), "order");
+    }
+
+    // ---- camel_to_snake tests ----
+
+    #[cfg(feature = "graphql")]
+    #[test]
+    fn test_camel_to_snake_multi_word() {
+        assert_eq!(camel_to_snake("createdAt"), "created_at");
+    }
+
+    #[cfg(feature = "graphql")]
+    #[test]
+    fn test_camel_to_snake_single_word() {
+        assert_eq!(camel_to_snake("id"), "id");
+    }
+
+    // ---- mutation_name_to_entity_type tests ----
+
+    #[cfg(feature = "graphql")]
+    #[test]
+    fn test_mutation_name_to_entity_type_create() {
+        assert_eq!(mutation_name_to_entity_type("createOrder", "create"), "order");
+    }
+
+    #[cfg(feature = "graphql")]
+    #[test]
+    fn test_mutation_name_to_entity_type_delete_pascal() {
+        assert_eq!(
+            mutation_name_to_entity_type("deleteUserProfile", "delete"),
+            "user_profile"
+        );
+    }
+
+    #[cfg(feature = "graphql")]
+    #[test]
+    fn test_mutation_name_to_entity_type_no_prefix_match() {
+        // When prefix doesn't match, the whole name is used
+        assert_eq!(
+            mutation_name_to_entity_type("createOrder", "delete"),
+            "create_order"
+        );
+    }
+
+    // ---- find_link_type tests ----
+
+    #[cfg(feature = "graphql")]
+    fn make_link_def(source: &str, target: &str, link_type: &str) -> crate::core::link::LinkDefinition {
+        crate::core::link::LinkDefinition {
+            link_type: link_type.to_string(),
+            source_type: source.to_string(),
+            target_type: target.to_string(),
+            forward_route_name: format!("{}s", target),
+            reverse_route_name: source.to_string(),
+            description: None,
+            required_fields: None,
+            auth: None,
+        }
+    }
+
+    #[cfg(feature = "graphql")]
+    #[test]
+    fn test_find_link_type_found() {
+        let links = vec![make_link_def("order", "invoice", "has_invoice")];
+        let result = find_link_type(&links, "order", "invoice")
+            .expect("should find link type");
+        assert_eq!(result, "has_invoice");
+    }
+
+    #[cfg(feature = "graphql")]
+    #[test]
+    fn test_find_link_type_not_found() {
+        let links = vec![make_link_def("order", "invoice", "has_invoice")];
+        let result = find_link_type(&links, "user", "car");
+        assert!(result.is_err());
+    }
+
+    #[cfg(feature = "graphql")]
+    #[test]
+    fn test_find_link_type_multiple_configs() {
+        let links = vec![
+            make_link_def("order", "invoice", "has_invoice"),
+            make_link_def("user", "car", "owner"),
+        ];
+        let result = find_link_type(&links, "user", "car")
+            .expect("should find link type among multiple configs");
+        assert_eq!(result, "owner");
+    }
+
+    // ---- get_string_arg / get_int_arg / get_json_arg tests ----
+
+    #[cfg(feature = "graphql")]
+    fn make_field(arguments: Vec<(String, GqlValue<String>)>) -> Field<String> {
+        use graphql_parser::query::SelectionSet;
+        use graphql_parser::Pos;
+        Field {
+            position: Pos { line: 1, column: 1 },
+            alias: None,
+            name: "test_field".to_string(),
+            arguments,
+            directives: vec![],
+            selection_set: SelectionSet {
+                span: (Pos { line: 1, column: 1 }, Pos { line: 1, column: 1 }),
+                items: vec![],
+            },
+        }
+    }
+
+    #[cfg(feature = "graphql")]
+    #[test]
+    fn test_get_string_arg_present() {
+        let field = make_field(vec![(
+            "name".to_string(),
+            GqlValue::String("Alice".to_string()),
+        )]);
+        let result = get_string_arg(&field, "name");
+        assert_eq!(result, Some("Alice".to_string()));
+    }
+
+    #[cfg(feature = "graphql")]
+    #[test]
+    fn test_get_string_arg_missing() {
+        let field = make_field(vec![]);
+        let result = get_string_arg(&field, "name");
+        assert_eq!(result, None);
+    }
+
+    #[cfg(feature = "graphql")]
+    #[test]
+    fn test_get_string_arg_wrong_type() {
+        let field = make_field(vec![(
+            "name".to_string(),
+            GqlValue::Int(graphql_parser::query::Number::from(42i32)),
+        )]);
+        let result = get_string_arg(&field, "name");
+        assert_eq!(result, None);
+    }
+
+    #[cfg(feature = "graphql")]
+    #[test]
+    fn test_get_int_arg_present() {
+        let field = make_field(vec![(
+            "limit".to_string(),
+            GqlValue::Int(graphql_parser::query::Number::from(10i32)),
+        )]);
+        let result = get_int_arg(&field, "limit");
+        assert_eq!(result, Some(10));
+    }
+
+    #[cfg(feature = "graphql")]
+    #[test]
+    fn test_get_int_arg_missing() {
+        let field = make_field(vec![]);
+        let result = get_int_arg(&field, "limit");
+        assert_eq!(result, None);
+    }
+
+    #[cfg(feature = "graphql")]
+    #[test]
+    fn test_get_int_arg_wrong_type() {
+        let field = make_field(vec![(
+            "limit".to_string(),
+            GqlValue::String("not_a_number".to_string()),
+        )]);
+        let result = get_int_arg(&field, "limit");
+        assert_eq!(result, None);
+    }
+
+    #[cfg(feature = "graphql")]
+    #[test]
+    fn test_get_json_arg_present() {
+        let field = make_field(vec![(
+            "data".to_string(),
+            GqlValue::String("hello".to_string()),
+        )]);
+        let result = get_json_arg(&field, "data");
+        assert_eq!(result, Some(serde_json::json!("hello")));
+    }
+
+    #[cfg(feature = "graphql")]
+    #[test]
+    fn test_get_json_arg_missing() {
+        let field = make_field(vec![]);
+        let result = get_json_arg(&field, "data");
+        assert_eq!(result, None);
+    }
+}

@@ -170,4 +170,128 @@ mod tests {
         assert!(!meta.has_prev);
         assert!(meta.has_next);
     }
+
+    // --- QueryParams::page edge cases ---
+
+    #[test]
+    fn test_query_params_page_zero_clamps_to_one() {
+        let params = QueryParams {
+            page: 0,
+            ..Default::default()
+        };
+        assert_eq!(params.page(), 1);
+    }
+
+    #[test]
+    fn test_query_params_page_positive_unchanged() {
+        let params = QueryParams {
+            page: 5,
+            ..Default::default()
+        };
+        assert_eq!(params.page(), 5);
+    }
+
+    // --- QueryParams::limit edge cases ---
+
+    #[test]
+    fn test_query_params_limit_zero_clamps_to_one() {
+        let params = QueryParams {
+            limit: 0,
+            ..Default::default()
+        };
+        assert_eq!(params.limit(), 1);
+    }
+
+    #[test]
+    fn test_query_params_limit_over_100_clamps_to_100() {
+        let params = QueryParams {
+            limit: 101,
+            ..Default::default()
+        };
+        assert_eq!(params.limit(), 100);
+    }
+
+    #[test]
+    fn test_query_params_limit_within_range() {
+        let params = QueryParams {
+            limit: 50,
+            ..Default::default()
+        };
+        assert_eq!(params.limit(), 50);
+    }
+
+    // --- filter_value ---
+
+    #[test]
+    fn test_filter_value_valid_json_object() {
+        let params = QueryParams {
+            filter: Some(r#"{"status": "active"}"#.to_string()),
+            ..Default::default()
+        };
+        let value = params
+            .filter_value()
+            .expect("valid JSON should parse successfully");
+        assert_eq!(value["status"], "active");
+    }
+
+    #[test]
+    fn test_filter_value_invalid_json_returns_none() {
+        let params = QueryParams {
+            filter: Some("not-json".to_string()),
+            ..Default::default()
+        };
+        assert!(params.filter_value().is_none());
+    }
+
+    #[test]
+    fn test_filter_value_none_returns_none() {
+        let params = QueryParams {
+            filter: None,
+            ..Default::default()
+        };
+        assert!(params.filter_value().is_none());
+    }
+
+    // --- PaginationMeta edge cases ---
+
+    #[test]
+    fn test_pagination_meta_total_zero() {
+        let meta = PaginationMeta::new(1, 20, 0);
+        assert_eq!(meta.total_pages, 0);
+        assert!(!meta.has_next);
+        assert!(!meta.has_prev);
+    }
+
+    #[test]
+    fn test_pagination_meta_last_page() {
+        // 100 items, 20 per page => 5 pages. Page 5 is the last.
+        let meta = PaginationMeta::new(5, 20, 100);
+        assert_eq!(meta.total_pages, 5);
+        assert!(!meta.has_next);
+        assert!(meta.has_prev);
+    }
+
+    #[test]
+    fn test_pagination_meta_single_page() {
+        let meta = PaginationMeta::new(1, 20, 10);
+        assert_eq!(meta.total_pages, 1);
+        assert!(!meta.has_next);
+        assert!(!meta.has_prev);
+    }
+
+    #[test]
+    fn test_pagination_meta_middle_page() {
+        let meta = PaginationMeta::new(3, 10, 50);
+        assert_eq!(meta.total_pages, 5);
+        assert!(meta.has_next);
+        assert!(meta.has_prev);
+    }
+
+    #[test]
+    fn test_pagination_meta_limit_zero_treated_as_one() {
+        // Limit 0 should be clamped to 1 to avoid division by zero
+        let meta = PaginationMeta::new(1, 0, 10);
+        assert_eq!(meta.limit, 1);
+        assert_eq!(meta.total_pages, 10);
+    }
 }

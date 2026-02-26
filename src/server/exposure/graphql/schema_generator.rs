@@ -287,3 +287,171 @@ impl SchemaGenerator {
             .collect()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    #[cfg(feature = "graphql")]
+    use super::*;
+
+    // ---- to_pascal_case tests ----
+
+    #[cfg(feature = "graphql")]
+    #[test]
+    fn test_to_pascal_case_snake_case() {
+        assert_eq!(SchemaGenerator::to_pascal_case("order_item"), "OrderItem");
+    }
+
+    #[cfg(feature = "graphql")]
+    #[test]
+    fn test_to_pascal_case_single_word() {
+        assert_eq!(SchemaGenerator::to_pascal_case("order"), "Order");
+    }
+
+    #[cfg(feature = "graphql")]
+    #[test]
+    fn test_to_pascal_case_empty() {
+        assert_eq!(SchemaGenerator::to_pascal_case(""), "");
+    }
+
+    #[cfg(feature = "graphql")]
+    #[test]
+    fn test_to_pascal_case_multiple_underscores() {
+        assert_eq!(
+            SchemaGenerator::to_pascal_case("user_order_item"),
+            "UserOrderItem"
+        );
+    }
+
+    #[cfg(feature = "graphql")]
+    #[test]
+    fn test_to_pascal_case_trailing_underscore() {
+        // trailing underscore produces an empty segment
+        assert_eq!(SchemaGenerator::to_pascal_case("order_"), "Order");
+    }
+
+    // ---- json_type_to_graphql tests ----
+
+    #[cfg(feature = "graphql")]
+    #[test]
+    fn test_json_type_to_graphql_string() {
+        let val = Value::String("hello".to_string());
+        assert_eq!(SchemaGenerator::json_type_to_graphql(&val), "String");
+    }
+
+    #[cfg(feature = "graphql")]
+    #[test]
+    fn test_json_type_to_graphql_int() {
+        let val = serde_json::json!(42);
+        assert_eq!(SchemaGenerator::json_type_to_graphql(&val), "Int");
+    }
+
+    #[cfg(feature = "graphql")]
+    #[test]
+    fn test_json_type_to_graphql_float() {
+        let val = serde_json::json!(3.14);
+        assert_eq!(SchemaGenerator::json_type_to_graphql(&val), "Float");
+    }
+
+    #[cfg(feature = "graphql")]
+    #[test]
+    fn test_json_type_to_graphql_bool() {
+        let val = serde_json::json!(true);
+        assert_eq!(SchemaGenerator::json_type_to_graphql(&val), "Boolean");
+    }
+
+    #[cfg(feature = "graphql")]
+    #[test]
+    fn test_json_type_to_graphql_array() {
+        let val = serde_json::json!([1, 2, 3]);
+        assert_eq!(SchemaGenerator::json_type_to_graphql(&val), "[String]");
+    }
+
+    #[cfg(feature = "graphql")]
+    #[test]
+    fn test_json_type_to_graphql_object() {
+        let val = serde_json::json!({"key": "value"});
+        assert_eq!(SchemaGenerator::json_type_to_graphql(&val), "JSON");
+    }
+
+    #[cfg(feature = "graphql")]
+    #[test]
+    fn test_json_type_to_graphql_null() {
+        let val = Value::Null;
+        assert_eq!(SchemaGenerator::json_type_to_graphql(&val), "String");
+    }
+
+    // ---- extract_fields_from_json tests ----
+
+    #[cfg(feature = "graphql")]
+    #[test]
+    fn test_extract_fields_from_json_flat_object() {
+        let json = serde_json::json!({
+            "id": "abc-123",
+            "name": "Alice",
+            "active": true
+        });
+        let fields = SchemaGenerator::extract_fields_from_json(&json);
+        assert_eq!(fields.len(), 3);
+
+        let id_field = fields.iter().find(|f| f.name == "id")
+            .expect("should have 'id' field");
+        assert_eq!(id_field.graphql_type, "String");
+        assert!(!id_field.nullable);
+
+        let active_field = fields.iter().find(|f| f.name == "active")
+            .expect("should have 'active' field");
+        assert_eq!(active_field.graphql_type, "Boolean");
+    }
+
+    #[cfg(feature = "graphql")]
+    #[test]
+    fn test_extract_fields_from_json_nested_object() {
+        let json = serde_json::json!({
+            "id": "abc",
+            "metadata": {"key": "value"}
+        });
+        let fields = SchemaGenerator::extract_fields_from_json(&json);
+        let meta_field = fields.iter().find(|f| f.name == "metadata")
+            .expect("should have 'metadata' field");
+        assert_eq!(meta_field.graphql_type, "JSON");
+    }
+
+    #[cfg(feature = "graphql")]
+    #[test]
+    fn test_extract_fields_from_json_skips_host() {
+        let json = serde_json::json!({
+            "id": "abc",
+            "host": "should-be-skipped",
+            "name": "test"
+        });
+        let fields = SchemaGenerator::extract_fields_from_json(&json);
+        assert_eq!(fields.len(), 2);
+        assert!(
+            fields.iter().all(|f| f.name != "host"),
+            "host field should be skipped"
+        );
+    }
+
+    #[cfg(feature = "graphql")]
+    #[test]
+    fn test_extract_fields_from_json_null_field_is_nullable() {
+        let json = serde_json::json!({
+            "id": "abc",
+            "deleted_at": null
+        });
+        let fields = SchemaGenerator::extract_fields_from_json(&json);
+        let deleted_field = fields.iter().find(|f| f.name == "deleted_at")
+            .expect("should have 'deleted_at' field");
+        assert!(deleted_field.nullable);
+        assert_eq!(deleted_field.graphql_type, "String");
+    }
+
+    #[cfg(feature = "graphql")]
+    #[test]
+    fn test_extract_fields_from_json_non_object() {
+        // When input is not an object, should return empty vec
+        let json = serde_json::json!("just a string");
+        let fields = SchemaGenerator::extract_fields_from_json(&json);
+        assert!(fields.is_empty());
+    }
+}

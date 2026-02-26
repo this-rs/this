@@ -176,4 +176,100 @@ mod tests {
         assert!(!format.validate(&FieldValue::String("abc123".to_string())));
         assert!(!format.validate(&FieldValue::String("ABCD123".to_string())));
     }
+
+    // --- FieldValue variant coverage ---
+
+    #[test]
+    fn test_field_value_float() {
+        let value = FieldValue::Float(3.14);
+        assert_eq!(value.as_string(), None);
+        assert_eq!(value.as_integer(), None);
+        assert_eq!(value.as_uuid(), None);
+        assert!(!value.is_null());
+    }
+
+    #[test]
+    fn test_field_value_boolean() {
+        let value = FieldValue::Boolean(true);
+        assert_eq!(value.as_string(), None);
+        assert_eq!(value.as_integer(), None);
+        assert!(!value.is_null());
+    }
+
+    #[test]
+    fn test_field_value_datetime() {
+        let now = chrono::Utc::now();
+        let value = FieldValue::DateTime(now);
+        assert_eq!(value.as_string(), None);
+        assert_eq!(value.as_integer(), None);
+        assert_eq!(value.as_uuid(), None);
+        assert!(!value.is_null());
+    }
+
+    #[test]
+    fn test_field_value_uuid() {
+        let id = Uuid::new_v4();
+        let value = FieldValue::Uuid(id);
+        assert_eq!(value.as_uuid(), Some(id));
+        assert_eq!(value.as_string(), None);
+        assert_eq!(value.as_integer(), None);
+        assert!(!value.is_null());
+    }
+
+    // --- Serde roundtrip ---
+
+    #[test]
+    fn test_serde_roundtrip_string() {
+        let original = FieldValue::String("hello".to_string());
+        let json = serde_json::to_string(&original).expect("serialize should succeed");
+        let restored: FieldValue =
+            serde_json::from_str(&json).expect("deserialize should succeed");
+        assert_eq!(original, restored);
+    }
+
+    #[test]
+    fn test_serde_roundtrip_integer() {
+        let original = FieldValue::Integer(42);
+        let json = serde_json::to_string(&original).expect("serialize should succeed");
+        let restored: FieldValue =
+            serde_json::from_str(&json).expect("deserialize should succeed");
+        assert_eq!(original, restored);
+    }
+
+    #[test]
+    fn test_serde_roundtrip_float() {
+        let original = FieldValue::Float(2.718);
+        let json = serde_json::to_string(&original).expect("serialize should succeed");
+        let restored: FieldValue =
+            serde_json::from_str(&json).expect("deserialize should succeed");
+        assert_eq!(original, restored);
+    }
+
+    #[test]
+    fn test_serde_roundtrip_boolean() {
+        let original = FieldValue::Boolean(false);
+        let json = serde_json::to_string(&original).expect("serialize should succeed");
+        let restored: FieldValue =
+            serde_json::from_str(&json).expect("deserialize should succeed");
+        assert_eq!(original, restored);
+    }
+
+    #[test]
+    fn test_serde_roundtrip_null() {
+        let original = FieldValue::Null;
+        let json = serde_json::to_string(&original).expect("serialize should succeed");
+        let restored: FieldValue =
+            serde_json::from_str(&json).expect("deserialize should succeed");
+        assert_eq!(original, restored);
+    }
+
+    // --- FieldFormat with non-string values ---
+
+    #[test]
+    fn test_format_validate_rejects_non_string() {
+        let format = FieldFormat::Email;
+        assert!(!format.validate(&FieldValue::Integer(42)));
+        assert!(!format.validate(&FieldValue::Boolean(true)));
+        assert!(!format.validate(&FieldValue::Null));
+    }
 }

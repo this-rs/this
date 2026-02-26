@@ -164,4 +164,153 @@ mod tests {
         let s = json_to_struct(&json);
         assert!(s.fields.is_empty());
     }
+
+    // === json_to_value per-type tests ===
+
+    #[test]
+    fn test_json_to_value_null() {
+        let v = json_to_value(&json!(null));
+        assert!(matches!(v.kind, Some(Kind::NullValue(0))));
+    }
+
+    #[test]
+    fn test_json_to_value_bool_true() {
+        let v = json_to_value(&json!(true));
+        assert!(matches!(v.kind, Some(Kind::BoolValue(true))));
+    }
+
+    #[test]
+    fn test_json_to_value_bool_false() {
+        let v = json_to_value(&json!(false));
+        assert!(matches!(v.kind, Some(Kind::BoolValue(false))));
+    }
+
+    #[test]
+    fn test_json_to_value_integer() {
+        let v = json_to_value(&json!(42));
+        match v.kind {
+            Some(Kind::NumberValue(n)) => assert!((n - 42.0).abs() < f64::EPSILON),
+            _ => panic!("expected NumberValue"),
+        }
+    }
+
+    #[test]
+    fn test_json_to_value_float() {
+        let v = json_to_value(&json!(3.14));
+        match v.kind {
+            Some(Kind::NumberValue(n)) => assert!((n - 3.14).abs() < f64::EPSILON),
+            _ => panic!("expected NumberValue"),
+        }
+    }
+
+    #[test]
+    fn test_json_to_value_string() {
+        let v = json_to_value(&json!("hello"));
+        assert!(matches!(v.kind, Some(Kind::StringValue(ref s)) if s == "hello"));
+    }
+
+    #[test]
+    fn test_json_to_value_array() {
+        let v = json_to_value(&json!([1, "two", true]));
+        match v.kind {
+            Some(Kind::ListValue(list)) => assert_eq!(list.values.len(), 3),
+            _ => panic!("expected ListValue"),
+        }
+    }
+
+    #[test]
+    fn test_json_to_value_object() {
+        let v = json_to_value(&json!({"key": "val"}));
+        match v.kind {
+            Some(Kind::StructValue(s)) => {
+                assert_eq!(s.fields.len(), 1);
+                assert!(s.fields.contains_key("key"));
+            }
+            _ => panic!("expected StructValue"),
+        }
+    }
+
+    // === value_to_json per-type tests ===
+
+    #[test]
+    fn test_value_to_json_null() {
+        let v = Value { kind: Some(Kind::NullValue(0)) };
+        assert_eq!(value_to_json(&v), json!(null));
+    }
+
+    #[test]
+    fn test_value_to_json_bool() {
+        let v = Value { kind: Some(Kind::BoolValue(true)) };
+        assert_eq!(value_to_json(&v), json!(true));
+    }
+
+    #[test]
+    fn test_value_to_json_number() {
+        let v = Value { kind: Some(Kind::NumberValue(99.5)) };
+        assert_eq!(value_to_json(&v), json!(99.5));
+    }
+
+    #[test]
+    fn test_value_to_json_string() {
+        let v = Value { kind: Some(Kind::StringValue("world".to_string())) };
+        assert_eq!(value_to_json(&v), json!("world"));
+    }
+
+    #[test]
+    fn test_value_to_json_list() {
+        let v = Value {
+            kind: Some(Kind::ListValue(ListValue {
+                values: vec![
+                    Value { kind: Some(Kind::BoolValue(true)) },
+                    Value { kind: Some(Kind::StringValue("a".to_string())) },
+                ],
+            })),
+        };
+        assert_eq!(value_to_json(&v), json!([true, "a"]));
+    }
+
+    #[test]
+    fn test_value_to_json_struct() {
+        let mut fields = std::collections::BTreeMap::new();
+        fields.insert("x".to_string(), Value { kind: Some(Kind::NumberValue(1.0)) });
+        let v = Value {
+            kind: Some(Kind::StructValue(Struct {
+                fields: fields.into_iter().collect(),
+            })),
+        };
+        assert_eq!(value_to_json(&v), json!({"x": 1.0}));
+    }
+
+    #[test]
+    fn test_value_to_json_none_kind() {
+        let v = Value { kind: None };
+        assert_eq!(value_to_json(&v), json!(null));
+    }
+
+    #[test]
+    fn test_value_to_json_nan_becomes_null() {
+        // NaN cannot be represented in JSON → from_f64 returns None → Null
+        let v = Value { kind: Some(Kind::NumberValue(f64::NAN)) };
+        assert_eq!(value_to_json(&v), json!(null));
+    }
+
+    // === Non-object struct conversions ===
+
+    #[test]
+    fn test_json_to_struct_array_returns_empty() {
+        let s = json_to_struct(&json!([1, 2, 3]));
+        assert!(s.fields.is_empty());
+    }
+
+    #[test]
+    fn test_json_to_struct_number_returns_empty() {
+        let s = json_to_struct(&json!(42));
+        assert!(s.fields.is_empty());
+    }
+
+    #[test]
+    fn test_json_to_struct_bool_returns_empty() {
+        let s = json_to_struct(&json!(true));
+        assert!(s.fields.is_empty());
+    }
 }
