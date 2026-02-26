@@ -243,4 +243,48 @@ mod tests {
         // No links → no routes, but it shouldn't panic
         assert!(routes.is_empty());
     }
+
+    #[test]
+    fn test_is_ready_with_fetchers_returns_true() {
+        use crate::core::EntityFetcher;
+
+        struct StubFetcher;
+
+        #[async_trait::async_trait]
+        impl EntityFetcher for StubFetcher {
+            async fn fetch_as_json(
+                &self,
+                _entity_id: &uuid::Uuid,
+            ) -> anyhow::Result<serde_json::Value> {
+                Ok(serde_json::json!({}))
+            }
+        }
+
+        let mut fetchers: HashMap<String, Arc<dyn EntityFetcher>> = HashMap::new();
+        fetchers.insert("order".to_string(), Arc::new(StubFetcher));
+
+        let host = ServerHost::from_builder_components(
+            Arc::new(MockLinkService),
+            test_config(),
+            EntityRegistry::new(),
+            fetchers,
+            HashMap::new(),
+        )
+        .expect("should build host");
+
+        assert!(host.is_ready());
+    }
+
+    #[test]
+    fn test_entity_creators_accessible() {
+        let host = make_host();
+        assert!(host.entity_creators.is_empty());
+    }
+
+    #[test]
+    fn test_link_service_accessible() {
+        let host = make_host();
+        // link_service should be accessible (Arc<dyn LinkService>)
+        let _ = host.link_service.clone();
+    }
 }

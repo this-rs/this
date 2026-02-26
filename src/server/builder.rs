@@ -301,6 +301,350 @@ impl Default for ServerBuilder {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{EntityAuthConfig, EntityConfig, LinksConfig};
+    use crate::core::LinkDefinition;
+    use crate::core::module::Module;
+    use crate::server::entity_registry::EntityRegistry;
+    use crate::storage::InMemoryLinkService;
+    use std::sync::Arc;
+
+    // ── Mock Module for testing ──────────────────────────────────────────
+
+    /// A minimal Module implementation for builder tests
+    struct StubModule {
+        name: &'static str,
+        entity_types: Vec<&'static str>,
+        config: LinksConfig,
+    }
+
+    impl StubModule {
+        fn single_entity() -> Self {
+            Self {
+                name: "stub",
+                entity_types: vec!["order"],
+                config: LinksConfig {
+                    entities: vec![EntityConfig {
+                        singular: "order".to_string(),
+                        plural: "orders".to_string(),
+                        auth: EntityAuthConfig::default(),
+                    }],
+                    links: vec![],
+                    validation_rules: None,
+                },
+            }
+        }
+
+        fn with_link() -> Self {
+            Self {
+                name: "linked_stub",
+                entity_types: vec!["user", "car"],
+                config: LinksConfig {
+                    entities: vec![
+                        EntityConfig {
+                            singular: "user".to_string(),
+                            plural: "users".to_string(),
+                            auth: EntityAuthConfig::default(),
+                        },
+                        EntityConfig {
+                            singular: "car".to_string(),
+                            plural: "cars".to_string(),
+                            auth: EntityAuthConfig::default(),
+                        },
+                    ],
+                    links: vec![LinkDefinition {
+                        link_type: "owner".to_string(),
+                        source_type: "user".to_string(),
+                        target_type: "car".to_string(),
+                        forward_route_name: "cars-owned".to_string(),
+                        reverse_route_name: "users-owners".to_string(),
+                        description: Some("User owns a car".to_string()),
+                        required_fields: None,
+                        auth: None,
+                    }],
+                    validation_rules: None,
+                },
+            }
+        }
+    }
+
+    impl Module for StubModule {
+        fn name(&self) -> &str {
+            self.name
+        }
+
+        fn entity_types(&self) -> Vec<&str> {
+            self.entity_types.clone()
+        }
+
+        fn links_config(&self) -> anyhow::Result<LinksConfig> {
+            Ok(self.config.clone())
+        }
+
+        fn register_entities(&self, _registry: &mut EntityRegistry) {
+            // No entity descriptors in stub
+        }
+
+        fn get_entity_fetcher(
+            &self,
+            _entity_type: &str,
+        ) -> Option<Arc<dyn crate::core::EntityFetcher>> {
+            None
+        }
+
+        fn get_entity_creator(
+            &self,
+            _entity_type: &str,
+        ) -> Option<Arc<dyn crate::core::EntityCreator>> {
+            None
+        }
+    }
+
+    /// A module whose links_config() returns an error
+    struct FailingModule;
+
+    impl Module for FailingModule {
+        fn name(&self) -> &str {
+            "failing"
+        }
+
+        fn entity_types(&self) -> Vec<&str> {
+            vec![]
+        }
+
+        fn links_config(&self) -> anyhow::Result<LinksConfig> {
+            Err(anyhow::anyhow!("config load failed"))
+        }
+
+        fn register_entities(&self, _registry: &mut EntityRegistry) {}
+
+        fn get_entity_fetcher(
+            &self,
+            _entity_type: &str,
+        ) -> Option<Arc<dyn crate::core::EntityFetcher>> {
+            None
+        }
+
+        fn get_entity_creator(
+            &self,
+            _entity_type: &str,
+        ) -> Option<Arc<dyn crate::core::EntityCreator>> {
+            None
+        }
+    }
+
+    // ── Constructor tests ────────────────────────────────────────────────
+
+    #[test]
+    fn test_new_creates_empty_builder() {
+        let builder = ServerBuilder::new();
+        assert!(builder.link_service.is_none());
+        assert!(builder.configs.is_empty());
+        assert!(builder.modules.is_empty());
+        assert!(builder.custom_routes.is_empty());
+        assert!(builder.event_bus.is_none());
+    }
+
+    #[test]
+    fn test_default_is_same_as_new() {
+        let builder = ServerBuilder::default();
+        assert!(builder.link_service.is_none());
+        assert!(builder.configs.is_empty());
+        assert!(builder.modules.is_empty());
+        assert!(builder.custom_routes.is_empty());
+        assert!(builder.event_bus.is_none());
+    }
+
+    // ── with_link_service ────────────────────────────────────────────────
+
+    #[test]
+    fn test_with_link_service_sets_service() {
+        let builder = ServerBuilder::new().with_link_service(InMemoryLinkService::new());
+        assert!(builder.link_service.is_some());
+    }
+
+    // ── with_event_bus ───────────────────────────────────────────────────
+
+    #[test]
+    fn test_with_event_bus_sets_bus() {
+        let builder = ServerBuilder::new().with_event_bus(1024);
+        assert!(builder.event_bus.is_some());
+    }
+
+    // ── with_custom_routes ───────────────────────────────────────────────
+
+    #[test]
+    fn test_with_custom_routes_appends_router() {
+        let builder = ServerBuilder::new()
+            .with_custom_routes(Router::new())
+            .with_custom_routes(Router::new());
+        assert_eq!(builder.custom_routes.len(), 2);
+    }
+
+    // ── register_module ──────────────────────────────────────────────────
+
+    #[test]
+    fn test_register_module_stores_config_and_module() {
+        let builder = ServerBuilder::new()
+            .register_module(StubModule::single_entity())
+            .expect("register_module should succeed");
+        assert_eq!(builder.configs.len(), 1);
+        assert_eq!(builder.modules.len(), 1);
+    }
+
+    #[test]
+    fn test_register_multiple_modules() {
+        let builder = ServerBuilder::new()
+            .register_module(StubModule::single_entity())
+            .expect("first module should register")
+            .register_module(StubModule::with_link())
+            .expect("second module should register");
+        assert_eq!(builder.configs.len(), 2);
+        assert_eq!(builder.modules.len(), 2);
+    }
+
+    #[test]
+    fn test_register_module_failing_config_returns_error() {
+        let result = ServerBuilder::new().register_module(FailingModule);
+        assert!(result.is_err());
+        let err_msg = format!("{}", result.err().expect("should be Err"));
+        assert!(
+            err_msg.contains("config load failed"),
+            "error should contain cause: {}",
+            err_msg
+        );
+    }
+
+    // ── build_host ───────────────────────────────────────────────────────
+
+    #[test]
+    fn test_build_host_without_link_service_fails() {
+        let result = ServerBuilder::new()
+            .register_module(StubModule::single_entity())
+            .expect("register should succeed")
+            .build_host();
+        assert!(result.is_err());
+        let err_msg = format!("{}", result.err().expect("should be Err"));
+        assert!(
+            err_msg.contains("LinkService is required"),
+            "error should mention LinkService: {}",
+            err_msg
+        );
+    }
+
+    #[test]
+    fn test_build_host_single_module() {
+        let host = ServerBuilder::new()
+            .with_link_service(InMemoryLinkService::new())
+            .register_module(StubModule::single_entity())
+            .expect("register should succeed")
+            .build_host()
+            .expect("build_host should succeed");
+
+        assert_eq!(host.config.entities.len(), 1);
+        assert_eq!(host.config.entities[0].singular, "order");
+        assert!(host.event_bus.is_none());
+    }
+
+    #[test]
+    fn test_build_host_multi_module_merges_configs() {
+        let host = ServerBuilder::new()
+            .with_link_service(InMemoryLinkService::new())
+            .register_module(StubModule::single_entity())
+            .expect("register first should succeed")
+            .register_module(StubModule::with_link())
+            .expect("register second should succeed")
+            .build_host()
+            .expect("build_host should succeed");
+
+        // Merged config should contain entities from both modules
+        let entity_names: Vec<&str> = host.config.entities.iter().map(|e| e.singular.as_str()).collect();
+        assert!(entity_names.contains(&"order"), "should contain order");
+        assert!(entity_names.contains(&"user"), "should contain user");
+        assert!(entity_names.contains(&"car"), "should contain car");
+    }
+
+    #[test]
+    fn test_build_host_with_event_bus_attaches_bus() {
+        let host = ServerBuilder::new()
+            .with_link_service(InMemoryLinkService::new())
+            .with_event_bus(16)
+            .register_module(StubModule::single_entity())
+            .expect("register should succeed")
+            .build_host()
+            .expect("build_host should succeed");
+
+        assert!(host.event_bus().is_some());
+    }
+
+    #[test]
+    fn test_build_host_no_modules_empty_config() {
+        let host = ServerBuilder::new()
+            .with_link_service(InMemoryLinkService::new())
+            .build_host()
+            .expect("build_host with no modules should succeed");
+
+        assert!(host.config.entities.is_empty());
+        assert!(host.config.links.is_empty());
+    }
+
+    // ── build (REST router) ──────────────────────────────────────────────
+
+    #[test]
+    fn test_build_produces_router() {
+        let router = ServerBuilder::new()
+            .with_link_service(InMemoryLinkService::new())
+            .register_module(StubModule::single_entity())
+            .expect("register should succeed")
+            .build()
+            .expect("build should produce a Router");
+
+        // We cannot inspect the Router deeply, but it should not panic
+        let _ = router;
+    }
+
+    #[test]
+    fn test_build_without_link_service_fails() {
+        let result = ServerBuilder::new()
+            .register_module(StubModule::single_entity())
+            .expect("register should succeed")
+            .build();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_build_with_custom_routes() {
+        use axum::routing::get;
+
+        let custom = Router::new().route("/custom", get(|| async { "ok" }));
+        let router = ServerBuilder::new()
+            .with_link_service(InMemoryLinkService::new())
+            .with_custom_routes(custom)
+            .register_module(StubModule::single_entity())
+            .expect("register should succeed")
+            .build()
+            .expect("build should succeed with custom routes");
+
+        let _ = router;
+    }
+
+    // ── Fluent chaining ──────────────────────────────────────────────────
+
+    #[test]
+    fn test_fluent_chaining_full_pipeline() {
+        let result = ServerBuilder::new()
+            .with_link_service(InMemoryLinkService::new())
+            .with_event_bus(256)
+            .with_custom_routes(Router::new())
+            .register_module(StubModule::with_link())
+            .expect("register should succeed")
+            .build();
+        assert!(result.is_ok(), "full fluent pipeline should succeed");
+    }
+}
+
 /// Wait for shutdown signal (SIGTERM or Ctrl+C)
 async fn shutdown_signal() {
     use tokio::signal;

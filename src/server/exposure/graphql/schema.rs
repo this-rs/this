@@ -494,3 +494,660 @@ pub fn build_schema(
 
     Schema::build(query, mutation, EmptySubscription).finish()
 }
+
+#[cfg(test)]
+#[cfg(feature = "graphql")]
+mod tests {
+    use super::*;
+    use crate::config::{EntityAuthConfig, EntityConfig, LinksConfig};
+    use crate::core::link::LinkDefinition;
+    use crate::core::EntityFetcher;
+    use crate::server::entity_registry::{EntityDescriptor, EntityRegistry};
+    use crate::server::host::ServerHost;
+    use crate::storage::in_memory::InMemoryLinkService;
+    use async_trait::async_trait;
+    use axum::Router;
+    use serde_json::{json, Value as JsonVal};
+    use std::collections::HashMap;
+
+    // -----------------------------------------------------------------------
+    // Mock infrastructure
+    // -----------------------------------------------------------------------
+
+    struct MockFetcher {
+        entities: std::sync::Mutex<HashMap<Uuid, JsonVal>>,
+    }
+
+    impl MockFetcher {
+        fn new() -> Self {
+            Self {
+                entities: std::sync::Mutex::new(HashMap::new()),
+            }
+        }
+
+        fn with_entity(self, id: Uuid, entity: JsonVal) -> Self {
+            self.entities
+                .lock()
+                .expect("lock poisoned")
+                .insert(id, entity);
+            self
+        }
+    }
+
+    #[async_trait]
+    impl EntityFetcher for MockFetcher {
+        async fn fetch_as_json(&self, entity_id: &Uuid) -> anyhow::Result<JsonVal> {
+            let entities = self.entities.lock().expect("lock poisoned");
+            entities
+                .get(entity_id)
+                .cloned()
+                .ok_or_else(|| anyhow::anyhow!("Entity not found: {}", entity_id))
+        }
+    }
+
+    struct StubDescriptor {
+        entity_type: String,
+        plural: String,
+    }
+
+    impl StubDescriptor {
+        fn new(singular: &str, plural: &str) -> Self {
+            Self {
+                entity_type: singular.to_string(),
+                plural: plural.to_string(),
+            }
+        }
+    }
+
+    impl EntityDescriptor for StubDescriptor {
+        fn entity_type(&self) -> &str {
+            &self.entity_type
+        }
+        fn plural(&self) -> &str {
+            &self.plural
+        }
+        fn build_routes(&self) -> Router {
+            Router::new()
+        }
+    }
+
+    fn build_test_host(
+        fetchers: HashMap<String, Arc<dyn EntityFetcher>>,
+    ) -> Arc<ServerHost> {
+        let link_service = Arc::new(InMemoryLinkService::new());
+        let config = LinksConfig {
+            entities: vec![
+                EntityConfig {
+                    singular: "order".to_string(),
+                    plural: "orders".to_string(),
+                    auth: EntityAuthConfig::default(),
+                },
+                EntityConfig {
+                    singular: "invoice".to_string(),
+                    plural: "invoices".to_string(),
+                    auth: EntityAuthConfig::default(),
+                },
+            ],
+            links: vec![LinkDefinition {
+                link_type: "has_invoice".to_string(),
+                source_type: "order".to_string(),
+                target_type: "invoice".to_string(),
+                forward_route_name: "invoices".to_string(),
+                reverse_route_name: "order".to_string(),
+                description: None,
+                required_fields: None,
+                auth: None,
+            }],
+            validation_rules: None,
+        };
+
+        let mut registry = EntityRegistry::new();
+        registry.register(Box::new(StubDescriptor::new("order", "orders")));
+        registry.register(Box::new(StubDescriptor::new("invoice", "invoices")));
+
+        Arc::new(
+            ServerHost::from_builder_components(
+                link_service,
+                config,
+                registry,
+                fetchers,
+                HashMap::new(),
+            )
+            .expect("should build test host"),
+        )
+    }
+
+    fn build_host_with_fetcher(
+        entity_type: &str,
+        fetcher: Arc<dyn EntityFetcher>,
+    ) -> Arc<ServerHost> {
+        let mut fetchers: HashMap<String, Arc<dyn EntityFetcher>> = HashMap::new();
+        fetchers.insert(entity_type.to_string(), fetcher);
+        build_test_host(fetchers)
+    }
+
+    // -----------------------------------------------------------------------
+    // build_schema smoke test
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_build_schema_does_not_panic() {
+        let host = build_test_host(HashMap::new());
+        let _schema = build_schema(host);
+    }
+
+    // -----------------------------------------------------------------------
+    // Entity struct fields (direct access, not #[Object] resolvers)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_entity_struct_fields() {
+        let entity = Entity {
+            id: "abc-123".to_string(),
+            entity_type: "order".to_string(),
+            name: "Test Order".to_string(),
+            created_at: "2024-01-01T00:00:00Z".to_string(),
+            updated_at: "2024-01-02T00:00:00Z".to_string(),
+            deleted_at: Some("2024-01-03T00:00:00Z".to_string()),
+            status: "active".to_string(),
+            data: json!({"custom": "field"}),
+            host: None,
+        };
+
+        assert_eq!(entity.id, "abc-123");
+        assert_eq!(entity.entity_type, "order");
+        assert_eq!(entity.name, "Test Order");
+        assert_eq!(entity.created_at, "2024-01-01T00:00:00Z");
+        assert_eq!(entity.updated_at, "2024-01-02T00:00:00Z");
+        assert_eq!(entity.deleted_at.as_deref(), Some("2024-01-03T00:00:00Z"));
+        assert_eq!(entity.status, "active");
+        assert_eq!(entity.data, json!({"custom": "field"}));
+    }
+
+    #[test]
+    fn test_entity_deleted_at_none() {
+        let entity = Entity {
+            id: "x".to_string(),
+            entity_type: "order".to_string(),
+            name: "".to_string(),
+            created_at: "".to_string(),
+            updated_at: "".to_string(),
+            deleted_at: None,
+            status: "".to_string(),
+            data: json!(null),
+            host: None,
+        };
+
+        assert!(entity.deleted_at.is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // Entity: get_linked_entities without host returns empty
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_get_linked_entities_no_host_returns_empty() {
+        let entity = Entity {
+            id: Uuid::new_v4().to_string(),
+            entity_type: "order".to_string(),
+            name: "".to_string(),
+            created_at: "".to_string(),
+            updated_at: "".to_string(),
+            deleted_at: None,
+            status: "".to_string(),
+            data: json!({}),
+            host: None,
+        };
+
+        let result = entity
+            .get_linked_entities("invoices", "invoice")
+            .await
+            .expect("should not error");
+        assert!(result.is_empty(), "no host means no linked entities");
+    }
+
+    // -----------------------------------------------------------------------
+    // Entity: get_linked_entities with host but no links
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_get_linked_entities_host_empty_store() {
+        let entity_id = Uuid::new_v4();
+        let host = build_test_host(HashMap::new());
+
+        let entity = Entity {
+            id: entity_id.to_string(),
+            entity_type: "order".to_string(),
+            name: "".to_string(),
+            created_at: "".to_string(),
+            updated_at: "".to_string(),
+            deleted_at: None,
+            status: "".to_string(),
+            data: json!({}),
+            host: Some(host),
+        };
+
+        let result = entity
+            .get_linked_entities("invoices", "invoice")
+            .await
+            .expect("should not error");
+        assert!(result.is_empty(), "empty store means no linked entities");
+    }
+
+    // -----------------------------------------------------------------------
+    // Entity: get_linked_entities with invalid UUID returns error
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_get_linked_entities_invalid_uuid() {
+        let host = build_test_host(HashMap::new());
+
+        let entity = Entity {
+            id: "not-a-uuid".to_string(),
+            entity_type: "order".to_string(),
+            name: "".to_string(),
+            created_at: "".to_string(),
+            updated_at: "".to_string(),
+            deleted_at: None,
+            status: "".to_string(),
+            data: json!({}),
+            host: Some(host),
+        };
+
+        let result = entity.get_linked_entities("invoices", "invoice").await;
+        assert!(result.is_err(), "invalid UUID should produce an error");
+    }
+
+    // -----------------------------------------------------------------------
+    // Entity: get_linked_entities with fetcher resolves targets
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_get_linked_entities_resolves_targets() {
+        let source_id = Uuid::new_v4();
+        let target_id = Uuid::new_v4();
+
+        let invoice_json = json!({
+            "id": target_id.to_string(),
+            "type": "invoice",
+            "name": "Invoice #1",
+            "created_at": "2024-01-01",
+            "updated_at": "2024-01-02",
+            "deleted_at": null,
+            "status": "paid"
+        });
+
+        let host = build_host_with_fetcher(
+            "invoice",
+            Arc::new(MockFetcher::new().with_entity(target_id, invoice_json)),
+        );
+
+        // Create a link in the store
+        let link_entity = crate::core::link::LinkEntity::new(
+            "has_invoice",
+            source_id,
+            target_id,
+            None,
+        );
+        host.link_service
+            .create(link_entity)
+            .await
+            .expect("should create link");
+
+        let entity = Entity {
+            id: source_id.to_string(),
+            entity_type: "order".to_string(),
+            name: "".to_string(),
+            created_at: "".to_string(),
+            updated_at: "".to_string(),
+            deleted_at: None,
+            status: "".to_string(),
+            data: json!({}),
+            host: Some(host),
+        };
+
+        let result = entity
+            .get_linked_entities("has_invoice", "invoice")
+            .await
+            .expect("should not error");
+        assert_eq!(result.len(), 1, "should resolve one linked entity");
+        assert_eq!(result[0].name, "Invoice #1");
+        assert_eq!(result[0].status, "paid");
+    }
+
+    // -----------------------------------------------------------------------
+    // Link struct fields
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_link_struct_fields() {
+        let link = Link {
+            id: "link-1".to_string(),
+            source_id: "src-1".to_string(),
+            target_id: "tgt-1".to_string(),
+            link_type: "has_invoice".to_string(),
+            metadata: json!({"key": "val"}),
+            created_at: "2024-01-01".to_string(),
+            target: None,
+            source: None,
+        };
+
+        assert_eq!(link.id, "link-1");
+        assert_eq!(link.source_id, "src-1");
+        assert_eq!(link.target_id, "tgt-1");
+        assert_eq!(link.link_type, "has_invoice");
+        assert!(link.target.is_none());
+        assert!(link.source.is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // Schema: entity_types query via schema execution
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_query_root_entity_types() {
+        let host = build_test_host(HashMap::new());
+        let schema = build_schema(host);
+
+        let result = schema
+            .execute("{ entityTypes }")
+            .await;
+
+        assert!(result.errors.is_empty(), "should have no errors: {:?}", result.errors);
+        let data = result.data.into_json().expect("should serialize");
+        let types = data["entityTypes"]
+            .as_array()
+            .expect("should be array");
+        let type_strs: Vec<&str> = types
+            .iter()
+            .map(|v| v.as_str().expect("string"))
+            .collect();
+        assert!(type_strs.contains(&"order"), "should have order");
+        assert!(type_strs.contains(&"invoice"), "should have invoice");
+    }
+
+    // -----------------------------------------------------------------------
+    // Schema: entity query with fetcher
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_query_root_entity_found() {
+        let order_id = Uuid::new_v4();
+        let order_json = json!({
+            "id": order_id.to_string(),
+            "type": "order",
+            "name": "Order #1",
+            "created_at": "2024-01-01",
+            "updated_at": "2024-01-02",
+            "deleted_at": null,
+            "status": "active"
+        });
+
+        let host = build_host_with_fetcher(
+            "order",
+            Arc::new(MockFetcher::new().with_entity(order_id, order_json)),
+        );
+        let schema = build_schema(host);
+
+        let query = format!(
+            r#"{{ entity(id: "{}", entityType: "order") {{ id name status }} }}"#,
+            order_id
+        );
+        let result = schema.execute(&query).await;
+        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+        let data = result.data.into_json().expect("json");
+        let entity = &data["entity"];
+        assert_eq!(entity["name"], "Order #1");
+        assert_eq!(entity["status"], "active");
+    }
+
+    // -----------------------------------------------------------------------
+    // Schema: entity query unknown type returns null
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_query_root_entity_unknown_type_returns_null() {
+        let host = build_test_host(HashMap::new());
+        let schema = build_schema(host);
+
+        let id = Uuid::new_v4();
+        let query = format!(
+            r#"{{ entity(id: "{}", entityType: "widget") {{ id }} }}"#,
+            id
+        );
+        let result = schema.execute(&query).await;
+        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+        let data = result.data.into_json().expect("json");
+        assert!(data["entity"].is_null(), "unknown type should return null");
+    }
+
+    // -----------------------------------------------------------------------
+    // Schema: entity query - entity not found returns null
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_query_root_entity_not_found_returns_null() {
+        let host = build_host_with_fetcher(
+            "order",
+            Arc::new(MockFetcher::new()),
+        );
+        let schema = build_schema(host);
+
+        let id = Uuid::new_v4();
+        let query = format!(
+            r#"{{ entity(id: "{}", entityType: "order") {{ id }} }}"#,
+            id
+        );
+        let result = schema.execute(&query).await;
+        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+        let data = result.data.into_json().expect("json");
+        assert!(data["entity"].is_null(), "not found should return null");
+    }
+
+    // -----------------------------------------------------------------------
+    // Schema: entity query with invalid UUID returns error
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_query_root_entity_invalid_uuid() {
+        let mut fetchers: HashMap<String, Arc<dyn EntityFetcher>> = HashMap::new();
+        fetchers.insert("order".to_string(), Arc::new(MockFetcher::new()));
+        let host = build_test_host(fetchers);
+        let schema = build_schema(host);
+
+        let query = r#"{ entity(id: "not-a-uuid", entityType: "order") { id } }"#;
+        let result = schema.execute(query).await;
+        assert!(
+            !result.errors.is_empty(),
+            "invalid UUID should produce errors"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Schema: entityLinks query
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_query_root_entity_links() {
+        let source_id = Uuid::new_v4();
+        let target_id = Uuid::new_v4();
+        let host = build_test_host(HashMap::new());
+
+        // Create a link in the store
+        let link_entity = crate::core::link::LinkEntity::new(
+            "has_invoice",
+            source_id,
+            target_id,
+            Some(json!({"amount": 100})),
+        );
+        host.link_service
+            .create(link_entity)
+            .await
+            .expect("should create link");
+
+        let schema = build_schema(host);
+
+        let query = format!(
+            r#"{{ entityLinks(entityId: "{}") {{ linkType sourceId targetId }} }}"#,
+            source_id
+        );
+        let result = schema.execute(&query).await;
+        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+        let data = result.data.into_json().expect("json");
+        let links = data["entityLinks"].as_array().expect("should be array");
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0]["linkType"], "has_invoice");
+        assert_eq!(links[0]["sourceId"], source_id.to_string());
+    }
+
+    // -----------------------------------------------------------------------
+    // Schema: createLink mutation
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_mutation_create_link() {
+        let host = build_test_host(HashMap::new());
+        let schema = build_schema(host);
+
+        let source_id = Uuid::new_v4();
+        let target_id = Uuid::new_v4();
+        let query = format!(
+            r#"mutation {{ createLink(sourceId: "{}", targetId: "{}", linkType: "has_invoice") {{ id sourceId targetId linkType }} }}"#,
+            source_id, target_id
+        );
+
+        let result = schema.execute(&query).await;
+        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+        let data = result.data.into_json().expect("json");
+        let link = &data["createLink"];
+        assert_eq!(link["sourceId"], source_id.to_string());
+        assert_eq!(link["targetId"], target_id.to_string());
+        assert_eq!(link["linkType"], "has_invoice");
+        assert!(link["id"].as_str().is_some(), "link should have an id");
+    }
+
+    // -----------------------------------------------------------------------
+    // Schema: createLink with invalid UUID
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_mutation_create_link_invalid_source_uuid() {
+        let host = build_test_host(HashMap::new());
+        let schema = build_schema(host);
+
+        let query = format!(
+            r#"mutation {{ createLink(sourceId: "not-a-uuid", targetId: "{}", linkType: "x") {{ id }} }}"#,
+            Uuid::new_v4()
+        );
+
+        let result = schema.execute(&query).await;
+        assert!(
+            !result.errors.is_empty(),
+            "invalid UUID should produce errors"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Schema: deleteLink mutation
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_mutation_delete_link() {
+        let host = build_test_host(HashMap::new());
+
+        // First create a link
+        let source_id = Uuid::new_v4();
+        let target_id = Uuid::new_v4();
+        let link_entity = crate::core::link::LinkEntity::new(
+            "has_invoice",
+            source_id,
+            target_id,
+            None,
+        );
+        let created = host
+            .link_service
+            .create(link_entity)
+            .await
+            .expect("should create link");
+
+        let schema = build_schema(host);
+
+        let query = format!(
+            r#"mutation {{ deleteLink(id: "{}") }}"#,
+            created.id
+        );
+        let result = schema.execute(&query).await;
+        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+        let data = result.data.into_json().expect("json");
+        assert_eq!(data["deleteLink"], true);
+    }
+
+    // -----------------------------------------------------------------------
+    // Schema: list_entities returns empty (stub implementation)
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_query_root_list_orders_returns_empty() {
+        let host = build_test_host(HashMap::new());
+        let schema = build_schema(host);
+
+        let result = schema.execute("{ orders { id } }").await;
+        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+        let data = result.data.into_json().expect("json");
+        let orders = data["orders"].as_array().expect("should be array");
+        assert!(orders.is_empty(), "list_entities returns empty for now");
+    }
+
+    // -----------------------------------------------------------------------
+    // Schema: link query by ID
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_query_root_link_by_id() {
+        let host = build_test_host(HashMap::new());
+
+        let source_id = Uuid::new_v4();
+        let target_id = Uuid::new_v4();
+        let link_entity = crate::core::link::LinkEntity::new(
+            "has_invoice",
+            source_id,
+            target_id,
+            None,
+        );
+        let created = host
+            .link_service
+            .create(link_entity)
+            .await
+            .expect("should create link");
+
+        let schema = build_schema(host);
+
+        let query = format!(
+            r#"{{ link(id: "{}") {{ id linkType sourceId targetId }} }}"#,
+            created.id
+        );
+        let result = schema.execute(&query).await;
+        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+        let data = result.data.into_json().expect("json");
+        let link = &data["link"];
+        assert_eq!(link["linkType"], "has_invoice");
+        assert_eq!(link["sourceId"], source_id.to_string());
+    }
+
+    // -----------------------------------------------------------------------
+    // Schema: link query not found returns null
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_query_root_link_not_found() {
+        let host = build_test_host(HashMap::new());
+        let schema = build_schema(host);
+
+        let id = Uuid::new_v4();
+        let query = format!(r#"{{ link(id: "{}") {{ id }} }}"#, id);
+        let result = schema.execute(&query).await;
+        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+        let data = result.data.into_json().expect("json");
+        assert!(data["link"].is_null(), "non-existent link should return null");
+    }
+}

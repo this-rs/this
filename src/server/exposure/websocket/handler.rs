@@ -165,3 +165,157 @@ async fn handle_client_message(manager: &ConnectionManager, connection_id: &str,
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::LinksConfig;
+    use crate::server::entity_registry::EntityRegistry;
+    use crate::server::exposure::websocket::protocol::SubscriptionFilter;
+    use crate::server::host::ServerHost;
+    use crate::storage::InMemoryLinkService;
+    use std::collections::HashMap;
+
+    /// Build a minimal ServerHost for testing
+    fn test_host() -> Arc<ServerHost> {
+        let host = ServerHost::from_builder_components(
+            Arc::new(InMemoryLinkService::new()),
+            LinksConfig::default_config(),
+            EntityRegistry::new(),
+            HashMap::new(),
+            HashMap::new(),
+        )
+        .expect("should build host");
+        Arc::new(host)
+    }
+
+    #[tokio::test]
+    async fn test_handle_client_message_ping_responds_pong() {
+        let manager = ConnectionManager::new(test_host());
+        let (conn_id, mut rx) = manager.connect().await;
+
+        let ping_json = r#"{"type":"ping"}"#;
+        handle_client_message(&manager, &conn_id, ping_json).await;
+
+        let msg = rx.try_recv().expect("should receive Pong");
+        assert!(
+            matches!(msg, ServerMessage::Pong),
+            "expected Pong, got {:?}",
+            msg
+        );
+    }
+
+    #[tokio::test]
+    async fn test_handle_client_message_subscribe_responds_subscribed() {
+        let manager = ConnectionManager::new(test_host());
+        let (conn_id, mut rx) = manager.connect().await;
+
+        let subscribe_json =
+            r#"{"type":"subscribe","filter":{"entity_type":"order"}}"#;
+        handle_client_message(&manager, &conn_id, subscribe_json).await;
+
+        let msg = rx.try_recv().expect("should receive Subscribed");
+        match msg {
+            ServerMessage::Subscribed {
+                subscription_id,
+                filter,
+            } => {
+                assert!(
+                    subscription_id.starts_with("sub_"),
+                    "subscription_id should start with sub_"
+                );
+                assert_eq!(filter.entity_type.as_deref(), Some("order"));
+            }
+            other => panic!("expected Subscribed, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_handle_client_message_unsubscribe_existing() {
+        let manager = ConnectionManager::new(test_host());
+        let (conn_id, mut rx) = manager.connect().await;
+
+        // First subscribe
+        let filter = SubscriptionFilter {
+            entity_type: Some("invoice".to_string()),
+            ..Default::default()
+        };
+        let sub_id = manager
+            .subscribe(&conn_id, filter)
+            .await
+            .expect("subscribe should succeed");
+
+        // Now unsubscribe via message handler
+        let unsub_json = format!(
+            r#"{{"type":"unsubscribe","subscription_id":"{}"}}"#,
+            sub_id
+        );
+        handle_client_message(&manager, &conn_id, &unsub_json).await;
+
+        let msg = rx.try_recv().expect("should receive Unsubscribed");
+        match msg {
+            ServerMessage::Unsubscribed { subscription_id } => {
+                assert_eq!(subscription_id, sub_id);
+            }
+            other => panic!("expected Unsubscribed, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_handle_client_message_unsubscribe_nonexistent() {
+        let manager = ConnectionManager::new(test_host());
+        let (conn_id, mut rx) = manager.connect().await;
+
+        let unsub_json =
+            r#"{"type":"unsubscribe","subscription_id":"sub_does_not_exist"}"#;
+        handle_client_message(&manager, &conn_id, unsub_json).await;
+
+        let msg = rx.try_recv().expect("should receive Error");
+        match msg {
+            ServerMessage::Error { message } => {
+                assert!(
+                    message.contains("not found"),
+                    "error should mention 'not found': {}",
+                    message
+                );
+            }
+            other => panic!("expected Error, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_handle_client_message_invalid_json_sends_error() {
+        let manager = ConnectionManager::new(test_host());
+        let (conn_id, mut rx) = manager.connect().await;
+
+        let bad_json = r#"{"this is not valid json"#;
+        handle_client_message(&manager, &conn_id, bad_json).await;
+
+        let msg = rx.try_recv().expect("should receive Error");
+        match msg {
+            ServerMessage::Error { message } => {
+                assert!(
+                    message.contains("Invalid message"),
+                    "error should mention 'Invalid message': {}",
+                    message
+                );
+            }
+            other => panic!("expected Error, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_handle_client_message_unknown_type_sends_error() {
+        let manager = ConnectionManager::new(test_host());
+        let (conn_id, mut rx) = manager.connect().await;
+
+        let unknown_json = r#"{"type":"unknown_action","data":{}}"#;
+        handle_client_message(&manager, &conn_id, unknown_json).await;
+
+        let msg = rx.try_recv().expect("should receive Error");
+        assert!(
+            matches!(msg, ServerMessage::Error { .. }),
+            "expected Error for unknown message type"
+        );
+    }
+}
