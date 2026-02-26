@@ -537,6 +537,157 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
+    // Extended test entity for FieldValue variant coverage in search
+    // -----------------------------------------------------------------------
+
+    #[derive(Clone, Debug, PartialEq)]
+    struct ExtendedTestEntity {
+        id: Uuid,
+        entity_name: String,
+        status: String,
+        ref_id: Uuid,
+        created_at: DateTime<Utc>,
+        updated_at: DateTime<Utc>,
+    }
+
+    impl ExtendedTestEntity {
+        fn new(name: &str, ref_id: Uuid) -> Self {
+            let now = Utc::now();
+            Self {
+                id: Uuid::new_v4(),
+                entity_name: name.to_string(),
+                status: "active".to_string(),
+                ref_id,
+                created_at: now,
+                updated_at: now,
+            }
+        }
+    }
+
+    impl Entity for ExtendedTestEntity {
+        type Service = ();
+
+        fn resource_name() -> &'static str {
+            "extended_test_entities"
+        }
+
+        fn resource_name_singular() -> &'static str {
+            "extended_test_entity"
+        }
+
+        fn service_from_host(
+            _: &std::sync::Arc<dyn std::any::Any + Send + Sync>,
+        ) -> anyhow::Result<std::sync::Arc<Self::Service>> {
+            Ok(std::sync::Arc::new(()))
+        }
+
+        fn id(&self) -> Uuid {
+            self.id
+        }
+
+        fn entity_type(&self) -> &str {
+            "extended_test"
+        }
+
+        fn created_at(&self) -> DateTime<Utc> {
+            self.created_at
+        }
+
+        fn updated_at(&self) -> DateTime<Utc> {
+            self.updated_at
+        }
+
+        fn deleted_at(&self) -> Option<DateTime<Utc>> {
+            None
+        }
+
+        fn status(&self) -> &str {
+            &self.status
+        }
+    }
+
+    impl crate::core::Data for ExtendedTestEntity {
+        fn name(&self) -> &str {
+            &self.entity_name
+        }
+
+        fn indexed_fields() -> &'static [&'static str] {
+            &["entity_name", "status", "ref_id", "created_at"]
+        }
+
+        fn field_value(&self, field: &str) -> Option<FieldValue> {
+            match field {
+                "entity_name" => Some(FieldValue::String(self.entity_name.clone())),
+                "status" => Some(FieldValue::String(self.status.clone())),
+                "ref_id" => Some(FieldValue::Uuid(self.ref_id)),
+                "created_at" => Some(FieldValue::DateTime(self.created_at)),
+                _ => None,
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_data_search_by_uuid_field() {
+        let service = InMemoryDataService::<ExtendedTestEntity>::new();
+        let target_ref = Uuid::new_v4();
+        let other_ref = Uuid::new_v4();
+
+        service
+            .create(ExtendedTestEntity::new("Alpha", target_ref))
+            .await
+            .expect("create Alpha should succeed");
+        service
+            .create(ExtendedTestEntity::new("Beta", other_ref))
+            .await
+            .expect("create Beta should succeed");
+        service
+            .create(ExtendedTestEntity::new("Gamma", target_ref))
+            .await
+            .expect("create Gamma should succeed");
+
+        let results = service
+            .search("ref_id", &target_ref.to_string())
+            .await
+            .expect("search by ref_id should succeed");
+        assert_eq!(
+            results.len(),
+            2,
+            "should find 2 entities with matching ref_id"
+        );
+        assert!(results.iter().all(|e| e.ref_id == target_ref));
+    }
+
+    #[tokio::test]
+    async fn test_data_search_by_datetime_field() {
+        let service = InMemoryDataService::<ExtendedTestEntity>::new();
+        let entity = ExtendedTestEntity::new("Timed", Uuid::new_v4());
+        let created_rfc3339 = entity.created_at.to_rfc3339();
+
+        service.create(entity).await.expect("create should succeed");
+
+        let results = service
+            .search("created_at", &created_rfc3339)
+            .await
+            .expect("search by created_at should succeed");
+        assert_eq!(
+            results.len(),
+            1,
+            "should find entity by its created_at timestamp"
+        );
+        assert_eq!(results[0].entity_name, "Timed");
+    }
+
+    #[tokio::test]
+    async fn test_data_default_creates_empty_service() {
+        let service = InMemoryDataService::<TestDataEntity>::default();
+        let all = service
+            .list()
+            .await
+            .expect("list should succeed on default service");
+        assert!(all.is_empty(), "default service should start empty");
+    }
+
+    // -----------------------------------------------------------------------
     // InMemoryLinkService tests (existing)
     // -----------------------------------------------------------------------
 

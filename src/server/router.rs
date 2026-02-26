@@ -133,3 +133,87 @@ pub fn build_link_routes(state: AppState) -> Router {
         .fallback(fallback_handler)
         .with_state(state)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::LinksConfig;
+    use crate::core::events::EventBus;
+    use crate::links::handlers::AppState;
+    use crate::links::registry::LinkRouteRegistry;
+    use crate::storage::InMemoryLinkService;
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    /// Build a minimal AppState for testing
+    fn test_app_state() -> AppState {
+        let config = Arc::new(LinksConfig::default_config());
+        let registry = Arc::new(LinkRouteRegistry::new(config.clone()));
+        AppState {
+            link_service: Arc::new(InMemoryLinkService::new()),
+            config,
+            registry,
+            entity_fetchers: Arc::new(HashMap::new()),
+            entity_creators: Arc::new(HashMap::new()),
+            event_bus: None,
+        }
+    }
+
+    #[test]
+    fn test_build_link_routes_produces_router() {
+        let state = test_app_state();
+        let router = build_link_routes(state);
+        // Should not panic; router is valid
+        let _ = router;
+    }
+
+    #[test]
+    fn test_build_link_routes_with_event_bus() {
+        let config = Arc::new(LinksConfig::default_config());
+        let registry = Arc::new(LinkRouteRegistry::new(config.clone()));
+        let state = AppState {
+            link_service: Arc::new(InMemoryLinkService::new()),
+            config,
+            registry,
+            entity_fetchers: Arc::new(HashMap::new()),
+            entity_creators: Arc::new(HashMap::new()),
+            event_bus: Some(Arc::new(EventBus::new(16))),
+        };
+        let router = build_link_routes(state);
+        let _ = router;
+    }
+
+    #[test]
+    fn test_build_link_routes_empty_config() {
+        let config = Arc::new(LinksConfig {
+            entities: vec![],
+            links: vec![],
+            validation_rules: None,
+        });
+        let registry = Arc::new(LinkRouteRegistry::new(config.clone()));
+        let state = AppState {
+            link_service: Arc::new(InMemoryLinkService::new()),
+            config,
+            registry,
+            entity_fetchers: Arc::new(HashMap::new()),
+            entity_creators: Arc::new(HashMap::new()),
+            event_bus: None,
+        };
+        let router = build_link_routes(state);
+        let _ = router;
+    }
+
+    #[cfg(feature = "grpc")]
+    mod grpc_tests {
+        use super::super::combine_rest_and_grpc;
+        use axum::Router;
+
+        #[test]
+        fn test_combine_rest_and_grpc_merges_routers() {
+            let rest = Router::new();
+            let grpc = Router::new();
+            let combined = combine_rest_and_grpc(rest, grpc);
+            let _ = combined;
+        }
+    }
+}

@@ -425,4 +425,58 @@ mod tests {
         assert_eq!(auth.update, "owner");
         assert_eq!(auth.delete, "admin_only");
     }
+
+    #[test]
+    fn test_touch_updates_updated_at() {
+        let mut link = LinkEntity::new("owner", Uuid::new_v4(), Uuid::new_v4(), None);
+        let original_updated_at = link.updated_at;
+
+        // Small sleep to guarantee time difference
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        link.touch();
+
+        assert!(
+            link.updated_at > original_updated_at,
+            "touch() should advance updated_at"
+        );
+    }
+
+    #[test]
+    fn test_link_auth_config_partial_yaml_deserialization() {
+        // Only specify some fields; others should get "authenticated" default
+        let yaml = r#"
+            list: public
+            delete: admin_only
+        "#;
+        let auth: LinkAuthConfig =
+            serde_yaml::from_str(yaml).expect("partial LinkAuthConfig should deserialize");
+        assert_eq!(auth.list, "public");
+        assert_eq!(auth.delete, "admin_only");
+        // Unspecified fields should use the default
+        assert_eq!(auth.get, "authenticated");
+        assert_eq!(auth.create, "authenticated");
+        assert_eq!(auth.update, "authenticated");
+    }
+
+    #[test]
+    fn test_link_entity_with_metadata() {
+        let metadata = serde_json::json!({"role": "CTO", "department": "Engineering"});
+        let link = LinkEntity::new(
+            "worker",
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Some(metadata.clone()),
+        );
+        assert_eq!(link.metadata, Some(metadata));
+        assert_eq!(link.entity_type, "link");
+    }
+
+    #[test]
+    fn test_link_entity_without_metadata() {
+        let link = LinkEntity::new("driver", Uuid::new_v4(), Uuid::new_v4(), None);
+        assert!(link.metadata.is_none());
+        assert_eq!(link.link_type, "driver");
+        assert_eq!(link.entity_type, "link");
+        assert!(link.deleted_at.is_none());
+    }
 }

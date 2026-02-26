@@ -451,4 +451,530 @@ mod tests {
             "Route names must be unique"
         );
     }
+
+    // ── Helper: 3-entity chain config (order → invoice → payment) ──
+
+    fn create_chain_config() -> LinksConfig {
+        LinksConfig {
+            entities: vec![
+                EntityConfig {
+                    singular: "order".to_string(),
+                    plural: "orders".to_string(),
+                    auth: crate::config::EntityAuthConfig::default(),
+                },
+                EntityConfig {
+                    singular: "invoice".to_string(),
+                    plural: "invoices".to_string(),
+                    auth: crate::config::EntityAuthConfig::default(),
+                },
+                EntityConfig {
+                    singular: "payment".to_string(),
+                    plural: "payments".to_string(),
+                    auth: crate::config::EntityAuthConfig::default(),
+                },
+            ],
+            links: vec![
+                LinkDefinition {
+                    link_type: "billing".to_string(),
+                    source_type: "order".to_string(),
+                    target_type: "invoice".to_string(),
+                    forward_route_name: "invoices".to_string(),
+                    reverse_route_name: "order".to_string(),
+                    description: None,
+                    required_fields: None,
+                    auth: None,
+                },
+                LinkDefinition {
+                    link_type: "payment".to_string(),
+                    source_type: "invoice".to_string(),
+                    target_type: "payment".to_string(),
+                    forward_route_name: "payments".to_string(),
+                    reverse_route_name: "invoice".to_string(),
+                    description: None,
+                    required_fields: None,
+                    auth: None,
+                },
+            ],
+            validation_rules: None,
+        }
+    }
+
+    // ── Helper: cycle config (A → B → A) ──
+
+    fn create_cycle_config() -> LinksConfig {
+        LinksConfig {
+            entities: vec![
+                EntityConfig {
+                    singular: "a".to_string(),
+                    plural: "as".to_string(),
+                    auth: crate::config::EntityAuthConfig::default(),
+                },
+                EntityConfig {
+                    singular: "b".to_string(),
+                    plural: "bs".to_string(),
+                    auth: crate::config::EntityAuthConfig::default(),
+                },
+            ],
+            links: vec![
+                LinkDefinition {
+                    link_type: "ab".to_string(),
+                    source_type: "a".to_string(),
+                    target_type: "b".to_string(),
+                    forward_route_name: "bs".to_string(),
+                    reverse_route_name: "as-from-b".to_string(),
+                    description: None,
+                    required_fields: None,
+                    auth: None,
+                },
+                LinkDefinition {
+                    link_type: "ba".to_string(),
+                    source_type: "b".to_string(),
+                    target_type: "a".to_string(),
+                    forward_route_name: "as".to_string(),
+                    reverse_route_name: "bs-from-a".to_string(),
+                    description: None,
+                    required_fields: None,
+                    auth: None,
+                },
+            ],
+            validation_rules: None,
+        }
+    }
+
+    // ── Helper: empty config ──
+
+    fn create_empty_config() -> LinksConfig {
+        LinksConfig {
+            entities: vec![],
+            links: vec![],
+            validation_rules: None,
+        }
+    }
+
+    // ======================================================================
+    // detect_link_chains tests
+    // ======================================================================
+
+    #[test]
+    fn test_detect_link_chains_simple_chain() {
+        let config = Arc::new(create_chain_config());
+        let registry = LinkRouteRegistry::new(config);
+
+        let chains = registry.detect_link_chains(5);
+
+        // Forward chains starting from "order" should include order→invoice and order→invoice→payment
+        let forward_from_order: Vec<_> = chains
+            .iter()
+            .filter(|c| {
+                !c.is_reverse()
+                    && c.steps
+                        .first()
+                        .map(|s| s.entity_type == "order")
+                        .unwrap_or(false)
+            })
+            .collect();
+
+        assert!(
+            forward_from_order.len() >= 2,
+            "expected at least 2 forward chains from order (1-step and 2-step), got {}",
+            forward_from_order.len()
+        );
+
+        // There should be a 3-step chain: order → invoice → payment
+        let three_step = forward_from_order
+            .iter()
+            .find(|c| c.steps.len() == 3)
+            .expect("expected a 3-step chain order→invoice→payment");
+
+        assert_eq!(three_step.steps[0].entity_type, "order");
+        assert_eq!(three_step.steps[1].entity_type, "invoice");
+        assert_eq!(three_step.steps[2].entity_type, "payment");
+    }
+
+    #[test]
+    fn test_detect_link_chains_cycle_detection() {
+        let config = Arc::new(create_cycle_config());
+        let registry = LinkRouteRegistry::new(config);
+
+        // This must terminate (cycle detection prevents infinite recursion)
+        let chains = registry.detect_link_chains(10);
+
+        // Should produce chains but not infinitely loop
+        // A→B, A→B→A would be blocked by cycle detection on the edge A->B
+        // So we get A→B and B→A as 2-step chains, but not A→B→A
+        assert!(
+            !chains.is_empty(),
+            "should detect at least some chains even with cycles"
+        );
+
+        // No chain should have duplicate edges (cycle detection guarantee)
+        for chain in &chains {
+            let len = chain.steps.len();
+            assert!(
+                len <= 4,
+                "chain length {} is suspiciously long for a 2-node cycle graph",
+                len
+            );
+        }
+    }
+
+    #[test]
+    fn test_detect_link_chains_max_depth_limits_traversal() {
+        let config = Arc::new(create_chain_config());
+        let registry = LinkRouteRegistry::new(config);
+
+        let chains_depth1 = registry.detect_link_chains(1);
+        let chains_depth5 = registry.detect_link_chains(5);
+
+        // With depth=1 we can only go one hop, so max chain length is 2 steps (source + one hop)
+        for chain in &chains_depth1 {
+            assert!(
+                chain.steps.len() <= 2,
+                "max_depth=1 should limit chains to 2 steps, got {}",
+                chain.steps.len()
+            );
+        }
+
+        // With depth=5, we should get longer chains (the 3-step order→invoice→payment)
+        let has_three_step = chains_depth5.iter().any(|c| c.steps.len() == 3);
+        assert!(has_three_step, "max_depth=5 should allow 3-step chains");
+    }
+
+    #[test]
+    fn test_detect_link_chains_forward_chains_detected() {
+        let config = Arc::new(create_chain_config());
+        let registry = LinkRouteRegistry::new(config);
+
+        let chains = registry.detect_link_chains(5);
+        let forward_chains: Vec<_> = chains.iter().filter(|c| !c.is_reverse()).collect();
+
+        assert!(
+            !forward_chains.is_empty(),
+            "should detect at least one forward chain"
+        );
+
+        // All steps in forward chains should have Forward direction
+        for chain in &forward_chains {
+            for step in &chain.steps {
+                assert_eq!(
+                    step.direction,
+                    LinkDirection::Forward,
+                    "all steps in a forward chain should have Forward direction"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_detect_link_chains_reverse_chains_detected() {
+        let config = Arc::new(create_chain_config());
+        let registry = LinkRouteRegistry::new(config);
+
+        let chains = registry.detect_link_chains(5);
+        let reverse_chains: Vec<_> = chains.iter().filter(|c| c.is_reverse()).collect();
+
+        assert!(
+            !reverse_chains.is_empty(),
+            "should detect at least one reverse chain"
+        );
+
+        // All steps in reverse chains should have Reverse direction
+        for chain in &reverse_chains {
+            for step in &chain.steps {
+                assert_eq!(
+                    step.direction,
+                    LinkDirection::Reverse,
+                    "all steps in a reverse chain should have Reverse direction"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_detect_link_chains_empty_config() {
+        let config = Arc::new(create_empty_config());
+        let registry = LinkRouteRegistry::new(config);
+
+        let chains = registry.detect_link_chains(5);
+        assert!(
+            chains.is_empty(),
+            "empty config should produce no chains, got {}",
+            chains.len()
+        );
+    }
+
+    // ======================================================================
+    // LinkChain::to_route_pattern tests
+    // ======================================================================
+
+    #[test]
+    fn test_to_route_pattern_single_step_chain() {
+        let config = Arc::new(create_chain_config());
+        let registry = LinkRouteRegistry::new(config);
+
+        let chains = registry.detect_link_chains(5);
+
+        // Find a 2-step (single hop) forward chain starting from order
+        let single_hop = chains
+            .iter()
+            .find(|c| {
+                c.steps.len() == 2
+                    && !c.is_reverse()
+                    && c.steps[0].entity_type == "order"
+                    && c.steps[1].entity_type == "invoice"
+            })
+            .expect("expected a 2-step forward chain order→invoice");
+
+        let pattern = single_hop.to_route_pattern();
+
+        // Pattern should be: /orders/{order_id}/invoices
+        assert_eq!(
+            pattern, "/orders/{order_id}/invoices",
+            "single hop pattern mismatch"
+        );
+    }
+
+    #[test]
+    fn test_to_route_pattern_multi_step_chain() {
+        let config = Arc::new(create_chain_config());
+        let registry = LinkRouteRegistry::new(config);
+
+        let chains = registry.detect_link_chains(5);
+
+        // Find the 3-step forward chain: order → invoice → payment
+        let multi_hop = chains
+            .iter()
+            .find(|c| {
+                c.steps.len() == 3
+                    && !c.is_reverse()
+                    && c.steps[0].entity_type == "order"
+                    && c.steps[2].entity_type == "payment"
+            })
+            .expect("expected a 3-step forward chain order→invoice→payment");
+
+        let pattern = multi_hop.to_route_pattern();
+
+        // Pattern should be: /orders/{order_id}/invoices/{invoice_id}/payments
+        assert_eq!(
+            pattern, "/orders/{order_id}/invoices/{invoice_id}/payments",
+            "multi-step pattern mismatch"
+        );
+    }
+
+    #[test]
+    fn test_to_route_pattern_plural_fallback() {
+        // Config with an entity type that is NOT in the entities list
+        // The get_plural fallback should append "s"
+        let config = Arc::new(LinksConfig {
+            entities: vec![
+                EntityConfig {
+                    singular: "widget".to_string(),
+                    plural: "widgets".to_string(),
+                    auth: crate::config::EntityAuthConfig::default(),
+                },
+                // "gadget" entity is deliberately missing from entities list
+            ],
+            links: vec![LinkDefinition {
+                link_type: "contains".to_string(),
+                source_type: "widget".to_string(),
+                target_type: "gadget".to_string(),
+                forward_route_name: "gadgets".to_string(),
+                reverse_route_name: "widget".to_string(),
+                description: None,
+                required_fields: None,
+                auth: None,
+            }],
+            validation_rules: None,
+        });
+
+        // Manually build a chain with an unknown entity to exercise fallback
+        let chain = LinkChain {
+            steps: vec![
+                LinkChainStep {
+                    entity_type: "unknown_thing".to_string(),
+                    route_name: None,
+                    direction: LinkDirection::Forward,
+                },
+                LinkChainStep {
+                    entity_type: "gadget".to_string(),
+                    route_name: Some("gadgets".to_string()),
+                    direction: LinkDirection::Forward,
+                },
+            ],
+            config,
+        };
+
+        let pattern = chain.to_route_pattern();
+
+        // "unknown_thing" is not in entities, so fallback appends "s" → "unknown_things"
+        // "gadget" is also not in entities → "gadgets" (from fallback)
+        assert_eq!(
+            pattern, "/unknown_things/{unknown_thing_id}/gadgets",
+            "fallback plural should append 's' for unknown entity types"
+        );
+    }
+
+    // ======================================================================
+    // LinkChain::is_reverse tests
+    // ======================================================================
+
+    #[test]
+    fn test_is_reverse_forward_chain() {
+        let config = Arc::new(create_chain_config());
+
+        let chain = LinkChain {
+            steps: vec![
+                LinkChainStep {
+                    entity_type: "order".to_string(),
+                    route_name: None,
+                    direction: LinkDirection::Forward,
+                },
+                LinkChainStep {
+                    entity_type: "invoice".to_string(),
+                    route_name: Some("invoices".to_string()),
+                    direction: LinkDirection::Forward,
+                },
+            ],
+            config,
+        };
+
+        assert!(
+            !chain.is_reverse(),
+            "chain starting with Forward direction should not be reverse"
+        );
+    }
+
+    #[test]
+    fn test_is_reverse_reverse_chain() {
+        let config = Arc::new(create_chain_config());
+
+        let chain = LinkChain {
+            steps: vec![
+                LinkChainStep {
+                    entity_type: "payment".to_string(),
+                    route_name: None,
+                    direction: LinkDirection::Reverse,
+                },
+                LinkChainStep {
+                    entity_type: "invoice".to_string(),
+                    route_name: Some("invoice".to_string()),
+                    direction: LinkDirection::Reverse,
+                },
+            ],
+            config,
+        };
+
+        assert!(
+            chain.is_reverse(),
+            "chain starting with Reverse direction should be reverse"
+        );
+    }
+
+    #[test]
+    fn test_is_reverse_empty_chain() {
+        let config = Arc::new(create_chain_config());
+
+        let chain = LinkChain {
+            steps: vec![],
+            config,
+        };
+
+        assert!(
+            !chain.is_reverse(),
+            "empty chain should return false for is_reverse"
+        );
+    }
+
+    // ======================================================================
+    // Error path tests
+    // ======================================================================
+
+    #[test]
+    fn test_resolve_route_nonexistent() {
+        let config = Arc::new(create_test_config());
+        let registry = LinkRouteRegistry::new(config);
+
+        let result = registry.resolve_route("user", "nonexistent-route");
+        assert!(
+            result.is_err(),
+            "resolving a nonexistent route should return an error"
+        );
+
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("nonexistent-route"),
+            "error message should contain the route name, got: {}",
+            err_msg
+        );
+        assert!(
+            err_msg.contains("user"),
+            "error message should contain the entity type, got: {}",
+            err_msg
+        );
+    }
+
+    #[test]
+    fn test_list_routes_for_unknown_entity() {
+        let config = Arc::new(create_test_config());
+        let registry = LinkRouteRegistry::new(config);
+
+        let routes = registry.list_routes_for_entity("unknown_type");
+        assert!(
+            routes.is_empty(),
+            "listing routes for an unknown entity should return an empty vec"
+        );
+    }
+
+    #[test]
+    fn test_resolve_route_wrong_entity_type() {
+        // "cars-owned" is a forward route from "user", not from "car"
+        let config = Arc::new(create_test_config());
+        let registry = LinkRouteRegistry::new(config);
+
+        let result = registry.resolve_route("car", "cars-owned");
+        assert!(
+            result.is_err(),
+            "resolving a route with wrong entity type should return an error"
+        );
+    }
+
+    #[test]
+    fn test_config_accessor() {
+        let config = Arc::new(create_test_config());
+        let registry = LinkRouteRegistry::new(config.clone());
+
+        let returned_config = registry.config();
+        assert_eq!(
+            returned_config.entities.len(),
+            config.entities.len(),
+            "config() should return the original configuration"
+        );
+        assert_eq!(
+            returned_config.links.len(),
+            config.links.len(),
+            "config() should return the original configuration"
+        );
+    }
+
+    #[test]
+    fn test_list_routes_for_entity_reverse_direction() {
+        let config = Arc::new(create_test_config());
+        let registry = LinkRouteRegistry::new(config);
+
+        // "car" should have reverse routes: "users-owners" and "users-drivers"
+        let car_routes = registry.list_routes_for_entity("car");
+        assert_eq!(car_routes.len(), 2, "car should have 2 reverse routes");
+
+        for route in &car_routes {
+            assert_eq!(
+                route.direction,
+                LinkDirection::Reverse,
+                "car routes should all be Reverse direction"
+            );
+            assert_eq!(
+                route.connected_to, "user",
+                "car routes should connect to user"
+            );
+        }
+    }
 }

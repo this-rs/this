@@ -615,3 +615,229 @@ impl LinkService for Neo4jLinkService {
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[cfg(feature = "neo4j")]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    // === json_value_to_bolt ===
+
+    #[test]
+    fn test_json_value_to_bolt_string() {
+        let val = json!("hello");
+        let bolt = json_value_to_bolt(&val);
+        // BoltType::String variant
+        assert!(
+            matches!(bolt, BoltType::String(_)),
+            "expected String variant, got: {:?}",
+            bolt
+        );
+    }
+
+    #[test]
+    fn test_json_value_to_bolt_integer() {
+        let val = json!(42);
+        let bolt = json_value_to_bolt(&val);
+        assert!(
+            matches!(bolt, BoltType::Integer(_)),
+            "expected Integer variant, got: {:?}",
+            bolt
+        );
+    }
+
+    #[test]
+    fn test_json_value_to_bolt_float() {
+        let val = json!(3.15);
+        let bolt = json_value_to_bolt(&val);
+        // JSON numbers that have decimals should become Float
+        assert!(
+            matches!(bolt, BoltType::Float(_)),
+            "expected Float variant, got: {:?}",
+            bolt
+        );
+    }
+
+    #[test]
+    fn test_json_value_to_bolt_bool_true() {
+        let val = json!(true);
+        let bolt = json_value_to_bolt(&val);
+        assert!(
+            matches!(bolt, BoltType::Boolean(_)),
+            "expected Boolean variant, got: {:?}",
+            bolt
+        );
+    }
+
+    #[test]
+    fn test_json_value_to_bolt_bool_false() {
+        let val = json!(false);
+        let bolt = json_value_to_bolt(&val);
+        assert!(
+            matches!(bolt, BoltType::Boolean(_)),
+            "expected Boolean variant, got: {:?}",
+            bolt
+        );
+    }
+
+    #[test]
+    fn test_json_value_to_bolt_null() {
+        let val = json!(null);
+        let bolt = json_value_to_bolt(&val);
+        assert!(
+            matches!(bolt, BoltType::Null(_)),
+            "expected Null variant, got: {:?}",
+            bolt
+        );
+    }
+
+    #[test]
+    fn test_json_value_to_bolt_object_becomes_string() {
+        let val = json!({"nested": "object"});
+        let bolt = json_value_to_bolt(&val);
+        // Objects/Arrays are serialized to JSON string
+        assert!(
+            matches!(bolt, BoltType::String(_)),
+            "expected String variant for object, got: {:?}",
+            bolt
+        );
+    }
+
+    #[test]
+    fn test_json_value_to_bolt_array_becomes_string() {
+        let val = json!([1, 2, 3]);
+        let bolt = json_value_to_bolt(&val);
+        assert!(
+            matches!(bolt, BoltType::String(_)),
+            "expected String variant for array, got: {:?}",
+            bolt
+        );
+    }
+
+    // === parse_search_value ===
+
+    #[test]
+    fn test_parse_search_value_true() {
+        let bolt = parse_search_value("true");
+        assert!(
+            matches!(bolt, BoltType::Boolean(_)),
+            "expected Boolean for 'true', got: {:?}",
+            bolt
+        );
+    }
+
+    #[test]
+    fn test_parse_search_value_false() {
+        let bolt = parse_search_value("false");
+        assert!(
+            matches!(bolt, BoltType::Boolean(_)),
+            "expected Boolean for 'false', got: {:?}",
+            bolt
+        );
+    }
+
+    #[test]
+    fn test_parse_search_value_integer() {
+        let bolt = parse_search_value("42");
+        assert!(
+            matches!(bolt, BoltType::Integer(_)),
+            "expected Integer for '42', got: {:?}",
+            bolt
+        );
+    }
+
+    #[test]
+    fn test_parse_search_value_negative_integer() {
+        let bolt = parse_search_value("-7");
+        assert!(
+            matches!(bolt, BoltType::Integer(_)),
+            "expected Integer for '-7', got: {:?}",
+            bolt
+        );
+    }
+
+    #[test]
+    fn test_parse_search_value_float() {
+        let bolt = parse_search_value("3.15");
+        assert!(
+            matches!(bolt, BoltType::Float(_)),
+            "expected Float for '3.15', got: {:?}",
+            bolt
+        );
+    }
+
+    #[test]
+    fn test_parse_search_value_string_fallback() {
+        let bolt = parse_search_value("hello world");
+        assert!(
+            matches!(bolt, BoltType::String(_)),
+            "expected String for 'hello world', got: {:?}",
+            bolt
+        );
+    }
+
+    #[test]
+    fn test_parse_search_value_number_without_dot_is_integer() {
+        // "100" should be parsed as Integer, not Float
+        let bolt = parse_search_value("100");
+        assert!(
+            matches!(bolt, BoltType::Integer(_)),
+            "expected Integer for '100', got: {:?}",
+            bolt
+        );
+    }
+
+    // === entity_to_bolt_props ===
+
+    #[test]
+    fn test_entity_to_bolt_props_returns_map() {
+        #[derive(Serialize)]
+        struct Simple {
+            name: String,
+            count: i32,
+        }
+        let entity = Simple {
+            name: "test".to_string(),
+            count: 5,
+        };
+        let result = entity_to_bolt_props(&entity).expect("should convert");
+        assert!(
+            matches!(result, BoltType::Map(_)),
+            "expected Map variant, got: {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_entity_to_bolt_props_includes_data_key() {
+        #[derive(Serialize)]
+        struct Item {
+            id: String,
+        }
+        let entity = Item {
+            id: "abc".to_string(),
+        };
+        let result = entity_to_bolt_props(&entity).expect("should convert");
+        if let BoltType::Map(map) = result {
+            // The map should contain __data key
+            let has_data = map.value.iter().any(|(k, _)| k.value == "__data");
+            assert!(has_data, "map should contain __data key");
+        } else {
+            panic!("expected Map variant");
+        }
+    }
+
+    #[test]
+    fn test_entity_to_bolt_props_non_object_returns_error() {
+        // A bare string will serialize to a JSON string, not an object
+        let result = entity_to_bolt_props(&"not an object");
+        assert!(result.is_err(), "non-object should return error");
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("Expected JSON object"),
+            "error should mention JSON object: {}",
+            err
+        );
+    }
+}

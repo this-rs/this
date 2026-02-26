@@ -66,3 +66,90 @@ impl EntityRegistry {
         self.descriptors.keys().map(|s| s.as_str()).collect()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Minimal mock EntityDescriptor for testing
+    struct MockDescriptor {
+        entity_type: String,
+        plural: String,
+    }
+
+    impl MockDescriptor {
+        fn new(entity_type: &str, plural: &str) -> Self {
+            Self {
+                entity_type: entity_type.to_string(),
+                plural: plural.to_string(),
+            }
+        }
+    }
+
+    impl EntityDescriptor for MockDescriptor {
+        fn entity_type(&self) -> &str {
+            &self.entity_type
+        }
+
+        fn plural(&self) -> &str {
+            &self.plural
+        }
+
+        fn build_routes(&self) -> Router {
+            Router::new()
+        }
+    }
+
+    #[test]
+    fn test_new_registry_is_empty() {
+        let registry = EntityRegistry::new();
+        assert!(registry.entity_types().is_empty());
+    }
+
+    #[test]
+    fn test_default_registry_is_empty() {
+        let registry = EntityRegistry::default();
+        assert!(registry.entity_types().is_empty());
+    }
+
+    #[test]
+    fn test_register_single_entity() {
+        let mut registry = EntityRegistry::new();
+        registry.register(Box::new(MockDescriptor::new("order", "orders")));
+        let types = registry.entity_types();
+        assert_eq!(types.len(), 1);
+        assert!(types.contains(&"order"));
+    }
+
+    #[test]
+    fn test_register_multiple_entities() {
+        let mut registry = EntityRegistry::new();
+        registry.register(Box::new(MockDescriptor::new("order", "orders")));
+        registry.register(Box::new(MockDescriptor::new("invoice", "invoices")));
+        registry.register(Box::new(MockDescriptor::new("user", "users")));
+        assert_eq!(registry.entity_types().len(), 3);
+    }
+
+    #[test]
+    fn test_register_duplicate_replaces() {
+        let mut registry = EntityRegistry::new();
+        registry.register(Box::new(MockDescriptor::new("order", "orders")));
+        registry.register(Box::new(MockDescriptor::new("order", "commandes")));
+        // Same key → replaced, still 1 entry
+        assert_eq!(registry.entity_types().len(), 1);
+    }
+
+    #[test]
+    fn test_build_routes_empty_registry() {
+        let registry = EntityRegistry::new();
+        let _router = registry.build_routes(); // Should not panic
+    }
+
+    #[test]
+    fn test_build_routes_with_entities() {
+        let mut registry = EntityRegistry::new();
+        registry.register(Box::new(MockDescriptor::new("order", "orders")));
+        registry.register(Box::new(MockDescriptor::new("invoice", "invoices")));
+        let _router = registry.build_routes(); // Should not panic
+    }
+}

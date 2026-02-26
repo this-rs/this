@@ -220,4 +220,186 @@ mod tests {
         assert_eq!(TestEntity::resource_name(), "test_entities");
         assert_eq!(TestEntity::resource_name_singular(), "test_entity");
     }
+
+    #[test]
+    fn test_entity_default_tenant_id_is_none() {
+        let now = Utc::now();
+        let entity = TestEntity {
+            id: Uuid::new_v4(),
+            entity_type: "test".to_string(),
+            created_at: now,
+            updated_at: now,
+            deleted_at: None,
+            status: "active".to_string(),
+        };
+        assert_eq!(entity.tenant_id(), None);
+    }
+
+    #[test]
+    fn test_entity_is_active_with_inactive_status() {
+        let now = Utc::now();
+        let entity = TestEntity {
+            id: Uuid::new_v4(),
+            entity_type: "test".to_string(),
+            created_at: now,
+            updated_at: now,
+            deleted_at: None,
+            status: "inactive".to_string(),
+        };
+        assert!(!entity.is_active());
+        assert!(!entity.is_deleted());
+    }
+
+    #[test]
+    fn test_entity_service_from_host() {
+        let host: Arc<dyn std::any::Any + Send + Sync> = Arc::new(());
+        let svc = TestEntity::service_from_host(&host).expect("service_from_host should succeed");
+        // We just verify it returns successfully; the service is ()
+        assert_eq!(*svc, ());
+    }
+
+    // --- Link trait ---
+
+    #[derive(Clone, Debug)]
+    struct TestLink {
+        id: Uuid,
+        source_id: Uuid,
+        target_id: Uuid,
+        link_type: String,
+        created_at: DateTime<Utc>,
+        updated_at: DateTime<Utc>,
+        deleted_at: Option<DateTime<Utc>>,
+        status: String,
+    }
+
+    impl Entity for TestLink {
+        type Service = ();
+
+        fn resource_name() -> &'static str {
+            "test_links"
+        }
+
+        fn resource_name_singular() -> &'static str {
+            "test_link"
+        }
+
+        fn service_from_host(
+            _host: &Arc<dyn std::any::Any + Send + Sync>,
+        ) -> Result<Arc<Self::Service>> {
+            Ok(Arc::new(()))
+        }
+
+        fn id(&self) -> Uuid {
+            self.id
+        }
+
+        fn entity_type(&self) -> &str {
+            "test_link"
+        }
+
+        fn created_at(&self) -> DateTime<Utc> {
+            self.created_at
+        }
+
+        fn updated_at(&self) -> DateTime<Utc> {
+            self.updated_at
+        }
+
+        fn deleted_at(&self) -> Option<DateTime<Utc>> {
+            self.deleted_at
+        }
+
+        fn status(&self) -> &str {
+            &self.status
+        }
+    }
+
+    impl Link for TestLink {
+        fn source_id(&self) -> Uuid {
+            self.source_id
+        }
+
+        fn target_id(&self) -> Uuid {
+            self.target_id
+        }
+
+        fn link_type(&self) -> &str {
+            &self.link_type
+        }
+    }
+
+    #[test]
+    fn test_link_accessors() {
+        let now = Utc::now();
+        let src = Uuid::new_v4();
+        let tgt = Uuid::new_v4();
+        let link = TestLink {
+            id: Uuid::new_v4(),
+            source_id: src,
+            target_id: tgt,
+            link_type: "ownership".to_string(),
+            created_at: now,
+            updated_at: now,
+            deleted_at: None,
+            status: "active".to_string(),
+        };
+        assert_eq!(link.source_id(), src);
+        assert_eq!(link.target_id(), tgt);
+        assert_eq!(link.link_type(), "ownership");
+    }
+
+    #[test]
+    fn test_link_is_deleted_and_is_active() {
+        let now = Utc::now();
+        let mut link = TestLink {
+            id: Uuid::new_v4(),
+            source_id: Uuid::new_v4(),
+            target_id: Uuid::new_v4(),
+            link_type: "ref".to_string(),
+            created_at: now,
+            updated_at: now,
+            deleted_at: None,
+            status: "active".to_string(),
+        };
+        assert!(!link.is_deleted());
+        assert!(link.is_active());
+
+        link.deleted_at = Some(now);
+        assert!(link.is_deleted());
+        assert!(!link.is_active());
+    }
+
+    #[test]
+    fn test_link_display_does_not_panic() {
+        let now = Utc::now();
+        let link = TestLink {
+            id: Uuid::new_v4(),
+            source_id: Uuid::new_v4(),
+            target_id: Uuid::new_v4(),
+            link_type: "ref".to_string(),
+            created_at: now,
+            updated_at: now,
+            deleted_at: None,
+            status: "active".to_string(),
+        };
+        // Calling display() should not panic
+        link.display();
+    }
+
+    #[test]
+    fn test_link_inactive_status() {
+        let now = Utc::now();
+        let link = TestLink {
+            id: Uuid::new_v4(),
+            source_id: Uuid::new_v4(),
+            target_id: Uuid::new_v4(),
+            link_type: "ref".to_string(),
+            created_at: now,
+            updated_at: now,
+            deleted_at: None,
+            status: "suspended".to_string(),
+        };
+        assert!(!link.is_active());
+        assert!(!link.is_deleted());
+    }
 }

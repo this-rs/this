@@ -625,3 +625,230 @@ impl LinkService for PostgresLinkService {
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[cfg(feature = "postgres")]
+#[allow(dead_code)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    // Minimal test entity via the impl_data_entity! macro.
+    crate::impl_data_entity!(TestOrder, "test_order", ["name"], {
+        amount: f64,
+    });
+
+    // -----------------------------------------------------------------------
+    // entity_to_row
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn entity_to_row_strips_common_fields() {
+        let order = TestOrder::new("Widget".into(), "active".into(), 42.5);
+        let row = PostgresDataService::<TestOrder>::entity_to_row(&order).unwrap();
+
+        let obj = row.data.as_object().expect("data should be a JSON object");
+        // Common fields must NOT appear in the JSONB data column
+        for field in ENTITY_COMMON_FIELDS {
+            assert!(
+                !obj.contains_key(*field),
+                "data should not contain common field '{field}'"
+            );
+        }
+        // Type-specific field must be preserved
+        assert_eq!(obj.get("amount").and_then(|v| v.as_f64()), Some(42.5));
+    }
+
+    #[test]
+    fn entity_to_row_preserves_entity_type() {
+        let order = TestOrder::new("Gadget".into(), "active".into(), 10.0);
+        let row = PostgresDataService::<TestOrder>::entity_to_row(&order).unwrap();
+
+        assert_eq!(row.entity_type, "test_order");
+    }
+
+    // -----------------------------------------------------------------------
+    // row_to_entity (roundtrip)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn row_to_entity_roundtrip() {
+        let order = TestOrder::new("Roundtrip".into(), "pending".into(), 99.99);
+        let original_id = order.id;
+        let original_created = order.created_at;
+        let original_updated = order.updated_at;
+
+        let row = PostgresDataService::<TestOrder>::entity_to_row(&order).unwrap();
+        let restored = PostgresDataService::<TestOrder>::row_to_entity(row).unwrap();
+
+        assert_eq!(restored.id, original_id);
+        assert_eq!(restored.name, "Roundtrip");
+        assert_eq!(restored.status, "pending");
+        assert_eq!(restored.amount, 99.99);
+        assert_eq!(restored.created_at, original_created);
+        assert_eq!(restored.updated_at, original_updated);
+        assert!(restored.deleted_at.is_none());
+    }
+
+    #[test]
+    fn row_to_entity_non_object_data_handled() {
+        // When the JSONB `data` column is not an object (e.g. null),
+        // row_to_entity should default to an empty object and still
+        // succeed if the type-specific fields have defaults / are present.
+        let now = Utc::now();
+        let id = Uuid::new_v4();
+
+        // Provide the required `amount` field so deserialization can succeed
+        // even though the outer value started as null -> {}.
+        let row_with_amount = EntityRow {
+            id,
+            entity_type: "test_order".into(),
+            name: "NullData".into(),
+            status: "active".into(),
+            tenant_id: None,
+            data: json!({ "amount": 7.5 }),
+            created_at: now,
+            updated_at: now,
+            deleted_at: None,
+        };
+        let entity = PostgresDataService::<TestOrder>::row_to_entity(row_with_amount).unwrap();
+        assert_eq!(entity.id, id);
+        assert_eq!(entity.name, "NullData");
+
+        // When data is truly null (missing custom fields), the fallback to {}
+        // still happens but deserialization returns a descriptive error (not a panic).
+        let row_null = EntityRow {
+            id,
+            entity_type: "test_order".into(),
+            name: "NullData".into(),
+            status: "active".into(),
+            tenant_id: None,
+            data: json!(null),
+            created_at: now,
+            updated_at: now,
+            deleted_at: None,
+        };
+        let err = PostgresDataService::<TestOrder>::row_to_entity(row_null).unwrap_err();
+        assert!(
+            err.to_string().contains("deserialize"),
+            "error should mention deserialization: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn row_to_entity_entity_type_fallback() {
+        // When entity_type / type are NOT in the JSONB data, row_to_entity
+        // should inject them from the row's entity_type column.
+        let now = Utc::now();
+        let id = Uuid::new_v4();
+
+        let row = EntityRow {
+            id,
+            entity_type: "test_order".into(),
+            name: "Fallback".into(),
+            status: "active".into(),
+            tenant_id: None,
+            data: json!({ "amount": 1.0 }), // no entity_type / type key
+            created_at: now,
+            updated_at: now,
+            deleted_at: None,
+        };
+
+        let entity = PostgresDataService::<TestOrder>::row_to_entity(row).unwrap();
+        assert_eq!(entity.entity_type, "test_order");
+    }
+
+    // -----------------------------------------------------------------------
+    // LinkRow conversions
+    // -----------------------------------------------------------------------
+
+    fn make_link() -> LinkEntity {
+        let now = Utc::now();
+        LinkEntity {
+            id: Uuid::new_v4(),
+            entity_type: "ownership".into(),
+            created_at: now,
+            updated_at: now,
+            deleted_at: None,
+            status: "active".into(),
+            tenant_id: Some(Uuid::new_v4()),
+            link_type: "owns".into(),
+            source_id: Uuid::new_v4(),
+            target_id: Uuid::new_v4(),
+            metadata: Some(json!({"priority": "high"})),
+        }
+    }
+
+    #[test]
+    fn link_row_from_link_preserves_fields() {
+        let link = make_link();
+        let row = LinkRow::from_link(&link);
+
+        assert_eq!(row.id, link.id);
+        assert_eq!(row.entity_type, link.entity_type);
+        assert_eq!(row.link_type, link.link_type);
+        assert_eq!(row.source_id, link.source_id);
+        assert_eq!(row.target_id, link.target_id);
+        assert_eq!(row.status, link.status);
+        assert_eq!(row.tenant_id, link.tenant_id);
+        assert_eq!(row.created_at, link.created_at);
+        assert_eq!(row.updated_at, link.updated_at);
+        assert_eq!(row.deleted_at, link.deleted_at);
+        // metadata: Some({...}) -> stored as the inner value
+        assert_eq!(row.metadata, json!({"priority": "high"}));
+        // source_type / target_type are always None
+        assert!(row.source_type.is_none());
+        assert!(row.target_type.is_none());
+    }
+
+    #[test]
+    fn link_row_into_link_roundtrip() {
+        let original = make_link();
+        let row = LinkRow::from_link(&original);
+        let restored = row.into_link();
+
+        assert_eq!(restored.id, original.id);
+        assert_eq!(restored.entity_type, original.entity_type);
+        assert_eq!(restored.link_type, original.link_type);
+        assert_eq!(restored.source_id, original.source_id);
+        assert_eq!(restored.target_id, original.target_id);
+        assert_eq!(restored.status, original.status);
+        assert_eq!(restored.tenant_id, original.tenant_id);
+        assert_eq!(restored.created_at, original.created_at);
+        assert_eq!(restored.updated_at, original.updated_at);
+        assert_eq!(restored.deleted_at, original.deleted_at);
+        assert_eq!(restored.metadata, original.metadata);
+    }
+
+    #[test]
+    fn link_row_into_link_empty_metadata_becomes_none() {
+        let mut link = make_link();
+        link.metadata = None; // from_link will store json!({})
+
+        let row = LinkRow::from_link(&link);
+        assert_eq!(
+            row.metadata,
+            json!({}),
+            "None metadata stored as empty object"
+        );
+
+        let restored = row.into_link();
+        assert_eq!(restored.metadata, None, "empty object should become None");
+    }
+
+    #[test]
+    fn link_row_into_link_with_metadata() {
+        let mut link = make_link();
+        link.metadata = Some(json!({"key": "val"}));
+
+        let row = LinkRow::from_link(&link);
+        let restored = row.into_link();
+
+        assert_eq!(
+            restored.metadata,
+            Some(json!({"key": "val"})),
+            "non-empty metadata should survive roundtrip"
+        );
+    }
+}

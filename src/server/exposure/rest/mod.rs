@@ -82,3 +82,113 @@ impl RestExposure {
         }))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::LinksConfig;
+    use crate::server::entity_registry::EntityRegistry;
+    use crate::server::host::ServerHost;
+    use crate::storage::InMemoryLinkService;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use std::collections::HashMap;
+    use tower::ServiceExt;
+
+    /// Build a minimal ServerHost for testing
+    fn test_host() -> Arc<ServerHost> {
+        let host = ServerHost::from_builder_components(
+            Arc::new(InMemoryLinkService::new()),
+            LinksConfig::default_config(),
+            EntityRegistry::new(),
+            HashMap::new(),
+            HashMap::new(),
+        )
+        .expect("should build host");
+        Arc::new(host)
+    }
+
+    #[test]
+    fn test_health_routes_builds_router() {
+        let router = RestExposure::health_routes();
+        let _ = router;
+    }
+
+    #[tokio::test]
+    async fn test_health_endpoint_returns_ok() {
+        let router = RestExposure::health_routes();
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .uri("/health")
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
+            .await
+            .expect("response should succeed");
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(response.into_body(), 1024)
+            .await
+            .expect("body should read");
+        let json: serde_json::Value =
+            serde_json::from_slice(&body).expect("body should be valid JSON");
+        assert_eq!(json["status"], "ok");
+        assert_eq!(json["service"], "this-rs");
+    }
+
+    #[tokio::test]
+    async fn test_healthz_endpoint_returns_ok() {
+        let router = RestExposure::health_routes();
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .uri("/healthz")
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
+            .await
+            .expect("response should succeed");
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(response.into_body(), 1024)
+            .await
+            .expect("body should read");
+        let json: serde_json::Value =
+            serde_json::from_slice(&body).expect("body should be valid JSON");
+        assert_eq!(json["status"], "ok");
+    }
+
+    #[test]
+    fn test_build_router_succeeds_with_host() {
+        let host = test_host();
+        let router = RestExposure::build_router(host, vec![]);
+        assert!(router.is_ok());
+    }
+
+    #[test]
+    fn test_build_router_with_custom_routes() {
+        use axum::routing::get;
+
+        let host = test_host();
+        let custom = Router::new().route("/custom", get(|| async { "custom" }));
+        let router = RestExposure::build_router(host, vec![custom]);
+        assert!(router.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_build_router_health_endpoint_reachable() {
+        let host = test_host();
+        let router = RestExposure::build_router(host, vec![]).expect("build should succeed");
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .uri("/health")
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
+            .await
+            .expect("response should succeed");
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+}

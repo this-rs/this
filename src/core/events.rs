@@ -388,4 +388,114 @@ mod tests {
         let _rx2 = bus2.subscribe();
         assert_eq!(bus.receiver_count(), 2);
     }
+
+    #[test]
+    fn test_entity_event_deleted_serialization() {
+        let entity_id = Uuid::new_v4();
+        let event = EntityEvent::Deleted {
+            entity_type: "invoice".to_string(),
+            entity_id,
+        };
+
+        let json = serde_json::to_value(&event).expect("EntityEvent::Deleted should serialize");
+        assert_eq!(json["action"], "deleted");
+        assert_eq!(json["entity_type"], "invoice");
+        assert_eq!(json["entity_id"], entity_id.to_string());
+        // Deleted variant should NOT have a "data" field
+        assert!(json.get("data").is_none());
+    }
+
+    #[test]
+    fn test_link_event_deleted_serialization() {
+        let link_id = Uuid::new_v4();
+        let source_id = Uuid::new_v4();
+        let target_id = Uuid::new_v4();
+        let event = LinkEvent::Deleted {
+            link_type: "ownership".to_string(),
+            link_id,
+            source_id,
+            target_id,
+        };
+
+        let json = serde_json::to_value(&event).expect("LinkEvent::Deleted should serialize");
+        assert_eq!(json["action"], "deleted");
+        assert_eq!(json["link_type"], "ownership");
+        assert_eq!(json["link_id"], link_id.to_string());
+        assert_eq!(json["source_id"], source_id.to_string());
+        assert_eq!(json["target_id"], target_id.to_string());
+        // Deleted variant should NOT have metadata
+        assert!(json.get("metadata").is_none());
+    }
+
+    #[test]
+    fn test_framework_event_entity_id_for_link_created() {
+        let link_id = Uuid::new_v4();
+        let event = FrameworkEvent::Link(LinkEvent::Created {
+            link_type: "worker".to_string(),
+            link_id,
+            source_id: Uuid::new_v4(),
+            target_id: Uuid::new_v4(),
+            metadata: None,
+        });
+
+        // entity_id() on a Link event should return the link_id
+        assert_eq!(event.entity_id(), Some(link_id));
+        // entity_type() should return None for link events
+        assert_eq!(event.entity_type(), None);
+    }
+
+    #[test]
+    fn test_framework_event_pattern_matching_all_entity_actions() {
+        let id = Uuid::new_v4();
+
+        let created = FrameworkEvent::Entity(EntityEvent::Created {
+            entity_type: "order".to_string(),
+            entity_id: id,
+            data: json!({}),
+        });
+        assert_eq!(created.action(), "created");
+        assert_eq!(created.event_kind(), "entity");
+        assert_eq!(created.entity_type(), Some("order"));
+        assert_eq!(created.entity_id(), Some(id));
+
+        let updated = FrameworkEvent::Entity(EntityEvent::Updated {
+            entity_type: "order".to_string(),
+            entity_id: id,
+            data: json!({"status": "shipped"}),
+        });
+        assert_eq!(updated.action(), "updated");
+
+        let deleted = FrameworkEvent::Entity(EntityEvent::Deleted {
+            entity_type: "order".to_string(),
+            entity_id: id,
+        });
+        assert_eq!(deleted.action(), "deleted");
+        assert_eq!(deleted.entity_id(), Some(id));
+    }
+
+    #[test]
+    fn test_framework_event_pattern_matching_all_link_actions() {
+        let link_id = Uuid::new_v4();
+
+        let created = FrameworkEvent::Link(LinkEvent::Created {
+            link_type: "driver".to_string(),
+            link_id,
+            source_id: Uuid::new_v4(),
+            target_id: Uuid::new_v4(),
+            metadata: Some(json!({"license": "B"})),
+        });
+        assert_eq!(created.action(), "created");
+        assert_eq!(created.event_kind(), "link");
+        assert_eq!(created.entity_id(), Some(link_id));
+
+        let deleted = FrameworkEvent::Link(LinkEvent::Deleted {
+            link_type: "driver".to_string(),
+            link_id,
+            source_id: Uuid::new_v4(),
+            target_id: Uuid::new_v4(),
+        });
+        assert_eq!(deleted.action(), "deleted");
+        assert_eq!(deleted.event_kind(), "link");
+        assert_eq!(deleted.entity_id(), Some(link_id));
+    }
 }
