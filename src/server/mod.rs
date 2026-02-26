@@ -8,7 +8,8 @@
 //! The server architecture is modular and supports multiple exposure types:
 //! - REST (implemented)
 //! - GraphQL (available with 'graphql' feature)
-//! - gRPC (planned)
+//! - gRPC (available with 'grpc' feature)
+//! - WebSocket (available with 'websocket' feature)
 //! - OpenAPI (planned)
 
 pub mod builder;
@@ -30,3 +31,6 @@ pub use exposure::WebSocketExposure;
 
 #[cfg(feature = "grpc")]
 pub use exposure::GrpcExposure;
+
+#[cfg(feature = "grpc")]
+pub use router::combine_rest_and_grpc;

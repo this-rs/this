@@ -12,6 +12,20 @@
 //!
 //! The gRPC services consume a `ServerHost` (same as REST, GraphQL, WebSocket)
 //! and are mounted alongside other exposures on the same port via axum interop.
+//!
+//! ## Dual mode: standalone vs cohabitation
+//!
+//! Two builder methods are available:
+//!
+//! - [`GrpcExposure::build_router`] — Standalone gRPC server. Includes tonic's
+//!   default `UNIMPLEMENTED` fallback for unknown services. **Cannot** be merged
+//!   with a REST router (causes panic due to double fallback).
+//!
+//! - [`GrpcExposure::build_router_no_fallback`] — For REST+gRPC cohabitation.
+//!   Omits the tonic fallback so the router can be safely merged with REST.
+//!   Use [`combine_rest_and_grpc`](crate::server::router::combine_rest_and_grpc)
+//!   or [`ServerBuilder::build_with_grpc`](crate::server::ServerBuilder::build_with_grpc)
+//!   for convenience.
 
 pub mod entity_service;
 pub mod link_service;
@@ -35,21 +49,32 @@ use std::sync::Arc;
 /// It is completely separate from the framework core and can coexist
 /// with other exposure types (REST, GraphQL, WebSocket).
 ///
-/// # Example
+/// # Example — Standalone gRPC server
 ///
 /// ```rust,ignore
-/// let host = builder.build_host()?;
-/// let host = Arc::new(host);
-/// let grpc_router = GrpcExposure::build_router(host.clone())?;
-/// let rest_router = RestExposure::build_router(host.clone(), vec![])?;
-///
-/// // Merge both routers to serve on the same port
-/// let app = rest_router.merge(grpc_router);
+/// let host = Arc::new(builder.build_host()?);
+/// let grpc_router = GrpcExposure::build_router(host)?;
+/// axum::serve(listener, grpc_router).await?;
 /// ```
+///
+/// # Example — REST + gRPC on the same port
+///
+/// ```rust,ignore
+/// let host = Arc::new(builder.build_host()?);
+/// let rest_router = RestExposure::build_router(host.clone(), vec![])?;
+/// let grpc_router = GrpcExposure::build_router_no_fallback(host)?;
+/// let app = rest_router.merge(grpc_router); // Safe: no double fallback
+/// ```
+///
+/// # Warning
+///
+/// **Do NOT merge `build_router()` with a REST router directly.**
+/// Both install axum fallback handlers, and `Router::merge()` panics when
+/// two routers have fallbacks. Use `build_router_no_fallback()` instead.
 pub struct GrpcExposure;
 
 impl GrpcExposure {
-    /// Build the gRPC router from a host
+    /// Build the gRPC router from a host (**standalone mode**)
     ///
     /// This method takes a `ServerHost` (which is transport-agnostic) and
     /// builds an Axum router with gRPC services mounted.
@@ -58,6 +83,14 @@ impl GrpcExposure {
     /// - `EntityService` for CRUD operations on any entity type
     /// - `LinkService` for relationship management
     /// - `GET /grpc/proto` endpoint for exporting the typed `.proto` definition
+    /// - A tonic `UNIMPLEMENTED` fallback for unknown gRPC services
+    ///
+    /// # Warning
+    ///
+    /// This router includes a fallback handler. **Do not merge it** with another
+    /// router that also has a fallback (e.g., REST), or axum will panic.
+    /// Use [`build_router_no_fallback`](Self::build_router_no_fallback) for
+    /// REST+gRPC cohabitation.
     ///
     /// # Arguments
     ///
@@ -65,7 +98,7 @@ impl GrpcExposure {
     ///
     /// # Returns
     ///
-    /// Returns a fully configured Axum router with gRPC services.
+    /// Returns a fully configured Axum router with gRPC services and tonic fallback.
     pub fn build_router(host: Arc<ServerHost>) -> Result<Router> {
         use axum::routing::get;
         use proto::entity_service_server::EntityServiceServer;
@@ -77,10 +110,101 @@ impl GrpcExposure {
         let link_svc = link_service::LinkServiceImpl::new(host.clone());
 
         // Build tonic Routes and convert to axum Router
+        // NOTE: Routes::default() installs a fallback(UNIMPLEMENTED) handler.
         let mut builder = Routes::builder();
         builder.add_service(EntityServiceServer::new(entity_svc));
         builder.add_service(LinkServiceServer::new(link_svc));
         let grpc_router = builder.routes().into_axum_router();
+
+        // Add the proto export endpoint
+        let proto_host = host.clone();
+        let proto_route =
+            Router::new().route("/grpc/proto", get(move || proto_export_handler(proto_host)));
+
+        Ok(grpc_router.merge(proto_route))
+    }
+
+    /// Build a gRPC router **without** a fallback handler (**cohabitation mode**)
+    ///
+    /// Unlike [`build_router`](Self::build_router), this method does **not** install
+    /// tonic's default `UNIMPLEMENTED` fallback. This allows the returned router to
+    /// be safely merged with another router that already has a fallback (e.g., REST
+    /// with its nested link path handler).
+    ///
+    /// The router includes:
+    /// - `EntityService` for CRUD operations on any entity type
+    /// - `LinkService` for relationship management
+    /// - `GET /grpc/proto` endpoint for exporting the typed `.proto` definition
+    ///
+    /// # When to use
+    ///
+    /// Use this method when combining gRPC with REST on the same server:
+    ///
+    /// ```rust,ignore
+    /// use this::server::router::combine_rest_and_grpc;
+    ///
+    /// let host = Arc::new(builder.build_host()?);
+    /// let rest_router = RestExposure::build_router(host.clone(), vec![])?;
+    /// let grpc_router = GrpcExposure::build_router_no_fallback(host)?;
+    /// let app = combine_rest_and_grpc(rest_router, grpc_router);
+    /// ```
+    ///
+    /// Or use the convenience method:
+    ///
+    /// ```rust,ignore
+    /// let app = builder.build_with_grpc()?;
+    /// ```
+    ///
+    /// # Trade-off
+    ///
+    /// Without the tonic fallback, requests to unknown gRPC service paths will be
+    /// handled by the REST fallback (returning HTTP 404) instead of the standard
+    /// gRPC `UNIMPLEMENTED` status. This is acceptable for cohabitation scenarios.
+    ///
+    /// # How it works
+    ///
+    /// Instead of using `tonic::service::Routes` (which installs a fallback via
+    /// `Routes::default()`), this method registers each gRPC service directly on
+    /// a bare `axum::Router` using `route_service()`, replicating the path format
+    /// `/{package.ServiceName}/{*rest}` that tonic uses internally.
+    pub fn build_router_no_fallback(host: Arc<ServerHost>) -> Result<Router> {
+        use axum::routing::get;
+        use proto::entity_service_server::EntityServiceServer;
+        use proto::link_service_server::LinkServiceServer;
+        use tonic::server::NamedService;
+        use tower::ServiceExt;
+
+        // Create gRPC service implementations
+        let entity_svc = entity_service::EntityServiceImpl::new(host.clone());
+        let link_svc = link_service::LinkServiceImpl::new(host.clone());
+
+        let entity_server = EntityServiceServer::new(entity_svc);
+        let link_server = LinkServiceServer::new(link_svc);
+
+        // Build axum Router directly, bypassing tonic's Routes which installs
+        // a fallback via Routes::default() → axum::Router::new().fallback(unimplemented).
+        //
+        // This replicates what tonic::service::Routes::add_service() does internally:
+        //   router.route_service("/{ServiceName}/{*rest}", svc.map_request(body_convert))
+        let grpc_router = Router::new()
+            .route_service(
+                &format!(
+                    "/{}/{{*rest}}",
+                    EntityServiceServer::<entity_service::EntityServiceImpl>::NAME
+                ),
+                entity_server.map_request(|req: axum::http::Request<axum::body::Body>| {
+                    req.map(tonic::body::Body::new)
+                }),
+            )
+            .route_service(
+                &format!(
+                    "/{}/{{*rest}}",
+                    LinkServiceServer::<link_service::LinkServiceImpl>::NAME
+                ),
+                link_server.map_request(|req: axum::http::Request<axum::body::Body>| {
+                    req.map(tonic::body::Body::new)
+                }),
+            );
 
         // Add the proto export endpoint
         let proto_host = host.clone();
