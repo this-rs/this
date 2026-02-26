@@ -301,6 +301,37 @@ impl Default for ServerBuilder {
     }
 }
 
+/// Wait for shutdown signal (SIGTERM or Ctrl+C)
+async fn shutdown_signal() {
+    use tokio::signal;
+
+    let ctrl_c = async {
+        signal::ctrl_c()
+            .await
+            .expect("failed to install Ctrl+C handler");
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        signal::unix::signal(signal::unix::SignalKind::terminate())
+            .expect("failed to install SIGTERM handler")
+            .recv()
+            .await;
+    };
+
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => {
+            tracing::info!("Received Ctrl+C signal, initiating graceful shutdown...");
+        },
+        _ = terminate => {
+            tracing::info!("Received SIGTERM signal, initiating graceful shutdown...");
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -647,36 +678,5 @@ mod tests {
             .expect("register should succeed")
             .build();
         assert!(result.is_ok(), "full fluent pipeline should succeed");
-    }
-}
-
-/// Wait for shutdown signal (SIGTERM or Ctrl+C)
-async fn shutdown_signal() {
-    use tokio::signal;
-
-    let ctrl_c = async {
-        signal::ctrl_c()
-            .await
-            .expect("failed to install Ctrl+C handler");
-    };
-
-    #[cfg(unix)]
-    let terminate = async {
-        signal::unix::signal(signal::unix::SignalKind::terminate())
-            .expect("failed to install SIGTERM handler")
-            .recv()
-            .await;
-    };
-
-    #[cfg(not(unix))]
-    let terminate = std::future::pending::<()>();
-
-    tokio::select! {
-        _ = ctrl_c => {
-            tracing::info!("Received Ctrl+C signal, initiating graceful shutdown...");
-        },
-        _ = terminate => {
-            tracing::info!("Received SIGTERM signal, initiating graceful shutdown...");
-        },
     }
 }

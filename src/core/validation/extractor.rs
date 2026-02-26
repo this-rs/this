@@ -130,10 +130,10 @@ mod tests {
                     }
                 });
                 config.add_validator("name", |field, value| {
-                    if let Some(s) = value.as_str() {
-                        if s.len() < 2 {
-                            return Err(format!("{} too short", field));
-                        }
+                    if let Some(s) = value.as_str()
+                        && s.len() < 2
+                    {
+                        return Err(format!("{} too short", field));
                     }
                     Ok(())
                 });

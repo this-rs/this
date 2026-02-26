@@ -541,9 +541,11 @@ mod tests {
         }
     }
 
+    type EntityEntry<'a> = (&'a str, &'a str, Option<Arc<dyn EntityFetcher>>);
+
     #[cfg(feature = "graphql")]
     fn build_host_with_links(
-        entities: Vec<(&str, &str, Option<Arc<dyn EntityFetcher>>)>,
+        entities: Vec<EntityEntry<'_>>,
         links: Vec<LinkDefinition>,
     ) -> Arc<ServerHost> {
         let link_service = Arc::new(InMemoryLinkService::new());

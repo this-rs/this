@@ -160,10 +160,10 @@ mod tests {
             }
         });
         config.add_validator("price", |field, value| {
-            if let Some(n) = value.as_f64() {
-                if n <= 0.0 {
-                    return Err(format!("{} must be positive", field));
-                }
+            if let Some(n) = value.as_f64()
+                && n <= 0.0
+            {
+                return Err(format!("{} must be positive", field));
             }
             Ok(())
         });
@@ -185,10 +185,10 @@ mod tests {
             }
         });
         config.add_validator("name", |field, value| {
-            if let Some(s) = value.as_str() {
-                if s.len() < 3 {
-                    return Err(format!("{} too short", field));
-                }
+            if let Some(s) = value.as_str()
+                && s.len() < 3
+            {
+                return Err(format!("{} too short", field));
             }
             Ok(())
         });
@@ -256,10 +256,10 @@ mod tests {
         });
         // Validator: min length 3
         config.add_validator("name", |field, value| {
-            if let Some(s) = value.as_str() {
-                if s.len() < 3 {
-                    return Err(format!("{} too short", field));
-                }
+            if let Some(s) = value.as_str()
+                && s.len() < 3
+            {
+                return Err(format!("{} too short", field));
             }
             Ok(())
         });
@@ -281,10 +281,10 @@ mod tests {
             }
         });
         config.add_validator("name", |field, value| {
-            if let Some(s) = value.as_str() {
-                if s.len() < 3 {
-                    return Err(format!("{} too short", field));
-                }
+            if let Some(s) = value.as_str()
+                && s.len() < 3
+            {
+                return Err(format!("{} too short", field));
             }
             Ok(())
         });
