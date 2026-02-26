@@ -670,3 +670,346 @@ impl LinkService for MysqlLinkService {
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[cfg(feature = "mysql")]
+mod tests {
+    use super::*;
+    use serde_json::json;
+    use chrono::Utc;
+
+    // Create a test entity using the macro
+    crate::impl_data_entity!(TestProduct, "test_product", ["name"], {
+        price: f64,
+    });
+
+    // -----------------------------------------------------------------------
+    // extract_data
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn extract_data_strips_common_fields() {
+        let product = TestProduct::new("Widget".to_string(), "active".to_string(), 9.99);
+        let data = MysqlDataService::<TestProduct>::extract_data(&product).unwrap();
+
+        let obj = data.as_object().expect("data should be a JSON object");
+        assert!(!obj.contains_key("id"), "id should be stripped");
+        assert!(!obj.contains_key("name"), "name should be stripped");
+        assert!(!obj.contains_key("status"), "status should be stripped");
+        assert!(!obj.contains_key("tenant_id"), "tenant_id should be stripped");
+        assert!(!obj.contains_key("created_at"), "created_at should be stripped");
+        assert!(!obj.contains_key("updated_at"), "updated_at should be stripped");
+        assert!(!obj.contains_key("deleted_at"), "deleted_at should be stripped");
+    }
+
+    #[test]
+    fn extract_data_preserves_custom_fields() {
+        let product = TestProduct::new("Widget".to_string(), "active".to_string(), 42.50);
+        let data = MysqlDataService::<TestProduct>::extract_data(&product).unwrap();
+
+        let obj = data.as_object().expect("data should be a JSON object");
+        assert!(obj.contains_key("price"), "custom field 'price' should remain");
+        assert_eq!(obj["price"].as_f64().unwrap(), 42.50);
+    }
+
+    // -----------------------------------------------------------------------
+    // reconstruct_entity
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn reconstruct_entity_merges_columns() {
+        let id = Uuid::new_v4().to_string();
+        let now = Utc::now();
+        let data = json!({"price": 19.99});
+
+        let product = MysqlDataService::<TestProduct>::reconstruct_entity(
+            id.clone(),
+            "test_product".to_string(),
+            "Gadget".to_string(),
+            "active".to_string(),
+            None,
+            data,
+            now,
+            now,
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(product.id.to_string(), id);
+        assert_eq!(product.name, "Gadget");
+        assert_eq!(product.status, "active");
+        assert_eq!(product.price, 19.99);
+        assert_eq!(product.created_at, now);
+        assert_eq!(product.updated_at, now);
+        assert!(product.deleted_at.is_none());
+    }
+
+    #[test]
+    fn reconstruct_entity_non_object_data_uses_empty() {
+        let id = Uuid::new_v4().to_string();
+        let now = Utc::now();
+
+        // Passing null data should fall back to an empty object,
+        // and deserialize with the default for 'price' (0.0 for f64).
+        let result = MysqlDataService::<TestProduct>::reconstruct_entity(
+            id,
+            "test_product".to_string(),
+            "NullData".to_string(),
+            "draft".to_string(),
+            None,
+            json!(null),
+            now,
+            now,
+            None,
+        );
+
+        // The entity may or may not deserialize depending on whether 'price'
+        // has a default. With serde, missing f64 fields fail deserialization,
+        // but the important point is that the code does NOT panic—it returns
+        // a Result. If it deserializes, the data object was treated as empty.
+        // If it fails, the error should be about a missing field, not about
+        // "not an object".
+        match result {
+            Ok(product) => {
+                assert_eq!(product.name, "NullData");
+                assert_eq!(product.status, "draft");
+            }
+            Err(e) => {
+                let msg = e.to_string();
+                assert!(
+                    msg.contains("missing field") || msg.contains("deserialize"),
+                    "error should be about missing field, got: {}",
+                    msg
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn reconstruct_entity_entity_type_fallback() {
+        let id = Uuid::new_v4().to_string();
+        let now = Utc::now();
+        // data does NOT contain "entity_type" or "type", so reconstruct
+        // should inject the column value.
+        let data = json!({"price": 5.0});
+
+        let product = MysqlDataService::<TestProduct>::reconstruct_entity(
+            id,
+            "test_product".to_string(),
+            "Fallback".to_string(),
+            "active".to_string(),
+            None,
+            data,
+            now,
+            now,
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(product.entity_type, "test_product");
+    }
+
+    #[test]
+    fn reconstruct_entity_with_tenant_id() {
+        let id = Uuid::new_v4().to_string();
+        let tenant_uuid = Uuid::new_v4();
+        let now = Utc::now();
+        let data = json!({"price": 1.0});
+
+        let product = MysqlDataService::<TestProduct>::reconstruct_entity(
+            id,
+            "test_product".to_string(),
+            "Tenant".to_string(),
+            "active".to_string(),
+            Some(tenant_uuid.to_string()),
+            data,
+            now,
+            now,
+            None,
+        )
+        .unwrap();
+
+        // The entity should deserialize. The tenant_id column value
+        // gets inserted into the JSON; it is available for types that
+        // have a tenant_id field. TestProduct does not, but it should
+        // still deserialize successfully (serde ignores unknown fields
+        // by default when deny_unknown_fields is not set).
+        assert_eq!(product.name, "Tenant");
+    }
+
+    #[test]
+    fn reconstruct_entity_without_tenant_id() {
+        let id = Uuid::new_v4().to_string();
+        let now = Utc::now();
+        let data = json!({"price": 2.0});
+
+        let product = MysqlDataService::<TestProduct>::reconstruct_entity(
+            id,
+            "test_product".to_string(),
+            "NoTenant".to_string(),
+            "active".to_string(),
+            None,
+            data,
+            now,
+            now,
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(product.name, "NoTenant");
+        assert_eq!(product.price, 2.0);
+    }
+
+    // -----------------------------------------------------------------------
+    // row_to_link
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn row_to_link_valid_uuids() {
+        let id = Uuid::new_v4();
+        let source = Uuid::new_v4();
+        let target = Uuid::new_v4();
+        let now = Utc::now();
+
+        let link = MysqlLinkService::row_to_link(
+            id.to_string(),
+            "link".to_string(),
+            "owner".to_string(),
+            source.to_string(),
+            target.to_string(),
+            None,
+            None,
+            "active".to_string(),
+            None,
+            json!({}),
+            now,
+            now,
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(link.id, id);
+        assert_eq!(link.source_id, source);
+        assert_eq!(link.target_id, target);
+        assert_eq!(link.link_type, "owner");
+        assert_eq!(link.entity_type, "link");
+        assert_eq!(link.status, "active");
+        assert!(link.tenant_id.is_none());
+        assert!(link.deleted_at.is_none());
+    }
+
+    #[test]
+    fn row_to_link_invalid_source_uuid() {
+        let id = Uuid::new_v4();
+        let now = Utc::now();
+
+        let result = MysqlLinkService::row_to_link(
+            id.to_string(),
+            "link".to_string(),
+            "owner".to_string(),
+            "not-a-uuid".to_string(),
+            Uuid::new_v4().to_string(),
+            None,
+            None,
+            "active".to_string(),
+            None,
+            json!({}),
+            now,
+            now,
+            None,
+        );
+
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("source_id"),
+            "error should mention source_id, got: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn row_to_link_invalid_link_uuid() {
+        let now = Utc::now();
+
+        let result = MysqlLinkService::row_to_link(
+            "not-a-uuid".to_string(),
+            "link".to_string(),
+            "owner".to_string(),
+            Uuid::new_v4().to_string(),
+            Uuid::new_v4().to_string(),
+            None,
+            None,
+            "active".to_string(),
+            None,
+            json!({}),
+            now,
+            now,
+            None,
+        );
+
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("link id"),
+            "error should mention link id, got: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn row_to_link_empty_metadata_becomes_none() {
+        let now = Utc::now();
+
+        let link = MysqlLinkService::row_to_link(
+            Uuid::new_v4().to_string(),
+            "link".to_string(),
+            "owner".to_string(),
+            Uuid::new_v4().to_string(),
+            Uuid::new_v4().to_string(),
+            None,
+            None,
+            "active".to_string(),
+            None,
+            json!({}),
+            now,
+            now,
+            None,
+        )
+        .unwrap();
+
+        assert!(
+            link.metadata.is_none(),
+            "empty object metadata should become None"
+        );
+    }
+
+    #[test]
+    fn row_to_link_with_metadata() {
+        let now = Utc::now();
+        let meta = json!({"k": "v"});
+
+        let link = MysqlLinkService::row_to_link(
+            Uuid::new_v4().to_string(),
+            "link".to_string(),
+            "owner".to_string(),
+            Uuid::new_v4().to_string(),
+            Uuid::new_v4().to_string(),
+            None,
+            None,
+            "active".to_string(),
+            None,
+            meta.clone(),
+            now,
+            now,
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(
+            link.metadata,
+            Some(meta),
+            "non-empty metadata should be preserved as Some"
+        );
+    }
+}

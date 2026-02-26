@@ -716,3 +716,136 @@ impl LinkService for ScyllaLinkService {
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[cfg(feature = "scylladb")]
+mod tests {
+    use super::*;
+    use crate::core::link::LinkEntity;
+    use serde_json::json;
+    use uuid::Uuid;
+
+    // A lightweight entity for testing field_value / search-filter logic.
+    crate::impl_data_entity!(TestWidget, "test_widget", ["name"], {
+        weight: f64,
+    });
+
+    // -----------------------------------------------------------------------
+    // parse_link helpers
+    // -----------------------------------------------------------------------
+
+    fn make_link(metadata: Option<serde_json::Value>) -> LinkEntity {
+        LinkEntity::new("owns", Uuid::new_v4(), Uuid::new_v4(), metadata)
+    }
+
+    #[test]
+    fn parse_link_valid_json() {
+        let link = make_link(None);
+        let json_str = serde_json::to_string(&link).expect("serialize");
+        let parsed = ScyllaLinkService::parse_link(&json_str).expect("parse_link should succeed");
+
+        assert_eq!(parsed.id, link.id);
+        assert_eq!(parsed.link_type, "owns");
+        assert_eq!(parsed.source_id, link.source_id);
+        assert_eq!(parsed.target_id, link.target_id);
+        assert_eq!(parsed.status, link.status);
+    }
+
+    #[test]
+    fn parse_link_invalid_json() {
+        let result = ScyllaLinkService::parse_link("not json");
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("Failed to deserialize link"),
+            "unexpected error message: {msg}"
+        );
+    }
+
+    #[test]
+    fn parse_link_empty_object() {
+        let result = ScyllaLinkService::parse_link("{}");
+        assert!(
+            result.is_err(),
+            "empty JSON object should fail due to missing required fields"
+        );
+    }
+
+    #[test]
+    fn parse_link_with_metadata() {
+        let meta = json!({"key": "val", "nested": {"a": 1}});
+        let link = make_link(Some(meta.clone()));
+        let json_str = serde_json::to_string(&link).expect("serialize");
+        let parsed = ScyllaLinkService::parse_link(&json_str).expect("parse_link should succeed");
+
+        assert_eq!(parsed.metadata, Some(meta));
+    }
+
+    #[test]
+    fn parse_link_with_null_metadata() {
+        let link = make_link(None);
+        let json_str = serde_json::to_string(&link).expect("serialize");
+        let parsed = ScyllaLinkService::parse_link(&json_str).expect("parse_link should succeed");
+
+        assert_eq!(parsed.metadata, None);
+        // Verify the rest of the entity survived the roundtrip.
+        assert_eq!(parsed.id, link.id);
+        assert_eq!(parsed.source_id, link.source_id);
+        assert_eq!(parsed.target_id, link.target_id);
+    }
+
+    // -----------------------------------------------------------------------
+    // Search field-value matching (mirrors the client-side filter in search())
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn search_field_value_string_matching() {
+        let widget = TestWidget::new("sprocket".into(), "active".into(), 3.5);
+
+        let fv = widget.field_value("name").expect("name field should exist");
+        assert_eq!(fv, FieldValue::String("sprocket".to_string()));
+
+        // Simulate the filter predicate from ScyllaDataService::search
+        let matches = match &fv {
+            FieldValue::String(s) => s == "sprocket",
+            _ => false,
+        };
+        assert!(matches, "FieldValue::String should match the search value");
+    }
+
+    #[test]
+    fn search_field_value_integer_matching() {
+        // FieldValue::Integer comparison uses to_string() in the search filter.
+        let fv = FieldValue::Integer(42);
+        let matches = match &fv {
+            FieldValue::Integer(i) => i.to_string() == "42",
+            _ => false,
+        };
+        assert!(matches, "FieldValue::Integer(42).to_string() should equal \"42\"");
+
+        // Negative case
+        let no_match = match &fv {
+            FieldValue::Integer(i) => i.to_string() == "99",
+            _ => false,
+        };
+        assert!(!no_match, "FieldValue::Integer(42) should not match \"99\"");
+    }
+
+    // -----------------------------------------------------------------------
+    // Entity JSON serialization roundtrip
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn entity_json_serialization_roundtrip() {
+        let widget = TestWidget::new("gear".into(), "active".into(), 7.25);
+        let json_str = serde_json::to_string(&widget).expect("serialize should succeed");
+        let restored: TestWidget =
+            serde_json::from_str(&json_str).expect("deserialize should succeed");
+
+        assert_eq!(restored.id, widget.id);
+        assert_eq!(restored.name, "gear");
+        assert_eq!(restored.status, "active");
+        assert_eq!(restored.entity_type, "test_widget");
+        assert!((restored.weight - 7.25).abs() < f64::EPSILON);
+    }
+}

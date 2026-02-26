@@ -549,3 +549,131 @@ impl LinkService for MongoLinkService {
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[cfg(feature = "mongodb_backend")]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    // -----------------------------------------------------------------------
+    // json_to_document
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn json_to_document_renames_id_to_underscore_id() {
+        let input = json!({"id": "abc", "name": "test"});
+        let doc = json_to_document(input).unwrap();
+
+        assert!(doc.contains_key("_id"), "document should contain _id");
+        assert!(!doc.contains_key("id"), "document should not contain id");
+        assert_eq!(doc.get_str("_id").unwrap(), "abc");
+    }
+
+    #[test]
+    fn json_to_document_preserves_other_fields() {
+        let input = json!({"id": "abc", "name": "test", "age": 42});
+        let doc = json_to_document(input).unwrap();
+
+        assert_eq!(doc.get_str("name").unwrap(), "test");
+        // serde_json::json!(42) serializes to i64 in BSON
+        assert_eq!(doc.get_i64("age").unwrap(), 42);
+    }
+
+    #[test]
+    fn json_to_document_non_object_returns_error() {
+        let input = json!("string");
+        let result = json_to_document(input);
+
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("non-object"),
+            "error should mention non-object, got: {err_msg}"
+        );
+    }
+
+    #[test]
+    fn json_to_document_nested_objects() {
+        let input = json!({"id": "x", "data": {"nested": true}});
+        let doc = json_to_document(input).unwrap();
+
+        assert_eq!(doc.get_str("_id").unwrap(), "x");
+        let nested = doc.get_document("data").unwrap();
+        assert_eq!(nested.get_bool("nested").unwrap(), true);
+    }
+
+    // -----------------------------------------------------------------------
+    // document_to_json
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn document_to_json_renames_underscore_id_to_id() {
+        let doc = doc! { "_id": "abc", "name": "test" };
+        let json = document_to_json(doc);
+
+        assert_eq!(json["id"], "abc");
+        assert!(json.get("_id").is_none(), "json should not contain _id");
+    }
+
+    #[test]
+    fn document_to_json_preserves_fields() {
+        let doc = doc! { "_id": "abc", "name": "test", "age": 42 };
+        let json = document_to_json(doc);
+
+        assert_eq!(json["name"], "test");
+        assert_eq!(json["age"], 42);
+    }
+
+    // -----------------------------------------------------------------------
+    // roundtrip
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn json_document_roundtrip() {
+        let original = json!({"id": "round", "name": "trip"});
+        let doc = json_to_document(original.clone()).unwrap();
+
+        // After json_to_document: "id" became "_id"
+        assert!(doc.contains_key("_id"));
+        assert!(!doc.contains_key("id"));
+
+        // After document_to_json: "_id" becomes "id" again
+        let back = document_to_json(doc);
+        assert_eq!(back["id"], "round");
+        assert_eq!(back["name"], "trip");
+        assert!(back.get("_id").is_none());
+    }
+
+    #[test]
+    fn json_document_roundtrip_with_nested() {
+        let original = json!({
+            "id": "nested-rt",
+            "payload": {
+                "items": [1, 2, 3],
+                "meta": {"key": "value"}
+            }
+        });
+        let doc = json_to_document(original).unwrap();
+        let back = document_to_json(doc);
+
+        assert_eq!(back["id"], "nested-rt");
+        assert_eq!(back["payload"]["items"], json!([1, 2, 3]));
+        assert_eq!(back["payload"]["meta"]["key"], "value");
+    }
+
+    // -----------------------------------------------------------------------
+    // uuid_bson
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn uuid_bson_returns_string() {
+        let id = Uuid::new_v4();
+        let bson = uuid_bson(&id);
+
+        match bson {
+            Bson::String(s) => assert_eq!(s, id.to_string()),
+            other => panic!("expected Bson::String, got: {other:?}"),
+        }
+    }
+}
