@@ -492,4 +492,91 @@ mod tests {
         assert!(sub1.id.starts_with("sub_"));
         assert!(sub2.id.starts_with("sub_"));
     }
+
+    #[test]
+    fn test_malformed_json_deserialization_error() {
+        let malformed = r#"{"type": "subscribe", "filter": "not_an_object"}"#;
+        let result = serde_json::from_str::<ClientMessage>(malformed);
+        assert!(result.is_err(), "malformed JSON should fail to deserialize");
+    }
+
+    #[test]
+    fn test_unknown_message_type_deserialization_error() {
+        let unknown = r#"{"type": "unknown_action", "data": {}}"#;
+        let result = serde_json::from_str::<ClientMessage>(unknown);
+        assert!(
+            result.is_err(),
+            "unknown message type should fail to deserialize"
+        );
+    }
+
+    #[test]
+    fn test_missing_required_fields_deserialization_error() {
+        // Subscribe requires a "filter" field
+        let missing_filter = r#"{"type": "subscribe"}"#;
+        let result = serde_json::from_str::<ClientMessage>(missing_filter);
+        assert!(
+            result.is_err(),
+            "subscribe without filter should fail to deserialize"
+        );
+
+        // Unsubscribe requires a "subscription_id" field
+        let missing_sub_id = r#"{"type": "unsubscribe"}"#;
+        let result = serde_json::from_str::<ClientMessage>(missing_sub_id);
+        assert!(
+            result.is_err(),
+            "unsubscribe without subscription_id should fail to deserialize"
+        );
+    }
+
+    #[test]
+    fn test_server_message_welcome_roundtrip() {
+        let msg = ServerMessage::Welcome {
+            connection_id: "conn_abc123".to_string(),
+        };
+
+        let json_str =
+            serde_json::to_string(&msg).expect("Welcome should serialize");
+        let deserialized: ServerMessage =
+            serde_json::from_str(&json_str).expect("Welcome should deserialize");
+
+        match deserialized {
+            ServerMessage::Welcome { connection_id } => {
+                assert_eq!(connection_id, "conn_abc123");
+            }
+            _ => panic!("Expected Welcome message"),
+        }
+    }
+
+    #[test]
+    fn test_server_message_subscribed_roundtrip() {
+        let msg = ServerMessage::Subscribed {
+            subscription_id: "sub_xyz789".to_string(),
+            filter: SubscriptionFilter {
+                entity_type: Some("invoice".to_string()),
+                entity_id: None,
+                event_type: Some("created".to_string()),
+                kind: None,
+            },
+        };
+
+        let json_str =
+            serde_json::to_string(&msg).expect("Subscribed should serialize");
+        let deserialized: ServerMessage =
+            serde_json::from_str(&json_str).expect("Subscribed should deserialize");
+
+        match deserialized {
+            ServerMessage::Subscribed {
+                subscription_id,
+                filter,
+            } => {
+                assert_eq!(subscription_id, "sub_xyz789");
+                assert_eq!(filter.entity_type.as_deref(), Some("invoice"));
+                assert_eq!(filter.event_type.as_deref(), Some("created"));
+                assert!(filter.entity_id.is_none());
+                assert!(filter.kind.is_none());
+            }
+            _ => panic!("Expected Subscribed message"),
+        }
+    }
 }

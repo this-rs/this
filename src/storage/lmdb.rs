@@ -514,3 +514,114 @@ impl LinkService for LmdbLinkService {
         .await?
     }
 }
+
+#[cfg(test)]
+#[cfg(feature = "lmdb")]
+mod tests {
+    use super::*;
+    use serde::{Deserialize, Serialize};
+    use serde_json::json;
+
+    // === lmdb_encode / lmdb_decode roundtrip ===
+
+    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+    struct TestItem {
+        name: String,
+        count: u32,
+    }
+
+    #[test]
+    fn test_encode_decode_roundtrip_struct() {
+        let item = TestItem {
+            name: "hello".to_string(),
+            count: 42,
+        };
+        let bytes = lmdb_encode(&item).expect("should encode");
+        let decoded: TestItem = lmdb_decode(&bytes).expect("should decode");
+        assert_eq!(decoded, item);
+    }
+
+    #[test]
+    fn test_encode_produces_valid_json() {
+        let item = TestItem {
+            name: "test".to_string(),
+            count: 7,
+        };
+        let bytes = lmdb_encode(&item).expect("should encode");
+        let json: serde_json::Value =
+            serde_json::from_slice(&bytes).expect("should be valid JSON");
+        assert_eq!(json["name"], "test");
+        assert_eq!(json["count"], 7);
+    }
+
+    #[test]
+    fn test_decode_invalid_bytes_returns_error() {
+        let bad_bytes = b"not valid json at all {{{";
+        let result: Result<TestItem> = lmdb_decode(bad_bytes);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("lmdb decode"), "error should mention lmdb decode: {}", err);
+    }
+
+    #[test]
+    fn test_encode_decode_link_entity() {
+        let link = LinkEntity::new("ownership", Uuid::new_v4(), Uuid::new_v4(), Some(json!({"priority": "high"})));
+        let bytes = lmdb_encode(&link).expect("should encode link");
+        let decoded: LinkEntity = lmdb_decode(&bytes).expect("should decode link");
+        assert_eq!(decoded.id, link.id);
+        assert_eq!(decoded.link_type, link.link_type);
+        assert_eq!(decoded.source_id, link.source_id);
+        assert_eq!(decoded.target_id, link.target_id);
+        assert_eq!(decoded.metadata, link.metadata);
+    }
+
+    #[test]
+    fn test_encode_decode_with_null_metadata() {
+        let link = LinkEntity::new("test", Uuid::new_v4(), Uuid::new_v4(), None);
+        let bytes = lmdb_encode(&link).expect("should encode");
+        let decoded: LinkEntity = lmdb_decode(&bytes).expect("should decode");
+        assert!(decoded.metadata.is_none());
+    }
+
+    // === composite_key ===
+
+    #[test]
+    fn test_composite_key_format() {
+        let prefix = Uuid::new_v4();
+        let link_id = Uuid::new_v4();
+        let key = composite_key(&prefix, &link_id);
+        let expected = format!("{}:{}", prefix, link_id);
+        assert_eq!(key, expected);
+    }
+
+    #[test]
+    fn test_composite_key_contains_colon_separator() {
+        let a = Uuid::new_v4();
+        let b = Uuid::new_v4();
+        let key = composite_key(&a, &b);
+        assert!(key.contains(':'), "composite key should contain ':'");
+        let parts: Vec<&str> = key.split(':').collect();
+        assert_eq!(parts.len(), 2, "should split into exactly 2 parts");
+    }
+
+    #[test]
+    fn test_composite_key_can_recover_link_id() {
+        let prefix = Uuid::new_v4();
+        let link_id = Uuid::new_v4();
+        let key = composite_key(&prefix, &link_id);
+        // Simulate the prefix iteration recovery used in find_by_source/find_by_target
+        let prefix_str = format!("{}:", prefix);
+        let recovered = &key[prefix_str.len()..];
+        assert_eq!(recovered, link_id.to_string());
+    }
+
+    #[test]
+    fn test_composite_key_different_uuids_produce_different_keys() {
+        let a = Uuid::new_v4();
+        let b = Uuid::new_v4();
+        let c = Uuid::new_v4();
+        let key1 = composite_key(&a, &b);
+        let key2 = composite_key(&a, &c);
+        assert_ne!(key1, key2);
+    }
+}

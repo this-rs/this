@@ -793,4 +793,71 @@ mod tests {
         user.set_status("inactive".to_string());
         assert_eq!(user.status(), "inactive");
     }
+
+    #[test]
+    fn test_data_entity_field_value_name() {
+        let user = TestUser::new(
+            "Alice".to_string(),
+            "active".to_string(),
+            "alice@example.com".to_string(),
+        );
+
+        let name_val = user.field_value("name").expect("field_value('name') should return Some");
+        assert_eq!(
+            name_val,
+            crate::core::field::FieldValue::String("Alice".to_string())
+        );
+    }
+
+    #[test]
+    fn test_data_entity_field_value_status() {
+        let user = TestUser::new(
+            "Bob".to_string(),
+            "pending".to_string(),
+            "bob@example.com".to_string(),
+        );
+
+        let status_val = user.field_value("status").expect("field_value('status') should return Some");
+        assert_eq!(
+            status_val,
+            crate::core::field::FieldValue::String("pending".to_string())
+        );
+    }
+
+    #[test]
+    fn test_data_entity_field_value_unknown_returns_none() {
+        let user = TestUser::new(
+            "Charlie".to_string(),
+            "active".to_string(),
+            "charlie@example.com".to_string(),
+        );
+
+        // "email" is a custom field but the default field_value() macro only handles "name" and "status"
+        assert!(user.field_value("email").is_none());
+        assert!(user.field_value("nonexistent").is_none());
+    }
+
+    #[test]
+    fn test_data_entity_resource_name() {
+        assert_eq!(TestUser::resource_name(), "test_users");
+    }
+
+    #[test]
+    fn test_data_entity_resource_name_singular() {
+        assert_eq!(TestUser::resource_name_singular(), "test_user");
+    }
+
+    #[test]
+    fn test_link_entity_resource_name() {
+        assert_eq!(TestOwnerLink::resource_name(), "test_owner_links");
+        assert_eq!(TestOwnerLink::resource_name_singular(), "test_owner_link");
+    }
+
+    #[test]
+    fn test_data_entity_indexed_fields() {
+        let fields = TestUser::indexed_fields();
+        assert!(fields.contains(&"name"));
+        assert!(fields.contains(&"email"));
+        assert_eq!(fields.len(), 2);
+    }
 }

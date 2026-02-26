@@ -443,4 +443,147 @@ mod tests {
         cm.dispatch_event(&envelope).await;
         assert!(rx.try_recv().is_err());
     }
+
+    #[tokio::test]
+    async fn test_concurrent_subscriptions_same_event_different_connections() {
+        let cm = ConnectionManager::new(test_host());
+
+        let (conn1_id, mut rx1) = cm.connect().await;
+        let (conn2_id, mut rx2) = cm.connect().await;
+
+        // Both connections subscribe to "order" created events
+        let filter = SubscriptionFilter {
+            entity_type: Some("order".to_string()),
+            event_type: Some("created".to_string()),
+            ..Default::default()
+        };
+        cm.subscribe(&conn1_id, filter.clone())
+            .await
+            .expect("conn1 subscribe should succeed");
+        cm.subscribe(&conn2_id, filter)
+            .await
+            .expect("conn2 subscribe should succeed");
+
+        // Dispatch an order created event
+        let envelope = EventEnvelope::new(FrameworkEvent::Entity(EntityEvent::Created {
+            entity_type: "order".to_string(),
+            entity_id: Uuid::new_v4(),
+            data: json!({"total": 50}),
+        }));
+        cm.dispatch_event(&envelope).await;
+
+        // Both connections should receive the event
+        let msg1 = rx1.try_recv().expect("conn1 should receive event");
+        let msg2 = rx2.try_recv().expect("conn2 should receive event");
+
+        match (&msg1, &msg2) {
+            (
+                ServerMessage::Event { data: d1, .. },
+                ServerMessage::Event { data: d2, .. },
+            ) => {
+                assert_eq!(d1.id, envelope.id);
+                assert_eq!(d2.id, envelope.id);
+            }
+            _ => panic!("Expected Event messages for both connections"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_send_to_nonexistent_connection() {
+        let cm = ConnectionManager::new(test_host());
+
+        // Sending to a nonexistent connection should not panic
+        cm.send_to(
+            "conn_does_not_exist",
+            ServerMessage::Pong,
+        )
+        .await;
+
+        // Verify manager is still functional
+        assert_eq!(cm.connection_count().await, 0);
+    }
+
+    #[tokio::test]
+    async fn test_dead_connection_handling() {
+        let cm = ConnectionManager::new(test_host());
+        let (conn_id, rx) = cm.connect().await;
+
+        // Subscribe to all events
+        cm.subscribe(&conn_id, SubscriptionFilter::default())
+            .await
+            .expect("subscribe should succeed");
+
+        // Drop the receiver to simulate a dead connection
+        drop(rx);
+
+        // Dispatching should not panic even though the receiver is dropped
+        let envelope = EventEnvelope::new(FrameworkEvent::Entity(EntityEvent::Created {
+            entity_type: "order".to_string(),
+            entity_id: Uuid::new_v4(),
+            data: json!({}),
+        }));
+        cm.dispatch_event(&envelope).await;
+
+        // Connection is still registered (cleanup happens on disconnect)
+        assert_eq!(cm.connection_count().await, 1);
+    }
+
+    #[tokio::test]
+    async fn test_dispatch_event_with_multiple_matching_subscriptions() {
+        let cm = ConnectionManager::new(test_host());
+        let (conn_id, mut rx) = cm.connect().await;
+
+        // Two subscriptions that both match the same event:
+        // 1. Subscribe to all "order" events
+        cm.subscribe(
+            &conn_id,
+            SubscriptionFilter {
+                entity_type: Some("order".to_string()),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("first subscribe should succeed");
+
+        // 2. Subscribe to all "created" events (regardless of entity type)
+        cm.subscribe(
+            &conn_id,
+            SubscriptionFilter {
+                event_type: Some("created".to_string()),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("second subscribe should succeed");
+
+        // Dispatch an order created event — should match BOTH subscriptions
+        let envelope = EventEnvelope::new(FrameworkEvent::Entity(EntityEvent::Created {
+            entity_type: "order".to_string(),
+            entity_id: Uuid::new_v4(),
+            data: json!({}),
+        }));
+        cm.dispatch_event(&envelope).await;
+
+        // Should receive two messages (one per matching subscription)
+        let msg1 = rx.try_recv().expect("should receive first matching event");
+        let msg2 = rx.try_recv().expect("should receive second matching event");
+
+        // Both should be Event messages with the same envelope ID
+        match (&msg1, &msg2) {
+            (
+                ServerMessage::Event {
+                    subscription_id: sub1,
+                    data: d1,
+                },
+                ServerMessage::Event {
+                    subscription_id: sub2,
+                    data: d2,
+                },
+            ) => {
+                assert_ne!(sub1, sub2, "subscription IDs should differ");
+                assert_eq!(d1.id, d2.id, "both should carry the same event envelope");
+            }
+            _ => panic!("Expected two Event messages"),
+        }
+    }
 }

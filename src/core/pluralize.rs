@@ -212,4 +212,22 @@ mod tests {
             assert_eq!(word, back_to_singular, "Roundtrip failed for: {}", word);
         }
     }
+
+    #[test]
+    fn test_pluralize_empty_string() {
+        assert_eq!(Pluralizer::pluralize(""), "");
+    }
+
+    #[test]
+    fn test_singularize_empty_string() {
+        assert_eq!(Pluralizer::singularize(""), "");
+    }
+
+    #[test]
+    fn test_singularize_word_not_ending_in_s() {
+        // A word that does not end in "s" should be returned unchanged
+        assert_eq!(Pluralizer::singularize("child"), "child");
+        assert_eq!(Pluralizer::singularize("deer"), "deer");
+        assert_eq!(Pluralizer::singularize("x"), "x");
+    }
 }

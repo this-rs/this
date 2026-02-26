@@ -1275,4 +1275,1760 @@ mod tests {
         assert_eq!(state.config.entities.len(), 2);
         assert_eq!(state.config.links.len(), 1);
     }
+
+    // ======================================================================
+    // Phase 1: Pure helper function tests
+    // ======================================================================
+
+    // ------------------------------------------------------------------
+    // get_nested_value
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_get_nested_value_top_level_key() {
+        let json = serde_json::json!({
+            "name": "Alice",
+            "age": 30
+        });
+        let result = get_nested_value(&json, "name");
+        assert_eq!(
+            result,
+            Some(serde_json::Value::String("Alice".to_string())),
+            "should retrieve top-level string value"
+        );
+    }
+
+    #[test]
+    fn test_get_nested_value_top_level_number() {
+        let json = serde_json::json!({ "count": 42 });
+        let result = get_nested_value(&json, "count");
+        assert_eq!(
+            result,
+            Some(serde_json::json!(42)),
+            "should retrieve top-level numeric value"
+        );
+    }
+
+    #[test]
+    fn test_get_nested_value_missing_top_level_key() {
+        let json = serde_json::json!({ "name": "Alice" });
+        let result = get_nested_value(&json, "missing");
+        assert_eq!(result, None, "missing top-level key should return None");
+    }
+
+    #[test]
+    fn test_get_nested_value_two_level_path() {
+        let json = serde_json::json!({
+            "source": { "name": "Alice", "email": "alice@example.com" },
+            "target": { "amount": 100 }
+        });
+        let result = get_nested_value(&json, "source.name");
+        assert_eq!(
+            result,
+            Some(serde_json::Value::String("Alice".to_string())),
+            "should navigate two-level dot path"
+        );
+    }
+
+    #[test]
+    fn test_get_nested_value_two_level_numeric() {
+        let json = serde_json::json!({
+            "target": { "amount": 99.5 }
+        });
+        let result = get_nested_value(&json, "target.amount");
+        assert_eq!(
+            result,
+            Some(serde_json::json!(99.5)),
+            "should retrieve nested numeric value"
+        );
+    }
+
+    #[test]
+    fn test_get_nested_value_missing_parent() {
+        let json = serde_json::json!({ "name": "Alice" });
+        let result = get_nested_value(&json, "source.name");
+        assert_eq!(result, None, "missing parent should return None");
+    }
+
+    #[test]
+    fn test_get_nested_value_missing_child() {
+        let json = serde_json::json!({ "source": { "name": "Alice" } });
+        let result = get_nested_value(&json, "source.missing");
+        assert_eq!(result, None, "missing child key should return None");
+    }
+
+    #[test]
+    fn test_get_nested_value_three_levels_returns_none() {
+        let json = serde_json::json!({
+            "a": { "b": { "c": "deep" } }
+        });
+        let result = get_nested_value(&json, "a.b.c");
+        assert_eq!(
+            result, None,
+            "three-level dot path should return None (only 1 or 2 levels supported)"
+        );
+    }
+
+    #[test]
+    fn test_get_nested_value_null_value() {
+        let json = serde_json::json!({ "field": null });
+        let result = get_nested_value(&json, "field");
+        assert_eq!(
+            result,
+            Some(serde_json::Value::Null),
+            "null values should be returned as Some(Null)"
+        );
+    }
+
+    #[test]
+    fn test_get_nested_value_boolean() {
+        let json = serde_json::json!({ "active": true });
+        let result = get_nested_value(&json, "active");
+        assert_eq!(
+            result,
+            Some(serde_json::json!(true)),
+            "should retrieve boolean value"
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // apply_link_filters
+    // ------------------------------------------------------------------
+
+    /// Helper to create an EnrichedLink with configurable fields
+    fn make_enriched_link(
+        link_type: &str,
+        status: &str,
+        target: Option<serde_json::Value>,
+        source: Option<serde_json::Value>,
+        metadata: Option<serde_json::Value>,
+    ) -> EnrichedLink {
+        EnrichedLink {
+            id: Uuid::new_v4(),
+            entity_type: "link".to_string(),
+            link_type: link_type.to_string(),
+            source_id: Uuid::new_v4(),
+            target_id: Uuid::new_v4(),
+            source,
+            target,
+            metadata,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+            status: status.to_string(),
+        }
+    }
+
+    #[test]
+    fn test_apply_link_filters_null_filter_returns_all() {
+        let links = vec![
+            make_enriched_link("owner", "active", None, None, None),
+            make_enriched_link("driver", "active", None, None, None),
+        ];
+        let result = apply_link_filters(links, &serde_json::Value::Null);
+        assert_eq!(result.len(), 2, "null filter should return all links");
+    }
+
+    #[test]
+    fn test_apply_link_filters_non_object_filter_returns_all() {
+        let links = vec![
+            make_enriched_link("owner", "active", None, None, None),
+        ];
+        let result = apply_link_filters(links, &serde_json::json!("not an object"));
+        assert_eq!(result.len(), 1, "non-object filter should return all links");
+    }
+
+    #[test]
+    fn test_apply_link_filters_empty_object_returns_all() {
+        let links = vec![
+            make_enriched_link("owner", "active", None, None, None),
+            make_enriched_link("driver", "inactive", None, None, None),
+        ];
+        let result = apply_link_filters(links, &serde_json::json!({}));
+        assert_eq!(result.len(), 2, "empty object filter should return all links");
+    }
+
+    #[test]
+    fn test_apply_link_filters_by_status() {
+        let links = vec![
+            make_enriched_link("owner", "active", None, None, None),
+            make_enriched_link("driver", "inactive", None, None, None),
+            make_enriched_link("owner", "active", None, None, None),
+        ];
+        let filter = serde_json::json!({ "status": "active" });
+        let result = apply_link_filters(links, &filter);
+        assert_eq!(result.len(), 2, "should filter to only active links");
+        for link in &result {
+            assert_eq!(link.status, "active");
+        }
+    }
+
+    #[test]
+    fn test_apply_link_filters_by_link_type() {
+        let links = vec![
+            make_enriched_link("owner", "active", None, None, None),
+            make_enriched_link("driver", "active", None, None, None),
+            make_enriched_link("owner", "active", None, None, None),
+        ];
+        let filter = serde_json::json!({ "link_type": "owner" });
+        let result = apply_link_filters(links, &filter);
+        assert_eq!(result.len(), 2, "should filter to only 'owner' links");
+    }
+
+    #[test]
+    fn test_apply_link_filters_by_nested_target_field() {
+        let links = vec![
+            make_enriched_link(
+                "owner",
+                "active",
+                Some(serde_json::json!({ "name": "Car A" })),
+                None,
+                None,
+            ),
+            make_enriched_link(
+                "owner",
+                "active",
+                Some(serde_json::json!({ "name": "Car B" })),
+                None,
+                None,
+            ),
+        ];
+        let filter = serde_json::json!({ "target.name": "Car A" });
+        let result = apply_link_filters(links, &filter);
+        assert_eq!(result.len(), 1, "should filter by nested target.name");
+    }
+
+    #[test]
+    fn test_apply_link_filters_by_nested_source_field() {
+        let links = vec![
+            make_enriched_link(
+                "owner",
+                "active",
+                None,
+                Some(serde_json::json!({ "email": "alice@test.com" })),
+                None,
+            ),
+            make_enriched_link(
+                "owner",
+                "active",
+                None,
+                Some(serde_json::json!({ "email": "bob@test.com" })),
+                None,
+            ),
+        ];
+        let filter = serde_json::json!({ "source.email": "bob@test.com" });
+        let result = apply_link_filters(links, &filter);
+        assert_eq!(result.len(), 1, "should filter by nested source.email");
+    }
+
+    #[test]
+    fn test_apply_link_filters_multiple_criteria() {
+        let links = vec![
+            make_enriched_link("owner", "active", None, None, None),
+            make_enriched_link("owner", "inactive", None, None, None),
+            make_enriched_link("driver", "active", None, None, None),
+        ];
+        let filter = serde_json::json!({ "link_type": "owner", "status": "active" });
+        let result = apply_link_filters(links, &filter);
+        assert_eq!(
+            result.len(),
+            1,
+            "should filter by both link_type AND status"
+        );
+        assert_eq!(result[0].link_type, "owner");
+        assert_eq!(result[0].status, "active");
+    }
+
+    #[test]
+    fn test_apply_link_filters_no_match_returns_empty() {
+        let links = vec![
+            make_enriched_link("owner", "active", None, None, None),
+        ];
+        let filter = serde_json::json!({ "status": "deleted" });
+        let result = apply_link_filters(links, &filter);
+        assert!(result.is_empty(), "non-matching filter should return empty vec");
+    }
+
+    #[test]
+    fn test_apply_link_filters_missing_field_excludes_link() {
+        let links = vec![
+            make_enriched_link("owner", "active", None, None, None),
+        ];
+        // "nonexistent_field" does not exist on EnrichedLink serialization
+        let filter = serde_json::json!({ "nonexistent_field": "value" });
+        let result = apply_link_filters(links, &filter);
+        assert!(
+            result.is_empty(),
+            "filtering by a missing field should exclude the link"
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // get_link_auth_policy
+    // ------------------------------------------------------------------
+
+    fn make_link_def_with_auth() -> LinkDefinition {
+        use crate::core::link::LinkAuthConfig;
+        LinkDefinition {
+            link_type: "test".to_string(),
+            source_type: "a".to_string(),
+            target_type: "b".to_string(),
+            forward_route_name: "bs".to_string(),
+            reverse_route_name: "as".to_string(),
+            description: None,
+            required_fields: None,
+            auth: Some(LinkAuthConfig {
+                list: "public".to_string(),
+                get: "authenticated".to_string(),
+                create: "admin_only".to_string(),
+                update: "owner".to_string(),
+                delete: "service_only".to_string(),
+            }),
+        }
+    }
+
+    #[test]
+    fn test_get_link_auth_policy_list() {
+        let def = make_link_def_with_auth();
+        let result = AppState::get_link_auth_policy(&def, "list");
+        assert_eq!(
+            result,
+            Some("public".to_string()),
+            "list operation should return 'public' policy"
+        );
+    }
+
+    #[test]
+    fn test_get_link_auth_policy_get() {
+        let def = make_link_def_with_auth();
+        let result = AppState::get_link_auth_policy(&def, "get");
+        assert_eq!(result, Some("authenticated".to_string()));
+    }
+
+    #[test]
+    fn test_get_link_auth_policy_create() {
+        let def = make_link_def_with_auth();
+        let result = AppState::get_link_auth_policy(&def, "create");
+        assert_eq!(result, Some("admin_only".to_string()));
+    }
+
+    #[test]
+    fn test_get_link_auth_policy_update() {
+        let def = make_link_def_with_auth();
+        let result = AppState::get_link_auth_policy(&def, "update");
+        assert_eq!(result, Some("owner".to_string()));
+    }
+
+    #[test]
+    fn test_get_link_auth_policy_delete() {
+        let def = make_link_def_with_auth();
+        let result = AppState::get_link_auth_policy(&def, "delete");
+        assert_eq!(result, Some("service_only".to_string()));
+    }
+
+    #[test]
+    fn test_get_link_auth_policy_unknown_operation() {
+        let def = make_link_def_with_auth();
+        let result = AppState::get_link_auth_policy(&def, "unknown_op");
+        assert_eq!(
+            result,
+            Some("authenticated".to_string()),
+            "unknown operations should default to 'authenticated'"
+        );
+    }
+
+    #[test]
+    fn test_get_link_auth_policy_no_auth_config() {
+        let def = LinkDefinition {
+            link_type: "test".to_string(),
+            source_type: "a".to_string(),
+            target_type: "b".to_string(),
+            forward_route_name: "bs".to_string(),
+            reverse_route_name: "as".to_string(),
+            description: None,
+            required_fields: None,
+            auth: None,
+        };
+        let result = AppState::get_link_auth_policy(&def, "list");
+        assert_eq!(
+            result, None,
+            "should return None when no auth config is set"
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // publish_event (fire-and-forget, no event bus)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_publish_event_no_event_bus_does_not_panic() {
+        let state = create_test_state();
+        // event_bus is None — should silently drop
+        state.publish_event(FrameworkEvent::Link(LinkEvent::Created {
+            link_type: "owner".to_string(),
+            link_id: Uuid::new_v4(),
+            source_id: Uuid::new_v4(),
+            target_id: Uuid::new_v4(),
+            metadata: None,
+        }));
+        // If we reach here without panic, the test passes
+    }
+
+    #[test]
+    fn test_publish_event_with_event_bus() {
+        let bus = Arc::new(EventBus::new(16));
+        let mut state = create_test_state();
+        state.event_bus = Some(bus.clone());
+
+        let mut rx = bus.subscribe();
+
+        state.publish_event(FrameworkEvent::Link(LinkEvent::Created {
+            link_type: "owner".to_string(),
+            link_id: Uuid::new_v4(),
+            source_id: Uuid::new_v4(),
+            target_id: Uuid::new_v4(),
+            metadata: None,
+        }));
+
+        // The event should be receivable
+        let envelope = rx.try_recv().expect("should receive published event");
+        assert!(
+            matches!(envelope.event, FrameworkEvent::Link(LinkEvent::Created { .. })),
+            "received event should be a Link::Created"
+        );
+    }
+
+    // ======================================================================
+    // Phase 2: Handler tests with InMemoryLinkService
+    // ======================================================================
+
+    /// Extended test config with order -> invoice -> payment chain
+    fn create_chain_test_state() -> AppState {
+        let config = Arc::new(LinksConfig {
+            entities: vec![
+                EntityConfig {
+                    singular: "order".to_string(),
+                    plural: "orders".to_string(),
+                    auth: crate::config::EntityAuthConfig::default(),
+                },
+                EntityConfig {
+                    singular: "invoice".to_string(),
+                    plural: "invoices".to_string(),
+                    auth: crate::config::EntityAuthConfig::default(),
+                },
+                EntityConfig {
+                    singular: "payment".to_string(),
+                    plural: "payments".to_string(),
+                    auth: crate::config::EntityAuthConfig::default(),
+                },
+            ],
+            links: vec![
+                LinkDefinition {
+                    link_type: "billing".to_string(),
+                    source_type: "order".to_string(),
+                    target_type: "invoice".to_string(),
+                    forward_route_name: "invoices".to_string(),
+                    reverse_route_name: "order".to_string(),
+                    description: Some("Order has invoices".to_string()),
+                    required_fields: None,
+                    auth: None,
+                },
+                LinkDefinition {
+                    link_type: "payment".to_string(),
+                    source_type: "invoice".to_string(),
+                    target_type: "payment".to_string(),
+                    forward_route_name: "payments".to_string(),
+                    reverse_route_name: "invoice".to_string(),
+                    description: None,
+                    required_fields: None,
+                    auth: None,
+                },
+            ],
+            validation_rules: None,
+        });
+
+        let registry = Arc::new(LinkRouteRegistry::new(config.clone()));
+        let link_service: Arc<dyn LinkService> = Arc::new(InMemoryLinkService::new());
+
+        AppState {
+            link_service,
+            config,
+            registry,
+            entity_fetchers: Arc::new(HashMap::new()),
+            entity_creators: Arc::new(HashMap::new()),
+            event_bus: None,
+        }
+    }
+
+    /// Simple EntityFetcher for tests that returns a JSON object with id and name
+    struct MockEntityFetcher {
+        entities: std::sync::RwLock<HashMap<Uuid, serde_json::Value>>,
+    }
+
+    impl MockEntityFetcher {
+        fn new() -> Self {
+            Self {
+                entities: std::sync::RwLock::new(HashMap::new()),
+            }
+        }
+
+        fn insert(&self, id: Uuid, data: serde_json::Value) {
+            self.entities
+                .write()
+                .expect("lock should not be poisoned")
+                .insert(id, data);
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl crate::core::EntityFetcher for MockEntityFetcher {
+        async fn fetch_as_json(&self, entity_id: &Uuid) -> anyhow::Result<serde_json::Value> {
+            let entities = self
+                .entities
+                .read()
+                .map_err(|e| anyhow::anyhow!("lock error: {}", e))?;
+            entities
+                .get(entity_id)
+                .cloned()
+                .ok_or_else(|| anyhow::anyhow!("Entity not found: {}", entity_id))
+        }
+    }
+
+    /// Simple EntityCreator for tests that returns the input with a generated id
+    struct MockEntityCreator;
+
+    #[async_trait::async_trait]
+    impl crate::core::EntityCreator for MockEntityCreator {
+        async fn create_from_json(
+            &self,
+            entity_data: serde_json::Value,
+        ) -> anyhow::Result<serde_json::Value> {
+            let mut data = entity_data;
+            if data.get("id").is_none() {
+                data["id"] = serde_json::json!(Uuid::new_v4().to_string());
+            }
+            Ok(data)
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // enrich_links_with_entities
+    // ------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_enrich_links_from_source_omits_source() {
+        let state = create_test_state();
+        let user_id = Uuid::new_v4();
+        let car_id = Uuid::new_v4();
+        let link = crate::core::link::LinkEntity::new("owner", user_id, car_id, None);
+
+        let link_def = &state.config.links[0];
+        let enriched = enrich_links_with_entities(
+            &state,
+            vec![link],
+            EnrichmentContext::FromSource,
+            link_def,
+        )
+        .await
+        .expect("enrichment should succeed");
+
+        assert_eq!(enriched.len(), 1);
+        assert!(
+            enriched[0].source.is_none(),
+            "FromSource context should omit source entity"
+        );
+        // No fetcher registered, so target will also be None (fetcher not found)
+        assert!(enriched[0].target.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_enrich_links_from_target_omits_target() {
+        let state = create_test_state();
+        let user_id = Uuid::new_v4();
+        let car_id = Uuid::new_v4();
+        let link = crate::core::link::LinkEntity::new("owner", user_id, car_id, None);
+
+        let link_def = &state.config.links[0];
+        let enriched = enrich_links_with_entities(
+            &state,
+            vec![link],
+            EnrichmentContext::FromTarget,
+            link_def,
+        )
+        .await
+        .expect("enrichment should succeed");
+
+        assert_eq!(enriched.len(), 1);
+        assert!(
+            enriched[0].target.is_none(),
+            "FromTarget context should omit target entity"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_enrich_links_with_fetcher_includes_entity() {
+        let user_id = Uuid::new_v4();
+        let car_id = Uuid::new_v4();
+
+        let car_fetcher = Arc::new(MockEntityFetcher::new());
+        car_fetcher.insert(car_id, serde_json::json!({ "id": car_id.to_string(), "model": "Tesla" }));
+
+        let mut fetchers: HashMap<String, Arc<dyn crate::core::EntityFetcher>> = HashMap::new();
+        fetchers.insert("car".to_string(), car_fetcher);
+
+        let mut state = create_test_state();
+        state.entity_fetchers = Arc::new(fetchers);
+
+        let link = crate::core::link::LinkEntity::new("owner", user_id, car_id, None);
+        let link_def = &state.config.links[0];
+
+        let enriched = enrich_links_with_entities(
+            &state,
+            vec![link],
+            EnrichmentContext::FromSource,
+            link_def,
+        )
+        .await
+        .expect("enrichment should succeed");
+
+        assert_eq!(enriched.len(), 1);
+        let target = enriched[0]
+            .target
+            .as_ref()
+            .expect("target entity should be fetched");
+        assert_eq!(target["model"], "Tesla");
+    }
+
+    #[tokio::test]
+    async fn test_enrich_links_direct_link_context() {
+        let user_id = Uuid::new_v4();
+        let car_id = Uuid::new_v4();
+
+        let user_fetcher = Arc::new(MockEntityFetcher::new());
+        user_fetcher.insert(user_id, serde_json::json!({ "id": user_id.to_string(), "name": "Alice" }));
+
+        let car_fetcher = Arc::new(MockEntityFetcher::new());
+        car_fetcher.insert(car_id, serde_json::json!({ "id": car_id.to_string(), "model": "BMW" }));
+
+        let mut fetchers: HashMap<String, Arc<dyn crate::core::EntityFetcher>> = HashMap::new();
+        fetchers.insert("user".to_string(), user_fetcher);
+        fetchers.insert("car".to_string(), car_fetcher);
+
+        let mut state = create_test_state();
+        state.entity_fetchers = Arc::new(fetchers);
+
+        let link = crate::core::link::LinkEntity::new("owner", user_id, car_id, None);
+        let link_def = &state.config.links[0];
+
+        let enriched = enrich_links_with_entities(
+            &state,
+            vec![link],
+            EnrichmentContext::DirectLink,
+            link_def,
+        )
+        .await
+        .expect("enrichment should succeed");
+
+        assert_eq!(enriched.len(), 1);
+        assert!(
+            enriched[0].source.is_some(),
+            "DirectLink context should include source"
+        );
+        assert!(
+            enriched[0].target.is_some(),
+            "DirectLink context should include target"
+        );
+        assert_eq!(enriched[0].source.as_ref().expect("source")["name"], "Alice");
+        assert_eq!(enriched[0].target.as_ref().expect("target")["model"], "BMW");
+    }
+
+    #[tokio::test]
+    async fn test_enrich_links_preserves_metadata() {
+        let state = create_test_state();
+        let metadata = serde_json::json!({ "role": "primary" });
+        let link = crate::core::link::LinkEntity::new(
+            "owner",
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Some(metadata.clone()),
+        );
+
+        let link_def = &state.config.links[0];
+        let enriched = enrich_links_with_entities(
+            &state,
+            vec![link],
+            EnrichmentContext::FromSource,
+            link_def,
+        )
+        .await
+        .expect("enrichment should succeed");
+
+        assert_eq!(enriched[0].metadata, Some(metadata));
+    }
+
+    #[tokio::test]
+    async fn test_enrich_links_empty_input() {
+        let state = create_test_state();
+        let link_def = &state.config.links[0];
+        let enriched = enrich_links_with_entities(
+            &state,
+            vec![],
+            EnrichmentContext::FromSource,
+            link_def,
+        )
+        .await
+        .expect("enrichment should succeed");
+        assert!(enriched.is_empty(), "enriching empty vec should return empty vec");
+    }
+
+    // ------------------------------------------------------------------
+    // fetch_entity_by_type
+    // ------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_fetch_entity_by_type_no_fetcher_registered() {
+        let state = create_test_state();
+        let result = fetch_entity_by_type(&state, "unknown_type", &Uuid::new_v4()).await;
+        assert!(result.is_err(), "should error when no fetcher is registered");
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("No entity fetcher registered"),
+            "error should mention missing fetcher, got: {}",
+            err_msg
+        );
+    }
+
+    #[tokio::test]
+    async fn test_fetch_entity_by_type_entity_not_found() {
+        let fetcher = Arc::new(MockEntityFetcher::new());
+        let mut fetchers: HashMap<String, Arc<dyn crate::core::EntityFetcher>> = HashMap::new();
+        fetchers.insert("car".to_string(), fetcher);
+
+        let mut state = create_test_state();
+        state.entity_fetchers = Arc::new(fetchers);
+
+        let result = fetch_entity_by_type(&state, "car", &Uuid::new_v4()).await;
+        assert!(result.is_err(), "should error when entity is not found");
+    }
+
+    #[tokio::test]
+    async fn test_fetch_entity_by_type_success() {
+        let car_id = Uuid::new_v4();
+        let fetcher = Arc::new(MockEntityFetcher::new());
+        fetcher.insert(car_id, serde_json::json!({ "id": car_id.to_string(), "model": "Audi" }));
+
+        let mut fetchers: HashMap<String, Arc<dyn crate::core::EntityFetcher>> = HashMap::new();
+        fetchers.insert("car".to_string(), fetcher);
+
+        let mut state = create_test_state();
+        state.entity_fetchers = Arc::new(fetchers);
+
+        let result = fetch_entity_by_type(&state, "car", &car_id)
+            .await
+            .expect("should succeed");
+        assert_eq!(result["model"], "Audi");
+    }
+
+    // ------------------------------------------------------------------
+    // Handler: list_links
+    // ------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_list_links_forward_empty() {
+        let state = create_test_state();
+        let user_id = Uuid::new_v4();
+
+        let result = list_links(
+            State(state),
+            Path(("users".to_string(), user_id, "cars-owned".to_string())),
+            Query(crate::core::query::QueryParams::default()),
+        )
+        .await
+        .expect("handler should succeed");
+
+        let resp = result.0;
+        assert_eq!(resp.data.len(), 0);
+        assert_eq!(resp.pagination.total, 0);
+        assert_eq!(resp.link_type, "owner");
+        assert_eq!(resp.direction, "Forward");
+    }
+
+    #[tokio::test]
+    async fn test_list_links_forward_with_links() {
+        let state = create_test_state();
+        let user_id = Uuid::new_v4();
+        let car1_id = Uuid::new_v4();
+        let car2_id = Uuid::new_v4();
+
+        // Create two links
+        let link1 = crate::core::link::LinkEntity::new("owner", user_id, car1_id, None);
+        let link2 = crate::core::link::LinkEntity::new("owner", user_id, car2_id, None);
+        state
+            .link_service
+            .create(link1)
+            .await
+            .expect("create should succeed");
+        state
+            .link_service
+            .create(link2)
+            .await
+            .expect("create should succeed");
+
+        let result = list_links(
+            State(state),
+            Path(("users".to_string(), user_id, "cars-owned".to_string())),
+            Query(crate::core::query::QueryParams::default()),
+        )
+        .await
+        .expect("handler should succeed");
+
+        let resp = result.0;
+        assert_eq!(resp.data.len(), 2);
+        assert_eq!(resp.pagination.total, 2);
+    }
+
+    #[tokio::test]
+    async fn test_list_links_reverse() {
+        let state = create_test_state();
+        let user_id = Uuid::new_v4();
+        let car_id = Uuid::new_v4();
+
+        let link = crate::core::link::LinkEntity::new("owner", user_id, car_id, None);
+        state
+            .link_service
+            .create(link)
+            .await
+            .expect("create should succeed");
+
+        let result = list_links(
+            State(state),
+            Path(("cars".to_string(), car_id, "users-owners".to_string())),
+            Query(crate::core::query::QueryParams::default()),
+        )
+        .await
+        .expect("handler should succeed");
+
+        let resp = result.0;
+        assert_eq!(resp.data.len(), 1);
+        assert_eq!(resp.direction, "Reverse");
+    }
+
+    #[tokio::test]
+    async fn test_list_links_invalid_route() {
+        let state = create_test_state();
+        let result = list_links(
+            State(state),
+            Path((
+                "users".to_string(),
+                Uuid::new_v4(),
+                "nonexistent".to_string(),
+            )),
+            Query(crate::core::query::QueryParams::default()),
+        )
+        .await;
+
+        assert!(result.is_err(), "should fail with invalid route");
+    }
+
+    #[tokio::test]
+    async fn test_list_links_pagination() {
+        let state = create_test_state();
+        let user_id = Uuid::new_v4();
+
+        // Create 5 links
+        for _ in 0..5 {
+            let car_id = Uuid::new_v4();
+            let link = crate::core::link::LinkEntity::new("owner", user_id, car_id, None);
+            state
+                .link_service
+                .create(link)
+                .await
+                .expect("create should succeed");
+        }
+
+        let params = crate::core::query::QueryParams {
+            page: 1,
+            limit: 2,
+            filter: None,
+            sort: None,
+        };
+
+        let result = list_links(
+            State(state),
+            Path(("users".to_string(), user_id, "cars-owned".to_string())),
+            Query(params),
+        )
+        .await
+        .expect("handler should succeed");
+
+        let resp = result.0;
+        assert_eq!(resp.data.len(), 2, "page 1 should have 2 items");
+        assert_eq!(resp.pagination.total, 5);
+        assert_eq!(resp.pagination.total_pages, 3);
+        assert!(resp.pagination.has_next);
+        assert!(!resp.pagination.has_prev);
+    }
+
+    #[tokio::test]
+    async fn test_list_links_with_filter() {
+        let state = create_test_state();
+        let user_id = Uuid::new_v4();
+
+        // Create links: two "owner" links from the same user
+        let car1_id = Uuid::new_v4();
+        let car2_id = Uuid::new_v4();
+        let link1 = crate::core::link::LinkEntity::new("owner", user_id, car1_id, None);
+        let mut link2 = crate::core::link::LinkEntity::new("owner", user_id, car2_id, None);
+        link2.status = "inactive".to_string();
+
+        state
+            .link_service
+            .create(link1)
+            .await
+            .expect("create should succeed");
+        state
+            .link_service
+            .create(link2)
+            .await
+            .expect("create should succeed");
+
+        let params = crate::core::query::QueryParams {
+            page: 1,
+            limit: 20,
+            filter: Some(r#"{"status": "active"}"#.to_string()),
+            sort: None,
+        };
+
+        let result = list_links(
+            State(state),
+            Path(("users".to_string(), user_id, "cars-owned".to_string())),
+            Query(params),
+        )
+        .await
+        .expect("handler should succeed");
+
+        let resp = result.0;
+        assert_eq!(resp.data.len(), 1, "filter should return only active links");
+        assert_eq!(resp.data[0].status, "active");
+    }
+
+    // ------------------------------------------------------------------
+    // Handler: get_link
+    // ------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_get_link_not_found() {
+        let state = create_test_state();
+        let result = get_link(State(state), Path(Uuid::new_v4())).await;
+        assert!(result.is_err(), "should fail for nonexistent link");
+    }
+
+    #[tokio::test]
+    async fn test_get_link_success() {
+        let state = create_test_state();
+        let user_id = Uuid::new_v4();
+        let car_id = Uuid::new_v4();
+        let link = crate::core::link::LinkEntity::new("owner", user_id, car_id, None);
+        let link_id = link.id;
+
+        state
+            .link_service
+            .create(link)
+            .await
+            .expect("create should succeed");
+
+        let result = get_link(State(state), Path(link_id)).await;
+        assert!(result.is_ok(), "should succeed for existing link");
+    }
+
+    // ------------------------------------------------------------------
+    // Handler: create_link
+    // ------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_create_link_success() {
+        let state = create_test_state();
+        let user_id = Uuid::new_v4();
+        let car_id = Uuid::new_v4();
+
+        let result = create_link(
+            State(state.clone()),
+            Path((
+                "users".to_string(),
+                user_id,
+                "cars-owned".to_string(),
+                car_id,
+            )),
+            Json(CreateLinkRequest { metadata: None }),
+        )
+        .await;
+
+        assert!(result.is_ok(), "create_link should succeed");
+        let response = result.expect("should be ok");
+        assert_eq!(response.status(), StatusCode::CREATED);
+
+        // Verify the link exists in the service
+        let links = state
+            .link_service
+            .find_by_source(&user_id, Some("owner"), None)
+            .await
+            .expect("find_by_source should succeed");
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].source_id, user_id);
+        assert_eq!(links[0].target_id, car_id);
+    }
+
+    #[tokio::test]
+    async fn test_create_link_with_metadata() {
+        let state = create_test_state();
+        let user_id = Uuid::new_v4();
+        let car_id = Uuid::new_v4();
+
+        let metadata = serde_json::json!({ "primary_owner": true });
+
+        let result = create_link(
+            State(state.clone()),
+            Path((
+                "users".to_string(),
+                user_id,
+                "cars-owned".to_string(),
+                car_id,
+            )),
+            Json(CreateLinkRequest {
+                metadata: Some(metadata.clone()),
+            }),
+        )
+        .await;
+
+        assert!(result.is_ok());
+
+        let links = state
+            .link_service
+            .find_by_source(&user_id, Some("owner"), None)
+            .await
+            .expect("find_by_source should succeed");
+        assert_eq!(links[0].metadata, Some(metadata));
+    }
+
+    #[tokio::test]
+    async fn test_create_link_invalid_route() {
+        let state = create_test_state();
+        let result = create_link(
+            State(state),
+            Path((
+                "users".to_string(),
+                Uuid::new_v4(),
+                "nonexistent".to_string(),
+                Uuid::new_v4(),
+            )),
+            Json(CreateLinkRequest { metadata: None }),
+        )
+        .await;
+
+        assert!(result.is_err(), "should fail with invalid route");
+    }
+
+    // ------------------------------------------------------------------
+    // Handler: delete_link
+    // ------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_delete_link_success() {
+        let state = create_test_state();
+        let user_id = Uuid::new_v4();
+        let car_id = Uuid::new_v4();
+
+        // First create a link
+        let link = crate::core::link::LinkEntity::new("owner", user_id, car_id, None);
+        state
+            .link_service
+            .create(link)
+            .await
+            .expect("create should succeed");
+
+        // Delete it
+        let result = delete_link(
+            State(state.clone()),
+            Path((
+                "users".to_string(),
+                user_id,
+                "cars-owned".to_string(),
+                car_id,
+            )),
+        )
+        .await;
+
+        assert!(result.is_ok(), "delete_link should succeed");
+        let response = result.expect("should be ok");
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+
+        // Verify link is gone
+        let links = state
+            .link_service
+            .find_by_source(&user_id, Some("owner"), None)
+            .await
+            .expect("find_by_source should succeed");
+        assert!(links.is_empty(), "link should be deleted");
+    }
+
+    #[tokio::test]
+    async fn test_delete_link_not_found() {
+        let state = create_test_state();
+        let result = delete_link(
+            State(state),
+            Path((
+                "users".to_string(),
+                Uuid::new_v4(),
+                "cars-owned".to_string(),
+                Uuid::new_v4(),
+            )),
+        )
+        .await;
+
+        assert!(result.is_err(), "should fail when link does not exist");
+    }
+
+    // ------------------------------------------------------------------
+    // Handler: create_linked_entity
+    // ------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_create_linked_entity_success() {
+        let mut state = create_test_state();
+        let user_id = Uuid::new_v4();
+
+        // Register a mock creator for "car"
+        let mut creators: HashMap<String, Arc<dyn crate::core::EntityCreator>> = HashMap::new();
+        creators.insert("car".to_string(), Arc::new(MockEntityCreator));
+        state.entity_creators = Arc::new(creators);
+
+        let entity_data = serde_json::json!({ "model": "Tesla Model 3", "year": 2024 });
+
+        let result = create_linked_entity(
+            State(state.clone()),
+            Path(("users".to_string(), user_id, "cars-owned".to_string())),
+            Json(CreateLinkedEntityRequest {
+                entity: entity_data,
+                metadata: None,
+            }),
+        )
+        .await;
+
+        assert!(result.is_ok(), "create_linked_entity should succeed");
+        let response = result.expect("should be ok");
+        assert_eq!(response.status(), StatusCode::CREATED);
+
+        // Verify link was created
+        let links = state
+            .link_service
+            .find_by_source(&user_id, Some("owner"), None)
+            .await
+            .expect("find_by_source should succeed");
+        assert_eq!(links.len(), 1, "a link should have been created");
+    }
+
+    #[tokio::test]
+    async fn test_create_linked_entity_no_creator_registered() {
+        let state = create_test_state();
+        let user_id = Uuid::new_v4();
+
+        let result = create_linked_entity(
+            State(state),
+            Path(("users".to_string(), user_id, "cars-owned".to_string())),
+            Json(CreateLinkedEntityRequest {
+                entity: serde_json::json!({}),
+                metadata: None,
+            }),
+        )
+        .await;
+
+        assert!(
+            result.is_err(),
+            "should fail when no entity creator is registered"
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // Handler: update_link
+    // ------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_update_link_success() {
+        let state = create_test_state();
+        let user_id = Uuid::new_v4();
+        let car_id = Uuid::new_v4();
+
+        let link = crate::core::link::LinkEntity::new("owner", user_id, car_id, None);
+        state
+            .link_service
+            .create(link)
+            .await
+            .expect("create should succeed");
+
+        let new_metadata = serde_json::json!({ "insured": true });
+
+        let result = update_link(
+            State(state.clone()),
+            Path((
+                "users".to_string(),
+                user_id,
+                "cars-owned".to_string(),
+                car_id,
+            )),
+            Json(CreateLinkRequest {
+                metadata: Some(new_metadata.clone()),
+            }),
+        )
+        .await;
+
+        assert!(result.is_ok(), "update_link should succeed");
+
+        // Verify metadata updated
+        let links = state
+            .link_service
+            .find_by_source(&user_id, Some("owner"), None)
+            .await
+            .expect("find_by_source should succeed");
+        assert_eq!(links[0].metadata, Some(new_metadata));
+    }
+
+    #[tokio::test]
+    async fn test_update_link_not_found() {
+        let state = create_test_state();
+        let result = update_link(
+            State(state),
+            Path((
+                "users".to_string(),
+                Uuid::new_v4(),
+                "cars-owned".to_string(),
+                Uuid::new_v4(),
+            )),
+            Json(CreateLinkRequest { metadata: None }),
+        )
+        .await;
+
+        assert!(result.is_err(), "should fail when link does not exist");
+    }
+
+    // ------------------------------------------------------------------
+    // Handler: get_link_by_route
+    // ------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_get_link_by_route_forward_success() {
+        let state = create_test_state();
+        let user_id = Uuid::new_v4();
+        let car_id = Uuid::new_v4();
+
+        let link = crate::core::link::LinkEntity::new("owner", user_id, car_id, None);
+        state
+            .link_service
+            .create(link)
+            .await
+            .expect("create should succeed");
+
+        let result = get_link_by_route(
+            State(state),
+            Path((
+                "users".to_string(),
+                user_id,
+                "cars-owned".to_string(),
+                car_id,
+            )),
+        )
+        .await;
+
+        assert!(result.is_ok(), "get_link_by_route should succeed");
+    }
+
+    #[tokio::test]
+    async fn test_get_link_by_route_not_found() {
+        let state = create_test_state();
+        let result = get_link_by_route(
+            State(state),
+            Path((
+                "users".to_string(),
+                Uuid::new_v4(),
+                "cars-owned".to_string(),
+                Uuid::new_v4(),
+            )),
+        )
+        .await;
+
+        assert!(result.is_err(), "should fail when link does not exist");
+    }
+
+    // ------------------------------------------------------------------
+    // Handler: list_available_links
+    // ------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_list_available_links_known_entity() {
+        let state = create_test_state();
+        let user_id = Uuid::new_v4();
+
+        let result = list_available_links(
+            State(state),
+            Path(("users".to_string(), user_id)),
+        )
+        .await
+        .expect("handler should succeed");
+
+        let resp = result.0;
+        assert_eq!(resp.entity_type, "user");
+        assert_eq!(resp.entity_id, user_id);
+        // user has "cars-owned" forward route
+        assert!(
+            !resp.available_routes.is_empty(),
+            "user should have available routes"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_list_available_links_car_has_reverse_routes() {
+        let state = create_test_state();
+        let car_id = Uuid::new_v4();
+
+        let result = list_available_links(
+            State(state),
+            Path(("cars".to_string(), car_id)),
+        )
+        .await
+        .expect("handler should succeed");
+
+        let resp = result.0;
+        assert_eq!(resp.entity_type, "car");
+        assert!(
+            !resp.available_routes.is_empty(),
+            "car should have reverse routes"
+        );
+        // Should contain "users-owners" reverse route
+        let route_names: Vec<&str> = resp
+            .available_routes
+            .iter()
+            .map(|r| r.path.as_str())
+            .collect();
+        let has_owners = route_names
+            .iter()
+            .any(|p| p.contains("users-owners"));
+        assert!(has_owners, "car should have users-owners route");
+    }
+
+    // ======================================================================
+    // Phase 3: Nested path handler tests
+    // ======================================================================
+
+    #[tokio::test]
+    async fn test_handle_nested_path_get_too_few_segments() {
+        let state = create_chain_test_state();
+        // Only 3 segments: orders/{id}/invoices — less than 5 segments
+        let result = handle_nested_path_get(
+            State(state),
+            Path("orders/abc/invoices".to_string()),
+            Query(crate::core::query::QueryParams::default()),
+        )
+        .await;
+
+        assert!(result.is_err(), "should fail with fewer than 5 segments");
+    }
+
+    #[tokio::test]
+    async fn test_handle_nested_path_get_list_returns_paginated() {
+        let state = create_chain_test_state();
+
+        let order_id = Uuid::new_v4();
+        let invoice_id = Uuid::new_v4();
+        let payment_id = Uuid::new_v4();
+
+        // Create the chain: order -> invoice -> payment
+        let link1 =
+            crate::core::link::LinkEntity::new("billing", order_id, invoice_id, None);
+        state
+            .link_service
+            .create(link1)
+            .await
+            .expect("create should succeed");
+
+        let link2 =
+            crate::core::link::LinkEntity::new("payment", invoice_id, payment_id, None);
+        state
+            .link_service
+            .create(link2)
+            .await
+            .expect("create should succeed");
+
+        // GET /orders/{order_id}/invoices/{invoice_id}/payments (5 segments -> list)
+        let path = format!(
+            "orders/{}/invoices/{}/payments",
+            order_id, invoice_id
+        );
+        let result = handle_nested_path_get(
+            State(state),
+            Path(path),
+            Query(crate::core::query::QueryParams::default()),
+        )
+        .await
+        .expect("handler should succeed");
+
+        let json = result.0;
+        assert!(
+            json.get("data").is_some(),
+            "response should contain 'data' field"
+        );
+        assert!(
+            json.get("pagination").is_some(),
+            "response should contain 'pagination' field"
+        );
+        let data = json["data"].as_array().expect("data should be an array");
+        assert_eq!(data.len(), 1, "should find one payment link");
+    }
+
+    #[tokio::test]
+    async fn test_handle_nested_path_get_specific_item() {
+        let state = create_chain_test_state();
+
+        let order_id = Uuid::new_v4();
+        let invoice_id = Uuid::new_v4();
+        let payment_id = Uuid::new_v4();
+
+        let link1 =
+            crate::core::link::LinkEntity::new("billing", order_id, invoice_id, None);
+        state
+            .link_service
+            .create(link1)
+            .await
+            .expect("create should succeed");
+
+        let link2 =
+            crate::core::link::LinkEntity::new("payment", invoice_id, payment_id, None);
+        state
+            .link_service
+            .create(link2)
+            .await
+            .expect("create should succeed");
+
+        // GET /orders/{order_id}/invoices/{invoice_id}/payments/{payment_id} (6 segments -> item)
+        let path = format!(
+            "orders/{}/invoices/{}/payments/{}",
+            order_id, invoice_id, payment_id
+        );
+        let result = handle_nested_path_get(
+            State(state),
+            Path(path),
+            Query(crate::core::query::QueryParams::default()),
+        )
+        .await
+        .expect("handler should succeed");
+
+        let json = result.0;
+        assert!(
+            json.get("link").is_some(),
+            "response should contain 'link' field for specific item"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_handle_nested_path_get_broken_chain() {
+        let state = create_chain_test_state();
+
+        let order_id = Uuid::new_v4();
+        let invoice_id = Uuid::new_v4();
+
+        // Only create order->invoice link, but NOT invoice->payment
+        let link1 =
+            crate::core::link::LinkEntity::new("billing", order_id, invoice_id, None);
+        state
+            .link_service
+            .create(link1)
+            .await
+            .expect("create should succeed");
+
+        // Try to get a specific payment through the chain — chain validation should fail
+        // because order->invoice exists but invoice->payment doesn't for this specific item
+        let fake_payment_id = Uuid::new_v4();
+        let path = format!(
+            "orders/{}/invoices/{}/payments/{}",
+            order_id, invoice_id, fake_payment_id
+        );
+        let result = handle_nested_path_get(
+            State(state),
+            Path(path),
+            Query(crate::core::query::QueryParams::default()),
+        )
+        .await;
+
+        assert!(
+            result.is_err(),
+            "should fail when link chain is broken (no payment link)"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_handle_nested_path_get_invalid_chain_first_link() {
+        let state = create_chain_test_state();
+
+        let order_id = Uuid::new_v4();
+        let wrong_invoice_id = Uuid::new_v4();
+        let payment_id = Uuid::new_v4();
+
+        // Create link from DIFFERENT order, not from order_id
+        let other_order_id = Uuid::new_v4();
+        let link1 = crate::core::link::LinkEntity::new(
+            "billing",
+            other_order_id,
+            wrong_invoice_id,
+            None,
+        );
+        state
+            .link_service
+            .create(link1)
+            .await
+            .expect("create should succeed");
+
+        let link2 = crate::core::link::LinkEntity::new(
+            "payment",
+            wrong_invoice_id,
+            payment_id,
+            None,
+        );
+        state
+            .link_service
+            .create(link2)
+            .await
+            .expect("create should succeed");
+
+        // Try to traverse: orders/{order_id}/invoices/{wrong_invoice_id}/payments
+        // The first link (order_id -> wrong_invoice_id) does not exist
+        let path = format!(
+            "orders/{}/invoices/{}/payments",
+            order_id, wrong_invoice_id
+        );
+        let result = handle_nested_path_get(
+            State(state),
+            Path(path),
+            Query(crate::core::query::QueryParams::default()),
+        )
+        .await;
+
+        assert!(
+            result.is_err(),
+            "should fail when first link in chain does not exist"
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // Handler: handle_nested_path_post
+    // ------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_handle_nested_path_post_too_few_segments() {
+        let state = create_chain_test_state();
+        let result = handle_nested_path_post(
+            State(state),
+            Path("orders/abc/invoices".to_string()),
+            Json(CreateLinkedEntityRequest {
+                entity: serde_json::json!({}),
+                metadata: None,
+            }),
+        )
+        .await;
+
+        assert!(result.is_err(), "should fail with fewer than 5 segments");
+    }
+
+    #[tokio::test]
+    async fn test_handle_nested_path_post_success() {
+        let mut state = create_chain_test_state();
+
+        // Register mock creator for payment
+        let mut creators: HashMap<String, Arc<dyn crate::core::EntityCreator>> = HashMap::new();
+        creators.insert("payment".to_string(), Arc::new(MockEntityCreator));
+        state.entity_creators = Arc::new(creators);
+
+        let order_id = Uuid::new_v4();
+        let invoice_id = Uuid::new_v4();
+
+        // Create the prerequisite chain
+        let link1 =
+            crate::core::link::LinkEntity::new("billing", order_id, invoice_id, None);
+        state
+            .link_service
+            .create(link1)
+            .await
+            .expect("create should succeed");
+
+        // POST /orders/{order_id}/invoices/{invoice_id}/payments
+        let path = format!("orders/{}/invoices/{}/payments", order_id, invoice_id);
+        let result = handle_nested_path_post(
+            State(state.clone()),
+            Path(path),
+            Json(CreateLinkedEntityRequest {
+                entity: serde_json::json!({ "amount": 100.0 }),
+                metadata: None,
+            }),
+        )
+        .await;
+
+        assert!(result.is_ok(), "handle_nested_path_post should succeed");
+        let response = result.expect("should be ok");
+        assert_eq!(response.status(), StatusCode::CREATED);
+    }
+
+    #[tokio::test]
+    async fn test_handle_nested_path_post_no_creator() {
+        let state = create_chain_test_state();
+
+        let order_id = Uuid::new_v4();
+        let invoice_id = Uuid::new_v4();
+
+        let link1 =
+            crate::core::link::LinkEntity::new("billing", order_id, invoice_id, None);
+        state
+            .link_service
+            .create(link1)
+            .await
+            .expect("create should succeed");
+
+        let path = format!("orders/{}/invoices/{}/payments", order_id, invoice_id);
+        let result = handle_nested_path_post(
+            State(state),
+            Path(path),
+            Json(CreateLinkedEntityRequest {
+                entity: serde_json::json!({}),
+                metadata: None,
+            }),
+        )
+        .await;
+
+        assert!(
+            result.is_err(),
+            "should fail when no entity creator is registered for target type"
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // EnrichedLink serialization
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_enriched_link_skips_none_source_and_target() {
+        let link = make_enriched_link("owner", "active", None, None, None);
+        let json = serde_json::to_value(&link).expect("serialization should succeed");
+        assert!(
+            json.get("source").is_none(),
+            "None source should be skipped in serialization"
+        );
+        assert!(
+            json.get("target").is_none(),
+            "None target should be skipped in serialization"
+        );
+        assert!(
+            json.get("metadata").is_none(),
+            "None metadata should be skipped in serialization"
+        );
+    }
+
+    #[test]
+    fn test_enriched_link_includes_present_fields() {
+        let link = make_enriched_link(
+            "owner",
+            "active",
+            Some(serde_json::json!({ "name": "Car" })),
+            Some(serde_json::json!({ "name": "User" })),
+            Some(serde_json::json!({ "priority": 1 })),
+        );
+        let json = serde_json::to_value(&link).expect("serialization should succeed");
+        assert!(json.get("source").is_some());
+        assert!(json.get("target").is_some());
+        assert!(json.get("metadata").is_some());
+        assert_eq!(json["type"], "link");
+    }
+
+    // ------------------------------------------------------------------
+    // AppState with event bus integration
+    // ------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_create_link_emits_event() {
+        let bus = Arc::new(EventBus::new(16));
+        let mut state = create_test_state();
+        state.event_bus = Some(bus.clone());
+
+        let mut rx = bus.subscribe();
+
+        let user_id = Uuid::new_v4();
+        let car_id = Uuid::new_v4();
+
+        let _result = create_link(
+            State(state),
+            Path((
+                "users".to_string(),
+                user_id,
+                "cars-owned".to_string(),
+                car_id,
+            )),
+            Json(CreateLinkRequest { metadata: None }),
+        )
+        .await
+        .expect("create should succeed");
+
+        let envelope = rx.try_recv().expect("should receive link created event");
+        match envelope.event {
+            FrameworkEvent::Link(LinkEvent::Created {
+                link_type,
+                source_id,
+                target_id,
+                ..
+            }) => {
+                assert_eq!(link_type, "owner");
+                assert_eq!(source_id, user_id);
+                assert_eq!(target_id, car_id);
+            }
+            other => panic!("expected Link::Created event, got: {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_delete_link_emits_event() {
+        let bus = Arc::new(EventBus::new(16));
+        let mut state = create_test_state();
+        state.event_bus = Some(bus.clone());
+
+        let user_id = Uuid::new_v4();
+        let car_id = Uuid::new_v4();
+        let link = crate::core::link::LinkEntity::new("owner", user_id, car_id, None);
+        state
+            .link_service
+            .create(link)
+            .await
+            .expect("create should succeed");
+
+        let mut rx = bus.subscribe();
+
+        delete_link(
+            State(state),
+            Path((
+                "users".to_string(),
+                user_id,
+                "cars-owned".to_string(),
+                car_id,
+            )),
+        )
+        .await
+        .expect("delete should succeed");
+
+        let envelope = rx.try_recv().expect("should receive link deleted event");
+        match envelope.event {
+            FrameworkEvent::Link(LinkEvent::Deleted {
+                link_type,
+                source_id,
+                target_id,
+                ..
+            }) => {
+                assert_eq!(link_type, "owner");
+                assert_eq!(source_id, user_id);
+                assert_eq!(target_id, car_id);
+            }
+            other => panic!("expected Link::Deleted event, got: {:?}", other),
+        }
+    }
 }
