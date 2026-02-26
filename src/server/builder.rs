@@ -207,7 +207,7 @@ impl ServerBuilder {
     /// This is a convenience method that builds both REST and gRPC routers
     /// from the registered modules and merges them safely into a single router.
     ///
-    /// Internally, it uses [`GrpcExposure::build_router_no_fallback`] for the
+    /// Internally, it uses [`GrpcExposure::build_router_no_fallback`](super::GrpcExposure::build_router_no_fallback) for the
     /// gRPC side (no fallback) and [`RestExposure::build_router`] for REST
     /// (with its nested link path fallback), then merges them via
     /// [`combine_rest_and_grpc`](super::router::combine_rest_and_grpc).
