@@ -560,7 +560,12 @@ mod tests {
             .expect("build_host should succeed");
 
         // Merged config should contain entities from both modules
-        let entity_names: Vec<&str> = host.config.entities.iter().map(|e| e.singular.as_str()).collect();
+        let entity_names: Vec<&str> = host
+            .config
+            .entities
+            .iter()
+            .map(|e| e.singular.as_str())
+            .collect();
         assert!(entity_names.contains(&"order"), "should contain order");
         assert!(entity_names.contains(&"user"), "should contain user");
         assert!(entity_names.contains(&"car"), "should contain car");

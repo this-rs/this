@@ -1430,9 +1430,7 @@ mod tests {
 
     #[test]
     fn test_apply_link_filters_non_object_filter_returns_all() {
-        let links = vec![
-            make_enriched_link("owner", "active", None, None, None),
-        ];
+        let links = vec![make_enriched_link("owner", "active", None, None, None)];
         let result = apply_link_filters(links, &serde_json::json!("not an object"));
         assert_eq!(result.len(), 1, "non-object filter should return all links");
     }
@@ -1444,7 +1442,11 @@ mod tests {
             make_enriched_link("driver", "inactive", None, None, None),
         ];
         let result = apply_link_filters(links, &serde_json::json!({}));
-        assert_eq!(result.len(), 2, "empty object filter should return all links");
+        assert_eq!(
+            result.len(),
+            2,
+            "empty object filter should return all links"
+        );
     }
 
     #[test]
@@ -1540,19 +1542,18 @@ mod tests {
 
     #[test]
     fn test_apply_link_filters_no_match_returns_empty() {
-        let links = vec![
-            make_enriched_link("owner", "active", None, None, None),
-        ];
+        let links = vec![make_enriched_link("owner", "active", None, None, None)];
         let filter = serde_json::json!({ "status": "deleted" });
         let result = apply_link_filters(links, &filter);
-        assert!(result.is_empty(), "non-matching filter should return empty vec");
+        assert!(
+            result.is_empty(),
+            "non-matching filter should return empty vec"
+        );
     }
 
     #[test]
     fn test_apply_link_filters_missing_field_excludes_link() {
-        let links = vec![
-            make_enriched_link("owner", "active", None, None, None),
-        ];
+        let links = vec![make_enriched_link("owner", "active", None, None, None)];
         // "nonexistent_field" does not exist on EnrichedLink serialization
         let filter = serde_json::json!({ "nonexistent_field": "value" });
         let result = apply_link_filters(links, &filter);
@@ -1692,7 +1693,10 @@ mod tests {
         // The event should be receivable
         let envelope = rx.try_recv().expect("should receive published event");
         assert!(
-            matches!(envelope.event, FrameworkEvent::Link(LinkEvent::Created { .. })),
+            matches!(
+                envelope.event,
+                FrameworkEvent::Link(LinkEvent::Created { .. })
+            ),
             "received event should be a Link::Created"
         );
     }
@@ -1822,14 +1826,10 @@ mod tests {
         let link = crate::core::link::LinkEntity::new("owner", user_id, car_id, None);
 
         let link_def = &state.config.links[0];
-        let enriched = enrich_links_with_entities(
-            &state,
-            vec![link],
-            EnrichmentContext::FromSource,
-            link_def,
-        )
-        .await
-        .expect("enrichment should succeed");
+        let enriched =
+            enrich_links_with_entities(&state, vec![link], EnrichmentContext::FromSource, link_def)
+                .await
+                .expect("enrichment should succeed");
 
         assert_eq!(enriched.len(), 1);
         assert!(
@@ -1848,14 +1848,10 @@ mod tests {
         let link = crate::core::link::LinkEntity::new("owner", user_id, car_id, None);
 
         let link_def = &state.config.links[0];
-        let enriched = enrich_links_with_entities(
-            &state,
-            vec![link],
-            EnrichmentContext::FromTarget,
-            link_def,
-        )
-        .await
-        .expect("enrichment should succeed");
+        let enriched =
+            enrich_links_with_entities(&state, vec![link], EnrichmentContext::FromTarget, link_def)
+                .await
+                .expect("enrichment should succeed");
 
         assert_eq!(enriched.len(), 1);
         assert!(
@@ -1870,7 +1866,10 @@ mod tests {
         let car_id = Uuid::new_v4();
 
         let car_fetcher = Arc::new(MockEntityFetcher::new());
-        car_fetcher.insert(car_id, serde_json::json!({ "id": car_id.to_string(), "model": "Tesla" }));
+        car_fetcher.insert(
+            car_id,
+            serde_json::json!({ "id": car_id.to_string(), "model": "Tesla" }),
+        );
 
         let mut fetchers: HashMap<String, Arc<dyn crate::core::EntityFetcher>> = HashMap::new();
         fetchers.insert("car".to_string(), car_fetcher);
@@ -1881,14 +1880,10 @@ mod tests {
         let link = crate::core::link::LinkEntity::new("owner", user_id, car_id, None);
         let link_def = &state.config.links[0];
 
-        let enriched = enrich_links_with_entities(
-            &state,
-            vec![link],
-            EnrichmentContext::FromSource,
-            link_def,
-        )
-        .await
-        .expect("enrichment should succeed");
+        let enriched =
+            enrich_links_with_entities(&state, vec![link], EnrichmentContext::FromSource, link_def)
+                .await
+                .expect("enrichment should succeed");
 
         assert_eq!(enriched.len(), 1);
         let target = enriched[0]
@@ -1904,10 +1899,16 @@ mod tests {
         let car_id = Uuid::new_v4();
 
         let user_fetcher = Arc::new(MockEntityFetcher::new());
-        user_fetcher.insert(user_id, serde_json::json!({ "id": user_id.to_string(), "name": "Alice" }));
+        user_fetcher.insert(
+            user_id,
+            serde_json::json!({ "id": user_id.to_string(), "name": "Alice" }),
+        );
 
         let car_fetcher = Arc::new(MockEntityFetcher::new());
-        car_fetcher.insert(car_id, serde_json::json!({ "id": car_id.to_string(), "model": "BMW" }));
+        car_fetcher.insert(
+            car_id,
+            serde_json::json!({ "id": car_id.to_string(), "model": "BMW" }),
+        );
 
         let mut fetchers: HashMap<String, Arc<dyn crate::core::EntityFetcher>> = HashMap::new();
         fetchers.insert("user".to_string(), user_fetcher);
@@ -1919,14 +1920,10 @@ mod tests {
         let link = crate::core::link::LinkEntity::new("owner", user_id, car_id, None);
         let link_def = &state.config.links[0];
 
-        let enriched = enrich_links_with_entities(
-            &state,
-            vec![link],
-            EnrichmentContext::DirectLink,
-            link_def,
-        )
-        .await
-        .expect("enrichment should succeed");
+        let enriched =
+            enrich_links_with_entities(&state, vec![link], EnrichmentContext::DirectLink, link_def)
+                .await
+                .expect("enrichment should succeed");
 
         assert_eq!(enriched.len(), 1);
         assert!(
@@ -1937,7 +1934,10 @@ mod tests {
             enriched[0].target.is_some(),
             "DirectLink context should include target"
         );
-        assert_eq!(enriched[0].source.as_ref().expect("source")["name"], "Alice");
+        assert_eq!(
+            enriched[0].source.as_ref().expect("source")["name"],
+            "Alice"
+        );
         assert_eq!(enriched[0].target.as_ref().expect("target")["model"], "BMW");
     }
 
@@ -1953,14 +1953,10 @@ mod tests {
         );
 
         let link_def = &state.config.links[0];
-        let enriched = enrich_links_with_entities(
-            &state,
-            vec![link],
-            EnrichmentContext::FromSource,
-            link_def,
-        )
-        .await
-        .expect("enrichment should succeed");
+        let enriched =
+            enrich_links_with_entities(&state, vec![link], EnrichmentContext::FromSource, link_def)
+                .await
+                .expect("enrichment should succeed");
 
         assert_eq!(enriched[0].metadata, Some(metadata));
     }
@@ -1969,15 +1965,14 @@ mod tests {
     async fn test_enrich_links_empty_input() {
         let state = create_test_state();
         let link_def = &state.config.links[0];
-        let enriched = enrich_links_with_entities(
-            &state,
-            vec![],
-            EnrichmentContext::FromSource,
-            link_def,
-        )
-        .await
-        .expect("enrichment should succeed");
-        assert!(enriched.is_empty(), "enriching empty vec should return empty vec");
+        let enriched =
+            enrich_links_with_entities(&state, vec![], EnrichmentContext::FromSource, link_def)
+                .await
+                .expect("enrichment should succeed");
+        assert!(
+            enriched.is_empty(),
+            "enriching empty vec should return empty vec"
+        );
     }
 
     // ------------------------------------------------------------------
@@ -1988,7 +1983,10 @@ mod tests {
     async fn test_fetch_entity_by_type_no_fetcher_registered() {
         let state = create_test_state();
         let result = fetch_entity_by_type(&state, "unknown_type", &Uuid::new_v4()).await;
-        assert!(result.is_err(), "should error when no fetcher is registered");
+        assert!(
+            result.is_err(),
+            "should error when no fetcher is registered"
+        );
         let err_msg = result.unwrap_err().to_string();
         assert!(
             err_msg.contains("No entity fetcher registered"),
@@ -2014,7 +2012,10 @@ mod tests {
     async fn test_fetch_entity_by_type_success() {
         let car_id = Uuid::new_v4();
         let fetcher = Arc::new(MockEntityFetcher::new());
-        fetcher.insert(car_id, serde_json::json!({ "id": car_id.to_string(), "model": "Audi" }));
+        fetcher.insert(
+            car_id,
+            serde_json::json!({ "id": car_id.to_string(), "model": "Audi" }),
+        );
 
         let mut fetchers: HashMap<String, Arc<dyn crate::core::EntityFetcher>> = HashMap::new();
         fetchers.insert("car".to_string(), fetcher);
@@ -2566,12 +2567,9 @@ mod tests {
         let state = create_test_state();
         let user_id = Uuid::new_v4();
 
-        let result = list_available_links(
-            State(state),
-            Path(("users".to_string(), user_id)),
-        )
-        .await
-        .expect("handler should succeed");
+        let result = list_available_links(State(state), Path(("users".to_string(), user_id)))
+            .await
+            .expect("handler should succeed");
 
         let resp = result.0;
         assert_eq!(resp.entity_type, "user");
@@ -2588,12 +2586,9 @@ mod tests {
         let state = create_test_state();
         let car_id = Uuid::new_v4();
 
-        let result = list_available_links(
-            State(state),
-            Path(("cars".to_string(), car_id)),
-        )
-        .await
-        .expect("handler should succeed");
+        let result = list_available_links(State(state), Path(("cars".to_string(), car_id)))
+            .await
+            .expect("handler should succeed");
 
         let resp = result.0;
         assert_eq!(resp.entity_type, "car");
@@ -2607,9 +2602,7 @@ mod tests {
             .iter()
             .map(|r| r.path.as_str())
             .collect();
-        let has_owners = route_names
-            .iter()
-            .any(|p| p.contains("users-owners"));
+        let has_owners = route_names.iter().any(|p| p.contains("users-owners"));
         assert!(has_owners, "car should have users-owners route");
     }
 
@@ -2640,16 +2633,14 @@ mod tests {
         let payment_id = Uuid::new_v4();
 
         // Create the chain: order -> invoice -> payment
-        let link1 =
-            crate::core::link::LinkEntity::new("billing", order_id, invoice_id, None);
+        let link1 = crate::core::link::LinkEntity::new("billing", order_id, invoice_id, None);
         state
             .link_service
             .create(link1)
             .await
             .expect("create should succeed");
 
-        let link2 =
-            crate::core::link::LinkEntity::new("payment", invoice_id, payment_id, None);
+        let link2 = crate::core::link::LinkEntity::new("payment", invoice_id, payment_id, None);
         state
             .link_service
             .create(link2)
@@ -2657,10 +2648,7 @@ mod tests {
             .expect("create should succeed");
 
         // GET /orders/{order_id}/invoices/{invoice_id}/payments (5 segments -> list)
-        let path = format!(
-            "orders/{}/invoices/{}/payments",
-            order_id, invoice_id
-        );
+        let path = format!("orders/{}/invoices/{}/payments", order_id, invoice_id);
         let result = handle_nested_path_get(
             State(state),
             Path(path),
@@ -2690,16 +2678,14 @@ mod tests {
         let invoice_id = Uuid::new_v4();
         let payment_id = Uuid::new_v4();
 
-        let link1 =
-            crate::core::link::LinkEntity::new("billing", order_id, invoice_id, None);
+        let link1 = crate::core::link::LinkEntity::new("billing", order_id, invoice_id, None);
         state
             .link_service
             .create(link1)
             .await
             .expect("create should succeed");
 
-        let link2 =
-            crate::core::link::LinkEntity::new("payment", invoice_id, payment_id, None);
+        let link2 = crate::core::link::LinkEntity::new("payment", invoice_id, payment_id, None);
         state
             .link_service
             .create(link2)
@@ -2734,8 +2720,7 @@ mod tests {
         let invoice_id = Uuid::new_v4();
 
         // Only create order->invoice link, but NOT invoice->payment
-        let link1 =
-            crate::core::link::LinkEntity::new("billing", order_id, invoice_id, None);
+        let link1 = crate::core::link::LinkEntity::new("billing", order_id, invoice_id, None);
         state
             .link_service
             .create(link1)
@@ -2772,24 +2757,16 @@ mod tests {
 
         // Create link from DIFFERENT order, not from order_id
         let other_order_id = Uuid::new_v4();
-        let link1 = crate::core::link::LinkEntity::new(
-            "billing",
-            other_order_id,
-            wrong_invoice_id,
-            None,
-        );
+        let link1 =
+            crate::core::link::LinkEntity::new("billing", other_order_id, wrong_invoice_id, None);
         state
             .link_service
             .create(link1)
             .await
             .expect("create should succeed");
 
-        let link2 = crate::core::link::LinkEntity::new(
-            "payment",
-            wrong_invoice_id,
-            payment_id,
-            None,
-        );
+        let link2 =
+            crate::core::link::LinkEntity::new("payment", wrong_invoice_id, payment_id, None);
         state
             .link_service
             .create(link2)
@@ -2798,10 +2775,7 @@ mod tests {
 
         // Try to traverse: orders/{order_id}/invoices/{wrong_invoice_id}/payments
         // The first link (order_id -> wrong_invoice_id) does not exist
-        let path = format!(
-            "orders/{}/invoices/{}/payments",
-            order_id, wrong_invoice_id
-        );
+        let path = format!("orders/{}/invoices/{}/payments", order_id, wrong_invoice_id);
         let result = handle_nested_path_get(
             State(state),
             Path(path),
@@ -2848,8 +2822,7 @@ mod tests {
         let invoice_id = Uuid::new_v4();
 
         // Create the prerequisite chain
-        let link1 =
-            crate::core::link::LinkEntity::new("billing", order_id, invoice_id, None);
+        let link1 = crate::core::link::LinkEntity::new("billing", order_id, invoice_id, None);
         state
             .link_service
             .create(link1)
@@ -2880,8 +2853,7 @@ mod tests {
         let order_id = Uuid::new_v4();
         let invoice_id = Uuid::new_v4();
 
-        let link1 =
-            crate::core::link::LinkEntity::new("billing", order_id, invoice_id, None);
+        let link1 = crate::core::link::LinkEntity::new("billing", order_id, invoice_id, None);
         state
             .link_service
             .create(link1)

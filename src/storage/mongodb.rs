@@ -600,7 +600,7 @@ mod tests {
 
         assert_eq!(doc.get_str("_id").unwrap(), "x");
         let nested = doc.get_document("data").unwrap();
-        assert_eq!(nested.get_bool("nested").unwrap(), true);
+        assert!(nested.get_bool("nested").unwrap());
     }
 
     // -----------------------------------------------------------------------

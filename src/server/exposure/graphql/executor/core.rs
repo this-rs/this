@@ -276,14 +276,9 @@ mod tests {
         registry.register(Box::new(StubDescriptor::new("order", "orders")));
         registry.register(Box::new(StubDescriptor::new("invoice", "invoices")));
 
-        let host = ServerHost::from_builder_components(
-            link_service,
-            config,
-            registry,
-            fetchers,
-            creators,
-        )
-        .expect("should build test host");
+        let host =
+            ServerHost::from_builder_components(link_service, config, registry, fetchers, creators)
+                .expect("should build test host");
 
         Arc::new(host)
     }
@@ -360,9 +355,7 @@ mod tests {
         let executor = GraphQLExecutor::new(host).await;
 
         // A fragment-only document has no operation
-        let result = executor
-            .execute("fragment F on Order { id }", None)
-            .await;
+        let result = executor.execute("fragment F on Order { id }", None).await;
 
         assert!(result.is_err(), "empty doc should return Err");
         let err_msg = result.expect_err("should be error").to_string();

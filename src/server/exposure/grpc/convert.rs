@@ -196,9 +196,9 @@ mod tests {
 
     #[test]
     fn test_json_to_value_float() {
-        let v = json_to_value(&json!(3.14));
+        let v = json_to_value(&json!(3.15));
         match v.kind {
-            Some(Kind::NumberValue(n)) => assert!((n - 3.14).abs() < f64::EPSILON),
+            Some(Kind::NumberValue(n)) => assert!((n - 3.15).abs() < f64::EPSILON),
             _ => panic!("expected NumberValue"),
         }
     }
@@ -234,25 +234,33 @@ mod tests {
 
     #[test]
     fn test_value_to_json_null() {
-        let v = Value { kind: Some(Kind::NullValue(0)) };
+        let v = Value {
+            kind: Some(Kind::NullValue(0)),
+        };
         assert_eq!(value_to_json(&v), json!(null));
     }
 
     #[test]
     fn test_value_to_json_bool() {
-        let v = Value { kind: Some(Kind::BoolValue(true)) };
+        let v = Value {
+            kind: Some(Kind::BoolValue(true)),
+        };
         assert_eq!(value_to_json(&v), json!(true));
     }
 
     #[test]
     fn test_value_to_json_number() {
-        let v = Value { kind: Some(Kind::NumberValue(99.5)) };
+        let v = Value {
+            kind: Some(Kind::NumberValue(99.5)),
+        };
         assert_eq!(value_to_json(&v), json!(99.5));
     }
 
     #[test]
     fn test_value_to_json_string() {
-        let v = Value { kind: Some(Kind::StringValue("world".to_string())) };
+        let v = Value {
+            kind: Some(Kind::StringValue("world".to_string())),
+        };
         assert_eq!(value_to_json(&v), json!("world"));
     }
 
@@ -261,8 +269,12 @@ mod tests {
         let v = Value {
             kind: Some(Kind::ListValue(ListValue {
                 values: vec![
-                    Value { kind: Some(Kind::BoolValue(true)) },
-                    Value { kind: Some(Kind::StringValue("a".to_string())) },
+                    Value {
+                        kind: Some(Kind::BoolValue(true)),
+                    },
+                    Value {
+                        kind: Some(Kind::StringValue("a".to_string())),
+                    },
                 ],
             })),
         };
@@ -272,7 +284,12 @@ mod tests {
     #[test]
     fn test_value_to_json_struct() {
         let mut fields = std::collections::BTreeMap::new();
-        fields.insert("x".to_string(), Value { kind: Some(Kind::NumberValue(1.0)) });
+        fields.insert(
+            "x".to_string(),
+            Value {
+                kind: Some(Kind::NumberValue(1.0)),
+            },
+        );
         let v = Value {
             kind: Some(Kind::StructValue(Struct {
                 fields: fields.into_iter().collect(),
@@ -290,7 +307,9 @@ mod tests {
     #[test]
     fn test_value_to_json_nan_becomes_null() {
         // NaN cannot be represented in JSON → from_f64 returns None → Null
-        let v = Value { kind: Some(Kind::NumberValue(f64::NAN)) };
+        let v = Value {
+            kind: Some(Kind::NumberValue(f64::NAN)),
+        };
         assert_eq!(value_to_json(&v), json!(null));
     }
 

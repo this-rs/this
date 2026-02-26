@@ -153,8 +153,8 @@ mod tests {
     #[test]
     fn test_round_decimals_two_places() {
         let f = round_decimals(2);
-        let result = f("price", json!(3.14159)).expect("should not fail");
-        assert_eq!(result, json!(3.14));
+        let result = f("price", json!(3.15159)).expect("should not fail");
+        assert_eq!(result, json!(3.15));
     }
 
     #[test]

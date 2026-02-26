@@ -500,14 +500,14 @@ pub fn build_schema(
 mod tests {
     use super::*;
     use crate::config::{EntityAuthConfig, EntityConfig, LinksConfig};
-    use crate::core::link::LinkDefinition;
     use crate::core::EntityFetcher;
+    use crate::core::link::LinkDefinition;
     use crate::server::entity_registry::{EntityDescriptor, EntityRegistry};
     use crate::server::host::ServerHost;
     use crate::storage::in_memory::InMemoryLinkService;
     use async_trait::async_trait;
     use axum::Router;
-    use serde_json::{json, Value as JsonVal};
+    use serde_json::{Value as JsonVal, json};
     use std::collections::HashMap;
 
     // -----------------------------------------------------------------------
@@ -571,9 +571,7 @@ mod tests {
         }
     }
 
-    fn build_test_host(
-        fetchers: HashMap<String, Arc<dyn EntityFetcher>>,
-    ) -> Arc<ServerHost> {
+    fn build_test_host(fetchers: HashMap<String, Arc<dyn EntityFetcher>>) -> Arc<ServerHost> {
         let link_service = Arc::new(InMemoryLinkService::new());
         let config = LinksConfig {
             entities: vec![
@@ -783,12 +781,8 @@ mod tests {
         );
 
         // Create a link in the store
-        let link_entity = crate::core::link::LinkEntity::new(
-            "has_invoice",
-            source_id,
-            target_id,
-            None,
-        );
+        let link_entity =
+            crate::core::link::LinkEntity::new("has_invoice", source_id, target_id, None);
         host.link_service
             .create(link_entity)
             .await
@@ -849,19 +843,16 @@ mod tests {
         let host = build_test_host(HashMap::new());
         let schema = build_schema(host);
 
-        let result = schema
-            .execute("{ entityTypes }")
-            .await;
+        let result = schema.execute("{ entityTypes }").await;
 
-        assert!(result.errors.is_empty(), "should have no errors: {:?}", result.errors);
+        assert!(
+            result.errors.is_empty(),
+            "should have no errors: {:?}",
+            result.errors
+        );
         let data = result.data.into_json().expect("should serialize");
-        let types = data["entityTypes"]
-            .as_array()
-            .expect("should be array");
-        let type_strs: Vec<&str> = types
-            .iter()
-            .map(|v| v.as_str().expect("string"))
-            .collect();
+        let types = data["entityTypes"].as_array().expect("should be array");
+        let type_strs: Vec<&str> = types.iter().map(|v| v.as_str().expect("string")).collect();
         assert!(type_strs.contains(&"order"), "should have order");
         assert!(type_strs.contains(&"invoice"), "should have invoice");
     }
@@ -927,10 +918,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_query_root_entity_not_found_returns_null() {
-        let host = build_host_with_fetcher(
-            "order",
-            Arc::new(MockFetcher::new()),
-        );
+        let host = build_host_with_fetcher("order", Arc::new(MockFetcher::new()));
         let schema = build_schema(host);
 
         let id = Uuid::new_v4();
@@ -1058,12 +1046,8 @@ mod tests {
         // First create a link
         let source_id = Uuid::new_v4();
         let target_id = Uuid::new_v4();
-        let link_entity = crate::core::link::LinkEntity::new(
-            "has_invoice",
-            source_id,
-            target_id,
-            None,
-        );
+        let link_entity =
+            crate::core::link::LinkEntity::new("has_invoice", source_id, target_id, None);
         let created = host
             .link_service
             .create(link_entity)
@@ -1072,10 +1056,7 @@ mod tests {
 
         let schema = build_schema(host);
 
-        let query = format!(
-            r#"mutation {{ deleteLink(id: "{}") }}"#,
-            created.id
-        );
+        let query = format!(r#"mutation {{ deleteLink(id: "{}") }}"#, created.id);
         let result = schema.execute(&query).await;
         assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
         let data = result.data.into_json().expect("json");
@@ -1108,12 +1089,8 @@ mod tests {
 
         let source_id = Uuid::new_v4();
         let target_id = Uuid::new_v4();
-        let link_entity = crate::core::link::LinkEntity::new(
-            "has_invoice",
-            source_id,
-            target_id,
-            None,
-        );
+        let link_entity =
+            crate::core::link::LinkEntity::new("has_invoice", source_id, target_id, None);
         let created = host
             .link_service
             .create(link_entity)
@@ -1148,6 +1125,9 @@ mod tests {
         let result = schema.execute(&query).await;
         assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
         let data = result.data.into_json().expect("json");
-        assert!(data["link"].is_null(), "non-existent link should return null");
+        assert!(
+            data["link"].is_null(),
+            "non-existent link should return null"
+        );
     }
 }

@@ -243,12 +243,12 @@ pub async fn unlink_entities_mutation(
 #[cfg(test)]
 #[cfg(feature = "graphql")]
 mod tests {
+    use super::super::core::GraphQLExecutor;
     use crate::config::{EntityAuthConfig, EntityConfig, LinksConfig};
     use crate::core::link::{LinkDefinition, LinkEntity};
     use crate::core::service::LinkService;
     use crate::core::{EntityCreator, EntityFetcher};
     use crate::server::entity_registry::{EntityDescriptor, EntityRegistry};
-    use super::super::core::GraphQLExecutor;
     use crate::server::host::ServerHost;
     use crate::storage::in_memory::InMemoryLinkService;
     use async_trait::async_trait;
@@ -463,10 +463,7 @@ mod tests {
 
         // Create a link first
         let link = LinkEntity::new("has_invoice", Uuid::new_v4(), Uuid::new_v4(), None);
-        let created = link_service
-            .create(link)
-            .await
-            .expect("should create link");
+        let created = link_service.create(link).await.expect("should create link");
 
         let pos = Pos { line: 1, column: 1 };
         let field = graphql_parser::query::Field {
@@ -706,10 +703,7 @@ mod tests {
 
         // Create a link first
         let link = LinkEntity::new("has_invoice", source_id, target_id, None);
-        link_service
-            .create(link)
-            .await
-            .expect("should create link");
+        link_service.create(link).await.expect("should create link");
 
         // unlinkOrderFromInvoice -> source_type="order", target_type="invoice"
         // find_link_type("order", "invoice") -> "has_invoice"

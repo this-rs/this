@@ -543,7 +543,12 @@ mod tests {
         let source_id = Uuid::new_v4();
         let target_id = Uuid::new_v4();
         let result = DirectLinkExtractor::from_path(
-            ("users".to_string(), source_id, "orders-owned".to_string(), target_id),
+            (
+                "users".to_string(),
+                source_id,
+                "orders-owned".to_string(),
+                target_id,
+            ),
             &registry,
             &config,
         );
@@ -562,7 +567,12 @@ mod tests {
         let source_id = Uuid::new_v4();
         let target_id = Uuid::new_v4();
         let result = DirectLinkExtractor::from_path(
-            ("orders".to_string(), source_id, "owner".to_string(), target_id),
+            (
+                "orders".to_string(),
+                source_id,
+                "owner".to_string(),
+                target_id,
+            ),
             &registry,
             &config,
         );
@@ -577,7 +587,12 @@ mod tests {
     fn test_direct_link_extractor_route_not_found() {
         let (config, registry) = test_config_and_registry();
         let result = DirectLinkExtractor::from_path(
-            ("users".to_string(), Uuid::new_v4(), "nope".to_string(), Uuid::new_v4()),
+            (
+                "users".to_string(),
+                Uuid::new_v4(),
+                "nope".to_string(),
+                Uuid::new_v4(),
+            ),
             &registry,
             &config,
         );
@@ -593,11 +608,8 @@ mod tests {
     #[test]
     fn test_recursive_too_few_segments_error() {
         let (config, registry) = test_config_and_registry();
-        let result = RecursiveLinkExtractor::from_segments(
-            vec!["users".to_string()],
-            &registry,
-            &config,
-        );
+        let result =
+            RecursiveLinkExtractor::from_segments(vec!["users".to_string()], &registry, &config);
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), ExtractorError::InvalidPath));
     }
@@ -665,7 +677,14 @@ mod tests {
         assert_eq!(ext.chain[0].entity_type, "user");
         assert_eq!(ext.chain[0].entity_id, user_id);
         assert_eq!(ext.chain[0].route_name.as_deref(), Some("orders-owned"));
-        assert_eq!(ext.chain[0].link_definition.as_ref().expect("should have link_def").link_type, "ownership");
+        assert_eq!(
+            ext.chain[0]
+                .link_definition
+                .as_ref()
+                .expect("should have link_def")
+                .link_type,
+            "ownership"
+        );
         assert_eq!(ext.chain[1].entity_type, "order");
         assert!(ext.chain[1].entity_id.is_nil()); // list segment
     }
@@ -760,7 +779,10 @@ mod tests {
         let ext = result.expect("should succeed");
         assert_eq!(ext.chain.len(), 2);
         assert_eq!(ext.chain[0].entity_type, "order");
-        assert!(matches!(ext.chain[0].link_direction, Some(LinkDirection::Reverse)));
+        assert!(matches!(
+            ext.chain[0].link_direction,
+            Some(LinkDirection::Reverse)
+        ));
         // Reverse direction → target entity is source_type (user)
         assert_eq!(ext.chain[1].entity_type, "user");
     }

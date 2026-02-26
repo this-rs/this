@@ -158,11 +158,7 @@ mod tests {
         ) -> anyhow::Result<Vec<LinkEntity>> {
             Ok(vec![])
         }
-        async fn update(
-            &self,
-            _id: &uuid::Uuid,
-            link: LinkEntity,
-        ) -> anyhow::Result<LinkEntity> {
+        async fn update(&self, _id: &uuid::Uuid, link: LinkEntity) -> anyhow::Result<LinkEntity> {
             Ok(link)
         }
         async fn delete(&self, _id: &uuid::Uuid) -> anyhow::Result<()> {

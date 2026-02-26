@@ -155,8 +155,8 @@ mod tests {
     #[cfg(feature = "graphql")]
     #[test]
     fn test_gql_value_to_json_float() {
-        let result = gql_value_to_json(&GqlValue::Float(3.14));
-        assert_eq!(result, serde_json::json!(3.14));
+        let result = gql_value_to_json(&GqlValue::Float(3.15));
+        assert_eq!(result, serde_json::json!(3.15));
     }
 
     #[cfg(feature = "graphql")]
@@ -290,7 +290,10 @@ mod tests {
     #[cfg(feature = "graphql")]
     #[test]
     fn test_mutation_name_to_entity_type_create() {
-        assert_eq!(mutation_name_to_entity_type("createOrder", "create"), "order");
+        assert_eq!(
+            mutation_name_to_entity_type("createOrder", "create"),
+            "order"
+        );
     }
 
     #[cfg(feature = "graphql")]
@@ -315,7 +318,11 @@ mod tests {
     // ---- find_link_type tests ----
 
     #[cfg(feature = "graphql")]
-    fn make_link_def(source: &str, target: &str, link_type: &str) -> crate::core::link::LinkDefinition {
+    fn make_link_def(
+        source: &str,
+        target: &str,
+        link_type: &str,
+    ) -> crate::core::link::LinkDefinition {
         crate::core::link::LinkDefinition {
             link_type: link_type.to_string(),
             source_type: source.to_string(),
@@ -332,8 +339,7 @@ mod tests {
     #[test]
     fn test_find_link_type_found() {
         let links = vec![make_link_def("order", "invoice", "has_invoice")];
-        let result = find_link_type(&links, "order", "invoice")
-            .expect("should find link type");
+        let result = find_link_type(&links, "order", "invoice").expect("should find link type");
         assert_eq!(result, "has_invoice");
     }
 
@@ -361,8 +367,8 @@ mod tests {
 
     #[cfg(feature = "graphql")]
     fn make_field(arguments: Vec<(String, GqlValue<String>)>) -> Field<String> {
-        use graphql_parser::query::SelectionSet;
         use graphql_parser::Pos;
+        use graphql_parser::query::SelectionSet;
         Field {
             position: Pos { line: 1, column: 1 },
             alias: None,

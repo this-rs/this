@@ -675,8 +675,8 @@ impl LinkService for MysqlLinkService {
 #[cfg(feature = "mysql")]
 mod tests {
     use super::*;
-    use serde_json::json;
     use chrono::Utc;
+    use serde_json::json;
 
     // Create a test entity using the macro
     crate::impl_data_entity!(TestProduct, "test_product", ["name"], {
@@ -696,10 +696,22 @@ mod tests {
         assert!(!obj.contains_key("id"), "id should be stripped");
         assert!(!obj.contains_key("name"), "name should be stripped");
         assert!(!obj.contains_key("status"), "status should be stripped");
-        assert!(!obj.contains_key("tenant_id"), "tenant_id should be stripped");
-        assert!(!obj.contains_key("created_at"), "created_at should be stripped");
-        assert!(!obj.contains_key("updated_at"), "updated_at should be stripped");
-        assert!(!obj.contains_key("deleted_at"), "deleted_at should be stripped");
+        assert!(
+            !obj.contains_key("tenant_id"),
+            "tenant_id should be stripped"
+        );
+        assert!(
+            !obj.contains_key("created_at"),
+            "created_at should be stripped"
+        );
+        assert!(
+            !obj.contains_key("updated_at"),
+            "updated_at should be stripped"
+        );
+        assert!(
+            !obj.contains_key("deleted_at"),
+            "deleted_at should be stripped"
+        );
     }
 
     #[test]
@@ -708,7 +720,10 @@ mod tests {
         let data = MysqlDataService::<TestProduct>::extract_data(&product).unwrap();
 
         let obj = data.as_object().expect("data should be a JSON object");
-        assert!(obj.contains_key("price"), "custom field 'price' should remain");
+        assert!(
+            obj.contains_key("price"),
+            "custom field 'price' should remain"
+        );
         assert_eq!(obj["price"].as_f64().unwrap(), 42.50);
     }
 

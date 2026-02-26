@@ -178,13 +178,13 @@ async fn resolve_relation_field_inner(
 #[cfg(test)]
 #[cfg(feature = "graphql")]
 mod tests {
+    use super::super::core::GraphQLExecutor;
     use super::*;
     use crate::config::{EntityAuthConfig, EntityConfig, LinksConfig};
+    use crate::core::EntityFetcher;
     use crate::core::link::{LinkDefinition, LinkEntity};
     use crate::core::service::LinkService;
-    use crate::core::EntityFetcher;
     use crate::server::entity_registry::{EntityDescriptor, EntityRegistry};
-    use super::super::core::GraphQLExecutor;
     use crate::server::host::ServerHost;
     use crate::storage::in_memory::InMemoryLinkService;
     use async_trait::async_trait;
@@ -311,10 +311,7 @@ mod tests {
     }
 
     /// Helper to create a Field with given name and sub-field names
-    fn make_field_with_selections(
-        name: &str,
-        sub_fields: &[&str],
-    ) -> Field<'static, String> {
+    fn make_field_with_selections(name: &str, sub_fields: &[&str]) -> Field<'static, String> {
         let pos = Pos { line: 1, column: 1 };
         let sub_items: Vec<Selection<'static, String>> = sub_fields
             .iter()
@@ -361,27 +358,13 @@ mod tests {
         let entity = json!({"id": "abc-123", "name": "Order 1", "total": 99.9});
         let field = make_field_with_selections("order", &["id", "name", "total"]);
 
-        let result = resolve_entity_fields(
-            &host,
-            entity,
-            &field.selection_set.items,
-            "order",
-        )
-        .await
-        .expect("should resolve fields");
+        let result = resolve_entity_fields(&host, entity, &field.selection_set.items, "order")
+            .await
+            .expect("should resolve fields");
 
-        assert_eq!(
-            result.get("id").and_then(|v| v.as_str()),
-            Some("abc-123")
-        );
-        assert_eq!(
-            result.get("name").and_then(|v| v.as_str()),
-            Some("Order 1")
-        );
-        assert_eq!(
-            result.get("total").and_then(|v| v.as_f64()),
-            Some(99.9)
-        );
+        assert_eq!(result.get("id").and_then(|v| v.as_str()), Some("abc-123"));
+        assert_eq!(result.get("name").and_then(|v| v.as_str()), Some("Order 1"));
+        assert_eq!(result.get("total").and_then(|v| v.as_f64()), Some(99.9));
     }
 
     #[tokio::test]
@@ -396,14 +379,9 @@ mod tests {
         let entity = json!({"id": "abc", "created_at": "2024-01-01T00:00:00Z"});
         let field = make_field_with_selections("order", &["id", "createdAt"]);
 
-        let result = resolve_entity_fields(
-            &host,
-            entity,
-            &field.selection_set.items,
-            "order",
-        )
-        .await
-        .expect("should resolve camelCase -> snake_case");
+        let result = resolve_entity_fields(&host, entity, &field.selection_set.items, "order")
+            .await
+            .expect("should resolve camelCase -> snake_case");
 
         assert_eq!(
             result.get("createdAt").and_then(|v| v.as_str()),
@@ -423,14 +401,9 @@ mod tests {
         let entity = json!({"id": order_id.to_string()});
         let field = make_field_with_selections("order", &["id", "nonExistentField"]);
 
-        let result = resolve_entity_fields(
-            &host,
-            entity,
-            &field.selection_set.items,
-            "order",
-        )
-        .await
-        .expect("should resolve with null for unknown");
+        let result = resolve_entity_fields(&host, entity, &field.selection_set.items, "order")
+            .await
+            .expect("should resolve with null for unknown");
 
         assert_eq!(result.get("nonExistentField"), Some(&Value::Null));
     }
@@ -446,13 +419,8 @@ mod tests {
         let entity = json!("not an object");
         let field = make_field_with_selections("order", &["id"]);
 
-        let result = resolve_entity_fields(
-            &host,
-            entity,
-            &field.selection_set.items,
-            "order",
-        )
-        .await;
+        let result =
+            resolve_entity_fields(&host, entity, &field.selection_set.items, "order").await;
         assert!(result.is_err(), "non-object entity should error");
         let err_msg = result.expect_err("error").to_string();
         assert!(
@@ -480,14 +448,9 @@ mod tests {
         ];
         let field = make_field_with_selections("orders", &["id", "name"]);
 
-        let result = resolve_entity_list(
-            &host,
-            entities,
-            &field.selection_set.items,
-            "order",
-        )
-        .await
-        .expect("should resolve list");
+        let result = resolve_entity_list(&host, entities, &field.selection_set.items, "order")
+            .await
+            .expect("should resolve list");
 
         assert_eq!(result.len(), 2, "should have two resolved entities");
         assert_eq!(
@@ -511,14 +474,9 @@ mod tests {
         let entities: Vec<Value> = vec![];
         let field = make_field_with_selections("orders", &["id"]);
 
-        let result = resolve_entity_list(
-            &host,
-            entities,
-            &field.selection_set.items,
-            "order",
-        )
-        .await
-        .expect("should resolve empty list");
+        let result = resolve_entity_list(&host, entities, &field.selection_set.items, "order")
+            .await
+            .expect("should resolve empty list");
 
         assert!(result.is_empty(), "empty input should produce empty output");
     }
@@ -535,10 +493,7 @@ mod tests {
 
         // Create a link: order -> invoice
         let link = LinkEntity::new("has_invoice", order_id, invoice_id, None);
-        link_service
-            .create(link)
-            .await
-            .expect("should create link");
+        link_service.create(link).await.expect("should create link");
 
         let order = json!({"id": order_id.to_string(), "name": "Order 1"});
         let invoice = json!({"id": invoice_id.to_string(), "amount": 100});
@@ -586,10 +541,7 @@ mod tests {
 
         // Create a link: order -> invoice
         let link = LinkEntity::new("has_invoice", order_id, invoice_id, None);
-        link_service
-            .create(link)
-            .await
-            .expect("should create link");
+        link_service.create(link).await.expect("should create link");
 
         let order = json!({"id": order_id.to_string(), "name": "Order 1"});
         let invoice = json!({"id": invoice_id.to_string(), "amount": 50});
@@ -621,7 +573,9 @@ mod tests {
             .get("data")
             .and_then(|d| d.get("invoice"))
             .expect("should have invoice");
-        let order_val = invoice_result.get("order").expect("should have order field");
+        let order_val = invoice_result
+            .get("order")
+            .expect("should have order field");
         assert!(order_val.is_object(), "order should be an object");
         assert_eq!(
             order_val.get("name").and_then(|v| v.as_str()),

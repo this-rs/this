@@ -637,10 +637,7 @@ mod tests {
 
         // With depth=5, we should get longer chains (the 3-step order→invoice→payment)
         let has_three_step = chains_depth5.iter().any(|c| c.steps.len() == 3);
-        assert!(
-            has_three_step,
-            "max_depth=5 should allow 3-step chains"
-        );
+        assert!(has_three_step, "max_depth=5 should allow 3-step chains");
     }
 
     #[test]
@@ -966,11 +963,7 @@ mod tests {
 
         // "car" should have reverse routes: "users-owners" and "users-drivers"
         let car_routes = registry.list_routes_for_entity("car");
-        assert_eq!(
-            car_routes.len(),
-            2,
-            "car should have 2 reverse routes"
-        );
+        assert_eq!(car_routes.len(), 2, "car should have 2 reverse routes");
 
         for route in &car_routes {
             assert_eq!(

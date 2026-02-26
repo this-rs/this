@@ -181,7 +181,7 @@ mod tests {
 
     #[test]
     fn test_field_value_float() {
-        let value = FieldValue::Float(3.14);
+        let value = FieldValue::Float(3.15);
         assert_eq!(value.as_string(), None);
         assert_eq!(value.as_integer(), None);
         assert_eq!(value.as_uuid(), None);
@@ -222,8 +222,7 @@ mod tests {
     fn test_serde_roundtrip_string() {
         let original = FieldValue::String("hello".to_string());
         let json = serde_json::to_string(&original).expect("serialize should succeed");
-        let restored: FieldValue =
-            serde_json::from_str(&json).expect("deserialize should succeed");
+        let restored: FieldValue = serde_json::from_str(&json).expect("deserialize should succeed");
         assert_eq!(original, restored);
     }
 
@@ -231,17 +230,15 @@ mod tests {
     fn test_serde_roundtrip_integer() {
         let original = FieldValue::Integer(42);
         let json = serde_json::to_string(&original).expect("serialize should succeed");
-        let restored: FieldValue =
-            serde_json::from_str(&json).expect("deserialize should succeed");
+        let restored: FieldValue = serde_json::from_str(&json).expect("deserialize should succeed");
         assert_eq!(original, restored);
     }
 
     #[test]
     fn test_serde_roundtrip_float() {
-        let original = FieldValue::Float(2.718);
+        let original = FieldValue::Float(2.75);
         let json = serde_json::to_string(&original).expect("serialize should succeed");
-        let restored: FieldValue =
-            serde_json::from_str(&json).expect("deserialize should succeed");
+        let restored: FieldValue = serde_json::from_str(&json).expect("deserialize should succeed");
         assert_eq!(original, restored);
     }
 
@@ -249,8 +246,7 @@ mod tests {
     fn test_serde_roundtrip_boolean() {
         let original = FieldValue::Boolean(false);
         let json = serde_json::to_string(&original).expect("serialize should succeed");
-        let restored: FieldValue =
-            serde_json::from_str(&json).expect("deserialize should succeed");
+        let restored: FieldValue = serde_json::from_str(&json).expect("deserialize should succeed");
         assert_eq!(original, restored);
     }
 
@@ -258,8 +254,7 @@ mod tests {
     fn test_serde_roundtrip_null() {
         let original = FieldValue::Null;
         let json = serde_json::to_string(&original).expect("serialize should succeed");
-        let restored: FieldValue =
-            serde_json::from_str(&json).expect("deserialize should succeed");
+        let restored: FieldValue = serde_json::from_str(&json).expect("deserialize should succeed");
         assert_eq!(original, restored);
     }
 

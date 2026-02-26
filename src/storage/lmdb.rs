@@ -548,8 +548,7 @@ mod tests {
             count: 7,
         };
         let bytes = lmdb_encode(&item).expect("should encode");
-        let json: serde_json::Value =
-            serde_json::from_slice(&bytes).expect("should be valid JSON");
+        let json: serde_json::Value = serde_json::from_slice(&bytes).expect("should be valid JSON");
         assert_eq!(json["name"], "test");
         assert_eq!(json["count"], 7);
     }
@@ -560,12 +559,21 @@ mod tests {
         let result: Result<TestItem> = lmdb_decode(bad_bytes);
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
-        assert!(err.contains("lmdb decode"), "error should mention lmdb decode: {}", err);
+        assert!(
+            err.contains("lmdb decode"),
+            "error should mention lmdb decode: {}",
+            err
+        );
     }
 
     #[test]
     fn test_encode_decode_link_entity() {
-        let link = LinkEntity::new("ownership", Uuid::new_v4(), Uuid::new_v4(), Some(json!({"priority": "high"})));
+        let link = LinkEntity::new(
+            "ownership",
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Some(json!({"priority": "high"})),
+        );
         let bytes = lmdb_encode(&link).expect("should encode link");
         let decoded: LinkEntity = lmdb_decode(&bytes).expect("should decode link");
         assert_eq!(decoded.id, link.id);

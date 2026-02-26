@@ -826,7 +826,11 @@ mod tests {
         link.metadata = None; // from_link will store json!({})
 
         let row = LinkRow::from_link(&link);
-        assert_eq!(row.metadata, json!({}), "None metadata stored as empty object");
+        assert_eq!(
+            row.metadata,
+            json!({}),
+            "None metadata stored as empty object"
+        );
 
         let restored = row.into_link();
         assert_eq!(restored.metadata, None, "empty object should become None");

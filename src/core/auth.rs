@@ -493,20 +493,24 @@ mod tests {
 
     #[test]
     fn test_auth_context_is_admin() {
-        assert!(AuthContext::Admin {
-            admin_id: Uuid::new_v4()
-        }
-        .is_admin());
+        assert!(
+            AuthContext::Admin {
+                admin_id: Uuid::new_v4()
+            }
+            .is_admin()
+        );
         assert!(!AuthContext::Anonymous.is_admin());
     }
 
     #[test]
     fn test_auth_context_is_service() {
-        assert!(AuthContext::Service {
-            service_name: "svc".to_string(),
-            tenant_id: None
-        }
-        .is_service());
+        assert!(
+            AuthContext::Service {
+                service_name: "svc".to_string(),
+                tenant_id: None
+            }
+            .is_service()
+        );
         assert!(!AuthContext::Anonymous.is_service());
     }
 

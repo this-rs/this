@@ -452,14 +452,8 @@ mod tests {
         registry.register(Box::new(StubDescriptor::new("order", "orders")));
 
         Arc::new(
-            ServerHost::from_builder_components(
-                link_service,
-                config,
-                registry,
-                fetchers,
-                creators,
-            )
-            .expect("should build test host"),
+            ServerHost::from_builder_components(link_service, config, registry, fetchers, creators)
+                .expect("should build test host"),
         )
     }
 
@@ -476,43 +470,37 @@ mod tests {
 
     #[test]
     fn test_json_value_parse_boolean_true() {
-        let result =
-            <JsonValue as ScalarType>::parse(async_graphql::Value::Boolean(true))
-                .expect("should parse bool");
+        let result = <JsonValue as ScalarType>::parse(async_graphql::Value::Boolean(true))
+            .expect("should parse bool");
         assert_eq!(result.0, Value::Bool(true));
     }
 
     #[test]
     fn test_json_value_parse_boolean_false() {
-        let result =
-            <JsonValue as ScalarType>::parse(async_graphql::Value::Boolean(false))
-                .expect("should parse bool");
+        let result = <JsonValue as ScalarType>::parse(async_graphql::Value::Boolean(false))
+            .expect("should parse bool");
         assert_eq!(result.0, Value::Bool(false));
     }
 
     #[test]
     fn test_json_value_parse_integer() {
         let gql_num = async_graphql::Value::Number(42.into());
-        let result =
-            <JsonValue as ScalarType>::parse(gql_num).expect("should parse int");
+        let result = <JsonValue as ScalarType>::parse(gql_num).expect("should parse int");
         assert_eq!(result.0, json!(42));
     }
 
     #[test]
     fn test_json_value_parse_float() {
-        let gql_num = async_graphql::Value::Number(
-            async_graphql::Number::from_f64(3.14).expect("valid f64"),
-        );
-        let result =
-            <JsonValue as ScalarType>::parse(gql_num).expect("should parse float");
-        assert_eq!(result.0, json!(3.14));
+        let gql_num =
+            async_graphql::Value::Number(async_graphql::Number::from_f64(3.15).expect("valid f64"));
+        let result = <JsonValue as ScalarType>::parse(gql_num).expect("should parse float");
+        assert_eq!(result.0, json!(3.15));
     }
 
     #[test]
     fn test_json_value_parse_string() {
         let gql_str = async_graphql::Value::String("hello".to_string());
-        let result =
-            <JsonValue as ScalarType>::parse(gql_str).expect("should parse string");
+        let result = <JsonValue as ScalarType>::parse(gql_str).expect("should parse string");
         assert_eq!(result.0, Value::String("hello".to_string()));
     }
 
@@ -523,8 +511,7 @@ mod tests {
             async_graphql::Value::String("two".to_string()),
             async_graphql::Value::Boolean(true),
         ]);
-        let result =
-            <JsonValue as ScalarType>::parse(gql_list).expect("should parse list");
+        let result = <JsonValue as ScalarType>::parse(gql_list).expect("should parse list");
         assert_eq!(result.0, json!([1, "two", true]));
     }
 
@@ -536,8 +523,7 @@ mod tests {
             async_graphql::Value::String("value".to_string()),
         );
         let gql_obj = async_graphql::Value::Object(map);
-        let result =
-            <JsonValue as ScalarType>::parse(gql_obj).expect("should parse object");
+        let result = <JsonValue as ScalarType>::parse(gql_obj).expect("should parse object");
         assert_eq!(result.0, json!({"key": "value"}));
     }
 
@@ -554,7 +540,10 @@ mod tests {
     #[test]
     fn test_json_value_to_value_bool() {
         let jv = JsonValue(Value::Bool(true));
-        assert_eq!(ScalarType::to_value(&jv), async_graphql::Value::Boolean(true));
+        assert_eq!(
+            ScalarType::to_value(&jv),
+            async_graphql::Value::Boolean(true)
+        );
     }
 
     #[test]
@@ -570,11 +559,11 @@ mod tests {
 
     #[test]
     fn test_json_value_to_value_float() {
-        let jv = JsonValue(json!(3.14));
+        let jv = JsonValue(json!(3.15));
         let gql_val = ScalarType::to_value(&jv);
         if let async_graphql::Value::Number(n) = gql_val {
             let f = n.as_f64().expect("should be f64");
-            assert!((f - 3.14).abs() < 1e-10);
+            assert!((f - 3.15).abs() < 1e-10);
         } else {
             panic!("expected Number variant");
         }
@@ -620,8 +609,7 @@ mod tests {
         let original = json!({"name": "test", "count": 5, "active": true, "items": [1, 2]});
         let jv = JsonValue(original.clone());
         let gql_val = ScalarType::to_value(&jv);
-        let parsed = <JsonValue as ScalarType>::parse(gql_val)
-            .expect("should parse back");
+        let parsed = <JsonValue as ScalarType>::parse(gql_val).expect("should parse back");
         assert_eq!(parsed.0, original);
     }
 
@@ -648,10 +636,7 @@ mod tests {
         assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
         let data = result.data.into_json().expect("json");
         let types = data["entityTypes"].as_array().expect("array");
-        let strs: Vec<&str> = types
-            .iter()
-            .map(|v| v.as_str().expect("str"))
-            .collect();
+        let strs: Vec<&str> = types.iter().map(|v| v.as_str().expect("str")).collect();
         assert!(strs.contains(&"order"), "should have order");
     }
 
@@ -673,10 +658,7 @@ mod tests {
         let host = build_test_host(fetchers, HashMap::new());
         let schema = build_dynamic_schema(host);
 
-        let query = format!(
-            r#"{{ entity(id: "{}", entityType: "order") }}"#,
-            order_id
-        );
+        let query = format!(r#"{{ entity(id: "{}", entityType: "order") }}"#, order_id);
         let result = schema.execute(&query).await;
         assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     }
@@ -691,10 +673,7 @@ mod tests {
         let schema = build_dynamic_schema(host);
 
         let id = Uuid::new_v4();
-        let query = format!(
-            r#"{{ entity(id: "{}", entityType: "widget") }}"#,
-            id
-        );
+        let query = format!(r#"{{ entity(id: "{}", entityType: "widget") }}"#, id);
         let result = schema.execute(&query).await;
         assert!(
             !result.errors.is_empty(),
@@ -786,8 +765,7 @@ mod tests {
         let host = build_test_host(fetchers, creators);
         let schema = build_dynamic_schema(host);
 
-        let query =
-            r#"mutation { createEntity(entityType: "order", data: {name: "test"}) }"#;
+        let query = r#"mutation { createEntity(entityType: "order", data: {name: "test"}) }"#;
         let result = schema.execute(query).await;
         assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     }
@@ -801,8 +779,7 @@ mod tests {
         let host = build_test_host(HashMap::new(), HashMap::new());
         let schema = build_dynamic_schema(host);
 
-        let query =
-            r#"mutation { createEntity(entityType: "widget", data: {name: "x"}) }"#;
+        let query = r#"mutation { createEntity(entityType: "widget", data: {name: "x"}) }"#;
         let result = schema.execute(query).await;
         assert!(
             !result.errors.is_empty(),
@@ -851,15 +828,20 @@ mod tests {
             source_id, target_id
         );
         let result = schema.execute(&create_query).await;
-        assert!(result.errors.is_empty(), "create errors: {:?}", result.errors);
+        assert!(
+            result.errors.is_empty(),
+            "create errors: {:?}",
+            result.errors
+        );
 
         // Query entity_links
-        let links_query = format!(
-            r#"{{ entityLinks(entityId: "{}") }}"#,
-            source_id
-        );
+        let links_query = format!(r#"{{ entityLinks(entityId: "{}") }}"#, source_id);
         let result = schema.execute(&links_query).await;
-        assert!(result.errors.is_empty(), "query errors: {:?}", result.errors);
+        assert!(
+            result.errors.is_empty(),
+            "query errors: {:?}",
+            result.errors
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -882,10 +864,7 @@ mod tests {
 
         let schema = build_dynamic_schema(host);
 
-        let query = format!(
-            r#"mutation {{ deleteLink(linkId: "{}") }}"#,
-            created.id
-        );
+        let query = format!(r#"mutation {{ deleteLink(linkId: "{}") }}"#, created.id);
         let result = schema.execute(&query).await;
         assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
         let data = result.data.into_json().expect("json");

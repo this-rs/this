@@ -597,9 +597,7 @@ mod tests {
         .await
         .expect("create_entity should succeed");
 
-        let envelope = rx
-            .try_recv()
-            .expect("should have received a create event");
+        let envelope = rx.try_recv().expect("should have received a create event");
         assert_eq!(envelope.event.action(), "created");
         assert_eq!(envelope.event.entity_type(), Some("order"));
     }
@@ -726,9 +724,7 @@ mod tests {
         .await
         .expect("delete_entity should succeed");
 
-        let envelope = rx
-            .try_recv()
-            .expect("should have received a delete event");
+        let envelope = rx.try_recv().expect("should have received a delete event");
         assert_eq!(envelope.event.action(), "deleted");
         assert_eq!(envelope.event.entity_type(), Some("order"));
     }

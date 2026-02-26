@@ -649,7 +649,11 @@ mod tests {
             .search("ref_id", &target_ref.to_string())
             .await
             .expect("search by ref_id should succeed");
-        assert_eq!(results.len(), 2, "should find 2 entities with matching ref_id");
+        assert_eq!(
+            results.len(),
+            2,
+            "should find 2 entities with matching ref_id"
+        );
         assert!(results.iter().all(|e| e.ref_id == target_ref));
     }
 
@@ -659,23 +663,27 @@ mod tests {
         let entity = ExtendedTestEntity::new("Timed", Uuid::new_v4());
         let created_rfc3339 = entity.created_at.to_rfc3339();
 
-        service
-            .create(entity)
-            .await
-            .expect("create should succeed");
+        service.create(entity).await.expect("create should succeed");
 
         let results = service
             .search("created_at", &created_rfc3339)
             .await
             .expect("search by created_at should succeed");
-        assert_eq!(results.len(), 1, "should find entity by its created_at timestamp");
+        assert_eq!(
+            results.len(),
+            1,
+            "should find entity by its created_at timestamp"
+        );
         assert_eq!(results[0].entity_name, "Timed");
     }
 
     #[tokio::test]
     async fn test_data_default_creates_empty_service() {
         let service = InMemoryDataService::<TestDataEntity>::default();
-        let all = service.list().await.expect("list should succeed on default service");
+        let all = service
+            .list()
+            .await
+            .expect("list should succeed on default service");
         assert!(all.is_empty(), "default service should start empty");
     }
 

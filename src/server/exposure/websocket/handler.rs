@@ -210,8 +210,7 @@ mod tests {
         let manager = ConnectionManager::new(test_host());
         let (conn_id, mut rx) = manager.connect().await;
 
-        let subscribe_json =
-            r#"{"type":"subscribe","filter":{"entity_type":"order"}}"#;
+        let subscribe_json = r#"{"type":"subscribe","filter":{"entity_type":"order"}}"#;
         handle_client_message(&manager, &conn_id, subscribe_json).await;
 
         let msg = rx.try_recv().expect("should receive Subscribed");
@@ -246,10 +245,7 @@ mod tests {
             .expect("subscribe should succeed");
 
         // Now unsubscribe via message handler
-        let unsub_json = format!(
-            r#"{{"type":"unsubscribe","subscription_id":"{}"}}"#,
-            sub_id
-        );
+        let unsub_json = format!(r#"{{"type":"unsubscribe","subscription_id":"{}"}}"#, sub_id);
         handle_client_message(&manager, &conn_id, &unsub_json).await;
 
         let msg = rx.try_recv().expect("should receive Unsubscribed");
@@ -266,8 +262,7 @@ mod tests {
         let manager = ConnectionManager::new(test_host());
         let (conn_id, mut rx) = manager.connect().await;
 
-        let unsub_json =
-            r#"{"type":"unsubscribe","subscription_id":"sub_does_not_exist"}"#;
+        let unsub_json = r#"{"type":"unsubscribe","subscription_id":"sub_does_not_exist"}"#;
         handle_client_message(&manager, &conn_id, unsub_json).await;
 
         let msg = rx.try_recv().expect("should receive Error");

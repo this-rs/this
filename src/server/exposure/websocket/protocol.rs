@@ -535,8 +535,7 @@ mod tests {
             connection_id: "conn_abc123".to_string(),
         };
 
-        let json_str =
-            serde_json::to_string(&msg).expect("Welcome should serialize");
+        let json_str = serde_json::to_string(&msg).expect("Welcome should serialize");
         let deserialized: ServerMessage =
             serde_json::from_str(&json_str).expect("Welcome should deserialize");
 
@@ -560,8 +559,7 @@ mod tests {
             },
         };
 
-        let json_str =
-            serde_json::to_string(&msg).expect("Subscribed should serialize");
+        let json_str = serde_json::to_string(&msg).expect("Subscribed should serialize");
         let deserialized: ServerMessage =
             serde_json::from_str(&json_str).expect("Subscribed should deserialize");
 

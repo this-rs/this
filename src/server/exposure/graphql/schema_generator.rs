@@ -348,7 +348,7 @@ mod tests {
     #[cfg(feature = "graphql")]
     #[test]
     fn test_json_type_to_graphql_float() {
-        let val = serde_json::json!(3.14);
+        let val = serde_json::json!(3.15);
         assert_eq!(SchemaGenerator::json_type_to_graphql(&val), "Float");
     }
 
@@ -393,12 +393,16 @@ mod tests {
         let fields = SchemaGenerator::extract_fields_from_json(&json);
         assert_eq!(fields.len(), 3);
 
-        let id_field = fields.iter().find(|f| f.name == "id")
+        let id_field = fields
+            .iter()
+            .find(|f| f.name == "id")
             .expect("should have 'id' field");
         assert_eq!(id_field.graphql_type, "String");
         assert!(!id_field.nullable);
 
-        let active_field = fields.iter().find(|f| f.name == "active")
+        let active_field = fields
+            .iter()
+            .find(|f| f.name == "active")
             .expect("should have 'active' field");
         assert_eq!(active_field.graphql_type, "Boolean");
     }
@@ -411,7 +415,9 @@ mod tests {
             "metadata": {"key": "value"}
         });
         let fields = SchemaGenerator::extract_fields_from_json(&json);
-        let meta_field = fields.iter().find(|f| f.name == "metadata")
+        let meta_field = fields
+            .iter()
+            .find(|f| f.name == "metadata")
             .expect("should have 'metadata' field");
         assert_eq!(meta_field.graphql_type, "JSON");
     }
@@ -440,7 +446,9 @@ mod tests {
             "deleted_at": null
         });
         let fields = SchemaGenerator::extract_fields_from_json(&json);
-        let deleted_field = fields.iter().find(|f| f.name == "deleted_at")
+        let deleted_field = fields
+            .iter()
+            .find(|f| f.name == "deleted_at")
             .expect("should have 'deleted_at' field");
         assert!(deleted_field.nullable);
         assert_eq!(deleted_field.graphql_type, "String");
@@ -462,9 +470,9 @@ mod tests {
     #[cfg(feature = "graphql")]
     use crate::config::{EntityAuthConfig, EntityConfig, LinksConfig};
     #[cfg(feature = "graphql")]
-    use crate::core::link::LinkDefinition;
-    #[cfg(feature = "graphql")]
     use crate::core::EntityFetcher;
+    #[cfg(feature = "graphql")]
+    use crate::core::link::LinkDefinition;
     #[cfg(feature = "graphql")]
     use crate::server::entity_registry::{EntityDescriptor, EntityRegistry};
     #[cfg(feature = "graphql")]
@@ -676,17 +684,20 @@ mod tests {
             "invoice should have both forward and reverse relations"
         );
         let names: Vec<&str> = rels.iter().map(|r| r.name.as_str()).collect();
-        assert!(names.contains(&"parent_order"), "should have reverse to order");
-        assert!(names.contains(&"payments"), "should have forward to payment");
+        assert!(
+            names.contains(&"parent_order"),
+            "should have reverse to order"
+        );
+        assert!(
+            names.contains(&"payments"),
+            "should have forward to payment"
+        );
     }
 
     #[cfg(feature = "graphql")]
     #[test]
     fn test_get_relations_for_none() {
-        let host = build_host_with_links(
-            vec![("order", "orders", None)],
-            vec![],
-        );
+        let host = build_host_with_links(vec![("order", "orders", None)], vec![]);
         let generator = SchemaGenerator::new(host);
 
         let rels = generator.get_relations_for("order");
@@ -700,10 +711,7 @@ mod tests {
     #[cfg(feature = "graphql")]
     #[test]
     fn test_get_plural_known_entity() {
-        let host = build_host_with_links(
-            vec![("order", "orders", None)],
-            vec![],
-        );
+        let host = build_host_with_links(vec![("order", "orders", None)], vec![]);
         let generator = SchemaGenerator::new(host);
         assert_eq!(generator.get_plural("order"), "orders");
     }
@@ -711,10 +719,7 @@ mod tests {
     #[cfg(feature = "graphql")]
     #[test]
     fn test_get_plural_unknown_entity_uses_fallback() {
-        let host = build_host_with_links(
-            vec![("order", "orders", None)],
-            vec![],
-        );
+        let host = build_host_with_links(vec![("order", "orders", None)], vec![]);
         let generator = SchemaGenerator::new(host);
         assert_eq!(generator.get_plural("widget"), "widgets");
     }
@@ -733,8 +738,14 @@ mod tests {
         let generator = SchemaGenerator::new(host);
         let query_root = generator.generate_query_root();
 
-        assert!(query_root.contains("type Query {"), "should start with type Query");
-        assert!(query_root.contains("order(id: ID!): Order"), "should have singular query");
+        assert!(
+            query_root.contains("type Query {"),
+            "should start with type Query"
+        );
+        assert!(
+            query_root.contains("order(id: ID!): Order"),
+            "should have singular query"
+        );
         assert!(
             query_root.contains("orders(limit: Int, offset: Int): [Order!]!"),
             "should have plural query"
@@ -770,7 +781,10 @@ mod tests {
         let generator = SchemaGenerator::new(host);
         let mutation_root = generator.generate_mutation_root();
 
-        assert!(mutation_root.contains("type Mutation {"), "should start with type Mutation");
+        assert!(
+            mutation_root.contains("type Mutation {"),
+            "should start with type Mutation"
+        );
         assert!(
             mutation_root.contains("createOrder(data: JSON!): Order!"),
             "should have createOrder"
@@ -784,7 +798,9 @@ mod tests {
             "should have deleteOrder"
         );
         assert!(
-            mutation_root.contains("createLink(sourceId: ID!, targetId: ID!, linkType: String!, metadata: JSON): Link!"),
+            mutation_root.contains(
+                "createLink(sourceId: ID!, targetId: ID!, linkType: String!, metadata: JSON): Link!"
+            ),
             "should have generic createLink"
         );
         assert!(
@@ -833,8 +849,16 @@ mod tests {
 
         let host = build_host_with_links(
             vec![
-                ("order", "orders", Some(Arc::new(MockFetcher::with_sample(order_sample)))),
-                ("invoice", "invoices", Some(Arc::new(MockFetcher::with_sample(serde_json::json!({}))))),
+                (
+                    "order",
+                    "orders",
+                    Some(Arc::new(MockFetcher::with_sample(order_sample))),
+                ),
+                (
+                    "invoice",
+                    "invoices",
+                    Some(Arc::new(MockFetcher::with_sample(serde_json::json!({})))),
+                ),
             ],
             vec![link],
         );
@@ -843,10 +867,7 @@ mod tests {
         let sdl = generator.generate_sdl().await;
 
         // Verify schema structure
-        assert!(
-            sdl.contains("schema {"),
-            "should have schema definition"
-        );
+        assert!(sdl.contains("schema {"), "should have schema definition");
         assert!(
             sdl.contains("query: Query"),
             "schema should reference Query"

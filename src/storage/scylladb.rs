@@ -821,7 +821,10 @@ mod tests {
             FieldValue::Integer(i) => i.to_string() == "42",
             _ => false,
         };
-        assert!(matches, "FieldValue::Integer(42).to_string() should equal \"42\"");
+        assert!(
+            matches,
+            "FieldValue::Integer(42).to_string() should equal \"42\""
+        );
 
         // Negative case
         let no_match = match &fv {

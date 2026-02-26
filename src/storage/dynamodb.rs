@@ -794,9 +794,15 @@ mod tests {
 
         let mut item = HashMap::new();
         item.insert("id".to_string(), AttributeValue::S(id.to_string()));
-        item.insert("type".to_string(), AttributeValue::S("test_item".to_string()));
+        item.insert(
+            "type".to_string(),
+            AttributeValue::S("test_item".to_string()),
+        );
         item.insert("name".to_string(), AttributeValue::S("Alpha".to_string()));
-        item.insert("status".to_string(), AttributeValue::S("active".to_string()));
+        item.insert(
+            "status".to_string(),
+            AttributeValue::S("active".to_string()),
+        );
         item.insert("created_at".to_string(), AttributeValue::S(now.clone()));
         item.insert("updated_at".to_string(), AttributeValue::S(now.clone()));
         item.insert("quantity".to_string(), AttributeValue::N("10".to_string()));
@@ -814,9 +820,15 @@ mod tests {
 
         let mut item = HashMap::new();
         item.insert("id".to_string(), AttributeValue::S(id.to_string()));
-        item.insert("type".to_string(), AttributeValue::S("test_item".to_string()));
+        item.insert(
+            "type".to_string(),
+            AttributeValue::S("test_item".to_string()),
+        );
         item.insert("name".to_string(), AttributeValue::S("Beta".to_string()));
-        item.insert("status".to_string(), AttributeValue::S("active".to_string()));
+        item.insert(
+            "status".to_string(),
+            AttributeValue::S("active".to_string()),
+        );
         item.insert("created_at".to_string(), AttributeValue::S(now.clone()));
         item.insert("updated_at".to_string(), AttributeValue::S(now.clone()));
         item.insert("quantity".to_string(), AttributeValue::N("55".to_string()));
@@ -837,9 +849,15 @@ mod tests {
 
         let mut item = HashMap::new();
         item.insert("id".to_string(), AttributeValue::S(id.to_string()));
-        item.insert("type".to_string(), AttributeValue::S("test_item".to_string()));
+        item.insert(
+            "type".to_string(),
+            AttributeValue::S("test_item".to_string()),
+        );
         item.insert("name".to_string(), AttributeValue::S("Gamma".to_string()));
-        item.insert("status".to_string(), AttributeValue::S("active".to_string()));
+        item.insert(
+            "status".to_string(),
+            AttributeValue::S("active".to_string()),
+        );
         item.insert("created_at".to_string(), AttributeValue::S(now.clone()));
         item.insert("updated_at".to_string(), AttributeValue::S(now.clone()));
         item.insert("quantity".to_string(), AttributeValue::N("0".to_string()));
@@ -921,10 +939,16 @@ mod tests {
         let mut item = HashMap::new();
         item.insert("id".to_string(), AttributeValue::S(id.to_string()));
         item.insert("type".to_string(), AttributeValue::S("link".to_string()));
-        item.insert("link_type".to_string(), AttributeValue::S("owns".to_string()));
+        item.insert(
+            "link_type".to_string(),
+            AttributeValue::S("owns".to_string()),
+        );
         item.insert("source_id".to_string(), AttributeValue::S(src.to_string()));
         item.insert("target_id".to_string(), AttributeValue::S(tgt.to_string()));
-        item.insert("status".to_string(), AttributeValue::S("active".to_string()));
+        item.insert(
+            "status".to_string(),
+            AttributeValue::S("active".to_string()),
+        );
         item.insert("created_at".to_string(), AttributeValue::S(now.clone()));
         item.insert("updated_at".to_string(), AttributeValue::S(now.clone()));
 
@@ -950,10 +974,16 @@ mod tests {
         let mut item = HashMap::new();
         item.insert("id".to_string(), AttributeValue::S(id.to_string()));
         item.insert("type".to_string(), AttributeValue::S("link".to_string()));
-        item.insert("link_type".to_string(), AttributeValue::S("works_at".to_string()));
+        item.insert(
+            "link_type".to_string(),
+            AttributeValue::S("works_at".to_string()),
+        );
         item.insert("source_id".to_string(), AttributeValue::S(src.to_string()));
         item.insert("target_id".to_string(), AttributeValue::S(tgt.to_string()));
-        item.insert("status".to_string(), AttributeValue::S("active".to_string()));
+        item.insert(
+            "status".to_string(),
+            AttributeValue::S("active".to_string()),
+        );
         item.insert("created_at".to_string(), AttributeValue::S(now.clone()));
         item.insert("updated_at".to_string(), AttributeValue::S(now.clone()));
         // metadata stored as a JSON string in DynamoDB
@@ -964,7 +994,9 @@ mod tests {
 
         let link = svc.item_to_link(&item).await.unwrap();
 
-        let meta = link.metadata.expect("metadata should be Some after parsing");
+        let meta = link
+            .metadata
+            .expect("metadata should be Some after parsing");
         assert_eq!(meta["role"], "admin");
         assert_eq!(meta["level"], 5);
     }

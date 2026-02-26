@@ -95,12 +95,12 @@ fn get_entity_type_from_singular<'a>(
 #[cfg(test)]
 #[cfg(feature = "graphql")]
 mod tests {
+    use super::super::core::GraphQLExecutor;
     use super::*;
     use crate::config::{EntityAuthConfig, EntityConfig, LinksConfig};
-    use crate::core::link::LinkDefinition;
     use crate::core::EntityFetcher;
+    use crate::core::link::LinkDefinition;
     use crate::server::entity_registry::{EntityDescriptor, EntityRegistry};
-    use super::super::core::GraphQLExecutor;
     use crate::server::host::ServerHost;
     use crate::storage::in_memory::InMemoryLinkService;
     use async_trait::async_trait;
@@ -188,9 +188,7 @@ mod tests {
         }
     }
 
-    fn build_test_host(
-        fetchers: HashMap<String, Arc<dyn EntityFetcher>>,
-    ) -> Arc<ServerHost> {
+    fn build_test_host(fetchers: HashMap<String, Arc<dyn EntityFetcher>>) -> Arc<ServerHost> {
         let link_service = Arc::new(InMemoryLinkService::new());
         let config = LinksConfig {
             entities: vec![
@@ -318,7 +316,10 @@ mod tests {
             .get("data")
             .and_then(|d| d.get("order"))
             .expect("should have order");
-        assert!(order_result.is_object(), "singular query should return object");
+        assert!(
+            order_result.is_object(),
+            "singular query should return object"
+        );
         assert_eq!(
             order_result.get("id").and_then(|v| v.as_str()),
             Some(order_id.to_string()).as_deref()
@@ -353,9 +354,7 @@ mod tests {
         let host = build_test_host(fetchers);
         let executor = GraphQLExecutor::new(host).await;
 
-        let result = executor
-            .execute("{ unknownEntity { id } }", None)
-            .await;
+        let result = executor.execute("{ unknownEntity { id } }", None).await;
         assert!(result.is_err(), "unknown field should return error");
         let err_msg = result.expect_err("error").to_string();
         assert!(
@@ -405,10 +404,7 @@ mod tests {
             build_test_host(fetchers)
         };
 
-        assert_eq!(
-            get_entity_type_from_singular(&host, "order"),
-            Some("order")
-        );
+        assert_eq!(get_entity_type_from_singular(&host, "order"), Some("order"));
         assert_eq!(
             get_entity_type_from_singular(&host, "invoice"),
             Some("invoice")

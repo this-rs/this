@@ -649,7 +649,7 @@ mod tests {
 
     #[test]
     fn test_json_value_to_bolt_float() {
-        let val = json!(3.14);
+        let val = json!(3.15);
         let bolt = json_value_to_bolt(&val);
         // JSON numbers that have decimals should become Float
         assert!(
@@ -759,10 +759,10 @@ mod tests {
 
     #[test]
     fn test_parse_search_value_float() {
-        let bolt = parse_search_value("3.14");
+        let bolt = parse_search_value("3.15");
         assert!(
             matches!(bolt, BoltType::Float(_)),
-            "expected Float for '3.14', got: {:?}",
+            "expected Float for '3.15', got: {:?}",
             bolt
         );
     }

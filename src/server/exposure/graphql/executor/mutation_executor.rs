@@ -151,11 +151,11 @@ async fn delete_entity_mutation(
 #[cfg(test)]
 #[cfg(feature = "graphql")]
 mod tests {
+    use super::super::core::GraphQLExecutor;
     use crate::config::{EntityAuthConfig, EntityConfig, LinksConfig};
     use crate::core::link::LinkDefinition;
     use crate::core::{EntityCreator, EntityFetcher};
     use crate::server::entity_registry::{EntityDescriptor, EntityRegistry};
-    use super::super::core::GraphQLExecutor;
     use crate::server::host::ServerHost;
     use crate::storage::in_memory::InMemoryLinkService;
     use async_trait::async_trait;
@@ -382,9 +382,7 @@ mod tests {
         let host = build_test_host();
         let executor = GraphQLExecutor::new(host).await;
 
-        let result = executor
-            .execute(r#"mutation { deleteOrder }"#, None)
-            .await;
+        let result = executor.execute(r#"mutation { deleteOrder }"#, None).await;
         assert!(result.is_err(), "missing id should error");
     }
 
@@ -470,6 +468,10 @@ mod tests {
             .get("data")
             .and_then(|d| d.get("unlinkInvoiceFromOrder"))
             .expect("should have unlink result");
-        assert_eq!(*unlink_result, Value::Bool(false), "should return false when no link found");
+        assert_eq!(
+            *unlink_result,
+            Value::Bool(false),
+            "should return false when no link found"
+        );
     }
 }

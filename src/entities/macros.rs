@@ -802,7 +802,9 @@ mod tests {
             "alice@example.com".to_string(),
         );
 
-        let name_val = user.field_value("name").expect("field_value('name') should return Some");
+        let name_val = user
+            .field_value("name")
+            .expect("field_value('name') should return Some");
         assert_eq!(
             name_val,
             crate::core::field::FieldValue::String("Alice".to_string())
@@ -817,7 +819,9 @@ mod tests {
             "bob@example.com".to_string(),
         );
 
-        let status_val = user.field_value("status").expect("field_value('status') should return Some");
+        let status_val = user
+            .field_value("status")
+            .expect("field_value('status') should return Some");
         assert_eq!(
             status_val,
             crate::core::field::FieldValue::String("pending".to_string())

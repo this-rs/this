@@ -477,10 +477,7 @@ mod tests {
         let msg2 = rx2.try_recv().expect("conn2 should receive event");
 
         match (&msg1, &msg2) {
-            (
-                ServerMessage::Event { data: d1, .. },
-                ServerMessage::Event { data: d2, .. },
-            ) => {
+            (ServerMessage::Event { data: d1, .. }, ServerMessage::Event { data: d2, .. }) => {
                 assert_eq!(d1.id, envelope.id);
                 assert_eq!(d2.id, envelope.id);
             }
@@ -493,11 +490,7 @@ mod tests {
         let cm = ConnectionManager::new(test_host());
 
         // Sending to a nonexistent connection should not panic
-        cm.send_to(
-            "conn_does_not_exist",
-            ServerMessage::Pong,
-        )
-        .await;
+        cm.send_to("conn_does_not_exist", ServerMessage::Pong).await;
 
         // Verify manager is still functional
         assert_eq!(cm.connection_count().await, 0);
