@@ -121,3 +121,166 @@ impl ServerHost {
         self.event_bus.as_ref()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{EntityAuthConfig, EntityConfig};
+    use crate::core::link::LinkEntity;
+
+    /// Minimal mock LinkService for testing
+    struct MockLinkService;
+
+    #[async_trait::async_trait]
+    impl crate::core::service::LinkService for MockLinkService {
+        async fn create(&self, link: LinkEntity) -> anyhow::Result<LinkEntity> {
+            Ok(link)
+        }
+        async fn get(&self, _id: &uuid::Uuid) -> anyhow::Result<Option<LinkEntity>> {
+            Ok(None)
+        }
+        async fn list(&self) -> anyhow::Result<Vec<LinkEntity>> {
+            Ok(vec![])
+        }
+        async fn find_by_source(
+            &self,
+            _source_id: &uuid::Uuid,
+            _link_type: Option<&str>,
+            _target_type: Option<&str>,
+        ) -> anyhow::Result<Vec<LinkEntity>> {
+            Ok(vec![])
+        }
+        async fn find_by_target(
+            &self,
+            _target_id: &uuid::Uuid,
+            _link_type: Option<&str>,
+            _source_type: Option<&str>,
+        ) -> anyhow::Result<Vec<LinkEntity>> {
+            Ok(vec![])
+        }
+        async fn update(&self, _id: &uuid::Uuid, link: LinkEntity) -> anyhow::Result<LinkEntity> {
+            Ok(link)
+        }
+        async fn delete(&self, _id: &uuid::Uuid) -> anyhow::Result<()> {
+            Ok(())
+        }
+        async fn delete_by_entity(&self, _entity_id: &uuid::Uuid) -> anyhow::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn test_config() -> LinksConfig {
+        LinksConfig {
+            entities: vec![EntityConfig {
+                singular: "order".to_string(),
+                plural: "orders".to_string(),
+                auth: EntityAuthConfig::default(),
+            }],
+            links: vec![],
+            validation_rules: None,
+        }
+    }
+
+    fn make_host() -> ServerHost {
+        ServerHost::from_builder_components(
+            Arc::new(MockLinkService),
+            test_config(),
+            EntityRegistry::new(),
+            HashMap::new(),
+            HashMap::new(),
+        )
+        .expect("should build host")
+    }
+
+    #[test]
+    fn test_from_builder_components_creates_host() {
+        let host = make_host();
+        assert!(host.event_bus.is_none());
+    }
+
+    #[test]
+    fn test_entity_types_empty_registry() {
+        let host = make_host();
+        assert!(host.entity_types().is_empty());
+    }
+
+    #[test]
+    fn test_is_ready_no_fetchers_returns_false() {
+        let host = make_host();
+        assert!(!host.is_ready());
+    }
+
+    #[test]
+    fn test_with_event_bus_sets_bus() {
+        let host = make_host();
+        let bus = EventBus::new(16);
+        let host = host.with_event_bus(bus);
+        assert!(host.event_bus().is_some());
+    }
+
+    #[test]
+    fn test_event_bus_none_by_default() {
+        let host = make_host();
+        assert!(host.event_bus().is_none());
+    }
+
+    #[test]
+    fn test_config_accessible_from_host() {
+        let host = make_host();
+        assert_eq!(host.config.entities.len(), 1);
+        assert_eq!(host.config.entities[0].singular, "order");
+    }
+
+    #[test]
+    fn test_registry_built_from_config() {
+        let host = make_host();
+        // Registry should exist and be built from config
+        let routes = host.registry.list_routes_for_entity("order");
+        // No links → no routes, but it shouldn't panic
+        assert!(routes.is_empty());
+    }
+
+    #[test]
+    fn test_is_ready_with_fetchers_returns_true() {
+        use crate::core::EntityFetcher;
+
+        struct StubFetcher;
+
+        #[async_trait::async_trait]
+        impl EntityFetcher for StubFetcher {
+            async fn fetch_as_json(
+                &self,
+                _entity_id: &uuid::Uuid,
+            ) -> anyhow::Result<serde_json::Value> {
+                Ok(serde_json::json!({}))
+            }
+        }
+
+        let mut fetchers: HashMap<String, Arc<dyn EntityFetcher>> = HashMap::new();
+        fetchers.insert("order".to_string(), Arc::new(StubFetcher));
+
+        let host = ServerHost::from_builder_components(
+            Arc::new(MockLinkService),
+            test_config(),
+            EntityRegistry::new(),
+            fetchers,
+            HashMap::new(),
+        )
+        .expect("should build host");
+
+        assert!(host.is_ready());
+    }
+
+    #[test]
+    fn test_entity_creators_accessible() {
+        let host = make_host();
+        assert!(host.entity_creators.is_empty());
+    }
+
+    #[test]
+    fn test_link_service_accessible() {
+        let host = make_host();
+        // link_service should be accessible (Arc<dyn LinkService>)
+        let _ = host.link_service.clone();
+    }
+}

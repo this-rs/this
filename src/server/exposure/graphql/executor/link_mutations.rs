@@ -239,3 +239,547 @@ pub async fn unlink_entities_mutation(
 
     Ok(Value::Bool(false))
 }
+
+#[cfg(test)]
+#[cfg(feature = "graphql")]
+mod tests {
+    use super::super::core::GraphQLExecutor;
+    use crate::config::{EntityAuthConfig, EntityConfig, LinksConfig};
+    use crate::core::link::{LinkDefinition, LinkEntity};
+    use crate::core::service::LinkService;
+    use crate::core::{EntityCreator, EntityFetcher};
+    use crate::server::entity_registry::{EntityDescriptor, EntityRegistry};
+    use crate::server::host::ServerHost;
+    use crate::storage::in_memory::InMemoryLinkService;
+    use async_trait::async_trait;
+    use axum::Router;
+    use serde_json::{Value, json};
+    use std::collections::HashMap;
+    use std::sync::Arc;
+    use uuid::Uuid;
+
+    // -----------------------------------------------------------------------
+    // Mock infrastructure
+    // -----------------------------------------------------------------------
+
+    struct MockFetcher;
+
+    #[async_trait]
+    impl EntityFetcher for MockFetcher {
+        async fn fetch_as_json(&self, _entity_id: &Uuid) -> anyhow::Result<Value> {
+            Ok(json!({}))
+        }
+    }
+
+    struct MockCreator;
+
+    #[async_trait]
+    impl EntityCreator for MockCreator {
+        async fn create_from_json(&self, mut data: Value) -> anyhow::Result<Value> {
+            let id = Uuid::new_v4();
+            if let Some(obj) = data.as_object_mut() {
+                obj.insert("id".to_string(), json!(id.to_string()));
+            }
+            Ok(data)
+        }
+
+        async fn update_from_json(
+            &self,
+            entity_id: &Uuid,
+            mut data: Value,
+        ) -> anyhow::Result<Value> {
+            if let Some(obj) = data.as_object_mut() {
+                obj.insert("id".to_string(), json!(entity_id.to_string()));
+            }
+            Ok(data)
+        }
+
+        async fn delete(&self, _entity_id: &Uuid) -> anyhow::Result<()> {
+            Ok(())
+        }
+    }
+
+    struct StubDescriptor {
+        entity_type: String,
+        plural: String,
+    }
+
+    impl StubDescriptor {
+        fn new(singular: &str, plural: &str) -> Self {
+            Self {
+                entity_type: singular.to_string(),
+                plural: plural.to_string(),
+            }
+        }
+    }
+
+    impl EntityDescriptor for StubDescriptor {
+        fn entity_type(&self) -> &str {
+            &self.entity_type
+        }
+        fn plural(&self) -> &str {
+            &self.plural
+        }
+        fn build_routes(&self) -> Router {
+            Router::new()
+        }
+    }
+
+    fn build_test_host_with_link_service(
+        link_service: Arc<InMemoryLinkService>,
+    ) -> Arc<ServerHost> {
+        let config = LinksConfig {
+            entities: vec![
+                EntityConfig {
+                    singular: "order".to_string(),
+                    plural: "orders".to_string(),
+                    auth: EntityAuthConfig::default(),
+                },
+                EntityConfig {
+                    singular: "invoice".to_string(),
+                    plural: "invoices".to_string(),
+                    auth: EntityAuthConfig::default(),
+                },
+            ],
+            links: vec![LinkDefinition {
+                link_type: "has_invoice".to_string(),
+                source_type: "order".to_string(),
+                target_type: "invoice".to_string(),
+                forward_route_name: "invoices".to_string(),
+                reverse_route_name: "order".to_string(),
+                description: None,
+                required_fields: None,
+                auth: None,
+            }],
+            validation_rules: None,
+        };
+
+        let mut registry = EntityRegistry::new();
+        registry.register(Box::new(StubDescriptor::new("order", "orders")));
+        registry.register(Box::new(StubDescriptor::new("invoice", "invoices")));
+
+        let mut fetchers: HashMap<String, Arc<dyn EntityFetcher>> = HashMap::new();
+        fetchers.insert("order".to_string(), Arc::new(MockFetcher));
+        fetchers.insert("invoice".to_string(), Arc::new(MockFetcher));
+
+        let mut creators: HashMap<String, Arc<dyn EntityCreator>> = HashMap::new();
+        creators.insert("order".to_string(), Arc::new(MockCreator));
+        creators.insert("invoice".to_string(), Arc::new(MockCreator));
+
+        Arc::new(
+            ServerHost::from_builder_components(link_service, config, registry, fetchers, creators)
+                .expect("should build test host"),
+        )
+    }
+
+    fn default_host() -> (Arc<ServerHost>, Arc<InMemoryLinkService>) {
+        let link_service = Arc::new(InMemoryLinkService::new());
+        let host = build_test_host_with_link_service(link_service.clone());
+        (host, link_service)
+    }
+
+    // -----------------------------------------------------------------------
+    // create_link_mutation tests (via executor)
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_create_link_mutation_success() {
+        let (host, _) = default_host();
+        let executor = GraphQLExecutor::new(host).await;
+        let source_id = Uuid::new_v4();
+        let target_id = Uuid::new_v4();
+
+        let query = format!(
+            r#"mutation {{ createLink(sourceId: "{}", targetId: "{}", linkType: "has_invoice") {{ id }} }}"#,
+            source_id, target_id
+        );
+        let result = executor
+            .execute(&query, None)
+            .await
+            .expect("should create link");
+
+        let link_result = result
+            .get("data")
+            .and_then(|d| d.get("createLink"))
+            .expect("should have createLink");
+        assert!(link_result.get("id").is_some(), "should have id");
+    }
+
+    #[tokio::test]
+    async fn test_create_link_mutation_missing_source_id() {
+        let (host, _) = default_host();
+        let executor = GraphQLExecutor::new(host).await;
+        let target_id = Uuid::new_v4();
+
+        let query = format!(
+            r#"mutation {{ createLink(targetId: "{}", linkType: "has_invoice") {{ id }} }}"#,
+            target_id
+        );
+        let result = executor.execute(&query, None).await;
+        assert!(result.is_err(), "missing sourceId should error");
+        let err_msg = result.expect_err("error").to_string();
+        assert!(
+            err_msg.contains("sourceId"),
+            "should mention sourceId: {}",
+            err_msg
+        );
+    }
+
+    #[tokio::test]
+    async fn test_create_link_mutation_missing_link_type() {
+        let (host, _) = default_host();
+        let executor = GraphQLExecutor::new(host).await;
+        let source_id = Uuid::new_v4();
+        let target_id = Uuid::new_v4();
+
+        let query = format!(
+            r#"mutation {{ createLink(sourceId: "{}", targetId: "{}") {{ id }} }}"#,
+            source_id, target_id
+        );
+        let result = executor.execute(&query, None).await;
+        assert!(result.is_err(), "missing linkType should error");
+        let err_msg = result.expect_err("error").to_string();
+        assert!(
+            err_msg.contains("linkType"),
+            "should mention linkType: {}",
+            err_msg
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // delete_link_mutation tests
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_delete_link_mutation_direct_call() {
+        // Note: deleteLink via executor gets caught by the "delete*" prefix check
+        // and routes to delete_entity_mutation instead of delete_link_mutation.
+        // So we test delete_link_mutation directly using a manually constructed Field.
+        use super::delete_link_mutation;
+        use graphql_parser::Pos;
+        use graphql_parser::query::{SelectionSet, Value as GqlValue};
+
+        let (host, link_service) = default_host();
+
+        // Create a link first
+        let link = LinkEntity::new("has_invoice", Uuid::new_v4(), Uuid::new_v4(), None);
+        let created = link_service.create(link).await.expect("should create link");
+
+        let pos = Pos { line: 1, column: 1 };
+        let field = graphql_parser::query::Field {
+            position: pos,
+            alias: None,
+            name: "deleteLink".to_string(),
+            arguments: vec![("id".to_string(), GqlValue::String(created.id.to_string()))],
+            directives: vec![],
+            selection_set: SelectionSet {
+                span: (pos, pos),
+                items: vec![],
+            },
+        };
+
+        let result = delete_link_mutation(&host, &field)
+            .await
+            .expect("should delete link");
+        assert_eq!(result, Value::Bool(true));
+    }
+
+    #[tokio::test]
+    async fn test_delete_link_mutation_missing_id_direct_call() {
+        use super::delete_link_mutation;
+        use graphql_parser::Pos;
+        use graphql_parser::query::SelectionSet;
+
+        let (host, _) = default_host();
+
+        let pos = Pos { line: 1, column: 1 };
+        let field = graphql_parser::query::Field {
+            position: pos,
+            alias: None,
+            name: "deleteLink".to_string(),
+            arguments: vec![],
+            directives: vec![],
+            selection_set: SelectionSet {
+                span: (pos, pos),
+                items: vec![],
+            },
+        };
+
+        let result = delete_link_mutation(&host, &field).await;
+        assert!(result.is_err(), "missing id should error");
+    }
+
+    // -----------------------------------------------------------------------
+    // create_and_link_mutation tests
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_create_and_link_mutation_success() {
+        let (host, link_service) = default_host();
+        let executor = GraphQLExecutor::new(host).await;
+        let parent_id = Uuid::new_v4();
+
+        let query = format!(
+            r#"mutation {{ createInvoiceForOrder(parentId: "{}", data: {{amount: 100}}) {{ id }} }}"#,
+            parent_id
+        );
+        let result = executor
+            .execute(&query, None)
+            .await
+            .expect("should create and link");
+
+        let created = result
+            .get("data")
+            .and_then(|d| d.get("createInvoiceForOrder"))
+            .expect("should have createInvoiceForOrder");
+        assert!(created.get("id").is_some(), "created entity should have id");
+
+        // Verify the link was created
+        let links = link_service
+            .find_by_source(&parent_id, Some("has_invoice"), None)
+            .await
+            .expect("should find links");
+        assert_eq!(links.len(), 1, "should have one link from parent");
+    }
+
+    #[tokio::test]
+    async fn test_create_and_link_mutation_missing_parent_id() {
+        let (host, _) = default_host();
+        let executor = GraphQLExecutor::new(host).await;
+
+        let result = executor
+            .execute(
+                r#"mutation { createInvoiceForOrder(data: {amount: 100}) { id } }"#,
+                None,
+            )
+            .await;
+        assert!(result.is_err(), "missing parentId should error");
+        let err_msg = result.expect_err("error").to_string();
+        assert!(
+            err_msg.contains("parentId"),
+            "should mention parentId: {}",
+            err_msg
+        );
+    }
+
+    #[tokio::test]
+    async fn test_create_and_link_mutation_missing_data() {
+        let (host, _) = default_host();
+        let executor = GraphQLExecutor::new(host).await;
+        let parent_id = Uuid::new_v4();
+
+        let query = format!(
+            r#"mutation {{ createInvoiceForOrder(parentId: "{}") {{ id }} }}"#,
+            parent_id
+        );
+        let result = executor.execute(&query, None).await;
+        assert!(result.is_err(), "missing data should error");
+    }
+
+    #[tokio::test]
+    async fn test_create_and_link_mutation_unknown_entity_type() {
+        let (host, _) = default_host();
+        let executor = GraphQLExecutor::new(host).await;
+        let parent_id = Uuid::new_v4();
+
+        let query = format!(
+            r#"mutation {{ createWidgetForGadget(parentId: "{}", data: {{name: "w"}}) {{ id }} }}"#,
+            parent_id
+        );
+        let result = executor.execute(&query, None).await;
+        assert!(result.is_err(), "unknown entity type should error");
+    }
+
+    #[tokio::test]
+    async fn test_create_and_link_mutation_with_explicit_link_type() {
+        let (host, link_service) = default_host();
+        let executor = GraphQLExecutor::new(host).await;
+        let parent_id = Uuid::new_v4();
+
+        let query = format!(
+            r#"mutation {{ createInvoiceForOrder(parentId: "{}", data: {{amount: 200}}, linkType: "has_invoice") {{ id }} }}"#,
+            parent_id
+        );
+        let result = executor
+            .execute(&query, None)
+            .await
+            .expect("should succeed with explicit linkType");
+
+        let created = result
+            .get("data")
+            .and_then(|d| d.get("createInvoiceForOrder"))
+            .expect("should have result");
+        assert!(created.get("id").is_some());
+
+        let links = link_service
+            .find_by_source(&parent_id, Some("has_invoice"), None)
+            .await
+            .expect("should find links");
+        assert_eq!(links.len(), 1);
+    }
+
+    // -----------------------------------------------------------------------
+    // link_entities_mutation tests
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_link_entities_mutation_success() {
+        let (host, link_service) = default_host();
+        let executor = GraphQLExecutor::new(host).await;
+        let source_id = Uuid::new_v4();
+        let target_id = Uuid::new_v4();
+
+        // linkOrderToInvoice -> source_type="order", target_type="invoice" -> matches config
+        let query = format!(
+            r#"mutation {{ linkOrderToInvoice(sourceId: "{}", targetId: "{}") {{ id }} }}"#,
+            source_id, target_id
+        );
+        let result = executor
+            .execute(&query, None)
+            .await
+            .expect("should link entities");
+
+        let link_result = result
+            .get("data")
+            .and_then(|d| d.get("linkOrderToInvoice"))
+            .expect("should have result");
+        assert!(link_result.get("id").is_some(), "link should have id");
+
+        // Verify link in storage
+        let links = link_service
+            .find_by_source(&source_id, Some("has_invoice"), None)
+            .await
+            .expect("should find links");
+        assert_eq!(links.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_link_entities_mutation_missing_source_id() {
+        let (host, _) = default_host();
+        let executor = GraphQLExecutor::new(host).await;
+        let target_id = Uuid::new_v4();
+
+        let query = format!(
+            r#"mutation {{ linkOrderToInvoice(targetId: "{}") {{ id }} }}"#,
+            target_id
+        );
+        let result = executor.execute(&query, None).await;
+        assert!(result.is_err(), "missing sourceId should error");
+    }
+
+    #[tokio::test]
+    async fn test_link_entities_mutation_with_explicit_link_type() {
+        let (host, _) = default_host();
+        let executor = GraphQLExecutor::new(host).await;
+        let source_id = Uuid::new_v4();
+        let target_id = Uuid::new_v4();
+
+        let query = format!(
+            r#"mutation {{ linkOrderToInvoice(sourceId: "{}", targetId: "{}", linkType: "has_invoice") {{ id }} }}"#,
+            source_id, target_id
+        );
+        let result = executor
+            .execute(&query, None)
+            .await
+            .expect("should succeed with explicit linkType");
+
+        let link_result = result
+            .get("data")
+            .and_then(|d| d.get("linkOrderToInvoice"))
+            .expect("should have result");
+        assert!(link_result.get("id").is_some());
+    }
+
+    // -----------------------------------------------------------------------
+    // unlink_entities_mutation tests
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_unlink_entities_mutation_found_and_deleted() {
+        let (host, link_service) = default_host();
+        let executor = GraphQLExecutor::new(host).await;
+        let source_id = Uuid::new_v4();
+        let target_id = Uuid::new_v4();
+
+        // Create a link first
+        let link = LinkEntity::new("has_invoice", source_id, target_id, None);
+        link_service.create(link).await.expect("should create link");
+
+        // unlinkOrderFromInvoice -> source_type="order", target_type="invoice"
+        // find_link_type("order", "invoice") -> "has_invoice"
+        // find_by_source(source_id, "has_invoice", "invoice")
+        let query = format!(
+            r#"mutation {{ unlinkOrderFromInvoice(sourceId: "{}", targetId: "{}") }}"#,
+            source_id, target_id
+        );
+        let result = executor
+            .execute(&query, None)
+            .await
+            .expect("should succeed");
+
+        let unlink_result = result
+            .get("data")
+            .and_then(|d| d.get("unlinkOrderFromInvoice"))
+            .expect("should have result");
+        assert_eq!(
+            *unlink_result,
+            Value::Bool(true),
+            "should return true when link found and deleted"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_unlink_entities_mutation_no_link_found() {
+        let (host, _) = default_host();
+        let executor = GraphQLExecutor::new(host).await;
+        let source_id = Uuid::new_v4();
+        let target_id = Uuid::new_v4();
+
+        let query = format!(
+            r#"mutation {{ unlinkOrderFromInvoice(sourceId: "{}", targetId: "{}") }}"#,
+            source_id, target_id
+        );
+        let result = executor
+            .execute(&query, None)
+            .await
+            .expect("should succeed even without link");
+
+        let unlink_result = result
+            .get("data")
+            .and_then(|d| d.get("unlinkOrderFromInvoice"))
+            .expect("should have result");
+        assert_eq!(
+            *unlink_result,
+            Value::Bool(false),
+            "should return false when no link found"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_unlink_entities_mutation_missing_source_id() {
+        let (host, _) = default_host();
+        let executor = GraphQLExecutor::new(host).await;
+        let target_id = Uuid::new_v4();
+
+        let query = format!(
+            r#"mutation {{ unlinkOrderFromInvoice(targetId: "{}") }}"#,
+            target_id
+        );
+        let result = executor.execute(&query, None).await;
+        assert!(result.is_err(), "missing sourceId should error");
+    }
+
+    #[tokio::test]
+    async fn test_unlink_entities_mutation_missing_target_id() {
+        let (host, _) = default_host();
+        let executor = GraphQLExecutor::new(host).await;
+        let source_id = Uuid::new_v4();
+
+        let query = format!(
+            r#"mutation {{ unlinkOrderFromInvoice(sourceId: "{}") }}"#,
+            source_id
+        );
+        let result = executor.execute(&query, None).await;
+        assert!(result.is_err(), "missing targetId should error");
+    }
+}

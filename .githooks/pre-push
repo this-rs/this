@@ -1,0 +1,22 @@
+#!/bin/sh
+#
+# Pre-push hook: run cargo fmt and clippy before pushing.
+# Mirrors the CI checks to catch issues locally.
+#
+# Setup (run once after cloning):
+#   git config core.hooksPath .githooks
+#
+
+set -e
+
+echo "🔍 Running pre-push checks..."
+
+echo "── cargo fmt --check ──"
+cargo fmt --check
+echo "✅ Formatting OK"
+
+echo "── cargo clippy ──"
+cargo clippy --lib --tests --all-features -- -D warnings
+echo "✅ Clippy OK"
+
+echo "🚀 All checks passed, pushing..."

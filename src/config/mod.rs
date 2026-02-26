@@ -513,4 +513,85 @@ links:
         let rules = merged.validation_rules.unwrap();
         assert_eq!(rules["works_at"].len(), 2);
     }
+
+    #[test]
+    fn test_find_link_definition_found() {
+        let config = LinksConfig::default_config();
+
+        let def = config.find_link_definition("owner", "user", "car");
+        assert!(def.is_some(), "should find owner link from user to car");
+        let def = def.expect("link definition should exist");
+        assert_eq!(def.link_type, "owner");
+        assert_eq!(def.source_type, "user");
+        assert_eq!(def.target_type, "car");
+    }
+
+    #[test]
+    fn test_find_link_definition_not_found() {
+        let config = LinksConfig::default_config();
+
+        let def = config.find_link_definition("nonexistent", "user", "car");
+        assert!(def.is_none(), "should not find a nonexistent link type");
+
+        // Wrong source type
+        let def = config.find_link_definition("owner", "company", "car");
+        assert!(def.is_none(), "should not find link with wrong source type");
+    }
+
+    #[test]
+    fn test_is_valid_link_source_type_mismatch() {
+        let mut rules = HashMap::new();
+        rules.insert(
+            "owner".to_string(),
+            vec![ValidationRule {
+                source: "user".to_string(),
+                targets: vec!["car".to_string()],
+            }],
+        );
+
+        let config = LinksConfig {
+            entities: vec![],
+            links: vec![],
+            validation_rules: Some(rules),
+        };
+
+        // Correct combination
+        assert!(config.is_valid_link("owner", "user", "car"));
+
+        // Source type mismatch
+        assert!(
+            !config.is_valid_link("owner", "company", "car"),
+            "should reject mismatched source type"
+        );
+
+        // Target type mismatch
+        assert!(
+            !config.is_valid_link("owner", "user", "truck"),
+            "should reject mismatched target type"
+        );
+    }
+
+    #[test]
+    fn test_is_valid_link_empty_targets() {
+        let mut rules = HashMap::new();
+        rules.insert(
+            "membership".to_string(),
+            vec![ValidationRule {
+                source: "user".to_string(),
+                targets: vec![], // empty targets list
+            }],
+        );
+
+        let config = LinksConfig {
+            entities: vec![],
+            links: vec![],
+            validation_rules: Some(rules),
+        };
+
+        // With empty targets, no target type can match
+        assert!(
+            !config.is_valid_link("membership", "user", "group"),
+            "should reject when targets list is empty"
+        );
+    }
 }
