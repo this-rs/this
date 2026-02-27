@@ -18,7 +18,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Install protoc
         uses: arduino/setup-protoc@v3
@@ -43,7 +43,7 @@ jobs:
     needs: minimal-versions
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
@@ -61,7 +61,7 @@ jobs:
     needs: create-release
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
