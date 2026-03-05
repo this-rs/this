@@ -18,14 +18,22 @@
 //! - `deduplicate` — Remove duplicates within a window (see T2.3)
 //! - `rate_limit` — Throttle via token bucket (see T2.3)
 
+pub mod batch;
+pub mod deduplicate;
 pub mod deliver;
+pub mod fan_out;
 pub mod filter;
 pub mod map;
+pub mod rate_limit;
 pub mod resolve;
 
+pub use batch::BatchOp;
+pub use deduplicate::DeduplicateOp;
 pub use deliver::DeliverOp;
+pub use fan_out::FanOutOp;
 pub use filter::FilterOp;
 pub use map::MapOp;
+pub use rate_limit::RateLimitOp;
 pub use resolve::ResolveOp;
 
 use crate::events::context::FlowContext;
