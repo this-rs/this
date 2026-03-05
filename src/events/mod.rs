@@ -19,10 +19,14 @@
 //! - `InMemoryEventLog` — Default, suitable for development and single-instance
 //! - Future: NATS JetStream, Kafka, Redis Streams
 
+pub mod context;
 pub mod log;
+pub mod matcher;
 pub mod memory;
 pub mod types;
 
+pub use context::FlowContext;
 pub use log::EventLog;
+pub use matcher::EventMatcher;
 pub use memory::InMemoryEventLog;
 pub use types::*;
