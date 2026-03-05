@@ -26,6 +26,7 @@ pub mod matcher;
 pub mod memory;
 pub mod operators;
 pub mod runtime;
+pub mod sinks;
 pub mod types;
 
 pub use compiler::{compile_flow, compile_flows, CompiledFlow};
@@ -34,4 +35,5 @@ pub use log::EventLog;
 pub use matcher::EventMatcher;
 pub use memory::InMemoryEventLog;
 pub use runtime::FlowRuntime;
+pub use sinks::{InAppNotificationSink, Sink, SinkRegistry};
 pub use types::*;
