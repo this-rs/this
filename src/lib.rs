@@ -54,6 +54,7 @@
 pub mod config;
 pub mod core;
 pub mod entities;
+pub mod events;
 pub mod links;
 pub mod server;
 pub mod storage;
