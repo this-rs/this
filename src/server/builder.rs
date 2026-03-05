@@ -364,6 +364,8 @@ mod tests {
                     }],
                     links: vec![],
                     validation_rules: None,
+                    events: None,
+                    sinks: None,
                 },
             }
         }
@@ -396,6 +398,8 @@ mod tests {
                         auth: None,
                     }],
                     validation_rules: None,
+                    events: None,
+                    sinks: None,
                 },
             }
         }

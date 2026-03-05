@@ -178,6 +178,8 @@ mod tests {
             }],
             links: vec![],
             validation_rules: None,
+            events: None,
+            sinks: None,
         }
     }
 

@@ -107,7 +107,10 @@ pub mod prelude {
     pub use crate::storage::{ScyllaDataService, ScyllaLinkService};
 
     // === Config ===
-    pub use crate::config::{EntityAuthConfig, EntityConfig, LinksConfig, ValidationRule};
+    pub use crate::config::{
+        EntityAuthConfig, EntityConfig, EventsConfig, LinksConfig, SinkConfig, SinkType,
+        ValidationRule,
+    };
 
     // === Server ===
     pub use crate::server::{EntityDescriptor, EntityRegistry, ServerBuilder};

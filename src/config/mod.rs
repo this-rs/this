@@ -1,9 +1,15 @@
 //! Configuration loading and management
 
+pub mod events;
+pub mod sinks;
+
 use crate::core::LinkDefinition;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+
+pub use events::*;
+pub use sinks::*;
 
 /// Authorization configuration for an entity
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -96,6 +102,14 @@ pub struct LinksConfig {
     /// Optional validation rules (link_type -> rules)
     #[serde(default)]
     pub validation_rules: Option<HashMap<String, Vec<ValidationRule>>>,
+
+    /// Optional event flow configuration (backend, flows, consumers)
+    #[serde(default)]
+    pub events: Option<EventsConfig>,
+
+    /// Optional sink configurations (notification destinations)
+    #[serde(default)]
+    pub sinks: Option<Vec<SinkConfig>>,
 }
 
 impl LinksConfig {
@@ -124,6 +138,8 @@ impl LinksConfig {
                 entities: vec![],
                 links: vec![],
                 validation_rules: None,
+                events: None,
+                sinks: None,
             };
         }
 
@@ -166,6 +182,34 @@ impl LinksConfig {
             }
         }
 
+        // Merge events: last config with events wins, flows are concatenated
+        let mut merged_events: Option<EventsConfig> = None;
+        for config in &configs {
+            if let Some(events) = &config.events {
+                if let Some(ref mut existing) = merged_events {
+                    existing.flows.extend(events.flows.clone());
+                    existing.consumers.extend(events.consumers.clone());
+                } else {
+                    merged_events = Some(events.clone());
+                }
+            }
+        }
+
+        // Merge sinks: deduplicate by name (last wins)
+        let mut sinks_map: HashMap<String, SinkConfig> = HashMap::new();
+        for config in &configs {
+            if let Some(sinks) = &config.sinks {
+                for sink in sinks {
+                    sinks_map.insert(sink.name.clone(), sink.clone());
+                }
+            }
+        }
+        let merged_sinks = if sinks_map.is_empty() {
+            None
+        } else {
+            Some(sinks_map.into_values().collect())
+        };
+
         // Convert back to vectors
         let entities: Vec<EntityConfig> = entities_map.into_values().collect();
         let links: Vec<LinkDefinition> = links_map.into_values().collect();
@@ -179,6 +223,8 @@ impl LinksConfig {
             entities,
             links,
             validation_rules,
+            events: merged_events,
+            sinks: merged_sinks,
         }
     }
 
@@ -269,6 +315,8 @@ impl LinksConfig {
                 },
             ],
             validation_rules: None,
+            events: None,
+            sinks: None,
         }
     }
 }
@@ -419,6 +467,8 @@ links:
             }],
             links: vec![],
             validation_rules: None,
+            events: None,
+            sinks: None,
         };
 
         let config2 = LinksConfig {
@@ -429,6 +479,8 @@ links:
             }],
             links: vec![],
             validation_rules: None,
+            events: None,
+            sinks: None,
         };
 
         let merged = LinksConfig::merge(vec![config1, config2]);
@@ -450,6 +502,8 @@ links:
             }],
             links: vec![],
             validation_rules: None,
+            events: None,
+            sinks: None,
         };
 
         let auth2 = EntityAuthConfig {
@@ -465,6 +519,8 @@ links:
             }],
             links: vec![],
             validation_rules: None,
+            events: None,
+            sinks: None,
         };
 
         let merged = LinksConfig::merge(vec![config1, config2]);
@@ -489,6 +545,8 @@ links:
             entities: vec![],
             links: vec![],
             validation_rules: Some(rules1),
+            events: None,
+            sinks: None,
         };
 
         let mut rules2 = HashMap::new();
@@ -504,6 +562,8 @@ links:
             entities: vec![],
             links: vec![],
             validation_rules: Some(rules2),
+            events: None,
+            sinks: None,
         };
 
         let merged = LinksConfig::merge(vec![config1, config2]);
@@ -553,6 +613,8 @@ links:
             entities: vec![],
             links: vec![],
             validation_rules: Some(rules),
+            events: None,
+            sinks: None,
         };
 
         // Correct combination
@@ -586,6 +648,8 @@ links:
             entities: vec![],
             links: vec![],
             validation_rules: Some(rules),
+            events: None,
+            sinks: None,
         };
 
         // With empty targets, no target type can match
@@ -593,5 +657,202 @@ links:
             !config.is_valid_link("membership", "user", "group"),
             "should reject when targets list is empty"
         );
+    }
+
+    #[test]
+    fn test_yaml_backward_compatible_without_events() {
+        // Old-style YAML without events/sinks should still parse
+        let yaml = r#"
+entities:
+  - singular: user
+    plural: users
+links:
+  - link_type: follows
+    source_type: user
+    target_type: user
+    forward_route_name: following
+    reverse_route_name: followers
+"#;
+
+        let config = LinksConfig::from_yaml_str(yaml).unwrap();
+        assert_eq!(config.entities.len(), 1);
+        assert_eq!(config.links.len(), 1);
+        assert!(config.events.is_none());
+        assert!(config.sinks.is_none());
+    }
+
+    #[test]
+    fn test_yaml_with_events_and_sinks() {
+        let yaml = r#"
+entities:
+  - singular: user
+    plural: users
+  - singular: capture
+    plural: captures
+
+links:
+  - link_type: follows
+    source_type: user
+    target_type: user
+    forward_route_name: following
+    reverse_route_name: followers
+  - link_type: likes
+    source_type: user
+    target_type: capture
+    forward_route_name: liked-captures
+    reverse_route_name: likers
+  - link_type: owns
+    source_type: user
+    target_type: capture
+    forward_route_name: captures
+    reverse_route_name: owner
+
+events:
+  backend:
+    type: memory
+  flows:
+    - name: notify-new-follower
+      trigger:
+        kind: link.created
+        link_type: follows
+      pipeline:
+        - resolve:
+            from: source_id
+            as: follower
+        - map:
+            template:
+              type: follow
+              message: "{{ follower.name }} started following you"
+        - deliver:
+            sinks: [push-notification, in-app-notification]
+    - name: notify-like
+      trigger:
+        kind: link.created
+        link_type: likes
+      pipeline:
+        - resolve:
+            from: target_id
+            via: owns
+            direction: reverse
+            as: owner
+        - filter:
+            condition: "source_id != owner.id"
+        - batch:
+            key: target_id
+            window: 5m
+        - deliver:
+            sink: push-notification
+  consumers:
+    - name: mobile-feed
+      seek: last_acknowledged
+
+sinks:
+  - name: push-notification
+    type: push
+    config:
+      provider: expo
+  - name: in-app-notification
+    type: in_app
+    config:
+      ttl: 30d
+"#;
+
+        let config = LinksConfig::from_yaml_str(yaml).unwrap();
+
+        // Entities and links
+        assert_eq!(config.entities.len(), 2);
+        assert_eq!(config.links.len(), 3);
+
+        // Events
+        assert!(config.events.is_some());
+        let events = config.events.as_ref().unwrap();
+        assert_eq!(events.backend.backend_type, "memory");
+        assert_eq!(events.flows.len(), 2);
+        assert_eq!(events.flows[0].name, "notify-new-follower");
+        assert_eq!(events.flows[1].name, "notify-like");
+        assert_eq!(events.consumers.len(), 1);
+        assert_eq!(events.consumers[0].name, "mobile-feed");
+
+        // Sinks
+        assert!(config.sinks.is_some());
+        let sinks = config.sinks.as_ref().unwrap();
+        assert_eq!(sinks.len(), 2);
+        assert_eq!(sinks[0].name, "push-notification");
+        assert_eq!(sinks[0].sink_type, SinkType::Push);
+        assert_eq!(sinks[1].name, "in-app-notification");
+        assert_eq!(sinks[1].sink_type, SinkType::InApp);
+    }
+
+    #[test]
+    fn test_merge_configs_with_events() {
+        let config1 = LinksConfig {
+            entities: vec![EntityConfig {
+                singular: "user".to_string(),
+                plural: "users".to_string(),
+                auth: EntityAuthConfig::default(),
+            }],
+            links: vec![],
+            validation_rules: None,
+            events: Some(EventsConfig {
+                backend: BackendConfig::default(),
+                flows: vec![FlowConfig {
+                    name: "flow-a".to_string(),
+                    description: None,
+                    trigger: TriggerConfig {
+                        kind: "link.created".to_string(),
+                        link_type: Some("follows".to_string()),
+                        entity_type: None,
+                    },
+                    pipeline: vec![],
+                }],
+                consumers: vec![],
+            }),
+            sinks: Some(vec![SinkConfig {
+                name: "push".to_string(),
+                sink_type: SinkType::Push,
+                config: HashMap::new(),
+            }]),
+        };
+
+        let config2 = LinksConfig {
+            entities: vec![],
+            links: vec![],
+            validation_rules: None,
+            events: Some(EventsConfig {
+                backend: BackendConfig::default(),
+                flows: vec![FlowConfig {
+                    name: "flow-b".to_string(),
+                    description: None,
+                    trigger: TriggerConfig {
+                        kind: "entity.created".to_string(),
+                        link_type: None,
+                        entity_type: Some("user".to_string()),
+                    },
+                    pipeline: vec![],
+                }],
+                consumers: vec![ConsumerConfig {
+                    name: "mobile".to_string(),
+                    seek: SeekMode::LastAcknowledged,
+                }],
+            }),
+            sinks: Some(vec![SinkConfig {
+                name: "in-app".to_string(),
+                sink_type: SinkType::InApp,
+                config: HashMap::new(),
+            }]),
+        };
+
+        let merged = LinksConfig::merge(vec![config1, config2]);
+
+        // Events should be merged
+        let events = merged.events.unwrap();
+        assert_eq!(events.flows.len(), 2);
+        assert_eq!(events.flows[0].name, "flow-a");
+        assert_eq!(events.flows[1].name, "flow-b");
+        assert_eq!(events.consumers.len(), 1);
+
+        // Sinks should be merged (deduplicated by name)
+        let sinks = merged.sinks.unwrap();
+        assert_eq!(sinks.len(), 2);
     }
 }
