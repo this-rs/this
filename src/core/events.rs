@@ -32,8 +32,10 @@
 //! }
 //! ```
 
+use crate::events::log::EventLog;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 use tokio::sync::broadcast;
 use uuid::Uuid;
 
@@ -173,9 +175,31 @@ impl EventEnvelope {
 /// designed for exactly this kind of pub/sub pattern.
 ///
 /// The bus is cheap to clone (Arc internally) and can be shared across threads.
-#[derive(Debug, Clone)]
+///
+/// # EventLog Bridge
+///
+/// When an `EventLog` is attached via `with_event_log()`, every published event
+/// is also appended to the persistent log. The EventLog becomes the source of
+/// truth, while the broadcast channel remains the real-time notification path.
+///
+/// ```text
+/// publish(event) ──┬──▶ broadcast channel (real-time, fire-and-forget)
+///                  └──▶ EventLog.append() (persistent, replayable)
+/// ```
+#[derive(Clone)]
 pub struct EventBus {
     sender: broadcast::Sender<EventEnvelope>,
+    /// Optional persistent event log (bridge)
+    event_log: Option<Arc<dyn EventLog>>,
+}
+
+impl std::fmt::Debug for EventBus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EventBus")
+            .field("sender", &self.sender)
+            .field("has_event_log", &self.event_log.is_some())
+            .finish()
+    }
 }
 
 impl EventBus {
@@ -189,7 +213,27 @@ impl EventBus {
     /// * `capacity` - Buffer size for the broadcast channel (recommended: 1024)
     pub fn new(capacity: usize) -> Self {
         let (sender, _) = broadcast::channel(capacity);
-        Self { sender }
+        Self {
+            sender,
+            event_log: None,
+        }
+    }
+
+    /// Attach a persistent EventLog to this bus
+    ///
+    /// When set, every `publish()` call also appends the event to the log.
+    /// The append is done via `tokio::spawn` to avoid blocking the publisher.
+    ///
+    /// This enables the event flow system to consume events from the durable
+    /// log instead of the ephemeral broadcast channel.
+    pub fn with_event_log(mut self, event_log: Arc<dyn EventLog>) -> Self {
+        self.event_log = Some(event_log);
+        self
+    }
+
+    /// Get a reference to the attached EventLog, if any
+    pub fn event_log(&self) -> Option<&Arc<dyn EventLog>> {
+        self.event_log.as_ref()
     }
 
     /// Publish an event to all subscribers
@@ -198,8 +242,22 @@ impl EventBus {
     /// the event is simply dropped. If subscribers are lagging, they will
     /// receive a `Lagged` error on their next recv().
     ///
-    /// Returns the number of receivers that will receive the event.
+    /// If an EventLog is attached, the event is also appended to the log
+    /// asynchronously (fire-and-forget via tokio::spawn).
+    ///
+    /// Returns the number of broadcast receivers that will receive the event.
     pub fn publish(&self, event: FrameworkEvent) -> usize {
+        // If an EventLog is attached, append to it (non-blocking)
+        if let Some(event_log) = &self.event_log {
+            let log = event_log.clone();
+            let event_clone = event.clone();
+            tokio::spawn(async move {
+                if let Err(e) = log.append(event_clone).await {
+                    tracing::warn!("Failed to append event to EventLog: {}", e);
+                }
+            });
+        }
+
         let envelope = EventEnvelope::new(event);
         // send() returns Err only if there are no receivers, which is fine
         self.sender.send(envelope).unwrap_or(0)
@@ -497,5 +555,98 @@ mod tests {
         assert_eq!(deleted.action(), "deleted");
         assert_eq!(deleted.event_kind(), "link");
         assert_eq!(deleted.entity_id(), Some(link_id));
+    }
+
+    #[tokio::test]
+    async fn test_event_bus_without_event_log() {
+        let bus = EventBus::new(16);
+        assert!(bus.event_log().is_none());
+
+        let mut rx = bus.subscribe();
+        bus.publish(FrameworkEvent::Entity(EntityEvent::Created {
+            entity_type: "order".to_string(),
+            entity_id: Uuid::new_v4(),
+            data: json!({}),
+        }));
+
+        let received = rx.recv().await.unwrap();
+        assert_eq!(received.event.action(), "created");
+    }
+
+    #[tokio::test]
+    async fn test_event_bus_with_event_log_bridge() {
+        use crate::events::memory::InMemoryEventLog;
+        use crate::events::log::EventLog;
+
+        let event_log = Arc::new(InMemoryEventLog::new());
+        let bus = EventBus::new(16).with_event_log(event_log.clone());
+
+        assert!(bus.event_log().is_some());
+
+        let mut rx = bus.subscribe();
+
+        // Publish an event
+        bus.publish(FrameworkEvent::Entity(EntityEvent::Created {
+            entity_type: "user".to_string(),
+            entity_id: Uuid::new_v4(),
+            data: json!({"name": "Alice"}),
+        }));
+
+        // Should receive via broadcast
+        let received = rx.recv().await.unwrap();
+        assert_eq!(received.event.entity_type(), Some("user"));
+
+        // Wait for the spawned task to complete
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        // Event should also be in the EventLog
+        assert_eq!(event_log.last_seq_no().await, Some(1));
+    }
+
+    #[tokio::test]
+    async fn test_event_bus_bridge_multiple_events() {
+        use crate::events::memory::InMemoryEventLog;
+        use crate::events::log::EventLog;
+        use crate::events::types::SeekPosition;
+        use tokio_stream::StreamExt;
+
+        let event_log = Arc::new(InMemoryEventLog::new());
+        let bus = EventBus::new(16).with_event_log(event_log.clone());
+
+        // Publish 5 events
+        for i in 0..5 {
+            bus.publish(FrameworkEvent::Entity(EntityEvent::Created {
+                entity_type: format!("type_{i}"),
+                entity_id: Uuid::new_v4(),
+                data: json!({}),
+            }));
+        }
+
+        // Wait for spawned tasks
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        // All events should be in the log
+        assert_eq!(event_log.last_seq_no().await, Some(5));
+
+        // Subscribe from beginning and replay
+        let stream = event_log.subscribe("test", SeekPosition::Beginning).await.unwrap();
+        let events: Vec<_> = stream.take(5).collect().await;
+        assert_eq!(events.len(), 5);
+    }
+
+    #[tokio::test]
+    async fn test_event_bus_backward_compatible_default() {
+        // Default bus has no event_log — same behavior as before
+        let bus = EventBus::default();
+        assert!(bus.event_log().is_none());
+        assert_eq!(bus.receiver_count(), 0);
+
+        // Publishing without subscribers or log should not panic
+        let receivers = bus.publish(FrameworkEvent::Entity(EntityEvent::Created {
+            entity_type: "order".to_string(),
+            entity_id: Uuid::new_v4(),
+            data: json!({}),
+        }));
+        assert_eq!(receivers, 0);
     }
 }
