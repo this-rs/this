@@ -23,6 +23,7 @@ pub mod context;
 pub mod log;
 pub mod matcher;
 pub mod memory;
+pub mod operators;
 pub mod types;
 
 pub use context::FlowContext;

@@ -43,6 +43,9 @@ serde_dynamo = { version = "4.0", optional = true }
 uuid = { version = "1.10", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 
+# Template engine (for map operator in event flows)
+tera = "1"
+
 # Error handling
 anyhow = "1.0"
 thiserror = "2.0"
