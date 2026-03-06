@@ -5,6 +5,7 @@ pub mod sinks;
 
 use crate::core::LinkDefinition;
 use anyhow::Result;
+use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -147,8 +148,8 @@ impl LinksConfig {
             return configs.into_iter().next().unwrap();
         }
 
-        let mut entities_map: HashMap<String, EntityConfig> = HashMap::new();
-        let mut links_map: HashMap<(String, String, String), LinkDefinition> = HashMap::new();
+        let mut entities_map: IndexMap<String, EntityConfig> = IndexMap::new();
+        let mut links_map: IndexMap<(String, String, String), LinkDefinition> = IndexMap::new();
         let mut validation_rules_map: HashMap<String, Vec<ValidationRule>> = HashMap::new();
 
         // Merge entities (last one wins for duplicates)
@@ -182,11 +183,13 @@ impl LinksConfig {
             }
         }
 
-        // Merge events: last config with events wins, flows are concatenated
+        // Merge events: backend last-wins, flows are concatenated (with duplicate warning)
         let mut merged_events: Option<EventsConfig> = None;
         for config in &configs {
             if let Some(events) = &config.events {
                 if let Some(ref mut existing) = merged_events {
+                    // Backend: last-wins (consistent with entities/links merge behavior)
+                    existing.backend = events.backend.clone();
                     existing.flows.extend(events.flows.clone());
                     existing.consumers.extend(events.consumers.clone());
                 } else {
@@ -195,8 +198,22 @@ impl LinksConfig {
             }
         }
 
-        // Merge sinks: deduplicate by name (last wins)
-        let mut sinks_map: HashMap<String, SinkConfig> = HashMap::new();
+        // Detect duplicate flow names and warn
+        if let Some(ref events) = merged_events {
+            let mut seen_names = std::collections::HashSet::new();
+            for flow in &events.flows {
+                if !seen_names.insert(&flow.name) {
+                    tracing::warn!(
+                        flow_name = %flow.name,
+                        "config merge: duplicate flow name detected — \
+                         later definition will shadow earlier one at runtime"
+                    );
+                }
+            }
+        }
+
+        // Merge sinks: deduplicate by name (last wins), preserving insertion order
+        let mut sinks_map: IndexMap<String, SinkConfig> = IndexMap::new();
         for config in &configs {
             if let Some(sinks) = &config.sinks {
                 for sink in sinks {

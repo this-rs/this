@@ -34,6 +34,15 @@ enum CompareOp {
     NotExists,
 }
 
+/// Right-hand side of a comparison: literal value or variable reference
+#[derive(Debug, Clone)]
+enum FilterValue {
+    /// A literal value (quoted string, number, boolean, null)
+    Literal(String),
+    /// A variable reference (unquoted identifier, resolved from context)
+    Variable(String),
+}
+
 /// Parsed filter expression
 #[derive(Debug, Clone)]
 struct FilterExpr {
@@ -42,7 +51,7 @@ struct FilterExpr {
     /// Comparison operator
     op: CompareOp,
     /// Right-hand side value (None for exists/not_exists)
-    value: Option<String>,
+    value: Option<FilterValue>,
 }
 
 /// Compiled filter operator
@@ -110,7 +119,7 @@ fn parse_condition(condition: &str) -> Result<FilterExpr> {
         return Ok(FilterExpr {
             field: left.trim().to_string(),
             op: CompareOp::NotEqual,
-            value: Some(unquote(right.trim())),
+            value: Some(parse_rhs(right.trim())),
         });
     }
 
@@ -119,7 +128,7 @@ fn parse_condition(condition: &str) -> Result<FilterExpr> {
         return Ok(FilterExpr {
             field: left.trim().to_string(),
             op: CompareOp::Equal,
-            value: Some(unquote(right.trim())),
+            value: Some(parse_rhs(right.trim())),
         });
     }
 
@@ -138,6 +147,58 @@ fn unquote(s: &str) -> String {
     }
 }
 
+/// Check if a string represents a literal value (quoted, number, boolean, null)
+/// rather than a variable reference.
+fn is_literal_value(s: &str) -> bool {
+    // Quoted strings
+    if (s.starts_with('"') && s.ends_with('"'))
+        || (s.starts_with('\'') && s.ends_with('\''))
+    {
+        return true;
+    }
+    // Numbers (int or float)
+    if s.parse::<f64>().is_ok() {
+        return true;
+    }
+    // Booleans
+    if s == "true" || s == "false" {
+        return true;
+    }
+    // Null
+    if s == "null" {
+        return true;
+    }
+    false
+}
+
+/// Parse the right-hand side of a comparison into a FilterValue
+fn parse_rhs(s: &str) -> FilterValue {
+    if is_literal_value(s) {
+        FilterValue::Literal(unquote(s))
+    } else {
+        FilterValue::Variable(s.to_string())
+    }
+}
+
+/// Resolve a FilterValue to a string for comparison
+fn resolve_filter_value(value: &FilterValue, ctx: &FlowContext) -> Option<String> {
+    match value {
+        FilterValue::Literal(s) => Some(s.clone()),
+        FilterValue::Variable(var_name) => ctx.get_var(var_name).map(value_to_string),
+    }
+}
+
+/// Convert a JSON Value to its string representation for comparison
+fn value_to_string(val: &Value) -> String {
+    match val {
+        Value::String(s) => s.clone(),
+        Value::Number(n) => n.to_string(),
+        Value::Bool(b) => b.to_string(),
+        Value::Null => "null".to_string(),
+        _ => val.to_string(),
+    }
+}
+
 /// Evaluate a filter expression against the context
 fn evaluate(expr: &FilterExpr, ctx: &FlowContext) -> bool {
     let var = ctx.get_var(&expr.field);
@@ -146,11 +207,21 @@ fn evaluate(expr: &FilterExpr, ctx: &FlowContext) -> bool {
         CompareOp::Exists => var.is_some(),
         CompareOp::NotExists => var.is_none(),
         CompareOp::Equal => match (var, &expr.value) {
-            (Some(val), Some(expected)) => value_matches(val, expected),
+            (Some(val), Some(filter_val)) => {
+                match resolve_filter_value(filter_val, ctx) {
+                    Some(resolved) => value_matches(val, &resolved),
+                    None => false, // RHS variable not found → not equal
+                }
+            }
             _ => false,
         },
         CompareOp::NotEqual => match (var, &expr.value) {
-            (Some(val), Some(expected)) => !value_matches(val, expected),
+            (Some(val), Some(filter_val)) => {
+                match resolve_filter_value(filter_val, ctx) {
+                    Some(resolved) => !value_matches(val, &resolved),
+                    None => true, // RHS variable not found → not equal
+                }
+            }
             (None, _) => true, // Missing field != anything is true
             _ => true,
         },
@@ -440,5 +511,87 @@ mod tests {
 
         let result = op.execute(&mut ctx).await.unwrap();
         assert!(matches!(result, OpResult::Continue));
+    }
+
+    // ── Tests: variable-to-variable comparison ──────────────────────
+
+    #[tokio::test]
+    async fn test_filter_var_to_var_not_equal_same_uuid_drops() {
+        // source_id == target_id (same UUID) → source_id != target_id should Drop
+        let same_id = Uuid::new_v4();
+        let mut ctx = make_link_context(same_id, same_id);
+
+        let op = FilterOp::from_config(&FilterConfig {
+            condition: "source_id != target_id".to_string(),
+        })
+        .unwrap();
+
+        let result = op.execute(&mut ctx).await.unwrap();
+        assert!(
+            matches!(result, OpResult::Drop),
+            "self-link (source_id == target_id) should be dropped by != filter"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_filter_var_to_var_equal_same_uuid_passes() {
+        // source_id == target_id (same UUID) → source_id == target_id should Continue
+        let same_id = Uuid::new_v4();
+        let mut ctx = make_link_context(same_id, same_id);
+
+        let op = FilterOp::from_config(&FilterConfig {
+            condition: "source_id == target_id".to_string(),
+        })
+        .unwrap();
+
+        let result = op.execute(&mut ctx).await.unwrap();
+        assert!(matches!(result, OpResult::Continue));
+    }
+
+    #[tokio::test]
+    async fn test_filter_var_to_var_equal_different_uuids_drops() {
+        // source_id != target_id (different UUIDs) → source_id == target_id should Drop
+        let mut ctx = make_link_context(Uuid::new_v4(), Uuid::new_v4());
+
+        let op = FilterOp::from_config(&FilterConfig {
+            condition: "source_id == target_id".to_string(),
+        })
+        .unwrap();
+
+        let result = op.execute(&mut ctx).await.unwrap();
+        assert!(matches!(result, OpResult::Drop));
+    }
+
+    #[tokio::test]
+    async fn test_filter_quoted_stays_literal() {
+        // Quoted "target_id" should NOT be resolved as a variable
+        let mut ctx = make_link_context(Uuid::new_v4(), Uuid::new_v4());
+
+        let op = FilterOp::from_config(&FilterConfig {
+            condition: "source_id != \"target_id\"".to_string(),
+        })
+        .unwrap();
+
+        // source_id is a UUID, "target_id" is the literal string → always not equal
+        let result = op.execute(&mut ctx).await.unwrap();
+        assert!(matches!(result, OpResult::Continue));
+    }
+
+    #[tokio::test]
+    async fn test_filter_unknown_var_fallback() {
+        // Unknown variable on RHS: source_id != unknown_var
+        // unknown_var doesn't exist → resolve returns None → treated as not equal
+        let mut ctx = make_link_context(Uuid::new_v4(), Uuid::new_v4());
+
+        let op = FilterOp::from_config(&FilterConfig {
+            condition: "source_id != unknown_var".to_string(),
+        })
+        .unwrap();
+
+        let result = op.execute(&mut ctx).await.unwrap();
+        assert!(
+            matches!(result, OpResult::Continue),
+            "comparison with unknown variable should be 'not equal'"
+        );
     }
 }

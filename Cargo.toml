@@ -71,6 +71,7 @@ prost-types = { version = "0.14", optional = true }
 
 # Push notifications (optional)
 reqwest = { version = "0.12", features = ["json"], optional = true }
+indexmap = "2.13.0"
 
 [build-dependencies]
 tonic-prost-build = { version = "0.14" }

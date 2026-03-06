@@ -17,6 +17,7 @@
 
 use crate::config::sinks::SinkType;
 use crate::events::sinks::device_tokens::DeviceTokenStore;
+use crate::events::sinks::preferences::NotificationPreferencesStore;
 use crate::events::sinks::Sink;
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
@@ -249,6 +250,17 @@ impl Default for RetryConfig {
 ///
 /// Receives payloads from the `deliver` operator and sends push
 /// notifications to all registered device tokens for the recipient.
+///
+/// # Preferences
+///
+/// If a `NotificationPreferencesStore` is attached via `with_preferences`,
+/// the sink checks user preferences before sending. Disabled notification
+/// types are silently dropped (same pattern as `InAppNotificationSink`).
+///
+/// # Stale token cleanup
+///
+/// When a push provider returns `PermanentError` (e.g., `DeviceNotRegistered`),
+/// the corresponding device token is automatically unregistered from the store.
 #[derive(Debug)]
 pub struct PushNotificationSink {
     /// Device token store
@@ -259,6 +271,9 @@ pub struct PushNotificationSink {
 
     /// Retry configuration
     retry_config: RetryConfig,
+
+    /// Optional preferences store (checks before delivering)
+    preferences: Option<Arc<NotificationPreferencesStore>>,
 }
 
 impl PushNotificationSink {
@@ -271,6 +286,7 @@ impl PushNotificationSink {
             device_tokens,
             provider: Arc::new(ExpoPushProvider::new()),
             retry_config: RetryConfig::default(),
+            preferences: None,
         }
     }
 
@@ -283,6 +299,7 @@ impl PushNotificationSink {
             device_tokens,
             provider,
             retry_config: RetryConfig::default(),
+            preferences: None,
         }
     }
 
@@ -296,13 +313,27 @@ impl PushNotificationSink {
             device_tokens,
             provider,
             retry_config,
+            preferences: None,
         }
     }
 
+    /// Attach a preferences store to check before sending
+    ///
+    /// When set, the sink checks `is_enabled(recipient, notification_type)`
+    /// before sending. Disabled types are silently dropped.
+    pub fn with_preferences(mut self, preferences: Arc<NotificationPreferencesStore>) -> Self {
+        self.preferences = Some(preferences);
+        self
+    }
+
     /// Send messages with retry logic
-    async fn send_with_retry(&self, messages: Vec<PushMessage>) -> Result<()> {
+    ///
+    /// Returns the list of tokens that had permanent errors (e.g., `DeviceNotRegistered`).
+    /// The caller should unregister these tokens from the store.
+    async fn send_with_retry(&self, messages: Vec<PushMessage>) -> Result<Vec<String>> {
         let mut pending = messages;
         let mut attempt = 0;
+        let mut permanently_failed_tokens: Vec<String> = Vec::new();
 
         loop {
             let results = self.provider.send_batch(pending.clone()).await;
@@ -328,6 +359,7 @@ impl PushNotificationSink {
                             error = %err,
                             "push: permanent error (will not retry)"
                         );
+                        permanently_failed_tokens.push(msg.to.clone());
                         permanent_errors.push(err.clone());
                     }
                 }
@@ -335,14 +367,11 @@ impl PushNotificationSink {
 
             if failed.is_empty() {
                 if permanent_errors.is_empty() {
-                    return Ok(());
+                    return Ok(permanently_failed_tokens);
                 } else {
                     // All retriable sent, but some had permanent errors
-                    return Err(anyhow!(
-                        "push: {} permanent error(s): {}",
-                        permanent_errors.len(),
-                        permanent_errors.join("; ")
-                    ));
+                    // Still return the failed tokens for cleanup
+                    return Ok(permanently_failed_tokens);
                 }
             }
 
@@ -380,21 +409,28 @@ impl Sink for PushNotificationSink {
         context_vars: &HashMap<String, Value>,
     ) -> Result<()> {
         // Determine recipient
-        let recipient = recipient_id
-            .map(|s| s.to_string())
-            .or_else(|| {
-                payload
-                    .get("recipient_id")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string())
-            })
-            .or_else(|| {
-                context_vars
-                    .get("recipient_id")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string())
-            })
+        let recipient = super::resolve_recipient(recipient_id, &payload, context_vars)
             .ok_or_else(|| anyhow!("push sink: recipient_id not found"))?;
+
+        // Check preferences before sending (same pattern as InAppNotificationSink)
+        if let Some(prefs_store) = &self.preferences {
+            let notification_type = payload
+                .get("notification_type")
+                .and_then(|v| v.as_str())
+                .unwrap_or("generic");
+
+            if !prefs_store
+                .is_enabled(&recipient, notification_type)
+                .await
+            {
+                tracing::debug!(
+                    recipient = %recipient,
+                    notification_type = %notification_type,
+                    "push sink: notification type disabled by user preferences, skipping"
+                );
+                return Ok(());
+            }
+        }
 
         // Get device tokens
         let tokens = self.device_tokens.get_tokens(&recipient).await;
@@ -440,7 +476,20 @@ impl Sink for PushNotificationSink {
             "push sink: sending notifications"
         );
 
-        self.send_with_retry(messages).await
+        // Send with retry; collect permanently failed tokens for cleanup
+        let stale_tokens = self.send_with_retry(messages).await?;
+
+        // Unregister stale tokens (e.g., DeviceNotRegistered)
+        for token in &stale_tokens {
+            tracing::info!(
+                recipient = %recipient,
+                token = %token,
+                "push sink: unregistering stale device token"
+            );
+            self.device_tokens.unregister(&recipient, token).await;
+        }
+
+        Ok(())
     }
 
     fn name(&self) -> &str {
@@ -651,7 +700,7 @@ mod tests {
         ]]);
 
         let sink = PushNotificationSink::with_config(
-            tokens,
+            tokens.clone(),
             Arc::new(provider),
             fast_retry_config(),
         );
@@ -661,12 +710,15 @@ mod tests {
             "recipient_id": "user-A"
         });
 
+        // Permanent errors are now handled gracefully: token cleaned up, no error
         let result = sink.deliver(payload, None, &HashMap::new()).await;
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("permanent error"));
+        assert!(result.is_ok());
 
         // Should only have been called once (no retry)
         assert_eq!(state.call_count.load(Ordering::SeqCst), 1);
+
+        // Stale token should have been cleaned up
+        assert_eq!(tokens.token_count("user-A").await, 0);
     }
 
     #[tokio::test]
@@ -766,5 +818,154 @@ mod tests {
         let sink = PushNotificationSink::with_provider(tokens, Arc::new(provider));
         assert_eq!(sink.name(), "push");
         assert_eq!(sink.sink_type(), SinkType::Push);
+    }
+
+    // ── Preferences integration tests ─────────────────────────────
+
+    #[tokio::test]
+    async fn test_push_with_preferences_disabled_type_skipped() {
+        let tokens = Arc::new(DeviceTokenStore::new());
+        tokens
+            .register("user-A", "token-1".to_string(), Platform::Ios)
+            .await;
+
+        let prefs = Arc::new(NotificationPreferencesStore::new());
+        prefs.disable_type("user-A", "new_like").await;
+
+        let (provider, state) = MockPushProvider::always_success();
+        let sink = PushNotificationSink::with_provider(tokens, Arc::new(provider))
+            .with_preferences(prefs);
+
+        // Deliver a disabled type — should be skipped
+        let payload = json!({
+            "title": "New like",
+            "notification_type": "new_like",
+            "recipient_id": "user-A"
+        });
+        sink.deliver(payload, None, &HashMap::new()).await.unwrap();
+        assert_eq!(state.call_count.load(Ordering::SeqCst), 0);
+
+        // Deliver an enabled type — should send
+        let payload = json!({
+            "title": "New follower",
+            "notification_type": "new_follower",
+            "recipient_id": "user-A"
+        });
+        sink.deliver(payload, None, &HashMap::new()).await.unwrap();
+        assert_eq!(state.call_count.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn test_push_with_preferences_muted_user_skipped() {
+        let tokens = Arc::new(DeviceTokenStore::new());
+        tokens
+            .register("user-A", "token-1".to_string(), Platform::Ios)
+            .await;
+
+        let prefs = Arc::new(NotificationPreferencesStore::new());
+        prefs.mute("user-A").await;
+
+        let (provider, state) = MockPushProvider::always_success();
+        let sink = PushNotificationSink::with_provider(tokens, Arc::new(provider))
+            .with_preferences(prefs);
+
+        let payload = json!({
+            "title": "Test",
+            "notification_type": "new_follower",
+            "recipient_id": "user-A"
+        });
+        sink.deliver(payload, None, &HashMap::new()).await.unwrap();
+        assert_eq!(state.call_count.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn test_push_without_preferences_delivers_all() {
+        let tokens = Arc::new(DeviceTokenStore::new());
+        tokens
+            .register("user-A", "token-1".to_string(), Platform::Ios)
+            .await;
+
+        let (provider, state) = MockPushProvider::always_success();
+        // No preferences store
+        let sink = PushNotificationSink::with_provider(tokens, Arc::new(provider));
+
+        let payload = json!({
+            "title": "Test",
+            "notification_type": "new_like",
+            "recipient_id": "user-A"
+        });
+        sink.deliver(payload, None, &HashMap::new()).await.unwrap();
+        assert_eq!(state.call_count.load(Ordering::SeqCst), 1);
+    }
+
+    // ── Stale token cleanup tests ─────────────────────────────────
+
+    #[tokio::test]
+    async fn test_push_permanent_error_unregisters_stale_token() {
+        let tokens = Arc::new(DeviceTokenStore::new());
+        tokens
+            .register("user-A", "good-token".to_string(), Platform::Ios)
+            .await;
+        tokens
+            .register("user-A", "stale-token".to_string(), Platform::Android)
+            .await;
+        assert_eq!(tokens.token_count("user-A").await, 2);
+
+        // First token succeeds, second gets DeviceNotRegistered
+        let (provider, _state) = MockPushProvider::new(vec![vec![
+            PushResult::Success,
+            PushResult::PermanentError("DeviceNotRegistered".to_string()),
+        ]]);
+
+        let sink = PushNotificationSink::with_config(
+            tokens.clone(),
+            Arc::new(provider),
+            fast_retry_config(),
+        );
+
+        let payload = json!({
+            "title": "Test",
+            "recipient_id": "user-A"
+        });
+
+        // Should succeed (stale token cleaned up silently)
+        sink.deliver(payload, None, &HashMap::new()).await.unwrap();
+
+        // Stale token should be unregistered
+        assert_eq!(tokens.token_count("user-A").await, 1);
+        let remaining = tokens.get_tokens("user-A").await;
+        assert_eq!(remaining[0].token, "good-token");
+    }
+
+    #[tokio::test]
+    async fn test_push_all_tokens_permanent_error_cleans_all() {
+        let tokens = Arc::new(DeviceTokenStore::new());
+        tokens
+            .register("user-A", "dead-1".to_string(), Platform::Ios)
+            .await;
+        tokens
+            .register("user-A", "dead-2".to_string(), Platform::Android)
+            .await;
+
+        let (provider, _state) = MockPushProvider::new(vec![vec![
+            PushResult::PermanentError("DeviceNotRegistered".to_string()),
+            PushResult::PermanentError("DeviceNotRegistered".to_string()),
+        ]]);
+
+        let sink = PushNotificationSink::with_config(
+            tokens.clone(),
+            Arc::new(provider),
+            fast_retry_config(),
+        );
+
+        let payload = json!({
+            "title": "Test",
+            "recipient_id": "user-A"
+        });
+
+        sink.deliver(payload, None, &HashMap::new()).await.unwrap();
+
+        // All tokens cleaned up
+        assert_eq!(tokens.token_count("user-A").await, 0);
     }
 }

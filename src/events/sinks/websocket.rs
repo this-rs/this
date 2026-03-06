@@ -76,20 +76,7 @@ impl Sink for WebSocketSink {
         context_vars: &HashMap<String, Value>,
     ) -> Result<()> {
         // Determine recipient (optional — if None, broadcast to all)
-        let recipient = recipient_id
-            .map(|s| s.to_string())
-            .or_else(|| {
-                payload
-                    .get("recipient_id")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string())
-            })
-            .or_else(|| {
-                context_vars
-                    .get("recipient_id")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string())
-            });
+        let recipient = super::resolve_recipient(recipient_id, &payload, context_vars);
 
         let count = match &recipient {
             Some(rid) => {

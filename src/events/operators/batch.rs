@@ -39,8 +39,6 @@ struct BatchBucket {
     items: Vec<String>,
     /// When this bucket was created
     started_at: Instant,
-    /// The last FlowContext (used as template for the emitted batch event)
-    last_ctx: Option<FlowContext>,
 }
 
 /// Compiled batch operator
@@ -104,47 +102,46 @@ impl PipelineOperator for BatchOp {
         let now = Instant::now();
         let mut buckets = self.buckets.write().await;
 
-        // Check if we have an existing bucket for this key
-        let bucket = buckets.entry(key_str.clone()).or_insert_with(|| BatchBucket {
-            items: Vec::new(),
-            started_at: now,
-            last_ctx: None,
-        });
+        // Determine action with an immutable borrow first (avoids borrow conflict with remove)
+        let (should_flush, should_discard) = if let Some(bucket) = buckets.get(&key_str) {
+            let window_expired = now.duration_since(bucket.started_at) >= self.window;
+            if window_expired && bucket.items.len() as u32 >= self.min_count {
+                (true, false)
+            } else if window_expired {
+                (false, true)
+            } else {
+                (false, false)
+            }
+        } else {
+            (false, false)
+        };
 
-        // Check if the window has expired
-        let window_expired = now.duration_since(bucket.started_at) >= self.window;
-
-        if window_expired && bucket.items.len() as u32 >= self.min_count {
+        if should_flush {
             // Window expired with enough items — flush the batch
+            let bucket = buckets.remove(&key_str).unwrap();
             let count = bucket.items.len();
-            let items = bucket.items.clone();
 
-            // Reset the bucket with the current event
-            bucket.items = vec![item_value];
-            bucket.started_at = now;
-            bucket.last_ctx = Some(ctx.clone());
-
-            // Set batch variables in context
             ctx.set_var(
                 "_batch",
                 json!({
                     "count": count,
                     "key": key_str,
-                    "items": items,
+                    "items": bucket.items,
                 }),
             );
 
             Ok(OpResult::Continue)
-        } else if window_expired {
-            // Window expired but not enough items — reset and accumulate
-            bucket.items = vec![item_value];
-            bucket.started_at = now;
-            bucket.last_ctx = Some(ctx.clone());
+        } else if should_discard {
+            // Window expired but not enough items — discard the bucket
+            buckets.remove(&key_str);
             Ok(OpResult::Drop)
         } else {
-            // Window still active — accumulate
+            // Window still active (or new key) — accumulate
+            let bucket = buckets.entry(key_str).or_insert_with(|| BatchBucket {
+                items: Vec::new(),
+                started_at: now,
+            });
             bucket.items.push(item_value);
-            bucket.last_ctx = Some(ctx.clone());
             Ok(OpResult::Drop)
         }
     }
@@ -170,7 +167,6 @@ mod tests {
     use super::*;
     use crate::core::events::{FrameworkEvent, LinkEvent};
     use crate::core::service::LinkService;
-    use serde_json::json;
     use std::collections::HashMap as StdHashMap;
     use std::sync::Arc;
     use uuid::Uuid;
@@ -337,5 +333,85 @@ mod tests {
 
         let result = op.execute(&mut ctx).await;
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_buckets_cleaned_after_flush() {
+        let target_id = Uuid::new_v4();
+        let op = BatchOp::with_params("target_id", Duration::from_millis(50), 1);
+
+        // Accumulate 2 events
+        for _ in 0..2 {
+            let mut ctx = make_link_context(Uuid::new_v4(), target_id);
+            let _ = op.execute(&mut ctx).await.unwrap();
+        }
+
+        // Verify bucket exists
+        assert_eq!(op.buckets.read().await.len(), 1);
+
+        // Wait for window to expire
+        tokio::time::sleep(Duration::from_millis(60)).await;
+
+        // Trigger flush
+        let mut ctx = make_link_context(Uuid::new_v4(), target_id);
+        let result = op.execute(&mut ctx).await.unwrap();
+        assert!(matches!(result, OpResult::Continue));
+
+        // Bucket should be removed after flush
+        assert_eq!(op.buckets.read().await.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_buckets_cleaned_after_expired_min_count_not_met() {
+        let target_id = Uuid::new_v4();
+        // Require min_count of 10, only send 2
+        let op = BatchOp::with_params("target_id", Duration::from_millis(50), 10);
+
+        // Accumulate 2 events (below min_count)
+        for _ in 0..2 {
+            let mut ctx = make_link_context(Uuid::new_v4(), target_id);
+            let _ = op.execute(&mut ctx).await.unwrap();
+        }
+
+        assert_eq!(op.buckets.read().await.len(), 1);
+
+        // Wait for window to expire
+        tokio::time::sleep(Duration::from_millis(60)).await;
+
+        // Next event — window expired but min_count not met → drop + cleanup
+        let mut ctx = make_link_context(Uuid::new_v4(), target_id);
+        let result = op.execute(&mut ctx).await.unwrap();
+        assert!(matches!(result, OpResult::Drop));
+
+        // Bucket should be removed (discarded, not kept forever)
+        assert_eq!(op.buckets.read().await.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_multiple_keys_independent_cleanup() {
+        let target_a = Uuid::new_v4();
+        let target_b = Uuid::new_v4();
+        let op = BatchOp::with_params("target_id", Duration::from_millis(50), 1);
+
+        // Accumulate for both keys
+        let mut ctx_a = make_link_context(Uuid::new_v4(), target_a);
+        let _ = op.execute(&mut ctx_a).await.unwrap();
+        let mut ctx_b = make_link_context(Uuid::new_v4(), target_b);
+        let _ = op.execute(&mut ctx_b).await.unwrap();
+
+        assert_eq!(op.buckets.read().await.len(), 2);
+
+        // Wait for window to expire
+        tokio::time::sleep(Duration::from_millis(60)).await;
+
+        // Flush only key A
+        let mut ctx_a2 = make_link_context(Uuid::new_v4(), target_a);
+        let result_a = op.execute(&mut ctx_a2).await.unwrap();
+        assert!(matches!(result_a, OpResult::Continue));
+
+        // Only key A removed, key B still present (but expired — will be cleaned on next event)
+        assert_eq!(op.buckets.read().await.len(), 1);
+        assert!(!op.buckets.read().await.contains_key(&target_a.to_string()));
+        assert!(op.buckets.read().await.contains_key(&target_b.to_string()));
     }
 }

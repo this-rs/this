@@ -42,6 +42,33 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+/// Resolve the recipient ID from multiple sources
+///
+/// Priority: explicit parameter > payload field > context variable.
+/// Returns `None` if no recipient ID is found in any source.
+///
+/// Shared by all sinks that need a recipient (in_app, push, websocket).
+pub fn resolve_recipient(
+    explicit: Option<&str>,
+    payload: &Value,
+    context_vars: &HashMap<String, Value>,
+) -> Option<String> {
+    explicit
+        .map(|s| s.to_string())
+        .or_else(|| {
+            payload
+                .get("recipient_id")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+        })
+        .or_else(|| {
+            context_vars
+                .get("recipient_id")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+        })
+}
+
 /// Trait for event sinks — destinations that receive processed events
 ///
 /// Each sink is registered in the `SinkRegistry` by name (matching the

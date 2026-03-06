@@ -51,7 +51,7 @@ impl DeliverOp {
 impl PipelineOperator for DeliverOp {
     async fn execute(&self, ctx: &mut FlowContext) -> Result<OpResult> {
         // Verify that _payload exists
-        let _payload = ctx
+        let payload = ctx
             .get_var("_payload")
             .ok_or_else(|| {
                 anyhow!("deliver: no '_payload' variable in context. Did you forget a 'map' step before 'deliver'?")
@@ -62,12 +62,50 @@ impl PipelineOperator for DeliverOp {
         let sinks_json: serde_json::Value = self.sink_names.clone().into();
         ctx.set_var("_delivered_to", sinks_json);
 
-        // TODO(Plan 3): Look up sinks in SinkRegistry and call send()
-        // For now, we just log the delivery intent
-        tracing::debug!(
-            sinks = ?self.sink_names,
-            "deliver: dispatching payload to sinks"
-        );
+        // Extract recipient_id from context variables (set by resolve/fan_out)
+        let recipient_id = ctx
+            .get_var_str("recipient_id")
+            .or_else(|| ctx.get_var_str("target_id"))
+            .map(|s| s.to_string());
+
+        // Build context vars for sinks (all pipeline variables)
+        let context_vars = ctx
+            .variables
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect::<std::collections::HashMap<String, serde_json::Value>>();
+
+        // Dispatch to sinks via SinkRegistry (if available)
+        if let Some(registry) = &ctx.sink_registry {
+            for sink_name in &self.sink_names {
+                tracing::debug!(
+                    sink = %sink_name,
+                    recipient = ?recipient_id,
+                    "deliver: dispatching to sink"
+                );
+
+                if let Err(e) = registry
+                    .deliver(
+                        sink_name,
+                        payload.clone(),
+                        recipient_id.as_deref(),
+                        &context_vars,
+                    )
+                    .await
+                {
+                    tracing::warn!(
+                        sink = %sink_name,
+                        error = %e,
+                        "deliver: sink delivery failed"
+                    );
+                }
+            }
+        } else {
+            tracing::debug!(
+                sinks = ?self.sink_names,
+                "deliver: no SinkRegistry available, skipping actual dispatch"
+            );
+        }
 
         Ok(OpResult::Continue)
     }

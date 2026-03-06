@@ -6,6 +6,7 @@
 use crate::core::events::FrameworkEvent;
 use crate::core::module::EntityFetcher;
 use crate::core::service::LinkService;
+use crate::events::sinks::SinkRegistry;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -42,6 +43,9 @@ pub struct FlowContext {
 
     /// Access to entity fetchers, keyed by entity type
     pub entity_fetchers: HashMap<String, Arc<dyn EntityFetcher>>,
+
+    /// Access to the sink registry for deliver operators
+    pub sink_registry: Option<Arc<SinkRegistry>>,
 }
 
 impl std::fmt::Debug for FlowContext {
@@ -180,6 +184,7 @@ impl FlowContext {
             variables,
             link_service,
             entity_fetchers,
+            sink_registry: None,
         }
     }
 
@@ -200,6 +205,12 @@ impl FlowContext {
             return None;
         }
         self.variables.get(name)
+    }
+
+    /// Set the sink registry for deliver operators
+    pub fn with_sink_registry(mut self, registry: Arc<SinkRegistry>) -> Self {
+        self.sink_registry = Some(registry);
+        self
     }
 
     /// Get a variable as a string (convenience)

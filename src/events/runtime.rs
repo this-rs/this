@@ -23,6 +23,7 @@ use crate::events::compiler::CompiledFlow;
 use crate::events::context::FlowContext;
 use crate::events::log::EventLog;
 use crate::events::operators::{OpResult, PipelineOperator};
+use crate::events::sinks::SinkRegistry;
 use crate::events::types::SeekPosition;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -42,6 +43,9 @@ pub struct FlowRuntime {
 
     /// Entity fetchers keyed by entity type
     entity_fetchers: HashMap<String, Arc<dyn EntityFetcher>>,
+
+    /// Sink registry for deliver operators
+    sink_registry: Option<Arc<SinkRegistry>>,
 
     /// Consumer name for tracking position
     consumer_name: String,
@@ -69,6 +73,7 @@ impl FlowRuntime {
             event_log,
             link_service,
             entity_fetchers,
+            sink_registry: None,
             consumer_name: "flow-runtime".to_string(),
         }
     }
@@ -76,6 +81,15 @@ impl FlowRuntime {
     /// Set a custom consumer name (for multi-consumer setups)
     pub fn with_consumer_name(mut self, name: impl Into<String>) -> Self {
         self.consumer_name = name.into();
+        self
+    }
+
+    /// Set the sink registry for deliver operators
+    ///
+    /// Without a sink registry, the `deliver` operator will log but not
+    /// actually dispatch to any sink.
+    pub fn with_sink_registry(mut self, registry: Arc<SinkRegistry>) -> Self {
+        self.sink_registry = Some(registry);
         self
     }
 
@@ -123,6 +137,11 @@ impl FlowRuntime {
                         self.entity_fetchers.clone(),
                     );
 
+                    // Attach sink registry if available
+                    if let Some(ref registry) = self.sink_registry {
+                        ctx.sink_registry = Some(registry.clone());
+                    }
+
                     // Execute the pipeline
                     if let Err(e) = execute_pipeline(&flow.operators, &mut ctx).await {
                         tracing::warn!(
@@ -134,8 +153,8 @@ impl FlowRuntime {
                 }
             }
 
-            // Ack the event (use the current last seq_no as position marker)
-            if let Some(seq) = self.event_log.last_seq_no().await {
+            // Ack the exact event we just processed
+            if let Some(seq) = envelope.seq_no {
                 if let Err(e) = self.event_log.ack(&self.consumer_name, seq).await {
                     tracing::warn!(error = %e, "failed to ack event");
                 }
@@ -196,7 +215,7 @@ fn execute_pipeline<'a>(
 mod tests {
     use super::*;
     use crate::config::events::*;
-    use crate::core::events::{EntityEvent, FrameworkEvent, LinkEvent};
+    use crate::core::events::{EntityEvent, EventEnvelope, FrameworkEvent, LinkEvent};
     use crate::events::compiler::compile_flow;
     use crate::events::memory::InMemoryEventLog;
     use serde_json::json;
@@ -326,7 +345,7 @@ mod tests {
         // Publish a matching event
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         event_log
-            .append(make_link_event("follows"))
+            .append(EventEnvelope::new(make_link_event("follows")))
             .await
             .unwrap();
 
@@ -368,7 +387,7 @@ mod tests {
         // Publish a NON-matching event (likes, not follows)
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         event_log
-            .append(make_link_event("likes"))
+            .append(EventEnvelope::new(make_link_event("likes")))
             .await
             .unwrap();
 
@@ -423,15 +442,15 @@ mod tests {
 
         // Publish events that match different flows
         event_log
-            .append(make_link_event("follows"))
+            .append(EventEnvelope::new(make_link_event("follows")))
             .await
             .unwrap();
         event_log
-            .append(make_entity_event("user"))
+            .append(EventEnvelope::new(make_entity_event("user")))
             .await
             .unwrap();
         event_log
-            .append(make_link_event("likes")) // matches nothing
+            .append(EventEnvelope::new(make_link_event("likes"))) // matches nothing
             .await
             .unwrap();
 
@@ -475,7 +494,7 @@ mod tests {
 
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         event_log
-            .append(make_entity_event("user")) // type is "user", filter expects "admin"
+            .append(EventEnvelope::new(make_entity_event("user"))) // type is "user", filter expects "admin"
             .await
             .unwrap();
 
@@ -532,7 +551,7 @@ mod tests {
 
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         event_log
-            .append(make_link_event("follows"))
+            .append(EventEnvelope::new(make_link_event("follows")))
             .await
             .unwrap();
 

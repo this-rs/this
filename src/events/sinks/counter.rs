@@ -32,6 +32,7 @@ use async_trait::async_trait;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
+use tokio::sync::{Mutex, RwLock};
 
 /// Counter operations
 #[derive(Debug, Clone, PartialEq)]
@@ -108,6 +109,9 @@ pub struct CounterConfig {
 ///
 /// Updates numeric fields on entities. Used for maintaining derived
 /// counters (follower_count, like_count, etc.) in response to events.
+///
+/// Uses per-key locks to ensure atomic read-modify-write operations,
+/// preventing TOCTOU race conditions under concurrent access.
 #[derive(Debug)]
 pub struct CounterSink {
     /// Default counter configuration
@@ -115,12 +119,39 @@ pub struct CounterSink {
 
     /// Entity field updater
     updater: Arc<dyn EntityFieldUpdater>,
+
+    /// Per-key locks for atomic read-modify-write
+    /// Key format: "entity_type:entity_id:field"
+    key_locks: RwLock<HashMap<String, Arc<Mutex<()>>>>,
 }
 
 impl CounterSink {
     /// Create a new CounterSink
     pub fn new(updater: Arc<dyn EntityFieldUpdater>, config: CounterConfig) -> Self {
-        Self { config, updater }
+        Self {
+            config,
+            updater,
+            key_locks: RwLock::new(HashMap::new()),
+        }
+    }
+
+    /// Get or create a lock for the given key
+    async fn get_lock(&self, key: &str) -> Arc<Mutex<()>> {
+        // Fast path: check if lock already exists (read lock)
+        {
+            let locks = self.key_locks.read().await;
+            if let Some(lock) = locks.get(key) {
+                return lock.clone();
+            }
+        }
+
+        // Slow path: create the lock (write lock)
+        let mut locks = self.key_locks.write().await;
+        // Double-check after acquiring write lock
+        locks
+            .entry(key.to_string())
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone()
     }
 }
 
@@ -174,6 +205,11 @@ impl Sink for CounterSink {
             .get("value")
             .and_then(|v| v.as_f64())
             .unwrap_or(1.0);
+
+        // Acquire per-key lock for atomic read-modify-write
+        let lock_key = format!("{}:{}:{}", entity_type, entity_id, field);
+        let lock = self.get_lock(&lock_key).await;
+        let _guard = lock.lock().await;
 
         // Read current value
         let current = self
@@ -488,5 +524,34 @@ mod tests {
         let sink = CounterSink::new(store, increment_config("like_count"));
         assert_eq!(sink.name(), "counter");
         assert_eq!(sink.sink_type(), SinkType::Counter);
+    }
+
+    #[tokio::test]
+    async fn test_counter_concurrent_increments() {
+        let store = Arc::new(MockEntityStore::new());
+        store.set("capture", "cap-1", "like_count", 0.0).await;
+
+        let sink = Arc::new(CounterSink::new(store.clone(), increment_config("like_count")));
+
+        // Spawn 50 concurrent increment tasks
+        let mut handles = Vec::new();
+        for _ in 0..50 {
+            let sink = sink.clone();
+            handles.push(tokio::spawn(async move {
+                let payload = json!({
+                    "entity_type": "capture",
+                    "entity_id": "cap-1"
+                });
+                sink.deliver(payload, None, &HashMap::new()).await.unwrap();
+            }));
+        }
+
+        for h in handles {
+            h.await.unwrap();
+        }
+
+        // Without per-key locks, this would be less than 50 due to TOCTOU
+        let value = store.read_field("capture", "cap-1", "like_count").await.unwrap();
+        assert_eq!(value, 50.0, "All 50 increments should be applied atomically");
     }
 }

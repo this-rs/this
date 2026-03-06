@@ -4,7 +4,7 @@
 //! Unlike the EventBus (fire-and-forget broadcast), the EventLog persists
 //! events and supports replay from any position.
 
-use crate::core::events::{EventEnvelope, FrameworkEvent};
+use crate::core::events::EventEnvelope;
 use crate::events::types::{SeekPosition, SeqNo};
 use anyhow::Result;
 use async_trait::async_trait;
@@ -30,11 +30,12 @@ use tokio_stream::Stream;
 /// - **Live**: Use `Latest` to only see new events
 #[async_trait]
 pub trait EventLog: Send + Sync {
-    /// Append an event to the log
+    /// Append an event envelope to the log
     ///
     /// Returns the sequence number assigned to the event.
     /// Events are assigned monotonically increasing sequence numbers.
-    async fn append(&self, event: FrameworkEvent) -> Result<SeqNo>;
+    /// The envelope's `seq_no` field is set by the implementation.
+    async fn append(&self, envelope: EventEnvelope) -> Result<SeqNo>;
 
     /// Subscribe to events from a given position
     ///

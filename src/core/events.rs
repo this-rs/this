@@ -33,6 +33,7 @@
 //! ```
 
 use crate::events::log::EventLog;
+use crate::events::types::SeqNo;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -156,6 +157,9 @@ pub struct EventEnvelope {
     pub timestamp: DateTime<Utc>,
     /// The actual event
     pub event: FrameworkEvent,
+    /// Sequence number assigned by the EventLog (None if not yet persisted)
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub seq_no: Option<SeqNo>,
 }
 
 impl EventEnvelope {
@@ -165,6 +169,7 @@ impl EventEnvelope {
             id: Uuid::new_v4(),
             timestamp: Utc::now(),
             event,
+            seq_no: None,
         }
     }
 }
@@ -247,18 +252,20 @@ impl EventBus {
     ///
     /// Returns the number of broadcast receivers that will receive the event.
     pub fn publish(&self, event: FrameworkEvent) -> usize {
-        // If an EventLog is attached, append to it (non-blocking)
+        // Create a single envelope shared between broadcast and EventLog
+        let envelope = EventEnvelope::new(event);
+
+        // If an EventLog is attached, append a clone to it (non-blocking)
         if let Some(event_log) = &self.event_log {
             let log = event_log.clone();
-            let event_clone = event.clone();
+            let envelope_clone = envelope.clone();
             tokio::spawn(async move {
-                if let Err(e) = log.append(event_clone).await {
+                if let Err(e) = log.append(envelope_clone).await {
                     tracing::warn!("Failed to append event to EventLog: {}", e);
                 }
             });
         }
 
-        let envelope = EventEnvelope::new(event);
         // send() returns Err only if there are no receivers, which is fine
         self.sender.send(envelope).unwrap_or(0)
     }

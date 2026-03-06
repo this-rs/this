@@ -3,7 +3,7 @@
 //! Vec-backed event log suitable for development and single-instance deployments.
 //! Events are stored in memory and lost on restart.
 
-use crate::core::events::{EventEnvelope, FrameworkEvent};
+use crate::core::events::EventEnvelope;
 use crate::events::log::EventLog;
 use crate::events::types::{SeekPosition, SeqNo};
 use anyhow::Result;
@@ -66,13 +66,13 @@ impl Default for InMemoryEventLog {
 
 #[async_trait]
 impl EventLog for InMemoryEventLog {
-    async fn append(&self, event: FrameworkEvent) -> Result<SeqNo> {
-        let envelope = EventEnvelope::new(event);
+    async fn append(&self, mut envelope: EventEnvelope) -> Result<SeqNo> {
         let seq_no;
         {
             let mut events = self.inner.events.write().await;
+            seq_no = (events.len() + 1) as SeqNo;
+            envelope.seq_no = Some(seq_no);
             events.push(envelope);
-            seq_no = events.len() as SeqNo;
         }
         // Wake all waiting subscribers
         self.inner.notify.notify_waiters();
@@ -98,10 +98,38 @@ impl EventLog for InMemoryEventLog {
         };
 
         let inner = self.inner.clone();
-        let stream = EventLogStream {
-            inner,
-            cursor: start_seq,
-        };
+
+        // Use futures::stream::unfold to properly handle the Notified lifetime.
+        // This avoids the race condition where a stack-allocated Notified is dropped
+        // after poll_next returns Pending, causing lost wakeups.
+        let stream = futures::stream::unfold(
+            (inner, start_seq),
+            |(inner, mut cursor)| async move {
+                loop {
+                    // Check for available events.
+                    // The read guard is scoped so it's dropped before we move `inner`.
+                    let maybe_event = {
+                        let events = inner.events.read().await;
+                        let c = cursor as usize;
+                        if c < events.len() {
+                            Some(events[c].clone())
+                        } else {
+                            None
+                        }
+                    }; // RwLockReadGuard dropped here
+
+                    if let Some(event) = maybe_event {
+                        cursor += 1;
+                        return Some((event, (inner, cursor)));
+                    }
+
+                    // No event available, wait for notification.
+                    // The Notified future is properly held alive by unfold's
+                    // internal state machine across poll calls.
+                    inner.notify.notified().await;
+                }
+            },
+        );
 
         Ok(Box::pin(stream))
     }
@@ -140,86 +168,31 @@ impl EventLog for InMemoryEventLog {
     }
 }
 
-/// Async stream over events in the log
-///
-/// Yields stored events first (replay), then waits for new events
-/// using the Notify channel.
-struct EventLogStream {
-    inner: Arc<InMemoryEventLogInner>,
-    cursor: SeqNo,
-}
-
-impl Stream for EventLogStream {
-    type Item = EventEnvelope;
-
-    fn poll_next(
-        mut self: Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<Option<Self::Item>> {
-        let cursor = self.cursor as usize;
-
-        // Try to read the next event synchronously
-        let maybe_event = {
-            let events_guard = self.inner.events.try_read();
-            match events_guard {
-                Ok(events) => {
-                    if cursor < events.len() {
-                        Some(events[cursor].clone())
-                    } else {
-                        None
-                    }
-                }
-                Err(_) => {
-                    // Lock is held by writer, wake ourselves to retry
-                    cx.waker().wake_by_ref();
-                    return std::task::Poll::Pending;
-                }
-            }
-        }; // Guard dropped here
-
-        if let Some(event) = maybe_event {
-            self.cursor += 1;
-            return std::task::Poll::Ready(Some(event));
-        }
-
-        // No event available, register for notification
-        let notified = self.inner.notify.notified();
-        tokio::pin!(notified);
-        match notified.poll(cx) {
-            std::task::Poll::Ready(()) => {
-                // Woken up, re-check for events
-                cx.waker().wake_by_ref();
-                std::task::Poll::Pending
-            }
-            std::task::Poll::Pending => std::task::Poll::Pending,
-        }
-    }
-}
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::events::{EntityEvent, LinkEvent};
+    use crate::core::events::{EntityEvent, EventEnvelope, FrameworkEvent, LinkEvent};
     use serde_json::json;
     use tokio_stream::StreamExt;
     use uuid::Uuid;
 
-    fn make_entity_event(entity_type: &str) -> FrameworkEvent {
-        FrameworkEvent::Entity(EntityEvent::Created {
+    fn make_entity_event(entity_type: &str) -> EventEnvelope {
+        EventEnvelope::new(FrameworkEvent::Entity(EntityEvent::Created {
             entity_type: entity_type.to_string(),
             entity_id: Uuid::new_v4(),
             data: json!({"name": "test"}),
-        })
+        }))
     }
 
-    fn make_link_event(link_type: &str) -> FrameworkEvent {
-        FrameworkEvent::Link(LinkEvent::Created {
+    fn make_link_event(link_type: &str) -> EventEnvelope {
+        EventEnvelope::new(FrameworkEvent::Link(LinkEvent::Created {
             link_type: link_type.to_string(),
             link_id: Uuid::new_v4(),
             source_id: Uuid::new_v4(),
             target_id: Uuid::new_v4(),
             metadata: None,
-        })
+        }))
     }
 
     #[tokio::test]
@@ -527,5 +500,80 @@ mod tests {
 
         assert_eq!(log1.last_seq_no().await, Some(2));
         assert_eq!(log2.last_seq_no().await, Some(2));
+    }
+
+    #[tokio::test]
+    async fn test_seq_no_set_on_stored_envelopes() {
+        let log = InMemoryEventLog::new();
+
+        log.append(make_entity_event("user")).await.unwrap();
+        log.append(make_entity_event("order")).await.unwrap();
+        log.append(make_link_event("follows")).await.unwrap();
+
+        // Subscribe from beginning and verify seq_no is set on each envelope
+        let stream = log
+            .subscribe("test-consumer", SeekPosition::Beginning)
+            .await
+            .unwrap();
+
+        let events: Vec<_> = stream.take(3).collect().await;
+        assert_eq!(events[0].seq_no, Some(1));
+        assert_eq!(events[1].seq_no, Some(2));
+        assert_eq!(events[2].seq_no, Some(3));
+
+        // Verify the event data is also correct
+        assert_eq!(events[0].event.entity_type(), Some("user"));
+        assert_eq!(events[1].event.entity_type(), Some("order"));
+    }
+
+    #[tokio::test]
+    async fn test_no_lost_wakeup_concurrent_producer_consumer() {
+        // Stress test: fast producer + consumer, verify no events lost
+        let log = InMemoryEventLog::new();
+        let event_count = 100;
+
+        // Subscribe BEFORE producing (from beginning)
+        let stream = log
+            .subscribe("stress-consumer", SeekPosition::Beginning)
+            .await
+            .unwrap();
+
+        // Spawn a fast producer with minimal delay
+        let log_clone = log.clone();
+        tokio::spawn(async move {
+            for i in 0..event_count {
+                log_clone
+                    .append(make_entity_event(&format!("stress_{i}")))
+                    .await
+                    .unwrap();
+                // Yield occasionally to interleave with consumer
+                if i % 10 == 0 {
+                    tokio::task::yield_now().await;
+                }
+            }
+        });
+
+        // Consume all events with a timeout
+        let events: Vec<_> =
+            tokio::time::timeout(std::time::Duration::from_secs(5), stream.take(event_count).collect())
+                .await
+                .expect("timed out waiting for events — possible lost wakeup");
+
+        assert_eq!(
+            events.len(),
+            event_count as usize,
+            "lost {} events",
+            event_count as usize - events.len()
+        );
+
+        // Verify sequential order and seq_no
+        for (i, event) in events.iter().enumerate() {
+            assert_eq!(
+                event.event.entity_type(),
+                Some(format!("stress_{i}").as_str()),
+                "event at index {i} has wrong type"
+            );
+            assert_eq!(event.seq_no, Some((i + 1) as u64));
+        }
     }
 }

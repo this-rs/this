@@ -439,14 +439,34 @@ pub struct DeliverConfig {
 
 impl DeliverConfig {
     /// Get all sink names this deliver step targets
+    ///
+    /// If both `sink` and `sinks` are present, they are merged (with a warning).
     pub fn sink_names(&self) -> Vec<&str> {
-        if let Some(sinks) = &self.sinks {
-            sinks.iter().map(|s| s.as_str()).collect()
-        } else if let Some(sink) = &self.sink {
-            vec![sink.as_str()]
-        } else {
-            vec![]
+        let mut names = Vec::new();
+
+        // Include the singular `sink` if present
+        if let Some(sink) = &self.sink {
+            names.push(sink.as_str());
         }
+
+        // Include all `sinks` if present
+        if let Some(sinks) = &self.sinks {
+            for s in sinks {
+                let name = s.as_str();
+                if !names.contains(&name) {
+                    names.push(name);
+                }
+            }
+        }
+
+        if self.sink.is_some() && self.sinks.is_some() {
+            tracing::warn!(
+                "deliver: both 'sink' and 'sinks' are defined — merging them. \
+                 Prefer using only 'sinks' for clarity."
+            );
+        }
+
+        names
     }
 }
 
@@ -710,6 +730,31 @@ flows: []
             sinks: None,
         };
         assert!(config.sink_names().is_empty());
+    }
+
+    #[test]
+    fn test_deliver_config_both_sink_and_sinks_merged() {
+        let config = DeliverConfig {
+            sink: Some("push".to_string()),
+            sinks: Some(vec!["in-app".to_string(), "websocket".to_string()]),
+        };
+        let names = config.sink_names();
+        assert_eq!(names.len(), 3);
+        assert!(names.contains(&"push"));
+        assert!(names.contains(&"in-app"));
+        assert!(names.contains(&"websocket"));
+    }
+
+    #[test]
+    fn test_deliver_config_both_with_duplicate_deduped() {
+        let config = DeliverConfig {
+            sink: Some("push".to_string()),
+            sinks: Some(vec!["push".to_string(), "in-app".to_string()]),
+        };
+        let names = config.sink_names();
+        // "push" should appear only once
+        assert_eq!(names.len(), 2);
+        assert_eq!(names, vec!["push", "in-app"]);
     }
 
     #[test]
