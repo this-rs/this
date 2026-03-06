@@ -1038,4 +1038,187 @@ mod tests {
         assert!(sdl.contains("type Mutation {"), "should have Mutation root");
         assert!(sdl.contains("schema {"), "should have schema definition");
     }
+
+    // -----------------------------------------------------------------------
+    // EventBus + NotificationStore integration tests
+    // -----------------------------------------------------------------------
+
+    #[cfg(feature = "graphql")]
+    fn build_host_with_events(
+        entities: Vec<EntityEntry<'_>>,
+        links: Vec<LinkDefinition>,
+    ) -> Arc<ServerHost> {
+        use crate::core::events::EventBus;
+        use crate::events::sinks::in_app::NotificationStore;
+
+        let link_service = Arc::new(InMemoryLinkService::new());
+        let entity_configs: Vec<EntityConfig> = entities
+            .iter()
+            .map(|(singular, plural, _)| EntityConfig {
+                singular: singular.to_string(),
+                plural: plural.to_string(),
+                auth: EntityAuthConfig::default(),
+            })
+            .collect();
+
+        let mut registry = EntityRegistry::new();
+        let mut fetchers: HashMap<String, Arc<dyn EntityFetcher>> = HashMap::new();
+
+        for (singular, plural, fetcher) in &entities {
+            registry.register(Box::new(StubDescriptor::new(singular, plural)));
+            if let Some(f) = fetcher {
+                fetchers.insert(singular.to_string(), f.clone());
+            }
+        }
+
+        let config = LinksConfig {
+            entities: entity_configs,
+            links,
+            validation_rules: None,
+            events: None,
+            sinks: None,
+        };
+
+        let notification_store = Arc::new(NotificationStore::new());
+
+        Arc::new(
+            ServerHost::from_builder_components(
+                link_service,
+                config,
+                registry,
+                fetchers,
+                HashMap::new(),
+            )
+            .expect("should build test host")
+            .with_event_bus(EventBus::new(256))
+            .with_notification_store(notification_store),
+        )
+    }
+
+    #[cfg(feature = "graphql")]
+    #[test]
+    fn test_generate_query_root_with_notification_store() {
+        let host = build_host_with_events(vec![("order", "orders", None)], vec![]);
+        let generator = SchemaGenerator::new(host);
+        let query_root = generator.generate_query_root();
+
+        assert!(
+            query_root.contains("notifications(userId: String!"),
+            "should have notifications query: {}",
+            query_root
+        );
+        assert!(
+            query_root.contains("unreadNotificationCount(userId: String!): Int!"),
+            "should have unreadNotificationCount query: {}",
+            query_root
+        );
+    }
+
+    #[cfg(feature = "graphql")]
+    #[test]
+    fn test_generate_mutation_root_with_notification_store() {
+        let host = build_host_with_events(vec![("order", "orders", None)], vec![]);
+        let generator = SchemaGenerator::new(host);
+        let mutation_root = generator.generate_mutation_root();
+
+        assert!(
+            mutation_root.contains("markNotificationAsRead(id: ID!): Boolean!"),
+            "should have markNotificationAsRead: {}",
+            mutation_root
+        );
+        assert!(
+            mutation_root.contains("markAllNotificationsAsRead(userId: String!): Int!"),
+            "should have markAllNotificationsAsRead: {}",
+            mutation_root
+        );
+        assert!(
+            mutation_root.contains("deleteNotification(id: ID!): Boolean!"),
+            "should have deleteNotification: {}",
+            mutation_root
+        );
+    }
+
+    #[cfg(feature = "graphql")]
+    #[test]
+    fn test_generate_subscription_root_content() {
+        let host = build_host_with_events(vec![("order", "orders", None)], vec![]);
+        let generator = SchemaGenerator::new(host);
+        let sub = generator.generate_subscription_root();
+
+        assert!(
+            sub.contains("type Subscription {"),
+            "should have Subscription type"
+        );
+        assert!(sub.contains("onEvent("), "should have onEvent subscription");
+        assert!(
+            sub.contains("EventEnvelope!"),
+            "should reference EventEnvelope"
+        );
+        assert!(
+            sub.contains("onNotification(userId: String): Notification!"),
+            "should have onNotification"
+        );
+        assert!(
+            sub.contains("type EventEnvelope {"),
+            "should have EventEnvelope type"
+        );
+        assert!(
+            sub.contains("type Notification {"),
+            "should have Notification type"
+        );
+        assert!(
+            sub.contains("recipientId: String!"),
+            "Notification should have recipientId"
+        );
+        assert!(
+            sub.contains("type NotificationList {"),
+            "should have NotificationList type"
+        );
+        assert!(
+            sub.contains("notifications: [Notification!]!"),
+            "NotificationList should have notifications"
+        );
+    }
+
+    #[cfg(feature = "graphql")]
+    #[tokio::test]
+    async fn test_generate_sdl_includes_subscriptions() {
+        let order_sample = serde_json::json!({
+            "id": "uuid-1",
+            "name": "Test",
+        });
+
+        let host = build_host_with_events(
+            vec![(
+                "order",
+                "orders",
+                Some(Arc::new(MockFetcher::with_sample(order_sample))),
+            )],
+            vec![],
+        );
+
+        let generator = SchemaGenerator::new(host);
+        let sdl = generator.generate_sdl().await;
+
+        assert!(
+            sdl.contains("subscription: Subscription"),
+            "schema should include subscription: {}",
+            sdl
+        );
+        assert!(
+            sdl.contains("type Subscription {"),
+            "should have Subscription type: {}",
+            sdl
+        );
+        assert!(
+            sdl.contains("type EventEnvelope {"),
+            "should have EventEnvelope type: {}",
+            sdl
+        );
+        assert!(
+            sdl.contains("type Notification {"),
+            "should have Notification type: {}",
+            sdl
+        );
+    }
 }
