@@ -7,6 +7,7 @@ mod dynamic_schema;
 mod executor;
 mod schema;
 mod schema_generator; // Now a directory with sub-modules
+mod subscription_handler;
 
 #[cfg(feature = "graphql")]
 use crate::server::host::ServerHost;
@@ -72,11 +73,17 @@ impl GraphQLExposure {
     pub fn build_router(host: Arc<ServerHost>) -> Result<Router> {
         // Create the GraphQL router with playground, query endpoint, and schema endpoint
         // The executor will be created lazily on first request
-        let router = Router::new()
+        let mut router = Router::new()
             .route("/graphql", post(graphql_handler_custom))
             .route("/graphql/playground", get(graphql_playground))
-            .route("/graphql/schema", get(graphql_dynamic_schema))
-            .layer(Extension(host));
+            .route("/graphql/schema", get(graphql_dynamic_schema));
+
+        // Add WebSocket subscription endpoint if EventBus or NotificationStore is configured
+        if host.event_bus().is_some() || host.notification_store().is_some() {
+            router = router.route("/graphql/ws", get(subscription_handler::graphql_ws_handler));
+        }
+
+        let router = router.layer(Extension(host));
 
         Ok(router)
     }

@@ -1,4 +1,8 @@
 //! Mutation execution for GraphQL
+//!
+//! After each successful mutation, events are published to the EventBus
+//! (if configured on the host) so that WebSocket, SSE, and GraphQL
+//! subscription clients receive real-time notifications.
 
 use anyhow::{Result, bail};
 use graphql_parser::query::Field;
@@ -9,6 +13,7 @@ use uuid::Uuid;
 use super::field_resolver;
 use super::link_mutations;
 use super::utils;
+use crate::core::events::{EntityEvent, FrameworkEvent};
 use crate::server::host::ServerHost;
 
 /// Resolve a mutation field (e.g., "createOrder", "updateInvoice", etc.)
@@ -58,6 +63,32 @@ pub async fn resolve_mutation_field(
         return link_mutations::delete_link_mutation(host, field).await;
     }
 
+    // ── Notification mutations (when NotificationStore is configured) ──
+    if let Some(store) = host.notification_store() {
+        if field_name == "markNotificationAsRead" {
+            let id = utils::get_string_arg(field, "id")
+                .ok_or_else(|| anyhow::anyhow!("Missing required argument 'id'"))?;
+            let uuid = Uuid::parse_str(&id)?;
+            let marked = store.mark_as_read(&[uuid], None).await;
+            return Ok(Value::Bool(marked > 0));
+        }
+
+        if field_name == "markAllNotificationsAsRead" {
+            let user_id = utils::get_string_arg(field, "userId")
+                .ok_or_else(|| anyhow::anyhow!("Missing required argument 'userId'"))?;
+            let marked = store.mark_all_as_read(&user_id).await;
+            return Ok(serde_json::json!(marked));
+        }
+
+        if field_name == "deleteNotification" {
+            let id = utils::get_string_arg(field, "id")
+                .ok_or_else(|| anyhow::anyhow!("Missing required argument 'id'"))?;
+            let uuid = Uuid::parse_str(&id)?;
+            let deleted = store.delete(&uuid).await;
+            return Ok(Value::Bool(deleted));
+        }
+    }
+
     bail!("Unknown mutation field: {}", field_name);
 }
 
@@ -76,6 +107,16 @@ async fn create_entity_mutation(
     // Create the entity
     if let Some(creator) = host.entity_creators.get(&entity_type) {
         let created = creator.create_from_json(data).await?;
+
+        // Publish event to EventBus
+        if let Some(event_bus) = host.event_bus() {
+            let entity_id = utils::extract_uuid_from_value(&created).unwrap_or_default();
+            event_bus.publish(FrameworkEvent::Entity(EntityEvent::Created {
+                entity_type: entity_type.clone(),
+                entity_id,
+                data: created.clone(),
+            }));
+        }
 
         // Resolve sub-fields
         let resolved = field_resolver::resolve_entity_fields(
@@ -111,6 +152,15 @@ async fn update_entity_mutation(
     if let Some(creator) = host.entity_creators.get(&entity_type) {
         let updated = creator.update_from_json(&uuid, data).await?;
 
+        // Publish event to EventBus
+        if let Some(event_bus) = host.event_bus() {
+            event_bus.publish(FrameworkEvent::Entity(EntityEvent::Updated {
+                entity_type: entity_type.clone(),
+                entity_id: uuid,
+                data: updated.clone(),
+            }));
+        }
+
         // Resolve sub-fields
         let resolved = field_resolver::resolve_entity_fields(
             host,
@@ -142,6 +192,15 @@ async fn delete_entity_mutation(
     // Delete the entity
     if let Some(creator) = host.entity_creators.get(&entity_type) {
         creator.delete(&uuid).await?;
+
+        // Publish event to EventBus
+        if let Some(event_bus) = host.event_bus() {
+            event_bus.publish(FrameworkEvent::Entity(EntityEvent::Deleted {
+                entity_type: entity_type.clone(),
+                entity_id: uuid,
+            }));
+        }
+
         Ok(Value::Bool(true))
     } else {
         bail!("Unknown entity type: {}", entity_type);
@@ -258,6 +317,8 @@ mod tests {
                 auth: None,
             }],
             validation_rules: None,
+            events: None,
+            sinks: None,
         };
 
         let mut registry = EntityRegistry::new();
@@ -473,5 +534,257 @@ mod tests {
             Value::Bool(false),
             "should return false when no link found"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Tests with EventBus (cover event publishing paths)
+    // -----------------------------------------------------------------------
+
+    fn build_test_host_with_event_bus() -> Arc<ServerHost> {
+        use crate::core::events::EventBus;
+
+        let link_service = Arc::new(InMemoryLinkService::new());
+        let config = LinksConfig {
+            entities: vec![
+                EntityConfig {
+                    singular: "order".to_string(),
+                    plural: "orders".to_string(),
+                    auth: EntityAuthConfig::default(),
+                },
+                EntityConfig {
+                    singular: "invoice".to_string(),
+                    plural: "invoices".to_string(),
+                    auth: EntityAuthConfig::default(),
+                },
+            ],
+            links: vec![LinkDefinition {
+                link_type: "has_invoice".to_string(),
+                source_type: "order".to_string(),
+                target_type: "invoice".to_string(),
+                forward_route_name: "invoices".to_string(),
+                reverse_route_name: "order".to_string(),
+                description: None,
+                required_fields: None,
+                auth: None,
+            }],
+            validation_rules: None,
+            events: None,
+            sinks: None,
+        };
+
+        let mut registry = EntityRegistry::new();
+        registry.register(Box::new(StubDescriptor::new("order", "orders")));
+        registry.register(Box::new(StubDescriptor::new("invoice", "invoices")));
+
+        let mut fetchers: HashMap<String, Arc<dyn EntityFetcher>> = HashMap::new();
+        fetchers.insert("order".to_string(), Arc::new(MockFetcher));
+        fetchers.insert("invoice".to_string(), Arc::new(MockFetcher));
+
+        let mut creators: HashMap<String, Arc<dyn EntityCreator>> = HashMap::new();
+        creators.insert("order".to_string(), Arc::new(MockCreator));
+        creators.insert("invoice".to_string(), Arc::new(MockCreator));
+
+        Arc::new(
+            ServerHost::from_builder_components(link_service, config, registry, fetchers, creators)
+                .expect("should build test host")
+                .with_event_bus(EventBus::new(256)),
+        )
+    }
+
+    #[tokio::test]
+    async fn test_create_entity_publishes_event() {
+        let host = build_test_host_with_event_bus();
+        let executor = GraphQLExecutor::new(host).await;
+
+        let result = executor
+            .execute(
+                r#"mutation { createOrder(data: {name: "test"}) { id name } }"#,
+                None,
+            )
+            .await
+            .expect("createOrder should succeed with EventBus");
+
+        let created = result
+            .get("data")
+            .and_then(|d| d.get("createOrder"))
+            .expect("should have createOrder");
+        assert!(created.get("id").is_some());
+    }
+
+    #[tokio::test]
+    async fn test_update_entity_publishes_event() {
+        let host = build_test_host_with_event_bus();
+        let executor = GraphQLExecutor::new(host).await;
+        let order_id = Uuid::new_v4();
+
+        let query = format!(
+            r#"mutation {{ updateOrder(id: "{}", data: {{name: "updated"}}) {{ id }} }}"#,
+            order_id
+        );
+        let result = executor
+            .execute(&query, None)
+            .await
+            .expect("updateOrder should succeed with EventBus");
+
+        let updated = result
+            .get("data")
+            .and_then(|d| d.get("updateOrder"))
+            .expect("should have updateOrder");
+        assert!(updated.get("id").is_some());
+    }
+
+    #[tokio::test]
+    async fn test_delete_entity_publishes_event() {
+        let host = build_test_host_with_event_bus();
+        let executor = GraphQLExecutor::new(host).await;
+        let order_id = Uuid::new_v4();
+
+        let query = format!(r#"mutation {{ deleteOrder(id: "{}") }}"#, order_id);
+        let result = executor
+            .execute(&query, None)
+            .await
+            .expect("deleteOrder should succeed with EventBus");
+
+        let deleted = result
+            .get("data")
+            .and_then(|d| d.get("deleteOrder"))
+            .expect("should have deleteOrder");
+        assert_eq!(*deleted, Value::Bool(true));
+    }
+
+    // -----------------------------------------------------------------------
+    // Tests with NotificationStore (cover notification mutation paths)
+    // -----------------------------------------------------------------------
+
+    fn build_test_host_with_notifications() -> (
+        Arc<ServerHost>,
+        Arc<crate::events::sinks::in_app::NotificationStore>,
+    ) {
+        use crate::core::events::EventBus;
+        use crate::events::sinks::in_app::NotificationStore;
+
+        let link_service = Arc::new(InMemoryLinkService::new());
+        let config = LinksConfig {
+            entities: vec![
+                EntityConfig {
+                    singular: "order".to_string(),
+                    plural: "orders".to_string(),
+                    auth: EntityAuthConfig::default(),
+                },
+                EntityConfig {
+                    singular: "invoice".to_string(),
+                    plural: "invoices".to_string(),
+                    auth: EntityAuthConfig::default(),
+                },
+            ],
+            links: vec![LinkDefinition {
+                link_type: "has_invoice".to_string(),
+                source_type: "order".to_string(),
+                target_type: "invoice".to_string(),
+                forward_route_name: "invoices".to_string(),
+                reverse_route_name: "order".to_string(),
+                description: None,
+                required_fields: None,
+                auth: None,
+            }],
+            validation_rules: None,
+            events: None,
+            sinks: None,
+        };
+
+        let mut registry = EntityRegistry::new();
+        registry.register(Box::new(StubDescriptor::new("order", "orders")));
+        registry.register(Box::new(StubDescriptor::new("invoice", "invoices")));
+
+        let mut fetchers: HashMap<String, Arc<dyn EntityFetcher>> = HashMap::new();
+        fetchers.insert("order".to_string(), Arc::new(MockFetcher));
+        fetchers.insert("invoice".to_string(), Arc::new(MockFetcher));
+
+        let mut creators: HashMap<String, Arc<dyn EntityCreator>> = HashMap::new();
+        creators.insert("order".to_string(), Arc::new(MockCreator));
+        creators.insert("invoice".to_string(), Arc::new(MockCreator));
+
+        let notification_store = Arc::new(NotificationStore::new());
+
+        let host = Arc::new(
+            ServerHost::from_builder_components(link_service, config, registry, fetchers, creators)
+                .expect("should build test host")
+                .with_event_bus(EventBus::new(256))
+                .with_notification_store(notification_store.clone()),
+        );
+
+        (host, notification_store)
+    }
+
+    #[tokio::test]
+    async fn test_mark_notification_as_read_mutation() {
+        use crate::events::sinks::in_app::StoredNotification;
+
+        let (host, store) = build_test_host_with_notifications();
+        let notif_id = Uuid::new_v4();
+        store
+            .insert(StoredNotification {
+                id: notif_id,
+                recipient_id: "user-1".to_string(),
+                notification_type: "test".to_string(),
+                title: "Test Title".to_string(),
+                body: "Test body".to_string(),
+                data: json!({}),
+                read: false,
+                created_at: chrono::Utc::now(),
+            })
+            .await;
+
+        let executor = GraphQLExecutor::new(host).await;
+        let query = format!(
+            r#"mutation {{ markNotificationAsRead(id: "{}") }}"#,
+            notif_id
+        );
+        let result = executor
+            .execute(&query, None)
+            .await
+            .expect("markNotificationAsRead should succeed");
+
+        let marked = result
+            .get("data")
+            .and_then(|d| d.get("markNotificationAsRead"))
+            .expect("should have result");
+        assert_eq!(*marked, Value::Bool(true));
+    }
+
+    #[tokio::test]
+    async fn test_mark_all_notifications_as_read_mutation() {
+        use crate::events::sinks::in_app::StoredNotification;
+
+        let (host, store) = build_test_host_with_notifications();
+        for i in 0..3 {
+            store
+                .insert(StoredNotification {
+                    id: Uuid::new_v4(),
+                    recipient_id: "user-42".to_string(),
+                    notification_type: "info".to_string(),
+                    title: format!("Notification {}", i),
+                    body: "body".to_string(),
+                    data: json!({}),
+                    read: false,
+                    created_at: chrono::Utc::now(),
+                })
+                .await;
+        }
+
+        let executor = GraphQLExecutor::new(host).await;
+        let result = executor
+            .execute(
+                r#"mutation { markAllNotificationsAsRead(userId: "user-42") }"#,
+                None,
+            )
+            .await
+            .expect("markAllNotificationsAsRead should succeed");
+
+        let count = result
+            .get("data")
+            .and_then(|d| d.get("markAllNotificationsAsRead"))
+            .expect("should have result");
+        assert_eq!(*count, json!(3));
     }
 }

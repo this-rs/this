@@ -14,6 +14,19 @@
 //!                           EventBus ──broadcast──▶ filter ──▶ Client
 //! ```
 //!
+//! # Sink Integration
+//!
+//! When a `SinkRegistry` is configured on the host, `build_router()` automatically
+//! wires a `WebSocketSink` for every sink of type `WebSocket` declared in the YAML
+//! config. The sink dispatches notifications through the `ConnectionManagerDispatcher`.
+//!
+//! ```text
+//! FlowRuntime → DeliverOp → SinkRegistry → WebSocketSink
+//!                                              └─ ConnectionManagerDispatcher
+//!                                                   └─ ConnectionManager
+//!                                                        └─ send_to_user() / broadcast_payload()
+//! ```
+//!
 //! # Protocol
 //!
 //! Client → Server (JSON):
@@ -25,13 +38,18 @@
 //! - `{"type": "event", "data": {...}}`
 //! - `{"type": "subscribed", "subscription_id": "..."}`
 //! - `{"type": "unsubscribed", "subscription_id": "..."}`
+//! - `{"type": "notification", "data": {...}}`
 //! - `{"type": "pong"}`
 //! - `{"type": "error", "message": "..."}`
 
+mod dispatcher;
 mod handler;
 mod manager;
 pub mod protocol;
 
+use crate::config::sinks::SinkType;
+use crate::events::sinks::Sink;
+use crate::events::sinks::websocket::WebSocketSink;
 use crate::server::host::ServerHost;
 use anyhow::Result;
 use axum::{Router, routing::get};
@@ -48,6 +66,13 @@ use std::sync::Arc;
 /// The `ServerHost` must have an `EventBus` configured (via `ServerBuilder::with_event_bus()`)
 /// for the WebSocket exposure to function. Without an EventBus, the WebSocket endpoint
 /// will still accept connections but no events will be broadcast.
+///
+/// # Sink Auto-wiring
+///
+/// If the host has a `SinkRegistry` and YAML config declares sinks of type `websocket`,
+/// `build_router()` will automatically register a `WebSocketSink` backed by the
+/// `ConnectionManager` for each such sink. This enables the `deliver` operator in
+/// event pipelines to dispatch payloads to connected WebSocket clients.
 ///
 /// # Example
 ///
@@ -76,6 +101,10 @@ impl WebSocketExposure {
     ///
     /// Creates a `ConnectionManager` that subscribes to the host's `EventBus`,
     /// spawns the event dispatch loop, and returns a router with the `/ws` endpoint.
+    ///
+    /// If the host has a `SinkRegistry`, this also registers a `WebSocketSink` for
+    /// every YAML-declared sink of type `websocket`, enabling the event pipeline
+    /// to dispatch notifications to connected clients.
     pub fn build_router(host: Arc<ServerHost>) -> Result<Router> {
         let connection_manager = Arc::new(manager::ConnectionManager::new(host.clone()));
 
@@ -94,10 +123,48 @@ impl WebSocketExposure {
             );
         }
 
+        // Auto-wire WebSocket sinks into the SinkRegistry
+        Self::wire_websocket_sinks(&host, &connection_manager);
+
         let router = Router::new()
             .route("/ws", get(handler::ws_handler))
             .with_state(connection_manager);
 
         Ok(router)
+    }
+
+    /// Wire WebSocket sinks into the SinkRegistry
+    ///
+    /// For each sink declared as `type: websocket` in the YAML config, register
+    /// a `WebSocketSink` backed by the `ConnectionManager` in the `SinkRegistry`.
+    fn wire_websocket_sinks(
+        host: &ServerHost,
+        connection_manager: &Arc<manager::ConnectionManager>,
+    ) {
+        let sink_registry = match &host.sink_registry {
+            Some(registry) => registry,
+            None => return,
+        };
+
+        let sink_configs = match &host.config.sinks {
+            Some(configs) => configs,
+            None => return,
+        };
+
+        // Create the dispatcher (shared by all WebSocket sinks)
+        let ws_dispatcher = Arc::new(dispatcher::ConnectionManagerDispatcher::new(
+            connection_manager.clone(),
+        ));
+        let ws_sink: Arc<dyn Sink> = Arc::new(WebSocketSink::new(ws_dispatcher));
+
+        for config in sink_configs {
+            if config.sink_type == SinkType::WebSocket {
+                sink_registry.register(&config.name, ws_sink.clone());
+                tracing::info!(
+                    sink = %config.name,
+                    "auto-wired WebSocket sink to ConnectionManager"
+                );
+            }
+        }
     }
 }

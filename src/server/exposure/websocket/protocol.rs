@@ -36,6 +36,7 @@
 
 use crate::core::events::{EventEnvelope, FrameworkEvent};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use uuid::Uuid;
 
 /// Messages sent from client to server
@@ -90,6 +91,15 @@ pub enum ServerMessage {
     Welcome {
         /// Unique connection ID
         connection_id: String,
+    },
+    /// A notification payload dispatched via the sink system
+    ///
+    /// Unlike `Event` (which is triggered by subscription filters), this message
+    /// is pushed by the server-side sink pipeline (e.g., `deliver` operator).
+    /// The client does NOT need to subscribe to receive these.
+    Notification {
+        /// The notification payload (built by the pipeline's `map` operator)
+        data: Value,
     },
 }
 
@@ -576,5 +586,28 @@ mod tests {
             }
             _ => panic!("Expected Subscribed message"),
         }
+    }
+
+    #[test]
+    fn test_server_message_notification_roundtrip() {
+        let msg = ServerMessage::Notification {
+            data: json!({"title": "New follower", "body": "Alice followed you"}),
+        };
+
+        let json_str = serde_json::to_string(&msg).expect("Notification should serialize");
+        let deserialized: ServerMessage =
+            serde_json::from_str(&json_str).expect("Notification should deserialize");
+
+        match deserialized {
+            ServerMessage::Notification { data } => {
+                assert_eq!(data["title"], "New follower");
+                assert_eq!(data["body"], "Alice followed you");
+            }
+            _ => panic!("Expected Notification message"),
+        }
+
+        // Verify the type tag
+        let json_val: serde_json::Value = serde_json::from_str(&json_str).unwrap();
+        assert_eq!(json_val["type"], "notification");
     }
 }

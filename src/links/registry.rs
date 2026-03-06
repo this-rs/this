@@ -393,6 +393,8 @@ mod tests {
                 },
             ],
             validation_rules: None,
+            events: None,
+            sinks: None,
         }
     }
 
@@ -496,6 +498,8 @@ mod tests {
                 },
             ],
             validation_rules: None,
+            events: None,
+            sinks: None,
         }
     }
 
@@ -538,6 +542,8 @@ mod tests {
                 },
             ],
             validation_rules: None,
+            events: None,
+            sinks: None,
         }
     }
 
@@ -548,6 +554,8 @@ mod tests {
             entities: vec![],
             links: vec![],
             validation_rules: None,
+            events: None,
+            sinks: None,
         }
     }
 
@@ -785,6 +793,8 @@ mod tests {
                 auth: None,
             }],
             validation_rules: None,
+            events: None,
+            sinks: None,
         });
 
         // Manually build a chain with an unknown entity to exercise fallback
