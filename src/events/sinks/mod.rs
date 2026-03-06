@@ -40,7 +40,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use serde_json::Value;
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 /// Resolve the recipient ID from multiple sources
 ///
@@ -108,36 +108,40 @@ pub trait Sink: Send + Sync + std::fmt::Debug {
 ///
 /// # Thread Safety
 ///
-/// The registry is immutable after construction — sinks are registered
-/// during startup and never removed. No locking needed for reads.
+/// Uses interior mutability (`RwLock`) so that sinks can be registered
+/// after initial construction (e.g., the WebSocket sink is wired when
+/// `WebSocketExposure::build_router()` is called, after the host is
+/// already wrapped in `Arc`).
 #[derive(Debug)]
 pub struct SinkRegistry {
-    sinks: HashMap<String, Arc<dyn Sink>>,
+    sinks: RwLock<HashMap<String, Arc<dyn Sink>>>,
 }
 
 impl SinkRegistry {
     /// Create an empty sink registry
     pub fn new() -> Self {
         Self {
-            sinks: HashMap::new(),
+            sinks: RwLock::new(HashMap::new()),
         }
     }
 
     /// Register a sink by name
     ///
     /// If a sink with the same name already exists, it is replaced.
-    pub fn register(&mut self, name: impl Into<String>, sink: Arc<dyn Sink>) {
-        self.sinks.insert(name.into(), sink);
+    /// This method uses interior mutability so it can be called through
+    /// `&self` (even behind `Arc`).
+    pub fn register(&self, name: impl Into<String>, sink: Arc<dyn Sink>) {
+        self.sinks.write().unwrap().insert(name.into(), sink);
     }
 
     /// Look up a sink by name
-    pub fn get(&self, name: &str) -> Option<&Arc<dyn Sink>> {
-        self.sinks.get(name)
+    pub fn get(&self, name: &str) -> Option<Arc<dyn Sink>> {
+        self.sinks.read().unwrap().get(name).cloned()
     }
 
     /// Get all registered sink names
-    pub fn names(&self) -> Vec<&str> {
-        self.sinks.keys().map(|s| s.as_str()).collect()
+    pub fn names(&self) -> Vec<String> {
+        self.sinks.read().unwrap().keys().cloned().collect()
     }
 
     /// Deliver a payload to a named sink
@@ -151,7 +155,6 @@ impl SinkRegistry {
         context_vars: &HashMap<String, Value>,
     ) -> Result<()> {
         let sink = self
-            .sinks
             .get(sink_name)
             .ok_or_else(|| anyhow::anyhow!("sink '{}' not found in registry", sink_name))?;
 
@@ -160,12 +163,12 @@ impl SinkRegistry {
 
     /// Number of registered sinks
     pub fn len(&self) -> usize {
-        self.sinks.len()
+        self.sinks.read().unwrap().len()
     }
 
     /// Whether the registry is empty
     pub fn is_empty(&self) -> bool {
-        self.sinks.is_empty()
+        self.sinks.read().unwrap().is_empty()
     }
 }
 
@@ -241,7 +244,7 @@ impl SinkFactory {
         &self,
         sink_configs: &[crate::config::sinks::SinkConfig],
     ) -> SinkRegistry {
-        let mut registry = SinkRegistry::new();
+        let registry = SinkRegistry::new();
 
         for config in sink_configs {
             match config.sink_type {
@@ -354,7 +357,7 @@ mod tests {
 
     #[test]
     fn test_registry_register_and_get() {
-        let mut registry = SinkRegistry::new();
+        let registry = SinkRegistry::new();
         let sink = Arc::new(TestSink::new("test-sink"));
         registry.register("test-sink", sink);
 
@@ -365,7 +368,7 @@ mod tests {
 
     #[test]
     fn test_registry_names() {
-        let mut registry = SinkRegistry::new();
+        let registry = SinkRegistry::new();
         registry.register("a", Arc::new(TestSink::new("a")));
         registry.register("b", Arc::new(TestSink::new("b")));
 
@@ -376,7 +379,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_registry_deliver() {
-        let mut registry = SinkRegistry::new();
+        let registry = SinkRegistry::new();
         let sink = Arc::new(TestSink::new("test-sink"));
         let deliveries = sink.deliveries.clone();
         registry.register("test-sink", sink);
@@ -412,7 +415,7 @@ mod tests {
 
     #[test]
     fn test_registry_replace_sink() {
-        let mut registry = SinkRegistry::new();
+        let registry = SinkRegistry::new();
         registry.register("s", Arc::new(TestSink::new("s-v1")));
         registry.register("s", Arc::new(TestSink::new("s-v2")));
 
