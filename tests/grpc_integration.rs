@@ -1455,7 +1455,7 @@ async fn test_grpc_proto_export_endpoint() {
     let (host, _order_store, _invoice_store) = build_test_host();
     let grpc_router = GrpcExposure::build_router(host).unwrap();
 
-    let server = TestServer::new(grpc_router).unwrap();
+    let server = TestServer::new(grpc_router);
 
     // Fetch the proto export via HTTP GET
     let response = server.get("/grpc/proto").await;
