@@ -154,11 +154,10 @@ impl FlowRuntime {
             }
 
             // Ack the exact event we just processed
-            if let Some(seq) = envelope.seq_no {
-                if let Err(e) = self.event_log.ack(&self.consumer_name, seq).await {
+            if let Some(seq) = envelope.seq_no
+                && let Err(e) = self.event_log.ack(&self.consumer_name, seq).await {
                     tracing::warn!(error = %e, "failed to ack event");
                 }
-            }
         }
 
         tracing::info!("flow runtime stream ended");

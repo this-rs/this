@@ -96,7 +96,7 @@ impl PipelineOperator for BatchOp {
         let item_value = ctx
             .get_var("source_id")
             .or_else(|| ctx.get_var("entity_id"))
-            .map(|v| value_to_string(v))
+            .map(value_to_string)
             .unwrap_or_default();
 
         let now = Instant::now();

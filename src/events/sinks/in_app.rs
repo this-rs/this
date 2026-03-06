@@ -333,8 +333,8 @@ impl Sink for InAppNotificationSink {
         let data = payload.get("data").cloned().unwrap_or(Value::Null);
 
         // Check preferences if available
-        if let Some(prefs_store) = &self.preferences {
-            if !prefs_store.is_enabled(&recipient, &notification_type).await {
+        if let Some(prefs_store) = &self.preferences
+            && !prefs_store.is_enabled(&recipient, &notification_type).await {
                 tracing::debug!(
                     recipient = %recipient,
                     notification_type = %notification_type,
@@ -342,7 +342,6 @@ impl Sink for InAppNotificationSink {
                 );
                 return Ok(());
             }
-        }
 
         // Create and store the notification
         let notification = StoredNotification {

@@ -139,7 +139,7 @@ impl ResolveOp {
     ///
     /// Tries each fetcher until one returns a result.
     async fn fetch_entity_by_id(&self, ctx: &FlowContext, id: &Uuid) -> Result<Value> {
-        for (_entity_type, fetcher) in &ctx.entity_fetchers {
+        for fetcher in ctx.entity_fetchers.values() {
             if let Ok(entity) = fetcher.fetch_as_json(id).await {
                 return Ok(entity);
             }

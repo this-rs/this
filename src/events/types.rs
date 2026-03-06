@@ -8,23 +8,19 @@ pub type SeqNo = u64;
 /// Seek position for event log consumers
 ///
 /// Determines where a consumer starts reading from when subscribing.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub enum SeekPosition {
     /// Start from the very beginning — replay all events
     Beginning,
     /// Resume from the last acknowledged position for this consumer
     LastAcknowledged,
     /// Start from now — only receive future events
+    #[default]
     Latest,
     /// Start from a specific sequence number
     Sequence(SeqNo),
 }
 
-impl Default for SeekPosition {
-    fn default() -> Self {
-        SeekPosition::Latest
-    }
-}
 
 impl From<crate::config::SeekMode> for SeekPosition {
     fn from(mode: crate::config::SeekMode) -> Self {

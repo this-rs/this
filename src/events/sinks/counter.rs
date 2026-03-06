@@ -47,7 +47,7 @@ pub enum CounterOperation {
 
 impl CounterOperation {
     /// Parse from a string
-    pub fn from_str(s: &str) -> Result<Self> {
+    pub fn parse(s: &str) -> Result<Self> {
         match s {
             "increment" | "inc" | "add" => Ok(Self::Increment),
             "decrement" | "dec" | "sub" | "subtract" => Ok(Self::Decrement),
@@ -182,7 +182,7 @@ impl Sink for CounterSink {
 
         // Operation: payload overrides config default
         let operation = if let Some(op_str) = payload.get("operation").and_then(|v| v.as_str()) {
-            CounterOperation::from_str(op_str)?
+            CounterOperation::parse(op_str)?
         } else {
             self.config.operation.clone()
         };
@@ -513,26 +513,26 @@ mod tests {
     #[test]
     fn test_counter_operation_parse() {
         assert_eq!(
-            CounterOperation::from_str("increment").unwrap(),
+            CounterOperation::parse("increment").unwrap(),
             CounterOperation::Increment
         );
         assert_eq!(
-            CounterOperation::from_str("inc").unwrap(),
+            CounterOperation::parse("inc").unwrap(),
             CounterOperation::Increment
         );
         assert_eq!(
-            CounterOperation::from_str("decrement").unwrap(),
+            CounterOperation::parse("decrement").unwrap(),
             CounterOperation::Decrement
         );
         assert_eq!(
-            CounterOperation::from_str("dec").unwrap(),
+            CounterOperation::parse("dec").unwrap(),
             CounterOperation::Decrement
         );
         assert_eq!(
-            CounterOperation::from_str("set").unwrap(),
+            CounterOperation::parse("set").unwrap(),
             CounterOperation::Set
         );
-        assert!(CounterOperation::from_str("invalid").is_err());
+        assert!(CounterOperation::parse("invalid").is_err());
     }
 
     #[test]

@@ -22,6 +22,7 @@ use std::collections::HashMap;
 ///       seek: last_acknowledged
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Default)]
 pub struct EventsConfig {
     /// Event backend configuration (memory, nats, kafka, redis)
     #[serde(default)]
@@ -36,15 +37,6 @@ pub struct EventsConfig {
     pub consumers: Vec<ConsumerConfig>,
 }
 
-impl Default for EventsConfig {
-    fn default() -> Self {
-        Self {
-            backend: BackendConfig::default(),
-            flows: vec![],
-            consumers: vec![],
-        }
-    }
-}
 
 /// Event backend configuration
 ///
@@ -492,20 +484,17 @@ pub struct ConsumerConfig {
 /// Seek mode for consumers — determines where to start reading from
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum SeekMode {
     /// Start from the very beginning (replay all events)
     Beginning,
     /// Resume from the last acknowledged position
     LastAcknowledged,
     /// Start from now (only receive future events)
+    #[default]
     Latest,
 }
 
-impl Default for SeekMode {
-    fn default() -> Self {
-        SeekMode::Latest
-    }
-}
 
 #[cfg(test)]
 mod tests {

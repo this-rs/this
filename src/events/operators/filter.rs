@@ -59,8 +59,8 @@ struct FilterExpr {
 pub struct FilterOp {
     /// The parsed expression to evaluate
     expr: FilterExpr,
-    /// Original condition string for error messages
-    condition: String,
+    /// Original condition string (kept for Debug output)
+    _condition: String,
 }
 
 impl FilterOp {
@@ -71,7 +71,7 @@ impl FilterOp {
         let expr = parse_condition(&config.condition)?;
         Ok(Self {
             expr,
-            condition: config.condition.clone(),
+            _condition: config.condition.clone(),
         })
     }
 }

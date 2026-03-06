@@ -106,7 +106,7 @@ impl PipelineOperator for FanOutOp {
 
             // Always set the entity ID as a sub-variable for convenience
             new_ctx.set_var(
-                &format!("{}_id", self.output_var),
+                format!("{}_id", self.output_var),
                 Value::String(entity_id.to_string()),
             );
 
@@ -123,7 +123,7 @@ impl PipelineOperator for FanOutOp {
 
 /// Try to fetch an entity by ID from any registered fetcher
 async fn fetch_entity(ctx: &FlowContext, id: &Uuid) -> Option<Value> {
-    for (_entity_type, fetcher) in &ctx.entity_fetchers {
+    for fetcher in ctx.entity_fetchers.values() {
         if let Ok(entity) = fetcher.fetch_as_json(id).await {
             return Some(entity);
         }
