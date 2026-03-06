@@ -17,7 +17,7 @@ use tokio_stream::Stream;
 /// In-memory implementation of the EventLog trait
 ///
 /// Uses a Vec for storage and a Notify for waking subscribers
-/// when new events are appended. Thread-safe via Arc<RwLock>.
+/// when new events are appended. Thread-safe via `Arc<RwLock>`.
 ///
 /// # Performance
 ///

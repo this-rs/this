@@ -39,7 +39,7 @@ impl std::fmt::Display for Platform {
 /// A registered device push token
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeviceToken {
-    /// The push token string (e.g., Expo push token "ExponentPushToken[xxx]")
+    /// The push token string (e.g., Expo push token "ExponentPushToken\[xxx\]")
     pub token: String,
 
     /// Platform this token belongs to

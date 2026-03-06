@@ -2,7 +2,7 @@
 //!
 //! Uses the `PushProvider` trait to abstract the push notification backend.
 //! The default implementation is `ExpoPushProvider` which sends via the
-//! Expo Push API (https://exp.host/--/api/v2/push/send).
+//! Expo Push API (<https://exp.host/--/api/v2/push/send>).
 //!
 //! # Retry strategy
 //!
@@ -84,7 +84,7 @@ pub trait PushProvider: Send + Sync + std::fmt::Debug {
 /// Expo Push API provider
 ///
 /// Sends push notifications via the Expo Push API.
-/// Works with Expo push tokens (format: "ExponentPushToken[xxx]").
+/// Works with Expo push tokens (format: "ExponentPushToken\[xxx\]").
 ///
 /// Requires the `push` feature to be enabled.
 #[cfg(feature = "push")]
