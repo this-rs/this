@@ -557,9 +557,9 @@ mod tests {
 
         assert_eq!(
             events.len(),
-            event_count as usize,
+            event_count,
             "lost {} events",
-            event_count as usize - events.len()
+            event_count - events.len()
         );
 
         // Verify sequential order and seq_no

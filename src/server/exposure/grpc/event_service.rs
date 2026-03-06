@@ -53,51 +53,51 @@ impl EventServiceImpl {
 /// All fields are AND conditions. An absent (empty) field means "match any".
 fn matches_filter(event: &FrameworkEvent, filter: &SubscribeRequest) -> bool {
     // Filter by kind ("entity" or "link")
-    if let Some(ref kind) = filter.kind {
-        if !kind.is_empty() && event.event_kind() != kind {
-            return false;
-        }
+    if let Some(ref kind) = filter.kind
+        && !kind.is_empty()
+        && event.event_kind() != kind
+    {
+        return false;
     }
 
     // Filter by entity_type
-    if let Some(ref entity_type) = filter.entity_type {
-        if !entity_type.is_empty() {
-            match event.entity_type() {
-                Some(et) if et == entity_type => {}
-                Some(_) => return false,
-                // Link events don't have entity_type
-                None => return false,
-            }
+    if let Some(ref entity_type) = filter.entity_type
+        && !entity_type.is_empty()
+    {
+        match event.entity_type() {
+            Some(et) if et == entity_type => {}
+            Some(_) => return false,
+            None => return false,
         }
     }
 
     // Filter by entity_id
-    if let Some(ref entity_id) = filter.entity_id {
-        if !entity_id.is_empty() {
-            let parsed = entity_id.parse::<Uuid>().ok();
-            match (parsed, event.entity_id()) {
-                (Some(filter_id), Some(event_id)) if filter_id == event_id => {}
-                _ => return false,
-            }
+    if let Some(ref entity_id) = filter.entity_id
+        && !entity_id.is_empty()
+    {
+        let parsed = entity_id.parse::<Uuid>().ok();
+        match (parsed, event.entity_id()) {
+            (Some(filter_id), Some(event_id)) if filter_id == event_id => {}
+            _ => return false,
         }
     }
 
     // Filter by event_type (action: "created", "updated", "deleted")
-    if let Some(ref event_type) = filter.event_type {
-        if !event_type.is_empty() && event.action() != event_type {
-            return false;
-        }
+    if let Some(ref event_type) = filter.event_type
+        && !event_type.is_empty()
+        && event.action() != event_type
+    {
+        return false;
     }
 
     // Filter by link_type (only relevant for link events)
-    if let Some(ref link_type) = filter.link_type {
-        if !link_type.is_empty() {
-            match extract_link_type(event) {
-                Some(lt) if lt == link_type => {}
-                Some(_) => return false,
-                // Entity events don't have link_type — skip them
-                None => return false,
-            }
+    if let Some(ref link_type) = filter.link_type
+        && !link_type.is_empty()
+    {
+        match extract_link_type(event) {
+            Some(lt) if lt == link_type => {}
+            Some(_) => return false,
+            None => return false,
         }
     }
 
@@ -210,7 +210,7 @@ fn envelope_to_response(envelope: &EventEnvelope) -> EventResponse {
         data,
         metadata,
         timestamp: envelope.timestamp.to_rfc3339(),
-        seq_no: envelope.seq_no.map(|s| s as u64).unwrap_or(0),
+        seq_no: envelope.seq_no.unwrap_or(0),
     }
 }
 

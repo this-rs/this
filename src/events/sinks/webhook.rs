@@ -253,8 +253,8 @@ mod tests {
             let mut responses = self.responses.lock().await;
             if idx < responses.len() {
                 // Use a placeholder to avoid shifting
-                let response = std::mem::replace(&mut responses[idx], Ok(0));
-                response
+
+                std::mem::replace(&mut responses[idx], Ok(0))
             } else {
                 Ok(200) // Default: success
             }

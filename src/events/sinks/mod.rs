@@ -180,11 +180,13 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    type DeliveryLog = Vec<(Value, Option<String>)>;
+
     /// A simple test sink that records deliveries
     #[derive(Debug)]
     struct TestSink {
         sink_name: String,
-        deliveries: Arc<tokio::sync::Mutex<Vec<(Value, Option<String>)>>>,
+        deliveries: Arc<tokio::sync::Mutex<DeliveryLog>>,
     }
 
     impl TestSink {

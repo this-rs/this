@@ -204,7 +204,7 @@ mod tests {
                 .links
                 .iter()
                 .filter(|l| {
-                    l.source_id == *source_id && link_type.map_or(true, |lt| l.link_type == lt)
+                    l.source_id == *source_id && link_type.is_none_or(|lt| l.link_type == lt)
                 })
                 .cloned()
                 .collect())
@@ -219,7 +219,7 @@ mod tests {
                 .links
                 .iter()
                 .filter(|l| {
-                    l.target_id == *target_id && link_type.map_or(true, |lt| l.link_type == lt)
+                    l.target_id == *target_id && link_type.is_none_or(|lt| l.link_type == lt)
                 })
                 .cloned()
                 .collect())

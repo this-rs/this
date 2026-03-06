@@ -572,6 +572,8 @@ mod tests {
             entities: entity_configs,
             links,
             validation_rules: None,
+            events: None,
+            sinks: None,
         };
 
         Arc::new(
