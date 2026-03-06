@@ -582,8 +582,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_event_bus_with_event_log_bridge() {
-        use crate::events::memory::InMemoryEventLog;
         use crate::events::log::EventLog;
+        use crate::events::memory::InMemoryEventLog;
 
         let event_log = Arc::new(InMemoryEventLog::new());
         let bus = EventBus::new(16).with_event_log(event_log.clone());
@@ -612,8 +612,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_event_bus_bridge_multiple_events() {
-        use crate::events::memory::InMemoryEventLog;
         use crate::events::log::EventLog;
+        use crate::events::memory::InMemoryEventLog;
         use crate::events::types::SeekPosition;
         use tokio_stream::StreamExt;
 
@@ -636,7 +636,10 @@ mod tests {
         assert_eq!(event_log.last_seq_no().await, Some(5));
 
         // Subscribe from beginning and replay
-        let stream = event_log.subscribe("test", SeekPosition::Beginning).await.unwrap();
+        let stream = event_log
+            .subscribe("test", SeekPosition::Beginning)
+            .await
+            .unwrap();
         let events: Vec<_> = stream.take(5).collect().await;
         assert_eq!(events.len(), 5);
     }

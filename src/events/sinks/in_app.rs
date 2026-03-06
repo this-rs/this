@@ -25,9 +25,9 @@
 //! silently dropped.
 
 use crate::config::sinks::SinkType;
-use crate::events::sinks::preferences::NotificationPreferencesStore;
 use crate::events::sinks::Sink;
-use anyhow::{anyhow, Result};
+use crate::events::sinks::preferences::NotificationPreferencesStore;
+use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -132,9 +132,7 @@ impl NotificationStore {
         let _ = self.broadcast.send(notification.clone());
 
         let mut store = self.notifications.write().await;
-        let user_notifs = store
-            .entry(notification.recipient_id.clone())
-            .or_default();
+        let user_notifs = store.entry(notification.recipient_id.clone()).or_default();
         user_notifs.push(notification);
 
         // Evict oldest if over capacity
@@ -305,8 +303,8 @@ impl Sink for InAppNotificationSink {
         context_vars: &HashMap<String, Value>,
     ) -> Result<()> {
         // Determine recipient: explicit parameter > payload field > context variable
-        let recipient = super::resolve_recipient(recipient_id, &payload, context_vars)
-            .ok_or_else(|| {
+        let recipient =
+            super::resolve_recipient(recipient_id, &payload, context_vars).ok_or_else(|| {
                 anyhow!(
                     "in_app sink: recipient_id not found. \
                      Provide it as a parameter, in the payload, or as a context variable."
@@ -336,10 +334,7 @@ impl Sink for InAppNotificationSink {
 
         // Check preferences if available
         if let Some(prefs_store) = &self.preferences {
-            if !prefs_store
-                .is_enabled(&recipient, &notification_type)
-                .await
-            {
+            if !prefs_store.is_enabled(&recipient, &notification_type).await {
                 tracing::debug!(
                     recipient = %recipient,
                     notification_type = %notification_type,

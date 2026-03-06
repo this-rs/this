@@ -102,9 +102,8 @@ impl EventLog for InMemoryEventLog {
         // Use futures::stream::unfold to properly handle the Notified lifetime.
         // This avoids the race condition where a stack-allocated Notified is dropped
         // after poll_next returns Pending, causing lost wakeups.
-        let stream = futures::stream::unfold(
-            (inner, start_seq),
-            |(inner, mut cursor)| async move {
+        let stream =
+            futures::stream::unfold((inner, start_seq), |(inner, mut cursor)| async move {
                 loop {
                     // Check for available events.
                     // The read guard is scoped so it's dropped before we move `inner`.
@@ -128,8 +127,7 @@ impl EventLog for InMemoryEventLog {
                     // internal state machine across poll calls.
                     inner.notify.notified().await;
                 }
-            },
-        );
+            });
 
         Ok(Box::pin(stream))
     }
@@ -167,7 +165,6 @@ impl EventLog for InMemoryEventLog {
         }
     }
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -447,10 +444,7 @@ mod tests {
                 .await
                 .unwrap()
                 .unwrap();
-            assert_eq!(
-                event.event.entity_type(),
-                Some(format!("old_{i}").as_str())
-            );
+            assert_eq!(event.event.entity_type(), Some(format!("old_{i}").as_str()));
         }
 
         // Now append a live event
@@ -554,10 +548,12 @@ mod tests {
         });
 
         // Consume all events with a timeout
-        let events: Vec<_> =
-            tokio::time::timeout(std::time::Duration::from_secs(5), stream.take(event_count).collect())
-                .await
-                .expect("timed out waiting for events — possible lost wakeup");
+        let events: Vec<_> = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            stream.take(event_count).collect(),
+        )
+        .await
+        .expect("timed out waiting for events — possible lost wakeup");
 
         assert_eq!(
             events.len(),

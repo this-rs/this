@@ -24,7 +24,7 @@
 use crate::config::events::DeliverConfig;
 use crate::events::context::FlowContext;
 use crate::events::operators::{OpResult, PipelineOperator};
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 
 /// Compiled deliver operator
@@ -199,10 +199,7 @@ mod tests {
 
         let result = op.execute(&mut ctx).await.unwrap();
         assert!(matches!(result, OpResult::Continue));
-        assert_eq!(
-            ctx.get_var("_delivered_to"),
-            Some(&json!(["in_app"]))
-        );
+        assert_eq!(ctx.get_var("_delivered_to"), Some(&json!(["in_app"])));
     }
 
     #[tokio::test]

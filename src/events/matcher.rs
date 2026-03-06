@@ -50,7 +50,9 @@ pub struct EventMatcher {
 
 /// Error returned when a TriggerConfig has an invalid `kind` string
 #[derive(Debug, thiserror::Error)]
-#[error("unknown event kind: '{kind}'. Expected one of: link.created, link.deleted, entity.created, entity.updated, entity.deleted")]
+#[error(
+    "unknown event kind: '{kind}'. Expected one of: link.created, link.deleted, entity.created, entity.updated, entity.deleted"
+)]
 pub struct UnknownEventKind {
     pub kind: String,
 }
@@ -83,7 +85,7 @@ impl EventMatcher {
             _ => {
                 return Err(UnknownEventKind {
                     kind: config.kind.clone(),
-                })
+                });
             }
         };
 
@@ -266,8 +268,7 @@ mod tests {
 
     #[test]
     fn test_entity_created_with_type_filter() {
-        let m =
-            EventMatcher::compile(&trigger("entity.created", None, Some("capture"))).unwrap();
+        let m = EventMatcher::compile(&trigger("entity.created", None, Some("capture"))).unwrap();
         assert!(m.matches(&entity_created("capture")));
         assert!(!m.matches(&entity_created("user")));
         assert!(!m.matches(&entity_created("post")));
@@ -347,12 +348,8 @@ mod tests {
     #[test]
     fn test_link_type_filter_ignored_for_entity_matcher() {
         // Even if link_type is set, it doesn't affect entity matching
-        let m = EventMatcher::compile(&trigger(
-            "entity.created",
-            Some("follows"),
-            Some("user"),
-        ))
-        .unwrap();
+        let m = EventMatcher::compile(&trigger("entity.created", Some("follows"), Some("user")))
+            .unwrap();
         // entity_type filter applies, link_type is irrelevant
         assert!(m.matches(&entity_created("user")));
         assert!(!m.matches(&entity_created("post")));
@@ -361,12 +358,8 @@ mod tests {
     #[test]
     fn test_entity_type_filter_ignored_for_link_matcher() {
         // Even if entity_type is set, it doesn't affect link matching
-        let m = EventMatcher::compile(&trigger(
-            "link.created",
-            Some("follows"),
-            Some("user"),
-        ))
-        .unwrap();
+        let m =
+            EventMatcher::compile(&trigger("link.created", Some("follows"), Some("user"))).unwrap();
         // link_type filter applies, entity_type is irrelevant
         assert!(m.matches(&link_created("follows")));
         assert!(!m.matches(&link_created("likes")));

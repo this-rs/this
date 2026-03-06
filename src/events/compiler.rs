@@ -66,18 +66,12 @@ pub fn compile_flow(config: &FlowConfig) -> Result<CompiledFlow> {
 fn compile_step(step: &PipelineStep) -> Result<Box<dyn PipelineOperator>> {
     match step {
         PipelineStep::Resolve(config) => Ok(Box::new(ResolveOp::from_config(config))),
-        PipelineStep::Filter(config) => {
-            Ok(Box::new(FilterOp::from_config(config)?))
-        }
+        PipelineStep::Filter(config) => Ok(Box::new(FilterOp::from_config(config)?)),
         PipelineStep::FanOut(config) => Ok(Box::new(FanOutOp::from_config(config))),
         PipelineStep::Batch(config) => Ok(Box::new(BatchOp::from_config(config)?)),
-        PipelineStep::Deduplicate(config) => {
-            Ok(Box::new(DeduplicateOp::from_config(config)?))
-        }
+        PipelineStep::Deduplicate(config) => Ok(Box::new(DeduplicateOp::from_config(config)?)),
         PipelineStep::Map(config) => Ok(Box::new(MapOp::from_config(config))),
-        PipelineStep::RateLimit(config) => {
-            Ok(Box::new(RateLimitOp::from_config(config)?))
-        }
+        PipelineStep::RateLimit(config) => Ok(Box::new(RateLimitOp::from_config(config)?)),
         PipelineStep::Deliver(config) => Ok(Box::new(DeliverOp::from_config(config)?)),
     }
 }

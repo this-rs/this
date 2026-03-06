@@ -24,7 +24,7 @@ use crate::config::events::BatchConfig;
 use crate::events::context::FlowContext;
 use crate::events::operators::deduplicate::parse_duration;
 use crate::events::operators::{OpResult, PipelineOperator};
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use serde_json::json;
 use std::collections::HashMap;

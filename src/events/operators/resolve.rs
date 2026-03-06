@@ -22,7 +22,7 @@
 use crate::config::events::ResolveConfig;
 use crate::events::context::FlowContext;
 use crate::events::operators::{OpResult, PipelineOperator};
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use serde_json::Value;
 use uuid::Uuid;
@@ -78,9 +78,7 @@ impl PipelineOperator for ResolveOp {
             }
             Some(link_type) => {
                 // Link resolution: follow the link, then fetch the entity
-                let target_id = self
-                    .follow_link(ctx, &from_id, link_type)
-                    .await?;
+                let target_id = self.follow_link(ctx, &from_id, link_type).await?;
                 let entity = self.fetch_entity_by_id(ctx, &target_id).await?;
                 ctx.set_var(&self.output_var, entity);
             }
@@ -206,8 +204,7 @@ mod tests {
                 .links
                 .iter()
                 .filter(|l| {
-                    l.source_id == *source_id
-                        && link_type.map_or(true, |lt| l.link_type == lt)
+                    l.source_id == *source_id && link_type.map_or(true, |lt| l.link_type == lt)
                 })
                 .cloned()
                 .collect())
@@ -222,8 +219,7 @@ mod tests {
                 .links
                 .iter()
                 .filter(|l| {
-                    l.target_id == *target_id
-                        && link_type.map_or(true, |lt| l.link_type == lt)
+                    l.target_id == *target_id && link_type.map_or(true, |lt| l.link_type == lt)
                 })
                 .cloned()
                 .collect())
@@ -330,8 +326,7 @@ mod tests {
         let mut fetchers = HashMap::new();
         fetchers.insert("user".to_string(), fetcher);
 
-        let link_service =
-            Arc::new(MockLinkService { links: vec![link] }) as Arc<dyn LinkService>;
+        let link_service = Arc::new(MockLinkService { links: vec![link] }) as Arc<dyn LinkService>;
 
         let mut ctx = make_context(source_id, target_id, link_service, fetchers);
 
@@ -374,8 +369,7 @@ mod tests {
         let mut fetchers = HashMap::new();
         fetchers.insert("user".to_string(), fetcher);
 
-        let link_service =
-            Arc::new(MockLinkService { links: vec![link] }) as Arc<dyn LinkService>;
+        let link_service = Arc::new(MockLinkService { links: vec![link] }) as Arc<dyn LinkService>;
 
         let mut ctx = make_context(source_id, target_id, link_service, fetchers);
 
@@ -393,8 +387,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_resolve_missing_variable() {
-        let link_service =
-            Arc::new(MockLinkService { links: vec![] }) as Arc<dyn LinkService>;
+        let link_service = Arc::new(MockLinkService { links: vec![] }) as Arc<dyn LinkService>;
 
         let mut ctx = make_context(Uuid::new_v4(), Uuid::new_v4(), link_service, HashMap::new());
 
@@ -414,8 +407,7 @@ mod tests {
     async fn test_resolve_no_link_found() {
         let source_id = Uuid::new_v4();
 
-        let link_service =
-            Arc::new(MockLinkService { links: vec![] }) as Arc<dyn LinkService>;
+        let link_service = Arc::new(MockLinkService { links: vec![] }) as Arc<dyn LinkService>;
 
         let mut ctx = make_context(source_id, Uuid::new_v4(), link_service, HashMap::new());
 
@@ -428,7 +420,12 @@ mod tests {
 
         let result = op.execute(&mut ctx).await;
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("no 'follows' link found"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("no 'follows' link found")
+        );
     }
 
     #[tokio::test]
@@ -441,8 +438,7 @@ mod tests {
         let mut fetchers = HashMap::new();
         fetchers.insert("user".to_string(), fetcher);
 
-        let link_service =
-            Arc::new(MockLinkService { links: vec![] }) as Arc<dyn LinkService>;
+        let link_service = Arc::new(MockLinkService { links: vec![] }) as Arc<dyn LinkService>;
 
         let mut ctx = make_context(entity_id, Uuid::new_v4(), link_service, fetchers);
 

@@ -17,7 +17,7 @@
 
 use crate::config::sinks::SinkType;
 use crate::events::sinks::Sink;
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use serde_json::Value;
 use std::collections::HashMap;
@@ -101,8 +101,7 @@ impl WebhookSink {
 
         for attempt in 0..=self.config.max_retries {
             if attempt > 0 {
-                let backoff_idx =
-                    (attempt as usize - 1).min(self.config.backoff.len() - 1);
+                let backoff_idx = (attempt as usize - 1).min(self.config.backoff.len() - 1);
                 let delay = self.config.backoff[backoff_idx];
                 tracing::debug!(
                     attempt = attempt,
@@ -298,10 +297,9 @@ mod tests {
     async fn test_webhook_custom_headers() {
         let sender = Arc::new(MockHttpSender::always_ok());
         let mut config = fast_config("https://example.com/hook");
-        config.headers.insert(
-            "Authorization".to_string(),
-            "Bearer token123".to_string(),
-        );
+        config
+            .headers
+            .insert("Authorization".to_string(), "Bearer token123".to_string());
         config.method = "PUT".to_string();
 
         let sink = WebhookSink::new(sender.clone(), config);
@@ -385,7 +383,12 @@ mod tests {
 
         let result = sink.deliver(json!({}), None, &HashMap::new()).await;
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("URL not configured"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("URL not configured")
+        );
     }
 
     #[test]

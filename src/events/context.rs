@@ -132,14 +132,8 @@ impl FlowContext {
                         target_id,
                         metadata,
                     } => {
-                        variables.insert(
-                            "link_type".to_string(),
-                            Value::String(link_type.clone()),
-                        );
-                        variables.insert(
-                            "link_id".to_string(),
-                            Value::String(link_id.to_string()),
-                        );
+                        variables.insert("link_type".to_string(), Value::String(link_type.clone()));
+                        variables.insert("link_id".to_string(), Value::String(link_id.to_string()));
                         variables.insert(
                             "source_id".to_string(),
                             Value::String(source_id.to_string()),
@@ -158,14 +152,8 @@ impl FlowContext {
                         source_id,
                         target_id,
                     } => {
-                        variables.insert(
-                            "link_type".to_string(),
-                            Value::String(link_type.clone()),
-                        );
-                        variables.insert(
-                            "link_id".to_string(),
-                            Value::String(link_id.to_string()),
-                        );
+                        variables.insert("link_type".to_string(), Value::String(link_type.clone()));
+                        variables.insert("link_id".to_string(), Value::String(link_id.to_string()));
                         variables.insert(
                             "source_id".to_string(),
                             Value::String(source_id.to_string()),
@@ -254,10 +242,7 @@ mod tests {
         ) -> anyhow::Result<crate::core::link::LinkEntity> {
             unimplemented!()
         }
-        async fn get(
-            &self,
-            _id: &Uuid,
-        ) -> anyhow::Result<Option<crate::core::link::LinkEntity>> {
+        async fn get(&self, _id: &Uuid) -> anyhow::Result<Option<crate::core::link::LinkEntity>> {
             unimplemented!()
         }
         async fn list(&self) -> anyhow::Result<Vec<crate::core::link::LinkEntity>> {
@@ -313,8 +298,14 @@ mod tests {
         let ctx = FlowContext::new(event, mock_link_service(), HashMap::new());
 
         assert_eq!(ctx.get_var_str("link_type"), Some("follows"));
-        assert_eq!(ctx.get_var_str("source_id"), Some(source_id.to_string().as_str()));
-        assert_eq!(ctx.get_var_str("target_id"), Some(target_id.to_string().as_str()));
+        assert_eq!(
+            ctx.get_var_str("source_id"),
+            Some(source_id.to_string().as_str())
+        );
+        assert_eq!(
+            ctx.get_var_str("target_id"),
+            Some(target_id.to_string().as_str())
+        );
         assert_eq!(ctx.get_var("metadata"), Some(&json!({"note": "hello"})));
     }
 
@@ -330,7 +321,10 @@ mod tests {
         let ctx = FlowContext::new(event, mock_link_service(), HashMap::new());
 
         assert_eq!(ctx.get_var_str("entity_type"), Some("user"));
-        assert_eq!(ctx.get_var_str("entity_id"), Some(entity_id.to_string().as_str()));
+        assert_eq!(
+            ctx.get_var_str("entity_id"),
+            Some(entity_id.to_string().as_str())
+        );
         assert_eq!(ctx.get_var("data"), Some(&json!({"name": "Alice"})));
     }
 
@@ -345,7 +339,10 @@ mod tests {
         let mut ctx = FlowContext::new(event, mock_link_service(), HashMap::new());
         ctx.set_var("owner", json!({"id": "abc", "name": "Bob"}));
 
-        assert_eq!(ctx.get_var("owner"), Some(&json!({"id": "abc", "name": "Bob"})));
+        assert_eq!(
+            ctx.get_var("owner"),
+            Some(&json!({"id": "abc", "name": "Bob"}))
+        );
     }
 
     #[test]
@@ -357,7 +354,10 @@ mod tests {
         });
 
         let mut ctx = FlowContext::new(event, mock_link_service(), HashMap::new());
-        ctx.set_var("owner", json!({"id": "abc", "profile": {"name": "Bob", "age": 30}}));
+        ctx.set_var(
+            "owner",
+            json!({"id": "abc", "profile": {"name": "Bob", "age": 30}}),
+        );
 
         assert_eq!(ctx.get_var_str("owner.id"), Some("abc"));
         assert_eq!(ctx.get_var_str("owner.profile.name"), Some("Bob"));

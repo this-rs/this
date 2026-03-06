@@ -594,19 +594,33 @@ consumers:
         assert_eq!(config.flows[0].pipeline.len(), 4);
 
         // Check pipeline operators
-        assert!(matches!(&config.flows[0].pipeline[0], PipelineStep::Resolve(r) if r.from == "source_id"));
-        assert!(matches!(&config.flows[0].pipeline[1], PipelineStep::Resolve(r) if r.from == "target_id"));
+        assert!(
+            matches!(&config.flows[0].pipeline[0], PipelineStep::Resolve(r) if r.from == "source_id")
+        );
+        assert!(
+            matches!(&config.flows[0].pipeline[1], PipelineStep::Resolve(r) if r.from == "target_id")
+        );
         assert!(matches!(&config.flows[0].pipeline[2], PipelineStep::Map(_)));
-        assert!(matches!(&config.flows[0].pipeline[3], PipelineStep::Deliver(d) if d.sink_names().len() == 2));
+        assert!(
+            matches!(&config.flows[0].pipeline[3], PipelineStep::Deliver(d) if d.sink_names().len() == 2)
+        );
 
         // Second flow with advanced operators
         assert_eq!(config.flows[1].name, "notify-like");
         assert_eq!(config.flows[1].pipeline.len(), 6);
-        assert!(matches!(&config.flows[1].pipeline[0], PipelineStep::Resolve(r) if r.via.as_deref() == Some("owns")));
-        assert!(matches!(&config.flows[1].pipeline[1], PipelineStep::Filter(f) if f.condition == "source_id != owner.id"));
+        assert!(
+            matches!(&config.flows[1].pipeline[0], PipelineStep::Resolve(r) if r.via.as_deref() == Some("owns"))
+        );
+        assert!(
+            matches!(&config.flows[1].pipeline[1], PipelineStep::Filter(f) if f.condition == "source_id != owner.id")
+        );
         assert!(matches!(&config.flows[1].pipeline[2], PipelineStep::Batch(b) if b.window == "5m"));
-        assert!(matches!(&config.flows[1].pipeline[3], PipelineStep::Deduplicate(d) if d.window == "1h"));
-        assert!(matches!(&config.flows[1].pipeline[5], PipelineStep::Deliver(d) if d.sink.as_deref() == Some("push-notification")));
+        assert!(
+            matches!(&config.flows[1].pipeline[3], PipelineStep::Deduplicate(d) if d.window == "1h")
+        );
+        assert!(
+            matches!(&config.flows[1].pipeline[5], PipelineStep::Deliver(d) if d.sink.as_deref() == Some("push-notification"))
+        );
 
         // Consumers
         assert_eq!(config.consumers.len(), 2);
@@ -816,7 +830,9 @@ pipeline:
         let flow: FlowConfig = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(flow.name, "feed-update");
         assert_eq!(flow.pipeline.len(), 4);
-        assert!(matches!(&flow.pipeline[1], PipelineStep::FanOut(f) if f.via == "follows" && f.direction == "reverse"));
+        assert!(
+            matches!(&flow.pipeline[1], PipelineStep::FanOut(f) if f.via == "follows" && f.direction == "reverse")
+        );
     }
 
     #[test]

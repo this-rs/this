@@ -16,10 +16,10 @@
 //! Client errors (4xx) fail immediately.
 
 use crate::config::sinks::SinkType;
+use crate::events::sinks::Sink;
 use crate::events::sinks::device_tokens::DeviceTokenStore;
 use crate::events::sinks::preferences::NotificationPreferencesStore;
-use crate::events::sinks::Sink;
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -183,20 +183,14 @@ impl PushProvider for ExpoPushProvider {
                     // 4xx → permanent error
                     let body = resp.text().await.unwrap_or_default();
                     vec![
-                        PushResult::PermanentError(format!(
-                            "client error {}: {}",
-                            status, body
-                        ));
+                        PushResult::PermanentError(format!("client error {}: {}", status, body));
                         messages.len()
                     ]
                 }
             }
             Err(e) => {
                 // Network error → retriable
-                vec![
-                    PushResult::RetriableError(format!("network error: {}", e));
-                    messages.len()
-                ]
+                vec![PushResult::RetriableError(format!("network error: {}", e)); messages.len()]
             }
         }
     }
@@ -419,10 +413,7 @@ impl Sink for PushNotificationSink {
                 .and_then(|v| v.as_str())
                 .unwrap_or("generic");
 
-            if !prefs_store
-                .is_enabled(&recipient, notification_type)
-                .await
-            {
+            if !prefs_store.is_enabled(&recipient, notification_type).await {
                 tracing::debug!(
                     recipient = %recipient,
                     notification_type = %notification_type,
@@ -531,7 +522,12 @@ mod tests {
                 call_count: Arc::new(AtomicUsize::new(0)),
                 received: Arc::new(tokio::sync::Mutex::new(Vec::new())),
             };
-            (Self { state: state.clone() }, state)
+            (
+                Self {
+                    state: state.clone(),
+                },
+                state,
+            )
         }
 
         /// Provider that always succeeds
@@ -577,7 +573,11 @@ mod tests {
     async fn test_push_deliver_success() {
         let tokens = Arc::new(DeviceTokenStore::new());
         tokens
-            .register("user-A", "ExponentPushToken[abc]".to_string(), Platform::Ios)
+            .register(
+                "user-A",
+                "ExponentPushToken[abc]".to_string(),
+                Platform::Ios,
+            )
             .await;
 
         let (provider, state) = MockPushProvider::always_success();
@@ -671,11 +671,8 @@ mod tests {
             vec![PushResult::Success],
         ]);
 
-        let sink = PushNotificationSink::with_config(
-            tokens,
-            Arc::new(provider),
-            fast_retry_config(),
-        );
+        let sink =
+            PushNotificationSink::with_config(tokens, Arc::new(provider), fast_retry_config());
 
         let payload = json!({
             "title": "Test",
@@ -695,9 +692,9 @@ mod tests {
             .register("user-A", "token-1".to_string(), Platform::Ios)
             .await;
 
-        let (provider, state) = MockPushProvider::new(vec![vec![
-            PushResult::PermanentError("DeviceNotRegistered".to_string()),
-        ]]);
+        let (provider, state) = MockPushProvider::new(vec![vec![PushResult::PermanentError(
+            "DeviceNotRegistered".to_string(),
+        )]]);
 
         let sink = PushNotificationSink::with_config(
             tokens.clone(),
@@ -736,11 +733,8 @@ mod tests {
             vec![PushResult::RetriableError("error 4".to_string())],
         ]);
 
-        let sink = PushNotificationSink::with_config(
-            tokens,
-            Arc::new(provider),
-            fast_retry_config(),
-        );
+        let sink =
+            PushNotificationSink::with_config(tokens, Arc::new(provider), fast_retry_config());
 
         let payload = json!({
             "title": "Test",
@@ -833,8 +827,8 @@ mod tests {
         prefs.disable_type("user-A", "new_like").await;
 
         let (provider, state) = MockPushProvider::always_success();
-        let sink = PushNotificationSink::with_provider(tokens, Arc::new(provider))
-            .with_preferences(prefs);
+        let sink =
+            PushNotificationSink::with_provider(tokens, Arc::new(provider)).with_preferences(prefs);
 
         // Deliver a disabled type — should be skipped
         let payload = json!({
@@ -866,8 +860,8 @@ mod tests {
         prefs.mute("user-A").await;
 
         let (provider, state) = MockPushProvider::always_success();
-        let sink = PushNotificationSink::with_provider(tokens, Arc::new(provider))
-            .with_preferences(prefs);
+        let sink =
+            PushNotificationSink::with_provider(tokens, Arc::new(provider)).with_preferences(prefs);
 
         let payload = json!({
             "title": "Test",

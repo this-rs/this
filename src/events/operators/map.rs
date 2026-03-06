@@ -21,7 +21,7 @@
 use crate::config::events::MapConfig;
 use crate::events::context::FlowContext;
 use crate::events::operators::{OpResult, PipelineOperator};
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use serde_json::Value;
 
@@ -203,14 +203,8 @@ mod tests {
     #[tokio::test]
     async fn test_map_with_context_variables() {
         let mut ctx = make_link_context();
-        ctx.set_var(
-            "owner",
-            json!({"name": "Alice", "id": "abc-123"}),
-        );
-        ctx.set_var(
-            "follower",
-            json!({"name": "Bob", "id": "def-456"}),
-        );
+        ctx.set_var("owner", json!({"name": "Alice", "id": "abc-123"}));
+        ctx.set_var("follower", json!({"name": "Bob", "id": "def-456"}));
 
         let op = MapOp::from_config(&MapConfig {
             template: json!({
@@ -227,10 +221,7 @@ mod tests {
         assert!(matches!(result, OpResult::Continue));
 
         let payload = ctx.get_var("_payload").unwrap();
-        assert_eq!(
-            payload["title"],
-            "Bob started following Alice"
-        );
+        assert_eq!(payload["title"], "Bob started following Alice");
         assert_eq!(payload["icon"], "follow");
         assert_eq!(payload["data"]["follower_id"], "def-456");
         assert_eq!(payload["data"]["owner_id"], "abc-123");
@@ -283,10 +274,7 @@ mod tests {
         ctx.set_var("user", json!({"name": "Alice"}));
 
         let op = MapOp::from_config(&MapConfig {
-            template: json!([
-                "Hello {{ user.name }}",
-                "static"
-            ]),
+            template: json!(["Hello {{ user.name }}", "static"]),
         });
 
         let result = op.execute(&mut ctx).await.unwrap();

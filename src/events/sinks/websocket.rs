@@ -38,11 +38,7 @@ pub trait WebSocketDispatcher: Send + Sync + std::fmt::Debug {
     /// to the recipient and send the payload to each of them.
     ///
     /// Returns the number of connections that received the message.
-    async fn dispatch_to_recipient(
-        &self,
-        recipient_id: &str,
-        payload: Value,
-    ) -> Result<usize>;
+    async fn dispatch_to_recipient(&self, recipient_id: &str, payload: Value) -> Result<usize>;
 
     /// Broadcast a payload to ALL connected clients
     ///
@@ -134,11 +130,7 @@ mod tests {
 
     #[async_trait]
     impl WebSocketDispatcher for MockDispatcher {
-        async fn dispatch_to_recipient(
-            &self,
-            recipient_id: &str,
-            payload: Value,
-        ) -> Result<usize> {
+        async fn dispatch_to_recipient(&self, recipient_id: &str, payload: Value) -> Result<usize> {
             self.dispatched
                 .lock()
                 .await
@@ -198,9 +190,7 @@ mod tests {
         // No recipient_id anywhere → broadcast
         let payload = json!({"title": "System announcement"});
 
-        sink.deliver(payload, None, &HashMap::new())
-            .await
-            .unwrap();
+        sink.deliver(payload, None, &HashMap::new()).await.unwrap();
 
         let dispatched = dispatcher.dispatched.lock().await;
         assert_eq!(dispatched.len(), 1);

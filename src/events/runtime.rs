@@ -234,10 +234,7 @@ mod tests {
         ) -> anyhow::Result<crate::core::link::LinkEntity> {
             unimplemented!()
         }
-        async fn get(
-            &self,
-            _: &Uuid,
-        ) -> anyhow::Result<Option<crate::core::link::LinkEntity>> {
+        async fn get(&self, _: &Uuid) -> anyhow::Result<Option<crate::core::link::LinkEntity>> {
             unimplemented!()
         }
         async fn list(&self) -> anyhow::Result<Vec<crate::core::link::LinkEntity>> {
@@ -333,12 +330,7 @@ mod tests {
         .unwrap();
 
         let link_service = Arc::new(MockLinkService) as Arc<dyn LinkService>;
-        let runtime = FlowRuntime::new(
-            vec![flow],
-            event_log.clone(),
-            link_service,
-            HashMap::new(),
-        );
+        let runtime = FlowRuntime::new(vec![flow], event_log.clone(), link_service, HashMap::new());
 
         let handle = runtime.run(SeekPosition::Latest);
 
@@ -375,12 +367,7 @@ mod tests {
         .unwrap();
 
         let link_service = Arc::new(MockLinkService) as Arc<dyn LinkService>;
-        let runtime = FlowRuntime::new(
-            vec![flow],
-            event_log.clone(),
-            link_service,
-            HashMap::new(),
-        );
+        let runtime = FlowRuntime::new(vec![flow], event_log.clone(), link_service, HashMap::new());
 
         let handle = runtime.run(SeekPosition::Latest);
 
@@ -483,12 +470,7 @@ mod tests {
         .unwrap();
 
         let link_service = Arc::new(MockLinkService) as Arc<dyn LinkService>;
-        let runtime = FlowRuntime::new(
-            vec![flow],
-            event_log.clone(),
-            link_service,
-            HashMap::new(),
-        );
+        let runtime = FlowRuntime::new(vec![flow], event_log.clone(), link_service, HashMap::new());
 
         let handle = runtime.run(SeekPosition::Latest);
 
@@ -540,12 +522,7 @@ mod tests {
         fetchers.insert("user".to_string(), fetcher);
 
         let link_service = Arc::new(MockLinkService) as Arc<dyn LinkService>;
-        let runtime = FlowRuntime::new(
-            vec![flow],
-            event_log.clone(),
-            link_service,
-            fetchers,
-        );
+        let runtime = FlowRuntime::new(vec![flow], event_log.clone(), link_service, fetchers);
 
         let handle = runtime.run(SeekPosition::Latest);
 

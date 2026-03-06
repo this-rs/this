@@ -29,7 +29,7 @@ pub mod runtime;
 pub mod sinks;
 pub mod types;
 
-pub use compiler::{compile_flow, compile_flows, CompiledFlow};
+pub use compiler::{CompiledFlow, compile_flow, compile_flows};
 pub use context::FlowContext;
 pub use log::EventLog;
 pub use matcher::EventMatcher;

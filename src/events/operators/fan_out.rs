@@ -15,7 +15,7 @@
 use crate::config::events::FanOutConfig;
 use crate::events::context::FlowContext;
 use crate::events::operators::{OpResult, PipelineOperator};
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use serde_json::Value;
 use uuid::Uuid;
@@ -100,10 +100,7 @@ impl PipelineOperator for FanOutOp {
                 }
                 None => {
                     // If no fetcher found, store just the ID
-                    new_ctx.set_var(
-                        &self.output_var,
-                        Value::String(entity_id.to_string()),
-                    );
+                    new_ctx.set_var(&self.output_var, Value::String(entity_id.to_string()));
                 }
             }
 
@@ -186,8 +183,7 @@ mod tests {
                 .links
                 .iter()
                 .filter(|l| {
-                    l.source_id == *source_id
-                        && link_type.map_or(true, |lt| l.link_type == lt)
+                    l.source_id == *source_id && link_type.map_or(true, |lt| l.link_type == lt)
                 })
                 .cloned()
                 .collect())
@@ -202,8 +198,7 @@ mod tests {
                 .links
                 .iter()
                 .filter(|l| {
-                    l.target_id == *target_id
-                        && link_type.map_or(true, |lt| l.link_type == lt)
+                    l.target_id == *target_id && link_type.map_or(true, |lt| l.link_type == lt)
                 })
                 .cloned()
                 .collect())
@@ -310,7 +305,10 @@ mod tests {
         match result {
             OpResult::FanOut(contexts) => {
                 assert_eq!(contexts.len(), 1);
-                assert_eq!(contexts[0].get_var("follower"), Some(&json!({"name": "Alice"})));
+                assert_eq!(
+                    contexts[0].get_var("follower"),
+                    Some(&json!({"name": "Alice"}))
+                );
                 assert!(contexts[0].get_var("follower_id").is_some());
             }
             other => panic!("expected FanOut, got {:?}", other),

@@ -27,7 +27,7 @@
 
 use crate::config::sinks::SinkType;
 use crate::events::sinks::Sink;
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use serde_json::Value;
 use std::collections::HashMap;
@@ -78,12 +78,7 @@ pub trait EntityFieldUpdater: Send + Sync + std::fmt::Debug {
     /// Read a numeric field from an entity
     ///
     /// Returns the current field value, or 0.0 if the field doesn't exist.
-    async fn read_field(
-        &self,
-        entity_type: &str,
-        entity_id: &str,
-        field: &str,
-    ) -> Result<f64>;
+    async fn read_field(&self, entity_type: &str, entity_id: &str, field: &str) -> Result<f64>;
 
     /// Write a numeric field to an entity
     async fn write_field(
@@ -167,22 +162,14 @@ impl Sink for CounterSink {
         let entity_type = payload
             .get("entity_type")
             .and_then(|v| v.as_str())
-            .or_else(|| {
-                context_vars
-                    .get("entity_type")
-                    .and_then(|v| v.as_str())
-            })
+            .or_else(|| context_vars.get("entity_type").and_then(|v| v.as_str()))
             .ok_or_else(|| anyhow!("counter sink: entity_type not found in payload or context"))?
             .to_string();
 
         let entity_id = payload
             .get("entity_id")
             .and_then(|v| v.as_str())
-            .or_else(|| {
-                context_vars
-                    .get("entity_id")
-                    .and_then(|v| v.as_str())
-            })
+            .or_else(|| context_vars.get("entity_id").and_then(|v| v.as_str()))
             .ok_or_else(|| anyhow!("counter sink: entity_id not found in payload or context"))?
             .to_string();
 
@@ -201,10 +188,7 @@ impl Sink for CounterSink {
         };
 
         // Value: default 1
-        let amount = payload
-            .get("value")
-            .and_then(|v| v.as_f64())
-            .unwrap_or(1.0);
+        let amount = payload.get("value").and_then(|v| v.as_f64()).unwrap_or(1.0);
 
         // Acquire per-key lock for atomic read-modify-write
         let lock_key = format!("{}:{}:{}", entity_type, entity_id, field);
@@ -282,14 +266,11 @@ mod tests {
 
     #[async_trait]
     impl EntityFieldUpdater for MockEntityStore {
-        async fn read_field(
-            &self,
-            entity_type: &str,
-            entity_id: &str,
-            field: &str,
-        ) -> Result<f64> {
+        async fn read_field(&self, entity_type: &str, entity_id: &str, field: &str) -> Result<f64> {
             let store = self.fields.read().await;
-            Ok(*store.get(&Self::key(entity_type, entity_id, field)).unwrap_or(&0.0))
+            Ok(*store
+                .get(&Self::key(entity_type, entity_id, field))
+                .unwrap_or(&0.0))
         }
 
         async fn write_field(
@@ -328,7 +309,10 @@ mod tests {
 
         sink.deliver(payload, None, &HashMap::new()).await.unwrap();
 
-        let value = store.read_field("capture", "cap-1", "like_count").await.unwrap();
+        let value = store
+            .read_field("capture", "cap-1", "like_count")
+            .await
+            .unwrap();
         assert_eq!(value, 6.0);
     }
 
@@ -344,7 +328,10 @@ mod tests {
 
         sink.deliver(payload, None, &HashMap::new()).await.unwrap();
 
-        let value = store.read_field("capture", "cap-1", "like_count").await.unwrap();
+        let value = store
+            .read_field("capture", "cap-1", "like_count")
+            .await
+            .unwrap();
         assert_eq!(value, 1.0);
     }
 
@@ -368,7 +355,10 @@ mod tests {
 
         sink.deliver(payload, None, &HashMap::new()).await.unwrap();
 
-        let value = store.read_field("capture", "cap-1", "like_count").await.unwrap();
+        let value = store
+            .read_field("capture", "cap-1", "like_count")
+            .await
+            .unwrap();
         assert_eq!(value, 4.0);
     }
 
@@ -392,7 +382,10 @@ mod tests {
 
         sink.deliver(payload, None, &HashMap::new()).await.unwrap();
 
-        let value = store.read_field("capture", "cap-1", "like_count").await.unwrap();
+        let value = store
+            .read_field("capture", "cap-1", "like_count")
+            .await
+            .unwrap();
         assert_eq!(value, 0.0); // Never goes negative
     }
 
@@ -417,7 +410,10 @@ mod tests {
 
         sink.deliver(payload, None, &HashMap::new()).await.unwrap();
 
-        let value = store.read_field("capture", "cap-1", "like_count").await.unwrap();
+        let value = store
+            .read_field("capture", "cap-1", "like_count")
+            .await
+            .unwrap();
         assert_eq!(value, 42.0);
     }
 
@@ -436,7 +432,10 @@ mod tests {
 
         sink.deliver(payload, None, &HashMap::new()).await.unwrap();
 
-        let value = store.read_field("user", "u-1", "follower_count").await.unwrap();
+        let value = store
+            .read_field("user", "u-1", "follower_count")
+            .await
+            .unwrap();
         assert_eq!(value, 15.0);
     }
 
@@ -457,7 +456,10 @@ mod tests {
 
         sink.deliver(payload, None, &HashMap::new()).await.unwrap();
 
-        let value = store.read_field("user", "u-1", "comment_count").await.unwrap();
+        let value = store
+            .read_field("user", "u-1", "comment_count")
+            .await
+            .unwrap();
         assert_eq!(value, 2.0);
     }
 
@@ -475,14 +477,14 @@ mod tests {
             "entity_type".to_string(),
             Value::String("capture".to_string()),
         );
-        vars.insert(
-            "entity_id".to_string(),
-            Value::String("cap-1".to_string()),
-        );
+        vars.insert("entity_id".to_string(), Value::String("cap-1".to_string()));
 
         sink.deliver(payload, None, &vars).await.unwrap();
 
-        let value = store.read_field("capture", "cap-1", "like_count").await.unwrap();
+        let value = store
+            .read_field("capture", "cap-1", "like_count")
+            .await
+            .unwrap();
         assert_eq!(value, 1.0);
     }
 
@@ -510,11 +512,26 @@ mod tests {
 
     #[test]
     fn test_counter_operation_parse() {
-        assert_eq!(CounterOperation::from_str("increment").unwrap(), CounterOperation::Increment);
-        assert_eq!(CounterOperation::from_str("inc").unwrap(), CounterOperation::Increment);
-        assert_eq!(CounterOperation::from_str("decrement").unwrap(), CounterOperation::Decrement);
-        assert_eq!(CounterOperation::from_str("dec").unwrap(), CounterOperation::Decrement);
-        assert_eq!(CounterOperation::from_str("set").unwrap(), CounterOperation::Set);
+        assert_eq!(
+            CounterOperation::from_str("increment").unwrap(),
+            CounterOperation::Increment
+        );
+        assert_eq!(
+            CounterOperation::from_str("inc").unwrap(),
+            CounterOperation::Increment
+        );
+        assert_eq!(
+            CounterOperation::from_str("decrement").unwrap(),
+            CounterOperation::Decrement
+        );
+        assert_eq!(
+            CounterOperation::from_str("dec").unwrap(),
+            CounterOperation::Decrement
+        );
+        assert_eq!(
+            CounterOperation::from_str("set").unwrap(),
+            CounterOperation::Set
+        );
         assert!(CounterOperation::from_str("invalid").is_err());
     }
 
@@ -531,7 +548,10 @@ mod tests {
         let store = Arc::new(MockEntityStore::new());
         store.set("capture", "cap-1", "like_count", 0.0).await;
 
-        let sink = Arc::new(CounterSink::new(store.clone(), increment_config("like_count")));
+        let sink = Arc::new(CounterSink::new(
+            store.clone(),
+            increment_config("like_count"),
+        ));
 
         // Spawn 50 concurrent increment tasks
         let mut handles = Vec::new();
@@ -551,7 +571,13 @@ mod tests {
         }
 
         // Without per-key locks, this would be less than 50 due to TOCTOU
-        let value = store.read_field("capture", "cap-1", "like_count").await.unwrap();
-        assert_eq!(value, 50.0, "All 50 increments should be applied atomically");
+        let value = store
+            .read_field("capture", "cap-1", "like_count")
+            .await
+            .unwrap();
+        assert_eq!(
+            value, 50.0,
+            "All 50 increments should be applied atomically"
+        );
     }
 }

@@ -17,7 +17,7 @@
 use crate::config::events::FilterConfig;
 use crate::events::context::FlowContext;
 use crate::events::operators::{OpResult, PipelineOperator};
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use serde_json::Value;
 
@@ -151,9 +151,7 @@ fn unquote(s: &str) -> String {
 /// rather than a variable reference.
 fn is_literal_value(s: &str) -> bool {
     // Quoted strings
-    if (s.starts_with('"') && s.ends_with('"'))
-        || (s.starts_with('\'') && s.ends_with('\''))
-    {
+    if (s.starts_with('"') && s.ends_with('"')) || (s.starts_with('\'') && s.ends_with('\'')) {
         return true;
     }
     // Numbers (int or float)

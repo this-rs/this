@@ -12,7 +12,7 @@
 use crate::config::events::DeduplicateConfig;
 use crate::events::context::FlowContext;
 use crate::events::operators::{OpResult, PipelineOperator};
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -60,12 +60,7 @@ impl PipelineOperator for DeduplicateOp {
         // Read the dedup key from context
         let key_value = ctx
             .get_var(&self.key)
-            .ok_or_else(|| {
-                anyhow!(
-                    "deduplicate: variable '{}' not found in context",
-                    self.key
-                )
-            })?
+            .ok_or_else(|| anyhow!("deduplicate: variable '{}' not found in context", self.key))?
             .clone();
 
         let key_str = value_to_string(&key_value);

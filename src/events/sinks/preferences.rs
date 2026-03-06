@@ -80,10 +80,7 @@ impl NotificationPreferencesStore {
     /// Get preferences for a user (returns defaults if not set)
     pub async fn get(&self, user_id: &str) -> UserPreferences {
         let store = self.preferences.read().await;
-        store
-            .get(user_id)
-            .cloned()
-            .unwrap_or_default()
+        store.get(user_id).cloned().unwrap_or_default()
     }
 
     /// Update preferences for a user

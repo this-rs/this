@@ -17,10 +17,7 @@
 //! ```
 
 use super::convert::json_to_struct;
-use super::proto::{
-    EventResponse, SubscribeRequest,
-    event_service_server::EventService,
-};
+use super::proto::{EventResponse, SubscribeRequest, event_service_server::EventService};
 use crate::core::events::{EntityEvent, EventEnvelope, FrameworkEvent, LinkEvent};
 use crate::server::host::ServerHost;
 use std::pin::Pin;
@@ -77,9 +74,7 @@ fn matches_filter(event: &FrameworkEvent, filter: &SubscribeRequest) -> bool {
     // Filter by entity_id
     if let Some(ref entity_id) = filter.entity_id {
         if !entity_id.is_empty() {
-            let parsed = entity_id
-                .parse::<Uuid>()
-                .ok();
+            let parsed = entity_id.parse::<Uuid>().ok();
             match (parsed, event.entity_id()) {
                 (Some(filter_id), Some(event_id)) if filter_id == event_id => {}
                 _ => return false,
@@ -223,7 +218,8 @@ fn envelope_to_response(envelope: &EventEnvelope) -> EventResponse {
 // gRPC trait implementation
 // ---------------------------------------------------------------------------
 
-type SubscribeStream = Pin<Box<dyn tokio_stream::Stream<Item = Result<EventResponse, Status>> + Send>>;
+type SubscribeStream =
+    Pin<Box<dyn tokio_stream::Stream<Item = Result<EventResponse, Status>> + Send>>;
 
 #[tonic::async_trait]
 impl EventService for EventServiceImpl {
@@ -262,18 +258,13 @@ impl EventService for EventServiceImpl {
                             let response = envelope_to_response(&envelope);
                             // If the client disconnected, tx.send() returns Err → break
                             if tx.send(Ok(response)).await.is_err() {
-                                tracing::debug!(
-                                    "gRPC event stream: client disconnected, closing"
-                                );
+                                tracing::debug!("gRPC event stream: client disconnected, closing");
                                 break;
                             }
                         }
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(count)) => {
-                        tracing::warn!(
-                            "gRPC event stream: lagged by {} events, skipping",
-                            count
-                        );
+                        tracing::warn!("gRPC event stream: lagged by {} events, skipping", count);
                         // Continue — the client misses some events but the stream stays alive
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => {
@@ -656,14 +647,11 @@ mod tests {
         }));
 
         // Should receive exactly 1 event (the user one)
-        let msg = tokio::time::timeout(
-            std::time::Duration::from_millis(100),
-            stream.next(),
-        )
-        .await
-        .expect("timed out waiting for event")
-        .expect("stream ended unexpectedly")
-        .expect("received error");
+        let msg = tokio::time::timeout(std::time::Duration::from_millis(100), stream.next())
+            .await
+            .expect("timed out waiting for event")
+            .expect("stream ended unexpectedly")
+            .expect("received error");
 
         assert_eq!(msg.event_kind, "entity");
         assert_eq!(msg.event_type, "created");
@@ -671,12 +659,12 @@ mod tests {
         assert_eq!(msg.entity_id, user_id.to_string());
 
         // No more matching events should arrive
-        let timeout_result = tokio::time::timeout(
-            std::time::Duration::from_millis(50),
-            stream.next(),
-        )
-        .await;
-        assert!(timeout_result.is_err(), "should time out — no more matching events");
+        let timeout_result =
+            tokio::time::timeout(std::time::Duration::from_millis(50), stream.next()).await;
+        assert!(
+            timeout_result.is_err(),
+            "should time out — no more matching events"
+        );
     }
 
     #[tokio::test]
@@ -685,9 +673,7 @@ mod tests {
         use tokio_stream::StreamExt;
 
         let event_bus = EventBus::new(64);
-        let host = Arc::new(
-            ServerHost::minimal_for_test().with_event_bus(event_bus.clone()),
-        );
+        let host = Arc::new(ServerHost::minimal_for_test().with_event_bus(event_bus.clone()));
 
         let svc = EventServiceImpl::new(host);
 
@@ -719,24 +705,18 @@ mod tests {
         }));
 
         // Should receive both
-        let msg1 = tokio::time::timeout(
-            std::time::Duration::from_millis(100),
-            stream.next(),
-        )
-        .await
-        .expect("timed out")
-        .expect("stream ended")
-        .expect("error");
+        let msg1 = tokio::time::timeout(std::time::Duration::from_millis(100), stream.next())
+            .await
+            .expect("timed out")
+            .expect("stream ended")
+            .expect("error");
         assert_eq!(msg1.event_kind, "entity");
 
-        let msg2 = tokio::time::timeout(
-            std::time::Duration::from_millis(100),
-            stream.next(),
-        )
-        .await
-        .expect("timed out")
-        .expect("stream ended")
-        .expect("error");
+        let msg2 = tokio::time::timeout(std::time::Duration::from_millis(100), stream.next())
+            .await
+            .expect("timed out")
+            .expect("stream ended")
+            .expect("error");
         assert_eq!(msg2.event_kind, "link");
     }
 
@@ -745,9 +725,7 @@ mod tests {
         use crate::server::host::ServerHost;
 
         let event_bus = EventBus::new(64);
-        let host = Arc::new(
-            ServerHost::minimal_for_test().with_event_bus(event_bus.clone()),
-        );
+        let host = Arc::new(ServerHost::minimal_for_test().with_event_bus(event_bus.clone()));
 
         let svc = EventServiceImpl::new(host);
 

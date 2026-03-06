@@ -25,15 +25,15 @@ pub mod push;
 pub mod webhook;
 pub mod websocket;
 
-pub use counter::{CounterSink, EntityFieldUpdater, CounterOperation, CounterConfig};
+pub use counter::{CounterConfig, CounterOperation, CounterSink, EntityFieldUpdater};
 pub use device_tokens::{DeviceToken, DeviceTokenStore, Platform};
 pub use in_app::InAppNotificationSink;
 pub use preferences::{NotificationPreferencesStore, UserPreferences};
-pub use push::{PushNotificationSink, PushProvider};
 #[cfg(feature = "push")]
 pub use push::ExpoPushProvider;
-pub use webhook::{WebhookSink, HttpSender, WebhookConfig};
-pub use websocket::{WebSocketSink, WebSocketDispatcher};
+pub use push::{PushNotificationSink, PushProvider};
+pub use webhook::{HttpSender, WebhookConfig, WebhookSink};
+pub use websocket::{WebSocketDispatcher, WebSocketSink};
 
 use crate::config::sinks::SinkType;
 use anyhow::Result;
@@ -251,7 +251,12 @@ mod tests {
 
         let payload = json!({"title": "Hello", "body": "World"});
         registry
-            .deliver("test-sink", payload.clone(), Some("user-1"), &HashMap::new())
+            .deliver(
+                "test-sink",
+                payload.clone(),
+                Some("user-1"),
+                &HashMap::new(),
+            )
             .await
             .unwrap();
 
