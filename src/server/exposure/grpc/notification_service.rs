@@ -227,10 +227,10 @@ impl NotificationService for NotificationServiceImpl {
                 match rx.recv().await {
                     Ok(notification) => {
                         // Filter by user_id if specified
-                        if let Some(ref uid) = user_id_filter {
-                            if notification.recipient_id != *uid {
-                                continue;
-                            }
+                        if let Some(ref uid) = user_id_filter
+                            && notification.recipient_id != *uid
+                        {
+                            continue;
                         }
 
                         let response = stored_to_response(&notification);

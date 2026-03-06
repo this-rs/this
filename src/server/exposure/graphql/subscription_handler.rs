@@ -266,10 +266,10 @@ async fn run_subscription(
 /// Check if an event envelope matches the subscription filter
 fn matches_filter(envelope: &EventEnvelope, filter: &SubscriptionFilter) -> bool {
     // Filter by kind (entity / link)
-    if let Some(ref kind) = filter.kind {
-        if envelope.event.event_kind() != kind {
-            return false;
-        }
+    if let Some(ref kind) = filter.kind
+        && envelope.event.event_kind() != kind
+    {
+        return false;
     }
 
     // Filter by entity_type
@@ -297,10 +297,10 @@ fn matches_filter(envelope: &EventEnvelope, filter: &SubscriptionFilter) -> bool
     }
 
     // Filter by event_type (created, updated, deleted)
-    if let Some(ref event_type) = filter.event_type {
-        if envelope.event.action() != event_type {
-            return false;
-        }
+    if let Some(ref event_type) = filter.event_type
+        && envelope.event.action() != event_type
+    {
+        return false;
     }
 
     // Filter by entity_id
@@ -456,10 +456,10 @@ async fn run_notification_subscription(
         match result {
             Ok(notification) => {
                 // Filter by userId if specified
-                if let Some(ref uid) = user_id_filter {
-                    if notification.recipient_id != *uid {
-                        continue;
-                    }
+                if let Some(ref uid) = user_id_filter
+                    && notification.recipient_id != *uid
+                {
+                    continue;
                 }
 
                 let payload = notification_to_graphql_value(&notification);
@@ -521,20 +521,20 @@ fn parse_subscription_filter(query: &str) -> SubscriptionFilter {
         ) = def
         {
             for sel in &sub.selection_set.items {
-                if let graphql_parser::query::Selection::Field(field) = sel {
-                    if field.name == "onEvent" {
-                        for (arg_name, arg_value) in &field.arguments {
-                            let value = match arg_value {
-                                graphql_parser::query::Value::String(s) => s.clone(),
-                                _ => continue,
-                            };
-                            match arg_name.as_str() {
-                                "kind" => filter.kind = Some(value),
-                                "entityType" => filter.entity_type = Some(value),
-                                "eventType" => filter.event_type = Some(value),
-                                "entityId" => filter.entity_id = Some(value),
-                                _ => {}
-                            }
+                if let graphql_parser::query::Selection::Field(field) = sel
+                    && field.name == "onEvent"
+                {
+                    for (arg_name, arg_value) in &field.arguments {
+                        let value = match arg_value {
+                            graphql_parser::query::Value::String(s) => s.clone(),
+                            _ => continue,
+                        };
+                        match arg_name.as_str() {
+                            "kind" => filter.kind = Some(value),
+                            "entityType" => filter.entity_type = Some(value),
+                            "eventType" => filter.event_type = Some(value),
+                            "entityId" => filter.entity_id = Some(value),
+                            _ => {}
                         }
                     }
                 }
