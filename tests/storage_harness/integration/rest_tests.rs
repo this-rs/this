@@ -39,7 +39,7 @@ macro_rules! rest_integration_tests {
                 let data_service = $data_factory;
                 let ds: Arc<dyn DataService<TestDataEntity> + Send + Sync> = Arc::new(data_service);
                 let router = storage_harness::integration::build_test_router(ds);
-                TestServer::new(router).unwrap()
+                TestServer::new(router)
             }
 
             // ==============================================================
