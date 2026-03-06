@@ -70,7 +70,7 @@ prost = { version = "0.14", optional = true }
 prost-types = { version = "0.14", optional = true }
 
 # Push notifications (optional)
-reqwest = { version = "0.12", features = ["json"], optional = true }
+reqwest = { version = "0.13", features = ["json"], optional = true }
 indexmap = "2.13.0"
 
 [build-dependencies]
@@ -79,7 +79,7 @@ tonic-prost-build = { version = "0.14" }
 [dev-dependencies]
 tokio-test = "0.4"
 axum-test = "18.1"
-reqwest = { version = "0.12", features = ["json"] }
+reqwest = { version = "0.13", features = ["json"] }
 tokio-tungstenite = "0.28"
 futures-util = "0.3"
 testcontainers = "0.23"
