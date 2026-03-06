@@ -68,6 +68,40 @@ pub async fn resolve_query_field(
         }
     }
 
+    // ── Notification queries (when NotificationStore is configured) ──
+    if let Some(store) = host.notification_store() {
+        if field_name == "notifications" {
+            let user_id = utils::get_string_arg(field, "userId")
+                .ok_or_else(|| anyhow::anyhow!("Missing required argument 'userId'"))?;
+            let limit = utils::get_int_arg(field, "limit").unwrap_or(20).min(100) as usize;
+            let offset = utils::get_int_arg(field, "offset").unwrap_or(0) as usize;
+
+            let notifications = store.list_by_user(&user_id, limit, offset).await;
+            let total = store.total_count(&user_id).await;
+            let unread = store.unread_count(&user_id).await;
+
+            let items: Vec<Value> = notifications
+                .into_iter()
+                .map(|n| serde_json::to_value(n).unwrap_or(Value::Null))
+                .collect();
+
+            return Ok(serde_json::json!({
+                "notifications": items,
+                "total": total,
+                "unread": unread,
+                "limit": limit,
+                "offset": offset,
+            }));
+        }
+
+        if field_name == "unreadNotificationCount" {
+            let user_id = utils::get_string_arg(field, "userId")
+                .ok_or_else(|| anyhow::anyhow!("Missing required argument 'userId'"))?;
+            let count = store.unread_count(&user_id).await;
+            return Ok(serde_json::json!(count));
+        }
+    }
+
     bail!("Unknown query field: {}", field_name);
 }
 

@@ -1,4 +1,8 @@
 //! Mutation execution for GraphQL
+//!
+//! After each successful mutation, events are published to the EventBus
+//! (if configured on the host) so that WebSocket, SSE, and GraphQL
+//! subscription clients receive real-time notifications.
 
 use anyhow::{Result, bail};
 use graphql_parser::query::Field;
@@ -9,6 +13,7 @@ use uuid::Uuid;
 use super::field_resolver;
 use super::link_mutations;
 use super::utils;
+use crate::core::events::{EntityEvent, FrameworkEvent};
 use crate::server::host::ServerHost;
 
 /// Resolve a mutation field (e.g., "createOrder", "updateInvoice", etc.)
@@ -58,6 +63,32 @@ pub async fn resolve_mutation_field(
         return link_mutations::delete_link_mutation(host, field).await;
     }
 
+    // ── Notification mutations (when NotificationStore is configured) ──
+    if let Some(store) = host.notification_store() {
+        if field_name == "markNotificationAsRead" {
+            let id = utils::get_string_arg(field, "id")
+                .ok_or_else(|| anyhow::anyhow!("Missing required argument 'id'"))?;
+            let uuid = Uuid::parse_str(&id)?;
+            let marked = store.mark_as_read(&[uuid], None).await;
+            return Ok(Value::Bool(marked > 0));
+        }
+
+        if field_name == "markAllNotificationsAsRead" {
+            let user_id = utils::get_string_arg(field, "userId")
+                .ok_or_else(|| anyhow::anyhow!("Missing required argument 'userId'"))?;
+            let marked = store.mark_all_as_read(&user_id).await;
+            return Ok(serde_json::json!(marked));
+        }
+
+        if field_name == "deleteNotification" {
+            let id = utils::get_string_arg(field, "id")
+                .ok_or_else(|| anyhow::anyhow!("Missing required argument 'id'"))?;
+            let uuid = Uuid::parse_str(&id)?;
+            let deleted = store.delete(&uuid).await;
+            return Ok(Value::Bool(deleted));
+        }
+    }
+
     bail!("Unknown mutation field: {}", field_name);
 }
 
@@ -76,6 +107,16 @@ async fn create_entity_mutation(
     // Create the entity
     if let Some(creator) = host.entity_creators.get(&entity_type) {
         let created = creator.create_from_json(data).await?;
+
+        // Publish event to EventBus
+        if let Some(event_bus) = host.event_bus() {
+            let entity_id = utils::extract_uuid_from_value(&created).unwrap_or_default();
+            event_bus.publish(FrameworkEvent::Entity(EntityEvent::Created {
+                entity_type: entity_type.clone(),
+                entity_id,
+                data: created.clone(),
+            }));
+        }
 
         // Resolve sub-fields
         let resolved = field_resolver::resolve_entity_fields(
@@ -111,6 +152,15 @@ async fn update_entity_mutation(
     if let Some(creator) = host.entity_creators.get(&entity_type) {
         let updated = creator.update_from_json(&uuid, data).await?;
 
+        // Publish event to EventBus
+        if let Some(event_bus) = host.event_bus() {
+            event_bus.publish(FrameworkEvent::Entity(EntityEvent::Updated {
+                entity_type: entity_type.clone(),
+                entity_id: uuid,
+                data: updated.clone(),
+            }));
+        }
+
         // Resolve sub-fields
         let resolved = field_resolver::resolve_entity_fields(
             host,
@@ -142,6 +192,15 @@ async fn delete_entity_mutation(
     // Delete the entity
     if let Some(creator) = host.entity_creators.get(&entity_type) {
         creator.delete(&uuid).await?;
+
+        // Publish event to EventBus
+        if let Some(event_bus) = host.event_bus() {
+            event_bus.publish(FrameworkEvent::Entity(EntityEvent::Deleted {
+                entity_type: entity_type.clone(),
+                entity_id: uuid,
+            }));
+        }
+
         Ok(Value::Bool(true))
     } else {
         bail!("Unknown entity type: {}", entity_type);

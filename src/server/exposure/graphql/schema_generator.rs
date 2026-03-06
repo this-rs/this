@@ -64,10 +64,21 @@ impl SchemaGenerator {
         sdl.push_str(&self.generate_mutation_root());
         sdl.push_str("\n\n");
 
+        // Generate Subscription root (if EventBus or NotificationStore is configured)
+        let has_subscriptions =
+            self.host.event_bus().is_some() || self.host.notification_store().is_some();
+        if has_subscriptions {
+            sdl.push_str(&self.generate_subscription_root());
+            sdl.push_str("\n\n");
+        }
+
         // Add schema definition
         sdl.push_str("schema {\n");
         sdl.push_str("  query: Query\n");
         sdl.push_str("  mutation: Mutation\n");
+        if has_subscriptions {
+            sdl.push_str("  subscription: Subscription\n");
+        }
         sdl.push_str("}\n");
 
         sdl
@@ -136,6 +147,13 @@ impl SchemaGenerator {
             ));
         }
 
+        // Add notification queries if NotificationStore is configured
+        if self.host.notification_store().is_some() {
+            query.push_str("\n  # Notification queries\n");
+            query.push_str("  notifications(userId: String!, limit: Int, offset: Int): NotificationList!\n");
+            query.push_str("  unreadNotificationCount(userId: String!): Int!\n");
+        }
+
         query.push('}');
         query
     }
@@ -193,8 +211,77 @@ impl SchemaGenerator {
             ));
         }
 
+        // Add notification mutations if NotificationStore is configured
+        if self.host.notification_store().is_some() {
+            mutation.push_str("\n  # Notification mutations\n");
+            mutation.push_str("  markNotificationAsRead(id: ID!): Boolean!\n");
+            mutation.push_str("  markAllNotificationsAsRead(userId: String!): Int!\n");
+            mutation.push_str("  deleteNotification(id: ID!): Boolean!\n");
+        }
+
         mutation.push('}');
         mutation
+    }
+
+    /// Generate the Subscription root type
+    ///
+    /// Only generated when the host has an EventBus configured.
+    /// Provides `onEvent` for streaming entity/link events with optional filters,
+    /// and `onNotification` for streaming notifications (when NotificationStore is configured).
+    fn generate_subscription_root(&self) -> String {
+        let mut sub = String::from("type Subscription {\n");
+
+        // Generic event subscription with optional filters
+        sub.push_str("  \"\"\"Stream real-time events. All filter arguments are optional.\"\"\"\n");
+        sub.push_str("  onEvent(kind: String, entityType: String, eventType: String, entityId: ID): EventEnvelope!\n");
+
+        // Notification subscription (if NotificationStore is configured)
+        if self.host.notification_store().is_some() {
+            sub.push_str("\n  \"\"\"Stream real-time notifications. Filter by userId to receive only that user's notifications.\"\"\"\n");
+            sub.push_str("  onNotification(userId: String): Notification!\n");
+        }
+
+        sub.push_str("}\n\n");
+
+        // Add the EventEnvelope type
+        sub.push_str("type EventEnvelope {\n");
+        sub.push_str("  id: ID!\n");
+        sub.push_str("  timestamp: String!\n");
+        sub.push_str("  kind: String!\n");
+        sub.push_str("  action: String!\n");
+        sub.push_str("  entityType: String\n");
+        sub.push_str("  entityId: ID\n");
+        sub.push_str("  linkType: String\n");
+        sub.push_str("  linkId: ID\n");
+        sub.push_str("  sourceId: ID\n");
+        sub.push_str("  targetId: ID\n");
+        sub.push_str("  data: JSON\n");
+        sub.push_str("  metadata: JSON\n");
+        sub.push_str("}\n\n");
+
+        // Add Notification types if NotificationStore is configured
+        if self.host.notification_store().is_some() {
+            sub.push_str("type Notification {\n");
+            sub.push_str("  id: ID!\n");
+            sub.push_str("  recipientId: String!\n");
+            sub.push_str("  notificationType: String!\n");
+            sub.push_str("  title: String!\n");
+            sub.push_str("  body: String!\n");
+            sub.push_str("  data: JSON\n");
+            sub.push_str("  read: Boolean!\n");
+            sub.push_str("  createdAt: String!\n");
+            sub.push_str("}\n\n");
+
+            sub.push_str("type NotificationList {\n");
+            sub.push_str("  notifications: [Notification!]!\n");
+            sub.push_str("  total: Int!\n");
+            sub.push_str("  unread: Int!\n");
+            sub.push_str("  limit: Int!\n");
+            sub.push_str("  offset: Int!\n");
+            sub.push('}');
+        }
+
+        sub
     }
 
     /// Extract fields from a JSON sample
