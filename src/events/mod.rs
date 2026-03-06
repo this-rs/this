@@ -35,5 +35,5 @@ pub use log::EventLog;
 pub use matcher::EventMatcher;
 pub use memory::InMemoryEventLog;
 pub use runtime::FlowRuntime;
-pub use sinks::{InAppNotificationSink, Sink, SinkRegistry};
+pub use sinks::{InAppNotificationSink, Sink, SinkFactory, SinkRegistry};
 pub use types::*;

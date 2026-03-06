@@ -27,7 +27,7 @@ pub mod websocket;
 
 pub use counter::{CounterConfig, CounterOperation, CounterSink, EntityFieldUpdater};
 pub use device_tokens::{DeviceToken, DeviceTokenStore, Platform};
-pub use in_app::InAppNotificationSink;
+pub use in_app::{InAppNotificationSink, NotificationStore};
 pub use preferences::{NotificationPreferencesStore, UserPreferences};
 #[cfg(feature = "push")]
 pub use push::ExpoPushProvider;
@@ -170,6 +170,136 @@ impl SinkRegistry {
 }
 
 impl Default for SinkRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Factory for creating sinks from YAML configuration
+///
+/// Builds sink instances from `SinkConfig` entries. Some sinks can be
+/// auto-created (InApp), while others require external dependencies
+/// provided by the user (Push needs PushProvider, Counter needs EntityFieldUpdater,
+/// WebSocket needs WebSocketDispatcher, Webhook needs HttpSender).
+///
+/// Sinks that cannot be auto-created are logged as warnings and skipped.
+pub struct SinkFactory {
+    /// Shared notification store (created once, reused by all InApp sinks)
+    notification_store: Arc<NotificationStore>,
+
+    /// Shared preferences store
+    preferences_store: Arc<NotificationPreferencesStore>,
+
+    /// Shared device token store
+    device_token_store: Arc<DeviceTokenStore>,
+}
+
+impl SinkFactory {
+    /// Create a new SinkFactory with fresh stores
+    pub fn new() -> Self {
+        Self {
+            notification_store: Arc::new(NotificationStore::new()),
+            preferences_store: Arc::new(NotificationPreferencesStore::new()),
+            device_token_store: Arc::new(DeviceTokenStore::new()),
+        }
+    }
+
+    /// Create a SinkFactory with pre-existing stores
+    pub fn with_stores(
+        notification_store: Arc<NotificationStore>,
+        preferences_store: Arc<NotificationPreferencesStore>,
+        device_token_store: Arc<DeviceTokenStore>,
+    ) -> Self {
+        Self {
+            notification_store,
+            preferences_store,
+            device_token_store,
+        }
+    }
+
+    /// Get the notification store (for sharing with ServerHost)
+    pub fn notification_store(&self) -> &Arc<NotificationStore> {
+        &self.notification_store
+    }
+
+    /// Get the preferences store (for sharing with ServerHost)
+    pub fn preferences_store(&self) -> &Arc<NotificationPreferencesStore> {
+        &self.preferences_store
+    }
+
+    /// Get the device token store (for sharing with ServerHost)
+    pub fn device_token_store(&self) -> &Arc<DeviceTokenStore> {
+        &self.device_token_store
+    }
+
+    /// Build a SinkRegistry from a list of SinkConfigs
+    ///
+    /// Auto-creates sinks that don't need external dependencies (InApp).
+    /// Logs warnings for sinks that need manual wiring (Push, WebSocket,
+    /// Counter, Webhook).
+    pub fn build_registry(
+        &self,
+        sink_configs: &[crate::config::sinks::SinkConfig],
+    ) -> SinkRegistry {
+        let mut registry = SinkRegistry::new();
+
+        for config in sink_configs {
+            match config.sink_type {
+                SinkType::InApp => {
+                    let sink = InAppNotificationSink::with_preferences(
+                        self.notification_store.clone(),
+                        self.preferences_store.clone(),
+                    );
+                    registry.register(&config.name, Arc::new(sink));
+                    tracing::info!(
+                        sink = %config.name,
+                        "auto-wired InApp notification sink"
+                    );
+                }
+                SinkType::Push => {
+                    tracing::warn!(
+                        sink = %config.name,
+                        "Push sink requires a PushProvider — use ServerBuilder::with_push_provider() to wire it"
+                    );
+                }
+                SinkType::WebSocket => {
+                    tracing::warn!(
+                        sink = %config.name,
+                        "WebSocket sink will be wired automatically when WebSocketExposure is built"
+                    );
+                }
+                SinkType::Webhook => {
+                    tracing::warn!(
+                        sink = %config.name,
+                        "Webhook sink requires an HttpSender implementation — skipping auto-wire"
+                    );
+                }
+                SinkType::Counter => {
+                    tracing::warn!(
+                        sink = %config.name,
+                        "Counter sink requires an EntityFieldUpdater — use ServerBuilder::with_counter_updater() to wire it"
+                    );
+                }
+                SinkType::Feed => {
+                    tracing::warn!(
+                        sink = %config.name,
+                        "Feed sink is not yet implemented — skipping"
+                    );
+                }
+                SinkType::Custom => {
+                    tracing::warn!(
+                        sink = %config.name,
+                        "Custom sink requires manual registration — skipping auto-wire"
+                    );
+                }
+            }
+        }
+
+        registry
+    }
+}
+
+impl Default for SinkFactory {
     fn default() -> Self {
         Self::new()
     }
