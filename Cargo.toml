@@ -78,12 +78,12 @@ tonic-prost-build = { version = "0.14" }
 
 [dev-dependencies]
 tokio-test = "0.4"
-axum-test = "18.1"
+axum-test = "19.0"
 reqwest = { version = "0.12", features = ["json"] }
 tokio-tungstenite = "0.28"
 futures-util = "0.3"
-testcontainers = "0.23"
-testcontainers-modules = { version = "0.11", features = ["postgres", "mongo", "neo4j", "mysql"] }
+testcontainers = "0.27"
+testcontainers-modules = { version = "0.15", features = ["postgres", "mongo", "neo4j", "mysql"] }
 tempfile = "3"
 
 [features]

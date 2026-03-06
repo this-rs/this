@@ -302,7 +302,7 @@ async fn delete_handler(
 /// let router = build_test_router(
 ///     Arc::new(InMemoryDataService::<TestDataEntity>::new()),
 /// );
-/// let server = axum_test::TestServer::new(router).unwrap();
+/// let server = axum_test::TestServer::new(router);
 /// ```
 pub fn build_test_router(
     data_service: Arc<dyn DataService<TestDataEntity> + Send + Sync>,
