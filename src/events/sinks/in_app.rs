@@ -34,7 +34,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::RwLock;
+use tokio::sync::{RwLock, broadcast};
 use uuid::Uuid;
 
 /// A stored notification
@@ -66,36 +66,88 @@ pub struct StoredNotification {
     pub created_at: DateTime<Utc>,
 }
 
+/// Maximum notifications stored per user before eviction
+const MAX_PER_USER: usize = 1000;
+
+/// Broadcast channel capacity for real-time notification streaming.
+///
+/// Subscribers that fall behind by more than this many notifications
+/// will receive a `Lagged` error and miss intermediate events.
+const BROADCAST_CAPACITY: usize = 256;
+
 /// In-memory notification store
 ///
 /// Thread-safe store for notifications, keyed by recipient_id.
-/// Each recipient has their own ordered list (newest first on retrieval).
+/// Each recipient has their own ordered list stored in chronological order
+/// (oldest first, newest last). Retrieval returns newest first.
+///
+/// When a user exceeds `MAX_PER_USER` notifications, the oldest are evicted.
+///
+/// ## Real-time streaming
+///
+/// A `tokio::sync::broadcast` channel broadcasts every inserted notification
+/// to subscribers (e.g., gRPC server-streaming RPCs). The broadcast is
+/// fire-and-forget: if no subscriber is listening, the notification is simply
+/// not delivered to the channel (no error, no panic).
 #[derive(Debug)]
 pub struct NotificationStore {
-    /// Notifications keyed by recipient_id
+    /// Notifications keyed by recipient_id (chronological order: oldest first)
     notifications: RwLock<HashMap<String, Vec<StoredNotification>>>,
+
+    /// Broadcast channel for real-time notification streaming.
+    /// Every `insert()` sends a clone on this channel.
+    broadcast: broadcast::Sender<StoredNotification>,
 }
 
 impl NotificationStore {
-    /// Create an empty store
+    /// Create an empty store with a broadcast channel
     pub fn new() -> Self {
+        let (broadcast, _) = broadcast::channel(BROADCAST_CAPACITY);
         Self {
             notifications: RwLock::new(HashMap::new()),
+            broadcast,
         }
     }
 
-    /// Store a notification
+    /// Subscribe to real-time notifications.
+    ///
+    /// Returns a receiver that will get every notification inserted after
+    /// this call. Notifications inserted before are NOT replayed.
+    ///
+    /// The subscriber should filter by `recipient_id` if it only wants
+    /// notifications for a specific user.
+    pub fn subscribe(&self) -> broadcast::Receiver<StoredNotification> {
+        self.broadcast.subscribe()
+    }
+
+    /// Store a notification and broadcast it to real-time subscribers.
+    ///
+    /// Notifications are stored in chronological order (oldest first).
+    /// If the user exceeds `MAX_PER_USER`, the oldest notifications are evicted.
+    ///
+    /// The broadcast is fire-and-forget: if no subscriber is listening,
+    /// `send()` returns `Err` which is silently ignored.
     pub async fn insert(&self, notification: StoredNotification) {
+        // Broadcast to real-time subscribers (fire-and-forget)
+        let _ = self.broadcast.send(notification.clone());
+
         let mut store = self.notifications.write().await;
-        store
+        let user_notifs = store
             .entry(notification.recipient_id.clone())
-            .or_default()
-            .push(notification);
+            .or_default();
+        user_notifs.push(notification);
+
+        // Evict oldest if over capacity
+        if user_notifs.len() > MAX_PER_USER {
+            let excess = user_notifs.len() - MAX_PER_USER;
+            user_notifs.drain(0..excess);
+        }
     }
 
     /// List notifications for a user with pagination
     ///
     /// Returns notifications ordered by creation time (newest first).
+    /// No sorting needed — stored in chronological order, iterated in reverse.
     pub async fn list_by_user(
         &self,
         recipient_id: &str,
@@ -107,21 +159,40 @@ impl NotificationStore {
             return Vec::new();
         };
 
-        // Return newest first
-        let mut sorted = user_notifications.clone();
-        sorted.sort_by(|a, b| b.created_at.cmp(&a.created_at));
-
-        sorted.into_iter().skip(offset).take(limit).collect()
+        // Iterate in reverse (newest first) — no clone+sort needed
+        user_notifications
+            .iter()
+            .rev()
+            .skip(offset)
+            .take(limit)
+            .cloned()
+            .collect()
     }
 
     /// Mark notifications as read by their IDs
     ///
+    /// If `recipient_id` is provided, only searches that user's notifications
+    /// (avoiding a full scan). Otherwise scans all users.
+    ///
     /// Returns the number of notifications actually marked as read.
-    pub async fn mark_as_read(&self, notification_ids: &[Uuid]) -> usize {
+    pub async fn mark_as_read(
+        &self,
+        notification_ids: &[Uuid],
+        recipient_id: Option<&str>,
+    ) -> usize {
         let mut store = self.notifications.write().await;
         let mut count = 0;
 
-        for notifications in store.values_mut() {
+        let values: Box<dyn Iterator<Item = &mut Vec<StoredNotification>>> =
+            if let Some(rid) = recipient_id {
+                // Scoped search: only this user's notifications
+                Box::new(store.get_mut(rid).into_iter())
+            } else {
+                // Global scan (fallback)
+                Box::new(store.values_mut())
+            };
+
+        for notifications in values {
             for notif in notifications.iter_mut() {
                 if notification_ids.contains(&notif.id) && !notif.read {
                     notif.read = true;
@@ -234,15 +305,7 @@ impl Sink for InAppNotificationSink {
         context_vars: &HashMap<String, Value>,
     ) -> Result<()> {
         // Determine recipient: explicit parameter > payload field > context variable
-        let recipient = recipient_id
-            .map(|s| s.to_string())
-            .or_else(|| payload.get("recipient_id").and_then(|v| v.as_str()).map(|s| s.to_string()))
-            .or_else(|| {
-                context_vars
-                    .get("recipient_id")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string())
-            })
+        let recipient = super::resolve_recipient(recipient_id, &payload, context_vars)
             .ok_or_else(|| {
                 anyhow!(
                     "in_app sink: recipient_id not found. \
@@ -392,8 +455,8 @@ mod tests {
 
         assert_eq!(store.unread_count("user-A").await, 3);
 
-        // Mark 2 as read
-        let marked = store.mark_as_read(&[id1, id2]).await;
+        // Mark 2 as read (scoped to user-A)
+        let marked = store.mark_as_read(&[id1, id2], Some("user-A")).await;
         assert_eq!(marked, 2);
         assert_eq!(store.unread_count("user-A").await, 1);
     }
@@ -661,5 +724,187 @@ mod tests {
         }
 
         assert_eq!(store.unread_count("user-A").await, 3);
+    }
+
+    // ── Eviction + mark_as_read scoped tests ──────────────────────────
+
+    #[tokio::test]
+    async fn test_store_evicts_oldest_beyond_max() {
+        let store = NotificationStore::new();
+
+        // Insert MAX_PER_USER + 50 notifications
+        let total = MAX_PER_USER + 50;
+        for i in 0..total {
+            store
+                .insert(StoredNotification {
+                    id: Uuid::new_v4(),
+                    recipient_id: "user-A".to_string(),
+                    notification_type: "test".to_string(),
+                    title: format!("Notif {}", i),
+                    body: String::new(),
+                    data: Value::Null,
+                    read: false,
+                    created_at: Utc::now() + chrono::Duration::seconds(i as i64),
+                })
+                .await;
+        }
+
+        // Should be capped at MAX_PER_USER
+        assert_eq!(store.total_count("user-A").await, MAX_PER_USER);
+
+        // Newest should still be present (last inserted)
+        let latest = store.list_by_user("user-A", 1, 0).await;
+        assert_eq!(latest[0].title, format!("Notif {}", total - 1));
+
+        // Oldest 50 should have been evicted — first kept is Notif 50
+        let oldest = store.list_by_user("user-A", 1, MAX_PER_USER - 1).await;
+        assert_eq!(oldest[0].title, "Notif 50");
+    }
+
+    #[tokio::test]
+    async fn test_mark_as_read_scoped_to_recipient() {
+        let store = NotificationStore::new();
+        let id_a = Uuid::new_v4();
+        let id_b = Uuid::new_v4();
+
+        store
+            .insert(StoredNotification {
+                id: id_a,
+                recipient_id: "user-A".to_string(),
+                notification_type: "test".to_string(),
+                title: "For A".to_string(),
+                body: String::new(),
+                data: Value::Null,
+                read: false,
+                created_at: Utc::now(),
+            })
+            .await;
+
+        store
+            .insert(StoredNotification {
+                id: id_b,
+                recipient_id: "user-B".to_string(),
+                notification_type: "test".to_string(),
+                title: "For B".to_string(),
+                body: String::new(),
+                data: Value::Null,
+                read: false,
+                created_at: Utc::now(),
+            })
+            .await;
+
+        // Scoped mark_as_read: try to mark id_b but scoped to user-A → should find 0
+        let marked = store.mark_as_read(&[id_b], Some("user-A")).await;
+        assert_eq!(marked, 0);
+        assert_eq!(store.unread_count("user-B").await, 1); // Still unread
+
+        // Scoped mark_as_read: mark id_a scoped to user-A → should find 1
+        let marked = store.mark_as_read(&[id_a], Some("user-A")).await;
+        assert_eq!(marked, 1);
+        assert_eq!(store.unread_count("user-A").await, 0);
+    }
+
+    #[tokio::test]
+    async fn test_mark_as_read_global_fallback() {
+        let store = NotificationStore::new();
+        let id = Uuid::new_v4();
+
+        store
+            .insert(StoredNotification {
+                id,
+                recipient_id: "user-A".to_string(),
+                notification_type: "test".to_string(),
+                title: "Test".to_string(),
+                body: String::new(),
+                data: Value::Null,
+                read: false,
+                created_at: Utc::now(),
+            })
+            .await;
+
+        // Without recipient_id — global scan fallback
+        let marked = store.mark_as_read(&[id], None).await;
+        assert_eq!(marked, 1);
+        assert_eq!(store.unread_count("user-A").await, 0);
+    }
+
+    // ── Broadcast channel tests ─────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_notification_broadcast_on_insert() {
+        let store = NotificationStore::new();
+        let mut rx = store.subscribe();
+
+        let notif_id = Uuid::new_v4();
+        store
+            .insert(StoredNotification {
+                id: notif_id,
+                recipient_id: "user-A".to_string(),
+                notification_type: "new_follower".to_string(),
+                title: "New follower".to_string(),
+                body: "Alice followed you".to_string(),
+                data: json!({"follower_name": "Alice"}),
+                read: false,
+                created_at: Utc::now(),
+            })
+            .await;
+
+        let received = rx.recv().await.expect("should receive broadcast");
+        assert_eq!(received.id, notif_id);
+        assert_eq!(received.recipient_id, "user-A");
+        assert_eq!(received.notification_type, "new_follower");
+        assert_eq!(received.title, "New follower");
+
+        // Also stored in the store
+        assert_eq!(store.total_count("user-A").await, 1);
+    }
+
+    #[tokio::test]
+    async fn test_broadcast_without_subscriber() {
+        let store = NotificationStore::new();
+
+        // Insert without any subscriber — should NOT panic
+        store
+            .insert(StoredNotification {
+                id: Uuid::new_v4(),
+                recipient_id: "user-A".to_string(),
+                notification_type: "test".to_string(),
+                title: "No one listening".to_string(),
+                body: String::new(),
+                data: Value::Null,
+                read: false,
+                created_at: Utc::now(),
+            })
+            .await;
+
+        // Still stored
+        assert_eq!(store.total_count("user-A").await, 1);
+    }
+
+    #[tokio::test]
+    async fn test_broadcast_multiple_subscribers() {
+        let store = NotificationStore::new();
+        let mut rx1 = store.subscribe();
+        let mut rx2 = store.subscribe();
+
+        let notif_id = Uuid::new_v4();
+        store
+            .insert(StoredNotification {
+                id: notif_id,
+                recipient_id: "user-A".to_string(),
+                notification_type: "test".to_string(),
+                title: "For everyone".to_string(),
+                body: String::new(),
+                data: Value::Null,
+                read: false,
+                created_at: Utc::now(),
+            })
+            .await;
+
+        let r1 = rx1.recv().await.expect("rx1 should receive");
+        let r2 = rx2.recv().await.expect("rx2 should receive");
+
+        assert_eq!(r1.id, notif_id);
+        assert_eq!(r2.id, notif_id);
     }
 }

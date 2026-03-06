@@ -120,6 +120,79 @@ impl ServerHost {
     pub fn event_bus(&self) -> Option<&Arc<EventBus>> {
         self.event_bus.as_ref()
     }
+
+    /// Create a minimal `ServerHost` for unit tests.
+    ///
+    /// Has empty registries and a mock `LinkService`. Useful for testing
+    /// services that only need the `EventBus` (e.g., `EventServiceImpl`).
+    #[cfg(test)]
+    pub fn minimal_for_test() -> Self {
+        use crate::core::link::LinkEntity;
+
+        struct NoopLinkService;
+
+        #[async_trait::async_trait]
+        impl crate::core::service::LinkService for NoopLinkService {
+            async fn create(&self, link: LinkEntity) -> anyhow::Result<LinkEntity> {
+                Ok(link)
+            }
+            async fn get(&self, _id: &uuid::Uuid) -> anyhow::Result<Option<LinkEntity>> {
+                Ok(None)
+            }
+            async fn list(&self) -> anyhow::Result<Vec<LinkEntity>> {
+                Ok(vec![])
+            }
+            async fn find_by_source(
+                &self,
+                _source_id: &uuid::Uuid,
+                _link_type: Option<&str>,
+                _target_type: Option<&str>,
+            ) -> anyhow::Result<Vec<LinkEntity>> {
+                Ok(vec![])
+            }
+            async fn find_by_target(
+                &self,
+                _target_id: &uuid::Uuid,
+                _link_type: Option<&str>,
+                _source_type: Option<&str>,
+            ) -> anyhow::Result<Vec<LinkEntity>> {
+                Ok(vec![])
+            }
+            async fn update(
+                &self,
+                _id: &uuid::Uuid,
+                link: LinkEntity,
+            ) -> anyhow::Result<LinkEntity> {
+                Ok(link)
+            }
+            async fn delete(&self, _id: &uuid::Uuid) -> anyhow::Result<()> {
+                Ok(())
+            }
+            async fn delete_by_entity(&self, _entity_id: &uuid::Uuid) -> anyhow::Result<()> {
+                Ok(())
+            }
+        }
+
+        let config = LinksConfig {
+            entities: vec![],
+            links: vec![],
+            validation_rules: None,
+            events: None,
+            sinks: None,
+        };
+        let config = Arc::new(config);
+        let registry = Arc::new(LinkRouteRegistry::new(config.clone()));
+
+        Self {
+            config,
+            link_service: Arc::new(NoopLinkService),
+            registry,
+            entity_registry: EntityRegistry::new(),
+            entity_fetchers: Arc::new(HashMap::new()),
+            entity_creators: Arc::new(HashMap::new()),
+            event_bus: None,
+        }
+    }
 }
 
 #[cfg(test)]
