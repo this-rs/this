@@ -9,6 +9,11 @@
 use crate::config::LinksConfig;
 use crate::core::events::EventBus;
 use crate::core::{EntityCreator, EntityFetcher, service::LinkService};
+use crate::events::log::EventLog;
+use crate::events::sinks::device_tokens::DeviceTokenStore;
+use crate::events::sinks::in_app::NotificationStore;
+use crate::events::sinks::preferences::NotificationPreferencesStore;
+use crate::events::sinks::SinkRegistry;
 use crate::links::registry::LinkRouteRegistry;
 use crate::server::entity_registry::EntityRegistry;
 use anyhow::Result;
@@ -60,6 +65,36 @@ pub struct ServerHost {
     /// When present, REST/GraphQL handlers will publish events for mutations.
     /// WebSocket and other real-time exposures subscribe to this bus.
     pub event_bus: Option<Arc<EventBus>>,
+
+    /// Optional persistent event log for durable event storage
+    ///
+    /// When present, the EventBus bridges events to this log for replay,
+    /// consumer groups, and FlowRuntime processing.
+    pub event_log: Option<Arc<dyn EventLog>>,
+
+    /// Optional sink registry for event delivery pipelines
+    ///
+    /// Contains all registered sinks (in_app, push, webhook, websocket, counter).
+    /// The FlowRuntime's `deliver` operator uses this to dispatch payloads.
+    pub sink_registry: Option<Arc<SinkRegistry>>,
+
+    /// Optional in-app notification store
+    ///
+    /// Provides list, mark_as_read, unread_count operations for notifications.
+    /// Used by REST/GraphQL/gRPC notification endpoints.
+    pub notification_store: Option<Arc<NotificationStore>>,
+
+    /// Optional device token store for push notifications
+    ///
+    /// Stores push notification tokens (Expo, APNs, FCM) per user.
+    /// Used by the push notification sink and device token endpoints.
+    pub device_token_store: Option<Arc<DeviceTokenStore>>,
+
+    /// Optional notification preferences store
+    ///
+    /// Stores per-user notification preferences (mute, disable types).
+    /// Used by sinks to filter notifications and by preference endpoints.
+    pub preferences_store: Option<Arc<NotificationPreferencesStore>>,
 }
 
 impl ServerHost {
@@ -97,6 +132,11 @@ impl ServerHost {
             entity_fetchers: Arc::new(fetchers),
             entity_creators: Arc::new(creators),
             event_bus: None,
+            event_log: None,
+            sink_registry: None,
+            notification_store: None,
+            device_token_store: None,
+            preferences_store: None,
         })
     }
 
@@ -119,6 +159,61 @@ impl ServerHost {
     /// Get a reference to the event bus (if configured)
     pub fn event_bus(&self) -> Option<&Arc<EventBus>> {
         self.event_bus.as_ref()
+    }
+
+    /// Set the persistent event log
+    pub fn with_event_log(mut self, event_log: Arc<dyn EventLog>) -> Self {
+        self.event_log = Some(event_log);
+        self
+    }
+
+    /// Get a reference to the event log (if configured)
+    pub fn event_log(&self) -> Option<&Arc<dyn EventLog>> {
+        self.event_log.as_ref()
+    }
+
+    /// Set the sink registry
+    pub fn with_sink_registry(mut self, registry: SinkRegistry) -> Self {
+        self.sink_registry = Some(Arc::new(registry));
+        self
+    }
+
+    /// Get a reference to the sink registry (if configured)
+    pub fn sink_registry(&self) -> Option<&Arc<SinkRegistry>> {
+        self.sink_registry.as_ref()
+    }
+
+    /// Set the notification store
+    pub fn with_notification_store(mut self, store: Arc<NotificationStore>) -> Self {
+        self.notification_store = Some(store);
+        self
+    }
+
+    /// Get a reference to the notification store (if configured)
+    pub fn notification_store(&self) -> Option<&Arc<NotificationStore>> {
+        self.notification_store.as_ref()
+    }
+
+    /// Set the device token store
+    pub fn with_device_token_store(mut self, store: Arc<DeviceTokenStore>) -> Self {
+        self.device_token_store = Some(store);
+        self
+    }
+
+    /// Get a reference to the device token store (if configured)
+    pub fn device_token_store(&self) -> Option<&Arc<DeviceTokenStore>> {
+        self.device_token_store.as_ref()
+    }
+
+    /// Set the notification preferences store
+    pub fn with_preferences_store(mut self, store: Arc<NotificationPreferencesStore>) -> Self {
+        self.preferences_store = Some(store);
+        self
+    }
+
+    /// Get a reference to the notification preferences store (if configured)
+    pub fn preferences_store(&self) -> Option<&Arc<NotificationPreferencesStore>> {
+        self.preferences_store.as_ref()
     }
 
     /// Create a minimal `ServerHost` for unit tests.
@@ -191,6 +286,11 @@ impl ServerHost {
             entity_fetchers: Arc::new(HashMap::new()),
             entity_creators: Arc::new(HashMap::new()),
             event_bus: None,
+            event_log: None,
+            sink_registry: None,
+            notification_store: None,
+            device_token_store: None,
+            preferences_store: None,
         }
     }
 }
@@ -357,5 +457,60 @@ mod tests {
         let host = make_host();
         // link_service should be accessible (Arc<dyn LinkService>)
         let _ = host.link_service.clone();
+    }
+
+    #[test]
+    fn test_new_fields_none_by_default() {
+        let host = make_host();
+        assert!(host.event_log().is_none());
+        assert!(host.sink_registry().is_none());
+        assert!(host.notification_store().is_none());
+        assert!(host.device_token_store().is_none());
+        assert!(host.preferences_store().is_none());
+    }
+
+    #[test]
+    fn test_with_notification_store() {
+        use crate::events::sinks::in_app::NotificationStore;
+        let host = make_host();
+        let store = Arc::new(NotificationStore::new());
+        let host = host.with_notification_store(store);
+        assert!(host.notification_store().is_some());
+    }
+
+    #[test]
+    fn test_with_device_token_store() {
+        use crate::events::sinks::device_tokens::DeviceTokenStore;
+        let host = make_host();
+        let store = Arc::new(DeviceTokenStore::new());
+        let host = host.with_device_token_store(store);
+        assert!(host.device_token_store().is_some());
+    }
+
+    #[test]
+    fn test_with_preferences_store() {
+        use crate::events::sinks::preferences::NotificationPreferencesStore;
+        let host = make_host();
+        let store = Arc::new(NotificationPreferencesStore::new());
+        let host = host.with_preferences_store(store);
+        assert!(host.preferences_store().is_some());
+    }
+
+    #[test]
+    fn test_with_sink_registry() {
+        use crate::events::sinks::SinkRegistry;
+        let host = make_host();
+        let registry = SinkRegistry::new();
+        let host = host.with_sink_registry(registry);
+        assert!(host.sink_registry().is_some());
+    }
+
+    #[test]
+    fn test_with_event_log() {
+        use crate::events::memory::InMemoryEventLog;
+        let host = make_host();
+        let log = Arc::new(InMemoryEventLog::new());
+        let host = host.with_event_log(log);
+        assert!(host.event_log().is_some());
     }
 }
