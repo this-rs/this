@@ -6,6 +6,9 @@
 //!
 //! The REST exposure consumes a `ServerHost` and produces an Axum `Router`.
 
+pub mod notifications;
+pub mod sse;
+
 use super::super::host::ServerHost;
 use crate::links::handlers::AppState;
 use crate::server::router::build_link_routes;
@@ -63,6 +66,29 @@ impl RestExposure {
         }
 
         app = app.merge(link_routes);
+
+        // SSE event stream — only if EventBus is configured
+        if let Some(event_bus) = &host.event_bus {
+            let sse_routes = Router::new()
+                .route("/events/stream", get(sse::sse_handler))
+                .with_state(event_bus.clone());
+            app = app.merge(sse_routes);
+        }
+
+        // Notification, preferences, and device token endpoints
+        // — only if notification_store is configured
+        if let (Some(notification_store), Some(preferences_store), Some(device_token_store)) = (
+            &host.notification_store,
+            &host.preferences_store,
+            &host.device_token_store,
+        ) {
+            let notif_state = notifications::NotificationState {
+                notification_store: notification_store.clone(),
+                preferences_store: preferences_store.clone(),
+                device_token_store: device_token_store.clone(),
+            };
+            app = app.merge(notifications::notification_routes(notif_state));
+        }
 
         Ok(app)
     }
