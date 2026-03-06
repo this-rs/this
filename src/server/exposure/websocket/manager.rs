@@ -35,6 +35,11 @@ struct ConnectionHandle {
     tx: mpsc::UnboundedSender<ServerMessage>,
     /// Active subscriptions for this connection
     subscriptions: Vec<Subscription>,
+    /// Optional user ID associated with this connection
+    ///
+    /// Set via `associate_user()` after authentication. Used by
+    /// `send_to_user()` to dispatch sink notifications to the right connections.
+    user_id: Option<String>,
 }
 
 /// Manages all active WebSocket connections and their subscriptions
@@ -46,6 +51,12 @@ pub struct ConnectionManager {
     _host: Arc<ServerHost>,
     /// All active connections indexed by connection ID
     connections: RwLock<HashMap<String, ConnectionHandle>>,
+}
+
+impl std::fmt::Debug for ConnectionManager {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ConnectionManager").finish_non_exhaustive()
+    }
 }
 
 impl ConnectionManager {
@@ -68,6 +79,7 @@ impl ConnectionManager {
         let handle = ConnectionHandle {
             tx,
             subscriptions: Vec::new(),
+            user_id: None,
         };
 
         self.connections
@@ -148,6 +160,83 @@ impl ConnectionManager {
             // If send fails, the receiver is dropped (client disconnected)
             let _ = conn.tx.send(message);
         }
+    }
+
+    /// Associate a user ID with a connection
+    ///
+    /// Call this after the client authenticates (e.g., via a JWT in the
+    /// first message or via a query parameter on the WebSocket URL).
+    /// Once associated, `send_to_user()` can dispatch notifications to
+    /// all connections belonging to that user.
+    #[allow(dead_code)] // Will be used when auth is implemented
+    pub async fn associate_user(&self, connection_id: &str, user_id: String) -> Result<(), String> {
+        let mut connections = self.connections.write().await;
+        let conn = connections
+            .get_mut(connection_id)
+            .ok_or_else(|| format!("Connection {} not found", connection_id))?;
+
+        tracing::debug!(
+            connection_id = %connection_id,
+            user_id = %user_id,
+            "User associated with WebSocket connection"
+        );
+
+        conn.user_id = Some(user_id);
+        Ok(())
+    }
+
+    /// Send a notification payload to all connections belonging to a user
+    ///
+    /// Returns the number of connections that received the message.
+    /// Returns 0 if no connections are associated with the given user ID.
+    pub async fn send_to_user(&self, user_id: &str, payload: serde_json::Value) -> usize {
+        let connections = self.connections.read().await;
+        let mut count = 0;
+
+        for handle in connections.values() {
+            if handle.user_id.as_deref() == Some(user_id) {
+                let msg = ServerMessage::Notification {
+                    data: payload.clone(),
+                };
+                if handle.tx.send(msg).is_ok() {
+                    count += 1;
+                }
+            }
+        }
+
+        if count > 0 {
+            tracing::debug!(
+                user_id = %user_id,
+                connections = count,
+                "Dispatched notification to user connections"
+            );
+        }
+
+        count
+    }
+
+    /// Broadcast a notification payload to ALL connected clients
+    ///
+    /// Returns the number of connections that received the message.
+    pub async fn broadcast_payload(&self, payload: serde_json::Value) -> usize {
+        let connections = self.connections.read().await;
+        let mut count = 0;
+
+        for handle in connections.values() {
+            let msg = ServerMessage::Notification {
+                data: payload.clone(),
+            };
+            if handle.tx.send(msg).is_ok() {
+                count += 1;
+            }
+        }
+
+        tracing::debug!(
+            connections = count,
+            "Broadcast notification to all connections"
+        );
+
+        count
     }
 
     /// Dispatch an event to all matching subscriptions across all connections
@@ -578,5 +667,99 @@ mod tests {
             }
             _ => panic!("Expected two Event messages"),
         }
+    }
+
+    #[tokio::test]
+    async fn test_associate_user() {
+        let cm = ConnectionManager::new(test_host());
+        let (conn_id, _rx) = cm.connect().await;
+
+        // Associate user
+        cm.associate_user(&conn_id, "user-A".to_string())
+            .await
+            .expect("associate should succeed");
+
+        // Non-existent connection should fail
+        let result = cm
+            .associate_user("conn_nonexistent", "user-B".to_string())
+            .await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_send_to_user() {
+        let cm = ConnectionManager::new(test_host());
+
+        // Create two connections for the same user
+        let (conn1_id, mut rx1) = cm.connect().await;
+        let (conn2_id, mut rx2) = cm.connect().await;
+        // Create one connection for a different user
+        let (conn3_id, mut rx3) = cm.connect().await;
+
+        cm.associate_user(&conn1_id, "user-A".to_string())
+            .await
+            .unwrap();
+        cm.associate_user(&conn2_id, "user-A".to_string())
+            .await
+            .unwrap();
+        cm.associate_user(&conn3_id, "user-B".to_string())
+            .await
+            .unwrap();
+
+        // Send to user-A
+        let payload = json!({"title": "Hello user-A"});
+        let count = cm.send_to_user("user-A", payload.clone()).await;
+        assert_eq!(count, 2);
+
+        // Both user-A connections should receive it
+        let msg1 = rx1.try_recv().expect("conn1 should receive");
+        let msg2 = rx2.try_recv().expect("conn2 should receive");
+        assert!(matches!(msg1, ServerMessage::Notification { .. }));
+        assert!(matches!(msg2, ServerMessage::Notification { .. }));
+
+        // user-B should NOT receive it
+        assert!(rx3.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn test_send_to_user_no_match() {
+        let cm = ConnectionManager::new(test_host());
+        let (_conn_id, _rx) = cm.connect().await;
+        // Connection has no user_id — send_to_user should return 0
+        let count = cm.send_to_user("user-X", json!({})).await;
+        assert_eq!(count, 0);
+    }
+
+    #[tokio::test]
+    async fn test_broadcast_payload() {
+        let cm = ConnectionManager::new(test_host());
+        let (_conn1_id, mut rx1) = cm.connect().await;
+        let (_conn2_id, mut rx2) = cm.connect().await;
+
+        let payload = json!({"type": "system_announcement", "message": "Server restarting"});
+        let count = cm.broadcast_payload(payload.clone()).await;
+        assert_eq!(count, 2);
+
+        let msg1 = rx1.try_recv().expect("conn1 should receive broadcast");
+        let msg2 = rx2.try_recv().expect("conn2 should receive broadcast");
+
+        match (&msg1, &msg2) {
+            (
+                ServerMessage::Notification { data: d1 },
+                ServerMessage::Notification { data: d2 },
+            ) => {
+                assert_eq!(d1["message"], "Server restarting");
+                assert_eq!(d2["message"], "Server restarting");
+            }
+            _ => panic!("Expected Notification messages"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_broadcast_payload_empty() {
+        let cm = ConnectionManager::new(test_host());
+        // No connections — should return 0
+        let count = cm.broadcast_payload(json!({})).await;
+        assert_eq!(count, 0);
     }
 }

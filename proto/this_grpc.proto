@@ -135,3 +135,170 @@ message LinkListResponse {
 message DeleteLinkResponse {
   bool success = 1;
 }
+
+// ============================================================================
+// Event Service — Real-time event streaming via server-streaming RPC
+// ============================================================================
+
+service EventService {
+  // Subscribe to real-time events with optional filters.
+  // Returns a server-streaming response — the server pushes events as they
+  // occur on the EventBus. Filters are ANDed: only events matching ALL
+  // provided criteria are forwarded to the client.
+  rpc Subscribe(SubscribeRequest) returns (stream EventResponse);
+}
+
+// ============================================================================
+// Event Messages
+// ============================================================================
+
+// Request to subscribe to the event stream.
+// All filter fields are optional — omitting a field means "match any".
+// When multiple fields are set they are ANDed together.
+message SubscribeRequest {
+  // Filter by entity type (e.g. "user", "capture").
+  optional string entity_type = 1;
+
+  // Filter by specific entity ID (UUID as string).
+  optional string entity_id = 2;
+
+  // Filter by event type (e.g. "created", "updated", "deleted").
+  optional string event_type = 3;
+
+  // Filter by event kind: "entity" or "link".
+  optional string kind = 4;
+
+  // Filter by link type (e.g. "follow", "like"). Only applies to link events.
+  optional string link_type = 5;
+}
+
+// A single event pushed by the server on the stream.
+message EventResponse {
+  // Unique event identifier (UUID as string).
+  string event_id = 1;
+
+  // Event kind: "entity" or "link".
+  string event_kind = 2;
+
+  // Event type: "created", "updated", or "deleted".
+  string event_type = 3;
+
+  // Entity type involved (e.g. "user", "capture", "comment").
+  string entity_type = 4;
+
+  // Entity ID involved (UUID as string). Present for entity events.
+  string entity_id = 5;
+
+  // Link type (e.g. "follow", "like"). Present only for link events.
+  string link_type = 6;
+
+  // Source entity ID for link events (UUID as string).
+  string source_id = 7;
+
+  // Target entity ID for link events (UUID as string).
+  string target_id = 8;
+
+  // Event payload data (entity data or link metadata).
+  google.protobuf.Struct data = 9;
+
+  // Additional metadata attached to the event.
+  google.protobuf.Struct metadata = 10;
+
+  // Event timestamp (RFC 3339 string).
+  string timestamp = 11;
+
+  // Monotonic sequence number from the EventBus.
+  uint64 seq_no = 12;
+}
+
+// ============================================================================
+// Notification Service — In-app notification management and streaming
+// ============================================================================
+
+service NotificationService {
+  // List notifications for a user with pagination (newest first)
+  rpc ListNotifications(ListNotificationsRequest) returns (ListNotificationsResponse);
+
+  // Get unread notification count for a user
+  rpc GetUnreadCount(GetUnreadCountRequest) returns (GetUnreadCountResponse);
+
+  // Mark specific notifications as read
+  rpc MarkAsRead(MarkAsReadRequest) returns (MarkAsReadResponse);
+
+  // Mark all notifications for a user as read
+  rpc MarkAllAsRead(MarkAllAsReadRequest) returns (MarkAllAsReadResponse);
+
+  // Delete a notification by ID
+  rpc DeleteNotification(DeleteNotificationRequest) returns (DeleteNotificationResponse);
+
+  // Subscribe to real-time notifications (server-streaming).
+  // Optionally filter by user_id — if omitted, all notifications are streamed.
+  rpc SubscribeNotifications(SubscribeNotificationsRequest) returns (stream NotificationResponse);
+}
+
+// ============================================================================
+// Notification Messages
+// ============================================================================
+
+message ListNotificationsRequest {
+  string user_id = 1;         // Recipient user ID (required)
+  int32 limit = 2;            // Max notifications to return (default: 20, max: 100)
+  int32 offset = 3;           // Offset for pagination
+}
+
+message ListNotificationsResponse {
+  repeated NotificationResponse notifications = 1;
+  int32 total = 2;            // Total notification count for the user
+  int32 unread = 3;           // Unread notification count for the user
+}
+
+message GetUnreadCountRequest {
+  string user_id = 1;         // Recipient user ID (required)
+}
+
+message GetUnreadCountResponse {
+  int32 count = 1;
+}
+
+message MarkAsReadRequest {
+  repeated string notification_ids = 1;  // UUIDs of notifications to mark as read
+  optional string user_id = 2;           // Optional: scope search to this user
+}
+
+message MarkAsReadResponse {
+  int32 marked_count = 1;     // Number of notifications actually marked as read
+}
+
+message MarkAllAsReadRequest {
+  string user_id = 1;         // Recipient user ID (required)
+}
+
+message MarkAllAsReadResponse {
+  int32 marked_count = 1;     // Number of notifications actually marked as read
+}
+
+message DeleteNotificationRequest {
+  string notification_id = 1; // UUID of the notification to delete
+}
+
+message DeleteNotificationResponse {
+  bool success = 1;
+}
+
+message SubscribeNotificationsRequest {
+  // Optional: filter by recipient user ID.
+  // If omitted, all notifications are streamed.
+  optional string user_id = 1;
+}
+
+// A single notification (used in list responses and streaming).
+message NotificationResponse {
+  string id = 1;                        // Notification UUID
+  string recipient_id = 2;             // Recipient user ID
+  string notification_type = 3;        // Type (e.g. "new_follower", "new_like")
+  string title = 4;                    // Human-readable title
+  string body = 5;                     // Human-readable body
+  google.protobuf.Struct data = 6;     // Additional payload data
+  bool read = 7;                       // Whether the notification has been read
+  string created_at = 8;              // Creation timestamp (RFC 3339)
+}

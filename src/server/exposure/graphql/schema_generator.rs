@@ -64,10 +64,21 @@ impl SchemaGenerator {
         sdl.push_str(&self.generate_mutation_root());
         sdl.push_str("\n\n");
 
+        // Generate Subscription root (if EventBus or NotificationStore is configured)
+        let has_subscriptions =
+            self.host.event_bus().is_some() || self.host.notification_store().is_some();
+        if has_subscriptions {
+            sdl.push_str(&self.generate_subscription_root());
+            sdl.push_str("\n\n");
+        }
+
         // Add schema definition
         sdl.push_str("schema {\n");
         sdl.push_str("  query: Query\n");
         sdl.push_str("  mutation: Mutation\n");
+        if has_subscriptions {
+            sdl.push_str("  subscription: Subscription\n");
+        }
         sdl.push_str("}\n");
 
         sdl
@@ -136,6 +147,15 @@ impl SchemaGenerator {
             ));
         }
 
+        // Add notification queries if NotificationStore is configured
+        if self.host.notification_store().is_some() {
+            query.push_str("\n  # Notification queries\n");
+            query.push_str(
+                "  notifications(userId: String!, limit: Int, offset: Int): NotificationList!\n",
+            );
+            query.push_str("  unreadNotificationCount(userId: String!): Int!\n");
+        }
+
         query.push('}');
         query
     }
@@ -193,8 +213,77 @@ impl SchemaGenerator {
             ));
         }
 
+        // Add notification mutations if NotificationStore is configured
+        if self.host.notification_store().is_some() {
+            mutation.push_str("\n  # Notification mutations\n");
+            mutation.push_str("  markNotificationAsRead(id: ID!): Boolean!\n");
+            mutation.push_str("  markAllNotificationsAsRead(userId: String!): Int!\n");
+            mutation.push_str("  deleteNotification(id: ID!): Boolean!\n");
+        }
+
         mutation.push('}');
         mutation
+    }
+
+    /// Generate the Subscription root type
+    ///
+    /// Only generated when the host has an EventBus configured.
+    /// Provides `onEvent` for streaming entity/link events with optional filters,
+    /// and `onNotification` for streaming notifications (when NotificationStore is configured).
+    fn generate_subscription_root(&self) -> String {
+        let mut sub = String::from("type Subscription {\n");
+
+        // Generic event subscription with optional filters
+        sub.push_str("  \"\"\"Stream real-time events. All filter arguments are optional.\"\"\"\n");
+        sub.push_str("  onEvent(kind: String, entityType: String, eventType: String, entityId: ID): EventEnvelope!\n");
+
+        // Notification subscription (if NotificationStore is configured)
+        if self.host.notification_store().is_some() {
+            sub.push_str("\n  \"\"\"Stream real-time notifications. Filter by userId to receive only that user's notifications.\"\"\"\n");
+            sub.push_str("  onNotification(userId: String): Notification!\n");
+        }
+
+        sub.push_str("}\n\n");
+
+        // Add the EventEnvelope type
+        sub.push_str("type EventEnvelope {\n");
+        sub.push_str("  id: ID!\n");
+        sub.push_str("  timestamp: String!\n");
+        sub.push_str("  kind: String!\n");
+        sub.push_str("  action: String!\n");
+        sub.push_str("  entityType: String\n");
+        sub.push_str("  entityId: ID\n");
+        sub.push_str("  linkType: String\n");
+        sub.push_str("  linkId: ID\n");
+        sub.push_str("  sourceId: ID\n");
+        sub.push_str("  targetId: ID\n");
+        sub.push_str("  data: JSON\n");
+        sub.push_str("  metadata: JSON\n");
+        sub.push_str("}\n\n");
+
+        // Add Notification types if NotificationStore is configured
+        if self.host.notification_store().is_some() {
+            sub.push_str("type Notification {\n");
+            sub.push_str("  id: ID!\n");
+            sub.push_str("  recipientId: String!\n");
+            sub.push_str("  notificationType: String!\n");
+            sub.push_str("  title: String!\n");
+            sub.push_str("  body: String!\n");
+            sub.push_str("  data: JSON\n");
+            sub.push_str("  read: Boolean!\n");
+            sub.push_str("  createdAt: String!\n");
+            sub.push_str("}\n\n");
+
+            sub.push_str("type NotificationList {\n");
+            sub.push_str("  notifications: [Notification!]!\n");
+            sub.push_str("  total: Int!\n");
+            sub.push_str("  unread: Int!\n");
+            sub.push_str("  limit: Int!\n");
+            sub.push_str("  offset: Int!\n");
+            sub.push('}');
+        }
+
+        sub
     }
 
     /// Extract fields from a JSON sample
@@ -572,6 +661,8 @@ mod tests {
             entities: entity_configs,
             links,
             validation_rules: None,
+            events: None,
+            sinks: None,
         };
 
         Arc::new(
@@ -946,5 +1037,188 @@ mod tests {
         assert!(sdl.contains("type Query {"), "should have Query root");
         assert!(sdl.contains("type Mutation {"), "should have Mutation root");
         assert!(sdl.contains("schema {"), "should have schema definition");
+    }
+
+    // -----------------------------------------------------------------------
+    // EventBus + NotificationStore integration tests
+    // -----------------------------------------------------------------------
+
+    #[cfg(feature = "graphql")]
+    fn build_host_with_events(
+        entities: Vec<EntityEntry<'_>>,
+        links: Vec<LinkDefinition>,
+    ) -> Arc<ServerHost> {
+        use crate::core::events::EventBus;
+        use crate::events::sinks::in_app::NotificationStore;
+
+        let link_service = Arc::new(InMemoryLinkService::new());
+        let entity_configs: Vec<EntityConfig> = entities
+            .iter()
+            .map(|(singular, plural, _)| EntityConfig {
+                singular: singular.to_string(),
+                plural: plural.to_string(),
+                auth: EntityAuthConfig::default(),
+            })
+            .collect();
+
+        let mut registry = EntityRegistry::new();
+        let mut fetchers: HashMap<String, Arc<dyn EntityFetcher>> = HashMap::new();
+
+        for (singular, plural, fetcher) in &entities {
+            registry.register(Box::new(StubDescriptor::new(singular, plural)));
+            if let Some(f) = fetcher {
+                fetchers.insert(singular.to_string(), f.clone());
+            }
+        }
+
+        let config = LinksConfig {
+            entities: entity_configs,
+            links,
+            validation_rules: None,
+            events: None,
+            sinks: None,
+        };
+
+        let notification_store = Arc::new(NotificationStore::new());
+
+        Arc::new(
+            ServerHost::from_builder_components(
+                link_service,
+                config,
+                registry,
+                fetchers,
+                HashMap::new(),
+            )
+            .expect("should build test host")
+            .with_event_bus(EventBus::new(256))
+            .with_notification_store(notification_store),
+        )
+    }
+
+    #[cfg(feature = "graphql")]
+    #[test]
+    fn test_generate_query_root_with_notification_store() {
+        let host = build_host_with_events(vec![("order", "orders", None)], vec![]);
+        let generator = SchemaGenerator::new(host);
+        let query_root = generator.generate_query_root();
+
+        assert!(
+            query_root.contains("notifications(userId: String!"),
+            "should have notifications query: {}",
+            query_root
+        );
+        assert!(
+            query_root.contains("unreadNotificationCount(userId: String!): Int!"),
+            "should have unreadNotificationCount query: {}",
+            query_root
+        );
+    }
+
+    #[cfg(feature = "graphql")]
+    #[test]
+    fn test_generate_mutation_root_with_notification_store() {
+        let host = build_host_with_events(vec![("order", "orders", None)], vec![]);
+        let generator = SchemaGenerator::new(host);
+        let mutation_root = generator.generate_mutation_root();
+
+        assert!(
+            mutation_root.contains("markNotificationAsRead(id: ID!): Boolean!"),
+            "should have markNotificationAsRead: {}",
+            mutation_root
+        );
+        assert!(
+            mutation_root.contains("markAllNotificationsAsRead(userId: String!): Int!"),
+            "should have markAllNotificationsAsRead: {}",
+            mutation_root
+        );
+        assert!(
+            mutation_root.contains("deleteNotification(id: ID!): Boolean!"),
+            "should have deleteNotification: {}",
+            mutation_root
+        );
+    }
+
+    #[cfg(feature = "graphql")]
+    #[test]
+    fn test_generate_subscription_root_content() {
+        let host = build_host_with_events(vec![("order", "orders", None)], vec![]);
+        let generator = SchemaGenerator::new(host);
+        let sub = generator.generate_subscription_root();
+
+        assert!(
+            sub.contains("type Subscription {"),
+            "should have Subscription type"
+        );
+        assert!(sub.contains("onEvent("), "should have onEvent subscription");
+        assert!(
+            sub.contains("EventEnvelope!"),
+            "should reference EventEnvelope"
+        );
+        assert!(
+            sub.contains("onNotification(userId: String): Notification!"),
+            "should have onNotification"
+        );
+        assert!(
+            sub.contains("type EventEnvelope {"),
+            "should have EventEnvelope type"
+        );
+        assert!(
+            sub.contains("type Notification {"),
+            "should have Notification type"
+        );
+        assert!(
+            sub.contains("recipientId: String!"),
+            "Notification should have recipientId"
+        );
+        assert!(
+            sub.contains("type NotificationList {"),
+            "should have NotificationList type"
+        );
+        assert!(
+            sub.contains("notifications: [Notification!]!"),
+            "NotificationList should have notifications"
+        );
+    }
+
+    #[cfg(feature = "graphql")]
+    #[tokio::test]
+    async fn test_generate_sdl_includes_subscriptions() {
+        let order_sample = serde_json::json!({
+            "id": "uuid-1",
+            "name": "Test",
+        });
+
+        let host = build_host_with_events(
+            vec![(
+                "order",
+                "orders",
+                Some(Arc::new(MockFetcher::with_sample(order_sample))),
+            )],
+            vec![],
+        );
+
+        let generator = SchemaGenerator::new(host);
+        let sdl = generator.generate_sdl().await;
+
+        assert!(
+            sdl.contains("subscription: Subscription"),
+            "schema should include subscription: {}",
+            sdl
+        );
+        assert!(
+            sdl.contains("type Subscription {"),
+            "should have Subscription type: {}",
+            sdl
+        );
+        assert!(
+            sdl.contains("type EventEnvelope {"),
+            "should have EventEnvelope type: {}",
+            sdl
+        );
+        assert!(
+            sdl.contains("type Notification {"),
+            "should have Notification type: {}",
+            sdl
+        );
     }
 }

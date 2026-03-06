@@ -8,6 +8,11 @@ use crate::core::events::EventBus;
 use crate::core::module::Module;
 use crate::core::service::LinkService;
 use crate::core::{EntityCreator, EntityFetcher};
+use crate::events::SinkFactory;
+use crate::events::sinks::SinkRegistry;
+use crate::events::sinks::device_tokens::DeviceTokenStore;
+use crate::events::sinks::in_app::NotificationStore;
+use crate::events::sinks::preferences::NotificationPreferencesStore;
 use anyhow::Result;
 use axum::Router;
 use std::collections::HashMap;
@@ -31,6 +36,12 @@ pub struct ServerBuilder {
     modules: Vec<Arc<dyn Module>>,
     custom_routes: Vec<Router>,
     event_bus: Option<EventBus>,
+
+    // Manual overrides for event system stores
+    sink_registry: Option<SinkRegistry>,
+    notification_store: Option<Arc<NotificationStore>>,
+    device_token_store: Option<Arc<DeviceTokenStore>>,
+    preferences_store: Option<Arc<NotificationPreferencesStore>>,
 }
 
 impl ServerBuilder {
@@ -43,6 +54,10 @@ impl ServerBuilder {
             modules: Vec::new(),
             custom_routes: Vec::new(),
             event_bus: None,
+            sink_registry: None,
+            notification_store: None,
+            device_token_store: None,
+            preferences_store: None,
         }
     }
 
@@ -102,6 +117,39 @@ impl ServerBuilder {
     /// ```
     pub fn with_event_bus(mut self, capacity: usize) -> Self {
         self.event_bus = Some(EventBus::new(capacity));
+        self
+    }
+
+    /// Provide a pre-built sink registry (overrides auto-wiring from config)
+    ///
+    /// Use this when you need full control over which sinks are registered.
+    /// If not provided and `sinks` is present in config, sinks are auto-wired.
+    pub fn with_sink_registry(mut self, registry: SinkRegistry) -> Self {
+        self.sink_registry = Some(registry);
+        self
+    }
+
+    /// Provide a pre-built notification store
+    ///
+    /// If not provided, one is auto-created when InApp sinks are configured.
+    pub fn with_notification_store(mut self, store: Arc<NotificationStore>) -> Self {
+        self.notification_store = Some(store);
+        self
+    }
+
+    /// Provide a pre-built device token store
+    ///
+    /// If not provided, one is auto-created when sinks are configured.
+    pub fn with_device_token_store(mut self, store: Arc<DeviceTokenStore>) -> Self {
+        self.device_token_store = Some(store);
+        self
+    }
+
+    /// Provide a pre-built notification preferences store
+    ///
+    /// If not provided, one is auto-created when sinks are configured.
+    pub fn with_preferences_store(mut self, store: Arc<NotificationPreferencesStore>) -> Self {
+        self.preferences_store = Some(store);
         self
     }
 
@@ -177,6 +225,55 @@ impl ServerBuilder {
         // Attach event bus if configured
         if let Some(event_bus) = self.event_bus.take() {
             host = host.with_event_bus(event_bus);
+        }
+
+        // Auto-wire event pipeline from config (sinks section)
+        let has_sinks = host.config.sinks.as_ref().is_some_and(|s| !s.is_empty());
+
+        if has_sinks || self.sink_registry.is_some() {
+            // Build or use provided stores
+            let notification_store = self
+                .notification_store
+                .take()
+                .unwrap_or_else(|| Arc::new(NotificationStore::new()));
+            let preferences_store = self
+                .preferences_store
+                .take()
+                .unwrap_or_else(|| Arc::new(NotificationPreferencesStore::new()));
+            let device_token_store = self
+                .device_token_store
+                .take()
+                .unwrap_or_else(|| Arc::new(DeviceTokenStore::new()));
+
+            // Build or use provided sink registry
+            let sink_registry = if let Some(registry) = self.sink_registry.take() {
+                registry
+            } else if let Some(ref sink_configs) = host.config.sinks {
+                let factory = SinkFactory::with_stores(
+                    notification_store.clone(),
+                    preferences_store.clone(),
+                    device_token_store.clone(),
+                );
+                factory.build_registry(sink_configs)
+            } else {
+                SinkRegistry::new()
+            };
+
+            // Attach everything to the host
+            host = host
+                .with_notification_store(notification_store)
+                .with_preferences_store(preferences_store)
+                .with_device_token_store(device_token_store)
+                .with_sink_registry(sink_registry);
+
+            tracing::info!("event pipeline auto-wired from config");
+        }
+
+        // Auto-wire event log if events section is present
+        if host.config.events.is_some() {
+            let event_log = Arc::new(crate::events::InMemoryEventLog::new());
+            host = host.with_event_log(event_log);
+            tracing::info!("event log auto-wired (InMemoryEventLog)");
         }
 
         Ok(host)
@@ -364,6 +461,8 @@ mod tests {
                     }],
                     links: vec![],
                     validation_rules: None,
+                    events: None,
+                    sinks: None,
                 },
             }
         }
@@ -396,6 +495,8 @@ mod tests {
                         auth: None,
                     }],
                     validation_rules: None,
+                    events: None,
+                    sinks: None,
                 },
             }
         }
@@ -678,5 +779,155 @@ mod tests {
             .expect("register should succeed")
             .build();
         assert!(result.is_ok(), "full fluent pipeline should succeed");
+    }
+
+    // ── Auto-wiring tests ──────────────────────────────────────────────
+
+    /// A module whose config includes sinks
+    struct StubModuleWithSinks;
+
+    impl Module for StubModuleWithSinks {
+        fn name(&self) -> &str {
+            "with_sinks"
+        }
+
+        fn entity_types(&self) -> Vec<&str> {
+            vec!["user"]
+        }
+
+        fn links_config(&self) -> anyhow::Result<LinksConfig> {
+            use crate::config::events::EventsConfig;
+            use crate::config::sinks::{SinkConfig, SinkType};
+
+            Ok(LinksConfig {
+                entities: vec![EntityConfig {
+                    singular: "user".to_string(),
+                    plural: "users".to_string(),
+                    auth: EntityAuthConfig::default(),
+                }],
+                links: vec![],
+                validation_rules: None,
+                events: Some(EventsConfig::default()),
+                sinks: Some(vec![SinkConfig {
+                    name: "in-app-notif".to_string(),
+                    sink_type: SinkType::InApp,
+                    config: Default::default(),
+                }]),
+            })
+        }
+
+        fn register_entities(&self, _registry: &mut EntityRegistry) {}
+
+        fn get_entity_fetcher(
+            &self,
+            _entity_type: &str,
+        ) -> Option<Arc<dyn crate::core::EntityFetcher>> {
+            None
+        }
+
+        fn get_entity_creator(
+            &self,
+            _entity_type: &str,
+        ) -> Option<Arc<dyn crate::core::EntityCreator>> {
+            None
+        }
+    }
+
+    #[test]
+    fn test_auto_wire_sinks_from_config() {
+        let host = ServerBuilder::new()
+            .with_link_service(InMemoryLinkService::new())
+            .with_event_bus(16)
+            .register_module(StubModuleWithSinks)
+            .expect("register should succeed")
+            .build_host()
+            .expect("build_host should succeed");
+
+        // Auto-wired: InApp sink registered
+        assert!(host.sink_registry().is_some());
+        let registry = host.sink_registry().unwrap();
+        assert!(registry.get("in-app-notif").is_some());
+        assert_eq!(registry.len(), 1);
+
+        // Auto-wired: stores created
+        assert!(host.notification_store().is_some());
+        assert!(host.device_token_store().is_some());
+        assert!(host.preferences_store().is_some());
+
+        // Auto-wired: event log created (events section present)
+        assert!(host.event_log().is_some());
+    }
+
+    #[test]
+    fn test_no_auto_wire_without_sinks_config() {
+        let host = ServerBuilder::new()
+            .with_link_service(InMemoryLinkService::new())
+            .register_module(StubModule::single_entity())
+            .expect("register should succeed")
+            .build_host()
+            .expect("build_host should succeed");
+
+        // No sinks in config → no auto-wiring
+        assert!(host.sink_registry().is_none());
+        assert!(host.notification_store().is_none());
+        assert!(host.device_token_store().is_none());
+        assert!(host.preferences_store().is_none());
+        assert!(host.event_log().is_none());
+    }
+
+    #[test]
+    fn test_manual_sink_registry_overrides_auto_wire() {
+        let manual_registry = SinkRegistry::new();
+
+        let host = ServerBuilder::new()
+            .with_link_service(InMemoryLinkService::new())
+            .with_sink_registry(manual_registry)
+            .register_module(StubModuleWithSinks)
+            .expect("register should succeed")
+            .build_host()
+            .expect("build_host should succeed");
+
+        // Manual registry used instead of auto-wired → empty, no InApp
+        let registry = host.sink_registry().unwrap();
+        assert!(registry.is_empty());
+        // InApp from config NOT auto-created because we provided a manual registry
+        assert!(registry.get("in-app-notif").is_none());
+    }
+
+    #[test]
+    fn test_manual_stores_used_in_auto_wire() {
+        let custom_store = Arc::new(crate::events::sinks::in_app::NotificationStore::new());
+        let store_clone = custom_store.clone();
+
+        let host = ServerBuilder::new()
+            .with_link_service(InMemoryLinkService::new())
+            .with_notification_store(custom_store)
+            .register_module(StubModuleWithSinks)
+            .expect("register should succeed")
+            .build_host()
+            .expect("build_host should succeed");
+
+        // The custom store should be the one on the host
+        assert!(Arc::ptr_eq(
+            host.notification_store().unwrap(),
+            &store_clone
+        ));
+    }
+
+    #[test]
+    fn test_retro_compatible_no_sinks_no_events() {
+        // Exact same test as before — nothing changes
+        let host = ServerBuilder::new()
+            .with_link_service(InMemoryLinkService::new())
+            .with_event_bus(16)
+            .register_module(StubModule::single_entity())
+            .expect("register should succeed")
+            .build_host()
+            .expect("build_host should succeed");
+
+        assert!(host.event_bus().is_some());
+        assert!(host.sink_registry().is_none());
+        assert!(host.event_log().is_none());
+        assert_eq!(host.config.entities.len(), 1);
     }
 }

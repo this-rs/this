@@ -385,6 +385,8 @@ mod tests {
                 },
             ],
             validation_rules: None,
+            events: None,
+            sinks: None,
         });
         let registry = LinkRouteRegistry::new(config.clone());
         (config, registry)

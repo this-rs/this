@@ -1,4 +1,7 @@
 //! Link-specific mutations for GraphQL
+//!
+//! After each successful link mutation, events are published to the EventBus
+//! (if configured) for real-time notification to all protocol subscribers.
 
 use anyhow::{Result, bail};
 use graphql_parser::query::Field;
@@ -8,6 +11,7 @@ use uuid::Uuid;
 
 use super::field_resolver;
 use super::utils;
+use crate::core::events::{FrameworkEvent, LinkEvent};
 use crate::core::link::LinkEntity;
 use crate::server::host::ServerHost;
 
@@ -34,6 +38,17 @@ pub async fn create_link_mutation(
     let link_entity = LinkEntity::new(link_type, source_uuid, target_uuid, metadata);
     let created_link = host.link_service.create(link_entity).await?;
 
+    // Publish event to EventBus
+    if let Some(event_bus) = host.event_bus() {
+        event_bus.publish(FrameworkEvent::Link(LinkEvent::Created {
+            link_type: created_link.link_type.clone(),
+            link_id: created_link.id,
+            source_id: created_link.source_id,
+            target_id: created_link.target_id,
+            metadata: created_link.metadata.clone(),
+        }));
+    }
+
     // Return the created link as JSON
     Ok(json!({
         "id": created_link.id.to_string(),
@@ -54,7 +69,21 @@ pub async fn delete_link_mutation(
         .ok_or_else(|| anyhow::anyhow!("Missing required argument 'id'"))?;
     let uuid = Uuid::parse_str(&link_id)?;
 
+    // Fetch link details before deleting (for event payload)
+    let link = host.link_service.get(&uuid).await?;
+
     host.link_service.delete(&uuid).await?;
+
+    // Publish event to EventBus (only if we found the link details)
+    if let (Some(event_bus), Some(link)) = (host.event_bus(), link) {
+        event_bus.publish(FrameworkEvent::Link(LinkEvent::Deleted {
+            link_type: link.link_type,
+            link_id: link.id,
+            source_id: link.source_id,
+            target_id: link.target_id,
+        }));
+    }
+
     Ok(Value::Bool(true))
 }
 
@@ -99,6 +128,17 @@ pub async fn create_and_link_mutation(
             .ok_or_else(|| anyhow::anyhow!("Created entity missing id field"))?;
         let entity_uuid = Uuid::parse_str(entity_id)?;
 
+        // Publish entity creation event
+        if let Some(event_bus) = host.event_bus() {
+            event_bus.publish(FrameworkEvent::Entity(
+                crate::core::events::EntityEvent::Created {
+                    entity_type: entity_type.clone(),
+                    entity_id: entity_uuid,
+                    data: created.clone(),
+                },
+            ));
+        }
+
         // Find the appropriate link type from config
         let actual_link_type = if let Some(lt) = link_type {
             lt
@@ -109,7 +149,18 @@ pub async fn create_and_link_mutation(
 
         // Create the link
         let link_entity = LinkEntity::new(actual_link_type, parent_uuid, entity_uuid, None);
-        host.link_service.create(link_entity).await?;
+        let created_link = host.link_service.create(link_entity).await?;
+
+        // Publish link creation event
+        if let Some(event_bus) = host.event_bus() {
+            event_bus.publish(FrameworkEvent::Link(LinkEvent::Created {
+                link_type: created_link.link_type,
+                link_id: created_link.id,
+                source_id: created_link.source_id,
+                target_id: created_link.target_id,
+                metadata: created_link.metadata,
+            }));
+        }
 
         // Resolve sub-fields for the created entity
         let resolved = field_resolver::resolve_entity_fields(
@@ -170,6 +221,17 @@ pub async fn link_entities_mutation(
     // Create the link
     let link_entity = LinkEntity::new(actual_link_type, source_uuid, target_uuid, metadata);
     let created_link = host.link_service.create(link_entity).await?;
+
+    // Publish event to EventBus
+    if let Some(event_bus) = host.event_bus() {
+        event_bus.publish(FrameworkEvent::Link(LinkEvent::Created {
+            link_type: created_link.link_type.clone(),
+            link_id: created_link.id,
+            source_id: created_link.source_id,
+            target_id: created_link.target_id,
+            metadata: created_link.metadata.clone(),
+        }));
+    }
 
     // Return the created link
     Ok(json!({
@@ -233,6 +295,17 @@ pub async fn unlink_entities_mutation(
     for link in links {
         if link.target_id == target_uuid {
             host.link_service.delete(&link.id).await?;
+
+            // Publish event to EventBus
+            if let Some(event_bus) = host.event_bus() {
+                event_bus.publish(FrameworkEvent::Link(LinkEvent::Deleted {
+                    link_type: link.link_type,
+                    link_id: link.id,
+                    source_id: link.source_id,
+                    target_id: link.target_id,
+                }));
+            }
+
             return Ok(Value::Bool(true));
         }
     }
@@ -352,6 +425,8 @@ mod tests {
                 auth: None,
             }],
             validation_rules: None,
+            events: None,
+            sinks: None,
         };
 
         let mut registry = EntityRegistry::new();
@@ -781,5 +856,196 @@ mod tests {
         );
         let result = executor.execute(&query, None).await;
         assert!(result.is_err(), "missing targetId should error");
+    }
+
+    // -----------------------------------------------------------------------
+    // Tests with EventBus configured (cover event publishing paths)
+    // -----------------------------------------------------------------------
+
+    fn build_host_with_event_bus(link_service: Arc<InMemoryLinkService>) -> Arc<ServerHost> {
+        use crate::core::events::EventBus;
+
+        let config = LinksConfig {
+            entities: vec![
+                EntityConfig {
+                    singular: "order".to_string(),
+                    plural: "orders".to_string(),
+                    auth: EntityAuthConfig::default(),
+                },
+                EntityConfig {
+                    singular: "invoice".to_string(),
+                    plural: "invoices".to_string(),
+                    auth: EntityAuthConfig::default(),
+                },
+            ],
+            links: vec![LinkDefinition {
+                link_type: "has_invoice".to_string(),
+                source_type: "order".to_string(),
+                target_type: "invoice".to_string(),
+                forward_route_name: "invoices".to_string(),
+                reverse_route_name: "order".to_string(),
+                description: None,
+                required_fields: None,
+                auth: None,
+            }],
+            validation_rules: None,
+            events: None,
+            sinks: None,
+        };
+
+        let mut registry = EntityRegistry::new();
+        registry.register(Box::new(StubDescriptor::new("order", "orders")));
+        registry.register(Box::new(StubDescriptor::new("invoice", "invoices")));
+
+        let mut fetchers: HashMap<String, Arc<dyn EntityFetcher>> = HashMap::new();
+        fetchers.insert("order".to_string(), Arc::new(MockFetcher));
+        fetchers.insert("invoice".to_string(), Arc::new(MockFetcher));
+
+        let mut creators: HashMap<String, Arc<dyn EntityCreator>> = HashMap::new();
+        creators.insert("order".to_string(), Arc::new(MockCreator));
+        creators.insert("invoice".to_string(), Arc::new(MockCreator));
+
+        Arc::new(
+            ServerHost::from_builder_components(link_service, config, registry, fetchers, creators)
+                .expect("should build test host")
+                .with_event_bus(EventBus::new(256)),
+        )
+    }
+
+    fn host_with_event_bus() -> (Arc<ServerHost>, Arc<InMemoryLinkService>) {
+        let link_service = Arc::new(InMemoryLinkService::new());
+        let host = build_host_with_event_bus(link_service.clone());
+        (host, link_service)
+    }
+
+    #[tokio::test]
+    async fn test_create_link_with_event_bus() {
+        let (host, _) = host_with_event_bus();
+        let executor = GraphQLExecutor::new(host).await;
+        let source_id = Uuid::new_v4();
+        let target_id = Uuid::new_v4();
+
+        let query = format!(
+            r#"mutation {{ createLink(sourceId: "{}", targetId: "{}", linkType: "has_invoice") {{ id }} }}"#,
+            source_id, target_id
+        );
+        let result = executor
+            .execute(&query, None)
+            .await
+            .expect("should create link with EventBus");
+
+        let link_result = result
+            .get("data")
+            .and_then(|d| d.get("createLink"))
+            .expect("should have createLink");
+        assert!(link_result.get("id").is_some());
+    }
+
+    #[tokio::test]
+    async fn test_delete_link_with_event_bus() {
+        use super::delete_link_mutation;
+        use graphql_parser::Pos;
+        use graphql_parser::query::{SelectionSet, Value as GqlValue};
+
+        let (host, link_service) = host_with_event_bus();
+
+        let link = LinkEntity::new("has_invoice", Uuid::new_v4(), Uuid::new_v4(), None);
+        let created = link_service.create(link).await.expect("should create link");
+
+        let pos = Pos { line: 1, column: 1 };
+        let field = graphql_parser::query::Field {
+            position: pos,
+            alias: None,
+            name: "deleteLink".to_string(),
+            arguments: vec![("id".to_string(), GqlValue::String(created.id.to_string()))],
+            directives: vec![],
+            selection_set: SelectionSet {
+                span: (pos, pos),
+                items: vec![],
+            },
+        };
+
+        let result = delete_link_mutation(&host, &field)
+            .await
+            .expect("should delete link with EventBus");
+        assert_eq!(result, Value::Bool(true));
+    }
+
+    #[tokio::test]
+    async fn test_create_and_link_with_event_bus() {
+        let (host, link_service) = host_with_event_bus();
+        let executor = GraphQLExecutor::new(host).await;
+        let parent_id = Uuid::new_v4();
+
+        let query = format!(
+            r#"mutation {{ createInvoiceForOrder(parentId: "{}", data: {{amount: 100}}) {{ id }} }}"#,
+            parent_id
+        );
+        let result = executor
+            .execute(&query, None)
+            .await
+            .expect("should create and link with EventBus");
+
+        let created = result
+            .get("data")
+            .and_then(|d| d.get("createInvoiceForOrder"))
+            .expect("should have result");
+        assert!(created.get("id").is_some());
+
+        let links = link_service
+            .find_by_source(&parent_id, Some("has_invoice"), None)
+            .await
+            .expect("should find links");
+        assert_eq!(links.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_link_entities_with_event_bus() {
+        let (host, _) = host_with_event_bus();
+        let executor = GraphQLExecutor::new(host).await;
+        let source_id = Uuid::new_v4();
+        let target_id = Uuid::new_v4();
+
+        let query = format!(
+            r#"mutation {{ linkOrderToInvoice(sourceId: "{}", targetId: "{}") {{ id }} }}"#,
+            source_id, target_id
+        );
+        let result = executor
+            .execute(&query, None)
+            .await
+            .expect("should link entities with EventBus");
+
+        let link_result = result
+            .get("data")
+            .and_then(|d| d.get("linkOrderToInvoice"))
+            .expect("should have result");
+        assert!(link_result.get("id").is_some());
+    }
+
+    #[tokio::test]
+    async fn test_unlink_entities_with_event_bus() {
+        let (host, link_service) = host_with_event_bus();
+        let executor = GraphQLExecutor::new(host).await;
+        let source_id = Uuid::new_v4();
+        let target_id = Uuid::new_v4();
+
+        // Create a link first
+        let link = LinkEntity::new("has_invoice", source_id, target_id, None);
+        link_service.create(link).await.expect("should create link");
+
+        let query = format!(
+            r#"mutation {{ unlinkOrderFromInvoice(sourceId: "{}", targetId: "{}") }}"#,
+            source_id, target_id
+        );
+        let result = executor
+            .execute(&query, None)
+            .await
+            .expect("should unlink with EventBus");
+
+        let unlink_result = result
+            .get("data")
+            .and_then(|d| d.get("unlinkOrderFromInvoice"))
+            .expect("should have result");
+        assert_eq!(*unlink_result, Value::Bool(true));
     }
 }

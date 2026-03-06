@@ -189,6 +189,8 @@ mod tests {
             entities: vec![],
             links: vec![],
             validation_rules: None,
+            events: None,
+            sinks: None,
         });
         let registry = Arc::new(LinkRouteRegistry::new(config.clone()));
         let state = AppState {

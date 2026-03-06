@@ -8,6 +8,8 @@
 //!
 //! - **EntityService**: Generic CRUD operations for any registered entity type
 //! - **LinkService**: Relationship management between entities
+//! - **EventService**: Real-time event streaming via server-streaming RPC
+//! - **NotificationService**: In-app notification CRUD and streaming (when NotificationStore is configured)
 //! - **ProtoGenerator**: Generates typed `.proto` files for client code generation
 //!
 //! The gRPC services consume a `ServerHost` (same as REST, GraphQL, WebSocket)
@@ -28,7 +30,9 @@
 //!   for convenience.
 
 pub mod entity_service;
+pub mod event_service;
 pub mod link_service;
+pub mod notification_service;
 pub mod proto_generator;
 
 mod convert;
@@ -102,18 +106,29 @@ impl GrpcExposure {
     pub fn build_router(host: Arc<ServerHost>) -> Result<Router> {
         use axum::routing::get;
         use proto::entity_service_server::EntityServiceServer;
+        use proto::event_service_server::EventServiceServer;
         use proto::link_service_server::LinkServiceServer;
+        use proto::notification_service_server::NotificationServiceServer;
         use tonic::service::Routes;
 
         // Create gRPC service implementations
         let entity_svc = entity_service::EntityServiceImpl::new(host.clone());
         let link_svc = link_service::LinkServiceImpl::new(host.clone());
+        let event_svc = event_service::EventServiceImpl::new(host.clone());
 
         // Build tonic Routes and convert to axum Router
         // NOTE: Routes::default() installs a fallback(UNIMPLEMENTED) handler.
         let mut builder = Routes::builder();
         builder.add_service(EntityServiceServer::new(entity_svc));
         builder.add_service(LinkServiceServer::new(link_svc));
+        builder.add_service(EventServiceServer::new(event_svc));
+
+        // Conditionally add NotificationService when NotificationStore is configured
+        if host.notification_store().is_some() {
+            let notification_svc = notification_service::NotificationServiceImpl::new(host.clone());
+            builder.add_service(NotificationServiceServer::new(notification_svc));
+        }
+
         let grpc_router = builder.routes().into_axum_router();
 
         // Add the proto export endpoint
@@ -170,23 +185,27 @@ impl GrpcExposure {
     pub fn build_router_no_fallback(host: Arc<ServerHost>) -> Result<Router> {
         use axum::routing::get;
         use proto::entity_service_server::EntityServiceServer;
+        use proto::event_service_server::EventServiceServer;
         use proto::link_service_server::LinkServiceServer;
+        use proto::notification_service_server::NotificationServiceServer;
         use tonic::server::NamedService;
         use tower::ServiceExt;
 
         // Create gRPC service implementations
         let entity_svc = entity_service::EntityServiceImpl::new(host.clone());
         let link_svc = link_service::LinkServiceImpl::new(host.clone());
+        let event_svc = event_service::EventServiceImpl::new(host.clone());
 
         let entity_server = EntityServiceServer::new(entity_svc);
         let link_server = LinkServiceServer::new(link_svc);
+        let event_server = EventServiceServer::new(event_svc);
 
         // Build axum Router directly, bypassing tonic's Routes which installs
         // a fallback via Routes::default() → axum::Router::new().fallback(unimplemented).
         //
         // This replicates what tonic::service::Routes::add_service() does internally:
         //   router.route_service("/{ServiceName}/{*rest}", svc.map_request(body_convert))
-        let grpc_router = Router::new()
+        let mut grpc_router = Router::new()
             .route_service(
                 &format!(
                     "/{}/{{*rest}}",
@@ -204,7 +223,31 @@ impl GrpcExposure {
                 link_server.map_request(|req: axum::http::Request<axum::body::Body>| {
                     req.map(tonic::body::Body::new)
                 }),
+            )
+            .route_service(
+                &format!(
+                    "/{}/{{*rest}}",
+                    EventServiceServer::<event_service::EventServiceImpl>::NAME
+                ),
+                event_server.map_request(|req: axum::http::Request<axum::body::Body>| {
+                    req.map(tonic::body::Body::new)
+                }),
             );
+
+        // Conditionally add NotificationService when NotificationStore is configured
+        if host.notification_store().is_some() {
+            let notification_svc = notification_service::NotificationServiceImpl::new(host.clone());
+            let notification_server = NotificationServiceServer::new(notification_svc);
+            grpc_router = grpc_router.route_service(
+                &format!(
+                    "/{}/{{*rest}}",
+                    NotificationServiceServer::<notification_service::NotificationServiceImpl>::NAME
+                ),
+                notification_server.map_request(|req: axum::http::Request<axum::body::Body>| {
+                    req.map(tonic::body::Body::new)
+                }),
+            );
+        }
 
         // Add the proto export endpoint
         let proto_host = host.clone();
