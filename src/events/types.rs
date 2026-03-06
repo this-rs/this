@@ -21,7 +21,6 @@ pub enum SeekPosition {
     Sequence(SeqNo),
 }
 
-
 impl From<crate::config::SeekMode> for SeekPosition {
     fn from(mode: crate::config::SeekMode) -> Self {
         match mode {

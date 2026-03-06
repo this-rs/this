@@ -334,14 +334,15 @@ impl Sink for InAppNotificationSink {
 
         // Check preferences if available
         if let Some(prefs_store) = &self.preferences
-            && !prefs_store.is_enabled(&recipient, &notification_type).await {
-                tracing::debug!(
-                    recipient = %recipient,
-                    notification_type = %notification_type,
-                    "in_app sink: notification type disabled by user preferences, skipping"
-                );
-                return Ok(());
-            }
+            && !prefs_store.is_enabled(&recipient, &notification_type).await
+        {
+            tracing::debug!(
+                recipient = %recipient,
+                notification_type = %notification_type,
+                "in_app sink: notification type disabled by user preferences, skipping"
+            );
+            return Ok(());
+        }
 
         // Create and store the notification
         let notification = StoredNotification {

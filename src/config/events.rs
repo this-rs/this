@@ -21,8 +21,7 @@ use std::collections::HashMap;
 ///     - name: mobile-feed
 ///       seek: last_acknowledged
 /// ```
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[derive(Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct EventsConfig {
     /// Event backend configuration (memory, nats, kafka, redis)
     #[serde(default)]
@@ -36,7 +35,6 @@ pub struct EventsConfig {
     #[serde(default)]
     pub consumers: Vec<ConsumerConfig>,
 }
-
 
 /// Event backend configuration
 ///
@@ -494,7 +492,6 @@ pub enum SeekMode {
     #[default]
     Latest,
 }
-
 
 #[cfg(test)]
 mod tests {
