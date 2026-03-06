@@ -34,8 +34,8 @@ use crate::server::host::ServerHost;
 use axum::extract::ws::{Message, WebSocket};
 use axum::extract::{Extension, WebSocketUpgrade};
 use axum::response::IntoResponse;
-use futures::stream::StreamExt;
 use futures::SinkExt;
+use futures::stream::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::HashMap;
@@ -287,12 +287,8 @@ fn matches_filter(envelope: &EventEnvelope, filter: &SubscriptionFilter) -> bool
                 } => et == entity_type,
             },
             FrameworkEvent::Link(l) => match l {
-                LinkEvent::Created {
-                    link_type: lt, ..
-                }
-                | LinkEvent::Deleted {
-                    link_type: lt, ..
-                } => lt == entity_type,
+                LinkEvent::Created { link_type: lt, .. }
+                | LinkEvent::Deleted { link_type: lt, .. } => lt == entity_type,
             },
         };
         if !matches {
@@ -1098,7 +1094,10 @@ mod tests {
             SubscriptionType::OnNotification(user_id) => {
                 assert_eq!(user_id.as_deref(), Some("user-A"));
             }
-            other => panic!("expected OnNotification, got {:?}", std::mem::discriminant(&other)),
+            other => panic!(
+                "expected OnNotification, got {:?}",
+                std::mem::discriminant(&other)
+            ),
         }
     }
 
@@ -1110,7 +1109,10 @@ mod tests {
             SubscriptionType::OnNotification(user_id) => {
                 assert_eq!(user_id, None);
             }
-            other => panic!("expected OnNotification, got {:?}", std::mem::discriminant(&other)),
+            other => panic!(
+                "expected OnNotification, got {:?}",
+                std::mem::discriminant(&other)
+            ),
         }
     }
 

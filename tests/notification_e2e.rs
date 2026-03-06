@@ -228,11 +228,7 @@ async fn entity_client(
 }
 
 /// Helper: insert a test notification into the store
-async fn insert_test_notification(
-    store: &NotificationStore,
-    user_id: &str,
-    title: &str,
-) -> Uuid {
+async fn insert_test_notification(store: &NotificationStore, user_id: &str, title: &str) -> Uuid {
     let id = Uuid::new_v4();
     store
         .insert(StoredNotification {
@@ -444,8 +440,7 @@ async fn test_e2e_grpc_notification_streaming() {
     // Insert a notification for user-B — should NOT arrive on user-A's stream
     insert_test_notification(&store, "user-B", "Not for A").await;
 
-    let timeout_result =
-        tokio::time::timeout(Duration::from_millis(100), stream.next()).await;
+    let timeout_result = tokio::time::timeout(Duration::from_millis(100), stream.next()).await;
     assert!(
         timeout_result.is_err(),
         "should not receive user-B notification on user-A stream"

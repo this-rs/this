@@ -48,8 +48,8 @@ mod manager;
 pub mod protocol;
 
 use crate::config::sinks::SinkType;
-use crate::events::sinks::websocket::WebSocketSink;
 use crate::events::sinks::Sink;
+use crate::events::sinks::websocket::WebSocketSink;
 use crate::server::host::ServerHost;
 use anyhow::Result;
 use axum::{Router, routing::get};
@@ -152,8 +152,9 @@ impl WebSocketExposure {
         };
 
         // Create the dispatcher (shared by all WebSocket sinks)
-        let ws_dispatcher =
-            Arc::new(dispatcher::ConnectionManagerDispatcher::new(connection_manager.clone()));
+        let ws_dispatcher = Arc::new(dispatcher::ConnectionManagerDispatcher::new(
+            connection_manager.clone(),
+        ));
         let ws_sink: Arc<dyn Sink> = Arc::new(WebSocketSink::new(ws_dispatcher));
 
         for config in sink_configs {

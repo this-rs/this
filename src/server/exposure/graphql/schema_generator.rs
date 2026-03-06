@@ -150,7 +150,9 @@ impl SchemaGenerator {
         // Add notification queries if NotificationStore is configured
         if self.host.notification_store().is_some() {
             query.push_str("\n  # Notification queries\n");
-            query.push_str("  notifications(userId: String!, limit: Int, offset: Int): NotificationList!\n");
+            query.push_str(
+                "  notifications(userId: String!, limit: Int, offset: Int): NotificationList!\n",
+            );
             query.push_str("  unreadNotificationCount(userId: String!): Int!\n");
         }
 

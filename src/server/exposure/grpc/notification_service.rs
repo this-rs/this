@@ -328,9 +328,7 @@ mod tests {
     #[tokio::test]
     async fn test_list_notifications_empty() {
         let store = Arc::new(NotificationStore::new());
-        let host = Arc::new(
-            ServerHost::minimal_for_test().with_notification_store(store),
-        );
+        let host = Arc::new(ServerHost::minimal_for_test().with_notification_store(store));
         let svc = NotificationServiceImpl::new(host);
 
         let request = Request::new(ListNotificationsRequest {
@@ -365,9 +363,7 @@ mod tests {
                 .await;
         }
 
-        let host = Arc::new(
-            ServerHost::minimal_for_test().with_notification_store(store),
-        );
+        let host = Arc::new(ServerHost::minimal_for_test().with_notification_store(store));
         let svc = NotificationServiceImpl::new(host);
 
         let request = Request::new(ListNotificationsRequest {
@@ -389,9 +385,7 @@ mod tests {
     #[tokio::test]
     async fn test_list_notifications_missing_user_id() {
         let store = Arc::new(NotificationStore::new());
-        let host = Arc::new(
-            ServerHost::minimal_for_test().with_notification_store(store),
-        );
+        let host = Arc::new(ServerHost::minimal_for_test().with_notification_store(store));
         let svc = NotificationServiceImpl::new(host);
 
         let request = Request::new(ListNotificationsRequest {
@@ -429,9 +423,7 @@ mod tests {
         let ids: Vec<Uuid> = notifs.iter().map(|n| n.id).collect();
         store.mark_as_read(&ids, Some("user-A")).await;
 
-        let host = Arc::new(
-            ServerHost::minimal_for_test().with_notification_store(store),
-        );
+        let host = Arc::new(ServerHost::minimal_for_test().with_notification_store(store));
         let svc = NotificationServiceImpl::new(host);
 
         let request = Request::new(GetUnreadCountRequest {
@@ -465,9 +457,7 @@ mod tests {
                 .await;
         }
 
-        let host = Arc::new(
-            ServerHost::minimal_for_test().with_notification_store(store),
-        );
+        let host = Arc::new(ServerHost::minimal_for_test().with_notification_store(store));
         let svc = NotificationServiceImpl::new(host);
 
         let request = Request::new(MarkAsReadRequest {
@@ -482,9 +472,7 @@ mod tests {
     #[tokio::test]
     async fn test_mark_as_read_invalid_uuid() {
         let store = Arc::new(NotificationStore::new());
-        let host = Arc::new(
-            ServerHost::minimal_for_test().with_notification_store(store),
-        );
+        let host = Arc::new(ServerHost::minimal_for_test().with_notification_store(store));
         let svc = NotificationServiceImpl::new(host);
 
         let request = Request::new(MarkAsReadRequest {
@@ -517,9 +505,7 @@ mod tests {
                 .await;
         }
 
-        let host = Arc::new(
-            ServerHost::minimal_for_test().with_notification_store(store),
-        );
+        let host = Arc::new(ServerHost::minimal_for_test().with_notification_store(store));
         let svc = NotificationServiceImpl::new(host);
 
         let request = Request::new(MarkAllAsReadRequest {
@@ -550,9 +536,7 @@ mod tests {
             })
             .await;
 
-        let host = Arc::new(
-            ServerHost::minimal_for_test().with_notification_store(store),
-        );
+        let host = Arc::new(ServerHost::minimal_for_test().with_notification_store(store));
         let svc = NotificationServiceImpl::new(host);
 
         let request = Request::new(DeleteNotificationRequest {
@@ -566,9 +550,7 @@ mod tests {
     #[tokio::test]
     async fn test_delete_notification_not_found() {
         let store = Arc::new(NotificationStore::new());
-        let host = Arc::new(
-            ServerHost::minimal_for_test().with_notification_store(store),
-        );
+        let host = Arc::new(ServerHost::minimal_for_test().with_notification_store(store));
         let svc = NotificationServiceImpl::new(host);
 
         let request = Request::new(DeleteNotificationRequest {
@@ -586,9 +568,7 @@ mod tests {
         use tokio_stream::StreamExt;
 
         let store = Arc::new(NotificationStore::new());
-        let host = Arc::new(
-            ServerHost::minimal_for_test().with_notification_store(store.clone()),
-        );
+        let host = Arc::new(ServerHost::minimal_for_test().with_notification_store(store.clone()));
         let svc = NotificationServiceImpl::new(host);
 
         // Subscribe with user filter
@@ -655,9 +635,7 @@ mod tests {
         use tokio_stream::StreamExt;
 
         let store = Arc::new(NotificationStore::new());
-        let host = Arc::new(
-            ServerHost::minimal_for_test().with_notification_store(store.clone()),
-        );
+        let host = Arc::new(ServerHost::minimal_for_test().with_notification_store(store.clone()));
         let svc = NotificationServiceImpl::new(host);
 
         // Subscribe without user filter (wildcard)

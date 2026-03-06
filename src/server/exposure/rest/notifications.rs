@@ -27,7 +27,10 @@ use crate::events::sinks::preferences::{NotificationPreferencesStore, UserPrefer
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
-use axum::{Json, Router, routing::{delete, get, post}};
+use axum::{
+    Json, Router,
+    routing::{delete, get, post},
+};
 use serde::Deserialize;
 use serde_json::json;
 use std::sync::Arc;
@@ -49,22 +52,10 @@ pub struct NotificationState {
 pub fn notification_routes(state: NotificationState) -> Router {
     Router::new()
         // Notification endpoints
-        .route(
-            "/notifications/{user_id}",
-            get(list_notifications),
-        )
-        .route(
-            "/notifications/{user_id}/unread-count",
-            get(unread_count),
-        )
-        .route(
-            "/notifications/{user_id}/read",
-            post(mark_as_read),
-        )
-        .route(
-            "/notifications/{user_id}/read-all",
-            post(mark_all_as_read),
-        )
+        .route("/notifications/{user_id}", get(list_notifications))
+        .route("/notifications/{user_id}/unread-count", get(unread_count))
+        .route("/notifications/{user_id}/read", post(mark_as_read))
+        .route("/notifications/{user_id}/read-all", post(mark_all_as_read))
         .route(
             "/notifications/{user_id}/{notification_id}",
             delete(delete_notification),
@@ -74,14 +65,8 @@ pub fn notification_routes(state: NotificationState) -> Router {
             "/notifications/{user_id}/preferences",
             get(get_preferences).put(update_preferences),
         )
-        .route(
-            "/notifications/{user_id}/mute",
-            post(mute_user),
-        )
-        .route(
-            "/notifications/{user_id}/unmute",
-            post(unmute_user),
-        )
+        .route("/notifications/{user_id}/mute", post(mute_user))
+        .route("/notifications/{user_id}/unmute", post(unmute_user))
         // Device token endpoints
         .route(
             "/device-tokens/{user_id}",
@@ -168,10 +153,7 @@ async fn mark_all_as_read(
     State(state): State<NotificationState>,
     Path(user_id): Path<String>,
 ) -> impl IntoResponse {
-    let marked = state
-        .notification_store
-        .mark_all_as_read(&user_id)
-        .await;
+    let marked = state.notification_store.mark_all_as_read(&user_id).await;
 
     Json(json!({ "marked": marked }))
 }
@@ -181,10 +163,7 @@ async fn delete_notification(
     State(state): State<NotificationState>,
     Path((_user_id, notification_id)): Path<(String, Uuid)>,
 ) -> impl IntoResponse {
-    let deleted = state
-        .notification_store
-        .delete(&notification_id)
-        .await;
+    let deleted = state.notification_store.delete(&notification_id).await;
 
     if deleted {
         (StatusCode::OK, Json(json!({ "deleted": true })))
@@ -213,7 +192,10 @@ async fn update_preferences(
     Path(user_id): Path<String>,
     Json(prefs): Json<UserPreferences>,
 ) -> impl IntoResponse {
-    state.preferences_store.update(&user_id, prefs.clone()).await;
+    state
+        .preferences_store
+        .update(&user_id, prefs.clone())
+        .await;
     Json(json!({ "preferences": prefs }))
 }
 
@@ -274,10 +256,7 @@ async fn unregister_device_token(
     State(state): State<NotificationState>,
     Path((user_id, token)): Path<(String, String)>,
 ) -> impl IntoResponse {
-    let removed = state
-        .device_token_store
-        .unregister(&user_id, &token)
-        .await;
+    let removed = state.device_token_store.unregister(&user_id, &token).await;
 
     if removed {
         (StatusCode::OK, Json(json!({ "unregistered": true })))
@@ -532,10 +511,12 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         let json = json_body(response).await;
         assert_eq!(json["preferences"]["muted"], false);
-        assert!(json["preferences"]["disabled_types"]
-            .as_array()
-            .unwrap()
-            .is_empty());
+        assert!(
+            json["preferences"]["disabled_types"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[tokio::test]
@@ -562,8 +543,18 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::OK);
-        assert!(!state.preferences_store.is_enabled("user-A", "new_like").await);
-        assert!(state.preferences_store.is_enabled("user-A", "new_follower").await);
+        assert!(
+            !state
+                .preferences_store
+                .is_enabled("user-A", "new_like")
+                .await
+        );
+        assert!(
+            state
+                .preferences_store
+                .is_enabled("user-A", "new_follower")
+                .await
+        );
     }
 
     #[tokio::test]
@@ -584,7 +575,12 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
-        assert!(!state.preferences_store.is_enabled("user-A", "anything").await);
+        assert!(
+            !state
+                .preferences_store
+                .is_enabled("user-A", "anything")
+                .await
+        );
 
         // Unmute
         let response = router
@@ -598,7 +594,12 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
-        assert!(state.preferences_store.is_enabled("user-A", "anything").await);
+        assert!(
+            state
+                .preferences_store
+                .is_enabled("user-A", "anything")
+                .await
+        );
     }
 
     // ── Device token tests ────────────────────────────────────────────

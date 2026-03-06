@@ -125,8 +125,7 @@ impl GrpcExposure {
 
         // Conditionally add NotificationService when NotificationStore is configured
         if host.notification_store().is_some() {
-            let notification_svc =
-                notification_service::NotificationServiceImpl::new(host.clone());
+            let notification_svc = notification_service::NotificationServiceImpl::new(host.clone());
             builder.add_service(NotificationServiceServer::new(notification_svc));
         }
 
@@ -237,8 +236,7 @@ impl GrpcExposure {
 
         // Conditionally add NotificationService when NotificationStore is configured
         if host.notification_store().is_some() {
-            let notification_svc =
-                notification_service::NotificationServiceImpl::new(host.clone());
+            let notification_svc = notification_service::NotificationServiceImpl::new(host.clone());
             let notification_server = NotificationServiceServer::new(notification_svc);
             grpc_router = grpc_router.route_service(
                 &format!(

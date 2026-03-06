@@ -66,7 +66,12 @@ impl EntityFetcher for TestEntityStore {
         let entities = self.entities.read().await;
         let offset = offset.unwrap_or(0) as usize;
         let limit = limit.unwrap_or(50) as usize;
-        Ok(entities.values().skip(offset).take(limit).cloned().collect())
+        Ok(entities
+            .values()
+            .skip(offset)
+            .take(limit)
+            .cloned()
+            .collect())
     }
 }
 
@@ -81,7 +86,11 @@ impl EntityCreator for TestEntityStore {
         self.entities.write().await.insert(id, value.clone());
         Ok(value)
     }
-    async fn update_from_json(&self, entity_id: &Uuid, entity_data: Value) -> anyhow::Result<Value> {
+    async fn update_from_json(
+        &self,
+        entity_id: &Uuid,
+        entity_data: Value,
+    ) -> anyhow::Result<Value> {
         let mut entities = self.entities.write().await;
         let existing = entities
             .get_mut(entity_id)
@@ -263,11 +272,7 @@ async fn event_client(
 }
 
 /// Insert a test notification
-async fn insert_test_notification(
-    store: &NotificationStore,
-    user_id: &str,
-    title: &str,
-) -> Uuid {
+async fn insert_test_notification(store: &NotificationStore, user_id: &str, title: &str) -> Uuid {
     let id = Uuid::new_v4();
     store
         .insert(StoredNotification {

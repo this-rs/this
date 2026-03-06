@@ -80,10 +80,7 @@ impl GraphQLExposure {
 
         // Add WebSocket subscription endpoint if EventBus or NotificationStore is configured
         if host.event_bus().is_some() || host.notification_store().is_some() {
-            router = router.route(
-                "/graphql/ws",
-                get(subscription_handler::graphql_ws_handler),
-            );
+            router = router.route("/graphql/ws", get(subscription_handler::graphql_ws_handler));
         }
 
         let router = router.layer(Extension(host));

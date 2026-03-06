@@ -148,8 +148,7 @@ pub async fn create_and_link_mutation(
         };
 
         // Create the link
-        let link_entity =
-            LinkEntity::new(actual_link_type, parent_uuid, entity_uuid, None);
+        let link_entity = LinkEntity::new(actual_link_type, parent_uuid, entity_uuid, None);
         let created_link = host.link_service.create(link_entity).await?;
 
         // Publish link creation event

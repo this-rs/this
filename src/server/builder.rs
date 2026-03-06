@@ -8,11 +8,11 @@ use crate::core::events::EventBus;
 use crate::core::module::Module;
 use crate::core::service::LinkService;
 use crate::core::{EntityCreator, EntityFetcher};
+use crate::events::SinkFactory;
+use crate::events::sinks::SinkRegistry;
 use crate::events::sinks::device_tokens::DeviceTokenStore;
 use crate::events::sinks::in_app::NotificationStore;
 use crate::events::sinks::preferences::NotificationPreferencesStore;
-use crate::events::sinks::SinkRegistry;
-use crate::events::SinkFactory;
 use anyhow::Result;
 use axum::Router;
 use std::collections::HashMap;
@@ -228,11 +228,7 @@ impl ServerBuilder {
         }
 
         // Auto-wire event pipeline from config (sinks section)
-        let has_sinks = host
-            .config
-            .sinks
-            .as_ref()
-            .is_some_and(|s| !s.is_empty());
+        let has_sinks = host.config.sinks.as_ref().is_some_and(|s| !s.is_empty());
 
         if has_sinks || self.sink_registry.is_some() {
             // Build or use provided stores
@@ -912,7 +908,10 @@ mod tests {
             .expect("build_host should succeed");
 
         // The custom store should be the one on the host
-        assert!(Arc::ptr_eq(host.notification_store().unwrap(), &store_clone));
+        assert!(Arc::ptr_eq(
+            host.notification_store().unwrap(),
+            &store_clone
+        ));
     }
 
     #[test]

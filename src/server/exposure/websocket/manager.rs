@@ -169,11 +169,7 @@ impl ConnectionManager {
     /// Once associated, `send_to_user()` can dispatch notifications to
     /// all connections belonging to that user.
     #[allow(dead_code)] // Will be used when auth is implemented
-    pub async fn associate_user(
-        &self,
-        connection_id: &str,
-        user_id: String,
-    ) -> Result<(), String> {
+    pub async fn associate_user(&self, connection_id: &str, user_id: String) -> Result<(), String> {
         let mut connections = self.connections.write().await;
         let conn = connections
             .get_mut(connection_id)

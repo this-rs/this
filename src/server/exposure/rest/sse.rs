@@ -27,8 +27,8 @@
 use crate::core::events::{EntityEvent, EventBus, EventEnvelope, FrameworkEvent, LinkEvent};
 use axum::extract::{Query, State};
 use axum::response::sse::{Event, KeepAlive, Sse};
-use futures::stream::Stream;
 use futures::StreamExt;
+use futures::stream::Stream;
 use serde::Deserialize;
 use serde_json::json;
 use std::convert::Infallible;
@@ -110,12 +110,8 @@ fn matches_filter(envelope: &EventEnvelope, filter: &SseFilter) -> bool {
                 } => et == entity_type,
             },
             FrameworkEvent::Link(l) => match l {
-                LinkEvent::Created {
-                    link_type: lt, ..
-                }
-                | LinkEvent::Deleted {
-                    link_type: lt, ..
-                } => lt == entity_type,
+                LinkEvent::Created { link_type: lt, .. }
+                | LinkEvent::Deleted { link_type: lt, .. } => lt == entity_type,
             },
         };
         if !matches {
