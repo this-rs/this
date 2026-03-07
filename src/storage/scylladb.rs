@@ -866,6 +866,151 @@ impl LinkService for ScyllaLinkService {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Tests for normalize_json_numbers (no ScyllaDB dependency)
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod normalize_tests {
+    use super::normalize_json_numbers;
+    use serde_json::json;
+
+    #[test]
+    fn converts_whole_f64_to_i64() {
+        let mut val = json!(42.0);
+        normalize_json_numbers(&mut val);
+        // Should now be an integer-backed Number
+        assert!(val.is_i64(), "42.0 should become i64, got: {val}");
+        assert_eq!(val.as_i64(), Some(42));
+    }
+
+    #[test]
+    fn preserves_fractional_f64() {
+        let mut val = json!(3.15);
+        normalize_json_numbers(&mut val);
+        assert!(val.is_f64(), "3.15 should stay f64");
+        assert!((val.as_f64().unwrap() - 3.15).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn preserves_existing_i64() {
+        let mut val = json!(100);
+        normalize_json_numbers(&mut val);
+        assert!(val.is_i64());
+        assert_eq!(val.as_i64(), Some(100));
+    }
+
+    #[test]
+    fn converts_zero() {
+        let mut val = json!(0.0);
+        normalize_json_numbers(&mut val);
+        assert!(val.is_i64() || val.is_u64(), "0.0 should become integer");
+        assert_eq!(val.as_i64(), Some(0));
+    }
+
+    #[test]
+    fn converts_negative_whole() {
+        let mut val = json!(-100.0);
+        normalize_json_numbers(&mut val);
+        assert!(val.is_i64(), "-100.0 should become i64");
+        assert_eq!(val.as_i64(), Some(-100));
+    }
+
+    #[test]
+    fn converts_large_whole_number() {
+        // 3549883.0 — the exact value that triggered the original bug
+        let mut val = json!(3549883.0);
+        normalize_json_numbers(&mut val);
+        assert!(val.is_i64(), "3549883.0 should become i64");
+        assert_eq!(val.as_i64(), Some(3_549_883));
+    }
+
+    #[test]
+    fn handles_nested_object() {
+        let mut val = json!({
+            "name": "Alice",
+            "age": 30.0,
+            "score": 95.5,
+            "count": 7.0
+        });
+        normalize_json_numbers(&mut val);
+
+        assert_eq!(val["name"], "Alice");
+        assert!(val["age"].is_i64(), "age 30.0 should become i64");
+        assert_eq!(val["age"].as_i64(), Some(30));
+        assert!(val["score"].is_f64(), "score 95.5 should stay f64");
+        assert!(val["count"].is_i64(), "count 7.0 should become i64");
+        assert_eq!(val["count"].as_i64(), Some(7));
+    }
+
+    #[test]
+    fn handles_nested_array() {
+        let mut val = json!([1.0, 2.5, 3.0, "hello"]);
+        normalize_json_numbers(&mut val);
+
+        let arr = val.as_array().unwrap();
+        assert!(arr[0].is_i64(), "1.0 should become i64");
+        assert!(arr[1].is_f64(), "2.5 should stay f64");
+        assert!(arr[2].is_i64(), "3.0 should become i64");
+        assert_eq!(arr[3].as_str(), Some("hello"));
+    }
+
+    #[test]
+    fn handles_deeply_nested() {
+        let mut val = json!({
+            "data": {
+                "items": [
+                    {"id": 1.0, "value": 3.15},
+                    {"id": 2.0, "value": 100.0}
+                ]
+            }
+        });
+        normalize_json_numbers(&mut val);
+
+        assert_eq!(val["data"]["items"][0]["id"].as_i64(), Some(1));
+        assert!(val["data"]["items"][0]["value"].is_f64());
+        assert_eq!(val["data"]["items"][1]["id"].as_i64(), Some(2));
+        assert_eq!(val["data"]["items"][1]["value"].as_i64(), Some(100));
+    }
+
+    #[test]
+    fn handles_null_bool_string() {
+        let mut val = json!({
+            "null_field": null,
+            "bool_field": true,
+            "string_field": "hello"
+        });
+        normalize_json_numbers(&mut val);
+
+        assert!(val["null_field"].is_null());
+        assert_eq!(val["bool_field"].as_bool(), Some(true));
+        assert_eq!(val["string_field"].as_str(), Some("hello"));
+    }
+
+    #[test]
+    fn roundtrip_deserialization_after_normalize() {
+        // Simulate the protobuf → serde_json → struct path
+        #[derive(Debug, serde::Deserialize, PartialEq)]
+        struct Sample {
+            frame_count: i64,
+            file_size_bytes: i64,
+            ratio: f64,
+        }
+
+        let mut val = json!({
+            "frame_count": 3549883.0,
+            "file_size_bytes": 1024.0,
+            "ratio": 1.5
+        });
+        normalize_json_numbers(&mut val);
+
+        let sample: Sample =
+            serde_json::from_value(val).expect("should deserialize after normalize");
+        assert_eq!(sample.frame_count, 3_549_883);
+        assert_eq!(sample.file_size_bytes, 1024);
+        assert!((sample.ratio - 1.5).abs() < f64::EPSILON);
+    }
+}
+
 #[cfg(test)]
 #[cfg(feature = "scylladb")]
 #[allow(dead_code)]
