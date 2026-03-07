@@ -24,6 +24,7 @@
 
 use crate::core::field::FieldValue;
 use crate::core::link::LinkEntity;
+use crate::core::module::{EntityCreator, EntityFetcher};
 use crate::core::{Data, DataService, LinkService};
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
@@ -409,6 +410,157 @@ impl<T: Data + Serialize + DeserializeOwned> DataService<T> for ScyllaDataServic
             .collect();
 
         Ok(results)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// JSON number normalization (protobuf Struct sends ALL numbers as f64)
+// ---------------------------------------------------------------------------
+
+/// Recursively walk a `serde_json::Value` and convert any `f64` that has no
+/// fractional part (e.g. `3549883.0`) into an `i64`.  This is necessary
+/// because `google.protobuf.Struct` only has `number_value` (double) — there
+/// is no integer type.  Without this normalisation, `serde_json::from_value`
+/// rejects `3549883.0` when the target Rust field is `i64` / `Option<i64>`.
+fn normalize_json_numbers(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Number(n) => {
+            if let Some(f) = n.as_f64() {
+                // Only convert if the value has no fractional part AND fits in i64
+                if f.fract() == 0.0 && f >= i64::MIN as f64 && f <= i64::MAX as f64 {
+                    #[allow(clippy::cast_possible_truncation)]
+                    let i = f as i64;
+                    if let Some(int_val) = serde_json::Number::from_f64(i as f64) {
+                        // Use from_i64 which is infallible for valid i64
+                        *n = serde_json::Number::from(i);
+                        let _ = int_val; // suppress unused warning
+                    }
+                }
+            }
+        }
+        serde_json::Value::Array(arr) => {
+            for item in arr.iter_mut() {
+                normalize_json_numbers(item);
+            }
+        }
+        serde_json::Value::Object(map) => {
+            for val in map.values_mut() {
+                normalize_json_numbers(val);
+            }
+        }
+        _ => {}
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Generic EntityFetcher / EntityCreator for ScyllaDataService<T>
+// ---------------------------------------------------------------------------
+
+#[async_trait]
+#[allow(clippy::cast_sign_loss)]
+impl<T: Data + Serialize + DeserializeOwned> EntityFetcher for ScyllaDataService<T> {
+    async fn fetch_as_json(&self, entity_id: &Uuid) -> Result<serde_json::Value> {
+        let entity = DataService::get(self, entity_id)
+            .await?
+            .ok_or_else(|| anyhow!("{} not found: {}", Self::entity_type_name(), entity_id))?;
+        serde_json::to_value(entity).map_err(|e| anyhow!("Failed to serialize entity: {}", e))
+    }
+
+    async fn list_as_json(
+        &self,
+        limit: Option<i32>,
+        offset: Option<i32>,
+    ) -> Result<Vec<serde_json::Value>> {
+        let all = DataService::list(self).await?;
+        let offset = offset.unwrap_or(0).max(0) as usize;
+        let limit = limit.unwrap_or(50).max(0) as usize;
+
+        all.into_iter()
+            .skip(offset)
+            .take(limit)
+            .map(|e| serde_json::to_value(e).map_err(|err| anyhow!("serialize: {}", err)))
+            .collect()
+    }
+}
+
+#[async_trait]
+impl<T: Data + Serialize + DeserializeOwned> EntityCreator for ScyllaDataService<T> {
+    async fn create_from_json(&self, mut data: serde_json::Value) -> Result<serde_json::Value> {
+        // Inject system fields if missing so the entity can be deserialized.
+        // The macro-generated structs use #[serde(rename = "type")] for entity_type.
+        if let Some(obj) = data.as_object_mut() {
+            if !obj.contains_key("id") {
+                obj.insert(
+                    "id".to_string(),
+                    serde_json::to_value(Uuid::new_v4())?,
+                );
+            }
+            if !obj.contains_key("type") {
+                obj.insert(
+                    "type".to_string(),
+                    serde_json::Value::String(Self::entity_type_name().to_string()),
+                );
+            }
+            let now = chrono::Utc::now();
+            if !obj.contains_key("created_at") {
+                obj.insert("created_at".to_string(), serde_json::to_value(now)?);
+            }
+            if !obj.contains_key("updated_at") {
+                obj.insert("updated_at".to_string(), serde_json::to_value(now)?);
+            }
+            if !obj.contains_key("status") {
+                obj.insert(
+                    "status".to_string(),
+                    serde_json::Value::String("active".to_string()),
+                );
+            }
+        }
+
+        // Normalise floats that are actually integers (protobuf Struct quirk)
+        normalize_json_numbers(&mut data);
+
+        let entity: T = serde_json::from_value(data)
+            .map_err(|e| anyhow!("Failed to deserialize {}: {}", Self::entity_type_name(), e))?;
+        let created = DataService::create(self, entity).await?;
+        serde_json::to_value(created).map_err(|e| anyhow!("Failed to serialize: {}", e))
+    }
+
+    async fn update_from_json(
+        &self,
+        entity_id: &Uuid,
+        data: serde_json::Value,
+    ) -> Result<serde_json::Value> {
+        let existing = DataService::get(self, entity_id)
+            .await?
+            .ok_or_else(|| anyhow!("{} not found: {}", Self::entity_type_name(), entity_id))?;
+
+        let mut existing_json = serde_json::to_value(&existing)?;
+
+        // Merge update fields into existing entity
+        if let (Some(existing_obj), Some(update_obj)) =
+            (existing_json.as_object_mut(), data.as_object())
+        {
+            for (key, value) in update_obj {
+                existing_obj.insert(key.clone(), value.clone());
+            }
+            // Always bump updated_at
+            existing_obj.insert(
+                "updated_at".to_string(),
+                serde_json::to_value(chrono::Utc::now())?,
+            );
+        }
+
+        // Normalise floats that are actually integers (protobuf Struct quirk)
+        normalize_json_numbers(&mut existing_json);
+
+        let updated: T = serde_json::from_value(existing_json)
+            .map_err(|e| anyhow!("Failed to deserialize {}: {}", Self::entity_type_name(), e))?;
+        let result = DataService::update(self, entity_id, updated).await?;
+        serde_json::to_value(result).map_err(|e| anyhow!("Failed to serialize: {}", e))
+    }
+
+    async fn delete(&self, entity_id: &Uuid) -> Result<()> {
+        DataService::delete(self, entity_id).await
     }
 }
 
