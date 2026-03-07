@@ -66,9 +66,21 @@ pub fn value_to_json(v: &Value) -> serde_json::Value {
     match &v.kind {
         Some(Kind::NullValue(_)) => serde_json::Value::Null,
         Some(Kind::BoolValue(b)) => serde_json::Value::Bool(*b),
-        Some(Kind::NumberValue(n)) => serde_json::Number::from_f64(*n)
-            .map(serde_json::Value::Number)
-            .unwrap_or(serde_json::Value::Null),
+        Some(Kind::NumberValue(n)) => {
+            // Protobuf Struct only has `number_value` (double) — no integer type.
+            // If the value has no fractional part and fits in i64, emit a JSON
+            // integer so that downstream `serde_json::from_value` can deserialise
+            // into i64 / Option<i64> fields without failing.
+            if n.fract() == 0.0 && *n >= i64::MIN as f64 && *n <= i64::MAX as f64 {
+                #[allow(clippy::cast_possible_truncation)]
+                let i = *n as i64;
+                serde_json::Value::Number(serde_json::Number::from(i))
+            } else {
+                serde_json::Number::from_f64(*n)
+                    .map(serde_json::Value::Number)
+                    .unwrap_or(serde_json::Value::Null)
+            }
+        }
         Some(Kind::StringValue(s)) => serde_json::Value::String(s.clone()),
         Some(Kind::ListValue(list)) => {
             let values: Vec<serde_json::Value> = list.values.iter().map(value_to_json).collect();
@@ -134,7 +146,7 @@ mod tests {
     fn test_struct_to_json_roundtrip() {
         let original = json!({
             "name": "Alice",
-            "age": 30.0,
+            "age": 30,
             "active": true,
             "address": null,
             "tags": ["admin", "user"],
@@ -144,6 +156,9 @@ mod tests {
         let s = json_to_struct(&original);
         let result = struct_to_json(&s);
 
+        // Note: protobuf Struct only has number_value (double), so all numbers
+        // go through f64.  value_to_json now converts whole-number f64 back to
+        // i64, so integer values survive the roundtrip as integers.
         assert_eq!(original, result);
     }
 
@@ -295,7 +310,8 @@ mod tests {
                 fields: fields.into_iter().collect(),
             })),
         };
-        assert_eq!(value_to_json(&v), json!({"x": 1.0}));
+        // 1.0 has no fractional part → normalised to integer 1
+        assert_eq!(value_to_json(&v), json!({"x": 1}));
     }
 
     #[test]

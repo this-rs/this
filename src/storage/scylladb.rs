@@ -24,6 +24,7 @@
 
 use crate::core::field::FieldValue;
 use crate::core::link::LinkEntity;
+use crate::core::module::{EntityCreator, EntityFetcher};
 use crate::core::{Data, DataService, LinkService};
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
@@ -413,6 +414,167 @@ impl<T: Data + Serialize + DeserializeOwned> DataService<T> for ScyllaDataServic
 }
 
 // ---------------------------------------------------------------------------
+// JSON number normalization (protobuf Struct sends ALL numbers as f64)
+// ---------------------------------------------------------------------------
+
+/// Recursively walk a `serde_json::Value` and convert any `f64` that has no
+/// fractional part (e.g. `3549883.0`) into an `i64`.  This is necessary
+/// because `google.protobuf.Struct` only has `number_value` (double) — there
+/// is no integer type.  Without this normalisation, `serde_json::from_value`
+/// rejects `3549883.0` when the target Rust field is `i64` / `Option<i64>`.
+fn normalize_json_numbers(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Number(n) => {
+            if let Some(f) = n.as_f64() {
+                // Only convert if the value has no fractional part AND fits in i64
+                if f.fract() == 0.0 && f >= i64::MIN as f64 && f <= i64::MAX as f64 {
+                    #[allow(clippy::cast_possible_truncation)]
+                    let i = f as i64;
+                    if let Some(int_val) = serde_json::Number::from_f64(i as f64) {
+                        // Use from_i64 which is infallible for valid i64
+                        *n = serde_json::Number::from(i);
+                        let _ = int_val; // suppress unused warning
+                    }
+                }
+            }
+        }
+        serde_json::Value::Array(arr) => {
+            for item in arr.iter_mut() {
+                normalize_json_numbers(item);
+            }
+        }
+        serde_json::Value::Object(map) => {
+            for val in map.values_mut() {
+                normalize_json_numbers(val);
+            }
+        }
+        _ => {}
+    }
+}
+
+// ---------------------------------------------------------------------------
+// JSON preparation helpers (pure logic, testable without ScyllaDB)
+// ---------------------------------------------------------------------------
+
+/// Inject default system fields (`id`, `type`, `created_at`, `updated_at`,
+/// `status`) into a JSON object so it can be deserialized into a `Data` entity.
+/// Also normalises protobuf-style float numbers to integers.
+fn prepare_create_json(data: &mut serde_json::Value, entity_type_name: &str) -> Result<()> {
+    if let Some(obj) = data.as_object_mut() {
+        if !obj.contains_key("id") {
+            obj.insert("id".to_string(), serde_json::to_value(Uuid::new_v4())?);
+        }
+        if !obj.contains_key("type") {
+            obj.insert(
+                "type".to_string(),
+                serde_json::Value::String(entity_type_name.to_string()),
+            );
+        }
+        let now = chrono::Utc::now();
+        if !obj.contains_key("created_at") {
+            obj.insert("created_at".to_string(), serde_json::to_value(now)?);
+        }
+        if !obj.contains_key("updated_at") {
+            obj.insert("updated_at".to_string(), serde_json::to_value(now)?);
+        }
+        if !obj.contains_key("status") {
+            obj.insert(
+                "status".to_string(),
+                serde_json::Value::String("active".to_string()),
+            );
+        }
+    }
+    normalize_json_numbers(data);
+    Ok(())
+}
+
+/// Merge `update_data` fields into `existing_json`, bump `updated_at`, and
+/// normalise protobuf-style float numbers.
+fn prepare_update_json(
+    existing_json: &mut serde_json::Value,
+    update_data: &serde_json::Value,
+) -> Result<()> {
+    if let (Some(existing_obj), Some(update_obj)) =
+        (existing_json.as_object_mut(), update_data.as_object())
+    {
+        for (key, value) in update_obj {
+            existing_obj.insert(key.clone(), value.clone());
+        }
+        existing_obj.insert(
+            "updated_at".to_string(),
+            serde_json::to_value(chrono::Utc::now())?,
+        );
+    }
+    normalize_json_numbers(existing_json);
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Generic EntityFetcher / EntityCreator for ScyllaDataService<T>
+// ---------------------------------------------------------------------------
+
+#[async_trait]
+#[allow(clippy::cast_sign_loss)]
+impl<T: Data + Serialize + DeserializeOwned> EntityFetcher for ScyllaDataService<T> {
+    async fn fetch_as_json(&self, entity_id: &Uuid) -> Result<serde_json::Value> {
+        let entity = DataService::get(self, entity_id)
+            .await?
+            .ok_or_else(|| anyhow!("{} not found: {}", Self::entity_type_name(), entity_id))?;
+        serde_json::to_value(entity).map_err(|e| anyhow!("Failed to serialize entity: {}", e))
+    }
+
+    async fn list_as_json(
+        &self,
+        limit: Option<i32>,
+        offset: Option<i32>,
+    ) -> Result<Vec<serde_json::Value>> {
+        let all = DataService::list(self).await?;
+        let offset = offset.unwrap_or(0).max(0) as usize;
+        let limit = limit.unwrap_or(50).max(0) as usize;
+
+        all.into_iter()
+            .skip(offset)
+            .take(limit)
+            .map(|e| serde_json::to_value(e).map_err(|err| anyhow!("serialize: {}", err)))
+            .collect()
+    }
+}
+
+#[async_trait]
+impl<T: Data + Serialize + DeserializeOwned> EntityCreator for ScyllaDataService<T> {
+    async fn create_from_json(&self, mut data: serde_json::Value) -> Result<serde_json::Value> {
+        prepare_create_json(&mut data, Self::entity_type_name())?;
+
+        let entity: T = serde_json::from_value(data)
+            .map_err(|e| anyhow!("Failed to deserialize {}: {}", Self::entity_type_name(), e))?;
+        let created = DataService::create(self, entity).await?;
+        serde_json::to_value(created).map_err(|e| anyhow!("Failed to serialize: {}", e))
+    }
+
+    async fn update_from_json(
+        &self,
+        entity_id: &Uuid,
+        data: serde_json::Value,
+    ) -> Result<serde_json::Value> {
+        let existing = DataService::get(self, entity_id)
+            .await?
+            .ok_or_else(|| anyhow!("{} not found: {}", Self::entity_type_name(), entity_id))?;
+
+        let mut existing_json = serde_json::to_value(&existing)?;
+        prepare_update_json(&mut existing_json, &data)?;
+
+        let updated: T = serde_json::from_value(existing_json)
+            .map_err(|e| anyhow!("Failed to deserialize {}: {}", Self::entity_type_name(), e))?;
+        let result = DataService::update(self, entity_id, updated).await?;
+        serde_json::to_value(result).map_err(|e| anyhow!("Failed to serialize: {}", e))
+    }
+
+    async fn delete(&self, entity_id: &Uuid) -> Result<()> {
+        DataService::delete(self, entity_id).await
+    }
+}
+
+// ---------------------------------------------------------------------------
 // ScyllaLinkService
 // ---------------------------------------------------------------------------
 
@@ -714,6 +876,271 @@ impl LinkService for ScyllaLinkService {
         }
 
         Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests for normalize_json_numbers (no ScyllaDB dependency)
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod normalize_tests {
+    use super::{normalize_json_numbers, prepare_create_json, prepare_update_json};
+    use serde_json::json;
+
+    #[test]
+    fn converts_whole_f64_to_i64() {
+        let mut val = json!(42.0);
+        normalize_json_numbers(&mut val);
+        // Should now be an integer-backed Number
+        assert!(val.is_i64(), "42.0 should become i64, got: {val}");
+        assert_eq!(val.as_i64(), Some(42));
+    }
+
+    #[test]
+    fn preserves_fractional_f64() {
+        let mut val = json!(3.15);
+        normalize_json_numbers(&mut val);
+        assert!(val.is_f64(), "3.15 should stay f64");
+        assert!((val.as_f64().unwrap() - 3.15).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn preserves_existing_i64() {
+        let mut val = json!(100);
+        normalize_json_numbers(&mut val);
+        assert!(val.is_i64());
+        assert_eq!(val.as_i64(), Some(100));
+    }
+
+    #[test]
+    fn converts_zero() {
+        let mut val = json!(0.0);
+        normalize_json_numbers(&mut val);
+        assert!(val.is_i64() || val.is_u64(), "0.0 should become integer");
+        assert_eq!(val.as_i64(), Some(0));
+    }
+
+    #[test]
+    fn converts_negative_whole() {
+        let mut val = json!(-100.0);
+        normalize_json_numbers(&mut val);
+        assert!(val.is_i64(), "-100.0 should become i64");
+        assert_eq!(val.as_i64(), Some(-100));
+    }
+
+    #[test]
+    fn converts_large_whole_number() {
+        // 3549883.0 — the exact value that triggered the original bug
+        let mut val = json!(3549883.0);
+        normalize_json_numbers(&mut val);
+        assert!(val.is_i64(), "3549883.0 should become i64");
+        assert_eq!(val.as_i64(), Some(3_549_883));
+    }
+
+    #[test]
+    fn handles_nested_object() {
+        let mut val = json!({
+            "name": "Alice",
+            "age": 30.0,
+            "score": 95.5,
+            "count": 7.0
+        });
+        normalize_json_numbers(&mut val);
+
+        assert_eq!(val["name"], "Alice");
+        assert!(val["age"].is_i64(), "age 30.0 should become i64");
+        assert_eq!(val["age"].as_i64(), Some(30));
+        assert!(val["score"].is_f64(), "score 95.5 should stay f64");
+        assert!(val["count"].is_i64(), "count 7.0 should become i64");
+        assert_eq!(val["count"].as_i64(), Some(7));
+    }
+
+    #[test]
+    fn handles_nested_array() {
+        let mut val = json!([1.0, 2.5, 3.0, "hello"]);
+        normalize_json_numbers(&mut val);
+
+        let arr = val.as_array().unwrap();
+        assert!(arr[0].is_i64(), "1.0 should become i64");
+        assert!(arr[1].is_f64(), "2.5 should stay f64");
+        assert!(arr[2].is_i64(), "3.0 should become i64");
+        assert_eq!(arr[3].as_str(), Some("hello"));
+    }
+
+    #[test]
+    fn handles_deeply_nested() {
+        let mut val = json!({
+            "data": {
+                "items": [
+                    {"id": 1.0, "value": 3.15},
+                    {"id": 2.0, "value": 100.0}
+                ]
+            }
+        });
+        normalize_json_numbers(&mut val);
+
+        assert_eq!(val["data"]["items"][0]["id"].as_i64(), Some(1));
+        assert!(val["data"]["items"][0]["value"].is_f64());
+        assert_eq!(val["data"]["items"][1]["id"].as_i64(), Some(2));
+        assert_eq!(val["data"]["items"][1]["value"].as_i64(), Some(100));
+    }
+
+    #[test]
+    fn handles_null_bool_string() {
+        let mut val = json!({
+            "null_field": null,
+            "bool_field": true,
+            "string_field": "hello"
+        });
+        normalize_json_numbers(&mut val);
+
+        assert!(val["null_field"].is_null());
+        assert_eq!(val["bool_field"].as_bool(), Some(true));
+        assert_eq!(val["string_field"].as_str(), Some("hello"));
+    }
+
+    #[test]
+    fn roundtrip_deserialization_after_normalize() {
+        // Simulate the protobuf → serde_json → struct path
+        #[derive(Debug, serde::Deserialize, PartialEq)]
+        struct Sample {
+            frame_count: i64,
+            file_size_bytes: i64,
+            ratio: f64,
+        }
+
+        let mut val = json!({
+            "frame_count": 3549883.0,
+            "file_size_bytes": 1024.0,
+            "ratio": 1.5
+        });
+        normalize_json_numbers(&mut val);
+
+        let sample: Sample =
+            serde_json::from_value(val).expect("should deserialize after normalize");
+        assert_eq!(sample.frame_count, 3_549_883);
+        assert_eq!(sample.file_size_bytes, 1024);
+        assert!((sample.ratio - 1.5).abs() < f64::EPSILON);
+    }
+
+    // -----------------------------------------------------------------------
+    // prepare_create_json tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn prepare_create_injects_all_system_fields() {
+        let mut data = json!({"name": "widget", "weight": 42.0});
+        prepare_create_json(&mut data, "test_widget").unwrap();
+
+        let obj = data.as_object().unwrap();
+        assert!(obj.contains_key("id"), "should inject id");
+        assert_eq!(obj["type"], "test_widget");
+        assert!(obj.contains_key("created_at"), "should inject created_at");
+        assert!(obj.contains_key("updated_at"), "should inject updated_at");
+        assert_eq!(obj["status"], "active");
+        // weight 42.0 should be normalised to i64
+        assert!(obj["weight"].is_i64(), "42.0 should become i64");
+        assert_eq!(obj["weight"].as_i64(), Some(42));
+    }
+
+    #[test]
+    fn prepare_create_preserves_existing_system_fields() {
+        let mut data = json!({
+            "id": "00000000-0000-0000-0000-000000000001",
+            "type": "custom_type",
+            "status": "draft",
+            "created_at": "2025-01-01T00:00:00Z",
+            "updated_at": "2025-01-01T00:00:00Z",
+            "name": "existing"
+        });
+        prepare_create_json(&mut data, "test_widget").unwrap();
+
+        let obj = data.as_object().unwrap();
+        // Should NOT overwrite existing fields
+        assert_eq!(obj["id"], "00000000-0000-0000-0000-000000000001");
+        assert_eq!(obj["type"], "custom_type");
+        assert_eq!(obj["status"], "draft");
+        assert_eq!(obj["created_at"], "2025-01-01T00:00:00Z");
+    }
+
+    #[test]
+    fn prepare_create_normalizes_nested_numbers() {
+        let mut data = json!({
+            "name": "test",
+            "metadata": {"count": 100.0, "ratio": 2.5}
+        });
+        prepare_create_json(&mut data, "widget").unwrap();
+
+        let meta = &data["metadata"];
+        assert!(meta["count"].is_i64(), "nested 100.0 should become i64");
+        assert!(meta["ratio"].is_f64(), "nested 2.5 should stay f64");
+    }
+
+    #[test]
+    fn prepare_create_on_non_object_is_noop() {
+        let mut data = json!("just a string");
+        prepare_create_json(&mut data, "widget").unwrap();
+        assert_eq!(data, json!("just a string"));
+    }
+
+    // -----------------------------------------------------------------------
+    // prepare_update_json tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn prepare_update_merges_fields() {
+        let mut existing = json!({
+            "id": "abc",
+            "name": "old-name",
+            "weight": 10,
+            "status": "active"
+        });
+        let update = json!({"name": "new-name", "weight": 99.0});
+        prepare_update_json(&mut existing, &update).unwrap();
+
+        let obj = existing.as_object().unwrap();
+        assert_eq!(obj["name"], "new-name");
+        assert_eq!(obj["weight"].as_i64(), Some(99)); // 99.0 → i64
+        assert_eq!(obj["id"], "abc"); // untouched
+        assert_eq!(obj["status"], "active"); // untouched
+        assert!(obj.contains_key("updated_at"), "should bump updated_at");
+    }
+
+    #[test]
+    fn prepare_update_bumps_updated_at() {
+        let mut existing = json!({
+            "id": "xyz",
+            "updated_at": "2020-01-01T00:00:00Z"
+        });
+        let update = json!({"name": "changed"});
+        prepare_update_json(&mut existing, &update).unwrap();
+
+        // updated_at should be overwritten with a recent timestamp
+        let updated_at = existing["updated_at"].as_str().unwrap();
+        assert!(
+            updated_at > "2024-",
+            "updated_at should be recent, got: {updated_at}"
+        );
+    }
+
+    #[test]
+    fn prepare_update_normalizes_numbers() {
+        let mut existing = json!({"id": "a", "score": 10});
+        let update = json!({"score": 500.0, "ratio": 1.5});
+        prepare_update_json(&mut existing, &update).unwrap();
+
+        assert_eq!(existing["score"].as_i64(), Some(500));
+        assert!(existing["ratio"].is_f64());
+    }
+
+    #[test]
+    fn prepare_update_non_object_update_is_noop() {
+        let mut existing = json!({"id": "a", "name": "test"});
+        let update = json!("not an object");
+        prepare_update_json(&mut existing, &update).unwrap();
+
+        // Should not crash, existing stays the same (except normalize pass)
+        assert_eq!(existing["name"], "test");
     }
 }
 
