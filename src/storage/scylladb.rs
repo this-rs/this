@@ -490,10 +490,7 @@ impl<T: Data + Serialize + DeserializeOwned> EntityCreator for ScyllaDataService
         // The macro-generated structs use #[serde(rename = "type")] for entity_type.
         if let Some(obj) = data.as_object_mut() {
             if !obj.contains_key("id") {
-                obj.insert(
-                    "id".to_string(),
-                    serde_json::to_value(Uuid::new_v4())?,
-                );
+                obj.insert("id".to_string(), serde_json::to_value(Uuid::new_v4())?);
             }
             if !obj.contains_key("type") {
                 obj.insert(
