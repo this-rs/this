@@ -290,6 +290,7 @@ fn matches_filter(envelope: &EventEnvelope, filter: &SubscriptionFilter) -> bool
                 LinkEvent::Created { link_type: lt, .. }
                 | LinkEvent::Deleted { link_type: lt, .. } => lt == entity_type,
             },
+            FrameworkEvent::Cognitive(_) => false,
         };
         if !matches {
             return false;
@@ -385,6 +386,13 @@ fn envelope_to_graphql_value(envelope: &EventEnvelope) -> Value {
                 "targetId": target_id.to_string(),
             }),
         },
+        FrameworkEvent::Cognitive(_signal) => json!({
+            "id": envelope.id.to_string(),
+            "timestamp": envelope.timestamp.to_rfc3339(),
+            "kind": "cognitive",
+            "action": envelope.event.action(),
+            "nodeId": envelope.event.entity_id().map(|id| id.to_string()),
+        }),
     }
 }
 

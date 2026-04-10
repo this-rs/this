@@ -165,6 +165,15 @@ impl FlowContext {
                     }
                 }
             }
+            FrameworkEvent::Cognitive(_signal) => {
+                variables.insert(
+                    "signal_type".to_string(),
+                    Value::String(event.action().to_string()),
+                );
+                if let Some(id) = event.entity_id() {
+                    variables.insert("node_id".to_string(), Value::String(id.to_string()));
+                }
+            }
         }
 
         Self {

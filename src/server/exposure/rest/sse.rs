@@ -113,6 +113,8 @@ fn matches_filter(envelope: &EventEnvelope, filter: &SseFilter) -> bool {
                 LinkEvent::Created { link_type: lt, .. }
                 | LinkEvent::Deleted { link_type: lt, .. } => lt == entity_type,
             },
+            // Cognitive signals don't have entity_type filtering
+            FrameworkEvent::Cognitive(_) => false,
         };
         if !matches {
             return false;
@@ -193,6 +195,12 @@ fn envelope_to_sse_event(envelope: &EventEnvelope) -> Option<Event> {
                 "timestamp": envelope.timestamp.to_rfc3339(),
             }),
         },
+        FrameworkEvent::Cognitive(_signal) => json!({
+            "kind": "cognitive",
+            "action": envelope.event.action(),
+            "node_id": envelope.event.entity_id(),
+            "timestamp": envelope.timestamp.to_rfc3339(),
+        }),
     };
 
     let json_str = serde_json::to_string(&data).ok()?;
