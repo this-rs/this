@@ -22,7 +22,9 @@ pub enum AuthProviderType {
     None,
 
     /// WAMI STS provider (Ed25519 JWT via wami-token)
-    #[cfg(feature = "wami")]
+    ///
+    /// The variant is always available for YAML deserialization,
+    /// but the actual provider is only instantiated when `feature = "wami"`.
     Wami,
 
     /// Standard OIDC provider (external IdP)

@@ -227,6 +227,38 @@ impl ServerBuilder {
             host = host.with_event_bus(event_bus);
         }
 
+        // Auto-wire auth provider from config
+        if let Some(ref auth_config) = host.config.auth {
+            use crate::config::auth::AuthProviderType;
+            match auth_config.provider {
+                AuthProviderType::None => {
+                    // No auth provider — use default NoAuthProvider behavior
+                }
+                AuthProviderType::Wami => {
+                    #[cfg(feature = "wami")]
+                    {
+                        use crate::core::auth::wami_provider::WamiAuthProvider;
+                        match WamiAuthProvider::from_config(auth_config) {
+                            Ok(provider) => {
+                                host = host.with_auth_provider(Arc::new(provider));
+                                tracing::info!("WAMI auth provider auto-wired");
+                            }
+                            Err(e) => {
+                                tracing::warn!("Failed to create WamiAuthProvider: {}. Continuing without auth.", e);
+                            }
+                        }
+                    }
+                    #[cfg(not(feature = "wami"))]
+                    {
+                        tracing::warn!("Auth provider set to 'wami' but feature 'wami' is not enabled. Ignoring.");
+                    }
+                }
+                AuthProviderType::Oidc => {
+                    tracing::warn!("OIDC auth provider not yet implemented. Ignoring.");
+                }
+            }
+        }
+
         // Auto-wire event pipeline from config (sinks section)
         let has_sinks = host.config.sinks.as_ref().is_some_and(|s| !s.is_empty());
 

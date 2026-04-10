@@ -14,7 +14,7 @@ use crate::config::auth::AuthConfig;
 use crate::core::auth::{AuthContext, AuthProvider};
 use anyhow::{Context, Result, anyhow, bail};
 use async_trait::async_trait;
-use axum::http::Request;
+use axum::http::HeaderMap;
 use ed25519_dalek::VerifyingKey;
 use jsonwebtoken::{Algorithm, DecodingKey, TokenData, Validation};
 use serde::{Deserialize, Serialize};
@@ -200,8 +200,8 @@ impl WamiAuthProvider {
     }
 
     /// Extract Bearer token from Authorization header
-    fn extract_bearer_token<B>(req: &Request<B>) -> Option<&str> {
-        req.headers()
+    fn extract_bearer_token(headers: &HeaderMap) -> Option<&str> {
+        headers
             .get(axum::http::header::AUTHORIZATION)?
             .to_str()
             .ok()?
@@ -247,8 +247,8 @@ impl WamiAuthProvider {
 
 #[async_trait]
 impl AuthProvider for WamiAuthProvider {
-    async fn extract_context<B: Send + Sync>(&self, req: &Request<B>) -> Result<AuthContext> {
-        let token = match Self::extract_bearer_token(req) {
+    async fn extract_context(&self, headers: &HeaderMap) -> Result<AuthContext> {
+        let token = match Self::extract_bearer_token(headers) {
             Some(t) if !t.is_empty() => t,
             _ => {
                 // No token — check if default policy allows anonymous
@@ -670,8 +670,8 @@ mod tests {
         config.default_policy = "public".to_string();
         let provider = WamiAuthProvider::from_config(&config).unwrap();
 
-        let req = Request::builder().body(()).unwrap();
-        let ctx = provider.extract_context(&req).await.unwrap();
+        let headers = HeaderMap::new();
+        let ctx = provider.extract_context(&headers).await.unwrap();
         assert!(matches!(ctx, AuthContext::Anonymous));
     }
 
@@ -682,8 +682,8 @@ mod tests {
         config.default_policy = "authenticated".to_string();
         let provider = WamiAuthProvider::from_config(&config).unwrap();
 
-        let req = Request::builder().body(()).unwrap();
-        let err = provider.extract_context(&req).await.unwrap_err();
+        let headers = HeaderMap::new();
+        let err = provider.extract_context(&headers).await.unwrap_err();
         assert!(err.to_string().contains("Missing"));
     }
 
@@ -697,12 +697,10 @@ mod tests {
         let user_id = claims.user_id.unwrap();
         let token = sign_token(&claims, &sk);
 
-        let req = Request::builder()
-            .header("Authorization", format!("Bearer {token}"))
-            .body(())
-            .unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert("Authorization", format!("Bearer {token}").parse().unwrap());
 
-        let ctx = provider.extract_context(&req).await.unwrap();
+        let ctx = provider.extract_context(&headers).await.unwrap();
         match ctx {
             AuthContext::User {
                 user_id: uid,
@@ -723,12 +721,10 @@ mod tests {
         config.default_policy = "authenticated".to_string();
         let provider = WamiAuthProvider::from_config(&config).unwrap();
 
-        let req = Request::builder()
-            .header("Authorization", "Bearer ")
-            .body(())
-            .unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert("Authorization", "Bearer ".parse().unwrap());
 
-        let err = provider.extract_context(&req).await.unwrap_err();
+        let err = provider.extract_context(&headers).await.unwrap_err();
         assert!(err.to_string().contains("Missing"));
     }
 
@@ -738,12 +734,10 @@ mod tests {
         let config = test_config(&pub_key_to_pem(&vk));
         let provider = WamiAuthProvider::from_config(&config).unwrap();
 
-        let req = Request::builder()
-            .header("Authorization", "Bearer invalid.token.here")
-            .body(())
-            .unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert("Authorization", "Bearer invalid.token.here".parse().unwrap());
 
-        let err = provider.extract_context(&req).await.unwrap_err();
+        let err = provider.extract_context(&headers).await.unwrap_err();
         assert!(err.to_string().contains("verification failed"));
     }
 }
