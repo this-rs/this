@@ -7,6 +7,7 @@
 //! single source of truth for the application state.
 
 use crate::config::LinksConfig;
+use crate::core::auth::AuthProvider;
 use crate::core::events::EventBus;
 use crate::core::{EntityCreator, EntityFetcher, service::LinkService};
 use crate::events::log::EventLog;
@@ -95,6 +96,12 @@ pub struct ServerHost {
     /// Stores per-user notification preferences (mute, disable types).
     /// Used by sinks to filter notifications and by preference endpoints.
     pub preferences_store: Option<Arc<NotificationPreferencesStore>>,
+
+    /// Optional auth provider for JWT/token verification
+    ///
+    /// When present, the auth middleware is auto-wired on all routes.
+    /// The provider extracts AuthContext from incoming requests.
+    pub auth_provider: Option<Arc<dyn AuthProvider>>,
 }
 
 impl ServerHost {
@@ -137,6 +144,7 @@ impl ServerHost {
             notification_store: None,
             device_token_store: None,
             preferences_store: None,
+            auth_provider: None,
         })
     }
 
@@ -216,6 +224,17 @@ impl ServerHost {
         self.preferences_store.as_ref()
     }
 
+    /// Set the auth provider
+    pub fn with_auth_provider(mut self, provider: Arc<dyn AuthProvider>) -> Self {
+        self.auth_provider = Some(provider);
+        self
+    }
+
+    /// Get a reference to the auth provider (if configured)
+    pub fn auth_provider(&self) -> Option<&Arc<dyn AuthProvider>> {
+        self.auth_provider.as_ref()
+    }
+
     /// Create a minimal `ServerHost` for unit tests.
     ///
     /// Has empty registries and a mock `LinkService`. Useful for testing
@@ -292,6 +311,7 @@ impl ServerHost {
             notification_store: None,
             device_token_store: None,
             preferences_store: None,
+            auth_provider: None,
         }
     }
 }
