@@ -42,6 +42,9 @@ pub struct ServerBuilder {
     notification_store: Option<Arc<NotificationStore>>,
     device_token_store: Option<Arc<DeviceTokenStore>>,
     preferences_store: Option<Arc<NotificationPreferencesStore>>,
+
+    // Auth config loaded from external file
+    auth_config: Option<crate::config::auth::AuthConfig>,
 }
 
 impl ServerBuilder {
@@ -58,6 +61,7 @@ impl ServerBuilder {
             notification_store: None,
             device_token_store: None,
             preferences_store: None,
+            auth_config: None,
         }
     }
 
@@ -120,6 +124,14 @@ impl ServerBuilder {
         self
     }
 
+    /// Enable the event bus with a default capacity of 1024
+    ///
+    /// Convenience method equivalent to `.with_event_bus(1024)`.
+    pub fn with_default_event_bus(mut self) -> Self {
+        self.event_bus = Some(EventBus::new(1024));
+        self
+    }
+
     /// Provide a pre-built sink registry (overrides auto-wiring from config)
     ///
     /// Use this when you need full control over which sinks are registered.
@@ -137,6 +149,14 @@ impl ServerBuilder {
         self
     }
 
+    /// Create and attach a default notification store
+    ///
+    /// Convenience method equivalent to `.with_notification_store(Arc::new(NotificationStore::new()))`.
+    pub fn with_default_notification_store(mut self) -> Self {
+        self.notification_store = Some(Arc::new(NotificationStore::new()));
+        self
+    }
+
     /// Provide a pre-built device token store
     ///
     /// If not provided, one is auto-created when sinks are configured.
@@ -150,6 +170,37 @@ impl ServerBuilder {
     /// If not provided, one is auto-created when sinks are configured.
     pub fn with_preferences_store(mut self, store: Arc<NotificationPreferencesStore>) -> Self {
         self.preferences_store = Some(store);
+        self
+    }
+
+    /// Load auth configuration from a YAML file
+    ///
+    /// This merges the auth config into the server's LinksConfig during build.
+    /// Keeps auth config separate from links.yaml for cleaner project structure.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// ServerBuilder::new()
+    ///     .with_link_service(service)
+    ///     .with_auth_config_file(concat!(env!("CARGO_MANIFEST_DIR"), "/config/auth.yaml"))?
+    ///     .register_module(module)?
+    ///     .build_host()?;
+    /// ```
+    pub fn with_auth_config_file(mut self, path: &str) -> Result<Self> {
+        let content = std::fs::read_to_string(path)
+            .map_err(|e| anyhow::anyhow!("Failed to read auth config from '{}': {}", path, e))?;
+        let config: crate::config::auth::AuthConfig = serde_yaml::from_str(&content)
+            .map_err(|e| anyhow::anyhow!("Failed to parse auth config from '{}': {}", path, e))?;
+        self.auth_config = Some(config);
+        Ok(self)
+    }
+
+    /// Set auth configuration directly
+    ///
+    /// Use this when you have an `AuthConfig` already constructed in code.
+    pub fn with_auth_config(mut self, config: crate::config::auth::AuthConfig) -> Self {
+        self.auth_config = Some(config);
         self
     }
 
@@ -185,7 +236,12 @@ impl ServerBuilder {
     /// Returns a `ServerHost` containing all framework state.
     pub fn build_host(mut self) -> Result<ServerHost> {
         // Merge all configs
-        let merged_config = self.merge_configs()?;
+        let mut merged_config = self.merge_configs()?;
+
+        // Inject auth config from with_auth_config_file() if set
+        if let Some(auth_config) = self.auth_config.take() {
+            merged_config.auth = Some(auth_config);
+        }
 
         // Extract link service
         let link_service = self
@@ -497,7 +553,15 @@ impl ServerBuilder {
                         )
                     })?
                     .clone();
-                let pub_key = wami_config.public_key.clone();
+                let pub_key = wami_config
+                    .public_key
+                    .as_ref()
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "Embedded mode requires 'public_key' in wami config"
+                        )
+                    })?
+                    .clone();
                 (priv_key, pub_key)
             }
             AuthMode::Sts => {
