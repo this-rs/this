@@ -24,8 +24,9 @@
 //! data: {"kind":"entity","action":"updated","entity_type":"user","entity_id":"...","data":{...},"timestamp":"..."}
 //! ```
 
+use crate::core::auth::AuthContext;
 use crate::core::events::{EntityEvent, EventBus, EventEnvelope, FrameworkEvent, LinkEvent};
-use axum::extract::{Query, State};
+use axum::extract::{Extension, Query, State};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use futures::StreamExt;
 use futures::stream::Stream;
@@ -53,15 +54,29 @@ pub struct SseFilter {
 ///
 /// Subscribes to the EventBus and streams matching events as SSE.
 /// Sends heartbeat comments every 30 seconds to keep the connection alive.
+///
+/// When auth middleware is active, the `AuthContext` is extracted and used
+/// for tenant-scoped event isolation.
 pub async fn sse_handler(
     State(event_bus): State<Arc<EventBus>>,
     Query(filter): Query<SseFilter>,
+    auth: Option<Extension<AuthContext>>,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+    let tenant_id = auth.as_ref().and_then(|Extension(ctx)| ctx.tenant_id());
     let rx = event_bus.subscribe();
 
     let stream = BroadcastStream::new(rx).filter_map(move |result| {
         let item = match result {
             Ok(envelope) => {
+                // Tenant isolation: skip events from other tenants
+                if let Some(conn_tenant) = tenant_id {
+                    if let Some(event_tenant) = envelope.tenant_id() {
+                        if conn_tenant != event_tenant {
+                            return std::future::ready(None);
+                        }
+                    }
+                }
+
                 if matches_filter(&envelope, &filter) {
                     envelope_to_sse_event(&envelope).map(Ok)
                 } else {

@@ -11,9 +11,11 @@ pub mod pluralize;
 pub mod query;
 pub mod service;
 pub mod store;
+pub mod tenant;
 pub mod validation;
 
 pub use auth::{AuthContext, AuthPolicy, AuthProvider, NoAuthProvider};
+pub use tenant::TenantContext;
 pub use entity::{Data, Entity, Link};
 pub use events::{EntityEvent, EventBus, EventEnvelope, FrameworkEvent, LinkEvent};
 pub use field::{FieldFormat, FieldValue};

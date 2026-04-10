@@ -9,34 +9,54 @@
 
 use super::manager::ConnectionManager;
 use super::protocol::{ClientMessage, ServerMessage};
+use crate::core::auth::AuthContext;
 use axum::extract::ws::{Message, WebSocket};
-use axum::extract::{State, WebSocketUpgrade};
+use axum::extract::{Extension, State, WebSocketUpgrade};
 use axum::response::IntoResponse;
 use futures::SinkExt;
 use futures::stream::StreamExt;
 use std::sync::Arc;
+use uuid::Uuid;
 
 /// WebSocket upgrade handler
 ///
 /// This is the axum handler for GET /ws. It upgrades the HTTP connection
 /// to a WebSocket connection and spawns the message loop.
+///
+/// If auth middleware is active, the `AuthContext` is extracted from request
+/// extensions and used for tenant-scoped event isolation. Without auth,
+/// the connection operates as anonymous (receives all events).
 pub async fn ws_handler(
     ws: WebSocketUpgrade,
     State(manager): State<Arc<ConnectionManager>>,
+    auth: Option<Extension<AuthContext>>,
 ) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| handle_socket(socket, manager))
+    let tenant_id = auth.as_ref().and_then(|Extension(ctx)| ctx.tenant_id());
+    let user_id = auth.as_ref().and_then(|Extension(ctx)| ctx.user_id());
+    ws.on_upgrade(move |socket| handle_socket(socket, manager, tenant_id, user_id))
 }
 
 /// Handle a single WebSocket connection
 ///
 /// This function:
-/// 1. Registers the connection with the ConnectionManager
+/// 1. Registers the connection with the ConnectionManager (with tenant isolation)
 /// 2. Sends a Welcome message with the connection ID
-/// 3. Spawns a write loop that forwards ServerMessages to the WebSocket
-/// 4. Runs the read loop that processes client messages
-/// 5. Cleans up on disconnect
-async fn handle_socket(socket: WebSocket, manager: Arc<ConnectionManager>) {
-    let (conn_id, mut server_rx) = manager.connect().await;
+/// 3. Associates the user ID if authenticated
+/// 4. Spawns a write loop that forwards ServerMessages to the WebSocket
+/// 5. Runs the read loop that processes client messages
+/// 6. Cleans up on disconnect
+async fn handle_socket(
+    socket: WebSocket,
+    manager: Arc<ConnectionManager>,
+    tenant_id: Option<Uuid>,
+    user_id: Option<Uuid>,
+) {
+    let (conn_id, mut server_rx) = manager.connect(tenant_id).await;
+
+    // Associate user ID for targeted notifications (send_to_user)
+    if let Some(uid) = user_id {
+        let _ = manager.associate_user(&conn_id, uid.to_string()).await;
+    }
 
     // Split the WebSocket into read and write halves
     let (mut ws_write, mut ws_read) = socket.split();
@@ -192,7 +212,7 @@ mod tests {
     #[tokio::test]
     async fn test_handle_client_message_ping_responds_pong() {
         let manager = ConnectionManager::new(test_host());
-        let (conn_id, mut rx) = manager.connect().await;
+        let (conn_id, mut rx) = manager.connect(None).await;
 
         let ping_json = r#"{"type":"ping"}"#;
         handle_client_message(&manager, &conn_id, ping_json).await;
@@ -208,7 +228,7 @@ mod tests {
     #[tokio::test]
     async fn test_handle_client_message_subscribe_responds_subscribed() {
         let manager = ConnectionManager::new(test_host());
-        let (conn_id, mut rx) = manager.connect().await;
+        let (conn_id, mut rx) = manager.connect(None).await;
 
         let subscribe_json = r#"{"type":"subscribe","filter":{"entity_type":"order"}}"#;
         handle_client_message(&manager, &conn_id, subscribe_json).await;
@@ -232,7 +252,7 @@ mod tests {
     #[tokio::test]
     async fn test_handle_client_message_unsubscribe_existing() {
         let manager = ConnectionManager::new(test_host());
-        let (conn_id, mut rx) = manager.connect().await;
+        let (conn_id, mut rx) = manager.connect(None).await;
 
         // First subscribe
         let filter = SubscriptionFilter {
@@ -260,7 +280,7 @@ mod tests {
     #[tokio::test]
     async fn test_handle_client_message_unsubscribe_nonexistent() {
         let manager = ConnectionManager::new(test_host());
-        let (conn_id, mut rx) = manager.connect().await;
+        let (conn_id, mut rx) = manager.connect(None).await;
 
         let unsub_json = r#"{"type":"unsubscribe","subscription_id":"sub_does_not_exist"}"#;
         handle_client_message(&manager, &conn_id, unsub_json).await;
@@ -281,7 +301,7 @@ mod tests {
     #[tokio::test]
     async fn test_handle_client_message_invalid_json_sends_error() {
         let manager = ConnectionManager::new(test_host());
-        let (conn_id, mut rx) = manager.connect().await;
+        let (conn_id, mut rx) = manager.connect(None).await;
 
         let bad_json = r#"{"this is not valid json"#;
         handle_client_message(&manager, &conn_id, bad_json).await;
@@ -302,7 +322,7 @@ mod tests {
     #[tokio::test]
     async fn test_handle_client_message_unknown_type_sends_error() {
         let manager = ConnectionManager::new(test_host());
-        let (conn_id, mut rx) = manager.connect().await;
+        let (conn_id, mut rx) = manager.connect(None).await;
 
         let unknown_json = r#"{"type":"unknown_action","data":{}}"#;
         handle_client_message(&manager, &conn_id, unknown_json).await;
