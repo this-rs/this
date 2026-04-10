@@ -335,6 +335,7 @@ mod tests {
                     data: serde_json::Value::Null,
                     read: false,
                     created_at: chrono::Utc::now(),
+                    tenant_id: None,
                 })
                 .await;
         }
@@ -385,6 +386,7 @@ mod tests {
                 data: serde_json::Value::Null,
                 read: false,
                 created_at: chrono::Utc::now(),
+                tenant_id: None,
             })
             .await;
 
@@ -425,6 +427,7 @@ mod tests {
                     data: serde_json::Value::Null,
                     read: false,
                     created_at: chrono::Utc::now(),
+                    tenant_id: None,
                 })
                 .await;
         }
@@ -462,6 +465,7 @@ mod tests {
                 data: serde_json::Value::Null,
                 read: false,
                 created_at: chrono::Utc::now(),
+                tenant_id: None,
             })
             .await;
 

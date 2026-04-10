@@ -115,6 +115,7 @@ fn extract_link_type(event: &FrameworkEvent) -> Option<&str> {
         },
         FrameworkEvent::Entity(_) => None,
         FrameworkEvent::Cognitive(_) => None,
+        FrameworkEvent::GdprErasure { .. } => None,
     }
 }
 
@@ -201,6 +202,15 @@ fn envelope_to_response(envelope: &EventEnvelope) -> EventResponse {
         FrameworkEvent::Cognitive(_) => (
             "cognitive".to_string(),
             event.entity_id().map(|id| id.to_string()).unwrap_or_default(),
+            String::new(),
+            String::new(),
+            String::new(),
+            None,
+            None,
+        ),
+        FrameworkEvent::GdprErasure { tenant_id, .. } => (
+            "gdpr_erasure".to_string(),
+            tenant_id.to_string(),
             String::new(),
             String::new(),
             String::new(),

@@ -228,7 +228,9 @@ impl ServerBuilder {
         }
 
         // Auto-wire auth provider from config
-        if let Some(ref auth_config) = host.config.auth {
+        // Clone the auth config to avoid borrow conflicts with `host`
+        let auth_config_owned = host.config.auth.clone();
+        if let Some(ref auth_config) = auth_config_owned {
             use crate::config::auth::AuthProviderType;
             match auth_config.provider {
                 AuthProviderType::None => {
@@ -237,6 +239,7 @@ impl ServerBuilder {
                 AuthProviderType::Wami => {
                     #[cfg(feature = "wami")]
                     {
+                        use crate::config::auth::AuthMode;
                         use crate::core::auth::wami_provider::WamiAuthProvider;
                         match WamiAuthProvider::from_config(auth_config) {
                             Ok(provider) => {
@@ -245,6 +248,31 @@ impl ServerBuilder {
                             }
                             Err(e) => {
                                 tracing::warn!("Failed to create WamiAuthProvider: {}. Continuing without auth.", e);
+                            }
+                        }
+
+                        // Auto-wire STS for embedded/bootstrap modes
+                        if let Some(ref wami_config) = auth_config.wami {
+                            let needs_sts = matches!(
+                                wami_config.mode,
+                                AuthMode::Embedded | AuthMode::Bootstrap
+                            );
+                            if needs_sts {
+                                match Self::build_sts_state(wami_config) {
+                                    Ok(sts_state) => {
+                                        host = host.with_sts_state(sts_state);
+                                        tracing::info!(
+                                            "STS service auto-wired (mode: {:?})",
+                                            wami_config.mode
+                                        );
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!(
+                                            "Failed to create STS service: {}. Auth endpoints won't be available.",
+                                            e
+                                        );
+                                    }
+                                }
                             }
                         }
                     }
@@ -421,6 +449,79 @@ impl ServerBuilder {
 
         tracing::info!("Server shutdown complete");
         Ok(())
+    }
+
+    /// Build the STS state from WAMI config (embedded/bootstrap modes)
+    #[cfg(feature = "wami")]
+    fn build_sts_state(
+        wami_config: &crate::config::auth::WamiConfig,
+    ) -> anyhow::Result<Arc<crate::server::exposure::rest::auth_routes::StsState>> {
+        use crate::config::auth::AuthMode;
+        use crate::core::auth::sts::StsService;
+        use crate::server::exposure::rest::auth_routes::StsState;
+
+        let (private_pem, public_pem) = match wami_config.mode {
+            AuthMode::Bootstrap => {
+                // Auto-generate a key pair for development
+                use ed25519_dalek::SigningKey;
+                use ed25519_dalek::pkcs8::{EncodePrivateKey, spki::der::pem::LineEnding};
+                use ed25519_dalek::pkcs8::EncodePublicKey;
+
+                // Generate a random 32-byte secret using UUIDs (no rand dependency needed)
+                let u1 = uuid::Uuid::new_v4();
+                let u2 = uuid::Uuid::new_v4();
+                let mut secret = [0u8; 32];
+                secret[..16].copy_from_slice(u1.as_bytes());
+                secret[16..].copy_from_slice(u2.as_bytes());
+                let signing_key = SigningKey::from_bytes(&secret);
+                let verifying_key = signing_key.verifying_key();
+
+                let priv_pem = signing_key
+                    .to_pkcs8_pem(LineEnding::LF)
+                    .map_err(|e| anyhow::anyhow!("Failed to encode bootstrap private key: {}", e))?
+                    .to_string();
+                let pub_pem = verifying_key
+                    .to_public_key_pem(LineEnding::LF)
+                    .map_err(|e| anyhow::anyhow!("Failed to encode bootstrap public key: {}", e))?;
+
+                tracing::info!("Bootstrap mode: auto-generated Ed25519 key pair");
+                (priv_pem, pub_pem)
+            }
+            AuthMode::Embedded => {
+                let priv_key = wami_config
+                    .private_key
+                    .as_ref()
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "Embedded mode requires 'private_key' in wami config"
+                        )
+                    })?
+                    .clone();
+                let pub_key = wami_config.public_key.clone();
+                (priv_key, pub_key)
+            }
+            AuthMode::Sts => {
+                anyhow::bail!("STS mode does not need embedded token issuance");
+            }
+        };
+
+        let issuer = wami_config
+            .issuer
+            .clone()
+            .unwrap_or_else(|| "this-rs".to_string());
+
+        let mut sts = StsService::new(&private_pem, issuer)?;
+        sts.set_access_ttl_secs(wami_config.token_ttl_secs);
+        sts.set_refresh_ttl_secs(wami_config.refresh_ttl_secs);
+
+        let decoding_key = jsonwebtoken::DecodingKey::from_ed_pem(public_pem.as_bytes())
+            .map_err(|e| anyhow::anyhow!("Failed to create DecodingKey: {}", e))?;
+
+        Ok(Arc::new(StsState {
+            sts: Arc::new(sts),
+            public_key_pem: public_pem,
+            decoding_key,
+        }))
     }
 }
 

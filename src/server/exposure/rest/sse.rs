@@ -130,6 +130,8 @@ fn matches_filter(envelope: &EventEnvelope, filter: &SseFilter) -> bool {
             },
             // Cognitive signals don't have entity_type filtering
             FrameworkEvent::Cognitive(_) => false,
+            // GDPR erasure events don't have entity_type filtering
+            FrameworkEvent::GdprErasure { .. } => false,
         };
         if !matches {
             return false;
@@ -214,6 +216,22 @@ fn envelope_to_sse_event(envelope: &EventEnvelope) -> Option<Event> {
             "kind": "cognitive",
             "action": envelope.event.action(),
             "node_id": envelope.event.entity_id(),
+            "timestamp": envelope.timestamp.to_rfc3339(),
+        }),
+        FrameworkEvent::GdprErasure {
+            tenant_id,
+            entities_deleted,
+            links_deleted,
+            notifications_deleted,
+            erased_at,
+        } => json!({
+            "kind": "gdpr_erasure",
+            "action": "erasure",
+            "tenant_id": tenant_id.to_string(),
+            "entities_deleted": entities_deleted,
+            "links_deleted": links_deleted,
+            "notifications_deleted": notifications_deleted,
+            "erased_at": erased_at.to_rfc3339(),
             "timestamp": envelope.timestamp.to_rfc3339(),
         }),
     };

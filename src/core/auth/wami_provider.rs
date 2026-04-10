@@ -318,6 +318,9 @@ mod tests {
             issuer: Some("test-issuer".to_string()),
             audience: Some("test-audience".to_string()),
             mode: Default::default(),
+            private_key: None,
+            token_ttl_secs: 3600,
+            refresh_ttl_secs: 86400,
         });
         config
     }
@@ -383,6 +386,9 @@ mod tests {
             issuer: None,
             audience: None,
             mode: Default::default(),
+            private_key: None,
+            token_ttl_secs: 3600,
+            refresh_ttl_secs: 86400,
         });
         let err = WamiAuthProvider::from_config(&config).unwrap_err();
         assert!(err.to_string().contains("public_key is required"));

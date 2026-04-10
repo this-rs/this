@@ -30,6 +30,11 @@ pub struct CompiledFlow {
 
     /// Compiled pipeline operators (in execution order)
     pub operators: Vec<Box<dyn PipelineOperator>>,
+
+    /// Optional tenant scope — when set, this flow only triggers for events
+    /// belonging to this specific tenant. `None` means the flow is global
+    /// and triggers for events from any tenant.
+    pub tenant_id: Option<uuid::Uuid>,
 }
 
 /// Compile a FlowConfig into a CompiledFlow
@@ -59,6 +64,7 @@ pub fn compile_flow(config: &FlowConfig) -> Result<CompiledFlow> {
         name: config.name.clone(),
         matcher,
         operators,
+        tenant_id: None, // Global by default; callers can set per-tenant scope
     })
 }
 

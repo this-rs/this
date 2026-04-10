@@ -10,6 +10,8 @@
 //! - `wami` — enables `WamiAuthProvider` (Ed25519 JWT verification)
 
 #[cfg(feature = "wami")]
+pub mod sts;
+#[cfg(feature = "wami")]
 pub mod wami_provider;
 
 use anyhow::Result;

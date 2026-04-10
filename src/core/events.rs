@@ -134,6 +134,19 @@ pub enum FrameworkEvent {
     Link(LinkEvent),
     /// A cognitive signal from obrain-db
     Cognitive(CognitiveSignal),
+    /// GDPR erasure completed for a tenant
+    GdprErasure {
+        /// The tenant whose data was erased
+        tenant_id: Uuid,
+        /// Number of entities deleted
+        entities_deleted: usize,
+        /// Number of links deleted
+        links_deleted: usize,
+        /// Number of notifications deleted
+        notifications_deleted: usize,
+        /// Timestamp of the erasure
+        erased_at: chrono::DateTime<chrono::Utc>,
+    },
 }
 
 impl FrameworkEvent {
@@ -144,6 +157,7 @@ impl FrameworkEvent {
             FrameworkEvent::Entity(_) => "entity",
             FrameworkEvent::Link(_) => "link",
             FrameworkEvent::Cognitive(_) => "cognitive",
+            FrameworkEvent::GdprErasure { .. } => "gdpr_erasure",
         }
     }
 
@@ -157,6 +171,7 @@ impl FrameworkEvent {
             },
             FrameworkEvent::Link(_) => None,
             FrameworkEvent::Cognitive(_) => None,
+            FrameworkEvent::GdprErasure { .. } => None,
         }
     }
 
@@ -180,6 +195,7 @@ impl FrameworkEvent {
                 CognitiveSignal::CoChangeDetected { nodes, .. } => nodes.first().copied(),
                 CognitiveSignal::StigmergyLockIn { path, .. } => path.first().copied(),
             },
+            FrameworkEvent::GdprErasure { tenant_id, .. } => Some(*tenant_id),
         }
     }
 
@@ -202,6 +218,7 @@ impl FrameworkEvent {
                 CognitiveSignal::AnomalyDetected { .. } => "anomaly_detected",
                 CognitiveSignal::StigmergyLockIn { .. } => "stigmergy_lock_in",
             },
+            FrameworkEvent::GdprErasure { .. } => "erasure",
         }
     }
 }
@@ -342,6 +359,15 @@ impl EventBus {
     /// Returns the number of broadcast receivers that will receive the event.
     pub fn publish_for_tenant(&self, event: FrameworkEvent, tenant_id: Uuid) -> usize {
         self.publish_envelope(EventEnvelope::new_with_tenant(event, tenant_id))
+    }
+
+    /// Publish a pre-built envelope directly
+    ///
+    /// Used by the event bridge (inbound) to publish envelopes with a
+    /// pre-assigned ID (needed for dedup tracking). Prefer `publish()` or
+    /// `publish_for_tenant()` for normal use.
+    pub fn publish_envelope_raw(&self, envelope: EventEnvelope) -> usize {
+        self.publish_envelope(envelope)
     }
 
     /// Internal: publish a pre-built envelope
