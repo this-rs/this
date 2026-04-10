@@ -14,7 +14,7 @@ pub mod wami_provider;
 
 use anyhow::Result;
 use async_trait::async_trait;
-use axum::http::Request;
+use axum::http::HeaderMap;
 use uuid::Uuid;
 
 /// Authorization context extracted from a request
@@ -162,8 +162,11 @@ impl AuthPolicy {
 /// Trait for auth providers
 #[async_trait]
 pub trait AuthProvider: Send + Sync {
-    /// Extract auth context from HTTP request
-    async fn extract_context<B: Send + Sync>(&self, req: &Request<B>) -> Result<AuthContext>;
+    /// Extract auth context from HTTP request headers
+    ///
+    /// Takes a `&HeaderMap` — only headers are needed for auth (Bearer token).
+    /// This keeps the trait dyn-compatible and Send-safe.
+    async fn extract_context(&self, headers: &HeaderMap) -> Result<AuthContext>;
 
     /// Check if user is owner of a resource
     async fn is_owner(
@@ -182,7 +185,7 @@ pub struct NoAuthProvider;
 
 #[async_trait]
 impl AuthProvider for NoAuthProvider {
-    async fn extract_context<B: Send + Sync>(&self, _req: &Request<B>) -> Result<AuthContext> {
+    async fn extract_context(&self, _headers: &HeaderMap) -> Result<AuthContext> {
         Ok(AuthContext::Anonymous)
     }
 
@@ -525,11 +528,9 @@ mod tests {
     #[tokio::test]
     async fn test_no_auth_provider_extract_context() {
         let provider = NoAuthProvider;
-        let req = Request::builder()
-            .body(())
-            .expect("failed to build request");
+        let headers = HeaderMap::new();
         let ctx = provider
-            .extract_context(&req)
+            .extract_context(&headers)
             .await
             .expect("extract_context should succeed");
         assert!(matches!(ctx, AuthContext::Anonymous));

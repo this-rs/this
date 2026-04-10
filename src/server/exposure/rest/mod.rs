@@ -11,9 +11,10 @@ pub mod sse;
 
 use super::super::host::ServerHost;
 use crate::links::handlers::AppState;
+use crate::server::middleware::auth::{AuthLayer, auth_middleware};
 use crate::server::router::build_link_routes;
 use anyhow::Result;
-use axum::{Json, Router, routing::get};
+use axum::{Json, Router, middleware, routing::get};
 use serde_json::{Value, json};
 use std::sync::Arc;
 
@@ -88,6 +89,21 @@ impl RestExposure {
                 device_token_store: device_token_store.clone(),
             };
             app = app.merge(notifications::notification_routes(notif_state));
+        }
+
+        // Auto-wire auth middleware if auth provider is configured
+        // This layer must be added last so it wraps all routes
+        if let Some(ref auth_provider) = host.auth_provider {
+            let default_policy = host
+                .config
+                .auth
+                .as_ref()
+                .map(|a| a.default_policy.clone())
+                .unwrap_or_else(|| "public".to_string());
+
+            let auth_layer = AuthLayer::new(auth_provider.clone(), default_policy);
+            app = app.layer(middleware::from_fn_with_state(auth_layer, auth_middleware));
+            tracing::info!("REST auth middleware auto-wired");
         }
 
         Ok(app)
