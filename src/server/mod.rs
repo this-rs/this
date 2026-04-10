@@ -16,6 +16,7 @@ pub mod builder;
 pub mod entity_registry;
 pub mod exposure;
 pub mod host;
+pub mod middleware;
 pub mod router;
 
 pub use builder::ServerBuilder;
