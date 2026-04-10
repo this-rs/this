@@ -5,6 +5,12 @@
 //! - Owner-based access
 //! - Service-to-service
 //! - Admin access
+//!
+//! ## Feature gates
+//! - `wami` — enables `WamiAuthProvider` (Ed25519 JWT verification)
+
+#[cfg(feature = "wami")]
+pub mod wami_provider;
 
 use anyhow::Result;
 use async_trait::async_trait;
@@ -157,7 +163,7 @@ impl AuthPolicy {
 #[async_trait]
 pub trait AuthProvider: Send + Sync {
     /// Extract auth context from HTTP request
-    async fn extract_context<B>(&self, req: &Request<B>) -> Result<AuthContext>;
+    async fn extract_context<B: Send + Sync>(&self, req: &Request<B>) -> Result<AuthContext>;
 
     /// Check if user is owner of a resource
     async fn is_owner(
@@ -176,7 +182,7 @@ pub struct NoAuthProvider;
 
 #[async_trait]
 impl AuthProvider for NoAuthProvider {
-    async fn extract_context<B>(&self, _req: &Request<B>) -> Result<AuthContext> {
+    async fn extract_context<B: Send + Sync>(&self, _req: &Request<B>) -> Result<AuthContext> {
         Ok(AuthContext::Anonymous)
     }
 

@@ -73,6 +73,11 @@ prost-types = { version = "0.14", optional = true }
 reqwest = { version = "0.12", features = ["json"], optional = true }
 indexmap = "2.13.0"
 
+# WAMI auth (optional, feature-gated)
+jsonwebtoken = { version = "9", optional = true }
+ed25519-dalek = { version = "2", optional = true, features = ["pkcs8", "pem", "rand_core"] }
+base64 = { version = "0.22", optional = true }
+
 [build-dependencies]
 tonic-prost-build = { version = "0.14" }
 
@@ -100,6 +105,9 @@ graphql = ["async-graphql", "async-graphql-axum", "graphql-parser"]
 grpc = ["tonic", "tonic-prost", "prost", "prost-types"]
 push = ["reqwest"]
 websocket = []
+wami = ["dep:jsonwebtoken", "dep:ed25519-dalek", "dep:base64"]
+obrain = []
+obrain-cognitive = ["obrain"]
 all = ["in-memory", "dynamodb", "postgres", "mongodb_backend", "neo4j", "scylladb", "mysql", "lmdb", "graphql", "grpc", "websocket", "push"]
 
 [lib]

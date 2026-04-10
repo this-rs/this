@@ -274,6 +274,7 @@ impl ServerHost {
             validation_rules: None,
             events: None,
             sinks: None,
+        auth: None,
         };
         let config = Arc::new(config);
         let registry = Arc::new(LinkRouteRegistry::new(config.clone()));
@@ -353,6 +354,7 @@ mod tests {
             validation_rules: None,
             events: None,
             sinks: None,
+            auth: None,
         }
     }
 
