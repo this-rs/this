@@ -111,11 +111,13 @@ impl WamiAuthProvider {
             .as_ref()
             .ok_or_else(|| anyhow!("AuthConfig.wami section is required for WamiAuthProvider"))?;
 
-        if wami_config.public_key.is_empty() {
-            bail!("wami.public_key is required (cannot be empty)");
-        }
+        let public_key = wami_config
+            .public_key
+            .as_deref()
+            .filter(|k| !k.is_empty())
+            .ok_or_else(|| anyhow!("wami.public_key is required (cannot be empty)"))?;
 
-        let decoding_key = Self::parse_public_key(&wami_config.public_key)
+        let decoding_key = Self::parse_public_key(public_key)
             .context("Failed to parse Ed25519 public key")?;
 
         let mut validation = Validation::new(Algorithm::EdDSA);
@@ -314,7 +316,7 @@ mod tests {
         let mut config = AuthConfig::default();
         config.provider = AuthProviderType::Wami;
         config.wami = Some(WamiConfig {
-            public_key: pub_key_b64.to_string(),
+            public_key: Some(pub_key_b64.to_string()),
             issuer: Some("test-issuer".to_string()),
             audience: Some("test-audience".to_string()),
             mode: Default::default(),
@@ -382,7 +384,7 @@ mod tests {
         let mut config = AuthConfig::default();
         config.provider = AuthProviderType::Wami;
         config.wami = Some(WamiConfig {
-            public_key: String::new(),
+            public_key: Some(String::new()),
             issuer: None,
             audience: None,
             mode: Default::default(),
