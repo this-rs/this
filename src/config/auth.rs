@@ -167,7 +167,11 @@ impl Default for GdprConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WamiConfig {
     /// Ed25519 public key (PEM or base64) for JWT verification
-    pub public_key: String,
+    ///
+    /// Required in `sts` and `embedded` modes.
+    /// In `bootstrap` mode, if absent, a key pair is auto-generated at startup.
+    #[serde(default)]
+    pub public_key: Option<String>,
 
     /// Ed25519 private key (PEM or base64) for JWT signing
     ///
@@ -536,7 +540,7 @@ tenant:
         assert!(config.is_enabled());
 
         let wami = config.wami.unwrap();
-        assert_eq!(wami.public_key, "MCowBQYDK2VwAyEA...");
+        assert_eq!(wami.public_key.as_deref(), Some("MCowBQYDK2VwAyEA..."));
         assert_eq!(wami.issuer.unwrap(), "https://sts.example.com");
         assert_eq!(wami.audience.unwrap(), "my-api");
         assert_eq!(wami.mode, AuthMode::Sts);
@@ -562,7 +566,7 @@ tenant:
 public_key: "MCowBQYDK2VwAyEA..."
 "#;
         let config: WamiConfig = serde_yaml::from_str(yaml).unwrap();
-        assert_eq!(config.public_key, "MCowBQYDK2VwAyEA...");
+        assert_eq!(config.public_key.as_deref(), Some("MCowBQYDK2VwAyEA..."));
         assert!(config.issuer.is_none());
         assert!(config.audience.is_none());
         assert_eq!(config.mode, AuthMode::Sts); // default
