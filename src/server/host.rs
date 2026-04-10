@@ -102,6 +102,14 @@ pub struct ServerHost {
     /// When present, the auth middleware is auto-wired on all routes.
     /// The provider extracts AuthContext from incoming requests.
     pub auth_provider: Option<Arc<dyn AuthProvider>>,
+
+    /// Optional STS (Security Token Service) state for embedded token issuance
+    ///
+    /// When present, auth endpoints (POST /auth/token, GET /auth/keys,
+    /// POST /auth/refresh, POST /auth/revoke) are auto-wired.
+    /// Only available in `embedded` or `bootstrap` WAMI modes.
+    #[cfg(feature = "wami")]
+    pub sts_state: Option<Arc<crate::server::exposure::rest::auth_routes::StsState>>,
 }
 
 impl ServerHost {
@@ -145,6 +153,8 @@ impl ServerHost {
             device_token_store: None,
             preferences_store: None,
             auth_provider: None,
+            #[cfg(feature = "wami")]
+            sts_state: None,
         })
     }
 
@@ -235,6 +245,16 @@ impl ServerHost {
         self.auth_provider.as_ref()
     }
 
+    /// Set the STS state for embedded token issuance (WAMI embedded/bootstrap modes)
+    #[cfg(feature = "wami")]
+    pub fn with_sts_state(
+        mut self,
+        state: Arc<crate::server::exposure::rest::auth_routes::StsState>,
+    ) -> Self {
+        self.sts_state = Some(state);
+        self
+    }
+
     /// Create a minimal `ServerHost` for unit tests.
     ///
     /// Has empty registries and a mock `LinkService`. Useful for testing
@@ -312,6 +332,8 @@ impl ServerHost {
             device_token_store: None,
             preferences_store: None,
             auth_provider: None,
+            #[cfg(feature = "wami")]
+            sts_state: None,
         }
     }
 }

@@ -109,6 +109,8 @@ impl EventMatcher {
             FrameworkEvent::Entity(entity_event) => self.matches_entity(entity_event),
             // Cognitive signals are not matchable via event matchers (yet)
             FrameworkEvent::Cognitive(_) => false,
+            // GDPR erasure events are not matchable via event matchers
+            FrameworkEvent::GdprErasure { .. } => false,
         }
     }
 

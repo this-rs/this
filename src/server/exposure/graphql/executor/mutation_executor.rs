@@ -735,6 +735,7 @@ mod tests {
                 data: json!({}),
                 read: false,
                 created_at: chrono::Utc::now(),
+                tenant_id: None,
             })
             .await;
 
@@ -771,6 +772,7 @@ mod tests {
                     data: json!({}),
                     read: false,
                     created_at: chrono::Utc::now(),
+                    tenant_id: None,
                 })
                 .await;
         }

@@ -11,10 +11,13 @@ pub mod mongodb;
 pub mod mysql;
 #[cfg(feature = "neo4j")]
 pub mod neo4j;
+#[cfg(feature = "obrain")]
+pub mod obrain;
 #[cfg(feature = "postgres")]
 pub mod postgres;
 #[cfg(feature = "scylladb")]
 pub mod scylladb;
+pub mod tenant_scoped;
 
 #[cfg(feature = "lmdb")]
 pub use self::lmdb::{LmdbDataService, LmdbLinkService};
@@ -24,6 +27,8 @@ pub use self::mongodb::{MongoDataService, MongoLinkService};
 pub use self::mysql::{MysqlDataService, MysqlLinkService};
 #[cfg(feature = "neo4j")]
 pub use self::neo4j::{Neo4jDataService, Neo4jLinkService};
+#[cfg(feature = "obrain")]
+pub use self::obrain::{ObrainDataService, ObrainLinkService, ObrainStore};
 #[cfg(feature = "dynamodb")]
 pub use dynamodb::{DynamoDBDataService, DynamoDBLinkService};
 pub use in_memory::{InMemoryDataService, InMemoryLinkService};
@@ -31,3 +36,4 @@ pub use in_memory::{InMemoryDataService, InMemoryLinkService};
 pub use postgres::{PostgresDataService, PostgresLinkService};
 #[cfg(feature = "scylladb")]
 pub use scylladb::{ScyllaDataService, ScyllaLinkService};
+pub use tenant_scoped::{TenantAware, TenantScopedLinkService};
