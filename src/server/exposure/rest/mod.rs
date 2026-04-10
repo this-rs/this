@@ -101,9 +101,15 @@ impl RestExposure {
                 .map(|a| a.default_policy.clone())
                 .unwrap_or_else(|| "public".to_string());
 
+            // Tenant resolver runs AFTER auth (inner layer = added first)
+            // so AuthContext is available in extensions
+            app = app.layer(middleware::from_fn(
+                crate::server::middleware::tenant::tenant_resolver_middleware,
+            ));
+
             let auth_layer = AuthLayer::new(auth_provider.clone(), default_policy);
             app = app.layer(middleware::from_fn_with_state(auth_layer, auth_middleware));
-            tracing::info!("REST auth middleware auto-wired");
+            tracing::info!("REST auth + tenant resolver middleware auto-wired");
         }
 
         Ok(app)
