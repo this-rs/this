@@ -314,6 +314,7 @@ fn matches_filter(envelope: &EventEnvelope, filter: &SubscriptionFilter) -> bool
                 | LinkEvent::Deleted { link_type: lt, .. } => lt == entity_type,
             },
             FrameworkEvent::Cognitive(_) => false,
+            FrameworkEvent::GdprErasure { .. } => false,
         };
         if !matches {
             return false;
@@ -415,6 +416,23 @@ fn envelope_to_graphql_value(envelope: &EventEnvelope) -> Value {
             "kind": "cognitive",
             "action": envelope.event.action(),
             "nodeId": envelope.event.entity_id().map(|id| id.to_string()),
+        }),
+        FrameworkEvent::GdprErasure {
+            tenant_id,
+            entities_deleted,
+            links_deleted,
+            notifications_deleted,
+            erased_at,
+        } => json!({
+            "id": envelope.id.to_string(),
+            "timestamp": envelope.timestamp.to_rfc3339(),
+            "kind": "gdpr_erasure",
+            "action": "erasure",
+            "tenantId": tenant_id.to_string(),
+            "entitiesDeleted": entities_deleted,
+            "linksDeleted": links_deleted,
+            "notificationsDeleted": notifications_deleted,
+            "erasedAt": erased_at.to_rfc3339(),
         }),
     }
 }
@@ -1181,6 +1199,7 @@ mod tests {
             data: json!({"follower": "Alice"}),
             read: false,
             created_at: chrono::Utc::now(),
+            tenant_id: None,
         };
 
         let value = notification_to_graphql_value(&notification);
@@ -1227,6 +1246,7 @@ mod tests {
                 data: json!({}),
                 read: false,
                 created_at: chrono::Utc::now(),
+                tenant_id: None,
             })
             .await;
 
@@ -1241,6 +1261,7 @@ mod tests {
                 data: json!({}),
                 read: false,
                 created_at: chrono::Utc::now(),
+                tenant_id: None,
             })
             .await;
 
@@ -1289,6 +1310,7 @@ mod tests {
                 data: json!({}),
                 read: false,
                 created_at: chrono::Utc::now(),
+                tenant_id: None,
             })
             .await;
 
@@ -1302,6 +1324,7 @@ mod tests {
                 data: json!({}),
                 read: false,
                 created_at: chrono::Utc::now(),
+                tenant_id: None,
             })
             .await;
 

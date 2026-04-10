@@ -64,6 +64,14 @@ pub struct StoredNotification {
 
     /// Creation timestamp
     pub created_at: DateTime<Utc>,
+
+    /// Tenant ID for multi-tenant isolation (optional)
+    ///
+    /// When set, this notification belongs to a specific tenant.
+    /// Tenant-scoped queries will only return notifications matching
+    /// the requested tenant_id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tenant_id: Option<Uuid>,
 }
 
 /// Maximum notifications stored per user before eviction
@@ -245,6 +253,63 @@ impl NotificationStore {
         }
         false
     }
+
+    // ── Tenant-scoped operations ────────────────────────────────────
+
+    /// List notifications for a user scoped to a specific tenant
+    ///
+    /// Only returns notifications whose `tenant_id` matches.
+    pub async fn list_by_user_tenant(
+        &self,
+        recipient_id: &str,
+        tenant_id: &Uuid,
+        limit: usize,
+        offset: usize,
+    ) -> Vec<StoredNotification> {
+        let store = self.notifications.read().await;
+        let Some(user_notifications) = store.get(recipient_id) else {
+            return Vec::new();
+        };
+
+        user_notifications
+            .iter()
+            .rev()
+            .filter(|n| n.tenant_id.as_ref() == Some(tenant_id))
+            .skip(offset)
+            .take(limit)
+            .cloned()
+            .collect()
+    }
+
+    /// Count unread notifications for a user scoped to a specific tenant
+    pub async fn unread_count_tenant(&self, recipient_id: &str, tenant_id: &Uuid) -> usize {
+        let store = self.notifications.read().await;
+        store
+            .get(recipient_id)
+            .map(|notifs| {
+                notifs
+                    .iter()
+                    .filter(|n| !n.read && n.tenant_id.as_ref() == Some(tenant_id))
+                    .count()
+            })
+            .unwrap_or(0)
+    }
+
+    /// Delete all notifications for a specific tenant (GDPR erasure)
+    ///
+    /// Returns the total number of notifications deleted across all users.
+    pub async fn delete_by_tenant(&self, tenant_id: &Uuid) -> usize {
+        let mut store = self.notifications.write().await;
+        let mut total_deleted = 0;
+
+        for notifications in store.values_mut() {
+            let before = notifications.len();
+            notifications.retain(|n| n.tenant_id.as_ref() != Some(tenant_id));
+            total_deleted += before - notifications.len();
+        }
+
+        total_deleted
+    }
 }
 
 impl Default for NotificationStore {
@@ -344,6 +409,12 @@ impl Sink for InAppNotificationSink {
             return Ok(());
         }
 
+        // Extract tenant_id from context variables (propagated by FlowRuntime)
+        let tenant_id = context_vars
+            .get("tenant_id")
+            .and_then(|v| v.as_str())
+            .and_then(|s| Uuid::parse_str(s).ok());
+
         // Create and store the notification
         let notification = StoredNotification {
             id: Uuid::new_v4(),
@@ -354,6 +425,7 @@ impl Sink for InAppNotificationSink {
             data,
             read: false,
             created_at: Utc::now(),
+            tenant_id,
         };
 
         self.store.insert(notification).await;
@@ -389,6 +461,7 @@ mod tests {
                     data: Value::Null,
                     read: false,
                     created_at: Utc::now() + chrono::Duration::seconds(i as i64),
+                    tenant_id: None,
                 })
                 .await;
         }
@@ -417,6 +490,7 @@ mod tests {
                     data: Value::Null,
                     read: false,
                     created_at: Utc::now() + chrono::Duration::seconds(i as i64),
+                    tenant_id: None,
                 })
                 .await;
         }
@@ -444,6 +518,7 @@ mod tests {
                     data: Value::Null,
                     read: false,
                     created_at: Utc::now(),
+                    tenant_id: None,
                 })
                 .await;
         }
@@ -471,6 +546,7 @@ mod tests {
                     data: Value::Null,
                     read: false,
                     created_at: Utc::now(),
+                    tenant_id: None,
                 })
                 .await;
         }
@@ -496,6 +572,7 @@ mod tests {
                 data: Value::Null,
                 read: false,
                 created_at: Utc::now(),
+                tenant_id: None,
             })
             .await;
 
@@ -509,6 +586,7 @@ mod tests {
                 data: Value::Null,
                 read: false,
                 created_at: Utc::now(),
+                tenant_id: None,
             })
             .await;
 
@@ -532,6 +610,7 @@ mod tests {
                 data: Value::Null,
                 read: false,
                 created_at: Utc::now(),
+                tenant_id: None,
             })
             .await;
 
@@ -740,6 +819,7 @@ mod tests {
                     data: Value::Null,
                     read: false,
                     created_at: Utc::now() + chrono::Duration::seconds(i as i64),
+                    tenant_id: None,
                 })
                 .await;
         }
@@ -772,6 +852,7 @@ mod tests {
                 data: Value::Null,
                 read: false,
                 created_at: Utc::now(),
+                tenant_id: None,
             })
             .await;
 
@@ -785,6 +866,7 @@ mod tests {
                 data: Value::Null,
                 read: false,
                 created_at: Utc::now(),
+                tenant_id: None,
             })
             .await;
 
@@ -814,6 +896,7 @@ mod tests {
                 data: Value::Null,
                 read: false,
                 created_at: Utc::now(),
+                tenant_id: None,
             })
             .await;
 
@@ -841,6 +924,7 @@ mod tests {
                 data: json!({"follower_name": "Alice"}),
                 read: false,
                 created_at: Utc::now(),
+                tenant_id: None,
             })
             .await;
 
@@ -869,6 +953,7 @@ mod tests {
                 data: Value::Null,
                 read: false,
                 created_at: Utc::now(),
+                tenant_id: None,
             })
             .await;
 
@@ -893,6 +978,7 @@ mod tests {
                 data: Value::Null,
                 read: false,
                 created_at: Utc::now(),
+                tenant_id: None,
             })
             .await;
 
@@ -901,5 +987,158 @@ mod tests {
 
         assert_eq!(r1.id, notif_id);
         assert_eq!(r2.id, notif_id);
+    }
+
+    // ── Tenant-scoped tests ─────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_list_by_user_tenant_filters_correctly() {
+        let store = NotificationStore::new();
+        let tenant_a = Uuid::new_v4();
+        let tenant_b = Uuid::new_v4();
+
+        // Insert 2 notifications for tenant A, 1 for tenant B
+        for i in 0..2 {
+            store
+                .insert(StoredNotification {
+                    id: Uuid::new_v4(),
+                    recipient_id: "user-A".to_string(),
+                    notification_type: "test".to_string(),
+                    title: format!("Tenant A notif {}", i),
+                    body: String::new(),
+                    data: Value::Null,
+                    read: false,
+                    created_at: Utc::now() + chrono::Duration::seconds(i as i64),
+                    tenant_id: Some(tenant_a),
+                })
+                .await;
+        }
+
+        store
+            .insert(StoredNotification {
+                id: Uuid::new_v4(),
+                recipient_id: "user-A".to_string(),
+                notification_type: "test".to_string(),
+                title: "Tenant B notif".to_string(),
+                body: String::new(),
+                data: Value::Null,
+                read: false,
+                created_at: Utc::now(),
+                tenant_id: Some(tenant_b),
+            })
+            .await;
+
+        // Tenant A should see 2
+        let a_notifs = store.list_by_user_tenant("user-A", &tenant_a, 10, 0).await;
+        assert_eq!(a_notifs.len(), 2);
+
+        // Tenant B should see 1
+        let b_notifs = store.list_by_user_tenant("user-A", &tenant_b, 10, 0).await;
+        assert_eq!(b_notifs.len(), 1);
+        assert_eq!(b_notifs[0].title, "Tenant B notif");
+
+        // Non-scoped list sees all 3
+        let all = store.list_by_user("user-A", 10, 0).await;
+        assert_eq!(all.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn test_unread_count_tenant() {
+        let store = NotificationStore::new();
+        let tenant_a = Uuid::new_v4();
+        let tenant_b = Uuid::new_v4();
+
+        store
+            .insert(StoredNotification {
+                id: Uuid::new_v4(),
+                recipient_id: "user-A".to_string(),
+                notification_type: "test".to_string(),
+                title: "A".to_string(),
+                body: String::new(),
+                data: Value::Null,
+                read: false,
+                created_at: Utc::now(),
+                tenant_id: Some(tenant_a),
+            })
+            .await;
+
+        store
+            .insert(StoredNotification {
+                id: Uuid::new_v4(),
+                recipient_id: "user-A".to_string(),
+                notification_type: "test".to_string(),
+                title: "B".to_string(),
+                body: String::new(),
+                data: Value::Null,
+                read: false,
+                created_at: Utc::now(),
+                tenant_id: Some(tenant_b),
+            })
+            .await;
+
+        assert_eq!(store.unread_count_tenant("user-A", &tenant_a).await, 1);
+        assert_eq!(store.unread_count_tenant("user-A", &tenant_b).await, 1);
+        assert_eq!(store.unread_count("user-A").await, 2); // total
+    }
+
+    #[tokio::test]
+    async fn test_delete_by_tenant() {
+        let store = NotificationStore::new();
+        let tenant_a = Uuid::new_v4();
+        let tenant_b = Uuid::new_v4();
+
+        for tenant in [tenant_a, tenant_b] {
+            for _ in 0..3 {
+                store
+                    .insert(StoredNotification {
+                        id: Uuid::new_v4(),
+                        recipient_id: "user-A".to_string(),
+                        notification_type: "test".to_string(),
+                        title: "Test".to_string(),
+                        body: String::new(),
+                        data: Value::Null,
+                        read: false,
+                        created_at: Utc::now(),
+                        tenant_id: Some(tenant),
+                    })
+                    .await;
+            }
+        }
+
+        assert_eq!(store.total_count("user-A").await, 6);
+
+        // Delete tenant A's notifications
+        let deleted = store.delete_by_tenant(&tenant_a).await;
+        assert_eq!(deleted, 3);
+        assert_eq!(store.total_count("user-A").await, 3);
+
+        // Remaining should all be tenant B
+        let remaining = store.list_by_user("user-A", 10, 0).await;
+        assert!(remaining.iter().all(|n| n.tenant_id == Some(tenant_b)));
+    }
+
+    #[tokio::test]
+    async fn test_sink_propagates_tenant_from_context() {
+        let store = Arc::new(NotificationStore::new());
+        let sink = InAppNotificationSink::new(store.clone());
+        let tenant_id = Uuid::new_v4();
+
+        let payload = json!({
+            "title": "Tenant notification",
+            "notification_type": "test",
+            "recipient_id": "user-A"
+        });
+
+        let mut vars = HashMap::new();
+        vars.insert(
+            "tenant_id".to_string(),
+            Value::String(tenant_id.to_string()),
+        );
+
+        sink.deliver(payload, None, &vars).await.unwrap();
+
+        let notifs = store.list_by_user("user-A", 10, 0).await;
+        assert_eq!(notifs.len(), 1);
+        assert_eq!(notifs[0].tenant_id, Some(tenant_id));
     }
 }

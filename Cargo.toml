@@ -73,6 +73,11 @@ prost-types = { version = "0.14", optional = true }
 reqwest = { version = "0.12", features = ["json"], optional = true }
 indexmap = "2.13.0"
 
+# Obrain graph database (optional, feature-gated)
+obrain-engine = { path = "../../lab/grafeo/crates/obrain-engine", optional = true }
+obrain-common = { path = "../../lab/grafeo/crates/obrain-common", optional = true }
+obrain-core = { path = "../../lab/grafeo/crates/obrain-core", optional = true, default-features = false }
+
 # WAMI auth (optional, feature-gated)
 jsonwebtoken = { version = "9", optional = true }
 ed25519-dalek = { version = "2", optional = true, features = ["pkcs8", "pem", "rand_core"] }
@@ -106,7 +111,7 @@ grpc = ["tonic", "tonic-prost", "prost", "prost-types"]
 push = ["reqwest"]
 websocket = []
 wami = ["dep:jsonwebtoken", "dep:ed25519-dalek", "dep:base64"]
-obrain = []
+obrain = ["dep:obrain-engine", "dep:obrain-common", "dep:obrain-core"]
 obrain-cognitive = ["obrain"]
 all = ["in-memory", "dynamodb", "postgres", "mongodb_backend", "neo4j", "scylladb", "mysql", "lmdb", "graphql", "grpc", "websocket", "push"]
 

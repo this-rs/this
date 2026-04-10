@@ -169,6 +169,14 @@ pub struct WamiConfig {
     /// Ed25519 public key (PEM or base64) for JWT verification
     pub public_key: String,
 
+    /// Ed25519 private key (PEM or base64) for JWT signing
+    ///
+    /// Required for `embedded` and `bootstrap` modes (STS token issuance).
+    /// Not needed in `sts` mode (verification only).
+    /// In `bootstrap` mode, if absent, a key pair is auto-generated at startup.
+    #[serde(default)]
+    pub private_key: Option<String>,
+
     /// Expected JWT issuer (optional, validates `iss` claim)
     #[serde(default)]
     pub issuer: Option<String>,
@@ -180,6 +188,24 @@ pub struct WamiConfig {
     /// Authentication mode
     #[serde(default)]
     pub mode: AuthMode,
+
+    /// Token TTL in seconds (default: 3600 = 1 hour)
+    #[serde(default = "default_token_ttl")]
+    pub token_ttl_secs: u64,
+
+    /// Refresh token TTL in seconds (default: 86400 = 24 hours)
+    #[serde(default = "default_refresh_ttl")]
+    pub refresh_ttl_secs: u64,
+}
+
+#[cfg(feature = "wami")]
+fn default_token_ttl() -> u64 {
+    3600
+}
+
+#[cfg(feature = "wami")]
+fn default_refresh_ttl() -> u64 {
+    86400
 }
 
 // ─── OIDC Configuration ────────────────────────────────────────────────────
