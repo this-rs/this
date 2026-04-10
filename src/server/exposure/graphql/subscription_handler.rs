@@ -28,6 +28,7 @@
 //!                         EventBus ──broadcast──▶ filter ──▶ next { id, payload }
 //! ```
 
+use crate::core::auth::AuthContext;
 use crate::core::events::{EntityEvent, EventBus, EventEnvelope, FrameworkEvent, LinkEvent};
 use crate::events::sinks::in_app::{NotificationStore, StoredNotification};
 use crate::server::host::ServerHost;
@@ -41,16 +42,22 @@ use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio_stream::wrappers::BroadcastStream;
+use uuid::Uuid;
 
 /// Axum handler for GraphQL WebSocket subscriptions
 ///
 /// Upgrades the HTTP connection to WebSocket and starts the
 /// `graphql-transport-ws` protocol handler.
+///
+/// If auth middleware is active, extracts `AuthContext` for tenant-scoped
+/// event filtering. Without auth, all events are streamed (anonymous mode).
 pub async fn graphql_ws_handler(
     ws: WebSocketUpgrade,
     Extension(host): Extension<Arc<ServerHost>>,
+    auth: Option<Extension<AuthContext>>,
 ) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| handle_graphql_ws(socket, host))
+    let tenant_id = auth.as_ref().and_then(|Extension(ctx)| ctx.tenant_id());
+    ws.on_upgrade(move |socket| handle_graphql_ws(socket, host, tenant_id))
 }
 
 /// Client-to-server protocol messages
@@ -107,7 +114,7 @@ struct SubscriptionFilter {
 /// 1. The write loop forwards all `ServerMsg` to the WebSocket
 /// 2. The read loop processes client messages and spawns subscription tasks
 /// 3. Each subscription task sends `ServerMsg` through the shared channel
-async fn handle_graphql_ws(socket: WebSocket, host: Arc<ServerHost>) {
+async fn handle_graphql_ws(socket: WebSocket, host: Arc<ServerHost>, tenant_id: Option<Uuid>) {
     let (mut ws_write, mut ws_read) = socket.split();
 
     // Shared channel for all outgoing messages (from any subscription)
@@ -174,8 +181,10 @@ async fn handle_graphql_ws(socket: WebSocket, host: Arc<ServerHost>) {
 
                         let sub_tx = out_tx.clone();
                         let sub_id = id.clone();
+                        let sub_tenant_id = tenant_id;
                         let handle = tokio::spawn(async move {
-                            run_subscription(event_bus, sub_id, filter, sub_tx).await;
+                            run_subscription(event_bus, sub_id, filter, sub_tx, sub_tenant_id)
+                                .await;
                         });
                         active_subscriptions.insert(id, handle);
                     }
@@ -224,11 +233,16 @@ async fn handle_graphql_ws(socket: WebSocket, host: Arc<ServerHost>) {
 }
 
 /// Run a single subscription, streaming filtered events from the EventBus
+///
+/// When `tenant_id` is `Some`, only events with the same `tenant_id` (or no
+/// `tenant_id`, i.e. broadcast events) are forwarded. This enforces tenant
+/// isolation at the subscription level.
 async fn run_subscription(
     event_bus: Arc<EventBus>,
     subscription_id: String,
     filter: SubscriptionFilter,
     tx: tokio::sync::mpsc::UnboundedSender<ServerMsg>,
+    tenant_id: Option<Uuid>,
 ) {
     let rx = event_bus.subscribe();
     let mut stream = BroadcastStream::new(rx);
@@ -236,6 +250,15 @@ async fn run_subscription(
     while let Some(result) = stream.next().await {
         match result {
             Ok(envelope) => {
+                // Tenant isolation: skip events from other tenants
+                if let Some(conn_tenant) = tenant_id {
+                    if let Some(event_tenant) = envelope.tenant_id() {
+                        if conn_tenant != event_tenant {
+                            continue;
+                        }
+                    }
+                }
+
                 if matches_filter(&envelope, &filter) {
                     let payload = envelope_to_graphql_value(&envelope);
                     let msg = ServerMsg::Next {
@@ -987,6 +1010,7 @@ mod tests {
                     ..Default::default()
                 },
                 tx,
+                None, // anonymous — no tenant filtering
             )
             .await;
         });
@@ -1045,6 +1069,7 @@ mod tests {
                 "sub-all".to_string(),
                 SubscriptionFilter::default(),
                 tx,
+                None, // anonymous — no tenant filtering
             )
             .await;
         });
