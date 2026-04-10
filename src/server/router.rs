@@ -191,6 +191,7 @@ mod tests {
             validation_rules: None,
             events: None,
             sinks: None,
+            auth: None,
         });
         let registry = Arc::new(LinkRouteRegistry::new(config.clone()));
         let state = AppState {

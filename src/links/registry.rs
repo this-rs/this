@@ -395,6 +395,7 @@ mod tests {
             validation_rules: None,
             events: None,
             sinks: None,
+            auth: None,
         }
     }
 
@@ -500,6 +501,7 @@ mod tests {
             validation_rules: None,
             events: None,
             sinks: None,
+            auth: None,
         }
     }
 
@@ -544,6 +546,7 @@ mod tests {
             validation_rules: None,
             events: None,
             sinks: None,
+            auth: None,
         }
     }
 
@@ -556,6 +559,7 @@ mod tests {
             validation_rules: None,
             events: None,
             sinks: None,
+            auth: None,
         }
     }
 
@@ -795,6 +799,7 @@ mod tests {
             validation_rules: None,
             events: None,
             sinks: None,
+            auth: None,
         });
 
         // Manually build a chain with an unknown entity to exercise fallback

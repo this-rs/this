@@ -107,6 +107,8 @@ impl EventMatcher {
         match event {
             FrameworkEvent::Link(link_event) => self.matches_link(link_event),
             FrameworkEvent::Entity(entity_event) => self.matches_entity(entity_event),
+            // Cognitive signals are not matchable via event matchers (yet)
+            FrameworkEvent::Cognitive(_) => false,
         }
     }
 
