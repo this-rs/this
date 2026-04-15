@@ -42,28 +42,27 @@ pub async fn tenant_resolver_middleware(mut request: Request, next: Next) -> Res
 /// Resolve tenant ID from the request using multiple sources
 fn resolve_tenant_id(request: &Request) -> Option<Uuid> {
     // 1. Explicit header override (for admin impersonation or cross-tenant ops)
-    if let Some(header_value) = request.headers().get("x-tenant-id") {
-        if let Ok(s) = header_value.to_str() {
-            if let Ok(tid) = Uuid::parse_str(s) {
-                return Some(tid);
-            }
-        }
+    if let Some(header_value) = request.headers().get("x-tenant-id")
+        && let Ok(s) = header_value.to_str()
+        && let Ok(tid) = Uuid::parse_str(s)
+    {
+        return Some(tid);
     }
 
     // 2. AuthContext from auth middleware
-    if let Some(auth) = request.extensions().get::<AuthContext>() {
-        if let Some(tid) = auth.tenant_id() {
-            return Some(tid);
-        }
+    if let Some(auth) = request.extensions().get::<AuthContext>()
+        && let Some(tid) = auth.tenant_id()
+    {
+        return Some(tid);
     }
 
     // 3. Query parameter fallback
     if let Some(query) = request.uri().query() {
         for pair in query.split('&') {
-            if let Some(value) = pair.strip_prefix("tenant_id=") {
-                if let Ok(tid) = Uuid::parse_str(value) {
-                    return Some(tid);
-                }
+            if let Some(value) = pair.strip_prefix("tenant_id=")
+                && let Ok(tid) = Uuid::parse_str(value)
+            {
+                return Some(tid);
             }
         }
     }
