@@ -270,12 +270,11 @@ impl<T: Data + Serialize + DeserializeOwned> DataService<T> for ObrainDataServic
                 // Check label matches T's entity_type — we can't get entity_type statically
                 // from T, so we deserialize all nodes in our index. Since each
                 // ObrainDataService<T> only inserts nodes of type T, this is safe.
-                if let Some(data_val) = node.get_property("_data") {
-                    if let Some(json_str) = data_val.as_str() {
-                        if let Ok(entity) = serde_json::from_str::<T>(json_str) {
-                            entities.push(entity);
-                        }
-                    }
+                if let Some(data_val) = node.get_property("_data")
+                    && let Some(json_str) = data_val.as_str()
+                    && let Ok(entity) = serde_json::from_str::<T>(json_str)
+                {
+                    entities.push(entity);
                 }
             }
         }
@@ -353,14 +352,12 @@ impl<T: Data + Serialize + DeserializeOwned> DataService<T> for ObrainDataServic
 
         let mut results = Vec::new();
         for node_id in matching_nodes {
-            if let Some(node) = session.get_node(node_id) {
-                if let Some(data_val) = node.get_property("_data") {
-                    if let Some(json_str) = data_val.as_str() {
-                        if let Ok(entity) = serde_json::from_str::<T>(json_str) {
-                            results.push(entity);
-                        }
-                    }
-                }
+            if let Some(node) = session.get_node(node_id)
+                && let Some(data_val) = node.get_property("_data")
+                && let Some(json_str) = data_val.as_str()
+                && let Ok(entity) = serde_json::from_str::<T>(json_str)
+            {
+                results.push(entity);
             }
         }
 
@@ -375,24 +372,21 @@ impl<T: Data + Serialize + DeserializeOwned> DataService<T> for ObrainDataServic
                 .map_err(|e| anyhow!("UUID index lock poisoned: {}", e))?;
 
             for &node_id in index.values() {
-                if let Some(node) = session.get_node(node_id) {
-                    if let Some(data_val) = node.get_property("_data") {
-                        if let Some(json_str) = data_val.as_str() {
-                            if let Ok(entity) = serde_json::from_str::<T>(json_str) {
-                                if entity.field_value(field).is_some_and(|fv| match &fv {
-                                    FieldValue::String(s) => s == value,
-                                    FieldValue::Integer(i) => i.to_string() == value,
-                                    FieldValue::Float(f) => f.to_string() == value,
-                                    FieldValue::Boolean(b) => b.to_string() == value,
-                                    FieldValue::Uuid(u) => u.to_string() == value,
-                                    FieldValue::DateTime(dt) => dt.to_rfc3339() == value,
-                                    FieldValue::Null => false,
-                                }) {
-                                    results.push(entity);
-                                }
-                            }
-                        }
-                    }
+                if let Some(node) = session.get_node(node_id)
+                    && let Some(data_val) = node.get_property("_data")
+                    && let Some(json_str) = data_val.as_str()
+                    && let Ok(entity) = serde_json::from_str::<T>(json_str)
+                    && entity.field_value(field).is_some_and(|fv| match &fv {
+                        FieldValue::String(s) => s == value,
+                        FieldValue::Integer(i) => i.to_string() == value,
+                        FieldValue::Float(f) => f.to_string() == value,
+                        FieldValue::Boolean(b) => b.to_string() == value,
+                        FieldValue::Uuid(u) => u.to_string() == value,
+                        FieldValue::DateTime(dt) => dt.to_rfc3339() == value,
+                        FieldValue::Null => false,
+                    })
+                {
+                    results.push(entity);
                 }
             }
         }
@@ -538,10 +532,10 @@ impl LinkService for ObrainLinkService {
 
         let mut links = Vec::with_capacity(index.len());
         for &node_id in index.values() {
-            if let Some(node) = session.get_node(node_id) {
-                if let Some(link) = self.link_from_node(&node) {
-                    links.push(link);
-                }
+            if let Some(node) = session.get_node(node_id)
+                && let Some(link) = self.link_from_node(&node)
+            {
+                links.push(link);
             }
         }
 
@@ -564,12 +558,11 @@ impl LinkService for ObrainLinkService {
 
         let mut results = Vec::new();
         for node_id in matching {
-            if let Some(node) = session.get_node(node_id) {
-                if let Some(link) = self.link_from_node(&node) {
-                    if link_type.is_none_or(|lt| link.link_type == lt) {
-                        results.push(link);
-                    }
-                }
+            if let Some(node) = session.get_node(node_id)
+                && let Some(link) = self.link_from_node(&node)
+                && link_type.is_none_or(|lt| link.link_type == lt)
+            {
+                results.push(link);
             }
         }
 
@@ -592,12 +585,11 @@ impl LinkService for ObrainLinkService {
 
         let mut results = Vec::new();
         for node_id in matching {
-            if let Some(node) = session.get_node(node_id) {
-                if let Some(link) = self.link_from_node(&node) {
-                    if link_type.is_none_or(|lt| link.link_type == lt) {
-                        results.push(link);
-                    }
-                }
+            if let Some(node) = session.get_node(node_id)
+                && let Some(link) = self.link_from_node(&node)
+                && link_type.is_none_or(|lt| link.link_type == lt)
+            {
+                results.push(link);
             }
         }
 

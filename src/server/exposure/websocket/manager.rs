@@ -282,21 +282,19 @@ impl ConnectionManager {
 
         for (connection_id, handle) in connections.iter() {
             // Tenant isolation check
-            if let Some(conn_tenant) = handle.tenant_id {
-                if let Some(event_tenant) = envelope.tenant_id() {
-                    if conn_tenant != event_tenant {
-                        continue; // Skip: event belongs to a different tenant
-                    }
-                }
-                // If event has no tenant_id, it's a broadcast → deliver to all
+            if let Some(conn_tenant) = handle.tenant_id
+                && let Some(event_tenant) = envelope.tenant_id()
+                && conn_tenant != event_tenant
+            {
+                continue; // Skip: event belongs to a different tenant
             }
 
             // User isolation check: if BOTH the event and connection have a user_id,
             // only deliver if they match. This prevents cross-user event leaks.
-            if let (Some(event_uid), Some(conn_uid)) = (&event_user_id, &handle.user_id) {
-                if event_uid != conn_uid {
-                    continue; // Skip: event belongs to a different user
-                }
+            if let (Some(event_uid), Some(conn_uid)) = (&event_user_id, &handle.user_id)
+                && event_uid != conn_uid
+            {
+                continue; // Skip: event belongs to a different user
             }
 
             for subscription in &handle.subscriptions {

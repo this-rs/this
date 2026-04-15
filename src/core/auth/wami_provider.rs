@@ -310,18 +310,19 @@ mod tests {
 
     /// Create an AuthConfig with the given public key
     fn test_config(pub_key_b64: &str) -> AuthConfig {
-        let mut config = AuthConfig::default();
-        config.provider = AuthProviderType::Wami;
-        config.wami = Some(WamiConfig {
-            public_key: Some(pub_key_b64.to_string()),
-            issuer: Some("test-issuer".to_string()),
-            audience: Some("test-audience".to_string()),
-            mode: Default::default(),
-            private_key: None,
-            token_ttl_secs: 3600,
-            refresh_ttl_secs: 86400,
-        });
-        config
+        AuthConfig {
+            provider: AuthProviderType::Wami,
+            wami: Some(WamiConfig {
+                public_key: Some(pub_key_b64.to_string()),
+                issuer: Some("test-issuer".to_string()),
+                audience: Some("test-audience".to_string()),
+                mode: Default::default(),
+                private_key: None,
+                token_ttl_secs: 3600,
+                refresh_ttl_secs: 86400,
+            }),
+            ..Default::default()
+        }
     }
 
     /// Sign claims into a JWT using an Ed25519 signing key
@@ -369,26 +370,30 @@ mod tests {
 
     #[test]
     fn test_from_config_missing_wami_section() {
-        let mut config = AuthConfig::default();
-        config.provider = AuthProviderType::Wami;
-        config.wami = None;
+        let config = AuthConfig {
+            provider: AuthProviderType::Wami,
+            wami: None,
+            ..Default::default()
+        };
         let err = WamiAuthProvider::from_config(&config).unwrap_err();
         assert!(err.to_string().contains("wami section is required"));
     }
 
     #[test]
     fn test_from_config_empty_public_key() {
-        let mut config = AuthConfig::default();
-        config.provider = AuthProviderType::Wami;
-        config.wami = Some(WamiConfig {
-            public_key: Some(String::new()),
-            issuer: None,
-            audience: None,
-            mode: Default::default(),
-            private_key: None,
-            token_ttl_secs: 3600,
-            refresh_ttl_secs: 86400,
-        });
+        let config = AuthConfig {
+            provider: AuthProviderType::Wami,
+            wami: Some(WamiConfig {
+                public_key: Some(String::new()),
+                issuer: None,
+                audience: None,
+                mode: Default::default(),
+                private_key: None,
+                token_ttl_secs: 3600,
+                refresh_ttl_secs: 86400,
+            }),
+            ..Default::default()
+        };
         let err = WamiAuthProvider::from_config(&config).unwrap_err();
         assert!(err.to_string().contains("public_key is required"));
     }
@@ -403,7 +408,7 @@ mod tests {
     #[test]
     fn test_from_config_wrong_key_length() {
         use base64::Engine;
-        let short_key = base64::engine::general_purpose::STANDARD.encode(&[0u8; 16]);
+        let short_key = base64::engine::general_purpose::STANDARD.encode([0u8; 16]);
         let config = test_config(&short_key);
         let err = WamiAuthProvider::from_config(&config).unwrap_err();
         // Should fail because 16 bytes != 32 bytes expected for Ed25519
