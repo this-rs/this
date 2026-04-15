@@ -7,7 +7,7 @@
 //! single source of truth for the application state.
 
 use crate::config::LinksConfig;
-use crate::core::auth::AuthProvider;
+use crate::core::auth::{AuthProvider, AuthResolverRegistry};
 use crate::core::events::EventBus;
 use crate::core::{EntityCreator, EntityFetcher, service::LinkService};
 use crate::events::log::EventLog;
@@ -103,6 +103,12 @@ pub struct ServerHost {
     /// The provider extracts AuthContext from incoming requests.
     pub auth_provider: Option<Arc<dyn AuthProvider>>,
 
+    /// Registry of custom auth resolvers
+    ///
+    /// Named resolvers referenced from YAML config as `resolver:name`.
+    /// Registered via `ServerBuilder::with_auth_resolver()`.
+    pub resolver_registry: Arc<AuthResolverRegistry>,
+
     /// Optional STS (Security Token Service) state for embedded token issuance
     ///
     /// When present, auth endpoints (POST /auth/token, GET /auth/keys,
@@ -153,6 +159,7 @@ impl ServerHost {
             device_token_store: None,
             preferences_store: None,
             auth_provider: None,
+            resolver_registry: Arc::new(AuthResolverRegistry::new()),
             #[cfg(feature = "wami")]
             sts_state: None,
         })
@@ -245,6 +252,20 @@ impl ServerHost {
         self.auth_provider.as_ref()
     }
 
+    /// Set the auth resolver registry
+    ///
+    /// The registry contains named resolvers that can be referenced from
+    /// YAML config as `resolver:name`.
+    pub fn with_resolver_registry(mut self, registry: AuthResolverRegistry) -> Self {
+        self.resolver_registry = Arc::new(registry);
+        self
+    }
+
+    /// Get a reference to the auth resolver registry
+    pub fn resolver_registry(&self) -> &Arc<AuthResolverRegistry> {
+        &self.resolver_registry
+    }
+
     /// Set the STS state for embedded token issuance (WAMI embedded/bootstrap modes)
     #[cfg(feature = "wami")]
     pub fn with_sts_state(
@@ -332,6 +353,7 @@ impl ServerHost {
             device_token_store: None,
             preferences_store: None,
             auth_provider: None,
+            resolver_registry: Arc::new(AuthResolverRegistry::new()),
             #[cfg(feature = "wami")]
             sts_state: None,
         }

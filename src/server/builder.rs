@@ -4,6 +4,7 @@ use super::entity_registry::EntityRegistry;
 use super::exposure::RestExposure;
 use super::host::ServerHost;
 use crate::config::LinksConfig;
+use crate::core::auth::{AuthResolver, AuthResolverRegistry, FnResolver};
 use crate::core::events::EventBus;
 use crate::core::module::Module;
 use crate::core::service::LinkService;
@@ -45,6 +46,9 @@ pub struct ServerBuilder {
 
     // Auth config loaded from external file
     auth_config: Option<crate::config::auth::AuthConfig>,
+
+    // Custom auth resolvers registry
+    resolver_registry: AuthResolverRegistry,
 }
 
 impl ServerBuilder {
@@ -62,6 +66,7 @@ impl ServerBuilder {
             device_token_store: None,
             preferences_store: None,
             auth_config: None,
+            resolver_registry: AuthResolverRegistry::new(),
         }
     }
 
@@ -204,6 +209,84 @@ impl ServerBuilder {
         self
     }
 
+    /// Register a custom auth resolver from a struct implementing `AuthResolver`
+    ///
+    /// The resolver can be referenced from YAML config with the `resolver:` prefix.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// use this_rs::core::auth::{AuthResolver, AuthContext};
+    ///
+    /// struct IsGroupMember { db: Arc<DbPool> }
+    ///
+    /// impl AuthResolver for IsGroupMember {
+    ///     fn check(&self, ctx: &AuthContext, resource_id: Option<&Uuid>) -> bool {
+    ///         // ... check group membership
+    ///         true
+    ///     }
+    /// }
+    ///
+    /// ServerBuilder::new()
+    ///     .with_auth_resolver_impl("is_group_member", IsGroupMember { db })
+    ///     .build_host()?;
+    /// ```
+    ///
+    /// Then in YAML:
+    /// ```yaml
+    /// auth:
+    ///   create: "resolver:is_group_member"
+    /// ```
+    pub fn with_auth_resolver_impl(
+        mut self,
+        name: impl Into<String>,
+        resolver: impl AuthResolver + 'static,
+    ) -> Self {
+        self.resolver_registry.register(name, Arc::new(resolver));
+        self
+    }
+
+    /// Register a custom auth resolver from a closure
+    ///
+    /// Convenience method for simple resolvers that don't need a dedicated struct.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// ServerBuilder::new()
+    ///     .with_auth_resolver("is_manager", |ctx: &AuthContext, _res: Option<&Uuid>| {
+    ///         ctx.has_role("manager")
+    ///     })
+    ///     .with_auth_resolver("is_delegated", |ctx: &AuthContext, resource_id: Option<&Uuid>| {
+    ///         // Check JWT claims for delegation
+    ///         let Some(user_id) = ctx.user_id() else { return false };
+    ///         let Some(_res_id) = resource_id else { return false };
+    ///         // Check delegation...
+    ///         true
+    ///     })
+    ///     .build_host()?;
+    /// ```
+    ///
+    /// Then in YAML:
+    /// ```yaml
+    /// auth:
+    ///   update: "resolver:is_manager"
+    ///   delete: "owner_or_resolver:is_delegated"
+    /// ```
+    pub fn with_auth_resolver<F>(mut self, name: impl Into<String>, func: F) -> Self
+    where
+        F: Fn(&crate::core::auth::AuthContext, Option<&uuid::Uuid>) -> bool
+            + Send
+            + Sync
+            + 'static,
+    {
+        let name_str: String = name.into();
+        let resolver = FnResolver::new(func, format!("Custom resolver: {}", name_str));
+        self.resolver_registry
+            .register(name_str, Arc::new(resolver));
+        self
+    }
+
     /// Register a module
     ///
     /// This will:
@@ -281,6 +364,17 @@ impl ServerBuilder {
         // Attach event bus if configured
         if let Some(event_bus) = self.event_bus.take() {
             host = host.with_event_bus(event_bus);
+        }
+
+        // Attach resolver registry if any resolvers were registered
+        if !self.resolver_registry.is_empty() {
+            let names = self.resolver_registry.names();
+            tracing::info!(
+                resolvers = ?names,
+                "Auth resolver registry attached ({} resolvers)",
+                names.len()
+            );
+            host = host.with_resolver_registry(self.resolver_registry);
         }
 
         // Auto-wire auth provider from config

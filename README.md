@@ -1,6 +1,7 @@
 # this-rs 🦀
 
-> A framework for building **complex multi-entity REST and GraphQL APIs** with **many relationships** in Rust.
+> A framework for building **complex multi-entity APIs** with **many relationships** in Rust.
+> Four protocols, nine storage backends, cognitive intelligence — from one codebase.
 >
 > **Designed for APIs with 5+ entities and complex relationships.**  
 > For simple CRUD APIs, consider using Axum directly.
@@ -12,32 +13,71 @@
 [![License](https://img.shields.io/crates/l/this-rs.svg)](LICENSE-MIT)
 [![codecov](https://codecov.io/gh/this-rs/this/graph/badge.svg)](https://codecov.io/gh/this-rs/this)
 
+**Website**: [this-rs.dev](https://this-rs.dev)
+
 ---
 
 ## ✨ Highlights
 
 ### 🚀 Core Features
-- 🔌 **Generic Entity System** - Add entities without modifying framework code
-- 🤖 **Auto-Generated Routes** - Declare a module, routes are created automatically
-- 🏗️ **Macro-Driven Entities** - Define entities with zero boilerplate using macros
-- 🔒 **Type-Safe** - Full Rust compile-time guarantees
+- 🔌 **Generic Entity System** — Add entities without modifying framework code
+- 🤖 **Auto-Generated Routes** — Declare a module, routes are created automatically
+- 🏗️ **Macro-Driven Entities** — Define entities with zero boilerplate using macros
+- 🔒 **Type-Safe** — Full Rust compile-time guarantees
 
 ### 🔗 Relationship Management
-- 🔗 **Flexible Relationships** - Multiple link types between same entities
-- ↔️ **Bidirectional Navigation** - Query relationships from both directions
-- ✨ **Auto-Enriched Links** - Full entities in responses, no N+1 queries
-- 🎯 **Smart Entity Creation** - Create new entities + links in one API call
+- 🔗 **Flexible Relationships** — Multiple link types between same entities
+- ↔️ **Bidirectional Navigation** — Query relationships from both directions
+- ✨ **Auto-Enriched Links** — Full entities in responses, no N+1 queries
+- 🎯 **Smart Entity Creation** — Create new entities + links in one API call
 
 ### 🌐 Multi-Protocol Support
-- 🆕 **REST API** - Traditional RESTful endpoints with auto-routing
-- 🆕 **GraphQL API** - Dynamic schema generation with full CRUD and relations
-- 🔜 **gRPC** (planned) - Extensible architecture for future protocols
+- 🌍 **REST API** — Traditional RESTful endpoints with auto-routing
+- 📊 **GraphQL API** — Dynamic schema generation with full CRUD, relations, and subscriptions
+- ⚡ **gRPC** — Auto-generated Protocol Buffers with EntityService, LinkService, EventService, and NotificationService
+- 🔌 **WebSocket** — Real-time bidirectional communication with subscribe/unsubscribe filters
+- 📡 **SSE** — Server-Sent Events for lightweight real-time streaming
+
+### 💾 Storage Backends (9)
+- **In-Memory** — Zero-config for development and testing
+- **PostgreSQL** — Production-ready relational backend
+- **MongoDB** — Document store backend
+- **Neo4j** — Graph database for deep relationship traversals
+- **ScyllaDB** — Distributed wide-column store (CQL compatible)
+- **MySQL** — Traditional relational backend
+- **DynamoDB** — AWS serverless storage
+- **LMDB** — Embedded key-value store (zero-copy reads)
+- **Obrain** — Cognitive graph database with hybrid intelligence
+
+### 📣 Event System
+- 🔔 **EventBus** — Built-in non-blocking broadcast on all CRUD operations
+- 🔄 **Event Flows** — Declarative YAML pipelines with 8 operators (filter, map, batch, deduplicate, rate_limit, fan_out, resolve, deliver)
+- 📬 **Notifications** — In-app NotificationStore with read/unread tracking across REST, GraphQL, and gRPC
+- 🪝 **Webhook Sinks** — Deliver events to external webhooks with retry logic
+- 📱 **Push Notifications** — Expo push notification delivery via Event Flows
+
+### 🧠 Cognitive Signals
+- 🚨 **AnomalyDetected** — Unusual patterns in data mutations (threshold-based)
+- 🔄 **CoChangeDetected** — Entities that always change together (correlation tracking)
+- 🕸️ **StigmergyLockIn** — Emergent behavioral lock-ins
+- 🩹 **ScarCreated** — Failure patterns to avoid repeating
+- 📖 **EpisodeLearned** — Learned behavioral sequences
+- 🌉 **CognitiveNotificationBridge** — Subscribes to EventBus, evaluates thresholds, routes to SinkRegistry
+
+### 🔐 Authentication & Authorization
+- 🔑 **WAMI Auth STS** — Built-in JWT authentication with Ed25519 key pairs
+- 🚀 **Bootstrap Mode** — Auto-generates keys at startup for zero-config development
+- 🛡️ **RBAC Policies** — Per-entity authorization policies in YAML (authenticated, owner, admin_only, service_only)
+- 🧩 **Custom Resolvers** — Reusable authorization logic referenced with `resolver:name` in YAML
+- 🏢 **Multi-Tenant** — Opt-in tenant isolation via `impl_entity_multi_tenant!` macro
+- 🗑️ **GDPR Erasure** — One-call tenant data deletion: `DELETE /tenants/:tenant_id/data`
 
 ### ⚡ Developer Experience
-- ✅ **Automatic Validation & Filtering** - Zero-boilerplate data validation with declarative rules
-- 📄 **Generic Pagination & Query Filtering** - Automatic pagination for all list endpoints
-- 📝 **Auto-Pluralization** - Smart plural forms (company → companies)
-- ⚙️ **YAML Configuration** - Declarative entity and link definitions
+- ✅ **Automatic Validation & Filtering** — Zero-boilerplate data validation with declarative rules
+- 📄 **Generic Pagination & Query Filtering** — Automatic pagination for all list endpoints
+- 📝 **Auto-Pluralization** — Smart plural forms (company → companies)
+- ⚙️ **YAML Configuration** — Declarative entity, link, event flow, auth, and cognitive definitions
+- 🛠️ **CLI Scaffolding** — `this-cli` generates entire projects in seconds
 
 ---
 
@@ -214,7 +254,7 @@ impl Module for CatalogModule {
 
 ### 4. Launch Server (Auto-Generated Routes!)
 
-#### REST API (Default)
+#### REST-only (simplest)
 ```rust
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -229,21 +269,29 @@ async fn main() -> Result<()> {
 }
 ```
 
-#### GraphQL API (Optional, feature flag)
+#### Multi-Protocol with Events, Auth & Cognitive Signals
 ```rust
-use this::server::GraphQLExposure;
+use this::prelude::*;
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let host = ServerBuilder::new()
         .with_link_service(InMemoryLinkService::new())
         .register_module(CatalogModule::new(store))?
-        .build_host()?;  // ← Build transport-agnostic host
-    
-    let graphql_app = GraphQLExposure::build_router(Arc::new(host))?;
-    
+        .build_host()?                                          // transport-agnostic host
+        .with_event_bus(EventBus::new(256))                     // event broadcasting
+        .with_notification_store(InMemoryNotificationStore::new())
+        .with_auth_config_file("config/auth.yaml")?;            // WAMI Auth STS
+
+    let host = Arc::new(host);
+    let app = Router::new()
+        .merge(RestExposure::build_router(host.clone(), vec![])?)
+        .merge(GraphQLExposure::build_router(host.clone())?)
+        .merge(GrpcExposure::build_router(host.clone())?)
+        .merge(WebSocketExposure::build_router(host)?);
+
     let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await?;
-    axum::serve(listener, graphql_app).await?;
+    axum::serve(listener, app).await?;
     Ok(())
 }
 ```
@@ -251,22 +299,36 @@ async fn main() -> Result<()> {
 **That's it!** Routes are auto-generated:
 
 **REST API:**
-- ✅ `GET /products` - List all
-- ✅ `POST /products` - Create new product
-- ✅ `GET /products/:id` - Get by ID
-- ✅ `PUT /products/:id` - Update product
-- ✅ `DELETE /products/:id` - Delete product
-- ✅ `GET /products/:id/links` - Introspection
-- ✅ Link routes (if configured in YAML)
+- ✅ `GET /products` — List all (paginated)
+- ✅ `POST /products` — Create new product
+- ✅ `GET /products/:id` — Get by ID
+- ✅ `PUT /products/:id` — Update product
+- ✅ `DELETE /products/:id` — Delete product
+- ✅ `GET /products/:id/links` — Introspection
+- ✅ Link routes (auto-generated from YAML)
 
 **GraphQL API:**
-- ✅ `POST /graphql` - GraphQL endpoint with full CRUD
-- ✅ `GET /graphql/playground` - Interactive GraphQL playground
-- ✅ `GET /graphql/schema` - Dynamic schema introspection
-- ✅ Auto-generated types (`Product`, `Order`, etc.)
-- ✅ Auto-generated queries (`products`, `product(id)`)
-- ✅ Auto-generated mutations (`createProduct`, `updateProduct`, `deleteProduct`)
-- ✅ Auto-resolved relations (follow links automatically)
+- ✅ `POST /graphql` — Full CRUD + subscriptions
+- ✅ `GET /graphql/playground` — Interactive playground
+- ✅ Auto-generated types, queries, mutations, and relations
+
+**gRPC:**
+- ✅ `EntityService` — List, Get, Create, Update, Delete
+- ✅ `LinkService` — CRUD for relationships
+- ✅ `EventService` — `StreamEvents` (server-streaming)
+- ✅ `NotificationService` — GetNotifications, MarkAsRead
+- ✅ `GET /grpc/proto` — Proto export for client generation
+
+**WebSocket & SSE:**
+- ✅ `/ws` — Subscribe/unsubscribe with entity_type/event_type filters
+- ✅ `/events/stream` — SSE endpoint with query filters
+
+**Auth (WAMI STS):**
+- ✅ `POST /auth/token` — JWT token issuance
+- ✅ `GET /auth/keys` — Public key endpoint (Ed25519)
+- ✅ `POST /auth/refresh` — Token refresh
+- ✅ `POST /auth/revoke` — Token revocation
+- ✅ `DELETE /tenants/:tenant_id/data` — GDPR erasure
 
 ---
 
@@ -439,13 +501,19 @@ Entity (Base Trait)
 
 ### Core Concepts
 
-1. **ServerBuilder** - Fluent API for building HTTP servers
-2. **EntityDescriptor** - Describes how to generate routes for an entity
-3. **EntityRegistry** - Collects and builds all entity routes
-4. **Module** - Groups related entities with configuration
-5. **LinkService** - Generic relationship management
-6. **EntityFetcher** - Dynamically fetch entities for link enrichment
-7. **EntityCreator** - Dynamically create entities with automatic linking
+1. **ServerBuilder** — Fluent API for building HTTP servers
+2. **ServerHost** — Transport-agnostic host holding all registries and services
+3. **EntityDescriptor** — Describes how to generate routes for an entity
+4. **EntityRegistry** — Collects and builds all entity routes
+5. **Module** — Groups related entities with configuration
+6. **LinkService** — Generic relationship management (9 backend implementations)
+7. **EntityFetcher** — Dynamically fetch entities for link enrichment
+8. **EntityCreator** — Dynamically create entities with automatic linking
+9. **EventBus** — Non-blocking broadcast channel for entity lifecycle events
+10. **Event Flows** — Declarative YAML pipelines (filter → map → batch → deduplicate → deliver)
+11. **CognitiveNotificationBridge** — Monitors EventBus for anomalies, co-changes, scars, stigmergy, episodes
+12. **SinkRegistry** — Routes signals to webhooks, in-app notifications, push, SSE
+13. **Exposures** — Protocol adapters: RestExposure, GraphQLExposure, GrpcExposure, WebSocketExposure
 
 ### Macro System
 
@@ -503,12 +571,16 @@ Entity (Base Trait)
 
 ### For Production
 
-✅ **Authorization** - Declarative auth policies  
-✅ **Configurable** - YAML-based configuration  
-✅ **Extensible** - Plugin architecture via modules  
-✅ **Performance** - Efficient link enrichment with no N+1 queries  
-✅ **Soft Deletes** - Built-in soft delete support  
-✅ **Dynamic Schema** - 🆕 GraphQL schema auto-generated from entities  
+✅ **WAMI Auth STS** — JWT authentication with Ed25519, bootstrap mode, RBAC policies  
+✅ **Custom Auth Resolvers** — Reusable authorization closures (`resolver:name` in YAML)  
+✅ **Multi-Tenant** — Opt-in tenant isolation per entity  
+✅ **GDPR Erasure** — One-call cascade delete across entities and links  
+✅ **9 Storage Backends** — In-Memory, PostgreSQL, MongoDB, Neo4j, ScyllaDB, MySQL, DynamoDB, LMDB, Obrain  
+✅ **Cognitive Signals** — Anomaly detection, co-change tracking, threshold-based routing  
+✅ **Event Flows** — Declarative pipelines with webhooks, push notifications, and SSE  
+✅ **Notifications** — In-app NotificationStore with read/unread tracking  
+✅ **Soft Deletes** — Built-in soft delete support  
+✅ **Dynamic Schema** — GraphQL schema auto-generated from entities  
 
 ---
 
@@ -533,40 +605,51 @@ this-rs eliminates **repetitive routing and relationship boilerplate** while mai
 **Perfect for**:
 - 🏢 **Microservices architectures** with many entities
 - 🔗 **Complex relationship graphs** (many-to-many, bidirectional)
-- 🔮 **Dynamic GraphQL + REST** from same definitions
+- 🔮 **Four protocols from one codebase** (REST + GraphQL + gRPC + WebSocket)
+- 🧠 **Cognitive APIs** with anomaly detection, co-change tracking, and intelligent signals
+- 🔐 **Secure multi-tenant platforms** with WAMI Auth, RBAC, and GDPR compliance
 - 🚀 **Rapidly evolving domains** (adding entities frequently)
-- 📊 **Data-rich applications** with interconnected entities
+- 📊 **Hybrid backends** (PostgreSQL for CRUD + Neo4j/Obrain for graph traversals)
 
 **NOT ideal for**:
 - ❌ Simple CRUD APIs (< 5 entities)
 - ❌ Maximum performance critical paths (framework adds overhead)
 - ❌ Learning projects (start with Axum first)
 
-### 🆕 What's New in v0.0.6
+### 🆕 What's New in v0.0.9
 
-- ✨ **GraphQL Support** - Auto-generated GraphQL schema from your entities
-- 🔄 **Dynamic Schema** - Types, queries, and mutations created at runtime
-- 🔗 **Automatic Relations** - Navigate entity relationships in GraphQL
-- 🎯 **Full CRUD** - Complete create, read, update, delete via GraphQL
-- 🏗️ **Modular Architecture** - Choose REST, GraphQL, or both
+- 🔔 **EventBus** — Built-in event system with non-blocking broadcast on all CRUD operations
+- 🔄 **Event Flows** — Declarative YAML pipelines: filter → map → batch → deduplicate → deliver
+- 📬 **Notifications** — In-app NotificationStore with read/unread tracking (REST + GraphQL + gRPC)
+- 🪝 **Webhook & Push Sinks** — Deliver events externally via webhooks or Expo push notifications
+- 📡 **SSE Streaming** — `GET /events/stream` for lightweight real-time event streaming
+- 🧠 **Cognitive Signals** — CognitiveNotificationBridge detects anomalies, co-changes, scars, stigmergy, episodes
+- 🔐 **WAMI Auth STS** — JWT authentication with Ed25519 keys, bootstrap mode, per-entity RBAC policies
+- 🧩 **Custom Auth Resolvers** — Reusable authorization closures referenced with `resolver:name` in YAML
+- 🗑️ **GDPR Erasure** — `DELETE /tenants/:tenant_id/data` cascades across all entities and links
+- 💾 **3 New Backends** — MySQL, LMDB, and Obrain storage backends (total: 9)
+- ⚡ **gRPC** — Full gRPC support with EntityService, LinkService, EventService, NotificationService
+- 🔌 **WebSocket** — Real-time bidirectional events with subscribe/unsubscribe filters
 
 ---
 
 ## 🤔 Honest Trade-offs
 
 ### What this-rs Adds ✅
-- Auto-generated routing for entities and links
-- Bidirectional relationship navigation
-- Link enrichment (no N+1 queries)
-- GraphQL schema from REST entities
-- YAML-based relationship configuration
+- Auto-generated routing for entities and links (REST + GraphQL + gRPC + WebSocket)
+- Bidirectional relationship navigation with auto-enrichment
+- 9 storage backends — same API, any database
+- EventBus + Event Flows with declarative YAML pipelines
+- Cognitive signals (anomaly detection, co-changes, stigmergy, scars, episodes)
+- WAMI Auth STS with JWT, RBAC, custom resolvers, multi-tenant, GDPR erasure
+- Notifications (in-app + webhook + push + SSE)
+- YAML-driven configuration for everything
 
 ### What You Still Write ✍️
 - Entity definitions (with macro helpers)
 - Business logic handlers (create, update, delete, custom queries)
-- Validation rules
-- Authorization logic
-- Error handling
+- Validation rules (with `Validated<T>` extractor)
+- Custom auth resolvers (closures or trait impls)
 
 ### The Cost ⚠️
 - Learning curve (framework patterns and traits)
@@ -574,7 +657,7 @@ this-rs eliminates **repetitive routing and relationship boilerplate** while mai
 - YAML configuration to maintain
 - Smaller ecosystem than pure Axum
 
-**Built with Rust. Designed for complex APIs. Best for scale.** 🦀✨
+**Built with Rust. Four protocols. Nine backends. Cognitive intelligence. One codebase.** 🦀✨
 
 ---
 
