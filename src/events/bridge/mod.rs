@@ -6,20 +6,20 @@
 //!
 //! All types and logic are feature-gated behind `#[cfg(feature = "obrain")]`.
 
+pub mod cognitive;
 #[cfg(feature = "obrain")]
-pub mod types;
-#[cfg(feature = "obrain")]
-pub mod outbound;
+pub mod dedup;
 #[cfg(feature = "obrain")]
 pub mod inbound;
 #[cfg(feature = "obrain")]
-pub mod dedup;
-pub mod cognitive;
-
+pub mod outbound;
 #[cfg(feature = "obrain")]
-pub use outbound::OutboundBridge;
+pub mod types;
+
+pub use cognitive::{CognitiveNotificationBridge, CognitiveNotificationConfig};
+#[cfg(feature = "obrain")]
+pub use dedup::DedupFilter;
 #[cfg(feature = "obrain")]
 pub use inbound::InboundBridge;
 #[cfg(feature = "obrain")]
-pub use dedup::DedupFilter;
-pub use cognitive::{CognitiveNotificationBridge, CognitiveNotificationConfig};
+pub use outbound::OutboundBridge;

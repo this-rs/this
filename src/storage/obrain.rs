@@ -25,8 +25,8 @@ use async_trait::async_trait;
 use obrain_common::types::{NodeId, Value as ObrainValue};
 use obrain_core::Node;
 use obrain_engine::ObrainDB;
-use serde::de::DeserializeOwned;
 use serde::Serialize;
+use serde::de::DeserializeOwned;
 use std::collections::HashMap;
 use std::marker::PhantomData;
 use std::sync::{Arc, RwLock};
@@ -199,8 +199,7 @@ impl<T: Data + Serialize + DeserializeOwned> DataService<T> for ObrainDataServic
         let label = entity_type.as_str();
         let node_id = {
             // Build property pairs referencing our collected data
-            let mut all_props: Vec<(&str, ObrainValue)> =
-                Vec::with_capacity(2 + field_vals.len());
+            let mut all_props: Vec<(&str, ObrainValue)> = Vec::with_capacity(2 + field_vals.len());
             all_props.push(("_uuid", ObrainValue::from(uuid_str.as_str())));
             all_props.push(("_data", ObrainValue::from(json_data.as_str())));
             for (key, val) in &field_vals {
@@ -445,10 +444,7 @@ impl ObrainLinkService {
     }
 
     /// Deserialize a LinkEntity from a node's _data property
-    fn link_from_node(
-        &self,
-        node: &Node,
-    ) -> Option<LinkEntity> {
+    fn link_from_node(&self, node: &Node) -> Option<LinkEntity> {
         let data_val = node.get_property("_data")?;
         let json_str = data_val.as_str()?;
         serde_json::from_str(json_str).ok()
@@ -491,18 +487,9 @@ impl LinkService for ObrainLinkService {
             vec![
                 ("_uuid", ObrainValue::from(uuid_str.as_str())),
                 ("_data", ObrainValue::from(json_data.as_str())),
-                (
-                    "_source_id",
-                    ObrainValue::from(source_str.as_str()),
-                ),
-                (
-                    "_target_id",
-                    ObrainValue::from(target_str.as_str()),
-                ),
-                (
-                    "_link_type",
-                    ObrainValue::from(link.link_type.as_str()),
-                ),
+                ("_source_id", ObrainValue::from(source_str.as_str())),
+                ("_target_id", ObrainValue::from(target_str.as_str())),
+                ("_link_type", ObrainValue::from(link.link_type.as_str())),
             ],
         );
 
@@ -1405,7 +1392,10 @@ mod tests {
         let entities = data_svc.list().await.unwrap();
         assert_eq!(entities.len(), 2);
 
-        let links = link_svc.find_by_source(&alice.id, None, None).await.unwrap();
+        let links = link_svc
+            .find_by_source(&alice.id, None, None)
+            .await
+            .unwrap();
         assert_eq!(links.len(), 1);
         assert_eq!(links[0].target_id, bob.id);
     }

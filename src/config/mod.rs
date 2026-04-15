@@ -521,7 +521,7 @@ links:
             validation_rules: None,
             events: None,
             sinks: None,
-        auth: None,
+            auth: None,
         };
 
         let merged = LinksConfig::merge(vec![config1, config2]);
@@ -545,7 +545,7 @@ links:
             validation_rules: None,
             events: None,
             sinks: None,
-        auth: None,
+            auth: None,
         };
 
         let auth2 = EntityAuthConfig {
@@ -563,7 +563,7 @@ links:
             validation_rules: None,
             events: None,
             sinks: None,
-        auth: None,
+            auth: None,
         };
 
         let merged = LinksConfig::merge(vec![config1, config2]);
@@ -590,7 +590,7 @@ links:
             validation_rules: Some(rules1),
             events: None,
             sinks: None,
-        auth: None,
+            auth: None,
         };
 
         let mut rules2 = HashMap::new();
@@ -608,7 +608,7 @@ links:
             validation_rules: Some(rules2),
             events: None,
             sinks: None,
-        auth: None,
+            auth: None,
         };
 
         let merged = LinksConfig::merge(vec![config1, config2]);
@@ -660,7 +660,7 @@ links:
             validation_rules: Some(rules),
             events: None,
             sinks: None,
-        auth: None,
+            auth: None,
         };
 
         // Correct combination
@@ -696,7 +696,7 @@ links:
             validation_rules: Some(rules),
             events: None,
             sinks: None,
-        auth: None,
+            auth: None,
         };
 
         // With empty targets, no target type can match

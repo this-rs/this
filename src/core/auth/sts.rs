@@ -134,11 +134,7 @@ impl StsService {
     ///
     /// The caller must supply the `DecodingKey` that corresponds to the
     /// signing key so the refresh token can be verified before re-issue.
-    pub fn refresh(
-        &self,
-        refresh_token: &str,
-        decoding_key: &DecodingKey,
-    ) -> Result<TokenPair> {
+    pub fn refresh(&self, refresh_token: &str, decoding_key: &DecodingKey) -> Result<TokenPair> {
         let mut validation = Validation::new(Algorithm::EdDSA);
         validation.set_issuer(&[self.issuer.as_str()]);
         validation.set_audience::<&str>(&[]);
@@ -158,8 +154,7 @@ impl StsService {
         // Revoke the old refresh token (rotation)
         self.revoke(&claims.jti);
 
-        let user_id =
-            Uuid::parse_str(&claims.sub).context("invalid sub claim in refresh token")?;
+        let user_id = Uuid::parse_str(&claims.sub).context("invalid sub claim in refresh token")?;
 
         self.issue_token_pair(user_id, claims.tenant_id, claims.roles)
     }
@@ -266,11 +261,11 @@ impl StsService {
             iss: self.issuer.clone(),
         };
 
-        let access_token =
-            encode(&header, &access_claims, &self.encoding_key).context("failed to sign access token")?;
+        let access_token = encode(&header, &access_claims, &self.encoding_key)
+            .context("failed to sign access token")?;
 
-        let refresh_token =
-            encode(&header, &refresh_claims, &self.encoding_key).context("failed to sign refresh token")?;
+        let refresh_token = encode(&header, &refresh_claims, &self.encoding_key)
+            .context("failed to sign refresh token")?;
 
         Ok(TokenPair {
             access_token,
@@ -285,8 +280,8 @@ impl StsService {
 mod tests {
     use super::*;
     use ed25519_dalek::SigningKey;
-    use ed25519_dalek::pkcs8::{EncodePrivateKey, EncodePublicKey};
     use ed25519_dalek::pkcs8::spki::der::pem::LineEnding;
+    use ed25519_dalek::pkcs8::{EncodePrivateKey, EncodePublicKey};
 
     /// Generate a fresh Ed25519 key pair and return (private PEM, public PEM)
     fn generate_test_keypair() -> (String, String) {
@@ -406,7 +401,9 @@ mod tests {
             })
             .unwrap();
 
-        let new_pair = sts.refresh(&pair.refresh_token, &dk).expect("refresh should succeed");
+        let new_pair = sts
+            .refresh(&pair.refresh_token, &dk)
+            .expect("refresh should succeed");
         assert!(!new_pair.access_token.is_empty());
         assert_ne!(new_pair.access_token, pair.access_token);
     }
@@ -447,7 +444,9 @@ mod tests {
         let dk = decoding_key(&pub_pem);
 
         let err = sts.refresh("not.a.valid.jwt", &dk).unwrap_err();
-        assert!(err.to_string().contains("verification failed") || err.to_string().contains("failed"));
+        assert!(
+            err.to_string().contains("verification failed") || err.to_string().contains("failed")
+        );
     }
 
     // ---- revocation ----
@@ -510,13 +509,7 @@ mod tests {
 
         let uid = Uuid::new_v4();
         let tid = Uuid::new_v4();
-        sts.register_user(
-            "dave".into(),
-            "pw".into(),
-            uid,
-            tid,
-            vec!["editor".into()],
-        );
+        sts.register_user("dave".into(), "pw".into(), uid, tid, vec!["editor".into()]);
 
         let pair = sts
             .login(&LoginCredentials {
@@ -530,9 +523,8 @@ mod tests {
         validation.set_issuer(&["test-issuer"]);
         validation.set_audience::<&str>(&[]);
 
-        let token_data =
-            jsonwebtoken::decode::<StsClaims>(&pair.access_token, &dk, &validation)
-                .expect("access token should verify");
+        let token_data = jsonwebtoken::decode::<StsClaims>(&pair.access_token, &dk, &validation)
+            .expect("access token should verify");
 
         assert_eq!(token_data.claims.sub, uid.to_string());
         assert_eq!(token_data.claims.tenant_id, tid);

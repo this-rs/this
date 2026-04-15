@@ -275,10 +275,7 @@ impl ServerBuilder {
     /// ```
     pub fn with_auth_resolver<F>(mut self, name: impl Into<String>, func: F) -> Self
     where
-        F: Fn(&crate::core::auth::AuthContext, Option<&uuid::Uuid>) -> bool
-            + Send
-            + Sync
-            + 'static,
+        F: Fn(&crate::core::auth::AuthContext, Option<&uuid::Uuid>) -> bool + Send + Sync + 'static,
     {
         let name_str: String = name.into();
         let resolver = FnResolver::new(func, format!("Custom resolver: {}", name_str));
@@ -397,7 +394,10 @@ impl ServerBuilder {
                                 tracing::info!("WAMI auth provider auto-wired");
                             }
                             Err(e) => {
-                                tracing::warn!("Failed to create WamiAuthProvider: {}. Continuing without auth.", e);
+                                tracing::warn!(
+                                    "Failed to create WamiAuthProvider: {}. Continuing without auth.",
+                                    e
+                                );
                             }
                         }
 
@@ -428,7 +428,9 @@ impl ServerBuilder {
                     }
                     #[cfg(not(feature = "wami"))]
                     {
-                        tracing::warn!("Auth provider set to 'wami' but feature 'wami' is not enabled. Ignoring.");
+                        tracing::warn!(
+                            "Auth provider set to 'wami' but feature 'wami' is not enabled. Ignoring."
+                        );
                     }
                 }
                 AuthProviderType::Oidc => {
@@ -614,8 +616,8 @@ impl ServerBuilder {
             AuthMode::Bootstrap => {
                 // Auto-generate a key pair for development
                 use ed25519_dalek::SigningKey;
-                use ed25519_dalek::pkcs8::{EncodePrivateKey, spki::der::pem::LineEnding};
                 use ed25519_dalek::pkcs8::EncodePublicKey;
+                use ed25519_dalek::pkcs8::{EncodePrivateKey, spki::der::pem::LineEnding};
 
                 // Generate a random 32-byte secret using UUIDs (no rand dependency needed)
                 let u1 = uuid::Uuid::new_v4();
@@ -642,18 +644,14 @@ impl ServerBuilder {
                     .private_key
                     .as_ref()
                     .ok_or_else(|| {
-                        anyhow::anyhow!(
-                            "Embedded mode requires 'private_key' in wami config"
-                        )
+                        anyhow::anyhow!("Embedded mode requires 'private_key' in wami config")
                     })?
                     .clone();
                 let pub_key = wami_config
                     .public_key
                     .as_ref()
                     .ok_or_else(|| {
-                        anyhow::anyhow!(
-                            "Embedded mode requires 'public_key' in wami config"
-                        )
+                        anyhow::anyhow!("Embedded mode requires 'public_key' in wami config")
                     })?
                     .clone();
                 (priv_key, pub_key)
@@ -754,7 +752,7 @@ mod tests {
                     validation_rules: None,
                     events: None,
                     sinks: None,
-                auth: None,
+                    auth: None,
                 },
             }
         }
@@ -789,7 +787,7 @@ mod tests {
                     validation_rules: None,
                     events: None,
                     sinks: None,
-                auth: None,
+                    auth: None,
                 },
             }
         }

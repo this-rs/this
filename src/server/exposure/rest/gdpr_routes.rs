@@ -147,13 +147,20 @@ pub async fn erasure_handler(
         erased_at,
     };
 
-    (StatusCode::OK, Json(serde_json::to_value(response).unwrap())).into_response()
+    (
+        StatusCode::OK,
+        Json(serde_json::to_value(response).unwrap()),
+    )
+        .into_response()
 }
 
 /// Build the GDPR routes
 pub fn gdpr_routes(state: Arc<GdprState>) -> Router {
     Router::new()
-        .route("/tenants/{tenant_id}/data", routing::delete(erasure_handler))
+        .route(
+            "/tenants/{tenant_id}/data",
+            routing::delete(erasure_handler),
+        )
         .with_state(state)
 }
 
@@ -180,13 +187,15 @@ mod tests {
 
     /// Inject an AuthContext as a middleware layer for testing
     fn with_auth(app: Router, auth: AuthContext) -> Router {
-        app.layer(middleware::from_fn(move |mut req: Request<Body>, next: axum::middleware::Next| {
-            let auth = auth.clone();
-            async move {
-                req.extensions_mut().insert(auth);
-                next.run(req).await
-            }
-        }))
+        app.layer(middleware::from_fn(
+            move |mut req: Request<Body>, next: axum::middleware::Next| {
+                let auth = auth.clone();
+                async move {
+                    req.extensions_mut().insert(auth);
+                    next.run(req).await
+                }
+            },
+        ))
     }
 
     #[tokio::test]
@@ -377,7 +386,9 @@ mod tests {
                 Uuid::new_v4(),
                 None,
             );
-            LinkService::create(link_service.as_ref(), link).await.unwrap();
+            LinkService::create(link_service.as_ref(), link)
+                .await
+                .unwrap();
         }
 
         // Create a link for a different tenant (should survive)
@@ -388,7 +399,9 @@ mod tests {
             Uuid::new_v4(),
             None,
         );
-        LinkService::create(link_service.as_ref(), other_link).await.unwrap();
+        LinkService::create(link_service.as_ref(), other_link)
+            .await
+            .unwrap();
 
         let state = Arc::new(GdprState {
             notification_store: Arc::new(NotificationStore::new()),
