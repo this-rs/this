@@ -254,10 +254,10 @@ type SubscribeStream =
 /// Returns `None` if no tenant can be determined (anonymous / system calls).
 fn extract_tenant_id<T>(request: &Request<T>) -> Option<Uuid> {
     // 1. Try AuthContext from extensions (set by gRPC auth interceptor)
-    if let Some(auth) = request.extensions().get::<AuthContext>() {
-        if let Some(tid) = auth.tenant_id() {
-            return Some(tid);
-        }
+    if let Some(auth) = request.extensions().get::<AuthContext>()
+        && let Some(tid) = auth.tenant_id()
+    {
+        return Some(tid);
     }
 
     // 2. Try explicit metadata header
@@ -303,12 +303,11 @@ impl EventService for EventServiceImpl {
                 match rx.recv().await {
                     Ok(envelope) => {
                         // Tenant isolation: skip events from other tenants
-                        if let Some(conn_tenant) = tenant_id {
-                            if let Some(event_tenant) = envelope.tenant_id() {
-                                if conn_tenant != event_tenant {
-                                    continue;
-                                }
-                            }
+                        if let Some(conn_tenant) = tenant_id
+                            && let Some(event_tenant) = envelope.tenant_id()
+                            && conn_tenant != event_tenant
+                        {
+                            continue;
                         }
 
                         if matches_filter(&envelope.event, &filter) {
