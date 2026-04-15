@@ -266,8 +266,19 @@ impl ConnectionManager {
     /// *different* `tenant_id` are silently skipped. Events without a `tenant_id`
     /// (broadcast events) are always delivered. Anonymous connections (no tenant)
     /// receive all events.
+    ///
+    /// **User isolation for user-scoped events**: if the event payload contains a
+    /// `user_id` field AND the connection has an associated `user_id`, the event
+    /// is only delivered if both match. This prevents user A from receiving user B's
+    /// private events (e.g., chat messages). Events without `user_id` in the payload
+    /// or connections without an associated user are not filtered (backward compatible).
     async fn dispatch_event(&self, envelope: &EventEnvelope) {
         let connections = self.connections.read().await;
+
+        // Pre-extract user_id from the event payload (if present) to avoid
+        // re-parsing for every connection. This applies to entity events whose
+        // `data` JSON contains a top-level `user_id` string field.
+        let event_user_id = Self::extract_event_user_id(&envelope.event);
 
         for (connection_id, handle) in connections.iter() {
             // Tenant isolation check
@@ -278,6 +289,14 @@ impl ConnectionManager {
                     }
                 }
                 // If event has no tenant_id, it's a broadcast → deliver to all
+            }
+
+            // User isolation check: if BOTH the event and connection have a user_id,
+            // only deliver if they match. This prevents cross-user event leaks.
+            if let (Some(event_uid), Some(conn_uid)) = (&event_user_id, &handle.user_id) {
+                if event_uid != conn_uid {
+                    continue; // Skip: event belongs to a different user
+                }
             }
 
             for subscription in &handle.subscriptions {
@@ -296,6 +315,21 @@ impl ConnectionManager {
                     }
                 }
             }
+        }
+    }
+
+    /// Extract a `user_id` string from the event payload, if present.
+    ///
+    /// For `EntityEvent::Created` and `EntityEvent::Updated`, checks the `data`
+    /// JSON for a top-level `"user_id"` string field. Returns `None` for all
+    /// other event types or if the field is absent.
+    fn extract_event_user_id(event: &crate::core::events::FrameworkEvent) -> Option<String> {
+        use crate::core::events::{EntityEvent, FrameworkEvent};
+        match event {
+            FrameworkEvent::Entity(
+                EntityEvent::Created { data, .. } | EntityEvent::Updated { data, .. },
+            ) => data.get("user_id").and_then(|v| v.as_str()).map(String::from),
+            _ => None,
         }
     }
 
