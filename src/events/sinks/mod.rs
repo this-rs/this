@@ -121,6 +121,7 @@ pub struct SinkRegistry {
     ///
     /// When a delivery targets a specific tenant, tenant-scoped sinks take
     /// priority over global sinks with the same name.
+    #[allow(clippy::type_complexity)]
     tenant_sinks: RwLock<HashMap<uuid::Uuid, HashMap<String, Arc<dyn Sink>>>>,
 }
 
