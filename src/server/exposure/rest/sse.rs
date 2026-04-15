@@ -69,12 +69,11 @@ pub async fn sse_handler(
         let item = match result {
             Ok(envelope) => {
                 // Tenant isolation: skip events from other tenants
-                if let Some(conn_tenant) = tenant_id {
-                    if let Some(event_tenant) = envelope.tenant_id() {
-                        if conn_tenant != event_tenant {
-                            return std::future::ready(None);
-                        }
-                    }
+                if let Some(conn_tenant) = tenant_id
+                    && let Some(event_tenant) = envelope.tenant_id()
+                    && conn_tenant != event_tenant
+                {
+                    return std::future::ready(None);
                 }
 
                 if matches_filter(&envelope, &filter) {

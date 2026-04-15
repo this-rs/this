@@ -69,7 +69,7 @@ impl TenantScopedLinkService {
 
     /// Check if a link belongs to this tenant
     fn is_owned(&self, link: &LinkEntity) -> bool {
-        link.tenant_id.map_or(true, |tid| tid == self.tenant_id)
+        link.tenant_id.is_none_or(|tid| tid == self.tenant_id)
     }
 }
 

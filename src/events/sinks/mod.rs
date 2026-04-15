@@ -176,12 +176,11 @@ impl SinkRegistry {
         tenant_id: Option<&uuid::Uuid>,
     ) -> Option<Arc<dyn Sink>> {
         // Try tenant-scoped first
-        if let Some(tid) = tenant_id {
-            if let Some(tenant_map) = self.tenant_sinks.read().unwrap().get(tid) {
-                if let Some(sink) = tenant_map.get(name) {
-                    return Some(sink.clone());
-                }
-            }
+        if let Some(tid) = tenant_id
+            && let Some(tenant_map) = self.tenant_sinks.read().unwrap().get(tid)
+            && let Some(sink) = tenant_map.get(name)
+        {
+            return Some(sink.clone());
         }
 
         // Fallback to global
