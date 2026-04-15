@@ -104,12 +104,9 @@ impl RestExposure {
 
         if gdpr_enabled {
             let gdpr_state = std::sync::Arc::new(gdpr_routes::GdprState {
-                notification_store: host
-                    .notification_store
-                    .clone()
-                    .unwrap_or_else(|| std::sync::Arc::new(
-                        crate::events::sinks::in_app::NotificationStore::new(),
-                    )),
+                notification_store: host.notification_store.clone().unwrap_or_else(|| {
+                    std::sync::Arc::new(crate::events::sinks::in_app::NotificationStore::new())
+                }),
                 link_service: Some(host.link_service.clone()),
                 sink_registry: host.sink_registry.clone(),
                 event_bus: host.event_bus.clone(),
@@ -123,7 +120,9 @@ impl RestExposure {
         if let Some(ref sts_state) = host.sts_state {
             let auth_routes = auth_routes::auth_router(sts_state.clone());
             app = app.merge(auth_routes);
-            tracing::info!("STS auth endpoints auto-wired (/auth/token, /auth/keys, /auth/refresh, /auth/revoke)");
+            tracing::info!(
+                "STS auth endpoints auto-wired (/auth/token, /auth/keys, /auth/refresh, /auth/revoke)"
+            );
         }
 
         // Auto-wire auth middleware if auth provider is configured

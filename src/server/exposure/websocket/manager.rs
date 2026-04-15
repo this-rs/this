@@ -328,7 +328,10 @@ impl ConnectionManager {
         match event {
             FrameworkEvent::Entity(
                 EntityEvent::Created { data, .. } | EntityEvent::Updated { data, .. },
-            ) => data.get("user_id").and_then(|v| v.as_str()).map(String::from),
+            ) => data
+                .get("user_id")
+                .and_then(|v| v.as_str())
+                .map(String::from),
             _ => None,
         }
     }

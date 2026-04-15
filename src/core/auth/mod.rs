@@ -387,9 +387,7 @@ impl AuthPolicy {
 
             AuthPolicy::Custom(f) => f(context),
 
-            AuthPolicy::Not(inner) => {
-                !inner.check_with_resolver(context, registry, resource_id)
-            }
+            AuthPolicy::Not(inner) => !inner.check_with_resolver(context, registry, resource_id),
 
             AuthPolicy::Resolver(name) => {
                 if let Some(reg) = registry {
@@ -457,13 +455,13 @@ impl AuthPolicy {
             "owner" => AuthPolicy::Owner,
             "service_only" => AuthPolicy::ServiceOnly,
             "admin_only" => AuthPolicy::AdminOnly,
-            "owner_or_service" => {
-                AuthPolicy::Or(vec![AuthPolicy::Owner, AuthPolicy::ServiceOnly])
-            }
+            "owner_or_service" => AuthPolicy::Or(vec![AuthPolicy::Owner, AuthPolicy::ServiceOnly]),
             s if s.starts_with("all:") => {
                 let parts = s.strip_prefix("all:").unwrap();
-                let policies: Vec<AuthPolicy> =
-                    parts.split(',').map(|p| AuthPolicy::parse_policy(p.trim())).collect();
+                let policies: Vec<AuthPolicy> = parts
+                    .split(',')
+                    .map(|p| AuthPolicy::parse_policy(p.trim()))
+                    .collect();
                 if policies.len() == 1 {
                     policies.into_iter().next().unwrap()
                 } else {
@@ -472,8 +470,10 @@ impl AuthPolicy {
             }
             s if s.starts_with("any:") => {
                 let parts = s.strip_prefix("any:").unwrap();
-                let policies: Vec<AuthPolicy> =
-                    parts.split(',').map(|p| AuthPolicy::parse_policy(p.trim())).collect();
+                let policies: Vec<AuthPolicy> = parts
+                    .split(',')
+                    .map(|p| AuthPolicy::parse_policy(p.trim()))
+                    .collect();
                 if policies.len() == 1 {
                     policies.into_iter().next().unwrap()
                 } else {
@@ -1123,10 +1123,7 @@ mod tests {
 
     #[test]
     fn test_resolver_description() {
-        let resolver = FnResolver::new(
-            |_: &AuthContext, _: Option<&Uuid>| true,
-            "Always allow",
-        );
+        let resolver = FnResolver::new(|_: &AuthContext, _: Option<&Uuid>| true, "Always allow");
         assert_eq!(resolver.description(), "Always allow");
     }
 

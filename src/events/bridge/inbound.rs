@@ -10,9 +10,7 @@
 
 use super::dedup::DedupFilter;
 use super::types::{MutationBusSubscriber, MutationEvent};
-use crate::core::events::{
-    EntityEvent, EventBus, EventEnvelope, FrameworkEvent, LinkEvent,
-};
+use crate::core::events::{EntityEvent, EventBus, EventEnvelope, FrameworkEvent, LinkEvent};
 use std::collections::HashSet;
 use std::sync::Arc;
 
@@ -67,10 +65,9 @@ impl InboundBridge {
                                 translate_to_framework(mutation, &self.registered_types)
                             {
                                 let envelope = match batch.tenant_id {
-                                    Some(tenant_id) => EventEnvelope::new_with_tenant(
-                                        framework_event,
-                                        tenant_id,
-                                    ),
+                                    Some(tenant_id) => {
+                                        EventEnvelope::new_with_tenant(framework_event, tenant_id)
+                                    }
                                     None => EventEnvelope::new(framework_event),
                                 };
 
@@ -78,8 +75,7 @@ impl InboundBridge {
                                 // outbound bridge sees it when it receives the event
                                 self.dedup.mark(envelope.id);
 
-                                let receivers =
-                                    self.event_bus.publish_envelope_raw(envelope);
+                                let receivers = self.event_bus.publish_envelope_raw(envelope);
 
                                 tracing::debug!(
                                     receivers = receivers,
@@ -90,9 +86,7 @@ impl InboundBridge {
                         }
                     }
                     None => {
-                        tracing::info!(
-                            "InboundBridge: MutationBus closed, shutting down"
-                        );
+                        tracing::info!("InboundBridge: MutationBus closed, shutting down");
                         break;
                     }
                 }
@@ -117,7 +111,9 @@ fn translate_to_framework(
             properties,
         } => {
             // Find the first label that matches a registered type
-            let entity_type = labels.iter().find(|l| registered_types.contains(l.as_str()))?;
+            let entity_type = labels
+                .iter()
+                .find(|l| registered_types.contains(l.as_str()))?;
             let data = serde_json::Value::Object(
                 properties
                     .iter()
@@ -274,9 +270,7 @@ mod tests {
 
         let result = translate_to_framework(&event, &registered()).unwrap();
         match result {
-            FrameworkEvent::Entity(EntityEvent::Deleted {
-                entity_id, ..
-            }) => {
+            FrameworkEvent::Entity(EntityEvent::Deleted { entity_id, .. }) => {
                 assert_eq!(entity_id, id);
             }
             other => panic!("Expected Entity::Deleted, got {:?}", other),

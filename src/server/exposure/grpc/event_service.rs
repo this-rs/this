@@ -201,7 +201,10 @@ fn envelope_to_response(envelope: &EventEnvelope) -> EventResponse {
         },
         FrameworkEvent::Cognitive(_) => (
             "cognitive".to_string(),
-            event.entity_id().map(|id| id.to_string()).unwrap_or_default(),
+            event
+                .entity_id()
+                .map(|id| id.to_string())
+                .unwrap_or_default(),
             String::new(),
             String::new(),
             String::new(),

@@ -124,7 +124,11 @@ impl CognitiveNotificationBridge {
 
     /// Create with default configuration
     pub fn with_defaults(event_bus: Arc<EventBus>, sink_registry: Arc<SinkRegistry>) -> Self {
-        Self::new(event_bus, sink_registry, CognitiveNotificationConfig::default())
+        Self::new(
+            event_bus,
+            sink_registry,
+            CognitiveNotificationConfig::default(),
+        )
     }
 
     /// Start the bridge as a background task
@@ -137,9 +141,7 @@ impl CognitiveNotificationBridge {
                 match rx.recv().await {
                     Ok(envelope) => {
                         if let FrameworkEvent::Cognitive(ref signal) = envelope.event {
-                            if let Some(notification) =
-                                self.evaluate_signal(signal)
-                            {
+                            if let Some(notification) = self.evaluate_signal(signal) {
                                 let sinks = self.resolve_sinks(&notification.signal_type);
                                 let tenant_id = envelope.tenant_id();
 
@@ -164,9 +166,7 @@ impl CognitiveNotificationBridge {
                                     }
                                     context.insert(
                                         "signal_type".to_string(),
-                                        serde_json::Value::String(
-                                            notification.signal_type.clone(),
-                                        ),
+                                        serde_json::Value::String(notification.signal_type.clone()),
                                     );
 
                                     if let Err(e) = self
@@ -193,11 +193,7 @@ impl CognitiveNotificationBridge {
                         }
                     }
                     Err(broadcast::error::RecvError::Lagged(n)) => {
-                        tracing::warn!(
-                            lagged = n,
-                            "CognitiveBridge lagged, {} events dropped",
-                            n
-                        );
+                        tracing::warn!(lagged = n, "CognitiveBridge lagged, {} events dropped", n);
                     }
                     Err(broadcast::error::RecvError::Closed) => {
                         tracing::info!("CognitiveBridge: EventBus closed, shutting down");
@@ -291,7 +287,9 @@ fn signal_title(signal: &CognitiveSignal) -> String {
         CognitiveSignal::ScarCreated { scar_type, .. } => {
             format!("Neural scar detected: {}", scar_type)
         }
-        CognitiveSignal::CoChangeDetected { nodes, strength, .. } => {
+        CognitiveSignal::CoChangeDetected {
+            nodes, strength, ..
+        } => {
             format!(
                 "Co-change pattern ({:.0}%) across {} nodes",
                 strength * 100.0,
@@ -301,10 +299,16 @@ fn signal_title(signal: &CognitiveSignal) -> String {
         CognitiveSignal::EpisodeLearned { lesson, .. } => {
             format!("Episode learned: {}", truncate(lesson, 60))
         }
-        CognitiveSignal::AnomalyDetected { anomaly_type, score, .. } => {
+        CognitiveSignal::AnomalyDetected {
+            anomaly_type,
+            score,
+            ..
+        } => {
             format!("Anomaly detected: {} (score: {:.2})", anomaly_type, score)
         }
-        CognitiveSignal::StigmergyLockIn { path, intensity, .. } => {
+        CognitiveSignal::StigmergyLockIn {
+            path, intensity, ..
+        } => {
             format!(
                 "Stigmergic lock-in ({:.0}%) on path of {} nodes",
                 intensity * 100.0,
@@ -486,11 +490,7 @@ mod tests {
     #[test]
     fn test_evaluate_signal_disabled_rule() {
         let mut config = CognitiveNotificationConfig::default();
-        config
-            .rules
-            .get_mut("scar_created")
-            .unwrap()
-            .enabled = false;
+        config.rules.get_mut("scar_created").unwrap().enabled = false;
 
         let bridge = CognitiveNotificationBridge::new(
             Arc::new(EventBus::new(16)),
@@ -509,11 +509,8 @@ mod tests {
     #[test]
     fn test_resolve_sinks_rule_specific() {
         let mut config = CognitiveNotificationConfig::default();
-        config
-            .rules
-            .get_mut("anomaly_detected")
-            .unwrap()
-            .sinks = vec!["webhook".to_string(), "slack".to_string()];
+        config.rules.get_mut("anomaly_detected").unwrap().sinks =
+            vec!["webhook".to_string(), "slack".to_string()];
 
         let bridge = CognitiveNotificationBridge::new(
             Arc::new(EventBus::new(16)),
@@ -613,10 +610,7 @@ mod tests {
         });
         registry.register("in_app", mock_sink.clone());
 
-        let bridge = CognitiveNotificationBridge::with_defaults(
-            event_bus.clone(),
-            registry,
-        );
+        let bridge = CognitiveNotificationBridge::with_defaults(event_bus.clone(), registry);
         let handle = bridge.start();
 
         // Yield to let the bridge subscribe
@@ -636,10 +630,7 @@ mod tests {
         let delivered = mock_sink.delivered.lock().unwrap();
         assert_eq!(delivered.len(), 1);
         assert_eq!(delivered[0]["signal_type"], "stigmergy_lock_in");
-        assert!(delivered[0]["title"]
-            .as_str()
-            .unwrap()
-            .contains("95%"));
+        assert!(delivered[0]["title"].as_str().unwrap().contains("95%"));
 
         handle.abort();
     }

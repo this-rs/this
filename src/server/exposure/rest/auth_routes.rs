@@ -5,9 +5,7 @@
 //! - POST /auth/refresh -- Refresh access token
 //! - POST /auth/revoke  -- Revoke a token by JTI
 
-use crate::core::auth::sts::{
-    LoginCredentials, RefreshRequest, RevokeRequest, StsService,
-};
+use crate::core::auth::sts::{LoginCredentials, RefreshRequest, RevokeRequest, StsService};
 use axum::{Json, Router, extract::State, http::StatusCode, response::IntoResponse, routing};
 use std::sync::Arc;
 
@@ -25,11 +23,7 @@ pub async fn login_handler(
     Json(credentials): Json<LoginCredentials>,
 ) -> impl IntoResponse {
     match state.sts.login(&credentials) {
-        Ok(pair) => (
-            StatusCode::OK,
-            Json(serde_json::to_value(pair).unwrap()),
-        )
-            .into_response(),
+        Ok(pair) => (StatusCode::OK, Json(serde_json::to_value(pair).unwrap())).into_response(),
         Err(_) => (
             StatusCode::UNAUTHORIZED,
             Json(serde_json::json!({"error": "invalid_credentials"})),
@@ -56,11 +50,7 @@ pub async fn refresh_handler(
     Json(body): Json<RefreshRequest>,
 ) -> impl IntoResponse {
     match state.sts.refresh(&body.refresh_token, &state.decoding_key) {
-        Ok(pair) => (
-            StatusCode::OK,
-            Json(serde_json::to_value(pair).unwrap()),
-        )
-            .into_response(),
+        Ok(pair) => (StatusCode::OK, Json(serde_json::to_value(pair).unwrap())).into_response(),
         Err(_) => (
             StatusCode::UNAUTHORIZED,
             Json(serde_json::json!({"error": "invalid_refresh_token"})),

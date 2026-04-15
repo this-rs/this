@@ -66,11 +66,7 @@ impl OutboundBridge {
                         }
                     }
                     Err(broadcast::error::RecvError::Lagged(n)) => {
-                        tracing::warn!(
-                            lagged = n,
-                            "OutboundBridge lagged, {} events dropped",
-                            n
-                        );
+                        tracing::warn!(lagged = n, "OutboundBridge lagged, {} events dropped", n);
                     }
                     Err(broadcast::error::RecvError::Closed) => {
                         tracing::info!("OutboundBridge: EventBus closed, shutting down");
@@ -123,11 +119,9 @@ fn translate_to_mutations(event: &FrameworkEvent) -> Option<Vec<MutationEvent>> 
                     Some(mutations)
                 }
             }
-            EntityEvent::Deleted { entity_id, .. } => {
-                Some(vec![MutationEvent::NodeDeleted {
-                    node_id: *entity_id,
-                }])
-            }
+            EntityEvent::Deleted { entity_id, .. } => Some(vec![MutationEvent::NodeDeleted {
+                node_id: *entity_id,
+            }]),
         },
         FrameworkEvent::Link(link_event) => match link_event {
             LinkEvent::Created {
@@ -394,11 +388,7 @@ mod tests {
         });
         let dedup = Arc::new(DedupFilter::new(Duration::from_secs(5)));
 
-        let bridge = OutboundBridge::new(
-            event_bus.clone(),
-            publisher.clone(),
-            dedup.clone(),
-        );
+        let bridge = OutboundBridge::new(event_bus.clone(), publisher.clone(), dedup.clone());
 
         let handle = bridge.start();
 

@@ -634,8 +634,7 @@ mod tests {
         flow.tenant_id = Some(tenant_a);
 
         let link_service = Arc::new(MockLinkService) as Arc<dyn LinkService>;
-        let runtime =
-            FlowRuntime::new(vec![flow], event_log.clone(), link_service, HashMap::new());
+        let runtime = FlowRuntime::new(vec![flow], event_log.clone(), link_service, HashMap::new());
 
         let handle = runtime.run(SeekPosition::Latest);
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
@@ -685,8 +684,7 @@ mod tests {
         // flow.tenant_id is None by default
 
         let link_service = Arc::new(MockLinkService) as Arc<dyn LinkService>;
-        let runtime =
-            FlowRuntime::new(vec![flow], event_log.clone(), link_service, HashMap::new());
+        let runtime = FlowRuntime::new(vec![flow], event_log.clone(), link_service, HashMap::new());
 
         let handle = runtime.run(SeekPosition::Latest);
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
