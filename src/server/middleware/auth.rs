@@ -100,10 +100,7 @@ pub async fn auth_middleware(
 ///     .route("/api/orders", get(list_orders))
 ///     .layer(middleware::from_fn_with_state(auth_layer, auth_middleware));
 /// ```
-pub fn build_auth_layer(
-    provider: Arc<dyn AuthProvider>,
-    default_policy: String,
-) -> AuthLayer {
+pub fn build_auth_layer(provider: Arc<dyn AuthProvider>, default_policy: String) -> AuthLayer {
     AuthLayer::new(provider, default_policy)
 }
 
@@ -111,12 +108,12 @@ pub fn build_auth_layer(
 mod tests {
     use super::*;
     use crate::core::auth::{AuthContext, NoAuthProvider};
+    use axum::Extension;
+    use axum::Router;
     use axum::body::Body;
     use axum::http::Request;
     use axum::middleware;
     use axum::routing::get;
-    use axum::Extension;
-    use axum::Router;
     use tower::ServiceExt;
 
     async fn echo_auth(Extension(auth): Extension<AuthContext>) -> String {
@@ -142,12 +139,7 @@ mod tests {
         let app = test_app(provider, "public");
 
         let response = app
-            .oneshot(
-                Request::builder()
-                    .uri("/test")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
+            .oneshot(Request::builder().uri("/test").body(Body::empty()).unwrap())
             .await
             .unwrap();
 
@@ -164,12 +156,7 @@ mod tests {
         let app = test_app(provider, "public");
 
         let response = app
-            .oneshot(
-                Request::builder()
-                    .uri("/test")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
+            .oneshot(Request::builder().uri("/test").body(Body::empty()).unwrap())
             .await
             .unwrap();
 
@@ -212,12 +199,7 @@ mod tests {
         let app = test_app(provider, "authenticated");
 
         let response = app
-            .oneshot(
-                Request::builder()
-                    .uri("/test")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
+            .oneshot(Request::builder().uri("/test").body(Body::empty()).unwrap())
             .await
             .unwrap();
 
@@ -260,12 +242,7 @@ mod tests {
         let app = test_app(provider, "authenticated");
 
         let response = app
-            .oneshot(
-                Request::builder()
-                    .uri("/test")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
+            .oneshot(Request::builder().uri("/test").body(Body::empty()).unwrap())
             .await
             .unwrap();
 
@@ -303,12 +280,7 @@ mod tests {
         let app = test_app(provider, "public");
 
         let response = app
-            .oneshot(
-                Request::builder()
-                    .uri("/test")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
+            .oneshot(Request::builder().uri("/test").body(Body::empty()).unwrap())
             .await
             .unwrap();
 

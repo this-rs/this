@@ -117,8 +117,8 @@ impl WamiAuthProvider {
             .filter(|k| !k.is_empty())
             .ok_or_else(|| anyhow!("wami.public_key is required (cannot be empty)"))?;
 
-        let decoding_key = Self::parse_public_key(public_key)
-            .context("Failed to parse Ed25519 public key")?;
+        let decoding_key =
+            Self::parse_public_key(public_key).context("Failed to parse Ed25519 public key")?;
 
         let mut validation = Validation::new(Algorithm::EdDSA);
 
@@ -156,29 +156,23 @@ impl WamiAuthProvider {
 
         if key_str.starts_with("-----BEGIN") {
             // PEM format
-            DecodingKey::from_ed_pem(key_str.as_bytes())
-                .context("Invalid Ed25519 PEM public key")
+            DecodingKey::from_ed_pem(key_str.as_bytes()).context("Invalid Ed25519 PEM public key")
         } else {
             // Raw base64 — decode to 32-byte Ed25519 public key
             use base64::Engine;
             let bytes = base64::engine::general_purpose::STANDARD
                 .decode(key_str)
-                .or_else(|_| {
-                    base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(key_str)
-                })
+                .or_else(|_| base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(key_str))
                 .context("Public key is not valid base64")?;
 
             if bytes.len() != 32 {
-                bail!(
-                    "Ed25519 public key must be 32 bytes, got {}",
-                    bytes.len()
-                );
+                bail!("Ed25519 public key must be 32 bytes, got {}", bytes.len());
             }
 
             // Validate the key is a valid Ed25519 point
             let key_bytes: [u8; 32] = bytes.as_slice().try_into().unwrap();
-            let verify_key = VerifyingKey::from_bytes(&key_bytes)
-                .context("Invalid Ed25519 public key bytes")?;
+            let verify_key =
+                VerifyingKey::from_bytes(&key_bytes).context("Invalid Ed25519 public key bytes")?;
 
             // jsonwebtoken expects SPKI DER format, not raw bytes
             use ed25519_dalek::pkcs8::EncodePublicKey;
@@ -194,7 +188,10 @@ impl WamiAuthProvider {
         // Basic structure validation before sending to jsonwebtoken
         let dot_count = token.chars().filter(|c| *c == '.').count();
         if dot_count != 2 {
-            bail!("Malformed JWT: expected 3 segments separated by dots, got {}", dot_count + 1);
+            bail!(
+                "Malformed JWT: expected 3 segments separated by dots, got {}",
+                dot_count + 1
+            );
         }
 
         jsonwebtoken::decode::<StsClaims>(token, &self.decoding_key, &self.validation)
@@ -287,9 +284,9 @@ impl AuthProvider for WamiAuthProvider {
 mod tests {
     use super::*;
     use crate::config::auth::{AuthConfig, AuthProviderType, WamiConfig};
+    use chrono::Utc;
     use ed25519_dalek::SigningKey;
     use jsonwebtoken::{EncodingKey, Header};
-    use chrono::Utc;
 
     /// Generate a fresh Ed25519 key pair for testing
     fn generate_test_keys() -> (SigningKey, VerifyingKey) {
@@ -449,7 +446,9 @@ mod tests {
         let err = provider.verify_token(&token).unwrap_err();
         let err_msg = err.to_string().to_lowercase();
         assert!(
-            err_msg.contains("exp") || err_msg.contains("expired") || err_msg.contains("verification failed"),
+            err_msg.contains("exp")
+                || err_msg.contains("expired")
+                || err_msg.contains("verification failed"),
             "Expected expiration error, got: {}",
             err
         );
@@ -743,7 +742,10 @@ mod tests {
         let provider = WamiAuthProvider::from_config(&config).unwrap();
 
         let mut headers = HeaderMap::new();
-        headers.insert("Authorization", "Bearer invalid.token.here".parse().unwrap());
+        headers.insert(
+            "Authorization",
+            "Bearer invalid.token.here".parse().unwrap(),
+        );
 
         let err = provider.extract_context(&headers).await.unwrap_err();
         assert!(err.to_string().contains("verification failed"));

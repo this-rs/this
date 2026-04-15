@@ -22,11 +22,7 @@
 
 use crate::core::auth::AuthContext;
 use crate::core::tenant::TenantContext;
-use axum::{
-    extract::Request,
-    middleware::Next,
-    response::Response,
-};
+use axum::{extract::Request, middleware::Next, response::Response};
 use uuid::Uuid;
 
 /// Axum middleware function that resolves the tenant context
@@ -102,12 +98,7 @@ mod tests {
     async fn test_no_tenant_returns_no_tenant() {
         let app = test_app();
         let response = app
-            .oneshot(
-                Request::builder()
-                    .uri("/test")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
+            .oneshot(Request::builder().uri("/test").body(Body::empty()).unwrap())
             .await
             .unwrap();
 
@@ -171,23 +162,20 @@ mod tests {
         let app = Router::new()
             .route("/test", get(echo_tenant))
             .layer(middleware::from_fn(tenant_resolver_middleware))
-            .layer(middleware::from_fn(move |mut req: Request<Body>, next: Next| {
-                let auth = AuthContext::User {
-                    user_id: uid,
-                    tenant_id: tid,
-                    roles: vec![],
-                };
-                req.extensions_mut().insert(auth);
-                async move { next.run(req).await }
-            }));
+            .layer(middleware::from_fn(
+                move |mut req: Request<Body>, next: Next| {
+                    let auth = AuthContext::User {
+                        user_id: uid,
+                        tenant_id: tid,
+                        roles: vec![],
+                    };
+                    req.extensions_mut().insert(auth);
+                    async move { next.run(req).await }
+                },
+            ));
 
         let response = app
-            .oneshot(
-                Request::builder()
-                    .uri("/test")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
+            .oneshot(Request::builder().uri("/test").body(Body::empty()).unwrap())
             .await
             .unwrap();
 
@@ -252,12 +240,7 @@ mod tests {
             }));
 
         let response = app
-            .oneshot(
-                Request::builder()
-                    .uri("/test")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
+            .oneshot(Request::builder().uri("/test").body(Body::empty()).unwrap())
             .await
             .unwrap();
 

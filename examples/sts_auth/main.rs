@@ -38,7 +38,10 @@ gdpr:
         println!("     Provider:  {:?}", config.provider);
         println!("     Policy:    {}", config.default_policy);
         println!("     Tenant:    enabled={}", config.tenant.enabled);
-        println!("     GDPR:      erasure_cascade={}", config.gdpr.erasure_cascade);
+        println!(
+            "     GDPR:      erasure_cascade={}",
+            config.gdpr.erasure_cascade
+        );
 
         let wami = config.wami.as_ref().expect("wami config");
         println!("     WAMI mode: {:?}", wami.mode);
@@ -46,35 +49,53 @@ gdpr:
         println!("     Refresh:   {}s", wami.refresh_ttl_secs);
 
         // Demonstrate STS token issuance
-        use this::core::auth::sts::*;
         use ed25519_dalek::SigningKey;
-        use ed25519_dalek::pkcs8::{EncodePrivateKey, EncodePublicKey};
         use ed25519_dalek::pkcs8::spki::der::pem::LineEnding;
+        use ed25519_dalek::pkcs8::{EncodePrivateKey, EncodePublicKey};
+        use this::core::auth::sts::*;
 
         // Generate bootstrap keys
         let secret = [42u8; 32]; // deterministic for demo
         let signing_key = SigningKey::from_bytes(&secret);
         let verifying_key = signing_key.verifying_key();
 
-        let priv_pem = signing_key.to_pkcs8_pem(LineEnding::LF).expect("priv pem").to_string();
-        let pub_pem = verifying_key.to_public_key_pem(LineEnding::LF).expect("pub pem");
+        let priv_pem = signing_key
+            .to_pkcs8_pem(LineEnding::LF)
+            .expect("priv pem")
+            .to_string();
+        let pub_pem = verifying_key
+            .to_public_key_pem(LineEnding::LF)
+            .expect("pub pem");
 
-        let sts = StsService::new(&priv_pem, "this-rs-example".to_string())
-            .expect("create STS");
+        let sts = StsService::new(&priv_pem, "this-rs-example".to_string()).expect("create STS");
 
         // Register demo users
         let tenant_a = uuid::Uuid::new_v4();
         let tenant_b = uuid::Uuid::new_v4();
 
-        sts.register_user("alice".into(), "secret".into(), uuid::Uuid::new_v4(), tenant_a, vec!["admin".into()]);
-        sts.register_user("bob".into(), "secret".into(), uuid::Uuid::new_v4(), tenant_b, vec!["viewer".into()]);
+        sts.register_user(
+            "alice".into(),
+            "secret".into(),
+            uuid::Uuid::new_v4(),
+            tenant_a,
+            vec!["admin".into()],
+        );
+        sts.register_user(
+            "bob".into(),
+            "secret".into(),
+            uuid::Uuid::new_v4(),
+            tenant_b,
+            vec!["viewer".into()],
+        );
         println!("\n[OK] Registered 2 users in 2 tenants");
 
         // Login Alice
-        let pair = sts.login(&LoginCredentials {
-            username: "alice".into(),
-            password: "secret".into(),
-        }).expect("login");
+        let pair = sts
+            .login(&LoginCredentials {
+                username: "alice".into(),
+                password: "secret".into(),
+            })
+            .expect("login");
         println!("\n[OK] Alice logged in:");
         println!("     Token type: {}", pair.token_type);
         println!("     Expires in: {}s", pair.expires_in);

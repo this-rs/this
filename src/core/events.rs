@@ -99,16 +99,10 @@ pub enum CognitiveSignal {
     },
 
     /// Co-change pattern detected between nodes (temporal coupling)
-    CoChangeDetected {
-        nodes: Vec<Uuid>,
-        strength: f64,
-    },
+    CoChangeDetected { nodes: Vec<Uuid>, strength: f64 },
 
     /// An episode was learned from a sequence of operations
-    EpisodeLearned {
-        episode_id: Uuid,
-        lesson: String,
-    },
+    EpisodeLearned { episode_id: Uuid, lesson: String },
 
     /// An anomaly was detected in the graph structure or behavior
     AnomalyDetected {
@@ -118,10 +112,7 @@ pub enum CognitiveSignal {
     },
 
     /// Stigmergic lock-in detected on a path (pheromone intensity above threshold)
-    StigmergyLockIn {
-        path: Vec<Uuid>,
-        intensity: f64,
-    },
+    StigmergyLockIn { path: Vec<Uuid>, intensity: f64 },
 }
 
 /// Top-level framework event that wraps entity, link, and cognitive events

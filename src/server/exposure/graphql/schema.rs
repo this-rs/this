@@ -599,7 +599,7 @@ mod tests {
             validation_rules: None,
             events: None,
             sinks: None,
-        auth: None,
+            auth: None,
         };
 
         let mut registry = EntityRegistry::new();

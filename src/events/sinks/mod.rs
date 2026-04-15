@@ -496,11 +496,7 @@ mod tests {
     fn test_register_for_tenant() {
         let registry = SinkRegistry::new();
         let tenant = uuid::Uuid::new_v4();
-        registry.register_for_tenant(
-            tenant,
-            "webhook",
-            Arc::new(TestSink::new("tenant-webhook")),
-        );
+        registry.register_for_tenant(tenant, "webhook", Arc::new(TestSink::new("tenant-webhook")));
 
         // Not visible as a global sink
         assert!(registry.get("webhook").is_none());
@@ -517,11 +513,7 @@ mod tests {
         let tenant = uuid::Uuid::new_v4();
 
         registry.register("webhook", Arc::new(TestSink::new("global-webhook")));
-        registry.register_for_tenant(
-            tenant,
-            "webhook",
-            Arc::new(TestSink::new("tenant-webhook")),
-        );
+        registry.register_for_tenant(tenant, "webhook", Arc::new(TestSink::new("tenant-webhook")));
 
         // Without tenant → global
         let global = registry.get_for_tenant("webhook", None).unwrap();
@@ -573,11 +565,7 @@ mod tests {
         let registry = SinkRegistry::new();
         let tenant = uuid::Uuid::new_v4();
 
-        registry.register_for_tenant(
-            tenant,
-            "webhook",
-            Arc::new(TestSink::new("tenant-webhook")),
-        );
+        registry.register_for_tenant(tenant, "webhook", Arc::new(TestSink::new("tenant-webhook")));
         assert!(registry.get_for_tenant("webhook", Some(&tenant)).is_some());
 
         registry.remove_tenant_sinks(&tenant);

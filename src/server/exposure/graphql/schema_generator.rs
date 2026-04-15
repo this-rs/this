@@ -663,7 +663,7 @@ mod tests {
             validation_rules: None,
             events: None,
             sinks: None,
-        auth: None,
+            auth: None,
         };
 
         Arc::new(
@@ -1078,7 +1078,7 @@ mod tests {
             validation_rules: None,
             events: None,
             sinks: None,
-        auth: None,
+            auth: None,
         };
 
         let notification_store = Arc::new(NotificationStore::new());
