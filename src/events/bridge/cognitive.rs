@@ -140,56 +140,56 @@ impl CognitiveNotificationBridge {
             loop {
                 match rx.recv().await {
                     Ok(envelope) => {
-                        if let FrameworkEvent::Cognitive(ref signal) = envelope.event {
-                            if let Some(notification) = self.evaluate_signal(signal) {
-                                let sinks = self.resolve_sinks(&notification.signal_type);
-                                let tenant_id = envelope.tenant_id();
+                        if let FrameworkEvent::Cognitive(ref signal) = envelope.event
+                            && let Some(notification) = self.evaluate_signal(signal)
+                        {
+                            let sinks = self.resolve_sinks(&notification.signal_type);
+                            let tenant_id = envelope.tenant_id();
 
-                                for sink_name in &sinks {
-                                    let payload = match serde_json::to_value(&notification) {
-                                        Ok(p) => p,
-                                        Err(e) => {
-                                            tracing::warn!(
-                                                error = %e,
-                                                "CognitiveBridge: failed to serialize notification"
-                                            );
-                                            continue;
-                                        }
-                                    };
-
-                                    let mut context = HashMap::new();
-                                    if let Some(tid) = tenant_id {
-                                        context.insert(
-                                            "tenant_id".to_string(),
-                                            serde_json::Value::String(tid.to_string()),
-                                        );
-                                    }
-                                    context.insert(
-                                        "signal_type".to_string(),
-                                        serde_json::Value::String(notification.signal_type.clone()),
-                                    );
-
-                                    if let Err(e) = self
-                                        .sink_registry
-                                        .deliver(sink_name, payload, None, &context)
-                                        .await
-                                    {
+                            for sink_name in &sinks {
+                                let payload = match serde_json::to_value(&notification) {
+                                    Ok(p) => p,
+                                    Err(e) => {
                                         tracing::warn!(
-                                            sink = %sink_name,
-                                            signal_type = %notification.signal_type,
                                             error = %e,
-                                            "CognitiveBridge: failed to deliver to sink"
+                                            "CognitiveBridge: failed to serialize notification"
                                         );
+                                        continue;
                                     }
-                                }
+                                };
 
-                                tracing::debug!(
-                                    signal_type = %notification.signal_type,
-                                    tenant_id = ?tenant_id,
-                                    sinks_count = sinks.len(),
-                                    "CognitiveBridge: notification delivered"
+                                let mut context = HashMap::new();
+                                if let Some(tid) = tenant_id {
+                                    context.insert(
+                                        "tenant_id".to_string(),
+                                        serde_json::Value::String(tid.to_string()),
+                                    );
+                                }
+                                context.insert(
+                                    "signal_type".to_string(),
+                                    serde_json::Value::String(notification.signal_type.clone()),
                                 );
+
+                                if let Err(e) = self
+                                    .sink_registry
+                                    .deliver(sink_name, payload, None, &context)
+                                    .await
+                                {
+                                    tracing::warn!(
+                                        sink = %sink_name,
+                                        signal_type = %notification.signal_type,
+                                        error = %e,
+                                        "CognitiveBridge: failed to deliver to sink"
+                                    );
+                                }
                             }
+
+                            tracing::debug!(
+                                signal_type = %notification.signal_type,
+                                tenant_id = ?tenant_id,
+                                sinks_count = sinks.len(),
+                                "CognitiveBridge: notification delivered"
+                            );
                         }
                     }
                     Err(broadcast::error::RecvError::Lagged(n)) => {
@@ -222,10 +222,10 @@ impl CognitiveNotificationBridge {
 
         // Check threshold
         let score = signal_score(signal);
-        if let Some(threshold) = rule.threshold {
-            if score < threshold {
-                return None;
-            }
+        if let Some(threshold) = rule.threshold
+            && score < threshold
+        {
+            return None;
         }
 
         Some(CognitiveNotification {
@@ -239,10 +239,10 @@ impl CognitiveNotificationBridge {
 
     /// Resolve which sinks to deliver to for a given signal type
     fn resolve_sinks(&self, signal_type: &str) -> Vec<String> {
-        if let Some(rule) = self.config.rules.get(signal_type) {
-            if !rule.sinks.is_empty() {
-                return rule.sinks.clone();
-            }
+        if let Some(rule) = self.config.rules.get(signal_type)
+            && !rule.sinks.is_empty()
+        {
+            return rule.sinks.clone();
         }
         self.config.default_sinks.clone()
     }

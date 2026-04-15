@@ -140,7 +140,7 @@ impl Default for EventScopingConfig {
 // ─── GDPR Configuration ────────────────────────────────────────────────────
 
 /// GDPR compliance configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct GdprConfig {
     /// Enable DELETE /tenants/:id/data cascade endpoint
     #[serde(default)]
@@ -149,15 +149,6 @@ pub struct GdprConfig {
     /// Sink name for immutable audit logging (must exist in sinks config)
     #[serde(default)]
     pub audit_sink: Option<String>,
-}
-
-impl Default for GdprConfig {
-    fn default() -> Self {
-        Self {
-            erasure_cascade: false,
-            audit_sink: None,
-        }
-    }
 }
 
 // ─── WAMI-specific Configuration ────────────────────────────────────────────
