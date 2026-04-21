@@ -1,0 +1,56 @@
+name: Extra Derives Proof (BAP fork)
+
+# Validates the `extra_derives:` slot on `impl_data_entity!` and
+# `impl_data_entity_validated!` (the patch shipped on top of upstream v0.0.9).
+#
+# Two layers:
+#   1. Baseline regression — full `cargo test --lib --all-features` must stay green
+#      (1104 upstream unit tests).
+#   2. Proof — the 4 dedicated tests in tests/macro_extra_derives.rs must pass.
+#
+# Triggers on the patch branch and on any PR targeting it, so we get a green
+# badge before tagging a fork release (e.g. v0.0.9-bap1) consumed via Cargo
+# `[patch."https://github.com/this-rs/this.git"]` in downstream crates.
+
+on:
+  push:
+    branches: [feat/derive-forwarding]
+  pull_request:
+    branches: [feat/derive-forwarding, main]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  RUSTFLAGS: -D warnings
+
+jobs:
+  proof:
+    name: macro_extra_derives proof
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install protoc
+        uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install Rust toolchain (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-extra-derives-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-extra-derives-
+
+      - name: Baseline — upstream unit tests (no regression allowed)
+        run: cargo test --lib --all-features
+
+      - name: Proof — extra_derives forwarding (4 tests)
+        run: cargo test --test macro_extra_derives

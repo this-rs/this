@@ -152,6 +152,9 @@ macro_rules! link_fields {
 /// ```
 #[macro_export]
 macro_rules! impl_data_entity {
+    // ── Variant 1 — backward-compatible (no extra derives) ───────────────────
+    // Forwards to Variant 2 with an empty `extra_derives: []` list.
+    // All pre-existing call-sites match this arm and remain bit-identical.
     (
         $type:ident,
         $type_name:expr,
@@ -160,7 +163,32 @@ macro_rules! impl_data_entity {
             $( $specific_field:ident : $specific_type:ty ),* $(,)?
         }
     ) => {
-        #[derive(Debug, Clone, ::serde::Serialize, ::serde::Deserialize)]
+        $crate::impl_data_entity!(
+            $type,
+            $type_name,
+            [ $( $indexed_field ),* ],
+            {
+                $( $specific_field : $specific_type ),*
+            },
+            extra_derives: []
+        );
+    };
+
+    // ── Variant 2 — accepts additional derives ───────────────────────────────
+    // `extra_derives: [path::to::Trait, other::Trait, ...]` are appended to the
+    // hardcoded set (Debug, Clone, Serialize, Deserialize). Useful for downstream
+    // crates that want to attach `ts_rs::TS`, `schemars::JsonSchema`,
+    // `utoipa::ToSchema`, etc. to macro-generated entity structs.
+    (
+        $type:ident,
+        $type_name:expr,
+        [ $( $indexed_field:expr ),* $(,)? ],
+        {
+            $( $specific_field:ident : $specific_type:ty ),* $(,)?
+        },
+        extra_derives: [ $( $extra_derive:path ),* $(,)? ]
+    ) => {
+        #[derive(Debug, Clone, ::serde::Serialize, ::serde::Deserialize $(, $extra_derive)*)]
         pub struct $type {
             /// Unique identifier for this entity
             pub id: ::uuid::Uuid,
@@ -523,6 +551,8 @@ macro_rules! impl_link_entity {
 /// ```
 #[macro_export]
 macro_rules! impl_data_entity_validated {
+    // ── Variant 1 — backward-compatible (no extra derives) ───────────────────
+    // Forwards to Variant 2 with empty `extra_derives: []`.
     (
         $type:ident,
         $type_name:expr,
@@ -552,14 +582,76 @@ macro_rules! impl_data_entity_validated {
         }
         $(,)?
     ) => {
-        // 1. Generate the base entity (reuse existing macro)
+        $crate::impl_data_entity_validated!(
+            $type,
+            $type_name,
+            [ $( $indexed_field ),* ],
+            {
+                $( $specific_field : $specific_type ),*
+            },
+            validate: {
+                $(
+                    $op: {
+                        $(
+                            $val_field: [ $( $validator )* ]
+                        ),*
+                    }
+                ),*
+            },
+            filters: {
+                $(
+                    $fop: {
+                        $(
+                            $fil_field: [ $( $filter )* ]
+                        ),*
+                    }
+                ),*
+            },
+            extra_derives: []
+        );
+    };
+
+    // ── Variant 2 — accepts `extra_derives:` and forwards to impl_data_entity! ─
+    (
+        $type:ident,
+        $type_name:expr,
+        [ $( $indexed_field:expr ),* $(,)? ],
+        {
+            $( $specific_field:ident : $specific_type:ty ),* $(,)?
+        }
+        $(,)?
+        validate: {
+            $(
+                $op:ident: {
+                    $(
+                        $val_field:ident: [ $( $validator:tt )* ]
+                    ),* $(,)?
+                }
+            ),* $(,)?
+        }
+        $(,)?
+        filters: {
+            $(
+                $fop:ident: {
+                    $(
+                        $fil_field:ident: [ $( $filter:tt )* ]
+                    ),* $(,)?
+                }
+            ),* $(,)?
+        }
+        $(,)?
+        extra_derives: [ $( $extra_derive:path ),* $(,)? ]
+        $(,)?
+    ) => {
+        // 1. Generate the base entity (reuse existing macro, forwarding extra derives)
         $crate::impl_data_entity!(
             $type,
             $type_name,
             [ $( $indexed_field ),* ],
             {
                 $( $specific_field : $specific_type ),*
-            }
+            },
+            extra_derives: [ $( $extra_derive ),* ]
         );
 
         // 2. Implement ValidatableEntity trait for validation support
