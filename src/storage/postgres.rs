@@ -322,7 +322,7 @@ impl<T: Data + Serialize + DeserializeOwned> DataService<T> for PostgresDataServ
                 "SELECT * FROM entities WHERE entity_type = $1 AND {} = $2",
                 field
             );
-            sqlx::query_as::<_, EntityRow>(&sql)
+            sqlx::query_as::<_, EntityRow>(sqlx::AssertSqlSafe(sql.clone()))
                 .bind(Self::entity_type_name())
                 .bind(value)
                 .fetch_all(&self.pool)
@@ -518,7 +518,8 @@ impl LinkService for PostgresLinkService {
         }
         sql.push_str(" ORDER BY created_at DESC");
 
-        let mut query = sqlx::query_as::<_, LinkRow>(&sql).bind(source_id);
+        let mut query =
+            sqlx::query_as::<_, LinkRow>(sqlx::AssertSqlSafe(sql.clone())).bind(source_id);
 
         if let Some(lt) = link_type {
             query = query.bind(lt);
@@ -553,7 +554,8 @@ impl LinkService for PostgresLinkService {
         }
         sql.push_str(" ORDER BY created_at DESC");
 
-        let mut query = sqlx::query_as::<_, LinkRow>(&sql).bind(target_id);
+        let mut query =
+            sqlx::query_as::<_, LinkRow>(sqlx::AssertSqlSafe(sql.clone())).bind(target_id);
 
         if let Some(lt) = link_type {
             query = query.bind(lt);
