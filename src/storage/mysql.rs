@@ -357,7 +357,7 @@ impl<T: Data + Serialize + DeserializeOwned> DataService<T> for MysqlDataService
                     DateTime<Utc>,
                     Option<DateTime<Utc>>,
                 ),
-            >(&sql)
+            >(sqlx::AssertSqlSafe(sql.clone()))
             .bind(Self::entity_type_name())
             .bind(value)
             .fetch_all(&self.pool)
@@ -515,7 +515,7 @@ impl LinkService for MysqlLinkService {
 
     async fn get(&self, id: &Uuid) -> Result<Option<LinkEntity>> {
         let sql = format!("{} WHERE id = ?", LINK_SELECT);
-        let row = sqlx::query_as::<_, LinkTuple>(&sql)
+        let row = sqlx::query_as::<_, LinkTuple>(sqlx::AssertSqlSafe(sql.clone()))
             .bind(id.to_string())
             .fetch_optional(&self.pool)
             .await
@@ -533,7 +533,7 @@ impl LinkService for MysqlLinkService {
 
     async fn list(&self) -> Result<Vec<LinkEntity>> {
         let sql = format!("{} ORDER BY created_at DESC", LINK_SELECT);
-        let rows = sqlx::query_as::<_, LinkTuple>(&sql)
+        let rows = sqlx::query_as::<_, LinkTuple>(sqlx::AssertSqlSafe(sql.clone()))
             .fetch_all(&self.pool)
             .await
             .map_err(|e| anyhow!("Failed to list links: {}", e))?;
@@ -561,7 +561,8 @@ impl LinkService for MysqlLinkService {
         }
         sql.push_str(" ORDER BY created_at DESC");
 
-        let mut query = sqlx::query_as::<_, LinkTuple>(&sql).bind(source_id.to_string());
+        let mut query = sqlx::query_as::<_, LinkTuple>(sqlx::AssertSqlSafe(sql.clone()))
+            .bind(source_id.to_string());
 
         if let Some(lt) = link_type {
             query = query.bind(lt);
@@ -595,7 +596,8 @@ impl LinkService for MysqlLinkService {
         }
         sql.push_str(" ORDER BY created_at DESC");
 
-        let mut query = sqlx::query_as::<_, LinkTuple>(&sql).bind(target_id.to_string());
+        let mut query = sqlx::query_as::<_, LinkTuple>(sqlx::AssertSqlSafe(sql.clone()))
+            .bind(target_id.to_string());
 
         if let Some(lt) = link_type {
             query = query.bind(lt);
