@@ -693,7 +693,7 @@ impl LinkService for DynamoDBLinkService {
         let target_links = self.find_by_target(entity_id, None, None).await?;
 
         // Delete all found links
-        for link in source_links.into_iter().chain(target_links.into_iter()) {
+        for link in source_links.into_iter().chain(target_links) {
             self.delete(&link.id).await?;
         }
 

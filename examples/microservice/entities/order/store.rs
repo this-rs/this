@@ -193,11 +193,11 @@ impl QueryableStore<Order> for OrderStore {
             }
             "amount:desc" => data.sort_by(|a, b| b.amount.partial_cmp(&a.amount).unwrap()),
 
-            "created_at" | "created_at:asc" => data.sort_by(|a, b| a.created_at.cmp(&b.created_at)),
-            "created_at:desc" => data.sort_by(|a, b| b.created_at.cmp(&a.created_at)),
+            "created_at" | "created_at:asc" => data.sort_by_key(|a| a.created_at),
+            "created_at:desc" => data.sort_by_key(|b| std::cmp::Reverse(b.created_at)),
 
-            "updated_at" | "updated_at:asc" => data.sort_by(|a, b| a.updated_at.cmp(&b.updated_at)),
-            "updated_at:desc" => data.sort_by(|a, b| b.updated_at.cmp(&a.updated_at)),
+            "updated_at" | "updated_at:asc" => data.sort_by_key(|a| a.updated_at),
+            "updated_at:desc" => data.sort_by_key(|b| std::cmp::Reverse(b.updated_at)),
 
             _ => {}
         }

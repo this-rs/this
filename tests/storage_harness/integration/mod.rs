@@ -162,8 +162,8 @@ async fn list_handler(
                 match sort.as_str() {
                     "name" | "name:asc" => entities.sort_by(|a, b| a.name.cmp(&b.name)),
                     "name:desc" => entities.sort_by(|a, b| b.name.cmp(&a.name)),
-                    "age" | "age:asc" => entities.sort_by(|a, b| a.age.cmp(&b.age)),
-                    "age:desc" => entities.sort_by(|a, b| b.age.cmp(&a.age)),
+                    "age" | "age:asc" => entities.sort_by_key(|a| a.age),
+                    "age:desc" => entities.sort_by_key(|b| std::cmp::Reverse(b.age)),
                     _ => {}
                 }
             }
