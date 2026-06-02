@@ -7,6 +7,7 @@
 //! single source of truth for the application state.
 
 use crate::config::LinksConfig;
+use crate::core::auth::{AuthProvider, AuthResolverRegistry};
 use crate::core::events::EventBus;
 use crate::core::{EntityCreator, EntityFetcher, service::LinkService};
 use crate::events::log::EventLog;
@@ -95,6 +96,26 @@ pub struct ServerHost {
     /// Stores per-user notification preferences (mute, disable types).
     /// Used by sinks to filter notifications and by preference endpoints.
     pub preferences_store: Option<Arc<NotificationPreferencesStore>>,
+
+    /// Optional auth provider for JWT/token verification
+    ///
+    /// When present, the auth middleware is auto-wired on all routes.
+    /// The provider extracts AuthContext from incoming requests.
+    pub auth_provider: Option<Arc<dyn AuthProvider>>,
+
+    /// Registry of custom auth resolvers
+    ///
+    /// Named resolvers referenced from YAML config as `resolver:name`.
+    /// Registered via `ServerBuilder::with_auth_resolver()`.
+    pub resolver_registry: Arc<AuthResolverRegistry>,
+
+    /// Optional STS (Security Token Service) state for embedded token issuance
+    ///
+    /// When present, auth endpoints (POST /auth/token, GET /auth/keys,
+    /// POST /auth/refresh, POST /auth/revoke) are auto-wired.
+    /// Only available in `embedded` or `bootstrap` WAMI modes.
+    #[cfg(feature = "wami")]
+    pub sts_state: Option<Arc<crate::server::exposure::rest::auth_routes::StsState>>,
 }
 
 impl ServerHost {
@@ -137,6 +158,10 @@ impl ServerHost {
             notification_store: None,
             device_token_store: None,
             preferences_store: None,
+            auth_provider: None,
+            resolver_registry: Arc::new(AuthResolverRegistry::new()),
+            #[cfg(feature = "wami")]
+            sts_state: None,
         })
     }
 
@@ -216,6 +241,41 @@ impl ServerHost {
         self.preferences_store.as_ref()
     }
 
+    /// Set the auth provider
+    pub fn with_auth_provider(mut self, provider: Arc<dyn AuthProvider>) -> Self {
+        self.auth_provider = Some(provider);
+        self
+    }
+
+    /// Get a reference to the auth provider (if configured)
+    pub fn auth_provider(&self) -> Option<&Arc<dyn AuthProvider>> {
+        self.auth_provider.as_ref()
+    }
+
+    /// Set the auth resolver registry
+    ///
+    /// The registry contains named resolvers that can be referenced from
+    /// YAML config as `resolver:name`.
+    pub fn with_resolver_registry(mut self, registry: AuthResolverRegistry) -> Self {
+        self.resolver_registry = Arc::new(registry);
+        self
+    }
+
+    /// Get a reference to the auth resolver registry
+    pub fn resolver_registry(&self) -> &Arc<AuthResolverRegistry> {
+        &self.resolver_registry
+    }
+
+    /// Set the STS state for embedded token issuance (WAMI embedded/bootstrap modes)
+    #[cfg(feature = "wami")]
+    pub fn with_sts_state(
+        mut self,
+        state: Arc<crate::server::exposure::rest::auth_routes::StsState>,
+    ) -> Self {
+        self.sts_state = Some(state);
+        self
+    }
+
     /// Create a minimal `ServerHost` for unit tests.
     ///
     /// Has empty registries and a mock `LinkService`. Useful for testing
@@ -274,6 +334,7 @@ impl ServerHost {
             validation_rules: None,
             events: None,
             sinks: None,
+            auth: None,
         };
         let config = Arc::new(config);
         let registry = Arc::new(LinkRouteRegistry::new(config.clone()));
@@ -291,6 +352,10 @@ impl ServerHost {
             notification_store: None,
             device_token_store: None,
             preferences_store: None,
+            auth_provider: None,
+            resolver_registry: Arc::new(AuthResolverRegistry::new()),
+            #[cfg(feature = "wami")]
+            sts_state: None,
         }
     }
 }
@@ -353,6 +418,7 @@ mod tests {
             validation_rules: None,
             events: None,
             sinks: None,
+            auth: None,
         }
     }
 

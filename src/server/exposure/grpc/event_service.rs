@@ -18,6 +18,7 @@
 
 use super::convert::json_to_struct;
 use super::proto::{EventResponse, SubscribeRequest, event_service_server::EventService};
+use crate::core::auth::AuthContext;
 use crate::core::events::{EntityEvent, EventEnvelope, FrameworkEvent, LinkEvent};
 use crate::server::host::ServerHost;
 use std::pin::Pin;
@@ -113,6 +114,8 @@ fn extract_link_type(event: &FrameworkEvent) -> Option<&str> {
             }
         },
         FrameworkEvent::Entity(_) => None,
+        FrameworkEvent::Cognitive(_) => None,
+        FrameworkEvent::GdprErasure { .. } => None,
     }
 }
 
@@ -196,6 +199,27 @@ fn envelope_to_response(envelope: &EventEnvelope) -> EventResponse {
                 None,
             ),
         },
+        FrameworkEvent::Cognitive(_) => (
+            "cognitive".to_string(),
+            event
+                .entity_id()
+                .map(|id| id.to_string())
+                .unwrap_or_default(),
+            String::new(),
+            String::new(),
+            String::new(),
+            None,
+            None,
+        ),
+        FrameworkEvent::GdprErasure { tenant_id, .. } => (
+            "gdpr_erasure".to_string(),
+            tenant_id.to_string(),
+            String::new(),
+            String::new(),
+            String::new(),
+            None,
+            None,
+        ),
     };
 
     EventResponse {
@@ -221,6 +245,29 @@ fn envelope_to_response(envelope: &EventEnvelope) -> EventResponse {
 type SubscribeStream =
     Pin<Box<dyn tokio_stream::Stream<Item = Result<EventResponse, Status>> + Send>>;
 
+/// Extract tenant_id from a gRPC request.
+///
+/// Checks (in order):
+/// 1. `AuthContext` in tonic extensions (set by an auth interceptor)
+/// 2. `x-tenant-id` metadata header (for explicit tenant specification)
+///
+/// Returns `None` if no tenant can be determined (anonymous / system calls).
+fn extract_tenant_id<T>(request: &Request<T>) -> Option<Uuid> {
+    // 1. Try AuthContext from extensions (set by gRPC auth interceptor)
+    if let Some(auth) = request.extensions().get::<AuthContext>()
+        && let Some(tid) = auth.tenant_id()
+    {
+        return Some(tid);
+    }
+
+    // 2. Try explicit metadata header
+    request
+        .metadata()
+        .get("x-tenant-id")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.parse::<Uuid>().ok())
+}
+
 #[tonic::async_trait]
 impl EventService for EventServiceImpl {
     type SubscribeStream = SubscribeStream;
@@ -229,6 +276,7 @@ impl EventService for EventServiceImpl {
         &self,
         request: Request<SubscribeRequest>,
     ) -> Result<Response<Self::SubscribeStream>, Status> {
+        let tenant_id = extract_tenant_id(&request);
         let filter = request.into_inner();
 
         // Get the EventBus — if not configured, streaming is unavailable
@@ -254,6 +302,14 @@ impl EventService for EventServiceImpl {
             loop {
                 match rx.recv().await {
                     Ok(envelope) => {
+                        // Tenant isolation: skip events from other tenants
+                        if let Some(conn_tenant) = tenant_id
+                            && let Some(event_tenant) = envelope.tenant_id()
+                            && conn_tenant != event_tenant
+                        {
+                            continue;
+                        }
+
                         if matches_filter(&envelope.event, &filter) {
                             let response = envelope_to_response(&envelope);
                             // If the client disconnected, tx.send() returns Err → break

@@ -63,7 +63,10 @@ pub mod storage;
 pub mod prelude {
     // === Core Traits ===
     pub use crate::core::{
-        auth::{AuthContext, AuthPolicy, AuthProvider, NoAuthProvider},
+        auth::{
+            AuthContext, AuthPolicy, AuthProvider, AuthResolver, AuthResolverRegistry, FnResolver,
+            NoAuthProvider,
+        },
         entity::{Data, Entity, Link},
         field::{FieldFormat, FieldValue},
         link::{LinkAuthConfig, LinkDefinition, LinkEntity},

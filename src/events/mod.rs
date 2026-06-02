@@ -19,6 +19,7 @@
 //! - `InMemoryEventLog` — Default, suitable for development and single-instance
 //! - Future: NATS JetStream, Kafka, Redis Streams
 
+pub mod bridge;
 pub mod compiler;
 pub mod context;
 pub mod log;

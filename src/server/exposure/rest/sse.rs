@@ -24,8 +24,9 @@
 //! data: {"kind":"entity","action":"updated","entity_type":"user","entity_id":"...","data":{...},"timestamp":"..."}
 //! ```
 
+use crate::core::auth::AuthContext;
 use crate::core::events::{EntityEvent, EventBus, EventEnvelope, FrameworkEvent, LinkEvent};
-use axum::extract::{Query, State};
+use axum::extract::{Extension, Query, State};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use futures::StreamExt;
 use futures::stream::Stream;
@@ -53,15 +54,28 @@ pub struct SseFilter {
 ///
 /// Subscribes to the EventBus and streams matching events as SSE.
 /// Sends heartbeat comments every 30 seconds to keep the connection alive.
+///
+/// When auth middleware is active, the `AuthContext` is extracted and used
+/// for tenant-scoped event isolation.
 pub async fn sse_handler(
     State(event_bus): State<Arc<EventBus>>,
     Query(filter): Query<SseFilter>,
+    auth: Option<Extension<AuthContext>>,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+    let tenant_id = auth.as_ref().and_then(|Extension(ctx)| ctx.tenant_id());
     let rx = event_bus.subscribe();
 
     let stream = BroadcastStream::new(rx).filter_map(move |result| {
         let item = match result {
             Ok(envelope) => {
+                // Tenant isolation: skip events from other tenants
+                if let Some(conn_tenant) = tenant_id
+                    && let Some(event_tenant) = envelope.tenant_id()
+                    && conn_tenant != event_tenant
+                {
+                    return std::future::ready(None);
+                }
+
                 if matches_filter(&envelope, &filter) {
                     envelope_to_sse_event(&envelope).map(Ok)
                 } else {
@@ -113,6 +127,10 @@ fn matches_filter(envelope: &EventEnvelope, filter: &SseFilter) -> bool {
                 LinkEvent::Created { link_type: lt, .. }
                 | LinkEvent::Deleted { link_type: lt, .. } => lt == entity_type,
             },
+            // Cognitive signals don't have entity_type filtering
+            FrameworkEvent::Cognitive(_) => false,
+            // GDPR erasure events don't have entity_type filtering
+            FrameworkEvent::GdprErasure { .. } => false,
         };
         if !matches {
             return false;
@@ -193,6 +211,28 @@ fn envelope_to_sse_event(envelope: &EventEnvelope) -> Option<Event> {
                 "timestamp": envelope.timestamp.to_rfc3339(),
             }),
         },
+        FrameworkEvent::Cognitive(_signal) => json!({
+            "kind": "cognitive",
+            "action": envelope.event.action(),
+            "node_id": envelope.event.entity_id(),
+            "timestamp": envelope.timestamp.to_rfc3339(),
+        }),
+        FrameworkEvent::GdprErasure {
+            tenant_id,
+            entities_deleted,
+            links_deleted,
+            notifications_deleted,
+            erased_at,
+        } => json!({
+            "kind": "gdpr_erasure",
+            "action": "erasure",
+            "tenant_id": tenant_id.to_string(),
+            "entities_deleted": entities_deleted,
+            "links_deleted": links_deleted,
+            "notifications_deleted": notifications_deleted,
+            "erased_at": erased_at.to_rfc3339(),
+            "timestamp": envelope.timestamp.to_rfc3339(),
+        }),
     };
 
     let json_str = serde_json::to_string(&data).ok()?;

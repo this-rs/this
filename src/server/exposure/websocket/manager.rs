@@ -40,6 +40,12 @@ struct ConnectionHandle {
     /// Set via `associate_user()` after authentication. Used by
     /// `send_to_user()` to dispatch sink notifications to the right connections.
     user_id: Option<String>,
+    /// Optional tenant ID for multi-tenant event isolation
+    ///
+    /// When set, this connection only receives events whose `tenant_id` matches.
+    /// Events without a `tenant_id` (broadcast events) are always delivered.
+    /// Set at connection time from the `AuthContext` extracted during WS upgrade.
+    tenant_id: Option<Uuid>,
 }
 
 /// Manages all active WebSocket connections and their subscriptions
@@ -72,7 +78,13 @@ impl ConnectionManager {
     ///
     /// Returns a tuple of (connection_id, receiver) where the receiver
     /// will receive `ServerMessage`s to forward to the client.
-    pub async fn connect(&self) -> (String, mpsc::UnboundedReceiver<ServerMessage>) {
+    ///
+    /// The optional `tenant_id` enables multi-tenant event isolation:
+    /// when set, only events with a matching `tenant_id` (or no tenant_id) are dispatched.
+    pub async fn connect(
+        &self,
+        tenant_id: Option<Uuid>,
+    ) -> (String, mpsc::UnboundedReceiver<ServerMessage>) {
         let connection_id = format!("conn_{}", Uuid::new_v4().simple());
         let (tx, rx) = mpsc::unbounded_channel();
 
@@ -80,6 +92,7 @@ impl ConnectionManager {
             tx,
             subscriptions: Vec::new(),
             user_id: None,
+            tenant_id,
         };
 
         self.connections
@@ -87,7 +100,11 @@ impl ConnectionManager {
             .await
             .insert(connection_id.clone(), handle);
 
-        tracing::debug!(connection_id = %connection_id, "WebSocket client connected");
+        tracing::debug!(
+            connection_id = %connection_id,
+            tenant_id = ?tenant_id,
+            "WebSocket client connected"
+        );
 
         (connection_id, rx)
     }
@@ -244,10 +261,42 @@ impl ConnectionManager {
     /// For each connection, check every subscription filter against the event.
     /// If a subscription matches, send the event to that connection with the
     /// subscription ID attached.
+    ///
+    /// **Tenant isolation**: if a connection has a `tenant_id`, events with a
+    /// *different* `tenant_id` are silently skipped. Events without a `tenant_id`
+    /// (broadcast events) are always delivered. Anonymous connections (no tenant)
+    /// receive all events.
+    ///
+    /// **User isolation for user-scoped events**: if the event payload contains a
+    /// `user_id` field AND the connection has an associated `user_id`, the event
+    /// is only delivered if both match. This prevents user A from receiving user B's
+    /// private events (e.g., chat messages). Events without `user_id` in the payload
+    /// or connections without an associated user are not filtered (backward compatible).
     async fn dispatch_event(&self, envelope: &EventEnvelope) {
         let connections = self.connections.read().await;
 
+        // Pre-extract user_id from the event payload (if present) to avoid
+        // re-parsing for every connection. This applies to entity events whose
+        // `data` JSON contains a top-level `user_id` string field.
+        let event_user_id = Self::extract_event_user_id(&envelope.event);
+
         for (connection_id, handle) in connections.iter() {
+            // Tenant isolation check
+            if let Some(conn_tenant) = handle.tenant_id
+                && let Some(event_tenant) = envelope.tenant_id()
+                && conn_tenant != event_tenant
+            {
+                continue; // Skip: event belongs to a different tenant
+            }
+
+            // User isolation check: if BOTH the event and connection have a user_id,
+            // only deliver if they match. This prevents cross-user event leaks.
+            if let (Some(event_uid), Some(conn_uid)) = (&event_user_id, &handle.user_id)
+                && event_uid != conn_uid
+            {
+                continue; // Skip: event belongs to a different user
+            }
+
             for subscription in &handle.subscriptions {
                 if subscription.filter.matches(&envelope.event) {
                     let message = ServerMessage::Event {
@@ -264,6 +313,24 @@ impl ConnectionManager {
                     }
                 }
             }
+        }
+    }
+
+    /// Extract a `user_id` string from the event payload, if present.
+    ///
+    /// For `EntityEvent::Created` and `EntityEvent::Updated`, checks the `data`
+    /// JSON for a top-level `"user_id"` string field. Returns `None` for all
+    /// other event types or if the field is absent.
+    fn extract_event_user_id(event: &crate::core::events::FrameworkEvent) -> Option<String> {
+        use crate::core::events::{EntityEvent, FrameworkEvent};
+        match event {
+            FrameworkEvent::Entity(
+                EntityEvent::Created { data, .. } | EntityEvent::Updated { data, .. },
+            ) => data
+                .get("user_id")
+                .and_then(|v| v.as_str())
+                .map(String::from),
+            _ => None,
         }
     }
 
@@ -334,7 +401,7 @@ mod tests {
     async fn test_connect_and_disconnect() {
         let cm = ConnectionManager::new(test_host());
 
-        let (conn_id, _rx) = cm.connect().await;
+        let (conn_id, _rx) = cm.connect(None).await;
         assert!(conn_id.starts_with("conn_"));
         assert_eq!(cm.connection_count().await, 1);
 
@@ -345,7 +412,7 @@ mod tests {
     #[tokio::test]
     async fn test_subscribe_and_unsubscribe() {
         let cm = ConnectionManager::new(test_host());
-        let (conn_id, _rx) = cm.connect().await;
+        let (conn_id, _rx) = cm.connect(None).await;
 
         // Subscribe
         let filter = SubscriptionFilter {
@@ -376,7 +443,7 @@ mod tests {
     #[tokio::test]
     async fn test_dispatch_event_matches() {
         let cm = ConnectionManager::new(test_host());
-        let (conn_id, mut rx) = cm.connect().await;
+        let (conn_id, mut rx) = cm.connect(None).await;
 
         // Subscribe to order events
         let filter = SubscriptionFilter {
@@ -411,7 +478,7 @@ mod tests {
     #[tokio::test]
     async fn test_dispatch_event_no_match() {
         let cm = ConnectionManager::new(test_host());
-        let (conn_id, mut rx) = cm.connect().await;
+        let (conn_id, mut rx) = cm.connect(None).await;
 
         // Subscribe to order events only
         let filter = SubscriptionFilter {
@@ -436,7 +503,7 @@ mod tests {
     #[tokio::test]
     async fn test_dispatch_with_event_bus() {
         let cm = Arc::new(ConnectionManager::new(test_host()));
-        let (conn_id, mut rx) = cm.connect().await;
+        let (conn_id, mut rx) = cm.connect(None).await;
 
         // Subscribe to everything
         cm.subscribe(&conn_id, SubscriptionFilter::default())
@@ -481,7 +548,7 @@ mod tests {
     #[tokio::test]
     async fn test_multiple_subscriptions_same_connection() {
         let cm = ConnectionManager::new(test_host());
-        let (conn_id, mut rx) = cm.connect().await;
+        let (conn_id, mut rx) = cm.connect(None).await;
 
         // Subscribe to orders
         cm.subscribe(
@@ -537,8 +604,8 @@ mod tests {
     async fn test_concurrent_subscriptions_same_event_different_connections() {
         let cm = ConnectionManager::new(test_host());
 
-        let (conn1_id, mut rx1) = cm.connect().await;
-        let (conn2_id, mut rx2) = cm.connect().await;
+        let (conn1_id, mut rx1) = cm.connect(None).await;
+        let (conn2_id, mut rx2) = cm.connect(None).await;
 
         // Both connections subscribe to "order" created events
         let filter = SubscriptionFilter {
@@ -588,7 +655,7 @@ mod tests {
     #[tokio::test]
     async fn test_dead_connection_handling() {
         let cm = ConnectionManager::new(test_host());
-        let (conn_id, rx) = cm.connect().await;
+        let (conn_id, rx) = cm.connect(None).await;
 
         // Subscribe to all events
         cm.subscribe(&conn_id, SubscriptionFilter::default())
@@ -613,7 +680,7 @@ mod tests {
     #[tokio::test]
     async fn test_dispatch_event_with_multiple_matching_subscriptions() {
         let cm = ConnectionManager::new(test_host());
-        let (conn_id, mut rx) = cm.connect().await;
+        let (conn_id, mut rx) = cm.connect(None).await;
 
         // Two subscriptions that both match the same event:
         // 1. Subscribe to all "order" events
@@ -672,7 +739,7 @@ mod tests {
     #[tokio::test]
     async fn test_associate_user() {
         let cm = ConnectionManager::new(test_host());
-        let (conn_id, _rx) = cm.connect().await;
+        let (conn_id, _rx) = cm.connect(None).await;
 
         // Associate user
         cm.associate_user(&conn_id, "user-A".to_string())
@@ -691,10 +758,10 @@ mod tests {
         let cm = ConnectionManager::new(test_host());
 
         // Create two connections for the same user
-        let (conn1_id, mut rx1) = cm.connect().await;
-        let (conn2_id, mut rx2) = cm.connect().await;
+        let (conn1_id, mut rx1) = cm.connect(None).await;
+        let (conn2_id, mut rx2) = cm.connect(None).await;
         // Create one connection for a different user
-        let (conn3_id, mut rx3) = cm.connect().await;
+        let (conn3_id, mut rx3) = cm.connect(None).await;
 
         cm.associate_user(&conn1_id, "user-A".to_string())
             .await
@@ -724,7 +791,7 @@ mod tests {
     #[tokio::test]
     async fn test_send_to_user_no_match() {
         let cm = ConnectionManager::new(test_host());
-        let (_conn_id, _rx) = cm.connect().await;
+        let (_conn_id, _rx) = cm.connect(None).await;
         // Connection has no user_id — send_to_user should return 0
         let count = cm.send_to_user("user-X", json!({})).await;
         assert_eq!(count, 0);
@@ -733,8 +800,8 @@ mod tests {
     #[tokio::test]
     async fn test_broadcast_payload() {
         let cm = ConnectionManager::new(test_host());
-        let (_conn1_id, mut rx1) = cm.connect().await;
-        let (_conn2_id, mut rx2) = cm.connect().await;
+        let (_conn1_id, mut rx1) = cm.connect(None).await;
+        let (_conn2_id, mut rx2) = cm.connect(None).await;
 
         let payload = json!({"type": "system_announcement", "message": "Server restarting"});
         let count = cm.broadcast_payload(payload.clone()).await;
@@ -761,5 +828,145 @@ mod tests {
         // No connections — should return 0
         let count = cm.broadcast_payload(json!({})).await;
         assert_eq!(count, 0);
+    }
+
+    // --- Tenant isolation tests ---
+
+    #[tokio::test]
+    async fn test_tenant_isolation_same_tenant_receives_event() {
+        let cm = ConnectionManager::new(test_host());
+        let tenant_a = Uuid::new_v4();
+
+        let (conn_id, mut rx) = cm.connect(Some(tenant_a)).await;
+        cm.subscribe(&conn_id, SubscriptionFilter::default())
+            .await
+            .unwrap();
+
+        // Event for tenant A — should be received
+        let envelope = EventEnvelope::new_with_tenant(
+            FrameworkEvent::Entity(EntityEvent::Created {
+                entity_type: "order".to_string(),
+                entity_id: Uuid::new_v4(),
+                data: json!({}),
+            }),
+            tenant_a,
+        );
+        cm.dispatch_event(&envelope).await;
+
+        assert!(rx.try_recv().is_ok(), "same tenant should receive event");
+    }
+
+    #[tokio::test]
+    async fn test_tenant_isolation_different_tenant_blocked() {
+        let cm = ConnectionManager::new(test_host());
+        let tenant_a = Uuid::new_v4();
+        let tenant_b = Uuid::new_v4();
+
+        let (conn_id, mut rx) = cm.connect(Some(tenant_a)).await;
+        cm.subscribe(&conn_id, SubscriptionFilter::default())
+            .await
+            .unwrap();
+
+        // Event for tenant B — should NOT be received by tenant A
+        let envelope = EventEnvelope::new_with_tenant(
+            FrameworkEvent::Entity(EntityEvent::Created {
+                entity_type: "order".to_string(),
+                entity_id: Uuid::new_v4(),
+                data: json!({}),
+            }),
+            tenant_b,
+        );
+        cm.dispatch_event(&envelope).await;
+
+        assert!(
+            rx.try_recv().is_err(),
+            "different tenant should NOT receive event"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_tenant_isolation_broadcast_event_reaches_all() {
+        let cm = ConnectionManager::new(test_host());
+        let tenant_a = Uuid::new_v4();
+
+        let (conn_id, mut rx) = cm.connect(Some(tenant_a)).await;
+        cm.subscribe(&conn_id, SubscriptionFilter::default())
+            .await
+            .unwrap();
+
+        // Event without tenant_id (broadcast) — should be received by everyone
+        let envelope = EventEnvelope::new(FrameworkEvent::Entity(EntityEvent::Created {
+            entity_type: "system".to_string(),
+            entity_id: Uuid::new_v4(),
+            data: json!({}),
+        }));
+        cm.dispatch_event(&envelope).await;
+
+        assert!(
+            rx.try_recv().is_ok(),
+            "broadcast event should reach all tenants"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_tenant_isolation_anonymous_receives_all() {
+        let cm = ConnectionManager::new(test_host());
+        let tenant_a = Uuid::new_v4();
+
+        // Anonymous connection (no tenant)
+        let (conn_id, mut rx) = cm.connect(None).await;
+        cm.subscribe(&conn_id, SubscriptionFilter::default())
+            .await
+            .unwrap();
+
+        // Tenant-scoped event — anonymous should still receive it
+        let envelope = EventEnvelope::new_with_tenant(
+            FrameworkEvent::Entity(EntityEvent::Created {
+                entity_type: "order".to_string(),
+                entity_id: Uuid::new_v4(),
+                data: json!({}),
+            }),
+            tenant_a,
+        );
+        cm.dispatch_event(&envelope).await;
+
+        assert!(
+            rx.try_recv().is_ok(),
+            "anonymous connection should receive all events"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_tenant_isolation_multi_tenant_dispatch() {
+        let cm = ConnectionManager::new(test_host());
+        let tenant_a = Uuid::new_v4();
+        let tenant_b = Uuid::new_v4();
+
+        let (conn_a, mut rx_a) = cm.connect(Some(tenant_a)).await;
+        let (conn_b, mut rx_b) = cm.connect(Some(tenant_b)).await;
+
+        cm.subscribe(&conn_a, SubscriptionFilter::default())
+            .await
+            .unwrap();
+        cm.subscribe(&conn_b, SubscriptionFilter::default())
+            .await
+            .unwrap();
+
+        // Publish event for tenant A
+        let envelope_a = EventEnvelope::new_with_tenant(
+            FrameworkEvent::Entity(EntityEvent::Created {
+                entity_type: "order".to_string(),
+                entity_id: Uuid::new_v4(),
+                data: json!({}),
+            }),
+            tenant_a,
+        );
+        cm.dispatch_event(&envelope_a).await;
+
+        assert!(rx_a.try_recv().is_ok(), "tenant A should receive its event");
+        assert!(
+            rx_b.try_recv().is_err(),
+            "tenant B should NOT receive tenant A's event"
+        );
     }
 }

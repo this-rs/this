@@ -30,6 +30,7 @@ use std::sync::Arc;
 /// - `entity_id` — Entity ID (for entity events)
 /// - `metadata` — Link metadata (for link events)
 /// - `data` — Entity data (for entity events)
+/// - `tenant_id` — Tenant ID (when multi-tenant, from EventEnvelope)
 #[derive(Clone)]
 pub struct FlowContext {
     /// The original framework event that triggered this flow
@@ -46,6 +47,12 @@ pub struct FlowContext {
 
     /// Access to the sink registry for deliver operators
     pub sink_registry: Option<Arc<SinkRegistry>>,
+
+    /// Tenant ID from the originating EventEnvelope (for multi-tenant isolation)
+    ///
+    /// When set, sinks should scope their operations to this tenant.
+    /// Propagated from `EventEnvelope.tenant_id` by the FlowRuntime.
+    pub tenant_id: Option<uuid::Uuid>,
 }
 
 impl std::fmt::Debug for FlowContext {
@@ -165,6 +172,21 @@ impl FlowContext {
                     }
                 }
             }
+            FrameworkEvent::Cognitive(_signal) => {
+                variables.insert(
+                    "signal_type".to_string(),
+                    Value::String(event.action().to_string()),
+                );
+                if let Some(id) = event.entity_id() {
+                    variables.insert("node_id".to_string(), Value::String(id.to_string()));
+                }
+            }
+            FrameworkEvent::GdprErasure { tenant_id, .. } => {
+                variables.insert(
+                    "tenant_id".to_string(),
+                    Value::String(tenant_id.to_string()),
+                );
+            }
         }
 
         Self {
@@ -173,6 +195,7 @@ impl FlowContext {
             link_service,
             entity_fetchers,
             sink_registry: None,
+            tenant_id: None,
         }
     }
 
@@ -198,6 +221,17 @@ impl FlowContext {
     /// Set the sink registry for deliver operators
     pub fn with_sink_registry(mut self, registry: Arc<SinkRegistry>) -> Self {
         self.sink_registry = Some(registry);
+        self
+    }
+
+    /// Set the tenant ID (propagated from EventEnvelope by FlowRuntime)
+    pub fn with_tenant_id(mut self, tenant_id: Option<uuid::Uuid>) -> Self {
+        self.tenant_id = tenant_id;
+        // Also inject tenant_id as a context variable for template access
+        if let Some(tid) = tenant_id {
+            self.variables
+                .insert("tenant_id".to_string(), Value::String(tid.to_string()));
+        }
         self
     }
 

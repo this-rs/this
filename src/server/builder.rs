@@ -4,6 +4,7 @@ use super::entity_registry::EntityRegistry;
 use super::exposure::RestExposure;
 use super::host::ServerHost;
 use crate::config::LinksConfig;
+use crate::core::auth::{AuthResolver, AuthResolverRegistry, FnResolver};
 use crate::core::events::EventBus;
 use crate::core::module::Module;
 use crate::core::service::LinkService;
@@ -42,6 +43,12 @@ pub struct ServerBuilder {
     notification_store: Option<Arc<NotificationStore>>,
     device_token_store: Option<Arc<DeviceTokenStore>>,
     preferences_store: Option<Arc<NotificationPreferencesStore>>,
+
+    // Auth config loaded from external file
+    auth_config: Option<crate::config::auth::AuthConfig>,
+
+    // Custom auth resolvers registry
+    resolver_registry: AuthResolverRegistry,
 }
 
 impl ServerBuilder {
@@ -58,6 +65,8 @@ impl ServerBuilder {
             notification_store: None,
             device_token_store: None,
             preferences_store: None,
+            auth_config: None,
+            resolver_registry: AuthResolverRegistry::new(),
         }
     }
 
@@ -120,6 +129,14 @@ impl ServerBuilder {
         self
     }
 
+    /// Enable the event bus with a default capacity of 1024
+    ///
+    /// Convenience method equivalent to `.with_event_bus(1024)`.
+    pub fn with_default_event_bus(mut self) -> Self {
+        self.event_bus = Some(EventBus::new(1024));
+        self
+    }
+
     /// Provide a pre-built sink registry (overrides auto-wiring from config)
     ///
     /// Use this when you need full control over which sinks are registered.
@@ -137,6 +154,14 @@ impl ServerBuilder {
         self
     }
 
+    /// Create and attach a default notification store
+    ///
+    /// Convenience method equivalent to `.with_notification_store(Arc::new(NotificationStore::new()))`.
+    pub fn with_default_notification_store(mut self) -> Self {
+        self.notification_store = Some(Arc::new(NotificationStore::new()));
+        self
+    }
+
     /// Provide a pre-built device token store
     ///
     /// If not provided, one is auto-created when sinks are configured.
@@ -150,6 +175,112 @@ impl ServerBuilder {
     /// If not provided, one is auto-created when sinks are configured.
     pub fn with_preferences_store(mut self, store: Arc<NotificationPreferencesStore>) -> Self {
         self.preferences_store = Some(store);
+        self
+    }
+
+    /// Load auth configuration from a YAML file
+    ///
+    /// This merges the auth config into the server's LinksConfig during build.
+    /// Keeps auth config separate from links.yaml for cleaner project structure.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// ServerBuilder::new()
+    ///     .with_link_service(service)
+    ///     .with_auth_config_file(concat!(env!("CARGO_MANIFEST_DIR"), "/config/auth.yaml"))?
+    ///     .register_module(module)?
+    ///     .build_host()?;
+    /// ```
+    pub fn with_auth_config_file(mut self, path: &str) -> Result<Self> {
+        let content = std::fs::read_to_string(path)
+            .map_err(|e| anyhow::anyhow!("Failed to read auth config from '{}': {}", path, e))?;
+        let config: crate::config::auth::AuthConfig = serde_yaml::from_str(&content)
+            .map_err(|e| anyhow::anyhow!("Failed to parse auth config from '{}': {}", path, e))?;
+        self.auth_config = Some(config);
+        Ok(self)
+    }
+
+    /// Set auth configuration directly
+    ///
+    /// Use this when you have an `AuthConfig` already constructed in code.
+    pub fn with_auth_config(mut self, config: crate::config::auth::AuthConfig) -> Self {
+        self.auth_config = Some(config);
+        self
+    }
+
+    /// Register a custom auth resolver from a struct implementing `AuthResolver`
+    ///
+    /// The resolver can be referenced from YAML config with the `resolver:` prefix.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// use this_rs::core::auth::{AuthResolver, AuthContext};
+    ///
+    /// struct IsGroupMember { db: Arc<DbPool> }
+    ///
+    /// impl AuthResolver for IsGroupMember {
+    ///     fn check(&self, ctx: &AuthContext, resource_id: Option<&Uuid>) -> bool {
+    ///         // ... check group membership
+    ///         true
+    ///     }
+    /// }
+    ///
+    /// ServerBuilder::new()
+    ///     .with_auth_resolver_impl("is_group_member", IsGroupMember { db })
+    ///     .build_host()?;
+    /// ```
+    ///
+    /// Then in YAML:
+    /// ```yaml
+    /// auth:
+    ///   create: "resolver:is_group_member"
+    /// ```
+    pub fn with_auth_resolver_impl(
+        mut self,
+        name: impl Into<String>,
+        resolver: impl AuthResolver + 'static,
+    ) -> Self {
+        self.resolver_registry.register(name, Arc::new(resolver));
+        self
+    }
+
+    /// Register a custom auth resolver from a closure
+    ///
+    /// Convenience method for simple resolvers that don't need a dedicated struct.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// ServerBuilder::new()
+    ///     .with_auth_resolver("is_manager", |ctx: &AuthContext, _res: Option<&Uuid>| {
+    ///         ctx.has_role("manager")
+    ///     })
+    ///     .with_auth_resolver("is_delegated", |ctx: &AuthContext, resource_id: Option<&Uuid>| {
+    ///         // Check JWT claims for delegation
+    ///         let Some(user_id) = ctx.user_id() else { return false };
+    ///         let Some(_res_id) = resource_id else { return false };
+    ///         // Check delegation...
+    ///         true
+    ///     })
+    ///     .build_host()?;
+    /// ```
+    ///
+    /// Then in YAML:
+    /// ```yaml
+    /// auth:
+    ///   update: "resolver:is_manager"
+    ///   delete: "owner_or_resolver:is_delegated"
+    /// ```
+    pub fn with_auth_resolver<F>(mut self, name: impl Into<String>, func: F) -> Self
+    where
+        F: Fn(&crate::core::auth::AuthContext, Option<&uuid::Uuid>) -> bool + Send + Sync + 'static,
+    {
+        let name_str: String = name.into();
+        let resolver = FnResolver::new(func, format!("Custom resolver: {}", name_str));
+        self.resolver_registry
+            .register(name_str, Arc::new(resolver));
         self
     }
 
@@ -185,7 +316,12 @@ impl ServerBuilder {
     /// Returns a `ServerHost` containing all framework state.
     pub fn build_host(mut self) -> Result<ServerHost> {
         // Merge all configs
-        let merged_config = self.merge_configs()?;
+        let mut merged_config = self.merge_configs()?;
+
+        // Inject auth config from with_auth_config_file() if set
+        if let Some(auth_config) = self.auth_config.take() {
+            merged_config.auth = Some(auth_config);
+        }
 
         // Extract link service
         let link_service = self
@@ -225,6 +361,82 @@ impl ServerBuilder {
         // Attach event bus if configured
         if let Some(event_bus) = self.event_bus.take() {
             host = host.with_event_bus(event_bus);
+        }
+
+        // Attach resolver registry if any resolvers were registered
+        if !self.resolver_registry.is_empty() {
+            let names = self.resolver_registry.names();
+            tracing::info!(
+                resolvers = ?names,
+                "Auth resolver registry attached ({} resolvers)",
+                names.len()
+            );
+            host = host.with_resolver_registry(self.resolver_registry);
+        }
+
+        // Auto-wire auth provider from config
+        // Clone the auth config to avoid borrow conflicts with `host`
+        let auth_config_owned = host.config.auth.clone();
+        if let Some(ref auth_config) = auth_config_owned {
+            use crate::config::auth::AuthProviderType;
+            match auth_config.provider {
+                AuthProviderType::None => {
+                    // No auth provider — use default NoAuthProvider behavior
+                }
+                AuthProviderType::Wami => {
+                    #[cfg(feature = "wami")]
+                    {
+                        use crate::config::auth::AuthMode;
+                        use crate::core::auth::wami_provider::WamiAuthProvider;
+                        match WamiAuthProvider::from_config(auth_config) {
+                            Ok(provider) => {
+                                host = host.with_auth_provider(Arc::new(provider));
+                                tracing::info!("WAMI auth provider auto-wired");
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    "Failed to create WamiAuthProvider: {}. Continuing without auth.",
+                                    e
+                                );
+                            }
+                        }
+
+                        // Auto-wire STS for embedded/bootstrap modes
+                        if let Some(ref wami_config) = auth_config.wami {
+                            let needs_sts = matches!(
+                                wami_config.mode,
+                                AuthMode::Embedded | AuthMode::Bootstrap
+                            );
+                            if needs_sts {
+                                match Self::build_sts_state(wami_config) {
+                                    Ok(sts_state) => {
+                                        host = host.with_sts_state(sts_state);
+                                        tracing::info!(
+                                            "STS service auto-wired (mode: {:?})",
+                                            wami_config.mode
+                                        );
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!(
+                                            "Failed to create STS service: {}. Auth endpoints won't be available.",
+                                            e
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    #[cfg(not(feature = "wami"))]
+                    {
+                        tracing::warn!(
+                            "Auth provider set to 'wami' but feature 'wami' is not enabled. Ignoring."
+                        );
+                    }
+                }
+                AuthProviderType::Oidc => {
+                    tracing::warn!("OIDC auth provider not yet implemented. Ignoring.");
+                }
+            }
         }
 
         // Auto-wire event pipeline from config (sinks section)
@@ -390,6 +602,83 @@ impl ServerBuilder {
         tracing::info!("Server shutdown complete");
         Ok(())
     }
+
+    /// Build the STS state from WAMI config (embedded/bootstrap modes)
+    #[cfg(feature = "wami")]
+    fn build_sts_state(
+        wami_config: &crate::config::auth::WamiConfig,
+    ) -> anyhow::Result<Arc<crate::server::exposure::rest::auth_routes::StsState>> {
+        use crate::config::auth::AuthMode;
+        use crate::core::auth::sts::StsService;
+        use crate::server::exposure::rest::auth_routes::StsState;
+
+        let (private_pem, public_pem) = match wami_config.mode {
+            AuthMode::Bootstrap => {
+                // Auto-generate a key pair for development
+                use ed25519_dalek::SigningKey;
+                use ed25519_dalek::pkcs8::EncodePublicKey;
+                use ed25519_dalek::pkcs8::{EncodePrivateKey, spki::der::pem::LineEnding};
+
+                // Generate a random 32-byte secret using UUIDs (no rand dependency needed)
+                let u1 = uuid::Uuid::new_v4();
+                let u2 = uuid::Uuid::new_v4();
+                let mut secret = [0u8; 32];
+                secret[..16].copy_from_slice(u1.as_bytes());
+                secret[16..].copy_from_slice(u2.as_bytes());
+                let signing_key = SigningKey::from_bytes(&secret);
+                let verifying_key = signing_key.verifying_key();
+
+                let priv_pem = signing_key
+                    .to_pkcs8_pem(LineEnding::LF)
+                    .map_err(|e| anyhow::anyhow!("Failed to encode bootstrap private key: {}", e))?
+                    .to_string();
+                let pub_pem = verifying_key
+                    .to_public_key_pem(LineEnding::LF)
+                    .map_err(|e| anyhow::anyhow!("Failed to encode bootstrap public key: {}", e))?;
+
+                tracing::info!("Bootstrap mode: auto-generated Ed25519 key pair");
+                (priv_pem, pub_pem)
+            }
+            AuthMode::Embedded => {
+                let priv_key = wami_config
+                    .private_key
+                    .as_ref()
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("Embedded mode requires 'private_key' in wami config")
+                    })?
+                    .clone();
+                let pub_key = wami_config
+                    .public_key
+                    .as_ref()
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("Embedded mode requires 'public_key' in wami config")
+                    })?
+                    .clone();
+                (priv_key, pub_key)
+            }
+            AuthMode::Sts => {
+                anyhow::bail!("STS mode does not need embedded token issuance");
+            }
+        };
+
+        let issuer = wami_config
+            .issuer
+            .clone()
+            .unwrap_or_else(|| "this-rs".to_string());
+
+        let mut sts = StsService::new(&private_pem, issuer)?;
+        sts.set_access_ttl_secs(wami_config.token_ttl_secs);
+        sts.set_refresh_ttl_secs(wami_config.refresh_ttl_secs);
+
+        let decoding_key = jsonwebtoken::DecodingKey::from_ed_pem(public_pem.as_bytes())
+            .map_err(|e| anyhow::anyhow!("Failed to create DecodingKey: {}", e))?;
+
+        Ok(Arc::new(StsState {
+            sts: Arc::new(sts),
+            public_key_pem: public_pem,
+            decoding_key,
+        }))
+    }
 }
 
 impl Default for ServerBuilder {
@@ -463,6 +752,7 @@ mod tests {
                     validation_rules: None,
                     events: None,
                     sinks: None,
+                    auth: None,
                 },
             }
         }
@@ -497,6 +787,7 @@ mod tests {
                     validation_rules: None,
                     events: None,
                     sinks: None,
+                    auth: None,
                 },
             }
         }
@@ -813,6 +1104,7 @@ mod tests {
                     sink_type: SinkType::InApp,
                     config: Default::default(),
                 }]),
+                auth: None,
             })
         }
 

@@ -289,6 +289,7 @@ mod tests {
             data: json!({"follower_name": "Alice"}),
             read: false,
             created_at: Utc::now(),
+            tenant_id: None,
         };
 
         let resp = stored_to_response(&notif);
@@ -314,6 +315,7 @@ mod tests {
             data: serde_json::Value::Null,
             read: true,
             created_at: Utc::now(),
+            tenant_id: None,
         };
 
         let resp = stored_to_response(&notif);
@@ -359,6 +361,7 @@ mod tests {
                     data: serde_json::Value::Null,
                     read: false,
                     created_at: Utc::now() + chrono::Duration::seconds(i as i64),
+                    tenant_id: None,
                 })
                 .await;
         }
@@ -415,6 +418,7 @@ mod tests {
                     data: serde_json::Value::Null,
                     read: false,
                     created_at: Utc::now(),
+                    tenant_id: None,
                 })
                 .await;
         }
@@ -453,6 +457,7 @@ mod tests {
                     data: serde_json::Value::Null,
                     read: false,
                     created_at: Utc::now(),
+                    tenant_id: None,
                 })
                 .await;
         }
@@ -501,6 +506,7 @@ mod tests {
                     data: serde_json::Value::Null,
                     read: false,
                     created_at: Utc::now(),
+                    tenant_id: None,
                 })
                 .await;
         }
@@ -533,6 +539,7 @@ mod tests {
                 data: serde_json::Value::Null,
                 read: false,
                 created_at: Utc::now(),
+                tenant_id: None,
             })
             .await;
 
@@ -591,6 +598,7 @@ mod tests {
                 data: json!({"follower": "alice"}),
                 read: false,
                 created_at: Utc::now(),
+                tenant_id: None,
             })
             .await;
 
@@ -605,6 +613,7 @@ mod tests {
                 data: serde_json::Value::Null,
                 read: false,
                 created_at: Utc::now(),
+                tenant_id: None,
             })
             .await;
 
@@ -655,6 +664,7 @@ mod tests {
                 data: serde_json::Value::Null,
                 read: false,
                 created_at: Utc::now(),
+                tenant_id: None,
             })
             .await;
 
@@ -668,6 +678,7 @@ mod tests {
                 data: serde_json::Value::Null,
                 read: false,
                 created_at: Utc::now(),
+                tenant_id: None,
             })
             .await;
 

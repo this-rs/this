@@ -11,6 +11,7 @@ pub mod pluralize;
 pub mod query;
 pub mod service;
 pub mod store;
+pub mod tenant;
 pub mod validation;
 
 pub use auth::{AuthContext, AuthPolicy, AuthProvider, NoAuthProvider};
@@ -23,4 +24,5 @@ pub use pluralize::Pluralizer;
 pub use query::{PaginatedResponse, PaginationMeta, QueryParams};
 pub use service::{DataService, LinkService};
 pub use store::QueryableStore;
+pub use tenant::TenantContext;
 pub use validation::{EntityValidationConfig, Validated};

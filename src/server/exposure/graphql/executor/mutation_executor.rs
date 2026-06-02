@@ -319,6 +319,7 @@ mod tests {
             validation_rules: None,
             events: None,
             sinks: None,
+            auth: None,
         };
 
         let mut registry = EntityRegistry::new();
@@ -570,6 +571,7 @@ mod tests {
             validation_rules: None,
             events: None,
             sinks: None,
+            auth: None,
         };
 
         let mut registry = EntityRegistry::new();
@@ -690,6 +692,7 @@ mod tests {
             validation_rules: None,
             events: None,
             sinks: None,
+            auth: None,
         };
 
         let mut registry = EntityRegistry::new();
@@ -732,6 +735,7 @@ mod tests {
                 data: json!({}),
                 read: false,
                 created_at: chrono::Utc::now(),
+                tenant_id: None,
             })
             .await;
 
@@ -768,6 +772,7 @@ mod tests {
                     data: json!({}),
                     read: false,
                     created_at: chrono::Utc::now(),
+                    tenant_id: None,
                 })
                 .await;
         }

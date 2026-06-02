@@ -240,6 +240,7 @@ async fn insert_test_notification(store: &NotificationStore, user_id: &str, titl
             data: json!({"source": "e2e_test"}),
             read: false,
             created_at: Utc::now(),
+            tenant_id: None,
         })
         .await;
     id

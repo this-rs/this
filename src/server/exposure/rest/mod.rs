@@ -6,14 +6,18 @@
 //!
 //! The REST exposure consumes a `ServerHost` and produces an Axum `Router`.
 
+#[cfg(feature = "wami")]
+pub mod auth_routes;
+pub mod gdpr_routes;
 pub mod notifications;
 pub mod sse;
 
 use super::super::host::ServerHost;
 use crate::links::handlers::AppState;
+use crate::server::middleware::auth::{AuthLayer, auth_middleware};
 use crate::server::router::build_link_routes;
 use anyhow::Result;
-use axum::{Json, Router, routing::get};
+use axum::{Json, Router, middleware, routing::get};
 use serde_json::{Value, json};
 use std::sync::Arc;
 
@@ -88,6 +92,58 @@ impl RestExposure {
                 device_token_store: device_token_store.clone(),
             };
             app = app.merge(notifications::notification_routes(notif_state));
+        }
+
+        // Auto-wire GDPR erasure endpoint if configured
+        let gdpr_enabled = host
+            .config
+            .auth
+            .as_ref()
+            .map(|a| a.gdpr.erasure_cascade)
+            .unwrap_or(false);
+
+        if gdpr_enabled {
+            let gdpr_state = std::sync::Arc::new(gdpr_routes::GdprState {
+                notification_store: host.notification_store.clone().unwrap_or_else(|| {
+                    std::sync::Arc::new(crate::events::sinks::in_app::NotificationStore::new())
+                }),
+                link_service: Some(host.link_service.clone()),
+                sink_registry: host.sink_registry.clone(),
+                event_bus: host.event_bus.clone(),
+            });
+            app = app.merge(gdpr_routes::gdpr_routes(gdpr_state));
+            tracing::info!("GDPR erasure endpoint auto-wired (DELETE /tenants/:tenant_id/data)");
+        }
+
+        // Auto-wire STS auth endpoints if STS is configured (embedded/bootstrap mode)
+        #[cfg(feature = "wami")]
+        if let Some(ref sts_state) = host.sts_state {
+            let auth_routes = auth_routes::auth_router(sts_state.clone());
+            app = app.merge(auth_routes);
+            tracing::info!(
+                "STS auth endpoints auto-wired (/auth/token, /auth/keys, /auth/refresh, /auth/revoke)"
+            );
+        }
+
+        // Auto-wire auth middleware if auth provider is configured
+        // This layer must be added last so it wraps all routes
+        if let Some(ref auth_provider) = host.auth_provider {
+            let default_policy = host
+                .config
+                .auth
+                .as_ref()
+                .map(|a| a.default_policy.clone())
+                .unwrap_or_else(|| "public".to_string());
+
+            // Tenant resolver runs AFTER auth (inner layer = added first)
+            // so AuthContext is available in extensions
+            app = app.layer(middleware::from_fn(
+                crate::server::middleware::tenant::tenant_resolver_middleware,
+            ));
+
+            let auth_layer = AuthLayer::new(auth_provider.clone(), default_policy);
+            app = app.layer(middleware::from_fn_with_state(auth_layer, auth_middleware));
+            tracing::info!("REST auth + tenant resolver middleware auto-wired");
         }
 
         Ok(app)
