@@ -44,7 +44,7 @@ uuid = { version = "1.10", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 
 # Template engine (for map operator in event flows)
-tera = "1"
+tera = "2"
 
 # Error handling
 anyhow = "1.0"
