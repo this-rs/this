@@ -133,10 +133,19 @@ async fn handle_socket(
 }
 
 /// Process a single client message
+///
+/// First tries to parse as a `ClientMessage` (subscribe/unsubscribe/ping).
+/// If parsing fails, delegates to the registered custom message handler (if any).
+/// Only returns an error if both fail.
 async fn handle_client_message(manager: &ConnectionManager, connection_id: &str, text: &str) {
     let msg: ClientMessage = match serde_json::from_str(text) {
         Ok(msg) => msg,
         Err(e) => {
+            // Try the custom handler before returning an error.
+            if manager.try_custom_handler(connection_id, text).await {
+                return; // Custom handler consumed the message.
+            }
+
             let error_msg = ServerMessage::Error {
                 message: format!("Invalid message: {}", e),
             };

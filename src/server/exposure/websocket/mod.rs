@@ -47,6 +47,10 @@ mod handler;
 mod manager;
 pub mod protocol;
 
+// Re-export ConnectionManager and CustomMessageHandler for host applications
+// that need to register custom message handlers or access connection state.
+pub use manager::{ConnectionManager, CustomMessageHandler};
+
 use crate::config::sinks::SinkType;
 use crate::events::sinks::Sink;
 use crate::events::sinks::websocket::WebSocketSink;
@@ -106,6 +110,26 @@ impl WebSocketExposure {
     /// every YAML-declared sink of type `websocket`, enabling the event pipeline
     /// to dispatch notifications to connected clients.
     pub fn build_router(host: Arc<ServerHost>) -> Result<Router> {
+        let (router, _cm) = Self::build_router_with_manager(host)?;
+        Ok(router)
+    }
+
+    /// Build the WebSocket router and return both the router and the `ConnectionManager`.
+    ///
+    /// Use this variant when the host application needs access to the `ConnectionManager`
+    /// to register a custom message handler (e.g., for multiplexing chat or other
+    /// protocols over the same `/ws` connection).
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// let (ws_router, ws_manager) = WebSocketExposure::build_router_with_manager(host)?;
+    /// ws_manager.set_custom_handler(Arc::new(MyChatHandler { ... })).await;
+    /// let app = rest_router.merge(ws_router);
+    /// ```
+    pub fn build_router_with_manager(
+        host: Arc<ServerHost>,
+    ) -> Result<(Router, Arc<manager::ConnectionManager>)> {
         let connection_manager = Arc::new(manager::ConnectionManager::new(host.clone()));
 
         // Spawn the event dispatch loop if there's an event bus
@@ -128,9 +152,9 @@ impl WebSocketExposure {
 
         let router = Router::new()
             .route("/ws", get(handler::ws_handler))
-            .with_state(connection_manager);
+            .with_state(connection_manager.clone());
 
-        Ok(router)
+        Ok((router, connection_manager))
     }
 
     /// Wire WebSocket sinks into the SinkRegistry
