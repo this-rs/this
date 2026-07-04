@@ -22,9 +22,42 @@ use super::protocol::{ServerMessage, Subscription, SubscriptionFilter};
 use crate::core::events::EventEnvelope;
 use crate::server::host::ServerHost;
 use std::collections::HashMap;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 use tokio::sync::{RwLock, broadcast, mpsc};
 use uuid::Uuid;
+
+/// Result type for custom message handlers.
+///
+/// - `true`: the message was handled (consumed)
+/// - `false`: the message was not recognized, fall back to error
+pub type CustomHandlerResult = Pin<Box<dyn Future<Output = bool> + Send>>;
+
+/// Trait for handling custom (non-protocol) messages on the WebSocket connection.
+///
+/// When a client sends a message that doesn't parse as a `ClientMessage`
+/// (subscribe/unsubscribe/ping), the `ConnectionManager` invokes the registered
+/// custom handler before returning an error.
+///
+/// This allows host applications to multiplex additional protocols (e.g., chat)
+/// over the same `/ws` connection without modifying the core `this-rs` protocol.
+///
+/// The handler receives:
+/// - `connection_id`: unique identifier for the WebSocket connection
+/// - `user_id`: optional authenticated user ID (if `associate_user()` was called)
+/// - `raw_text`: the raw JSON text that failed to parse as `ClientMessage`
+/// - `sender`: an `mpsc::UnboundedSender<ServerMessage>` to send responses back
+///   to this specific connection
+pub trait CustomMessageHandler: Send + Sync + 'static {
+    fn handle(
+        &self,
+        connection_id: &str,
+        user_id: Option<&str>,
+        raw_text: &str,
+        sender: mpsc::UnboundedSender<ServerMessage>,
+    ) -> CustomHandlerResult;
+}
 
 /// A handle to a single WebSocket connection
 ///
@@ -57,6 +90,11 @@ pub struct ConnectionManager {
     _host: Arc<ServerHost>,
     /// All active connections indexed by connection ID
     connections: RwLock<HashMap<String, ConnectionHandle>>,
+    /// Optional custom message handler for non-protocol messages.
+    ///
+    /// When set, messages that fail to parse as `ClientMessage` are forwarded
+    /// to this handler before returning an error to the client.
+    custom_handler: RwLock<Option<Arc<dyn CustomMessageHandler>>>,
 }
 
 impl std::fmt::Debug for ConnectionManager {
@@ -71,7 +109,52 @@ impl ConnectionManager {
         Self {
             _host: host,
             connections: RwLock::new(HashMap::new()),
+            custom_handler: RwLock::new(None),
         }
+    }
+
+    /// Register a custom message handler for non-protocol messages.
+    ///
+    /// When a client sends a JSON message whose `type` field doesn't match any
+    /// `ClientMessage` variant (subscribe/unsubscribe/ping), the handler is
+    /// invoked with the raw text and connection metadata. This enables host
+    /// applications to multiplex additional protocols (e.g., chat) over the
+    /// same `/ws` connection.
+    ///
+    /// Only one handler can be registered at a time; calling this again replaces
+    /// the previous handler.
+    pub async fn set_custom_handler(&self, handler: Arc<dyn CustomMessageHandler>) {
+        *self.custom_handler.write().await = Some(handler);
+    }
+
+    /// Try to handle a message via the custom handler.
+    ///
+    /// Returns `true` if the message was consumed by the custom handler,
+    /// `false` if no handler is registered or the handler didn't recognize it.
+    pub async fn try_custom_handler(&self, connection_id: &str, raw_text: &str) -> bool {
+        // Read the handler under a short lock, then release before calling.
+        let handler = {
+            let guard = self.custom_handler.read().await;
+            guard.clone()
+        };
+
+        let handler = match handler {
+            Some(h) => h,
+            None => return false,
+        };
+
+        // Get user_id and sender for this connection.
+        let (user_id, sender) = {
+            let connections = self.connections.read().await;
+            match connections.get(connection_id) {
+                Some(handle) => (handle.user_id.clone(), handle.tx.clone()),
+                None => return false,
+            }
+        };
+
+        handler
+            .handle(connection_id, user_id.as_deref(), raw_text, sender)
+            .await
     }
 
     /// Register a new WebSocket connection
@@ -968,5 +1051,119 @@ mod tests {
             rx_b.try_recv().is_err(),
             "tenant B should NOT receive tenant A's event"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Custom message handler tests
+    // -----------------------------------------------------------------------
+
+    /// Messages recorded by [`RecordingHandler`]: (user_id, raw_text).
+    type SeenMessages = Arc<RwLock<Vec<(Option<String>, String)>>>;
+
+    /// Test handler that records received messages and optionally consumes them.
+    struct RecordingHandler {
+        seen: SeenMessages,
+        consume: bool,
+    }
+
+    impl CustomMessageHandler for RecordingHandler {
+        fn handle(
+            &self,
+            _connection_id: &str,
+            user_id: Option<&str>,
+            raw_text: &str,
+            sender: mpsc::UnboundedSender<ServerMessage>,
+        ) -> CustomHandlerResult {
+            let seen = self.seen.clone();
+            let consume = self.consume;
+            let user = user_id.map(|u| u.to_string());
+            let text = raw_text.to_string();
+            Box::pin(async move {
+                seen.write().await.push((user, text));
+                if consume {
+                    let _ = sender.send(ServerMessage::Error {
+                        message: "ack".to_string(),
+                    });
+                }
+                consume
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn test_custom_handler_not_registered_returns_false() {
+        let cm = ConnectionManager::new(test_host());
+        let (conn_id, _rx) = cm.connect(None).await;
+
+        let handled = cm.try_custom_handler(&conn_id, r#"{"type":"chat"}"#).await;
+        assert!(!handled, "no handler registered → message not consumed");
+    }
+
+    #[tokio::test]
+    async fn test_custom_handler_consumes_message_and_replies() {
+        let cm = ConnectionManager::new(test_host());
+        let (conn_id, mut rx) = cm.connect(None).await;
+        cm.associate_user(&conn_id, "user_42".to_string())
+            .await
+            .unwrap();
+
+        let seen = Arc::new(RwLock::new(Vec::new()));
+        cm.set_custom_handler(Arc::new(RecordingHandler {
+            seen: seen.clone(),
+            consume: true,
+        }))
+        .await;
+
+        let raw = r#"{"type":"chat","body":"hello"}"#;
+        let handled = cm.try_custom_handler(&conn_id, raw).await;
+        assert!(handled, "handler should consume the message");
+
+        // The handler saw the raw text and the associated user
+        let recorded = seen.read().await;
+        assert_eq!(recorded.len(), 1);
+        assert_eq!(recorded[0].0.as_deref(), Some("user_42"));
+        assert_eq!(recorded[0].1, raw);
+        drop(recorded);
+
+        // The handler's reply reached this connection's channel
+        let msg = rx.try_recv().unwrap();
+        match msg {
+            ServerMessage::Error { message } => assert_eq!(message, "ack"),
+            other => panic!("Expected handler ack, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_custom_handler_declining_returns_false() {
+        let cm = ConnectionManager::new(test_host());
+        let (conn_id, _rx) = cm.connect(None).await;
+
+        cm.set_custom_handler(Arc::new(RecordingHandler {
+            seen: Arc::new(RwLock::new(Vec::new())),
+            consume: false,
+        }))
+        .await;
+
+        let handled = cm.try_custom_handler(&conn_id, "not-json").await;
+        assert!(
+            !handled,
+            "handler declined → caller falls back to error path"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_custom_handler_unknown_connection_returns_false() {
+        let cm = ConnectionManager::new(test_host());
+
+        cm.set_custom_handler(Arc::new(RecordingHandler {
+            seen: Arc::new(RwLock::new(Vec::new())),
+            consume: true,
+        }))
+        .await;
+
+        let handled = cm
+            .try_custom_handler("conn_nonexistent", r#"{"type":"chat"}"#)
+            .await;
+        assert!(!handled, "unknown connection → message not consumed");
     }
 }
