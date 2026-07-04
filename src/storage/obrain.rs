@@ -95,6 +95,80 @@ impl ObrainStore {
         let session = self.db.session();
         session.use_graph(name);
     }
+
+    /// Rebuild the UUID→NodeId index for a specific entity label.
+    ///
+    /// **Why this exists**: `ObrainStore::open()` (and `from_db`) restore the
+    /// underlying `ObrainDB` from disk, but the in-memory `uuid_to_node` index
+    /// is left empty. As a result, every operation that resolves a `Uuid`
+    /// (get / update / delete / list) returns "not found" on a freshly opened
+    /// store, even when the nodes are physically present on disk.
+    ///
+    /// Call this method after `open()` (or `from_db()`) for each entity label
+    /// you intend to serve. It scans nodes by label, reads their `_uuid`
+    /// property, and repopulates the index.
+    ///
+    /// Returns the number of (uuid, node_id) entries that were inserted.
+    ///
+    /// # Example
+    /// ```rust,ignore
+    /// let store = ObrainStore::open("./data/evg.obrain")?;
+    /// for label in ["event", "member", "date_proposal"] {
+    ///     store.rebuild_index_for_label(label)?;
+    /// }
+    /// ```
+    pub fn rebuild_index_for_label(&self, label: &str) -> Result<usize> {
+        let store = self.db.store();
+        let session = self.db.session();
+        let node_ids = store.nodes_by_label(label);
+        let mut index = self
+            .uuid_to_node
+            .write()
+            .map_err(|e| anyhow!("UUID index lock poisoned: {}", e))?;
+        let mut inserted = 0_usize;
+        for nid in node_ids {
+            if let Some(node) = session.get_node(nid)
+                && let Some(uuid_val) = node.get_property("_uuid")
+                && let Some(uuid_str) = uuid_val.as_str()
+                && let Ok(uuid) = Uuid::parse_str(uuid_str)
+            {
+                index.insert(uuid, nid);
+                inserted += 1;
+            }
+        }
+        Ok(inserted)
+    }
+
+    /// Rebuild the link UUID→NodeId index for a given link type.
+    ///
+    /// Links are stored as nodes with label `_link:{link_type}` (see the
+    /// `link_nodes` field on `ObrainStore`). After `open()`, that index is
+    /// empty and must be repopulated for `LinkService` operations to find
+    /// previously-persisted links.
+    ///
+    /// Returns the number of entries inserted.
+    pub fn rebuild_link_index(&self, link_type: &str) -> Result<usize> {
+        let full_label = format!("_link:{}", link_type);
+        let store = self.db.store();
+        let session = self.db.session();
+        let node_ids = store.nodes_by_label(&full_label);
+        let mut index = self
+            .link_nodes
+            .write()
+            .map_err(|e| anyhow!("Link index lock poisoned: {}", e))?;
+        let mut inserted = 0_usize;
+        for nid in node_ids {
+            if let Some(node) = session.get_node(nid)
+                && let Some(uuid_val) = node.get_property("_uuid")
+                && let Some(uuid_str) = uuid_val.as_str()
+                && let Ok(uuid) = Uuid::parse_str(uuid_str)
+            {
+                index.insert(uuid, nid);
+                inserted += 1;
+            }
+        }
+        Ok(inserted)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -215,6 +289,13 @@ impl<T: Data + Serialize + DeserializeOwned> DataService<T> for ObrainDataServic
             .map_err(|e| anyhow!("UUID index lock poisoned: {}", e))?
             .insert(uuid, node_id);
 
+        // Commit WAL so the mutation is durable across restarts (cf. pattern
+        // used by obrain-hub::conversation/cognitive_brain after each write).
+        self.store
+            .db
+            .commit_wal()
+            .map_err(|e| anyhow!("commit_wal after create failed: {}", e))?;
+
         Ok(entity)
     }
 
@@ -317,6 +398,12 @@ impl<T: Data + Serialize + DeserializeOwned> DataService<T> for ObrainDataServic
             }
         }
 
+        // Commit WAL so the mutation is durable across restarts.
+        self.store
+            .db
+            .commit_wal()
+            .map_err(|e| anyhow!("commit_wal after update failed: {}", e))?;
+
         Ok(entity)
     }
 
@@ -337,6 +424,12 @@ impl<T: Data + Serialize + DeserializeOwned> DataService<T> for ObrainDataServic
         // DETACH DELETE — removes edges connected to this node too
         store.delete_node_edges(node_id);
         store.delete_node(node_id);
+
+        // Commit WAL so the deletion is durable.
+        self.store
+            .db
+            .commit_wal()
+            .map_err(|e| anyhow!("commit_wal after delete failed: {}", e))?;
 
         Ok(())
     }
@@ -497,6 +590,12 @@ impl LinkService for ObrainLinkService {
         // Opportunistically create graph edge for traversal
         self.try_create_edge(&link);
 
+        // Commit WAL so the link is durable.
+        self.store
+            .db
+            .commit_wal()
+            .map_err(|e| anyhow!("commit_wal after link create failed: {}", e))?;
+
         Ok(link)
     }
 
@@ -638,6 +737,12 @@ impl LinkService for ObrainLinkService {
             ObrainValue::from(link.link_type.as_str()),
         );
 
+        // Commit WAL so the link update is durable.
+        self.store
+            .db
+            .commit_wal()
+            .map_err(|e| anyhow!("commit_wal after link update failed: {}", e))?;
+
         Ok(link)
     }
 
@@ -656,6 +761,12 @@ impl LinkService for ObrainLinkService {
 
         let store = self.store.db.store();
         store.delete_node(node_id);
+
+        // Commit WAL so the deletion is durable.
+        self.store
+            .db
+            .commit_wal()
+            .map_err(|e| anyhow!("commit_wal after link delete failed: {}", e))?;
 
         Ok(())
     }
@@ -1411,5 +1522,90 @@ mod tests {
             retrieved.metadata,
             Some(serde_json::json!({"role": "Developer", "since": "2024-01-01"}))
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Index rebuild tests (simulate a fresh open() where nodes exist on disk
+    // but the in-memory UUID→NodeId indexes are empty)
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_rebuild_index_for_label_after_index_loss() {
+        let store = test_store();
+        let service = ObrainDataService::<TestDataEntity>::new(store.clone());
+        let entity = TestDataEntity::new("Persisted");
+        service.create(entity.clone()).await.unwrap();
+
+        // Simulate a fresh open(): nodes are present, index is empty.
+        store.uuid_to_node.write().unwrap().clear();
+        assert!(
+            service.get(&entity.id).await.unwrap().is_none(),
+            "empty index → entity unreachable (the bug this fixes)"
+        );
+
+        // Rebuild from the label scan.
+        let inserted = store.rebuild_index_for_label("test_data").unwrap();
+        assert_eq!(inserted, 1);
+
+        let retrieved = service.get(&entity.id).await.unwrap();
+        assert_eq!(retrieved.unwrap().entity_name, "Persisted");
+    }
+
+    #[tokio::test]
+    async fn test_rebuild_index_for_label_unknown_label() {
+        let store = test_store();
+        let service = ObrainDataService::<TestDataEntity>::new(store.clone());
+        service.create(TestDataEntity::new("Alice")).await.unwrap();
+
+        // Rebuilding a label with no nodes is a no-op, not an error.
+        let inserted = store.rebuild_index_for_label("unknown_label").unwrap();
+        assert_eq!(inserted, 0);
+    }
+
+    #[tokio::test]
+    async fn test_rebuild_link_index_after_index_loss() {
+        let store = test_store();
+        let service = ObrainLinkService::new(store.clone());
+        let link = LinkEntity::new("owner", Uuid::new_v4(), Uuid::new_v4(), None);
+        service.create(link.clone()).await.unwrap();
+
+        // Simulate a fresh open(): link nodes are present, index is empty.
+        store.link_nodes.write().unwrap().clear();
+        assert!(
+            service.get(&link.id).await.unwrap().is_none(),
+            "empty link index → link unreachable (the bug this fixes)"
+        );
+
+        let inserted = store.rebuild_link_index("owner").unwrap();
+        assert_eq!(inserted, 1);
+
+        let retrieved = service.get(&link.id).await.unwrap().unwrap();
+        assert_eq!(retrieved.link_type, "owner");
+    }
+
+    #[tokio::test]
+    async fn test_persistence_across_reopen_with_rebuilt_index() {
+        let dir = std::env::temp_dir().join(format!("this_obrain_test_{}", Uuid::new_v4()));
+        let entity = TestDataEntity::new("Durable");
+
+        // Write, then drop the store (process-restart simulation).
+        {
+            let store = ObrainStore::open(&dir).unwrap();
+            let service = ObrainDataService::<TestDataEntity>::new(store);
+            service.create(entity.clone()).await.unwrap();
+            // No explicit flush: durability must come from the per-mutation
+            // commit_wal() calls.
+        }
+
+        // Reopen: node must be on disk, index must be rebuildable.
+        let store = ObrainStore::open(&dir).unwrap();
+        let inserted = store.rebuild_index_for_label("test_data").unwrap();
+        assert_eq!(inserted, 1, "entity must survive reopen via WAL commit");
+
+        let service = ObrainDataService::<TestDataEntity>::new(store);
+        let retrieved = service.get(&entity.id).await.unwrap();
+        assert_eq!(retrieved.unwrap().entity_name, "Durable");
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 }
