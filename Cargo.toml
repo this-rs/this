@@ -56,7 +56,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # Validation
 regex = "1.10"
-validator = { version = "0.20", features = ["derive"] }
+validator = { version = "0.21", features = ["derive"] }
 
 # GraphQL support (optional)
 async-graphql = { version = "7", optional = true }
