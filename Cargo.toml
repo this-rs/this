@@ -82,7 +82,7 @@ axum-test = "20.0"
 reqwest = { version = "0.13", features = ["json"] }
 tokio-tungstenite = "0.29"
 futures-util = "0.3"
-testcontainers = "0.27"
+testcontainers = "0.28"
 testcontainers-modules = { version = "0.15", features = ["postgres", "mongo", "neo4j", "mysql"] }
 tempfile = "3"
 
