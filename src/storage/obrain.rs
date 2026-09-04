@@ -10,6 +10,25 @@
 //! holds the `ObrainDB` instance and a UUID→NodeId index. This index is necessary
 //! because this.rs uses `Uuid` identifiers while obrain uses internal `NodeId` (u64).
 //!
+//! # Engine & durability
+//!
+//! The backend couples **this-rs/obrain** (the ultra-benchmarked cognitive graph
+//! engine — fastest tested graph DB on the LDBC Social Network Benchmark, in
+//! embedded and server configurations). Local checkout: `~/projects/banc-obrain`
+//! (workspace `crates/obrain-{engine,core,common,…}`); the path dependencies in
+//! `Cargo.toml` point at it, mirroring aletheia's path-dep convention.
+//!
+//! `ObrainStore::open(path)` opens a **durable substrate store**: the engine
+//! persists mmap zones/dict columns and a write-ahead log with `EveryCommit`
+//! fsync, and every mutation path in this module ends in `commit_wal()`, so a
+//! crash between requests cannot lose an acknowledged write. This holds
+//! whatever transport delivered the mutation (REST, WebSocket, SSE, gRPC — or
+//! the vite-rs `/__dev` bridge in dev): once the storage service returns Ok,
+//! the write is on disk. After reopening a store, the in-memory UUID indexes
+//! must be rebuilt from the persisted labels — see [`ObrainStore::rebuild_index_for_label`]
+//! and [`ObrainStore::rebuild_link_index`] (tests assert data, links and search
+//! all survive a reopen).
+//!
 //! # Feature flag
 //!
 //! Gated behind `#[cfg(feature = "obrain")]`. Enable with:
@@ -815,6 +834,14 @@ impl LinkService for ObrainLinkService {
                 index.remove(&link_uuid);
                 store.delete_node(node_id);
             }
+
+            // Commit WAL once for the whole batch so none of the deletions can
+            // be lost on crash (durability contract: every mutation path ends
+            // in a commit_wal — see the create/update/delete paths above).
+            self.store
+                .db
+                .commit_wal()
+                .map_err(|e| anyhow!("commit_wal after delete_by_entity failed: {}", e))?;
         }
 
         Ok(())
@@ -1606,6 +1633,120 @@ mod tests {
         let retrieved = service.get(&entity.id).await.unwrap();
         assert_eq!(retrieved.unwrap().entity_name, "Durable");
 
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn test_links_survive_reopen_with_rebuilt_index() {
+        let dir = std::env::temp_dir().join(format!("this_obrain_links_{}", Uuid::new_v4()));
+
+        // Write data + links, drop the store (restart simulation).
+        let (alice, bob, link) = {
+            let store = ObrainStore::open(&dir).unwrap();
+            let data_svc = ObrainDataService::<TestDataEntity>::new(Arc::clone(&store));
+            let link_svc = ObrainLinkService::new(Arc::clone(&store));
+            let alice = TestDataEntity::new("Alice");
+            let bob = TestDataEntity::new("Bob");
+            data_svc.create(alice.clone()).await.unwrap();
+            data_svc.create(bob.clone()).await.unwrap();
+            let link = LinkEntity::new("friend", alice.id, bob.id, None);
+            link_svc.create(link.clone()).await.unwrap();
+            (alice, bob, link)
+        };
+
+        // Reopen: everything must be on disk via per-mutation WAL commits,
+        // and the UUID indexes must be rebuildable from the label scan.
+        let store = ObrainStore::open(&dir).unwrap();
+        assert_eq!(store.rebuild_index_for_label("test_data").unwrap(), 2);
+        assert_eq!(store.rebuild_link_index("friend").unwrap(), 1);
+
+        let data_svc = ObrainDataService::<TestDataEntity>::new(Arc::clone(&store));
+        let link_svc = ObrainLinkService::new(Arc::clone(&store));
+
+        let entities = data_svc.list().await.unwrap();
+        assert_eq!(entities.len(), 2, "entities survive reopen");
+        let found_alice = data_svc.get(&alice.id).await.unwrap();
+        assert_eq!(found_alice.unwrap().entity_name, "Alice");
+
+        // Property search works again after reopen (f_* properties persisted).
+        let matches = data_svc.search("entity_name", "Bob").await.unwrap();
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].id, bob.id);
+
+        let links = link_svc
+            .find_by_source(&alice.id, None, None)
+            .await
+            .unwrap();
+        assert_eq!(links.len(), 1, "link survives reopen");
+        assert_eq!(links[0].id, link.id);
+        assert_eq!(links[0].target_id, bob.id);
+
+        // Mutations after reopen are durable too: update + delete then reopen
+        // one more time and observe the final state.
+        let mut updated = link.clone();
+        updated.metadata = Some(serde_json::json!({"since": "2024"}));
+        updated.touch();
+        link_svc.update(&link.id, updated).await.unwrap();
+        data_svc.delete(&alice.id).await.unwrap();
+
+        drop(store);
+        let store = ObrainStore::open(&dir).unwrap();
+        assert_eq!(store.rebuild_index_for_label("test_data").unwrap(), 1);
+        assert_eq!(store.rebuild_link_index("friend").unwrap(), 1);
+
+        let data_svc = ObrainDataService::<TestDataEntity>::new(Arc::clone(&store));
+        let link_svc = ObrainLinkService::new(store);
+        assert!(
+            data_svc.get(&alice.id).await.unwrap().is_none(),
+            "delete durable"
+        );
+        assert!(
+            data_svc.get(&bob.id).await.unwrap().is_some(),
+            "remaining entity intact"
+        );
+        let mut remaining = link_svc.list().await.unwrap();
+        assert_eq!(remaining.len(), 1);
+        let survivor = remaining.pop().unwrap();
+        assert_eq!(
+            survivor
+                .metadata
+                .as_ref()
+                .and_then(|m| m.get("since"))
+                .and_then(|v| v.as_str()),
+            Some("2024"),
+            "post-reopen update durable"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn test_delete_by_entity_is_durable_across_reopen() {
+        let dir = std::env::temp_dir().join(format!("this_obrain_dbe_{}", Uuid::new_v4()));
+        let user_id = Uuid::new_v4();
+
+        {
+            let store = ObrainStore::open(&dir).unwrap();
+            let link_svc = ObrainLinkService::new(store);
+            link_svc
+                .create(LinkEntity::new("owner", user_id, Uuid::new_v4(), None))
+                .await
+                .unwrap();
+            link_svc
+                .create(LinkEntity::new("owner", user_id, Uuid::new_v4(), None))
+                .await
+                .unwrap();
+            // Batch delete: must end in a WAL commit so both deletions are
+            // durable even though the batch touches multiple nodes.
+            link_svc.delete_by_entity(&user_id).await.unwrap();
+        }
+
+        let store = ObrainStore::open(&dir).unwrap();
+        assert_eq!(
+            store.rebuild_link_index("owner").unwrap(),
+            0,
+            "batch deletion must survive reopen (commit_wal after batch)"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 }
