@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **vite-rs frontend hosting** (`frontend` feature, `this::server::frontend`) — the API process can serve the project SPA itself, reusing vite-rs serving rules (statics/ETag/304/MIME/SPA fallback) for both dev and embedded production assets; dev mode adds the vite-rs hot-reload loop, browser capture and the `/__dev` AI command bridge (`DevState`), activated via `SERVE_FRONTEND`/`THIS_*` env vars (`attach_from_env`).
+- **Obrain engine re-coupled to this-rs/obrain (banc-obrain) checkout** — the durable cognitive graph engine (substrate + `EveryCommit` fsync WAL); `delete_by_entity` now ends in a WAL commit, and reopen-persistence tests cover data, links, search, post-reopen mutations and batch deletes.
+
 ### Planned
 - ScyllaDB storage backend
 - PostgreSQL storage backend
