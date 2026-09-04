@@ -19,7 +19,7 @@ futures = "0.3"
 
 # Web framework
 axum = { version = "0.8", features = ["macros", "ws"] }
-tower = "0.5"
+tower = { version = "0.5", features = ["util"] }
 tower-http = { version = "0.7", features = ["trace", "cors"] }
 
 # Serialization
@@ -73,10 +73,18 @@ prost-types = { version = "0.14", optional = true }
 reqwest = { version = "0.13", features = ["json"], optional = true }
 indexmap = "2.13.0"
 
-# Obrain graph database (optional, feature-gated)
-obrain-engine = { path = "../../lab/grafeo/crates/obrain-engine", optional = true }
-obrain-common = { path = "../../lab/grafeo/crates/obrain-common", optional = true }
-obrain-core = { path = "../../lab/grafeo/crates/obrain-core", optional = true, default-features = false }
+# Obrain graph database — cognitive graph engine (this-rs/obrain, the
+# ultra-benchmarked engine: fastest tested graph DB on LDBC Social Network
+# Benchmark in embedded and server configurations). Workspace checkout:
+# ~/projects/banc-obrain (github this-rs/obrain). Optional, feature-gated.
+obrain-engine = { path = "../../banc-obrain/crates/obrain-engine", optional = true }
+obrain-common = { path = "../../banc-obrain/crates/obrain-common", optional = true }
+obrain-core = { path = "../../banc-obrain/crates/obrain-core", optional = true, default-features = false }
+
+# vite-rs — Vite-like static/dev frontend serving reused by the `frontend`
+# feature (dev loop + AI bridge + static file rules). Local checkout is the
+# detached crate ~/projects/vite-rs (same path convention as aletheia's miner).
+vite-rs = { path = "../../vite-rs", optional = true }
 
 # WAMI auth (optional, feature-gated)
 jsonwebtoken = { version = "9", optional = true }
@@ -113,6 +121,9 @@ websocket = []
 wami = ["dep:jsonwebtoken", "dep:ed25519-dalek", "dep:base64"]
 obrain = ["dep:obrain-engine", "dep:obrain-common", "dep:obrain-core"]
 obrain-cognitive = ["obrain"]
+# vite-rs based SPA frontend hosting (this::server::frontend). Not part of
+# `all` because it needs the local vite-rs checkout (path dep), like obrain.
+frontend = ["dep:vite-rs"]
 all = ["in-memory", "dynamodb", "postgres", "mongodb_backend", "neo4j", "scylladb", "mysql", "lmdb", "graphql", "grpc", "websocket", "push"]
 
 [lib]
