@@ -47,7 +47,7 @@
 - **MySQL** — Traditional relational backend
 - **DynamoDB** — AWS serverless storage
 - **LMDB** — Embedded key-value store (zero-copy reads)
-- **Obrain** — Cognitive graph database with hybrid intelligence
+- **Obrain** — Cognitive graph database with hybrid intelligence; the backend now couples with the this-rs/obrain engine checkout and records durable per-mutation WAL commits
 
 ### 📣 Event System
 - 🔔 **EventBus** — Built-in non-blocking broadcast on all CRUD operations
@@ -78,6 +78,7 @@
 - 📝 **Auto-Pluralization** — Smart plural forms (company → companies)
 - ⚙️ **YAML Configuration** — Declarative entity, link, event flow, auth, and cognitive definitions
 - 🛠️ **CLI Scaffolding** — `this-cli` generates entire projects in seconds
+- 🖥️ **Frontend serving (`frontend` feature)** — optional feature that serves the project's SPA from the API process using the detached vite-rs crate (dev hot reload + `/__dev` AI command bridge; embedded production serving with vite-rs rules), via `this::server::frontend`
 
 ---
 
