@@ -297,3 +297,78 @@ il gagne l'identité, l'IAM, le bail et le journal à côté.
 Les opérations du trait passent par l'**espace actif** sur `ObrainStore` : un
 consommateur qui bascule n'a rien à savoir des espaces pour que ses lectures
 restent correctes.
+
+---
+
+## Contrat de latence — **REFRAÎCHI** (mesure du 2026-09-11, après le mode par défaut et l'IAM v2)
+
+`examples/latency_contract` (400 itérations in-process, 250 requêtes HTTP) et
+`examples/iam_bench` (200 principaux × 4 rôles × 20 permissions). Machine
+**partagée**, load ≈ 29 au moment de la mesure.
+
+### Ce qui a changé dans la mesure elle-même (et pourquoi c'était nécessaire)
+
+1. **Minimum ET médiane.** Une même opération mesurée à deux minutes
+   d'intervalle donnait 6 µs puis 16 µs : la médiane ondule d'un facteur 3 sous
+   charge. Le **minimum** est le coût sans interférence — c'est lui qu'on cite.
+2. **La politique `perm:` mesurait un chemin qui n'existe pas.** La décision
+   était matérialisée sous `("user:1", "tenant-a")` alors que le contexte se
+   mappe en `(user_id, tenant_id)` : la politique ne trouvait **aucune décision**
+   et affichait 1,08 µs — le coût d'une recherche qui ne trouve rien. Corrigé :
+   elle mesure désormais le **chemin nominal** (4,4 µs, cohérent avec la décision
+   IAM elle-même).
+3. **Une clé d'ACL codée en dur** dans le banc (`"tenant-a/user:1"`) datait du
+   schéma v1 : elle a fait **paniquer** le banc après le passage à v2. Le banc
+   passe maintenant par le contrat (`Iam::acl_key`, `GraphBackend`), jamais par
+   une valeur recopiée.
+
+### in-process (minimum / médiane)
+
+| surface | minimum | médiane | ce que ça inclut |
+|---|---|---|---|
+| bail · état publié | **140 ns** | 150 ns | lecture du verrou + époque — appelé à **chaque** écriture |
+| autorisation · politique du vocabulaire | **140 ns** | 141 ns | résolution de route + évaluation (`public`) |
+| identité · recherche indexée | **992 ns** | 1,11 µs | `find_nodes_by_property` (index) |
+| identité · projection d'un nœud | **2,21 µs** | 2,47 µs | lecture + chaîne de motifs + SHA-256 |
+| IAM · décision matérialisée | **4,12 µs** | 6,22 µs | recherche indexée + 1 lecture de nœud |
+| IAM · lecture d'un nœud de décision | **4,52 µs** | 4,98 µs | 1 lecture de nœud |
+| autorisation · politique `perm:` | **4,42 µs** | 4,65 µs | résolution + mappage d'identité + décision IAM |
+| journal · relecture depuis 0 | **1,37 ms** | 2,35 ms | lecture de zone + tri + dédup (64 entrées) |
+| journal · append d'une entrée | **1,96 ms** | 3,24 ms | attribution du `seq` + écriture de zone |
+
+**Ce que le mode par défaut coûte par requête autorisée** : la résolution de
+route et l'évaluation d'une politique du vocabulaire coûtent **140 ns** ; une
+politique `perm:` coûte **4,4 µs**, dominée par la décision IAM indexée.
+
+### HTTP (socket réelle, connexion réutilisée — le `connect` n'est pas inclus)
+
+| surface | minimum | médiane |
+|---|---|---|
+| `GET /graph/identity` | **47,51 µs** | 68,11 µs |
+| `GET /graph/identity/{id}` (200) | **59,19 µs** | 87,14 µs |
+| `GET /graph` | **109,52 µs** | 166,45 µs |
+
+Le document et le réseau dominent : `GET /graph/identity` coûte **×12** la
+décision IAM qu'il contient.
+
+### IAM : le contrat **robuste** n'est pas un rapport, c'est une **forme**
+
+Un rapport unique (index ÷ traversée) a été mesuré de **×0,5 à ×18** sur la même
+machine selon la taille du graphe et la charge. Ce qui tient, c'est la forme —
+mesurée en faisant varier le graphe d'administration (minimums) :
+
+| rôles × permissions | index | traversée | rapport |
+|---|---|---|---|
+| 1 × 5 | 7,46 µs | 4,03 µs | ×0,5 |
+| 4 × 20 | 7,20 µs | 41,43 µs | ×5,8 |
+| 8 × 40 | 8,92 µs | 161,79 µs | ×18,1 |
+
+**La colonne `index` est plate** : la décision matérialisée ne dépend pas du
+nombre de rôles, parce qu'elle ne les parcourt pas. La traversée, elle, croît
+avec le graphe. *Honnêteté* : sur un graphe minuscule (1 rôle × 5 permissions),
+la traversée est **moins chère** que l'index — le seuil est autour d'une
+poignée d'arêtes.
+
+**Écriture** (le prix payé une fois, à l'écriture IAM) : **21,16 ms par
+principal** avec un commit par principal, **1,36 ms par principal** en un seul
+lot — **×16**. C'est le chiffre qui justifie `materialize_batch`.
