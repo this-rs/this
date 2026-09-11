@@ -118,6 +118,21 @@ pub struct ServerHost {
     /// makes it *the same entity whatever the engine*.
     pub identity: Arc<IdentityRegistry>,
 
+    /// L'application des politiques se fait-elle en **observation** ?
+    ///
+    /// `true` = chaque refus est calculé, journalisé et **publié dans la réponse**
+    /// (en-tête `x-this-rs-authz`), mais la requête passe. C'est le mode
+    /// d'adoption d'un projet existant : on voit ce qui serait refusé sur le
+    /// trafic réel avant d'armer. Voir `ServerBuilder::authorization_report_only`.
+    pub authorize_report_only: bool,
+
+    /// Le mappage d'identité fourni par l'application, s'il y en a un.
+    ///
+    /// Quand il est présent, il remplace le mappage de this-rs pour toutes les
+    /// politiques `perm:` — c'est ce qui rend l'IAM **natif** pour un modèle
+    /// d'authentification plus ancien.
+    pub principal_mapping: Option<Arc<crate::server::middleware::authorization::PrincipalMapping>>,
+
     /// Les politiques déclarées (`auth:`) sont-elles **appliquées** ?
     ///
     /// **`true` par défaut** : un framework qui laisse passer par défaut n'est
@@ -191,6 +206,8 @@ impl ServerHost {
             graph_store: None,
             identity: Arc::new(IdentityRegistry::new()),
             authorize: true,
+            authorize_report_only: false,
+            principal_mapping: None,
             auth_provider: None,
             resolver_registry: Arc::new(AuthResolverRegistry::new()),
             #[cfg(feature = "wami")]
@@ -430,6 +447,8 @@ impl ServerHost {
             graph_store: None,
             identity: Arc::new(IdentityRegistry::new()),
             authorize: true,
+            authorize_report_only: false,
+            principal_mapping: None,
             auth_provider: None,
             resolver_registry: Arc::new(AuthResolverRegistry::new()),
             #[cfg(feature = "wami")]

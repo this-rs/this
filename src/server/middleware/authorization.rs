@@ -186,6 +186,33 @@ enum IamVerdict {
     Unevaluable,
 }
 
+/// Le mappage `contexte → (principal, portée)` — la couture pour les **projets
+/// existants**.
+///
+/// Le mappage par défaut suppose le modèle de this-rs : `User`/`Owner` →
+/// `(user_id, tenant_id)`, `Service` → `(service_name, tenant_id)`, `Admin` →
+/// `(admin_id, "global")`. Un projet plus ancien a souvent un autre modèle (un
+/// `sub` et une organisation, un compte et un espace de travail, une clé d'API
+/// et un projet). Plutôt que de lui imposer une réécriture, il fournit sa
+/// fonction — et l'IAM natif s'applique à **ses** identités.
+pub type PrincipalMapping =
+    dyn Fn(&AuthContext) -> Option<(String, String)> + Send + Sync + 'static;
+
+/// Comment l'application des politiques se comporte.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AuthorizationMode {
+    /// Refus effectif : la requête est arrêtée en 403.
+    Enforced,
+    /// **Observation** : on calcule la décision, on la **journalise**, mais on
+    /// laisse passer, et la réponse porte l'en-tête `x-this-rs-authz`.
+    ///
+    /// C'est le mode d'adoption d'un projet existant : on voit exactement ce qui
+    /// serait refusé, sur le trafic réel, avant d'armer. Passer directement de
+    /// « rien n'est appliqué » à « tout est appliqué » casse une production.
+    ReportOnly,
+}
+
 #[derive(Clone)]
 pub struct Authorization {
     config: Arc<LinksConfig>,
@@ -199,6 +226,11 @@ pub struct Authorization {
     /// défaut.
     #[cfg(feature = "obrain")]
     iam: Option<crate::storage::iam::Iam>,
+    /// Mode d'application (défaut : `Enforced`).
+    mode: AuthorizationMode,
+    /// Mappage `contexte → (principal, portée)`, s'il est fourni par
+    /// l'application. `None` = le mappage par défaut de this-rs.
+    mapping: Option<Arc<PrincipalMapping>>,
 }
 
 impl Authorization {
@@ -214,7 +246,61 @@ impl Authorization {
             resolvers,
             #[cfg(feature = "obrain")]
             iam: None,
+            mode: AuthorizationMode::Enforced,
+            mapping: None,
         }
+    }
+
+    /// Le mode d'application.
+    pub fn mode(&self) -> AuthorizationMode {
+        self.mode
+    }
+
+    /// **Mode observation** : décide et journalise, mais laisse passer.
+    ///
+    /// À utiliser pour adopter ce module sur un projet qui existe déjà : on
+    /// regarde le trafic réel, on corrige les politiques qui refuseraient à
+    /// tort, puis on arme.
+    pub fn report_only(mut self) -> Self {
+        self.mode = AuthorizationMode::ReportOnly;
+        self
+    }
+
+    /// **Fournit le mappage d'identité** de l'application, qui remplace celui de
+    /// this-rs pour toutes les politiques `perm:`.
+    ///
+    /// Rend l'IAM natif pour un modèle d'authentification qui n'est pas celui de
+    /// this-rs : l'application dit qui est le principal et dans quelle portée,
+    /// et les décisions matérialisées s'appliquent à **ses** identités.
+    ///
+    /// ```rust,ignore
+    /// let authz = Authorization::new(config, &registry, resolvers)
+    ///     .with_principal_mapping(|ctx| match ctx {
+    ///         // Modèle existant : le sujet du jeton et son organisation.
+    ///         AuthContext::User { user_id, tenant_id, .. } => {
+    ///             Some((format!("account:{user_id}"), format!("org:{tenant_id}")))
+    ///         }
+    ///         _ => None,
+    ///     });
+    /// ```
+    pub fn with_principal_mapping<F>(mut self, mapping: F) -> Self
+    where
+        F: Fn(&AuthContext) -> Option<(String, String)> + Send + Sync + 'static,
+    {
+        self.mapping = Some(Arc::new(mapping));
+        self
+    }
+
+    /// Comme [`Authorization::with_principal_mapping`], avec un mappage déjà
+    /// partagé (utile quand l'hôte le porte et le passe au routeur).
+    pub fn with_principal_mapping_shared(mut self, mapping: Arc<PrincipalMapping>) -> Self {
+        self.mapping = Some(mapping);
+        self
+    }
+
+    /// Un mappage d'identité est-il fourni par l'application ?
+    pub fn has_principal_mapping(&self) -> bool {
+        self.mapping.is_some()
     }
 
     /// Branche le **plan IAM** : les politiques `perm:<permission>` seront
@@ -231,7 +317,20 @@ impl Authorization {
     /// décision matérialisée est refusé comme les autres. Un contexte anonyme
     /// n'a pas de principal — donc pas de décision, donc refus.
     #[cfg(feature = "obrain")]
-    fn iam_identity(context: &AuthContext) -> Option<(String, String)> {
+    fn iam_identity(&self, context: &AuthContext) -> Option<(String, String)> {
+        if let Some(mapping) = &self.mapping {
+            return mapping(context);
+        }
+        Self::default_iam_identity(context)
+    }
+
+    /// Le mappage **par défaut** : le modèle d'identité de this-rs.
+    ///
+    /// **L'IAM décide, pas la variante de contexte** : un administrateur sans
+    /// décision matérialisée est refusé comme les autres. Un contexte anonyme
+    /// n'a pas de principal — donc pas de décision, donc refus.
+    #[cfg(feature = "obrain")]
+    fn default_iam_identity(context: &AuthContext) -> Option<(String, String)> {
         match context {
             AuthContext::User {
                 user_id, tenant_id, ..
@@ -335,7 +434,7 @@ impl Authorization {
             );
             return IamVerdict::Unevaluable;
         };
-        let Some((principal, scope)) = Self::iam_identity(context) else {
+        let Some((principal, scope)) = self.iam_identity(context) else {
             tracing::debug!(
                 permission,
                 "`perm:` sans principal (anonyme) — non tranchable"
@@ -598,6 +697,32 @@ pub async fn authorization_middleware(
             origin,
             reason,
         } => {
+            // **Mode observation** : on décide, on le dit dans les journaux et
+            // dans la réponse, mais la requête passe. C'est ainsi qu'un projet
+            // qui existe déjà adopte ce module sans casser sa production : il
+            // voit, sur le trafic réel, ce qui serait refusé — puis il arme.
+            if authz.mode() == AuthorizationMode::ReportOnly {
+                tracing::warn!(
+                    %method,
+                    %path,
+                    %scope,
+                    %policy,
+                    origin = ?origin,
+                    %reason,
+                    "autorisation : refus OBSERVÉ — mode observation, la requête passe \
+                     (armer avec `with_authorization()` après avoir lu ces journaux)"
+                );
+                let mut response = next.run(request).await;
+                let headers = response.headers_mut();
+                headers.insert(
+                    header_name("x-this-rs-authz"),
+                    header_value("observed-deny"),
+                );
+                headers.insert(header_name("x-this-rs-authz-policy"), header_value(&policy));
+                headers.insert(header_name("x-this-rs-authz-scope"), header_value(&scope));
+                return response;
+            }
+
             tracing::debug!(%method, %path, %scope, %policy, "autorisation refusée");
             (
                 StatusCode::FORBIDDEN,
@@ -612,6 +737,18 @@ pub async fn authorization_middleware(
                 .into_response()
         }
     }
+}
+
+/// Un nom d'en-tête constant (connu, donc infaillible).
+fn header_name(name: &'static str) -> axum::http::HeaderName {
+    axum::http::HeaderName::from_static(name)
+}
+
+/// Une valeur d'en-tête sûre : une portée ou une politique exotique ne doit pas
+/// faire échouer la réponse — on la remplace alors par une forme lisible.
+fn header_value(value: &str) -> axum::http::HeaderValue {
+    axum::http::HeaderValue::from_str(value)
+        .unwrap_or_else(|_| axum::http::HeaderValue::from_static("non-ascii"))
 }
 
 #[cfg(test)]
@@ -1187,6 +1324,217 @@ mod tests {
                 }
             }
         }
+    }
+
+    // ── Adoption d'un projet existant : observation + mappage d'identité ──
+
+    /// Un mappage d'identité **d'un autre modèle** : le projet nomme ses
+    /// principaux `account:<id>` et ses portées `org:<id>`.
+    fn legacy_mapping() -> impl Fn(&AuthContext) -> Option<(String, String)> + Send + Sync + 'static
+    {
+        |ctx: &AuthContext| match ctx {
+            AuthContext::User {
+                user_id, tenant_id, ..
+            } => Some((format!("account:{user_id}"), format!("org:{tenant_id}"))),
+            _ => None,
+        }
+    }
+
+    #[cfg(feature = "obrain")]
+    #[test]
+    fn a_custom_mapping_is_what_makes_the_iam_native_to_another_model() {
+        use crate::storage::ObrainStore;
+        use crate::storage::iam::RoleGrant;
+
+        let store = ObrainStore::new_in_memory();
+        let iam = store.iam();
+        let tenant = uuid::Uuid::from_u128(7);
+        let user = uuid::Uuid::from_u128(42);
+        let ctx = AuthContext::User {
+            user_id: user,
+            tenant_id: tenant,
+            roles: vec![],
+        };
+
+        // La décision est matérialisée sous les noms **du projet**, pas sous
+        // ceux de this-rs : c'est lui qui dit qui est le principal.
+        iam.materialize(
+            "account:00000000-0000-0000-0000-00000000002a",
+            "org:00000000-0000-0000-0000-000000000007",
+            &[RoleGrant {
+                role: "reader".into(),
+                permissions: vec!["orders:read".into()],
+            }],
+        )
+        .expect("matérialisation");
+
+        let auth = EntityAuthConfig {
+            list: "perm:orders:read".to_string(),
+            ..Default::default()
+        };
+        let config = LinksConfig {
+            entities: vec![entity("order", "orders", auth)],
+            links: Vec::<LinkDefinition>::new(),
+            validation_rules: None,
+            events: None,
+            sinks: None,
+            auth: None,
+        };
+        let base = || {
+            Authorization::new(
+                Arc::new(config.clone()),
+                &registry(&[("order", "orders")]),
+                Arc::new(AuthResolverRegistry::new()),
+            )
+            .with_iam(&store)
+        };
+
+        // Sans mappage : le modèle par défaut cherche `(user_id, tenant_id)` et
+        // ne trouve AUCUNE décision — refus.
+        assert!(
+            !base().decide(&Method::GET, "/orders", &ctx).is_allow(),
+            "le mappage par défaut ne doit pas trouver une décision nommée autrement"
+        );
+
+        // Avec le mappage du projet : la décision matérialisée est trouvée, et
+        // la politique est tranchée — l'IAM est **natif** pour ses identités.
+        let authz = base().with_principal_mapping(legacy_mapping());
+        assert!(authz.has_principal_mapping());
+        match authz.decide(&Method::GET, "/orders", &ctx) {
+            Decision::Allow { origin, .. } => assert_eq!(origin, PolicyOrigin::Iam),
+            other => panic!("le mappage du projet doit rendre la décision lisible : {other:?}"),
+        }
+    }
+
+    #[cfg(feature = "obrain")]
+    #[test]
+    fn a_mapping_that_declines_a_context_keeps_the_policy_unevaluable() {
+        let store = crate::storage::ObrainStore::new_in_memory();
+        let auth = EntityAuthConfig {
+            list: "perm:orders:read".to_string(),
+            ..Default::default()
+        };
+        let config = LinksConfig {
+            entities: vec![entity("order", "orders", auth)],
+            links: Vec::<LinkDefinition>::new(),
+            validation_rules: None,
+            events: None,
+            sinks: None,
+            auth: None,
+        };
+        let authz = Authorization::new(
+            Arc::new(config),
+            &registry(&[("order", "orders")]),
+            Arc::new(AuthResolverRegistry::new()),
+        )
+        .with_iam(&store)
+        // Le projet ne reconnaît que les utilisateurs : ce contexte-là n'a pas
+        // d'identité chez lui.
+        .with_principal_mapping(|_| None);
+
+        match authz.decide(&Method::GET, "/orders", &AuthContext::Anonymous) {
+            Decision::Deny { reason, .. } => assert!(
+                reason.contains("non tranchable"),
+                "un contexte sans identité doit rester non tranchable : {reason}"
+            ),
+            other => panic!("attendu un refus : {other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_default_mode_is_enforced_and_report_only_is_explicit() {
+        let authz = authz(
+            vec![entity("order", "orders", EntityAuthConfig::default())],
+            &[("order", "orders")],
+        );
+        assert_eq!(
+            authz.mode(),
+            AuthorizationMode::Enforced,
+            "le défaut doit rester le refus effectif"
+        );
+        assert_eq!(authz.report_only().mode(), AuthorizationMode::ReportOnly);
+    }
+
+    /// **Le test qui porte l'adoption d'un projet existant** : en observation,
+    /// un refus est calculé, journalisé et **publié**, mais la requête passe.
+    #[cfg(feature = "obrain")]
+    #[tokio::test]
+    async fn report_only_publishes_the_denial_without_blocking() {
+        use axum::routing::delete;
+
+        let store = crate::storage::ObrainStore::new_in_memory();
+        let auth = EntityAuthConfig {
+            delete: "admin_only".to_string(),
+            ..Default::default()
+        };
+        let config = LinksConfig {
+            entities: vec![entity("order", "orders", auth)],
+            links: Vec::<LinkDefinition>::new(),
+            validation_rules: None,
+            events: None,
+            sinks: None,
+            auth: None,
+        };
+        let base = || {
+            Authorization::new(
+                Arc::new(config.clone()),
+                &registry(&[("order", "orders")]),
+                Arc::new(AuthResolverRegistry::new()),
+            )
+            .with_iam(&store)
+        };
+
+        let app = |authz: Authorization| {
+            axum::Router::new()
+                .route("/orders/{id}", delete(|| async { "supprime" }))
+                .layer(axum::Extension(AuthContext::Anonymous))
+                .layer(axum::middleware::from_fn_with_state(
+                    authz,
+                    authorization_middleware,
+                ))
+        };
+
+        // Armé : refus effectif.
+        assert_eq!(
+            call(app(base()), Method::DELETE, "/orders/1").await,
+            StatusCode::FORBIDDEN,
+            "en mode armé, un anonyme n'efface pas"
+        );
+
+        // Observation : la requête PASSE, et la réponse dit ce qui serait refusé.
+        use axum::body::Body;
+        use tower::ServiceExt;
+        let response = app(base().report_only())
+            .oneshot(
+                axum::http::Request::builder()
+                    .method(Method::DELETE)
+                    .uri("/orders/1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .expect("réponse");
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "en observation, rien n'est bloqué — c'est le principe"
+        );
+        let headers = response.headers();
+        assert_eq!(
+            headers.get("x-this-rs-authz").map(|v| v.to_str().unwrap()),
+            Some("observed-deny"),
+            "la réponse doit publier le refus observé"
+        );
+        assert_eq!(
+            headers
+                .get("x-this-rs-authz-policy")
+                .map(|v| v.to_str().unwrap()),
+            Some("admin_only")
+        );
+        assert!(
+            headers.get("x-this-rs-authz-scope").is_some(),
+            "la portée concernée doit être lisible"
+        );
     }
 
     #[tokio::test]
@@ -2292,7 +2640,7 @@ mod policy_perimeter {
             ];
             for (ctx, expected) in cases {
                 assert_eq!(
-                    Authorization::iam_identity(&ctx),
+                    Authorization::default_iam_identity(&ctx),
                     expected,
                     "identité IAM de {}",
                     describe(&ctx)

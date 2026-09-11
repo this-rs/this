@@ -135,7 +135,15 @@ pub trait Module: Send + Sync {
     ///
     /// # Returns
     /// An `EntityFetcher` implementation, or `None` if the entity type is not managed by this module
-    fn get_entity_fetcher(&self, entity_type: &str) -> Option<Arc<dyn EntityFetcher>>;
+    ///
+    /// **Défaut : `None`.** Ces deux accesseurs ne servent qu'à la surface
+    /// GraphQL et à la résolution de liens par identifiant : un module qui
+    /// n'expose pas ces chemins n'a rien à fournir. Les rendre obligatoires
+    /// forçait chaque module — et donc chaque projet qui adopte this-rs — à
+    /// écrire deux méthodes vides pour compiler.
+    fn get_entity_fetcher(&self, _entity_type: &str) -> Option<Arc<dyn EntityFetcher>> {
+        None
+    }
 
     /// Get an entity creator for a specific entity type
     ///
@@ -146,5 +154,9 @@ pub trait Module: Send + Sync {
     ///
     /// # Returns
     /// An `EntityCreator` implementation, or `None` if the entity type is not managed by this module
-    fn get_entity_creator(&self, entity_type: &str) -> Option<Arc<dyn EntityCreator>>;
+    ///
+    /// **Défaut : `None`** — voir [`Module::get_entity_fetcher`].
+    fn get_entity_creator(&self, _entity_type: &str) -> Option<Arc<dyn EntityCreator>> {
+        None
+    }
 }

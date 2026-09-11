@@ -167,7 +167,7 @@ impl RestExposure {
         // comptait sur l'accès libre. C'est un correctif de sécurité : il
         // s'arme (`ServerBuilder::with_authorization`), il ne s'impose pas.
         if host.authorize {
-            let authz = crate::server::middleware::authorization::Authorization::new(
+            let mut authz = crate::server::middleware::authorization::Authorization::new(
                 host.config.clone(),
                 &host.entity_registry,
                 host.resolver_registry.clone(),
@@ -175,6 +175,16 @@ impl RestExposure {
             // Avec un store obrain, les politiques `perm:<permission>` sont
             // tranchées par la **décision IAM matérialisée** (une lecture
             // indexée), au lieu d'être recalculées par traversée.
+            // Mode observation : décider, journaliser, publier — sans bloquer.
+            if host.authorize_report_only {
+                authz = authz.report_only();
+            }
+            // Mappage d'identité de l'application (IAM natif d'un modèle existant).
+            if let Some(mapping) = host.principal_mapping.clone() {
+                authz = authz.with_principal_mapping_shared(mapping);
+                tracing::info!("authorization: mappage d'identité fourni par l'application");
+            }
+
             #[cfg(feature = "obrain")]
             let authz = match &host.graph_store {
                 Some(store) => {
