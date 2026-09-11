@@ -48,6 +48,7 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use std::collections::HashMap;
 use std::marker::PhantomData;
+use std::sync::Mutex;
 use std::sync::{Arc, RwLock};
 use uuid::Uuid;
 
@@ -66,6 +67,10 @@ pub use obrain_common::types::NodeId as ObrainNodeId;
 pub struct ObrainStore {
     /// The obrain database instance
     db: ObrainDB,
+    /// Sérialise les `commit_wal()` : deux commits concurrents sur le même
+    /// moteur se marchent dessus (flush substrate → ENOENT). Le contrat du
+    /// harnais exige des creates parallèles sûrs (test_concurrent_access).
+    commit_lock: Mutex<()>,
     /// UUID → NodeId index for O(1) entity lookups
     uuid_to_node: RwLock<HashMap<Uuid, NodeId>>,
     /// Link UUID → (EdgeId-placeholder: source_node, target_node, link_uuid)
@@ -73,6 +78,36 @@ pub struct ObrainStore {
     /// require both endpoints to exist as nodes. Since LinkService is entity-agnostic
     /// (source/target may not exist yet), we use labeled nodes for links.
     link_nodes: RwLock<HashMap<Uuid, NodeId>>,
+    /// Espace actif (graphe nommé) — `None` = graphe par défaut.
+    ///
+    /// **C'est ici, et pas dans obrain, que vit l'espace courant.** Voir
+    /// [`ObrainStore::use_graph`] : le contexte de graphe côté `ObrainDB` ne
+    /// propage rien sur le chemin substrat, donc this-rs doit le porter lui-même
+    /// et l'appliquer à chaque session qu'il ouvre ([`ObrainStore::session`]).
+    space: RwLock<Option<String>>,
+    /// Index d'identité canonique `Uuid → handle`, **cloisonné par espace**.
+    ///
+    /// Séparé de `uuid_to_node` à dessein : `ObrainDataService` ne le lit jamais,
+    /// donc le chemin historique est inchangé (patch additif). Voir
+    /// `crate::core::identity` et `storage::obrain_identity`.
+    identity: RwLock<crate::core::identity::IdentityIndex>,
+    /// Le bail d'écriture, quand le fencing est armé.
+    ///
+    /// `None` = comportement historique (aucun fencing). Voir
+    /// [`ObrainStore::enable_write_fencing`] et `storage::writer_lease`.
+    lease: RwLock<Option<Arc<crate::storage::writer_lease::WriterLeaseHandle>>>,
+    /// Identité stable d'un store **volatile** (substrat temporaire) : sans
+    /// chemin, c'est le seul moyen de nommer le shard.
+    volatile_id: u64,
+    /// Qui a délivré le bail en vigueur — publié, jamais deviné.
+    lease_authority: RwLock<Option<crate::storage::writer_lease::AuthorityKind>>,
+}
+
+/// Compteur d'instances volatiles — monotone, pour que deux stores en mémoire
+/// ne partagent jamais une identité de shard.
+fn next_volatile_id() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
 impl ObrainStore {
@@ -80,8 +115,14 @@ impl ObrainStore {
     pub fn new_in_memory() -> Arc<Self> {
         Arc::new(Self {
             db: ObrainDB::new_in_memory(),
+            commit_lock: Mutex::new(()),
             uuid_to_node: RwLock::new(HashMap::new()),
             link_nodes: RwLock::new(HashMap::new()),
+            space: RwLock::new(None),
+            identity: RwLock::new(crate::core::identity::IdentityIndex::default()),
+            lease: RwLock::new(None),
+            volatile_id: next_volatile_id(),
+            lease_authority: RwLock::new(None),
         })
     }
 
@@ -90,8 +131,36 @@ impl ObrainStore {
         let db = ObrainDB::open(path).map_err(|e| anyhow!("Failed to open ObrainDB: {}", e))?;
         Ok(Arc::new(Self {
             db,
+            commit_lock: Mutex::new(()),
             uuid_to_node: RwLock::new(HashMap::new()),
             link_nodes: RwLock::new(HashMap::new()),
+            space: RwLock::new(None),
+            identity: RwLock::new(crate::core::identity::IdentityIndex::default()),
+            lease: RwLock::new(None),
+            volatile_id: next_volatile_id(),
+            lease_authority: RwLock::new(None),
+        }))
+    }
+
+    /// Ouvre un store persistant en **lecture seule stricte**.
+    ///
+    /// C'est le mode à utiliser pour **publier** le relief d'un store qu'on ne
+    /// possède pas : obrain refuse alors les mutations au niveau moteur, et le
+    /// verrou est partagé (`LOCK_SH`) — plusieurs processus peuvent lire la
+    /// même base simultanément, ce que l'ouverture normale interdit.
+    pub fn open_read_only(path: impl AsRef<std::path::Path>) -> Result<Arc<Self>> {
+        let db = ObrainDB::open_read_only(path)
+            .map_err(|e| anyhow!("Failed to open ObrainDB read-only: {}", e))?;
+        Ok(Arc::new(Self {
+            db,
+            commit_lock: Mutex::new(()),
+            uuid_to_node: RwLock::new(HashMap::new()),
+            link_nodes: RwLock::new(HashMap::new()),
+            space: RwLock::new(None),
+            identity: RwLock::new(crate::core::identity::IdentityIndex::default()),
+            lease: RwLock::new(None),
+            volatile_id: next_volatile_id(),
+            lease_authority: RwLock::new(None),
         }))
     }
 
@@ -99,8 +168,14 @@ impl ObrainStore {
     pub fn from_db(db: ObrainDB) -> Arc<Self> {
         Arc::new(Self {
             db,
+            commit_lock: Mutex::new(()),
             uuid_to_node: RwLock::new(HashMap::new()),
             link_nodes: RwLock::new(HashMap::new()),
+            space: RwLock::new(None),
+            identity: RwLock::new(crate::core::identity::IdentityIndex::default()),
+            lease: RwLock::new(None),
+            volatile_id: next_volatile_id(),
+            lease_authority: RwLock::new(None),
         })
     }
 
@@ -109,10 +184,310 @@ impl ObrainStore {
         &self.db
     }
 
-    /// Switch the session to a named graph (for multi-tenant isolation)
-    pub fn use_graph(&self, name: &str) {
+    /// Commit WAL sérialisé — sûr sous creates parallèles (cf. commit_lock).
+    pub fn commit_wal(&self) -> Result<()> {
+        let _g = self
+            .commit_lock
+            .lock()
+            .map_err(|_| anyhow!("commit lock poisoned"))?;
+        self.db
+            .commit_wal()
+            .map_err(|e| anyhow!("commit_wal failed: {}", e))
+    }
+
+    /// Ouvre une session **dans l'espace actif**.
+    ///
+    /// **Toutes** les opérations du module passent par ici. C'est le seul point
+    /// où l'espace est appliqué, et c'est indispensable : `ObrainDB::session()`
+    /// ne propage PAS le contexte de graphe du moteur sur le chemin substrat.
+    /// Le code de propagation existe (`obrain-engine/src/database/mod.rs:1305-1308`)
+    /// mais il est **inatteignable** — les bases adossées à un substrat sortent
+    /// par un retour anticipé quelques dizaines de lignes plus haut
+    /// (`mod.rs:1229-1242`, « this early return is the path EVERY real session
+    /// takes »). Vérifié empiriquement : `db.set_current_graph(Some("a"))` suivi
+    /// de `db.session()` rend une session dont `current_graph()` vaut `None`,
+    /// et toutes les lectures retombent sur le graphe par défaut.
+    ///
+    /// `Session::use_graph`, en revanche, fonctionne : c'est donc à this-rs de
+    /// le poser, session par session.
+    pub(crate) fn session(&self) -> obrain_engine::Session {
         let session = self.db.session();
-        session.use_graph(name);
+        if let Some(space) = self.space_snapshot() {
+            session.use_graph(&space);
+        }
+        session
+    }
+
+    /// L'espace actif, cloné (le verrou n'est pas tenu pendant l'usage).
+    fn space_snapshot(&self) -> Option<String> {
+        self.space.read().ok().and_then(|s| s.clone())
+    }
+
+    /// Le magasin de l'espace actif — graphe nommé s'il existe, racine sinon.
+    ///
+    /// Sert aux reconstructions d'index : elles doivent balayer le magasin de
+    /// l'espace courant, pas la racine (`ObrainDB::store()` rend toujours la
+    /// racine).
+    pub(crate) fn active_store(&self) -> Arc<dyn obrain_engine::GraphStoreMut> {
+        let root = self.db.store().clone();
+        match self.space_snapshot() {
+            Some(name) => root.named_graph(&name).unwrap_or(root),
+            None => root,
+        }
+    }
+
+    /// Bascule l'espace actif (graphe nommé) — la dimension « spacieux ».
+    ///
+    /// # Pourquoi ce n'est pas un simple appel à obrain
+    ///
+    /// Obrain sait faire des graphes nommés — ce sont des **sous-substrats
+    /// physiques** (`<store>/graphs/<nom>`, `obrain-substrate/src/store.rs:15923`)
+    /// avec leur propre portée d'identité (`graph_scope()`,
+    /// `obrain-core/src/graph/traits.rs:1060`). Mais son contexte de graphe
+    /// persistant (`ObrainDB::set_current_graph`) ne propage rien sur le chemin
+    /// substrat (cf. [`ObrainStore::session`], vérifié). this-rs porte donc
+    /// l'espace lui-même et l'applique à chaque session.
+    ///
+    /// # Changement d'espace = invalidation du cache
+    ///
+    /// Les index `Uuid → NodeId` de ce store sont des **caches** : ils sont
+    /// vidés à chaque bascule. C'est nécessaire, et non un détail : deux espaces
+    /// sont deux substrats distincts qui allouent chacun leurs `NodeId` à
+    /// partir de 1, donc un index partagé ferait résoudre l'entité d'un espace
+    /// vers le nœud homonyme d'un autre. Après une bascule, la reprise est
+    /// explicite — comme après une réouverture :
+    ///
+    /// ```rust,ignore
+    /// store.use_graph("tenant-a");
+    /// for label in ["user", "order"] {
+    ///     store.rebuild_index_for_label(label)?;
+    /// }
+    /// ```
+    ///
+    /// # Concurrence
+    ///
+    /// L'espace est porté par le **store**, pas par la requête : deux appelants
+    /// concurrents sur des espaces différents s'écrasent. Pour servir plusieurs
+    /// espaces en parallèle, il faut un `ObrainStore` par espace.
+    pub fn use_graph(&self, name: &str) {
+        if let Ok(mut space) = self.space.write() {
+            *space = Some(name.to_string());
+        }
+        self.invalidate_caches();
+    }
+
+    /// Quitte l'espace nommé (retour au graphe par défaut).
+    ///
+    /// Invalide les caches, comme [`ObrainStore::use_graph`].
+    pub fn reset_graph(&self) {
+        if let Ok(mut space) = self.space.write() {
+            *space = None;
+        }
+        self.invalidate_caches();
+    }
+
+    /// Vide les caches `Uuid → NodeId` (entités et liens).
+    /// Arme le **fencing d'écriture** : prend un bail pour le shard courant.
+    ///
+    /// À appeler **avant** de servir des écritures. Renvoie l'époque obtenue —
+    /// à publier, pour qu'un opérateur sache quel writer est en titre.
+    ///
+    /// # Ce que ça change
+    ///
+    /// Chaque opération d'écriture vérifie le bail **en entrée** (voir
+    /// [`ObrainStore::check_write`]). Sans bail, le comportement est celui
+    /// d'avant ; avec, un writer périmé est **refusé** au lieu d'écrire dans le
+    /// dos de son successeur.
+    ///
+    /// # Pourquoi en entrée et pas au commit
+    ///
+    /// Côté obrain, le WAL est écrit **avant** la mutation mmap
+    /// (`obrain-substrate/src/writer.rs:287-309`). Un contrôle au commit
+    /// laisserait donc la trace du writer périmé déjà sur le disque.
+    ///
+    /// # Exemple
+    ///
+    /// ```rust,ignore
+    /// let store = ObrainStore::open("./data/app.obrain")?;
+    /// let authority = FileAuthority::new("./data/app.obrain");
+    /// let epoch = store.enable_write_fencing_with(&authority)?;  // 1
+    /// // Un second writer sur le même store sera refusé par `acquire`.
+    /// ```
+    ///
+    /// Le bail couvre `(store, espace courant)` : deux espaces d'un même store
+    /// sont deux shards, donc deux baux indépendants.
+    pub fn enable_write_fencing_with(
+        &self,
+        authority: &crate::storage::writer_lease::FileAuthority,
+    ) -> Result<u64> {
+        let shard = self.shard_id()?;
+        let owner = crate::storage::writer_lease::OwnerId::this_process();
+        let handle = authority.acquire(&shard, &owner)?;
+        let epoch = handle.epoch();
+        if let Ok(mut slot) = self.lease.write() {
+            *slot = Some(Arc::new(handle));
+        }
+        if let Ok(mut slot) = self.lease_authority.write() {
+            *slot = Some(crate::storage::writer_lease::LeaseAuthority::kind(
+                authority,
+            ));
+        }
+        tracing::info!(
+            epoch,
+            shard = %shard.key(),
+            "fencing d'écriture armé (bail pris)"
+        );
+        Ok(epoch)
+    }
+
+    /// L'identité du shard courant — store + espace.
+    pub fn shard_id(&self) -> Result<crate::storage::writer_lease::ShardId> {
+        use crate::storage::writer_lease::{ShardId, StoreId};
+        let store = match self.db.config().path.clone() {
+            Some(path) => StoreId::Dir(path),
+            None => StoreId::Volatile(self.volatile_id),
+        };
+        Ok(ShardId {
+            store,
+            space: self.space_snapshot(),
+        })
+    }
+
+    /// L'état du bail, s'il est armé — **publié** par le relief.
+    pub fn lease_info(&self) -> Option<crate::storage::writer_lease::LeaseInfo> {
+        let slot = self.lease.read().ok()?;
+        let handle = slot.as_ref()?;
+        Some(crate::storage::writer_lease::LeaseInfo {
+            epoch: handle.epoch(),
+            shard: handle.shard().key(),
+            authority: self.lease_authority.read().ok().and_then(|a| *a),
+        })
+    }
+
+    /// L'époque du bail en vigueur, si le fencing est armé.
+    pub fn lease_epoch(&self) -> Option<u64> {
+        self.lease
+            .read()
+            .ok()
+            .and_then(|slot| slot.as_ref().map(|h| h.epoch()))
+    }
+
+    /// **Le contrôle d'entrée d'écriture.**
+    ///
+    /// Un seul load atomique quand le fencing est armé ; un no-op sinon. C'est
+    /// la garantie que le coût du fencing reste négligeable devant une écriture.
+    pub(crate) fn check_write(&self) -> Result<()> {
+        let guard = self
+            .lease
+            .read()
+            .map_err(|_| anyhow!("bail d'écriture : verrou empoisonné"))?;
+        match guard.as_ref() {
+            Some(handle) => handle
+                .assert_live()
+                .map_err(|e| anyhow!("écriture refusée : {e}")),
+            None => Ok(()),
+        }
+    }
+
+    /// Rend le bail (relâche l'exclusion).
+    pub fn release_write_fencing(&self) {
+        if let Ok(mut slot) = self.lease_authority.write() {
+            *slot = None;
+        }
+        if let Ok(mut slot) = self.lease.write() {
+            if let Some(handle) = slot.take() {
+                if let Ok(inner) = Arc::try_unwrap(handle) {
+                    inner.release();
+                }
+            }
+        }
+    }
+
+    /// **Couture de test** : simule la reprise du bail par un autre écrivain.
+    #[doc(hidden)]
+    pub fn fence_write_lease_for_test(&self, by_epoch: u64) {
+        if let Ok(slot) = self.lease.read() {
+            if let Some(handle) = slot.as_ref() {
+                handle.fence_for_test(by_epoch);
+            }
+        }
+    }
+
+    fn invalidate_caches(&self) {
+        if let Ok(mut index) = self.uuid_to_node.write() {
+            index.clear();
+        }
+        if let Ok(mut index) = self.link_nodes.write() {
+            index.clear();
+        }
+        // L'index d'identité est cloisonné par espace : le purger en reprenant
+        // l'espace courant, sans quoi il mélangerait deux espaces (dont les
+        // NodeId repartent chacun de 1).
+        if let Ok(mut index) = self.identity.write() {
+            index.clear(self.space_snapshot());
+        }
+    }
+
+    /// L'index d'identité, pour les adaptateurs du même crate.
+    ///
+    /// Volontairement `pub(crate)` : l'index est un détail d'implémentation du
+    /// stockage, pas une surface publique. Le public passe par
+    /// `ObrainStore::identity_get` / `identity_len` / `identity_space`
+    /// (`storage::obrain_identity`).
+    pub(crate) fn identity_index(&self) -> &RwLock<crate::core::identity::IdentityIndex> {
+        &self.identity
+    }
+
+    /// Espace (graphe nommé) actuellement actif — `None` = graphe par défaut.
+    pub fn space(&self) -> Option<String> {
+        self.space_snapshot()
+    }
+
+    /// Espaces (graphes nommés) connus du store, triés.
+    pub fn spaces(&self) -> Vec<String> {
+        self.db.list_graphs()
+    }
+
+    /// Crée un espace (graphe nommé). Rend `true` s'il a été créé,
+    /// `false` s'il existait déjà.
+    ///
+    /// Exige un store **adossé au substrat** : les graphes nommés sont des
+    /// sous-substrats physiques (`<store>/graphs/<nom>`), et le nom est validé
+    /// composant par composant par obrain (`/` autorisé, refus de `""`, `"."`,
+    /// `".."`, `\`, `\0`).
+    pub fn create_space(&self, name: &str) -> Result<bool> {
+        self.db
+            .create_graph(name)
+            .map_err(|e| anyhow!("create_graph({name}) failed: {e}"))
+    }
+
+    /// Supprime un espace (graphe nommé). Rend `true` s'il a été supprimé.
+    pub fn drop_space(&self, name: &str) -> bool {
+        self.db.drop_graph(name)
+    }
+
+    /// Le store est-il adossé au substrat ?
+    ///
+    /// **Ce que ça conditionne** : toute la couche topologique et géométrique
+    /// (simplexes, courbure de Ricci, énergie, HKS, clustering) n'existe que
+    /// côté `SubstrateStore`.
+    ///
+    /// ⚠️ Surprise vérifiée — depuis le cutover T17 d'obrain, **même
+    /// `new_in_memory()` est substrat-backed** (une configuration en mémoire
+    /// ouvre un substrat temporaire auto-nettoyé,
+    /// `obrain-engine/src/database/mod.rs:799-808`). Cette méthode rend donc
+    /// `true` dans tous les cas de cette version : elle reste le garde-fou
+    /// explicite contre un chemin non-substrat, pas un test de « en mémoire ou
+    /// pas ». Ce qui n'est PAS garanti, en revanche, c'est que la couche
+    /// simpliciale soit *configurée* — voir
+    /// `SubstrateStore::passes_simpliciales_config()`.
+    pub fn is_substrate(&self) -> bool {
+        self.db.substrate_handle().is_some()
+    }
+
+    /// Le store a-t-il été ouvert en lecture seule ?
+    pub fn is_read_only(&self) -> bool {
+        self.db.is_read_only()
     }
 
     /// Rebuild the UUID→NodeId index for a specific entity label.
@@ -137,8 +512,8 @@ impl ObrainStore {
     /// }
     /// ```
     pub fn rebuild_index_for_label(&self, label: &str) -> Result<usize> {
-        let store = self.db.store();
-        let session = self.db.session();
+        let store = self.active_store();
+        let session = self.session();
         let node_ids = store.nodes_by_label(label);
         let mut index = self
             .uuid_to_node
@@ -168,8 +543,8 @@ impl ObrainStore {
     /// Returns the number of entries inserted.
     pub fn rebuild_link_index(&self, link_type: &str) -> Result<usize> {
         let full_label = format!("_link:{}", link_type);
-        let store = self.db.store();
-        let session = self.db.session();
+        let store = self.active_store();
+        let session = self.session();
         let node_ids = store.nodes_by_label(&full_label);
         let mut index = self
             .link_nodes
@@ -258,7 +633,8 @@ fn field_value_to_obrain(fv: &FieldValue) -> ObrainValue {
 #[async_trait]
 impl<T: Data + Serialize + DeserializeOwned> DataService<T> for ObrainDataService<T> {
     async fn create(&self, entity: T) -> Result<T> {
-        let session = self.store.db.session();
+        self.store.check_write()?;
+        let session = self.store.session();
         let entity_type = entity.entity_type().to_string();
         let uuid = entity.id();
         let uuid_str = uuid.to_string();
@@ -311,7 +687,6 @@ impl<T: Data + Serialize + DeserializeOwned> DataService<T> for ObrainDataServic
         // Commit WAL so the mutation is durable across restarts (cf. pattern
         // used by obrain-hub::conversation/cognitive_brain after each write).
         self.store
-            .db
             .commit_wal()
             .map_err(|e| anyhow!("commit_wal after create failed: {}", e))?;
 
@@ -331,7 +706,7 @@ impl<T: Data + Serialize + DeserializeOwned> DataService<T> for ObrainDataServic
             }
         };
 
-        let session = self.store.db.session();
+        let session = self.store.session();
         let node = match session.get_node(node_id) {
             Some(n) => n,
             None => return Ok(None),
@@ -353,7 +728,7 @@ impl<T: Data + Serialize + DeserializeOwned> DataService<T> for ObrainDataServic
     }
 
     async fn list(&self) -> Result<Vec<T>> {
-        let session = self.store.db.session();
+        let session = self.store.session();
 
         // Query all nodes by label (entity_type)
         // We need a dummy instance to get entity_type, but Data doesn't provide that statically.
@@ -383,6 +758,7 @@ impl<T: Data + Serialize + DeserializeOwned> DataService<T> for ObrainDataServic
     }
 
     async fn update(&self, id: &Uuid, entity: T) -> Result<T> {
+        self.store.check_write()?;
         let node_id = {
             let index = self
                 .store
@@ -394,7 +770,7 @@ impl<T: Data + Serialize + DeserializeOwned> DataService<T> for ObrainDataServic
                 .ok_or_else(|| anyhow!("Node not found: {}", id))?
         };
 
-        let session = self.store.db.session();
+        let session = self.store.session();
 
         // Verify node still exists
         if session.get_node(node_id).is_none() {
@@ -419,7 +795,6 @@ impl<T: Data + Serialize + DeserializeOwned> DataService<T> for ObrainDataServic
 
         // Commit WAL so the mutation is durable across restarts.
         self.store
-            .db
             .commit_wal()
             .map_err(|e| anyhow!("commit_wal after update failed: {}", e))?;
 
@@ -427,6 +802,7 @@ impl<T: Data + Serialize + DeserializeOwned> DataService<T> for ObrainDataServic
     }
 
     async fn delete(&self, id: &Uuid) -> Result<()> {
+        self.store.check_write()?;
         let node_id = {
             let mut index = self
                 .store
@@ -446,7 +822,6 @@ impl<T: Data + Serialize + DeserializeOwned> DataService<T> for ObrainDataServic
 
         // Commit WAL so the deletion is durable.
         self.store
-            .db
             .commit_wal()
             .map_err(|e| anyhow!("commit_wal after delete failed: {}", e))?;
 
@@ -455,7 +830,7 @@ impl<T: Data + Serialize + DeserializeOwned> DataService<T> for ObrainDataServic
 
     async fn search(&self, field: &str, value: &str) -> Result<Vec<T>> {
         let store = self.store.db.store();
-        let session = self.store.db.session();
+        let session = self.store.session();
         let prop_key = format!("f_{}", field);
 
         // Use obrain's native property search via GraphStore
@@ -569,7 +944,7 @@ impl ObrainLinkService {
         let target_node = index.get(&link.target_id);
 
         if let (Some(&src), Some(&tgt)) = (source_node, target_node) {
-            let session = self.store.db.session();
+            let session = self.store.session();
             session.create_edge(src, tgt, &link.link_type);
         }
     }
@@ -578,7 +953,8 @@ impl ObrainLinkService {
 #[async_trait]
 impl LinkService for ObrainLinkService {
     async fn create(&self, link: LinkEntity) -> Result<LinkEntity> {
-        let session = self.store.db.session();
+        self.store.check_write()?;
+        let session = self.store.session();
         let uuid_str = link.id.to_string();
         let source_str = link.source_id.to_string();
         let target_str = link.target_id.to_string();
@@ -611,7 +987,6 @@ impl LinkService for ObrainLinkService {
 
         // Commit WAL so the link is durable.
         self.store
-            .db
             .commit_wal()
             .map_err(|e| anyhow!("commit_wal after link create failed: {}", e))?;
 
@@ -631,7 +1006,7 @@ impl LinkService for ObrainLinkService {
             }
         };
 
-        let session = self.store.db.session();
+        let session = self.store.session();
         let node = match session.get_node(node_id) {
             Some(n) => n,
             None => return Ok(None),
@@ -641,7 +1016,7 @@ impl LinkService for ObrainLinkService {
     }
 
     async fn list(&self) -> Result<Vec<LinkEntity>> {
-        let session = self.store.db.session();
+        let session = self.store.session();
         let index = self
             .store
             .link_nodes
@@ -667,7 +1042,7 @@ impl LinkService for ObrainLinkService {
         _target_type: Option<&str>,
     ) -> Result<Vec<LinkEntity>> {
         let store = self.store.db.store();
-        let session = self.store.db.session();
+        let session = self.store.session();
         let source_str = source_id.to_string();
         let search_val = ObrainValue::from(source_str.as_str());
 
@@ -694,7 +1069,7 @@ impl LinkService for ObrainLinkService {
         _source_type: Option<&str>,
     ) -> Result<Vec<LinkEntity>> {
         let store = self.store.db.store();
-        let session = self.store.db.session();
+        let session = self.store.session();
         let target_str = target_id.to_string();
         let search_val = ObrainValue::from(target_str.as_str());
 
@@ -715,6 +1090,7 @@ impl LinkService for ObrainLinkService {
     }
 
     async fn update(&self, id: &Uuid, link: LinkEntity) -> Result<LinkEntity> {
+        self.store.check_write()?;
         let node_id = {
             let index = self
                 .store
@@ -726,7 +1102,7 @@ impl LinkService for ObrainLinkService {
                 .ok_or_else(|| anyhow!("Edge not found: {}", id))?
         };
 
-        let session = self.store.db.session();
+        let session = self.store.session();
         let store = self.store.db.store();
 
         if session.get_node(node_id).is_none() {
@@ -758,7 +1134,6 @@ impl LinkService for ObrainLinkService {
 
         // Commit WAL so the link update is durable.
         self.store
-            .db
             .commit_wal()
             .map_err(|e| anyhow!("commit_wal after link update failed: {}", e))?;
 
@@ -766,6 +1141,7 @@ impl LinkService for ObrainLinkService {
     }
 
     async fn delete(&self, id: &Uuid) -> Result<()> {
+        self.store.check_write()?;
         let node_id = {
             let mut index = self
                 .store
@@ -783,7 +1159,6 @@ impl LinkService for ObrainLinkService {
 
         // Commit WAL so the deletion is durable.
         self.store
-            .db
             .commit_wal()
             .map_err(|e| anyhow!("commit_wal after link delete failed: {}", e))?;
 
@@ -791,8 +1166,9 @@ impl LinkService for ObrainLinkService {
     }
 
     async fn delete_by_entity(&self, entity_id: &Uuid) -> Result<()> {
+        self.store.check_write()?;
         let entity_str = entity_id.to_string();
-        let session = self.store.db.session();
+        let session = self.store.session();
 
         // Find all links where entity is source or target
         let mut to_remove = Vec::new();
@@ -839,7 +1215,6 @@ impl LinkService for ObrainLinkService {
             // be lost on crash (durability contract: every mutation path ends
             // in a commit_wal — see the create/update/delete paths above).
             self.store
-                .db
                 .commit_wal()
                 .map_err(|e| anyhow!("commit_wal after delete_by_entity failed: {}", e))?;
         }
@@ -1747,6 +2122,347 @@ mod tests {
             0,
             "batch deletion must survive reopen (commit_wal after batch)"
         );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // -----------------------------------------------------------------------
+    // Espaces (graphes nommés) — la dimension « spacieux »
+    // -----------------------------------------------------------------------
+
+    /// Ouvre un store adossé au substrat dans un répertoire temporaire.
+    ///
+    /// Les graphes nommés d'obrain sont des **sous-substrats physiques**
+    /// (`<store>/graphs/<nom>`) : un store en mémoire les refuse, donc ces
+    /// tests ne peuvent pas utiliser `test_store()`.
+    fn substrate_store(tag: &str) -> (Arc<ObrainStore>, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!("this_obrain_{tag}_{}", Uuid::new_v4()));
+        let store = ObrainStore::open(&dir).unwrap();
+        (store, dir)
+    }
+
+    /// `use_graph` doit **effectivement** changer l'espace de lecture.
+    ///
+    /// Ce test existe parce que l'implémentation précédente était un no-op :
+    /// elle posait le nom de graphe sur une session jetable, détruite aussitôt.
+    /// Sans assertion sur le contenu relu, le bug restait invisible.
+    #[tokio::test]
+    async fn test_use_graph_scopes_reads() {
+        let (store, dir) = substrate_store("space_scope");
+        assert!(
+            store.is_substrate(),
+            "un store ouvert sur disque est adossé au substrat"
+        );
+
+        assert!(
+            store.create_space("tenant-a").unwrap(),
+            "création de l'espace A"
+        );
+        assert!(
+            store.create_space("tenant-b").unwrap(),
+            "création de l'espace B"
+        );
+        assert_eq!(
+            store.spaces(),
+            vec!["tenant-a".to_string(), "tenant-b".to_string()],
+            "les espaces créés doivent être listés"
+        );
+
+        let service = ObrainDataService::<TestDataEntity>::new(Arc::clone(&store));
+
+        store.use_graph("tenant-a");
+        assert_eq!(store.space().as_deref(), Some("tenant-a"));
+        let alice = service.create(TestDataEntity::new("Alice")).await.unwrap();
+
+        // Un espace où l'on n'a rien écrit est vide — et le DOIT. C'est
+        // l'assertion qui manquait à l'implémentation précédente : elle était
+        // un no-op, donc toutes les lectures retombaient sur le graphe par
+        // défaut et ce test serait passé sur du code cassé.
+        store.use_graph("tenant-b");
+        assert_eq!(store.space().as_deref(), Some("tenant-b"));
+        assert!(
+            service.list().await.unwrap().is_empty(),
+            "l'espace B ne doit voir aucune entité de l'espace A"
+        );
+        assert!(
+            service.get(&alice.id).await.unwrap().is_none(),
+            "une entité de A ne doit pas être lisible depuis B"
+        );
+
+        // Retour dans A : la bascule a invalidé le cache (deux espaces allouent
+        // leurs NodeId à partir de 1, un cache partagé aliasing), on le
+        // reconstruit — exactement comme après un `open()`.
+        store.use_graph("tenant-a");
+        assert!(
+            service.list().await.unwrap().is_empty(),
+            "après une bascule, le cache est vide : la reprise est explicite"
+        );
+        assert_eq!(
+            store.rebuild_index_for_label("test_data").unwrap(),
+            1,
+            "l'espace A doit contenir exactement son entité"
+        );
+        assert_eq!(service.list().await.unwrap().len(), 1);
+        assert!(service.get(&alice.id).await.unwrap().is_some());
+
+        // Le graphe par défaut est un troisième espace, distinct lui aussi.
+        store.reset_graph();
+        assert_eq!(store.space(), None);
+        assert!(
+            service.list().await.unwrap().is_empty(),
+            "le graphe par défaut ne doit pas voir les entités de l'espace A"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Deux espaces peuplés en parallèle ne doivent pas se voir.
+    ///
+    /// C'est le test qui protège la raison d'être de l'invalidation du cache :
+    /// les graphes nommés d'obrain sont des **substrats distincts** qui allouent
+    /// chacun leurs `NodeId` à partir de 1. Un cache `Uuid → NodeId` partagé
+    /// ferait donc résoudre l'entité d'un espace vers le nœud **homonyme** d'un
+    /// autre — et `list()` rendrait deux fois la même entité. La bascule vide le
+    /// cache ([`ObrainStore::use_graph`]) : c'est ce qui rend l'aliasing
+    /// impossible, au prix d'une reprise explicite.
+    ///
+    /// Obrain a la notion qui rendrait le cache directement cloisonnable —
+    /// `graph_scope()`, qui préfixe les identités par espace
+    /// (`obrain-core/src/graph/traits.rs:1060`) — et this-rs ne l'utilise pas
+    /// encore : un cache indexé par espace supprimerait la reprise manuelle.
+    /// En attendant, ce test garantit qu'aucune entité ne traverse.
+    #[tokio::test]
+    async fn test_spaces_do_not_alias_through_the_global_uuid_index() {
+        let (store, dir) = substrate_store("space_alias");
+        assert!(store.create_space("tenant-a").unwrap());
+        assert!(store.create_space("tenant-b").unwrap());
+
+        let service = ObrainDataService::<TestDataEntity>::new(Arc::clone(&store));
+
+        store.use_graph("tenant-a");
+        let alice = service.create(TestDataEntity::new("Alice")).await.unwrap();
+
+        store.use_graph("tenant-b");
+        let bob = service.create(TestDataEntity::new("Bob")).await.unwrap();
+
+        assert_ne!(alice.id, bob.id, "les entités sont distinctes par UUID");
+
+        // Chaque espace ne doit relire que la sienne — après la reprise
+        // explicite du cache, comme le veut le contrat du store.
+        store.use_graph("tenant-a");
+        assert_eq!(store.rebuild_index_for_label("test_data").unwrap(), 1);
+        let in_a = service.list().await.unwrap();
+        assert_eq!(
+            in_a.len(),
+            1,
+            "l'espace A ne doit lister QUE son entité (alias d'index global ?)"
+        );
+        assert_eq!(in_a[0].id, alice.id);
+        assert!(service.get(&bob.id).await.unwrap().is_none());
+
+        store.use_graph("tenant-b");
+        assert_eq!(store.rebuild_index_for_label("test_data").unwrap(), 1);
+        let in_b = service.list().await.unwrap();
+        assert_eq!(
+            in_b.len(),
+            1,
+            "l'espace B ne doit lister QUE son entité (alias d'index global ?)"
+        );
+        assert_eq!(in_b[0].id, bob.id);
+        assert!(service.get(&alice.id).await.unwrap().is_none());
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Témoin d'un **défaut d'obrain** (ignoré tant qu'il n'est pas corrigé).
+    ///
+    /// `SubstrateStore::clustering_global()` calcule `Σ_v k(v)·(k(v)−1)/2`. Pour
+    /// un nœud vivant de degré nul dans le type d'arête des cliques, `k − 1`
+    /// sous-déborde un `u64` : **panic en debug**, résultat correct par wrap en
+    /// release — donc invisible depuis `obrain topo stats` (binaire release).
+    ///
+    /// Le test est `#[ignore]` parce qu'il échoue par construction : c'est un
+    /// témoin, pas une garantie. Le jour où obrain pose une garde `k == 0`, il
+    /// suffira de le réactiver (il attend `Some(_)` au lieu du panic).
+    #[test]
+    #[ignore = "défaut obrain connu : obrain-substrate/src/store.rs:10859 (k - 1 sous-déborde)"]
+    fn witness_clustering_global_panics_on_isolated_node() {
+        let (store, dir) = substrate_store("clustering_defect");
+        let sub = store.db().substrate_handle().expect("substrat");
+        sub.configurer_passes_simpliciales(&obrain_substrate::simplex_passes::SimplexPassesSpec {
+            clique_edge_type: "knows".into(),
+            clique_labels: Vec::new(),
+            dispatch: None,
+            maintenance: true,
+        })
+        .expect("configuration des passes");
+        // Un nœud vivant, sans aucune arête `knows` : degré nul.
+        store.db().session().create_node(&["isolated"]);
+        sub.materialiser_simplexes().expect("passe");
+
+        let result =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| sub.clustering_global()));
+        assert!(
+            result.is_err(),
+            "attendu : panic (soustraction débordante) tant que la garde k==0 manque ; \
+             si ce test se met à rendre Ok, le défaut est corrigé — le réactiver"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// **Le fencing est réel** : un writer périmé est refusé, en entrée d'opération.
+    ///
+    /// Ce test porte trois propriétés :
+    /// 1. le bail se prend et les écritures passent tant qu'il est vivant ;
+    /// 2. un **second store dans le même processus** sur le même répertoire est
+    ///    refusé — c'est exactement le trou d'obrain (`file.rs:179-207` rend la
+    ///    part de verrou existante, donc obrain les laisserait passer tous les
+    ///    deux) ;
+    /// 3. une fois le bail perdu, **l'écriture est refusée mais la lecture
+    ///    reste possible** — un writer périmé peut encore servir des lectures.
+    #[tokio::test]
+    async fn test_write_fencing_refuses_a_stale_writer() {
+        use crate::storage::writer_lease::FileAuthority;
+
+        let dir = std::env::temp_dir().join(format!("this_obrain_lease_{}", Uuid::new_v4()));
+        let store = ObrainStore::open(&dir).unwrap();
+        let authority = FileAuthority::new(&dir);
+
+        let epoch = store.enable_write_fencing_with(&authority).unwrap();
+        assert_eq!(epoch, 1, "premier bail = époque 1");
+        assert_eq!(store.lease_epoch(), Some(1));
+
+        let service = ObrainDataService::<TestDataEntity>::new(Arc::clone(&store));
+
+        // 1. Bail vivant : l'écriture passe.
+        let entity = service.create(TestDataEntity::new("avant")).await.unwrap();
+
+        // 2. Un second store, MÊME processus, MÊME répertoire : obrain le laisse
+        //    passer, le bail non.
+        let store2 = ObrainStore::open(&dir).unwrap();
+        let refused = store2.enable_write_fencing_with(&authority);
+        assert!(
+            refused.is_err(),
+            "un second écrivain in-process doit être refusé, obtenu {:?}",
+            refused.ok()
+        );
+
+        // 3. Notre writer est périmé (un autre a repris le bail).
+        store.fence_write_lease_for_test(2);
+        let write = service.create(TestDataEntity::new("apres")).await;
+        assert!(
+            write.is_err(),
+            "un writer périmé ne doit PLUS écrire : {:?}",
+            write.map(|e| e.id)
+        );
+        assert!(
+            write.unwrap_err().to_string().contains("refusée"),
+            "le refus doit être explicite"
+        );
+        // …mais la lecture reste servie.
+        assert!(
+            service.get(&entity.id).await.unwrap().is_some(),
+            "un writer périmé peut encore LIRE"
+        );
+
+        // 4. Après relâchement, un successeur prend le bail avec l'époque SUIVANTE.
+        store.release_write_fencing();
+        let store3 = ObrainStore::open(&dir).unwrap();
+        let epoch3 = store3.enable_write_fencing_with(&authority).unwrap();
+        assert_eq!(epoch3, 2, "l'époque ne recule jamais");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Le relief suit les écritures de this-rs — **sans passe batch**.
+    ///
+    /// C'est la promesse qui rend le relief exploitable : obrain appelle la
+    /// maintenance simpliciale *dans la transaction* de l'arête
+    /// (`obrain-substrate/src/store.rs:16154`), donc un lien créé par
+    /// `ObrainLinkService` met à jour triangles/cliques sans qu'aucun job ne
+    /// repasse derrière. Ce test l'exige au lieu de le supposer : il configure
+    /// les passes, matérialise **une** fois, puis écrit un second triangle par
+    /// le chemin normal et vérifie que le compteur a suivi tout seul.
+    #[tokio::test]
+    async fn test_simplex_relief_follows_this_rs_writes() {
+        use crate::graph::relief::{Relief, ReliefOptions};
+
+        let (store, dir) = substrate_store("simplex_writes");
+        let data = ObrainDataService::<TestDataEntity>::new(Arc::clone(&store));
+        let links = ObrainLinkService::new(Arc::clone(&store));
+
+        // Triangle 1 : a—b, b—c, a—c. `try_create_edge` ne crée d'arête native
+        // que si les deux extrémités sont déjà dans l'index, d'où l'ordre.
+        let a = data.create(TestDataEntity::new("a")).await.unwrap();
+        let b = data.create(TestDataEntity::new("b")).await.unwrap();
+        let c = data.create(TestDataEntity::new("c")).await.unwrap();
+        for (src, dst) in [(a.id, b.id), (b.id, c.id), (a.id, c.id)] {
+            links
+                .create(LinkEntity::new("knows", src, dst, None))
+                .await
+                .unwrap();
+        }
+
+        // Passes simpliciales : triangles sur `knows`, aucun filtre de label,
+        // maintenance incrémentale ACTIVE.
+        let sub = store
+            .db()
+            .substrate_handle()
+            .expect("store substrat-backed");
+        sub.configurer_passes_simpliciales(&obrain_substrate::simplex_passes::SimplexPassesSpec {
+            clique_edge_type: "knows".into(),
+            clique_labels: Vec::new(),
+            dispatch: None,
+            maintenance: true,
+        })
+        .expect("configuration des passes");
+        let first = sub.materialiser_simplexes().expect("passe complète");
+        sub.flush().expect("flush");
+        assert_eq!(
+            first.triangles, 1,
+            "un triangle fermé = exactement un triangle matérialisé"
+        );
+
+        // Le relief publie l'état ET le compte.
+        let before = Relief::describe(
+            &store,
+            ReliefOptions {
+                include_counts: true,
+            },
+        );
+        assert!(before.engine.simplex.configured, "passes configurées");
+        assert!(
+            before.engine.simplex.maintenance,
+            "la maintenance au commit doit être active"
+        );
+        assert!(
+            before.engine.simplex.counts_error.is_none(),
+            "les compteurs doivent être calculables : {:?}",
+            before.engine.simplex.counts_error
+        );
+        assert_eq!(before.engine.simplex.counts.unwrap().triangles, 1);
+
+        // SECOND triangle (b, c, d), écrit par this-rs : b—d et c—d suffisent,
+        // b—c existe déjà. AUCUNE passe n'est relancée ici.
+        let d = data.create(TestDataEntity::new("d")).await.unwrap();
+        for (src, dst) in [(b.id, d.id), (c.id, d.id)] {
+            links
+                .create(LinkEntity::new("knows", src, dst, None))
+                .await
+                .unwrap();
+        }
+
+        let after = Relief::describe(
+            &store,
+            ReliefOptions {
+                include_counts: true,
+            },
+        );
+        assert_eq!(
+            after.engine.simplex.counts.unwrap().triangles,
+            2,
+            "la maintenance au commit doit avoir ajouté le triangle sans passe batch"
+        );
+
         std::fs::remove_dir_all(&dir).ok();
     }
 }

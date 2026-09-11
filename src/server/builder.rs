@@ -44,6 +44,16 @@ pub struct ServerBuilder {
     device_token_store: Option<Arc<DeviceTokenStore>>,
     preferences_store: Option<Arc<NotificationPreferencesStore>>,
 
+    // Obrain graph handle — the relief source for the `/graph` surface
+    #[cfg(feature = "obrain")]
+    graph_store: Option<Arc<crate::storage::ObrainStore>>,
+
+    // Identité des entités — comment elles sont nommées, quel que soit le moteur
+    identity: Option<crate::core::identity::IdentityRegistry>,
+
+    // Armer l'application des politiques `auth:` (jamais par défaut)
+    authorize: bool,
+
     // Auth config loaded from external file
     auth_config: Option<crate::config::auth::AuthConfig>,
 
@@ -65,6 +75,10 @@ impl ServerBuilder {
             notification_store: None,
             device_token_store: None,
             preferences_store: None,
+            #[cfg(feature = "obrain")]
+            graph_store: None,
+            identity: None,
+            authorize: false,
             auth_config: None,
             resolver_registry: AuthResolverRegistry::new(),
         }
@@ -73,6 +87,51 @@ impl ServerBuilder {
     /// Set the link service (required)
     pub fn with_link_service(mut self, service: impl LinkService + 'static) -> Self {
         self.link_service = Some(Arc::new(service));
+        self
+    }
+
+    /// Attach an obrain graph handle — publishes the self-describing `/graph` surface.
+    ///
+    /// The handle is independent of the link service: an app can serve entities
+    /// from any backend and still expose the relief of an obrain store.
+    #[cfg(feature = "obrain")]
+    pub fn with_graph_store(mut self, store: Arc<crate::storage::ObrainStore>) -> Self {
+        self.graph_store = Some(store);
+        self
+    }
+
+    /// **Arme l'application des politiques d'autorisation.**
+    ///
+    /// Sans cet appel, les sections `auth:` d'une entité ne sont **pas**
+    /// appliquées — c'est le comportement historique. Avec, chaque requête vers
+    /// une route d'entité connue est confrontée à la politique déclarée de
+    /// l'opération (`list`, `get`, `create`, `update`, `delete`, `list_links`,
+    /// `create_link`, `delete_link`), et refusée en **403** si elle ne la
+    /// satisfait pas.
+    ///
+    /// Deux garanties : **fail-closed** (une politique illisible refuse, jamais
+    /// ne laisse passer) et **jamais d'invention** (une route inconnue est
+    /// *abstenue*, pas dotée d'une politique imaginaire).
+    ///
+    /// ⚠️ À armer en connaissance de cause : la politique par défaut d'une
+    /// entité est `"authenticated"`, donc les entités sans configuration
+    /// explicite exigeront un contexte authentifié.
+    pub fn with_authorization(mut self) -> Self {
+        self.authorize = true;
+        self
+    }
+
+    /// Set how entities are identified, quel que soit le moteur qui les porte.
+    ///
+    /// Sans appel explicite, un hôte auquel un store obrain est attaché
+    /// auto-câble [`IdentityRegistry::obrain_default`] — convention `_uuid`/`_data`
+    /// **puis** propriétés plates. C'est ce qui permet de servir, par la même
+    /// route, une base écrite par this-rs et une base écrite par un autre outil.
+    pub fn with_identity_registry(
+        mut self,
+        registry: crate::core::identity::IdentityRegistry,
+    ) -> Self {
+        self.identity = Some(registry);
         self
     }
 
@@ -372,6 +431,50 @@ impl ServerBuilder {
                 names.len()
             );
             host = host.with_resolver_registry(self.resolver_registry);
+        }
+
+        // Transférer l'armement de l'autorisation (faux par défaut).
+        if self.authorize {
+            host.authorize = true;
+        }
+
+        // Attach the obrain graph handle if one was provided.
+        //
+        // Volontairement sans auto-câblage depuis un chemin de config : ouvrir
+        // un store obrain est une décision de l'application (mode, WAL,
+        // lecture seule), pas un effet de bord du chargement de `this.yaml`.
+        #[cfg(feature = "obrain")]
+        if let Some(store) = self.graph_store.take() {
+            let substrate = store.is_substrate();
+            tracing::info!(
+                substrate,
+                read_only = store.is_read_only(),
+                "obrain graph handle attached (GET /graph publishes the relief)"
+            );
+            host = host.with_graph_store(store);
+        }
+
+        // Identité : un registre explicite prime ; sinon, dès qu'un store obrain
+        // est attaché, on auto-câble le registre obrain (convention PUIS
+        // propriétés plates). Sans store, on ne présume rien : la convention
+        // seule, c'est-à-dire le comportement historique.
+        match self.identity.take() {
+            Some(registry) => {
+                host = host.with_identity_registry(registry);
+                tracing::info!("identity registry attached explicitly");
+            }
+            None =>
+            {
+                #[cfg(feature = "obrain")]
+                if host.graph_store().is_some() {
+                    host = host.with_identity_registry(
+                        crate::core::identity::IdentityRegistry::obrain_default(),
+                    );
+                    tracing::info!(
+                        "identity registry auto-wired (obrain_default: _uuid/_data then flat properties)"
+                    );
+                }
+            }
         }
 
         // Auto-wire auth provider from config

@@ -9,6 +9,7 @@
 use crate::config::LinksConfig;
 use crate::core::auth::{AuthProvider, AuthResolverRegistry};
 use crate::core::events::EventBus;
+use crate::core::identity::IdentityRegistry;
 use crate::core::{EntityCreator, EntityFetcher, service::LinkService};
 use crate::events::log::EventLog;
 use crate::events::sinks::SinkRegistry;
@@ -97,6 +98,35 @@ pub struct ServerHost {
     /// Used by sinks to filter notifications and by preference endpoints.
     pub preferences_store: Option<Arc<NotificationPreferencesStore>>,
 
+    /// Optional obrain graph handle — the relief source.
+    ///
+    /// When present, `RestExposure` auto-wires the self-describing `/graph`
+    /// surface (`crate::graph::routes`), which publishes what the engine can
+    /// actually do: procedures introspected from obrain's registry, the
+    /// declared dispatch families, the simplicial layer state, and the known
+    /// limits. Absent = no `/graph` routes at all (no half-truths).
+    #[cfg(feature = "obrain")]
+    pub graph_store: Option<Arc<crate::storage::ObrainStore>>,
+
+    /// How identities are resolved for the entities this host serves.
+    ///
+    /// Engine-agnostic by construction (see `crate::core::identity`): the default
+    /// registry resolves only the `_uuid`/`_data` convention this-rs writes, so
+    /// existing deployments behave exactly as before. Attach
+    /// `IdentityRegistry::obrain_default()` to also resolve entities from stores
+    /// written by another tool (flat properties, no `_uuid`) — which is what
+    /// makes it *the same entity whatever the engine*.
+    pub identity: Arc<IdentityRegistry>,
+
+    /// Les politiques déclarées (`auth:`) sont-elles **appliquées** ?
+    ///
+    /// `false` par défaut, et c'est délibéré : ces politiques n'ont jamais été
+    /// appliquées, donc les armer d'office casserait tout déploiement existant
+    /// qui comptait sur l'accès libre. Voir
+    /// `ServerBuilder::with_authorization` et
+    /// `server::middleware::authorization`.
+    pub authorize: bool,
+
     /// Optional auth provider for JWT/token verification
     ///
     /// When present, the auth middleware is auto-wired on all routes.
@@ -158,6 +188,10 @@ impl ServerHost {
             notification_store: None,
             device_token_store: None,
             preferences_store: None,
+            #[cfg(feature = "obrain")]
+            graph_store: None,
+            identity: Arc::new(IdentityRegistry::new()),
+            authorize: false,
             auth_provider: None,
             resolver_registry: Arc::new(AuthResolverRegistry::new()),
             #[cfg(feature = "wami")]
@@ -239,6 +273,47 @@ impl ServerHost {
     /// Get a reference to the notification preferences store (if configured)
     pub fn preferences_store(&self) -> Option<&Arc<NotificationPreferencesStore>> {
         self.preferences_store.as_ref()
+    }
+
+    /// Attach an obrain graph handle — enables the self-describing `/graph` surface.
+    ///
+    /// ```rust,ignore
+    /// let store = ObrainStore::open("./data/app.obrain")?;
+    /// let host = ServerBuilder::new()
+    ///     .with_link_service(ObrainLinkService::new(store.clone()))
+    ///     .with_graph_store(store)
+    ///     .build_host()?;
+    /// // GET /graph now publishes the relief.
+    /// ```
+    #[cfg(feature = "obrain")]
+    pub fn with_graph_store(mut self, store: Arc<crate::storage::ObrainStore>) -> Self {
+        self.graph_store = Some(store);
+        self
+    }
+
+    /// Get a reference to the obrain graph handle (if attached)
+    #[cfg(feature = "obrain")]
+    pub fn graph_store(&self) -> Option<&Arc<crate::storage::ObrainStore>> {
+        self.graph_store.as_ref()
+    }
+
+    /// Attach an identity registry — how entities are named across engines.
+    ///
+    /// ```rust,ignore
+    /// let host = ServerBuilder::new()
+    ///     .with_link_service(links)
+    ///     .with_graph_store(store)
+    ///     .with_identity_registry(IdentityRegistry::obrain_default())
+    ///     .build_host()?;
+    /// ```
+    pub fn with_identity_registry(mut self, registry: IdentityRegistry) -> Self {
+        self.identity = Arc::new(registry);
+        self
+    }
+
+    /// The identity registry in force.
+    pub fn identity_registry(&self) -> &Arc<IdentityRegistry> {
+        &self.identity
     }
 
     /// Set the auth provider
@@ -352,6 +427,10 @@ impl ServerHost {
             notification_store: None,
             device_token_store: None,
             preferences_store: None,
+            #[cfg(feature = "obrain")]
+            graph_store: None,
+            identity: Arc::new(IdentityRegistry::new()),
+            authorize: false,
             auth_provider: None,
             resolver_registry: Arc::new(AuthResolverRegistry::new()),
             #[cfg(feature = "wami")]

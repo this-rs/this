@@ -2,6 +2,9 @@
 
 #[cfg(feature = "dynamodb")]
 pub mod dynamodb;
+/// IAM **matérialisé** : la décision d'autorisation est une lecture indexée.
+#[cfg(feature = "obrain")]
+pub mod iam;
 pub mod in_memory;
 #[cfg(feature = "lmdb")]
 pub mod lmdb;
@@ -13,12 +16,22 @@ pub mod mysql;
 pub mod neo4j;
 #[cfg(feature = "obrain")]
 pub mod obrain;
+/// Adaptateur obrain de l'identité canonique — la moitié I/O de `core::identity`.
+#[cfg(feature = "obrain")]
+pub mod obrain_identity;
 #[cfg(feature = "postgres")]
 pub mod postgres;
 #[cfg(feature = "scylladb")]
 pub mod scylladb;
 pub mod tenant_scoped;
+/// Bail d'écriture et jeton de fencing — l'unicité de l'écrivain, **imposée**.
+///
+/// Non gaté : std + serde seulement. Le format de trame (128 octets, CRC32) est
+/// gelé par test.
+pub mod writer_lease;
 
+#[cfg(feature = "obrain")]
+pub use self::iam::{AclStamp, IAM_SCHEMA, Iam, IamError, RoleGrant};
 #[cfg(feature = "lmdb")]
 pub use self::lmdb::{LmdbDataService, LmdbLinkService};
 #[cfg(feature = "mongodb_backend")]
@@ -29,6 +42,8 @@ pub use self::mysql::{MysqlDataService, MysqlLinkService};
 pub use self::neo4j::{Neo4jDataService, Neo4jLinkService};
 #[cfg(feature = "obrain")]
 pub use self::obrain::{ObrainDataService, ObrainLinkService, ObrainStore};
+#[cfg(feature = "obrain")]
+pub use self::obrain_identity::{IdentityReport, LabelReport};
 #[cfg(feature = "dynamodb")]
 pub use dynamodb::{DynamoDBDataService, DynamoDBLinkService};
 pub use in_memory::{InMemoryDataService, InMemoryLinkService};

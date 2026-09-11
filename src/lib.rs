@@ -55,6 +55,11 @@ pub mod config;
 pub mod core;
 pub mod entities;
 pub mod events;
+/// Relief d'obrain publié par this-rs (introspection + publication REST).
+///
+/// Gated behind `obrain` : sans le moteur, il n'y a pas de relief à décrire.
+#[cfg(feature = "obrain")]
+pub mod graph;
 pub mod links;
 pub mod server;
 pub mod storage;

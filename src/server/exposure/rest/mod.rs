@@ -94,6 +94,20 @@ impl RestExposure {
             app = app.merge(notifications::notification_routes(notif_state));
         }
 
+        // Auto-wire the self-describing graph relief — only if an obrain store
+        // is attached. Absent handle = no `/graph` routes at all: better no
+        // relief than a relief that would have to invent what it cannot read.
+        #[cfg(feature = "obrain")]
+        if let Some(store) = &host.graph_store {
+            app = app.merge(crate::graph::routes::graph_routes(
+                crate::graph::routes::GraphState {
+                    store: store.clone(),
+                    identity: host.identity.clone(),
+                },
+            ));
+            tracing::info!("graph relief auto-wired (GET /graph)");
+        }
+
         // Auto-wire GDPR erasure endpoint if configured
         let gdpr_enabled = host
             .config
@@ -144,6 +158,39 @@ impl RestExposure {
             let auth_layer = AuthLayer::new(auth_provider.clone(), default_policy);
             app = app.layer(middleware::from_fn_with_state(auth_layer, auth_middleware));
             tracing::info!("REST auth + tenant resolver middleware auto-wired");
+        }
+
+        // Application des politiques : ARMÉE EXPLICITEMENT, jamais par défaut.
+        //
+        // Les politiques déclarées (`auth:` par entité) n'ont jamais été
+        // appliquées ; les appliquer d'office casserait tout déploiement qui
+        // comptait sur l'accès libre. C'est un correctif de sécurité : il
+        // s'arme (`ServerBuilder::with_authorization`), il ne s'impose pas.
+        if host.authorize {
+            let authz = crate::server::middleware::authorization::Authorization::new(
+                host.config.clone(),
+                &host.entity_registry,
+                host.resolver_registry.clone(),
+            );
+            // Avec un store obrain, les politiques `perm:<permission>` sont
+            // tranchées par la **décision IAM matérialisée** (une lecture
+            // indexée), au lieu d'être recalculées par traversée.
+            #[cfg(feature = "obrain")]
+            let authz = match &host.graph_store {
+                Some(store) => {
+                    tracing::info!("authorization: IAM matérialisé branché (politiques `perm:`)");
+                    authz.with_iam(store)
+                }
+                None => authz,
+            };
+            app = app.layer(middleware::from_fn_with_state(
+                authz,
+                crate::server::middleware::authorization::authorization_middleware,
+            ));
+            tracing::info!(
+                "authorization armed — declared `auth:` policies are now ENFORCED \
+                 (403 on refusal; unknown routes abstain)"
+            );
         }
 
         Ok(app)
