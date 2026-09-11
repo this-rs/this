@@ -21,6 +21,21 @@ adopter ses identités, armer.
 
 ## 1. Brancher (une fois)
 
+La CLI prépare le terrain — elle ne décide rien :
+
+```bash
+this adopt obrain --report-only      # --dry-run pour voir sans écrire
+```
+
+Elle active la feature `obrain` sur votre dépendance `this-rs` (TOML édité sans
+toucher à votre mise en forme ni à vos autres clés), insère la ligne de
+branchement si `this init` a laissé un marqueur `[this:obrain_store]`, sinon
+**affiche** le fragment à recopier, et rappelle l'ordre d'adoption. Elle n'écrit
+**aucune** configuration d'authentification : écrire un `auth.yaml` dans un
+projet qui tourne pourrait désarmer son authentification.
+
+À la main, l'équivalent tient en une ligne :
+
 ```toml
 # Cargo.toml
 this-rs = { path = "../this-rs/this", features = ["obrain"] }
