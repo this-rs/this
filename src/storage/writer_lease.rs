@@ -430,10 +430,10 @@ fn crc32(bytes: &[u8]) -> u32 {
 
 /// Nom d'hôte, sans dépendance : variable d'environnement, sinon `/etc/hostname`.
 fn hostname() -> String {
-    if let Ok(h) = std::env::var("HOSTNAME") {
-        if !h.is_empty() {
-            return h;
-        }
+    if let Ok(h) = std::env::var("HOSTNAME")
+        && !h.is_empty()
+    {
+        return h;
     }
     std::fs::read_to_string("/etc/hostname")
         .map(|s| s.trim().to_string())

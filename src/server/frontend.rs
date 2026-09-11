@@ -70,8 +70,14 @@ enum Source {
     /// Files on disk (dev, or `SERVE_FRONTEND` production layouts).
     Disk(StaticFiles),
     /// Bytes compiled into the binary (generated `rust-embed` store).
-    Embedded(Arc<dyn Fn(&str) -> Option<Cow<'static, [u8]>> + Send + Sync>),
+    Embedded(EmbeddedLoader),
 }
+
+/// Chargeur d'un actif compilé dans le binaire (`rust-embed`).
+///
+/// Nommé plutôt qu'écrit en place : le type était suffisamment imbriqué pour que
+/// clippy le refuse, et un alias dit mieux l'intention qu'une signature touffue.
+type EmbeddedLoader = Arc<dyn Fn(&str) -> Option<Cow<'static, [u8]>> + Send + Sync>;
 
 /// Frontend hosting state shared by every fallback request.
 #[derive(Clone)]
@@ -407,7 +413,7 @@ fn serve_embedded(
         // assets/-vs-root alternates.
         loader(rel)
             .or_else(|| loader(&format!("assets/{rel}")))
-            .or_else(|| rel.strip_prefix("assets/").and_then(|rest| loader(rest)))
+            .or_else(|| rel.strip_prefix("assets/").and_then(loader))
     });
     if let Some(bytes) = hit {
         return embedded_out(bytes, p, inm);
@@ -415,12 +421,12 @@ fn serve_embedded(
     if rel.is_none() && p != "/" {
         return Outgoing::text(404, "not found", "text/plain; charset=utf-8");
     }
-    if p == "/" || !statics::is_asset_url(p) {
-        if let Some(bytes) = loader("index.html") {
-            let mut out = embedded_out(bytes, "/index.html", inm);
-            maybe_inject(dev, &mut out);
-            return out;
-        }
+    if (p == "/" || !statics::is_asset_url(p))
+        && let Some(bytes) = loader("index.html")
+    {
+        let mut out = embedded_out(bytes, "/index.html", inm);
+        maybe_inject(dev, &mut out);
+        return out;
     }
     Outgoing::text(404, "not found", "text/plain; charset=utf-8")
 }
@@ -497,10 +503,8 @@ fn outgoing_to_response(out: Outgoing) -> Response {
     }
     for (k, v) in vite_rs::headers::DEFAULT_SECURITY_HEADERS {
         let already = out.headers.iter().any(|(ek, _)| ek.eq_ignore_ascii_case(k));
-        if !already {
-            if let Ok(hv) = header::HeaderValue::from_str(v) {
-                builder = builder.header(*k, hv);
-            }
+        if !already && let Ok(hv) = header::HeaderValue::from_str(v) {
+            builder = builder.header(*k, hv);
         }
     }
     let body = match out.body {

@@ -394,22 +394,21 @@ impl ObrainStore {
         if let Ok(mut slot) = self.lease_authority.write() {
             *slot = None;
         }
-        if let Ok(mut slot) = self.lease.write() {
-            if let Some(handle) = slot.take() {
-                if let Ok(inner) = Arc::try_unwrap(handle) {
-                    inner.release();
-                }
-            }
+        if let Ok(mut slot) = self.lease.write()
+            && let Some(handle) = slot.take()
+            && let Ok(inner) = Arc::try_unwrap(handle)
+        {
+            inner.release();
         }
     }
 
     /// **Couture de test** : simule la reprise du bail par un autre écrivain.
     #[doc(hidden)]
     pub fn fence_write_lease_for_test(&self, by_epoch: u64) {
-        if let Ok(slot) = self.lease.read() {
-            if let Some(handle) = slot.as_ref() {
-                handle.fence_for_test(by_epoch);
-            }
+        if let Ok(slot) = self.lease.read()
+            && let Some(handle) = slot.as_ref()
+        {
+            handle.fence_for_test(by_epoch);
         }
     }
 

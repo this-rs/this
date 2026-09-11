@@ -324,7 +324,15 @@ pub struct Trap {
 /// Source : `obrain-engine/src/query/planner/lpg/mutation.rs:743-937`, qui
 /// ordonne neuf familles dont une seule (le registre, `:891`) est
 /// introspectable. Les huit autres sont ci-dessous.
-const FAMILIES: &[(&str, &[&str], &[&str], Option<&str>)] = &[
+/// Une famille de dispatch : `(nom, préfixes, portées, note)`.
+type FamilyRow = (
+    &'static str,
+    &'static [&'static str],
+    &'static [&'static str],
+    Option<&'static str>,
+);
+
+const FAMILIES: &[FamilyRow] = &[
     (
         "projection",
         &[

@@ -656,10 +656,9 @@ impl Iam {
             for (perm_node, _) in store.edges_from(role_node, Direction::Outgoing) {
                 if let Some(v) = store
                     .get_node_property(perm_node, &obrain_common::types::PropertyKey::new("name"))
+                    && let Some(name) = v.as_str()
                 {
-                    if let Some(name) = v.as_str() {
-                        out.push(name.to_string());
-                    }
+                    out.push(name.to_string());
                 }
             }
         }

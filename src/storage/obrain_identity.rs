@@ -273,13 +273,15 @@ impl ObrainStore {
             let total = node_ids.len();
             lr.nodes = Some(total);
 
-            let mut examined = 0usize;
-            for nid in node_ids {
-                if examined >= max_per_label || report.total_nodes >= max_total {
-                    report.truncated = true;
-                    break;
-                }
-                examined += 1;
+            // Le plafond se pose sur l'itérateur (`take`) : aucun compteur de
+            // boucle à tenir. Le dépassement se lit **après** la boucle, en
+            // demandant un élément de plus au même itérateur — pas en ajoutant 1
+            // au plafond, ce qui débordait quand il valait `usize::MAX` (le
+            // balayage complet).
+            let budget = max_per_label.min(max_total.saturating_sub(report.total_nodes));
+            let mut remaining = node_ids.into_iter();
+
+            for nid in remaining.by_ref().take(budget) {
                 report.total_nodes += 1;
 
                 let Some(node) = session.get_node(nid) else {
@@ -297,7 +299,7 @@ impl ObrainStore {
 
                 match registry.project(&view) {
                     Ok(entity) => {
-                        let handle = u64::from(node.id.0);
+                        let handle = node.id.0;
                         if index.insert(space.as_deref(), entity.id, handle) {
                             match entity.origin {
                                 crate::core::identity::Provenance::Convention => {
@@ -317,6 +319,9 @@ impl ObrainStore {
                     }
                 }
             }
+
+            // Un élément de plus disponible = le plafond a mordu.
+            report.truncated |= remaining.next().is_some();
 
             report.labels.push(lr);
         }
