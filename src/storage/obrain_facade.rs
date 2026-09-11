@@ -88,7 +88,7 @@ pub trait GraphBackend: Send + Sync {
     fn find_nodes_by_property(&self, property: &str, value: &Value) -> Vec<NodeId>;
 
     /// Crée un nœud avec ses propriétés.
-    fn create_node<'a>(&self, labels: &[&str], props: Vec<(&'a str, Value)>) -> NodeId;
+    fn create_node(&self, labels: &[&str], props: Vec<(&str, Value)>) -> NodeId;
 
     /// Écrit une propriété sur un nœud existant.
     fn set_node_property(&self, id: NodeId, key: &str, value: Value);
@@ -161,7 +161,7 @@ impl GraphBackend for ObrainDB {
         ObrainDB::find_nodes_by_property(self, property, value)
     }
 
-    fn create_node<'a>(&self, labels: &[&str], props: Vec<(&'a str, Value)>) -> NodeId {
+    fn create_node(&self, labels: &[&str], props: Vec<(&str, Value)>) -> NodeId {
         self.session().create_node_with_props(labels, props)
     }
 
@@ -249,7 +249,7 @@ impl GraphBackend for ObrainStore {
         self.active_store().find_nodes_by_property(property, value)
     }
 
-    fn create_node<'a>(&self, labels: &[&str], props: Vec<(&'a str, Value)>) -> NodeId {
+    fn create_node(&self, labels: &[&str], props: Vec<(&str, Value)>) -> NodeId {
         self.session().create_node_with_props(labels, props)
     }
 

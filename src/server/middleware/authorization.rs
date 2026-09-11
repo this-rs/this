@@ -677,13 +677,14 @@ mod tests {
     }
 
     fn admin_only_delete() -> EntityAuthConfig {
-        let mut a = EntityAuthConfig::default();
-        // « admin » n'est PAS du vocabulaire : c'était un fail-open (le parseur
-        // retombait sur `authenticated`, donc un simple utilisateur passait).
-        // Le vrai mot est `admin_only`.
-        a.delete = "admin_only".to_string();
-        a.list = "public".to_string();
-        a
+        EntityAuthConfig {
+            // « admin » n'est PAS du vocabulaire : c'était un fail-open (le parseur
+            // retombait sur `authenticated`, donc un simple utilisateur passait).
+            // Le vrai mot est `admin_only`.
+            delete: "admin_only".to_string(),
+            list: "public".to_string(),
+            ..Default::default()
+        }
     }
 
     // ── Résolution ───────────────────────────────────────────────────────
@@ -807,8 +808,10 @@ mod tests {
 
     #[test]
     fn role_policies_use_the_roles_of_the_context() {
-        let mut auth = EntityAuthConfig::default();
-        auth.delete = "role:admin".to_string();
+        let auth = EntityAuthConfig {
+            delete: "role:admin".to_string(),
+            ..Default::default()
+        };
         let a = authz(
             vec![entity("order", "orders", auth)],
             &[("order", "orders")],
@@ -847,9 +850,11 @@ mod tests {
     /// **La propriété de sécurité qui compte** : une politique illisible refuse.
     #[test]
     fn an_unreadable_policy_denies_instead_of_allowing() {
-        let mut auth = EntityAuthConfig::default();
-        // Ni un mot-clé connu, ni un résolveur enregistré.
-        auth.create = "resolver:inexistant".to_string();
+        let auth = EntityAuthConfig {
+            // Ni un mot-clé connu, ni un résolveur enregistré.
+            create: "resolver:inexistant".to_string(),
+            ..Default::default()
+        };
         let a = authz(
             vec![entity("order", "orders", auth)],
             &[("order", "orders")],
@@ -869,8 +874,10 @@ mod tests {
 
     #[test]
     fn owner_policy_needs_an_owner_context() {
-        let mut auth = EntityAuthConfig::default();
-        auth.update = "owner".to_string();
+        let auth = EntityAuthConfig {
+            update: "owner".to_string(),
+            ..Default::default()
+        };
         let a = authz(
             vec![entity("order", "orders", auth)],
             &[("order", "orders")],
@@ -926,9 +933,11 @@ mod tests {
         }
 
         fn authz_with_iam(store: &std::sync::Arc<ObrainStore>) -> Authorization {
-            let mut auth = EntityAuthConfig::default();
-            auth.delete = "perm:orders:write".to_string();
-            auth.list = "any:perm:orders:read,role:auditor".to_string();
+            let auth = EntityAuthConfig {
+                delete: "perm:orders:write".to_string(),
+                list: "any:perm:orders:read,role:auditor".to_string(),
+                ..Default::default()
+            };
             let config = LinksConfig {
                 entities: vec![entity("order", "orders", auth)],
                 links: Vec::<LinkDefinition>::new(),
@@ -1065,8 +1074,10 @@ mod tests {
         /// Fail-closed : sans plan IAM, `perm:` refuse — même pour un admin.
         #[test]
         fn perm_without_an_iam_plan_denies() {
-            let mut auth = EntityAuthConfig::default();
-            auth.delete = "perm:orders:write".to_string();
+            let auth = EntityAuthConfig {
+                delete: "perm:orders:write".to_string(),
+                ..Default::default()
+            };
             let config = LinksConfig {
                 entities: vec![entity("order", "orders", auth)],
                 links: Vec::<LinkDefinition>::new(),
@@ -1182,9 +1193,11 @@ mod tests {
     async fn the_middleware_refuses_and_allows_on_real_requests() {
         use axum::routing::{delete, get};
 
-        let mut auth = EntityAuthConfig::default();
-        auth.list = "public".to_string();
-        auth.delete = "admin".to_string();
+        let auth = EntityAuthConfig {
+            list: "public".to_string(),
+            delete: "admin".to_string(),
+            ..Default::default()
+        };
         let a = authz(
             vec![entity("order", "orders", auth)],
             &[("order", "orders")],
@@ -1224,16 +1237,20 @@ mod tests {
     async fn an_absent_context_is_treated_as_anonymous() {
         use axum::routing::delete;
 
-        let mut auth = EntityAuthConfig::default();
-        auth.delete = "public".to_string();
+        let auth = EntityAuthConfig {
+            delete: "public".to_string(),
+            ..Default::default()
+        };
         let a = authz(
             vec![entity("order", "orders", auth)],
             &[("order", "orders")],
         );
 
         // Aucune couche ne pose d'AuthContext : fail-closed ⇒ anonyme.
-        let mut strict = EntityAuthConfig::default();
-        strict.delete = "authenticated".to_string();
+        let strict = EntityAuthConfig {
+            delete: "authenticated".to_string(),
+            ..Default::default()
+        };
         let a2 = authz(
             vec![entity("order", "orders", strict)],
             &[("order", "orders")],
@@ -1341,16 +1358,16 @@ mod policy_perimeter {
     /// La **même** politique sur les huit opérations : les tests de vocabulaire
     /// n'ont pas à dépendre de la table route → opération.
     fn policy_everywhere(policy: &str) -> EntityAuthConfig {
-        let mut a = EntityAuthConfig::default();
-        a.list = policy.to_string();
-        a.get = policy.to_string();
-        a.create = policy.to_string();
-        a.update = policy.to_string();
-        a.delete = policy.to_string();
-        a.list_links = policy.to_string();
-        a.create_link = policy.to_string();
-        a.delete_link = policy.to_string();
-        a
+        EntityAuthConfig {
+            list: policy.to_string(),
+            get: policy.to_string(),
+            create: policy.to_string(),
+            update: policy.to_string(),
+            delete: policy.to_string(),
+            list_links: policy.to_string(),
+            create_link: policy.to_string(),
+            delete_link: policy.to_string(),
+        }
     }
 
     fn authz_policy(policy: &str) -> Authorization {
@@ -1784,7 +1801,7 @@ mod policy_perimeter {
                     // est que le pré-passage ne soit **jamais plus permissif** que
                     // le framework.
                     assert!(
-                        !(mine == Some(true) && theirs == false),
+                        mine != Some(true) || theirs,
                         "le pré-passage est PLUS PERMISSIF que le framework sur \
                          `{policy}` ({name}) : c'est le fail-open à interdire"
                     );
@@ -1828,16 +1845,16 @@ mod policy_perimeter {
     // ── 5. Requirement : les huit opérations et l'abstention ─────────────
 
     fn distinct_policies() -> EntityAuthConfig {
-        let mut a = EntityAuthConfig::default();
-        a.list = "public".to_string();
-        a.get = "authenticated".to_string();
-        a.create = "role:creator".to_string();
-        a.update = "owner".to_string();
-        a.delete = "admin_only".to_string();
-        a.list_links = "service_only".to_string();
-        a.create_link = "owner_or_service".to_string();
-        a.delete_link = "any:owner,role:admin".to_string();
-        a
+        EntityAuthConfig {
+            list: "public".to_string(),
+            get: "authenticated".to_string(),
+            create: "role:creator".to_string(),
+            update: "owner".to_string(),
+            delete: "admin_only".to_string(),
+            list_links: "service_only".to_string(),
+            create_link: "owner_or_service".to_string(),
+            delete_link: "any:owner,role:admin".to_string(),
+        }
     }
 
     #[test]

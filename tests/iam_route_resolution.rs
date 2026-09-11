@@ -1038,8 +1038,10 @@ fn unknown_routes_abstain_rather_than_inventing_a_policy() {
 /// (`origin: default`) le laisse deviner.
 #[test]
 fn a_config_entry_naming_the_route_plural_must_not_be_ignored() {
-    let mut auth = EntityAuthConfig::default();
-    auth.delete = "admin_only".to_string();
+    let auth = EntityAuthConfig {
+        delete: "admin_only".to_string(),
+        ..Default::default()
+    };
 
     // La configuration nomme le pluriel de la route : `orders`.
     let authz = authorization(
@@ -1068,8 +1070,10 @@ fn a_config_entry_naming_the_route_plural_must_not_be_ignored() {
 /// de la configuration est décoratif pour l'autorisation.
 #[test]
 fn the_config_plural_field_does_not_participate_in_resolution() {
-    let mut auth = EntityAuthConfig::default();
-    auth.delete = "admin_only".to_string();
+    let auth = EntityAuthConfig {
+        delete: "admin_only".to_string(),
+        ..Default::default()
+    };
 
     // `plural` annonce `commandes`, mais la route montée est `/orders`.
     let authz = authorization(

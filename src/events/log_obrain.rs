@@ -208,7 +208,7 @@ impl ObrainJournalLog {
     /// au lieu de l'étendre.
     ///
     /// Rend la tête du journal après écriture.
-    pub fn append_entries(&self, entries: &mut Vec<JournalEntry>) -> Result<u64> {
+    pub fn append_entries(&self, entries: &mut [JournalEntry]) -> Result<u64> {
         let _guard = self
             .inner
             .append_lock
@@ -329,10 +329,10 @@ impl ObrainJournalLog {
         )?;
         let mut position = None;
         for entry in acks.read_all()? {
-            if let Some((name, seq)) = entry.ack_of() {
-                if name == consumer {
-                    position = Some(seq); // la dernière consigne gagne
-                }
+            if let Some((name, seq)) = entry.ack_of()
+                && name == consumer
+            {
+                position = Some(seq); // la dernière consigne gagne
             }
         }
         Ok(position)
