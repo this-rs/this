@@ -67,7 +67,9 @@ pub enum PolicyOrigin {
 pub enum Requirement {
     /// Une politique s'applique : c'est l'opération et l'entité concernées.
     Policy {
-        /// Type d'entité (ou `link` pour une route de lien).
+        /// Type d'entité **source** (le pluriel de la route décide, pas le type
+        /// d'arête : une route de lien est gouvernée par la politique du lien
+        /// déclarée pour l'entité source).
         entity_type: String,
         /// Opération (`list`, `get`, `create`, `update`, `delete`, `list_links`,
         /// `create_link`, `delete_link`).
@@ -130,6 +132,59 @@ impl Decision {
 /// réellement montées) et les résolveurs nommés.
 /// Le préfixe d'une politique adossée à l'IAM matérialisé.
 pub const PERM_PREFIX: &str = "perm:";
+
+/// Les politiques exactes du vocabulaire du framework.
+const KNOWN_EXACT: &[&str] = &[
+    "public",
+    "authenticated",
+    "owner",
+    "service_only",
+    "admin_only",
+    "owner_or_service",
+];
+
+/// Les préfixes acceptés par le vocabulaire du framework.
+const KNOWN_PREFIXES: &[&str] = &[
+    "all:",
+    "any:",
+    "not:",
+    "role:",
+    "owner_or_role:",
+    "resolver:",
+    "owner_or_resolver:",
+    PERM_PREFIX,
+];
+
+/// Ce texte fait-il partie du vocabulaire **connu** ?
+///
+/// # Pourquoi cette fonction existe
+///
+/// [`AuthPolicy::parse_policy`] se replie sur `AuthPolicy::Authenticated` pour
+/// **tout** texte qu'il ne reconnaît pas (`_ => AuthPolicy::Authenticated`). Ce
+/// repli est un **fail-open** : une faute de frappe dans une configuration
+/// `auth:` (`"n'importe quoi"`, `"PUBLIC"`, `""`) était jugée comme
+/// « authenticated » — donc un simple utilisateur authentifié passait là où l'on
+/// croyait exiger un administrateur.
+///
+/// On refuse donc explicitement ce qui n'est pas du vocabulaire, au lieu de
+/// laisser le parseur deviner.
+pub fn is_known_policy(policy: &str) -> bool {
+    KNOWN_EXACT.contains(&policy) || KNOWN_PREFIXES.iter().any(|p| policy.starts_with(p))
+}
+
+/// Le verdict d'une politique adossée à l'IAM.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IamVerdict {
+    /// Le plan a été consulté et la décision accorde.
+    Allowed,
+    /// Le plan a été consulté et la décision refuse.
+    Denied,
+    /// **Rien à consulter** : aucun plan branché, ou aucun principal dans le
+    /// contexte. Ce n'est ni un accord ni un refus : c'est une politique **non
+    /// tranchable**, et elle doit refuser — sans jamais pouvoir être retournée
+    /// en autorisation par une négation.
+    Unevaluable,
+}
 
 #[derive(Clone)]
 pub struct Authorization {
@@ -207,29 +262,58 @@ impl Authorization {
     /// `the_pre_pass_agrees_with_the_framework_parser` vérifie cette égalité
     /// pour tout le vocabulaire qui n'utilise pas `perm:` — le pré-passage ne
     /// doit **rien** changer aux politiques existantes.
-    fn evaluate(&self, policy: &str, context: &AuthContext, used_iam: &mut bool) -> bool {
-        let policy = policy.trim();
-
+    fn evaluate(&self, policy: &str, context: &AuthContext, used_iam: &mut bool) -> Option<bool> {
+        // Pas de `trim()` ici : `parse_policy` n'élague pas, et une divergence
+        // dans le sens permissif (« public » entouré d'espaces ouvrait la route
+        // aux anonymes) est exactement ce qu'il ne faut pas.
+        // Les parties d'une composition sont, elles, élaguées — comme le fait
+        // `parse_policy` après découpage.
         for (prefix, conjunction) in [("all:", true), ("any:", false)] {
             if let Some(rest) = policy.strip_prefix(prefix) {
                 let parts: Vec<&str> = rest.split(',').map(str::trim).collect();
-                return if conjunction {
-                    parts.iter().all(|p| self.evaluate(p, context, used_iam))
-                } else {
-                    parts.iter().any(|p| self.evaluate(p, context, used_iam))
-                };
+                let mut unevaluable = false;
+                for part in parts {
+                    match self.evaluate(part, context, used_iam) {
+                        // Court-circuit : un « et » faux, un « ou » vrai.
+                        Some(true) if !conjunction => return Some(true),
+                        Some(false) if conjunction => return Some(false),
+                        Some(_) => {}
+                        None => unevaluable = true,
+                    }
+                }
+                return if unevaluable { None } else { Some(conjunction) };
             }
         }
         if let Some(inner) = policy.strip_prefix("not:") {
-            return !self.evaluate(inner, context, used_iam);
+            // **Une négation ne peut pas transformer « non tranchable » en
+            // approbation.** Sans cette règle, `not:perm:blacklisted` sans plan
+            // IAM autorisait tout le monde, anonyme compris : une liste de
+            // refus devenait une liste d'admission.
+            return self
+                .evaluate(inner, context, used_iam)
+                .map(|verdict| !verdict);
         }
-
         if let Some(permission) = policy.strip_prefix(PERM_PREFIX) {
-            *used_iam = true;
-            return self.check_iam(permission.trim(), context);
+            return match self.check_iam(permission.trim(), context, used_iam) {
+                IamVerdict::Allowed => Some(true),
+                IamVerdict::Denied => Some(false),
+                IamVerdict::Unevaluable => None,
+            };
         }
-
-        AuthPolicy::parse_policy(policy).check_with_resolver(context, Some(&self.resolvers), None)
+        if !is_known_policy(policy) {
+            // Fail-closed sur le vocabulaire (voir `is_known_policy`).
+            tracing::warn!(
+                policy,
+                "politique hors vocabulaire — refus (le repli du parseur sur \
+                 `authenticated` serait un fail-open)"
+            );
+            return Some(false);
+        }
+        Some(AuthPolicy::parse_policy(policy).check_with_resolver(
+            context,
+            Some(&self.resolvers),
+            None,
+        ))
     }
 
     /// La décision **matérialisée** autorise-t-elle cette permission ?
@@ -238,18 +322,29 @@ impl Authorization {
     /// aucune traversée. Fail-closed : sans plan IAM, sans principal, ou sans
     /// décision, c'est **non**.
     #[cfg(feature = "obrain")]
-    fn check_iam(&self, permission: &str, context: &AuthContext) -> bool {
+    fn check_iam(
+        &self,
+        permission: &str,
+        context: &AuthContext,
+        consulted: &mut bool,
+    ) -> IamVerdict {
         let Some(iam) = &self.iam else {
             tracing::warn!(
                 permission,
-                "politique `perm:` sans plan IAM branché — refus (fail-closed)"
+                "politique `perm:` sans plan IAM branché — non tranchable (refus)"
             );
-            return false;
+            return IamVerdict::Unevaluable;
         };
         let Some((principal, scope)) = Self::iam_identity(context) else {
-            tracing::debug!(permission, "`perm:` sans principal (anonyme) — refus");
-            return false;
+            tracing::debug!(
+                permission,
+                "`perm:` sans principal (anonyme) — non tranchable"
+            );
+            return IamVerdict::Unevaluable;
         };
+        // À partir d'ici, le plan est RÉELLEMENT consulté : la provenance peut
+        // l'affirmer.
+        *consulted = true;
         match iam.decision(&principal, &scope) {
             Ok(Some(stamp)) => {
                 let allowed = stamp.allows(permission);
@@ -261,24 +356,33 @@ impl Authorization {
                     allowed,
                     "décision IAM matérialisée consultée"
                 );
-                allowed
+                if allowed {
+                    IamVerdict::Allowed
+                } else {
+                    IamVerdict::Denied
+                }
             }
             Ok(None) => {
                 tracing::debug!(principal, scope, "aucune décision matérialisée — refus");
-                false
+                IamVerdict::Denied
             }
             Err(e) => {
                 tracing::warn!(error = %e, "lecture de la décision IAM échouée — refus");
-                false
+                IamVerdict::Denied
             }
         }
     }
 
     /// Sans plan IAM, la compilation par défaut doit quand même refuser.
     #[cfg(not(feature = "obrain"))]
-    fn check_iam(&self, _permission: &str, _context: &AuthContext) -> bool {
-        tracing::warn!("politique `perm:` sans support IAM (feature `obrain`) — refus");
-        false
+    fn check_iam(
+        &self,
+        _permission: &str,
+        _context: &AuthContext,
+        _consulted: &mut bool,
+    ) -> IamVerdict {
+        tracing::warn!("politique `perm:` sans support IAM (feature `obrain`) — non tranchable");
+        IamVerdict::Unevaluable
     }
 
     /// La politique déclarée pour une entité et une opération.
@@ -286,12 +390,17 @@ impl Authorization {
     /// `None` = l'entité n'a **pas** d'entrée de configuration ; l'appelant
     /// décide alors d'appliquer la politique par défaut du framework — en le
     /// disant ([`PolicyOrigin::Default`]).
-    fn declared_policy(&self, entity_type: &str, operation: &str) -> Option<String> {
+    fn declared_policy(&self, entity_type: &str, plural: &str, operation: &str) -> Option<String> {
+        // Jointure par **type d'entité**, puis par **pluriel de la route** : une
+        // entrée qui nomme le pluriel monté ne doit pas être ignorée (elle
+        // faisait retomber la politique sur le défaut du framework — plus faible
+        // que déclaré, sans autre trace que `origin: default`).
         let entity = self
             .config
             .entities
             .iter()
-            .find(|e| e.singular == entity_type)?;
+            .find(|e| e.singular == entity_type)
+            .or_else(|| self.config.entities.iter().find(|e| e.plural == plural))?;
         let auth: &EntityAuthConfig = &entity.auth;
         let policy = match operation {
             "list" => &auth.list,
@@ -347,12 +456,12 @@ impl Authorization {
         };
 
         let operation = match (method, segments.len()) {
-            (&Method::GET, 1) => "list",
+            (&Method::GET | &Method::HEAD, 1) => "list",
             (&Method::POST, 1) => "create",
-            (&Method::GET, 2) => "get",
+            (&Method::GET | &Method::HEAD, 2) => "get",
             (&Method::PUT | &Method::PATCH, 2) => "update",
             (&Method::DELETE, 2) => "delete",
-            (&Method::GET, 3) => "list_links",
+            (&Method::GET | &Method::HEAD, 3) => "list_links",
             (&Method::POST, 5) => "create_link",
             (&Method::DELETE, 5) => "delete_link",
             _ => {
@@ -366,7 +475,7 @@ impl Authorization {
             }
         };
 
-        match self.declared_policy(entity_type, operation) {
+        match self.declared_policy(entity_type, plural, operation) {
             Some(policy) => Requirement::Policy {
                 entity_type: entity_type.clone(),
                 operation: operation.to_string(),
@@ -412,19 +521,18 @@ impl Authorization {
         // `parse_policy` retombe sur `Resolver("<texte>")`, que
         // `check_with_resolver` refuse déjà quand le résolveur est inconnu.
         let mut used_iam = false;
-        let allowed = self.evaluate(&policy, context, &mut used_iam);
+        let verdict = self.evaluate(&policy, context, &mut used_iam);
         // Une politique tranchée par l'IAM matérialisé le DIT : la provenance
         // d'une décision ne se devine pas.
         let origin = if used_iam { PolicyOrigin::Iam } else { origin };
 
-        if allowed {
-            Decision::Allow {
+        match verdict {
+            Some(true) => Decision::Allow {
                 scope,
                 policy,
                 origin,
-            }
-        } else {
-            Decision::Deny {
+            },
+            Some(false) => Decision::Deny {
                 scope,
                 policy,
                 origin,
@@ -432,7 +540,14 @@ impl Authorization {
                     "le contexte ({}) ne satisfait pas la politique",
                     describe(context)
                 ),
-            }
+            },
+            None => Decision::Deny {
+                scope,
+                policy,
+                origin,
+                reason: "politique non tranchable (IAM non consultable) — refus fail-closed"
+                    .to_string(),
+            },
         }
     }
 }
@@ -563,7 +678,10 @@ mod tests {
 
     fn admin_only_delete() -> EntityAuthConfig {
         let mut a = EntityAuthConfig::default();
-        a.delete = "admin".to_string();
+        // « admin » n'est PAS du vocabulaire : c'était un fail-open (le parseur
+        // retombait sur `authenticated`, donc un simple utilisateur passait).
+        // Le vrai mot est `admin_only`.
+        a.delete = "admin_only".to_string();
         a.list = "public".to_string();
         a
     }
@@ -1043,9 +1161,14 @@ mod tests {
                         Some(&resolvers),
                         None,
                     );
+                    // Le vocabulaire est **clos** : dès qu'une partie n'est pas
+                    // un mot connu (partie vide d'une virgule double, mot
+                    // inventé), le pré-passage REFUSE là où `parse_policy`
+                    // retombait sur `authenticated`. Divergence VOULUE : on
+                    // l'affirme au lieu de la subir.
                     assert_eq!(
                         mine,
-                        theirs,
+                        Some(theirs),
                         "divergence sur `{policy}` avec {}",
                         describe(context)
                     );
@@ -1140,5 +1263,1418 @@ mod tests {
             a.decide(&Method::GET, "/health", &AuthContext::Anonymous),
             Decision::Abstain { .. }
         ));
+    }
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// Périmètre dédié : **le vocabulaire des politiques et son évaluation**.
+//
+// Ce module est un enfant de `authorization`, donc il atteint délibérément les
+// éléments privés (`evaluate`, `check_iam`, `iam_identity`, `describe`) : ce sont
+// des chemins de décision, pas des détails d'implémentation.
+// ══════════════════════════════════════════════════════════════════════════════
+#[cfg(test)]
+mod policy_perimeter {
+    use super::*;
+    use crate::config::EntityConfig;
+    use crate::core::link::LinkDefinition;
+    use crate::server::entity_registry::EntityDescriptor;
+    use serde_json::json;
+
+    // ── Montage ──────────────────────────────────────────────────────────
+
+    struct Descriptor {
+        entity_type: &'static str,
+        plural: &'static str,
+    }
+
+    impl EntityDescriptor for Descriptor {
+        fn entity_type(&self) -> &str {
+            self.entity_type
+        }
+        fn plural(&self) -> &str {
+            self.plural
+        }
+        fn build_routes(&self) -> axum::Router {
+            axum::Router::new()
+        }
+    }
+
+    fn registry(plurals: &[(&'static str, &'static str)]) -> EntityRegistry {
+        let mut r = EntityRegistry::new();
+        for (t, p) in plurals {
+            r.register(Box::new(Descriptor {
+                entity_type: t,
+                plural: p,
+            }));
+        }
+        r
+    }
+
+    fn entity(singular: &str, plural: &str, auth: EntityAuthConfig) -> EntityConfig {
+        EntityConfig {
+            singular: singular.to_string(),
+            plural: plural.to_string(),
+            auth,
+        }
+    }
+
+    fn config_of(entities: Vec<EntityConfig>) -> LinksConfig {
+        LinksConfig {
+            entities,
+            links: Vec::<LinkDefinition>::new(),
+            validation_rules: None,
+            events: None,
+            sinks: None,
+            auth: None,
+        }
+    }
+
+    fn authz_with(config: LinksConfig, plurals: &[(&'static str, &'static str)]) -> Authorization {
+        Authorization::new(
+            Arc::new(config),
+            &registry(plurals),
+            Arc::new(AuthResolverRegistry::new()),
+        )
+    }
+
+    /// La **même** politique sur les huit opérations : les tests de vocabulaire
+    /// n'ont pas à dépendre de la table route → opération.
+    fn policy_everywhere(policy: &str) -> EntityAuthConfig {
+        let mut a = EntityAuthConfig::default();
+        a.list = policy.to_string();
+        a.get = policy.to_string();
+        a.create = policy.to_string();
+        a.update = policy.to_string();
+        a.delete = policy.to_string();
+        a.list_links = policy.to_string();
+        a.create_link = policy.to_string();
+        a.delete_link = policy.to_string();
+        a
+    }
+
+    fn authz_policy(policy: &str) -> Authorization {
+        authz_with(
+            config_of(vec![entity("order", "orders", policy_everywhere(policy))]),
+            &[("order", "orders")],
+        )
+    }
+
+    // ── Contextes ────────────────────────────────────────────────────────
+    //
+    // Identifiants fixes : les matrices comparent des verdicts, et une
+    // comparaison ne doit pas dépendre du hasard d'un `new_v4()`.
+
+    const USER: u128 = 0x1111_1111_1111_1111_1111_1111_1111_1111;
+    const OTHER_USER: u128 = 0x5555_5555_5555_5555_5555_5555_5555_5555;
+    const TENANT: u128 = 0x2222_2222_2222_2222_2222_2222_2222_2222;
+    const ADMIN: u128 = 0x3333_3333_3333_3333_3333_3333_3333_3333;
+    const RESOURCE: u128 = 0x4444_4444_4444_4444_4444_4444_4444_4444;
+
+    fn uid(v: u128) -> uuid::Uuid {
+        uuid::Uuid::from_u128(v)
+    }
+
+    fn user_ctx(roles: &[&str]) -> AuthContext {
+        AuthContext::User {
+            user_id: uid(USER),
+            tenant_id: uid(TENANT),
+            roles: roles.iter().map(|r| r.to_string()).collect(),
+        }
+    }
+
+    fn owner_ctx() -> AuthContext {
+        AuthContext::Owner {
+            user_id: uid(USER),
+            tenant_id: uid(TENANT),
+            resource_id: uid(RESOURCE),
+            resource_type: "order".into(),
+        }
+    }
+
+    fn service_ctx(tenant: Option<uuid::Uuid>) -> AuthContext {
+        AuthContext::Service {
+            service_name: "svc".into(),
+            tenant_id: tenant,
+        }
+    }
+
+    fn admin_ctx() -> AuthContext {
+        AuthContext::Admin {
+            admin_id: uid(ADMIN),
+        }
+    }
+
+    /// **Les sept contextes** du vocabulaire, dans un ordre stable — c'est
+    /// l'index utilisé par les matrices de verdicts.
+    fn all_contexts() -> Vec<(&'static str, AuthContext)> {
+        vec![
+            ("anonyme", AuthContext::Anonymous),
+            ("utilisateur", user_ctx(&[])),
+            ("utilisateur admin", user_ctx(&["admin"])),
+            ("propriétaire", owner_ctx()),
+            ("service en locataire", service_ctx(Some(uid(TENANT)))),
+            ("service global", service_ctx(None)),
+            ("administrateur", admin_ctx()),
+        ]
+    }
+
+    // ── 1. Le vocabulaire × tous les contextes ───────────────────────────
+    //
+    // Table de verdicts explicite : chaque ligne est une politique du
+    // vocabulaire, chaque colonne un contexte. C'est le filet qui attrape une
+    // dérive silencieuse de la sémantique d'un mot-clé.
+
+    const ANON: usize = 0;
+    const USER_: usize = 1;
+    const USER_ADMIN: usize = 2;
+    const OWNER: usize = 3;
+    const SERVICE_TENANT: usize = 4;
+    const SERVICE_GLOBAL: usize = 5;
+    const ADMIN_: usize = 6;
+
+    #[test]
+    fn the_vocabulary_decides_the_same_way_for_every_context_kind() {
+        let authz = authz_policy("public");
+        // [anonyme, utilisateur, utilisateur admin, propriétaire,
+        //  service en locataire, service global, administrateur]
+        let cases: &[(&str, [bool; 7])] = &[
+            ("public", [true, true, true, true, true, true, true]),
+            ("authenticated", [false, true, true, true, true, true, true]),
+            ("owner", [false, false, false, true, false, false, false]),
+            (
+                "admin_only",
+                [false, false, false, false, false, false, true],
+            ),
+            (
+                "service_only",
+                [false, false, false, false, true, true, false],
+            ),
+            (
+                "owner_or_service",
+                [false, false, false, true, true, true, false],
+            ),
+            (
+                "role:admin",
+                [false, false, true, false, false, false, false],
+            ),
+            (
+                "role:reader",
+                [false, false, false, false, false, false, false],
+            ),
+            ("role:", [false, false, false, false, false, false, false]),
+            (
+                "owner_or_role:admin",
+                [false, false, true, true, false, false, false],
+            ),
+            (
+                "owner_or_role:",
+                [false, false, false, true, false, false, false],
+            ),
+            ("resolver:inconnu", [false; 7]),
+            (
+                "owner_or_resolver:inconnu",
+                [false, false, false, true, false, false, false],
+            ),
+            (
+                "all:authenticated,role:admin",
+                [false, false, true, false, false, false, false],
+            ),
+            (
+                "all:public,authenticated",
+                [false, true, true, true, true, true, true],
+            ),
+            ("all:owner,service_only", [false; 7]),
+            (
+                "any:owner,role:admin",
+                [false, false, true, true, false, false, false],
+            ),
+            (
+                "any:service_only,admin_only",
+                [false, false, false, false, true, true, true],
+            ),
+            ("any:public,not:authenticated", [true; 7]),
+            ("not:public", [false; 7]),
+            (
+                "not:authenticated",
+                [true, false, false, false, false, false, false],
+            ),
+            ("not:not:public", [true; 7]),
+            (
+                // `any:owner` n'est PAS un OU : avec une seule branche, le
+                // framework rend la branche elle-même — donc ici `all:` exige
+                // réellement `owner`.
+                "all:any:owner,role:admin,authenticated",
+                [false; 7],
+            ),
+            (
+                "any:all:owner,role:admin,service_only",
+                [false, false, true, true, true, true, false],
+            ),
+        ];
+
+        for (policy, expected) in cases {
+            for (i, (name, ctx)) in all_contexts().iter().enumerate() {
+                let mut used_iam = false;
+                let got = authz.evaluate(policy, ctx, &mut used_iam);
+                assert_eq!(
+                    got,
+                    Some(expected[i]),
+                    "`{policy}` pour {name} : verdict inattendu (colonne {i})"
+                );
+                assert!(
+                    !used_iam,
+                    "`{policy}` ne contient pas `perm:` — l'IAM ne doit pas être consulté"
+                );
+            }
+        }
+    }
+
+    /// L'index des colonnes de la table ci-dessus doit rester celui de
+    /// [`all_contexts`] : sinon la table comparerait des colonnes décalées et
+    /// resterait verte en disant n'importe quoi.
+    #[test]
+    fn the_verdict_matrix_columns_match_the_context_list() {
+        let contexts = all_contexts();
+        assert_eq!(contexts.len(), 7);
+        assert!(matches!(contexts[ANON].1, AuthContext::Anonymous));
+        assert!(matches!(contexts[USER_].1, AuthContext::User { .. }));
+        assert!(matches!(contexts[USER_ADMIN].1, AuthContext::User { .. }));
+        assert!(matches!(contexts[OWNER].1, AuthContext::Owner { .. }));
+        assert!(matches!(
+            contexts[SERVICE_TENANT].1,
+            AuthContext::Service {
+                tenant_id: Some(_),
+                ..
+            }
+        ));
+        assert!(matches!(
+            contexts[SERVICE_GLOBAL].1,
+            AuthContext::Service {
+                tenant_id: None,
+                ..
+            }
+        ));
+        assert!(matches!(contexts[ADMIN_].1, AuthContext::Admin { .. }));
+        // les rôles distinguent les deux utilisateurs
+        assert!(contexts[USER_].1.roles().is_empty());
+        assert_eq!(contexts[USER_ADMIN].1.roles().len(), 1);
+        assert_eq!(contexts[USER_ADMIN].1.roles()[0], "admin");
+    }
+
+    // ── 2. Fail-closed ───────────────────────────────────────────────────
+
+    /// Un résolveur absent refuse **pour tous les contextes**, y compris
+    /// l'administrateur et le service : la variante de contexte ne rachète pas
+    /// une politique illisible.
+    #[test]
+    fn an_unreadable_resolver_denies_for_every_context_kind() {
+        let authz = authz_policy("resolver:absent_du_registre");
+        for (name, ctx) in all_contexts() {
+            let decision = authz.decide(&Method::GET, "/orders", &ctx);
+            match decision {
+                Decision::Deny {
+                    scope,
+                    policy,
+                    reason,
+                    ..
+                } => {
+                    assert_eq!(scope, "order · list");
+                    assert_eq!(policy, "resolver:absent_du_registre");
+                    assert!(
+                        !reason.trim().is_empty(),
+                        "{name} : un refus doit être explicable"
+                    );
+                }
+                other => panic!("{name} : un résolveur absent doit refuser, obtenu {other:?}"),
+            }
+        }
+    }
+
+    /// **Défaut constaté.** L'en-tête de `decide` annonce que `parse_policy`
+    /// retombe sur `Resolver(<texte>)` : c'est faux, la branche finale est
+    /// `_ => AuthPolicy::Authenticated`. Un texte hors vocabulaire (faute de
+    /// frappe, politique vide) **autorise donc tout contexte authentifié** au
+    /// lieu de refuser.
+    #[test]
+    fn a_policy_word_outside_the_vocabulary_denies_instead_of_authenticating() {
+        let authz = authz_policy("");
+        for policy in ["", "foobar:x", "PUBLIC", "Public", "admin", "role"] {
+            for (name, ctx) in all_contexts() {
+                let mut used_iam = false;
+                let allowed = authz.evaluate(policy, &ctx, &mut used_iam);
+                assert_eq!(
+                    allowed,
+                    Some(false),
+                    "hors vocabulaire : refus explicite attendu (jamais `None`, qui dirait « non tranchable »)"
+                );
+                assert!(
+                    allowed == Some(false),
+                    "`{policy}` est hors vocabulaire : il doit refuser pour {name}, jamais approuver"
+                );
+            }
+        }
+    }
+
+    /// **Corrigé** : `evaluate` **n'élague plus** la politique entière avant de
+    /// la parser — `parse_policy` ne l'élague pas, et une divergence dans le sens
+    /// permissif est exactement ce qu'il ne faut pas. Un mot-clé entouré
+    /// d'espaces n'appartient donc plus au vocabulaire : il est **refusé**.
+    #[test]
+    fn a_padded_policy_word_does_not_change_the_frame() {
+        let authz = authz_policy("public");
+        for (name, ctx) in all_contexts() {
+            let mut used_iam = false;
+            assert_eq!(
+                authz.evaluate(" public ", &ctx, &mut used_iam),
+                Some(false),
+                "un mot-clé entouré d'espaces n'est pas du vocabulaire : refus pour {name}"
+            );
+            assert!(
+                !used_iam,
+                "le vocabulaire ne doit jamais consulter l'IAM ({name})"
+            );
+        }
+    }
+
+    /// Le rôle littéral : `role:admin,editor` n'est **pas** une liste de rôles —
+    /// Toutes les parties d'une politique appartiennent-elles au vocabulaire ?
+    ///
+    /// Le pré-passage descend les compositions (`all:`, `any:`, `not:`) : une
+    /// partie **vide** (virgule double) ou un mot inventé n'en fait pas partie.
+    fn every_part_is_known(policy: &str) -> bool {
+        fn known(part: &str) -> bool {
+            let part = part.trim();
+            if part.is_empty() {
+                return false;
+            }
+            for prefix in ["all:", "any:"] {
+                if let Some(rest) = part.strip_prefix(prefix) {
+                    return rest.split(',').all(known);
+                }
+            }
+            if let Some(inner) = part.strip_prefix("not:") {
+                return known(inner);
+            }
+            is_known_policy(part)
+        }
+        known(policy)
+    }
+
+    /// c'est le rôle nommé « admin,editor », que personne ne porte.
+    #[test]
+    fn a_role_policy_is_a_literal_name_not_a_comma_list() {
+        let policy = "role:admin,editor";
+        let authz = authz_policy(policy);
+        for (name, ctx) in [
+            ("utilisateur admin", user_ctx(&["admin"])),
+            ("utilisateur éditeur", user_ctx(&["editor"])),
+            ("utilisateur des deux", user_ctx(&["admin", "editor"])),
+        ] {
+            let mut used_iam = false;
+            assert_eq!(
+                authz.evaluate(policy, &ctx, &mut used_iam),
+                Some(false),
+                "`{policy}` n'est pas une liste de rôles (le framework la lit comme un rôle littéral) : {name} doit être refusé"
+            );
+        }
+    }
+
+    #[test]
+    fn a_role_policy_denies_an_admin_context_that_carries_no_role() {
+        let authz = authz_policy("role:admin");
+        // Un contexte `Admin` n'a pas de rôle : `role:` ne le concerne pas.
+        assert!(
+            !authz
+                .decide(&Method::GET, "/orders", &admin_ctx())
+                .is_allow()
+        );
+        assert!(
+            authz
+                .decide(&Method::GET, "/orders", &user_ctx(&["admin"]))
+                .is_allow()
+        );
+    }
+
+    // ── 4. Test différentiel étendu vs le parseur du framework ───────────
+    //
+    // `evaluate` est un pré-passage : pour toute politique SANS `perm:`, il doit
+    // rendre exactement ce que rend `AuthPolicy::parse_policy` —
+    // sinon il change en silence le sens des politiques déjà déployées.
+
+    #[test]
+    fn the_pre_pass_agrees_with_the_framework_on_a_wide_matrix() {
+        let authz = authz_policy("");
+        let resolvers = AuthResolverRegistry::new();
+        let contexts = all_contexts();
+
+        let policies = [
+            // vocabulaire simple
+            "public",
+            "authenticated",
+            "owner",
+            "admin_only",
+            "service_only",
+            "owner_or_service",
+            // rôles et résolveurs
+            "role:admin",
+            "role:reader",
+            "role:",
+            "role:admin,role:editor",
+            "owner_or_role:admin",
+            "resolver:inconnu",
+            "resolver:absent",
+            "owner_or_resolver:inconnu",
+            // compositions
+            "all:authenticated",
+            "any:owner",
+            // `all:`, `any:`, `not:` **seuls** sont hors vocabulaire après
+            // découpage : le pré-passage les refuse explicitement (fail-closed
+            // sur le vocabulaire) là où le parseur retombait sur
+            // `authenticated`. Cette divergence est VOULUE, elle est testée par
+            // `a_policy_word_outside_the_vocabulary_denies_instead_of_authenticating`.
+            "all:authenticated,role:admin",
+            "any:owner,role:admin",
+            "all: owner , role:admin",
+            "any:owner,,role:admin",
+            "all:any:owner,role:admin,authenticated",
+            "any:all:authenticated,owner,admin_only",
+            "all:authenticated,any:owner,role:admin",
+            // négations
+            "not:public",
+            "not:authenticated",
+            "not:not:public",
+            "not:any:public,role:admin",
+            "any:public,not:authenticated",
+            // hors vocabulaire
+            "foobar:x",
+            "FOOBAR:x",
+            "",
+            "   ",
+        ];
+        assert!(
+            policies.len() >= 25,
+            "la matrice doit couvrir au moins 25 politiques"
+        );
+
+        for policy in policies {
+            for (name, ctx) in &contexts {
+                let mut used_iam = false;
+                let mine = authz.evaluate(policy, ctx, &mut used_iam);
+                let theirs = AuthPolicy::parse_policy(policy).check_with_resolver(
+                    ctx,
+                    Some(&resolvers),
+                    None,
+                );
+                // Le vocabulaire est **clos** : dès qu'une partie n'est pas un
+                // mot connu (partie vide d'une virgule double, mot inventé), le
+                // pré-passage REFUSE là où `parse_policy` retombait sur
+                // `authenticated`. Divergence VOULUE — on l'affirme au lieu de
+                // la subir.
+                if every_part_is_known(policy) {
+                    assert_eq!(
+                        mine,
+                        Some(theirs),
+                        "divergence du pré-passage sur `{policy}` pour {name}"
+                    );
+                } else {
+                    // Une partie hors vocabulaire est refusée **part par part** :
+                    // dans une disjonction, une autre branche peut légitimement
+                    // accorder. L'invariant qui compte — et le seul qui protège —
+                    // est que le pré-passage ne soit **jamais plus permissif** que
+                    // le framework.
+                    assert!(
+                        !(mine == Some(true) && theirs == false),
+                        "le pré-passage est PLUS PERMISSIF que le framework sur \
+                         `{policy}` ({name}) : c'est le fail-open à interdire"
+                    );
+                }
+                assert!(
+                    !used_iam,
+                    "`{policy}` n'utilise pas `perm:` — l'IAM ne doit pas être consulté"
+                );
+            }
+        }
+    }
+
+    /// Le quantificateur de la matrice : elle doit **distinguer** les contextes,
+    /// sinon elle serait verte en comparant deux fois la même chose.
+    #[test]
+    fn the_differential_matrix_actually_discriminates() {
+        let authz = authz_policy("");
+        let contexts = all_contexts();
+        let verdicts_of = |policy: &str| -> Vec<bool> {
+            contexts
+                .iter()
+                .map(|(_, ctx)| {
+                    let mut used = false;
+                    // `None` (non tranchable) se lit comme un refus : c'est la
+                    // seule lecture sûre.
+                    authz.evaluate(policy, ctx, &mut used) == Some(true)
+                })
+                .collect()
+        };
+        let public = verdicts_of("public");
+        let owner = verdicts_of("owner");
+        let admin_only = verdicts_of("admin_only");
+        assert!(public.iter().all(|v| *v));
+        assert_eq!(owner, vec![false, false, false, true, false, false, false]);
+        assert_eq!(
+            admin_only,
+            vec![false, false, false, false, false, false, true]
+        );
+    }
+
+    // ── 5. Requirement : les huit opérations et l'abstention ─────────────
+
+    fn distinct_policies() -> EntityAuthConfig {
+        let mut a = EntityAuthConfig::default();
+        a.list = "public".to_string();
+        a.get = "authenticated".to_string();
+        a.create = "role:creator".to_string();
+        a.update = "owner".to_string();
+        a.delete = "admin_only".to_string();
+        a.list_links = "service_only".to_string();
+        a.create_link = "owner_or_service".to_string();
+        a.delete_link = "any:owner,role:admin".to_string();
+        a
+    }
+
+    #[test]
+    fn every_route_shape_renders_its_operation_policy_and_scope() {
+        let authz = authz_with(
+            config_of(vec![entity("order", "orders", distinct_policies())]),
+            &[("order", "orders")],
+        );
+
+        let cases = [
+            (Method::GET, "/orders", "list", "public"),
+            (Method::POST, "/orders", "create", "role:creator"),
+            (Method::GET, "/orders/7", "get", "authenticated"),
+            (Method::PUT, "/orders/7", "update", "owner"),
+            (Method::PATCH, "/orders/7", "update", "owner"),
+            (Method::DELETE, "/orders/7", "delete", "admin_only"),
+            (
+                Method::GET,
+                "/orders/7/invoices",
+                "list_links",
+                "service_only",
+            ),
+            (
+                Method::POST,
+                "/orders/7/items/product/9",
+                "create_link",
+                "owner_or_service",
+            ),
+            (
+                Method::DELETE,
+                "/orders/7/items/product/9",
+                "delete_link",
+                "any:owner,role:admin",
+            ),
+        ];
+
+        let mut seen: Vec<&str> = Vec::new();
+        for (method, path, operation, policy) in cases {
+            match authz.requirement(&method, path) {
+                Requirement::Policy {
+                    entity_type,
+                    operation: got_operation,
+                    policy: got_policy,
+                    origin,
+                } => {
+                    assert_eq!(got_operation, operation, "{method} {path}");
+                    assert_eq!(got_policy, policy, "{method} {path}");
+                    assert_eq!(origin, PolicyOrigin::Declared, "{method} {path}");
+                    // Une route de lien garde l'entité **source** (la doc du
+                    // variant annonce `link` : c'est l'implémentation qui fait foi).
+                    assert_eq!(entity_type, "order", "{method} {path}");
+                    // La portée publiée est exactement la forme résolue.
+                    match authz.decide(&method, path, &AuthContext::Anonymous) {
+                        Decision::Allow { scope, .. } | Decision::Deny { scope, .. } => {
+                            assert_eq!(scope, format!("order · {operation}"), "{method} {path}");
+                        }
+                        Decision::Abstain { reason } => panic!(
+                            "{method} {path} : abstention inattendue sur une forme connue ({reason})"
+                        ),
+                    }
+                    if !seen.contains(&operation) {
+                        seen.push(operation);
+                    }
+                }
+                other => panic!("{method} {path} : attendu une politique, obtenu {other:?}"),
+            }
+        }
+
+        seen.sort_unstable();
+        assert_eq!(
+            seen,
+            [
+                "create",
+                "create_link",
+                "delete",
+                "delete_link",
+                "get",
+                "list",
+                "list_links",
+                "update"
+            ],
+            "les huit opérations doivent être rendues"
+        );
+    }
+
+    #[test]
+    fn every_abstention_carries_an_actionable_reason() {
+        let authz = authz_policy("public");
+        let cases: [(Method, &str, Option<&str>); 11] = [
+            (Method::GET, "", Some("vide")),
+            (Method::GET, "/", Some("vide")),
+            (Method::GET, "/health", Some("health")),
+            (Method::GET, "/graph/identity", Some("graph")),
+            (Method::GET, "/inconnus", Some("inconnus")),
+            (Method::PUT, "/orders", Some("PUT")),
+            (Method::DELETE, "/orders", Some("DELETE")),
+            // `HEAD` n'est PAS ici : il est gouverné comme `GET`, sinon une
+            // requête HEAD atteindrait la route par le handler GET sans passer
+            // par la politique (voir le test dédié dans `iam_route_resolution`).
+            (Method::OPTIONS, "/orders/1", Some("OPTIONS")),
+            (Method::GET, "/orders/1/2/3/4/5/6", Some("7 segments")),
+            (Method::POST, "/orders/1/2/3", Some("4 segments")),
+            (Method::PATCH, "/orders/1/2/3/4/5", Some("6 segments")),
+        ];
+
+        for (method, path, fragment) in cases {
+            match authz.requirement(&method, path) {
+                Requirement::Abstain { reason } => {
+                    assert!(
+                        !reason.trim().is_empty(),
+                        "{method} {path} : une abstention doit être explicable"
+                    );
+                    if let Some(fragment) = fragment {
+                        assert!(
+                            reason.contains(fragment),
+                            "{method} {path} : la raison `{reason}` devrait nommer `{fragment}`"
+                        );
+                    }
+                    match authz.decide(&method, path, &AuthContext::Anonymous) {
+                        Decision::Abstain { reason: carried } => assert_eq!(
+                            carried, reason,
+                            "{method} {path} : la décision doit reprendre la raison telle quelle"
+                        ),
+                        other => {
+                            panic!("{method} {path} : attendu une abstention, obtenu {other:?}")
+                        }
+                    }
+                }
+                other => panic!("{method} {path} : attendu une abstention, obtenu {other:?}"),
+            }
+        }
+    }
+
+    // ── 6. Provenance : Declared vs Default ──────────────────────────────
+
+    /// La provenance dépend de la **présence** d'une entrée de configuration,
+    /// jamais de la valeur de la politique : une entité configurée dont la
+    /// politique vaut le défaut du framework reste `Declared`.
+    #[test]
+    fn the_origin_follows_the_presence_of_a_config_entry_not_the_value() {
+        let configured = authz_with(
+            config_of(vec![entity("order", "orders", EntityAuthConfig::default())]),
+            &[("order", "orders")],
+        );
+        let unconfigured = authz_with(config_of(Vec::new()), &[("order", "orders")]);
+
+        for (authz, expected) in [
+            (&configured, PolicyOrigin::Declared),
+            (&unconfigured, PolicyOrigin::Default),
+        ] {
+            match authz.requirement(&Method::GET, "/orders") {
+                Requirement::Policy { policy, origin, .. } => {
+                    assert_eq!(policy, "authenticated");
+                    assert_eq!(origin, expected);
+                }
+                other => panic!("attendu une politique, obtenu {other:?}"),
+            }
+        }
+
+        // Le défaut s'applique aux huit opérations, pas seulement à `list`.
+        let cases = [
+            (Method::POST, "/orders"),
+            (Method::GET, "/orders/1"),
+            (Method::PUT, "/orders/1"),
+            (Method::PATCH, "/orders/1"),
+            (Method::DELETE, "/orders/1"),
+            (Method::GET, "/orders/1/invoices"),
+            (Method::POST, "/orders/1/items/product/2"),
+            (Method::DELETE, "/orders/1/items/product/2"),
+        ];
+        for (method, path) in cases {
+            match unconfigured.requirement(&method, path) {
+                Requirement::Policy { policy, origin, .. } => {
+                    assert_eq!(origin, PolicyOrigin::Default, "{method} {path}");
+                    assert_eq!(policy, "authenticated", "{method} {path}");
+                }
+                other => panic!("{method} {path} : attendu une politique, obtenu {other:?}"),
+            }
+        }
+
+        // …et pour un contexte anonyme le défaut refuse, en portant la provenance.
+        match unconfigured.decide(&Method::GET, "/orders", &AuthContext::Anonymous) {
+            Decision::Deny { origin, policy, .. } => {
+                assert_eq!(origin, PolicyOrigin::Default);
+                assert_eq!(policy, "authenticated");
+            }
+            other => panic!("attendu un refus, obtenu {other:?}"),
+        }
+    }
+
+    /// Le registre d'entités est l'autorité sur les **routes** : la
+    /// configuration seule ne fabrique pas de politique.
+    #[test]
+    fn the_registry_is_the_authority_on_routes_not_the_config() {
+        // Déclarée en configuration, absente du registre : aucune route, donc
+        // abstention — la configuration ne suffit pas à s'arroger une politique.
+        let authz = authz_with(
+            config_of(vec![
+                entity("order", "orders", policy_everywhere("public")),
+                entity("invoice", "invoices", policy_everywhere("admin_only")),
+            ]),
+            &[("order", "orders")],
+        );
+        assert!(matches!(
+            authz.requirement(&Method::GET, "/invoices"),
+            Requirement::Abstain { .. }
+        ));
+
+        // Le pluriel retenu est celui du **registre** : `EntityConfig::plural`
+        // diverge ici volontairement.
+        let mismatched = authz_with(
+            config_of(vec![entity(
+                "order",
+                "commandes",
+                policy_everywhere("public"),
+            )]),
+            &[("order", "orders")],
+        );
+        assert!(matches!(
+            mismatched.requirement(&Method::GET, "/commandes"),
+            Requirement::Abstain { .. }
+        ));
+        match mismatched.requirement(&Method::GET, "/orders") {
+            Requirement::Policy { policy, origin, .. } => {
+                assert_eq!(policy, "public");
+                assert_eq!(
+                    origin,
+                    PolicyOrigin::Declared,
+                    "la configuration est retrouvée par le SINGULIER de l'entité"
+                );
+            }
+            other => panic!("attendu une politique, obtenu {other:?}"),
+        }
+    }
+
+    // ── 7. `describe` : lisible, sans fuite d'identifiant ────────────────
+
+    #[test]
+    fn every_context_is_described_without_leaking_its_identifiers() {
+        let cases = [
+            (AuthContext::Anonymous, "anonyme"),
+            (user_ctx(&[]), "utilisateur authentifié"),
+            (owner_ctx(), "propriétaire de la ressource"),
+            (service_ctx(None), "service"),
+            (admin_ctx(), "administrateur"),
+        ];
+        for (ctx, expected) in &cases {
+            let got = describe(ctx);
+            assert_eq!(got, *expected);
+            assert!(!got.is_empty());
+        }
+
+        // La raison d'un refus porte la description du contexte, jamais son id.
+        let authz = authz_policy("owner");
+        match authz.decide(&Method::GET, "/orders", &user_ctx(&[])) {
+            Decision::Deny { reason, .. } => {
+                assert!(
+                    reason.contains("utilisateur authentifié"),
+                    "le refus doit dire quel contexte a échoué : {reason}"
+                );
+                assert!(
+                    !reason.contains(&uid(USER).to_string())
+                        && !reason.contains(&uid(TENANT).to_string()),
+                    "la raison ne doit pas divulguer d'identifiant : {reason}"
+                );
+            }
+            other => panic!("attendu un refus, obtenu {other:?}"),
+        }
+    }
+
+    // ── 8. Sérialisation publiée ─────────────────────────────────────────
+
+    #[test]
+    fn a_decision_serialises_under_its_verdict_discriminant() {
+        let allow = Decision::Allow {
+            scope: "order · list".to_string(),
+            policy: "public".to_string(),
+            origin: PolicyOrigin::Declared,
+        };
+        let value = serde_json::to_value(&allow).expect("sérialisation");
+        assert_eq!(value["verdict"].as_str(), Some("allow"));
+        assert_eq!(value["origin"].as_str(), Some("declared"));
+        assert_eq!(value["scope"].as_str(), Some("order · list"));
+        assert_eq!(value["policy"].as_str(), Some("public"));
+        assert!(value.get("reason").is_none());
+
+        let deny = Decision::Deny {
+            scope: "order · delete".to_string(),
+            policy: "role:admin".to_string(),
+            origin: PolicyOrigin::Default,
+            reason: "le contexte (anonyme) ne satisfait pas la politique".to_string(),
+        };
+        let value = serde_json::to_value(&deny).expect("sérialisation");
+        assert_eq!(value["verdict"].as_str(), Some("deny"));
+        assert_eq!(value["origin"].as_str(), Some("default"));
+        assert!(matches!(value["reason"].as_str(), Some(r) if !r.trim().is_empty()));
+
+        let abstain = Decision::Abstain {
+            reason: "chemin vide".to_string(),
+        };
+        let value = serde_json::to_value(&abstain).expect("sérialisation");
+        assert_eq!(value["verdict"].as_str(), Some("abstain"));
+        assert_eq!(value["reason"].as_str(), Some("chemin vide"));
+        assert!(
+            value.get("scope").is_none() && value.get("policy").is_none(),
+            "une abstention ne porte ni portée ni politique"
+        );
+
+        // Les trois provenances ont trois jetons distincts — un tableau de bord
+        // qui les agrège en dépend.
+        assert_eq!(
+            serde_json::to_value(PolicyOrigin::Declared).unwrap(),
+            json!("declared")
+        );
+        assert_eq!(
+            serde_json::to_value(PolicyOrigin::Default).unwrap(),
+            json!("default")
+        );
+        assert_eq!(
+            serde_json::to_value(PolicyOrigin::Iam).unwrap(),
+            json!("iam")
+        );
+    }
+
+    #[test]
+    fn a_requirement_serialises_under_its_kind_discriminant() {
+        let policy = Requirement::Policy {
+            entity_type: "order".to_string(),
+            operation: "list_links".to_string(),
+            policy: "service_only".to_string(),
+            origin: PolicyOrigin::Iam,
+        };
+        let value = serde_json::to_value(&policy).expect("sérialisation");
+        assert_eq!(value["kind"].as_str(), Some("policy"));
+        assert_eq!(value["origin"].as_str(), Some("iam"));
+        assert_eq!(value["entity_type"].as_str(), Some("order"));
+        assert_eq!(value["operation"].as_str(), Some("list_links"));
+        assert_eq!(value["policy"].as_str(), Some("service_only"));
+
+        let abstain = Requirement::Abstain {
+            reason: "`inconnus` n'est le pluriel d'aucune entité enregistrée".to_string(),
+        };
+        let value = serde_json::to_value(&abstain).expect("sérialisation");
+        assert_eq!(value["kind"].as_str(), Some("abstain"));
+        assert!(matches!(value["reason"].as_str(), Some(r) if !r.is_empty()));
+        assert!(
+            value.get("policy").is_none(),
+            "une abstention ne publie pas de politique"
+        );
+    }
+
+    /// `is_allow` n'est vrai que pour `Allow` — une abstention n'est **pas** une
+    /// autorisation, même si le middleware la laisse passer (le routeur décide).
+    #[test]
+    fn is_allow_is_true_only_for_allow() {
+        assert!(
+            Decision::Allow {
+                scope: "order · list".into(),
+                policy: "public".into(),
+                origin: PolicyOrigin::Declared,
+            }
+            .is_allow()
+        );
+        assert!(
+            !Decision::Deny {
+                scope: "order · list".into(),
+                policy: "public".into(),
+                origin: PolicyOrigin::Declared,
+                reason: "non".into(),
+            }
+            .is_allow()
+        );
+        assert!(
+            !Decision::Abstain {
+                reason: "route inconnue".into()
+            }
+            .is_allow(),
+            "l'abstention n'est pas une autorisation"
+        );
+    }
+
+    // ── 9. L'IAM matérialisé (feature `obrain`) ──────────────────────────
+
+    #[cfg(feature = "obrain")]
+    mod iam_plan {
+        use super::*;
+        use crate::storage::ObrainStore;
+        use crate::storage::iam::RoleGrant;
+
+        fn store() -> Arc<ObrainStore> {
+            ObrainStore::new_in_memory()
+        }
+
+        fn authz_with_plan(store: &Arc<ObrainStore>, policy: &str) -> Authorization {
+            authz_policy(policy).with_iam(store)
+        }
+
+        fn materialize(store: &Arc<ObrainStore>, principal: &str, scope: &str, perms: &[&str]) {
+            let grants = [RoleGrant {
+                role: "r".to_string(),
+                permissions: perms.iter().map(|p| p.to_string()).collect(),
+            }];
+            store
+                .iam()
+                .materialize(principal, scope, &grants)
+                .expect("matérialisation");
+        }
+
+        /// **(principal, portée)** — c'est la clé de lecture de la décision, donc
+        /// une erreur ici est une erreur de cloisonnement.
+        #[test]
+        fn the_identity_of_each_context_is_its_principal_and_its_scope() {
+            let cases: [(AuthContext, Option<(String, String)>); 6] = [
+                (AuthContext::Anonymous, None),
+                (
+                    user_ctx(&[]),
+                    Some((uid(USER).to_string(), uid(TENANT).to_string())),
+                ),
+                (
+                    owner_ctx(),
+                    Some((uid(USER).to_string(), uid(TENANT).to_string())),
+                ),
+                (
+                    service_ctx(Some(uid(TENANT))),
+                    Some(("svc".to_string(), uid(TENANT).to_string())),
+                ),
+                (
+                    service_ctx(None),
+                    Some(("svc".to_string(), "global".to_string())),
+                ),
+                (
+                    admin_ctx(),
+                    Some((uid(ADMIN).to_string(), "global".to_string())),
+                ),
+            ];
+            for (ctx, expected) in cases {
+                assert_eq!(
+                    Authorization::iam_identity(&ctx),
+                    expected,
+                    "identité IAM de {}",
+                    describe(&ctx)
+                );
+            }
+        }
+
+        /// Une décision matérialisée répond à `perm:` pour **chaque** sorte de
+        /// principal, dans exactement la portée que le contexte désigne.
+        #[test]
+        fn a_materialised_decision_answers_every_principal_kind_in_its_scope() {
+            // Un store par cas : `User` et `Owner` désignent le MÊME couple
+            // (principal, portée), donc un store partagé confondrait les deux.
+            let cases: Vec<(&str, AuthContext, String, String)> = vec![
+                (
+                    "utilisateur",
+                    user_ctx(&[]),
+                    uid(USER).to_string(),
+                    uid(TENANT).to_string(),
+                ),
+                (
+                    "propriétaire",
+                    owner_ctx(),
+                    uid(USER).to_string(),
+                    uid(TENANT).to_string(),
+                ),
+                (
+                    "service en locataire",
+                    service_ctx(Some(uid(TENANT))),
+                    "svc".to_string(),
+                    uid(TENANT).to_string(),
+                ),
+                (
+                    "service global",
+                    service_ctx(None),
+                    "svc".to_string(),
+                    "global".to_string(),
+                ),
+                (
+                    "administrateur",
+                    admin_ctx(),
+                    uid(ADMIN).to_string(),
+                    "global".to_string(),
+                ),
+            ];
+
+            for (name, ctx, principal, scope) in &cases {
+                let store = store();
+                let authz = authz_with_plan(&store, "perm:orders:read");
+                let before = authz.decide(&Method::GET, "/orders", ctx);
+                assert!(
+                    !before.is_allow(),
+                    "{name} : sans décision matérialisée, refus attendu, obtenu {before:?}"
+                );
+                materialize(&store, principal, scope, &["orders:read"]);
+                match authz.decide(&Method::GET, "/orders", ctx) {
+                    Decision::Allow { origin, .. } => {
+                        assert_eq!(origin, PolicyOrigin::Iam, "{name}");
+                    }
+                    other => panic!("{name} : autorisation attendue, obtenue {other:?}"),
+                }
+            }
+        }
+
+        /// Le cloisonnement : la décision d'un principal ne vaut pas pour un
+        /// autre, même dans le même locataire.
+        #[test]
+        fn a_decision_for_one_principal_does_not_authorise_another() {
+            let store = store();
+            materialize(
+                &store,
+                &uid(USER).to_string(),
+                &uid(TENANT).to_string(),
+                &["x"],
+            );
+            let authz = authz_with_plan(&store, "perm:x");
+
+            assert!(
+                authz
+                    .decide(&Method::GET, "/orders", &user_ctx(&[]))
+                    .is_allow()
+            );
+            let neighbour = AuthContext::User {
+                user_id: uid(OTHER_USER),
+                tenant_id: uid(TENANT),
+                roles: vec![],
+            };
+            assert!(
+                !authz.decide(&Method::GET, "/orders", &neighbour).is_allow(),
+                "aucune décision pour cet utilisateur : refus"
+            );
+            // et un autre locataire non plus (même principal)
+            let other_tenant = AuthContext::User {
+                user_id: uid(USER),
+                tenant_id: uid(OTHER_USER),
+                roles: vec![],
+            };
+            assert!(
+                !authz
+                    .decide(&Method::GET, "/orders", &other_tenant)
+                    .is_allow(),
+                "la portée isole les locataires"
+            );
+        }
+
+        /// Une décision **absente** refuse ; une décision **invalidée** refuse
+        /// aussi, mais l'époque continue d'avancer (rematérialisation sur le même
+        /// nœud) — c'est ce qui rend un cache sûr.
+        #[test]
+        fn an_absent_decision_denies_and_an_invalidated_one_keeps_the_epoch_moving() {
+            let store = store();
+            let principal = uid(USER).to_string();
+            let scope = uid(TENANT).to_string();
+
+            // absente
+            assert!(store.iam().decision(&principal, &scope).unwrap().is_none());
+            let authz = authz_with_plan(&store, "perm:orders:write");
+            assert!(
+                !authz
+                    .decide(&Method::DELETE, "/orders/1", &user_ctx(&[]))
+                    .is_allow(),
+                "aucune décision matérialisée : refus"
+            );
+
+            // présente
+            materialize(&store, &principal, &scope, &["orders:write"]);
+            assert!(
+                authz
+                    .decide(&Method::DELETE, "/orders/1", &user_ctx(&[]))
+                    .is_allow()
+            );
+            let e1 = store
+                .iam()
+                .decision(&principal, &scope)
+                .unwrap()
+                .expect("décision")
+                .epoch;
+
+            // invalidée
+            let e2 = store
+                .iam()
+                .invalidate(&principal, &scope)
+                .expect("invalidation");
+            assert_eq!(e2, e1 + 1, "l'époque est monotone");
+            let decision = authz.decide(&Method::DELETE, "/orders/1", &user_ctx(&[]));
+            assert!(
+                !decision.is_allow(),
+                "une décision invalidée ne doit plus autoriser : {decision:?}"
+            );
+            assert!(
+                matches!(
+                    decision,
+                    Decision::Deny {
+                        origin: PolicyOrigin::Iam,
+                        ..
+                    }
+                ),
+                "le nœud de décision existe toujours, et c'est bien l'IAM qui a tranché"
+            );
+
+            // rematérialisée : même nœud, époque strictement croissante
+            materialize(&store, &principal, &scope, &["orders:write"]);
+            let e3 = store
+                .iam()
+                .decision(&principal, &scope)
+                .unwrap()
+                .expect("décision")
+                .epoch;
+            assert_eq!(e3, e2 + 1, "l'époque ne repart pas à 1");
+            assert!(
+                authz
+                    .decide(&Method::DELETE, "/orders/1", &user_ctx(&[]))
+                    .is_allow()
+            );
+        }
+
+        /// La permission est comparée **exactement** ; seul `*` couvre le reste.
+        #[test]
+        fn a_permission_is_matched_exactly_and_only_a_star_covers_the_rest() {
+            let store = store();
+            let principal = uid(USER).to_string();
+            let scope = uid(TENANT).to_string();
+            materialize(&store, &principal, &scope, &["orders:read"]);
+
+            let allowed = |permission: &str| -> bool {
+                let authz = authz_with_plan(&store, &format!("perm:{permission}"));
+                authz
+                    .decide(&Method::GET, "/orders", &user_ctx(&[]))
+                    .is_allow()
+            };
+            assert!(allowed("orders:read"));
+            assert!(!allowed("orders:write"), "permission non accordée");
+            assert!(!allowed("orders:rea"), "aucune correspondance partielle");
+            assert!(!allowed("orders:"), "un préfixe n'est pas un joker");
+            assert!(
+                !allowed("ORDERS:READ"),
+                "la comparaison est sensible à la casse"
+            );
+            assert!(!allowed("*"), "demander `*` n'est pas détenir `*`");
+
+            // Le joker accordé couvre toute permission demandée.
+            materialize(&store, &principal, &scope, &["*"]);
+            assert!(allowed("orders:write"));
+            assert!(allowed("n'importe:quoi"));
+        }
+
+        /// `perm:` composé : `all:` (ET), `any:` (OU), et `not:` (liste de refus)
+        /// quand le plan **est** consultable.
+        #[test]
+        fn perm_composes_with_all_any_and_not() {
+            let store = store();
+            materialize(
+                &store,
+                &uid(USER).to_string(),
+                &uid(TENANT).to_string(),
+                &["x"],
+            );
+
+            // all: — les deux conditions sont nécessaires
+            let all = authz_with_plan(&store, "all:perm:x,authenticated");
+            assert!(
+                all.decide(&Method::GET, "/orders", &user_ctx(&[]))
+                    .is_allow()
+            );
+            assert!(
+                !all.decide(&Method::GET, "/orders", &AuthContext::Anonymous)
+                    .is_allow(),
+                "un anonyme n'a pas de décision matérialisée"
+            );
+            let all_with_role = authz_with_plan(&store, "all:perm:x,role:admin");
+            assert!(
+                !all_with_role
+                    .decide(&Method::GET, "/orders", &user_ctx(&[]))
+                    .is_allow(),
+                "le rôle manque"
+            );
+
+            // any: — une seule branche suffit
+            let any = authz_with_plan(&store, "any:perm:x,role:auditor");
+            assert!(
+                any.decide(&Method::GET, "/orders", &user_ctx(&[]))
+                    .is_allow()
+            );
+            assert!(
+                any.decide(&Method::GET, "/orders", &user_ctx(&["auditor"]))
+                    .is_allow()
+            );
+            let any_missing = authz_with_plan(&store, "any:perm:y,role:auditor");
+            assert!(
+                !any_missing
+                    .decide(&Method::GET, "/orders", &user_ctx(&[]))
+                    .is_allow(),
+                "ni la permission ni le rôle : refus"
+            );
+
+            // not: — refus de qui détient la permission, et c'est le sens d'une
+            // liste de refus : qui ne la détient pas passe.
+            let deny_list = authz_with_plan(&store, "not:perm:x");
+            assert!(
+                !deny_list
+                    .decide(&Method::GET, "/orders", &user_ctx(&[]))
+                    .is_allow(),
+                "le porteur de la permission est refusé"
+            );
+            let neighbour = AuthContext::User {
+                user_id: uid(OTHER_USER),
+                tenant_id: uid(TENANT),
+                roles: vec![],
+            };
+            match deny_list.decide(&Method::GET, "/orders", &neighbour) {
+                Decision::Allow { origin, .. } => assert_eq!(
+                    origin,
+                    PolicyOrigin::Iam,
+                    "l'IAM a été consulté (et n'a rien trouvé pour ce principal)"
+                ),
+                other => panic!("attendu une autorisation, obtenue {other:?}"),
+            }
+            // Le cas du contexte SANS principal (anonyme) est un défaut : voir
+            // `a_deny_list_over_the_plan_does_not_absolve_a_context_without_a_principal`.
+        }
+
+        /// Une permission vide (`perm:`) est une configuration fautive : elle
+        /// refuse quand la décision est finie.
+        #[test]
+        fn an_empty_permission_policy_denies_a_finite_decision() {
+            let store = store();
+            materialize(
+                &store,
+                &uid(USER).to_string(),
+                &uid(TENANT).to_string(),
+                &["orders:read", "orders:write"],
+            );
+            let authz = authz_with_plan(&store, "perm:");
+            let decision = authz.decide(&Method::GET, "/orders", &user_ctx(&[]));
+            assert!(
+                !decision.is_allow(),
+                "`perm:` (permission vide) doit refuser : {decision:?}"
+            );
+        }
+
+        /// **Corrigé** : le joker ne couvre **plus** la permission vide —
+        /// `AclStamp::allows` refuse un nom vide, donc un `perm:` sans nom
+        /// (faute de frappe) refuse même quand la décision porte `*`.
+        #[test]
+        fn an_empty_permission_policy_is_not_authorised_by_a_wildcard_decision() {
+            let store = store();
+            materialize(
+                &store,
+                &uid(USER).to_string(),
+                &uid(TENANT).to_string(),
+                &["*"],
+            );
+            let authz = authz_with_plan(&store, "perm:");
+            let decision = authz.decide(&Method::GET, "/orders", &user_ctx(&[]));
+            assert!(
+                !decision.is_allow(),
+                "`perm:` sans permission demandée ne doit pas être approuvé : {decision:?}"
+            );
+        }
+
+        /// **Corrigé** : une politique `perm:` **non tranchable** (ici : contexte
+        /// sans principal) ne peut plus être retournée en autorisation par une
+        /// négation. L'évaluation est tri-état : `None` (non tranchable) reste
+        /// `None` sous `not:`, et `None` refuse.
+        #[test]
+        fn a_deny_list_over_the_plan_does_not_absolve_a_context_without_a_principal() {
+            let store = store();
+            materialize(
+                &store,
+                &uid(USER).to_string(),
+                &uid(TENANT).to_string(),
+                &["x"],
+            );
+            let deny_list = authz_with_plan(&store, "not:perm:x");
+            let decision = deny_list.decide(&Method::GET, "/orders", &AuthContext::Anonymous);
+            assert!(
+                !decision.is_allow(),
+                "`not:perm:` ne doit pas absoudre un contexte sans principal : {decision:?}"
+            );
+        }
+
+        /// La provenance suit la **consultation réelle**, pas la présence du
+        /// préfixe : `any:`/`all:` court-circuitent selon l'ordre des branches.
+        #[test]
+        fn the_iam_origin_follows_the_actual_consultation_of_the_plan() {
+            let store = store();
+            materialize(
+                &store,
+                &uid(USER).to_string(),
+                &uid(TENANT).to_string(),
+                &["x"],
+            );
+
+            // `perm:` en tête : consulté, et il refuse (l'utilisateur n'a pas `y`)
+            // — puis le rôle sauve. La provenance doit dire `iam`.
+            let role_after = authz_with_plan(&store, "any:perm:y,role:auditor");
+            match role_after.decide(&Method::GET, "/orders", &user_ctx(&["auditor"])) {
+                Decision::Allow { origin, .. } => assert_eq!(origin, PolicyOrigin::Iam),
+                other => panic!("le rôle `auditor` doit sauver : {other:?}"),
+            }
+
+            // `role:` en tête et satisfait : `any` court-circuite, l'IAM n'est
+            // jamais consulté — la provenance reste celle de la déclaration.
+            let role_first = authz_with_plan(&store, "any:role:auditor,perm:x");
+            match role_first.decide(&Method::GET, "/orders", &user_ctx(&["auditor"])) {
+                Decision::Allow { origin, .. } => assert_eq!(
+                    origin,
+                    PolicyOrigin::Declared,
+                    "l'IAM n'a pas été consulté : la provenance ne doit pas le prétendre"
+                ),
+                other => panic!("attendu une autorisation, obtenue {other:?}"),
+            }
+            // …et le même `any:` consulte bien l'IAM pour qui n'a pas le rôle.
+            match role_first.decide(&Method::GET, "/orders", &user_ctx(&[])) {
+                Decision::Allow { origin, .. } => assert_eq!(origin, PolicyOrigin::Iam),
+                other => panic!("la décision matérialisée doit sauver : {other:?}"),
+            }
+        }
+
+        /// **Corrigé** : `role:admin` est du vocabulaire, et un utilisateur qui
+        /// porte le rôle le satisfait — sans consulter l'IAM (la provenance reste
+        /// celle de la déclaration).
+        #[test]
+        fn a_role_policy_is_satisfied_without_consulting_the_iam() {
+            let store = store();
+            materialize(
+                &store,
+                &uid(USER).to_string(),
+                &uid(TENANT).to_string(),
+                &["x"],
+            );
+            let authz = authz_with_plan(&store, "role:admin");
+            match authz.decide(&Method::GET, "/orders", &user_ctx(&["admin"])) {
+                Decision::Allow { origin, policy, .. } => {
+                    assert_eq!(origin, PolicyOrigin::Declared);
+                    assert_eq!(policy, "role:admin");
+                }
+                other => panic!("attendu une autorisation, obtenue {other:?}"),
+            }
+        }
     }
 }

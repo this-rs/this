@@ -51,8 +51,11 @@ pub struct ServerBuilder {
     // Identité des entités — comment elles sont nommées, quel que soit le moteur
     identity: Option<crate::core::identity::IdentityRegistry>,
 
-    // Armer l'application des politiques `auth:` (jamais par défaut)
+    // Armer l'application des politiques `auth:` (défaut : armé)
     authorize: bool,
+
+    // Armer le bail d'écriture sur un store obrain inscriptible (défaut : armé)
+    fence_writes: bool,
 
     // Auth config loaded from external file
     auth_config: Option<crate::config::auth::AuthConfig>,
@@ -78,7 +81,8 @@ impl ServerBuilder {
             #[cfg(feature = "obrain")]
             graph_store: None,
             identity: None,
-            authorize: false,
+            authorize: true,
+            fence_writes: true,
             auth_config: None,
             resolver_registry: AuthResolverRegistry::new(),
         }
@@ -100,24 +104,75 @@ impl ServerBuilder {
         self
     }
 
-    /// **Arme l'application des politiques d'autorisation.**
+    /// **Branche un store obrain — le chemin clé en main.**
     ///
-    /// Sans cet appel, les sections `auth:` d'une entité ne sont **pas**
-    /// appliquées — c'est le comportement historique. Avec, chaque requête vers
-    /// une route d'entité connue est confrontée à la politique déclarée de
-    /// l'opération (`list`, `get`, `create`, `update`, `delete`, `list_links`,
-    /// `create_link`, `delete_link`), et refusée en **403** si elle ne la
-    /// satisfait pas.
+    /// Un seul appel suffit à obtenir : le relief (`GET /graph`), l'identité
+    /// canonique (convention `_uuid`/`_data` **puis** propriétés plates), le
+    /// plan IAM matérialisé, l'application des politiques `auth:` (armée par
+    /// défaut) et, si le store est inscriptible, le **bail d'écriture**.
     ///
-    /// Deux garanties : **fail-closed** (une politique illisible refuse, jamais
-    /// ne laisse passer) et **jamais d'invention** (une route inconnue est
-    /// *abstenue*, pas dotée d'une politique imaginaire).
+    /// ```rust,ignore
+    /// let store = ObrainStore::open("./data/app.obrain")?;
+    /// let host = ServerBuilder::new()
+    ///     .with_link_service(ObrainLinkService::new(store.clone()))
+    ///     .with_obrain_store(store)   // ← tout le reste suit
+    ///     .build_host()?;
+    /// ```
     ///
-    /// ⚠️ À armer en connaissance de cause : la politique par défaut d'une
-    /// entité est `"authenticated"`, donc les entités sans configuration
-    /// explicite exigeront un contexte authentifié.
+    /// C'est un alias sémantique de [`ServerBuilder::with_graph_store`] : il ne
+    /// fait rien de plus, mais il dit l'intention. Si le bail ne peut pas être
+    /// pris (un autre écrivain le détient), la construction **échoue** : voir
+    /// [`ServerBuilder::without_write_fencing`] pour l'assumer explicitement.
+    #[cfg(feature = "obrain")]
+    pub fn with_obrain_store(self, store: Arc<crate::storage::ObrainStore>) -> Self {
+        self.with_graph_store(store)
+    }
+
+    /// **N'arme pas** le bail d'écriture sur le store obrain.
+    ///
+    /// Par défaut, attacher un store inscriptible prend un bail exclusif : un
+    /// second écrivain (dans un autre processus **ou dans celui-ci**) est
+    /// refusé, au lieu de corrompre le WAL en silence. Désarmer cet appel rend
+    /// l'arbitrage à l'exploitant — à ne faire que sciemment.
+    ///
+    /// Un store ouvert en **lecture seule** n'arme jamais de bail : il n'écrit
+    /// pas, donc il n'a rien à arbitrer.
+    #[cfg(feature = "obrain")]
+    pub fn without_write_fencing(mut self) -> Self {
+        self.fence_writes = false;
+        tracing::warn!(
+            "write fencing DISARMED — a second writer on this store will not be refused"
+        );
+        self
+    }
+
+    /// **Arme l'application des politiques d'autorisation** — c'est le défaut.
+    ///
+    /// Chaque requête vers une route d'entité connue est confrontée à la
+    /// politique déclarée de l'opération, et refusée en **403** si elle ne la
+    /// satisfait pas. Deux garanties : **fail-closed** (une politique illisible
+    /// refuse, jamais ne laisse passer) et **jamais d'invention** (une route
+    /// inconnue est *abstenue*, pas dotée d'une politique imaginaire).
+    ///
+    /// ⚠️ La politique par défaut d'une entité est `"authenticated"` : une
+    /// entité sans configuration explicite **exige un contexte authentifié**.
+    /// C'est voulu — un framework qui laisse passer par défaut n'est pas sûr
+    /// par défaut.
     pub fn with_authorization(mut self) -> Self {
         self.authorize = true;
+        self
+    }
+
+    /// **Désarme** l'application des politiques — dégradation délibérée.
+    ///
+    /// À n'utiliser que pour un service réellement public, ou pour reproduire
+    /// l'ancien comportement d'accès libre. Une fois désarmées, les sections
+    /// `auth:` sont **décoratives** : lues, jamais appliquées. L'appel est
+    /// journalisé en avertissement pour que la décision reste visible en
+    /// exploitation.
+    pub fn without_authorization(mut self) -> Self {
+        self.authorize = false;
+        tracing::warn!("authorization DISARMED — declared `auth:` policies will NOT be enforced");
         self
     }
 
@@ -434,9 +489,11 @@ impl ServerBuilder {
         }
 
         // Transférer l'armement de l'autorisation (faux par défaut).
-        if self.authorize {
-            host.authorize = true;
-        }
+        // Transfert dans les DEUX sens : sans le `else`, un
+        // `without_authorization()` était silencieusement annulé par le défaut
+        // `true` posé à la construction de l'hôte — un service qui se croyait
+        // ouvert refusait ses clients.
+        host.authorize = self.authorize;
 
         // Attach the obrain graph handle if one was provided.
         //
@@ -446,10 +503,45 @@ impl ServerBuilder {
         #[cfg(feature = "obrain")]
         if let Some(store) = self.graph_store.take() {
             let substrate = store.is_substrate();
+            let read_only = store.is_read_only();
+
+            // Le bail, armé par défaut dès que le store est inscriptible.
+            //
+            // **Fail-closed** : si le bail ne peut pas être pris, on refuse de
+            // construire. Continuer sans bail serait exactement le trou qu'il
+            // comble — un second écrivain corromprait le WAL en silence.
+            if self.fence_writes && !read_only {
+                let shard = store.shard_id()?;
+                match &shard.store {
+                    crate::storage::writer_lease::StoreId::Dir(path) => {
+                        let authority =
+                            crate::storage::writer_lease::FileAuthority::new(path.clone());
+                        match store.enable_write_fencing_with(&authority) {
+                            Ok(epoch) => tracing::info!(
+                                epoch,
+                                shard = %shard.key(),
+                                "write fencing armed by default (second writer will be refused)"
+                            ),
+                            Err(e) => {
+                                return Err(anyhow::anyhow!(
+                                    "write fencing refused on {}: {e}. Un autre écrivain détient                                      le bail (autre processus, ou ce processus). Utiliser                                      `.without_write_fencing()` pour l'assumer explicitement.",
+                                    shard.key()
+                                ));
+                            }
+                        }
+                    }
+                    crate::storage::writer_lease::StoreId::Volatile(_) => {
+                        tracing::debug!("store volatil : pas de bail de fichier possible");
+                    }
+                }
+            } else if read_only {
+                tracing::info!("store ouvert en lecture seule : aucun bail armé (rien à arbitrer)");
+            }
+
             tracing::info!(
                 substrate,
-                read_only = store.is_read_only(),
-                "obrain graph handle attached (GET /graph publishes the relief)"
+                read_only,
+                "obrain attached — relief, identity, IAM and authorization follow                  (GET /graph, GET /graph/identity)"
             );
             host = host.with_graph_store(store);
         }

@@ -86,11 +86,17 @@ async fn main() -> anyhow::Result<()> {
     println!("  GET /graph?counts=true  + compteurs de simplexes (balayage complet)");
     println!("  GET /graph/procedures   la surface d'appel");
     println!("  GET /graph/spaces       l'espace actif et les espaces connus");
+    println!("  GET /graph/identity     le contrat d'identité (chaîne, repli)");
+    println!("  GET /graph/identity?counts=true  comptage borné des entités");
     println!("  GET /health             liveness");
 
+    // **Le chemin clé en main** : `.with_obrain_store()` branche le store et
+    // tout ce qui suit — relief, identité canonique, plan IAM matérialisé et
+    // application des politiques `auth:` (armée par défaut). Un store ouvert en
+    // lecture seule ne prend pas de bail d'écriture : il n'a rien à arbitrer.
     ServerBuilder::new()
         .with_link_service(links)
-        .with_graph_store(store)
+        .with_obrain_store(store)
         .serve(&addr)
         .await
 }

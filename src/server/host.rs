@@ -120,11 +120,10 @@ pub struct ServerHost {
 
     /// Les politiques déclarées (`auth:`) sont-elles **appliquées** ?
     ///
-    /// `false` par défaut, et c'est délibéré : ces politiques n'ont jamais été
-    /// appliquées, donc les armer d'office casserait tout déploiement existant
-    /// qui comptait sur l'accès libre. Voir
-    /// `ServerBuilder::with_authorization` et
-    /// `server::middleware::authorization`.
+    /// **`true` par défaut** : un framework qui laisse passer par défaut n'est
+    /// pas sûr par défaut. Se désarme sciemment
+    /// (`ServerBuilder::without_authorization`) — et l'appel est journalisé.
+    /// Voir `server::middleware::authorization`.
     pub authorize: bool,
 
     /// Optional auth provider for JWT/token verification
@@ -191,7 +190,7 @@ impl ServerHost {
             #[cfg(feature = "obrain")]
             graph_store: None,
             identity: Arc::new(IdentityRegistry::new()),
-            authorize: false,
+            authorize: true,
             auth_provider: None,
             resolver_registry: Arc::new(AuthResolverRegistry::new()),
             #[cfg(feature = "wami")]
@@ -430,7 +429,7 @@ impl ServerHost {
             #[cfg(feature = "obrain")]
             graph_store: None,
             identity: Arc::new(IdentityRegistry::new()),
-            authorize: false,
+            authorize: true,
             auth_provider: None,
             resolver_registry: Arc::new(AuthResolverRegistry::new()),
             #[cfg(feature = "wami")]

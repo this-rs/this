@@ -16,6 +16,9 @@ pub mod mysql;
 pub mod neo4j;
 #[cfg(feature = "obrain")]
 pub mod obrain;
+/// `GraphBackend` — la couture de bascule entre obrain et this-rs.
+#[cfg(feature = "obrain")]
+pub mod obrain_facade;
 /// Adaptateur obrain de l'identité canonique — la moitié I/O de `core::identity`.
 #[cfg(feature = "obrain")]
 pub mod obrain_identity;
@@ -42,6 +45,8 @@ pub use self::mysql::{MysqlDataService, MysqlLinkService};
 pub use self::neo4j::{Neo4jDataService, Neo4jLinkService};
 #[cfg(feature = "obrain")]
 pub use self::obrain::{ObrainDataService, ObrainLinkService, ObrainStore};
+#[cfg(feature = "obrain")]
+pub use self::obrain_facade::GraphBackend;
 #[cfg(feature = "obrain")]
 pub use self::obrain_identity::{IdentityReport, LabelReport};
 #[cfg(feature = "dynamodb")]
