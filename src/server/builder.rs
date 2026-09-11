@@ -54,6 +54,12 @@ pub struct ServerBuilder {
     // Armer l'application des politiques `auth:` (défaut : armé)
     authorize: bool,
 
+    // Application en OBSERVATION (défaut : non) — l'adoption d'un projet existant
+    authorize_report_only: bool,
+
+    // Mappage d'identité de l'application, pour l'IAM natif d'un modèle existant
+    principal_mapping: Option<Arc<crate::server::middleware::authorization::PrincipalMapping>>,
+
     // Armer le bail d'écriture sur un store obrain inscriptible (défaut : armé)
     fence_writes: bool,
 
@@ -82,6 +88,8 @@ impl ServerBuilder {
             graph_store: None,
             identity: None,
             authorize: true,
+            authorize_report_only: false,
+            principal_mapping: None,
             fence_writes: true,
             auth_config: None,
             resolver_registry: AuthResolverRegistry::new(),
@@ -160,6 +168,57 @@ impl ServerBuilder {
     /// par défaut.
     pub fn with_authorization(mut self) -> Self {
         self.authorize = true;
+        self
+    }
+
+    /// **Mode observation** : l'application des politiques décide, journalise et
+    /// le publie dans la réponse, mais **ne bloque rien**.
+    ///
+    /// # Pourquoi c'est le bon premier pas sur un projet existant
+    ///
+    /// Passer de « aucune politique appliquée » à « tout est appliqué » casse une
+    /// production : les politiques déclarées n'ont jamais été vérifiées contre le
+    /// trafic réel. Ici, on les observe :
+    ///
+    /// * chaque refus calculé part dans les journaux (`autorisation : refus OBSERVÉ`) ;
+    /// * la réponse porte `x-this-rs-authz: observed-deny`, plus la politique et la
+    ///   portée en clair (`x-this-rs-authz-policy`, `x-this-rs-authz-scope`) — un
+    ///   reverse-proxy peut donc les compter ;
+    /// * quand les journaux sont propres, on arme avec `with_authorization()`.
+    pub fn authorization_report_only(mut self) -> Self {
+        self.authorize = true;
+        self.authorize_report_only = true;
+        tracing::warn!(
+            "authorization in REPORT-ONLY mode — denials are computed, logged and \
+             published, but requests are NOT blocked"
+        );
+        self
+    }
+
+    /// **Fournit le mappage d'identité** de l'application, pour les politiques
+    /// `perm:` (IAM matérialisé).
+    ///
+    /// Le mappage par défaut est le modèle de this-rs (`User`/`Owner` →
+    /// `(user_id, tenant_id)`, `Service` → `(service_name, tenant_id)`, `Admin` →
+    /// `(admin_id, "global")`). Un projet plus ancien nomme ses identités
+    /// autrement : il fournit sa fonction, et l'IAM natif s'applique à **ses**
+    /// principaux et à **ses** portées — sans réécrire son authentification.
+    ///
+    /// ```rust,ignore
+    /// let host = ServerBuilder::new()
+    ///     .with_obrain_store(store)
+    ///     .with_principal_mapping(|ctx| match ctx {
+    ///         AuthContext::User { user_id, tenant_id, .. } =>
+    ///             Some((format!("account:{user_id}"), format!("org:{tenant_id}"))),
+    ///         _ => None,
+    ///     })
+    ///     .build_host()?;
+    /// ```
+    pub fn with_principal_mapping<F>(mut self, mapping: F) -> Self
+    where
+        F: Fn(&crate::core::auth::AuthContext) -> Option<(String, String)> + Send + Sync + 'static,
+    {
+        self.principal_mapping = Some(Arc::new(mapping));
         self
     }
 
@@ -437,7 +496,33 @@ impl ServerBuilder {
             merged_config.auth = Some(auth_config);
         }
 
-        // Extract link service
+        // Le service de liens : celui fourni, sinon — quand un store obrain est
+        // branché — le service obrain. **C'est ce qui rend le branchement d'un
+        // store réellement « clé en main »** : sans ce repli, attacher obrain
+        // échouait sur « LinkService is required », une exigence qui n'a rien à
+        // voir avec ce que l'appelant demandait.
+        #[cfg(feature = "obrain")]
+        let link_service = match self.link_service.take() {
+            Some(service) => service,
+            None => match self.graph_store.as_ref() {
+                Some(store) => {
+                    tracing::info!(
+                        "aucun LinkService fourni : service de liens obrain attaché par défaut \
+                         (le store est déjà là)"
+                    );
+                    Arc::new(crate::storage::ObrainLinkService::new(Arc::clone(store)))
+                        as Arc<dyn LinkService>
+                }
+                None => {
+                    return Err(anyhow::anyhow!(
+                        "LinkService is required. Call .with_link_service() — ou branchez un \
+                         store obrain avec .with_obrain_store()"
+                    ));
+                }
+            },
+        };
+
+        #[cfg(not(feature = "obrain"))]
         let link_service = self
             .link_service
             .take()
@@ -494,6 +579,8 @@ impl ServerBuilder {
         // `true` posé à la construction de l'hôte — un service qui se croyait
         // ouvert refusait ses clients.
         host.authorize = self.authorize;
+        host.authorize_report_only = self.authorize_report_only;
+        host.principal_mapping = self.principal_mapping.clone();
 
         // Attach the obrain graph handle if one was provided.
         //
