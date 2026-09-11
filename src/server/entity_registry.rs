@@ -65,6 +65,30 @@ impl EntityRegistry {
     pub fn entity_types(&self) -> Vec<&str> {
         self.descriptors.keys().map(|s| s.as_str()).collect()
     }
+
+    /// Les couples `(type d'entité, pluriel)` des descripteurs enregistrés.
+    ///
+    /// C'est la jointure dont dépend l'**application des politiques** : les
+    /// routes qui existent vraiment viennent des descripteurs (leur `plural()`),
+    /// et la politique vient de la configuration (par type d'entité). Sans cette
+    /// table, un point d'application ne pourrait deviner ni l'un ni l'autre.
+    pub fn entity_plurals(&self) -> Vec<(String, String)> {
+        let mut out: Vec<(String, String)> = self
+            .descriptors
+            .values()
+            .map(|d| (d.entity_type().to_string(), d.plural().to_string()))
+            .collect();
+        out.sort();
+        out
+    }
+
+    /// Le type d'entité d'un pluriel de route, s'il est enregistré.
+    pub fn entity_type_for_plural(&self, plural: &str) -> Option<&str> {
+        self.descriptors
+            .values()
+            .find(|d| d.plural() == plural)
+            .map(|d| d.entity_type())
+    }
 }
 
 #[cfg(test)]

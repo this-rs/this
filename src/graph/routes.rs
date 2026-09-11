@@ -1,0 +1,768 @@
+//! Publication REST du relief d'obrain.
+//!
+//! Trois points d'entrée, montés par `RestExposure` **uniquement** quand un
+//! `ObrainStore` est attaché au `ServerHost` :
+//!
+//! | Route | Contenu |
+//! |---|---|
+//! | `GET /graph` | le document complet ([`Relief`]) — `?counts=true` ajoute les compteurs de simplexes (balayage complet, opt-in) |
+//! | `GET /graph/procedures` | la surface d'appel : procédures introspectées + familles déclarées + pièges |
+//! | `GET /graph/spaces` | l'espace actif et les espaces connus |
+//!
+//! Aucune de ces routes n'écrit, et aucune ne rend d'erreur pour un fait
+//! simplement indisponible : c'est le contrat du document (cf. `relief.rs`).
+
+use std::sync::Arc;
+
+use axum::extract::{Path, Query, State};
+use axum::http::StatusCode;
+use axum::response::{IntoResponse, Response};
+use axum::routing::get;
+use axum::{Json, Router};
+use serde::{Deserialize, Serialize};
+use serde_json::json;
+use uuid::Uuid;
+
+use crate::core::identity::{IdentityRegistry, MotiveSpec};
+use crate::graph::relief::{FamilySpec, ProcedureSpec, Relief, ReliefOptions, Trap};
+use crate::storage::ObrainStore;
+use crate::storage::obrain_identity::IdentityReport;
+
+/// État partagé des routes de relief.
+#[derive(Clone)]
+pub struct GraphState {
+    /// Le store obrain dont on publie le relief.
+    pub store: Arc<ObrainStore>,
+    /// Comment les entités sont nommées, **quel que soit le moteur**.
+    ///
+    /// C'est ce registre qui décide si une base écrite par un autre outil
+    /// (propriétés plates, sans `_uuid`) est lisible ou non.
+    pub identity: Arc<IdentityRegistry>,
+}
+
+/// Construit les routes du relief.
+///
+/// Fusionnées telles quelles dans le routeur REST — elles n'installent aucun
+/// fallback, donc `Router::merge` reste sûr.
+pub fn graph_routes(state: GraphState) -> Router {
+    Router::new()
+        .route("/graph", get(relief_handler))
+        .route("/graph/procedures", get(procedures_handler))
+        .route("/graph/spaces", get(spaces_handler))
+        .route("/graph/identity", get(identity_handler))
+        .route("/graph/identity/{id}", get(identity_get_handler))
+        .with_state(state)
+}
+
+/// Paramètres de `GET /graph`.
+#[derive(Debug, Default, Deserialize)]
+struct ReliefQuery {
+    /// Calculer les compteurs de simplexes — **balayage complet**, opt-in.
+    #[serde(default)]
+    counts: bool,
+}
+
+/// `GET /graph` — le document de relief.
+async fn relief_handler(State(state): State<GraphState>, Query(q): Query<ReliefQuery>) -> Response {
+    let opts = ReliefOptions {
+        include_counts: q.counts,
+    };
+    match describe(state.store, opts).await {
+        Ok(relief) => Json(relief).into_response(),
+        Err(e) => join_error(e),
+    }
+}
+
+/// `GET /graph/procedures` — la surface d'appel.
+///
+/// Sépare explicitement ce qui est **introspecté** (le registre du moteur) de
+/// ce qui est **déclaré** (les familles de dispatch qui n'y figurent pas), et
+/// joint les pièges connus : un client qui découvre la surface par cette route
+/// n'a pas besoin d'aller les chercher ailleurs.
+async fn procedures_handler(State(state): State<GraphState>) -> Response {
+    match describe(state.store, ReliefOptions::default()).await {
+        Ok(relief) => Json(CallSurface {
+            procedures: relief.procedures,
+            families: relief.families,
+            traps: relief.traps,
+            notes: relief.notes,
+        })
+        .into_response(),
+        Err(e) => join_error(e),
+    }
+}
+
+/// `GET /graph/spaces` — espace actif et espaces connus.
+async fn spaces_handler(State(state): State<GraphState>) -> Response {
+    match describe(state.store, ReliefOptions::default()).await {
+        Ok(relief) => Json(relief.space).into_response(),
+        Err(e) => join_error(e),
+    }
+}
+
+/// La surface d'appel, telle que publiée par `GET /graph/procedures`.
+#[derive(Debug, Serialize)]
+struct CallSurface {
+    /// Procédures du registre — introspectées.
+    procedures: Vec<ProcedureSpec>,
+    /// Familles hors registre — déclarées.
+    families: Vec<FamilySpec>,
+    /// Limites connues, adossées à une preuve.
+    traps: Vec<Trap>,
+    /// Notes de lecture.
+    notes: Vec<String>,
+}
+
+/// Décrit le relief hors du thread async.
+///
+/// `Relief::describe` interroge le moteur de façon synchrone — et avec
+/// `include_counts`, il **balaye la zone simplex entière**. Le faire sur le
+/// réacteur bloquerait les autres requêtes ; on le pousse donc sur le pool
+/// bloquant.
+async fn describe(
+    store: Arc<ObrainStore>,
+    opts: ReliefOptions,
+) -> Result<Relief, tokio::task::JoinError> {
+    tokio::task::spawn_blocking(move || Relief::describe(&store, opts)).await
+}
+
+/// `Relief::describe` ne rend jamais d'erreur métier : la seule issue d'échec
+/// est la mort de la tâche bloquante (panique). On la rapporte telle quelle.
+fn join_error(e: tokio::task::JoinError) -> Response {
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Json(json!({ "error": format!("relief introspection task failed: {e}") })),
+    )
+        .into_response()
+}
+
+// ── Identité canonique ────────────────────────────────────────────────
+
+/// Bornes du comptage exposé par HTTP.
+///
+/// Le balayage complet d'un store réel se compte en **minutes** (mesuré :
+/// 1 m 53 s sur 1,55 M de nœuds). Il n'est donc **jamais** servi : la route
+/// borne, et publie `truncated` quand la borne mord.
+const IDENTITY_COUNT_MAX_PER_LABEL: usize = 2_000;
+const IDENTITY_COUNT_MAX_TOTAL: usize = 20_000;
+
+/// Paramètres de `GET /graph/identity`.
+#[derive(Debug, Default, Deserialize)]
+struct IdentityQuery {
+    /// Compter les entités — **balayage borné**, opt-in.
+    #[serde(default)]
+    counts: bool,
+}
+
+/// Ce que la route publie : une **déclaration**, et des compteurs sur demande.
+#[derive(Debug, Serialize)]
+struct IdentityDoc {
+    /// Identifiant de schéma du document.
+    schema: String,
+    /// Schéma d'identité en vigueur.
+    scheme: String,
+    /// Espace du store au moment de la réponse.
+    space: Option<String>,
+    /// Repli en vigueur (voir `Fallback`).
+    fallback: crate::core::identity::Fallback,
+    /// La chaîne de motifs, dans l'ordre, avec les propriétés examinées.
+    motives: Vec<MotiveSpec>,
+    /// Labels vus par le moteur (`all_labels()`).
+    labels: Vec<String>,
+    /// Pourquoi la liste de labels est vide, le cas échéant.
+    labels_error: Option<String>,
+    /// Entités actuellement indexées (index en mémoire).
+    index_len: usize,
+    /// Espace de l'index.
+    index_space: Option<String>,
+    /// Le rapport de comptage — présent seulement si `?counts=true`.
+    counts: Option<IdentityReport>,
+    /// Bornes appliquées au comptage (publiées : le client doit pouvoir juger).
+    count_bounds: CountBounds,
+    /// Limites connues, adossées à une preuve.
+    traps: Vec<Trap>,
+    /// Notes de lecture.
+    notes: Vec<String>,
+}
+
+/// Les bornes du comptage, publiées.
+#[derive(Debug, Serialize)]
+struct CountBounds {
+    /// Plafond par label.
+    max_per_label: usize,
+    /// Plafond global.
+    max_total: usize,
+    /// Le balayage complet est-il possible ? (non : il se compte en minutes)
+    full_scan_served: bool,
+}
+
+/// `GET /graph/identity` — la déclaration d'identité, et les compteurs sur demande.
+async fn identity_handler(
+    State(state): State<GraphState>,
+    Query(q): Query<IdentityQuery>,
+) -> Response {
+    let store = state.store.clone();
+    let registry = state.identity.clone();
+    let with_counts = q.counts;
+
+    let doc = tokio::task::spawn_blocking(move || {
+        let labels = crate::storage::obrain_identity::discover_labels(&store);
+        // Une liste vide ne se lit PAS « aucune entité » : l'API du moteur ne
+        // permet pas de distinguer « store vide » de « backend non
+        // introspectable » (le trait rend `Vec::new()` par défaut). On publie
+        // l'ambiguïté au lieu de trancher à tort.
+        let labels_error = labels.is_empty().then(|| {
+            "aucun label rendu par le moteur : store vide OU introspection indisponible — les \
+             deux cas sont INDISCERNABLES par l'API actuelle"
+                .to_string()
+        });
+
+        let counts = with_counts.then(|| {
+            store.rebuild_identity_index_capped(
+                &registry,
+                IDENTITY_COUNT_MAX_PER_LABEL,
+                IDENTITY_COUNT_MAX_TOTAL,
+            )
+        });
+
+        let mut notes = vec![
+            "L'index d'identité est en mémoire et REPART DE ZÉRO à chaque ouverture du store, \
+             ainsi qu'à chaque bascule d'espace (`use_graph`/`reset_graph`) : les deux espaces \
+             allouent leurs identifiants internes à partir de 1 et ne peuvent pas partager un index."
+                .to_string(),
+            "Une identité dérivée est un uuid de VERSION 8 : elle est reconnaissable, et ne peut \
+             pas être confondue avec un uuid v4 écrit par la convention `_uuid`/`_data`."
+                .to_string(),
+        ];
+        if with_counts {
+            notes.push(format!(
+                "Comptage borné à {IDENTITY_COUNT_MAX_PER_LABEL} nœuds par label et \
+                 {IDENTITY_COUNT_MAX_TOTAL} au total. Le balayage complet d'une base réelle se \
+                 compte en minutes : utiliser l'outil `adopt_obrain_base`, pas cette route."
+            ));
+        } else {
+            notes.push(
+                "Comptage non demandé : `counts` est absent, ce qui ne signifie PAS « aucune \
+                 entité ». Ajouter `?counts=true` pour un comptage borné."
+                    .to_string(),
+            );
+        }
+
+        IdentityDoc {
+            schema: "this-rs/graph-identity/1".to_string(),
+            scheme: crate::core::identity::ENTITY_ID_SCHEME.to_string(),
+            space: store.space(),
+            fallback: registry.fallback(),
+            motives: registry.motives(),
+            labels,
+            labels_error,
+            index_len: store.identity_len(),
+            index_space: store.identity_space(),
+            counts,
+            count_bounds: CountBounds {
+                max_per_label: IDENTITY_COUNT_MAX_PER_LABEL,
+                max_total: IDENTITY_COUNT_MAX_TOTAL,
+                full_scan_served: false,
+            },
+            traps: identity_traps(),
+            notes,
+        }
+    })
+    .await;
+
+    match doc {
+        Ok(doc) => Json(doc).into_response(),
+        Err(e) => join_error(e),
+    }
+}
+
+/// `GET /graph/identity/{id}` — résout une identité **et publie de quoi la vérifier**.
+///
+/// La réponse porte `canonical_bytes_hex` : les octets exactement hachés. Un
+/// tiers peut donc **recalculer** l'identifiant et vérifier qu'il correspond,
+/// sans faire confiance à this-rs. C'est la définition opérationnelle de « la
+/// même entité quel que soit le moteur ».
+async fn identity_get_handler(State(state): State<GraphState>, Path(id): Path<String>) -> Response {
+    let Ok(uuid) = Uuid::parse_str(&id) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": format!("identifiant illisible : {id:?}"),
+                "hint": "un identifiant est un uuid ; les identités dérivées sont en version 8                          (voir GET /graph/identity)"
+            })),
+        )
+            .into_response();
+    };
+
+    let store = state.store.clone();
+    let registry = state.identity.clone();
+    let resolved =
+        tokio::task::spawn_blocking(move || store.resolve_identity(&registry, &uuid)).await;
+
+    match resolved {
+        Ok(Ok(Some(entity))) => Json(json!({
+            "id": entity.id.to_string(),
+            "scheme": crate::core::identity::ENTITY_ID_SCHEME,
+            "provenance": entity.origin,
+            "motive": entity.motive,
+            "label": entity.label,
+            "entity_type": entity.entity_type,
+            "name": entity.name,
+            "key": entity.key,
+            // Les octets hachés, publiés : un tiers recalcule et vérifie.
+            "canonical_bytes_hex": entity.key.canonical_hex(),
+            "data": entity.data,
+        }))
+        .into_response(),
+        Ok(Ok(None)) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({
+                "error": "identité inconnue de l'index",
+                "hint": "l'index est en mémoire et se reconstruit à la demande : appeler                          GET /graph/identity?counts=true (borné) ou l'outil adopt_obrain_base                          pour un balayage complet hors requête"
+            })),
+        )
+            .into_response(),
+        Ok(Err(e)) => (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
+        Err(e) => join_error(e),
+    }
+}
+
+/// Les limites connues de l'identité, chacune adossée à une preuve.
+fn identity_traps() -> Vec<Trap> {
+    vec![
+        Trap {
+            id: "derived-ids-are-permanent".to_string(),
+            statement: "Un identifiant dérivé est une clé PERMANENTE : il est fonction pure de                         (espace, label, nom de propriété, valeur). Renommer un `qualified_name`                         change l'identité — et donc les liens, les références et les empreintes                         de journal qui pointaient dessus."
+                .to_string(),
+            evidence: "this/src/core/identity.rs — ENTITY_ID_SCHEME, vecteurs d'or gelés".to_string(),
+        },
+        Trap {
+            id: "index-is-in-memory-and-scoped".to_string(),
+            statement: "L'index d'identité vit en mémoire, repart de zéro à chaque ouverture et                         est purgé à chaque bascule d'espace."
+                .to_string(),
+            evidence: "this/src/storage/obrain.rs — invalidate_caches, IdentityIndex".to_string(),
+        },
+        Trap {
+            id: "labels-introspection-is-ambiguous".to_string(),
+            statement: "`all_labels()` ne distingue pas « store vide » de « backend non                         introspectable » : une liste vide n'est jamais « aucune entité »."
+                .to_string(),
+            evidence: "obrain-core/src/graph/traits.rs:552 (défaut `Vec::new()`) ;                        obrain-substrate/src/store.rs (override)"
+                .to_string(),
+        },
+        Trap {
+            id: "content-digest-is-not-a-primary-key".to_string(),
+            statement: "Le repli par digest de contenu est une clé de DÉDUPLICATION à la lecture,                         pas une clé primaire : il est désactivé par défaut, et sa liste de                         propriétés volatiles exclues est publiée par les motifs."
+                .to_string(),
+            evidence: "this/src/core/identity.rs — ContentDigestProjection, DEFAULT_VOLATILE"
+                .to_string(),
+        },
+    ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::Request;
+    use tower::ServiceExt;
+
+    fn app() -> Router {
+        graph_routes(GraphState {
+            store: ObrainStore::new_in_memory(),
+            identity: Arc::new(crate::core::identity::IdentityRegistry::obrain_default()),
+        })
+    }
+
+    async fn body_json(response: Response) -> serde_json::Value {
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("corps");
+        serde_json::from_slice(&bytes).expect("json")
+    }
+
+    #[tokio::test]
+    async fn get_graph_publishes_the_relief() {
+        let response = app()
+            .oneshot(
+                Request::builder()
+                    .uri("/graph")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let json = body_json(response).await;
+        assert_eq!(json["schema"], crate::graph::relief::RELIEF_SCHEMA);
+        assert!(
+            json["procedures"].as_array().is_some_and(|p| !p.is_empty()),
+            "le relief doit publier les procédures introspectées du registre"
+        );
+        assert!(
+            json["families"].as_array().is_some_and(|f| !f.is_empty()),
+            "les familles déclarées doivent être publiées"
+        );
+        assert!(json["traps"].as_array().is_some_and(|t| !t.is_empty()));
+        // Ce store EST substrat-backed (T17 : une config mémoire ouvre un
+        // substrat temporaire) — mais ses passes simpliciales ne sont pas
+        // configurées, et le document doit le distinguer.
+        assert_eq!(json["engine"]["substrate"], true);
+        assert_eq!(json["engine"]["simplex"]["configured"], false);
+    }
+
+    #[tokio::test]
+    async fn counts_are_opt_in_and_explained_when_impossible() {
+        // Sans `?counts=true`, aucun compteur n'est calculé.
+        let response = app()
+            .oneshot(
+                Request::builder()
+                    .uri("/graph")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let json = body_json(response).await;
+        assert!(json["engine"]["simplex"]["counts"].is_null());
+
+        // Avec `?counts=true` sur un store en mémoire, le compteur reste absent
+        // mais la RAISON est publiée (jamais un 0 ambigu).
+        let response = app()
+            .oneshot(
+                Request::builder()
+                    .uri("/graph?counts=true")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let json = body_json(response).await;
+        assert!(json["engine"]["simplex"]["counts"].is_null());
+        assert!(
+            json["engine"]["simplex"]["counts_error"]
+                .as_str()
+                .is_some_and(|e| !e.is_empty()),
+            "l'absence de compteur doit être expliquée"
+        );
+    }
+
+    #[tokio::test]
+    async fn procedures_route_separates_introspected_from_declared() {
+        let response = app()
+            .oneshot(
+                Request::builder()
+                    .uri("/graph/procedures")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let json = body_json(response).await;
+
+        let procedures = json["procedures"].as_array().expect("procédures");
+        assert!(procedures.iter().all(|p| p["origin"] == "introspected"));
+        let families = json["families"].as_array().expect("familles");
+        assert!(families.iter().all(|f| f["origin"] == "declared"));
+    }
+
+    #[tokio::test]
+    async fn spaces_route_reports_the_default_graph() {
+        let response = app()
+            .oneshot(
+                Request::builder()
+                    .uri("/graph/spaces")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let json = body_json(response).await;
+        assert!(json["current"].is_null(), "aucun espace actif par défaut");
+        assert!(json["graphs"].as_array().is_some_and(|g| g.is_empty()));
+    }
+
+    // ── Auto-câblage par RestExposure ────────────────────────────────────
+    //
+    // Les tests ci-dessus vérifient le groupe de routes ; ceux-ci vérifient
+    // qu'il est bien MONTÉ — et monté seulement quand il y a un store. C'est
+    // la différence entre « la route existe » et « la route est servie ».
+
+    #[tokio::test]
+    async fn rest_exposure_auto_wires_graph_routes() {
+        use crate::server::RestExposure;
+        use crate::server::host::ServerHost;
+
+        let host =
+            Arc::new(ServerHost::minimal_for_test().with_graph_store(ObrainStore::new_in_memory()));
+        let router = RestExposure::build_router(host, vec![]).expect("routeur REST");
+
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .uri("/graph")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let json = body_json(response).await;
+        assert_eq!(json["schema"], crate::graph::relief::RELIEF_SCHEMA);
+    }
+
+    #[tokio::test]
+    async fn graph_routes_are_absent_without_a_store() {
+        use crate::server::RestExposure;
+        use crate::server::host::ServerHost;
+
+        let host = Arc::new(ServerHost::minimal_for_test());
+        let router = RestExposure::build_router(host, vec![]).expect("routeur REST");
+
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .uri("/graph")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        // Le routeur REST répond 400 sur un chemin inconnu (son handler de
+        // liens attend un paramètre de chemin) — peu importe le code exact :
+        // ce qui compte est qu'AUCUN relief ne soit servi.
+        assert_ne!(
+            response.status(),
+            StatusCode::OK,
+            "sans handle obrain, pas de relief partiel"
+        );
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("corps");
+        assert!(
+            !String::from_utf8_lossy(&body).contains(crate::graph::relief::RELIEF_SCHEMA),
+            "aucune route /graph ne doit exister sans store attaché"
+        );
+    }
+
+    // ── Identité canonique ───────────────────────────────────────────────
+
+    /// Un store avec **un nœud à propriétés plates** (comme une base écrite par
+    /// un autre outil), indexé par identité dérivée.
+    fn app_with_flat_node() -> (Router, String) {
+        let store = ObrainStore::new_in_memory();
+        {
+            let session = store.session();
+            session.create_node_with_props(
+                &["Page"],
+                [(
+                    "qualified_name",
+                    obrain_common::types::Value::from("entity:mp_hodge"),
+                )],
+            );
+        }
+        let registry = crate::core::identity::IdentityRegistry::obrain_default();
+        let report = store.rebuild_identity_index(&registry);
+        assert_eq!(report.total_resolved, 1, "le nœud plat doit être résolu");
+
+        // L'identifiant se recalcule depuis la clé canonique — c'est justement
+        // ce qu'un tiers peut refaire.
+        let key = crate::core::identity::EntityKey::new(
+            None,
+            "Page",
+            crate::core::identity::Qualifier::Natural {
+                property: "qualified_name".into(),
+                value: "entity:mp_hodge".into(),
+            },
+        )
+        .expect("clé");
+        let id = key.uuid().to_string();
+
+        let router = graph_routes(GraphState {
+            store,
+            identity: Arc::new(registry),
+        });
+        (router, id)
+    }
+
+    #[tokio::test]
+    async fn identity_document_declares_the_chain_without_counting() {
+        let response = app()
+            .oneshot(
+                Request::builder()
+                    .uri("/graph/identity")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let json = body_json(response).await;
+        assert_eq!(json["schema"], "this-rs/graph-identity/1");
+        assert_eq!(
+            json["scheme"],
+            crate::core::identity::ENTITY_ID_SCHEME,
+            "le schéma d'identité doit être publié tel quel"
+        );
+        assert_eq!(json["motives"][0]["motive"], "convention:_uuid/_data");
+        assert_eq!(json["motives"][0]["rank"], 0);
+        assert!(
+            json["counts"].is_null(),
+            "sans ?counts=true, aucun comptage — et surtout pas un zéro"
+        );
+        assert_eq!(json["count_bounds"]["full_scan_served"], false);
+        assert!(json["traps"].as_array().is_some_and(|t| !t.is_empty()));
+        // Le store est vide : l'ambiguïté doit être publiée, pas un zéro muet.
+        assert!(
+            json["labels_error"]
+                .as_str()
+                .is_some_and(|e| e.contains("INDISCERNABLES")),
+            "store vide : l'ambiguïté doit être dite"
+        );
+    }
+
+    #[tokio::test]
+    async fn identity_counts_are_bounded_and_opt_in() {
+        let (router, _) = app_with_flat_node();
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .uri("/graph/identity?counts=true")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let json = body_json(response).await;
+        let counts = &json["counts"];
+        assert_eq!(counts["total_resolved"], 1);
+        assert_eq!(counts["labels"][0]["by_derivation"], 1);
+        assert_eq!(counts["labels"][0]["by_convention"], 0);
+        assert_eq!(counts["truncated"], false);
+        assert_eq!(
+            json["count_bounds"]["max_per_label"],
+            IDENTITY_COUNT_MAX_PER_LABEL
+        );
+        assert_eq!(json["index_len"], 1);
+    }
+
+    /// La pièce maîtresse : la réponse porte de quoi **recalculer** l'identifiant.
+    #[tokio::test]
+    async fn identity_lookup_publishes_the_bytes_a_third_party_can_recheck() {
+        let (router, id) = app_with_flat_node();
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/graph/identity/{id}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let json = body_json(response).await;
+        assert_eq!(json["id"], id);
+        assert_eq!(json["provenance"], "derived");
+        assert_eq!(json["motive"], "derived:flat-property");
+        assert_eq!(json["label"], "Page");
+        assert_eq!(json["key"]["qualifier"]["kind"], "natural");
+        assert_eq!(json["key"]["qualifier"]["property"], "qualified_name");
+
+        // Vérification indépendante : on recalcule l'id depuis les octets publiés.
+        let hex = json["canonical_bytes_hex"]
+            .as_str()
+            .expect("octets publiés");
+        assert!(!hex.is_empty() && hex.len() % 2 == 0);
+        let key = crate::core::identity::EntityKey::new(
+            None,
+            "Page",
+            crate::core::identity::Qualifier::Natural {
+                property: "qualified_name".into(),
+                value: "entity:mp_hodge".into(),
+            },
+        )
+        .expect("clé");
+        assert_eq!(
+            key.canonical_hex(),
+            hex,
+            "les octets publiés doivent être EXACTEMENT ceux qui sont hachés"
+        );
+        assert_eq!(key.uuid().to_string(), id);
+    }
+
+    #[tokio::test]
+    async fn identity_lookup_explains_a_miss_and_refuses_garbage() {
+        let (router, _) = app_with_flat_node();
+
+        // Inconnue de l'index : 404 AVEC la marche à suivre.
+        let unknown = Uuid::new_v4().to_string();
+        let response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/graph/identity/{unknown}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let json = body_json(response).await;
+        assert!(
+            json["hint"]
+                .as_str()
+                .is_some_and(|h| h.contains("counts=true")),
+            "un 404 doit dire comment peupler l'index"
+        );
+
+        // Identifiant illisible : 400, pas 404 (ce n'est pas la même chose).
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .uri("/graph/identity/pas-un-uuid")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn rest_exposure_auto_wires_the_identity_routes() {
+        use crate::server::RestExposure;
+        use crate::server::host::ServerHost;
+
+        let host =
+            Arc::new(ServerHost::minimal_for_test().with_graph_store(ObrainStore::new_in_memory()));
+        let router = RestExposure::build_router(host, vec![]).expect("routeur REST");
+
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .uri("/graph/identity")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let json = body_json(response).await;
+        assert_eq!(json["schema"], "this-rs/graph-identity/1");
+    }
+}
