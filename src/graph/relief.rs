@@ -135,14 +135,54 @@ pub struct JournalRelief {
     pub transport_available: bool,
 }
 
-/// IAM matérialisé.
+/// IAM matérialisé — **et le contrat de données pour le lire sans this-rs**.
+///
+/// Un tableau de bord obrain, un harnais, n'importe quel programme qui parle
+/// obrain doit pouvoir lire l'état d'autorisation **sans lier this-rs** : les
+/// décisions sont des nœuds et des arêtes ordinaires. Cette section publie donc
+/// le schéma — labels, propriétés, arêtes, sens de chacun — au lieu de le
+/// laisser deviner par lecture du code.
+///
+/// Ce qui est publié est un **contrat** : les noms ci-dessous sont ceux que le
+/// framework écrit, et ils sont figés par des tests.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IamRelief {
+    /// Version du schéma des décisions ([`crate::storage::iam::IAM_SCHEMA`]).
+    pub schema: String,
     /// L'index de décision (`acl_key`) existe-t-il sur ce store ?
     ///
     /// C'est la preuve qu'une décision d'autorisation peut être lue **par
     /// index** au lieu d'être recalculée par traversée.
     pub acl_index: bool,
+    /// Nombre de décisions présentes (`Acl`), dans l'**espace actif**.
+    pub decisions: usize,
+    /// La propriété que l'application des politiques lit à chaque requête.
+    ///
+    /// Un tableau de bord qui veut montrer « ce que le framework regarde
+    /// réellement » lit celle-ci, pas la liste JSON.
+    pub hot_path_property: String,
+    /// Les labels que le framework écrit.
+    pub labels: Vec<IamSchemaEntry>,
+    /// Les propriétés d'un nœud de décision.
+    pub properties: Vec<IamSchemaEntry>,
+    /// Les arêtes du graphe d'administration.
+    pub edges: Vec<IamSchemaEntry>,
+    /// La frontière de confiance, en clair.
+    pub trust: Vec<String>,
+}
+
+/// Une entrée du contrat publié : un nom, ce qu'il veut dire, et **qui l'écrit**.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IamSchemaEntry {
+    /// Le nom écrit dans le store (label, propriété ou type d'arête).
+    pub name: String,
+    /// Sa forme ou ses extrémités (`text`, `json`, `int`, `Principal → Role`…).
+    pub form: String,
+    /// Ce qu'il signifie — et ce qu'un lecteur peut en conclure.
+    pub meaning: String,
+    /// `true` : le framework l'**écrit**. `false` : il le **lit** quand il est là
+    /// (c'est alors à l'application de le tenir).
+    pub written: bool,
 }
 
 /// Le relief complet, tel que publié.
@@ -170,6 +210,16 @@ pub struct Relief {
     pub traps: Vec<Trap>,
     /// Notes de lecture (provenance, features, coûts).
     pub notes: Vec<String>,
+}
+
+/// Une entrée du contrat IAM publié.
+fn entry(name: &str, form: &str, meaning: &str, written: bool) -> IamSchemaEntry {
+    IamSchemaEntry {
+        name: name.to_string(),
+        form: form.to_string(),
+        meaning: meaning.to_string(),
+        written,
+    }
 }
 
 /// Faits du moteur.
@@ -648,10 +698,113 @@ impl Relief {
                 durable_available: substrate,
                 transport_available: false,
             },
-            iam: IamRelief {
-                acl_index: store
-                    .db()
-                    .has_property_index(crate::storage::iam::ACL_KEY_PROP),
+            iam: {
+                use crate::storage::iam;
+                IamRelief {
+                    schema: iam::IAM_SCHEMA.to_string(),
+                    acl_index: store
+                        .db()
+                        .has_property_index(crate::storage::iam::ACL_KEY_PROP),
+                    // **Espace actif** : le comptage doit porter sur ce que le
+                    // lecteur voit, pas sur la racine.
+                    decisions: store.active_store().node_count_by_label(iam::ACL_LABEL),
+                    hot_path_property: iam::ACL_PERMS_BLOB_PROP.to_string(),
+                    labels: vec![
+                        entry(
+                            iam::ACL_LABEL,
+                            "nœud de décision",
+                            "un nœud par couple (principal, portée) : la décision matérialisée",
+                            true,
+                        ),
+                        entry(
+                            iam::PRINCIPAL_LABEL,
+                            "nœud",
+                            "le principal, pour la traversée et la traçabilité — il ne PORTE pas la décision",
+                            true,
+                        ),
+                        entry(
+                            "Role",
+                            "nœud",
+                            "un rôle nommé — LU si présent (la traversée de référence s'en sert), ÉCRIT par l'application si elle gère ses rôles en graphe",
+                            false,
+                        ),
+                        entry(
+                            "Permission",
+                            "nœud",
+                            "une permission nommée — même contrat que `Role`",
+                            false,
+                        ),
+                    ],
+                    properties: vec![
+                        entry(
+                            iam::ACL_KEY_PROP,
+                            "text",
+                            "clé du couple (portée, principal), jointe par un US (0x1F) — indexée",
+                            true,
+                        ),
+                        entry(
+                            iam::ACL_SCOPE_PROP,
+                            "text",
+                            "la portée (locataire, organisation…)",
+                            true,
+                        ),
+                        entry(
+                            iam::ACL_PRINCIPAL_PROP,
+                            "text",
+                            "le principal",
+                            true,
+                        ),
+                        entry(
+                            iam::ACL_ROLES_PROP,
+                            "json (liste de chaînes)",
+                            "les rôles effectifs, dédupliqués et triés",
+                            true,
+                        ),
+                        entry(
+                            iam::ACL_PERMS_PROP,
+                            "json (liste de chaînes)",
+                            "les permissions effectives — la forme PUBLIÉE, à lire pour afficher",
+                            true,
+                        ),
+                        entry(
+                            iam::ACL_PERMS_BLOB_PROP,
+                            "text (permissions encadrées par des US)",
+                            "la forme du chemin chaud : ce que l'application des politiques lit à chaque requête",
+                            true,
+                        ),
+                        entry(
+                            iam::ACL_EPOCH_PROP,
+                            "int",
+                            "l'époque, strictement croissante : l'invalidation ne recule jamais",
+                            true,
+                        ),
+                        entry(
+                            iam::ACL_DIGEST_PROP,
+                            "text (empreinte du contenu)",
+                            "empreinte des rôles et permissions ; vidée à l'invalidation",
+                            true,
+                        ),
+                    ],
+                    edges: vec![
+                        entry(
+                            "HAS_ROLE",
+                            "Principal → Role",
+                            "LU si présent : c'est par ces arêtes que la traversée de référence calcule les permissions. La décision matérialisée, elle, ne les écrit pas — elle porte les rôles en propriété",
+                            false,
+                        ),
+                        entry(
+                            "GRANTS",
+                            "Role → Permission",
+                            "LU si présent : ce que le rôle accorde",
+                            false,
+                        ),
+                    ],
+                    trust: vec![
+                        "Qui peut écrire dans le store peut écrire une décision, donc accorder des permissions : la protection est la maîtrise du store et le bail d'écriture, pas une signature.".to_string(),
+                        "Deux nœuds portant la même `acl_key` rendent la décision ambiguë : elle est REFUSÉE, jamais résolue par l'ordre de l'index.".to_string(),
+                        "Lire ce graphe demande un droit de lecture sur le store : la liste des décisions dit qui peut quoi.".to_string(),
+                    ],
+                }
             },
             procedures,
             families: describe_families(),

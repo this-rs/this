@@ -43,7 +43,7 @@
 //! La trame fait **128 octets**, commence par `THISLSE1`, porte une version et un
 //! **CRC32**, et l'époque est **dupliquée en clair** à offset fixe pour que la
 //! réparation d'une trame corrompue reste possible — mais **explicitement**
-//! ([`LeaseRecord::decode_lossy_epoch`]), jamais en silence.
+//! ([`LeaseRecord::decode_lossy_epoch`](crate::storage::writer_lease::LeaseRecord::decode_lossy_epoch)), jamais en silence.
 
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -698,7 +698,7 @@ impl FileAuthority {
     /// dans celui-ci — et **refuse** aussi si la trame sur le disque est
     /// corrompue : repartir de zéro ferait *reculer* l'époque, ce qui lèverait
     /// un fencing en cours. La réparation est explicite
-    /// ([`LeaseRecord::decode_lossy_epoch`]).
+    /// ([`LeaseRecord::decode_lossy_epoch`](crate::storage::writer_lease::LeaseRecord::decode_lossy_epoch)).
     pub fn acquire(
         &self,
         shard: &ShardId,

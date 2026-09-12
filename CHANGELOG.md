@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Integration
+- **Consumer contract** — three ways to integrate the stack into another program (the obrain Dashboard, a harness, an application), each independent of the others: as a **library** (`this::storage::{Iam, AclStamp, GraphBackend, ObrainStore}`, re-exported so no deep paths are needed), over **HTTP** (`GET /graph`), or through **obrain alone**. See `docs/integration-consommateurs.md`.
+- **The relief now publishes the IAM data contract**: schema version, decision count (active space), the property the enforcement actually reads (`acl_perms_blob`), and the labels, properties and edges with their meaning and a `written` flag — `true` when the framework writes it, `false` when it only reads it if present. A consumer no longer has to read framework source to know what it may rely on.
+- **`ObrainStore::check_write` is public**: a program that writes through its own path (a dashboard in write mode, a migration tool, a job) must be able to honour the write lease. It was `pub(crate)`, so the fence could not be respected by anyone outside the crate.
+- **Documentation is warning-free**: `RUSTDOCFLAGS="-D warnings" cargo doc -p this-rs --no-deps` passes with and without `--all-features` — 14 defects fixed (links broken by module-declaration site resolution, links from public documentation to private items, a bare URL). The module docs no longer depend on where they are declared.
+- `tests/consumer_contract.rs` (8 tests) plays the role of an external program: it reads a decision through the public API, asks the hot-path question, opens a store **read-only** without taking the write lease, **reads the decisions with obrain alone** (no `Iam` type — the proof the data is not captive), discovers decisions by label, checks the published contract over HTTP, and enforces its own policies on its own router.
+
 ### Performance
 - **IAM hot path: 6.15 µs → 2.37 µs per authorised request (×2.6)**, measured. The hot path no longer builds a full `AclStamp` — roles, scope, principal and a **SHA-256 digest** — to answer a membership question: `Iam::allows(principal, scope, permission)` does one index lookup, **one** property read and a string scan. Permissions are additionally stored in a hot-path form (`acl_perms_blob`), and permissions containing a control character are refused at materialisation, so one permission cannot impersonate another.
 - `stamp_of` reads its seven fields through the engine's `get_node_property` ("without loading all properties") and `node_has_label`, instead of materialising the node and rebuilding a B-tree with allocated `String` keys: **4.52 µs → 2.88 µs**. The full decision follows: 4.12 → 3.23 µs.
