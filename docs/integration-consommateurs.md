@@ -178,6 +178,12 @@ Ce n'est pas une note de bas de page : c'est la question qui décide si vos
 | **GraphQL** | `/graphql`, `/graphql/playground`, `/graphql/schema`, `/graphql/ws` | **non** | le framework **refuse de la monter** si des politiques sont armées ; l'application doit accepter explicitement (`build_router_unenforced`) |
 | **gRPC** | le routeur tonic | **non** | même refus, même acceptation (`build_with_grpc_unenforced`) |
 | **WebSocket** | `/ws` | **non** | même refus, même acceptation |
+| **Frontend** | `/*` (repli) : assets, SPA, `/__dev/*` | **non** | c'est un **repli** : il n'est pas résolu par route, et surtout **`Frontend::attach` remplace le repli**. Appelé APRÈS vos couches, ni l'authentification ni l'autorisation ne voient le SPA ni `/__dev` (mesuré : `tests/frontend_surface.rs`). **Montez le repli avant d'appliquer les couches.** |
+| **Pont de commandes** | `/__dev`, `/__dev/command*` | **non** | **fermé par défaut** : il exécute la commande de reconstruction sur demande HTTP, et l'ouvrir demande `THIS_DEV_COMMANDS=true`. À réserver au développement local. |
+
+**Le framework ne pose aucune couche CORS** : cette politique appartient à
+l'application. Ne croyez pas être protégé — ou exposé — par quelque chose que
+vous n'avez pas écrit.
 
 **Pourquoi GraphQL/gRPC/WebSocket ne peuvent pas appliquer les politiques** :
 elles ne sont pas résolues par route. Le middleware REST lit le pluriel, la

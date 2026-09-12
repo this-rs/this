@@ -305,6 +305,20 @@ fn describe_surfaces() -> Vec<SurfaceRelief> {
             "aucune : un canal n'est pas une route",
             "même refus, même acceptation explicite (`build_router_unenforced`)",
         ),
+        declared(
+            "frontend",
+            &["/* (repli)", "assets, SPA, /__dev/*"],
+            false,
+            "aucune : c'est un repli, il n'est pas résolu par route",
+            "ATTENTION À L'ORDRE : `Frontend::attach(app)` remplace le repli, donc s'il est appelé APRÈS vos couches, ni l'authentification ni l'autorisation ne voient le SPA ni `/__dev` (mesuré : `tests/frontend_surface.rs`). Montez le repli AVANT d'appliquer les couches. Les fichiers statiques sont publics par nature",
+        ),
+        declared(
+            "dev_bridge",
+            &["/__dev", "/__dev/command*"],
+            false,
+            "aucune — et c'est un pont de COMMANDES : il exécute la commande de reconstruction sur demande HTTP",
+            "FERMÉ par défaut : `THIS_DEV_COMMANDS` doit valoir vrai pour l'ouvrir (auparavant `THIS_DEV=true` suffisait), et l'ouverture est journalisée en avertissement. À réserver au développement local",
+        ),
     ]
 }
 
