@@ -245,7 +245,8 @@ impl ObrainStore {
     /// avec leur propre portée d'identité (`graph_scope()`,
     /// `obrain-core/src/graph/traits.rs:1060`). Mais son contexte de graphe
     /// persistant (`ObrainDB::set_current_graph`) ne propage rien sur le chemin
-    /// substrat (cf. [`ObrainStore::session`], vérifié). this-rs porte donc
+    /// substrat (cf. `ObrainStore::session()`, privé — les consommateurs passent par la façade
+    /// `GraphBackend`, qui est cloisonnée par espace). this-rs porte donc
     /// l'espace lui-même et l'applique à chaque session.
     ///
     /// # Changement d'espace = invalidation du cache
@@ -376,7 +377,17 @@ impl ObrainStore {
     ///
     /// Un seul load atomique quand le fencing est armé ; un no-op sinon. C'est
     /// la garantie que le coût du fencing reste négligeable devant une écriture.
-    pub(crate) fn check_write(&self) -> Result<()> {
+    /// Vérifie le bail d'écriture : à appeler **avant** toute écriture menée
+    /// hors des services de données.
+    ///
+    /// Un programme qui écrit dans le store par ses propres moyens (un tableau de
+    /// bord en mode écriture, un outil de migration, un job) doit passer par ici
+    /// pour ne pas écrire dans le dos du détenteur du bail : c'est cette fonction
+    /// qui refuse un écrivain périmé.
+    ///
+    /// Fail-closed : sans bail, le comportement est celui d'avant (aucune
+    /// vérification) ; avec un bail, un écrivain périmé est **refusé**.
+    pub fn check_write(&self) -> Result<()> {
         let guard = self
             .lease
             .read()

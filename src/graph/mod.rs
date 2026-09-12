@@ -3,7 +3,7 @@
 //! # Le principe
 //!
 //! this-rs ne tient pas de catalogue du relief d'obrain : obrain le publie,
-//! this-rs le **lit** et le **republic**. [`relief::Relief::describe`] interroge
+//! this-rs le **lit** et le **republic**. [`Relief::describe`](crate::graph::relief::Relief::describe) interroge
 //! le moteur — registre des procédures, état du substrat, couche simpliciale,
 //! espaces — et rend un document sérialisable.
 //!
@@ -13,10 +13,10 @@
 //!
 //! # Ce que le document refuse de faire
 //!
-//! - Il **marque** chaque affirmation [`relief::Origin::Introspected`] ou
-//!   [`relief::Origin::Declared`]. Ce qui n'est pas introspectable est déclaré
+//! - Il **marque** chaque affirmation [`Origin::Introspected`](crate::graph::relief::Origin::Introspected) ou
+//!   [`Origin::Declared`](crate::graph::relief::Origin::Declared). Ce qui n'est pas introspectable est déclaré
 //!   comme tel — jamais présenté comme un fait lu.
-//! - Il **publie ses propres limites** ([`relief::Trap`]), chacune adossée à un
+//! - Il **publie ses propres limites** ([`Trap`](crate::graph::relief::Trap)), chacune adossée à un
 //!   `fichier:ligne` d'obrain.
 //! - Il ne rend **jamais** d'erreur pour un fait indisponible : un fait manquant
 //!   est un `false`/`None` **accompagné de sa raison**.
@@ -27,7 +27,7 @@
 //!
 //! # Publication
 //!
-//! [`routes::graph_routes`] expose le document en REST (`GET /graph`), monté
+//! [`graph_routes`](crate::graph::routes::graph_routes) expose le document en REST (`GET /graph`), monté
 //! automatiquement par `RestExposure` dès qu'un `ObrainStore` est attaché au
 //! `ServerHost` (voir `ServerHost::with_graph_store`).
 

@@ -208,7 +208,7 @@ fn default_refresh_ttl() -> u64 {
 /// OIDC provider configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OidcConfig {
-    /// OIDC discovery URL (e.g., https://auth.example.com/.well-known/openid-configuration)
+    /// OIDC discovery URL (e.g. <https://auth.example.com/.well-known/openid-configuration>)
     pub discovery_url: String,
 
     /// Expected audience

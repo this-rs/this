@@ -22,7 +22,7 @@
 //! qui échouait (« seq 7 attendu à l'index 15 »). Tout consommateur devait donc
 //! re-trier et dédupliquer **avant** de réparer les trous.
 //!
-//! [`ObrainJournalLog::read_from`] fait ce travail **ici**, et le fait toujours :
+//! [`ObrainJournalLog::read_from`](crate::events::log_obrain::ObrainJournalLog::read_from) fait ce travail **ici**, et le fait toujours :
 //! tri stable par `seq`, déduplication par `seq` (le premier gagne), et
 //! indication de troncature quand la borne de lecture mord. Aucun consommateur
 //! n'a plus à réapprendre la leçon.

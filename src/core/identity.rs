@@ -27,8 +27,8 @@
 //! 2. **Un `_uuid` illisible arrête la chaîne** ([`IdentityError::Malformed`],
 //!    distinct de [`IdentityError::NotApplicable`]) : re-cléer ici donnerait une
 //!    **seconde identité** à une entité qui en a déjà une.
-//! 3. **Un motif non branché se déclare.** [`ApiProjection`] et
-//!    [`ChainProjection`] rendent `Unresolvable { reason: "non implémenté" }` —
+//! 3. **Un motif non branché se déclare.** [`ApiProjection`](crate::core::identity::ApiProjection) et
+//!    [`ChainProjection`](crate::core::identity::ChainProjection) rendent `Unresolvable { reason: "non implémenté" }` —
 //!    jamais un silence, jamais un zéro (même doctrine que `graph::relief`).
 //!
 //! # Stabilité de l'identité dérivée

@@ -1,7 +1,7 @@
 //! Adaptateur obrain de l'identité canonique.
 //!
 //! Ce module est la moitié **I/O** de `crate::core::identity` : il transforme un
-//! nœud du moteur en [`NodeView`], balaie un store pour bâtir l'index
+//! nœud du moteur en [`NodeView`](crate::core::identity::NodeView), balaie un store pour bâtir l'index
 //! d'identité, et projette les entités. La moitié **pure** (encodage, motifs,
 //! chaîne de résolution) vit dans `core::identity` et se teste sans moteur.
 //!

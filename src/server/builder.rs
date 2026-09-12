@@ -238,7 +238,7 @@ impl ServerBuilder {
     /// Set how entities are identified, quel que soit le moteur qui les porte.
     ///
     /// Sans appel explicite, un hôte auquel un store obrain est attaché
-    /// auto-câble [`IdentityRegistry::obrain_default`] — convention `_uuid`/`_data`
+    /// auto-câble [`IdentityRegistry::obrain_default`](crate::core::identity::IdentityRegistry::obrain_default) — convention `_uuid`/`_data`
     /// **puis** propriétés plates. C'est ce qui permet de servir, par la même
     /// route, une base écrite par this-rs et une base écrite par un autre outil.
     pub fn with_identity_registry(
