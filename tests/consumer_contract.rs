@@ -458,6 +458,17 @@ async fn the_relief_publishes_which_surfaces_enforce_policies() {
         "le pont de commandes doit être publié comme fermé par défaut : {bridge}"
     );
 
+    // **La carte doit NOMMER les lectures publiées**, pas seulement une famille
+    // générique : `/graph…` ne dit pas qu'on peut descendre d'un cran. Cette
+    // assertion existe parce que la route multi-échelle a été ajoutée au code
+    // SANS l'être à la carte, en silence.
+    assert!(
+        rest["mounted_at"]
+            .as_array()
+            .is_some_and(|paths| paths.iter().any(|p| p == "/graph/hierarchy/{id}")),
+        "la carte doit nommer la vue multi-échelle : {rest}"
+    );
+
     // Et l'ensemble est cohérent : toute surface publiée dit ce qu'elle sert.
     for surface in surfaces {
         assert!(
@@ -467,6 +478,74 @@ async fn the_relief_publishes_which_surfaces_enforce_policies() {
             "une surface sans chemin publié n'informe personne : {surface}"
         );
     }
+}
+
+/// **Le relief publie la MATIÈRE du store**, pas seulement ses capacités :
+/// labels et leurs comptes, types d'arêtes et leurs comptes, clés de propriétés.
+/// C'est la première chose qu'on demande à une base, et elle manquait.
+#[tokio::test]
+async fn the_relief_publishes_the_shape_of_the_store() {
+    let store = ObrainStore::new_in_memory();
+    {
+        let session = store.db().session();
+        let a = session.create_node_with_props(
+            &["Group"],
+            [("name", obrain_common::types::Value::from("collectif"))],
+        );
+        let b = session.create_node_with_props(
+            &["Member"],
+            [("name", obrain_common::types::Value::from("moi"))],
+        );
+        session.create_node_with_props(
+            &["Member"],
+            [("name", obrain_common::types::Value::from("toi"))],
+        );
+        session.create_edge(a, b, "CONTAINS");
+        store.commit_wal().expect("commit");
+    }
+
+    let json = relief_json(std::sync::Arc::clone(&store)).await;
+    let shape = &json["store"];
+
+    assert_eq!(
+        shape["origin"], "introspected",
+        "la forme est LUE, pas déclarée"
+    );
+    assert_eq!(shape["nodes"], 3, "trois nœuds : {shape}");
+    assert_eq!(shape["edges"], 1, "une arête : {shape}");
+
+    let labels = shape["labels"].as_array().expect("labels");
+    let member = labels
+        .iter()
+        .find(|l| l["name"] == "Member")
+        .expect("le label Member doit être publié");
+    assert_eq!(member["count"], 2, "et avec son compte : {shape}");
+    let group = labels
+        .iter()
+        .find(|l| l["name"] == "Group")
+        .expect("le label Group");
+    assert_eq!(group["count"], 1);
+    assert_eq!(
+        labels[0]["name"], "Member",
+        "les labels sont triés du plus peuplé au moins peuplé"
+    );
+
+    assert!(
+        shape["edge_types"]
+            .as_array()
+            .is_some_and(|e| e.iter().any(|e| e["name"] == "CONTAINS" && e["count"] == 1)),
+        "les types d'arêtes et leurs comptes sont publiés : {shape}"
+    );
+    assert!(
+        shape["property_keys"]
+            .as_array()
+            .is_some_and(|k| k.iter().any(|k| k == "name")),
+        "le catalogue des propriétés est publié : {shape}"
+    );
+    assert!(
+        shape["indexes"].is_array(),
+        "les index sont publiés (même vides) : {shape}"
+    );
 }
 
 // ===========================================================================

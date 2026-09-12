@@ -209,6 +209,58 @@ pub struct SurfaceRelief {
     pub origin: Origin,
 }
 
+/// **La forme du store** : ce que la base contient, pas seulement ce qu'elle sait faire.
+///
+/// Le relief publiait les **capacités** du moteur (procédures, familles,
+/// simplexes) et les **contrats** du framework (identité, bail, journal, IAM) —
+/// mais pas la **matière** : quels labels existent et combien de nœuds chacun
+/// porte, quels types d'arêtes et en quelle quantité, quelles clés de propriétés,
+/// quels index. C'est pourtant la première chose qu'on demande à une base.
+///
+/// Les valeurs viennent de l'introspection du moteur (`all_labels`,
+/// `node_count_by_label`, `edge_counts_by_type`, `all_property_keys`,
+/// `list_indexes`) — donc de la **base réelle**, pas d'un catalogue tenu à la
+/// main. Ce qui n'est pas introspectable est **dit absent**, jamais estimé.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StoreRelief {
+    /// Nœuds, dans l'espace actif.
+    pub nodes: usize,
+    /// Arêtes, dans l'espace actif.
+    pub edges: usize,
+    /// Les labels et leur nombre de nœuds — du plus peuplé au moins peuplé.
+    pub labels: Vec<CountedName>,
+    /// Les types d'arêtes et leur nombre.
+    pub edge_types: Vec<CountedName>,
+    /// Le catalogue des clés de propriétés.
+    pub property_keys: Vec<String>,
+    /// Les index déclarés.
+    pub indexes: Vec<IndexRelief>,
+    /// Provenance : **introspecté** quand le moteur répond, sinon absent.
+    pub origin: Origin,
+}
+
+/// Un nom et son compte.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CountedName {
+    /// Le nom (label ou type d'arête).
+    pub name: String,
+    /// Combien il y en a.
+    pub count: usize,
+}
+
+/// Un index déclaré.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IndexRelief {
+    /// Son nom.
+    pub name: String,
+    /// Son type (`hash`, `btree`, `fulltext`…).
+    pub index_type: String,
+    /// Sa cible (`Label:property`).
+    pub target: String,
+    /// Est-il unique ?
+    pub unique: bool,
+}
+
 /// Le relief complet, tel que publié.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Relief {
@@ -228,6 +280,8 @@ pub struct Relief {
     pub lease: LeaseRelief,
     /// Journal ordonné.
     pub journal: JournalRelief,
+    /// **La matière** : labels, arêtes, propriétés, index — la forme du store.
+    pub store: StoreRelief,
     /// IAM matérialisé.
     pub iam: IamRelief,
     /// Application des politiques, surface par surface.
@@ -236,6 +290,58 @@ pub struct Relief {
     pub traps: Vec<Trap>,
     /// Notes de lecture (provenance, features, coûts).
     pub notes: Vec<String>,
+}
+
+/// **La forme du store**, introspectée depuis la base réelle.
+fn describe_store(store: &ObrainStore) -> StoreRelief {
+    let active = store.active_store();
+
+    let mut labels: Vec<CountedName> = active
+        .all_labels()
+        .into_iter()
+        .map(|label| CountedName {
+            count: active.node_count_by_label(&label),
+            name: label,
+        })
+        .collect();
+    labels.sort_by(|a, b| b.count.cmp(&a.count).then_with(|| a.name.cmp(&b.name)));
+
+    // Les comptes d'arêtes ne sont pas garantis par tous les moteurs : quand le
+    // moteur ne sait pas, on publie une liste vide — jamais une estimation.
+    let mut edge_types: Vec<CountedName> = active
+        .edge_counts_by_type()
+        .map(|counts| {
+            counts
+                .into_iter()
+                .map(|(name, count)| CountedName { name, count })
+                .collect()
+        })
+        .unwrap_or_default();
+    edge_types.sort_by(|a, b| b.count.cmp(&a.count).then_with(|| a.name.cmp(&b.name)));
+
+    let property_keys = active.all_property_keys();
+
+    let indexes = store
+        .db()
+        .list_indexes()
+        .into_iter()
+        .map(|index| IndexRelief {
+            name: index.name,
+            index_type: index.index_type,
+            target: index.target,
+            unique: index.unique,
+        })
+        .collect();
+
+    StoreRelief {
+        nodes: active.node_count(),
+        edges: active.edge_count(),
+        labels,
+        edge_types,
+        property_keys,
+        indexes,
+        origin: Origin::Introspected,
+    }
 }
 
 /// **Ce que le framework applique, surface par surface.**
@@ -271,6 +377,7 @@ fn describe_surfaces() -> Vec<SurfaceRelief> {
                 "/notifications/{user_id}/…",
                 "/device-tokens/{user_id}",
                 "/graph…",
+                "/graph/hierarchy/{id}",
                 "/gdpr/…",
                 "/auth/…",
                 "/health",
@@ -808,6 +915,7 @@ impl Relief {
                 durable_available: substrate,
                 transport_available: false,
             },
+            store: describe_store(store),
             iam: {
                 use crate::storage::iam;
                 IamRelief {
