@@ -163,3 +163,42 @@ cargo run --features obrain --example canvas_inference
 Cet exemple déroule les cinq étapes sur le routeur réel : la lecture part du
 sujet, le masquage est compté, le plafond refuse, le relief suit la même
 décision, et le sujet est résolu depuis l'interface — jamais depuis le chemin.
+
+## Ce que ça coûte — mesuré, pas supposé
+
+```bash
+cargo bench --features obrain --bench scope_bench          # les chiffres
+cargo bench --features obrain --bench scope_bench -- --verifier   # + les budgets
+cargo test  --features obrain --test scope_budgets -- --nocapture # le garde-fou
+```
+
+| Mesure | Valeur mesurée |
+|---|---|
+| correspondance d'une permission — accordé | ≈ 0,03 µs |
+| correspondance — **refus**, 67 permissions | ≈ 0,30 µs |
+| périmètre illimité (le chemin d'avant) | ≈ 0,02 µs — **court-circuit** |
+| construction d'un périmètre, 67 permissions | ≈ 7,3 µs (une fois, puis cache par époque) |
+| chaîne d'une requête (décision + périmètre) | ≈ 3,9 µs |
+| descente de 258 nœuds, **sans** périmètre | ≈ 0,59 ms |
+| descente de 258 nœuds, **sous** périmètre | ≈ 0,85 ms (**×1,44**) |
+| forme du store, sans vs sous périmètre | **×0,99** — parité |
+
+### Ce que le banc a corrigé
+
+| Défaut trouvé | Correction | Effet mesuré |
+|---|---|---|
+| `may_read_node` **allouait trois `String`** par question | comparaison de `&str`, sans allocation | refus ×1,5 · accordé **×2** · illimité ×2,5 |
+| périmètre **réanalysé à chaque requête** (7,7 µs) | cache keyé par `(principal, portée, époque)` | `scope_for` **−16 %** |
+| chaque nœud **lu deux fois** (visibilité puis description) | les labels lus sont réutilisés | descente filtrée **−8 %**, ratio ×1,65 → **×1,44** |
+
+### Deux hypothèses démenties par la mesure
+
+1. La **détection de cycle** en `Vec::contains` (O(n) par enfant) semblait le
+   coupable : la remplacer par un ensemble n'a **rien** changé (573 → 575 µs). Le
+   coût était dans les lectures du store.
+2. Le **relief filtré** semblait deux fois plus rapide que le non filtré
+   (×0,62) : c'était du bruit d'ordonnancement. La parité réelle est ×0,99.
+
+*Les chiffres ci-dessus sont ceux du profil `release` sur cette machine ; les
+ratios des tests de budget, eux, sont mesurés en debug et valent par leur
+**rapport**, jamais par leur durée absolue.*

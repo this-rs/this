@@ -18,7 +18,8 @@
 //! est **vide** : l'appelant ne voit rien, et les compteurs de masquage le
 //! disent. Un IAM qui ne répond pas ne doit pas ressembler à un IAM qui autorise.
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, RwLock};
 
 use crate::core::auth::AuthContext;
 use crate::graph::routes::ScopeResolver;
@@ -33,6 +34,15 @@ pub struct IamScopeResolver {
     mapping: Option<Arc<PrincipalMapping>>,
     /// Le périmètre d'un appelant **sans contexte** — vide par défaut.
     anonymous: ReadScope,
+    /// **Périmètres déjà construits**, par `(principal, portée, époque)`.
+    ///
+    /// Construire un périmètre demande d'**analyser** chaque permission et
+    /// d'allouer ses chaînes : le banc mesurait 7,7 µs pour 67 permissions, à
+    /// chaque requête. L'époque de la décision rend le cache **sûr** : elle est
+    /// monotone, donc une décision modifiée porte une autre époque, donc une
+    /// autre clé. Un cache qui ignorerait l'époque servirait un droit révoqué —
+    /// le genre d'optimisation qui est une faille.
+    cache: RwLock<HashMap<(String, String, u64), Arc<ReadScope>>>,
 }
 
 impl IamScopeResolver {
@@ -42,6 +52,7 @@ impl IamScopeResolver {
             iam,
             mapping: None,
             anonymous: ReadScope::none(),
+            cache: RwLock::new(HashMap::new()),
         }
     }
 
@@ -85,8 +96,19 @@ impl IamScopeResolver {
         };
         match self.iam.decision(&principal, &scope) {
             Ok(Some(stamp)) => {
+                // **Le cache est keyé par l'époque** : une décision modifiée a une
+                // autre époque, donc une autre entrée.
+                let cle = (principal.clone(), scope.clone(), stamp.epoch);
+                if let Some(deja) = self.cache.read().expect("verrou").get(&cle) {
+                    return (**deja).clone();
+                }
                 let permissions: Vec<&str> = stamp.permissions.iter().map(String::as_str).collect();
-                ReadScope::from_permissions(permissions)
+                let construit = ReadScope::from_permissions(permissions);
+                self.cache
+                    .write()
+                    .expect("verrou")
+                    .insert(cle, Arc::new(construit.clone()));
+                construit
             }
             Ok(None) => ReadScope::none(),
             Err(error) => {
@@ -212,6 +234,72 @@ mod tests {
         assert!(
             !scope.may_read_node(""),
             "la permission tronquée `node:read:` ne doit rien accorder"
+        );
+    }
+
+    /// **Le cache ne sert jamais un droit révoqué.**
+    ///
+    /// C'est le risque de toute optimisation sur un chemin d'autorisation : le
+    /// cache est keyé par l'**époque** de la décision, donc une révocation
+    /// produit une autre clé. Ce test l'exige — sinon l'optimisation serait une
+    /// faille, pas une amélioration.
+    #[test]
+    fn a_revoked_decision_is_never_served_from_the_cache() {
+        let store = crate::storage::ObrainStore::new_in_memory();
+        let iam = store.iam();
+        let (user, tenant) = (uuid::Uuid::from_u128(5), uuid::Uuid::from_u128(9));
+        iam.materialize(
+            &user.to_string(),
+            &tenant.to_string(),
+            &[RoleGrant {
+                role: "lecteur".into(),
+                permissions: vec!["node:read:Page".into()],
+            }],
+        )
+        .expect("matérialisation");
+        let resolveur = IamScopeResolver::new(store.iam());
+        let ctx = contexte(user, tenant);
+
+        // Première lecture : le droit existe.
+        let avant = resolveur.scope_of(Some(&ctx));
+        assert!(
+            avant.may_read_node("Page"),
+            "le droit est accordé au départ"
+        );
+        assert!(!avant.may_read_node("Secret"));
+
+        // **Révocation** : on rematérialise sans la permission.
+        iam.materialize(
+            &user.to_string(),
+            &tenant.to_string(),
+            &[RoleGrant {
+                role: "lecteur".into(),
+                permissions: vec!["node:read:Secret".into()],
+            }],
+        )
+        .expect("rematérialisation");
+
+        let apres = resolveur.scope_of(Some(&ctx));
+        assert!(
+            !apres.may_read_node("Page"),
+            "un droit RÉVOQUÉ ne doit pas survivre au cache : {apres:?}"
+        );
+        assert!(
+            apres.may_read_node("Secret"),
+            "et le nouveau droit s'applique"
+        );
+
+        // Et une décision **invalidée** n'accorde plus rien : l'invalidation
+        // incrémente l'époque et vide les permissions — fail-closed.
+        resolveur
+            .iam()
+            .invalidate(&user.to_string(), &tenant.to_string())
+            .expect("invalidation");
+        let apres_invalidation = resolveur.scope_of(Some(&ctx));
+        assert!(
+            !apres_invalidation.may_read_node("Page")
+                && !apres_invalidation.may_read_node("Secret"),
+            "une décision invalidée ne doit plus rien accorder : {apres_invalidation:?}"
         );
     }
 
