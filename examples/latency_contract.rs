@@ -37,7 +37,7 @@ use this::core::link::LinkDefinition;
 use this::server::entity_registry::{EntityDescriptor, EntityRegistry};
 use this::server::middleware::authorization::Authorization;
 use this::storage::ObrainStore;
-use this::storage::iam::{PendingDecision, RoleGrant};
+use this::storage::iam::RoleGrant;
 
 /// Échantillonne une opération et rend la médiane en secondes.
 /// Le coût d'une opération : **minimum** et **médiane**.
@@ -319,9 +319,11 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    let mut auth_cfg = EntityAuthConfig::default();
-    auth_cfg.list = "public".to_string();
-    auth_cfg.delete = "perm:orders:write".to_string();
+    let auth_cfg = EntityAuthConfig {
+        list: "public".to_string(),
+        delete: "perm:orders:write".to_string(),
+        ..Default::default()
+    };
     let mut registry_entities = EntityRegistry::new();
     registry_entities.register(Box::new(Orders));
     let links_config = LinksConfig {
@@ -384,8 +386,8 @@ async fn main() -> anyhow::Result<()> {
 
     println!("── in-process ───────────────────────────────────────────────────────");
     println!(
-        "  {:<38} {:>12} {:>12}   {}",
-        "surface", "minimum", "médiane", "ce que ça inclut"
+        "  {:<38} {:>12} {:>12}   ce que ça inclut",
+        "surface", "minimum", "médiane"
     );
     for row in &rows {
         println!(
@@ -397,12 +399,10 @@ async fn main() -> anyhow::Result<()> {
         );
     }
     println!(
-        "  {:<38} {}   {}",
-        "(hors contrat)",
-        "-",
-        "la traversée des rôles n'est PAS mesurée ici : ce store ne porte que les \
-décisions matérialisées, pas les arêtes de rôles — la mesurer donnerait un chiffre \
-flatteur et faux. La comparaison décision/traversée vit dans `iam_bench`, où le graphe existe."
+        "  {:<38} la traversée des rôles n'est PAS mesurée ici : ce store ne porte que \
+les décisions matérialisées, pas les arêtes de rôles — la mesurer donnerait un chiffre \
+flatteur et faux. La comparaison décision/traversée vit dans `iam_bench`, où le graphe existe.",
+        "(hors contrat)"
     );
     println!();
 
@@ -410,6 +410,8 @@ flatteur et faux. La comparaison décision/traversée vit dans `iam_bench`, où 
     let router = this::graph::routes::graph_routes(this::graph::routes::GraphState {
         store: Arc::clone(&store),
         identity: Arc::new(IdentityRegistry::obrain_default()),
+        scope: None,
+        canvas: None,
     });
 
     let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
@@ -472,7 +474,7 @@ flatteur et faux. La comparaison décision/traversée vit dans `iam_bench`, où 
         } else {
             path
         };
-        let (bytes, headers_only) = http_get(&mut stream, path);
+        let (_bytes, headers_only) = http_get(&mut stream, path);
         assert!(
             !headers_only,
             "réponse sans Content-Length : mesure invalide"

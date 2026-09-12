@@ -368,6 +368,14 @@ fn describe_inference() -> InferenceRelief {
                 purpose: "savoir ce que la base contient AVANT de la parcourir".to_string(),
             },
             InferenceRead {
+                path: "/graph/hierarchy/self?echelle=canvas".to_string(),
+                returns: "la descente depuis le SUJET de votre état d'interface, à SON échelle"
+                    .to_string(),
+                purpose: "lire ce que l'utilisateur a sous les yeux, sans qu'il traduise — le \
+                          plafond de sa décision IAM s'applique"
+                    .to_string(),
+            },
+            InferenceRead {
                 path: "/graph/hierarchy/{id}?echelle=cosmos|monde|groupe|noeud".to_string(),
                 returns: "les sous-groupes, à l'échelle demandée".to_string(),
                 purpose: "descendre d'un cran à la fois — et demander une INTENTION plutôt \
@@ -405,6 +413,10 @@ fn describe_inference() -> InferenceRelief {
             "chaque niveau publie `total` et `truncated` : une coupe n'est JAMAIS silencieuse"
                 .to_string(),
             "un cycle est signalé (`cycles`), jamais parcouru : la descente se termine toujours"
+                .to_string(),
+            "`echelle=canvas` et `self` lisent l'ÉTAT D'INTERFACE du demandeur : l'échelle qu'il \
+             affiche et le sujet qu'il regarde. Refusés explicitement (401/404/501) quand \
+             l'interface n'existe pas ou n'a rien déclaré — jamais interprétés comme un défaut"
                 .to_string(),
             "le coût suit ce qui est montré, pas la taille de la base (parcours par adjacence)"
                 .to_string(),

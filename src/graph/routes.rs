@@ -21,6 +21,7 @@ use axum::routing::get;
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 
+use crate::graph::canvas::CanvasState;
 use crate::graph::hierarchy;
 use crate::storage::permission::{ReadScope, Scale};
 use serde_json::json;
@@ -49,6 +50,12 @@ pub struct GraphState {
     /// échelles visibles. C'est ce qui rend la granularité **effective par
     /// requête**.
     pub scope: Option<Arc<dyn ScopeResolver>>,
+    /// **L'état d'interface de l'appelant**, s'il en a un.
+    ///
+    /// Présent : `?echelle=canvas` prend l'échelle que l'utilisateur a sous les
+    /// yeux, et `self` prend son sujet. Absent : ces deux formes sont refusées
+    /// avec un message clair — jamais interprétées comme « aucun sujet ».
+    pub canvas: Option<Arc<dyn CanvasState>>,
 }
 
 /// **Résout le périmètre de lecture d'une requête.**
@@ -71,7 +78,14 @@ impl GraphState {
             store,
             identity,
             scope: None,
+            canvas: None,
         }
+    }
+
+    /// **Relie l'état d'interface de l'appelant** aux lectures de graphe.
+    pub fn with_canvas(mut self, canvas: Arc<dyn CanvasState>) -> Self {
+        self.canvas = Some(canvas);
+        self
     }
 
     /// **Restreint les lectures au périmètre du demandeur.**
@@ -335,12 +349,110 @@ async fn identity_handler(
     }
 }
 
-/// `GET /graph/identity/{id}` — résout une identité **et publie de quoi la vérifier**.
+/// **Le sujet de l'appelant**, résolu en identifiant de nœud.
 ///
-/// La réponse porte `canonical_bytes_hex` : les octets exactement hachés. Un
-/// tiers peut donc **recalculer** l'identifiant et vérifier qu'il correspond,
-/// sans faire confiance à this-rs. C'est la définition opérationnelle de « la
-/// même entité quel que soit le moteur ».
+/// Quatre refus explicites, jamais un défaut silencieux : pas d'état d'interface
+/// branché, pas d'identification, pas de sujet déclaré, ou un sujet ambigu
+/// (plusieurs nœuds portent ce nom) ou introuvable. Une lecture qui partirait
+/// « de nulle part » serait pire qu'un refus : elle montrerait autre chose que ce
+/// que l'utilisateur regarde.
+fn resolve_subject(
+    state: &GraphState,
+    context: Option<&axum::Extension<crate::core::auth::AuthContext>>,
+) -> Result<String, Box<Response>> {
+    let refus = |status: StatusCode, corps: serde_json::Value| -> Box<Response> {
+        Box::new((status, Json(corps)).into_response())
+    };
+
+    let Some(canvas) = &state.canvas else {
+        return Err(refus(
+            StatusCode::NOT_IMPLEMENTED,
+            json!({
+                "error": "canvas_absent",
+                "reason": "cette instance ne publie pas d'état d'interface : désignez le nœud \
+                           par son identifiant numérique",
+            }),
+        ));
+    };
+    let Some(portee) = canvas_portee(context) else {
+        return Err(refus(
+            StatusCode::UNAUTHORIZED,
+            json!({
+                "error": "portee_inconnue",
+                "reason": "le sujet est une ressource PERSONNELLE : identifiez-vous",
+            }),
+        ));
+    };
+    let Some((store_name, qn)) = canvas.subject_of(&portee) else {
+        return Err(refus(
+            StatusCode::NOT_FOUND,
+            json!({
+                "error": "sujet_non_declare",
+                "reason": "votre état d'interface ne déclare pas de sujet",
+            }),
+        ));
+    };
+
+    // Un sujet qui nomme un espace différent de celui qu'on sert : on le dit,
+    // plutôt que de chercher dans le mauvais.
+    if let (false, Some(servi)) = (store_name.is_empty(), state.store.space())
+        && store_name != servi
+    {
+        return Err(refus(
+            StatusCode::CONFLICT,
+            json!({
+                "error": "espace_divergent",
+                "sujet": store_name,
+                "servi": servi,
+                "reason": "le sujet de votre interface appartient à un autre espace que celui-ci",
+            }),
+        ));
+    }
+
+    let trouves = state.store.active_store().find_nodes_by_property(
+        "qualified_name",
+        &obrain_common::types::Value::from(qn.as_str()),
+    );
+    match trouves.as_slice() {
+        [] => Err(refus(
+            StatusCode::NOT_FOUND,
+            json!({
+                "error": "sujet_introuvable",
+                "sujet": qn,
+                "reason": "aucun nœud ne porte ce `qualified_name` dans cet espace",
+            }),
+        )),
+        [unique] => Ok(unique.as_u64().to_string()),
+        plusieurs => Err(refus(
+            StatusCode::CONFLICT,
+            json!({
+                "error": "sujet_ambigu",
+                "sujet": qn,
+                "candidats": plusieurs.len(),
+                "reason": "plusieurs nœuds portent ce `qualified_name` : désignez-le par son \
+                           identifiant plutôt que par un nom ambigu",
+            }),
+        )),
+    }
+}
+
+/// **La portée de l'état d'interface** : celle de l'appelant, jamais du chemin.
+///
+/// Même règle que `/notifications/*` : l'état d'interface est une ressource
+/// **personnelle**, et l'identifiant du chemin n'est jamais cru sur parole. Ici il
+/// n'y a même pas d'identifiant : la portée vient du contexte d'authentification.
+fn canvas_portee(
+    context: Option<&axum::Extension<crate::core::auth::AuthContext>>,
+) -> Option<String> {
+    match context.map(|axum::Extension(ctx)| ctx)? {
+        crate::core::auth::AuthContext::User { user_id, .. }
+        | crate::core::auth::AuthContext::Owner { user_id, .. } => Some(user_id.to_string()),
+        crate::core::auth::AuthContext::Admin { admin_id } => Some(admin_id.to_string()),
+        crate::core::auth::AuthContext::Service { service_name, .. } => Some(service_name.clone()),
+        crate::core::auth::AuthContext::Anonymous => None,
+    }
+}
+
 /// **Le périmètre du demandeur**, ou « tout » quand aucun résolveur n'est branché.
 fn resolve_scope(
     state: &GraphState,
@@ -389,12 +501,24 @@ async fn hierarchy_handler(
     Query(query): Query<HierarchyQuery>,
     context: Option<axum::Extension<crate::core::auth::AuthContext>>,
 ) -> Response {
+    // **`self` : le sujet de l'appelant.** Ce qu'il regarde à l'écran devient le
+    // point de départ de la descente — l'interface n'a plus à traduire.
+    let id = if id == "self" {
+        match resolve_subject(&state, context.as_ref()) {
+            Ok(resolved) => resolved,
+            Err(response) => return *response,
+        }
+    } else {
+        id
+    };
+
     let Ok(raw) = id.parse::<u64>() else {
         return (
             StatusCode::BAD_REQUEST,
             Json(json!({
                 "error": format!("identifiant de nœud illisible : {id:?}"),
-                "hint": "un nœud se désigne par son identifiant numérique (voir /graph)"
+                "hint": "un nœud se désigne par son identifiant numérique (voir /graph), \
+                         ou par `self` (le sujet de votre état d'interface)"
             })),
         )
             .into_response();
@@ -407,13 +531,47 @@ async fn hierarchy_handler(
     // **L'échelle d'abord** : elle porte l'intention, `depth`/`limit` la
     // précisent. Une échelle inconnue est refusée — jamais ramenée à un défaut
     // silencieux, qui ferait croire qu'on a obéi.
-    if let Some(raw) = &query.echelle {
-        match Scale::parse(raw) {
-            Some(scale) => {
-                let (depth, limit) = scale.descent();
-                spec.max_depth = depth;
-                spec.per_level_limit = limit;
+    // **`?echelle=canvas`** : l'échelle que l'utilisateur a sous les yeux.
+    let echelle_demandee: Option<Scale> = match query.echelle.as_deref() {
+        Some("canvas") => {
+            let Some(canvas) = &state.canvas else {
+                return (
+                    StatusCode::NOT_IMPLEMENTED,
+                    Json(json!({
+                        "error": "canvas_absent",
+                        "reason": "cette instance ne publie pas d'état d'interface : demandez une \
+                                   échelle explicite (cosmos, monde, groupe, noeud)",
+                    })),
+                )
+                    .into_response();
+            };
+            let Some(portee) = canvas_portee(context.as_ref()) else {
+                return (
+                    StatusCode::UNAUTHORIZED,
+                    Json(json!({
+                        "error": "portee_inconnue",
+                        "reason": "l'échelle du canvas est une ressource PERSONNELLE : identifiez-vous",
+                    })),
+                )
+                    .into_response();
+            };
+            match canvas.scale_of(&portee) {
+                Some(scale) => Some(scale),
+                None => {
+                    return (
+                        StatusCode::NOT_FOUND,
+                        Json(json!({
+                            "error": "echelle_non_declaree",
+                            "reason": "votre état d'interface ne déclare pas d'échelle : \
+                                       l'interface n'a rien dit, on n'invente pas",
+                        })),
+                    )
+                        .into_response();
+                }
             }
+        }
+        Some(raw) => match Scale::parse(raw) {
+            Some(scale) => Some(scale),
             None => {
                 return (
                     StatusCode::BAD_REQUEST,
@@ -422,13 +580,38 @@ async fn hierarchy_handler(
                         "echelles": Scale::ALL.iter().map(|s| json!({
                             "echelle": s.as_str(),
                             "montre": s.meaning(),
-                        })).collect::<Vec<_>>(),
+                        })).chain(std::iter::once(json!({
+                            "echelle": "canvas",
+                            "montre": "l'échelle de VOTRE état d'interface",
+                        }))).collect::<Vec<_>>(),
                     })),
                 )
                     .into_response();
             }
+        },
+        None => None,
+    };
+
+    if let Some(scale) = echelle_demandee {
+        // **Le plafond du demandeur** : l'interface propose, la décision dispose.
+        if !scope.allows_scale(scale) {
+            return (
+                StatusCode::FORBIDDEN,
+                Json(json!({
+                    "error": "echelle_refusee",
+                    "echelle": scale.as_str(),
+                    "finest": scope.finest_scale().map(|s| s.as_str()),
+                    "reason": "votre décision IAM ne couvre pas cette échelle : voyez \
+                               `echelle:read:*` dans iam.vocabulary",
+                })),
+            )
+                .into_response();
         }
+        let (depth, limit) = scale.descent();
+        spec.max_depth = depth;
+        spec.per_level_limit = limit;
     }
+
     if let Some(depth) = query.depth {
         // Borné : une profondeur absurde est ramenée à la borne, jamais
         // obéie telle quelle.
@@ -555,6 +738,7 @@ mod tests {
             store: ObrainStore::new_in_memory(),
             identity: Arc::new(crate::core::identity::IdentityRegistry::obrain_default()),
             scope: None,
+            canvas: None,
         })
     }
 
@@ -774,6 +958,7 @@ mod tests {
             store,
             identity: Arc::new(registry),
             scope: None,
+            canvas: None,
         });
         (router, id)
     }

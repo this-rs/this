@@ -35,6 +35,7 @@ pub mod relief;
 pub mod routes;
 pub mod scope;
 
+pub mod canvas;
 pub mod hierarchy;
 
 pub use relief::{
