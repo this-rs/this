@@ -377,8 +377,10 @@ async fn graphql_mounts_when_nothing_is_enforced() {
     );
 }
 
+#[cfg(any(feature = "graphql", feature = "grpc"))]
 struct ModuleImpose;
 
+#[cfg(any(feature = "graphql", feature = "grpc"))]
 impl this::core::module::Module for ModuleImpose {
     fn name(&self) -> &str {
         "impose"

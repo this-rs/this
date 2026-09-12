@@ -14,10 +14,16 @@
 //! l'exécution. La clé n'est **jamais** journalisée ni incluse dans un message
 //! d'erreur — un secret dans une trace est un secret publié.
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Result, bail};
+
+#[cfg(feature = "powerdns")]
+use anyhow::Context;
 use serde::{Deserialize, Serialize};
 
-use super::{DnsPlan, DnsRecord, ensure_dot};
+use super::ensure_dot;
+
+#[cfg(feature = "powerdns")]
+use super::{DnsPlan, DnsRecord};
 
 /// Configuration de la délégation DNS (`dns:` dans `config/server.yaml`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -105,6 +111,7 @@ impl PdnsConfig {
         ensure_dot(&self.zone)
     }
 
+    #[cfg(feature = "powerdns")]
     /// `http://127.0.0.1:8081/api/v1/servers/localhost/zones/exemple.fr.`
     fn zone_url(&self) -> String {
         format!(
@@ -115,6 +122,7 @@ impl PdnsConfig {
         )
     }
 
+    #[cfg(feature = "powerdns")]
     fn zones_url(&self) -> String {
         format!(
             "{}/api/v1/servers/{}/zones",
@@ -334,14 +342,15 @@ impl PdnsClient {
     }
 }
 
-#[cfg(feature = "powerdns")]
 // ── Les formes de l'API PowerDNS ──────────────────────────────────────────
+#[cfg(feature = "powerdns")]
 #[derive(Debug, Deserialize)]
 struct ZoneResponse {
     #[serde(default)]
     rrsets: Vec<RrsetResponse>,
 }
 
+#[cfg(feature = "powerdns")]
 #[derive(Debug, Deserialize)]
 struct RrsetResponse {
     name: String,
@@ -353,6 +362,7 @@ struct RrsetResponse {
     records: Vec<RecordContent>,
 }
 
+#[cfg(feature = "powerdns")]
 #[derive(Debug, Clone, Deserialize, Serialize)]
 struct RecordContent {
     content: String,
@@ -360,6 +370,7 @@ struct RecordContent {
     disabled: bool,
 }
 
+#[cfg(feature = "powerdns")]
 #[derive(Debug, Serialize)]
 struct RrsetChange {
     name: String,

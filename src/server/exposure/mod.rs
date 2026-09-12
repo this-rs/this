@@ -29,11 +29,13 @@ pub use grpc::GrpcExposure;
 // Future expositions
 // pub mod openapi;
 
+#[cfg(any(feature = "graphql", feature = "grpc", feature = "websocket"))]
 /// Les politiques `auth:` déclarées sont-elles **armées** sur cet hôte ?
 pub(crate) fn policies_armed(host: &crate::server::host::ServerHost) -> bool {
     host.authorize
 }
 
+#[cfg(any(feature = "graphql", feature = "grpc", feature = "websocket"))]
 /// **Refuse** de servir une surface qui ne sait pas appliquer les politiques.
 ///
 /// # Pourquoi refuser plutôt que prévenir
@@ -65,6 +67,7 @@ pub(crate) fn refuse_unenforced_surface(
     );
 }
 
+#[cfg(any(feature = "graphql", feature = "grpc", feature = "websocket"))]
 /// Le journal d'une surface servie **sans** application des politiques.
 pub(crate) fn warn_unenforced_surface(surface: &str, opt_in: &str) {
     tracing::warn!(

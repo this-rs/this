@@ -34,6 +34,8 @@
 pub mod relief;
 pub mod routes;
 
+pub mod hierarchy;
+
 pub use relief::{
     EngineRelief, FamilySpec, Origin, ParameterSpec, ProcedureSpec, RELIEF_SCHEMA, Relief,
     ReliefOptions, SimplexCounts, SimplexRelief, SpaceRelief, Trap,
