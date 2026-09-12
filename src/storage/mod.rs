@@ -22,6 +22,7 @@ pub mod obrain_facade;
 /// Adaptateur obrain de l'identité canonique — la moitié I/O de `core::identity`.
 #[cfg(feature = "obrain")]
 pub mod obrain_identity;
+pub mod permission;
 #[cfg(feature = "postgres")]
 pub mod postgres;
 #[cfg(feature = "scylladb")]

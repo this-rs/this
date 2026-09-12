@@ -44,6 +44,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::storage::ObrainStore;
+use crate::storage::permission::ReadScope;
 
 /// Identifiant de schéma du document — à faire évoluer si la forme change.
 pub const RELIEF_SCHEMA: &str = "this-rs/graph-relief/1";
@@ -169,6 +170,24 @@ pub struct IamRelief {
     pub edges: Vec<IamSchemaEntry>,
     /// La frontière de confiance, en clair.
     pub trust: Vec<String>,
+    /// **Le vocabulaire des permissions granulaires** — la façon de donner un
+    /// droit sur *ce* label, *ce* type de relation, *cet* espace.
+    pub vocabulary: Vec<PermissionSpec>,
+    /// La règle de correspondance, en une phrase.
+    pub matching: String,
+}
+
+/// Une famille de permissions, publiée.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PermissionSpec {
+    /// La famille (`graph`, `node`, `edge`, `space`).
+    pub family: String,
+    /// Les actions reconnues.
+    pub actions: Vec<String>,
+    /// Ce que la cible désigne (`label`, `type d'arête`, `espace`, ou rien).
+    pub target: String,
+    /// Un exemple, prêt à recopier.
+    pub example: String,
 }
 
 /// Une entrée du contrat publié : un nom, ce qu'il veut dire, et **qui l'écrit**.
@@ -237,6 +256,12 @@ pub struct StoreRelief {
     pub indexes: Vec<IndexRelief>,
     /// Provenance : **introspecté** quand le moteur répond, sinon absent.
     pub origin: Origin,
+    /// Labels **masqués** par le périmètre de lecture du demandeur.
+    #[serde(default)]
+    pub hidden_labels: usize,
+    /// Types d'arêtes **masqués** par ce périmètre.
+    #[serde(default)]
+    pub hidden_edge_types: usize,
 }
 
 /// Un nom et son compte.
@@ -262,9 +287,15 @@ pub struct IndexRelief {
 }
 
 /// **Comment brancher un moteur d'inférence sur cette base.**
+///
+/// Un modèle — ou l'agent qui le pilote — n'a pas à deviner le protocole : il
+/// lit ce manifeste, puis appelle. Il dit **comment s'authentifier**, **quoi
+/// lire**, **quelles bornes** s'appliquent, et **sous quel régime** ces lectures
+/// sont jugées.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InferenceRelief {
-    /// Ce qu'un lecteur doit présenter, et ce que l'authentification en fait.
+    /// Ce qu'un lecteur doit présenter (`Authorization: Bearer <jeton>`), et ce
+    /// que l'authentification en fait : un principal et une portée.
     pub authentication: String,
     /// Le mapping d'identité : comment `(principal, portée)` est dérivé.
     pub identity: String,
@@ -283,7 +314,7 @@ pub struct InferenceRelief {
 pub struct InferenceRead {
     /// Le chemin.
     pub path: String,
-    /// Ce qu'elle rend.
+    /// Ce qu'elle rend — en une phrase, pour un modèle.
     pub returns: String,
     /// Pourquoi on l'appelle.
     pub purpose: String,
@@ -325,11 +356,9 @@ pub struct Relief {
 /// **Le manifeste d'inférence** : le protocole, dit une fois, pour un moteur.
 fn describe_inference() -> InferenceRelief {
     InferenceRelief {
-        authentication: "`Authorization: Bearer <jeton>` — le framework en dérive un \
-                         principal et une portée (voir `identity`)"
+        authentication: "`Authorization: Bearer <jeton>` — l'application décide du format ;                          le framework en dérive un principal et une portée (voir `identity`)"
             .to_string(),
-        identity: "`(principal, portée)` : le mappage de l'application s'il en a fourni un, \
-                   sinon le modèle de this-rs (`user_id`, `tenant_id`)"
+        identity: "`(principal, portée)` : le mappage de l'application s'il en a fourni un,                    sinon le modèle de this-rs (`user_id`, `tenant_id`)"
             .to_string(),
         reads: vec![
             InferenceRead {
@@ -339,9 +368,15 @@ fn describe_inference() -> InferenceRelief {
                 purpose: "savoir ce que la base contient AVANT de la parcourir".to_string(),
             },
             InferenceRead {
+                path: "/graph/hierarchy/{id}?echelle=cosmos|monde|groupe|noeud".to_string(),
+                returns: "les sous-groupes, à l'échelle demandée".to_string(),
+                purpose: "descendre d'un cran à la fois — et demander une INTENTION plutôt \
+                          qu'un nombre de niveaux".to_string(),
+            },
+            InferenceRead {
                 path: "/graph/hierarchy/{id}?depth=N&limit=M".to_string(),
-                returns: "les sous-groupes, niveau par niveau".to_string(),
-                purpose: "descendre d'un cran à la fois au lieu de tout charger".to_string(),
+                returns: "la même descente, bornée explicitement".to_string(),
+                purpose: "quand la profondeur exacte compte plus que l'échelle".to_string(),
             },
             InferenceRead {
                 path: "/graph/hierarchy/{id}?format=outline".to_string(),
@@ -365,6 +400,8 @@ fn describe_inference() -> InferenceRelief {
         limits: vec![
             "`depth` ≤ 32, `limit` ≤ 1000 par niveau (les valeurs hors bornes sont ramenées)"
                 .to_string(),
+            "`echelle` : `cosmos` (l'ensemble, agrégé) · `monde` (le graphe entier) ·              `groupe` (une branche et ses sous-groupes) · `noeud` (un nœud et son voisinage)              — une échelle inconnue est REFUSÉE, avec la liste des valides"
+                .to_string(),
             "chaque niveau publie `total` et `truncated` : une coupe n'est JAMAIS silencieuse"
                 .to_string(),
             "un cycle est signalé (`cycles`), jamais parcouru : la descente se termine toujours"
@@ -372,17 +409,14 @@ fn describe_inference() -> InferenceRelief {
             "le coût suit ce qui est montré, pas la taille de la base (parcours par adjacence)"
                 .to_string(),
         ],
-        authorization: "ces lectures s'ABSTIENNENT par défaut (descriptives, publiques). Si \
-                        l'application déclare `graph.policy` (config/server.yaml), elles sont \
-                        JUGÉES : un appelant sans droit reçoit 403"
+        authorization: "ces lectures s'ABSTIENNENT par défaut (descriptives, publiques). Si                         l'application déclare `graph.policy` (config/server.yaml), elles sont                         JUGÉES : un appelant sans droit reçoit 403, et une politique `perm:` est                         tranchée par la décision IAM matérialisée"
             .to_string(),
         rules: vec![
-            "n'énumérez jamais le graphe entier : descendez par `depth`, et arrêtez-vous quand \
-             `children` vaut 0 ou quand `truncated` est vrai — il dit alors combien il reste"
+            "n'énumérez jamais le graphe entier : descendez par `depth`, et arrêtez-vous quand              `children` vaut 0 ou quand `truncated` est vrai — il dit alors combien il reste"
                 .to_string(),
             "traitez `children` comme la carte : il dit ce qui est en dessous SANS le charger"
                 .to_string(),
-            "une permission refusée est un refus, pas une absence de données"
+            "une permission refusée est un refus, pas une absence de données : ne réessayez pas              sans droit"
                 .to_string(),
         ],
     }
@@ -390,6 +424,17 @@ fn describe_inference() -> InferenceRelief {
 
 /// **La forme du store**, introspectée depuis la base réelle.
 fn describe_store(store: &ObrainStore) -> StoreRelief {
+    describe_store_scoped(store, &ReadScope::all())
+}
+
+/// **La forme du store, sous un périmètre de lecture.**
+///
+/// Un lecteur ne voit que les labels dont il a le droit de lire les nœuds, et
+/// les types d'arêtes dont il a le droit de lire les relations. Ce qui est
+/// masqué est **compté** : même règle que la vue multi-échelle — le masquage est
+/// visible, jamais déduit. Les totaux (`nodes`, `edges`) restent ceux de la base :
+/// ils ne disent rien d'un label en particulier.
+fn describe_store_scoped(store: &ObrainStore, scope: &ReadScope) -> StoreRelief {
     let active = store.active_store();
 
     let mut labels: Vec<CountedName> = active
@@ -401,6 +446,15 @@ fn describe_store(store: &ObrainStore) -> StoreRelief {
         })
         .collect();
     labels.sort_by(|a, b| b.count.cmp(&a.count).then_with(|| a.name.cmp(&b.name)));
+
+    // **Le périmètre de lecture** : un label non lisible n'est pas publié — mais
+    // il est compté, pour que le lecteur sache qu'on lui cache quelque chose.
+    let mut hidden_labels = 0usize;
+    if !scope.is_unrestricted() {
+        let avant = labels.len();
+        labels.retain(|l| scope.may_read_node(&l.name));
+        hidden_labels = avant - labels.len();
+    }
 
     // Les comptes d'arêtes ne sont pas garantis par tous les moteurs : quand le
     // moteur ne sait pas, on publie une liste vide — jamais une estimation.
@@ -414,6 +468,13 @@ fn describe_store(store: &ObrainStore) -> StoreRelief {
         })
         .unwrap_or_default();
     edge_types.sort_by(|a, b| b.count.cmp(&a.count).then_with(|| a.name.cmp(&b.name)));
+
+    let mut hidden_edge_types = 0usize;
+    if !scope.is_unrestricted() {
+        let avant = edge_types.len();
+        edge_types.retain(|e| scope.may_read_edge(&e.name));
+        hidden_edge_types = avant - edge_types.len();
+    }
 
     let property_keys = active.all_property_keys();
 
@@ -437,6 +498,8 @@ fn describe_store(store: &ObrainStore) -> StoreRelief {
         property_keys,
         indexes,
         origin: Origin::Introspected,
+        hidden_labels,
+        hidden_edge_types,
     }
 }
 
@@ -1114,7 +1177,53 @@ impl Relief {
                             false,
                         ),
                     ],
-                    trust: vec![
+                    vocabulary: vec![
+                    PermissionSpec {
+                        family: "graph".to_string(),
+                        actions: vec!["read".to_string()],
+                        target: "aucune (la base entière)".to_string(),
+                        example: "graph:read".to_string(),
+                    },
+                    PermissionSpec {
+                        family: "node".to_string(),
+                        actions: vec![
+                            "read".to_string(),
+                            "write".to_string(),
+                            "delete".to_string(),
+                        ],
+                        target: "un label, ou `*`".to_string(),
+                        example: "node:read:Page".to_string(),
+                    },
+                    PermissionSpec {
+                        family: "edge".to_string(),
+                        actions: vec![
+                            "read".to_string(),
+                            "create".to_string(),
+                            "delete".to_string(),
+                        ],
+                        target: "un type d'arête, ou `*`".to_string(),
+                        example: "edge:create:CITES  (TISSER : le droit de relier)".to_string(),
+                    },
+                    PermissionSpec {
+                        family: "echelle".to_string(),
+                        actions: vec!["read".to_string()],
+                        target: "une échelle : cosmos | monde | groupe | noeud".to_string(),
+                        example: "echelle:read:groupe  (voir JUSQU'AU groupe, pas le détail d'un \
+                                  nœud)"
+                            .to_string(),
+                    },
+                    PermissionSpec {
+                        family: "space".to_string(),
+                        actions: vec!["use".to_string(), "create".to_string(), "drop".to_string()],
+                        target: "un espace nommé".to_string(),
+                        example: "space:use:lab".to_string(),
+                    },
+                ],
+                matching: "une permission DÉTENUE accorde une permission DEMANDÉE si les familles                            et les actions sont égales, et si la cible détenue est `*` ou égale à                            la cible demandée. `*` accorde tout ; `famille:*` accorde toutes les                            actions de cette famille ; une permission sans cible ne couvre PAS une                            demande avec cible (`node:read` n'accorde pas `node:read:Page`). Ce qui                            n'est pas reconnu n'accorde rien. Un droit d'ÉCHELLE est un \
+                           PLAFOND : `echelle:read:groupe` accorde cosmos, monde et groupe, \
+                           mais pas `noeud`."
+                    .to_string(),
+                trust: vec![
                         "Qui peut écrire dans le store peut écrire une décision, donc accorder des permissions : la protection est la maîtrise du store et le bail d'écriture, pas une signature.".to_string(),
                         "Deux nœuds portant la même `acl_key` rendent la décision ambiguë : elle est REFUSÉE, jamais résolue par l'ordre de l'index.".to_string(),
                         "Lire ce graphe demande un droit de lecture sur le store : la liste des décisions dit qui peut quoi.".to_string(),
@@ -1645,5 +1754,47 @@ mod tests {
                 "section {key} absente"
             );
         }
+    }
+
+    /// **Le relief lui-même est filtré** : un lecteur ne voit que les labels et
+    /// les types de relations qu'il a le droit de lire — et ce qui est masqué est
+    /// **compté**, jamais silencieux.
+    #[test]
+    fn the_store_shape_is_filtered_by_the_read_scope() {
+        use crate::storage::permission::ReadScope;
+
+        let store = ObrainStore::new_in_memory();
+        {
+            let session = store.db().session();
+            let a = session.create_node_with_props(
+                &["Page"],
+                [("qualified_name", obrain_common::types::Value::from("a"))],
+            );
+            let b = session.create_node_with_props(
+                &["Secret"],
+                [("qualified_name", obrain_common::types::Value::from("b"))],
+            );
+            session.create_edge(a, b, "CONTAINS");
+            session.create_edge(b, a, "REVELE");
+            store.commit_wal().expect("commit");
+        }
+
+        // Périmètre : lire les `Page`, et lire la relation `CONTAINS` seulement.
+        let scope = ReadScope::from_permissions(["node:read:Page", "edge:read:CONTAINS"]);
+        let shape = describe_store_scoped(&store, &scope);
+
+        let labels: Vec<&str> = shape.labels.iter().map(|l| l.name.as_str()).collect();
+        assert_eq!(labels, vec!["Page"], "seul le label lisible : {labels:?}");
+        assert_eq!(shape.hidden_labels, 1, "le label masqué est compté");
+
+        let edges: Vec<&str> = shape.edge_types.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(edges, vec!["CONTAINS"], "seul le type lisible : {edges:?}");
+        assert_eq!(shape.hidden_edge_types, 1, "le type masqué est compté");
+
+        // Sans périmètre restrictif, tout est publié — le comportement d'avant.
+        let complet = describe_store(&store);
+        assert_eq!(complet.labels.len(), 2);
+        assert_eq!(complet.hidden_labels, 0);
+        assert_eq!(complet.edge_types.len(), 2);
     }
 }

@@ -349,6 +349,40 @@ async fn the_relief_publishes_the_iam_data_contract() {
         "chaque champ publié dit ce qu'il signifie — un contrat sans sens n'en est pas un"
     );
 
+    // **Le vocabulaire des permissions granulaires** est publié : sans lui, un
+    // consommateur ne peut pas donner un droit sur *ce* label ou *ce* type de
+    // relation — il ne saurait pas comment l'écrire.
+    let vocabulary = iam["vocabulary"].as_array().expect("vocabulary");
+    for family in ["graph", "node", "edge", "space"] {
+        assert!(
+            vocabulary.iter().any(|v| v["family"] == family),
+            "la famille `{family}` doit figurer au vocabulaire : {vocabulary:?}"
+        );
+    }
+    let edge = vocabulary
+        .iter()
+        .find(|v| v["family"] == "edge")
+        .expect("famille edge");
+    assert!(
+        edge["actions"]
+            .as_array()
+            .is_some_and(|a| a.iter().any(|a| a == "create")),
+        "TISSER (créer une relation) doit être une action publiée : {edge}"
+    );
+    assert!(
+        edge["example"]
+            .as_str()
+            .is_some_and(|e| e.contains("edge:create:")),
+        "et l'exemple doit montrer comment l'écrire : {edge}"
+    );
+    assert!(
+        iam["matching"]
+            .as_str()
+            .is_some_and(|m| m.contains("`*`") && m.contains("sans cible")),
+        "la règle de correspondance — et son piège — doivent être publiées : {}",
+        iam["matching"]
+    );
+
     // Et la frontière de confiance est publiée avec, pas cachée.
     let trust = iam["trust"].as_array().expect("trust");
     assert!(
