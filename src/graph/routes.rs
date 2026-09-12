@@ -22,7 +22,7 @@ use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 
 use crate::graph::hierarchy;
-use crate::storage::permission::Scale;
+use crate::storage::permission::{ReadScope, Scale};
 use serde_json::json;
 use uuid::Uuid;
 
@@ -41,6 +41,44 @@ pub struct GraphState {
     /// C'est ce registre qui décide si une base écrite par un autre outil
     /// (propriétés plates, sans `_uuid`) est lisible ou non.
     pub identity: Arc<IdentityRegistry>,
+    /// **Qui lit, et ce qu'il a le droit de voir.**
+    ///
+    /// Absent : lecture non restreinte (le relief descriptif d'avant). Présent :
+    /// chaque lecture demande au résolveur le périmètre du **demandeur**, donc
+    /// ses permissions IAM décident des labels, des types de relations et des
+    /// échelles visibles. C'est ce qui rend la granularité **effective par
+    /// requête**.
+    pub scope: Option<Arc<dyn ScopeResolver>>,
+}
+
+/// **Résout le périmètre de lecture d'une requête.**
+///
+/// Le framework en fournit une implémentation adossée à l'IAM
+/// (`IamScopeResolver`) ; une application peut la remplacer — c'est une couture,
+/// pas une politique en dur.
+pub trait ScopeResolver: Send + Sync {
+    /// Le périmètre du demandeur, d'après son contexte d'authentification.
+    ///
+    /// **Sans contexte, rien n'est accordé** : un appelant non identifié ne voit
+    /// aucune donnée, et les compteurs de masquage le disent.
+    fn scope_for(&self, context: Option<&crate::core::auth::AuthContext>) -> ReadScope;
+}
+
+impl GraphState {
+    /// L'état minimal : le store et l'identité, **sans** restriction.
+    pub fn new(store: Arc<ObrainStore>, identity: Arc<IdentityRegistry>) -> Self {
+        Self {
+            store,
+            identity,
+            scope: None,
+        }
+    }
+
+    /// **Restreint les lectures au périmètre du demandeur.**
+    pub fn with_scope_resolver(mut self, resolver: Arc<dyn ScopeResolver>) -> Self {
+        self.scope = Some(resolver);
+        self
+    }
 }
 
 /// Construit les routes du relief.
@@ -69,11 +107,16 @@ struct ReliefQuery {
 }
 
 /// `GET /graph` — le document de relief.
-async fn relief_handler(State(state): State<GraphState>, Query(q): Query<ReliefQuery>) -> Response {
+async fn relief_handler(
+    State(state): State<GraphState>,
+    Query(q): Query<ReliefQuery>,
+    context: Option<axum::Extension<crate::core::auth::AuthContext>>,
+) -> Response {
     let opts = ReliefOptions {
         include_counts: q.counts,
     };
-    match describe(state.store, opts).await {
+    let scope = resolve_scope(&state, context.as_ref());
+    match describe_scoped(state.store, opts, scope).await {
         Ok(relief) => Json(relief).into_response(),
         Err(e) => join_error(e),
     }
@@ -130,6 +173,16 @@ async fn describe(
     opts: ReliefOptions,
 ) -> Result<Relief, tokio::task::JoinError> {
     tokio::task::spawn_blocking(move || Relief::describe(&store, opts)).await
+}
+
+/// Le même calcul, **sous un périmètre de lecture** — donc sur le chemin d'une
+/// requête identifiée.
+async fn describe_scoped(
+    store: Arc<ObrainStore>,
+    opts: ReliefOptions,
+    scope: Arc<ReadScope>,
+) -> Result<Relief, tokio::task::JoinError> {
+    tokio::task::spawn_blocking(move || Relief::describe_scoped(&store, opts, &scope)).await
 }
 
 /// `Relief::describe` ne rend jamais d'erreur métier : la seule issue d'échec
@@ -288,6 +341,20 @@ async fn identity_handler(
 /// tiers peut donc **recalculer** l'identifiant et vérifier qu'il correspond,
 /// sans faire confiance à this-rs. C'est la définition opérationnelle de « la
 /// même entité quel que soit le moteur ».
+/// **Le périmètre du demandeur**, ou « tout » quand aucun résolveur n'est branché.
+fn resolve_scope(
+    state: &GraphState,
+    context: Option<&axum::Extension<crate::core::auth::AuthContext>>,
+) -> Arc<ReadScope> {
+    match &state.scope {
+        Some(resolver) => Arc::new(resolver.scope_for(context.map(|axum::Extension(ctx)| ctx))),
+        // Sans résolveur, la lecture reste **descriptive** — le comportement
+        // d'avant, et le défaut que le framework ne change pas sans qu'on le lui
+        // demande.
+        None => Arc::new(ReadScope::all()),
+    }
+}
+
 /// Paramètres de `GET /graph/hierarchy/{id}`.
 #[derive(Debug, Deserialize)]
 struct HierarchyQuery {
@@ -320,6 +387,7 @@ async fn hierarchy_handler(
     State(state): State<GraphState>,
     Path(id): Path<String>,
     Query(query): Query<HierarchyQuery>,
+    context: Option<axum::Extension<crate::core::auth::AuthContext>>,
 ) -> Response {
     let Ok(raw) = id.parse::<u64>() else {
         return (
@@ -331,6 +399,8 @@ async fn hierarchy_handler(
         )
             .into_response();
     };
+
+    let scope = resolve_scope(&state, context.as_ref());
 
     let mut spec = hierarchy::HierarchySpec::default();
 
@@ -371,7 +441,8 @@ async fn hierarchy_handler(
     let store = state.store.clone();
     let vue = tokio::task::spawn_blocking(move || {
         let node = obrain_common::types::NodeId::new(raw);
-        hierarchy::describe(&store, node, spec)
+        // **La descente porte le périmètre** : ce qui est masqué est compté.
+        hierarchy::describe_scoped(&store, node, spec, &scope)
     })
     .await;
 
@@ -483,6 +554,7 @@ mod tests {
         graph_routes(GraphState {
             store: ObrainStore::new_in_memory(),
             identity: Arc::new(crate::core::identity::IdentityRegistry::obrain_default()),
+            scope: None,
         })
     }
 
@@ -701,6 +773,7 @@ mod tests {
         let router = graph_routes(GraphState {
             store,
             identity: Arc::new(registry),
+            scope: None,
         });
         (router, id)
     }

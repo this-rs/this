@@ -33,6 +33,7 @@
 
 pub mod relief;
 pub mod routes;
+pub mod scope;
 
 pub mod hierarchy;
 

@@ -92,11 +92,37 @@ Le vocabulaire est **publié** avec le contrat IAM (`GET /graph → iam.vocabula
 `iam.matching`) : un consommateur n'a pas à lire le code du framework pour savoir
 comment écrire un droit.
 
-## Ce qui reste à faire, dit franchement
+## Le filtrage est appliqué, par requête
 
-Le filtrage est **câblé dans la bibliothèque** (`describe_scoped`,
-`describe_store_scoped`) et **testé** ; le chemin HTTP l'applique dès qu'un
-périmètre lui est fourni. **L'étape suivante** est de résoudre le périmètre du
-demandeur dans le handler (lire la décision IAM de l'appelant à partir de son
-`AuthContext`, puis passer le `ReadScope`) pour que le filtrage soit automatique
-par requête. C'est du câblage — un travail, pas un réglage — et ce n'est pas fait.
+Déclarer la politique **suffit** :
+
+```yaml
+graph:
+  policy: "perm:graph:read"
+```
+
+Dès qu'elle est armée, l'exposition branche un **résolveur de périmètre** : le
+contexte d'authentification de la requête devient `(principal, portée)` — par le
+**même mappage** que le middleware d'autorisation, jamais un second, sinon une
+seule personne recevrait deux autorisations —, la décision matérialisée fournit
+ses permissions, et celles-ci deviennent le périmètre de la lecture. Les deux
+vont ensemble : la politique dit *qui a le droit de lire le graphe*, le périmètre
+dit *ce que ce lecteur voit*.
+
+**Le défaut est le refus.** Pas de contexte d'authentification, pas de décision
+matérialisée, ou une décision illisible : le périmètre est **vide**. Un IAM qui
+ne répond pas ne doit pas ressembler à un IAM qui autorise.
+
+**Et le masquage ne fuit pas** :
+
+* un nœud masqué par son **label** est **compté** (`hidden`) ;
+* une relation dont le **type** n'est pas lisible n'est **ni parcourue ni
+  comptée** — le nombre décrirait une structure hors périmètre ; le lecteur
+  apprend seulement qu'il en existe ;
+* le **compte d'enfants** d'un nœud passe par le périmètre : une racine n'annonce
+  pas ce qu'elle cache. C'est la fuite la plus discrète — la structure sans le
+  contenu — et elle est fermée par un test.
+
+Pour remplacer le résolveur (une couture, pas une politique en dur) :
+`GraphState::with_scope_resolver(...)`, ou `IamScopeResolver` avec le mappage
+d'identité de l'application.

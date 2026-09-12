@@ -409,7 +409,7 @@ fn describe_inference() -> InferenceRelief {
             "le coût suit ce qui est montré, pas la taille de la base (parcours par adjacence)"
                 .to_string(),
         ],
-        authorization: "ces lectures s'ABSTIENNENT par défaut (descriptives, publiques). Si                         l'application déclare `graph.policy` (config/server.yaml), elles sont                         JUGÉES : un appelant sans droit reçoit 403, et une politique `perm:` est                         tranchée par la décision IAM matérialisée"
+        authorization: "ces lectures s'ABSTIENNENT par défaut (descriptives, publiques). Si                         l'application déclare `graph.policy` (config/server.yaml), elles sont                         JUGÉES — 403 sans droit — ET FILTRÉES par la décision IAM du                         demandeur : il ne voit que les labels, les types de relations et les                         échelles que ses permissions couvrent"
             .to_string(),
         rules: vec![
             "n'énumérez jamais le graphe entier : descendez par `depth`, et arrêtez-vous quand              `children` vaut 0 ou quand `truncated` est vrai — il dit alors combien il reste"
@@ -418,13 +418,10 @@ fn describe_inference() -> InferenceRelief {
                 .to_string(),
             "une permission refusée est un refus, pas une absence de données : ne réessayez pas              sans droit"
                 .to_string(),
+            "ce que vous ne voyez pas est COMPTÉ quand c'est un nœud masqué par son label, et              seulement SIGNALÉ quand c'est une relation dont vous ne lisez pas le type : dans              ce cas le nombre n'est pas publié, il décrirait une structure hors périmètre"
+                .to_string(),
         ],
     }
-}
-
-/// **La forme du store**, introspectée depuis la base réelle.
-fn describe_store(store: &ObrainStore) -> StoreRelief {
-    describe_store_scoped(store, &ReadScope::all())
 }
 
 /// **La forme du store, sous un périmètre de lecture.**
@@ -995,6 +992,16 @@ impl Relief {
     /// d'honnêteté du document — un consommateur doit pouvoir le lire même sur
     /// un store vide, en mémoire, ou en lecture seule.
     pub fn describe(store: &ObrainStore, opts: ReliefOptions) -> Self {
+        Self::describe_scoped(store, opts, &ReadScope::all())
+    }
+
+    /// **Le relief sous un périmètre de lecture.**
+    ///
+    /// La forme du store n'est alors publiée que pour ce que le demandeur a le
+    /// droit de lire : ses permissions décident des labels et des types de
+    /// relations visibles, et ce qui est masqué est **compté**. C'est ce que le
+    /// handler appelle dès qu'un résolveur de périmètre est branché.
+    pub fn describe_scoped(store: &ObrainStore, opts: ReliefOptions, scope: &ReadScope) -> Self {
         let substrate_store = store.db().substrate_handle();
         let substrate = substrate_store.is_some();
 
@@ -1074,7 +1081,7 @@ impl Relief {
                 durable_available: substrate,
                 transport_available: false,
             },
-            store: describe_store(store),
+            store: describe_store_scoped(store, scope),
             inference: describe_inference(),
             iam: {
                 use crate::storage::iam;
@@ -1792,7 +1799,7 @@ mod tests {
         assert_eq!(shape.hidden_edge_types, 1, "le type masqué est compté");
 
         // Sans périmètre restrictif, tout est publié — le comportement d'avant.
-        let complet = describe_store(&store);
+        let complet = describe_store_scoped(&store, &ReadScope::all());
         assert_eq!(complet.labels.len(), 2);
         assert_eq!(complet.hidden_labels, 0);
         assert_eq!(complet.edge_types.len(), 2);

@@ -355,8 +355,14 @@ impl Authorization {
     /// **L'IAM décide, pas la variante de contexte** : un administrateur sans
     /// décision matérialisée est refusé comme les autres. Un contexte anonyme
     /// n'a pas de principal — donc pas de décision, donc refus.
+    /// **Le mappage par défaut, partagé.**
+    ///
+    /// Il est `pub(crate)` parce que le périmètre de lecture
+    /// (`crate::graph::scope`) doit répondre à la même question — *qui est cet
+    /// appelant* — que le middleware d'autorisation. Deux mappages divergents
+    /// donneraient deux autorisations différentes pour une seule personne.
     #[cfg(feature = "obrain")]
-    fn default_iam_identity(context: &AuthContext) -> Option<(String, String)> {
+    pub(crate) fn default_iam_identity(context: &AuthContext) -> Option<(String, String)> {
         match context {
             AuthContext::User {
                 user_id, tenant_id, ..
