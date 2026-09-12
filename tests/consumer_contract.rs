@@ -280,7 +280,11 @@ fn an_obrain_only_reader_discovers_the_decisions_by_label() {
 
 async fn relief_json(store: Arc<ObrainStore>) -> Json {
     let identity = Arc::new(IdentityRegistry::obrain_default());
-    let app = this::graph::graph_routes(this::graph::GraphState { store, identity });
+    let app = this::graph::graph_routes(this::graph::GraphState {
+        store,
+        identity,
+        scope: None,
+    });
     let response = app
         .oneshot(
             Request::builder()
@@ -884,5 +888,224 @@ async fn without_a_declared_policy_the_graph_reads_stay_public() {
     assert!(
         json["store"]["nodes"].as_u64().is_some(),
         "le relief répond sans politique : {json}"
+    );
+}
+
+/// **La granularité appliquée par requête.** Avec `graph.policy` déclarée, la
+/// lecture n'est pas seulement autorisée ou refusée : elle est **filtrée par la
+/// décision du demandeur**. Deux principes, deux lectures différentes de la même
+/// base — et ce qui est masqué est **compté**.
+#[tokio::test]
+async fn the_graph_read_is_filtered_by_the_callers_own_decision() {
+    use std::sync::Arc as StdArc;
+
+    use axum::Router;
+    use axum::body::Body;
+    use axum::extract::Extension;
+    use axum::http::{Method, Request, StatusCode};
+    use tower::ServiceExt;
+
+    use this::config::{EntityAuthConfig, EntityConfig, LinksConfig, ServerSecurityConfig};
+    use this::core::auth::{AuthContext, AuthResolverRegistry};
+    use this::core::link::LinkDefinition;
+    use this::server::RestExposure;
+    use this::server::builder::ServerBuilder;
+    use this::server::entity_registry::{EntityDescriptor, EntityRegistry};
+    use this::storage::iam::RoleGrant;
+
+    struct Orders;
+    impl EntityDescriptor for Orders {
+        fn entity_type(&self) -> &str {
+            "order"
+        }
+        fn plural(&self) -> &str {
+            "orders"
+        }
+        fn build_routes(&self) -> Router {
+            Router::new()
+        }
+    }
+
+    // Une base : un groupe lisible, un secret qui ne l'est pas.
+    let store = ObrainStore::new_in_memory();
+    let root = {
+        let session = store.db().session();
+        let root = session.create_node_with_props(
+            &["Group"],
+            [("name", obrain_common::types::Value::from("collectif"))],
+        );
+        let lisible = session.create_node_with_props(
+            &["Group"],
+            [("name", obrain_common::types::Value::from("visible"))],
+        );
+        let secret = session.create_node_with_props(
+            &["Secret"],
+            [("name", obrain_common::types::Value::from("confiance"))],
+        );
+        session.create_edge(root, lisible, "CONTAINS");
+        session.create_edge(root, secret, "CONTAINS");
+        store.commit_wal().expect("commit");
+        root.as_u64()
+    };
+
+    let tenant = uuid::Uuid::from_u128(7);
+    let lecteur = uuid::Uuid::from_u128(1);
+    let aveugle = uuid::Uuid::from_u128(2);
+    store
+        .iam()
+        .materialize(
+            &lecteur.to_string(),
+            &tenant.to_string(),
+            &[RoleGrant {
+                role: "lecteur".into(),
+                permissions: vec![
+                    "graph:read".into(),
+                    "node:read:Group".into(),
+                    "edge:read:CONTAINS".into(),
+                    "echelle:read:groupe".into(),
+                ],
+            }],
+        )
+        .expect("matérialisation du lecteur");
+    store
+        .iam()
+        .materialize(
+            &aveugle.to_string(),
+            &tenant.to_string(),
+            &[RoleGrant {
+                role: "aveugle".into(),
+                permissions: vec!["graph:read".into()],
+            }],
+        )
+        .expect("matérialisation de l'aveugle");
+
+    let security = ServerSecurityConfig {
+        graph: this::config::server::GraphExposureConfig {
+            policy: Some("perm:graph:read".to_string()),
+        },
+        ..Default::default()
+    };
+    let mut registry = EntityRegistry::new();
+    registry.register(Box::new(Orders));
+    let host = ServerBuilder::new()
+        .with_server_security(security)
+        .with_obrain_store(StdArc::clone(&store))
+        .build_host()
+        .expect("hôte");
+    let app = RestExposure::build_router(StdArc::new(host), vec![]).expect("routeur");
+
+    let call = |app: Router, user: uuid::Uuid, uri: &'static str| async move {
+        let app = app.layer(Extension(AuthContext::User {
+            user_id: user,
+            tenant_id: tenant,
+            roles: vec![],
+        }));
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri(uri)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .expect("réponse");
+        (response.status(), response)
+    };
+
+    let body_of = |response: axum::response::Response| async move {
+        let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+            .await
+            .expect("corps");
+        String::from_utf8(bytes.to_vec()).expect("utf8")
+    };
+
+    // **Le lecteur** : il voit le groupe, pas le secret — et le masquage est dit.
+    let (status, response) = call(
+        app.clone(),
+        lecteur,
+        Box::leak(format!("/graph/hierarchy/{root}?echelle=groupe").into_boxed_str()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let body = body_of(response).await;
+    assert!(
+        body.contains("visible"),
+        "le groupe lisible est là : {body}"
+    );
+    assert!(
+        !body.contains("confiance"),
+        "le secret ne doit PAS apparaître : {body}"
+    );
+    let json: serde_json::Value = serde_json::from_str(&body).expect("json");
+    assert_eq!(json["levels"][0]["hidden"], 1, "et il est compté : {json}");
+
+    // **L'aveugle** : `graph:read` seul ne donne aucun label — il ne voit rien,
+    // et les notes le lui disent.
+    let (status, response) = call(
+        app.clone(),
+        aveugle,
+        Box::leak(format!("/graph/hierarchy/{root}").into_boxed_str()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "autorisé, mais sans périmètre");
+    let body = body_of(response).await;
+    let json: serde_json::Value = serde_json::from_str(&body).expect("json");
+    assert!(
+        json["levels"].as_array().is_some_and(|l| l.is_empty()),
+        "aucun label n'est lisible sans `node:read:` : {json}"
+    );
+    // **Le compte ne fuit pas** : la racine n'annonce pas ce qu'elle cache.
+    // C'est la fuite la plus discrète — la structure sans le contenu.
+    assert_eq!(
+        json["root"]["children"], 0,
+        "la racine ne doit pas annoncer le nombre d'enfants cachés : {json}"
+    );
+    assert!(
+        body.contains("ni parcourues ni comptées"),
+        "et l'absence de relations lisibles est expliquée, SANS publier de compte : {json}"
+    );
+
+    // **Le relief aussi** : la forme du store suit la même décision.
+    let (status, response) = call(app, lecteur, "/graph").await;
+    assert_eq!(status, StatusCode::OK);
+    let body = body_of(response).await;
+    let json: serde_json::Value = serde_json::from_str(&body).expect("json");
+    let labels: Vec<&str> = json["store"]["labels"]
+        .as_array()
+        .expect("labels")
+        .iter()
+        .filter_map(|l| l["name"].as_str())
+        .collect();
+    assert_eq!(labels, vec!["Group"], "seul le label lisible : {labels:?}");
+    // Le `Secret` n'est pas publié — et le compte dit qu'il y a bien des labels
+    // hors périmètre. Ceux de l'IAM en font partie : un lecteur de connaissances
+    // n'a pas à voir les labels internes de l'autorisation.
+    assert!(
+        !labels.contains(&"Secret"),
+        "le label hors périmètre ne doit pas être publié : {labels:?}"
+    );
+    let hidden = json["store"]["hidden_labels"].as_u64().expect("compte");
+    assert!(
+        hidden >= 1,
+        "et le masquage est compté ({hidden}) : {}",
+        json["store"]
+    );
+    let _ = (
+        EntityAuthConfig::default(),
+        EntityConfig {
+            singular: "order".to_string(),
+            plural: "orders".to_string(),
+            auth: EntityAuthConfig::default(),
+        },
+        LinksConfig {
+            entities: vec![],
+            links: Vec::<LinkDefinition>::new(),
+            validation_rules: None,
+            events: None,
+            sinks: None,
+            auth: None,
+        },
+        AuthResolverRegistry::new(),
     );
 }

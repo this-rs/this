@@ -230,11 +230,45 @@ fn labels_of(store: &ObrainStore, node: obrain_common::types::NodeId) -> Vec<Str
         .unwrap_or_default()
 }
 
+/// Les enfants **visibles** d'un nœud, et combien sont masqués.
+fn visible_children(
+    store: &ObrainStore,
+    node: obrain_common::types::NodeId,
+    spec: &HierarchySpec,
+    scope: &ReadScope,
+) -> (usize, usize, bool) {
+    if scope.is_unrestricted() {
+        return (contained_children(store, node, spec).len(), 0, false);
+    }
+    let mut visible = 0usize;
+    let mut hidden = 0usize;
+    let mut illisible = false;
+    for (child, edge_type) in contained_children(store, node, spec) {
+        // **Une relation non lisible n'est pas comptée.** La compter révélerait,
+        // par un nombre, la structure de ce qu'on n'a pas le droit de voir : on
+        // ne publie que le FAIT qu'il existe des relations hors périmètre.
+        if !scope.may_read_edge(&edge_type) {
+            illisible = true;
+            continue;
+        }
+        if labels_of(store, child)
+            .iter()
+            .any(|l| scope.may_read_node(l))
+        {
+            visible += 1;
+        } else {
+            hidden += 1;
+        }
+    }
+    (visible, hidden, illisible)
+}
+
 /// Décrit un nœud de la vue.
 fn describe_node(
     store: &ObrainStore,
     id: obrain_common::types::NodeId,
     spec: &HierarchySpec,
+    scope: &ReadScope,
 ) -> HierarchyNode {
     let labels = <ObrainStore as GraphBackend>::get_node(store, id)
         .map(|node| {
@@ -245,7 +279,10 @@ fn describe_node(
         })
         .unwrap_or_default();
     let properties = <ObrainStore as GraphBackend>::node_properties(store, id);
-    let children = contained_children(store, id, spec).len();
+    // **Le compte passe par le périmètre.** Compter tous les enfants
+    // révélerait, par un simple nombre, ce qu'un lecteur n'a pas le droit de
+    // voir — la fuite la plus discrète : la structure sans le contenu.
+    let (children, hidden, _) = visible_children(store, id, spec, scope);
 
     HierarchyNode {
         id: id.as_u64(),
@@ -253,7 +290,7 @@ fn describe_node(
         name: name_of(&properties),
         children,
         expanded: false,
-        hidden: 0,
+        hidden,
         drill_down: format!("/graph/hierarchy/{}?depth=1", id.as_u64()),
     }
 }
@@ -285,6 +322,7 @@ pub fn describe_scoped(
     let mut frontier: Vec<obrain_common::types::NodeId> = vec![root];
 
     let mut hidden_total = 0usize;
+    let mut edge_illisible = false;
 
     for depth in 1..=spec.max_depth {
         let mut current: Vec<obrain_common::types::NodeId> = Vec::new();
@@ -292,9 +330,11 @@ pub fn describe_scoped(
         for parent in &frontier {
             for (child, edge_type) in contained_children(store, *parent, &spec) {
                 // **Le tissage, en lecture** : une relation dont on n'a pas le
-                // droit de lire le type n'est pas traversée.
+                // droit de lire le type n'est ni traversée NI COMPTÉE — la
+                // compter décrirait une structure hors périmètre. On retient
+                // seulement qu'il en existe, pour le dire en note.
                 if !scope.is_unrestricted() && !scope.may_read_edge(&edge_type) {
-                    hidden_here += 1;
+                    edge_illisible = true;
                     continue;
                 }
                 if visited.contains(&child) {
@@ -328,7 +368,7 @@ pub fn describe_scoped(
 
         let nodes = current
             .iter()
-            .map(|id| describe_node(store, *id, &spec))
+            .map(|id| describe_node(store, *id, &spec, scope))
             .collect::<Vec<_>>();
 
         // Le niveau suivant ne descend que les nœuds **montrés**.
@@ -369,6 +409,14 @@ pub fn describe_scoped(
             cycles.len()
         ));
     }
+    if edge_illisible {
+        notes.push(
+            "Des relations dont votre décision IAM ne couvre pas le TYPE ne sont ni parcourues ni \
+             comptées : leur nombre n'est pas publié, parce qu'il décrirait une structure que vous \
+             n'avez pas le droit de voir."
+                .to_string(),
+        );
+    }
     if hidden_total > 0 {
         notes.push(format!(
             "{hidden_total} nœud(s) MASQUÉ(s) par le périmètre de lecture : votre décision IAM ne              couvre pas leur label, ou pas le type de la relation qui y mène. Le compte est              publié pour que le masquage soit visible, jamais déduit."
@@ -376,7 +424,7 @@ pub fn describe_scoped(
     }
 
     Hierarchy {
-        root: describe_node(store, root, &spec),
+        root: describe_node(store, root, &spec, scope),
         depth: levels.len(),
         levels,
         cycles,

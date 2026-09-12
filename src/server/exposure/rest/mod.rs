@@ -99,12 +99,29 @@ impl RestExposure {
         // relief than a relief that would have to invent what it cannot read.
         #[cfg(feature = "obrain")]
         if let Some(store) = &host.graph_store {
-            app = app.merge(crate::graph::routes::graph_routes(
-                crate::graph::routes::GraphState {
-                    store: store.clone(),
-                    identity: host.identity.clone(),
-                },
-            ));
+            let mut state =
+                crate::graph::routes::GraphState::new(store.clone(), host.identity.clone());
+
+            // **Une politique déclarée rend la lecture filtrée.**
+            //
+            // Les deux vont ensemble : `graph.policy` dit qui a le droit de lire
+            // le graphe ; le périmètre, adossé à l'IAM, dit **ce que** ce lecteur
+            // voit — label par label, type de relation par type, échelle par
+            // échelle. Déclarer l'un sans brancher l'autre laisserait un appelant
+            // autorisé lire la base entière.
+            if host.security.graph.armed() {
+                let mut resolver = crate::graph::scope::IamScopeResolver::new(store.iam());
+                if let Some(mapping) = &host.principal_mapping {
+                    resolver = resolver.with_mapping(mapping.clone());
+                }
+                state = state.with_scope_resolver(std::sync::Arc::new(resolver));
+                tracing::info!(
+                    "lectures de graphe : politique + périmètre IAM (ce que le demandeur peut lire \
+                     décide de ce qu'il voit)"
+                );
+            }
+
+            app = app.merge(crate::graph::routes::graph_routes(state));
             tracing::info!("graph relief auto-wired (GET /graph)");
         }
 
