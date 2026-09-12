@@ -455,6 +455,8 @@ async fn the_multi_scale_view_is_served_by_the_router() {
     let app = this::graph::graph_routes(this::graph::GraphState {
         store: std::sync::Arc::clone(&store),
         identity: std::sync::Arc::new(IdentityRegistry::obrain_default()),
+        scope: None,
+        canvas: None,
     });
 
     // Les trois niveaux, en JSON.
@@ -533,6 +535,8 @@ async fn the_canvas_scales_drive_the_multi_scale_read() {
     let app = this::graph::graph_routes(this::graph::GraphState {
         store: std::sync::Arc::clone(&store),
         identity: std::sync::Arc::new(IdentityRegistry::obrain_default()),
+        scope: None,
+        canvas: None,
     });
 
     // `cosmos` : l'ensemble, agrégé — un cran, peu de nœuds par niveau.
@@ -579,4 +583,277 @@ async fn the_canvas_scales_drive_the_multi_scale_read() {
         body.contains("cosmos") && body.contains("groupe"),
         "le refus doit publier les échelles valides : {body}"
     );
+}
+
+// ===========================================================================
+// 7. L'INTERFACE ET LES DROITS, DE BOUT EN BOUT
+// ===========================================================================
+
+/// **Le Canvas propose, la décision dispose.**
+///
+/// Un utilisateur regarde un sujet à une échelle ; sa lecture part **de ce
+/// sujet**, **à cette échelle** — sans qu'il ait rien à traduire. Et son
+/// échelle est **plafonnée** par sa décision IAM : une interface qui demande
+/// plus que ce que les droits permettent reçoit un refus, jamais une vue
+/// tronquée en silence.
+#[tokio::test]
+async fn the_canvas_drives_the_read_and_the_decision_caps_it() {
+    use std::sync::Arc as StdArc;
+
+    use axum::Router;
+    use axum::body::Body;
+    use axum::extract::Extension;
+    use axum::http::{Method, Request, StatusCode};
+    use tower::ServiceExt;
+
+    use this::core::auth::AuthContext;
+    use this::core::identity::IdentityRegistry;
+    use this::graph::canvas::SimpleCanvasState;
+    use this::graph::routes::{GraphState, ScopeResolver};
+    use this::graph::scope::IamScopeResolver;
+    use this::storage::ObrainStore;
+    use this::storage::iam::RoleGrant;
+    use this::storage::permission::Scale;
+
+    // Une base : un sujet nommé, et deux sous-groupes.
+    let store = ObrainStore::new_in_memory();
+    let sujet = {
+        let session = store.db().session();
+        let racine = session.create_node_with_props(
+            &["Group"],
+            [
+                ("name", obrain_common::types::Value::from("aletheia")),
+                (
+                    "qualified_name",
+                    obrain_common::types::Value::from("aletheia"),
+                ),
+            ],
+        );
+        let enfant = session.create_node_with_props(
+            &["Group"],
+            [
+                ("name", obrain_common::types::Value::from("maths")),
+                (
+                    "qualified_name",
+                    obrain_common::types::Value::from("aletheia/maths"),
+                ),
+            ],
+        );
+        session.create_edge(racine, enfant, "CONTAINS");
+        let petit = session.create_node_with_props(
+            &["Group"],
+            [
+                ("name", obrain_common::types::Value::from("theoremes")),
+                (
+                    "qualified_name",
+                    obrain_common::types::Value::from("aletheia/maths/theoremes"),
+                ),
+            ],
+        );
+        session.create_edge(enfant, petit, "CONTAINS");
+        store.commit_wal().expect("commit");
+        racine.as_u64()
+    };
+
+    let utilisateur = uuid::Uuid::from_u128(11);
+    let tenant = uuid::Uuid::from_u128(7);
+    store
+        .iam()
+        .materialize(
+            &utilisateur.to_string(),
+            &tenant.to_string(),
+            &[RoleGrant {
+                role: "lecteur".into(),
+                permissions: vec![
+                    "graph:read".into(),
+                    "node:read:Group".into(),
+                    "edge:read:CONTAINS".into(),
+                    // Le droit s'arrête au groupe : pas de détail par nœud.
+                    "echelle:read:groupe".into(),
+                ],
+            }],
+        )
+        .expect("matérialisation");
+
+    // **Son état d'interface** : il regarde `aletheia`, à l'échelle `groupe`.
+    let canvas = StdArc::new(SimpleCanvasState::new());
+    canvas.set_subject(&utilisateur.to_string(), "xth", "aletheia");
+    canvas.set_scale(&utilisateur.to_string(), Scale::Groupe);
+
+    let resolver: StdArc<dyn ScopeResolver> = StdArc::new(IamScopeResolver::new(store.iam()));
+    let app = this::graph::graph_routes(
+        GraphState::new(
+            StdArc::clone(&store),
+            StdArc::new(IdentityRegistry::obrain_default()),
+        )
+        .with_scope_resolver(resolver)
+        .with_canvas(canvas.clone()),
+    );
+
+    let appel = |app: Router, uri: &'static str, identifie: bool| async move {
+        let app = if identifie {
+            app.layer(Extension(AuthContext::User {
+                user_id: utilisateur,
+                tenant_id: tenant,
+                roles: vec![],
+            }))
+        } else {
+            app
+        };
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri(uri)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .expect("réponse");
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+            .await
+            .expect("corps");
+        (status, String::from_utf8(bytes.to_vec()).expect("utf8"))
+    };
+
+    // **`self` + `echelle=canvas`** : la lecture part du sujet de l'interface, à
+    // l'échelle de l'interface. L'utilisateur n'a rien traduit.
+    let (status, body) = appel(app.clone(), "/graph/hierarchy/self?echelle=canvas", true).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let json: serde_json::Value = serde_json::from_str(&body).expect("json");
+    assert_eq!(
+        json["root"]["id"], sujet,
+        "la descente part du SUJET de l'interface : {json}"
+    );
+    assert_eq!(
+        json["depth"], 2,
+        "et à l'échelle déclarée (groupe → 4 niveaux au plus, 2 ici) : {json}"
+    );
+    assert_eq!(
+        json["levels"][1]["nodes"][0]["name"], "theoremes",
+        "les sous-groupes sont là : {json}"
+    );
+
+    // **Le plafond** : l'interface propose `noeud`, la décision s'arrête au
+    // groupe → refus, pas de vue tronquée en silence.
+    canvas.set_scale(&utilisateur.to_string(), Scale::Noeud);
+    let (status, body) = appel(app.clone(), "/graph/hierarchy/self?echelle=canvas", true).await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "l'échelle du canvas est PLAFONNÉE par la décision : {body}"
+    );
+    assert!(
+        body.contains("echelle_refusee") && body.contains("groupe"),
+        "et le refus dit jusqu'où le droit va : {body}"
+    );
+
+    // **Sans identification**, l'échelle du canvas n'existe pas : c'est une
+    // ressource personnelle.
+    let (status, body) = appel(app.clone(), "/graph/hierarchy/self?echelle=canvas", false).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+
+    // **Un sujet non déclaré** est dit, pas inventé.
+    let autre = uuid::Uuid::from_u128(99);
+    store
+        .iam()
+        .materialize(
+            &autre.to_string(),
+            &tenant.to_string(),
+            &[RoleGrant {
+                role: "lecteur".into(),
+                permissions: vec![
+                    "graph:read".into(),
+                    "node:read:Group".into(),
+                    "edge:read:CONTAINS".into(),
+                    "echelle:read:groupe".into(),
+                ],
+            }],
+        )
+        .expect("matérialisation");
+    let app_sans_sujet = this::graph::graph_routes(
+        GraphState::new(
+            StdArc::clone(&store),
+            StdArc::new(IdentityRegistry::obrain_default()),
+        )
+        .with_canvas(StdArc::new(SimpleCanvasState::new())),
+    );
+    let (status, body) = appel(app_sans_sujet, "/graph/hierarchy/self?echelle=canvas", true).await;
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "un utilisateur sans sujet déclaré ne part pas « de nulle part » : {body}"
+    );
+    assert!(body.contains("sujet_non_declare"), "{body}");
+
+    // **L'état d'interface est relu à CHAQUE requête** : l'utilisateur redescend
+    // à l'échelle `groupe`, et la lecture suit — sans redémarrage, sans cache.
+    canvas.set_scale(&utilisateur.to_string(), Scale::Groupe);
+    let (status, body) = appel(app.clone(), "/graph/hierarchy/self?echelle=canvas", true).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "revenir à une échelle permise rouvre la lecture : {body}"
+    );
+    let json: serde_json::Value = serde_json::from_str(&body).expect("json");
+    assert_eq!(
+        json["depth"], 2,
+        "et c'est bien l'échelle RELUE qui décide : {json}"
+    );
+
+    // **Sans état d'interface branché**, la forme est refusée explicitement —
+    // jamais interprétée comme « aucun sujet ».
+    let sans_canvas = this::graph::graph_routes(GraphState::new(
+        StdArc::clone(&store),
+        StdArc::new(IdentityRegistry::obrain_default()),
+    ));
+    let (status, body) = appel(sans_canvas, "/graph/hierarchy/self?echelle=canvas", true).await;
+    assert_eq!(status, StatusCode::NOT_IMPLEMENTED, "{body}");
+    assert!(body.contains("canvas_absent"), "{body}");
+
+    // **Un sujet plus profond se résout par le MÊME mécanisme** : la lecture ne
+    // dépend pas de la racine, seulement de ce que l'interface regarde.
+    let sujet_intermediaire = {
+        let app = this::graph::graph_routes(
+            GraphState::new(
+                StdArc::clone(&store),
+                StdArc::new(IdentityRegistry::obrain_default()),
+            )
+            .with_canvas({
+                let c = StdArc::new(SimpleCanvasState::new());
+                c.set_subject(&utilisateur.to_string(), "xth", "aletheia/maths");
+                c.set_scale(&utilisateur.to_string(), Scale::Groupe);
+                c
+            }),
+        );
+        appel(app, "/graph/hierarchy/self?echelle=canvas", true).await
+    };
+    assert_eq!(
+        sujet_intermediaire.0,
+        StatusCode::OK,
+        "{}",
+        sujet_intermediaire.1
+    );
+    let json: serde_json::Value = serde_json::from_str(&sujet_intermediaire.1).expect("json");
+    assert_eq!(
+        json["root"]["name"], "maths",
+        "le sujet déclaré devient le point de départ : {json}"
+    );
+    assert_eq!(
+        sujet_existe(&store, "aletheia/maths/theoremes"),
+        1,
+        "et le nœud le plus profond existe bien — le même sujet aurait pu le désigner"
+    );
+}
+
+/// Le nœud d'un `qualified_name` existe-t-il, et combien de fois ?
+fn sujet_existe(store: &this::storage::ObrainStore, qn: &str) -> usize {
+    use this::storage::GraphBackend;
+    <this::storage::ObrainStore as GraphBackend>::find_nodes_by_property(
+        store,
+        "qualified_name",
+        &obrain_common::types::Value::from(qn),
+    )
+    .len()
 }

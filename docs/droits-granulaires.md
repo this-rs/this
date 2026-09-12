@@ -126,3 +126,40 @@ ne répond pas ne doit pas ressembler à un IAM qui autorise.
 Pour remplacer le résolveur (une couture, pas une politique en dur) :
 `GraphState::with_scope_resolver(...)`, ou `IamScopeResolver` avec le mappage
 d'identité de l'application.
+
+## L'interface et les droits, de bout en bout
+
+Un Canvas décrit ce qu'il montre par une **échelle** et un **sujet**. La lecture
+de graphe savait demander une profondeur et un identifiant. Les deux parlent
+maintenant la même langue :
+
+```bash
+GET /graph/hierarchy/self?echelle=canvas     # mon sujet, à mon échelle
+GET /graph/hierarchy/self?format=outline     # lisible par un modèle
+```
+
+* **`echelle=canvas`** prend l'échelle que l'utilisateur a sous les yeux ;
+* **`self`** prend le sujet qu'il regarde — résolu par son `qualified_name` dans
+  l'espace servi ;
+* **la décision IAM plafonne** : une interface qui demande `noeud` quand le droit
+  s'arrête à `groupe` reçoit **403**, avec `finest` qui dit jusqu'où le droit va ;
+* **l'état est relu à chaque requête** (pas de cache) : changer d'échelle change
+  la lecture ;
+* **rien n'est inventé** : pas d'état d'interface branché → `501` ; pas de sujet
+  déclaré → `404` ; pas d'identification → `401` ; sujet ambigu (deux nœuds du
+  même nom) → `409`. Jamais « partir de nulle part ».
+
+Le framework **ne connaît pas** l'implémentation de l'état d'interface : il
+déclare le contrat `CanvasState` (`scale_of`, `subject_of`), et l'application
+l'implémente. C'est une couture : l'interface peut évoluer — faces, panneaux,
+sujet enrichi — sans que la lecture de graphe change, et l'inverse est vrai
+aussi. Une implémentation en mémoire (`SimpleCanvasState`) sert aux tests et à
+l'exemple.
+
+```bash
+cargo run --features obrain --example canvas_inference
+```
+
+Cet exemple déroule les cinq étapes sur le routeur réel : la lecture part du
+sujet, le masquage est compté, le plafond refuse, le relief suit la même
+décision, et le sujet est résolu depuis l'interface — jamais depuis le chemin.

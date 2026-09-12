@@ -170,15 +170,19 @@ all = ["in-memory", "dynamodb", "postgres", "mongodb_backend", "neo4j", "scyllad
 name = "this"
 path = "src/lib.rs"
 
+
 [[example]]
 name = "domain_harness"
 path = "examples/domain_harness.rs"
+# L'exemple a besoin du client : sans la feature, il ne doit pas être construit
+# par `--all-targets`, sinon un consommateur qui ne l'active pas échoue à la
+# compilation d'un exemple qu'il n'utilise pas.
+required-features = ["powerdns"]
 
 [[example]]
 name = "caddyfile"
 path = "examples/caddyfile.rs"
 required-features = []
-
 [[example]]
 name = "simple_api"
 path = "examples/simple_api/main.rs"
@@ -199,6 +203,11 @@ required-features = ["graphql"]
 # Serveur multi-protocoles (REST + GraphQL + gRPC + WebSocket + SSE) au-dessus
 # d'un store obrain aletheia (noeuds `Page` / `Problem` / `Lemma` / `Gate`).
 # Voir examples/ALETHEIA-SERVER.md pour le runbook de deploiement.
+[[example]]
+name = "aletheia_server"
+path = "examples/aletheia_server.rs"
+required-features = ["obrain", "graphql", "grpc", "websocket"]
+
 # Le plus petit serveur qui publie le relief d'obrain sur REST : aucun catalogue
 # tenu à la main, le document se décrit depuis le registre du moteur.
 [[example]]
@@ -232,4 +241,9 @@ required-features = ["obrain"]
 [[example]]
 name = "relief_bench"
 path = "examples/relief_bench.rs"
+required-features = ["obrain"]
+
+[[example]]
+name = "canvas_inference"
+path = "examples/canvas_inference.rs"
 required-features = ["obrain"]

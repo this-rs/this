@@ -284,6 +284,7 @@ async fn relief_json(store: Arc<ObrainStore>) -> Json {
         store,
         identity,
         scope: None,
+        canvas: None,
     });
     let response = app
         .oneshot(
