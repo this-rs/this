@@ -183,6 +183,22 @@ impl From<anyhow::Error> for IamError {
 /// Ne détient pas de cache : chaque appel lit le store. La matérialisation est ce
 /// qui rend cette lecture bon marché — pas un cache applicatif, qui serait une
 /// seconde source de vérité à invalider.
+/// # Modèle de confiance — à connaître avant de s'appuyer dessus
+///
+/// Une décision est un **nœud du store**, protégé par la seule intégrité du
+/// store : ni signature, ni MAC. Conséquences, mesurées par les tests de
+/// sécurité (`tests/security_iam.rs`) :
+///
+/// * **qui peut écrire dans le store peut accorder des permissions** — c'est la
+///   frontière de confiance réelle, et elle est plus basse que l'IAM ;
+/// * deux nœuds portant la même clé d'ACL rendent la décision **ambiguë, donc
+///   refusée** — l'ordre de l'index ne décide jamais ;
+/// * le **journal** ordonné n'est pas non plus à chaîne de hachage : une entrée
+///   supprimée laisse un **trou visible** (`seq` manquant), pas une preuve.
+///
+/// Ce n'est pas une faiblesse cachée : c'est la frontière. La protéger demande
+/// un store dont on maîtrise les écritures, et le bail d'écriture
+/// (`storage::writer_lease`) pour n'en avoir qu'un.
 #[derive(Clone)]
 pub struct Iam {
     store: Arc<ObrainStore>,
@@ -209,6 +225,56 @@ impl Iam {
     ///
     /// La portée vient **en premier** : c'est elle qui isole deux locataires, et
     /// un préfixe commun rend les clés lisibles à l'œil comme au débogage.
+    ///
+    /// # Sécurité — ce que la clé garantit, et ce qu'elle ne garantit pas
+    ///
+    /// Les deux parties sont jointes par un **US (0x1F)** : deux couples
+    /// distincts ne peuvent pas produire la même clé **tant qu'aucune partie ne
+    /// contient ce caractère** (avec `/`, `("a/b","c")` et `("a","b/c")`
+    /// collisionnaient — une décision écrasait l'autre).
+    ///
+    /// Un séparateur ne peut pas être injectif par lui-même : `("a\u{1f}b","c")`
+    /// et `("a","b\u{1f}c")` produisent la même clé. Le plan **refuse** donc
+    /// toute partie contenant un caractère de contrôle (voir
+    /// [`Iam::validate_identity_part`]) : la collision devient impossible au lieu
+    /// d'être improbable. Un mappage d'identité qui fabriquerait un principal à
+    /// partir d'un en-tête brut s'en trouve protégé.
+    /// Refuse une partie d'identité qui pourrait casser l'injectivité de la clé.
+    ///
+    /// Un nom **vide** : il se confondrait avec « pas de principal ».
+    /// Un caractère de **contrôle** (dont l'US séparateur) : il permettrait à un
+    /// nom d'en usurper un autre — `("a\u{1f}b","c")` et `("a","b\u{1f}c")`
+    /// donneraient la même clé.
+    ///
+    /// Fail-closed : ces identités-là ne sont pas « nettoyées », elles sont
+    /// **refusées**. Échapper silencieusement un nom d'utilisateur serait pire —
+    /// deux noms distincts deviendraient une seule identité.
+    fn validate_identity_part(part: &str, value: &str) -> Result<(), IamError> {
+        if value.is_empty() {
+            return Err(IamError::Malformed {
+                node: format!("identité ({part})"),
+                reason: "vide : se confondrait avec « pas de principal »".to_string(),
+            });
+        }
+        if let Some(bad) = value.chars().find(|c| c.is_control()) {
+            return Err(IamError::Malformed {
+                node: format!("identité ({part})"),
+                reason: format!(
+                    "contient un caractère de contrôle (U+{:04X}) : il permettrait à ce nom \
+                     d'en usurper un autre dans la clé d'ACL",
+                    bad as u32
+                ),
+            });
+        }
+        Ok(())
+    }
+
+    /// Valide un couple avant toute écriture ou lecture indexée.
+    fn validate_identity(scope: &str, principal: &str) -> Result<(), IamError> {
+        Self::validate_identity_part("portée", scope)?;
+        Self::validate_identity_part("principal", principal)
+    }
+
     pub fn acl_key(scope: &str, principal: &str) -> String {
         // Séparateur US (0x1F) : avec un `/`, `("a/b", "c")` et `("a", "b/c")`
         // produisaient la MÊME clé — la seconde décision écrasait la première,
@@ -258,7 +324,9 @@ impl Iam {
         &self,
         principal: &str,
     ) -> Result<Option<obrain_common::types::NodeId>, IamError> {
-        let hits = self.store.db().find_nodes_by_property(
+        // **Espace actif** : l'index racine ignorerait l'espace courant, et deux
+        // espaces pourraient se répondre l'un l'autre.
+        let hits = self.store.active_store().find_nodes_by_property(
             PRINCIPAL_QN_PROP,
             &obrain_common::types::Value::from(principal),
         );
@@ -266,12 +334,32 @@ impl Iam {
     }
 
     /// Le nœud de décision d'une clé, s'il existe — **par index**.
+    /// Le nœud de décision d'une clé, s'il existe — **par index, dans l'espace actif**.
+    ///
+    /// # Deux nœuds pour la même clé ⇒ refus
+    ///
+    /// Rien n'empêche d'écrire un second nœud portant la même `acl_key` : c'est à
+    /// la portée de qui peut écrire dans le store (voir la limite de confiance
+    /// documentée sur [`Iam`]). Rendre « le premier trouvé » donnerait une
+    /// décision **dépendante de l'ordre de l'index** — un attaquant pourrait la
+    /// faire basculer en ajoutant un nœud. Une ambiguïté n'est pas une décision :
+    /// on refuse.
     fn acl_node(&self, key: &str) -> Result<Option<obrain_common::types::NodeId>, IamError> {
         let hits = self
             .store
-            .db()
+            .active_store()
             .find_nodes_by_property(ACL_KEY_PROP, &obrain_common::types::Value::from(key));
-        Ok(hits.into_iter().next())
+        match hits.len() {
+            0 => Ok(None),
+            1 => Ok(hits.into_iter().next()),
+            n => Err(IamError::Malformed {
+                node: key.to_string(),
+                reason: format!(
+                    "{n} nœuds de décision portent cette clé d'ACL — décision AMBIGUË, donc \
+                     refusée : une décision qui dépend de l'ordre de l'index n'en est pas une"
+                ),
+            }),
+        }
     }
 
     /// **Matérialise** la décision d'un principal dans une portée.
@@ -286,6 +374,7 @@ impl Iam {
         scope: &str,
         roles: &[RoleGrant],
     ) -> Result<AclStamp, IamError> {
+        Self::validate_identity(scope, principal)?;
         let key = Self::acl_key(scope, principal);
 
         let mut permissions: Vec<String> = roles
@@ -419,6 +508,7 @@ impl Iam {
         let mut stamps = Vec::with_capacity(batch.len());
 
         for pending in batch {
+            Self::validate_identity(pending.scope, pending.principal)?;
             let key = Self::acl_key(pending.scope, pending.principal);
             let mut permissions: Vec<String> = pending
                 .roles
@@ -529,6 +619,7 @@ impl Iam {
 
     /// **La décision** : une seule recherche indexée, aucune traversée.
     pub fn decision(&self, principal: &str, scope: &str) -> Result<Option<AclStamp>, IamError> {
+        Self::validate_identity(scope, principal)?;
         let key = Self::acl_key(scope, principal);
         let Some(node) = self.acl_node(&key)? else {
             return Ok(None);
@@ -602,6 +693,7 @@ impl Iam {
     /// Invalide la décision : l'époque avance, les stamps mémorisés deviennent
     /// **détectablement** périmés.
     pub fn invalidate(&self, principal: &str, scope: &str) -> Result<u64, IamError> {
+        Self::validate_identity(scope, principal)?;
         let key = Self::acl_key(scope, principal);
         let Some(node) = self.acl_node(&key)? else {
             return Ok(0);
