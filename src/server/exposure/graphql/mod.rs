@@ -71,6 +71,34 @@ impl GraphQLExposure {
     /// let graphql_app = GraphQLExposure::build_router(host)?;
     /// ```
     pub fn build_router(host: Arc<ServerHost>) -> Result<Router> {
+        // **Fail-closed** : GraphQL n'est pas résolu par route, donc aucune
+        // politique `auth:` ne peut s'y rattacher. Servir cette surface armée
+        // publierait les entités sans leur politique — jusqu'aux mutations.
+        crate::server::exposure::refuse_unenforced_surface(
+            &host,
+            "GraphQL",
+            "GraphQLExposure::build_router_unenforced",
+        )?;
+        Self::build_router_unenforced(host)
+    }
+
+    /// Comme [`GraphQLExposure::build_router`], en **acceptant explicitement**
+    /// que les politiques `auth:` ne s'appliquent pas ici.
+    ///
+    /// # Ce que vous acceptez
+    ///
+    /// Un client GraphQL atteint les entités — **lecture et mutation** — sans
+    /// que les politiques déclarées soient consultées. Si vos entités portent
+    /// des `auth:` (`admin_only`, `perm:…`), elles ne valent que pour le REST.
+    ///
+    /// À n'utiliser que si (a) toutes vos entités sont publiques pour qui
+    /// atteint le port, ou (b) vous appliquez vous-même le contrôle dans vos
+    /// résolveurs. L'appel est journalisé en avertissement, à chaque montage.
+    pub fn build_router_unenforced(host: Arc<ServerHost>) -> Result<Router> {
+        crate::server::exposure::warn_unenforced_surface(
+            "GraphQL",
+            "GraphQLExposure::build_router_unenforced",
+        );
         // Create the GraphQL router with playground, query endpoint, and schema endpoint
         // The executor will be created lazily on first request
         let mut router = Router::new()

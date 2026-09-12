@@ -387,6 +387,63 @@ fn the_published_contract_matches_the_schema_constants() {
     assert_eq!(IAM_SCHEMA, "this-rs/iam/2");
 }
 
+/// **La carte des surfaces est publiée** : un consommateur — un tableau de bord,
+/// un audit — voit quelles surfaces appliquent les politiques, lesquelles non,
+/// et ce qui les protège à défaut. Un protocole oublié serait un protocole non
+/// appliqué.
+#[tokio::test]
+async fn the_relief_publishes_which_surfaces_enforce_policies() {
+    let json = relief_json(producer_store()).await;
+    let surfaces = json["surfaces"].as_array().expect("surfaces");
+
+    let find = |name: &str| {
+        surfaces
+            .iter()
+            .find(|s| s["surface"] == name)
+            .unwrap_or_else(|| panic!("la surface `{name}` doit être publiée"))
+            .clone()
+    };
+
+    // REST applique, et le dit.
+    let rest = find("rest");
+    assert_eq!(rest["enforces_policies"], true);
+    assert_eq!(
+        rest["origin"], "declared",
+        "la provenance est publiée en clair"
+    );
+    assert!(
+        rest["mechanism"]
+            .as_str()
+            .is_some_and(|m| m.contains("middleware")),
+        "le mécanisme doit être nommé : {rest}"
+    );
+
+    // Les surfaces hors REST n'appliquent pas — et c'est publié, avec ce qui les
+    // protège à défaut et l'acceptation explicite requise.
+    for surface in ["graphql", "grpc", "websocket"] {
+        let entry = find(surface);
+        assert_eq!(
+            entry["enforces_policies"], false,
+            "`{surface}` ne peut pas appliquer les politiques : cela doit être publié"
+        );
+        let otherwise = entry["otherwise"].as_str().expect("otherwise");
+        assert!(
+            otherwise.contains("REFUSE") || otherwise.contains("refus"),
+            "la carte doit dire que le framework refuse de la monter : {otherwise}"
+        );
+    }
+
+    // Et l'ensemble est cohérent : toute surface publiée dit ce qu'elle sert.
+    for surface in surfaces {
+        assert!(
+            surface["mounted_at"]
+                .as_array()
+                .is_some_and(|paths| !paths.is_empty()),
+            "une surface sans chemin publié n'informe personne : {surface}"
+        );
+    }
+}
+
 // ===========================================================================
 // 4. CONSOMMATEUR QUI APPLIQUE LES POLITIQUES
 // ===========================================================================

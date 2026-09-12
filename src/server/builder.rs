@@ -823,7 +823,35 @@ impl ServerBuilder {
         let host = Arc::new(self.build_host()?);
 
         let rest_router = RestExposure::build_router(host.clone(), custom_routes)?;
+        // **Fail-closed** : ce raccourci montait REST (politiques appliquées) et
+        // gRPC (aucune politique) dans le MÊME routeur, sans un mot. Un client
+        // gRPC atteignait donc les entités protégées sans leur politique. Il
+        // refuse maintenant, et l'application qui accepte le risque le dit.
         let grpc_router = GrpcExposure::build_router_no_fallback(host)?;
+
+        Ok(combine_rest_and_grpc(rest_router, grpc_router))
+    }
+
+    /// Comme [`ServerBuilder::build_with_grpc`], en **acceptant explicitement**
+    /// que gRPC ne soit pas soumis aux politiques `auth:`.
+    ///
+    /// # Ce que vous acceptez
+    ///
+    /// Le routeur REST applique vos politiques ; le routeur gRPC, non — ses
+    /// opérations ne sont pas résolues par route. Un client gRPC atteint donc
+    /// les entités que le REST refuse. À n'utiliser que si vous appliquez le
+    /// contrôle ailleurs (authentification réseau, résolveurs) ou si vos entités
+    /// sont publiques pour qui atteint le port.
+    #[cfg(feature = "grpc")]
+    pub fn build_with_grpc_unenforced(mut self) -> Result<Router> {
+        use super::exposure::grpc::GrpcExposure;
+        use super::router::combine_rest_and_grpc;
+
+        let custom_routes = std::mem::take(&mut self.custom_routes);
+        let host = Arc::new(self.build_host()?);
+
+        let rest_router = RestExposure::build_router(host.clone(), custom_routes)?;
+        let grpc_router = GrpcExposure::build_router_no_fallback_unenforced(host)?;
 
         Ok(combine_rest_and_grpc(rest_router, grpc_router))
     }

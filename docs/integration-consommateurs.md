@@ -166,6 +166,31 @@ let perms: Vec<String> = serde_json::from_str(
 
 ---
 
+## 3 bis. Quelles surfaces appliquent vos politiques
+
+Ce n'est pas une note de bas de page : c'est la question qui décide si vos
+`auth:` protègent quelque chose. La réponse est **publiée** par le relief
+(`surfaces`), et vérifiée par des tests.
+
+| Surface | Chemins | Politiques appliquées ? | Sinon, ce qui protège |
+|---|---|---|---|
+| **REST** | `/{plural}`, `/{plural}/{id}`, `/{plural}/{id}/{route}`, `/{plural}/{id}/{cible}/{id}`, `/links/{id}`, `/events/stream`, `/notifications/{user_id}/…`, `/device-tokens/{user_id}`, `/graph…`, `/gdpr/…`, `/auth/…`, `/health` | **oui** — pluriel + méthode + nombre de segments → opération → politique | les chemins hors routes d'entité s'abstiennent : `/health` et `/auth/*` sont publics par nature ; `/graph/*` est descriptif ; `/gdpr/*` exige un administrateur **dans le handler** ; `/notifications/*` et `/device-tokens/*` comparent l'identifiant du chemin à celui de l'appelant ; `/events/stream` est borné au locataire de l'appelant |
+| **GraphQL** | `/graphql`, `/graphql/playground`, `/graphql/schema`, `/graphql/ws` | **non** | le framework **refuse de la monter** si des politiques sont armées ; l'application doit accepter explicitement (`build_router_unenforced`) |
+| **gRPC** | le routeur tonic | **non** | même refus, même acceptation (`build_with_grpc_unenforced`) |
+| **WebSocket** | `/ws` | **non** | même refus, même acceptation |
+
+**Pourquoi GraphQL/gRPC/WebSocket ne peuvent pas appliquer les politiques** :
+elles ne sont pas résolues par route. Le middleware REST lit le pluriel, la
+méthode et le nombre de segments pour en déduire une opération ; une requête
+GraphQL ne dit rien de tout cela — le contrôle devrait être fait **par
+opération**, dans les résolveurs. En attendant, le choix du framework est de
+**refuser** plutôt que de publier des entités sans leur politique.
+
+Si vous montez ces surfaces avec l'acceptation explicite, sachez ce que cela
+veut dire : **un client GraphQL atteint vos entités en lecture ET en mutation**
+sans passer par les `auth:` déclarées. Traitez ces surfaces comme un accès
+interne, ou appliquez le contrôle vous-même.
+
 ## 4. La frontière de confiance — à connaître avant de s'appuyer dessus
 
 Publiée dans le relief (`iam.trust`), et **testée comme telle** dans

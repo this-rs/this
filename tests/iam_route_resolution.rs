@@ -112,6 +112,7 @@ fn distinct_per_operation(prefix: &str) -> EntityAuthConfig {
         list_links: format!("{prefix}:list_links"),
         create_link: format!("{prefix}:create_link"),
         delete_link: format!("{prefix}:delete_link"),
+        ..Default::default()
     }
 }
 
@@ -364,6 +365,44 @@ fn superfluous_slashes_and_a_missing_leading_slash_reach_the_same_operation() {
 }
 
 /// Les formes hors contrat s'abstiennent : jamais de politique extrapolée.
+/// **Toute forme que le routeur sert est jugée.** C'est la contrepartie du test
+/// précédent : le périmètre des abstentions ne doit pas couvrir des chemins que
+/// le routeur sert réellement (repli des liens inclus).
+#[test]
+fn every_served_shape_is_judged() {
+    let authz = authorization(
+        vec![entity_config(
+            "order",
+            "orders",
+            distinct_per_operation("order"),
+        )],
+        &[("order", "orders")],
+    );
+
+    let judged = [
+        // Routeur de liens : 3 segments (lecture), 4 segments (écriture de lien).
+        (Method::GET, "/orders/42/invoices"),
+        (Method::POST, "/orders/42/invoices/7"),
+        (Method::PUT, "/orders/42/invoices/7"),
+        (Method::DELETE, "/orders/42/invoices/7"),
+        // Repli : les chemins profonds sont servis, donc jugés.
+        (Method::GET, "/orders/42/a/b/c"),
+        (Method::GET, "/orders/42/a/b/c/d"),
+        (Method::GET, "/orders/42/a/b/c/d/e/f"),
+        // Création à 5 segments (forme canonique).
+        (Method::POST, "/orders/42/a/b/c"),
+    ];
+
+    for (method, path) in judged {
+        match authz.requirement(&method, path) {
+            Requirement::Policy { .. } => {}
+            Requirement::Abstain { reason } => panic!(
+                "{method} {path} est SERVI par le routeur et doit être jugé, or il s'abstient ({reason})"
+            ),
+        }
+    }
+}
+
 #[test]
 fn shapes_outside_the_contract_abstain() {
     let authz = authorization(
@@ -375,23 +414,21 @@ fn shapes_outside_the_contract_abstain() {
         &[("order", "orders")],
     );
 
+    // **Correction d'audit.** Cette liste contenait des formes que le routeur
+    // SERT (repli des liens, `/{src}/{id}/{route}/{cible}`, chemins profonds) et
+    // qui s'abstenaient donc — une lecture, et même une création, non jugées.
+    // Elles sont maintenant couvertes (voir `every_served_shape_is_judged`
+    // ci-dessous) ; il ne reste ici que ce que le routeur ne sert pas.
     let cases = [
         // Un pluriel seul n'accepte que GET et POST.
         (Method::PUT, "/orders"),
         (Method::PATCH, "/orders"),
         (Method::DELETE, "/orders"),
-        // 4 segments : aucune opération du contrat.
-        (Method::GET, "/orders/42/a/b"),
-        (Method::POST, "/orders/42/a/b"),
-        (Method::DELETE, "/orders/42/a/b"),
-        // 5 segments : réservés à POST et DELETE (liens).
-        (Method::GET, "/orders/42/a/b/c"),
-        (Method::PUT, "/orders/42/a/b/c"),
-        (Method::PATCH, "/orders/42/a/b/c"),
-        // 6 segments : au-delà de toute forme connue.
-        (Method::GET, "/orders/42/a/b/c/d"),
-        (Method::POST, "/orders/42/a/b/c/d"),
-        (Method::DELETE, "/orders/42/a/b/c/d"),
+        // Méthodes que le routeur n'associe à aucune route d'entité.
+        (Method::OPTIONS, "/orders/42"),
+        (Method::PUT, "/orders/42/a"),
+        // 6 segments en écriture : au-delà de toute forme servie.
+        (Method::PATCH, "/orders/42/a/b/c/d"),
     ];
 
     for (method, path) in cases {
@@ -653,10 +690,35 @@ fn head_is_governed_like_get_because_axum_serves_it_through_the_get_route() {
         );
     }
 
-    // Et `HEAD` n'invente pas d'opération là où `GET` s'abstient. On compare la
-    // **forme** : la raison d'une abstention nomme la méthode fautive, donc les
-    // deux `Abstain` ne sont pas textuellement égaux — et c'est voulu.
-    for path in ["/orders/42/a/b/c/d", "/inconnus"] {
+    // **Correction d'audit — invariant renforcé.** Pour une entité
+    // ENREGISTRÉE, aucune forme de **lecture** ne s'abstient plus, à aucune
+    // profondeur : le routeur de liens monte un repli qui sert les chemins
+    // profonds, et s'abstenir y laissait une lecture non jugée. On l'affirme
+    // ici, pour GET et pour HEAD (axum sert HEAD par le handler GET).
+    for depth in 1..=8usize {
+        let path = std::iter::once("orders")
+            .chain(std::iter::repeat_n("42", depth - 1))
+            .collect::<Vec<_>>()
+            .join("/");
+        let path = format!("/{path}");
+        for method in [Method::GET, Method::HEAD] {
+            let requirement = authz.requirement(&method, &path);
+            assert!(
+                matches!(requirement, Requirement::Policy { .. }),
+                "{method} {path} : une forme de lecture servie par le routeur doit être jugée \
+                 (obtenu {requirement:?})"
+            );
+        }
+        assert_eq!(
+            authz.requirement(&Method::HEAD, &path),
+            authz.requirement(&Method::GET, &path),
+            "HEAD {path} doit être jugé comme GET"
+        );
+    }
+
+    // Et hors périmètre, HEAD s'abstient comme GET : on ne juge que ce que l'on
+    // connaît.
+    for path in ["/inconnus", "/health"] {
         let head = authz.requirement(&Method::HEAD, path);
         let get = authz.requirement(&Method::GET, path);
         assert!(

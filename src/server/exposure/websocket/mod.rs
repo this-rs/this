@@ -110,8 +110,38 @@ impl WebSocketExposure {
     /// every YAML-declared sink of type `websocket`, enabling the event pipeline
     /// to dispatch notifications to connected clients.
     pub fn build_router(host: Arc<ServerHost>) -> Result<Router> {
-        let (router, _cm) = Self::build_router_with_manager(host)?;
+        // **Fail-closed** : un canal WebSocket n'est pas résolu par route, donc
+        // aucune politique `auth:` ne s'y rattache.
+        crate::server::exposure::refuse_unenforced_surface(
+            &host,
+            "WebSocket",
+            "WebSocketExposure::build_router_unenforced",
+        )?;
+        Self::build_router_unenforced(host)
+    }
+
+    /// Comme [`WebSocketExposure::build_router`], en **acceptant explicitement**
+    /// que les politiques `auth:` ne s'appliquent pas au WebSocket.
+    pub fn build_router_unenforced(host: Arc<ServerHost>) -> Result<Router> {
+        crate::server::exposure::warn_unenforced_surface(
+            "WebSocket",
+            "WebSocketExposure::build_router_unenforced",
+        );
+        let (router, _cm) = Self::build_router_with_manager_unenforced(host)?;
         Ok(router)
+    }
+
+    /// Comme [`WebSocketExposure::build_router`], en rendant aussi le
+    /// `ConnectionManager` — et **refuse** de même si les politiques sont armées.
+    pub fn build_router_with_manager(
+        host: Arc<ServerHost>,
+    ) -> Result<(Router, Arc<ConnectionManager>)> {
+        crate::server::exposure::refuse_unenforced_surface(
+            &host,
+            "WebSocket",
+            "WebSocketExposure::build_router_with_manager_unenforced",
+        )?;
+        Self::build_router_with_manager_unenforced(host)
     }
 
     /// Build the WebSocket router and return both the router and the `ConnectionManager`.
@@ -127,7 +157,7 @@ impl WebSocketExposure {
     /// ws_manager.set_custom_handler(Arc::new(MyChatHandler { ... })).await;
     /// let app = rest_router.merge(ws_router);
     /// ```
-    pub fn build_router_with_manager(
+    pub fn build_router_with_manager_unenforced(
         host: Arc<ServerHost>,
     ) -> Result<(Router, Arc<manager::ConnectionManager>)> {
         let connection_manager = Arc::new(manager::ConnectionManager::new(host.clone()));

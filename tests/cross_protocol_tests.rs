@@ -165,7 +165,7 @@ async fn start_combined_server() -> (SocketAddr, Arc<ServerHost>, Arc<Notificati
 
     // Build both WS and gRPC routers sharing the same host
     let ws_router = WebSocketExposure::build_router(host.clone()).unwrap();
-    let grpc_router = GrpcExposure::build_router_no_fallback(host.clone()).unwrap();
+    let grpc_router = GrpcExposure::build_router_no_fallback_unenforced(host.clone()).unwrap();
 
     let app = ws_router.merge(grpc_router);
 
