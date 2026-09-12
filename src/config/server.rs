@@ -42,6 +42,16 @@ pub struct ServerSecurityConfig {
     #[serde(default)]
     pub proxy: ProxyConfig,
 
+    /// **Politique des lectures de graphe** : relief, vue multi-échelle, identité.
+    ///
+    /// Ces routes ne sont pas des routes d'entité : sans ce réglage elles
+    /// **s'abstiennent** — aucune politique ne s'y rattache, seule la couche
+    /// d'authentification les couvre. C'est ce qu'on veut d'un relief public ;
+    /// ce n'est **pas** ce qu'on veut quand un moteur d'inférence lit la base :
+    /// il doit présenter un principal qui a le droit de la lire.
+    #[serde(default)]
+    pub graph: GraphExposureConfig,
+
     /// **Délégation DNS** : la zone que le serveur autoritaire doit publier.
     ///
     /// Absente par défaut : le framework ne touche pas au DNS sans qu'on le lui
@@ -79,6 +89,29 @@ impl ServerSecurityConfig {
 // ---------------------------------------------------------------------------
 // CORS
 // ---------------------------------------------------------------------------
+
+/// Ce qui protège les **lectures de graphe** : relief, vue multi-échelle,
+/// identité.
+///
+/// Sans politique, elles restent descriptives et publiques — c'est le défaut, et
+/// c'est ce qui permet d'observer une base sans droits. Avec une politique, un
+/// appelant sans droit reçoit **403** : un moteur d'inférence lit alors la base
+/// **en respectant le protocole IAM** au lieu de le contourner.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GraphExposureConfig {
+    /// La politique appliquée à `/graph…` (`perm:…`, `authenticated`,
+    /// `admin_only`, `role:…`…).
+    #[serde(default)]
+    pub policy: Option<String>,
+}
+
+impl GraphExposureConfig {
+    /// La politique est-elle armée ?
+    pub fn armed(&self) -> bool {
+        self.policy.as_ref().is_some_and(|p| !p.trim().is_empty())
+    }
+}
 
 /// Politique CORS.
 ///
