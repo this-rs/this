@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+- **Security test suites** (`tests/security_iam.rs`, 24 tests · `tests/security_durability.rs`, 11) — each test names the attack it models: privilege escalation through policy composition (`any:not:admin_only` authorises everyone *except* admins), route bypass (path traversal, method-override header, HEAD as a side door), decision capture (key collision, neighbouring tenant, neighbouring **space**, replay after invalidation), identity collisions (length-ambiguous names, Unicode normalisation) and the trust boundary itself (`documented_limit_*` tests assert what an attacker with store write access CAN do, so it is known rather than assumed).
+- **Fixed — IAM lookups were not scoped to the active space.** `principal_node` and `acl_node` queried the **root** index: in a named space, a decision from another space could answer. (An earlier claim of mine that this was fixed was wrong — the replacement never matched the multi-line calls. The security suite is what caught it.)
+- **Fixed — the ACL key separator was not injective.** Names containing the US separator (0x1F) collided (`("a\u{1f}b","c")` and `("a","b\u{1f}c")` produced the same key, so one decision overwrote the other). Identity parts containing control characters, or empty, are now **refused** — fail-closed, and reachable through a custom principal mapping.
+- **Hardened — a duplicated ACL key makes the decision ambiguous, and an ambiguous decision is refused** rather than resolved by index order (an attacker adding a node could otherwise flip it).
+
 ### Added
 - **Adoption by an existing project** — the framework now has a documented, tested migration path (see `docs/adoption-projet-existant.md`): branch the store, **observe** the traffic, make the IAM native to your own identities, then arm.
   - `ServerBuilder::authorization_report_only()` — denials are computed, logged and **published in the response** (`x-this-rs-authz: observed-deny` plus `x-this-rs-authz-policy` / `x-this-rs-authz-scope`) but nothing is blocked. This is how a running service adopts policy enforcement without being broken by it.
