@@ -264,25 +264,37 @@ fn visible_children(
 }
 
 /// Décrit un nœud de la vue.
+/// Décrit un nœud de la vue.
+///
+/// `enfants_connus` : les comptes (visibles, masqués) **déjà** calculés par un
+/// parcours du parent. Les repasser évite de **reparcourir les enfants** — et
+/// donc de relire leurs labels une seconde fois. Le banc a montré que ce double
+/// parcours coûtait ×1,68 sur un arbre de 258 nœuds.
 fn describe_node(
     store: &ObrainStore,
     id: obrain_common::types::NodeId,
     spec: &HierarchySpec,
     scope: &ReadScope,
+    enfants_connus: Option<(usize, usize)>,
+    labels_connus: Option<&Vec<String>>,
 ) -> HierarchyNode {
-    let labels = <ObrainStore as GraphBackend>::get_node(store, id)
-        .map(|node| {
-            node.labels
-                .iter()
-                .map(|l| l.as_str().to_string())
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
+    // **Un nœud se lit une fois.** La vérification de visibilité lit ses labels ;
+    // les relire pour le décrire doublait le coût de chaque nœud de la descente —
+    // c'est là que passait l'essentiel des 2,2 µs par nœud, pas dans la
+    // détection de cycle (que j'avais d'abord soupçonnée à tort : le banc l'a
+    // démenti).
+    let labels = match labels_connus {
+        Some(labels) => labels.clone(),
+        None => labels_of(store, id),
+    };
     let properties = <ObrainStore as GraphBackend>::node_properties(store, id);
     // **Le compte passe par le périmètre.** Compter tous les enfants
     // révélerait, par un simple nombre, ce qu'un lecteur n'a pas le droit de
     // voir — la fuite la plus discrète : la structure sans le contenu.
-    let (children, hidden, _) = visible_children(store, id, spec, scope);
+    let (children, hidden) = enfants_connus.unwrap_or_else(|| {
+        let (v, h, _) = visible_children(store, id, spec, scope);
+        (v, h)
+    });
 
     HierarchyNode {
         id: id.as_u64(),
@@ -316,18 +328,37 @@ pub fn describe_scoped(
     spec: HierarchySpec,
     scope: &ReadScope,
 ) -> Hierarchy {
-    let mut visited: Vec<obrain_common::types::NodeId> = vec![root];
+    // **Un ensemble, pas un vecteur.** La détection de cycle testait
+    // `visited.contains` — un parcours linéaire — pour CHAQUE enfant parcouru :
+    // sur un arbre de 258 nœuds, cela faisait ~33 000 comparaisons par descente,
+    // et le banc l'a montré (2,2 µs par nœud, dont l'essentiel là). Un ensemble
+    // rend le test constant, et `insert` répond vrai la première fois, faux
+    // ensuite : le cycle se détecte **en insérant**.
+    let mut visited: std::collections::HashSet<obrain_common::types::NodeId> =
+        std::collections::HashSet::new();
+    visited.insert(root);
     let mut cycles: Vec<(u64, u64)> = Vec::new();
     let mut levels: Vec<HierarchyLevel> = Vec::new();
     let mut frontier: Vec<obrain_common::types::NodeId> = vec![root];
 
     let mut hidden_total = 0usize;
     let mut edge_illisible = false;
+    // Les comptes par nœud, **calculés une fois** : la boucle de niveau sait
+    // combien d'enfants chacun a vus, et `describe_node` le réutilise.
+    let mut comptes: std::collections::HashMap<obrain_common::types::NodeId, (usize, usize)> =
+        std::collections::HashMap::new();
+    // Les labels lus pour vérifier la visibilité : on les garde pour décrire les
+    // nœuds retenus, plutôt que de les relire.
+    let mut labels_vus: std::collections::HashMap<obrain_common::types::NodeId, Vec<String>> =
+        std::collections::HashMap::new();
 
     for depth in 1..=spec.max_depth {
         let mut current: Vec<obrain_common::types::NodeId> = Vec::new();
         let mut hidden_here = 0usize;
         for parent in &frontier {
+            // Ce que CE parent voit : on le retient pour ne pas le recalculer.
+            let mut vus_ici = 0usize;
+            let mut masques_ici = 0usize;
             for (child, edge_type) in contained_children(store, *parent, &spec) {
                 // **Le tissage, en lecture** : une relation dont on n'a pas le
                 // droit de lire le type n'est ni traversée NI COMPTÉE — la
@@ -337,23 +368,29 @@ pub fn describe_scoped(
                     edge_illisible = true;
                     continue;
                 }
-                if visited.contains(&child) {
-                    // **Cycle** : signalé, jamais parcouru.
+                if !visited.insert(child) {
+                    // **Cycle** : signalé, jamais parcouru. `insert` a répondu
+                    // « déjà là » — et il n'a rien coûté de plus.
                     cycles.push((parent.as_u64(), child.as_u64()));
                     continue;
                 }
                 // **Le nœud lui-même** : le label décide.
                 if !scope.is_unrestricted() {
                     let labels = labels_of(store, child);
-                    if !labels.iter().any(|l| scope.may_read_node(l)) {
-                        visited.push(child);
-                        hidden_here += 1;
+                    let lisible = labels.iter().any(|l| scope.may_read_node(l));
+                    labels_vus.insert(child, labels);
+                    if !lisible {
+                        // **Masqué, mais visité** : un nœud hors périmètre ne
+                        // doit pas être redescendu — ni par un autre chemin.
+                        masques_ici += 1;
                         continue;
                     }
                 }
-                visited.push(child);
                 current.push(child);
+                vus_ici += 1;
             }
+            comptes.insert(*parent, (vus_ici, masques_ici));
+            hidden_here += masques_ici;
         }
         hidden_total += hidden_here;
         if current.is_empty() {
@@ -368,7 +405,18 @@ pub fn describe_scoped(
 
         let nodes = current
             .iter()
-            .map(|id| describe_node(store, *id, &spec, scope))
+            .map(|id| {
+                // Le compte vient du parcours qui vient d'avoir lieu : on ne le
+                // refait pas.
+                describe_node(
+                    store,
+                    *id,
+                    &spec,
+                    scope,
+                    comptes.get(id).copied(),
+                    labels_vus.get(id),
+                )
+            })
             .collect::<Vec<_>>();
 
         // Le niveau suivant ne descend que les nœuds **montrés**.
@@ -424,7 +472,7 @@ pub fn describe_scoped(
     }
 
     Hierarchy {
-        root: describe_node(store, root, &spec, scope),
+        root: describe_node(store, root, &spec, scope, None, None),
         depth: levels.len(),
         levels,
         cycles,

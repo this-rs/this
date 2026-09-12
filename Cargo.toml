@@ -247,3 +247,12 @@ required-features = ["obrain"]
 name = "canvas_inference"
 path = "examples/canvas_inference.rs"
 required-features = ["obrain"]
+
+# ── Bancs d'essai ─────────────────────────────────────────────────────────
+# `harness = false` : le banc a son propre harnais (échauffement, N tours,
+# médiane), sans dépendance de mesure — le dépôt construit hors ligne.
+[[bench]]
+name = "scope_bench"
+path = "benches/scope_bench.rs"
+harness = false
+required-features = ["obrain"]

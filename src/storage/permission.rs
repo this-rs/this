@@ -339,13 +339,40 @@ impl ReadScope {
         self.may("graph", "read", None)
     }
 
+    /// La correspondance, **sans allouer**.
+    ///
+    /// Cette fonction est appelée **par nœud** et **par relation** pendant une
+    /// descente : construire un `Permission` (trois `String`) pour chaque
+    /// question coûtait plus cher que la comparaison elle-même. Le banc
+    /// (`benches/scope_bench.rs`) l'a montré : 0,45 µs par refus sur 67
+    /// permissions, dont l'essentiel en allocations.
     fn may(&self, family: &str, action: &str, target: Option<&str>) -> bool {
-        let wanted = Permission {
-            family: family.to_string(),
-            action: action.to_string(),
-            target: target.map(str::to_string),
-        };
-        self.permissions.iter().any(|held| held.allows(&wanted))
+        self.permissions
+            .iter()
+            .any(|held| held_allows(held, family, action, target))
+    }
+}
+
+/// `held` accorde-t-il `family:action:target` ?
+///
+/// Compare des `&str` : aucun temporaire, aucune allocation. La règle est celle
+/// de [`Permission::allows`], dont ceci est l'implémentation sans allocation —
+/// un test différentiel vérifie qu'elles répondent la même chose.
+fn held_allows(held: &Permission, family: &str, action: &str, target: Option<&str>) -> bool {
+    if held.family == "*" && held.action == "*" {
+        return true;
+    }
+    if held.family != family {
+        return false;
+    }
+    if held.action != "*" && held.action != action {
+        return false;
+    }
+    match (held.target.as_deref(), target) {
+        (None, None) => true,
+        (Some("*"), _) => true,
+        (Some(held_target), Some(wanted)) => held_target == wanted,
+        _ => false,
     }
 }
 
@@ -509,6 +536,72 @@ mod tests {
         // Et une échelle se traduit en profondeur — le seul endroit qui le fait.
         assert_eq!(Scale::Groupe.descent(), (4, 100));
         assert!(Scale::Noeud.descent().1 > Scale::Cosmos.descent().1);
+    }
+
+    /// **Deux chemins, une seule réponse.** `Permission::allows` (qui alloue) et
+    /// la correspondance sans allocation doivent décider identiquement — sinon
+    /// l'optimisation aurait changé l'autorisation, ce qui serait le pire des
+    /// échanges.
+    #[test]
+    fn the_allocating_and_allocating_free_paths_agree() {
+        let detenues = [
+            "graph:read",
+            "*",
+            "node:*:Page",
+            "node:read:*",
+            "edge:create:CITES",
+            "space:use:lab",
+            "node:read",
+        ];
+        let demandes: Vec<(String, String, Option<String>)> = vec![
+            ("graph".into(), "read".into(), None),
+            ("graph".into(), "write".into(), None),
+            ("node".into(), "read".into(), Some("Page".into())),
+            ("node".into(), "read".into(), Some("Autre".into())),
+            ("node".into(), "write".into(), Some("Page".into())),
+            ("node".into(), "delete".into(), Some("Page".into())),
+            ("node".into(), "read".into(), None),
+            ("edge".into(), "create".into(), Some("CITES".into())),
+            ("edge".into(), "read".into(), Some("CITES".into())),
+            ("space".into(), "use".into(), Some("lab".into())),
+            ("space".into(), "use".into(), Some("autre".into())),
+        ];
+
+        for brute in detenues {
+            let held = Permission::parse(brute).expect("lisible");
+            for (family, action, target) in &demandes {
+                let par_allocation = held.allows(&Permission {
+                    family: family.clone(),
+                    action: action.clone(),
+                    target: target.clone(),
+                });
+                let sans_allocation = held_allows(&held, family, action, target.as_deref());
+                assert_eq!(
+                    par_allocation, sans_allocation,
+                    "désaccord sur `{brute}` face à `{family}:{action}:{target:?}`"
+                );
+            }
+        }
+
+        // Et le périmètre entier répond comme ses permissions une à une.
+        let scope = scope(&detenues);
+        for (family, action, target) in &demandes {
+            let attendu = detenues
+                .iter()
+                .filter_map(|d| Permission::parse(d))
+                .any(|held| {
+                    held.allows(&Permission {
+                        family: family.clone(),
+                        action: action.clone(),
+                        target: target.clone(),
+                    })
+                });
+            assert_eq!(
+                scope.may(family, action, target.as_deref()),
+                attendu,
+                "le périmètre doit répondre comme ses permissions : `{family}:{action}:{target:?}`"
+            );
+        }
     }
 
     #[test]
