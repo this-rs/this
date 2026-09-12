@@ -509,6 +509,7 @@ impl Authorization {
             "delete" => &auth.delete,
             "list_links" => &auth.list_links,
             "create_link" => &auth.create_link,
+            "update_link" => &auth.update_link,
             "delete_link" => &auth.delete_link,
             _ => return None,
         };
@@ -553,16 +554,45 @@ impl Authorization {
                 reason: format!("`{plural}` n'est le pluriel d'aucune entité enregistrée"),
             };
         };
+        // La portée peut être **déplacée** : `POST /{entité}/{id}/{cible}` crée
+        // une entité liée, et c'est la politique de la CIBLE qui s'applique.
+        let mut scope_entity = entity_type.clone();
+        let mut scope_plural = plural.to_string();
 
+        // **Chaque forme que le routeur sert doit être jugée.** Le routeur de
+        // liens monte `/{entité}/{id}/{route}` (3), `/{src}/{id}/{route}/{cible}`
+        // (4), `/{src}/{id}/{route}/{cible}/{id}` (5) et un repli qui sert les
+        // chemins plus profonds : s'en tenir aux formes « canoniques » laissait
+        // passer des **créations** sans politique (audit de la chaîne).
         let operation = match (method, segments.len()) {
             (&Method::GET | &Method::HEAD, 1) => "list",
             (&Method::POST, 1) => "create",
             (&Method::GET | &Method::HEAD, 2) => "get",
             (&Method::PUT | &Method::PATCH, 2) => "update",
             (&Method::DELETE, 2) => "delete",
-            (&Method::GET | &Method::HEAD, 3) => "list_links",
-            (&Method::POST, 5) => "create_link",
-            (&Method::DELETE, 5) => "delete_link",
+            // Toute lecture sous une entité est une navigation de liens — y
+            // compris les chemins profonds servis par le repli (`>= 3`).
+            (&Method::GET | &Method::HEAD, n) if n >= 3 => "list_links",
+            // `POST /{entité}/{id}/{cible}` **crée une entité liée** : c'est la
+            // politique de création de la CIBLE qui s'applique, pas celle de la
+            // source. Absente des formes reconnues, cette route créait sans
+            // politique.
+            (&Method::POST, 3) => {
+                let target = segments[2];
+                let Some((target_type, _)) = self.entities.iter().find(|(_, p)| p == target) else {
+                    return Requirement::Abstain {
+                        reason: format!("`{target}` n'est le pluriel d'aucune entité enregistrée"),
+                    };
+                };
+                // La décision portera le nom de la cible : un opérateur doit voir
+                // `Invoice · create`, pas `Order · create`.
+                scope_entity = target_type.clone();
+                scope_plural = target.to_string();
+                "create"
+            }
+            (&Method::POST, n) if n >= 4 => "create_link",
+            (&Method::PUT | &Method::PATCH, 4) => "update_link",
+            (&Method::DELETE, n) if n >= 4 => "delete_link",
             _ => {
                 return Requirement::Abstain {
                     reason: format!(
@@ -574,9 +604,9 @@ impl Authorization {
             }
         };
 
-        match self.declared_policy(entity_type, plural, operation) {
+        match self.declared_policy(&scope_entity, &scope_plural, operation) {
             Some(policy) => Requirement::Policy {
-                entity_type: entity_type.clone(),
+                entity_type: scope_entity.clone(),
                 operation: operation.to_string(),
                 policy,
                 origin: PolicyOrigin::Declared,
@@ -591,10 +621,11 @@ impl Authorization {
                     "delete" => default_auth.delete,
                     "list_links" => default_auth.list_links,
                     "create_link" => default_auth.create_link,
+                    "update_link" => default_auth.update_link,
                     _ => default_auth.delete_link,
                 };
                 Requirement::Policy {
-                    entity_type: entity_type.clone(),
+                    entity_type: scope_entity.clone(),
                     operation: operation.to_string(),
                     policy,
                     origin: PolicyOrigin::Default,
@@ -881,9 +912,14 @@ mod tests {
             a.requirement(&Method::PUT, "/orders"),
             Requirement::Abstain { .. }
         ));
+        // **Correction d'audit** : un chemin profond sous une entité connue
+        // n'est PLUS abstenu. Le routeur de liens monte un repli qui **sert**
+        // ces chemins (`build_link_routes().fallback`) : s'abstenir y laissait
+        // une lecture non jugée. Toute lecture sous une entité est une
+        // navigation de liens, donc `list_links`.
         assert!(matches!(
             a.requirement(&Method::GET, "/orders/42/a/b/c/d"),
-            Requirement::Abstain { .. }
+            Requirement::Policy { ref operation, .. } if operation == "list_links"
         ));
     }
 
@@ -1715,6 +1751,7 @@ mod policy_perimeter {
             list_links: policy.to_string(),
             create_link: policy.to_string(),
             delete_link: policy.to_string(),
+            ..Default::default()
         }
     }
 
@@ -2202,6 +2239,7 @@ mod policy_perimeter {
             list_links: "service_only".to_string(),
             create_link: "owner_or_service".to_string(),
             delete_link: "any:owner,role:admin".to_string(),
+            update_link: "owner_or_service".to_string(),
         }
     }
 
@@ -2236,6 +2274,21 @@ mod policy_perimeter {
                 "/orders/7/items/product/9",
                 "delete_link",
                 "any:owner,role:admin",
+            ),
+            // **Correction d'audit** : la forme à QUATRE segments d'écriture
+            // (que le routeur de liens sert) n'était rattachée à aucune
+            // opération — elle était donc servie sans politique.
+            (
+                Method::POST,
+                "/orders/7/items/9",
+                "create_link",
+                "owner_or_service",
+            ),
+            (
+                Method::PUT,
+                "/orders/7/items/9",
+                "update_link",
+                "owner_or_service",
             ),
         ];
 
@@ -2282,16 +2335,17 @@ mod policy_perimeter {
                 "get",
                 "list",
                 "list_links",
-                "update"
+                "update",
+                "update_link"
             ],
-            "les huit opérations doivent être rendues"
+            "les neuf opérations doivent être rendues"
         );
     }
 
     #[test]
     fn every_abstention_carries_an_actionable_reason() {
         let authz = authz_policy("public");
-        let cases: [(Method, &str, Option<&str>); 11] = [
+        let cases: [(Method, &str, Option<&str>); 10] = [
             (Method::GET, "", Some("vide")),
             (Method::GET, "/", Some("vide")),
             (Method::GET, "/health", Some("health")),
@@ -2303,9 +2357,16 @@ mod policy_perimeter {
             // requête HEAD atteindrait la route par le handler GET sans passer
             // par la politique (voir le test dédié dans `iam_route_resolution`).
             (Method::OPTIONS, "/orders/1", Some("OPTIONS")),
-            (Method::GET, "/orders/1/2/3/4/5/6", Some("7 segments")),
-            (Method::POST, "/orders/1/2/3", Some("4 segments")),
+            // **Correction d'audit** : ces deux formes étaient listées ici comme
+            // abstentions. Le routeur les SERT (repli des liens, et
+            // `/{src}/{id}/{route}/{cible}`) : elles sont maintenant jugées —
+            // `list_links` pour toute lecture profonde, `create_link` pour une
+            // écriture à quatre segments. Elles ont migré vers le test de
+            // couverture, et il ne reste ici que de vraies abstentions.
             (Method::PATCH, "/orders/1/2/3/4/5", Some("6 segments")),
+            // 4 segments en `PUT` est désormais jugé (`update_link`) : il ne
+            // reste ici qu'une forme que le routeur NE sert PAS.
+            (Method::PUT, "/orders/1/2", Some("3 segments")),
         ];
 
         for (method, path, fragment) in cases {
@@ -2334,6 +2395,57 @@ mod policy_perimeter {
                 other => panic!("{method} {path} : attendu une abstention, obtenu {other:?}"),
             }
         }
+    }
+
+    /// **Correction d'audit** : `POST /{entité}/{id}/{cible}` **crée une entité
+    /// liée**. La forme n'était rattachée à aucune opération : la route créait
+    /// donc sans qu'aucune politique ne soit consultée. Elle est jugée par la
+    /// politique de création de la **cible** — c'est une création d'invoice, pas
+    /// une opération sur l'order qui la porte.
+    #[test]
+    fn creating_a_linked_entity_is_judged_by_the_target_entity_policy() {
+        let invoice = EntityAuthConfig {
+            create: "admin_only".to_string(),
+            ..Default::default()
+        };
+        let authz = authz_with(
+            config_of(vec![
+                entity("order", "orders", EntityAuthConfig::default()),
+                entity("invoice", "invoices", invoice),
+            ]),
+            &[("order", "orders"), ("invoice", "invoices")],
+        );
+
+        match authz.requirement(&Method::POST, "/orders/7/invoices") {
+            Requirement::Policy {
+                entity_type,
+                operation,
+                policy,
+                ..
+            } => {
+                assert_eq!(
+                    entity_type, "invoice",
+                    "la portée est la CIBLE, pas la source"
+                );
+                assert_eq!(operation, "create");
+                assert_eq!(policy, "admin_only");
+            }
+            other => panic!("la création d'une entité liée doit être jugée : {other:?}"),
+        }
+
+        // Et l'application effective le fait : un anonyme ne crée pas.
+        assert!(
+            !authz
+                .decide(&Method::POST, "/orders/7/invoices", &AuthContext::Anonymous)
+                .is_allow()
+        );
+
+        // Une cible NON enregistrée reste non tranchable : pas de politique
+        // inventée pour un type que le serveur ne connaît pas.
+        assert!(matches!(
+            authz.requirement(&Method::POST, "/orders/7/inconnues"),
+            Requirement::Abstain { .. }
+        ));
     }
 
     // ── 6. Provenance : Declared vs Default ──────────────────────────────

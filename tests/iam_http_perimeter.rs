@@ -366,6 +366,7 @@ fn perimeter_policies() -> EntityAuthConfig {
         list_links: "role:linker".to_string(),
         create_link: "role:writer".to_string(),
         delete_link: "admin_only".to_string(),
+        ..Default::default()
     }
 }
 
@@ -995,6 +996,7 @@ async fn an_unknown_route_is_never_refused_by_the_authorization_layer() {
         list_links: "admin_only".to_string(),
         create_link: "admin_only".to_string(),
         delete_link: "admin_only".to_string(),
+        ..Default::default()
     };
     let store = ObrainStore::new_in_memory();
     let host = host_with_store(strict, store).expect("hôte");

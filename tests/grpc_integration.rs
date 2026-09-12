@@ -224,7 +224,7 @@ async fn start_grpc_server() -> (
 ) {
     let (host, order_store, invoice_store) = build_test_host();
 
-    let grpc_router = GrpcExposure::build_router(host.clone()).unwrap();
+    let grpc_router = GrpcExposure::build_router_unenforced(host.clone()).unwrap();
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -1089,7 +1089,7 @@ async fn start_rest_grpc_server() -> (
     let (host, order_store, invoice_store) = build_test_host();
 
     let rest_router = RestExposure::build_router(host.clone(), vec![]).unwrap();
-    let grpc_router = GrpcExposure::build_router_no_fallback(host.clone()).unwrap();
+    let grpc_router = GrpcExposure::build_router_no_fallback_unenforced(host.clone()).unwrap();
     let app = combine_rest_and_grpc(rest_router, grpc_router);
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1164,7 +1164,7 @@ async fn test_no_fallback_router_can_merge_with_rest() {
     let (host, _order_store, _invoice_store) = build_test_host();
 
     let rest_router = RestExposure::build_router(host.clone(), vec![]).unwrap();
-    let grpc_router = GrpcExposure::build_router_no_fallback(host).unwrap();
+    let grpc_router = GrpcExposure::build_router_no_fallback_unenforced(host).unwrap();
 
     // This MUST NOT panic — the whole point of this fix
     let _app = combine_rest_and_grpc(rest_router, grpc_router);
@@ -1179,7 +1179,7 @@ async fn test_build_router_with_fallback_panics_on_rest_merge() {
     let (host, _order_store, _invoice_store) = build_test_host();
 
     let rest_router = RestExposure::build_router(host.clone(), vec![]).unwrap();
-    let grpc_router = GrpcExposure::build_router(host).unwrap();
+    let grpc_router = GrpcExposure::build_router_unenforced(host).unwrap();
 
     // This MUST panic — proves the problem still exists with build_router()
     let _app = rest_router.merge(grpc_router);
@@ -1326,7 +1326,7 @@ async fn test_grpc_proto_endpoint_in_combined_router() {
 
 #[tokio::test]
 async fn test_build_with_grpc_convenience() {
-    // Test the ServerBuilder::build_with_grpc() convenience method
+    // Test the ServerBuilder::build_with_grpc_unenforced() convenience method
     use this::config::LinksConfig;
     use this::core::module::Module;
     use this::server::ServerBuilder;
@@ -1376,12 +1376,12 @@ async fn test_build_with_grpc_convenience() {
         }
     }
 
-    // build_with_grpc() must not panic (no double-fallback)
+    // build_with_grpc_unenforced() must not panic (no double-fallback)
     let app = ServerBuilder::new()
         .with_link_service(InMemoryLinkService::new())
         .register_module(MinimalModule)
         .unwrap()
-        .build_with_grpc()
+        .build_with_grpc_unenforced()
         .unwrap();
 
     // Verify the router works
@@ -1453,7 +1453,7 @@ async fn test_grpc_proto_export_endpoint() {
     use axum_test::TestServer;
 
     let (host, _order_store, _invoice_store) = build_test_host();
-    let grpc_router = GrpcExposure::build_router(host).unwrap();
+    let grpc_router = GrpcExposure::build_router_unenforced(host).unwrap();
 
     let server = TestServer::new(grpc_router);
 

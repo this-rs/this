@@ -180,7 +180,7 @@ fn build_test_host() -> (Arc<ServerHost>, Arc<NotificationStore>) {
 async fn start_server() -> (SocketAddr, Arc<ServerHost>, Arc<NotificationStore>) {
     let (host, store) = build_test_host();
 
-    let grpc_router = GrpcExposure::build_router(host.clone()).unwrap();
+    let grpc_router = GrpcExposure::build_router_unenforced(host.clone()).unwrap();
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();

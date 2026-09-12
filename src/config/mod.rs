@@ -48,6 +48,16 @@ pub struct EntityAuthConfig {
     /// Policy for deleting links (DELETE /{entities}/{id}/{link_type}/{target_type}/{target_id})
     #[serde(default = "default_auth_policy")]
     pub delete_link: String,
+
+    /// Policy for updating a link (PUT /{entities}/{id}/{link_route}/{target_id})
+    ///
+    /// Ajouté en auditant la chaîne : le routeur de liens sert un `PUT` à quatre
+    /// segments (`update_link`), et aucune opération ne lui correspondait — la
+    /// requête était donc **abstenue**, donc non jugée par les politiques.
+    /// `#[serde(default)]` : une configuration écrite avant ce champ continue de
+    /// se lire, avec la politique par défaut.
+    #[serde(default = "default_auth_policy")]
+    pub update_link: String,
 }
 
 fn default_auth_policy() -> String {
@@ -65,6 +75,7 @@ impl Default for EntityAuthConfig {
             list_links: default_auth_policy(),
             create_link: default_auth_policy(),
             delete_link: default_auth_policy(),
+            update_link: default_auth_policy(),
         }
     }
 }

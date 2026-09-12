@@ -185,6 +185,30 @@ pub struct IamSchemaEntry {
     pub written: bool,
 }
 
+/// **Application des politiques, par surface.**
+///
+/// Le framework déclare ici ce qu'il applique — et ce qu'il n'applique pas. Une
+/// surface hors REST (GraphQL, gRPC, WebSocket) n'est pas résolue par route :
+/// aucune politique `auth:` ne peut s'y rattacher, et le framework **refuse**
+/// donc de la monter quand les politiques sont armées. C'est une **déclaration**
+/// ([`Origin::Declared`]) : le relief ne peut pas savoir ce que l'application a
+/// réellement monté, il publie ce qu'il en coûte de le monter.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SurfaceRelief {
+    /// La surface (`rest`, `graphql`, `grpc`, `websocket`).
+    pub surface: String,
+    /// Les chemins qu'elle sert.
+    pub mounted_at: Vec<String>,
+    /// Applique-t-elle les politiques `auth:` ?
+    pub enforces_policies: bool,
+    /// Comment, ou pourquoi pas.
+    pub mechanism: String,
+    /// Ce qui la protège **à défaut** de politique.
+    pub otherwise: String,
+    /// Provenance de l'affirmation.
+    pub origin: Origin,
+}
+
 /// Le relief complet, tel que publié.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Relief {
@@ -206,10 +230,82 @@ pub struct Relief {
     pub journal: JournalRelief,
     /// IAM matérialisé.
     pub iam: IamRelief,
+    /// Application des politiques, surface par surface.
+    pub surfaces: Vec<SurfaceRelief>,
     /// Limites et pièges connus, adossés à `fichier:ligne`.
     pub traps: Vec<Trap>,
     /// Notes de lecture (provenance, features, coûts).
     pub notes: Vec<String>,
+}
+
+/// **Ce que le framework applique, surface par surface.**
+///
+/// Déclaré, jamais introspecté : le relief ne voit pas les routeurs que
+/// l'application monte. Ce qu'il publie, c'est la règle du framework — et un
+/// consommateur qui voit `enforces_policies: false` sait exactement ce qu'il
+/// reste à sa charge.
+fn describe_surfaces() -> Vec<SurfaceRelief> {
+    let declared = |surface: &str,
+                    mounted_at: &[&str],
+                    enforces_policies: bool,
+                    mechanism: &str,
+                    otherwise: &str| SurfaceRelief {
+        surface: surface.to_string(),
+        mounted_at: mounted_at.iter().map(|s| (*s).to_string()).collect(),
+        enforces_policies,
+        mechanism: mechanism.to_string(),
+        otherwise: otherwise.to_string(),
+        origin: Origin::Declared,
+    };
+
+    vec![
+        declared(
+            "rest",
+            &[
+                "/{plural}",
+                "/{plural}/{id}",
+                "/{plural}/{id}/{route}",
+                "/{plural}/{id}/{cible}/{id}",
+                "/links/{id}",
+                "/events/stream",
+                "/notifications/{user_id}/…",
+                "/device-tokens/{user_id}",
+                "/graph…",
+                "/gdpr/…",
+                "/auth/…",
+                "/health",
+            ],
+            true,
+            "middleware d'autorisation : pluriel + méthode + nombre de segments → opération → politique",
+            "les chemins hors routes d'entité s'abstiennent : /health et /auth/* sont publics par nature, /graph/* est descriptif, /gdpr/* exige un administrateur dans le handler, /notifications/* et /device-tokens/* comparent l'identifiant du chemin à celui de l'appelant, /events/stream est borné au locataire de l'appelant",
+        ),
+        declared(
+            "graphql",
+            &[
+                "/graphql",
+                "/graphql/playground",
+                "/graphql/schema",
+                "/graphql/ws",
+            ],
+            false,
+            "aucune : les opérations GraphQL ne sont pas résolues par route",
+            "le framework REFUSE de monter la surface quand les politiques sont armées ; l'application doit accepter explicitement (`build_router_unenforced`), et l'acceptation est journalisée",
+        ),
+        declared(
+            "grpc",
+            &["/* (tonic)", "/grpc/*"],
+            false,
+            "aucune : les services gRPC ne sont pas résolus par route",
+            "même refus, même acceptation explicite (`build_router_unenforced`, `build_with_grpc_unenforced`)",
+        ),
+        declared(
+            "websocket",
+            &["/ws"],
+            false,
+            "aucune : un canal n'est pas une route",
+            "même refus, même acceptation explicite (`build_router_unenforced`)",
+        ),
+    ]
 }
 
 /// Une entrée du contrat IAM publié.
@@ -806,6 +902,7 @@ impl Relief {
                     ],
                 }
             },
+            surfaces: describe_surfaces(),
             procedures,
             families: describe_families(),
             traps: TRAPS
