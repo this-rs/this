@@ -243,7 +243,144 @@ impl Frontend {
     /// si l'application l'a explicitement demandé, et chaque service journalise
     /// un avertissement.
     pub fn attach(self, app: Router) -> Router {
+        let router = self.router();
+        app.fallback_service(router)
+    }
+}
+
+/// **Un site par hôte** : plusieurs domaines, plusieurs contenus, un processus.
+///
+/// # Pourquoi ce type existe
+///
+/// Un `Frontend` est un **repli** : il sert un contenu. Une application réelle
+/// sert souvent **plusieurs domaines** — un site public, une console, un
+/// explorateur, un serveur git — chacun avec son dossier. Monter un processus
+/// par domaine serait une réponse ; celle-ci en sert N avec les mêmes couches,
+/// la même garde de domaine et le même `Caddyfile`.
+///
+/// ```rust,ignore
+/// let sites = FrontendSites::new()
+///     .site("www.exemple.fr", Frontend::disk("dist/www"))
+///     .site("explorer.exemple.fr", Frontend::disk("web/explorer"))
+///     .site("ci.exemple.fr", Frontend::disk("web/ci"))
+///     .default_site(Frontend::disk("dist/www"));
+/// let app = sites.attach(api_router);   // AVANT vos couches (voir `attach`)
+/// ```
+///
+/// # Deux règles
+///
+/// * **Le premier site qui correspond gagne.** L'ordre de déclaration est donc
+///   significatif : mettez les hôtes exacts avant les jokers.
+/// * L'hôte est lu dans `Host`, ou dans `X-Forwarded-Host` **seulement** si vous
+///   l'autorisez — la même règle que partout ailleurs, et le même piège.
+#[derive(Clone)]
+pub struct FrontendSites {
+    sites: Vec<(String, std::sync::Arc<Frontend>)>,
+    default: Option<std::sync::Arc<Frontend>>,
+    trust_forwarded_host: bool,
+}
+
+impl Default for FrontendSites {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl FrontendSites {
+    /// Un hôte sans site.
+    pub fn new() -> Self {
+        Self {
+            sites: Vec::new(),
+            default: None,
+            trust_forwarded_host: false,
+        }
+    }
+
+    /// Un site pour un hôte (ou un motif : `*.exemple.fr`).
+    pub fn site(mut self, host: impl Into<String>, frontend: Frontend) -> Self {
+        self.sites
+            .push((host.into(), std::sync::Arc::new(frontend)));
+        self
+    }
+
+    /// Le site des hôtes qui ne correspondent à rien.
+    ///
+    /// Sans lui, un hôte inconnu reçoit **404** — le garde de domaine l'aura
+    /// refusé avant s'il est configuré.
+    pub fn default_site(mut self, frontend: Frontend) -> Self {
+        self.default = Some(std::sync::Arc::new(frontend));
+        self
+    }
+
+    /// Faire confiance à `X-Forwarded-Host` pour choisir le site.
+    pub fn trust_forwarded_host(mut self, on: bool) -> Self {
+        self.trust_forwarded_host = on;
+        self
+    }
+
+    /// Le site d'un hôte, dans l'ordre de déclaration.
+    pub fn for_host(&self, host: &str) -> Option<&Frontend> {
+        self.sites
+            .iter()
+            .find(|(pattern, _)| crate::config::server::host_matches(pattern, host))
+            .map(|(_, frontend)| frontend.as_ref())
+            .or(self.default.as_deref())
+    }
+
+    /// Combien de sites sont déclarés (hors site par défaut).
+    pub fn len(&self) -> usize {
+        self.sites.len()
+    }
+
+    /// Aucun site déclaré ?
+    pub fn is_empty(&self) -> bool {
+        self.sites.is_empty()
+    }
+
+    /// Le routeur de repli, qui choisit le site par l'hôte.
+    pub fn router(&self) -> Router {
+        Router::new()
+            .fallback(dispatch_by_host)
+            .with_state(std::sync::Arc::new(self.clone()))
+    }
+
+    /// Branche les sites comme **repli** de `app`.
+    ///
+    /// Comme [`Frontend::attach`], à appeler **avant** vos couches : un repli
+    /// posé après elles **remplace** celui qu'elles enveloppaient.
+    pub fn attach(self, app: Router) -> Router {
         app.fallback_service(self.router())
+    }
+}
+
+/// Le repli qui choisit le site par l'hôte.
+async fn dispatch_by_host(
+    State(sites): State<std::sync::Arc<FrontendSites>>,
+    req: Request,
+) -> Response {
+    let host = req
+        .headers()
+        .get("x-forwarded-host")
+        .filter(|_| sites.trust_forwarded_host)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.split(',').next())
+        .or_else(|| {
+            req.headers()
+                .get(axum::http::header::HOST)
+                .and_then(|v| v.to_str().ok())
+        });
+
+    let Some(host) = host else {
+        return (StatusCode::NOT_FOUND, "hôte absent").into_response();
+    };
+
+    match sites.for_host(&crate::config::server::normalize_host(host)) {
+        Some(frontend) => serve(State(frontend.clone()), req).await,
+        None => (
+            StatusCode::NOT_FOUND,
+            format!("aucun site pour l'hôte `{host}`"),
+        )
+            .into_response(),
     }
 }
 

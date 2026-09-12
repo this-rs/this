@@ -152,6 +152,8 @@ lmdb = ["heed"]
 graphql = ["async-graphql", "async-graphql-axum", "graphql-parser"]
 grpc = ["tonic", "tonic-prost", "prost", "prost-types"]
 push = ["reqwest"]
+# Gestion d'une zone PowerDNS (API HTTP) : délégation DNS de l'exposition.
+powerdns = ["reqwest"]
 websocket = []
 wami = ["dep:jsonwebtoken", "dep:ed25519-dalek", "dep:base64"]
 obrain = ["dep:obrain-engine", "dep:obrain-common", "dep:obrain-core", "dep:obrain-substrate", "dep:obrain-adapters", "dep:obrain-reactive"]
@@ -167,6 +169,10 @@ all = ["in-memory", "dynamodb", "postgres", "mongodb_backend", "neo4j", "scyllad
 [lib]
 name = "this"
 path = "src/lib.rs"
+
+[[example]]
+name = "domain_harness"
+path = "examples/domain_harness.rs"
 
 [[example]]
 name = "caddyfile"

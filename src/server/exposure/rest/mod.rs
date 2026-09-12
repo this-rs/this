@@ -139,6 +139,15 @@ impl RestExposure {
             );
         }
 
+        // **Le repli multi-sites, monté AVANT les couches.** Posé ici, il est
+        // couvert par le CORS, la garde de domaine, l'authentification et les
+        // politiques ; posé par l'application APRÈS elles, il les contournerait.
+        #[cfg(feature = "frontend")]
+        if let Some(sites) = &host.frontend_sites {
+            app = app.fallback_service(sites.router());
+            tracing::info!(sites = sites.len(), "repli multi-sites monté");
+        }
+
         // ═══════════════════════════════════════════════════════════════════
         // L'ORDRE DES COUCHES EST UN MAILLON DE LA CHAÎNE
         //

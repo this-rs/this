@@ -41,6 +41,14 @@ pub struct ServerSecurityConfig {
     /// Délégation au proxy.
     #[serde(default)]
     pub proxy: ProxyConfig,
+
+    /// **Délégation DNS** : la zone que le serveur autoritaire doit publier.
+    ///
+    /// Absente par défaut : le framework ne touche pas au DNS sans qu'on le lui
+    /// demande — et il ne touche jamais qu'aux enregistrements **A/AAAA/CNAME**
+    /// des sites déclarés.
+    #[serde(default)]
+    pub dns: Option<crate::dns::PdnsConfig>,
 }
 
 impl ServerSecurityConfig {
@@ -186,6 +194,21 @@ pub struct DomainConfig {
     #[serde(default)]
     pub allowed: Vec<String>,
 
+    /// **La liste explicite des sites**, pour la délégation.
+    ///
+    /// C'est **la même liste** qui alimente le `Caddyfile` et les
+    /// enregistrements DNS : une déclaration, deux délégations — pas deux
+    /// inventaires à tenir en accord.
+    ///
+    /// `allowed` est un **filtre** : il accepte des motifs (`*.exemple.fr`). Un
+    /// `Caddyfile`, lui, énumère des **sites** : un motif ne dit pas quels
+    /// domaines existent. Sans cette liste, la délégation écrit les motifs
+    /// (Caddy sait faire un bloc joker, mais on ne voit pas ce qui est servi) ;
+    /// avec elle, chaque domaine a son bloc, et l'exploitant relit ce qu'il
+    /// applique.
+    #[serde(default)]
+    pub sites: Vec<String>,
+
     /// Faire confiance à `X-Forwarded-Host` (posé par le proxy).
     ///
     /// À n'activer **que** derrière un proxy de confiance : sinon un client
@@ -208,6 +231,31 @@ pub struct DomainConfig {
     pub default_tenant: Option<String>,
 }
 
+/// **Un motif d'hôte correspond-il ?** — logique **partagée**.
+///
+/// Le garde de domaine et la répartition des sites répondent à la même question
+/// de la même façon : deux implémentations divergentes laisseraient passer un
+/// hôte que l'une refuse, ou serviraient le site d'un autre.
+///
+/// `*.exemple.fr` couvre **exactement un** niveau de sous-domaine.
+pub fn host_matches(pattern: &str, host: &str) -> bool {
+    let pattern = normalize_host(pattern);
+    let host = normalize_host(host);
+    match pattern.strip_prefix("*.") {
+        Some(suffix) => host.strip_suffix(suffix).is_some_and(|prefix| {
+            prefix.ends_with('.') && !prefix[..prefix.len() - 1].contains('.')
+        }),
+        None => host == pattern,
+    }
+}
+
+/// `Exemple.FR:443` → `exemple.fr` (minuscules, sans port ni point final).
+pub fn normalize_host(host: &str) -> String {
+    let host = host.trim().trim_end_matches('.');
+    let host = host.split(':').next().unwrap_or(host);
+    host.to_ascii_lowercase()
+}
+
 impl DomainConfig {
     /// Une garde est-elle active ?
     pub fn guards(&self) -> bool {
@@ -219,17 +267,9 @@ impl DomainConfig {
         if !self.guards() {
             return true;
         }
-        let host = Self::normalize(host);
-        self.allowed.iter().any(|pattern| {
-            let pattern = Self::normalize(pattern);
-            match pattern.strip_prefix("*.") {
-                // `*.exemple.fr` : exactement un label devant.
-                Some(suffix) => host.strip_suffix(suffix).is_some_and(|prefix| {
-                    prefix.ends_with('.') && !prefix[..prefix.len() - 1].contains('.')
-                }),
-                None => host == pattern,
-            }
-        })
+        self.allowed
+            .iter()
+            .any(|pattern| host_matches(pattern, host))
     }
 
     /// Le locataire désigné par cet hôte, s'il y en a un.
@@ -237,12 +277,12 @@ impl DomainConfig {
     /// L'ordre : la **table explicite** d'abord, puis le **sous-domaine**, puis
     /// le locataire par défaut.
     pub fn tenant_of(&self, host: &str) -> Option<uuid::Uuid> {
-        let host = Self::normalize(host);
+        let host = normalize_host(host);
         if let Some(tenant) = self.tenants.get(&host) {
             return uuid::Uuid::parse_str(tenant).ok();
         }
         if let Some(base) = &self.subdomain_base {
-            let base = Self::normalize(base);
+            let base = normalize_host(base);
             if let Some(label) = host.strip_suffix(&base).and_then(|p| p.strip_suffix('.'))
                 && !label.is_empty()
                 && !label.contains('.')
@@ -272,13 +312,6 @@ impl DomainConfig {
             }
         }
         Ok(())
-    }
-
-    /// `Exemple.FR:443` → `exemple.fr` (minuscules, sans port ni point final).
-    fn normalize(host: &str) -> String {
-        let host = host.trim().trim_end_matches('.');
-        let host = host.split(':').next().unwrap_or(host);
-        host.to_ascii_lowercase()
     }
 }
 
@@ -319,6 +352,17 @@ pub struct CaddyConfig {
     #[serde(default = "default_true")]
     pub security_headers: bool,
 
+    /// **Upstream par hôte**, quand les domaines ne vont pas tous au même
+    /// endroit.
+    ///
+    /// Cas réel : une application sert son API et sa SPA sur un port, mais son
+    /// serveur **git** sur un autre. Déléguer « le domaine » proprement, c'est
+    /// router `git.<domaine>` vers le serveur git — pas tout vers l'API.
+    ///
+    /// Un hôte absent de cette table utilise [`CaddyConfig::upstream`].
+    #[serde(default)]
+    pub upstreams: std::collections::BTreeMap<String, String>,
+
     /// Directives ajoutées telles quelles dans chaque bloc de site.
     ///
     /// L'échappatoire : un besoin que ce schéma ne couvre pas se dit ici, plutôt
@@ -335,6 +379,7 @@ impl Default for CaddyConfig {
             email: None,
             tls: CaddyTls::default(),
             security_headers: true,
+            upstreams: std::collections::BTreeMap::new(),
             extra_directives: Vec::new(),
         }
     }
@@ -392,7 +437,11 @@ impl CaddyConfig {
             out.push_str("}\n\n");
         }
 
-        let sites = if domains.allowed.is_empty() {
+        // Les sites à écrire : la liste explicite d'abord — `allowed` est un
+        // filtre, pas un inventaire de domaines.
+        let sites = if !domains.sites.is_empty() {
+            domains.sites.clone()
+        } else if domains.allowed.is_empty() {
             vec![":443".to_string()]
         } else {
             domains.allowed.clone()
@@ -408,7 +457,9 @@ impl CaddyConfig {
                 CaddyTls::Internal => out.push_str("\ttls internal\n"),
                 CaddyTls::Off => out.push_str("\ttls off\n"),
             }
-            out.push_str(&format!("\treverse_proxy {}\n", self.upstream));
+            // L'upstream de CE site : le sien s'il en a un, sinon le commun.
+            let upstream = self.upstreams.get(&site).unwrap_or(&self.upstream);
+            out.push_str(&format!("\treverse_proxy {upstream}\n"));
 
             if self.security_headers {
                 out.push_str("\theader {\n");
@@ -627,9 +678,11 @@ proxy:
                     email: Some("ops@exemple.fr".into()),
                     tls: CaddyTls::Internal,
                     security_headers: true,
+                    upstreams: std::collections::BTreeMap::new(),
                     extra_directives: vec!["encode gzip".into()],
                 },
             },
+            ..Default::default()
         };
 
         let caddyfile = config.caddyfile().expect("délégation demandée");

@@ -127,6 +127,51 @@ bloc de site par hôte servi), même upstream. Il contient :
 * this-rs **ne pilote pas** Caddy : pas de rechargement automatique, pas
   d'écriture de fichier de configuration, pas d'appel à son API.
 
+## 3 bis. La chaîne complète, et le harnais
+
+```text
+config/server.yaml
+   ├─ domaines servis ──► PowerDNS   (A / AAAA / CNAME)
+   ├─ CORS / garde ─────► this-rs    (la couche d'entrée)
+   └─ proxy.caddy ──────► Caddyfile  (TLS, routage, en-têtes)
+```
+
+```yaml
+dns:
+  api_url: "http://127.0.0.1:8081"
+  api_key_env: "PDNS_API_KEY"     # le NOM de la variable — jamais la clé
+  zone: "exemple.fr"
+  target: "203.0.113.10"          # la cible des enregistrements dérivés
+  record_type: A                  # A | AAAA | CNAME
+  ttl: 300
+  prune: false                    # supprimer ce qui n'est plus déclaré ?
+```
+
+```bash
+cargo run --features powerdns --example domain_harness -- config/server.yaml
+cargo run --features powerdns --example domain_harness -- config/server.yaml --plan-dns
+PDNS_API_KEY=… cargo run --features powerdns --example domain_harness -- config/server.yaml --apply-dns
+```
+
+**Une seule déclaration, trois délégations** : la liste `domains.sites` alimente
+le `Caddyfile` **et** les enregistrements DNS. Pas deux inventaires à tenir en
+accord.
+
+### Ce que le framework s'autorise à toucher — et jamais
+
+| | |
+|---|---|
+| Types gérés | **A**, **AAAA**, **CNAME** uniquement. Jamais MX, TXT, SRV, NS, SOA |
+| Zone | uniquement la zone déclarée (`dns.zone`) ; un nom d'une autre zone est signalé, jamais touché |
+| Suppression | **seulement** si `prune: true` ; par défaut un enregistrement géré mais non déclaré est **signalé**, pas effacé |
+| Zone absente | `ensure_zone` ne la crée que si des serveurs de noms sont fournis (sinon la zone ne serait pas servie) — et ne recrée **jamais** une zone existante |
+| Clé d'API | lue dans l'environnement, **jamais** depuis le fichier (qui se versionne), **jamais** journalisée ni incluse dans une erreur |
+| Écriture | `--apply-dns` explicite ; sans lui, le harnais n'écrit rien |
+| Refus du serveur | c'est une **erreur**, jamais un succès silencieux : un domaine cru publié et non publié est pire qu'un échec |
+
+Le **plan** ([`this::dns::plan`]) est une fonction pure : il se relit, il se
+teste sans réseau, et il dit exactement ce qui serait créé, modifié ou supprimé.
+
 ## 4. Ce que l'application peut lire à l'exécution
 
 ```rust
