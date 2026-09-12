@@ -409,3 +409,85 @@ proxy:
         "et l'API garde le sien :\n{caddyfile}"
     );
 }
+
+// ===========================================================================
+// 6. LA VUE MULTI-ÉCHELLE SUR L'EXPOSITION RÉELLE
+// ===========================================================================
+
+/// **L'exigence** : voir les sous-groupes des sous-groupes des sous-groupes, à
+/// travers l'interface — servie par le routeur, bornée, et lisible par un moteur
+/// d'inférence.
+#[tokio::test]
+async fn the_multi_scale_view_is_served_by_the_router() {
+    use this::core::identity::IdentityRegistry;
+    use this::storage::ObrainStore;
+
+    // Un arbre : racine → 2 groupes → 4 sous-groupes → 8 sous-sous-groupes.
+    let store = ObrainStore::new_in_memory();
+    let root = {
+        let session = store.db().session();
+        let root = session.create_node_with_props(
+            &["Group"],
+            [("name", obrain_common::types::Value::from("aletheia"))],
+        );
+        let mut frontier = vec![root];
+        for niveau in 1..=3 {
+            let mut next = Vec::new();
+            for parent in &frontier {
+                for i in 0..2 {
+                    let child = session.create_node_with_props(
+                        &["Group"],
+                        [(
+                            "name",
+                            obrain_common::types::Value::from(format!("g{niveau}-{i}")),
+                        )],
+                    );
+                    session.create_edge(*parent, child, "CONTAINS");
+                    next.push(child);
+                }
+            }
+            frontier = next;
+        }
+        store.commit_wal().expect("commit");
+        root.as_u64()
+    };
+
+    let app = this::graph::graph_routes(this::graph::GraphState {
+        store: std::sync::Arc::clone(&store),
+        identity: std::sync::Arc::new(IdentityRegistry::obrain_default()),
+    });
+
+    // Les trois niveaux, en JSON.
+    let (status, body) = get(
+        app.clone(),
+        "www.aletheia-chain.com",
+        &format!("/graph/hierarchy/{root}?depth=3"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let json: serde_json::Value = serde_json::from_str(&body).expect("json");
+    assert_eq!(json["depth"], 3, "{json}");
+    assert_eq!(json["levels"][0]["nodes"].as_array().unwrap().len(), 2);
+    assert_eq!(json["levels"][1]["nodes"].as_array().unwrap().len(), 4);
+    assert_eq!(
+        json["levels"][2]["nodes"].as_array().unwrap().len(),
+        8,
+        "les sous-groupes des sous-groupes des sous-groupes : {json}"
+    );
+    assert_eq!(json["levels"][0]["truncated"], false, "rien n'est coupé");
+
+    // La forme lisible par un moteur d'inférence.
+    let (status, outline) = get(
+        app,
+        "www.aletheia-chain.com",
+        &format!("/graph/hierarchy/{root}?depth=2&format=outline"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(outline.contains("aletheia"), "{outline}");
+    assert!(outline.contains("- g1-0"), "{outline}");
+    assert!(
+        outline.contains("↳ /graph/hierarchy/"),
+        "un niveau non descendu donne son adresse : {outline}"
+    );
+}

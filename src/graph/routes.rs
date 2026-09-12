@@ -20,6 +20,8 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
+
+use crate::graph::hierarchy;
 use serde_json::json;
 use uuid::Uuid;
 
@@ -51,6 +53,9 @@ pub fn graph_routes(state: GraphState) -> Router {
         .route("/graph/spaces", get(spaces_handler))
         .route("/graph/identity", get(identity_handler))
         .route("/graph/identity/{id}", get(identity_get_handler))
+        // **La vue multi-échelle** : descendre d'un groupe à ses sous-groupes,
+        // niveau par niveau, sans jamais charger tout le graphe.
+        .route("/graph/hierarchy/{id}", get(hierarchy_handler))
         .with_state(state)
 }
 
@@ -282,6 +287,76 @@ async fn identity_handler(
 /// tiers peut donc **recalculer** l'identifiant et vérifier qu'il correspond,
 /// sans faire confiance à this-rs. C'est la définition opérationnelle de « la
 /// même entité quel que soit le moteur ».
+/// Paramètres de `GET /graph/hierarchy/{id}`.
+#[derive(Debug, Deserialize)]
+struct HierarchyQuery {
+    /// Profondeur à descendre (bornée par la spécification).
+    depth: Option<usize>,
+    /// Plafond de nœuds **par niveau**.
+    limit: Option<usize>,
+    /// `outline` : rendre la vue en **texte indenté**, pour un moteur
+    /// d'inférence, plutôt qu'en JSON.
+    format: Option<String>,
+}
+
+/// **`GET /graph/hierarchy/{id}`** — les sous-groupes, jusqu'à la profondeur
+/// demandée.
+///
+/// Chaque niveau est borné, chaque troncature est **publiée** (`truncated`,
+/// `total`), chaque cycle est **signalé** au lieu d'être parcouru. Parcours par
+/// **adjacence** : le coût suit ce qui est montré, pas la taille de la base.
+///
+/// `?format=outline` rend la même information en texte indenté, avec l'adresse
+/// à demander pour continuer — la forme qu'un modèle lit le mieux.
+async fn hierarchy_handler(
+    State(state): State<GraphState>,
+    Path(id): Path<String>,
+    Query(query): Query<HierarchyQuery>,
+) -> Response {
+    let Ok(raw) = id.parse::<u64>() else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": format!("identifiant de nœud illisible : {id:?}"),
+                "hint": "un nœud se désigne par son identifiant numérique (voir /graph)"
+            })),
+        )
+            .into_response();
+    };
+
+    let mut spec = hierarchy::HierarchySpec::default();
+    if let Some(depth) = query.depth {
+        // Borné : une profondeur absurde est ramenée à la borne, jamais
+        // obéie telle quelle.
+        spec.max_depth = depth.min(32);
+    }
+    if let Some(limit) = query.limit {
+        spec.per_level_limit = limit.clamp(1, 1000);
+    }
+
+    let store = state.store.clone();
+    let vue = tokio::task::spawn_blocking(move || {
+        let node = obrain_common::types::NodeId::new(raw);
+        hierarchy::describe(&store, node, spec)
+    })
+    .await;
+
+    match vue {
+        Ok(vue) => {
+            if query.format.as_deref() == Some("outline") {
+                (StatusCode::OK, vue.outline()).into_response()
+            } else {
+                Json(vue).into_response()
+            }
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": format!("vue multi-échelle indisponible : {e}") })),
+        )
+            .into_response(),
+    }
+}
+
 async fn identity_get_handler(State(state): State<GraphState>, Path(id): Path<String>) -> Response {
     let Ok(uuid) = Uuid::parse_str(&id) else {
         return (
