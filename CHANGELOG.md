@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Performance
+- **IAM hot path: 6.15 µs → 2.37 µs per authorised request (×2.6)**, measured. The hot path no longer builds a full `AclStamp` — roles, scope, principal and a **SHA-256 digest** — to answer a membership question: `Iam::allows(principal, scope, permission)` does one index lookup, **one** property read and a string scan. Permissions are additionally stored in a hot-path form (`acl_perms_blob`), and permissions containing a control character are refused at materialisation, so one permission cannot impersonate another.
+- `stamp_of` reads its seven fields through the engine's `get_node_property` ("without loading all properties") and `node_has_label`, instead of materialising the node and rebuilding a B-tree with allocated `String` keys: **4.52 µs → 2.88 µs**. The full decision follows: 4.12 → 3.23 µs.
+- **Fixed (security):** `stamp_of` read through the **root** session, so in a named space a node could be missing (fail-closed but wrong) or the id could designate a *different node of the same number* in the root. It now reads through the active space — the same scoping as `acl_node` — and a security test locks it.
+- `GraphBackend::node_property` no longer reads every property to return one (it called `node_properties().get(key)`); it uses the engine's direct `Node::get_property`. A generic win for every facade consumer.
+- **Not optimised, on purpose**: route resolution plus a vocabulary policy costs ~240 ns, i.e. 0.5% of a ~45 µs HTTP request. A pre-parsed route table would add a second referential to maintain for half a percent.
+- **Write path**: the IAM is never consulted on writes (verified: no `iam()` reference in `src/storage/obrain.rs` or `src/core/service.rs`); the only added cost is the write lease — **0.01%** of a journal append (210 ns vs 1.91 ms), now printed by the latency contract.
+
 ### Security
 - **Security test suites** (`tests/security_iam.rs`, 24 tests · `tests/security_durability.rs`, 11) — each test names the attack it models: privilege escalation through policy composition (`any:not:admin_only` authorises everyone *except* admins), route bypass (path traversal, method-override header, HEAD as a side door), decision capture (key collision, neighbouring tenant, neighbouring **space**, replay after invalidation), identity collisions (length-ambiguous names, Unicode normalisation) and the trust boundary itself (`documented_limit_*` tests assert what an attacker with store write access CAN do, so it is known rather than assumed).
 - **Fixed — IAM lookups were not scoped to the active space.** `principal_node` and `acl_node` queried the **root** index: in a named space, a decision from another space could answer. (An earlier claim of mine that this was fixed was wrong — the replacement never matched the multi-line calls. The security suite is what caught it.)

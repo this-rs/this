@@ -71,6 +71,26 @@ pub const ACL_SCOPE_PROP: &str = "acl_scope";
 pub const ACL_DIGEST_PROP: &str = "acl_digest";
 /// Propriété portant la liste lisible des permissions.
 pub const ACL_PERMS_PROP: &str = "acl_perms";
+
+/// Les permissions **telles que le chemin chaud les lit** : une seule chaîne,
+/// chaque permission encadrée par un US (`\u{1f}`).
+///
+/// Pourquoi une seconde forme, alors que `acl_perms` porte déjà la liste :
+/// trancher `perm:<permission>` coûte, sur le chemin chaud, un **décodage JSON
+/// par requête** (mesuré : 1,06 µs pour 80 permissions) et la construction d'un
+/// `AclStamp` complet (rôles, portée, principal, empreinte SHA-256) dont
+/// l'appelant n'a aucun besoin. Une lecture de propriété + un parcours de chaîne
+/// répondent à la seule question posée — *ce principal a-t-il cette
+/// permission ?* — et `acl_perms` reste la forme **publiée** (lisible, hachée,
+/// servie par le relief).
+///
+/// Le US ne peut pas apparaître dans une permission : celles qui contiennent un
+/// caractère de contrôle sont **refusées** à la matérialisation. Sans cette
+/// validation, `("a\u{1f}b")` pourrait se faire passer pour deux permissions.
+pub const ACL_PERMS_BLOB_PROP: &str = "acl_perms_blob";
+
+/// Le séparateur interne du chemin chaud (US, comme la clé d'ACL).
+const PERM_SEPARATOR: char = '\u{1f}';
 /// Propriété portant les rôles retenus.
 pub const ACL_ROLES_PROP: &str = "acl_roles";
 /// Propriété portant l'époque de matérialisation.
@@ -249,6 +269,46 @@ impl Iam {
     /// Fail-closed : ces identités-là ne sont pas « nettoyées », elles sont
     /// **refusées**. Échapper silencieusement un nom d'utilisateur serait pire —
     /// deux noms distincts deviendraient une seule identité.
+    /// Le rendu « chemin chaud » d'une liste de permissions : encadrée par des
+    /// US, chaque permission séparée par un US. Une recherche d'appartenance
+    /// devient un parcours de chaîne, sans allocation ni décodage.
+    fn perms_blob(permissions: &[String]) -> String {
+        let mut blob =
+            String::with_capacity(permissions.iter().map(|p| p.len() + 1).sum::<usize>() + 1);
+        blob.push(PERM_SEPARATOR);
+        for permission in permissions {
+            blob.push_str(permission);
+            blob.push(PERM_SEPARATOR);
+        }
+        blob
+    }
+
+    /// Refuse une permission que le chemin chaud ne saurait pas représenter.
+    ///
+    /// Un caractère de contrôle casserait le séparateur ; une permission vide est
+    /// une faute de configuration. Fail-closed : on refuse la matérialisation au
+    /// lieu d'écrire une décision ambiguë.
+    fn validate_permission(permission: &str) -> Result<(), IamError> {
+        if permission.is_empty() {
+            return Err(IamError::Malformed {
+                node: "permission".to_string(),
+                reason: "vide : une permission sans nom n'autorise rien".to_string(),
+            });
+        }
+        if let Some(bad) = permission.chars().find(|c| c.is_control()) {
+            return Err(IamError::Malformed {
+                node: format!("permission {permission:?}"),
+                reason: format!(
+                    "contient un caractère de contrôle (U+{:04X}) : il casserait le \
+                     séparateur du chemin chaud et permettrait à une permission d'en \
+                     usurper une autre",
+                    bad as u32
+                ),
+            });
+        }
+        Ok(())
+    }
+
     fn validate_identity_part(part: &str, value: &str) -> Result<(), IamError> {
         if value.is_empty() {
             return Err(IamError::Malformed {
@@ -383,6 +443,9 @@ impl Iam {
             .collect();
         permissions.sort();
         permissions.dedup();
+        for permission in &permissions {
+            Self::validate_permission(permission)?;
+        }
         let mut role_names: Vec<String> = roles.iter().map(|r| r.role.clone()).collect();
         role_names.sort();
         role_names.dedup();
@@ -444,6 +507,13 @@ impl Iam {
             node,
             ACL_PERMS_PROP,
             obrain_common::types::Value::from(Self::encode_list(&permissions).as_str()),
+        );
+        // Le chemin chaud (voir `allows`) lit CETTE propriété : une lecture, un
+        // parcours de chaîne, aucun décodage.
+        store.set_node_property(
+            node,
+            ACL_PERMS_BLOB_PROP,
+            obrain_common::types::Value::from(Self::perms_blob(&permissions).as_str()),
         );
         store.set_node_property(
             node,
@@ -521,6 +591,9 @@ impl Iam {
                 pending.roles.iter().map(|r| r.role.clone()).collect();
             role_names.sort();
             role_names.dedup();
+            for permission in &permissions {
+                Self::validate_permission(permission)?;
+            }
 
             if self.principal_node(pending.principal)?.is_none() {
                 session.create_node_with_props(
@@ -594,6 +667,10 @@ impl Iam {
                 obrain_common::types::Value::from(Self::encode_list(&stamp.permissions).as_str()),
             );
             set(
+                ACL_PERMS_BLOB_PROP,
+                obrain_common::types::Value::from(Self::perms_blob(&stamp.permissions).as_str()),
+            );
+            set(
                 ACL_ROLES_PROP,
                 obrain_common::types::Value::from(Self::encode_list(&stamp.roles).as_str()),
             );
@@ -618,6 +695,51 @@ impl Iam {
     }
 
     /// **La décision** : une seule recherche indexée, aucune traversée.
+    /// **Le chemin chaud** : ce principal a-t-il cette permission, ici et
+    /// maintenant ?
+    ///
+    /// Répond à la seule question que pose l'application des politiques, sans
+    /// construire de décision complète. Coût mesuré : une recherche indexée, une
+    /// lecture de propriété, un parcours de chaîne — **sans** décodage JSON,
+    /// **sans** empreinte SHA-256, **sans** allocation de `AclStamp`
+    /// (`examples/iam_bench`, section « décomposition »).
+    ///
+    /// Sémantique **strictement identique** à `decision(...)?.allows(permission)` :
+    /// c'est vérifié cas par cas par un test différentiel
+    /// (`allows_agrees_with_the_full_decision_in_every_case`). Deux chemins pour
+    /// une même question n'ont de valeur que s'ils répondent toujours pareil.
+    ///
+    /// Fail-closed : absence de nœud, absence de propriété, erreur de lecture,
+    /// permission vide → `false`. Un joker `*` accorde toute permission **nommée**
+    /// mais jamais la permission vide.
+    pub fn allows(&self, principal: &str, scope: &str, permission: &str) -> Result<bool, IamError> {
+        Self::validate_identity(scope, principal)?;
+        if permission.is_empty() {
+            return Ok(false);
+        }
+        let key = Self::acl_key(scope, principal);
+        let Some(node) = self.acl_node(&key)? else {
+            return Ok(false);
+        };
+        let blob = self
+            .store
+            .active_store()
+            .get_node_property(
+                node,
+                &obrain_common::types::PropertyKey::new(ACL_PERMS_BLOB_PROP),
+            )
+            .and_then(|value| value.as_str().map(str::to_string))
+            .unwrap_or_default();
+        if blob.is_empty() {
+            // Décision jamais matérialisée, ou invalidée (le blob est vidé avec
+            // les permissions) : rien n'est accordé.
+            return Ok(false);
+        }
+        Ok(blob
+            .split(PERM_SEPARATOR)
+            .any(|held| held == permission || held == "*"))
+    }
+
     pub fn decision(&self, principal: &str, scope: &str) -> Result<Option<AclStamp>, IamError> {
         Self::validate_identity(scope, principal)?;
         let key = Self::acl_key(scope, principal);
@@ -632,26 +754,27 @@ impl Iam {
         &self,
         node: obrain_common::types::NodeId,
     ) -> Result<Option<AclStamp>, IamError> {
-        // UNE seule lecture de nœud : le nœud arrive avec sa table de
-        // propriétés, et on lit les cinq champs dedans — au lieu de cinq appels
-        // `get_node_property`. C'est la correction du coût que la mesure avait
-        // mis au jour : les 23 µs d'une « lecture indexée » étaient dominées par
-        // les cinq appels, pas par l'index.
-        let Some(obrain_node) = self.store.session().get_node(node) else {
-            return Ok(None);
-        };
+        // **L'espace actif, pas la racine** : `self.store.session()` lisait la
+        // session racine, donc dans un espace nommé un nœud pouvait être absent
+        // (refus — fail-closed, mais faux) ou, pire, l'identifiant pouvait
+        // désigner **un autre nœud du même numéro** dans la racine. Le store
+        // actif est celui qui a servi à trouver le nœud.
+        let store = self.store.active_store();
         // **Le label fait partie du contrat** : un nœud qui porte une propriété
         // `acl_key` sans être une décision n'en est pas une. Sans ce contrôle,
         // n'importe quel nœud porteur de la propriété était lu comme une
-        // décision valide (époque 0, permissions vides).
-        if !obrain_node.labels.iter().any(|l| l.as_str() == ACL_LABEL) {
+        // décision valide (époque 0, permissions vides). `node_has_label` est le
+        // test prévu pour ça — pas une liste de labels matérialisée.
+        if store.node_has_label(node, ACL_LABEL) != Some(true) {
             return Ok(None);
         }
-        let props = obrain_node.properties_as_btree();
+        // **Une propriété à la fois, sans charger le nœud.** Le moteur expose
+        // `get_node_property`, documenté comme « sans charger toutes les
+        // propriétés » : la lecture complète du nœud puis la reconstruction d'une
+        // carte B-tree (avec des clés `String` allouées) coûtait 4,01 µs mesurés
+        // pour sept champs — plus que tout le reste de la décision.
         let get = |prop: &str| {
-            props
-                .get(&obrain_common::types::PropertyKey::new(prop))
-                .cloned()
+            store.get_node_property(node, &obrain_common::types::PropertyKey::new(prop))
         };
         let Some(key) = get(ACL_KEY_PROP).and_then(|v| v.as_str().map(str::to_string)) else {
             return Ok(None);
@@ -718,6 +841,13 @@ impl Iam {
         // retrouve le MÊME nœud — l'époque reste donc monotone. Retirer la clé
         // ferait créer un second nœud et l'époque repartirait à 1.
         store.set_node_property(node, ACL_PERMS_PROP, obrain_common::types::Value::from(""));
+        // **Le chemin chaud aussi** : l'oublier laisserait `allows()` accorder
+        // exactement ce que l'invalidation vient de retirer.
+        store.set_node_property(
+            node,
+            ACL_PERMS_BLOB_PROP,
+            obrain_common::types::Value::from(""),
+        );
         store.set_node_property(node, ACL_ROLES_PROP, obrain_common::types::Value::from(""));
         // Le **digest** aussi : sinon le nœud portait encore l'empreinte de
         // l'ancienne décision, et qui lit ce champ la croyait en vigueur.
@@ -1074,6 +1204,161 @@ mod perimeter {
             .db()
             .find_nodes_by_property(ACL_KEY_PROP, &v(key))
             .len()
+    }
+
+    // ── Le chemin chaud : `allows` DOIT dire la même chose que la décision ──
+
+    /// **Test différentiel** : `allows` est une seconde voie vers la même
+    /// réponse. Deux chemins n'ont de valeur que s'ils répondent toujours
+    /// pareil — y compris sur les cas tordus (joker, vide, préfixe, casse,
+    /// espaces, permission suspicieusement proche).
+    #[test]
+    fn allows_agrees_with_the_full_decision_in_every_case() {
+        let store = ObrainStore::new_in_memory();
+        let iam = store.iam();
+
+        let cases: Vec<(&str, Vec<RoleGrant>)> = vec![
+            (
+                "joker",
+                vec![RoleGrant {
+                    role: "root".into(),
+                    permissions: vec!["*".into()],
+                }],
+            ),
+            (
+                "exact",
+                vec![RoleGrant {
+                    role: "reader".into(),
+                    permissions: vec!["orders:read".into(), "catalog:read".into()],
+                }],
+            ),
+            (
+                "proches",
+                vec![RoleGrant {
+                    role: "r".into(),
+                    permissions: vec!["a".into(), "ab".into(), "a:b".into(), "b:a".into()],
+                }],
+            ),
+            ("aucune", vec![]),
+        ];
+        let asked = [
+            "",
+            "orders:read",
+            "catalog:read",
+            "orders",
+            "orders:write",
+            "a",
+            "ab",
+            "ba",
+            "a:b",
+            "b:a",
+            ":",
+            "*",
+            "ORDERS:READ",
+            " orders:read",
+            "orders:read ",
+            "a\u{1f}b",
+        ];
+
+        for (label, grants) in &cases {
+            let principal = format!("u-{label}");
+            let scope = "t";
+            iam.materialize(&principal, scope, grants)
+                .expect("matérialisation");
+
+            for permission in asked {
+                let full = iam
+                    .decision(&principal, scope)
+                    .expect("décision")
+                    .map(|stamp| stamp.allows(permission))
+                    .unwrap_or(false);
+                let hot = iam
+                    .allows(&principal, scope, permission)
+                    .expect("chemin chaud");
+                assert_eq!(
+                    full, hot,
+                    "désaccord sur ({label}, {permission:?}) : décision={full} chemin chaud={hot}"
+                );
+            }
+        }
+    }
+
+    /// **Sécurité** : une invalidation doit fermer le chemin chaud *aussi*. Une
+    /// seule des deux formes vidée laisserait `allows()` accorder ce que
+    /// l'invalidation vient de retirer.
+    #[test]
+    fn invalidation_closes_the_hot_path_too() {
+        let store = ObrainStore::new_in_memory();
+        let iam = store.iam();
+        iam.materialize(
+            "u",
+            "t",
+            &[RoleGrant {
+                role: "writer".into(),
+                permissions: vec!["orders:write".into()],
+            }],
+        )
+        .expect("matérialisation");
+        assert!(iam.allows("u", "t", "orders:write").expect("chaud"));
+
+        iam.invalidate("u", "t").expect("invalidation");
+
+        assert!(
+            !iam.allows("u", "t", "orders:write").expect("chaud"),
+            "après invalidation, le chemin chaud doit refuser"
+        );
+        assert!(
+            !iam.decision("u", "t")
+                .expect("décision")
+                .expect("nœud")
+                .allows("orders:write"),
+            "et la décision complète aussi (les deux formes sont vidées)"
+        );
+    }
+
+    /// **Sécurité** : une permission contenant le séparateur du chemin chaud est
+    /// refusée — sinon elle pourrait se faire passer pour deux permissions.
+    #[test]
+    fn a_permission_containing_the_separator_is_refused() {
+        let store = ObrainStore::new_in_memory();
+        let iam = store.iam();
+        let err = iam
+            .materialize(
+                "u",
+                "t",
+                &[RoleGrant {
+                    role: "r".into(),
+                    permissions: vec!["orders:read\u{1f}orders:write".into()],
+                }],
+            )
+            .expect_err("une permission avec un caractère de contrôle doit être refusée");
+        assert!(err.to_string().contains("contrôle"), "{err}");
+
+        assert!(
+            iam.materialize(
+                "u",
+                "t",
+                &[RoleGrant {
+                    role: "r".into(),
+                    permissions: vec!["".into()],
+                }],
+            )
+            .is_err(),
+            "une permission vide est une faute de configuration"
+        );
+    }
+
+    /// Le chemin chaud ne doit accorder **rien** sans décision matérialisée.
+    #[test]
+    fn the_hot_path_grants_nothing_without_a_materialised_decision() {
+        let store = ObrainStore::new_in_memory();
+        let iam = store.iam();
+        assert!(!iam.allows("personne", "t", "orders:read").expect("chaud"));
+        assert!(!iam.allows("personne", "t", "").expect("chaud"));
+        assert!(
+            iam.allows("", "t", "orders:read").is_err(),
+            "une identité vide est refusée, pas accordée"
+        );
     }
 
     /// Combien de nœuds `Principal` portent ce nom qualifié.

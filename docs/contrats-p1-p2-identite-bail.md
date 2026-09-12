@@ -372,3 +372,65 @@ poignée d'arêtes.
 **Écriture** (le prix payé une fois, à l'écriture IAM) : **21,16 ms par
 principal** avec un commit par principal, **1,36 ms par principal** en un seul
 lot — **×16**. C'est le chiffre qui justifie `materialize_batch`.
+
+---
+
+## Optimisation du chemin chaud IAM (mesuré, 2026-09-11)
+
+Question posée : *l'IAM est-il bien branché, et optimisé pour ne pas saboter les
+performances d'obrain et de this-rs ?* Réponse en trois parties.
+
+### 1. Il est branché, et le chemin est traçable
+
+```
+requête HTTP
+  └─ authorization_middleware        (server/exposure/rest/mod.rs)
+       └─ Authorization::decide      (résolution de route → politique)
+            └─ check_iam             (politique `perm:`)
+                 └─ Iam::allows      ← LE CHEMIN CHAUD
+                      ├─ acl_node              (index `acl_key → nœud`, espace actif)
+                      └─ get_node_property     (UNE propriété : `acl_perms_blob`)
+```
+
+Preuves : une décision retirée fait basculer une **vraie** requête
+(`tests/native_integration.rs`, `tests/security_iam.rs`) ; les politiques
+`perm:` sont refusées **faill-closed** quand le plan IAM est absent ; et le
+**chemin d'écriture ne consulte pas l'IAM du tout** (vérifié : aucune référence
+à `iam()` dans `src/storage/obrain.rs` ni `src/core/service.rs`).
+
+### 2. Ce qui coûtait, et ce qui a changé
+
+Décomposition mesurée avant optimisation (`examples/iam_bench`, minimums) :
+index 1,19 µs · **lecture du nœud 4,01 µs** · décodage JSON des permissions
+1,06 µs (80 permissions) · décision complète 7,55 µs.
+
+| Cause | Correction |
+|---|---|
+| Le chemin chaud construisait un `AclStamp` **complet** — rôles, portée, principal, et une **empreinte SHA-256** — pour répondre à une question d'appartenance | `Iam::allows(principal, portée, permission)` répond à la seule question posée : index, **une** propriété, un parcours de chaîne. Pas de décodage JSON, pas d'empreinte, pas d'allocation de stamp |
+| Les permissions n'existaient qu'en **JSON** : un décodage par requête | Une seconde forme, `acl_perms_blob` (US encadrants), lue par le chemin chaud. Les permissions contenant un caractère de contrôle sont **refusées** à la matérialisation — sinon une permission pourrait en usurper une autre |
+| `stamp_of` matérialisait le nœud **puis** reconstruisait une carte B-tree avec des clés `String` allouées | Le moteur expose `get_node_property` (« sans charger toutes les propriétés ») et `node_has_label` : sept lectures ciblées au lieu d'une carte complète |
+| `stamp_of` lisait via la session **racine** | Il lit via l'**espace actif** — même cloisonnement que `acl_node`. Un test de sécurité le verrouille désormais (`the_hot_path_is_scoped_to_the_active_space_too`) |
+| `GraphBackend::node_property` lisait **toutes** les propriétés pour en rendre une | Lecture directe via `Node::get_property` — gain générique, pour tout consommateur de la façade |
+
+### 3. Résultat mesuré (minimums, machine partagée)
+
+| surface | avant | après |
+|---|---|---|
+| **autorisation · politique `perm:`** (le coût payé à **chaque requête autorisée**) | 6,15 µs | **2,37 µs** — **×2,6** |
+| `stamp_of` (lecture d'un nœud de décision) | 4,52 µs | **2,88 µs** |
+| `Iam::decision` (décision complète, chemin de publication) | 4,12 µs | **3,23 µs** |
+| autorisation · politique du vocabulaire | 140 ns | 240 ns (même ordre : bruit) |
+| **bail / écriture** | — | **0,01 %** (210 ns contre 1,91 ms d'append) |
+
+**Ce qu'on n'a pas optimisé, et pourquoi** : la résolution de route et
+l'évaluation d'une politique du vocabulaire coûtent ~240 ns, soit **0,5 %** d'une
+requête HTTP mesurée à ~45 µs. Pré-calculer une table de routes et pré-analyser
+les politiques ajouterait un second référentiel à maintenir pour gagner un
+demi-pour-cent : le rapport n'y est pas.
+
+**La correction n'a pas de prix de sécurité** : `allows` doit dire **exactement**
+ce que dit `decision().allows()` — un test différentiel le vérifie sur 4 jeux de
+permissions × 16 permissions demandées (joker, vide, préfixe, casse, espaces,
+caractère séparateur). Et l'invalidation vide **les deux** formes : l'oublier
+aurait laissé le chemin chaud accorder ce que l'invalidation venait de retirer
+(test dédié).

@@ -235,6 +235,60 @@ fn main() -> anyhow::Result<()> {
     );
     println!();
 
+    // ── Décomposition du coût d'une décision (le chemin chaud) ───────────
+    //
+    // Une politique `perm:` est tranchée à CHAQUE requête autorisée. Avant
+    // d'optimiser, on mesure où passe le temps : index, lecture de nœud, ou
+    // décodage des listes.
+    use this::storage::GraphBackend;
+    let hot_principal = format!("user:{}", principals / 2);
+    let hot_key = Iam::acl_key("tenant-a", &hot_principal);
+    let hot_node = <ObrainStore as GraphBackend>::find_nodes_by_property(
+        store.as_ref(),
+        this::storage::iam::ACL_KEY_PROP,
+        &obrain_common::types::Value::from(hot_key.as_str()),
+    )
+    .into_iter()
+    .next()
+    .expect("nœud de décision");
+
+    let index_only = bench(iters, || {
+        <ObrainStore as GraphBackend>::find_nodes_by_property(
+            store.as_ref(),
+            this::storage::iam::ACL_KEY_PROP,
+            &obrain_common::types::Value::from(hot_key.as_str()),
+        )
+    });
+    let node_read = bench(iters, || {
+        <ObrainStore as GraphBackend>::node_properties(store.as_ref(), hot_node)
+    });
+    let raw_perms = <ObrainStore as GraphBackend>::node_property(
+        store.as_ref(),
+        hot_node,
+        this::storage::iam::ACL_PERMS_PROP,
+    )
+    .and_then(|v| v.as_str().map(str::to_string))
+    .expect("permissions persistées");
+    let decode = bench(iters, || {
+        serde_json::from_str::<Vec<String>>(&raw_perms).expect("liste")
+    });
+    let whole = bench(iters, || {
+        iam.decision(&hot_principal, "tenant-a")
+            .expect("lecture")
+            .expect("décision")
+    });
+
+    println!("décomposition d'une décision (chemin chaud, minimums) :");
+    println!("  index (acl_key → nœud)      {}", dur(index_only.min));
+    println!("  lecture du nœud             {}", dur(node_read.min));
+    println!(
+        "  décodage des permissions    {}   ← {} permissions, JSON",
+        dur(decode.min),
+        grants.iter().map(|g| g.permissions.len()).sum::<usize>()
+    );
+    println!("  décision complète           {}", dur(whole.min));
+    println!();
+
     // ── Le contrat robuste : l'index est plat, la traversée croît ────────
     //
     // Un rapport unique dépend de la machine. Ce qui ne dépend pas d'elle,
