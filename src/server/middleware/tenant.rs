@@ -30,6 +30,14 @@ use uuid::Uuid;
 /// This extracts the tenant ID from multiple sources (header, auth context,
 /// query param) and inserts a `TenantContext` into request extensions.
 pub async fn tenant_resolver_middleware(mut request: Request, next: Next) -> Response {
+    // **Un locataire déjà posé est respecté.** Le garde de domaine
+    // (`middleware::origin`) pose celui du domaine servi quand la configuration
+    // en désigne un : un jeton d'un autre locataire ne doit pas pouvoir changer
+    // de locataire par la parole, une fois qu'un domaine a parlé.
+    if request.extensions().get::<TenantContext>().is_some() {
+        return next.run(request).await;
+    }
+
     let tenant_id = resolve_tenant_id(&request);
 
     if let Some(tid) = tenant_id {

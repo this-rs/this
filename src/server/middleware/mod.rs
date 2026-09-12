@@ -9,6 +9,7 @@ pub mod tenant;
 pub use auth::AuthLayer;
 /// Application des politiques d'autorisation (le point qui manquait).
 pub mod authorization;
+pub mod origin;
 pub use authorization::{
     Authorization, Decision, PolicyOrigin, Requirement, authorization_middleware,
 };

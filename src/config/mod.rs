@@ -2,6 +2,7 @@
 
 pub mod auth;
 pub mod events;
+pub mod server;
 pub mod sinks;
 
 use crate::core::LinkDefinition;
@@ -12,6 +13,9 @@ use std::collections::HashMap;
 
 pub use auth::AuthConfig;
 pub use events::*;
+pub use server::{
+    CaddyConfig, CaddyTls, CorsConfig, DomainConfig, ProxyConfig, ServerSecurityConfig,
+};
 pub use sinks::*;
 
 /// Authorization configuration for an entity

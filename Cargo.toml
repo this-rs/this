@@ -130,6 +130,7 @@ tonic-prost-build = { version = "0.14" }
 
 [dev-dependencies]
 tokio-test = "0.4"
+async-trait = "0.1"
 axum-test = "21.1"
 reqwest = { version = "0.13", features = ["json"] }
 tokio-tungstenite = "0.30"
@@ -166,6 +167,11 @@ all = ["in-memory", "dynamodb", "postgres", "mongodb_backend", "neo4j", "scyllad
 [lib]
 name = "this"
 path = "src/lib.rs"
+
+[[example]]
+name = "caddyfile"
+path = "examples/caddyfile.rs"
+required-features = []
 
 [[example]]
 name = "simple_api"
