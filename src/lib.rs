@@ -53,6 +53,7 @@
 
 pub mod config;
 pub mod core;
+pub mod dns;
 pub mod entities;
 pub mod events;
 /// Relief d'obrain publié par this-rs (introspection + publication REST).

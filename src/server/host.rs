@@ -133,6 +133,14 @@ pub struct ServerHost {
     /// d'authentification plus ancien.
     pub principal_mapping: Option<Arc<crate::server::middleware::authorization::PrincipalMapping>>,
 
+    /// **Le repli multi-sites**, quand l'application en déclare un.
+    ///
+    /// Monté par `RestExposure::build_router` **avant** les couches : c'est ce
+    /// qui le rend couvert par le CORS, la garde de domaine, l'authentification
+    /// et les politiques.
+    #[cfg(feature = "frontend")]
+    pub frontend_sites: Option<Arc<crate::server::frontend::FrontendSites>>,
+
     /// **Exposition** : CORS, domaines servis, délégation de proxy.
     ///
     /// Voir [`crate::config::ServerSecurityConfig`] et `config/server.yaml`.
@@ -235,6 +243,8 @@ impl ServerHost {
             graph_store: None,
             identity: Arc::new(IdentityRegistry::new()),
             security: Arc::new(crate::config::ServerSecurityConfig::default()),
+            #[cfg(feature = "frontend")]
+            frontend_sites: None,
             authorize: true,
             authorize_report_only: false,
             principal_mapping: None,
@@ -477,6 +487,8 @@ impl ServerHost {
             graph_store: None,
             identity: Arc::new(IdentityRegistry::new()),
             security: Arc::new(crate::config::ServerSecurityConfig::default()),
+            #[cfg(feature = "frontend")]
+            frontend_sites: None,
             authorize: true,
             authorize_report_only: false,
             principal_mapping: None,

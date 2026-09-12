@@ -447,9 +447,11 @@ async fn the_caddyfile_is_rendered_from_the_same_configuration() {
                     email: Some("ops@exemple.fr".into()),
                     tls: CaddyTls::Acme,
                     security_headers: true,
+                    upstreams: std::collections::BTreeMap::new(),
                     extra_directives: vec!["encode zstd gzip".into()],
                 },
             },
+            ..Default::default()
         })
         .with_link_service(this::storage::in_memory::InMemoryLinkService::new())
         .build_host()

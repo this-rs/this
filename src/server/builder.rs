@@ -60,6 +60,10 @@ pub struct ServerBuilder {
     // Exposition : CORS, domaines servis, délégation de proxy (config/server.yaml)
     security: crate::config::ServerSecurityConfig,
 
+    // Repli multi-sites (N domaines, N contenus), monté AVANT les couches
+    #[cfg(feature = "frontend")]
+    frontend_sites: Option<std::sync::Arc<crate::server::frontend::FrontendSites>>,
+
     // Mappage d'identité de l'application, pour l'IAM natif d'un modèle existant
     principal_mapping: Option<Arc<crate::server::middleware::authorization::PrincipalMapping>>,
 
@@ -93,6 +97,8 @@ impl ServerBuilder {
             authorize: true,
             authorize_report_only: false,
             security: crate::config::ServerSecurityConfig::default(),
+            #[cfg(feature = "frontend")]
+            frontend_sites: None,
             principal_mapping: None,
             fence_writes: true,
             auth_config: None,
@@ -172,6 +178,16 @@ impl ServerBuilder {
     /// par défaut.
     pub fn with_authorization(mut self) -> Self {
         self.authorize = true;
+        self
+    }
+
+    /// **Déclare le repli multi-sites** : plusieurs domaines, plusieurs contenus.
+    ///
+    /// Monté **avant** les couches d'exposition, donc **couvert** par elles
+    /// (CORS, garde de domaine, authentification, politiques).
+    #[cfg(feature = "frontend")]
+    pub fn with_frontend_sites(mut self, sites: crate::server::frontend::FrontendSites) -> Self {
+        self.frontend_sites = Some(std::sync::Arc::new(sites));
         self
     }
 
@@ -638,6 +654,10 @@ impl ServerBuilder {
         self.security.cors.validate()?;
         self.security.domains.validate()?;
         host.security = Arc::new(self.security.clone());
+        #[cfg(feature = "frontend")]
+        {
+            host.frontend_sites = self.frontend_sites.clone();
+        }
         host.principal_mapping = self.principal_mapping.clone();
 
         // Attach the obrain graph handle if one was provided.
