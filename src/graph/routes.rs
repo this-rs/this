@@ -22,6 +22,7 @@ use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 
 use crate::graph::hierarchy;
+use crate::storage::permission::Scale;
 use serde_json::json;
 use uuid::Uuid;
 
@@ -294,6 +295,13 @@ struct HierarchyQuery {
     depth: Option<usize>,
     /// Plafond de nœuds **par niveau**.
     limit: Option<usize>,
+    /// **L'échelle de descente**, dans le vocabulaire de l'interface :
+    /// `cosmos`, `monde`, `groupe`, `noeud`.
+    ///
+    /// Une échelle est une **intention** (jusqu'où je veux voir), une profondeur
+    /// un **nombre** : donner l'échelle évite au client de traduire, et c'est ce
+    /// que l'état d'interface d'un Canvas exprime déjà.
+    echelle: Option<String>,
     /// `outline` : rendre la vue en **texte indenté**, pour un moteur
     /// d'inférence, plutôt qu'en JSON.
     format: Option<String>,
@@ -325,6 +333,32 @@ async fn hierarchy_handler(
     };
 
     let mut spec = hierarchy::HierarchySpec::default();
+
+    // **L'échelle d'abord** : elle porte l'intention, `depth`/`limit` la
+    // précisent. Une échelle inconnue est refusée — jamais ramenée à un défaut
+    // silencieux, qui ferait croire qu'on a obéi.
+    if let Some(raw) = &query.echelle {
+        match Scale::parse(raw) {
+            Some(scale) => {
+                let (depth, limit) = scale.descent();
+                spec.max_depth = depth;
+                spec.per_level_limit = limit;
+            }
+            None => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({
+                        "error": format!("échelle inconnue : {raw:?}"),
+                        "echelles": Scale::ALL.iter().map(|s| json!({
+                            "echelle": s.as_str(),
+                            "montre": s.meaning(),
+                        })).collect::<Vec<_>>(),
+                    })),
+                )
+                    .into_response();
+            }
+        }
+    }
     if let Some(depth) = query.depth {
         // Borné : une profondeur absurde est ramenée à la borne, jamais
         // obéie telle quelle.

@@ -28,6 +28,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::storage::permission::ReadScope;
 use crate::storage::{GraphBackend, ObrainStore};
 
 /// Ce qu'on considère comme une relation **de contenance**.
@@ -92,6 +93,14 @@ pub struct HierarchyNode {
     pub expanded: bool,
     /// Adresse à demander pour continuer depuis ce nœud.
     pub drill_down: String,
+    /// **Combien d'enfants sont masqués** par le périmètre de lecture.
+    ///
+    /// Un lecteur qui n'a pas le droit de lire un label ne doit pas le voir — et
+    /// ne doit pas non plus pouvoir le **deviner** par un compte. Le masquage est
+    /// donc **dit**, jamais silencieux : `children` compte ce qui est lisible,
+    /// `hidden` ce qui ne l'est pas.
+    #[serde(default)]
+    pub hidden: usize,
 }
 
 /// Un niveau de la vue.
@@ -105,6 +114,9 @@ pub struct HierarchyLevel {
     pub total: usize,
     /// **A-t-on coupé ?** Jamais tu.
     pub truncated: bool,
+    /// Nœuds de ce niveau **masqués** par le périmètre de lecture.
+    #[serde(default)]
+    pub hidden: usize,
 }
 
 /// La vue complète.
@@ -191,9 +203,9 @@ fn contained_children(
     store: &ObrainStore,
     node: obrain_common::types::NodeId,
     spec: &HierarchySpec,
-) -> Vec<obrain_common::types::NodeId> {
+) -> Vec<(obrain_common::types::NodeId, String)> {
     let active = store.active_store();
-    let mut children = Vec::new();
+    let mut children: Vec<(obrain_common::types::NodeId, String)> = Vec::new();
     for (target, edge_id) in active.edges_from(node, obrain_core::graph::Direction::Outgoing) {
         let Some(edge) = active.get_edge(edge_id) else {
             continue;
@@ -203,12 +215,19 @@ fn contained_children(
             .iter()
             .any(|t| t.eq_ignore_ascii_case(edge.edge_type.as_str()))
         {
-            children.push(target);
+            children.push((target, edge.edge_type.as_str().to_string()));
         }
     }
-    children.sort_unstable();
+    children.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
     children.dedup();
     children
+}
+
+/// Les labels d'un nœud (pour décider s'il est lisible).
+fn labels_of(store: &ObrainStore, node: obrain_common::types::NodeId) -> Vec<String> {
+    <ObrainStore as GraphBackend>::get_node(store, node)
+        .map(|n| n.labels.iter().map(|l| l.as_str().to_string()).collect())
+        .unwrap_or_default()
 }
 
 /// Décrit un nœud de la vue.
@@ -234,6 +253,7 @@ fn describe_node(
         name: name_of(&properties),
         children,
         expanded: false,
+        hidden: 0,
         drill_down: format!("/graph/hierarchy/{}?depth=1", id.as_u64()),
     }
 }
@@ -244,24 +264,58 @@ pub fn describe(
     root: obrain_common::types::NodeId,
     spec: HierarchySpec,
 ) -> Hierarchy {
+    describe_scoped(store, root, spec, &ReadScope::all())
+}
+
+/// **La même descente, sous un périmètre de lecture.**
+///
+/// Un principal ne voit que les nœuds dont il a le droit de lire le label, et ne
+/// traverse que les relations dont il a le droit de lire le type. Ce qui est
+/// masqué est **compté** (`hidden`) : personne ne peut déduire une structure
+/// qu'il n'a pas le droit de voir, et personne ne peut croire qu'il a tout vu.
+pub fn describe_scoped(
+    store: &ObrainStore,
+    root: obrain_common::types::NodeId,
+    spec: HierarchySpec,
+    scope: &ReadScope,
+) -> Hierarchy {
     let mut visited: Vec<obrain_common::types::NodeId> = vec![root];
     let mut cycles: Vec<(u64, u64)> = Vec::new();
     let mut levels: Vec<HierarchyLevel> = Vec::new();
     let mut frontier: Vec<obrain_common::types::NodeId> = vec![root];
 
+    let mut hidden_total = 0usize;
+
     for depth in 1..=spec.max_depth {
         let mut current: Vec<obrain_common::types::NodeId> = Vec::new();
+        let mut hidden_here = 0usize;
         for parent in &frontier {
-            for child in contained_children(store, *parent, &spec) {
+            for (child, edge_type) in contained_children(store, *parent, &spec) {
+                // **Le tissage, en lecture** : une relation dont on n'a pas le
+                // droit de lire le type n'est pas traversée.
+                if !scope.is_unrestricted() && !scope.may_read_edge(&edge_type) {
+                    hidden_here += 1;
+                    continue;
+                }
                 if visited.contains(&child) {
                     // **Cycle** : signalé, jamais parcouru.
                     cycles.push((parent.as_u64(), child.as_u64()));
                     continue;
                 }
+                // **Le nœud lui-même** : le label décide.
+                if !scope.is_unrestricted() {
+                    let labels = labels_of(store, child);
+                    if !labels.iter().any(|l| scope.may_read_node(l)) {
+                        visited.push(child);
+                        hidden_here += 1;
+                        continue;
+                    }
+                }
                 visited.push(child);
                 current.push(child);
             }
         }
+        hidden_total += hidden_here;
         if current.is_empty() {
             break;
         }
@@ -291,6 +345,7 @@ pub fn describe(
             nodes,
             total,
             truncated,
+            hidden: hidden_here,
         });
         frontier = next;
     }
@@ -312,6 +367,11 @@ pub fn describe(
         notes.push(format!(
             "{} cycle(s) signalé(s) et NON parcouru(s) : le graphe se referme",
             cycles.len()
+        ));
+    }
+    if hidden_total > 0 {
+        notes.push(format!(
+            "{hidden_total} nœud(s) MASQUÉ(s) par le périmètre de lecture : votre décision IAM ne              couvre pas leur label, ou pas le type de la relation qui y mène. Le compte est              publié pour que le masquage soit visible, jamais déduit."
         ));
     }
 
@@ -381,6 +441,71 @@ mod tests {
             vue.levels[0].nodes.iter().all(|n| n.children == 2),
             "chaque groupe du niveau 1 a 2 enfants"
         );
+    }
+
+    /// **La granularité** : un principal ne voit que les labels qu'il a le droit
+    /// de lire, ne traverse que les types de relations qu'il a le droit de lire,
+    /// et ce qui est masqué est **compté** — jamais silencieux.
+    #[test]
+    fn a_read_scope_hides_what_the_principal_may_not_read() {
+        let store = ObrainStore::new_in_memory();
+        let session = store.db().session();
+        let root = session.create_node_with_props(
+            &["Group"],
+            [("name", obrain_common::types::Value::from("racine"))],
+        );
+        // Un sous-groupe lisible, un nœud d'un autre label qui ne l'est pas.
+        let visible = session.create_node_with_props(
+            &["Group"],
+            [("name", obrain_common::types::Value::from("groupe"))],
+        );
+        let secret = session.create_node_with_props(
+            &["Secret"],
+            [("name", obrain_common::types::Value::from("confidence"))],
+        );
+        session.create_edge(root, visible, "CONTAINS");
+        session.create_edge(root, secret, "CONTAINS");
+        store.commit_wal().expect("commit");
+
+        // Périmètre : lire les `Group`, et lire/parcourir `CONTAINS`.
+        let scope =
+            ReadScope::from_permissions(["graph:read", "node:read:Group", "edge:read:CONTAINS"]);
+        let vue = describe_scoped(&store, root, HierarchySpec::default(), &scope);
+
+        let noms: Vec<&str> = vue.levels[0]
+            .nodes
+            .iter()
+            .filter_map(|n| n.name.as_deref())
+            .collect();
+        assert_eq!(
+            noms,
+            vec!["groupe"],
+            "seul le label lisible apparaît : {noms:?}"
+        );
+        assert_eq!(vue.levels[0].hidden, 1, "le nœud masqué est COMPTÉ");
+        assert!(
+            vue.notes.iter().any(|n| n.contains("MASQUÉ")),
+            "et le masquage est expliqué : {:?}",
+            vue.notes
+        );
+
+        // Un principal qui ne peut pas lire le type de relation ne la traverse
+        // même pas : rien n'apparaît, et les deux enfants sont masqués.
+        let sans_tissage = ReadScope::from_permissions(["node:read:Group"]);
+        let vue = describe_scoped(&store, root, HierarchySpec::default(), &sans_tissage);
+        assert!(
+            vue.levels.is_empty(),
+            "aucune relation traversable : {vue:?}"
+        );
+        assert_eq!(
+            vue.root.hidden, 0,
+            "la racine n'a pas d'enfants comptés : la relation n'est pas lue"
+        );
+
+        // Sans périmètre restrictif, tout est visible — le comportement d'avant.
+        let vue = describe(&store, root, HierarchySpec::default());
+        assert_eq!(vue.levels[0].nodes.len(), 2);
+        assert_eq!(vue.levels[0].hidden, 0);
     }
 
     /// La profondeur est **bornée**, et ce qui reste à voir est **dit**.

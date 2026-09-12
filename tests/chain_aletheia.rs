@@ -491,3 +491,92 @@ async fn the_multi_scale_view_is_served_by_the_router() {
         "un niveau non descendu donne son adresse : {outline}"
     );
 }
+
+/// **Le vocabulaire du Canvas sert l'inférence** : on demande une **échelle**
+/// (`cosmos`, `monde`, `groupe`, `noeud`) — l'intention — plutôt qu'une
+/// profondeur, le nombre. Et une échelle inconnue est **refusée** avec la liste
+/// des échelles, jamais ramenée à un défaut silencieux.
+#[tokio::test]
+async fn the_canvas_scales_drive_the_multi_scale_read() {
+    use this::core::identity::IdentityRegistry;
+    use this::storage::ObrainStore;
+
+    let store = ObrainStore::new_in_memory();
+    let root = {
+        let session = store.db().session();
+        let root = session.create_node_with_props(
+            &["Group"],
+            [("name", obrain_common::types::Value::from("aletheia"))],
+        );
+        let mut frontier = vec![root];
+        for niveau in 1..=3 {
+            let mut next = Vec::new();
+            for parent in &frontier {
+                for i in 0..2 {
+                    let child = session.create_node_with_props(
+                        &["Group"],
+                        [(
+                            "name",
+                            obrain_common::types::Value::from(format!("g{niveau}-{i}")),
+                        )],
+                    );
+                    session.create_edge(*parent, child, "CONTAINS");
+                    next.push(child);
+                }
+            }
+            frontier = next;
+        }
+        store.commit_wal().expect("commit");
+        root.as_u64()
+    };
+
+    let app = this::graph::graph_routes(this::graph::GraphState {
+        store: std::sync::Arc::clone(&store),
+        identity: std::sync::Arc::new(IdentityRegistry::obrain_default()),
+    });
+
+    // `cosmos` : l'ensemble, agrégé — un cran, peu de nœuds par niveau.
+    let (status, body) = get(
+        app.clone(),
+        "www.aletheia-chain.com",
+        &format!("/graph/hierarchy/{root}?echelle=cosmos"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let cosmos: serde_json::Value = serde_json::from_str(&body).expect("json");
+    assert_eq!(
+        cosmos["depth"], 1,
+        "l'échelle cosmos descend d'un cran : {cosmos}"
+    );
+
+    // `groupe` : une branche et ses sous-groupes — plus profond.
+    let (status, body) = get(
+        app.clone(),
+        "www.aletheia-chain.com",
+        &format!("/graph/hierarchy/{root}?echelle=groupe"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let groupe: serde_json::Value = serde_json::from_str(&body).expect("json");
+    assert_eq!(
+        groupe["depth"], 3,
+        "l'échelle groupe voit les sous-groupes : {groupe}"
+    );
+    assert!(
+        groupe["levels"][2]["nodes"].as_array().unwrap().len() == 8,
+        "et le troisième niveau est bien là : {groupe}"
+    );
+
+    // Une échelle inconnue : refusée, avec la liste — pas de défaut silencieux.
+    let (status, body) = get(
+        app,
+        "www.aletheia-chain.com",
+        &format!("/graph/hierarchy/{root}?echelle=galaxie"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(
+        body.contains("cosmos") && body.contains("groupe"),
+        "le refus doit publier les échelles valides : {body}"
+    );
+}
