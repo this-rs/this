@@ -214,6 +214,34 @@ impl Frontend {
     /// Attach this frontend as the fallback of an existing axum app. API
     /// routes registered on `app` keep priority; everything unmatched goes to
     /// the SPA (or `/__dev` endpoints in dev mode).
+    ///
+    /// # ⚠️ L'ordre décide si vos couches voient le frontend
+    ///
+    /// `fallback_service` **remplace** le repli existant, y compris celui que
+    /// vos couches enveloppaient. Mesuré, dans `tests/frontend_surface.rs` :
+    ///
+    /// | ordre | ce que reçoit une requête non routée |
+    /// |---|---|
+    /// | `api.layer(mw)` **puis** `attach` | le repli, **sans** passer par `mw` |
+    /// | `attach` **puis** `api.layer(mw)` | `mw` la voit |
+    ///
+    /// Conséquence : attaché en dernier (l'ordre naturel — « je construis mon
+    /// API, puis je branche le frontend »), le SPA **et le pont `/__dev`** sont
+    /// servis **hors** de l'authentification et de l'autorisation. Sur des
+    /// fichiers statiques c'est sans conséquence ; sur `/__dev`, qui **exécute
+    /// la commande de reconstruction**, ce n'est pas acceptable.
+    ///
+    /// **Appelez `attach` avant vos couches**, ou montez le repli vous-même
+    /// avant de les appliquer :
+    ///
+    /// ```rust,ignore
+    /// let app = frontend.attach(api_router);   // 1. le repli d'abord
+    /// let app = app.layer(auth).layer(authz);  // 2. les couches ensuite
+    /// ```
+    ///
+    /// Le pont de commandes a par ailleurs sa propre garde : il n'est servi que
+    /// si l'application l'a explicitement demandé, et chaque service journalise
+    /// un avertissement.
     pub fn attach(self, app: Router) -> Router {
         app.fallback_service(self.router())
     }
@@ -275,10 +303,22 @@ pub fn from_env() -> Option<Frontend> {
         if let Some(ms) = env_opt("THIS_POLL_MS").and_then(|v| v.parse().ok()) {
             dev = dev.poll_ms(ms);
         }
-        if matches!(
+        // **Le pont de commandes est FERMÉ par défaut.** Il exécute la commande
+        // de reconstruction (`THIS_REBUILD`, `npm run build` par défaut) sur
+        // demande HTTP : l'ouvrir doit être un acte explicite de l'exploitant.
+        // Avant, `THIS_DEV=true` suffisait à l'ouvrir — un déploiement qui hérite
+        // de cette variable exposait donc un pont de commandes, hors des couches
+        // d'authentification quand le frontend est attaché en dernier.
+        let bridge_requested = matches!(
             std::env::var("THIS_DEV_COMMANDS").ok().as_deref(),
-            Some("0") | Some("false") | Some("no") | Some("off")
-        ) {
+            Some("1") | Some("true") | Some("yes") | Some("on")
+        );
+        if bridge_requested {
+            tracing::warn!(
+                "THIS_DEV_COMMANDS : le pont de commandes `/__dev` est OUVERT — il exécute la \
+                 commande de reconstruction sur demande HTTP. À réserver au développement local."
+            );
+        } else {
             dev = dev.commands(false);
         }
         Some(dev)

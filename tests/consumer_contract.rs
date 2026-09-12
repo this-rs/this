@@ -433,6 +433,31 @@ async fn the_relief_publishes_which_surfaces_enforce_policies() {
         );
     }
 
+    // **Toutes** les surfaces, y compris celles qui n'apparaissent pas dans un
+    // inventaire de routes : le frontend et le pont de commandes sont servis par
+    // un **repli**.
+    for surface in ["frontend", "dev_bridge"] {
+        let entry = find(surface);
+        assert_eq!(
+            entry["enforces_policies"], false,
+            "`{surface}` ne peut pas appliquer les politiques : cela doit être publié"
+        );
+    }
+    let frontend = find("frontend");
+    assert!(
+        frontend["otherwise"]
+            .as_str()
+            .is_some_and(|o| o.contains("ORDRE")),
+        "le piège de l'ordre du repli doit être publié : {frontend}"
+    );
+    let bridge = find("dev_bridge");
+    assert!(
+        bridge["otherwise"]
+            .as_str()
+            .is_some_and(|o| o.contains("FERMÉ")),
+        "le pont de commandes doit être publié comme fermé par défaut : {bridge}"
+    );
+
     // Et l'ensemble est cohérent : toute surface publiée dit ce qu'elle sert.
     for surface in surfaces {
         assert!(
