@@ -499,6 +499,19 @@ flatteur et faux. La comparaison décision/traversée vit dans `iam_bench`, où 
         "  décision IAM          {}  ← appelée à chaque requête autorisée",
         dur(decision.min)
     );
+    // La question qui compte pour ne pas « saboter » obrain : combien le bail
+    // ajoute à une ÉCRITURE ? On compare au coût de l'append, mesuré plus haut
+    // dans la même exécution.
+    if let Some(journal_row) = rows.iter().find(|r| r.surface.contains("journal · append")) {
+        println!(
+            "  bail / écriture        {:.2} %  ← le bail ({} ) face à l'append du journal ({})",
+            100.0 * live.min / journal_row.cost.min,
+            dur(live.min),
+            dur(journal_row.cost.min)
+        );
+    }
+    println!();
+
     let http_identity = stats(http_iters, || {
         let (n, _) = http_get(&mut stream, "/graph/identity");
         assert!(n > 0);

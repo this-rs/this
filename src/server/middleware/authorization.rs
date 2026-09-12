@@ -444,26 +444,26 @@ impl Authorization {
         // À partir d'ici, le plan est RÉELLEMENT consulté : la provenance peut
         // l'affirmer.
         *consulted = true;
-        match iam.decision(&principal, &scope) {
-            Ok(Some(stamp)) => {
-                let allowed = stamp.allows(permission);
+        // **Chemin chaud** : `Iam::allows` répond à la seule question posée
+        // (une recherche indexée, une lecture de propriété, un parcours de
+        // chaîne) au lieu de construire une décision complète — rôles, portée,
+        // principal et empreinte SHA-256 compris — que personne n'utilise ici.
+        // La sémantique est identique, et un test différentiel le vérifie cas
+        // par cas.
+        match iam.allows(&principal, &scope, permission) {
+            Ok(allowed) => {
                 tracing::debug!(
                     principal,
                     scope,
                     permission,
-                    epoch = stamp.epoch,
                     allowed,
-                    "décision IAM matérialisée consultée"
+                    "décision IAM consultée (chemin chaud)"
                 );
                 if allowed {
                     IamVerdict::Allowed
                 } else {
                     IamVerdict::Denied
                 }
-            }
-            Ok(None) => {
-                tracing::debug!(principal, scope, "aucune décision matérialisée — refus");
-                IamVerdict::Denied
             }
             Err(e) => {
                 tracing::warn!(error = %e, "lecture de la décision IAM échouée — refus");

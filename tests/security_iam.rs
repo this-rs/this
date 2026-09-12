@@ -579,6 +579,49 @@ fn a_decision_written_in_one_space_is_invisible_in_another() {
     }
 }
 
+/// Le cloisonnement par espace vaut aussi pour le **chemin chaud** (`allows`,
+/// celui qu'emprunte chaque requête) et pour la lecture d'un stamp — pas
+/// seulement pour la décision complète. (Défaut réellement trouvé : `stamp_of`
+/// lisait via la session **racine**.)
+#[test]
+fn the_hot_path_is_scoped_to_the_active_space_too() {
+    let store = store();
+    let iam = store.iam();
+    iam.materialize("u", "t", &[grant("root", &["*"])])
+        .expect("dans l'espace par défaut");
+    let key = Iam::acl_key("t", "u");
+    let node = <ObrainStore as GraphBackend>::find_nodes_by_property(
+        &store,
+        ACL_KEY_PROP,
+        &obrain_common::types::Value::from(key.as_str()),
+    )
+    .into_iter()
+    .next()
+    .expect("nœud");
+
+    assert!(iam.allows("u", "t", "orders:read").expect("chaud"));
+    assert!(
+        iam.stamp_of(node)
+            .expect("stamp")
+            .expect("quelque chose")
+            .allows("orders:read")
+    );
+
+    if store.create_space("voisin").is_ok() {
+        store.use_graph("voisin");
+        assert!(
+            !store.iam().allows("u", "t", "orders:read").expect("chaud"),
+            "le chemin chaud ne doit RIEN accorder dans un espace voisin"
+        );
+        assert_eq!(
+            store.iam().stamp_of(node).expect("stamp"),
+            None,
+            "et un nœud de l'autre espace ne doit pas être lisible ici"
+        );
+        store.reset_graph();
+    }
+}
+
 // ===========================================================================
 // 4. CONTOURNEMENT PAR LA ROUTE
 // ===========================================================================

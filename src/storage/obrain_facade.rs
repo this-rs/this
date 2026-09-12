@@ -145,8 +145,16 @@ impl GraphBackend for ObrainDB {
             .unwrap_or_default()
     }
 
+    /// **Une** propriété, sans construire la carte complète.
+    ///
+    /// L'implémentation naïve (`self.node_properties(id).get(key).cloned()`)
+    /// payait, pour lire une clé, une seconde carte B-tree avec des clés `String`
+    /// allouées et la copie de **toutes** les valeurs — mesuré 4,01 µs contre
+    /// 1,19 µs pour la recherche indexée qui la précède. Le moteur expose
+    /// `Node::get_property`, qui répond directement.
     fn node_property(&self, id: NodeId, key: &str) -> Option<Value> {
-        self.node_properties(id).get(key).cloned()
+        self.get_node(id)
+            .and_then(|node| node.get_property(key).cloned())
     }
 
     fn neighbors(&self, id: NodeId, direction: Direction) -> Vec<NodeId> {
