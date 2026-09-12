@@ -182,6 +182,19 @@ impl RestExposure {
             // Avec un store obrain, les politiques `perm:<permission>` sont
             // tranchées par la **décision IAM matérialisée** (une lecture
             // indexée), au lieu d'être recalculées par traversée.
+            // **Politique des lectures de graphe** : quand l'application en
+            // déclare une, le relief, la vue multi-échelle et l'identité cessent
+            // de s'abstenir — un moteur d'inférence doit prouver son droit.
+            if let Some(policy) = &host.security.graph.policy
+                && host.security.graph.armed()
+            {
+                authz = authz.with_graph_policy(policy.clone());
+                tracing::info!(
+                    policy = %policy,
+                    "lectures de graphe soumises à une politique (relief, multi-échelle, identité)"
+                );
+            }
+
             // Mode observation : décider, journaliser, publier — sans bloquer.
             if host.authorize_report_only {
                 authz = authz.report_only();

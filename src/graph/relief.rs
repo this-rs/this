@@ -261,6 +261,34 @@ pub struct IndexRelief {
     pub unique: bool,
 }
 
+/// **Comment brancher un moteur d'inférence sur cette base.**
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InferenceRelief {
+    /// Ce qu'un lecteur doit présenter, et ce que l'authentification en fait.
+    pub authentication: String,
+    /// Le mapping d'identité : comment `(principal, portée)` est dérivé.
+    pub identity: String,
+    /// **Les lectures, dans l'ordre où on les découvre.**
+    pub reads: Vec<InferenceRead>,
+    /// Les bornes appliquées à chaque lecture.
+    pub limits: Vec<String>,
+    /// **Le régime d'autorisation** de ces lectures.
+    pub authorization: String,
+    /// Les règles à respecter côté appelant.
+    pub rules: Vec<String>,
+}
+
+/// Une lecture du manifeste.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InferenceRead {
+    /// Le chemin.
+    pub path: String,
+    /// Ce qu'elle rend.
+    pub returns: String,
+    /// Pourquoi on l'appelle.
+    pub purpose: String,
+}
+
 /// Le relief complet, tel que publié.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Relief {
@@ -282,6 +310,8 @@ pub struct Relief {
     pub journal: JournalRelief,
     /// **La matière** : labels, arêtes, propriétés, index — la forme du store.
     pub store: StoreRelief,
+    /// **Comment un moteur d'inférence se branche sur cette base.**
+    pub inference: InferenceRelief,
     /// IAM matérialisé.
     pub iam: IamRelief,
     /// Application des politiques, surface par surface.
@@ -290,6 +320,72 @@ pub struct Relief {
     pub traps: Vec<Trap>,
     /// Notes de lecture (provenance, features, coûts).
     pub notes: Vec<String>,
+}
+
+/// **Le manifeste d'inférence** : le protocole, dit une fois, pour un moteur.
+fn describe_inference() -> InferenceRelief {
+    InferenceRelief {
+        authentication: "`Authorization: Bearer <jeton>` — le framework en dérive un \
+                         principal et une portée (voir `identity`)"
+            .to_string(),
+        identity: "`(principal, portée)` : le mappage de l'application s'il en a fourni un, \
+                   sinon le modèle de this-rs (`user_id`, `tenant_id`)"
+            .to_string(),
+        reads: vec![
+            InferenceRead {
+                path: "/graph".to_string(),
+                returns: "le relief : la forme du store, les capacités du moteur, le contrat IAM"
+                    .to_string(),
+                purpose: "savoir ce que la base contient AVANT de la parcourir".to_string(),
+            },
+            InferenceRead {
+                path: "/graph/hierarchy/{id}?depth=N&limit=M".to_string(),
+                returns: "les sous-groupes, niveau par niveau".to_string(),
+                purpose: "descendre d'un cran à la fois au lieu de tout charger".to_string(),
+            },
+            InferenceRead {
+                path: "/graph/hierarchy/{id}?format=outline".to_string(),
+                returns: "la même vue en texte indenté, avec les adresses pour continuer"
+                    .to_string(),
+                purpose: "la forme qu'un modèle lit le mieux".to_string(),
+            },
+            InferenceRead {
+                path: "/graph/identity".to_string(),
+                returns: "le contrat d'identité ; `?counts=true` pour un comptage borné"
+                    .to_string(),
+                purpose: "reconnaître la même entité d'un moteur à l'autre".to_string(),
+            },
+            InferenceRead {
+                path: "/graph/identity/{uuid}".to_string(),
+                returns: "la chaîne d'identité d'une entité, octets canoniques compris"
+                    .to_string(),
+                purpose: "recalculer un identifiant de façon indépendante".to_string(),
+            },
+        ],
+        limits: vec![
+            "`depth` ≤ 32, `limit` ≤ 1000 par niveau (les valeurs hors bornes sont ramenées)"
+                .to_string(),
+            "chaque niveau publie `total` et `truncated` : une coupe n'est JAMAIS silencieuse"
+                .to_string(),
+            "un cycle est signalé (`cycles`), jamais parcouru : la descente se termine toujours"
+                .to_string(),
+            "le coût suit ce qui est montré, pas la taille de la base (parcours par adjacence)"
+                .to_string(),
+        ],
+        authorization: "ces lectures s'ABSTIENNENT par défaut (descriptives, publiques). Si \
+                        l'application déclare `graph.policy` (config/server.yaml), elles sont \
+                        JUGÉES : un appelant sans droit reçoit 403"
+            .to_string(),
+        rules: vec![
+            "n'énumérez jamais le graphe entier : descendez par `depth`, et arrêtez-vous quand \
+             `children` vaut 0 ou quand `truncated` est vrai — il dit alors combien il reste"
+                .to_string(),
+            "traitez `children` comme la carte : il dit ce qui est en dessous SANS le charger"
+                .to_string(),
+            "une permission refusée est un refus, pas une absence de données"
+                .to_string(),
+        ],
+    }
 }
 
 /// **La forme du store**, introspectée depuis la base réelle.
@@ -384,7 +480,7 @@ fn describe_surfaces() -> Vec<SurfaceRelief> {
             ],
             true,
             "middleware d'autorisation : pluriel + méthode + nombre de segments → opération → politique",
-            "les chemins hors routes d'entité s'abstiennent : /health et /auth/* sont publics par nature, /graph/* est descriptif, /gdpr/* exige un administrateur dans le handler, /notifications/* et /device-tokens/* comparent l'identifiant du chemin à celui de l'appelant, /events/stream est borné au locataire de l'appelant",
+            "les chemins hors routes d'entité s'abstiennent : /health et /auth/* sont publics par nature, /graph/* est descriptif SAUF si `graph.policy` est déclarée (config/server.yaml) — il est alors jugé comme une route d'entité, ce qui permet à un moteur d'inférence de lire la base sous IAM, /gdpr/* exige un administrateur dans le handler, /notifications/* et /device-tokens/* comparent l'identifiant du chemin à celui de l'appelant, /events/stream est borné au locataire de l'appelant",
         ),
         declared(
             "graphql",
@@ -916,6 +1012,7 @@ impl Relief {
                 transport_available: false,
             },
             store: describe_store(store),
+            inference: describe_inference(),
             iam: {
                 use crate::storage::iam;
                 IamRelief {

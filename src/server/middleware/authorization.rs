@@ -231,6 +231,13 @@ pub struct Authorization {
     /// Mappage `contexte → (principal, portée)`, s'il est fourni par
     /// l'application. `None` = le mappage par défaut de this-rs.
     mapping: Option<Arc<PrincipalMapping>>,
+    /// Politique des **lectures de graphe** (`/graph…`), quand l'application en
+    /// déclare une.
+    ///
+    /// Ces routes ne sont pas des routes d'entité : sans ce réglage elles
+    /// **s'abstiennent**. En déclarer une est ce qui permet à un moteur
+    /// d'inférence de lire la base **en respectant le protocole IAM**.
+    graph_policy: Option<String>,
 }
 
 impl Authorization {
@@ -248,6 +255,7 @@ impl Authorization {
             iam: None,
             mode: AuthorizationMode::Enforced,
             mapping: None,
+            graph_policy: None,
         }
     }
 
@@ -296,6 +304,24 @@ impl Authorization {
     pub fn with_principal_mapping_shared(mut self, mapping: Arc<PrincipalMapping>) -> Self {
         self.mapping = Some(mapping);
         self
+    }
+
+    /// **Déclare la politique des lectures de graphe** (`/graph…`).
+    ///
+    /// Sans elle, les lectures de graphe s'abstiennent (descriptives, publiques
+    /// par nature). Avec elle, elles sont **jugées** comme n'importe quelle
+    /// route : un moteur d'inférence doit présenter un principal qui a la
+    /// permission, et une politique `perm:` la tranche par la décision
+    /// matérialisée.
+    pub fn with_graph_policy(mut self, policy: impl Into<String>) -> Self {
+        let policy = policy.into();
+        self.graph_policy = (!policy.trim().is_empty()).then_some(policy);
+        self
+    }
+
+    /// La politique des lectures de graphe, si elle est déclarée.
+    pub fn graph_policy(&self) -> Option<&str> {
+        self.graph_policy.as_deref()
     }
 
     /// Un mappage d'identité est-il fourni par l'application ?
@@ -548,6 +574,21 @@ impl Authorization {
                 reason: "chemin vide".to_string(),
             };
         };
+
+        // **Les lectures de graphe**, d'abord : elles ne sont pas des routes
+        // d'entité, et quand l'application déclare une politique pour elles,
+        // c'est elle qui décide. C'est ainsi qu'un moteur d'inférence lit la
+        // base **sous IAM** : il présente un principal, la politique tranche.
+        if plural == &"graph"
+            && let Some(policy) = &self.graph_policy
+        {
+            return Requirement::Policy {
+                entity_type: "Graph".to_string(),
+                operation: "read".to_string(),
+                policy: policy.clone(),
+                origin: PolicyOrigin::Declared,
+            };
+        }
 
         let Some((entity_type, _)) = self.entities.iter().find(|(_, p)| p == plural) else {
             return Requirement::Abstain {

@@ -197,6 +197,46 @@ veut dire : **un client GraphQL atteint vos entités en lecture ET en mutation**
 sans passer par les `auth:` déclarées. Traitez ces surfaces comme un accès
 interne, ou appliquez le contrôle vous-même.
 
+## 3 ter. Brancher un moteur d'inférence — **sous IAM**
+
+Une base exposée par this-rs se branche à un moteur d'inférence **en respectant
+le protocole IAM**, à une condition : que les lectures du moteur soient
+**jugées**. Elles ne le sont pas par défaut — `/graph*` s'abstient, comme toute
+route hors entité — et c'est délibéré : un relief descriptif et public est ce
+qu'on veut pour observer une base sans droits. Pour un moteur, on déclare :
+
+```yaml
+# config/server.yaml
+graph:
+  policy: "perm:graph:read"     # ou authenticated, admin_only, role:…
+```
+
+Dès lors, `/graph`, `/graph/hierarchy/{id}` et `/graph/identity*` sont **jugés
+comme n'importe quelle route** : un appelant sans droit reçoit **403**, et une
+politique `perm:` est tranchée par la **décision IAM matérialisée** — le même
+chemin indexé que le reste de l'application.
+
+**Le moteur n'a rien à deviner** : `GET /graph → inference` publie le protocole.
+
+```json
+"inference": {
+  "authentication": "`Authorization: Bearer <jeton>` …",
+  "identity": "`(principal, portée)` : le mappage de l'application …",
+  "reads": [ { "path": "/graph", "returns": "…", "purpose": "savoir ce que la base contient AVANT de la parcourir" },
+             { "path": "/graph/hierarchy/{id}?depth=N&limit=M", "returns": "…", "purpose": "descendre d'un cran à la fois" },
+             { "path": "/graph/hierarchy/{id}?format=outline", "…": "…" } ],
+  "limits": [ "`depth` ≤ 32, `limit` ≤ 1000 …", "chaque niveau publie `total` et `truncated` …" ],
+  "authorization": "… si l'application déclare `graph.policy` … 403 …",
+  "rules": [ "n'énumérez jamais le graphe entier : descendez par `depth` …" ]
+}
+```
+
+**Ce qui n'est pas fait, et qu'il faut savoir** : la politique est **par
+surface**, pas **par nœud**. Un principal autorisé à lire le graphe le lit
+**entier**. Un filtrage par nœud (ne voir que les groupes sur lesquels on a une
+décision) demanderait un modèle de permission par entité sur les lectures de
+graphe — c'est un travail, pas un réglage, et il n'est pas fait.
+
 ## 4. La frontière de confiance — à connaître avant de s'appuyer dessus
 
 Publiée dans le relief (`iam.trust`), et **testée comme telle** dans

@@ -638,3 +638,217 @@ async fn a_consumer_can_enforce_policies_on_its_own_router() {
          avec SON plan IAM"
     );
 }
+
+/// **Le manifeste d'inférence est publié** : un moteur n'a pas à deviner le
+/// protocole, il le lit — comment s'authentifier, quoi lire, quelles bornes,
+/// sous quel régime ces lectures sont jugées.
+#[tokio::test]
+async fn the_relief_publishes_the_inference_manifest() {
+    let json = relief_json(producer_store()).await;
+    let inference = &json["inference"];
+
+    assert!(
+        inference["authentication"]
+            .as_str()
+            .is_some_and(|a| a.contains("Bearer")),
+        "l'authentification doit être dite : {inference}"
+    );
+
+    let reads = inference["reads"].as_array().expect("reads");
+    for expected in [
+        "/graph",
+        "/graph/hierarchy/{id}?depth=N&limit=M",
+        "/graph/hierarchy/{id}?format=outline",
+        "/graph/identity",
+        "/graph/identity/{uuid}",
+    ] {
+        assert!(
+            reads.iter().any(|r| r["path"] == expected),
+            "la lecture `{expected}` doit figurer au manifeste"
+        );
+    }
+    assert!(
+        reads
+            .iter()
+            .all(|r| r["purpose"].as_str().is_some_and(|p| !p.is_empty())),
+        "chaque lecture dit POURQUOI on l'appelle — c'est ce qu'un modèle lit : {inference}"
+    );
+
+    let limits = inference["limits"].as_array().expect("limits");
+    assert!(
+        limits
+            .iter()
+            .any(|l| l.as_str().is_some_and(|l| l.contains("truncated"))),
+        "la borne la plus importante (une coupe n'est jamais silencieuse) doit être publiée"
+    );
+    assert!(
+        inference["authorization"]
+            .as_str()
+            .is_some_and(|a| a.contains("graph.policy")),
+        "le régime d'autorisation, et la clé qui le règle, doivent être publiés : {inference}"
+    );
+    let rules = inference["rules"].as_array().expect("rules");
+    assert!(
+        rules
+            .iter()
+            .any(|r| r.as_str().is_some_and(|r| r.contains("depth"))),
+        "la règle « ne jamais énumérer tout » doit être publiée : {rules:?}"
+    );
+}
+
+// ===========================================================================
+// 5. UN MOTEUR D'INFÉRENCE LIT LA BASE **SOUS IAM**
+// ===========================================================================
+
+/// **La question** : une base exposée par this-rs peut-elle être branchée à un
+/// moteur d'inférence **en respectant le protocole IAM** ?
+///
+/// Oui — à une condition, et c'est celle-ci : les lectures qu'un moteur utilise
+/// (relief, vue multi-échelle, identité) doivent être **jugées**. Sans politique
+/// déclarée elles s'abstiennent (descriptives, publiques) ; avec une politique,
+/// elles répondent **403** à qui n'a pas le droit, et la politique `perm:` est
+/// tranchée par la décision matérialisée — le même chemin que le reste.
+#[tokio::test]
+async fn a_reader_without_the_permission_is_refused_by_the_policy() {
+    use std::sync::Arc as StdArc;
+
+    use axum::Router;
+    use axum::body::Body;
+    use axum::extract::Extension;
+    use axum::http::{Method, Request, StatusCode};
+    use tower::ServiceExt;
+
+    use this::config::{EntityAuthConfig, EntityConfig, LinksConfig, ServerSecurityConfig};
+    use this::core::auth::{AuthContext, AuthResolverRegistry};
+    use this::core::link::LinkDefinition;
+    use this::server::RestExposure;
+    use this::server::builder::ServerBuilder;
+    use this::server::entity_registry::EntityRegistry;
+    use this::storage::iam::RoleGrant;
+
+    struct Orders;
+    impl this::server::entity_registry::EntityDescriptor for Orders {
+        fn entity_type(&self) -> &str {
+            "order"
+        }
+        fn plural(&self) -> &str {
+            "orders"
+        }
+        fn build_routes(&self) -> Router {
+            Router::new()
+        }
+    }
+
+    // Le lecteur : un principal qui a `graph:read` dans sa portée.
+    let store = ObrainStore::new_in_memory();
+    store
+        .iam()
+        .materialize(
+            &uuid::Uuid::from_u128(1).to_string(),
+            &uuid::Uuid::from_u128(7).to_string(),
+            &[RoleGrant {
+                role: "reader".into(),
+                permissions: vec!["graph:read".into()],
+            }],
+        )
+        .expect("matérialisation");
+
+    // Le relief est **soumis** à la politique — c'est le maillon qui manquait.
+    let security = ServerSecurityConfig {
+        graph: this::config::server::GraphExposureConfig {
+            policy: Some("perm:graph:read".to_string()),
+        },
+        ..Default::default()
+    };
+
+    let mut registry = EntityRegistry::new();
+    registry.register(Box::new(Orders));
+    let host = ServerBuilder::new()
+        .with_server_security(security)
+        .with_obrain_store(StdArc::clone(&store))
+        .build_host()
+        .expect("hôte");
+    let app = RestExposure::build_router(StdArc::new(host), vec![]).expect("routeur");
+
+    let call = |app: Router, ctx: Option<AuthContext>| async move {
+        let app = match ctx {
+            Some(ctx) => app.layer(Extension(ctx)),
+            None => app,
+        };
+        app.oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/graph")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .expect("réponse")
+        .status()
+    };
+
+    // Sans identité : refusé.
+    assert_eq!(
+        call(app.clone(), None).await,
+        StatusCode::FORBIDDEN,
+        "un lecteur anonyme ne doit pas lire la base quand une politique est déclarée"
+    );
+
+    // Identifié, mais sans la permission : refusé aussi.
+    assert_eq!(
+        call(
+            app.clone(),
+            Some(AuthContext::User {
+                user_id: uuid::Uuid::from_u128(2),
+                tenant_id: uuid::Uuid::from_u128(7),
+                roles: vec![],
+            })
+        )
+        .await,
+        StatusCode::FORBIDDEN,
+        "un autre principal n'a pas `graph:read`"
+    );
+
+    // Le porteur de `graph:read` : autorisé.
+    assert_eq!(
+        call(
+            app,
+            Some(AuthContext::User {
+                user_id: uuid::Uuid::from_u128(1),
+                tenant_id: uuid::Uuid::from_u128(7),
+                roles: vec![],
+            })
+        )
+        .await,
+        StatusCode::OK,
+        "le porteur de la permission lit la base — c'est le protocole IAM respecté"
+    );
+    let _ = (
+        EntityAuthConfig::default(),
+        EntityConfig {
+            singular: "order".to_string(),
+            plural: "orders".to_string(),
+            auth: EntityAuthConfig::default(),
+        },
+        LinksConfig {
+            entities: vec![],
+            links: Vec::<LinkDefinition>::new(),
+            validation_rules: None,
+            events: None,
+            sinks: None,
+            auth: None,
+        },
+        AuthResolverRegistry::new(),
+    );
+}
+
+/// **Sans politique déclarée, rien ne change** : le relief reste descriptif et
+/// public — c'est le défaut, et il ne doit pas bouger.
+#[tokio::test]
+async fn without_a_declared_policy_the_graph_reads_stay_public() {
+    let json = relief_json(producer_store()).await;
+    assert!(
+        json["store"]["nodes"].as_u64().is_some(),
+        "le relief répond sans politique : {json}"
+    );
+}
