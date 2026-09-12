@@ -57,6 +57,9 @@ pub struct ServerBuilder {
     // Application en OBSERVATION (défaut : non) — l'adoption d'un projet existant
     authorize_report_only: bool,
 
+    // Exposition : CORS, domaines servis, délégation de proxy (config/server.yaml)
+    security: crate::config::ServerSecurityConfig,
+
     // Mappage d'identité de l'application, pour l'IAM natif d'un modèle existant
     principal_mapping: Option<Arc<crate::server::middleware::authorization::PrincipalMapping>>,
 
@@ -89,6 +92,7 @@ impl ServerBuilder {
             identity: None,
             authorize: true,
             authorize_report_only: false,
+            security: crate::config::ServerSecurityConfig::default(),
             principal_mapping: None,
             fence_writes: true,
             auth_config: None,
@@ -168,6 +172,55 @@ impl ServerBuilder {
     /// par défaut.
     pub fn with_authorization(mut self) -> Self {
         self.authorize = true;
+        self
+    }
+
+    /// **Charge la configuration d'exposition** (`config/server.yaml`) : CORS,
+    /// domaines servis, délégation de proxy.
+    ///
+    /// ```yaml
+    /// cors:
+    ///   enabled: true
+    ///   origins: ["https://app.exemple.fr"]
+    ///   credentials: true
+    /// domains:
+    ///   allowed: ["app.exemple.fr"]           # tout autre Host est refusé
+    ///   trust_forwarded_host: true            # derrière Caddy
+    ///   tenants: { "app.exemple.fr": "<uuid>" }
+    /// proxy:
+    ///   caddy: { enabled: true, upstream: "127.0.0.1:3000" }
+    /// ```
+    pub fn with_server_config_file(mut self, path: &str) -> Result<Self> {
+        self.security = crate::config::ServerSecurityConfig::from_file(path)?;
+        Ok(self)
+    }
+
+    /// **Fournit la configuration d'exposition** par programme.
+    pub fn with_server_security(mut self, security: crate::config::ServerSecurityConfig) -> Self {
+        self.security = security;
+        self
+    }
+
+    /// **CORS** : qui a le droit d'appeler depuis un navigateur.
+    ///
+    /// Sans cet appel (ou sans `cors.enabled` dans le fichier), **aucune** couche
+    /// CORS n'est posée : le framework ne décide pas à la place de l'application.
+    pub fn with_cors(mut self, cors: crate::config::CorsConfig) -> Self {
+        self.security.cors = cors;
+        self
+    }
+
+    /// **Domaines servis** : tout autre `Host` est refusé, et un domaine peut
+    /// désigner le locataire.
+    pub fn with_domains(mut self, domains: crate::config::DomainConfig) -> Self {
+        self.security.domains = domains;
+        self
+    }
+
+    /// **Délègue la configuration du proxy à Caddy** : le framework en rend un
+    /// `Caddyfile` (`ServerHost::caddyfile`), l'exploitant l'applique.
+    pub fn delegate_to_caddy(mut self, caddy: crate::config::CaddyConfig) -> Self {
+        self.security.proxy.caddy = caddy;
         self
     }
 
@@ -580,6 +633,11 @@ impl ServerBuilder {
         // ouvert refusait ses clients.
         host.authorize = self.authorize;
         host.authorize_report_only = self.authorize_report_only;
+        // **Validée au démarrage** : une origine CORS impossible ou un locataire
+        // illisible doit faire échouer la construction, pas le premier appel.
+        self.security.cors.validate()?;
+        self.security.domains.validate()?;
+        host.security = Arc::new(self.security.clone());
         host.principal_mapping = self.principal_mapping.clone();
 
         // Attach the obrain graph handle if one was provided.

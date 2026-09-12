@@ -139,26 +139,24 @@ impl RestExposure {
             );
         }
 
-        // Auto-wire auth middleware if auth provider is configured
-        // This layer must be added last so it wraps all routes
-        if let Some(ref auth_provider) = host.auth_provider {
-            let default_policy = host
-                .config
-                .auth
-                .as_ref()
-                .map(|a| a.default_policy.clone())
-                .unwrap_or_else(|| "public".to_string());
-
-            // Tenant resolver runs AFTER auth (inner layer = added first)
-            // so AuthContext is available in extensions
-            app = app.layer(middleware::from_fn(
-                crate::server::middleware::tenant::tenant_resolver_middleware,
-            ));
-
-            let auth_layer = AuthLayer::new(auth_provider.clone(), default_policy);
-            app = app.layer(middleware::from_fn_with_state(auth_layer, auth_middleware));
-            tracing::info!("REST auth + tenant resolver middleware auto-wired");
-        }
+        // ═══════════════════════════════════════════════════════════════════
+        // L'ORDRE DES COUCHES EST UN MAILLON DE LA CHAÎNE
+        //
+        // En axum, **la dernière couche appliquée est la plus EXTERNE** : l'ordre
+        // d'exécution est l'inverse de l'ordre d'écriture. Ici, l'ordre voulu est
+        //
+        //   CORS → domaine servi → authentification → locataire → politiques
+        //
+        // donc on applique dans l'ordre inverse : politiques d'abord, CORS en
+        // dernier.
+        //
+        // Ce n'était pas le cas : les politiques étaient appliquées EN DERNIER,
+        // donc exécutées EN PREMIER — **avant l'authentification**. Elles ne
+        // voyaient qu'un anonyme, et toute route non publique était refusée à un
+        // appelant pourtant porteur d'un jeton valide. Fail-closed, donc pas une
+        // fuite, mais une application cassée qui accusait ses politiques.
+        // (`tests/chain_order.rs` le prouve sur l'exposition réelle.)
+        // ═══════════════════════════════════════════════════════════════════
 
         // Application des politiques : ARMÉE EXPLICITEMENT, jamais par défaut.
         //
@@ -200,6 +198,60 @@ impl RestExposure {
             tracing::info!(
                 "authorization armed — declared `auth:` policies are now ENFORCED \
                  (403 on refusal; unknown routes abstain)"
+            );
+        }
+
+        // Auto-wire auth middleware if auth provider is configured
+        // This layer must be added last so it wraps all routes
+        if let Some(ref auth_provider) = host.auth_provider {
+            let default_policy = host
+                .config
+                .auth
+                .as_ref()
+                .map(|a| a.default_policy.clone())
+                .unwrap_or_else(|| "public".to_string());
+
+            // Tenant resolver runs AFTER auth (inner layer = added first)
+            // so AuthContext is available in extensions
+            app = app.layer(middleware::from_fn(
+                crate::server::middleware::tenant::tenant_resolver_middleware,
+            ));
+
+            let auth_layer = AuthLayer::new(auth_provider.clone(), default_policy);
+            app = app.layer(middleware::from_fn_with_state(auth_layer, auth_middleware));
+            tracing::info!("REST auth + tenant resolver middleware auto-wired");
+        }
+
+        // Domaine servi : refusé AVANT l'authentification — un hôte qui n'est pas
+        // servi n'a pas à coûter une vérification de jeton — et le locataire du
+        // domaine est posé ici, pour que le résolveur ne l'écrase pas.
+        let domains = &host.security.domains;
+        if domains.guards()
+            || domains.subdomain_base.is_some()
+            || !domains.tenants.is_empty()
+            || domains.default_tenant.is_some()
+        {
+            app = app.layer(middleware::from_fn_with_state(
+                crate::server::middleware::origin::DomainGuard::new(std::sync::Arc::new(
+                    domains.clone(),
+                )),
+                crate::server::middleware::origin::domain_guard_middleware,
+            ));
+            tracing::info!(
+                allowed = ?domains.allowed,
+                "garde de domaine armée (les autres hôtes sont refusés en 421)"
+            );
+        }
+
+        // CORS : la couche la plus EXTERNE. Un pré-vol (`OPTIONS`) ne porte pas
+        // de jeton : s'il rencontrait l'authentification d'abord, il recevrait
+        // 401 et le navigateur refuserait un appel légitime.
+        if let Some(cors) = crate::server::middleware::origin::cors_layer(&host.security.cors) {
+            app = app.layer(cors);
+            tracing::info!(
+                origins = ?host.security.cors.origins,
+                credentials = host.security.cors.credentials,
+                "CORS configuré par l'application"
             );
         }
 

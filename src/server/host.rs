@@ -133,6 +133,12 @@ pub struct ServerHost {
     /// d'authentification plus ancien.
     pub principal_mapping: Option<Arc<crate::server::middleware::authorization::PrincipalMapping>>,
 
+    /// **Exposition** : CORS, domaines servis, délégation de proxy.
+    ///
+    /// Voir [`crate::config::ServerSecurityConfig`] et `config/server.yaml`.
+    /// `ServerHost::caddyfile()` en rend le `Caddyfile` délégué.
+    pub security: Arc<crate::config::ServerSecurityConfig>,
+
     /// Les politiques déclarées (`auth:`) sont-elles **appliquées** ?
     ///
     /// **`true` par défaut** : un framework qui laisse passer par défaut n'est
@@ -160,6 +166,29 @@ pub struct ServerHost {
     /// Only available in `embedded` or `bootstrap` WAMI modes.
     #[cfg(feature = "wami")]
     pub sts_state: Option<Arc<crate::server::exposure::rest::auth_routes::StsState>>,
+}
+
+/// Ce que l'application applique à l'entrée HTTP — sans divulguer ses listes.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ExposureSummary {
+    /// Une politique CORS est-elle posée ?
+    pub cors_enabled: bool,
+    /// Combien d'origines sont autorisées.
+    pub cors_origins: usize,
+    /// Les identifiants (cookies, `Authorization`) sont-ils autorisés en CORS ?
+    pub cors_credentials: bool,
+    /// Une garde de domaine est-elle active (les autres hôtes sont refusés) ?
+    pub domains_guarded: bool,
+    /// Combien d'hôtes sont servis.
+    pub hosts_allowed: usize,
+    /// Combien de domaines désignent un locataire.
+    pub tenants_mapped: usize,
+    /// Les sous-domaines désignent-ils le locataire ?
+    pub subdomain_tenants: bool,
+    /// `X-Forwarded-Host` est-il cru (délégation à un proxy) ?
+    pub forwarded_host_trusted: bool,
+    /// Une délégation `Caddyfile` est-elle configurée ?
+    pub caddy_delegated: bool,
 }
 
 impl ServerHost {
@@ -205,6 +234,7 @@ impl ServerHost {
             #[cfg(feature = "obrain")]
             graph_store: None,
             identity: Arc::new(IdentityRegistry::new()),
+            security: Arc::new(crate::config::ServerSecurityConfig::default()),
             authorize: true,
             authorize_report_only: false,
             principal_mapping: None,
@@ -446,6 +476,7 @@ impl ServerHost {
             #[cfg(feature = "obrain")]
             graph_store: None,
             identity: Arc::new(IdentityRegistry::new()),
+            security: Arc::new(crate::config::ServerSecurityConfig::default()),
             authorize: true,
             authorize_report_only: false,
             principal_mapping: None,
@@ -454,6 +485,35 @@ impl ServerHost {
             #[cfg(feature = "wami")]
             sts_state: None,
         }
+    }
+    /// **Résumé de l'exposition** — ce que l'application applique à l'entrée.
+    ///
+    /// Des **comptes et des faits**, jamais les valeurs : la liste des origines
+    /// CORS et celle des domaines servis appartiennent à l'application, et les
+    /// publier dirait à un inconnu quels hôtes viser. Un opérateur qui veut les
+    /// valeurs lit sa configuration ; un consommateur qui veut savoir *si* une
+    /// garde est active lit ceci.
+    pub fn exposure(&self) -> ExposureSummary {
+        let domains = &self.security.domains;
+        ExposureSummary {
+            cors_enabled: self.security.cors.enabled,
+            cors_origins: self.security.cors.origins.len(),
+            cors_credentials: self.security.cors.credentials,
+            domains_guarded: domains.guards(),
+            hosts_allowed: domains.allowed.len(),
+            tenants_mapped: domains.tenants.len(),
+            subdomain_tenants: domains.subdomain_base.is_some(),
+            forwarded_host_trusted: domains.trust_forwarded_host,
+            caddy_delegated: self.security.proxy.caddy.enabled,
+        }
+    }
+
+    /// Le `Caddyfile` **délégué** par la configuration, s'il est demandé.
+    ///
+    /// this-rs ne pilote pas Caddy : il décrit ce qu'il applique (domaines,
+    /// upstream, en-têtes) et l'exploitant relit puis applique.
+    pub fn caddyfile(&self) -> Option<String> {
+        self.security.caddyfile()
     }
 }
 
