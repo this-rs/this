@@ -238,6 +238,17 @@ pub struct Authorization {
     /// **s'abstiennent**. En déclarer une est ce qui permet à un moteur
     /// d'inférence de lire la base **en respectant le protocole IAM**.
     graph_policy: Option<String>,
+    /// Les chemins **déclarés publics** : les seuls où une abstention laisse
+    /// passer.
+    ///
+    /// Une entrée terminée par `/` est un préfixe (`/auth/` couvre
+    /// `/auth/token`), sinon la correspondance est exacte. Défaut : `/health`,
+    /// `/healthz`, `/auth/` — la liveness et l'émission de jetons, rien
+    /// d'autre. Partout ailleurs, **l'abstention est un refus** : une route que
+    /// le résolveur ne reconnaît pas ne traverse plus un service armé (c'était
+    /// la faille des chemins lien/nested à 4 segments, qui passaient sans
+    /// garde).
+    public_paths: Arc<Vec<String>>,
 }
 
 impl Authorization {
@@ -256,6 +267,11 @@ impl Authorization {
             mode: AuthorizationMode::Enforced,
             mapping: None,
             graph_policy: None,
+            public_paths: Arc::new(vec![
+                "/health".to_string(),
+                "/healthz".to_string(),
+                "/auth/".to_string(),
+            ]),
         }
     }
 
@@ -322,6 +338,30 @@ impl Authorization {
     /// La politique des lectures de graphe, si elle est déclarée.
     pub fn graph_policy(&self) -> Option<&str> {
         self.graph_policy.as_deref()
+    }
+
+    /// **Remplace** la liste des chemins publics — les seuls où une abstention
+    /// laisse passer.
+    ///
+    /// Le remplacement est TOTAL : ce qui n'y figure plus est refusé. Une
+    /// entrée terminée par `/` est un préfixe, sinon la correspondance est
+    /// exacte. La liste vide est légitime : plus aucun chemin ne vit
+    /// d'abstention.
+    pub fn with_public_paths(mut self, paths: Vec<String>) -> Self {
+        self.public_paths = Arc::new(paths);
+        self
+    }
+
+    /// Ce chemin est-il déclaré public ?
+    pub fn is_public_path(&self, path: &str) -> bool {
+        self.public_paths.iter().any(|entry| {
+            match entry.strip_suffix('/') {
+                // Préfixe : `/auth/` couvre `/auth/token` ET `/auth` lui-même
+                // (le chemin nu ne doit pas être plus fermé que ses enfants).
+                Some(stem) => path == stem || path.starts_with(entry.as_str()),
+                None => path == entry,
+            }
+        })
     }
 
     /// Un mappage d'identité est-il fourni par l'application ?
@@ -768,7 +808,54 @@ pub async fn authorization_middleware(
     let decision = authz.decide(&method, &path, &context);
 
     match decision {
-        Decision::Allow { .. } | Decision::Abstain { .. } => next.run(request).await,
+        Decision::Allow { .. } => next.run(request).await,
+        // **L'abstention n'est plus un passage.** Elle l'était : toute route
+        // que le résolveur ne reconnaissait pas (chemins lien/nested à
+        // 4 segments d'un pluriel non enregistré, formes non reconnues)
+        // traversait le service ARMÉ sans décision — la faille 4-segments.
+        // Désormais : seuls les chemins **déclarés publics** passent ; partout
+        // ailleurs, refus par défaut. Le mode observation observe (la requête
+        // passe, la réponse le dit) — c'est le chemin d'adoption.
+        Decision::Abstain { reason } => {
+            if authz.is_public_path(&path) {
+                return next.run(request).await;
+            }
+            if authz.mode() == AuthorizationMode::ReportOnly {
+                tracing::warn!(
+                    %method,
+                    %path,
+                    %reason,
+                    "autorisation : abstention OBSERVÉE — mode observation, la requête passe \
+                     (hors observation, ce chemin sans garde serait refusé)"
+                );
+                let mut response = next.run(request).await;
+                response.headers_mut().insert(
+                    header_name("x-this-rs-authz"),
+                    header_value("observed-deny-abstain"),
+                );
+                return response;
+            }
+            tracing::debug!(
+                %method,
+                %path,
+                %reason,
+                "abstention refusée — chemin sans garde explicite (refus par défaut)"
+            );
+            let mut response = (
+                StatusCode::FORBIDDEN,
+                axum::Json(json!({
+                    "error": "forbidden",
+                    "verdict": "deny_abstain",
+                    "reason": reason,
+                })),
+            )
+                .into_response();
+            response.headers_mut().insert(
+                header_name("x-this-rs-authz"),
+                header_value("deny-abstain"),
+            );
+            response
+        }
         Decision::Deny {
             scope,
             policy,
@@ -2714,7 +2801,8 @@ mod policy_perimeter {
     }
 
     /// `is_allow` n'est vrai que pour `Allow` — une abstention n'est **pas** une
-    /// autorisation, même si le middleware la laisse passer (le routeur décide).
+    /// autorisation : hors chemins déclarés publics, le middleware la refuse
+    /// (voir `tests/abstention_refusee.rs`).
     #[test]
     fn is_allow_is_true_only_for_allow() {
         assert!(
