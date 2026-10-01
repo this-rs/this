@@ -1080,7 +1080,11 @@ async fn an_abstention_is_a_refusal_on_the_real_router() {
     // Une route personnalisée : le framework ne fabrique pas de politique pour
     // ce qu'il ne connaît pas — et ne pas en fabriquer, désormais, refuse.
     let (status, body) = call(&app, Method::GET, "/custom/ping").await;
-    assert_eq!(status, StatusCode::FORBIDDEN, "route personnalisée : {body}");
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "route personnalisée : {body}"
+    );
     assert_eq!(body["verdict"], "deny_abstain");
 
     // `/graph/identity` : même famille, même sort.
@@ -1120,7 +1124,10 @@ async fn declaring_a_graph_policy_serves_the_relief_under_the_armed_layer() {
         host_with_store(EntityAuthConfig::default(), store).expect("hôte"),
         "authenticated",
     );
-    assert!(host.authorize, "la couche reste armée : c'est la déclaration qui ouvre");
+    assert!(
+        host.authorize,
+        "la couche reste armée : c'est la déclaration qui ouvre"
+    );
     let app = as_context(router(host), ctx_user());
 
     let (status, relief) = call(&app, Method::GET, "/graph").await;

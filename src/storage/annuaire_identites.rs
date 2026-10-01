@@ -104,7 +104,9 @@ impl AnnuaireIdentites {
         index.clear();
         for node_id in magasin.nodes_by_label(LABEL_UTILISATEUR) {
             if let Some(noeud) = session.get_node(node_id)
-                && let Some(nom) = noeud.get_property("username").and_then(|v| v.as_str().map(String::from))
+                && let Some(nom) = noeud
+                    .get_property("username")
+                    .and_then(|v| v.as_str().map(String::from))
             {
                 index.insert(nom, node_id);
             }
@@ -254,9 +256,11 @@ impl AnnuaireIdentites {
         };
         self.store.check_write()?;
         let hash = hacher(nouveau)?;
-        self.store
-            .active_store()
-            .set_node_property(node_id, "hash_argon2", ObrainValue::from(hash.as_str()));
+        self.store.active_store().set_node_property(
+            node_id,
+            "hash_argon2",
+            ObrainValue::from(hash.as_str()),
+        );
         self.store
             .commit_wal()
             .context("commit_wal après changement de mot de passe")?;
@@ -289,9 +293,11 @@ impl AnnuaireIdentites {
         };
         self.store.check_write()?;
         let roles_json = serde_json::to_string(&roles)?;
-        self.store
-            .active_store()
-            .set_node_property(node_id, "roles", ObrainValue::from(roles_json.as_str()));
+        self.store.active_store().set_node_property(
+            node_id,
+            "roles",
+            ObrainValue::from(roles_json.as_str()),
+        );
         self.store
             .commit_wal()
             .context("commit_wal après changement de rôles")?;
@@ -403,7 +409,12 @@ mod tests {
         assert_eq!(ok.unwrap().roles, vec!["lecteur".to_string()]);
 
         assert!(annuaire.verifier("alice", "faux").unwrap().is_none());
-        assert!(annuaire.verifier("inconnue", "tres-secret").unwrap().is_none());
+        assert!(
+            annuaire
+                .verifier("inconnue", "tres-secret")
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]

@@ -1,5 +1,9 @@
 //! Storage implementations for different backends
 
+/// Annuaire d'identités persisté (chantier STS-PERSISTANT) : les utilisateurs
+/// de la passerelle dans un store obrain dédié, mots de passe argon2id.
+#[cfg(all(feature = "obrain", feature = "wami"))]
+pub mod annuaire_identites;
 #[cfg(feature = "dynamodb")]
 pub mod dynamodb;
 /// IAM **matérialisé** : la décision d'autorisation est une lecture indexée.
@@ -14,10 +18,6 @@ pub mod mongodb;
 pub mod mysql;
 #[cfg(feature = "neo4j")]
 pub mod neo4j;
-/// Annuaire d'identités persisté (chantier STS-PERSISTANT) : les utilisateurs
-/// de la passerelle dans un store obrain dédié, mots de passe argon2id.
-#[cfg(all(feature = "obrain", feature = "wami"))]
-pub mod annuaire_identites;
 #[cfg(feature = "obrain")]
 pub mod obrain;
 /// `GraphBackend` — la couture de bascule entre obrain et this-rs.

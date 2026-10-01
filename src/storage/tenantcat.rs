@@ -164,7 +164,9 @@ impl CatalogueTenants {
         }
         let courant = Self::charger(store_dir)?;
         if let Some(numero) = courant.resoudre(&uuid) {
-            bail!("{uuid} est déjà interné sous le numéro {numero} — un numéro ne se réattribue pas");
+            bail!(
+                "{uuid} est déjà interné sous le numéro {numero} — un numéro ne se réattribue pas"
+            );
         }
         let prochain = courant
             .entrees
@@ -238,10 +240,24 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let chemin = dir.path().join(FICHIER_TENANTCAT);
         std::fs::write(&chemin, format!("{}\t0\tpublic-vole\n", Uuid::new_v4())).unwrap();
-        assert!(CatalogueTenants::charger(dir.path()).unwrap_err().to_string().contains("PUBLIC"));
+        assert!(
+            CatalogueTenants::charger(dir.path())
+                .unwrap_err()
+                .to_string()
+                .contains("PUBLIC")
+        );
 
-        std::fs::write(&chemin, format!("{}\t{}\tsentinelle\n", Uuid::new_v4(), u32::MAX)).unwrap();
-        assert!(CatalogueTenants::charger(dir.path()).unwrap_err().to_string().contains("sentinelle"));
+        std::fs::write(
+            &chemin,
+            format!("{}\t{}\tsentinelle\n", Uuid::new_v4(), u32::MAX),
+        )
+        .unwrap();
+        assert!(
+            CatalogueTenants::charger(dir.path())
+                .unwrap_err()
+                .to_string()
+                .contains("sentinelle")
+        );
     }
 
     #[test]
@@ -250,11 +266,21 @@ mod tests {
         let chemin = dir.path().join(FICHIER_TENANTCAT);
         let u = Uuid::new_v4();
         std::fs::write(&chemin, format!("{u}\t1\tun\n{u}\t2\tdeux\n")).unwrap();
-        assert!(CatalogueTenants::charger(dir.path()).unwrap_err().to_string().contains("déjà interné"));
+        assert!(
+            CatalogueTenants::charger(dir.path())
+                .unwrap_err()
+                .to_string()
+                .contains("déjà interné")
+        );
 
         let (x, y) = (Uuid::new_v4(), Uuid::new_v4());
         std::fs::write(&chemin, format!("{x}\t3\tx\n{y}\t3\ty\n")).unwrap();
-        assert!(CatalogueTenants::charger(dir.path()).unwrap_err().to_string().contains("déjà attribué"));
+        assert!(
+            CatalogueTenants::charger(dir.path())
+                .unwrap_err()
+                .to_string()
+                .contains("déjà attribué")
+        );
     }
 
     #[test]
@@ -277,7 +303,11 @@ mod tests {
         // numéros intermédiaires n'existent pas.
         let dir = tempfile::tempdir().unwrap();
         let u = Uuid::new_v4();
-        std::fs::write(dir.path().join(FICHIER_TENANTCAT), format!("{u}\t41\tancien\n")).unwrap();
+        std::fs::write(
+            dir.path().join(FICHIER_TENANTCAT),
+            format!("{u}\t41\tancien\n"),
+        )
+        .unwrap();
         let e = CatalogueTenants::attribuer(dir.path(), Uuid::new_v4(), "suivant").unwrap();
         assert_eq!(e.numero, 42);
     }

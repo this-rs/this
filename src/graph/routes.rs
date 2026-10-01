@@ -1196,9 +1196,9 @@ mod tests {
     /// graphe déclarée, et le document sort.
     #[tokio::test]
     async fn declaring_a_graph_policy_serves_the_identity_contract() {
+        use crate::core::auth::AuthContext;
         use crate::server::RestExposure;
         use crate::server::host::ServerHost;
-        use crate::core::auth::AuthContext;
 
         let mut host =
             ServerHost::minimal_for_test().with_graph_store(ObrainStore::new_in_memory());
