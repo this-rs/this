@@ -79,6 +79,7 @@
 - ⚙️ **YAML Configuration** — Declarative entity, link, event flow, auth, and cognitive definitions
 - 🛠️ **CLI Scaffolding** — `this-cli` generates entire projects in seconds
 - 🖥️ **Frontend serving (`frontend` feature)** — optional feature that serves the project's SPA from the API process using the detached vite-rs crate (dev hot reload + `/__dev` AI command bridge; embedded production serving with vite-rs rules), via `this::server::frontend`
+- 🛰️ **Deployment host (`this-host`)** — a config-driven binary (`deploy.yaml`) that attaches existing projects — their base, their identities, their policies, their exposure — without rewriting them and **without writing Rust**: one `mount` per attached project, a published plan (`GET /`, `--dry-run`) that says what is attached **and what is not**, and `read_only: true` by default so attaching a live base does not open it for writing. See [Deploying a structure](docs/hote-de-deploiement.md)
 
 ---
 

@@ -24,11 +24,70 @@
 use crate::core::auth::{AuthContext, AuthProvider};
 use axum::{
     extract::{Request, State},
-    http::StatusCode,
+    http::{HeaderMap, HeaderValue, StatusCode, header},
     middleware::Next,
     response::{IntoResponse, Response},
 };
 use std::sync::Arc;
+
+/// Le nom du cookie que la structure accepte — et que `POST /auth/token` pose.
+///
+/// Un nom, un seul, partagé par la porte (`/auth/verify`) et par cette couche :
+/// deux noms voudraient dire deux comportements.
+pub const COOKIE_JETON: &str = "this_token";
+
+/// Le jeton porté par une requête : **l'en-tête d'abord, le cookie ensuite**.
+///
+/// L'en-tête gagne toujours : une requête qui dit explicitement qui elle est
+/// n'est pas réécrite par un cookie — sinon un cookie périmé pourrait
+/// contredire un jeton frais.
+pub fn jeton_de_la_requete(headers: &HeaderMap) -> Option<String> {
+    if let Some(value) = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        && let Some(token) = value.strip_prefix("Bearer ")
+        && !token.trim().is_empty()
+    {
+        return Some(token.trim().to_string());
+    }
+
+    headers
+        .get_all(header::COOKIE)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .flat_map(|cookies| cookies.split(';'))
+        .find_map(|cookie| {
+            let (name, value) = cookie.split_once('=')?;
+            (name.trim() == COOKIE_JETON && !value.trim().is_empty())
+                .then(|| value.trim().to_string())
+        })
+}
+
+/// **Traduit le cookie en en-tête** avant la couche d'authentification.
+///
+/// Un navigateur ne peut pas poser `Authorization: Bearer …` sur une
+/// navigation. Sans cette traduction, toute surface rattachée est
+/// inatteignable depuis une page — et il ne reste que deux issues : rendre le
+/// projet **public**, ou **réécrire son authentification**. Aucune des deux
+/// n'est acceptable pour rattacher un projet qui existe déjà.
+///
+/// Elle **ne vérifie rien** : elle déplace le jeton du cookie vers l'en-tête,
+/// et la vérification reste celle de l'[`AuthProvider`] — une seule
+/// implémentation de la confiance, jamais deux. Le cookie est donc gardé comme
+/// l'en-tête : signature, échéance, émetteur et révocation sont vérifiés
+/// exactement pareil.
+///
+/// À monter **le plus à l'extérieur** (dernier `.layer()` appliqué), pour
+/// qu'elle s'exécute avant l'authentification.
+pub async fn cookie_vers_en_tete(mut request: Request, next: Next) -> Response {
+    if !request.headers().contains_key(header::AUTHORIZATION)
+        && let Some(token) = jeton_de_la_requete(request.headers())
+        && let Ok(value) = HeaderValue::from_str(&format!("Bearer {token}"))
+    {
+        request.headers_mut().insert(header::AUTHORIZATION, value);
+    }
+    next.run(request).await
+}
 
 /// Auth middleware layer that wraps an AuthProvider
 #[derive(Clone)]

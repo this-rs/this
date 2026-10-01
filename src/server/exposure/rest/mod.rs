@@ -116,10 +116,10 @@ impl RestExposure {
             // **Une politique déclarée rend la lecture filtrée.**
             //
             // Les deux vont ensemble : `graph.policy` dit qui a le droit de lire
-            // le graphe ; le périmètre, adossé à l'IAM, dit **ce que** ce lecteur
-            // voit — label par label, type de relation par type, échelle par
-            // échelle. Déclarer l'un sans brancher l'autre laisserait un appelant
-            // autorisé lire la base entière.
+            // le graphe ; le périmètre, adossé à l'IAM, dit **ce que** ce
+            // lecteur voit — label par label, type de relation par type, échelle
+            // par échelle. Déclarer l'un sans brancher l'autre laisserait un
+            // appelant autorisé lire la base entière.
             if host.security.graph.armed() {
                 let mut resolver = crate::graph::scope::IamScopeResolver::new(store.iam());
                 if let Some(mapping) = &host.principal_mapping {
@@ -169,11 +169,16 @@ impl RestExposure {
 
         // **Le repli multi-sites, monté AVANT les couches.** Posé ici, il est
         // couvert par le CORS, la garde de domaine, l'authentification et les
-        // politiques ; posé par l'application APRÈS elles, il les contournerait.
+        // politiques ; posé par l'application APRÈS elles, il les contournerait
+        // (mesuré : `tests/frontend_surface.rs`). C'est la seule façon de
+        // composer proprement « N domaines, N contenus, un jeu de couches ».
         #[cfg(feature = "frontend")]
         if let Some(sites) = &host.frontend_sites {
             app = app.fallback_service(sites.router());
-            tracing::info!(sites = sites.len(), "repli multi-sites monté");
+            tracing::info!(
+                sites = sites.len(),
+                "repli multi-sites monté (les couches s'appliquent aussi au repli)"
+            );
         }
 
         // ═══════════════════════════════════════════════════════════════════
@@ -195,12 +200,18 @@ impl RestExposure {
         // (`tests/chain_order.rs` le prouve sur l'exposition réelle.)
         // ═══════════════════════════════════════════════════════════════════
 
-        // Application des politiques : ARMÉE EXPLICITEMENT, jamais par défaut.
+        // Application des politiques : **ARMÉE PAR DÉFAUT** (`ServerHost::authorize`
+        // vaut `true` — `server/host.rs`), désarmable explicitement
+        // (`ServerBuilder::without_authorization`, journalisé comme un
+        // avertissement).
         //
-        // Les politiques déclarées (`auth:` par entité) n'ont jamais été
-        // appliquées ; les appliquer d'office casserait tout déploiement qui
-        // comptait sur l'accès libre. C'est un correctif de sécurité : il
-        // s'arme (`ServerBuilder::with_authorization`), il ne s'impose pas.
+        // Voici pourquoi : depuis que l'abstention est un refus (2026-09-13),
+        // une couche armée refuse tout ce qu'elle ne sait pas juger — y compris
+        // les lectures de graphe sans `graph.policy`. Ce commentaire disait
+        // « armée explicitement, jamais par défaut » : c'était faux, et la
+        // contradiction entre le commentaire et le champ a coûté cher (des
+        // tests écrits sur le contrat d'avant). L'état réel est celui du champ,
+        // pas d'une phrase.
         if host.authorize {
             let mut authz = crate::server::middleware::authorization::Authorization::new(
                 host.config.clone(),
@@ -247,7 +258,7 @@ impl RestExposure {
             ));
             tracing::info!(
                 "authorization armed — declared `auth:` policies are now ENFORCED \
-                 (403 on refusal; unknown routes abstain)"
+                 (403 on refusal; abstention denied outside declared public paths)"
             );
         }
 

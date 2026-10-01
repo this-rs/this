@@ -78,7 +78,7 @@ prost = { version = "0.14", optional = true }
 prost-types = { version = "0.14", optional = true }
 
 # Push notifications (optional)
-reqwest = { version = "0.13", features = ["json"], optional = true }
+reqwest = { version = "0.13", features = ["json", "stream"], optional = true }
 indexmap = "2.13.0"
 
 # Obrain graph database — cognitive graph engine (this-rs/obrain, the
@@ -95,25 +95,25 @@ indexmap = "2.13.0"
 #      `obrain-adapters::plugins::algorithms` est sous ce cfg).
 # Le dispatch générique des procédures `CALL` en dépend aussi (cf.
 # `cognitive-full = [..., "algos"]` dans obrain-engine).
-obrain-engine = { path = "../../banc-obrain/crates/obrain-engine", optional = true, features = ["algos"] }
-obrain-common = { path = "../../banc-obrain/crates/obrain-common", optional = true }
-obrain-core = { path = "../../banc-obrain/crates/obrain-core", optional = true, default-features = false }
+obrain-engine = { path = "../../banc-obrain-j4/crates/obrain-engine", optional = true, features = ["algos"] }
+obrain-common = { path = "../../banc-obrain-j4/crates/obrain-common", optional = true }
+obrain-core = { path = "../../banc-obrain-j4/crates/obrain-core", optional = true, default-features = false }
 # `obrain-substrate` doit être une dépendance DIRECTE (et non transitive via
 # l'engine) dès qu'on nomme ses types : `substrate_handle()` rend un
 # `Option<Arc<SubstrateStore>>`, et la couche simpliciale / courbure / énergie
 # ne vit que là (`simplex_passes`, `simplex_zone`, `geometric`). Aucune feature.
-obrain-substrate = { path = "../../banc-obrain/crates/obrain-substrate", optional = true }
+obrain-substrate = { path = "../../banc-obrain-j4/crates/obrain-substrate", optional = true }
 # `obrain-adapters` doit aussi être direct dès qu'on NOMME ses types : le
 # registre rend des `ParameterDef` dont le `param_type` est un
 # `obrain_adapters::plugins::ParameterType` (re-export `plugins/mod.rs:16`).
 # `plugins::traits` n'est PAS gaté par `algos` (seul `plugins::algorithms` l'est),
 # donc `default-features = false` suffit ici — les features dont on a besoin
 # (`algos`) sont demandées via `obrain-engine`, et l'unification les ramène.
-obrain-adapters = { path = "../../banc-obrain/crates/obrain-adapters", optional = true, default-features = false }
+obrain-adapters = { path = "../../banc-obrain-j4/crates/obrain-adapters", optional = true, default-features = false }
 # `obrain-reactive` porte les VRAIS types du pont : `MutationBus`, `MutationEvent`,
 # `MutationBatch`. Il manquait, et c'est pour ça que `events/bridge/types.rs`
 # recopiait des types locaux — recopie qui a DÉJÀ divergé (voir types.rs).
-obrain-reactive = { path = "../../banc-obrain/crates/obrain-reactive", optional = true }
+obrain-reactive = { path = "../../banc-obrain-j4/crates/obrain-reactive", optional = true }
 
 # vite-rs — Vite-like static/dev frontend serving reused by the `frontend`
 # feature (dev loop + AI bridge + static file rules). Local checkout is the
@@ -124,6 +124,11 @@ vite-rs = { path = "../../vite-rs", optional = true }
 jsonwebtoken = { version = "9", optional = true }
 ed25519-dalek = { version = "2", optional = true, features = ["pkcs8", "pem", "rand_core"] }
 base64 = { version = "0.22", optional = true }
+
+# Hachage des mots de passe de l'annuaire persisté (chantier STS-PERSISTANT) :
+# argon2id, paramètres par défaut du crate = recommandation OWASP
+# (v19, m=19456 KiB, t=2, p=1). Voir storage::annuaire_identites.
+argon2 = { version = "0.5", optional = true, features = ["std"] }
 
 [build-dependencies]
 tonic-prost-build = { version = "0.14" }
@@ -151,11 +156,14 @@ mysql = ["sqlx", "sqlx/macros", "sqlx/runtime-tokio", "sqlx/tls-rustls", "sqlx/m
 lmdb = ["heed"]
 graphql = ["async-graphql", "async-graphql-axum", "graphql-parser"]
 grpc = ["tonic", "tonic-prost", "prost", "prost-types"]
-push = ["reqwest"]
+push = ["dep:reqwest"]
 # Gestion d'une zone PowerDNS (API HTTP) : délégation DNS de l'exposition.
-powerdns = ["reqwest"]
+powerdns = ["dep:reqwest"]
+# Rattachement d'un projet existant par HTTP (proxy gardé du binaire
+# this-gateway) : un « service » derrière la porte, avec ses refus explicites.
+proxy = ["dep:reqwest"]
 websocket = []
-wami = ["dep:jsonwebtoken", "dep:ed25519-dalek", "dep:base64"]
+wami = ["dep:jsonwebtoken", "dep:ed25519-dalek", "dep:base64", "dep:argon2"]
 obrain = ["dep:obrain-engine", "dep:obrain-common", "dep:obrain-core", "dep:obrain-substrate", "dep:obrain-adapters", "dep:obrain-reactive"]
 # Alias conservé pour compatibilité, mais le relief cognitif n'est PAS branché :
 # `core::events::CognitiveSignal` est un vocabulaire propre à this-rs, et le
@@ -256,3 +264,11 @@ name = "scope_bench"
 path = "benches/scope_bench.rs"
 harness = false
 required-features = ["obrain"]
+
+# La passerelle IAM devant les stores obrain (chantier PASSERELLE-THIS-RS) :
+# STS (émission + validation Ed25519), refus par défaut (la faille 4-segments
+# meurt aux deux étages), stores en LECTURE SEULE montés sous /stores/{nom}.
+[[bin]]
+name = "this-gateway"
+path = "src/bin/this-gateway.rs"
+required-features = ["obrain", "wami"]

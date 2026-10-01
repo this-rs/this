@@ -48,7 +48,19 @@ async fn whoami(domain: Option<Extension<DomainContext>>) -> String {
 }
 
 fn app(security: ServerSecurityConfig) -> Router {
+    // **Couche d'autorisation DÉSARMÉE, et c'est ce qui rend ce fichier juste.**
+    //
+    // Ce fichier mesure la surface *origine* — domaines, CORS, proxy. Depuis
+    // que l'abstention est un refus (2026-09-13), la couche armée refuse tout ce
+    // qu'elle ne sait pas juger : une route personnalisée comme `/whoami` n'est
+    // pas une route d'entité, donc **403 avant même d'atteindre le garde de
+    // domaine** — ces tests mesureraient l'autorisation au lieu du domaine.
+    //
+    // Le contrat de refus vit là où il se décide : `tests/abstention_refusee.rs`
+    // (au niveau de la couche) et `tests/iam_http_perimeter.rs` (sur le routeur
+    // monté, avec un store attaché).
     let host = ServerBuilder::new()
+        .without_authorization()
         .with_server_security(security)
         .with_link_service(this::storage::in_memory::InMemoryLinkService::new())
         .build_host()

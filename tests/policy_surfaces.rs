@@ -29,6 +29,8 @@ use this::server::entity_registry::{EntityDescriptor, EntityRegistry};
 use this::server::exposure::rest::notifications::{NotificationState, notification_routes};
 use this::server::middleware::authorization::{Authorization, Requirement};
 use this::storage::ObrainStore;
+use this::ui::routes::{UiStateCtx, ui_routes};
+use this::ui::state::UiStateStore;
 
 // ---------------------------------------------------------------------------
 // Outils
@@ -427,4 +429,68 @@ async fn the_framework_grpc_shortcut_refuses_instead_of_half_protecting() {
         message.contains("gRPC") && message.contains("ARMÉES"),
         "le refus doit nommer la surface en cause : {message}"
     );
+}
+
+/// **La même faille, refermée sur l'état d'interface.**
+///
+/// `/ui/state/{portee}` n'est pas une route d'entité : le résolveur de politiques
+/// **s'abstient** dessus. La portée est dans le CHEMIN, et la croire sur parole
+/// laisserait n'importe quel appelant lire — et réécrire — l'interface d'un
+/// autre : sa face, son échelle, ses panneaux, son sujet. C'est le même défaut
+/// que sur `/notifications/*`, et il est fermé par la MÊME garde, étendue d'un
+/// segment plutôt que recopiée.
+#[tokio::test]
+async fn l_etat_d_interface_d_un_autre_est_refuse() {
+    let ctx = UiStateCtx {
+        store: Arc::new(UiStateStore::new()),
+    };
+    let app = ui_routes(ctx);
+
+    let moi = uuid::Uuid::from_u128(1).to_string();
+    let autre = uuid::Uuid::from_u128(2).to_string();
+
+    // Sans appelant identifié : refus (fail-closed), jamais un document par défaut.
+    let nu = app
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .uri(format!("/ui/state/{moi}"))
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(nu.status(), axum::http::StatusCode::UNAUTHORIZED);
+
+    // Un utilisateur identifié écrit SA portée : autorisé, et le document relu est
+    // celui qu'il a écrit (le store rend un défaut, jamais un vide silencieux).
+    let siens = app
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .method("PUT")
+                .uri(format!("/ui/state/{moi}"))
+                .header("content-type", "application/json")
+                .extension(user(1))
+                .body(axum::body::Body::from(
+                    r#"{"vue":"cosmos","echelle":"groupe","panneaux":{"fil":false}}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(siens.status(), axum::http::StatusCode::OK);
+
+    // La portée d'un AUTRE : refusé, avec ou sans corps.
+    let autre_refuse = app
+        .oneshot(
+            axum::http::Request::builder()
+                .uri(format!("/ui/state/{autre}"))
+                .extension(user(1))
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(autre_refuse.status(), axum::http::StatusCode::FORBIDDEN);
 }

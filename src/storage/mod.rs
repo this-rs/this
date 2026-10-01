@@ -14,6 +14,10 @@ pub mod mongodb;
 pub mod mysql;
 #[cfg(feature = "neo4j")]
 pub mod neo4j;
+/// Annuaire d'identités persisté (chantier STS-PERSISTANT) : les utilisateurs
+/// de la passerelle dans un store obrain dédié, mots de passe argon2id.
+#[cfg(all(feature = "obrain", feature = "wami"))]
+pub mod annuaire_identites;
 #[cfg(feature = "obrain")]
 pub mod obrain;
 /// `GraphBackend` — la couture de bascule entre obrain et this-rs.
@@ -28,12 +32,18 @@ pub mod postgres;
 #[cfg(feature = "scylladb")]
 pub mod scylladb;
 pub mod tenant_scoped;
+/// Catalogue tenant Uuid <-> u32 d'un store de donnees — substrate.tenantcat
+/// (NATIF-J4, RFC principal-natif-v2 §5.1).
+#[cfg(feature = "obrain")]
+pub mod tenantcat;
 /// Bail d'écriture et jeton de fencing — l'unicité de l'écrivain, **imposée**.
 ///
 /// Non gaté : std + serde seulement. Le format de trame (128 octets, CRC32) est
 /// gelé par test.
 pub mod writer_lease;
 
+#[cfg(all(feature = "obrain", feature = "wami"))]
+pub use self::annuaire_identites::{AnnuaireIdentites, Utilisateur};
 #[cfg(feature = "obrain")]
 pub use self::iam::{AclStamp, IAM_SCHEMA, Iam, IamError, RoleGrant};
 #[cfg(feature = "lmdb")]

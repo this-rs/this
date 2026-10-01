@@ -30,6 +30,13 @@
 //! | descente de 258 nœuds, sans périmètre | ≈ 0,58 ms |
 //! | descente de 258 nœuds, sous périmètre | ≈ 0,87 ms (×1,45) |
 
+// Le garde-fou parle le périmètre de lecture, qui vit dans `this::graph` et
+// `this::storage::permission` — les deux gatés `obrain`. Sans cette ligne, un
+// `cargo test` par défaut **échouait à la compilation** de cette cible au lieu
+// de ne pas la construire : un test qui interdit le build est pire qu'un test
+// absent.
+#![cfg(feature = "obrain")]
+
 use std::hint::black_box;
 use std::time::{Duration, Instant};
 
