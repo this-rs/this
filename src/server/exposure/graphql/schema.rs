@@ -413,6 +413,12 @@ impl QueryRoot {
     }
 
     /// Helper to list entities of a given type
+    ///
+    /// ⚠️ **Stub non branché** : il rend un vecteur VIDE (« This will be
+    /// implemented when we add proper list support to EntityFetcher »). Le
+    /// marquer mort est un constat, pas une excuse : le jour où la pagination
+    /// arrive, l'`allow` tombe avec le `vec![]`.
+    #[allow(dead_code)]
     async fn list_entities(&self, _entity_type: &str) -> Result<Vec<Entity>> {
         // For now, return empty vec as we need pagination support
         // This will be implemented when we add proper list support to EntityFetcher

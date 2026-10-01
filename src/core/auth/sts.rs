@@ -478,7 +478,7 @@ mod tests {
     #[test]
     fn annuaire_branche_fait_foi_seul() {
         let (priv_pem, pub_pem) = generate_test_keypair();
-        let mut sts = build_sts(&priv_pem);
+        let sts = build_sts(&priv_pem);
         let (user, tenant) = (Uuid::new_v4(), Uuid::new_v4());
 
         // Un utilisateur en mémoire préexiste — il doit cesser de compter.
@@ -489,7 +489,13 @@ mod tests {
             Uuid::new_v4(),
             vec![],
         );
-        sts.set_annuaire(Arc::new(AnnuaireJouet { tenant, user }));
+        // `set_annuaire` pose l'annuaire UNE fois : il rend `false` si un autre
+        // était déjà posé — auquel cas celui-ci serait ignoré en silence, et le
+        // test mesurerait l'ancien. Le constat est donc exigé ici.
+        assert!(
+            sts.set_annuaire(Arc::new(AnnuaireJouet { tenant, user })),
+            "l'annuaire du test doit être celui qui fait foi (aucun autre n'était posé)"
+        );
 
         // Le couple de l'annuaire passe, et le jeton porte SON identité.
         let pair = sts

@@ -304,11 +304,11 @@ impl Declaration {
     /// `~` littéral ferait chercher un répertoire nommé `~`, et l'échec serait
     /// attribué au store au lieu du chemin.
     fn cle_a_tilde(&self) -> bool {
-        fn tilde(chemin: &PathBuf) -> bool {
+        fn tilde(chemin: &Path) -> bool {
             chemin.to_string_lossy().starts_with('~')
         }
-        self.keys.as_ref().is_some_and(tilde)
-            || self.identites.as_ref().is_some_and(tilde)
+        self.keys.as_deref().is_some_and(tilde)
+            || self.identites.as_deref().is_some_and(tilde)
             || self.stores.iter().any(|s| tilde(&s.path))
     }
 }
@@ -2934,7 +2934,15 @@ async fn main() -> anyhow::Result<()> {
     // ── STS : émission, adossée à l'annuaire (le store fait foi) ──
     let mut sts = StsService::new(&priv_pem, args.issuer.clone())?;
     sts.set_access_ttl_secs(900);
-    sts.set_annuaire(annuaire.clone());
+    // `set_annuaire` pose l'annuaire UNE fois et rend `false` si un autre était
+    // déjà posé — auquel cas le nouveau serait ignoré en SILENCE, et la
+    // passerelle authentifierait contre un annuaire qui n'est pas le sien. Sur
+    // un service qui vient d'être créé, `false` veut donc dire que cette
+    // supposition est fausse : le taire ferait autorité sur l'ancien.
+    anyhow::ensure!(
+        sts.set_annuaire(annuaire.clone()),
+        "un annuaire est déjà posé sur ce STS : le nouveau serait ignoré en silence"
+    );
     let sts_state = Arc::new(StsState {
         sts: Arc::new(sts),
         public_key_pem: pub_pem.clone(),
