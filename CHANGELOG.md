@@ -7,31 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-> ### ⚠️ CET ARBRE N'EST PLUS LA LIGNE DE LA PASSERELLE — voir `this-rs-passerelle`
+> ### ✅ LES DEUX LIGNES SONT RÉUNIFIÉES ICI — `this-rs-passerelle` n'est plus la ligne
 >
-> **2026-09-15.** La production exécute `this-rs-gateway.stats-nano-20260915`,
-> construit depuis **`~/projects/this-rs-passerelle`** (dépôt git, branche
-> `consolidation/rattachement-2026-09-15`, commits `f0208b5` puis `95f0daf`).
-> C'est là que vivent désormais **le rattachement ET les compteurs** :
-> `/services/{nom}`, la porte `/auth/verify`, la déclaration `--config`,
-> `prevol`, `plan`, `basculer.sh`, l'hôte de déploiement, `stats.policy` et
-> `/stores/{nom}/stats` — un seul arbre, un seul binaire, vérifié :
-> 1 444 verts avec `--features obrain,wami,proxy` (dont 3 pour
-> `passerelle_identites`, 11 pour `passerelle_rattachement`, 8 pour
-> `deploy_host`), 1 376 avec `obrain`, 1 005 par défaut.
+> **2026-10-01.** L'avertissement qui précédait celui-ci (« cet arbre n'est plus
+> la ligne de la passerelle ») datait du 15/09 et **n'est plus vrai** : les
+> apports de `this-rs-passerelle` sont rentrés **dans ce dépôt** — binaire
+> `this-gateway`, annuaire d'identités persisté (argon2id), catalogue tenant,
+> rattachement déclaratif (`--config`), `prevol`, `plan`, `basculer.sh`,
+> `/auth/verify`, cookie de session, exposition Caddy — et ses suites y sont
+> vertes : `cargo test --features obrain,wami,proxy`, dont
+> `passerelle_identites` et `passerelle_rattachement` (gateway **réel** en
+> sous-processus).
 >
-> **Ne pas basculer depuis cet arbre.** Le binaire qu'il produit
-> (`this-gateway`) ne porte pas la surface `/stats` : la bascule préparée le
-> 14/09 a été marquée périmée
-> (`~/sauvegardes-bascule-v3/plan-2026-09-14-PERIME/PERIME.md`) parce qu'elle
-> aurait été une **régression**, pas une mise à jour. Le travail de cet arbre a
-> été intégré dans `this-rs-passerelle` ; il reste ici comme historique, et
-> parce que ses suites y sont vertes.
->
-> Le plan à jour est `~/sauvegardes-bascule-v3/plan-2026-09-15/` (binaire stagé
-> `this-rs-gateway.consolide-20260915`, prévol sans aucun `MANQUE`).
+> Ce qui reste vrai de l'avertissement d'origine, et qu'il faut garder en tête :
+> **la production n'exécute pas le binaire de cet arbre.** Mesuré le 2026-10-01
+> (lecture seule, `192.168.1.103:8144` — voir
+> [`docs/atlas/rattachement-passerelle.mmd`](docs/atlas/rattachement-passerelle.mmd)) :
+> l'unité `this-rs-gateway.service` tourne un binaire construit hors de cet
+> arbre, **pilotée par la ligne de commande** et non par `--config`, et **aucun
+> service n'est monté** (l'`ExecStart` ne porte que des `--store`). Basculer
+> reste donc un geste d'exploitation : `plan`, puis `basculer.sh`, qui rend
+> l'état d'avant si la nouvelle ne devient pas saine.
 
 ### Fixed
+- **Le schéma Postgres n'était appliqué par AUCUN code de production.** Les deux migrations (`migrations/001_create_entities.up.sql`, `002_create_links.up.sql`) vivaient dans le dépôt comme un **document** : le seul `sqlx::migrate!` du dépôt était dans un test (`tests/postgres_tests.rs`), pendant que MySQL et ScyllaDB réécrivaient le même schéma en dur, chacun de son côté. Autrement dit, trois définitions du même contrat et **aucun lien entre elles** : la première divergence se serait découverte en production, une colonne absente à la fois. Le paquet fournit désormais **le geste**, comme il le faisait déjà pour MySQL et ScyllaDB — `this::storage::postgres::ensure_schema(&pool)` — avec le même nom, le même contrat (idempotent, rejouable à chaque démarrage) et le même refus du silence : l'échec est **rendu**, pas journalisé, parce qu'une base au schéma incomplet doit arrêter le démarrage plutôt que produire des requêtes qui échouent une par une. **Rien n'est créé au démarrage pour autant** : ouvrir une base est une décision d'application, la modifier en est une seconde, et un framework qui migre la base de son hôte lui retire cette décision. Voir [`docs/schema-et-migrations.md`](docs/schema-et-migrations.md).
+  - `tests/postgres_tests.rs` passe désormais par **le geste du paquet** et non par un `sqlx::migrate!` recopié : recopier mesurait le SQL, pas le code qui l'applique.
+  - **`tests/schema_migrations.rs` (neuf) tient le lien sans Docker** — donc dans n'importe quelle CI : toute colonne écrite par `postgres.rs` existe dans les migrations ; MySQL déclare les mêmes colonnes que la référence Postgres ; toute colonne écrite par `mysql.rs` existe dans son DDL. Ces tests **nomment ce qu'ils ne couvrent pas** : les types ne sont pas comparés (`UUID` contre `CHAR(36)`, `JSONB` contre `JSON`), et ScyllaDB n'est pas aligné — son DDL ne porte ni `tenant_id` ni `deleted_at`, donc ni confinement par locataire ni effacement doux. Cet écart est **consigné par un test qui tombera le jour où il sera comblé**, pour forcer la mise à jour au lieu de laisser une exception silencieuse.
+- **Le portail de poussée (`clippy --lib --tests --all-features -D warnings`) refusait l'arbre : sept constats.** Le pre-push lance `cargo fmt --check` ET ce clippy : un arbre qui ne les passe pas **n'est pas poussable**, et un correctif qui ne peut pas partir ne vaut pas mieux qu'un correctif absent. `cargo fmt` a d'abord été repassé (17 emplacements, 7 fichiers), puis les sept constats traités — dont deux qui n'étaient pas de la forme mais du **sens** :
+  - `storage/permission.rs` : la règle « `held == "*"` couvre la demande » liait `wanted` sans jamais le lire. La corriger en `Some(_)` **changeait la règle** — une permission sans cible aurait cessé de couvrir une demande sans cible ; le test `the_allocating_and_allocating_free_paths_agree` l'a refusé, et c'est lui qui a raison. Le motif est `_`, et la raison est écrite sur place.
+  - `core/auth/sts.rs` + `bin/this-gateway.rs` : `set_annuaire` pose l'annuaire **une fois** et rend `false` si un autre était déjà posé — auquel cas le nouveau serait ignoré **en silence**, et la passerelle authentifierait contre un annuaire qui n'est pas le sien. Le test **exige** désormais le constat (`assert!`), et le binaire **s'arrête** (`anyhow::ensure!`) au lieu d'ignorer la réponse.
+  - Les cinq autres : `push.rs` (`mem::take` au lieu de `drain(..).collect()`), `dynamodb.rs` (`into_iter()` redondant), `storage_harness/integration/mod.rs` (`sort_by_key`), et deux chemins `async-graphql` **non branchés** (`dynamic_schema.rs`, `schema.rs`) marqués morts **en le disant** — l'`allow` est un constat sur un chemin que personne ne monte, pas une excuse ; il tombera avec le `vec![]` du stub `list_entities`.
 - **La bascule ne pouvait pas réussir : son ORDRE était impossible.** `basculer.sh` démarrait la nouvelle unité **en laissant l'ancienne tourner**, puis n'arrêtait l'ancienne qu'après la santé — pour éviter toute coupure. Mesuré avec deux passerelles réelles et **un seul** store d'identités : la seconde ne démarre pas — `substrate … is already open by another process (exclusive lock on substrate.meta refused)`. Le store d'identités s'ouvre en **verrou exclusif**, donc deux passerelles ne peuvent pas coexister : la santé ne venait jamais, et le script déclenchait un **retour arrière à chaque bascule**. L'ordre est désormais **arrêter l'ancienne, puis démarrer la nouvelle**, et la raison est écrite dans l'artefact (sans elle, la prochaine relecture le « corrigera » en ordre sans coupure). La coupure est réelle mais brève : **0,2 s** jusqu'à `/health` quand les bases sont chaudes, **jusqu'à 3,3 s à froid**, mesuré avec la déclaration de production (4 bases + viz). Deux gardes : `deux_passerelles_ne_partagent_pas_le_store_didentites` (deux passerelles réelles, `tests/passerelle_identites.rs` — il tombera le jour où la coexistence devient possible, et il faudra alors *reposer* l'ordre sans coupure) et, dans le test de l'artefact, l'ordre des gestes **et** la présence de la raison.
 - **`basculer.sh` n'était pas exécutable — deux défauts dans le même artefact, et le test qui manquait.** Le générateur produisait un script que le shell **refuse** :
   - **La commande d'installation n'était pas du shell valide.** La ligne était `faire "cp -f \"$(dirname \"$0\")/$UNITE\" …"` — or `faire` **ré-exécute son argument avec `sh -c`** : la substitution imbriquée y arrivait mal échappée, et `sh` répondait `Syntax error: Unterminated quoted string`. La bascule échouait à son **premier** geste. Le répertoire du script est maintenant calculé sur une ligne à part (`ICI=$(dirname "$0")`), et la commande reçoit ses deux chemins entre guillemets — vérifié : `sh -n -c` passe.

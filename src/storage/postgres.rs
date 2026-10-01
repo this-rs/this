@@ -20,6 +20,26 @@
 //! Links are stored in a `links` table with dedicated columns for
 //! relationship traversal. See `migrations/002_create_links.up.sql`.
 //!
+//! # Qui applique ce schéma — le geste, pas le démarrage
+//!
+//! **Rien n'est créé au démarrage**, et c'est délibéré : ouvrir une base est
+//! une décision d'application, la modifier en est une autre. Le paquet
+//! fournit donc le geste, explicitement — [`ensure_schema`] — et
+//! l'application l'appelle quand elle le décide :
+//!
+//! ```rust,ignore
+//! let pool = PgPool::connect(&url).await?;
+//! this::storage::postgres::ensure_schema(&pool).await?;   // migrations/001 puis 002
+//! let service = PostgresDataService::<Invoice>::new(pool);
+//! ```
+//!
+//! Le geste est **idempotent** (sqlx tient la table `_sqlx_migrations`) : on
+//! peut le rejouer à chaque démarrage sans rien casser. Il est le
+//! **symétrique** de `storage::mysql::ensure_schema` et
+//! `storage::scylladb::ensure_schema`, qui existaient déjà ; Postgres, lui,
+//! n'avait que du SQL de référence que personne n'exécutait — le schéma
+//! n'arrivait en production que si l'exploitant le jouait à la main.
+//!
 //! # Entity type convention
 //!
 //! The `entity_type` column is populated from `T::resource_name_singular()`.
@@ -35,6 +55,33 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use sqlx::{FromRow, PgPool};
 use uuid::Uuid;
+
+// ---------------------------------------------------------------------------
+// Schema management
+// ---------------------------------------------------------------------------
+
+/// Applique les migrations SQL de référence (`migrations/`) — le GESTE, offert.
+///
+/// Idempotent : sqlx tient la table `_sqlx_migrations`, donc les migrations
+/// déjà appliquées ne le sont pas deux fois. Rejouable à chaque démarrage.
+///
+/// **Le framework ne l'appelle pas de lui-même** : ouvrir une base est une
+/// décision d'application, la modifier en est une autre, et un framework qui
+/// migre la base de son hôte en silence lui retirerait cette décision. C'est
+/// donc à l'application — ou à son hôte de déploiement — de l'appeler, et
+/// l'échec est rendu plutôt que journalisé : une base au schéma incomplet doit
+/// arrêter le démarrage, pas produire des requêtes qui échouent une par une.
+///
+/// Symétrique de `storage::mysql::ensure_schema` et
+/// `storage::scylladb::ensure_schema` — même nom, même contrat, même
+/// idempotence, pour que les trois backends se tiennent pareil.
+pub async fn ensure_schema(pool: &PgPool) -> Result<()> {
+    sqlx::migrate!("./migrations")
+        .run(pool)
+        .await
+        .map_err(|e| anyhow!("Failed to apply database migrations: {}", e))?;
+    Ok(())
+}
 
 // ---------------------------------------------------------------------------
 // EntityRow — intermediate struct for DB row mapping
