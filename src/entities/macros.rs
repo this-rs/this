@@ -3,10 +3,39 @@
 //! These macros generate the repetitive trait implementations needed
 //! for each entity type following the Entity/Data/Link architecture.
 
-/// Helper macro to enable multi-tenancy for an entity
+/// Helper macro to read the tenant of a multi-tenant entity
 ///
-/// This macro adds an override for the `Entity::tenant_id()` method
-/// to return the actual tenant_id field value.
+/// # ⚠️ Cette macro n'active PAS le multi-tenant (2026-10-01)
+///
+/// Elle documentait « ajoute un override de `Entity::tenant_id()` » : c'est
+/// **faux**, et le commentaire intérieur le disait déjà — on ne peut pas
+/// ajouter un override de trait dans un `impl` séparé en Rust stable, et la
+/// macro ne peut pas non plus écrire le `impl Entity` (celui que
+/// [`impl_data_entity!`](crate::impl_data_entity) génère déjà).
+///
+/// Ce qu'elle fait donc, exactement : une méthode **inhérente**
+/// `get_tenant_id()` qui lit le champ `tenant_id`. Utile pour lire le champ ;
+/// **sans effet sur le framework**, qui lit `Entity::tenant_id()` — dont le
+/// défaut est `None`.
+///
+/// # Ce qu'il faut écrire pour activer réellement le multi-tenant
+///
+/// L'override vit **dans votre `impl Entity`** (ou dans une méthode du même
+/// bloc) :
+///
+/// ```rust,ignore
+/// impl Entity for User {
+///     fn tenant_id(&self) -> Option<Uuid> {
+///         Some(self.tenant_id)   // ← ce que le FRAMEWORK lit
+///     }
+/// }
+/// ```
+///
+/// Le test `multi_tenant_macro_only_reads_the_field_not_the_trait` consigne
+/// l'écart : il montre qu'après `impl_entity_multi_tenant!(E)`, le trait répond
+/// toujours `None`. Il **tombera** le jour où la macro câblera réellement le
+/// trait — et il faudra alors réécrire cette documentation, pas la laisser
+/// mentir.
 ///
 /// # Example
 /// ```rust,ignore
@@ -15,17 +44,27 @@
 ///     email: String,
 /// });
 ///
-/// // Enable multi-tenancy
+/// // Lire le champ :
 /// impl_entity_multi_tenant!(User);
+///
+/// // Et pour que le FRAMEWORK le voie, l'override de trait reste à écrire :
+/// impl Entity for User {
+///     fn tenant_id(&self) -> Option<Uuid> { Some(self.tenant_id) }
+/// }
 /// ```
 #[macro_export]
 macro_rules! impl_entity_multi_tenant {
     ($type:ident) => {
-        // Cannot override trait methods in separate impl blocks in stable Rust
-        // This is a marker for documentation purposes
-        // Users should manually implement tenant_id access via a helper method
+        // Ne PAS écrire ici « active le multi-tenant » : cette macro ne peut pas
+        // override un trait dans un `impl` séparé (Rust stable), et le `impl
+        // Entity` appartient à `impl_data_entity!`. Elle lit le champ, rien de
+        // plus — voir la documentation ci-dessus, qui dit où vit l'override.
         impl $type {
-            /// Get the tenant ID for multi-tenant isolation
+            /// Lire le champ `tenant_id` — **ce que le framework ne lit pas**.
+            ///
+            /// Pour que la couche de données et le confinement par locataire le
+            /// voient, écrivez `fn tenant_id(&self) -> Option<Uuid>` dans votre
+            /// `impl Entity`.
             #[allow(dead_code)]
             pub fn get_tenant_id(&self) -> ::uuid::Uuid {
                 self.tenant_id
@@ -208,7 +247,23 @@ macro_rules! impl_data_entity {
             fn service_from_host(
                 _host: &::std::sync::Arc<dyn ::std::any::Any + Send + Sync>
             ) -> ::anyhow::Result<::std::sync::Arc<Self::Service>> {
-                unimplemented!("service_from_host must be implemented by user")
+                // **Un refus DIAGNOSTIQUABLE, pas une panique.** Cette macro ne
+                // peut pas deviner le service de VOTRE entite : elle genere donc
+                // `type Service = ()` et cette fonction, qui rend une erreur
+                // nommant le type et le remede. Avant, elle faisait
+                // `unimplemented!()` — un processus qui s'arrete sans dire quoi
+                // ecrire, la ou un `Err` remonte jusqu'a l'appelant qui peut le
+                // lire (et le journaliser). Un service par entite s'ecrit dans
+                // un `impl Entity` a vous ; sinon, `()` suffit et cette fonction
+                // n'a pas a etre appelee.
+                ::anyhow::bail!(
+                    "service_from_host n'est pas implemente pour `{}` : la macro genere \
+                     `type Service = ()` mais ne peut pas deviner le service de votre entite. \
+                     Ecrivez `impl Entity for {}` avec `service_from_host`, ou n'attachez pas \
+                     de service par entite (le service rendu est `()`).",
+                    stringify!($type),
+                    stringify!($type)
+                )
             }
 
             fn id(&self) -> ::uuid::Uuid {
@@ -390,7 +445,23 @@ macro_rules! impl_link_entity {
             fn service_from_host(
                 _host: &::std::sync::Arc<dyn ::std::any::Any + Send + Sync>
             ) -> ::anyhow::Result<::std::sync::Arc<Self::Service>> {
-                unimplemented!("service_from_host must be implemented by user")
+                // **Un refus DIAGNOSTIQUABLE, pas une panique.** Cette macro ne
+                // peut pas deviner le service de VOTRE entite : elle genere donc
+                // `type Service = ()` et cette fonction, qui rend une erreur
+                // nommant le type et le remede. Avant, elle faisait
+                // `unimplemented!()` — un processus qui s'arrete sans dire quoi
+                // ecrire, la ou un `Err` remonte jusqu'a l'appelant qui peut le
+                // lire (et le journaliser). Un service par entite s'ecrit dans
+                // un `impl Entity` a vous ; sinon, `()` suffit et cette fonction
+                // n'a pas a etre appelee.
+                ::anyhow::bail!(
+                    "service_from_host n'est pas implemente pour `{}` : la macro genere \
+                     `type Service = ()` mais ne peut pas deviner le service de votre entite. \
+                     Ecrivez `impl Entity for {}` avec `service_from_host`, ou n'attachez pas \
+                     de service par entite (le service rendu est `()`).",
+                    stringify!($type),
+                    stringify!($type)
+                )
             }
 
             fn id(&self) -> ::uuid::Uuid {
@@ -863,5 +934,93 @@ mod tests {
         assert!(fields.contains(&"name"));
         assert!(fields.contains(&"email"));
         assert_eq!(fields.len(), 2);
+    }
+
+    // ======================================================================
+    // Le trou du contrat d'entité : `service_from_host` et le multi-tenant
+    // ======================================================================
+
+    /// La macro **ne peut pas** deviner le service de l'entité : elle doit donc
+    /// le **dire**, pas s'arrêter net.
+    ///
+    /// Avant, la fonction générée faisait `unimplemented!()` : un processus qui
+    /// meurt sans laisser quoi écrire, là où la signature promet un `Result`.
+    /// Le refus porte désormais le type **et** le geste à écrire — il remonte
+    /// jusqu'à l'appelant, qui peut le journaliser.
+    #[test]
+    fn test_service_from_host_non_implemente_dit_quoi_ecrire() {
+        use std::sync::Arc;
+
+        let host: Arc<dyn std::any::Any + Send + Sync> = Arc::new(());
+
+        let erreur = TestUser::service_from_host(&host)
+            .expect_err("la macro ne peut pas deviner le service : elle doit le REFUSER");
+        let message = erreur.to_string();
+        assert!(
+            message.contains("TestUser"),
+            "l'erreur nomme le type fautif : {message}"
+        );
+        assert!(
+            message.contains("service_from_host"),
+            "l'erreur nomme le geste à écrire : {message}"
+        );
+
+        // Le lien aussi, et pas seulement l'entité de données.
+        let erreur_lien = TestOwnerLink::service_from_host(&host)
+            .expect_err("même refus pour les entités de lien");
+        assert!(erreur_lien.to_string().contains("TestOwnerLink"));
+    }
+
+    // Une entité multi-tenant, telle que la documentation la décrit.
+    impl_data_entity!(
+        TestTenantUser,
+        "test_tenant_user",
+        ["name"],
+        {
+            tenant_id: Uuid,
+        }
+    );
+    crate::impl_entity_multi_tenant!(TestTenantUser);
+
+    /// **`impl_entity_multi_tenant!` n'active pas le multi-tenant** — et ce test
+    /// consigne l'écart au lieu de laisser la documentation le promettre.
+    ///
+    /// La macro ne peut pas surcharger `Entity::tenant_id()` (un `impl` de trait
+    /// séparé, en Rust stable, n'existe pas) : elle lit le champ, rien de plus.
+    /// Le framework, lui, lit le **trait**, dont le défaut est `None`.
+    ///
+    /// Ce test **tombera** le jour où la macro câblera réellement le trait — et
+    /// ce jour-là, c'est la documentation de la macro qu'il faudra réécrire, pas
+    /// ce test qu'il faudra faire taire.
+    #[test]
+    fn test_multi_tenant_macro_lit_le_champ_mais_pas_le_trait() {
+        use crate::core::entity::Entity;
+
+        let locataire = Uuid::new_v4();
+        let mut utilisateur =
+            TestTenantUser::new("Jane".to_string(), "active".to_string(), locataire);
+
+        assert_eq!(
+            utilisateur.get_tenant_id(),
+            locataire,
+            "le helper de la macro LIT bien le champ"
+        );
+        assert_eq!(
+            Entity::tenant_id(&utilisateur),
+            None,
+            "mais le FRAMEWORK lit le trait, dont le défaut est `None` : l'override \
+             (`fn tenant_id(&self) -> Option<Uuid> {{ Some(self.tenant_id) }}`) reste à \
+             écrire dans `impl Entity` — la macro ne le fait pas et ne peut pas le faire"
+        );
+
+        // Le GESTE de suppression douce, lui, est bien engendré — et il n'est
+        // filtré par rien : le framework marque et rend, l'application cache
+        // (voir `Entity::deleted_at`).
+        utilisateur.soft_delete();
+        assert!(utilisateur.is_deleted());
+        utilisateur.restore();
+        assert!(!utilisateur.is_deleted());
+        utilisateur.set_status("archive".to_string());
+        assert_eq!(utilisateur.status(), "archive");
     }
 }

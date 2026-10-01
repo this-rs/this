@@ -47,10 +47,12 @@ pub trait Entity: Clone + Send + Sync + 'static {
     ///
     /// # Le contrat réel — mesuré, pas supposé (2026-10-01)
     ///
-    /// **Le framework ne supprime jamais en douceur** : `DataService::delete`
-    /// est un DELETE dur, et aucune ligne du framework n'écrit `deleted_at`.
-    /// C'est donc une **convention de l'application**, qui la pose par une mise
-    /// à jour.
+    /// Le **geste de marquage** existe : les entités engendrées par
+    /// [`impl_data_entity!`](crate::impl_data_entity) et
+    /// [`impl_link_entity!`](crate::impl_link_entity) portent `soft_delete()`
+    /// et `restore()`, qui écrivent et effacent `deleted_at`. Mais
+    /// `DataService::delete`, lui, est un **DELETE dur** : le framework ne
+    /// supprime jamais en douceur par sa couche de données.
     ///
     /// Conséquence, verrouillée par le banc partagé des neuf backends
     /// (`tests/storage_harness/data_service_tests.rs`,
