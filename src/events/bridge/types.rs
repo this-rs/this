@@ -1,135 +1,137 @@
-//! Obrain-db MutationEvent types (local stubs)
+//! Pont de types entre this-rs et obrain — **ré-exports des vrais types**.
 //!
-//! These types mirror obrain-db's `MutationEvent` and `MutationBatch` types.
-//! They are defined locally until obrain-db becomes a direct dependency,
-//! at which point they will be replaced by re-exports.
+//! # Ce qui a changé, et pourquoi
+//!
+//! Ce fichier contenait des **stubs locaux** qui « reproduisaient » `MutationEvent`
+//! et `MutationBatch` « jusqu'à ce que obrain-db devienne une dépendance directe ».
+//! La dépendance est maintenant déclarée (`obrain-reactive`, feature `obrain`),
+//! donc les stubs sont remplacés par des ré-exports.
+//!
+//! Il était temps : **les deux définitions avaient déjà divergé**, ce que le
+//! commentaire d'origine annonçait comme un risque futur et qui était déjà un fait.
+//!
+//! | stub local | vrai type obrain |
+//! |---|---|
+//! | `node_id: Uuid` | `id: NodeId` |
+//! | `properties: HashMap<String, serde_json::Value>` | `properties: Vec<(PropertyKey, Value)>` |
+//! | `labels: Vec<String>` | `labels: SmallVec<[ArcStr; 2]>` |
+//! | variante `PropertySet { node_id, key, value }` | **absente** : une écriture de propriété est un `NodeUpdated { before, after }` |
+//! | — | `NodeUpdated`, `EdgeUpdated` (états avant/après) |
+//! | `MutationBatch { tenant_id, events }` | `{ events, timestamp: Instant, context: Option<Arc<EventContext>> }` |
+//!
+//! # Conséquence de fond : rien ne se sérialise
+//!
+//! Les événements d'obrain dérivent `Debug, Clone` **seulement** — pas `Serialize`.
+//! C'est cohérent avec le chemin rapide : le pont est **in-process**, il n'y a
+//! aucun octet à mettre sur un fil. Les anciens tests de sérialisation JSON
+//! testaient donc une propriété que le vrai modèle n'a pas ; ils sont remplacés
+//! par des tests de structure et de contrat.
+//!
+//! # Ce que this-rs garde
+//!
+//! Les deux traits de bus. obrain n'a pas d'équivalent : son `MutationBus` expose
+//! `subscribe() -> broadcast::Receiver`. Garder l'abstraction côté this-rs permet
+//! de brancher un bus obrain réel **ou** un bus de test, sans que les appelants
+//! connaissent `tokio::broadcast`.
 
-use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
-use uuid::Uuid;
+pub use obrain_reactive::{
+    EdgeSnapshot, EventContext, MutationBatch, MutationBus, MutationEvent, NodeSnapshot,
+};
 
-/// Represents a mutation event from obrain-db's MutationBus
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub enum MutationEvent {
-    /// A graph node was created
-    NodeCreated {
-        node_id: Uuid,
-        labels: Vec<String>,
-        properties: HashMap<String, serde_json::Value>,
-    },
-    /// A graph node was deleted
-    NodeDeleted { node_id: Uuid },
-    /// A property was set on a node
-    PropertySet {
-        node_id: Uuid,
-        key: String,
-        value: serde_json::Value,
-    },
-    /// An edge was created between two nodes
-    EdgeCreated {
-        edge_id: Uuid,
-        source_id: Uuid,
-        target_id: Uuid,
-        edge_type: String,
-        properties: HashMap<String, serde_json::Value>,
-    },
-    /// An edge was deleted
-    EdgeDeleted {
-        edge_id: Uuid,
-        source_id: Uuid,
-        target_id: Uuid,
-        edge_type: String,
-    },
-}
+use async_trait::async_trait;
 
-/// A batch of mutations (obrain groups mutations into batches)
-#[derive(Debug, Clone)]
-pub struct MutationBatch {
-    /// Tenant that produced the mutations (None = no tenant / global)
-    pub tenant_id: Option<Uuid>,
-    /// The mutation events in this batch
-    pub events: Vec<MutationEvent>,
-}
-
-/// Trait for receiving mutation events (will be implemented by real obrain-db MutationBus)
-#[async_trait::async_trait]
+/// Réception d'un lot de mutations.
+#[async_trait]
 pub trait MutationBusSubscriber: Send + Sync {
-    /// Receive the next mutation batch, or `None` if the bus is closed
+    /// Reçoit le prochain lot, ou `None` si le bus est fermé.
     async fn recv(&mut self) -> Option<MutationBatch>;
 }
 
-/// Trait for publishing mutation events
-#[async_trait::async_trait]
+/// Émission d'un lot de mutations.
+#[async_trait]
 pub trait MutationBusPublisher: Send + Sync {
-    /// Publish a batch of mutations to the MutationBus
+    /// Publie un lot vers le bus de mutations.
     async fn publish(&self, batch: MutationBatch) -> anyhow::Result<()>;
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
+    use obrain_common::types::{NodeId, PropertyKey, Value};
 
-    #[test]
-    fn test_mutation_event_node_created_serialization() {
-        let mut props = HashMap::new();
-        props.insert("name".to_string(), json!("Alice"));
-
-        let event = MutationEvent::NodeCreated {
-            node_id: Uuid::nil(),
-            labels: vec!["user".to_string()],
-            properties: props,
-        };
-
-        let json = serde_json::to_value(&event).unwrap();
-        assert_eq!(json["NodeCreated"]["labels"][0], "user");
+    fn node(id: u64, nom: &str) -> NodeSnapshot {
+        NodeSnapshot {
+            id: NodeId(id),
+            labels: Default::default(),
+            properties: vec![(PropertyKey::from("name"), Value::from(nom))],
+        }
     }
 
+    /// Un `NodeCreated` porte l'INSTANTANÉ complet : plus besoin de requêter le
+    /// store en retour, ce que l'ancien stub (id + map JSON) ne permettait pas.
     #[test]
-    fn test_mutation_event_edge_created_serialization() {
-        let event = MutationEvent::EdgeCreated {
-            edge_id: Uuid::nil(),
-            source_id: Uuid::nil(),
-            target_id: Uuid::nil(),
-            edge_type: "owns".to_string(),
-            properties: HashMap::new(),
+    fn node_created_carries_the_full_snapshot() {
+        let e = MutationEvent::NodeCreated {
+            node: node(7, "Alice"),
         };
-
-        let json = serde_json::to_value(&event).unwrap();
-        assert_eq!(json["EdgeCreated"]["edge_type"], "owns");
+        match e {
+            MutationEvent::NodeCreated { node } => {
+                assert_eq!(node.properties.len(), 1);
+                assert_eq!(node.properties[0].0, PropertyKey::from("name"));
+                assert_eq!(node.properties[0].1, Value::from("Alice"));
+            }
+            _ => panic!("variante inattendue"),
+        }
     }
 
+    /// Une écriture de propriété est une MISE À JOUR avec état avant/après —
+    /// il n'existe pas de variante de delta de propriété. C'est la décision de
+    /// modèle que le stub masquait.
     #[test]
-    fn test_mutation_event_roundtrip() {
-        let event = MutationEvent::PropertySet {
-            node_id: Uuid::new_v4(),
-            key: "status".to_string(),
-            value: json!("active"),
-        };
-
-        let serialized = serde_json::to_string(&event).unwrap();
-        let deserialized: MutationEvent = serde_json::from_str(&serialized).unwrap();
-        assert_eq!(event, deserialized);
+    fn a_property_write_is_an_update_with_before_and_after() {
+        let before = node(7, "Alice");
+        let after = node(7, "Alicia");
+        let e = MutationEvent::NodeUpdated { before, after };
+        match e {
+            MutationEvent::NodeUpdated { before, after } => {
+                assert_ne!(before.properties, after.properties);
+                assert_eq!(before.id, after.id, "même entité des deux côtés");
+            }
+            _ => panic!("variante inattendue"),
+        }
     }
 
+    /// Le lot obrain porte un horodatage et un contexte optionnel — le tenant
+    /// n'est plus un champ du lot comme dans le stub, il vit dans le contexte.
     #[test]
-    fn test_mutation_batch_creation() {
-        let batch = MutationBatch {
-            tenant_id: Some(Uuid::new_v4()),
-            events: vec![
-                MutationEvent::NodeDeleted {
-                    node_id: Uuid::new_v4(),
-                },
-                MutationEvent::EdgeDeleted {
-                    edge_id: Uuid::new_v4(),
-                    source_id: Uuid::new_v4(),
-                    target_id: Uuid::new_v4(),
-                    edge_type: "owns".to_string(),
-                },
-            ],
-        };
+    fn batch_carries_timestamp_and_optional_context() {
+        let b = MutationBatch::new(vec![MutationEvent::NodeDeleted {
+            node: node(9, "Bob"),
+        }]);
+        assert_eq!(b.events.len(), 1);
+        assert!(b.context.is_none(), "bootstrap : pas de contexte");
+        let ctx = EventContext::new(Some("tenant-a".into()), None, None);
+        // `with_context` est une FONCTION ASSOCIÉE qui prend les événements :
+        // ce n'est pas un builder. (Corrigé après vérification de la signature.)
+        let b2 = MutationBatch::with_context(vec![], std::sync::Arc::new(ctx));
+        assert_eq!(
+            b2.context.as_ref().and_then(|c| c.tenant_id.clone()),
+            Some("tenant-a".to_string())
+        );
+    }
 
-        assert!(batch.tenant_id.is_some());
-        assert_eq!(batch.events.len(), 2);
+    /// Le bus d'obrain est utilisable comme source de réception : c'est le
+    /// chemin in-process (broadcast `tokio`, pas de socket, pas d'octets).
+    #[test]
+    fn the_real_bus_delivers_in_process() {
+        let bus = MutationBus::new();
+        let mut rx = bus.subscribe();
+        // `publish` rend un booléen (au moins un abonné a reçu), pas un compte.
+        let delivered = bus.publish(MutationEvent::NodeDeleted { node: node(1, "x") });
+        assert!(delivered, "un abonné était présent");
+        let got = rx
+            .try_recv()
+            .expect("le lot doit être disponible sans bloquer");
+        assert_eq!(got.events.len(), 1);
     }
 }

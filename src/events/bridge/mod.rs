@@ -6,6 +6,8 @@
 //!
 //! All types and logic are feature-gated behind `#[cfg(feature = "obrain")]`.
 
+#[cfg(feature = "obrain")]
+pub mod codec;
 pub mod cognitive;
 #[cfg(feature = "obrain")]
 pub mod dedup;

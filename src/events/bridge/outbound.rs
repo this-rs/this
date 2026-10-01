@@ -5,10 +5,14 @@
 //! and publishes them to the `MutationBus` so cognitive listeners
 //! (stigmergy, co-change detection, etc.) can react.
 
+use super::codec::{edge_of_uuid, json_to_properties, node_of_uuid};
 use super::dedup::DedupFilter;
-use super::types::{MutationBatch, MutationBusPublisher, MutationEvent};
+use super::types::{
+    EdgeSnapshot, EventContext, MutationBatch, MutationBusPublisher, MutationEvent, NodeSnapshot,
+};
 use crate::core::events::{EntityEvent, EventBus, FrameworkEvent, LinkEvent};
-use std::collections::HashMap;
+use obrain_common::types::ArcStr;
+use serde_json::Value as Json;
 use std::sync::Arc;
 use tokio::sync::broadcast;
 
@@ -52,9 +56,16 @@ impl OutboundBridge {
                         }
 
                         if let Some(mutations) = translate_to_mutations(&envelope.event) {
-                            let batch = MutationBatch {
-                                tenant_id: envelope.tenant_id,
-                                events: mutations,
+                            // Le tenant vit dans le CONTEXTE d'evenement cote
+                            // obrain, et c'est une chaine : on y met la forme
+                            // texte de la poignee, qui se re-parse a l'identique
+                            // au retour (voir `codec::uuid_of_tenant`).
+                            let batch = match envelope.tenant_id {
+                                Some(t) => MutationBatch::with_context(
+                                    mutations,
+                                    Arc::new(EventContext::new(Some(t.to_string()), None, None)),
+                                ),
+                                None => MutationBatch::new(mutations),
                             };
                             if let Err(e) = self.mutation_publisher.publish(batch).await {
                                 tracing::warn!(
@@ -90,385 +101,273 @@ fn translate_to_mutations(event: &FrameworkEvent) -> Option<Vec<MutationEvent>> 
                 entity_id,
                 data,
             } => {
-                let properties = extract_properties(data);
+                // Un identifiant qui n'est pas une poignee obrain ne se traduit
+                // pas : on preferera perdre l'evenement plutot que fabriquer une
+                // identite etrangere dans le graphe.
+                let id = node_of_uuid(*entity_id)?;
                 Some(vec![MutationEvent::NodeCreated {
-                    node_id: *entity_id,
-                    labels: vec![entity_type.clone()],
-                    properties,
+                    node: NodeSnapshot {
+                        id,
+                        labels: std::iter::once(ArcStr::from(entity_type.as_str())).collect(),
+                        properties: json_to_properties(&objets(data)),
+                    },
                 }])
             }
             EntityEvent::Updated {
-                entity_type: _,
+                entity_type,
                 entity_id,
                 data,
             } => {
-                // Emit a PropertySet for each top-level field in the data
-                let properties = extract_properties(data);
-                let mutations: Vec<MutationEvent> = properties
-                    .into_iter()
-                    .map(|(key, value)| MutationEvent::PropertySet {
-                        node_id: *entity_id,
-                        key,
-                        value,
-                    })
-                    .collect();
-
-                if mutations.is_empty() {
-                    None
-                } else {
-                    Some(mutations)
+                let id = node_of_uuid(*entity_id)?;
+                let properties = json_to_properties(&objets(data));
+                if properties.is_empty() {
+                    return None;
                 }
-            }
-            EntityEvent::Deleted { entity_id, .. } => Some(vec![MutationEvent::NodeDeleted {
-                node_id: *entity_id,
-            }]),
-        },
-        FrameworkEvent::Link(link_event) => match link_event {
-            LinkEvent::Created {
-                link_type,
-                link_id,
-                source_id,
-                target_id,
-                metadata,
-            } => {
-                let properties = metadata
-                    .as_ref()
-                    .map(extract_properties)
-                    .unwrap_or_default();
-                Some(vec![MutationEvent::EdgeCreated {
-                    edge_id: *link_id,
-                    source_id: *source_id,
-                    target_id: *target_id,
-                    edge_type: link_type.clone(),
-                    properties,
+                // ⚠️ LIMITE DE MODELE, ECRITE ET NON MASQUEE : this-rs ne
+                // transporte que l'etat NOUVEAU (`EntityEvent::Updated { data }`).
+                // obrain, lui, definit une mise a jour comme un couple
+                // `before` / `after`. On ne peut donc pas produire un `before`
+                // fidele, et on n'invente pas de valeurs : `before` porte
+                // l'IDENTITE (et les labels), avec des proprietes VIDES, ce qui
+                // signifie « inconnu », pas « vide ».
+                // Remede propre : que `EntityEvent::Updated` porte le precedent
+                // (ou le delta) — c'est un changement du modele this-rs, pas du
+                // pont, et il est volontairement laisse a decider.
+                Some(vec![MutationEvent::NodeUpdated {
+                    before: NodeSnapshot {
+                        id,
+                        labels: std::iter::once(ArcStr::from(entity_type.as_str())).collect(),
+                        properties: Vec::new(),
+                    },
+                    after: NodeSnapshot {
+                        id,
+                        labels: std::iter::once(ArcStr::from(entity_type.as_str())).collect(),
+                        properties,
+                    },
                 }])
             }
-            LinkEvent::Deleted {
-                link_type,
-                link_id,
-                source_id,
-                target_id,
-            } => Some(vec![MutationEvent::EdgeDeleted {
-                edge_id: *link_id,
-                source_id: *source_id,
-                target_id: *target_id,
-                edge_type: link_type.clone(),
-            }]),
+            EntityEvent::Deleted { entity_id, .. } => {
+                let id = node_of_uuid(*entity_id)?;
+                // Meme limite : l'evenement de suppression this-rs ne porte ni
+                // labels ni proprietes. L'instantane est donc reduit a l'identite.
+                Some(vec![MutationEvent::NodeDeleted {
+                    node: NodeSnapshot {
+                        id,
+                        labels: Default::default(),
+                        properties: Vec::new(),
+                    },
+                }])
+            }
         },
-        // Cognitive signals originate from obrain — do not loop them back
-        FrameworkEvent::Cognitive(_) => None,
-        // GDPR erasure events are not forwarded as mutations
-        FrameworkEvent::GdprErasure { .. } => None,
+        FrameworkEvent::Link(LinkEvent::Created {
+            link_type,
+            link_id,
+            source_id,
+            target_id,
+            metadata,
+        }) => Some(vec![MutationEvent::EdgeCreated {
+            edge: EdgeSnapshot {
+                id: edge_of_uuid(*link_id)?,
+                src: node_of_uuid(*source_id)?,
+                dst: node_of_uuid(*target_id)?,
+                edge_type: ArcStr::from(link_type.as_str()),
+                properties: metadata
+                    .as_ref()
+                    .map(objets)
+                    .map(|o| json_to_properties(&o))
+                    .unwrap_or_default(),
+            },
+        }]),
+        FrameworkEvent::Link(LinkEvent::Deleted {
+            link_type,
+            link_id,
+            source_id,
+            target_id,
+        }) => Some(vec![MutationEvent::EdgeDeleted {
+            edge: EdgeSnapshot {
+                id: edge_of_uuid(*link_id)?,
+                src: node_of_uuid(*source_id)?,
+                dst: node_of_uuid(*target_id)?,
+                edge_type: ArcStr::from(link_type.as_str()),
+                properties: Vec::new(),
+            },
+        }]),
+        // Signaux cognitifs et effacements RGPD : ils viennent d'obrain lui-meme
+        // ou n'ont pas de pendant graphe — on ne les renvoie pas (le filtre de
+        // dedup couvre deja la boucle, ceci est la seconde ceinture).
+        _ => None,
     }
 }
 
-/// Extract top-level properties from a JSON value into a HashMap
-fn extract_properties(value: &serde_json::Value) -> HashMap<String, serde_json::Value> {
-    match value {
-        serde_json::Value::Object(map) => map.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
-        _ => HashMap::new(),
-    }
+/// Objet JSON d'une charge utile, ou objet vide si ce n'en est pas un.
+///
+/// obrain n'a pas de types composites : une charge qui n'est pas un objet ne
+/// peut pas devenir des proprietes. On rend un objet vide plutot que de perdre
+/// silencieusement une structure non representable.
+fn objets(value: &Json) -> serde_json::Map<String, Json> {
+    value.as_object().cloned().unwrap_or_default()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::events::CognitiveSignal;
+    use obrain_common::types::{EdgeId, NodeId};
     use serde_json::json;
     use uuid::Uuid;
 
-    #[test]
-    fn test_translate_entity_created() {
-        let event = FrameworkEvent::Entity(EntityEvent::Created {
-            entity_type: "order".to_string(),
-            entity_id: Uuid::nil(),
-            data: json!({"name": "Order #1", "amount": 42}),
-        });
+    fn node_uuid(id: u64) -> Uuid {
+        super::super::codec::uuid_of_node(NodeId(id))
+    }
+    fn edge_uuid(id: u64) -> Uuid {
+        super::super::codec::uuid_of_edge(EdgeId(id))
+    }
 
-        let mutations = translate_to_mutations(&event).unwrap();
-        assert_eq!(mutations.len(), 1);
-        match &mutations[0] {
-            MutationEvent::NodeCreated {
-                node_id,
-                labels,
-                properties,
-            } => {
-                assert_eq!(*node_id, Uuid::nil());
-                assert_eq!(labels, &["order"]);
-                assert_eq!(properties["name"], json!("Order #1"));
-                assert_eq!(properties["amount"], json!(42));
+    #[test]
+    fn created_becomes_node_created_with_a_real_snapshot() {
+        let ev = FrameworkEvent::Entity(EntityEvent::Created {
+            entity_type: "order".into(),
+            entity_id: node_uuid(7),
+            data: json!({"total": 42, "ref": "A-1"}),
+        });
+        let muts = translate_to_mutations(&ev).unwrap();
+        assert_eq!(muts.len(), 1);
+        match &muts[0] {
+            MutationEvent::NodeCreated { node } => {
+                assert_eq!(node.id, NodeId(7));
+                assert_eq!(node.labels.len(), 1);
+                assert_eq!(node.labels[0].as_str(), "order");
+                assert_eq!(node.properties.len(), 2);
+                assert!(
+                    node.properties.iter().any(|(k, v)| k.as_str() == "ref"
+                        && *v == obrain_common::types::Value::from("A-1"))
+                );
             }
-            other => panic!("Expected NodeCreated, got {:?}", other),
+            other => panic!("attendu NodeCreated, obtenu {other:?}"),
         }
     }
 
     #[test]
-    fn test_translate_entity_updated() {
-        let id = Uuid::new_v4();
-        let event = FrameworkEvent::Entity(EntityEvent::Updated {
-            entity_type: "order".to_string(),
-            entity_id: id,
-            data: json!({"status": "shipped", "tracking": "ABC123"}),
+    fn updated_becomes_node_updated_and_before_is_unknown_not_fabricated() {
+        let ev = FrameworkEvent::Entity(EntityEvent::Updated {
+            entity_type: "order".into(),
+            entity_id: node_uuid(7),
+            data: json!({"total": 43}),
         });
-
-        let mutations = translate_to_mutations(&event).unwrap();
-        assert_eq!(mutations.len(), 2);
-
-        // Collect the keys that were set
-        let keys: Vec<String> = mutations
-            .iter()
-            .map(|m| match m {
-                MutationEvent::PropertySet { key, .. } => key.clone(),
-                other => panic!("Expected PropertySet, got {:?}", other),
-            })
-            .collect();
-        assert!(keys.contains(&"status".to_string()));
-        assert!(keys.contains(&"tracking".to_string()));
+        match &translate_to_mutations(&ev).unwrap()[0] {
+            MutationEvent::NodeUpdated { before, after } => {
+                assert_eq!(after.properties.len(), 1);
+                assert!(
+                    before.properties.is_empty(),
+                    "l'etat precedent n'est pas connu : on ne l'invente pas"
+                );
+                assert_eq!(before.id, after.id, "mais l'identite est portee");
+            }
+            other => panic!("attendu NodeUpdated, obtenu {other:?}"),
+        }
     }
 
     #[test]
-    fn test_translate_entity_updated_empty_data() {
-        let event = FrameworkEvent::Entity(EntityEvent::Updated {
-            entity_type: "order".to_string(),
-            entity_id: Uuid::new_v4(),
+    fn updated_without_fields_produces_nothing() {
+        let ev = FrameworkEvent::Entity(EntityEvent::Updated {
+            entity_type: "order".into(),
+            entity_id: node_uuid(7),
             data: json!({}),
         });
-
-        // Empty update data should produce None (no mutations)
-        assert!(translate_to_mutations(&event).is_none());
+        assert!(translate_to_mutations(&ev).is_none());
     }
 
     #[test]
-    fn test_translate_entity_deleted() {
-        let id = Uuid::new_v4();
-        let event = FrameworkEvent::Entity(EntityEvent::Deleted {
-            entity_type: "order".to_string(),
-            entity_id: id,
+    fn deleted_becomes_node_deleted() {
+        let ev = FrameworkEvent::Entity(EntityEvent::Deleted {
+            entity_type: "order".into(),
+            entity_id: node_uuid(9),
         });
-
-        let mutations = translate_to_mutations(&event).unwrap();
-        assert_eq!(mutations.len(), 1);
-        match &mutations[0] {
-            MutationEvent::NodeDeleted { node_id } => assert_eq!(*node_id, id),
-            other => panic!("Expected NodeDeleted, got {:?}", other),
+        match &translate_to_mutations(&ev).unwrap()[0] {
+            MutationEvent::NodeDeleted { node } => assert_eq!(node.id, NodeId(9)),
+            other => panic!("attendu NodeDeleted, obtenu {other:?}"),
         }
     }
 
     #[test]
-    fn test_translate_link_created() {
-        let link_id = Uuid::new_v4();
-        let source = Uuid::new_v4();
-        let target = Uuid::new_v4();
-        let event = FrameworkEvent::Link(LinkEvent::Created {
-            link_type: "owns".to_string(),
-            link_id,
-            source_id: source,
-            target_id: target,
-            metadata: Some(json!({"weight": 1.0})),
+    fn links_use_edge_handles() {
+        let created = FrameworkEvent::Link(LinkEvent::Created {
+            link_type: "owns".into(),
+            link_id: edge_uuid(3),
+            source_id: node_uuid(1),
+            target_id: node_uuid(2),
+            metadata: Some(json!({"since": 2024})),
         });
-
-        let mutations = translate_to_mutations(&event).unwrap();
-        assert_eq!(mutations.len(), 1);
-        match &mutations[0] {
-            MutationEvent::EdgeCreated {
-                edge_id,
-                source_id,
-                target_id,
-                edge_type,
-                properties,
-            } => {
-                assert_eq!(*edge_id, link_id);
-                assert_eq!(*source_id, source);
-                assert_eq!(*target_id, target);
-                assert_eq!(edge_type, "owns");
-                assert_eq!(properties["weight"], json!(1.0));
+        match &translate_to_mutations(&created).unwrap()[0] {
+            MutationEvent::EdgeCreated { edge } => {
+                assert_eq!(edge.id, EdgeId(3));
+                assert_eq!(edge.src, NodeId(1));
+                assert_eq!(edge.dst, NodeId(2));
+                assert_eq!(edge.edge_type.as_str(), "owns");
+                assert_eq!(edge.properties.len(), 1);
             }
-            other => panic!("Expected EdgeCreated, got {:?}", other),
+            other => panic!("attendu EdgeCreated, obtenu {other:?}"),
         }
+        let deleted = FrameworkEvent::Link(LinkEvent::Deleted {
+            link_type: "owns".into(),
+            link_id: edge_uuid(3),
+            source_id: node_uuid(1),
+            target_id: node_uuid(2),
+        });
+        assert!(matches!(
+            translate_to_mutations(&deleted).unwrap()[0],
+            MutationEvent::EdgeDeleted { .. }
+        ));
     }
 
     #[test]
-    fn test_translate_link_created_no_metadata() {
-        let event = FrameworkEvent::Link(LinkEvent::Created {
-            link_type: "owns".to_string(),
-            link_id: Uuid::new_v4(),
-            source_id: Uuid::new_v4(),
-            target_id: Uuid::new_v4(),
-            metadata: None,
+    fn a_foreign_identity_is_never_written_into_the_graph() {
+        let ev = FrameworkEvent::Entity(EntityEvent::Created {
+            entity_type: "order".into(),
+            entity_id: Uuid::new_v4(), // pas une poignee obrain
+            data: json!({"a": 1}),
         });
+        assert!(
+            translate_to_mutations(&ev).is_none(),
+            "on prefere perdre l'evenement plutot que creer une identite etrangere"
+        );
+    }
 
-        let mutations = translate_to_mutations(&event).unwrap();
-        match &mutations[0] {
-            MutationEvent::EdgeCreated { properties, .. } => {
-                assert!(properties.is_empty());
+    /// Un composite n'est pas seulement CONSERVE : il garde sa structure.
+    ///
+    /// Ce test affirmait l'inverse avant le couplage aux vrais types — il
+    /// documentait une perte (tableau JSON -> chaine) qui venait d'une erreur de
+    /// ma part sur les capacites d'obrain. `Value::List` existe, donc la
+    /// conversion est sans perte et le test dit maintenant la verite.
+    #[test]
+    fn composite_payload_keeps_its_structure() {
+        let ev = FrameworkEvent::Entity(EntityEvent::Created {
+            entity_type: "order".into(),
+            entity_id: node_uuid(5),
+            data: json!({"items": [1, 2, 3], "meta": {"v": 2}}),
+        });
+        match &translate_to_mutations(&ev).unwrap()[0] {
+            MutationEvent::NodeCreated { node } => {
+                let get = |k: &str| {
+                    node.properties
+                        .iter()
+                        .find(|(key, _)| key.as_str() == k)
+                        .map(|(_, v)| v.clone())
+                        .expect("propriete attendue")
+                };
+                match get("items") {
+                    obrain_common::types::Value::List(items) => {
+                        assert_eq!(items.len(), 3, "la liste EST une liste, pas une chaine");
+                    }
+                    other => panic!("attendu une List, obtenu {other:?}"),
+                }
+                match get("meta") {
+                    obrain_common::types::Value::Map(m) => {
+                        assert_eq!(m.len(), 1, "l'objet EST un objet");
+                    }
+                    other => panic!("attendu une Map, obtenu {other:?}"),
+                }
             }
-            other => panic!("Expected EdgeCreated, got {:?}", other),
+            other => panic!("attendu NodeCreated, obtenu {other:?}"),
         }
-    }
-
-    #[test]
-    fn test_translate_link_deleted() {
-        let link_id = Uuid::new_v4();
-        let source = Uuid::new_v4();
-        let target = Uuid::new_v4();
-        let event = FrameworkEvent::Link(LinkEvent::Deleted {
-            link_type: "owns".to_string(),
-            link_id,
-            source_id: source,
-            target_id: target,
-        });
-
-        let mutations = translate_to_mutations(&event).unwrap();
-        assert_eq!(mutations.len(), 1);
-        match &mutations[0] {
-            MutationEvent::EdgeDeleted {
-                edge_id,
-                source_id,
-                target_id,
-                edge_type,
-            } => {
-                assert_eq!(*edge_id, link_id);
-                assert_eq!(*source_id, source);
-                assert_eq!(*target_id, target);
-                assert_eq!(edge_type, "owns");
-            }
-            other => panic!("Expected EdgeDeleted, got {:?}", other),
-        }
-    }
-
-    #[test]
-    fn test_translate_cognitive_returns_none() {
-        let event = FrameworkEvent::Cognitive(CognitiveSignal::ScarCreated {
-            node_id: Uuid::new_v4(),
-            scar_type: "test".to_string(),
-            description: "test".to_string(),
-        });
-
-        assert!(translate_to_mutations(&event).is_none());
-    }
-
-    #[test]
-    fn test_extract_properties_from_object() {
-        let val = json!({"a": 1, "b": "hello"});
-        let props = extract_properties(&val);
-        assert_eq!(props.len(), 2);
-        assert_eq!(props["a"], json!(1));
-        assert_eq!(props["b"], json!("hello"));
-    }
-
-    #[test]
-    fn test_extract_properties_from_non_object() {
-        let val = json!(42);
-        let props = extract_properties(&val);
-        assert!(props.is_empty());
-    }
-
-    #[tokio::test]
-    async fn test_outbound_bridge_skips_deduped_events() {
-        use super::super::dedup::DedupFilter;
-        use std::sync::Mutex;
-        use std::time::Duration;
-
-        // Mock publisher that records what it receives
-        struct MockPublisher {
-            received: Mutex<Vec<MutationBatch>>,
-        }
-
-        #[async_trait::async_trait]
-        impl MutationBusPublisher for MockPublisher {
-            async fn publish(&self, batch: MutationBatch) -> anyhow::Result<()> {
-                self.received.lock().unwrap().push(batch);
-                Ok(())
-            }
-        }
-
-        let event_bus = Arc::new(EventBus::new(16));
-        let publisher = Arc::new(MockPublisher {
-            received: Mutex::new(Vec::new()),
-        });
-        let dedup = Arc::new(DedupFilter::new(Duration::from_secs(5)));
-
-        let bridge = OutboundBridge::new(event_bus.clone(), publisher.clone(), dedup.clone());
-
-        let handle = bridge.start();
-
-        // Yield to let the spawned task subscribe to the EventBus
-        tokio::task::yield_now().await;
-
-        // Publish a normal event that is NOT deduped
-        event_bus.publish(FrameworkEvent::Entity(EntityEvent::Created {
-            entity_type: "invoice".to_string(),
-            entity_id: Uuid::new_v4(),
-            data: json!({"total": 100}),
-        }));
-
-        // Give the bridge task time to process
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-
-        // The non-deduped event should have been published
-        let received = publisher.received.lock().unwrap();
-        assert_eq!(received.len(), 1);
-        assert_eq!(received[0].events.len(), 1);
-
-        handle.abort();
-    }
-
-    #[tokio::test]
-    async fn test_outbound_bridge_publishes_mutations() {
-        use std::sync::Mutex;
-        use std::time::Duration;
-
-        struct MockPublisher {
-            received: Mutex<Vec<MutationBatch>>,
-        }
-
-        #[async_trait::async_trait]
-        impl MutationBusPublisher for MockPublisher {
-            async fn publish(&self, batch: MutationBatch) -> anyhow::Result<()> {
-                self.received.lock().unwrap().push(batch);
-                Ok(())
-            }
-        }
-
-        let event_bus = Arc::new(EventBus::new(16));
-        let publisher = Arc::new(MockPublisher {
-            received: Mutex::new(Vec::new()),
-        });
-        let dedup = Arc::new(DedupFilter::new(Duration::from_secs(5)));
-
-        let bridge = OutboundBridge::new(event_bus.clone(), publisher.clone(), dedup);
-        let handle = bridge.start();
-
-        // Yield to let the spawned task subscribe to the EventBus
-        tokio::task::yield_now().await;
-
-        // Publish entity + link events
-        let entity_id = Uuid::new_v4();
-        event_bus.publish(FrameworkEvent::Entity(EntityEvent::Created {
-            entity_type: "user".to_string(),
-            entity_id,
-            data: json!({"name": "Alice"}),
-        }));
-        event_bus.publish(FrameworkEvent::Link(LinkEvent::Created {
-            link_type: "follows".to_string(),
-            link_id: Uuid::new_v4(),
-            source_id: entity_id,
-            target_id: Uuid::new_v4(),
-            metadata: None,
-        }));
-        // Cognitive events should be ignored
-        event_bus.publish(FrameworkEvent::Cognitive(CognitiveSignal::ScarCreated {
-            node_id: Uuid::new_v4(),
-            scar_type: "test".to_string(),
-            description: "test".to_string(),
-        }));
-
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-
-        let received = publisher.received.lock().unwrap();
-        // 2 batches: NodeCreated + EdgeCreated (cognitive was skipped)
-        assert_eq!(received.len(), 2);
-
-        handle.abort();
     }
 }
