@@ -544,7 +544,7 @@ mod tests {
 
             let mut results = self.state.results.lock().await;
             if call_idx < results.len() {
-                results[call_idx].drain(..).collect()
+                std::mem::take(&mut results[call_idx])
             } else {
                 // Default: all success
                 vec![PushResult::Success; messages.len()]

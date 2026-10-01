@@ -208,7 +208,12 @@ impl Permission {
             // Une permission sans cible ne couvre que les demandes sans cible :
             // `node:read` n'accorde pas `node:read:Page`.
             (None, None) => true,
-            (Some(held), wanted) if held == "*" => true,
+            // `held == "*"` couvre N'IMPORTE quelle demande de la famille, y
+            // compris une demande SANS cible : le motif porte donc sur la
+            // demande entière (`_`), pas sur `Some(_)`. Lier `wanted` ici
+            // laissait croire qu'on la lisait — un test le prouve
+            // (`the_allocating_and_allocating_free_paths_agree`).
+            (Some(held), _) if held == "*" => true,
             (Some(held), Some(wanted)) => held == wanted,
             _ => false,
         }
