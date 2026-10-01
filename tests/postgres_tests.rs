@@ -75,13 +75,16 @@ async fn init_pg_env() -> &'static PgTestEnv {
     let port = container.get_host_port_ipv4(5432).await.unwrap();
     let url = format!("postgres://postgres:postgres@{}:{}/postgres", host, port);
 
-    // Run migrations with a temporary pool
+    // Run migrations with a temporary pool — par le GESTE DU PAQUET et non par
+    // `sqlx::migrate!` recopié ici : c'est le chemin que l'application emprunte,
+    // donc c'est celui qu'il faut éprouver. Le recopier mesurait le SQL, pas le
+    // code qui l'applique (et l'un des deux pouvait dériver sans que rien ne le
+    // dise).
     let pool = PgPool::connect(&url)
         .await
         .expect("Failed to connect to PostgreSQL");
 
-    sqlx::migrate!("./migrations")
-        .run(&pool)
+    this::storage::postgres::ensure_schema(&pool)
         .await
         .expect("Failed to run migrations");
 
