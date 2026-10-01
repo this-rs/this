@@ -85,6 +85,11 @@ pub struct ServerHost {
     /// Provides list, mark_as_read, unread_count operations for notifications.
     /// Used by REST/GraphQL/gRPC notification endpoints.
     pub notification_store: Option<Arc<NotificationStore>>,
+    /// État d'interface exposé (`/ui/state/{portee}`) — voir `crate::ui`.
+    ///
+    /// Absent = aucune route d'interface : mieux vaut pas de surface du tout
+    /// qu'une surface qui devrait inventer un état qu'elle ne détient pas.
+    pub ui_state: Option<Arc<crate::ui::state::UiStateStore>>,
 
     /// Optional device token store for push notifications
     ///
@@ -136,8 +141,9 @@ pub struct ServerHost {
     /// **Le repli multi-sites**, quand l'application en déclare un.
     ///
     /// Monté par `RestExposure::build_router` **avant** les couches : c'est ce
-    /// qui le rend couvert par le CORS, la garde de domaine, l'authentification
-    /// et les politiques.
+    /// qui le rend couvert par le CORS, la garde de domaine,
+    /// l'authentification et les politiques. Un repli posé après elles les
+    /// contourne (c'est le piège mesuré dans `tests/frontend_surface.rs`).
     #[cfg(feature = "frontend")]
     pub frontend_sites: Option<Arc<crate::server::frontend::FrontendSites>>,
 
@@ -237,14 +243,15 @@ impl ServerHost {
             event_log: None,
             sink_registry: None,
             notification_store: None,
+            ui_state: None,
             device_token_store: None,
             preferences_store: None,
             #[cfg(feature = "obrain")]
             graph_store: None,
             identity: Arc::new(IdentityRegistry::new()),
-            security: Arc::new(crate::config::ServerSecurityConfig::default()),
             #[cfg(feature = "frontend")]
             frontend_sites: None,
+            security: Arc::new(crate::config::ServerSecurityConfig::default()),
             authorize: true,
             authorize_report_only: false,
             principal_mapping: None,
@@ -299,6 +306,12 @@ impl ServerHost {
     }
 
     /// Set the notification store
+    /// Attache le store d'état d'interface (routes `/ui/state/{portee}`).
+    pub fn with_ui_state(mut self, store: Arc<crate::ui::state::UiStateStore>) -> Self {
+        self.ui_state = Some(store);
+        self
+    }
+
     pub fn with_notification_store(mut self, store: Arc<NotificationStore>) -> Self {
         self.notification_store = Some(store);
         self
@@ -486,9 +499,9 @@ impl ServerHost {
             #[cfg(feature = "obrain")]
             graph_store: None,
             identity: Arc::new(IdentityRegistry::new()),
-            security: Arc::new(crate::config::ServerSecurityConfig::default()),
             #[cfg(feature = "frontend")]
             frontend_sites: None,
+            security: Arc::new(crate::config::ServerSecurityConfig::default()),
             authorize: true,
             authorize_report_only: false,
             principal_mapping: None,
@@ -496,6 +509,7 @@ impl ServerHost {
             resolver_registry: Arc::new(AuthResolverRegistry::new()),
             #[cfg(feature = "wami")]
             sts_state: None,
+            ui_state: None,
         }
     }
     /// **Résumé de l'exposition** — ce que l'application applique à l'entrée.

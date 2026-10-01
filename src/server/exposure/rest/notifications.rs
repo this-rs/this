@@ -122,7 +122,7 @@ pub struct PaginationParams {
 /// Posée en **une couche** sur tout le routeur : les douze routes portent un
 /// `{user_id}`, la garde n'a donc pas à être répétée — et ne peut pas être
 /// oubliée sur une route ajoutée plus tard.
-async fn ensure_self_middleware(
+pub(crate) async fn ensure_self_middleware(
     request: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> axum::response::Response {
@@ -148,6 +148,10 @@ async fn ensure_self_middleware(
         .collect();
     let path_user = match segments.as_slice() {
         ["notifications", user, ..] | ["device-tokens", user, ..] => (*user).to_string(),
+        // L'état d'interface est une ressource PERSONNELLE : `/ui/state/{scope}`
+        // porte la portée dans le chemin, donc la même règle s'applique — le
+        // propriétaire seul, jamais « parce que c'est de l'affichage ».
+        ["ui", "state", portee, ..] => (*portee).to_string(),
         _ => {
             tracing::error!(
                 path = %request.uri().path(),
