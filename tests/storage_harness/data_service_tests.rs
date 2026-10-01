@@ -219,6 +219,71 @@ macro_rules! data_service_tests {
             }
 
             // ==================================================================
+            // Suppression douce — LE CONTRAT RÉEL, mesuré, pas supposé
+            // ==================================================================
+
+            /// `deleted_at` est **persisté et rendu**, et `list`/`get` ne le
+            /// filtrent **pas**.
+            ///
+            /// # Pourquoi ce test existe
+            ///
+            /// L'atlas du dépôt (2026-10-01) a relevé : « `deleted_at` est écrit
+            /// mais jamais filtré, et `delete` est un DELETE dur ». Vrai — et
+            /// surtout : **personne ne savait si les neuf backends s'accordaient
+            /// là-dessus**. Trois nomment la colonne (postgres, mysql, dynamodb),
+            /// six ne la nomment jamais ; ceux-là ne la gardent que si leur
+            /// sérialisation la transporte. Une même requête qui rend un résultat
+            /// différent selon le moteur est pire qu'une convention explicite :
+            /// ce test **fixe la convention** et fait tomber tout backend qui
+            /// s'en écarterait seul.
+            ///
+            /// # Ce que le contrat dit, et ce qu'il ne dit pas
+            ///
+            /// Le framework **ne supprime jamais en douceur** : `delete` est un
+            /// DELETE dur (`test_delete_existing` ci-dessus), et `deleted_at`
+            /// n'est écrit par aucune ligne du framework — c'est une **convention
+            /// de l'application**, qui la pose via `update`. Elle est donc
+            /// **informative** : `is_deleted()` répond, `list`/`get` ne cachent
+            /// rien.
+            ///
+            /// ⚠️ Si le dépôt veut un jour de VRAIES suppressions douces, c'est
+            /// ce test qu'il faut **retourner** (attendre l'absence), et les
+            /// backends qu'il faut changer **ensemble** — pas un seul, en
+            /// silence. Le nom du test le dit : `..._is_still_listed_the_current_contract`.
+            #[tokio::test]
+            async fn test_soft_deleted_entity_is_still_listed_the_current_contract() {
+                let service = $factory;
+                let mut entity = create_test_entity("Soft", "soft@test.com", 33, 1.5, true);
+                let id = entity.id;
+                service.create(entity.clone()).await.unwrap();
+
+                // L'application marque « supprimé » par une MISE À JOUR : le
+                // framework n'a pas de geste de suppression douce.
+                entity.deleted_at = Some(chrono::Utc::now());
+                service.update(&id, entity.clone()).await.unwrap();
+
+                let relu = service
+                    .get(&id)
+                    .await
+                    .unwrap()
+                    .expect("l'entité est toujours là (contrat actuel : delete est dur)");
+                assert_eq!(
+                    relu.deleted_at(),
+                    entity.deleted_at,
+                    "`deleted_at` doit être PERSISTÉ par ce backend (sinon la convention \
+                     de l'application ne survit pas au redémarrage)"
+                );
+                assert!(relu.is_deleted());
+
+                let liste = service.list().await.unwrap();
+                assert!(
+                    liste.iter().any(|e| e.id == id),
+                    "elle est toujours LISTÉE : `list` ne filtre pas `deleted_at` \
+                     (contrat actuel, mesuré ici)"
+                );
+            }
+
+            // ==================================================================
             // CRUD — Delete nonexistent
             // ==================================================================
 
