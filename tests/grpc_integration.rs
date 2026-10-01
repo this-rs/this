@@ -1519,3 +1519,51 @@ async fn test_grpc_create_entities_of_different_types() {
     assert_eq!(orders.entities.len(), 1);
     assert_eq!(invoices.entities.len(), 1);
 }
+
+// ============================================================================
+// Flux d'événements : le refus est FAIL-CLOSED, et il est exercé
+// ============================================================================
+
+/// Un abonnement au flux d'événements **sans portée** est refusé par le serveur
+/// RÉEL — pas par une fonction interne.
+///
+/// Avant le 2026-10-01, ce même appel ouvrait un flux qui recevait les
+/// événements de **tous** les locataires : aucun interceptor ne pose
+/// d'`AuthContext` côté gRPC, et l'absence de portée ne refusait rien — la garde
+/// de filtrage ne s'appliquait simplement pas. L'atlas le disait « fail-closed
+/// lu dans le code, exercé par aucun test » ; il n'était, en vérité, pas
+/// appliqué du tout. Ce test est la garde qui manquait : il tombe si quelqu'un
+/// rouvre un flux sans portée.
+#[tokio::test]
+async fn un_flux_d_evenements_sans_portee_est_refuse() {
+    use this::server::exposure::grpc::proto::SubscribeRequest;
+    use this::server::exposure::grpc::proto::event_service_client::EventServiceClient;
+
+    let (addr, _host, _orders, _invoices) = start_grpc_server().await;
+    let mut client = EventServiceClient::connect(format!("http://{}", addr))
+        .await
+        .expect("client EventService");
+
+    let status = match client
+        .subscribe(SubscribeRequest {
+            entity_type: None,
+            entity_id: None,
+            event_type: None,
+            kind: None,
+            link_type: None,
+        })
+        .await
+    {
+        Err(status) => status,
+        Ok(_) => panic!("un abonnement sans portée doit être refusé (fail-closed)"),
+    };
+
+    assert_eq!(status.code(), tonic::Code::PermissionDenied);
+    // Un refus doit nommer son remède : sans cela, on apprend à désarmer la
+    // garde pour faire taire le symptôme.
+    assert!(
+        status.message().contains("x-tenant-id"),
+        "le refus doit nommer le remède, obtenu : {}",
+        status.message()
+    );
+}
