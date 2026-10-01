@@ -129,12 +129,7 @@ async fn call(router: Router, method: Method, path: &str) -> Response {
 /// un principal authentifié.
 #[tokio::test]
 async fn un_chemin_quatre_segments_sans_garde_est_refuse() {
-    let response = call(
-        app(authz(), true),
-        Method::GET,
-        "/inconnus/1/liens/cibles",
-    )
-    .await;
+    let response = call(app(authz(), true), Method::GET, "/inconnus/1/liens/cibles").await;
     assert_eq!(
         response.status(),
         StatusCode::FORBIDDEN,
@@ -153,12 +148,7 @@ async fn un_chemin_quatre_segments_sans_garde_est_refuse() {
 /// La même chose en anonyme : refus aussi (fail-closed des deux côtés).
 #[tokio::test]
 async fn un_chemin_quatre_segments_anonyme_est_refuse() {
-    let response = call(
-        app(authz(), false),
-        Method::GET,
-        "/inconnus/1/liens/cibles",
-    )
-    .await;
+    let response = call(app(authz(), false), Method::GET, "/inconnus/1/liens/cibles").await;
     assert_eq!(response.status(), StatusCode::FORBIDDEN);
 }
 

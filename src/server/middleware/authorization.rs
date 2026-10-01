@@ -868,10 +868,9 @@ pub async fn authorization_middleware(
                 })),
             )
                 .into_response();
-            response.headers_mut().insert(
-                header_name("x-this-rs-authz"),
-                header_value("deny-abstain"),
-            );
+            response
+                .headers_mut()
+                .insert(header_name("x-this-rs-authz"), header_value("deny-abstain"));
             response
         }
         Decision::Deny {
