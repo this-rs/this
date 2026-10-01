@@ -64,6 +64,7 @@ pub mod graph;
 pub mod links;
 pub mod server;
 pub mod storage;
+pub mod ui;
 
 /// Re-exports of commonly used types and traits
 pub mod prelude {

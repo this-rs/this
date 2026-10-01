@@ -94,6 +94,17 @@ impl RestExposure {
             app = app.merge(notifications::notification_routes(notif_state));
         }
 
+        // État d'interface : monté SEULEMENT si un store est attaché, comme le
+        // relief plus bas. Un handle absent = aucune route `/ui/state`, plutôt
+        // qu'une route qui répondrait un état qu'elle ne détient pas.
+        // Posé AVANT les couches (CORS, domaine, authentification) : l'ordre
+        // compte, c'est ce qui fait que la garde de la route voit un appelant.
+        if let Some(ui) = &host.ui_state {
+            app = app.merge(crate::ui::routes::ui_routes(
+                crate::ui::routes::UiStateCtx { store: ui.clone() },
+            ));
+        }
+
         // Auto-wire the self-describing graph relief — only if an obrain store
         // is attached. Absent handle = no `/graph` routes at all: better no
         // relief than a relief that would have to invent what it cannot read.

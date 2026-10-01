@@ -41,6 +41,8 @@ pub struct ServerBuilder {
     // Manual overrides for event system stores
     sink_registry: Option<SinkRegistry>,
     notification_store: Option<Arc<NotificationStore>>,
+    /// Store d'état d'interface (voir `crate::ui`).
+    ui_state: Option<Arc<crate::ui::state::UiStateStore>>,
     device_token_store: Option<Arc<DeviceTokenStore>>,
     preferences_store: Option<Arc<NotificationPreferencesStore>>,
 
@@ -89,6 +91,7 @@ impl ServerBuilder {
             event_bus: None,
             sink_registry: None,
             notification_store: None,
+            ui_state: None,
             device_token_store: None,
             preferences_store: None,
             #[cfg(feature = "obrain")]
@@ -184,7 +187,16 @@ impl ServerBuilder {
     /// **Déclare le repli multi-sites** : plusieurs domaines, plusieurs contenus.
     ///
     /// Monté **avant** les couches d'exposition, donc **couvert** par elles
-    /// (CORS, garde de domaine, authentification, politiques).
+    /// (CORS, garde de domaine, authentification, politiques) — c'est tout
+    /// l'intérêt de passer par ici plutôt que de composer `attach` soi-même.
+    ///
+    /// ```rust,ignore
+    /// let sites = FrontendSites::new()
+    ///     .site("www.exemple.fr", Frontend::disk("dist/www"))
+    ///     .site("explorer.exemple.fr", Frontend::disk("web/explorer"))
+    ///     .trust_forwarded_host(true);
+    /// ServerBuilder::new().with_frontend_sites(sites)
+    /// ```
     #[cfg(feature = "frontend")]
     pub fn with_frontend_sites(mut self, sites: crate::server::frontend::FrontendSites) -> Self {
         self.frontend_sites = Some(std::sync::Arc::new(sites));
@@ -399,6 +411,15 @@ impl ServerBuilder {
     /// Create and attach a default notification store
     ///
     /// Convenience method equivalent to `.with_notification_store(Arc::new(NotificationStore::new()))`.
+    /// Attache le store d'état d'interface (routes `/ui/state/{portee}`).
+    ///
+    /// `Arc` partagé : le même store peut être lu par l'hôte et écrit par
+    /// l'appelant, sans recopie ni seconde autorité.
+    pub fn with_ui_state(mut self, store: Arc<crate::ui::state::UiStateStore>) -> Self {
+        self.ui_state = Some(store);
+        self
+    }
+
     pub fn with_default_notification_store(mut self) -> Self {
         self.notification_store = Some(Arc::new(NotificationStore::new()));
         self
@@ -629,6 +650,13 @@ impl ServerBuilder {
         // Attach event bus if configured
         if let Some(event_bus) = self.event_bus.take() {
             host = host.with_event_bus(event_bus);
+        }
+
+        // Store d'état d'interface : attaché à l'hôte, exactement comme le bus
+        // d'événements. Sa présence est ce qui décide du montage de
+        // `/ui/state/{portee}` — absent, la route n'existe pas.
+        if let Some(ui) = self.ui_state.take() {
+            host.ui_state = Some(ui);
         }
 
         // Attach resolver registry if any resolvers were registered
