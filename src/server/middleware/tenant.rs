@@ -15,6 +15,30 @@
 //! `Extension<TenantContext>` and will get a 500 if it's missing, or use
 //! `Option<Extension<TenantContext>>` for optional tenant support.
 //!
+//! ## ⚠️ CONSTAT (2026-10-01) — l'en-tête passe AVANT l'identité, et rien ne les confronte
+//!
+//! L'ordre ci-dessus donne au **client** le dernier mot sur le locataire :
+//! `x-tenant-id` est lu avant `AuthContext`, et **aucune vérification** ne
+//! confronte la valeur réclamée à celle du jeton (ni égalité, ni rôle
+//! d'administration). Un utilisateur authentifié du locataire A peut donc
+//! désigner le locataire B et recevoir un `TenantContext` de B — celui dont les
+//! gestionnaires en aval se servent pour filtrer leurs lectures. L'en-tête est
+//! de plus **autorisé en CORS** (`config/server.rs`, `allow_headers`) : un
+//! navigateur peut l'envoyer sans difficulté.
+//!
+//! Le commentaire d'origine dit « admin impersonation » : c'est l'usage
+//! **visé**, mais il n'est pas **vérifié**. Côté gRPC, le même choix a été
+//! corrigé le même jour, et autrement : le flux d'événements refuse toute
+//! portée absente, et l'identité y **prime** sur l'en-tête
+//! (`exposure/grpc/event_service.rs`).
+//!
+//! Fermer ce chemin demande de trancher une politique d'ensemble, pas de
+//! bricoler ici : honorer l'en-tête **seulement** pour un administrateur
+//! authentifié, ou seulement derrière une option déclarée
+//! (`security.tenant.trust_header`). Le constat est écrit au point qui décide,
+//! pour que la décision se prenne — plutôt que d'être découverte par celui qui
+//! la subira.
+//!
 //! ## Auto-wiring
 //!
 //! Added automatically when `auth.tenant_resolver: true` in config, or when

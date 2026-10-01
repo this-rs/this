@@ -4,6 +4,20 @@
 //! WebSocket) and streams matching events to gRPC clients. Filters from the
 //! `SubscribeRequest` are applied server-side (AND logic, absent = wildcard).
 //!
+//! ## La portée d'un flux : fail-closed (2026-10-01)
+//!
+//! Un flux d'événements ne se reprend pas : une fois qu'un client a lu ce qu'il
+//! n'aurait pas dû, c'est lu. La portée du flux est donc décidée **avant**
+//! d'ouvrir quoi que ce soit, et l'absence de portée est un **refus** —
+//! `PermissionDenied`, avec la raison et le remède (`portee_du_flux`).
+//!
+//! Avant, l'absence de portée n'était pas un refus : aucun interceptor ne pose
+//! d'`AuthContext` côté gRPC, l'en-tête `x-tenant-id` était le seul recours, et
+//! sans lui la garde de filtrage ne s'appliquait **pas** — le flux recevait les
+//! événements de tous les locataires. Le test d'intégration
+//! `un_flux_d_evenements_sans_portee_est_refuse` (`tests/grpc_integration.rs`)
+//! exerce désormais ce refus sur un serveur réel.
+//!
 //! ## Architecture
 //!
 //! ```text
@@ -12,7 +26,7 @@
 //!                      broadcast channel
 //!                        ↓           ↓
 //!              WebSocket Manager   EventServiceImpl::subscribe()
-//!                                     ↓ (filter)
+//!                                     ↓ (portée, puis filtre)
 //!                                  gRPC stream → client
 //! ```
 
@@ -245,43 +259,86 @@ fn envelope_to_response(envelope: &EventEnvelope) -> EventResponse {
 type SubscribeStream =
     Pin<Box<dyn tokio_stream::Stream<Item = Result<EventResponse, Status>> + Send>>;
 
-/// Extract tenant_id from a gRPC request.
+/// La portée d'un flux d'événements : **ce que ce flux a le droit de voir**.
 ///
-/// Checks (in order):
-/// 1. `AuthContext` in tonic extensions (set by an auth interceptor)
-/// 2. `x-tenant-id` metadata header (for explicit tenant specification)
+/// Il n'y a pas de troisième cas « je ne sais pas » : l'inconnu est un refus
+/// ([`portee_du_flux`] rend une erreur). C'est la doctrine du dépôt — depuis le
+/// 2026-09-13, l'abstention d'autorisation est un refus — appliquée ici, où
+/// elle manquait le plus : un flux d'événements ne se reprend pas, une fois
+/// qu'un client a lu ce qu'il n'aurait pas dû.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PorteeFlux {
+    /// Un locataire : le flux ne porte que ses événements.
+    Locataire(Uuid),
+    /// **Global, et déclaré comme tel** : un administrateur authentifié voit
+    /// tout. Ce n'est pas un défaut, c'est un principal nommé — la différence
+    /// entre « tout le monde voit tout » et « l'administrateur voit tout ».
+    Global,
+}
+
+/// La portée d'un flux, ou **le refus d'ouvrir**.
 ///
-/// Returns `None` if no tenant can be determined (anonymous / system calls).
+/// # Ce qui a changé, et pourquoi (2026-10-01)
 ///
-/// # ⚠️ DEUX DÉFAUTS CONSTATÉS ICI (2026-10-01) — non corrigés, écrits ici pour
-/// ne pas être perdus
+/// Avant, cette résolution rendait `Option<Uuid>` :
+/// 1. `AuthContext` dans les extensions (posé par un interceptor) ;
+/// 2. sinon l'en-tête `x-tenant-id`.
 ///
-/// 1. **Rien ne pose d'`AuthContext` sur une requête gRPC.** Aucun interceptor
-///    n'est monté par le framework : la branche 1 ne se déclenche donc
-///    **jamais** dans un déploiement qui ne l'ajoute pas lui-même, et le
-///    filtrage par locataire du flux repose uniquement sur l'en-tête ci-dessous
-///    — c'est-à-dire sur ce que le client veut bien écrire.
-/// 2. **L'en-tête `x-tenant-id` est cru sur parole.** Un client peut donc
-///    désigner le locataire dont il veut lire les événements ; et, pire, quand
-///    il n'en désigne **aucun**, la garde de filtrage
-///    (`if let Some(conn_tenant) = tenant_id && let Some(event_tenant) = …`)
-///    ne s'applique pas : le flux **non scopé reçoit les événements de TOUS les
-///    locataires**. Le commentaire dit « anonyme / appels système » ; c'est en
-///    fait, aujourd'hui, « tout ».
+/// Et `None` — aucune identité, aucun en-tête — n'était pas un refus : la garde
+/// de filtrage du flux ne s'appliquait simplement **pas**, et le flux non scopé
+/// recevait les événements de **tous** les locataires. Le commentaire d'origine
+/// disait « anonyme / appels système » : c'était, en fait, « tout », pour qui
+/// savait ouvrir un canal HTTP/2. Le fail-closed était écrit dans l'atlas comme
+/// « lu dans le code, exercé par aucun test » ; il n'était, en réalité, pas
+/// appliqué du tout ici.
 ///
-/// La correction attendue est celle du reste du dépôt — l'abstention devient un
-/// refus : un flux sans locataire **résolu** ne doit pas s'ouvrir. Elle touche à
-/// la sémantique du flux (et donc à ses tests), c'est pourquoi le constat est
-/// écrit au point qui décide, et non dans un rapport que personne ne relit.
-fn extract_tenant_id<T>(request: &Request<T>) -> Option<Uuid> {
-    // 1. Try AuthContext from extensions (set by gRPC auth interceptor)
-    if let Some(auth) = request.extensions().get::<AuthContext>()
-        && let Some(tid) = auth.tenant_id()
-    {
-        return Some(tid);
+/// Désormais :
+/// - une identité avec locataire → `Locataire` (l'identité **prime** sur
+///   l'en-tête : un client ne choisit pas son locataire quand un jeton en
+///   désigne un) ;
+/// - un `Admin` authentifié (sans locataire) → `Global`, explicitement ;
+/// - sinon, l'en-tête `x-tenant-id` **bien formé** → `Locataire` (le geste
+///   explicite reste possible, il vient de la configuration d'exposition) ;
+/// - **rien du tout → `PermissionDenied`**, avec la raison et le remède.
+///
+/// ⚠️ Ce qui **reste** ouvert, et qu'il faut savoir : l'en-tête `x-tenant-id`
+/// est un **choix du client**, pas une preuve — le middleware HTTP
+/// (`server/middleware/tenant.rs`) lui accorde la même confiance, et rien ne le
+/// confronte à l'identité. Le fermer demande de trancher une politique
+/// d'ensemble (en-tête honoré seulement pour un administrateur, ou seulement
+/// derrière une option déclarée) : c'est écrit ici pour que la décision se
+/// prenne, plutôt que d'être oubliée.
+fn portee_du_flux<T>(request: &Request<T>) -> Result<PorteeFlux, Status> {
+    // 1. L'identité d'abord — elle seule peut désigner un locataire *prouvé*.
+    if let Some(auth) = request.extensions().get::<AuthContext>() {
+        if let Some(tid) = auth.tenant_id() {
+            return Ok(PorteeFlux::Locataire(tid));
+        }
+        if matches!(auth, AuthContext::Admin { .. }) {
+            return Ok(PorteeFlux::Global);
+        }
+        // Un principal authentifié SANS locataire et sans rôle d'administration
+        // (un `User` sans locataire, p. ex.) n'a pas de portée : on ne lui
+        // invente pas « tout ».
     }
 
-    // 2. Try explicit metadata header
+    // 2. L'en-tête explicite — le geste déclaré, pas la preuve.
+    if let Some(tid) = en_tete_locataire(request) {
+        return Ok(PorteeFlux::Locataire(tid));
+    }
+
+    Err(Status::permission_denied(
+        "flux d'événements : aucune portée — l'abstention est un refus. \
+         Présentez une identité (un interceptor gRPC qui pose `AuthContext` : \
+         un jeton porteur de locataire scope le flux, un administrateur le voit \
+         entier), ou déclarez le locataire par l'en-tête `x-tenant-id`. \
+         Auparavant, une requête sans portée recevait les événements de TOUS \
+         les locataires.",
+    ))
+}
+
+/// Le locataire déclaré par l'en-tête `x-tenant-id` — s'il est bien formé.
+fn en_tete_locataire<T>(request: &Request<T>) -> Option<Uuid> {
     request
         .metadata()
         .get("x-tenant-id")
@@ -297,7 +354,16 @@ impl EventService for EventServiceImpl {
         &self,
         request: Request<SubscribeRequest>,
     ) -> Result<Response<Self::SubscribeStream>, Status> {
-        let tenant_id = extract_tenant_id(&request);
+        // **La portée AVANT tout le reste, et avant l'`EventBus`** : une requête
+        // sans portée n'obtient pas un « service indisponible » (qui se lirait
+        // comme un incident), elle obtient un REFUS motivé. L'ordre compte aussi
+        // pour une raison de fond : on ne veut pas qu'un serveur mal configuré
+        // (sans bus) fasse passer le refus pour une panne.
+        let portee = portee_du_flux(&request)?;
+        let locataire_du_flux = match portee {
+            PorteeFlux::Locataire(tid) => Some(tid),
+            PorteeFlux::Global => None,
+        };
         let filter = request.into_inner();
 
         // Get the EventBus — if not configured, streaming is unavailable
@@ -323,8 +389,12 @@ impl EventService for EventServiceImpl {
             loop {
                 match rx.recv().await {
                     Ok(envelope) => {
-                        // Tenant isolation: skip events from other tenants
-                        if let Some(conn_tenant) = tenant_id
+                        // Tenant isolation: skip events from other tenants.
+                        //
+                        // `locataire_du_flux` vaut `None` **seulement** pour un
+                        // administrateur authentifié (`PorteeFlux::Global`) : il
+                        // n'y a plus de flux « sans portée » qui verrait tout.
+                        if let Some(conn_tenant) = locataire_du_flux
                             && let Some(event_tenant) = envelope.tenant_id()
                             && conn_tenant != event_tenant
                         {
@@ -367,8 +437,140 @@ mod tests {
     use crate::core::events::EventBus;
     use serde_json::json;
 
-    // === Filter tests ===
+    // === Portée du flux d'événements (fail-closed) ===
+    //
+    // Ces tests exercent le refus : avant le 2026-10-01, une requête sans
+    // identité NI en-tête ouvrait un flux qui recevait les événements de TOUS
+    // les locataires. Le fail-closed était écrit dans l'atlas comme « lu dans le
+    // code, exercé par aucun test » : il n'était pas appliqué du tout ici.
 
+    fn requete_vide() -> Request<SubscribeRequest> {
+        Request::new(SubscribeRequest {
+            entity_type: None,
+            entity_id: None,
+            event_type: None,
+            kind: None,
+            link_type: None,
+        })
+    }
+
+    fn avec_identite(auth: AuthContext) -> Request<SubscribeRequest> {
+        let mut request = requete_vide();
+        request.extensions_mut().insert(auth);
+        request
+    }
+
+    fn avec_en_tete(tid: Uuid) -> Request<SubscribeRequest> {
+        let mut request = requete_vide();
+        request
+            .metadata_mut()
+            .insert("x-tenant-id", tid.to_string().parse().unwrap());
+        request
+    }
+
+    #[test]
+    fn un_flux_sans_portee_est_refuse() {
+        let err = portee_du_flux(&requete_vide())
+            .expect_err("sans identité ni en-tête, le flux ne doit pas s'ouvrir");
+        assert_eq!(err.code(), tonic::Code::PermissionDenied);
+        // Le refus doit DIRE la raison et le remède : un refus muet apprend à
+        // désarmer la garde pour faire taire le symptôme.
+        assert!(
+            err.message().contains("x-tenant-id") && err.message().contains("AuthContext"),
+            "le refus doit nommer le remède, obtenu : {}",
+            err.message()
+        );
+    }
+
+    #[test]
+    fn une_identite_avec_locataire_scope_le_flux() {
+        let tenant = Uuid::new_v4();
+        let request = avec_identite(AuthContext::User {
+            user_id: Uuid::new_v4(),
+            tenant_id: tenant,
+            roles: vec![],
+        });
+        assert_eq!(
+            portee_du_flux(&request).unwrap(),
+            PorteeFlux::Locataire(tenant)
+        );
+    }
+
+    #[test]
+    fn un_anonyme_sans_en_tete_est_refuse() {
+        let err = portee_du_flux(&avec_identite(AuthContext::Anonymous))
+            .expect_err("un anonyme n'a pas de portée");
+        assert_eq!(err.code(), tonic::Code::PermissionDenied);
+    }
+
+    #[test]
+    fn un_administrateur_authentifie_voit_tout_explicitement() {
+        let request = avec_identite(AuthContext::Admin {
+            admin_id: Uuid::new_v4(),
+        });
+        assert_eq!(portee_du_flux(&request).unwrap(), PorteeFlux::Global);
+    }
+
+    #[test]
+    fn l_identite_prime_sur_l_en_tete() {
+        let tenant_du_jeton = Uuid::new_v4();
+        let tenant_reclame = Uuid::new_v4();
+        let mut request = avec_identite(AuthContext::User {
+            user_id: Uuid::new_v4(),
+            tenant_id: tenant_du_jeton,
+            roles: vec![],
+        });
+        request
+            .metadata_mut()
+            .insert("x-tenant-id", tenant_reclame.to_string().parse().unwrap());
+
+        assert_eq!(
+            portee_du_flux(&request).unwrap(),
+            PorteeFlux::Locataire(tenant_du_jeton),
+            "un client ne choisit pas son locataire quand un jeton en désigne un"
+        );
+    }
+
+    #[test]
+    fn l_en_tete_seul_declare_une_portee_mais_ne_l_invente_pas() {
+        let tenant = Uuid::new_v4();
+        assert_eq!(
+            portee_du_flux(&avec_en_tete(tenant)).unwrap(),
+            PorteeFlux::Locataire(tenant)
+        );
+
+        // Un en-tête MAL FORMÉ ne vaut rien : il ne devient pas « tout », il
+        // devient un refus.
+        let mut mal_forme = requete_vide();
+        mal_forme
+            .metadata_mut()
+            .insert("x-tenant-id", "pas-un-uuid".parse().unwrap());
+        assert_eq!(
+            portee_du_flux(&mal_forme).unwrap_err().code(),
+            tonic::Code::PermissionDenied
+        );
+    }
+
+    /// Le refus est **câblé** : ce n'est pas seulement la fonction de résolution
+    /// qui refuse, c'est le service — et il refuse **avant** de regarder si un
+    /// bus est configuré. L'ordre est délibéré : un serveur mal configuré (sans
+    /// `EventBus`) ne doit pas faire passer un refus pour une panne, sinon on
+    /// apprend à relire les refus comme des incidents.
+    #[tokio::test]
+    async fn un_abonnement_sans_portee_est_refuse_par_le_service() {
+        use crate::server::host::ServerHost;
+
+        let event_bus = EventBus::new(64);
+        let host = Arc::new(ServerHost::minimal_for_test().with_event_bus(event_bus));
+        let svc = EventServiceImpl::new(host);
+
+        match svc.subscribe(requete_vide()).await {
+            Err(status) => assert_eq!(status.code(), tonic::Code::PermissionDenied),
+            Ok(_) => panic!("sans portée, le flux ne doit pas s'ouvrir"),
+        }
+    }
+
+    // === Filter tests ===
     #[test]
     fn test_filter_empty_matches_everything() {
         let filter = SubscribeRequest {
@@ -688,12 +890,21 @@ mod tests {
         let svc = EventServiceImpl::new(host);
 
         // Subscribe to "user" entity events only
-        let request = Request::new(SubscribeRequest {
+        //
+        // **Une portée est désormais exigée** (fail-closed, 2026-10-01) : le flux
+        // présente l'identité d'un utilisateur de son locataire, comme un vrai
+        // client le ferait par son interceptor.
+        let mut request = Request::new(SubscribeRequest {
             entity_type: Some("user".to_string()),
             entity_id: None,
             event_type: None,
             kind: None,
             link_type: None,
+        });
+        request.extensions_mut().insert(AuthContext::User {
+            user_id: Uuid::new_v4(),
+            tenant_id: Uuid::new_v4(),
+            roles: vec![],
         });
 
         let response = svc.subscribe(request).await.unwrap();
@@ -754,13 +965,19 @@ mod tests {
 
         let svc = EventServiceImpl::new(host);
 
-        // Subscribe with no filters (wildcard)
-        let request = Request::new(SubscribeRequest {
+        // Subscribe with no filters (wildcard) — **en administrateur**, puisque
+        // « recevoir tout » est désormais un droit nommé et non un défaut : c'est
+        // toute la différence entre « tout le monde voit tout » et
+        // « l'administrateur voit tout ».
+        let mut request = Request::new(SubscribeRequest {
             entity_type: None,
             entity_id: None,
             event_type: None,
             kind: None,
             link_type: None,
+        });
+        request.extensions_mut().insert(AuthContext::Admin {
+            admin_id: Uuid::new_v4(),
         });
 
         let response = svc.subscribe(request).await.unwrap();
@@ -806,13 +1023,18 @@ mod tests {
 
         let svc = EventServiceImpl::new(host);
 
-        let request = Request::new(SubscribeRequest {
+        // Le client déclare son locataire par l'en-tête : le geste explicite
+        // reste possible (une identité, posée par un interceptor, primerait).
+        let mut request = Request::new(SubscribeRequest {
             entity_type: None,
             entity_id: None,
             event_type: None,
             kind: None,
             link_type: None,
         });
+        request
+            .metadata_mut()
+            .insert("x-tenant-id", Uuid::new_v4().to_string().parse().unwrap());
 
         let response = svc.subscribe(request).await.unwrap();
 
