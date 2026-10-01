@@ -1,0 +1,84 @@
+flowchart TB
+%% name: ui-adoption-et-integration
+%% PROUVE (lu dans le code, jamais suppose) : les trois surfaces servies sont un repli SPA -- Frontend::attach pose un fallback_service, jamais une route --, un repli multi-sites choisi par l hote, et un etat d interface REST monte seulement si un store est attache. L ordre des couches decide de tout : monte par le builder, rest/mod.rs:176 pose le repli AVANT les .layer, donc CORS, domaine, authentification et politiques le couvrent ; appele a la main en dernier, il passe a cote d elles -- c est mesure dans tests/frontend_surface.rs:45, pas affirme. Le chemin d adoption est un CLI qui edite le Cargo.toml et refuse d ecrire une config d authentification, puis une observation avant armement. Enfin la vue multi-echelle descend un cran a la fois et DIT toujours ce qu elle a coupe, et sa couture avec l etat d interface -- CanvasState, ?echelle=canvas -- est declaree mais non branchee : canvas n apparait nulle part dans this/src/server.
+%% SOURCES LUES : this/src/ui/mod.rs (1-20) ; this/src/ui/state.rs (UI_SCHEMA 12, UiSubject 20, UiState 37, Default 55, UiStateStore 76, get 93) ; this/src/ui/routes.rs (ui_routes 32, garde 35, PUT 56) ; this/src/server/exposure/rest/mod.rs (ui_state 102, GraphState 114, FrontendSites 176, CORS 309) ; this/src/server/frontend.rs (embedded 183, attach 245, FrontendSites 277, embedded_router 389, from_env 410, pont dev 443, attach_from_env 485, serve 496) ; this/src/graph/canvas.rs (CanvasState 41, SimpleCanvasState 92) ; this/src/graph/hierarchy.rs (edge_types 55, defauts 63-70, children 87, hidden 103, truncated 116, cycles 132, outline 146) ; this/src/graph/routes.rs (hierarchy 111, echelle=canvas 534, bornes 618 et 621, outline 634) ; this/src/graph/relief.rs (inference 359-424) ; this/src/server/builder.rs (with_ui_state 418, report_only 269) ; this/Cargo.toml (features frontend et all) ; this/tests/frontend_surface.rs (45, 72, 107, 139) ; this/tests/origin_surface.rs (141, 215, 322) ; this/tests/policy_surfaces.rs (443) ; this/tests/chain_aletheia.rs (128, 174, 421, 502) ; this-cli/src/commands/adopt_obrain.rs (89, 34, 20) ; this/docs/adoption-projet-existant.md ; this/docs/multi-echelle.md ; website/src/App.tsx (22) ; website/src/components/CLI.tsx (762) ; website/dist.
+%% NON ETABLI : je n ai rien compile ni lance -- aucune de ces affirmations n est observee a l execution, seulement lue. Je n ai pas lu les 1495 lignes de iam_http_perimeter.rs ni tout this-cli, ni verifie qu un site web est reellement deploye sur this-rs.dev. Je n ai pas mesure le cout du pont /__dev ni cherche si une application reelle appelle with_canvas hors des tests.
+%% LEGENDE : ✅ existe et tourne · 🟠 ecrit/teste mais partiel ou non deploye · 🔴 refuse, avec sa raison · ⚪ amont, reutilise tel quel
+
+subgraph AD["✅ ADOPTION : brancher, observer, armer"]
+  ad1["✅ this adopt obrain -- adopt_obrain.rs:89<br/>edite le Cargo.toml du projet :<br/>active la feature obrain sur this-rs<br/>sans toucher a sa mise en forme"]
+  ad2["✅ marqueur [this:obrain_store] -- :34<br/>insere .with_obrain_store juste apres<br/>sans marqueur : AFFICHE le fragment,<br/>ne devine pas ou il va"]
+  ad3["🔴 n ecrit AUCUNE config auth -- :20<br/>un auth.yaml pose dans un projet<br/>qui tourne pourrait DESARMER<br/>son authentification"]
+  ad4["✅ observer avant d armer -- builder.rs:269<br/>authorization_report_only : la requete<br/>passe, la reponse dit observed-deny<br/>authorization.rs:902"]
+  ad5["✅ retirer l appel = meme hote ARME<br/>adoption-projet-existant.md section 6<br/>without_authorization journalise :<br/>les auth deviennent decoratives"]
+end
+
+subgraph SF["🟠 SURFACES SERVIES : repli SPA, sites, embarque, pont dev"]
+  sf1["🟠 Frontend::attach -- frontend.rs:245<br/>un fallback_service, jamais une route :<br/>absent d un inventaire de .route ;<br/>feature frontend, hors de la feature all"]
+  sf2["🟠 FrontendSites -- frontend.rs:277<br/>N domaines, N contenus, un processus<br/>le premier site qui correspond gagne<br/>hote inconnu sans defaut : 404"]
+  sf3["✅ Frontend::embedded -- frontend.rs:183<br/>rust-embed compile dans le binaire,<br/>memes regles vite-rs qu en dev :<br/>ETag, 304, MIME, repli SPA"]
+  sf4["🔴 pont /__dev ferme par defaut -- :443<br/>THIS_DEV_COMMANDS seul l ouvre :<br/>il EXECUTE la commande de rebuild<br/>chaque service journalise un avertissement"]
+end
+
+subgraph OR["✅ ORDRE DES COUCHES : mesure, pas intention"]
+  or1["✅ le builder monte le repli AVANT -- rest/mod.rs:176<br/>CORS, garde de domaine, authentification<br/>et politiques s appliquent donc<br/>AUSSI aux sites -- chain_aletheia.rs:128"]
+  or2["🔴 attach appele en dernier<br/>le repli passe A COTE des couches<br/>mesure : frontend_surface.rs:45<br/>et le pont /__dev avec lui"]
+  or3["✅ CORS la plus externe -- rest/mod.rs:309<br/>un pre-vol OPTIONS passe sans jeton --<br/>origin_surface.rs:322 ; sans cors.enabled,<br/>aucun en-tete n est jamais pose"]
+end
+
+subgraph UI["✅ ETAT D INTERFACE : un document par portee"]
+  ui1["✅ UI_SCHEMA -- state.rs:12<br/>this-rs/ui-state/1, versionne, comme<br/>RELIEF_SCHEMA ; vue, echelle, panneaux,<br/>sujet ; defaut LISIBLE et coherent :55"]
+  ui2["✅ GET et PUT /ui/state/portee -- routes.rs:34<br/>le PUT rend ce qui est ECRIT, pas<br/>un accuse vide : un champ non su<br/>se relit en defaut, jamais suppose"]
+  ui3["🔴 une seule garde, fail-closed -- routes.rs:35<br/>ensure_self_middleware reutilisee :<br/>sans appelant identifie, 401<br/>policy_surfaces.rs:443"]
+  ui4["✅ monte si un store est attache<br/>rest/mod.rs:102 -- pas de handle, pas<br/>de route, plutot qu une route rendant<br/>un etat qu elle ne detient pas"]
+end
+
+subgraph CV["🟠 LA COUTURE CANVAS : declaree, pas branchee"]
+  cv1["✅ trait CanvasState -- canvas.rs:41<br/>deux questions : scale_of, subject_of<br/>le framework ne connait PAS<br/>la forme de l etat d interface"]
+  cv2["✅ ?echelle=canvas et self -- routes.rs:534<br/>la lecture prend l echelle et le sujet<br/>du demandeur ; sa decision IAM<br/>PLAFONNE, elle ne tronque pas en silence"]
+  cv3["🟠 seule impl : SimpleCanvasState<br/>canvas.rs:92 -- en memoire, servie<br/>aux tests et aux exemples --<br/>chain_aletheia.rs:690"]
+  cv4["🔴 UiStateStore n implemente PAS<br/>CanvasState -- state.rs:76 ; et canvas<br/>n apparait NULLE PART dans<br/>this/src/server : les deux moities pendent"]
+end
+
+subgraph MS["✅ MULTI-ECHELLE : un cran a la fois"]
+  ms1["✅ GET /graph/hierarchy/id -- routes.rs:111<br/>un niveau par appel ; children dit<br/>combien il y a dessous, drill_down<br/>dit ou continuer"]
+  ms2["✅ borne -- routes.rs:618 et 621<br/>depth ramene a 32 au plus, limit borne<br/>de 1 a 1000 ; defaut 5 niveaux et<br/>50 noeuds -- hierarchy.rs:63"]
+  ms3["✅ total, truncated, hidden -- hierarchy.rs:116<br/>on ne peut pas confondre c est tout<br/>avec on a coupe ; un masque du perimetre<br/>de lecture est DIT, jamais devine"]
+  ms4["✅ cycles signales -- hierarchy.rs:132<br/>un noeud deja visite n est pas<br/>redescendu : la descente se termine<br/>toujours, aucune boucle muette"]
+  ms5["✅ format=outline -- routes.rs:634<br/>la meme vue en texte indente, avec<br/>l adresse de chaque branche non<br/>descendue : la forme d un moteur"]
+end
+
+subgraph WE["🟠 SITE WEB : construit, muet sur l adoption"]
+  we1["🟠 website/ : React, Vite, Tailwind<br/>App.tsx:22 -- 11 sections par chemin<br/>site marketing de this-rs.dev :<br/>titre et meta og dans index.html"]
+  we2["🟠 website/dist construit -- index.html<br/>et assets/index-CPqSX1KK.js ; les trois<br/>workflows de this/.github ne citent<br/>JAMAIS website : rien ici ne le deploie"]
+  we3["🟠 zero occurrence de adopt dans<br/>website/src ; CLI.tsx:762 liste init,<br/>add, dev, doctor, generate --<br/>jamais le chemin d adoption"]
+end
+
+  ad1 --> ad2
+  ad2 --> ad3
+  ad2 --> ad4
+  ad4 --> ad5
+  sf1 --> sf2
+  sf1 --> sf3
+  sf1 --> sf4
+  sf2 --> or1
+  sf1 -.->|"appele en dernier"| or2
+  sf4 -.->|"meme repli"| or2
+  or1 --> or3
+  ui2 --> ui3
+  ui2 --> ui4
+  ui2 -.->|"l etat lu"| cv2
+  cv1 --> cv2
+  cv1 --> cv3
+  cv3 -.->|"seul pont"| cv4
+  cv2 --> ms1
+  ms1 --> ms2
+  ms1 --> ms3
+  ms3 --> ms4
+  ms1 --> ms5
+  we3 -.->|"ecart"| ad1
+
+  classDef danger fill:#ffe5e5,stroke:#c0392b,color:#7b241c
+  classDef note fill:#eef2f7,stroke:#94a3b8,color:#334155
+  class ad3,sf4,or2,ui3,cv4 danger
+  class sf1,sf2,cv3,we1,we2,we3 note

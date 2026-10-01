@@ -1,0 +1,90 @@
+flowchart TB
+%% name: contrat-d-entite
+%% PROUVE (lu dans le code, jamais suppose) : entrer dans le framework = implementer le trait Entity de
+%%   this/src/core/entity.rs:18 - Clone + Send + Sync + static, 1 type associe et 9 methodes obligatoires ;
+%%   tenant_id, is_deleted, is_active sont fournies donc optionnelles. Aucun derive proc-macro n existe
+%%   dans le depot : les macros d entite sont declaratives. Les routes ne viennent PAS de Entity mais d un
+%%   second trait, EntityDescriptor, et rien dans le code ne joint resource_name a plural.
+%% SOURCES LUES : this/src/core/entity.rs (Entity 18-81, Data 89-109, Link 117-138, tests 140-405) ;
+%%   this/src/entities/macros.rs (154-302, 331-487, validated 525-596, multi_tenant 22-35, tests 678-867) ;
+%%   this/src/server/entity_registry.rs (10-24, 54-62, tests 94-179) ; this/src/core/module.rs 127 ;
+%%   this/src/server/builder.rs 564 ; authorization.rs 263 ; storage/postgres.rs 132-160 ; obrain.rs 665-676 ;
+%%   in_memory.rs 110-120 ; migrations/001_create_entities.up.sql ; this-cli/src/commands/add_entity.rs
+%%   102-136 ; templates/entity/descriptor.rs.tera 29-50 ; this/tests/consumer_contract.rs 605.
+%% NON ETABLI : rien n a ete compile ni teste ici ; backends non verifies un par un, ni GraphQL et gRPC.
+%% LEGENDE : ✅ existe et tourne · 🟠 ecrit/teste mais partiel ou non deploye · 🔴 refuse, avec sa raison · ⚪ amont, reutilise tel quel
+subgraph S1["✅ Le contrat d entree : le trait Entity"]
+  direction TB
+  E_SIG["Entity : Clone + Send + Sync + static<br/>1 type associe Service : Send + Sync<br/>entity.rs:18-20"]
+  E_REQ["Obligatoires : 9 methodes<br/>resource_name et resource_name_singular<br/>service_from_host ; id et entity_type<br/>created_at, updated_at, deleted_at, status<br/>entity.rs:23-50"]
+  E_OPT["Fournies donc optionnelles<br/>tenant_id rend None<br/>is_deleted et is_active en decoulent<br/>entity.rs:68-80"]
+end
+subgraph S2["✅ Les specialisations que le stockage exige"]
+  direction TB
+  D_REQ["Data : Entity plus name<br/>plus indexed_fields et field_value<br/>display fournie ; entity.rs:89-109"]
+  L_REQ["Link : Entity plus source_id<br/>plus target_id et link_type<br/>display fournie ; entity.rs:117-138"]
+  BOUND["Bornes imposees aux backends<br/>T : Data + Serialize + DeserializeOwned<br/>postgres.rs:209, mysql.rs:222"]
+end
+subgraph S3["🟠 Les macros declaratives, aucun derive"]
+  direction TB
+  M_DATA["impl_data_entity!<br/>genere la struct, impl Entity, impl Data<br/>plus new, soft_delete, restore, touch<br/>macros.rs:154-302"]
+  M_LINK["impl_link_entity!<br/>genere la struct, impl Entity, impl Link<br/>macros.rs:331-487"]
+  M_VAL["impl_data_entity_validated!<br/>reutilise impl_data_entity puis ajoute<br/>ValidatableEntity ; macros.rs:525-596"]
+  M_UNIMPL["🔴 service_from_host genere en unimplemented!<br/>l entite macro ne fournit donc aucun service<br/>le contrat est satisfait a moitie<br/>macros.rs:208-212 et 390-394"]
+  M_TENANT["🔴 impl_entity_multi_tenant! n override rien<br/>son commentaire le dit : marqueur de<br/>documentation ; ajoute get_tenant_id et<br/>tenant_id reste None ; macros.rs:22-35"]
+end
+subgraph S4["✅ Les routes : un second trait, distinct"]
+  direction TB
+  R_CODEGEN["⚪ Le codegen CLI produit le descripteur<br/>descriptor.rs.tera:29-50<br/>routes /plural et /plural/id"]
+  R_DESC["EntityDescriptor<br/>entity_type, plural, build_routes<br/>entity_registry.rs:10-24"]
+  R_REG["Module : register_entities remplit<br/>le registre ; module.rs:127<br/>appele par builder.rs:564"]
+  R_BUILD["EntityRegistry : build_routes<br/>fusionne les routeurs en un seul<br/>entity_registry.rs:54-62"]
+  R_AUTH["entity_plurals alimente l application<br/>des politiques ; authorization.rs:263<br/>cas ambigu teste ; iam_route_resolution.rs:1026"]
+  R_GAP["🔴 Aucun lien verifie entre les deux pluriels<br/>resource_name de Entity d un cote<br/>plural de EntityDescriptor de l autre"]
+end
+subgraph S5["🟠 Colonnes et proprietes tirees du contrat"]
+  direction TB
+  C_SQL["⚪ 001_create_entities.up.sql<br/>une table partagee : id, entity_type<br/>name, status, tenant_id, data JSONB<br/>timestamps, 4 index"]
+  C_PG["postgres.rs:132-160<br/>entity_type vient de resource_name_singular<br/>commun en colonnes, reste en JSONB"]
+  C_OBRAIN["obrain.rs:665-676<br/>chaque champ de indexed_fields<br/>devient la propriete f_champ du noeud"]
+  C_SEARCH["in_memory.rs:110-120 et lmdb.rs:216<br/>field_value porte le filtrage<br/>et la recherche par champ"]
+  C_GAP["🔴 indexed_fields ne cree aucune colonne<br/>migration.sql.tera:11-14 n ajoute<br/>qu un index partiel sur entity_type"]
+end
+subgraph S6["✅ Ou le contrat est verifie"]
+  direction TB
+  V_MACRO["Tests du contrat des macros<br/>resource_name pluralise en test_users<br/>indexed_fields compte deux champs<br/>macros.rs:678-867"]
+  V_ENTITY["Tests du trait lui-meme<br/>tenant_id rend None par defaut<br/>is_deleted et is_active ; entity.rs:140-405"]
+  V_REG["Tests du registre et de ses routes<br/>enregistrement, doublon, fusion<br/>entity_registry.rs:94-179"]
+  V_INTEG["Tests consommateurs<br/>consumer_contract.rs:605<br/>policy_surfaces.rs:41 et native_integration.rs:50"]
+  V_CLI["🟠 add_entity.rs:102-128<br/>refuse de redefinir les champs du contrat<br/>id, entity_type, name, status, timestamps"]
+end
+E_SIG --> E_REQ
+E_SIG --> E_OPT
+E_REQ --> D_REQ & L_REQ
+D_REQ --> BOUND
+D_REQ --> M_DATA
+L_REQ --> M_LINK
+M_DATA --> M_VAL
+M_DATA --> M_UNIMPL
+E_OPT --> M_TENANT
+R_CODEGEN --> R_DESC
+R_DESC --> R_REG
+R_REG --> R_BUILD
+R_BUILD --> R_AUTH
+R_DESC --> R_GAP
+E_REQ --> R_GAP
+C_SQL --> C_PG
+BOUND --> C_PG
+D_REQ --> C_OBRAIN
+D_REQ --> C_SEARCH
+M_DATA --> C_GAP
+M_DATA --> V_MACRO
+E_SIG --> V_ENTITY
+R_BUILD --> V_REG
+R_AUTH --> V_INTEG
+R_CODEGEN --> V_CLI
+
+classDef danger fill:#ffe0e0,stroke:#c62828,stroke-width:2px,color:#7f1d1d
+classDef note fill:#fff8e1,stroke:#f9a825,stroke-width:1px,color:#5d4037
+class M_UNIMPL,M_TENANT,R_GAP,C_GAP danger
+class E_OPT,BOUND,R_CODEGEN,C_SQL,V_CLI note

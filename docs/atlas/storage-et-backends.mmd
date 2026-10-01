@@ -1,0 +1,79 @@
+flowchart TB
+%% name: storage-et-backends
+%% PROUVE (lu dans le code, jamais suppose) : le contrat est deux traits, 6 methodes pour DataService et 8 pour LinkService, sans limit ni offset ni tri ni transaction - core/service.rs:13-99 ; il est tenu par un seul harnais de 40 tests, 16 data + 14 link + 10 REST, que j ai EXECUTE pour 5 moteurs : lmdb 40 passed, mysql 40 passed sur un conteneur mysql 8.1, mongodb 40 passed, neo4j 40 passed, obrain 40 passed, tous 0 failed ; le harnais ecrit lui-meme ses 3 tolerances : doublon d id upsert OU refus, delete inexistant Ok OU Err, ordre de list non teste ; les filtres d extremite target_type et source_type sont acceptes par le trait puis IGNORES par les 9 backends, parametre nomme _target_type partout ; delete_by_tenant n est surcharge par AUCUN backend alors que le commentaire du trait l annonce ; aucune requete LIMIT n existe dans les 6 backends de src/storage, la pagination est une fenetre memoire au-dessus du store - scylladb.rs:528-537 et links/handlers.rs:220 ; EntityFetcher::list_as_json a pour defaut Ok vec vide et seul ScyllaDB l implemente dans le crate ; LMDB est le seul a tenir plusieurs ecritures dans une transaction, 3 puts un txn ; obrain est le seul a porter WAL fsync, bail d ecriture qui refuse un ecrivain perime, et mode lecture seule ; son index Uuid vers NodeId vit en memoire et repart vide apres open, sans aucun appelant de rebuild hors tests ; obrain n est pas dans la feature all ; ensure_indexes de mongodb et neo4j n a AUCUN appelant dans le depot et ensure_schema n est appele que par 2 tests ; a cote des backends, obrain_facade.rs:55 expose GraphBackend, 15 methodes communes a obrain et this-rs, dont les espaces et le bail sont EXCLUS car obrain ne sait pas les tenir.
+%% SOURCES LUES : this/src/storage/mod.rs:3-70 ; this/src/core/service.rs:13-31 et 38-99 ; in_memory.rs:27 56 76 110 260 ; lmdb.rs:75 120 155 204 293 304-308 345 349 468 ; mysql.rs:50 101 112 223 257 276 339 556 590 661 ; postgres.rs:66 78 257 318 512 ; mongodb.rs:156 193 257 347 445 537 ; neo4j.rs:158 170 206 261 331 383 406 500 605 ; scylladb.rs:47 518 528-537 ; dynamodb.rs:245 292 318 583 ; obrain.rs:67 146-151 188 320 390 505-524 645 701 740 841 947 1028 1052 ; writer_lease.rs:1-50 ; obrain_facade.rs:55-116 ; core/module.rs:47-53 ; core/query.rs:126-147 ; links/handlers.rs:220-230 ; tests/storage_harness/mod.rs:17-22 et data_service_tests.rs:127 228 419 466 et link_service_tests.rs:229 308 ; tests/in_memory_tests.rs:12-14, lmdb_tests.rs:56-58, mysql_tests.rs:86 137-139, mongodb_tests.rs:119-121, neo4j_tests.rs:131-133, postgres_tests.rs:146-148, scylladb_tests.rs:152-154, obrain_tests.rs:26-28 ; this/docs/changes/STORE_SIMPLIFICATION.md:1-60 ; this/Cargo.toml:139 175 ; this-cli/src/templates/entity/store.rs.tera:48, mysql_store.rs.tera:69, lmdb_store.rs.tera:72, postgres_store.rs.tera:70.
+%% NON ETABLI : je n ai pas execute les suites postgres et scylladb, faute de temps, leurs fichiers et leurs conteneurs sont la ; je n ai pas verifie si le moteur obrain indexe de lui-meme _source_id et les proprietes f_ les champs, le seul create_property_index de src est iam.rs:237 ; je n ai pas mesure si find_nodes_by_property degrade en balayage sans index ; je n ai pas lu iam, permission, tenantcat, annuaire_identites et obrain_identity ligne a ligne, seulement leurs en-tetes ; DynamoDB n a aucun test de harnais et je n ai pas de credentials pour en ecrire un ; scylladb.rs:528-537 est lu, pas execute ; les compteurs viennent des sorties cargo, pas d une couverture ; je n ai pas verifie le comportement des backends derriere la passerelle en production, aucun n y est cable par defaut.
+%% LEGENDE : ✅ existe et tourne · 🟠 ecrit/teste mais partiel ou non deploye · 🔴 refuse, avec sa raison · ⚪ amont, reutilise tel quel
+
+subgraph CON["✅ LE CONTRAT - deux traits, un harnais"]
+  TR_D["core/service.rs:13-31<br/>DataService, 6 methodes<br/>create get list update delete search<br/>ni limit, ni offset, ni tri, ni txn"]
+  TR_L["core/service.rs:38-99<br/>LinkService, 8 methodes<br/>find_by_source et find_by_target<br/>2 filtres de type en plus du link_type"]
+  HA["tests/storage_harness/mod.rs:17-22<br/>3 macros : 16 data, 14 link, 10 REST<br/>un contrat unique pour les moteurs<br/>fabrique par backend, isolation par test"]
+  T_OUV["le harnais ecrit ses tolerances<br/>doublon d id : upsert OU refus :419<br/>delete inexistant : Ok OU Err :228<br/>ordre de list non teste :127"]
+end
+
+subgraph EXE["✅ EXECUTE ICI - 5 suites, 200 tests, 0 echec"]
+  S_ALL["8 fichiers de suite, 1 par backend<br/>in_memory lmdb mysql mongodb neo4j<br/>postgres scylladb obrain<br/>dynamodb : AUCUN fichier de suite"]
+  S_SRV["les 5 suites serveur<br/>demarrent un conteneur par test<br/>mysql 8.1 mongo 5.0.6 neo4j 5<br/>images locales, harnais identique"]
+  X_ALL["cargo test --offline, par feature<br/>lmdb 40 passed, mysql 40, mongodb 40<br/>neo4j 40, obrain 40, 0 failed<br/>0.38 s lmdb, 15.30 s mysql"]
+end
+
+subgraph EMB["✅ EMBARQUES - aucun serveur externe"]
+  B_MEM["in_memory.rs:27, feature in-memory<br/>Arc RwLock HashMap, create = insert<br/>search compare les FieldValue :110<br/>DEFAUT du crate : Cargo.toml:139"]
+  B_LM["lmdb.rs:75, heed memmap<br/>1 write txn par operation :120-138<br/>3 bases : links by_source by_target :293<br/>SEUL a tenir 3 puts dans 1 txn :304"]
+  B_OB["obrain.rs:67, substrat mmap + WAL<br/>commit_wal apres CHAQUE mutation :701<br/>commit_lock serialise les commits :188<br/>lien en noeud _link, arete si 2 bouts"]
+end
+
+subgraph SRV["🟠 SERVEURS - 5 moteurs, 5 dialectes"]
+  B_SQL["mysql.rs:50 et postgres.rs:78<br/>meme schema en dur, colonnes + data<br/>JSON en MySQL, JSONB en Postgres<br/>search : name status sinon extraction"]
+  B_MG["mongodb.rs:108<br/>create = insert_one, doublon = erreur<br/>search enumere string int bool :257<br/>ensure_indexes links :347, 0 appelant"]
+  B_NJ["neo4j.rs:138<br/>create = MERGE, donc upsert :206<br/>liens en noeuds _Link, pas des aretes<br/>contrainte UNIQUE id :170, 0 appelant"]
+  B_SC["scylladb.rs:518, PK entity_type + id<br/>SEUL backend du crate a implementer<br/>EntityFetcher::list_as_json<br/>un list entier puis skip take :528"]
+  B_DY["dynamodb.rs:245, 0 test de harnais<br/>update ignore _id, reecrit tout :292<br/>search = scan integral + filtre :318<br/>pas de requete ciblee, pas de LIMIT"]
+end
+
+subgraph ECA["🔴 LES ECARTS - declare, documente, jamais tenu"]
+  G_TEN["delete_by_tenant : service.rs:88-98<br/>le trait annonce une surcharge bulk<br/>aucun des 9 backends ne le fait<br/>list tout puis delete un par un"]
+  G_TYP["les filtres de type sont MORTS<br/>jamais lu, _target_type : lmdb.rs:349<br/>mongodb.rs:445 neo4j.rs:500 mysql.rs:556<br/>le harnais l admet sans mesurer :229"]
+  G_PAG["aucun LIMIT dans les 6 backends<br/>l unique chemin limit offset fait<br/>list puis skip take : scylladb.rs:528<br/>et links/handlers.rs:220 cote REST"]
+  G_FET["EntityFetcher::list_as_json :47<br/>defaut = Ok vec vide, module.rs:47-53<br/>dans le crate seul scylladb.rs:518<br/>l implemente, les autres rendent vide"]
+  G_IDX["obrain : uuid_to_node est MEMOIRE<br/>apres open l index repart vide :505<br/>get et list rendent vide sans rebuild<br/>aucun appelant hors tests :1945"]
+  E_DOC["docs/changes/STORE_SIMPLIFICATION.md<br/>ne decrit AUCUN backend, il raconte<br/>la suppression d un store d exemple<br/>298 lignes, comparaison avant apres"]
+  E_AL["this/Cargo.toml:175, feature all<br/>liste 8 backends, PAS obrain<br/>default = in-memory seulement :139<br/>obrain se demande par sa propre feature"]
+end
+
+subgraph OBP["🟠 PROPRE A OBRAIN - ce que lui seul porte"]
+  O_ONLY["les 3 garde-fous de lui seul<br/>bail d ecriture, trame 128 o + CRC32<br/>refuse un ecrivain perime :390<br/>lecture seule stricte : obrain.rs:146"]
+  O_EX2["poses sur le store obrain<br/>iam.rs:237 ACL materialisee indexee<br/>permission.rs, tenantcat.rs<br/>annuaire_identites.rs argon2id"]
+end
+
+HA -->|"contrat"| TR_D
+HA -->|"contrat"| TR_L
+HA -.->|"3 tolerances"| T_OUV
+HA -->|"1 suite par backend"| S_ALL
+S_ALL -->|"5 avec conteneur"| S_SRV
+S_ALL -->|"fabrique"| B_MEM
+S_ALL -->|"fabrique"| B_LM
+S_ALL -->|"fabrique"| B_OB
+S_SRV -->|"fabrique"| B_SQL
+S_SRV -->|"fabrique"| B_MG
+S_SRV -->|"fabrique"| B_NJ
+S_SRV -->|"fabrique"| B_SC
+S_SRV -->|"5 sur 8 executees"| X_ALL
+TR_D -->|"impl par"| B_DY
+TR_L -->|"defaut jamais surcharge"| G_TEN
+TR_L -.->|"2 filtres sur 3 ignores"| G_TYP
+TR_D -.->|"ni limit ni offset"| G_PAG
+B_MG -->|"aucun LIMIT, aucun offset"| G_PAG
+TR_D -.->|"defaut vide"| G_FET
+B_SC -->|"seul a l implementer"| G_FET
+B_OB -->|"index memoire"| G_IDX
+B_OB -->|"bail, WAL, lecture seule"| O_ONLY
+B_OB -->|"modules poses dessus"| O_EX2
+E_AL -.->|"obrain hors all"| B_OB
+E_DOC -.->|"ne cite aucun backend"| TR_D
+
+classDef danger fill:#7f1d1d,stroke:#ef4444,color:#fff
+classDef note fill:#1e293b,stroke:#64748b,color:#e2e8f0
+class G_TEN,G_TYP,G_PAG,G_FET,G_IDX,E_DOC,E_AL danger
+class B_DY,O_EX note
