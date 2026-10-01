@@ -1,0 +1,90 @@
+flowchart TB
+%% name: deploiement-hotellerie-dns
+%% PROUVE (lu dans le code, jamais suppose) : this-host lit un deploy.yaml, le VALIDE avant toute
+%% E/S de base, publie le plan par --dry-run sans ouvrir aucune base ou par GET / en service, monte
+%% un hote independant par attachement et n invente aucune route. Le module dns calcule une fonction
+%% PURE : desired_records derive des sites declares, puis plan compare desired et current, et ne
+%% supprime jamais sans prune. La mise en ligne est un ORDRE : declarer, planifier, servir en lecture
+%% seule, observer, deleguer DNS et Caddy, puis armer. Le DNS n est jamais ecrit par cet hote.
+%% SOURCES LUES : this/src/bin/this-host.rs (main:70, parse_args:40), this/src/deploy/mod.rs
+%% (validate:290, plan:415, build:670, build_attachment:706, surfaces_of:633, ConfigOnlyModule:797,
+%% avertissement 403:448), this/src/dns/mod.rs (key:51, MANAGED_TYPES:60, plan:124, ensure_dot:203),
+%% this/src/dns/powerdns.rs (api_key:102, current_records:197, apply:232, ensure_zone:313),
+%% this/src/server/host.rs:187 et :522, this/src/config/server.rs:95 et :464, cet exemple
+%% domain_harness.rs:108 a 191, this/tests/deploy_host.rs:145 et :270, Cargo.toml:161 et :175,
+%% this/docs/hote-de-deploiement.md, this/docs/domaines-cors-caddy.md.
+%% NON ETABLI : je n ai ni compile ni lance les binaires ni les tests, aucune zone DNS n a ete
+%% interrogee ni ecrite ; this-host n est pas declare dans [[bin]] — non verifie a l execution.
+%% LEGENDE : ✅ existe et tourne · 🟠 ecrit/teste mais partiel ou non deploye · 🔴 refuse, avec sa raison · ⚪ amont, reutilise tel quel
+subgraph S1["✅ L hote this-host — pilotage par un fichier"]
+  h2["parse_args:40 — --config est requis sinon sortie :64<br/>--dry-run publie le plan puis sort :81<br/>--json n imprime que le document :83"]
+  h1["main:70 appelle from_file:79 qui lit ET valide<br/>avant toute E/S de base :77<br/>aucune base n est ouverte par cette etape"]
+  h3["build:95 ouvre les bases et sert :130<br/>GET / le plan, GET /healthz la sonde<br/>arret propre sur ctrl_c :131"]
+end
+subgraph S2["✅ Validation fail-closed — refusee au chargement"]
+  v1["validate:290 : bind hors IP:port, aucun<br/>attachement, nom hors [a-zA-Z0-9_-]<br/>mount reserve :334 ou deja pris :340"]
+  v2["read_only vaut true par defaut pour Obrain :186<br/>deux attachements sur la MEME base sont refuses :348<br/>fichier absent :366, exposure illisible :378"]
+end
+subgraph S3["✅ Le montage — un hote independant par attachement"]
+  m1["build:670 valide PUIS nest chaque<br/>attachement sous son mount :679<br/>rien n est partage implicitement :667"]
+  m2["build_attachment:706 ouvre le store :<br/>open_read_only:717 ou open:725 selon read_only<br/>InMemoryLinkService si memory :711"]
+  m3["surfaces_of:633 monte {mount}/health et<br/>{mount}/healthz, plus /graph* SEULEMENT<br/>si la feature obrain est la :636"]
+  m4["ConfigOnlyModule:797 porte le links.yaml<br/>links_config:811 — rattacher un projet<br/>sans ecrire une ligne de Rust"]
+end
+subgraph S4["✅ Le plan publie — GET / et --dry-run"]
+  p1["GET / rend le Plan :696 — structure, bind,<br/>inspected, attachments, not_attached :827<br/>dry-run rend le meme document, inspected false"]
+  p2["warnings: enforce sans graph.policy donne<br/>403 sur /graph, et le plan dit pourquoi :448<br/>verrouille par deploy_host.rs:244"]
+  p3["not_attached publie ce qui n est PAS<br/>rattache :526 — CRUD d entites, et reverse<br/>proxy vers un projet existant :531"]
+  p4["aucun secret : le plan publie le CHEMIN<br/>d un fichier declare, jamais son contenu<br/>deploy/mod.rs:421, teste :932"]
+end
+subgraph S5["✅ DNS — ce que le module calcule, sans reseau"]
+  d1["desired_records:181 — un enregistrement<br/>par hote SERVI, derive de domains.sites<br/>un CNAME porte un nom qualifie :188"]
+  d2["plan:124 zone desired current prune rend<br/>creates updates deletes untouched :72<br/>et c est une fonction PURE, testable :212"]
+  d3["MANAGED_TYPES:60 A AAAA CNAME seulement — MX<br/>TXT NS SRV jamais touches :146, signales intact :147<br/>ensure_dot:203 tout se compare en FQDN :135<br/>sinon la zone entiere sortait du perimetre :131"]
+end
+subgraph S6["🟠 DNS — l ecriture PowerDNS, feature powerdns"]
+  e1["PdnsConfig:36 — api_url, zone, target, ttl<br/>api_key_env porte le NOM de la variable<br/>api_key:102 refuse une cle absente ou vide"]
+  e2["current_records:197 lit la zone de l autorite<br/>apply:232 envoie REPLACE pour creates et<br/>updates, DELETE seulement si le plan en a :247"]
+  e3["ensure_zone:313 cree la zone seulement si<br/>absente, et refuse sans serveurs de noms :317<br/>rectify:284 tourne apres l ecriture"]
+  e4["Cargo.toml:161 — powerdns hors default ET<br/>hors all :175 ; active par le seul exemple<br/>domain_harness required-features :188"]
+  e5["deploy/mod.rs:130 annonce la zone PowerDNS dans<br/>l exposition, mais AUCUN chemin ne la lit : pas d appel<br/>a powerdns.rs, et ExposureSummary:187 n a pas de champ dns"]
+end
+subgraph S7["🚀 Mise en ligne — l ordre des gestes"]
+  o1["1 declarer deploy.yaml, puis this-host avec<br/>--dry-run : le plan rendu, ZERO base ouverte<br/>test deploy_host.rs:145"]
+  o2["2 servir en read_only true et observer<br/>GET /attached/X/graph — la base d un autre<br/>outil n est pas modifiee :270"]
+  o3["3 deleguer le DNS : desired_records:108, puis<br/>current_records et plan:144, et apply:191<br/>SEULEMENT sous --apply-dns explicite :176"]
+  o4["4 deleguer Caddy : la configuration REND un<br/>Caddyfile config/server.rs:95 et render:464<br/>l exploitant relit, puis caddy reload :107"]
+  o5["5 armer : report_only pour observer, puis<br/>enforce, et read_only false si le projet<br/>doit ecrire ses decisions IAM docs:229"]
+end
+h2 --> h1
+h1 --> h3
+h1 --> v1
+v1 --> v2
+v2 --> m1
+h1 --> p1
+m1 --> m2
+m2 --> m3
+m2 --> m4
+m1 --> p1
+p1 --> p2
+p1 --> p3
+p1 --> p4
+p1 --> e5
+d1 --> d2
+d3 --> d2
+e1 --> e2
+d2 --> e2
+e2 --> e3
+e4 --> e2
+o1 --> h1
+o1 --> o2
+o2 --> o3
+o3 --> o4
+o4 --> o5
+o3 --> d1
+classDef danger fill:#ffe0e0,stroke:#c0392b,color:#7b241c
+classDef note fill:#fff6d6,stroke:#b7950b,color:#5b4a00
+classDef gate fill:#e2f5e2,stroke:#1e8449,color:#145a32
+class e5,p3 danger
+class o1,o2,o3,o4,o5 note
+class h1,h3,p1,p2 gate

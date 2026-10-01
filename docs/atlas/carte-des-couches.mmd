@@ -1,0 +1,73 @@
+flowchart TB
+%% name: carte-des-couches
+%% PROUVE (lu dans le code, jamais suppose) : le workspace racine declare 3 membres et this-examples n en fait PAS partie, il a son propre [workspace] et rattache this-rs par [patch.crates-io] ; this-cli ne depend PAS de this-rs, il emet du texte de Cargo.toml ; core n est pas un fond propre, il importe config, links, server et events ; l arete storage vers graph n existe qu en cfg(test) ; la lib s appelle this, pas this-rs.
+%% SOURCES LUES : Cargo.toml:1-6 ; this/Cargo.toml:2,178,286-289 ; this/src/lib.rs:54-73 ; core/mod.rs:3-18 ; core/module.rs:5-6 ; core/extractors.rs:12-14 ; core/events.rs:35-36 ; config/mod.rs:8 ; server/builder.rs:6,12-16,51,603 ; server/router.rs:4 ; storage/mod.rs:3-43 ; events/mod.rs:22-43 ; events/log_obrain.rs:45 ; graph/relief.rs:46-47 ; storage/obrain.rs:1236,2397 ; deploy/mod.rs:70-73 ; ui/routes.rs ; dns/mod.rs:27-32 ; this/src/bin/this-host.rs:25 ; this/src/bin/this-gateway.rs:124 ; this-cli/Cargo.toml:13-28 ; this-cli/src/templates/project/Cargo.toml.tera:7 ; this-examples/Cargo.toml:1-28 ; facematch/Cargo.toml:10 ; facematch/src/main.rs
+%% NON ETABLI : le cablage runtime de ui vers le server, ui n a aucun use crate:: et je ne l ai pas suivi plus loin ; l etat de compilation reel de la feature obrain-cognitive ; le contenu ligne a ligne des 17 sous-modules de storage ; les comptes 18 et 19 sur 20 viennent d un grep par membre, pas d un cargo metadata.
+%% LEGENDE : ✅ existe et tourne · 🟠 ecrit ou teste mais partiel, non deploye · 🔴 refuse, avec sa raison · ⚪ amont, reutilise tel quel
+
+subgraph CR["✅ CRATES DU DEPOT - 3 membres declares, un 4e a part"]
+  WS["Workspace racine<br/>Cargo.toml:1-6<br/>members = this, this-cli, facematch"]
+  LIB["this-rs v0.0.9<br/>[lib] name = #quot;this#quot;, pas this-rs<br/>this/Cargo.toml:2 et :178"]
+  CLI["this-cli v0.0.4<br/>[[bin]] name = #quot;this#quot;<br/>this-cli/Cargo.toml:13-15<br/>AUCUNE dependance this-rs"]
+  FACE["facematch<br/>path = ../this, features all + obrain<br/>facematch/Cargo.toml:10<br/>main.rs fait 3 lignes, aucun use this::"]
+  EXAM["this-examples<br/>workspace PROPRE : Cargo.toml:1-24<br/>patch crates-io vers ../this :27-28<br/>20 membres, aucun dans le workspace racine"]
+end
+
+subgraph MOD["✅ this/src - 11 modules declares, lib.rs:54-70"]
+  M_CORE["core/ - lib.rs:55<br/>14 sous-modules : Entity, Data, Link,<br/>identity, service, store, auth"]
+  M_CONFIG["config/ - lib.rs:54<br/>922 lignes de YAML : entities, links,<br/>events, sinks, auth, server"]
+  M_ENT["entities/ - lib.rs:60<br/>5 lignes, macros seulement<br/>impl_data_entity, impl_link_entity"]
+  M_EVENTS["events/ - lib.rs:61<br/>13 sous-modules : compile_flow,<br/>sinks, matcher, log, bridge"]
+  M_LINKS["links/ - lib.rs:67<br/>handlers CRUD de liens +<br/>LinkRouteRegistry, LinkDirection"]
+  M_SERVER["server/ - lib.rs:68<br/>ServerBuilder + 4 expositions :<br/>REST, GraphQL, gRPC, WebSocket"]
+  M_STORAGE["storage/ - lib.rs:69<br/>17 sous-modules, 9 backends :<br/>in_memory toujours, 8 gates"]
+  M_DEPLOY["deploy/ - lib.rs:58<br/>1092 lignes : DeploymentConfig,<br/>Host, Attachment, Plan"]
+  M_DNS["dns/ - lib.rs:59<br/>plan de zone PowerDNS<br/>PdnsClient, DnsPlan"]
+  M_UI["ui/ - lib.rs:70<br/>191 lignes : UI_SCHEMA, UiState<br/>aucun use crate:: dedans"]
+end
+
+subgraph GATED["🟠 GATE PAR FEATURE - n existe que si la feature est active"]
+  M_GRAPH["graph/ - lib.rs:66<br/>relief, routes, scope, canvas<br/>gate obrain : lib.rs:65"]
+  F_OBC["feature obrain-cognitive<br/>this/Cargo.toml:168-171 : alias de obrain<br/>le relief cognitif n est PAS branche"]
+end
+
+subgraph BIN["🟠 BINAIRES - deux binaires, deux regimes"]
+  B_GW["this-gateway<br/>required-features obrain + wami<br/>this/Cargo.toml:286-289"]
+  B_HOST["this-host<br/>AUCUN [[bin]] declare : auto-decouvert<br/>use this::deploy, this-host.rs:25"]
+end
+
+subgraph ECA["🔴 ECARTS - le code contredit la lecture naive"]
+  E_CLI["this-cli ne LIE pas this-rs<br/>il EMET du texte : Cargo.toml.tera:7<br/>this = package this-rs, version 0.0.9"]
+  E_FOND["core n est pas un fond propre<br/>il importe config, links, server, events<br/>core/module.rs:5-6, extractors.rs:12-14"]
+  E_TEST["storage importe graph<br/>SEULEMENT sous #[cfg(test)]<br/>storage/obrain.rs:1236 puis :2397"]
+end
+
+WS --> LIB
+WS --> CLI
+WS --> FACE
+LIB -->|"path = ../this"| FACE
+EXAM -.->|"patch crates-io, hors workspace"| LIB
+EXAM -->|"18 membres sur 20"| M_SERVER
+EXAM -->|"19 membres sur 20"| M_STORAGE
+
+M_CORE -->|"module.rs:5"| M_CONFIG
+M_CORE -->|"module.rs:6"| M_SERVER
+M_CORE -->|"extractors.rs:14"| M_LINKS
+M_CORE -->|"events.rs:35"| M_EVENTS
+M_CONFIG -->|"config/mod.rs:8"| M_CORE
+
+M_SERVER -->|"builder.rs:6"| M_CONFIG
+M_SERVER -->|"builder.rs:12-16"| M_EVENTS
+M_SERVER -->|"router.rs:4"| M_LINKS
+M_SERVER -->|"builder.rs:51,603"| M_STORAGE
+M_EVENTS -->|"log_obrain.rs:45"| M_STORAGE
+M_GRAPH -->|"relief.rs:46-47"| M_STORAGE
+M_STORAGE -.->|"#[cfg(test)] seulement :2397"| M_GRAPH
+M_DEPLOY -->|"mod.rs:70-73"| M_SERVER
+B_HOST -->|"this-host.rs:25"| M_DEPLOY
+B_GW -->|"this-gateway.rs:124"| M_SERVER
+
+classDef danger fill:#7f1d1d,stroke:#ef4444,color:#fff
+classDef note fill:#1e293b,stroke:#64748b,color:#e2e8f0
+class E_CLI,E_FOND,E_TEST danger
+class M_DNS,M_UI,FACE note

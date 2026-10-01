@@ -256,6 +256,21 @@ name = "canvas_inference"
 path = "examples/canvas_inference.rs"
 required-features = ["obrain"]
 
+# Deux exemples qui parlent obrain par ses types (`ObrainStore`,
+# `ObrainDataService`, `ObrainLinkService`) : sans la feature, ils ne
+# compilent pas — et `cargo test` construit les exemples. Déclarés ici
+# **uniquement** pour porter `required-features`, sans quoi un `cargo test`
+# par défaut échouait avant même d'exécuter un test.
+[[example]]
+name = "weave_pilot"
+path = "examples/weave_pilot.rs"
+required-features = ["obrain"]
+
+[[example]]
+name = "weave_bench"
+path = "examples/weave_bench.rs"
+required-features = ["obrain"]
+
 # ── Bancs d'essai ─────────────────────────────────────────────────────────
 # `harness = false` : le banc a son propre harnais (échauffement, N tours,
 # médiane), sans dépendance de mesure — le dépôt construit hors ligne.

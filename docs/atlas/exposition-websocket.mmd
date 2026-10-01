@@ -1,0 +1,86 @@
+flowchart TB
+%% name: exposition-websocket
+%% PROUVE (lu dans le code, jamais suppose) : le handshake GET /ws, le Welcome portant conn_id, la
+%% boucle de lecture, l abonnement par filtre, la boucle d ecriture, le nettoyage a la fermeture, et
+%% DEUX chemins distincts vers le client : EventBus vers abonnement, et sink vers Notification.
+%% SOURCES LUES : websocket/handler.rs 29 34 48 54 58 62 65 80 104 109 131 140 145 192,
+%% websocket/manager.rs 167 171 196 205 231 257 271 272 292 321 358 368 377 384 390 407 427 435 443,
+%% websocket/mod.rs 112 125 160 166 181 184 194 209 216, websocket/protocol.rs 45 47 52 57 63 65 72
+%% 100 138 164 215, websocket/dispatcher.rs 50 58, events/sinks/websocket.rs 68 75 83 87,
+%% events/sinks/mod.rs 51, events/operators/deliver.rs 52 57 79 106, tests/websocket_integration.rs 6
+%% 137 161 278, tests/notification_e2e.rs 13, examples/aletheia_server.rs 1945 2002 2205, Cargo.toml 165
+%% NON ETABLI : je n ai pas execute la suite de tests ni mesure un debit reel ; je n ai pas lu les sinks
+%% in_app push counter ni le middleware d authorization en entier ; le rendu de bout en bout d une
+%% Notification vers une vraie socket n est prouve par AUCUN test du depot, seulement par des mocks.
+%% LEGENDE : ✅ existe et tourne · 🟠 ecrit/teste mais partiel ou non deploye · 🔴 refuse avec sa raison · ⚪ amont reutilise tel quel
+
+subgraph HS["Cycle de vie d une connexion — ✅ monte et teste"]
+  UP["GET /ws<br/>ws_handler extrait un AuthContext OPTIONNEL<br/>handler.rs:29-36"]
+  CONNECT["manager.connect tenant_id<br/>cree conn_ uuid + canal mpsc non borne<br/>manager.rs:167-193"]
+  WELCOME["ServerMessage::Welcome<br/>premier frame, porte connection_id<br/>handler.rs:65-73"]
+  READLOOP["read loop sur ws_read.next<br/>Text vers handle_client_message, Ping avale<br/>handler.rs:104-128"]
+  CLOSE["Close frame ou erreur de lecture<br/>write_handle.abort puis disconnect<br/>handler.rs:109-132"]
+end
+
+subgraph PROTO["Protocole JSON d une seule socket — ✅ enum serde teste"]
+  CSUB["client type subscribe + filter<br/>entity_type entity_id event_type kind<br/>protocol.rs:47 138"]
+  CUNS["client type unsubscribe<br/>subscription_id, erreur si absente<br/>protocol.rs:52 handler.rs:173-190"]
+  CPING["client type ping<br/>repond Pong sans toucher l EventBus<br/>protocol.rs:57 handler.rs:192"]
+  CUSTOM["JSON non reconnu<br/>custom handler d abord, sinon Error<br/>handler.rs:141-154 manager.rs:134"]
+  SSUB["serveur type subscribed<br/>id sub_ uuid genere par Subscription::new<br/>protocol.rs:215 handler.rs:158-166"]
+  SEV["serveur type event<br/>subscription_id + EventEnvelope<br/>protocol.rs:65 manager.rs:385"]
+end
+
+subgraph EV["Evenement metier vers abonnement — ✅ EventBus vers filtre vers mpsc"]
+  BUS["EventBus publish<br/>broadcast abonne au montage du routeur<br/>mod.rs:166-171"]
+  LOOP["run_dispatch_loop<br/>Lagged saute des evenements sans mourir<br/>manager.rs:427-449"]
+  TENANT["garde tenant puis user_id<br/>skip si l un diverge du handle<br/>manager.rs:368-381"]
+  MATCH["SubscriptionFilter::matches<br/>AND sur les 4 champs, None = joker<br/>protocol.rs:164-199"]
+  TX["handle.tx.send mpsc<br/>non borne donc jamais bloquant<br/>manager.rs:390"]
+  WLOOP["write loop serde_json puis Message::Text<br/>SEUL endroit qui ecrit sur la socket<br/>handler.rs:80-101"]
+end
+
+subgraph SINK["Evenement metier vers notification poussee — 🟠 cable, aucun FluxRuntime dans le depot"]
+  DELIVER["operateur deliver<br/>exige _payload pose par map en amont<br/>deliver.rs:52-57"]
+  REG["SinkRegistry::deliver<br/>sans registre le deliver ne fait RIEN<br/>deliver.rs:79-106"]
+  WSSINK["WebSocketSink::deliver via resolve_recipient<br/>explicite puis payload.recipient_id puis vars<br/>sinon broadcast, sinks/websocket.rs:68-89 mod.rs:51"]
+  DISP["ConnectionManagerDispatcher<br/>send_to_user ou broadcast_payload<br/>dispatcher.rs:50-60"]
+  USR["send_to_user compare handle.user_id<br/>0 connexion si aucun user associe<br/>manager.rs:292-316"]
+  SNOT["ServerMessage::Notification data<br/>pousse sans aucun abonnement client<br/>protocol.rs:100 manager.rs:298"]
+end
+
+subgraph AUTHZ["Autorisation de la surface — 🔴 refus par defaut, anonyme en pratique"]
+  FAIL["build_router refuse<br/>refuse_unenforced_surface si auth ARME<br/>mod.rs:112-121"]
+  UNENF["build_router_unenforced avertit puis monte<br/>seul usage reel : aletheia_server.rs:1945<br/>et les tests d integration"]
+  NOCTX["AuthContext jamais insere sur /ws<br/>auth.rs:127 vit dans auth_middleware<br/>edge_ingress journalise seulement"]
+  ANON["auth None donc tenant et user None<br/>associate_user jamais appele en production<br/>handler.rs:34-35 57-59"]
+  DEADN["allow dead_code sur associate_user<br/>commentaire Will be used when auth is implemented<br/>manager.rs:271 — contredit par handler.rs:58"]
+end
+
+subgraph PROOF["Preuves d execution — 🟠 une seule surface vraiment couverte"]
+  WTEST["websocket_integration.rs ✅ 8 tests<br/>connexion, ping, filtre, multi-client<br/>gate feature websocket hors defaut, Cargo.toml:165"]
+  GTEST["notification_e2e.rs 🟠 gRPC uniquement<br/>cfg feature grpc, zero mention de ws<br/>ligne 13"]
+end
+
+UP --> CONNECT --> WELCOME --> READLOOP
+READLOOP --> CLOSE
+READLOOP --> CSUB
+READLOOP --> CUNS
+READLOOP --> CPING
+READLOOP --> CUSTOM
+CSUB --> SSUB
+CSUB --> SEV
+BUS --> LOOP --> TENANT --> MATCH --> TX --> WLOOP
+DELIVER --> REG --> WSSINK
+WSSINK --> DISP --> USR --> SNOT --> TX
+FAIL --> UNENF --> NOCTX --> ANON
+ANON --> USR
+DEADN -.-> ANON
+USR -.-> SEV
+WTEST -.-> HS
+GTEST -.-> SINK
+
+classDef danger fill:#ffe0e0,stroke:#c0392b,stroke-width:2px,color:#5b1010
+classDef note fill:#fff6d6,stroke:#b8860b,stroke-dasharray:4 3,color:#4a3600
+class FAIL,ANON danger
+class DEADN,GTEST,NOCTX note

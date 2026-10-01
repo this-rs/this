@@ -1,0 +1,89 @@
+flowchart TB
+%% name: autorisation-des-liens
+%% PROUVE (lu dans le code, jamais suppose) : la decision d autoriser un lien est prise sur la FORME du
+%%   chemin, par une couche qui ne porte aucun registre de liens : le type de lien ne decide rien.
+%% SOURCES LUES : server/middleware/authorization.rs (requirement 616, declared_policy 564, decide 743,
+%%   middleware 807, abstention 837, evaluate 436), config/mod.rs (EntityAuthConfig 23, defaut 67),
+%%   core/link.rs (LinkAuthConfig 153, LinkDefinition.auth 217, required_fields 213), links/handlers.rs
+%%   (get_link_auth_policy 57, CreateLinkRequest 146, create_link 487 et 508, update_link 638 et 671),
+%%   exposure/rest/mod.rs 66 215 254, storage/in_memory.rs 236, host.rs 162 255, builder.rs 100.
+%% NON ETABLI : la couverture d une exposition GraphQL ou gRPC attachee par l application, et le contenu
+%%   reel de la configuration de deploiement.
+%% LEGENDE : ✅ existe et tourne · 🟠 ecrit/teste mais partiel ou non deploye · 🔴 refuse, avec sa raison ·
+%%   ⚪ amont reutilise tel quel
+subgraph ARM["✅ Armement : la couche est montee par defaut"]
+  F1["server/host.rs:162 et 255<br/>ServerHost.authorize<br/>vaut true par defaut"]
+  F2["exposure/rest/mod.rs:215<br/>le layer est monte<br/>si host.authorize"]
+  F3["exposure/rest/mod.rs:66 puis 254<br/>toutes les routes sont mergees<br/>AVANT le layer : il les couvre"]
+end
+
+subgraph RES["✅ La decision reelle : forme du chemin vers operation"]
+  B1["authorization.rs:807<br/>authorization_middleware<br/>lit AuthContext des extensions"]
+  B2["authorization.rs:826 vers 616<br/>requirement : segments et methode<br/>aucune lecture du type de lien"]
+  B3["GET ou HEAD, 3 segments et plus<br/>operation list_links<br/>authorization.rs:680<br/>route custom sous une entite incluse : limite 611"]
+  B4["POST a 3 segments : cree une entite liee<br/>operation create de la CIBLE<br/>authorization.rs:685 a 697"]
+  B5["POST et DELETE a 4 segments et plus<br/>create_link et delete_link<br/>PUT PATCH a 4 exactement : update_link<br/>authorization.rs:698 a 700"]
+  B6["pluriel inconnu ou forme non reconnue<br/>abstention, pas d invention<br/>authorization.rs:657 et 701"]
+end
+
+subgraph DON["✅ Sur quelle donnee : EntityAuthConfig de l entite source"]
+  C1["authorization.rs:564<br/>declared_policy joint par singular<br/>puis par plural de la route"]
+  C2["config/mod.rs:23<br/>EntityAuthConfig : 8 politiques<br/>dont list_links create_link delete_link"]
+  C3["config/mod.rs:67<br/>default_auth_policy<br/>vaut authenticated"]
+  C4["authorization.rs:719<br/>entite sans entree de config<br/>defaut applique, origin default"]
+end
+
+subgraph VER["✅ Verdict : fail-closed, et l abstention est un refus"]
+  D1["authorization.rs:759<br/>evaluate : politique lue<br/>puis AuthPolicy gouverne"]
+  D2["authorization.rs:764<br/>Allow si vrai, Deny si faux<br/>Deny si non tranchable"]
+  D3["authorization.rs:837<br/>abstention hors chemin public<br/>403 deny_abstain"]
+  D4["authorization.rs:910<br/>403 avec scope policy origin<br/>et reason dans le corps"]
+  D5["authorization.rs:887<br/>mode report_only : journalise<br/>laisse passer, en-tete x-this-rs-authz"]
+end
+
+subgraph MET["🟠 Metadonnee du lien : acceptee, jamais exigee"]
+  E1["links/handlers.rs:146<br/>CreateLinkRequest.metadata<br/>est un Option, donc facultatif"]
+  E2["links/handlers.rs:508<br/>create_link la passe telle quelle<br/>absente vaut None, le lien est cree"]
+  E3["core/link.rs:213 required_fields<br/>et config/mod.rs:282 is_valid_link<br/>declares, jamais appeles en production<br/>les seuls appels sont des tests"]
+  E4["links/handlers.rs:671<br/>update_link : metadata = payload<br/>un PUT sans metadata ECRASE l existante"]
+  E5["LINK_METADATA.md:467<br/>validation de la metadata<br/>laissee a l application"]
+end
+
+subgraph MORT["🔴 La voie par type de lien : declaree, jamais branchee"]
+  A1["core/link.rs:153<br/>LinkAuthConfig par type de lien<br/>list get create update delete"]
+  A2["links/handlers.rs:57<br/>get_link_auth_policy rend la politique<br/>du lien, ou None si auth absent"]
+  A3["aucun appelant de production<br/>grep : seuls les tests<br/>handlers.rs:1594 a 1658"]
+  A4["LINK_AUTHORIZATION.md:202<br/>montre un controle dans create_link<br/>ce code n existe pas dans handlers.rs"]
+end
+
+F1 --> F2 --> F3
+F3 --> B1
+B1 --> B2
+B2 --> B3
+B2 --> B4
+B2 --> B5
+B2 --> B6
+B3 --> C1
+B4 --> C1
+B5 --> C1
+C1 --> C2
+C2 --> C3
+C1 --> C4
+C2 --> D1
+C4 --> D1
+D1 --> D2
+B6 --> D3
+D2 --> D4
+D2 --> D5
+C1 -. "le type de lien n entre pas dans la jointure" .-> A2
+A1 --> A2
+A2 --> A3
+A3 -. "ecart doc et code" .-> A4
+E1 --> E2
+E2 -. "rien ne verifie required_fields" .-> E3
+E1 --> E4
+E3 -. "confirme par la doc" .-> E5
+classDef danger fill:#ffe0e0,stroke:#c0392b,color:#7b241c
+classDef note fill:#eef4ff,stroke:#2c5aa0,color:#1b3a6b
+class A1,A2,A3,A4 danger
+class B6,D3,E3,E4 note

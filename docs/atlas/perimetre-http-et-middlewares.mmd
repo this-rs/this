@@ -1,0 +1,88 @@
+flowchart TB
+%% name: perimetre-http-et-middlewares
+%% PROUVE (lu dans le code, jamais suppose) : l ordre que subit une requete est CORS, puis garde de domaine, puis authentification, puis locataire, puis autorisation, puis handler — parce qu axum execute les .layer en ordre INVERSE de leur application, et que rest/mod.rs applique l autorisation en premier et CORS en dernier. Chaque couche decide d une chose et d une seule : origine et hote, en-tetes, identite, locataire, droit. Et depuis le 2026-09-13, une abstention d autorisation hors chemin public declare est un REFUS en 403, jamais un passage.
+%% SOURCES LUES : this/src/server/exposure/rest/mod.rs (254-316, ordre des couches) ; middleware/origin.rs (domain_guard_middleware 60, effective_host 105, refused 127, cors_layer 150, tests 222-279) ; middleware/auth.rs (COOKIE_JETON 37, jeton_de_la_requete 44, cookie_vers_en_tete 82, auth_middleware 119) ; middleware/tenant.rs (32, resolve_tenant_id 51) ; middleware/authorization.rs (is_known_policy 171, public_paths 270, with_public_paths 350, evaluate 436, check_iam 496, requirement 616, decide 743, authorization_middleware 807) ; config/server.rs (ServerSecurityConfig 32, GraphExposureConfig 116, CorsConfig 140, DomainConfig 236, host_matches 288, validate 206 et 348) ; server/builder.rs (100, 313, 674-679) ; server/host.rs (255) ; bin/this-gateway.rs (3077-3090) ; tests/origin_surface.rs (130, 141, 322, 378) ; tests/abstention_refusee.rs (131, 186, 208, 236) ; tests/iam_http_perimeter.rs (348, 1031, 1117, 1166).
+%% NON ETABLI : je n ai ni compile ni lance un seul test ; l ordre des couches est deduit du sens d empilement des .layer et des commentaires du depot, pas observe a l execution. Je n ai pas lu l integralite de authorization.rs ni des 1495 lignes de iam_http_perimeter.rs, ni cherche ce que fait reellement this deploy sur un deploiement arme.
+%% LEGENDE : ✅ existe et tourne · 🟠 ecrit/teste mais partiel ou non deploye · 🔴 refuse, avec sa raison · ⚪ amont, reutilise tel quel
+
+subgraph AMONT["⚪ AMONT : hors du cadre, reutilise tel quel"]
+  cl["⚪ Client ou navigateur<br/>pose Host et Origin<br/>un pre-vol OPTIONS<br/>ne porte aucun jeton"]
+  cd["⚪ Caddy, en amont<br/>config/server.rs:464<br/>le framework DECRIT le Caddyfile<br/>il ne pilote pas le proxy"]
+end
+
+subgraph S1["✅ ORIGINE : CORS puis hote, avant toute identite"]
+  c1["✅ cors_layer -- origin.rs:150<br/>enabled=false donc None :<br/>aucun en-tete n est pose"]
+  d1["✅ domain_guard_middleware -- origin.rs:60<br/>hote effectif = Host normalise<br/>minuscules, sans port ni point final"]
+  d2["✅ X-Forwarded-Host<br/>lu SEULEMENT si trust_forwarded_host<br/>origin.rs:105-113"]
+  d3["🔴 hote non servi, ou Host absent<br/>421 MISDIRECTED_REQUEST<br/>origin.rs:67-76 et 127-139"]
+  d4["✅ DomainContext + TenantContext<br/>poses dans les extensions<br/>origin.rs:88-96"]
+  d5["🟠 allowed vide : aucune garde<br/>tout hote passe sans liste<br/>origin.rs:57-59, server.rs:313"]
+end
+
+subgraph S2["✅ IDENTITE : le cookie devient un en-tete, puis le jeton"]
+  a0["🟠 cookie_vers_en_tete -- auth.rs:82<br/>traduit this_token en Bearer<br/>ne verifie RIEN<br/>monte par this-gateway:3090"]
+  a1["✅ auth_middleware -- auth.rs:119<br/>le provider extrait le contexte<br/>l en-tete gagne sur le cookie<br/>auth.rs:44-64"]
+  a2["🔴 echec et default_policy different de public<br/>401 plus WWW-Authenticate Bearer<br/>sinon le contexte vaut Anonymous"]
+  t1["✅ tenant_resolver -- tenant.rs:32<br/>un locataire deja pose est respecte<br/>le domaine ne se fait pas ecraser"]
+  t2["🟠 ordre de resolution du locataire<br/>X-Tenant-Id, puis AuthContext,<br/>puis ?tenant_id= -- tenant.rs:51-78"]
+end
+
+subgraph S3["✅ POLITIQUES : route vers entite puis verdict"]
+  z1["✅ authorization_middleware -- authorization.rs:807<br/>lit AuthContext dans les extensions<br/>absent vaut Anonymous, fail-closed"]
+  z2["✅ requirement -- authorization.rs:616<br/>methode et segments resolus<br/>en entite plus operation"]
+  z3["🟠 entite sans entree de config<br/>defaut authenticated applique,<br/>origin: default le DIT"]
+  z4["🔴 politique hors vocabulaire<br/>is_known_policy faux donc refus<br/>authorization.rs:171 et 474"]
+  z5["🔴 perm: sans plan IAM<br/>non tranchable donc refus<br/>authorization.rs:502-515"]
+  z7["🟠 mode ReportOnly<br/>la requete passe, la reponse dit<br/>x-this-rs-authz -- authorization.rs:887"]
+  h1["✅ handler ou route d entite<br/>le seul noeud qui sert la donnee"]
+end
+
+subgraph S4["🔴 ABSTENTION : hors chemin public, c est un refus"]
+  b1["🔴 Decision::Abstain -- authorization.rs:837<br/>403 forbidden, verdict deny_abstain<br/>plus l en-tete x-this-rs-authz"]
+  b2["✅ chemins publics declares<br/>/health /healthz /auth/<br/>authorization.rs:270-274"]
+  b3["🔴 /graph sans graph.policy<br/>abstention donc 403,<br/>et la raison nomme le REMEDE<br/>authorization.rs:646-655"]
+  b4["🔴 faille des 4 segments<br/>l abstention laissait passer,<br/>le test l exige desormais en 403<br/>tests/abstention_refusee.rs:131"]
+end
+
+subgraph S5["🟠 ECARTS : ce qui est ecrit contre ce qui tourne"]
+  x1["🟠 authorization.rs:22-27 affirme<br/>jamais applique par defaut<br/>or builder.rs:100 pose true<br/>rest/mod.rs:207 le reconnait"]
+  x2["🟠 server.rs:110 dit /graph<br/>descriptif et public par defaut<br/>server.rs:49 dit 403 deny_abstain<br/>et c est le code qui tranche"]
+  x3["🟠 builder.rs:674 dit faux par defaut<br/>builder.rs:100 pose true<br/>le transfert 678 corrige le no-op"]
+  x4["🟠 iam_http_perimeter.rs:1156<br/>decrit un opt-out silencieux<br/>le test 1180 exige le contraire"]
+end
+
+  cl --> c1
+  cd -.-> d2
+  c1 --> d1
+  d1 --> d2
+  d2 --> d3
+  d1 --> d4
+  d1 -.->|"allowed vide"| d5
+  d4 --> t1
+  d5 --> t1
+  d1 --> a1
+  a0 --> a1
+  a1 --> a2
+  a1 --> t1
+  t1 --> z1
+  t1 --> t2
+  z1 --> z2
+  z2 --> z3
+  z2 --> z4
+  z2 --> z5
+  z2 --> b3
+  z1 --> b1
+  z1 --> z7
+  z1 -->|"Allow"| h1
+  z3 --> h1
+  b1 --> b2
+  b1 --> b4
+  x1 -.->|"contredit"| z1
+  x2 -.->|"contredit"| b3
+  x3 -.->|"meme defaut"| x1
+  x4 -.->|"decrit le bug corrige"| z1
+
+  classDef danger fill:#ffe5e5,stroke:#c0392b,color:#7b241c
+  classDef note fill:#eef2f7,stroke:#94a3b8,color:#334155
+  class d3,a2,z4,z5,b1,b3,b4 danger
+  class a0,d5,t2,z3,z7,x1,x2,x3,x4 note

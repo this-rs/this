@@ -1,0 +1,87 @@
+flowchart TB
+%% name: exposition-rest
+%% PROUVE (lu dans le code, jamais suppose) : RestExposure::build_router assemble UN routeur Axum
+%% a partir de morceaux fusionnes ; un morceau conditionnel absent ne laisse AUCUNE route plutot
+%% qu'une route vide. Les couches s'executent CORS d'abord, politiques en dernier — l'ordre
+%% d'ecriture est l'inverse de l'ordre d'execution.
+%% SOURCES LUES : rest/mod.rs (build_router:49, health_routes:322, couches:183-316),
+%% rest/auth_routes.rs (auth_router:222, verify_handler:159, refusal:212), rest/notifications.rs
+%% (notification_routes:53, ensure_self_middleware:125), rest/sse.rs:60, rest/gdpr_routes.rs:159,
+%% server/router.rs:116, server/entity_registry.rs:54, ui/routes.rs:32, graph/routes.rs:100,
+%% middleware/auth.rs:44, middleware/authorization.rs:270, deploy/mod.rs:787,
+%% bin/this-gateway.rs:2964, Cargo.toml:147.
+%% NON ETABLI : les chemins CRUD des entites viennent des descripteurs de l'APPLICATION via le
+%% trait EntityDescriptor, aucun chemin concret n'est ecrit dans le framework ; je n'ai pas lance
+%% le binaire, tout est lu et couvert par les tests cites.
+%% LEGENDE : ✅ existe et tourne · 🟠 ecrit/teste mais partiel ou non deploye · 🔴 refuse, avec sa
+%% raison · ⚪ amont, reutilise tel quel
+subgraph S1["✅ Socle toujours monte — RestExposure"]
+  r1["RestExposure::build_router<br/>mod.rs:49 fusionne les morceaux<br/>appele par deploy/mod.rs:787"]
+  h1["GET /health et GET /healthz<br/>mod.rs:322 — 200 status:ok<br/>service this-rs, teste mod.rs:368"]
+  e1["CRUD d entites<br/>host.entity_registry.build_routes<br/>mod.rs:62 — chemins donnes par l app"]
+  l1["Liens : build_link_routes<br/>GET /links/{link_id} router.rs:117<br/>GET /{type}/{id}/links router.rs:129"]
+  l2["/{src}/{sid}/{route}/{tid}<br/>GET POST PUT DELETE router.rs:122<br/>POST 201 handlers.rs:526, DELETE 204 :734"]
+  l3["/{type}/{id}/{route_name}<br/>GET et POST router.rs:118<br/>fallback GET vers chemin profond :133"]
+end
+subgraph S2["🟠 Monte SEULEMENT si la piece est attachee"]
+  s1["GET /events/stream — SSE<br/>mod.rs:75 si event_bus<br/>keep-alive 30 s sse.rs:96"]
+  n1["/notifications et /device-tokens<br/>mod.rs:84 si les 3 stores<br/>garde ensure_self notifications.rs:83"]
+  u1["GET et PUT /ui/state/{portee}<br/>mod.rs:102 si ui_state<br/>meme garde ui/routes.rs:35"]
+  g1["GET /graph, /graph/procedures<br/>/graph/spaces et /graph/identity<br/>mod.rs:111 — feature obrain"]
+  d1["DELETE /tenants/{tenant_id}/data<br/>mod.rs:146 si erasure_cascade<br/>200 erased gdpr_routes.rs:150"]
+  f1["repli multi-sites frontend<br/>fallback_service mod.rs:174<br/>feature frontend, couvert par les couches"]
+end
+subgraph S3["✅ La porte — contrat auth/verify"]
+  v1["GET et POST /auth/verify<br/>auth_routes.rs:228<br/>lit Bearer PUIS cookie this_token"]
+  v2["Ordre des controles : signature<br/>EdDSA, exp, iss, puis revocation jti<br/>auth_routes.rs:164 a 180"]
+  v3["401 + WWW-Authenticate Bearer<br/>motifs : missing_token :161<br/>invalid_token :173, revoked_token :179"]
+  v4["200 : en-tetes x-this-subject<br/>x-this-tenant et x-this-roles :182<br/>corps JSON sub tenant roles exp iss"]
+end
+subgraph S4["🟠 STS — emettre les jetons, feature wami"]
+  t1["POST /auth/token — 200 paire<br/>plus Set-Cookie HttpOnly SameSite<br/>401 invalid_credentials :66"]
+  t2["GET /auth/keys — 200 JWKS<br/>500 jwks_generation_failed :92<br/>POST /auth/refresh 200 ou 401 :107"]
+  t3["POST /auth/revoke — 200<br/>corps status revoked :121<br/>revocation lue par la porte :177"]
+  t4["monte si host.sts_state mod.rs:160<br/>feature wami hors default et hors<br/>all Cargo.toml:166 — donc a activer"]
+end
+subgraph S5["⚪ Couches — l ordre EST la chaine"]
+  c1["CORS la plus EXTERNE mod.rs:309<br/>le pre-vol OPTIONS ne porte pas<br/>de jeton, il doit passer avant"]
+  c2["garde de domaine mod.rs:294<br/>hote non servi refuse en 421<br/>origin.rs:131"]
+  c3["authentification puis locataire<br/>mod.rs:276 a 281 — refus 401<br/>auth.rs:138"]
+  c4["politiques armees par defaut<br/>mod.rs:214 — refus 403<br/>abstention refusee hors chemins publics"]
+end
+subgraph S6["🔴 Refus et ecarts declares"]
+  p1["chemins publics declares<br/>/health /healthz /auth/<br/>authorization.rs:270 — tout autre<br/>chemin non juge est refuse"]
+  x1["ARCHITECTURE.md ne decrit que<br/>les routes de liens :246<br/>/auth /health /events/stream et<br/>/tenants/.../data n y figurent pas"]
+end
+r1 --> h1
+r1 --> e1
+r1 --> l1
+l1 --> l2
+l1 --> l3
+r1 --> s1
+r1 --> n1
+r1 --> u1
+r1 --> g1
+r1 --> d1
+r1 --> f1
+r1 --> t4
+t4 --> t1
+t4 --> t2
+t4 --> t3
+r1 --> v1
+v1 --> v2
+v2 --> v3
+v2 --> v4
+c1 --> c2
+c2 --> c3
+c3 --> c4
+c4 --> r1
+c4 --> p1
+n1 --> p1
+p1 --> x1
+classDef danger fill:#ffe0e0,stroke:#c0392b,color:#7b241c
+classDef note fill:#fff6d6,stroke:#b7950b,color:#5b4a00
+classDef gate fill:#e2f5e2,stroke:#1e8449,color:#145a32
+class p1,x1 danger
+class c1,c2,c3,c4 note
+class v1,v2,v4 gate
