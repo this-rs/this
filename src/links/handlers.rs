@@ -54,18 +54,22 @@ impl AppState {
     }
 
     /// Get the authorization policy for a link operation
+    ///
+    /// Délègue à `LinkAuthConfig::policy_for` : la traduction
+    /// « opération → politique » n'existe qu'à **un** endroit. Deux copies d'un
+    /// même vocabulaire finissent par diverger — et celui-ci décide
+    /// d'autorisations. L'ancienne copie locale rendait de plus
+    /// `"authenticated"` pour une opération **inconnue** : une politique
+    /// inventée, là où l'appelant doit pouvoir distinguer « rien de déclaré ».
     pub fn get_link_auth_policy(
         link_definition: &LinkDefinition,
         operation: &str,
     ) -> Option<String> {
-        link_definition.auth.as_ref().map(|auth| match operation {
-            "list" => auth.list.clone(),
-            "get" => auth.get.clone(),
-            "create" => auth.create.clone(),
-            "update" => auth.update.clone(),
-            "delete" => auth.delete.clone(),
-            _ => "authenticated".to_string(),
-        })
+        link_definition
+            .auth
+            .as_ref()
+            .and_then(|auth| auth.policy_for(operation))
+            .map(str::to_string)
     }
 }
 
@@ -1633,10 +1637,13 @@ mod tests {
     fn test_get_link_auth_policy_unknown_operation() {
         let def = make_link_def_with_auth();
         let result = AppState::get_link_auth_policy(&def, "unknown_op");
+        // Avant : `Some("authenticated")` — une politique **inventée** pour une
+        // opération que la configuration ne nomme pas. L'appelant ne pouvait
+        // alors pas distinguer « rien de déclaré » d'un « authenticated »
+        // délibéré. `None` est le seul constat honnête.
         assert_eq!(
-            result,
-            Some("authenticated".to_string()),
-            "unknown operations should default to 'authenticated'"
+            result, None,
+            "une opération hors vocabulaire ne doit pas produire de politique"
         );
     }
 

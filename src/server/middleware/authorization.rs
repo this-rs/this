@@ -6,8 +6,13 @@
 //! - `EntityAuthConfig` (`list`/`get`/`create`/`update`/`delete`/`list_links`/
 //!   `create_link`/`delete_link`) n'était lu **nulle part** hors de la
 //!   configuration ;
-//! - `AppState::get_link_auth_policy` calculait bien une politique par
-//!   opération de lien, mais n'avait **aucun appelant de production** ;
+//! - `LinkAuthConfig` — la politique **par type de lien** — était déclaré et
+//!   lu par personne : `AppState::get_link_auth_policy` calculait bien une
+//!   politique par opération de lien, mais n'avait **aucun appelant de
+//!   production**. Elle est désormais appliquée ici, **avant** la politique de
+//!   l'entité source quand le chemin nomme une route de lien déclarée
+//!   (`declared_link_policy`) : « lire les factures d'une commande » n'est pas
+//!   « lire les commandes » ;
 //! - le moteur de politiques, lui, était **complet** : `AuthPolicy` (`Public`,
 //!   `Authenticated`, `Owner`, `HasRole`, `ServiceOnly`, `AdminOnly`, `And`,
 //!   `Or`, `Not`, `Custom`, `Resolver`), `AuthPolicy::parse_policy`,
@@ -69,7 +74,7 @@ pub enum Requirement {
     Policy {
         /// Type d'entité **source** (le pluriel de la route décide, pas le type
         /// d'arête : une route de lien est gouvernée par la politique du lien
-        /// déclarée pour l'entité source).
+        /// déclarée pour l'entité source, sinon par celle de l'entité source).
         entity_type: String,
         /// Opération (`list`, `get`, `create`, `update`, `delete`, `list_links`,
         /// `create_link`, `delete_link`).
@@ -593,6 +598,57 @@ impl Authorization {
         path.split('/').filter(|s| !s.is_empty()).collect()
     }
 
+    /// La politique déclarée pour le **type de lien** que ce chemin emprunte.
+    ///
+    /// # Pourquoi ce chemin existe
+    ///
+    /// `LinkAuthConfig` (`core/link.rs`) permet de déclarer une politique **par
+    /// type de lien** — plus précise que celle de l'entité source : « lire les
+    /// factures d'une commande » n'est pas « lire les commandes ». Il était
+    /// déclaré, documenté, testé… et lu par **aucun** appelant de production :
+    /// la décision se prenait sur la forme du chemin, avec l'`EntityAuthConfig`
+    /// de l'entité source. Une politique déclarée et jamais appliquée est pire
+    /// qu'une politique absente : elle donne l'assurance d'un réglage qui n'a
+    /// pas eu lieu.
+    ///
+    /// La résolution est celle du **routeur** lui-même (`LinkRouteRegistry`) :
+    /// un lien se désigne par le couple `(type d'entité, nom de route)`, dans un
+    /// sens ou dans l'autre. On ne devine donc rien : on cherche la définition
+    /// déclarée dont le **nom de route est celui du chemin**, du côté où le
+    /// chemin se trouve (source en marche avant, cible en marche arrière).
+    ///
+    /// `None` = aucune définition ne porte d'`auth` pour cette route : le
+    /// comportement d'avant est **inchangé** (politique de l'entité, puis défaut
+    /// du framework). C'est ce qui rend ce correctif sans effet de bord sur les
+    /// configurations existantes.
+    fn declared_link_policy(
+        &self,
+        segments: &[&str],
+        scope_entity: &str,
+        operation: &str,
+    ) -> Option<String> {
+        // Seules les opérations dont le 3ᵉ segment est un **nom de route** :
+        // `POST /{entité}/{id}/{cible}` (3 segments) crée une entité liée, son
+        // 3ᵉ segment est un pluriel d'entité, pas une route de lien.
+        if !matches!(
+            operation,
+            "list_links" | "create_link" | "update_link" | "delete_link" | "get_link"
+        ) {
+            return None;
+        }
+        let route = *segments.get(2)?;
+        let definition = self.config.links.iter().find(|def| {
+            def.auth.is_some()
+                && ((def.source_type == scope_entity && def.forward_route_name == route)
+                    || (def.target_type == scope_entity && def.reverse_route_name == route))
+        })?;
+        definition
+            .auth
+            .as_ref()?
+            .policy_for(operation)
+            .map(str::to_string)
+    }
+
     /// **La résolution** : route → (entité, opération).
     ///
     /// Les formes reconnues sont celles que this-rs génère lui-même :
@@ -708,6 +764,19 @@ impl Authorization {
                 };
             }
         };
+
+        // **Le type de lien passe avant l'entité.** Une politique déclarée sur le
+        // lien (« lire les factures d'une commande ») est plus précise que celle
+        // de l'entité source (« lire les commandes ») : quand elle existe, c'est
+        // elle qui décide. Sinon, rien ne change — c'est le `match` ci-dessous.
+        if let Some(policy) = self.declared_link_policy(&segments, &scope_entity, operation) {
+            return Requirement::Policy {
+                entity_type: scope_entity.clone(),
+                operation: operation.to_string(),
+                policy,
+                origin: PolicyOrigin::Declared,
+            };
+        }
 
         match self.declared_policy(&scope_entity, &scope_plural, operation) {
             Some(policy) => Requirement::Policy {
@@ -937,7 +1006,7 @@ fn header_value(value: &str) -> axum::http::HeaderValue {
 mod tests {
     use super::*;
     use crate::config::EntityConfig;
-    use crate::core::link::LinkDefinition;
+    use crate::core::link::{LinkAuthConfig, LinkDefinition};
     use crate::server::entity_registry::EntityDescriptor;
 
     struct Descriptor {
@@ -1004,6 +1073,257 @@ mod tests {
             list: "public".to_string(),
             ..Default::default()
         }
+    }
+
+    // ── Politiques par TYPE DE LIEN ──────────────────────────────────────
+    //
+    // `LinkAuthConfig` était déclaré, documenté, testé… et lu par aucun
+    // appelant de production. Ces tests tiennent l'application : une politique
+    // de lien décide **avant** celle de l'entité, et seulement sur SA route.
+
+    fn authz_avec_liens(
+        entities: Vec<EntityConfig>,
+        plurals: &[(&'static str, &'static str)],
+        links: Vec<LinkDefinition>,
+    ) -> Authorization {
+        let config = LinksConfig {
+            entities,
+            links,
+            validation_rules: None,
+            events: None,
+            sinks: None,
+            auth: None,
+        };
+        Authorization::new(
+            Arc::new(config),
+            &registry(plurals),
+            Arc::new(AuthResolverRegistry::new()),
+        )
+    }
+
+    /// Une définition de lien : `source` navigue vers `target` par `route`.
+    fn lien(
+        source: &str,
+        target: &str,
+        route: &str,
+        route_inverse: &str,
+        auth: Option<LinkAuthConfig>,
+    ) -> LinkDefinition {
+        LinkDefinition {
+            link_type: format!("{source}-{target}"),
+            source_type: source.to_string(),
+            target_type: target.to_string(),
+            forward_route_name: route.to_string(),
+            reverse_route_name: route_inverse.to_string(),
+            description: None,
+            required_fields: None,
+            auth,
+        }
+    }
+
+    /// Le cas qui justifie tout ce bloc : l'entité dit `public`, le lien dit
+    /// `admin_only`. C'est le lien qui doit décider — il est plus précis.
+    #[test]
+    fn une_politique_de_type_de_lien_decide_avant_celle_de_l_entite() {
+        let auth = EntityAuthConfig {
+            list_links: "public".to_string(),
+            ..Default::default()
+        };
+        let a = authz_avec_liens(
+            vec![entity("order", "orders", auth)],
+            &[("order", "orders")],
+            vec![lien(
+                "order",
+                "invoice",
+                "invoices",
+                "order",
+                Some(LinkAuthConfig {
+                    list: "admin_only".to_string(),
+                    ..Default::default()
+                }),
+            )],
+        );
+
+        assert_eq!(
+            a.requirement(&Method::GET, "/orders/42/invoices"),
+            Requirement::Policy {
+                entity_type: "order".to_string(),
+                operation: "list_links".to_string(),
+                policy: "admin_only".to_string(),
+                origin: PolicyOrigin::Declared,
+            }
+        );
+    }
+
+    /// Le même lien, emprunté dans l'autre sens, est jugé par la **même**
+    /// déclaration : la route inverse est la même arête vue de la cible.
+    #[test]
+    fn la_route_inverse_du_meme_lien_est_jugee_par_sa_declaration() {
+        let a = authz_avec_liens(
+            vec![
+                entity("order", "orders", EntityAuthConfig::default()),
+                entity("invoice", "invoices", EntityAuthConfig::default()),
+            ],
+            &[("order", "orders"), ("invoice", "invoices")],
+            vec![lien(
+                "order",
+                "invoice",
+                "invoices",
+                "order",
+                Some(LinkAuthConfig {
+                    list: "service_only".to_string(),
+                    ..Default::default()
+                }),
+            )],
+        );
+
+        assert_eq!(
+            a.requirement(&Method::GET, "/invoices/7/order"),
+            Requirement::Policy {
+                entity_type: "invoice".to_string(),
+                operation: "list_links".to_string(),
+                policy: "service_only".to_string(),
+                origin: PolicyOrigin::Declared,
+            }
+        );
+    }
+
+    /// Créer un lien se lit sur `auth.create` du **type de lien**, pas sur
+    /// `create_link` de l'entité source.
+    #[test]
+    fn creer_un_lien_suit_la_politique_de_creation_du_type_de_lien() {
+        let auth = EntityAuthConfig {
+            create_link: "public".to_string(),
+            ..Default::default()
+        };
+        let a = authz_avec_liens(
+            vec![entity("order", "orders", auth)],
+            &[("order", "orders")],
+            vec![lien(
+                "order",
+                "invoice",
+                "invoices",
+                "order",
+                Some(LinkAuthConfig {
+                    create: "admin_only".to_string(),
+                    ..Default::default()
+                }),
+            )],
+        );
+
+        assert_eq!(
+            a.requirement(&Method::POST, "/orders/42/invoices/invoice/7"),
+            Requirement::Policy {
+                entity_type: "order".to_string(),
+                operation: "create_link".to_string(),
+                policy: "admin_only".to_string(),
+                origin: PolicyOrigin::Declared,
+            }
+        );
+    }
+
+    /// **Sans `auth` sur le lien, rien ne change** — c'est ce qui rend ce
+    /// correctif sans effet de bord sur les configurations existantes.
+    #[test]
+    fn sans_auth_sur_le_lien_la_politique_de_l_entite_reste_seule() {
+        let auth = EntityAuthConfig {
+            list_links: "admin_only".to_string(),
+            ..Default::default()
+        };
+        let a = authz_avec_liens(
+            vec![entity("order", "orders", auth)],
+            &[("order", "orders")],
+            vec![lien("order", "invoice", "invoices", "order", None)],
+        );
+
+        assert_eq!(
+            a.requirement(&Method::GET, "/orders/42/invoices"),
+            Requirement::Policy {
+                entity_type: "order".to_string(),
+                operation: "list_links".to_string(),
+                policy: "admin_only".to_string(),
+                origin: PolicyOrigin::Declared,
+            }
+        );
+    }
+
+    /// Une politique de lien ne déborde **pas** sur les autres routes de la même
+    /// entité : sa portée est sa route, et rien d'autre.
+    #[test]
+    fn une_politique_de_lien_ne_deborde_pas_sur_les_autres_routes() {
+        let auth = EntityAuthConfig {
+            list: "public".to_string(),
+            ..Default::default()
+        };
+        let lien_verrouille = || {
+            vec![lien(
+                "order",
+                "invoice",
+                "invoices",
+                "order",
+                Some(LinkAuthConfig {
+                    list: "admin_only".to_string(),
+                    ..Default::default()
+                }),
+            )]
+        };
+        let a = authz_avec_liens(
+            vec![entity("order", "orders", auth)],
+            &[("order", "orders")],
+            lien_verrouille(),
+        );
+
+        // La liste des commandes garde SA politique.
+        assert_eq!(
+            a.requirement(&Method::GET, "/orders"),
+            Requirement::Policy {
+                entity_type: "order".to_string(),
+                operation: "list".to_string(),
+                policy: "public".to_string(),
+                origin: PolicyOrigin::Declared,
+            }
+        );
+        // Une navigation par une AUTRE route de la même entité aussi.
+        assert_eq!(
+            a.requirement(&Method::GET, "/orders/42/vehicules"),
+            Requirement::Policy {
+                entity_type: "order".to_string(),
+                operation: "list_links".to_string(),
+                policy: "authenticated".to_string(),
+                origin: PolicyOrigin::Declared,
+            }
+        );
+    }
+
+    /// Un lien déclaré pour **une autre entité source** ne décide pas ici : la
+    /// résolution est celle du routeur — le couple (type d'entité, nom de route),
+    /// jamais le nom de route seul.
+    #[test]
+    fn un_lien_d_une_autre_entite_source_ne_decide_pas() {
+        let a = authz_avec_liens(
+            vec![entity("order", "orders", EntityAuthConfig::default())],
+            &[("order", "orders")],
+            vec![lien(
+                "customer",
+                "invoice",
+                "invoices",
+                "customer",
+                Some(LinkAuthConfig {
+                    list: "admin_only".to_string(),
+                    ..Default::default()
+                }),
+            )],
+        );
+
+        assert_eq!(
+            a.requirement(&Method::GET, "/orders/42/invoices"),
+            Requirement::Policy {
+                entity_type: "order".to_string(),
+                operation: "list_links".to_string(),
+                policy: "authenticated".to_string(),
+                origin: PolicyOrigin::Declared,
+            }
+        );
     }
 
     // ── Résolution ───────────────────────────────────────────────────────

@@ -21,6 +21,20 @@ Scenario: Healthcare System
 
 ## 📝 Configuration
 
+> **⚠️ Corrigé le 2026-10-01 — le schéma ci-dessous ne chargeait PAS.**
+> Les valeurs d'`auth` sont des **politiques en texte** (`"authenticated"`,
+> `"admin_only"`, `"role:doctor"`, `"owner"`, `"perm:…"` — le vocabulaire du
+> moteur), pas des objets `{policy, roles}` : écrire l'ancienne forme faisait
+> **échouer le chargement** de la configuration.
+>
+> Deuxième correction, de fond : **ces politiques ne sont plus à appliquer à la
+> main**. Jusqu'ici elles étaient déclarées et lues par **aucun** appelant de
+> production ; le middleware d'autorisation consulte désormais le type de lien
+> **avant** la politique de l'entité source, quand le chemin nomme la route du
+> lien (`Authorization::declared_link_policy`). Une route de lien déclarée pour
+> une **autre** entité source ne décide pas ici : la résolution est celle du
+> routeur — le couple `(type d'entité, nom de route)`.
+
 ### Basic Auth Configuration
 
 ```yaml
@@ -31,15 +45,10 @@ links:
     forward_route_name: diagnoses
     reverse_route_name: patient
     auth:
-      create:
-        policy: RequireRole
-        roles: [doctor, admin]
-      delete:
-        policy: RequireRole
-        roles: [admin]  # Only admins can remove diagnoses
-      update:
-        policy: RequireRole
-        roles: [doctor, admin]
+      list: authenticated
+      create: role:doctor        # policy strings, not objects
+      update: role:doctor
+      delete: admin_only         # only admins can remove diagnoses
 ```
 
 ### Auth Policy Types
@@ -188,6 +197,16 @@ impl AuthProvider for YourAuthProvider {
 ```
 
 ### 2. Use in Handlers
+
+> **Plus nécessaire depuis le 2026-10-01.** L'application est faite par le
+> **middleware d'autorisation**, avant le handler : `LinkAuthConfig::policy_for`
+> traduit l'opération (`list_links`, `create_link`, …) en politique, et la
+> décision porte la portée et la provenance (`x-this-rs-authz-scope`,
+> `x-this-rs-authz-policy`). Recopier cette vérification dans chaque handler
+> créait un second chemin d'autorisation — la façon la plus sûre d'en laisser un
+> troué. Le code ci-dessous est conservé comme **exemple d'appel direct** de la
+> configuration (par exemple dans un handler maison), pas comme le chemin
+> recommandé.
 
 ```rust
 pub async fn create_link(
