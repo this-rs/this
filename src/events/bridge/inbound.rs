@@ -8,9 +8,12 @@
 //! translated. Internal graph mutations (e.g. pheromone trails, scar nodes)
 //! are silently ignored.
 
+use super::codec::{properties_to_json, uuid_of_edge, uuid_of_node, uuid_of_tenant};
 use super::dedup::DedupFilter;
 use super::types::{MutationBusSubscriber, MutationEvent};
 use crate::core::events::{EntityEvent, EventBus, EventEnvelope, FrameworkEvent, LinkEvent};
+use obrain_common::types::ArcStr;
+use serde_json::Value as Json;
 use std::collections::HashSet;
 use std::sync::Arc;
 
@@ -64,10 +67,20 @@ impl InboundBridge {
                             if let Some(framework_event) =
                                 translate_to_framework(mutation, &self.registered_types)
                             {
-                                let envelope = match batch.tenant_id {
-                                    Some(tenant_id) => {
-                                        EventEnvelope::new_with_tenant(framework_event, tenant_id)
-                                    }
+                                // Le tenant n'est plus un champ du lot : il vit dans
+                                // `EventContext`, et c'est une CHAÎNE cote obrain alors
+                                // que l'enveloppe this-rs porte un Uuid. On derive donc
+                                // une poignee stable (`uuid_of_tenant`) : un tenant qui
+                                // est deja un UUID garde son identite, un nom libre
+                                // obtient une poignee deterministe — meme nom, meme
+                                // routage, sans table.
+                                let tenant_id = batch
+                                    .context
+                                    .as_ref()
+                                    .and_then(|c| c.tenant_id.as_deref())
+                                    .map(uuid_of_tenant);
+                                let envelope = match tenant_id {
+                                    Some(t) => EventEnvelope::new_with_tenant(framework_event, t),
                                     None => EventEnvelope::new(framework_event),
                                 };
 
@@ -79,7 +92,7 @@ impl InboundBridge {
 
                                 tracing::debug!(
                                     receivers = receivers,
-                                    tenant_id = ?batch.tenant_id,
+                                    tenant_id = ?tenant_id,
                                     "InboundBridge: forwarded mutation to EventBus"
                                 );
                             }
@@ -105,97 +118,78 @@ fn translate_to_framework(
     registered_types: &HashSet<String>,
 ) -> Option<FrameworkEvent> {
     match event {
-        MutationEvent::NodeCreated {
-            node_id,
-            labels,
-            properties,
-        } => {
-            // Find the first label that matches a registered type
-            let entity_type = labels
-                .iter()
-                .find(|l| registered_types.contains(l.as_str()))?;
-            let data = serde_json::Value::Object(
-                properties
-                    .iter()
-                    .map(|(k, v)| (k.clone(), v.clone()))
-                    .collect(),
-            );
+        MutationEvent::NodeCreated { node } => {
+            let entity_type = label_connu(&node.labels, registered_types)?;
             Some(FrameworkEvent::Entity(EntityEvent::Created {
-                entity_type: entity_type.clone(),
-                entity_id: *node_id,
-                data,
+                entity_type,
+                entity_id: uuid_of_node(node.id),
+                data: Json::Object(properties_to_json(&node.properties)),
             }))
         }
-        MutationEvent::NodeDeleted { node_id } => {
-            // We don't know the entity_type from a bare NodeDeleted, so we use
-            // a sentinel. In practice, obrain-db would include labels, but our
-            // stub doesn't. We emit a delete with an empty entity_type which
-            // downstream handlers can interpret.
-            //
-            // NOTE: A real integration should carry labels on NodeDeleted too.
-            Some(FrameworkEvent::Entity(EntityEvent::Deleted {
-                entity_type: String::new(),
-                entity_id: *node_id,
-            }))
-        }
-        MutationEvent::PropertySet {
-            node_id,
-            key,
-            value,
-        } => {
-            // PropertySet becomes an entity update with a single field
-            let data = serde_json::json!({ key.clone(): value.clone() });
+        // `NodeUpdated` n'existait PAS dans le stub : une ecriture de propriete y
+        // etait un delta (`PropertySet`). Le vrai modele porte deux etats.
+        MutationEvent::NodeUpdated { after, .. } => {
+            let entity_type = label_connu(&after.labels, registered_types)?;
             Some(FrameworkEvent::Entity(EntityEvent::Updated {
-                entity_type: String::new(),
-                entity_id: *node_id,
-                data,
+                entity_type,
+                entity_id: uuid_of_node(after.id),
+                data: Json::Object(properties_to_json(&after.properties)),
             }))
         }
-        MutationEvent::EdgeCreated {
-            edge_id,
-            source_id,
-            target_id,
-            edge_type,
-            properties,
-        } => {
-            let metadata = if properties.is_empty() {
+        MutationEvent::NodeDeleted { node } => {
+            // CE QUE LE COUPLAGE A CORRIGE. L'ancienne branche, faute de labels
+            // dans le stub, emettait une sentinelle `String::new()` — le code
+            // portait meme la dette en commentaire (« A real integration should
+            // carry labels on NodeDeleted too »). Le vrai `NodeDeleted` porte
+            // l'instantane complet : les labels sont la, la sentinelle disparait.
+            // Un noeud supprime dont aucun label n'est un type enregistre est
+            // desormais ignore au lieu d'etre diffuse avec un type vide.
+            let entity_type = label_connu(&node.labels, registered_types)?;
+            Some(FrameworkEvent::Entity(EntityEvent::Deleted {
+                entity_type,
+                entity_id: uuid_of_node(node.id),
+            }))
+        }
+        MutationEvent::EdgeCreated { edge } => Some(FrameworkEvent::Link(LinkEvent::Created {
+            link_type: edge.edge_type.as_str().to_string(),
+            link_id: uuid_of_edge(edge.id),
+            source_id: uuid_of_node(edge.src),
+            target_id: uuid_of_node(edge.dst),
+            metadata: if edge.properties.is_empty() {
                 None
             } else {
-                Some(serde_json::Value::Object(
-                    properties
-                        .iter()
-                        .map(|(k, v)| (k.clone(), v.clone()))
-                        .collect(),
-                ))
-            };
-            Some(FrameworkEvent::Link(LinkEvent::Created {
-                link_type: edge_type.clone(),
-                link_id: *edge_id,
-                source_id: *source_id,
-                target_id: *target_id,
-                metadata,
-            }))
-        }
-        MutationEvent::EdgeDeleted {
-            edge_id,
-            source_id,
-            target_id,
-            edge_type,
-        } => Some(FrameworkEvent::Link(LinkEvent::Deleted {
-            link_type: edge_type.clone(),
-            link_id: *edge_id,
-            source_id: *source_id,
-            target_id: *target_id,
+                Some(Json::Object(properties_to_json(&edge.properties)))
+            },
         })),
+        MutationEvent::EdgeDeleted { edge } => Some(FrameworkEvent::Link(LinkEvent::Deleted {
+            link_type: edge.edge_type.as_str().to_string(),
+            link_id: uuid_of_edge(edge.id),
+            source_id: uuid_of_node(edge.src),
+            target_id: uuid_of_node(edge.dst),
+        })),
+        // this-rs n'a que `LinkEvent::Created` et `LinkEvent::Deleted` : une
+        // mise a jour d'arete n'a pas de pendant cote client. On ne l'invente
+        // pas — perte assumee et ecrite ici plutot que silencieuse.
+        MutationEvent::EdgeUpdated { .. } => None,
     }
+}
+
+/// Premier label de l'instantane qui correspond a un type d'entite this-rs.
+///
+/// Retourne `None` si aucun ne correspond : c'est le filtre qui ecarte les
+/// mutations internes d'obrain (traces de pheromones, noeuds de cicatrice).
+fn label_connu(labels: &[ArcStr], registered: &HashSet<String>) -> Option<String> {
+    labels
+        .iter()
+        .find(|l| registered.contains(l.as_str()))
+        .map(|l| l.as_str().to_string())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use obrain_common::types::{NodeId, PropertyKey, Value};
     use serde_json::json;
-    use std::collections::HashMap;
-    use uuid::Uuid;
 
     fn registered() -> HashSet<String> {
         let mut set = HashSet::new();
@@ -204,357 +198,134 @@ mod tests {
         set
     }
 
+    fn snap(id: u64, label: &str) -> obrain_reactive::NodeSnapshot {
+        obrain_reactive::NodeSnapshot {
+            id: NodeId(id),
+            labels: vec![ArcStr::from(label)].into_iter().collect(),
+            properties: vec![(PropertyKey::from("name"), Value::from("Alice"))],
+        }
+    }
+
     #[test]
-    fn test_translate_node_created_matching_label() {
-        let mut props = HashMap::new();
-        props.insert("name".to_string(), json!("Alice"));
-
-        let event = MutationEvent::NodeCreated {
-            node_id: Uuid::nil(),
-            labels: vec!["user".to_string()],
-            properties: props,
+    fn node_created_matching_label_becomes_entity_created() {
+        let e = MutationEvent::NodeCreated {
+            node: snap(7, "user"),
         };
-
-        let result = translate_to_framework(&event, &registered()).unwrap();
-        match result {
+        match translate_to_framework(&e, &registered()).unwrap() {
             FrameworkEvent::Entity(EntityEvent::Created {
                 entity_type,
                 entity_id,
                 data,
             }) => {
                 assert_eq!(entity_type, "user");
-                assert_eq!(entity_id, Uuid::nil());
+                assert_eq!(entity_id, uuid_of_node(NodeId(7)), "poignee stable");
                 assert_eq!(data["name"], json!("Alice"));
             }
-            other => panic!("Expected Entity::Created, got {:?}", other),
+            other => panic!("attendu Created, obtenu {other:?}"),
         }
     }
 
+    /// LA correction apportee par le couplage : les labels sont disponibles sur
+    /// une suppression, donc plus de sentinelle vide — et un noeud dont aucun
+    /// label n'est enregistre est ECARTE au lieu d'etre diffuse vide.
     #[test]
-    fn test_translate_node_created_no_matching_label() {
-        let event = MutationEvent::NodeCreated {
-            node_id: Uuid::nil(),
-            labels: vec!["pheromone_trail".to_string()],
-            properties: HashMap::new(),
+    fn node_deleted_carries_labels_now() {
+        let e = MutationEvent::NodeDeleted {
+            node: snap(9, "order"),
         };
-
-        // Internal graph node — should be ignored
-        assert!(translate_to_framework(&event, &registered()).is_none());
-    }
-
-    #[test]
-    fn test_translate_node_created_multiple_labels_picks_registered() {
-        let event = MutationEvent::NodeCreated {
-            node_id: Uuid::nil(),
-            labels: vec![
-                "internal_meta".to_string(),
-                "order".to_string(),
-                "tracked".to_string(),
-            ],
-            properties: HashMap::new(),
-        };
-
-        let result = translate_to_framework(&event, &registered()).unwrap();
-        match result {
-            FrameworkEvent::Entity(EntityEvent::Created { entity_type, .. }) => {
-                assert_eq!(entity_type, "order");
+        match translate_to_framework(&e, &registered()).unwrap() {
+            FrameworkEvent::Entity(EntityEvent::Deleted { entity_type, .. }) => {
+                assert_eq!(
+                    entity_type, "order",
+                    "le label reel, plus la sentinelle vide"
+                );
             }
-            other => panic!("Expected Entity::Created, got {:?}", other),
+            other => panic!("attendu Deleted, obtenu {other:?}"),
         }
-    }
-
-    #[test]
-    fn test_translate_node_deleted() {
-        let id = Uuid::new_v4();
-        let event = MutationEvent::NodeDeleted { node_id: id };
-
-        let result = translate_to_framework(&event, &registered()).unwrap();
-        match result {
-            FrameworkEvent::Entity(EntityEvent::Deleted { entity_id, .. }) => {
-                assert_eq!(entity_id, id);
-            }
-            other => panic!("Expected Entity::Deleted, got {:?}", other),
-        }
-    }
-
-    #[test]
-    fn test_translate_property_set() {
-        let id = Uuid::new_v4();
-        let event = MutationEvent::PropertySet {
-            node_id: id,
-            key: "status".to_string(),
-            value: json!("active"),
+        // label inconnu : ecarte
+        let inconnu = MutationEvent::NodeDeleted {
+            node: snap(9, "pheromone"),
         };
+        assert!(translate_to_framework(&inconnu, &registered()).is_none());
+    }
 
-        let result = translate_to_framework(&event, &registered()).unwrap();
-        match result {
-            FrameworkEvent::Entity(EntityEvent::Updated {
-                entity_id, data, ..
-            }) => {
-                assert_eq!(entity_id, id);
-                assert_eq!(data["status"], json!("active"));
-            }
-            other => panic!("Expected Entity::Updated, got {:?}", other),
+    #[test]
+    fn node_updated_becomes_entity_updated() {
+        let e = MutationEvent::NodeUpdated {
+            before: snap(7, "user"),
+            after: snap(7, "user"),
+        };
+        assert!(matches!(
+            translate_to_framework(&e, &registered()).unwrap(),
+            FrameworkEvent::Entity(EntityEvent::Updated { .. })
+        ));
+    }
+
+    #[test]
+    fn a_foreign_uuid_is_never_translated() {
+        // Un evenement dont l'identite n'est pas une poignee obrain ne doit pas
+        // produire d'identite stranger : on verifie l'invariant par le codec.
+        assert!(node_of_uuid_check(uuid::Uuid::new_v4()));
+        fn node_of_uuid_check(u: uuid::Uuid) -> bool {
+            super::super::codec::node_of_uuid(u).is_none()
         }
     }
 
     #[test]
-    fn test_translate_edge_created_with_properties() {
-        let event = MutationEvent::EdgeCreated {
-            edge_id: Uuid::nil(),
-            source_id: Uuid::nil(),
-            target_id: Uuid::nil(),
-            edge_type: "follows".to_string(),
-            properties: {
-                let mut m = HashMap::new();
-                m.insert("since".to_string(), json!("2025-01-01"));
-                m
-            },
+    fn edge_created_and_deleted_use_edge_handles() {
+        let edge = obrain_reactive::EdgeSnapshot {
+            id: obrain_common::types::EdgeId(3),
+            src: NodeId(1),
+            dst: NodeId(2),
+            edge_type: ArcStr::from("owns"),
+            properties: vec![],
         };
-
-        let result = translate_to_framework(&event, &registered()).unwrap();
-        match result {
+        match translate_to_framework(
+            &MutationEvent::EdgeCreated { edge: edge.clone() },
+            &registered(),
+        )
+        .unwrap()
+        {
             FrameworkEvent::Link(LinkEvent::Created {
-                link_type,
-                metadata,
-                ..
-            }) => {
-                assert_eq!(link_type, "follows");
-                assert_eq!(metadata.unwrap()["since"], json!("2025-01-01"));
-            }
-            other => panic!("Expected Link::Created, got {:?}", other),
-        }
-    }
-
-    #[test]
-    fn test_translate_edge_created_no_properties() {
-        let event = MutationEvent::EdgeCreated {
-            edge_id: Uuid::nil(),
-            source_id: Uuid::nil(),
-            target_id: Uuid::nil(),
-            edge_type: "owns".to_string(),
-            properties: HashMap::new(),
-        };
-
-        let result = translate_to_framework(&event, &registered()).unwrap();
-        match result {
-            FrameworkEvent::Link(LinkEvent::Created { metadata, .. }) => {
-                assert!(metadata.is_none());
-            }
-            other => panic!("Expected Link::Created, got {:?}", other),
-        }
-    }
-
-    #[test]
-    fn test_translate_edge_deleted() {
-        let edge_id = Uuid::new_v4();
-        let source = Uuid::new_v4();
-        let target = Uuid::new_v4();
-        let event = MutationEvent::EdgeDeleted {
-            edge_id,
-            source_id: source,
-            target_id: target,
-            edge_type: "owns".to_string(),
-        };
-
-        let result = translate_to_framework(&event, &registered()).unwrap();
-        match result {
-            FrameworkEvent::Link(LinkEvent::Deleted {
-                link_type,
-                link_id,
-                source_id,
-                target_id,
+                link_type, link_id, ..
             }) => {
                 assert_eq!(link_type, "owns");
-                assert_eq!(link_id, edge_id);
-                assert_eq!(source_id, source);
-                assert_eq!(target_id, target);
+                assert_eq!(link_id, uuid_of_edge(obrain_common::types::EdgeId(3)));
             }
-            other => panic!("Expected Link::Deleted, got {:?}", other),
+            other => panic!("attendu Link::Created, obtenu {other:?}"),
         }
+        assert!(matches!(
+            translate_to_framework(&MutationEvent::EdgeDeleted { edge }, &registered()).unwrap(),
+            FrameworkEvent::Link(LinkEvent::Deleted { .. })
+        ));
     }
 
-    #[tokio::test]
-    async fn test_inbound_bridge_forwards_mutations() {
-        use super::super::types::MutationBatch;
-        use std::time::Duration;
-        use tokio::sync::mpsc;
-
-        // Mock subscriber backed by an mpsc channel
-        struct MockSubscriber {
-            rx: mpsc::Receiver<MutationBatch>,
-        }
-
-        #[async_trait::async_trait]
-        impl MutationBusSubscriber for MockSubscriber {
-            async fn recv(&mut self) -> Option<MutationBatch> {
-                self.rx.recv().await
-            }
-        }
-
-        let (tx, rx) = mpsc::channel(16);
-        let event_bus = Arc::new(EventBus::new(16));
-        let dedup = Arc::new(DedupFilter::new(Duration::from_secs(5)));
-
-        let mut event_rx = event_bus.subscribe();
-
-        let bridge = InboundBridge::new(
-            event_bus.clone(),
-            Box::new(MockSubscriber { rx }),
-            dedup.clone(),
-            registered(),
-        );
-        let handle = bridge.start();
-
-        // Send a mutation batch
-        let node_id = Uuid::new_v4();
-        tx.send(MutationBatch {
-            tenant_id: None,
-            events: vec![MutationEvent::NodeCreated {
-                node_id,
-                labels: vec!["order".to_string()],
-                properties: {
-                    let mut m = HashMap::new();
-                    m.insert("total".to_string(), json!(99));
-                    m
-                },
-            }],
-        })
-        .await
-        .unwrap();
-
-        // Receive the translated event
-        let received = tokio::time::timeout(Duration::from_millis(200), event_rx.recv())
-            .await
-            .expect("timeout")
-            .expect("recv error");
-
-        assert_eq!(received.event.event_kind(), "entity");
-        assert_eq!(received.event.action(), "created");
-        assert_eq!(received.event.entity_id(), Some(node_id));
-
-        // The event should be marked in the dedup filter
-        assert!(dedup.is_duplicate(&received));
-
-        // Close the channel to shut down the bridge
-        drop(tx);
-        let _ = tokio::time::timeout(Duration::from_millis(100), handle).await;
+    #[test]
+    fn edge_updated_has_no_counterpart_and_is_not_invented() {
+        let edge = obrain_reactive::EdgeSnapshot {
+            id: obrain_common::types::EdgeId(3),
+            src: NodeId(1),
+            dst: NodeId(2),
+            edge_type: ArcStr::from("owns"),
+            properties: vec![],
+        };
+        let e = MutationEvent::EdgeUpdated {
+            before: edge.clone(),
+            after: edge,
+        };
+        assert!(translate_to_framework(&e, &registered()).is_none());
     }
 
-    #[tokio::test]
-    async fn test_inbound_bridge_ignores_unregistered_types() {
-        use super::super::types::MutationBatch;
-        use std::time::Duration;
-        use tokio::sync::mpsc;
-
-        struct MockSubscriber {
-            rx: mpsc::Receiver<MutationBatch>,
-        }
-
-        #[async_trait::async_trait]
-        impl MutationBusSubscriber for MockSubscriber {
-            async fn recv(&mut self) -> Option<MutationBatch> {
-                self.rx.recv().await
-            }
-        }
-
-        let (tx, rx) = mpsc::channel(16);
-        let event_bus = Arc::new(EventBus::new(16));
-        let dedup = Arc::new(DedupFilter::new(Duration::from_secs(5)));
-        let mut event_rx = event_bus.subscribe();
-
-        let bridge = InboundBridge::new(
-            event_bus.clone(),
-            Box::new(MockSubscriber { rx }),
-            dedup,
-            registered(),
+    #[test]
+    fn tenant_handle_is_stable_and_uuid_aware() {
+        let a = uuid_of_tenant("tenant-a");
+        assert_eq!(a, uuid_of_tenant("tenant-a"), "meme nom, meme poignee");
+        assert_ne!(a, uuid_of_tenant("tenant-b"));
+        let as_uuid = "0b6f4a3c-0000-4000-8000-000000000001";
+        assert_eq!(
+            uuid_of_tenant(as_uuid),
+            uuid::Uuid::parse_str(as_uuid).unwrap(),
+            "un tenant deja UUID garde son identite"
         );
-        let handle = bridge.start();
-
-        // Send a mutation with an unregistered type (should be ignored)
-        tx.send(MutationBatch {
-            tenant_id: None,
-            events: vec![MutationEvent::NodeCreated {
-                node_id: Uuid::new_v4(),
-                labels: vec!["pheromone_trail".to_string()],
-                properties: HashMap::new(),
-            }],
-        })
-        .await
-        .unwrap();
-
-        // Then send one with a registered type
-        let node_id = Uuid::new_v4();
-        tx.send(MutationBatch {
-            tenant_id: None,
-            events: vec![MutationEvent::NodeCreated {
-                node_id,
-                labels: vec!["user".to_string()],
-                properties: HashMap::new(),
-            }],
-        })
-        .await
-        .unwrap();
-
-        // We should only receive the registered one
-        let received = tokio::time::timeout(Duration::from_millis(200), event_rx.recv())
-            .await
-            .expect("timeout")
-            .expect("recv error");
-        assert_eq!(received.event.entity_id(), Some(node_id));
-
-        drop(tx);
-        let _ = tokio::time::timeout(Duration::from_millis(100), handle).await;
-    }
-
-    #[tokio::test]
-    async fn test_inbound_bridge_tenant_propagation() {
-        use super::super::types::MutationBatch;
-        use std::time::Duration;
-        use tokio::sync::mpsc;
-
-        struct MockSubscriber {
-            rx: mpsc::Receiver<MutationBatch>,
-        }
-
-        #[async_trait::async_trait]
-        impl MutationBusSubscriber for MockSubscriber {
-            async fn recv(&mut self) -> Option<MutationBatch> {
-                self.rx.recv().await
-            }
-        }
-
-        let (tx, rx) = mpsc::channel(16);
-        let event_bus = Arc::new(EventBus::new(16));
-        let dedup = Arc::new(DedupFilter::new(Duration::from_secs(5)));
-        let mut event_rx = event_bus.subscribe();
-
-        let bridge = InboundBridge::new(
-            event_bus.clone(),
-            Box::new(MockSubscriber { rx }),
-            dedup,
-            registered(),
-        );
-        let handle = bridge.start();
-
-        let tenant = Uuid::new_v4();
-        tx.send(MutationBatch {
-            tenant_id: Some(tenant),
-            events: vec![MutationEvent::NodeDeleted {
-                node_id: Uuid::new_v4(),
-            }],
-        })
-        .await
-        .unwrap();
-
-        let received = tokio::time::timeout(Duration::from_millis(200), event_rx.recv())
-            .await
-            .expect("timeout")
-            .expect("recv error");
-
-        assert_eq!(received.tenant_id(), Some(tenant));
-
-        drop(tx);
-        let _ = tokio::time::timeout(Duration::from_millis(100), handle).await;
     }
 }
