@@ -252,6 +252,27 @@ type SubscribeStream =
 /// 2. `x-tenant-id` metadata header (for explicit tenant specification)
 ///
 /// Returns `None` if no tenant can be determined (anonymous / system calls).
+///
+/// # ⚠️ DEUX DÉFAUTS CONSTATÉS ICI (2026-10-01) — non corrigés, écrits ici pour
+/// ne pas être perdus
+///
+/// 1. **Rien ne pose d'`AuthContext` sur une requête gRPC.** Aucun interceptor
+///    n'est monté par le framework : la branche 1 ne se déclenche donc
+///    **jamais** dans un déploiement qui ne l'ajoute pas lui-même, et le
+///    filtrage par locataire du flux repose uniquement sur l'en-tête ci-dessous
+///    — c'est-à-dire sur ce que le client veut bien écrire.
+/// 2. **L'en-tête `x-tenant-id` est cru sur parole.** Un client peut donc
+///    désigner le locataire dont il veut lire les événements ; et, pire, quand
+///    il n'en désigne **aucun**, la garde de filtrage
+///    (`if let Some(conn_tenant) = tenant_id && let Some(event_tenant) = …`)
+///    ne s'applique pas : le flux **non scopé reçoit les événements de TOUS les
+///    locataires**. Le commentaire dit « anonyme / appels système » ; c'est en
+///    fait, aujourd'hui, « tout ».
+///
+/// La correction attendue est celle du reste du dépôt — l'abstention devient un
+/// refus : un flux sans locataire **résolu** ne doit pas s'ouvrir. Elle touche à
+/// la sémantique du flux (et donc à ses tests), c'est pourquoi le constat est
+/// écrit au point qui décide, et non dans un rapport que personne ne relit.
 fn extract_tenant_id<T>(request: &Request<T>) -> Option<Uuid> {
     // 1. Try AuthContext from extensions (set by gRPC auth interceptor)
     if let Some(auth) = request.extensions().get::<AuthContext>()
