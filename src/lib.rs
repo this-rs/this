@@ -53,6 +53,9 @@
 
 pub mod config;
 pub mod core;
+/// Hôte de déploiement piloté par configuration : une structure qu'on déploie,
+/// sur laquelle on rattache des projets qui existent déjà.
+pub mod deploy;
 pub mod dns;
 pub mod entities;
 pub mod events;
