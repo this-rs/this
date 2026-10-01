@@ -58,6 +58,29 @@ pub struct RefreshRequest {
     pub refresh_token: String,
 }
 
+/// Une identité vérifiée par un annuaire externe — ce que `login` a besoin
+/// de savoir pour émettre un jeton, rien de plus.
+#[derive(Debug, Clone)]
+pub struct IdentiteVerifiee {
+    pub user_id: Uuid,
+    pub tenant_id: Uuid,
+    pub roles: Vec<String>,
+}
+
+/// Contrat de vérification d'identités déléguée (chantier STS-PERSISTANT).
+///
+/// Quand un annuaire est branché sur le STS ([`StsService::set_annuaire`]),
+/// il devient la **seule** source de vérité du login : l'annuaire en mémoire
+/// historique (comparaison en clair, réservé aux tests) n'est plus consulté.
+/// Implémenté par `storage::annuaire_identites::AnnuaireIdentites` (store
+/// obrain dédié, hash argon2id).
+pub trait AnnuaireVerification: Send + Sync {
+    /// Rend l'identité si — et seulement si — le couple login/mot de passe
+    /// est valide. `None` couvre indistinctement « inconnu » et « mauvais
+    /// mot de passe » (on ne renseigne pas un attaquant).
+    fn verifier_identite(&self, username: &str, mot_de_passe: &str) -> Option<IdentiteVerifiee>;
+}
+
 /// Internal user record for the simple built-in store
 struct UserRecord {
     user_id: Uuid,
@@ -77,6 +100,11 @@ pub struct StsService {
     refresh_token_ttl: Duration,
     revoked_tokens: Arc<RwLock<HashSet<String>>>,
     users: Arc<RwLock<HashMap<String, UserRecord>>>,
+    /// L'annuaire persisté, quand il est branché : il fait alors foi seul.
+    ///
+    /// `OnceLock` et non `Option` : il se pose à travers une référence partagée
+    /// (voir `set_annuaire`), une fois, au démarrage.
+    annuaire: std::sync::OnceLock<Arc<dyn AnnuaireVerification>>,
 }
 
 impl StsService {
@@ -94,7 +122,33 @@ impl StsService {
             refresh_token_ttl: Duration::hours(24),
             revoked_tokens: Arc::new(RwLock::new(HashSet::new())),
             users: Arc::new(RwLock::new(HashMap::new())),
+            annuaire: std::sync::OnceLock::new(),
         })
+    }
+
+    /// Branche l'annuaire persisté : à partir d'ici, `login` ne consulte plus
+    /// que lui (fail-closed : pas de repli sur l'annuaire en mémoire).
+    ///
+    /// ── POURQUOI `&self` ET NON `&mut self` (2026-09-20) ────────────────────
+    ///
+    /// Le host distribue le STS sous `Arc<StsService>`
+    /// (`StsState::sts: Arc<StsService>`) : un appelant qui construit son serveur
+    /// par `ServerBuilder` ne dispose donc **plus jamais** d'un `&mut` après le
+    /// `build_host()`, et ne pouvait de ce fait pas brancher d'annuaire — il
+    /// restait sur l'annuaire en mémoire, **en clair**, « réservé aux tests »
+    /// (voir le commentaire de `UserRecord`). Le magasin de mots de passe hachés
+    /// existait ; il était inatteignable depuis ce chemin.
+    ///
+    /// Le champ est donc un `OnceLock` : on le pose **une fois**, au démarrage, à
+    /// travers la référence partagée. Poser deux annuaires serait un changement
+    /// d'autorité à chaud, ce qu'aucun appelant ne demande et qu'il vaut mieux
+    /// refuser bruyamment que subir en silence.
+    ///
+    /// Rend `true` si l'annuaire a été installé, `false` s'il y en avait déjà un
+    /// (l'appelant peut alors le DIRE, plutôt que de croire avoir branché).
+    #[must_use]
+    pub fn set_annuaire(&self, annuaire: Arc<dyn AnnuaireVerification>) -> bool {
+        self.annuaire.set(annuaire).is_ok()
     }
 
     /// Set the access token TTL in seconds
@@ -108,7 +162,18 @@ impl StsService {
     }
 
     /// Issue a token pair for valid credentials.
+    ///
+    /// Avec un annuaire branché ([`Self::set_annuaire`]), c'est lui qui
+    /// vérifie (argon2id sur store persisté) — l'annuaire en mémoire
+    /// ci-dessous ne sert plus qu'aux tests et aux démos sans persistance.
     pub fn login(&self, credentials: &LoginCredentials) -> Result<TokenPair> {
+        if let Some(annuaire) = self.annuaire.get() {
+            let identite = annuaire
+                .verifier_identite(&credentials.username, &credentials.password)
+                .ok_or_else(|| anyhow::anyhow!("invalid credentials"))?;
+            return self.issue_token_pair(identite.user_id, identite.tenant_id, identite.roles);
+        }
+
         let users = self
             .users
             .read()
@@ -172,6 +237,16 @@ impl StsService {
             .read()
             .map(|set| set.contains(jti))
             .unwrap_or(false)
+    }
+
+    /// L'émetteur que la vérification doit **exiger**.
+    ///
+    /// Un jeton signé par un autre émetteur ne doit pas ouvrir une porte : la
+    /// signature seule ne dit pas *qui* a signé. Exposer l'émetteur permet à
+    /// [`verify_handler`](crate::server::exposure::rest::auth_routes) de le
+    /// vérifier au lieu de le supposer.
+    pub fn issuer(&self) -> &str {
+        &self.issuer
     }
 
     /// Register a user (for bootstrapping / testing).
@@ -376,6 +451,82 @@ mod tests {
             })
             .unwrap_err();
         assert!(err.to_string().contains("invalid credentials"));
+    }
+
+    // ---- annuaire délégué (chantier STS-PERSISTANT) ----
+
+    /// Un annuaire jouet : un seul couple valide, comptabilise les appels.
+    struct AnnuaireJouet {
+        tenant: Uuid,
+        user: Uuid,
+    }
+
+    impl AnnuaireVerification for AnnuaireJouet {
+        fn verifier_identite(
+            &self,
+            username: &str,
+            mot_de_passe: &str,
+        ) -> Option<IdentiteVerifiee> {
+            (username == "persistee" && mot_de_passe == "bon-mdp").then(|| IdentiteVerifiee {
+                user_id: self.user,
+                tenant_id: self.tenant,
+                roles: vec!["lecteur".into()],
+            })
+        }
+    }
+
+    #[test]
+    fn annuaire_branche_fait_foi_seul() {
+        let (priv_pem, pub_pem) = generate_test_keypair();
+        let mut sts = build_sts(&priv_pem);
+        let (user, tenant) = (Uuid::new_v4(), Uuid::new_v4());
+
+        // Un utilisateur en mémoire préexiste — il doit cesser de compter.
+        sts.register_user(
+            "fantome".into(),
+            "clair".into(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            vec![],
+        );
+        sts.set_annuaire(Arc::new(AnnuaireJouet { tenant, user }));
+
+        // Le couple de l'annuaire passe, et le jeton porte SON identité.
+        let pair = sts
+            .login(&LoginCredentials {
+                username: "persistee".into(),
+                password: "bon-mdp".into(),
+            })
+            .expect("login via l'annuaire");
+        let dk = decoding_key(&pub_pem);
+        let mut validation = Validation::new(Algorithm::EdDSA);
+        validation.set_issuer(&["test-issuer"]);
+        validation.set_audience::<&str>(&[]);
+        let claims = jsonwebtoken::decode::<StsClaims>(&pair.access_token, &dk, &validation)
+            .unwrap()
+            .claims;
+        assert_eq!(claims.sub, user.to_string());
+        assert_eq!(claims.tenant_id, tenant);
+        assert_eq!(claims.roles, vec!["lecteur".to_string()]);
+
+        // Mauvais mot de passe : refus.
+        assert!(
+            sts.login(&LoginCredentials {
+                username: "persistee".into(),
+                password: "faux".into(),
+            })
+            .is_err()
+        );
+
+        // Fail-closed : l'annuaire en mémoire n'est PLUS un repli.
+        assert!(
+            sts.login(&LoginCredentials {
+                username: "fantome".into(),
+                password: "clair".into(),
+            })
+            .is_err(),
+            "l'annuaire branché fait foi seul — pas de repli sur le clair"
+        );
     }
 
     // ---- refresh ----

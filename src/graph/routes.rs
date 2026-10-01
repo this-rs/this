@@ -867,9 +867,18 @@ mod tests {
         use crate::server::RestExposure;
         use crate::server::host::ServerHost;
 
-        let host =
-            Arc::new(ServerHost::minimal_for_test().with_graph_store(ObrainStore::new_in_memory()));
-        let router = RestExposure::build_router(host, vec![]).expect("routeur REST");
+        // **Couche d'autorisation désarmée, exprès** — sinon ce test ne prouve
+        // plus ce qu'il annonce. Depuis que l'abstention est un refus
+        // (2026-09-13), une route de graphe **sans `graph.policy` déclarée**
+        // rend 403, et une route **absente** rend 403 pour la même raison : le
+        // statut ne distingue plus « montée » de « non montée ». Le contrat de
+        // refus est verrouillé juste en dessous
+        // (`graph_reads_are_refused_when_no_policy_is_declared`) et au niveau de
+        // la couche par `tests/abstention_refusee.rs`.
+        let mut host =
+            ServerHost::minimal_for_test().with_graph_store(ObrainStore::new_in_memory());
+        host.authorize = false;
+        let router = RestExposure::build_router(Arc::new(host), vec![]).expect("routeur REST");
 
         let response = router
             .oneshot(
@@ -884,6 +893,50 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         let json = body_json(response).await;
         assert_eq!(json["schema"], crate::graph::relief::RELIEF_SCHEMA);
+    }
+
+    /// Le contrat de refus, **à l'endroit où la route est montée**.
+    ///
+    /// Un store est attaché, les routes existent — mais aucune `graph.policy`
+    /// n'est déclarée : la couche s'abstient, et une abstention est un refus.
+    /// Un appelant identifié n'y change rien (ce n'est pas une affaire
+    /// d'identité : la route n'a pas de garde). Le remède est de **déclarer**
+    /// la politique (`security.graph.policy`), jamais d'espérer un passage
+    /// silencieux — c'est exactement ce que le plan de déploiement réclame.
+    #[tokio::test]
+    async fn graph_reads_are_refused_when_no_policy_is_declared() {
+        use crate::server::RestExposure;
+        use crate::server::host::ServerHost;
+
+        let host =
+            Arc::new(ServerHost::minimal_for_test().with_graph_store(ObrainStore::new_in_memory()));
+        assert!(host.authorize, "l'autorisation est armée par défaut");
+        let router = RestExposure::build_router(host, vec![]).expect("routeur REST");
+
+        for uri in ["/graph", "/graph/identity", "/graph/spaces"] {
+            let response = router
+                .clone()
+                .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(
+                response.status(),
+                StatusCode::FORBIDDEN,
+                "`{uri}` sans politique déclarée : l'abstention refuse"
+            );
+            let json = body_json(response).await;
+            assert_eq!(
+                json["verdict"], "deny_abstain",
+                "le refus se nomme, il ne se devine pas : {json}"
+            );
+            assert!(
+                json["reason"]
+                    .as_str()
+                    .is_some_and(|r| r.contains("graph.policy")),
+                "et il NOMME le remède : un motif qui parle d'« entité enregistrée » \
+                 enverrait chercher au mauvais endroit : {json}"
+            );
+        }
     }
 
     #[tokio::test]
@@ -1128,7 +1181,53 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.status(),
+            StatusCode::FORBIDDEN,
+            "sans `graph.policy`, la couche s'abstient et l'abstention refuse : \
+             voir `graph_reads_are_refused_when_no_policy_is_declared`"
+        );
+        let json = body_json(response).await;
+        assert_eq!(json["verdict"], "deny_abstain");
+    }
+
+    /// **La route est servie dès qu'on déclare la politique** — le remède est
+    /// réel, pas théorique : même hôte, même store, une politique de lecture de
+    /// graphe déclarée, et le document sort.
+    #[tokio::test]
+    async fn declaring_a_graph_policy_serves_the_identity_contract() {
+        use crate::server::RestExposure;
+        use crate::server::host::ServerHost;
+        use crate::core::auth::AuthContext;
+
+        let mut host =
+            ServerHost::minimal_for_test().with_graph_store(ObrainStore::new_in_memory());
+        // `authorize` reste armé : c'est bien la DÉCLARATION qui ouvre la route.
+        let mut security = (*host.security).clone();
+        security.graph.policy = Some("authenticated".to_string());
+        host.security = Arc::new(security);
+
+        let router = RestExposure::build_router(Arc::new(host), vec![]).expect("routeur REST");
+        let router = router.layer(axum::Extension(AuthContext::User {
+            user_id: uuid::Uuid::from_u128(1),
+            tenant_id: uuid::Uuid::from_u128(9),
+            roles: vec![],
+        }));
+
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .uri("/graph/identity")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "politique déclarée + appelant identifié : la route répond"
+        );
         let json = body_json(response).await;
         assert_eq!(json["schema"], "this-rs/graph-identity/1");
     }

@@ -201,20 +201,33 @@ interne, ou appliquez le contrôle vous-même.
 
 Une base exposée par this-rs se branche à un moteur d'inférence **en respectant
 le protocole IAM**, à une condition : que les lectures du moteur soient
-**jugées**. Elles ne le sont pas par défaut — `/graph*` s'abstient, comme toute
-route hors entité — et c'est délibéré : un relief descriptif et public est ce
-qu'on veut pour observer une base sans droits. Pour un moteur, on déclare :
+**jugées**. Elles ne le sont pas par défaut — et depuis le 2026-09-13, **ne pas
+être jugées veut dire être refusées** : la couche d'autorisation s'abstient sur
+`/graph*` (comme sur toute route hors entité), et une abstention est un refus.
+Sans `graph.policy`, `GET /graph` rend donc **403 `deny_abstain`**, **même à un
+appelant identifié, même avec un store attaché** — le relief n'est plus public
+par accident (`tests/abstention_refusee.rs`, `tests/iam_http_perimeter.rs`).
+
+Un relief **descriptif et lisible sans droits** reste possible : il se
+**déclare**.
 
 ```yaml
 # config/server.yaml
 graph:
-  policy: "perm:graph:read"     # ou authenticated, admin_only, role:…
+  policy: "public"              # observable sans droits — choix EXPLICITE
+  # policy: "authenticated"     # tout porteur d'un jeton valide
+  # policy: "perm:graph:read"   # tranché par la décision IAM matérialisée
+  # policy: "admin_only"        # réservé à l'administration
 ```
 
 Dès lors, `/graph`, `/graph/hierarchy/{id}` et `/graph/identity*` sont **jugés
-comme n'importe quelle route** : un appelant sans droit reçoit **403**, et une
+comme n'importe quelle route** : `public` laisse passer tout le monde,
+`authenticated` exige un jeton, un appelant sans droit reçoit **403**, et une
 politique `perm:` est tranchée par la **décision IAM matérialisée** — le même
-chemin indexé que le reste de l'application.
+chemin indexé que le reste de l'application. Un projet qui préfère ne pas
+déclarer de politique peut désarmer la couche
+(`ServerBuilder::without_authorization()`, journalisé comme un avertissement) —
+et il assume alors l'accès libre de **toutes** ses routes non publiques.
 
 **Le moteur n'a rien à deviner** : `GET /graph → inference` publie le protocole.
 

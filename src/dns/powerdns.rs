@@ -2,10 +2,15 @@
 //!
 //! # Ce que ce module fait, et ce qu'il ne fait pas
 //!
-//! Il **lit** l'état d'une zone, **applique** un [`DnsPlan`] et demande la
+//! Il **lit** l'état d'une zone, **applique** un [`super::DnsPlan`] et demande la
 //! rectification. Il ne décide de rien : le plan vient de [`super::plan`], qui
 //! est une fonction pure, relisible, et qui ne touche jamais aux enregistrements
 //! hors périmètre (MX, TXT, NS…).
+//!
+//! (Le lien s'écrit en **chemin complet** à dessein : `DnsPlan` n'est importé
+//! dans ce module que sous la feature `powerdns` — un lien court serait
+//! introuvable sans elle, et *redondant* avec elle. Un lien qui ne tient que
+//! dans une configuration de features ne tient pas.)
 //!
 //! # La clé d'API ne vient pas du fichier
 //!

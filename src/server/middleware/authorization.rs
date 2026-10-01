@@ -636,6 +636,24 @@ impl Authorization {
             };
         }
 
+        // **Les lectures de graphe SANS politique déclarée.** Elles ne sont pas
+        // des routes d'entité : rien ne s'y rattache — et depuis que
+        // l'abstention est un refus, ce « rien » refuse. Le motif le **dit** :
+        // la raison générique (« `graph` n'est le pluriel d'aucune entité
+        // enregistrée ») enverrait chercher une entité manquante là où il
+        // manque une **politique**, et un opérateur qui cherche au mauvais
+        // endroit finit par désarmer la couche pour faire taire le symptôme.
+        if plural == &"graph" {
+            return Requirement::Abstain {
+                reason: "lectures de graphe (`/graph…`) : aucune `graph.policy` déclarée — \
+                         l'abstention est un refus. Pour les ouvrir délibérément, déclarez \
+                         `security.graph.policy` (`public`, `authenticated`, \
+                         `perm:graph:read`, `role:…`) ; pour les ouvrir sans garde, \
+                         désarmez l'autorisation."
+                    .to_string(),
+            };
+        }
+
         let Some((entity_type, _)) = self.entities.iter().find(|(_, p)| p == plural) else {
             return Requirement::Abstain {
                 reason: format!("`{plural}` n'est le pluriel d'aucune entité enregistrée"),

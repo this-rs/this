@@ -30,7 +30,7 @@ use axum::routing::{delete, get};
 use serde_json::Value as Json;
 use tower::ServiceExt;
 
-use this::config::{EntityAuthConfig, EntityConfig, LinksConfig};
+use this::config::{EntityAuthConfig, EntityConfig, LinksConfig, ServerSecurityConfig};
 use this::core::auth::AuthContext;
 use this::core::link::LinkDefinition;
 use this::core::module::Module;
@@ -124,7 +124,26 @@ fn host(
     delete_policy: &str,
     report_only: bool,
 ) -> anyhow::Result<Arc<this::server::host::ServerHost>> {
+    host_with_graph_policy(store, delete_policy, report_only, None)
+}
+
+/// Le même hôte, avec une **politique de lecture de graphe** déclarée.
+///
+/// Depuis que l'abstention est un refus (2026-09-13), `/graph*` sans
+/// `graph.policy` est refusé — **même à un appelant authentifié** : ce n'est pas
+/// une affaire d'identité, c'est une garde absente. Lire le relief sous une
+/// couche armée suppose donc de la **déclarer** — le geste que le plan de
+/// déploiement réclame déjà d'un projet en mode `enforce`.
+fn host_with_graph_policy(
+    store: Arc<ObrainStore>,
+    delete_policy: &str,
+    report_only: bool,
+    graph_policy: Option<&str>,
+) -> anyhow::Result<Arc<this::server::host::ServerHost>> {
+    let mut security = ServerSecurityConfig::default();
+    security.graph.policy = graph_policy.map(str::to_string);
     let builder = ServerBuilder::new()
+        .with_server_security(security)
         .register_module(LegacyModule {
             delete_policy: delete_policy.to_string(),
         })?
@@ -169,25 +188,53 @@ async fn call(
 #[tokio::test]
 async fn one_call_wires_obrain_identity_iam_and_enforcement() {
     let store = ObrainStore::new_in_memory();
+
+    // ── 1) Le chemin clé en main, **tel quel** ───────────────────────────────
     let host = host(Arc::clone(&store), "authenticated", false).expect("hôte");
 
-    // Le store est attaché, et le relief est servi.
+    // Le store est attaché, et l'application des politiques est armée sans
+    // qu'on l'ait demandée.
     assert!(host.graph_store().is_some());
+    assert!(host.authorize);
 
     let app = RestExposure::build_router(Arc::clone(&host), vec![]).expect("routeur");
+
+    // Les lectures de graphe n'ont **pas** de politique : depuis que
+    // l'abstention est un refus (2026-09-13), elles sont refusées — le relief
+    // n'est plus public par accident. C'est le prix, assumé, du fail-closed :
+    // lire la base demande de le DÉCLARER (étape 2 ci-dessous).
     let (status, _) = call(app.clone(), None, Method::GET, "/graph").await;
-    assert_eq!(status, StatusCode::OK, "le relief d'obrain est publié");
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "sans `graph.policy` déclarée, l'abstention refuse les lectures de graphe"
+    );
 
-    let (status, _) = call(app.clone(), None, Method::GET, "/graph/identity").await;
-    assert_eq!(status, StatusCode::OK, "le contrat d'identité est publié");
-
-    // Et l'application des politiques est armée sans qu'on l'ait demandée.
-    assert!(host.authorize);
     assert_eq!(
         call(app, None, Method::DELETE, "/orders/1").await.0,
         StatusCode::FORBIDDEN,
         "une route d'entité sans contexte est refusée"
     );
+
+    // ── 2) La lecture DÉCLARÉE : le relief et l'identité sont servis ─────────
+    let host = host_with_graph_policy(
+        Arc::clone(&store),
+        "authenticated",
+        false,
+        Some("authenticated"),
+    )
+    .expect("hôte");
+    let app = RestExposure::build_router(host, vec![]).expect("routeur");
+
+    let (status, _) = call(app.clone(), Some(user(9, 1)), Method::GET, "/graph").await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "politique déclarée + appelant identifié : le relief d'obrain est publié"
+    );
+
+    let (status, _) = call(app, Some(user(9, 1)), Method::GET, "/graph/identity").await;
+    assert_eq!(status, StatusCode::OK, "le contrat d'identité est publié");
 }
 
 // ---------------------------------------------------------------------------
@@ -361,8 +408,18 @@ async fn a_base_written_by_another_tool_is_adopted_through_the_turnkey_path() {
         }
     }
 
-    let host = host(Arc::clone(&store), "authenticated", false).expect("hôte");
+    // La lecture est **déclarée** (`graph.policy`) et l'appelant est identifié :
+    // depuis que l'abstention est un refus, un relief sans politique déclarée
+    // serait refusé même avec un store attaché.
+    let host = host_with_graph_policy(
+        Arc::clone(&store),
+        "authenticated",
+        false,
+        Some("authenticated"),
+    )
+    .expect("hôte");
     let app = RestExposure::build_router(host, vec![]).expect("routeur");
+    let app = app.layer(Extension(user(9, 1)));
 
     // Le comptage borné passe par l'identité dérivée : les deux nœuds sont
     // résolus alors qu'aucun ne porte `_uuid`.

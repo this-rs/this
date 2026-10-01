@@ -14,9 +14,25 @@
 //!    (`GET /graph`), l'identité canonique (`GET /graph/identity`), le plan IAM
 //!    matérialisé, l'autorisation armée, et le **bail d'écriture** si le store
 //!    est inscriptible — mais **pas** sur un store ouvert en lecture seule.
-//! 3. **L'abstention n'est pas un refus.** Une route que le framework ne
-//!    connaît pas (`/health`, `/graph`, une route personnalisée) n'est **jamais**
-//!    refusée par la couche d'autorisation : c'est le routeur qui répond.
+//!    ⚠️ **Lire le relief sous une couche armée demande de DÉCLARER
+//!    `graph.policy`** : voir le point 3, et `with_graph_policy` plus bas.
+//! 3. **L'abstention EST un refus** (contrat du 2026-09-13, cf.
+//!    `tests/abstention_refusee.rs`). Ce fichier affirmait l'inverse — que
+//!    `/health`, `/graph` et une route personnalisée n'étaient *jamais* refusés
+//!    par la couche. C'était vrai jusqu'à la faille 4-segments : une route non
+//!    reconnue traversait un service armé sans décision. Aujourd'hui, seuls les
+//!    chemins **déclarés publics** passent (`/health`, `/healthz`, `/auth/…`) ;
+//!    partout ailleurs, et notamment sur les lectures de graphe sans
+//!    `graph.policy`, la réponse est **403 `deny_abstain`**.
+//!
+//! # Ce que ça change pour lire un graphe
+//!
+//! Un store attaché ne rend plus le relief public par accident : il faut
+//! **déclarer** la politique de lecture (`security.graph.policy`), exactement ce
+//! que le plan de déploiement réclame déjà (« mode `enforce` sans
+//! `graph.policy` »). Les tests qui lisent le document le font donc avec
+//! [`with_graph_policy`] **et** un contexte d'authentification : c'est le
+//! parcours réel d'un consommateur.
 //!
 //! # Comment le contexte d'authentification est injecté
 //!
@@ -233,6 +249,21 @@ fn host_with_store(auth: EntityAuthConfig, store: Arc<ObrainStore>) -> anyhow::R
 
 fn router(host: ServerHost) -> Router {
     router_with(host, vec![link_mutation_routes()])
+}
+
+/// **Déclare `graph.policy` sur un hôte déjà bâti.**
+///
+/// Depuis que l'abstention est un refus, un `/graph*` sans politique déclarée
+/// rend 403 — **même à un appelant identifié** : ce n'est pas une affaire
+/// d'identité, la route n'a pas de garde. Lire le relief suppose donc de la
+/// déclarer ; c'est le geste que `this deploy` réclame d'un projet en mode
+/// `enforce`, et c'est la seule façon de vérifier le contenu du document
+/// **sous la couche armée** plutôt qu'avec la couche retirée.
+fn with_graph_policy(mut host: ServerHost, policy: &str) -> ServerHost {
+    let mut security = (*host.security).clone();
+    security.graph.policy = Some(policy.to_string());
+    host.security = Arc::new(security);
+    host
 }
 
 fn router_with(host: ServerHost, custom: Vec<Router>) -> Router {
@@ -978,15 +1009,27 @@ async fn a_perm_refusal_says_the_iam_decided() {
 }
 
 // ===========================================================================
-// 5. ABSTENTION ≠ REFUS
+// 5. ABSTENTION = REFUS
 // ===========================================================================
 
-/// La couche d'autorisation ne juge **que** les routes d'entité qu'elle sait
-/// résoudre. Partout ailleurs elle s'abstient : le routeur répond, et le statut
-/// est celui du routeur — **jamais 403**.
+/// **L'abstention est un refus** (contrat du 2026-09-13), vérifié sur le routeur
+/// REST réel, avec un store attaché.
+///
+/// Ce test affirmait l'inverse — son nom le disait. C'était le contrat d'avant
+/// la faille 4-segments : une route non reconnue traversait un service armé
+/// **sans décision**. Le contrat actuel :
+///
+/// * seuls les chemins **déclarés publics** passent (`/health`) ;
+/// * une route inconnue, une route personnalisée, ou une lecture de graphe
+///   **sans `graph.policy`** rendent **403**, et la réponse le **nomme**
+///   (`verdict: deny_abstain`) au lieu de laisser deviner ;
+/// * conséquence assumée du fail-closed : « route absente » et « route sans
+///   garde » ne se distinguent plus par le **statut** (403 dans les deux cas) —
+///   c'est le corps qui les distingue, et `no_graph_surface_exists_when_no_store_is_attached`
+///   montre l'absence avec la couche retirée.
 #[tokio::test]
-async fn an_unknown_route_is_never_refused_by_the_authorization_layer() {
-    // Politiques volontairement strictes : tout ce qui n'est pas abstenu tombe.
+async fn an_abstention_is_a_refusal_on_the_real_router() {
+    // Politiques volontairement strictes : tout ce qui est jugé tombe.
     let strict = EntityAuthConfig {
         list: "admin_only".to_string(),
         get: "admin_only".to_string(),
@@ -1003,57 +1046,106 @@ async fn an_unknown_route_is_never_refused_by_the_authorization_layer() {
     let custom = Router::new().route("/custom/ping", get(ping));
     let app = router_with(host, vec![custom, link_mutation_routes()]);
 
-    // `/health` : montée par le framework lui-même, et pas une route d'entité.
+    // `/health` : chemin **déclaré public** par la couche elle-même — le seul
+    // passage qui reste, et c'est volontaire (liveness).
     let (status, _) = call(&app, Method::GET, "/health").await;
     assert_eq!(
         status,
         StatusCode::OK,
-        "`/health` n'appartient à aucune entité : abstention, donc pas de refus"
+        "`/health` est un chemin public déclaré : c'est le seul qui passe sans garde"
     );
 
-    // `/graph` : le relief, monté parce qu'un store est branché.
-    let (status, _) = call(&app, Method::GET, "/graph").await;
+    // `/graph` : la route est bien montée (un store est branché) — mais aucune
+    // `graph.policy` n'est déclarée, donc abstention, donc refus.
+    let (status, body) = call(&app, Method::GET, "/graph").await;
     assert_eq!(
         status,
-        StatusCode::OK,
-        "`/graph` est une route de relief : la couche d'autorisation s'abstient"
+        StatusCode::FORBIDDEN,
+        "`/graph` sans `graph.policy` : l'abstention refuse — {body}"
+    );
+    assert_eq!(
+        body["verdict"], "deny_abstain",
+        "le refus se nomme : {body}"
+    );
+    assert!(
+        body["reason"]
+            .as_str()
+            .is_some_and(|r| r.contains("graph.policy")),
+        "et il nomme le REMÈDE : la raison générique (« n'est le pluriel d'aucune \
+         entité ») ferait chercher une entité manquante là où il manque une \
+         politique — un opérateur qui cherche au mauvais endroit désarme la \
+         couche pour faire taire le symptôme : {body}"
     );
 
     // Une route personnalisée : le framework ne fabrique pas de politique pour
-    // ce qu'il ne connaît pas.
-    let (status, _) = call(&app, Method::GET, "/custom/ping").await;
+    // ce qu'il ne connaît pas — et ne pas en fabriquer, désormais, refuse.
+    let (status, body) = call(&app, Method::GET, "/custom/ping").await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "route personnalisée : {body}");
+    assert_eq!(body["verdict"], "deny_abstain");
+
+    // `/graph/identity` : même famille, même sort.
+    let (status, _) = call(&app, Method::GET, "/graph/identity").await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    // Une route inexistante sous un pluriel inconnu : refusée aussi — et la
+    // raison dit que le pluriel est inconnu, pas que l'identité manque.
+    let (status, body) = call(&app, Method::GET, &format!("/inconnus/{ORDER_ID}/items")).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    assert!(
+        body["reason"]
+            .as_str()
+            .is_some_and(|r| r.contains("inconnus")),
+        "le refus dit POURQUOI : {body}"
+    );
+
+    // Et une forme à un seul segment, que le framework ne reconnaît pas du tout.
+    let (status, body) = call(&app, Method::GET, "/inconnu").await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+}
+
+// ===========================================================================
+// 5 bis. DÉCLARER LA POLITIQUE ROUVRE LA LECTURE
+// ===========================================================================
+
+/// **Le remède est réel, pas théorique.** Même hôte, même store : on déclare
+/// `graph.policy` et on présente une identité, et le document sort.
+///
+/// C'est le parcours d'un consommateur de la base (un moteur d'inférence, un
+/// tableau de bord) : il ne peut plus lire par accident, il lit **par droit
+/// déclaré**.
+#[tokio::test]
+async fn declaring_a_graph_policy_serves_the_relief_under_the_armed_layer() {
+    let store = ObrainStore::new_in_memory();
+    let host = with_graph_policy(
+        host_with_store(EntityAuthConfig::default(), store).expect("hôte"),
+        "authenticated",
+    );
+    assert!(host.authorize, "la couche reste armée : c'est la déclaration qui ouvre");
+    let app = as_context(router(host), ctx_user());
+
+    let (status, relief) = call(&app, Method::GET, "/graph").await;
     assert_eq!(
         status,
         StatusCode::OK,
-        "une route personnalisée n'est pas jugée par la couche : 200, pas 403"
+        "politique déclarée + appelant identifié : le relief est servi"
     );
+    assert_eq!(relief["schema"], RELIEF_SCHEMA);
 
-    // `/graph/identity` : même famille.
-    let (status, _) = call(&app, Method::GET, "/graph/identity").await;
+    let (status, identity) = call(&app, Method::GET, "/graph/identity").await;
     assert_eq!(status, StatusCode::OK);
+    assert_eq!(identity["scheme"], ENTITY_ID_SCHEME);
 
-    // Une route réellement inexistante sous un pluriel inconnu : c'est le
-    // routeur qui tranche, et le statut est un 404 de résolution de route.
-    let (status, _) = call(&app, Method::GET, &format!("/inconnus/{ORDER_ID}/items")).await;
-    assert_ne!(
-        status,
-        StatusCode::FORBIDDEN,
-        "abstention : la couche d'autorisation ne refuse JAMAIS une route qu'elle ne connaît pas"
-    );
+    // Et toujours aucune lecture **anonyme**, même politique déclarée : la
+    // politique est `authenticated`, l'absence de contexte vaut `Anonymous`.
+    let anonyme = router(with_graph_policy(
+        host_with_store(EntityAuthConfig::default(), ObrainStore::new_in_memory()).expect("hôte"),
+        "authenticated",
+    ));
+    let (status, _) = call(&anonyme, Method::GET, "/graph").await;
     assert_eq!(
         status,
-        StatusCode::NOT_FOUND,
-        "le pluriel `inconnus` n'est le pluriel d'aucune entité, et le routeur de liens ne \
-         résout pas la route `items` : 404"
-    );
-
-    // Et une forme que le framework ne reconnaît pas du tout (un seul segment) :
-    // jamais 403 non plus.
-    let (status, _) = call(&app, Method::GET, "/inconnu").await;
-    assert_ne!(
-        status,
         StatusCode::FORBIDDEN,
-        "une route à un segment sous un pluriel inconnu s'abstient aussi"
+        "sans contexte, un droit `authenticated` ne s'ouvre pas"
     );
 }
 
@@ -1211,11 +1303,20 @@ async fn attaching_an_obrain_store_wires_relief_identity_iam_and_the_write_lease
         "un store INSCRIPTIBLE prend le bail d'écriture dès la construction de l'hôte"
     );
 
-    let app = router_with(host, vec![]);
+    // Le relief se lit **sous la couche armée** : politique de lecture déclarée
+    // et appelant identifié (voir le point 3 de l'en-tête de ce fichier).
+    let app = as_context(
+        router_with(with_graph_policy(host, "authenticated"), vec![]),
+        ctx_user(),
+    );
 
     // Le relief, 200, et son schéma publié tel quel.
     let (status, relief) = call(&app, Method::GET, "/graph").await;
-    assert_eq!(status, StatusCode::OK, "GET /graph doit répondre");
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "GET /graph doit répondre dès que la lecture est déclarée"
+    );
     assert_eq!(
         relief["schema"], RELIEF_SCHEMA,
         "le document doit se nommer par son schéma"
@@ -1283,12 +1384,16 @@ async fn a_read_only_store_is_never_given_a_write_lease() {
         "un store ouvert en lecture seule ne prend PAS de bail, même avec le fencing armé"
     );
 
-    let app = router_with(host, vec![]);
+    let app = as_context(
+        router_with(with_graph_policy(host, "authenticated"), vec![]),
+        ctx_user(),
+    );
     let (status, relief) = call(&app, Method::GET, "/graph").await;
     assert_eq!(
         status,
         StatusCode::OK,
-        "publier le relief d'un store qu'on ne possède pas est le cas d'usage visé"
+        "publier le relief d'un store qu'on ne possède pas est le cas d'usage visé \
+         (lecture déclarée + appelant identifié)"
     );
     assert_eq!(
         relief["engine"]["read_only"], true,
@@ -1318,10 +1423,17 @@ async fn the_attached_store_identity_counts_are_served_over_http() {
     );
 
     let host = host_with_store(EntityAuthConfig::default(), store.clone()).expect("hôte");
-    let app = router_with(host, vec![]);
+    let app = as_context(
+        router_with(with_graph_policy(host, "authenticated"), vec![]),
+        ctx_user(),
+    );
 
     let (status, identity) = call(&app, Method::GET, "/graph/identity?counts=true").await;
-    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "le contrat d'identité se lit comme le relief : politique déclarée + identité"
+    );
     assert_eq!(
         identity["counts"]["total_resolved"], 1,
         "le nœud plat est résolu par le motif des propriétés plates — donc le registre \
@@ -1337,21 +1449,47 @@ async fn the_attached_store_identity_counts_are_served_over_http() {
     );
 }
 
-/// Le pendant négatif, dans le même store : **sans** store attaché, aucune route
-/// `/graph` n'existe. Pas de relief partiel, pas d'invention.
+/// Le pendant négatif : **sans** store attaché, aucune route `/graph` n'existe.
+/// Pas de relief partiel, pas d'invention.
+///
+/// **Comment on l'observe maintenant** : avec la couche armée, une route
+/// *absente* et une route *sans garde* rendent le même 403 (abstention = refus),
+/// donc le statut ne prouve plus l'absence. On retire la couche pour voir le
+/// **404 du routeur** — puis on vérifie, couche armée, que le refus est bien un
+/// refus d'abstention et **jamais un 200**.
 #[tokio::test]
 async fn no_graph_surface_exists_when_no_store_is_attached() {
-    let app = router(host_with(EntityAuthConfig::default()).expect("hôte"));
+    // 1) Couche retirée : ce que rend le routeur lui-même.
+    let mut host = host_with(EntityAuthConfig::default()).expect("hôte");
+    host.authorize = false;
+    let nu = router(host);
 
-    let (status, body) = call(&app, Method::GET, "/graph").await;
+    let (status, body) = call(&nu, Method::GET, "/graph").await;
     assert_ne!(
         status,
         StatusCode::OK,
-        "sans store attaché, aucun relief ne doit être servi : {body}"
+        "sans store attaché, aucun relief n'est servi — {body}"
     );
-    assert_ne!(
+    assert!(
+        body["schema"].is_null(),
+        "…et surtout aucun document de relief inventé : {body}"
+    );
+    // Ce que le routeur répond vraiment, nommé : `/graph` est un chemin à un
+    // segment, et le **repli** du routeur de liens le réclame avant de constater
+    // qu'il n'est pas une route d'entité. Ce n'est ni un relief, ni un 200.
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "réponse du repli du routeur de liens (`Invalid path format`) : {body}"
+    );
+
+    // 2) Couche armée : refus d'abstention, jamais un document.
+    let arme = router(host_with(EntityAuthConfig::default()).expect("hôte"));
+    let (status, body) = call(&arme, Method::GET, "/graph").await;
+    assert_eq!(
         status,
         StatusCode::FORBIDDEN,
-        "…et ce n'est pas l'autorisation qui refuse"
+        "aucun relief n'est servi non plus avec la couche armée — {body}"
     );
+    assert_eq!(body["verdict"], "deny_abstain");
 }

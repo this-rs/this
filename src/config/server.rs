@@ -44,11 +44,25 @@ pub struct ServerSecurityConfig {
 
     /// **Politique des lectures de graphe** : relief, vue multi-échelle, identité.
     ///
-    /// Ces routes ne sont pas des routes d'entité : sans ce réglage elles
-    /// **s'abstiennent** — aucune politique ne s'y rattache, seule la couche
-    /// d'authentification les couvre. C'est ce qu'on veut d'un relief public ;
-    /// ce n'est **pas** ce qu'on veut quand un moteur d'inférence lit la base :
-    /// il doit présenter un principal qui a le droit de la lire.
+    /// Ces routes ne sont pas des routes d'entité : sans ce réglage, **aucune
+    /// politique ne s'y rattache** — la couche d'autorisation s'abstient. Et
+    /// depuis le 2026-09-13, **une abstention est un refus** (`tests/abstention_refusee.rs`) :
+    /// un `/graph*` sans politique déclarée rend **403 `deny_abstain`**, même à
+    /// un appelant identifié — même avec un store attaché.
+    ///
+    /// Rien n'est donc public **par accident**. Pour retrouver un relief
+    /// descriptif et lisible sans droits, on le **déclare** :
+    ///
+    /// ```yaml
+    /// graph:
+    ///   policy: "public"          # observable sans droits — choix explicite
+    ///   # policy: "authenticated"  # tout porteur d'un jeton
+    ///   # policy: "perm:graph:read" # tranché par la décision IAM matérialisée
+    /// ```
+    ///
+    /// Sans ce réglage, un projet qui veut exposer la base doit soit déclarer la
+    /// politique, soit désarmer la couche (`without_authorization`, journalisé
+    /// comme un avertissement).
     #[serde(default)]
     pub graph: GraphExposureConfig,
 

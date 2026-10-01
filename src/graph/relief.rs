@@ -548,11 +548,12 @@ fn describe_surfaces() -> Vec<SurfaceRelief> {
                 "/graph/hierarchy/{id}",
                 "/gdpr/…",
                 "/auth/…",
+                "/ui/state/{portee}",
                 "/health",
             ],
             true,
             "middleware d'autorisation : pluriel + méthode + nombre de segments → opération → politique",
-            "les chemins hors routes d'entité s'abstiennent : /health et /auth/* sont publics par nature, /graph/* est descriptif SAUF si `graph.policy` est déclarée (config/server.yaml) — il est alors jugé comme une route d'entité, ce qui permet à un moteur d'inférence de lire la base sous IAM, /gdpr/* exige un administrateur dans le handler, /notifications/* et /device-tokens/* comparent l'identifiant du chemin à celui de l'appelant, /events/stream est borné au locataire de l'appelant",
+            "les chemins hors routes d'entité s'abstiennent : /health et /auth/* sont publics par nature, /graph/* est descriptif SAUF si `graph.policy` est déclarée (config/server.yaml) — il est alors jugé comme une route d'entité, ce qui permet à un moteur d'inférence de lire la base sous IAM, /gdpr/* exige un administrateur dans le handler, /notifications/* et /device-tokens/* comparent l'identifiant du chemin à celui de l'appelant, /ui/state/* de même (l'état d'interface est une ressource PERSONNELLE : la portée du chemin n'est jamais crue sur parole), /events/stream est borné au locataire de l'appelant",
         ),
         declared(
             "graphql",
