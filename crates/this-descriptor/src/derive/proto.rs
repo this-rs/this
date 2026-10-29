@@ -139,13 +139,15 @@ pub fn entity_proto(e: &EntityDesc, mode: TagMode) -> Result<ProtoEntity, Contra
             .iter()
             .map(|f| format!("{}.{}", e.name, f.name))
             .collect();
-        return Err(ContractError::framework(codes::DESCRIPTOR_INVALID).with_param(
-            "issues",
-            format!(
-                "no proto_tag on {} (run `this descriptor lock`)",
-                names.join(", ")
+        return Err(
+            ContractError::framework(codes::DESCRIPTOR_INVALID).with_param(
+                "issues",
+                format!(
+                    "no proto_tag on {} (run `this descriptor lock`)",
+                    names.join(", ")
+                ),
             ),
-        ));
+        );
     }
     tagged.sort_by_key(|(t, _)| *t);
     out.untagged = untagged.iter().map(|f| f.name.clone()).collect();
@@ -186,11 +188,10 @@ pub fn entity_proto(e: &EntityDesc, mode: TagMode) -> Result<ProtoEntity, Contra
         t.push_str(&field_line(f, *tag, imports));
     }
     t.push_str("}\n\n");
-    t.push_str(&format!("message Update{pascal}Request {{\n  string id = 1;\n"));
-    for (tag, f) in tagged
-        .iter()
-        .filter(|(_, f)| !f.read_only && !f.immutable)
-    {
+    t.push_str(&format!(
+        "message Update{pascal}Request {{\n  string id = 1;\n"
+    ));
+    for (tag, f) in tagged.iter().filter(|(_, f)| !f.read_only && !f.immutable) {
         t.push_str(&field_line(f, *tag, imports));
     }
     t.push_str("}\n\n");
@@ -264,7 +265,7 @@ pub fn assign_tags(e: &mut EntityDesc, previous: &BTreeMap<String, u32>) -> Vec<
             assigned.push((f.name.clone(), TENANT_ID_TAG));
         }
     }
-    let mut next = e
+    let first_free = e
         .fields
         .iter()
         .filter_map(|f| f.proto_tag)
@@ -276,10 +277,9 @@ pub fn assign_tags(e: &mut EntityDesc, previous: &BTreeMap<String, u32>) -> Vec<
         .filter(|&i| e.fields[i].proto_tag.is_none())
         .collect();
     fresh.sort_by(|&a, &b| e.fields[a].name.cmp(&e.fields[b].name));
-    for i in fresh {
-        e.fields[i].proto_tag = Some(next);
-        assigned.push((e.fields[i].name.clone(), next));
-        next += 1;
+    for (tag, i) in (first_free..).zip(fresh) {
+        e.fields[i].proto_tag = Some(tag);
+        assigned.push((e.fields[i].name.clone(), tag));
     }
     assigned
 }
@@ -296,7 +296,9 @@ mod tests {
             FieldDesc::new("amount", FieldType::F64).tag(16),
             FieldDesc::new("note", FieldType::Text).optional().tag(18),
             FieldDesc::new("lines", FieldType::List(Box::new(FieldType::Uuid))).tag(19),
-            FieldDesc::new("tenant_id", FieldType::Uuid).read_only().tag(8),
+            FieldDesc::new("tenant_id", FieldType::Uuid)
+                .read_only()
+                .tag(8),
             FieldDesc::new("meta", FieldType::Json).optional().tag(20),
         ];
         let mut e = EntityDesc::new("invoice");
@@ -311,8 +313,16 @@ mod tests {
         let b = entity_proto(&invoice(&[4, 2, 0, 3, 1]), TagMode::Strict).unwrap();
         assert_eq!(a, b, "declaration order never changes the output");
         assert!(a.text.contains("  double amount = 16;\n"), "{}", a.text);
-        assert!(a.text.contains("  optional string note = 18;\n"), "{}", a.text);
-        assert!(a.text.contains("  repeated string lines = 19;\n"), "{}", a.text);
+        assert!(
+            a.text.contains("  optional string note = 18;\n"),
+            "{}",
+            a.text
+        );
+        assert!(
+            a.text.contains("  repeated string lines = 19;\n"),
+            "{}",
+            a.text
+        );
         assert!(a.text.contains("  string tenant_id = 8;\n"), "{}", a.text);
         assert!(a.imports.contains(STRUCT_IMPORT));
     }
@@ -347,7 +357,12 @@ mod tests {
         // ...the strict derivation refuses them, the lenient one comments them out.
         let err = entity_proto(&e, TagMode::Strict).unwrap_err();
         assert_eq!(err.code.as_str(), codes::DESCRIPTOR_INVALID);
-        assert!(err.params["issues"].as_str().unwrap().contains("invoice.late"));
+        assert!(
+            err.params["issues"]
+                .as_str()
+                .unwrap()
+                .contains("invoice.late")
+        );
         let p = entity_proto(&e, TagMode::Lenient).unwrap();
         assert!(p.text.contains("  // late: no proto_tag yet"), "{}", p.text);
         assert!(!p.text.contains("bool late ="), "{}", p.text);

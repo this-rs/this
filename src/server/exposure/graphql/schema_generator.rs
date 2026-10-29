@@ -123,7 +123,9 @@ impl SchemaGenerator {
 
         // Generate entity types
         for entity_type in self.host.entity_types() {
-            if let Ok(type_def) = self.generate_entity_type(entity_type, described.as_deref()).await
+            if let Ok(type_def) = self
+                .generate_entity_type(entity_type, described.as_deref())
+                .await
             {
                 sdl.push_str(&type_def);
                 sdl.push_str("\n\n");
@@ -214,7 +216,6 @@ impl SchemaGenerator {
         type_def.push('}');
         Ok(type_def)
     }
-
 
     /// Generate the Query root type
     fn generate_query_root(&self) -> String {
@@ -1349,14 +1350,25 @@ mod tests {
     #[tokio::test]
     async fn sdl_from_descriptor_without_sample() {
         // No fetcher at all: the legacy path would emit an EMPTY type.
-        let sdl = SchemaGenerator::new(described_host(None)).generate_sdl().await;
+        let sdl = SchemaGenerator::new(described_host(None))
+            .generate_sdl()
+            .await;
         assert!(sdl.contains("type Knife {\n  id: ID!\n"), "{sdl}");
         assert!(sdl.contains("  price: Float!\n"), "{sdl}");
-        assert!(sdl.contains("  stock: Int64\n"), "optional = nullable: {sdl}");
+        assert!(
+            sdl.contains("  stock: Int64\n"),
+            "optional = nullable: {sdl}"
+        );
         assert!(sdl.contains("  deleted_at: DateTime\n"), "{sdl}");
-        assert!(sdl.contains("scalar JSON"), "root mutations use JSON: {sdl}");
+        assert!(
+            sdl.contains("scalar JSON"),
+            "root mutations use JSON: {sdl}"
+        );
         assert!(sdl.contains("input KnifeCreateInput {"), "{sdl}");
-        assert!(sdl.contains("knives(limit: Int, offset: Int): [Knife!]!"), "{sdl}");
+        assert!(
+            sdl.contains("knives(limit: Int, offset: Int): [Knife!]!"),
+            "{sdl}"
+        );
         // A misleading sample is ignored when a descriptor exists.
         let liar: Arc<dyn EntityFetcher> = Arc::new(MockFetcher::with_sample(serde_json::json!({
             "price": "not a number", "bogus": true
@@ -1400,7 +1412,10 @@ mod tests {
         );
         assert!(host.descriptors().is_empty());
         let sdl = SchemaGenerator::new(host).generate_sdl().await;
-        assert!(sdl.starts_with("type Order {\n"), "legacy output unchanged: {sdl}");
+        assert!(
+            sdl.starts_with("type Order {\n"),
+            "legacy output unchanged: {sdl}"
+        );
         assert!(sdl.contains("  total: Int!\n"), "{sdl}");
         assert!(sdl.contains("  note: String\n"), "{sdl}");
         assert!(!sdl.contains("scalar "), "{sdl}");

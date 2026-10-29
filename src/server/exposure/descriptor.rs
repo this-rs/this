@@ -40,14 +40,20 @@ pub fn descriptor_routes(host: Arc<ServerHost>) -> Router {
         .route(
             "/_this/descriptors/{module}",
             get(move |Path(module): Path<String>| async move {
-                one_descriptor(&h2, &module).map(Json).map_err(ApiError)
+                one_descriptor(&h2, &module)
+                    .map(Json)
+                    .map_err(|e| ApiError(*e))
             }),
         )
         .route(
             "/_this/schema/{entity}/{op}",
-            get(move |Path((entity, op)): Path<(String, String)>| async move {
-                write_schema(&h3, &entity, &op).map(Json).map_err(ApiError)
-            }),
+            get(
+                move |Path((entity, op)): Path<(String, String)>| async move {
+                    write_schema(&h3, &entity, &op)
+                        .map(Json)
+                        .map_err(|e| ApiError(*e))
+                },
+            ),
         )
         .route(
             "/_this/openapi.json",
@@ -61,20 +67,22 @@ fn all_descriptors(host: &ServerHost) -> Value {
     json!({ "generation": set.generation(), "modules": modules })
 }
 
-fn not_found(what: &str, id: &str) -> ContractError {
-    ContractError::framework(codes::ENTITY_NOT_FOUND)
-        .with_param("entity", what)
-        .with_param("id", id)
+fn not_found(what: &str, id: &str) -> Box<ContractError> {
+    Box::new(
+        ContractError::framework(codes::ENTITY_NOT_FOUND)
+            .with_param("entity", what)
+            .with_param("id", id),
+    )
 }
 
-fn one_descriptor(host: &ServerHost, module: &str) -> Result<ModuleDescriptor, ContractError> {
+fn one_descriptor(host: &ServerHost, module: &str) -> Result<ModuleDescriptor, Box<ContractError>> {
     host.descriptors()
         .module(module)
         .map(|m| (**m).clone())
         .ok_or_else(|| not_found("module", module))
 }
 
-fn write_schema(host: &ServerHost, entity: &str, op: &str) -> Result<Value, ContractError> {
+fn write_schema(host: &ServerHost, entity: &str, op: &str) -> Result<Value, Box<ContractError>> {
     let op = match op {
         "create" => WriteOp::Create,
         "update" => WriteOp::Update,
@@ -84,7 +92,7 @@ fn write_schema(host: &ServerHost, entity: &str, op: &str) -> Result<Value, Cont
     let (_, desc) = set
         .entity(entity)
         .ok_or_else(|| not_found("entity", entity))?;
-    derive::json_schema(desc, op)
+    derive::json_schema(desc, op).map_err(Box::new)
 }
 
 fn openapi(host: &ServerHost) -> Value {
@@ -105,7 +113,8 @@ mod tests {
 
     fn host() -> Arc<ServerHost> {
         let mut e = EntityDesc::new("knife");
-        e.fields.push(FieldDesc::new("price", FieldType::F64).tag(16));
+        e.fields
+            .push(FieldDesc::new("price", FieldType::F64).tag(16));
         let mut m = ModuleDescriptor::new("shop", "1.2.0");
         m.entities.push(e);
         let mut set = DescriptorSet::new();
@@ -128,7 +137,9 @@ mod tests {
             .await
             .unwrap();
         let status = resp.status();
-        let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20).await.unwrap();
+        let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20)
+            .await
+            .unwrap();
         (status, serde_json::from_slice(&bytes).unwrap())
     }
 
