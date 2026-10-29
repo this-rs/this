@@ -932,4 +932,134 @@ mod tests {
         );
         std::fs::remove_dir_all(&dir).ok();
     }
+
+    // ------------------------------------------------------------------
+    // Cache guarantee tests: verify the zero-stale policy end-to-end
+    // ------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn cache_guarantee_html_always_revalidates() {
+        let fe = Frontend::embedded(loader_from(embedded_store(&[
+            ("index.html", "<html>v1</html>"),
+        ])));
+        let router = fe.router();
+
+        let (s, _, hdrs) = body_text(get(router.clone(), "/").await).await;
+        assert_eq!(s, 200);
+        let cc = hdrs
+            .iter()
+            .find(|(k, _)| k == "cache-control")
+            .map(|(_, v)| v.as_str())
+            .expect("cache-control present");
+        assert!(
+            cc.contains("max-age=0") && cc.contains("must-revalidate"),
+            "HTML must revalidate: {cc}"
+        );
+
+        let (_, _, hdrs) = body_text(get(router, "/index.html").await).await;
+        let cc = hdrs
+            .iter()
+            .find(|(k, _)| k == "cache-control")
+            .map(|(_, v)| v.as_str())
+            .expect("cache-control present");
+        assert!(
+            cc.contains("max-age=0"),
+            "/index.html must revalidate: {cc}"
+        );
+    }
+
+    #[tokio::test]
+    async fn cache_guarantee_hashed_assets_immutable() {
+        let fe = Frontend::embedded(loader_from(embedded_store(&[
+            ("assets/app-abc123.js", "console.log(1);"),
+            ("s/chunk-xyz.css", "body{}"),
+        ])));
+        let router = fe.router();
+
+        for path in ["/assets/app-abc123.js", "/s/chunk-xyz.css"] {
+            let (s, _, hdrs) = body_text(get(router.clone(), path).await).await;
+            assert_eq!(s, 200, "{path} should serve");
+            let cc = hdrs
+                .iter()
+                .find(|(k, _)| k == "cache-control")
+                .map(|(_, v)| v.as_str())
+                .expect("cache-control present");
+            assert!(
+                cc.contains("immutable") && cc.contains("max-age=31536000"),
+                "hashed asset {path} must be immutable: {cc}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn cache_guarantee_non_hashed_files_revalidate() {
+        // Root-level non-HTML files (favicon, manifest, non-hashed JS, etc.)
+        // MUST revalidate — never serve stale content.
+        let fe = Frontend::embedded(loader_from(embedded_store(&[
+            ("favicon.ico", "icon-bytes"),
+            ("manifest.json", r#"{"name":"app"}"#),
+            ("robots.txt", "User-agent: *"),
+            ("app.js", "export default 1;"),
+        ])));
+        let router = fe.router();
+
+        for path in ["/favicon.ico", "/manifest.json", "/robots.txt", "/app.js"] {
+            let (s, _, hdrs) = body_text(get(router.clone(), path).await).await;
+            assert_eq!(s, 200, "{path} should serve");
+            let cc = hdrs
+                .iter()
+                .find(|(k, _)| k == "cache-control")
+                .map(|(_, v)| v.as_str())
+                .expect("cache-control present");
+            assert!(
+                cc.contains("max-age=0") && cc.contains("must-revalidate"),
+                "non-hashed {path} must revalidate (zero-stale): {cc}"
+            );
+            // Must NOT be immutable
+            assert!(
+                !cc.contains("immutable"),
+                "non-hashed {path} must not be immutable: {cc}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn cache_guarantee_embedded_etag_changes_with_content() {
+        // When the embedded content changes, the ETag MUST change.
+        // This test proves the FNV-1a content hash works.
+        let fe1 = Frontend::embedded(loader_from(embedded_store(&[("app.js", "version 1")])));
+        let fe2 = Frontend::embedded(loader_from(embedded_store(&[("app.js", "version 2")])));
+
+        let (_, _, h1) = body_text(get(fe1.router(), "/app.js").await).await;
+        let (_, _, h2) = body_text(get(fe2.router(), "/app.js").await).await;
+
+        let etag1 = h1.iter().find(|(k, _)| k == "etag").map(|(_, v)| v.as_str());
+        let etag2 = h2.iter().find(|(k, _)| k == "etag").map(|(_, v)| v.as_str());
+
+        assert!(etag1.is_some(), "ETag must be present");
+        assert!(etag2.is_some(), "ETag must be present");
+        assert_ne!(
+            etag1, etag2,
+            "different content must produce different ETags"
+        );
+    }
+
+    #[tokio::test]
+    async fn security_headers_are_present() {
+        let fe = Frontend::embedded(loader_from(embedded_store(&[
+            ("index.html", "<html>secure</html>"),
+        ])));
+        let (_, _, hdrs) = body_text(get(fe.router(), "/").await).await;
+
+        // vite-rs default security headers should be applied.
+        let header_names: Vec<&str> = hdrs.iter().map(|(k, _)| k.as_str()).collect();
+        assert!(
+            header_names.contains(&"x-content-type-options"),
+            "x-content-type-options missing: {header_names:?}"
+        );
+        assert!(
+            header_names.contains(&"referrer-policy"),
+            "referrer-policy missing: {header_names:?}"
+        );
+    }
 }
