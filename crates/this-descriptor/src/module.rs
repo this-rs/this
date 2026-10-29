@@ -40,6 +40,10 @@ pub struct ModuleDescriptor {
     pub i18n: I18nDecl,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub custom: Vec<Custom>,
+    /// Reserved for the runtime section (Track 4): carried verbatim so that `check()` can
+    /// refuse it (`this.module.format_unsupported`) instead of silently dropping it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime: Option<serde_json::Value>,
 }
 
 /// Dependency on another module.
@@ -65,6 +69,7 @@ impl ModuleDescriptor {
             errors: vec![],
             i18n: I18nDecl::default(),
             custom: vec![],
+            runtime: None,
         }
     }
 

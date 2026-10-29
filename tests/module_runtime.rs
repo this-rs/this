@@ -204,7 +204,12 @@ fn harness_with(b: ServerBuilder, authorize: bool) -> Harness {
 }
 
 fn harness(authorize: bool) -> Harness {
-    harness_with(ServerBuilder::new().with_module_runtime(), authorize)
+    harness_with(
+        ServerBuilder::new()
+            .with_module_runtime()
+            .with_hot_load_enabled(true),
+        authorize,
+    )
 }
 
 fn module_events(
@@ -540,6 +545,7 @@ async fn draining_times_out_and_cancels_streams() {
         ServerBuilder::new()
             .with_module_runtime_options(RuntimeOptions {
                 drain_grace: Duration::from_millis(150),
+                hot_load_enabled: true,
                 ..Default::default()
             })
             .offer_module(Streams("1.0.0")),
@@ -723,9 +729,11 @@ async fn plugin_source_is_an_extension_point() {
     assert_eq!(err.code.as_str(), "this.not_implemented");
 
     let h = harness_with(
-        ServerBuilder::new().with_module_loader(Arc::new(
-            DefaultModuleLoader::new().with_plugin("wasm", Arc::new(FakeWasm)),
-        )),
+        ServerBuilder::new()
+            .with_module_loader(Arc::new(
+                DefaultModuleLoader::new().with_plugin("wasm", Arc::new(FakeWasm)),
+            ))
+            .with_hot_load_enabled(true),
         false,
     );
     h.runtime()
@@ -874,6 +882,7 @@ async fn builtin_described_module_cannot_be_unloaded_nor_shadowed() {
     let h = harness_with(
         ServerBuilder::new()
             .with_module_runtime()
+            .with_hot_load_enabled(true)
             .register_module(Catalogue { extra: false })
             .unwrap(),
         false,
@@ -909,6 +918,7 @@ async fn compiled_module_must_match_its_descriptor_at_runtime() {
     let h = harness_with(
         ServerBuilder::new()
             .with_module_runtime()
+            .with_hot_load_enabled(true)
             .offer_module(Catalogue { extra: true }),
         false,
     );
@@ -940,9 +950,11 @@ impl ModuleLoader for Rogue {
 #[tokio::test]
 async fn fetcher_outside_the_descriptor_is_refused_not_last_wins() {
     let h = harness_with(
-        ServerBuilder::new().with_module_loader(Arc::new(
-            DefaultModuleLoader::new().with_plugin("rogue", Arc::new(Rogue)),
-        )),
+        ServerBuilder::new()
+            .with_module_loader(Arc::new(
+                DefaultModuleLoader::new().with_plugin("rogue", Arc::new(Rogue)),
+            ))
+            .with_hot_load_enabled(true),
         false,
     );
     let before = h.host.catalog.load();
@@ -1120,7 +1132,11 @@ async fn hot_loaded_compiled_module_keeps_its_yaml_policies() {
         let (s, _) = h.call(Method::GET, "/secrets", None, None).await;
         assert_eq!(s, StatusCode::UNAUTHORIZED, "described={described}");
         let (s, v) = h.call(Method::GET, "/secrets", Some("admin"), None).await;
-        assert_eq!(s, StatusCode::OK, "described={described}: served to the admin: {v}");
+        assert_eq!(
+            s,
+            StatusCode::OK,
+            "described={described}: served to the admin: {v}"
+        );
     }
 }
 
@@ -1129,6 +1145,7 @@ async fn report_only_observes_runtime_refusals_without_blocking() {
     let h = harness_with(
         ServerBuilder::new()
             .with_module_runtime()
+            .with_hot_load_enabled(true)
             .authorization_report_only(),
         true,
     );
@@ -1152,6 +1169,7 @@ async fn replace_cancels_old_version_streams_after_grace() {
         ServerBuilder::new()
             .with_module_runtime_options(RuntimeOptions {
                 drain_grace: Duration::from_millis(150),
+                hot_load_enabled: true,
                 ..Default::default()
             })
             .offer_module(Streams("1.0.0")),
@@ -1200,4 +1218,73 @@ async fn replace_cancels_old_version_streams_after_grace() {
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert!(!fresh.is_finished(), "new version's stream still open");
     fresh.abort();
+}
+
+// ── hot loading closed by default (decision 0e59f39b) ──────────────────────
+
+#[tokio::test]
+async fn hot_load_disabled_by_default_refuses_load() {
+    let h = harness_with(ServerBuilder::new().with_module_runtime(), false);
+    let rt = h.runtime();
+    let src = manifest(&billing("1.0.0", PolicyExpr::Authenticated));
+
+    let e = rt.load(src.clone()).await.unwrap_err();
+    assert_eq!(e.code.as_str(), "this.module.hot_load_disabled");
+    let e = rt.replace(src.clone()).await.unwrap_err();
+    assert_eq!(e.code.as_str(), "this.module.hot_load_disabled");
+    let e = rt.unload("billing").await.unwrap_err();
+    assert_eq!(e.code.as_str(), "this.module.hot_load_disabled");
+    assert!(h.host.catalog.load().entity_of_plural("invoices").is_none());
+
+    // Admin interface: mutations refused, reads still answer.
+    let (s, body) = h
+        .call(
+            Method::POST,
+            "/admin/modules",
+            Some("admin"),
+            Some(json!({"manifest": billing("1.0.0", PolicyExpr::Authenticated)})),
+        )
+        .await;
+    assert_ne!(s, StatusCode::CREATED, "{body}");
+    assert_eq!(code(&body), "this.module.hot_load_disabled", "{body}");
+    let (s, body) = h
+        .call(
+            Method::DELETE,
+            "/admin/modules/billing",
+            Some("admin"),
+            None,
+        )
+        .await;
+    assert_eq!(code(&body), "this.module.hot_load_disabled", "{s} {body}");
+    let (s, _) = h
+        .call(Method::GET, "/admin/modules", Some("admin"), None)
+        .await;
+    assert_eq!(s, StatusCode::OK);
+    // The refusal still goes through the admin policy first.
+    let (s, _) = h
+        .call(Method::DELETE, "/admin/modules/billing", Some("user"), None)
+        .await;
+    assert_eq!(s, StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn hot_load_enabled_allows_load_unload() {
+    let h = harness_with(
+        ServerBuilder::new()
+            .with_module_runtime()
+            .with_hot_load_enabled(true),
+        false,
+    );
+    let rt = h.runtime();
+    let st = rt
+        .load(manifest(&billing("1.0.0", PolicyExpr::Authenticated)))
+        .await
+        .expect("load");
+    assert_eq!(st.state, ModuleState::Active);
+    let (s, _) = h.call(Method::GET, "/invoices", None, None).await;
+    assert_eq!(s, StatusCode::OK);
+    let st = rt.unload("billing").await.expect("unload");
+    assert_eq!(st.state, ModuleState::Unloaded);
+    let (s, _) = h.call(Method::GET, "/invoices", None, None).await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
 }

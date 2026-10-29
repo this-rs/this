@@ -45,6 +45,9 @@ pub struct RuntimeOptions {
     pub admin_policy: PolicyExpr,
     /// Path prefix of the admin interface (default `/admin/modules`).
     pub admin_prefix: String,
+    /// `hot_load.enabled`: load / replace / unload and the admin interface are refused with
+    /// `this.module.hot_load_disabled` unless this is set explicitly (default `false`: closed).
+    pub hot_load_enabled: bool,
 }
 
 impl Default for RuntimeOptions {
@@ -55,6 +58,7 @@ impl Default for RuntimeOptions {
             ),
             admin_policy: PolicyExpr::AdminOnly,
             admin_prefix: "/admin/modules".into(),
+            hot_load_enabled: false,
         }
     }
 }
@@ -105,6 +109,9 @@ pub struct ModuleRuntime {
     /// module drains).
     inner: std::sync::Mutex<Inner>,
     pub(crate) table: ArcSwap<DispatchTable>,
+    /// Test fault injection: the Nth next `compose` fails (0 = off).
+    #[cfg(test)]
+    pub(crate) fail_compose_at: std::sync::atomic::AtomicUsize,
 }
 
 impl std::fmt::Debug for ModuleRuntime {
@@ -168,7 +175,19 @@ impl ModuleRuntime {
             ops: tokio::sync::Mutex::new(()),
             inner: std::sync::Mutex::new(inner),
             table: ArcSwap::from_pointee(table),
+            #[cfg(test)]
+            fail_compose_at: std::sync::atomic::AtomicUsize::new(0),
         })
+    }
+
+    /// Hot loading is closed unless the host enabled it (`hot_load.enabled`).
+    pub(crate) fn ensure_hot_load(&self, operation: &str) -> Result<(), ContractError> {
+        if self.options.hot_load_enabled {
+            Ok(())
+        } else {
+            Err(ContractError::framework(codes::MODULE_HOT_LOAD_DISABLED)
+                .with_param("operation", operation))
+        }
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, Inner> {
@@ -266,6 +285,7 @@ impl ModuleRuntime {
     /// publish the next catalog and dispatch table. Fail-closed: on any error nothing is
     /// published and the module is recorded `Failed`.
     pub async fn load(&self, source: ModuleSource) -> Result<ModuleStatus, ContractError> {
+        self.ensure_hot_load("load")?;
         let _op = self.ops.lock().await;
         let iface = match self.loader.load(&source).await {
             Ok(i) => i,
@@ -451,6 +471,7 @@ impl ModuleRuntime {
     /// get up to `drain_grace` to finish, then streams are cancelled, the next catalog is
     /// published without it, and it is `Unloaded`.
     pub async fn unload(&self, name: &str) -> Result<ModuleStatus, ContractError> {
+        self.ensure_hot_load("unload")?;
         let _op = self.ops.lock().await;
         let gate = self.begin_drain(name)?;
         if !gate.wait_idle(self.options.drain_grace).await {
@@ -461,8 +482,27 @@ impl ModuleRuntime {
         let mut inner = self.lock();
         let r = inner.records.get_mut(name).expect("checked");
         r.state.transition(ModuleState::Unloaded)?;
-        r.iface = None;
-        let (catalog, table) = self.compose(&inner)?;
+        let saved_iface = r.iface.take();
+        let (catalog, table) = match self.compose(&inner) {
+            Ok(c) => c,
+            Err(e) => {
+                // Compose failed: the module must stay served, coherently. Back to `Active`
+                // with its interface and a fresh gate (the old one was cancelled), and the
+                // dispatch table recomposed WITHOUT the draining state.
+                let r = inner.records.get_mut(name).expect("checked");
+                r.state = ModuleState::Active;
+                r.iface = saved_iface;
+                r.gate = Arc::new(Gate::new());
+                if let Ok((_, table)) = self.compose(&inner) {
+                    self.table.store(Arc::new(table));
+                }
+                self.emit(ModuleEvent::Failed {
+                    module: name.to_string(),
+                    code: e.code.as_str().to_string(),
+                });
+                return Err(e);
+            }
+        };
         let published = self.parts.catalog.publish(catalog);
         self.table.store(Arc::new(table));
         self.parts.locales.remove_module(name);
@@ -507,9 +547,16 @@ impl ModuleRuntime {
             r.state.transition(ModuleState::Draining)?;
             r.gate.clone()
         };
-        let (_, table) = self.compose(&inner)?;
-        self.table.store(Arc::new(table));
-        Ok(gate)
+        match self.compose(&inner) {
+            Ok((_, table)) => {
+                self.table.store(Arc::new(table));
+                Ok(gate)
+            }
+            Err(e) => {
+                inner.records.get_mut(name).expect("checked").state = ModuleState::Active;
+                Err(e)
+            }
+        }
     }
 
     /// Replace an active module by another version, in ONE publication: every active
@@ -517,6 +564,7 @@ impl ModuleRuntime {
     /// version must itself resolve. In-flight requests finish on the old version (they
     /// hold its router); new ones see the new version.
     pub async fn replace(&self, source: ModuleSource) -> Result<ModuleStatus, ContractError> {
+        self.ensure_hot_load("replace")?;
         let _op = self.ops.lock().await;
         let label = format!("{source:?}");
         let result = self.replace_locked(source).await;
@@ -614,6 +662,18 @@ impl ModuleRuntime {
     /// Next catalog and dispatch table: base snapshot + every Active/Draining runtime
     /// module. Duplicates and configuration conflicts are errors (no last-wins).
     fn compose(&self, inner: &Inner) -> Result<(HostCatalog, DispatchTable), ContractError> {
+        #[cfg(test)]
+        if self
+            .fail_compose_at
+            .load(std::sync::atomic::Ordering::SeqCst)
+            > 0
+            && self
+                .fail_compose_at
+                .fetch_sub(1, std::sync::atomic::Ordering::SeqCst)
+                == 1
+        {
+            return Err(ContractError::framework(codes::INTERNAL).with_param("reason", "injected"));
+        }
         let mut descriptors: DescriptorSet = (*self.base.descriptors).clone();
         let mut fetchers = (*self.base.fetchers).clone();
         let mut creators = (*self.base.creators).clone();
@@ -746,5 +806,84 @@ impl ModuleRuntime {
             generation: 0,
         };
         Ok((catalog, table))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::descriptor::{
+        EntityDesc, FieldDesc, FieldType, ModuleDescriptor, Operation, PolicyExpr,
+    };
+    use crate::server::RestExposure;
+    use crate::server::builder::ServerBuilder;
+    use crate::storage::in_memory::InMemoryLinkService;
+    use axum::body::Body;
+    use axum::http::{Method, Request, StatusCode};
+    use tower::ServiceExt;
+
+    fn billing() -> ModuleDescriptor {
+        let mut d = ModuleDescriptor::new("billing", "1.0.0");
+        let mut e = EntityDesc::new("invoice");
+        e.fields.push(FieldDesc::new("amount", FieldType::F64));
+        for op in Operation::CRUD {
+            e.permissions.ops.insert(op, PolicyExpr::Authenticated);
+        }
+        d.entities.push(e);
+        d.normalize();
+        d
+    }
+
+    async fn get(app: &axum::Router, uri: &str) -> StatusCode {
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri(uri)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+            .status()
+    }
+
+    #[tokio::test]
+    async fn unload_compose_failure_keeps_module_consistent() {
+        let host = std::sync::Arc::new(
+            ServerBuilder::new()
+                .with_link_service(InMemoryLinkService::new())
+                .with_module_runtime()
+                .with_hot_load_enabled(true)
+                .without_authorization()
+                .build_host()
+                .expect("host"),
+        );
+        let app = RestExposure::build_router(host.clone(), vec![]).expect("router");
+        let rt = host.module_runtime.clone().expect("runtime");
+        rt.load(ModuleSource::Manifest(billing().to_json_pretty()))
+            .await
+            .expect("load");
+        assert_eq!(get(&app, "/invoices").await, StatusCode::OK);
+        let generation = host.catalog.load().generation;
+
+        // 1st compose = draining table, 2nd = the unloaded catalog: make the 2nd fail.
+        rt.fail_compose_at
+            .store(2, std::sync::atomic::Ordering::SeqCst);
+        let err = rt.unload("billing").await.unwrap_err();
+        assert_eq!(err.code.as_str(), "this.internal");
+
+        // Coherent: still Active, still in the catalog (nothing published), still served
+        // (not 503 draining, not tombstoned 404), stream gate usable again.
+        let st = rt.status("billing").await.unwrap();
+        assert_eq!(st.state, ModuleState::Active);
+        assert_eq!(host.catalog.load().generation, generation);
+        assert!(host.catalog.load().entity_of_plural("invoices").is_some());
+        assert_eq!(get(&app, "/invoices").await, StatusCode::OK);
+
+        // And the module can still be unloaded normally afterwards.
+        let st = rt.unload("billing").await.expect("unload retry");
+        assert_eq!(st.state, ModuleState::Unloaded);
+        assert_eq!(get(&app, "/invoices").await, StatusCode::NOT_FOUND);
     }
 }
