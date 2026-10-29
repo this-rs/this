@@ -111,6 +111,7 @@ impl EventMatcher {
             FrameworkEvent::Cognitive(_) => false,
             // GDPR erasure events are not matchable via event matchers
             FrameworkEvent::GdprErasure { .. } => false,
+            FrameworkEvent::Module(_) => false,
         }
     }
 

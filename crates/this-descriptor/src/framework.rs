@@ -58,6 +58,8 @@ pub mod codes {
     pub const MODULE_UNAVAILABLE: &str = "this.module.unavailable";
     pub const MODULE_ILLEGAL_TRANSITION: &str = "this.module.illegal_transition";
     pub const MODULE_REFERENCE_UNKNOWN: &str = "this.module.reference_unknown";
+    pub const MODULE_NOT_FOUND: &str = "this.module.not_found";
+    pub const MODULE_CONFIG_CONFLICT: &str = "this.module.config_conflict";
     pub const DESCRIPTOR_INVALID: &str = "this.descriptor.invalid";
     pub const DESCRIPTOR_PARSE: &str = "this.descriptor.parse";
     pub const DESCRIPTOR_TAG_REUSED: &str = "this.descriptor.tag_reused";
@@ -378,6 +380,20 @@ pub const FRAMEWORK_ERRORS: &[(&str, ErrorKind, &[&str], &str, &str)] = &[
         &["module", "entity"],
         "{module} référence {entity}, ni local ni requis",
         "{module} references {entity}, neither local nor required",
+    ),
+    (
+        MODULE_NOT_FOUND,
+        K::NotFound,
+        &["module"],
+        "Module introuvable: {module}",
+        "Module not found: {module}",
+    ),
+    (
+        MODULE_CONFIG_CONFLICT,
+        K::Conflict,
+        &["what", "key"],
+        "Configuration en conflit ({what}): {key}",
+        "Conflicting configuration ({what}): {key}",
     ),
     (
         DESCRIPTOR_INVALID,
