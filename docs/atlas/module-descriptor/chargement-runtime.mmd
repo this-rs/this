@@ -1,0 +1,57 @@
+sequenceDiagram
+%% name: module-descriptor-runtime-load
+%% PROUVE : rien encore — sequence PROPOSEE par la RFC §3.7 et §3.8 (ModuleRuntime, ModuleStore, Vfs).
+%% SOURCES LUES : this/src/server/builder.rs (register_module, build_host), this/src/server/host.rs (entity_creators),
+%%   this/src/config/mod.rs (LinksConfig::merge last-wins), this/src/storage/obrain.rs (check_write).
+%% NON ETABLI : DynamicRouter (RwLock de Router en fallback) n'a pas ete mesure sous charge.
+    autonumber
+    actor Admin
+    participant RT as ModuleRuntime
+    participant MS as ModuleStore
+    participant VFS as Vfs (memory, fs, obrain)
+    participant RES as resolve
+    participant LD as ModuleLoader
+    participant DS as DescriptorSet
+    participant DR as DynamicRouter
+
+    Admin->>RT: load(Stored name billing)
+    rect rgba(164,139,255,.15)
+    Note over RT,VFS: Phase 1 - lecture et verification
+    RT->>MS: get(billing, None)
+    MS->>VFS: list /modules/billing
+    VFS-->>MS: versions 1.0.0, 1.2.0
+    MS->>VFS: read /modules/billing/1.2.0/descriptor.json
+    VFS-->>MS: bytes + etag
+    MS->>MS: from_json puis check()
+    MS-->>RT: ModuleDescriptor
+    end
+    rect rgba(164,139,255,.15)
+    Note over RT,DS: Phase 2 - resolution fail-closed
+    RT->>RES: requires vs modules actifs
+    alt dependance manquante, version ou cycle
+        RES-->>RT: ContractError this.module.*
+        RT-->>Admin: Failed, rien n'est servi
+    else entite deja fournie
+        RES-->>RT: this.module.duplicate_entity
+        RT-->>Admin: Failed
+    else ok
+        RES-->>RT: ordre topologique
+    end
+    end
+    rect rgba(164,139,255,.15)
+    Note over RT,DR: Phase 3 - chargement et activation
+    RT->>LD: load(source)
+    LD-->>RT: ModuleInterface fetchers creators routes
+    RT->>DS: insert(descriptor)
+    RT->>DR: rebuild Router avec les routes du module
+    RT-->>Admin: ModuleStatus Active
+    end
+    Admin->>RT: unload(billing)
+    alt dependants actifs
+        RT-->>Admin: this.module.has_dependents, reste Active
+    else aucun
+        RT->>DR: retire routes, nouvelles requetes 503
+        Note over RT: Draining, attente des requetes en vol
+        RT->>DS: remove(billing)
+        RT-->>Admin: Unloaded
+    end

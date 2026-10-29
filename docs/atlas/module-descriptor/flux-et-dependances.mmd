@@ -1,0 +1,27 @@
+flowchart TB
+%% name: module-descriptor-streams
+%% PROUVE : decoupage du plan Project Orchestrator "ModuleDescriptor — socle commun front/back" (RFC §7).
+%% Les fichiers listes sont disjoints entre flux, sauf host.rs et builder.rs touches en sequence (fondation puis un seul flux).
+%% NON ETABLI : estimation de duree des flux.
+    classDef todo     fill:#f0a02033,stroke:#d98a00,stroke-width:2px
+    classDef entry    fill:#a48bff40,stroke:#a48bff,stroke-width:3px
+    classDef trap     fill:#e5484d1f,stroke:#e5484d,stroke-width:3px
+
+    F(["🟠 fondation<br/>crate this-descriptor + contrats"]):::entry
+    subgraph P["7 flux paralleles, worktrees _wt-md/flux"]
+        direction LR
+        V["🟠 validation<br/>engine validate, query, gate.rs"]:::todo
+        E["🟠 errors-i18n<br/>core/errors, core/i18n"]:::todo
+        A["🟠 auth<br/>policy, surface.rs, grpc identity"]:::todo
+        S["🟠 schema<br/>derive, generators, macros.rs"]:::todo
+        M["🟠 modules-runtime<br/>module_runtime, builder.rs"]:::todo
+        X["🟠 vfs<br/>storage/vfs memory fs obrain"]:::todo
+        C["🟠 cli<br/>this-cli descriptor, doctor"]:::todo
+    end
+    F ==> V & E & A & S & M & X & C
+    I["🟠 integration<br/>e2e REST GraphQL gRPC"]:::todo
+    V & E & A & S & M & X & C ==> I
+    R["🟠 revue finale et referencement"]:::todo
+    I ==> R
+    T["⚠ chemins ../../banc-obrain-j4 et ../../vite-rs<br/>faux depuis _wt-md/flux"]:::trap
+    T -.-> P

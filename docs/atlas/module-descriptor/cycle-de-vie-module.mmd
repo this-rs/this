@@ -1,0 +1,28 @@
+stateDiagram-v2
+%% name: module-descriptor-lifecycle
+%% PROUVE : rien encore — machine a etats PROPOSEE (enum ModuleState, crate this-descriptor, RFC §3.2 et §3.7).
+%% Le test lifecycle_transitions_are_legal_only du flux modules-runtime doit refuser toute transition absente ici.
+%% NON ETABLI : la duree maximale de Draining (delai de grace) reste a fixer par le flux modules-runtime.
+    [*] --> Discovered : catalogue ou ModuleStore
+    Discovered --> Resolving : load()
+    Resolving --> Resolved : dependances ok
+    Resolving --> Failed : manquante, version, cycle, doublon
+    Resolved --> Loading
+    Loading --> Loaded : ModuleInterface construite
+    Loading --> Failed : descripteur invalide
+    Loaded --> Activating
+    Activating --> Active : DescriptorSet et routes publies
+    Activating --> Failed : conflit de route
+    Active --> Active : unload refuse, dependants actifs
+    Active --> Draining : unload()
+    Draining --> Unloaded : requetes en vol terminees
+    Unloaded --> Discovered : rechargement
+    Failed --> Discovered : correction puis load()
+    Unloaded --> [*]
+
+    classDef refusedS fill:#e5484d33,stroke:#e5484d,stroke-width:2px,stroke-dasharray:6 3
+    classDef okS fill:#2ea04333,stroke:#2ea043,stroke-width:2px
+    classDef todoS fill:#f0a02033,stroke:#d98a00,stroke-width:2px
+    class Failed refusedS
+    class Active okS
+    class Draining todoS
