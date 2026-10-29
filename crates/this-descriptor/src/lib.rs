@@ -28,6 +28,9 @@ pub mod error;
 pub mod field;
 pub mod framework;
 pub mod i18n;
+#[cfg(feature = "leptos")]
+/// `impl FromServerFnError for ContractError` (Leptos server functions).
+pub mod leptos;
 pub mod lifecycle;
 pub mod link;
 pub mod module;
@@ -44,6 +47,7 @@ pub use field::{
     Applies, FieldDesc, FieldI18n, FieldType, FieldTypeOf, TransformRule, TransformSpec,
     ValidatorRule, ValidatorSpec,
 };
+pub use engine::i18n::{I18nCatalog, LocaleHints};
 pub use i18n::{I18nDecl, Locale, MessageBundle, MessageDecl, MessageKey, MessageSyntax};
 pub use lifecycle::ModuleState;
 pub use link::LinkDesc;
