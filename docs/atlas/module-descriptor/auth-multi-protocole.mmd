@@ -1,0 +1,69 @@
+%% name: module-descriptor · auth multi-protocole par opération
+%% PROUVE : une seule résolution (descripteur, puis auth YAML, puis défaut) et un seul évaluateur à trois valeurs servent REST (politiques du descripteur), GraphQL, gRPC, GraphQL-WS et WebSocketExposure ; même verdict testé sur REST, GraphQL et gRPC (same_policy_same_verdict_across_protocols).
+%% LU : core/auth/{surface,descriptor_policy,mod}.rs, server/exposure/{guard,mod}.rs, grpc/{identity,entity_service,link_service,event_service,mod}.rs, graphql/{mod,subscription_handler}.rs, graphql/executor/*.rs, middleware/authorization.rs, websocket/{mod,handler,manager}.rs, rest/mod.rs, tests/auth_surfaces.rs
+%% NON ÉTABLI : NotificationService gRPC et champs notifications GraphQL refusés armés (IDOR) ; sinks websocket refusés armés (broadcast) ; REST garde la grammaire plate pour les politiques YAML (seules les politiques du descripteur passent par engine::policy) ; e2e gRPC par trames HTTP sur le routeur armé, pas par client tonic.
+flowchart TB
+  classDef ok       fill:#2ea04333,stroke:#2ea043,stroke-width:2px
+  classDef todo     fill:#f0a02033,stroke:#d98a00,stroke-width:2px
+  classDef refused  fill:#e5484d33,stroke:#e5484d,stroke-width:2px,stroke-dasharray:6 3
+  classDef upstream fill:#8b8fa322,stroke:#8b8fa3,stroke-dasharray:3 3
+  classDef trap     fill:#e5484d1f,stroke:#e5484d,stroke-width:3px
+  classDef entry    fill:#a48bff40,stroke:#a48bff,stroke-width:3px
+
+  subgraph ID["Identité — AuthProvider (une seule implémentation de la confiance)"]
+    direction LR
+    H(["HTTP : HeaderMap"]):::entry
+    M(["gRPC : métadonnées"]):::entry
+    W(["WS : poignée de main<br/>en-tête, cookie, access_token"]):::entry
+    X["✅ extract_context<br/>extract_context_from_metadata<br/>extract_context_from_handshake"]:::ok
+    F["✅ échec : anonyme si default_policy public<br/>sinon this.auth.unauthenticated<br/>test grpc_identity_from_metadata"]:::ok
+  end
+
+  subgraph RES["Résolution — core/auth/surface.rs (sans dépendance server)"]
+    direction TB
+    PI["✅ PolicyIndex<br/>instantané du LiveCatalog"]:::ok
+    D1["✅ 1. EntityDesc.permissions explicite"]:::ok
+    D2["✅ 2. auth YAML, PolicyExpr::parse<br/>jeton inconnu = refus"]:::ok
+    D3["✅ 3. PermDesc::default_policy<br/>authenticated, deny pour le métier"]:::ok
+    LK["✅ liens : LinkDesc, puis lien YAML, puis entité de portée<br/>toutes les déclarations doivent accepter"]:::ok
+    AG["✅ module_permissions<br/>PermDesc agrégées par module"]:::ok
+  end
+
+  EV["✅ engine::policy::evaluate<br/>Option bool, résolveur inconnu = refus<br/>test unknown_resolver_denies"]:::ok
+  CV["✅ TryFrom PolicyExpr pour AuthPolicy<br/>perm: refusé, jamais approché<br/>test perm_desc_to_auth_policy_equivalent"]:::ok
+  G["✅ SurfaceGuard<br/>armé, observation, désarmé<br/>this.auth.forbidden = 403 / PERMISSION_DENIED / FORBIDDEN"]:::ok
+
+  subgraph SURF["Surfaces"]
+    direction LR
+    R["✅ REST : Authorization.with_catalog<br/>descripteur d'abord, même évaluateur<br/>rest_applies_descriptor_permissions"]:::ok
+    GQ["✅ GraphQL : requêtes, mutations, liens imbriqués<br/>graphql_mutation_denied_without_role"]:::ok
+    GS["✅ GraphQL-WS : événements filtrés par get<br/>graphql_served_with_armed_policies_when_covered"]:::ok
+    GR["✅ gRPC Entity et Link par appel<br/>grpc_create_denied_without_role"]:::ok
+    GE["✅ gRPC EventService filtré par get"]:::ok
+    NS["🔴 NotificationService gRPC<br/>utilisateur pris dans la requête<br/>refus de monter armé"]:::refused
+    WS["✅ WebSocketExposure servie armée<br/>poignée de main + filtrage par get<br/>ws_subscription_denied_without_role"]:::ok
+    WK["🔴 sinks websocket<br/>broadcast sans politique<br/>refus de monter armé"]:::refused
+    NQ["⚠ champs notifications GraphQL<br/>refusés quand appliqué"]:::trap
+  end
+
+  H ==> X
+  M ==> X
+  W ==> X
+  X --> F
+  X ==> G
+  PI --> D1 --> D2 --> D3
+  PI --> LK
+  PI --> AG
+  G ==> PI
+  G ==> EV
+  CV -.->|"même verdict, vocabulaire commun"| EV
+  G ==> GQ
+  G ==> GS
+  G ==> GR
+  G ==> GE
+  G --> NQ
+  PI ==>|"descripteur seulement"| R
+  R ==>|"same_policy_same_verdict_across_protocols"| EV
+  NS -.- G
+  G ==> WS
+  WK -.- WS

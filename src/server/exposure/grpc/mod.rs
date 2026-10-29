@@ -31,6 +31,7 @@
 
 pub mod entity_service;
 pub mod event_service;
+pub mod identity;
 pub mod link_service;
 pub mod notification_service;
 pub mod proto_generator;
@@ -103,15 +104,24 @@ impl GrpcExposure {
     /// # Returns
     ///
     /// Returns a fully configured Axum router with gRPC services and tonic fallback.
+    ///
+    /// # Policies (armed host)
+    ///
+    /// Every `EntityService` / `LinkService` call is judged per operation by the
+    /// declared policies (`SurfaceGuard`: descriptor, then YAML `auth:`, then the
+    /// default), with the caller resolved from the call **metadata**
+    /// ([`identity::identity_layer`]). The event stream is filtered by the same
+    /// policies. Refusal: `PERMISSION_DENIED` with the `this.auth.forbidden` contract
+    /// error in the details. Only `NotificationService` is not covered yet: with a
+    /// `NotificationStore` and armed policies, the router is still REFUSED.
     pub fn build_router(host: Arc<ServerHost>) -> Result<Router> {
-        // **Fail-closed** : les opérations gRPC ne sont pas résolues par route,
-        // donc aucune politique `auth:` ne s'y rattache.
-        crate::server::exposure::refuse_unenforced_surface(
+        crate::server::exposure::refuse_uncovered_surface(
             &host,
             "gRPC",
+            &uncovered_parts(&host),
             "GrpcExposure::build_router_unenforced",
         )?;
-        Self::build_router_unenforced(host)
+        Ok(Self::routes(host, true, true))
     }
 
     /// Comme [`GrpcExposure::build_router`], en **acceptant explicitement** que
@@ -124,91 +134,33 @@ impl GrpcExposure {
             "gRPC",
             "GrpcExposure::build_router_unenforced",
         );
-        use axum::routing::get;
-        use proto::entity_service_server::EntityServiceServer;
-        use proto::event_service_server::EventServiceServer;
-        use proto::link_service_server::LinkServiceServer;
-        use proto::notification_service_server::NotificationServiceServer;
-        use tonic::service::Routes;
-
-        // Create gRPC service implementations
-        let entity_svc = entity_service::EntityServiceImpl::new(host.clone());
-        let link_svc = link_service::LinkServiceImpl::new(host.clone());
-        let event_svc = event_service::EventServiceImpl::new(host.clone());
-
-        // Build tonic Routes and convert to axum Router
-        // NOTE: Routes::default() installs a fallback(UNIMPLEMENTED) handler.
-        let mut builder = Routes::builder();
-        builder.add_service(EntityServiceServer::new(entity_svc));
-        builder.add_service(LinkServiceServer::new(link_svc));
-        builder.add_service(EventServiceServer::new(event_svc));
-
-        // Conditionally add NotificationService when NotificationStore is configured
-        if host.notification_store().is_some() {
-            let notification_svc = notification_service::NotificationServiceImpl::new(host.clone());
-            builder.add_service(NotificationServiceServer::new(notification_svc));
-        }
-
-        let grpc_router = builder.routes().into_axum_router();
-
-        // Add the proto export endpoint
-        let proto_host = host.clone();
-        let proto_route =
-            Router::new().route("/grpc/proto", get(move || proto_export_handler(proto_host)));
-
-        Ok(grpc_router.merge(proto_route))
+        Ok(Self::routes(host, false, true))
     }
 
     /// Build a gRPC router **without** a fallback handler (**cohabitation mode**)
     ///
     /// Unlike [`build_router`](Self::build_router), this method does **not** install
-    /// tonic's default `UNIMPLEMENTED` fallback. This allows the returned router to
-    /// be safely merged with another router that already has a fallback (e.g., REST
-    /// with its nested link path handler).
-    ///
-    /// The router includes:
-    /// - `EntityService` for CRUD operations on any entity type
-    /// - `LinkService` for relationship management
-    /// - `GET /grpc/proto` endpoint for exporting the typed `.proto` definition
-    ///
-    /// # When to use
-    ///
-    /// Use this method when combining gRPC with REST on the same server:
+    /// tonic's default `UNIMPLEMENTED` fallback, so the router can be merged with a
+    /// REST router (which has its own fallback):
     ///
     /// ```rust,ignore
-    /// use this::server::router::combine_rest_and_grpc;
-    ///
-    /// let host = Arc::new(builder.build_host()?);
     /// let rest_router = RestExposure::build_router(host.clone(), vec![])?;
     /// let grpc_router = GrpcExposure::build_router_no_fallback(host)?;
     /// let app = combine_rest_and_grpc(rest_router, grpc_router);
     /// ```
     ///
-    /// Or use the convenience method:
-    ///
-    /// ```rust,ignore
-    /// let app = builder.build_with_grpc()?;
-    /// ```
-    ///
-    /// # Trade-off
-    ///
-    /// Without the tonic fallback, requests to unknown gRPC service paths will be
-    /// handled by the REST fallback (returning HTTP 404) instead of the standard
-    /// gRPC `UNIMPLEMENTED` status. This is acceptable for cohabitation scenarios.
-    ///
-    /// # How it works
-    ///
-    /// Instead of using `tonic::service::Routes` (which installs a fallback via
-    /// `Routes::default()`), this method registers each gRPC service directly on
-    /// a bare `axum::Router` using `route_service()`, replicating the path format
-    /// `/{package.ServiceName}/{*rest}` that tonic uses internally.
+    /// Without the tonic fallback, unknown gRPC paths get the REST fallback (HTTP
+    /// 404) instead of `UNIMPLEMENTED`. Each service is registered with
+    /// `route_service("/{package.ServiceName}/{*rest}")`, as tonic does internally.
+    /// Policies: as [`build_router`](Self::build_router).
     pub fn build_router_no_fallback(host: Arc<ServerHost>) -> Result<Router> {
-        crate::server::exposure::refuse_unenforced_surface(
+        crate::server::exposure::refuse_uncovered_surface(
             &host,
             "gRPC",
+            &uncovered_parts(&host),
             "GrpcExposure::build_router_no_fallback_unenforced",
         )?;
-        Self::build_router_no_fallback_unenforced(host)
+        Ok(Self::routes(host, true, false))
     }
 
     /// Variante sans repli, en **acceptant explicitement** l'absence
@@ -218,70 +170,86 @@ impl GrpcExposure {
             "gRPC (sans repli)",
             "GrpcExposure::build_router_no_fallback_unenforced",
         );
+        Ok(Self::routes(host, false, false))
+    }
+
+    /// The router: services enforced or not, with or without tonic's fallback.
+    fn routes(host: Arc<ServerHost>, enforce: bool, fallback: bool) -> Router {
         use axum::routing::get;
         use proto::entity_service_server::EntityServiceServer;
         use proto::event_service_server::EventServiceServer;
         use proto::link_service_server::LinkServiceServer;
         use proto::notification_service_server::NotificationServiceServer;
-        use tonic::server::NamedService;
-        use tower::ServiceExt;
 
-        // Create gRPC service implementations
-        let entity_svc = entity_service::EntityServiceImpl::new(host.clone());
-        let link_svc = link_service::LinkServiceImpl::new(host.clone());
-        let event_svc = event_service::EventServiceImpl::new(host.clone());
-
-        let entity_server = EntityServiceServer::new(entity_svc);
-        let link_server = LinkServiceServer::new(link_svc);
-        let event_server = EventServiceServer::new(event_svc);
-
-        // Build axum Router directly, bypassing tonic's Routes which installs
-        // a fallback via Routes::default() → axum::Router::new().fallback(unimplemented).
-        //
-        // This replicates what tonic::service::Routes::add_service() does internally:
-        //   router.route_service("/{ServiceName}/{*rest}", svc.map_request(body_convert))
-        let mut grpc_router = Router::new()
-            .route_service(
-                &format!(
-                    "/{}/{{*rest}}",
-                    EntityServiceServer::<entity_service::EntityServiceImpl>::NAME
-                ),
-                entity_server.map_request(|req: axum::http::Request<axum::body::Body>| {
-                    req.map(tonic::body::Body::new)
-                }),
+        let (entity_svc, link_svc, event_svc) = if enforce {
+            (
+                entity_service::EntityServiceImpl::new(host.clone()),
+                link_service::LinkServiceImpl::new(host.clone()),
+                event_service::EventServiceImpl::new(host.clone()),
             )
-            .route_service(
-                &format!(
-                    "/{}/{{*rest}}",
-                    LinkServiceServer::<link_service::LinkServiceImpl>::NAME
-                ),
-                link_server.map_request(|req: axum::http::Request<axum::body::Body>| {
-                    req.map(tonic::body::Body::new)
-                }),
+        } else {
+            (
+                entity_service::EntityServiceImpl::unenforced(host.clone()),
+                link_service::LinkServiceImpl::unenforced(host.clone()),
+                event_service::EventServiceImpl::unenforced(host.clone()),
             )
-            .route_service(
-                &format!(
-                    "/{}/{{*rest}}",
-                    EventServiceServer::<event_service::EventServiceImpl>::NAME
-                ),
-                event_server.map_request(|req: axum::http::Request<axum::body::Body>| {
-                    req.map(tonic::body::Body::new)
-                }),
-            );
+        };
+        let notification_svc = host
+            .notification_store()
+            .is_some()
+            .then(|| notification_service::NotificationServiceImpl::new(host.clone()));
 
-        // Conditionally add NotificationService when NotificationStore is configured
-        if host.notification_store().is_some() {
-            let notification_svc = notification_service::NotificationServiceImpl::new(host.clone());
-            let notification_server = NotificationServiceServer::new(notification_svc);
-            grpc_router = grpc_router.route_service(
-                &format!(
-                    "/{}/{{*rest}}",
-                    NotificationServiceServer::<notification_service::NotificationServiceImpl>::NAME
-                ),
-                notification_server.map_request(|req: axum::http::Request<axum::body::Body>| {
-                    req.map(tonic::body::Body::new)
-                }),
-            );
+        let mut grpc_router = if fallback {
+            // NOTE: Routes::default() installs a fallback(UNIMPLEMENTED) handler.
+            let mut builder = tonic::service::Routes::builder();
+            builder.add_service(EntityServiceServer::new(entity_svc));
+            builder.add_service(LinkServiceServer::new(link_svc));
+            builder.add_service(EventServiceServer::new(event_svc));
+            if let Some(svc) = notification_svc {
+                builder.add_service(NotificationServiceServer::new(svc));
+            }
+            builder.routes().into_axum_router()
+        } else {
+            use tonic::server::NamedService;
+            use tower::ServiceExt;
+            fn path(name: &str) -> String {
+                format!("/{name}/{{*rest}}")
+            }
+            let to_tonic =
+                |req: axum::http::Request<axum::body::Body>| req.map(tonic::body::Body::new);
+            let mut r = Router::new()
+                .route_service(
+                    &path(EntityServiceServer::<entity_service::EntityServiceImpl>::NAME),
+                    EntityServiceServer::new(entity_svc).map_request(to_tonic),
+                )
+                .route_service(
+                    &path(LinkServiceServer::<link_service::LinkServiceImpl>::NAME),
+                    LinkServiceServer::new(link_svc).map_request(to_tonic),
+                )
+                .route_service(
+                    &path(EventServiceServer::<event_service::EventServiceImpl>::NAME),
+                    EventServiceServer::new(event_svc).map_request(to_tonic),
+                );
+            if let Some(svc) = notification_svc {
+                r =
+                    r.route_service(
+                        &path(
+                            NotificationServiceServer::<
+                                notification_service::NotificationServiceImpl,
+                            >::NAME,
+                        ),
+                        NotificationServiceServer::new(svc).map_request(to_tonic),
+                    );
+            }
+            r
+        };
+
+        if enforce {
+            // Identity from the call metadata, once per HTTP/2 request.
+            grpc_router = grpc_router.layer(axum::middleware::from_fn_with_state(
+                host.clone(),
+                identity::identity_layer,
+            ));
         }
 
         // Add the proto export endpoint
@@ -289,8 +257,19 @@ impl GrpcExposure {
         let proto_route =
             Router::new().route("/grpc/proto", get(move || proto_export_handler(proto_host)));
 
-        Ok(grpc_router.merge(proto_route))
+        grpc_router.merge(proto_route)
     }
+}
+
+/// Parts of the gRPC surface that do not apply the policies yet.
+fn uncovered_parts(host: &ServerHost) -> Vec<&'static str> {
+    let mut out = Vec::new();
+    if host.notification_store().is_some() {
+        // Takes the user id from the request message: an identity check is needed
+        // before it can be served armed.
+        out.push("NotificationService");
+    }
+    out
 }
 
 /// Handler for GET /grpc/proto — exports a typed `.proto` definition
