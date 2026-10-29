@@ -44,7 +44,22 @@
 //! | `THIS_DEV_COMMANDS` | `"false"` disables the AI command bridge | enabled |
 //! | `THIS_POLL_MS` | watcher poll interval | `500` |
 //!
-//! [`vite-rs`]: https://github.com/DeusData/vite-rs
+//! # Cache guarantee
+//!
+//! vite-rs enforces a **zero-stale** policy: every response the browser sees is
+//! fresh or revalidated:
+//!
+//! | URL pattern | Cache-Control | Why |
+//! |---|---|---|
+//! | `/assets/*`, `/s/*` | `immutable, max-age=31536000` | filename contains content hash |
+//! | `*.html`, `/`, `/index.html` | `max-age=0, must-revalidate` | entry points always revalidate |
+//! | everything else | `max-age=0, must-revalidate` | forced revalidation, ETag/304 avoids payload |
+//!
+//! In disk mode the ETag is derived from `mtime + file size`; in embedded mode
+//! it is an FNV-1a hash of the byte content.  Both guarantee that a changed
+//! file always produces a new ETag.
+//!
+//! [`vite-rs`]: https://github.com/this-rs/vite-rs
 
 use std::borrow::Cow;
 use std::io::Read;
