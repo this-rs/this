@@ -204,9 +204,7 @@ impl DefaultModuleLoader {
             ContractError::framework(codes::DESCRIPTOR_INVALID)
                 .with_param("issues", format!("links_config: {e}"))
         })?;
-        let declared_descriptor = module.descriptor();
-        let derived = declared_descriptor.is_none();
-        let descriptor = match declared_descriptor {
+        let descriptor = match module.descriptor() {
             Some(d) => self.checked(d, CheckProfile::Compiled)?,
             None => {
                 let mut d = ModuleDescriptor::new(
@@ -286,16 +284,18 @@ impl DefaultModuleLoader {
                 creators.insert(t.to_string(), c);
             }
         }
+        // The overlay writes the descriptor's EFFECTIVE policies (defaults included) over
+        // the module's YAML `auth:`: an operation the descriptor does not declare (all of
+        // them for a derived descriptor) would become `authenticated` instead of the YAML
+        // policy (e.g. `create: role:admin`), unlike the same module built into the host,
+        // where `PolicyIndex` reads explicit descriptor policies first, then the YAML
+        // (fail-open, found in review). The YAML entries stay; the overlay only adds the
+        // entities YAML does not list. Explicit descriptor policies still win (dispatch
+        // judges through `PolicyIndex`).
         let mut links_config = config.clone().overlay_descriptor(&descriptor);
-        if derived {
-            // A DERIVED descriptor declares no policy: overlaying it would replace the
-            // module's own YAML `auth:` (e.g. `create: role:admin`) with the default
-            // `authenticated` (fail-open, found in review). Its YAML entries stay
-            // authoritative; the overlay only adds the entities YAML does not list.
-            for e in links_config.entities.iter_mut() {
-                if let Some(yaml) = config.entities.iter().find(|c| c.singular == e.singular) {
-                    *e = yaml.clone();
-                }
+        for e in links_config.entities.iter_mut() {
+            if let Some(yaml) = config.entities.iter().find(|c| c.singular == e.singular) {
+                *e = yaml.clone();
             }
         }
         Ok(ModuleInterface {
