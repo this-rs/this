@@ -9,7 +9,10 @@ use super::proto::{
     CreateLinkRequest, DeleteLinkRequest, DeleteLinkResponse, FindLinksRequest, GetLinkRequest,
     LinkListResponse, LinkResponse, link_service_server::LinkService as LinkServiceTrait,
 };
+use crate::core::errors::to_status;
 use crate::core::link::LinkEntity;
+use crate::descriptor::Operation;
+use crate::server::exposure::guard::SurfaceGuard;
 use crate::server::host::ServerHost;
 use std::sync::Arc;
 use tonic::{Request, Response, Status};
@@ -21,21 +24,40 @@ use uuid::Uuid;
 /// responses with entity data from entity fetchers.
 pub struct LinkServiceImpl {
     host: Arc<ServerHost>,
+    /// Apply the declared policies per call (armed routers).
+    enforce: bool,
 }
 
 impl LinkServiceImpl {
     /// Create a new LinkServiceImpl from a ServerHost
+    ///
+    /// **Fail-closed**: policies are applied per call whenever the host has them armed.
     pub fn new(host: Arc<ServerHost>) -> Self {
-        Self { host }
+        Self {
+            host,
+            enforce: true,
+        }
+    }
+
+    /// Service that does NOT apply the policies (`*_unenforced` routers).
+    pub fn unenforced(host: Arc<ServerHost>) -> Self {
+        Self {
+            host,
+            enforce: false,
+        }
+    }
+
+    async fn guard<T>(&self, request: &Request<T>) -> Result<SurfaceGuard, Status> {
+        super::identity::guard_of(&self.host, request, self.enforce).await
     }
 
     /// Convert a LinkEntity to a gRPC LinkResponse, optionally enriching with entity data
-    async fn link_to_response(&self, link: &LinkEntity) -> LinkResponse {
+    async fn link_to_response(&self, link: &LinkEntity, guard: &SurfaceGuard) -> LinkResponse {
         let metadata = link.metadata.as_ref().map(json_to_struct);
 
         // Try to fetch source and target entity data for enrichment
-        let source_data = self.fetch_entity_data(&link.source_id).await;
-        let target_data = self.fetch_entity_data(&link.target_id).await;
+        let source_data = self.fetch_entity_data(&link.source_id, guard).await;
+        let target_data = self.fetch_entity_data(&link.target_id, guard).await;
 
         LinkResponse {
             id: link.id.to_string(),
@@ -50,9 +72,22 @@ impl LinkServiceImpl {
         }
     }
 
-    /// Try to fetch entity data by ID across all registered fetchers
-    async fn fetch_entity_data(&self, entity_id: &Uuid) -> Option<prost_types::Struct> {
-        for fetcher in self.host.entity_fetchers.values() {
+    /// Try to fetch entity data by ID across all registered fetchers.
+    ///
+    /// Enrichment is a READ of the entity: a type whose `get` policy refuses the
+    /// caller is skipped (no data rather than a leak through the link).
+    async fn fetch_entity_data(
+        &self,
+        entity_id: &Uuid,
+        guard: &SurfaceGuard,
+    ) -> Option<prost_types::Struct> {
+        for (entity_type, fetcher) in self.host.entity_fetchers.iter() {
+            if guard
+                .check(entity_type, Operation::Get, Some(entity_id))
+                .is_err()
+            {
+                continue;
+            }
             if let Ok(json) = fetcher.fetch_as_json(entity_id).await {
                 return Some(json_to_struct(&json));
             }
@@ -67,6 +102,7 @@ impl LinkServiceTrait for LinkServiceImpl {
         &self,
         request: Request<CreateLinkRequest>,
     ) -> Result<Response<LinkResponse>, Status> {
+        let guard = self.guard(&request).await?;
         let req = request.into_inner();
 
         let source_id = Uuid::parse_str(&req.source_id)
@@ -76,6 +112,16 @@ impl LinkServiceTrait for LinkServiceImpl {
             .map_err(|e| Status::invalid_argument(format!("Invalid target_id: {}", e)))?;
 
         let metadata = req.metadata.as_ref().map(struct_to_json);
+
+        guard
+            .check_link(
+                Some(&req.link_type),
+                None,
+                None,
+                None,
+                Operation::CreateLink,
+            )
+            .map_err(to_status)?;
 
         let link = LinkEntity::new(&req.link_type, source_id, target_id, metadata);
 
@@ -99,7 +145,7 @@ impl LinkServiceTrait for LinkServiceImpl {
             ));
         }
 
-        let response = self.link_to_response(&created).await;
+        let response = self.link_to_response(&created, &guard).await;
         Ok(Response::new(response))
     }
 
@@ -107,6 +153,7 @@ impl LinkServiceTrait for LinkServiceImpl {
         &self,
         request: Request<GetLinkRequest>,
     ) -> Result<Response<LinkResponse>, Status> {
+        let guard = self.guard(&request).await?;
         let req = request.into_inner();
 
         let link_id = Uuid::parse_str(&req.link_id)
@@ -120,7 +167,11 @@ impl LinkServiceTrait for LinkServiceImpl {
             .map_err(|e| Status::internal(format!("Failed to get link: {}", e)))?
             .ok_or_else(|| Status::not_found(format!("Link '{}' not found", req.link_id)))?;
 
-        let response = self.link_to_response(&link).await;
+        guard
+            .check_link(Some(&link.link_type), None, None, None, Operation::GetLink)
+            .map_err(to_status)?;
+
+        let response = self.link_to_response(&link, &guard).await;
         Ok(Response::new(response))
     }
 
@@ -128,6 +179,7 @@ impl LinkServiceTrait for LinkServiceImpl {
         &self,
         request: Request<FindLinksRequest>,
     ) -> Result<Response<LinkListResponse>, Status> {
+        let guard = self.guard(&request).await?;
         let req = request.into_inner();
 
         let entity_id = Uuid::parse_str(&req.entity_id)
@@ -144,6 +196,11 @@ impl LinkServiceTrait for LinkServiceImpl {
         } else {
             Some(req.entity_type.as_str())
         };
+
+        // `entity_type` filters the TARGETS of the outgoing links.
+        guard
+            .check_link(link_type, None, entity_type, None, Operation::ListLinks)
+            .map_err(to_status)?;
 
         let links = self
             .host
@@ -154,7 +211,7 @@ impl LinkServiceTrait for LinkServiceImpl {
 
         let mut responses = Vec::with_capacity(links.len());
         for link in &links {
-            responses.push(self.link_to_response(link).await);
+            responses.push(self.link_to_response(link, &guard).await);
         }
 
         Ok(Response::new(LinkListResponse { links: responses }))
@@ -164,6 +221,7 @@ impl LinkServiceTrait for LinkServiceImpl {
         &self,
         request: Request<FindLinksRequest>,
     ) -> Result<Response<LinkListResponse>, Status> {
+        let guard = self.guard(&request).await?;
         let req = request.into_inner();
 
         let entity_id = Uuid::parse_str(&req.entity_id)
@@ -181,6 +239,11 @@ impl LinkServiceTrait for LinkServiceImpl {
             Some(req.entity_type.as_str())
         };
 
+        // `entity_type` filters the SOURCES of the incoming links.
+        guard
+            .check_link(link_type, entity_type, None, None, Operation::ListLinks)
+            .map_err(to_status)?;
+
         let links = self
             .host
             .link_service
@@ -190,7 +253,7 @@ impl LinkServiceTrait for LinkServiceImpl {
 
         let mut responses = Vec::with_capacity(links.len());
         for link in &links {
-            responses.push(self.link_to_response(link).await);
+            responses.push(self.link_to_response(link, &guard).await);
         }
 
         Ok(Response::new(LinkListResponse { links: responses }))
@@ -200,6 +263,7 @@ impl LinkServiceTrait for LinkServiceImpl {
         &self,
         request: Request<DeleteLinkRequest>,
     ) -> Result<Response<DeleteLinkResponse>, Status> {
+        let guard = self.guard(&request).await?;
         let req = request.into_inner();
 
         let link_id = Uuid::parse_str(&req.link_id)
@@ -212,6 +276,18 @@ impl LinkServiceTrait for LinkServiceImpl {
             .get(&link_id)
             .await
             .map_err(|e| Status::internal(format!("Failed to get link: {}", e)))?;
+
+        // Judged on the stored link type; an unknown link id is judged against every
+        // declaration (strictest), so a refusal does not reveal existence.
+        guard
+            .check_link(
+                link.as_ref().map(|l| l.link_type.as_str()),
+                None,
+                None,
+                None,
+                Operation::DeleteLink,
+            )
+            .map_err(to_status)?;
 
         self.host
             .link_service
@@ -374,7 +450,7 @@ mod tests {
     async fn create_link_valid_request_returns_link_response() {
         let link_svc = Arc::new(InMemoryLinkService::new());
         let host = make_host(link_svc);
-        let svc = LinkServiceImpl::new(host);
+        let svc = LinkServiceImpl::unenforced(host);
 
         let source_id = Uuid::new_v4();
         let target_id = Uuid::new_v4();
@@ -399,7 +475,7 @@ mod tests {
     #[tokio::test]
     async fn create_link_invalid_source_id_returns_invalid_argument() {
         let link_svc = Arc::new(InMemoryLinkService::new());
-        let svc = LinkServiceImpl::new(make_host(link_svc));
+        let svc = LinkServiceImpl::unenforced(make_host(link_svc));
 
         let err = svc
             .create_link(Request::new(CreateLinkRequest {
@@ -421,7 +497,7 @@ mod tests {
     #[tokio::test]
     async fn create_link_invalid_target_id_returns_invalid_argument() {
         let link_svc = Arc::new(InMemoryLinkService::new());
-        let svc = LinkServiceImpl::new(make_host(link_svc));
+        let svc = LinkServiceImpl::unenforced(make_host(link_svc));
 
         let err = svc
             .create_link(Request::new(CreateLinkRequest {
@@ -448,7 +524,7 @@ mod tests {
         let bus = host.event_bus().expect("event bus should be configured");
         let mut rx = bus.subscribe();
 
-        let svc = LinkServiceImpl::new(host);
+        let svc = LinkServiceImpl::unenforced(host);
 
         svc.create_link(Request::new(CreateLinkRequest {
             link_type: "has_invoice".to_string(),
@@ -482,7 +558,7 @@ mod tests {
             .await
             .expect("should create link in store");
 
-        let svc = LinkServiceImpl::new(make_host(link_svc));
+        let svc = LinkServiceImpl::unenforced(make_host(link_svc));
 
         let resp = svc
             .get_link(Request::new(GetLinkRequest {
@@ -499,7 +575,7 @@ mod tests {
     #[tokio::test]
     async fn get_link_not_found_returns_not_found() {
         let link_svc = Arc::new(InMemoryLinkService::new());
-        let svc = LinkServiceImpl::new(make_host(link_svc));
+        let svc = LinkServiceImpl::unenforced(make_host(link_svc));
 
         let err = svc
             .get_link(Request::new(GetLinkRequest {
@@ -553,7 +629,7 @@ mod tests {
             .await
             .expect("create link 3");
 
-        let svc = LinkServiceImpl::new(make_host(link_svc));
+        let svc = LinkServiceImpl::unenforced(make_host(link_svc));
 
         let resp = svc
             .find_links_by_source(Request::new(FindLinksRequest {
@@ -591,7 +667,7 @@ mod tests {
             .await
             .expect("create link 2");
 
-        let svc = LinkServiceImpl::new(make_host(link_svc));
+        let svc = LinkServiceImpl::unenforced(make_host(link_svc));
 
         let resp = svc
             .find_links_by_source(Request::new(FindLinksRequest {
@@ -635,7 +711,7 @@ mod tests {
             .await
             .expect("create link 2");
 
-        let svc = LinkServiceImpl::new(make_host(link_svc));
+        let svc = LinkServiceImpl::unenforced(make_host(link_svc));
 
         let resp = svc
             .find_links_by_target(Request::new(FindLinksRequest {
@@ -673,7 +749,7 @@ mod tests {
             .await
             .expect("create link 2");
 
-        let svc = LinkServiceImpl::new(make_host(link_svc));
+        let svc = LinkServiceImpl::unenforced(make_host(link_svc));
 
         let resp = svc
             .find_links_by_target(Request::new(FindLinksRequest {
@@ -703,7 +779,7 @@ mod tests {
             .await
             .expect("should create link in store");
 
-        let svc = LinkServiceImpl::new(make_host(link_svc));
+        let svc = LinkServiceImpl::unenforced(make_host(link_svc));
 
         let resp = svc
             .delete_link(Request::new(DeleteLinkRequest {
@@ -729,7 +805,7 @@ mod tests {
         let bus = host.event_bus().expect("event bus should be configured");
         let mut rx = bus.subscribe();
 
-        let svc = LinkServiceImpl::new(host);
+        let svc = LinkServiceImpl::unenforced(host);
 
         svc.delete_link(Request::new(DeleteLinkRequest {
             link_id: link_id.to_string(),
@@ -768,7 +844,7 @@ mod tests {
             .await
             .expect("should create link in store");
 
-        let svc = LinkServiceImpl::new(host);
+        let svc = LinkServiceImpl::unenforced(host);
 
         let resp = svc
             .get_link(Request::new(GetLinkRequest {

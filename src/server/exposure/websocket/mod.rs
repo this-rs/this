@@ -110,14 +110,8 @@ impl WebSocketExposure {
     /// every YAML-declared sink of type `websocket`, enabling the event pipeline
     /// to dispatch notifications to connected clients.
     pub fn build_router(host: Arc<ServerHost>) -> Result<Router> {
-        // **Fail-closed** : un canal WebSocket n'est pas résolu par route, donc
-        // aucune politique `auth:` ne s'y rattache.
-        crate::server::exposure::refuse_unenforced_surface(
-            &host,
-            "WebSocket",
-            "WebSocketExposure::build_router_unenforced",
-        )?;
-        Self::build_router_unenforced(host)
+        let (router, _cm) = Self::build_router_with_manager(host)?;
+        Ok(router)
     }
 
     /// Comme [`WebSocketExposure::build_router`], en **acceptant explicitement**
@@ -132,16 +126,26 @@ impl WebSocketExposure {
     }
 
     /// Comme [`WebSocketExposure::build_router`], en rendant aussi le
-    /// `ConnectionManager` — et **refuse** de même si les politiques sont armées.
+    /// `ConnectionManager`.
+    ///
+    /// # Policies (armed host)
+    ///
+    /// The caller is resolved at the handshake (header, `this_token` cookie,
+    /// `access_token` query; 401 on a bad token with a non-public default policy)
+    /// and every event is delivered only if it may `get` its entity / `get_link`
+    /// its link (`SurfaceGuard`, same resolution as REST). Still **refused** when
+    /// `websocket` sinks are wired: their `broadcast` reaches every connection
+    /// without any policy (fail-closed).
     pub fn build_router_with_manager(
         host: Arc<ServerHost>,
     ) -> Result<(Router, Arc<ConnectionManager>)> {
-        crate::server::exposure::refuse_unenforced_surface(
+        crate::server::exposure::refuse_uncovered_surface(
             &host,
             "WebSocket",
+            &uncovered_parts(&host),
             "WebSocketExposure::build_router_with_manager_unenforced",
         )?;
-        Self::build_router_with_manager_unenforced(host)
+        Ok(Self::build(host, true))
     }
 
     /// Build the WebSocket router and return both the router and the `ConnectionManager`.
@@ -160,7 +164,15 @@ impl WebSocketExposure {
     pub fn build_router_with_manager_unenforced(
         host: Arc<ServerHost>,
     ) -> Result<(Router, Arc<manager::ConnectionManager>)> {
-        let connection_manager = Arc::new(manager::ConnectionManager::new(host.clone()));
+        Ok(Self::build(host, false))
+    }
+
+    fn build(host: Arc<ServerHost>, enforce: bool) -> (Router, Arc<manager::ConnectionManager>) {
+        let mut cm = manager::ConnectionManager::new(host.clone());
+        if enforce {
+            cm = cm.enforced();
+        }
+        let connection_manager = Arc::new(cm);
 
         // Spawn the event dispatch loop if there's an event bus
         if let Some(event_bus) = host.event_bus() {
@@ -184,7 +196,7 @@ impl WebSocketExposure {
             .route("/ws", get(handler::ws_handler))
             .with_state(connection_manager.clone());
 
-        Ok((router, connection_manager))
+        (router, connection_manager)
     }
 
     /// Wire WebSocket sinks into the SinkRegistry
@@ -220,5 +232,21 @@ impl WebSocketExposure {
                 );
             }
         }
+    }
+}
+
+/// Parts of the WebSocket surface that do not apply the policies yet.
+fn uncovered_parts(host: &ServerHost) -> Vec<&'static str> {
+    let wired_sinks = host.sink_registry.is_some()
+        && host
+            .config
+            .sinks
+            .as_ref()
+            .is_some_and(|s| s.iter().any(|c| c.sink_type == SinkType::WebSocket));
+    if wired_sinks {
+        // `WebSocketSink::broadcast` reaches every connection, whatever its caller.
+        vec!["websocket sinks (broadcast)"]
+    } else {
+        vec![]
     }
 }

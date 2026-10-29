@@ -64,6 +64,10 @@ pub enum PolicyOrigin {
     /// Politique évaluée par la **décision IAM matérialisée** (`perm:…`) —
     /// donc par une lecture indexée, sans traversée du graphe des rôles.
     Iam,
+    /// Déclarée dans le **descripteur** du module (`EntityDesc.permissions` /
+    /// `LinkDesc.permissions`) : tranchée par l'évaluateur unique
+    /// (`engine::policy`), comme sur GraphQL, gRPC et WebSocket.
+    Descriptor,
 }
 
 /// Ce qu'une route exige.
@@ -256,6 +260,11 @@ pub struct Authorization {
     /// la faille des chemins lien/nested à 4 segments, qui passaient sans
     /// garde).
     public_paths: Arc<Vec<String>>,
+    /// Le catalogue vivant de l'hôte : quand il porte des descripteurs, une
+    /// politique déclarée dans le descripteur décide AVANT la table YAML
+    /// (`core::auth::surface::PolicyIndex`, même résolution que les autres
+    /// surfaces). `None` = résolution YAML seule (historique).
+    catalog: Option<Arc<crate::server::catalog::LiveCatalog>>,
 }
 
 impl Authorization {
@@ -279,7 +288,111 @@ impl Authorization {
                 "/healthz".to_string(),
                 "/auth/".to_string(),
             ]),
+            catalog: None,
         }
+    }
+
+    /// Branche le **catalogue vivant** de l'hôte : les politiques déclarées dans
+    /// les descripteurs (`EntityDesc.permissions`, `LinkDesc.permissions`)
+    /// s'appliquent alors à REST avec la même préséance et le même évaluateur
+    /// que GraphQL, gRPC et WebSocket (`core::auth::surface`). Sans lui, une
+    /// politique déclarée seulement dans le descripteur protégeait les autres
+    /// surfaces mais pas REST.
+    pub fn with_catalog(mut self, catalog: Arc<crate::server::catalog::LiveCatalog>) -> Self {
+        self.catalog = Some(catalog);
+        self
+    }
+
+    /// Les politiques résolues **par le descripteur** pour cette requête, quand
+    /// c'est lui qui décide (préséance de `PolicyIndex` : `LinkDesc`, puis
+    /// `auth:` YAML du lien, puis `EntityDesc`, puis `auth:` YAML de l'entité).
+    /// `None` = la table YAML (ou le défaut) décide : chemin historique inchangé.
+    fn descriptor_policies(
+        &self,
+        segments: &[&str],
+        scope_entity: &str,
+        operation: &str,
+    ) -> Option<Vec<crate::core::auth::surface::ResolvedPolicy>> {
+        use crate::core::auth::surface::{PolicyIndex, PolicySource};
+        use crate::descriptor::Operation;
+        let catalog = self.catalog.as_ref()?.load();
+        catalog.descriptors.modules().next()?;
+        let op: Operation = operation.parse().ok()?;
+        let index = PolicyIndex::new(catalog.descriptors.clone(), catalog.links_config.clone());
+        let is_link = matches!(
+            op,
+            Operation::ListLinks
+                | Operation::GetLink
+                | Operation::CreateLink
+                | Operation::UpdateLink
+                | Operation::DeleteLink
+        );
+        // Same route → link resolution as the link router (and `declared_link_policy`).
+        let definition = segments.get(2).filter(|_| is_link).and_then(|route| {
+            catalog.links_config.links.iter().find(|d| {
+                (d.source_type == scope_entity && d.forward_route_name == *route)
+                    || (d.target_type == scope_entity && d.reverse_route_name == *route)
+            })
+        });
+        let resolved = match definition {
+            Some(d) => index.link_policies(
+                Some(&d.link_type),
+                Some(&d.source_type),
+                Some(&d.target_type),
+                Some(scope_entity),
+                &op,
+            ),
+            None => vec![index.entity_policy(scope_entity, &op)],
+        };
+        resolved
+            .iter()
+            .any(|r| {
+                matches!(
+                    r.source,
+                    PolicySource::Descriptor | PolicySource::LinkDescriptor
+                )
+            })
+            .then_some(resolved)
+    }
+
+    /// Évalue des politiques issues du descripteur avec l'évaluateur unique.
+    fn evaluate_descriptor(
+        &self,
+        resolved: &[crate::core::auth::surface::ResolvedPolicy],
+        context: &AuthContext,
+        used_iam: &mut bool,
+    ) -> Result<(), String> {
+        use crate::core::auth::descriptor_policy::{PermissionFn, RegistryEnv};
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let consulted = AtomicBool::new(false);
+        let perm = |p: &str| -> Option<bool> {
+            let mut c = false;
+            let verdict = match self.check_iam(p, context, &mut c) {
+                IamVerdict::Allowed => Some(true),
+                IamVerdict::Denied => Some(false),
+                IamVerdict::Unevaluable => None,
+            };
+            if c {
+                consulted.store(true, Ordering::Relaxed);
+            }
+            verdict
+        };
+        let perm_ref: &PermissionFn<'_> = &perm;
+        let env = RegistryEnv::new(Some(&self.resolvers), context).with_permission(perm_ref);
+        let mut outcome = Ok(());
+        for r in resolved {
+            if let Err(e) = crate::core::auth::surface::decide(r, context, None, &env) {
+                outcome = Err(e
+                    .params
+                    .get("reason")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string)
+                    .unwrap_or_else(|| e.message.clone()));
+                break;
+            }
+        }
+        *used_iam = consulted.load(Ordering::Relaxed);
+        outcome
     }
 
     /// Le mode d'application.
@@ -767,6 +880,17 @@ impl Authorization {
             }
         };
 
+        // **Le descripteur d'abord** (quand il décide : voir
+        // `descriptor_policies`). Même préséance que GraphQL / gRPC / WebSocket.
+        if let Some(resolved) = self.descriptor_policies(&segments, &scope_entity, operation) {
+            return Requirement::Policy {
+                entity_type: scope_entity.clone(),
+                operation: operation.to_string(),
+                policy: describe_resolved(&resolved),
+                origin: PolicyOrigin::Descriptor,
+            };
+        }
+
         // **Le type de lien passe avant l'entité.** Une politique déclarée sur le
         // lien (« lire les factures d'une commande ») est plus précise que celle
         // de l'entité source (« lire les commandes ») : quand elle existe, c'est
@@ -823,6 +947,33 @@ impl Authorization {
         };
 
         let scope = format!("{entity_type} · {operation}");
+
+        // Politique du descripteur : l'évaluateur unique (`engine::policy`), pas
+        // la grammaire plate. Re-résolue ici sur le même instantané logique ; si
+        // le catalogue a changé entre-temps au point de ne plus la porter, refus.
+        if origin == PolicyOrigin::Descriptor {
+            let segments = Self::segments(path);
+            let mut used_iam = false;
+            let verdict = match self.descriptor_policies(&segments, &entity_type, &operation) {
+                Some(resolved) => self.evaluate_descriptor(&resolved, context, &mut used_iam),
+                None => Err("catalogue republié pendant la décision — refus".to_string()),
+            };
+            let origin = if used_iam { PolicyOrigin::Iam } else { origin };
+            return match verdict {
+                Ok(()) => Decision::Allow {
+                    scope,
+                    policy,
+                    origin,
+                },
+                Err(reason) => Decision::Deny {
+                    scope,
+                    policy,
+                    origin,
+                    reason: format!("le contexte ({}) : {reason}", describe(context)),
+                },
+            };
+        }
+
         // Fail-closed : une politique illisible ne doit JAMAIS laisser passer.
         // `parse_policy` retombe sur `Resolver("<texte>")`, que
         // `check_with_resolver` refuse déjà quand le résolveur est inconnu.
@@ -855,6 +1006,21 @@ impl Authorization {
                     .to_string(),
             },
         }
+    }
+}
+
+/// Le texte d'une (ou de plusieurs, toutes requises) politique(s) résolue(s).
+fn describe_resolved(resolved: &[crate::core::auth::surface::ResolvedPolicy]) -> String {
+    let texts: Vec<String> = resolved
+        .iter()
+        .map(|r| match &r.policy {
+            Ok(e) => e.to_string(),
+            Err(raw) => raw.clone(),
+        })
+        .collect();
+    match texts.as_slice() {
+        [one] => one.clone(),
+        many => format!("all({})", many.join(", ")),
     }
 }
 
@@ -3629,5 +3795,188 @@ mod policy_perimeter {
                 other => panic!("attendu une autorisation, obtenue {other:?}"),
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod descriptor_tests {
+    //! REST reads the descriptor's permissions with the precedence of every other
+    //! surface (`core::auth::surface::PolicyIndex`).
+    use super::*;
+    use crate::config::EntityConfig;
+    use crate::core::link::{LinkAuthConfig, LinkDefinition};
+    use crate::descriptor::{
+        DescriptorSet, EntityDesc, LinkDesc, ModuleDescriptor, Operation, PolicyExpr,
+    };
+    use crate::server::host::ServerHost;
+    use crate::storage::InMemoryLinkService;
+    use std::collections::HashMap;
+
+    struct Stub(&'static str, &'static str);
+    impl crate::server::entity_registry::EntityDescriptor for Stub {
+        fn entity_type(&self) -> &str {
+            self.0
+        }
+        fn plural(&self) -> &str {
+            self.1
+        }
+        fn build_routes(&self) -> axum::Router {
+            axum::Router::new()
+        }
+    }
+
+    fn user(roles: &[&str]) -> AuthContext {
+        AuthContext::User {
+            user_id: uuid::Uuid::from_u128(1),
+            tenant_id: uuid::Uuid::from_u128(2),
+            roles: roles.iter().map(|r| r.to_string()).collect(),
+        }
+    }
+
+    /// YAML: `order` all `authenticated`; links `has_invoice` (YAML `create` =
+    /// `role:clerk`) and `has_note` (no YAML auth). Descriptor: `order.create` =
+    /// `role:admin`, `order.update` = `all(authenticated, not(role:banned))`,
+    /// `order.list_links` = `role:auditor`, `has_invoice.list_links` = `role:billing`.
+    fn authz() -> Authorization {
+        let link =
+            |lt: &str, target: &str, route: &str, auth: Option<LinkAuthConfig>| LinkDefinition {
+                link_type: lt.into(),
+                source_type: "order".into(),
+                target_type: target.into(),
+                forward_route_name: route.into(),
+                reverse_route_name: "order".into(),
+                description: None,
+                required_fields: None,
+                auth,
+            };
+        let config = LinksConfig {
+            entities: vec![EntityConfig {
+                singular: "order".into(),
+                plural: "orders".into(),
+                auth: EntityAuthConfig::default(),
+            }],
+            links: vec![
+                link(
+                    "has_invoice",
+                    "invoice",
+                    "invoices",
+                    Some(LinkAuthConfig {
+                        create: "role:clerk".into(),
+                        ..Default::default()
+                    }),
+                ),
+                link("has_note", "note", "notes", None),
+            ],
+            validation_rules: None,
+            events: None,
+            sinks: None,
+            auth: None,
+        };
+        let mut m = ModuleDescriptor::new("shop", "1.0.0");
+        let mut order = EntityDesc::new("order");
+        let ops = &mut order.permissions.ops;
+        ops.insert(Operation::Create, PolicyExpr::HasRole(vec!["admin".into()]));
+        ops.insert(
+            Operation::Update,
+            PolicyExpr::parse("all(authenticated, not(role:banned))").unwrap(),
+        );
+        ops.insert(
+            Operation::ListLinks,
+            PolicyExpr::HasRole(vec!["auditor".into()]),
+        );
+        m.entities.push(order);
+        let mut l = LinkDesc::new("has_invoice", "order", "invoice");
+        l.permissions.ops.insert(
+            Operation::ListLinks,
+            PolicyExpr::HasRole(vec!["billing".into()]),
+        );
+        m.links.push(l);
+        let mut set = DescriptorSet::new();
+        set.insert(m).unwrap();
+
+        let mut registry = EntityRegistry::new();
+        registry.register(Box::new(Stub("order", "orders")));
+        let host = ServerHost::from_builder_components(
+            Arc::new(InMemoryLinkService::new()),
+            config,
+            registry,
+            HashMap::new(),
+            HashMap::new(),
+        )
+        .unwrap()
+        .with_descriptors(set);
+        Authorization::new(
+            host.config.clone(),
+            &host.entity_registry,
+            host.resolver_registry.clone(),
+        )
+        .with_catalog(host.catalog.clone())
+    }
+
+    fn allowed(a: &Authorization, m: Method, path: &str, ctx: &AuthContext) -> bool {
+        matches!(a.decide(&m, path, ctx), Decision::Allow { .. })
+    }
+
+    fn origin(a: &Authorization, m: Method, path: &str) -> PolicyOrigin {
+        match a.requirement(&m, path) {
+            Requirement::Policy { origin, .. } => origin,
+            other => panic!("{path}: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rest_applies_descriptor_permissions() {
+        let a = authz();
+        let id = uuid::Uuid::nil();
+        // Entity: descriptor explicit beats the YAML `authenticated`.
+        assert_eq!(
+            origin(&a, Method::POST, "/orders"),
+            PolicyOrigin::Descriptor
+        );
+        assert!(!allowed(&a, Method::POST, "/orders", &user(&[])));
+        assert!(allowed(&a, Method::POST, "/orders", &user(&["admin"])));
+        // Function form: evaluated by the engine, not refused as "unknown vocabulary".
+        let one = format!("/orders/{id}");
+        assert!(allowed(&a, Method::PUT, &one, &user(&[])));
+        assert!(!allowed(&a, Method::PUT, &one, &user(&["banned"])));
+        assert!(!allowed(&a, Method::PUT, &one, &AuthContext::Anonymous));
+        // Not declared in the descriptor: YAML decides, as before.
+        assert_eq!(origin(&a, Method::GET, "/orders"), PolicyOrigin::Declared);
+    }
+
+    #[test]
+    fn link_policy_precedence_matches_rest() {
+        let a = authz();
+        let id = uuid::Uuid::nil();
+        let t = uuid::Uuid::from_u128(5);
+        // 1. LinkDesc explicit (`has_invoice.list_links` = billing) beats the entity's
+        //    descriptor (`order.list_links` = auditor).
+        let invoices = format!("/orders/{id}/invoices");
+        assert_eq!(origin(&a, Method::GET, &invoices), PolicyOrigin::Descriptor);
+        assert!(allowed(&a, Method::GET, &invoices, &user(&["billing"])));
+        assert!(!allowed(&a, Method::GET, &invoices, &user(&["auditor"])));
+        // 2. YAML link table (`has_invoice.create` = clerk) beats the entity descriptor.
+        let create = format!("/orders/{id}/invoices/invoice/{t}");
+        assert_eq!(origin(&a, Method::POST, &create), PolicyOrigin::Declared);
+        assert!(allowed(&a, Method::POST, &create, &user(&["clerk"])));
+        assert!(!allowed(&a, Method::POST, &create, &user(&["admin"])));
+        // 3. Neither on the link: the entity descriptor (`order.list_links` = auditor).
+        let notes = format!("/orders/{id}/notes");
+        assert_eq!(origin(&a, Method::GET, &notes), PolicyOrigin::Descriptor);
+        assert!(allowed(&a, Method::GET, &notes, &user(&["auditor"])));
+        assert!(!allowed(&a, Method::GET, &notes, &user(&["billing"])));
+        // Same resolution as the non-REST guard.
+        let index = crate::core::auth::surface::PolicyIndex::new(
+            a.catalog.as_ref().unwrap().load().descriptors.clone(),
+            a.catalog.as_ref().unwrap().load().links_config.clone(),
+        );
+        let p = index.link_policies(
+            Some("has_note"),
+            Some("order"),
+            Some("note"),
+            Some("order"),
+            &Operation::ListLinks,
+        );
+        assert_eq!(p[0].policy, Ok(PolicyExpr::HasRole(vec!["auditor".into()])));
     }
 }

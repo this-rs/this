@@ -106,6 +106,56 @@ mod tests {
         assert_eq!(evaluate(&p("not:resolver:no"), &anon, &Env), Some(true));
     }
 
+    /// An unknown resolver never allows: alone, composed, or negated. Unlike the legacy
+    /// `check_with_resolver` (where `not:resolver:unknown` was `true`), the negation of an
+    /// unevaluable resolver stays unevaluable, hence denied at the edge.
+    #[test]
+    fn unknown_resolver_denies() {
+        let roles = vec!["admin".to_string()];
+        let admin_user = PrincipalView {
+            authenticated: true,
+            roles: &roles,
+            admin: true,
+            service: true,
+            owner: Some(true),
+            ..Default::default()
+        };
+        for s in [
+            "resolver:unknown",
+            "not:resolver:unknown",
+            "not(resolver:unknown)",
+            "all:authenticated,resolver:unknown",
+            "any:resolver:unknown,resolver:no",
+            "owner_or_resolver:unknown_but_owner_is_false",
+        ] {
+            let expr = p(s);
+            let who = if s.starts_with("owner_or") {
+                PrincipalView {
+                    owner: Some(false),
+                    ..admin_user
+                }
+            } else {
+                admin_user
+            };
+            assert!(
+                !is_allowed(&expr, &who, &Env),
+                "`{s}` must deny with an unknown resolver"
+            );
+            assert!(
+                !is_allowed(&expr, &who, &NoEnv),
+                "`{s}` must deny without env"
+            );
+        }
+        // A known resolver still decides.
+        assert!(is_allowed(&p("resolver:yes"), &admin_user, &Env));
+        // Short-circuit: an evaluable `true` branch of an `any` still allows.
+        assert!(is_allowed(
+            &p("any:resolver:unknown,admin_only"),
+            &admin_user,
+            &Env
+        ));
+    }
+
     /// Three-valued table, same verdicts as `Authorization::evaluate` on the shared vocabulary.
     #[test]
     fn three_valued_equivalence_table() {
