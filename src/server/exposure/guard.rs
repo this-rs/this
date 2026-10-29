@@ -29,6 +29,7 @@ use crate::core::auth::descriptor_policy::RegistryEnv;
 use crate::core::auth::surface::{PolicyIndex, authorize_link_op, authorize_op};
 use crate::core::auth::{AuthContext, AuthResolverRegistry};
 use crate::core::events::{EntityEvent, FrameworkEvent, LinkEvent};
+use crate::core::{EntityCreator, EntityFetcher};
 use crate::descriptor::framework::codes;
 use crate::descriptor::{ContractError, Operation};
 use crate::server::host::ServerHost;
@@ -71,8 +72,22 @@ pub(crate) fn identity_failure(
     }
 }
 
+impl Enforced {
+    fn index(&self) -> PolicyIndex {
+        let catalog = self.catalog.load();
+        PolicyIndex::new(catalog.descriptors.clone(), catalog.links_config.clone())
+    }
+}
+
+fn unknown_entity(entity: &str) -> ContractError {
+    crate::core::errors::not_found(entity, format!("entity type '{entity}' not registered"))
+}
+
+/// Policies are read from the LIVE catalog at each check (not frozen at guard creation): a
+/// long-lived WebSocket connection judges a module loaded after it connected, and a module
+/// unloaded since is no longer served.
 struct Enforced {
-    index: PolicyIndex,
+    catalog: Arc<crate::server::catalog::LiveCatalog>,
     resolvers: Arc<AuthResolverRegistry>,
     report_only: bool,
     surface: &'static str,
@@ -112,12 +127,10 @@ impl SurfaceGuard {
         if !host.authorize {
             return Self::unenforced(ctx);
         }
-        let catalog = host.catalog.load();
-        let index = PolicyIndex::new(catalog.descriptors.clone(), catalog.links_config.clone());
         Self {
             ctx,
             enforced: Some(Arc::new(Enforced {
-                index,
+                catalog: host.catalog.clone(),
                 resolvers: host.resolver_registry.clone(),
                 report_only: host.authorize_report_only,
                 surface,
@@ -199,9 +212,61 @@ impl SurfaceGuard {
             return Ok(());
         };
         let res = self.with_env(e, resource, |env| {
-            authorize_op(&e.index, entity, &op, &self.ctx, None, env)
+            authorize_op(&e.index(), entity, &op, &self.ctx, None, env)
         });
         self.outcome(e, res)
+    }
+
+    /// THE access to the fetcher of `entity` for a caller-driven operation: the policy of
+    /// `op` is judged first (descriptor, then YAML `auth:`), then the fetcher is read from
+    /// the LIVE catalog (hot-loaded modules included). Unknown entity: `ENTITY_NOT_FOUND`.
+    pub fn fetcher(
+        &self,
+        host: &ServerHost,
+        entity: &str,
+        op: Operation,
+        resource: Option<&Uuid>,
+    ) -> Result<Arc<dyn EntityFetcher>, ContractError> {
+        self.check(entity, op, resource)?;
+        host.catalog
+            .load()
+            .fetchers
+            .get(entity)
+            .cloned()
+            .ok_or_else(|| unknown_entity(entity))
+    }
+
+    /// Creator counterpart of [`SurfaceGuard::fetcher`].
+    pub fn creator(
+        &self,
+        host: &ServerHost,
+        entity: &str,
+        op: Operation,
+        resource: Option<&Uuid>,
+    ) -> Result<Arc<dyn EntityCreator>, ContractError> {
+        self.check(entity, op, resource)?;
+        host.catalog
+            .load()
+            .creators
+            .get(entity)
+            .cloned()
+            .ok_or_else(|| unknown_entity(entity))
+    }
+
+    /// Fetchers (from the live catalog) of every entity type whose `get` policy allows
+    /// the caller to read `resource`: enrichment of a link by id across types.
+    pub fn readable_fetchers(
+        &self,
+        host: &ServerHost,
+        resource: &Uuid,
+    ) -> Vec<Arc<dyn EntityFetcher>> {
+        let catalog = host.catalog.load();
+        catalog
+            .fetchers
+            .iter()
+            .filter(|(entity, _)| self.check(entity, Operation::Get, Some(resource)).is_ok())
+            .map(|(_, f)| f.clone())
+            .collect()
     }
 
     /// May the caller run the link operation `op`? Every matching declaration must
@@ -217,7 +282,9 @@ impl SurfaceGuard {
         let Some(e) = &self.enforced else {
             return Ok(());
         };
-        let policies = e.index.link_policies(link_type, source, target, scope, &op);
+        let policies = e
+            .index()
+            .link_policies(link_type, source, target, scope, &op);
         let res = self.with_env(e, None, |env| authorize_link_op(&policies, &self.ctx, env));
         self.outcome(e, res)
     }
@@ -351,5 +418,222 @@ mod tests {
             "test",
         );
         assert!(reader.allows_event(&ev));
+    }
+
+    // ── coverage: the guard is the ONLY way to a fetcher / creator ─────────────
+
+    /// Files that may read a fetcher / creator map directly, each with the reason. Any other
+    /// file under `src/` must go through `ServerHost::guarded_fetcher` /
+    /// `guarded_creator` or `SurfaceGuard::{fetcher, creator, readable_fetchers}`.
+    const DIRECT_ACCESS_ALLOWED: &[(&str, &str)] = &[
+        (
+            "src/server/exposure/guard.rs",
+            "the guard itself: policy check, then lookup in the live catalog",
+        ),
+        (
+            "src/server/host.rs",
+            "defines the maps and the guarded accessors; `schema_fetcher` (schema derivation \
+             for SDL / proto: no caller, only field names and types are inferred); unit tests",
+        ),
+        (
+            "src/core/validation/gate.rs",
+            "`wrap_creators` re-wraps every creator in `ValidatingCreator` when a snapshot is \
+             built (no caller, no data read or written)",
+        ),
+        (
+            "src/links/handlers.rs",
+            "REST link handlers: the link policy is judged by the authorization middleware \
+             BEFORE the handler runs, and `AppState` is rebuilt from the published catalog by \
+             the module runtime (REST is not a SurfaceGuard surface)",
+        ),
+        (
+            "src/events/operators/resolve.rs",
+            "in-process flow operator (event pipeline): no caller, the event is already \
+             emitted; reads the fetchers the FlowRuntime was built with",
+        ),
+        (
+            "src/events/operators/fan_out.rs",
+            "in-process flow operator (event pipeline): same as `resolve`",
+        ),
+    ];
+
+    fn rust_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                rust_files(&path, out);
+            } else if path.extension().is_some_and(|e| e == "rs") {
+                out.push(path);
+            }
+        }
+    }
+
+    /// Offending `(file, pattern)` pairs among `files` (path, content).
+    fn direct_accesses(files: &[(String, String)]) -> Vec<(String, String)> {
+        let patterns: Vec<String> = ["fetchers", "creators"]
+            .iter()
+            .flat_map(|m| [".get(", ".iter(", ".values(", "["].map(|a| format!("{m}{a}")))
+            .collect();
+        let mut found = vec![];
+        for (path, content) in files {
+            if DIRECT_ACCESS_ALLOWED.iter().any(|(p, _)| path.ends_with(p)) {
+                continue;
+            }
+            // Comments dropped, whitespace removed: catches `.entity_fetchers\n    .get(`.
+            let code: String = content
+                .lines()
+                .filter(|l| !l.trim_start().starts_with("//"))
+                .flat_map(|l| l.chars().filter(|c| !c.is_whitespace()))
+                .collect();
+            for p in &patterns {
+                if code.contains(p.as_str()) {
+                    found.push((path.clone(), p.clone()));
+                }
+            }
+        }
+        found
+    }
+
+    fn load_sources() -> Vec<(String, String)> {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut paths = vec![];
+        rust_files(&root, &mut paths);
+        paths
+            .into_iter()
+            .map(|p| {
+                let content = std::fs::read_to_string(&p).unwrap();
+                (p.to_string_lossy().replace('\\', "/"), content)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn no_entity_fetchers_access_outside_guard() {
+        let sources = load_sources();
+        assert!(sources.len() > 50, "the scan must see the source tree");
+        let found = direct_accesses(&sources);
+        assert!(
+            found.is_empty(),
+            "direct fetcher/creator access outside the guard and its allow-list \
+             (use ServerHost::guarded_fetcher / SurfaceGuard::fetcher): {found:#?}"
+        );
+        // The allow-list stays honest: every entry exists.
+        for (p, _) in DIRECT_ACCESS_ALLOWED {
+            assert!(sources.iter().any(|(path, _)| path.ends_with(p)), "{p}");
+        }
+    }
+
+    #[test]
+    fn coverage_scan_detects_a_direct_access() {
+        // The scanner itself is checked: single line, multi-line (rustfmt layout), indexing.
+        let files = |code: &str| vec![("src/server/exposure/x.rs".to_string(), code.to_string())];
+        assert!(!direct_accesses(&files("host.entity_fetchers.get(t)")).is_empty());
+        assert!(!direct_accesses(&files("host\n    .entity_creators\n    .get(t)")).is_empty());
+        assert!(!direct_accesses(&files("host.catalog.load().fetchers[\"a\"]")).is_empty());
+        assert!(direct_accesses(&files("// host.entity_fetchers.get(t)")).is_empty());
+        assert!(direct_accesses(&files("guard.fetcher(host, t, op, None)")).is_empty());
+    }
+
+    // ── single guard: policy first, then the LIVE catalog ──────────────────────
+
+    #[tokio::test]
+    async fn guarded_fetcher_judges_policy_then_reads_live_catalog() {
+        use crate::core::EntityFetcher;
+        struct F;
+        #[async_trait::async_trait]
+        impl EntityFetcher for F {
+            async fn fetch_as_json(&self, _: &Uuid) -> anyhow::Result<serde_json::Value> {
+                Ok(serde_json::json!({}))
+            }
+        }
+        let mut host = armed_host("public");
+        let mut cfg = (*host.config).clone();
+        cfg.entities[0].auth.get = "role:reader".into();
+        host.config = Arc::new(cfg.clone());
+        host.catalog.publish({
+            let mut c = (*host.catalog.load()).clone();
+            c.links_config = Arc::new(cfg);
+            c
+        });
+        let reader = AuthContext::User {
+            user_id: Uuid::nil(),
+            tenant_id: Uuid::nil(),
+            roles: vec!["reader".into()],
+        };
+        // Refused for anonymous BEFORE any lookup (even though no fetcher exists yet).
+        let err = host
+            .guarded_fetcher("order", Operation::Get, &AuthContext::Anonymous)
+            .err()
+            .expect("refused");
+        assert_eq!(err.code.as_str(), codes::AUTH_FORBIDDEN);
+        // Allowed caller, entity not in the catalog yet: not found.
+        let err = host
+            .guarded_fetcher("order", Operation::Get, &reader)
+            .err()
+            .expect("unknown");
+        assert_eq!(err.code.as_str(), codes::ENTITY_NOT_FOUND);
+        // Published afterwards (hot load): served, with no change to `host.entity_fetchers`.
+        host.catalog.publish({
+            let mut c = (*host.catalog.load()).clone();
+            let mut m = (*c.fetchers).clone();
+            m.insert("order".into(), Arc::new(F));
+            c.fetchers = Arc::new(m);
+            c
+        });
+        assert!(host.entity_fetchers.is_empty(), "frozen field unchanged");
+        assert!(
+            host.guarded_fetcher("order", Operation::Get, &reader)
+                .is_ok()
+        );
+        assert!(
+            host.guarded_fetcher("order", Operation::Get, &AuthContext::Anonymous)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn long_lived_guard_judges_a_module_published_after_it_was_built() {
+        // WebSocket / GraphQL subscription: ONE guard per connection, built at connect time.
+        let host = armed_host("public");
+        let guard = SurfaceGuard::for_host(&host, AuthContext::Anonymous, "WebSocket");
+        let ev = FrameworkEvent::Entity(EntityEvent::Deleted {
+            entity_type: "vault".into(),
+            entity_id: Uuid::nil(),
+        });
+        let base = (*host.catalog.load().links_config).clone();
+        let publish = |get: Option<&str>| {
+            let mut cfg = base.clone();
+            if let Some(get) = get {
+                cfg.entities.push(EntityConfig {
+                    singular: "vault".into(),
+                    plural: "vaults".into(),
+                    auth: EntityAuthConfig {
+                        get: get.into(),
+                        ..Default::default()
+                    },
+                });
+            }
+            host.catalog.publish({
+                let mut c = (*host.catalog.load()).clone();
+                c.links_config = Arc::new(cfg);
+                c
+            });
+        };
+        // Module published AFTER the connection, `get` public: its events are delivered
+        // (a guard frozen at connect time would not know `vault`).
+        publish(Some("public"));
+        assert!(
+            guard.allows_event(&ev),
+            "the connection's guard must see the module loaded after it connected"
+        );
+        // Module replaced by a stricter version: refused from the next event on.
+        publish(Some("role:admin"));
+        assert!(
+            !guard.allows_event(&ev),
+            "new policy applies to the open connection"
+        );
+        // Module unloaded: the entity is undeclared again, events are not delivered.
+        publish(None);
+        assert!(!guard.allows_event(&ev), "unloaded module no longer served");
     }
 }

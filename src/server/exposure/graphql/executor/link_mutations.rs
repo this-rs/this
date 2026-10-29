@@ -138,8 +138,8 @@ pub async fn create_and_link_mutation(
 
     // Creating a linked entity = `create` on the new entity AND `create_link` on
     // the link anchored on the parent (both judged BEFORE anything is written).
-    guard
-        .check(&entity_type, Operation::Create, None)
+    let creator = guard
+        .creator(host, &entity_type, Operation::Create, None)
         .map_err(anyhow::Error::new)?;
     guard
         .check_link(
@@ -152,7 +152,7 @@ pub async fn create_and_link_mutation(
         .map_err(anyhow::Error::new)?;
 
     // Create the entity
-    if let Some(creator) = host.entity_creators.get(&entity_type) {
+    {
         let created = creator.create_from_json(data).await?;
 
         // Extract the new entity's ID
@@ -178,7 +178,11 @@ pub async fn create_and_link_mutation(
             lt
         } else {
             // Try to find link type from config
-            utils::find_link_type(&host.config.links, &parent_type, &entity_type)?
+            utils::find_link_type(
+                &host.catalog().links_config.links,
+                &parent_type,
+                &entity_type,
+            )?
         };
 
         // Create the link
@@ -207,8 +211,6 @@ pub async fn create_and_link_mutation(
         .await?;
 
         Ok(resolved)
-    } else {
-        bail!("Unknown entity type: {}", entity_type);
     }
 }
 
@@ -248,7 +250,11 @@ pub async fn link_entities_mutation(
     let actual_link_type = if let Some(lt) = link_type {
         lt
     } else {
-        utils::find_link_type(&host.config.links, &source_type, &target_type)?
+        utils::find_link_type(
+            &host.catalog().links_config.links,
+            &source_type,
+            &target_type,
+        )?
     };
 
     guard
@@ -326,7 +332,12 @@ pub async fn unlink_entities_mutation(
     let actual_link_type = if let Some(lt) = link_type {
         Some(lt)
     } else {
-        utils::find_link_type(&host.config.links, &source_type, &target_type).ok()
+        utils::find_link_type(
+            &host.catalog().links_config.links,
+            &source_type,
+            &target_type,
+        )
+        .ok()
     };
 
     guard

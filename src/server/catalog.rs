@@ -76,6 +76,11 @@ impl HostCatalog {
             .find(|(e, _)| e == entity)
             .map(|(_, p)| p.as_str())
     }
+    /// Every served entity type (sorted), hot-loaded modules included. The legacy
+    /// `ServerHost::entity_types` reads the frozen registry and misses them.
+    pub fn entity_types(&self) -> Vec<&str> {
+        self.plurals.iter().map(|(e, _)| e.as_str()).collect()
+    }
     /// Entity type whose plural is `plural` (first path segment dispatch).
     pub fn entity_of_plural(&self, plural: &str) -> Option<&str> {
         self.plurals
@@ -88,6 +93,9 @@ impl HostCatalog {
 /// The published snapshot. Cheap to read (`load` = one atomic load).
 pub struct LiveCatalog {
     current: ArcSwap<HostCatalog>,
+    /// Texts derived from a snapshot (SDL, proto), keyed by name and valid for ONE
+    /// generation: a publication invalidates them by construction.
+    derived: std::sync::Mutex<HashMap<&'static str, (u64, Arc<String>)>>,
 }
 
 impl std::fmt::Debug for LiveCatalog {
@@ -100,12 +108,29 @@ impl LiveCatalog {
     pub fn new(initial: HostCatalog) -> Self {
         Self {
             current: ArcSwap::from_pointee(initial),
+            derived: std::sync::Mutex::new(HashMap::new()),
         }
     }
 
     /// Current snapshot. Keep it for the whole request.
     pub fn load(&self) -> Arc<HostCatalog> {
         self.current.load_full()
+    }
+
+    /// Derived text of `key` computed for exactly `generation`, if cached.
+    pub fn derived(&self, key: &'static str, generation: u64) -> Option<Arc<String>> {
+        let map = self.derived.lock().unwrap_or_else(|e| e.into_inner());
+        map.get(key)
+            .filter(|(g, _)| *g == generation)
+            .map(|(_, v)| v.clone())
+    }
+
+    /// Cache the derived text of `key` for `generation` (a newer generation wins).
+    pub fn store_derived(&self, key: &'static str, generation: u64, value: Arc<String>) {
+        let mut map = self.derived.lock().unwrap_or_else(|e| e.into_inner());
+        if map.get(key).is_none_or(|(g, _)| *g <= generation) {
+            map.insert(key, (generation, value));
+        }
     }
 
     /// Publish the next snapshot, built from the current one. `generation` is set here.

@@ -126,12 +126,12 @@ async fn create_entity_mutation(
     let data = utils::get_json_arg(field, "data")
         .ok_or_else(|| anyhow::anyhow!("Missing required argument 'data'"))?;
 
-    guard
-        .check(&entity_type, Operation::Create, None)
+    let creator = guard
+        .creator(host, &entity_type, Operation::Create, None)
         .map_err(anyhow::Error::new)?;
 
     // Create the entity
-    if let Some(creator) = host.entity_creators.get(&entity_type) {
+    {
         let created = creator.create_from_json(data).await?;
 
         // Publish event to EventBus
@@ -155,8 +155,6 @@ async fn create_entity_mutation(
         .await?;
 
         Ok(resolved)
-    } else {
-        bail!("Unknown entity type: {}", entity_type);
     }
 }
 
@@ -176,12 +174,12 @@ async fn update_entity_mutation(
     let data = utils::get_json_arg(field, "data")
         .ok_or_else(|| anyhow::anyhow!("Missing required argument 'data'"))?;
 
-    guard
-        .check(&entity_type, Operation::Update, Some(&uuid))
+    let creator = guard
+        .creator(host, &entity_type, Operation::Update, Some(&uuid))
         .map_err(anyhow::Error::new)?;
 
     // Update the entity
-    if let Some(creator) = host.entity_creators.get(&entity_type) {
+    {
         let updated = creator.update_from_json(&uuid, data).await?;
 
         // Publish event to EventBus
@@ -204,8 +202,6 @@ async fn update_entity_mutation(
         .await?;
 
         Ok(resolved)
-    } else {
-        bail!("Unknown entity type: {}", entity_type);
     }
 }
 
@@ -223,12 +219,12 @@ async fn delete_entity_mutation(
         .ok_or_else(|| anyhow::anyhow!("Missing required argument 'id'"))?;
     let uuid = Uuid::parse_str(&id)?;
 
-    guard
-        .check(&entity_type, Operation::Delete, Some(&uuid))
+    let creator = guard
+        .creator(host, &entity_type, Operation::Delete, Some(&uuid))
         .map_err(anyhow::Error::new)?;
 
     // Delete the entity
-    if let Some(creator) = host.entity_creators.get(&entity_type) {
+    {
         creator.delete(&uuid).await?;
 
         // Publish event to EventBus
@@ -240,8 +236,6 @@ async fn delete_entity_mutation(
         }
 
         Ok(Value::Bool(true))
-    } else {
-        bail!("Unknown entity type: {}", entity_type);
     }
 }
 
@@ -517,8 +511,8 @@ mod tests {
         assert!(result.is_err(), "unknown entity type should error");
         let err_msg = result.expect_err("error").to_string();
         assert!(
-            err_msg.contains("Unknown entity type"),
-            "should mention unknown entity: {}",
+            err_msg.contains("this.entity.not_found"),
+            "should be the typed not-found error: {}",
             err_msg
         );
     }
