@@ -187,4 +187,16 @@ pub trait Module: Send + Sync {
     fn descriptor(&self) -> Option<crate::descriptor::ModuleDescriptor> {
         None
     }
+
+    /// Message bundles of the module (translations of its error codes and keys, per locale),
+    /// added to `ServerHost::locales` by `ServerBuilder::build_host` so that every surface
+    /// (REST, gRPC, GraphQL) renders the module's errors in the request locale, exactly as
+    /// for a runtime-loaded module.
+    ///
+    /// **Default: empty** — an existing module is unchanged. A bundle the catalog refuses
+    /// (unknown locale tag, placeholder mismatch...) fails `build_host` with the contract
+    /// error, instead of being silently dropped.
+    fn bundles(&self) -> Vec<crate::descriptor::MessageBundle> {
+        Vec::new()
+    }
 }

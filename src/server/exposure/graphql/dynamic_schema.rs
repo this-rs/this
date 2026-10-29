@@ -125,7 +125,11 @@ impl DynamicQueryRoot {
         id: ID,
         entity_type: String,
     ) -> async_graphql::Result<Option<JsonValue>> {
-        let uuid = Uuid::parse_str(&id).map_err(|e| Error::new(format!("Invalid UUID: {}", e)))?;
+        let uuid = Uuid::parse_str(&id).map_err(|e| {
+            crate::core::errors::to_graphql_error(crate::core::errors::bad_request(format!(
+                "invalid UUID: {e}"
+            )))
+        })?;
 
         if let Some(fetcher) = self.host.entity_fetchers.get(&entity_type) {
             match fetcher.fetch_as_json(&uuid).await {
@@ -133,7 +137,9 @@ impl DynamicQueryRoot {
                 Err(_) => Ok(None),
             }
         } else {
-            Err(Error::new(format!("Unknown entity type: {}", entity_type)))
+            Err(crate::core::errors::to_graphql_error(
+                crate::core::errors::not_found("entity type", &entity_type),
+            ))
         }
     }
 
@@ -149,23 +155,28 @@ impl DynamicQueryRoot {
                 .list_as_json(limit, offset)
                 .await
                 .map(|list| list.into_iter().map(JsonValue).collect())
-                .map_err(|e| Error::new(format!("Failed to list entities: {}", e)))
+                .map_err(|e| crate::core::errors::graphql::graphql_error_from_anyhow(&e))
         } else {
-            Err(Error::new(format!("Unknown entity type: {}", entity_type)))
+            Err(crate::core::errors::to_graphql_error(
+                crate::core::errors::not_found("entity type", &entity_type),
+            ))
         }
     }
 
     /// Get links for an entity (as source)
     async fn entity_links(&self, entity_id: ID) -> async_graphql::Result<Vec<JsonValue>> {
-        let uuid =
-            Uuid::parse_str(&entity_id).map_err(|e| Error::new(format!("Invalid UUID: {}", e)))?;
+        let uuid = Uuid::parse_str(&entity_id).map_err(|e| {
+            crate::core::errors::to_graphql_error(crate::core::errors::bad_request(format!(
+                "invalid UUID: {e}"
+            )))
+        })?;
 
         let links = self
             .host
             .link_service
             .find_by_source(&uuid, None, None)
             .await
-            .map_err(|e| Error::new(format!("Failed to get links: {}", e)))?;
+            .map_err(|e| crate::core::errors::graphql::graphql_error_from_anyhow(&e))?;
 
         // Convert links to JSON
         let json_links: Vec<JsonValue> = links
@@ -208,9 +219,11 @@ impl DynamicMutationRoot {
                 .create_from_json(data.0)
                 .await
                 .map(JsonValue)
-                .map_err(|e| Error::new(format!("Failed to create entity: {}", e)))
+                .map_err(|e| crate::core::errors::graphql::graphql_error_from_anyhow(&e))
         } else {
-            Err(Error::new(format!("Unknown entity type: {}", entity_type)))
+            Err(crate::core::errors::to_graphql_error(
+                crate::core::errors::not_found("entity type", &entity_type),
+            ))
         }
     }
 
@@ -221,31 +234,43 @@ impl DynamicMutationRoot {
         entity_type: String,
         data: JsonValue,
     ) -> async_graphql::Result<JsonValue> {
-        let uuid = Uuid::parse_str(&id).map_err(|e| Error::new(format!("Invalid UUID: {}", e)))?;
+        let uuid = Uuid::parse_str(&id).map_err(|e| {
+            crate::core::errors::to_graphql_error(crate::core::errors::bad_request(format!(
+                "invalid UUID: {e}"
+            )))
+        })?;
 
         if let Some(creator) = self.host.entity_creators.get(&entity_type) {
             creator
                 .update_from_json(&uuid, data.0)
                 .await
                 .map(JsonValue)
-                .map_err(|e| Error::new(format!("Failed to update entity: {}", e)))
+                .map_err(|e| crate::core::errors::graphql::graphql_error_from_anyhow(&e))
         } else {
-            Err(Error::new(format!("Unknown entity type: {}", entity_type)))
+            Err(crate::core::errors::to_graphql_error(
+                crate::core::errors::not_found("entity type", &entity_type),
+            ))
         }
     }
 
     /// Delete an entity
     async fn delete_entity(&self, id: ID, entity_type: String) -> async_graphql::Result<bool> {
-        let uuid = Uuid::parse_str(&id).map_err(|e| Error::new(format!("Invalid UUID: {}", e)))?;
+        let uuid = Uuid::parse_str(&id).map_err(|e| {
+            crate::core::errors::to_graphql_error(crate::core::errors::bad_request(format!(
+                "invalid UUID: {e}"
+            )))
+        })?;
 
         if let Some(creator) = self.host.entity_creators.get(&entity_type) {
             creator
                 .delete(&uuid)
                 .await
                 .map(|_| true)
-                .map_err(|e| Error::new(format!("Failed to delete entity: {}", e)))
+                .map_err(|e| crate::core::errors::graphql::graphql_error_from_anyhow(&e))
         } else {
-            Err(Error::new(format!("Unknown entity type: {}", entity_type)))
+            Err(crate::core::errors::to_graphql_error(
+                crate::core::errors::not_found("entity type", &entity_type),
+            ))
         }
     }
 
@@ -257,10 +282,16 @@ impl DynamicMutationRoot {
         link_type: String,
         metadata: Option<JsonValue>,
     ) -> async_graphql::Result<JsonValue> {
-        let source_uuid = Uuid::parse_str(&source_id)
-            .map_err(|e| Error::new(format!("Invalid source UUID: {}", e)))?;
-        let target_uuid = Uuid::parse_str(&target_id)
-            .map_err(|e| Error::new(format!("Invalid target UUID: {}", e)))?;
+        let source_uuid = Uuid::parse_str(&source_id).map_err(|e| {
+            crate::core::errors::to_graphql_error(crate::core::errors::bad_request(format!(
+                "invalid UUID: {e}"
+            )))
+        })?;
+        let target_uuid = Uuid::parse_str(&target_id).map_err(|e| {
+            crate::core::errors::to_graphql_error(crate::core::errors::bad_request(format!(
+                "invalid UUID: {e}"
+            )))
+        })?;
 
         let metadata_value = metadata.map(|j| j.0);
 
@@ -271,7 +302,7 @@ impl DynamicMutationRoot {
             .link_service
             .create(link_entity)
             .await
-            .map_err(|e| Error::new(format!("Failed to create link: {}", e)))?;
+            .map_err(|e| crate::core::errors::graphql::graphql_error_from_anyhow(&e))?;
 
         Ok(JsonValue(serde_json::json!({
             "id": link.id.to_string(),
@@ -285,15 +316,18 @@ impl DynamicMutationRoot {
 
     /// Delete a link
     async fn delete_link(&self, link_id: ID) -> async_graphql::Result<bool> {
-        let uuid =
-            Uuid::parse_str(&link_id).map_err(|e| Error::new(format!("Invalid UUID: {}", e)))?;
+        let uuid = Uuid::parse_str(&link_id).map_err(|e| {
+            crate::core::errors::to_graphql_error(crate::core::errors::bad_request(format!(
+                "invalid UUID: {e}"
+            )))
+        })?;
 
         self.host
             .link_service
             .delete(&uuid)
             .await
             .map(|_| true)
-            .map_err(|e| Error::new(format!("Failed to delete link: {}", e)))
+            .map_err(|e| crate::core::errors::graphql::graphql_error_from_anyhow(&e))
     }
 }
 
@@ -684,8 +718,8 @@ mod tests {
         );
         let err_msg = format!("{:?}", result.errors);
         assert!(
-            err_msg.contains("Unknown entity type"),
-            "should mention unknown entity type: {}",
+            err_msg.contains("this.entity.not_found"),
+            "should carry the contract code for an unknown entity type: {}",
             err_msg
         );
     }

@@ -24,7 +24,10 @@ pub mod grpc;
 #[cfg(feature = "graphql")]
 pub mod graphql;
 
-pub use self::http::{ApiError, ApiResult, accepts_problem_json, error_response, localize_errors};
+pub use self::http::{
+    ApiError, ApiResult, ErrorExtras, accepts_problem_json, error_response, error_response_with,
+    localize_errors,
+};
 pub use crate::descriptor::error::{ERROR_HEADER, PROBLEM_JSON};
 pub use crate::descriptor::framework::codes;
 pub use crate::descriptor::{ContractError, ErrorCode, ErrorKind, FieldViolation};

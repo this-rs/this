@@ -13,6 +13,7 @@
 
 use super::{ERROR_HEADER, PROBLEM_JSON, from_anyhow, http_status};
 use crate::core::i18n::{LocaleCatalog, RequestHints, framework_catalog};
+use crate::descriptor::framework::codes;
 use crate::descriptor::{ContractError, I18nCatalog, Locale};
 use axum::extract::{Request, State};
 use axum::http::{HeaderMap, HeaderValue, header};
@@ -106,6 +107,50 @@ pub fn error_response(
     res
 }
 
+/// Legacy keys a surface keeps ADDING to the contract body (`error`, `errors`, `scope`,
+/// `policy`...): carried in the response extensions so that [`localize_errors`] re-renders
+/// the localized contract body without losing them.
+#[derive(Debug, Clone, Default)]
+pub struct ErrorExtras(pub serde_json::Map<String, serde_json::Value>);
+
+/// Contract response (status from `err`, or `status` when a legacy surface keeps its own)
+/// with legacy `extras` merged over the body. The contract keys stay.
+pub fn error_response_with(
+    err: ContractError,
+    status: Option<axum::http::StatusCode>,
+    extras: serde_json::Map<String, serde_json::Value>,
+) -> Response {
+    let mut res = render(err, None);
+    if let Some(s) = status {
+        *res.status_mut() = s;
+    }
+    let body = merged_body(
+        res.extensions().get::<ContractError>(),
+        res.status(),
+        &extras,
+    );
+    if let Some(body) = body {
+        *res.body_mut() = axum::body::Body::from(serde_json::to_vec(&body).unwrap_or_default());
+    }
+    res.extensions_mut().insert(ErrorExtras(extras));
+    res
+}
+
+fn merged_body(
+    err: Option<&ContractError>,
+    status: axum::http::StatusCode,
+    extras: &serde_json::Map<String, serde_json::Value>,
+) -> Option<serde_json::Value> {
+    let mut body = err?.http_body();
+    if let Some(o) = body.as_object_mut() {
+        o.insert("status".into(), status.as_u16().into());
+        for (k, v) in extras {
+            o.insert(k.clone(), v.clone());
+        }
+    }
+    Some(body)
+}
+
 fn render(err: ContractError, locale: Option<&Locale>) -> Response {
     let status = http_status(&err);
     let mut res = (status, axum::Json(err.http_body())).into_response();
@@ -140,11 +185,68 @@ pub async fn localize_errors(
     req.extensions_mut().insert(catalog.clone());
     req.extensions_mut()
         .insert(crate::core::i18n::RequestLocale(locale.clone()));
-    let res = next.run(req).await;
+    let method = req.method().clone();
+    let path = req.uri().path().to_string();
+    let mut res = next.run(req).await;
+    if res.extensions().get::<ContractError>().is_none() {
+        res = envelope_bare(res, &method, &path).await;
+    }
     let Some(err) = res.extensions().get::<ContractError>().cloned() else {
         return res;
     };
     relocalize(res, snapshot.localize(err, &locale), &locale, problem)
+}
+
+/// A 4xx response that carries no contract (axum rejections: `JsonRejection`, `Path`,
+/// `Query`...; the router's 404 / 405; a handler returning a bare `StatusCode`) gets the
+/// envelope by its status, which it KEEPS. Bodies that are not plain text (HTML of a
+/// frontend, JSON of a custom handler) are left alone.
+async fn envelope_bare(res: Response, method: &axum::http::Method, path: &str) -> Response {
+    use axum::http::StatusCode as S;
+    let status = res.status();
+    if !status.is_client_error() || status == S::TOO_MANY_REQUESTS {
+        return res;
+    }
+    let ctype = res
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_owned);
+    if let Some(c) = &ctype
+        && !c.starts_with("text/plain")
+    {
+        return res;
+    }
+    let (parts, body) = res.into_parts();
+    let text = axum::body::to_bytes(body, 8 * 1024)
+        .await
+        .ok()
+        .and_then(|b| String::from_utf8(b.to_vec()).ok())
+        .unwrap_or_default();
+    let reason = if text.trim().is_empty() {
+        status.canonical_reason().unwrap_or("error").to_string()
+    } else {
+        text.trim().to_string()
+    };
+    let err = match status {
+        S::NOT_FOUND => {
+            ContractError::framework(codes::TRANSPORT_NOT_FOUND).with_param("path", path)
+        }
+        S::METHOD_NOT_ALLOWED => ContractError::framework(codes::TRANSPORT_METHOD_NOT_ALLOWED)
+            .with_param("method", method.as_str()),
+        S::UNAUTHORIZED => ContractError::framework(codes::AUTH_UNAUTHENTICATED),
+        S::FORBIDDEN => super::forbidden(format!("{method} {path}")),
+        _ => super::bad_request(reason),
+    };
+    let mut out = render(err.clone(), None);
+    *out.status_mut() = status;
+    // Keep what the inner layer set (`WWW-Authenticate`, `Allow`...), except the body headers.
+    for (k, v) in parts.headers.iter() {
+        if k != header::CONTENT_TYPE && k != header::CONTENT_LENGTH {
+            out.headers_mut().append(k.clone(), v.clone());
+        }
+    }
+    out
 }
 
 /// Replace the body of an error response by `err` (already localized), IN PLACE: status,
@@ -153,7 +255,14 @@ pub async fn localize_errors(
 /// dropped; `vary` gains the request parts the body now depends on.
 fn relocalize(res: Response, err: ContractError, locale: &Locale, problem: bool) -> Response {
     let (mut parts, _old_body) = res.into_parts();
-    let body = serde_json::to_vec(&err.http_body()).unwrap_or_default();
+    let extras = parts
+        .extensions
+        .get::<ErrorExtras>()
+        .map(|e| e.0.clone())
+        .unwrap_or_default();
+    let body = merged_body(Some(&err), parts.status, &extras)
+        .map(|b| serde_json::to_vec(&b).unwrap_or_default())
+        .unwrap_or_default();
     let h = &mut parts.headers;
     h.remove(header::CONTENT_LENGTH);
     h.insert(
@@ -207,6 +316,77 @@ mod tests {
         validation([FieldViolation::new("amount", codes::VALIDATION_POSITIVE)
             .with_param("field", "amount")
             .with_param("value", -1)])
+    }
+
+    /// Responses that carry no contract (axum's own 404 / 405, extractor rejections as plain
+    /// text, a bare `StatusCode`) get the envelope of their status, which they KEEP, in the
+    /// request locale.
+    #[tokio::test]
+    async fn bare_4xx_responses_get_the_envelope_in_the_request_locale() {
+        use axum::routing::post;
+        let app = Router::new()
+            .route("/x", get(|| async { "ok" }))
+            .route("/bare", get(|| async { StatusCode::NOT_FOUND }))
+            .route(
+                "/json",
+                post(|axum::Json(_v): axum::Json<serde_json::Value>| async { "ok" }),
+            )
+            .layer(axum::middleware::from_fn_with_state(
+                LocaleCatalog::framework(),
+                localize_errors,
+            ));
+        let call = |method: &str, uri: &str, lang: &str| {
+            let app = app.clone();
+            let req = HttpRequest::builder()
+                .method(method)
+                .uri(uri)
+                .header(header::ACCEPT_LANGUAGE, lang)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from("{nope"))
+                .unwrap();
+            async move { app.oneshot(req).await.unwrap() }
+        };
+        for (method, uri, status, code) in [
+            ("GET", "/missing", 404u16, "this.transport.not_found"),
+            ("GET", "/bare", 404, "this.transport.not_found"),
+            ("DELETE", "/x", 405, "this.transport.method_not_allowed"),
+            ("POST", "/json", 400, "this.transport.bad_request"),
+        ] {
+            let fr = call(method, uri, "fr").await;
+            assert_eq!(fr.status().as_u16(), status, "{method} {uri}");
+            assert_eq!(fr.headers()[ERROR_HEADER], code, "{method} {uri}");
+            assert_eq!(fr.headers()[header::CONTENT_LANGUAGE], "fr");
+            let fr = body_json(fr).await;
+            let en = body_json(call(method, uri, "en").await).await;
+            assert_eq!(fr["code"], code);
+            assert_eq!(fr["status"], status);
+            assert_ne!(fr["message"], en["message"], "{method} {uri}: fr vs en");
+        }
+        // Not a plain-text rejection: a JSON body of a handler is left alone.
+        let app = Router::new()
+            .route(
+                "/j",
+                get(|| async {
+                    (
+                        StatusCode::NOT_FOUND,
+                        axum::Json(serde_json::json!({"mine": 1})),
+                    )
+                }),
+            )
+            .layer(axum::middleware::from_fn_with_state(
+                LocaleCatalog::framework(),
+                localize_errors,
+            ));
+        let res = app
+            .oneshot(
+                HttpRequest::builder()
+                    .uri("/j")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(body_json(res).await, serde_json::json!({"mine": 1}));
     }
 
     #[test]
