@@ -27,7 +27,9 @@ use crate::core::auth::AuthContext;
 use crate::core::errors::ApiError;
 use crate::descriptor::engine::policy::{PolicyEnv, evaluate};
 use crate::descriptor::framework::codes;
-use crate::descriptor::{ContractError, DescriptorSet, Operation, PermDesc, PolicyExpr, PrincipalView};
+use crate::descriptor::{
+    ContractError, DescriptorSet, Operation, PermDesc, PolicyExpr, PrincipalView,
+};
 use axum::Router;
 use axum::extract::{Request, State};
 use axum::http::Method;
@@ -190,51 +192,93 @@ enum Target {
     Links(Router),
 }
 
-/// The layer function (`axum::middleware::from_fn_with_state`).
-pub async fn dispatch_middleware(
-    State(rt): State<Arc<ModuleRuntime>>,
-    mut request: Request,
-    next: Next,
-) -> Response {
-    let table = rt.table.load_full();
-    let path = request.uri().path().to_string();
-    let segs: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
-    let Some(first) = segs.first().copied() else {
-        return next.run(request).await;
-    };
+/// Outcome of routing a path against one dispatch table.
+enum Routed {
+    /// Not a runtime module path: the static router handles it.
+    Pass,
+    /// Answered here (tombstone of an unloaded module).
+    Respond(ContractError),
+    /// Served by a runtime module.
+    Module(String, Arc<Gate>, Target),
+}
 
-    let (module, gate, target) = if let Some(route) = table.entities.get(first) {
+fn route(table: &DispatchTable, segs: &[&str]) -> Routed {
+    let first = segs[0];
+    if let Some(route) = table.entities.get(first) {
         let target = if segs.len() <= 2 {
             Target::Module(route.router.clone())
         } else {
             match &table.links {
                 Some(l) => Target::Links(l.clone()),
-                None => return next.run(request).await,
+                None => return Routed::Pass,
             }
         };
-        (route.module.clone(), route.gate.clone(), target)
+        Routed::Module(route.module.clone(), route.gate.clone(), target)
     } else if segs.len() >= 3
         && let Some((module, gate)) = table
             .link_routes
             .get(&(first.to_string(), segs[2].to_string()))
         && let Some(links) = &table.links
     {
-        (module.clone(), gate.clone(), Target::Links(links.clone()))
+        Routed::Module(module.clone(), gate.clone(), Target::Links(links.clone()))
     } else if let Some(module) = table.tombstones.get(first) {
-        return ApiError(
+        Routed::Respond(
             ContractError::framework(codes::MODULE_NOT_FOUND).with_param("module", module),
         )
-        .into_response();
     } else {
-        return next.run(request).await;
-    };
-
-    if table.draining.contains(&module) {
-        return ApiError(
-            ContractError::framework(codes::MODULE_UNAVAILABLE).with_param("module", &module),
-        )
-        .into_response();
+        Routed::Pass
     }
+}
+
+/// The layer function (`axum::middleware::from_fn_with_state`).
+pub async fn dispatch_middleware(
+    State(rt): State<Arc<ModuleRuntime>>,
+    mut request: Request,
+    next: Next,
+) -> Response {
+    let path = request.uri().path().to_string();
+    let segs: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+    if segs.is_empty() {
+        return next.run(request).await;
+    }
+
+    // Route, then ENTER the module's gate, then confirm the table did not change in
+    // between. Without the confirmation, a drain could start between our table read and
+    // `gate.enter()`: `wait_idle` would see 0 in flight, the module would be unloaded,
+    // and this request would still run on the unloaded module's router (race found in
+    // review). Either the drain's table store happened before our re-read (we see a new
+    // table and route again: 503), or after our `enter` (the drain waits for us).
+    let mut table = rt.table.load_full();
+    let mut attempts = 0;
+    let (target, _inflight) = loop {
+        let (module, gate, target) = match route(&table, &segs) {
+            Routed::Pass => return next.run(request).await,
+            Routed::Respond(e) => return ApiError(e).into_response(),
+            Routed::Module(m, g, t) => (m, g, t),
+        };
+        if table.draining.contains(&module) {
+            return ApiError(
+                ContractError::framework(codes::MODULE_UNAVAILABLE).with_param("module", &module),
+            )
+            .into_response();
+        }
+        let inflight = gate.enter();
+        let current = rt.table.load_full();
+        if Arc::ptr_eq(&current, &table) {
+            request.extensions_mut().insert(gate.token());
+            break (target, inflight);
+        }
+        drop(inflight);
+        attempts += 1;
+        if attempts >= 8 {
+            // The table keeps changing under us: refuse rather than guess.
+            return ApiError(
+                ContractError::framework(codes::MODULE_UNAVAILABLE).with_param("module", &module),
+            )
+            .into_response();
+        }
+        table = current;
+    };
 
     let parts = rt.parts();
     if parts.authorize {
@@ -252,8 +296,6 @@ pub async fn dispatch_middleware(
         }
     }
 
-    let _inflight = gate.enter();
-    request.extensions_mut().insert(gate.token());
     let router = match target {
         Target::Module(r) | Target::Links(r) => r,
     };
@@ -292,7 +334,9 @@ pub(crate) fn principal(ctx: &AuthContext) -> (bool, Option<String>, Vec<String>
         AuthContext::User { user_id, roles, .. } => {
             (true, Some(user_id.to_string()), roles.clone(), false, false)
         }
-        AuthContext::Owner { user_id, .. } => (true, Some(user_id.to_string()), vec![], false, false),
+        AuthContext::Owner { user_id, .. } => {
+            (true, Some(user_id.to_string()), vec![], false, false)
+        }
         AuthContext::Service { .. } => (true, None, vec![], false, true),
         AuthContext::Admin { admin_id } => (true, Some(admin_id.to_string()), vec![], true, false),
         AuthContext::Anonymous => (false, None, vec![], false, false),
@@ -341,7 +385,9 @@ pub(crate) fn check_policy(
     match evaluate(policy, &who, &env) {
         Some(true) => Ok(()),
         _ if !authenticated => Err(ContractError::framework(codes::AUTH_UNAUTHENTICATED)),
-        _ => Err(ContractError::framework(codes::AUTH_FORBIDDEN).with_param("operation", operation)),
+        _ => {
+            Err(ContractError::framework(codes::AUTH_FORBIDDEN).with_param("operation", operation))
+        }
     }
 }
 
@@ -353,9 +399,8 @@ fn judge(
     ctx: &AuthContext,
     parts: &super::runtime::HostParts,
 ) -> Result<(), ContractError> {
-    let forbidden = |op: &str| {
-        Err(ContractError::framework(codes::AUTH_FORBIDDEN).with_param("operation", op))
-    };
+    let forbidden =
+        |op: &str| Err(ContractError::framework(codes::AUTH_FORBIDDEN).with_param("operation", op));
     let Some(scope) = table.entity_of_plural(segs[0]) else {
         return forbidden("unknown");
     };
@@ -381,10 +426,14 @@ fn judge(
     };
     let entity = table.descriptors.entity(&scope).map(|(_, e)| e);
     let link = if segs.len() >= 3 && op != Operation::Create {
-        table.descriptors.modules().flat_map(|m| m.links.iter()).find(|l| {
-            (l.source == scope && l.forward_route == segs[2])
-                || (l.target == scope && l.reverse_route == segs[2])
-        })
+        table
+            .descriptors
+            .modules()
+            .flat_map(|m| m.links.iter())
+            .find(|l| {
+                (l.source == scope && l.forward_route == segs[2])
+                    || (l.target == scope && l.reverse_route == segs[2])
+            })
     } else {
         None
     };

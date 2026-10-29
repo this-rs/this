@@ -260,7 +260,11 @@ async fn get_handler(State(svc): Svc, Path(id): Path<Uuid>) -> Response {
     }
 }
 
-async fn update_handler(State(svc): Svc, Path(id): Path<Uuid>, body: axum::Json<Value>) -> Response {
+async fn update_handler(
+    State(svc): Svc,
+    Path(id): Path<Uuid>,
+    body: axum::Json<Value>,
+) -> Response {
     match svc.update_from_json(&id, body.0).await {
         Ok(v) => axum::Json(v).into_response(),
         Err(e) => err(e),

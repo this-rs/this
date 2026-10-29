@@ -76,13 +76,19 @@ fn same<T: Serialize>(a: &T, b: &T) -> bool {
 /// does not know and therefore REFUSES (fail-closed).
 pub fn legacy_policy(p: &crate::descriptor::PolicyExpr) -> String {
     use crate::descriptor::PolicyExpr as P;
-    let flat = |v: &[P]| v.iter().all(|e| !matches!(e, P::And(_) | P::Or(_) | P::Not(_)));
+    let flat = |v: &[P]| {
+        v.iter()
+            .all(|e| !matches!(e, P::And(_) | P::Or(_) | P::Not(_)))
+    };
     match p {
         P::Deny => "not:public".into(),
         P::HasRole(r) if r.len() == 1 => format!("role:{}", r[0]),
         P::HasRole(r) => format!(
             "any:{}",
-            r.iter().map(|x| format!("role:{x}")).collect::<Vec<_>>().join(",")
+            r.iter()
+                .map(|x| format!("role:{x}"))
+                .collect::<Vec<_>>()
+                .join(",")
         ),
         P::And(v) if flat(v) => format!(
             "all:{}",
@@ -371,10 +377,9 @@ impl LinksConfig {
                     l.target_type.as_str(),
                 );
                 match links.get(&key) {
-                    Some(prev) if !same(*prev, l) => errors.push(conflict(
-                        "link",
-                        format!("{}:{}->{}", key.0, key.1, key.2),
-                    )),
+                    Some(prev) if !same(*prev, l) => {
+                        errors.push(conflict("link", format!("{}:{}->{}", key.0, key.1, key.2)))
+                    }
                     Some(_) => continue,
                     None => {
                         links.insert(key, l);
@@ -385,10 +390,9 @@ impl LinksConfig {
                     (l.target_type.as_str(), l.reverse_route_name.as_str()),
                 ] {
                     match routes.get(&(entity, route)) {
-                        Some(owner) if *owner != key => errors.push(conflict(
-                            "link_route",
-                            format!("{entity}/{route}"),
-                        )),
+                        Some(owner) if *owner != key => {
+                            errors.push(conflict("link_route", format!("{entity}/{route}")))
+                        }
                         Some(_) => {}
                         None => {
                             routes.insert((entity, route), key);
@@ -1255,30 +1259,41 @@ validation_rules:
         inv.permissions
             .ops
             .insert(Operation::Delete, PolicyExpr::AdminOnly);
-        inv.permissions.ops.insert(Operation::List, PolicyExpr::Deny);
+        inv.permissions
+            .ops
+            .insert(Operation::List, PolicyExpr::Deny);
         d.entities.push(inv);
         let mut l = LinkDesc::new("owner", "user", "invoice");
-        l.permissions
-            .ops
-            .insert(Operation::CreateLink, PolicyExpr::HasRole(vec!["a".into(), "b".into()]));
+        l.permissions.ops.insert(
+            Operation::CreateLink,
+            PolicyExpr::HasRole(vec!["a".into(), "b".into()]),
+        );
         d.links.push(l);
         d.normalize();
 
         let merged = host.overlay_descriptor(&d);
         assert_eq!(merged.sinks.as_ref().unwrap().len(), 1, "sinks kept");
         assert!(merged.validation_rules.is_some(), "validation_rules kept");
-        assert_eq!(merged.entities.len(), 2, "entity replaced by key, user kept");
-        let invoice = merged.entities.iter().find(|e| e.singular == "invoice").unwrap();
+        assert_eq!(
+            merged.entities.len(),
+            2,
+            "entity replaced by key, user kept"
+        );
+        let invoice = merged
+            .entities
+            .iter()
+            .find(|e| e.singular == "invoice")
+            .unwrap();
         assert_eq!(invoice.plural, "invoices");
         assert_eq!(invoice.auth.delete, "admin_only");
-        assert_eq!(invoice.auth.list, "not:public", "deny in the legacy grammar");
+        assert_eq!(
+            invoice.auth.list, "not:public",
+            "deny in the legacy grammar"
+        );
         assert_eq!(invoice.auth.get, "authenticated", "descriptor default");
         let link = &merged.links[0];
         assert_eq!(link.forward_route_name, "invoices-owners");
-        assert_eq!(
-            link.auth.as_ref().unwrap().create,
-            "any:role:a,role:b"
-        );
+        assert_eq!(link.auth.as_ref().unwrap().create, "any:role:a,role:b");
 
         let alone = LinksConfig::from_descriptor(&d);
         assert!(alone.sinks.is_none() && alone.auth.is_none());

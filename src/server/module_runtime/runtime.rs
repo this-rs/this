@@ -50,7 +50,9 @@ pub struct RuntimeOptions {
 impl Default for RuntimeOptions {
     fn default() -> Self {
         Self {
-            drain_grace: Duration::from_millis(crate::descriptor::lifecycle::DEFAULT_DRAIN_GRACE_MS),
+            drain_grace: Duration::from_millis(
+                crate::descriptor::lifecycle::DEFAULT_DRAIN_GRACE_MS,
+            ),
             admin_policy: PolicyExpr::AdminOnly,
             admin_prefix: "/admin/modules".into(),
         }
@@ -232,7 +234,12 @@ impl ModuleRuntime {
                 .iter()
                 .map(|q| format!("{} {}", q.name, q.version))
                 .collect(),
-            entities: r.descriptor.entities.iter().map(|e| e.name.clone()).collect(),
+            entities: r
+                .descriptor
+                .entities
+                .iter()
+                .map(|e| e.name.clone())
+                .collect(),
             builtin: r.builtin,
         }
     }
@@ -242,7 +249,9 @@ impl ModuleRuntime {
         let source = self.lock().offers.get(name).cloned();
         match source {
             Some(s) => self.load(s).await,
-            None => Err(ContractError::framework(codes::MODULE_NOT_FOUND).with_param("module", name)),
+            None => {
+                Err(ContractError::framework(codes::MODULE_NOT_FOUND).with_param("module", name))
+            }
         }
     }
 
@@ -273,10 +282,9 @@ impl ModuleRuntime {
                     at: now(),
                 };
                 // Never overwrite a live record (duplicate load of an active module).
-                let live = inner
-                    .records
-                    .get(&name)
-                    .is_some_and(|r| matches!(r.state, ModuleState::Active | ModuleState::Draining));
+                let live = inner.records.get(&name).is_some_and(|r| {
+                    matches!(r.state, ModuleState::Active | ModuleState::Draining)
+                });
                 if !live {
                     inner.records.insert(
                         name.clone(),
@@ -448,14 +456,31 @@ impl ModuleRuntime {
     /// hold its router); new ones see the new version.
     pub async fn replace(&self, source: ModuleSource) -> Result<ModuleStatus, ContractError> {
         let _op = self.ops.lock().await;
+        let label = format!("{source:?}");
+        let result = self.replace_locked(source).await;
+        if let Err(e) = &result {
+            // Same observability as a refused load: every refused change is an event.
+            self.emit(ModuleEvent::Failed {
+                module: label,
+                code: e.code.as_str().to_string(),
+            });
+        }
+        result
+    }
+
+    async fn replace_locked(&self, source: ModuleSource) -> Result<ModuleStatus, ContractError> {
         let iface = self.loader.load(&source).await?;
         let mut inner = self.lock();
         let d = iface.descriptor.clone();
         let Some(old) = inner.records.get(&d.name) else {
-            return Err(ContractError::framework(codes::MODULE_NOT_FOUND).with_param("module", &d.name));
+            return Err(
+                ContractError::framework(codes::MODULE_NOT_FOUND).with_param("module", &d.name)
+            );
         };
         if old.builtin || old.state != ModuleState::Active {
-            return Err(ContractError::framework(codes::MODULE_UNAVAILABLE).with_param("module", &d.name));
+            return Err(
+                ContractError::framework(codes::MODULE_UNAVAILABLE).with_param("module", &d.name)
+            );
         }
         // `resolve` checks the `requires` of EVERY module it sees, active ones included:
         // a dependent whose `VersionReq` rejects the new version is reported as
@@ -485,6 +510,19 @@ impl ModuleRuntime {
         };
         let published = self.parts.catalog.publish(catalog);
         self.table.store(Arc::new(table));
+        // The OLD version drains in the background: requests already in flight finish
+        // on it (they hold its router), and after the grace delay its streams are
+        // cancelled. Without this, a stream opened on the old version would stay open
+        // forever on code that is no longer published (found in review).
+        let old_gate = old.gate.clone();
+        let grace = self.options.drain_grace;
+        let module = d.name.clone();
+        tokio::spawn(async move {
+            if !old_gate.wait_idle(grace).await {
+                tracing::warn!(%module, "replace: grace elapsed, cancelling the old version's streams");
+            }
+            old_gate.cancel();
+        });
         self.emit(ModuleEvent::Replaced {
             module: d.name.clone(),
             from,
@@ -534,6 +572,20 @@ impl ModuleRuntime {
                     table.add_entity(&e.plural, name, router.clone(), r.gate.clone());
                 }
             }
+            // A module only contributes fetchers / creators for the entities its
+            // descriptor declares (all checked above). Anything else would silently
+            // REPLACE a host or other module's fetcher (last-wins), whatever loader
+            // produced the interface (plugin loaders included).
+            for k in iface.fetchers.keys().chain(iface.creators.keys()) {
+                if !iface.descriptor.entities.iter().any(|e| &e.name == k) {
+                    return Err(ContractError::framework(codes::MODULE_IDENTITY_MISMATCH)
+                        .with_param("module", name)
+                        .with_param(
+                            "what",
+                            format!("fetcher/creator for `{k}`, an entity the descriptor does not declare"),
+                        ));
+                }
+            }
             for (k, v) in &iface.fetchers {
                 fetchers.insert(k.clone(), v.clone());
             }
@@ -541,7 +593,13 @@ impl ModuleRuntime {
                 creators.insert(k.clone(), v.clone());
             }
             configs.push(iface.links_config.clone());
-            runtime_links.extend(iface.links_config.links.iter().map(|l| (name.clone(), l.clone())));
+            runtime_links.extend(
+                iface
+                    .links_config
+                    .links
+                    .iter()
+                    .map(|l| (name.clone(), l.clone())),
+            );
             if r.state == ModuleState::Draining {
                 table.draining.insert(name.clone());
             }
@@ -549,8 +607,10 @@ impl ModuleRuntime {
         let links_config = Arc::new(LinksConfig::merge_strict(configs).map_err(one_error)?);
         let fetchers = Arc::new(fetchers);
         let creators = Arc::new(creators);
-        let plural_of: HashMap<&str, &str> =
-            plurals.iter().map(|(e, p)| (e.as_str(), p.as_str())).collect();
+        let plural_of: HashMap<&str, &str> = plurals
+            .iter()
+            .map(|(e, p)| (e.as_str(), p.as_str()))
+            .collect();
         let mut link_routes = HashSet::new();
         for (module, l) in &runtime_links {
             if let Some(p) = plural_of.get(l.source_type.as_str()) {
@@ -573,7 +633,9 @@ impl ModuleRuntime {
         }
         for (plural, route, module) in link_routes {
             let gate = inner.records.get(&module).map(|r| r.gate.clone());
-            table.link_routes.insert((plural, route), (module, gate.unwrap_or_default()));
+            table
+                .link_routes
+                .insert((plural, route), (module, gate.unwrap_or_default()));
         }
         table
             .tombstones

@@ -245,9 +245,13 @@ mod try_register_tests {
     fn try_register_refuses_duplicate_entity_and_plural() {
         let mut r = EntityRegistry::new();
         r.try_register(Box::new(D("order", "orders"))).unwrap();
-        let e = r.try_register(Box::new(D("order", "commandes"))).unwrap_err();
+        let e = r
+            .try_register(Box::new(D("order", "commandes")))
+            .unwrap_err();
         assert_eq!(e.code.as_str(), "this.module.duplicate_entity");
-        let e = r.try_register(Box::new(D("command", "orders"))).unwrap_err();
+        let e = r
+            .try_register(Box::new(D("command", "orders")))
+            .unwrap_err();
         assert_eq!(e.code.as_str(), "this.module.duplicate_plural");
         assert_eq!(r.entity_plurals(), vec![("order".into(), "orders".into())]);
         assert!(r.unregister("order").is_some());

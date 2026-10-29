@@ -128,7 +128,8 @@ impl ServerBuilder {
     /// (`RuntimeOptions::admin_prefix`, default `/admin/modules`, policy `admin_only`).
     /// Without this call the host is frozen at build time, exactly as before.
     pub fn with_module_runtime(mut self) -> Self {
-        self.module_runtime.get_or_insert_with(RuntimeSetup::default);
+        self.module_runtime
+            .get_or_insert_with(RuntimeSetup::default);
         self
     }
 
@@ -730,8 +731,11 @@ impl ServerBuilder {
         for &i in described_idx {
             let module = &self.modules[i];
             let name = crate::descriptor::naming::to_snake_identifier(module.name());
-            let mut visible: std::collections::BTreeSet<String> =
-                module.entity_types().iter().map(|s| s.to_string()).collect();
+            let mut visible: std::collections::BTreeSet<String> = module
+                .entity_types()
+                .iter()
+                .map(|s| s.to_string())
+                .collect();
             let mut stack = vec![name.clone()];
             let mut seen = std::collections::BTreeSet::new();
             while let Some(m) = stack.pop() {
@@ -2203,7 +2207,10 @@ mod descriptor_tests {
 
     fn code_of(r: anyhow::Result<crate::server::host::ServerHost>) -> String {
         let err = r.err().expect("build must fail");
-        crate::core::errors::from_anyhow(&err).code.as_str().to_string()
+        crate::core::errors::from_anyhow(&err)
+            .code
+            .as_str()
+            .to_string()
     }
 
     #[test]

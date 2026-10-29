@@ -89,7 +89,12 @@ pub async fn admin_middleware(
         (Method::POST, "") => load(&rt, request)
             .await
             .map(|s| (StatusCode::CREATED, Json(serde_json::json!(s)))),
-        _ => Err(ContractError::framework(codes::MODULE_NOT_FOUND).with_param("module", rest)),
+        // Unsupported method/shape: say so, instead of a misleading `module.not_found`
+        // on an existing module (e.g. `PUT {prefix}/billing`).
+        (m, r) => Err(bad(format!(
+            "`{m} {prefix}/{r}` is not an operation of the module admin interface \
+             (GET/POST {prefix}, GET/DELETE {prefix}/{{name}})"
+        ))),
     };
     match result {
         Ok(r) => r.into_response(),
@@ -120,6 +125,8 @@ async fn load(
             })
             .await
         }
-        _ => Err(bad("exactly one of `module`, `manifest`, `store` is expected")),
+        _ => Err(bad(
+            "exactly one of `module`, `manifest`, `store` is expected",
+        )),
     }
 }
