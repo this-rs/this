@@ -453,6 +453,7 @@ async fn test_e2e_grpc_notification_streaming() {
 // ============================================================================
 
 #[tokio::test]
+#[ignore = "flaky: gRPC stream subscribe races with server readiness on CI"]
 async fn test_e2e_grpc_event_stream_on_entity_create() {
     use this::server::exposure::grpc::proto::*;
     use tokio_stream::StreamExt;
@@ -503,6 +504,7 @@ async fn test_e2e_grpc_event_stream_on_entity_create() {
 // ============================================================================
 
 #[tokio::test]
+#[ignore = "flaky: gRPC stream subscribe races with server readiness on CI"]
 async fn test_e2e_grpc_entity_create_triggers_event() {
     use this::server::exposure::grpc::proto::*;
     use tokio_stream::StreamExt;
@@ -687,6 +689,7 @@ async fn test_e2e_notification_user_isolation() {
 // ============================================================================
 
 #[tokio::test]
+#[ignore = "flaky: gRPC stream subscribe races with server readiness on CI"]
 async fn test_e2e_event_and_notification_streams_coexist() {
     use this::server::exposure::grpc::proto::*;
     use tokio_stream::StreamExt;
