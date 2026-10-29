@@ -435,7 +435,10 @@ mod tests {
         ))
         .generate_proto()
         .await;
-        assert!(p.starts_with("syntax = \"proto3\";\n\npackage this_api;\n\n// Order entity\n"), "{p}");
+        assert!(
+            p.starts_with("syntax = \"proto3\";\n\npackage this_api;\n\n// Order entity\n"),
+            "{p}"
+        );
         assert!(p.contains("  double amount = 1;\n"), "{p}");
         assert!(p.contains("  string id = 2;\n"), "{p}");
         assert!(p.contains("service OrderService {"), "{p}");

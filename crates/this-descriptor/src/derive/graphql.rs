@@ -86,10 +86,7 @@ impl SdlBuilder {
             && !variants.is_empty()
             && variants.iter().all(|v| is_graphql_name(v))
             && !SCALARS.iter().any(|(s, _)| *s == gql)
-            && !matches!(
-                gql.as_str(),
-                "String" | "Int" | "Float" | "Boolean" | "ID"
-            );
+            && !matches!(gql.as_str(), "String" | "Int" | "Float" | "Boolean" | "ID");
         if !valid {
             return "String".into();
         }
@@ -131,7 +128,10 @@ impl SdlBuilder {
     pub fn input_types(&mut self, e: &EntityDesc) -> String {
         let pascal = pascal_case(&e.name);
         let mut out = String::new();
-        for (suffix, op) in [("CreateInput", Applies::Create), ("UpdateInput", Applies::Update)] {
+        for (suffix, op) in [
+            ("CreateInput", Applies::Create),
+            ("UpdateInput", Applies::Update),
+        ] {
             let fields: Vec<&FieldDesc> = e
                 .all_fields()
                 .filter(|f| !f.read_only && !(op == Applies::Update && f.immutable))
@@ -221,16 +221,25 @@ mod tests {
         let sdl = sdl_for(&[&invoice()]);
         assert!(sdl.contains("type Invoice {\n"), "{sdl}");
         assert!(sdl.contains("  amount: Float!\n"), "{sdl}");
-        assert!(sdl.contains("  note: String\n"), "optional = nullable: {sdl}");
+        assert!(
+            sdl.contains("  note: String\n"),
+            "optional = nullable: {sdl}"
+        );
         assert!(sdl.contains("  deleted_at: DateTime\n"), "{sdl}");
         assert!(sdl.contains("  id: ID!\n"), "{sdl}");
         assert!(sdl.contains("  count: Int64!\n"), "u32 exceeds Int: {sdl}");
         assert!(sdl.contains("  lines: [ID!]\n"), "{sdl}");
         assert!(sdl.contains("  state: InvoiceState!\n"), "{sdl}");
-        assert!(sdl.contains("enum InvoiceState {\n  draft\n  sent\n}"), "{sdl}");
+        assert!(
+            sdl.contains("enum InvoiceState {\n  draft\n  sent\n}"),
+            "{sdl}"
+        );
         assert!(sdl.contains("scalar DateTime"), "{sdl}");
         assert!(sdl.contains("scalar Int64"), "{sdl}");
-        assert!(!sdl.contains("scalar Decimal"), "unused scalar omitted: {sdl}");
+        assert!(
+            !sdl.contains("scalar Decimal"),
+            "unused scalar omitted: {sdl}"
+        );
         // Inputs: read-only excluded, required on create = `!`, update all nullable except
         // an explicit `required` on update.
         let create = section(&sdl, "input InvoiceCreateInput {");
@@ -270,8 +279,14 @@ mod tests {
         ));
         let sdl = sdl_for(&[&a, &b]);
         assert_eq!(sdl.matches("enum State {").count(), 1, "{sdl}");
-        assert!(section(&sdl, "type B {").contains("  s: String!\n"), "{sdl}");
-        assert!(section(&sdl, "type B {").contains("  t: String!\n"), "{sdl}");
+        assert!(
+            section(&sdl, "type B {").contains("  s: String!\n"),
+            "{sdl}"
+        );
+        assert!(
+            section(&sdl, "type B {").contains("  t: String!\n"),
+            "{sdl}"
+        );
     }
 
     #[test]
@@ -284,7 +299,9 @@ mod tests {
     }
 
     fn section<'a>(sdl: &'a str, start: &str) -> &'a str {
-        let i = sdl.find(start).unwrap_or_else(|| panic!("{start} in {sdl}"));
+        let i = sdl
+            .find(start)
+            .unwrap_or_else(|| panic!("{start} in {sdl}"));
         let rest = &sdl[i..];
         &rest[..rest.find('}').unwrap() + 1]
     }

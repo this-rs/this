@@ -234,9 +234,7 @@ pub fn openapi(set: &DescriptorSet, title: &str, version: &str) -> Value {
             m.insert("default".into(), err.clone());
             Value::Object(m)
         };
-        let body = |name: &str| {
-            json!({"required": true, "content": {"application/json": {"schema": r(name)}}})
-        };
+        let body = |name: &str| json!({"required": true, "content": {"application/json": {"schema": r(name)}}});
         let id_param = json!([{"name": "id", "in": "path", "required": true, "schema": {"type": "string", "format": "uuid"}}]);
         let q = |name: &str, ty: &str| json!({"name": name, "in": "query", "required": false, "schema": {"type": ty}});
         paths.insert(
@@ -287,7 +285,13 @@ mod tests {
                 )
                 .transform(TransformSpec::Uppercase, Applies::Always),
             FieldDesc::new("tenant_id", FieldType::Uuid).read_only(),
-            FieldDesc::new("customer", FieldType::Ref { entity: "user".into() }).immutable(),
+            FieldDesc::new(
+                "customer",
+                FieldType::Ref {
+                    entity: "user".into(),
+                },
+            )
+            .immutable(),
         ];
         e
     }
@@ -311,14 +315,20 @@ mod tests {
         assert!(c["properties"].get("id").is_none(), "{c}");
         assert_eq!(c["properties"]["amount"]["exclusiveMinimum"], 0);
         assert_eq!(c["properties"]["currency"]["enum"], json!(["EUR", "USD"]));
-        assert_eq!(c["properties"]["currency"]["x-this-transforms"], json!(["uppercase"]));
+        assert_eq!(
+            c["properties"]["currency"]["x-this-transforms"],
+            json!(["uppercase"])
+        );
         assert_eq!(c["properties"]["note"]["anyOf"][1], json!({"type": "null"}));
         assert_eq!(c["additionalProperties"], false);
 
         let u = crate::derive::json_schema(&e, WriteOp::Update).unwrap();
         assert_eq!(u["required"], json!([]), "nothing required on update: {u}");
         assert!(u["properties"].get("customer").is_none(), "immutable: {u}");
-        assert!(u["properties"]["currency"].get("enum").is_none(), "create-only rule");
+        assert!(
+            u["properties"]["currency"].get("enum").is_none(),
+            "create-only rule"
+        );
         assert_eq!(u["properties"]["amount"]["exclusiveMinimum"], 0);
     }
 
@@ -333,7 +343,8 @@ mod tests {
         assert!(doc["paths"]["/invoices"]["post"].is_object());
         assert!(doc["paths"]["/invoices/{id}"]["delete"].is_object());
         assert_eq!(
-            doc["paths"]["/invoices"]["post"]["requestBody"]["content"]["application/json"]["schema"]["$ref"],
+            doc["paths"]["/invoices"]["post"]["requestBody"]["content"]["application/json"]["schema"]
+                ["$ref"],
             "#/components/schemas/InvoiceCreate"
         );
         assert!(doc["components"]["schemas"]["Invoice"]["properties"]["id"].is_object());
