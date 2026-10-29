@@ -20,6 +20,9 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v7
 
+      - name: Create local dep stubs
+        run: bash .github/create-local-dep-stubs.sh
+
       - name: Install protoc
         uses: arduino/setup-protoc@v3
         with:
@@ -62,6 +65,9 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
+
+      - name: Create local dep stubs
+        run: bash .github/create-local-dep-stubs.sh
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
