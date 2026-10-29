@@ -9,9 +9,17 @@
 //! do NOT survive `open()` and must be rebuilt by hand (`rebuild_index_for_label`), and
 //! they are cleared on every space switch (`use_graph`). A VFS cache would carry the
 //! same trap; every operation therefore resolves the path by scanning the nodes of the
-//! label in the ACTIVE space (`active_store`). Module trees are small (a few files per
-//! version), the scan is the price of being correct after a reopen without any rebuild
-//! step. Every mutation ends with `commit_wal()` (durable once `Ok` is returned).
+//! label. Module trees are small (a few files per version), the scan is the price of
+//! being correct after a reopen without any rebuild step. Every mutation ends with
+//! `commit_wal()` (durable once `Ok` is returned).
+//!
+//! Space: the files live in the ROOT graph of the database (`ObrainDB::graph_store_mut`),
+//! whatever space the `ObrainStore` currently has active. `use_graph` is a store-wide
+//! switch made by the entity layer (tenants, spaces); a VFS that followed it would see
+//! its modules vanish, or another tenant's, on every switch.
+//!
+//! Creation is not atomic in obrain (node, then properties): `_path` is set LAST, so a
+//! node interrupted half-way has no path and is ignored by `scan`.
 
 use super::memory::{check_shape, list_flat};
 use super::{
@@ -21,6 +29,7 @@ use crate::storage::obrain::ObrainStore;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use obrain_common::types::{NodeId, Value as ObrainValue};
+use obrain_core::graph::GraphStoreMut;
 use std::sync::{Arc, Mutex};
 
 /// Label of the VFS file nodes.
@@ -75,14 +84,18 @@ impl ObrainVfs {
         }
     }
 
-    /// Every file node of the active space. Nodes whose properties do not parse are
+    /// Root graph of the database, independent of the store's active space.
+    fn graph(&self) -> Arc<dyn GraphStoreMut> {
+        self.store.db().graph_store_mut()
+    }
+
+    /// Every file node of the root graph. Nodes whose properties do not parse are
     /// skipped (never served), not fatal.
     fn scan(&self) -> Vec<Row> {
-        let store = self.store.active_store();
-        let session = self.store.session();
+        let graph = self.graph();
         let mut out = Vec::new();
-        for id in store.nodes_by_label(FILE_LABEL) {
-            let Some(node) = session.get_node(id) else {
+        for id in graph.nodes_by_label(FILE_LABEL) {
+            let Some(node) = graph.get_node(id) else {
                 continue;
             };
             let s = |k: &str| {
@@ -131,12 +144,14 @@ impl ObrainVfs {
 #[async_trait]
 impl Vfs for ObrainVfs {
     async fn read(&self, path: &VfsPath) -> Result<Vec<u8>, VfsError> {
+        // Under the write lock: an update sets `_content` then `_etag`, a reader in
+        // between would see a mismatch and report a spurious integrity error.
+        let _g = self.guard()?;
         let row = self
             .find(path)
             .ok_or_else(|| VfsError::NotFound(path.clone()))?;
         let node = self
-            .store
-            .session()
+            .graph()
             .get_node(row.id)
             .ok_or_else(|| VfsError::NotFound(path.clone()))?;
         let hex = node
@@ -179,27 +194,29 @@ impl Vfs for ObrainVfs {
         let props = |k: &'static str, v: &str| (k, ObrainValue::from(v));
         match current {
             Some(row) => {
-                let store = self.store.active_store();
+                let graph = self.graph();
                 for (k, v) in [
                     props("_content", &hex),
                     props("_etag", &meta.etag),
                     props("_size", &size),
                     props("_modified", &modified),
                 ] {
-                    store.set_node_property(row.id, k, v);
+                    graph.set_node_property(row.id, k, v);
                 }
             }
             None => {
-                self.store.session().create_node_with_props(
-                    &[FILE_LABEL],
-                    vec![
-                        props("_path", path.as_str()),
-                        props("_content", &hex),
-                        props("_etag", &meta.etag),
-                        props("_size", &size),
-                        props("_modified", &modified),
-                    ],
-                );
+                let graph = self.graph();
+                let id = graph.create_node(&[FILE_LABEL]);
+                // `_path` last: an interrupted creation leaves a node `scan` ignores.
+                for (k, v) in [
+                    props("_content", &hex),
+                    props("_etag", &meta.etag),
+                    props("_size", &size),
+                    props("_modified", &modified),
+                    props("_path", path.as_str()),
+                ] {
+                    graph.set_node_property(id, k, v);
+                }
             }
         }
         self.commit()?;
@@ -227,7 +244,7 @@ impl Vfs for ObrainVfs {
         }
         check_precondition(path, current.as_ref().map(|r| r.meta.etag.as_str()), &pre)?;
         if let Some(row) = current {
-            self.store.active_store().delete_node(row.id);
+            self.graph().delete_node(row.id);
             self.commit()?;
         }
         Ok(())
@@ -286,6 +303,40 @@ mod tests {
         let v = ObrainVfs::new(ObrainStore::open(&dir).unwrap());
         assert!(v.stat(&q).await.unwrap().is_none(), "delete durable");
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn obrain_vfs_ignores_the_active_space() {
+        // The entity layer switches spaces (`use_graph`); the module files must not
+        // follow, neither for reads nor for writes.
+        let store = ObrainStore::new_in_memory();
+        let v = ObrainVfs::new(store.clone());
+        let a = VfsPath::parse("/modules/billing/1.0.0/descriptor.json").unwrap();
+        let b = VfsPath::parse("/modules/billing/1.0.0/i18n/fr.json").unwrap();
+        v.write(&a, b"root", Precondition::None).await.unwrap();
+        store.create_space("tenant_a").unwrap();
+        store.use_graph("tenant_a");
+        assert_eq!(store.space().as_deref(), Some("tenant_a"));
+        assert_eq!(
+            v.read(&a).await.unwrap(),
+            b"root",
+            "read while a space is active"
+        );
+        v.write(&b, b"fr", Precondition::IfNoneMatch).await.unwrap();
+        // The tenant space holds no VFS node.
+        assert!(
+            store.active_store().nodes_by_label(FILE_LABEL).is_empty(),
+            "VFS nodes leaked into the tenant space"
+        );
+        store.reset_graph();
+        assert_eq!(v.read(&b).await.unwrap(), b"fr");
+        assert_eq!(
+            v.list(&VfsPath::parse("/modules/billing/1.0.0").unwrap())
+                .await
+                .unwrap()
+                .len(),
+            2
+        );
     }
 
     #[tokio::test]

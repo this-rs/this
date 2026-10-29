@@ -13,15 +13,17 @@
 //!
 //! # Guarantees
 //!
-//! - **Fail-closed put**: `check(Stored)`, bundle checks (module, syntax, key namespace)
-//!   and `check_compat` against the highest stored version (yanked included: a yanked
-//!   version's tags stay published) run BEFORE anything is written.
+//! - **Fail-closed put**: `check(Stored)`, bundle checks (module, syntax, key namespace,
+//!   locale declared and unique case-insensitively), asset path checks, and
+//!   `check_compat` against EVERY stored version in semver order (yanked included: a
+//!   yanked version's tags stay published; a backport is checked against the versions
+//!   above it) run BEFORE anything is written.
 //! - **Immutable versions**: a committed version is never rewritten. Putting the same
 //!   content again is idempotent (returns the manifest's meta); different content is
 //!   refused with `this.vfs.precondition_failed` (`Aborted`, 409).
 //! - **Atomic visibility**: a version without `manifest.json` does not exist for
-//!   `get`/`list`/`bundle` (a crashed put leaves invisible orphans, overwritten by the
-//!   next put of that version).
+//!   `get`/`list`/`bundle` (a crashed put leaves invisible orphans, deleted by the next
+//!   put of that version before it writes).
 //! - **Integrity**: every read compares the file's etag with the manifest; a tampered or
 //!   half-overwritten file is refused (`this.internal`), never served.
 //! - **Rollback without mutation**: `yank` hides a version from `get(name, None)` (the
@@ -101,27 +103,25 @@ fn issue(reason: &str, path: impl Into<String>, message: impl Into<String>) -> D
     }
 }
 
-/// A tag reserved by `prev` used by a field of `next` (gap of `check_compat`, which only
-/// walks `prev`'s fields).
-fn reserved_tag_reuse(prev: &ModuleDescriptor, next: &ModuleDescriptor) -> Vec<DescriptorIssue> {
-    let mut out = Vec::new();
-    for pe in &prev.entities {
-        let Some(ne) = next.entity(&pe.name) else {
-            continue;
-        };
-        for nf in &ne.fields {
-            if let Some(tag) = nf.proto_tag
-                && pe.reserved_tags.contains(&tag)
-            {
-                out.push(issue(
-                    "tag_reused",
-                    format!("entities.{}.fields.{}", ne.name, nf.name),
-                    format!("tag {tag} reserved by version {}", prev.version),
-                ));
-            }
-        }
+/// Compatibility of `next` with ONE stored version `other`, in semver order: a lower
+/// version must evolve into `next`, `next` must evolve into a higher one (backport). So a
+/// backport `1.0.1` put after `2.0.0` is accepted when it lacks fields added in `2.0.0`,
+/// and refused when it binds a tag `2.0.0` gives to another field.
+fn compat_with(other: &ModuleDescriptor, next: &ModuleDescriptor) -> Vec<DescriptorIssue> {
+    if semver_key(&other.version) < semver_key(&next.version) {
+        check_compat(other, next)
+    } else {
+        check_compat(next, other)
     }
-    out
+}
+
+/// Locale tag usable as a file name on every backend: BCP 47 characters only.
+fn locale_ok(l: &Locale) -> bool {
+    let s = l.as_str();
+    !s.is_empty()
+        && s.len() <= 35
+        && s.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
 }
 
 fn immutable(path: &VfsPath) -> ContractError {
@@ -319,6 +319,16 @@ impl VfsModuleStore {
         let mut issues = Vec::new();
         let mut locales = BTreeSet::new();
         let ns = format!("{}.", desc.name);
+        // `load_stored` only reads the declared locales and the default one: a bundle for
+        // any other locale would be stored and never served. Exact match: `load_stored` asks
+        // for the declared spelling.
+        let declared: BTreeSet<String> = desc
+            .i18n
+            .locales
+            .iter()
+            .chain(std::iter::once(&desc.i18n.default_locale))
+            .map(|l| l.as_str().to_string())
+            .collect();
         for (i, b) in bundles.iter().enumerate() {
             let p = format!("bundles[{i}]");
             if b.module != desc.name {
@@ -332,11 +342,23 @@ impl VfsModuleStore {
                 e.path = p.clone();
                 issues.push(e);
             }
-            if !locales.insert(b.locale.clone()) {
+            // Case-insensitive: `fr-CA` and `fr-ca` are one file on a case-insensitive
+            // file system (macOS, Windows), the second write would replace the first.
+            let folded = b.locale.as_str().to_ascii_lowercase();
+            if !locales.insert(folded) {
                 issues.push(issue("duplicate_locale", &p, b.locale.to_string()));
             }
-            if VfsPath::parse(&format!("/{}.json", b.locale)).is_err() {
+            if !locale_ok(&b.locale) {
                 issues.push(issue("invalid_locale", &p, b.locale.to_string()));
+            } else if !declared.contains(b.locale.as_str()) {
+                issues.push(issue(
+                    "locale_undeclared",
+                    &p,
+                    format!(
+                        "bundle `{}` is neither in i18n.locales nor the default locale",
+                        b.locale
+                    ),
+                ));
             }
             for key in b.messages.keys() {
                 if !key.0.starts_with(&ns) {
@@ -348,10 +370,25 @@ impl VfsModuleStore {
                 }
             }
         }
-        let mut asset_names = BTreeSet::new();
+        // Asset paths: valid, unique case-insensitively (one file on macOS / Windows), and
+        // no asset below another (`a` and `a/b`): the Vfs would refuse the second write
+        // AFTER the first files are written.
+        let mut asset_names: BTreeSet<String> = BTreeSet::new();
         for (rel, _) in assets {
-            if VfsPath::parse(&format!("/assets/{rel}")).is_err() || !asset_names.insert(*rel) {
+            if VfsPath::parse(&format!("/assets/{rel}")).is_err()
+                || !asset_names.insert(rel.to_ascii_lowercase())
+            {
                 issues.push(issue("invalid_asset", "assets", rel.to_string()));
+            }
+        }
+        for a in &asset_names {
+            let as_dir = format!("{a}/");
+            if asset_names.iter().any(|b| b.starts_with(&as_dir)) {
+                issues.push(issue(
+                    "invalid_asset",
+                    "assets",
+                    format!("`{a}` is both a file and a directory"),
+                ));
             }
         }
         if !issues.is_empty() {
@@ -388,15 +425,14 @@ impl VfsModuleStore {
             return Err(immutable(&dir));
         }
 
-        // 4. Compatibility against EVERY stored version (yanked included), not only the
-        //    highest: `check_compat(prev, next)` does not look at `prev.reserved_tags`,
-        //    so v1 {note=17} -> v2 {reserved 17} -> v3 {memo=17} passes against v2 alone.
-        //    Reserved tags of any previous version are also checked here.
+        // 4. Compatibility against EVERY stored version (yanked included: a yanked
+        //    version's tags stay published), in semver order (`compat_with`): a removed
+        //    version's reservations are still carried by the versions after it, and a
+        //    backport is checked against the versions above it.
         let mut issues = Vec::new();
-        for prev in self.versions(&desc.name).await? {
-            let prev = self.get_checked(&desc.name, &prev.version, false).await?;
-            issues.extend(check_compat(&prev, &desc));
-            issues.extend(reserved_tag_reuse(&prev, &desc));
+        for other in self.versions(&desc.name).await? {
+            let other = self.get_checked(&desc.name, &other.version, false).await?;
+            issues.extend(compat_with(&other, &desc));
         }
         if !issues.is_empty() {
             issues.sort_by(|a, b| (&a.path, &a.message).cmp(&(&b.path, &b.message)));
@@ -404,7 +440,17 @@ impl VfsModuleStore {
             return Err(invalid(issues));
         }
 
-        // 5. Files, then the commit marker.
+        // 5. Orphans of a crashed put of this version (no manifest, so invisible) are
+        //    removed first: their shape could block this put (`assets/a` left as a file
+        //    where this put writes `assets/a/b`).
+        for f in self.files_below(&dir).await? {
+            match self.vfs.delete(&f, Precondition::None).await {
+                Ok(()) | Err(VfsError::NotFound(_)) => {}
+                Err(e) => return Err(e.into()),
+            }
+        }
+
+        // 6. Files, then the commit marker.
         for (rel, bytes) in &files {
             self.vfs
                 .write(&Self::rel(&dir, rel)?, bytes, Precondition::None)
@@ -561,12 +607,15 @@ impl ModuleStore for VfsModuleStore {
         let Some(bytes) = self.read_verified(&dir, &m, &rel).await? else {
             return Ok(None);
         };
-        let b: MessageBundle = serde_json::from_slice(&bytes).map_err(|e| {
-            integrity(
-                &Self::rel(&dir, &rel).unwrap_or(dir.clone()),
-                &e.to_string(),
-            )
-        })?;
+        let path = Self::rel(&dir, &rel)?;
+        let b: MessageBundle =
+            serde_json::from_slice(&bytes).map_err(|e| integrity(&path, &e.to_string()))?;
+        if b.module != name || b.locale.as_str() != locale {
+            return Err(integrity(
+                &path,
+                "bundle module or locale differs from its path",
+            ));
+        }
         Ok(Some(b))
     }
 
@@ -785,7 +834,7 @@ mod tests {
         let err = store.put(&reuse_again, &[]).await.unwrap_err();
         assert!(format!("{:?}", err.params).contains("tag_reused"));
         // Once 1.0.0 is removed, the reservation of 1.1.0 alone still protects tag 17
-        // (check_compat does not read prev.reserved_tags: covered by the store).
+        // (check_compat reads prev.reserved_tags).
         store.unyank("billing", "1.1.0").await.unwrap();
         store.remove("billing", "1.0.0").await.unwrap();
         let err = store.put(&reuse_again, &[]).await.unwrap_err();
@@ -1044,5 +1093,146 @@ mod tests {
             .collect();
         locales.sort();
         assert_eq!(locales, ["en", "fr"]);
+    }
+
+    #[tokio::test]
+    async fn module_store_backport_checked_against_higher_versions() {
+        let (_vfs, store) = mem();
+        store.put(&v1("1.0.0"), &[]).await.unwrap();
+        // 2.0.0 adds `due` (18) and removes `note` (17, reserved).
+        let v2 = module(
+            "2.0.0",
+            vec![
+                FieldDesc::new("amount", FieldType::F64).tag(16),
+                FieldDesc::new("due", FieldType::String).tag(18),
+            ],
+            vec![17],
+        );
+        store.put(&v2, &[]).await.unwrap();
+        // Backport 1.0.1 = the 1.0 shape: lacks `due`, keeps `note`. Accepted (before
+        // the review, `check_compat(2.0.0, 1.0.1)` refused it with tag_not_reserved).
+        store.put(&v1("1.0.1"), &[]).await.unwrap();
+        assert_eq!(store.get("billing", None).await.unwrap().version, "2.0.0");
+        // Backport binding 18 to another field than 2.0.0 does: refused.
+        let bad = module(
+            "1.0.2",
+            vec![
+                FieldDesc::new("amount", FieldType::F64).tag(16),
+                FieldDesc::new("note", FieldType::String).tag(17),
+                FieldDesc::new("memo", FieldType::String).tag(18),
+            ],
+            vec![],
+        );
+        let err = store.put(&bad, &[]).await.unwrap_err();
+        assert_eq!(err.code.0, codes::DESCRIPTOR_INVALID);
+        assert!(
+            format!("{:?}", err.params).contains("tag_reused"),
+            "{err:?}"
+        );
+        // Backport dropping `note` without reserving 17: refused against 1.0.0.
+        let unreserved = module(
+            "1.0.3",
+            vec![FieldDesc::new("amount", FieldType::F64).tag(16)],
+            vec![],
+        );
+        let err = store.put(&unreserved, &[]).await.unwrap_err();
+        assert!(
+            format!("{:?}", err.params).contains("tag_not_reserved"),
+            "{err:?}"
+        );
+        assert_eq!(store.versions("billing").await.unwrap().len(), 3);
+    }
+
+    #[tokio::test]
+    async fn module_store_put_rejects_bad_locales_and_assets() {
+        let (vfs, store) = mem();
+        let mut m = v1("1.0.0");
+        m.i18n.locales = vec![Locale::new("fr-CA"), Locale::new("fr-ca")];
+        // Same file on a case-insensitive file system.
+        let err = store
+            .put(&m, &[bundle("fr-CA", "a"), bundle("fr-ca", "b")])
+            .await
+            .unwrap_err();
+        assert!(format!("{:?}", err.params).contains("duplicate_locale"));
+        // A locale nobody will ever load.
+        let err = store
+            .put(&v1("1.0.0"), &[bundle("de", "Rechnung")])
+            .await
+            .unwrap_err();
+        assert!(format!("{:?}", err.params).contains("locale_undeclared"));
+        // Not a BCP 47 tag (would create i18n/fr/CA.json).
+        let mut m = v1("1.0.0");
+        m.i18n.locales = vec![Locale::new("fr/CA")];
+        let err = store.put(&m, &[bundle("fr/CA", "x")]).await.unwrap_err();
+        assert!(format!("{:?}", err.params).contains("invalid_locale"));
+        // Assets: case-insensitive duplicates, file-and-directory.
+        let err = store
+            .put_with_assets(
+                &v1("1.0.0"),
+                &[],
+                &[("Front.wasm", b"a"), ("front.wasm", b"b")],
+            )
+            .await
+            .unwrap_err();
+        assert!(format!("{:?}", err.params).contains("invalid_asset"));
+        let err = store
+            .put_with_assets(&v1("1.0.0"), &[], &[("a", b"a"), ("a/b", b"b")])
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{:?}", err.params).contains("both a file and a directory"),
+            "{err:?}"
+        );
+        // Every refusal happened before any write.
+        assert_eq!(all_files(vfs.as_ref()).await, 0);
+    }
+
+    #[tokio::test]
+    async fn module_store_orphans_do_not_block_the_next_put() {
+        let (vfs, store) = mem();
+        // A crashed put left `assets/a` as a FILE, the retry writes `assets/a/b`.
+        let orphan = VfsPath::parse("/modules/billing/1.0.0/assets/a").unwrap();
+        vfs.write(&orphan, b"stale", Precondition::None)
+            .await
+            .unwrap();
+        store
+            .put_with_assets(&v1("1.0.0"), &[], &[("a/b", b"fresh")])
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .asset("billing", "1.0.0", "a/b")
+                .await
+                .unwrap()
+                .unwrap(),
+            b"fresh"
+        );
+        assert!(vfs.stat(&orphan).await.unwrap().is_none(), "orphan removed");
+    }
+
+    #[tokio::test]
+    async fn module_store_on_local_fs_refuses_tampering() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = VfsModuleStore::new(Arc::new(LocalFsVfs::open(dir.path()).unwrap()));
+        store
+            .put_with_assets(
+                &v1("1.0.0"),
+                &[bundle("fr", "Facture")],
+                &[("x.wasm", b"x")],
+            )
+            .await
+            .unwrap();
+        // Edited behind the store's back, on disk.
+        std::fs::write(
+            dir.path().join("modules/billing/1.0.0/assets/x.wasm"),
+            b"evil",
+        )
+        .unwrap();
+        let err = store.asset("billing", "1.0.0", "x.wasm").await.unwrap_err();
+        assert_eq!(err.code.0, codes::INTERNAL);
+        std::fs::remove_file(dir.path().join("modules/billing/1.0.0/descriptor.json")).unwrap();
+        let err = store.get("billing", None).await.unwrap_err();
+        assert_eq!(err.code.0, codes::INTERNAL);
+        assert!(format!("{:?}", err.params).contains("file missing"));
     }
 }

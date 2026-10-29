@@ -53,6 +53,20 @@ pub fn check_compat(prev: &ModuleDescriptor, next: &ModuleDescriptor) -> Vec<Des
                 }
             }
         }
+        // A tag `prev` reserved stays reserved: no field of `next` may take it (the field
+        // that owned it may be gone from every version still around, so the walk over
+        // `prev.fields` above cannot see the reuse).
+        for nf in &ne.fields {
+            if let Some(tag) = nf.proto_tag
+                && pe.reserved_tags.contains(&tag)
+            {
+                out.push(issue(
+                    "tag_reused",
+                    format!("entities.{}.fields.{}", ne.name, nf.name),
+                    format!("tag {tag} reserved by version {}", prev.version),
+                ));
+            }
+        }
     }
     out
 }
@@ -116,5 +130,36 @@ mod tests {
             vec![17],
         );
         assert!(check_compat(&prev, &reserved).is_empty());
+    }
+
+    #[test]
+    fn reserved_tag_of_prev_cannot_be_taken_by_next() {
+        // v2 removed `note` (17) and reserved it; v3 gives 17 to `memo`. Against v2 alone
+        // (v1 no longer stored, or the CLI comparing two adjacent versions) the reuse
+        // must still be seen.
+        let v2 = v(
+            vec![FieldDesc::new("amount", FieldType::F64).tag(16)],
+            vec![17],
+        );
+        let v3 = v(
+            vec![
+                FieldDesc::new("amount", FieldType::F64).tag(16),
+                FieldDesc::new("memo", FieldType::String).tag(17),
+            ],
+            vec![],
+        );
+        let issues = check_compat(&v2, &v3);
+        assert_eq!(issues.len(), 1, "{issues:?}");
+        assert_eq!(issues[0].code.0, "this.descriptor.tag_reused");
+        assert_eq!(issues[0].path, "entities.invoice.fields.memo");
+        // Keeping the reservation and using a fresh tag is fine.
+        let v3_ok = v(
+            vec![
+                FieldDesc::new("amount", FieldType::F64).tag(16),
+                FieldDesc::new("memo", FieldType::String).tag(18),
+            ],
+            vec![17],
+        );
+        assert!(check_compat(&v2, &v3_ok).is_empty());
     }
 }

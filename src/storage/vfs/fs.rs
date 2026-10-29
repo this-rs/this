@@ -187,7 +187,12 @@ impl Vfs for LocalFsVfs {
                 let mut f = fs::File::create(&tmp)?;
                 f.write_all(&bytes)?;
                 f.sync_all()?;
-                fs::rename(&tmp, &local)
+                fs::rename(&tmp, &local)?;
+                // The rename itself is durable only once the directory entry is: without
+                // this a crash can lose a committed manifest.json after `Ok` was returned.
+                #[cfg(unix)]
+                fs::File::open(dir)?.sync_all()?;
+                Ok(())
             })();
             if let Err(e) = res {
                 let _ = fs::remove_file(&tmp);

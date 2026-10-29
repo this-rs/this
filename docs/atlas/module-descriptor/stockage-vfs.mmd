@@ -1,7 +1,9 @@
 flowchart TB
 %% name: module-descriptor-vfs-storage
 %% PROUVE : banc vfs_conformance_* (memoire, fs), obrain_vfs_conformance (--features obrain), fs_vfs_sandboxed,
-%%   obrain_vfs_survives_reopen_without_rebuild, module_store_* (put/get/bundles/immuable/yank/remove/assets), read_source_loads_stored_module.
+%%   obrain_vfs_survives_reopen_without_rebuild, obrain_vfs_ignores_the_active_space (rouge avant correctif, mesure),
+%%   module_store_* (put/get/bundles/immuable/yank/remove/assets/backport/locales/orphelins/alteration fs), read_source_loads_stored_module,
+%%   compat::tests::reserved_tag_of_prev_cannot_be_taken_by_next (this-descriptor).
 %% SOURCES LUES : src/storage/vfs/{mod,memory,fs,obrain,module_store,conformance}.rs, src/storage/obrain.rs,
 %%   src/server/module_runtime/loader.rs, crates/this-descriptor/src/{check,compat,module,i18n}.rs.
 %% NON ETABLI : ecritures concurrentes entre PROCESSUS (verrou en processus seulement) ; ModuleRuntime branche sur read_source (flux modules-runtime).
@@ -10,10 +12,10 @@ flowchart TB
 
     subgraph MS["VfsModuleStore - module_store.rs"]
         direction TB
-        CHK["✅ check Stored + bundles<br/>module, syntaxe, espace de cles"]:::ok
-        CMP["✅ check_compat contre TOUTES les versions<br/>+ tags reserves (trou de check_compat)"]:::ok
+        CHK["✅ check Stored + bundles + assets<br/>module, syntaxe, cles, locale declaree,<br/>doublons insensibles a la casse"]:::ok
+        CMP["✅ check_compat contre TOUTES les versions<br/>ordre semver : backport verifie contre les superieures<br/>tags reserves lus par check_compat"]:::ok
         IMM["✅ version immuable<br/>meme contenu = idempotent, sinon 409 Aborted"]:::ok
-        MAN["✅ manifest.json ecrit en dernier IfNoneMatch<br/>= marqueur de commit + etags"]:::ok
+        MAN["✅ orphelins purges, fichiers, puis manifest.json<br/>IfNoneMatch = marqueur de commit + etags"]:::ok
         YNK["✅ yank / unyank : retour arriere<br/>sans toucher l'arbre de la version"]:::ok
         RD["✅ get / bundle / asset<br/>etag verifie contre le manifeste, re-check Stored"]:::ok
     end
@@ -21,8 +23,8 @@ flowchart TB
     subgraph V["trait Vfs - semantique commune, banc conformance.rs"]
         direction LR
         MEM["✅ InMemoryVfs<br/>BTreeMap sous un verrou"]:::ok
-        FS["✅ LocalFsVfs<br/>refus des liens symboliques,<br/>tmp + fsync + rename"]:::ok
-        OB["✅ ObrainVfs feature obrain<br/>un noeud _vfs_file par fichier"]:::ok
+        FS["✅ LocalFsVfs<br/>refus des liens symboliques,<br/>tmp + fsync + rename + fsync du repertoire"]:::ok
+        OB["✅ ObrainVfs feature obrain<br/>un noeud _vfs_file par fichier,<br/>graphe RACINE, jamais l espace actif"]:::ok
     end
 
     TRAP["⚠ index uuid vers NodeId d'ObrainStore<br/>perdus a open : ObrainVfs ne garde<br/>AUCUN index, balayage du label"]:::trap
