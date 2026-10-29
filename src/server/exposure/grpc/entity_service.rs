@@ -10,6 +10,9 @@ use super::proto::{
     GetEntityRequest, ListEntitiesRequest, ListEntitiesResponse, UpdateEntityRequest,
     entity_service_server::EntityService,
 };
+use crate::core::errors::to_status;
+use crate::descriptor::Operation;
+use crate::server::exposure::guard::SurfaceGuard;
 use crate::server::host::ServerHost;
 use std::sync::Arc;
 use tonic::{Request, Response, Status};
@@ -21,12 +24,33 @@ use uuid::Uuid;
 /// The entity type is determined at runtime from the request message.
 pub struct EntityServiceImpl {
     host: Arc<ServerHost>,
+    /// Apply the declared policies per call (armed routers). See `identity::guard_of`.
+    enforce: bool,
 }
 
 impl EntityServiceImpl {
-    /// Create a new EntityServiceImpl from a ServerHost
+    /// Create a new EntityServiceImpl from a ServerHost.
+    ///
+    /// **Fail-closed**: policies are applied per call whenever the host has them armed
+    /// (`ServerHost::authorize`).
     pub fn new(host: Arc<ServerHost>) -> Self {
-        Self { host }
+        Self {
+            host,
+            enforce: true,
+        }
+    }
+
+    /// Service that does NOT apply the policies (explicit opt-in of the
+    /// `*_unenforced` routers).
+    pub fn unenforced(host: Arc<ServerHost>) -> Self {
+        Self {
+            host,
+            enforce: false,
+        }
+    }
+
+    async fn guard<T>(&self, request: &Request<T>) -> Result<SurfaceGuard, Status> {
+        super::identity::guard_of(&self.host, request, self.enforce).await
     }
 
     /// Get the entity fetcher for the given type, or return a gRPC NOT_FOUND status
@@ -64,7 +88,11 @@ impl EntityService for EntityServiceImpl {
         &self,
         request: Request<GetEntityRequest>,
     ) -> Result<Response<EntityResponse>, Status> {
+        let guard = self.guard(&request).await?;
         let req = request.into_inner();
+        guard
+            .check(&req.entity_type, Operation::Get, Uuid::parse_str(&req.entity_id).ok().as_ref())
+            .map_err(to_status)?;
 
         let entity_id = Uuid::parse_str(&req.entity_id)
             .map_err(|e| Status::invalid_argument(format!("Invalid entity_id: {}", e)))?;
@@ -85,7 +113,11 @@ impl EntityService for EntityServiceImpl {
         &self,
         request: Request<ListEntitiesRequest>,
     ) -> Result<Response<ListEntitiesResponse>, Status> {
+        let guard = self.guard(&request).await?;
         let req = request.into_inner();
+        guard
+            .check(&req.entity_type, Operation::List, None)
+            .map_err(to_status)?;
 
         let fetcher = self.get_fetcher(&req.entity_type)?;
 
@@ -114,7 +146,11 @@ impl EntityService for EntityServiceImpl {
         &self,
         request: Request<CreateEntityRequest>,
     ) -> Result<Response<EntityResponse>, Status> {
+        let guard = self.guard(&request).await?;
         let req = request.into_inner();
+        guard
+            .check(&req.entity_type, Operation::Create, None)
+            .map_err(to_status)?;
 
         let creator = self.get_creator(&req.entity_type)?;
 
@@ -152,7 +188,11 @@ impl EntityService for EntityServiceImpl {
         &self,
         request: Request<UpdateEntityRequest>,
     ) -> Result<Response<EntityResponse>, Status> {
+        let guard = self.guard(&request).await?;
         let req = request.into_inner();
+        guard
+            .check(&req.entity_type, Operation::Update, Uuid::parse_str(&req.entity_id).ok().as_ref())
+            .map_err(to_status)?;
 
         let entity_id = Uuid::parse_str(&req.entity_id)
             .map_err(|e| Status::invalid_argument(format!("Invalid entity_id: {}", e)))?;
@@ -190,7 +230,11 @@ impl EntityService for EntityServiceImpl {
         &self,
         request: Request<DeleteEntityRequest>,
     ) -> Result<Response<DeleteEntityResponse>, Status> {
+        let guard = self.guard(&request).await?;
         let req = request.into_inner();
+        guard
+            .check(&req.entity_type, Operation::Delete, Uuid::parse_str(&req.entity_id).ok().as_ref())
+            .map_err(to_status)?;
 
         let entity_id = Uuid::parse_str(&req.entity_id)
             .map_err(|e| Status::invalid_argument(format!("Invalid entity_id: {}", e)))?;
@@ -410,7 +454,7 @@ mod tests {
         let id = Uuid::new_v4();
         fetcher.insert(id, json!({"id": id.to_string(), "name": "Order #1"}));
 
-        let svc = EntityServiceImpl::new(make_host_with_mocks(
+        let svc = EntityServiceImpl::unenforced(make_host_with_mocks(
             fetcher,
             Arc::new(MockEntityCreator::new()),
         ));
@@ -432,7 +476,7 @@ mod tests {
 
     #[tokio::test]
     async fn get_entity_invalid_uuid_returns_invalid_argument() {
-        let svc = EntityServiceImpl::new(make_host_with_mocks(
+        let svc = EntityServiceImpl::unenforced(make_host_with_mocks(
             Arc::new(MockEntityFetcher::new()),
             Arc::new(MockEntityCreator::new()),
         ));
@@ -454,7 +498,7 @@ mod tests {
 
     #[tokio::test]
     async fn get_entity_unregistered_type_returns_not_found() {
-        let svc = EntityServiceImpl::new(make_host_with_mocks(
+        let svc = EntityServiceImpl::unenforced(make_host_with_mocks(
             Arc::new(MockEntityFetcher::new()),
             Arc::new(MockEntityCreator::new()),
         ));
@@ -484,7 +528,7 @@ mod tests {
         fetcher.insert(Uuid::new_v4(), json!({"name": "Order #1"}));
         fetcher.insert(Uuid::new_v4(), json!({"name": "Order #2"}));
 
-        let svc = EntityServiceImpl::new(make_host_with_mocks(
+        let svc = EntityServiceImpl::unenforced(make_host_with_mocks(
             fetcher,
             Arc::new(MockEntityCreator::new()),
         ));
@@ -510,7 +554,7 @@ mod tests {
             fetcher.insert(Uuid::new_v4(), json!({"name": format!("Order #{}", i)}));
         }
 
-        let svc = EntityServiceImpl::new(make_host_with_mocks(
+        let svc = EntityServiceImpl::unenforced(make_host_with_mocks(
             fetcher,
             Arc::new(MockEntityCreator::new()),
         ));
@@ -534,7 +578,7 @@ mod tests {
 
     #[tokio::test]
     async fn list_entities_unknown_type_returns_not_found() {
-        let svc = EntityServiceImpl::new(make_host_with_mocks(
+        let svc = EntityServiceImpl::unenforced(make_host_with_mocks(
             Arc::new(MockEntityFetcher::new()),
             Arc::new(MockEntityCreator::new()),
         ));
@@ -557,7 +601,7 @@ mod tests {
 
     #[tokio::test]
     async fn create_entity_valid_request_returns_data() {
-        let svc = EntityServiceImpl::new(make_host_with_mocks(
+        let svc = EntityServiceImpl::unenforced(make_host_with_mocks(
             Arc::new(MockEntityFetcher::new()),
             Arc::new(MockEntityCreator::new()),
         ));
@@ -590,7 +634,7 @@ mod tests {
         let bus = host.event_bus().expect("event bus should be configured");
         let mut rx = bus.subscribe();
 
-        let svc = EntityServiceImpl::new(host);
+        let svc = EntityServiceImpl::unenforced(host);
 
         let data = super::super::convert::json_to_struct(&json!({"name": "Evented Order"}));
         svc.create_entity(Request::new(CreateEntityRequest {
@@ -607,7 +651,7 @@ mod tests {
 
     #[tokio::test]
     async fn create_entity_no_data_uses_empty_map() {
-        let svc = EntityServiceImpl::new(make_host_with_mocks(
+        let svc = EntityServiceImpl::unenforced(make_host_with_mocks(
             Arc::new(MockEntityFetcher::new()),
             Arc::new(MockEntityCreator::new()),
         ));
@@ -641,7 +685,7 @@ mod tests {
             .insert(id, json!({"id": id.to_string(), "name": "Old"}));
 
         let creator = Arc::new(MockEntityCreator::with_store(store));
-        let svc = EntityServiceImpl::new(make_host_with_mocks(
+        let svc = EntityServiceImpl::unenforced(make_host_with_mocks(
             Arc::new(MockEntityFetcher::new()),
             creator,
         ));
@@ -662,7 +706,7 @@ mod tests {
 
     #[tokio::test]
     async fn update_entity_invalid_uuid_returns_invalid_argument() {
-        let svc = EntityServiceImpl::new(make_host_with_mocks(
+        let svc = EntityServiceImpl::unenforced(make_host_with_mocks(
             Arc::new(MockEntityFetcher::new()),
             Arc::new(MockEntityCreator::new()),
         ));
@@ -693,7 +737,7 @@ mod tests {
             .insert(id, json!({"id": id.to_string()}));
 
         let creator = Arc::new(MockEntityCreator::with_store(store));
-        let svc = EntityServiceImpl::new(make_host_with_mocks(
+        let svc = EntityServiceImpl::unenforced(make_host_with_mocks(
             Arc::new(MockEntityFetcher::new()),
             creator,
         ));
@@ -717,7 +761,7 @@ mod tests {
         let bus = host.event_bus().expect("event bus should be configured");
         let mut rx = bus.subscribe();
 
-        let svc = EntityServiceImpl::new(host);
+        let svc = EntityServiceImpl::unenforced(host);
         let id = Uuid::new_v4();
 
         svc.delete_entity(Request::new(DeleteEntityRequest {
@@ -730,5 +774,82 @@ mod tests {
         let envelope = rx.try_recv().expect("should have received a delete event");
         assert_eq!(envelope.event.action(), "deleted");
         assert_eq!(envelope.event.entity_type(), Some("order"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Per-operation policies (armed host)
+    // -----------------------------------------------------------------------
+
+    fn armed_host(create: &str) -> Arc<ServerHost> {
+        let mut config = test_config();
+        config.entities[0].auth.create = create.to_string();
+        let mut fetchers: HashMap<String, Arc<dyn EntityFetcher>> = HashMap::new();
+        fetchers.insert("order".to_string(), Arc::new(MockEntityFetcher::new()));
+        let mut creators: HashMap<String, Arc<dyn EntityCreator>> = HashMap::new();
+        creators.insert("order".to_string(), Arc::new(MockEntityCreator::new()));
+        Arc::new(
+            ServerHost::from_builder_components(
+                Arc::new(InMemoryLinkService::new()),
+                config,
+                EntityRegistry::new(),
+                fetchers,
+                creators,
+            )
+            .expect("should build host"),
+        )
+    }
+
+    fn create_as(ctx: Option<crate::core::auth::AuthContext>) -> Request<CreateEntityRequest> {
+        let mut req = Request::new(CreateEntityRequest {
+            entity_type: "order".to_string(),
+            data: Some(json_to_struct(&json!({"name": "x"}))),
+        });
+        if let Some(ctx) = ctx {
+            req.extensions_mut().insert(ctx);
+        }
+        req
+    }
+
+    #[tokio::test]
+    async fn grpc_create_denied_without_role() {
+        use crate::core::auth::AuthContext;
+        let svc = EntityServiceImpl::new(armed_host("role:admin"));
+
+        let anon = svc.create_entity(create_as(None)).await.unwrap_err();
+        assert_eq!(anon.code(), Code::PermissionDenied);
+        assert!(anon.message().contains("order"), "{}", anon.message());
+
+        let plain = AuthContext::User {
+            user_id: Uuid::from_u128(1),
+            tenant_id: Uuid::from_u128(2),
+            roles: vec!["reader".into()],
+        };
+        let st = svc.create_entity(create_as(Some(plain))).await.unwrap_err();
+        assert_eq!(st.code(), Code::PermissionDenied);
+        // The JSON envelope of the contract error travels in the details.
+        let details: serde_json::Value = serde_json::from_slice(st.details()).unwrap();
+        assert_eq!(details["code"], "this.auth.forbidden");
+
+        let admin = AuthContext::User {
+            user_id: Uuid::from_u128(1),
+            tenant_id: Uuid::from_u128(2),
+            roles: vec!["admin".into()],
+        };
+        assert!(svc.create_entity(create_as(Some(admin))).await.is_ok());
+
+        // Default policy (`authenticated`) still guards reads.
+        let list = svc
+            .list_entities(Request::new(ListEntitiesRequest {
+                entity_type: "order".to_string(),
+                limit: 0,
+                offset: 0,
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(list.code(), Code::PermissionDenied);
+
+        // Explicit opt-out keeps the historical behavior.
+        let open = EntityServiceImpl::unenforced(armed_host("role:admin"));
+        assert!(open.create_entity(create_as(None)).await.is_ok());
     }
 }

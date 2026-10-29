@@ -32,6 +32,9 @@
 //! ## Feature gates
 //! - `wami` — enables `WamiAuthProvider` (Ed25519 JWT verification)
 
+pub mod descriptor_policy;
+pub mod surface;
+
 #[cfg(feature = "wami")]
 pub mod sts;
 #[cfg(feature = "wami")]
@@ -503,7 +506,17 @@ impl AuthPolicy {
                 let name = s.strip_prefix("owner_or_resolver:").unwrap().to_string();
                 AuthPolicy::Or(vec![AuthPolicy::Owner, AuthPolicy::Resolver(name)])
             }
-            _ => AuthPolicy::Authenticated, // Default
+            _ => {
+                // Historical fail-open fallback, kept for compatibility of this
+                // function only. Enforcement paths parse with `PolicyExpr::parse`
+                // (unknown token = refusal), see `descriptor_policy::parse_declared`.
+                tracing::warn!(
+                    policy = s,
+                    "unknown policy token: `parse_policy` falls back to `authenticated` \
+                     (enforcement refuses it)"
+                );
+                AuthPolicy::Authenticated
+            }
         }
     }
 }
@@ -517,6 +530,36 @@ pub trait AuthProvider: Send + Sync {
     /// This keeps the trait dyn-compatible and Send-safe.
     async fn extract_context(&self, headers: &HeaderMap) -> Result<AuthContext>;
 
+    /// Extract the auth context from **gRPC metadata** (`authorization: Bearer …`).
+    ///
+    /// Default: gRPC metadata are HTTP/2 headers, so they are handed to
+    /// [`AuthProvider::extract_context`] — one implementation of trust for every
+    /// protocol. Override only if the provider reads binary (`-bin`) metadata.
+    #[cfg(feature = "grpc")]
+    async fn extract_context_from_metadata(
+        &self,
+        metadata: &tonic::metadata::MetadataMap,
+    ) -> Result<AuthContext> {
+        let headers = metadata.clone().into_headers();
+        self.extract_context(&headers).await
+    }
+
+    /// Extract the auth context from a **WebSocket handshake**.
+    ///
+    /// Browsers cannot set `Authorization` on a WebSocket upgrade: when the header is
+    /// absent, the token may come from the `this_token` cookie or from the
+    /// `access_token` query parameter, and is verified exactly like a bearer header
+    /// (default implementation: moved into `Authorization`, then
+    /// [`AuthProvider::extract_context`]). An explicit header always wins.
+    async fn extract_context_from_handshake(
+        &self,
+        headers: &HeaderMap,
+        query: Option<&str>,
+    ) -> Result<AuthContext> {
+        let headers = handshake_headers(headers, query);
+        self.extract_context(&headers).await
+    }
+
     /// Check if user is owner of a resource
     async fn is_owner(
         &self,
@@ -527,6 +570,43 @@ pub trait AuthProvider: Send + Sync {
 
     /// Check if user has a role
     async fn has_role(&self, user_id: &Uuid, role: &str) -> Result<bool>;
+}
+
+/// Name of the session cookie that carries a token (same as the REST cookie layer).
+pub const TOKEN_COOKIE: &str = "this_token";
+
+/// Headers of a WebSocket handshake, with the token moved into `Authorization` when
+/// the header is absent: cookie `this_token` first, then query `access_token`.
+pub fn handshake_headers(headers: &HeaderMap, query: Option<&str>) -> HeaderMap {
+    let mut out = headers.clone();
+    let has_bearer = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.starts_with("Bearer ") && !v[7..].trim().is_empty());
+    if has_bearer {
+        return out;
+    }
+    let from_cookie = headers
+        .get_all(axum::http::header::COOKIE)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .flat_map(|c| c.split(';'))
+        .find_map(|c| {
+            let (n, v) = c.split_once('=')?;
+            (n.trim() == TOKEN_COOKIE && !v.trim().is_empty()).then(|| v.trim().to_string())
+        });
+    let from_query = || {
+        query?.split('&').find_map(|kv| {
+            let (k, v) = kv.split_once('=')?;
+            (k == "access_token" && !v.is_empty()).then(|| v.to_string())
+        })
+    };
+    if let Some(token) = from_cookie.or_else(from_query)
+        && let Ok(v) = axum::http::HeaderValue::from_str(&format!("Bearer {token}"))
+    {
+        out.insert(axum::http::header::AUTHORIZATION, v);
+    }
+    out
 }
 
 /// Default no-auth provider (for development)
