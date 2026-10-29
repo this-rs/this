@@ -15,6 +15,25 @@ use std::sync::Arc;
 use tonic::{Request, Response, Status};
 use uuid::Uuid;
 
+/// Request metadata carrying the list filter (REST `?filter=` grammar, JSON object).
+pub const FILTER_METADATA: &str = "this-filter";
+/// Request metadata carrying the list sort (REST `?sort=` grammar).
+pub const SORT_METADATA: &str = "this-sort";
+
+/// A write failure: a `ContractError` (validation, business code) keeps its code and kind
+/// (`this.validation.failed` → `INVALID_ARGUMENT`); anything else stays the historical
+/// `INTERNAL` with its message.
+fn write_error(e: &anyhow::Error, op: &str) -> Status {
+    if e.chain().any(|c| {
+        c.downcast_ref::<crate::descriptor::ContractError>()
+            .is_some()
+    }) {
+        crate::core::errors::to_status(crate::core::errors::from_anyhow(e))
+    } else {
+        Status::internal(format!("Failed to {op} entity: {e}"))
+    }
+}
+
 /// gRPC Entity Service implementation
 ///
 /// Delegates all operations to the `ServerHost`'s entity fetchers and creators.
@@ -85,9 +104,41 @@ impl EntityService for EntityServiceImpl {
         &self,
         request: Request<ListEntitiesRequest>,
     ) -> Result<Response<ListEntitiesResponse>, Status> {
+        // Typed filters (validation stream): `this-filter` / `this-sort` metadata, same
+        // grammar as REST `?filter=` / `?sort=`. Present → checked against the descriptor
+        // (strict without one), applied BEFORE pagination; malformed → INVALID_ARGUMENT.
+        let meta = |k: &str| {
+            request
+                .metadata()
+                .get(k)
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_string)
+        };
+        let (filter, sort) = (meta(FILTER_METADATA), meta(SORT_METADATA));
         let req = request.into_inner();
 
         let fetcher = self.get_fetcher(&req.entity_type)?;
+
+        if filter.is_some() || sort.is_some() {
+            let descriptors = self.host.descriptors();
+            let desc = descriptors.entity(&req.entity_type).map(|(_, d)| d);
+            let q = crate::core::query::query_from_args(
+                desc,
+                filter.map(serde_json::Value::String),
+                sort.as_deref(),
+                u32::try_from(req.limit).ok(),
+                u32::try_from(req.offset).ok(),
+            )
+            .map_err(crate::core::errors::to_status)?;
+            let (rows, total) = fetcher
+                .list_query(&q)
+                .await
+                .map_err(|e| Status::internal(format!("Failed to list entities: {}", e)))?;
+            return Ok(Response::new(ListEntitiesResponse {
+                entities: rows.iter().map(json_to_struct).collect(),
+                total: i32::try_from(total).unwrap_or(i32::MAX),
+            }));
+        }
 
         let limit = if req.limit > 0 { Some(req.limit) } else { None };
         let offset = if req.offset > 0 {
@@ -127,7 +178,7 @@ impl EntityService for EntityServiceImpl {
         let result = creator
             .create_from_json(data)
             .await
-            .map_err(|e| Status::internal(format!("Failed to create entity: {}", e)))?;
+            .map_err(|e| write_error(&e, "create"))?;
 
         // Publish event if event bus is configured
         if let Some(ref bus) = self.host.event_bus
@@ -168,7 +219,7 @@ impl EntityService for EntityServiceImpl {
         let result = creator
             .update_from_json(&entity_id, data)
             .await
-            .map_err(|e| Status::internal(format!("Failed to update entity: {}", e)))?;
+            .map_err(|e| write_error(&e, "update"))?;
 
         // Publish event if event bus is configured
         if let Some(ref bus) = self.host.event_bus {
