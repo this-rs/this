@@ -132,9 +132,24 @@ impl SchemaGenerator {
     }
 
     /// Generate the complete SDL schema
+    ///
+    /// Derived from the LIVE catalog (hot-loaded modules included) and cached per catalog
+    /// generation: a publication invalidates it.
     pub async fn generate_sdl(&self) -> String {
+        let generation = self.host.catalog().generation;
+        if let Some(cached) = self.host.catalog.derived("graphql_sdl", generation) {
+            return (*cached).clone();
+        }
+        let sdl = self.derive_sdl().await;
+        self.host
+            .catalog
+            .store_derived("graphql_sdl", generation, Arc::new(sdl.clone()));
+        sdl
+    }
+
+    async fn derive_sdl(&self) -> String {
         let mut sdl = String::new();
-        let set = self.host.descriptors();
+        let set = self.host.catalog().descriptors.clone();
         let described = (!set.is_empty()).then(|| described_sdl(&set, &self.host_type_names()));
 
         // Scalars and enums of the described entities (none without descriptors: the
@@ -148,9 +163,9 @@ impl SchemaGenerator {
         }
 
         // Generate entity types
-        for entity_type in self.host.entity_types() {
+        for entity_type in self.entity_types() {
             if let Ok(type_def) = self
-                .generate_entity_type(entity_type, described.as_deref())
+                .generate_entity_type(&entity_type, described.as_deref())
                 .await
             {
                 sdl.push_str(&type_def);
@@ -202,6 +217,21 @@ impl SchemaGenerator {
         sdl
     }
 
+    /// Entity types of the live catalog (sorted).
+    fn entity_types(&self) -> Vec<String> {
+        self.host
+            .catalog()
+            .entity_types()
+            .into_iter()
+            .map(String::from)
+            .collect()
+    }
+
+    /// Links configuration of the live catalog.
+    fn links_config(&self) -> Arc<crate::config::LinksConfig> {
+        self.host.catalog().links_config.clone()
+    }
+
     /// Type names this generator defines besides the derived ones (entity object types,
     /// subscription and notification types), sorted: a described enum must not take them.
     fn host_type_names(&self) -> Vec<String> {
@@ -235,7 +265,7 @@ impl SchemaGenerator {
             for line in fields {
                 type_def.push_str(&format!("  {}\n", line));
             }
-        } else if let Some(fetcher) = self.host.entity_fetchers.get(entity_type) {
+        } else if let Some(fetcher) = self.host.schema_fetcher(entity_type) {
             // Legacy inference: sample entity first
             let mut sample = fetcher.get_sample_entity().await?;
 
@@ -277,10 +307,10 @@ impl SchemaGenerator {
     fn generate_query_root(&self) -> String {
         let mut query = String::from("type Query {\n");
 
-        for entity_type in self.host.entity_types() {
-            let type_name = Self::to_pascal_case(entity_type);
-            let singular = entity_type;
-            let plural = self.get_plural(entity_type);
+        for entity_type in self.entity_types() {
+            let type_name = Self::to_pascal_case(&entity_type);
+            let singular = &entity_type;
+            let plural = self.get_plural(&entity_type);
 
             // Single query: order(id: ID!): Order
             query.push_str(&format!("  {}(id: ID!): {}\n", singular, type_name));
@@ -309,8 +339,8 @@ impl SchemaGenerator {
     fn generate_mutation_root(&self) -> String {
         let mut mutation = String::from("type Mutation {\n");
 
-        for entity_type in self.host.entity_types() {
-            let type_name = Self::to_pascal_case(entity_type);
+        for entity_type in self.entity_types() {
+            let type_name = Self::to_pascal_case(&entity_type);
 
             // CREATE: createOrder(data: JSON!): Order!
             mutation.push_str(&format!(
@@ -335,7 +365,7 @@ impl SchemaGenerator {
 
         // Add typed link mutations for each entity combination
         mutation.push_str("\n  # Typed link mutations\n");
-        for link_config in &self.host.config.links {
+        for link_config in &self.links_config().links {
             let source_type = Self::to_pascal_case(&link_config.source_type);
             let target_type = Self::to_pascal_case(&link_config.target_type);
 
@@ -472,7 +502,7 @@ impl SchemaGenerator {
     fn get_relations_for(&self, entity_type: &str) -> Vec<RelationInfo> {
         let mut relations = Vec::new();
 
-        for link_def in &self.host.config.links {
+        for link_def in &self.links_config().links {
             // Forward relation: order -> invoices
             if link_def.source_type == entity_type {
                 relations.push(RelationInfo {
@@ -505,8 +535,7 @@ impl SchemaGenerator {
         if let Some((_, desc)) = self.host.descriptors().entity(entity_type) {
             return desc.plural.clone();
         }
-        self.host
-            .config
+        self.links_config()
             .entities
             .iter()
             .find(|e| e.singular == entity_type)
@@ -1475,6 +1504,70 @@ mod tests {
         assert!(sdl.contains("  total: Int!\n"), "{sdl}");
         assert!(sdl.contains("  note: String\n"), "{sdl}");
         assert!(!sdl.contains("scalar "), "{sdl}");
+    }
+
+    // -----------------------------------------------------------------------
+    // Live catalog: derivation follows publications, cached per generation
+    // -----------------------------------------------------------------------
+
+    #[cfg(feature = "graphql")]
+    struct Counting(std::sync::atomic::AtomicUsize);
+
+    #[cfg(feature = "graphql")]
+    #[async_trait]
+    impl EntityFetcher for Counting {
+        async fn fetch_as_json(&self, _id: &Uuid) -> anyhow::Result<Value> {
+            Ok(serde_json::json!({}))
+        }
+        async fn get_sample_entity(&self) -> anyhow::Result<Value> {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(serde_json::json!({"id": "x", "label": "a"}))
+        }
+    }
+
+    #[cfg(feature = "graphql")]
+    #[tokio::test]
+    async fn live_sdl_follows_catalog_and_is_cached_by_generation() {
+        use std::sync::atomic::Ordering::SeqCst;
+        let counter = Arc::new(Counting(Default::default()));
+        let host = build_host_with_links(vec![("order", "orders", Some(counter.clone()))], vec![]);
+        let generator = SchemaGenerator::new(host.clone());
+        let first = generator.generate_sdl().await;
+        let again = generator.generate_sdl().await;
+        assert_eq!(first, again);
+        assert_eq!(
+            counter.0.load(SeqCst),
+            1,
+            "second call served from the cache"
+        );
+
+        // A publication (new generation) invalidates the cache AND is read by the SDL:
+        // `widget` is in no registry, only in the published catalog.
+        host.catalog.publish({
+            let mut c = (*host.catalog.load()).clone();
+            let mut plurals = (*c.plurals).clone();
+            plurals.push(("widget".into(), "widgets".into()));
+            plurals.sort();
+            c.plurals = Arc::new(plurals);
+            let mut f = (*c.fetchers).clone();
+            f.insert(
+                "widget".into(),
+                Arc::new(MockFetcher::with_sample(
+                    serde_json::json!({"id": "w", "size": 3}),
+                )),
+            );
+            c.fetchers = Arc::new(f);
+            c
+        });
+        let after = generator.generate_sdl().await;
+        assert!(!first.contains("type Widget"), "{first}");
+        assert!(after.contains("type Widget"), "{after}");
+        assert!(after.contains("widgets"), "{after}");
+        assert_eq!(
+            counter.0.load(SeqCst),
+            2,
+            "re-derived once for the new generation"
+        );
     }
 }
 
