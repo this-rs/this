@@ -3,6 +3,7 @@ flowchart LR
 %% PROUVE (flux schema, branche md/schema) : derive graphql / proto / json_schema / openapi (cargo test -p this-descriptor --all-features, 88 tests),
 %%   generateurs this-rs descripteur d'abord + repli sample, cache SDL, routes /_this (cargo test -p this-rs --lib --features graphql,grpc, 1218 tests).
 %% SOURCES LUES : crates/this-descriptor/src/{derive,entity,field,module}.rs, src/server/exposure/{graphql/schema_generator,grpc/proto_generator,rest/mod}.rs, src/entities/macros.rs.
+%% RELECTURE (md/schema) : required = regle du moteur (derive_required_matches_engine), tags hors plage refuses (proto_refuses_out_of_range_tags), overlays gardent le tag de base, SDL validee par graphql_parser (described_sdl_parses_with_graphql_parser), /_this juge Descriptor read authenticated (descriptor_export_requires_authentication).
 %% NON ETABLI : application du lock aux modules compiles (compose ne porte pas de tags, flux cli), fil gRPC type (le fil servi reste Struct), modules charges a chaud absents de entity_types.
     classDef ok       fill:#2ea04333,stroke:#2ea043,stroke-width:2px
     classDef todo     fill:#f0a02033,stroke:#d98a00,stroke-width:2px
@@ -19,11 +20,11 @@ flowchart LR
 
     subgraph DER["this_descriptor::derive, pur, wasm32"]
         direction TB
-        AT["✅ proto::assign_tags<br/>ordre des noms, append-only"]:::ok
+        AT["✅ proto::assign_tags<br/>ordre des noms, append-only<br/>overlay = tag de base"]:::ok
         PR["✅ proto::entity_proto<br/>tri par tag, reserved 1..15 + retires"]:::ok
         GQ["✅ graphql::SdlBuilder<br/>optional = nullable, enums, inputs"]:::ok
-        JS["✅ json_schema::write_schema<br/>required = required_on"]:::ok
-        OA["✅ json_schema::openapi<br/>CRUD minimal 3.1"]:::ok
+        JS["✅ json_schema::write_schema<br/>required = payload_required, regle du moteur"]:::ok
+        OA["✅ json_schema::openapi<br/>CRUD minimal 3.1, statuts 2XX"]:::ok
     end
     LOCK --> AT
     SET ==> PR
@@ -37,6 +38,8 @@ flowchart LR
         PG["✅ ProtoGenerator<br/>Lenient : champ sans tag commente"]:::ok
         EX["✅ GET /_this/descriptors, /schema, /openapi.json"]:::ok
     end
+    AUTHZ["✅ Authorization::requirement<br/>/_this = Descriptor read, authenticated"]:::ok
+    AUTHZ ==>|"garde, sinon 403 pour tous"| EX
     GQ ==> SG
     PR ==> PG
     JS ==> EX

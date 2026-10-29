@@ -11,8 +11,13 @@
 //! published at runtime is exported without rebuilding the router. Descriptors carry no
 //! secret (no texts, no data): the same exposure level as `/graphql/schema` and
 //! `/grpc/proto`. The `_this` prefix cannot collide with an entity plural (identifiers
-//! start with a letter). The authorization middleware abstains on these routes (unknown to
-//! it): the global auth layer decides, as for `/health`.
+//! start with a letter).
+//!
+//! Authorization: when the REST authorization layer is armed (the default), `GET`/`HEAD`
+//! on `/_this/*` is judged as `Descriptor · read` with the `authenticated` policy
+//! (`Authorization::requirement`); any other method abstains, i.e. is refused. Without
+//! that rule the routes abstained and an armed server refused them to every caller
+//! (`descriptor_routes_do_not_shadow_link_routes`, `descriptor_export_requires_authentication`).
 
 use crate::core::errors::ApiError;
 use crate::descriptor::derive;
