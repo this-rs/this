@@ -342,6 +342,48 @@ impl ServerHost {
         )
     }
 
+    /// Current snapshot of the live catalog (one atomic load; keep it for the request).
+    pub fn catalog(&self) -> Arc<crate::server::catalog::HostCatalog> {
+        self.catalog.load()
+    }
+
+    /// THE access to the fetcher of `entity` for `ctx` running `op`: the policy is judged
+    /// (same evaluator as REST), then the fetcher comes from the LIVE catalog. GraphQL,
+    /// gRPC, WebSocket and links reach fetchers only through it (or through
+    /// `SurfaceGuard::fetcher`, which shares the evaluation of one request).
+    #[cfg(any(feature = "graphql", feature = "grpc", feature = "websocket"))]
+    #[allow(clippy::result_large_err)] // `ContractError` is the cross-surface contract
+    pub fn guarded_fetcher(
+        &self,
+        entity: &str,
+        op: crate::descriptor::Operation,
+        ctx: &crate::core::auth::AuthContext,
+    ) -> Result<Arc<dyn EntityFetcher>, crate::descriptor::ContractError> {
+        crate::server::exposure::SurfaceGuard::for_host(self, ctx.clone(), "host")
+            .fetcher(self, entity, op, None)
+    }
+
+    /// Creator counterpart of [`ServerHost::guarded_fetcher`].
+    #[cfg(any(feature = "graphql", feature = "grpc", feature = "websocket"))]
+    #[allow(clippy::result_large_err)]
+    pub fn guarded_creator(
+        &self,
+        entity: &str,
+        op: crate::descriptor::Operation,
+        ctx: &crate::core::auth::AuthContext,
+    ) -> Result<Arc<dyn EntityCreator>, crate::descriptor::ContractError> {
+        crate::server::exposure::SurfaceGuard::for_host(self, ctx.clone(), "host")
+            .creator(self, entity, op, None)
+    }
+
+    /// Fetcher for SCHEMA DERIVATION only (SDL, proto: sample entity to infer field names
+    /// and types). No caller, no policy: the schema endpoints are descriptive. Never use it
+    /// to serve data (the coverage test `no_entity_fetchers_access_outside_guard` pins it).
+    #[cfg(any(feature = "graphql", feature = "grpc"))]
+    pub(crate) fn schema_fetcher(&self, entity: &str) -> Option<Arc<dyn EntityFetcher>> {
+        self.catalog.load().fetchers.get(entity).cloned()
+    }
+
     /// Active descriptors (current snapshot).
     pub fn descriptors(&self) -> Arc<crate::descriptor::DescriptorSet> {
         self.catalog.load().descriptors.clone()

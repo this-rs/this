@@ -77,14 +77,6 @@ fn bad_request(reason: String) -> Status {
     to_status(crate::core::errors::bad_request(reason))
 }
 
-/// `NOT_FOUND` `this.entity.not_found` for an entity TYPE the host does not serve.
-fn unknown_type(entity_type: &str) -> Status {
-    to_status(crate::core::errors::not_found(
-        entity_type,
-        format!("entity type '{entity_type}' not registered"),
-    ))
-}
-
 /// gRPC Entity Service implementation
 ///
 /// Delegates all operations to the `ServerHost`'s entity fetchers and creators.
@@ -130,28 +122,30 @@ impl EntityServiceImpl {
         super::identity::guard_of(&self.host, request, self.enforce).await
     }
 
-    /// Get the entity fetcher for the given type, or return a gRPC NOT_FOUND status
+    /// Fetcher of the live catalog, behind the policy of `op` (single guard).
     fn get_fetcher(
         &self,
+        guard: &SurfaceGuard,
         entity_type: &str,
+        op: Operation,
+        resource: Option<&Uuid>,
     ) -> Result<Arc<dyn crate::core::EntityFetcher>, Status> {
-        self.host
-            .entity_fetchers
-            .get(entity_type)
-            .cloned()
-            .ok_or_else(|| unknown_type(entity_type))
+        guard
+            .fetcher(&self.host, entity_type, op, resource)
+            .map_err(to_status)
     }
 
-    /// Get the entity creator for the given type, or return a gRPC NOT_FOUND status
+    /// Creator counterpart of [`Self::get_fetcher`].
     fn get_creator(
         &self,
+        guard: &SurfaceGuard,
         entity_type: &str,
+        op: Operation,
+        resource: Option<&Uuid>,
     ) -> Result<Arc<dyn crate::core::EntityCreator>, Status> {
-        self.host
-            .entity_creators
-            .get(entity_type)
-            .cloned()
-            .ok_or_else(|| unknown_type(entity_type))
+        guard
+            .creator(&self.host, entity_type, op, resource)
+            .map_err(to_status)
     }
 }
 
@@ -164,18 +158,16 @@ impl EntityServiceImpl {
     ) -> Result<Response<EntityResponse>, Status> {
         let guard = self.guard(&request).await?;
         let req = request.into_inner();
-        guard
-            .check(
-                &req.entity_type,
-                Operation::Get,
-                Uuid::parse_str(&req.entity_id).ok().as_ref(),
-            )
-            .map_err(to_status)?;
 
         let entity_id = Uuid::parse_str(&req.entity_id)
             .map_err(|e| bad_request(format!("Invalid entity_id: {e}")))?;
 
-        let fetcher = self.get_fetcher(&req.entity_type)?;
+        let fetcher = self.get_fetcher(
+            &guard,
+            &req.entity_type,
+            Operation::Get,
+            Uuid::parse_str(&req.entity_id).ok().as_ref(),
+        )?;
 
         let json = fetcher
             .fetch_as_json(&entity_id)
@@ -198,11 +190,8 @@ impl EntityServiceImpl {
         let filter = query_metadata(request.metadata(), FILTER_METADATA)?;
         let sort = query_metadata(request.metadata(), SORT_METADATA)?;
         let req = request.into_inner();
-        guard
-            .check(&req.entity_type, Operation::List, None)
-            .map_err(to_status)?;
 
-        let fetcher = self.get_fetcher(&req.entity_type)?;
+        let fetcher = self.get_fetcher(&guard, &req.entity_type, Operation::List, None)?;
 
         if filter.is_some() || sort.is_some() {
             let descriptors = self.host.descriptors();
@@ -252,11 +241,8 @@ impl EntityServiceImpl {
     ) -> Result<Response<EntityResponse>, Status> {
         let guard = self.guard(&request).await?;
         let req = request.into_inner();
-        guard
-            .check(&req.entity_type, Operation::Create, None)
-            .map_err(to_status)?;
 
-        let creator = self.get_creator(&req.entity_type)?;
+        let creator = self.get_creator(&guard, &req.entity_type, Operation::Create, None)?;
 
         let data = req
             .data
@@ -294,18 +280,16 @@ impl EntityServiceImpl {
     ) -> Result<Response<EntityResponse>, Status> {
         let guard = self.guard(&request).await?;
         let req = request.into_inner();
-        guard
-            .check(
-                &req.entity_type,
-                Operation::Update,
-                Uuid::parse_str(&req.entity_id).ok().as_ref(),
-            )
-            .map_err(to_status)?;
 
         let entity_id = Uuid::parse_str(&req.entity_id)
             .map_err(|e| bad_request(format!("Invalid entity_id: {e}")))?;
 
-        let creator = self.get_creator(&req.entity_type)?;
+        let creator = self.get_creator(
+            &guard,
+            &req.entity_type,
+            Operation::Update,
+            Uuid::parse_str(&req.entity_id).ok().as_ref(),
+        )?;
 
         let data = req
             .data
@@ -340,18 +324,16 @@ impl EntityServiceImpl {
     ) -> Result<Response<DeleteEntityResponse>, Status> {
         let guard = self.guard(&request).await?;
         let req = request.into_inner();
-        guard
-            .check(
-                &req.entity_type,
-                Operation::Delete,
-                Uuid::parse_str(&req.entity_id).ok().as_ref(),
-            )
-            .map_err(to_status)?;
 
         let entity_id = Uuid::parse_str(&req.entity_id)
             .map_err(|e| bad_request(format!("Invalid entity_id: {e}")))?;
 
-        let creator = self.get_creator(&req.entity_type)?;
+        let creator = self.get_creator(
+            &guard,
+            &req.entity_type,
+            Operation::Delete,
+            Uuid::parse_str(&req.entity_id).ok().as_ref(),
+        )?;
 
         creator
             .delete(&entity_id)

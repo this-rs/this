@@ -42,12 +42,25 @@ impl ProtoGenerator {
     /// inference from a JSON sample, whose numbers follow the sample's key order and are
     /// therefore NOT stable.
     pub async fn generate_proto(&self) -> String {
+        // Live catalog: the proto follows hot-loaded modules; derived once per generation.
+        let catalog = self.host.catalog();
+        if let Some(cached) = self.host.catalog.derived("grpc_proto", catalog.generation) {
+            return (*cached).clone();
+        }
+        let proto = self.derive_proto(&catalog).await;
+        self.host
+            .catalog
+            .store_derived("grpc_proto", catalog.generation, Arc::new(proto.clone()));
+        proto
+    }
+
+    async fn derive_proto(&self, catalog: &crate::server::catalog::HostCatalog) -> String {
         let mut body = String::new();
         let mut imports = BTreeSet::new();
-        let set = self.host.descriptors();
+        let set = catalog.descriptors.clone();
 
         // Generate messages and services for each entity type
-        for entity_type in self.host.entity_types() {
+        for entity_type in catalog.entity_types() {
             if let Some((_, desc)) = set.entity(entity_type) {
                 // Lenient never fails: untagged fields become comments.
                 if let Ok(p) = proto_derive::entity_proto(desc, proto_derive::TagMode::Lenient) {
@@ -81,7 +94,7 @@ impl ProtoGenerator {
         let pascal = to_pascal_case(entity_type);
 
         // Try to get sample entity to discover fields
-        let fields = if let Some(fetcher) = self.host.entity_fetchers.get(entity_type) {
+        let fields = if let Some(fetcher) = self.host.schema_fetcher(entity_type) {
             if let Ok(sample) = fetcher.get_sample_entity().await {
                 extract_fields_from_json(&sample)
             } else {
@@ -442,5 +455,53 @@ mod tests {
         assert!(p.contains("  double amount = 1;\n"), "{p}");
         assert!(p.contains("  string id = 2;\n"), "{p}");
         assert!(p.contains("service OrderService {"), "{p}");
+    }
+
+    #[tokio::test]
+    async fn proto_follows_catalog_publication_and_is_cached_by_generation() {
+        let host = Arc::new(
+            ServerHost::from_builder_components(
+                Arc::new(InMemoryLinkService::new()),
+                LinksConfig {
+                    entities: vec![EntityConfig {
+                        singular: "order".into(),
+                        plural: "orders".into(),
+                        auth: EntityAuthConfig::default(),
+                    }],
+                    links: vec![],
+                    validation_rules: None,
+                    events: None,
+                    sinks: None,
+                    auth: None,
+                },
+                EntityRegistry::new(),
+                HashMap::new(),
+                HashMap::new(),
+            )
+            .unwrap(),
+        );
+        // The registry is empty: nothing is served from the frozen host.
+        let generator = ProtoGenerator::new(host.clone());
+        assert!(!generator.generate_proto().await.contains("message Widget"));
+        assert!(
+            host.catalog.derived("grpc_proto", 0).is_some(),
+            "cached for generation 0"
+        );
+
+        host.catalog.publish({
+            let mut c = (*host.catalog.load()).clone();
+            c.plurals = Arc::new(vec![("widget".into(), "widgets".into())]);
+            let mut f = (*c.fetchers).clone();
+            f.insert("widget".into(), Arc::new(Sample(json!({"size": 3}))));
+            c.fetchers = Arc::new(f);
+            c
+        });
+        let after = generator.generate_proto().await;
+        assert!(after.contains("message Widget"), "{after}");
+        assert!(after.contains("service WidgetService"), "{after}");
+        assert!(
+            host.catalog.derived("grpc_proto", 0).is_none(),
+            "old generation invalidated"
+        );
     }
 }
