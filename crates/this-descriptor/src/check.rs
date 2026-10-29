@@ -528,6 +528,39 @@ mod tests {
     }
 
     #[test]
+    fn max_value_integral_bound_is_accepted_on_an_integer_field() {
+        use crate::field::{ValidatorRule, ValidatorSpec};
+        let with = |ty: FieldType, rule: ValidatorSpec| {
+            let mut f = FieldDesc::new("age", ty);
+            f.validators.push(ValidatorRule {
+                rule,
+                on: Applies::Always,
+            });
+            module_with(vec![f])
+        };
+        // `max_value(150)` in the macro arrives as f64: it must stay an integer bound.
+        for rule in [
+            ValidatorSpec::max_value_f64(150.0),
+            ValidatorSpec::min_value_f64(-3.0),
+        ] {
+            with(FieldType::I32, rule)
+                .check(&reg(), CheckProfile::Compiled)
+                .unwrap();
+        }
+        // A really fractional bound on an integer field stays refused; on a float field it is fine.
+        assert_eq!(
+            codes_of(
+                with(FieldType::I32, ValidatorSpec::max_value_f64(150.5))
+                    .check(&reg(), CheckProfile::Compiled)
+            ),
+            vec!["this.descriptor.validator_type"]
+        );
+        with(FieldType::F64, ValidatorSpec::max_value_f64(150.5))
+            .check(&reg(), CheckProfile::Compiled)
+            .unwrap();
+    }
+
+    #[test]
     fn check_accepts_untagged_fields() {
         let m = module_with(vec![FieldDesc::new("amount", FieldType::F64)]);
         m.check(&reg(), CheckProfile::Compiled).unwrap();

@@ -32,7 +32,7 @@ pub async fn resolve_mutation_field(
     }
 
     // Check for createAndLink mutation (e.g., "createInvoiceForOrder") - must be before create check
-    if field_name.starts_with("create") && field_name.contains("For") {
+    if utils::typed_link_operands(&host.config.links, field_name, "create", "For").is_some() {
         return link_mutations::create_and_link_mutation(host, guard, field).await;
     }
 
@@ -829,5 +829,102 @@ mod tests {
             .and_then(|d| d.get("markAllNotificationsAsRead"))
             .expect("should have result");
         assert_eq!(*count, json!(3));
+    }
+
+    // -----------------------------------------------------------------------
+    // Typed link mutations are derived from the declared links, not from the name
+    // -----------------------------------------------------------------------
+
+    fn host_with_for_names() -> Arc<ServerHost> {
+        let mk = |link_type: &str, source: &str, target: &str| LinkDefinition {
+            link_type: link_type.to_string(),
+            source_type: source.to_string(),
+            target_type: target.to_string(),
+            forward_route_name: format!("{target}s"),
+            reverse_route_name: format!("{source}s"),
+            description: None,
+            required_fields: None,
+            auth: None,
+        };
+        let config = LinksConfig {
+            entities: vec![],
+            links: vec![mk("sale_of", "for_sale", "tool")],
+            validation_rules: None,
+            events: None,
+            sinks: None,
+            auth: None,
+        };
+        let mut registry = EntityRegistry::new();
+        let mut creators: HashMap<String, Arc<dyn EntityCreator>> = HashMap::new();
+        let mut fetchers: HashMap<String, Arc<dyn EntityFetcher>> = HashMap::new();
+        for (s, p) in [
+            ("format", "formats"),
+            ("tool", "tools"),
+            ("for_sale", "for_sales"),
+        ] {
+            registry.register(Box::new(StubDescriptor::new(s, p)));
+            creators.insert(s.to_string(), Arc::new(MockCreator));
+            fetchers.insert(s.to_string(), Arc::new(MockFetcher));
+        }
+        Arc::new(
+            ServerHost::from_builder_components(
+                Arc::new(InMemoryLinkService::new()),
+                config,
+                registry,
+                fetchers,
+                creators,
+            )
+            .expect("host"),
+        )
+    }
+
+    #[tokio::test]
+    async fn create_x_for_y_is_derived_from_links_not_from_the_name() {
+        let executor = GraphQLExecutor::new(host_with_for_names()).await;
+
+        // `createFormat` contains "For" but is a plain create on `format`.
+        let r = executor
+            .execute(r#"mutation { createFormat(data: {n: 1}) { id } }"#, None)
+            .await
+            .expect("createFormat is an entity create, not createAndLink");
+        assert!(r["data"]["createFormat"]["id"].is_string(), "{r}");
+
+        // `createToolForForSale`: a declared link whose source itself contains "For".
+        let parent = Uuid::new_v4();
+        let q = format!(
+            r#"mutation {{ createToolForForSale(parentId: "{parent}", data: {{n: 1}}) {{ id }} }}"#
+        );
+        let r = executor
+            .execute(&q, None)
+            .await
+            .expect("typed name resolved through the declared link");
+        assert!(r["data"]["createToolForForSale"]["id"].is_string(), "{r}");
+    }
+
+    #[test]
+    fn typed_link_operands_only_match_declared_links() {
+        use super::super::utils::typed_link_operands;
+        let links = vec![LinkDefinition {
+            link_type: "sale_of".into(),
+            source_type: "for_sale".into(),
+            target_type: "tool".into(),
+            forward_route_name: String::new(),
+            reverse_route_name: String::new(),
+            description: None,
+            required_fields: None,
+            auth: None,
+        }];
+        assert_eq!(
+            typed_link_operands(&links, "createToolForForSale", "create", "For"),
+            Some(("tool".into(), "for_sale".into()))
+        );
+        assert_eq!(
+            typed_link_operands(&links, "createFormat", "create", "For"),
+            None
+        );
+        assert_eq!(
+            typed_link_operands(&links, "createToolForOrder", "create", "For"),
+            None
+        );
     }
 }
