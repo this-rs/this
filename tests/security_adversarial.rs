@@ -19,9 +19,7 @@ use tower::ServiceExt;
 use uuid::Uuid;
 
 use this::core::auth::{AuthContext, AuthProvider};
-use this::descriptor::{
-    EntityDesc, FieldDesc, FieldType, ModuleDescriptor, Operation, PolicyExpr,
-};
+use this::descriptor::{EntityDesc, FieldDesc, FieldType, ModuleDescriptor, Operation, PolicyExpr};
 use this::server::builder::ServerBuilder;
 use this::server::exposure::GraphQLExposure;
 use this::server::exposure::grpc::entity_service::EntityServiceImpl;
@@ -87,9 +85,15 @@ fn ledger() -> ModuleDescriptor {
 fn shop() -> ModuleDescriptor {
     let mut e = EntityDesc::new("item");
     e.fields.push(FieldDesc::new("qty", FieldType::I64));
-    e.fields.push(FieldDesc::new("code", FieldType::String).immutable());
-    e.fields.push(FieldDesc::new("audit", FieldType::String).read_only().optional());
-    e.fields.push(FieldDesc::new("note", FieldType::String).optional());
+    e.fields
+        .push(FieldDesc::new("code", FieldType::String).immutable());
+    e.fields.push(
+        FieldDesc::new("audit", FieldType::String)
+            .read_only()
+            .optional(),
+    );
+    e.fields
+        .push(FieldDesc::new("note", FieldType::String).optional());
     for op in Operation::CRUD {
         e.permissions.ops.insert(op, PolicyExpr::Authenticated);
     }
@@ -451,7 +455,8 @@ async fn grpc_probes_on_hot_loaded_admin_only_module_reach_nothing() {
     );
     // Entity type spelled differently.
     for t in ["Entry", "entries", "ENTRY", "entry ", "ledger.entry"] {
-        note(format!("list as `{t}`"),
+        note(
+            format!("list as `{t}`"),
             svc.list_entities(a.grpc(
                 "user",
                 ListEntitiesRequest {
@@ -502,7 +507,13 @@ async fn grpc_probes_on_hot_loaded_admin_only_module_reach_nothing() {
         .map(|r| format!("{:?}", r.into_inner())),
     );
     // Link service: jokers.
-    for (lt, et) in [("", ""), ("owns", ""), ("", "entry"), ("owns", "entry"), ("*", "")] {
+    for (lt, et) in [
+        ("", ""),
+        ("owns", ""),
+        ("", "entry"),
+        ("owns", "entry"),
+        ("*", ""),
+    ] {
         for by_target in [false, true] {
             let req = a.grpc(
                 "user",
@@ -517,7 +528,8 @@ async fn grpc_probes_on_hot_loaded_admin_only_module_reach_nothing() {
             } else {
                 links.find_links_by_source(req).await
             };
-            note(format!("find_links(by_target={by_target}, type={lt:?}, entity={et:?})"),
+            note(
+                format!("find_links(by_target={by_target}, type={lt:?}, entity={et:?})"),
                 r.map(|r| format!("{:?}", r.into_inner())),
             );
         }
@@ -610,10 +622,18 @@ async fn hot_load_closed_by_default_on_every_entry() {
             "/admin/modules",
             Some(json!({"manifest": serde_json::from_str::<Value>(&manifest).unwrap()})),
         ),
-        (Method::POST, "/admin/modules", Some(json!({"module": "ledger"}))),
+        (
+            Method::POST,
+            "/admin/modules",
+            Some(json!({"module": "ledger"})),
+        ),
         (Method::DELETE, "/admin/modules/ledger", None),
         (Method::DELETE, "/admin/modules/ledger/", None),
-        (Method::POST, "/admin/modules/", Some(json!({"module": "ledger"}))),
+        (
+            Method::POST,
+            "/admin/modules/",
+            Some(json!({"module": "ledger"})),
+        ),
     ] {
         let (s, v) = a.rest(m.clone(), uri, Some("root"), body).await;
         if s.is_success() {
@@ -700,7 +720,10 @@ async fn failed_load_and_failed_replace_leave_a_consistent_state() {
         "half-served after failed load: {s}"
     );
     let (s, _) = a.rest(Method::GET, "/entries", Some("root"), None).await;
-    assert!(s.is_client_error(), "half-served after failed load (root): {s}");
+    assert!(
+        s.is_client_error(),
+        "half-served after failed load (root): {s}"
+    );
 
     rt.load(ModuleSource::Manifest(ledger().to_json_pretty()))
         .await
@@ -728,10 +751,18 @@ async fn failed_load_and_failed_replace_leave_a_consistent_state() {
         "replace admitted a public policy in a manifest"
     );
     let (s, v) = a.rest(Method::GET, "/entries", Some("user"), None).await;
-    assert_eq!(s, StatusCode::FORBIDDEN, "policy widened by a failed replace: {v}");
+    assert_eq!(
+        s,
+        StatusCode::FORBIDDEN,
+        "policy widened by a failed replace: {v}"
+    );
     let (s, v) = a.rest(Method::GET, "/entries", Some("admin"), None).await;
     assert_eq!(s, StatusCode::OK, "{v}");
-    assert_eq!(v["data"].as_array().map(Vec::len), Some(1), "rows lost: {v}");
+    assert_eq!(
+        v["data"].as_array().map(Vec::len),
+        Some(1),
+        "rows lost: {v}"
+    );
 }
 
 /// (e) Validation of declarative writes: read-only, immutable, null, wrong types,
@@ -762,26 +793,67 @@ async fn declarative_writes_refuse_server_owned_immutable_null_and_mistyped() {
     let mut bypass: Vec<String> = vec![];
     // Create attempts that must be refused.
     for (label, body) in [
-        ("server id", json!({"name": "n", "qty": 1, "code": "c", "id": Uuid::new_v4()})),
-        ("created_at", json!({"name": "n", "qty": 1, "code": "c", "created_at": "1999-01-01T00:00:00Z"})),
-        ("updated_at", json!({"name": "n", "qty": 1, "code": "c", "updated_at": "1999-01-01T00:00:00Z"})),
-        ("deleted_at", json!({"name": "n", "qty": 1, "code": "c", "deleted_at": null})),
-        ("type", json!({"name": "n", "qty": 1, "code": "c", "type": "user"})),
-        ("tenant_id", json!({"name": "n", "qty": 1, "code": "c", "tenant_id": Uuid::new_v4()})),
-        ("read_only audit", json!({"name": "n", "qty": 1, "code": "c", "audit": "forged"})),
-        ("unknown key", json!({"name": "n", "qty": 1, "code": "c", "zzz": 1})),
-        ("null required", json!({"name": "n", "qty": null, "code": "c"})),
+        (
+            "server id",
+            json!({"name": "n", "qty": 1, "code": "c", "id": Uuid::new_v4()}),
+        ),
+        (
+            "created_at",
+            json!({"name": "n", "qty": 1, "code": "c", "created_at": "1999-01-01T00:00:00Z"}),
+        ),
+        (
+            "updated_at",
+            json!({"name": "n", "qty": 1, "code": "c", "updated_at": "1999-01-01T00:00:00Z"}),
+        ),
+        (
+            "deleted_at",
+            json!({"name": "n", "qty": 1, "code": "c", "deleted_at": null}),
+        ),
+        (
+            "type",
+            json!({"name": "n", "qty": 1, "code": "c", "type": "user"}),
+        ),
+        (
+            "tenant_id",
+            json!({"name": "n", "qty": 1, "code": "c", "tenant_id": Uuid::new_v4()}),
+        ),
+        (
+            "read_only audit",
+            json!({"name": "n", "qty": 1, "code": "c", "audit": "forged"}),
+        ),
+        (
+            "unknown key",
+            json!({"name": "n", "qty": 1, "code": "c", "zzz": 1}),
+        ),
+        (
+            "null required",
+            json!({"name": "n", "qty": null, "code": "c"}),
+        ),
         ("null name", json!({"name": null, "qty": 1, "code": "c"})),
         ("missing required", json!({"name": "n", "code": "c"})),
-        ("string as i64", json!({"name": "n", "qty": "1", "code": "c"})),
-        ("float as i64", json!({"name": "n", "qty": 1.5, "code": "c"})),
-        ("huge as i64", json!({"name": "n", "qty": 1e30, "code": "c"})),
-        ("array as string", json!({"name": "n", "qty": 1, "code": ["c"]})),
+        (
+            "string as i64",
+            json!({"name": "n", "qty": "1", "code": "c"}),
+        ),
+        (
+            "float as i64",
+            json!({"name": "n", "qty": 1.5, "code": "c"}),
+        ),
+        (
+            "huge as i64",
+            json!({"name": "n", "qty": 1e30, "code": "c"}),
+        ),
+        (
+            "array as string",
+            json!({"name": "n", "qty": 1, "code": ["c"]}),
+        ),
         ("object body array", json!([{"name": "n"}])),
         ("scalar body", json!("x")),
         ("null body", Value::Null),
     ] {
-        let (s, v) = a.rest(Method::POST, "/items", Some("user"), Some(body)).await;
+        let (s, v) = a
+            .rest(Method::POST, "/items", Some("user"), Some(body))
+            .await;
         if s.is_success() {
             bypass.push(format!("create {label}: {s} {v}"));
         }
@@ -804,7 +876,9 @@ async fn declarative_writes_refuse_server_owned_immutable_null_and_mistyped() {
         ("deleted_at", json!({"deleted_at": "1999-01-01T00:00:00Z"})),
     ] {
         for m in [Method::PATCH, Method::PUT] {
-            let (s, v) = a.rest(m.clone(), &uri, Some("user"), Some(body.clone())).await;
+            let (s, v) = a
+                .rest(m.clone(), &uri, Some("user"), Some(body.clone()))
+                .await;
             if s.is_success() {
                 bypass.push(format!("{m} {label}: {s} {v}"));
             }
@@ -854,7 +928,9 @@ async fn list_queries_are_bounded() {
         "page=4294967296&limit=100",
         "limit=0",
     ] {
-        let (s, v) = a.rest(Method::GET, &format!("/items?{q}"), Some("user"), None).await;
+        let (s, v) = a
+            .rest(Method::GET, &format!("/items?{q}"), Some("user"), None)
+            .await;
         let n = v["data"].as_array().map(Vec::len).unwrap_or(0);
         if n > 100 || s.is_server_error() {
             bad.push(format!("{q}: {s} rows={n}"));
@@ -867,9 +943,17 @@ async fn list_queries_are_bounded() {
         r#"{"cmp":{"field":"qty","op":"eq","value":1}}"#,
         "}".repeat(2000)
     );
-    let enc = deep.replace('{', "%7B").replace('}', "%7D").replace('"', "%22");
+    let enc = deep
+        .replace('{', "%7B")
+        .replace('}', "%7D")
+        .replace('"', "%22");
     let (s, _) = a
-        .rest(Method::GET, &format!("/items?filter={enc}"), Some("user"), None)
+        .rest(
+            Method::GET,
+            &format!("/items?filter={enc}"),
+            Some("user"),
+            None,
+        )
         .await;
     if s.is_server_error() || s.is_success() {
         bad.push(format!("deep filter: {s}"));
@@ -884,9 +968,13 @@ async fn list_queries_are_bounded() {
 async fn manifest_cannot_admit_anonymous_through_negation() {
     let a = host(true);
     let rt = a.host.module_runtime.clone().unwrap();
-    for (i, pol) in ["not:deny", "not:role:banned", "any:authenticated,not:authenticated"]
-        .iter()
-        .enumerate()
+    for (i, pol) in [
+        "not:deny",
+        "not:role:banned",
+        "any:authenticated,not:authenticated",
+    ]
+    .iter()
+    .enumerate()
     {
         let mut m = ledger();
         m.name = format!("neg{i}");
@@ -899,7 +987,10 @@ async fn manifest_cannot_admit_anonymous_through_negation() {
                 .insert(op, PolicyExpr::parse(pol).unwrap());
         }
         let r = rt.load(ModuleSource::Manifest(m.to_json_pretty())).await;
-        assert!(r.is_err(), "`{pol}` loaded from a manifest: anonymous access");
+        assert!(
+            r.is_err(),
+            "`{pol}` loaded from a manifest: anonymous access"
+        );
         let (s, _) = a
             .rest(Method::GET, &format!("/things{i}"), None, None)
             .await;

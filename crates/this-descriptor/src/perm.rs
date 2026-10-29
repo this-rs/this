@@ -196,7 +196,10 @@ impl PolicyExpr {
 
     fn parse_inner(s: &str, input: &str, depth: usize) -> Result<Self, PolicyParseError> {
         if depth > MAX_POLICY_DEPTH {
-            return Err(perr(input, format!("nested deeper than {MAX_POLICY_DEPTH} levels")));
+            return Err(perr(
+                input,
+                format!("nested deeper than {MAX_POLICY_DEPTH} levels"),
+            ));
         }
         let flat = |rest: &str, and: bool| -> Result<PolicyExpr, PolicyParseError> {
             // Legacy flat form: `all:a,b` / `any:a,b` (split on every comma).
@@ -230,7 +233,11 @@ impl PolicyExpr {
             return Ok(PolicyExpr::Or(parts));
         }
         if let Some(inner) = func("not") {
-            return Ok(PolicyExpr::Not(Box::new(PolicyExpr::parse_inner(inner.trim(), input, depth + 1)?)));
+            return Ok(PolicyExpr::Not(Box::new(PolicyExpr::parse_inner(
+                inner.trim(),
+                input,
+                depth + 1,
+            )?)));
         }
         let named = |rest: &str, what: &str| -> Result<String, PolicyParseError> {
             if valid_name(rest) {
@@ -252,9 +259,11 @@ impl PolicyExpr {
             "owner_or_service" => PolicyExpr::Or(vec![PolicyExpr::Owner, PolicyExpr::ServiceOnly]),
             _ if s.starts_with("all:") => return flat(&s[4..], true),
             _ if s.starts_with("any:") => return flat(&s[4..], false),
-            _ if s.starts_with("not:") => {
-                PolicyExpr::Not(Box::new(PolicyExpr::parse_inner(&s[4..], input, depth + 1)?))
-            }
+            _ if s.starts_with("not:") => PolicyExpr::Not(Box::new(PolicyExpr::parse_inner(
+                &s[4..],
+                input,
+                depth + 1,
+            )?)),
             _ if s.starts_with("role:") => PolicyExpr::HasRole(
                 s[5..]
                     .split('|')
