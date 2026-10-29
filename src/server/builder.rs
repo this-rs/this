@@ -561,13 +561,123 @@ impl ServerBuilder {
         let config = module.links_config()?;
         self.configs.push(config);
 
-        // Register entities from the module
-        module.register_entities(&mut self.entity_registry);
-
-        // Store module for fetchers
+        // Entities are registered in `build_host`, AFTER dependency resolution, in
+        // topological order: the result no longer depends on registration order, and a
+        // module rejected by resolution never pollutes the `EntityRegistry`.
         self.modules.push(module);
 
         Ok(self)
+    }
+
+    /// Descriptors of the registered modules, checked, resolved, and the module order in
+    /// which entities must be registered (legacy modules keep their position; modules with
+    /// a descriptor are placed in topological order in their slots).
+    fn resolve_descriptors(&self) -> Result<(crate::descriptor::DescriptorSet, Vec<usize>)> {
+        use crate::descriptor::framework::codes;
+        use crate::descriptor::{
+            CheckProfile, ContractError, CustomRegistry, DescriptorSet, naming,
+        };
+
+        let mut described: Vec<(usize, crate::descriptor::ModuleDescriptor)> = Vec::new();
+        for (i, module) in self.modules.iter().enumerate() {
+            let Some(mut d) = module.descriptor() else {
+                continue;
+            };
+            d.normalize();
+            d.check(&CustomRegistry::default(), CheckProfile::Compiled)
+                .map_err(|issues| {
+                    anyhow::Error::new(crate::descriptor::check::issues_to_error(&issues))
+                })?;
+            // Identity declared once: the trait methods must agree with the descriptor.
+            let mut mismatches = Vec::new();
+            if naming::to_snake_identifier(module.name()) != d.name {
+                mismatches.push(format!("name `{}` vs `{}`", module.name(), d.name));
+            }
+            if module.version() != d.version {
+                mismatches.push(format!("version `{}` vs `{}`", module.version(), d.version));
+            }
+            let types: std::collections::BTreeSet<&str> =
+                module.entity_types().into_iter().collect();
+            for e in &d.entities {
+                if !types.contains(e.name.as_str()) {
+                    mismatches.push(format!("entity `{}` missing from entity_types()", e.name));
+                }
+            }
+            if !mismatches.is_empty() {
+                return Err(anyhow::Error::new(
+                    ContractError::framework(codes::MODULE_IDENTITY_MISMATCH)
+                        .with_param("module", &d.name)
+                        .with_param("what", mismatches.join("; ")),
+                ));
+            }
+            described.push((i, d));
+        }
+
+        let mut order: Vec<usize> = (0..self.modules.len()).collect();
+        let mut set = DescriptorSet::new();
+        if described.is_empty() {
+            return Ok((set, order));
+        }
+        let refs: Vec<&crate::descriptor::ModuleDescriptor> =
+            described.iter().map(|(_, d)| d).collect();
+        let resolution = crate::descriptor::resolve::resolve(&refs, &[]).map_err(|errs| {
+            let text = errs
+                .iter()
+                .map(|e| e.to_string())
+                .collect::<Vec<_>>()
+                .join("; ");
+            anyhow::Error::new(errs.into_iter().next().expect("non-empty")).context(text)
+        })?;
+        let slots: Vec<usize> = described.iter().map(|(i, _)| *i).collect();
+        for (slot, name) in slots.iter().zip(resolution.order.iter()) {
+            let (idx, _) = described
+                .iter()
+                .find(|(_, d)| &d.name == name)
+                .expect("resolved name");
+            order[*slot] = *idx;
+        }
+        for name in &resolution.order {
+            let (_, d) = described
+                .iter()
+                .find(|(_, d)| &d.name == name)
+                .expect("resolved name");
+            set.insert(d.clone()).map_err(anyhow::Error::new)?;
+        }
+        Ok((set, order))
+    }
+
+    /// Every entity with a descriptor has ONE plural: `EntityDesc.plural` ==
+    /// `EntityDescriptor::plural` == `EntityConfig::plural` (when each exists).
+    fn check_plurals(
+        set: &crate::descriptor::DescriptorSet,
+        registry: &EntityRegistry,
+        config: &LinksConfig,
+    ) -> Result<()> {
+        use crate::descriptor::ContractError;
+        use crate::descriptor::framework::codes;
+        let registered: HashMap<String, String> = registry.entity_plurals().into_iter().collect();
+        for m in set.modules() {
+            for e in &m.entities {
+                let mut sources = vec![format!("descriptor={}", e.plural)];
+                let mut diverge = false;
+                if let Some(p) = registered.get(&e.name) {
+                    diverge |= p != &e.plural;
+                    sources.push(format!("EntityDescriptor={p}"));
+                }
+                if let Some(c) = config.entities.iter().find(|c| c.singular == e.name) {
+                    diverge |= c.plural != e.plural;
+                    sources.push(format!("links.yaml={}", c.plural));
+                }
+                if diverge {
+                    return Err(anyhow::Error::new(
+                        ContractError::framework(codes::MODULE_PLURAL_MISMATCH)
+                            .with_param("entity", &e.name)
+                            .with_param("sources", sources.join(", ")),
+                    ));
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Build the transport-agnostic host
@@ -619,22 +729,41 @@ impl ServerBuilder {
             .take()
             .ok_or_else(|| anyhow::anyhow!("LinkService is required. Call .with_link_service()"))?;
 
-        // Build entity fetchers map from all modules
-        let mut fetchers_map: HashMap<String, Arc<dyn EntityFetcher>> = HashMap::new();
-        for module in &self.modules {
-            for entity_type in module.entity_types() {
-                if let Some(fetcher) = module.get_entity_fetcher(entity_type) {
-                    fetchers_map.insert(entity_type.to_string(), fetcher);
-                }
-            }
-        }
+        // Descriptors: checked, identity-checked, resolved (topological, semver, cycles,
+        // duplicates). Without any descriptor this is a no-op (historical behaviour).
+        let (descriptor_set, order) = self.resolve_descriptors()?;
 
-        // Build entity creators map from all modules
+        // Entities registered in resolved order (see `register_module`).
+        for &i in &order {
+            self.modules[i].register_entities(&mut self.entity_registry);
+        }
+        Self::check_plurals(&descriptor_set, &self.entity_registry, &merged_config)?;
+
+        // Build entity fetchers / creators maps. A collision involving a module WITH a
+        // descriptor is an error (fail-closed); between legacy modules the historical
+        // last-wins is kept, with a warning.
+        let described: std::collections::BTreeSet<String> = descriptor_set
+            .modules()
+            .flat_map(|m| m.entities.iter().map(|e| e.name.clone()))
+            .collect();
+        let mut fetchers_map: HashMap<String, Arc<dyn EntityFetcher>> = HashMap::new();
         let mut creators_map: HashMap<String, Arc<dyn EntityCreator>> = HashMap::new();
-        for module in &self.modules {
+        for &i in &order {
+            let module = &self.modules[i];
             for entity_type in module.entity_types() {
-                if let Some(creator) = module.get_entity_creator(entity_type) {
-                    creators_map.insert(entity_type.to_string(), creator);
+                if let Some(fetcher) = module.get_entity_fetcher(entity_type)
+                    && fetchers_map
+                        .insert(entity_type.to_string(), fetcher)
+                        .is_some()
+                {
+                    duplicate_provider(&described, entity_type, module.name())?;
+                }
+                if let Some(creator) = module.get_entity_creator(entity_type)
+                    && creators_map
+                        .insert(entity_type.to_string(), creator)
+                        .is_some()
+                {
+                    duplicate_provider(&described, entity_type, module.name())?;
                 }
             }
         }
@@ -647,6 +776,9 @@ impl ServerBuilder {
             fetchers_map,
             creators_map,
         )?;
+        if !descriptor_set.is_empty() {
+            host = host.with_descriptors(descriptor_set);
+        }
 
         // Attach event bus if configured
         if let Some(event_bus) = self.event_bus.take() {
@@ -1129,6 +1261,30 @@ async fn shutdown_signal() {
             tracing::info!("Received SIGTERM signal, initiating graceful shutdown...");
         },
     }
+}
+
+/// Two modules provide the same entity type. Error when one of them is described
+/// (fail-closed); historical last-wins with a warning between legacy modules.
+fn duplicate_provider(
+    described: &std::collections::BTreeSet<String>,
+    entity_type: &str,
+    module: &str,
+) -> Result<()> {
+    if described.contains(entity_type) {
+        return Err(anyhow::Error::new(
+            crate::descriptor::ContractError::framework(
+                crate::descriptor::framework::codes::MODULE_DUPLICATE_ENTITY,
+            )
+            .with_param("entity", entity_type)
+            .with_param("modules", module),
+        ));
+    }
+    tracing::warn!(
+        entity_type,
+        module,
+        "entity provided by several modules: the last registered wins (legacy behaviour)"
+    );
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1634,5 +1790,155 @@ mod tests {
         assert!(host.sink_registry().is_none());
         assert!(host.event_log().is_none());
         assert_eq!(host.config.entities.len(), 1);
+    }
+}
+
+#[cfg(test)]
+mod descriptor_tests {
+    use super::*;
+    use crate::config::{EntityAuthConfig, EntityConfig, LinksConfig};
+    use crate::core::module::Module;
+    use crate::descriptor::{EntityDesc, ModuleDescriptor, ModuleReq};
+    use crate::server::entity_registry::EntityRegistry;
+    use crate::storage::InMemoryLinkService;
+
+    /// Module whose descriptor declares one entity and optional requirements.
+    struct Described {
+        name: &'static str,
+        entity: &'static str,
+        yaml_plural: String,
+        requires: Vec<&'static str>,
+    }
+
+    impl Module for Described {
+        fn name(&self) -> &str {
+            self.name
+        }
+        fn entity_types(&self) -> Vec<&str> {
+            vec![self.entity]
+        }
+        fn links_config(&self) -> anyhow::Result<LinksConfig> {
+            Ok(LinksConfig {
+                entities: vec![EntityConfig {
+                    singular: self.entity.to_string(),
+                    plural: self.yaml_plural.clone(),
+                    auth: EntityAuthConfig::default(),
+                }],
+                links: vec![],
+                validation_rules: None,
+                events: None,
+                sinks: None,
+                auth: None,
+            })
+        }
+        fn register_entities(&self, _registry: &mut EntityRegistry) {}
+        fn descriptor(&self) -> Option<ModuleDescriptor> {
+            let mut d = ModuleDescriptor::new(self.name, "1.0.0");
+            d.entities.push(EntityDesc::new(self.entity));
+            d.requires = self
+                .requires
+                .iter()
+                .map(|r| ModuleReq {
+                    name: r.to_string(),
+                    version: "^1".into(),
+                    optional: false,
+                })
+                .collect();
+            Some(d)
+        }
+    }
+
+    fn m(name: &'static str, entity: &'static str, requires: Vec<&'static str>) -> Described {
+        Described {
+            name,
+            entity,
+            yaml_plural: format!("{entity}s"),
+            requires,
+        }
+    }
+
+    #[test]
+    fn build_host_resolve_independent_of_registration_order() {
+        // `billing` requires `users` but is registered FIRST.
+        let host = ServerBuilder::new()
+            .with_link_service(InMemoryLinkService::new())
+            .register_module(m("billing", "invoice", vec!["users"]))
+            .unwrap()
+            .register_module(m("users", "user", vec![]))
+            .unwrap()
+            .build_host()
+            .expect("resolution does not depend on registration order");
+        let set = host.descriptors();
+        assert!(set.entity("invoice").is_some() && set.entity("user").is_some());
+    }
+
+    #[test]
+    fn build_host_fails_on_missing_dependency() {
+        let err = ServerBuilder::new()
+            .with_link_service(InMemoryLinkService::new())
+            .register_module(m("billing", "invoice", vec!["users"]))
+            .unwrap()
+            .build_host()
+            .err()
+            .expect("missing dependency");
+        let c = crate::core::errors::from_anyhow(&err);
+        assert_eq!(c.code.as_str(), "this.module.dependency_missing");
+    }
+
+    #[test]
+    fn plural_drift_fails_at_startup() {
+        let mut bad = m("billing", "invoice", vec![]);
+        bad.yaml_plural = "invoicez".into();
+        let err = ServerBuilder::new()
+            .with_link_service(InMemoryLinkService::new())
+            .register_module(bad)
+            .unwrap()
+            .build_host()
+            .err()
+            .expect("plural drift");
+        assert_eq!(
+            crate::core::errors::from_anyhow(&err).code.as_str(),
+            "this.module.plural_mismatch"
+        );
+    }
+
+    #[test]
+    fn identity_mismatch_between_trait_and_descriptor_fails() {
+        struct Liar;
+        impl Module for Liar {
+            fn name(&self) -> &str {
+                "billing"
+            }
+            fn entity_types(&self) -> Vec<&str> {
+                vec![]
+            }
+            fn links_config(&self) -> anyhow::Result<LinksConfig> {
+                Ok(LinksConfig {
+                    entities: vec![],
+                    links: vec![],
+                    validation_rules: None,
+                    events: None,
+                    sinks: None,
+                    auth: None,
+                })
+            }
+            fn register_entities(&self, _registry: &mut EntityRegistry) {}
+            fn descriptor(&self) -> Option<ModuleDescriptor> {
+                let mut d = ModuleDescriptor::new("billing", "1.0.0");
+                d.entities.push(EntityDesc::new("invoice"));
+                Some(d)
+            }
+        }
+        let err = ServerBuilder::new()
+            .with_link_service(InMemoryLinkService::new())
+            .register_module(Liar)
+            .unwrap()
+            .build_host()
+            .err()
+            .expect("identity mismatch");
+        assert_eq!(
+            crate::core::errors::from_anyhow(&err).code.as_str(),
+            "this.module.identity_mismatch"
+        );
     }
 }

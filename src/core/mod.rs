@@ -2,9 +2,13 @@
 
 pub mod auth;
 pub mod entity;
+/// `ContractError` across layers: `from_anyhow` and protocol adapters (module descriptor RFC).
+pub mod errors;
 pub mod events;
 pub mod extractors;
 pub mod field;
+/// Locale extraction (Accept-Language, gRPC `accept-language`): errors-i18n stream.
+pub mod i18n;
 /// Identité d'entité **engine-agnostique** : la même entité, quel que soit le
 /// moteur qui la porte (convention `_uuid`/`_data`, propriétés plates, api, chaîne).
 pub mod identity;

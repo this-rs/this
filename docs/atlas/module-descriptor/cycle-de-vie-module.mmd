@@ -1,0 +1,26 @@
+stateDiagram-v2
+%% name: module-descriptor-lifecycle
+%% PROUVE : enum ModuleState (crate this-descriptor, lifecycle.rs) et ModuleState::can_transition ; le test
+%%   lifecycle_transitions_are_legal_only verifie la table complete (toute paire hors de ce diagramme est refusee).
+%% SOURCES LUES : crates/this-descriptor/src/lifecycle.rs, RFC v2 §3.7.
+%% NON ETABLI : replace() (echange de version) et l'annulation des flux en fin de grace : flux modules-runtime.
+    [*] --> Discovered : catalogue ou ModuleStore
+    Discovered --> Resolved : resolve ok, interface construite
+    Discovered --> Failed : dependance, version, cycle, doublon, check
+    Resolved --> Active : instantane HostCatalog publie
+    Resolved --> Failed : publication refusee
+    Active --> Draining : unload ou replace
+    Active --> Failed : panne du backend
+    Draining --> Active : unload annule
+    Draining --> Unloaded : requetes finies ou grace 30 s
+    Draining --> Failed
+    Unloaded --> Discovered : rechargement
+    Failed --> Discovered : correction puis load
+    Unloaded --> [*]
+
+    classDef refusedS fill:#e5484d33,stroke:#e5484d,stroke-width:2px,stroke-dasharray:6 3
+    classDef okS fill:#2ea04333,stroke:#2ea043,stroke-width:2px
+    classDef todoS fill:#f0a02033,stroke:#d98a00,stroke-width:2px
+    class Failed refusedS
+    class Active okS
+    class Draining todoS
