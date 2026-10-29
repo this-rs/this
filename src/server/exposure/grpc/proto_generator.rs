@@ -8,8 +8,14 @@
 //! - A typed message per entity (e.g., `Order`, `Invoice`)
 //! - A typed CRUD service per entity (e.g., `OrderService`, `InvoiceService`)
 //! - A generic `LinkService` for relationship management
+//!
+//! Field numbers of a DESCRIBED entity are its `proto_tag`s (stable across field
+//! reordering, see `this_descriptor::derive::proto`); only entities without a descriptor
+//! fall back to numbering the keys of a JSON sample.
 
+use crate::descriptor::derive::proto as proto_derive;
 use crate::server::host::ServerHost;
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 /// Generates typed `.proto` definitions from ServerHost entity registry
@@ -27,24 +33,46 @@ impl ProtoGenerator {
         Self { host }
     }
 
-    /// Generate the complete `.proto` file content
+    /// Generate the complete `.proto` file content.
+    ///
+    /// Descriptor first: an entity of the host's `DescriptorSet` is derived by
+    /// `this_descriptor::derive::proto` with ITS `proto_tag`s (fields sorted by tag,
+    /// framework and removed tags `reserved`; a field without a tag is written as a comment,
+    /// never given an invented number). An entity without a descriptor keeps the legacy
+    /// inference from a JSON sample, whose numbers follow the sample's key order and are
+    /// therefore NOT stable.
     pub async fn generate_proto(&self) -> String {
-        let mut proto = String::new();
-
-        // Header
-        proto.push_str("syntax = \"proto3\";\n\n");
-        proto.push_str("package this_api;\n\n");
+        let mut body = String::new();
+        let mut imports = BTreeSet::new();
+        let set = self.host.descriptors();
 
         // Generate messages and services for each entity type
         for entity_type in self.host.entity_types() {
-            self.generate_entity_messages(&mut proto, entity_type).await;
-            self.generate_entity_service(&mut proto, entity_type);
+            if let Some((_, desc)) = set.entity(entity_type) {
+                // Lenient never fails: untagged fields become comments.
+                if let Ok(p) = proto_derive::entity_proto(desc, proto_derive::TagMode::Lenient) {
+                    imports.extend(p.imports);
+                    body.push_str(&p.text);
+                    continue;
+                }
+            }
+            self.generate_entity_messages(&mut body, entity_type).await;
+            self.generate_entity_service(&mut body, entity_type);
         }
 
         // Generate link service
-        self.generate_link_messages(&mut proto);
-        self.generate_link_service(&mut proto);
+        self.generate_link_messages(&mut body);
+        self.generate_link_service(&mut body);
 
+        // Header (the imports are known once the entities are derived)
+        let mut proto = String::from("syntax = \"proto3\";\n\npackage this_api;\n\n");
+        for import in &imports {
+            proto.push_str(&format!("import \"{}\";\n", import));
+        }
+        if !imports.is_empty() {
+            proto.push('\n');
+        }
+        proto.push_str(&body);
         proto
     }
 
@@ -115,30 +143,8 @@ impl ProtoGenerator {
 
     /// Generate a CRUD service for an entity type
     fn generate_entity_service(&self, proto: &mut String, entity_type: &str) {
-        let pascal = to_pascal_case(entity_type);
-
-        proto.push_str(&format!("service {}Service {{\n", pascal));
-        proto.push_str(&format!(
-            "  rpc Get{}(Get{}Request) returns ({});\n",
-            pascal, pascal, pascal
-        ));
-        proto.push_str(&format!(
-            "  rpc List{}(List{}Request) returns (List{}Response);\n",
-            pascal, pascal, pascal
-        ));
-        proto.push_str(&format!(
-            "  rpc Create{}(Create{}Request) returns ({});\n",
-            pascal, pascal, pascal
-        ));
-        proto.push_str(&format!(
-            "  rpc Update{}(Update{}Request) returns ({});\n",
-            pascal, pascal, pascal
-        ));
-        proto.push_str(&format!(
-            "  rpc Delete{}(Delete{}Request) returns (Delete{}Response);\n",
-            pascal, pascal, pascal
-        ));
-        proto.push_str("}\n\n");
+        // Same service shape as a described entity: one definition.
+        proto.push_str(&proto_derive::service_block(&to_pascal_case(entity_type)));
     }
 
     /// Generate link-related messages
@@ -297,5 +303,144 @@ mod tests {
         assert!(field_names.contains(&"name"));
         assert!(field_names.contains(&"amount"));
         assert!(field_names.contains(&"active"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Descriptor-first derivation
+    // -----------------------------------------------------------------------
+
+    use crate::config::{EntityAuthConfig, EntityConfig, LinksConfig};
+    use crate::core::EntityFetcher;
+    use crate::descriptor::{DescriptorSet, EntityDesc, FieldDesc, FieldType, ModuleDescriptor};
+    use crate::server::entity_registry::{EntityDescriptor, EntityRegistry};
+    use crate::storage::in_memory::InMemoryLinkService;
+    use serde_json::json;
+    use std::collections::HashMap;
+
+    struct Sample(serde_json::Value);
+    #[async_trait::async_trait]
+    impl EntityFetcher for Sample {
+        async fn fetch_as_json(&self, _id: &uuid::Uuid) -> anyhow::Result<serde_json::Value> {
+            Ok(self.0.clone())
+        }
+        async fn get_sample_entity(&self) -> anyhow::Result<serde_json::Value> {
+            Ok(self.0.clone())
+        }
+    }
+
+    struct Stub(&'static str, &'static str);
+    impl EntityDescriptor for Stub {
+        fn entity_type(&self) -> &str {
+            self.0
+        }
+        fn plural(&self) -> &str {
+            self.1
+        }
+        fn build_routes(&self) -> axum::Router {
+            axum::Router::new()
+        }
+    }
+
+    fn host(
+        entity: (&'static str, &'static str),
+        sample: serde_json::Value,
+        set: Option<DescriptorSet>,
+    ) -> Arc<ServerHost> {
+        let mut registry = EntityRegistry::new();
+        registry.register(Box::new(Stub(entity.0, entity.1)));
+        let mut fetchers: HashMap<String, Arc<dyn EntityFetcher>> = HashMap::new();
+        fetchers.insert(entity.0.to_string(), Arc::new(Sample(sample)));
+        let config = LinksConfig {
+            entities: vec![EntityConfig {
+                singular: entity.0.into(),
+                plural: entity.1.into(),
+                auth: EntityAuthConfig::default(),
+            }],
+            links: vec![],
+            validation_rules: None,
+            events: None,
+            sinks: None,
+            auth: None,
+        };
+        let h = ServerHost::from_builder_components(
+            Arc::new(InMemoryLinkService::new()),
+            config,
+            registry,
+            fetchers,
+            HashMap::new(),
+        )
+        .expect("host");
+        Arc::new(match set {
+            Some(s) => h.with_descriptors(s),
+            None => h,
+        })
+    }
+
+    fn knife_set(reverse: bool) -> DescriptorSet {
+        let mut e = EntityDesc::new("knife");
+        e.fields = vec![
+            FieldDesc::new("price", FieldType::F64).tag(16),
+            FieldDesc::new("blade", FieldType::String).tag(18),
+            FieldDesc::new("stock", FieldType::U32).optional().tag(17),
+            FieldDesc::new("sharpened", FieldType::Bool),
+        ];
+        if reverse {
+            e.fields.reverse();
+        }
+        e.reserved_tags = vec![19];
+        let mut m = ModuleDescriptor::new("shop", "1.0.0");
+        m.entities.push(e);
+        let mut set = DescriptorSet::new();
+        set.insert(m).unwrap();
+        set
+    }
+
+    #[tokio::test]
+    async fn proto_tags_stable_across_field_reorder_in_json() {
+        // Same descriptor, two JSON samples with different keys and key order, and the
+        // descriptor's own fields declared in reverse: the .proto does not move.
+        let a = ProtoGenerator::new(host(
+            ("knife", "knives"),
+            json!({"price": 1.5, "blade": "x", "stock": 3}),
+            Some(knife_set(false)),
+        ))
+        .generate_proto()
+        .await;
+        let b = ProtoGenerator::new(host(
+            ("knife", "knives"),
+            json!({"zzz": true, "stock": 3, "blade": "x", "aaa": 1, "price": 1.5}),
+            Some(knife_set(true)),
+        ))
+        .generate_proto()
+        .await;
+        assert_eq!(a, b);
+        assert!(a.contains("  double price = 16;\n"), "{a}");
+        assert!(a.contains("  optional uint32 stock = 17;\n"), "{a}");
+        assert!(a.contains("  string blade = 18;\n"), "{a}");
+        assert!(a.contains("  reserved 8 to 15, 19;\n"), "{a}");
+        // Untagged field: documented, never numbered.
+        assert!(a.contains("  // sharpened: no proto_tag yet"), "{a}");
+        assert!(!a.contains("bool sharpened ="), "{a}");
+        assert!(!a.contains("zzz"), "{a}");
+        assert!(a.contains("service KnifeService {"), "{a}");
+        assert!(a.contains("service LinkService {"), "{a}");
+    }
+
+    #[tokio::test]
+    async fn generators_fall_back_to_sample_without_descriptor_proto() {
+        let p = ProtoGenerator::new(host(
+            ("order", "orders"),
+            json!({"amount": 2.5, "id": "x"}),
+            None,
+        ))
+        .generate_proto()
+        .await;
+        assert!(
+            p.starts_with("syntax = \"proto3\";\n\npackage this_api;\n\n// Order entity\n"),
+            "{p}"
+        );
+        assert!(p.contains("  double amount = 1;\n"), "{p}");
+        assert!(p.contains("  string id = 2;\n"), "{p}");
+        assert!(p.contains("service OrderService {"), "{p}");
     }
 }
