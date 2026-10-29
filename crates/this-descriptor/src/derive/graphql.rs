@@ -16,10 +16,14 @@
 //! | `Enum` | `enum <PascalName>` (falls back to `String` if a variant is not a GraphQL name, or if another entity declares the same enum name with other variants) |
 //! | `List(T)` | `[T!]` |
 //!
-//! Inputs: `<Entity>CreateInput` (writable fields; `!` = `required_on(Create)`) and
-//! `<Entity>UpdateInput` (writable and mutable fields; `!` only for an explicit `required`
-//! rule on update). They document the shape of the `data: JSON!` argument of the host's
-//! mutations.
+//! Inputs: `<Entity>CreateInput` (writable fields) and `<Entity>UpdateInput` (writable and
+//! mutable fields); `!` = [`payload_required`](super::payload_required), the rule the server
+//! applies (a base field such as `name` is required only through an explicit rule). They
+//! document the shape of the `data: JSON!` argument of the host's mutations.
+//!
+//! Names: an enum is never given a name already taken by an object or input type of the
+//! document (entity types, `<Entity>CreateInput`, root types, scalars): it falls back to
+//! `String` instead of producing a duplicate type definition.
 
 use super::pascal_case;
 use crate::entity::EntityDesc;
@@ -32,7 +36,12 @@ use std::collections::{BTreeMap, BTreeSet};
 pub struct SdlBuilder {
     scalars: BTreeSet<&'static str>,
     enums: BTreeMap<String, Vec<String>>,
+    /// Type names an enum may not take (object, input and root types of the document).
+    reserved: BTreeSet<String>,
 }
+
+/// Root type names of a GraphQL schema.
+const ROOT_TYPES: &[&str] = &["Query", "Mutation", "Subscription"];
 
 /// Scalars this derivation may reference, with their documentation.
 const SCALARS: &[(&str, &str)] = &[
@@ -52,6 +61,28 @@ const SCALARS: &[(&str, &str)] = &[
 impl SdlBuilder {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Builder for a document that will hold the object and input types of `entities`:
+    /// their names (and the root type names) are reserved, never taken by an enum.
+    pub fn for_entities<'a>(entities: impl IntoIterator<Item = &'a EntityDesc>) -> Self {
+        let mut b = Self::new();
+        b.reserve(ROOT_TYPES.iter().copied());
+        for e in entities {
+            let p = pascal_case(&e.name);
+            b.reserve([
+                format!("{p}CreateInput"),
+                format!("{p}UpdateInput"),
+                p.clone(),
+            ]);
+        }
+        b
+    }
+
+    /// Reserve type names (e.g. host types such as `NotificationList`): an enum that would
+    /// take one of them is emitted as `String`.
+    pub fn reserve<S: Into<String>>(&mut self, names: impl IntoIterator<Item = S>) {
+        self.reserved.extend(names.into_iter().map(Into::into));
     }
 
     /// GraphQL type expression of `ty`, WITHOUT the outer `!`.
@@ -86,6 +117,7 @@ impl SdlBuilder {
             && !variants.is_empty()
             && variants.iter().all(|v| is_graphql_name(v))
             && !SCALARS.iter().any(|(s, _)| *s == gql)
+            && !self.reserved.contains(&gql)
             && !matches!(gql.as_str(), "String" | "Int" | "Float" | "Boolean" | "ID");
         if !valid {
             return "String".into();
@@ -141,7 +173,11 @@ impl SdlBuilder {
             }
             out.push_str(&format!("input {pascal}{suffix} {{\n"));
             for f in fields {
-                let bang = if f.required_on(op) { "!" } else { "" };
+                let bang = if super::payload_required(e, f, op) {
+                    "!"
+                } else {
+                    ""
+                };
                 out.push_str(&format!("  {}: {}{}\n", f.name, self.type_ref(&f.ty), bang));
             }
             out.push_str("}\n\n");
@@ -178,7 +214,7 @@ fn is_graphql_name(s: &str) -> bool {
 
 /// SDL of `entities` (types, enums, scalars, inputs; no root types).
 pub fn sdl_for(entities: &[&EntityDesc]) -> String {
-    let mut b = SdlBuilder::new();
+    let mut b = SdlBuilder::for_entities(entities.iter().copied());
     let mut body = String::new();
     for e in entities {
         body.push_str(&b.object_type(e, &[]));
@@ -294,8 +330,44 @@ mod tests {
         let mut l = EntityDesc::new("membership");
         l.kind = crate::entity::EntityKind::Link;
         let sdl = sdl_for(&[&l]);
-        assert!(section(&sdl, "input MembershipCreateInput {").contains("source_id: ID!"));
+        let create = section(&sdl, "input MembershipCreateInput {");
+        // Base fields are filled by the server (link route): present, never `!` without an
+        // explicit rule (same rule as engine::validate::apply).
+        assert!(create.contains("  source_id: ID\n"), "{create}");
         assert!(!section(&sdl, "input MembershipUpdateInput {").contains("source_id"));
+    }
+
+    #[test]
+    fn sdl_enum_never_shadows_entity_type() {
+        // Enum `invoice` on entity `invoice`, enum `query`, enum `order_create_input`:
+        // each would define a type twice; they fall back to String.
+        let en = |n: &str| FieldType::Enum {
+            name: n.into(),
+            variants: vec!["a".into()],
+        };
+        let mut inv = EntityDesc::new("invoice");
+        inv.fields = vec![
+            FieldDesc::new("kind", en("invoice")),
+            FieldDesc::new("q", en("query")),
+            FieldDesc::new("c", en("order_create_input")),
+            FieldDesc::new("ok", en("invoice_kind")),
+        ];
+        let order = EntityDesc::new("order");
+        let sdl = sdl_for(&[&inv, &order]);
+        assert_eq!(sdl.matches("type Invoice {").count(), 1, "{sdl}");
+        assert!(!sdl.contains("enum Invoice "), "{sdl}");
+        assert!(!sdl.contains("enum Query "), "{sdl}");
+        assert!(!sdl.contains("enum OrderCreateInput "), "{sdl}");
+        assert!(sdl.contains("enum InvoiceKind {"), "{sdl}");
+        let t = section(&sdl, "type Invoice {");
+        assert!(t.contains("  kind: String!\n"), "{t}");
+        assert!(t.contains("  q: String!\n"), "{t}");
+        assert!(t.contains("  c: String!\n"), "{t}");
+        assert!(t.contains("  ok: InvoiceKind!\n"), "{t}");
+        // A host can reserve its own type names.
+        let mut b = SdlBuilder::for_entities([&inv]);
+        b.reserve(["InvoiceKind"]);
+        assert_eq!(b.type_ref(&en("invoice_kind")), "String");
     }
 
     fn section<'a>(sdl: &'a str, start: &str) -> &'a str {
