@@ -69,6 +69,11 @@ impl RestExposure {
             app = app.merge(custom_router);
         }
 
+        // Module descriptors and derived documents (`/_this/*`), read from the live catalog.
+        app = app.merge(crate::server::exposure::descriptor::descriptor_routes(
+            host.clone(),
+        ));
+
         app = app.merge(link_routes);
 
         // SSE event stream — only if EventBus is configured

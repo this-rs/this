@@ -1,14 +1,24 @@
 //! Dynamic GraphQL schema generator
 //!
-//! This module generates GraphQL schemas automatically from registered entities
-//! without any hardcoded entity types.
+//! Generates the SDL of the host's entities. **Descriptor first**: an entity present in
+//! the host's [`DescriptorSet`](crate::descriptor::DescriptorSet) is derived from its
+//! `EntityDesc` (real types, `optional` = nullable, enums, create/update input types) by
+//! `this_descriptor::derive::graphql`, cached per published descriptor set. An entity
+//! WITHOUT a descriptor keeps the legacy inference from a JSON sample
+//! (`EntityFetcher::get_sample_entity`, then the first listed entity).
 
+#[cfg(feature = "graphql")]
+use crate::descriptor::DescriptorSet;
+#[cfg(feature = "graphql")]
+use crate::descriptor::derive::graphql::SdlBuilder;
 #[cfg(feature = "graphql")]
 use crate::server::host::ServerHost;
 #[cfg(feature = "graphql")]
 use serde_json::Value;
 #[cfg(feature = "graphql")]
-use std::sync::Arc;
+use std::collections::HashMap;
+#[cfg(feature = "graphql")]
+use std::sync::{Arc, Mutex, OnceLock};
 
 #[cfg(feature = "graphql")]
 /// Information about a GraphQL field
@@ -33,6 +43,57 @@ pub struct RelationInfo {
 }
 
 #[cfg(feature = "graphql")]
+/// The part of the SDL derived from a descriptor set: it depends on nothing else, so it
+/// is computed once per published set.
+#[derive(Debug, Default)]
+pub struct DescribedSdl {
+    /// Entity -> lines `name: Type!` of its object type.
+    pub fields: HashMap<String, Vec<String>>,
+    /// Input types of every described entity.
+    pub inputs: String,
+    /// Scalars and enums referenced by the described entities.
+    pub definitions: String,
+}
+
+#[cfg(feature = "graphql")]
+/// Number of descriptor sets whose derived SDL is kept (a host publishes a new set on each
+/// module change; older entries are dropped first).
+const SDL_CACHE_SIZE: usize = 4;
+
+#[cfg(feature = "graphql")]
+/// Derived SDL of `set`, cached by IDENTITY of the published set. A published
+/// `DescriptorSet` is immutable and every change publishes a new `Arc` (with a new
+/// generation): pointer equality is the generation key, and holding the `Arc` in the cache
+/// rules out address reuse.
+pub fn described_sdl(set: &Arc<DescriptorSet>) -> Arc<DescribedSdl> {
+    type Cache = Mutex<Vec<(Arc<DescriptorSet>, Arc<DescribedSdl>)>>;
+    static CACHE: OnceLock<Cache> = OnceLock::new();
+    let cache = CACHE.get_or_init(Default::default);
+    if let Ok(c) = cache.lock()
+        && let Some((_, sdl)) = c.iter().find(|(s, _)| Arc::ptr_eq(s, set))
+    {
+        return sdl.clone();
+    }
+    let mut b = SdlBuilder::new();
+    let mut out = DescribedSdl::default();
+    let mut entities: Vec<_> = set.modules().flat_map(|m| m.entities.iter()).collect();
+    entities.sort_by(|a, b| a.name.cmp(&b.name));
+    for e in entities {
+        out.fields.insert(e.name.clone(), b.object_fields(e));
+        out.inputs.push_str(&b.input_types(e));
+    }
+    out.definitions = b.definitions();
+    let out = Arc::new(out);
+    if let Ok(mut c) = cache.lock() {
+        if c.len() >= SDL_CACHE_SIZE {
+            c.remove(0);
+        }
+        c.push((set.clone(), out.clone()));
+    }
+    out
+}
+
+#[cfg(feature = "graphql")]
 /// Schema generator that creates GraphQL SDL from ServerHost
 pub struct SchemaGenerator {
     host: Arc<ServerHost>,
@@ -47,13 +108,31 @@ impl SchemaGenerator {
     /// Generate the complete SDL schema
     pub async fn generate_sdl(&self) -> String {
         let mut sdl = String::new();
+        let set = self.host.descriptors();
+        let described = (!set.is_empty()).then(|| described_sdl(&set));
+
+        // Scalars and enums of the described entities (none without descriptors: the
+        // legacy output is unchanged).
+        if let Some(d) = &described {
+            sdl.push_str(&d.definitions);
+            if !d.definitions.contains("scalar JSON\n") {
+                // The root mutations take `data: JSON!`.
+                sdl.push_str("\"Arbitrary JSON value.\"\nscalar JSON\n\n");
+            }
+        }
 
         // Generate entity types
         for entity_type in self.host.entity_types() {
-            if let Ok(type_def) = self.generate_entity_type(entity_type).await {
+            if let Ok(type_def) = self.generate_entity_type(entity_type, described.as_deref()).await
+            {
                 sdl.push_str(&type_def);
                 sdl.push_str("\n\n");
             }
+        }
+
+        // Input types (shape of the `data` argument) of the described entities.
+        if let Some(d) = &described {
+            sdl.push_str(&d.inputs);
         }
 
         // Generate Query root
@@ -84,14 +163,22 @@ impl SchemaGenerator {
         sdl
     }
 
-    /// Generate a GraphQL type for an entity
-    async fn generate_entity_type(&self, entity_type: &str) -> anyhow::Result<String> {
+    /// Generate a GraphQL type for an entity: from its descriptor when it has one, else
+    /// from a JSON sample.
+    async fn generate_entity_type(
+        &self,
+        entity_type: &str,
+        described: Option<&DescribedSdl>,
+    ) -> anyhow::Result<String> {
         let type_name = Self::to_pascal_case(entity_type);
         let mut type_def = format!("type {} {{\n", type_name);
 
-        // Get fields from a sample entity or from listing entities
-        if let Some(fetcher) = self.host.entity_fetchers.get(entity_type) {
-            // Try to get a sample entity first
+        if let Some(fields) = described.and_then(|d| d.fields.get(entity_type)) {
+            for line in fields {
+                type_def.push_str(&format!("  {}\n", line));
+            }
+        } else if let Some(fetcher) = self.host.entity_fetchers.get(entity_type) {
+            // Legacy inference: sample entity first
             let mut sample = fetcher.get_sample_entity().await?;
 
             // If sample is empty, try to get the first entity from the list
@@ -127,6 +214,7 @@ impl SchemaGenerator {
         type_def.push('}');
         Ok(type_def)
     }
+
 
     /// Generate the Query root type
     fn generate_query_root(&self) -> String {
@@ -353,14 +441,20 @@ impl SchemaGenerator {
     }
 
     /// Get plural form of entity type
+    ///
+    /// Descriptor first (THE source of the plural), then `links.yaml`, then the shared
+    /// pluralizer (never an ad hoc `+ "s"`: `knife` -> `knives`).
     fn get_plural(&self, entity_type: &str) -> String {
+        if let Some((_, desc)) = self.host.descriptors().entity(entity_type) {
+            return desc.plural.clone();
+        }
         self.host
             .config
             .entities
             .iter()
             .find(|e| e.singular == entity_type)
             .map(|e| e.plural.clone())
-            .unwrap_or_else(|| format!("{}s", entity_type))
+            .unwrap_or_else(|| crate::descriptor::naming::Pluralizer::pluralize(entity_type))
     }
 
     /// Convert snake_case to PascalCase
@@ -1222,5 +1316,93 @@ mod tests {
             "should have Notification type: {}",
             sdl
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Descriptor-first derivation
+    // -----------------------------------------------------------------------
+
+    #[cfg(feature = "graphql")]
+    fn described_set() -> crate::descriptor::DescriptorSet {
+        use crate::descriptor::{EntityDesc, FieldDesc, FieldType, ModuleDescriptor};
+        let mut e = EntityDesc::new("knife");
+        e.fields = vec![
+            FieldDesc::new("price", FieldType::F64),
+            FieldDesc::new("stock", FieldType::U32).optional(),
+            FieldDesc::new("tenant_id", FieldType::Uuid).read_only(),
+        ];
+        let mut m = ModuleDescriptor::new("shop", "1.0.0");
+        m.entities.push(e);
+        let mut set = crate::descriptor::DescriptorSet::new();
+        set.insert(m).unwrap();
+        set
+    }
+
+    #[cfg(feature = "graphql")]
+    fn described_host(fetcher: Option<Arc<dyn EntityFetcher>>) -> Arc<ServerHost> {
+        let host = build_host_with_links(vec![("knife", "knives", fetcher)], vec![]);
+        let host = Arc::try_unwrap(host).ok().expect("unique host");
+        Arc::new(host.with_descriptors(described_set()))
+    }
+
+    #[cfg(feature = "graphql")]
+    #[tokio::test]
+    async fn sdl_from_descriptor_without_sample() {
+        // No fetcher at all: the legacy path would emit an EMPTY type.
+        let sdl = SchemaGenerator::new(described_host(None)).generate_sdl().await;
+        assert!(sdl.contains("type Knife {\n  id: ID!\n"), "{sdl}");
+        assert!(sdl.contains("  price: Float!\n"), "{sdl}");
+        assert!(sdl.contains("  stock: Int64\n"), "optional = nullable: {sdl}");
+        assert!(sdl.contains("  deleted_at: DateTime\n"), "{sdl}");
+        assert!(sdl.contains("scalar JSON"), "root mutations use JSON: {sdl}");
+        assert!(sdl.contains("input KnifeCreateInput {"), "{sdl}");
+        assert!(sdl.contains("knives(limit: Int, offset: Int): [Knife!]!"), "{sdl}");
+        // A misleading sample is ignored when a descriptor exists.
+        let liar: Arc<dyn EntityFetcher> = Arc::new(MockFetcher::with_sample(serde_json::json!({
+            "price": "not a number", "bogus": true
+        })));
+        let sdl2 = SchemaGenerator::new(described_host(Some(liar)))
+            .generate_sdl()
+            .await;
+        assert!(sdl2.contains("  price: Float!\n"), "{sdl2}");
+        assert!(!sdl2.contains("bogus"), "{sdl2}");
+    }
+
+    #[cfg(feature = "graphql")]
+    #[test]
+    fn sdl_cached_by_generation() {
+        let host = described_host(None);
+        let set = host.descriptors();
+        let a = described_sdl(&set);
+        let b = described_sdl(&host.descriptors());
+        assert!(Arc::ptr_eq(&a, &b), "same published set: cached");
+        // Publishing a new set (new generation) derives again.
+        let host2 = Arc::try_unwrap(host)
+            .ok()
+            .expect("unique host")
+            .with_descriptors(described_set());
+        let c = described_sdl(&host2.descriptors());
+        assert!(!Arc::ptr_eq(&a, &c), "new generation: recomputed");
+        assert_eq!(a.fields, c.fields, "same content");
+    }
+
+    #[cfg(feature = "graphql")]
+    #[tokio::test]
+    async fn generators_fall_back_to_sample_without_descriptor() {
+        let sample = serde_json::json!({"id": "x", "total": 3, "note": null});
+        let host = build_host_with_links(
+            vec![(
+                "order",
+                "orders",
+                Some(Arc::new(MockFetcher::with_sample(sample))),
+            )],
+            vec![],
+        );
+        assert!(host.descriptors().is_empty());
+        let sdl = SchemaGenerator::new(host).generate_sdl().await;
+        assert!(sdl.starts_with("type Order {\n"), "legacy output unchanged: {sdl}");
+        assert!(sdl.contains("  total: Int!\n"), "{sdl}");
+        assert!(sdl.contains("  note: String\n"), "{sdl}");
+        assert!(!sdl.contains("scalar "), "{sdl}");
     }
 }
