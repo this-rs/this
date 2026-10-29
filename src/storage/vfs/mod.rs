@@ -240,11 +240,12 @@ pub trait Vfs: Send + Sync {
 ///
 /// Contract for implementations:
 /// - `put` runs `ModuleDescriptor::check` with `CheckProfile::Stored` (explicit policies,
-///   no `public` unless allowed) AND `this_descriptor::compat::check_compat` against the
-///   highest stored version (tags never moved nor reused);
+///   no `public` unless allowed) AND `this_descriptor::compat::check_compat` against every
+///   stored version, in semver order (tags never moved nor reused, backports included);
 /// - `put` and `remove` are authorized by the caller with the admin operation
 ///   `this.module.load` (see the RFC trust model);
-/// - `get(name, None)` returns the highest semver version.
+/// - `get(name, None)` returns the highest semver version (`VfsModuleStore`: highest
+///   non-yanked one).
 #[async_trait]
 pub trait ModuleStore: Send + Sync {
     async fn put(
