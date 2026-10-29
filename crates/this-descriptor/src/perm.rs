@@ -183,19 +183,26 @@ fn split_top(s: &str, input: &str) -> Result<Vec<String>, PolicyParseError> {
     Ok(out)
 }
 
+/// Maximum nesting of a policy string (`not:not:..`, `all(any(..))`): the parser and every
+/// walker recurse once per level, and a descriptor can come from a store or an admin POST.
+pub const MAX_POLICY_DEPTH: usize = 32;
+
 impl PolicyExpr {
     /// Parse one policy. NO trim at the top (as the REST middleware: `" public"` is not
     /// `public`); parts of a composition are trimmed (as `parse_policy`).
     pub fn parse(s: &str) -> Result<Self, PolicyParseError> {
-        Self::parse_inner(s, s)
+        Self::parse_inner(s, s, 0)
     }
 
-    fn parse_inner(s: &str, input: &str) -> Result<Self, PolicyParseError> {
+    fn parse_inner(s: &str, input: &str, depth: usize) -> Result<Self, PolicyParseError> {
+        if depth > MAX_POLICY_DEPTH {
+            return Err(perr(input, format!("nested deeper than {MAX_POLICY_DEPTH} levels")));
+        }
         let flat = |rest: &str, and: bool| -> Result<PolicyExpr, PolicyParseError> {
             // Legacy flat form: `all:a,b` / `any:a,b` (split on every comma).
             let parts = rest
                 .split(',')
-                .map(|p| PolicyExpr::parse_inner(p.trim(), input))
+                .map(|p| PolicyExpr::parse_inner(p.trim(), input, depth + 1))
                 .collect::<Result<Vec<_>, _>>()?;
             Ok(match parts.len() {
                 1 => parts.into_iter().next().unwrap(),
@@ -211,22 +218,19 @@ impl PolicyExpr {
         if let Some(inner) = func("all") {
             let parts = split_top(inner, input)?
                 .iter()
-                .map(|p| PolicyExpr::parse_inner(p, input))
+                .map(|p| PolicyExpr::parse_inner(p, input, depth + 1))
                 .collect::<Result<Vec<_>, _>>()?;
             return Ok(PolicyExpr::And(parts));
         }
         if let Some(inner) = func("any") {
             let parts = split_top(inner, input)?
                 .iter()
-                .map(|p| PolicyExpr::parse_inner(p, input))
+                .map(|p| PolicyExpr::parse_inner(p, input, depth + 1))
                 .collect::<Result<Vec<_>, _>>()?;
             return Ok(PolicyExpr::Or(parts));
         }
         if let Some(inner) = func("not") {
-            return Ok(PolicyExpr::Not(Box::new(PolicyExpr::parse_inner(
-                inner.trim(),
-                input,
-            )?)));
+            return Ok(PolicyExpr::Not(Box::new(PolicyExpr::parse_inner(inner.trim(), input, depth + 1)?)));
         }
         let named = |rest: &str, what: &str| -> Result<String, PolicyParseError> {
             if valid_name(rest) {
@@ -249,7 +253,7 @@ impl PolicyExpr {
             _ if s.starts_with("all:") => return flat(&s[4..], true),
             _ if s.starts_with("any:") => return flat(&s[4..], false),
             _ if s.starts_with("not:") => {
-                PolicyExpr::Not(Box::new(PolicyExpr::parse_inner(&s[4..], input)?))
+                PolicyExpr::Not(Box::new(PolicyExpr::parse_inner(&s[4..], input, depth + 1)?))
             }
             _ if s.starts_with("role:") => PolicyExpr::HasRole(
                 s[5..]
@@ -289,6 +293,65 @@ impl PolicyExpr {
             PolicyExpr::Not(e) => e.walk(f),
             _ => {}
         }
+    }
+
+    /// Can this policy admit an ANONYMOUS caller? Sound over-approximation: `public` does,
+    /// but so does any unguarded negation (`not:deny`, `not:role:x`, `any:authenticated,
+    /// not:authenticated`). Computed over the outcome SET {true,false,unevaluable} of every
+    /// sub-expression for a principal with no identity and no role; `owner`, `perm:` and
+    /// positive `resolver:` are never `true` for it (host-registered resolvers decide
+    /// themselves), but their NEGATION is, which is why `not:resolver:x` needs a guard.
+    pub fn may_admit_anonymous(&self) -> bool {
+        const T: u8 = 1;
+        const F: u8 = 2;
+        const N: u8 = 4;
+        fn go(e: &PolicyExpr) -> u8 {
+            match e {
+                PolicyExpr::Public => T,
+                PolicyExpr::Deny
+                | PolicyExpr::Authenticated
+                | PolicyExpr::ServiceOnly
+                | PolicyExpr::AdminOnly
+                | PolicyExpr::HasRole(_) => F,
+                PolicyExpr::Owner | PolicyExpr::Perm(_) | PolicyExpr::Resolver(_) => F | N,
+                PolicyExpr::Not(x) => {
+                    let s = go(x);
+                    (if s & T != 0 { F } else { 0 })
+                        | (if s & F != 0 { T } else { 0 })
+                        | (if s & N != 0 { N } else { 0 })
+                }
+                PolicyExpr::And(v) => fold(v, F, T),
+                PolicyExpr::Or(v) => fold(v, T, F),
+            }
+        }
+        // `short` = the absorbing value (false for and, true for or), `unit` the neutral one.
+        fn fold(v: &[PolicyExpr], short: u8, unit: u8) -> u8 {
+            let mut acc = unit;
+            for e in v {
+                let s = go(e);
+                let mut next = 0;
+                for a in [T, F, N] {
+                    if acc & a == 0 {
+                        continue;
+                    }
+                    for b in [T, F, N] {
+                        if s & b == 0 {
+                            continue;
+                        }
+                        next |= if a == short || b == short {
+                            short
+                        } else if a == N || b == N {
+                            N
+                        } else {
+                            unit
+                        };
+                    }
+                }
+                acc = next;
+            }
+            acc
+        }
+        go(self) & T != 0
     }
 
     /// Does the policy admit anonymous callers syntactically (contains `public`)?
@@ -477,6 +540,30 @@ mod tests {
         assert_eq!(PolicyExpr::parse(&s).unwrap(), e);
         let json = serde_json::to_string(&e).unwrap();
         assert_eq!(serde_json::from_str::<PolicyExpr>(&json).unwrap(), e);
+    }
+
+    /// Review (DoS): a policy string of a few hundred KB (`not:not:not:..`) recursed once per
+    /// level and overflowed the stack of a worker thread (process abort). Bounded depth now.
+    #[test]
+    fn deeply_nested_policy_is_refused_not_a_stack_overflow() {
+        let run = || {
+            for s in [
+                format!("{}deny", "not:".repeat(200_000)),
+                format!("{}deny{}", "not(".repeat(100_000), ")".repeat(100_000)),
+                format!("{}deny", "all:".repeat(200_000)),
+                format!("{}deny{}", "any(".repeat(100_000), ")".repeat(100_000)),
+            ] {
+                assert!(PolicyExpr::parse(&s).is_err());
+            }
+            // A realistic nesting still parses.
+            assert!(PolicyExpr::parse("all(any(owner, role:a), not(not(resolver:x)))").is_ok());
+        };
+        std::thread::Builder::new()
+            .stack_size(2 * 1024 * 1024)
+            .spawn(run)
+            .unwrap()
+            .join()
+            .unwrap();
     }
 
     #[test]
