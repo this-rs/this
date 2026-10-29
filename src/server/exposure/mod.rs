@@ -5,6 +5,9 @@
 
 pub mod rest;
 
+// Export of the module descriptors and derived documents (`/_this/*`).
+pub mod descriptor;
+
 #[cfg(feature = "graphql")]
 pub mod graphql;
 

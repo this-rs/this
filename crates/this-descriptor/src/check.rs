@@ -325,12 +325,24 @@ fn check_fields(
             let tenant = f.name == TENANT_ID && tag == TENANT_ID_TAG;
             // An overlay of a base field keeps the base field's reserved tag.
             let base_tag = overlay.and_then(|b| b.proto_tag);
-            if tag < FIRST_USER_TAG && !tenant && base_tag != Some(tag) {
+            if let Some(b) = base_tag
+                && b != tag
+            {
+                // Same field on the wire: a different number would split it in two.
+                c.push(
+                    "tag_reserved",
+                    &p,
+                    format!("overlay of base field `{}` must keep tag {b}", f.name),
+                );
+            } else if tag < FIRST_USER_TAG && !tenant && base_tag != Some(tag) {
                 c.push(
                     "tag_reserved",
                     &p,
                     format!("tag {tag} < {FIRST_USER_TAG} is reserved"),
                 );
+            }
+            if let Some(reason) = crate::derive::proto::invalid_tag_reason(tag) {
+                c.push("tag_out_of_range", &p, format!("tag {tag} {reason}"));
             }
             if !tags.insert(tag) {
                 c.push("duplicate_tag", &p, format!("tag {tag} used twice"));
@@ -508,6 +520,26 @@ mod tests {
             codes_of(m.check(&reg(), CheckProfile::Compiled))
                 .contains(&"this.descriptor.duplicate_tag".into())
         );
+    }
+
+    #[test]
+    fn check_rejects_unencodable_tag_and_moved_overlay_tag() {
+        for t in [19_000, 19_999, 536_870_912] {
+            let m = module_with(vec![FieldDesc::new("a", FieldType::F64).tag(t)]);
+            assert_eq!(
+                codes_of(m.check(&reg(), CheckProfile::Compiled)),
+                vec!["this.descriptor.tag_out_of_range"],
+                "tag {t}"
+            );
+        }
+        // An overlay of `status` (base tag 6) moved to 16 would be a second field on the wire.
+        let m = module_with(vec![FieldDesc::new("status", FieldType::String).tag(16)]);
+        assert_eq!(
+            codes_of(m.check(&reg(), CheckProfile::Compiled)),
+            vec!["this.descriptor.tag_reserved"]
+        );
+        let ok = module_with(vec![FieldDesc::new("status", FieldType::String).tag(6)]);
+        ok.check(&reg(), CheckProfile::Compiled).unwrap();
     }
 
     #[test]

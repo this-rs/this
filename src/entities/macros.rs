@@ -1360,6 +1360,34 @@ mod descriptor_macro_tests {
         let _ = Invoice::validation_config("create");
     }
 
+    /// The macro assigns NO tag (RFC §3.3: declaration order would make them unstable);
+    /// stable tags come from the lock: `assign_tags` gives user fields 16.. in NAME order,
+    /// and a later declaration reorder keeps them.
+    #[test]
+    fn macro_entity_gets_stable_tags_from_lock_starting_at_16() {
+        use crate::descriptor::derive::proto::{TagMode, assign_tags, entity_proto, tag_map};
+        let mut d = Invoice::entity_desc().clone();
+        assert!(
+            entity_proto(&d, TagMode::Strict).is_err(),
+            "untagged: strict refuses"
+        );
+        assign_tags(&mut d, &Default::default());
+        let lock = tag_map(&d);
+        assert_eq!(lock["amount"], 16);
+        assert_eq!(lock["due_date"], 17);
+        assert_eq!(lock["number"], 18);
+        assert_eq!(
+            lock["status"], 6,
+            "overlay of a base field keeps its base tag"
+        );
+        let proto = entity_proto(&d, TagMode::Strict).unwrap();
+        // Same lock applied to the fields in another order: same .proto.
+        let mut r = Invoice::entity_desc().clone();
+        r.fields.reverse();
+        assign_tags(&mut r, &lock);
+        assert_eq!(entity_proto(&r, TagMode::Strict).unwrap(), proto);
+    }
+
     #[test]
     fn macro_descriptor_validates_like_legacy() {
         use crate::descriptor::engine::validate::{Side, ValidateCtx, WriteOp, apply_desc};
