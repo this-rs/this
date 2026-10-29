@@ -290,7 +290,12 @@ fn check_perms(c: &mut Ctx, path: &str, perms: &PermDesc, profile: CheckProfile,
                 }
             }
         }
-        if !allow_public && perms.ops.values().any(|p| p.mentions_public() || p.may_admit_anonymous()) {
+        if !allow_public
+            && perms
+                .ops
+                .values()
+                .any(|p| p.mentions_public() || p.may_admit_anonymous())
+        {
             c.push(
                 "public_refused",
                 path,
@@ -736,22 +741,46 @@ mod tests {
         ] {
             let mut m = module_with(vec![]);
             for op in Operation::CRUD {
-                m.entities[0].permissions.ops.insert(op, PolicyExpr::parse(pol).unwrap());
+                m.entities[0]
+                    .permissions
+                    .ops
+                    .insert(op, PolicyExpr::parse(pol).unwrap());
             }
             assert!(
-                codes_of(m.check(&reg(), CheckProfile::Stored { allow_public: false }))
-                    .contains(&"this.descriptor.public_refused".into()),
+                codes_of(m.check(
+                    &reg(),
+                    CheckProfile::Stored {
+                        allow_public: false
+                    }
+                ))
+                .contains(&"this.descriptor.public_refused".into()),
                 "`{pol}` admits anonymous callers: must be refused like `public`"
             );
         }
         // Guarded negations stay legal.
-        for pol in ["all:authenticated,not:role:banned", "role:admin", "authenticated", "owner"] {
+        for pol in [
+            "all:authenticated,not:role:banned",
+            "role:admin",
+            "authenticated",
+            "owner",
+        ] {
             let mut m = module_with(vec![]);
             for op in Operation::CRUD {
-                m.entities[0].permissions.ops.insert(op, PolicyExpr::parse(pol).unwrap());
+                m.entities[0]
+                    .permissions
+                    .ops
+                    .insert(op, PolicyExpr::parse(pol).unwrap());
             }
-            let c = codes_of(m.check(&reg(), CheckProfile::Stored { allow_public: false }));
-            assert!(!c.contains(&"this.descriptor.public_refused".into()), "`{pol}` is guarded: {c:?}");
+            let c = codes_of(m.check(
+                &reg(),
+                CheckProfile::Stored {
+                    allow_public: false,
+                },
+            ));
+            assert!(
+                !c.contains(&"this.descriptor.public_refused".into()),
+                "`{pol}` is guarded: {c:?}"
+            );
         }
     }
 
