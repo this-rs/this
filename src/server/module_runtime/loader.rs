@@ -53,7 +53,11 @@ impl std::fmt::Debug for ModuleSource {
         match self {
             ModuleSource::Compiled(m) => write!(f, "Compiled({})", m.name()),
             ModuleSource::Stored { name, version, .. } => {
-                write!(f, "Stored({name}@{})", version.as_deref().unwrap_or("latest"))
+                write!(
+                    f,
+                    "Stored({name}@{})",
+                    version.as_deref().unwrap_or("latest")
+                )
             }
             ModuleSource::Manifest(_) => f.write_str("Manifest"),
             ModuleSource::Plugin { kind, location } => write!(f, "Plugin({kind}:{location})"),
@@ -217,6 +221,39 @@ impl DefaultModuleLoader {
                 self.checked(d, CheckProfile::Compiled)?
             }
         };
+        // Identity declared once (same rule as `ServerBuilder::build_host`, plus the
+        // reverse direction): name, version and entity types of the trait must match the
+        // descriptor. An extra `entity_types()` entry would bring a fetcher/creator the
+        // descriptor does not own; a different name would make `offer_module` list the
+        // module under one name and load it under another.
+        let mut mismatches = Vec::new();
+        if crate::descriptor::naming::to_snake_identifier(module.name()) != descriptor.name {
+            mismatches.push(format!("name `{}` vs `{}`", module.name(), descriptor.name));
+        }
+        if module.version() != descriptor.version {
+            mismatches.push(format!(
+                "version `{}` vs `{}`",
+                module.version(),
+                descriptor.version
+            ));
+        }
+        let types: std::collections::BTreeSet<&str> = module.entity_types().into_iter().collect();
+        let declared: std::collections::BTreeSet<&str> = descriptor
+            .entities
+            .iter()
+            .map(|e| e.name.as_str())
+            .collect();
+        for t in types.difference(&declared) {
+            mismatches.push(format!("entity_types() has `{t}`, the descriptor does not"));
+        }
+        for t in declared.difference(&types) {
+            mismatches.push(format!("descriptor has `{t}`, entity_types() does not"));
+        }
+        if !mismatches.is_empty() {
+            return Err(ContractError::framework(codes::MODULE_IDENTITY_MISMATCH)
+                .with_param("module", &descriptor.name)
+                .with_param("what", mismatches.join("; ")));
+        }
         // One owner per plural: descriptor, `EntityDescriptor` and links.yaml must agree.
         for e in &descriptor.entities {
             let registered = plurals.get(&e.name);

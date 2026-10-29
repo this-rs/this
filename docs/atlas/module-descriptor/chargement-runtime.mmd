@@ -1,10 +1,15 @@
 sequenceDiagram
 %% name: module-descriptor-runtime-load
-%% PROUVE (flux modules-runtime, tests/module_runtime.rs, cargo test -p this-rs --test module_runtime : 11 ok) :
+%% PROUVE (flux modules-runtime, tests/module_runtime.rs, cargo test -p this-rs --test module_runtime : 19 ok) :
 %%   load_then_routes_served_unload_then_404, unload_refused_with_active_dependents,
 %%   replace_checks_dependents_version_req, draining_times_out_and_cancels_streams,
 %%   dynamic_module_paths_not_shadowed_by_link_wildcards, json_entity_publishes_event_and_links,
-%%   admin_interface_requires_admin_then_lists_loads_unloads, plugin_source_is_an_extension_point.
+%%   admin_interface_requires_admin_then_lists_loads_unloads, plugin_source_is_an_extension_point,
+%%   relecture : replace_cancels_old_version_streams_after_grace, fetcher_outside_the_descriptor_is_refused_not_last_wins,
+%%   compiled_module_must_match_its_descriptor_at_runtime, admin_interface_enforced_even_with_authorization_disarmed,
+%%   runtime_module_policies_enforced_on_crud_and_link_routes, loading_an_active_module_again_is_refused_and_unload_twice_too.
+%% DEDUIT (non teste) : la repartition entre dans la Gate PUIS relit la table (Arc::ptr_eq) ; une vidange ne peut plus
+%%   manquer une requete entree entre lecture de table et Gate::enter.
 %% SOURCES LUES : src/server/module_runtime/{runtime,dispatch,admin,loader,json_entity}.rs,
 %%   src/server/exposure/rest/mod.rs (ModuleRuntime::mount), src/server/catalog.rs, crates/this-descriptor/src/resolve.rs.
 %% NON ETABLI : GraphQL et gRPC ne lisent pas encore le catalogue (flux auth) ; un module charge a chaud
@@ -61,4 +66,13 @@ sequenceDiagram
         RT->>DSP: tombstone, 404 this.module.not_found
         RT->>BUS: Module Unloaded
         RT-->>Admin: 200 unloaded
+    end
+    RT->>RT: replace billing 1.1.0, API Rust, pas de route admin
+    alt VersionReq d un dependant refuse
+        RT->>BUS: Module Failed this.module.dependency_version
+    else accepte
+        RT->>CAT: publish 1.1.0 en un seul swap
+        RT->>DSP: store DispatchTable, nouvelle Gate
+        Note over RT,DSP: ancienne version : requetes en vol finissent, grace puis ModuleCancellation de l ancienne Gate
+        RT->>BUS: Module Replaced
     end
