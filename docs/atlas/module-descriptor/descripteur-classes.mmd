@@ -1,9 +1,11 @@
-classDiagram
 %% name: module-descriptor-classes
-%% PROUVE : forme du code de crates/this-descriptor/src (fondation, v2) ; JSON et YAML aller-retour testes
-%%   (descriptor_json_roundtrip, descriptor_yaml_roundtrip).
+%% QUESTION : quelle est la forme du descripteur (types publics de this-descriptor) ?
+%% PROUVE : forme du code de crates/this-descriptor/src (fondation, v2, inchangee par les flux sur ces types) ; JSON et YAML aller-retour testes
+%%   (descriptor_json_roundtrip, descriptor_yaml_roundtrip). Statut : toutes les classes ✅ (fondation mesuree) ; I18nDecl vers
+%%   MessageBundle ✅ pour les modules stockes, 🟠 pour les modules compiles (aucun crochet de bundles sur Module).
 %% SOURCES LUES : crates/this-descriptor/src/{module,entity,field,link,error,perm,i18n,query,custom}.rs.
 %% NON ETABLI : rien d'autre que ce que les tests couvrent ; le code fait foi en cas d'ecart.
+classDiagram
     direction LR
     class ModuleDescriptor {
         +u32 format
@@ -134,3 +136,24 @@ classDiagram
     DescriptorSet o-- "*" ModuleDescriptor
     Query~T~ ..> FieldDesc : filterable et sortable
     Described ..> EntityDesc : macros impl_data_entity
+    note for MessageBundle "✅ modules stockes (ModuleStore)<br/>🟠 modules compiles : aucun crochet"
+    note for LinkDesc "⚠ module compile : routage servi depuis links.yaml<br/>LinkDesc redeclare, aucune comparaison"
+    note for FieldDesc "⚠ proto_tag vide a l'execution<br/>descriptor.lock non applique"
+    classDef ok   fill:#2ea04333,stroke:#2ea043,stroke-width:2px
+    classDef todo fill:#f0a02033,stroke:#d98a00,stroke-width:2px
+    classDef trap fill:#e5484d1f,stroke:#e5484d,stroke-width:3px
+    class ModuleDescriptor:::ok
+    class ModuleReq:::ok
+    class EntityDesc:::ok
+    class LinkDesc:::trap
+    class ErrorDesc:::ok
+    class ContractError:::ok
+    class ErrorKind:::ok
+    class PermDesc:::ok
+    class PolicyExpr:::ok
+    class I18nDecl:::ok
+    class MessageBundle:::todo
+    class Query~T~:::ok
+    class DescriptorSet:::ok
+    class Described:::ok
+    class FieldDesc:::ok

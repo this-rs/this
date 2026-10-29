@@ -1,9 +1,11 @@
-flowchart LR
 %% name: module-descriptor-derivations
-%% PROUVE (fondation, cargo test -p this-descriptor) : ModuleDescriptor, compose, moteurs validate / query / policy / i18n,
-%%   table ErrorKind, catalogue framework fr/en, impl Described emis par les macros (tests this-rs descriptor_macro_tests).
-%% SOURCES LUES : crates/this-descriptor/src/*, src/entities/macros.rs, src/core/errors/mod.rs, proto/this_grpc.proto.
-%% NON ETABLI : derive::graphql_sdl / proto_file / json_schema (stubs NotImplemented, flux schema) ; glue Leptos (suite).
+%% QUESTION : de la declaration unique, qu'est-ce que chaque surface derive aujourd'hui (integ/module-descriptor, revue finale 29/10/2026) ?
+%% PROUVE (MESURE) : cargo test --features graphql,grpc --test module_descriptor_e2e : 6 ok (relance par la revue), dont
+%%   same_invalid_payload_same_code_on_rest_graphql_grpc, status_mapping_per_protocol, message_localized_fr_then_en, policy_denied_on_all_protocols ;
+%%   flux schema : cargo test -p this-descriptor --all-features (derive graphql/proto/json_schema/openapi) ; this-cli cargo test (unit 566, descriptor_cli 2).
+%% LU : crates/this-descriptor/src/{module,derive/*,engine/*}.rs, src/core/errors/*, src/server/exposure/{rest,graphql,grpc}/*, this-cli/src/descriptor/mod.rs (MODULE_DESCRIPTOR_FN).
+%% NON ETABLI : glue Leptos (feature leptos de this-descriptor seulement, aucun client) ; fil gRPC type (le fil servi reste Struct) ; module charge a chaud hors REST.
+flowchart LR
     classDef ok       fill:#2ea04333,stroke:#2ea043,stroke-width:2px
     classDef todo     fill:#f0a02033,stroke:#d98a00,stroke-width:2px
     classDef refused  fill:#e5484d33,stroke:#e5484d,stroke-width:2px,stroke-dasharray:6 3
@@ -13,7 +15,7 @@ flowchart LR
 
     MAC(["Macro impl_data_entity<br/>champs, types, pluriel, regles"]):::entry
     YML(["descriptor/module.yaml<br/>requires, liens, erreurs, cles, permissions"]):::entry
-    MD["✅ ModuleDescriptor::compose<br/>un proprietaire par facette"]:::ok
+    MD["✅ ModuleDescriptor::compose<br/>un proprietaire par facette<br/>compose_gives_each_facet_one_owner"]:::ok
     MAC ==> MD
     YML ==> MD
 
@@ -22,40 +24,40 @@ flowchart LR
         V["✅ engine::validate::apply"]:::ok
         Q["✅ engine::query strict"]:::ok
         P["✅ engine::policy::evaluate<br/>Option bool"]:::ok
-        I["✅ engine::i18n::render"]:::ok
+        I["✅ engine::i18n + I18nCatalog"]:::ok
         E["✅ ErrorKind table<br/>HTTP gRPC GraphQL"]:::ok
     end
     MD ==> PURE
 
-    subgraph DER["Derivations, flux schema"]
+    subgraph DER["this_descriptor::derive, flux schema"]
         direction TB
-        SDL["🟠 derive::graphql_sdl<br/>cache par generation"]:::todo
-        PROTO["🟠 derive::proto_file<br/>documentation seulement"]:::todo
-        JS["🟠 derive::json_schema"]:::todo
+        SDL["✅ graphql_sdl<br/>cache par generation"]:::ok
+        PROTO["✅ proto_file<br/>documentation seulement"]:::ok
+        JS["✅ json_schema + openapi"]:::ok
     end
     MD ==> DER
 
     subgraph SURF["Surfaces"]
         direction TB
-        REST["🟠 REST<br/>couche de validation + ApiError"]:::todo
-        GQL["🟠 GraphQL<br/>ValidatingCreator + guarded_fetcher"]:::todo
-        GRPC["🟠 gRPC<br/>identity + Status details"]:::todo
-        LEP["⚪ Leptos wasm32"]:::upstream
-        CLI["🟠 this-cli<br/>Tera = descripteur"]:::todo
+        REST["✅ REST<br/>couche de validation, ApiError,<br/>localize_errors"]:::ok
+        GQL["✅ GraphQL<br/>ValidatingCreator, gardes,<br/>erreur localisee"]:::ok
+        GRPC["✅ gRPC EntityService<br/>identite, from_anyhow, locale"]:::ok
+        LEP["⚪ Leptos wasm32<br/>FromServerFnError seulement"]:::upstream
+        CLI["✅ this-cli<br/>descriptor check export lock"]:::ok
     end
-    PURE --> REST
-    PURE --> GQL
-    PURE --> GRPC
+    PURE ==> REST
+    PURE ==> GQL
+    PURE ==> GRPC
     PURE -.->|"glue suite"| LEP
-    DER --> GQL
+    DER ==> GQL
     DER -.->|"client codegen"| GRPC
-    MD --> CLI
+    MD ==> CLI
 
-    OLD1["⚠ schema infere<br/>d'un sample JSON"]:::trap
-    OLD2["⚠ GraphQL, gRPC, REST CLI<br/>contournent la validation"]:::trap
-    OLD3["⚠ toute erreur gRPC<br/>devient INTERNAL"]:::trap
+    OLD1["⚠ schema infere d'un sample JSON<br/>conserve pour les entites<br/>sans descripteur"]:::trap
+    OLD3["⚠ sites ad hoc restants<br/>link_service 7 Status, GraphQL 29 Error::new"]:::trap
+    LOCK["🟠 descriptor.lock non applique<br/>par Module::descriptor engendre<br/>module compile servi sans tags"]:::todo
     WIRE["🔴 tags proto comme contrat du fil<br/>le fil servi est Struct"]:::refused
-    OLD1 -.->|"remplace par"| SDL
-    OLD2 -.->|"remplace par"| V
-    OLD3 -.->|"remplace par from_anyhow"| E
+    OLD1 -.->|"repli"| SDL
+    OLD3 -.->|"a migrer vers from_anyhow"| E
+    LOCK -.-> PROTO
     PROTO -.- WIRE

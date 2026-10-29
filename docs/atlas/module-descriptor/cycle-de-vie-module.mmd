@@ -1,16 +1,18 @@
-stateDiagram-v2
 %% name: module-descriptor-lifecycle
-%% PROUVE : enum ModuleState (crate this-descriptor, lifecycle.rs) et ModuleState::can_transition ; le test
-%%   lifecycle_transitions_are_legal_only verifie la table complete (toute paire hors de ce diagramme est refusee).
-%% SOURCES LUES : crates/this-descriptor/src/lifecycle.rs, RFC v2 §3.7.
-%% NON ETABLI : replace() (echange de version) et l'annulation des flux en fin de grace : flux modules-runtime.
+%% QUESTION : quels etats un module traverse et quelles transitions sont legales ?
+%% PROUVE (MESURE) : ModuleState::can_transition, test lifecycle_transitions_are_legal_only (table complete) ;
+%%   flux modules-runtime (tests/module_runtime.rs, 19 ok) : replace_checks_dependents_version_req, draining_times_out_and_cancels_streams,
+%%   replace_cancels_old_version_streams_after_grace ; e2e hot_loaded_module_from_vfs_served_then_404_after_unload.
+%% LU : crates/this-descriptor/src/lifecycle.rs, src/server/module_runtime/runtime.rs.
+%% NON ETABLI : Active vers Failed sur panne du backend (transition legale, aucun detecteur de panne branche).
+stateDiagram-v2
     [*] --> Discovered : catalogue ou ModuleStore
     Discovered --> Resolved : resolve ok, interface construite
     Discovered --> Failed : dependance, version, cycle, doublon, check
     Resolved --> Active : instantane HostCatalog publie
     Resolved --> Failed : publication refusee
     Active --> Draining : unload ou replace
-    Active --> Failed : panne du backend
+    Active --> Failed : panne du backend, non detectee
     Draining --> Active : unload annule
     Draining --> Unloaded : requetes finies ou grace 30 s
     Draining --> Failed
@@ -18,9 +20,18 @@ stateDiagram-v2
     Failed --> Discovered : correction puis load
     Unloaded --> [*]
 
-    classDef refusedS fill:#e5484d33,stroke:#e5484d,stroke-width:2px,stroke-dasharray:6 3
-    classDef okS fill:#2ea04333,stroke:#2ea043,stroke-width:2px
-    classDef todoS fill:#f0a02033,stroke:#d98a00,stroke-width:2px
-    class Failed refusedS
-    class Active okS
-    class Draining todoS
+    note right of Draining
+        ✅ 503 this.module.unavailable
+        puis ModuleCancellation des flux
+    end note
+    note right of Unloaded
+        ✅ 404 this.module.not_found
+        bundles retires de ServerHost::locales
+    end note
+
+    classDef ok       fill:#2ea04333,stroke:#2ea043,stroke-width:2px
+    classDef refused  fill:#e5484d33,stroke:#e5484d,stroke-width:2px,stroke-dasharray:6 3
+    classDef upstream fill:#8b8fa322,stroke:#8b8fa3,stroke-dasharray:3 3
+    class Discovered,Resolved,Active,Draining ok
+    class Unloaded upstream
+    class Failed refused

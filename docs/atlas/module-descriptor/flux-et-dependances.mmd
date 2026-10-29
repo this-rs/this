@@ -1,31 +1,36 @@
-flowchart TB
 %% name: module-descriptor-streams
-%% PROUVE : fondation compilee et testee sur md/foundation (voir rapport du flux) ; decoupage RFC v2 §7.1.
-%% host.rs et builder.rs sont touches EN SEQUENCE : fondation, puis auth, puis modules-runtime.
-%% NON ETABLI : duree des flux.
+%% QUESTION : ou en est chaque flux du lot module-descriptor (revue finale 29/10/2026) ?
+%% PROUVE (MESURE) : 6 merges --no-ff sur integ/module-descriptor (this) + md/cli (this-cli) ; cargo check --all-targets --all-features rc=0 ;
+%%   cargo clippy --workspace --all-targets --all-features -D warnings propre ; tests d'acceptation de chaque flux listes ok dans
+%%   cargo test --workspace --all-features (2388 ok / 53 echecs environnement) ; e2e 6 ok relance par la revue.
+%% LU : git log integ/module-descriptor, taches PO du plan ada69546.
+%% NON ETABLI : scylladb_tests (non mesure) ; attribution des 53 echecs a l'environnement partiellement deduite.
+flowchart TB
     classDef ok       fill:#2ea04333,stroke:#2ea043,stroke-width:2px
     classDef todo     fill:#f0a02033,stroke:#d98a00,stroke-width:2px
     classDef entry    fill:#a48bff40,stroke:#a48bff,stroke-width:3px
     classDef trap     fill:#e5484d1f,stroke:#e5484d,stroke-width:3px
 
     F(["✅ fondation<br/>this-descriptor, HostCatalog, errors, resolution au build"]):::entry
-    subgraph P["7 flux paralleles, worktrees _wt-md/flux"]
+    subgraph P["7 flux, fusionnes sur integ/module-descriptor"]
         direction LR
-        V["🟠 validation<br/>gate, couche REST"]:::todo
-        E["🟠 errors-i18n<br/>http grpc graphql, Locale"]:::todo
-        A["🟠 auth<br/>evaluateur unique, guarded_fetcher"]:::todo
-        S["🟠 schema<br/>derive, generateurs"]:::todo
-        M["🟠 modules-runtime<br/>runtime, repartition"]:::todo
-        X["🟠 vfs<br/>memory fs obrain module_store"]:::todo
-        C["🟠 cli<br/>descripteur, doctor, CI"]:::todo
+        V["✅ validation<br/>gate, couche REST"]:::ok
+        E["✅ errors-i18n<br/>http grpc graphql, Locale"]:::ok
+        A["✅ auth<br/>evaluateur unique, gardes"]:::ok
+        S["✅ schema<br/>derive, generateurs"]:::ok
+        M["✅ modules-runtime<br/>runtime, repartition"]:::ok
+        X["✅ vfs<br/>memory fs obrain module_store"]:::ok
+        C["✅ cli<br/>descripteur, doctor, lock"]:::ok
     end
     F ==> V & E & A & S & M & X & C
     A -->|"host.rs puis builder.rs"| M
-    I["🟠 integration<br/>e2e REST GraphQL gRPC, autorisation armee"]:::todo
+    I["🟠 integration<br/>e2e 6 ok ; manque examples/descriptor_api,<br/>workspace pas entierement vert"]:::todo
     V & E & A & S & M & X & C ==> I
-    R["🟠 revue finale et referencement"]:::todo
+    R["🟠 revue finale<br/>RFC §10, diagrammes ; publication a faire"]:::todo
     I ==> R
     T["⚠ chemins ../../banc-obrain-j4 et ../../vite-rs<br/>resolus par liens symboliques dans this-rs/"]:::trap
-    W["⚠ workspace parent this-rs/Cargo.toml<br/>doit exclure this"]:::trap
+    W["⚠ workspace parent this-rs/Cargo.toml<br/>doit exclure this et this-cli"]:::trap
+    L["⚠ lien _wt-md/this vers integ<br/>requis par this-cli"]:::trap
     T -.-> P
     W -.-> F
+    L -.-> C

@@ -1,10 +1,12 @@
-flowchart LR
 %% name: module-descriptor-schema-derivations
-%% PROUVE (flux schema, branche md/schema) : derive graphql / proto / json_schema / openapi (cargo test -p this-descriptor --all-features, 88 tests),
+%% QUESTION : d'ou viennent SDL, .proto, JSON Schema et OpenAPI, et qui les sert ?
+%% PROUVE (flux schema, branche md/schema, fusionnee sans conflit sur integ) : derive graphql / proto / json_schema / openapi (cargo test -p this-descriptor --all-features, 88 tests),
 %%   generateurs this-rs descripteur d'abord + repli sample, cache SDL, routes /_this (cargo test -p this-rs --lib --features graphql,grpc, 1218 tests).
 %% SOURCES LUES : crates/this-descriptor/src/{derive,entity,field,module}.rs, src/server/exposure/{graphql/schema_generator,grpc/proto_generator,rest/mod}.rs, src/entities/macros.rs.
 %% RELECTURE (md/schema) : required = regle du moteur (derive_required_matches_engine), tags hors plage refuses (proto_refuses_out_of_range_tags), overlays gardent le tag de base, SDL validee par graphql_parser (described_sdl_parses_with_graphql_parser), /_this juge Descriptor read authenticated (descriptor_export_requires_authentication).
-%% NON ETABLI : application du lock aux modules compiles (compose ne porte pas de tags, flux cli), fil gRPC type (le fil servi reste Struct), modules charges a chaud absents de entity_types.
+%% LU (revue finale) : this-cli/src/descriptor/mod.rs : read_lock().apply dans export, MODULE_DESCRIPTOR_FN (Module::descriptor engendre) compose SANS lock.
+%% NON ETABLI : fil gRPC type (le fil servi reste Struct) ; this descriptor export --format proto|graphql|json-schema sans test CLI ; modules charges a chaud absents de entity_types.
+flowchart LR
     classDef ok       fill:#2ea04333,stroke:#2ea043,stroke-width:2px
     classDef todo     fill:#f0a02033,stroke:#d98a00,stroke-width:2px
     classDef refused  fill:#e5484d33,stroke:#e5484d,stroke-width:2px,stroke-dasharray:6 3
@@ -16,7 +18,11 @@ flowchart LR
     LOCK(["descriptor.lock<br/>champ vers tag"]):::entry
     SET["✅ DescriptorSet publie<br/>Arc immuable, generation"]:::ok
     MAC ==> SET
-    LOCK -.->|"flux cli, non branche"| SET
+    LOCKRT["🟠 lock applique au descripteur servi<br/>Module::descriptor engendre l'ignore"]:::todo
+    LOCKCLI["✅ this descriptor export<br/>compose puis lock.apply"]:::ok
+    LOCK ==> LOCKCLI
+    LOCK -.->|"non branche a l'execution"| LOCKRT
+    LOCKRT -.-> SET
 
     subgraph DER["this_descriptor::derive, pur, wasm32"]
         direction TB
