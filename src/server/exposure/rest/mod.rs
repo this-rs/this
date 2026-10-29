@@ -200,6 +200,14 @@ impl RestExposure {
         // (`tests/chain_order.rs` le prouve sur l'exposition réelle.)
         // ═══════════════════════════════════════════════════════════════════
 
+        // Validation structurelle (RFC module-descriptor §3.5) : la plus INTERNE des
+        // couches, donc exécutée APRÈS les politiques (un appelant refusé n'apprend
+        // rien du schéma). Sans descripteur publié : traversée à l'identique.
+        app = app.layer(middleware::from_fn_with_state(
+            host.validation_layer_state(),
+            crate::core::validation::validation_middleware,
+        ));
+
         // Application des politiques : **ARMÉE PAR DÉFAUT** (`ServerHost::authorize`
         // vaut `true` — `server/host.rs`), désarmable explicitement
         // (`ServerBuilder::without_authorization`, journalisé comme un

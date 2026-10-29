@@ -73,7 +73,6 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # Validation
 regex = "1.10"
-validator = { version = "0.21", features = ["derive"] }
 
 # GraphQL support (optional)
 async-graphql = { version = "7", optional = true }
@@ -288,6 +287,13 @@ name = "scope_bench"
 path = "benches/scope_bench.rs"
 harness = false
 required-features = ["obrain"]
+
+# Validation par descripteur (RFC module-descriptor §7.1) : `engine::validate::apply`
+# est sur le chemin de toute écriture d'une entité décrite.
+[[bench]]
+name = "validate_bench"
+path = "benches/validate_bench.rs"
+harness = false
 
 # La passerelle IAM devant les stores obrain (chantier PASSERELLE-THIS-RS) :
 # STS (émission + validation Ed25519), refus par défaut (la faille 4-segments

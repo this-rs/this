@@ -128,11 +128,27 @@ async fn graphql_handler_custom(
 
     match executor.execute(&request.query, request.variables).await {
         Ok(response) => AxumJson(response),
-        Err(e) => AxumJson(serde_json::json!({
-            "errors": [{
-                "message": e.to_string()
-            }]
-        })),
+        // A `ContractError` (validation, typed query, business code) keeps its code in
+        // `extensions` (`BAD_USER_INPUT`, `this_code`, `fields`); anything else is the
+        // historical message-only error.
+        Err(e) => {
+            let contract = e
+                .chain()
+                .find_map(|c| c.downcast_ref::<crate::descriptor::ContractError>());
+            match contract {
+                Some(c) => AxumJson(serde_json::json!({
+                    "errors": [{
+                        "message": c.message,
+                        "extensions": c.graphql_extensions()
+                    }]
+                })),
+                None => AxumJson(serde_json::json!({
+                    "errors": [{
+                        "message": e.to_string()
+                    }]
+                })),
+            }
+        }
     }
 }
 

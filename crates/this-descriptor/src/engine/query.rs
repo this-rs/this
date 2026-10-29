@@ -21,6 +21,17 @@ fn malformed(reason: impl Into<String>) -> ContractError {
 /// an array value without suffix is `in`; no suffix = `eq`.
 pub fn parse_filter_json(s: &str) -> Result<FilterExpr, ContractError> {
     let v: Value = serde_json::from_str(s).map_err(|e| malformed(e.to_string()))?;
+    parse_filter_value(v)
+}
+
+/// Same grammar as [`parse_filter_json`], from an already decoded value (a GraphQL object
+/// argument, a gRPC `Struct`). A string value is decoded as JSON first, so a client may
+/// pass the REST form unchanged. An empty object is "no filter" (`And([])` matches all).
+pub fn parse_filter_value(v: Value) -> Result<FilterExpr, ContractError> {
+    let v = match v {
+        Value::String(s) => serde_json::from_str(&s).map_err(|e| malformed(e.to_string()))?,
+        other => other,
+    };
     let Value::Object(obj) = v else {
         return Err(malformed("the filter must be a JSON object"));
     };
@@ -305,6 +316,36 @@ mod tests {
         assert_eq!(e.code.as_str(), codes::QUERY_MALFORMED_FILTER);
         let e = parse_legacy(&schema(), Some("[1,2]"), None, 1, 20).unwrap_err();
         assert_eq!(e.code.as_str(), codes::QUERY_MALFORMED_FILTER);
+    }
+
+    #[test]
+    fn sort_on_non_sortable_rejected() {
+        // `note` is declared but not sortable; `ghost` is not declared at all.
+        for sort in ["note", "note:desc", "-note", "ghost", "amount,note"] {
+            let e = parse_legacy(&schema(), None, Some(sort), 1, 20).unwrap_err();
+            assert_eq!(e.code.as_str(), codes::QUERY_FIELD_NOT_SORTABLE, "{sort}");
+            assert_eq!(e.kind, crate::error::ErrorKind::BadRequest, "{sort}");
+        }
+        // Base fields declared sortable by `base_fields` stay sortable.
+        parse_legacy(&schema(), None, Some("created_at:desc,amount"), 1, 20).unwrap();
+    }
+
+    #[test]
+    fn filter_value_accepts_object_and_json_string() {
+        let a = parse_filter_value(json!({"amount>": 3})).unwrap();
+        let b = parse_filter_value(json!(r#"{"amount>": 3}"#)).unwrap();
+        assert_eq!(a, b);
+        assert_eq!(
+            parse_filter_value(json!(42)).unwrap_err().code.as_str(),
+            codes::QUERY_MALFORMED_FILTER
+        );
+        assert_eq!(
+            parse_filter_value(json!("{oops"))
+                .unwrap_err()
+                .code
+                .as_str(),
+            codes::QUERY_MALFORMED_FILTER
+        );
     }
 
     #[test]
