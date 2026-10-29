@@ -56,6 +56,7 @@ pub mod codes {
     pub const MODULE_HAS_DEPENDENTS: &str = "this.module.has_dependents";
     pub const MODULE_FORMAT_UNSUPPORTED: &str = "this.module.format_unsupported";
     pub const MODULE_UNAVAILABLE: &str = "this.module.unavailable";
+    pub const MODULE_HOT_LOAD_DISABLED: &str = "this.module.hot_load_disabled";
     pub const MODULE_ILLEGAL_TRANSITION: &str = "this.module.illegal_transition";
     pub const MODULE_REFERENCE_UNKNOWN: &str = "this.module.reference_unknown";
     pub const MODULE_NOT_FOUND: &str = "this.module.not_found";
@@ -368,6 +369,13 @@ pub const FRAMEWORK_ERRORS: &[(&str, ErrorKind, &[&str], &str, &str)] = &[
         "Module unavailable: {module}",
     ),
     (
+        MODULE_HOT_LOAD_DISABLED,
+        K::PermissionDenied,
+        &["operation"],
+        "Chargement à chaud désactivé sur cet hôte (opération: {operation})",
+        "Hot loading is disabled on this host (operation: {operation})",
+    ),
+    (
         MODULE_ILLEGAL_TRANSITION,
         K::Internal,
         &["from", "to"],
@@ -563,6 +571,7 @@ pub fn descriptor() -> ModuleDescriptor {
                 .collect(),
         },
         custom: vec![],
+        runtime: None,
     }
 }
 
@@ -595,11 +604,16 @@ mod tests {
             MODULE_CYCLE,
             NOT_IMPLEMENTED,
             VFS_PRECONDITION_FAILED,
+            MODULE_HOT_LOAD_DISABLED,
             TRANSPORT_MISSING_ARG,
         ] {
             assert!(kind_of(c).is_some(), "{c}");
         }
         assert_eq!(kind_of(VFS_PRECONDITION_FAILED), Some(ErrorKind::Aborted));
+        assert_eq!(
+            kind_of(MODULE_HOT_LOAD_DISABLED),
+            Some(ErrorKind::PermissionDenied)
+        );
     }
 
     #[test]

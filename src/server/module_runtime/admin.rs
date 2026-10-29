@@ -76,6 +76,16 @@ pub async fn admin_middleware(
     }
 
     let method = request.method().clone();
+    let op = if method == Method::DELETE {
+        "unload"
+    } else {
+        "load"
+    };
+    if method != Method::GET
+        && let Err(e) = rt.ensure_hot_load(op)
+    {
+        return ApiError(e).into_response();
+    }
     let result = match (method, rest.as_str()) {
         (Method::GET, "") => Ok((StatusCode::OK, Json(serde_json::json!(rt.list().await)))),
         (Method::GET, name) if !name.contains('/') => rt
