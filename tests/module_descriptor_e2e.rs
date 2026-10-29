@@ -787,6 +787,7 @@ fn armed_runtime_host() -> Armed {
     let host = ServerBuilder::new()
         .with_link_service(InMemoryLinkService::new())
         .with_module_runtime()
+        .with_hot_load_enabled(true)
         .build_host()
         .expect("host")
         .with_auth_provider(Arc::new(Tokens));
