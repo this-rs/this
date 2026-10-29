@@ -11,12 +11,14 @@
 use async_trait::async_trait;
 use axum::Router;
 use axum::body::Body;
+use axum::extract::Path;
 use axum::http::{Request as HttpRequest, StatusCode};
-use axum::routing::post;
+use axum::routing::{post, put};
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use this::config::{EntityAuthConfig, EntityConfig, LinksConfig};
+use this::core::query::ListQuery;
 use this::core::{EntityCreator, EntityFetcher};
 use this::descriptor::{
     Applies, DescriptorSet, EntityDesc, FieldDesc, FieldType, FilterOp, ModuleDescriptor,
@@ -28,7 +30,9 @@ use this::server::exposure::grpc::entity_service::{
     EntityServiceImpl, FILTER_METADATA, SORT_METADATA,
 };
 use this::server::exposure::grpc::proto::entity_service_server::EntityService;
-use this::server::exposure::grpc::proto::{CreateEntityRequest, ListEntitiesRequest};
+use this::server::exposure::grpc::proto::{
+    CreateEntityRequest, ListEntitiesRequest, UpdateEntityRequest,
+};
 use this::server::exposure::rest::RestExposure;
 use this::server::host::ServerHost;
 use this::storage::InMemoryLinkService;
@@ -49,6 +53,19 @@ impl EntityCreator for Store {
         v["id"] = json!(Uuid::new_v4().to_string());
         self.rows.lock().unwrap().push(v.clone());
         Ok(v)
+    }
+
+    async fn update_from_json(&self, id: &Uuid, v: Value) -> anyhow::Result<Value> {
+        *self.writes.lock().unwrap() += 1;
+        let mut rows = self.rows.lock().unwrap();
+        let row = rows
+            .iter_mut()
+            .find(|r| r["id"] == json!(id.to_string()))
+            .ok_or_else(|| anyhow::anyhow!("not found"))?;
+        if let (Some(row), Value::Object(patch)) = (row.as_object_mut(), v) {
+            row.extend(patch);
+        }
+        Ok(row.clone())
     }
 }
 
@@ -91,16 +108,40 @@ impl EntityDescriptor for Routes {
     }
     fn build_routes(&self) -> Router {
         let store = self.store.clone();
-        Router::new().route(
-            &format!("/{}", self.plural),
-            post(move |axum::Json(v): axum::Json<Value>| {
-                let store = store.clone();
-                async move {
-                    let created = store.create_from_json(v).await.unwrap();
-                    axum::Json(created)
-                }
-            }),
-        )
+        let lister = self.store.clone();
+        let updater = self.store.clone();
+        Router::new()
+            .route(
+                &format!("/{}", self.plural),
+                post(move |axum::Json(v): axum::Json<Value>| {
+                    let store = store.clone();
+                    async move {
+                        let created = store.create_from_json(v).await.unwrap();
+                        axum::Json(created)
+                    }
+                })
+                // List as the CLI template should generate it: the checked `ListQuery`
+                // straight to `EntityFetcher::list_query`.
+                .get(move |q: ListQuery| {
+                    let store = lister.clone();
+                    async move {
+                        let (rows, total) = store.list_query(&q.0).await.unwrap();
+                        axum::Json(json!({"data": rows, "total": total}))
+                    }
+                }),
+            )
+            .route(
+                &format!("/{}/{{id}}", self.plural),
+                put(
+                    move |Path(id): Path<Uuid>, axum::Json(v): axum::Json<Value>| {
+                        let store = updater.clone();
+                        async move {
+                            let row = store.update_from_json(&id, v).await.unwrap();
+                            axum::Json(row)
+                        }
+                    },
+                ),
+            )
     }
 }
 
@@ -454,4 +495,219 @@ async fn grpc_list_applies_filter_and_sort_from_metadata() {
     assert_eq!(st.code(), tonic::Code::InvalidArgument);
     let st = svc.list_entities(list("{}", "note")).await.unwrap_err();
     assert_eq!(st.code(), tonic::Code::InvalidArgument);
+}
+
+// ---------------------------------------------------------------------------
+// Review round (validation stream): paths the first round did not prove.
+// ---------------------------------------------------------------------------
+
+async fn graphql_vars(host: &Arc<ServerHost>, query: &str, variables: Value) -> Value {
+    let app = GraphQLExposure::build_router_unenforced(host.clone()).unwrap();
+    send(
+        app,
+        "POST",
+        "/graphql",
+        json!({ "query": query, "variables": variables }),
+    )
+    .await
+    .1
+}
+
+/// Before the review, `$var` arguments were read as `null`: `filter: $f` listed EVERY row
+/// (fail-open) and `data: $input` was refused as not an object.
+#[tokio::test]
+async fn graphql_variables_reach_validation_and_filters() {
+    let f = fixture();
+    let create = r#"mutation ($input: JSON) { createInvoice(data: $input) { id number } }"#;
+    let out = graphql_vars(
+        &f.host,
+        create,
+        json!({"input": {"number": "abc", "amount": -1}}),
+    )
+    .await;
+    assert_eq!(
+        out["errors"][0]["extensions"]["fields"][0]["code"], "this.validation.positive",
+        "{out}"
+    );
+    assert_eq!(*f.invoices.writes.lock().unwrap(), 0, "store never reached");
+    let out = graphql_vars(
+        &f.host,
+        create,
+        json!({"input": {"number": " ab1 ", "amount": 2}}),
+    )
+    .await;
+    assert!(out.get("errors").is_none(), "{out}");
+    assert_eq!(out["data"]["createInvoice"]["number"], "AB1");
+
+    seed(&f).await;
+    let list = r#"query ($f: String, $s: String = "-amount") { invoices(filter: $f, sort: $s) { number } }"#;
+    let out = graphql_vars(&f.host, list, json!({"f": r#"{"amount>": 6}"#})).await;
+    assert!(out.get("errors").is_none(), "{out}");
+    let numbers: Vec<&str> = out["data"]["invoices"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["number"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        numbers,
+        vec!["CCC", "BBB", "DDD"],
+        "variable filter applied, default sort used"
+    );
+    let out = graphql_vars(&f.host, list, json!({"f": "{oops"})).await;
+    assert_eq!(
+        out["errors"][0]["extensions"]["this_code"], "this.query.malformed_filter",
+        "{out}"
+    );
+}
+
+#[tokio::test]
+async fn graphql_non_string_sort_is_typed_error() {
+    let f = fixture();
+    seed(&f).await;
+    let out = graphql(&f.host, r#"{ invoices(sort: ["amount"]) { number } }"#).await;
+    assert_eq!(
+        out["errors"][0]["extensions"]["this_code"], "this.query.malformed_sort",
+        "{out}"
+    );
+    assert!(out["data"].is_null(), "no unsorted list returned: {out}");
+}
+
+#[tokio::test]
+async fn invalid_update_refused_on_graphql_and_grpc() {
+    let f = fixture();
+    seed(&f).await;
+    let id = f.invoices.rows.lock().unwrap()[0]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let out = graphql(
+        &f.host,
+        &format!(r#"mutation {{ updateInvoice(id: "{id}", data: {{amount: -3}}) {{ id }} }}"#),
+    )
+    .await;
+    assert_eq!(
+        out["errors"][0]["extensions"]["fields"][0]["code"], "this.validation.positive",
+        "{out}"
+    );
+
+    let st = EntityServiceImpl::new(f.host.clone())
+        .update_entity(tonic::Request::new(UpdateEntityRequest {
+            entity_type: "invoice".into(),
+            entity_id: id.clone(),
+            data: Some(grpc_struct(json!({"number": "x"}))),
+        }))
+        .await
+        .unwrap_err();
+    assert_eq!(st.code(), tonic::Code::InvalidArgument);
+    let details: Value = serde_json::from_slice(st.details()).unwrap();
+    assert_eq!(
+        details["fields"][0]["code"],
+        "this.validation.string_length"
+    );
+    assert_eq!(*f.invoices.writes.lock().unwrap(), 0, "store never reached");
+
+    // Update: absent required fields are NOT required, present ones are transformed.
+    EntityServiceImpl::new(f.host.clone())
+        .update_entity(tonic::Request::new(UpdateEntityRequest {
+            entity_type: "invoice".into(),
+            entity_id: id,
+            data: Some(grpc_struct(json!({"number": " zz9 "}))),
+        }))
+        .await
+        .unwrap();
+    assert_eq!(f.invoices.rows.lock().unwrap()[0]["number"], "ZZ9");
+}
+
+/// Non-ASCII filters travel in `this-filter-bin`; an unreadable ASCII value is refused
+/// (it used to be read as "no filter", listing everything).
+#[tokio::test]
+async fn grpc_filter_bin_metadata_and_unreadable_value_refused() {
+    use tonic::metadata::{AsciiMetadataValue, MetadataValue};
+    let f = fixture();
+    seed(&f).await;
+    f.invoices
+        .rows
+        .lock()
+        .unwrap()
+        .push(json!({"id": Uuid::new_v4().to_string(), "number": "Zoé", "amount": 1.0}));
+    let svc = EntityServiceImpl::new(f.host.clone());
+    let base = || ListEntitiesRequest {
+        entity_type: "invoice".into(),
+        limit: 0,
+        offset: 0,
+    };
+
+    let mut req = tonic::Request::new(base());
+    req.metadata_mut().insert_bin(
+        "this-filter-bin",
+        MetadataValue::from_bytes(r#"{"number": "Zoé"}"#.as_bytes()),
+    );
+    let res = svc.list_entities(req).await.unwrap().into_inner();
+    assert_eq!(res.total, 1);
+
+    let mut req = tonic::Request::new(base());
+    req.metadata_mut().insert(
+        FILTER_METADATA,
+        AsciiMetadataValue::try_from(r#"{"number": "Zoé"}"#.as_bytes()).unwrap(),
+    );
+    let st = svc.list_entities(req).await.unwrap_err();
+    assert_eq!(st.code(), tonic::Code::InvalidArgument, "{st:?}");
+    let details: Value = serde_json::from_slice(st.details()).unwrap();
+    assert_eq!(details["code"], "this.transport.bad_request");
+}
+
+/// The REAL REST exposure (not a hand-built router): list filter/sort checked by the layer
+/// and applied through `ListQuery`; a generated `PUT` handler cannot store an invalid row.
+#[tokio::test]
+async fn rest_exposure_list_and_update_go_through_the_layer() {
+    let f = fixture();
+    seed(&f).await;
+    let rest = || RestExposure::build_router(f.host.clone(), vec![]).unwrap();
+    let get = |uri: &'static str| {
+        let app = rest();
+        async move {
+            let res = app
+                .oneshot(HttpRequest::builder().uri(uri).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            let status = res.status();
+            let bytes = axum::body::to_bytes(res.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            (
+                status,
+                serde_json::from_slice::<Value>(&bytes).unwrap_or(Value::Null),
+            )
+        }
+    };
+
+    let (status, body) = get("/invoices?filter=%7Boops").await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["code"], "this.query.malformed_filter");
+    let (status, body) = get("/invoices?sort=note").await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["code"], "this.query.field_not_sortable");
+    let (status, body) =
+        get("/invoices?filter=%7B%22amount%3E%22%3A6%7D&sort=-amount&limit=2").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["total"], 3);
+    assert_eq!(body["data"][0]["number"], "CCC");
+    assert_eq!(body["data"].as_array().unwrap().len(), 2);
+
+    let id = f.invoices.rows.lock().unwrap()[0]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let (status, body) = send(
+        rest(),
+        "PUT",
+        &format!("/invoices/{id}"),
+        json!({"amount": -1}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    assert_eq!(body["fields"][0]["code"], "this.validation.positive");
+    assert_eq!(*f.invoices.writes.lock().unwrap(), 0, "store never reached");
 }

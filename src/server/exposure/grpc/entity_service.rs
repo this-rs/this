@@ -16,9 +16,51 @@ use tonic::{Request, Response, Status};
 use uuid::Uuid;
 
 /// Request metadata carrying the list filter (REST `?filter=` grammar, JSON object).
+/// Non-ASCII values go in the binary variant `this-filter-bin` (same for `this-sort-bin`).
 pub const FILTER_METADATA: &str = "this-filter";
 /// Request metadata carrying the list sort (REST `?sort=` grammar).
 pub const SORT_METADATA: &str = "this-sort";
+
+/// Read a list-query metadata entry, FAIL-CLOSED: `key` (ASCII) or `key-bin` (binary,
+/// base64 on the wire, for UTF-8 filter values such as `{"name": "Zoé"}`).
+/// - absent → `Ok(None)` (no filter / no sort, historical path);
+/// - present but unreadable (non visible-ASCII in `key`, invalid UTF-8 in `key-bin`), or
+///   given under both keys → `INVALID_ARGUMENT` `this.transport.bad_request`. Reading an
+///   unreadable value as "absent" would silently list EVERYTHING.
+fn query_metadata(md: &tonic::metadata::MetadataMap, key: &str) -> Result<Option<String>, Status> {
+    let bad = |reason: String| {
+        crate::core::errors::to_status(
+            crate::descriptor::ContractError::framework(
+                crate::descriptor::framework::codes::TRANSPORT_BAD_REQUEST,
+            )
+            .with_param("reason", reason),
+        )
+    };
+    let ascii = md
+        .get(key)
+        .map(|v| {
+            v.to_str()
+                .map(str::to_string)
+                .map_err(|_| bad(format!("`{key}` is not visible ASCII: use `{key}-bin`")))
+        })
+        .transpose()?;
+    let bin_key = format!("{key}-bin");
+    let binary = md
+        .get_bin(bin_key.as_str())
+        .map(|v| {
+            v.to_bytes()
+                .map_err(|_| bad(format!("`{bin_key}` is not valid base64")))
+                .and_then(|b| {
+                    String::from_utf8(b.to_vec())
+                        .map_err(|_| bad(format!("`{bin_key}` is not valid UTF-8")))
+                })
+        })
+        .transpose()?;
+    match (ascii, binary) {
+        (Some(_), Some(_)) => Err(bad(format!("both `{key}` and `{bin_key}` given"))),
+        (a, b) => Ok(a.or(b)),
+    }
+}
 
 /// A write failure: a `ContractError` (validation, business code) keeps its code and kind
 /// (`this.validation.failed` → `INVALID_ARGUMENT`); anything else stays the historical
@@ -107,14 +149,8 @@ impl EntityService for EntityServiceImpl {
         // Typed filters (validation stream): `this-filter` / `this-sort` metadata, same
         // grammar as REST `?filter=` / `?sort=`. Present → checked against the descriptor
         // (strict without one), applied BEFORE pagination; malformed → INVALID_ARGUMENT.
-        let meta = |k: &str| {
-            request
-                .metadata()
-                .get(k)
-                .and_then(|v| v.to_str().ok())
-                .map(str::to_string)
-        };
-        let (filter, sort) = (meta(FILTER_METADATA), meta(SORT_METADATA));
+        let filter = query_metadata(request.metadata(), FILTER_METADATA)?;
+        let sort = query_metadata(request.metadata(), SORT_METADATA)?;
         let req = request.into_inner();
 
         let fetcher = self.get_fetcher(&req.entity_type)?;
@@ -133,7 +169,7 @@ impl EntityService for EntityServiceImpl {
             let (rows, total) = fetcher
                 .list_query(&q)
                 .await
-                .map_err(|e| Status::internal(format!("Failed to list entities: {}", e)))?;
+                .map_err(|e| write_error(&e, "list"))?;
             return Ok(Response::new(ListEntitiesResponse {
                 entities: rows.iter().map(json_to_struct).collect(),
                 total: i32::try_from(total).unwrap_or(i32::MAX),

@@ -28,7 +28,22 @@ pub async fn resolve_query_field(
         // (strict without one) and applied BEFORE pagination; malformed → a
         // `ContractError` (`BAD_USER_INPUT`). Absent → historical path, unchanged.
         let filter = utils::get_json_arg(field, "filter");
-        let sort = utils::get_string_arg(field, "sort");
+        // `sort` present but not a string (list, number, object...) is a typed error:
+        // reading it as "no sort" would silently ignore what the client asked for.
+        let sort = match utils::get_json_arg(field, "sort") {
+            None | Some(Value::Null) => None,
+            Some(Value::String(s)) => Some(s),
+            Some(other) => {
+                return Err(crate::descriptor::ContractError::framework(
+                    crate::descriptor::framework::codes::QUERY_MALFORMED_SORT,
+                )
+                .with_param(
+                    "reason",
+                    format!("`sort` must be a string (REST grammar), got {other}"),
+                )
+                .into());
+            }
+        };
         if (filter.is_some() || sort.is_some())
             && let Some(fetcher) = host.entity_fetchers.get(entity_type)
         {
