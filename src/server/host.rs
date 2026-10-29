@@ -62,6 +62,11 @@ pub struct ServerHost {
     /// Entity creators map (for automatic entity + link creation)
     pub entity_creators: Arc<HashMap<String, Arc<dyn EntityCreator>>>,
 
+    /// Live catalog (descriptors, fetchers, creators, links config, plurals) published
+    /// atomically. Equal to the fields above at construction; runtime module loading
+    /// publishes new snapshots here. New readers MUST go through it (see `server::catalog`).
+    pub catalog: Arc<crate::server::catalog::LiveCatalog>,
+
     /// Optional event bus for real-time notifications (WebSocket, SSE)
     ///
     /// When present, REST/GraphQL handlers will publish events for mutations.
@@ -231,14 +236,27 @@ impl ServerHost {
     ) -> Result<Self> {
         let config = Arc::new(config);
         let registry = Arc::new(LinkRouteRegistry::new(config.clone()));
+        let fetchers = Arc::new(fetchers);
+        let creators = Arc::new(creators);
+        let catalog = Arc::new(crate::server::catalog::LiveCatalog::new(
+            crate::server::catalog::HostCatalog {
+                descriptors: Arc::new(crate::descriptor::DescriptorSet::new()),
+                fetchers: fetchers.clone(),
+                creators: creators.clone(),
+                links_config: config.clone(),
+                plurals: Arc::new(entity_registry.entity_plurals()),
+                generation: 0,
+            },
+        ));
 
         Ok(Self {
             config,
             link_service,
             registry,
             entity_registry,
-            entity_fetchers: Arc::new(fetchers),
-            entity_creators: Arc::new(creators),
+            entity_fetchers: fetchers,
+            entity_creators: creators,
+            catalog,
             event_bus: None,
             event_log: None,
             sink_registry: None,
@@ -260,6 +278,19 @@ impl ServerHost {
             #[cfg(feature = "wami")]
             sts_state: None,
         })
+    }
+
+    /// Publish the active descriptors in the live catalog (called by `build_host`).
+    pub fn with_descriptors(self, descriptors: crate::descriptor::DescriptorSet) -> Self {
+        let mut next = (*self.catalog.load()).clone();
+        next.descriptors = Arc::new(descriptors);
+        self.catalog.publish(next);
+        self
+    }
+
+    /// Active descriptors (current snapshot).
+    pub fn descriptors(&self) -> Arc<crate::descriptor::DescriptorSet> {
+        self.catalog.load().descriptors.clone()
     }
 
     /// Get entity types registered in the host
@@ -482,6 +513,16 @@ impl ServerHost {
         };
         let config = Arc::new(config);
         let registry = Arc::new(LinkRouteRegistry::new(config.clone()));
+        let catalog = Arc::new(crate::server::catalog::LiveCatalog::new(
+            crate::server::catalog::HostCatalog {
+                descriptors: Arc::new(crate::descriptor::DescriptorSet::new()),
+                fetchers: Arc::new(HashMap::new()),
+                creators: Arc::new(HashMap::new()),
+                links_config: config.clone(),
+                plurals: Arc::new(vec![]),
+                generation: 0,
+            },
+        ));
 
         Self {
             config,
@@ -490,6 +531,7 @@ impl ServerHost {
             entity_registry: EntityRegistry::new(),
             entity_fetchers: Arc::new(HashMap::new()),
             entity_creators: Arc::new(HashMap::new()),
+            catalog,
             event_bus: None,
             event_log: None,
             sink_registry: None,

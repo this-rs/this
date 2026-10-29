@@ -1,0 +1,61 @@
+flowchart LR
+%% name: module-descriptor-derivations
+%% PROUVE (fondation, cargo test -p this-descriptor) : ModuleDescriptor, compose, moteurs validate / query / policy / i18n,
+%%   table ErrorKind, catalogue framework fr/en, impl Described emis par les macros (tests this-rs descriptor_macro_tests).
+%% SOURCES LUES : crates/this-descriptor/src/*, src/entities/macros.rs, src/core/errors/mod.rs, proto/this_grpc.proto.
+%% NON ETABLI : derive::graphql_sdl / proto_file / json_schema (stubs NotImplemented, flux schema) ; glue Leptos (suite).
+    classDef ok       fill:#2ea04333,stroke:#2ea043,stroke-width:2px
+    classDef todo     fill:#f0a02033,stroke:#d98a00,stroke-width:2px
+    classDef refused  fill:#e5484d33,stroke:#e5484d,stroke-width:2px,stroke-dasharray:6 3
+    classDef upstream fill:#8b8fa322,stroke:#8b8fa3,stroke-dasharray:3 3
+    classDef trap     fill:#e5484d1f,stroke:#e5484d,stroke-width:3px
+    classDef entry    fill:#a48bff40,stroke:#a48bff,stroke-width:3px
+
+    MAC(["Macro impl_data_entity<br/>champs, types, pluriel, regles"]):::entry
+    YML(["descriptor/module.yaml<br/>requires, liens, erreurs, cles, permissions"]):::entry
+    MD["✅ ModuleDescriptor::compose<br/>un proprietaire par facette"]:::ok
+    MAC ==> MD
+    YML ==> MD
+
+    subgraph PURE["Moteurs purs this-descriptor, wasm32"]
+        direction TB
+        V["✅ engine::validate::apply"]:::ok
+        Q["✅ engine::query strict"]:::ok
+        P["✅ engine::policy::evaluate<br/>Option bool"]:::ok
+        I["✅ engine::i18n::render"]:::ok
+        E["✅ ErrorKind table<br/>HTTP gRPC GraphQL"]:::ok
+    end
+    MD ==> PURE
+
+    subgraph DER["Derivations, flux schema"]
+        direction TB
+        SDL["🟠 derive::graphql_sdl<br/>cache par generation"]:::todo
+        PROTO["🟠 derive::proto_file<br/>documentation seulement"]:::todo
+        JS["🟠 derive::json_schema"]:::todo
+    end
+    MD ==> DER
+
+    subgraph SURF["Surfaces"]
+        direction TB
+        REST["🟠 REST<br/>couche de validation + ApiError"]:::todo
+        GQL["🟠 GraphQL<br/>ValidatingCreator + guarded_fetcher"]:::todo
+        GRPC["🟠 gRPC<br/>identity + Status details"]:::todo
+        LEP["⚪ Leptos wasm32"]:::upstream
+        CLI["🟠 this-cli<br/>Tera = descripteur"]:::todo
+    end
+    PURE --> REST
+    PURE --> GQL
+    PURE --> GRPC
+    PURE -.->|"glue suite"| LEP
+    DER --> GQL
+    DER -.->|"client codegen"| GRPC
+    MD --> CLI
+
+    OLD1["⚠ schema infere<br/>d'un sample JSON"]:::trap
+    OLD2["⚠ GraphQL, gRPC, REST CLI<br/>contournent la validation"]:::trap
+    OLD3["⚠ toute erreur gRPC<br/>devient INTERNAL"]:::trap
+    WIRE["🔴 tags proto comme contrat du fil<br/>le fil servi est Struct"]:::refused
+    OLD1 -.->|"remplace par"| SDL
+    OLD2 -.->|"remplace par"| V
+    OLD3 -.->|"remplace par from_anyhow"| E
+    PROTO -.- WIRE

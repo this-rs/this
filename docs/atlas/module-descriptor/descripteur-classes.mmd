@@ -1,0 +1,136 @@
+classDiagram
+%% name: module-descriptor-classes
+%% PROUVE : forme du code de crates/this-descriptor/src (fondation, v2) ; JSON et YAML aller-retour testes
+%%   (descriptor_json_roundtrip, descriptor_yaml_roundtrip).
+%% SOURCES LUES : crates/this-descriptor/src/{module,entity,field,link,error,perm,i18n,query,custom}.rs.
+%% NON ETABLI : rien d'autre que ce que les tests couvrent ; le code fait foi en cas d'ecart.
+    direction LR
+    class ModuleDescriptor {
+        +u32 format
+        +String name
+        +String version
+        +Vec~ModuleReq~ requires
+        +Vec~EntityDesc~ entities
+        +Vec~LinkDesc~ links
+        +Vec~ErrorDesc~ errors
+        +I18nDecl i18n
+        +Vec~Custom~ custom
+        +check(CustomRegistry, CheckProfile) Result
+        +compose(described) Result
+    }
+    class ModuleReq {
+        +String name
+        +String version
+        +bool optional
+    }
+    class EntityDesc {
+        +String name
+        +String plural
+        +EntityKind kind
+        +Vec~FieldDesc~ fields
+        +Vec~u32~ reserved_tags
+        +PermDesc permissions
+        +EntityI18n i18n
+    }
+    class FieldDesc {
+        +String name
+        +FieldType ty
+        +bool optional
+        +Option~Value~ default
+        +Option~u32~ proto_tag
+        +Vec~ValidatorRule~ validators
+        +Vec~TransformRule~ transforms
+        +Vec~FilterOp~ filterable
+        +bool sortable
+        +bool read_only
+        +bool immutable
+        +required_on(Applies) bool
+    }
+    class LinkDesc {
+        +String link_type
+        +String source
+        +String target
+        +Vec~FieldDesc~ fields
+        +PermDesc permissions
+        +effective_policy(scope, op) PolicyExpr
+    }
+    class ErrorDesc {
+        +ErrorCode code
+        +ErrorKind kind
+        +MessageKey message_key
+        +Vec~String~ params
+    }
+    class ContractError {
+        +ErrorCode code
+        +ErrorKind kind
+        +MessageKey message_key
+        +String message
+        +Vec~FieldViolation~ fields
+        +framework(code) ContractError
+        +from_desc(ErrorDesc) ContractError
+        +http_body() Value
+    }
+    class ErrorKind {
+        <<enumeration>>
+        Validation
+        PermissionDenied
+        Aborted
+        Internal
+        +http_status() u16
+        +grpc_code() i32
+        +graphql_code() str
+    }
+    class PermDesc {
+        +Map~Operation,PolicyExpr~ ops
+        +effective(Operation) PolicyExpr
+    }
+    class PolicyExpr {
+        <<enumeration>>
+        Public
+        Authenticated
+        Deny
+        HasRole
+        Perm
+        Resolver
+        And_Or_Not
+    }
+    class I18nDecl {
+        +Locale default_locale
+        +Vec~MessageDecl~ keys
+    }
+    class MessageBundle {
+        +String module
+        +Locale locale
+        +Map messages
+    }
+    class Query~T~ {
+        +Option~FilterExpr~ filter
+        +Vec~SortSpec~ sort
+        +Page page
+    }
+    class DescriptorSet {
+        +insert(ModuleDescriptor) Result
+        +compiled(entity) CompiledEntity
+        +generation() u64
+    }
+    class Described {
+        <<interface>>
+        +entity_desc() static EntityDesc
+    }
+    ModuleDescriptor "1" *-- "*" ModuleReq : requires
+    ModuleDescriptor "1" *-- "*" EntityDesc
+    ModuleDescriptor "1" *-- "*" LinkDesc
+    ModuleDescriptor "1" *-- "*" ErrorDesc
+    ModuleDescriptor "1" *-- "1" I18nDecl
+    I18nDecl ..> MessageBundle : textes hors descripteur
+    EntityDesc "1" *-- "*" FieldDesc
+    EntityDesc "1" *-- "1" PermDesc
+    LinkDesc "1" *-- "*" FieldDesc
+    LinkDesc "1" *-- "1" PermDesc
+    PermDesc --> PolicyExpr
+    ErrorDesc --> ErrorKind
+    ContractError --> ErrorKind
+    ContractError ..> ErrorDesc : from_desc
+    DescriptorSet o-- "*" ModuleDescriptor
+    Query~T~ ..> FieldDesc : filterable et sortable
+    Described ..> EntityDesc : macros impl_data_entity

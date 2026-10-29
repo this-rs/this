@@ -67,6 +67,15 @@ jobs:
       - name: Run doc tests
         run: cargo test --doc --features all,wami
 
+      - name: Test this-descriptor (pure crate, every feature)
+        run: cargo test -p this-descriptor --all-features
+
+      - name: Check this-descriptor on wasm32 (no server dependency)
+        run: |
+          rustup target add wasm32-unknown-unknown
+          cargo check -p this-descriptor --target wasm32-unknown-unknown
+          cargo check -p this-descriptor --target wasm32-unknown-unknown --features yaml,pattern
+
   # Code coverage
   coverage:
     name: Code Coverage
