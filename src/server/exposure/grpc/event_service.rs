@@ -129,6 +129,7 @@ fn extract_link_type(event: &FrameworkEvent) -> Option<&str> {
         },
         FrameworkEvent::Entity(_) => None,
         FrameworkEvent::Cognitive(_) => None,
+        FrameworkEvent::Module(_) => None,
         FrameworkEvent::GdprErasure { .. } => None,
     }
 }
@@ -232,6 +233,15 @@ fn envelope_to_response(envelope: &EventEnvelope) -> EventResponse {
             String::new(),
             String::new(),
             None,
+            None,
+        ),
+        FrameworkEvent::Module(m) => (
+            "module".to_string(),
+            String::new(),
+            String::new(),
+            String::new(),
+            String::new(),
+            Some(json_to_struct(&serde_json::to_value(m).unwrap_or_default())),
             None,
         ),
     };
