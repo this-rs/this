@@ -352,13 +352,12 @@ fn portee_du_flux<T>(request: &Request<T>) -> Result<PorteeFlux, Status> {
         return Ok(PorteeFlux::Locataire(tid));
     }
 
-    Err(Status::permission_denied(
-        "flux d'événements : aucune portée — l'abstention est un refus. \
-         Présentez une identité (un interceptor gRPC qui pose `AuthContext` : \
-         un jeton porteur de locataire scope le flux, un administrateur le voit \
-         entier), ou déclarez le locataire par l'en-tête `x-tenant-id`. \
-         Auparavant, une requête sans portée recevait les événements de TOUS \
-         les locataires.",
+    Err(crate::core::errors::to_status(
+        crate::core::errors::forbidden(
+            "event stream: no scope — present an identity (an interceptor setting \
+             `AuthContext`: a tenant token scopes the stream, an administrator sees it \
+             all) or declare the tenant with the `x-tenant-id` header",
+        ),
     ))
 }
 
@@ -397,8 +396,11 @@ impl EventService for EventServiceImpl {
             .host
             .event_bus()
             .ok_or_else(|| {
-                Status::unavailable(
-                    "EventBus not configured — real-time streaming is not available",
+                crate::core::errors::to_status(
+                    crate::descriptor::ContractError::framework(
+                        crate::descriptor::framework::codes::TRANSPORT_UNAVAILABLE,
+                    )
+                    .with_param("reason", "event bus not configured"),
                 )
             })?
             .clone();

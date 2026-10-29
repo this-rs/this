@@ -105,11 +105,17 @@ impl LinkServiceTrait for LinkServiceImpl {
         let guard = self.guard(&request).await?;
         let req = request.into_inner();
 
-        let source_id = Uuid::parse_str(&req.source_id)
-            .map_err(|e| Status::invalid_argument(format!("Invalid source_id: {}", e)))?;
+        let source_id = Uuid::parse_str(&req.source_id).map_err(|e| {
+            to_status(crate::core::errors::bad_request(format!(
+                "Invalid source_id: {e}"
+            )))
+        })?;
 
-        let target_id = Uuid::parse_str(&req.target_id)
-            .map_err(|e| Status::invalid_argument(format!("Invalid target_id: {}", e)))?;
+        let target_id = Uuid::parse_str(&req.target_id).map_err(|e| {
+            to_status(crate::core::errors::bad_request(format!(
+                "Invalid target_id: {e}"
+            )))
+        })?;
 
         let metadata = req.metadata.as_ref().map(struct_to_json);
 
@@ -156,8 +162,11 @@ impl LinkServiceTrait for LinkServiceImpl {
         let guard = self.guard(&request).await?;
         let req = request.into_inner();
 
-        let link_id = Uuid::parse_str(&req.link_id)
-            .map_err(|e| Status::invalid_argument(format!("Invalid link_id: {}", e)))?;
+        let link_id = Uuid::parse_str(&req.link_id).map_err(|e| {
+            to_status(crate::core::errors::bad_request(format!(
+                "Invalid link_id: {e}"
+            )))
+        })?;
 
         let link = self
             .host
@@ -165,7 +174,7 @@ impl LinkServiceTrait for LinkServiceImpl {
             .get(&link_id)
             .await
             .map_err(|e| crate::core::errors::grpc::status_from_anyhow(&e))?
-            .ok_or_else(|| Status::not_found(format!("Link '{}' not found", req.link_id)))?;
+            .ok_or_else(|| to_status(crate::core::errors::not_found("link", &req.link_id)))?;
 
         guard
             .check_link(Some(&link.link_type), None, None, None, Operation::GetLink)
@@ -182,8 +191,11 @@ impl LinkServiceTrait for LinkServiceImpl {
         let guard = self.guard(&request).await?;
         let req = request.into_inner();
 
-        let entity_id = Uuid::parse_str(&req.entity_id)
-            .map_err(|e| Status::invalid_argument(format!("Invalid entity_id: {}", e)))?;
+        let entity_id = Uuid::parse_str(&req.entity_id).map_err(|e| {
+            to_status(crate::core::errors::bad_request(format!(
+                "Invalid entity_id: {e}"
+            )))
+        })?;
 
         let link_type = if req.link_type.is_empty() {
             None
@@ -224,8 +236,11 @@ impl LinkServiceTrait for LinkServiceImpl {
         let guard = self.guard(&request).await?;
         let req = request.into_inner();
 
-        let entity_id = Uuid::parse_str(&req.entity_id)
-            .map_err(|e| Status::invalid_argument(format!("Invalid entity_id: {}", e)))?;
+        let entity_id = Uuid::parse_str(&req.entity_id).map_err(|e| {
+            to_status(crate::core::errors::bad_request(format!(
+                "Invalid entity_id: {e}"
+            )))
+        })?;
 
         let link_type = if req.link_type.is_empty() {
             None
@@ -266,8 +281,11 @@ impl LinkServiceTrait for LinkServiceImpl {
         let guard = self.guard(&request).await?;
         let req = request.into_inner();
 
-        let link_id = Uuid::parse_str(&req.link_id)
-            .map_err(|e| Status::invalid_argument(format!("Invalid link_id: {}", e)))?;
+        let link_id = Uuid::parse_str(&req.link_id).map_err(|e| {
+            to_status(crate::core::errors::bad_request(format!(
+                "Invalid link_id: {e}"
+            )))
+        })?;
 
         // Fetch link before deletion for event data
         let link = self
@@ -487,6 +505,10 @@ mod tests {
             .await
             .expect_err("should fail on invalid source_id");
 
+        assert_eq!(
+            err.metadata().get("x-this-error").unwrap(),
+            "this.transport.bad_request"
+        );
         assert_eq!(err.code(), Code::InvalidArgument);
         assert!(
             err.message().contains("Invalid source_id"),
@@ -585,10 +607,14 @@ mod tests {
             .expect_err("should fail when link does not exist");
 
         assert_eq!(err.code(), Code::NotFound);
-        assert!(
-            err.message().contains("not found"),
-            "error message should mention 'not found'"
+        // Contract envelope (was an ad hoc `Status::not_found(format!(..))`).
+        assert_eq!(
+            err.metadata().get("x-this-error").unwrap(),
+            "this.entity.not_found"
         );
+        let contract = crate::core::errors::grpc::contract_error_of(&err).expect("envelope");
+        assert_eq!(contract.code.as_str(), "this.entity.not_found");
+        assert_eq!(contract.params["entity"], "link");
     }
 
     // -----------------------------------------------------------------------

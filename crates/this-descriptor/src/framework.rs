@@ -71,6 +71,8 @@ pub mod codes {
     pub const TRANSPORT_BAD_REQUEST: &str = "this.transport.bad_request";
     pub const TRANSPORT_MISSING_ARG: &str = "this.transport.missing_arg";
     pub const TRANSPORT_UNAVAILABLE: &str = "this.transport.unavailable";
+    pub const TRANSPORT_NOT_FOUND: &str = "this.transport.not_found";
+    pub const TRANSPORT_METHOD_NOT_ALLOWED: &str = "this.transport.method_not_allowed";
     pub const NOT_IMPLEMENTED: &str = "this.not_implemented";
     pub const INTERNAL: &str = "this.internal";
 }
@@ -464,6 +466,20 @@ pub const FRAMEWORK_ERRORS: &[(&str, ErrorKind, &[&str], &str, &str)] = &[
         &["field"],
         "Argument manquant: {field}",
         "Missing argument: {field}",
+    ),
+    (
+        TRANSPORT_NOT_FOUND,
+        K::NotFound,
+        &["path"],
+        "Route introuvable: {path}",
+        "Route not found: {path}",
+    ),
+    (
+        TRANSPORT_METHOD_NOT_ALLOWED,
+        K::BadRequest,
+        &["method"],
+        "Méthode non autorisée: {method}",
+        "Method not allowed: {method}",
     ),
     (
         TRANSPORT_UNAVAILABLE,

@@ -122,8 +122,11 @@ impl Entity {
     /// Generic method to get all links of a specific type
     async fn links(&self, link_type: Option<String>) -> Result<Vec<Link>> {
         if let Some(host) = &self.host {
-            let uuid = Uuid::parse_str(&self.id)
-                .map_err(|e| Error::new(format!("Invalid UUID: {}", e)))?;
+            let uuid = Uuid::parse_str(&self.id).map_err(|e| {
+                crate::core::errors::to_graphql_error(crate::core::errors::bad_request(format!(
+                    "invalid UUID: {e}"
+                )))
+            })?;
 
             let link_type_str = link_type.as_deref();
 
@@ -162,8 +165,11 @@ impl Entity {
     #[allow(dead_code)]
     async fn get_linked_entities(&self, link_type: &str, target_type: &str) -> Result<Vec<Entity>> {
         if let Some(host) = &self.host {
-            let uuid = Uuid::parse_str(&self.id)
-                .map_err(|e| Error::new(format!("Invalid UUID: {}", e)))?;
+            let uuid = Uuid::parse_str(&self.id).map_err(|e| {
+                crate::core::errors::to_graphql_error(crate::core::errors::bad_request(format!(
+                    "invalid UUID: {e}"
+                )))
+            })?;
 
             match host
                 .link_service
@@ -255,8 +261,11 @@ impl QueryRoot {
     /// Returns the entity with all its custom fields in the `data` field
     async fn entity(&self, id: String, entity_type: String) -> Result<Option<Entity>> {
         if let Some(fetcher) = self.host.entity_fetchers.get(&entity_type) {
-            let uuid =
-                Uuid::parse_str(&id).map_err(|e| Error::new(format!("Invalid UUID: {}", e)))?;
+            let uuid = Uuid::parse_str(&id).map_err(|e| {
+                crate::core::errors::to_graphql_error(crate::core::errors::bad_request(format!(
+                    "invalid UUID: {e}"
+                )))
+            })?;
 
             match fetcher.fetch_as_json(&uuid).await {
                 Ok(value) => Ok(Some(Entity {
@@ -324,7 +333,11 @@ impl QueryRoot {
 
     /// Get link by ID
     async fn link(&self, id: String) -> Result<Option<Link>> {
-        let uuid = Uuid::parse_str(&id).map_err(|e| Error::new(format!("Invalid UUID: {}", e)))?;
+        let uuid = Uuid::parse_str(&id).map_err(|e| {
+            crate::core::errors::to_graphql_error(crate::core::errors::bad_request(format!(
+                "invalid UUID: {e}"
+            )))
+        })?;
 
         match self.host.link_service.get(&uuid).await {
             Ok(Some(link_entity)) => Ok(Some(Link {
@@ -351,8 +364,11 @@ impl QueryRoot {
         link_type: Option<String>,
         target_type: Option<String>,
     ) -> Result<Vec<Link>> {
-        let uuid =
-            Uuid::parse_str(&entity_id).map_err(|e| Error::new(format!("Invalid UUID: {}", e)))?;
+        let uuid = Uuid::parse_str(&entity_id).map_err(|e| {
+            crate::core::errors::to_graphql_error(crate::core::errors::bad_request(format!(
+                "invalid UUID: {e}"
+            )))
+        })?;
 
         let link_type_str = link_type.as_deref();
         let target_type_str = target_type.as_deref();
@@ -390,8 +406,11 @@ impl QueryRoot {
     #[allow(dead_code)]
     async fn get_entity_by_type(&self, id: String, entity_type: String) -> Result<Option<Entity>> {
         if let Some(fetcher) = self.host.entity_fetchers.get(&entity_type) {
-            let uuid =
-                Uuid::parse_str(&id).map_err(|e| Error::new(format!("Invalid UUID: {}", e)))?;
+            let uuid = Uuid::parse_str(&id).map_err(|e| {
+                crate::core::errors::to_graphql_error(crate::core::errors::bad_request(format!(
+                    "invalid UUID: {e}"
+                )))
+            })?;
 
             match fetcher.fetch_as_json(&uuid).await {
                 Ok(value) => Ok(Some(Entity {
@@ -444,10 +463,16 @@ impl MutationRoot {
         link_type: String,
         metadata: Option<Value>,
     ) -> Result<Link> {
-        let source_uuid = Uuid::parse_str(&source_id)
-            .map_err(|e| Error::new(format!("Invalid source UUID: {}", e)))?;
-        let target_uuid = Uuid::parse_str(&target_id)
-            .map_err(|e| Error::new(format!("Invalid target UUID: {}", e)))?;
+        let source_uuid = Uuid::parse_str(&source_id).map_err(|e| {
+            crate::core::errors::to_graphql_error(crate::core::errors::bad_request(format!(
+                "invalid UUID: {e}"
+            )))
+        })?;
+        let target_uuid = Uuid::parse_str(&target_id).map_err(|e| {
+            crate::core::errors::to_graphql_error(crate::core::errors::bad_request(format!(
+                "invalid UUID: {e}"
+            )))
+        })?;
 
         use crate::core::link::LinkEntity as CoreLinkEntity;
 
@@ -469,14 +494,18 @@ impl MutationRoot {
                 target: None,
                 source: None,
             }),
-            Err(e) => Err(Error::new(format!("Failed to create link: {}", e))),
+            Err(e) => Err(crate::core::errors::graphql::graphql_error_from_anyhow(&e)),
         }
     }
 
     /// Delete a link
     #[allow(dead_code)]
     async fn delete_link(&self, id: String) -> Result<bool> {
-        let uuid = Uuid::parse_str(&id).map_err(|e| Error::new(format!("Invalid UUID: {}", e)))?;
+        let uuid = Uuid::parse_str(&id).map_err(|e| {
+            crate::core::errors::to_graphql_error(crate::core::errors::bad_request(format!(
+                "invalid UUID: {e}"
+            )))
+        })?;
 
         match self.host.link_service.delete(&uuid).await {
             Ok(_) => Ok(true),

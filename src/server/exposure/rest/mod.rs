@@ -289,16 +289,6 @@ impl RestExposure {
             tracing::info!("module runtime mounted (dispatch layer + admin interface)");
         }
 
-        // Error localization (errors-i18n stream): every response carrying a `ContractError`
-        // (validation, policies, runtime dispatch, handlers using `ApiError`) is rendered in
-        // the request locale (`?lang=`, `x-this-locale`, cookie, `Accept-Language`) from the
-        // host catalog, which runtime modules extend with their bundles. Outside every layer
-        // above, inside authentication (its 401 keeps the framework default locale).
-        app = app.layer(middleware::from_fn_with_state(
-            host.locales.clone(),
-            crate::core::errors::localize_errors,
-        ));
-
         // Auto-wire auth middleware if auth provider is configured
         // This layer must be added last so it wraps all routes
         if let Some(ref auth_provider) = host.auth_provider {
@@ -319,6 +309,18 @@ impl RestExposure {
             app = app.layer(middleware::from_fn_with_state(auth_layer, auth_middleware));
             tracing::info!("REST auth + tenant resolver middleware auto-wired");
         }
+
+        // Error localization (errors-i18n stream): every response carrying a `ContractError`
+        // (validation, policies, runtime dispatch, handlers using `ApiError`) is rendered in
+        // the request locale (`?lang=`, `x-this-locale`, cookie, `Accept-Language`) from the
+        // host catalog, which runtime modules extend with their bundles. OUTSIDE authentication,
+        // tenant and policies too (their 401 / 403 are localized; added after them), inside the
+        // domain guard and CORS. Also gives the envelope to responses that carry no contract
+        // (axum rejections, router 404 / 405).
+        app = app.layer(middleware::from_fn_with_state(
+            host.locales.clone(),
+            crate::core::errors::localize_errors,
+        ));
 
         // Domaine servi : refusé AVANT l'authentification — un hôte qui n'est pas
         // servi n'a pas à coûter une vérification de jeton — et le locataire du
@@ -536,10 +538,26 @@ mod tests {
         ] {
             let a = call(full.clone(), method, &uri).await;
             let b = call(link_only.clone(), method, &uri).await;
+            // Same answer as the bare link routes; the full router only ADDS the contract keys
+            // (envelope), the legacy `error` key stays.
             assert_eq!(
-                a, b,
+                a.0, b.0,
                 "{method} {uri}: answered by the link routes as before"
             );
+            let legacy = |s: &str| {
+                serde_json::from_str::<serde_json::Value>(s)
+                    .ok()
+                    .map(|v| v["error"].clone())
+            };
+            // (A plain-text axum rejection on the bare link routes is enveloped by the full
+            // router: no legacy key to compare there.)
+            if let Some(legacy_b) = legacy(&b.1) {
+                assert_eq!(
+                    legacy(&a.1),
+                    Some(legacy_b),
+                    "{method} {uri}: legacy `error` key"
+                );
+            }
             assert!(!a.1.contains("\"generation\""), "{method} {uri}: {}", a.1);
         }
     }
