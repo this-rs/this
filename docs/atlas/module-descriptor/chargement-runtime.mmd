@@ -1,5 +1,7 @@
-sequenceDiagram
 %% name: module-descriptor-runtime-load
+%% QUESTION : que se passe-t-il, dans l'ordre, quand un admin charge, decharge ou remplace un module ?
+%% PROUVE (integration, MESURE par la revue) : hot_loaded_module_from_vfs_served_then_404_after_unload,
+%%   hot_loaded_compiled_module_is_validated_on_rest_and_through_its_creator (e2e 6/6 ok).
 %% PROUVE (flux modules-runtime, tests/module_runtime.rs, cargo test -p this-rs --test module_runtime : 19 ok) :
 %%   load_then_routes_served_unload_then_404, unload_refused_with_active_dependents,
 %%   replace_checks_dependents_version_req, draining_times_out_and_cancels_streams,
@@ -14,8 +16,10 @@ sequenceDiagram
 %%   src/server/exposure/rest/mod.rs (ModuleRuntime::mount), src/server/catalog.rs, crates/this-descriptor/src/resolve.rs.
 %% PROUVE (flux vfs) : cote ModuleStore = module_store_get_highest_version, module_store_yank_rolls_back_and_unyank_restores,
 %%   module_store_get_rechecks_with_current_registry, read_source_loads_stored_module. Detail : stockage-vfs.mmd.
-%% NON ETABLI : GraphQL et gRPC ne lisent pas encore le catalogue (flux auth) ; un module charge a chaud
-%%   n'y est pas servi. Pas de chargement WASM reel (wasmtime absent) : point d'extension ModuleSource::Plugin.
+%% NON ETABLI : un module charge a chaud n'est servi qu'en REST (GraphQL, gRPC, WS lisent les champs figes de l'hote et refusent).
+%%   Pas de chargement WASM reel (wasmtime absent) : point d'extension ModuleSource::Plugin (tache 169fcdf1).
+%%   Option hot_load desactivee par defaut (decision 0e59f39b) : absente, with_module_runtime active le chargement.
+sequenceDiagram
     autonumber
     actor Admin
     participant AU as Authentification
@@ -39,6 +43,7 @@ sequenceDiagram
     RT->>LD: load source
     LD->>LD: check profil Stored, politiques explicites
     LD-->>RT: ModuleInterface, JsonEntityService par entite
+    RT->>RT: bundles i18n verifies avant toute publication
     end
     rect rgba(164,139,255,.15)
     Note over RT,RES: Phase 2 - resolution fail-closed contre les modules actifs
@@ -53,10 +58,12 @@ sequenceDiagram
     end
     rect rgba(164,139,255,.15)
     Note over RT,DSP: Phase 3 - composition base + modules actifs, merge_strict
-    RT->>CAT: publish HostCatalog generation+1
-    RT->>DSP: store DispatchTable
+    RT->>CAT: publish HostCatalog generation+1, createurs ValidatingCreator
+    RT->>DSP: store DispatchTable, routes sous couche de validation
+    Note over RT,CAT: bundles ajoutes a ServerHost::locales, retires a l unload, remplaces au replace
     RT->>BUS: Module Loaded
     RT-->>Admin: 201 active
+    Note over DSP,BUS: ⚠ servi en REST seulement, GraphQL et gRPC refusent ce module (fail-closed)
     end
     Admin->>RT: DELETE /admin/modules/billing
     alt dependants actifs ou module compile dans l'hote

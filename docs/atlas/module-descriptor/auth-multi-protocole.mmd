@@ -1,5 +1,8 @@
-%% name: module-descriptor · auth multi-protocole par opération
-%% PROUVE : une seule résolution (descripteur, puis auth YAML, puis défaut) et un seul évaluateur à trois valeurs servent REST (politiques du descripteur), GraphQL, gRPC, GraphQL-WS et WebSocketExposure ; même verdict testé sur REST, GraphQL et gRPC (same_policy_same_verdict_across_protocols).
+%% name: module-descriptor-auth
+%% QUESTION : qui decide d'une operation, sur quelle surface, avec quelle politique ?
+%% PROUVE (integration, MESURE par la revue) : e2e policy_denied_on_all_protocols (REST, GraphQL, gRPC), 6/6 ok.
+%% REVUE FINALE (LU) : PolicyIndex::entity_policy rend la politique du descripteur et IGNORE en silence la meme operation dans auth YAML (redeclaration non signalee) ; refus 403 REST historique non localise.
+%% PROUVE (flux auth) :une seule résolution (descripteur, puis auth YAML, puis défaut) et un seul évaluateur à trois valeurs servent REST (politiques du descripteur), GraphQL, gRPC, GraphQL-WS et WebSocketExposure ; même verdict testé sur REST, GraphQL et gRPC (same_policy_same_verdict_across_protocols).
 %% LU : core/auth/{surface,descriptor_policy,mod}.rs, server/exposure/{guard,mod}.rs, grpc/{identity,entity_service,link_service,event_service,mod}.rs, graphql/{mod,subscription_handler}.rs, graphql/executor/*.rs, middleware/authorization.rs, websocket/{mod,handler,manager}.rs, rest/mod.rs, tests/auth_surfaces.rs
 %% NON ÉTABLI : NotificationService gRPC et champs notifications GraphQL refusés armés (IDOR) ; sinks websocket refusés armés (broadcast) ; REST garde la grammaire plate pour les politiques YAML (seules les politiques du descripteur passent par engine::policy) ; e2e gRPC par trames HTTP sur le routeur armé, pas par client tonic.
 flowchart TB
@@ -67,3 +70,7 @@ flowchart TB
   NS -.- G
   G ==> WS
   WK -.- WS
+  TW["⚠ descripteur ET auth YAML pour la meme operation :<br/>le descripteur gagne en silence<br/>pas de this.descriptor.declared_twice"]:::trap
+  TW -.- D2
+  HL["⚠ module charge a chaud : REST seulement,<br/>GraphQL et gRPC refusent"]:::trap
+  HL -.- G

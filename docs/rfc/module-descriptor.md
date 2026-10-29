@@ -1,8 +1,9 @@
 # RFC — ModuleDescriptor : un socle commun front/back, déclaré une fois
 
-- Statut : **v2, fondation implémentée** (29/10/2026). v1 (`md/design`, 501d901) revue par trois lentilles
-  (archi, cohérence, philosophie) : 66 objections, toutes traitées au §9 (corrigées, réfutées ou reportées
-  avec un propriétaire nommé).
+- Statut : **v2, sept flux et intégration fusionnés sur `integ/module-descriptor`** (29/10/2026) ; état réel
+  au §10 « État livré » (livré / partiel / reporté, avec preuves mesurées), qui prime sur les sections de
+  conception. v1 (`md/design`, 501d901) revue par trois lentilles (archi, cohérence, philosophie) :
+  66 objections, toutes traitées au §9 (corrigées, réfutées ou reportées avec un propriétaire nommé).
 - Auteurs : agent architecte (v1), flux fondation (v2, branche `md/foundation`).
 - Portée : dépôt `this` (crate `this-rs` + crate `this-descriptor`), dépôt `this-cli`.
 - **Source de vérité des contrats : le code** de `crates/this-descriptor/src/*.rs` et les fichiers this-rs listés
@@ -531,3 +532,72 @@ cités pour un flux sont ses tests d'acceptation (§7.1).
 | P16 | Corps RFC 9457 | **C** | `http_body` ajoute `type`, `title`, `status`, `detail` ; `PROBLEM_JSON` ; négociation `Accept` (errors-i18n) |
 | P17 | `Aborted`, précision des bornes | **C** | `ErrorKind::Aborted` (409 / `ABORTED`), `this.vfs.precondition_failed` → Aborted ; bornes en `serde_json::Number` (`min_max_keep_integer_precision`) ; `check()` refuse une borne non entière sur un champ entier |
 | P18 | Idempotence de la double validation | **C** | = C23 |
+
+## 10. État livré (revue finale, 29/10/2026, `integ/module-descriptor`)
+
+Revue « cohérence, philosophie et diagrammes » sur l'arbre intégré (`this` : `_wt-md/integ` ; `this-cli` :
+`_wt-md/cli-integ`). Légende : **MESURÉ** = commande exécutée (via `gate.sh exec cargo …`, noms de tests
+visibles dans la sortie) ; **LU** = constaté par lecture ou `grep` du code intégré ; **DÉDUIT** = conclusion non
+exécutée. Les diagrammes `docs/atlas/module-descriptor/*.mmd` portent les mêmes statuts (✅ ok, 🟠 todo,
+🔴 refusé, ⚠ piège).
+
+### 10.1 Livré
+
+| Facette | Preuve |
+|---|---|
+| Contrat commun (`this-descriptor`, wasm32, `default = []`) : descripteur, moteurs purs, table `ErrorKind`, catalogue `this.*` fr/en | MESURÉ (flux fondation, `cargo test -p this-descriptor --all-features`) ; LU : `crates/this-descriptor/src/*` |
+| Même payload invalide → même code `this.validation.positive` en REST / GraphQL / gRPC ; 422 / `INVALID_ARGUMENT` / `BAD_USER_INPUT` | MESURÉ (revue) : `cargo test --features graphql,grpc --test module_descriptor_e2e` → 6 ok : `same_invalid_payload_same_code_on_rest_graphql_grpc`, `status_mapping_per_protocol`, `message_localized_fr_then_en`, `policy_denied_on_all_protocols`, `hot_loaded_module_from_vfs_served_then_404_after_unload`, `hot_loaded_compiled_module_is_validated_on_rest_and_through_its_creator` |
+| Validation structurelle (couche REST + `ValidatingCreator`), champ absent validé, `type_mismatch` au lieu de 500, crate `validator` retiré | MESURÉ (flux validation, tests §7.1 listés ok dans le run `--workspace` de l'intégration) ; e2e ci-dessus |
+| Une `ContractError` → statut par surface ; `from_anyhow` sans fuite ; localisation par requête (REST `localize_errors`, GraphQL, gRPC `EntityService`) | MESURÉ : `message_localized_fr_then_en` + preuves rouges de l'intégration (localisation GraphQL / gRPC neutralisée → échec) ; LU : `grep Status::internal src/server/exposure/grpc/` vide |
+| Auth : évaluateur unique à trois valeurs, gardes REST / GraphQL / gRPC / WS, identité gRPC par métadonnées | MESURÉ : `policy_denied_on_all_protocols` ; tests du flux auth (§7.1) ok dans le run `--workspace` |
+| Dérivations `graphql_sdl`, `proto_file` (documentation), `json_schema`, `openapi` ; générateurs descripteur d'abord, cache par `generation` | MESURÉ (flux schema : `cargo test -p this-descriptor --all-features`, 88 tests ; `--lib --features graphql,grpc`) |
+| Modules au runtime : résolution, couche de répartition, cycle de vie, `replace`, vidange ; module stocké chargé du VFS, servi, déchargé → 404 `this.module.not_found`, textes retirés | MESURÉ : `hot_loaded_module_from_vfs_served_then_404_after_unload` ; flux modules-runtime (`tests/module_runtime.rs`, 19 ok) |
+| `ModuleStore` / VFS : `InMemoryVfs`, `LocalFsVfs`, `ObrainVfs` (feature `obrain`), `check(Stored)` + `check_compat` à `put` | MESURÉ (flux vfs : `vfs_conformance_*`, `obrain_vfs_conformance`, `module_store_*`) |
+| CLI : pluralizer partagé, `links.yaml` préservé (`flatten`), descripteur matérialisé (`this descriptor check|export|lock`), un seul lecteur de la grammaire de macro | MESURÉ (intégration, `_wt-md/cli-integ`) : `cargo test` → unit 566 ok, descriptor_cli 2, integration 84, mcp_integration 21 ; `cargo clippy --all-targets -- -D warnings` propre |
+| Qualité | MESURÉ (intégration) : `cargo clippy --workspace --all-targets --all-features -- -D warnings` propre |
+
+### 10.2 Partiel
+
+| Point | État | Preuve |
+|---|---|---|
+| Modules chargés à chaud | servis en **REST seulement** ; GraphQL / gRPC / WS lisent les champs de l'hôte figés au build et refusent (fail-closed) | LU : `module_runtime` monté dans `rest/mod.rs` hors de la couche d'autorisation ; aucun lecteur du catalogue vivant pour l'entité chargée sous `graphql/` et `grpc/` hors `query_executor`/`entity_service` (garde) |
+| Erreurs ad hoc hors chemins d'entité | 17 constructeurs `Status::` tonic (dont `link_service.rs` 7, `notification_service.rs` 6), 29 `Error::new` GraphQL (`dynamic_schema.rs` 19, `schema.rs` 10), ~178 lignes `StatusCode::` dans `src/` | LU (`grep`, revue) |
+| Localisation | non appliquée au 403 de l'autorisation REST, au corps historique 400/422 de `Validated<T>`, au 401 d'authentification, aux rejets axum (note PO f3862798) | LU |
+| Textes des modules | seuls les modules **stockés** apportent des bundles à `ServerHost::locales` ; aucun crochet pour un module compilé | LU : pas de méthode de bundle sur `Module` (`src/core/module.rs`) |
+| Filtres typés | REST (`ListQuery`), GraphQL, gRPC ok ; les listes de liens lisent encore `QueryParams::filter_value` (JSON malformé ignoré) ; le gabarit CLI `handlers.rs.tera` ne lit pas `ListQuery` | LU : `src/links/handlers.rs` (`apply_link_filters(.., &filter_value)`), `grep ListQuery handlers.rs.tera` vide |
+| Tags proto | `descriptor.lock` appliqué par la CLI (`export`) mais **pas** par `Module::descriptor()` engendré (`MODULE_DESCRIPTOR_FN` compose sans lock) : un module compilé est servi sans tags (`ProtoGenerator` Lenient commente les champs) | LU : `this-cli/src/descriptor/mod.rs` |
+| `cargo test --workspace --all-features` | 2388 ok / 53 échecs / 78 ignorés ; échecs attribués à l'environnement (conteneurs partagés : 41/41 en `--test-threads=1` ; `chain_aletheia` déjà rouge sur la base `c123743`) ; scylladb non mesuré | MESURÉ (intégration), attribution partiellement DÉDUITE |
+
+### 10.3 Reporté (propriétaire : suite du plan ada69546)
+
+- `examples/descriptor_api` (non écrit) ; `hot_loaded_module_policy_enforced_on_all_surfaces` et
+  `rest_linked_create_returns_422_contract_error` remplacés par les tests e2e ci-dessus (REST seulement pour
+  le chargement à chaud).
+- Option d'hôte `hot_load` désactivée par défaut tant que la signature des modules n'existe pas (décision
+  0e59f39b proposée) : **absente** du code, `with_module_runtime()` active le chargement (LU : aucun
+  `hot_load` sous `src/`). Rattachée à la tâche 169fcdf1 (manifeste unifié skill ↔ ModuleDescriptor).
+- Glue Leptos (`server-fn`), moteur Fluent, fil gRPC typé, verrou inter-processus du `ModuleStore`,
+  extraction des types serde de `config` vers `this_descriptor::config` (C15).
+- GraphQL : la mutation `createXForY` est reconnue par `field_name.contains("For")`
+  (`graphql/executor/mutation_executor.rs`), pas par le descripteur.
+
+### 10.4 « Une déclaration, tout dérivé » : ce qui reste redéclaré
+
+Verdict : **tenu pour les champs, types, règles, erreurs et messages ; non tenu pour l'identité du module,
+le pluriel, les liens et l'enregistrement des fournisseurs**, qui restent écrits plusieurs fois (le plus
+souvent par la CLI, à des marqueurs) et seulement **contrôlés** au démarrage — ou pas du tout pour les liens et
+les politiques.
+
+| # | Facette | Copies | Garde | Preuve (LU) |
+|---|---|---|---|---|
+| R1 | Identité du module | `Module::name`, `Module::version`, `Module::entity_types` + `descriptor/module.yaml` | ✅ dérive = erreur `this.module.identity_mismatch` au build | `ServerBuilder::resolve_descriptors` ; test `identity_mismatch_between_trait_and_descriptor_fails` |
+| R2 | Pluriel | `EntityDesc.plural` (macro), `EntityDescriptor::plural` (`descriptor.rs.tera`), `links.yaml` `entities[].plural` | ✅ dérive = `this.module.plural_mismatch` au build | `ServerBuilder::check_plurals` ; `plural_drift_fails_at_startup` |
+| R3 | Liens d'un module compilé | `links.yaml` (routage servi, `Module::links_config`) **et** `LinkDesc` de `module.yaml` (auth, références) ; `this add link` écrit les deux | ⚠ **aucune** comparaison : une dérive est silencieuse. `LinksConfig::from_descriptor` ne sert qu'aux modules stockés | `this-cli/src/commands/add_link.rs` (« links.yaml keeps the runtime routing until it is derived ») ; `module_runtime/loader.rs` seul appelant de `from_descriptor` |
+| R4 | Politiques | `EntityDesc.permissions` / `LinkDesc.permissions` **et** `auth:` YAML | ⚠ le descripteur gagne **en silence** par opération (entité) ; contredit §2.1 (« une redéclaration est une erreur ») | `PolicyIndex::entity_policy` (`core/auth/surface.rs`), test `descriptor_wins_over_yaml_and_links_follow_precedence` |
+| R5 | Fournisseurs | `register_entities`, `get_entity_fetcher`, `get_entity_creator` (bras de `match`), liste `[this:described_entities]` | ✅ doublon refusé si un module décrit est en cause ; ⚠ oubli d'un fournisseur non contrôlé (DÉDUIT : aucune vérification « entité décrite sans fetcher » trouvée dans `build_host`) | `build_host`, `duplicate_provider` ; marqueurs de `add_entity.rs` |
+| R6 | Tags proto | `descriptor.lock` (CLI) ; absents du descripteur servi | 🟠 lock non appliqué à l'exécution | voir §10.2 |
+| R7 | Grammaire de macro | `macros.rs` (`__this_described!`) + lecteur CLI `descriptor/code.rs` | ✅ deux copies (au lieu de trois), vérifiées par `generated_descriptor_matches_code` | `this-cli/src/descriptor/code.rs` |
+| R8 | Copie CLI de `LinksConfig` | `this-cli/src/commands/add_link.rs` (sous-ensemble + `#[serde(flatten)]`) | ✅ sans perte (`add_link_preserves_unknown_yaml_keys`) ; reste une copie (C15 reporté) | LU |
+| R9 | Chemins historiques parallèles | `EntityValidationConfig` / `Validated<T>` legacy, schéma inféré du sample, `LinksConfig::merge` dernier-gagnant entre modules **non décrits** (`ServerBuilder::merge_configs`) | ⚪ conservés par additivité (§2.4) ; actifs seulement sans descripteur | LU |
+
+Diagramme : `docs/atlas/module-descriptor/redeclarations-restantes.mmd`.
