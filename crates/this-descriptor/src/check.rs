@@ -102,6 +102,13 @@ impl ModuleDescriptor {
                 format!("{} > {DESCRIPTOR_FORMAT}", self.format),
             );
         }
+        if self.runtime.is_some() {
+            c.issues.push(DescriptorIssue {
+                code: ErrorCode::new(crate::framework::codes::MODULE_FORMAT_UNSUPPORTED),
+                path: "runtime".into(),
+                message: "the `runtime` section is reserved (not supported yet)".into(),
+            });
+        }
         if !is_identifier(&self.name) {
             c.push(
                 "invalid_name",
@@ -502,6 +509,22 @@ mod tests {
     }
     fn reg() -> CustomRegistry {
         CustomRegistry::default()
+    }
+
+    #[test]
+    fn runtime_section_refused_until_track4() {
+        let ok = ModuleDescriptor::new("billing", "1.0.0");
+        assert!(ok.check(&reg(), CheckProfile::Compiled).is_ok());
+        let parsed = ModuleDescriptor::from_json(
+            r#"{"name":"billing","version":"1.0.0","runtime":{"kind":"wasm"}}"#,
+        )
+        .unwrap();
+        assert!(
+            parsed.runtime.is_some(),
+            "runtime must be carried, not dropped"
+        );
+        let codes = codes_of(parsed.check(&reg(), CheckProfile::Compiled));
+        assert_eq!(codes, vec!["this.module.format_unsupported".to_string()]);
     }
 
     #[test]

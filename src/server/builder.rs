@@ -126,7 +126,9 @@ impl ServerBuilder {
     /// Enable runtime module loading on the host: `ServerHost::module_runtime`, the
     /// dispatch layer of hot-loaded routes and the admin interface
     /// (`RuntimeOptions::admin_prefix`, default `/admin/modules`, policy `admin_only`).
-    /// Without this call the host is frozen at build time, exactly as before.
+    /// Without this call the host is frozen at build time, exactly as before. Hot loading
+    /// itself stays CLOSED (`this.module.hot_load_disabled`) until
+    /// [`Self::with_hot_load_enabled`]`(true)` (decision: closed by default).
     pub fn with_module_runtime(mut self) -> Self {
         self.module_runtime
             .get_or_insert_with(RuntimeSetup::default);
@@ -142,6 +144,17 @@ impl ServerBuilder {
         self.module_runtime
             .get_or_insert_with(RuntimeSetup::default)
             .options = options;
+        self
+    }
+
+    /// `hot_load.enabled`: open (or close) runtime load / replace / unload and the admin
+    /// interface. Closed by default, and `with_module_runtime*` never opens it implicitly:
+    /// the host must say so explicitly. Enables the runtime (read-only admin routes stay).
+    pub fn with_hot_load_enabled(mut self, enabled: bool) -> Self {
+        self.module_runtime
+            .get_or_insert_with(RuntimeSetup::default)
+            .options
+            .hot_load_enabled = enabled;
         self
     }
 
