@@ -679,6 +679,26 @@ impl Authorization {
             };
         };
 
+        // **Routes du framework `/_this/*`** (export des descripteurs de module, JSON
+        // Schema, OpenAPI — `exposure/descriptor.rs`). Ce ne sont pas des routes
+        // d'entité : sans cette règle elles s'abstenaient, et l'abstention étant un
+        // refus, l'export était injoignable pour TOUT appelant sur un serveur armé.
+        // Les descripteurs décrivent aussi les politiques : on ne les ouvre pas à
+        // l'anonyme — lecture `authenticated` ; toute autre méthode s'abstient (refus).
+        if *plural == crate::server::exposure::descriptor::PREFIX.trim_start_matches('/') {
+            return match *method {
+                Method::GET | Method::HEAD => Requirement::Policy {
+                    entity_type: "Descriptor".to_string(),
+                    operation: "read".to_string(),
+                    policy: "authenticated".to_string(),
+                    origin: PolicyOrigin::Default,
+                },
+                _ => Requirement::Abstain {
+                    reason: "`/_this/*` est en lecture seule".to_string(),
+                },
+            };
+        }
+
         // **Les lectures de graphe**, d'abord : elles ne sont pas des routes
         // d'entité, et quand l'application déclare une politique pour elles,
         // c'est elle qui décide. C'est ainsi qu'un moteur d'inférence lit la
@@ -2126,6 +2146,43 @@ mod tests {
             StatusCode::FORBIDDEN,
             "sans contexte, on est anonyme — et `authenticated` refuse"
         );
+    }
+
+    #[test]
+    fn descriptor_export_requires_authentication() {
+        let a = authz(vec![], &[]);
+        assert_eq!(
+            a.requirement(&Method::GET, "/_this/descriptors/shop"),
+            Requirement::Policy {
+                entity_type: "Descriptor".to_string(),
+                operation: "read".to_string(),
+                policy: "authenticated".to_string(),
+                origin: PolicyOrigin::Default,
+            }
+        );
+        assert!(
+            !a.decide(&Method::GET, "/_this/openapi.json", &AuthContext::Anonymous)
+                .is_allow()
+        );
+        let user = AuthContext::User {
+            user_id: uuid::Uuid::new_v4(),
+            tenant_id: uuid::Uuid::new_v4(),
+            roles: vec![],
+        };
+        assert!(
+            a.decide(&Method::GET, "/_this/descriptors", &user)
+                .is_allow()
+        );
+        // Read-only: any write shape abstains (= refused when armed).
+        assert!(matches!(
+            a.requirement(&Method::POST, "/_this/descriptors"),
+            Requirement::Abstain { .. }
+        ));
+        // `_thisx` is not the framework prefix.
+        assert!(matches!(
+            a.requirement(&Method::GET, "/_thisx/descriptors"),
+            Requirement::Abstain { .. }
+        ));
     }
 
     #[test]

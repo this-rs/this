@@ -433,6 +433,85 @@ mod tests {
         assert!(router.is_ok());
     }
 
+    /// `/_this/*` (static prefix) and the link wildcards `/{a}/{b}/{c}[/{d}]` live in the
+    /// same merged router: the export routes answer, and a link-shaped path that is NOT an
+    /// export route still reaches the link handlers exactly as without the export routes.
+    #[tokio::test]
+    async fn descriptor_routes_do_not_shadow_link_routes() {
+        async fn call(router: Router, method: &str, uri: &str) -> (StatusCode, String) {
+            let resp = router
+                .oneshot(
+                    Request::builder()
+                        .method(method)
+                        .uri(uri)
+                        .body(Body::empty())
+                        .expect("request"),
+                )
+                .await
+                .expect("response");
+            let status = resp.status();
+            let body = axum::body::to_bytes(resp.into_body(), 1 << 20)
+                .await
+                .expect("body");
+            (status, String::from_utf8_lossy(&body).into_owned())
+        }
+        // Armed by default: the export is JUDGED (Descriptor · read, `authenticated`), not
+        // left to an abstention that refused every caller.
+        let armed = RestExposure::build_router(test_host(), vec![]).expect("build");
+        let (s, body) = call(armed, "GET", "/_this/descriptors").await;
+        assert_eq!(s, StatusCode::FORBIDDEN, "{body}");
+        assert!(
+            body.contains("Descriptor"),
+            "policy decision, not abstention: {body}"
+        );
+        assert!(!body.contains("\"generation\""), "nothing leaked: {body}");
+
+        // Routing proper, authorization disarmed (it is proven separately).
+        let mut disarmed = ServerHost::from_builder_components(
+            Arc::new(InMemoryLinkService::new()),
+            LinksConfig::default_config(),
+            EntityRegistry::new(),
+            HashMap::new(),
+            HashMap::new(),
+        )
+        .expect("host");
+        disarmed.authorize = false;
+        let full = RestExposure::build_router(Arc::new(disarmed), vec![]).expect("build");
+        let (s, body) = call(full.clone(), "GET", "/_this/descriptors").await;
+        assert_eq!(s, StatusCode::OK, "{body}");
+        assert!(body.contains("\"generation\""), "{body}");
+        let (s, _) = call(full.clone(), "GET", "/_this/openapi.json").await;
+        assert_eq!(s, StatusCode::OK);
+
+        let host = test_host();
+        let link_only = build_link_routes(AppState {
+            link_service: host.link_service.clone(),
+            config: host.config.clone(),
+            registry: host.registry.clone(),
+            entity_fetchers: host.entity_fetchers.clone(),
+            entity_creators: host.entity_creators.clone(),
+            event_bus: host.event_bus.clone(),
+        });
+        let id = "00000000-0000-0000-0000-000000000001";
+        let target = "00000000-0000-0000-0000-000000000002";
+        for (method, uri) in [
+            ("GET", format!("/orders/{id}/invoices")),
+            ("GET", format!("/orders/{id}/links")),
+            ("GET", format!("/orders/{id}/invoices/{target}")),
+            ("POST", format!("/orders/{id}/invoices/{target}")),
+            // Same depth as `/_this/schema/{entity}/{op}`, other first segment.
+            ("GET", "/_thisx/schema/knife/create".to_string()),
+        ] {
+            let a = call(full.clone(), method, &uri).await;
+            let b = call(link_only.clone(), method, &uri).await;
+            assert_eq!(
+                a, b,
+                "{method} {uri}: answered by the link routes as before"
+            );
+            assert!(!a.1.contains("\"generation\""), "{method} {uri}: {}", a.1);
+        }
+    }
+
     #[tokio::test]
     async fn test_build_router_health_endpoint_reachable() {
         let host = test_host();
