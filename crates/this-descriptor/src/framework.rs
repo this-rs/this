@@ -38,6 +38,7 @@ pub mod codes {
     pub const QUERY_FIELD_NOT_SORTABLE: &str = "this.query.field_not_sortable";
     pub const QUERY_MALFORMED_SORT: &str = "this.query.malformed_sort";
     pub const QUERY_PAGE_OUT_OF_RANGE: &str = "this.query.page_out_of_range";
+    pub const QUERY_TOO_LARGE: &str = "this.query.too_large";
     pub const AUTH_UNAUTHENTICATED: &str = "this.auth.unauthenticated";
     pub const AUTH_FORBIDDEN: &str = "this.auth.forbidden";
     pub const AUTH_RESOLVER_UNKNOWN: &str = "this.auth.resolver_unknown";
@@ -243,6 +244,13 @@ pub const FRAMEWORK_ERRORS: &[(&str, ErrorKind, &[&str], &str, &str)] = &[
         &["max"],
         "Pagination hors limites (max {max})",
         "Page out of range (max {max})",
+    ),
+    (
+        QUERY_TOO_LARGE,
+        K::BadRequest,
+        &["max"],
+        "Table trop volumineuse pour un filtrage en mémoire (max {max} lignes): affinez la requête ou utilisez un backend qui exécute la requête nativement",
+        "Too many rows for an in-memory query (max {max}): narrow the query or use a backend that runs it natively",
     ),
     (
         AUTH_UNAUTHENTICATED,

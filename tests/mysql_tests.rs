@@ -113,6 +113,7 @@ async fn mysql_pool() -> MySqlPool {
 // ---------------------------------------------------------------------------
 
 async fn clean_mysql_data_service() -> MysqlDataService<TestDataEntity> {
+    storage_harness::serialize_container_test();
     let pool = mysql_pool().await;
     sqlx::query("TRUNCATE TABLE entities")
         .execute(&pool)
@@ -122,6 +123,7 @@ async fn clean_mysql_data_service() -> MysqlDataService<TestDataEntity> {
 }
 
 async fn clean_mysql_link_service() -> MysqlLinkService {
+    storage_harness::serialize_container_test();
     let pool = mysql_pool().await;
     sqlx::query("TRUNCATE TABLE links")
         .execute(&pool)

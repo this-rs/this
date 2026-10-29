@@ -208,6 +208,11 @@ name = "full_api"
 path = "examples/full_api/main.rs"
 
 [[example]]
+name = "descriptor_api"
+path = "examples/descriptor_api/main.rs"
+required-features = ["graphql", "grpc"]
+
+[[example]]
 name = "microservice"
 path = "examples/microservice/main.rs"
 
