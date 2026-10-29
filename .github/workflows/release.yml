@@ -80,8 +80,20 @@ jobs:
             ~/.cargo/git
           key: ${{ runner.os }}-cargo-publish-${{ hashFiles('**/Cargo.lock') }}
 
+      # this-rs depends on `this-descriptor = { version, path }`: crates.io must know the
+      # descriptor version BEFORE this-rs is packaged. Idempotent: skipped when published.
+      - name: Publish this-descriptor first
+        run: |
+          V=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name=="this-descriptor") | .version')
+          if curl -sf "https://crates.io/api/v1/crates/this-descriptor/$V" -A "this-rs-release" > /dev/null; then
+            echo "this-descriptor $V already on crates.io"
+          else
+            cargo publish -p this-descriptor --token ${{ secrets.CARGO_TOKEN }}
+            sleep 30
+          fi
+
       - name: Verify package
-        run: cargo package --allow-dirty
+        run: cargo package -p this-rs --allow-dirty
 
       - name: Publish to crates.io
-        run: cargo publish --allow-dirty --token ${{ secrets.CARGO_TOKEN }}
+        run: cargo publish -p this-rs --allow-dirty --token ${{ secrets.CARGO_TOKEN }}

@@ -1,10 +1,9 @@
 classDiagram
 %% name: module-descriptor-classes
-%% PROUVE : rien encore — c'est le CONTRAT propose par docs/rfc/module-descriptor.md §3.2 (crate this-descriptor), pas du code existant.
-%% SOURCES LUES : this/src/server/entity_registry.rs (EntityDescriptor sans champs), this/src/core/module.rs (trait Module),
-%%   this/src/core/validation/config.rs + entities/macros.rs (grammaire validate/filters), this/src/core/auth/mod.rs (AuthPolicy),
-%%   this/src/core/query.rs (QueryParams), this/src/core/link.rs (LinkDefinition).
-%% NON ETABLI : non compile ; les noms peuvent bouger pendant le flux fondation.
+%% PROUVE : forme du code de crates/this-descriptor/src (fondation, v2) ; JSON et YAML aller-retour testes
+%%   (descriptor_json_roundtrip, descriptor_yaml_roundtrip).
+%% SOURCES LUES : crates/this-descriptor/src/{module,entity,field,link,error,perm,i18n,query,custom}.rs.
+%% NON ETABLI : rien d'autre que ce que les tests couvrent ; le code fait foi en cas d'ecart.
     direction LR
     class ModuleDescriptor {
         +u32 format
@@ -14,9 +13,10 @@ classDiagram
         +Vec~EntityDesc~ entities
         +Vec~LinkDesc~ links
         +Vec~ErrorDesc~ errors
-        +I18nCatalog i18n
+        +I18nDecl i18n
         +Vec~Custom~ custom
-        +check(CustomRegistry) Result
+        +check(CustomRegistry, CheckProfile) Result
+        +compose(described) Result
     }
     class ModuleReq {
         +String name
@@ -36,22 +36,23 @@ classDiagram
         +String name
         +FieldType ty
         +bool optional
-        +u32 proto_tag
+        +Option~Value~ default
+        +Option~u32~ proto_tag
         +Vec~ValidatorRule~ validators
-        +Vec~TransformRule~ filters
+        +Vec~TransformRule~ transforms
         +Vec~FilterOp~ filterable
         +bool sortable
-        +FieldI18n i18n
         +bool read_only
+        +bool immutable
+        +required_on(Applies) bool
     }
     class LinkDesc {
         +String link_type
         +String source
         +String target
-        +String forward_route
-        +String reverse_route
         +Vec~FieldDesc~ fields
         +PermDesc permissions
+        +effective_policy(scope, op) PolicyExpr
     }
     class ErrorDesc {
         +ErrorCode code
@@ -64,15 +65,16 @@ classDiagram
         +ErrorKind kind
         +MessageKey message_key
         +String message
-        +Map params
         +Vec~FieldViolation~ fields
+        +framework(code) ContractError
+        +from_desc(ErrorDesc) ContractError
         +http_body() Value
     }
     class ErrorKind {
         <<enumeration>>
         Validation
         PermissionDenied
-        NotFound
+        Aborted
         Internal
         +http_status() u16
         +grpc_code() i32
@@ -80,18 +82,25 @@ classDiagram
     }
     class PermDesc {
         +Map~Operation,PolicyExpr~ ops
-        +policy(Operation) PolicyExpr
+        +effective(Operation) PolicyExpr
     }
     class PolicyExpr {
         <<enumeration>>
         Public
         Authenticated
+        Deny
         HasRole
-        And_Or_Not
+        Perm
         Resolver
+        And_Or_Not
     }
-    class I18nCatalog {
+    class I18nDecl {
         +Locale default_locale
+        +Vec~MessageDecl~ keys
+    }
+    class MessageBundle {
+        +String module
+        +Locale locale
         +Map messages
     }
     class Query~T~ {
@@ -99,19 +108,21 @@ classDiagram
         +Vec~SortSpec~ sort
         +Page page
     }
-    class Custom {
-        +String name
-        +Value params
+    class DescriptorSet {
+        +insert(ModuleDescriptor) Result
+        +compiled(entity) CompiledEntity
+        +generation() u64
     }
     class Described {
         <<interface>>
-        +entity_desc() EntityDesc
+        +entity_desc() static EntityDesc
     }
     ModuleDescriptor "1" *-- "*" ModuleReq : requires
     ModuleDescriptor "1" *-- "*" EntityDesc
     ModuleDescriptor "1" *-- "*" LinkDesc
     ModuleDescriptor "1" *-- "*" ErrorDesc
-    ModuleDescriptor "1" *-- "1" I18nCatalog
+    ModuleDescriptor "1" *-- "1" I18nDecl
+    I18nDecl ..> MessageBundle : textes hors descripteur
     EntityDesc "1" *-- "*" FieldDesc
     EntityDesc "1" *-- "1" PermDesc
     LinkDesc "1" *-- "*" FieldDesc
@@ -119,7 +130,7 @@ classDiagram
     PermDesc --> PolicyExpr
     ErrorDesc --> ErrorKind
     ContractError --> ErrorKind
-    ContractError ..> ErrorDesc : instancie
-    Query~T~ ..> FieldDesc : verifie filterable et sortable
-    FieldDesc ..> Custom : extension nommee
-    Described ..> EntityDesc : macro impl_data_entity
+    ContractError ..> ErrorDesc : from_desc
+    DescriptorSet o-- "*" ModuleDescriptor
+    Query~T~ ..> FieldDesc : filterable et sortable
+    Described ..> EntityDesc : macros impl_data_entity

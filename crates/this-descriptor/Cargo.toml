@@ -1,0 +1,47 @@
+[package]
+name = "this-descriptor"
+version = "0.1.0"
+edition = "2024"
+authors = ["Riviere Théotime <t@ffs.holdings>"]
+license = "MIT OR Apache-2.0"
+description = "Serializable module descriptor shared by this-rs, this-cli and wasm32 fronts: types, validation, query filters, policies, errors, i18n"
+repository = "https://github.com/this-rs/this"
+keywords = ["descriptor", "validation", "wasm", "api", "schema"]
+categories = ["web-programming", "wasm", "data-structures"]
+
+# Pure crate: NO tokio, axum, tonic in the default build. It must compile for
+# wasm32-unknown-unknown (`cargo check -p this-descriptor --target wasm32-unknown-unknown`).
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "2.0"
+# Dependency resolution (semver VersionReq). Pure, wasm32-compatible.
+semver = { version = "1", features = ["serde"] }
+# Same date semantics as the legacy `validators::date_format` (strftime via NaiveDate).
+chrono = { version = "0.4", default-features = false, features = ["alloc"] }
+# Parsing of FieldType::Uuid values. No `v4`: generation stays on the server.
+uuid = { version = "1", default-features = false }
+
+regex = { version = "1", optional = true }
+serde_yaml = { version = "0.9", optional = true }
+
+# Protocol adapters, opt-in. They live HERE (not in this-rs) because of the orphan
+# rule: `impl From<ContractError> for tonic::Status` must be written in the crate that
+# owns ContractError or the one that owns Status.
+http = { version = "1", optional = true }
+tonic = { version = "0.14", optional = true, default-features = false }
+async-graphql = { version = "7", optional = true, default-features = false }
+
+[features]
+default = []
+# Read descriptor/module.yaml.
+yaml = ["dep:serde_yaml"]
+# ValidatorSpec::Pattern compiled with `regex`. Without it, check() REJECTS a Pattern
+# (fail-closed: the front would otherwise skip the rule).
+pattern = ["dep:regex"]
+http = ["dep:http"]
+grpc = ["dep:tonic"]
+graphql = ["dep:async-graphql"]
+
+[dev-dependencies]
+serde_yaml = "0.9"

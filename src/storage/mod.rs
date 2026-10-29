@@ -32,6 +32,8 @@ pub mod postgres;
 #[cfg(feature = "scylladb")]
 pub mod scylladb;
 pub mod tenant_scoped;
+/// Virtual file system and module store (interfaces; module descriptor RFC §3.8).
+pub mod vfs;
 /// Catalogue tenant Uuid <-> u32 d'un store de donnees — substrate.tenantcat
 /// (NATIF-J4, RFC principal-natif-v2 §5.1).
 #[cfg(feature = "obrain")]
