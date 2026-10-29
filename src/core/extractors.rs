@@ -23,7 +23,7 @@ pub enum ExtractorError {
     JsonError(String),
     /// A contract error raised by the store or the validation engine (`ValidatingCreator`):
     /// answered with its own status, code and envelope (422 `this.validation.failed`...).
-    Contract(crate::descriptor::ContractError),
+    Contract(Box<crate::descriptor::ContractError>),
 }
 
 impl ExtractorError {
@@ -36,7 +36,7 @@ impl ExtractorError {
                 || c.downcast_ref::<crate::core::errors::ApiError>().is_some()
         });
         if contract {
-            ExtractorError::Contract(crate::core::errors::from_anyhow(e))
+            ExtractorError::Contract(Box::new(crate::core::errors::from_anyhow(e)))
         } else {
             ExtractorError::JsonError(format!("Failed to create entity: {e}"))
         }
@@ -61,7 +61,7 @@ impl std::error::Error for ExtractorError {}
 impl IntoResponse for ExtractorError {
     fn into_response(self) -> Response {
         if let ExtractorError::Contract(c) = self {
-            return crate::core::errors::ApiError(c).into_response();
+            return crate::core::errors::ApiError(*c).into_response();
         }
         let (status, message) = match self {
             ExtractorError::InvalidPath => (StatusCode::BAD_REQUEST, self.to_string()),
