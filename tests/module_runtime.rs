@@ -1040,6 +1040,72 @@ async fn runtime_module_policies_enforced_on_crud_and_link_routes() {
     assert_eq!(s, StatusCode::FORBIDDEN);
 }
 
+/// Legacy compiled module WITHOUT `Module::descriptor()`: its policies live only in its
+/// YAML `auth:` (`list: admin_only`).
+struct Vault;
+struct Secrets;
+impl EntityDescriptor for Secrets {
+    fn entity_type(&self) -> &str {
+        "secret"
+    }
+    fn plural(&self) -> &str {
+        "secrets"
+    }
+    fn build_routes(&self) -> Router {
+        Router::new().route("/secrets", axum::routing::get(|| async { "[]" }))
+    }
+}
+impl Module for Vault {
+    fn name(&self) -> &str {
+        "vault"
+    }
+    fn entity_types(&self) -> Vec<&str> {
+        vec!["secret"]
+    }
+    fn links_config(&self) -> anyhow::Result<LinksConfig> {
+        Ok(LinksConfig {
+            entities: vec![EntityConfig {
+                singular: "secret".into(),
+                plural: "secrets".into(),
+                auth: EntityAuthConfig {
+                    list: "admin_only".into(),
+                    ..Default::default()
+                },
+            }],
+            links: vec![],
+            validation_rules: None,
+            events: None,
+            sinks: None,
+            auth: None,
+        })
+    }
+    fn register_entities(&self, registry: &mut EntityRegistry) {
+        registry.register(Box::new(Secrets));
+    }
+}
+
+/// Review regression: a hot-loaded compiled module without a descriptor kept its YAML
+/// `auth:` only on paper — the derived (policy-less) descriptor was overlaid on it and the
+/// dispatch judged from descriptors alone, so `list: admin_only` became `authenticated`.
+#[tokio::test]
+async fn hot_loaded_module_without_descriptor_keeps_its_yaml_policies() {
+    let h = harness(true);
+    h.runtime()
+        .load(ModuleSource::Compiled(Arc::new(Vault)))
+        .await
+        .expect("load");
+    let (s, v) = h.call(Method::GET, "/secrets", Some("user"), None).await;
+    assert_eq!(
+        (s, code(&v)),
+        (StatusCode::FORBIDDEN, "this.auth.forbidden"),
+        "YAML `list: admin_only` must hold for a plain user: {v}"
+    );
+    let (s, _) = h.call(Method::GET, "/secrets", None, None).await;
+    assert_eq!(s, StatusCode::UNAUTHORIZED);
+    let (s, v) = h.call(Method::GET, "/secrets", Some("admin"), None).await;
+    assert_eq!(s, StatusCode::OK, "served to the admin: {v}");
+}
+
 #[tokio::test]
 async fn report_only_observes_runtime_refusals_without_blocking() {
     let h = harness_with(
