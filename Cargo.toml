@@ -116,8 +116,8 @@ obrain-adapters = { path = "../../banc-obrain-j4/crates/obrain-adapters", option
 obrain-reactive = { path = "../../banc-obrain-j4/crates/obrain-reactive", optional = true }
 
 # vite-rs — Vite-like static/dev frontend serving reused by the `frontend`
-# feature (dev loop + AI bridge + static file rules). Local checkout is the
-# detached crate ~/projects/vite-rs (same path convention as aletheia's miner).
+# feature (dev loop + AI bridge + static file rules + guaranteed cache
+# freshness). Local checkout: ~/projects/vite-rs (github this-rs/vite-rs).
 vite-rs = { path = "../../vite-rs", optional = true }
 
 # WAMI auth (optional, feature-gated)
