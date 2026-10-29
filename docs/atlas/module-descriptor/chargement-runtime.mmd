@@ -12,6 +12,8 @@ sequenceDiagram
 %%   manquer une requete entree entre lecture de table et Gate::enter.
 %% SOURCES LUES : src/server/module_runtime/{runtime,dispatch,admin,loader,json_entity}.rs,
 %%   src/server/exposure/rest/mod.rs (ModuleRuntime::mount), src/server/catalog.rs, crates/this-descriptor/src/resolve.rs.
+%% PROUVE (flux vfs) : cote ModuleStore = module_store_get_highest_version, module_store_yank_rolls_back_and_unyank_restores,
+%%   module_store_get_rechecks_with_current_registry, read_source_loads_stored_module. Detail : stockage-vfs.mmd.
 %% NON ETABLI : GraphQL et gRPC ne lisent pas encore le catalogue (flux auth) ; un module charge a chaud
 %%   n'y est pas servi. Pas de chargement WASM reel (wasmtime absent) : point d'extension ModuleSource::Plugin.
     autonumber
