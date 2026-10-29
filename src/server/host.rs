@@ -67,6 +67,10 @@ pub struct ServerHost {
     /// publishes new snapshots here. New readers MUST go through it (see `server::catalog`).
     pub catalog: Arc<crate::server::catalog::LiveCatalog>,
 
+    /// Runtime module loader of this host (`ServerBuilder::with_module_runtime`). `None` =
+    /// the host is frozen at build time (historical behaviour, no admin routes).
+    pub module_runtime: Option<Arc<crate::server::module_runtime::ModuleRuntime>>,
+
     /// Optional event bus for real-time notifications (WebSocket, SSE)
     ///
     /// When present, REST/GraphQL handlers will publish events for mutations.
@@ -257,6 +261,7 @@ impl ServerHost {
             entity_fetchers: fetchers,
             entity_creators: creators,
             catalog,
+            module_runtime: None,
             event_bus: None,
             event_log: None,
             sink_registry: None,
@@ -532,6 +537,7 @@ impl ServerHost {
             entity_fetchers: Arc::new(HashMap::new()),
             entity_creators: Arc::new(HashMap::new()),
             catalog,
+            module_runtime: None,
             event_bus: None,
             event_log: None,
             sink_registry: None,

@@ -262,6 +262,17 @@ impl RestExposure {
             );
         }
 
+        // Runtime modules (modules-runtime stream): dispatch of hot-loaded routes, then the
+        // admin interface. OUTSIDE the policy layer above (its entity table is frozen at
+        // build time: it would refuse every hot-loaded path by abstention); they judge
+        // their requests themselves with the descriptors' policies. INSIDE
+        // authentication, domain guard and CORS below, which still apply.
+        // Mounted BEFORE routing (see `ModuleRuntime::mount`).
+        if let Some(runtime) = &host.module_runtime {
+            app = runtime.mount(app);
+            tracing::info!("module runtime mounted (dispatch layer + admin interface)");
+        }
+
         // Auto-wire auth middleware if auth provider is configured
         // This layer must be added last so it wraps all routes
         if let Some(ref auth_provider) = host.auth_provider {

@@ -64,6 +64,39 @@ pub struct EntityAuthConfig {
     pub update_link: String,
 }
 
+/// Same serialized form (the config types do not all implement `PartialEq`).
+fn same<T: Serialize>(a: &T, b: &T) -> bool {
+    serde_json::to_value(a).ok() == serde_json::to_value(b).ok()
+}
+
+/// A descriptor policy in the grammar the legacy middleware reads (`AuthPolicy::parse_policy`):
+/// `all:a,b`, `any:a,b`, `not:a`, `role:x`. `deny` has no legacy word: it becomes
+/// `not:public` (always false). A composite nested inside another composite cannot be
+/// written in the flat legacy form: the canonical form is kept, which the legacy parser
+/// does not know and therefore REFUSES (fail-closed).
+pub fn legacy_policy(p: &crate::descriptor::PolicyExpr) -> String {
+    use crate::descriptor::PolicyExpr as P;
+    let flat = |v: &[P]| v.iter().all(|e| !matches!(e, P::And(_) | P::Or(_) | P::Not(_)));
+    match p {
+        P::Deny => "not:public".into(),
+        P::HasRole(r) if r.len() == 1 => format!("role:{}", r[0]),
+        P::HasRole(r) => format!(
+            "any:{}",
+            r.iter().map(|x| format!("role:{x}")).collect::<Vec<_>>().join(",")
+        ),
+        P::And(v) if flat(v) => format!(
+            "all:{}",
+            v.iter().map(legacy_policy).collect::<Vec<_>>().join(",")
+        ),
+        P::Or(v) if flat(v) => format!(
+            "any:{}",
+            v.iter().map(legacy_policy).collect::<Vec<_>>().join(",")
+        ),
+        P::Not(e) if flat(std::slice::from_ref(e)) => format!("not:{}", legacy_policy(e)),
+        other => other.to_string(),
+    }
+}
+
 fn default_auth_policy() -> String {
     "authenticated".to_string()
 }
@@ -274,6 +307,231 @@ impl LinksConfig {
             sinks: merged_sinks,
             auth: merged_auth,
         }
+    }
+
+    /// Merge configurations **refusing** conflicts instead of last-wins.
+    ///
+    /// Two configurations may repeat an IDENTICAL declaration (same entity, same link,
+    /// same sink): that is not a conflict. Every DIFFERING redeclaration is reported, all
+    /// of them (not only the first), each as `this.module.config_conflict {what, key}`:
+    /// - `entity` (by singular) and `plural` (two entities on the same plural);
+    /// - `link` (by `link_type`, `source_type`, `target_type`) and `link_route` (two links
+    ///   with the same route name on the same entity);
+    /// - `sink` (by name), `flow` (by name), `events.backend`, `auth`.
+    ///
+    /// Validation rules and consumers are additive (no identity to conflict on). On
+    /// success the result equals [`LinksConfig::merge`].
+    pub fn merge_strict(
+        configs: Vec<LinksConfig>,
+    ) -> std::result::Result<Self, Vec<crate::descriptor::ContractError>> {
+        use crate::descriptor::ContractError;
+        use crate::descriptor::framework::codes;
+        let conflict = |what: &str, key: String| {
+            ContractError::framework(codes::MODULE_CONFIG_CONFLICT)
+                .with_param("what", what)
+                .with_param("key", key)
+        };
+        let mut errors = Vec::new();
+
+        let mut entities: IndexMap<&str, &EntityConfig> = IndexMap::new();
+        let mut plurals: HashMap<&str, &str> = HashMap::new();
+        let mut links: IndexMap<(&str, &str, &str), &LinkDefinition> = IndexMap::new();
+        let mut routes: HashMap<(&str, &str), (&str, &str, &str)> = HashMap::new();
+        let mut sinks: HashMap<&str, &SinkConfig> = HashMap::new();
+        let mut flows: HashMap<&str, &FlowConfig> = HashMap::new();
+        let mut backend: Option<&BackendConfig> = None;
+        let mut auth: Option<&AuthConfig> = None;
+
+        for config in &configs {
+            for e in &config.entities {
+                match entities.get(e.singular.as_str()) {
+                    Some(prev) if !same(*prev, e) => {
+                        errors.push(conflict("entity", e.singular.clone()))
+                    }
+                    Some(_) => {}
+                    None => {
+                        entities.insert(&e.singular, e);
+                    }
+                }
+                match plurals.get(e.plural.as_str()) {
+                    Some(owner) if *owner != e.singular => errors.push(conflict(
+                        "plural",
+                        format!("{} ({owner}, {})", e.plural, e.singular),
+                    )),
+                    Some(_) => {}
+                    None => {
+                        plurals.insert(&e.plural, &e.singular);
+                    }
+                }
+            }
+            for l in &config.links {
+                let key = (
+                    l.link_type.as_str(),
+                    l.source_type.as_str(),
+                    l.target_type.as_str(),
+                );
+                match links.get(&key) {
+                    Some(prev) if !same(*prev, l) => errors.push(conflict(
+                        "link",
+                        format!("{}:{}->{}", key.0, key.1, key.2),
+                    )),
+                    Some(_) => continue,
+                    None => {
+                        links.insert(key, l);
+                    }
+                }
+                for (entity, route) in [
+                    (l.source_type.as_str(), l.forward_route_name.as_str()),
+                    (l.target_type.as_str(), l.reverse_route_name.as_str()),
+                ] {
+                    match routes.get(&(entity, route)) {
+                        Some(owner) if *owner != key => errors.push(conflict(
+                            "link_route",
+                            format!("{entity}/{route}"),
+                        )),
+                        Some(_) => {}
+                        None => {
+                            routes.insert((entity, route), key);
+                        }
+                    }
+                }
+            }
+            for s in config.sinks.iter().flatten() {
+                match sinks.get(s.name.as_str()) {
+                    Some(prev) if !same(*prev, s) => errors.push(conflict("sink", s.name.clone())),
+                    Some(_) => {}
+                    None => {
+                        sinks.insert(&s.name, s);
+                    }
+                }
+            }
+            if let Some(ev) = &config.events {
+                match backend {
+                    Some(prev) if !same(prev, &ev.backend) => {
+                        errors.push(conflict("events.backend", String::new()))
+                    }
+                    Some(_) => {}
+                    None => backend = Some(&ev.backend),
+                }
+                for f in &ev.flows {
+                    match flows.get(f.name.as_str()) {
+                        Some(prev) if !same(*prev, f) => {
+                            errors.push(conflict("flow", f.name.clone()))
+                        }
+                        Some(_) => {}
+                        None => {
+                            flows.insert(&f.name, f);
+                        }
+                    }
+                }
+            }
+            if let Some(a) = &config.auth {
+                match auth {
+                    Some(prev) if !same(prev, a) => errors.push(conflict("auth", String::new())),
+                    Some(_) => {}
+                    None => auth = Some(a),
+                }
+            }
+        }
+        if !errors.is_empty() {
+            return Err(errors);
+        }
+        // No conflict: the legacy merge is now order-independent for every keyed item,
+        // except identical flows that it would concatenate twice: dedup them.
+        let mut merged = Self::merge(configs);
+        if let Some(ev) = merged.events.as_mut() {
+            let mut seen = std::collections::HashSet::new();
+            ev.flows.retain(|f| seen.insert(f.name.clone()));
+        }
+        Ok(merged)
+    }
+
+    /// The links configuration DERIVED from a module descriptor (entities with their
+    /// plural and policies, links with their routes and policies). The descriptor is the
+    /// owner; nothing else is invented. Host-level keys (`events`, `sinks`, `auth`,
+    /// `validation_rules`) are absent: they belong to the host (see
+    /// [`LinksConfig::overlay_descriptor`]).
+    pub fn from_descriptor(d: &crate::descriptor::ModuleDescriptor) -> Self {
+        Self {
+            entities: vec![],
+            links: vec![],
+            validation_rules: None,
+            events: None,
+            sinks: None,
+            auth: None,
+        }
+        .overlay_descriptor(d)
+    }
+
+    /// Merge a descriptor INTO this configuration, by key: an entity (by singular) or a
+    /// link (by type, source, target) of the descriptor replaces the YAML one, everything
+    /// else (other entities and links, `events`, `sinks`, `auth`, `validation_rules`) is
+    /// kept untouched. This is what keeps a `links.yaml` written by hand (or by an older
+    /// CLI) from losing keys when its entities become descriptor-owned.
+    pub fn overlay_descriptor(mut self, d: &crate::descriptor::ModuleDescriptor) -> Self {
+        use crate::descriptor::Operation as Op;
+        for e in &d.entities {
+            let p = |op: Op| legacy_policy(&e.permissions.effective(&op));
+            let cfg = EntityConfig {
+                singular: e.name.clone(),
+                plural: e.plural.clone(),
+                auth: EntityAuthConfig {
+                    list: p(Op::List),
+                    get: p(Op::Get),
+                    create: p(Op::Create),
+                    update: p(Op::Update),
+                    delete: p(Op::Delete),
+                    list_links: p(Op::ListLinks),
+                    create_link: p(Op::CreateLink),
+                    delete_link: p(Op::DeleteLink),
+                    update_link: p(Op::UpdateLink),
+                },
+            };
+            match self.entities.iter_mut().find(|x| x.singular == e.name) {
+                Some(slot) => *slot = cfg,
+                None => self.entities.push(cfg),
+            }
+        }
+        for l in &d.links {
+            let scope = d.entity(&l.source);
+            let auth = (!l.permissions.is_empty()).then(|| {
+                let p = |op: Op| legacy_policy(&l.effective_policy(scope, &op));
+                crate::core::link::LinkAuthConfig {
+                    list: p(Op::ListLinks),
+                    get: p(Op::GetLink),
+                    create: p(Op::CreateLink),
+                    update: p(Op::UpdateLink),
+                    delete: p(Op::DeleteLink),
+                }
+            });
+            let def = LinkDefinition {
+                link_type: l.link_type.clone(),
+                source_type: l.source.clone(),
+                target_type: l.target.clone(),
+                forward_route_name: l.forward_route.clone(),
+                reverse_route_name: l.reverse_route.clone(),
+                description: l.description.clone(),
+                required_fields: {
+                    let req: Vec<String> = l
+                        .fields
+                        .iter()
+                        .filter(|f| f.required_on(crate::descriptor::Applies::Create))
+                        .map(|f| f.name.clone())
+                        .collect();
+                    (!req.is_empty()).then_some(req)
+                },
+                auth,
+            };
+            match self.links.iter_mut().find(|x| {
+                x.link_type == def.link_type
+                    && x.source_type == def.source_type
+                    && x.target_type == def.target_type
+            }) {
+                Some(slot) => *slot = def,
+                None => self.links.push(def),
+            }
+        }
+        self
     }
 
     /// Validate if a link combination is allowed
@@ -918,5 +1176,112 @@ sinks:
         // Sinks should be merged (deduplicated by name)
         let sinks = merged.sinks.unwrap();
         assert_eq!(sinks.len(), 2);
+    }
+}
+
+#[cfg(test)]
+mod strict_merge_tests {
+    use super::*;
+    use crate::descriptor::{EntityDesc, LinkDesc, ModuleDescriptor, Operation, PolicyExpr};
+
+    fn yaml(s: &str) -> LinksConfig {
+        LinksConfig::from_yaml_str(s).unwrap()
+    }
+
+    #[test]
+    fn merge_strict_reports_conflicts() {
+        let a = yaml(
+            r#"
+entities:
+  - { singular: order, plural: orders }
+links:
+  - { link_type: has, source_type: order, target_type: invoice,
+      forward_route_name: invoices, reverse_route_name: order }
+sinks:
+  - { name: inbox, type: in_app }
+"#,
+        );
+        // Identical redeclarations are not conflicts.
+        let merged = LinksConfig::merge_strict(vec![a.clone(), a.clone()]).unwrap();
+        assert_eq!(merged.entities.len(), 1);
+        assert_eq!(merged.links.len(), 1);
+
+        let b = yaml(
+            r#"
+entities:
+  - { singular: order, plural: commandes }
+  - { singular: command, plural: orders }
+links:
+  - { link_type: has, source_type: order, target_type: invoice,
+      forward_route_name: bills, reverse_route_name: order }
+  - { link_type: owns, source_type: order, target_type: payment,
+      forward_route_name: invoices, reverse_route_name: owner }
+sinks:
+  - { name: inbox, type: webhook }
+"#,
+        );
+        let errs = LinksConfig::merge_strict(vec![a.clone(), b]).unwrap_err();
+        let what: Vec<String> = errs
+            .iter()
+            .map(|e| {
+                assert_eq!(e.code.as_str(), "this.module.config_conflict");
+                e.params["what"].as_str().unwrap().to_string()
+            })
+            .collect();
+        for w in ["entity", "plural", "link", "link_route", "sink"] {
+            assert!(what.iter().any(|x| x == w), "missing {w} in {what:?}");
+        }
+        // The legacy merge still silently keeps the last one (unchanged behaviour).
+        let legacy = LinksConfig::merge(vec![a.clone(), a]);
+        assert_eq!(legacy.entities.len(), 1);
+    }
+
+    #[test]
+    fn from_descriptor_preserves_host_level_keys() {
+        let host = yaml(
+            r#"
+entities:
+  - { singular: invoice, plural: invoices, auth: { list: public } }
+  - { singular: user, plural: users }
+links: []
+sinks:
+  - { name: inbox, type: in_app }
+validation_rules:
+  owner: [ { source: user, targets: [invoice] } ]
+"#,
+        );
+        let mut d = ModuleDescriptor::new("billing", "1.0.0");
+        let mut inv = EntityDesc::new("invoice");
+        inv.permissions
+            .ops
+            .insert(Operation::Delete, PolicyExpr::AdminOnly);
+        inv.permissions.ops.insert(Operation::List, PolicyExpr::Deny);
+        d.entities.push(inv);
+        let mut l = LinkDesc::new("owner", "user", "invoice");
+        l.permissions
+            .ops
+            .insert(Operation::CreateLink, PolicyExpr::HasRole(vec!["a".into(), "b".into()]));
+        d.links.push(l);
+        d.normalize();
+
+        let merged = host.overlay_descriptor(&d);
+        assert_eq!(merged.sinks.as_ref().unwrap().len(), 1, "sinks kept");
+        assert!(merged.validation_rules.is_some(), "validation_rules kept");
+        assert_eq!(merged.entities.len(), 2, "entity replaced by key, user kept");
+        let invoice = merged.entities.iter().find(|e| e.singular == "invoice").unwrap();
+        assert_eq!(invoice.plural, "invoices");
+        assert_eq!(invoice.auth.delete, "admin_only");
+        assert_eq!(invoice.auth.list, "not:public", "deny in the legacy grammar");
+        assert_eq!(invoice.auth.get, "authenticated", "descriptor default");
+        let link = &merged.links[0];
+        assert_eq!(link.forward_route_name, "invoices-owners");
+        assert_eq!(
+            link.auth.as_ref().unwrap().create,
+            "any:role:a,role:b"
+        );
+
+        let alone = LinksConfig::from_descriptor(&d);
+        assert!(alone.sinks.is_none() && alone.auth.is_none());
+        assert_eq!(alone.entities.len(), 1);
     }
 }

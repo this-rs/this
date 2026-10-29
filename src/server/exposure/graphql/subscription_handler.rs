@@ -314,6 +314,7 @@ fn matches_filter(envelope: &EventEnvelope, filter: &SubscriptionFilter) -> bool
             },
             FrameworkEvent::Cognitive(_) => false,
             FrameworkEvent::GdprErasure { .. } => false,
+            FrameworkEvent::Module(_) => false,
         };
         if !matches {
             return false;
@@ -415,6 +416,13 @@ fn envelope_to_graphql_value(envelope: &EventEnvelope) -> Value {
             "kind": "cognitive",
             "action": envelope.event.action(),
             "nodeId": envelope.event.entity_id().map(|id| id.to_string()),
+        }),
+        FrameworkEvent::Module(m) => json!({
+            "id": envelope.id.to_string(),
+            "timestamp": envelope.timestamp.to_rfc3339(),
+            "kind": "module",
+            "action": envelope.event.action(),
+            "module": m,
         }),
         FrameworkEvent::GdprErasure {
             tenant_id,
