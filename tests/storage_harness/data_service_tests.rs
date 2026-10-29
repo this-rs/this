@@ -259,7 +259,14 @@ macro_rules! data_service_tests {
 
                 // L'application marque « supprimé » par une MISE À JOUR : le
                 // framework n'a pas de geste de suppression douce.
-                entity.deleted_at = Some(chrono::Utc::now());
+                // Truncate to microsecond precision: MySQL DATETIME(6) only
+                // stores µs, so nanoseconds would cause a mismatch on read-back.
+                use chrono::Timelike;
+                let now = chrono::Utc::now();
+                let now_us = now
+                    .with_nanosecond(now.nanosecond() / 1_000 * 1_000)
+                    .unwrap();
+                entity.deleted_at = Some(now_us);
                 service.update(&id, entity.clone()).await.unwrap();
 
                 let relu = service
