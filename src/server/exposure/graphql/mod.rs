@@ -3,9 +3,7 @@
 //! This module provides GraphQL-specific routing and schema generation.
 //! It is completely separate from the core framework logic.
 
-mod dynamic_schema;
 mod executor;
-mod schema;
 mod schema_generator; // Now a directory with sub-modules
 mod subscription_handler;
 

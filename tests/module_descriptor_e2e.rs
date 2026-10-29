@@ -40,6 +40,7 @@ use this::server::exposure::GraphQLExposure;
 use this::server::exposure::grpc::entity_service::EntityServiceImpl;
 use this::server::exposure::grpc::proto::CreateEntityRequest;
 use this::server::exposure::grpc::proto::entity_service_server::EntityService;
+use this::server::exposure::grpc::proto_generator::ProtoGenerator;
 use this::server::exposure::rest::RestExposure;
 use this::server::host::ServerHost;
 use this::server::module_runtime::ModuleSource;
@@ -755,4 +756,298 @@ async fn hot_loaded_compiled_module_is_validated_on_rest_and_through_its_creator
     let (s, v) = call(&app, Method::POST, "/products", Some(json!({"price": 3.0}))).await;
     assert_eq!(s, StatusCode::CREATED, "{v}");
     assert_eq!(*store.writes.lock().unwrap(), 1);
+}
+
+// ── hot-loaded module on REST + GraphQL + gRPC, policies ARMED ───────────────
+
+/// `ledger { entry { amount: f64 } }`: every CRUD operation requires the `admin` role.
+fn ledger() -> ModuleDescriptor {
+    let mut e = EntityDesc::new("entry");
+    e.fields.push(FieldDesc::new("amount", FieldType::F64));
+    for op in Operation::CRUD {
+        e.permissions
+            .ops
+            .insert(op, PolicyExpr::HasRole(vec!["admin".into()]));
+    }
+    let mut m = ModuleDescriptor::new("ledger", "1.0.0");
+    m.entities.push(e);
+    m.normalize();
+    m
+}
+
+struct Armed {
+    host: Arc<ServerHost>,
+    rest: Router,
+    graphql: Router,
+}
+
+fn armed_runtime_host() -> Armed {
+    let host = ServerBuilder::new()
+        .with_link_service(InMemoryLinkService::new())
+        .with_module_runtime()
+        .build_host()
+        .expect("host")
+        .with_auth_provider(Arc::new(Tokens));
+    assert!(host.authorize, "policies are armed by default");
+    let host = Arc::new(host);
+    Armed {
+        rest: RestExposure::build_router(host.clone(), vec![]).expect("REST"),
+        graphql: GraphQLExposure::build_router(host.clone()).expect("GraphQL armed"),
+        host,
+    }
+}
+
+impl Armed {
+    async fn rest(
+        &self,
+        method: Method,
+        uri: &str,
+        token: &str,
+        body: Option<Value>,
+    ) -> (StatusCode, Value) {
+        let mut req = Request::builder()
+            .method(method)
+            .uri(uri)
+            .header("authorization", format!("Bearer {token}"));
+        let req = match body {
+            Some(b) => {
+                req = req.header("content-type", "application/json");
+                req.body(Body::from(b.to_string()))
+            }
+            None => req.body(Body::empty()),
+        }
+        .unwrap();
+        let res = self.rest.clone().oneshot(req).await.unwrap();
+        let status = res.status();
+        let bytes = axum::body::to_bytes(res.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        (
+            status,
+            serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+        )
+    }
+
+    async fn gql(&self, token: &str, query: &str) -> Value {
+        let res = self
+            .graphql
+            .clone()
+            .oneshot(
+                Request::post("/graphql")
+                    .header("content-type", "application/json")
+                    .header("authorization", format!("Bearer {token}"))
+                    .body(Body::from(json!({ "query": query }).to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let bytes = axum::body::to_bytes(res.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    async fn sdl(&self) -> String {
+        let res = self
+            .graphql
+            .clone()
+            .oneshot(Request::get("/graphql/schema").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let bytes = axum::body::to_bytes(res.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        String::from_utf8(bytes.to_vec()).unwrap()
+    }
+
+    fn grpc_req<T>(&self, token: &str, msg: T) -> tonic::Request<T> {
+        let mut req = tonic::Request::new(msg);
+        req.metadata_mut()
+            .insert("authorization", format!("Bearer {token}").parse().unwrap());
+        req
+    }
+
+    async fn grpc_create(
+        &self,
+        token: &str,
+        entity: &str,
+        body: Value,
+    ) -> Result<(), tonic::Status> {
+        EntityServiceImpl::new(self.host.clone())
+            .create_entity(self.grpc_req(
+                token,
+                CreateEntityRequest {
+                    entity_type: entity.into(),
+                    data: Some(grpc_struct(body)),
+                },
+            ))
+            .await
+            .map(|_| ())
+    }
+
+    async fn grpc_list(&self, token: &str, entity: &str) -> Result<usize, tonic::Status> {
+        use this::server::exposure::grpc::proto::ListEntitiesRequest;
+        EntityServiceImpl::new(self.host.clone())
+            .list_entities(self.grpc_req(
+                token,
+                ListEntitiesRequest {
+                    entity_type: entity.into(),
+                    limit: 10,
+                    offset: 0,
+                },
+            ))
+            .await
+            .map(|r| r.into_inner().entities.len())
+    }
+}
+
+/// Records a failed expectation instead of aborting: ONE run reports every surface that
+/// does not follow the live catalog (a red proof names REST / GraphQL / gRPC separately).
+fn ck(failures: &mut Vec<String>, ok: bool, what: impl FnOnce() -> String) {
+    if !ok {
+        failures.push(what());
+    }
+}
+
+fn err_code(v: &Value) -> &str {
+    v["errors"][0]["extensions"]["this_code"]
+        .as_str()
+        .unwrap_or("")
+}
+
+#[tokio::test]
+async fn hot_loaded_module_served_on_rest_graphql_grpc() {
+    let a = armed_runtime_host();
+    let runtime = a.host.module_runtime.clone().expect("runtime");
+    let mut f: Vec<String> = vec![];
+    let create_gql = r#"mutation { createEntry(data: {name: "n", amount: 2.0}) { id } }"#;
+    let body = json!({"name": "n", "amount": 1.0});
+
+    // Before the load: nothing is served on any surface.
+    ck(&mut f, !a.sdl().await.contains("type Entry"), || {
+        "SDL has Entry before load".into()
+    });
+    let (s, _) = a.rest(Method::GET, "/entries", "admin", None).await;
+    ck(&mut f, s.is_client_error(), || {
+        format!("REST before load: {s}")
+    });
+    let out = a.gql("admin", "{ entries { id } }").await;
+    ck(&mut f, out["errors"].is_array(), || {
+        format!("GraphQL before load: {out}")
+    });
+    let st = a
+        .grpc_create("admin", "entry", body.clone())
+        .await
+        .unwrap_err();
+    ck(&mut f, st.code() == tonic::Code::NotFound, || {
+        format!("gRPC before load: {st:?}")
+    });
+
+    runtime
+        .load(ModuleSource::Manifest(ledger().to_json_pretty()))
+        .await
+        .expect("hot load");
+
+    // REST: refused without the role, served with it.
+    let (s, v) = a
+        .rest(Method::POST, "/entries", "user", Some(body.clone()))
+        .await;
+    ck(&mut f, s == StatusCode::FORBIDDEN, || {
+        format!("REST user create: {s} {v}")
+    });
+    let (s, v) = a
+        .rest(Method::POST, "/entries", "admin", Some(body.clone()))
+        .await;
+    ck(&mut f, s == StatusCode::CREATED, || {
+        format!("REST admin create: {s} {v}")
+    });
+
+    // GraphQL: schema and resolvers follow the live catalog.
+    let sdl = a.sdl().await;
+    ck(
+        &mut f,
+        sdl.contains("type Entry") && sdl.contains("entries"),
+        || format!("GraphQL SDL after load:\n{sdl}"),
+    );
+    let out = a.gql("user", create_gql).await;
+    ck(&mut f, err_code(&out) == "this.auth.forbidden", || {
+        format!("GraphQL user create: {out}")
+    });
+    let out = a.gql("user", "{ entries { id } }").await;
+    ck(&mut f, err_code(&out) == "this.auth.forbidden", || {
+        format!("GraphQL user list: {out}")
+    });
+    let out = a.gql("admin", create_gql).await;
+    ck(&mut f, out["errors"].is_null(), || {
+        format!("GraphQL admin create: {out}")
+    });
+    let out = a.gql("admin", "{ entries { id } }").await;
+    ck(
+        &mut f,
+        out["data"]["entries"].as_array().map(Vec::len) == Some(2),
+        || format!("GraphQL admin list (expected 2 rows): {out}"),
+    );
+
+    // gRPC: entity service and exported proto follow the live catalog.
+    let st = a.grpc_create("user", "entry", body.clone()).await;
+    ck(
+        &mut f,
+        st.as_ref().err().map(|s| s.code()) == Some(tonic::Code::PermissionDenied),
+        || format!("gRPC user create: {st:?}"),
+    );
+    let r = a.grpc_create("admin", "entry", body.clone()).await;
+    ck(&mut f, r.is_ok(), || format!("gRPC admin create: {r:?}"));
+    let r = a.grpc_list("admin", "entry").await;
+    ck(&mut f, r.as_ref().ok() == Some(&3), || {
+        format!("gRPC admin list (expected 3 rows): {r:?}")
+    });
+    let r = a.grpc_list("user", "entry").await;
+    ck(
+        &mut f,
+        r.as_ref().err().map(|s| s.code()) == Some(tonic::Code::PermissionDenied),
+        || format!("gRPC user list: {r:?}"),
+    );
+    let proto = ProtoGenerator::new(a.host.clone()).generate_proto().await;
+    ck(&mut f, proto.contains("message Entry"), || {
+        format!("proto after load:\n{proto}")
+    });
+
+    // Unload: 404 / unknown everywhere; schema and proto back to before.
+    runtime.unload("ledger").await.expect("unload");
+    let (s, v) = a.rest(Method::GET, "/entries", "admin", None).await;
+    ck(
+        &mut f,
+        s == StatusCode::NOT_FOUND && v["code"] == "this.module.not_found",
+        || format!("REST after unload: {s} {v}"),
+    );
+    let out = a.gql("admin", "{ entries { id } }").await;
+    ck(
+        &mut f,
+        out["data"].is_null() && out["errors"].is_array(),
+        || format!("GraphQL list after unload: {out}"),
+    );
+    let out = a.gql("admin", create_gql).await;
+    ck(&mut f, out["errors"].is_array(), || {
+        format!("GraphQL create after unload: {out}")
+    });
+    let r = a.grpc_list("admin", "entry").await;
+    ck(
+        &mut f,
+        r.as_ref().err().map(|s| s.code()) == Some(tonic::Code::NotFound),
+        || format!("gRPC after unload: {r:?}"),
+    );
+    ck(&mut f, !a.sdl().await.contains("type Entry"), || {
+        "SDL still has Entry after unload".into()
+    });
+    let proto = ProtoGenerator::new(a.host.clone()).generate_proto().await;
+    ck(&mut f, !proto.contains("message Entry"), || {
+        "proto still has Entry after unload".into()
+    });
+
+    assert!(
+        f.is_empty(),
+        "{} expectation(s) failed:\n- {}",
+        f.len(),
+        f.join("\n- ")
+    );
 }

@@ -81,13 +81,7 @@ impl LinkServiceImpl {
         entity_id: &Uuid,
         guard: &SurfaceGuard,
     ) -> Option<prost_types::Struct> {
-        for (entity_type, fetcher) in self.host.entity_fetchers.iter() {
-            if guard
-                .check(entity_type, Operation::Get, Some(entity_id))
-                .is_err()
-            {
-                continue;
-            }
+        for fetcher in guard.readable_fetchers(&self.host, entity_id) {
             if let Ok(json) = fetcher.fetch_as_json(entity_id).await {
                 return Some(json_to_struct(&json));
             }

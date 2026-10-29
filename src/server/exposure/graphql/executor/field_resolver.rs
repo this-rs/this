@@ -118,7 +118,7 @@ async fn resolve_relation_field_inner(
     let source_uuid = Uuid::parse_str(entity_id)?;
 
     // Get links configuration for this entity type
-    let links_config = &host.config;
+    let links_config = host.catalog().links_config.clone();
 
     // Find the link configuration for this relation
     for link_config in &links_config.links {
@@ -144,13 +144,15 @@ async fn resolve_relation_field_inner(
                 )
                 .await?;
 
-            // Fetch the target entities
-            if let Some(fetcher) = host.entity_fetchers.get(&link_config.target_type) {
+            // Fetch the target entities (each target read is a `get`, judged by the guard
+            // together with the lookup of its fetcher in the live catalog)
+            {
                 let mut targets = Vec::new();
 
                 for link in links {
-                    guard
-                        .check(
+                    let fetcher = guard
+                        .fetcher(
+                            host,
                             &link_config.target_type,
                             Operation::Get,
                             Some(&link.target_id),
@@ -194,17 +196,15 @@ async fn resolve_relation_field_inner(
                 .await?;
 
             // Fetch the source entity (should be only one for singular relations)
-            if let Some(link) = links.first() {
-                guard
-                    .check(
+            if let Some(link) = links.first()
+                && let fetcher = guard
+                    .fetcher(
+                        host,
                         &link_config.source_type,
                         Operation::Get,
                         Some(&link.source_id),
                     )
-                    .map_err(anyhow::Error::new)?;
-            }
-            if let Some(link) = links.first()
-                && let Some(fetcher) = host.entity_fetchers.get(&link_config.source_type)
+                    .map_err(anyhow::Error::new)?
                 && let Ok(source_entity) = fetcher.fetch_as_json(&link.source_id).await
             {
                 let resolved = resolve_entity_fields_impl(
