@@ -585,9 +585,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_delete_link_mutation_direct_call() {
-        // Note: deleteLink via executor gets caught by the "delete*" prefix check
-        // and routes to delete_entity_mutation instead of delete_link_mutation.
-        // So we test delete_link_mutation directly using a manually constructed Field.
+        // Direct call on a manually constructed Field (the executor routing of
+        // `deleteLink` is covered by `graphql_delete_link_is_routed_and_guarded`).
         use super::delete_link_mutation;
         use graphql_parser::Pos;
         use graphql_parser::query::{SelectionSet, Value as GqlValue};

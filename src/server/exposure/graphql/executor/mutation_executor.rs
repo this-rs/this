@@ -46,22 +46,9 @@ pub async fn resolve_mutation_field(
         return link_mutations::unlink_entities_mutation(host, guard, field).await;
     }
 
-    // Check for create mutation (e.g., "createOrder")
-    if field_name.starts_with("create") {
-        return create_entity_mutation(host, guard, field).await;
-    }
-
-    // Check for update mutation (e.g., "updateOrder")
-    if field_name.starts_with("update") {
-        return update_entity_mutation(host, guard, field).await;
-    }
-
-    // Check for delete mutation (e.g., "deleteOrder")
-    if field_name.starts_with("delete") {
-        return delete_entity_mutation(host, guard, field).await;
-    }
-
-    // Check for deleteLink mutation
+    // Check for deleteLink mutation: BEFORE the generic `delete` prefix, which
+    // otherwise routed it to `delete_entity_mutation` on a phantom `link` entity
+    // (judged by the default policy of an entity that does not exist).
     if field_name == "deleteLink" {
         return link_mutations::delete_link_mutation(host, guard, field).await;
     }
@@ -103,6 +90,24 @@ pub async fn resolve_mutation_field(
             let deleted = store.delete(&uuid).await;
             return Ok(Value::Bool(deleted));
         }
+    }
+
+    // Generic entity mutations LAST: their prefixes also match `deleteNotification`
+    // (routed before to `delete_entity_mutation` on a phantom `notification`
+    // entity, bypassing the notification refusal above).
+    // Check for create mutation (e.g., "createOrder")
+    if field_name.starts_with("create") {
+        return create_entity_mutation(host, guard, field).await;
+    }
+
+    // Check for update mutation (e.g., "updateOrder")
+    if field_name.starts_with("update") {
+        return update_entity_mutation(host, guard, field).await;
+    }
+
+    // Check for delete mutation (e.g., "deleteOrder")
+    if field_name.starts_with("delete") {
+        return delete_entity_mutation(host, guard, field).await;
     }
 
     bail!("Unknown mutation field: {}", field_name);
