@@ -3,6 +3,8 @@ sequenceDiagram
 %% PROUVE : rien encore pour la sequence (flux modules-runtime et vfs). Contrats prouves par la fondation :
 %%   resolve (tests resolve_*), check_compat (tag_reuse_move_and_unreserved_removal_detected), LiveCatalog
 %%   (readers_keep_their_snapshot_across_publication), VfsPath (vfs_path_rejects_dotdot_and_friends).
+%% PROUVE (flux vfs) : phase 1 cote ModuleStore = module_store_get_highest_version, module_store_yank_rolls_back_and_unyank_restores,
+%%   module_store_get_rechecks_with_current_registry, read_source_loads_stored_module. Detail : stockage-vfs.mmd.
 %% SOURCES LUES : src/server/catalog.rs, src/storage/vfs/mod.rs, crates/this-descriptor/src/{resolve,compat,check}.rs.
 %% NON ETABLI : couche de repartition sous charge ; annulation des flux en fin de grace.
     autonumber
@@ -24,7 +26,7 @@ sequenceDiagram
     rect rgba(164,139,255,.15)
     Note over RT,MS: Phase 1 - lecture et verification
     RT->>MS: get billing None
-    MS->>MS: plus haute version, descriptor.json sans textes
+    MS->>MS: plus haute version non retiree (yank), manifest.json, etags verifies
     MS->>MS: check profil Stored
     MS-->>RT: ModuleDescriptor
     end
