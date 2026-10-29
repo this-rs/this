@@ -23,6 +23,50 @@ pub async fn resolve_query_field(
         let limit = utils::get_int_arg(field, "limit");
         let offset = utils::get_int_arg(field, "offset");
 
+        // Typed filters (validation stream): `filter` (object or JSON string, REST
+        // grammar) and `sort` (REST grammar). Present → checked against the descriptor
+        // (strict without one) and applied BEFORE pagination; malformed → a
+        // `ContractError` (`BAD_USER_INPUT`). Absent → historical path, unchanged.
+        let filter = utils::get_json_arg(field, "filter");
+        // `sort` present but not a string (list, number, object...) is a typed error:
+        // reading it as "no sort" would silently ignore what the client asked for.
+        let sort = match utils::get_json_arg(field, "sort") {
+            None | Some(Value::Null) => None,
+            Some(Value::String(s)) => Some(s),
+            Some(other) => {
+                return Err(crate::descriptor::ContractError::framework(
+                    crate::descriptor::framework::codes::QUERY_MALFORMED_SORT,
+                )
+                .with_param(
+                    "reason",
+                    format!("`sort` must be a string (REST grammar), got {other}"),
+                )
+                .into());
+            }
+        };
+        if (filter.is_some() || sort.is_some())
+            && let Some(fetcher) = host.entity_fetchers.get(entity_type)
+        {
+            let descriptors = host.descriptors();
+            let desc = descriptors.entity(entity_type).map(|(_, d)| d);
+            let q = crate::core::query::query_from_args(
+                desc,
+                filter,
+                sort.as_deref(),
+                limit.and_then(|l| u32::try_from(l).ok()),
+                offset.and_then(|o| u32::try_from(o).ok()),
+            )?;
+            let (entities, _total) = fetcher.list_query(&q).await?;
+            let resolved_entities = field_resolver::resolve_entity_list(
+                host,
+                entities,
+                &field.selection_set.items,
+                entity_type,
+            )
+            .await?;
+            return Ok(Value::Array(resolved_entities));
+        }
+
         // Fetch entities
         if let Some(fetcher) = host.entity_fetchers.get(entity_type) {
             let entities = fetcher.list_as_json(limit, offset).await?;

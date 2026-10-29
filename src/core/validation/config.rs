@@ -100,6 +100,23 @@ impl EntityValidationConfig {
     }
 }
 
+/// Legacy error strings → one `this.validation.failed` contract error. The legacy rule set
+/// does not know which field produced which string, so each violation has an empty `path`
+/// and the generic `this.validation.custom` code; its `message` is the legacy string.
+pub fn legacy_errors_to_contract(errors: &[String]) -> crate::descriptor::ContractError {
+    use crate::descriptor::framework::codes;
+    let mut err = crate::descriptor::ContractError::framework(codes::VALIDATION_FAILED);
+    err.fields = errors
+        .iter()
+        .map(|m| {
+            let mut v = crate::descriptor::FieldViolation::new("", codes::VALIDATION_CUSTOM);
+            v.message = m.clone();
+            v
+        })
+        .collect();
+    err
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

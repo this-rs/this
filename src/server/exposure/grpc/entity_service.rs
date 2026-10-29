@@ -15,6 +15,67 @@ use std::sync::Arc;
 use tonic::{Request, Response, Status};
 use uuid::Uuid;
 
+/// Request metadata carrying the list filter (REST `?filter=` grammar, JSON object).
+/// Non-ASCII values go in the binary variant `this-filter-bin` (same for `this-sort-bin`).
+pub const FILTER_METADATA: &str = "this-filter";
+/// Request metadata carrying the list sort (REST `?sort=` grammar).
+pub const SORT_METADATA: &str = "this-sort";
+
+/// Read a list-query metadata entry, FAIL-CLOSED: `key` (ASCII) or `key-bin` (binary,
+/// base64 on the wire, for UTF-8 filter values such as `{"name": "Zoé"}`).
+/// - absent → `Ok(None)` (no filter / no sort, historical path);
+/// - present but unreadable (non visible-ASCII in `key`, invalid UTF-8 in `key-bin`), or
+///   given under both keys → `INVALID_ARGUMENT` `this.transport.bad_request`. Reading an
+///   unreadable value as "absent" would silently list EVERYTHING.
+fn query_metadata(md: &tonic::metadata::MetadataMap, key: &str) -> Result<Option<String>, Status> {
+    let bad = |reason: String| {
+        crate::core::errors::to_status(
+            crate::descriptor::ContractError::framework(
+                crate::descriptor::framework::codes::TRANSPORT_BAD_REQUEST,
+            )
+            .with_param("reason", reason),
+        )
+    };
+    let ascii = md
+        .get(key)
+        .map(|v| {
+            v.to_str()
+                .map(str::to_string)
+                .map_err(|_| bad(format!("`{key}` is not visible ASCII: use `{key}-bin`")))
+        })
+        .transpose()?;
+    let bin_key = format!("{key}-bin");
+    let binary = md
+        .get_bin(bin_key.as_str())
+        .map(|v| {
+            v.to_bytes()
+                .map_err(|_| bad(format!("`{bin_key}` is not valid base64")))
+                .and_then(|b| {
+                    String::from_utf8(b.to_vec())
+                        .map_err(|_| bad(format!("`{bin_key}` is not valid UTF-8")))
+                })
+        })
+        .transpose()?;
+    match (ascii, binary) {
+        (Some(_), Some(_)) => Err(bad(format!("both `{key}` and `{bin_key}` given"))),
+        (a, b) => Ok(a.or(b)),
+    }
+}
+
+/// A write failure: a `ContractError` (validation, business code) keeps its code and kind
+/// (`this.validation.failed` → `INVALID_ARGUMENT`); anything else stays the historical
+/// `INTERNAL` with its message.
+fn write_error(e: &anyhow::Error, op: &str) -> Status {
+    if e.chain().any(|c| {
+        c.downcast_ref::<crate::descriptor::ContractError>()
+            .is_some()
+    }) {
+        crate::core::errors::to_status(crate::core::errors::from_anyhow(e))
+    } else {
+        Status::internal(format!("Failed to {op} entity: {e}"))
+    }
+}
+
 /// gRPC Entity Service implementation
 ///
 /// Delegates all operations to the `ServerHost`'s entity fetchers and creators.
@@ -85,9 +146,35 @@ impl EntityService for EntityServiceImpl {
         &self,
         request: Request<ListEntitiesRequest>,
     ) -> Result<Response<ListEntitiesResponse>, Status> {
+        // Typed filters (validation stream): `this-filter` / `this-sort` metadata, same
+        // grammar as REST `?filter=` / `?sort=`. Present → checked against the descriptor
+        // (strict without one), applied BEFORE pagination; malformed → INVALID_ARGUMENT.
+        let filter = query_metadata(request.metadata(), FILTER_METADATA)?;
+        let sort = query_metadata(request.metadata(), SORT_METADATA)?;
         let req = request.into_inner();
 
         let fetcher = self.get_fetcher(&req.entity_type)?;
+
+        if filter.is_some() || sort.is_some() {
+            let descriptors = self.host.descriptors();
+            let desc = descriptors.entity(&req.entity_type).map(|(_, d)| d);
+            let q = crate::core::query::query_from_args(
+                desc,
+                filter.map(serde_json::Value::String),
+                sort.as_deref(),
+                u32::try_from(req.limit).ok(),
+                u32::try_from(req.offset).ok(),
+            )
+            .map_err(crate::core::errors::to_status)?;
+            let (rows, total) = fetcher
+                .list_query(&q)
+                .await
+                .map_err(|e| write_error(&e, "list"))?;
+            return Ok(Response::new(ListEntitiesResponse {
+                entities: rows.iter().map(json_to_struct).collect(),
+                total: i32::try_from(total).unwrap_or(i32::MAX),
+            }));
+        }
 
         let limit = if req.limit > 0 { Some(req.limit) } else { None };
         let offset = if req.offset > 0 {
@@ -127,7 +214,7 @@ impl EntityService for EntityServiceImpl {
         let result = creator
             .create_from_json(data)
             .await
-            .map_err(|e| Status::internal(format!("Failed to create entity: {}", e)))?;
+            .map_err(|e| write_error(&e, "create"))?;
 
         // Publish event if event bus is configured
         if let Some(ref bus) = self.host.event_bus
@@ -168,7 +255,7 @@ impl EntityService for EntityServiceImpl {
         let result = creator
             .update_from_json(&entity_id, data)
             .await
-            .map_err(|e| Status::internal(format!("Failed to update entity: {}", e)))?;
+            .map_err(|e| write_error(&e, "update"))?;
 
         // Publish event if event bus is configured
         if let Some(ref bus) = self.host.event_bus {

@@ -3,7 +3,11 @@
 //! This module provides the `Validated<T>` extractor that automatically
 //! validates and filters request payloads before they reach handlers.
 
-use super::config::EntityValidationConfig;
+use super::config::{EntityValidationConfig, legacy_errors_to_contract};
+use super::layer::EngineValidated;
+use crate::core::errors::ERROR_HEADER;
+use crate::descriptor::ContractError;
+use crate::descriptor::framework::codes;
 use axum::{
     Json,
     extract::{FromRequest, Request},
@@ -62,22 +66,24 @@ where
     type Rejection = Response;
 
     async fn from_request(req: Request, state: &S) -> Result<Self, Self::Rejection> {
+        // Descriptor path: the REST validation layer already ran the shared engine on this
+        // body (and replaced it by the transformed payload). `Validated<T>` only extracts:
+        // validating again here would be a second, divergent rule set.
+        if req.extensions().get::<EngineValidated>().is_some() {
+            return match Json::<Value>::from_request(req, state).await {
+                Ok(Json(v)) => Ok(Validated::new(v)),
+                Err(e) => Err(invalid_json(e.to_string())),
+            };
+        }
+
+        // Legacy path (entity without descriptor): unchanged rules.
         // Extract the HTTP method
         let method = req.method().clone();
 
         // Extract JSON payload
         let Json(payload): Json<Value> = match Json::from_request(req, state).await {
             Ok(json) => json,
-            Err(e) => {
-                return Err((
-                    StatusCode::BAD_REQUEST,
-                    Json(json!({
-                        "error": "Invalid JSON",
-                        "details": e.to_string()
-                    })),
-                )
-                    .into_response());
-            }
+            Err(e) => return Err(invalid_json(e.to_string())),
         };
 
         // Determine operation from HTTP method
@@ -93,16 +99,39 @@ where
         // Validate and filter
         match config.validate_and_filter(payload) {
             Ok(validated_payload) => Ok(Validated::new(validated_payload)),
-            Err(errors) => Err((
-                StatusCode::UNPROCESSABLE_ENTITY,
-                Json(json!({
-                    "error": "Validation failed",
-                    "errors": errors
-                })),
-            )
-                .into_response()),
+            Err(errors) => Err(legacy_validation_response(errors)),
         }
     }
+}
+
+/// 400 for an unreadable body: legacy keys (`error: "Invalid JSON"`, `details`) plus the
+/// contract keys (`code`, `kind`, ...) and the `x-this-error` header.
+fn invalid_json(details: String) -> Response {
+    let err = ContractError::framework(codes::TRANSPORT_BAD_REQUEST)
+        .with_param("reason", details.clone());
+    let mut body = err.http_body();
+    body["error"] = json!("Invalid JSON");
+    body["details"] = json!(details);
+    with_error_header(StatusCode::BAD_REQUEST, body, &err)
+}
+
+/// 422 of the legacy rule set, additive: `error` and `errors` (strings) stay EXACTLY as
+/// before; `code` / `kind` / `fields` / RFC 9457 keys are added from
+/// `ContractError::http_body` so every client can switch on `code`.
+pub fn legacy_validation_response(errors: Vec<String>) -> Response {
+    let err = legacy_errors_to_contract(&errors);
+    let mut body = err.http_body();
+    body["error"] = json!("Validation failed");
+    body["errors"] = json!(errors);
+    with_error_header(StatusCode::UNPROCESSABLE_ENTITY, body, &err)
+}
+
+fn with_error_header(status: StatusCode, body: Value, err: &ContractError) -> Response {
+    let mut res = (status, Json(body)).into_response();
+    if let Ok(v) = axum::http::HeaderValue::from_str(err.code.as_str()) {
+        res.headers_mut().insert(ERROR_HEADER, v);
+    }
+    res
 }
 
 #[cfg(test)]
@@ -247,6 +276,65 @@ mod tests {
             Err(response) => assert_eq!(response.status(), StatusCode::BAD_REQUEST),
             Ok(_) => panic!("expected error"),
         }
+    }
+
+    async fn body_of(res: Response) -> Value {
+        let bytes = axum::body::to_bytes(res.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    #[tokio::test]
+    async fn legacy_validated_body_keeps_error_and_errors_keys() {
+        let req = json_request("POST", json!({"name": "  a  "}));
+        let res = match Validated::<TestEntity>::from_request(req, &()).await {
+            Err(r) => r,
+            Ok(_) => panic!("expected a refusal"),
+        };
+        assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(res.headers()[ERROR_HEADER], "this.validation.failed");
+        let body = body_of(res).await;
+        // Exactly the historical keys and values...
+        assert_eq!(body["error"], "Validation failed");
+        assert_eq!(body["errors"], json!(["name too short"]));
+        // ...plus the contract keys.
+        assert_eq!(body["code"], "this.validation.failed");
+        assert_eq!(body["kind"], "validation");
+        assert_eq!(body["status"], 422);
+        assert_eq!(body["fields"][0]["message"], "name too short");
+    }
+
+    #[tokio::test]
+    async fn engine_validated_request_is_only_extracted() {
+        // The layer validated (and transformed) the body: the legacy rules are NOT run
+        // again (`name: null` would fail them).
+        let mut req = json_request("POST", json!({"name": null}));
+        req.extensions_mut().insert(EngineValidated {
+            entity: "test_entity".into(),
+            op: crate::descriptor::engine::validate::WriteOp::Create,
+        });
+        let v = Validated::<TestEntity>::from_request(req, &())
+            .await
+            .unwrap_or_else(|_| panic!("extracted as is"));
+        assert_eq!(v.into_inner(), json!({"name": null}));
+    }
+
+    #[tokio::test]
+    async fn invalid_json_keeps_legacy_keys_and_adds_code() {
+        let req = Request::builder()
+            .method("POST")
+            .header("content-type", "application/json")
+            .body(Body::from("{{{"))
+            .unwrap();
+        let res = match Validated::<TestEntity>::from_request(req, &()).await {
+            Err(r) => r,
+            Ok(_) => panic!("expected a refusal"),
+        };
+        let body = body_of(res).await;
+        assert_eq!(body["error"], "Invalid JSON");
+        assert!(body["details"].is_string());
+        assert_eq!(body["code"], "this.transport.bad_request");
     }
 
     #[tokio::test]
