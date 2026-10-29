@@ -14,7 +14,11 @@ use crate::core::LinkDefinition;
 use crate::links::registry::{LinkDirection, LinkRouteRegistry};
 
 /// Errors that can occur during extraction
+///
+/// `#[non_exhaustive]`: variants are added as the contract grows (`Contract` appeared with
+/// the module descriptor). Match with a wildcard arm.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum ExtractorError {
     InvalidPath,
     InvalidEntityId,
