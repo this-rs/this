@@ -452,14 +452,24 @@ impl<T: ?Sized> ProbeFallback for FieldProbe<T> {
     }
 }
 
+/// A bound written `max_value(150)` reaches the macro as `f64`; an integral value is kept as
+/// an INTEGER number, otherwise `check` refuses the float `150.0` on an integer field
+/// (`bound 150.0 is not an integer`). A genuinely fractional bound stays a float.
+fn bound_number(v: f64) -> serde_json::Number {
+    if v.fract() == 0.0 && v >= i64::MIN as f64 && v < i64::MAX as f64 {
+        return serde_json::Number::from(v as i64);
+    }
+    serde_json::Number::from_f64(v).unwrap_or_else(|| 0.into())
+}
+
 /// Constructors used by the `impl_data_entity_validated!` translation (this-rs macros), so
 /// generated code needs no `serde_json` in the user's crate.
 impl ValidatorSpec {
     pub fn max_value_f64(v: f64) -> Self {
-        ValidatorSpec::MaxValue(serde_json::Number::from_f64(v).unwrap_or_else(|| 0.into()))
+        ValidatorSpec::MaxValue(bound_number(v))
     }
     pub fn min_value_f64(v: f64) -> Self {
-        ValidatorSpec::MinValue(serde_json::Number::from_f64(v).unwrap_or_else(|| 0.into()))
+        ValidatorSpec::MinValue(bound_number(v))
     }
     pub fn in_list_strings(values: Vec<String>) -> Self {
         ValidatorSpec::InList(values.into_iter().map(serde_json::Value::String).collect())

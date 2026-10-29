@@ -113,19 +113,11 @@ pub async fn create_and_link_mutation(
 ) -> Result<Value> {
     let field_name = field.name.as_str();
 
-    // Parse field name: createInvoiceForOrder -> (invoice, order)
-    let parts: Vec<&str> = field_name
-        .strip_prefix("create")
-        .unwrap_or("")
-        .split("For")
-        .collect();
-
-    if parts.len() != 2 {
-        bail!("Invalid createAndLink mutation format: {}", field_name);
-    }
-
-    let entity_type = utils::pascal_to_snake(parts[0]);
-    let parent_type = utils::pascal_to_snake(parts[1]);
+    // createInvoiceForOrder -> (invoice, order), from the declared links (schema_generator
+    // emits `create{Target}For{Source}` for each `LinkDefinition`).
+    let (entity_type, parent_type) =
+        utils::typed_link_operands(&host.config.links, field_name, "create", "For")
+            .ok_or_else(|| anyhow::anyhow!("Invalid createAndLink mutation: {field_name}"))?;
 
     // Get arguments
     let parent_id = utils::get_string_arg(field, "parentId")

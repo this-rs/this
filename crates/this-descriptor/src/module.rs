@@ -161,6 +161,35 @@ impl ModuleDescriptor {
         self.normalize();
         Ok(self)
     }
+
+    /// [`Self::compose`] then `descriptor.lock`: the compiled module receives the STABLE proto
+    /// tags (`/grpc/proto`, `descriptor export --format proto`) instead of the declaration
+    /// order. A lock that contradicts the composed descriptor (moved or reused tag) is a start
+    /// error, as `this descriptor check` refuses it at build time.
+    #[cfg(feature = "yaml")]
+    pub fn compose_locked(
+        self,
+        described: &[&EntityDesc],
+        lock_yaml: &str,
+    ) -> Result<Self, ContractError> {
+        let lock = crate::lock::DescriptorLock::parse(lock_yaml)?;
+        let mut composed = self.compose(described)?;
+        let issues = lock.check(&composed);
+        if !issues.is_empty() {
+            return Err(
+                ContractError::framework(codes::DESCRIPTOR_INVALID).with_param(
+                    "issues",
+                    issues
+                        .iter()
+                        .map(ToString::to_string)
+                        .collect::<Vec<_>>()
+                        .join("; "),
+                ),
+            );
+        }
+        lock.apply(&mut composed);
+        Ok(composed)
+    }
 }
 
 /// Precomputed view of an entity, built once by [`DescriptorSet::insert`]: field index,
@@ -374,6 +403,50 @@ mod tests {
             dup.compose(&[&described]).unwrap_err().code.as_str(),
             "this.descriptor.declared_twice"
         );
+    }
+
+    #[cfg(feature = "yaml")]
+    fn compiled_invoice() -> (ModuleDescriptor, EntityDesc) {
+        use crate::field::{FieldDesc, FieldType};
+        let mut described = EntityDesc::new("invoice");
+        described
+            .fields
+            .push(FieldDesc::new("amount", FieldType::F64));
+        described
+            .fields
+            .push(FieldDesc::new("label", FieldType::String));
+        (ModuleDescriptor::new("billing", "1.0.0"), described)
+    }
+
+    #[cfg(feature = "yaml")]
+    #[test]
+    fn proto_tags_present_for_compiled_module_with_lock() {
+        use crate::derive::proto::{TagMode, file_for};
+        let (m, described) = compiled_invoice();
+        // The lock keeps `label` on 20 although it is declared second: stable, not positional.
+        let lock = "format: 1\nentities:\n  invoice:\n    fields:\n      amount: 16\n      label: 20\n    reserved: [17]\n";
+        let composed = m.clone().compose_locked(&[&described], lock).unwrap();
+        let e = &composed.entities[0];
+        assert_eq!(e.field("amount").unwrap().proto_tag, Some(16));
+        assert_eq!(e.field("label").unwrap().proto_tag, Some(20));
+        assert_eq!(e.reserved_tags, vec![17]);
+        let proto = file_for(&[e], "billing", TagMode::Strict).unwrap();
+        assert!(proto.contains("label = 20;"), "{proto}");
+        // Without the lock (plain compose) the tags stay absent: Strict refuses, no invented number.
+        let bare = m.compose(&[&described]).unwrap();
+        assert!(bare.entities[0].field("label").unwrap().proto_tag.is_none());
+        assert!(file_for(&[&bare.entities[0]], "billing", TagMode::Strict).is_err());
+    }
+
+    #[cfg(feature = "yaml")]
+    #[test]
+    fn compose_locked_refuses_a_contradicting_lock() {
+        let (m, mut described) = compiled_invoice();
+        described.fields[1].proto_tag = Some(30);
+        let lock =
+            "format: 1\nentities:\n  invoice:\n    fields:\n      amount: 16\n      label: 20\n";
+        let e = m.compose_locked(&[&described], lock).unwrap_err();
+        assert_eq!(e.code.as_str(), codes::DESCRIPTOR_INVALID);
     }
 
     #[test]

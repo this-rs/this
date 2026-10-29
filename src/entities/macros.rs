@@ -931,7 +931,7 @@ macro_rules! add_validators_for_field {
 
     // max_value with parameter
     ($config:expr, $field:expr, max_value($max:expr) $( $rest:tt )*) => {
-        $config.add_validator($field, $crate::core::validation::validators::max_value($max));
+        $config.add_validator($field, $crate::core::validation::validators::max_value(($max) as f64));
         $crate::add_validators_for_field!($config, $field, $( $rest )*);
     };
 
@@ -1323,6 +1323,41 @@ mod descriptor_macro_tests {
             d.fields.iter().all(|f| f.proto_tag.is_none()),
             "macro never assigns tags"
         );
+    }
+
+    impl_data_entity_validated!(
+        Person,
+        "person",
+        ["name"],
+        {
+            age: i32,
+        },
+        validate: {
+            create: {
+                age: [required max_value(150)],
+            },
+            update: {},
+        },
+        filters: {
+            create: {},
+        }
+    );
+
+    /// `max_value(150)` on an INTEGER field: the bound must stay an integer in the descriptor
+    /// (it used to become the float 150.0, refused by `check`).
+    #[test]
+    fn macro_max_value_integer_bound_on_integer_field() {
+        let d = Person::entity_desc();
+        let age = d.field("age").unwrap();
+        assert!(
+            age.validators
+                .iter()
+                .any(|r| matches!(&r.rule, ValidatorSpec::MaxValue(n) if n.is_i64()))
+        );
+        let mut m = ModuleDescriptor::new("people", "1.0.0");
+        m.entities.push(d.clone());
+        m.check(&CustomRegistry::default(), CheckProfile::Compiled)
+            .unwrap();
     }
 
     #[test]
