@@ -70,6 +70,7 @@ pub struct ServerBuilder {
     principal_mapping: Option<Arc<crate::server::middleware::authorization::PrincipalMapping>>,
 
     // Armer le bail d'écriture sur un store obrain inscriptible (défaut : armé)
+    #[cfg_attr(not(feature = "obrain"), allow(dead_code))]
     fence_writes: bool,
 
     // Auth config loaded from external file
@@ -743,22 +744,18 @@ impl ServerBuilder {
         // est attaché, on auto-câble le registre obrain (convention PUIS
         // propriétés plates). Sans store, on ne présume rien : la convention
         // seule, c'est-à-dire le comportement historique.
-        match self.identity.take() {
-            Some(registry) => {
-                host = host.with_identity_registry(registry);
-                tracing::info!("identity registry attached explicitly");
-            }
-            None =>
-            {
-                #[cfg(feature = "obrain")]
-                if host.graph_store().is_some() {
-                    host = host.with_identity_registry(
-                        crate::core::identity::IdentityRegistry::obrain_default(),
-                    );
-                    tracing::info!(
-                        "identity registry auto-wired (obrain_default: _uuid/_data then flat properties)"
-                    );
-                }
+        if let Some(registry) = self.identity.take() {
+            host = host.with_identity_registry(registry);
+            tracing::info!("identity registry attached explicitly");
+        } else {
+            #[cfg(feature = "obrain")]
+            if host.graph_store().is_some() {
+                host = host.with_identity_registry(
+                    crate::core::identity::IdentityRegistry::obrain_default(),
+                );
+                tracing::info!(
+                    "identity registry auto-wired (obrain_default: _uuid/_data then flat properties)"
+                );
             }
         }
 

@@ -181,8 +181,10 @@ pub fn is_known_policy(policy: &str) -> bool {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum IamVerdict {
     /// Le plan a été consulté et la décision accorde.
+    #[cfg_attr(not(feature = "obrain"), allow(dead_code))]
     Allowed,
     /// Le plan a été consulté et la décision refuse.
+    #[cfg_attr(not(feature = "obrain"), allow(dead_code))]
     Denied,
     /// **Rien à consulter** : aucun plan branché, ou aucun principal dans le
     /// contexte. Ce n'est ni un accord ni un refus : c'est une politique **non
