@@ -130,7 +130,8 @@ fn field_schema(f: &FieldDesc, op: Option<Applies>) -> Value {
 }
 
 /// JSON Schema of the payload of `op`: writable fields only (no read-only field; no
-/// immutable field on update), `required` = `required_on(op)`, unknown keys refused unless
+/// immutable field on update), `required` = [`payload_required`](super::payload_required)
+/// (the server's rule), unknown keys refused unless
 /// the entity has the `this.allow_unknown_fields` capability.
 pub fn write_schema(e: &EntityDesc, op: WriteOp) -> Value {
     let a = applies(op);
@@ -141,7 +142,7 @@ pub fn write_schema(e: &EntityDesc, op: WriteOp) -> Value {
         .filter(|f| !f.read_only && !(op == WriteOp::Update && f.immutable))
     {
         props.insert(f.name.clone(), field_schema(f, Some(a)));
-        if f.required_on(a) {
+        if super::payload_required(e, f, a) {
             required.push(json!(f.name));
         }
     }
@@ -177,6 +178,10 @@ pub fn read_schema(e: &EntityDesc) -> Value {
     })
 }
 
+/// Component name of the error body. Contains a `.`, which `pascal_case` of an entity name
+/// never produces: an entity named `error` cannot overwrite it.
+pub const ERROR_SCHEMA: &str = "this.Error";
+
 /// Shape of the error body (`ContractError::http_body`).
 fn error_schema() -> Value {
     json!({
@@ -206,8 +211,8 @@ fn error_schema() -> Value {
 pub fn openapi(set: &DescriptorSet, title: &str, version: &str) -> Value {
     let mut paths = Map::new();
     let mut schemas = Map::new();
-    schemas.insert("Error".into(), error_schema());
-    let err = json!({"description": "Error (see `code`)", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}});
+    schemas.insert(ERROR_SCHEMA.into(), error_schema());
+    let err = json!({"description": "Error (see `code`)", "content": {"application/json": {"schema": {"$ref": format!("#/components/schemas/{ERROR_SCHEMA}")}}}});
     let r = |name: &str| json!({"$ref": format!("#/components/schemas/{name}")});
     for e in super::entities_sorted(set)
         .into_iter()
@@ -225,10 +230,13 @@ pub fn openapi(set: &DescriptorSet, title: &str, version: &str) -> Value {
         schemas.insert(p.clone(), read_schema(e));
         schemas.insert(create.clone(), cs);
         schemas.insert(update.clone(), us);
-        let one = |status: &str, desc: &str| {
+        // CRUD handlers are written by the module (`EntityDescriptor::build_routes`): the
+        // exact success status (200 or 201 on create, 200 or 204 on delete) is not in the
+        // descriptor, so the document promises a 2XX range, never a guessed code.
+        let one = |desc: &str| {
             let mut m = Map::new();
             m.insert(
-                status.to_string(),
+                "2XX".to_string(),
                 json!({"description": desc, "content": {"application/json": {"schema": r(&p)}}}),
             );
             m.insert("default".into(), err.clone());
@@ -241,21 +249,23 @@ pub fn openapi(set: &DescriptorSet, title: &str, version: &str) -> Value {
             format!("/{}", e.plural),
             json!({
                 "get": {"operationId": format!("list{p}"), "tags": [e.name],
-                    "parameters": [q("limit", "integer"), q("offset", "integer"), q("filter", "string"), q("sort", "string")],
-                    "responses": {"200": {"description": "Page", "content": {"application/json": {"schema": {"type": "object"}}}}, "default": err}},
+                    // `sort` is not listed: the legacy QueryParams never read it.
+                    "parameters": [q("limit", "integer"), q("offset", "integer"), q("filter", "string")],
+                    // Page shape is the module's (array or paginated object).
+                    "responses": {"2XX": {"description": "Page", "content": {"application/json": {"schema": {}}}}, "default": err}},
                 "post": {"operationId": format!("create{p}"), "tags": [e.name],
-                    "requestBody": body(&create), "responses": one("201", "Created")}
+                    "requestBody": body(&create), "responses": one("Created")}
             }),
         );
         paths.insert(
             format!("/{}/{{id}}", e.plural),
             json!({
                 "parameters": id_param,
-                "get": {"operationId": format!("get{p}"), "tags": [e.name], "responses": one("200", "Entity")},
+                "get": {"operationId": format!("get{p}"), "tags": [e.name], "responses": one("Entity")},
                 "put": {"operationId": format!("update{p}"), "tags": [e.name],
-                    "requestBody": body(&update), "responses": one("200", "Updated")},
+                    "requestBody": body(&update), "responses": one("Updated")},
                 "delete": {"operationId": format!("delete{p}"), "tags": [e.name],
-                    "responses": {"204": {"description": "Deleted"}, "default": err}}
+                    "responses": {"2XX": {"description": "Deleted"}, "default": err}}
             }),
         );
     }
@@ -306,11 +316,13 @@ mod tests {
             .iter()
             .map(|v| v.as_str().unwrap())
             .collect();
-        // Non-optional writable fields (incl. base `name` / `status`), not `note`.
-        for f in ["amount", "currency", "customer", "name", "status"] {
-            assert!(req.contains(&f), "{f} required on create: {c}");
-        }
-        assert!(!req.contains(&"note"), "{c}");
+        // Non-optional declared writable fields; not `note` (optional), not the base `name` /
+        // `status` (filled by the server unless an explicit rule says otherwise).
+        assert_eq!(req, vec!["amount", "currency", "customer"], "{c}");
+        assert!(
+            c["properties"]["name"].is_object(),
+            "base field writable: {c}"
+        );
         assert!(c["properties"].get("tenant_id").is_none(), "read-only: {c}");
         assert!(c["properties"].get("id").is_none(), "{c}");
         assert_eq!(c["properties"]["amount"]["exclusiveMinimum"], 0);
@@ -336,6 +348,8 @@ mod tests {
     fn openapi_lists_crud_paths_and_schemas() {
         let mut m = ModuleDescriptor::new("billing", "1.0.0");
         m.entities.push(invoice());
+        // An entity named `error` does not overwrite the error body schema.
+        m.entities.push(EntityDesc::new("error"));
         let mut set = DescriptorSet::new();
         set.insert(m).unwrap();
         let doc = openapi(&set, "api", "1.0.0");
@@ -348,6 +362,28 @@ mod tests {
             "#/components/schemas/InvoiceCreate"
         );
         assert!(doc["components"]["schemas"]["Invoice"]["properties"]["id"].is_object());
-        assert!(doc["components"]["schemas"]["Error"].is_object());
+        assert!(doc["components"]["schemas"][ERROR_SCHEMA]["required"].is_array());
+        assert_eq!(doc["components"]["schemas"]["Error"]["title"], "Error");
+        // No guessed status code: handlers are the module's.
+        let post = &doc["paths"]["/invoices"]["post"]["responses"];
+        assert!(
+            post["2XX"].is_object() && post.get("201").is_none(),
+            "{post}"
+        );
+        assert!(doc["paths"]["/invoices/{id}"]["delete"]["responses"]["2XX"].is_object());
+        let params = doc["paths"]["/invoices"]["get"]["parameters"].to_string();
+        assert!(!params.contains("\"sort\""), "sort is never read: {params}");
+        // Every $ref resolves to a component.
+        let text = doc.to_string();
+        for (i, _) in text.match_indices("#/components/schemas/") {
+            let name: String = text[i + 21..]
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || *c == '.')
+                .collect();
+            assert!(
+                doc["components"]["schemas"].get(&name).is_some(),
+                "dangling $ref {name}"
+            );
+        }
     }
 }

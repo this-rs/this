@@ -121,40 +121,86 @@ fn reserved_line(tags: &BTreeSet<u32>) -> Option<String> {
     (!parts.is_empty()).then(|| format!("  reserved {};\n", parts.join(", ")))
 }
 
+/// Largest protobuf field number (2^29 - 1).
+pub const MAX_PROTO_TAG: u32 = 536_870_911;
+/// Field numbers reserved by the protobuf implementation itself.
+pub const PROTOBUF_RESERVED: std::ops::RangeInclusive<u32> = 19_000..=19_999;
+
+/// Why `tag` cannot number a field in a `.proto` (`None` = valid).
+pub fn invalid_tag_reason(tag: u32) -> Option<&'static str> {
+    if tag == 0 || tag > MAX_PROTO_TAG {
+        Some("outside 1..=536870911")
+    } else if PROTOBUF_RESERVED.contains(&tag) {
+        Some("in 19000..=19999 (reserved by protobuf)")
+    } else {
+        None
+    }
+}
+
 /// Messages + service of `e`.
+///
+/// A field whose tag cannot appear in a valid `.proto` (no tag, a number protobuf refuses,
+/// or a number already taken by another field) is refused in [`TagMode::Strict`] and
+/// written as a comment in [`TagMode::Lenient`]: the output is always a parseable file.
 pub fn entity_proto(e: &EntityDesc, mode: TagMode) -> Result<ProtoEntity, ContractError> {
     let pascal = pascal_case(&e.name);
     let mut out = ProtoEntity::default();
     let mut tagged: Vec<(u32, &FieldDesc)> = Vec::new();
     let mut untagged: Vec<&FieldDesc> = Vec::new();
-    for f in e.all_fields() {
+    // (field, reason) of the fields that have a tag but cannot use it.
+    let mut bad: Vec<(&FieldDesc, String)> = Vec::new();
+    let mut seen: BTreeMap<u32, &str> = BTreeMap::new();
+    let mut fields: Vec<&FieldDesc> = e.all_fields().collect();
+    // Duplicates are reported on the field whose NAME sorts last: deterministic whatever
+    // the declaration order.
+    fields.sort_by(|a, b| a.name.cmp(&b.name));
+    for f in fields {
         match f.proto_tag {
-            Some(t) => tagged.push((t, f)),
+            Some(t) => {
+                if let Some(reason) = invalid_tag_reason(t) {
+                    bad.push((f, format!("tag {t} {reason}")));
+                } else if let Some(other) = seen.get(&t) {
+                    bad.push((f, format!("tag {t} already used by `{other}`")));
+                } else {
+                    seen.insert(t, &f.name);
+                    tagged.push((t, f));
+                }
+            }
             None => untagged.push(f),
         }
     }
-    untagged.sort_by(|a, b| a.name.cmp(&b.name));
-    if mode == TagMode::Strict && !untagged.is_empty() {
-        let names: Vec<String> = untagged
-            .iter()
-            .map(|f| format!("{}.{}", e.name, f.name))
-            .collect();
-        return Err(
-            ContractError::framework(codes::DESCRIPTOR_INVALID).with_param(
-                "issues",
-                format!(
-                    "no proto_tag on {} (run `this descriptor lock`)",
-                    names.join(", ")
-                ),
-            ),
-        );
+    if mode == TagMode::Strict && (!untagged.is_empty() || !bad.is_empty()) {
+        let mut issues: Vec<String> = Vec::new();
+        if !untagged.is_empty() {
+            let names: Vec<String> = untagged
+                .iter()
+                .map(|f| format!("{}.{}", e.name, f.name))
+                .collect();
+            issues.push(format!(
+                "no proto_tag on {} (run `this descriptor lock`)",
+                names.join(", ")
+            ));
+        }
+        for (f, reason) in &bad {
+            issues.push(format!("{}.{}: {reason}", e.name, f.name));
+        }
+        return Err(ContractError::framework(codes::DESCRIPTOR_INVALID)
+            .with_param("issues", issues.join("; ")));
     }
     tagged.sort_by_key(|(t, _)| *t);
-    out.untagged = untagged.iter().map(|f| f.name.clone()).collect();
+    out.untagged = untagged
+        .iter()
+        .map(|f| f.name.clone())
+        .chain(bad.iter().map(|(f, _)| f.name.clone()))
+        .collect();
 
     let used: BTreeSet<u32> = tagged.iter().map(|(t, _)| *t).collect();
     let mut reserved: BTreeSet<u32> = (1..FIRST_USER_TAG).filter(|t| !used.contains(t)).collect();
-    reserved.extend(e.reserved_tags.iter().filter(|t| !used.contains(t)));
+    reserved.extend(
+        e.reserved_tags
+            .iter()
+            .filter(|t| !used.contains(t) && invalid_tag_reason(**t).is_none()),
+    );
 
     let imports = &mut out.imports;
     let t = &mut out.text;
@@ -168,6 +214,9 @@ pub fn entity_proto(e: &EntityDesc, mode: TagMode) -> Result<ProtoEntity, Contra
             "  // {}: no proto_tag yet (run `this descriptor lock`)\n",
             f.name
         ));
+    }
+    for (f, reason) in &bad {
+        t.push_str(&format!("  // {}: {reason}, not numbered\n", f.name));
     }
     if let Some(r) = reserved_line(&reserved) {
         t.push_str(&r);
@@ -247,22 +296,33 @@ pub fn tag_map(e: &EntityDesc) -> BTreeMap<String, u32> {
 }
 
 /// Give a tag to every declared field without one, append-only:
-/// 1. a field already in `previous` (the lock) gets its previous tag back;
-/// 2. `tenant_id` gets [`TENANT_ID_TAG`];
-/// 3. the others, in NAME order (never declaration order), get `max + 1`, where `max` covers
+/// 1. an overlay of a base field (`name`, `status`) gets the BASE tag (6, 7): it is the
+///    same field on the wire;
+/// 2. a field already in `previous` (the lock) gets its previous tag back, unless another
+///    field already holds that number (then it is treated as new);
+/// 3. `tenant_id` gets [`TENANT_ID_TAG`] (if free);
+/// 4. the others, in NAME order (never declaration order), get `max + 1`, where `max` covers
 ///    the tags in use, `reserved_tags`, every tag of `previous` (a removed field's tag is
-///    never reused) and 15.
+///    never reused) and 15; numbers protobuf refuses (19000..=19999) are skipped.
 ///
 /// Returns the newly assigned `(field, tag)`.
 pub fn assign_tags(e: &mut EntityDesc, previous: &BTreeMap<String, u32>) -> Vec<(String, u32)> {
     let mut assigned = Vec::new();
+    let kind = e.kind;
+    let mut used: BTreeSet<u32> = e.fields.iter().filter_map(|f| f.proto_tag).collect();
     for f in e.fields.iter_mut().filter(|f| f.proto_tag.is_none()) {
-        if let Some(t) = previous.get(&f.name) {
-            f.proto_tag = Some(*t);
-            assigned.push((f.name.clone(), *t));
-        } else if f.name == TENANT_ID {
-            f.proto_tag = Some(TENANT_ID_TAG);
-            assigned.push((f.name.clone(), TENANT_ID_TAG));
+        let base_tag = crate::entity::base_fields(kind)
+            .iter()
+            .find(|b| b.name == f.name)
+            .and_then(|b| b.proto_tag);
+        let tag = base_tag
+            .or_else(|| previous.get(&f.name).copied())
+            .or_else(|| (f.name == TENANT_ID).then_some(TENANT_ID_TAG))
+            .filter(|t| !used.contains(t));
+        if let Some(t) = tag {
+            f.proto_tag = Some(t);
+            used.insert(t);
+            assigned.push((f.name.clone(), t));
         }
     }
     let first_free = e
@@ -277,7 +337,8 @@ pub fn assign_tags(e: &mut EntityDesc, previous: &BTreeMap<String, u32>) -> Vec<
         .filter(|&i| e.fields[i].proto_tag.is_none())
         .collect();
     fresh.sort_by(|&a, &b| e.fields[a].name.cmp(&e.fields[b].name));
-    for (tag, i) in (first_free..).zip(fresh) {
+    let numbers = (first_free..).filter(|t| invalid_tag_reason(*t).is_none());
+    for (tag, i) in numbers.zip(fresh) {
         e.fields[i].proto_tag = Some(tag);
         assigned.push((e.fields[i].name.clone(), tag));
     }
@@ -394,6 +455,77 @@ mod tests {
         assert_eq!(tag_map(&c)["zeta"], 17);
         assert_eq!(tag_map(&c)["beta"], 18);
         assert_eq!(new.len(), 2);
+    }
+
+    #[test]
+    fn proto_refuses_out_of_range_tags() {
+        // A descriptor that did not go through check() (runtime YAML, hand-built set): the
+        // derivation itself never writes a number protobuf refuses, nor the same number twice.
+        let mut e = invoice(&[0, 1]);
+        e.fields
+            .push(FieldDesc::new("bad", FieldType::Bool).tag(19_500));
+        e.fields
+            .push(FieldDesc::new("zero", FieldType::Bool).tag(0));
+        e.fields
+            .push(FieldDesc::new("twin", FieldType::Bool).tag(16));
+        e.reserved_tags.push(19_001);
+        let err = entity_proto(&e, TagMode::Strict).unwrap_err();
+        let issues = err.params["issues"].as_str().unwrap().to_string();
+        assert_eq!(err.code.as_str(), codes::DESCRIPTOR_INVALID);
+        assert!(issues.contains("invoice.bad: tag 19500"), "{issues}");
+        assert!(issues.contains("invoice.zero: tag 0"), "{issues}");
+        // `amount` < `twin` by name: the duplicate is reported on `twin`, whatever the order.
+        assert!(
+            issues.contains("invoice.twin: tag 16 already used by `amount`"),
+            "{issues}"
+        );
+        let mut reordered = e.clone();
+        reordered.fields.reverse();
+        let a = entity_proto(&e, TagMode::Lenient).unwrap();
+        let b = entity_proto(&reordered, TagMode::Lenient).unwrap();
+        assert_eq!(a, b);
+        assert!(a.text.contains("  double amount = 16;\n"), "{}", a.text);
+        assert!(!a.text.contains("= 19500;"), "{}", a.text);
+        assert!(!a.text.contains("= 0;"), "{}", a.text);
+        assert!(!a.text.contains("bool twin = 16;"), "{}", a.text);
+        assert!(!a.text.contains("19001"), "{}", a.text);
+        assert!(
+            a.text
+                .contains("  // twin: tag 16 already used by `amount`"),
+            "{}",
+            a.text
+        );
+        assert_eq!(a.untagged, vec!["bad", "twin", "zero"]);
+    }
+
+    #[test]
+    fn assign_tags_keeps_base_tag_on_overlays_and_never_collides() {
+        let mut e = EntityDesc::new("invoice");
+        // Overlay of `status` declared without a tag (e.g. from YAML): base tag 6, not 16.
+        e.fields = vec![
+            FieldDesc::new("status", FieldType::String),
+            FieldDesc::new("amount", FieldType::F64),
+            FieldDesc::new("explicit", FieldType::F64).tag(16),
+        ];
+        // The lock says amount = 16, but `explicit` now holds 16: amount gets a new number.
+        let lock: BTreeMap<String, u32> = [("amount".to_string(), 16)].into();
+        assign_tags(&mut e, &lock);
+        let m = tag_map(&e);
+        assert_eq!(m["status"], 6);
+        assert_eq!(m["explicit"], 16);
+        assert_eq!(m["amount"], 17);
+        let mut module = ModuleDescriptor::new("billing", "1.0.0");
+        module.entities.push(e.clone());
+        module
+            .check(&CustomRegistry::default(), CheckProfile::Compiled)
+            .unwrap();
+        entity_proto(&e, TagMode::Strict).unwrap();
+        // Allocation skips the numbers protobuf reserves.
+        let mut big = EntityDesc::new("big");
+        big.fields = vec![FieldDesc::new("a", FieldType::Bool)];
+        big.reserved_tags = vec![18_999];
+        assign_tags(&mut big, &BTreeMap::new());
+        assert_eq!(tag_map(&big)["a"], 20_000);
     }
 
     #[test]
