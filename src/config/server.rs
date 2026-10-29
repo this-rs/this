@@ -351,12 +351,10 @@ impl DomainConfig {
                 bail!("domains.tenants : `{host}` → `{tenant}` n'est pas un UUID de locataire");
             }
         }
-        for value in [&self.default_tenant] {
-            if let Some(tenant) = value
-                && uuid::Uuid::parse_str(tenant).is_err()
-            {
-                bail!("domains.default_tenant : `{tenant}` n'est pas un UUID");
-            }
+        if let Some(tenant) = &self.default_tenant
+            && uuid::Uuid::parse_str(tenant).is_err()
+        {
+            bail!("domains.default_tenant : `{tenant}` n'est pas un UUID");
         }
         Ok(())
     }
