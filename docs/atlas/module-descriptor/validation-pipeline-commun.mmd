@@ -3,6 +3,8 @@ flowchart LR
 %% PROUVE (flux validation, md/validation) : une ecriture d'entite DECRITE passe par engine::validate sur REST, GraphQL et gRPC ;
 %%   meme code this.validation.positive sur les trois (same_invalid_payload_same_code_on_rest_graphql_grpc) ; store jamais atteint ;
 %%   filtre et tri types appliques avant pagination en REST (ListQuery), GraphQL (args filter/sort) et gRPC (metadonnees this-filter/this-sort).
+%% REVUE (0c8b4c9) : variables GraphQL inlinees avant resolution (graphql_variables_reach_validation_and_filters) ; sort non chaine = malformed_sort ;
+%%   metadonnees gRPC illisibles = INVALID_ARGUMENT, valeurs UTF-8 via this-filter-bin (grpc_filter_bin_metadata_and_unreadable_value_refused) ; update refuse en GraphQL et gRPC.
 %% SOURCES LUES : src/core/validation/{gate,layer,extractor,config}.rs, src/core/query.rs, src/server/host.rs,
 %%   src/server/exposure/{rest/mod.rs,graphql/mod.rs,graphql/executor/query_executor.rs,grpc/entity_service.rs}, crates/this-descriptor/src/engine/{validate,query}.rs.
 %% NON ETABLI : WebSocket n'ecrit pas d'entite (aucun appel create_from_json sous websocket/) ; handlers REST de liens (links/handlers.rs) gardent filter_value laxiste (flux integration) ;
@@ -15,8 +17,8 @@ flowchart LR
     classDef entry    fill:#a48bff40,stroke:#a48bff,stroke-width:3px
 
     RESTIN(["REST POST /plural<br/>PUT PATCH /plural/id<br/>GET /plural"]):::entry
-    GQLIN(["GraphQL mutation createX updateX<br/>query xs filter sort"]):::entry
-    GRPCIN(["gRPC CreateEntity UpdateEntity<br/>ListEntities + metadonnees"]):::entry
+    GQLIN(["GraphQL mutation createX updateX<br/>query xs filter sort<br/>variables inlinees"]):::entry
+    GRPCIN(["gRPC CreateEntity UpdateEntity<br/>ListEntities + metadonnees<br/>this-filter ou this-filter-bin"]):::entry
 
     subgraph HOST["ServerHost::with_descriptors"]
         direction TB
@@ -40,7 +42,7 @@ flowchart LR
 
     STORE@{ shape: cyl, label: "Store / EntityFetcher::list_query" }
     LEGACY["⚪ entite sans descripteur<br/>createur et handlers inchanges"]:::upstream
-    LINKS["⚠ links/handlers.rs<br/>filter_value laxiste, flux integration"]:::trap
+    LINKS["⚠ links/handlers.rs<br/>filter_value laxiste, refus de creation<br/>sans code, flux integration"]:::trap
 
     RESTIN ==> LAYER
     LAYER ==>|"ecriture"| APPLY
