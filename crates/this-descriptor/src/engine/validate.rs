@@ -492,6 +492,71 @@ mod tests {
     }
 
     #[test]
+    fn update_validates_only_present_fields() {
+        let r = CustomRegistry::default();
+        // `number` and `amount` are required on create, but an update that omits them is
+        // fine: only present keys are checked...
+        apply(&invoice(), WriteOp::Update, json!({}), &ctx(&r)).unwrap();
+        apply(&invoice(), WriteOp::Update, json!({"amount": 2}), &ctx(&r)).unwrap();
+        // ...and a present key is fully checked (transform, type, validators).
+        let e = apply(&invoice(), WriteOp::Update, json!({"amount": -2}), &ctx(&r)).unwrap_err();
+        assert_eq!(codes(e), vec!["amount:this.validation.positive"]);
+        let out = apply(
+            &invoice(),
+            WriteOp::Update,
+            json!({"number": " x12 "}),
+            &ctx(&r),
+        )
+        .unwrap();
+        assert_eq!(out.value, json!({"number": "X12"}));
+    }
+
+    #[test]
+    fn read_only_field_rejected() {
+        let r = CustomRegistry::default();
+        for op in [WriteOp::Create, WriteOp::Update] {
+            let e = apply(
+                &invoice(),
+                op,
+                json!({"number": "abc", "amount": 1, "tenant_id": "00000000-0000-0000-0000-000000000000"}),
+                &ctx(&r),
+            )
+            .unwrap_err();
+            assert_eq!(
+                codes(e),
+                vec!["tenant_id:this.validation.read_only"],
+                "{op:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn unknown_field_rejected() {
+        let r = CustomRegistry::default();
+        let e = apply(
+            &invoice(),
+            WriteOp::Create,
+            json!({"number": "abc", "amount": 1, "amount_typo": 1}),
+            &ctx(&r),
+        )
+        .unwrap_err();
+        assert_eq!(codes(e), vec!["amount_typo:this.validation.unknown_field"]);
+        // Opt-out by capability: the unknown key passes through untouched.
+        let mut d = invoice().desc;
+        d.custom
+            .push(crate::custom::Custom::named(ALLOW_UNKNOWN_FIELDS));
+        let c = CompiledEntity::new("billing", d).unwrap();
+        let out = apply(
+            &c,
+            WriteOp::Create,
+            json!({"number": "abc", "amount": 1, "amount_typo": 1}),
+            &ctx(&r),
+        )
+        .unwrap();
+        assert_eq!(out.value["amount_typo"], 1);
+    }
+
+    #[test]
     fn transforms_run_before_validators() {
         let r = CustomRegistry::default();
         let out = apply(
