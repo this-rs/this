@@ -38,7 +38,7 @@ pub fn to_status(err: ContractError) -> tonic::Status {
 /// GraphQL error (`extensions.code` from the kind table, plus `this_code`, `fields`...).
 #[cfg(feature = "graphql")]
 pub fn to_graphql_error(err: ContractError) -> async_graphql::Error {
-    err.into()
+    err.into_graphql_error()
 }
 
 /// REST response: newtype because of the orphan rule (`IntoResponse` and `ContractError`
@@ -89,6 +89,21 @@ mod tests {
         let res = ApiError(ContractError::framework("this.query.malformed_filter")).into_response();
         assert_eq!(res.status(), axum::http::StatusCode::BAD_REQUEST);
         assert_eq!(res.headers()[ERROR_HEADER], "this.query.malformed_filter");
+    }
+
+    #[cfg(feature = "graphql")]
+    #[test]
+    fn contract_error_to_graphql_extensions() {
+        let e = to_graphql_error(ContractError::framework("this.validation.failed"));
+        let ext = e.extensions.expect("extensions");
+        assert_eq!(
+            ext.get("code"),
+            Some(&async_graphql::Value::from("BAD_USER_INPUT"))
+        );
+        assert_eq!(
+            ext.get("this_code"),
+            Some(&async_graphql::Value::from("this.validation.failed"))
+        );
     }
 
     #[cfg(feature = "grpc")]

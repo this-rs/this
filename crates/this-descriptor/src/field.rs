@@ -452,6 +452,20 @@ impl<T: ?Sized> ProbeFallback for FieldProbe<T> {
     }
 }
 
+/// Constructors used by the `impl_data_entity_validated!` translation (this-rs macros), so
+/// generated code needs no `serde_json` in the user's crate.
+impl ValidatorSpec {
+    pub fn max_value_f64(v: f64) -> Self {
+        ValidatorSpec::MaxValue(serde_json::Number::from_f64(v).unwrap_or_else(|| 0.into()))
+    }
+    pub fn min_value_f64(v: f64) -> Self {
+        ValidatorSpec::MinValue(serde_json::Number::from_f64(v).unwrap_or_else(|| 0.into()))
+    }
+    pub fn in_list_strings(values: Vec<String>) -> Self {
+        ValidatorSpec::InList(values.into_iter().map(serde_json::Value::String).collect())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -476,7 +490,7 @@ mod tests {
             (FieldType::List(Box::new(FieldType::Uuid)), false)
         );
         assert_eq!(
-            (&&FieldProbe::<Opaque>::new()).probe_field_type(),
+            FieldProbe::<Opaque>::new().probe_field_type(),
             (FieldType::Json, false)
         );
     }
@@ -502,19 +516,5 @@ mod tests {
         assert!(FieldType::Date.accepts(&json!("2026-10-29")));
         assert!(FieldType::Uuid.accepts(&json!("67e55044-10b1-426f-9247-bb680e5fe0c8")));
         assert!(!FieldType::Uuid.accepts(&json!("nope")));
-    }
-}
-
-/// Constructors used by the `impl_data_entity_validated!` translation (this-rs macros), so
-/// generated code needs no `serde_json` in the user's crate.
-impl ValidatorSpec {
-    pub fn max_value_f64(v: f64) -> Self {
-        ValidatorSpec::MaxValue(serde_json::Number::from_f64(v).unwrap_or_else(|| 0.into()))
-    }
-    pub fn min_value_f64(v: f64) -> Self {
-        ValidatorSpec::MinValue(serde_json::Number::from_f64(v).unwrap_or_else(|| 0.into()))
-    }
-    pub fn in_list_strings(values: Vec<String>) -> Self {
-        ValidatorSpec::InList(values.into_iter().map(serde_json::Value::String).collect())
     }
 }

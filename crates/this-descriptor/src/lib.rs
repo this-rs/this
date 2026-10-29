@@ -14,6 +14,10 @@
 //! No tokio, axum or tonic in the default build: `cargo check -p this-descriptor --target
 //! wasm32-unknown-unknown` is part of the acceptance.
 
+// `ContractError` IS the contract that crosses every surface; boxing it in every `Result`
+// would make each call site heavier for a cold path (errors are not the hot path here).
+#![allow(clippy::result_large_err)]
+
 pub mod check;
 pub mod compat;
 pub mod custom;

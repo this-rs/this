@@ -126,10 +126,10 @@ pub fn resolve(
         let mut reach: BTreeSet<&str> = BTreeSet::new();
         let mut stack = vec![m.name.as_str()];
         while let Some(x) = stack.pop() {
-            if reach.insert(x) {
-                if let Some(ds) = deps.get(x) {
-                    stack.extend(ds.iter().copied());
-                }
+            if reach.insert(x)
+                && let Some(ds) = deps.get(x)
+            {
+                stack.extend(ds.iter().copied());
             }
         }
         let visible = |entity: &str| owner.get(entity).is_some_and(|o| reach.contains(o));

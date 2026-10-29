@@ -92,6 +92,10 @@ impl fmt::Debug for CustomRegistry {
     }
 }
 
+/// The named extension is not registered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UnknownCustom;
+
 /// Refusal to register a non-idempotent transform.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error(
@@ -156,11 +160,14 @@ impl CustomRegistry {
 
     /// Implementation of a validator. `Ok(None)` = known but server-only without an
     /// implementation here (deferred). `Err(())` = unknown.
-    pub fn validator(&self, name: &str) -> Result<Option<(CustomScope, CustomValidatorFn)>, ()> {
+    pub fn validator(
+        &self,
+        name: &str,
+    ) -> Result<Option<(CustomScope, CustomValidatorFn)>, UnknownCustom> {
         match self.entries.get(&(CustomKind::Validator, name.to_string())) {
             Some(Entry::Validator { scope, f: Some(f) }) => Ok(Some((*scope, f.clone()))),
             Some(Entry::Validator { f: None, .. }) | Some(Entry::Name) => Ok(None),
-            _ => Err(()),
+            _ => Err(UnknownCustom),
         }
     }
 

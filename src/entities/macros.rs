@@ -1260,10 +1260,13 @@ mod tests {
 
 #[cfg(test)]
 mod descriptor_macro_tests {
+    // The generated `new` / `soft_delete` helpers are not exercised here.
+    #![allow(dead_code)]
     use crate::descriptor::{
         Applies, CheckProfile, CustomRegistry, Described, FieldType, ModuleDescriptor,
         TransformSpec, ValidatorSpec,
     };
+    #[allow(unused_imports)]
     use crate::prelude::*;
 
     impl_data_entity!(Knife, "knife", ["name"], {

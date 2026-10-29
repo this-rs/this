@@ -513,6 +513,16 @@ impl ServerHost {
         };
         let config = Arc::new(config);
         let registry = Arc::new(LinkRouteRegistry::new(config.clone()));
+        let catalog = Arc::new(crate::server::catalog::LiveCatalog::new(
+            crate::server::catalog::HostCatalog {
+                descriptors: Arc::new(crate::descriptor::DescriptorSet::new()),
+                fetchers: Arc::new(HashMap::new()),
+                creators: Arc::new(HashMap::new()),
+                links_config: config.clone(),
+                plurals: Arc::new(vec![]),
+                generation: 0,
+            },
+        ));
 
         Self {
             config,
@@ -521,6 +531,7 @@ impl ServerHost {
             entity_registry: EntityRegistry::new(),
             entity_fetchers: Arc::new(HashMap::new()),
             entity_creators: Arc::new(HashMap::new()),
+            catalog,
             event_bus: None,
             event_log: None,
             sink_registry: None,

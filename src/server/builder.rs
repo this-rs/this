@@ -751,21 +751,19 @@ impl ServerBuilder {
         for &i in &order {
             let module = &self.modules[i];
             for entity_type in module.entity_types() {
-                if let Some(fetcher) = module.get_entity_fetcher(entity_type) {
-                    if fetchers_map
+                if let Some(fetcher) = module.get_entity_fetcher(entity_type)
+                    && fetchers_map
                         .insert(entity_type.to_string(), fetcher)
                         .is_some()
-                    {
-                        duplicate_provider(&described, entity_type, module.name())?;
-                    }
+                {
+                    duplicate_provider(&described, entity_type, module.name())?;
                 }
-                if let Some(creator) = module.get_entity_creator(entity_type) {
-                    if creators_map
+                if let Some(creator) = module.get_entity_creator(entity_type)
+                    && creators_map
                         .insert(entity_type.to_string(), creator)
                         .is_some()
-                    {
-                        duplicate_provider(&described, entity_type, module.name())?;
-                    }
+                {
+                    duplicate_provider(&described, entity_type, module.name())?;
                 }
             }
         }

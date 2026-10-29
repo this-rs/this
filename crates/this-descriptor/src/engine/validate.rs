@@ -121,10 +121,10 @@ pub fn apply(
                 v = transform(&t.rule, v, ctx.registry)?;
             }
             obj.insert(f.name.clone(), v);
-        } else if op == WriteOp::Create {
-            if let Some(d) = &f.default {
-                obj.insert(f.name.clone(), d.clone());
-            }
+        } else if op == WriteOp::Create
+            && let Some(d) = &f.default
+        {
+            obj.insert(f.name.clone(), d.clone());
         }
         let v = obj.get(&f.name);
         match v {
@@ -260,14 +260,14 @@ fn run_validator(
     match rule {
         ValidatorSpec::Required | ValidatorSpec::Optional => {}
         ValidatorSpec::Positive => {
-            if let Some(n) = number_of(v) {
-                if n.as_f64().is_some_and(|x| x <= 0.0) {
-                    out.push(violation(
-                        name,
-                        codes::VALIDATION_POSITIVE,
-                        &[field, ("value", v.clone())],
-                    ));
-                }
+            if let Some(n) = number_of(v)
+                && n.as_f64().is_some_and(|x| x <= 0.0)
+            {
+                out.push(violation(
+                    name,
+                    codes::VALIDATION_POSITIVE,
+                    &[field, ("value", v.clone())],
+                ));
             }
         }
         ValidatorSpec::StringLength { min, max } => {
@@ -288,25 +288,25 @@ fn run_validator(
             }
         }
         ValidatorSpec::MinValue(min) => {
-            if let Some(n) = number_of(v) {
-                if cmp_numbers(&n, min) == Some(Ordering::Less) {
-                    out.push(violation(
-                        name,
-                        codes::VALIDATION_MIN_VALUE,
-                        &[field, ("min", json!(min)), ("value", v.clone())],
-                    ));
-                }
+            if let Some(n) = number_of(v)
+                && cmp_numbers(&n, min) == Some(Ordering::Less)
+            {
+                out.push(violation(
+                    name,
+                    codes::VALIDATION_MIN_VALUE,
+                    &[field, ("min", json!(min)), ("value", v.clone())],
+                ));
             }
         }
         ValidatorSpec::MaxValue(max) => {
-            if let Some(n) = number_of(v) {
-                if cmp_numbers(&n, max) == Some(Ordering::Greater) {
-                    out.push(violation(
-                        name,
-                        codes::VALIDATION_MAX_VALUE,
-                        &[field, ("max", json!(max)), ("value", v.clone())],
-                    ));
-                }
+            if let Some(n) = number_of(v)
+                && cmp_numbers(&n, max) == Some(Ordering::Greater)
+            {
+                out.push(violation(
+                    name,
+                    codes::VALIDATION_MAX_VALUE,
+                    &[field, ("max", json!(max)), ("value", v.clone())],
+                ));
             }
         }
         ValidatorSpec::InList(allowed) => {
@@ -331,14 +331,14 @@ fn run_validator(
             }
         }
         ValidatorSpec::DateFormat(fmt) => {
-            if let Some(s) = v.as_str() {
-                if chrono::NaiveDate::parse_from_str(s, fmt).is_err() {
-                    out.push(violation(
-                        name,
-                        codes::VALIDATION_DATE_FORMAT,
-                        &[field, ("format", json!(fmt)), ("value", v.clone())],
-                    ));
-                }
+            if let Some(s) = v.as_str()
+                && chrono::NaiveDate::parse_from_str(s, fmt).is_err()
+            {
+                out.push(violation(
+                    name,
+                    codes::VALIDATION_DATE_FORMAT,
+                    &[field, ("format", json!(fmt)), ("value", v.clone())],
+                ));
             }
         }
         ValidatorSpec::Pattern(p) => {
@@ -394,7 +394,7 @@ fn run_validator(
             }
             Ok(None) if ctx.side == Side::Client => deferred.push(format!("{name}:{}", c.name)),
             // Known by name only on the server, or unknown: fail-closed.
-            Ok(None) | Err(()) => {
+            Ok(None) | Err(crate::custom::UnknownCustom) => {
                 return Err(
                     ContractError::framework(codes::INTERNAL).with_message(format!(
                         "custom validator `{}` has no implementation here",

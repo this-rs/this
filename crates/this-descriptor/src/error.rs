@@ -413,9 +413,14 @@ impl From<ContractError> for tonic::Status {
 }
 
 /// GraphQL: `Error { message, extensions }` with the kind table code.
+///
+/// A method, not `From`: async-graphql has a blanket `impl<T: Display> From<T> for Error`
+/// that would only keep the message (and conflicts with a dedicated impl). Never use `?`
+/// on a `ContractError` inside a resolver: call `into_graphql_error()`.
 #[cfg(feature = "graphql")]
-impl From<ContractError> for async_graphql::Error {
-    fn from(e: ContractError) -> Self {
+impl ContractError {
+    pub fn into_graphql_error(self) -> async_graphql::Error {
+        let e = self;
         let ext = e.graphql_extensions();
         let mut err = async_graphql::Error::new(e.message.clone());
         let mut values = async_graphql::ErrorExtensionValues::default();

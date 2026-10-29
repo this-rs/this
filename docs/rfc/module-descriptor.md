@@ -77,8 +77,10 @@ Décision inchangée (crate séparé, même dépôt). Changements v2 :
   même sémantique `NaiveDate::parse_from_str` que l'ancien `date_format`), **`uuid`** (`default-features=false`).
 - Features, **`default = []`** : `yaml` (serde_yaml), `pattern` (regex ; sans elle, `check()` **refuse** un
   `Pattern`), `http` (`http::StatusCode`), `grpc` (`From<ContractError> for tonic::Status`), `graphql`
-  (`From<ContractError> for async_graphql::Error`). Les adaptateurs de protocole vivent ici à cause de la règle
-  d'orphelinat (le crate possède `ContractError`). this-rs active `grpc`/`graphql` via ses propres features.
+  (`ContractError::into_graphql_error()` — une méthode, pas `From` : async-graphql a un `impl<T: Display>
+  From<T> for Error` global qui ne garderait que le message ; ne jamais faire `?` sur une `ContractError`
+  dans un résolveur). Les adaptateurs de protocole vivent ici à cause de la règle d'orphelinat (le crate
+  possède `ContractError`). this-rs active `grpc`/`graphql` via ses propres features.
 - Publication : `release.yml` publie `this-descriptor` **avant** `this-rs` (étape idempotente), puis
   `cargo package/publish -p this-rs`. `ci.yml` teste `-p this-descriptor --all-features` et vérifie wasm32.
 - Le pluralizer **déménage** dans `this_descriptor::naming::Pluralizer` ; `this::core::pluralize` le ré-exporte.
