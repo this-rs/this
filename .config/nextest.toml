@@ -1,0 +1,12 @@
+# cargo-nextest configuration of this repository.
+#
+# The container-backed storage binaries share ONE database per binary and wipe it before
+# each test (`TRUNCATE ...`, `MATCH (n) DELETE n`). They must not overlap: nextest runs
+# every test in its own process, so the in-process lock of `tests/storage_harness` cannot
+# serialize them there. A test group with `max-threads = 1` does, without ignoring any test.
+[test-groups]
+container-db = { max-threads = 1 }
+
+[[profile.default.overrides]]
+filter = "binary(postgres_tests) | binary(mysql_tests) | binary(neo4j_tests) | binary(scylladb_tests) | binary(mongodb_tests)"
+test-group = "container-db"

@@ -124,6 +124,7 @@ async fn pg_pool() -> PgPool {
 
 /// Create a fresh `PostgresDataService` with a clean entities table.
 async fn clean_pg_data_service() -> PostgresDataService<TestDataEntity> {
+    storage_harness::serialize_container_test();
     let pool = pg_pool().await;
     sqlx::query("TRUNCATE entities CASCADE")
         .execute(&pool)
@@ -134,6 +135,7 @@ async fn clean_pg_data_service() -> PostgresDataService<TestDataEntity> {
 
 /// Create a fresh `PostgresLinkService` with a clean links table.
 async fn clean_pg_link_service() -> PostgresLinkService {
+    storage_harness::serialize_container_test();
     let pool = pg_pool().await;
     sqlx::query("TRUNCATE links CASCADE")
         .execute(&pool)

@@ -107,6 +107,7 @@ async fn neo4j_graph() -> Graph {
 // ---------------------------------------------------------------------------
 
 async fn clean_neo4j_data_service() -> Neo4jDataService<TestDataEntity> {
+    storage_harness::serialize_container_test();
     let graph = neo4j_graph().await;
     graph
         .run(neo4rs::query("MATCH (n:`test_data_entity`) DELETE n"))
@@ -116,6 +117,7 @@ async fn clean_neo4j_data_service() -> Neo4jDataService<TestDataEntity> {
 }
 
 async fn clean_neo4j_link_service() -> Neo4jLinkService {
+    storage_harness::serialize_container_test();
     let graph = neo4j_graph().await;
     graph
         .run(neo4rs::query("MATCH (l:`_Link`) DELETE l"))

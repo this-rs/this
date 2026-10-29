@@ -223,6 +223,33 @@ impl EntityCreator for ProductStore {
 }
 ```
 
+### Describe it once (ModuleDescriptor)
+
+A module can also be declared as data. One `ModuleDescriptor` — entities, fields, validators, typed
+filters, links, policies, messages in French and English — drives REST, GraphQL and gRPC: the same invalid
+payload gets the same contract code (`this.validation.positive`) and the matching status on each protocol, a
+filter on a field the descriptor does not expose is a typed error, and the message follows the caller's
+`Accept-Language`.
+
+```rust
+let mut invoice = EntityDesc::new("invoice");
+invoice.fields = vec![
+    FieldDesc::new("amount", FieldType::F64)
+        .validator(ValidatorSpec::Positive, Applies::Always)
+        .filterable(&[FilterOp::Gt, FilterOp::Eq])
+        .sortable(),
+];
+invoice.permissions.ops.insert(Operation::Create, PolicyExpr::HasRole(vec!["admin".into()]));
+let mut module = ModuleDescriptor::new("billing", "1.0.0");
+module.entities.push(invoice);
+```
+
+Runnable, with tests: [`examples/descriptor_api`](examples/descriptor_api/main.rs)
+(`cargo test --example descriptor_api --features graphql,grpc`). Migrating an existing module (additive;
+a few non-additive changes are listed): [`docs/migration/module-descriptor.md`](docs/migration/module-descriptor.md).
+Design: [`docs/rfc/module-descriptor.md`](docs/rfc/module-descriptor.md). The default `EntityFetcher::list_query`
+is O(n) and bounded (10 000 rows, error `this.query.too_large`); override it to push queries to your backend.
+
 ### 3. Create Module
 
 ```rust
