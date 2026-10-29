@@ -48,6 +48,52 @@ impl EntityRegistry {
         self.descriptors.insert(entity_type, descriptor);
     }
 
+    /// Register an entity descriptor, **refusing** a duplicate (fail-closed).
+    ///
+    /// Same entity type already registered → `this.module.duplicate_entity`; same plural
+    /// served by another entity type → `this.module.duplicate_plural`. The registry is
+    /// unchanged on error. [`EntityRegistry::register`] keeps the historical last-wins for
+    /// modules without a descriptor.
+    #[allow(clippy::result_large_err)] // `ContractError` is the contract (see descriptor crate)
+    pub fn try_register(
+        &mut self,
+        descriptor: Box<dyn EntityDescriptor>,
+    ) -> Result<(), crate::descriptor::ContractError> {
+        use crate::descriptor::ContractError;
+        use crate::descriptor::framework::codes;
+        let entity_type = descriptor.entity_type().to_string();
+        if self.descriptors.contains_key(&entity_type) {
+            return Err(ContractError::framework(codes::MODULE_DUPLICATE_ENTITY)
+                .with_param("entity", &entity_type)
+                .with_param("modules", "already registered"));
+        }
+        if self.entity_type_for_plural(descriptor.plural()).is_some() {
+            return Err(ContractError::framework(codes::MODULE_DUPLICATE_PLURAL)
+                .with_param("plural", descriptor.plural()));
+        }
+        self.descriptors.insert(entity_type, descriptor);
+        Ok(())
+    }
+
+    /// Is `entity_type` registered?
+    pub fn contains(&self, entity_type: &str) -> bool {
+        self.descriptors.contains_key(entity_type)
+    }
+
+    /// Remove an entity descriptor (runtime unload of a module). Returns it if present.
+    pub fn unregister(&mut self, entity_type: &str) -> Option<Box<dyn EntityDescriptor>> {
+        self.descriptors.remove(entity_type)
+    }
+
+    /// Take every descriptor out of the registry (sorted by entity type, so the caller's
+    /// order is deterministic). Used by the builder to register one module at a time and
+    /// decide, per entity, between `try_register` and the legacy `register`.
+    pub fn drain(&mut self) -> Vec<Box<dyn EntityDescriptor>> {
+        let mut out: Vec<(String, Box<dyn EntityDescriptor>)> = self.descriptors.drain().collect();
+        out.sort_by(|a, b| a.0.cmp(&b.0));
+        out.into_iter().map(|(_, d)| d).collect()
+    }
+
     /// Build a router with all registered entity routes
     ///
     /// This merges all entity routes into a single router.
@@ -175,5 +221,40 @@ mod tests {
         registry.register(Box::new(MockDescriptor::new("order", "orders")));
         registry.register(Box::new(MockDescriptor::new("invoice", "invoices")));
         let _router = registry.build_routes(); // Should not panic
+    }
+}
+
+#[cfg(test)]
+mod try_register_tests {
+    use super::*;
+
+    struct D(&'static str, &'static str);
+    impl EntityDescriptor for D {
+        fn entity_type(&self) -> &str {
+            self.0
+        }
+        fn plural(&self) -> &str {
+            self.1
+        }
+        fn build_routes(&self) -> Router {
+            Router::new()
+        }
+    }
+
+    #[test]
+    fn try_register_refuses_duplicate_entity_and_plural() {
+        let mut r = EntityRegistry::new();
+        r.try_register(Box::new(D("order", "orders"))).unwrap();
+        let e = r
+            .try_register(Box::new(D("order", "commandes")))
+            .unwrap_err();
+        assert_eq!(e.code.as_str(), "this.module.duplicate_entity");
+        let e = r
+            .try_register(Box::new(D("command", "orders")))
+            .unwrap_err();
+        assert_eq!(e.code.as_str(), "this.module.duplicate_plural");
+        assert_eq!(r.entity_plurals(), vec![("order".into(), "orders".into())]);
+        assert!(r.unregister("order").is_some());
+        assert!(!r.contains("order"));
     }
 }

@@ -78,6 +78,18 @@ pub struct ServerBuilder {
 
     // Custom auth resolvers registry
     resolver_registry: AuthResolverRegistry,
+
+    // Runtime module loading (`with_module_runtime`); `None` = host frozen at build.
+    module_runtime: Option<RuntimeSetup>,
+}
+
+/// What `with_module_runtime*` collected, consumed by `build_host`.
+#[derive(Default)]
+struct RuntimeSetup {
+    options: crate::server::module_runtime::RuntimeOptions,
+    loader: Option<Arc<dyn crate::server::module_runtime::ModuleLoader>>,
+    store: Option<Arc<dyn crate::storage::vfs::ModuleStore>>,
+    offers: Vec<(String, crate::server::module_runtime::ModuleSource)>,
 }
 
 impl ServerBuilder {
@@ -107,7 +119,63 @@ impl ServerBuilder {
             fence_writes: true,
             auth_config: None,
             resolver_registry: AuthResolverRegistry::new(),
+            module_runtime: None,
         }
+    }
+
+    /// Enable runtime module loading on the host: `ServerHost::module_runtime`, the
+    /// dispatch layer of hot-loaded routes and the admin interface
+    /// (`RuntimeOptions::admin_prefix`, default `/admin/modules`, policy `admin_only`).
+    /// Without this call the host is frozen at build time, exactly as before.
+    pub fn with_module_runtime(mut self) -> Self {
+        self.module_runtime
+            .get_or_insert_with(RuntimeSetup::default);
+        self
+    }
+
+    /// Same as [`Self::with_module_runtime`], with explicit options (drain grace, admin
+    /// policy and prefix).
+    pub fn with_module_runtime_options(
+        mut self,
+        options: crate::server::module_runtime::RuntimeOptions,
+    ) -> Self {
+        self.module_runtime
+            .get_or_insert_with(RuntimeSetup::default)
+            .options = options;
+        self
+    }
+
+    /// Replace the default loader (`DefaultModuleLoader`), e.g. by one with plugin
+    /// loaders (WASM/WAMI extension point) or a `CustomRegistry`. Enables the runtime.
+    pub fn with_module_loader(
+        mut self,
+        loader: Arc<dyn crate::server::module_runtime::ModuleLoader>,
+    ) -> Self {
+        self.module_runtime
+            .get_or_insert_with(RuntimeSetup::default)
+            .loader = Some(loader);
+        self
+    }
+
+    /// Store that admin `{"store": {...}}` load requests read from. Enables the runtime.
+    pub fn with_module_store(mut self, store: Arc<dyn crate::storage::vfs::ModuleStore>) -> Self {
+        self.module_runtime
+            .get_or_insert_with(RuntimeSetup::default)
+            .store = Some(store);
+        self
+    }
+
+    /// Offer a compiled module for loading at runtime (NOT loaded at build): listed as
+    /// `discovered`, loaded by `POST {admin_prefix}` with `{"module": "<name>"}` or by
+    /// `ModuleRuntime::load_offered`. Enables the runtime.
+    pub fn offer_module(mut self, module: impl Module + 'static) -> Self {
+        let name = crate::descriptor::naming::to_snake_identifier(module.name());
+        let source = crate::server::module_runtime::ModuleSource::Compiled(Arc::new(module));
+        self.module_runtime
+            .get_or_insert_with(RuntimeSetup::default)
+            .offers
+            .push((name, source));
+        self
     }
 
     /// Set the link service (required)
@@ -646,6 +714,68 @@ impl ServerBuilder {
         Ok((set, order))
     }
 
+    /// Checks on the `links.yaml` of DESCRIBED modules (legacy modules keep the
+    /// permissive behaviour):
+    /// - every link end is an entity of the module itself or of a module it requires
+    ///   (transitively): `this.module.reference_unknown` otherwise (the same rule
+    ///   `resolve` applies to the descriptor's own links);
+    /// - their configurations merge without conflict (`LinksConfig::merge_strict`):
+    ///   `this.module.config_conflict` instead of last-wins.
+    fn check_described_configs(
+        &self,
+        set: &crate::descriptor::DescriptorSet,
+        described_idx: &std::collections::BTreeSet<usize>,
+    ) -> Result<()> {
+        use crate::descriptor::ContractError;
+        use crate::descriptor::framework::codes;
+        for &i in described_idx {
+            let module = &self.modules[i];
+            let name = crate::descriptor::naming::to_snake_identifier(module.name());
+            let mut visible: std::collections::BTreeSet<String> = module
+                .entity_types()
+                .iter()
+                .map(|s| s.to_string())
+                .collect();
+            let mut stack = vec![name.clone()];
+            let mut seen = std::collections::BTreeSet::new();
+            while let Some(m) = stack.pop() {
+                if !seen.insert(m.clone()) {
+                    continue;
+                }
+                if let Some(d) = set.module(&m) {
+                    visible.extend(d.entities.iter().map(|e| e.name.clone()));
+                    stack.extend(d.requires.iter().map(|r| r.name.clone()));
+                }
+            }
+            for l in &self.configs[i].links {
+                for end in [&l.source_type, &l.target_type] {
+                    if !visible.contains(end) {
+                        return Err(anyhow::Error::new(
+                            ContractError::framework(codes::MODULE_REFERENCE_UNKNOWN)
+                                .with_param("module", &name)
+                                .with_param("entity", end),
+                        ));
+                    }
+                }
+            }
+        }
+        let configs: Vec<LinksConfig> = described_idx
+            .iter()
+            .map(|&i| self.configs[i].clone())
+            .collect();
+        if configs.len() > 1 {
+            LinksConfig::merge_strict(configs).map_err(|errs| {
+                let text = errs
+                    .iter()
+                    .map(|e| e.to_string())
+                    .collect::<Vec<_>>()
+                    .join("; ");
+                anyhow::Error::new(errs.into_iter().next().expect("non-empty")).context(text)
+            })?;
+        }
+        Ok(())
+    }
+
     /// Every entity with a descriptor has ONE plural: `EntityDesc.plural` ==
     /// `EntityDescriptor::plural` == `EntityConfig::plural` (when each exists).
     fn check_plurals(
@@ -733,9 +863,52 @@ impl ServerBuilder {
         // duplicates). Without any descriptor this is a no-op (historical behaviour).
         let (descriptor_set, order) = self.resolve_descriptors()?;
 
-        // Entities registered in resolved order (see `register_module`).
+        let described_idx: std::collections::BTreeSet<usize> = (0..self.modules.len())
+            .filter(|&i| {
+                descriptor_set
+                    .module(&crate::descriptor::naming::to_snake_identifier(
+                        self.modules[i].name(),
+                    ))
+                    .is_some()
+            })
+            .collect();
+        self.check_described_configs(&descriptor_set, &described_idx)?;
+
+        // Entities registered in resolved order (see `register_module`), one module at a
+        // time: an entity of a DESCRIBED module (or colliding with one) is registered with
+        // `try_register` — a duplicate entity or plural is an error, not a silent
+        // last-wins. Between legacy modules the historical last-wins is kept (warned).
+        let mut described_types: std::collections::BTreeSet<String> = Default::default();
         for &i in &order {
-            self.modules[i].register_entities(&mut self.entity_registry);
+            let mut local = EntityRegistry::new();
+            self.modules[i].register_entities(&mut local);
+            let is_described = described_idx.contains(&i);
+            for d in local.drain() {
+                let t = d.entity_type().to_string();
+                let collides_with_described = described_types.contains(&t)
+                    || self
+                        .entity_registry
+                        .entity_type_for_plural(d.plural())
+                        .is_some_and(|owner| described_types.contains(owner));
+                if is_described || collides_with_described {
+                    self.entity_registry.try_register(d).map_err(|e| {
+                        anyhow::Error::new(e.with_param("module", self.modules[i].name()))
+                    })?;
+                    if is_described {
+                        described_types.insert(t);
+                    }
+                } else {
+                    if self.entity_registry.contains(&t) {
+                        tracing::warn!(
+                            entity_type = %t,
+                            module = self.modules[i].name(),
+                            "entity registered by several modules: the last one wins (legacy \
+                             behaviour; declare a descriptor to make it an error)"
+                        );
+                    }
+                    self.entity_registry.register(d);
+                }
+            }
         }
         Self::check_plurals(&descriptor_set, &self.entity_registry, &merged_config)?;
 
@@ -1003,6 +1176,31 @@ impl ServerBuilder {
             let event_log = Arc::new(crate::events::InMemoryEventLog::new());
             host = host.with_event_log(event_log);
             tracing::info!("event log auto-wired (InMemoryEventLog)");
+        }
+
+        // Runtime module loading, created LAST: it captures the final catalog (base of
+        // every composition), the event bus, the resolvers and the authorization flags.
+        if let Some(setup) = self.module_runtime.take() {
+            use crate::server::module_runtime::{DefaultModuleLoader, HostParts, ModuleRuntime};
+            let loader = setup.loader.unwrap_or_else(|| {
+                Arc::new(DefaultModuleLoader::new().with_event_bus(host.event_bus.clone()))
+            });
+            let runtime = ModuleRuntime::new(
+                HostParts {
+                    catalog: host.catalog.clone(),
+                    link_service: host.link_service.clone(),
+                    event_bus: host.event_bus.clone(),
+                    resolvers: host.resolver_registry.clone(),
+                    authorize: host.authorize,
+                    report_only: host.authorize_report_only,
+                },
+                loader,
+                setup.store,
+                setup.options,
+                setup.offers,
+            );
+            host.module_runtime = Some(runtime);
+            tracing::info!("module runtime enabled (runtime load/unload, admin interface)");
         }
 
         Ok(host)
@@ -1940,5 +2138,143 @@ mod descriptor_tests {
             crate::core::errors::from_anyhow(&err).code.as_str(),
             "this.module.identity_mismatch"
         );
+    }
+
+    // ── modules-runtime stream: registration and links of described modules ──
+
+    struct Routes(&'static str, &'static str);
+    impl crate::server::entity_registry::EntityDescriptor for Routes {
+        fn entity_type(&self) -> &str {
+            self.0
+        }
+        fn plural(&self) -> &str {
+            self.1
+        }
+        fn build_routes(&self) -> axum::Router {
+            axum::Router::new()
+        }
+    }
+
+    /// Module that REGISTERS its entity (legacy or described).
+    struct Registering {
+        name: &'static str,
+        entity: &'static str,
+        described: bool,
+        links: Vec<(&'static str, &'static str)>,
+    }
+    impl Module for Registering {
+        fn name(&self) -> &str {
+            self.name
+        }
+        fn entity_types(&self) -> Vec<&str> {
+            vec![self.entity]
+        }
+        fn links_config(&self) -> anyhow::Result<LinksConfig> {
+            let links = self
+                .links
+                .iter()
+                .map(|(s, t)| crate::core::LinkDefinition {
+                    link_type: "owner".into(),
+                    source_type: s.to_string(),
+                    target_type: t.to_string(),
+                    forward_route_name: format!("{t}s"),
+                    reverse_route_name: format!("{s}s"),
+                    description: None,
+                    required_fields: None,
+                    auth: None,
+                })
+                .collect();
+            Ok(LinksConfig {
+                entities: vec![],
+                links,
+                validation_rules: None,
+                events: None,
+                sinks: None,
+                auth: None,
+            })
+        }
+        fn register_entities(&self, registry: &mut EntityRegistry) {
+            registry.register(Box::new(Routes(self.entity, "invoices")));
+        }
+        fn descriptor(&self) -> Option<ModuleDescriptor> {
+            self.described.then(|| {
+                let mut d = ModuleDescriptor::new(self.name, "1.0.0");
+                d.entities.push(EntityDesc::new(self.entity));
+                d
+            })
+        }
+    }
+
+    fn code_of(r: anyhow::Result<crate::server::host::ServerHost>) -> String {
+        let err = r.err().expect("build must fail");
+        crate::core::errors::from_anyhow(&err)
+            .code
+            .as_str()
+            .to_string()
+    }
+
+    #[test]
+    fn duplicate_entity_across_modules_fails() {
+        let legacy = |name| Registering {
+            name,
+            entity: "invoice",
+            described: false,
+            links: vec![],
+        };
+        let described = |name| Registering {
+            name,
+            entity: "invoice",
+            described: true,
+            links: vec![],
+        };
+        // Described vs described: refused by resolution.
+        let r = ServerBuilder::new()
+            .with_link_service(InMemoryLinkService::new())
+            .register_module(described("billing"))
+            .unwrap()
+            .register_module(described("accounting"))
+            .unwrap()
+            .build_host();
+        assert_eq!(code_of(r), "this.module.duplicate_entity");
+        // Legacy vs described, in both registration orders: refused by `try_register`.
+        for legacy_first in [true, false] {
+            let mut b = ServerBuilder::new().with_link_service(InMemoryLinkService::new());
+            if legacy_first {
+                b = b.register_module(legacy("old")).unwrap();
+                b = b.register_module(described("billing")).unwrap();
+            } else {
+                b = b.register_module(described("billing")).unwrap();
+                b = b.register_module(legacy("old")).unwrap();
+            }
+            assert_eq!(code_of(b.build_host()), "this.module.duplicate_entity");
+        }
+        // Legacy vs legacy: historical last-wins, unchanged.
+        let host = ServerBuilder::new()
+            .with_link_service(InMemoryLinkService::new())
+            .register_module(legacy("a"))
+            .unwrap()
+            .register_module(legacy("b"))
+            .unwrap()
+            .build_host()
+            .expect("legacy last-wins kept");
+        assert_eq!(host.entity_types(), vec!["invoice"]);
+    }
+
+    #[test]
+    fn link_to_entity_of_undeclared_module_fails() {
+        let billing = Registering {
+            name: "billing",
+            entity: "invoice",
+            described: true,
+            links: vec![("user", "invoice")],
+        };
+        let r = ServerBuilder::new()
+            .with_link_service(InMemoryLinkService::new())
+            .register_module(m("users", "user", vec![]))
+            .unwrap()
+            .register_module(billing)
+            .unwrap()
+            .build_host();
+        assert_eq!(code_of(r), "this.module.reference_unknown");
     }
 }
