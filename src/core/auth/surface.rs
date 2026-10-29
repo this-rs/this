@@ -42,6 +42,7 @@ use crate::config::LinksConfig;
 use crate::descriptor::engine::policy::{PolicyEnv, evaluate};
 use crate::descriptor::framework::codes;
 use crate::descriptor::{ContractError, DescriptorSet, Operation, PermDesc, PolicyExpr};
+use uuid::Uuid;
 
 /// Where a resolved policy comes from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
@@ -249,11 +250,16 @@ impl PolicyIndex {
 
 /// Ownership seen by the evaluator for `op`: explicit verdict, else the context rule,
 /// except `List` (unknown before reading rows: unevaluable).
-pub fn ownership(principal: &Principal, op: &Operation, explicit: Option<bool>) -> Option<bool> {
+pub fn ownership(
+    principal: &Principal,
+    op: &Operation,
+    explicit: Option<bool>,
+    resource: Option<&Uuid>,
+) -> Option<bool> {
     match (explicit, op) {
         (Some(b), _) => Some(b),
         (None, Operation::List) => None,
-        (None, _) => principal.context_ownership(),
+        (None, _) => principal.context_ownership(resource),
     }
 }
 
@@ -268,6 +274,7 @@ pub fn decide(
     resolved: &ResolvedPolicy,
     ctx: &AuthContext,
     owner: Option<bool>,
+    resource: Option<&Uuid>,
     env: &dyn PolicyEnv,
 ) -> Result<(), ContractError> {
     let expr = match &resolved.policy {
@@ -278,7 +285,7 @@ pub fn decide(
         }
     };
     let principal = Principal::of(ctx);
-    let view = principal.view(ownership(&principal, &resolved.operation, owner));
+    let view = principal.view(ownership(&principal, &resolved.operation, owner, resource));
     match evaluate(expr, &view, env) {
         Some(true) => Ok(()),
         Some(false) => Err(forbidden(&resolved.scope, "policy not satisfied")),
@@ -296,9 +303,10 @@ pub fn authorize_op(
     op: &Operation,
     ctx: &AuthContext,
     owner: Option<bool>,
+    resource: Option<&Uuid>,
     env: &dyn PolicyEnv,
 ) -> Result<(), ContractError> {
-    decide(&index.entity_policy(entity, op), ctx, owner, env)
+    decide(&index.entity_policy(entity, op), ctx, owner, resource, env)
 }
 
 /// Link operation: ALL matching declarations must allow; none = refusal.
@@ -311,7 +319,7 @@ pub fn authorize_link_op(
         return Err(forbidden("link", "undeclared link type"));
     }
     for p in policies {
-        decide(p, ctx, None, env)?;
+        decide(p, ctx, None, None, env)?;
     }
     Ok(())
 }
@@ -378,19 +386,20 @@ mod tests {
         let idx = index_with(None);
         let ctx = user(&["admin"]);
         let env = RegistryEnv::new(None, &ctx);
-        assert!(authorize_op(&idx, "order", &Operation::Create, &ctx, None, &env).is_ok());
+        assert!(authorize_op(&idx, "order", &Operation::Create, &ctx, None, None, &env).is_ok());
         let plain = user(&[]);
         let env2 = RegistryEnv::new(None, &plain);
-        let err = authorize_op(&idx, "order", &Operation::Create, &plain, None, &env2).unwrap_err();
+        let err =
+            authorize_op(&idx, "order", &Operation::Create, &plain, None, None, &env2).unwrap_err();
         assert_eq!(err.code.as_str(), codes::AUTH_FORBIDDEN);
         assert_eq!(err.kind, ErrorKind::PermissionDenied);
         // `admin_onyl` is never read as `authenticated`.
-        assert!(authorize_op(&idx, "order", &Operation::Delete, &ctx, None, &env).is_err());
+        assert!(authorize_op(&idx, "order", &Operation::Delete, &ctx, None, None, &env).is_err());
         // Business operation: deny by default.
         let pay = Operation::Custom("order.pay".into());
-        assert!(authorize_op(&idx, "order", &pay, &ctx, None, &env).is_err());
+        assert!(authorize_op(&idx, "order", &pay, &ctx, None, None, &env).is_err());
         // Plural lookup reaches the same entry.
-        assert!(authorize_op(&idx, "orders", &Operation::Create, &ctx, None, &env).is_ok());
+        assert!(authorize_op(&idx, "orders", &Operation::Create, &ctx, None, None, &env).is_ok());
     }
 
     #[test]
@@ -403,8 +412,19 @@ mod tests {
             resource_type: "order".into(),
         };
         let env = RegistryEnv::new(None, &owner);
-        assert!(authorize_op(&idx, "order", &Operation::List, &owner, None, &env).is_err());
-        assert!(authorize_op(&idx, "order", &Operation::List, &owner, Some(true), &env).is_ok());
+        assert!(authorize_op(&idx, "order", &Operation::List, &owner, None, None, &env).is_err());
+        assert!(
+            authorize_op(
+                &idx,
+                "order",
+                &Operation::List,
+                &owner,
+                Some(true),
+                None,
+                &env
+            )
+            .is_ok()
+        );
     }
 
     #[test]
@@ -425,7 +445,7 @@ mod tests {
         let env = RegistryEnv::new(None, &anon);
         let r = idx.entity_policy("order", &Operation::Create);
         assert_eq!(r.source, PolicySource::Descriptor);
-        assert!(authorize_op(&idx, "order", &Operation::Create, &anon, None, &env).is_ok());
+        assert!(authorize_op(&idx, "order", &Operation::Create, &anon, None, None, &env).is_ok());
         // Not declared in the descriptor: the YAML table still applies.
         assert_eq!(
             idx.entity_policy("order", &Operation::List).source,

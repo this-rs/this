@@ -79,7 +79,8 @@ pub async fn graphql_ws_handler(
         Err(resp) => return resp,
     };
     let tenant_id = guard.context().tenant_id();
-    ws.on_upgrade(move |socket| handle_graphql_ws(socket, host, tenant_id, guard))
+    ws.protocols(["graphql-transport-ws", "access_token", "bearer"])
+        .on_upgrade(move |socket| handle_graphql_ws(socket, host, tenant_id, guard))
         .into_response()
 }
 

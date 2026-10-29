@@ -81,6 +81,19 @@ struct Tokens;
 #[async_trait]
 impl AuthProvider for Tokens {
     async fn extract_context(&self, h: &HeaderMap) -> anyhow::Result<AuthContext> {
+        // `Bearer owner:<uuid>` → the OWNER of that one resource.
+        if let Some(r) = h
+            .get("authorization")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.strip_prefix("Bearer owner:"))
+        {
+            return Ok(AuthContext::Owner {
+                user_id: Uuid::from_u128(1),
+                tenant_id: Uuid::from_u128(2),
+                resource_id: Uuid::parse_str(r)?,
+                resource_type: "order".into(),
+            });
+        }
         let roles = match h.get("authorization").and_then(|v| v.to_str().ok()) {
             Some("Bearer admin") => vec!["admin".to_string()],
             Some("Bearer reader") => vec!["reader".to_string()],
@@ -114,6 +127,14 @@ fn entity(singular: &str, plural: &str, auth: EntityAuthConfig) -> EntityConfig 
 /// Descriptor: `order.create` = `role:admin`, `order.get` =
 /// `any(role:reader, role:admin)` (function form, unreadable by the flat grammar).
 fn host() -> Arc<ServerHost> {
+    host_with_order_get(PolicyExpr::parse("any(role:reader, role:admin)").unwrap())
+}
+
+fn host_with_order_get(get: PolicyExpr) -> Arc<ServerHost> {
+    host_with_ws_origins(get, vec![])
+}
+
+fn host_with_ws_origins(get: PolicyExpr, ws_origins: Vec<String>) -> Arc<ServerHost> {
     let config = LinksConfig {
         entities: vec![
             entity("order", "orders", EntityAuthConfig::default()),
@@ -151,10 +172,7 @@ fn host() -> Arc<ServerHost> {
         .permissions
         .ops
         .insert(Operation::Create, PolicyExpr::HasRole(vec!["admin".into()]));
-    order.permissions.ops.insert(
-        Operation::Get,
-        PolicyExpr::parse("any(role:reader, role:admin)").unwrap(),
-    );
+    order.permissions.ops.insert(Operation::Get, get);
     module.entities.push(order);
     let mut set = DescriptorSet::new();
     set.insert(module).unwrap();
@@ -169,7 +187,7 @@ fn host() -> Arc<ServerHost> {
     registry.register(Box::new(Stub("order", "orders")));
     registry.register(Box::new(Stub("invoice", "invoices")));
 
-    let host = ServerHost::from_builder_components(
+    let mut host = ServerHost::from_builder_components(
         Arc::new(InMemoryLinkService::new()),
         config,
         registry,
@@ -180,6 +198,10 @@ fn host() -> Arc<ServerHost> {
     .with_descriptors(set)
     .with_auth_provider(Arc::new(Tokens))
     .with_event_bus(EventBus::new(64));
+    host.security = Arc::new(this::config::ServerSecurityConfig {
+        websocket_origins: ws_origins,
+        ..Default::default()
+    });
     assert!(host.authorize, "policies are armed by default");
     Arc::new(host)
 }
@@ -516,4 +538,190 @@ async fn ws_subscription_denied_without_role() {
             .is_none(),
         "`user` may not `get` orders: no event"
     );
+}
+
+/// `owner` is satisfied by an `Owner` context for ITS resource only: the owner of
+/// order A is refused on order B, on REST, GraphQL and gRPC alike (it used to be
+/// satisfied by the context variant, whatever the resource asked for).
+#[tokio::test]
+async fn owner_policy_compares_resource_id() {
+    let host = host_with_order_get(PolicyExpr::Owner);
+    let authz = rest(&host);
+    let gql = GraphQLExposure::build_router(host.clone()).expect("GraphQL served armed");
+    let rpc = GrpcExposure::build_router(host.clone()).expect("gRPC served armed");
+    let (a, b) = (Uuid::new_v4(), Uuid::new_v4());
+    let owner_of_a = AuthContext::Owner {
+        user_id: Uuid::from_u128(1),
+        tenant_id: Uuid::from_u128(2),
+        resource_id: a,
+        resource_type: "order".into(),
+    };
+    let token = format!("owner:{a}");
+
+    // REST
+    let own = authz.decide(&Method::GET, &format!("/orders/{a}"), &owner_of_a);
+    assert!(matches!(own, Decision::Allow { .. }), "REST own: {own:?}");
+    let other = authz.decide(&Method::GET, &format!("/orders/{b}"), &owner_of_a);
+    assert!(
+        matches!(other, Decision::Deny { .. }),
+        "REST other: {other:?}"
+    );
+
+    // GraphQL
+    let q = |id: Uuid| format!(r#"{{ order(id: "{id}") {{ id }} }}"#);
+    let body = graphql(&gql, Some(&token), &q(a)).await;
+    assert!(body.get("errors").is_none(), "GraphQL own: {body}");
+    let body = graphql(&gql, Some(&token), &q(b)).await;
+    assert_eq!(
+        body["errors"][0]["extensions"]["code"], "FORBIDDEN",
+        "GraphQL other: {body}"
+    );
+
+    // gRPC
+    let get = |id: Uuid| GetEntityRequest {
+        entity_type: "order".into(),
+        entity_id: id.to_string(),
+    };
+    let path = "/this_grpc.EntityService/GetEntity";
+    assert_eq!(grpc(&rpc, path, Some(&token), get(a)).await, 0, "gRPC own");
+    assert_eq!(
+        grpc(&rpc, path, Some(&token), get(b)).await,
+        PERMISSION_DENIED,
+        "gRPC other"
+    );
+}
+
+async fn serve_ws(host: Arc<ServerHost>) -> std::net::SocketAddr {
+    let app = WebSocketExposure::build_router(host).expect("WebSocket served armed");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    addr
+}
+
+/// Handshake with extra headers; `Ok(status)` of the upgrade or the refusal status.
+async fn handshake(addr: std::net::SocketAddr, path: &str, headers: &[(&str, &str)]) -> u16 {
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+    let mut req = format!("ws://{addr}{path}").into_client_request().unwrap();
+    for (k, v) in headers {
+        req.headers_mut().append(
+            axum::http::HeaderName::from_bytes(k.as_bytes()).unwrap(),
+            axum::http::HeaderValue::from_str(v).unwrap(),
+        );
+    }
+    match tokio_tungstenite::connect_async(req).await {
+        Ok((_, resp)) => resp.status().as_u16(),
+        Err(tokio_tungstenite::tungstenite::Error::Http(resp)) => resp.status().as_u16(),
+        Err(e) => panic!("handshake: {e}"),
+    }
+}
+
+/// Cross-site WebSocket hijacking: an identity that comes from the AMBIENT cookie
+/// `this_token` is accepted only from a listed `Origin` (default: refused, also when
+/// `Origin` is absent). Explicit tokens (query, header) are not concerned.
+#[tokio::test]
+async fn ws_cookie_identity_requires_an_allowed_origin() {
+    let cookie = ("cookie", "this_token=reader");
+    // Default config: no listed origin → the cookie identity is refused.
+    let addr = serve_ws(host()).await;
+    assert_eq!(handshake(addr, "/ws", &[cookie]).await, 403, "no Origin");
+    assert_eq!(
+        handshake(addr, "/ws", &[cookie, ("origin", "https://evil.example")]).await,
+        403,
+        "unlisted Origin (empty list)"
+    );
+    // An explicit token needs no Origin.
+    assert_eq!(handshake(addr, "/ws?access_token=reader", &[]).await, 101);
+
+    let listed = host_with_ws_origins(
+        PolicyExpr::parse("any(role:reader, role:admin)").unwrap(),
+        vec!["https://app.example".into()],
+    );
+    let addr = serve_ws(listed).await;
+    assert_eq!(
+        handshake(addr, "/ws", &[cookie, ("origin", "https://evil.example")]).await,
+        403,
+        "unlisted Origin"
+    );
+    assert_eq!(
+        handshake(addr, "/ws", &[cookie]).await,
+        403,
+        "absent Origin"
+    );
+    assert_eq!(
+        handshake(addr, "/ws", &[cookie, ("origin", "https://app.example")]).await,
+        101,
+        "listed Origin"
+    );
+}
+
+/// The handshake token is percent-decoded from the query and also read from
+/// `Sec-WebSocket-Protocol`; it never reaches the logs.
+#[tokio::test]
+async fn ws_handshake_token_is_decoded_and_never_logged() {
+    use std::io::Write;
+    #[derive(Clone, Default)]
+    struct Buf(Arc<std::sync::Mutex<Vec<u8>>>);
+    impl Write for Buf {
+        fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(b);
+            Ok(b.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Buf {
+        type Writer = Buf;
+        fn make_writer(&'a self) -> Buf {
+            self.clone()
+        }
+    }
+    let logs = Buf::default();
+    // Global: the handshake runs in tasks spawned by the server (a scoped subscriber
+    // would not follow them). This is the only test of the file that sets one.
+    tracing::subscriber::set_global_default(
+        tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::TRACE)
+            .with_writer(logs.clone())
+            .finish(),
+    )
+    .expect("no other global subscriber in this test binary");
+    let app = WebSocketExposure::build_router(host()).expect("WebSocket served armed");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+    // `%72eader` is `reader` once decoded; a raw (undecoded) token would be refused.
+    assert_eq!(handshake(addr, "/ws?access_token=%72eader", &[]).await, 101);
+    // Browser style: the token travels in the subprotocol list.
+    assert_eq!(
+        handshake(
+            addr,
+            "/ws",
+            &[("sec-websocket-protocol", "access_token, reader")]
+        )
+        .await,
+        101
+    );
+    // Forged tokens are refused and must not appear in any log line.
+    assert_eq!(
+        handshake(addr, "/ws?access_token=s3cr3t-forged%2Btoken", &[]).await,
+        401
+    );
+    assert_eq!(
+        handshake(
+            addr,
+            "/ws",
+            &[("sec-websocket-protocol", "access_token, s3cr3t-forged-sub")]
+        )
+        .await,
+        401
+    );
+    let text = String::from_utf8_lossy(&logs.0.lock().unwrap()).to_string();
+    assert!(
+        text.contains("authentication failed"),
+        "the capture works (refusals are logged): {text}"
+    );
+    assert!(!text.contains("s3cr3t"), "token leaked into logs: {text}");
 }
