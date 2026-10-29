@@ -65,18 +65,24 @@ fn query_metadata(md: &tonic::metadata::MetadataMap, key: &str) -> Result<Option
     }
 }
 
-/// A write failure: a `ContractError` (validation, business code) keeps its code and kind
-/// (`this.validation.failed` → `INVALID_ARGUMENT`); anything else stays the historical
-/// `INTERNAL` with its message.
-fn write_error(e: &anyhow::Error, op: &str) -> Status {
-    if e.chain().any(|c| {
-        c.downcast_ref::<crate::descriptor::ContractError>()
-            .is_some()
-    }) {
-        crate::core::errors::to_status(crate::core::errors::from_anyhow(e))
-    } else {
-        Status::internal(format!("Failed to {op} entity: {e}"))
-    }
+/// Status of a store failure: a `ContractError` anywhere in the chain (validation, business
+/// code) keeps its code and kind (`this.validation.failed` → `INVALID_ARGUMENT`); anything
+/// else is `this.internal` (`INTERNAL`, logged, its text never sent to the client).
+fn status_from_anyhow(e: &anyhow::Error) -> Status {
+    to_status(crate::core::errors::from_anyhow(e))
+}
+
+/// `INVALID_ARGUMENT` `this.transport.bad_request` with `reason`.
+fn bad_request(reason: String) -> Status {
+    to_status(crate::core::errors::bad_request(reason))
+}
+
+/// `NOT_FOUND` `this.entity.not_found` for an entity TYPE the host does not serve.
+fn unknown_type(entity_type: &str) -> Status {
+    to_status(crate::core::errors::not_found(
+        entity_type,
+        format!("entity type '{entity_type}' not registered"),
+    ))
 }
 
 /// gRPC Entity Service implementation
@@ -110,6 +116,16 @@ impl EntityServiceImpl {
         }
     }
 
+    /// `status` rendered in the locale of the call (`x-this-locale`, `cookie`,
+    /// `accept-language` metadata) when it carries a contract envelope; a transport
+    /// status without one is returned unchanged.
+    fn localize(&self, meta: &tonic::metadata::MetadataMap, status: Status) -> Status {
+        match crate::core::errors::grpc::contract_error_of(&status) {
+            Some(err) => crate::core::errors::status_for(err, meta, &self.host.locales.load()),
+            None => status,
+        }
+    }
+
     async fn guard<T>(&self, request: &Request<T>) -> Result<SurfaceGuard, Status> {
         super::identity::guard_of(&self.host, request, self.enforce).await
     }
@@ -123,9 +139,7 @@ impl EntityServiceImpl {
             .entity_fetchers
             .get(entity_type)
             .cloned()
-            .ok_or_else(|| {
-                Status::not_found(format!("Entity type '{}' not registered", entity_type))
-            })
+            .ok_or_else(|| unknown_type(entity_type))
     }
 
     /// Get the entity creator for the given type, or return a gRPC NOT_FOUND status
@@ -137,15 +151,14 @@ impl EntityServiceImpl {
             .entity_creators
             .get(entity_type)
             .cloned()
-            .ok_or_else(|| {
-                Status::not_found(format!("Entity type '{}' not registered", entity_type))
-            })
+            .ok_or_else(|| unknown_type(entity_type))
     }
 }
 
-#[tonic::async_trait]
-impl EntityService for EntityServiceImpl {
-    async fn get_entity(
+/// Call bodies: every error is a `Status` built from a `ContractError` (code from the kind
+/// table, JSON envelope in `details`); the trait impl below renders it in the call locale.
+impl EntityServiceImpl {
+    async fn get_entity_inner(
         &self,
         request: Request<GetEntityRequest>,
     ) -> Result<Response<EntityResponse>, Status> {
@@ -160,21 +173,21 @@ impl EntityService for EntityServiceImpl {
             .map_err(to_status)?;
 
         let entity_id = Uuid::parse_str(&req.entity_id)
-            .map_err(|e| Status::invalid_argument(format!("Invalid entity_id: {}", e)))?;
+            .map_err(|e| bad_request(format!("Invalid entity_id: {e}")))?;
 
         let fetcher = self.get_fetcher(&req.entity_type)?;
 
         let json = fetcher
             .fetch_as_json(&entity_id)
             .await
-            .map_err(|e| Status::internal(format!("Failed to fetch entity: {}", e)))?;
+            .map_err(|e| status_from_anyhow(&e))?;
 
         Ok(Response::new(EntityResponse {
             data: Some(json_to_struct(&json)),
         }))
     }
 
-    async fn list_entities(
+    async fn list_entities_inner(
         &self,
         request: Request<ListEntitiesRequest>,
     ) -> Result<Response<ListEntitiesResponse>, Status> {
@@ -205,7 +218,7 @@ impl EntityService for EntityServiceImpl {
             let (rows, total) = fetcher
                 .list_query(&q)
                 .await
-                .map_err(|e| write_error(&e, "list"))?;
+                .map_err(|e| status_from_anyhow(&e))?;
             return Ok(Response::new(ListEntitiesResponse {
                 entities: rows.iter().map(json_to_struct).collect(),
                 total: i32::try_from(total).unwrap_or(i32::MAX),
@@ -222,7 +235,7 @@ impl EntityService for EntityServiceImpl {
         let entities = fetcher
             .list_as_json(limit, offset)
             .await
-            .map_err(|e| Status::internal(format!("Failed to list entities: {}", e)))?;
+            .map_err(|e| status_from_anyhow(&e))?;
 
         let total = entities.len() as i32;
         let proto_entities = entities.iter().map(json_to_struct).collect();
@@ -233,7 +246,7 @@ impl EntityService for EntityServiceImpl {
         }))
     }
 
-    async fn create_entity(
+    async fn create_entity_inner(
         &self,
         request: Request<CreateEntityRequest>,
     ) -> Result<Response<EntityResponse>, Status> {
@@ -254,7 +267,7 @@ impl EntityService for EntityServiceImpl {
         let result = creator
             .create_from_json(data)
             .await
-            .map_err(|e| write_error(&e, "create"))?;
+            .map_err(|e| status_from_anyhow(&e))?;
 
         // Publish event if event bus is configured
         if let Some(ref bus) = self.host.event_bus
@@ -275,7 +288,7 @@ impl EntityService for EntityServiceImpl {
         }))
     }
 
-    async fn update_entity(
+    async fn update_entity_inner(
         &self,
         request: Request<UpdateEntityRequest>,
     ) -> Result<Response<EntityResponse>, Status> {
@@ -290,7 +303,7 @@ impl EntityService for EntityServiceImpl {
             .map_err(to_status)?;
 
         let entity_id = Uuid::parse_str(&req.entity_id)
-            .map_err(|e| Status::invalid_argument(format!("Invalid entity_id: {}", e)))?;
+            .map_err(|e| bad_request(format!("Invalid entity_id: {e}")))?;
 
         let creator = self.get_creator(&req.entity_type)?;
 
@@ -303,7 +316,7 @@ impl EntityService for EntityServiceImpl {
         let result = creator
             .update_from_json(&entity_id, data)
             .await
-            .map_err(|e| write_error(&e, "update"))?;
+            .map_err(|e| status_from_anyhow(&e))?;
 
         // Publish event if event bus is configured
         if let Some(ref bus) = self.host.event_bus {
@@ -321,7 +334,7 @@ impl EntityService for EntityServiceImpl {
         }))
     }
 
-    async fn delete_entity(
+    async fn delete_entity_inner(
         &self,
         request: Request<DeleteEntityRequest>,
     ) -> Result<Response<DeleteEntityResponse>, Status> {
@@ -336,14 +349,14 @@ impl EntityService for EntityServiceImpl {
             .map_err(to_status)?;
 
         let entity_id = Uuid::parse_str(&req.entity_id)
-            .map_err(|e| Status::invalid_argument(format!("Invalid entity_id: {}", e)))?;
+            .map_err(|e| bad_request(format!("Invalid entity_id: {e}")))?;
 
         let creator = self.get_creator(&req.entity_type)?;
 
         creator
             .delete(&entity_id)
             .await
-            .map_err(|e| Status::internal(format!("Failed to delete entity: {}", e)))?;
+            .map_err(|e| status_from_anyhow(&e))?;
 
         // Publish event if event bus is configured
         if let Some(ref bus) = self.host.event_bus {
@@ -356,6 +369,59 @@ impl EntityService for EntityServiceImpl {
         }
 
         Ok(Response::new(DeleteEntityResponse { success: true }))
+    }
+}
+
+#[tonic::async_trait]
+impl EntityService for EntityServiceImpl {
+    async fn get_entity(
+        &self,
+        request: Request<GetEntityRequest>,
+    ) -> Result<Response<EntityResponse>, Status> {
+        let meta = request.metadata().clone();
+        self.get_entity_inner(request)
+            .await
+            .map_err(|s| self.localize(&meta, s))
+    }
+
+    async fn list_entities(
+        &self,
+        request: Request<ListEntitiesRequest>,
+    ) -> Result<Response<ListEntitiesResponse>, Status> {
+        let meta = request.metadata().clone();
+        self.list_entities_inner(request)
+            .await
+            .map_err(|s| self.localize(&meta, s))
+    }
+
+    async fn create_entity(
+        &self,
+        request: Request<CreateEntityRequest>,
+    ) -> Result<Response<EntityResponse>, Status> {
+        let meta = request.metadata().clone();
+        self.create_entity_inner(request)
+            .await
+            .map_err(|s| self.localize(&meta, s))
+    }
+
+    async fn update_entity(
+        &self,
+        request: Request<UpdateEntityRequest>,
+    ) -> Result<Response<EntityResponse>, Status> {
+        let meta = request.metadata().clone();
+        self.update_entity_inner(request)
+            .await
+            .map_err(|s| self.localize(&meta, s))
+    }
+
+    async fn delete_entity(
+        &self,
+        request: Request<DeleteEntityRequest>,
+    ) -> Result<Response<DeleteEntityResponse>, Status> {
+        let meta = request.metadata().clone();
+        self.delete_entity_inner(request)
+            .await
+            .map_err(|s| self.localize(&meta, s))
     }
 }
 

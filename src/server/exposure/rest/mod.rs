@@ -289,6 +289,16 @@ impl RestExposure {
             tracing::info!("module runtime mounted (dispatch layer + admin interface)");
         }
 
+        // Error localization (errors-i18n stream): every response carrying a `ContractError`
+        // (validation, policies, runtime dispatch, handlers using `ApiError`) is rendered in
+        // the request locale (`?lang=`, `x-this-locale`, cookie, `Accept-Language`) from the
+        // host catalog, which runtime modules extend with their bundles. Outside every layer
+        // above, inside authentication (its 401 keeps the framework default locale).
+        app = app.layer(middleware::from_fn_with_state(
+            host.locales.clone(),
+            crate::core::errors::localize_errors,
+        ));
+
         // Auto-wire auth middleware if auth provider is configured
         // This layer must be added last so it wraps all routes
         if let Some(ref auth_provider) = host.auth_provider {

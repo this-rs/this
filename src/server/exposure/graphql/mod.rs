@@ -166,6 +166,7 @@ pub(crate) async fn request_guard(
         None => match crate::server::exposure::resolve_identity(host, headers, query).await {
             Ok(ctx) => ctx,
             Err(e) => {
+                let e = localize_in(host, headers, query, e);
                 return Err((
                     axum::http::StatusCode::UNAUTHORIZED,
                     AxumJson(serde_json::json!({
@@ -180,12 +181,32 @@ pub(crate) async fn request_guard(
 }
 
 #[cfg(feature = "graphql")]
+/// `err` rendered in the locale of the request (`?lang=`, `x-this-locale`, cookie,
+/// `Accept-Language`) from the host catalog, the same negotiation as REST and gRPC.
+fn localize_in(
+    host: &ServerHost,
+    headers: &axum::http::HeaderMap,
+    query: Option<&str>,
+    err: crate::descriptor::ContractError,
+) -> crate::descriptor::ContractError {
+    let catalog = host.locales.load();
+    let locale = crate::core::i18n::RequestHints::from_http(headers, query).resolve(&catalog);
+    catalog.localize(err, &locale)
+}
+
+#[cfg(feature = "graphql")]
 /// GraphQL error object of an executor failure: a contract error (refusal,
 /// validation...) keeps its code in `extensions`; anything else keeps the
 /// historical `{ message }` shape.
-fn error_object(e: &anyhow::Error) -> serde_json::Value {
+fn error_object(
+    e: &anyhow::Error,
+    host: &ServerHost,
+    headers: &axum::http::HeaderMap,
+    query: Option<&str>,
+) -> serde_json::Value {
     for cause in e.chain() {
         if let Some(c) = cause.downcast_ref::<crate::descriptor::ContractError>() {
+            let c = localize_in(host, headers, query, c.clone());
             return serde_json::json!({ "message": c.message, "extensions": c.graphql_extensions() });
         }
     }
@@ -199,6 +220,7 @@ async fn graphql_handler_custom(
     enforcement: Option<Extension<Enforcement>>,
     auth: Option<Extension<AuthContext>>,
     headers: axum::http::HeaderMap,
+    uri: axum::http::Uri,
     AxumJson(request): AxumJson<GraphQLRequestBody>,
 ) -> axum::response::Response {
     let guard = match request_guard(
@@ -213,11 +235,14 @@ async fn graphql_handler_custom(
         Ok(g) => g,
         Err(resp) => return resp,
     };
-    let executor = GraphQLExecutor::new(host).await.with_guard(guard);
+    let executor = GraphQLExecutor::new(host.clone()).await.with_guard(guard);
 
     match executor.execute(&request.query, request.variables).await {
         Ok(response) => AxumJson(response).into_response(),
-        Err(e) => AxumJson(serde_json::json!({ "errors": [error_object(&e)] })).into_response(),
+        Err(e) => AxumJson(
+            serde_json::json!({ "errors": [error_object(&e, &host, &headers, uri.query())] }),
+        )
+        .into_response(),
     }
 }
 

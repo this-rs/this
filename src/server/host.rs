@@ -187,6 +187,12 @@ pub struct ServerHost {
     /// [`ServerHost::with_custom_registry`] reaches creators already wrapped.
     pub validation_registry: crate::core::validation::SharedRegistry,
 
+    /// Message catalog of the host (framework bundles + module bundles), shared through an
+    /// `ArcSwap`: every surface renders a `ContractError` in the request locale from it
+    /// (REST `localize_errors`, GraphQL handler, gRPC services). Runtime modules add their
+    /// bundles on load and remove them on unload.
+    pub locales: crate::core::i18n::LocaleCatalog,
+
     /// Optional STS (Security Token Service) state for embedded token issuance
     ///
     /// When present, auth endpoints (POST /auth/token, GET /auth/keys,
@@ -286,6 +292,7 @@ impl ServerHost {
             auth_provider: None,
             resolver_registry: Arc::new(AuthResolverRegistry::new()),
             validation_registry: crate::core::validation::shared_registry(),
+            locales: crate::core::i18n::LocaleCatalog::framework(),
             #[cfg(feature = "wami")]
             sts_state: None,
         })
@@ -309,6 +316,12 @@ impl ServerHost {
         next.creators = creators;
         next.descriptors = Arc::new(descriptors);
         self.catalog.publish(next);
+        self
+    }
+
+    /// Replace the message catalog (framework bundles plus the application's own).
+    pub fn with_locales(mut self, locales: crate::core::i18n::LocaleCatalog) -> Self {
+        self.locales = locales;
         self
     }
 
@@ -592,6 +605,7 @@ impl ServerHost {
             auth_provider: None,
             resolver_registry: Arc::new(AuthResolverRegistry::new()),
             validation_registry: crate::core::validation::shared_registry(),
+            locales: crate::core::i18n::LocaleCatalog::framework(),
             #[cfg(feature = "wami")]
             sts_state: None,
             ui_state: None,

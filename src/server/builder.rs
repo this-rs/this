@@ -1193,6 +1193,8 @@ impl ServerBuilder {
                     resolvers: host.resolver_registry.clone(),
                     authorize: host.authorize,
                     report_only: host.authorize_report_only,
+                    validation_registry: host.validation_registry.clone(),
+                    locales: host.locales.clone(),
                 },
                 loader,
                 setup.store,

@@ -68,6 +68,12 @@ pub struct HostParts {
     /// `ServerHost::authorize` (policies of runtime modules enforced by the dispatch layer).
     pub authorize: bool,
     pub report_only: bool,
+    /// `ServerHost::validation_registry`: creators and REST routes of runtime modules are
+    /// validated by the same engine as the host's (`ValidatingCreator`, validation layer).
+    pub validation_registry: crate::core::validation::SharedRegistry,
+    /// `ServerHost::locales`: bundles of a stored module are added on load, removed on
+    /// unload, replaced on replace.
+    pub locales: crate::core::i18n::LocaleCatalog,
 }
 
 struct Record {
@@ -271,11 +277,26 @@ impl ModuleRuntime {
                 return Err(e);
             }
         };
+        // Bundles of a stored module, checked BEFORE anything is published (fail-closed: a
+        // bundle the catalog would refuse refuses the load).
+        let bundles = match Self::bundles_of(&source, &iface.descriptor.name).await {
+            Ok(b) => b,
+            Err(e) => {
+                self.emit(ModuleEvent::Failed {
+                    module: format!("{source:?}"),
+                    code: e.code.as_str().to_string(),
+                });
+                return Err(e);
+            }
+        };
         let name = iface.descriptor.name.clone();
         let descriptor = iface.descriptor.clone();
         let mut inner = self.lock();
         match self.activate(&mut inner, iface) {
-            Ok(status) => Ok(status),
+            Ok(status) => {
+                self.publish_bundles(&status.name, bundles);
+                Ok(status)
+            }
             Err(e) => {
                 let failed = ModuleState::Failed {
                     code: e.code.clone(),
@@ -303,6 +324,46 @@ impl ModuleRuntime {
                 });
                 Err(e)
             }
+        }
+    }
+
+    /// Message bundles of `source` (stored modules only; other sources have none yet:
+    /// `Module` has no bundle hook). Refused, nothing published, when one belongs to
+    /// another module or would be refused by the catalog (`I18nCatalog::bundle_issues`).
+    async fn bundles_of(
+        source: &ModuleSource,
+        module: &str,
+    ) -> Result<Vec<crate::descriptor::MessageBundle>, ContractError> {
+        let Some(stored) = crate::storage::vfs::read_source(source).await? else {
+            return Ok(Vec::new());
+        };
+        for b in &stored.bundles {
+            let issues = crate::descriptor::I18nCatalog::bundle_issues(b);
+            if b.module != module || !issues.is_empty() {
+                return Err(ContractError::framework(codes::DESCRIPTOR_INVALID)
+                    .with_param("module", module)
+                    .with_param(
+                        "reason",
+                        format!(
+                            "bundle {}/{} refused: {issues:?}",
+                            b.module,
+                            b.locale.as_str()
+                        ),
+                    ));
+            }
+        }
+        Ok(stored.bundles)
+    }
+
+    /// Replace the bundles of `module` in the host catalog (already checked by
+    /// `bundles_of`, so `add_bundles` cannot refuse them).
+    fn publish_bundles(&self, module: &str, bundles: Vec<crate::descriptor::MessageBundle>) {
+        self.parts.locales.remove_module(module);
+        if bundles.is_empty() {
+            return;
+        }
+        if let Err(e) = self.parts.locales.add_bundles(bundles) {
+            tracing::error!(%module, code = %e.code.as_str(), "module bundles refused after check");
         }
     }
 
@@ -404,6 +465,7 @@ impl ModuleRuntime {
         let (catalog, table) = self.compose(&inner)?;
         let published = self.parts.catalog.publish(catalog);
         self.table.store(Arc::new(table));
+        self.parts.locales.remove_module(name);
         let r = &inner.records[name];
         tracing::info!(module = %name, generation = published.generation, "module unloaded");
         self.emit(ModuleEvent::Unloaded {
@@ -470,6 +532,7 @@ impl ModuleRuntime {
 
     async fn replace_locked(&self, source: ModuleSource) -> Result<ModuleStatus, ContractError> {
         let iface = self.loader.load(&source).await?;
+        let bundles = Self::bundles_of(&source, &iface.descriptor.name).await?;
         let mut inner = self.lock();
         let d = iface.descriptor.clone();
         let Some(old) = inner.records.get(&d.name) else {
@@ -510,6 +573,7 @@ impl ModuleRuntime {
         };
         let published = self.parts.catalog.publish(catalog);
         self.table.store(Arc::new(table));
+        self.publish_bundles(&d.name, bundles);
         // The OLD version drains in the background: requests already in flight finish
         // on it (they hold its router), and after the grace delay its streams are
         // cancelled. Without this, a stream opened on the old version would stay open
@@ -530,6 +594,21 @@ impl ModuleRuntime {
             generation: published.generation,
         });
         Ok(Self::status_of(&d.name, &inner.records[&d.name]))
+    }
+
+    /// A runtime module's REST router behind the descriptor validation layer. The dispatch
+    /// layer sits OUTSIDE the host's validation layer (see `rest/mod.rs`), so without this a
+    /// hot-loaded compiled module's create/update would reach its store unchecked.
+    fn validated_routes(&self, router: axum::Router) -> axum::Router {
+        let catalog = self.parts.catalog.clone();
+        let state = crate::core::validation::ValidationLayerState::new(
+            Arc::new(move || catalog.load().descriptors.clone()),
+            self.parts.validation_registry.clone(),
+        );
+        router.layer(axum::middleware::from_fn_with_state(
+            state,
+            crate::core::validation::validation_middleware,
+        ))
     }
 
     /// Next catalog and dispatch table: base snapshot + every Active/Draining runtime
@@ -569,7 +648,12 @@ impl ModuleRuntime {
                 }
                 plurals.push((e.name.clone(), e.plural.clone()));
                 if let Some(router) = &iface.routes {
-                    table.add_entity(&e.plural, name, router.clone(), r.gate.clone());
+                    table.add_entity(
+                        &e.plural,
+                        name,
+                        self.validated_routes(router.clone()),
+                        r.gate.clone(),
+                    );
                 }
             }
             // A module only contributes fetchers / creators for the entities its
@@ -589,8 +673,18 @@ impl ModuleRuntime {
             for (k, v) in &iface.fetchers {
                 fetchers.insert(k.clone(), v.clone());
             }
-            for (k, v) in &iface.creators {
-                creators.insert(k.clone(), v.clone());
+            // Creators validated by the engine (GraphQL, gRPC and link handlers reach them
+            // through the catalog). The interface keeps the RAW creators, so a later
+            // composition never wraps twice.
+            let mut own = DescriptorSet::new();
+            own.insert((*iface.descriptor).clone())?;
+            let validated = crate::core::validation::wrap_creators(
+                &iface.creators,
+                &own,
+                &self.parts.validation_registry,
+            );
+            for (k, v) in validated {
+                creators.insert(k, v);
             }
             configs.push(iface.links_config.clone());
             runtime_links.extend(

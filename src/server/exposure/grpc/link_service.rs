@@ -130,7 +130,7 @@ impl LinkServiceTrait for LinkServiceImpl {
             .link_service
             .create(link)
             .await
-            .map_err(|e| Status::internal(format!("Failed to create link: {}", e)))?;
+            .map_err(|e| crate::core::errors::grpc::status_from_anyhow(&e))?;
 
         // Publish event if event bus is configured
         if let Some(ref bus) = self.host.event_bus {
@@ -164,7 +164,7 @@ impl LinkServiceTrait for LinkServiceImpl {
             .link_service
             .get(&link_id)
             .await
-            .map_err(|e| Status::internal(format!("Failed to get link: {}", e)))?
+            .map_err(|e| crate::core::errors::grpc::status_from_anyhow(&e))?
             .ok_or_else(|| Status::not_found(format!("Link '{}' not found", req.link_id)))?;
 
         guard
@@ -207,7 +207,7 @@ impl LinkServiceTrait for LinkServiceImpl {
             .link_service
             .find_by_source(&entity_id, link_type, entity_type)
             .await
-            .map_err(|e| Status::internal(format!("Failed to find links: {}", e)))?;
+            .map_err(|e| crate::core::errors::grpc::status_from_anyhow(&e))?;
 
         let mut responses = Vec::with_capacity(links.len());
         for link in &links {
@@ -249,7 +249,7 @@ impl LinkServiceTrait for LinkServiceImpl {
             .link_service
             .find_by_target(&entity_id, link_type, entity_type)
             .await
-            .map_err(|e| Status::internal(format!("Failed to find links: {}", e)))?;
+            .map_err(|e| crate::core::errors::grpc::status_from_anyhow(&e))?;
 
         let mut responses = Vec::with_capacity(links.len());
         for link in &links {
@@ -275,7 +275,7 @@ impl LinkServiceTrait for LinkServiceImpl {
             .link_service
             .get(&link_id)
             .await
-            .map_err(|e| Status::internal(format!("Failed to get link: {}", e)))?;
+            .map_err(|e| crate::core::errors::grpc::status_from_anyhow(&e))?;
 
         // Judged on the stored link type; an unknown link id is judged against every
         // declaration (strictest), so a refusal does not reveal existence.
@@ -293,7 +293,7 @@ impl LinkServiceTrait for LinkServiceImpl {
             .link_service
             .delete(&link_id)
             .await
-            .map_err(|e| Status::internal(format!("Failed to delete link: {}", e)))?;
+            .map_err(|e| crate::core::errors::grpc::status_from_anyhow(&e))?;
 
         // Publish event if event bus is configured
         if let Some(ref bus) = self.host.event_bus

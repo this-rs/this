@@ -572,7 +572,7 @@ pub async fn create_linked_entity(
     let created_entity = entity_creator
         .create_from_json(payload.entity)
         .await
-        .map_err(|e| ExtractorError::JsonError(format!("Failed to create entity: {}", e)))?;
+        .map_err(|e| ExtractorError::from_create(&e))?;
 
     // Extract the ID from the created entity
     let target_entity_id = created_entity["id"].as_str().ok_or_else(|| {
@@ -1177,7 +1177,7 @@ pub async fn handle_nested_path_post(
     let created_entity = entity_creator
         .create_from_json(payload.entity)
         .await
-        .map_err(|e| ExtractorError::JsonError(format!("Failed to create entity: {}", e)))?;
+        .map_err(|e| ExtractorError::from_create(&e))?;
 
     // Extraire l'ID de l'entité créée
     let target_entity_id = created_entity["id"].as_str().ok_or_else(|| {

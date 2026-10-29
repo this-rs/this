@@ -21,6 +21,26 @@ pub enum ExtractorError {
     RouteNotFound(String),
     LinkNotFound,
     JsonError(String),
+    /// A contract error raised by the store or the validation engine (`ValidatingCreator`):
+    /// answered with its own status, code and envelope (422 `this.validation.failed`...).
+    Contract(crate::descriptor::ContractError),
+}
+
+impl ExtractorError {
+    /// Error of a create through a link route: a `ContractError` in the chain keeps its
+    /// code; anything else stays the historical 400 `Failed to create entity: ...`.
+    pub fn from_create(e: &anyhow::Error) -> Self {
+        let contract = e.chain().any(|c| {
+            c.downcast_ref::<crate::descriptor::ContractError>()
+                .is_some()
+                || c.downcast_ref::<crate::core::errors::ApiError>().is_some()
+        });
+        if contract {
+            ExtractorError::Contract(crate::core::errors::from_anyhow(e))
+        } else {
+            ExtractorError::JsonError(format!("Failed to create entity: {e}"))
+        }
+    }
 }
 
 impl std::fmt::Display for ExtractorError {
@@ -31,6 +51,7 @@ impl std::fmt::Display for ExtractorError {
             ExtractorError::RouteNotFound(route) => write!(f, "Route not found: {}", route),
             ExtractorError::LinkNotFound => write!(f, "Link not found"),
             ExtractorError::JsonError(msg) => write!(f, "JSON error: {}", msg),
+            ExtractorError::Contract(c) => write!(f, "{}: {}", c.code.as_str(), c.message),
         }
     }
 }
@@ -39,12 +60,16 @@ impl std::error::Error for ExtractorError {}
 
 impl IntoResponse for ExtractorError {
     fn into_response(self) -> Response {
+        if let ExtractorError::Contract(c) = self {
+            return crate::core::errors::ApiError(c).into_response();
+        }
         let (status, message) = match self {
             ExtractorError::InvalidPath => (StatusCode::BAD_REQUEST, self.to_string()),
             ExtractorError::InvalidEntityId => (StatusCode::BAD_REQUEST, self.to_string()),
             ExtractorError::RouteNotFound(_) => (StatusCode::NOT_FOUND, self.to_string()),
             ExtractorError::LinkNotFound => (StatusCode::NOT_FOUND, self.to_string()),
             ExtractorError::JsonError(_) => (StatusCode::BAD_REQUEST, self.to_string()),
+            ExtractorError::Contract(_) => unreachable!("answered above"),
         };
 
         (status, Json(serde_json::json!({ "error": message }))).into_response()
