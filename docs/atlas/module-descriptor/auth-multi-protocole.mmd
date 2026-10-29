@@ -1,7 +1,7 @@
 %% name: module-descriptor · auth multi-protocole par opération
-%% PROUVE : une seule résolution (descripteur, puis auth YAML, puis défaut) et un seul évaluateur à trois valeurs servent REST, GraphQL, gRPC et les abonnements GraphQL-WS.
-%% LU : core/auth/{surface,descriptor_policy,mod}.rs, server/exposure/{guard,mod}.rs, grpc/{identity,entity_service,link_service,event_service,mod}.rs, graphql/{mod,subscription_handler}.rs, graphql/executor/*.rs, middleware/authorization.rs
-%% NON ÉTABLI : WebSocketExposure (dispatcher) reste refusée armée ; NotificationService gRPC refusé armé ; REST garde son propre évaluateur (Authorization::evaluate), équivalence testée sur le vocabulaire commun seulement ; pas d'e2e gRPC armé via client tonic réel.
+%% PROUVE : une seule résolution (descripteur, puis auth YAML, puis défaut) et un seul évaluateur à trois valeurs servent REST (politiques du descripteur), GraphQL, gRPC, GraphQL-WS et WebSocketExposure ; même verdict testé sur REST, GraphQL et gRPC (same_policy_same_verdict_across_protocols).
+%% LU : core/auth/{surface,descriptor_policy,mod}.rs, server/exposure/{guard,mod}.rs, grpc/{identity,entity_service,link_service,event_service,mod}.rs, graphql/{mod,subscription_handler}.rs, graphql/executor/*.rs, middleware/authorization.rs, websocket/{mod,handler,manager}.rs, rest/mod.rs, tests/auth_surfaces.rs
+%% NON ÉTABLI : NotificationService gRPC et champs notifications GraphQL refusés armés (IDOR) ; sinks websocket refusés armés (broadcast) ; REST garde la grammaire plate pour les politiques YAML (seules les politiques du descripteur passent par engine::policy) ; e2e gRPC par trames HTTP sur le routeur armé, pas par client tonic.
 flowchart TB
   classDef ok       fill:#2ea04333,stroke:#2ea043,stroke-width:2px
   classDef todo     fill:#f0a02033,stroke:#d98a00,stroke-width:2px
@@ -35,13 +35,14 @@ flowchart TB
 
   subgraph SURF["Surfaces"]
     direction LR
-    R["⚪ REST : middleware Authorization<br/>inchangé, tests verts"]:::upstream
+    R["✅ REST : Authorization.with_catalog<br/>descripteur d'abord, même évaluateur<br/>rest_applies_descriptor_permissions"]:::ok
     GQ["✅ GraphQL : requêtes, mutations, liens imbriqués<br/>graphql_mutation_denied_without_role"]:::ok
     GS["✅ GraphQL-WS : événements filtrés par get<br/>graphql_served_with_armed_policies_when_covered"]:::ok
     GR["✅ gRPC Entity et Link par appel<br/>grpc_create_denied_without_role"]:::ok
     GE["✅ gRPC EventService filtré par get"]:::ok
     NS["🔴 NotificationService gRPC<br/>utilisateur pris dans la requête<br/>refus de monter armé"]:::refused
-    WS["🔴 WebSocketExposure<br/>dispatcher hors flux, refusée armée"]:::refused
+    WS["✅ WebSocketExposure servie armée<br/>poignée de main + filtrage par get<br/>ws_subscription_denied_without_role"]:::ok
+    WK["🔴 sinks websocket<br/>broadcast sans politique<br/>refus de monter armé"]:::refused
     NQ["⚠ champs notifications GraphQL<br/>refusés quand appliqué"]:::trap
   end
 
@@ -61,6 +62,8 @@ flowchart TB
   G ==> GR
   G ==> GE
   G --> NQ
-  R -.->|"équivalence non branchée sur PolicyIndex"| EV
+  PI ==>|"descripteur seulement"| R
+  R ==>|"same_policy_same_verdict_across_protocols"| EV
   NS -.- G
-  WS -.- G
+  G ==> WS
+  WK -.- WS

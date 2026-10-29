@@ -10,6 +10,7 @@
 use super::manager::ConnectionManager;
 use super::protocol::{ClientMessage, ServerMessage};
 use crate::core::auth::AuthContext;
+use crate::server::exposure::guard::SurfaceGuard;
 use axum::extract::ws::{Message, WebSocket};
 use axum::extract::{Extension, State, WebSocketUpgrade};
 use axum::response::IntoResponse;
@@ -26,14 +27,51 @@ use uuid::Uuid;
 /// If auth middleware is active, the `AuthContext` is extracted from request
 /// extensions and used for tenant-scoped event isolation. Without auth,
 /// the connection operates as anonymous (receives all events).
+///
+/// Armed router (`WebSocketExposure::build_router`): the caller is the context set
+/// by an outer auth layer, else it is resolved at the HANDSHAKE (`Authorization`
+/// header, `this_token` cookie, `access_token` query) with the REST rule — a bad
+/// token with a non-public default policy is a 401 — and the connection carries
+/// its `SurfaceGuard`: every event is filtered by the `get` / `get_link` policy.
 pub async fn ws_handler(
     ws: WebSocketUpgrade,
     State(manager): State<Arc<ConnectionManager>>,
     auth: Option<Extension<AuthContext>>,
-) -> impl IntoResponse {
-    let tenant_id = auth.as_ref().and_then(|Extension(ctx)| ctx.tenant_id());
-    let user_id = auth.as_ref().and_then(|Extension(ctx)| ctx.user_id());
-    ws.on_upgrade(move |socket| handle_socket(socket, manager, tenant_id, user_id))
+    headers: axum::http::HeaderMap,
+    axum::extract::RawQuery(query): axum::extract::RawQuery,
+) -> axum::response::Response {
+    let guard = if manager.enforces() {
+        let ctx = match auth.as_ref() {
+            Some(Extension(ctx)) => ctx.clone(),
+            None => match crate::server::exposure::resolve_identity(
+                manager.host(),
+                &headers,
+                query.as_deref(),
+            )
+            .await
+            {
+                Ok(ctx) => ctx,
+                Err(e) => {
+                    return (
+                        axum::http::StatusCode::UNAUTHORIZED,
+                        axum::Json(e.to_json()),
+                    )
+                        .into_response();
+                }
+            },
+        };
+        Some(SurfaceGuard::for_host(manager.host(), ctx, "WebSocket"))
+    } else {
+        None
+    };
+    let ctx = match &guard {
+        Some(g) => Some(g.context().clone()),
+        None => auth.map(|Extension(c)| c),
+    };
+    let tenant_id = ctx.as_ref().and_then(|c| c.tenant_id());
+    let user_id = ctx.as_ref().and_then(|c| c.user_id());
+    ws.on_upgrade(move |socket| handle_socket(socket, manager, tenant_id, user_id, guard))
+        .into_response()
 }
 
 /// Handle a single WebSocket connection
@@ -50,8 +88,12 @@ async fn handle_socket(
     manager: Arc<ConnectionManager>,
     tenant_id: Option<Uuid>,
     user_id: Option<Uuid>,
+    guard: Option<SurfaceGuard>,
 ) {
-    let (conn_id, mut server_rx) = manager.connect(tenant_id).await;
+    let (conn_id, mut server_rx) = match guard {
+        Some(g) => manager.connect_guarded(tenant_id, g).await,
+        None => manager.connect(tenant_id).await,
+    };
 
     // Associate user ID for targeted notifications (send_to_user)
     if let Some(uid) = user_id {
