@@ -33,6 +33,7 @@ pub mod i18n;
 pub mod leptos;
 pub mod lifecycle;
 pub mod link;
+pub mod lock;
 pub mod module;
 pub mod naming;
 pub mod perm;

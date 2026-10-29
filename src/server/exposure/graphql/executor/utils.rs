@@ -166,6 +166,40 @@ pub fn pluralize(word: &str) -> String {
     }
 }
 
+/// PascalCase of a snake_case entity type (the spelling of `schema_generator`).
+fn snake_to_pascal(s: &str) -> String {
+    s.split('_')
+        .map(|w| {
+            let mut c = w.chars();
+            c.next()
+                .map(|f| f.to_uppercase().collect::<String>() + c.as_str())
+                .unwrap_or_default()
+        })
+        .collect()
+}
+
+/// Operands `(first, second)` (snake_case entity types, in the order of the name) of a typed
+/// link mutation, derived from the declared links and NOT from the spelling of the name:
+/// `create{Target}For{Source}` (and the `link` / `unlink` spellings, not yet routed through it) is
+/// exactly the names `schema_generator` emits for each `LinkDefinition`. Splitting on a
+/// substring (`For`, `To`, `From`) mis-routed any entity whose name contains it
+/// (`createFormat`, `createTool`...) and mis-parsed names such as `ForSale`.
+pub fn typed_link_operands(
+    links: &[crate::core::LinkDefinition],
+    field_name: &str,
+    prefix: &str,
+    infix: &str,
+) -> Option<(String, String)> {
+    links.iter().find_map(|l| {
+        let name = format!(
+            "{prefix}{}{infix}{}",
+            snake_to_pascal(&l.target_type),
+            snake_to_pascal(&l.source_type)
+        );
+        (name == field_name).then(|| (l.target_type.clone(), l.source_type.clone()))
+    })
+}
+
 /// Convert PascalCase to snake_case
 pub fn pascal_to_snake(s: &str) -> String {
     let mut result = String::new();

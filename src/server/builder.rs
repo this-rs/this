@@ -823,6 +823,97 @@ impl ServerBuilder {
         Ok(())
     }
 
+    /// R3 and R4 of the single-source audit: a facet declared on BOTH sides (descriptor and
+    /// `links.yaml`) with DIFFERENT values is `this.descriptor.declared_twice`, not a silent
+    /// winner.
+    /// - R4: an entity operation declared in `EntityDesc.permissions` and in the `auth:` of
+    ///   the entity's YAML entry (compared on the AST, `legacy_policy` spelling accepted);
+    /// - R3: a link (same `link_type`/source/target) declared in a `LinkDesc` and in
+    ///   `links.yaml`: routes, description, and per-operation `auth`.
+    ///
+    /// A YAML `auth:` field left at its default (`authenticated`) is NOT a declaration: the
+    /// YAML types fill every field, so an absent one cannot be told from an explicit
+    /// `authenticated`.
+    fn check_redeclarations(
+        set: &crate::descriptor::DescriptorSet,
+        config: &LinksConfig,
+    ) -> Result<()> {
+        use crate::config::legacy_policy;
+        use crate::descriptor::{ContractError, PolicyExpr, framework::codes};
+        const DEFAULT: &str = "authenticated";
+        let differs = |raw: &str, expr: &PolicyExpr| {
+            raw != DEFAULT
+                && raw != legacy_policy(expr)
+                && PolicyExpr::parse(raw).ok().as_ref() != Some(expr)
+        };
+        let mut twice: Vec<String> = Vec::new();
+        for m in set.modules() {
+            for e in &m.entities {
+                let Some(c) = config.entities.iter().find(|c| c.singular == e.name) else {
+                    continue;
+                };
+                for (op, expr) in &e.permissions.ops {
+                    let Some(raw) =
+                        crate::core::auth::descriptor_policy::entity_auth_field(&c.auth, op)
+                    else {
+                        continue;
+                    };
+                    if differs(raw, expr) {
+                        twice.push(format!(
+                            "{}.{op}: descriptor `{expr}` vs auth `{raw}` in links.yaml",
+                            e.name
+                        ));
+                    }
+                }
+            }
+            for l in &m.links {
+                let Some(d) = config.links.iter().find(|d| {
+                    d.link_type == l.link_type
+                        && d.source_type == l.source
+                        && d.target_type == l.target
+                }) else {
+                    continue;
+                };
+                let id = format!("{}({}→{})", l.link_type, l.source, l.target);
+                if d.forward_route_name != l.forward_route {
+                    twice.push(format!(
+                        "{id}: forward route `{}` (descriptor) vs `{}` (links.yaml)",
+                        l.forward_route, d.forward_route_name
+                    ));
+                }
+                if d.reverse_route_name != l.reverse_route {
+                    twice.push(format!(
+                        "{id}: reverse route `{}` (descriptor) vs `{}` (links.yaml)",
+                        l.reverse_route, d.reverse_route_name
+                    ));
+                }
+                if let (Some(a), Some(b)) = (&l.description, &d.description)
+                    && a != b
+                {
+                    twice.push(format!("{id}: description differs"));
+                }
+                if let Some(auth) = &d.auth {
+                    for (op, expr) in &l.permissions.ops {
+                        if let Some(raw) = auth.policy_for(op.as_str())
+                            && differs(raw, expr)
+                        {
+                            twice.push(format!(
+                                "{id}.{op}: descriptor `{expr}` vs auth `{raw}` in links.yaml"
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+        if twice.is_empty() {
+            return Ok(());
+        }
+        Err(anyhow::Error::new(
+            ContractError::framework(codes::DESCRIPTOR_DECLARED_TWICE)
+                .with_param("what", twice.join("; ")),
+        ))
+    }
+
     /// Build the transport-agnostic host
     ///
     /// This generates a `ServerHost` that can be used with any exposure type
@@ -924,6 +1015,7 @@ impl ServerBuilder {
             }
         }
         Self::check_plurals(&descriptor_set, &self.entity_registry, &merged_config)?;
+        Self::check_redeclarations(&descriptor_set, &merged_config)?;
 
         // Build entity fetchers / creators maps. A collision involving a module WITH a
         // descriptor is an error (fail-closed); between legacy modules the historical
@@ -2291,5 +2383,129 @@ mod descriptor_tests {
             .unwrap()
             .build_host();
         assert_eq!(code_of(r), "this.module.reference_unknown");
+    }
+
+    // ── R3 / R4: a facet declared on both sides with different values is an error ──
+
+    /// Described module whose `links.yaml` mirrors its descriptor, with knobs to diverge.
+    struct Mirrored {
+        yaml_delete: &'static str,
+        yaml_forward: &'static str,
+        yaml_link_delete: &'static str,
+    }
+    impl Module for Mirrored {
+        fn name(&self) -> &str {
+            "billing"
+        }
+        fn entity_types(&self) -> Vec<&str> {
+            vec!["invoice"]
+        }
+        fn links_config(&self) -> anyhow::Result<LinksConfig> {
+            let auth = EntityAuthConfig {
+                delete: self.yaml_delete.into(),
+                ..Default::default()
+            };
+            let link_auth = crate::core::link::LinkAuthConfig {
+                delete: self.yaml_link_delete.into(),
+                ..Default::default()
+            };
+            Ok(LinksConfig {
+                entities: vec![EntityConfig {
+                    singular: "invoice".into(),
+                    plural: "invoices".into(),
+                    auth,
+                }],
+                links: vec![crate::core::LinkDefinition {
+                    link_type: "parent".into(),
+                    source_type: "invoice".into(),
+                    target_type: "invoice".into(),
+                    forward_route_name: self.yaml_forward.into(),
+                    reverse_route_name: "invoices-parents".into(),
+                    description: None,
+                    required_fields: None,
+                    auth: Some(link_auth),
+                }],
+                validation_rules: None,
+                events: None,
+                sinks: None,
+                auth: None,
+            })
+        }
+        fn register_entities(&self, _registry: &mut EntityRegistry) {}
+        fn descriptor(&self) -> Option<ModuleDescriptor> {
+            use crate::descriptor::{LinkDesc, Operation, PolicyExpr};
+            let mut d = ModuleDescriptor::new("billing", "1.0.0");
+            let mut e = EntityDesc::new("invoice");
+            e.permissions
+                .ops
+                .insert(Operation::Delete, PolicyExpr::AdminOnly);
+            d.entities.push(e);
+            let mut l = LinkDesc::new("parent", "invoice", "invoice");
+            l.forward_route = "invoices-parents".into();
+            l.permissions
+                .ops
+                .insert(Operation::DeleteLink, PolicyExpr::AdminOnly);
+            d.links.push(l);
+            Some(d)
+        }
+    }
+
+    fn build_mirrored(
+        yaml_delete: &'static str,
+        yaml_forward: &'static str,
+        yaml_link_delete: &'static str,
+    ) -> anyhow::Result<crate::server::host::ServerHost> {
+        ServerBuilder::new()
+            .with_link_service(InMemoryLinkService::new())
+            .register_module(Mirrored {
+                yaml_delete,
+                yaml_forward,
+                yaml_link_delete,
+            })
+            .unwrap()
+            .build_host()
+    }
+
+    #[test]
+    fn declared_twice_same_values_or_default_yaml_is_accepted() {
+        // Same AST in two spellings, YAML left at its default, identical routes: fine.
+        build_mirrored("admin_only", "invoices-parents", "admin_only").expect("mirrored");
+        build_mirrored("authenticated", "invoices-parents", "authenticated")
+            .expect("YAML at default is not a declaration");
+    }
+
+    #[test]
+    fn declared_twice_entity_policy_r4() {
+        let err = build_mirrored("public", "invoices-parents", "admin_only")
+            .err()
+            .expect("R4: delete declared twice with different policies");
+        let c = crate::core::errors::from_anyhow(&err);
+        assert_eq!(c.code.as_str(), "this.descriptor.declared_twice");
+        assert!(
+            c.params["what"]
+                .as_str()
+                .unwrap()
+                .contains("invoice.delete"),
+            "{:?}",
+            c.params
+        );
+    }
+
+    #[test]
+    fn declared_twice_link_r3() {
+        // Route differs.
+        let err = build_mirrored("admin_only", "other-route", "admin_only")
+            .err()
+            .expect("R3: forward route declared twice");
+        let c = crate::core::errors::from_anyhow(&err);
+        assert_eq!(c.code.as_str(), "this.descriptor.declared_twice");
+        assert!(c.params["what"].as_str().unwrap().contains("forward route"));
+        // Link policy differs.
+        let err = build_mirrored("admin_only", "invoices-parents", "public")
+            .err()
+            .expect("R3: link delete declared twice");
+        let c = crate::core::errors::from_anyhow(&err);
+        assert_eq!(c.code.as_str(), "this.descriptor.declared_twice");
+        assert!(c.params["what"].as_str().unwrap().contains("delete_link"));
     }
 }
