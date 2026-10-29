@@ -1,0 +1,59 @@
+flowchart LR
+%% name: module-descriptor-derivations
+%% PROUVE : rien n'est encore ecrit (🟠 = decide par la RFC). Les noeuds ⚠ sont les defauts MESURES dans main c9386e0 :
+%%   sample JSON (schema_generator.rs, proto_generator.rs), create_from_json sans validation (grpc/entity_service.rs,
+%%   graphql/executor/mutation_executor.rs), Status::internal sur toute erreur (entity_service.rs).
+%% SOURCES LUES : les fichiers ci-dessus + core/validation/extractor.rs + core/query.rs + server/exposure/mod.rs.
+%% NON ETABLI : la glue Leptos (FromServerFnError) est hors de ce lot.
+    classDef ok       fill:#2ea04333,stroke:#2ea043,stroke-width:2px
+    classDef todo     fill:#f0a02033,stroke:#d98a00,stroke-width:2px
+    classDef refused  fill:#e5484d33,stroke:#e5484d,stroke-width:2px,stroke-dasharray:6 3
+    classDef upstream fill:#8b8fa322,stroke:#8b8fa3,stroke-dasharray:3 3
+    classDef trap     fill:#e5484d1f,stroke:#e5484d,stroke-width:3px
+    classDef entry    fill:#a48bff40,stroke:#a48bff,stroke-width:3px
+
+    SRC(["Declaration unique<br/>macro impl_data_entity ou descriptor/module.yaml"]):::entry
+    MD["🟠 ModuleDescriptor<br/>crate this-descriptor, wasm32"]:::todo
+    SRC ==> MD
+
+    subgraph PURE["Moteurs purs, partages front et back"]
+        direction TB
+        V["🟠 engine::validate::apply"]:::todo
+        Q["🟠 engine::query::check_query"]:::todo
+        P["🟠 engine::policy::evaluate"]:::todo
+        I["🟠 engine::i18n::render"]:::todo
+        E["🟠 ErrorKind table<br/>HTTP / gRPC / GraphQL"]:::todo
+    end
+    MD ==> PURE
+
+    subgraph DER["Derivations, flux schema"]
+        direction TB
+        SDL["🟠 derive::graphql_sdl"]:::todo
+        PROTO["🟠 derive::proto_file<br/>tags stables >= 16"]:::todo
+        JS["🟠 derive::json_schema"]:::todo
+    end
+    MD ==> DER
+
+    subgraph SURF["Surfaces"]
+        direction TB
+        REST["REST<br/>Validated + ApiError"]
+        GQL["GraphQL<br/>ValidatingCreator + authorize_op"]
+        GRPC["gRPC<br/>identity.rs + Status details"]
+        LEP["Leptos wasm32"]
+        CLI["this-cli<br/>Tera = descripteur"]
+    end
+    PURE --> REST
+    PURE --> GQL
+    PURE --> GRPC
+    PURE -.->|"glue hors lot"| LEP
+    DER --> GQL
+    DER --> GRPC
+    MD --> CLI
+
+    OLD1["⚠ aujourd'hui : schema infere<br/>d'un sample JSON"]:::trap
+    OLD2["⚠ aujourd'hui : GraphQL et gRPC<br/>contournent la validation"]:::trap
+    OLD3["⚠ aujourd'hui : toute erreur gRPC<br/>devient INTERNAL"]:::trap
+    OLD1 -.->|"remplace par"| SDL
+    OLD2 -.->|"remplace par"| V
+    OLD3 -.->|"remplace par"| E
+    LEP:::upstream
