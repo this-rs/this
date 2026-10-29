@@ -1,23 +1,21 @@
 stateDiagram-v2
 %% name: module-descriptor-lifecycle
-%% PROUVE : rien encore — machine a etats PROPOSEE (enum ModuleState, crate this-descriptor, RFC §3.2 et §3.7).
-%% Le test lifecycle_transitions_are_legal_only du flux modules-runtime doit refuser toute transition absente ici.
-%% NON ETABLI : la duree maximale de Draining (delai de grace) reste a fixer par le flux modules-runtime.
+%% PROUVE : enum ModuleState (crate this-descriptor, lifecycle.rs) et ModuleState::can_transition ; le test
+%%   lifecycle_transitions_are_legal_only verifie la table complete (toute paire hors de ce diagramme est refusee).
+%% SOURCES LUES : crates/this-descriptor/src/lifecycle.rs, RFC v2 §3.7.
+%% NON ETABLI : replace() (echange de version) et l'annulation des flux en fin de grace : flux modules-runtime.
     [*] --> Discovered : catalogue ou ModuleStore
-    Discovered --> Resolving : load()
-    Resolving --> Resolved : dependances ok
-    Resolving --> Failed : manquante, version, cycle, doublon
-    Resolved --> Loading
-    Loading --> Loaded : ModuleInterface construite
-    Loading --> Failed : descripteur invalide
-    Loaded --> Activating
-    Activating --> Active : DescriptorSet et routes publies
-    Activating --> Failed : conflit de route
-    Active --> Active : unload refuse, dependants actifs
-    Active --> Draining : unload()
-    Draining --> Unloaded : requetes en vol terminees
+    Discovered --> Resolved : resolve ok, interface construite
+    Discovered --> Failed : dependance, version, cycle, doublon, check
+    Resolved --> Active : instantane HostCatalog publie
+    Resolved --> Failed : publication refusee
+    Active --> Draining : unload ou replace
+    Active --> Failed : panne du backend
+    Draining --> Active : unload annule
+    Draining --> Unloaded : requetes finies ou grace 30 s
+    Draining --> Failed
     Unloaded --> Discovered : rechargement
-    Failed --> Discovered : correction puis load()
+    Failed --> Discovered : correction puis load
     Unloaded --> [*]
 
     classDef refusedS fill:#e5484d33,stroke:#e5484d,stroke-width:2px,stroke-dasharray:6 3

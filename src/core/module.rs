@@ -51,6 +51,22 @@ pub trait EntityFetcher: Send + Sync {
     ) -> Result<Vec<serde_json::Value>> {
         Ok(vec![])
     }
+
+    /// List with a typed query (filter, sort, page), already checked against the
+    /// entity's `QuerySchema` by the caller.
+    ///
+    /// Default: **O(n)** — fetch everything with `list_as_json(None, None)`, then filter,
+    /// sort and paginate in memory (filter BEFORE pagination, so pages are correct). A
+    /// backend that can push the query down overrides it. Returns `(page, total)`.
+    async fn list_query(
+        &self,
+        query: &crate::descriptor::Query,
+    ) -> Result<(Vec<serde_json::Value>, usize)> {
+        let all = self.list_as_json(None, None).await?;
+        Ok(crate::descriptor::engine::query::apply_in_memory(
+            query, all,
+        ))
+    }
 }
 
 /// Trait for creating entities dynamically
@@ -157,6 +173,18 @@ pub trait Module: Send + Sync {
     ///
     /// **Défaut : `None`** — voir [`Module::get_entity_fetcher`].
     fn get_entity_creator(&self, _entity_type: &str) -> Option<Arc<dyn EntityCreator>> {
+        None
+    }
+
+    /// Descriptor of the module (entities, fields, rules, errors, permissions, messages,
+    /// dependencies), declared once.
+    ///
+    /// **Default: `None`** — an existing module compiles and behaves exactly as before.
+    /// When `Some`, `ServerBuilder::build_host` resolves dependencies (topological,
+    /// semver, cycles, duplicates), checks that `name`, `version` and `entity_types` match the
+    /// descriptor, and that the plural agrees with `EntityDescriptor::plural` and
+    /// `EntityConfig::plural`.
+    fn descriptor(&self) -> Option<crate::descriptor::ModuleDescriptor> {
         None
     }
 }
