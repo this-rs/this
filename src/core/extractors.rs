@@ -4,7 +4,6 @@
 //! - Deserialize and validate entities from request bodies
 //! - Parse link routes and resolve definitions
 
-use axum::Json;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use uuid::Uuid;
@@ -27,6 +26,12 @@ pub enum ExtractorError {
 }
 
 impl ExtractorError {
+    /// Any service error: a `ContractError` in the chain keeps its code and status;
+    /// anything else is `this.internal` (500, nothing leaked).
+    pub fn from_anyhow(e: &anyhow::Error) -> Self {
+        ExtractorError::Contract(Box::new(crate::core::errors::from_anyhow(e)))
+    }
+
     /// Error of a create through a link route: a `ContractError` in the chain keeps its
     /// code; anything else stays the historical 400 `Failed to create entity: ...`.
     pub fn from_create(e: &anyhow::Error) -> Self {
@@ -40,6 +45,12 @@ impl ExtractorError {
         } else {
             ExtractorError::JsonError(format!("Failed to create entity: {e}"))
         }
+    }
+}
+
+impl From<crate::descriptor::ContractError> for ExtractorError {
+    fn from(e: crate::descriptor::ContractError) -> Self {
+        ExtractorError::Contract(Box::new(e))
     }
 }
 
@@ -63,16 +74,25 @@ impl IntoResponse for ExtractorError {
         if let ExtractorError::Contract(c) = self {
             return crate::core::errors::ApiError(*c).into_response();
         }
-        let (status, message) = match self {
-            ExtractorError::InvalidPath => (StatusCode::BAD_REQUEST, self.to_string()),
-            ExtractorError::InvalidEntityId => (StatusCode::BAD_REQUEST, self.to_string()),
-            ExtractorError::RouteNotFound(_) => (StatusCode::NOT_FOUND, self.to_string()),
-            ExtractorError::LinkNotFound => (StatusCode::NOT_FOUND, self.to_string()),
-            ExtractorError::JsonError(_) => (StatusCode::BAD_REQUEST, self.to_string()),
+        use crate::core::errors as e;
+        use crate::descriptor::{ContractError, framework::codes};
+        let message = self.to_string();
+        let (status, contract) = match &self {
+            ExtractorError::InvalidPath => (StatusCode::BAD_REQUEST, e::bad_request(&message)),
+            ExtractorError::InvalidEntityId => (StatusCode::BAD_REQUEST, e::bad_request(&message)),
+            ExtractorError::RouteNotFound(route) => (
+                StatusCode::NOT_FOUND,
+                ContractError::framework(codes::TRANSPORT_NOT_FOUND).with_param("path", route),
+            ),
+            ExtractorError::LinkNotFound => (StatusCode::NOT_FOUND, e::not_found("link", "-")),
+            ExtractorError::JsonError(_) => (StatusCode::BAD_REQUEST, e::bad_request(&message)),
             ExtractorError::Contract(_) => unreachable!("answered above"),
         };
 
-        (status, Json(serde_json::json!({ "error": message }))).into_response()
+        // Legacy `error` key unchanged; the contract keys are added.
+        let mut extras = serde_json::Map::new();
+        extras.insert("error".into(), serde_json::Value::String(message));
+        e::error_response_with(contract, Some(status), extras)
     }
 }
 

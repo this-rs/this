@@ -45,7 +45,7 @@ use std::sync::Arc;
 use axum::extract::{Request, State};
 use axum::http::{Method, StatusCode};
 use axum::middleware::Next;
-use axum::response::{IntoResponse, Response};
+use axum::response::Response;
 use serde::Serialize;
 use serde_json::json;
 
@@ -1149,15 +1149,14 @@ pub async fn authorization_middleware(
                 %reason,
                 "abstention refusée — chemin sans garde explicite (refus par défaut)"
             );
-            let mut response = (
-                StatusCode::FORBIDDEN,
-                axum::Json(json!({
+            let mut response = forbidden_response(
+                &format!("{method} {path}"),
+                json!({
                     "error": "forbidden",
                     "verdict": "deny_abstain",
                     "reason": reason,
-                })),
-            )
-                .into_response();
+                }),
+            );
             response
                 .headers_mut()
                 .insert(header_name("x-this-rs-authz"), header_value("deny-abstain"));
@@ -1196,19 +1195,33 @@ pub async fn authorization_middleware(
             }
 
             tracing::debug!(%method, %path, %scope, %policy, "autorisation refusée");
-            (
-                StatusCode::FORBIDDEN,
-                axum::Json(json!({
+            forbidden_response(
+                &format!("{method} {path}"),
+                json!({
                     "error": "forbidden",
                     "scope": scope,
                     "policy": policy,
                     "origin": origin,
                     "reason": reason,
-                })),
+                }),
             )
-                .into_response()
         }
     }
+}
+
+/// 403 of the authorization layer: the contract envelope (`this.auth.forbidden`, localized by
+/// `localize_errors`) PLUS the legacy keys (`error`, `scope`, `policy`, `origin`, `reason`,
+/// `verdict`), unchanged.
+fn forbidden_response(operation: &str, legacy: serde_json::Value) -> Response {
+    let extras = match legacy {
+        serde_json::Value::Object(m) => m,
+        _ => serde_json::Map::new(),
+    };
+    crate::core::errors::error_response_with(
+        crate::core::errors::forbidden(operation),
+        Some(StatusCode::FORBIDDEN),
+        extras,
+    )
 }
 
 /// Un nom d'en-tête constant (connu, donc infaillible).
