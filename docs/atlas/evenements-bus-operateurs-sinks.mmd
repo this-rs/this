@@ -1,0 +1,91 @@
+flowchart TB
+%% name: evenements-bus-operateurs-sinks
+%% PROUVE (lu dans le code, jamais suppose) : le bus diffuse ET journalise, mais les deux gestes ne sont pas atomiques ; l ordre n est acquis que dans le journal, par le seq_no pose sous verrou ; trois points de perte sont ecrits noir sur blanc (aucun abonne, retard du canal, pipeline en echec) ; la reprise est un ack plus un seek manuel, jamais automatique ; et rien ne relit le seq_no hors du journal.
+%% SOURCES LUES : this/src/core/events.rs (EventBus 281, publish_envelope 365, append spawn 370, send 378) ; this/src/events/log.rs (trait 32, backends futurs 18) ; this/src/events/types.rs (SeekPosition 12) ; this/src/events/memory.rs (append 69, seq 73, subscribe 82, ack 135, seek 141, test sans perte 524) ; this/src/events/runtime.rs (run_inner 109, matcher 135, execute 158, ack 169, execute_pipeline 185) ; this/src/events/operators/mod.rs (OpResult 45) ; operators/deliver.rs (registre 79, echec avale 96) ; this/src/events/sinks/mod.rs (get_for_tenant 174, sink absent 214, build_registry 303, auto-cablage 311) ; bridge/dedup.rs (mark 38) ; bridge/outbound.rs (start 47, lag 79) ; bridge/inbound.rs (start 61, mark 89) ; this/src/server/host.rs (event_bus 69) ; this/src/server/builder.rs (sink factory 852) ; this/tests/notification_e2e.rs (459, 506) ; this/tests/chain_order.rs (121)
+%% NON ETABLI : je n ai pas compile ni lance les tests ; je n ai pas verifie log_obrain.rs ni cognitive.rs au dela de leur en-tete ; je n ai pas cherche de consommateur du seq_no hors du journal.
+%% LEGENDE : ✅ existe et tourne · 🟠 ecrit/teste mais partiel ou non deploye · 🔴 refuse, avec sa raison · ⚪ amont, reutilise tel quel
+  E2["✅ EventBus::publish<br/>entree, diffuse + journalise<br/>core/events.rs:340"]
+  E3["🟠 append par tokio::spawn<br/>le seq_no suit l ordonnanceur<br/>core/events.rs:370"]
+  E4["🔴 send sans abonne<br/>unwrap_or 0, evenement perdu<br/>core/events.rs:378"]
+
+  subgraph S1["✅ EMISSION : un seul point d entree"]
+    E2 --> E3
+    E2 --> E4
+  end
+
+  L1["✅ EventLog<br/>append subscribe ack seek<br/>log.rs:32"]
+  L2["✅ InMemoryEventLog<br/>Vec sous write-lock<br/>memory.rs:69"]
+  L3["🔴 NATS Kafka Redis<br/>doc seulement, aucun code<br/>log.rs:18"]
+  N1["✅ ordre = seq_no<br/>pose sous verrou ; 100 evenements sans perte testes, pas garantis<br/>memory.rs:73, memory.rs:524"]
+
+  subgraph S2["✅ INGESTION : le journal est la verite"]
+    L1 --> L2
+    L1 -.-> L3
+    L2 --> N1
+  end
+
+  P1["✅ FlowRuntime<br/>matcher + tenant<br/>runtime.rs:135"]
+  P2["✅ execute_pipeline<br/>serie Continue Drop FanOut<br/>runtime.rs:185"]
+  P3["✅ 1 pour 1<br/>map filter resolve<br/>operators/mod.rs:9"]
+  P4["🟠 1 vers N et etat<br/>fan_out batch dedup rate_limit<br/>operators/mod.rs:15"]
+  P5["✅ deliver<br/>paquet vers les sinks<br/>deliver.rs:52"]
+
+  subgraph S3["✅ OPERATEURS : pipeline en serie"]
+    P1 --> P2
+    P2 --> P3
+    P2 --> P4
+    P3 --> P5
+    P4 --> P5
+  end
+
+  K1["✅ SinkRegistry<br/>nom vers instance<br/>sinks/mod.rs:116"]
+  K2["✅ InApp<br/>auto-cable<br/>sinks/mod.rs:311"]
+  K3["🟠 Push WebSocket<br/>Webhook Counter Feed<br/>avertissement, cablage manuel<br/>sinks/mod.rs:322"]
+  K4["🔴 sink absent du registre<br/>erreur rendue a l appelant<br/>sinks/mod.rs:214"]
+  K5["🔴 echec de sink<br/>journalise, la boucle continue<br/>deliver.rs:96"]
+
+  subgraph S4["🟠 SORTIE : un seul sink auto-cable"]
+    K1 --> K2
+    K1 -.-> K3
+    K1 -.-> K4
+    K2 -.-> K5
+  end
+
+  B1["✅ DedupFilter<br/>identifiants marques a TTL<br/>dedup.rs:38"]
+  B2["🟠 OutboundBridge<br/>traduit et publie, jamais instancie<br/>outbound.rs:47"]
+  B3["🔴 retard du canal<br/>RecvError::Lagged, jette<br/>outbound.rs:79"]
+  B4["🟠 InboundBridge<br/>marque avant de publier<br/>inbound.rs:89"]
+
+  subgraph S5["🟠 PONT OBRAIN : ecrit, non branche"]
+    B1 --> B2
+    B2 -.-> B3
+    B4 --> B1
+  end
+
+  T1["✅ pousse puis abonne<br/>200 ms, ordre impose par le test<br/>notification_e2e.rs:459"]
+  T2["🟠 creation par gRPC<br/>publie a la main ensuite<br/>notification_e2e.rs:506"]
+  T3["✅ memory.rs teste<br/>rejeu, seq, ack, seek, isolation<br/>memory.rs:195"]
+  T5["🔴 aucune mesure de perte<br/>aucun test du seq_no concurrent<br/>NON ETABLI"]
+
+  subgraph S6["🟠 CE QUI EST TESTE : ordre et reprise"]
+    T1 --> T2
+    T3 -.-> T5
+  end
+
+  R1["🟠 ack apres le pipeline<br/>rien n est rejoue sur echec<br/>runtime.rs:169"]
+  R2["✅ reprise = seek<br/>relire depuis une position<br/>memory.rs:141"]
+
+  subgraph S7["🟠 REPRISE : manuelle, non automatique"]
+    R1 --> R2
+  end
+
+  E4 --> L1
+  E3 --> L1
+  L2 --> P1
+  P5 --> K1
+  P2 --> B2
+  R2 -.-> N1
+  classDef danger fill:#ffe5e5,stroke:#c0392b,color:#7b241c
+  classDef note fill:#fff8e1,stroke:#b7950b,color:#7d6608
+  class E4,K4,K5,B3,T5,L3 danger
+  class E3,K3,B2,B4,T2,N1,R1,R2,S4,S5,S6,S7 note

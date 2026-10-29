@@ -1,0 +1,83 @@
+flowchart TB
+%% name: server-builder-et-routage
+%% PROUVE (lu dans le code, jamais suppose) : le builder ne fait qu empiler, build_host cable dans un ordre fixe ; une route d entite est ECRITE dans son descripteur et jamais derivee de son pluriel ; la configuration decide des politiques et des routes de lien, pas des routes CRUD.
+%% SOURCES LUES : this/src/server/builder.rs (new:84, register_module:556, build_host:580, build:891, build_with_grpc:924) ; entity_registry.rs (trait:10, register:46, build_routes:54, entity_plurals:75) ; router.rs (build_link_routes:116) ; exposure/rest/mod.rs (build_router:49 a 317) ; middleware/authorization.rs (new:256, requirement:616) ; config/mod.rs (merge:157) ; host.rs (from_builder_components:225) ; this-examples/crates/billing/src/entities/order/descriptor.rs:42 ; this/tests/config_merging_tests.rs ; this/tests/iam_route_resolution.rs.
+%% NON ETABLI : rien n a ete compile ni execute pour ce diagramme ; grpc, frontend.rs et websocket lus en surface seulement ; je n ai pas verifie les handlers de links a l execution ni la resolution LinkRouteRegistry en vol.
+%% LEGENDE : ✅ existe et tourne · 🟠 ecrit/teste mais partiel ou non deploye · 🔴 refuse, avec sa raison · ⚪ amont, reutilise tel quel
+
+subgraph G1["✅ Le builder : ce qui entre, dans quel ordre"]
+  direction LR
+  B1["ServerBuilder::new - builder.rs:84<br/>authorize=true et fence_writes=true<br/>aucune exigence posee a ce stade"]
+  B2["register_module - builder.rs:556<br/>1 links_config puis configs.push<br/>2 register_entities puis modules.push"]
+  B3["with_custom_routes - builder.rs:358<br/>un Vec de routers : chaque appel<br/>s ajoute, la fusion vient plus tard"]
+  B1 --> B2 --> B3
+end
+
+subgraph G2["✅ Configuration : ce que le merge change a l assemblage"]
+  direction LR
+  C1["LinksConfig::merge - config/mod.rs:157<br/>0 module : tout a None · 1 module :<br/>la config est rendue TELLE QUELLE - 169"]
+  C2["entites : clef singular, la derniere<br/>definition gagne - 180 · liens : clef<br/>link_type plus source et cible - 192"]
+  C3["validation_rules CONCATENEES - 200<br/>auth : dernier non-None gagne - 241<br/>sinks : dedoublonnes par nom - 250"]
+  C4["events : backend dernier gagne, flows<br/>et consumers concatene - 214 · flow<br/>homonyme : warning seulement - 228"]
+  C1 --> C2 --> C3 --> C4
+end
+
+subgraph G3["✅ build_host : l ordre reel des branchements"]
+  direction LR
+  H1["merge_configs - 582 puis auth_config<br/>injecte dans merged_config.auth - 585<br/>le fichier auth ne passe pas le merge"]
+  H2["link_service : fourni, sinon repli<br/>ObrainLinkService si store attache - 597<br/>sinon erreur LinkService is required - 607"]
+  H3["fetchers et creators par module - 622<br/>et 632 puis from_builder_components - 642<br/>l hote reste transport-agnostique"]
+  H4["event_bus 651 · ui_state 658<br/>resolvers 663 · authorize transfere<br/>dans les DEUX sens - 678"]
+  H5["cors.validate et domains.validate - 682<br/>frontend_sites 687 · principal_mapping 689<br/>echouer ici et non au premier appel"]
+  H6["store obrain 697 : bail d ecriture si<br/>inscriptible, construction REFUSEE si<br/>pris - 719 · identite auto 754 · sinks 831"]
+  H1 --> H2 --> H3 --> H4 --> H5 --> H6
+end
+
+subgraph G4["✅ Derivation d une route d entite"]
+  direction LR
+  E1["EntityDescriptor - entity_registry.rs:10<br/>entity_type, plural et build_routes<br/>les routes sont ECRITES A LA MAIN"]
+  E2["OrderDescriptor::build_routes<br/>descriptor.rs:42 : /orders et<br/>/orders/{id}, cinq handlers nommes"]
+  E3["le pluriel ne derive aucune route :<br/>il est recopie dans le litteral et sert<br/>a la jointure des politiques - 263"]
+  E1 --> E2 --> E3
+end
+
+subgraph G5["✅ RestExposure : l ordre de fusion des routeurs"]
+  direction LR
+  R1["build_router - rest/mod.rs:49<br/>AppState bati depuis l hote - 51<br/>entity_routes = registry.build_routes - 62"]
+  R2["merge : health 66 · entity_routes<br/>puis custom_routes 68 · puis<br/>link_routes 72 - dans cet ordre"]
+  R3["link_routes - router.rs:116 : /links<br/>/{ent}/{id}/{route} et /{src}/{id}/<br/>{route}/{tgt} · repli nested - 133"]
+  R4["conditionnels, si le handle existe :<br/>SSE 75 · notifications 84 · ui 102<br/>graph 112 · gdpr 146 · sts 161"]
+  R5["repli multi-sites en fallback_service<br/>monte AVANT les couches - 176<br/>pose apres elles, il les contournerait"]
+  R6["build_with_grpc - builder.rs:924 :<br/>REST applique et gRPC non, donc REFUS<br/>build_with_grpc_unenforced assume - 952"]
+  R1 --> R2 --> R3 --> R4 --> R5 --> R6
+end
+
+subgraph G6["✅ Couches et politiques : la requete jugee"]
+  direction LR
+  L1["l ordre d ecriture est l INVERSE de<br/>l ordre d execution - rest/mod.rs:184<br/>la derniere layer posee est la plus externe"]
+  L2["posees : politiques 254 · tenant 276<br/>auth 281 · domaine 294 · CORS 309<br/>chaine voulue : CORS, domaine, auth,<br/>locataire, politiques - 189"]
+  A1["Authorization::new - authorization.rs:256<br/>entities = registry.entity_plurals - 263<br/>la jointure route vers entite vient la"]
+  A2["requirement - 616 : segments et methode<br/>GET /{plural} vaut list · POST a 3<br/>segments vaut create de la CIBLE - 685"]
+  A3["abstention = refus hors /health, /healthz<br/>et /auth/ - 270 · reponse 403<br/>deny_abstain - 862"]
+  L1 --> L2 --> A1 --> A2 --> A3
+end
+
+subgraph G7["🟠 La doc dit plus que le code"]
+  direction LR
+  D1["SERVER_BUILDER_IMPLEMENTATION.md:152<br/>annonce descriptors en Vec et register<br/>qui push · le code est un HashMap - 32 :<br/>un doublon REMPLACE - test 157"]
+  D2["ROUTING_EXPLANATION.md:82 : build vaut<br/>entity.merge(link) · le code delegue a<br/>RestExposure, avec health, customs,<br/>conditionnels et la chaine de couches"]
+  D3["doc 355 : aucune route oubliable ·<br/>rien ne verifie les verbes du descripteur<br/>un verbe manquant ne casse rien - 54"]
+  D1 --> D2 --> D3
+end
+
+B3 --> C1
+C4 --> H1
+H6 --> R1
+E1 --> R1
+E3 --> A1
+R6 --> L1
+
+classDef danger fill:#ffe3e3,stroke:#c92a2a,color:#7a1414
+classDef note fill:#fff4e6,stroke:#e8590c,color:#8a3b00
+class D1,D2,D3 danger
+class R6 note

@@ -1,0 +1,77 @@
+flowchart TB
+%% name: core-auth-et-sts
+%% PROUVE (lu dans le code, jamais suppose) : le login passe par l annuaire persiste des qu il est branche, sinon par l annuaire memoire EN CLAIR ; les jetons sont signes EdDSA et verifies dans un ordre explicite signature, exp, iss, jti revoque ; les identites vivent dans un store obrain dedie, noeuds de label User, hash argon2id, commit WAL ; le verrou de ce store est EXCLUSIF et une seconde passerelle meurt en le nommant ; il n existe aucune rotation de cle a chaud.
+%% SOURCES LUES : this/src/core/auth/sts.rs (login 169, set_annuaire 150, issue_token_pair 304, refresh 202, revoke 228, issuer 248, UserRecord 85) · this/src/storage/annuaire_identites.rs (ouvrir 73, LABEL_UTILISATEUR 43, ajouter 178, verifier 304, hacher 321, epouvantail 48) · this/src/server/exposure/rest/auth_routes.rs (login_handler 51, jwks_handler 89, refresh_handler 101, verify_handler 159, auth_router 222) · this/src/bin/this-gateway.rs (charge_ou_genere_cles 1838, set_annuaire 2937, prevol cles 1217, admin_cree 2618) · this/src/storage/obrain.rs (open 130, open_read_only 151) · this/tests/passerelle_identites.rs (matrice 186, cli_user 417, verrou 514) · this/tests/identity_conformance.rs (119 a 299).
+%% NON ETABLI : je n ai execute aucun test, tout est lu ; les parametres argon2id dits OWASP m=19456, t=2, p=1 viennent du commentaire du module et du defaut du crate, ils ne sont pas mesures ici ; la perte des revocations au redemarrage est deduite du type du champ, pas mesuree ; la verification par WamiAuthProvider est lue dans le cablage, pas exercee ; identity_conformance.rs ne porte PAS sur les comptes, il prouve l identite des entites du graphe.
+%% LEGENDE : ✅ existe et tourne · 🟠 ecrit/teste mais partiel ou non deploye · 🔴 refuse, avec sa raison · ⚪ amont, reutilise tel quel
+
+subgraph S1["✅ Emission des jetons, STS EdDSA"]
+  direction LR
+  A1["POST /auth/token<br/>login_handler rend la paire et<br/>pose le cookie this_token HttpOnly<br/>SameSite Lax - auth_routes.rs:51"]
+  A2["StsService::login<br/>annuaire branche = SEULE source<br/>de verite, fail-closed, aucun repli<br/>sts.rs:169-175"]
+  A3["issue_token_pair<br/>EdDSA Ed25519, claims sub, tenant_id,<br/>roles, exp, iat, jti, iss ; acces 900 s,<br/>refresh 24 h par defaut - sts.rs:304-350"]
+  A4["POST /auth/refresh<br/>verifie le refresh, REVOQUE son jti<br/>puis re-emet: la rotation est ici<br/>sts.rs:202-224"]
+end
+
+subgraph S2["⚪ Verification, la porte"]
+  direction LR
+  B1["GET ou POST /auth/verify<br/>jeton_de_la_requete: Bearer, et a<br/>defaut le cookie this_token<br/>auth_routes.rs:159-162"]
+  B2["Ordre de controle, non negociable<br/>signature EdDSA, exp, iss EXIGE via<br/>sts.issuer(), puis jti revoque ; aud vide<br/>car ces jetons n en portent pas - :164-180"]
+  B3["Identite rendue en en-tetes<br/>x-this-subject, x-this-tenant,<br/>x-this-roles pour forward_auth Caddy<br/>auth_routes.rs:182-208"]
+  B4["WamiAuthProvider, amont reutilise<br/>meme cle publique, mode sts,<br/>verification EdDSA deja ecrite<br/>this-gateway.rs:2944-2958"]
+end
+
+subgraph S3["🟠 Identites persistees, store obrain dedie"]
+  direction LR
+  C1["AnnuaireIdentites::ouvrir<br/>ObrainStore::open: verrou exclusif,<br/>index username recharge a l ouverture<br/>annuaire_identites.rs:73-113"]
+  C2["Noeud de label User, puis commit WAL<br/>username, hash_argon2, user_id,<br/>tenant_id, roles, created_at<br/>annuaire_identites.rs:43,206-232"]
+  C3["hacher en argon2id<br/>Argon2::default, sel OsRng, seule la<br/>chaine PHC est persistee, jamais le clair<br/>annuaire_identites.rs:321-327"]
+  C4["HASH_EPOUVANTAIL<br/>inconnu et mauvais mot de passe coutent<br/>le meme temps: pas d enumeration<br/>annuaire_identites.rs:45-48,304-315"]
+end
+
+subgraph S4["✅ Branchement de l annuaire au STS"]
+  direction LR
+  D1["set_annuaire prend et self<br/>OnceLock: pose UNE fois au demarrage<br/>a travers l Arc partage, sans mut<br/>sts.rs:149-152"]
+  D2["Gateway: TTL acces 900 s, puis<br/>set_annuaire avec le MEME Arc que<br/>les routes admin, donc creation a chaud<br/>connectable - this-gateway.rs:2935-2967"]
+  D3["🔴 Un second annuaire est refuse<br/>set_annuaire rend false: changer<br/>d autorite a chaud se refuse plutot<br/>que de se subir - sts.rs:143-152"]
+end
+
+subgraph S5["🟠 Contraintes d exploitation"]
+  direction LR
+  E1["Verrou EXCLUSIF du store d identites<br/>la 2e passerelle ne demarre pas et le<br/>DIT: exclusive lock on substrate.meta<br/>passerelle_identites.rs:496-611"]
+  E2["CLI user add, list, passwd<br/>s execute passerelle eteinte, meme<br/>verrou, meme store que le service<br/>passerelle_identites.rs:413-494"]
+  E3["Cles Ed25519 sur disque<br/>gateway.key.pem et gateway.pub.pem ;<br/>absentes, la paire est GENEREE au vol<br/>this-gateway.rs:1838-1879"]
+  E4["Pas de rotation de cle a chaud<br/>changer la paire invalide TOUS les<br/>jetons emis ; prevol le verifie et le dit<br/>this-gateway.rs:1219-1227"]
+  E5["Revocations en memoire seule<br/>RwLock sur un HashSet, perdues au<br/>redemarrage: revoke n est pas durable<br/>sts.rs:101,228-240"]
+  E6["GET /auth/keys publie le JWKS<br/>kty OKP, crv Ed25519, use sig:<br/>la cle publique COURANTE seulement<br/>auth_routes.rs:88-98"]
+end
+
+subgraph S6["🟠 Ecarts a dire"]
+  direction LR
+  F1["identity_conformance.rs<br/>prouve l identite des ENTITES du<br/>graphe, _uuid et EntityKey,<br/>pas celle des comptes - :119-299"]
+  F2["Le clair survit en repli memoire<br/>UserRecord compare le mot de passe<br/>en clair si AUCUN annuaire n est<br/>branche: tests et demos - sts.rs:84-91"]
+end
+
+A1 --> A2
+A2 --> A3
+A4 --> A3
+A3 --> B1
+B1 --> B2
+B2 --> B3
+B4 -.-> B2
+C1 --> C2
+C3 --> C2
+C2 --> C4
+C1 --> D1
+D2 --> D1
+D1 --> A2
+A2 -.->|"sans annuaire"| F2
+E1 --> E2
+E3 --> E4
+E5 -.-> B2
+E6 -.-> B2
+
+classDef danger fill:#ffe3e3,stroke:#c0392b,color:#7b241c
+classDef note fill:#eef3ff,stroke:#3b5bdb,color:#1b2a6b
+class D3,E4,E5 danger
+class F1,F2 note

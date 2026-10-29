@@ -16,7 +16,14 @@ pub mod builder;
 pub mod entity_registry;
 pub mod exposure;
 pub mod host;
+pub mod middleware;
 pub mod router;
+
+#[cfg(feature = "frontend")]
+pub mod frontend;
+
+#[cfg(feature = "frontend")]
+pub use frontend::Frontend;
 
 pub use builder::ServerBuilder;
 pub use entity_registry::{EntityDescriptor, EntityRegistry};

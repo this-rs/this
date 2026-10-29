@@ -224,7 +224,7 @@ async fn start_grpc_server() -> (
 ) {
     let (host, order_store, invoice_store) = build_test_host();
 
-    let grpc_router = GrpcExposure::build_router(host.clone()).unwrap();
+    let grpc_router = GrpcExposure::build_router_unenforced(host.clone()).unwrap();
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -1089,7 +1089,7 @@ async fn start_rest_grpc_server() -> (
     let (host, order_store, invoice_store) = build_test_host();
 
     let rest_router = RestExposure::build_router(host.clone(), vec![]).unwrap();
-    let grpc_router = GrpcExposure::build_router_no_fallback(host.clone()).unwrap();
+    let grpc_router = GrpcExposure::build_router_no_fallback_unenforced(host.clone()).unwrap();
     let app = combine_rest_and_grpc(rest_router, grpc_router);
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1164,7 +1164,7 @@ async fn test_no_fallback_router_can_merge_with_rest() {
     let (host, _order_store, _invoice_store) = build_test_host();
 
     let rest_router = RestExposure::build_router(host.clone(), vec![]).unwrap();
-    let grpc_router = GrpcExposure::build_router_no_fallback(host).unwrap();
+    let grpc_router = GrpcExposure::build_router_no_fallback_unenforced(host).unwrap();
 
     // This MUST NOT panic — the whole point of this fix
     let _app = combine_rest_and_grpc(rest_router, grpc_router);
@@ -1179,7 +1179,7 @@ async fn test_build_router_with_fallback_panics_on_rest_merge() {
     let (host, _order_store, _invoice_store) = build_test_host();
 
     let rest_router = RestExposure::build_router(host.clone(), vec![]).unwrap();
-    let grpc_router = GrpcExposure::build_router(host).unwrap();
+    let grpc_router = GrpcExposure::build_router_unenforced(host).unwrap();
 
     // This MUST panic — proves the problem still exists with build_router()
     let _app = rest_router.merge(grpc_router);
@@ -1326,7 +1326,7 @@ async fn test_grpc_proto_endpoint_in_combined_router() {
 
 #[tokio::test]
 async fn test_build_with_grpc_convenience() {
-    // Test the ServerBuilder::build_with_grpc() convenience method
+    // Test the ServerBuilder::build_with_grpc_unenforced() convenience method
     use this::config::LinksConfig;
     use this::core::module::Module;
     use this::server::ServerBuilder;
@@ -1376,12 +1376,12 @@ async fn test_build_with_grpc_convenience() {
         }
     }
 
-    // build_with_grpc() must not panic (no double-fallback)
+    // build_with_grpc_unenforced() must not panic (no double-fallback)
     let app = ServerBuilder::new()
         .with_link_service(InMemoryLinkService::new())
         .register_module(MinimalModule)
         .unwrap()
-        .build_with_grpc()
+        .build_with_grpc_unenforced()
         .unwrap();
 
     // Verify the router works
@@ -1453,7 +1453,7 @@ async fn test_grpc_proto_export_endpoint() {
     use axum_test::TestServer;
 
     let (host, _order_store, _invoice_store) = build_test_host();
-    let grpc_router = GrpcExposure::build_router(host).unwrap();
+    let grpc_router = GrpcExposure::build_router_unenforced(host).unwrap();
 
     let server = TestServer::new(grpc_router);
 
@@ -1518,4 +1518,52 @@ async fn test_grpc_create_entities_of_different_types() {
 
     assert_eq!(orders.entities.len(), 1);
     assert_eq!(invoices.entities.len(), 1);
+}
+
+// ============================================================================
+// Flux d'événements : le refus est FAIL-CLOSED, et il est exercé
+// ============================================================================
+
+/// Un abonnement au flux d'événements **sans portée** est refusé par le serveur
+/// RÉEL — pas par une fonction interne.
+///
+/// Avant le 2026-10-01, ce même appel ouvrait un flux qui recevait les
+/// événements de **tous** les locataires : aucun interceptor ne pose
+/// d'`AuthContext` côté gRPC, et l'absence de portée ne refusait rien — la garde
+/// de filtrage ne s'appliquait simplement pas. L'atlas le disait « fail-closed
+/// lu dans le code, exercé par aucun test » ; il n'était, en vérité, pas
+/// appliqué du tout. Ce test est la garde qui manquait : il tombe si quelqu'un
+/// rouvre un flux sans portée.
+#[tokio::test]
+async fn un_flux_d_evenements_sans_portee_est_refuse() {
+    use this::server::exposure::grpc::proto::SubscribeRequest;
+    use this::server::exposure::grpc::proto::event_service_client::EventServiceClient;
+
+    let (addr, _host, _orders, _invoices) = start_grpc_server().await;
+    let mut client = EventServiceClient::connect(format!("http://{}", addr))
+        .await
+        .expect("client EventService");
+
+    let status = match client
+        .subscribe(SubscribeRequest {
+            entity_type: None,
+            entity_id: None,
+            event_type: None,
+            kind: None,
+            link_type: None,
+        })
+        .await
+    {
+        Err(status) => status,
+        Ok(_) => panic!("un abonnement sans portée doit être refusé (fail-closed)"),
+    };
+
+    assert_eq!(status.code(), tonic::Code::PermissionDenied);
+    // Un refus doit nommer son remède : sans cela, on apprend à désarmer la
+    // garde pour faire taire le symptôme.
+    assert!(
+        status.message().contains("x-tenant-id"),
+        "le refus doit nommer le remède, obtenu : {}",
+        status.message()
+    );
 }

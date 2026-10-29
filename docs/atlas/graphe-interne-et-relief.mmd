@@ -1,0 +1,88 @@
+flowchart TB
+%% name: graphe-interne-et-relief
+%% PROUVE (lu dans le code, jamais suppose) : le module graph ne tient AUCUNE liste d algorithmes a la main, il appelle le registre du moteur et une liste non vide EST la preuve que la feature algos est compilee ; les 8 familles de dispatch hors registre sont DECLAREES, leur disponibilite n est pas prouvee ; les 14 pieges sont adosses a un fichier:ligne d obrain ; les memes aretes se lisent deux fois, une fois en labels et types par le contrat GraphBackend, une fois en simplexes et courbure par les passes du substrat, et la seconde lecture n est pas derivable de la premiere ; le clustering global est volontairement laisse null parce que l appel panique en build debug ; le trait GraphBackend ne couvre NI les espaces NI le bail, et ce test le verifie sur la SOURCE du trait.
+%% SOURCES LUES : graph/mod.rs:30-45 ; graph/routes.rs:102-113,118-131,145-156,185-199,534-605 ; graph/relief.rs:50,59-60,446-513,637-664,704,736-742,771-854,857-973,1007-1033,1433-1445 ; graph/hierarchy.rs:50-79,108-137 ; graph/canvas.rs:34-44 ; graph/scope.rs:31,140 ; storage/obrain_facade.rs:55-103,116,207 ; tests/graph_backend_switch.rs:196-246,256,292,336-410,719-753,832-1070 ; tests/chain_aletheia.rs:421-495,502-586,600-848 ; docs/relief-simplicial-deux-ajouts-2026-09-12.md:16-43
+%% NON ETABLI : je n ai pas compile ni lance les tests, donc les comptes annonces par la doc - 870 tests verts, 28 procedures, 34 microsecondes pour GET /graph - ne sont pas remesures ici ; je n ai pas ouvert le depot obrain, donc les fichiers:ligne cites DANS les pieges sont recopies depuis les commentaires de this-rs, pas verifies a la source ; je n ai pas verifie le cablage runtime de RestExposure vers graph_routes, seulement les deux points d appel avec_graph_store ; le detail du handler /graph/identity et de son comptage borne n a pas ete lu.
+%% ECART : la doc du perimetre mesure GET /graph a 33,5-34,4 microsecondes, la doc contrats-p1-p2-identite-bail.md:220 annonce 184,94 microsecondes pour la meme route - meme endpoint, deux chiffres, non reconcilies ici.
+%% LEGENDE : ✅ existe et tourne · 🟠 ecrit ou teste mais partiel, non deploye · 🔴 refuse, avec sa raison · ⚪ amont, reutilise tel quel
+%% LECTURE : le graphe d entites metier est ce que l APPLICATION declare et ce que le contrat commun lit ; la topologie interne du depot est ce que le substrat ENGENDRE a partir des memes aretes, sans modele metier et sans declaration possible.
+
+subgraph EXPO["✅ SURFACE PUBLIEE - six routes REST, aucune n ecrit"]
+  E1["GET /graph<br/>le document Relief complet,<br/>schema this-rs/graph-relief/1<br/>routes.rs:104 ; relief.rs:50"]
+  E2["GET /graph/procedures<br/>la surface d appel : procedures<br/>plus familles plus pieges<br/>routes.rs:105 et :145-156"]
+  E3["GET /graph/spaces et /graph/identity<br/>un espace et un contrat d identite,<br/>plus la vue hierarchy par identifiant<br/>routes.rs:106-111"]
+  E4["spawn_blocking<br/>describe interroge le moteur en synchrone<br/>et balaye quand counts est demande<br/>routes.rs:185-199"]
+end
+
+subgraph REG["✅ INTROSPECTE - lu au moteur, jamais tenu a la main"]
+  R1["Le registre du moteur, interroge<br/>une ProcedureSpec par algorithme :<br/>nom, parametres, colonnes de sortie<br/>relief.rs:1023-1029"]
+  R2["registry_available<br/>une liste non vide EST la preuve que<br/>la feature algos est compilee<br/>relief.rs:1031-1033"]
+end
+
+subgraph DECL["🟠 DECLARE - obrain ne sait pas l introspecter"]
+  D1["FAMILIES : 8 familles hors registre<br/>cognitive, engrams, projection, window,<br/>cdc, substrate, catalog, user-defined<br/>relief.rs:771-854"]
+  D2["available est calcule contre une liste<br/>DECLAREE, pas prouvee : obrain n expose<br/>pas ses features compilees<br/>relief.rs:59-60 et :736-738"]
+  D3["TRAPS : 14 pieges, chacun adosse<br/>a un fichier:ligne d obrain<br/>ex. kcore annonce des colonnes fausses<br/>relief.rs:857-973"]
+end
+
+subgraph TOPO["✅ TOPOLOGIE INTERNE - engendree, jamais declaree"]
+  T1["SimplexRelief : l etat des passes<br/>configured, maintenance,<br/>clique_edge_type_id, dispatch_configured<br/>relief.rs:637-656"]
+  T2["counts : opt-in et couteux<br/>triangles, k4, k5, hyperedges<br/>par balayage complet de la zone simplex<br/>relief.rs:1433-1445"]
+  T3["maintenance incrementale au commit<br/>mise a jour dans la meme transaction WAL<br/>donc aucun job de rattrapage<br/>relief.rs:643-648"]
+end
+
+subgraph METIER["✅ GRAPHE D ENTITES METIER - ce que le contrat lit"]
+  M1["StoreRelief : la matiere du depot<br/>labels, types d aretes, cles de propriete,<br/>index - introspectes de la base reelle<br/>relief.rs:446-513"]
+  M2["Le perimetre de lecture masque ET compte<br/>hidden_labels, hidden_edge_types :<br/>jamais de coupe muette<br/>relief.rs:459-486"]
+  M3["Hierarchy multi-echelle<br/>CONTAINS, HAS_SUBGROUP, PART_OF,<br/>depth 5, 50 par niveau, truncated, cycles<br/>hierarchy.rs:50-69 et :108-137"]
+  M4["Canvas : une echelle et un sujet<br/>cosmos, monde, groupe, noeud, plus self -<br/>l intention remplace le nombre<br/>canvas.rs:34-44 ; routes.rs:534-605"]
+end
+
+subgraph BACK["✅ BACKENDS ET BASCULE - une couture, deux implementations"]
+  B1["GraphBackend : le contrat commun<br/>is_substrate, nodes_by_label, neighbors,<br/>node_count, commit<br/>obrain_facade.rs:55-103"]
+  B2["Deux implementations du meme trait<br/>ObrainDB brut, obrain_facade.rs:116<br/>ObrainStore, obrain_facade.rs:207"]
+  B3["Parite stricte, exigee par test<br/>le meme consommateur generique doit<br/>rendre un rapport identique des deux cotes<br/>graph_backend_switch.rs:196-246"]
+  B4["Bascule a l execution, pas au build<br/>liste d objets-trait et Box d objets-trait,<br/>les deux implementations<br/>graph_backend_switch.rs:256 et :292"]
+  B5["Toutes les operations du trait<br/>passent par l espace ACTIF : les deux<br/>espaces allouent leurs ids depuis 1<br/>graph_backend_switch.rs:336-410"]
+  B6["Bail d ecriture : le trou ferme<br/>le branchement cle en main l arme, le second<br/>ecrivain est refuse, lecture seule sans bail<br/>graph_backend_switch.rs:832-1070"]
+end
+
+subgraph REFUS["🔴 REFUSE OU NON PUBLIE - avec la raison"]
+  X1["clustering_global reste null<br/>l appel panique en build debug des qu un<br/>noeud vivant a un degre nul dans les cliques<br/>relief.rs:945-955"]
+  X2["Aucun accesseur ricci sur le substrate<br/>il faut writer puis read_edge puis ricci_f32<br/>la courbure de Forman n est PAS persistee<br/>relief.rs:912-917"]
+  X3["obrain-cli n a aucune cible lib<br/>les outils MCP structurels sont<br/>inatteignables : a reecrire, pas a importer<br/>relief.rs:957-964"]
+  X4["Journal sans transport<br/>transport_available vaut false : ordonne,<br/>mais rien ne l expedie vers un autre noeud<br/>relief.rs:131-137"]
+  X5["Une echelle se REFUSE, elle ne se rabat pas<br/>inconnue rend 400 avec la liste des echelles<br/>au-dela du droit rend 403, jamais une coupe<br/>chain_aletheia.rs:575-585 et :740-750"]
+end
+
+E1 --> E4
+E1 --> R1
+E1 --> T1
+E1 --> M1
+E1 -.->|"jamais d erreur pour un fait indisponible"| X4
+E2 --> D1
+E2 --> D3
+D2 --> D1
+R1 --> R2
+R1 -->|"rien hors engine n est importable"| X3
+T1 --> T2
+T1 --> T3
+T1 -->|"courbure non persistee"| X2
+T2 -->|"un balayage en HTTP"| X1
+M1 -->|"les MEMES aretes, deux lectures"| T1
+M1 --> M2
+E3 --> M3
+M3 --> M4
+M4 --> X5
+B1 --> B2
+B2 --> B3
+B3 --> B4
+B2 --> B5
+B2 --> B6
+B5 -.->|"le contrat ne les expose pas"| M1
+B6 -.->|"arbitrage d ecriture, hors contrat"| M1
+
+classDef danger fill:#ffe0e0,stroke:#c62828,stroke-width:2px,color:#7f1d1d
+classDef note fill:#eef4ff,stroke:#2c5aa0,color:#1b3a6b
+class X1,X2,X3,X4,X5 danger
+class D1,D2,D3 note

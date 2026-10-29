@@ -1,0 +1,78 @@
+flowchart TB
+%% name: this-cli-et-mcp
+%% PROUVE (lu dans le code, jamais suppose) : un seul binaire #quot;this#quot; avec un match de dispatch ; toute commande qui ecrit recoit un dyn FileWriter, donc le dry-run est un autre writer et rien d autre ; le codegen n invente rien, il introspecte model.rs, descriptor.rs et links.yaml ; le serveur MCP est synchrone, sur stdio, et declare 12 outils, un par commande ; les handlers MCP ecrivent vraiment sur disque via McpFileWriter.
+%% SOURCES LUES : this-cli/src/main.rs (16, 36, 57-60) ; commands/mod.rs (22-74, 174-343) ; commands/init.rs (101-122) ; commands/add_entity.rs (174-204, 377, 721) ; commands/add_link.rs (102, 140, 208) ; commands/add_target.rs (19-113) ; commands/add_sink.rs (24, 82) ; commands/add_event_flow.rs (56-89) ; commands/adopt_obrain.rs (67-125) ; commands/generate.rs (12-103) ; codegen/introspect.rs (77-114) ; codegen/typescript.rs (12-38) ; commands/info.rs (89) ; commands/doctor.rs (93, 172) ; mcp/server.rs (13, 33-59, 110-116, 152-163) ; mcp/tools.rs (8-21, 287, 322, 404) ; mcp/handlers.rs (15-32, 45-62, 102-125, 177, 400-426, 565-615) ; utils/file_writer.rs ; this-cli/Cargo.toml.
+%% NON ETABLI : je n ai ni compile la crate ni pilote un agent contre this mcp en vrai ; le client TypeScript genere n a pas ete execute dans un navigateur ; le contenu des gabarits .tera n a ete lu qu en liste de noms, pas ligne a ligne ; le contrat MCP n a pas ete confronte a une version recente de la specification.
+%% LEGENDE : ✅ existe et tourne · 🟠 ecrit/teste mais partiel ou non deploye · 🔴 refuse, avec sa raison · ⚪ amont, reutilise tel quel
+
+SB1["✅ Un binaire, un seul dispatch — main.rs"]
+  M1["main.rs:16 Cli::parse<br/>puis run_command ligne 36<br/>un match unique, zero logique<br/>metier dans main"]
+  M2["Commands enum, mod.rs:32-74<br/>init add adopt info build dev<br/>generate doctor completions mcp<br/>les args vivent dans mod.rs"]
+  M3["--dry-run global, mod.rs:24<br/>DryRunWriter sinon RealWriter<br/>main.rs:20-28 ; le trait FileWriter<br/>porte create / write / update"]
+
+SB2["✅ Commandes qui ecrivent — toutes via FileWriter"]
+  W1["this init : 7 gabarits .tera<br/>Cargo.toml main.rs module.rs<br/>stores.rs entities/mod.rs<br/>links.yaml server.yaml, init.rs:101"]
+  W2["--events ajoute config/events.yaml<br/>--auth ajoute config/auth.yaml<br/>--cognitive implique --events<br/>init.rs:67 et 117-119"]
+  W3["this add entity pose 5 fichiers<br/>model store handlers descriptor<br/>et mod dans src/entities/nom/<br/>add_entity.rs:174-179"]
+  W4["puis met a jour entities/mod.rs<br/>stores.rs et module.rs<br/>add_entity.rs:203, 377 et 721"]
+  W5["this add link reecrit<br/>config/links.yaml ligne 208<br/>🔴 refuse un lien deja declare<br/>add_link.rs:140"]
+  W6["this add target ecrit this.yaml<br/>puis front/ ou src-tauri/<br/>add_target.rs:44-113 ; exige<br/>un workspace avec this.yaml"]
+  W7["add event-flow et add sink<br/>reecrivent config/events.yaml<br/>add_sink.rs:82 ; refuse un sink<br/>absent du fichier, add_event_flow.rs:89"]
+
+SB3["✅ Codegen — lire le projet, ecrire un client"]
+  G1["this generate client exige<br/>un this.yaml de workspace<br/>generate.rs:29-34 ; rien<br/>ne se devine hors workspace"]
+  G2["introspect lit src/entities/*/<br/>model.rs et descriptor.rs<br/>plus config/links.yaml<br/>introspect.rs:77-114"]
+  G3["typescript.rs:12-38 assemble<br/>entete, helper fetchJson<br/>interfaces, CRUD par entite<br/>et fonctions de lien"]
+  G4["ecrit webapp/src/api-client.ts<br/>sinon api-client.ts a la racine<br/>generate.rs:88-103, chemin<br/>deduit de la cible webapp"]
+  G5["🔴 refuse lang autre que<br/>typescript, dans la commande<br/>generate.rs:21-26 et dans<br/>le handler MCP handlers.rs:599"]
+
+SB4["✅ Serveur MCP — stdio, JSON-RPC 2.0"]
+  S1["this mcp est cache de l aide<br/>commands/mod.rs:72 ; lance<br/>McpServer::new().run()<br/>main.rs:57-60"]
+  S2["une ligne lue, une reponse<br/>synchrone, sans tokio, sans<br/>thread ; protocole annonce<br/>2024-11-05, server.rs:13"]
+  S3["methodes servies : initialize<br/>ping, tools/list, tools/call<br/>toute autre rend<br/>METHOD_NOT_FOUND, server.rs:110"]
+  S4["🔴 tools/list et tools/call<br/>refusent tant que initialize<br/>n a pas eu lieu : erreur<br/>INVALID_REQUEST, server.rs:152"]
+
+SB5["✅ Ce qu un agent recoit — 12 outils"]
+  T1["12 outils, un par commande<br/>tools.rs:8-21 ; le test<br/>ligne 404 verrouille ce compte<br/>init add link sink adopt inclus"]
+  T2["handlers.rs:15-32 dispatch<br/>par nom ; McpFileWriter ecrit<br/>pour de vrai et is_dry_run<br/>reste false, handlers.rs:122"]
+  T3["un champ cwd fait un<br/>set_current_dir global<br/>que CwdGuard restaure au drop<br/>handlers.rs:45-62"]
+  T4["get_project_info et<br/>check_project_health ne<br/>reimplementent rien : ils<br/>appellent info.rs:89 et doctor.rs:93"]
+
+SB6["🟠 Ecarts entre le dit et le fait"]
+  E1["start_dev : la description dit<br/>qu il rend la commande, tools.rs:287<br/>le handler appelle dev::run 426<br/>qui spawn et bloque le stdio"]
+  E2["init_project MCP force<br/>auth false et cognitive false<br/>handlers.rs:177-178 : aucun<br/>outil n expose ces deux modes"]
+  E3["README.md:304 annonce 9 outils<br/>le code en expose 12 ; et<br/>architecture.md:159 cite run_stdio<br/>qui n existe nulle part"]
+  E4["add_target : l enum de l outil<br/>ignore website tools.rs:322<br/>alors que le handler l accepte<br/>handlers.rs:442"]
+
+M1 --> M2
+M1 --> M3
+M3 -.-> W1
+M2 --> W1
+W1 --> W2
+M2 --> W3
+W3 --> W4
+M2 --> W5
+M2 --> W6
+M2 --> W7
+M2 --> G1
+G1 --> G2
+G2 --> G3
+G3 --> G4
+G1 --> G5
+M2 --> S1
+S1 --> S2
+S2 --> S3
+S3 --> S4
+S3 --> T1
+T1 --> T2
+T2 --> T3
+T2 --> T4
+T2 -.-> E1
+T2 -.-> E2
+T1 -.-> E3
+T1 -.-> E4
+
+classDef danger fill:#ffe0e0,stroke:#c0392b,color:#000
+classDef note fill:#eef4ff,stroke:#3b6fb6,color:#000
+class E1,E2,E3,E4 danger
+class G2,G3,T1 note

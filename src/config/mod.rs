@@ -1,6 +1,8 @@
 //! Configuration loading and management
 
+pub mod auth;
 pub mod events;
+pub mod server;
 pub mod sinks;
 
 use crate::core::LinkDefinition;
@@ -9,7 +11,11 @@ use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+pub use auth::AuthConfig;
 pub use events::*;
+pub use server::{
+    CaddyConfig, CaddyTls, CorsConfig, DomainConfig, ProxyConfig, ServerSecurityConfig,
+};
 pub use sinks::*;
 
 /// Authorization configuration for an entity
@@ -46,6 +52,16 @@ pub struct EntityAuthConfig {
     /// Policy for deleting links (DELETE /{entities}/{id}/{link_type}/{target_type}/{target_id})
     #[serde(default = "default_auth_policy")]
     pub delete_link: String,
+
+    /// Policy for updating a link (PUT /{entities}/{id}/{link_route}/{target_id})
+    ///
+    /// Ajouté en auditant la chaîne : le routeur de liens sert un `PUT` à quatre
+    /// segments (`update_link`), et aucune opération ne lui correspondait — la
+    /// requête était donc **abstenue**, donc non jugée par les politiques.
+    /// `#[serde(default)]` : une configuration écrite avant ce champ continue de
+    /// se lire, avec la politique par défaut.
+    #[serde(default = "default_auth_policy")]
+    pub update_link: String,
 }
 
 fn default_auth_policy() -> String {
@@ -63,6 +79,7 @@ impl Default for EntityAuthConfig {
             list_links: default_auth_policy(),
             create_link: default_auth_policy(),
             delete_link: default_auth_policy(),
+            update_link: default_auth_policy(),
         }
     }
 }
@@ -111,6 +128,10 @@ pub struct LinksConfig {
     /// Optional sink configurations (notification destinations)
     #[serde(default)]
     pub sinks: Option<Vec<SinkConfig>>,
+
+    /// Optional authentication & authorization configuration
+    #[serde(default)]
+    pub auth: Option<AuthConfig>,
 }
 
 impl LinksConfig {
@@ -141,6 +162,7 @@ impl LinksConfig {
                 validation_rules: None,
                 events: None,
                 sinks: None,
+                auth: None,
             };
         }
 
@@ -212,6 +234,14 @@ impl LinksConfig {
             }
         }
 
+        // Merge auth: last-wins (only one auth config should be active)
+        let mut merged_auth: Option<AuthConfig> = None;
+        for config in &configs {
+            if config.auth.is_some() {
+                merged_auth = config.auth.clone();
+            }
+        }
+
         // Merge sinks: deduplicate by name (last wins), preserving insertion order
         let mut sinks_map: IndexMap<String, SinkConfig> = IndexMap::new();
         for config in &configs {
@@ -242,6 +272,7 @@ impl LinksConfig {
             validation_rules,
             events: merged_events,
             sinks: merged_sinks,
+            auth: merged_auth,
         }
     }
 
@@ -334,7 +365,13 @@ impl LinksConfig {
             validation_rules: None,
             events: None,
             sinks: None,
+            auth: None,
         }
+    }
+
+    /// Get the effective auth config (or default if absent)
+    pub fn auth_config(&self) -> AuthConfig {
+        self.auth.clone().unwrap_or_default()
     }
 }
 
@@ -486,6 +523,7 @@ links:
             validation_rules: None,
             events: None,
             sinks: None,
+            auth: None,
         };
 
         let config2 = LinksConfig {
@@ -498,6 +536,7 @@ links:
             validation_rules: None,
             events: None,
             sinks: None,
+            auth: None,
         };
 
         let merged = LinksConfig::merge(vec![config1, config2]);
@@ -521,6 +560,7 @@ links:
             validation_rules: None,
             events: None,
             sinks: None,
+            auth: None,
         };
 
         let auth2 = EntityAuthConfig {
@@ -538,6 +578,7 @@ links:
             validation_rules: None,
             events: None,
             sinks: None,
+            auth: None,
         };
 
         let merged = LinksConfig::merge(vec![config1, config2]);
@@ -564,6 +605,7 @@ links:
             validation_rules: Some(rules1),
             events: None,
             sinks: None,
+            auth: None,
         };
 
         let mut rules2 = HashMap::new();
@@ -581,6 +623,7 @@ links:
             validation_rules: Some(rules2),
             events: None,
             sinks: None,
+            auth: None,
         };
 
         let merged = LinksConfig::merge(vec![config1, config2]);
@@ -632,6 +675,7 @@ links:
             validation_rules: Some(rules),
             events: None,
             sinks: None,
+            auth: None,
         };
 
         // Correct combination
@@ -667,6 +711,7 @@ links:
             validation_rules: Some(rules),
             events: None,
             sinks: None,
+            auth: None,
         };
 
         // With empty targets, no target type can match
@@ -829,6 +874,7 @@ sinks:
                 sink_type: SinkType::Push,
                 config: HashMap::new(),
             }]),
+            auth: None,
         };
 
         let config2 = LinksConfig {
@@ -857,6 +903,7 @@ sinks:
                 sink_type: SinkType::InApp,
                 config: HashMap::new(),
             }]),
+            auth: None,
         };
 
         let merged = LinksConfig::merge(vec![config1, config2]);

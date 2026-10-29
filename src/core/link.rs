@@ -176,6 +176,31 @@ fn default_link_auth_policy() -> String {
     "authenticated".to_string()
 }
 
+impl LinkAuthConfig {
+    /// La politique déclarée pour une opération de lien — **le seul endroit** où
+    /// ce vocabulaire se traduit.
+    ///
+    /// Les opérations arrivent sous deux noms : celui de la **configuration
+    /// d'entité** (`list_links`, `create_link`, …) et celui du **type de lien**
+    /// (`list`, `create`, …). Les deux désignent la même opération ; les
+    /// traduire à un seul endroit évite qu'un appelant en oublie un — ce qui
+    /// était exactement l'état de ce type : `LinkAuthConfig` était déclaré et
+    /// lu par personne hors de ses propres tests.
+    ///
+    /// `None` pour une opération hors vocabulaire : on ne **devine** pas de
+    /// politique, et l'appelant retombe sur celle de l'entité source.
+    pub fn policy_for(&self, operation: &str) -> Option<&str> {
+        match operation {
+            "list" | "list_links" => Some(&self.list),
+            "get" | "get_link" => Some(&self.get),
+            "create" | "create_link" => Some(&self.create),
+            "update" | "update_link" => Some(&self.update),
+            "delete" | "delete_link" => Some(&self.delete),
+            _ => None,
+        }
+    }
+}
+
 impl Default for LinkAuthConfig {
     fn default() -> Self {
         Self {

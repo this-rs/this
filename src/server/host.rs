@@ -7,7 +7,9 @@
 //! single source of truth for the application state.
 
 use crate::config::LinksConfig;
+use crate::core::auth::{AuthProvider, AuthResolverRegistry};
 use crate::core::events::EventBus;
+use crate::core::identity::IdentityRegistry;
 use crate::core::{EntityCreator, EntityFetcher, service::LinkService};
 use crate::events::log::EventLog;
 use crate::events::sinks::SinkRegistry;
@@ -83,6 +85,11 @@ pub struct ServerHost {
     /// Provides list, mark_as_read, unread_count operations for notifications.
     /// Used by REST/GraphQL/gRPC notification endpoints.
     pub notification_store: Option<Arc<NotificationStore>>,
+    /// État d'interface exposé (`/ui/state/{portee}`) — voir `crate::ui`.
+    ///
+    /// Absent = aucune route d'interface : mieux vaut pas de surface du tout
+    /// qu'une surface qui devrait inventer un état qu'elle ne détient pas.
+    pub ui_state: Option<Arc<crate::ui::state::UiStateStore>>,
 
     /// Optional device token store for push notifications
     ///
@@ -95,6 +102,107 @@ pub struct ServerHost {
     /// Stores per-user notification preferences (mute, disable types).
     /// Used by sinks to filter notifications and by preference endpoints.
     pub preferences_store: Option<Arc<NotificationPreferencesStore>>,
+
+    /// Optional obrain graph handle — the relief source.
+    ///
+    /// When present, `RestExposure` auto-wires the self-describing `/graph`
+    /// surface (`crate::graph::routes`), which publishes what the engine can
+    /// actually do: procedures introspected from obrain's registry, the
+    /// declared dispatch families, the simplicial layer state, and the known
+    /// limits. Absent = no `/graph` routes at all (no half-truths).
+    #[cfg(feature = "obrain")]
+    pub graph_store: Option<Arc<crate::storage::ObrainStore>>,
+
+    /// How identities are resolved for the entities this host serves.
+    ///
+    /// Engine-agnostic by construction (see `crate::core::identity`): the default
+    /// registry resolves only the `_uuid`/`_data` convention this-rs writes, so
+    /// existing deployments behave exactly as before. Attach
+    /// `IdentityRegistry::obrain_default()` to also resolve entities from stores
+    /// written by another tool (flat properties, no `_uuid`) — which is what
+    /// makes it *the same entity whatever the engine*.
+    pub identity: Arc<IdentityRegistry>,
+
+    /// L'application des politiques se fait-elle en **observation** ?
+    ///
+    /// `true` = chaque refus est calculé, journalisé et **publié dans la réponse**
+    /// (en-tête `x-this-rs-authz`), mais la requête passe. C'est le mode
+    /// d'adoption d'un projet existant : on voit ce qui serait refusé sur le
+    /// trafic réel avant d'armer. Voir `ServerBuilder::authorization_report_only`.
+    pub authorize_report_only: bool,
+
+    /// Le mappage d'identité fourni par l'application, s'il y en a un.
+    ///
+    /// Quand il est présent, il remplace le mappage de this-rs pour toutes les
+    /// politiques `perm:` — c'est ce qui rend l'IAM **natif** pour un modèle
+    /// d'authentification plus ancien.
+    pub principal_mapping: Option<Arc<crate::server::middleware::authorization::PrincipalMapping>>,
+
+    /// **Le repli multi-sites**, quand l'application en déclare un.
+    ///
+    /// Monté par `RestExposure::build_router` **avant** les couches : c'est ce
+    /// qui le rend couvert par le CORS, la garde de domaine,
+    /// l'authentification et les politiques. Un repli posé après elles les
+    /// contourne (c'est le piège mesuré dans `tests/frontend_surface.rs`).
+    #[cfg(feature = "frontend")]
+    pub frontend_sites: Option<Arc<crate::server::frontend::FrontendSites>>,
+
+    /// **Exposition** : CORS, domaines servis, délégation de proxy.
+    ///
+    /// Voir [`crate::config::ServerSecurityConfig`] et `config/server.yaml`.
+    /// `ServerHost::caddyfile()` en rend le `Caddyfile` délégué.
+    pub security: Arc<crate::config::ServerSecurityConfig>,
+
+    /// Les politiques déclarées (`auth:`) sont-elles **appliquées** ?
+    ///
+    /// **`true` par défaut** : un framework qui laisse passer par défaut n'est
+    /// pas sûr par défaut. Se désarme sciemment
+    /// (`ServerBuilder::without_authorization`) — et l'appel est journalisé.
+    /// Voir `server::middleware::authorization`.
+    pub authorize: bool,
+
+    /// Optional auth provider for JWT/token verification
+    ///
+    /// When present, the auth middleware is auto-wired on all routes.
+    /// The provider extracts AuthContext from incoming requests.
+    pub auth_provider: Option<Arc<dyn AuthProvider>>,
+
+    /// Registry of custom auth resolvers
+    ///
+    /// Named resolvers referenced from YAML config as `resolver:name`.
+    /// Registered via `ServerBuilder::with_auth_resolver()`.
+    pub resolver_registry: Arc<AuthResolverRegistry>,
+
+    /// Optional STS (Security Token Service) state for embedded token issuance
+    ///
+    /// When present, auth endpoints (POST /auth/token, GET /auth/keys,
+    /// POST /auth/refresh, POST /auth/revoke) are auto-wired.
+    /// Only available in `embedded` or `bootstrap` WAMI modes.
+    #[cfg(feature = "wami")]
+    pub sts_state: Option<Arc<crate::server::exposure::rest::auth_routes::StsState>>,
+}
+
+/// Ce que l'application applique à l'entrée HTTP — sans divulguer ses listes.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ExposureSummary {
+    /// Une politique CORS est-elle posée ?
+    pub cors_enabled: bool,
+    /// Combien d'origines sont autorisées.
+    pub cors_origins: usize,
+    /// Les identifiants (cookies, `Authorization`) sont-ils autorisés en CORS ?
+    pub cors_credentials: bool,
+    /// Une garde de domaine est-elle active (les autres hôtes sont refusés) ?
+    pub domains_guarded: bool,
+    /// Combien d'hôtes sont servis.
+    pub hosts_allowed: usize,
+    /// Combien de domaines désignent un locataire.
+    pub tenants_mapped: usize,
+    /// Les sous-domaines désignent-ils le locataire ?
+    pub subdomain_tenants: bool,
+    /// `X-Forwarded-Host` est-il cru (délégation à un proxy) ?
+    pub forwarded_host_trusted: bool,
+    /// Une délégation `Caddyfile` est-elle configurée ?
+    pub caddy_delegated: bool,
 }
 
 impl ServerHost {
@@ -135,8 +243,22 @@ impl ServerHost {
             event_log: None,
             sink_registry: None,
             notification_store: None,
+            ui_state: None,
             device_token_store: None,
             preferences_store: None,
+            #[cfg(feature = "obrain")]
+            graph_store: None,
+            identity: Arc::new(IdentityRegistry::new()),
+            #[cfg(feature = "frontend")]
+            frontend_sites: None,
+            security: Arc::new(crate::config::ServerSecurityConfig::default()),
+            authorize: true,
+            authorize_report_only: false,
+            principal_mapping: None,
+            auth_provider: None,
+            resolver_registry: Arc::new(AuthResolverRegistry::new()),
+            #[cfg(feature = "wami")]
+            sts_state: None,
         })
     }
 
@@ -184,6 +306,12 @@ impl ServerHost {
     }
 
     /// Set the notification store
+    /// Attache le store d'état d'interface (routes `/ui/state/{portee}`).
+    pub fn with_ui_state(mut self, store: Arc<crate::ui::state::UiStateStore>) -> Self {
+        self.ui_state = Some(store);
+        self
+    }
+
     pub fn with_notification_store(mut self, store: Arc<NotificationStore>) -> Self {
         self.notification_store = Some(store);
         self
@@ -214,6 +342,82 @@ impl ServerHost {
     /// Get a reference to the notification preferences store (if configured)
     pub fn preferences_store(&self) -> Option<&Arc<NotificationPreferencesStore>> {
         self.preferences_store.as_ref()
+    }
+
+    /// Attach an obrain graph handle — enables the self-describing `/graph` surface.
+    ///
+    /// ```rust,ignore
+    /// let store = ObrainStore::open("./data/app.obrain")?;
+    /// let host = ServerBuilder::new()
+    ///     .with_link_service(ObrainLinkService::new(store.clone()))
+    ///     .with_graph_store(store)
+    ///     .build_host()?;
+    /// // GET /graph now publishes the relief.
+    /// ```
+    #[cfg(feature = "obrain")]
+    pub fn with_graph_store(mut self, store: Arc<crate::storage::ObrainStore>) -> Self {
+        self.graph_store = Some(store);
+        self
+    }
+
+    /// Get a reference to the obrain graph handle (if attached)
+    #[cfg(feature = "obrain")]
+    pub fn graph_store(&self) -> Option<&Arc<crate::storage::ObrainStore>> {
+        self.graph_store.as_ref()
+    }
+
+    /// Attach an identity registry — how entities are named across engines.
+    ///
+    /// ```rust,ignore
+    /// let host = ServerBuilder::new()
+    ///     .with_link_service(links)
+    ///     .with_graph_store(store)
+    ///     .with_identity_registry(IdentityRegistry::obrain_default())
+    ///     .build_host()?;
+    /// ```
+    pub fn with_identity_registry(mut self, registry: IdentityRegistry) -> Self {
+        self.identity = Arc::new(registry);
+        self
+    }
+
+    /// The identity registry in force.
+    pub fn identity_registry(&self) -> &Arc<IdentityRegistry> {
+        &self.identity
+    }
+
+    /// Set the auth provider
+    pub fn with_auth_provider(mut self, provider: Arc<dyn AuthProvider>) -> Self {
+        self.auth_provider = Some(provider);
+        self
+    }
+
+    /// Get a reference to the auth provider (if configured)
+    pub fn auth_provider(&self) -> Option<&Arc<dyn AuthProvider>> {
+        self.auth_provider.as_ref()
+    }
+
+    /// Set the auth resolver registry
+    ///
+    /// The registry contains named resolvers that can be referenced from
+    /// YAML config as `resolver:name`.
+    pub fn with_resolver_registry(mut self, registry: AuthResolverRegistry) -> Self {
+        self.resolver_registry = Arc::new(registry);
+        self
+    }
+
+    /// Get a reference to the auth resolver registry
+    pub fn resolver_registry(&self) -> &Arc<AuthResolverRegistry> {
+        &self.resolver_registry
+    }
+
+    /// Set the STS state for embedded token issuance (WAMI embedded/bootstrap modes)
+    #[cfg(feature = "wami")]
+    pub fn with_sts_state(
+        mut self,
+        state: Arc<crate::server::exposure::rest::auth_routes::StsState>,
+    ) -> Self {
+        self.sts_state = Some(state);
+        self
     }
 
     /// Create a minimal `ServerHost` for unit tests.
@@ -274,6 +478,7 @@ impl ServerHost {
             validation_rules: None,
             events: None,
             sinks: None,
+            auth: None,
         };
         let config = Arc::new(config);
         let registry = Arc::new(LinkRouteRegistry::new(config.clone()));
@@ -291,7 +496,50 @@ impl ServerHost {
             notification_store: None,
             device_token_store: None,
             preferences_store: None,
+            #[cfg(feature = "obrain")]
+            graph_store: None,
+            identity: Arc::new(IdentityRegistry::new()),
+            #[cfg(feature = "frontend")]
+            frontend_sites: None,
+            security: Arc::new(crate::config::ServerSecurityConfig::default()),
+            authorize: true,
+            authorize_report_only: false,
+            principal_mapping: None,
+            auth_provider: None,
+            resolver_registry: Arc::new(AuthResolverRegistry::new()),
+            #[cfg(feature = "wami")]
+            sts_state: None,
+            ui_state: None,
         }
+    }
+    /// **Résumé de l'exposition** — ce que l'application applique à l'entrée.
+    ///
+    /// Des **comptes et des faits**, jamais les valeurs : la liste des origines
+    /// CORS et celle des domaines servis appartiennent à l'application, et les
+    /// publier dirait à un inconnu quels hôtes viser. Un opérateur qui veut les
+    /// valeurs lit sa configuration ; un consommateur qui veut savoir *si* une
+    /// garde est active lit ceci.
+    pub fn exposure(&self) -> ExposureSummary {
+        let domains = &self.security.domains;
+        ExposureSummary {
+            cors_enabled: self.security.cors.enabled,
+            cors_origins: self.security.cors.origins.len(),
+            cors_credentials: self.security.cors.credentials,
+            domains_guarded: domains.guards(),
+            hosts_allowed: domains.allowed.len(),
+            tenants_mapped: domains.tenants.len(),
+            subdomain_tenants: domains.subdomain_base.is_some(),
+            forwarded_host_trusted: domains.trust_forwarded_host,
+            caddy_delegated: self.security.proxy.caddy.enabled,
+        }
+    }
+
+    /// Le `Caddyfile` **délégué** par la configuration, s'il est demandé.
+    ///
+    /// this-rs ne pilote pas Caddy : il décrit ce qu'il applique (domaines,
+    /// upstream, en-têtes) et l'exploitant relit puis applique.
+    pub fn caddyfile(&self) -> Option<String> {
+        self.security.caddyfile()
     }
 }
 
@@ -353,6 +601,7 @@ mod tests {
             validation_rules: None,
             events: None,
             sinks: None,
+            auth: None,
         }
     }
 

@@ -1,0 +1,78 @@
+flowchart LR
+%% name: exposition-graphql
+%% PROUVE (lu dans le code, jamais suppose) : la surface GraphQL se monte a la main depuis le host, jamais par le builder ; le SDL est genere en echantillonnant une entite reelle ; la requete est executee par un executor maison bati sur graphql-parser, pas sur async-graphql ; elle descend jusqu au store par EntityFetcher, EntityCreator et LinkService ; variables, autorisation par operation et types d enum ne sont pas traites.
+%% SOURCES LUES : exposure/graphql/mod.rs (build_router l.73-83, build_router_unenforced l.97-117, routes l.104-112, handler l.122-137, schema SDL l.148-161), exposure/mod.rs (refuse_unenforced_surface l.53-68), schema_generator.rs (generate_sdl l.48-85, generate_entity_type l.88-129, generate_query_root l.132-161, generate_mutation_root l.164-226, json_type_to_graphql l.305-318, get_relations_for l.341-364), executor/core.rs (new l.23-28, execute_document l.51-83, subscriptions refusees l.81), executor/query_executor.rs (resolve_query_field l.14-106), executor/field_resolver.rs (resolve_entity_fields_impl l.41-84, resolve_relation_field_inner l.97-176), executor/mutation_executor.rs (resolve_mutation_field l.20-92), executor/utils.rs (get_string_arg l.8-20, Variable vers Null l.64), subscription_handler.rs (graphql_ws_handler l.54-61, detect_subscription_type l.450-487, run_subscription l.240-287), server/builder.rs (fetchers et creators des modules l.620-642), tests/policy_surfaces.rs (refus l.331-355, montage sans politiques l.363-380), Cargo.toml (feature graphql l.157).
+%% NON ETABLI : je n ai ni compile ni lance le serveur ; je n ai pas vu /graphql/schema rendu sur une base peuplee ; je n ai pas mesure ce qu un type sans champ casse chez un client ; je n ai pas lu AuthContext ni les sinks de notifications au dela du handler.
+%% LEGENDE : ✅ existe et tourne · 🟠 ecrit/teste mais partiel ou non deploye · 🔴 refuse, avec sa raison · ⚪ amont, reutilise tel quel
+
+subgraph MONT["✅ surface : montage explicite, jamais automatique"]
+  direction TB
+  M1["build_router refuse tant que les<br/>politiques auth: sont ARMEES : aucune<br/>operation n est resolue par route<br/>mod.rs l.73-83"]
+  M2["build_router_unenforced : opt-in<br/>explicite, avertissement journalise<br/>a chaque montage · l.97-101"]
+  M3["POST /graphql et GET /graphql/schema<br/>GET /graphql/playground, qui vient seul<br/>d async_graphql · l.104-107"]
+  M4["GET /graphql/ws monte si EventBus ou<br/>NotificationStore existe · l.110-112"]
+end
+
+subgraph GEN["🟠 schema : genere par echantillonnage"]
+  direction TB
+  G1["generate_sdl parcourt les entites du<br/>registre, pas la config : le registre<br/>fait foi · l.48-57"]
+  G2["get_sample_entity, sinon list_as_json<br/>avec limit 1 : base vide donne un<br/>type sans aucun champ · l.93-105"]
+  G3["Types deduits du JSON : objet vers JSON,<br/>tableau vers liste de String, null vers<br/>String ; aucun enum ni scalaire metier<br/>l.305-318"]
+  G4["Query et Mutation ecrits en format a la<br/>main ; leur SDL n est jamais relu pour<br/>executer · l.132-226, core.rs l.16-18"]
+end
+
+subgraph EXEC["✅ executor maison : graphql-parser"]
+  direction TB
+  E1["Un GraphQLExecutor par requete : le SDL<br/>entier est donc regenere a chaque POST<br/>mod.rs l.127"]
+  E2["parse_query puis execute_document :<br/>premiere operation seulement ; une<br/>subscription par HTTP est refusee<br/>core.rs l.37, l.69-82"]
+  E3["Variables recues puis jamais lues :<br/>seuls les litteraux comptent, une<br/>variable vaut Null · core.rs l.86-122"]
+  E4["Pluriel vers list_as_json, singulier<br/>vers fetch_as_json apres Uuid::parse_str<br/>query_executor.rs l.21-69"]
+  E5["Champ direct, puis camelCase vers<br/>snake_case, puis relation, sinon null<br/>sans erreur · l.53-81"]
+  E6["create, update, delete vers EntityCreator,<br/>createLink et linkTo vers LinkService,<br/>puis publication evenement · l.20-92"]
+end
+
+subgraph STORE["⚪ store amont : atteint par traits"]
+  direction TB
+  S1["entity_fetchers et entity_creators :<br/>remplis par Module::get_entity_fetcher et<br/>get_entity_creator · builder.rs l.620-642"]
+  S2["link_service : memes find_by_source et<br/>find_by_target que REST ; une lecture<br/>ne publie aucun evenement"]
+end
+
+subgraph SUB["🔴 souscriptions : canal a part, non controle"]
+  direction TB
+  U1["graphql-transport-ws en brut, sans<br/>async-graphql : onEvent filtre kind,<br/>entityType, eventType, entityId ;<br/>onNotification filtre userId · l.450-487"]
+  U2["Aucune politique auth: n est consultee<br/>sur ce canal : le refus fail-closed du<br/>montage HTTP ne le couvre pas<br/>l.240-287"]
+end
+
+subgraph MORT["🔴 non branche : ecrit, garde, jamais atteint"]
+  direction TB
+  X1["schema.rs et dynamic_schema.rs : types<br/>async-graphql, modules prives sans<br/>reference croisee, seuls leurs propres<br/>tests les touchent"]
+  X2["macros.rs : graphql_entity! et<br/>register_graphql_entities! ne sont pas<br/>declares dans mod.rs, donc jamais<br/>compiles ni invoques"]
+end
+
+M1 -->|refus explique, opt-in nomme| M2
+M1 --> M3
+M2 --> M3
+M3 --> M4
+M3 --> E1
+M4 --> U1
+E1 --> G1
+G1 --> G2
+G1 --> G3
+G2 --> E2
+E1 --> E2
+E2 --> E3
+E3 --> E4
+E4 --> E5
+E2 --> E6
+E4 --> S1
+E6 --> S1
+E5 --> S2
+E6 --> S2
+E1 -->|remplace| X1
+G2 -->|base vide, type vide| X1
+U1 --> U2
+
+classDef danger fill:#ffe0e0,stroke:#c0392b,stroke-width:2px,color:#000
+classDef note fill:#eef4ff,stroke:#3b6ea5,stroke-width:1px,color:#000
+class X1,X2,U2 danger
+class E3,G2,G4 note

@@ -194,6 +194,7 @@ pub struct DynamicMutationRoot {
 }
 
 #[cfg(feature = "graphql")]
+#[allow(dead_code)] // même raison que le struct : ce chemin async-graphql n'est monté par personne
 #[Object]
 impl DynamicMutationRoot {
     /// Create a new entity of the specified type
@@ -447,6 +448,7 @@ mod tests {
             validation_rules: None,
             events: None,
             sinks: None,
+            auth: None,
         };
 
         let mut registry = EntityRegistry::new();

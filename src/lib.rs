@@ -53,17 +53,30 @@
 
 pub mod config;
 pub mod core;
+/// Hôte de déploiement piloté par configuration : une structure qu'on déploie,
+/// sur laquelle on rattache des projets qui existent déjà.
+pub mod deploy;
+pub mod dns;
 pub mod entities;
 pub mod events;
+/// Relief d'obrain publié par this-rs (introspection + publication REST).
+///
+/// Gated behind `obrain` : sans le moteur, il n'y a pas de relief à décrire.
+#[cfg(feature = "obrain")]
+pub mod graph;
 pub mod links;
 pub mod server;
 pub mod storage;
+pub mod ui;
 
 /// Re-exports of commonly used types and traits
 pub mod prelude {
     // === Core Traits ===
     pub use crate::core::{
-        auth::{AuthContext, AuthPolicy, AuthProvider, NoAuthProvider},
+        auth::{
+            AuthContext, AuthPolicy, AuthProvider, AuthResolver, AuthResolverRegistry, FnResolver,
+            NoAuthProvider,
+        },
         entity::{Data, Entity, Link},
         field::{FieldFormat, FieldValue},
         link::{LinkAuthConfig, LinkDefinition, LinkEntity},
