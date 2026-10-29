@@ -42,6 +42,16 @@ pub struct ServerSecurityConfig {
     #[serde(default)]
     pub proxy: ProxyConfig,
 
+    /// **Origines autorisées à ouvrir une WebSocket / graphql-ws avec le cookie de
+    /// session** (`this_token`). Le cookie est un identifiant AMBIANT : le navigateur
+    /// l'attache à une poignée de main déclenchée par n'importe quel site (détournement
+    /// de WebSocket inter-sites). Quand l'identité vient du cookie, l'en-tête `Origin`
+    /// doit être dans cette liste ; **vide par défaut = refus** (de même si `Origin`
+    /// est absent). Un jeton explicite (en-tête `Authorization`, `Sec-WebSocket-Protocol`,
+    /// requête `access_token`) n'est pas concerné. `*` désactive explicitement le contrôle.
+    #[serde(default)]
+    pub websocket_origins: Vec<String>,
+
     /// **Politique des lectures de graphe** : relief, vue multi-échelle, identité.
     ///
     /// Ces routes ne sont pas des routes d'entité : sans ce réglage, **aucune

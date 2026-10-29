@@ -44,6 +44,19 @@ pub async fn resolve_identity(
     let Some(provider) = host.auth_provider.as_ref() else {
         return Ok(AuthContext::Anonymous);
     };
+    // Cookie identity is ambient: only from a listed `Origin` (cross-site WebSocket
+    // hijacking). Explicit tokens (header, subprotocol, query) are not affected.
+    if let Some((crate::core::auth::HandshakeSource::Cookie, _)) =
+        crate::core::auth::handshake_token(headers, query)
+        && !crate::core::auth::origin_allowed(headers, &host.security.websocket_origins)
+    {
+        tracing::warn!(
+            "WebSocket handshake: session cookie from an unlisted or absent Origin: refused"
+        );
+        return Err(ContractError::framework(codes::AUTH_FORBIDDEN)
+            .with_param("operation", "websocket")
+            .with_param("reason", "origin not allowed for cookie identity"));
+    }
     match provider
         .extract_context_from_handshake(headers, query)
         .await
@@ -212,7 +225,7 @@ impl SurfaceGuard {
             return Ok(());
         };
         let res = self.with_env(e, resource, |env| {
-            authorize_op(&e.index(), entity, &op, &self.ctx, None, env)
+            authorize_op(&e.index(), entity, &op, &self.ctx, None, resource, env)
         });
         self.outcome(e, res)
     }

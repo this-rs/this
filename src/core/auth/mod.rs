@@ -369,7 +369,15 @@ impl AuthPolicy {
 
             AuthPolicy::Authenticated => !matches!(context, AuthContext::Anonymous),
 
-            AuthPolicy::Owner => matches!(context, AuthContext::Owner { .. }),
+            AuthPolicy::Owner => match context {
+                // Owner of THAT resource only: when the caller knows the resource, an
+                // owner context of another resource does not count. Without a resource
+                // (legacy `check()`), the context variant decides, as before.
+                AuthContext::Owner {
+                    resource_id: owned, ..
+                } => resource_id.is_none_or(|r| r == owned),
+                _ => false,
+            },
 
             AuthPolicy::HasRole(required_roles) => match context {
                 AuthContext::User { roles, .. } => required_roles.iter().any(|r| roles.contains(r)),
@@ -575,16 +583,80 @@ pub trait AuthProvider: Send + Sync {
 /// Name of the session cookie that carries a token (same as the REST cookie layer).
 pub const TOKEN_COOKIE: &str = "this_token";
 
-/// Headers of a WebSocket handshake, with the token moved into `Authorization` when
-/// the header is absent: cookie `this_token` first, then query `access_token`.
-pub fn handshake_headers(headers: &HeaderMap, query: Option<&str>) -> HeaderMap {
-    let mut out = headers.clone();
-    let has_bearer = headers
+/// Where the token of a WebSocket handshake comes from. A token that comes from a
+/// COOKIE is an ambient credential (the browser attaches it to any cross-site
+/// request): it needs an `Origin` check ([`origin_allowed`]); the others are explicit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HandshakeSource {
+    Header,
+    Subprotocol,
+    Cookie,
+    Query,
+}
+
+/// Percent-decoding (`%2B` → `+`); an invalid escape or invalid UTF-8 keeps the raw text
+/// (the token is then verified as it is, and fails if it is not one).
+fn percent_decode(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%'
+            && i + 2 < b.len()
+            && let (Some(h), Some(l)) = (
+                (b[i + 1] as char).to_digit(16),
+                (b[i + 2] as char).to_digit(16),
+            )
+        {
+            out.push((h * 16 + l) as u8);
+            i += 3;
+        } else {
+            out.push(b[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8(out).unwrap_or_else(|_| s.to_string())
+}
+
+/// Token offered through `Sec-WebSocket-Protocol` (the only header a browser can set
+/// on a WebSocket): `access_token, <token>` / `bearer, <token>` (the marker is the
+/// protocol the server echoes, as browsers require).
+fn subprotocol_token(headers: &HeaderMap) -> Option<String> {
+    let offered: Vec<&str> = headers
+        .get_all("sec-websocket-protocol")
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .flat_map(|v| v.split(','))
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+        .collect();
+    for (i, p) in offered.iter().enumerate() {
+        let lower = p.to_ascii_lowercase();
+        if (lower == "access_token" || lower == "bearer")
+            && let Some(t) = offered.get(i + 1)
+        {
+            return Some(t.to_string());
+        }
+    }
+    None
+}
+
+/// The token of a handshake and where it comes from. Precedence: `Authorization`
+/// header, `Sec-WebSocket-Protocol`, cookie `this_token`, query `access_token`
+/// (percent-decoded).
+pub fn handshake_token(
+    headers: &HeaderMap,
+    query: Option<&str>,
+) -> Option<(HandshakeSource, String)> {
+    if let Some(v) = headers
         .get(axum::http::header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
-        .is_some_and(|v| v.starts_with("Bearer ") && !v[7..].trim().is_empty());
-    if has_bearer {
-        return out;
+        .filter(|v| v.starts_with("Bearer ") && !v[7..].trim().is_empty())
+    {
+        return Some((HandshakeSource::Header, v[7..].trim().to_string()));
+    }
+    if let Some(t) = subprotocol_token(headers) {
+        return Some((HandshakeSource::Subprotocol, t));
     }
     let from_cookie = headers
         .get_all(axum::http::header::COOKIE)
@@ -595,13 +667,40 @@ pub fn handshake_headers(headers: &HeaderMap, query: Option<&str>) -> HeaderMap 
             let (n, v) = c.split_once('=')?;
             (n.trim() == TOKEN_COOKIE && !v.trim().is_empty()).then(|| v.trim().to_string())
         });
-    let from_query = || {
-        query?.split('&').find_map(|kv| {
-            let (k, v) = kv.split_once('=')?;
-            (k == "access_token" && !v.is_empty()).then(|| v.to_string())
-        })
+    if let Some(t) = from_cookie {
+        return Some((HandshakeSource::Cookie, t));
+    }
+    query?.split('&').find_map(|kv| {
+        let (k, v) = kv.split_once('=')?;
+        (k == "access_token" && !v.is_empty()).then(|| (HandshakeSource::Query, percent_decode(v)))
+    })
+}
+
+/// Is the `Origin` of a handshake allowed to use the AMBIENT (cookie) identity?
+/// `allowed` is the host's list (`security.websocket_origins`); fail-closed: empty
+/// list, absent `Origin` or unlisted `Origin` all refuse. `*` is an explicit opt-out.
+pub fn origin_allowed(headers: &HeaderMap, allowed: &[String]) -> bool {
+    let Some(origin) = headers
+        .get(axum::http::header::ORIGIN)
+        .and_then(|v| v.to_str().ok())
+        .map(|o| o.trim().trim_end_matches('/'))
+        .filter(|o| !o.is_empty())
+    else {
+        return false;
     };
-    if let Some(token) = from_cookie.or_else(from_query)
+    allowed.iter().any(|a| {
+        let a = a.trim().trim_end_matches('/');
+        a == "*" || a.eq_ignore_ascii_case(origin)
+    })
+}
+
+/// Headers of a WebSocket handshake, with the token moved into `Authorization` when
+/// the header is absent (see [`handshake_token`] for the sources and their order).
+/// The token is never logged.
+pub fn handshake_headers(headers: &HeaderMap, query: Option<&str>) -> HeaderMap {
+    let mut out = headers.clone();
+    if let Some((source, token)) = handshake_token(headers, query)
+        && source != HandshakeSource::Header
         && let Ok(v) = axum::http::HeaderValue::from_str(&format!("Bearer {token}"))
     {
         out.insert(axum::http::header::AUTHORIZATION, v);

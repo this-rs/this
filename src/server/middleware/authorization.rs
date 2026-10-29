@@ -360,6 +360,7 @@ impl Authorization {
         &self,
         resolved: &[crate::core::auth::surface::ResolvedPolicy],
         context: &AuthContext,
+        resource: Option<&uuid::Uuid>,
         used_iam: &mut bool,
     ) -> Result<(), String> {
         use crate::core::auth::descriptor_policy::{PermissionFn, RegistryEnv};
@@ -381,7 +382,7 @@ impl Authorization {
         let env = RegistryEnv::new(Some(&self.resolvers), context).with_permission(perm_ref);
         let mut outcome = Ok(());
         for r in resolved {
-            if let Err(e) = crate::core::auth::surface::decide(r, context, None, &env) {
+            if let Err(e) = crate::core::auth::surface::decide(r, context, None, resource, &env) {
                 outcome = Err(e
                     .params
                     .get("reason")
@@ -954,6 +955,28 @@ impl Authorization {
         }
     }
 
+    /// An `Owner` context asked about a resource other than its own is, for this request,
+    /// an authenticated user who owns nothing (so `owner` cannot be satisfied, while
+    /// `authenticated` still is). Unknown resource: the context stands (legacy rule).
+    fn owner_scoped(context: &AuthContext, resource: Option<&uuid::Uuid>) -> AuthContext {
+        match (context, resource) {
+            (
+                AuthContext::Owner {
+                    user_id,
+                    tenant_id,
+                    resource_id,
+                    ..
+                },
+                Some(r),
+            ) if resource_id != r => AuthContext::User {
+                user_id: *user_id,
+                tenant_id: *tenant_id,
+                roles: vec![],
+            },
+            _ => context.clone(),
+        }
+    }
+
     /// **La décision.** Fail-closed : illisible ⇒ refus.
     pub fn decide(&self, method: &Method, path: &str, context: &AuthContext) -> Decision {
         let (entity_type, operation, policy, origin) = match self.requirement(method, path) {
@@ -968,6 +991,14 @@ impl Authorization {
 
         let scope = format!("{entity_type} · {operation}");
 
+        // The resource the request is about (`/{plural}/{id}/...`): an `Owner` context
+        // owns ONE resource and is a mere authenticated user for every other.
+        let resource = Self::segments(path)
+            .get(1)
+            .and_then(|s| uuid::Uuid::parse_str(s).ok());
+        let downgraded = Self::owner_scoped(context, resource.as_ref());
+        let context = &downgraded;
+
         // Politique du descripteur : l'évaluateur unique (`engine::policy`), pas
         // la grammaire plate. Re-résolue ici sur le même instantané logique ; si
         // le catalogue a changé entre-temps au point de ne plus la porter, refus.
@@ -975,7 +1006,9 @@ impl Authorization {
             let segments = Self::segments(path);
             let mut used_iam = false;
             let verdict = match self.descriptor_policies(&segments, &entity_type, &operation) {
-                Some(resolved) => self.evaluate_descriptor(&resolved, context, &mut used_iam),
+                Some(resolved) => {
+                    self.evaluate_descriptor(&resolved, context, resource.as_ref(), &mut used_iam)
+                }
                 None => Err("catalogue republié pendant la décision — refus".to_string()),
             };
             let origin = if used_iam { PolicyOrigin::Iam } else { origin };
@@ -1729,6 +1762,35 @@ mod tests {
             resource_type: "order".into(),
         };
         assert!(a.decide(&Method::PUT, "/orders/1", &owner).is_allow());
+    }
+
+    /// YAML (legacy string) path: an `Owner` context owns ITS resource only.
+    #[test]
+    fn owner_policy_compares_resource_id_on_yaml_tables() {
+        let auth = EntityAuthConfig {
+            update: "owner".to_string(),
+            ..Default::default()
+        };
+        let a = authz(
+            vec![entity("order", "orders", auth)],
+            &[("order", "orders")],
+        );
+        let (mine, other) = (uuid::Uuid::new_v4(), uuid::Uuid::new_v4());
+        let owner = AuthContext::Owner {
+            user_id: uuid::Uuid::new_v4(),
+            tenant_id: uuid::Uuid::new_v4(),
+            resource_id: mine,
+            resource_type: "order".into(),
+        };
+        assert!(
+            a.decide(&Method::PUT, &format!("/orders/{mine}"), &owner)
+                .is_allow()
+        );
+        assert!(
+            !a.decide(&Method::PUT, &format!("/orders/{other}"), &owner)
+                .is_allow(),
+            "owner of one order is not the owner of another"
+        );
     }
 
     // ── Middleware, de bout en bout ──────────────────────────────────────

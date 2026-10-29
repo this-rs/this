@@ -45,6 +45,12 @@ impl AuthProvider for HeaderAuth {
     async fn extract_context(&self, headers: &HeaderMap) -> anyhow::Result<AuthContext> {
         Ok(
             match headers.get("x-test-auth").and_then(|v| v.to_str().ok()) {
+                Some(o) if o.starts_with("owner:") => AuthContext::Owner {
+                    user_id: uuid::Uuid::from_u128(1),
+                    tenant_id: uuid::Uuid::from_u128(1),
+                    resource_id: uuid::Uuid::parse_str(&o[6..])?,
+                    resource_type: "invoice".into(),
+                },
                 Some("admin") => AuthContext::Admin {
                     admin_id: uuid::Uuid::from_u128(9),
                 },
@@ -1287,4 +1293,109 @@ async fn hot_load_enabled_allows_load_unload() {
     assert_eq!(st.state, ModuleState::Unloaded);
     let (s, _) = h.call(Method::GET, "/invoices", None, None).await;
     assert_eq!(s, StatusCode::NOT_FOUND);
+}
+
+/// Compiled module whose link policy lives only in its YAML `auth:` (`admin_only`).
+struct Guarded;
+impl Module for Guarded {
+    fn name(&self) -> &str {
+        "guarded"
+    }
+    fn entity_types(&self) -> Vec<&str> {
+        vec!["secret"]
+    }
+    fn links_config(&self) -> anyhow::Result<LinksConfig> {
+        Ok(LinksConfig {
+            entities: vec![EntityConfig {
+                singular: "secret".into(),
+                plural: "secrets".into(),
+                auth: EntityAuthConfig::default(),
+            }],
+            links: vec![this::core::link::LinkDefinition {
+                link_type: "guards".into(),
+                source_type: "secret".into(),
+                target_type: "secret".into(),
+                forward_route_name: "secrets-guards".into(),
+                reverse_route_name: "secrets-guarded".into(),
+                description: None,
+                required_fields: None,
+                auth: Some(this::core::link::LinkAuthConfig {
+                    list: "admin_only".into(),
+                    get: "admin_only".into(),
+                    create: "admin_only".into(),
+                    update: "admin_only".into(),
+                    delete: "admin_only".into(),
+                }),
+            }],
+            validation_rules: None,
+            events: None,
+            sinks: None,
+            auth: None,
+        })
+    }
+    fn register_entities(&self, registry: &mut EntityRegistry) {
+        registry.register(Box::new(Secrets));
+    }
+}
+
+/// Review (HIGH): the YAML `auth:` of a LINK of a hot-loaded compiled module is applied
+/// by the dispatch (it used to be overwritten by the descriptor's default).
+#[tokio::test]
+async fn hot_loaded_compiled_module_keeps_its_yaml_link_policies() {
+    let h = harness(true);
+    h.runtime()
+        .load(ModuleSource::Compiled(Arc::new(Guarded)))
+        .await
+        .expect("load");
+    let id = uuid::Uuid::from_u128(77);
+    let (s, v) = h
+        .call(
+            Method::GET,
+            &format!("/secrets/{id}/secrets-guards"),
+            Some("user"),
+            None,
+        )
+        .await;
+    assert_eq!(
+        (s, code(&v)),
+        (StatusCode::FORBIDDEN, "this.auth.forbidden"),
+        "YAML link `list: admin_only` must hold for a plain user: {v}"
+    );
+    let (s, v) = h
+        .call(
+            Method::GET,
+            &format!("/secrets/{id}/secrets-guards"),
+            Some("admin"),
+            None,
+        )
+        .await;
+    assert_ne!(s, StatusCode::FORBIDDEN, "admin passes the gate: {v}");
+}
+
+/// `owner` on a hot-loaded module: an `Owner` context passes for ITS resource only.
+#[tokio::test]
+async fn owner_policy_compares_resource_id() {
+    let h = harness(true);
+    h.runtime()
+        .load(manifest(&billing("1.0.0", PolicyExpr::Owner)))
+        .await
+        .unwrap();
+    let (mine, other) = (uuid::Uuid::from_u128(500), uuid::Uuid::from_u128(501));
+    let who = format!("owner:{mine}");
+    let (s, v) = h
+        .call(Method::GET, &format!("/invoices/{other}"), Some(&who), None)
+        .await;
+    assert_eq!(
+        (s, code(&v)),
+        (StatusCode::FORBIDDEN, "this.auth.forbidden"),
+        "owner of another resource: {v}"
+    );
+    let (s, v) = h
+        .call(Method::GET, &format!("/invoices/{mine}"), Some(&who), None)
+        .await;
+    assert_ne!(
+        s,
+        StatusCode::FORBIDDEN,
+        "owner of THIS resource passes the gate: {v}"
+    );
 }

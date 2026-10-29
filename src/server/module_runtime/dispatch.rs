@@ -17,8 +17,7 @@
 //! by abstention) and INSIDE authentication, CORS and the domain guard, which therefore
 //! still apply. Runtime-module requests are judged here, by the descriptor's own
 //! policies (`EntityDesc.permissions`, `LinkDesc.permissions`) through the single
-//! evaluator `this_descriptor::engine::policy::evaluate`, fail-closed (`owner` is
-//! unevaluable at the edge → refused; unknown resolver → refused). With authorization
+//! evaluator `this_descriptor::engine::policy::evaluate`, fail-closed (`owner` holds only for the `Owner` context of THAT resource; unknown resolver → refused). With authorization
 //! disarmed, nothing is judged (same as the rest of the host); in report-only mode the
 //! refusal is logged and the request passes.
 
@@ -378,7 +377,15 @@ pub(crate) fn check_policy(
         roles: &roles,
         admin,
         service,
-        owner: None,
+        // Same rule as the other surfaces: an `Owner` context owns its own resource only.
+        owner: operation.parse::<Operation>().ok().and_then(|op| {
+            crate::core::auth::surface::ownership(
+                &crate::core::auth::descriptor_policy::Principal::of(ctx),
+                &op,
+                None,
+                resource.as_ref(),
+            )
+        }),
     };
     let env = Env {
         ctx,
