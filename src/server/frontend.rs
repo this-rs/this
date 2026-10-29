@@ -939,9 +939,10 @@ mod tests {
 
     #[tokio::test]
     async fn cache_guarantee_html_always_revalidates() {
-        let fe = Frontend::embedded(loader_from(embedded_store(&[
-            ("index.html", "<html>v1</html>"),
-        ])));
+        let fe = Frontend::embedded(loader_from(embedded_store(&[(
+            "index.html",
+            "<html>v1</html>",
+        )])));
         let router = fe.router();
 
         let (s, _, hdrs) = body_text(get(router.clone(), "/").await).await;
@@ -1033,8 +1034,14 @@ mod tests {
         let (_, _, h1) = body_text(get(fe1.router(), "/app.js").await).await;
         let (_, _, h2) = body_text(get(fe2.router(), "/app.js").await).await;
 
-        let etag1 = h1.iter().find(|(k, _)| k == "etag").map(|(_, v)| v.as_str());
-        let etag2 = h2.iter().find(|(k, _)| k == "etag").map(|(_, v)| v.as_str());
+        let etag1 = h1
+            .iter()
+            .find(|(k, _)| k == "etag")
+            .map(|(_, v)| v.as_str());
+        let etag2 = h2
+            .iter()
+            .find(|(k, _)| k == "etag")
+            .map(|(_, v)| v.as_str());
 
         assert!(etag1.is_some(), "ETag must be present");
         assert!(etag2.is_some(), "ETag must be present");
@@ -1046,9 +1053,10 @@ mod tests {
 
     #[tokio::test]
     async fn security_headers_are_present() {
-        let fe = Frontend::embedded(loader_from(embedded_store(&[
-            ("index.html", "<html>secure</html>"),
-        ])));
+        let fe = Frontend::embedded(loader_from(embedded_store(&[(
+            "index.html",
+            "<html>secure</html>",
+        )])));
         let (_, _, hdrs) = body_text(get(fe.router(), "/").await).await;
 
         // vite-rs default security headers should be applied.
