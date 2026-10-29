@@ -15,6 +15,9 @@
 //! `AuthContext::Owner` (the context, not a row lookup), roles only exist on
 //! `AuthContext::User`, `admin_only` / `service_only` follow the variant.
 
+// `ContractError` is the cross-surface contract (same allowance as this-descriptor).
+#![allow(clippy::result_large_err)]
+
 use super::{AuthContext, AuthPolicy, AuthResolverRegistry};
 use crate::config::EntityAuthConfig;
 use crate::descriptor::engine::policy::PolicyEnv;
@@ -260,8 +263,14 @@ mod tests {
 
     fn registry() -> AuthResolverRegistry {
         let mut r = AuthResolverRegistry::new();
-        r.register("yes", Arc::new(FnResolver::new(|_: &AuthContext, _| true, "yes")));
-        r.register("no", Arc::new(FnResolver::new(|_: &AuthContext, _| false, "no")));
+        r.register(
+            "yes",
+            Arc::new(FnResolver::new(|_: &AuthContext, _| true, "yes")),
+        );
+        r.register(
+            "no",
+            Arc::new(FnResolver::new(|_: &AuthContext, _| false, "no")),
+        );
         r.register(
             "is_user",
             Arc::new(FnResolver::new(
@@ -316,7 +325,8 @@ mod tests {
                 assert_eq!(engine, converted, "`{s}` for {name}: engine vs AuthPolicy");
                 // The legacy flat grammar (no function form, no `|`, no deny) must agree too.
                 if !s.contains('(') && !s.contains('|') && *s != "deny" {
-                    let parsed = AuthPolicy::parse_policy(s).check_with_resolver(&ctx, Some(&reg), None);
+                    let parsed =
+                        AuthPolicy::parse_policy(s).check_with_resolver(&ctx, Some(&reg), None);
                     assert_eq!(engine, parsed, "`{s}` for {name}: engine vs parse_policy");
                 }
             }
@@ -327,8 +337,35 @@ mod tests {
         }
         // perm: is refused, never approximated.
         assert!(AuthPolicy::try_from(PolicyExpr::parse("perm:invoices.read").unwrap()).is_err());
-        assert!(
-            AuthPolicy::try_from(PolicyExpr::parse("any(public, perm:x)").unwrap()).is_err()
+        assert!(AuthPolicy::try_from(PolicyExpr::parse("any(public, perm:x)").unwrap()).is_err());
+    }
+
+    #[test]
+    fn ws_handshake_token_from_header_cookie_or_query() {
+        use crate::core::auth::handshake_headers;
+        use axum::http::{HeaderMap, HeaderValue};
+        let auth = |h: &HeaderMap| {
+            h.get("authorization")
+                .map(|v| v.to_str().unwrap().to_string())
+        };
+        let mut h = HeaderMap::new();
+        assert_eq!(
+            auth(&handshake_headers(&h, Some("access_token=q1"))),
+            Some("Bearer q1".into())
+        );
+        h.insert("cookie", HeaderValue::from_static("a=b; this_token=c1"));
+        assert_eq!(
+            auth(&handshake_headers(&h, Some("access_token=q1"))),
+            Some("Bearer c1".into())
+        );
+        h.insert("authorization", HeaderValue::from_static("Bearer h1"));
+        assert_eq!(
+            auth(&handshake_headers(&h, Some("access_token=q1"))),
+            Some("Bearer h1".into())
+        );
+        assert_eq!(
+            auth(&handshake_headers(&HeaderMap::new(), Some("x=1"))),
+            None
         );
     }
 

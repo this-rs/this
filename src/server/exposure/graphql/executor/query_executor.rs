@@ -8,11 +8,14 @@ use uuid::Uuid;
 
 use super::field_resolver;
 use super::utils;
+use crate::descriptor::Operation;
+use crate::server::exposure::guard::SurfaceGuard;
 use crate::server::host::ServerHost;
 
 /// Resolve a query field (e.g., "orders", "order", "invoice", etc.)
 pub async fn resolve_query_field(
     host: &Arc<ServerHost>,
+    guard: &SurfaceGuard,
     field: &Field<'_, String>,
 ) -> Result<Value> {
     let field_name = field.name.as_str();
@@ -23,6 +26,10 @@ pub async fn resolve_query_field(
         let limit = utils::get_int_arg(field, "limit");
         let offset = utils::get_int_arg(field, "offset");
 
+        guard
+            .check(entity_type, Operation::List, None)
+            .map_err(anyhow::Error::new)?;
+
         // Fetch entities
         if let Some(fetcher) = host.entity_fetchers.get(entity_type) {
             let entities = fetcher.list_as_json(limit, offset).await?;
@@ -30,6 +37,7 @@ pub async fn resolve_query_field(
             // Resolve sub-fields for each entity
             let resolved_entities = field_resolver::resolve_entity_list(
                 host,
+                guard,
                 entities,
                 &field.selection_set.items,
                 entity_type,
@@ -50,12 +58,16 @@ pub async fn resolve_query_field(
         let uuid = Uuid::parse_str(&id)?;
 
         // Fetch the entity
+        guard
+            .check(entity_type, Operation::Get, Some(&uuid))
+            .map_err(anyhow::Error::new)?;
         if let Some(fetcher) = host.entity_fetchers.get(entity_type) {
             let entity = fetcher.fetch_as_json(&uuid).await?;
 
             // Resolve sub-fields
             let resolved = field_resolver::resolve_entity_fields(
                 host,
+                guard,
                 entity,
                 &field.selection_set.items,
                 entity_type,
@@ -69,6 +81,15 @@ pub async fn resolve_query_field(
     }
 
     // ── Notification queries (when NotificationStore is configured) ──
+    // Notification queries take the user from an ARGUMENT: not covered by the
+    // policies, refused when they are enforced (fail-closed).
+    if host.notification_store().is_some()
+        && matches!(field_name, "notifications" | "unreadNotificationCount")
+    {
+        guard
+            .deny_uncovered(field_name)
+            .map_err(anyhow::Error::new)?;
+    }
     if let Some(store) = host.notification_store() {
         if field_name == "notifications" {
             let user_id = utils::get_string_arg(field, "userId")

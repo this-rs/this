@@ -9,8 +9,8 @@ use super::proto::{
     CreateLinkRequest, DeleteLinkRequest, DeleteLinkResponse, FindLinksRequest, GetLinkRequest,
     LinkListResponse, LinkResponse, link_service_server::LinkService as LinkServiceTrait,
 };
-use crate::core::link::LinkEntity;
 use crate::core::errors::to_status;
+use crate::core::link::LinkEntity;
 use crate::descriptor::Operation;
 use crate::server::exposure::guard::SurfaceGuard;
 use crate::server::host::ServerHost;
@@ -82,7 +82,10 @@ impl LinkServiceImpl {
         guard: &SurfaceGuard,
     ) -> Option<prost_types::Struct> {
         for (entity_type, fetcher) in self.host.entity_fetchers.iter() {
-            if guard.check(entity_type, Operation::Get, Some(entity_id)).is_err() {
+            if guard
+                .check(entity_type, Operation::Get, Some(entity_id))
+                .is_err()
+            {
                 continue;
             }
             if let Ok(json) = fetcher.fetch_as_json(entity_id).await {
@@ -111,7 +114,13 @@ impl LinkServiceTrait for LinkServiceImpl {
         let metadata = req.metadata.as_ref().map(struct_to_json);
 
         guard
-            .check_link(Some(&req.link_type), None, None, None, Operation::CreateLink)
+            .check_link(
+                Some(&req.link_type),
+                None,
+                None,
+                None,
+                Operation::CreateLink,
+            )
             .map_err(to_status)?;
 
         let link = LinkEntity::new(&req.link_type, source_id, target_id, metadata);

@@ -141,12 +141,19 @@ mod tests {
                 !is_allowed(&expr, &who, &Env),
                 "`{s}` must deny with an unknown resolver"
             );
-            assert!(!is_allowed(&expr, &who, &NoEnv), "`{s}` must deny without env");
+            assert!(
+                !is_allowed(&expr, &who, &NoEnv),
+                "`{s}` must deny without env"
+            );
         }
         // A known resolver still decides.
         assert!(is_allowed(&p("resolver:yes"), &admin_user, &Env));
         // Short-circuit: an evaluable `true` branch of an `any` still allows.
-        assert!(is_allowed(&p("any:resolver:unknown,admin_only"), &admin_user, &Env));
+        assert!(is_allowed(
+            &p("any:resolver:unknown,admin_only"),
+            &admin_user,
+            &Env
+        ));
     }
 
     /// Three-valued table, same verdicts as `Authorization::evaluate` on the shared vocabulary.

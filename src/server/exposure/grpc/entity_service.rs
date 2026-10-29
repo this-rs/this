@@ -91,7 +91,11 @@ impl EntityService for EntityServiceImpl {
         let guard = self.guard(&request).await?;
         let req = request.into_inner();
         guard
-            .check(&req.entity_type, Operation::Get, Uuid::parse_str(&req.entity_id).ok().as_ref())
+            .check(
+                &req.entity_type,
+                Operation::Get,
+                Uuid::parse_str(&req.entity_id).ok().as_ref(),
+            )
             .map_err(to_status)?;
 
         let entity_id = Uuid::parse_str(&req.entity_id)
@@ -191,7 +195,11 @@ impl EntityService for EntityServiceImpl {
         let guard = self.guard(&request).await?;
         let req = request.into_inner();
         guard
-            .check(&req.entity_type, Operation::Update, Uuid::parse_str(&req.entity_id).ok().as_ref())
+            .check(
+                &req.entity_type,
+                Operation::Update,
+                Uuid::parse_str(&req.entity_id).ok().as_ref(),
+            )
             .map_err(to_status)?;
 
         let entity_id = Uuid::parse_str(&req.entity_id)
@@ -233,7 +241,11 @@ impl EntityService for EntityServiceImpl {
         let guard = self.guard(&request).await?;
         let req = request.into_inner();
         guard
-            .check(&req.entity_type, Operation::Delete, Uuid::parse_str(&req.entity_id).ok().as_ref())
+            .check(
+                &req.entity_type,
+                Operation::Delete,
+                Uuid::parse_str(&req.entity_id).ok().as_ref(),
+            )
             .map_err(to_status)?;
 
         let entity_id = Uuid::parse_str(&req.entity_id)

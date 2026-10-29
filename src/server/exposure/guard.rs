@@ -15,6 +15,9 @@
 //!   (provider error → anonymous only if `auth.default_policy` is `public`, else
 //!   `this.auth.unauthenticated`).
 
+// `ContractError` is the cross-surface contract (same allowance as this-descriptor).
+#![allow(clippy::result_large_err)]
+
 use std::sync::Arc;
 
 use axum::http::HeaderMap;
@@ -40,7 +43,10 @@ pub async fn resolve_identity(
     let Some(provider) = host.auth_provider.as_ref() else {
         return Ok(AuthContext::Anonymous);
     };
-    match provider.extract_context_from_handshake(headers, query).await {
+    match provider
+        .extract_context_from_handshake(headers, query)
+        .await
+    {
         Ok(ctx) => Ok(ctx),
         Err(e) => identity_failure(host, &e),
     }
@@ -151,7 +157,12 @@ impl SurfaceGuard {
         }
     }
 
-    fn with_env<R>(&self, e: &Enforced, resource: Option<&Uuid>, f: impl FnOnce(&RegistryEnv<'_>) -> R) -> R {
+    fn with_env<R>(
+        &self,
+        e: &Enforced,
+        resource: Option<&Uuid>,
+        f: impl FnOnce(&RegistryEnv<'_>) -> R,
+    ) -> R {
         #[cfg(feature = "obrain")]
         {
             if let Some((iam, mapping)) = &e.iam {
@@ -178,7 +189,12 @@ impl SurfaceGuard {
     }
 
     /// May the caller run `op` on `entity` (optionally on one resource)?
-    pub fn check(&self, entity: &str, op: Operation, resource: Option<&Uuid>) -> Result<(), ContractError> {
+    pub fn check(
+        &self,
+        entity: &str,
+        op: Operation,
+        resource: Option<&Uuid>,
+    ) -> Result<(), ContractError> {
         let Some(e) = &self.enforced else {
             return Ok(());
         };
@@ -241,7 +257,9 @@ impl SurfaceGuard {
                     entity_type,
                     entity_id,
                 },
-            ) => self.check(entity_type, Operation::Get, Some(entity_id)).is_ok(),
+            ) => self
+                .check(entity_type, Operation::Get, Some(entity_id))
+                .is_ok(),
             FrameworkEvent::Link(
                 LinkEvent::Created { link_type, .. } | LinkEvent::Deleted { link_type, .. },
             ) => self

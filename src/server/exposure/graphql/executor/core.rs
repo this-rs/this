@@ -8,12 +8,18 @@ use std::sync::Arc;
 
 use super::mutation_executor;
 use super::query_executor;
+use crate::core::auth::AuthContext;
 use crate::server::exposure::graphql::schema_generator::SchemaGenerator;
+use crate::server::exposure::guard::SurfaceGuard;
 use crate::server::host::ServerHost;
 
 /// GraphQL executor that executes queries against the dynamic schema
 pub struct GraphQLExecutor {
     host: Arc<ServerHost>,
+    /// Per-request authorization (policies of the caller). The HTTP handler always
+    /// attaches one ([`GraphQLExecutor::with_guard`]); `new` alone is unenforced and
+    /// only reachable inside the crate (tests).
+    guard: SurfaceGuard,
     #[allow(dead_code)]
     schema_sdl: String,
 }
@@ -24,7 +30,17 @@ impl GraphQLExecutor {
         let generator = SchemaGenerator::new(host.clone());
         let schema_sdl = generator.generate_sdl().await;
 
-        Self { host, schema_sdl }
+        Self {
+            host,
+            guard: SurfaceGuard::unenforced(AuthContext::Anonymous),
+            schema_sdl,
+        }
+    }
+
+    /// Apply the caller's guard to every resolver of this request.
+    pub fn with_guard(mut self, guard: SurfaceGuard) -> Self {
+        self.guard = guard;
+        self
     }
 
     /// Execute a GraphQL query and return the result as JSON
@@ -93,7 +109,8 @@ impl GraphQLExecutor {
         for selection in selections {
             if let Selection::Field(field) = selection {
                 let field_name = field.name.as_str();
-                let field_value = query_executor::resolve_query_field(&self.host, field).await?;
+                let field_value =
+                    query_executor::resolve_query_field(&self.host, &self.guard, field).await?;
                 result.insert(field_name.to_string(), field_value);
             }
         }
@@ -113,7 +130,8 @@ impl GraphQLExecutor {
             if let Selection::Field(field) = selection {
                 let field_name = field.name.as_str();
                 let field_value =
-                    mutation_executor::resolve_mutation_field(&self.host, field).await?;
+                    mutation_executor::resolve_mutation_field(&self.host, &self.guard, field)
+                        .await?;
                 result.insert(field_name.to_string(), field_value);
             }
         }
