@@ -76,7 +76,7 @@ pub async fn graphql_ws_handler(
     .await
     {
         Ok(g) => g,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
     let tenant_id = guard.context().tenant_id();
     ws.protocols(["graphql-transport-ws", "access_token", "bearer"])

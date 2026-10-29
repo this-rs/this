@@ -10,11 +10,11 @@
 //! module with armed policies, `NOT_FOUND` on GraphQL/gRPC, and two diverging sources of
 //! truth.
 //!
-//! The foundation therefore provides [`HostCatalog`] (immutable) and [`LiveCatalog`]
-//! (`ArcSwap`): readers call [`LiveCatalog::load`] once per request and keep a consistent
+//! The foundation therefore provides `HostCatalog` (immutable) and `LiveCatalog`
+//! (`ArcSwap`): readers call `LiveCatalog::load` once per request and keep a consistent
 //! view (no lock, no guard held across an `.await`); `ModuleRuntime` builds the next
 //! snapshot (creators already wrapped in `ValidatingCreator`) and publishes it with
-//! [`LiveCatalog::publish`].
+//! `LiveCatalog::publish`.
 //!
 //! # Migration contract (who reads it)
 //!

@@ -52,11 +52,7 @@ pub async fn ws_handler(
             {
                 Ok(ctx) => ctx,
                 Err(e) => {
-                    return (
-                        e.http_status_code(),
-                        axum::Json(e.to_json()),
-                    )
-                        .into_response();
+                    return (e.http_status_code(), axum::Json(e.to_json())).into_response();
                 }
             },
         };
