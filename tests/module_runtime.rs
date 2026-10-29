@@ -1040,9 +1040,11 @@ async fn runtime_module_policies_enforced_on_crud_and_link_routes() {
     assert_eq!(s, StatusCode::FORBIDDEN);
 }
 
-/// Legacy compiled module WITHOUT `Module::descriptor()`: its policies live only in its
-/// YAML `auth:` (`list: admin_only`).
-struct Vault;
+/// Compiled module whose `list` policy lives only in its YAML `auth:` (`admin_only`).
+/// `described`: it also has a descriptor that declares `get` only (not `list`).
+struct Vault {
+    described: bool,
+}
 struct Secrets;
 impl EntityDescriptor for Secrets {
     fn entity_type(&self) -> &str {
@@ -1082,28 +1084,44 @@ impl Module for Vault {
     fn register_entities(&self, registry: &mut EntityRegistry) {
         registry.register(Box::new(Secrets));
     }
+    fn descriptor(&self) -> Option<ModuleDescriptor> {
+        if !self.described {
+            return None;
+        }
+        let mut e = EntityDesc::new("secret");
+        e.permissions
+            .ops
+            .insert(Operation::Get, PolicyExpr::Authenticated);
+        let mut d = ModuleDescriptor::new("vault", "1.0.0");
+        d.entities.push(e);
+        d.normalize();
+        Some(d)
+    }
 }
 
-/// Review regression: a hot-loaded compiled module without a descriptor kept its YAML
-/// `auth:` only on paper — the derived (policy-less) descriptor was overlaid on it and the
-/// dispatch judged from descriptors alone, so `list: admin_only` became `authenticated`.
+/// Review regression: a hot-loaded compiled module kept its YAML `auth:` only on paper —
+/// the descriptor (derived and policy-less, or declaring other operations only) was
+/// overlaid on it with its DEFAULTS, and the dispatch judged from descriptors alone, so
+/// `list: admin_only` became `authenticated`.
 #[tokio::test]
-async fn hot_loaded_module_without_descriptor_keeps_its_yaml_policies() {
-    let h = harness(true);
-    h.runtime()
-        .load(ModuleSource::Compiled(Arc::new(Vault)))
-        .await
-        .expect("load");
-    let (s, v) = h.call(Method::GET, "/secrets", Some("user"), None).await;
-    assert_eq!(
-        (s, code(&v)),
-        (StatusCode::FORBIDDEN, "this.auth.forbidden"),
-        "YAML `list: admin_only` must hold for a plain user: {v}"
-    );
-    let (s, _) = h.call(Method::GET, "/secrets", None, None).await;
-    assert_eq!(s, StatusCode::UNAUTHORIZED);
-    let (s, v) = h.call(Method::GET, "/secrets", Some("admin"), None).await;
-    assert_eq!(s, StatusCode::OK, "served to the admin: {v}");
+async fn hot_loaded_compiled_module_keeps_its_yaml_policies() {
+    for described in [false, true] {
+        let h = harness(true);
+        h.runtime()
+            .load(ModuleSource::Compiled(Arc::new(Vault { described })))
+            .await
+            .expect("load");
+        let (s, v) = h.call(Method::GET, "/secrets", Some("user"), None).await;
+        assert_eq!(
+            (s, code(&v)),
+            (StatusCode::FORBIDDEN, "this.auth.forbidden"),
+            "described={described}: YAML `list: admin_only` must hold for a plain user: {v}"
+        );
+        let (s, _) = h.call(Method::GET, "/secrets", None, None).await;
+        assert_eq!(s, StatusCode::UNAUTHORIZED, "described={described}");
+        let (s, v) = h.call(Method::GET, "/secrets", Some("admin"), None).await;
+        assert_eq!(s, StatusCode::OK, "described={described}: served to the admin: {v}");
+    }
 }
 
 #[tokio::test]
