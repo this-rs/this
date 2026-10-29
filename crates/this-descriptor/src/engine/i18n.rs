@@ -6,15 +6,21 @@
 //!
 //! Rules, identical on every side:
 //! - a key is looked up in the requested locale (exact tag, then primary language), then in
-//!   the catalog's default locale, and only then rendered as **the key itself** (never a
-//!   panic, never an empty string);
-//! - module bundles are searched before the framework's, so a module may reword a `this.*`
-//!   message for its own users;
+//!   the catalog's default locale, then in any bundle that has it (a module that ships only
+//!   `en` in a `fr` host still shows English, not its key), and only then rendered as **the
+//!   key itself** (never a panic, never an empty string);
+//! - a bundle only carries keys of its own namespace (`<module>.`, `this.` for the
+//!   framework) and only the `simple` syntax: [`I18nCatalog::add_bundle`] refuses the rest.
+//!   A module can therefore neither reword a `this.*` message for every other module nor
+//!   shadow another module's keys (the catalog does not know which module raised an error,
+//!   so such an override would be global and load-order dependent);
 //! - an explicit choice (query parameter, cookie) wins over `Accept-Language`, but only when
 //!   the catalog has that locale: an unknown explicit choice falls through to the header.
 
-use crate::error::ContractError;
-use crate::i18n::{Locale, MessageBundle, MessageKey};
+use crate::check::{DescriptorIssue, issues_to_error};
+use crate::error::{ContractError, ErrorCode};
+use crate::i18n::{Locale, MessageBundle, MessageKey, MessageSyntax};
+use crate::module::ModuleDescriptor;
 use serde_json::Value;
 use std::collections::BTreeMap;
 
@@ -208,13 +214,53 @@ impl I18nCatalog {
     }
 
     /// Add (or replace) a bundle. A bundle of module `this` goes to the framework layer.
-    pub fn with_bundle(mut self, bundle: MessageBundle) -> Self {
-        self.add_bundle(bundle);
-        self
+    pub fn with_bundle(mut self, bundle: MessageBundle) -> Result<Self, ContractError> {
+        self.add_bundle(bundle)?;
+        Ok(self)
+    }
+
+    /// Why `bundle` cannot enter a catalog (empty when it can): unsupported syntax, or a
+    /// key outside the bundle's namespace (`<module>.`).
+    pub fn bundle_issues(bundle: &MessageBundle) -> Vec<DescriptorIssue> {
+        let path = format!("i18n/{}/{}.json", bundle.module, bundle.locale);
+        let mut issues = Vec::new();
+        if bundle.syntax != MessageSyntax::Simple {
+            issues.push(DescriptorIssue {
+                code: ErrorCode::new("this.descriptor.syntax_unsupported"),
+                path: path.clone(),
+                message: "only the `simple` syntax is rendered today".into(),
+            });
+        }
+        let ns = format!("{}.", bundle.module);
+        if bundle.module.is_empty() {
+            issues.push(DescriptorIssue {
+                code: ErrorCode::new("this.descriptor.bundle_namespace"),
+                path: path.clone(),
+                message: "a bundle must name its module".into(),
+            });
+        }
+        for key in bundle.messages.keys() {
+            if bundle.module.is_empty() || !key.0.starts_with(&ns) {
+                issues.push(DescriptorIssue {
+                    code: ErrorCode::new("this.descriptor.bundle_namespace"),
+                    path: format!("{path}:{key}"),
+                    message: format!("`{key}` is outside the namespace `{ns}`"),
+                });
+            }
+        }
+        issues
     }
 
     /// Add (or replace) a bundle, keyed by `(module, locale)`.
-    pub fn add_bundle(&mut self, bundle: MessageBundle) {
+    ///
+    /// Refused as a whole (`this.descriptor.invalid`, catalog unchanged) when its syntax is
+    /// not `simple` or when one of its keys is outside `<module>.`: a module cannot reword
+    /// `this.*` texts nor another module's texts.
+    pub fn add_bundle(&mut self, bundle: MessageBundle) -> Result<(), ContractError> {
+        let issues = Self::bundle_issues(&bundle);
+        if !issues.is_empty() {
+            return Err(issues_to_error(&issues));
+        }
         let layer = if bundle.module == crate::framework::FRAMEWORK_MODULE {
             &mut self.framework
         } else {
@@ -227,6 +273,7 @@ impl I18nCatalog {
             Some(slot) => *slot = bundle,
             None => layer.push(bundle),
         }
+        Ok(())
     }
 
     /// Remove every bundle of a module (unload). Returns how many were removed.
@@ -276,10 +323,13 @@ impl I18nCatalog {
         }
     }
 
-    /// Text of `key`: requested locale, then default locale; `None` if neither has it.
+    /// Text of `key`: requested locale, then default locale, then the first bundle (lookup
+    /// order) that has it; `None` if no bundle has it.
     pub fn lookup(&self, locale: &Locale, key: &MessageKey) -> Option<&str> {
         let bundles = self.bundles();
-        lookup(&bundles, locale, key).or_else(|| lookup(&bundles, &self.default_locale, key))
+        lookup(&bundles, locale, key)
+            .or_else(|| lookup(&bundles, &self.default_locale, key))
+            .or_else(|| bundles.iter().find_map(|b| b.get(key)))
     }
 
     /// Render `key` with `params`; missing everywhere → the key itself.
@@ -326,6 +376,43 @@ impl I18nCatalog {
             .filter(|k| lookup(&bundles, locale, k).is_none())
             .cloned()
             .collect()
+    }
+
+    /// Coverage of a descriptor: every key it declares (`i18n.keys`, the message keys of its
+    /// `errors`, entity and field labels) that has no text in one of the locales it declares
+    /// (`i18n.locales` plus `i18n.default_locale`). Sorted, without duplicates.
+    pub fn missing_for(&self, desc: &ModuleDescriptor) -> Vec<(Locale, MessageKey)> {
+        let mut keys: Vec<&MessageKey> = desc.i18n.keys.iter().map(|k| &k.key).collect();
+        keys.extend(desc.errors.iter().map(|e| &e.message_key));
+        for e in &desc.entities {
+            keys.extend(e.i18n.label.iter().chain(e.i18n.label_plural.iter()));
+            for f in &e.fields {
+                keys.extend(
+                    f.i18n
+                        .label
+                        .iter()
+                        .chain(f.i18n.help.iter())
+                        .chain(f.i18n.placeholder.iter()),
+                );
+            }
+        }
+        keys.sort();
+        keys.dedup();
+        let mut locales = vec![desc.i18n.default_locale.clone()];
+        for l in &desc.i18n.locales {
+            if !locales.contains(l) {
+                locales.push(l.clone());
+            }
+        }
+        let mut out = Vec::new();
+        for l in &locales {
+            for k in self.missing(l, keys.iter().copied()) {
+                out.push((l.clone(), k));
+            }
+        }
+        out.sort();
+        out.dedup();
+        out
     }
 }
 
@@ -448,7 +535,9 @@ mod tests {
 
     #[test]
     fn catalog_falls_back_to_default_locale_then_key() {
-        let cat = I18nCatalog::framework().with_bundle(billing("fr", "Facture déjà payée"));
+        let cat = I18nCatalog::framework()
+            .with_bundle(billing("fr", "Facture déjà payée"))
+            .unwrap();
         let k = MessageKey::new("billing.invoice.already_paid");
         // No English billing bundle: default locale (fr), not the key.
         assert_eq!(
@@ -468,7 +557,9 @@ mod tests {
 
     #[test]
     fn catalog_module_bundles_win_and_replace() {
-        let mut cat = I18nCatalog::framework().with_bundle(billing("en", "Already paid"));
+        let mut cat = I18nCatalog::framework()
+            .with_bundle(billing("en", "Already paid"))
+            .unwrap();
         let err = ContractError::new("billing.invoice.already_paid", crate::ErrorKind::Conflict)
             .with_field(
                 FieldViolation::new("amount", "this.validation.positive")
@@ -481,7 +572,7 @@ mod tests {
             "{}",
             e.fields[0].message
         );
-        cat.add_bundle(billing("en", "Paid already"));
+        cat.add_bundle(billing("en", "Paid already")).unwrap();
         assert_eq!(
             cat.localize(err.clone(), &Locale::new("en")).message,
             "Paid already"
@@ -492,18 +583,108 @@ mod tests {
             cat.localize(err, &Locale::new("en")).message,
             "billing.invoice.already_paid"
         );
-        // A module may reword a framework message.
+    }
+
+    #[test]
+    fn catalog_refuses_foreign_keys_and_unsupported_syntax() {
+        let mut cat = I18nCatalog::framework();
+        let before = cat.clone();
+        let internal = MessageKey::new("this.internal");
+        // A module rewording a framework text would do it for EVERY module: refused whole.
         let mut over = billing("en", "x");
-        over.messages
-            .insert(MessageKey::new("this.internal"), "Oops".into());
-        let cat = I18nCatalog::framework().with_bundle(over);
+        over.messages.insert(internal.clone(), "Oops".into());
+        let err = cat.add_bundle(over).unwrap_err();
+        assert_eq!(err.code.as_str(), framework::codes::DESCRIPTOR_INVALID);
+        assert!(
+            err.params["issues"]
+                .as_str()
+                .unwrap()
+                .contains("this.descriptor.bundle_namespace"),
+            "{err:?}"
+        );
+        assert_eq!(cat, before, "refused bundle leaves the catalog unchanged");
         assert_eq!(
-            cat.render(
-                &Locale::new("en"),
-                &MessageKey::new("this.internal"),
-                &BTreeMap::new()
-            ),
-            "Oops"
+            cat.render(&Locale::new("en"), &internal, &BTreeMap::new()),
+            "Internal error"
+        );
+        // Nor another module's keys.
+        let mut steal = billing("en", "x");
+        steal
+            .messages
+            .insert(MessageKey::new("crm.contact.label"), "Hijack".into());
+        assert!(cat.add_bundle(steal).is_err());
+        // Nor a bundle without module.
+        let mut anon = billing("en", "x");
+        anon.module.clear();
+        assert!(cat.add_bundle(anon).is_err());
+        // Fluent is reserved: refused, not rendered as `simple`.
+        let mut fluent = billing("en", "{ $n -> [one] x *[other] y }");
+        fluent.syntax = MessageSyntax::Fluent;
+        let err = I18nCatalog::framework().with_bundle(fluent).unwrap_err();
+        assert!(
+            err.params["issues"]
+                .as_str()
+                .unwrap()
+                .contains("this.descriptor.syntax_unsupported")
+        );
+        assert_eq!(cat, before);
+        assert!(I18nCatalog::bundle_issues(&billing("en", "ok")).is_empty());
+    }
+
+    #[test]
+    fn catalog_last_resort_is_any_bundle_before_the_key() {
+        // Host default `fr`, module ships only `de`: a `en` request shows German, not the key.
+        let cat = I18nCatalog::framework()
+            .with_bundle(billing("de", "Bereits bezahlt"))
+            .unwrap();
+        let k = MessageKey::new("billing.invoice.already_paid");
+        assert_eq!(
+            cat.render(&Locale::new("en"), &k, &BTreeMap::new()),
+            "Bereits bezahlt"
+        );
+        // `missing` stays strict (coverage reports must not be hidden by the fallback).
+        assert_eq!(cat.missing(&Locale::new("en"), [&k]), vec![k.clone()]);
+    }
+
+    #[test]
+    fn catalog_missing_for_descriptor_covers_declared_keys_and_locales() {
+        use crate::error::{ErrorDesc, ErrorKind};
+        use crate::i18n::MessageDecl;
+        let mut desc = ModuleDescriptor::new("billing", "1.0.0");
+        desc.i18n.default_locale = Locale::new("fr");
+        desc.i18n.locales = vec![Locale::new("fr"), Locale::new("en")];
+        desc.i18n.keys.push(MessageDecl {
+            key: MessageKey::new("billing.invoice.already_paid"),
+            params: vec![],
+        });
+        desc.errors.push(ErrorDesc {
+            code: ErrorCode::new("billing.invoice.overdue"),
+            kind: ErrorKind::Conflict,
+            message_key: MessageKey::new("billing.invoice.overdue"),
+            params: vec![],
+            description: None,
+        });
+        let cat = I18nCatalog::framework()
+            .with_bundle(billing("fr", "Déjà payée"))
+            .unwrap();
+        let missing = cat.missing_for(&desc);
+        assert_eq!(
+            missing,
+            vec![
+                (
+                    Locale::new("en"),
+                    MessageKey::new("billing.invoice.already_paid")
+                ),
+                (
+                    Locale::new("en"),
+                    MessageKey::new("billing.invoice.overdue")
+                ),
+                (
+                    Locale::new("fr"),
+                    MessageKey::new("billing.invoice.overdue")
+                ),
+            ],
+            "error message keys count, every declared locale is checked"
         );
     }
 
@@ -533,7 +714,9 @@ mod tests {
 
     #[test]
     fn catalog_missing_lists_untranslated_keys() {
-        let cat = I18nCatalog::framework().with_bundle(billing("fr", "Payée"));
+        let cat = I18nCatalog::framework()
+            .with_bundle(billing("fr", "Payée"))
+            .unwrap();
         let k = [
             MessageKey::new("billing.invoice.already_paid"),
             MessageKey::new("this.internal"),

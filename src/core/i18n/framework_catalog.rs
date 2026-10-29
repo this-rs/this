@@ -2,8 +2,10 @@
 //! bundles of every module, shared by all surfaces and swappable at runtime (hot-loaded
 //! modules add their bundles, unloaded modules remove them).
 
-use crate::descriptor::{I18nCatalog, Locale, MessageBundle};
+use crate::descriptor::check::issues_to_error;
+use crate::descriptor::{ContractError, I18nCatalog, Locale, MessageBundle};
 use arc_swap::ArcSwap;
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, OnceLock};
 
 /// Framework bundles shipped by this-rs (`fr` default, `en`).
@@ -53,14 +55,38 @@ impl LocaleCatalog {
         });
     }
 
-    /// Add (or replace) module bundles.
-    pub fn add_bundles(&self, bundles: impl IntoIterator<Item = MessageBundle>) {
+    /// Add (or replace) module bundles, all or nothing: when one bundle is refused
+    /// (`I18nCatalog::bundle_issues`: foreign key, unsupported syntax), none is published
+    /// and the error lists every issue.
+    // `ContractError` is the envelope every surface returns unboxed (same allowance as the
+    // `this-descriptor` crate); this runs at module load, not on a hot path.
+    #[allow(clippy::result_large_err)]
+    pub fn add_bundles(
+        &self,
+        bundles: impl IntoIterator<Item = MessageBundle>,
+    ) -> Result<(), ContractError> {
         let bundles: Vec<MessageBundle> = bundles.into_iter().collect();
+        let issues: Vec<_> = bundles
+            .iter()
+            .flat_map(I18nCatalog::bundle_issues)
+            .collect();
+        if !issues.is_empty() {
+            return Err(issues_to_error(&issues));
+        }
         self.update(|c| {
             for b in &bundles {
-                c.add_bundle(b.clone());
+                // Cannot fail: every bundle passed `bundle_issues` above.
+                let _ = c.add_bundle(b.clone());
             }
         });
+        Ok(())
+    }
+
+    /// Remove every bundle of an unloaded module. Returns how many were removed.
+    pub fn remove_module(&self, module: &str) -> usize {
+        let removed = std::sync::atomic::AtomicUsize::new(0);
+        self.update(|c| removed.store(c.remove_module(module), Ordering::Relaxed));
+        removed.into_inner()
     }
 }
 
@@ -171,22 +197,33 @@ mod tests {
     fn locale_catalog_hot_adds_and_removes_module_bundles() {
         let cat = LocaleCatalog::framework();
         let before = cat.load();
-        cat.add_bundles([MessageBundle {
-            module: "billing".into(),
+        let bundle = |module: &str, key: &str| MessageBundle {
+            module: module.into(),
             locale: Locale::new("de"),
-            messages: [(MessageKey::new("billing.paid"), "Bezahlt".into())]
+            messages: [(MessageKey::new(key), "Bezahlt".into())]
                 .into_iter()
                 .collect(),
             ..Default::default()
-        }]);
+        };
+        cat.add_bundles([bundle("billing", "billing.paid")])
+            .unwrap();
         assert!(cat.load().locales().contains(&Locale::new("de")));
         assert!(
             !before.locales().contains(&Locale::new("de")),
             "old snapshot unchanged"
         );
-        cat.update(|c| {
-            c.remove_module("billing");
-        });
+        // All or nothing: one foreign key refuses the whole batch.
+        let snapshot = cat.load();
+        let err = cat
+            .add_bundles([
+                bundle("crm", "crm.contact"),
+                bundle("crm", "this.auth.forbidden"),
+            ])
+            .unwrap_err();
+        assert_eq!(err.code.as_str(), "this.descriptor.invalid");
+        assert_eq!(*cat.load(), *snapshot, "nothing published");
+        assert_eq!(cat.remove_module("billing"), 1);
         assert!(!cat.load().locales().contains(&Locale::new("de")));
+        assert_eq!(cat.remove_module("billing"), 0);
     }
 }

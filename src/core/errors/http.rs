@@ -141,22 +141,42 @@ pub async fn localize_errors(
     req.extensions_mut()
         .insert(crate::core::i18n::RequestLocale(locale.clone()));
     let res = next.run(req).await;
-    match res.extensions().get::<ContractError>() {
-        Some(err) => {
-            let err = err.clone();
-            let mut out = error_response(err, &snapshot, &locale, problem);
-            // Keep headers set by outer handlers (CORS, tracing...) that the body rewrite
-            // would otherwise drop; ours (content-type, language, error code) win.
-            for (name, value) in res.headers() {
-                if !out.headers().contains_key(name) {
-                    out.headers_mut().insert(name.clone(), value.clone());
-                }
-            }
-            out
-        }
-        None => res,
-    }
+    let Some(err) = res.extensions().get::<ContractError>().cloned() else {
+        return res;
+    };
+    relocalize(res, snapshot.localize(err, &locale), &locale, problem)
 }
+
+/// Replace the body of an error response by `err` (already localized), IN PLACE: status,
+/// every other header (all values of a multi-valued one such as `set-cookie`) and every
+/// extension set by the handler or inner layers are kept. A stale `content-length` is
+/// dropped; `vary` gains the request parts the body now depends on.
+fn relocalize(res: Response, err: ContractError, locale: &Locale, problem: bool) -> Response {
+    let (mut parts, _old_body) = res.into_parts();
+    let body = serde_json::to_vec(&err.http_body()).unwrap_or_default();
+    let h = &mut parts.headers;
+    h.remove(header::CONTENT_LENGTH);
+    h.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static(if problem {
+            PROBLEM_JSON
+        } else {
+            "application/json"
+        }),
+    );
+    if let Ok(v) = HeaderValue::from_str(locale.as_str()) {
+        h.insert(header::CONTENT_LANGUAGE, v);
+    }
+    if let Ok(v) = HeaderValue::from_str(err.code.as_str()) {
+        h.insert(ERROR_HEADER, v);
+    }
+    h.append(header::VARY, HeaderValue::from_static(LOCALE_VARY));
+    parts.extensions.insert(err);
+    Response::from_parts(parts, axum::body::Body::from(body))
+}
+
+/// Request parts a localized error body depends on (`?lang=` is in the URL already).
+const LOCALE_VARY: &str = "accept, accept-language, cookie, x-this-locale";
 
 /// Response for an error in the framework catalog's default locale (French), for code that
 /// has no request at hand.
@@ -301,6 +321,73 @@ mod tests {
         let res = app().oneshot(req("/ok", "en")).await.unwrap();
         assert_eq!(res.status(), StatusCode::OK);
         assert!(res.headers().get(header::CONTENT_LANGUAGE).is_none());
+    }
+
+    #[derive(Clone, Debug, PartialEq)]
+    struct Marker(u8);
+
+    #[tokio::test]
+    async fn localize_errors_keeps_multi_valued_headers_and_extensions() {
+        let app = Router::new()
+            .route(
+                "/logout",
+                get(|| async {
+                    let mut res = ApiError(not_found("session", "s1")).into_response();
+                    let h = res.headers_mut();
+                    h.append(
+                        header::SET_COOKIE,
+                        HeaderValue::from_static("a=; Max-Age=0"),
+                    );
+                    h.append(
+                        header::SET_COOKIE,
+                        HeaderValue::from_static("b=; Max-Age=0"),
+                    );
+                    // Stale length of the French body: must not survive the rewrite.
+                    h.insert(header::CONTENT_LENGTH, HeaderValue::from_static("3"));
+                    res.extensions_mut().insert(Marker(7));
+                    res
+                }),
+            )
+            .layer(axum::middleware::from_fn_with_state(
+                LocaleCatalog::framework(),
+                localize_errors,
+            ));
+        let req = HttpRequest::builder()
+            .uri("/logout")
+            .header(header::ACCEPT_LANGUAGE, "en")
+            .body(Body::empty())
+            .unwrap();
+        let res = app.oneshot(req).await.unwrap();
+        assert_eq!(res.status(), StatusCode::NOT_FOUND);
+        let cookies: Vec<_> = res.headers().get_all(header::SET_COOKIE).iter().collect();
+        assert_eq!(cookies.len(), 2, "every set-cookie kept: {cookies:?}");
+        // The stale "3" is gone; if a length is present (axum sets it from the new body's
+        // exact size), it is the real one.
+        let length = res
+            .headers()
+            .get(header::CONTENT_LENGTH)
+            .map(|v| v.to_str().unwrap().parse::<usize>().unwrap());
+        assert_ne!(length, Some(3), "stale content-length kept");
+        assert_eq!(res.extensions().get::<Marker>(), Some(&Marker(7)));
+        assert_eq!(
+            res.extensions().get::<ContractError>().unwrap().message,
+            "session not found: s1",
+            "extension holds the localized error"
+        );
+        let vary: Vec<_> = res.headers().get_all(header::VARY).iter().collect();
+        assert!(
+            vary.iter()
+                .any(|v| v.to_str().unwrap().contains("accept-language")),
+            "{vary:?}"
+        );
+        let bytes = axum::body::to_bytes(res.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        if let Some(n) = length {
+            assert_eq!(n, bytes.len(), "content-length matches the localized body");
+        }
+        let b: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(b["message"], "session not found: s1");
     }
 
     #[tokio::test]

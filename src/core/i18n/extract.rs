@@ -9,6 +9,7 @@
 //! URL: its explicit choice is the metadata `x-this-locale`.
 
 use super::framework_catalog::LocaleCatalog;
+use crate::descriptor::engine::i18n::match_locale;
 use crate::descriptor::{I18nCatalog, Locale, LocaleHints};
 use axum::extract::FromRequestParts;
 use axum::http::{HeaderMap, header, request::Parts};
@@ -22,14 +23,21 @@ pub const LOCALE_COOKIE: &str = "this_locale";
 pub const LOCALE_HEADER: &str = "x-this-locale";
 
 /// Owned locale hints read from a request (borrowed by [`LocaleHints`] for resolution).
+///
+/// Two explicit choices, each used only when the catalog has it: `query` (`?lang=` /
+/// `?locale=`), then `header` (`x-this-locale`, the only explicit choice gRPC has). An
+/// unavailable query value does not hide an available header value.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RequestHints {
     pub query: Option<String>,
+    pub header: Option<String>,
     pub cookie: Option<String>,
     pub accept_language: Option<String>,
 }
 
 impl RequestHints {
+    /// Borrowed hints (the `header` choice is not representable there: [`Self::resolve`]
+    /// applies it).
     pub fn as_hints(&self) -> LocaleHints<'_> {
         LocaleHints {
             query: self.query.as_deref(),
@@ -38,14 +46,12 @@ impl RequestHints {
         }
     }
 
-    /// Hints of an HTTP request: query string, `this_locale` cookie, `x-this-locale` header
-    /// (treated as an explicit choice, after the query), `Accept-Language`.
+    /// Hints of an HTTP request: query string, `x-this-locale` header, `this_locale`
+    /// cookie, `Accept-Language`.
     pub fn from_http(headers: &HeaderMap, query: Option<&str>) -> Self {
-        let explicit = query
-            .and_then(locale_from_query)
-            .or_else(|| header_str(headers, LOCALE_HEADER).map(str::to_string));
         Self {
-            query: explicit,
+            query: query.and_then(locale_from_query),
+            header: header_str(headers, LOCALE_HEADER).map(str::to_string),
             cookie: headers
                 .get_all(header::COOKIE)
                 .iter()
@@ -56,9 +62,21 @@ impl RequestHints {
         }
     }
 
-    /// Resolve against a catalog.
+    /// Resolve against a catalog: query, header, cookie (each only if available), then
+    /// `Accept-Language`, then the default locale.
     pub fn resolve(&self, catalog: &I18nCatalog) -> Locale {
-        catalog.resolve(self.as_hints())
+        let available = catalog.locales();
+        if let Some(l) = [&self.query, &self.header]
+            .into_iter()
+            .flatten()
+            .find_map(|tag| match_locale(tag, &available))
+        {
+            return l;
+        }
+        catalog.resolve(LocaleHints {
+            query: None,
+            ..self.as_hints()
+        })
     }
 }
 
@@ -142,7 +160,8 @@ pub fn locale_from_metadata(meta: &tonic::metadata::MetadataMap, catalog: &I18nC
             .filter(|s| !s.is_empty())
     };
     let hints = RequestHints {
-        query: get(LOCALE_HEADER).map(str::to_string),
+        query: None,
+        header: get(LOCALE_HEADER).map(str::to_string),
         cookie: get("cookie").and_then(|c| cookie_value(c, LOCALE_COOKIE)),
         accept_language: get("accept-language").map(str::to_string),
     };
@@ -211,6 +230,21 @@ mod tests {
             Locale::new("en"),
             "unknown explicit falls through"
         );
+        // An unavailable `?lang=` does not hide an available `x-this-locale`.
+        let req = Request::builder()
+            .uri("/invoices?lang=xx")
+            .header(LOCALE_HEADER, "en")
+            .header(header::COOKIE, "this_locale=fr")
+            .header(header::ACCEPT_LANGUAGE, "fr")
+            .body(())
+            .unwrap();
+        assert_eq!(extract(req).await, Locale::new("en"), "header after query");
+        let req = Request::builder()
+            .uri("/invoices?lang=fr")
+            .header(LOCALE_HEADER, "en")
+            .body(())
+            .unwrap();
+        assert_eq!(extract(req).await, Locale::new("fr"), "query before header");
         // The catalog installed by the middleware decides what is available.
         let cat =
             LocaleCatalog::new(I18nCatalog::framework().with_default_locale(Locale::new("en")));
