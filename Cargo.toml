@@ -19,7 +19,7 @@ futures = "0.3"
 
 # Web framework
 axum = { version = "0.8", features = ["macros", "ws"] }
-tower = "0.5"
+tower = { version = "0.5", features = ["util"] }
 tower-http = { version = "0.7", features = ["trace", "cors"] }
 
 # Serialization
@@ -50,6 +50,14 @@ tera = "1"
 anyhow = "1.0"
 thiserror = "2.0"
 
+# Identité d'entité engine-agnostique (`core::identity`) : l'id dérivé est une
+# clé PERMANENTE, donc une fonction de hachage stable et résistante à la
+# collision adverse est requise (un `qualified_name` vient d'un client).
+# Dépendance NON optionnelle à dessein : un `sha2` optionnel produirait deux
+# espaces d'identité selon les features de build — le pire défaut possible pour
+# un identifiant.
+sha2 = "0.10"
+
 # Logging
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
@@ -70,19 +78,69 @@ prost = { version = "0.14", optional = true }
 prost-types = { version = "0.14", optional = true }
 
 # Push notifications (optional)
-reqwest = { version = "0.13", features = ["json"], optional = true }
+reqwest = { version = "0.13", features = ["json", "stream"], optional = true }
 indexmap = "2.13.0"
+
+# Obrain graph database — cognitive graph engine (this-rs/obrain, the
+# ultra-benchmarked engine: fastest tested graph DB on LDBC Social Network
+# Benchmark in embedded and server configurations). Workspace checkout:
+# ~/projects/banc-obrain (github this-rs/obrain). Optional, feature-gated.
+#
+# `algos` est requis pour DEUX raisons distinctes :
+#   1. `obrain-engine::procedures` (le registre des procédures) est gaté
+#      derrière cette feature (`obrain-engine/src/lib.rs:44-45`) — sans elle
+#      `registre()` n'existe pas, donc le relief ne peut pas se décrire ;
+#   2. c'est elle qui apporte pagerank / leiden / articulation_points /
+#      strongly_connected_components / spectral (tout
+#      `obrain-adapters::plugins::algorithms` est sous ce cfg).
+# Le dispatch générique des procédures `CALL` en dépend aussi (cf.
+# `cognitive-full = [..., "algos"]` dans obrain-engine).
+obrain-engine = { path = "../../banc-obrain-j4/crates/obrain-engine", optional = true, features = ["algos"] }
+obrain-common = { path = "../../banc-obrain-j4/crates/obrain-common", optional = true }
+obrain-core = { path = "../../banc-obrain-j4/crates/obrain-core", optional = true, default-features = false }
+# `obrain-substrate` doit être une dépendance DIRECTE (et non transitive via
+# l'engine) dès qu'on nomme ses types : `substrate_handle()` rend un
+# `Option<Arc<SubstrateStore>>`, et la couche simpliciale / courbure / énergie
+# ne vit que là (`simplex_passes`, `simplex_zone`, `geometric`). Aucune feature.
+obrain-substrate = { path = "../../banc-obrain-j4/crates/obrain-substrate", optional = true }
+# `obrain-adapters` doit aussi être direct dès qu'on NOMME ses types : le
+# registre rend des `ParameterDef` dont le `param_type` est un
+# `obrain_adapters::plugins::ParameterType` (re-export `plugins/mod.rs:16`).
+# `plugins::traits` n'est PAS gaté par `algos` (seul `plugins::algorithms` l'est),
+# donc `default-features = false` suffit ici — les features dont on a besoin
+# (`algos`) sont demandées via `obrain-engine`, et l'unification les ramène.
+obrain-adapters = { path = "../../banc-obrain-j4/crates/obrain-adapters", optional = true, default-features = false }
+# `obrain-reactive` porte les VRAIS types du pont : `MutationBus`, `MutationEvent`,
+# `MutationBatch`. Il manquait, et c'est pour ça que `events/bridge/types.rs`
+# recopiait des types locaux — recopie qui a DÉJÀ divergé (voir types.rs).
+obrain-reactive = { path = "../../banc-obrain-j4/crates/obrain-reactive", optional = true }
+
+# vite-rs — Vite-like static/dev frontend serving reused by the `frontend`
+# feature (dev loop + AI bridge + static file rules + guaranteed cache
+# freshness). Local checkout: ~/projects/vite-rs (github this-rs/vite-rs).
+vite-rs = { path = "../../vite-rs", optional = true }
+
+# WAMI auth (optional, feature-gated)
+jsonwebtoken = { version = "9", optional = true }
+ed25519-dalek = { version = "2", optional = true, features = ["pkcs8", "pem", "rand_core"] }
+base64 = { version = "0.22", optional = true }
+
+# Hachage des mots de passe de l'annuaire persisté (chantier STS-PERSISTANT) :
+# argon2id, paramètres par défaut du crate = recommandation OWASP
+# (v19, m=19456 KiB, t=2, p=1). Voir storage::annuaire_identites.
+argon2 = { version = "0.5", optional = true, features = ["std"] }
 
 [build-dependencies]
 tonic-prost-build = { version = "0.14" }
 
 [dev-dependencies]
 tokio-test = "0.4"
+async-trait = "0.1"
 axum-test = "21.1"
 reqwest = { version = "0.13", features = ["json"] }
 tokio-tungstenite = "0.30"
 futures-util = "0.3"
-testcontainers = "0.28"
+testcontainers = "0.27"
 testcontainers-modules = { version = "0.15", features = ["postgres", "mongo", "neo4j", "mysql"] }
 tempfile = "3"
 
@@ -98,14 +156,41 @@ mysql = ["sqlx", "sqlx/macros", "sqlx/runtime-tokio", "sqlx/tls-rustls", "sqlx/m
 lmdb = ["heed"]
 graphql = ["async-graphql", "async-graphql-axum", "graphql-parser"]
 grpc = ["tonic", "tonic-prost", "prost", "prost-types"]
-push = ["reqwest"]
+push = ["dep:reqwest"]
+# Gestion d'une zone PowerDNS (API HTTP) : délégation DNS de l'exposition.
+powerdns = ["dep:reqwest"]
+# Rattachement d'un projet existant par HTTP (proxy gardé du binaire
+# this-gateway) : un « service » derrière la porte, avec ses refus explicites.
+proxy = ["dep:reqwest"]
 websocket = []
+wami = ["dep:jsonwebtoken", "dep:ed25519-dalek", "dep:base64", "dep:argon2"]
+obrain = ["dep:obrain-engine", "dep:obrain-common", "dep:obrain-core", "dep:obrain-substrate", "dep:obrain-adapters", "dep:obrain-reactive"]
+# Alias conservé pour compatibilité, mais le relief cognitif n'est PAS branché :
+# `core::events::CognitiveSignal` est un vocabulaire propre à this-rs, et le
+# moteur cognitif d'obrain (`obrain-cognitive`) n'est pas une dépendance.
+obrain-cognitive = ["obrain"]
+# vite-rs based SPA frontend hosting (this::server::frontend). Not part of
+# `all` because it needs the local vite-rs checkout (path dep), like obrain.
+frontend = ["dep:vite-rs"]
 all = ["in-memory", "dynamodb", "postgres", "mongodb_backend", "neo4j", "scylladb", "mysql", "lmdb", "graphql", "grpc", "websocket", "push"]
 
 [lib]
 name = "this"
 path = "src/lib.rs"
 
+
+[[example]]
+name = "domain_harness"
+path = "examples/domain_harness.rs"
+# L'exemple a besoin du client : sans la feature, il ne doit pas être construit
+# par `--all-targets`, sinon un consommateur qui ne l'active pas échoue à la
+# compilation d'un exemple qu'il n'utilise pas.
+required-features = ["powerdns"]
+
+[[example]]
+name = "caddyfile"
+path = "examples/caddyfile.rs"
+required-features = []
 [[example]]
 name = "simple_api"
 path = "examples/simple_api/main.rs"
@@ -122,3 +207,83 @@ path = "examples/microservice/main.rs"
 name = "microservice_graphql"
 path = "examples/microservice/main_graphql.rs"
 required-features = ["graphql"]
+
+# Serveur multi-protocoles (REST + GraphQL + gRPC + WebSocket + SSE) au-dessus
+# d'un store obrain aletheia (noeuds `Page` / `Problem` / `Lemma` / `Gate`).
+# Voir examples/ALETHEIA-SERVER.md pour le runbook de deploiement.
+[[example]]
+name = "aletheia_server"
+path = "examples/aletheia_server.rs"
+required-features = ["obrain", "graphql", "grpc", "websocket"]
+
+# Le plus petit serveur qui publie le relief d'obrain sur REST : aucun catalogue
+# tenu à la main, le document se décrit depuis le registre du moteur.
+[[example]]
+name = "graph_relief"
+path = "examples/graph_relief.rs"
+required-features = ["obrain"]
+
+# Contrat de latence : ce que coûte chaque surface, in-process et HTTP.
+[[example]]
+name = "latency_contract"
+path = "examples/latency_contract.rs"
+required-features = ["obrain"]
+
+# Banc : ce que coûte une décision d'autorisation — traversée contre
+# matérialisation indexée (le chiffre qui porte le chantier IAM).
+[[example]]
+name = "iam_bench"
+path = "examples/iam_bench.rs"
+required-features = ["obrain"]
+
+# Diagnostic : cette base obrain est-elle adoptable par les services de
+# stockage, ou seulement lisible en relief ? (la distinction qui décide de ce
+# que this-rs peut exposer d'une base qu'il n'a pas écrite)
+[[example]]
+name = "adopt_obrain_base"
+path = "examples/adopt_obrain_base.rs"
+required-features = ["obrain"]
+
+# Banc : ce que coûte la publication du relief (chemin constant vs balayage
+# simplex), et la bascule d'espace. `--release` pour des chiffres utilisables.
+[[example]]
+name = "relief_bench"
+path = "examples/relief_bench.rs"
+required-features = ["obrain"]
+
+[[example]]
+name = "canvas_inference"
+path = "examples/canvas_inference.rs"
+required-features = ["obrain"]
+
+# Deux exemples qui parlent obrain par ses types (`ObrainStore`,
+# `ObrainDataService`, `ObrainLinkService`) : sans la feature, ils ne
+# compilent pas — et `cargo test` construit les exemples. Déclarés ici
+# **uniquement** pour porter `required-features`, sans quoi un `cargo test`
+# par défaut échouait avant même d'exécuter un test.
+[[example]]
+name = "weave_pilot"
+path = "examples/weave_pilot.rs"
+required-features = ["obrain"]
+
+[[example]]
+name = "weave_bench"
+path = "examples/weave_bench.rs"
+required-features = ["obrain"]
+
+# ── Bancs d'essai ─────────────────────────────────────────────────────────
+# `harness = false` : le banc a son propre harnais (échauffement, N tours,
+# médiane), sans dépendance de mesure — le dépôt construit hors ligne.
+[[bench]]
+name = "scope_bench"
+path = "benches/scope_bench.rs"
+harness = false
+required-features = ["obrain"]
+
+# La passerelle IAM devant les stores obrain (chantier PASSERELLE-THIS-RS) :
+# STS (émission + validation Ed25519), refus par défaut (la faille 4-segments
+# meurt aux deux étages), stores en LECTURE SEULE montés sous /stores/{nom}.
+[[bin]]
+name = "this-gateway"
+path = "src/bin/this-gateway.rs"
+required-features = ["obrain", "wami"]

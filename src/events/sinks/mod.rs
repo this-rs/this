@@ -114,7 +114,15 @@ pub trait Sink: Send + Sync + std::fmt::Debug {
 /// already wrapped in `Arc`).
 #[derive(Debug)]
 pub struct SinkRegistry {
+    /// Global sinks (available to all tenants)
     sinks: RwLock<HashMap<String, Arc<dyn Sink>>>,
+
+    /// Tenant-scoped sinks (keyed by tenant_id → sink_name → sink)
+    ///
+    /// When a delivery targets a specific tenant, tenant-scoped sinks take
+    /// priority over global sinks with the same name.
+    #[allow(clippy::type_complexity)]
+    tenant_sinks: RwLock<HashMap<uuid::Uuid, HashMap<String, Arc<dyn Sink>>>>,
 }
 
 impl SinkRegistry {
@@ -122,10 +130,11 @@ impl SinkRegistry {
     pub fn new() -> Self {
         Self {
             sinks: RwLock::new(HashMap::new()),
+            tenant_sinks: RwLock::new(HashMap::new()),
         }
     }
 
-    /// Register a sink by name
+    /// Register a global sink by name
     ///
     /// If a sink with the same name already exists, it is replaced.
     /// This method uses interior mutability so it can be called through
@@ -134,8 +143,48 @@ impl SinkRegistry {
         self.sinks.write().unwrap().insert(name.into(), sink);
     }
 
-    /// Look up a sink by name
+    /// Register a tenant-scoped sink
+    ///
+    /// This sink will only be used for deliveries targeting the specified tenant.
+    /// If a global sink with the same name exists, the tenant-scoped sink takes priority.
+    pub fn register_for_tenant(
+        &self,
+        tenant_id: uuid::Uuid,
+        name: impl Into<String>,
+        sink: Arc<dyn Sink>,
+    ) {
+        self.tenant_sinks
+            .write()
+            .unwrap()
+            .entry(tenant_id)
+            .or_default()
+            .insert(name.into(), sink);
+    }
+
+    /// Look up a sink by name (global only)
     pub fn get(&self, name: &str) -> Option<Arc<dyn Sink>> {
+        self.sinks.read().unwrap().get(name).cloned()
+    }
+
+    /// Look up a sink by name, preferring tenant-scoped sinks when available
+    ///
+    /// Resolution order:
+    /// 1. Tenant-scoped sink (if `tenant_id` provided and a matching sink exists)
+    /// 2. Global sink (fallback)
+    pub fn get_for_tenant(
+        &self,
+        name: &str,
+        tenant_id: Option<&uuid::Uuid>,
+    ) -> Option<Arc<dyn Sink>> {
+        // Try tenant-scoped first
+        if let Some(tid) = tenant_id
+            && let Some(tenant_map) = self.tenant_sinks.read().unwrap().get(tid)
+            && let Some(sink) = tenant_map.get(name)
+        {
+            return Some(sink.clone());
+        }
+
+        // Fallback to global
         self.sinks.read().unwrap().get(name).cloned()
     }
 
@@ -154,21 +203,32 @@ impl SinkRegistry {
         recipient_id: Option<&str>,
         context_vars: &HashMap<String, Value>,
     ) -> Result<()> {
+        // Extract tenant_id from context_vars for tenant-scoped lookup
+        let tenant_id = context_vars
+            .get("tenant_id")
+            .and_then(|v| v.as_str())
+            .and_then(|s| uuid::Uuid::parse_str(s).ok());
+
         let sink = self
-            .get(sink_name)
+            .get_for_tenant(sink_name, tenant_id.as_ref())
             .ok_or_else(|| anyhow::anyhow!("sink '{}' not found in registry", sink_name))?;
 
         sink.deliver(payload, recipient_id, context_vars).await
     }
 
-    /// Number of registered sinks
+    /// Number of registered global sinks
     pub fn len(&self) -> usize {
         self.sinks.read().unwrap().len()
     }
 
-    /// Whether the registry is empty
+    /// Whether the registry has no global sinks
     pub fn is_empty(&self) -> bool {
         self.sinks.read().unwrap().is_empty()
+    }
+
+    /// Remove all sinks for a specific tenant (GDPR erasure)
+    pub fn remove_tenant_sinks(&self, tenant_id: &uuid::Uuid) {
+        self.tenant_sinks.write().unwrap().remove(tenant_id);
     }
 }
 
@@ -428,5 +488,87 @@ mod tests {
         let registry = SinkRegistry::default();
         assert!(registry.is_empty());
         assert_eq!(registry.len(), 0);
+    }
+
+    // ── Tenant-scoped sink tests ────────────────────────────────────
+
+    #[test]
+    fn test_register_for_tenant() {
+        let registry = SinkRegistry::new();
+        let tenant = uuid::Uuid::new_v4();
+        registry.register_for_tenant(tenant, "webhook", Arc::new(TestSink::new("tenant-webhook")));
+
+        // Not visible as a global sink
+        assert!(registry.get("webhook").is_none());
+
+        // Visible via tenant lookup
+        let sink = registry.get_for_tenant("webhook", Some(&tenant));
+        assert!(sink.is_some());
+        assert_eq!(sink.unwrap().name(), "tenant-webhook");
+    }
+
+    #[test]
+    fn test_tenant_sink_overrides_global() {
+        let registry = SinkRegistry::new();
+        let tenant = uuid::Uuid::new_v4();
+
+        registry.register("webhook", Arc::new(TestSink::new("global-webhook")));
+        registry.register_for_tenant(tenant, "webhook", Arc::new(TestSink::new("tenant-webhook")));
+
+        // Without tenant → global
+        let global = registry.get_for_tenant("webhook", None).unwrap();
+        assert_eq!(global.name(), "global-webhook");
+
+        // With tenant → tenant-scoped
+        let scoped = registry.get_for_tenant("webhook", Some(&tenant)).unwrap();
+        assert_eq!(scoped.name(), "tenant-webhook");
+
+        // Different tenant → global fallback
+        let other_tenant = uuid::Uuid::new_v4();
+        let fallback = registry
+            .get_for_tenant("webhook", Some(&other_tenant))
+            .unwrap();
+        assert_eq!(fallback.name(), "global-webhook");
+    }
+
+    #[tokio::test]
+    async fn test_deliver_uses_tenant_from_context_vars() {
+        let registry = SinkRegistry::new();
+        let tenant = uuid::Uuid::new_v4();
+
+        let global_sink = Arc::new(TestSink::new("global"));
+        let tenant_sink = Arc::new(TestSink::new("tenant"));
+        let tenant_deliveries = tenant_sink.deliveries.clone();
+
+        registry.register("webhook", global_sink);
+        registry.register_for_tenant(tenant, "webhook", tenant_sink);
+
+        // Deliver with tenant_id in context_vars → should use tenant sink
+        let mut vars = HashMap::new();
+        vars.insert(
+            "tenant_id".to_string(),
+            serde_json::Value::String(tenant.to_string()),
+        );
+
+        registry
+            .deliver("webhook", json!({"msg": "hello"}), None, &vars)
+            .await
+            .unwrap();
+
+        let recorded = tenant_deliveries.lock().await;
+        assert_eq!(recorded.len(), 1);
+        assert_eq!(recorded[0].0, json!({"msg": "hello"}));
+    }
+
+    #[test]
+    fn test_remove_tenant_sinks() {
+        let registry = SinkRegistry::new();
+        let tenant = uuid::Uuid::new_v4();
+
+        registry.register_for_tenant(tenant, "webhook", Arc::new(TestSink::new("tenant-webhook")));
+        assert!(registry.get_for_tenant("webhook", Some(&tenant)).is_some());
+
+        registry.remove_tenant_sinks(&tenant);
+        assert!(registry.get_for_tenant("webhook", Some(&tenant)).is_none());
     }
 }

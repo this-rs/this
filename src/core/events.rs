@@ -84,7 +84,38 @@ pub enum LinkEvent {
     },
 }
 
-/// Top-level framework event that wraps entity and link events
+/// Cognitive signals from obrain-db (feature-gated behind `obrain-cognitive`)
+///
+/// These signals represent high-level cognitive observations detected by
+/// obrain's graph analysis layers (stigmergy, co-change detection, etc.)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "signal_type", rename_all = "snake_case")]
+pub enum CognitiveSignal {
+    /// A neural scar was created on a graph node (indicates repeated failure)
+    ScarCreated {
+        node_id: Uuid,
+        scar_type: String,
+        description: String,
+    },
+
+    /// Co-change pattern detected between nodes (temporal coupling)
+    CoChangeDetected { nodes: Vec<Uuid>, strength: f64 },
+
+    /// An episode was learned from a sequence of operations
+    EpisodeLearned { episode_id: Uuid, lesson: String },
+
+    /// An anomaly was detected in the graph structure or behavior
+    AnomalyDetected {
+        node_id: Uuid,
+        anomaly_type: String,
+        score: f64,
+    },
+
+    /// Stigmergic lock-in detected on a path (pheromone intensity above threshold)
+    StigmergyLockIn { path: Vec<Uuid>, intensity: f64 },
+}
+
+/// Top-level framework event that wraps entity, link, and cognitive events
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum FrameworkEvent {
@@ -92,6 +123,21 @@ pub enum FrameworkEvent {
     Entity(EntityEvent),
     /// A link event
     Link(LinkEvent),
+    /// A cognitive signal from obrain-db
+    Cognitive(CognitiveSignal),
+    /// GDPR erasure completed for a tenant
+    GdprErasure {
+        /// The tenant whose data was erased
+        tenant_id: Uuid,
+        /// Number of entities deleted
+        entities_deleted: usize,
+        /// Number of links deleted
+        links_deleted: usize,
+        /// Number of notifications deleted
+        notifications_deleted: usize,
+        /// Timestamp of the erasure
+        erased_at: chrono::DateTime<chrono::Utc>,
+    },
 }
 
 impl FrameworkEvent {
@@ -101,6 +147,8 @@ impl FrameworkEvent {
         match self {
             FrameworkEvent::Entity(_) => "entity",
             FrameworkEvent::Link(_) => "link",
+            FrameworkEvent::Cognitive(_) => "cognitive",
+            FrameworkEvent::GdprErasure { .. } => "gdpr_erasure",
         }
     }
 
@@ -113,6 +161,8 @@ impl FrameworkEvent {
                 | EntityEvent::Deleted { entity_type, .. } => Some(entity_type),
             },
             FrameworkEvent::Link(_) => None,
+            FrameworkEvent::Cognitive(_) => None,
+            FrameworkEvent::GdprErasure { .. } => None,
         }
     }
 
@@ -129,6 +179,14 @@ impl FrameworkEvent {
                     Some(*link_id)
                 }
             },
+            FrameworkEvent::Cognitive(c) => match c {
+                CognitiveSignal::ScarCreated { node_id, .. }
+                | CognitiveSignal::AnomalyDetected { node_id, .. } => Some(*node_id),
+                CognitiveSignal::EpisodeLearned { episode_id, .. } => Some(*episode_id),
+                CognitiveSignal::CoChangeDetected { nodes, .. } => nodes.first().copied(),
+                CognitiveSignal::StigmergyLockIn { path, .. } => path.first().copied(),
+            },
+            FrameworkEvent::GdprErasure { tenant_id, .. } => Some(*tenant_id),
         }
     }
 
@@ -144,6 +202,14 @@ impl FrameworkEvent {
                 LinkEvent::Created { .. } => "created",
                 LinkEvent::Deleted { .. } => "deleted",
             },
+            FrameworkEvent::Cognitive(c) => match c {
+                CognitiveSignal::ScarCreated { .. } => "scar_created",
+                CognitiveSignal::CoChangeDetected { .. } => "co_change_detected",
+                CognitiveSignal::EpisodeLearned { .. } => "episode_learned",
+                CognitiveSignal::AnomalyDetected { .. } => "anomaly_detected",
+                CognitiveSignal::StigmergyLockIn { .. } => "stigmergy_lock_in",
+            },
+            FrameworkEvent::GdprErasure { .. } => "erasure",
         }
     }
 }
@@ -160,17 +226,37 @@ pub struct EventEnvelope {
     /// Sequence number assigned by the EventLog (None if not yet persisted)
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub seq_no: Option<SeqNo>,
+    /// Tenant that produced this event (None = no tenant / backward compat)
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub tenant_id: Option<Uuid>,
 }
 
 impl EventEnvelope {
-    /// Create a new event envelope
+    /// Create a new event envelope (no tenant — backward compatible)
     pub fn new(event: FrameworkEvent) -> Self {
         Self {
             id: Uuid::new_v4(),
             timestamp: Utc::now(),
             event,
             seq_no: None,
+            tenant_id: None,
         }
+    }
+
+    /// Create a new event envelope scoped to a tenant
+    pub fn new_with_tenant(event: FrameworkEvent, tenant_id: Uuid) -> Self {
+        Self {
+            id: Uuid::new_v4(),
+            timestamp: Utc::now(),
+            event,
+            seq_no: None,
+            tenant_id: Some(tenant_id),
+        }
+    }
+
+    /// Get the tenant_id of this envelope
+    pub fn tenant_id(&self) -> Option<Uuid> {
+        self.tenant_id
     }
 }
 
@@ -241,7 +327,7 @@ impl EventBus {
         self.event_log.as_ref()
     }
 
-    /// Publish an event to all subscribers
+    /// Publish an event to all subscribers (no tenant — backward compatible)
     ///
     /// This is non-blocking and will never fail. If there are no subscribers,
     /// the event is simply dropped. If subscribers are lagging, they will
@@ -252,9 +338,31 @@ impl EventBus {
     ///
     /// Returns the number of broadcast receivers that will receive the event.
     pub fn publish(&self, event: FrameworkEvent) -> usize {
-        // Create a single envelope shared between broadcast and EventLog
-        let envelope = EventEnvelope::new(event);
+        self.publish_envelope(EventEnvelope::new(event))
+    }
 
+    /// Publish an event scoped to a specific tenant
+    ///
+    /// The tenant_id is attached to the EventEnvelope and can be used by
+    /// subscribers (WebSocket, SSE, GraphQL subscriptions) to filter events
+    /// per tenant.
+    ///
+    /// Returns the number of broadcast receivers that will receive the event.
+    pub fn publish_for_tenant(&self, event: FrameworkEvent, tenant_id: Uuid) -> usize {
+        self.publish_envelope(EventEnvelope::new_with_tenant(event, tenant_id))
+    }
+
+    /// Publish a pre-built envelope directly
+    ///
+    /// Used by the event bridge (inbound) to publish envelopes with a
+    /// pre-assigned ID (needed for dedup tracking). Prefer `publish()` or
+    /// `publish_for_tenant()` for normal use.
+    pub fn publish_envelope_raw(&self, envelope: EventEnvelope) -> usize {
+        self.publish_envelope(envelope)
+    }
+
+    /// Internal: publish a pre-built envelope
+    fn publish_envelope(&self, envelope: EventEnvelope) -> usize {
         // If an EventLog is attached, append a clone to it (non-blocking)
         if let Some(event_log) = &self.event_log {
             let log = event_log.clone();
@@ -658,5 +766,244 @@ mod tests {
             data: json!({}),
         }));
         assert_eq!(receivers, 0);
+    }
+
+    // --- CognitiveSignal tests ---
+
+    #[test]
+    fn test_cognitive_signal_scar_created() {
+        let node_id = Uuid::new_v4();
+        let event = FrameworkEvent::Cognitive(CognitiveSignal::ScarCreated {
+            node_id,
+            scar_type: "repeated_failure".to_string(),
+            description: "Endpoint /api/orders fails 5x in 1h".to_string(),
+        });
+
+        assert_eq!(event.event_kind(), "cognitive");
+        assert_eq!(event.action(), "scar_created");
+        assert_eq!(event.entity_id(), Some(node_id));
+        assert_eq!(event.entity_type(), None);
+    }
+
+    #[test]
+    fn test_cognitive_signal_co_change_detected() {
+        let n1 = Uuid::new_v4();
+        let n2 = Uuid::new_v4();
+        let event = FrameworkEvent::Cognitive(CognitiveSignal::CoChangeDetected {
+            nodes: vec![n1, n2],
+            strength: 0.85,
+        });
+
+        assert_eq!(event.action(), "co_change_detected");
+        assert_eq!(event.entity_id(), Some(n1)); // First node
+    }
+
+    #[test]
+    fn test_cognitive_signal_co_change_empty_nodes() {
+        let event = FrameworkEvent::Cognitive(CognitiveSignal::CoChangeDetected {
+            nodes: vec![],
+            strength: 0.5,
+        });
+        assert_eq!(event.entity_id(), None);
+    }
+
+    #[test]
+    fn test_cognitive_signal_episode_learned() {
+        let ep_id = Uuid::new_v4();
+        let event = FrameworkEvent::Cognitive(CognitiveSignal::EpisodeLearned {
+            episode_id: ep_id,
+            lesson: "Retry with backoff works better".to_string(),
+        });
+
+        assert_eq!(event.action(), "episode_learned");
+        assert_eq!(event.entity_id(), Some(ep_id));
+    }
+
+    #[test]
+    fn test_cognitive_signal_anomaly_detected() {
+        let node_id = Uuid::new_v4();
+        let event = FrameworkEvent::Cognitive(CognitiveSignal::AnomalyDetected {
+            node_id,
+            anomaly_type: "outlier_degree".to_string(),
+            score: 0.95,
+        });
+
+        assert_eq!(event.action(), "anomaly_detected");
+        assert_eq!(event.entity_id(), Some(node_id));
+    }
+
+    #[test]
+    fn test_cognitive_signal_stigmergy_lock_in() {
+        let p1 = Uuid::new_v4();
+        let p2 = Uuid::new_v4();
+        let event = FrameworkEvent::Cognitive(CognitiveSignal::StigmergyLockIn {
+            path: vec![p1, p2],
+            intensity: 0.92,
+        });
+
+        assert_eq!(event.action(), "stigmergy_lock_in");
+        assert_eq!(event.entity_id(), Some(p1));
+    }
+
+    #[test]
+    fn test_cognitive_signal_stigmergy_empty_path() {
+        let event = FrameworkEvent::Cognitive(CognitiveSignal::StigmergyLockIn {
+            path: vec![],
+            intensity: 0.0,
+        });
+        assert_eq!(event.entity_id(), None);
+    }
+
+    #[test]
+    fn test_cognitive_signal_serialization_roundtrip() {
+        let event = FrameworkEvent::Cognitive(CognitiveSignal::ScarCreated {
+            node_id: Uuid::new_v4(),
+            scar_type: "test".to_string(),
+            description: "test scar".to_string(),
+        });
+
+        let envelope = EventEnvelope::new(event);
+        let json = serde_json::to_string(&envelope).unwrap();
+        let deserialized: EventEnvelope = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(deserialized.event.event_kind(), "cognitive");
+        assert_eq!(deserialized.event.action(), "scar_created");
+        assert!(deserialized.tenant_id.is_none());
+    }
+
+    // --- tenant_id tests ---
+
+    #[test]
+    fn test_envelope_new_has_no_tenant() {
+        let envelope = EventEnvelope::new(FrameworkEvent::Entity(EntityEvent::Created {
+            entity_type: "order".to_string(),
+            entity_id: Uuid::new_v4(),
+            data: json!({}),
+        }));
+        assert!(envelope.tenant_id().is_none());
+    }
+
+    #[test]
+    fn test_envelope_new_with_tenant() {
+        let tenant = Uuid::new_v4();
+        let envelope = EventEnvelope::new_with_tenant(
+            FrameworkEvent::Entity(EntityEvent::Created {
+                entity_type: "order".to_string(),
+                entity_id: Uuid::new_v4(),
+                data: json!({}),
+            }),
+            tenant,
+        );
+        assert_eq!(envelope.tenant_id(), Some(tenant));
+    }
+
+    #[test]
+    fn test_envelope_tenant_id_serialization_roundtrip() {
+        let tenant = Uuid::new_v4();
+        let envelope = EventEnvelope::new_with_tenant(
+            FrameworkEvent::Entity(EntityEvent::Created {
+                entity_type: "x".to_string(),
+                entity_id: Uuid::new_v4(),
+                data: json!({}),
+            }),
+            tenant,
+        );
+
+        let json = serde_json::to_string(&envelope).unwrap();
+        assert!(json.contains("tenant_id"));
+
+        let deserialized: EventEnvelope = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.tenant_id(), Some(tenant));
+    }
+
+    #[test]
+    fn test_envelope_no_tenant_omitted_in_json() {
+        let envelope = EventEnvelope::new(FrameworkEvent::Entity(EntityEvent::Created {
+            entity_type: "x".to_string(),
+            entity_id: Uuid::new_v4(),
+            data: json!({}),
+        }));
+
+        let json = serde_json::to_string(&envelope).unwrap();
+        // tenant_id should be omitted (skip_serializing_if = None)
+        assert!(!json.contains("tenant_id"));
+    }
+
+    #[test]
+    fn test_envelope_backward_compat_deserialize_without_tenant() {
+        // Simulate an old envelope JSON without tenant_id
+        let old_json = r#"{
+            "id": "00000000-0000-0000-0000-000000000001",
+            "timestamp": "2025-01-01T00:00:00Z",
+            "event": {
+                "kind": "entity",
+                "action": "created",
+                "entity_type": "order",
+                "entity_id": "00000000-0000-0000-0000-000000000002",
+                "data": {}
+            }
+        }"#;
+
+        let envelope: EventEnvelope = serde_json::from_str(old_json).unwrap();
+        assert!(envelope.tenant_id().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_publish_for_tenant() {
+        let bus = EventBus::new(16);
+        let mut rx = bus.subscribe();
+
+        let tenant = Uuid::new_v4();
+        let entity_id = Uuid::new_v4();
+        let event = FrameworkEvent::Entity(EntityEvent::Created {
+            entity_type: "order".to_string(),
+            entity_id,
+            data: json!({"amount": 100}),
+        });
+
+        let receivers = bus.publish_for_tenant(event, tenant);
+        assert_eq!(receivers, 1);
+
+        let received = rx.recv().await.unwrap();
+        assert_eq!(received.tenant_id(), Some(tenant));
+        assert_eq!(received.event.entity_id(), Some(entity_id));
+    }
+
+    #[tokio::test]
+    async fn test_publish_without_tenant_backward_compat() {
+        let bus = EventBus::new(16);
+        let mut rx = bus.subscribe();
+
+        bus.publish(FrameworkEvent::Entity(EntityEvent::Created {
+            entity_type: "order".to_string(),
+            entity_id: Uuid::new_v4(),
+            data: json!({}),
+        }));
+
+        let received = rx.recv().await.unwrap();
+        assert!(received.tenant_id().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_publish_for_tenant_cognitive_event() {
+        let bus = EventBus::new(16);
+        let mut rx = bus.subscribe();
+
+        let tenant = Uuid::new_v4();
+        let node_id = Uuid::new_v4();
+
+        bus.publish_for_tenant(
+            FrameworkEvent::Cognitive(CognitiveSignal::AnomalyDetected {
+                node_id,
+                anomaly_type: "spike".to_string(),
+                score: 0.99,
+            }),
+            tenant,
+        );
+
+        let received = rx.recv().await.unwrap();
+        assert_eq!(received.tenant_id(), Some(tenant));
+        assert_eq!(received.event.event_kind(), "cognitive");
+        assert_eq!(received.event.entity_id(), Some(node_id));
     }
 }

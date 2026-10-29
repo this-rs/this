@@ -1,0 +1,85 @@
+flowchart TB
+%% name: liens-enrichis-urls-et-navigation
+%% PROUVE (lu dans le code, jamais suppose) : LinkEntity ne porte ni source_type ni target_type — les deux colonnes de la migration 002 restent NULL et les filtres correspondants sont ignores en SQL.
+%% PROUVE : le registre fabrique deux clefs par LinkDefinition — Forward depuis la source, Reverse depuis la cible — et resolve_route rend la definition ou une erreur RouteNotFound.
+%% PROUVE : les URLs deployees portent le route_name sur 4 segments ; POST sur 3 segments cree l entite cible et le lien.
+%% PROUVE : la profondeur illimitee vient du repli du routeur et d un extracteur recursif, pas de routes generees — detect_link_chains et to_route_pattern ne sont appeles que par les tests.
+%% PROUVE : la navigation profonde rejoue un find_by_source ou find_by_target par saut, puis enrichit en bouclant un fetch d entite par lien, et ne filtre et pagine qu apres avoir tout enrichi.
+%% SOURCES LUES : this/src/links/mod.rs 9-13 ; links/registry.rs (25, 33, 39, 59, 107, 283, 325) ; links/handlers.rs (33, 57, 84, 158, 170, 238, 311, 487, 533, 759, 799, 830, 954, 995, 1133) ; core/link.rs (13, 31, 153, 193, 222) ; core/extractors.rs (59, 108, 192, 297) ; core/service.rs (40, 51, 61).
+%% SOURCES LUES : storage/postgres.rs (504, 508, 540, 543) ; server/router.rs (71, 89, 116) ; server/exposure/rest/mod.rs 63 ; server/middleware/authorization.rs 674-700 ; migrations/002_create_links.up.sql ; docs/guides/ENRICHED_LINKS.md ; docs/changes/SEMANTIC_URLS.md ; docs/guides/MULTI_LEVEL_NAVIGATION.md.
+%% NON ETABLI : aucun serveur this-rs n a ete lance — le cout en requetes SQL reelles n est donc pas chiffre ici ; les expositions GraphQL et gRPC des liens et le decorateur TenantScopedLinkService n ont pas ete lus.
+%% LEGENDE : ✅ existe et tourne · 🟠 ecrit/teste mais partiel ou non deploye · 🔴 refuse, avec sa raison · ⚪ amont, reutilise tel quel
+
+subgraph MODELE["✅ Modele de lien : LinkEntity"]
+  LNK["core/link.rs:13<br/>LinkEntity : id, source_id, target_id<br/>sens unique et dirige"]
+  LTYPE["core/link.rs:31-50<br/>link_type, status, metadata<br/>tenant_id optionnel<br/>002_create_links.up.sql:8"]
+  CARD["aucun champ de cardinalite<br/>N-N atteint par accumulation<br/>1 source vers K cibles"]
+  NOTYPE["storage/postgres.rs:504-507 · 540-542<br/>LinkEntity ne porte pas source_type ni target_type<br/>les deux colonnes SQL restent NULL"]
+end
+
+subgraph REGISTRE["✅ Registre : route_name vers LinkDefinition"]
+  REG["links/registry.rs:25-33<br/>clef type + route_name<br/>vers LinkDefinition"]
+  FWDREV["links/registry.rs:39-50<br/>2 entrees par definition<br/>Forward source vers cible<br/>Reverse cible vers source"]
+  DEFNAME["core/link.rs:222-237<br/>defaut genere au pluriel<br/>cibles-liees et sources-liees"]
+  RESOLVE["links/registry.rs:59-73<br/>resolve_route<br/>ou erreur RouteNotFound"]
+end
+
+subgraph URLS["✅ URLs semantiques deployees"]
+  U1["links/handlers.rs:170 · router.rs:119<br/>GET /users/id/cars-owned<br/>liste des liens enrichis"]
+  U2["links/handlers.rs:533<br/>POST /users/id/cars-owned<br/>cree l entite cible ET le lien"]
+  U3["server/router.rs:122-128<br/>POST PUT DELETE<br/>/users/id/cars-owned/car_id"]
+  U4["links/handlers.rs:759 · 778<br/>GET /users/id/links<br/>introspection des routes"]
+  U5["core/extractors.rs:108-142<br/>route_name remplace link_type<br/>sur les 4 verbes"]
+end
+
+subgraph NAV["✅ Navigation profonde par repli"]
+  RT["server/router.rs:89-114<br/>repli du routeur<br/>5 segments et plus vers deep"]
+  EXT["core/extractors.rs:192-304<br/>RecursiveLinkExtractor<br/>pattern type/id/route/id/route"]
+  LIST["core/extractors.rs:297-301<br/>impair et 5 et plus = liste<br/>pair et 6 et plus = item"]
+  VALID["links/handlers.rs:830-912 · 995-1067<br/>validation de toute la chaine<br/>1 requete de liens par saut"]
+  POSTDEEP["links/handlers.rs:1133 · router.rs:4-7<br/>🟠 handle_nested_path_post exporte<br/>mais absent de build_link_routes"]
+end
+
+subgraph COUT["🟠 Cout reel de la navigation"]
+  ENR["links/handlers.rs:238-285<br/>boucle for link in links<br/>1 fetch d entite par lien"]
+  N1["docs/guides/ENRICHED_LINKS.md:5 et 230<br/>🟠 annoncent zero requete N+1<br/>la boucle en fait une par lien"]
+  PAG["links/handlers.rs:209-226 · 954-970<br/>filtre puis pagination<br/>APRES enrichissement total"]
+  SQLQ["core/service.rs:51 et 61<br/>1 requete de liens par saut<br/>find_by_source, find_by_target"]
+  IDX["002_create_links.up.sql:37-42<br/>🟠 2 index sur source_type et target_type<br/>colonnes toujours NULL, donc inutiles"]
+end
+
+subgraph ECART["🔴 Annonce ou ecrit, non branche au runtime"]
+  CHAINS["links/registry.rs:107 et 283<br/>detect_link_chains, to_route_pattern<br/>appeles par les tests seuls"]
+  DOCS["docs/guides/MULTI_LEVEL_NAVIGATION.md<br/>annonce des routes generees par chaine<br/>aucune n est montee au runtime"]
+  AUTHL["core/link.rs:153 · handlers.rs:57<br/>🟠 LinkAuthConfig par link_type<br/>jamais consultee : l auth d entite tranche<br/>authorization.rs:680"]
+end
+
+  LNK --> LTYPE
+  LNK --> CARD
+  LTYPE --> NOTYPE
+  NOTYPE --> IDX
+  REG --> FWDREV
+  FWDREV --> DEFNAME
+  REG --> RESOLVE
+  RESOLVE --> U1
+  U1 --> U2
+  U2 --> U3
+  U4 --> REG
+  U5 --> REG
+  REG --> RT
+  RT --> EXT
+  EXT --> LIST
+  LIST --> VALID
+  EXT --> POSTDEEP
+  VALID --> SQLQ
+  VALID --> ENR
+  ENR --> N1
+  ENR --> PAG
+  PAG --> SQLQ
+  LTYPE --> AUTHL
+  CHAINS -. "nourrit la doc seulement" .-> DOCS
+
+  classDef danger fill:#ffe0e0,stroke:#c0392b,color:#7b241c
+  classDef note fill:#eef4ff,stroke:#2c5aa0,color:#1b3a6b
+  class CHAINS,DOCS,POSTDEEP,IDX,AUTHL danger
+  class N1,CARD,PAG note

@@ -1,0 +1,66 @@
+flowchart TB
+%% name: migrations-schema-et-audit
+%% PROUVE (lu dans le code, jamais suppose) : les 2 migrations SQL sont du Postgres pur et declarent 9 colonnes + 4 index pour entities, 13 colonnes + 7 index pour links, sans aucune FOREIGN KEY ; aucun runner de migration n existe dans src/ , le seul appel a sqlx::migrate! est dans un test ; MySQL et ScyllaDB redefinissent le meme schema en dur dans src/ mais ne sont appeles que par leurs tests ; le code Rust tient la correspondance colonne par colonne via EntityRow LinkRow ENTITY_COMMON_FIELDS SEARCHABLE_COLUMNS ; deleted_at est ecrit mais jamais filtre et delete est un DELETE dur ; audit.toml ignore 2 RUSTSEC que ci.yml repasse aussi en --ignore ; build.rs ne compile que le proto gRPC.
+%% SOURCES LUES : this/migrations/001_create_entities.up.sql (lignes 7 a 29), 001_create_entities.down.sql (ligne 1), 002_create_links.up.sql (lignes 8 a 45), 002_create_links.down.sql (ligne 1), this/src/storage/postgres.rs (EntityRow ligne 48, ENTITY_COMMON_FIELDS ligne 68, SEARCHABLE_COLUMNS ligne 79, entity_type_name ligne 133, entity_to_row ligne 140, row_to_entity ligne 169, INSERT entities ligne 217, search ligne 319, DELETE dur ligne 303, LinkRow ligne 355, INSERT links ligne 455), this/src/storage/mysql.rs (ensure_schema ligne 50), this/src/storage/scylladb.rs (ensure_schema ligne 47), this/tests/postgres_tests.rs (sqlx::migrate! ligne 83), this/tests/mysql_tests.rs (ligne 86), this/tests/scylladb_tests.rs (ligne 102), this/audit.toml (lignes 5 a 13), this/build.rs (ligne 3), this/Cargo.toml (features postgres ligne 151, mysql ligne 155), this/.github/workflows/ci.yml (job security_audit ligne 204, cargo audit ligne 221).
+%% NON ETABLI : non verifie si un consommateur hors depot applique lui meme les migrations ; non verifie le comportement reel de cargo-audit face a deux sources d ignore identiques ; non lance les tests Docker Postgres MySQL Scylla donc la conformite runtime du schema n est pas mesuree ici ; non verifie les index Neo4j MongoDB DynamoDB ni obrain qui n ont pas de migration SQL ; la racine this-rs/Cargo.toml est un workspace dont l audit.toml est absent mais je n ai pas lance cargo audit pour le confirmer.
+%% LEGENDE : ✅ existe et tourne · 🟠 ecrit/teste mais partiel ou non deploye · 🔴 refuse, avec sa raison · ⚪ amont, reutilise tel quel
+
+subgraph SQL["✅ SQL de reference - les 2 migrations Postgres"]
+    M1["001_create_entities.up.sql<br/>9 colonnes : id entity_type name status<br/>tenant_id data JSONB created_at<br/>updated_at deleted_at - lignes 7 a 17"]
+    M2["4 index poses sur entities<br/>type seul, tenant partiel, type+status<br/>et GIN sur data - lignes 20 23 26 28"]
+    M3["002_create_links.up.sql<br/>13 colonnes dont source_id target_id<br/>source_type target_type nullable<br/>et metadata JSONB - lignes 8 a 22"]
+    M4["7 index poses sur links<br/>source, target, 2 composites link_type<br/>2 partiels sur les types, 1 tenant<br/>lignes 25 a 45"]
+    M5["2 fichiers down : DROP TABLE nu<br/>aucune FOREIGN KEY declaree<br/>source_id et target_id non contraints<br/>down 001 ligne 1 et 002 ligne 1"]
+end
+
+subgraph RUN["🟠 Qui applique vraiment le schema"]
+    R1["aucun runner dans src ou this-cli<br/>grep sqlx::migrate rend 0 hors tests<br/>le framework ne cree rien au demarrage"]
+    R2["tests/postgres_tests.rs:83<br/>sqlx::migrate! ./migrations<br/>sous cfg feature postgres"]
+    R3["features postgres et mysql<br/>activent sqlx/migrate<br/>Cargo.toml:151 et Cargo.toml:155"]
+end
+
+subgraph DUR["🟠 Schema reecrit en dur - 3 moteurs qui divergent"]
+    C1["mysql.rs:50 ensure_schema<br/>CHAR 36 au lieu d UUID, JSON non JSONB<br/>name VARCHAR 255, status VARCHAR 50<br/>2 index seulement au lieu de 4"]
+    C2["scylladb.rs:47 ensure_schema<br/>PK entity_type + id, tout en TEXT<br/>ni tenant_id ni deleted_at<br/>3 index secondaires"]
+    C3["les 2 ne sont appeles que par les tests<br/>mysql_tests.rs:86<br/>scylladb_tests.rs:102<br/>aucun chemin de production"]
+end
+
+subgraph SYN["✅ Contrat de synchronisation schema et code entites"]
+    S1["EntityRow postgres.rs:48<br/>9 champs = 9 colonnes de 001<br/>INSERT nomme les 9 - ligne 217"]
+    S2["LinkRow postgres.rs:355<br/>13 champs = 13 colonnes de 002<br/>INSERT nomme les 13 - ligne 455"]
+    S3["ENTITY_COMMON_FIELDS ligne 68<br/>7 champs retires du JSONB<br/>entity_type et type restent dedans<br/>une colonne ajoutee doit y entrer"]
+    S4["SEARCHABLE_COLUMNS ligne 79<br/>name et status seuls interpoles en SQL<br/>tout autre champ passe par le JSONB<br/>search ligne 319"]
+    S5["la colonne entity_type recoit<br/>resource_name_singular ligne 133<br/>le JSONB garde entity_type d origine<br/>deux identifiants pour un type"]
+end
+
+subgraph AUD["🟠 Audit et build face au schema"]
+    A1["audit.toml:5 ignore 2 RUSTSEC<br/>2023-0071 rsa via sqlx-mysql<br/>2025-0111 tokio-tar testcontainers"]
+    A2["ci.yml:221 repasse les 2 memes<br/>en --ignore sur la ligne de commande<br/>deux sources pour une seule decision"]
+    A3["racine this-rs/Cargo.toml = workspace<br/>sans audit.toml : lance la bas<br/>cargo audit ne lit aucune ignore"]
+    A4["build.rs:3 compile proto/this_grpc.proto<br/>seulement si CARGO_FEATURE_GRPC<br/>ne regarde ni migration ni audit"]
+end
+
+subgraph DRIFT["🟠 Ce qui a deja derive du schema"]
+    D1["deleted_at ecrit en INSERT et UPDATE<br/>mais aucun WHERE deleted_at IS NULL<br/>et delete fait un DELETE dur<br/>postgres.rs:303 - soft delete decoratif"]
+    D2["name 512 cote Postgres<br/>255 cote MySQL : meme entite<br/>deux limites, une seule gagne"]
+end
+
+M1 --> S1
+M3 --> S2
+M1 --> RUN
+M1 -.->|reecrit a la main| DUR
+M1 --> AUD
+S3 --> S1
+S4 --> S1
+S5 --> M1
+R2 --> M1
+C1 -.->|ecart de colonnes| D2
+A1 -.->|meme liste| A2
+A3 -.->|cwd different| A1
+A4 -.->|n inspecte pas| M1
+D1 -.->|colonne morte| M1
+
+classDef danger fill:#7f1d1d,stroke:#fca5a5,color:#ffffff
+classDef note fill:#1e3a5f,stroke:#93c5fd,color:#ffffff
+class D1,D2 danger
+class A2,A3 note

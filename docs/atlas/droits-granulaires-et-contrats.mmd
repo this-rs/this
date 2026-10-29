@@ -1,0 +1,83 @@
+flowchart TB
+%% name: droits-granulaires-et-contrats
+%% PROUVE (lu dans le code, jamais suppose) : une permission est STRUCTUREE famille action cible et la correspondance est exacte, une cible detenue * accordant tout mais une permission SANS cible ne couvrant pas une demande AVEC cible ; un droit d ECHELLE est un PLAFOND et non un cran ; le perimetre de lecture est construit depuis la decision IAM et le defaut est le refus ; le filtrage est applique par requete au relief et a la descente, et ce qui est masque est COMPTE ; en revanche le droit de TISSER edge:create et les droits d ecriture node:write, space:use ne sont lus par AUCUN site d appel hors tests, et known_action n est appele que par ses propres tests ; P1 gele un identifiant sha256-128 v8 avec la convention _uuid/_data en index 0 non deplacable et un _uuid illisible rapporte jamais re-clee ; P2 tient un verrou flock avec epoque croissante, verifie a l ENTREE de 7 mutations, mais commit_wal ne re-verifie PAS et on_commit / tripwire ne sont jamais appeles hors tests.
+%% SOURCES LUES : this/src/storage/permission.rs (Permission 141, parse 153, allows 191, sans cible 210, Scale 61, descent 111, may_create_edge 297, may_write_node 287, may_use_space 302, allows_scale 321, held_allows 361, known_action 125, FAMILIES 49) · this/src/graph/scope.rs (IamScopeResolver 31, scope_of 90, cache par epoque 101) · this/src/graph/relief.rs (labels filtres 464, aretes filtrees 484, vocabulaire publie 1199-1245) · this/src/graph/hierarchy.rs (arete non traversee 250, 367) · this/src/graph/routes.rs (plafond 403 597, refus sans politique 909-937) · this/src/storage/iam.rs (IAM_SCHEMA 61, ACL_PERMS_BLOB_PROP 90, AclStamp::allows 169, hot path allows 715) · this/src/server/middleware/authorization.rs (check_iam 496, deny_abstain 866) · this/src/config/server.rs (abstention refusee 47-53, armed 125) · this/src/server/exposure/rest/mod.rs (perimetre branche 123-130) · this/src/core/identity.rs (ENTITY_ID_SCHEME 50, EntityKey 176, canonical_bytes 248, uuid 267, obrain_default 889, vecteurs d or 1160) · this/tests/identity_conformance.rs (non-regression 120, base etrangere 164, recalcul 189, noeuds internes 219, uuid illisible 252, rapport 278) · this/src/storage/writer_lease.rs (LeaseRecord 234, encode 253, decode 280, assert_live 540, tripwire 575, on_commit 606, FileAuthority 667, lease_path 691, acquire 702) · this/src/storage/obrain.rs (commit_wal 188, check_write 390, appels 646 771 815 966 1103 1154 1179) · this/src/server/builder.rs (bail fail-closed 704-724, opt-out 162) · this/tests/consumer_contract.rs (lecture seule 125, contrat publie 308, contrat et constantes 405, surfaces 434, relief filtre 900, relief dit public 886) · this/tests/security_durability.rs (limites 173, 213).
+%% NON ETABLI : je n ai execute aucun test ni aucun binaire, tout est lu ; le rendu de ce diagramme par le moteur Mermaid du viewer n est pas verifie ici ; les budgets de temps cites par la doc droits-granulaires.md environ 0,03 micro-s n ont pas ete remesures ; je n ai pas verifie si un deploiement reel arme graph.policy, ni si un consommateur hors depot utilise edge:create ; la liste des 7 mutations gardees est lue par grep, pas exercee.
+%% LEGENDE : ✅ existe et tourne · 🟠 ecrit/teste mais partiel ou non deploye · 🔴 refuse, avec sa raison · ⚪ amont, reutilise tel quel
+
+subgraph S1["✅ Le modele : qui, sur quoi, jusqu ou"]
+  D1["Permission = famille action cible<br/>structure, pas une chaine libre<br/>parse 153 refuse la cible vide<br/>permission.rs:141"]
+  D2["Accorde si familles et actions egales<br/>et cible detenue * ou egale a la demandee<br/>SANS cible ne couvre PAS une cible<br/>permission.rs:191-215"]
+  D3["Echelle = PLAFOND, pas un cran isole<br/>echelle:read:groupe accorde cosmos,<br/>monde, groupe mais PAS noeud<br/>permission.rs:111, 321"]
+  D4["ReadScope construit depuis la decision IAM<br/>permission illisible = ignoree, jamais elargie<br/>cache keye par epoque de la decision<br/>scope.rs:90-126"]
+  D5["Applique par requete : labels et aretes filtres<br/>relief.rs:464,484 - hierarchy.rs:250,256<br/>plafond franchi = 403 + finest<br/>routes.rs:597"]
+  D6["Le masquage est COMPTE, jamais deduit<br/>hidden et hidden_labels ; children = 0<br/>la racine n annonce pas ce qu elle cache<br/>consumer_contract.rs:1042,1061"]
+  D1 --> D2
+  D2 --> D4
+  D3 --> D4
+  D4 --> D5
+  D4 --> D6
+  D4 -->|"la meme decision, deux moteurs"| T4
+end
+
+subgraph S2["🟠 Ce qui est ecrit et publie, mais NON applique"]
+  T1["edge:create:CITES = TISSER<br/>droit distinct de edge:read<br/>may_create_edge permission.rs:297<br/>AUCUN site d appel hors tests"]
+  T2["may_write_node :287 et may_use_space :302<br/>definis, testes, jamais lus<br/>par un chemin d ecriture"]
+  T3["known_action :125 et FAMILIES :49<br/>valides par leurs propres tests seuls<br/>Permission::parse ne les appelle pas :<br/>une action inconnue se parse quand meme"]
+  T4["DEUX moteurs de correspondance<br/>iam.rs:169,715 : egalite de chaine, * seul<br/>permission.rs:361 : la grammaire complete<br/>la meme decision, deux lectures"]
+  T5["Le vocabulaire est PUBLIE au relief<br/>familles, exemples, matching, trust<br/>relief.rs:1199-1245 - verrouille par<br/>consumer_contract.rs:360-389"]
+  T5 --> T1
+  T5 -->|"un relief, deux contrats publies"| I6
+  T1 --> T2
+  T3 --> T4
+  T4 --> T1
+end
+
+subgraph S3["✅ P1 : identite gelee, additive, verrouillee"]
+  I1["ENTITY_ID_SCHEME gele<br/>this-rs/entity-id/sha256-128/v1<br/>core/identity.rs:50"]
+  I2["EntityKey = espace, label, qualifier<br/>encodage injectif len puis octets<br/>uuid = sha256 tronque, version 8<br/>identity.rs:176,248,267"]
+  I3["Convention _uuid/_data en index 0<br/>NON deplacable : push insere apres<br/>base this-rs : 2 par convention, 0 derive<br/>identity_conformance.rs:127-142"]
+  I4["Base etrangere : invisible a la convention<br/>lisible par identite derivee ; les deux<br/>chiffres coexistent, donc c est ADDITIF<br/>identity_conformance.rs:164-182"]
+  I5["_uuid illisible = Malformed, JAMAIS re-clee<br/>ce serait une SECONDE identite<br/>pour la meme entite<br/>identity_conformance.rs:252-271"]
+  I6["Rapport honnete : schema, motifs, bornes<br/>this-rs/graph-identity/1 ; les noeuds<br/>_link:* sont vus puis ecartes<br/>identity_conformance.rs:219,278"]
+  I1 --> I2
+  I2 -->|"deux formats GELES, jamais modifies en place"| L1
+  I2 --> I3
+  I3 --> I4
+  I2 --> I5
+  I4 --> I6
+end
+
+subgraph S4["🟠 P2 : entree gardee, filet non branche"]
+  L1["Trame 128 o GELEE : THISLSE1, version,<br/>CRC32 sur 120 o ; decode refuse magic,<br/>CRC puis version, dans cet ordre<br/>writer_lease.rs:238-297"]
+  L2["flock exclusif + epoque strictement croissante<br/>ferme le trou INTRA-processus d obrain<br/>shard.lease dans le repertoire du store<br/>writer_lease.rs:691,702-757"]
+  L3["check_write : 1 load atomique, 7 mutations<br/>create, update, delete entites et liens<br/>obrain.rs:390 ; appels 646, 771, 815,<br/>966, 1103, 1154, 1179"]
+  L4["commit_wal ne re-verifie PAS le bail<br/>obrain.rs:188-196 : le contrat P2-2<br/>affirme l inverse ; la garde vit<br/>a l entree, pas au commit"]
+  L5["on_commit et tripwire JAMAIS appeles<br/>hors des tests du module : le pread<br/>toutes les 256 commits n est pas deploye<br/>writer_lease.rs:575,606"]
+  L6["Fail-closed a la construction : build_host<br/>ECHOUE si le bail est pris, meme par<br/>ce processus ; opt-out explicite<br/>builder.rs:704-724,162"]
+  L7["Lecteur seule : lease_info rend None<br/>il ne prend aucun bail et lit quand meme<br/>les decisions : le refus est cible<br/>consumer_contract.rs:151-163"]
+  L1 --> L2
+  L2 --> L3
+  L3 --> L4
+  L3 --> L5
+  L3 --> L6
+  L6 --> L7
+end
+
+subgraph S5["🔴 Limites et ecarts, avec leur raison"]
+  R1["Le bail est un VERROU, pas une signature<br/>epoque baissee acceptee ; un CRC recalcule<br/>rend une trame forgee valide : la vraie<br/>protection est la maitrise du repertoire<br/>security_durability.rs:173,213"]
+  R2["Le fichier reel est shard.lease<br/>le contrat P2 annonce shard.lock :<br/>l ecart est dans le document<br/>writer_lease.rs:691"]
+  R3["/graph sans politique = 403 deny_abstain<br/>une abstention est un refus depuis<br/>2026-09-13, meme identifie : rien n est<br/>public par accident - routes.rs:909"]
+  R4["Et pourtant le test qui dit le relief<br/>PUBLIC monte le routeur de graphe NU,<br/>sans middleware d autorisation : il ne<br/>prouve pas la surface deployee<br/>consumer_contract.rs:886-893"]
+  R5["Conformite sous feature obrain : hors<br/>feature, les deux fichiers compilent a vide<br/>identity_conformance.rs:17 et<br/>consumer_contract.rs:19"]
+  L2 -->|"le chemin reel du fichier"| R2
+  L4 -->|"ce que le contrat P2-2 promet"| R1
+  R3 --> R4
+end
+
+classDef danger fill:#ffe3e3,stroke:#c0392b,color:#7b241c
+classDef warn fill:#fff3d6,stroke:#b7791f,color:#6b4a10
+classDef note fill:#eef3ff,stroke:#3b5bdb,color:#1b2a6b
+class T1,T2,T3,T4,L4,L5 warn
+class R1,R2,R3,R4,R5 danger
+class D2,I2,L3 note

@@ -1,0 +1,68 @@
+%% name: rattachement-passerelle
+%% PROUVE (lu dans le code, jamais suppose) : la porte est `est_public` = /health, /healthz, /auth, /auth/* et l exception anonyme est bornee a GET/HEAD sur un store declare `tenant=public` OU un service `anonymous:true` ; `garde_store` rend 403 au tenant etranger et 404 au store inconnu ; `en_tete_interdit` refuse TOUT en-tete `x-this-*` venu du client, plus hop-by-hop, host et content-length ; `identite_en_entetes` produit x-this-subject / x-this-tenant / x-this-roles VERIFIES ; `sert_le_service` applique les refus declares AVANT de transmettre, chemin deprefixe du mount ; `plan` et `prevol` n executent rien.
+%% SOURCES LUES : this/src/bin/this-gateway.rs (porte, garde_store, sert_le_service, identite_en_entetes, en_tete_interdit, est_public, lit_declaration, decl_store, decl_service, plan_deploiement, prevol, script_bascule, bloc_caddy) ; this/docs/passerelle-rattachement.md ; tests/passerelle_rattachement.rs ; tests/passerelle_identites.rs ; unite systemd this-rs-gateway.service.
+%% MESURE ICI (2026-10-01, lecture seule, 192.168.1.103:8144) : /health 200 ; /auth/verify 401 ; /stores/runtime/graph 401 ; /stores/linux/graph 200 anonyme ; /services/viz/ 401 — la porte repond, mais AUCUN service n est monte : l ExecStart ne porte que des --store.
+%% NON ETABLI : le rendu du moteur Mermaid embarque sur ces libelles n est pas teste ici (le lint du viewer, oui) ; le cout d un flux SSE a travers la passerelle n a pas ete remesure depuis le 2026-09-14.
+%% LEGENDE : ✅ existe et tourne · 🟠 ecrit et teste, pas deploye · 🔴 refuse, avec sa raison · ⚪ amont, reutilise tel quel
+
+flowchart TB
+
+  subgraph AMONT["⚪ Ce qui existe avant"]
+    A1["⚪ un projet qui tourne deja : le viz de n3 sur :8432, PUBLIC,<br/>ou POST /api/query passe sans authentification ; et une facade<br/>Caddy + un tunnel qui joint la PASSERELLE, jamais chaque projet"]
+  end
+
+  subgraph DECL["✅ La declaration : deploy.yaml"]
+    D1["✅ addr, keys, identites, issuer (paire Ed25519, store<br/>d identites), puis stores: et services:"]
+    D2["✅ stores: — name, path ouvert en LECTURE SEULE (verrou<br/>partage : coexiste avec le viz et le relief), tenant ou public<br/>✅ services: — name, upstream http(s), mount /services/{name}"]
+    D3["✅ une declaration refusee NE DEMARRE PAS : cle inconnue,<br/>upstream sans http(s), mount reserve, anonymous ET tenant,<br/>deny sans /, deux services sur le meme mount, store sans tenant"]
+    D1 --> D2
+    D2 --> D3
+  end
+
+  subgraph GARDE["✅ La chaine de garde, de l exterieur vers l interieur"]
+    G1["✅ 1. le cookie devient un en-tete (POST /auth/token pose<br/>this_token HttpOnly) ; 2. authentification Ed25519 :<br/>le jeton STS devient user_id, tenant_id, roles"]
+    G2["✅ 3. la porte : hors /health, /healthz, /auth/* — pas de<br/>principal => 401, meme reponse pour un jeton absent et<br/>invalide. Exception ETROITE : GET/HEAD anonyme sur un store<br/>public ou un service anonymous, jamais une ecriture"]
+    G3["✅ 4. la garde : tenant etranger => 403, store inconnu<br/>=> 404 ; 5. les refus declares, PUIS la transmission —<br/>deny: /api/query refuse /api/query/plan, jamais /api/querylog"]
+    G1 --> G2
+    G2 --> G3
+  end
+
+  subgraph RECOIT["✅ Ce que le projet rattache recoit"]
+    R1["✅ l identite VERIFIEE en en-tetes : x-this-subject,<br/>x-this-tenant, x-this-roles — les memes noms que<br/>/auth/verify. Un en-tete d identite du CLIENT est ECRASE"]
+    R2["✅ reponse ordinaire et flux SSE NON tamponne portes<br/>(TTFB 0,005 s) ; 🔴 WebSocket et Upgrade NON portes —<br/>mesure : un 200 ordinaire, jamais un 101"]
+    R3["✅ consequence : le projet ne doit etre joignable QUE par<br/>la passerelle — ces en-tetes ne valent que parce que<br/>la requete vient d elle"]
+    R1 --> R2
+    R2 --> R3
+  end
+
+  subgraph EXPO["🟠 Exposer le site rattache"]
+    X1["🟠 via_gateway (defaut) : Caddy fait reverse_proxy vers la<br/>passerelle — UNE route, aucune decision de securite dans Caddy"]
+    X2["🟠 forward_auth : Caddy joint le projet en direct apres<br/>/auth/verify, copie les en-tetes et repose les 403.<br/>✅ la route de login passe AVANT la porte — sans elle,<br/>personne n obtenait jamais son cookie"]
+    X1 --> X2
+  end
+
+  subgraph DEPLOY["🟠 Deployer : plan, prevol, bascule"]
+    P1["🟠 plan --config --out DIR N EXECUTE RIEN : il ecrit l unite<br/>this-gateway.service, le bloc Caddy, le tunnel, dns.txt,<br/>basculer.sh et un RUNBOOK.md"]
+    P2["🟠 prevol constate SANS RIEN MODIFIER, le meme script en<br/>local ou sur la cible, exit 1 des qu un constat est MANQUE.<br/>En tete : cles (une paire regeneree deconnecte tout le monde)<br/>et identites"]
+    P3["🟠 basculer.sh installe, demarre, attend /health et relance<br/>l ANCIENNE si la nouvelle ne repond pas.<br/>🔴 l ancienne est arretee AVANT — contrainte MESUREE :<br/>le store d identites s ouvre en verrou EXCLUSIF"]
+    P1 --> P2
+    P2 --> P3
+  end
+
+  subgraph ETAT["⚠️ Ce qui tourne ici, mesure le 2026-10-01"]
+    E1["✅ this-rs-gateway.service active depuis le 2026-09-16,<br/>binaire sauvegardes-bascule-v3/this-rs-gateway.fix-wal-20260916,<br/>🟠 encore pilotee par la LIGNE DE COMMANDE et non par --config"]
+    E2["🟠 les 4 bases sont des --store, AUCUN service n est monte :<br/>le rattachement d un PROJET n est pas deploye. Les bases,<br/>elles, sont servies : /health 200, /auth/verify 401 (la porte<br/>existe maintenant), runtime 401, linux 200 en anonyme"]
+    E1 --> E2
+  end
+
+  A1 -->|"on ecrit ce qui l expose"| D1
+  D3 -->|"ce fichier ARME le service"| G1
+  D3 -->|"et c est lui qu on deploie"| P1
+  G3 -->|"le principal est connu"| R1
+  R3 -->|"le projet est sous garde"| X1
+  P3 -->|"ce que ca donne ici"| E1
+
+  classDef danger fill:#3a1f24,stroke:#e88a8a,color:#ffdede
+  classDef note fill:#1f2937,stroke:#4b5563,color:#e5e7eb
+  class P3,R2 danger
+  class E1,D3 note

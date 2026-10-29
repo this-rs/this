@@ -1,0 +1,90 @@
+flowchart TB
+%% name: validation-filtrage-pagination
+%% PROUVE (lu dans le code, jamais suppose) : la validation n a qu un point d entree, l extracteur
+%%   Validated que l application doit declarer ; l ordre est filtres de champ PUIS validateurs, mais
+%%   les deux ne parcourent que les cles DEJA presentes dans le JSON recu.
+%% SOURCES LUES : core/validation/extractor.rs (ValidatableEntity 18, Validated 34, FromRequest 57,
+%%   400 JSON 69, operation par methode 84, 422 96, tests 239 et 253), config.rs (validate_and_filter 63,
+%%   filtres 66, erreur de filtre 74, validateurs 82, non-objet 323), validators.rs (required 8, positive 24,
+%%   string_length 42, max_value 69, in_list 87, date_format 107), filters.rs (trim 9, uppercase 20, lowercase 31,
+%%   round_decimals 42), core/query.rs (QueryParams 28, page 84, limit 88, filter_value 93, PaginationMeta 137),
+%%   core/store.rs 9, core/mod.rs 18 et 32, lib.rs 88, core/extractors.rs (IntoResponse 40),
+%%   links/handlers.rs (list_links 168, filtre 214, total 218, pagination 221, apply_link_filters 311,
+%%   egalite 336, dot 355, chemin profond 958 et 971),
+%%   entities/macros.rs (macro 525, ValidatableEntity 566), examples/microservice/entities/order/store.rs (apply_filters 118, cle inconnue 178, apply_sort 186), order/handlers.rs (17, filtre 32, sort 35) et model.rs 5.
+%% NON ETABLI : le rejet d une query string non numerique, l egalite serde entre 100 et 100.0, toute
+%%   validation a la SORTIE d un handler, et ce que font les autres expositions REST ou GraphQL du depot.
+%% LEGENDE : ✅ existe et tourne · 🟠 ecrit/teste mais partiel ou non deploye · 🔴 refuse, avec sa raison ·
+%%   ⚪ amont, reutilise tel quel
+subgraph ENT["✅ Entree : un seul point de validation, et il est opt-in"]
+  A1["core/validation/extractor.rs:57<br/>Validated T implemente FromRequest<br/>c est le seul point de validation<br/>du framework"]
+  A2["extractor.rs:84<br/>operation deduite de la methode<br/>POST create, PUT et PATCH update<br/>tout le reste create, donc aussi GET"]
+  A3["lib.rs:88 exporte Validated<br/>aucun handler de this/src ne l utilise<br/>seuls les exemples microservice le posent<br/>order handlers.rs:67 et 91"]
+end
+
+subgraph RULE["🟠 Ordre reel : filtres puis validateurs, sur les cles presentes"]
+  B1["config.rs:63 validate_and_filter<br/>etape 1 filtres de champ<br/>etape 2 validateurs<br/>dans cet ordre"]
+  B2["config.rs:66 et 74<br/>un filtre qui echoue pousse<br/>Erreur de filtrage sur champ<br/>dans la liste d erreurs"]
+  B3["config.rs:82<br/>les validateurs sont cherches<br/>par la cle presente dans le payload<br/>jamais par la liste des regles"]
+  B4["consequence prouvee par le code<br/>un champ absent du JSON<br/>n est jamais valide<br/>il passe tel quel au handler"]
+  B5["validators.rs:8 required<br/>refuse null seulement<br/>la chaine vide passe<br/>validators.rs:167 le teste"]
+  B6["validators.rs:24 42 87 107<br/>type inattendu rend Ok sans bruit<br/>positive et string_length<br/>laissent passer un non nombre"]
+  B7["config.rs:67 et 83<br/>payload array, chaine ou null<br/>aucune des deux etapes ne tourne<br/>Ok, corps rendu tel quel"]
+end
+
+subgraph QUERY["⚪ Vocabulaire de requete tel que serde le lit"]
+  C1["query.rs:28 QueryParams<br/>page defaut 1, limit defaut 20<br/>filter et sort sont Option"]
+  C2["query.rs:84 et 88<br/>page max 1, limit clampe de 1 a 100<br/>ce sont les getters qui bornent<br/>pas la deserialisation"]
+  C3["query.rs:93 filter_value<br/>serde_json::from_str puis ok<br/>un JSON invalide rend None<br/>le filtre est ignore en silence"]
+  C4["query.rs:60 sort est declare<br/>et documente field deux points asc<br/>mais aucun code de this/src ne le lit<br/>seul l exemple order handlers.rs:35"]
+end
+
+subgraph LNK["🟠 Filtre des liens : egalite stricte seulement"]
+  D1["links/handlers.rs:214 et 958<br/>filter_value puis apply_link_filters<br/>c est le seul filtrage servi<br/>par le framework lui-meme"]
+  D2["handlers.rs:311 pour 336<br/>egalite stricte valeur par valeur<br/>cle absente du lien ou des entites<br/>rejette le lien"]
+  D3["handlers.rs:355 dot-notation<br/>limitee a un seul point<br/>source.name oui, plus profond non<br/>et amount> n est pas un champ"]
+end
+
+subgraph STORE["✅ Store et sortie paginee"]
+  E1["core/store.rs:9 QueryableStore<br/>apply_filters apply_sort list_all<br/>trait declare, aucune impl<br/>nulle part dans this/src"]
+  E2["exemple order store.rs:118<br/>cles de filtre codees en dur<br/>number status customer_name amount><br/>cle inconnue, resultat inchange"]
+  E3["exemple order store.rs:186<br/>apply_sort couvre number amount<br/>created_at updated_at, asc ou desc<br/>aucun tri par defaut"]
+  E4["handlers.rs:218 et 221<br/>total compte APRES filtrage<br/>puis skip start et take limit<br/>la pagination s applique toujours"]
+  E5["query.rs:137 PaginationMeta<br/>total_pages en div_ceil, has_next<br/>quand start plus limit est sous total<br/>le chemin profond handlers.rs:971<br/>reconstruit ce meme JSON a la main"]
+end
+
+subgraph ERR["🔴 Ce que le client recoit vraiment"]
+  F1["extractor.rs:69<br/>JSON invalide ou content-type absent<br/>400 error Invalid JSON<br/>plus details du rejet"]
+  F2["extractor.rs:96<br/>422 error Validation failed<br/>plus le tableau errors accumule<br/>seul 422 du framework"]
+  F3["core/extractors.rs:40<br/>InvalidPath, InvalidEntityId, JsonError<br/>donnent 400 ; RouteNotFound et<br/>LinkNotFound donnent 404<br/>corps error avec le message"]
+  F4["filtre JSON malforme, cle inconnue<br/>ou tri non implemente<br/>200 avec un resultat non filtre<br/>aucun avertissement au client"]
+end
+
+A2 --> A1
+A1 --> B1
+A1 --> F1
+B1 --> B2
+B1 --> B3
+B3 --> B4
+B4 --> B5
+B3 --> B6
+B3 --> F2
+B1 -. "payload non-objet : etapes sautees" .-> B7
+C1 --> C2
+C2 --> E4
+C3 --> D1
+C3 -. "parse rate : filtre ignore" .-> F4
+C4 -. "declare et documente, jamais lu" .-> C1
+D1 --> D2
+D2 --> D3
+D1 --> E4
+D1 -. "route inconnue" .-> F3
+D3 -. "amount> ne matche aucune cle" .-> F4
+E1 -. "trait seul : l impl est dans l exemple" .-> E2
+E2 --> E3
+E4 --> E5
+A3 -. "hors Validated, aucun 422 possible" .-> F4
+classDef danger fill:#ffe0e0,stroke:#c0392b,color:#7b241c
+classDef note fill:#eef4ff,stroke:#2c5aa0,color:#1b3a6b
+class B4,C3,C4,D3,F4 danger
+class A3,B7,E1,F1,F2,F3 note

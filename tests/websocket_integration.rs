@@ -43,7 +43,7 @@ async fn start_test_server() -> (SocketAddr, Arc<ServerHost>) {
     let host = build_test_host();
 
     let rest_router = RestExposure::build_router(host.clone(), vec![]).unwrap();
-    let ws_router = WebSocketExposure::build_router(host.clone()).unwrap();
+    let ws_router = WebSocketExposure::build_router_unenforced(host.clone()).unwrap();
     let app = rest_router.merge(ws_router);
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();

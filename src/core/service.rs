@@ -79,6 +79,23 @@ pub trait LinkService: Send + Sync {
     ///
     /// Used when deleting an entity to maintain referential integrity
     async fn delete_by_entity(&self, entity_id: &Uuid) -> Result<()>;
+
+    /// Delete all links belonging to a specific tenant
+    ///
+    /// Used for GDPR erasure cascade. Returns the number of links deleted.
+    /// Default implementation lists all links, filters by tenant_id, and deletes
+    /// matching entries. Backends may override for more efficient bulk deletion.
+    async fn delete_by_tenant(&self, tenant_id: &Uuid) -> Result<usize> {
+        let all_links = self.list().await?;
+        let mut deleted = 0;
+        for link in all_links {
+            if link.tenant_id.as_ref() == Some(tenant_id) {
+                self.delete(&link.id).await?;
+                deleted += 1;
+            }
+        }
+        Ok(deleted)
+    }
 }
 
 #[cfg(test)]

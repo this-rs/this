@@ -21,6 +21,7 @@
 //! - `POST   /device-tokens/:user_id`              — Register a device token
 //! - `DELETE /device-tokens/:user_id/:token`       — Unregister a device token
 
+use crate::core::auth::AuthContext;
 use crate::events::sinks::device_tokens::{DeviceTokenStore, Platform};
 use crate::events::sinks::in_app::NotificationStore;
 use crate::events::sinks::preferences::{NotificationPreferencesStore, UserPreferences};
@@ -76,6 +77,10 @@ pub fn notification_routes(state: NotificationState) -> Router {
             "/device-tokens/{user_id}/{token}",
             delete(unregister_device_token),
         )
+        // **Une seule garde pour toutes ces routes** : elles ne sont pas des routes
+        // d'entité, donc aucune politique `auth:` ne s'y rattache — le `user_id`
+        // du chemin ne doit jamais être cru sur parole.
+        .layer(axum::middleware::from_fn(ensure_self_middleware))
         .with_state(state)
 }
 
@@ -93,6 +98,102 @@ pub struct PaginationParams {
 // ── Notification handlers ─────────────────────────────────────────────
 
 /// List notifications for a user (newest first)
+/// **L'accès aux ressources personnelles d'un utilisateur.**
+///
+/// # Pourquoi cette garde existe
+///
+/// `/notifications/{user_id}/…` et `/device-tokens/{user_id}` ne sont pas des
+/// routes d'entité : le résolveur de politiques **s'abstient** dessus, donc
+/// aucune `auth:` déclarée ne s'y rattache. Le `user_id` est dans le **chemin**,
+/// et le croire sur parole laissait n'importe quel appelant lire, effacer ou
+/// modifier les notifications d'un autre — et enregistrer ou supprimer ses
+/// **jetons d'appareil**, c'est-à-dire détourner ses notifications poussées.
+/// (Défaut réellement trouvé en auditant la chaîne : aucun test ne couvrait ces
+/// routes.)
+///
+/// # La règle
+///
+/// * **Pas de contexte** : refus. Les données personnelles exigent un appelant
+///   identifié — fail-closed plutôt que fuite.
+/// * **Utilisateur / propriétaire** : seulement ses propres ressources.
+/// * **Administrateur** : peut inspecter (c'est son rôle).
+/// * **Service** : peut agir (c'est un justificatif côté serveur).
+///
+/// Posée en **une couche** sur tout le routeur : les douze routes portent un
+/// `{user_id}`, la garde n'a donc pas à être répétée — et ne peut pas être
+/// oubliée sur une route ajoutée plus tard.
+pub(crate) async fn ensure_self_middleware(
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+
+    let refused = |status: StatusCode, reason: &str| {
+        (
+            status,
+            Json(json!({ "error": "forbidden", "reason": reason })),
+        )
+            .into_response()
+    };
+
+    // Les deux collections portent leur identifiant en **second** segment :
+    // `/notifications/{user_id}/…` et `/device-tokens/{user_id}`. On le lit
+    // explicitement plutôt que de s'appuyer sur le nom du paramètre de route —
+    // une garde qui se trompe de segment ne garde rien.
+    let segments: Vec<&str> = request
+        .uri()
+        .path()
+        .split('/')
+        .filter(|s| !s.is_empty())
+        .collect();
+    let path_user = match segments.as_slice() {
+        ["notifications", user, ..] | ["device-tokens", user, ..] => (*user).to_string(),
+        // L'état d'interface est une ressource PERSONNELLE : `/ui/state/{scope}`
+        // porte la portée dans le chemin, donc la même règle s'applique — le
+        // propriétaire seul, jamais « parce que c'est de l'affichage ».
+        ["ui", "state", portee, ..] => (*portee).to_string(),
+        _ => {
+            tracing::error!(
+                path = %request.uri().path(),
+                "route personnelle sans identifiant lisible : refus (fail-closed)"
+            );
+            return refused(StatusCode::BAD_REQUEST, "identifiant d'utilisateur absent");
+        }
+    };
+
+    let context = request
+        .extensions()
+        .get::<AuthContext>()
+        .cloned()
+        .unwrap_or(AuthContext::Anonymous);
+
+    let allowed = match &context {
+        AuthContext::User { user_id, .. } | AuthContext::Owner { user_id, .. } => {
+            user_id.to_string() == path_user
+        }
+        AuthContext::Admin { .. } | AuthContext::Service { .. } => true,
+        AuthContext::Anonymous => {
+            return refused(
+                StatusCode::UNAUTHORIZED,
+                "ressource personnelle : un appelant identifié est requis",
+            );
+        }
+    };
+
+    if !allowed {
+        tracing::warn!(
+            path = %request.uri().path(),
+            "accès refusé aux ressources d'un AUTRE utilisateur"
+        );
+        return refused(
+            StatusCode::FORBIDDEN,
+            "cette ressource appartient à un autre utilisateur",
+        );
+    }
+
+    next.run(request).await
+}
+
 async fn list_notifications(
     State(state): State<NotificationState>,
     Path(user_id): Path<String>,
@@ -284,8 +385,20 @@ mod tests {
         }
     }
 
+    /// Ces tests exercent la **logique des handlers**. Les routes personnelles
+    /// exigent désormais un appelant identifié (`ensure_self_middleware`), donc
+    /// on pose ici un contexte d'administrateur — légitime pour inspecter.
+    /// La garde elle-même a ses propres tests (`tests/policy_surfaces.rs`) :
+    /// refus d'un autre utilisateur, refus sans contexte, couverture des
+    /// méthodes.
+    fn with_admin(router: Router) -> Router {
+        router.layer(axum::Extension(crate::core::auth::AuthContext::Admin {
+            admin_id: uuid::Uuid::from_u128(1),
+        }))
+    }
+
     fn test_router() -> Router {
-        notification_routes(test_state())
+        with_admin(notification_routes(test_state()))
     }
 
     async fn json_body(response: axum::response::Response) -> Value {
@@ -320,7 +433,7 @@ mod tests {
     #[tokio::test]
     async fn test_list_and_unread_count() {
         let state = test_state();
-        let router = notification_routes(state.clone());
+        let router = with_admin(notification_routes(state.clone()));
 
         // Insert some notifications
         for i in 0..3 {
@@ -335,6 +448,7 @@ mod tests {
                     data: serde_json::Value::Null,
                     read: false,
                     created_at: chrono::Utc::now(),
+                    tenant_id: None,
                 })
                 .await;
         }
@@ -371,7 +485,7 @@ mod tests {
     #[tokio::test]
     async fn test_mark_as_read() {
         let state = test_state();
-        let router = notification_routes(state.clone());
+        let router = with_admin(notification_routes(state.clone()));
 
         let id = Uuid::new_v4();
         state
@@ -385,6 +499,7 @@ mod tests {
                 data: serde_json::Value::Null,
                 read: false,
                 created_at: chrono::Utc::now(),
+                tenant_id: None,
             })
             .await;
 
@@ -411,7 +526,7 @@ mod tests {
     #[tokio::test]
     async fn test_mark_all_as_read() {
         let state = test_state();
-        let router = notification_routes(state.clone());
+        let router = with_admin(notification_routes(state.clone()));
 
         for _ in 0..3 {
             state
@@ -425,6 +540,7 @@ mod tests {
                     data: serde_json::Value::Null,
                     read: false,
                     created_at: chrono::Utc::now(),
+                    tenant_id: None,
                 })
                 .await;
         }
@@ -448,7 +564,7 @@ mod tests {
     #[tokio::test]
     async fn test_delete_notification() {
         let state = test_state();
-        let router = notification_routes(state.clone());
+        let router = with_admin(notification_routes(state.clone()));
 
         let id = Uuid::new_v4();
         state
@@ -462,6 +578,7 @@ mod tests {
                 data: serde_json::Value::Null,
                 read: false,
                 created_at: chrono::Utc::now(),
+                tenant_id: None,
             })
             .await;
 
@@ -522,7 +639,7 @@ mod tests {
     #[tokio::test]
     async fn test_update_preferences() {
         let state = test_state();
-        let router = notification_routes(state.clone());
+        let router = with_admin(notification_routes(state.clone()));
 
         let response = router
             .oneshot(
@@ -560,7 +677,7 @@ mod tests {
     #[tokio::test]
     async fn test_mute_unmute() {
         let state = test_state();
-        let router = notification_routes(state.clone());
+        let router = with_admin(notification_routes(state.clone()));
 
         // Mute
         let response = router
@@ -607,7 +724,7 @@ mod tests {
     #[tokio::test]
     async fn test_register_and_list_device_tokens() {
         let state = test_state();
-        let router = notification_routes(state.clone());
+        let router = with_admin(notification_routes(state.clone()));
 
         // Register
         let response = router
@@ -651,7 +768,7 @@ mod tests {
     #[tokio::test]
     async fn test_unregister_device_token() {
         let state = test_state();
-        let router = notification_routes(state.clone());
+        let router = with_admin(notification_routes(state.clone()));
 
         state
             .device_token_store

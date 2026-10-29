@@ -1,0 +1,77 @@
+flowchart TB
+%% name: exposition-grpc
+%% PROUVE (lu dans le code, jamais suppose) : les 4 services vivent dans this/proto/this_grpc.proto ; le montage reel est dans grpc/mod.rs ; le TYPE d entite vient de la REQUETE et non du proto ; l execution reelle des tests a rendu 26 passed / 0 failed en 0.23s.
+%% SOURCES LUES : this_grpc.proto l.11 32 143 218 et l.66 ; grpc/mod.rs l.106 109 142-144 147 157 205-270 ; grpc/entity_service.rs l.37 70 92-104 127 133 ; grpc/link_service.rs l.54-61 80 90 ; grpc/event_service.rs l.55-106 255 286 ; grpc/notification_service.rs l.50 107 ; grpc/proto_generator.rs l.36 120 ; grpc/convert.rs l.13 55 74 ; this/build.rs l.3 ; tests/grpc_integration.rs l.227 243 606 625 644 1158 1174 1322 ; tests/notification_e2e.rs l.414 461.
+%% NON ETABLI : aucun test n exerce le REFUS quand les politiques sont armees ; le filtrage par locataire du flux n est exerce nulle part ; je n ai ni compile ni servi le proto exporte ; le champ total n est jamais verifie.
+%% LEGENDE : ✅ existe et tourne · 🟠 ecrit/teste mais partiel ou non deploye · 🔴 refuse, avec sa raison · ⚪ amont, reutilise tel quel
+subgraph SPROTO["🟠 PROTO this_grpc.proto : 4 services, 17 rpc, aucune entite nommee"]
+  A1["this/proto/this_grpc.proto<br/>package this_grpc, 304 lignes<br/>les donnees sont des google.protobuf.Struct l.66"]
+  A2["EntityService : 5 rpc<br/>Get, List, Create, Update, Delete<br/>ligne 11 a 26"]
+  A3["LinkService : 5 rpc<br/>ligne 32 a 47<br/>LinkResponse porte source_data et target_data l.127"]
+  A4["EventService : Subscribe seul<br/>reponse server-streaming l.148<br/>5 filtres optionnels, AND entre eux l.158"]
+  A5["NotificationService : 6 rpc<br/>liste, compteur, marquage, suppression<br/>plus SubscribeNotifications l.218"]
+end
+subgraph SMONT["✅ MONTAGE : ce que le serveur sert vraiment"]
+  B1["this/build.rs l.3 : le proto n est compile<br/>que si la feature grpc est posee<br/>sinon include_proto n a rien a lire"]
+  B2["grpc/mod.rs l.142-144 : Entity, Link<br/>et Event sont montes TOUJOURS<br/>dans les deux constructeurs de routeur"]
+  B3["l.147 : NotificationService n est monte<br/>que si un notification_store existe<br/>sinon il est absent du routeur, pas en erreur"]
+  B4["l.205-270 : variante sans repli tonic<br/>route_service sur /Service/{*rest}<br/>c est elle qui cohabite avec REST"]
+  B5["l.157 : GET /grpc/proto<br/>ProtoGenerator reecrit un proto<br/>qui n est PAS celui que le serveur sert"]
+  B6["🔴 l.109 : refuse de monter la surface<br/>si des politiques auth: sont armees<br/>authorize vaut true par defaut, host.rs l.162"]
+end
+subgraph SMAP["✅ MAPPING proto vers entites : le type est resolu a l execution"]
+  C1["entity_type de la requete resolu<br/>dans host.entity_fetchers et entity_creators<br/>entity_service.rs l.37-58"]
+  C3["convert.rs l.13 et l.55 : Struct vers<br/>serde_json::Value et retour<br/>entier sans fraction rendu en i64 l.74"]
+  C4["create et update passent par EntityCreator<br/>entity_service.rs l.127 et l.168<br/>uuid invalide donne InvalidArgument l.70"]
+  C5["toute ecriture publie sur l EventBus<br/>entity_service.rs l.133 et link_service.rs l.90<br/>le meme bus que REST et WebSocket"]
+  C6["link : LinkEntity::new puis enrichissement<br/>en essayant TOUS les fetchers jusqu au premier<br/>qui connait l id, link_service.rs l.54-61"]
+  C7["list : limit et offset a 0 valent None<br/>total vaut la TAILLE DE PAGE et non le total<br/>entity_service.rs l.92-104"]
+  C8["EventService : filtres AND, absent = joker<br/>event_service.rs l.55-106<br/>sans EventBus le flux repond unavailable l.286"]
+end
+subgraph STEST["🟠 CE QUE LES TESTS ETABLISSENT VRAIMENT : 26 verts mesures en 0.23s"]
+  D1["tests/grpc_integration.rs : 26 tests<br/>mesure : cargo test -p this-rs<br/>--features grpc, 26 passed 0 failed"]
+  D2["de vrais clients tonic sur socket TCP<br/>CRUD entite bout en bout l.243-264<br/>et deux types d entites distincts l.1473"]
+  D3["codes etablis : type inconnu NotFound l.625<br/>uuid invalide InvalidArgument l.644<br/>entite absente Internal et non NotFound l.606"]
+  D4["liens : create, get, find par source et par<br/>cible, filtre link_type, delete l.652 a l.1054<br/>metadonnees de lien l.717"]
+  D5["cohabitation : la variante sans repli se<br/>merge sans paniquer l.1158, tandis que<br/>build_router avec repli PANIQUE l.1174"]
+  D6["/grpc/proto : 200 et trois sous-chaines<br/>syntax, package this_api, LinkService l.1322<br/>jamais compile, jamais appele en RPC"]
+  D7["🟠 EventService et NotificationService ne<br/>sont PAS exerces ici, zero occurrence<br/>etablis ailleurs : notification_e2e.rs l.461 et l.414"]
+end
+subgraph SECART["🟠 ECARTS et angles morts"]
+  E1["le proto exporte annonce package this_api<br/>et des services types par entite<br/>proto_generator.rs l.36 et l.120"]
+  E2["la doc de build_router l.87-90 cite Entity<br/>et Link mais OUBLIE EventService<br/>pourtant monte l.144"]
+  E3["🟠 le locataire du flux n est filtre que si<br/>AuthContext est pose ou si x-tenant-id est<br/>lisible, event_service.rs l.255 : aucun interceptor au depot"]
+  E4["⚪ amont reutilise tel quel : EntityFetcher<br/>EntityCreator, EventBus, InMemoryLinkService<br/>NotificationStore, aucun type propre au gRPC"]
+end
+B1 --> A1
+A1 --> A2
+A1 --> A3
+A1 --> A4
+A1 --> A5
+A2 --> B2
+A3 --> B2
+A4 --> B2
+A5 --> B3
+B6 -->|opt-in explicite et journalise| B2
+B2 --> B4
+B2 --> B5
+B2 --> C1
+C1 --> C3
+C1 --> C4
+C1 --> C6
+C1 --> C7
+C4 --> C5
+C5 --> C8
+D1 --> D2
+D1 --> D5
+D1 --> D6
+D1 --> D7
+D2 --> D3
+D2 --> D4
+E1 -.->|ecart avec le proto servi| B5
+E2 -.->|doc incomplete| B2
+E3 -.->|angle mort du test| C8
+classDef danger fill:#7f1d1d,stroke:#ef4444,color:#fff,stroke-width:2px
+classDef note fill:#1e293b,stroke:#64748b,color:#e2e8f0,stroke-dasharray:4 3
+class B6 danger
+class E1,E2,E3 note

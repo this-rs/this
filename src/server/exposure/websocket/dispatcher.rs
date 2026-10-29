@@ -88,7 +88,7 @@ mod tests {
         let dispatcher = ConnectionManagerDispatcher::new(cm.clone());
 
         // Create a connection and associate a user
-        let (conn_id, mut rx) = cm.connect().await;
+        let (conn_id, mut rx) = cm.connect(None).await;
         cm.associate_user(&conn_id, "user-42".to_string())
             .await
             .unwrap();
@@ -128,8 +128,8 @@ mod tests {
         let cm = Arc::new(ConnectionManager::new(test_host()));
         let dispatcher = ConnectionManagerDispatcher::new(cm.clone());
 
-        let (_conn1, mut rx1) = cm.connect().await;
-        let (_conn2, mut rx2) = cm.connect().await;
+        let (_conn1, mut rx1) = cm.connect(None).await;
+        let (_conn2, mut rx2) = cm.connect(None).await;
 
         let payload = json!({"message": "System update"});
         let count = dispatcher.broadcast(payload).await.unwrap();

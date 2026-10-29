@@ -53,14 +53,16 @@ jobs:
           path: target
           key: ${{ runner.os }}-cargo-build-target-${{ matrix.rust }}-${{ hashFiles('**/Cargo.lock') }}
 
+      # Use --features all,wami (not --all-features) because obrain and
+      # frontend depend on local path checkouts not available on CI.
       - name: Run unit tests
-        run: cargo test --lib --all-features --verbose
+        run: cargo test --lib --features all,wami --verbose
 
       - name: Run integration tests (sequential for DB isolation)
-        run: cargo test --all-features --test '*' -- --test-threads=1
+        run: cargo test --features all,wami --test '*' -- --test-threads=1
 
       - name: Run doc tests
-        run: cargo test --doc --all-features
+        run: cargo test --doc --features all,wami
 
   # Code coverage
   coverage:
@@ -92,7 +94,7 @@ jobs:
           restore-keys: ${{ runner.os }}-cargo-coverage-
 
       - name: Generate code coverage
-        run: cargo llvm-cov --all-features --workspace --lcov --output-path lcov.info -- --test-threads=1
+        run: cargo llvm-cov --features all,wami --workspace --lcov --output-path lcov.info -- --test-threads=1
 
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v7
@@ -155,7 +157,7 @@ jobs:
           key: ${{ runner.os }}-cargo-build-target-clippy-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Run clippy
-        run: cargo clippy --all-targets --all-features -- -D warnings
+        run: cargo clippy --all-targets --features all,wami -- -D warnings
 
   # Vérification de la compilation des exemples
   examples:
@@ -255,7 +257,7 @@ jobs:
           key: ${{ runner.os }}-cargo-build-target-docs-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Check documentation
-        run: cargo doc --no-deps --all-features
+        run: cargo doc --no-deps --features all,wami
         env:
           RUSTDOCFLAGS: -D warnings
 
@@ -279,16 +281,16 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - name: Build
-        run: cargo build --all-features
+        run: cargo build --features all,wami
 
       # Unit tests run on all platforms (no Docker needed).
       # Integration tests (testcontainers) only run on Linux where Docker is available.
       - name: Run unit tests
-        run: cargo test --lib --all-features
+        run: cargo test --lib --features all,wami
 
       - name: Run integration tests (Linux only)
         if: runner.os == 'Linux'
-        run: cargo test --all-features --test '*' -- --test-threads=1
+        run: cargo test --features all,wami --test '*' -- --test-threads=1
 
   # Note: Minimal Versions (feature-powerset) check moved to release.yml
   # as it's too slow for PR/push CI (~10+ min) and only needed before release.

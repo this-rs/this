@@ -44,6 +44,31 @@ pub trait Entity: Clone + Send + Sync + 'static {
     fn updated_at(&self) -> DateTime<Utc>;
 
     /// Get the deletion timestamp (soft delete)
+    ///
+    /// # Le contrat réel — mesuré, pas supposé (2026-10-01)
+    ///
+    /// Le **geste de marquage** existe : les entités engendrées par
+    /// [`impl_data_entity!`](crate::impl_data_entity) et
+    /// [`impl_link_entity!`](crate::impl_link_entity) portent `soft_delete()`
+    /// et `restore()`, qui écrivent et effacent `deleted_at`. Mais
+    /// `DataService::delete`, lui, est un **DELETE dur** : le framework ne
+    /// supprime jamais en douceur par sa couche de données.
+    ///
+    /// Conséquence, verrouillée par le banc partagé des neuf backends
+    /// (`tests/storage_harness/data_service_tests.rs`,
+    /// `test_soft_deleted_entity_is_still_listed_the_current_contract`) :
+    /// **`get` et `list` ne filtrent pas `deleted_at`**. Une entité marquée
+    /// reste servie ; cacher ce qui est marqué est à l'appelant
+    /// ([`Entity::is_deleted`]).
+    ///
+    /// Ce n'est pas un oubli mais une **convention explicite** : l'atlas du
+    /// 2026-10-01 avait relevé l'écart sans pouvoir dire si les neuf backends
+    /// s'accordaient — trois nomment la colonne (postgres, mysql, dynamodb),
+    /// six ne la nomment jamais. Le banc fait désormais tomber tout backend qui
+    /// filtrerait **seul** : une même requête qui rend un résultat différent
+    /// selon le moteur est pire qu'une convention assumée. Pour de vraies
+    /// suppressions douces, il faut **retourner ce test** et changer les
+    /// backends ensemble.
     fn deleted_at(&self) -> Option<DateTime<Utc>>;
 
     /// Get the entity status

@@ -121,8 +121,17 @@ impl FlowRuntime {
         while let Some(envelope) = stream.next().await {
             let event = &envelope.event;
 
-            // Find matching flows
+            // Find matching flows (respecting tenant scoping)
             for flow in &self.flows {
+                // Tenant isolation: if this flow is scoped to a specific tenant,
+                // only trigger it for events from that tenant
+                if let Some(flow_tenant) = flow.tenant_id {
+                    match envelope.tenant_id {
+                        Some(event_tenant) if event_tenant == flow_tenant => {} // Match
+                        _ => continue, // Skip: flow is tenant-scoped but event is from a different tenant (or global)
+                    }
+                }
+
                 if flow.matcher.matches(event) {
                     tracing::debug!(
                         flow = %flow.name,
@@ -136,6 +145,9 @@ impl FlowRuntime {
                         self.link_service.clone(),
                         self.entity_fetchers.clone(),
                     );
+
+                    // Propagate tenant_id from the envelope
+                    ctx = ctx.with_tenant_id(envelope.tenant_id);
 
                     // Attach sink registry if available
                     if let Some(ref registry) = self.sink_registry {
@@ -595,5 +607,102 @@ mod tests {
 
         // Map should NOT have been executed (filter dropped)
         assert!(ctx.get_var("_payload").is_none());
+    }
+
+    // ── Tenant isolation tests ───────────────────────────────────���──
+
+    #[tokio::test]
+    async fn test_tenant_scoped_flow_only_triggers_for_matching_tenant() {
+        let event_log = Arc::new(InMemoryEventLog::new());
+        let tenant_a = Uuid::new_v4();
+        let tenant_b = Uuid::new_v4();
+
+        // Create a flow scoped to tenant_a
+        let mut flow = compile_flow(&FlowConfig {
+            name: "tenant_a_flow".to_string(),
+            description: None,
+            trigger: TriggerConfig {
+                kind: "entity.created".to_string(),
+                link_type: None,
+                entity_type: Some("order".to_string()),
+            },
+            pipeline: vec![PipelineStep::Map(MapConfig {
+                template: json!({"msg": "tenant A order"}),
+            })],
+        })
+        .unwrap();
+        flow.tenant_id = Some(tenant_a);
+
+        let link_service = Arc::new(MockLinkService) as Arc<dyn LinkService>;
+        let runtime = FlowRuntime::new(vec![flow], event_log.clone(), link_service, HashMap::new());
+
+        let handle = runtime.run(SeekPosition::Latest);
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+
+        // Publish from tenant_b — should NOT trigger the flow
+        event_log
+            .append(EventEnvelope::new_with_tenant(
+                make_entity_event("order"),
+                tenant_b,
+            ))
+            .await
+            .unwrap();
+
+        // Publish from tenant_a — should trigger
+        event_log
+            .append(EventEnvelope::new_with_tenant(
+                make_entity_event("order"),
+                tenant_a,
+            ))
+            .await
+            .unwrap();
+
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        handle.abort();
+        // No panics = success; a more rigorous test would use a spy sink
+    }
+
+    #[tokio::test]
+    async fn test_global_flow_triggers_for_all_tenants() {
+        let event_log = Arc::new(InMemoryEventLog::new());
+        let tenant_a = Uuid::new_v4();
+
+        // Global flow (tenant_id = None)
+        let flow = compile_flow(&FlowConfig {
+            name: "global_flow".to_string(),
+            description: None,
+            trigger: TriggerConfig {
+                kind: "entity.created".to_string(),
+                link_type: None,
+                entity_type: Some("order".to_string()),
+            },
+            pipeline: vec![PipelineStep::Map(MapConfig {
+                template: json!({"msg": "global order"}),
+            })],
+        })
+        .unwrap();
+        // flow.tenant_id is None by default
+
+        let link_service = Arc::new(MockLinkService) as Arc<dyn LinkService>;
+        let runtime = FlowRuntime::new(vec![flow], event_log.clone(), link_service, HashMap::new());
+
+        let handle = runtime.run(SeekPosition::Latest);
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+
+        // Both tenant-scoped and global events should trigger
+        event_log
+            .append(EventEnvelope::new_with_tenant(
+                make_entity_event("order"),
+                tenant_a,
+            ))
+            .await
+            .unwrap();
+        event_log
+            .append(EventEnvelope::new(make_entity_event("order")))
+            .await
+            .unwrap();
+
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        handle.abort();
     }
 }

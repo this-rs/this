@@ -104,6 +104,26 @@ impl GrpcExposure {
     ///
     /// Returns a fully configured Axum router with gRPC services and tonic fallback.
     pub fn build_router(host: Arc<ServerHost>) -> Result<Router> {
+        // **Fail-closed** : les opérations gRPC ne sont pas résolues par route,
+        // donc aucune politique `auth:` ne s'y rattache.
+        crate::server::exposure::refuse_unenforced_surface(
+            &host,
+            "gRPC",
+            "GrpcExposure::build_router_unenforced",
+        )?;
+        Self::build_router_unenforced(host)
+    }
+
+    /// Comme [`GrpcExposure::build_router`], en **acceptant explicitement** que
+    /// les politiques `auth:` ne s'appliquent pas au gRPC.
+    ///
+    /// Voir [`GraphQLExposure::build_router_unenforced`](crate::server::GraphQLExposure::build_router_unenforced)
+    /// pour ce que cet opt-in signifie.
+    pub fn build_router_unenforced(host: Arc<ServerHost>) -> Result<Router> {
+        crate::server::exposure::warn_unenforced_surface(
+            "gRPC",
+            "GrpcExposure::build_router_unenforced",
+        );
         use axum::routing::get;
         use proto::entity_service_server::EntityServiceServer;
         use proto::event_service_server::EventServiceServer;
@@ -183,6 +203,21 @@ impl GrpcExposure {
     /// a bare `axum::Router` using `route_service()`, replicating the path format
     /// `/{package.ServiceName}/{*rest}` that tonic uses internally.
     pub fn build_router_no_fallback(host: Arc<ServerHost>) -> Result<Router> {
+        crate::server::exposure::refuse_unenforced_surface(
+            &host,
+            "gRPC",
+            "GrpcExposure::build_router_no_fallback_unenforced",
+        )?;
+        Self::build_router_no_fallback_unenforced(host)
+    }
+
+    /// Variante sans repli, en **acceptant explicitement** l'absence
+    /// d'application des politiques (voir [`GrpcExposure::build_router`]).
+    pub fn build_router_no_fallback_unenforced(host: Arc<ServerHost>) -> Result<Router> {
+        crate::server::exposure::warn_unenforced_surface(
+            "gRPC (sans repli)",
+            "GrpcExposure::build_router_no_fallback_unenforced",
+        );
         use axum::routing::get;
         use proto::entity_service_server::EntityServiceServer;
         use proto::event_service_server::EventServiceServer;
