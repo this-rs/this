@@ -31,6 +31,9 @@ serde_yaml = { version = "0.9", optional = true }
 http = { version = "1", optional = true }
 tonic = { version = "0.14", optional = true, default-features = false }
 async-graphql = { version = "7", optional = true, default-features = false }
+# Leptos server functions: `impl FromServerFnError for ContractError` (feature `leptos`).
+# 0.9: `status_code()` and `ser() -> ServerFnErrorResponseParts` do not exist in 0.8.x.
+server_fn = { version = "=0.9.0-rc0", optional = true, default-features = false }
 
 [features]
 default = []
@@ -42,6 +45,8 @@ pattern = ["dep:regex"]
 http = ["dep:http"]
 grpc = ["dep:tonic"]
 graphql = ["dep:async-graphql"]
+# `ContractError` as the error type of Leptos server functions (wasm32 and ssr).
+leptos = ["dep:server_fn", "http"]
 
 [dev-dependencies]
 serde_yaml = "0.9"
