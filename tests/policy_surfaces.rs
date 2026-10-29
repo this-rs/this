@@ -12,8 +12,6 @@
 //! * ce qui **refuse de se monter** quand il ne peut pas appliquer les
 //!   politiques.
 
-#![cfg(feature = "obrain")]
-
 use std::sync::Arc;
 
 use axum::Router;
@@ -28,6 +26,7 @@ use this::core::link::LinkDefinition;
 use this::server::entity_registry::{EntityDescriptor, EntityRegistry};
 use this::server::exposure::rest::notifications::{NotificationState, notification_routes};
 use this::server::middleware::authorization::{Authorization, Requirement};
+#[cfg(feature = "obrain")]
 use this::storage::ObrainStore;
 use this::ui::routes::{UiStateCtx, ui_routes};
 use this::ui::state::UiStateStore;
@@ -76,12 +75,15 @@ fn authorization(policy: &str) -> Authorization {
     };
     let mut registry = EntityRegistry::new();
     registry.register(Box::new(Orders));
-    Authorization::new(
+    let authz = Authorization::new(
         Arc::new(config),
         &registry,
         Arc::new(AuthResolverRegistry::new()),
-    )
-    .with_iam(&ObrainStore::new_in_memory())
+    );
+    // The IAM plan only exists with obrain; the path classification does not need it.
+    #[cfg(feature = "obrain")]
+    let authz = authz.with_iam(&ObrainStore::new_in_memory());
+    authz
 }
 
 /// La classification d'un chemin, en clair — c'est **la carte** que ces tests
@@ -325,7 +327,7 @@ async fn the_guard_covers_every_method_of_the_collection() {
 /// GraphQL applique désormais les politiques **par opération** (flux auth du
 /// ModuleDescriptor) : armé, il se MONTE, et chaque résolveur juge son
 /// `(entité, opération)` comme le REST — ici `list: admin_only` refuse l'anonyme.
-#[cfg(feature = "graphql")]
+#[cfg(all(feature = "graphql", feature = "obrain"))]
 #[tokio::test]
 async fn graphql_mounts_armed_and_enforces_per_operation() {
     use this::server::GraphQLExposure;
@@ -369,7 +371,7 @@ async fn graphql_mounts_armed_and_enforces_per_operation() {
 
 /// Et une application qui a **désarmé** l'application des politiques peut monter
 /// la surface sans rien accepter de particulier : il n'y a rien à appliquer.
-#[cfg(feature = "graphql")]
+#[cfg(all(feature = "graphql", feature = "obrain"))]
 #[tokio::test]
 async fn graphql_mounts_when_nothing_is_enforced() {
     use this::server::GraphQLExposure;
@@ -391,10 +393,10 @@ async fn graphql_mounts_when_nothing_is_enforced() {
     );
 }
 
-#[cfg(any(feature = "graphql", feature = "grpc"))]
+#[cfg(all(any(feature = "graphql", feature = "grpc"), feature = "obrain"))]
 struct ModuleImpose;
 
-#[cfg(any(feature = "graphql", feature = "grpc"))]
+#[cfg(all(any(feature = "graphql", feature = "grpc"), feature = "obrain"))]
 impl this::core::module::Module for ModuleImpose {
     fn name(&self) -> &str {
         "impose"
@@ -428,7 +430,7 @@ impl this::core::module::Module for ModuleImpose {
 /// gRPC (non appliqué) dans le même routeur. gRPC applique désormais les
 /// politiques par appel : le raccourci se monte armé — SAUF si une partie non
 /// couverte est montée (`NotificationService`), où il refuse toujours.
-#[cfg(feature = "grpc")]
+#[cfg(all(feature = "grpc", feature = "obrain"))]
 #[tokio::test]
 async fn the_framework_grpc_shortcut_refuses_instead_of_half_protecting() {
     use this::server::builder::ServerBuilder;
@@ -526,3 +528,12 @@ async fn l_etat_d_interface_d_un_autre_est_refuse() {
         .unwrap();
     assert_eq!(autre_refuse.status(), axum::http::StatusCode::FORBIDDEN);
 }
+
+/// Without `--features obrain` (a local path dependency, absent from CI) the three
+/// tests that build a host on an `ObrainStore` are not compiled. This stub makes the
+/// gap VISIBLE in every run (`ignored, ...` in the output) instead of a silent
+/// "0 tests"; the rest of this file runs on any feature set.
+#[cfg(not(feature = "obrain"))]
+#[test]
+#[ignore = "NOT RUN: graphql/grpc host tests of this file need --features obrain"]
+fn obrain_gated_tests_were_not_run() {}

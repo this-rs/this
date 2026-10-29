@@ -168,7 +168,7 @@ pub(crate) async fn request_guard(
             Err(e) => {
                 let e = localize_in(host, headers, query, e);
                 return Err((
-                    axum::http::StatusCode::UNAUTHORIZED,
+                    e.http_status_code(),
                     AxumJson(serde_json::json!({
                         "errors": [{ "message": e.message, "extensions": e.graphql_extensions() }]
                     })),

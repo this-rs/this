@@ -475,7 +475,21 @@ impl LinksConfig {
     pub fn overlay_descriptor(mut self, d: &crate::descriptor::ModuleDescriptor) -> Self {
         use crate::descriptor::Operation as Op;
         for e in &d.entities {
-            let p = |op: Op| legacy_policy(&e.permissions.effective(&op));
+            // An operation the descriptor does not DECLARE keeps the YAML policy already
+            // present for this entity: the descriptor's implicit default must never
+            // loosen a hand-written `auth:`. Without YAML, the default applies.
+            let prior = self
+                .entities
+                .iter()
+                .find(|x| x.singular == e.name)
+                .map(|x| x.auth.clone());
+            let p = |op: Op| match (e.permissions.policy(&op), &prior) {
+                (Some(x), _) => legacy_policy(x),
+                (None, Some(y)) => crate::core::auth::descriptor_policy::entity_auth_field(y, &op)
+                    .map(str::to_string)
+                    .unwrap_or_else(|| legacy_policy(&e.permissions.effective(&op))),
+                (None, None) => legacy_policy(&e.permissions.effective(&op)),
+            };
             let cfg = EntityConfig {
                 singular: e.name.clone(),
                 plural: e.plural.clone(),
@@ -498,14 +512,30 @@ impl LinksConfig {
         }
         for l in &d.links {
             let scope = d.entity(&l.source);
-            let auth = (!l.permissions.is_empty()).then(|| {
-                let p = |op: Op| legacy_policy(&l.effective_policy(scope, &op));
+            // Same rule as entities: a link auth already in YAML survives for every
+            // operation the descriptor does not declare on the link itself.
+            let prior = self
+                .links
+                .iter()
+                .find(|x| {
+                    x.link_type == l.link_type
+                        && x.source_type == l.source
+                        && x.target_type == l.target
+                })
+                .and_then(|x| x.auth.clone());
+            let auth = (!l.permissions.is_empty() || prior.is_some()).then(|| {
+                let p = |op: Op, yaml: Option<&String>| match (l.permissions.policy(&op), yaml) {
+                    (Some(x), _) => legacy_policy(x),
+                    (None, Some(y)) => y.clone(),
+                    (None, None) => legacy_policy(&l.effective_policy(scope, &op)),
+                };
+                let y = prior.as_ref();
                 crate::core::link::LinkAuthConfig {
-                    list: p(Op::ListLinks),
-                    get: p(Op::GetLink),
-                    create: p(Op::CreateLink),
-                    update: p(Op::UpdateLink),
-                    delete: p(Op::DeleteLink),
+                    list: p(Op::ListLinks, y.map(|a| &a.list)),
+                    get: p(Op::GetLink, y.map(|a| &a.get)),
+                    create: p(Op::CreateLink, y.map(|a| &a.create)),
+                    update: p(Op::UpdateLink, y.map(|a| &a.update)),
+                    delete: p(Op::DeleteLink, y.map(|a| &a.delete)),
                 }
             });
             let def = LinkDefinition {
@@ -1298,5 +1328,40 @@ validation_rules:
         let alone = LinksConfig::from_descriptor(&d);
         assert!(alone.sinks.is_none() && alone.auth.is_none());
         assert_eq!(alone.entities.len(), 1);
+    }
+
+    /// Review (HIGH): the overlay wrote the descriptor's IMPLICIT defaults over the YAML
+    /// `auth:` (entity and link), loosening `admin_only` to `authenticated`.
+    #[test]
+    fn overlay_keeps_yaml_policy_for_undeclared_operations() {
+        let host = yaml(
+            r#"
+entities:
+  - { singular: secret, plural: secrets, auth: { list: admin_only, delete: role:ops } }
+links:
+  - link_type: guards
+    source_type: secret
+    target_type: secret
+    forward_route_name: secrets-guards
+    reverse_route_name: secrets-guarded
+    auth: { list: admin_only, get: admin_only, create: admin_only, update: admin_only, delete: admin_only }
+"#,
+        );
+        let mut d = ModuleDescriptor::new("vault", "1.0.0");
+        let mut e = EntityDesc::new("secret");
+        e.permissions.ops.insert(Operation::Get, PolicyExpr::Public);
+        d.entities.push(e);
+        d.links.push(LinkDesc::new("guards", "secret", "secret"));
+        d.normalize();
+        let merged = host.overlay_descriptor(&d);
+        let s = &merged.entities[0];
+        assert_eq!(s.auth.list, "admin_only", "YAML list survives");
+        assert_eq!(s.auth.delete, "role:ops", "YAML delete survives");
+        assert_eq!(s.auth.get, "public", "explicit descriptor policy wins");
+        let a = merged.links[0].auth.as_ref().expect("YAML link auth kept");
+        assert_eq!(
+            (a.list.as_str(), a.create.as_str(), a.delete.as_str()),
+            ("admin_only", "admin_only", "admin_only")
+        );
     }
 }
