@@ -1,0 +1,67 @@
+flowchart LR
+%% name: module-descriptor-erreurs-i18n
+%% PROUVE (flux errors-i18n, md/errors-i18n) : une ContractError, une table ErrorKind, un catalogue ; rendu par surface
+%%   teste par cargo test -p this-rs --lib --features grpc,graphql -- core::errors core::i18n (19 tests nommes,
+%%   dont same_error_same_code_and_text_on_every_surface : meme code et meme texte fr/en en REST, gRPC, GraphQL)
+%%   et cargo test -p this-descriptor --features leptos (I18nCatalog, server_fn ; 14 tests i18n+leptos nommes).
+%% REVUE (relecteur) : bundle hors espace de noms ou Fluent refuse en bloc (catalog_refuses_foreign_keys_and_unsupported_syntax),
+%%   localize_errors reecrit en place (localize_errors_keeps_multi_valued_headers_and_extensions).
+%% SOURCES LUES : crates/this-descriptor/src/{error,i18n,framework,engine/i18n}.rs, src/core/errors/*, src/core/i18n/*,
+%%   leptos/server_fn/src/error.rs (0.9.0-rc0, identique a crates.io).
+%% NON ETABLI : branchement de localize_errors dans le routeur du host, RequestLocale dans les requetes GraphQL,
+%%   migration des sites StatusCode / Status:: / Error::new ad hoc (flux integration) ; bundles des modules compiles.
+    classDef ok       fill:#2ea04333,stroke:#2ea043,stroke-width:2px
+    classDef todo     fill:#f0a02033,stroke:#d98a00,stroke-width:2px
+    classDef refused  fill:#e5484d33,stroke:#e5484d,stroke-width:2px,stroke-dasharray:6 3
+    classDef upstream fill:#8b8fa322,stroke:#8b8fa3,stroke-dasharray:3 3
+    classDef trap     fill:#e5484d1f,stroke:#e5484d,stroke-width:3px
+    classDef entry    fill:#a48bff40,stroke:#a48bff,stroke-width:3px
+
+    SRC(["Code metier, moteurs<br/>validate, policy, query"]):::entry
+    REQ(["Requete<br/>?lang, cookie this_locale,<br/>Accept-Language, x-this-locale"]):::entry
+
+    subgraph PURE["this-descriptor, wasm32"]
+        direction TB
+        CE["✅ ContractError<br/>code stable, kind, message_key, fields"]:::ok
+        TAB["✅ ErrorKind<br/>HTTP, gRPC, GraphQL"]:::ok
+        CAT["✅ I18nCatalog<br/>locale demandee, defaut, tout bundle, cle<br/>missing_for descripteur"]:::ok
+        NS["🔴 bundle refuse<br/>cle hors module. ou syntaxe Fluent<br/>pas de surcharge globale de this.*"]:::refused
+        SF["✅ feature leptos<br/>FromServerFnError"]:::ok
+    end
+
+    subgraph HOST["this-rs core"]
+        direction TB
+        FA["✅ from_anyhow<br/>sinon this.internal sans fuite"]:::ok
+        LOC["✅ RequestLocale, RequestHints,<br/>locale_from_metadata"]:::ok
+        LC["✅ LocaleCatalog ArcSwap<br/>ajout et retrait a chaud"]:::ok
+    end
+
+    subgraph SURF["Surfaces"]
+        direction TB
+        REST["✅ ApiError + localize_errors<br/>x-this-error, problem+json, Content-Language"]:::ok
+        GRPC["✅ to_status, status_for<br/>code mappe, details JSON"]:::ok
+        GQL["✅ to_graphql_error_in<br/>extensions.code, this_code"]:::ok
+        LEP["⚪ Front Leptos<br/>server fn Result T, ContractError"]:::upstream
+    end
+
+    SRC ==>|"anyhow"| FA
+    FA ==> CE
+    CE --> TAB
+    REQ ==> LOC
+    LC --> CAT
+    NS -.->|"add_bundle Err"| CAT
+    LOC ==>|"resolve"| CAT
+    CAT ==>|"localize"| REST
+    CAT ==>|"localize"| GRPC
+    CAT ==>|"localize"| GQL
+    TAB --> REST
+    TAB --> GRPC
+    TAB --> GQL
+    CE --> SF
+    SF -.->|"JSON + statut du kind"| LEP
+
+    WIRE["🟠 integration<br/>layer sur le routeur, data GraphQL,<br/>bundles par module"]:::todo
+    OLD["⚠ sites ad hoc restants<br/>32 Status, 29 Error::new, 78 StatusCode"]:::trap
+    WIRE -.-> REST
+    WIRE -.-> GQL
+    OLD -.->|"migrer vers map_status, map_gql, ApiResult"| FA

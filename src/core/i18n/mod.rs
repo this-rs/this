@@ -1,14 +1,16 @@
-//! Locales on the server side. The engine (negotiation, rendering) is pure and lives in
-//! `this_descriptor::engine::i18n`; the `errors-i18n` stream adds here the extractors
-//! (HTTP `Accept-Language`, gRPC metadata `accept-language`).
+//! Locales on the server side. The engine (negotiation, rendering, `I18nCatalog`) is pure
+//! and lives in `this_descriptor::engine::i18n` (shared with wasm32 fronts); this module adds
+//! the host catalog ([`LocaleCatalog`]) and the extractors (HTTP query / cookie /
+//! `Accept-Language`, gRPC metadata).
+
+pub mod extract;
+pub mod framework_catalog;
 
 pub use crate::descriptor::engine::i18n::{localize, negotiate, render};
-pub use crate::descriptor::{Locale, MessageBundle, MessageKey};
-
-/// Framework bundles shipped by this-rs (`fr` default, `en`).
-pub fn framework_bundles() -> Vec<MessageBundle> {
-    ["fr", "en"]
-        .iter()
-        .filter_map(|l| crate::descriptor::framework::bundle(&Locale::new(*l)))
-        .collect()
-}
+pub use crate::descriptor::{I18nCatalog, Locale, LocaleHints, MessageBundle, MessageKey};
+#[cfg(feature = "grpc")]
+pub use extract::locale_from_metadata;
+pub use extract::{
+    LOCALE_COOKIE, LOCALE_HEADER, LOCALE_QUERY_PARAMS, RequestHints, RequestLocale, locale_of_parts,
+};
+pub use framework_catalog::{LocaleCatalog, framework_bundles, framework_catalog};
