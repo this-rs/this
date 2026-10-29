@@ -735,6 +735,7 @@ impl ModuleRuntime {
             .tombstones
             .retain(|p, _| !plurals.iter().any(|(_, q)| q == p));
         table.descriptors = descriptors.clone();
+        table.links_config = Some(links_config.clone());
         table.plurals = Arc::new(plurals.clone());
         let catalog = HostCatalog {
             descriptors,

@@ -204,7 +204,9 @@ impl DefaultModuleLoader {
             ContractError::framework(codes::DESCRIPTOR_INVALID)
                 .with_param("issues", format!("links_config: {e}"))
         })?;
-        let descriptor = match module.descriptor() {
+        let declared_descriptor = module.descriptor();
+        let derived = declared_descriptor.is_none();
+        let descriptor = match declared_descriptor {
             Some(d) => self.checked(d, CheckProfile::Compiled)?,
             None => {
                 let mut d = ModuleDescriptor::new(
@@ -284,8 +286,20 @@ impl DefaultModuleLoader {
                 creators.insert(t.to_string(), c);
             }
         }
+        let mut links_config = config.clone().overlay_descriptor(&descriptor);
+        if derived {
+            // A DERIVED descriptor declares no policy: overlaying it would replace the
+            // module's own YAML `auth:` (e.g. `create: role:admin`) with the default
+            // `authenticated` (fail-open, found in review). Its YAML entries stay
+            // authoritative; the overlay only adds the entities YAML does not list.
+            for e in links_config.entities.iter_mut() {
+                if let Some(yaml) = config.entities.iter().find(|c| c.singular == e.singular) {
+                    *e = yaml.clone();
+                }
+            }
+        }
         Ok(ModuleInterface {
-            links_config: config.overlay_descriptor(&descriptor),
+            links_config,
             descriptor: Arc::new(descriptor),
             fetchers,
             creators,

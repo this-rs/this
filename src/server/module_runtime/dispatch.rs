@@ -24,12 +24,11 @@
 
 use super::runtime::ModuleRuntime;
 use crate::core::auth::AuthContext;
+use crate::core::auth::surface::PolicyIndex;
 use crate::core::errors::ApiError;
 use crate::descriptor::engine::policy::{PolicyEnv, evaluate};
 use crate::descriptor::framework::codes;
-use crate::descriptor::{
-    ContractError, DescriptorSet, Operation, PermDesc, PolicyExpr, PrincipalView,
-};
+use crate::descriptor::{ContractError, DescriptorSet, Operation, PolicyExpr, PrincipalView};
 use axum::Router;
 use axum::extract::{Request, State};
 use axum::http::Method;
@@ -148,6 +147,10 @@ pub struct DispatchTable {
     /// Modules in `Draining`: their requests get 503 `this.module.unavailable`.
     pub(crate) draining: HashSet<String>,
     pub(crate) descriptors: Arc<DescriptorSet>,
+    /// Merged links configuration of the composed snapshot: its YAML `auth:` tables are
+    /// part of the policy resolution (`PolicyIndex`), as on every other surface.
+    /// `None` (empty table only) = every judged request is refused.
+    pub(crate) links_config: Option<Arc<crate::config::LinksConfig>>,
     /// `(entity, plural)` of every served entity (static and runtime).
     pub(crate) plurals: Arc<Vec<(String, String)>>,
 }
@@ -424,24 +427,43 @@ fn judge(
         (&Method::DELETE, n) if n >= 4 => Operation::DeleteLink,
         _ => return forbidden("unknown"),
     };
-    let entity = table.descriptors.entity(&scope).map(|(_, e)| e);
-    let link = if segs.len() >= 3 && op != Operation::Create {
-        table
-            .descriptors
-            .modules()
-            .flat_map(|m| m.links.iter())
-            .find(|l| {
-                (l.source == scope && l.forward_route == segs[2])
-                    || (l.target == scope && l.reverse_route == segs[2])
-            })
+    // Same resolution as REST (static), GraphQL, gRPC and WebSocket: descriptor first,
+    // then the YAML `auth:` tables (link, then entity), then the default. Resolving from
+    // the descriptors alone skipped every YAML policy: a runtime link route anchored on a
+    // static entity, or a link declared with `auth:` in YAML, fell back to the default
+    // `authenticated` (found in review).
+    let Some(links_config) = table.links_config.clone() else {
+        return forbidden(op.as_str());
+    };
+    let index = PolicyIndex::new(table.descriptors.clone(), links_config.clone());
+    let definition = if segs.len() >= 3 && op != Operation::Create {
+        links_config.links.iter().find(|d| {
+            (d.source_type == scope && d.forward_route_name == segs[2])
+                || (d.target_type == scope && d.reverse_route_name == segs[2])
+        })
     } else {
         None
     };
-    let policy = match (link, entity) {
-        (Some(l), e) => l.effective_policy(e, &op),
-        (None, Some(e)) => e.permissions.effective(&op),
-        (None, None) => PermDesc::default_policy(&op),
+    let resolved = match definition {
+        Some(d) => index.link_policies(
+            Some(&d.link_type),
+            Some(&d.source_type),
+            Some(&d.target_type),
+            Some(&scope),
+            &op,
+        ),
+        None => vec![index.entity_policy(&scope, &op)],
     };
+    if resolved.is_empty() {
+        return forbidden(op.as_str());
+    }
     let resource = segs.get(1).and_then(|s| uuid::Uuid::parse_str(s).ok());
-    check_policy(&policy, ctx, &parts.resolvers, resource, op.as_str())
+    for r in &resolved {
+        let policy = match &r.policy {
+            Ok(p) => p,
+            Err(_) => return forbidden(op.as_str()),
+        };
+        check_policy(policy, ctx, &parts.resolvers, resource, op.as_str())?;
+    }
+    Ok(())
 }
