@@ -30,6 +30,11 @@ pub use grpc::GrpcExposure;
 // pub mod openapi;
 
 #[cfg(any(feature = "graphql", feature = "grpc", feature = "websocket"))]
+pub mod guard;
+#[cfg(any(feature = "graphql", feature = "grpc", feature = "websocket"))]
+pub use guard::{SurfaceGuard, resolve_identity};
+
+#[cfg(any(feature = "graphql", feature = "grpc", feature = "websocket"))]
 /// Les politiques `auth:` déclarées sont-elles **armées** sur cet hôte ?
 pub(crate) fn policies_armed(host: &crate::server::host::ServerHost) -> bool {
     host.authorize
@@ -64,6 +69,35 @@ pub(crate) fn refuse_unenforced_surface(
          La servir ainsi publierait les entités sans leur politique. Deux issues : \
          (a) accepter explicitement le risque avec `{opt_in}` — et le dire dans les journaux, \
          (b) ou désarmer l'application des politiques (`without_authorization()`) si c'est voulu."
+    );
+}
+
+#[cfg(any(feature = "graphql", feature = "grpc"))]
+/// **Lève** le refus pour une surface désormais appliquée par opération — et le
+/// garde pour ce qui ne l'est pas encore.
+///
+/// GraphQL et gRPC appliquent les politiques **dans leurs résolveurs / services**
+/// (`SurfaceGuard`, même résolution que REST : descripteur, puis `auth:` YAML, puis
+/// défaut). Ils sont donc servis armés. Mais une surface n'est servie armée que si
+/// **toutes** ses parties montées sont couvertes : `uncovered` liste celles qui ne le
+/// sont pas (ex. `NotificationService` gRPC, qui prend l'utilisateur dans la
+/// requête). Liste non vide + politiques armées = refus, comme avant (fail-closed).
+pub(crate) fn refuse_uncovered_surface(
+    host: &crate::server::host::ServerHost,
+    surface: &str,
+    uncovered: &[&str],
+    opt_in: &str,
+) -> anyhow::Result<()> {
+    if !policies_armed(host) || uncovered.is_empty() {
+        return Ok(());
+    }
+    anyhow::bail!(
+        "les politiques `auth:` sont ARMÉES, et la surface {surface} est appliquée par \
+         opération SAUF : {}. Ces parties ne savent pas encore appliquer les politiques ; \
+         les servir publierait leurs données sans politique. Issues : (a) retirer ce qui \
+         les monte (ex. le NotificationStore), (b) accepter le risque avec `{opt_in}`, \
+         (c) désarmer (`without_authorization()`).",
+        uncovered.join(", ")
     );
 }
 

@@ -50,12 +50,27 @@ use uuid::Uuid;
 /// `EventResponse` messages on the server-streaming response.
 pub struct EventServiceImpl {
     host: Arc<ServerHost>,
+    /// Filter the stream by the declared policies (armed routers): an entity event
+    /// is delivered only if the caller may `get` it, a link event only if it may
+    /// `get_link` it.
+    enforce: bool,
 }
 
 impl EventServiceImpl {
-    /// Create a new `EventServiceImpl` from a `ServerHost`
+    /// Create a new `EventServiceImpl` from a `ServerHost` (policies applied when armed).
     pub fn new(host: Arc<ServerHost>) -> Self {
-        Self { host }
+        Self {
+            host,
+            enforce: true,
+        }
+    }
+
+    /// Stream NOT filtered by the policies (`*_unenforced` routers).
+    pub fn unenforced(host: Arc<ServerHost>) -> Self {
+        Self {
+            host,
+            enforce: false,
+        }
     }
 }
 
@@ -360,6 +375,7 @@ impl EventService for EventServiceImpl {
         // pour une raison de fond : on ne veut pas qu'un serveur mal configuré
         // (sans bus) fasse passer le refus pour une panne.
         let portee = portee_du_flux(&request)?;
+        let guard = super::identity::guard_of(&self.host, &request, self.enforce).await?;
         let locataire_du_flux = match portee {
             PorteeFlux::Locataire(tid) => Some(tid),
             PorteeFlux::Global => None,
@@ -398,6 +414,12 @@ impl EventService for EventServiceImpl {
                             && let Some(event_tenant) = envelope.tenant_id()
                             && conn_tenant != event_tenant
                         {
+                            continue;
+                        }
+
+                        // Entity-level policies (armed routers): no event of an
+                        // entity the caller may not read.
+                        if !guard.allows_event(&envelope.event) {
                             continue;
                         }
 
@@ -562,7 +584,7 @@ mod tests {
 
         let event_bus = EventBus::new(64);
         let host = Arc::new(ServerHost::minimal_for_test().with_event_bus(event_bus));
-        let svc = EventServiceImpl::new(host);
+        let svc = EventServiceImpl::unenforced(host);
 
         match svc.subscribe(requete_vide()).await {
             Err(status) => assert_eq!(status.code(), tonic::Code::PermissionDenied),
@@ -887,7 +909,7 @@ mod tests {
         let host = ServerHost::minimal_for_test().with_event_bus(event_bus.clone());
         let host = Arc::new(host);
 
-        let svc = EventServiceImpl::new(host);
+        let svc = EventServiceImpl::unenforced(host);
 
         // Subscribe to "user" entity events only
         //
@@ -963,7 +985,7 @@ mod tests {
         let event_bus = EventBus::new(64);
         let host = Arc::new(ServerHost::minimal_for_test().with_event_bus(event_bus.clone()));
 
-        let svc = EventServiceImpl::new(host);
+        let svc = EventServiceImpl::unenforced(host);
 
         // Subscribe with no filters (wildcard) — **en administrateur**, puisque
         // « recevoir tout » est désormais un droit nommé et non un défaut : c'est
@@ -1021,7 +1043,7 @@ mod tests {
         let event_bus = EventBus::new(64);
         let host = Arc::new(ServerHost::minimal_for_test().with_event_bus(event_bus.clone()));
 
-        let svc = EventServiceImpl::new(host);
+        let svc = EventServiceImpl::unenforced(host);
 
         // Le client déclare son locataire par l'en-tête : le geste explicite
         // reste possible (une identité, posée par un interceptor, primerait).
