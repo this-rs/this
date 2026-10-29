@@ -202,11 +202,42 @@ async fn describe_scoped(
 /// `Relief::describe` ne rend jamais d'erreur métier : la seule issue d'échec
 /// est la mort de la tâche bloquante (panique). On la rapporte telle quelle.
 fn join_error(e: tokio::task::JoinError) -> Response {
-    (
+    envelope(
         StatusCode::INTERNAL_SERVER_ERROR,
-        Json(json!({ "error": format!("relief introspection task failed: {e}") })),
+        json!({ "error": format!("relief introspection task failed: {e}") }),
     )
-        .into_response()
+}
+
+/// Error response of the relief routes: the contract envelope (code, kind, message_key,
+/// fields; localized by `localize_errors`) chosen by `status`, PLUS the legacy keys of `body`
+/// (`error`, `reason`, `hint`...), unchanged. A 500 never carries the internal text
+/// (logged instead).
+fn envelope(status: StatusCode, body: serde_json::Value) -> Response {
+    use crate::core::errors as ce;
+    let text = body
+        .get("reason")
+        .or_else(|| body.get("error"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let mut extras = body.as_object().cloned().unwrap_or_default();
+    let err = match status.as_u16() {
+        401 => ce::unauthenticated(),
+        403 => ce::forbidden(&text),
+        404 => ce::not_found("graph", &text),
+        409 => ce::conflict("graph"),
+        501 => crate::descriptor::ContractError::framework(
+            crate::descriptor::framework::codes::NOT_IMPLEMENTED,
+        )
+        .with_param("what", &text),
+        500 => {
+            tracing::error!(detail = %text, "graph relief: internal failure");
+            extras.clear();
+            ce::internal()
+        }
+        _ => ce::bad_request(&text),
+    };
+    ce::error_response_with(err, Some(status), extras)
 }
 
 // ── Identité canonique ────────────────────────────────────────────────
@@ -361,7 +392,7 @@ fn resolve_subject(
     context: Option<&axum::Extension<crate::core::auth::AuthContext>>,
 ) -> Result<String, Box<Response>> {
     let refus = |status: StatusCode, corps: serde_json::Value| -> Box<Response> {
-        Box::new((status, Json(corps)).into_response())
+        Box::new(envelope(status, corps))
     };
 
     let Some(canvas) = &state.canvas else {
@@ -513,15 +544,14 @@ async fn hierarchy_handler(
     };
 
     let Ok(raw) = id.parse::<u64>() else {
-        return (
+        return envelope(
             StatusCode::BAD_REQUEST,
-            Json(json!({
+            json!({
                 "error": format!("identifiant de nœud illisible : {id:?}"),
                 "hint": "un nœud se désigne par son identifiant numérique (voir /graph), \
                          ou par `self` (le sujet de votre état d'interface)"
-            })),
-        )
-            .into_response();
+            }),
+        );
     };
 
     let scope = resolve_scope(&state, context.as_ref());
@@ -535,47 +565,44 @@ async fn hierarchy_handler(
     let echelle_demandee: Option<Scale> = match query.echelle.as_deref() {
         Some("canvas") => {
             let Some(canvas) = &state.canvas else {
-                return (
+                return envelope(
                     StatusCode::NOT_IMPLEMENTED,
-                    Json(json!({
+                    json!({
                         "error": "canvas_absent",
                         "reason": "cette instance ne publie pas d'état d'interface : demandez une \
                                    échelle explicite (cosmos, monde, groupe, noeud)",
-                    })),
-                )
-                    .into_response();
+                    }),
+                );
             };
             let Some(portee) = canvas_portee(context.as_ref()) else {
-                return (
+                return envelope(
                     StatusCode::UNAUTHORIZED,
-                    Json(json!({
+                    json!({
                         "error": "portee_inconnue",
                         "reason": "l'échelle du canvas est une ressource PERSONNELLE : identifiez-vous",
-                    })),
-                )
-                    .into_response();
+                    }),
+                );
             };
             match canvas.scale_of(&portee) {
                 Some(scale) => Some(scale),
                 None => {
-                    return (
+                    return envelope(
                         StatusCode::NOT_FOUND,
-                        Json(json!({
+                        json!({
                             "error": "echelle_non_declaree",
                             "reason": "votre état d'interface ne déclare pas d'échelle : \
                                        l'interface n'a rien dit, on n'invente pas",
-                        })),
-                    )
-                        .into_response();
+                        }),
+                    );
                 }
             }
         }
         Some(raw) => match Scale::parse(raw) {
             Some(scale) => Some(scale),
             None => {
-                return (
+                return envelope(
                     StatusCode::BAD_REQUEST,
-                    Json(json!({
+                    json!({
                         "error": format!("échelle inconnue : {raw:?}"),
                         "echelles": Scale::ALL.iter().map(|s| json!({
                             "echelle": s.as_str(),
@@ -584,9 +611,8 @@ async fn hierarchy_handler(
                             "echelle": "canvas",
                             "montre": "l'échelle de VOTRE état d'interface",
                         }))).collect::<Vec<_>>(),
-                    })),
-                )
-                    .into_response();
+                    }),
+                );
             }
         },
         None => None,
@@ -595,17 +621,16 @@ async fn hierarchy_handler(
     if let Some(scale) = echelle_demandee {
         // **Le plafond du demandeur** : l'interface propose, la décision dispose.
         if !scope.allows_scale(scale) {
-            return (
+            return envelope(
                 StatusCode::FORBIDDEN,
-                Json(json!({
+                json!({
                     "error": "echelle_refusee",
                     "echelle": scale.as_str(),
                     "finest": scope.finest_scale().map(|s| s.as_str()),
                     "reason": "votre décision IAM ne couvre pas cette échelle : voyez \
                                `echelle:read:*` dans iam.vocabulary",
-                })),
-            )
-                .into_response();
+                }),
+            );
         }
         let (depth, limit) = scale.descent();
         spec.max_depth = depth;
@@ -637,24 +662,22 @@ async fn hierarchy_handler(
                 Json(vue).into_response()
             }
         }
-        Err(e) => (
+        Err(e) => envelope(
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({ "error": format!("vue multi-échelle indisponible : {e}") })),
-        )
-            .into_response(),
+            json!({ "error": format!("vue multi-échelle indisponible : {e}") }),
+        ),
     }
 }
 
 async fn identity_get_handler(State(state): State<GraphState>, Path(id): Path<String>) -> Response {
     let Ok(uuid) = Uuid::parse_str(&id) else {
-        return (
+        return envelope(
             StatusCode::BAD_REQUEST,
-            Json(json!({
+            json!({
                 "error": format!("identifiant illisible : {id:?}"),
                 "hint": "un identifiant est un uuid ; les identités dérivées sont en version 8                          (voir GET /graph/identity)"
-            })),
-        )
-            .into_response();
+            }),
+        );
     };
 
     let store = state.store.clone();
@@ -677,19 +700,17 @@ async fn identity_get_handler(State(state): State<GraphState>, Path(id): Path<St
             "data": entity.data,
         }))
         .into_response(),
-        Ok(Ok(None)) => (
+        Ok(Ok(None)) => envelope(
             StatusCode::NOT_FOUND,
-            Json(json!({
+            json!({
                 "error": "identité inconnue de l'index",
                 "hint": "l'index est en mémoire et se reconstruit à la demande : appeler                          GET /graph/identity?counts=true (borné) ou l'outil adopt_obrain_base                          pour un balayage complet hors requête"
-            })),
-        )
-            .into_response(),
-        Ok(Err(e)) => (
+            }),
+        ),
+        Ok(Err(e)) => envelope(
             StatusCode::UNPROCESSABLE_ENTITY,
-            Json(json!({ "error": e.to_string() })),
-        )
-            .into_response(),
+            json!({ "error": e.to_string() }),
+        ),
         Err(e) => join_error(e),
     }
 }

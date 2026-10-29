@@ -1046,6 +1046,12 @@ impl ServerBuilder {
             }
         }
 
+        // Message bundles of the compiled modules, in resolved order.
+        let module_bundles: Vec<crate::descriptor::MessageBundle> = order
+            .iter()
+            .flat_map(|&i| self.modules[i].bundles())
+            .collect();
+
         // Build the host
         let mut host = ServerHost::from_builder_components(
             link_service,
@@ -1056,6 +1062,11 @@ impl ServerBuilder {
         )?;
         if !descriptor_set.is_empty() {
             host = host.with_descriptors(descriptor_set);
+        }
+        if !module_bundles.is_empty() {
+            host.locales
+                .add_bundles(module_bundles)
+                .map_err(anyhow::Error::new)?;
         }
 
         // Attach event bus if configured

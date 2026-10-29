@@ -24,6 +24,9 @@ use super::proto::{
     NotificationResponse, SubscribeNotificationsRequest,
     notification_service_server::NotificationService,
 };
+use crate::core::errors::{bad_request, to_status};
+use crate::descriptor::ContractError;
+use crate::descriptor::framework::codes;
 use crate::server::host::ServerHost;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -31,6 +34,11 @@ use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
 use uuid::Uuid;
+
+/// `this.transport.missing_arg` (InvalidArgument).
+fn missing(field: &str) -> Status {
+    to_status(ContractError::framework(codes::TRANSPORT_MISSING_ARG).with_param("field", field))
+}
 
 /// gRPC Notification Service implementation
 ///
@@ -49,8 +57,9 @@ impl NotificationServiceImpl {
     /// Get the NotificationStore or return UNAVAILABLE
     fn store(&self) -> Result<&Arc<crate::events::sinks::in_app::NotificationStore>, Status> {
         self.host.notification_store().ok_or_else(|| {
-            Status::unavailable(
-                "NotificationStore not configured — notification features are not available",
+            to_status(
+                ContractError::framework(codes::TRANSPORT_UNAVAILABLE)
+                    .with_param("reason", "notification store not configured"),
             )
         })
     }
@@ -101,7 +110,7 @@ impl NotificationService for NotificationServiceImpl {
         let store = self.store()?;
 
         if req.user_id.is_empty() {
-            return Err(Status::invalid_argument("user_id is required"));
+            return Err(missing("user_id"));
         }
 
         let limit = if req.limit > 0 {
@@ -133,7 +142,7 @@ impl NotificationService for NotificationServiceImpl {
         let store = self.store()?;
 
         if req.user_id.is_empty() {
-            return Err(Status::invalid_argument("user_id is required"));
+            return Err(missing("user_id"));
         }
 
         let count = store.unread_count(&req.user_id).await;
@@ -151,17 +160,14 @@ impl NotificationService for NotificationServiceImpl {
         let store = self.store()?;
 
         if req.notification_ids.is_empty() {
-            return Err(Status::invalid_argument(
-                "At least one notification_id is required",
-            ));
+            return Err(missing("notification_ids"));
         }
 
         let ids: Vec<Uuid> = req
             .notification_ids
             .iter()
             .map(|s| {
-                Uuid::parse_str(s)
-                    .map_err(|_| Status::invalid_argument(format!("Invalid UUID: {}", s)))
+                Uuid::parse_str(s).map_err(|_| to_status(bad_request(format!("Invalid UUID: {s}"))))
             })
             .collect::<Result<Vec<_>, _>>()?;
 
@@ -181,7 +187,7 @@ impl NotificationService for NotificationServiceImpl {
         let store = self.store()?;
 
         if req.user_id.is_empty() {
-            return Err(Status::invalid_argument("user_id is required"));
+            return Err(missing("user_id"));
         }
 
         let marked = store.mark_all_as_read(&req.user_id).await;
@@ -199,7 +205,7 @@ impl NotificationService for NotificationServiceImpl {
         let store = self.store()?;
 
         let id = Uuid::parse_str(&req.notification_id)
-            .map_err(|_| Status::invalid_argument("Invalid notification_id UUID"))?;
+            .map_err(|_| to_status(bad_request("Invalid notification_id UUID")))?;
 
         let success = store.delete(&id).await;
 
@@ -399,7 +405,12 @@ mod tests {
 
         let result = svc.list_notifications(request).await;
         assert!(result.is_err());
-        assert_eq!(result.unwrap_err().code(), tonic::Code::InvalidArgument);
+        let status = result.unwrap_err();
+        assert_eq!(status.code(), tonic::Code::InvalidArgument);
+        // Contract envelope (was an ad hoc `Status::invalid_argument("user_id is required")`).
+        let contract = crate::core::errors::grpc::contract_error_of(&status).expect("envelope");
+        assert_eq!(contract.code.as_str(), "this.transport.missing_arg");
+        assert_eq!(contract.params["field"], "user_id");
     }
 
     // === GetUnreadCount tests ===

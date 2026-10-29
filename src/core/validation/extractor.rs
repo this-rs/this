@@ -5,14 +5,14 @@
 
 use super::config::{EntityValidationConfig, legacy_errors_to_contract};
 use super::layer::EngineValidated;
-use crate::core::errors::ERROR_HEADER;
+use crate::core::errors::error_response_with;
 use crate::descriptor::ContractError;
 use crate::descriptor::framework::codes;
 use axum::{
     Json,
     extract::{FromRequest, Request},
     http::StatusCode,
-    response::{IntoResponse, Response},
+    response::Response,
 };
 use serde_json::{Value, json};
 
@@ -109,10 +109,10 @@ where
 fn invalid_json(details: String) -> Response {
     let err = ContractError::framework(codes::TRANSPORT_BAD_REQUEST)
         .with_param("reason", details.clone());
-    let mut body = err.http_body();
-    body["error"] = json!("Invalid JSON");
-    body["details"] = json!(details);
-    with_error_header(StatusCode::BAD_REQUEST, body, &err)
+    let mut extras = serde_json::Map::new();
+    extras.insert("error".into(), json!("Invalid JSON"));
+    extras.insert("details".into(), json!(details));
+    error_response_with(err, Some(StatusCode::BAD_REQUEST), extras)
 }
 
 /// 422 of the legacy rule set, additive: `error` and `errors` (strings) stay EXACTLY as
@@ -120,18 +120,10 @@ fn invalid_json(details: String) -> Response {
 /// `ContractError::http_body` so every client can switch on `code`.
 pub fn legacy_validation_response(errors: Vec<String>) -> Response {
     let err = legacy_errors_to_contract(&errors);
-    let mut body = err.http_body();
-    body["error"] = json!("Validation failed");
-    body["errors"] = json!(errors);
-    with_error_header(StatusCode::UNPROCESSABLE_ENTITY, body, &err)
-}
-
-fn with_error_header(status: StatusCode, body: Value, err: &ContractError) -> Response {
-    let mut res = (status, Json(body)).into_response();
-    if let Ok(v) = axum::http::HeaderValue::from_str(err.code.as_str()) {
-        res.headers_mut().insert(ERROR_HEADER, v);
-    }
-    res
+    let mut extras = serde_json::Map::new();
+    extras.insert("error".into(), json!("Validation failed"));
+    extras.insert("errors".into(), json!(errors));
+    error_response_with(err, Some(StatusCode::UNPROCESSABLE_ENTITY), extras)
 }
 
 #[cfg(test)]
@@ -293,7 +285,10 @@ mod tests {
             Ok(_) => panic!("expected a refusal"),
         };
         assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY);
-        assert_eq!(res.headers()[ERROR_HEADER], "this.validation.failed");
+        assert_eq!(
+            res.headers()[crate::core::errors::ERROR_HEADER],
+            "this.validation.failed"
+        );
         let body = body_of(res).await;
         // Exactly the historical keys and values...
         assert_eq!(body["error"], "Validation failed");

@@ -26,7 +26,7 @@ use axum::{
     extract::{Request, State},
     http::{HeaderMap, HeaderValue, StatusCode, header},
     middleware::Next,
-    response::{IntoResponse, Response},
+    response::Response,
 };
 use std::sync::Arc;
 
@@ -134,12 +134,14 @@ pub async fn auth_middleware(
                 next.run(request).await
             } else {
                 tracing::debug!("Auth failed: {}", err);
-                (
-                    StatusCode::UNAUTHORIZED,
-                    [("WWW-Authenticate", "Bearer")],
-                    format!("Unauthorized: {}", err),
-                )
-                    .into_response()
+                let mut res = crate::core::errors::error_response_with(
+                    crate::core::errors::unauthenticated(),
+                    Some(StatusCode::UNAUTHORIZED),
+                    serde_json::Map::new(),
+                );
+                res.headers_mut()
+                    .insert("WWW-Authenticate", HeaderValue::from_static("Bearer"));
+                res
             }
         }
     }
