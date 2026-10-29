@@ -93,7 +93,8 @@ mod tests {
         assert_eq!(e.code.as_str(), codes::INTERNAL);
         assert!(!e.message.contains("secret"));
         // ...unless it already is a contract envelope.
-        let inner = ContractError::framework(codes::AUTH_FORBIDDEN).with_param("operation", "create");
+        let inner =
+            ContractError::framework(codes::AUTH_FORBIDDEN).with_param("operation", "create");
         let e = ContractError::from_server_fn_error(ServerFnErrorErr::ServerError(
             inner.to_json().to_string(),
         ));

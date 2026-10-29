@@ -3,16 +3,40 @@
 //! `ContractError` travels inside `anyhow::Error` (the `EntityCreator` / `EntityFetcher`
 //! traits are unchanged). Every surface calls [`from_anyhow`] instead of
 //! `map_err(|e| Status::internal(..))`: a business or validation error keeps its code and
-//! kind; only an unknown error becomes `Internal`.
+//! kind; only an unknown error becomes `this.internal`.
 //!
-//! Minimal adapters (the table only) live here so the `auth` and `integration` streams do
-//! not reimplement them; the `errors-i18n` stream enriches them (localization, details).
+//! One table (`ErrorKind`: HTTP / gRPC / GraphQL), one envelope, one catalog:
+//! - [`http`]: [`ApiError`] (`IntoResponse`, header `x-this-error`, RFC 9457 when
+//!   accepted) and the [`localize_errors`] middleware (message in the request locale);
+//! - [`grpc`] (feature `grpc`): `Status` with the mapped code, the JSON envelope in
+//!   `details`, `x-this-error` metadata, localized message;
+//! - [`graphql`] (feature `graphql`): `async_graphql::Error` with `extensions.code` from the
+//!   table plus `this_code`, `kind`, `message_key`, `params`, `fields`.
+//!
+//! The constructors below ([`not_found`], [`forbidden`]...) are the stable codes the ad hoc
+//! `StatusCode::NOT_FOUND` / `Status::not_found` / `Error::new("...")` sites migrate to.
 
+pub mod http;
+
+#[cfg(feature = "grpc")]
+pub mod grpc;
+
+#[cfg(feature = "graphql")]
+pub mod graphql;
+
+pub use self::http::{ApiError, ApiResult, accepts_problem_json, error_response, localize_errors};
 pub use crate::descriptor::error::{ERROR_HEADER, PROBLEM_JSON};
+pub use crate::descriptor::framework::codes;
 pub use crate::descriptor::{ContractError, ErrorCode, ErrorKind, FieldViolation};
 
+#[cfg(feature = "graphql")]
+pub use self::graphql::{GraphqlResultExt, to_graphql_error, to_graphql_error_localized};
+#[cfg(feature = "grpc")]
+pub use self::grpc::{StatusResultExt, status_for, to_status, to_status_localized};
+
 /// Recover a `ContractError` from an `anyhow::Error` (searching the whole cause chain);
-/// anything else becomes `this.internal` (the original text is NOT exposed to clients).
+/// anything else becomes `this.internal` (the original text is NOT exposed to clients, it
+/// is logged at `debug`).
 pub fn from_anyhow(err: &anyhow::Error) -> ContractError {
     for cause in err.chain() {
         if let Some(c) = cause.downcast_ref::<ContractError>() {
@@ -20,7 +44,7 @@ pub fn from_anyhow(err: &anyhow::Error) -> ContractError {
         }
     }
     tracing::debug!(error = %err, "error without contract: reported as this.internal");
-    ContractError::framework(crate::descriptor::framework::codes::INTERNAL)
+    ContractError::framework(codes::INTERNAL)
 }
 
 /// HTTP status code of a contract error.
@@ -29,51 +53,61 @@ pub fn http_status(err: &ContractError) -> axum::http::StatusCode {
         .unwrap_or(axum::http::StatusCode::INTERNAL_SERVER_ERROR)
 }
 
-/// gRPC status (code from the kind table, JSON envelope in `details`).
-#[cfg(feature = "grpc")]
-pub fn to_status(err: ContractError) -> tonic::Status {
-    err.into()
+/// `this.entity.not_found` (`{entity} not found: {id}`).
+pub fn not_found(entity: &str, id: impl std::fmt::Display) -> ContractError {
+    ContractError::framework(codes::ENTITY_NOT_FOUND)
+        .with_param("entity", entity)
+        .with_param("id", id.to_string())
 }
 
-/// GraphQL error (`extensions.code` from the kind table, plus `this_code`, `fields`...).
-#[cfg(feature = "graphql")]
-pub fn to_graphql_error(err: ContractError) -> async_graphql::Error {
-    err.into_graphql_error()
+/// `this.entity.conflict` (`{entity} already exists`).
+pub fn conflict(entity: &str) -> ContractError {
+    ContractError::framework(codes::ENTITY_CONFLICT).with_param("entity", entity)
 }
 
-/// REST response: newtype because of the orphan rule (`IntoResponse` and `ContractError`
-/// are both foreign to this-rs). Body = `ContractError::http_body` (legacy `error` /
-/// `errors` keys kept), header `x-this-error: <code>`.
-#[derive(Debug, Clone)]
-pub struct ApiError(pub ContractError);
-
-impl From<ContractError> for ApiError {
-    fn from(e: ContractError) -> Self {
-        Self(e)
-    }
+/// `this.auth.unauthenticated`.
+pub fn unauthenticated() -> ContractError {
+    ContractError::framework(codes::AUTH_UNAUTHENTICATED)
 }
 
-impl axum::response::IntoResponse for ApiError {
-    fn into_response(self) -> axum::response::Response {
-        let status = http_status(&self.0);
-        let mut res = (status, axum::Json(self.0.http_body())).into_response();
-        if let Ok(v) = axum::http::HeaderValue::from_str(self.0.code.as_str()) {
-            res.headers_mut().insert(ERROR_HEADER, v);
-        }
-        res
-    }
+/// `this.auth.forbidden` (`Operation denied: {operation}`).
+pub fn forbidden(operation: impl std::fmt::Display) -> ContractError {
+    ContractError::framework(codes::AUTH_FORBIDDEN).with_param("operation", operation.to_string())
+}
+
+/// `this.transport.bad_request` (`Bad request: {reason}`): a malformed request that no
+/// more specific code (`this.query.*`, `this.validation.*`) describes.
+pub fn bad_request(reason: impl std::fmt::Display) -> ContractError {
+    ContractError::framework(codes::TRANSPORT_BAD_REQUEST).with_param("reason", reason.to_string())
+}
+
+/// `this.validation.failed` carrying `violations` (one per field).
+pub fn validation(violations: impl IntoIterator<Item = FieldViolation>) -> ContractError {
+    violations.into_iter().fold(
+        ContractError::framework(codes::VALIDATION_FAILED),
+        |e, v| e.with_field(v),
+    )
+}
+
+/// `this.internal` (no detail ever reaches the client).
+pub fn internal() -> ContractError {
+    ContractError::framework(codes::INTERNAL)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::response::IntoResponse;
 
     #[test]
     fn from_anyhow_downcasts_contract_error() {
         let e = ContractError::framework("this.validation.failed");
         let wrapped = anyhow::Error::new(e.clone()).context("while creating invoice");
         assert_eq!(from_anyhow(&wrapped), e);
+        // Deeper in the chain, behind two contexts.
+        let deep = anyhow::Error::new(not_found("invoice", 7))
+            .context("fetch")
+            .context("resolver");
+        assert_eq!(from_anyhow(&deep).code.as_str(), codes::ENTITY_NOT_FOUND);
     }
 
     #[test]
@@ -82,36 +116,29 @@ mod tests {
         assert_eq!(e.code.as_str(), "this.internal");
         assert_eq!(e.kind, ErrorKind::Internal);
         assert!(!e.message.contains("secret"));
+        assert!(e.params.is_empty() && e.fields.is_empty());
     }
 
     #[test]
-    fn api_error_status_body_and_header() {
-        let res = ApiError(ContractError::framework("this.query.malformed_filter")).into_response();
-        assert_eq!(res.status(), axum::http::StatusCode::BAD_REQUEST);
-        assert_eq!(res.headers()[ERROR_HEADER], "this.query.malformed_filter");
-    }
-
-    #[cfg(feature = "graphql")]
-    #[test]
-    fn contract_error_to_graphql_extensions() {
-        let e = to_graphql_error(ContractError::framework("this.validation.failed"));
-        let ext = e.extensions.expect("extensions");
-        assert_eq!(
-            ext.get("code"),
-            Some(&async_graphql::Value::from("BAD_USER_INPUT"))
-        );
-        assert_eq!(
-            ext.get("this_code"),
-            Some(&async_graphql::Value::from("this.validation.failed"))
-        );
-    }
-
-    #[cfg(feature = "grpc")]
-    #[test]
-    fn contract_error_to_grpc_code() {
-        let s = to_status(ContractError::framework("this.validation.failed"));
-        assert_eq!(s.code(), tonic::Code::InvalidArgument);
-        let back: ContractError = serde_json::from_slice(s.details()).unwrap();
-        assert_eq!(back.code.as_str(), "this.validation.failed");
+    fn constructors_use_stable_codes_and_kinds() {
+        let cases = [
+            (not_found("invoice", 1), "this.entity.not_found", 404),
+            (conflict("invoice"), "this.entity.conflict", 409),
+            (unauthenticated(), "this.auth.unauthenticated", 401),
+            (forbidden("create"), "this.auth.forbidden", 403),
+            (bad_request("eof"), "this.transport.bad_request", 400),
+            (validation([]), "this.validation.failed", 422),
+            (internal(), "this.internal", 500),
+        ];
+        for (e, code, status) in cases {
+            assert_eq!(e.code.as_str(), code);
+            assert_eq!(http_status(&e).as_u16(), status, "{code}");
+            assert!(
+                !e.message.contains('{'),
+                "{code}: params filled: {}",
+                e.message
+            );
+        }
+        assert_eq!(not_found("invoice", 1).message, "invoice introuvable: 1");
     }
 }
