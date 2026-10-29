@@ -1839,6 +1839,7 @@ mod tests {
 
     /// Un mappage d'identité **d'un autre modèle** : le projet nomme ses
     /// principaux `account:<id>` et ses portées `org:<id>`.
+    #[cfg(feature = "obrain")]
     fn legacy_mapping() -> impl Fn(&AuthContext) -> Option<(String, String)> + Send + Sync + 'static
     {
         |ctx: &AuthContext| match ctx {
@@ -2241,6 +2242,7 @@ mod policy_perimeter {
     // comparaison ne doit pas dépendre du hasard d'un `new_v4()`.
 
     const USER: u128 = 0x1111_1111_1111_1111_1111_1111_1111_1111;
+    #[cfg(feature = "obrain")]
     const OTHER_USER: u128 = 0x5555_5555_5555_5555_5555_5555_5555_5555;
     const TENANT: u128 = 0x2222_2222_2222_2222_2222_2222_2222_2222;
     const ADMIN: u128 = 0x3333_3333_3333_3333_3333_3333_3333_3333;
