@@ -311,10 +311,10 @@ fn check_fields(
         if !names.insert(&f.name) {
             c.push("duplicate_field", &p, "declared twice");
         }
-        if let Some(b) = base_fields(kind)
+        let overlay = base_fields(kind)
             .iter()
-            .find(|b| is_entity && b.name == f.name)
-        {
+            .find(|b| is_entity && b.name == f.name);
+        if let Some(b) = overlay {
             // Overlay of a WRITABLE base field (`name`, `status`) to carry rules: allowed if
             // the type and write mode are unchanged.
             if b.read_only || b.immutable || b.ty != f.ty || b.read_only != f.read_only {
@@ -323,7 +323,9 @@ fn check_fields(
         }
         if let Some(tag) = f.proto_tag {
             let tenant = f.name == TENANT_ID && tag == TENANT_ID_TAG;
-            if tag < FIRST_USER_TAG && !tenant {
+            // An overlay of a base field keeps the base field's reserved tag.
+            let base_tag = overlay.and_then(|b| b.proto_tag);
+            if tag < FIRST_USER_TAG && !tenant && base_tag != Some(tag) {
                 c.push(
                     "tag_reserved",
                     &p,
@@ -347,14 +349,15 @@ fn check_fields(
         if f.read_only && f.immutable {
             c.push("contradiction", &p, "read_only and immutable");
         }
-        if let Some(d) = &f.default {
-            if !d.is_null() && !f.ty.accepts(d) {
-                c.push(
-                    "default_type",
-                    &p,
-                    format!("default {d} is not a {}", f.ty.label()),
-                );
-            }
+        if let Some(d) = &f.default
+            && !d.is_null()
+            && !f.ty.accepts(d)
+        {
+            c.push(
+                "default_type",
+                &p,
+                format!("default {d} is not a {}", f.ty.label()),
+            );
         }
         check_type(c, &p, &f.ty);
         for r in &f.validators {
