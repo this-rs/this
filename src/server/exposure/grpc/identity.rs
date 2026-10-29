@@ -32,7 +32,10 @@ pub async fn context_of<T>(host: &ServerHost, request: &Request<T>) -> Result<Au
     let Some(provider) = host.auth_provider.as_ref() else {
         return Ok(AuthContext::Anonymous);
     };
-    match provider.extract_context_from_metadata(request.metadata()).await {
+    match provider
+        .extract_context_from_metadata(request.metadata())
+        .await
+    {
         Ok(ctx) => Ok(ctx),
         Err(e) => identity_failure(host, &e).map_err(to_status),
     }
@@ -68,7 +71,9 @@ pub async fn identity_layer(
                 Ok(ctx) => ctx,
                 Err(err) => {
                     debug_assert_eq!(err.code.as_str(), codes::AUTH_UNAUTHENTICATED);
-                    return to_status(err).into_http::<axum::body::Body>().into_response();
+                    return to_status(err)
+                        .into_http::<axum::body::Body>()
+                        .into_response();
                 }
             },
         };
@@ -109,8 +114,7 @@ mod tests {
     }
 
     fn host(default_policy: Option<&str>) -> ServerHost {
-        let mut h = ServerHost::minimal_for_test()
-            .with_auth_provider(Arc::new(TokenProvider));
+        let mut h = ServerHost::minimal_for_test().with_auth_provider(Arc::new(TokenProvider));
         if let Some(p) = default_policy {
             let mut cfg = (*h.config).clone();
             cfg.auth = Some(serde_yaml::from_str(&format!("default_policy: {p}")).unwrap());

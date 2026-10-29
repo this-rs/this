@@ -231,12 +231,15 @@ impl GrpcExposure {
                     EventServiceServer::new(event_svc).map_request(to_tonic),
                 );
             if let Some(svc) = notification_svc {
-                r = r.route_service(
-                    &path(
-                        NotificationServiceServer::<notification_service::NotificationServiceImpl>::NAME,
-                    ),
-                    NotificationServiceServer::new(svc).map_request(to_tonic),
-                );
+                r =
+                    r.route_service(
+                        &path(
+                            NotificationServiceServer::<
+                                notification_service::NotificationServiceImpl,
+                            >::NAME,
+                        ),
+                        NotificationServiceServer::new(svc).map_request(to_tonic),
+                    );
             }
             r
         };

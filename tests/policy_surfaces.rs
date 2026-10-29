@@ -322,12 +322,12 @@ async fn the_guard_covers_every_method_of_the_collection() {
 // 3. LES SURFACES HORS REST REFUSENT DE SE MONTER
 // ===========================================================================
 
-/// **Fail-closed** : les surfaces qui ne peuvent pas appliquer les politiques
-/// (elles ne sont pas résolues par route) **refusent de se monter** quand elles
-/// sont armées, au lieu de publier les entités sans leur politique.
+/// GraphQL applique désormais les politiques **par opération** (flux auth du
+/// ModuleDescriptor) : armé, il se MONTE, et chaque résolveur juge son
+/// `(entité, opération)` comme le REST — ici `list: admin_only` refuse l'anonyme.
 #[cfg(feature = "graphql")]
 #[tokio::test]
-async fn graphql_refuses_to_mount_when_policies_are_armed() {
+async fn graphql_mounts_armed_and_enforces_per_operation() {
     use this::server::GraphQLExposure;
     use this::server::builder::ServerBuilder;
 
@@ -341,14 +341,26 @@ async fn graphql_refuses_to_mount_when_policies_are_armed() {
     );
     assert!(host.authorize, "les politiques sont armées par défaut");
 
-    let refused = GraphQLExposure::build_router(Arc::clone(&host));
-    let message = format!("{:#}", refused.expect_err("doit refuser"));
-    assert!(
-        message.contains("ARMÉES") && message.contains("build_router_unenforced"),
-        "le refus doit dire pourquoi et nommer l'acceptation explicite : {message}"
+    let app = GraphQLExposure::build_router(Arc::clone(&host)).expect("armé et couvert : monté");
+    let response = app
+        .oneshot(
+            Request::post("/graphql")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"query":"{ orders { id } }"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+        .await
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(
+        body["errors"][0]["extensions"]["this_code"], "this.auth.forbidden",
+        "list: admin_only doit refuser l'anonyme sur GraphQL comme en REST : {body}"
     );
 
-    // L'acceptation explicite monte la surface.
+    // L'acceptation explicite monte toujours la surface.
     assert!(
         GraphQLExposure::build_router_unenforced(host).is_ok(),
         "l'opt-in explicite doit monter la surface"
@@ -413,21 +425,41 @@ impl this::core::module::Module for ModuleImpose {
 }
 
 /// Le raccourci **du framework** `build_with_grpc()` montait REST (appliqué) et
-/// gRPC (non appliqué) dans le même routeur, sans un mot. Il refuse désormais.
+/// gRPC (non appliqué) dans le même routeur. gRPC applique désormais les
+/// politiques par appel : le raccourci se monte armé — SAUF si une partie non
+/// couverte est montée (`NotificationService`), où il refuse toujours.
 #[cfg(feature = "grpc")]
 #[tokio::test]
 async fn the_framework_grpc_shortcut_refuses_instead_of_half_protecting() {
     use this::server::builder::ServerBuilder;
 
-    let refused = ServerBuilder::new()
+    assert!(
+        ServerBuilder::new()
+            .register_module(ModuleImpose)
+            .expect("module")
+            .with_obrain_store(ObrainStore::new_in_memory())
+            .build_with_grpc()
+            .is_ok(),
+        "gRPC appliqué par opération : servi armé"
+    );
+
+    let host = ServerBuilder::new()
         .register_module(ModuleImpose)
         .expect("module")
         .with_obrain_store(ObrainStore::new_in_memory())
-        .build_with_grpc();
+        .build_host()
+        .expect("hôte")
+        .with_notification_store(Arc::new(
+            this::events::sinks::in_app::NotificationStore::new(),
+        ));
+    let refused =
+        this::server::exposure::grpc::GrpcExposure::build_router_no_fallback(Arc::new(host));
     let message = format!("{:#}", refused.expect_err("doit refuser"));
     assert!(
-        message.contains("gRPC") && message.contains("ARMÉES"),
-        "le refus doit nommer la surface en cause : {message}"
+        message.contains("gRPC")
+            && message.contains("ARMÉES")
+            && message.contains("NotificationService"),
+        "le refus doit nommer la partie non couverte : {message}"
     );
 }
 

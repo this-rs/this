@@ -13,9 +13,12 @@
 //! 3. `PermDesc::default_policy` (`authenticated`, `deny` for business operations).
 //!
 //! # Precedence (link)
-//! 1. `LinkDesc.permissions` explicit; 2. YAML `LinkDefinition.auth`; 3. the scope
-//! entity (source in forward direction), as above. A partial link table does not
-//! complete itself with `authenticated` (RFC §3.6).
+//! 1. `LinkDesc.permissions` explicit;
+//! 2. YAML `LinkDefinition.auth`;
+//! 3. the scope entity (the entity the request is anchored on, as the REST route;
+//!    the source when the caller does not know it), as above.
+//!
+//! A partial link table does not complete itself with `authenticated` (RFC §3.6).
 //!
 //! # Owner
 //! `owner` is satisfied by an `AuthContext::Owner` (same rule as the REST middleware),
@@ -26,6 +29,9 @@
 //! A refusal is `this.auth.forbidden` (403 / `PERMISSION_DENIED` / `FORBIDDEN`) for
 //! every caller, anonymous included — the same status as the REST middleware. An
 //! unreadable declared policy is also a refusal (`reason` names it).
+
+// `ContractError` is the cross-surface contract (same allowance as this-descriptor).
+#![allow(clippy::result_large_err)]
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -151,7 +157,7 @@ impl PolicyIndex {
                         policy: Ok(p.clone()),
                         source: PolicySource::LinkDescriptor,
                     },
-                    None => self.link_fallback(&l.source, op, scope_name, &key),
+                    None => self.link_fallback(scope.unwrap_or(&l.source), op, scope_name, &key),
                 };
                 out.entry(key).or_insert(resolved);
             }
@@ -179,7 +185,7 @@ impl PolicyIndex {
                     policy: Self::declared(raw),
                     source: PolicySource::LinkConfig,
                 },
-                None => self.link_fallback(&d.source_type, op, scope_name, &key),
+                None => self.link_fallback(scope.unwrap_or(&d.source_type), op, scope_name, &key),
             };
             out.insert(key, resolved);
         }
@@ -193,7 +199,7 @@ impl PolicyIndex {
 
     fn link_fallback(
         &self,
-        source_entity: &str,
+        scope_entity: &str,
         op: &Operation,
         scope_name: String,
         key: &(String, String, String),
@@ -214,7 +220,7 @@ impl PolicyIndex {
                 source: PolicySource::LinkConfig,
             };
         }
-        let mut r = self.entity_policy(source_entity, op);
+        let mut r = self.entity_policy(scope_entity, op);
         r.scope = scope_name;
         r
     }
@@ -276,7 +282,10 @@ pub fn decide(
     match evaluate(expr, &view, env) {
         Some(true) => Ok(()),
         Some(false) => Err(forbidden(&resolved.scope, "policy not satisfied")),
-        None => Err(forbidden(&resolved.scope, "policy unevaluable (fail-closed)")),
+        None => Err(forbidden(
+            &resolved.scope,
+            "policy unevaluable (fail-closed)",
+        )),
     }
 }
 
@@ -418,15 +427,33 @@ mod tests {
         assert_eq!(r.source, PolicySource::Descriptor);
         assert!(authorize_op(&idx, "order", &Operation::Create, &anon, None, &env).is_ok());
         // Not declared in the descriptor: the YAML table still applies.
-        assert_eq!(idx.entity_policy("order", &Operation::List).source, PolicySource::Config);
+        assert_eq!(
+            idx.entity_policy("order", &Operation::List).source,
+            PolicySource::Config
+        );
 
         // Link: descriptor explicit, then YAML link table, then entity.
-        let del = idx.link_policies(Some("has_invoice"), None, None, None, &Operation::DeleteLink);
+        let del = idx.link_policies(
+            Some("has_invoice"),
+            None,
+            None,
+            None,
+            &Operation::DeleteLink,
+        );
         assert_eq!(del.len(), 1);
         assert_eq!(del[0].source, PolicySource::LinkDescriptor);
-        let create = idx.link_policies(Some("has_invoice"), None, None, None, &Operation::CreateLink);
+        let create = idx.link_policies(
+            Some("has_invoice"),
+            None,
+            None,
+            None,
+            &Operation::CreateLink,
+        );
         assert_eq!(create[0].source, PolicySource::LinkConfig);
-        assert_eq!(create[0].policy, Ok(PolicyExpr::HasRole(vec!["billing".into()])));
+        assert_eq!(
+            create[0].policy,
+            Ok(PolicyExpr::HasRole(vec!["billing".into()]))
+        );
         // Undeclared link type without scope: refused.
         let none = idx.link_policies(Some("unknown"), None, None, None, &Operation::CreateLink);
         let admin = AuthContext::Admin {
