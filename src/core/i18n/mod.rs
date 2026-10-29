@@ -1,6 +1,6 @@
 //! Locales on the server side. The engine (negotiation, rendering, `I18nCatalog`) is pure
 //! and lives in `this_descriptor::engine::i18n` (shared with wasm32 fronts); this module adds
-//! the host catalog ([`LocaleCatalog`]) and the extractors (HTTP query / cookie /
+//! the host catalog (`LocaleCatalog`) and the extractors (HTTP query / cookie /
 //! `Accept-Language`, gRPC metadata).
 
 pub mod extract;

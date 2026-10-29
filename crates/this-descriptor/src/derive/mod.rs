@@ -1,6 +1,6 @@
 //! Derivations of protocol artifacts from descriptors (pure functions, wasm32-compatible).
 //!
-//! - [`graphql_sdl`] / [`graphql`]: GraphQL SDL (object type, enums, create/update input
+//! - [`graphql_sdl`] / `graphql`: GraphQL SDL (object type, enums, create/update input
 //!   types). `optional` fields are nullable; required-on-create fields are `!` in the
 //!   create input.
 //! - [`proto_file`] / [`proto`]: `.proto` file. Fields are emitted with THEIR `proto_tag`,

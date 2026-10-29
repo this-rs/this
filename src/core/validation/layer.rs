@@ -12,7 +12,7 @@
 //! | `GET /{plural}`                  | `?filter=&sort=&page=&limit=` parsed STRICTLY and checked against the entity's `QuerySchema`; the checked [`ListQuery`] is put in the request extensions |
 //!
 //! Anything else (links, undescribed entities, hosts without descriptors) passes through
-//! untouched. A refusal is an [`ApiError`]: 422 `this.validation.failed` with `fields`, or
+//! untouched. A refusal is an `ApiError`: 422 `this.validation.failed` with `fields`, or
 //! 400 `this.query.*`; the legacy `error` / `errors` keys are kept by `http_body`.
 //!
 //! On success the request carries [`EngineValidated`]: `Validated<T>` then only extracts

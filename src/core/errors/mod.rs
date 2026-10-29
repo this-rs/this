@@ -1,19 +1,19 @@
 //! `ContractError` across the layers of this-rs.
 //!
 //! `ContractError` travels inside `anyhow::Error` (the `EntityCreator` / `EntityFetcher`
-//! traits are unchanged). Every surface calls [`from_anyhow`] instead of
+//! traits are unchanged). Every surface calls `from_anyhow` instead of
 //! `map_err(|e| Status::internal(..))`: a business or validation error keeps its code and
 //! kind; only an unknown error becomes `this.internal`.
 //!
 //! One table (`ErrorKind`: HTTP / gRPC / GraphQL), one envelope, one catalog:
-//! - [`http`]: [`ApiError`] (`IntoResponse`, header `x-this-error`, RFC 9457 when
-//!   accepted) and the [`localize_errors`] middleware (message in the request locale);
-//! - [`grpc`] (feature `grpc`): `Status` with the mapped code, the JSON envelope in
+//! - `http`: `ApiError` (`IntoResponse`, header `x-this-error`, RFC 9457 when
+//!   accepted) and the `localize_errors` middleware (message in the request locale);
+//! - `grpc` (feature `grpc`): `Status` with the mapped code, the JSON envelope in
 //!   `details`, `x-this-error` metadata, localized message;
-//! - [`graphql`] (feature `graphql`): `async_graphql::Error` with `extensions.code` from the
+//! - `graphql` (feature `graphql`): `async_graphql::Error` with `extensions.code` from the
 //!   table plus `this_code`, `kind`, `message_key`, `params`, `fields`.
 //!
-//! The constructors below ([`not_found`], [`forbidden`]...) are the stable codes the ad hoc
+//! The constructors below (`not_found`, `forbidden`...) are the stable codes the ad hoc
 //! `StatusCode::NOT_FOUND` / `Status::not_found` / `Error::new("...")` sites migrate to.
 
 pub mod http;

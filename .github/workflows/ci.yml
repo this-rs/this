@@ -133,7 +133,10 @@ jobs:
           components: rustfmt
 
       - name: Check formatting
-        run: cargo fmt --all -- --check
+        # rustfmt on the tracked files: `cargo fmt` runs `cargo metadata`, which loads
+        # the optional obrain/vite-rs path dependencies (absent on the runner) once the
+        # workspace declares members. Formatting is the same check.
+        run: git ls-files '*.rs' | xargs rustfmt --edition 2024 --check
 
   # Clippy linting
   clippy:

@@ -1,10 +1,10 @@
 //! REST: `ContractError` as an HTTP response, localized in the request locale.
 //!
-//! - [`ApiError`] (`IntoResponse`): status from the kind table, body
+//! - `ApiError` (`IntoResponse`): status from the kind table, body
 //!   `ContractError::http_body` (legacy `error` / `errors` keys kept, contract keys,
 //!   RFC 9457 keys), header `x-this-error: <code>`. The error itself is also stored in the
 //!   response extensions.
-//! - [`localize_errors`] middleware: installs the [`LocaleCatalog`] for the extractors,
+//! - `localize_errors` middleware: installs the `LocaleCatalog` for the extractors,
 //!   resolves the request locale (query, cookie, `Accept-Language`), and re-renders every
 //!   `ContractError` response in that locale, as `application/problem+json` when the client
 //!   accepts it (`Content-Language` set). Handlers never deal with locales.
@@ -26,7 +26,7 @@ use axum::response::{IntoResponse, Response};
 pub struct ApiError(pub ContractError);
 
 /// Handler result whose error side is a contract error. `?` works on
-/// `Result<_, ContractError>` and on `Result<_, anyhow::Error>` (through [`from_anyhow`]).
+/// `Result<_, ContractError>` and on `Result<_, anyhow::Error>` (through `from_anyhow`).
 pub type ApiResult<T> = Result<T, ApiError>;
 
 impl From<ContractError> for ApiError {
@@ -108,7 +108,7 @@ pub fn error_response(
 }
 
 /// Legacy keys a surface keeps ADDING to the contract body (`error`, `errors`, `scope`,
-/// `policy`...): carried in the response extensions so that [`localize_errors`] re-renders
+/// `policy`...): carried in the response extensions so that `localize_errors` re-renders
 /// the localized contract body without losing them.
 #[derive(Debug, Clone, Default)]
 pub struct ErrorExtras(pub serde_json::Map<String, serde_json::Value>);

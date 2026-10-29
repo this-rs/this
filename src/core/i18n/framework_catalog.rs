@@ -16,7 +16,7 @@ pub fn framework_bundles() -> Vec<MessageBundle> {
         .collect()
 }
 
-/// Process-wide framework-only catalog, used when no [`LocaleCatalog`] was installed
+/// Process-wide framework-only catalog, used when no `LocaleCatalog` was installed
 /// (an `ApiError` rendered outside the `localize_errors` middleware, a unit test...).
 pub fn framework_catalog() -> &'static I18nCatalog {
     static CATALOG: OnceLock<I18nCatalog> = OnceLock::new();

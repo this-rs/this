@@ -151,7 +151,7 @@ pub(crate) async fn request_guard(
     auth: Option<AuthContext>,
     headers: &axum::http::HeaderMap,
     query: Option<&str>,
-) -> std::result::Result<SurfaceGuard, axum::response::Response> {
+) -> std::result::Result<SurfaceGuard, Box<axum::response::Response>> {
     // Absent marker = a router not built by this module: fail-closed (enforce).
     let enforce = enforcement.map(|e| e.0).unwrap_or(true);
     if !enforce || !host.authorize {
@@ -165,13 +165,15 @@ pub(crate) async fn request_guard(
             Ok(ctx) => ctx,
             Err(e) => {
                 let e = localize_in(host, headers, query, e);
-                return Err((
-                    e.http_status_code(),
-                    AxumJson(serde_json::json!({
-                        "errors": [{ "message": e.message, "extensions": e.graphql_extensions() }]
-                    })),
-                )
-                    .into_response());
+                return Err(Box::new(
+                    (
+                        e.http_status_code(),
+                        AxumJson(serde_json::json!({
+                            "errors": [{ "message": e.message, "extensions": e.graphql_extensions() }]
+                        })),
+                    )
+                        .into_response(),
+                ));
             }
         },
     };
@@ -231,7 +233,7 @@ async fn graphql_handler_custom(
     .await
     {
         Ok(g) => g,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
     let executor = GraphQLExecutor::new(host.clone()).await.with_guard(guard);
 

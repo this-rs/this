@@ -8,7 +8,7 @@
 //! `impl<T: Display> From<T> for Error` keeps the message only. Use
 //! [`GraphqlResultExt::map_gql`] / [`GraphqlResultExt::map_gql_in`] instead.
 //!
-//! Locale: the HTTP handler puts the [`RequestLocale`] (and the [`LocaleCatalog`]) in the
+//! Locale: the HTTP handler puts the [`RequestLocale`] (and the `LocaleCatalog`) in the
 //! request data (`request.data(locale)`); [`to_graphql_error_in`] reads them from the
 //! resolver context.
 
