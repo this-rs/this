@@ -346,9 +346,12 @@ mod tests {
         MessageBundle {
             module: "billing".into(),
             locale: Locale::new(locale),
-            messages: [(MessageKey::new("billing.invoice.already_paid"), text.to_string())]
-                .into_iter()
-                .collect(),
+            messages: [(
+                MessageKey::new("billing.invoice.already_paid"),
+                text.to_string(),
+            )]
+            .into_iter()
+            .collect(),
             ..Default::default()
         }
     }
@@ -382,7 +385,11 @@ mod tests {
         assert_eq!(negotiate("de", &av, &d), d);
         assert_eq!(negotiate("", &av, &d), d);
         assert_eq!(negotiate("*", &av, &d), d);
-        assert_eq!(negotiate("en;q=0", &av, &d), d, "q=0 means 'not acceptable'");
+        assert_eq!(
+            negotiate("en;q=0", &av, &d),
+            d,
+            "q=0 means 'not acceptable'"
+        );
         assert_eq!(negotiate(";;,,;q=", &av, &d), d, "garbage never panics");
     }
 
@@ -408,9 +415,15 @@ mod tests {
             render(&[&en], &Locale::new("en"), &k, &BTreeMap::new()),
             "billing.nope"
         );
-        assert_eq!(render(&[], &Locale::new("xx"), &k, &BTreeMap::new()), "billing.nope");
+        assert_eq!(
+            render(&[], &Locale::new("xx"), &k, &BTreeMap::new()),
+            "billing.nope"
+        );
         let cat = I18nCatalog::empty(Locale::new("en"));
-        assert_eq!(cat.render(&Locale::new("en"), &k, &BTreeMap::new()), "billing.nope");
+        assert_eq!(
+            cat.render(&Locale::new("en"), &k, &BTreeMap::new()),
+            "billing.nope"
+        );
         let e = cat.localize(
             ContractError::new("billing.nope", crate::ErrorKind::Conflict).with_message(""),
             &Locale::new("en"),
@@ -457,12 +470,22 @@ mod tests {
     fn catalog_module_bundles_win_and_replace() {
         let mut cat = I18nCatalog::framework().with_bundle(billing("en", "Already paid"));
         let err = ContractError::new("billing.invoice.already_paid", crate::ErrorKind::Conflict)
-            .with_field(FieldViolation::new("amount", "this.validation.positive").with_param("field", "amount"));
+            .with_field(
+                FieldViolation::new("amount", "this.validation.positive")
+                    .with_param("field", "amount"),
+            );
         let e = cat.localize(err.clone(), &Locale::new("en"));
         assert_eq!(e.message, "Already paid");
-        assert!(e.fields[0].message.contains("amount"), "{}", e.fields[0].message);
+        assert!(
+            e.fields[0].message.contains("amount"),
+            "{}",
+            e.fields[0].message
+        );
         cat.add_bundle(billing("en", "Paid already"));
-        assert_eq!(cat.localize(err.clone(), &Locale::new("en")).message, "Paid already");
+        assert_eq!(
+            cat.localize(err.clone(), &Locale::new("en")).message,
+            "Paid already"
+        );
         assert_eq!(cat.remove_module("billing"), 1);
         // Unknown everywhere: the message already present is kept.
         assert_eq!(
@@ -471,10 +494,15 @@ mod tests {
         );
         // A module may reword a framework message.
         let mut over = billing("en", "x");
-        over.messages.insert(MessageKey::new("this.internal"), "Oops".into());
+        over.messages
+            .insert(MessageKey::new("this.internal"), "Oops".into());
         let cat = I18nCatalog::framework().with_bundle(over);
         assert_eq!(
-            cat.render(&Locale::new("en"), &MessageKey::new("this.internal"), &BTreeMap::new()),
+            cat.render(
+                &Locale::new("en"),
+                &MessageKey::new("this.internal"),
+                &BTreeMap::new()
+            ),
             "Oops"
         );
     }
@@ -487,9 +515,18 @@ mod tests {
             cookie: c,
             accept_language: a,
         };
-        assert_eq!(cat.resolve(h(Some("en"), Some("fr"), Some("fr"))), Locale::new("en"));
-        assert_eq!(cat.resolve(h(None, Some("en-GB"), Some("fr"))), Locale::new("en"));
-        assert_eq!(cat.resolve(h(Some("de"), None, Some("en"))), Locale::new("en"));
+        assert_eq!(
+            cat.resolve(h(Some("en"), Some("fr"), Some("fr"))),
+            Locale::new("en")
+        );
+        assert_eq!(
+            cat.resolve(h(None, Some("en-GB"), Some("fr"))),
+            Locale::new("en")
+        );
+        assert_eq!(
+            cat.resolve(h(Some("de"), None, Some("en"))),
+            Locale::new("en")
+        );
         assert_eq!(cat.resolve(h(None, None, None)), Locale::new("fr"));
         assert_eq!(cat.locales(), vec![Locale::new("fr"), Locale::new("en")]);
     }
