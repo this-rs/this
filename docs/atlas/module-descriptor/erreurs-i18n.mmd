@@ -1,8 +1,11 @@
 flowchart LR
 %% name: module-descriptor-erreurs-i18n
 %% PROUVE (flux errors-i18n, md/errors-i18n) : une ContractError, une table ErrorKind, un catalogue ; rendu par surface
-%%   teste par cargo test -p this-rs --lib --features grpc,graphql -- core::errors core::i18n (17 tests nommes)
-%%   et cargo test -p this-descriptor --features leptos (I18nCatalog, server_fn).
+%%   teste par cargo test -p this-rs --lib --features grpc,graphql -- core::errors core::i18n (19 tests nommes,
+%%   dont same_error_same_code_and_text_on_every_surface : meme code et meme texte fr/en en REST, gRPC, GraphQL)
+%%   et cargo test -p this-descriptor --features leptos (I18nCatalog, server_fn ; 14 tests i18n+leptos nommes).
+%% REVUE (relecteur) : bundle hors espace de noms ou Fluent refuse en bloc (catalog_refuses_foreign_keys_and_unsupported_syntax),
+%%   localize_errors reecrit en place (localize_errors_keeps_multi_valued_headers_and_extensions).
 %% SOURCES LUES : crates/this-descriptor/src/{error,i18n,framework,engine/i18n}.rs, src/core/errors/*, src/core/i18n/*,
 %%   leptos/server_fn/src/error.rs (0.9.0-rc0, identique a crates.io).
 %% NON ETABLI : branchement de localize_errors dans le routeur du host, RequestLocale dans les requetes GraphQL,
@@ -21,7 +24,8 @@ flowchart LR
         direction TB
         CE["✅ ContractError<br/>code stable, kind, message_key, fields"]:::ok
         TAB["✅ ErrorKind<br/>HTTP, gRPC, GraphQL"]:::ok
-        CAT["✅ I18nCatalog<br/>modules puis framework,<br/>repli locale par defaut puis cle"]:::ok
+        CAT["✅ I18nCatalog<br/>locale demandee, defaut, tout bundle, cle<br/>missing_for descripteur"]:::ok
+        NS["🔴 bundle refuse<br/>cle hors module. ou syntaxe Fluent<br/>pas de surcharge globale de this.*"]:::refused
         SF["✅ feature leptos<br/>FromServerFnError"]:::ok
     end
 
@@ -45,6 +49,7 @@ flowchart LR
     CE --> TAB
     REQ ==> LOC
     LC --> CAT
+    NS -.->|"add_bundle Err"| CAT
     LOC ==>|"resolve"| CAT
     CAT ==>|"localize"| REST
     CAT ==>|"localize"| GRPC
