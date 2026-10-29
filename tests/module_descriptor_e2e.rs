@@ -638,3 +638,121 @@ async fn hot_loaded_module_from_vfs_served_then_404_after_unload() {
         "bundles removed with the module"
     );
 }
+
+/// Compiled module loaded at runtime: `catalog` (product { price: f64 > 0 }). Its REST
+/// route writes the payload straight to its store, like a CLI-generated handler.
+struct Catalog(Arc<Store>);
+struct Products(Arc<Store>);
+
+impl EntityDescriptor for Products {
+    fn entity_type(&self) -> &str {
+        "product"
+    }
+    fn plural(&self) -> &str {
+        "products"
+    }
+    fn build_routes(&self) -> Router {
+        let store = self.0.clone();
+        Router::new().route(
+            "/products",
+            axum::routing::post(move |axum::Json(v): axum::Json<Value>| {
+                let store = store.clone();
+                async move {
+                    let created = store.create_from_json(v).await.unwrap();
+                    (StatusCode::CREATED, axum::Json(created))
+                }
+            }),
+        )
+    }
+}
+
+impl this::core::module::Module for Catalog {
+    fn name(&self) -> &str {
+        "catalog"
+    }
+    fn entity_types(&self) -> Vec<&str> {
+        vec!["product"]
+    }
+    fn links_config(&self) -> anyhow::Result<LinksConfig> {
+        Ok(LinksConfig {
+            entities: vec![],
+            links: vec![],
+            validation_rules: None,
+            events: None,
+            sinks: None,
+            auth: None,
+        })
+    }
+    fn register_entities(&self, registry: &mut EntityRegistry) {
+        registry.register(Box::new(Products(self.0.clone())));
+    }
+    fn get_entity_fetcher(&self, _: &str) -> Option<Arc<dyn EntityFetcher>> {
+        Some(self.0.clone())
+    }
+    fn get_entity_creator(&self, _: &str) -> Option<Arc<dyn EntityCreator>> {
+        Some(self.0.clone())
+    }
+    fn descriptor(&self) -> Option<ModuleDescriptor> {
+        let mut e = EntityDesc::new("product");
+        e.fields.push(
+            FieldDesc::new("price", FieldType::F64)
+                .validator(ValidatorSpec::Positive, Applies::Always),
+        );
+        let mut d = ModuleDescriptor::new("catalog", "1.0.0");
+        d.entities.push(e);
+        Some(d)
+    }
+}
+
+#[tokio::test]
+async fn hot_loaded_compiled_module_is_validated_on_rest_and_through_its_creator() {
+    let store = Arc::new(Store::default());
+    let host = ServerBuilder::new()
+        .with_link_service(InMemoryLinkService::new())
+        .with_module_runtime()
+        .without_authorization()
+        .build_host()
+        .expect("host")
+        .with_auth_provider(Arc::new(HeaderAuth));
+    let host = Arc::new(host);
+    let app = RestExposure::build_router(host.clone(), vec![]).expect("router");
+    host.module_runtime
+        .clone()
+        .expect("runtime")
+        .load(ModuleSource::Compiled(Arc::new(Catalog(store.clone()))))
+        .await
+        .expect("load");
+
+    // REST: the dispatch layer is outside the host's validation layer; the module's
+    // routes carry their own.
+    let (s, v) = call(
+        &app,
+        Method::POST,
+        "/products",
+        Some(json!({"price": -3.0})),
+    )
+    .await;
+    assert_eq!(s, StatusCode::UNPROCESSABLE_ENTITY, "{v}");
+    assert_eq!(v["fields"][0]["code"], "this.validation.positive");
+    assert_eq!(
+        *store.writes.lock().unwrap(),
+        0,
+        "the store is never reached"
+    );
+
+    // GraphQL / gRPC / link handlers reach the module through the catalog creator.
+    let creator = host.catalog.load().creators["product"].clone();
+    let err = creator
+        .create_from_json(json!({"price": -3.0}))
+        .await
+        .expect_err("validated");
+    assert_eq!(
+        this::core::errors::from_anyhow(&err).code.as_str(),
+        "this.validation.failed"
+    );
+    assert_eq!(*store.writes.lock().unwrap(), 0);
+
+    let (s, v) = call(&app, Method::POST, "/products", Some(json!({"price": 3.0}))).await;
+    assert_eq!(s, StatusCode::CREATED, "{v}");
+    assert_eq!(*store.writes.lock().unwrap(), 1);
+}
