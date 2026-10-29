@@ -10,6 +10,57 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use std::fmt;
 
+pub mod fs;
+pub mod memory;
+pub mod module_store;
+#[cfg(feature = "obrain")]
+pub mod obrain;
+
+#[cfg(test)]
+pub(crate) mod conformance;
+
+pub use fs::LocalFsVfs;
+pub use memory::InMemoryVfs;
+pub use module_store::{StoredModule, StoredVersion, VfsModuleStore, read_source};
+#[cfg(feature = "obrain")]
+pub use obrain::ObrainVfs;
+
+/// Etag of a content: sha256, lower-case hex. Same function for every backend, so an
+/// etag read from one backend is comparable with one computed by the caller.
+pub fn etag_of(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(bytes);
+    let mut s = String::with_capacity(64);
+    for b in digest {
+        s.push_str(&format!("{b:02x}"));
+    }
+    s
+}
+
+/// Shared precondition semantics (every backend calls it under its write lock):
+/// - `IfMatch(e)`: the path must exist with etag `e`;
+/// - `IfNoneMatch`: the path must not exist;
+/// - `None`: always passes.
+pub fn check_precondition(
+    path: &VfsPath,
+    current: Option<&str>,
+    pre: &Precondition,
+) -> Result<(), VfsError> {
+    let ok = match pre {
+        Precondition::None => true,
+        Precondition::IfMatch(want) => current == Some(want.as_str()),
+        Precondition::IfNoneMatch => current.is_none(),
+    };
+    if ok {
+        Ok(())
+    } else {
+        Err(VfsError::PreconditionFailed {
+            path: path.clone(),
+            current: current.map(str::to_string),
+        })
+    }
+}
+
 /// Absolute, normalized path: starts with `/`, no `..`, `.`, `\`, NUL or empty segment.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct VfsPath(String);
@@ -37,6 +88,49 @@ impl VfsPath {
     pub fn join(&self, segment: &str) -> Result<Self, VfsError> {
         let base = self.0.trim_end_matches('/');
         Self::parse(&format!("{base}/{segment}"))
+    }
+    pub fn is_root(&self) -> bool {
+        self.0 == "/"
+    }
+    /// Segments, root excluded (`/a/b` -> `["a", "b"]`).
+    pub fn segments(&self) -> impl Iterator<Item = &str> {
+        self.0.split('/').filter(|s| !s.is_empty())
+    }
+    /// Last segment (`None` for the root).
+    pub fn file_name(&self) -> Option<&str> {
+        self.segments().last()
+    }
+    /// Parent directory (`None` for the root).
+    pub fn parent(&self) -> Option<VfsPath> {
+        if self.is_root() {
+            return None;
+        }
+        match self.0.rfind('/') {
+            Some(0) => Some(Self("/".into())),
+            Some(i) => Some(Self(self.0[..i].to_string())),
+            None => None,
+        }
+    }
+    /// `true` when `self` is strictly below `dir`.
+    pub fn is_below(&self, dir: &VfsPath) -> bool {
+        if dir.is_root() {
+            return !self.is_root();
+        }
+        self.0.len() > dir.0.len()
+            && self.0.starts_with(&dir.0)
+            && self.0.as_bytes()[dir.0.len()] == b'/'
+    }
+    /// Child of `dir` on the way to `self` (`/a/b/c` below `/a` -> `/a/b`).
+    pub fn child_of(&self, dir: &VfsPath) -> Option<VfsPath> {
+        if !self.is_below(dir) {
+            return None;
+        }
+        let start = if dir.is_root() { 1 } else { dir.0.len() + 1 };
+        let end = self.0[start..]
+            .find('/')
+            .map(|i| start + i)
+            .unwrap_or(self.0.len());
+        Some(Self(self.0[..end].to_string()))
     }
 }
 impl fmt::Display for VfsPath {
@@ -112,6 +206,18 @@ impl From<VfsError> for ContractError {
     }
 }
 
+/// Storage of immutable-by-convention files (modules, catalogs, wasm artifacts).
+///
+/// Semantics every backend honours (bench: `conformance::run_all`):
+/// - directories are IMPLICIT: a directory exists while a file exists below it; the
+///   root `/` always exists and cannot be written;
+/// - `list(dir)` returns the immediate children of `dir`, sorted by path; a missing
+///   directory lists as empty (not an error);
+/// - `read` / `delete` of a missing file: `NotFound`; `stat` of a missing file: `Ok(None)`;
+/// - a file cannot be written where a directory exists, nor below a file: `InvalidPath`;
+/// - writes are atomic per file (a reader never sees a partial content) and the
+///   precondition is checked under the backend's write lock (`check_precondition`);
+/// - `etag` = `etag_of(content)`, so equal contents have equal etags on every backend.
 #[async_trait]
 pub trait Vfs: Send + Sync {
     async fn read(&self, path: &VfsPath) -> Result<Vec<u8>, VfsError>;
@@ -134,11 +240,12 @@ pub trait Vfs: Send + Sync {
 ///
 /// Contract for implementations:
 /// - `put` runs `ModuleDescriptor::check` with `CheckProfile::Stored` (explicit policies,
-///   no `public` unless allowed) AND `this_descriptor::compat::check_compat` against the
-///   highest stored version (tags never moved nor reused);
+///   no `public` unless allowed) AND `this_descriptor::compat::check_compat` against every
+///   stored version, in semver order (tags never moved nor reused, backports included);
 /// - `put` and `remove` are authorized by the caller with the admin operation
 ///   `this.module.load` (see the RFC trust model);
-/// - `get(name, None)` returns the highest semver version.
+/// - `get(name, None)` returns the highest semver version (`VfsModuleStore`: highest
+///   non-yanked one).
 #[async_trait]
 pub trait ModuleStore: Send + Sync {
     async fn put(
