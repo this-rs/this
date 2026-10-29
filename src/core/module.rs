@@ -9,6 +9,20 @@ use async_trait::async_trait;
 use std::sync::Arc;
 use uuid::Uuid;
 
+/// Default cap of the in-memory `EntityFetcher::list_query` (rows).
+pub const DEFAULT_LIST_QUERY_MAX_ROWS: usize = 10_000;
+
+/// `THIS_LIST_QUERY_MAX_ROWS` when set and numeric, else [`DEFAULT_LIST_QUERY_MAX_ROWS`].
+fn default_list_query_max_rows() -> usize {
+    static CAP: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *CAP.get_or_init(|| {
+        std::env::var("THIS_LIST_QUERY_MAX_ROWS")
+            .ok()
+            .and_then(|v| v.trim().parse().ok())
+            .unwrap_or(DEFAULT_LIST_QUERY_MAX_ROWS)
+    })
+}
+
 /// Trait for fetching entities dynamically
 ///
 /// This allows the link system to enrich links with full entity data
@@ -52,17 +66,52 @@ pub trait EntityFetcher: Send + Sync {
         Ok(vec![])
     }
 
+    /// Hard cap on the rows the DEFAULT [`list_query`](Self::list_query) will load in
+    /// memory. Above it the query fails with `this.query.too_large` (a typed 400 /
+    /// `INVALID_ARGUMENT` / `BAD_USER_INPUT`) instead of reading a whole table.
+    ///
+    /// Default: [`DEFAULT_LIST_QUERY_MAX_ROWS`] (10 000), or the value of the
+    /// `THIS_LIST_QUERY_MAX_ROWS` environment variable when it parses as a number (read
+    /// once per process). Override this method to set a per-fetcher limit. It has no effect
+    /// on a fetcher that overrides `list_query` itself.
+    fn list_query_max_rows(&self) -> usize {
+        default_list_query_max_rows()
+    }
+
     /// List with a typed query (filter, sort, page), already checked against the
     /// entity's `QuerySchema` by the caller.
     ///
-    /// Default: **O(n)** — fetch everything with `list_as_json(None, None)`, then filter,
-    /// sort and paginate in memory (filter BEFORE pagination, so pages are correct). A
-    /// backend that can push the query down overrides it. Returns `(page, total)`.
+    /// Default: **O(n), bounded** — fetch at most [`list_query_max_rows`](Self::list_query_max_rows)
+    /// rows with `list_as_json(Some(max + 1), None)`, then filter, sort and paginate in
+    /// memory (filter BEFORE pagination, so pages are correct). When the source holds more
+    /// than the cap, the query fails with the typed error `this.query.too_large` (a
+    /// `ContractError`) rather than silently answering from a truncated table. Returns
+    /// `(page, total)`.
+    ///
+    /// **Native overrides.** A backend that can push the query down overrides this method
+    /// and translates the typed [`Query`](crate::descriptor::Query) itself: SQL (Postgres,
+    /// MySQL): `WHERE` / `ORDER BY` / `LIMIT .. OFFSET` built from `query.filter`,
+    /// `query.sort` and `query.page`, with bound parameters only (field names come from the
+    /// already-checked `QuerySchema`, never from the client string); MongoDB: a filter
+    /// document plus `sort` / `skip` / `limit`; Neo4j / Cypher: `WHERE` and `ORDER BY` /
+    /// `SKIP` / `LIMIT`; ScyllaDB / DynamoDB / LMDB (no ad-hoc secondary index): keep this
+    /// default, or query an index you own. Return `total` as the number of rows matching
+    /// the filter BEFORE pagination.
     async fn list_query(
         &self,
         query: &crate::descriptor::Query,
     ) -> Result<(Vec<serde_json::Value>, usize)> {
-        let all = self.list_as_json(None, None).await?;
+        let max = self.list_query_max_rows();
+        let probe = i32::try_from(max.saturating_add(1)).unwrap_or(i32::MAX);
+        let all = self.list_as_json(Some(probe), None).await?;
+        if all.len() > max {
+            return Err(anyhow::Error::new(
+                crate::descriptor::ContractError::framework(
+                    crate::descriptor::framework::codes::QUERY_TOO_LARGE,
+                )
+                .with_param("max", max),
+            ));
+        }
         Ok(crate::descriptor::engine::query::apply_in_memory(
             query, all,
         ))
@@ -186,5 +235,87 @@ pub trait Module: Send + Sync {
     /// `EntityConfig::plural`.
     fn descriptor(&self) -> Option<crate::descriptor::ModuleDescriptor> {
         None
+    }
+}
+
+#[cfg(test)]
+mod list_query_tests {
+    use super::*;
+    use crate::descriptor::{Page, Query};
+    use serde_json::json;
+
+    /// Source of `rows` rows whose `list_as_json` honours `limit`; cap set per fetcher.
+    struct Rows {
+        rows: usize,
+        cap: usize,
+    }
+
+    #[async_trait]
+    impl EntityFetcher for Rows {
+        async fn fetch_as_json(&self, _: &Uuid) -> Result<serde_json::Value> {
+            Ok(json!({}))
+        }
+        async fn list_as_json(
+            &self,
+            limit: Option<i32>,
+            _: Option<i32>,
+        ) -> Result<Vec<serde_json::Value>> {
+            let take = limit.map_or(self.rows, |l| (l.max(0) as usize).min(self.rows));
+            Ok((0..take).map(|i| json!({ "n": i })).collect())
+        }
+        fn list_query_max_rows(&self) -> usize {
+            self.cap
+        }
+    }
+
+    #[tokio::test]
+    async fn list_query_default_refuses_a_table_above_the_cap_with_a_typed_error() {
+        let f = Rows { rows: 11, cap: 10 };
+        let err = f.list_query(&Query::new()).await.expect_err("too large");
+        let c = crate::core::errors::from_anyhow(&err);
+        assert_eq!(c.code.as_str(), "this.query.too_large");
+        assert_eq!(c.kind, crate::descriptor::ErrorKind::BadRequest);
+    }
+
+    #[tokio::test]
+    async fn list_query_default_serves_a_table_at_the_cap_and_paginates_after_filtering() {
+        let f = Rows { rows: 10, cap: 10 };
+        let mut q = Query::new();
+        q.page = Page::Cursor {
+            after: Some("8".into()),
+            limit: 5,
+        };
+        let (page, total) = f.list_query(&q).await.expect("at the cap is served");
+        assert_eq!((page.len(), total), (2, 10));
+    }
+
+    #[tokio::test]
+    async fn list_query_default_asks_the_source_for_at_most_cap_plus_one_rows() {
+        // The source would hold a million rows: the default must not load them all.
+        let f = Rows {
+            rows: 1_000_000,
+            cap: 5,
+        };
+        let err = f.list_query(&Query::new()).await.expect_err("too large");
+        assert_eq!(
+            crate::core::errors::from_anyhow(&err).code.as_str(),
+            "this.query.too_large"
+        );
+        assert_eq!(f.list_as_json(Some(6), None).await.unwrap().len(), 6);
+    }
+
+    #[test]
+    fn list_query_default_cap_is_ten_thousand_without_override() {
+        struct Plain;
+        #[async_trait]
+        impl EntityFetcher for Plain {
+            async fn fetch_as_json(&self, _: &Uuid) -> Result<serde_json::Value> {
+                Ok(json!({}))
+            }
+        }
+        // Honours the documented env override only when it is set in this process.
+        if std::env::var("THIS_LIST_QUERY_MAX_ROWS").is_err() {
+            assert_eq!(Plain.list_query_max_rows(), 10_000);
+        }
     }
 }
