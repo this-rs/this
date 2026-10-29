@@ -769,6 +769,7 @@ macro_rules! __this_desc_rules {
     ) => {
         $(
             {
+                #[allow(unused_variables)]
                 let on = $crate::__this_applies!($op);
                 $(
                     {
@@ -780,6 +781,7 @@ macro_rules! __this_desc_rules {
         )*
         $(
             {
+                #[allow(unused_variables)]
                 let on = $crate::__this_applies!($fop);
                 $(
                     {
