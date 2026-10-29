@@ -41,13 +41,13 @@ pub mod resolve;
 
 pub use check::{CheckProfile, DescriptorIssue};
 pub use custom::{Custom, CustomKind, CustomRegistry, CustomScope};
+pub use engine::i18n::{I18nCatalog, LocaleHints};
 pub use entity::{EntityDesc, EntityI18n, EntityKind, base_fields};
 pub use error::{ContractError, ErrorCode, ErrorDesc, ErrorKind, FieldViolation};
 pub use field::{
     Applies, FieldDesc, FieldI18n, FieldType, FieldTypeOf, TransformRule, TransformSpec,
     ValidatorRule, ValidatorSpec,
 };
-pub use engine::i18n::{I18nCatalog, LocaleHints};
 pub use i18n::{I18nDecl, Locale, MessageBundle, MessageDecl, MessageKey, MessageSyntax};
 pub use lifecycle::ModuleState;
 pub use link::LinkDesc;
