@@ -33,8 +33,8 @@ pub struct Principal {
     pub roles: Vec<String>,
     pub admin: bool,
     pub service: bool,
-    /// `Some(true)` for an `AuthContext::Owner` (same rule as `AuthPolicy::Owner`).
-    pub owner_context: bool,
+    /// The resource an `AuthContext::Owner` owns (`None` for every other context).
+    pub owner_of: Option<Uuid>,
 }
 
 impl Principal {
@@ -45,7 +45,10 @@ impl Principal {
             roles: ctx.roles().to_vec(),
             admin: ctx.is_admin(),
             service: ctx.is_service(),
-            owner_context: matches!(ctx, AuthContext::Owner { .. }),
+            owner_of: match ctx {
+                AuthContext::Owner { resource_id, .. } => Some(*resource_id),
+                _ => None,
+            },
         }
     }
 
@@ -62,9 +65,15 @@ impl Principal {
         }
     }
 
-    /// Ownership as the REST middleware sees it: the context variant.
-    pub fn context_ownership(&self) -> Option<bool> {
-        Some(self.owner_context)
+    /// Ownership of `resource`: an `Owner` context owns ONLY its own resource (compared
+    /// by id); any other context owns nothing. Resource unknown (create, list) with an
+    /// owner context = unevaluable, never true.
+    pub fn context_ownership(&self, resource: Option<&Uuid>) -> Option<bool> {
+        match (&self.owner_of, resource) {
+            (None, _) => Some(false),
+            (Some(owned), Some(r)) => Some(owned == r),
+            (Some(_), None) => None,
+        }
     }
 }
 
@@ -320,13 +329,16 @@ mod tests {
                 let legacy = AuthPolicy::try_from(&expr).unwrap();
                 let p = Principal::of(&ctx);
                 let env = RegistryEnv::new(Some(&reg), &ctx);
-                let engine = is_allowed(&expr, &p.view(p.context_ownership()), &env);
-                let converted = legacy.check_with_resolver(&ctx, Some(&reg), None);
+                let engine = is_allowed(&expr, &p.view(p.context_ownership(Some(&uid(3)))), &env);
+                let converted = legacy.check_with_resolver(&ctx, Some(&reg), Some(&uid(3)));
                 assert_eq!(engine, converted, "`{s}` for {name}: engine vs AuthPolicy");
                 // The legacy flat grammar (no function form, no `|`, no deny) must agree too.
                 if !s.contains('(') && !s.contains('|') && *s != "deny" {
-                    let parsed =
-                        AuthPolicy::parse_policy(s).check_with_resolver(&ctx, Some(&reg), None);
+                    let parsed = AuthPolicy::parse_policy(s).check_with_resolver(
+                        &ctx,
+                        Some(&reg),
+                        Some(&uid(3)),
+                    );
                     assert_eq!(engine, parsed, "`{s}` for {name}: engine vs parse_policy");
                 }
             }
@@ -366,6 +378,28 @@ mod tests {
         assert_eq!(
             auth(&handshake_headers(&HeaderMap::new(), Some("x=1"))),
             None
+        );
+        // Percent-decoded query token; subprotocol token; header still wins.
+        assert_eq!(
+            auth(&handshake_headers(
+                &HeaderMap::new(),
+                Some("access_token=a%2Bb%3D")
+            )),
+            Some("Bearer a+b=".into())
+        );
+        let mut sp = HeaderMap::new();
+        sp.insert(
+            "sec-websocket-protocol",
+            HeaderValue::from_static("graphql-transport-ws, access_token, sp1"),
+        );
+        assert_eq!(
+            auth(&handshake_headers(&sp, Some("access_token=q1"))),
+            Some("Bearer sp1".into())
+        );
+        sp.insert("authorization", HeaderValue::from_static("Bearer h1"));
+        assert_eq!(
+            auth(&handshake_headers(&sp, None)),
+            Some("Bearer h1".into())
         );
     }
 

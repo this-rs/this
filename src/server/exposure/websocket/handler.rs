@@ -53,7 +53,7 @@ pub async fn ws_handler(
                 Ok(ctx) => ctx,
                 Err(e) => {
                     return (
-                        axum::http::StatusCode::UNAUTHORIZED,
+                        e.http_status_code(),
                         axum::Json(e.to_json()),
                     )
                         .into_response();
@@ -70,7 +70,8 @@ pub async fn ws_handler(
     };
     let tenant_id = ctx.as_ref().and_then(|c| c.tenant_id());
     let user_id = ctx.as_ref().and_then(|c| c.user_id());
-    ws.on_upgrade(move |socket| handle_socket(socket, manager, tenant_id, user_id, guard))
+    ws.protocols(["access_token", "bearer"])
+        .on_upgrade(move |socket| handle_socket(socket, manager, tenant_id, user_id, guard))
         .into_response()
 }
 
