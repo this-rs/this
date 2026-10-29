@@ -22,6 +22,9 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v7
 
+      - name: Create local dep stubs
+        run: bash .github/create-local-dep-stubs.sh
+
       - name: Install protoc
         uses: arduino/setup-protoc@v3
         with:
@@ -48,8 +51,10 @@ jobs:
           path: target
           key: ${{ runner.os }}-cargo-build-target-docs-${{ hashFiles('**/Cargo.lock') }}
 
+      # Use --features all,wami (not --all-features) because obrain and
+      # frontend depend on local path checkouts not available on CI.
       - name: Build documentation
-        run: cargo doc --no-deps --all-features
+        run: cargo doc --no-deps --features all,wami
         env:
           RUSTDOCFLAGS: --cfg docsrs
 
