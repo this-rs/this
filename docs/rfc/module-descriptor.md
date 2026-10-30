@@ -287,6 +287,14 @@ Corps HTTP (additif ; RFC 9457 compris) :
   lecture (documenté par le flux auth).
 - Les fetchers ne sont plus accessibles qu'à travers `host.guarded_fetcher(entity, Operation, &AuthContext)`
   (flux auth) ; un test de couverture échoue si `entity_fetchers.get(` apparaît hors de la garde.
+- **Identité au handshake WebSocket / graphql-ws** (`resolve_identity`, `src/server/exposure/guard.rs`) : quand le
+  jeton vient du cookie ambiant `this_token` (source `Cookie` de `handshake_token`), l'`Origin` doit figurer dans
+  `security.websocket_origins` — **fail-closed** : liste vide, `Origin` absente ou hors liste = refus
+  `this.auth.forbidden` (403). C'est la parade au détournement cross-site de WebSocket (CSWSH) depuis un
+  sous-domaine voisin (le cookie est joint par le navigateur à toute requête same-site). Un jeton explicite
+  (`Authorization`, sous-protocole, `access_token`) n'est pas concerné ; `*` dans la liste désarme le contrôle
+  explicitement. Tests `ws_cookie_identity_requires_an_allowed_origin` et
+  `graphql_ws_cookie_identity_requires_an_allowed_origin` (`tests/auth_surfaces.rs`).
 
 ### 3.7 Modules au runtime
 
