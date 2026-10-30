@@ -12,6 +12,7 @@ use crate::i18n::MessageSyntax;
 use crate::module::{DESCRIPTOR_FORMAT, ModuleDescriptor};
 use crate::naming::is_identifier;
 use crate::perm::{Operation, PermDesc};
+use crate::runtime::RuntimeDesc;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::fmt;
@@ -82,6 +83,47 @@ impl Ctx<'_> {
     }
 }
 
+fn check_runtime(c: &mut Ctx, r: &RuntimeDesc, profile: CheckProfile) {
+    if r.entry.trim().is_empty() {
+        c.push(
+            "runtime_entry",
+            "runtime.entry",
+            "`entry` must be a non-empty WASM export name",
+        );
+    }
+    if matches!(profile, CheckProfile::Stored { .. }) && r.handles.is_empty() {
+        c.push(
+            "runtime_handles",
+            "runtime.handles",
+            "a stored WASM module must declare the handles it requests",
+        );
+    }
+    let mut seen = BTreeSet::new();
+    for h in &r.handles {
+        if !seen.insert(h.to_string()) {
+            c.push(
+                "runtime_handles",
+                "runtime.handles",
+                format!("duplicate handle `{h}`"),
+            );
+        }
+    }
+    if r.limits.memory_bytes == Some(0) {
+        c.push(
+            "runtime_limits",
+            "runtime.limits.memory_bytes",
+            "`memory_bytes` must be > 0",
+        );
+    }
+    if r.limits.cpu_time_ms == Some(0) {
+        c.push(
+            "runtime_limits",
+            "runtime.limits.cpu_time_ms",
+            "`cpu_time_ms` must be > 0",
+        );
+    }
+}
+
 impl ModuleDescriptor {
     /// Verify this descriptor. Fail-closed: anything undeclared or unregistered is an issue.
     pub fn check(
@@ -102,12 +144,8 @@ impl ModuleDescriptor {
                 format!("{} > {DESCRIPTOR_FORMAT}", self.format),
             );
         }
-        if self.runtime.is_some() {
-            c.issues.push(DescriptorIssue {
-                code: ErrorCode::new(crate::framework::codes::MODULE_FORMAT_UNSUPPORTED),
-                path: "runtime".into(),
-                message: "the `runtime` section is reserved (not supported yet)".into(),
-            });
+        if let Some(r) = &self.runtime {
+            check_runtime(&mut c, r, profile);
         }
         if !is_identifier(&self.name) {
             c.push(
@@ -497,6 +535,7 @@ mod tests {
     use crate::entity::EntityDesc;
     use crate::field::FieldDesc;
     use crate::perm::PolicyExpr;
+    use crate::runtime::{Handle, RuntimeDesc, RuntimeLimits};
 
     fn module_with(fields: Vec<FieldDesc>) -> ModuleDescriptor {
         let mut m = ModuleDescriptor::new("billing", "1.0.0");
@@ -517,19 +556,47 @@ mod tests {
     }
 
     #[test]
-    fn runtime_section_refused_until_track4() {
+    fn runtime_section_roundtrip_and_check() {
         let ok = ModuleDescriptor::new("billing", "1.0.0");
         assert!(ok.check(&reg(), CheckProfile::Compiled).is_ok());
-        let parsed = ModuleDescriptor::from_json(
-            r#"{"name":"billing","version":"1.0.0","runtime":{"kind":"wasm"}}"#,
-        )
-        .unwrap();
-        assert!(
-            parsed.runtime.is_some(),
-            "runtime must be carried, not dropped"
-        );
-        let codes = codes_of(parsed.check(&reg(), CheckProfile::Compiled));
-        assert_eq!(codes, vec!["this.module.format_unsupported".to_string()]);
+
+        let mut d = ModuleDescriptor::new("billing", "1.0.0");
+        d.runtime = Some(RuntimeDesc {
+            entry: "run".into(),
+            handles: vec![Handle::Graph, Handle::Inference],
+            limits: RuntimeLimits {
+                memory_bytes: Some(1 << 20),
+                cpu_time_ms: Some(50),
+                network: false,
+            },
+        });
+        assert!(d.check(&reg(), CheckProfile::Compiled).is_ok());
+
+        // JSON round-trip carries the runtime section as typed data, not verbatim.
+        let s = d.to_json_pretty();
+        let back = ModuleDescriptor::from_json(&s).unwrap();
+        assert_eq!(back, d);
+
+        // A stored module must declare its handles explicitly.
+        let mut no_handles = d.clone();
+        no_handles.runtime = Some(RuntimeDesc {
+            entry: "run".into(),
+            handles: vec![],
+            limits: Default::default(),
+        });
+        let codes = codes_of(no_handles.check(
+            &reg(),
+            CheckProfile::Stored {
+                allow_public: false,
+            },
+        ));
+        assert!(codes.iter().any(|c| c == "this.descriptor.runtime_handles"));
+
+        // An empty entry is refused.
+        let mut no_entry = d;
+        no_entry.runtime.as_mut().unwrap().entry = String::new();
+        let codes = codes_of(no_entry.check(&reg(), CheckProfile::Compiled));
+        assert!(codes.iter().any(|c| c == "this.descriptor.runtime_entry"));
     }
 
     #[test]

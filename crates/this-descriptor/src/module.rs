@@ -6,6 +6,7 @@ use crate::error::{ContractError, ErrorCode, ErrorDesc};
 use crate::framework::codes;
 use crate::i18n::I18nDecl;
 use crate::link::LinkDesc;
+use crate::runtime::RuntimeDesc;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
@@ -40,10 +41,12 @@ pub struct ModuleDescriptor {
     pub i18n: I18nDecl,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub custom: Vec<Custom>,
-    /// Reserved for the runtime section (Track 4): carried verbatim so that `check()` can
-    /// refuse it (`this.module.format_unsupported`) instead of silently dropping it.
+    /// Execution capabilities of this module as a WASM skill (Track 4). `None` = a
+    /// declarative or compiled module without guest code. A module with a `runtime`
+    /// section is loaded through `ModuleSource::Wasm` (this-rs) and its sandbox policy is
+    /// derived with `crate::wami::statements`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub runtime: Option<serde_json::Value>,
+    pub runtime: Option<RuntimeDesc>,
 }
 
 /// Dependency on another module.

@@ -46,6 +46,10 @@ pub enum ModuleSource {
     /// A module produced by a plugin loader registered for `kind` (WASM/WAMI extension
     /// point, see the type documentation).
     Plugin { kind: String, location: String },
+    /// A WASM module (Track 4). Loaded through a plugin loader registered for `"wasm"`
+    /// (e.g. `this-skill-runtime`); refused with `this.module.format_unsupported` until
+    /// such a runtime is connected (fail-closed).
+    Wasm { location: String },
 }
 
 impl std::fmt::Debug for ModuleSource {
@@ -61,6 +65,7 @@ impl std::fmt::Debug for ModuleSource {
             }
             ModuleSource::Manifest(_) => f.write_str("Manifest"),
             ModuleSource::Plugin { kind, location } => write!(f, "Plugin({kind}:{location})"),
+            ModuleSource::Wasm { location } => write!(f, "Wasm({location})"),
         }
     }
 }
@@ -323,6 +328,15 @@ impl ModuleLoader for DefaultModuleLoader {
                 Some(loader) => loader.load(source).await,
                 None => Err(ContractError::framework(codes::NOT_IMPLEMENTED)
                     .with_param("what", format!("module plugin `{kind}` ({location})"))),
+            },
+            ModuleSource::Wasm { location } => match self.plugins.get("wasm") {
+                Some(loader) => loader.load(source).await,
+                None => Err(
+                    ContractError::framework(codes::MODULE_FORMAT_UNSUPPORTED).with_param(
+                        "what",
+                        format!("WASM module runtime not available for `{location}`"),
+                    ),
+                ),
             },
         }
     }
