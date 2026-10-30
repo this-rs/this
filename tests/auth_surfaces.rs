@@ -616,6 +616,35 @@ async fn handshake(addr: std::net::SocketAddr, path: &str, headers: &[(&str, &st
     }
 }
 
+/// Refused handshake: the status AND the raw body (to read the `this.*` contract code).
+async fn refused_handshake(
+    addr: std::net::SocketAddr,
+    path: &str,
+    headers: &[(&str, &str)],
+) -> (u16, String) {
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+    let mut req = format!("ws://{addr}{path}").into_client_request().unwrap();
+    for (k, v) in headers {
+        req.headers_mut().append(
+            axum::http::HeaderName::from_bytes(k.as_bytes()).unwrap(),
+            axum::http::HeaderValue::from_str(v).unwrap(),
+        );
+    }
+    match tokio_tungstenite::connect_async(req).await {
+        Err(tokio_tungstenite::tungstenite::Error::Http(resp)) => {
+            let status = resp.status().as_u16();
+            let body = resp
+                .body()
+                .as_ref()
+                .map(|b| String::from_utf8_lossy(b).to_string())
+                .unwrap_or_default();
+            (status, body)
+        }
+        Ok((_, resp)) => (resp.status().as_u16(), String::new()),
+        Err(e) => panic!("handshake: {e}"),
+    }
+}
+
 /// Cross-site WebSocket hijacking: an identity that comes from the AMBIENT cookie
 /// `this_token` is accepted only from a listed `Origin` (default: refused, also when
 /// `Origin` is absent). Explicit tokens (query, header) are not concerned.
@@ -624,7 +653,12 @@ async fn ws_cookie_identity_requires_an_allowed_origin() {
     let cookie = ("cookie", "this_token=reader");
     // Default config: no listed origin → the cookie identity is refused.
     let addr = serve_ws(host()).await;
-    assert_eq!(handshake(addr, "/ws", &[cookie]).await, 403, "no Origin");
+    let (status, body) = refused_handshake(addr, "/ws", &[cookie]).await;
+    assert_eq!(status, 403, "no Origin");
+    assert!(
+        body.contains("this.auth.forbidden"),
+        "contract code: {body}"
+    );
     assert_eq!(
         handshake(addr, "/ws", &[cookie, ("origin", "https://evil.example")]).await,
         403,
@@ -757,10 +791,11 @@ async fn graphql_ws_cookie_identity_requires_an_allowed_origin() {
     let cookie = ("cookie", "this_token=reader");
     // Default config: no listed origin → the cookie identity is refused.
     let addr = serve_graphql_ws(host()).await;
-    assert_eq!(
-        handshake(addr, "/graphql/ws", &[cookie]).await,
-        403,
-        "no Origin"
+    let (status, body) = refused_handshake(addr, "/graphql/ws", &[cookie]).await;
+    assert_eq!(status, 403, "no Origin");
+    assert!(
+        body.contains("this.auth.forbidden"),
+        "contract code: {body}"
     );
     assert_eq!(
         handshake(
