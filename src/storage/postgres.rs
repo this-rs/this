@@ -47,7 +47,8 @@
 //! to scope operations to the correct entity type.
 
 use crate::core::link::LinkEntity;
-use crate::core::{Data, DataService, LinkService};
+use crate::core::{Data, DataService, EntityFetcher, LinkService};
+use crate::descriptor::{FilterExpr, FilterOp, Page, Query, SortDir, SortSpec};
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -389,6 +390,268 @@ impl<T: Data + Serialize + DeserializeOwned> DataService<T> for PostgresDataServ
         };
 
         rows.into_iter().map(Self::row_to_entity).collect()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// EntityFetcher — native SQL list_query (filter/sort/page pushed to Postgres)
+// ---------------------------------------------------------------------------
+
+/// Is `field` a dedicated column (vs. a JSONB `data` key)? Whitelisted — these
+/// names are the only ones interpolated verbatim into SQL.
+fn is_common_column(field: &str) -> bool {
+    matches!(
+        field,
+        "id" | "tenant_id" | "name" | "status" | "created_at" | "updated_at" | "deleted_at"
+    )
+}
+
+/// JSON value → text bind. The SQL casts it back (`::uuid`, `::float8`, …) when
+/// the column/JSONB side needs a typed comparison, so binds stay uniform.
+fn text_of(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::String(s) => s.clone(),
+        serde_json::Value::Bool(b) => b.to_string(),
+        serde_json::Value::Number(n) => n.to_string(),
+        serde_json::Value::Null => "null".to_string(),
+        other => other.to_string(),
+    }
+}
+
+/// `(lhs, param_cast)` for a comparison: dedicated columns are used as-is (the
+/// parameter is cast to the column type), JSONB fields are extracted with `->>`
+/// and cast to `float8` / `boolean` when the compared value is a number / bool.
+fn filter_lhs(field: &str, value: &serde_json::Value) -> (String, &'static str) {
+    match field {
+        "id" | "tenant_id" => (field.to_string(), "::uuid"),
+        "created_at" | "updated_at" | "deleted_at" => (field.to_string(), "::timestamptz"),
+        "name" | "status" => (field.to_string(), ""),
+        _ => match value {
+            serde_json::Value::Number(_) => (format!("(data->>'{}')::float8", field), "::float8"),
+            serde_json::Value::Bool(_) => (format!("(data->>'{}')::boolean", field), "::boolean"),
+            _ => (format!("data->>'{}'", field), ""),
+        },
+    }
+}
+
+/// LHS for a null check / sort (no compared value to infer a type from).
+fn plain_lhs(field: &str) -> String {
+    if is_common_column(field) {
+        field.to_string()
+    } else {
+        format!("data->>'{}'", field)
+    }
+}
+
+fn push_expr(
+    sql: &mut String,
+    binds: &mut Vec<String>,
+    next: &mut usize,
+    expr: &FilterExpr,
+) -> anyhow::Result<()> {
+    match expr {
+        FilterExpr::And(v) => {
+            sql.push('(');
+            for (i, e) in v.iter().enumerate() {
+                if i > 0 {
+                    sql.push_str(" AND ");
+                }
+                push_expr(sql, binds, next, e)?;
+            }
+            sql.push(')');
+        }
+        FilterExpr::Or(v) => {
+            sql.push('(');
+            for (i, e) in v.iter().enumerate() {
+                if i > 0 {
+                    sql.push_str(" OR ");
+                }
+                push_expr(sql, binds, next, e)?;
+            }
+            sql.push(')');
+        }
+        FilterExpr::Not(e) => {
+            sql.push_str("NOT (");
+            push_expr(sql, binds, next, e)?;
+            sql.push(')');
+        }
+        FilterExpr::Cmp { field, op, value } => match op {
+            FilterOp::IsNull => {
+                let lhs = plain_lhs(field);
+                let want_null = value.as_bool().unwrap_or(false);
+                sql.push_str(&format!(
+                    "{} IS {}NULL",
+                    lhs,
+                    if want_null { "" } else { "NOT " }
+                ));
+            }
+            FilterOp::In => {
+                let (lhs, cast) = filter_lhs(field, value);
+                let arr: &[serde_json::Value] = value.as_array().map(Vec::as_slice).unwrap_or(&[]);
+                if arr.is_empty() {
+                    sql.push_str("FALSE");
+                    return Ok(());
+                }
+                sql.push_str(&format!("{} IN (", lhs));
+                for (i, v) in arr.iter().enumerate() {
+                    if i > 0 {
+                        sql.push_str(", ");
+                    }
+                    sql.push_str(&format!("${}{}", *next, cast));
+                    *next += 1;
+                    binds.push(text_of(v));
+                }
+                sql.push(')');
+            }
+            FilterOp::Contains | FilterOp::StartsWith => {
+                let (lhs, _) = filter_lhs(field, value);
+                let s = text_of(value);
+                let pattern = if *op == FilterOp::Contains {
+                    format!("%{}%", s)
+                } else {
+                    format!("{}%", s)
+                };
+                sql.push_str(&format!("{} LIKE ${}", lhs, *next));
+                *next += 1;
+                binds.push(pattern);
+            }
+            _ => {
+                let (lhs, cast) = filter_lhs(field, value);
+                let op_sql = match op {
+                    FilterOp::Eq => "=",
+                    FilterOp::Ne => "<>",
+                    FilterOp::Gt => ">",
+                    FilterOp::Gte => ">=",
+                    FilterOp::Lt => "<",
+                    FilterOp::Lte => "<=",
+                    _ => "=",
+                };
+                sql.push_str(&format!("{} {} ${}{}", lhs, op_sql, *next, cast));
+                *next += 1;
+                binds.push(text_of(value));
+            }
+        },
+    }
+    Ok(())
+}
+
+/// WHERE clause (without the leading `WHERE`) plus its text binds, in order.
+/// The first bind is always the entity type (`$1`).
+fn build_where(
+    entity_type: &str,
+    filter: Option<&FilterExpr>,
+) -> anyhow::Result<(String, Vec<String>)> {
+    let mut sql = String::from("entity_type = $1");
+    let mut binds = vec![entity_type.to_string()];
+    let mut next = 2;
+    if let Some(f) = filter {
+        sql.push_str(" AND ");
+        push_expr(&mut sql, &mut binds, &mut next, f)?;
+    }
+    Ok((sql, binds))
+}
+
+fn build_order(sort: &[SortSpec]) -> String {
+    if sort.is_empty() {
+        return "ORDER BY created_at DESC".to_string();
+    }
+    let parts: Vec<String> = sort
+        .iter()
+        .map(|s| {
+            let dir = if s.dir == SortDir::Desc {
+                " DESC"
+            } else {
+                " ASC"
+            };
+            format!("{}{}", plain_lhs(&s.field), dir)
+        })
+        .collect();
+    format!("ORDER BY {}", parts.join(", "))
+}
+
+fn page_bounds(page: &Page) -> (usize, usize) {
+    match page {
+        Page::Offset { page, limit } => (
+            ((*page).max(1) as usize - 1) * *limit as usize,
+            *limit as usize,
+        ),
+        Page::Cursor { after, limit } => (
+            after
+                .as_deref()
+                .and_then(|c| c.parse::<usize>().ok())
+                .unwrap_or(0),
+            *limit as usize,
+        ),
+    }
+}
+
+#[async_trait]
+impl<T: Data + Serialize + DeserializeOwned> EntityFetcher for PostgresDataService<T> {
+    async fn fetch_as_json(&self, entity_id: &Uuid) -> Result<serde_json::Value> {
+        let entity = DataService::get(self, entity_id)
+            .await?
+            .ok_or_else(|| anyhow!("{} not found: {}", T::resource_name_singular(), entity_id))?;
+        serde_json::to_value(entity).map_err(|e| anyhow!("Failed to serialize entity: {}", e))
+    }
+
+    async fn list_as_json(
+        &self,
+        limit: Option<i32>,
+        offset: Option<i32>,
+    ) -> Result<Vec<serde_json::Value>> {
+        let all = DataService::list(self).await?;
+        let offset = offset.unwrap_or(0).max(0) as usize;
+        let limit = limit.unwrap_or(50).max(0) as usize;
+
+        all.into_iter()
+            .skip(offset)
+            .take(limit)
+            .map(|e| serde_json::to_value(e).map_err(|err| anyhow!("serialize: {}", err)))
+            .collect()
+    }
+
+    /// Native override: translate the checked [`Query`] into SQL `WHERE` /
+    /// `ORDER BY` / `LIMIT .. OFFSET`, with bound parameters only (field names
+    /// come from the checked schema, and are whitelisted before interpolation).
+    /// `total` is a separate `COUNT(*)` over the same filter, BEFORE pagination.
+    async fn list_query(&self, query: &Query) -> Result<(Vec<serde_json::Value>, usize)> {
+        let (where_sql, binds) = build_where(Self::entity_type_name(), query.filter.as_ref())?;
+
+        let total: i64 = {
+            let count_sql = format!("SELECT COUNT(*) FROM entities WHERE {}", where_sql);
+            let mut q = sqlx::query_scalar::<_, i64>(sqlx::AssertSqlSafe(count_sql));
+            for b in &binds {
+                q = q.bind(b);
+            }
+            q.fetch_one(&self.pool)
+                .await
+                .map_err(|e| anyhow!("Failed to count entities: {}", e))?
+        };
+
+        let (skip, limit) = page_bounds(&query.page);
+        let select_sql = format!(
+            "SELECT * FROM entities WHERE {} {} LIMIT {} OFFSET {}",
+            where_sql,
+            build_order(&query.sort),
+            limit,
+            skip
+        );
+        let mut q = sqlx::query_as::<_, EntityRow>(sqlx::AssertSqlSafe(select_sql));
+        for b in &binds {
+            q = q.bind(b);
+        }
+        let rows = q
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| anyhow!("Failed to list entities: {}", e))?;
+
+        let values: Vec<serde_json::Value> = rows
+            .into_iter()
+            .map(Self::row_to_entity)
+            .map(|e| e.and_then(|e| serde_json::to_value(e).map_err(anyhow::Error::from)))
+            .collect::<Result<_>>()?;
+
+        Ok((values, total as usize))
     }
 }
 

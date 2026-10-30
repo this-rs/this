@@ -1,9 +1,11 @@
 //! In-memory implementations of DataService and LinkService for testing and development
 
 use crate::core::field::FieldValue;
-use crate::core::{Data, DataService, LinkService, link::LinkEntity};
+use crate::core::{Data, DataService, EntityFetcher, LinkService, link::LinkEntity};
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
+use serde::Serialize;
+use serde::de::DeserializeOwned;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use uuid::Uuid;
@@ -128,6 +130,54 @@ impl<T: Data> DataService<T> for InMemoryDataService<T> {
             })
             .cloned()
             .collect())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// EntityFetcher — JSON bridge (native list_query)
+// ---------------------------------------------------------------------------
+
+#[async_trait]
+impl<T: Data + Serialize + DeserializeOwned> EntityFetcher for InMemoryDataService<T> {
+    async fn fetch_as_json(&self, entity_id: &Uuid) -> Result<serde_json::Value> {
+        let entity = DataService::get(self, entity_id)
+            .await?
+            .ok_or_else(|| anyhow!("{} not found: {}", T::resource_name_singular(), entity_id))?;
+        serde_json::to_value(entity).map_err(|e| anyhow!("Failed to serialize entity: {}", e))
+    }
+
+    async fn list_as_json(
+        &self,
+        limit: Option<i32>,
+        offset: Option<i32>,
+    ) -> Result<Vec<serde_json::Value>> {
+        let all = DataService::list(self).await?;
+        let offset = offset.unwrap_or(0).max(0) as usize;
+        let limit = limit.unwrap_or(50).max(0) as usize;
+
+        all.into_iter()
+            .skip(offset)
+            .take(limit)
+            .map(|e| serde_json::to_value(e).map_err(|err| anyhow!("serialize: {}", err)))
+            .collect()
+    }
+
+    /// Native override: filter, sort and paginate directly over the in-memory
+    /// table. The table already lives in RAM, so there is no I/O to bound and the
+    /// `list_query_max_rows` cap of the DEFAULT implementation does not apply:
+    /// filtering happens BEFORE pagination and `total` counts matching rows.
+    async fn list_query(
+        &self,
+        query: &crate::descriptor::Query,
+    ) -> Result<(Vec<serde_json::Value>, usize)> {
+        let all = DataService::list(self).await?;
+        let rows: Vec<serde_json::Value> = all
+            .into_iter()
+            .map(|e| serde_json::to_value(e).map_err(|err| anyhow!("serialize: {}", err)))
+            .collect::<Result<_>>()?;
+        Ok(crate::descriptor::engine::query::apply_in_memory(
+            query, rows,
+        ))
     }
 }
 
