@@ -212,6 +212,14 @@ name = "descriptor_api"
 path = "examples/descriptor_api/main.rs"
 required-features = ["graphql", "grpc"]
 
+# Chargement à chaud : un module déclaratif stocké dans un VFS (InMemoryVfs ou
+# LocalFsVfs), chargé dans un hôte vivant, servi sur REST/GraphQL/gRPC, puis
+# déchargé (404 `this.module.not_found`). Un seul ModuleDescriptor, déclaré une fois.
+[[example]]
+name = "hot_module"
+path = "examples/hot_module/main.rs"
+required-features = ["graphql", "grpc"]
+
 [[example]]
 name = "microservice"
 path = "examples/microservice/main.rs"
