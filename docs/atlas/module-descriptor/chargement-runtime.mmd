@@ -45,6 +45,8 @@ sequenceDiagram
     RT->>RT: envelopper les createurs ValidatingCreator
     RT->>CAT: publish HostCatalog generation+1
     Note over CAT,DSP: REST, GraphQL, gRPC, liens, autorisation lisent le meme instantane
+    Note over DSP: 🟠 proposee : couche tower de repartition, placee sous l'autorisation et avant le Router, lit le premier segment et consulte entity_of_plural (existant)
+    RT->>DSP: route pluriel vers le routeur du module (proposee)
     RT-->>Admin: Active
     end
     Admin->>RT: unload billing
