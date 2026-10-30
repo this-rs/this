@@ -119,21 +119,21 @@ classDiagram
         <<interface>>
         +entity_desc() static EntityDesc
     }
-    ModuleDescriptor "1" *-- "*" ModuleReq : requires
-    ModuleDescriptor "1" *-- "*" EntityDesc
-    ModuleDescriptor "1" *-- "*" LinkDesc
-    ModuleDescriptor "1" *-- "*" ErrorDesc
-    ModuleDescriptor "1" *-- "1" I18nDecl
+    ModuleDescriptor 1 *-- * ModuleReq : requires
+    ModuleDescriptor 1 *-- * EntityDesc
+    ModuleDescriptor 1 *-- * LinkDesc
+    ModuleDescriptor 1 *-- * ErrorDesc
+    ModuleDescriptor 1 *-- 1 I18nDecl
     I18nDecl ..> MessageBundle : textes hors descripteur
-    EntityDesc "1" *-- "*" FieldDesc
-    EntityDesc "1" *-- "1" PermDesc
-    LinkDesc "1" *-- "*" FieldDesc
-    LinkDesc "1" *-- "1" PermDesc
+    EntityDesc 1 *-- * FieldDesc
+    EntityDesc 1 *-- 1 PermDesc
+    LinkDesc 1 *-- * FieldDesc
+    LinkDesc 1 *-- 1 PermDesc
     PermDesc --> PolicyExpr
     ErrorDesc --> ErrorKind
     ContractError --> ErrorKind
     ContractError ..> ErrorDesc : from_desc
-    DescriptorSet o-- "*" ModuleDescriptor
+    DescriptorSet o-- * ModuleDescriptor
     Query~T~ ..> FieldDesc : filterable et sortable
     Described ..> EntityDesc : macros impl_data_entity
     note for MessageBundle "✅ modules stockes (ModuleStore)<br/>🟠 modules compiles : aucun crochet"
