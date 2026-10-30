@@ -637,7 +637,10 @@ async fn ws_cookie_identity_requires_an_allowed_origin() {
         handshake(
             addr,
             "/ws",
-            &[("authorization", "Bearer reader"), ("origin", "https://evil.example")]
+            &[
+                ("authorization", "Bearer reader"),
+                ("origin", "https://evil.example")
+            ]
         )
         .await,
         101,
@@ -774,7 +777,10 @@ async fn graphql_ws_cookie_identity_requires_an_allowed_origin() {
         handshake(
             addr,
             "/graphql/ws",
-            &[("authorization", "Bearer reader"), ("origin", "https://evil.example")]
+            &[
+                ("authorization", "Bearer reader"),
+                ("origin", "https://evil.example")
+            ]
         )
         .await,
         101,
