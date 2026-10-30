@@ -4,10 +4,10 @@
 //! delegating to an external Node/Vite dev server or to hand-rolled static
 //! handling — by reusing the [`vite-rs`] crate inside an axum fallback:
 //!
-//! * **static file rules** come from `vite_rs::statics` (safe path
+//! * **static file rules** come from `this_vite::statics` (safe path
 //!   resolution, `assets/`-vs-root layouts, MIME types, ETag/304 revalidation
 //!   and per-URL `Cache-Control` policies),
-//! * **dev mode** comes from `vite_rs::dev::DevState`: hot-reload version
+//! * **dev mode** comes from `this_vite::dev::DevState`: hot-reload version
 //!   polling, rebuild-on-change watcher, browser console/network/error
 //!   capture and the **AI command bridge** (`/__dev/command*`),
 //! * **embedded (production) mode** serves the assets compiled into the
@@ -71,9 +71,9 @@ use axum::body::Body;
 use axum::extract::{Request, State};
 use axum::http::{Method, StatusCode, header};
 use axum::response::{IntoResponse, Response};
-use vite_rs::dev::DevState;
-use vite_rs::http::Outgoing;
-use vite_rs::statics::{self, StaticFiles};
+use this_vite::dev::DevState;
+use this_vite::http::Outgoing;
+use this_vite::statics::{self, StaticFiles};
 
 /// Mirrors vite-rs's request body cap so the adapter never buffers more than
 /// the crate itself would.
@@ -98,7 +98,7 @@ type EmbeddedLoader = Arc<dyn Fn(&str) -> Option<Cow<'static, [u8]>> + Send + Sy
 #[derive(Clone)]
 pub struct Frontend {
     source: Source,
-    /// Present in dev mode only (inert otherwise — see `vite_rs::dev`).
+    /// Present in dev mode only (inert otherwise — see `this_vite::dev`).
     dev: Option<Arc<DevState>>,
 }
 
@@ -526,7 +526,7 @@ async fn serve(State(fe): State<Frontend>, req: Request) -> Response {
             Ok(b) => b.to_vec(),
             Err(_) => return StatusCode::PAYLOAD_TOO_LARGE.into_response(),
         };
-        let vreq = vite_rs::http::Request {
+        let vreq = this_vite::http::Request {
             method: method.to_string(),
             url,
             headers: Vec::new(),
@@ -562,7 +562,7 @@ async fn serve(State(fe): State<Frontend>, req: Request) -> Response {
     };
 
     if is_head {
-        out.body = vite_rs::http::Body::Bytes(Vec::new());
+        out.body = this_vite::http::Body::Bytes(Vec::new());
     }
     outgoing_to_response(out)
 }
@@ -651,7 +651,7 @@ fn embedded_out(bytes: Cow<'static, [u8]>, url_path: &str, inm: Option<&str>) ->
                 ("ETag".into(), etag),
                 ("Cache-Control".into(), cache.into()),
             ],
-            body: vite_rs::http::Body::Bytes(Vec::new()),
+            body: this_vite::http::Body::Bytes(Vec::new()),
         };
     }
     Outgoing {
@@ -661,7 +661,7 @@ fn embedded_out(bytes: Cow<'static, [u8]>, url_path: &str, inm: Option<&str>) ->
             ("ETag".into(), etag),
             ("Cache-Control".into(), cache.into()),
         ],
-        body: vite_rs::http::Body::Bytes(bytes.into_owned()),
+        body: this_vite::http::Body::Bytes(bytes.into_owned()),
     }
 }
 
@@ -693,20 +693,20 @@ fn outgoing_to_response(out: Outgoing) -> Response {
             builder = builder.header(k, hv);
         }
     }
-    for (k, v) in vite_rs::headers::DEFAULT_SECURITY_HEADERS {
+    for (k, v) in this_vite::headers::DEFAULT_SECURITY_HEADERS {
         let already = out.headers.iter().any(|(ek, _)| ek.eq_ignore_ascii_case(k));
         if !already && let Ok(hv) = header::HeaderValue::from_str(v) {
             builder = builder.header(*k, hv);
         }
     }
     let body = match out.body {
-        vite_rs::http::Body::Bytes(b) => Body::from(b),
-        vite_rs::http::Body::File { mut file, .. } => {
+        this_vite::http::Body::Bytes(b) => Body::from(b),
+        this_vite::http::Body::File { mut file, .. } => {
             let mut buf = Vec::new();
             let _ = file.read_to_end(&mut buf);
             Body::from(buf)
         }
-        vite_rs::http::Body::Stream { .. } => Body::empty(),
+        this_vite::http::Body::Stream { .. } => Body::empty(),
     };
     builder
         .body(body)
