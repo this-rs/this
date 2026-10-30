@@ -47,6 +47,7 @@ grpc = ["dep:tonic"]
 graphql = ["dep:async-graphql"]
 # `ContractError` as the error type of Leptos server functions (wasm32 and ssr).
 leptos = ["dep:server_fn", "http"]
+wami = []
 
 [dev-dependencies]
 serde_yaml = "0.9"

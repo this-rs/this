@@ -317,6 +317,21 @@ Corps HTTP (additif ; RFC 9457 compris) :
 - `JsonEntityService` (entités déclaratives) = **adaptateur** `EntityFetcher`/`EntityCreator` branché sur les mêmes
   chemins d'événements et de liens (test `json_entity_publishes_event_and_links`).
 
+- **Section `runtime` (Track 4, flux `md/track4`)** : un module qui embarque du code invité (skill WASM)
+  déclare `runtime: { entry, handles, limits }` — `entry` = export d'entrée, `handles` = capacités demandées
+  (`graph`, `inference`, `storage`, `network` ou un nom pointé custom), `limits` = bornes du sandbox
+  (`memory_bytes`, `cpu_time_ms`, `network`). Type `RuntimeDesc` (crate `this-descriptor`), validé par `check()` :
+  `entry` non vide, doublons de handle refusés, limites `> 0` ; en profil `Stored`, les handles sont **explicites**
+  (refus sinon, fail-closed). Un descripteur sans `runtime` reste valide.
+- **Un seul vocabulaire de permissions** : les permissions d'un skill sont des `PermDesc`/`PolicyExpr` (aucun
+  `SkillManifest` ni enum `Permission` séparé). `wami::statements(&PermDesc, tenant)` (feature `wami`, pure)
+  convertit chaque opération métier `Custom("<handle>.<action>")` en un `WamiStatement { orn, effect }`
+  (`arn:wami:skill:<tenant>:<handle>/<action>`) ; `Deny` prime sur `Allow`. C'est l'unique point de conversion
+  vers les politiques WAMI (ORN + Effect).
+- **`ModuleSource::Wasm { location }`** (loader) : chargé via un chargeur de plugin enregistré pour `"wasm"`
+  (ex. `this-skill-runtime`) ; **refusé** avec `this.module.format_unsupported` tant que le sandbox n'est pas
+  branché (fail-closed). `hot_load` reste fermé par défaut.
+
 ### 3.8 `ModuleStore` / VFS
 
 `src/storage/vfs/mod.rs` (fondation) : `VfsPath` (absolu, refuse `..`, `.`, `\`, NUL, segments vides),

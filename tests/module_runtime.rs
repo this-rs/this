@@ -755,6 +755,57 @@ async fn plugin_source_is_an_extension_point() {
     );
 }
 
+/// A loader that only accepts `ModuleSource::Wasm` (stands in for `this-skill-runtime`).
+struct FakeWasmRuntime;
+#[async_trait]
+impl ModuleLoader for FakeWasmRuntime {
+    async fn load(&self, source: &ModuleSource) -> Result<ModuleInterface, ContractError> {
+        let ModuleSource::Wasm { location } = source else {
+            unreachable!()
+        };
+        assert_eq!(location, "billing.wasm");
+        DefaultModuleLoader::new()
+            .load(&manifest(&billing("1.0.0", PolicyExpr::Authenticated)))
+            .await
+    }
+}
+
+#[tokio::test]
+async fn wasm_source_refused_until_runtime_available() {
+    // No plugin registered for "wasm": fail-closed with the precise code.
+    let plain = harness(false);
+    let err = plain
+        .runtime()
+        .load(ModuleSource::Wasm {
+            location: "billing.wasm".into(),
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(err.code.as_str(), "this.module.format_unsupported");
+}
+
+#[tokio::test]
+async fn wasm_source_delegates_to_registered_runtime() {
+    let h = harness_with(
+        ServerBuilder::new()
+            .with_module_loader(Arc::new(
+                DefaultModuleLoader::new().with_plugin("wasm", Arc::new(FakeWasmRuntime)),
+            ))
+            .with_hot_load_enabled(true),
+        false,
+    );
+    h.runtime()
+        .load(ModuleSource::Wasm {
+            location: "billing.wasm".into(),
+        })
+        .await
+        .expect("wasm plugin loader used");
+    assert_eq!(
+        h.call(Method::GET, "/invoices", None, None).await.0,
+        StatusCode::OK
+    );
+}
+
 #[tokio::test]
 async fn stored_profile_refuses_missing_policies() {
     let h = harness(false);

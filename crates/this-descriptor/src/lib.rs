@@ -39,6 +39,10 @@ pub mod naming;
 pub mod perm;
 pub mod query;
 pub mod resolve;
+pub mod runtime;
+#[cfg(feature = "wami")]
+/// `wami::statements`: PermDesc -> sandbox policy statements (Track 4).
+pub mod wami;
 
 pub use check::{CheckProfile, DescriptorIssue};
 pub use custom::{Custom, CustomKind, CustomRegistry, CustomScope};
@@ -55,6 +59,9 @@ pub use link::LinkDesc;
 pub use module::{CompiledEntity, DESCRIPTOR_FORMAT, DescriptorSet, ModuleDescriptor, ModuleReq};
 pub use perm::{Operation, PermDesc, PolicyExpr, PrincipalView};
 pub use query::{FilterExpr, FilterOp, Page, Query, QuerySchema, SortDir, SortSpec, Untyped};
+pub use runtime::{Handle, RuntimeDesc, RuntimeLimits};
+#[cfg(feature = "wami")]
+pub use wami::{Effect, WamiStatement, statements};
 
 /// Link between a Rust type and its descriptor. Implemented by `impl_data_entity!` and
 /// `impl_data_entity_validated!` (this-rs); cached in a `OnceLock`, never rebuilt.
