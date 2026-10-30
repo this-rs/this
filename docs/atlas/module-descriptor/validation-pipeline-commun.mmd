@@ -1,0 +1,66 @@
+%% name: module-descriptor-validation-pipeline
+%% QUESTION : par ou passe une ecriture ou une liste d'entite decrite, sur chaque protocole ?
+%% PROUVE (MESURE) : flux validation (validating_creator_blocks_invalid_graphql_payload, rest_create_validated_without_validated_extractor,
+%%   generated_rest_update_rejects_invalid_payload, query_params_malformed_filter_is_400, graphql_variables_reach_validation_and_filters,
+%%   grpc_filter_bin_metadata_and_unreadable_value_refused) ; integration : e2e same_invalid_payload_same_code_on_rest_graphql_grpc (relance revue)
+%%   et creation REST via route de lien = 422 this.validation.* (integration a1ce734).
+%% LU : src/core/validation/{gate,layer,extractor,config}.rs, src/core/query.rs (filter_value, try_filter_value), src/links/handlers.rs,
+%%   this-cli/src/templates/entity/handlers.rs.tera (aucun ListQuery).
+%% NON ETABLI : WebSocket n'ecrit pas d'entite ; rendu d'erreur du chemin dynamic_schema GraphQL non teste.
+flowchart LR
+    classDef ok       fill:#2ea04333,stroke:#2ea043,stroke-width:2px
+    classDef todo     fill:#f0a02033,stroke:#d98a00,stroke-width:2px
+    classDef refused  fill:#e5484d33,stroke:#e5484d,stroke-width:2px,stroke-dasharray:6 3
+    classDef upstream fill:#8b8fa322,stroke:#8b8fa3,stroke-dasharray:3 3
+    classDef trap     fill:#e5484d1f,stroke:#e5484d,stroke-width:3px
+    classDef entry    fill:#a48bff40,stroke:#a48bff,stroke-width:3px
+
+    RESTIN(["REST POST /plural<br/>PUT PATCH /plural/id<br/>GET /plural"]):::entry
+    GQLIN(["GraphQL createX updateX<br/>query xs filter sort"]):::entry
+    GRPCIN(["gRPC Create Update<br/>ListEntities + this-filter"]):::entry
+
+    subgraph HOST["ServerHost::with_descriptors"]
+        direction TB
+        WRAP["✅ wrap_creators<br/>entites decrites, y compris<br/>modules charges a chaud"]:::ok
+        REG["✅ validation_registry<br/>ArcSwap CustomRegistry"]:::ok
+    end
+
+    subgraph CORE["core/validation"]
+        direction TB
+        LAYER["✅ layer::validation_middleware<br/>sous l'autorisation, aussi sur<br/>les routes runtime"]:::ok
+        GATE["✅ gate::ValidatingCreator<br/>erreur = ContractError dans anyhow"]:::ok
+        SHIM["✅ Validated T<br/>EngineValidated, sinon regles legacy"]:::ok
+        LQ["✅ core::query::ListQuery<br/>query_from_args, to_query"]:::ok
+    end
+
+    subgraph ENG["this-descriptor, wasm32"]
+        direction TB
+        APPLY["✅ engine::validate::apply<br/>cles, transforms, presence, type, validateurs"]:::ok
+        QE["✅ engine::query<br/>parse strict, check, apply_in_memory"]:::ok
+    end
+
+    STORE@{ shape: cyl, label: "Store / EntityFetcher::list_query" }
+    LEGACY["⚪ entite sans descripteur<br/>EntityValidationConfig, createur inchange"]:::upstream
+    LINKS["⚠ links/handlers.rs<br/>QueryParams::filter_value laxiste :<br/>JSON malformé ignore"]:::trap
+    TPL["🟠 handlers.rs.tera CLI<br/>ne lit pas ListQuery"]:::todo
+
+    RESTIN ==> LAYER
+    LAYER ==>|"ecriture"| APPLY
+    LAYER ==>|"liste"| QE
+    LAYER --> SHIM
+    LAYER --> LQ
+    GQLIN ==> GATE
+    GRPCIN ==> GATE
+    GQLIN ==>|"filter sort"| LQ
+    GRPCIN ==>|"this-filter this-sort"| LQ
+    WRAP --> GATE
+    REG --> GATE
+    REG --> LAYER
+    GATE ==> APPLY
+    LQ ==> QE
+    APPLY ==>|"Ok valeur transformee"| STORE
+    QE ==> STORE
+    APPLY -.->|"Err 422 INVALID_ARGUMENT BAD_USER_INPUT"| RESTIN
+    WRAP -.-> LEGACY
+    LQ -.->|"non branche"| LINKS
+    LQ -.->|"non branche"| TPL

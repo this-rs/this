@@ -1,0 +1,30 @@
+%% name: module-descriptor-runtime-layers
+%% QUESTION : dans quel ordre une requete REST traverse les couches quand le module runtime est monte ?
+%% PROUVE (MESURE) : tests/module_runtime.rs (admin_interface_requires_admin_then_lists_loads_unloads avec autorisation ARMEE,
+%%   dynamic_module_paths_not_shadowed_by_link_wildcards) ; e2e hot_loaded_compiled_module_is_validated_on_rest_and_through_its_creator
+%%   (preuve rouge de l'integration : couche de validation runtime neutralisee = 201 au lieu de 422) ; message_localized_fr_then_en.
+%% LU : RestExposure::build_router (src/server/exposure/rest/mod.rs, ordre des .layer), ModuleRuntime::mount, Authorization::with_catalog.
+%% NON ETABLI : 403 de l'autorisation historique et 401 d'authentification non localises (pas de ContractError, note PO f3862798).
+flowchart TB
+    classDef ok       fill:#2ea04333,stroke:#2ea043,stroke-width:2px
+    classDef todo     fill:#f0a02033,stroke:#d98a00,stroke-width:2px
+    classDef upstream fill:#8b8fa322,stroke:#8b8fa3,stroke-dasharray:3 3
+    classDef trap     fill:#e5484d1f,stroke:#e5484d,stroke-width:3px
+    classDef entry    fill:#a48bff40,stroke:#a48bff,stroke-width:3px
+
+    REQ(["Requete HTTP"]):::entry --> CORS["✅ CORS puis garde de domaine"]:::ok
+    CORS --> AUTHN["✅ Authentification<br/>pose AuthContext, puis tenant"]:::ok
+    AUTHN --> LOC["✅ localize_errors<br/>ServerHost::locales"]:::ok
+    LOC --> ADM{"✅ Interface admin<br/>/admin/modules, admin_only"}:::ok
+    ADM -->|"autre chemin"| DSP{"✅ Couche de repartition<br/>DispatchTable, ArcSwap"}:::ok
+    DSP -->|"pluriel runtime"| RVAL["✅ couche de validation<br/>sur les routes chargees"]:::ok
+    RVAL --> MOD["✅ Routeur du module<br/>JsonEntityService ou routes compilees<br/>createurs ValidatingCreator"]:::ok
+    DSP -->|"route de lien runtime"| LNK["✅ Routeur de liens de l'instantane<br/>merge_strict"]:::ok
+    DSP -->|"Draining"| U503["✅ 503 this.module.unavailable"]:::ok
+    DSP -->|"module decharge"| U404["✅ 404 this.module.not_found"]:::ok
+    DSP -.->|"politiques du descripteur<br/>evaluate, owner refuse"| POL["✅ Refus 401 ou 403<br/>this.auth.*"]:::ok
+    DSP ==>|"chemin statique"| AUTHZ["✅ Authorization.with_catalog<br/>descripteur d'abord, puis YAML"]:::ok
+    AUTHZ ==> VAL["✅ validation_middleware<br/>entites decrites"]:::ok
+    VAL ==> ROUTER["⚪ Router statique<br/>entites, liens, repli"]:::upstream
+    AUTHZ -.- T403["⚠ 403 historique sans ContractError<br/>non localise"]:::trap
+    AUTHZ -.- FROZEN["⚠ table d'entites figee au build :<br/>un module charge a chaud passe<br/>par la repartition, jamais ici"]:::trap

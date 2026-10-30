@@ -392,3 +392,33 @@ pub fn assert_field_value_uuid(fv: &FieldValue, expected: Uuid) {
         other => panic!("Expected FieldValue::Uuid({}), got {:?}", expected, other),
     }
 }
+
+// ---------------------------------------------------------------------------
+// Serialization of tests that share ONE container database
+// ---------------------------------------------------------------------------
+
+/// Serialize the tests of a container-backed binary (postgres, mysql, neo4j).
+///
+/// Their factories wipe a table/label shared by every test of the binary
+/// (`TRUNCATE entities`, `MATCH (n) DELETE n`): two tests running at once erase each
+/// other's rows. CI used to hide this with `-- --test-threads=1`; under any other thread
+/// count (a default `cargo test`, a governor with `RUST_TEST_THREADS=6`) the neo4j binary
+/// failed 18 of 41 tests. Call this FIRST in every `clean_*` factory: the guard is kept
+/// in a thread-local, so it is held until the test's thread ends (libtest runs each test
+/// on its own thread) or until the same thread starts its next test (`--test-threads=1`
+/// reuses the thread, hence the release BEFORE the new acquisition). nextest runs one
+/// process per test and serializes these binaries through `.config/nextest.toml`.
+pub fn serialize_container_test() {
+    use std::cell::RefCell;
+    use std::sync::{Mutex, MutexGuard};
+
+    static LOCK: Mutex<()> = Mutex::new(());
+    thread_local! {
+        static HELD: RefCell<Option<MutexGuard<'static, ()>>> = const { RefCell::new(None) };
+    }
+    HELD.with(|held| {
+        drop(held.borrow_mut().take());
+        let guard = LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        *held.borrow_mut() = Some(guard);
+    });
+}

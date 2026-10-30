@@ -8,11 +8,14 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 use super::utils;
+use crate::descriptor::Operation;
+use crate::server::exposure::guard::SurfaceGuard;
 use crate::server::host::ServerHost;
 
 /// Resolve fields for a list of entities
 pub async fn resolve_entity_list(
     host: &Arc<ServerHost>,
+    guard: &SurfaceGuard,
     entities: Vec<Value>,
     selections: &[Selection<'_, String>],
     entity_type: &str,
@@ -20,7 +23,8 @@ pub async fn resolve_entity_list(
     let mut resolved = Vec::new();
 
     for entity in entities {
-        let resolved_entity = resolve_entity_fields(host, entity, selections, entity_type).await?;
+        let resolved_entity =
+            resolve_entity_fields(host, guard, entity, selections, entity_type).await?;
         resolved.push(resolved_entity);
     }
 
@@ -30,16 +34,19 @@ pub async fn resolve_entity_list(
 /// Resolve fields for a single entity
 pub fn resolve_entity_fields<'a>(
     host: &'a Arc<ServerHost>,
+    guard: &'a SurfaceGuard,
     entity: Value,
     selections: &'a [Selection<'_, String>],
     entity_type: &'a str,
 ) -> BoxFuture<'a, Result<Value>> {
-    async move { resolve_entity_fields_impl(host, entity, selections, entity_type).await }.boxed()
+    async move { resolve_entity_fields_impl(host, guard, entity, selections, entity_type).await }
+        .boxed()
 }
 
 /// Implementation of resolve_entity_fields
 async fn resolve_entity_fields_impl(
     host: &Arc<ServerHost>,
+    guard: &SurfaceGuard,
     entity: Value,
     selections: &[Selection<'_, String>],
     entity_type: &str,
@@ -69,7 +76,7 @@ async fn resolve_entity_fields_impl(
 
             // Check if this is a relation field
             if let Some(relation_value) =
-                resolve_relation_field_impl(host, entity_obj, field, entity_type).await?
+                resolve_relation_field_impl(host, guard, entity_obj, field, entity_type).await?
             {
                 result.insert(field_name.to_string(), relation_value);
                 continue;
@@ -86,16 +93,19 @@ async fn resolve_entity_fields_impl(
 /// Resolve a relation field (e.g., "invoices" for an order)
 fn resolve_relation_field_impl<'a>(
     host: &'a Arc<ServerHost>,
+    guard: &'a SurfaceGuard,
     entity: &'a serde_json::Map<String, Value>,
     field: &'a Field<'_, String>,
     entity_type: &'a str,
 ) -> BoxFuture<'a, Result<Option<Value>>> {
-    async move { resolve_relation_field_inner(host, entity, field, entity_type).await }.boxed()
+    async move { resolve_relation_field_inner(host, guard, entity, field, entity_type).await }
+        .boxed()
 }
 
 /// Inner implementation of resolve_relation_field
 async fn resolve_relation_field_inner(
     host: &Arc<ServerHost>,
+    guard: &SurfaceGuard,
     entity: &serde_json::Map<String, Value>,
     field: &Field<'_, String>,
     entity_type: &str,
@@ -108,12 +118,23 @@ async fn resolve_relation_field_inner(
     let source_uuid = Uuid::parse_str(entity_id)?;
 
     // Get links configuration for this entity type
-    let links_config = &host.config;
+    let links_config = host.catalog().links_config.clone();
 
     // Find the link configuration for this relation
     for link_config in &links_config.links {
         if link_config.source_type == entity_type && link_config.forward_route_name == field_name {
             // This is a forward relation (e.g., order -> invoices)
+            // Navigating links is `list_links` on the link (then the source entity),
+            // and every target read is a `get` on the target entity.
+            guard
+                .check_link(
+                    Some(&link_config.link_type),
+                    Some(&link_config.source_type),
+                    Some(&link_config.target_type),
+                    Some(entity_type),
+                    Operation::ListLinks,
+                )
+                .map_err(anyhow::Error::new)?;
             let links = host
                 .link_service
                 .find_by_source(
@@ -123,14 +144,24 @@ async fn resolve_relation_field_inner(
                 )
                 .await?;
 
-            // Fetch the target entities
-            if let Some(fetcher) = host.entity_fetchers.get(&link_config.target_type) {
+            // Fetch the target entities (each target read is a `get`, judged by the guard
+            // together with the lookup of its fetcher in the live catalog)
+            {
                 let mut targets = Vec::new();
 
                 for link in links {
+                    let fetcher = guard
+                        .fetcher(
+                            host,
+                            &link_config.target_type,
+                            Operation::Get,
+                            Some(&link.target_id),
+                        )
+                        .map_err(anyhow::Error::new)?;
                     if let Ok(target_entity) = fetcher.fetch_as_json(&link.target_id).await {
                         let resolved = resolve_entity_fields_impl(
                             host,
+                            guard,
                             target_entity,
                             &field.selection_set.items,
                             &link_config.target_type,
@@ -146,6 +177,15 @@ async fn resolve_relation_field_inner(
             && link_config.reverse_route_name == field_name
         {
             // This is a reverse relation (e.g., invoice -> order)
+            guard
+                .check_link(
+                    Some(&link_config.link_type),
+                    Some(&link_config.source_type),
+                    Some(&link_config.target_type),
+                    Some(entity_type),
+                    Operation::ListLinks,
+                )
+                .map_err(anyhow::Error::new)?;
             let links = host
                 .link_service
                 .find_by_target(
@@ -157,11 +197,19 @@ async fn resolve_relation_field_inner(
 
             // Fetch the source entity (should be only one for singular relations)
             if let Some(link) = links.first()
-                && let Some(fetcher) = host.entity_fetchers.get(&link_config.source_type)
+                && let fetcher = guard
+                    .fetcher(
+                        host,
+                        &link_config.source_type,
+                        Operation::Get,
+                        Some(&link.source_id),
+                    )
+                    .map_err(anyhow::Error::new)?
                 && let Ok(source_entity) = fetcher.fetch_as_json(&link.source_id).await
             {
                 let resolved = resolve_entity_fields_impl(
                     host,
+                    guard,
                     source_entity,
                     &field.selection_set.items,
                     &link_config.source_type,
@@ -361,9 +409,17 @@ mod tests {
         let entity = json!({"id": "abc-123", "name": "Order 1", "total": 99.9});
         let field = make_field_with_selections("order", &["id", "name", "total"]);
 
-        let result = resolve_entity_fields(&host, entity, &field.selection_set.items, "order")
-            .await
-            .expect("should resolve fields");
+        let result = resolve_entity_fields(
+            &host,
+            &crate::server::exposure::guard::SurfaceGuard::unenforced(
+                crate::core::auth::AuthContext::Anonymous,
+            ),
+            entity,
+            &field.selection_set.items,
+            "order",
+        )
+        .await
+        .expect("should resolve fields");
 
         assert_eq!(result.get("id").and_then(|v| v.as_str()), Some("abc-123"));
         assert_eq!(result.get("name").and_then(|v| v.as_str()), Some("Order 1"));
@@ -382,9 +438,17 @@ mod tests {
         let entity = json!({"id": "abc", "created_at": "2024-01-01T00:00:00Z"});
         let field = make_field_with_selections("order", &["id", "createdAt"]);
 
-        let result = resolve_entity_fields(&host, entity, &field.selection_set.items, "order")
-            .await
-            .expect("should resolve camelCase -> snake_case");
+        let result = resolve_entity_fields(
+            &host,
+            &crate::server::exposure::guard::SurfaceGuard::unenforced(
+                crate::core::auth::AuthContext::Anonymous,
+            ),
+            entity,
+            &field.selection_set.items,
+            "order",
+        )
+        .await
+        .expect("should resolve camelCase -> snake_case");
 
         assert_eq!(
             result.get("createdAt").and_then(|v| v.as_str()),
@@ -404,9 +468,17 @@ mod tests {
         let entity = json!({"id": order_id.to_string()});
         let field = make_field_with_selections("order", &["id", "nonExistentField"]);
 
-        let result = resolve_entity_fields(&host, entity, &field.selection_set.items, "order")
-            .await
-            .expect("should resolve with null for unknown");
+        let result = resolve_entity_fields(
+            &host,
+            &crate::server::exposure::guard::SurfaceGuard::unenforced(
+                crate::core::auth::AuthContext::Anonymous,
+            ),
+            entity,
+            &field.selection_set.items,
+            "order",
+        )
+        .await
+        .expect("should resolve with null for unknown");
 
         assert_eq!(result.get("nonExistentField"), Some(&Value::Null));
     }
@@ -422,8 +494,16 @@ mod tests {
         let entity = json!("not an object");
         let field = make_field_with_selections("order", &["id"]);
 
-        let result =
-            resolve_entity_fields(&host, entity, &field.selection_set.items, "order").await;
+        let result = resolve_entity_fields(
+            &host,
+            &crate::server::exposure::guard::SurfaceGuard::unenforced(
+                crate::core::auth::AuthContext::Anonymous,
+            ),
+            entity,
+            &field.selection_set.items,
+            "order",
+        )
+        .await;
         assert!(result.is_err(), "non-object entity should error");
         let err_msg = result.expect_err("error").to_string();
         assert!(
@@ -451,9 +531,17 @@ mod tests {
         ];
         let field = make_field_with_selections("orders", &["id", "name"]);
 
-        let result = resolve_entity_list(&host, entities, &field.selection_set.items, "order")
-            .await
-            .expect("should resolve list");
+        let result = resolve_entity_list(
+            &host,
+            &crate::server::exposure::guard::SurfaceGuard::unenforced(
+                crate::core::auth::AuthContext::Anonymous,
+            ),
+            entities,
+            &field.selection_set.items,
+            "order",
+        )
+        .await
+        .expect("should resolve list");
 
         assert_eq!(result.len(), 2, "should have two resolved entities");
         assert_eq!(
@@ -477,9 +565,17 @@ mod tests {
         let entities: Vec<Value> = vec![];
         let field = make_field_with_selections("orders", &["id"]);
 
-        let result = resolve_entity_list(&host, entities, &field.selection_set.items, "order")
-            .await
-            .expect("should resolve empty list");
+        let result = resolve_entity_list(
+            &host,
+            &crate::server::exposure::guard::SurfaceGuard::unenforced(
+                crate::core::auth::AuthContext::Anonymous,
+            ),
+            entities,
+            &field.selection_set.items,
+            "order",
+        )
+        .await
+        .expect("should resolve empty list");
 
         assert!(result.is_empty(), "empty input should produce empty output");
     }

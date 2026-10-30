@@ -67,6 +67,15 @@ jobs:
       - name: Run doc tests
         run: cargo test --doc --features all,wami
 
+      - name: Test this-descriptor (pure crate, every feature)
+        run: cargo test -p this-descriptor --all-features
+
+      - name: Check this-descriptor on wasm32 (no server dependency)
+        run: |
+          rustup target add wasm32-unknown-unknown
+          cargo check -p this-descriptor --target wasm32-unknown-unknown
+          cargo check -p this-descriptor --target wasm32-unknown-unknown --features yaml,pattern
+
   # Code coverage
   coverage:
     name: Code Coverage
@@ -99,6 +108,20 @@ jobs:
           key: ${{ runner.os }}-cargo-coverage-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-coverage-
 
+      # The container-backed tests pull their images at run time; a transient registry error
+      # (measured: "bytes remaining on stream" on mongo:5.0.6) failed the whole job. Pull them
+      # here with retries so the test run never depends on a single registry response.
+      - name: Pre-pull test container images (retry on transient registry errors)
+        run: |
+          for img in cassandra:4.1 mongo:5.0.6 neo4j:5 postgres:11-alpine mysql:8.1; do
+            for attempt in 1 2 3 4 5; do
+              if docker pull --quiet "$img" >/dev/null; then break; fi
+              echo "::warning::pull of $img failed (attempt $attempt), retrying"
+              sleep $((attempt * 15))
+              if [ "$attempt" = 5 ]; then echo "::error::cannot pull $img"; exit 1; fi
+            done
+          done
+
       - name: Generate code coverage
         run: cargo llvm-cov --features all,wami --workspace --lcov --output-path lcov.info -- --test-threads=1
 
@@ -124,7 +147,10 @@ jobs:
           components: rustfmt
 
       - name: Check formatting
-        run: cargo fmt --all -- --check
+        # rustfmt on the tracked files: `cargo fmt` runs `cargo metadata`, which loads
+        # the optional obrain/vite-rs path dependencies (absent on the runner) once the
+        # workspace declares members. Formatting is the same check.
+        run: git ls-files '*.rs' | xargs rustfmt --edition 2024 --check
 
   # Clippy linting
   clippy:

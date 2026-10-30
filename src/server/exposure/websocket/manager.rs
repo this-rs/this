@@ -20,6 +20,7 @@
 
 use super::protocol::{ServerMessage, Subscription, SubscriptionFilter};
 use crate::core::events::EventEnvelope;
+use crate::server::exposure::guard::SurfaceGuard;
 use crate::server::host::ServerHost;
 use std::collections::HashMap;
 use std::future::Future;
@@ -79,6 +80,9 @@ struct ConnectionHandle {
     /// Events without a `tenant_id` (broadcast events) are always delivered.
     /// Set at connection time from the `AuthContext` extracted during WS upgrade.
     tenant_id: Option<Uuid>,
+    /// Per-connection policies (armed router): an event is delivered only if the
+    /// caller may `get` its entity / `get_link` its link. `None` = unenforced.
+    guard: Option<SurfaceGuard>,
 }
 
 /// Manages all active WebSocket connections and their subscriptions
@@ -95,6 +99,9 @@ pub struct ConnectionManager {
     /// When set, messages that fail to parse as `ClientMessage` are forwarded
     /// to this handler before returning an error to the client.
     custom_handler: RwLock<Option<Arc<dyn CustomMessageHandler>>>,
+    /// Built by an armed router (`WebSocketExposure::build_router`): the handshake
+    /// resolves the caller and every connection carries its `SurfaceGuard`.
+    enforce: bool,
 }
 
 impl std::fmt::Debug for ConnectionManager {
@@ -110,7 +117,25 @@ impl ConnectionManager {
             _host: host,
             connections: RwLock::new(HashMap::new()),
             custom_handler: RwLock::new(None),
+            enforce: false,
         }
+    }
+
+    /// Mark this manager as built by an armed router (policies applied per
+    /// connection when the host has them armed).
+    pub(crate) fn enforced(mut self) -> Self {
+        self.enforce = true;
+        self
+    }
+
+    /// Should the handshake resolve the caller and guard the connection?
+    pub(crate) fn enforces(&self) -> bool {
+        self.enforce && self._host.authorize
+    }
+
+    /// The host this manager serves.
+    pub(crate) fn host(&self) -> &Arc<ServerHost> {
+        &self._host
     }
 
     /// Register a custom message handler for non-protocol messages.
@@ -168,6 +193,23 @@ impl ConnectionManager {
         &self,
         tenant_id: Option<Uuid>,
     ) -> (String, mpsc::UnboundedReceiver<ServerMessage>) {
+        self.connect_inner(tenant_id, None).await
+    }
+
+    /// Register a connection carrying the caller's `SurfaceGuard` (armed router).
+    pub(crate) async fn connect_guarded(
+        &self,
+        tenant_id: Option<Uuid>,
+        guard: SurfaceGuard,
+    ) -> (String, mpsc::UnboundedReceiver<ServerMessage>) {
+        self.connect_inner(tenant_id, Some(guard)).await
+    }
+
+    async fn connect_inner(
+        &self,
+        tenant_id: Option<Uuid>,
+        guard: Option<SurfaceGuard>,
+    ) -> (String, mpsc::UnboundedReceiver<ServerMessage>) {
         let connection_id = format!("conn_{}", Uuid::new_v4().simple());
         let (tx, rx) = mpsc::unbounded_channel();
 
@@ -176,6 +218,7 @@ impl ConnectionManager {
             subscriptions: Vec::new(),
             user_id: None,
             tenant_id,
+            guard,
         };
 
         self.connections
@@ -378,6 +421,14 @@ impl ConnectionManager {
                 && event_uid != conn_uid
             {
                 continue; // Skip: event belongs to a different user
+            }
+
+            // Entity-level policies (armed router): no event of an entity the
+            // caller may not read.
+            if let Some(guard) = &handle.guard
+                && !guard.allows_event(&envelope.event)
+            {
+                continue;
             }
 
             for subscription in &handle.subscriptions {
@@ -1165,5 +1216,96 @@ mod tests {
             .try_custom_handler("conn_nonexistent", r#"{"type":"chat"}"#)
             .await;
         assert!(!handled, "unknown connection → message not consumed");
+    }
+}
+
+#[cfg(test)]
+mod policy_tests {
+    use super::*;
+    use crate::config::{EntityAuthConfig, EntityConfig, LinksConfig};
+    use crate::core::auth::AuthContext;
+    use crate::core::events::{EntityEvent, FrameworkEvent};
+    use crate::server::entity_registry::EntityRegistry;
+    use crate::storage::InMemoryLinkService;
+    use std::collections::HashMap;
+
+    /// Armed host: `order.get` = `role:reader`.
+    fn armed_host() -> ServerHost {
+        let config = LinksConfig {
+            entities: vec![EntityConfig {
+                singular: "order".into(),
+                plural: "orders".into(),
+                auth: EntityAuthConfig {
+                    get: "role:reader".into(),
+                    ..Default::default()
+                },
+            }],
+            links: vec![],
+            validation_rules: None,
+            events: None,
+            sinks: None,
+            auth: None,
+        };
+        ServerHost::from_builder_components(
+            Arc::new(InMemoryLinkService::new()),
+            config,
+            EntityRegistry::new(),
+            HashMap::new(),
+            HashMap::new(),
+        )
+        .unwrap()
+    }
+
+    fn user(roles: &[&str]) -> AuthContext {
+        AuthContext::User {
+            user_id: Uuid::from_u128(1),
+            tenant_id: Uuid::from_u128(2),
+            roles: roles.iter().map(|r| r.to_string()).collect(),
+        }
+    }
+
+    #[tokio::test]
+    async fn ws_events_filtered_by_policy() {
+        let host = Arc::new(armed_host());
+        let cm = ConnectionManager::new(host.clone()).enforced();
+        assert!(cm.enforces());
+
+        let mut rxs = Vec::new();
+        for ctx in [user(&["reader"]), user(&[]), AuthContext::Anonymous] {
+            let guard = SurfaceGuard::for_host(&host, ctx, "WebSocket");
+            let (id, rx) = cm.connect_guarded(None, guard).await;
+            cm.subscribe(&id, SubscriptionFilter::default())
+                .await
+                .unwrap();
+            rxs.push(rx);
+        }
+        // An unguarded connection (historical `connect`) still receives everything.
+        let (open, mut open_rx) = cm.connect(None).await;
+        cm.subscribe(&open, SubscriptionFilter::default())
+            .await
+            .unwrap();
+
+        cm.dispatch_event(&EventEnvelope::new(FrameworkEvent::Entity(
+            EntityEvent::Created {
+                entity_type: "order".into(),
+                entity_id: Uuid::new_v4(),
+                data: serde_json::json!({}),
+            },
+        )))
+        .await;
+
+        assert!(rxs[0].try_recv().is_ok(), "reader may `get` orders");
+        assert!(rxs[1].try_recv().is_err(), "no role: filtered");
+        assert!(rxs[2].try_recv().is_err(), "anonymous: filtered");
+        assert!(open_rx.try_recv().is_ok());
+
+        // A disarmed host never enforces, even on a manager built armed.
+        let mut disarmed = armed_host();
+        disarmed.authorize = false;
+        assert!(
+            !ConnectionManager::new(Arc::new(disarmed))
+                .enforced()
+                .enforces()
+        );
     }
 }

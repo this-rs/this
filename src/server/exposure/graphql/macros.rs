@@ -73,12 +73,9 @@ macro_rules! graphql_entity {
 #[macro_export]
 #[cfg(feature = "graphql")]
 macro_rules! register_graphql_entities {
-    ($builder:expr, $( $type:ident ),* $(,)?) => {
-        {
-            // Cette macro est un placeholder pour future implémentation
-            // Pour l'instant, les entités sont automatiquement détectées via EntityRegistry
-            $builder
-        }
-    };
+    ($builder:expr, $( $type:ident ),* $(,)?) => {{
+        // Cette macro est un placeholder pour future implémentation
+        // Pour l'instant, les entités sont automatiquement détectées via EntityRegistry
+        $builder
+    }};
 }
-

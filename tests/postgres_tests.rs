@@ -124,6 +124,7 @@ async fn pg_pool() -> PgPool {
 
 /// Create a fresh `PostgresDataService` with a clean entities table.
 async fn clean_pg_data_service() -> PostgresDataService<TestDataEntity> {
+    storage_harness::serialize_container_test();
     let pool = pg_pool().await;
     sqlx::query("TRUNCATE entities CASCADE")
         .execute(&pool)
@@ -134,6 +135,7 @@ async fn clean_pg_data_service() -> PostgresDataService<TestDataEntity> {
 
 /// Create a fresh `PostgresLinkService` with a clean links table.
 async fn clean_pg_link_service() -> PostgresLinkService {
+    storage_harness::serialize_container_test();
     let pool = pg_pool().await;
     sqlx::query("TRUNCATE links CASCADE")
         .execute(&pool)
@@ -149,3 +151,69 @@ async fn clean_pg_link_service() -> PostgresLinkService {
 data_service_tests!(clean_pg_data_service().await);
 link_service_tests!(clean_pg_link_service().await);
 rest_integration_tests!(clean_pg_data_service().await);
+
+// ---------------------------------------------------------------------------
+// Native `list_query` (EntityFetcher) — filter/sort/page pushed to PostgreSQL
+// ---------------------------------------------------------------------------
+
+mod list_query_native_tests {
+    use super::*;
+    use serde_json::json;
+    use this::core::EntityFetcher;
+    use this::core::service::DataService;
+    use this::descriptor::{FilterExpr, FilterOp, Query, SortDir};
+
+    #[tokio::test]
+    async fn postgres_list_query_filters_sorts_and_paginates_natively() {
+        let svc = clean_pg_data_service().await;
+        for e in sample_batch(25) {
+            svc.create(e).await.unwrap();
+        }
+
+        // ages are 20..44; filter age >= 40 (JSONB numeric), sort by name asc
+        // (dedicated column), page 2 of 2.
+        let q = Query::new()
+            .filter(FilterExpr::Cmp {
+                field: "age".into(),
+                op: FilterOp::Gte,
+                value: json!(40),
+            })
+            .sort_by("name", SortDir::Asc)
+            .page(2, 2);
+
+        let (page, total) = svc.list_query(&q).await.expect("native list_query");
+
+        assert_eq!(total, 5, "ages 40..44 match");
+        assert_eq!(page.len(), 2);
+        assert_eq!(page[0]["name"], json!("Entity_22"));
+        assert_eq!(page[1]["name"], json!("Entity_23"));
+    }
+
+    #[tokio::test]
+    async fn postgres_list_query_pushes_text_column_and_jsonb_filters_to_sql() {
+        let svc = clean_pg_data_service().await;
+        for e in sample_batch(10) {
+            svc.create(e).await.unwrap();
+        }
+
+        // `status` is a dedicated column, `email` is a JSONB key (LIKE).
+        let q = Query::new().filter(FilterExpr::And(vec![
+            FilterExpr::Cmp {
+                field: "status".into(),
+                op: FilterOp::Eq,
+                value: json!("active"),
+            },
+            FilterExpr::Cmp {
+                field: "email".into(),
+                op: FilterOp::Contains,
+                value: json!("@test.com"),
+            },
+        ]));
+
+        let (page, total) = svc.list_query(&q).await.expect("native list_query");
+
+        assert_eq!(total, 10);
+        assert_eq!(page.len(), 10);
+        assert!(page.iter().all(|r| r["status"] == json!("active")));
+    }
+}

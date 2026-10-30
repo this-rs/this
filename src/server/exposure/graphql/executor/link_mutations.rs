@@ -13,11 +13,14 @@ use super::field_resolver;
 use super::utils;
 use crate::core::events::{FrameworkEvent, LinkEvent};
 use crate::core::link::LinkEntity;
+use crate::descriptor::Operation;
+use crate::server::exposure::guard::SurfaceGuard;
 use crate::server::host::ServerHost;
 
 /// Create a link between two existing entities
 pub async fn create_link_mutation(
     host: &Arc<ServerHost>,
+    guard: &SurfaceGuard,
     field: &Field<'_, String>,
 ) -> Result<Value> {
     // Get arguments
@@ -33,6 +36,10 @@ pub async fn create_link_mutation(
 
     // Get optional metadata
     let metadata = utils::get_json_arg(field, "metadata");
+
+    guard
+        .check_link(Some(&link_type), None, None, None, Operation::CreateLink)
+        .map_err(anyhow::Error::new)?;
 
     // Create the link
     let link_entity = LinkEntity::new(link_type, source_uuid, target_uuid, metadata);
@@ -63,6 +70,7 @@ pub async fn create_link_mutation(
 /// Delete a link by ID
 pub async fn delete_link_mutation(
     host: &Arc<ServerHost>,
+    guard: &SurfaceGuard,
     field: &Field<'_, String>,
 ) -> Result<Value> {
     let link_id = utils::get_string_arg(field, "id")
@@ -71,6 +79,16 @@ pub async fn delete_link_mutation(
 
     // Fetch link details before deleting (for event payload)
     let link = host.link_service.get(&uuid).await?;
+    // Judged on the stored link type (unknown id: every declaration, strictest).
+    guard
+        .check_link(
+            link.as_ref().map(|l| l.link_type.as_str()),
+            None,
+            None,
+            None,
+            Operation::DeleteLink,
+        )
+        .map_err(anyhow::Error::new)?;
 
     host.link_service.delete(&uuid).await?;
 
@@ -90,23 +108,16 @@ pub async fn delete_link_mutation(
 /// Create an entity and link it to another entity (e.g., createInvoiceForOrder)
 pub async fn create_and_link_mutation(
     host: &Arc<ServerHost>,
+    guard: &SurfaceGuard,
     field: &Field<'_, String>,
 ) -> Result<Value> {
     let field_name = field.name.as_str();
 
-    // Parse field name: createInvoiceForOrder -> (invoice, order)
-    let parts: Vec<&str> = field_name
-        .strip_prefix("create")
-        .unwrap_or("")
-        .split("For")
-        .collect();
-
-    if parts.len() != 2 {
-        bail!("Invalid createAndLink mutation format: {}", field_name);
-    }
-
-    let entity_type = utils::pascal_to_snake(parts[0]);
-    let parent_type = utils::pascal_to_snake(parts[1]);
+    // createInvoiceForOrder -> (invoice, order), from the declared links (schema_generator
+    // emits `create{Target}For{Source}` for each `LinkDefinition`).
+    let (entity_type, parent_type) =
+        utils::typed_link_operands(&host.config.links, field_name, "create", "For")
+            .ok_or_else(|| anyhow::anyhow!("Invalid createAndLink mutation: {field_name}"))?;
 
     // Get arguments
     let parent_id = utils::get_string_arg(field, "parentId")
@@ -117,8 +128,23 @@ pub async fn create_and_link_mutation(
 
     let parent_uuid = Uuid::parse_str(&parent_id)?;
 
+    // Creating a linked entity = `create` on the new entity AND `create_link` on
+    // the link anchored on the parent (both judged BEFORE anything is written).
+    let creator = guard
+        .creator(host, &entity_type, Operation::Create, None)
+        .map_err(anyhow::Error::new)?;
+    guard
+        .check_link(
+            link_type.as_deref(),
+            Some(&parent_type),
+            Some(&entity_type),
+            Some(&parent_type),
+            Operation::CreateLink,
+        )
+        .map_err(anyhow::Error::new)?;
+
     // Create the entity
-    if let Some(creator) = host.entity_creators.get(&entity_type) {
+    {
         let created = creator.create_from_json(data).await?;
 
         // Extract the new entity's ID
@@ -144,7 +170,11 @@ pub async fn create_and_link_mutation(
             lt
         } else {
             // Try to find link type from config
-            utils::find_link_type(&host.config.links, &parent_type, &entity_type)?
+            utils::find_link_type(
+                &host.catalog().links_config.links,
+                &parent_type,
+                &entity_type,
+            )?
         };
 
         // Create the link
@@ -165,6 +195,7 @@ pub async fn create_and_link_mutation(
         // Resolve sub-fields for the created entity
         let resolved = field_resolver::resolve_entity_fields(
             host,
+            guard,
             created,
             &field.selection_set.items,
             &entity_type,
@@ -172,14 +203,13 @@ pub async fn create_and_link_mutation(
         .await?;
 
         Ok(resolved)
-    } else {
-        bail!("Unknown entity type: {}", entity_type);
     }
 }
 
 /// Link two existing entities (e.g., linkInvoiceToOrder)
 pub async fn link_entities_mutation(
     host: &Arc<ServerHost>,
+    guard: &SurfaceGuard,
     field: &Field<'_, String>,
 ) -> Result<Value> {
     let field_name = field.name.as_str();
@@ -212,8 +242,22 @@ pub async fn link_entities_mutation(
     let actual_link_type = if let Some(lt) = link_type {
         lt
     } else {
-        utils::find_link_type(&host.config.links, &source_type, &target_type)?
+        utils::find_link_type(
+            &host.catalog().links_config.links,
+            &source_type,
+            &target_type,
+        )?
     };
+
+    guard
+        .check_link(
+            Some(&actual_link_type),
+            Some(&source_type),
+            Some(&target_type),
+            Some(&source_type),
+            Operation::CreateLink,
+        )
+        .map_err(anyhow::Error::new)?;
 
     // Get optional metadata
     let metadata = utils::get_json_arg(field, "metadata");
@@ -247,6 +291,7 @@ pub async fn link_entities_mutation(
 /// Unlink two entities (e.g., unlinkInvoiceFromOrder)
 pub async fn unlink_entities_mutation(
     host: &Arc<ServerHost>,
+    guard: &SurfaceGuard,
     field: &Field<'_, String>,
 ) -> Result<Value> {
     let field_name = field.name.as_str();
@@ -279,8 +324,23 @@ pub async fn unlink_entities_mutation(
     let actual_link_type = if let Some(lt) = link_type {
         Some(lt)
     } else {
-        utils::find_link_type(&host.config.links, &source_type, &target_type).ok()
+        utils::find_link_type(
+            &host.catalog().links_config.links,
+            &source_type,
+            &target_type,
+        )
+        .ok()
     };
+
+    guard
+        .check_link(
+            actual_link_type.as_deref(),
+            Some(&source_type),
+            Some(&target_type),
+            Some(&source_type),
+            Operation::DeleteLink,
+        )
+        .map_err(anyhow::Error::new)?;
 
     // Find and delete the link
     let links = host
@@ -528,9 +588,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_delete_link_mutation_direct_call() {
-        // Note: deleteLink via executor gets caught by the "delete*" prefix check
-        // and routes to delete_entity_mutation instead of delete_link_mutation.
-        // So we test delete_link_mutation directly using a manually constructed Field.
+        // Direct call on a manually constructed Field (the executor routing of
+        // `deleteLink` is covered by `graphql_delete_link_is_routed_and_guarded`).
         use super::delete_link_mutation;
         use graphql_parser::Pos;
         use graphql_parser::query::{SelectionSet, Value as GqlValue};
@@ -554,9 +613,15 @@ mod tests {
             },
         };
 
-        let result = delete_link_mutation(&host, &field)
-            .await
-            .expect("should delete link");
+        let result = delete_link_mutation(
+            &host,
+            &crate::server::exposure::guard::SurfaceGuard::unenforced(
+                crate::core::auth::AuthContext::Anonymous,
+            ),
+            &field,
+        )
+        .await
+        .expect("should delete link");
         assert_eq!(result, Value::Bool(true));
     }
 
@@ -581,7 +646,14 @@ mod tests {
             },
         };
 
-        let result = delete_link_mutation(&host, &field).await;
+        let result = delete_link_mutation(
+            &host,
+            &crate::server::exposure::guard::SurfaceGuard::unenforced(
+                crate::core::auth::AuthContext::Anonymous,
+            ),
+            &field,
+        )
+        .await;
         assert!(result.is_err(), "missing id should error");
     }
 
@@ -967,9 +1039,15 @@ mod tests {
             },
         };
 
-        let result = delete_link_mutation(&host, &field)
-            .await
-            .expect("should delete link with EventBus");
+        let result = delete_link_mutation(
+            &host,
+            &crate::server::exposure::guard::SurfaceGuard::unenforced(
+                crate::core::auth::AuthContext::Anonymous,
+            ),
+            &field,
+        )
+        .await
+        .expect("should delete link with EventBus");
         assert_eq!(result, Value::Bool(true));
     }
 

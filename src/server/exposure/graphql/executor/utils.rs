@@ -1,8 +1,9 @@
 //! Utility functions for GraphQL execution
 
 use anyhow::Result;
-use graphql_parser::query::{Field, Value as GqlValue};
+use graphql_parser::query::{Field, Selection, Value as GqlValue, VariableDefinition};
 use serde_json::{Value, json};
+use std::collections::HashMap;
 use uuid::Uuid;
 
 /// Get string argument from field
@@ -65,6 +66,95 @@ pub fn gql_value_to_json(value: &GqlValue<String>) -> Value {
     }
 }
 
+/// JSON (a GraphQL variable's value) → GraphQL literal. Integers outside `i32` become
+/// `Float` (graphql-parser's `Number` is built from `i32` only).
+pub fn json_to_gql<'a>(value: &Value) -> GqlValue<'a, String> {
+    match value {
+        Value::Null => GqlValue::Null,
+        Value::Bool(b) => GqlValue::Boolean(*b),
+        Value::Number(n) => match n.as_i64().and_then(|i| i32::try_from(i).ok()) {
+            Some(i) => GqlValue::Int(i.into()),
+            None => GqlValue::Float(n.as_f64().unwrap_or(0.0)),
+        },
+        Value::String(s) => GqlValue::String(s.clone()),
+        Value::Array(items) => GqlValue::List(items.iter().map(json_to_gql).collect()),
+        Value::Object(map) => GqlValue::Object(
+            map.iter()
+                .map(|(k, v)| (k.clone(), json_to_gql(v)))
+                .collect(),
+        ),
+    }
+}
+
+/// The operation's variables: the request's values, completed by the defaults declared
+/// in the operation (`query ($f: String = "...")`).
+pub fn with_variable_defaults(
+    definitions: &[VariableDefinition<'_, String>],
+    mut variables: HashMap<String, Value>,
+) -> HashMap<String, Value> {
+    for def in definitions {
+        if let Some(default) = &def.default_value
+            && !variables.contains_key(&def.name)
+        {
+            variables.insert(def.name.clone(), gql_value_to_json(default));
+        }
+    }
+    variables
+}
+
+fn substitute_value<'a>(
+    value: &GqlValue<'a, String>,
+    variables: &HashMap<String, Value>,
+) -> GqlValue<'a, String> {
+    match value {
+        GqlValue::Variable(name) => variables
+            .get(name)
+            .map(json_to_gql)
+            .unwrap_or(GqlValue::Null),
+        GqlValue::List(items) => GqlValue::List(
+            items
+                .iter()
+                .map(|v| substitute_value(v, variables))
+                .collect(),
+        ),
+        GqlValue::Object(map) => GqlValue::Object(
+            map.iter()
+                .map(|(k, v)| (k.clone(), substitute_value(v, variables)))
+                .collect(),
+        ),
+        other => other.clone(),
+    }
+}
+
+/// Inline the operation's variables into every argument of `selections`, nested fields
+/// and inline fragments included. Without this, a `$var` argument read as `null`: a
+/// `filter: $f` silently listed EVERYTHING and `data: $input` was refused as not an
+/// object. An undeclared / unprovided variable is `null` (GraphQL semantics).
+pub fn substitute_variables<'a>(
+    selections: &[Selection<'a, String>],
+    variables: &HashMap<String, Value>,
+) -> Vec<Selection<'a, String>> {
+    selections
+        .iter()
+        .map(|sel| match sel {
+            Selection::Field(field) => {
+                let mut f = field.clone();
+                for (_, v) in f.arguments.iter_mut() {
+                    *v = substitute_value(v, variables);
+                }
+                f.selection_set.items = substitute_variables(&field.selection_set.items, variables);
+                Selection::Field(f)
+            }
+            Selection::InlineFragment(frag) => {
+                let mut fr = frag.clone();
+                fr.selection_set.items = substitute_variables(&frag.selection_set.items, variables);
+                Selection::InlineFragment(fr)
+            }
+            other => other.clone(),
+        })
+        .collect()
+}
+
 /// Simple pluralization (can be improved)
 pub fn pluralize(word: &str) -> String {
     if let Some(stripped) = word.strip_suffix('y') {
@@ -74,6 +164,40 @@ pub fn pluralize(word: &str) -> String {
     } else {
         format!("{}s", word)
     }
+}
+
+/// PascalCase of a snake_case entity type (the spelling of `schema_generator`).
+fn snake_to_pascal(s: &str) -> String {
+    s.split('_')
+        .map(|w| {
+            let mut c = w.chars();
+            c.next()
+                .map(|f| f.to_uppercase().collect::<String>() + c.as_str())
+                .unwrap_or_default()
+        })
+        .collect()
+}
+
+/// Operands `(first, second)` (snake_case entity types, in the order of the name) of a typed
+/// link mutation, derived from the declared links and NOT from the spelling of the name:
+/// `create{Target}For{Source}` (and the `link` / `unlink` spellings, not yet routed through it) is
+/// exactly the names `schema_generator` emits for each `LinkDefinition`. Splitting on a
+/// substring (`For`, `To`, `From`) mis-routed any entity whose name contains it
+/// (`createFormat`, `createTool`...) and mis-parsed names such as `ForSale`.
+pub fn typed_link_operands(
+    links: &[crate::core::LinkDefinition],
+    field_name: &str,
+    prefix: &str,
+    infix: &str,
+) -> Option<(String, String)> {
+    links.iter().find_map(|l| {
+        let name = format!(
+            "{prefix}{}{infix}{}",
+            snake_to_pascal(&l.target_type),
+            snake_to_pascal(&l.source_type)
+        );
+        (name == field_name).then(|| (l.target_type.clone(), l.source_type.clone()))
+    })
 }
 
 /// Convert PascalCase to snake_case

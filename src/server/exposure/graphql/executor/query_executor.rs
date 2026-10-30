@@ -8,67 +8,125 @@ use uuid::Uuid;
 
 use super::field_resolver;
 use super::utils;
+use crate::descriptor::Operation;
+use crate::server::exposure::guard::SurfaceGuard;
 use crate::server::host::ServerHost;
 
 /// Resolve a query field (e.g., "orders", "order", "invoice", etc.)
 pub async fn resolve_query_field(
     host: &Arc<ServerHost>,
+    guard: &SurfaceGuard,
     field: &Field<'_, String>,
 ) -> Result<Value> {
     let field_name = field.name.as_str();
 
     // Check if this is a plural query (e.g., "orders", "invoices")
     if let Some(entity_type) = get_entity_type_from_plural(host, field_name) {
+        let entity_type = entity_type.as_str();
         // Get pagination arguments
         let limit = utils::get_int_arg(field, "limit");
         let offset = utils::get_int_arg(field, "offset");
 
-        // Fetch entities
-        if let Some(fetcher) = host.entity_fetchers.get(entity_type) {
-            let entities = fetcher.list_as_json(limit, offset).await?;
+        let fetcher = guard
+            .fetcher(host, entity_type, Operation::List, None)
+            .map_err(anyhow::Error::new)?;
 
-            // Resolve sub-fields for each entity
+        // Typed filters (validation stream): `filter` (object or JSON string, REST
+        // grammar) and `sort` (REST grammar). Present → checked against the descriptor
+        // (strict without one) and applied BEFORE pagination; malformed → a
+        // `ContractError` (`BAD_USER_INPUT`). Absent → historical path, unchanged.
+        let filter = utils::get_json_arg(field, "filter");
+        // `sort` present but not a string (list, number, object...) is a typed error:
+        // reading it as "no sort" would silently ignore what the client asked for.
+        let sort = match utils::get_json_arg(field, "sort") {
+            None | Some(Value::Null) => None,
+            Some(Value::String(s)) => Some(s),
+            Some(other) => {
+                return Err(crate::descriptor::ContractError::framework(
+                    crate::descriptor::framework::codes::QUERY_MALFORMED_SORT,
+                )
+                .with_param(
+                    "reason",
+                    format!("`sort` must be a string (REST grammar), got {other}"),
+                )
+                .into());
+            }
+        };
+        if filter.is_some() || sort.is_some() {
+            let descriptors = host.descriptors();
+            let desc = descriptors.entity(entity_type).map(|(_, d)| d);
+            let q = crate::core::query::query_from_args(
+                desc,
+                filter,
+                sort.as_deref(),
+                limit.and_then(|l| u32::try_from(l).ok()),
+                offset.and_then(|o| u32::try_from(o).ok()),
+            )?;
+            let (entities, _total) = fetcher.list_query(&q).await?;
             let resolved_entities = field_resolver::resolve_entity_list(
                 host,
+                guard,
                 entities,
                 &field.selection_set.items,
                 entity_type,
             )
             .await?;
-
             return Ok(Value::Array(resolved_entities));
-        } else {
-            bail!("Unknown entity type: {}", entity_type);
         }
+
+        // Fetch entities
+        let entities = fetcher.list_as_json(limit, offset).await?;
+
+        // Resolve sub-fields for each entity
+        let resolved_entities = field_resolver::resolve_entity_list(
+            host,
+            guard,
+            entities,
+            &field.selection_set.items,
+            entity_type,
+        )
+        .await?;
+
+        return Ok(Value::Array(resolved_entities));
     }
 
     // Check if this is a singular query (e.g., "order", "invoice")
     if let Some(entity_type) = get_entity_type_from_singular(host, field_name) {
+        let entity_type = entity_type.as_str();
         // Get the ID argument
         let id = utils::get_string_arg(field, "id")
             .ok_or_else(|| anyhow::anyhow!("Missing required argument 'id'"))?;
         let uuid = Uuid::parse_str(&id)?;
 
         // Fetch the entity
-        if let Some(fetcher) = host.entity_fetchers.get(entity_type) {
-            let entity = fetcher.fetch_as_json(&uuid).await?;
+        let fetcher = guard
+            .fetcher(host, entity_type, Operation::Get, Some(&uuid))
+            .map_err(anyhow::Error::new)?;
+        let entity = fetcher.fetch_as_json(&uuid).await?;
 
-            // Resolve sub-fields
-            let resolved = field_resolver::resolve_entity_fields(
-                host,
-                entity,
-                &field.selection_set.items,
-                entity_type,
-            )
-            .await?;
+        // Resolve sub-fields
+        let resolved = field_resolver::resolve_entity_fields(
+            host,
+            guard,
+            entity,
+            &field.selection_set.items,
+            entity_type,
+        )
+        .await?;
 
-            return Ok(resolved);
-        } else {
-            bail!("Unknown entity type: {}", entity_type);
-        }
+        return Ok(resolved);
     }
 
     // ── Notification queries (when NotificationStore is configured) ──
+    // Notification queries take the user from an ARGUMENT: not covered by the
+    // policies, refused when they are enforced (fail-closed).
+    if host.notification_store().is_some()
+        && matches!(field_name, "notifications" | "unreadNotificationCount")
+    {
+        guard
+            .deny_uncovered(field_name)
+            .map_err(anyhow::Error::new)?;
+    }
     if let Some(store) = host.notification_store() {
         if field_name == "notifications" {
             let user_id = utils::get_string_arg(field, "userId")
@@ -106,24 +164,23 @@ pub async fn resolve_query_field(
 }
 
 /// Get entity type from plural field name (e.g., "orders" -> "order")
-fn get_entity_type_from_plural<'a>(host: &'a Arc<ServerHost>, field_name: &str) -> Option<&'a str> {
-    for entity_type in host.entity_types() {
-        let plural = utils::pluralize(entity_type);
-        if plural == field_name {
-            return Some(entity_type);
-        }
-    }
-    None
+fn get_entity_type_from_plural(host: &Arc<ServerHost>, field_name: &str) -> Option<String> {
+    let catalog = host.catalog();
+    catalog
+        .entity_types()
+        .into_iter()
+        .find(|entity_type| utils::pluralize(entity_type) == field_name)
+        .map(String::from)
 }
 
 /// Get entity type from singular field name (e.g., "order" -> "order")
-fn get_entity_type_from_singular<'a>(
-    host: &'a Arc<ServerHost>,
-    field_name: &str,
-) -> Option<&'a str> {
-    host.entity_types()
+fn get_entity_type_from_singular(host: &Arc<ServerHost>, field_name: &str) -> Option<String> {
+    let catalog = host.catalog();
+    catalog
+        .entity_types()
         .into_iter()
         .find(|&entity_type| entity_type == field_name)
+        .map(String::from)
 }
 
 #[cfg(test)]
@@ -414,10 +471,13 @@ mod tests {
             build_test_host(fetchers)
         };
 
-        assert_eq!(get_entity_type_from_plural(&host, "orders"), Some("order"));
+        assert_eq!(
+            get_entity_type_from_plural(&host, "orders"),
+            Some("order".to_string())
+        );
         assert_eq!(
             get_entity_type_from_plural(&host, "invoices"),
-            Some("invoice")
+            Some("invoice".to_string())
         );
     }
 
@@ -441,10 +501,13 @@ mod tests {
             build_test_host(fetchers)
         };
 
-        assert_eq!(get_entity_type_from_singular(&host, "order"), Some("order"));
+        assert_eq!(
+            get_entity_type_from_singular(&host, "order"),
+            Some("order".to_string())
+        );
         assert_eq!(
             get_entity_type_from_singular(&host, "invoice"),
-            Some("invoice")
+            Some("invoice".to_string())
         );
     }
 

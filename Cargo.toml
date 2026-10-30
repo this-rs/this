@@ -1,6 +1,6 @@
 [package]
 name = "this-rs"
-version = "0.0.9"
+version = "0.0.10"
 edition = "2024"
 authors = ["Riviere Théotime <t@ffs.holdings>"]
 license = "MIT OR Apache-2.0"
@@ -10,7 +10,16 @@ keywords = ["entity", "relationship", "rest", "graphql", "api"]
 categories = ["web-programming", "web-programming::http-server", "database"]
 readme = "README.md"
 
+[workspace]
+members = [".", "crates/this-descriptor"]
+resolver = "3"
+
 [dependencies]
+# Module descriptor (types, pure engines, error table) shared with this-cli and wasm32
+# fronts. `version` + `path`: publishable (this-descriptor is published BEFORE this-rs).
+this-descriptor = { version = "0.1", path = "crates/this-descriptor", features = ["yaml", "pattern", "http"] }
+# Atomic publication of the host catalog snapshot (readers never lock).
+arc-swap = "1"
 # Async runtime
 tokio = { version = "1.40", features = ["full"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
@@ -64,7 +73,6 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # Validation
 regex = "1.10"
-validator = { version = "0.21", features = ["derive"] }
 
 # GraphQL support (optional)
 async-graphql = { version = "7", optional = true }
@@ -154,8 +162,8 @@ neo4j = ["neo4rs"]
 scylladb = ["scylla"]
 mysql = ["sqlx", "sqlx/macros", "sqlx/runtime-tokio", "sqlx/tls-rustls", "sqlx/mysql", "sqlx/uuid", "sqlx/chrono", "sqlx/json", "sqlx/migrate"]
 lmdb = ["heed"]
-graphql = ["async-graphql", "async-graphql-axum", "graphql-parser"]
-grpc = ["tonic", "tonic-prost", "prost", "prost-types"]
+graphql = ["async-graphql", "async-graphql-axum", "graphql-parser", "this-descriptor/graphql"]
+grpc = ["tonic", "tonic-prost", "prost", "prost-types", "this-descriptor/grpc"]
 push = ["dep:reqwest"]
 # Gestion d'une zone PowerDNS (API HTTP) : délégation DNS de l'exposition.
 powerdns = ["dep:reqwest"]
@@ -198,6 +206,19 @@ path = "examples/simple_api/main.rs"
 [[example]]
 name = "full_api"
 path = "examples/full_api/main.rs"
+
+[[example]]
+name = "descriptor_api"
+path = "examples/descriptor_api/main.rs"
+required-features = ["graphql", "grpc"]
+
+# Chargement à chaud : un module déclaratif stocké dans un VFS (InMemoryVfs ou
+# LocalFsVfs), chargé dans un hôte vivant, servi sur REST/GraphQL/gRPC, puis
+# déchargé (404 `this.module.not_found`). Un seul ModuleDescriptor, déclaré une fois.
+[[example]]
+name = "hot_module"
+path = "examples/hot_module/main.rs"
+required-features = ["graphql", "grpc"]
 
 [[example]]
 name = "microservice"
@@ -279,6 +300,13 @@ name = "scope_bench"
 path = "benches/scope_bench.rs"
 harness = false
 required-features = ["obrain"]
+
+# Validation par descripteur (RFC module-descriptor §7.1) : `engine::validate::apply`
+# est sur le chemin de toute écriture d'une entité décrite.
+[[bench]]
+name = "validate_bench"
+path = "benches/validate_bench.rs"
+harness = false
 
 # La passerelle IAM devant les stores obrain (chantier PASSERELLE-THIS-RS) :
 # STS (émission + validation Ed25519), refus par défaut (la faille 4-segments

@@ -1,0 +1,51 @@
+%% name: module-descriptor-vfs-storage
+%% QUESTION : comment un module stocke est ecrit, verifie et relu, sur quels backends ?
+%% PROUVE (MESURE) : banc vfs_conformance_* (memoire, fs), obrain_vfs_conformance (--features obrain), fs_vfs_sandboxed,
+%%   obrain_vfs_survives_reopen_without_rebuild, obrain_vfs_ignores_the_active_space (rouge avant correctif),
+%%   module_store_* (put/get/bundles/immuable/yank/remove/assets/backport/locales/orphelins/alteration fs), read_source_loads_stored_module,
+%%   compat::tests::reserved_tag_of_prev_cannot_be_taken_by_next ; integration : e2e hot_loaded_module_from_vfs_served_then_404_after_unload.
+%% LU : src/storage/vfs/{mod,memory,fs,obrain,module_store,conformance}.rs, src/server/module_runtime/{loader,runtime}.rs.
+%% NON ETABLI : ecritures concurrentes entre PROCESSUS (verrou en processus seulement).
+flowchart TB
+    classDef ok       fill:#2ea04333,stroke:#2ea043,stroke-width:2px
+    classDef todo     fill:#f0a02033,stroke:#d98a00,stroke-width:2px
+    classDef refused  fill:#e5484d33,stroke:#e5484d,stroke-width:2px,stroke-dasharray:6 3
+    classDef upstream fill:#8b8fa322,stroke:#8b8fa3,stroke-dasharray:3 3
+    classDef trap     fill:#e5484d1f,stroke:#e5484d,stroke-width:3px
+    classDef entry    fill:#a48bff40,stroke:#a48bff,stroke-width:3px
+
+    ADM(["Admin : put / yank / remove<br/>politique this.module.load"]):::entry
+    RT["✅ ModuleRuntime / DefaultModuleLoader<br/>read_source, bundles verifies avant publication<br/>e2e hot_loaded_module_from_vfs"]:::ok
+
+    subgraph MS["VfsModuleStore - module_store.rs"]
+        direction TB
+        CHK["✅ check Stored + bundles + assets<br/>module, syntaxe, cles, locale declaree"]:::ok
+        CMP["✅ check_compat contre TOUTES les versions<br/>backport verifie contre les superieures"]:::ok
+        IMM["✅ version immuable<br/>meme contenu = idempotent, sinon 409 Aborted"]:::ok
+        MAN["✅ orphelins purges, fichiers, puis manifest.json<br/>IfNoneMatch = marqueur de commit"]:::ok
+        YNK["✅ yank / unyank : retour arriere"]:::ok
+        RD["✅ get / bundle / asset<br/>etag verifie, re-check Stored"]:::ok
+    end
+
+    subgraph V["trait Vfs - banc conformance.rs"]
+        direction LR
+        MEM["✅ InMemoryVfs"]:::ok
+        FS["✅ LocalFsVfs<br/>refus des liens symboliques,<br/>tmp + fsync + rename"]:::ok
+        OB["✅ ObrainVfs feature obrain<br/>un noeud _vfs_file par fichier,<br/>graphe RACINE"]:::ok
+    end
+
+    TRAP["⚠ index uuid vers NodeId d'ObrainStore<br/>perdus a open : ObrainVfs ne garde<br/>AUCUN index, balayage du label"]:::trap
+    RACE["🟠 deux processus sur la meme version :<br/>pas de verrou inter-processus,<br/>detecte par les etags, jamais servi"]:::todo
+    DB@{ shape: cyl, label: "substrat obrain<br/>commit_wal a chaque mutation" }
+    DISK@{ shape: cyl, label: "repertoire local" }
+
+    ADM ==> CHK ==> CMP ==> IMM ==> MAN
+    ADM --> YNK
+    RT ==>|"read_source : descripteur + bundles"| RD
+    MAN --> V
+    RD --> V
+    YNK --> V
+    FS --> DISK
+    OB --> DB
+    OB -.- TRAP
+    MAN -.- RACE

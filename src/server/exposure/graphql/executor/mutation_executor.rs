@@ -14,53 +14,56 @@ use super::field_resolver;
 use super::link_mutations;
 use super::utils;
 use crate::core::events::{EntityEvent, FrameworkEvent};
+use crate::descriptor::Operation;
+use crate::server::exposure::guard::SurfaceGuard;
 use crate::server::host::ServerHost;
 
 /// Resolve a mutation field (e.g., "createOrder", "updateInvoice", etc.)
 pub async fn resolve_mutation_field(
     host: &Arc<ServerHost>,
+    guard: &SurfaceGuard,
     field: &Field<'_, String>,
 ) -> Result<Value> {
     let field_name = field.name.as_str();
 
     // Check for createLink mutation (must be before create check)
     if field_name == "createLink" {
-        return link_mutations::create_link_mutation(host, field).await;
+        return link_mutations::create_link_mutation(host, guard, field).await;
     }
 
     // Check for createAndLink mutation (e.g., "createInvoiceForOrder") - must be before create check
-    if field_name.starts_with("create") && field_name.contains("For") {
-        return link_mutations::create_and_link_mutation(host, field).await;
+    if utils::typed_link_operands(&host.config.links, field_name, "create", "For").is_some() {
+        return link_mutations::create_and_link_mutation(host, guard, field).await;
     }
 
     // Check for link mutation (e.g., "linkInvoiceToOrder")
     if field_name.starts_with("link") && field_name.contains("To") {
-        return link_mutations::link_entities_mutation(host, field).await;
+        return link_mutations::link_entities_mutation(host, guard, field).await;
     }
 
     // Check for unlink mutation (e.g., "unlinkInvoiceFromOrder")
     if field_name.starts_with("unlink") && field_name.contains("From") {
-        return link_mutations::unlink_entities_mutation(host, field).await;
+        return link_mutations::unlink_entities_mutation(host, guard, field).await;
     }
 
-    // Check for create mutation (e.g., "createOrder")
-    if field_name.starts_with("create") {
-        return create_entity_mutation(host, field).await;
-    }
-
-    // Check for update mutation (e.g., "updateOrder")
-    if field_name.starts_with("update") {
-        return update_entity_mutation(host, field).await;
-    }
-
-    // Check for delete mutation (e.g., "deleteOrder")
-    if field_name.starts_with("delete") {
-        return delete_entity_mutation(host, field).await;
-    }
-
-    // Check for deleteLink mutation
+    // Check for deleteLink mutation: BEFORE the generic `delete` prefix, which
+    // otherwise routed it to `delete_entity_mutation` on a phantom `link` entity
+    // (judged by the default policy of an entity that does not exist).
     if field_name == "deleteLink" {
-        return link_mutations::delete_link_mutation(host, field).await;
+        return link_mutations::delete_link_mutation(host, guard, field).await;
+    }
+
+    // Notification mutations take the user (or a bare id) from ARGUMENTS: not
+    // covered by the policies, refused when they are enforced (fail-closed).
+    if host.notification_store().is_some()
+        && matches!(
+            field_name,
+            "markNotificationAsRead" | "markAllNotificationsAsRead" | "deleteNotification"
+        )
+    {
+        guard
+            .deny_uncovered(field_name)
+            .map_err(anyhow::Error::new)?;
     }
 
     // ── Notification mutations (when NotificationStore is configured) ──
@@ -89,12 +92,31 @@ pub async fn resolve_mutation_field(
         }
     }
 
+    // Generic entity mutations LAST: their prefixes also match `deleteNotification`
+    // (routed before to `delete_entity_mutation` on a phantom `notification`
+    // entity, bypassing the notification refusal above).
+    // Check for create mutation (e.g., "createOrder")
+    if field_name.starts_with("create") {
+        return create_entity_mutation(host, guard, field).await;
+    }
+
+    // Check for update mutation (e.g., "updateOrder")
+    if field_name.starts_with("update") {
+        return update_entity_mutation(host, guard, field).await;
+    }
+
+    // Check for delete mutation (e.g., "deleteOrder")
+    if field_name.starts_with("delete") {
+        return delete_entity_mutation(host, guard, field).await;
+    }
+
     bail!("Unknown mutation field: {}", field_name);
 }
 
 /// Create an entity
 async fn create_entity_mutation(
     host: &Arc<ServerHost>,
+    guard: &SurfaceGuard,
     field: &Field<'_, String>,
 ) -> Result<Value> {
     let field_name = field.name.as_str();
@@ -104,8 +126,12 @@ async fn create_entity_mutation(
     let data = utils::get_json_arg(field, "data")
         .ok_or_else(|| anyhow::anyhow!("Missing required argument 'data'"))?;
 
+    let creator = guard
+        .creator(host, &entity_type, Operation::Create, None)
+        .map_err(anyhow::Error::new)?;
+
     // Create the entity
-    if let Some(creator) = host.entity_creators.get(&entity_type) {
+    {
         let created = creator.create_from_json(data).await?;
 
         // Publish event to EventBus
@@ -121,6 +147,7 @@ async fn create_entity_mutation(
         // Resolve sub-fields
         let resolved = field_resolver::resolve_entity_fields(
             host,
+            guard,
             created,
             &field.selection_set.items,
             &entity_type,
@@ -128,14 +155,13 @@ async fn create_entity_mutation(
         .await?;
 
         Ok(resolved)
-    } else {
-        bail!("Unknown entity type: {}", entity_type);
     }
 }
 
 /// Update an entity
 async fn update_entity_mutation(
     host: &Arc<ServerHost>,
+    guard: &SurfaceGuard,
     field: &Field<'_, String>,
 ) -> Result<Value> {
     let field_name = field.name.as_str();
@@ -148,8 +174,12 @@ async fn update_entity_mutation(
     let data = utils::get_json_arg(field, "data")
         .ok_or_else(|| anyhow::anyhow!("Missing required argument 'data'"))?;
 
+    let creator = guard
+        .creator(host, &entity_type, Operation::Update, Some(&uuid))
+        .map_err(anyhow::Error::new)?;
+
     // Update the entity
-    if let Some(creator) = host.entity_creators.get(&entity_type) {
+    {
         let updated = creator.update_from_json(&uuid, data).await?;
 
         // Publish event to EventBus
@@ -164,6 +194,7 @@ async fn update_entity_mutation(
         // Resolve sub-fields
         let resolved = field_resolver::resolve_entity_fields(
             host,
+            guard,
             updated,
             &field.selection_set.items,
             &entity_type,
@@ -171,14 +202,13 @@ async fn update_entity_mutation(
         .await?;
 
         Ok(resolved)
-    } else {
-        bail!("Unknown entity type: {}", entity_type);
     }
 }
 
 /// Delete an entity
 async fn delete_entity_mutation(
     host: &Arc<ServerHost>,
+    guard: &SurfaceGuard,
     field: &Field<'_, String>,
 ) -> Result<Value> {
     let field_name = field.name.as_str();
@@ -189,8 +219,12 @@ async fn delete_entity_mutation(
         .ok_or_else(|| anyhow::anyhow!("Missing required argument 'id'"))?;
     let uuid = Uuid::parse_str(&id)?;
 
+    let creator = guard
+        .creator(host, &entity_type, Operation::Delete, Some(&uuid))
+        .map_err(anyhow::Error::new)?;
+
     // Delete the entity
-    if let Some(creator) = host.entity_creators.get(&entity_type) {
+    {
         creator.delete(&uuid).await?;
 
         // Publish event to EventBus
@@ -202,8 +236,6 @@ async fn delete_entity_mutation(
         }
 
         Ok(Value::Bool(true))
-    } else {
-        bail!("Unknown entity type: {}", entity_type);
     }
 }
 
@@ -479,8 +511,8 @@ mod tests {
         assert!(result.is_err(), "unknown entity type should error");
         let err_msg = result.expect_err("error").to_string();
         assert!(
-            err_msg.contains("Unknown entity type"),
-            "should mention unknown entity: {}",
+            err_msg.contains("this.entity.not_found"),
+            "should be the typed not-found error: {}",
             err_msg
         );
     }
@@ -791,5 +823,102 @@ mod tests {
             .and_then(|d| d.get("markAllNotificationsAsRead"))
             .expect("should have result");
         assert_eq!(*count, json!(3));
+    }
+
+    // -----------------------------------------------------------------------
+    // Typed link mutations are derived from the declared links, not from the name
+    // -----------------------------------------------------------------------
+
+    fn host_with_for_names() -> Arc<ServerHost> {
+        let mk = |link_type: &str, source: &str, target: &str| LinkDefinition {
+            link_type: link_type.to_string(),
+            source_type: source.to_string(),
+            target_type: target.to_string(),
+            forward_route_name: format!("{target}s"),
+            reverse_route_name: format!("{source}s"),
+            description: None,
+            required_fields: None,
+            auth: None,
+        };
+        let config = LinksConfig {
+            entities: vec![],
+            links: vec![mk("sale_of", "for_sale", "tool")],
+            validation_rules: None,
+            events: None,
+            sinks: None,
+            auth: None,
+        };
+        let mut registry = EntityRegistry::new();
+        let mut creators: HashMap<String, Arc<dyn EntityCreator>> = HashMap::new();
+        let mut fetchers: HashMap<String, Arc<dyn EntityFetcher>> = HashMap::new();
+        for (s, p) in [
+            ("format", "formats"),
+            ("tool", "tools"),
+            ("for_sale", "for_sales"),
+        ] {
+            registry.register(Box::new(StubDescriptor::new(s, p)));
+            creators.insert(s.to_string(), Arc::new(MockCreator));
+            fetchers.insert(s.to_string(), Arc::new(MockFetcher));
+        }
+        Arc::new(
+            ServerHost::from_builder_components(
+                Arc::new(InMemoryLinkService::new()),
+                config,
+                registry,
+                fetchers,
+                creators,
+            )
+            .expect("host"),
+        )
+    }
+
+    #[tokio::test]
+    async fn create_x_for_y_is_derived_from_links_not_from_the_name() {
+        let executor = GraphQLExecutor::new(host_with_for_names()).await;
+
+        // `createFormat` contains "For" but is a plain create on `format`.
+        let r = executor
+            .execute(r#"mutation { createFormat(data: {n: 1}) { id } }"#, None)
+            .await
+            .expect("createFormat is an entity create, not createAndLink");
+        assert!(r["data"]["createFormat"]["id"].is_string(), "{r}");
+
+        // `createToolForForSale`: a declared link whose source itself contains "For".
+        let parent = Uuid::new_v4();
+        let q = format!(
+            r#"mutation {{ createToolForForSale(parentId: "{parent}", data: {{n: 1}}) {{ id }} }}"#
+        );
+        let r = executor
+            .execute(&q, None)
+            .await
+            .expect("typed name resolved through the declared link");
+        assert!(r["data"]["createToolForForSale"]["id"].is_string(), "{r}");
+    }
+
+    #[test]
+    fn typed_link_operands_only_match_declared_links() {
+        use super::super::utils::typed_link_operands;
+        let links = vec![LinkDefinition {
+            link_type: "sale_of".into(),
+            source_type: "for_sale".into(),
+            target_type: "tool".into(),
+            forward_route_name: String::new(),
+            reverse_route_name: String::new(),
+            description: None,
+            required_fields: None,
+            auth: None,
+        }];
+        assert_eq!(
+            typed_link_operands(&links, "createToolForForSale", "create", "For"),
+            Some(("tool".into(), "for_sale".into()))
+        );
+        assert_eq!(
+            typed_link_operands(&links, "createFormat", "create", "For"),
+            None
+        );
+        assert_eq!(
+            typed_link_operands(&links, "createToolForOrder", "create", "For"),
+            None
+        );
     }
 }

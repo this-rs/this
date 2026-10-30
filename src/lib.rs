@@ -53,6 +53,9 @@
 
 pub mod config;
 pub mod core;
+/// Module descriptor (crate `this-descriptor`): types, pure engines, error table. Shared
+/// with this-cli and wasm32 fronts. See `docs/rfc/module-descriptor.md`.
+pub use this_descriptor as descriptor;
 /// Hôte de déploiement piloté par configuration : une structure qu'on déploie,
 /// sur laquelle on rattache des projets qui existent déjà.
 pub mod deploy;

@@ -1,0 +1,58 @@
+%% name: module-descriptor-redeclarations
+%% QUESTION : la promesse une declaration, tout derive est-elle tenue ? Qu'est-ce qui reste ecrit plusieurs fois, et qui le garde ?
+%% PROUVE (LU par la revue finale, integ/module-descriptor) : ServerBuilder::resolve_descriptors (identity_mismatch), ServerBuilder::check_plurals,
+%%   ServerBuilder::merge_configs (LinksConfig::merge), PolicyIndex::entity_policy (core/auth/surface.rs), loader.rs seul appelant de LinksConfig::from_descriptor,
+%%   this-cli : commands/add_link.rs (ecrit links.yaml ET module.yaml), descriptor/mod.rs (MODULE_DESCRIPTOR_FN sans lock), descriptor/code.rs.
+%% PROUVE (MESURE, tests existants) : identity_mismatch_between_trait_and_descriptor_fails, plural_drift_fails_at_startup,
+%%   descriptor_wins_over_yaml_and_links_follow_precedence, add_link_preserves_unknown_yaml_keys, generated_descriptor_matches_code.
+%% NON ETABLI : aucun controle d'un fournisseur oublie (entite decrite sans fetcher) trouve dans build_host (deduit de la lecture).
+flowchart LR
+    classDef ok       fill:#2ea04333,stroke:#2ea043,stroke-width:2px
+    classDef todo     fill:#f0a02033,stroke:#d98a00,stroke-width:2px
+    classDef refused  fill:#e5484d33,stroke:#e5484d,stroke-width:2px,stroke-dasharray:6 3
+    classDef upstream fill:#8b8fa322,stroke:#8b8fa3,stroke-dasharray:3 3
+    classDef trap     fill:#e5484d1f,stroke:#e5484d,stroke-width:3px
+    classDef entry    fill:#a48bff40,stroke:#a48bff,stroke-width:3px
+
+    MAC(["Macro impl_data_entity<br/>champs, types, regles, pluriel"]):::entry
+    YML(["descriptor/module.yaml<br/>identite, liens, erreurs, cles, permissions"]):::entry
+
+    subgraph ONE["Declare une fois, derive"]
+        direction TB
+        F1["✅ champs, types, validateurs, transformations"]:::ok
+        F2["✅ erreurs : code, kind, statut par surface"]:::ok
+        F3["✅ cles i18n + bundles des modules stockes"]:::ok
+        F4["✅ filtres et tris permis"]:::ok
+        F5["✅ SDL, .proto, JSON Schema, OpenAPI"]:::ok
+    end
+
+    subgraph CHK["Redeclare, derive = erreur au demarrage"]
+        direction TB
+        R1["✅ R1 identite : Module::name, version,<br/>entity_types vs module.yaml<br/>this.module.identity_mismatch"]:::ok
+        R2["✅ R2 pluriel : EntityDesc, EntityDescriptor,<br/>links.yaml entities<br/>this.module.plural_mismatch"]:::ok
+        R7["✅ R7 grammaire de macro : macros.rs<br/>+ lecteur CLI descriptor/code.rs<br/>generated_descriptor_matches_code"]:::ok
+    end
+
+    subgraph SIL["Redeclare, derive silencieuse"]
+        direction TB
+        R3["⚠ R3 liens d'un module compile :<br/>links.yaml sert le routage,<br/>LinkDesc sert auth et references"]:::trap
+        R4["⚠ R4 politiques : descripteur ET auth YAML,<br/>le descripteur gagne sans erreur"]:::trap
+        R5["⚠ R5 fournisseurs : register_entities,<br/>get_entity_fetcher, get_entity_creator<br/>bras de match ecrits par la CLI"]:::trap
+    end
+
+    subgraph TODO["A deriver, suite"]
+        direction TB
+        R6["🟠 R6 tags proto : descriptor.lock<br/>applique par la CLI, pas a l'execution"]:::todo
+        R8["🟠 R8 copie CLI de LinksConfig<br/>sans perte, extraction C15 reportee"]:::todo
+        R10["🟠 GraphQL createXForY<br/>reconnu par contains For"]:::todo
+    end
+
+    LEG["⚪ R9 chemins historiques sans descripteur :<br/>EntityValidationConfig, sample JSON,<br/>LinksConfig::merge dernier gagnant"]:::upstream
+
+    MAC ==> ONE
+    YML ==> ONE
+    MAC --> CHK
+    YML --> CHK
+    YML -.->|"copie non comparee"| SIL
+    YML -.-> TODO
+    LEG -.-|"additif, actif sans descripteur"| ONE

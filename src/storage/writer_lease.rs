@@ -687,9 +687,18 @@ impl FileAuthority {
         }
     }
 
-    /// Le chemin du fichier de bail d'un shard.
+    /// Le chemin du fichier de bail d'un shard (la trame, lue et réécrite).
     pub fn lease_path(&self, shard: &ShardId) -> PathBuf {
         self.root.join(format!("{}.lease", shard.key()))
+    }
+
+    /// Le fichier **de verrou** d'un shard. Il porte l'exclusion et ne contient
+    /// rien : séparé de la trame pour que la lecture/écriture du bail ne soit
+    /// jamais bloquée par le verrou. Sous Windows le verrou est obligatoire (il
+    /// verrouille la plage du fichier pour tous les handles) : verrouiller la
+    /// trame elle-même faisait échouer toute autre lecture du bail (`os error 33`).
+    pub fn lock_path(&self, shard: &ShardId) -> PathBuf {
+        self.root.join(format!("{}.lock", shard.key()))
     }
 
     /// Acquiert le bail d'un shard.
@@ -716,13 +725,14 @@ impl FileAuthority {
             .map_err(|e| LeaseError::Unavailable(format!("répertoire de bail : {e}")))?;
 
         let path = self.lease_path(shard);
+        // L'exclusion vit sur le fichier de verrou, pas sur la trame.
         let file = OpenOptions::new()
             .read(true)
             .write(true)
             .create(true)
             .truncate(false)
-            .open(&path)
-            .map_err(|e| LeaseError::Unavailable(format!("ouverture du bail : {e}")))?;
+            .open(self.lock_path(shard))
+            .map_err(|e| LeaseError::Unavailable(format!("ouverture du verrou : {e}")))?;
 
         // L'EXCLUSION. Un échec ici n'est pas une erreur fatale : c'est le cas
         // normal d'un second écrivain. On ne distingue pas « tenu ailleurs »
@@ -1145,6 +1155,36 @@ mod tests {
         let current = auth.current(&shard).expect("lecture").expect("bail");
         assert_eq!(current.epoch, 1);
         assert_eq!(current.owner.instance, handle.lease().owner.instance);
+    }
+
+    /// Régression Windows : le verrou tenu par l'écrivain ne doit JAMAIS
+    /// empêcher la lecture de la trame (`os error 33` sous Windows, où le verrou
+    /// est obligatoire). Le verrou vit dans son fichier `.lock`, séparé du bail.
+    #[test]
+    fn the_frame_stays_readable_while_the_writer_holds_the_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let auth = FileAuthority::new(dir.path());
+        let shard = dir_shard(dir.path());
+        let handle = auth
+            .acquire(&shard, &OwnerId::this_process())
+            .expect("premier bail");
+
+        assert!(
+            auth.lock_path(&shard).exists(),
+            "le verrou a son propre fichier"
+        );
+        assert_ne!(
+            auth.lock_path(&shard),
+            auth.lease_path(&shard),
+            "verrou et trame sont deux fichiers distincts"
+        );
+
+        // Le verrou est tenu : la trame reste lisible par un second handle.
+        for _ in 0..3 {
+            let current = auth.current(&shard).expect("lecture").expect("bail");
+            assert_eq!(current.epoch, 1);
+        }
+        assert_eq!(handle.epoch(), 1);
     }
 
     /// **LE test qui manquait à obrain.** `obrain-substrate/src/file.rs:179-207`

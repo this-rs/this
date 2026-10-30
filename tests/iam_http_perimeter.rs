@@ -321,7 +321,7 @@ fn ctx_owner() -> AuthContext {
     AuthContext::Owner {
         user_id: Uuid::from_u128(1),
         tenant_id: Uuid::from_u128(9),
-        resource_id: Uuid::from_u128(42),
+        resource_id: Uuid::parse_str(ORDER_ID).expect("ORDER_ID"),
         resource_type: "order".to_string(),
     }
 }

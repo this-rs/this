@@ -223,6 +223,33 @@ impl EntityCreator for ProductStore {
 }
 ```
 
+### Describe it once (ModuleDescriptor)
+
+A module can also be declared as data. One `ModuleDescriptor` — entities, fields, validators, typed
+filters, links, policies, messages in French and English — drives REST, GraphQL and gRPC: the same invalid
+payload gets the same contract code (`this.validation.positive`) and the matching status on each protocol, a
+filter on a field the descriptor does not expose is a typed error, and the message follows the caller's
+`Accept-Language`.
+
+```rust
+let mut invoice = EntityDesc::new("invoice");
+invoice.fields = vec![
+    FieldDesc::new("amount", FieldType::F64)
+        .validator(ValidatorSpec::Positive, Applies::Always)
+        .filterable(&[FilterOp::Gt, FilterOp::Eq])
+        .sortable(),
+];
+invoice.permissions.ops.insert(Operation::Create, PolicyExpr::HasRole(vec!["admin".into()]));
+let mut module = ModuleDescriptor::new("billing", "1.0.0");
+module.entities.push(invoice);
+```
+
+Runnable, with tests: [`examples/descriptor_api`](examples/descriptor_api/main.rs)
+(`cargo test --example descriptor_api --features graphql,grpc`). Migrating an existing module (additive;
+a few non-additive changes are listed): [`docs/migration/module-descriptor.md`](docs/migration/module-descriptor.md).
+Design: [`docs/rfc/module-descriptor.md`](docs/rfc/module-descriptor.md). The default `EntityFetcher::list_query`
+is O(n) and bounded (10 000 rows, error `this.query.too_large`); override it to push queries to your backend.
+
 ### 3. Create Module
 
 ```rust
@@ -403,6 +430,150 @@ When you query links, you automatically get full entity data:
 ```
 
 **No N+1 queries!** Entities are fetched efficiently in the background.
+
+---
+
+## 📐 ModuleDescriptor — Declare It Once
+
+A module can be **described as data** instead of restated in code. A single `ModuleDescriptor` holds the
+entities and their fields, the field rules (validators, transforms, filterable/sortable, read-only), the
+links, the policy of every operation, the stable error codes and their French/English messages. REST,
+GraphQL, gRPC, WebSocket, the generated contracts and the CLI all derive from it — no second declaration,
+nothing to keep in sync.
+
+```rust
+let mut invoice = EntityDesc::new("invoice");
+invoice.fields = vec![
+    FieldDesc::new("amount", FieldType::F64)
+        .validator(ValidatorSpec::Positive, Applies::Always)
+        .filterable(&[FilterOp::Gt, FilterOp::Eq])
+        .sortable(),
+];
+invoice.permissions.ops.insert(Operation::Create, PolicyExpr::HasRole(vec!["admin".into()]));
+
+let mut billing = ModuleDescriptor::new("billing", "1.0.0");
+billing.entities.push(invoice);
+
+impl Module for BillingModule {
+    fn name(&self) -> &str { "billing" }
+    fn version(&self) -> &str { "1.0.0" }
+
+    // Declared once — the host derives validation, filters, policies and contracts from it.
+    fn descriptor(&self) -> Option<ModuleDescriptor> { Some(billing.clone()) }
+
+    // Registration of stores and fetchers is unchanged.
+}
+```
+
+### What the host derives (nothing to redeclare)
+
+| Surface | Derived from the descriptor |
+|---|---|
+| **REST** | create/update validation — including a **missing** required field — typed `?filter=` / `?sort=`, the policy of each operation, localized error bodies |
+| **GraphQL** | the same validators, `filter` / `sort` arguments on list fields, the same policies |
+| **gRPC** | the same validators, `this-filter` / `this-sort` metadata, identity read from call metadata, the same policies |
+| **WebSocket** | the same policies; the `graphql-ws` handshake is CSWSH-guarded when identity comes from the `this_token` cookie |
+| **Contracts** | `GET /_this/descriptors`, `/_this/descriptors/{module}`, `/_this/schema/{entity}/{create\|update}` (JSON Schema) and `/_this/openapi.json` — all read-only |
+| **CLI** | `this descriptor check`, `this descriptor lock`, `this descriptor export` (JSON, YAML, SDL, `.proto`, JSON Schema) |
+| **Frontend / other tools** | `this descriptor export` renders the same declaration as JSON, YAML, SDL, `.proto` or JSON Schema — one source for generated clients, mocks and docs |
+
+The parts that cannot live in the descriptor keep **one** owner: `impl_data_entity_validated!` for the struct field types,
+`descriptor/module.yaml` for identity (`name`, `version`) and `requires`, `descriptor/descriptor.lock` for the proto tags
+(>= 16, never moved, never reused). `this descriptor check` fails when a declaration drifts — `this.descriptor.declared_twice`,
+`this.descriptor.tag_reused`, `this.module.identity_mismatch`, `this.module.plural_mismatch` — instead of letting two copies diverge silently.
+
+### Stable error codes
+
+Every failure the described surface answers carries a machine-readable code with the same meaning on every
+protocol, plus one status per protocol — a client branches on the code, not on the wording.
+
+| Family | Codes | REST / gRPC / GraphQL |
+|---|---|---|
+| `this.validation.*` | `required`, `type_mismatch`, `positive`, `string_length`, `unknown_field`, `read_only`, `custom` | 422 · `INVALID_ARGUMENT` · `BAD_USER_INPUT` |
+| `this.query.*` | `malformed_filter`, `field_not_filterable`, `field_not_sortable`, `too_large` | 400 · `INVALID_ARGUMENT` · `BAD_USER_INPUT` |
+| `this.auth.*` | `unauthenticated`, `forbidden` | 401 / 403 · `UNAUTHENTICATED` / `PERMISSION_DENIED` · `UNAUTHENTICATED` / `FORBIDDEN` |
+| `this.module.*` | `not_found`, `duplicate_entity`, `duplicate_plural`, `identity_mismatch`, `plural_mismatch`, `dependency_missing`, `dependency_version`, `hot_load_disabled`, `has_dependents`, `unavailable` | 404 / 409 / 400 by code |
+| `this.descriptor.*` | `invalid`, `declared_twice`, `tag_reused`, `syntax_unsupported` | build / check time |
+| `this.transport.*` | `bad_request`, `not_found`, `method_not_allowed`, `missing_arg` | 400 / 404 / 405 |
+
+The same invalid payload therefore gets the **same code** on the three protocols (REST `422
+this.validation.positive`, gRPC `INVALID_ARGUMENT`, GraphQL `BAD_USER_INPUT`) — proven by the test
+`same_invalid_payload_same_code_on_rest_graphql_grpc`.
+
+Two behaviours worth knowing:
+
+- an unknown query field is a **typed error**, never silently ignored (`this.query.field_not_filterable`);
+- the default `EntityFetcher::list_query` is bounded to 10 000 rows and answers `this.query.too_large`
+  (400) beyond that — override it to push filtering and pagination down to your backend.
+
+### i18n — one message, the caller's language
+
+Messages are declared once, in French and English, next to the entity; a module can ship its own bundles.
+The locale is resolved **per request** with one priority order, on every protocol:
+
+1. explicit choice in the URL: `?lang=en` (or `?locale=en`);
+2. persisted choice: cookie `this_locale=en`;
+3. `x-this-locale` header (gRPC metadata for gRPC);
+4. `Accept-Language` (gRPC metadata `accept-language`);
+5. the catalog's default locale.
+
+An explicit choice the catalog does not have falls through to the next hint — it never produces an empty
+message. The error body carries `code`, `kind`, `message_key`, `fields` and the localized `message`
+(RFC 9457 keys included), so a client can branch on the code and display the text as-is.
+
+### Auth — one evaluator, every protocol
+
+Policies are declared per operation in the descriptor (`PolicyExpr::HasRole`, `AdminOnly`, `any(...)`,
+`all(...)`, `not(...)`) and evaluated by a **single** `PolicyIndex` on REST, GraphQL, gRPC and WebSocket.
+Resolution order is fixed: **descriptor (explicit) → `links.yaml` link table → `links.yaml` entity table →
+default**. An authenticated identity that matches no rule gets `this.auth.forbidden`; an anonymous caller
+`this.auth.unauthenticated`.
+
+`AuthContext` comes from each protocol's own channel — the `Authorization` header, a session cookie, a
+GraphQL/WebSocket handshake, gRPC metadata — so a policy is written once and enforced everywhere.
+
+### Hot loading from a VFS
+
+A declarative module can be loaded into a **live** host, replaced and unloaded, from a `ModuleStore`
+behind the VFS (`InMemoryVfs`, `LocalFsVfs`, `ObrainVfs` — read through `VfsModuleStore`):
+
+```rust
+let app = ServerBuilder::new()
+    .register_module(BillingModule::new(store))?
+    .with_module_runtime()       // runtime routes + admin interface
+    .with_hot_load_enabled(true) // load / replace / unload — closed by default
+    .build()?;
+```
+
+- `ModuleSource::Stored` reads the module from the VFS and checks it with `CheckProfile::Stored`;
+  `requires` (semver) are ordered topologically and **fail closed** — a missing dependency is
+  `this.module.dependency_missing`, a version mismatch `this.module.dependency_version`.
+- The admin interface is mounted with its own policy (`RuntimeOptions::admin_policy`, `admin_only` by
+  default) — loading code into a running host is never open by default, whatever `authorize` says:
+
+  | Method | Path | Effect |
+  |---|---|---|
+  | `GET` | `/admin/modules` | status of every module (active, draining, unloaded, failed, offered) |
+  | `GET` | `/admin/modules/{name}` | status of one module |
+  | `POST` | `/admin/modules` | `{"manifest": {…}}`, `{"store": {"name": "…", "version": "…"}}` or `{"module": "<offered>"}` |
+  | `DELETE` | `/admin/modules/{name}` | unload — refused with `this.module.has_dependents` while a dependent is active |
+
+- An unload **drains** in-flight requests for up to 30 s (`drain_grace`), then cancels them; afterwards the
+  module's plural answers 404 `this.module.not_found` — a tombstone, not a silent 400.
+- With `with_hot_load_enabled(true)` absent, every load/unload and the admin interface answer
+  `this.module.hot_load_disabled`.
+- Runtime modules are served over REST by the runtime dispatch layer; GraphQL, gRPC and WebSocket do not
+  serve hot-loaded modules yet, and say so rather than pretending.
+
+### Run it, read it
+
+- Runnable, with tests: [`examples/descriptor_api`](examples/descriptor_api/main.rs) —
+  `cargo test --example descriptor_api --features graphql,grpc`.
+- Design: [docs/rfc/module-descriptor.md](docs/rfc/module-descriptor.md) ·
+  Migration of an existing module (additive, non-additive changes listed):
+  [docs/migration/module-descriptor.md](docs/migration/module-descriptor.md).
+- CLI side: `this descriptor init` · `check` · `lock` · `export`, and `this add module` — see the
+  [this-cli README](https://github.com/this-rs/this-cli).
 
 ---
 
