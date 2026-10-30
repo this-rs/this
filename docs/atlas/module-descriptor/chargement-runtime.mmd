@@ -1,87 +1,62 @@
-%% name: module-descriptor-runtime-load
-%% QUESTION : que se passe-t-il, dans l'ordre, quand un admin charge, decharge ou remplace un module ?
-%% PROUVE (integration, MESURE par la revue) : hot_loaded_module_from_vfs_served_then_404_after_unload,
-%%   hot_loaded_compiled_module_is_validated_on_rest_and_through_its_creator (e2e 6/6 ok).
-%% PROUVE (flux modules-runtime, tests/module_runtime.rs, cargo test -p this-rs --test module_runtime : 19 ok) :
-%%   load_then_routes_served_unload_then_404, unload_refused_with_active_dependents,
-%%   replace_checks_dependents_version_req, draining_times_out_and_cancels_streams,
-%%   dynamic_module_paths_not_shadowed_by_link_wildcards, json_entity_publishes_event_and_links,
-%%   admin_interface_requires_admin_then_lists_loads_unloads, plugin_source_is_an_extension_point,
-%%   relecture : replace_cancels_old_version_streams_after_grace, fetcher_outside_the_descriptor_is_refused_not_last_wins,
-%%   compiled_module_must_match_its_descriptor_at_runtime, admin_interface_enforced_even_with_authorization_disarmed,
-%%   runtime_module_policies_enforced_on_crud_and_link_routes, loading_an_active_module_again_is_refused_and_unload_twice_too.
-%% DEDUIT (non teste) : la repartition entre dans la Gate PUIS relit la table (Arc::ptr_eq) ; une vidange ne peut plus
-%%   manquer une requete entree entre lecture de table et Gate::enter.
-%% SOURCES LUES : src/server/module_runtime/{runtime,dispatch,admin,loader,json_entity}.rs,
-%%   src/server/exposure/rest/mod.rs (ModuleRuntime::mount), src/server/catalog.rs, crates/this-descriptor/src/resolve.rs.
-%% PROUVE (flux vfs) : cote ModuleStore = module_store_get_highest_version, module_store_yank_rolls_back_and_unyank_restores,
-%%   module_store_get_rechecks_with_current_registry, read_source_loads_stored_module. Detail : stockage-vfs.mmd.
-%% NON ETABLI : un module charge a chaud n'est servi qu'en REST (GraphQL, gRPC, WS lisent les champs figes de l'hote et refusent).
-%%   Pas de chargement WASM reel (wasmtime absent) : point d'extension ModuleSource::Plugin (tache 169fcdf1).
-%%   Option hot_load desactivee par defaut (decision 0e59f39b) : absente, with_module_runtime active le chargement.
 sequenceDiagram
+%% name: module-descriptor-runtime-load
+%% PROUVE : rien encore pour la sequence (flux modules-runtime et vfs). Contrats prouves par la fondation :
+%%   resolve (tests resolve_*), check_compat (tag_reuse_move_and_unreserved_removal_detected), LiveCatalog
+%%   (readers_keep_their_snapshot_across_publication), VfsPath (vfs_path_rejects_dotdot_and_friends).
+%% SOURCES LUES : src/server/catalog.rs, src/storage/vfs/mod.rs, crates/this-descriptor/src/{resolve,compat,check}.rs.
+%% NON ETABLI : couche de repartition sous charge ; annulation des flux en fin de grace.
     autonumber
     actor Admin
-    participant AU as Authentification
-    participant ADM as Interface admin
+    participant AZ as Autorisation
     participant RT as ModuleRuntime
-    participant LD as DefaultModuleLoader
+    participant MS as ModuleStore
     participant RES as resolve
+    participant LD as ModuleLoader
     participant CAT as LiveCatalog
     participant DSP as Couche de repartition
-    participant BUS as EventBus
 
-    Admin->>AU: POST /admin/modules manifest
-    AU->>ADM: AuthContext
-    ADM->>ADM: politique admin_only, evaluate du descripteur
-    alt anonyme ou non admin
-        ADM-->>Admin: 401 this.auth.unauthenticated ou 403 this.auth.forbidden
+    Admin->>AZ: load billing
+    AZ->>AZ: politique this.module.load
+    alt refus
+        AZ-->>Admin: 403 this.auth.forbidden
     end
-    ADM->>RT: load Manifest
+    AZ->>RT: load Stored billing
     rect rgba(164,139,255,.15)
-    Note over RT,LD: Phase 1 - lecture et verification, verrou ops tenu
+    Note over RT,MS: Phase 1 - lecture et verification
+    RT->>MS: get billing None
+    MS->>MS: plus haute version, descriptor.json sans textes
+    MS->>MS: check profil Stored
+    MS-->>RT: ModuleDescriptor
+    end
+    rect rgba(164,139,255,.15)
+    Note over RT,RES: Phase 2 - resolution fail-closed
+    RT->>RES: candidats vs modules actifs
+    alt dependance, version, cycle, doublon, reference
+        RES-->>RT: Vec ContractError this.module.*
+        RT-->>Admin: Failed, rien n'est publie
+    else ok
+        RES-->>RT: ordre topologique
+    end
+    end
+    rect rgba(164,139,255,.15)
+    Note over RT,DSP: Phase 3 - un seul store atomique
     RT->>LD: load source
     LD->>LD: check profil Stored, politiques explicites
     LD-->>RT: ModuleInterface, JsonEntityService par entite
     RT->>RT: bundles i18n verifies avant toute publication
+    RT->>RT: envelopper les createurs ValidatingCreator
+    RT->>CAT: publish HostCatalog generation+1
+    Note over CAT,DSP: REST, GraphQL, gRPC, liens, autorisation lisent le meme instantane
+    Note over DSP: 🟠 proposee : couche tower de repartition, placee sous l'autorisation et avant le Router, lit le premier segment et consulte entity_of_plural (existant)
+    RT->>DSP: route pluriel vers le routeur du module (proposee)
+    RT-->>Admin: Active
     end
-    rect rgba(164,139,255,.15)
-    Note over RT,RES: Phase 2 - resolution fail-closed contre les modules actifs
-    RT->>RES: candidat vs actifs
-    alt dependance, version, cycle, doublon, reference
-        RES-->>RT: this.module.*
-        RT->>BUS: Module Failed
-        RT-->>Admin: erreur, etat Failed, rien n'est publie
-    else ok
-        RES-->>RT: ordre
-    end
-    end
-    rect rgba(164,139,255,.15)
-    Note over RT,DSP: Phase 3 - composition base + modules actifs, merge_strict
-    RT->>CAT: publish HostCatalog generation+1, createurs ValidatingCreator
-    RT->>DSP: store DispatchTable, routes sous couche de validation
-    Note over RT,CAT: bundles ajoutes a ServerHost::locales, retires a l unload, remplaces au replace
-    RT->>BUS: Module Loaded
-    RT-->>Admin: 201 active
-    Note over DSP,BUS: ⚠ servi en REST seulement, GraphQL et gRPC refusent ce module (fail-closed)
-    end
-    Admin->>RT: DELETE /admin/modules/billing
-    alt dependants actifs ou module compile dans l'hote
-        RT-->>Admin: 412 this.module.has_dependents, reste Active
+    Admin->>RT: unload billing
+    alt dependants actifs
+        RT-->>Admin: this.module.has_dependents, reste Active
     else aucun
-        RT->>DSP: Draining, nouvelles requetes 503 this.module.unavailable
-        Note over RT,DSP: attente des requetes en vol, grace 30 s, puis ModuleCancellation
         RT->>CAT: publish sans billing
-        RT->>DSP: tombstone, 404 this.module.not_found
-        RT->>BUS: Module Unloaded
-        RT-->>Admin: 200 unloaded
-    end
-    RT->>RT: replace billing 1.1.0, API Rust, pas de route admin
-    alt VersionReq d un dependant refuse
-        RT->>BUS: Module Failed this.module.dependency_version
-    else accepte
-        RT->>CAT: publish 1.1.0 en un seul swap
-        RT->>DSP: store DispatchTable, nouvelle Gate
-        Note over RT,DSP: ancienne version : requetes en vol finissent, grace puis ModuleCancellation de l ancienne Gate
-        RT->>BUS: Module Replaced
+        DSP-->>Admin: nouvelles requetes 503 this.module.unavailable
+        Note over RT: Draining, grace 30 s puis annulation des flux
+        RT-->>Admin: Unloaded
     end
