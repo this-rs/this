@@ -69,6 +69,11 @@ impl RestExposure {
             app = app.merge(custom_router);
         }
 
+        // Module descriptors and derived documents (`/_this/*`), read from the live catalog.
+        app = app.merge(crate::server::exposure::descriptor::descriptor_routes(
+            host.clone(),
+        ));
+
         app = app.merge(link_routes);
 
         // SSE event stream — only if EventBus is configured
@@ -200,6 +205,14 @@ impl RestExposure {
         // (`tests/chain_order.rs` le prouve sur l'exposition réelle.)
         // ═══════════════════════════════════════════════════════════════════
 
+        // Validation structurelle (RFC module-descriptor §3.5) : la plus INTERNE des
+        // couches, donc exécutée APRÈS les politiques (un appelant refusé n'apprend
+        // rien du schéma). Sans descripteur publié : traversée à l'identique.
+        app = app.layer(middleware::from_fn_with_state(
+            host.validation_layer_state(),
+            crate::core::validation::validation_middleware,
+        ));
+
         // Application des politiques : **ARMÉE PAR DÉFAUT** (`ServerHost::authorize`
         // vaut `true` — `server/host.rs`), désarmable explicitement
         // (`ServerBuilder::without_authorization`, journalisé comme un
@@ -217,7 +230,10 @@ impl RestExposure {
                 host.config.clone(),
                 &host.entity_registry,
                 host.resolver_registry.clone(),
-            );
+            )
+            // Descriptor policies decide before the YAML table, as on every
+            // other surface (`core::auth::surface::PolicyIndex`).
+            .with_catalog(host.catalog.clone());
             // Avec un store obrain, les politiques `perm:<permission>` sont
             // tranchées par la **décision IAM matérialisée** (une lecture
             // indexée), au lieu d'être recalculées par traversée.
@@ -262,6 +278,17 @@ impl RestExposure {
             );
         }
 
+        // Runtime modules (modules-runtime stream): dispatch of hot-loaded routes, then the
+        // admin interface. OUTSIDE the policy layer above (its entity table is frozen at
+        // build time: it would refuse every hot-loaded path by abstention); they judge
+        // their requests themselves with the descriptors' policies. INSIDE
+        // authentication, domain guard and CORS below, which still apply.
+        // Mounted BEFORE routing (see `ModuleRuntime::mount`).
+        if let Some(runtime) = &host.module_runtime {
+            app = runtime.mount(app);
+            tracing::info!("module runtime mounted (dispatch layer + admin interface)");
+        }
+
         // Auto-wire auth middleware if auth provider is configured
         // This layer must be added last so it wraps all routes
         if let Some(ref auth_provider) = host.auth_provider {
@@ -282,6 +309,18 @@ impl RestExposure {
             app = app.layer(middleware::from_fn_with_state(auth_layer, auth_middleware));
             tracing::info!("REST auth + tenant resolver middleware auto-wired");
         }
+
+        // Error localization (errors-i18n stream): every response carrying a `ContractError`
+        // (validation, policies, runtime dispatch, handlers using `ApiError`) is rendered in
+        // the request locale (`?lang=`, `x-this-locale`, cookie, `Accept-Language`) from the
+        // host catalog, which runtime modules extend with their bundles. OUTSIDE authentication,
+        // tenant and policies too (their 401 / 403 are localized; added after them), inside the
+        // domain guard and CORS. Also gives the envelope to responses that carry no contract
+        // (axum rejections, router 404 / 405).
+        app = app.layer(middleware::from_fn_with_state(
+            host.locales.clone(),
+            crate::core::errors::localize_errors,
+        ));
 
         // Domaine servi : refusé AVANT l'authentification — un hôte qui n'est pas
         // servi n'a pas à coûter une vérification de jeton — et le locataire du
@@ -426,6 +465,101 @@ mod tests {
         let custom = Router::new().route("/custom", get(|| async { "custom" }));
         let router = RestExposure::build_router(host, vec![custom]);
         assert!(router.is_ok());
+    }
+
+    /// `/_this/*` (static prefix) and the link wildcards `/{a}/{b}/{c}[/{d}]` live in the
+    /// same merged router: the export routes answer, and a link-shaped path that is NOT an
+    /// export route still reaches the link handlers exactly as without the export routes.
+    #[tokio::test]
+    async fn descriptor_routes_do_not_shadow_link_routes() {
+        async fn call(router: Router, method: &str, uri: &str) -> (StatusCode, String) {
+            let resp = router
+                .oneshot(
+                    Request::builder()
+                        .method(method)
+                        .uri(uri)
+                        .body(Body::empty())
+                        .expect("request"),
+                )
+                .await
+                .expect("response");
+            let status = resp.status();
+            let body = axum::body::to_bytes(resp.into_body(), 1 << 20)
+                .await
+                .expect("body");
+            (status, String::from_utf8_lossy(&body).into_owned())
+        }
+        // Armed by default: the export is JUDGED (Descriptor · read, `authenticated`), not
+        // left to an abstention that refused every caller.
+        let armed = RestExposure::build_router(test_host(), vec![]).expect("build");
+        let (s, body) = call(armed, "GET", "/_this/descriptors").await;
+        assert_eq!(s, StatusCode::FORBIDDEN, "{body}");
+        assert!(
+            body.contains("Descriptor"),
+            "policy decision, not abstention: {body}"
+        );
+        assert!(!body.contains("\"generation\""), "nothing leaked: {body}");
+
+        // Routing proper, authorization disarmed (it is proven separately).
+        let mut disarmed = ServerHost::from_builder_components(
+            Arc::new(InMemoryLinkService::new()),
+            LinksConfig::default_config(),
+            EntityRegistry::new(),
+            HashMap::new(),
+            HashMap::new(),
+        )
+        .expect("host");
+        disarmed.authorize = false;
+        let full = RestExposure::build_router(Arc::new(disarmed), vec![]).expect("build");
+        let (s, body) = call(full.clone(), "GET", "/_this/descriptors").await;
+        assert_eq!(s, StatusCode::OK, "{body}");
+        assert!(body.contains("\"generation\""), "{body}");
+        let (s, _) = call(full.clone(), "GET", "/_this/openapi.json").await;
+        assert_eq!(s, StatusCode::OK);
+
+        let host = test_host();
+        let link_only = build_link_routes(AppState {
+            link_service: host.link_service.clone(),
+            config: host.config.clone(),
+            registry: host.registry.clone(),
+            entity_fetchers: host.entity_fetchers.clone(),
+            entity_creators: host.entity_creators.clone(),
+            event_bus: host.event_bus.clone(),
+        });
+        let id = "00000000-0000-0000-0000-000000000001";
+        let target = "00000000-0000-0000-0000-000000000002";
+        for (method, uri) in [
+            ("GET", format!("/orders/{id}/invoices")),
+            ("GET", format!("/orders/{id}/links")),
+            ("GET", format!("/orders/{id}/invoices/{target}")),
+            ("POST", format!("/orders/{id}/invoices/{target}")),
+            // Same depth as `/_this/schema/{entity}/{op}`, other first segment.
+            ("GET", "/_thisx/schema/knife/create".to_string()),
+        ] {
+            let a = call(full.clone(), method, &uri).await;
+            let b = call(link_only.clone(), method, &uri).await;
+            // Same answer as the bare link routes; the full router only ADDS the contract keys
+            // (envelope), the legacy `error` key stays.
+            assert_eq!(
+                a.0, b.0,
+                "{method} {uri}: answered by the link routes as before"
+            );
+            let legacy = |s: &str| {
+                serde_json::from_str::<serde_json::Value>(s)
+                    .ok()
+                    .map(|v| v["error"].clone())
+            };
+            // (A plain-text axum rejection on the bare link routes is enveloped by the full
+            // router: no legacy key to compare there.)
+            if let Some(legacy_b) = legacy(&b.1) {
+                assert_eq!(
+                    legacy(&a.1),
+                    Some(legacy_b),
+                    "{method} {uri}: legacy `error` key"
+                );
+            }
+            assert!(!a.1.contains("\"generation\""), "{method} {uri}: {}", a.1);
+        }
     }
 
     #[tokio::test]

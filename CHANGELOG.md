@@ -5,7 +5,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.0.10] - 2026-10-30
+
+### Added — module-descriptor
+- **`ModuleDescriptor`** (crate `this-descriptor`, `default = []`, compatible wasm32) : un module est décrit une fois (entités, champs, validateurs, transformations, filtres typés, liens, politiques, erreurs, messages fr/en) et le descripteur pilote REST, GraphQL, gRPC et WebSocket. Même payload invalide = même code (`this.validation.positive`) sur les trois protocoles ; 422 / `INVALID_ARGUMENT` / `BAD_USER_INPUT`.
+- **Filtres et tris typés** (`?filter=`, `?sort=`, arguments GraphQL, métadonnées gRPC `this-filter` / `this-sort`) vérifiés contre le descripteur ; un filtre mal formé ou interdit est une erreur typée, jamais ignorée.
+- **Politiques** évaluées par un évaluateur unique sur REST, GraphQL, gRPC et WebSocket ; jeton inconnu = erreur.
+- **Identité WebSocket / graphql-ws protégée contre le détournement cross-site (CSWSH)** : quand l'identité vient du cookie de session `this_token`, le handshake exige une `Origin` listée dans `security.websocket_origins` — liste vide, `Origin` absente ou hors liste = refus `this.auth.forbidden` (403). Un jeton explicite (`Authorization`, sous-protocole, `access_token`) n'est pas concerné ; `*` désarme le contrôle explicitement.
+- **Modules au runtime** (`with_module_runtime`) : chargement depuis un `ModuleStore` (VFS) — REST seulement ; GraphQL / gRPC / WS refusent.
+- **`examples/descriptor_api`** : un module décrit complet servi et interrogé en REST, GraphQL et gRPC (`cargo test --example descriptor_api --features graphql,grpc`).
+- **Guide de migration** : [`docs/migration/module-descriptor.md`](docs/migration/module-descriptor.md).
+- `EntityFetcher::list_query_max_rows()` et l'erreur `this.query.too_large`.
+
+### Changed — module-descriptor (non additif)
+- `impl_data_entity_validated!` : une opération inconnue (`creat:`) est une `compile_error!` ; elle était ignorée en silence.
+- `ExtractorError` est `#[non_exhaustive]` et porte `Contract(Box<ContractError>)` : un `match` exhaustif externe doit ajouter un bras `_`.
+- `Module::descriptor()`, `AuthProvider::extract_context_from_metadata` / `extract_context_from_handshake`, `EntityFetcher::list_query` : nouvelles méthodes avec valeur par défaut (additif).
+- `EntityFetcher::list_query` par défaut est **borné** : au plus `list_query_max_rows()` lignes (10 000, `THIS_LIST_QUERY_MAX_ROWS`), au-delà `this.query.too_large` (400). Un backend qui sait pousser la requête surcharge `list_query`.
+- Corps d'erreur HTTP : `code`, `kind`, `message_key`, `fields`, `message` et clés RFC 9457 ajoutés (`error` / `errors` conservés).
+
+### Tests — module-descriptor
+- Les binaires adossés à un conteneur (`postgres_tests`, `mysql_tests`, `neo4j_tests`) sont sérialisés par un verrou de processus (`tests/storage_harness`) et, sous nextest, par le groupe `container-db` de `.config/nextest.toml` ; ils ne dépendent plus de `-- --test-threads=1` (neo4j échouait 18 tests sur 41 au nombre de threads par défaut).
+- `chain_aletheia` (3 tests rouges sur la base) : cause racine documentée dans la note PO « chain_aletheia : cause racine » (l'abstention d'autorisation est un refus depuis b5f9bcb, y compris pour les sites frontend).
 
 > ### ✅ LES DEUX LIGNES SONT RÉUNIFIÉES ICI — `this-rs-passerelle` n'est plus la ligne
 >

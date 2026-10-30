@@ -13,10 +13,14 @@
 //! - OpenAPI (planned)
 
 pub mod builder;
+/// Live host catalog: one immutable snapshot published atomically (module descriptor RFC).
+pub mod catalog;
 pub mod entity_registry;
 pub mod exposure;
 pub mod host;
 pub mod middleware;
+/// Runtime module loading: `ModuleLoader`, `ModuleInterface`, `ModuleSource` (interfaces).
+pub mod module_runtime;
 pub mod router;
 
 #[cfg(feature = "frontend")]

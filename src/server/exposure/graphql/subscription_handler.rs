@@ -31,6 +31,7 @@
 use crate::core::auth::AuthContext;
 use crate::core::events::{EntityEvent, EventBus, EventEnvelope, FrameworkEvent, LinkEvent};
 use crate::events::sinks::in_app::{NotificationStore, StoredNotification};
+use crate::server::exposure::guard::SurfaceGuard;
 use crate::server::host::ServerHost;
 use axum::extract::ws::{Message, WebSocket};
 use axum::extract::{Extension, WebSocketUpgrade};
@@ -51,13 +52,36 @@ use uuid::Uuid;
 ///
 /// If auth middleware is active, extracts `AuthContext` for tenant-scoped
 /// event filtering. Without auth, all events are streamed (anonymous mode).
+///
+/// Armed router (`GraphQLExposure::build_router`): the caller is resolved at the
+/// HANDSHAKE (`Authorization` header, `this_token` cookie or `access_token` query,
+/// `AuthProvider::extract_context_from_handshake`), refused with 401 when the
+/// token is bad and the default policy is not public, and every event is filtered
+/// by the `get` / `get_link` policy of its entity / link (`SurfaceGuard`).
 pub async fn graphql_ws_handler(
     ws: WebSocketUpgrade,
     Extension(host): Extension<Arc<ServerHost>>,
+    enforcement: Option<Extension<super::Enforcement>>,
     auth: Option<Extension<AuthContext>>,
-) -> impl IntoResponse {
-    let tenant_id = auth.as_ref().and_then(|Extension(ctx)| ctx.tenant_id());
-    ws.on_upgrade(move |socket| handle_graphql_ws(socket, host, tenant_id))
+    headers: axum::http::HeaderMap,
+    axum::extract::RawQuery(query): axum::extract::RawQuery,
+) -> axum::response::Response {
+    let guard = match super::request_guard(
+        &host,
+        enforcement.map(|Extension(e)| e),
+        auth.map(|Extension(c)| c),
+        &headers,
+        query.as_deref(),
+    )
+    .await
+    {
+        Ok(g) => g,
+        Err(resp) => return *resp,
+    };
+    let tenant_id = guard.context().tenant_id();
+    ws.protocols(["graphql-transport-ws", "access_token", "bearer"])
+        .on_upgrade(move |socket| handle_graphql_ws(socket, host, tenant_id, guard))
+        .into_response()
 }
 
 /// Client-to-server protocol messages
@@ -114,7 +138,12 @@ struct SubscriptionFilter {
 /// 1. The write loop forwards all `ServerMsg` to the WebSocket
 /// 2. The read loop processes client messages and spawns subscription tasks
 /// 3. Each subscription task sends `ServerMsg` through the shared channel
-async fn handle_graphql_ws(socket: WebSocket, host: Arc<ServerHost>, tenant_id: Option<Uuid>) {
+async fn handle_graphql_ws(
+    socket: WebSocket,
+    host: Arc<ServerHost>,
+    tenant_id: Option<Uuid>,
+    guard: SurfaceGuard,
+) {
     let (mut ws_write, mut ws_read) = socket.split();
 
     // Shared channel for all outgoing messages (from any subscription)
@@ -182,13 +211,31 @@ async fn handle_graphql_ws(socket: WebSocket, host: Arc<ServerHost>, tenant_id: 
                         let sub_tx = out_tx.clone();
                         let sub_id = id.clone();
                         let sub_tenant_id = tenant_id;
+                        let sub_guard = guard.clone();
                         let handle = tokio::spawn(async move {
-                            run_subscription(event_bus, sub_id, filter, sub_tx, sub_tenant_id)
-                                .await;
+                            run_subscription(
+                                event_bus,
+                                sub_id,
+                                filter,
+                                sub_tx,
+                                sub_tenant_id,
+                                sub_guard,
+                            )
+                            .await;
                         });
                         active_subscriptions.insert(id, handle);
                     }
                     SubscriptionType::OnNotification(user_id) => {
+                        // The user comes from the query: not covered by the policies,
+                        // refused when they are enforced (fail-closed).
+                        if let Err(e) = guard.deny_uncovered("onNotification") {
+                            let _ = out_tx.send(ServerMsg::Error {
+                                id: id.clone(),
+                                payload: json!([{"message": e.message, "extensions": e.graphql_extensions()}]),
+                            });
+                            let _ = out_tx.send(ServerMsg::Complete { id });
+                            continue;
+                        }
                         let store = match host.notification_store() {
                             Some(s) => s.clone(),
                             None => {
@@ -243,6 +290,7 @@ async fn run_subscription(
     filter: SubscriptionFilter,
     tx: tokio::sync::mpsc::UnboundedSender<ServerMsg>,
     tenant_id: Option<Uuid>,
+    guard: SurfaceGuard,
 ) {
     let rx = event_bus.subscribe();
     let mut stream = BroadcastStream::new(rx);
@@ -255,6 +303,12 @@ async fn run_subscription(
                     && let Some(event_tenant) = envelope.tenant_id()
                     && conn_tenant != event_tenant
                 {
+                    continue;
+                }
+
+                // Entity-level policies (armed router): no event of an entity the
+                // caller may not read.
+                if !guard.allows_event(&envelope.event) {
                     continue;
                 }
 
@@ -314,6 +368,7 @@ fn matches_filter(envelope: &EventEnvelope, filter: &SubscriptionFilter) -> bool
             },
             FrameworkEvent::Cognitive(_) => false,
             FrameworkEvent::GdprErasure { .. } => false,
+            FrameworkEvent::Module(_) => false,
         };
         if !matches {
             return false;
@@ -415,6 +470,13 @@ fn envelope_to_graphql_value(envelope: &EventEnvelope) -> Value {
             "kind": "cognitive",
             "action": envelope.event.action(),
             "nodeId": envelope.event.entity_id().map(|id| id.to_string()),
+        }),
+        FrameworkEvent::Module(m) => json!({
+            "id": envelope.id.to_string(),
+            "timestamp": envelope.timestamp.to_rfc3339(),
+            "kind": "module",
+            "action": envelope.event.action(),
+            "module": m,
         }),
         FrameworkEvent::GdprErasure {
             tenant_id,
@@ -1028,6 +1090,7 @@ mod tests {
                 },
                 tx,
                 None, // anonymous — no tenant filtering
+                SurfaceGuard::unenforced(AuthContext::Anonymous),
             )
             .await;
         });
@@ -1087,6 +1150,7 @@ mod tests {
                 SubscriptionFilter::default(),
                 tx,
                 None, // anonymous — no tenant filtering
+                SurfaceGuard::unenforced(AuthContext::Anonymous),
             )
             .await;
         });

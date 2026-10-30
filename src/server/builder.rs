@@ -78,6 +78,18 @@ pub struct ServerBuilder {
 
     // Custom auth resolvers registry
     resolver_registry: AuthResolverRegistry,
+
+    // Runtime module loading (`with_module_runtime`); `None` = host frozen at build.
+    module_runtime: Option<RuntimeSetup>,
+}
+
+/// What `with_module_runtime*` collected, consumed by `build_host`.
+#[derive(Default)]
+struct RuntimeSetup {
+    options: crate::server::module_runtime::RuntimeOptions,
+    loader: Option<Arc<dyn crate::server::module_runtime::ModuleLoader>>,
+    store: Option<Arc<dyn crate::storage::vfs::ModuleStore>>,
+    offers: Vec<(String, crate::server::module_runtime::ModuleSource)>,
 }
 
 impl ServerBuilder {
@@ -107,7 +119,76 @@ impl ServerBuilder {
             fence_writes: true,
             auth_config: None,
             resolver_registry: AuthResolverRegistry::new(),
+            module_runtime: None,
         }
+    }
+
+    /// Enable runtime module loading on the host: `ServerHost::module_runtime`, the
+    /// dispatch layer of hot-loaded routes and the admin interface
+    /// (`RuntimeOptions::admin_prefix`, default `/admin/modules`, policy `admin_only`).
+    /// Without this call the host is frozen at build time, exactly as before. Hot loading
+    /// itself stays CLOSED (`this.module.hot_load_disabled`) until
+    /// [`Self::with_hot_load_enabled`]`(true)` (decision: closed by default).
+    pub fn with_module_runtime(mut self) -> Self {
+        self.module_runtime
+            .get_or_insert_with(RuntimeSetup::default);
+        self
+    }
+
+    /// Same as [`Self::with_module_runtime`], with explicit options (drain grace, admin
+    /// policy and prefix).
+    pub fn with_module_runtime_options(
+        mut self,
+        options: crate::server::module_runtime::RuntimeOptions,
+    ) -> Self {
+        self.module_runtime
+            .get_or_insert_with(RuntimeSetup::default)
+            .options = options;
+        self
+    }
+
+    /// `hot_load.enabled`: open (or close) runtime load / replace / unload and the admin
+    /// interface. Closed by default, and `with_module_runtime*` never opens it implicitly:
+    /// the host must say so explicitly. Enables the runtime (read-only admin routes stay).
+    pub fn with_hot_load_enabled(mut self, enabled: bool) -> Self {
+        self.module_runtime
+            .get_or_insert_with(RuntimeSetup::default)
+            .options
+            .hot_load_enabled = enabled;
+        self
+    }
+
+    /// Replace the default loader (`DefaultModuleLoader`), e.g. by one with plugin
+    /// loaders (WASM/WAMI extension point) or a `CustomRegistry`. Enables the runtime.
+    pub fn with_module_loader(
+        mut self,
+        loader: Arc<dyn crate::server::module_runtime::ModuleLoader>,
+    ) -> Self {
+        self.module_runtime
+            .get_or_insert_with(RuntimeSetup::default)
+            .loader = Some(loader);
+        self
+    }
+
+    /// Store that admin `{"store": {...}}` load requests read from. Enables the runtime.
+    pub fn with_module_store(mut self, store: Arc<dyn crate::storage::vfs::ModuleStore>) -> Self {
+        self.module_runtime
+            .get_or_insert_with(RuntimeSetup::default)
+            .store = Some(store);
+        self
+    }
+
+    /// Offer a compiled module for loading at runtime (NOT loaded at build): listed as
+    /// `discovered`, loaded by `POST {admin_prefix}` with `{"module": "<name>"}` or by
+    /// `ModuleRuntime::load_offered`. Enables the runtime.
+    pub fn offer_module(mut self, module: impl Module + 'static) -> Self {
+        let name = crate::descriptor::naming::to_snake_identifier(module.name());
+        let source = crate::server::module_runtime::ModuleSource::Compiled(Arc::new(module));
+        self.module_runtime
+            .get_or_insert_with(RuntimeSetup::default)
+            .offers
+            .push((name, source));
+        self
     }
 
     /// Set the link service (required)
@@ -561,13 +642,276 @@ impl ServerBuilder {
         let config = module.links_config()?;
         self.configs.push(config);
 
-        // Register entities from the module
-        module.register_entities(&mut self.entity_registry);
-
-        // Store module for fetchers
+        // Entities are registered in `build_host`, AFTER dependency resolution, in
+        // topological order: the result no longer depends on registration order, and a
+        // module rejected by resolution never pollutes the `EntityRegistry`.
         self.modules.push(module);
 
         Ok(self)
+    }
+
+    /// Descriptors of the registered modules, checked, resolved, and the module order in
+    /// which entities must be registered (legacy modules keep their position; modules with
+    /// a descriptor are placed in topological order in their slots).
+    fn resolve_descriptors(&self) -> Result<(crate::descriptor::DescriptorSet, Vec<usize>)> {
+        use crate::descriptor::framework::codes;
+        use crate::descriptor::{
+            CheckProfile, ContractError, CustomRegistry, DescriptorSet, naming,
+        };
+
+        let mut described: Vec<(usize, crate::descriptor::ModuleDescriptor)> = Vec::new();
+        for (i, module) in self.modules.iter().enumerate() {
+            let Some(mut d) = module.descriptor() else {
+                continue;
+            };
+            d.normalize();
+            d.check(&CustomRegistry::default(), CheckProfile::Compiled)
+                .map_err(|issues| {
+                    anyhow::Error::new(crate::descriptor::check::issues_to_error(&issues))
+                })?;
+            // Identity declared once: the trait methods must agree with the descriptor.
+            let mut mismatches = Vec::new();
+            if naming::to_snake_identifier(module.name()) != d.name {
+                mismatches.push(format!("name `{}` vs `{}`", module.name(), d.name));
+            }
+            if module.version() != d.version {
+                mismatches.push(format!("version `{}` vs `{}`", module.version(), d.version));
+            }
+            let types: std::collections::BTreeSet<&str> =
+                module.entity_types().into_iter().collect();
+            for e in &d.entities {
+                if !types.contains(e.name.as_str()) {
+                    mismatches.push(format!("entity `{}` missing from entity_types()", e.name));
+                }
+            }
+            if !mismatches.is_empty() {
+                return Err(anyhow::Error::new(
+                    ContractError::framework(codes::MODULE_IDENTITY_MISMATCH)
+                        .with_param("module", &d.name)
+                        .with_param("what", mismatches.join("; ")),
+                ));
+            }
+            described.push((i, d));
+        }
+
+        let mut order: Vec<usize> = (0..self.modules.len()).collect();
+        let mut set = DescriptorSet::new();
+        if described.is_empty() {
+            return Ok((set, order));
+        }
+        let refs: Vec<&crate::descriptor::ModuleDescriptor> =
+            described.iter().map(|(_, d)| d).collect();
+        let resolution = crate::descriptor::resolve::resolve(&refs, &[]).map_err(|errs| {
+            let text = errs
+                .iter()
+                .map(|e| e.to_string())
+                .collect::<Vec<_>>()
+                .join("; ");
+            anyhow::Error::new(errs.into_iter().next().expect("non-empty")).context(text)
+        })?;
+        let slots: Vec<usize> = described.iter().map(|(i, _)| *i).collect();
+        for (slot, name) in slots.iter().zip(resolution.order.iter()) {
+            let (idx, _) = described
+                .iter()
+                .find(|(_, d)| &d.name == name)
+                .expect("resolved name");
+            order[*slot] = *idx;
+        }
+        for name in &resolution.order {
+            let (_, d) = described
+                .iter()
+                .find(|(_, d)| &d.name == name)
+                .expect("resolved name");
+            set.insert(d.clone()).map_err(anyhow::Error::new)?;
+        }
+        Ok((set, order))
+    }
+
+    /// Checks on the `links.yaml` of DESCRIBED modules (legacy modules keep the
+    /// permissive behaviour):
+    /// - every link end is an entity of the module itself or of a module it requires
+    ///   (transitively): `this.module.reference_unknown` otherwise (the same rule
+    ///   `resolve` applies to the descriptor's own links);
+    /// - their configurations merge without conflict (`LinksConfig::merge_strict`):
+    ///   `this.module.config_conflict` instead of last-wins.
+    fn check_described_configs(
+        &self,
+        set: &crate::descriptor::DescriptorSet,
+        described_idx: &std::collections::BTreeSet<usize>,
+    ) -> Result<()> {
+        use crate::descriptor::ContractError;
+        use crate::descriptor::framework::codes;
+        for &i in described_idx {
+            let module = &self.modules[i];
+            let name = crate::descriptor::naming::to_snake_identifier(module.name());
+            let mut visible: std::collections::BTreeSet<String> = module
+                .entity_types()
+                .iter()
+                .map(|s| s.to_string())
+                .collect();
+            let mut stack = vec![name.clone()];
+            let mut seen = std::collections::BTreeSet::new();
+            while let Some(m) = stack.pop() {
+                if !seen.insert(m.clone()) {
+                    continue;
+                }
+                if let Some(d) = set.module(&m) {
+                    visible.extend(d.entities.iter().map(|e| e.name.clone()));
+                    stack.extend(d.requires.iter().map(|r| r.name.clone()));
+                }
+            }
+            for l in &self.configs[i].links {
+                for end in [&l.source_type, &l.target_type] {
+                    if !visible.contains(end) {
+                        return Err(anyhow::Error::new(
+                            ContractError::framework(codes::MODULE_REFERENCE_UNKNOWN)
+                                .with_param("module", &name)
+                                .with_param("entity", end),
+                        ));
+                    }
+                }
+            }
+        }
+        let configs: Vec<LinksConfig> = described_idx
+            .iter()
+            .map(|&i| self.configs[i].clone())
+            .collect();
+        if configs.len() > 1 {
+            LinksConfig::merge_strict(configs).map_err(|errs| {
+                let text = errs
+                    .iter()
+                    .map(|e| e.to_string())
+                    .collect::<Vec<_>>()
+                    .join("; ");
+                anyhow::Error::new(errs.into_iter().next().expect("non-empty")).context(text)
+            })?;
+        }
+        Ok(())
+    }
+
+    /// Every entity with a descriptor has ONE plural: `EntityDesc.plural` ==
+    /// `EntityDescriptor::plural` == `EntityConfig::plural` (when each exists).
+    fn check_plurals(
+        set: &crate::descriptor::DescriptorSet,
+        registry: &EntityRegistry,
+        config: &LinksConfig,
+    ) -> Result<()> {
+        use crate::descriptor::ContractError;
+        use crate::descriptor::framework::codes;
+        let registered: HashMap<String, String> = registry.entity_plurals().into_iter().collect();
+        for m in set.modules() {
+            for e in &m.entities {
+                let mut sources = vec![format!("descriptor={}", e.plural)];
+                let mut diverge = false;
+                if let Some(p) = registered.get(&e.name) {
+                    diverge |= p != &e.plural;
+                    sources.push(format!("EntityDescriptor={p}"));
+                }
+                if let Some(c) = config.entities.iter().find(|c| c.singular == e.name) {
+                    diverge |= c.plural != e.plural;
+                    sources.push(format!("links.yaml={}", c.plural));
+                }
+                if diverge {
+                    return Err(anyhow::Error::new(
+                        ContractError::framework(codes::MODULE_PLURAL_MISMATCH)
+                            .with_param("entity", &e.name)
+                            .with_param("sources", sources.join(", ")),
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// R3 and R4 of the single-source audit: a facet declared on BOTH sides (descriptor and
+    /// `links.yaml`) with DIFFERENT values is `this.descriptor.declared_twice`, not a silent
+    /// winner.
+    /// - R4: an entity operation declared in `EntityDesc.permissions` and in the `auth:` of
+    ///   the entity's YAML entry (compared on the AST, `legacy_policy` spelling accepted);
+    /// - R3: a link (same `link_type`/source/target) declared in a `LinkDesc` and in
+    ///   `links.yaml`: routes, description, and per-operation `auth`.
+    ///
+    /// A YAML `auth:` field left at its default (`authenticated`) is NOT a declaration: the
+    /// YAML types fill every field, so an absent one cannot be told from an explicit
+    /// `authenticated`.
+    fn check_redeclarations(
+        set: &crate::descriptor::DescriptorSet,
+        config: &LinksConfig,
+    ) -> Result<()> {
+        use crate::config::legacy_policy;
+        use crate::descriptor::{ContractError, PolicyExpr, framework::codes};
+        const DEFAULT: &str = "authenticated";
+        let differs = |raw: &str, expr: &PolicyExpr| {
+            raw != DEFAULT
+                && raw != legacy_policy(expr)
+                && PolicyExpr::parse(raw).ok().as_ref() != Some(expr)
+        };
+        let mut twice: Vec<String> = Vec::new();
+        for m in set.modules() {
+            for e in &m.entities {
+                let Some(c) = config.entities.iter().find(|c| c.singular == e.name) else {
+                    continue;
+                };
+                for (op, expr) in &e.permissions.ops {
+                    let Some(raw) =
+                        crate::core::auth::descriptor_policy::entity_auth_field(&c.auth, op)
+                    else {
+                        continue;
+                    };
+                    if differs(raw, expr) {
+                        twice.push(format!(
+                            "{}.{op}: descriptor `{expr}` vs auth `{raw}` in links.yaml",
+                            e.name
+                        ));
+                    }
+                }
+            }
+            for l in &m.links {
+                let Some(d) = config.links.iter().find(|d| {
+                    d.link_type == l.link_type
+                        && d.source_type == l.source
+                        && d.target_type == l.target
+                }) else {
+                    continue;
+                };
+                let id = format!("{}({}→{})", l.link_type, l.source, l.target);
+                if d.forward_route_name != l.forward_route {
+                    twice.push(format!(
+                        "{id}: forward route `{}` (descriptor) vs `{}` (links.yaml)",
+                        l.forward_route, d.forward_route_name
+                    ));
+                }
+                if d.reverse_route_name != l.reverse_route {
+                    twice.push(format!(
+                        "{id}: reverse route `{}` (descriptor) vs `{}` (links.yaml)",
+                        l.reverse_route, d.reverse_route_name
+                    ));
+                }
+                if let (Some(a), Some(b)) = (&l.description, &d.description)
+                    && a != b
+                {
+                    twice.push(format!("{id}: description differs"));
+                }
+                if let Some(auth) = &d.auth {
+                    for (op, expr) in &l.permissions.ops {
+                        if let Some(raw) = auth.policy_for(op.as_str())
+                            && differs(raw, expr)
+                        {
+                            twice.push(format!(
+                                "{id}.{op}: descriptor `{expr}` vs auth `{raw}` in links.yaml"
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+        if twice.is_empty() {
+            return Ok(());
+        }
+        Err(anyhow::Error::new(
+            ContractError::framework(codes::DESCRIPTOR_DECLARED_TWICE)
+                .with_param("what", twice.join("; ")),
+        ))
     }
 
     /// Build the transport-agnostic host
@@ -619,25 +963,94 @@ impl ServerBuilder {
             .take()
             .ok_or_else(|| anyhow::anyhow!("LinkService is required. Call .with_link_service()"))?;
 
-        // Build entity fetchers map from all modules
+        // Descriptors: checked, identity-checked, resolved (topological, semver, cycles,
+        // duplicates). Without any descriptor this is a no-op (historical behaviour).
+        let (descriptor_set, order) = self.resolve_descriptors()?;
+
+        let described_idx: std::collections::BTreeSet<usize> = (0..self.modules.len())
+            .filter(|&i| {
+                descriptor_set
+                    .module(&crate::descriptor::naming::to_snake_identifier(
+                        self.modules[i].name(),
+                    ))
+                    .is_some()
+            })
+            .collect();
+        self.check_described_configs(&descriptor_set, &described_idx)?;
+
+        // Entities registered in resolved order (see `register_module`), one module at a
+        // time: an entity of a DESCRIBED module (or colliding with one) is registered with
+        // `try_register` — a duplicate entity or plural is an error, not a silent
+        // last-wins. Between legacy modules the historical last-wins is kept (warned).
+        let mut described_types: std::collections::BTreeSet<String> = Default::default();
+        for &i in &order {
+            let mut local = EntityRegistry::new();
+            self.modules[i].register_entities(&mut local);
+            let is_described = described_idx.contains(&i);
+            for d in local.drain() {
+                let t = d.entity_type().to_string();
+                let collides_with_described = described_types.contains(&t)
+                    || self
+                        .entity_registry
+                        .entity_type_for_plural(d.plural())
+                        .is_some_and(|owner| described_types.contains(owner));
+                if is_described || collides_with_described {
+                    self.entity_registry.try_register(d).map_err(|e| {
+                        anyhow::Error::new(e.with_param("module", self.modules[i].name()))
+                    })?;
+                    if is_described {
+                        described_types.insert(t);
+                    }
+                } else {
+                    if self.entity_registry.contains(&t) {
+                        tracing::warn!(
+                            entity_type = %t,
+                            module = self.modules[i].name(),
+                            "entity registered by several modules: the last one wins (legacy \
+                             behaviour; declare a descriptor to make it an error)"
+                        );
+                    }
+                    self.entity_registry.register(d);
+                }
+            }
+        }
+        Self::check_plurals(&descriptor_set, &self.entity_registry, &merged_config)?;
+        Self::check_redeclarations(&descriptor_set, &merged_config)?;
+
+        // Build entity fetchers / creators maps. A collision involving a module WITH a
+        // descriptor is an error (fail-closed); between legacy modules the historical
+        // last-wins is kept, with a warning.
+        let described: std::collections::BTreeSet<String> = descriptor_set
+            .modules()
+            .flat_map(|m| m.entities.iter().map(|e| e.name.clone()))
+            .collect();
         let mut fetchers_map: HashMap<String, Arc<dyn EntityFetcher>> = HashMap::new();
-        for module in &self.modules {
+        let mut creators_map: HashMap<String, Arc<dyn EntityCreator>> = HashMap::new();
+        for &i in &order {
+            let module = &self.modules[i];
             for entity_type in module.entity_types() {
-                if let Some(fetcher) = module.get_entity_fetcher(entity_type) {
-                    fetchers_map.insert(entity_type.to_string(), fetcher);
+                if let Some(fetcher) = module.get_entity_fetcher(entity_type)
+                    && fetchers_map
+                        .insert(entity_type.to_string(), fetcher)
+                        .is_some()
+                {
+                    duplicate_provider(&described, entity_type, module.name())?;
+                }
+                if let Some(creator) = module.get_entity_creator(entity_type)
+                    && creators_map
+                        .insert(entity_type.to_string(), creator)
+                        .is_some()
+                {
+                    duplicate_provider(&described, entity_type, module.name())?;
                 }
             }
         }
 
-        // Build entity creators map from all modules
-        let mut creators_map: HashMap<String, Arc<dyn EntityCreator>> = HashMap::new();
-        for module in &self.modules {
-            for entity_type in module.entity_types() {
-                if let Some(creator) = module.get_entity_creator(entity_type) {
-                    creators_map.insert(entity_type.to_string(), creator);
-                }
-            }
-        }
+        // Message bundles of the compiled modules, in resolved order.
+        let module_bundles: Vec<crate::descriptor::MessageBundle> = order
+            .iter()
+            .flat_map(|&i| self.modules[i].bundles())
+            .collect();
 
         // Build the host
         let mut host = ServerHost::from_builder_components(
@@ -647,6 +1060,14 @@ impl ServerBuilder {
             fetchers_map,
             creators_map,
         )?;
+        if !descriptor_set.is_empty() {
+            host = host.with_descriptors(descriptor_set);
+        }
+        if !module_bundles.is_empty() {
+            host.locales
+                .add_bundles(module_bundles)
+                .map_err(anyhow::Error::new)?;
+        }
 
         // Attach event bus if configured
         if let Some(event_bus) = self.event_bus.take() {
@@ -871,6 +1292,33 @@ impl ServerBuilder {
             let event_log = Arc::new(crate::events::InMemoryEventLog::new());
             host = host.with_event_log(event_log);
             tracing::info!("event log auto-wired (InMemoryEventLog)");
+        }
+
+        // Runtime module loading, created LAST: it captures the final catalog (base of
+        // every composition), the event bus, the resolvers and the authorization flags.
+        if let Some(setup) = self.module_runtime.take() {
+            use crate::server::module_runtime::{DefaultModuleLoader, HostParts, ModuleRuntime};
+            let loader = setup.loader.unwrap_or_else(|| {
+                Arc::new(DefaultModuleLoader::new().with_event_bus(host.event_bus.clone()))
+            });
+            let runtime = ModuleRuntime::new(
+                HostParts {
+                    catalog: host.catalog.clone(),
+                    link_service: host.link_service.clone(),
+                    event_bus: host.event_bus.clone(),
+                    resolvers: host.resolver_registry.clone(),
+                    authorize: host.authorize,
+                    report_only: host.authorize_report_only,
+                    validation_registry: host.validation_registry.clone(),
+                    locales: host.locales.clone(),
+                },
+                loader,
+                setup.store,
+                setup.options,
+                setup.offers,
+            );
+            host.module_runtime = Some(runtime);
+            tracing::info!("module runtime enabled (runtime load/unload, admin interface)");
         }
 
         Ok(host)
@@ -1129,6 +1577,30 @@ async fn shutdown_signal() {
             tracing::info!("Received SIGTERM signal, initiating graceful shutdown...");
         },
     }
+}
+
+/// Two modules provide the same entity type. Error when one of them is described
+/// (fail-closed); historical last-wins with a warning between legacy modules.
+fn duplicate_provider(
+    described: &std::collections::BTreeSet<String>,
+    entity_type: &str,
+    module: &str,
+) -> Result<()> {
+    if described.contains(entity_type) {
+        return Err(anyhow::Error::new(
+            crate::descriptor::ContractError::framework(
+                crate::descriptor::framework::codes::MODULE_DUPLICATE_ENTITY,
+            )
+            .with_param("entity", entity_type)
+            .with_param("modules", module),
+        ));
+    }
+    tracing::warn!(
+        entity_type,
+        module,
+        "entity provided by several modules: the last registered wins (legacy behaviour)"
+    );
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1634,5 +2106,417 @@ mod tests {
         assert!(host.sink_registry().is_none());
         assert!(host.event_log().is_none());
         assert_eq!(host.config.entities.len(), 1);
+    }
+}
+
+#[cfg(test)]
+mod descriptor_tests {
+    use super::*;
+    use crate::config::{EntityAuthConfig, EntityConfig, LinksConfig};
+    use crate::core::module::Module;
+    use crate::descriptor::{EntityDesc, ModuleDescriptor, ModuleReq};
+    use crate::server::entity_registry::EntityRegistry;
+    use crate::storage::InMemoryLinkService;
+
+    /// Module whose descriptor declares one entity and optional requirements.
+    struct Described {
+        name: &'static str,
+        entity: &'static str,
+        yaml_plural: String,
+        requires: Vec<&'static str>,
+    }
+
+    impl Module for Described {
+        fn name(&self) -> &str {
+            self.name
+        }
+        fn entity_types(&self) -> Vec<&str> {
+            vec![self.entity]
+        }
+        fn links_config(&self) -> anyhow::Result<LinksConfig> {
+            Ok(LinksConfig {
+                entities: vec![EntityConfig {
+                    singular: self.entity.to_string(),
+                    plural: self.yaml_plural.clone(),
+                    auth: EntityAuthConfig::default(),
+                }],
+                links: vec![],
+                validation_rules: None,
+                events: None,
+                sinks: None,
+                auth: None,
+            })
+        }
+        fn register_entities(&self, _registry: &mut EntityRegistry) {}
+        fn descriptor(&self) -> Option<ModuleDescriptor> {
+            let mut d = ModuleDescriptor::new(self.name, "1.0.0");
+            d.entities.push(EntityDesc::new(self.entity));
+            d.requires = self
+                .requires
+                .iter()
+                .map(|r| ModuleReq {
+                    name: r.to_string(),
+                    version: "^1".into(),
+                    optional: false,
+                })
+                .collect();
+            Some(d)
+        }
+    }
+
+    fn m(name: &'static str, entity: &'static str, requires: Vec<&'static str>) -> Described {
+        Described {
+            name,
+            entity,
+            yaml_plural: format!("{entity}s"),
+            requires,
+        }
+    }
+
+    #[test]
+    fn build_host_resolve_independent_of_registration_order() {
+        // `billing` requires `users` but is registered FIRST.
+        let host = ServerBuilder::new()
+            .with_link_service(InMemoryLinkService::new())
+            .register_module(m("billing", "invoice", vec!["users"]))
+            .unwrap()
+            .register_module(m("users", "user", vec![]))
+            .unwrap()
+            .build_host()
+            .expect("resolution does not depend on registration order");
+        let set = host.descriptors();
+        assert!(set.entity("invoice").is_some() && set.entity("user").is_some());
+    }
+
+    #[test]
+    fn build_host_fails_on_missing_dependency() {
+        let err = ServerBuilder::new()
+            .with_link_service(InMemoryLinkService::new())
+            .register_module(m("billing", "invoice", vec!["users"]))
+            .unwrap()
+            .build_host()
+            .err()
+            .expect("missing dependency");
+        let c = crate::core::errors::from_anyhow(&err);
+        assert_eq!(c.code.as_str(), "this.module.dependency_missing");
+    }
+
+    #[test]
+    fn plural_drift_fails_at_startup() {
+        let mut bad = m("billing", "invoice", vec![]);
+        bad.yaml_plural = "invoicez".into();
+        let err = ServerBuilder::new()
+            .with_link_service(InMemoryLinkService::new())
+            .register_module(bad)
+            .unwrap()
+            .build_host()
+            .err()
+            .expect("plural drift");
+        assert_eq!(
+            crate::core::errors::from_anyhow(&err).code.as_str(),
+            "this.module.plural_mismatch"
+        );
+    }
+
+    #[test]
+    fn identity_mismatch_between_trait_and_descriptor_fails() {
+        struct Liar;
+        impl Module for Liar {
+            fn name(&self) -> &str {
+                "billing"
+            }
+            fn entity_types(&self) -> Vec<&str> {
+                vec![]
+            }
+            fn links_config(&self) -> anyhow::Result<LinksConfig> {
+                Ok(LinksConfig {
+                    entities: vec![],
+                    links: vec![],
+                    validation_rules: None,
+                    events: None,
+                    sinks: None,
+                    auth: None,
+                })
+            }
+            fn register_entities(&self, _registry: &mut EntityRegistry) {}
+            fn descriptor(&self) -> Option<ModuleDescriptor> {
+                let mut d = ModuleDescriptor::new("billing", "1.0.0");
+                d.entities.push(EntityDesc::new("invoice"));
+                Some(d)
+            }
+        }
+        let err = ServerBuilder::new()
+            .with_link_service(InMemoryLinkService::new())
+            .register_module(Liar)
+            .unwrap()
+            .build_host()
+            .err()
+            .expect("identity mismatch");
+        assert_eq!(
+            crate::core::errors::from_anyhow(&err).code.as_str(),
+            "this.module.identity_mismatch"
+        );
+    }
+
+    // ── modules-runtime stream: registration and links of described modules ──
+
+    struct Routes(&'static str, &'static str);
+    impl crate::server::entity_registry::EntityDescriptor for Routes {
+        fn entity_type(&self) -> &str {
+            self.0
+        }
+        fn plural(&self) -> &str {
+            self.1
+        }
+        fn build_routes(&self) -> axum::Router {
+            axum::Router::new()
+        }
+    }
+
+    /// Module that REGISTERS its entity (legacy or described).
+    struct Registering {
+        name: &'static str,
+        entity: &'static str,
+        described: bool,
+        links: Vec<(&'static str, &'static str)>,
+    }
+    impl Module for Registering {
+        fn name(&self) -> &str {
+            self.name
+        }
+        fn entity_types(&self) -> Vec<&str> {
+            vec![self.entity]
+        }
+        fn links_config(&self) -> anyhow::Result<LinksConfig> {
+            let links = self
+                .links
+                .iter()
+                .map(|(s, t)| crate::core::LinkDefinition {
+                    link_type: "owner".into(),
+                    source_type: s.to_string(),
+                    target_type: t.to_string(),
+                    forward_route_name: format!("{t}s"),
+                    reverse_route_name: format!("{s}s"),
+                    description: None,
+                    required_fields: None,
+                    auth: None,
+                })
+                .collect();
+            Ok(LinksConfig {
+                entities: vec![],
+                links,
+                validation_rules: None,
+                events: None,
+                sinks: None,
+                auth: None,
+            })
+        }
+        fn register_entities(&self, registry: &mut EntityRegistry) {
+            registry.register(Box::new(Routes(self.entity, "invoices")));
+        }
+        fn descriptor(&self) -> Option<ModuleDescriptor> {
+            self.described.then(|| {
+                let mut d = ModuleDescriptor::new(self.name, "1.0.0");
+                d.entities.push(EntityDesc::new(self.entity));
+                d
+            })
+        }
+    }
+
+    fn code_of(r: anyhow::Result<crate::server::host::ServerHost>) -> String {
+        let err = r.err().expect("build must fail");
+        crate::core::errors::from_anyhow(&err)
+            .code
+            .as_str()
+            .to_string()
+    }
+
+    #[test]
+    fn duplicate_entity_across_modules_fails() {
+        let legacy = |name| Registering {
+            name,
+            entity: "invoice",
+            described: false,
+            links: vec![],
+        };
+        let described = |name| Registering {
+            name,
+            entity: "invoice",
+            described: true,
+            links: vec![],
+        };
+        // Described vs described: refused by resolution.
+        let r = ServerBuilder::new()
+            .with_link_service(InMemoryLinkService::new())
+            .register_module(described("billing"))
+            .unwrap()
+            .register_module(described("accounting"))
+            .unwrap()
+            .build_host();
+        assert_eq!(code_of(r), "this.module.duplicate_entity");
+        // Legacy vs described, in both registration orders: refused by `try_register`.
+        for legacy_first in [true, false] {
+            let mut b = ServerBuilder::new().with_link_service(InMemoryLinkService::new());
+            if legacy_first {
+                b = b.register_module(legacy("old")).unwrap();
+                b = b.register_module(described("billing")).unwrap();
+            } else {
+                b = b.register_module(described("billing")).unwrap();
+                b = b.register_module(legacy("old")).unwrap();
+            }
+            assert_eq!(code_of(b.build_host()), "this.module.duplicate_entity");
+        }
+        // Legacy vs legacy: historical last-wins, unchanged.
+        let host = ServerBuilder::new()
+            .with_link_service(InMemoryLinkService::new())
+            .register_module(legacy("a"))
+            .unwrap()
+            .register_module(legacy("b"))
+            .unwrap()
+            .build_host()
+            .expect("legacy last-wins kept");
+        assert_eq!(host.entity_types(), vec!["invoice"]);
+    }
+
+    #[test]
+    fn link_to_entity_of_undeclared_module_fails() {
+        let billing = Registering {
+            name: "billing",
+            entity: "invoice",
+            described: true,
+            links: vec![("user", "invoice")],
+        };
+        let r = ServerBuilder::new()
+            .with_link_service(InMemoryLinkService::new())
+            .register_module(m("users", "user", vec![]))
+            .unwrap()
+            .register_module(billing)
+            .unwrap()
+            .build_host();
+        assert_eq!(code_of(r), "this.module.reference_unknown");
+    }
+
+    // ── R3 / R4: a facet declared on both sides with different values is an error ──
+
+    /// Described module whose `links.yaml` mirrors its descriptor, with knobs to diverge.
+    struct Mirrored {
+        yaml_delete: &'static str,
+        yaml_forward: &'static str,
+        yaml_link_delete: &'static str,
+    }
+    impl Module for Mirrored {
+        fn name(&self) -> &str {
+            "billing"
+        }
+        fn entity_types(&self) -> Vec<&str> {
+            vec!["invoice"]
+        }
+        fn links_config(&self) -> anyhow::Result<LinksConfig> {
+            let auth = EntityAuthConfig {
+                delete: self.yaml_delete.into(),
+                ..Default::default()
+            };
+            let link_auth = crate::core::link::LinkAuthConfig {
+                delete: self.yaml_link_delete.into(),
+                ..Default::default()
+            };
+            Ok(LinksConfig {
+                entities: vec![EntityConfig {
+                    singular: "invoice".into(),
+                    plural: "invoices".into(),
+                    auth,
+                }],
+                links: vec![crate::core::LinkDefinition {
+                    link_type: "parent".into(),
+                    source_type: "invoice".into(),
+                    target_type: "invoice".into(),
+                    forward_route_name: self.yaml_forward.into(),
+                    reverse_route_name: "invoices-parents".into(),
+                    description: None,
+                    required_fields: None,
+                    auth: Some(link_auth),
+                }],
+                validation_rules: None,
+                events: None,
+                sinks: None,
+                auth: None,
+            })
+        }
+        fn register_entities(&self, _registry: &mut EntityRegistry) {}
+        fn descriptor(&self) -> Option<ModuleDescriptor> {
+            use crate::descriptor::{LinkDesc, Operation, PolicyExpr};
+            let mut d = ModuleDescriptor::new("billing", "1.0.0");
+            let mut e = EntityDesc::new("invoice");
+            e.permissions
+                .ops
+                .insert(Operation::Delete, PolicyExpr::AdminOnly);
+            d.entities.push(e);
+            let mut l = LinkDesc::new("parent", "invoice", "invoice");
+            l.forward_route = "invoices-parents".into();
+            l.permissions
+                .ops
+                .insert(Operation::DeleteLink, PolicyExpr::AdminOnly);
+            d.links.push(l);
+            Some(d)
+        }
+    }
+
+    fn build_mirrored(
+        yaml_delete: &'static str,
+        yaml_forward: &'static str,
+        yaml_link_delete: &'static str,
+    ) -> anyhow::Result<crate::server::host::ServerHost> {
+        ServerBuilder::new()
+            .with_link_service(InMemoryLinkService::new())
+            .register_module(Mirrored {
+                yaml_delete,
+                yaml_forward,
+                yaml_link_delete,
+            })
+            .unwrap()
+            .build_host()
+    }
+
+    #[test]
+    fn declared_twice_same_values_or_default_yaml_is_accepted() {
+        // Same AST in two spellings, YAML left at its default, identical routes: fine.
+        build_mirrored("admin_only", "invoices-parents", "admin_only").expect("mirrored");
+        build_mirrored("authenticated", "invoices-parents", "authenticated")
+            .expect("YAML at default is not a declaration");
+    }
+
+    #[test]
+    fn declared_twice_entity_policy_r4() {
+        let err = build_mirrored("public", "invoices-parents", "admin_only")
+            .err()
+            .expect("R4: delete declared twice with different policies");
+        let c = crate::core::errors::from_anyhow(&err);
+        assert_eq!(c.code.as_str(), "this.descriptor.declared_twice");
+        assert!(
+            c.params["what"]
+                .as_str()
+                .unwrap()
+                .contains("invoice.delete"),
+            "{:?}",
+            c.params
+        );
+    }
+
+    #[test]
+    fn declared_twice_link_r3() {
+        // Route differs.
+        let err = build_mirrored("admin_only", "other-route", "admin_only")
+            .err()
+            .expect("R3: forward route declared twice");
+        let c = crate::core::errors::from_anyhow(&err);
+        assert_eq!(c.code.as_str(), "this.descriptor.declared_twice");
+        assert!(c.params["what"].as_str().unwrap().contains("forward route"));
+        // Link policy differs.
+        let err = build_mirrored("admin_only", "invoices-parents", "public")
+            .err()
+            .expect("R3: link delete declared twice");
+        let c = crate::core::errors::from_anyhow(&err);
+        assert_eq!(c.code.as_str(), "this.descriptor.declared_twice");
+        assert!(c.params["what"].as_str().unwrap().contains("delete_link"));
     }
 }

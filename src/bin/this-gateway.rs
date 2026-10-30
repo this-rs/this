@@ -2429,7 +2429,7 @@ fn identite_en_entetes(ctx: &AuthContext) -> Vec<(&'static str, String)> {
 ///
 /// L'ordre compte : les **refus déclarés** d'abord (`/api/query` du viz — sa
 /// requête brute), puis la transmission. La garde, elle, est déjà passée : ce
-/// handler n'est atteint que par un appelant que la [porte](porte) et la
+/// handler n'est atteint que par un appelant que la [porte] et la
 /// [garde de store](garde_store) ont laissé passer.
 #[cfg(feature = "proxy")]
 async fn sert_le_service(State(etat): State<Arc<EtatService>>, request: Request) -> Response {

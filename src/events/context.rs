@@ -187,6 +187,11 @@ impl FlowContext {
                     Value::String(tenant_id.to_string()),
                 );
             }
+            FrameworkEvent::Module(m) => {
+                if let Ok(Value::Object(fields)) = serde_json::to_value(m) {
+                    variables.extend(fields);
+                }
+            }
         }
 
         Self {

@@ -1,0 +1,62 @@
+%% name: module-descriptor-integration-e2e
+%% QUESTION : de bout en bout, qu'est-ce qui est prouve sur l'arbre integre, et ou sont les trous ?
+%% PROUVE (MESURE, relance par la revue finale) : cargo test --features graphql,grpc --test module_descriptor_e2e : 6 ok,
+%%   same_invalid_payload_same_code_on_rest_graphql_grpc, status_mapping_per_protocol, message_localized_fr_then_en,
+%%   policy_denied_on_all_protocols, hot_loaded_module_from_vfs_served_then_404_after_unload,
+%%   hot_loaded_compiled_module_is_validated_on_rest_and_through_its_creator.
+%% PREUVES ROUGES (integration) : localisation GraphQL, localisation gRPC, bundles runtime, couche de validation des routes runtime.
+%% LU : src/server/exposure/rest/mod.rs, graphql/mod.rs, grpc/entity_service.rs, module_runtime/runtime.rs, core/errors/*, core/i18n/*.
+%% NON ETABLI : enveloppe ValidatingCreator d'un module compile charge a chaud testee seulement apres le controle REST (deduit) ;
+%%   GraphQL et gRPC ne servent pas un module charge a chaud ; option hot_load absente.
+flowchart LR
+    classDef ok       fill:#2ea04333,stroke:#2ea043,stroke-width:2px
+    classDef todo     fill:#f0a02033,stroke:#d98a00,stroke-width:2px
+    classDef refused  fill:#e5484d33,stroke:#e5484d,stroke-width:2px,stroke-dasharray:6 3
+    classDef upstream fill:#8b8fa322,stroke:#8b8fa3,stroke-dasharray:3 3
+    classDef trap     fill:#e5484d1f,stroke:#e5484d,stroke-width:3px
+    classDef entry    fill:#a48bff40,stroke:#a48bff,stroke-width:3px
+
+    D(["ModuleDescriptor<br/>declare une fois"]):::entry
+
+    subgraph HOTE["ServerHost"]
+        direction TB
+        CAT["✅ LiveCatalog<br/>descripteurs, createurs valides"]:::ok
+        LOC["✅ ServerHost::locales<br/>LocaleCatalog partage"]:::ok
+        REG["✅ validation_registry"]:::ok
+    end
+
+    subgraph SURF["Surfaces"]
+        direction TB
+        REST["✅ REST<br/>validation, politiques, localize_errors"]:::ok
+        GQL["✅ GraphQL<br/>error_object localise"]:::ok
+        GRPC["✅ gRPC EntityService<br/>statut contrat re-rendu"]:::ok
+    end
+
+    subgraph RT["ModuleRuntime"]
+        direction TB
+        VFS[("VfsModuleStore<br/>InMemory, LocalFs, Obrain")]
+        LOAD["✅ load / unload / replace"]:::ok
+        WRAP["✅ wrap_creators + couche de validation<br/>sur les routes chargees"]:::ok
+        BUN["✅ bundles ajoutes, retires"]:::ok
+    end
+
+    GAP["⚠ GraphQL, gRPC : module charge a chaud<br/>non servi, refus fail-closed"]:::trap
+    HOT["🟠 option hot_load desactivee par defaut<br/>decision 0e59f39b, absente du code"]:::todo
+    EX["🟠 examples/descriptor_api<br/>non ecrit"]:::todo
+
+    D ==> CAT
+    D ==> REG
+    CAT ==> REST
+    CAT ==> GQL
+    CAT ==> GRPC
+    LOC ==> REST
+    LOC ==> GQL
+    LOC ==> GRPC
+    VFS ==> LOAD
+    LOAD ==> WRAP
+    LOAD ==> BUN
+    WRAP ==> CAT
+    BUN ==> LOC
+    LOAD -.->|"non servi"| GAP
+    HOT -.-> LOAD
+    EX -.-> D

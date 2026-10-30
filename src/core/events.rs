@@ -115,6 +115,33 @@ pub enum CognitiveSignal {
     StigmergyLockIn { path: Vec<Uuid>, intensity: f64 },
 }
 
+/// Runtime module lifecycle events (`ModuleRuntime`).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "action", rename_all = "snake_case")]
+pub enum ModuleEvent {
+    /// The module is active (catalog `generation` published).
+    Loaded {
+        module: String,
+        version: String,
+        generation: u64,
+    },
+    /// The module was replaced by another version in one publication.
+    Replaced {
+        module: String,
+        from: String,
+        to: String,
+        generation: u64,
+    },
+    /// The module was drained and removed.
+    Unloaded {
+        module: String,
+        version: String,
+        generation: u64,
+    },
+    /// A load was refused (`code` = stable error code); nothing was published.
+    Failed { module: String, code: String },
+}
+
 /// Top-level framework event that wraps entity, link, and cognitive events
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -125,6 +152,8 @@ pub enum FrameworkEvent {
     Link(LinkEvent),
     /// A cognitive signal from obrain-db
     Cognitive(CognitiveSignal),
+    /// A module was loaded, replaced, unloaded or refused at runtime
+    Module(ModuleEvent),
     /// GDPR erasure completed for a tenant
     GdprErasure {
         /// The tenant whose data was erased
@@ -149,6 +178,7 @@ impl FrameworkEvent {
             FrameworkEvent::Link(_) => "link",
             FrameworkEvent::Cognitive(_) => "cognitive",
             FrameworkEvent::GdprErasure { .. } => "gdpr_erasure",
+            FrameworkEvent::Module(_) => "module",
         }
     }
 
@@ -162,6 +192,7 @@ impl FrameworkEvent {
             },
             FrameworkEvent::Link(_) => None,
             FrameworkEvent::Cognitive(_) => None,
+            FrameworkEvent::Module(_) => None,
             FrameworkEvent::GdprErasure { .. } => None,
         }
     }
@@ -187,6 +218,7 @@ impl FrameworkEvent {
                 CognitiveSignal::StigmergyLockIn { path, .. } => path.first().copied(),
             },
             FrameworkEvent::GdprErasure { tenant_id, .. } => Some(*tenant_id),
+            FrameworkEvent::Module(_) => None,
         }
     }
 
@@ -210,6 +242,12 @@ impl FrameworkEvent {
                 CognitiveSignal::StigmergyLockIn { .. } => "stigmergy_lock_in",
             },
             FrameworkEvent::GdprErasure { .. } => "erasure",
+            FrameworkEvent::Module(m) => match m {
+                ModuleEvent::Loaded { .. } => "loaded",
+                ModuleEvent::Replaced { .. } => "replaced",
+                ModuleEvent::Unloaded { .. } => "unloaded",
+                ModuleEvent::Failed { .. } => "failed",
+            },
         }
     }
 }

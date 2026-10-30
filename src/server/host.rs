@@ -62,6 +62,15 @@ pub struct ServerHost {
     /// Entity creators map (for automatic entity + link creation)
     pub entity_creators: Arc<HashMap<String, Arc<dyn EntityCreator>>>,
 
+    /// Live catalog (descriptors, fetchers, creators, links config, plurals) published
+    /// atomically. Equal to the fields above at construction; runtime module loading
+    /// publishes new snapshots here. New readers MUST go through it (see `server::catalog`).
+    pub catalog: Arc<crate::server::catalog::LiveCatalog>,
+
+    /// Runtime module loader of this host (`ServerBuilder::with_module_runtime`). `None` =
+    /// the host is frozen at build time (historical behaviour, no admin routes).
+    pub module_runtime: Option<Arc<crate::server::module_runtime::ModuleRuntime>>,
+
     /// Optional event bus for real-time notifications (WebSocket, SSE)
     ///
     /// When present, REST/GraphQL handlers will publish events for mutations.
@@ -173,6 +182,17 @@ pub struct ServerHost {
     /// Registered via `ServerBuilder::with_auth_resolver()`.
     pub resolver_registry: Arc<AuthResolverRegistry>,
 
+    /// Custom validators / transforms used by the descriptor validation (`ValidatingCreator`
+    /// and the REST validation layer). Shared through an `ArcSwap`: replacing it with
+    /// [`ServerHost::with_custom_registry`] reaches creators already wrapped.
+    pub validation_registry: crate::core::validation::SharedRegistry,
+
+    /// Message catalog of the host (framework bundles + module bundles), shared through an
+    /// `ArcSwap`: every surface renders a `ContractError` in the request locale from it
+    /// (REST `localize_errors`, GraphQL handler, gRPC services). Runtime modules add their
+    /// bundles on load and remove them on unload.
+    pub locales: crate::core::i18n::LocaleCatalog,
+
     /// Optional STS (Security Token Service) state for embedded token issuance
     ///
     /// When present, auth endpoints (POST /auth/token, GET /auth/keys,
@@ -231,14 +251,28 @@ impl ServerHost {
     ) -> Result<Self> {
         let config = Arc::new(config);
         let registry = Arc::new(LinkRouteRegistry::new(config.clone()));
+        let fetchers = Arc::new(fetchers);
+        let creators = Arc::new(creators);
+        let catalog = Arc::new(crate::server::catalog::LiveCatalog::new(
+            crate::server::catalog::HostCatalog {
+                descriptors: Arc::new(crate::descriptor::DescriptorSet::new()),
+                fetchers: fetchers.clone(),
+                creators: creators.clone(),
+                links_config: config.clone(),
+                plurals: Arc::new(entity_registry.entity_plurals()),
+                generation: 0,
+            },
+        ));
 
         Ok(Self {
             config,
             link_service,
             registry,
             entity_registry,
-            entity_fetchers: Arc::new(fetchers),
-            entity_creators: Arc::new(creators),
+            entity_fetchers: fetchers,
+            entity_creators: creators,
+            catalog,
+            module_runtime: None,
             event_bus: None,
             event_log: None,
             sink_registry: None,
@@ -257,9 +291,102 @@ impl ServerHost {
             principal_mapping: None,
             auth_provider: None,
             resolver_registry: Arc::new(AuthResolverRegistry::new()),
+            validation_registry: crate::core::validation::shared_registry(),
+            locales: crate::core::i18n::LocaleCatalog::framework(),
             #[cfg(feature = "wami")]
             sts_state: None,
         })
+    }
+
+    /// Publish the active descriptors in the live catalog (called ONCE by `build_host`).
+    ///
+    /// Validation stream: the creator of every DESCRIBED entity is wrapped in
+    /// `ValidatingCreator` here, in both `entity_creators` and the catalog, so GraphQL,
+    /// gRPC and the link handlers validate through the same engine. Undescribed entities
+    /// keep their creator untouched. Expects the RAW creators (a second call would wrap
+    /// twice: harmless, transforms are idempotent, but wasted).
+    pub fn with_descriptors(mut self, descriptors: crate::descriptor::DescriptorSet) -> Self {
+        let creators = Arc::new(crate::core::validation::wrap_creators(
+            &self.entity_creators,
+            &descriptors,
+            &self.validation_registry,
+        ));
+        self.entity_creators = creators.clone();
+        let mut next = (*self.catalog.load()).clone();
+        next.creators = creators;
+        next.descriptors = Arc::new(descriptors);
+        self.catalog.publish(next);
+        self
+    }
+
+    /// Replace the message catalog (framework bundles plus the application's own).
+    pub fn with_locales(mut self, locales: crate::core::i18n::LocaleCatalog) -> Self {
+        self.locales = locales;
+        self
+    }
+
+    /// Custom validators / transforms for the descriptor validation. May be called before
+    /// or after `with_descriptors`: wrapped creators read the registry at each call.
+    pub fn with_custom_registry(self, registry: crate::descriptor::CustomRegistry) -> Self {
+        self.validation_registry.store(Arc::new(registry));
+        self
+    }
+
+    /// State of the REST validation layer: reads the CURRENT catalog at each request, so a
+    /// module published at runtime is validated from its first request.
+    pub fn validation_layer_state(&self) -> crate::core::validation::ValidationLayerState {
+        let catalog = self.catalog.clone();
+        crate::core::validation::ValidationLayerState::new(
+            Arc::new(move || catalog.load().descriptors.clone()),
+            self.validation_registry.clone(),
+        )
+    }
+
+    /// Current snapshot of the live catalog (one atomic load; keep it for the request).
+    pub fn catalog(&self) -> Arc<crate::server::catalog::HostCatalog> {
+        self.catalog.load()
+    }
+
+    /// THE access to the fetcher of `entity` for `ctx` running `op`: the policy is judged
+    /// (same evaluator as REST), then the fetcher comes from the LIVE catalog. GraphQL,
+    /// gRPC, WebSocket and links reach fetchers only through it (or through
+    /// `SurfaceGuard::fetcher`, which shares the evaluation of one request).
+    #[cfg(any(feature = "graphql", feature = "grpc", feature = "websocket"))]
+    #[allow(clippy::result_large_err)] // `ContractError` is the cross-surface contract
+    pub fn guarded_fetcher(
+        &self,
+        entity: &str,
+        op: crate::descriptor::Operation,
+        ctx: &crate::core::auth::AuthContext,
+    ) -> Result<Arc<dyn EntityFetcher>, crate::descriptor::ContractError> {
+        crate::server::exposure::SurfaceGuard::for_host(self, ctx.clone(), "host")
+            .fetcher(self, entity, op, None)
+    }
+
+    /// Creator counterpart of [`ServerHost::guarded_fetcher`].
+    #[cfg(any(feature = "graphql", feature = "grpc", feature = "websocket"))]
+    #[allow(clippy::result_large_err)]
+    pub fn guarded_creator(
+        &self,
+        entity: &str,
+        op: crate::descriptor::Operation,
+        ctx: &crate::core::auth::AuthContext,
+    ) -> Result<Arc<dyn EntityCreator>, crate::descriptor::ContractError> {
+        crate::server::exposure::SurfaceGuard::for_host(self, ctx.clone(), "host")
+            .creator(self, entity, op, None)
+    }
+
+    /// Fetcher for SCHEMA DERIVATION only (SDL, proto: sample entity to infer field names
+    /// and types). No caller, no policy: the schema endpoints are descriptive. Never use it
+    /// to serve data (the coverage test `no_entity_fetchers_access_outside_guard` pins it).
+    #[cfg(any(feature = "graphql", feature = "grpc"))]
+    pub(crate) fn schema_fetcher(&self, entity: &str) -> Option<Arc<dyn EntityFetcher>> {
+        self.catalog.load().fetchers.get(entity).cloned()
+    }
+
+    /// Active descriptors (current snapshot).
+    pub fn descriptors(&self) -> Arc<crate::descriptor::DescriptorSet> {
+        self.catalog.load().descriptors.clone()
     }
 
     /// Get entity types registered in the host
@@ -482,6 +609,16 @@ impl ServerHost {
         };
         let config = Arc::new(config);
         let registry = Arc::new(LinkRouteRegistry::new(config.clone()));
+        let catalog = Arc::new(crate::server::catalog::LiveCatalog::new(
+            crate::server::catalog::HostCatalog {
+                descriptors: Arc::new(crate::descriptor::DescriptorSet::new()),
+                fetchers: Arc::new(HashMap::new()),
+                creators: Arc::new(HashMap::new()),
+                links_config: config.clone(),
+                plurals: Arc::new(vec![]),
+                generation: 0,
+            },
+        ));
 
         Self {
             config,
@@ -490,6 +627,8 @@ impl ServerHost {
             entity_registry: EntityRegistry::new(),
             entity_fetchers: Arc::new(HashMap::new()),
             entity_creators: Arc::new(HashMap::new()),
+            catalog,
+            module_runtime: None,
             event_bus: None,
             event_log: None,
             sink_registry: None,
@@ -507,6 +646,8 @@ impl ServerHost {
             principal_mapping: None,
             auth_provider: None,
             resolver_registry: Arc::new(AuthResolverRegistry::new()),
+            validation_registry: crate::core::validation::shared_registry(),
+            locales: crate::core::i18n::LocaleCatalog::framework(),
             #[cfg(feature = "wami")]
             sts_state: None,
             ui_state: None,
@@ -761,5 +902,89 @@ mod tests {
         let log = Arc::new(InMemoryEventLog::new());
         let host = host.with_event_log(log);
         assert!(host.event_log().is_some());
+    }
+
+    #[tokio::test]
+    async fn with_descriptors_wraps_described_creators_and_registry_is_live() {
+        use crate::core::validation::gate::tests::{RecordingCreator, billing};
+        use crate::descriptor::{Applies, Custom, CustomScope, DescriptorSet, ValidatorSpec};
+        use std::sync::Arc;
+
+        let mut m = billing();
+        m.entities[0].fields[1]
+            .validators
+            .push(crate::descriptor::ValidatorRule {
+                rule: ValidatorSpec::Custom(Custom::named("billing.even")),
+                on: Applies::Always,
+            });
+        let mut set = DescriptorSet::new();
+        set.insert(m).unwrap();
+
+        let rec = Arc::new(RecordingCreator::default());
+        let legacy: Arc<dyn EntityCreator> = Arc::new(RecordingCreator::default());
+        let mut creators: HashMap<String, Arc<dyn EntityCreator>> = HashMap::new();
+        creators.insert("invoice".into(), rec.clone());
+        creators.insert("legacy".into(), legacy.clone());
+        let host = ServerHost::from_builder_components(
+            Arc::new(MockLinkService),
+            LinksConfig::default_config(),
+            EntityRegistry::new(),
+            HashMap::new(),
+            creators,
+        )
+        .unwrap()
+        .with_descriptors(set);
+
+        // Same wrapped creator in the legacy field and in the catalog.
+        let snapshot = host.catalog.load();
+        assert!(Arc::ptr_eq(
+            &host.entity_creators["invoice"],
+            &snapshot.creators["invoice"]
+        ));
+        assert!(Arc::ptr_eq(&host.entity_creators["legacy"], &legacy));
+
+        // Custom validator without implementation: fail-closed (internal), store untouched.
+        let payload = serde_json::json!({"number": "abc", "amount": 3});
+        let err = host.entity_creators["invoice"]
+            .create_from_json(payload.clone())
+            .await
+            .unwrap_err();
+        assert_eq!(
+            crate::core::errors::from_anyhow(&err).code.as_str(),
+            "this.internal"
+        );
+
+        // Registry installed AFTER wrapping: reached through the ArcSwap.
+        let mut reg = crate::descriptor::CustomRegistry::default();
+        reg.register_validator(
+            "billing.even",
+            CustomScope::Both,
+            Arc::new(|f, v, _| {
+                if v.as_f64().is_some_and(|x| x % 2.0 == 0.0) {
+                    Ok(())
+                } else {
+                    Err(crate::descriptor::FieldViolation::new(
+                        f,
+                        "billing.not_even",
+                    ))
+                }
+            }),
+        );
+        let host = host.with_custom_registry(reg);
+        let err = host.entity_creators["invoice"]
+            .create_from_json(payload)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            crate::core::errors::from_anyhow(&err).fields[0]
+                .code
+                .as_str(),
+            "billing.not_even"
+        );
+        host.entity_creators["invoice"]
+            .create_from_json(serde_json::json!({"number": "abc", "amount": 4}))
+            .await
+            .unwrap();
+        assert_eq!(rec.seen.lock().unwrap().len(), 1);
     }
 }

@@ -3,17 +3,17 @@
 //! Les utilisateurs de la passerelle cessent d'être des arguments de ligne de
 //! commande en mémoire (mot de passe EN CLAIR dans un environnement systemd :
 //! le défaut à tuer) : ils vivent dans un **store obrain dédié**, nœuds de
-//! label [`LABEL_UTILISATEUR`] portant `{username, hash_argon2, user_id,
+//! label `LABEL_UTILISATEUR` portant `{username, hash_argon2, user_id,
 //! tenant_id, roles, created_at}`.
 //!
 //! # Mots de passe : argon2id, jamais de clair
 //!
-//! Le hachage est **argon2id** via [`Argon2::default()`], soit les paramètres
+//! Le hachage est **argon2id** via `Argon2::default()`, soit les paramètres
 //! recommandés par l'OWASP Password Storage Cheat Sheet : v19, m=19456 KiB
 //! (19 Mio), t=2 itérations, p=1 voie, sel aléatoire de 16 octets (OsRng),
 //! sortie 32 octets, sérialisé au format PHC (`$argon2id$v=19$m=19456,t=2,
 //! p=1$…`). Seule cette chaîne PHC est persistée — le clair ne touche jamais
-//! le disque, et la vérification passe par [`PasswordVerifier`] (comparaison
+//! le disque, et la vérification passe par `PasswordVerifier` (comparaison
 //! à temps constant côté digest).
 //!
 //! # Verrou : un seul écrivain

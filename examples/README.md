@@ -54,6 +54,40 @@ cargo run --example microservice
 # Serveur sur http://127.0.0.1:3000
 ```
 
+### 4. 🧩 [descriptor_api](./descriptor_api/main.rs) - Un module décrit une seule fois
+
+**Niveau** : Intermédiaire  
+**Durée** : 10 minutes  
+**Fichiers** : 1 fichier
+
+Un seul `ModuleDescriptor` (`billing`) sert les trois protocoles :
+- validation, transformations d'entrée et filtres typés déclarés dans le descripteur ;
+- politiques par opération, appliquées à l'identique sur REST, GraphQL et gRPC ;
+- messages en français et en anglais.
+
+```bash
+cargo run --example descriptor_api --features graphql,grpc
+cargo test --example descriptor_api --features graphql,grpc
+```
+
+### 5. 🔥 [hot_module](./hot_module/main.rs) - Chargement à chaud depuis un VFS
+
+**Niveau** : Avancé  
+**Durée** : 15 minutes  
+**Fichiers** : 1 fichier
+
+Un module déclaratif (`warehouse`) est stocké dans un `ModuleStore` sur un VFS
+(`LocalFsVfs` par défaut, `InMemoryVfs` avec `--memory`), puis chargé dans un hôte
+**déjà construit** : routes REST, types GraphQL, entités gRPC et bundles i18n
+apparaissent au chargement et disparaissent au déchargement (404
+`this.module.not_found` sur toutes les surfaces).
+
+```bash
+cargo run --example hot_module --features graphql,grpc
+cargo run --example hot_module --features graphql,grpc -- --serve  # puis curl
+cargo test --example hot_module --features graphql,grpc
+```
+
 ## 🎓 Parcours d'Apprentissage Recommandé
 
 ### Étape 1 : Comprendre les Concepts (simple_api)

@@ -1,0 +1,62 @@
+sequenceDiagram
+%% name: module-descriptor-runtime-load
+%% PROUVE : rien encore pour la sequence (flux modules-runtime et vfs). Contrats prouves par la fondation :
+%%   resolve (tests resolve_*), check_compat (tag_reuse_move_and_unreserved_removal_detected), LiveCatalog
+%%   (readers_keep_their_snapshot_across_publication), VfsPath (vfs_path_rejects_dotdot_and_friends).
+%% SOURCES LUES : src/server/catalog.rs, src/storage/vfs/mod.rs, crates/this-descriptor/src/{resolve,compat,check}.rs.
+%% NON ETABLI : couche de repartition sous charge ; annulation des flux en fin de grace.
+    autonumber
+    actor Admin
+    participant AZ as Autorisation
+    participant RT as ModuleRuntime
+    participant MS as ModuleStore
+    participant RES as resolve
+    participant LD as ModuleLoader
+    participant CAT as LiveCatalog
+    participant DSP as Couche de repartition
+
+    Admin->>AZ: load billing
+    AZ->>AZ: politique this.module.load
+    alt refus
+        AZ-->>Admin: 403 this.auth.forbidden
+    end
+    AZ->>RT: load Stored billing
+    rect rgba(164,139,255,.15)
+    Note over RT,MS: Phase 1 - lecture et verification
+    RT->>MS: get billing None
+    MS->>MS: plus haute version, descriptor.json sans textes
+    MS->>MS: check profil Stored
+    MS-->>RT: ModuleDescriptor
+    end
+    rect rgba(164,139,255,.15)
+    Note over RT,RES: Phase 2 - resolution fail-closed
+    RT->>RES: candidats vs modules actifs
+    alt dependance, version, cycle, doublon, reference
+        RES-->>RT: Vec ContractError this.module.*
+        RT-->>Admin: Failed, rien n'est publie
+    else ok
+        RES-->>RT: ordre topologique
+    end
+    end
+    rect rgba(164,139,255,.15)
+    Note over RT,DSP: Phase 3 - un seul store atomique
+    RT->>LD: load source
+    LD->>LD: check profil Stored, politiques explicites
+    LD-->>RT: ModuleInterface, JsonEntityService par entite
+    RT->>RT: bundles i18n verifies avant toute publication
+    RT->>RT: envelopper les createurs ValidatingCreator
+    RT->>CAT: publish HostCatalog generation+1
+    Note over CAT,DSP: REST, GraphQL, gRPC, liens, autorisation lisent le meme instantane
+    Note over DSP: 🟠 proposee : couche tower de repartition, placee sous l'autorisation et avant le Router, lit le premier segment et consulte entity_of_plural (existant)
+    RT->>DSP: route pluriel vers le routeur du module (proposee)
+    RT-->>Admin: Active
+    end
+    Admin->>RT: unload billing
+    alt dependants actifs
+        RT-->>Admin: this.module.has_dependents, reste Active
+    else aucun
+        RT->>CAT: publish sans billing
+        DSP-->>Admin: nouvelles requetes 503 this.module.unavailable
+        Note over RT: Draining, grace 30 s puis annulation des flux
+        RT-->>Admin: Unloaded
+    end

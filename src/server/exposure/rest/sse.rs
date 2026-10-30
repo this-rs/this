@@ -131,6 +131,7 @@ fn matches_filter(envelope: &EventEnvelope, filter: &SseFilter) -> bool {
             FrameworkEvent::Cognitive(_) => false,
             // GDPR erasure events don't have entity_type filtering
             FrameworkEvent::GdprErasure { .. } => false,
+            FrameworkEvent::Module(_) => false,
         };
         if !matches {
             return false;
@@ -215,6 +216,12 @@ fn envelope_to_sse_event(envelope: &EventEnvelope) -> Option<Event> {
             "kind": "cognitive",
             "action": envelope.event.action(),
             "node_id": envelope.event.entity_id(),
+            "timestamp": envelope.timestamp.to_rfc3339(),
+        }),
+        FrameworkEvent::Module(m) => json!({
+            "kind": "module",
+            "action": envelope.event.action(),
+            "module": m,
             "timestamp": envelope.timestamp.to_rfc3339(),
         }),
         FrameworkEvent::GdprErasure {

@@ -126,14 +126,19 @@ pub(crate) async fn ensure_self_middleware(
     request: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> axum::response::Response {
-    use axum::response::IntoResponse;
-
+    use crate::core::errors as ce;
+    // Contract envelope (code / kind / message_key / fields, localized by `localize_errors`)
+    // PLUS the legacy keys `error` and `reason`.
     let refused = |status: StatusCode, reason: &str| {
-        (
-            status,
-            Json(json!({ "error": "forbidden", "reason": reason })),
-        )
-            .into_response()
+        let err = match status {
+            StatusCode::BAD_REQUEST => ce::bad_request(reason),
+            StatusCode::UNAUTHORIZED => ce::unauthenticated(),
+            _ => ce::forbidden("personal resource"),
+        };
+        let mut extras = serde_json::Map::new();
+        extras.insert("error".into(), json!("forbidden"));
+        extras.insert("reason".into(), json!(reason));
+        ce::error_response_with(err, Some(status), extras)
     };
 
     // Les deux collections portent leur identifiant en **second** segment :
@@ -192,6 +197,17 @@ pub(crate) async fn ensure_self_middleware(
     }
 
     next.run(request).await
+}
+
+/// 404 of the contract (`this.entity.not_found`), legacy `error` key kept.
+fn not_found_response(entity: &str, id: impl std::fmt::Display) -> axum::response::Response {
+    let mut extras = serde_json::Map::new();
+    extras.insert("error".into(), json!(format!("{entity} not found")));
+    crate::core::errors::error_response_with(
+        crate::core::errors::not_found(entity, id),
+        Some(StatusCode::NOT_FOUND),
+        extras,
+    )
 }
 
 async fn list_notifications(
@@ -263,16 +279,13 @@ async fn mark_all_as_read(
 async fn delete_notification(
     State(state): State<NotificationState>,
     Path((_user_id, notification_id)): Path<(String, Uuid)>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
     let deleted = state.notification_store.delete(&notification_id).await;
 
     if deleted {
-        (StatusCode::OK, Json(json!({ "deleted": true })))
+        (StatusCode::OK, Json(json!({ "deleted": true }))).into_response()
     } else {
-        (
-            StatusCode::NOT_FOUND,
-            Json(json!({ "error": "notification not found" })),
-        )
+        not_found_response("notification", notification_id)
     }
 }
 
@@ -356,16 +369,13 @@ async fn register_device_token(
 async fn unregister_device_token(
     State(state): State<NotificationState>,
     Path((user_id, token)): Path<(String, String)>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
     let removed = state.device_token_store.unregister(&user_id, &token).await;
 
     if removed {
-        (StatusCode::OK, Json(json!({ "unregistered": true })))
+        (StatusCode::OK, Json(json!({ "unregistered": true }))).into_response()
     } else {
-        (
-            StatusCode::NOT_FOUND,
-            Json(json!({ "error": "token not found" })),
-        )
+        not_found_response("device token", token)
     }
 }
 
