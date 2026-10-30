@@ -48,7 +48,7 @@ pub async fn resolve_identity(
     // hijacking). Explicit tokens (header, subprotocol, query) are not affected.
     if let Some((crate::core::auth::HandshakeSource::Cookie, _)) =
         crate::core::auth::handshake_token(headers, query)
-        && false // RED-PROOF: origin check disabled to demonstrate the failing test
+        && !crate::core::auth::origin_allowed(headers, &host.security.websocket_origins)
     {
         tracing::warn!(
             "WebSocket handshake: session cookie from an unlisted or absent Origin: refused"
