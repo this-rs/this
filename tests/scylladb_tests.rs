@@ -48,16 +48,28 @@ const TEST_KEYSPACE: &str = "this_test";
 
 static TEST_ENV: OnceLock<ScyllaTestEnv> = OnceLock::new();
 
+/// Serialises the one-time start: tests run in parallel and each saw an empty `TEST_ENV`, so
+/// several containers were started and all but one failed to bind the fixed CQL port.
+static INIT_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 async fn init_scylla_env() -> &'static ScyllaTestEnv {
+    let _init = INIT_LOCK.lock().await;
     if let Some(env) = TEST_ENV.get() {
         return env;
     }
 
     // Use Cassandra (CQL-compatible) for testing.
     // ScyllaDB requires AIO slots that are unavailable in Docker Desktop.
+    // Cassandra announces its broadcast RPC address to CQL drivers. Left to its default it
+    // announces the container-internal IP (172.17.x.x), which the host cannot reach, so the
+    // driver connects to the mapped port and then never becomes ready (measured on the CI
+    // runner: 90 retries, ~6200 s, then failure). Announce the host address and map the CQL
+    // port 1:1 so the advertised endpoint is the one the driver actually uses.
     let container = GenericImage::new("cassandra", "4.1")
         .with_exposed_port(9042.tcp())
         .with_wait_for(WaitFor::message_on_stdout("Startup complete"))
+        .with_mapped_port(9042, 9042.tcp())
+        .with_env_var("CASSANDRA_BROADCAST_RPC_ADDRESS", "127.0.0.1")
         .with_env_var("MAX_HEAP_SIZE", "256M")
         .with_env_var("HEAP_NEWSIZE", "50M")
         .with_startup_timeout(std::time::Duration::from_secs(120))
