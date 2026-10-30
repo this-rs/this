@@ -632,6 +632,17 @@ async fn ws_cookie_identity_requires_an_allowed_origin() {
     );
     // An explicit token needs no Origin.
     assert_eq!(handshake(addr, "/ws?access_token=reader", &[]).await, 101);
+    // An explicit Authorization header needs no Origin, even a foreign one.
+    assert_eq!(
+        handshake(
+            addr,
+            "/ws",
+            &[("authorization", "Bearer reader"), ("origin", "https://evil.example")]
+        )
+        .await,
+        101,
+        "header token"
+    );
 
     let listed = host_with_ws_origins(
         PolicyExpr::parse("any(role:reader, role:admin)").unwrap(),
@@ -724,4 +735,80 @@ async fn ws_handshake_token_is_decoded_and_never_logged() {
         "the capture works (refusals are logged): {text}"
     );
     assert!(!text.contains("s3cr3t"), "token leaked into logs: {text}");
+}
+
+async fn serve_graphql_ws(host: Arc<ServerHost>) -> std::net::SocketAddr {
+    let app = GraphQLExposure::build_router(host).expect("GraphQL served armed");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    addr
+}
+
+/// Cross-site WebSocket hijacking on graphql-ws (`graphql-transport-ws`): an identity
+/// that comes from the AMBIENT cookie `this_token` is accepted only from a listed
+/// `Origin` (default: refused, also when `Origin` is absent). An explicit
+/// `Authorization` header is not concerned.
+#[tokio::test]
+async fn graphql_ws_cookie_identity_requires_an_allowed_origin() {
+    let cookie = ("cookie", "this_token=reader");
+    // Default config: no listed origin → the cookie identity is refused.
+    let addr = serve_graphql_ws(host()).await;
+    assert_eq!(
+        handshake(addr, "/graphql/ws", &[cookie]).await,
+        403,
+        "no Origin"
+    );
+    assert_eq!(
+        handshake(
+            addr,
+            "/graphql/ws",
+            &[cookie, ("origin", "https://evil.example")]
+        )
+        .await,
+        403,
+        "unlisted Origin (empty list)"
+    );
+    // An explicit Authorization header needs no Origin, even a foreign one.
+    assert_eq!(
+        handshake(
+            addr,
+            "/graphql/ws",
+            &[("authorization", "Bearer reader"), ("origin", "https://evil.example")]
+        )
+        .await,
+        101,
+        "header token"
+    );
+
+    let listed = host_with_ws_origins(
+        PolicyExpr::parse("any(role:reader, role:admin)").unwrap(),
+        vec!["https://app.example".into()],
+    );
+    let addr = serve_graphql_ws(listed).await;
+    assert_eq!(
+        handshake(
+            addr,
+            "/graphql/ws",
+            &[cookie, ("origin", "https://evil.example")]
+        )
+        .await,
+        403,
+        "unlisted Origin"
+    );
+    assert_eq!(
+        handshake(addr, "/graphql/ws", &[cookie]).await,
+        403,
+        "absent Origin"
+    );
+    assert_eq!(
+        handshake(
+            addr,
+            "/graphql/ws",
+            &[cookie, ("origin", "https://app.example")]
+        )
+        .await,
+        101,
+        "listed Origin"
+    );
 }
