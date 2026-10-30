@@ -37,12 +37,12 @@ if [ ! -d "$VITE_DIR" ]; then
   mkdir -p "$VITE_DIR/src"
   cat > "$VITE_DIR/Cargo.toml" <<EOF
 [package]
-name = "vite-rs"
+name = "this-vite"
 version = "0.0.1"
 edition = "2021"
 EOF
   touch "$VITE_DIR/src/lib.rs"
-  echo "  stub: vite-rs"
+  echo "  stub: this-vite"
 fi
 
 echo "Local dep stubs ready."
