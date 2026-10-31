@@ -26,8 +26,11 @@
 //!
 //! ## Auto-wiring
 //!
-//! Added automatically when `auth.tenant_resolver: true` in config, or when
-//! the auth provider is present. Placed AFTER the auth middleware layer.
+//! Mounted whenever an authentication provider is configured
+//! (`server/exposure/rest/mod.rs`, beside `AuthLayer`) — there is no tenant
+//! flag, and never was: the `auth.tenant_resolver` this header used to announce
+//! exists nowhere in the configuration. Placed after (inner to) the auth
+//! middleware, so `AuthContext` is already in the extensions when it runs.
 
 use crate::core::auth::AuthContext;
 use crate::core::errors::http::ApiError;

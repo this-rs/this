@@ -13,7 +13,7 @@
 [![License](https://img.shields.io/crates/l/this-rs.svg)](LICENSE-MIT)
 [![codecov](https://codecov.io/gh/this-rs/this/graph/badge.svg)](https://codecov.io/gh/this-rs/this)
 
-**Website**: [this-rs.dev](https://this-rs.dev)
+**Website**: [this.rs](https://this.rs)
 
 ---
 
@@ -763,7 +763,7 @@ Entity (Base Trait)
 ✅ **Cognitive Signals** — Anomaly detection, co-change tracking, threshold-based routing  
 ✅ **Event Flows** — Declarative pipelines with webhooks, push notifications, and SSE  
 ✅ **Notifications** — In-app NotificationStore with read/unread tracking  
-✅ **Soft Deletes** — Built-in soft delete support  
+✅ **Soft Deletes** — Opt-in reversible delete: `ServerBuilder::with_soft_delete()` marks `deleted_at` instead of removing the row, hides marked rows on GraphQL / gRPC / link routes, and exposes `restore` / `purge` / `*_including_deleted` as the escape hatches. One contract for all 9 backends; for application-owned REST routes, wrap your store in `SoftDeleting::new(service)`. Off by default — turning it on changes what existing `deleted_at` values mean.
 ✅ **Dynamic Schema** — GraphQL schema auto-generated from entities  
 
 ---
