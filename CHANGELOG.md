@@ -29,6 +29,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   avec un locataire différent du jeton : c'est exactement le comportement qui
   laissait passer d'un locataire à l'autre.
 
+### Removed — `tenant.resolver` ne promet plus une politique inexistante
+- `TenantResolver::Header` et `::Subdomain` (`src/config/auth.rs`) étaient
+  déclarés, désérialisables et testés, mais **lus par aucun code** : écrire
+  `tenant.resolver: header` ne changeait rien et ne le disait pas. `Header`
+  nommait précisément la politique que le correctif de sécurité ci-dessus refuse
+  (un client qui choisit son locataire), et `Subdomain` décrit le locataire d'un
+  domaine servi, posé par le garde de domaine (`middleware::origin`) avant que ce
+  résolveur ne s'exécute. Les deux variantes sont retirées ; seule `jwt_claim`
+  est acceptée, la source réelle étant le jeton. **Rupture assumée** : une
+  configuration qui écrit `resolver: header` ou `resolver: subdomain` ne démarre
+  plus, et le message d'erreur nomme la valeur attendue. Les tests qui
+  verrouillaient les variantes mortes ont été **réécrits, pas supprimés** : ils
+  exigent désormais le refus, et échouent si une variante revient.
+- **Deux commentaires décrivaient l'état d'avant le correctif**, ils sont remis
+  au vrai. `middleware/tenant.rs` annonçait un montage conditionné par
+  `auth.tenant_resolver: true` — clé inexistante, le montage suit la présence
+  d'un provider d'authentification. `grpc/event_service.rs` affirmait que le
+  middleware HTTP accordait à l'en-tête « la même confiance, sans rien
+  confronter ».
+- **Ce qui reste ouvert est dit, pas masqué** : côté gRPC, l'en-tête
+  `x-tenant-id` seul ouvre toujours un flux sur le locataire qu'il nomme, faute
+  d'interceptor d'identité tonic au dépôt. Le remède est nommé dans le fichier ;
+  le fermer est une décision de politique, pas un correctif glissé.
+
 ## [0.0.10] - 2026-10-30
 
 ### Added — module-descriptor
