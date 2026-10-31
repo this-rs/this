@@ -378,6 +378,271 @@ async fn replace_checks_dependents_version_req() {
 }
 
 #[tokio::test]
+async fn replace_refuses_downgrade_and_same_version() {
+    let h = harness(false);
+    let rt = h.runtime();
+    rt.load(manifest(&billing("1.0.0", PolicyExpr::Authenticated)))
+        .await
+        .unwrap();
+
+    // Same version refused (a replacement must move forward).
+    let err = rt
+        .replace(manifest(&billing("1.0.0", PolicyExpr::Authenticated)))
+        .await
+        .unwrap_err();
+    assert_eq!(err.code.as_str(), "this.module.version_not_newer");
+    assert_eq!(rt.status("billing").await.unwrap().version, "1.0.0");
+
+    // Downgrade refused.
+    let err = rt
+        .replace(manifest(&billing("0.9.0", PolicyExpr::Authenticated)))
+        .await
+        .unwrap_err();
+    assert_eq!(err.code.as_str(), "this.module.version_not_newer");
+    assert_eq!(rt.status("billing").await.unwrap().version, "1.0.0");
+
+    // Upgrade accepted.
+    let s = rt
+        .replace(manifest(&billing("1.1.0", PolicyExpr::Authenticated)))
+        .await
+        .unwrap();
+    assert_eq!(
+        (s.version.as_str(), s.state),
+        ("1.1.0", ModuleState::Active)
+    );
+}
+
+#[tokio::test]
+async fn replace_refuses_incompatible_proto_tags() {
+    fn tagged(version: &str, a_tag: u32, b_tag: u32) -> ModuleDescriptor {
+        let mut d = ModuleDescriptor::new("tagged", version);
+        let mut e = EntityDesc::new("thing");
+        let mut fa = FieldDesc::new("a", FieldType::F64);
+        fa.proto_tag = Some(a_tag);
+        let mut fb = FieldDesc::new("b", FieldType::F64);
+        fb.proto_tag = Some(b_tag);
+        e.fields.push(fa);
+        e.fields.push(fb);
+        for op in Operation::CRUD {
+            e.permissions.ops.insert(op, PolicyExpr::Authenticated);
+        }
+        d.entities.push(e);
+        d.normalize();
+        d
+    }
+
+    let h = harness(false);
+    let rt = h.runtime();
+    rt.load(manifest(&tagged("1.0.0", 16, 17))).await.unwrap();
+
+    // Swapping tags 1 and 2 is incompatible: tags moved.
+    let err = rt
+        .replace(manifest(&tagged("1.1.0", 17, 16)))
+        .await
+        .unwrap_err();
+    assert_eq!(
+        err.code.as_str(),
+        "this.descriptor.invalid",
+        "issues: {:?}",
+        err.params
+    );
+    assert!(
+        err.params["issues"].as_str().unwrap_or("").contains("tag_"),
+        "expected a tag issue: {}",
+        err.params["issues"]
+    );
+    assert_eq!(
+        rt.status("tagged").await.unwrap().version,
+        "1.0.0",
+        "unchanged after a refused replace"
+    );
+
+    // Appending a NEW tag at the end is compatible.
+    let mut d = tagged("1.2.0", 16, 17);
+    let mut fc = FieldDesc::new("c", FieldType::F64);
+    fc.proto_tag = Some(18);
+    d.entities[0].fields.push(fc);
+    d.normalize();
+    let s = rt.replace(manifest(&d)).await.unwrap();
+    assert_eq!(
+        (s.version.as_str(), s.state),
+        ("1.2.0", ModuleState::Active)
+    );
+}
+
+// ── lifecycle hooks (init/start/stop/health) and dry-run ────────────────────
+
+struct LifecycleRoutes;
+impl EntityDescriptor for LifecycleRoutes {
+    fn entity_type(&self) -> &str {
+        "job"
+    }
+    fn plural(&self) -> &str {
+        "jobs"
+    }
+    fn build_routes(&self) -> Router {
+        Router::new().route("/jobs", axum::routing::get(|| async { "[]" }))
+    }
+}
+
+struct LifecycleModule {
+    inited: Arc<std::sync::atomic::AtomicBool>,
+    started: Arc<std::sync::atomic::AtomicBool>,
+    stopped: Arc<std::sync::atomic::AtomicBool>,
+    fail_init: bool,
+    healthy: bool,
+}
+impl Module for LifecycleModule {
+    fn name(&self) -> &str {
+        "lifecycle"
+    }
+    fn entity_types(&self) -> Vec<&str> {
+        vec!["job"]
+    }
+    fn links_config(&self) -> anyhow::Result<LinksConfig> {
+        Ok(LinksConfig {
+            entities: vec![],
+            links: vec![],
+            validation_rules: None,
+            events: None,
+            sinks: None,
+            auth: None,
+        })
+    }
+    fn register_entities(&self, registry: &mut EntityRegistry) {
+        registry.register(Box::new(LifecycleRoutes));
+    }
+    fn init(&self) -> anyhow::Result<()> {
+        if self.fail_init {
+            return Err(anyhow::anyhow!("init boom"));
+        }
+        self.inited.store(true, std::sync::atomic::Ordering::SeqCst);
+        Ok(())
+    }
+    fn start(&self) -> anyhow::Result<()> {
+        self.started
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        Ok(())
+    }
+    fn stop(&self) -> anyhow::Result<()> {
+        self.stopped
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        Ok(())
+    }
+    fn health(&self) -> anyhow::Result<()> {
+        if self.healthy {
+            Ok(())
+        } else {
+            Err(anyhow::anyhow!("unhealthy"))
+        }
+    }
+}
+
+type Flags = [Arc<std::sync::atomic::AtomicBool>; 3];
+
+fn lifecycle_module(fail_init: bool, healthy: bool) -> (Arc<LifecycleModule>, Flags) {
+    let inited = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let started = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let stopped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let m = Arc::new(LifecycleModule {
+        inited: inited.clone(),
+        started: started.clone(),
+        stopped: stopped.clone(),
+        fail_init,
+        healthy,
+    });
+    (m, [inited, started, stopped])
+}
+
+#[tokio::test]
+async fn hot_loaded_compiled_module_runs_lifecycle_hooks() {
+    let h = harness(false);
+    let rt = h.runtime();
+    let (m, flags) = lifecycle_module(false, true);
+    rt.load(ModuleSource::Compiled(m)).await.expect("load");
+    assert!(
+        flags[0].load(std::sync::atomic::Ordering::SeqCst),
+        "init ran"
+    );
+    assert!(
+        flags[1].load(std::sync::atomic::Ordering::SeqCst),
+        "start ran"
+    );
+    rt.health("lifecycle").await.expect("healthy");
+    rt.unload("lifecycle").await.expect("unload");
+    assert!(
+        flags[2].load(std::sync::atomic::Ordering::SeqCst),
+        "stop ran"
+    );
+}
+
+#[tokio::test]
+async fn failing_init_refuses_the_load() {
+    let h = harness(false);
+    let rt = h.runtime();
+    let (m, flags) = lifecycle_module(true, true);
+    let err = rt.load(ModuleSource::Compiled(m)).await.unwrap_err();
+    assert_eq!(err.code.as_str(), "this.module.unavailable");
+    assert!(
+        !flags[0].load(std::sync::atomic::Ordering::SeqCst),
+        "init did not complete"
+    );
+    // Recorded as Failed, not served.
+    assert!(matches!(
+        rt.status("lifecycle").await.unwrap().state,
+        ModuleState::Failed { .. }
+    ));
+}
+
+#[tokio::test]
+async fn dry_run_validates_without_publishing() {
+    let h = harness(false);
+    let rt = h.runtime();
+    rt.load(manifest(&billing("1.0.0", PolicyExpr::Authenticated)))
+        .await
+        .unwrap();
+
+    // A valid upgrade previews as `Resolved` and changes nothing.
+    let preview = rt
+        .dry_run(manifest(&billing("1.1.0", PolicyExpr::Authenticated)))
+        .await
+        .expect("dry-run ok");
+    assert_eq!(
+        (preview.version.as_str(), preview.state.clone()),
+        ("1.1.0", ModuleState::Resolved)
+    );
+    assert_eq!(
+        rt.status("billing").await.unwrap().version,
+        "1.0.0",
+        "not published"
+    );
+
+    // A downgrade is refused exactly as `replace` would refuse it.
+    let err = rt
+        .dry_run(manifest(&billing("0.9.0", PolicyExpr::Authenticated)))
+        .await
+        .unwrap_err();
+    assert_eq!(err.code.as_str(), "this.module.version_not_newer");
+    assert_eq!(rt.status("billing").await.unwrap().version, "1.0.0");
+
+    // A brand-new module previews `Resolved` and is NOT registered.
+    let mut fresh = ModuleDescriptor::new("fresh", "1.0.0");
+    fresh
+        .entities
+        .push(entity("widget", PolicyExpr::Authenticated));
+    fresh.normalize();
+    let preview = rt.dry_run(manifest(&fresh)).await.expect("dry-run new ok");
+    assert_eq!(
+        (preview.version.as_str(), preview.state.clone()),
+        ("1.0.0", ModuleState::Resolved)
+    );
+    assert!(
+        rt.status("fresh").await.is_err(),
+        "a dry-run must not register the module"
+    );
+}
+
+#[tokio::test]
 async fn duplicate_entity_or_plural_with_host_is_refused_and_nothing_published() {
     let h = harness(false);
     let rt = h.runtime();
@@ -601,6 +866,48 @@ async fn draining_times_out_and_cancels_streams() {
         h.call(Method::GET, "/streams", None, None).await.0,
         StatusCode::NOT_FOUND
     );
+}
+
+#[tokio::test]
+async fn unload_cancelled_mid_drain_reverts_to_active() {
+    let h = Arc::new(harness_with(
+        ServerBuilder::new()
+            .with_module_runtime_options(RuntimeOptions {
+                drain_grace: Duration::from_millis(500),
+                hot_load_enabled: true,
+                ..Default::default()
+            })
+            .offer_module(Streams("1.0.0")),
+        false,
+    ));
+    h.runtime().load_offered("streams").await.expect("load");
+
+    // Hold a stream in flight so the drain cannot go idle immediately.
+    let streaming = {
+        let h = h.clone();
+        tokio::spawn(async move { h.call(Method::GET, "/streams", None, None).await })
+    };
+    tokio::time::sleep(Duration::from_millis(40)).await;
+
+    // Start the unload, then drop its future mid-drain (before the grace elapses).
+    let unloading =
+        tokio::time::timeout(Duration::from_millis(40), h.runtime().unload("streams")).await;
+    assert!(
+        unloading.is_err(),
+        "unload must still be draining after 40ms"
+    );
+
+    // The drop reverted the module to Active, not stuck Draining (503).
+    assert_eq!(
+        h.runtime().status("streams").await.unwrap().state,
+        ModuleState::Active,
+        "a cancelled unload must not leave the module stuck in Draining"
+    );
+
+    // A later unload works normally (the module was not poisoned).
+    streaming.abort();
+    let st = h.runtime().unload("streams").await.expect("unload retry");
+    assert_eq!(st.state, ModuleState::Unloaded);
 }
 
 // ── admin interface and policies ───────────────────────────────────────────
