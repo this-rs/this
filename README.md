@@ -492,7 +492,7 @@ protocol, plus one status per protocol — a client branches on the code, not on
 | `this.validation.*` | `required`, `type_mismatch`, `positive`, `string_length`, `unknown_field`, `read_only`, `custom` | 422 · `INVALID_ARGUMENT` · `BAD_USER_INPUT` |
 | `this.query.*` | `malformed_filter`, `field_not_filterable`, `field_not_sortable`, `too_large` | 400 · `INVALID_ARGUMENT` · `BAD_USER_INPUT` |
 | `this.auth.*` | `unauthenticated`, `forbidden` | 401 / 403 · `UNAUTHENTICATED` / `PERMISSION_DENIED` · `UNAUTHENTICATED` / `FORBIDDEN` |
-| `this.module.*` | `not_found`, `duplicate_entity`, `duplicate_plural`, `identity_mismatch`, `plural_mismatch`, `dependency_missing`, `dependency_version`, `hot_load_disabled`, `has_dependents`, `unavailable` | 404 / 409 / 400 by code |
+| `this.module.*` | `not_found`, `duplicate_entity`, `duplicate_plural`, `identity_mismatch`, `plural_mismatch`, `dependency_missing`, `dependency_version`, `hot_load_disabled`, `has_dependents`, `unavailable`, `version_not_newer` | 404 / 409 / 400 by code |
 | `this.descriptor.*` | `invalid`, `declared_twice`, `tag_reused`, `syntax_unsupported` | build / check time |
 | `this.transport.*` | `bad_request`, `not_found`, `method_not_allowed`, `missing_arg` | 400 / 404 / 405 |
 
@@ -560,6 +560,17 @@ let app = ServerBuilder::new()
 
 - An unload **drains** in-flight requests for up to 30 s (`drain_grace`), then cancels them; afterwards the
   module's plural answers 404 `this.module.not_found` — a tombstone, not a silent 400.
+- A **cancelled unload** (client disconnect mid-drain) reverts the module to `active` instead of leaving it
+  stuck `draining` (503) with no legal transition out.
+- A **`replace` is forward-only**: a downgrade or identical version is refused (`this.module.version_not_newer`),
+  and proto-tag compatibility (`check_compat`, the same rule the store enforces) is checked before publishing —
+  a hot swap cannot silently rewrite the wire contract.
+- A **compiled** module (`ModuleSource::Compiled`) runs its `init` then `start` lifecycle hooks before it is
+  served; a failure refuses the load and records the module `failed`. `unload` / `replace` call `stop`.
+  `ModuleRuntime::health(name)` probes the module's `health()` without touching the served routes.
+- `ModuleRuntime::dry_run(source)` validates a load or replace (resolution, version ordering, proto-tag
+  compatibility) **without publishing anything** — a sandbox for a module change, returning the status it
+  would get (`resolved`).
 - With `with_hot_load_enabled(true)` absent, every load/unload and the admin interface answer
   `this.module.hot_load_disabled`.
 - Runtime modules are served over REST by the runtime dispatch layer; GraphQL, gRPC and WebSocket do not
