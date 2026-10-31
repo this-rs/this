@@ -5,6 +5,30 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Security
+- **Le client ne choisit plus son locataire.** `tenant_resolver_middleware`
+  (`src/server/middleware/tenant.rs`) lisait `x-tenant-id` **avant** `AuthContext`,
+  puis `?tenant_id=`, sans jamais confronter la valeur réclamée au jeton. Un
+  utilisateur authentifié du locataire A qui envoyait `X-Tenant-Id: <locataire B>`
+  recevait un `TenantContext` de B — la valeur dont les gestionnaires en aval se
+  servent pour filtrer leurs lectures. L'en-tête est de plus dans `allow_headers`
+  (`config/server.rs`), donc un navigateur pouvait l'envoyer ; le paramètre de
+  requête, lui, ne demandait **aucune identité**. Le middleware est auto-monté dès
+  qu'un provider d'authentification est présent : la faille était dans la
+  configuration par défaut.
+  Désormais le jeton prime ; une valeur **contraire** est un refus
+  `this.auth.forbidden` (403, `reason: tenant_mismatch`) et une valeur sans
+  identité derrière elle aussi (403, `reason: tenant_without_identity`) — le refus
+  n'écho pas le locataire demandé. Seule exception : `AuthContext::Admin`, qui peut
+  désigner un locataire (l'usage « impersonation » visé à l'origine, cette fois
+  vérifié). 4 tests de régression nomment l'attaque, dont un qui vérifie que le
+  corps du refus ne révèle pas le locataire visé.
+  **Rupture pour un déploiement qui s'appuyait sur l'en-tête** sans identité ou
+  avec un locataire différent du jeton : c'est exactement le comportement qui
+  laissait passer d'un locataire à l'autre.
+
 ## [0.0.10] - 2026-10-30
 
 ### Added — module-descriptor

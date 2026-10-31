@@ -4,40 +4,25 @@
 //! and inserts a `TenantContext` into request extensions. This enables
 //! downstream handlers to access the tenant ID without dealing with auth details.
 //!
-//! ## Resolution order
+//! ## Resolution order — the token speaks, the client does not
 //!
-//! 1. `X-Tenant-Id` header (explicit override, e.g. for admin impersonation)
-//! 2. `AuthContext.tenant_id()` from JWT claims
-//! 3. `?tenant_id=` query parameter (fallback for dev/testing)
+//! 1. `AuthContext` from the auth middleware: the tenant the credential carries;
+//! 2. `X-Tenant-Id` header or `?tenant_id=` query, honoured **only** when it
+//!    agrees with the credential, or when the caller is an administrator.
 //!
-//! If no tenant can be resolved, the request proceeds without a `TenantContext`
-//! (public/anonymous access). Handlers that require a tenant should extract
-//! `Extension<TenantContext>` and will get a 500 if it's missing, or use
-//! `Option<Extension<TenantContext>>` for optional tenant support.
+//! ## ⚠️ 2026-10-31 — fixed: the client used to choose its own tenant
 //!
-//! ## ⚠️ CONSTAT (2026-10-01) — l'en-tête passe AVANT l'identité, et rien ne les confronte
+//! Until that date the order was the opposite: `x-tenant-id` (then `?tenant_id=`)
+//! was read **before** `AuthContext`, and nothing compared the claimed value with
+//! the token. An authenticated user of tenant A sending `X-Tenant-Id: <tenant B>`
+//! received a `TenantContext` for B — the value downstream handlers filter reads
+//! by. The header is also in `allow_headers` (`config/server.rs`), so a browser
+//! could send it. The query parameter was worse: it required no identity at all.
 //!
-//! L'ordre ci-dessus donne au **client** le dernier mot sur le locataire :
-//! `x-tenant-id` est lu avant `AuthContext`, et **aucune vérification** ne
-//! confronte la valeur réclamée à celle du jeton (ni égalité, ni rôle
-//! d'administration). Un utilisateur authentifié du locataire A peut donc
-//! désigner le locataire B et recevoir un `TenantContext` de B — celui dont les
-//! gestionnaires en aval se servent pour filtrer leurs lectures. L'en-tête est
-//! de plus **autorisé en CORS** (`config/server.rs`, `allow_headers`) : un
-//! navigateur peut l'envoyer sans difficulté.
-//!
-//! Le commentaire d'origine dit « admin impersonation » : c'est l'usage
-//! **visé**, mais il n'est pas **vérifié**. Côté gRPC, le même choix a été
-//! corrigé le même jour, et autrement : le flux d'événements refuse toute
-//! portée absente, et l'identité y **prime** sur l'en-tête
-//! (`exposure/grpc/event_service.rs`).
-//!
-//! Fermer ce chemin demande de trancher une politique d'ensemble, pas de
-//! bricoler ici : honorer l'en-tête **seulement** pour un administrateur
-//! authentifié, ou seulement derrière une option déclarée
-//! (`security.tenant.trust_header`). Le constat est écrit au point qui décide,
-//! pour que la décision se prenne — plutôt que d'être découverte par celui qui
-//! la subira.
+//! Now the credential wins. A **contradicting** value is a `this.auth.forbidden`
+//! refusal (403), not a preference; a value with no credential behind it is the
+//! same refusal. The single exception is `AuthContext::Admin`, which may name a
+//! tenant — the original "impersonation" intent, this time actually checked.
 //!
 //! ## Auto-wiring
 //!
@@ -45,14 +30,29 @@
 //! the auth provider is present. Placed AFTER the auth middleware layer.
 
 use crate::core::auth::AuthContext;
+use crate::core::errors::http::ApiError;
 use crate::core::tenant::TenantContext;
-use axum::{extract::Request, middleware::Next, response::Response};
+use crate::descriptor::ContractError;
+use crate::descriptor::framework::codes;
+use axum::response::{IntoResponse, Response};
+use axum::{extract::Request, middleware::Next};
 use uuid::Uuid;
+
+/// What the request asks for, once the credential has had its say.
+enum Resolution {
+    /// Nobody names a tenant: the request proceeds without a `TenantContext`.
+    None,
+    /// One tenant, agreed by the credential (or designated by an administrator).
+    Tenant(Uuid),
+    /// The request names a tenant it has no right to use.
+    Forbidden(&'static str),
+}
 
 /// Axum middleware function that resolves the tenant context
 ///
-/// This extracts the tenant ID from multiple sources (header, auth context,
-/// query param) and inserts a `TenantContext` into request extensions.
+/// This extracts the tenant ID from the credential, then from an explicit
+/// designation that the credential allows, and inserts a `TenantContext` into
+/// request extensions. A contradicting designation is refused.
 pub async fn tenant_resolver_middleware(mut request: Request, next: Next) -> Response {
     // **Un locataire déjà posé est respecté.** Le garde de domaine
     // (`middleware::origin`) pose celui du domaine servi quand la configuration
@@ -62,33 +62,33 @@ pub async fn tenant_resolver_middleware(mut request: Request, next: Next) -> Res
         return next.run(request).await;
     }
 
-    let tenant_id = resolve_tenant_id(&request);
-
-    if let Some(tid) = tenant_id {
-        request.extensions_mut().insert(TenantContext::new(tid));
+    match resolve_tenant(&request) {
+        Resolution::None => {}
+        Resolution::Tenant(tid) => {
+            request.extensions_mut().insert(TenantContext::new(tid));
+        }
+        Resolution::Forbidden(reason) => {
+            return ApiError(
+                ContractError::framework(codes::AUTH_FORBIDDEN).with_param("reason", reason),
+            )
+            .into_response();
+        }
     }
 
     next.run(request).await
 }
 
-/// Resolve tenant ID from the request using multiple sources
-fn resolve_tenant_id(request: &Request) -> Option<Uuid> {
-    // 1. Explicit header override (for admin impersonation or cross-tenant ops)
+/// The tenant the request *asks* for, by header or query parameter.
+///
+/// Asking is not getting: `resolve_tenant` decides whether the ask is allowed.
+fn requested_tenant(request: &Request) -> Option<Uuid> {
     if let Some(header_value) = request.headers().get("x-tenant-id")
         && let Ok(s) = header_value.to_str()
-        && let Ok(tid) = Uuid::parse_str(s)
+        && let Ok(tid) = Uuid::parse_str(s.trim())
     {
         return Some(tid);
     }
 
-    // 2. AuthContext from auth middleware
-    if let Some(auth) = request.extensions().get::<AuthContext>()
-        && let Some(tid) = auth.tenant_id()
-    {
-        return Some(tid);
-    }
-
-    // 3. Query parameter fallback
     if let Some(query) = request.uri().query() {
         for pair in query.split('&') {
             if let Some(value) = pair.strip_prefix("tenant_id=")
@@ -100,6 +100,35 @@ fn resolve_tenant_id(request: &Request) -> Option<Uuid> {
     }
 
     None
+}
+
+/// Decide the tenant of a request: the credential first, the client only where
+/// the credential allows it.
+fn resolve_tenant(request: &Request) -> Resolution {
+    let requested = requested_tenant(request);
+    let identity = request.extensions().get::<AuthContext>();
+
+    // An administrator carries no tenant of its own but may designate one:
+    // this is the "impersonation" the header was originally meant for.
+    if identity.is_some_and(|auth| auth.is_admin()) {
+        return match requested.or_else(|| identity.and_then(|auth| auth.tenant_id())) {
+            Some(tid) => Resolution::Tenant(tid),
+            None => Resolution::None,
+        };
+    }
+
+    let from_token = identity.and_then(|auth| auth.tenant_id());
+
+    match (requested, from_token) {
+        (None, None) => Resolution::None,
+        (None, Some(tid)) => Resolution::Tenant(tid),
+        // Asking for the tenant you already are is not a request at all.
+        (Some(tid), Some(same)) if tid == same => Resolution::Tenant(tid),
+        // Asking for another tenant with a credential that does not carry it.
+        (Some(_), Some(_)) => Resolution::Forbidden("tenant_mismatch"),
+        // Asking for a tenant with no credential at all.
+        (Some(_), None) => Resolution::Forbidden("tenant_without_identity"),
+    }
 }
 
 #[cfg(test)]
@@ -140,36 +169,88 @@ mod tests {
         assert_eq!(body, "no-tenant");
     }
 
+    /// A router that injects a credential before the tenant resolver runs,
+    /// mirroring the production layer order.
+    fn app_with_identity(auth: AuthContext) -> Router {
+        Router::new()
+            .route("/test", get(echo_tenant))
+            .layer(middleware::from_fn(tenant_resolver_middleware))
+            .layer(middleware::from_fn(
+                move |mut req: Request<Body>, next: Next| {
+                    let auth = auth.clone();
+                    async move {
+                        req.extensions_mut().insert(auth);
+                        next.run(req).await
+                    }
+                },
+            ))
+    }
+
+    fn user_of(tenant: Uuid) -> AuthContext {
+        AuthContext::User {
+            user_id: Uuid::new_v4(),
+            tenant_id: tenant,
+            roles: vec![],
+        }
+    }
+
     #[tokio::test]
-    async fn test_tenant_from_header() {
+    async fn test_tenant_from_header_without_identity_is_refused() {
+        // Regression: this used to answer `tenant:<claimed>`. Anyone could name
+        // a tenant by setting a header, with no credential at all.
         let app = test_app();
-        let tid = Uuid::new_v4();
+        let claimed = Uuid::new_v4();
         let response = app
             .oneshot(
                 Request::builder()
                     .uri("/test")
-                    .header("x-tenant-id", tid.to_string())
+                    .header("x-tenant-id", claimed.to_string())
                     .body(Body::empty())
                     .unwrap(),
             )
             .await
             .unwrap();
 
-        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
         let body = axum::body::to_bytes(response.into_body(), usize::MAX)
             .await
             .unwrap();
-        assert_eq!(body, format!("tenant:{}", tid));
+        let text = String::from_utf8_lossy(&body);
+        assert!(
+            text.contains("this.auth.forbidden"),
+            "the refusal must name its code, got {text}"
+        );
+        assert!(text.contains("tenant_without_identity"), "got {text}");
     }
 
     #[tokio::test]
-    async fn test_tenant_from_query_param() {
+    async fn test_tenant_from_query_param_without_identity_is_refused() {
+        // Same hole through the query string, which required nothing at all.
         let app = test_app();
-        let tid = Uuid::new_v4();
+        let claimed = Uuid::new_v4();
         let response = app
             .oneshot(
                 Request::builder()
-                    .uri(format!("/test?tenant_id={}", tid))
+                    .uri(format!("/test?tenant_id={claimed}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn test_header_matching_the_token_is_honoured() {
+        let token_tenant = Uuid::new_v4();
+        let app = app_with_identity(user_of(token_tenant));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/test")
+                    .header("x-tenant-id", token_tenant.to_string())
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -180,7 +261,63 @@ mod tests {
         let body = axum::body::to_bytes(response.into_body(), usize::MAX)
             .await
             .unwrap();
-        assert_eq!(body, format!("tenant:{}", tid));
+        assert_eq!(body, format!("tenant:{token_tenant}"));
+    }
+
+    #[tokio::test]
+    async fn test_header_contradicting_the_token_is_refused() {
+        // The actual attack: a valid user of tenant A asking for tenant B.
+        let my_tenant = Uuid::new_v4();
+        let other_tenant = Uuid::new_v4();
+        let app = app_with_identity(user_of(my_tenant));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/test")
+                    .header("x-tenant-id", other_tenant.to_string())
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let text = String::from_utf8_lossy(&body);
+        assert!(text.contains("tenant_mismatch"), "got {text}");
+        assert!(
+            !text.contains(&other_tenant.to_string()),
+            "the refusal must not echo the tenant that was asked for: {text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_admin_may_designate_a_tenant() {
+        // The documented intent of the header: verified impersonation.
+        let target = Uuid::new_v4();
+        let app = app_with_identity(AuthContext::Admin {
+            admin_id: Uuid::new_v4(),
+        });
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/test")
+                    .header("x-tenant-id", target.to_string())
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(body, format!("tenant:{target}"));
     }
 
     #[tokio::test]
@@ -219,25 +356,29 @@ mod tests {
 
     #[tokio::test]
     async fn test_header_takes_priority_over_query() {
-        let app = test_app();
-        let header_tid = Uuid::new_v4();
+        // Header precedence is kept, but both are now checked against the
+        // credential: here the header agrees with it and the query does not, so
+        // the header wins and the query is never consulted.
+        let token_tenant = Uuid::new_v4();
         let query_tid = Uuid::new_v4();
+        let app = app_with_identity(user_of(token_tenant));
 
         let response = app
             .oneshot(
                 Request::builder()
-                    .uri(format!("/test?tenant_id={}", query_tid))
-                    .header("x-tenant-id", header_tid.to_string())
+                    .uri(format!("/test?tenant_id={query_tid}"))
+                    .header("x-tenant-id", token_tenant.to_string())
                     .body(Body::empty())
                     .unwrap(),
             )
             .await
             .unwrap();
 
+        assert_eq!(response.status(), StatusCode::OK);
         let body = axum::body::to_bytes(response.into_body(), usize::MAX)
             .await
             .unwrap();
-        assert_eq!(body, format!("tenant:{}", header_tid));
+        assert_eq!(body, format!("tenant:{token_tenant}"));
     }
 
     #[tokio::test]
