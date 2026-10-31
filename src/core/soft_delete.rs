@@ -345,7 +345,7 @@ mod tests {
         }
     }
 
-    fn service() -> SoftDeleting<InMemoryDataService<Markable>> {
+    pub(super) fn service() -> SoftDeleting<InMemoryDataService<Markable>> {
         SoftDeleting::new(InMemoryDataService::new())
     }
 
@@ -1064,7 +1064,7 @@ mod delegation_tests {
     use super::*;
     use crate::storage::in_memory::InMemoryDataService;
 
-    fn service() -> SoftDeleting<InMemoryDataService<Markable>> {
+    pub(super) fn service() -> SoftDeleting<InMemoryDataService<Markable>> {
         SoftDeleting::new(InMemoryDataService::new())
     }
 
@@ -1265,5 +1265,107 @@ mod query_tests {
         let tail = fetcher.list_as_json(Some(5), Some(95)).await.unwrap();
         assert!(tail.len() <= 5);
         assert!(tail.iter().all(|d| !is_hidden(d)));
+    }
+}
+
+#[cfg(test)]
+mod remaining_surface_tests {
+    //! Paths a green build would never complain about: a delegation that was
+    //! never called, a reinstate of something absent, a sort dropped by the
+    //! query rewrite.
+
+    use super::tests::{Markable, service};
+    use super::*;
+    use crate::descriptor::SortDir;
+
+    #[tokio::test]
+    async fn restore_and_purge_of_an_absent_id_are_not_errors() {
+        let svc = service();
+        let absent = Uuid::new_v4();
+
+        assert!(
+            svc.restore::<Markable>(&absent).await.unwrap().is_none(),
+            "restoring something that is not there answers None, not an error"
+        );
+        svc.purge::<Markable>(&absent)
+            .await
+            .expect("purging something that is not there is a no-op, not a failure");
+    }
+
+    #[tokio::test]
+    async fn the_query_rewrite_keeps_the_callers_sort_and_page() {
+        // The decorator adds a filter; it must not silently drop the ordering or
+        // the pagination the caller asked for.
+        let q = Query::new().sort_by("name", SortDir::Desc).page(2, 10);
+        let injected = with_hidden_filter(&q);
+
+        assert_eq!(injected.sort.len(), 1, "the sort survives");
+        assert_eq!(injected.sort[0].field, "name");
+        assert_eq!(injected.page, q.page, "the page survives");
+        assert_ne!(injected.filter, q.filter, "and the filter grew");
+    }
+
+    #[tokio::test]
+    async fn the_creator_hands_create_and_update_straight_through() {
+        use std::collections::HashMap;
+        use std::sync::Mutex;
+
+        struct Creator {
+            docs: Mutex<HashMap<Uuid, serde_json::Value>>,
+        }
+
+        #[async_trait]
+        impl EntityFetcher for Creator {
+            async fn fetch_as_json(&self, id: &Uuid) -> Result<serde_json::Value> {
+                self.docs
+                    .lock()
+                    .unwrap()
+                    .get(id)
+                    .cloned()
+                    .ok_or_else(|| anyhow::anyhow!("not found"))
+            }
+        }
+
+        #[async_trait]
+        impl EntityCreator for Creator {
+            async fn create_from_json(&self, data: serde_json::Value) -> Result<serde_json::Value> {
+                Ok(data)
+            }
+            async fn update_from_json(
+                &self,
+                id: &Uuid,
+                data: serde_json::Value,
+            ) -> Result<serde_json::Value> {
+                self.docs.lock().unwrap().insert(*id, data.clone());
+                Ok(data)
+            }
+            async fn delete(&self, id: &Uuid) -> Result<()> {
+                self.docs.lock().unwrap().remove(id);
+                Ok(())
+            }
+        }
+
+        let inner = Arc::new(Creator {
+            docs: Mutex::new(HashMap::new()),
+        });
+        let creator = SoftDeleteCreator::new(inner.clone(), inner.clone());
+
+        let created = creator
+            .create_from_json(serde_json::json!({ "name": "fresh" }))
+            .await
+            .expect("create delegates");
+        assert_eq!(created["name"], "fresh");
+
+        let id = Uuid::new_v4();
+        let updated = creator
+            .update_from_json(&id, serde_json::json!({ "name": "renamed" }))
+            .await
+            .expect("update delegates");
+        assert_eq!(updated["name"], "renamed");
+        assert_eq!(
+            inner.docs.lock().unwrap().get(&id).unwrap()["name"],
+            "renamed",
+            "update reached the store, it was not swallowed"
+        );
     }
 }
