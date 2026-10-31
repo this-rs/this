@@ -966,6 +966,22 @@ impl ServerBuilder {
         // Descriptors: checked, identity-checked, resolved (topological, semver, cycles,
         // duplicates). Without any descriptor this is a no-op (historical behaviour).
         let (descriptor_set, order) = self.resolve_descriptors()?;
+        // Boot lifecycle of the built-in modules: `init` then `start`, in resolved order.
+        // A failure is RECORDED and the host still starts (the point of "start despite a
+        // module in error"); `ServerHost::health` reports the degraded module. The hooks
+        // are synchronous, so they run here, at boot.
+        let mut module_failures: Vec<(String, String)> = Vec::new();
+        for &i in &order {
+            let m = &self.modules[i];
+            if let Err(e) = m.init().and_then(|_| m.start()) {
+                tracing::warn!(
+                    module = %m.name(),
+                    error = %e,
+                    "module lifecycle failed at boot: recorded, the host still starts"
+                );
+                module_failures.push((m.name().to_string(), e.to_string()));
+            }
+        }
 
         let described_idx: std::collections::BTreeSet<usize> = (0..self.modules.len())
             .filter(|&i| {
@@ -1060,6 +1076,7 @@ impl ServerBuilder {
             fetchers_map,
             creators_map,
         )?;
+        host.module_failures = module_failures;
         if !descriptor_set.is_empty() {
             host = host.with_descriptors(descriptor_set);
         }
@@ -1854,6 +1871,48 @@ mod tests {
         assert_eq!(host.config.entities.len(), 1);
         assert_eq!(host.config.entities[0].singular, "order");
         assert!(host.event_bus.is_none());
+    }
+
+    struct BadInitModule;
+
+    impl Module for BadInitModule {
+        fn name(&self) -> &str {
+            "badinit"
+        }
+        fn entity_types(&self) -> Vec<&str> {
+            vec![]
+        }
+        fn links_config(&self) -> anyhow::Result<LinksConfig> {
+            Ok(LinksConfig {
+                entities: vec![],
+                links: vec![],
+                validation_rules: None,
+                events: None,
+                sinks: None,
+                auth: None,
+            })
+        }
+        fn register_entities(&self, _registry: &mut EntityRegistry) {}
+        fn init(&self) -> anyhow::Result<()> {
+            Err(anyhow::anyhow!("boom"))
+        }
+    }
+
+    #[test]
+    fn test_boot_lifecycle_failure_is_recorded_not_fatal() {
+        let host = ServerBuilder::new()
+            .with_link_service(InMemoryLinkService::new())
+            .register_module(StubModule::single_entity())
+            .expect("register good")
+            .register_module(BadInitModule)
+            .expect("register bad")
+            .build_host()
+            .expect("the host must start despite a module whose init fails");
+
+        assert_eq!(host.health("badinit"), Err("boom".to_string()));
+        assert_eq!(host.module_failures().len(), 1);
+        // The other module and the host are unaffected.
+        assert_eq!(host.config.entities.len(), 1);
     }
 
     #[test]
