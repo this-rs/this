@@ -856,11 +856,25 @@ mod creator_tests {
     }
 }
 
-#[cfg(test)]
+// `guarded_creator` only exists when one of the JSON surfaces is compiled in.
+#[cfg(all(
+    test,
+    any(feature = "graphql", feature = "grpc", feature = "websocket")
+))]
 mod host_tests {
     use super::*;
+
+    /// The guard judges policies; a deletion needs a credential that satisfies
+    /// them, and this test is about the wiring, not about the policy engine.
+    fn admin() -> AuthContext {
+        AuthContext::Admin {
+            admin_id: Uuid::new_v4(),
+        }
+    }
     use crate::config::LinksConfig;
     use crate::core::Module;
+    use crate::core::auth::AuthContext;
+    use crate::descriptor::Operation;
     use crate::server::builder::ServerBuilder;
     use crate::server::entity_registry::EntityRegistry;
     use std::collections::HashMap;
@@ -981,26 +995,26 @@ mod host_tests {
         store.insert(id, "widget");
         let host = host_with(store.clone());
 
-        host.entity_creators["widget"]
-            .delete(&id)
-            .await
-            .expect("delete through the host");
+        // Through the guarded accessors -- the path GraphQL, gRPC and the link
+        // routes actually take, and the only one the structural test in
+        // `exposure::guard` allows outside the guard itself.
+        let creator = host
+            .guarded_creator("widget", Operation::Delete, &admin())
+            .expect("guarded creator");
+        creator.delete(&id).await.expect("delete through the host");
 
         let row = store.snapshot(&id).expect("the row must still be stored");
         assert!(!row["deleted_at"].is_null(), "delete must mark: {row}");
         assert_eq!(row["name"], "widget", "the rest of the row is intact");
 
+        let fetcher = host
+            .guarded_fetcher("widget", Operation::Get, &admin())
+            .expect("guarded fetcher");
         assert!(
-            host.entity_fetchers["widget"]
-                .fetch_as_json(&id)
-                .await
-                .is_err(),
+            fetcher.fetch_as_json(&id).await.is_err(),
             "a marked row must read as absent through the host"
         );
-        let listed = host.entity_fetchers["widget"]
-            .list_as_json(None, None)
-            .await
-            .unwrap();
+        let listed = fetcher.list_as_json(None, None).await.unwrap();
         assert!(
             listed.is_empty(),
             "a marked row must not be listed: {listed:?}"
@@ -1024,7 +1038,10 @@ mod host_tests {
             .build_host()
             .expect("build host");
 
-        host.entity_creators["widget"].delete(&id).await.unwrap();
+        let creator = host
+            .guarded_creator("widget", Operation::Delete, &admin())
+            .expect("guarded creator");
+        creator.delete(&id).await.unwrap();
         assert!(
             store.snapshot(&id).is_none(),
             "without the option, delete still removes the row"
