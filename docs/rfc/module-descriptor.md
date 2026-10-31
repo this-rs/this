@@ -71,7 +71,7 @@ Racine commune : **il n'existe aucune description typée et sérialisable d'un m
 Décision inchangée (crate séparé, même dépôt). Changements v2 :
 
 - `[workspace] members = [".", "crates/this-descriptor"]` dans le `Cargo.toml` de `this` ;
-  `this-descriptor = { version = "0.1", path = "crates/this-descriptor", features = ["yaml","pattern","http"] }`.
+  `this-descriptor = { version = "0.0.1", path = "crates/this-descriptor", features = ["yaml","pattern","http"] }`.
   **Toujours `version` + `path`** (publiable). `this-cli` : même forme (`version` + `path`), et sa CI fait un
   checkout de `this-rs/this` au bon chemin (flux cli).
 - Dépendances : `serde`, `serde_json`, `thiserror`, `semver`, **`chrono`** (`default-features=false`, `alloc` :
