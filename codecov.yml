@@ -1,0 +1,34 @@
+# Codecov policy.
+#
+# Why this file exists: without it, codecov defaults `patch` coverage to
+# `target: auto`, i.e. the project's own average -- 91.93% at the time of
+# writing. Every pull request that adds test scaffolding therefore failed the
+# patch check regardless of how well the production code was covered, because a
+# test fixture must implement trait methods the tests never call
+# (`resource_name`, `entity_type`, ...): those lines are in the diff and can
+# never be executed.
+#
+# Observed on #79 and #80: both green on every GitHub Actions job (including
+# `Code Coverage`, which runs llvm-cov for real), both red on this one status.
+# A gate that fails every PR teaches people to ignore it.
+#
+# The policy below keeps the pressure where it is useful:
+#   - new code must reach 80% (absolute) -- a real bar, not a formality;
+#   - the project as a whole may not lose more than 1 percentage point;
+#   - the comment is posted on the PR but does not block on a small dip.
+
+coverage:
+  status:
+    project:
+      default:
+        target: auto
+        threshold: 1%
+    patch:
+      default:
+        target: 80%
+        threshold: 0%
+
+comment:
+  layout: "reach,diff,flags,tree"
+  behavior: default
+  require_changes: false
