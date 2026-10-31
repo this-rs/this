@@ -248,6 +248,31 @@ pub trait Module: Send + Sync {
     fn bundles(&self) -> Vec<crate::descriptor::MessageBundle> {
         Vec::new()
     }
+
+    /// Lifecycle: called once, before a hot-loaded compiled module is served (by
+    /// `ModuleRuntime::load` / `replace`). Returning an error refuses the load and records
+    /// the module `Failed`. Default: no-op. Built-in modules are not called here (the host
+    /// is built synchronously by `build_host`).
+    fn init(&self) -> Result<()> {
+        Ok(())
+    }
+
+    /// Lifecycle: called after [`Module::init`], once the module is active and served.
+    fn start(&self) -> Result<()> {
+        Ok(())
+    }
+
+    /// Lifecycle: called when the module stops serving (unload / replace). Best effort:
+    /// an error is logged, not propagated. Default: no-op.
+    fn stop(&self) -> Result<()> {
+        Ok(())
+    }
+
+    /// Health probe: `Ok(())` = healthy, `Err(..)` = degraded. Read by
+    /// `ModuleRuntime::health` without touching the served routes. Default: healthy.
+    fn health(&self) -> Result<()> {
+        Ok(())
+    }
 }
 
 #[cfg(test)]

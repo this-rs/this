@@ -192,6 +192,10 @@ pub struct ServerHost {
     /// (REST `localize_errors`, GraphQL handler, gRPC services). Runtime modules add their
     /// bundles on load and remove them on unload.
     pub locales: crate::core::i18n::LocaleCatalog,
+    /// Built-in modules whose `init` / `start` hook failed at boot (name -> error). The
+    /// host still starts and serves; `health` reports them as degraded. Empty when every
+    /// hook succeeded or no module overrides a hook.
+    pub module_failures: Vec<(String, String)>,
 
     /// Optional STS (Security Token Service) state for embedded token issuance
     ///
@@ -295,6 +299,7 @@ impl ServerHost {
             locales: crate::core::i18n::LocaleCatalog::framework(),
             #[cfg(feature = "wami")]
             sts_state: None,
+            module_failures: Vec::new(),
         })
     }
 
@@ -450,6 +455,22 @@ impl ServerHost {
     /// Check if host is properly initialized
     pub fn is_ready(&self) -> bool {
         !self.entity_fetchers.is_empty()
+    }
+
+    /// Boot health of a built-in module: `Ok(())` when its `init` / `start` hook succeeded
+    /// at boot (or it overrides neither), `Err(reason)` when it failed. An unknown name is
+    /// `Ok(())` (nothing to report). Hot-loaded modules report through `ModuleRuntime`.
+    pub fn health(&self, name: &str) -> Result<(), String> {
+        match self.module_failures.iter().find(|(n, _)| n == name) {
+            Some((_, reason)) => Err(reason.clone()),
+            None => Ok(()),
+        }
+    }
+
+    /// Built-in modules whose boot lifecycle failed (`name -> error`). The host still
+    /// serves them; this is the operational signal that they are degraded.
+    pub fn module_failures(&self) -> &[(String, String)] {
+        &self.module_failures
     }
 
     /// Set the event bus for real-time notifications
@@ -704,6 +725,7 @@ impl ServerHost {
             #[cfg(feature = "wami")]
             sts_state: None,
             ui_state: None,
+            module_failures: Vec::new(),
         }
     }
     /// **Résumé de l'exposition** — ce que l'application applique à l'entrée.
