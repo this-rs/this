@@ -13,7 +13,7 @@
 [![License](https://img.shields.io/crates/l/this-rs.svg)](LICENSE-MIT)
 [![codecov](https://codecov.io/gh/this-rs/this/graph/badge.svg)](https://codecov.io/gh/this-rs/this)
 
-**Website**: [this-rs.dev](https://this-rs.dev)
+**Website**: [this.rs](https://this.rs)
 
 ---
 
