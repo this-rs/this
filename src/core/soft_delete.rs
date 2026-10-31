@@ -1369,3 +1369,38 @@ mod remaining_surface_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod escape_hatch_tests {
+    use super::DataService;
+    use super::tests::{Markable, service};
+
+    #[tokio::test]
+    async fn list_including_deleted_is_the_only_way_to_see_the_whole_table() {
+        // The pair to `list()`: `list` hides, `list_including_deleted` does not.
+        // If both hid, nothing could be purged or audited; if both showed, the
+        // soft delete would not be one.
+        let svc = service();
+        let alive = Markable::new("alive");
+        let dead = Markable::new("dead");
+        let dead_id = dead.id;
+
+        svc.create(alive).await.unwrap();
+        svc.create(dead).await.unwrap();
+        svc.delete(&dead_id).await.unwrap();
+
+        assert_eq!(
+            svc.list().await.unwrap().len(),
+            1,
+            "list hides the marked row"
+        );
+        assert_eq!(
+            svc.list_including_deleted::<Markable>()
+                .await
+                .unwrap()
+                .len(),
+            2,
+            "list_including_deleted shows everything, which is what an audit needs"
+        );
+    }
+}
