@@ -23,6 +23,7 @@ use super::loader::{ModuleInterface, ModuleLoader, ModuleSource, ModuleStatus};
 use crate::config::LinksConfig;
 use crate::core::auth::AuthResolverRegistry;
 use crate::core::events::{EventBus, FrameworkEvent, ModuleEvent};
+use crate::core::module::Module;
 use crate::core::service::LinkService;
 use crate::descriptor::framework::codes;
 use crate::descriptor::{ContractError, DescriptorSet, ModuleDescriptor, ModuleState, PolicyExpr};
@@ -86,6 +87,9 @@ struct Record {
     builtin: bool,
     iface: Option<ModuleInterface>,
     gate: Arc<Gate>,
+    /// Trait object of a hot-loaded compiled module, kept for `stop` / `health`. `None` for
+    /// built-in and declarative modules (there is nothing to call).
+    lifecycle: Option<Arc<dyn Module>>,
 }
 
 #[derive(Default)]
@@ -162,6 +166,7 @@ impl ModuleRuntime {
                     builtin: true,
                     iface: None,
                     gate: Arc::new(Gate::new()),
+                    lifecycle: None,
                 },
             );
         }
@@ -280,6 +285,74 @@ impl ModuleRuntime {
         }
     }
 
+    /// Health of one module. `Ok(())` = healthy. A module with no lifecycle handle
+    /// (built-in, declarative, or not loaded) reports healthy: nothing to probe.
+    pub async fn health(&self, name: &str) -> Result<(), ContractError> {
+        let lifecycle = {
+            let inner = self.lock();
+            let record = inner.records.get(name).ok_or_else(|| {
+                ContractError::framework(codes::MODULE_NOT_FOUND).with_param("module", name)
+            })?;
+            if matches!(record.state, ModuleState::Failed { .. }) {
+                return Err(
+                    ContractError::framework(codes::MODULE_UNAVAILABLE).with_param("module", name)
+                );
+            }
+            record.lifecycle.clone()
+        };
+        match lifecycle {
+            Some(m) => m.health().map_err(|e| {
+                ContractError::framework(codes::MODULE_UNAVAILABLE)
+                    .with_param("module", name)
+                    .with_param("reason", e.to_string())
+            }),
+            None => Ok(()),
+        }
+    }
+
+    /// Validate a load or replace WITHOUT publishing: check the descriptor, resolve it
+    /// against the active modules, and (for a module already active) run proto-tag
+    /// `check_compat`. Nothing is recorded, published or served -- a sandbox for a module
+    /// change. The returned status is the one the module WOULD get (state `Resolved`).
+    pub async fn dry_run(&self, source: ModuleSource) -> Result<ModuleStatus, ContractError> {
+        let iface = self.loader.load(&source).await?;
+        let d = iface.descriptor.clone();
+        let inner = self.lock();
+        let others = Self::active_descriptors(&inner, Some(&d.name));
+        let refs: Vec<&ModuleDescriptor> = others.iter().map(|a| a.as_ref()).collect();
+        crate::descriptor::resolve::resolve(&[d.as_ref()], &refs).map_err(one_error)?;
+        if let Some(old) = inner.records.get(&d.name)
+            && matches!(old.state, ModuleState::Active | ModuleState::Draining)
+        {
+            // Same rules as `replace`: forward-only, then proto-tag compatibility.
+            if let (Some(new_v), Some(old_v)) = (d.semver(), old.descriptor.semver())
+                && new_v <= old_v
+            {
+                return Err(ContractError::framework(codes::MODULE_VERSION_NOT_NEWER)
+                    .with_param("module", d.name.clone())
+                    .with_param("from", old.descriptor.version.clone())
+                    .with_param("to", d.version.clone()));
+            }
+            let issues =
+                crate::descriptor::compat::check_compat(old.descriptor.as_ref(), d.as_ref());
+            if !issues.is_empty() {
+                return Err(crate::descriptor::check::issues_to_error(&issues));
+            }
+        }
+        Ok(ModuleStatus {
+            name: d.name.clone(),
+            version: d.version.clone(),
+            state: ModuleState::Resolved,
+            requires: d
+                .requires
+                .iter()
+                .map(|q| format!("{} {}", q.name, q.version))
+                .collect(),
+            entities: d.entities.iter().map(|e| e.name.clone()).collect(),
+            builtin: false,
+        })
+    }
+
     /// Load and activate a module: read and check (loader), resolve against the active
     /// modules (dependencies, semver, cycles, duplicates, references), compose and
     /// publish the next catalog and dispatch table. Fail-closed: on any error nothing is
@@ -310,9 +383,50 @@ impl ModuleRuntime {
             }
         };
         let name = iface.descriptor.name.clone();
+        // Lifecycle of a hot-loaded compiled module: `init` then `start`, before it is
+        // served. A failure refuses the load (the module is recorded `Failed`).
+        let lifecycle = match &source {
+            ModuleSource::Compiled(m) => Some(m.clone()),
+            _ => None,
+        };
+        if let Some(m) = &lifecycle {
+            let ran = m.init().and_then(|_| m.start());
+            if let Err(e) = ran {
+                let err = ContractError::framework(codes::MODULE_UNAVAILABLE)
+                    .with_param("module", name.clone())
+                    .with_param("reason", e.to_string());
+                {
+                    let mut inner = self.lock();
+                    let live = inner.records.get(&name).is_some_and(|r| {
+                        matches!(r.state, ModuleState::Active | ModuleState::Draining)
+                    });
+                    if !live {
+                        inner.records.insert(
+                            name.clone(),
+                            Record {
+                                descriptor: iface.descriptor.clone(),
+                                state: ModuleState::Failed {
+                                    code: err.code.clone(),
+                                    at: now(),
+                                },
+                                builtin: false,
+                                iface: None,
+                                gate: Arc::new(Gate::new()),
+                                lifecycle: None,
+                            },
+                        );
+                    }
+                }
+                self.emit(ModuleEvent::Failed {
+                    module: name,
+                    code: err.code.as_str().to_string(),
+                });
+                return Err(err);
+            }
+        }
         let descriptor = iface.descriptor.clone();
         let mut inner = self.lock();
-        match self.activate(&mut inner, iface) {
+        match self.activate(&mut inner, iface, lifecycle) {
             Ok(status) => {
                 self.publish_bundles(&status.name, bundles);
                 Ok(status)
@@ -335,6 +449,7 @@ impl ModuleRuntime {
                             builtin: false,
                             iface: None,
                             gate: Arc::new(Gate::new()),
+                            lifecycle: None,
                         },
                     );
                 }
@@ -407,6 +522,7 @@ impl ModuleRuntime {
         &self,
         inner: &mut Inner,
         iface: ModuleInterface,
+        lifecycle: Option<Arc<dyn Module>>,
     ) -> Result<ModuleStatus, ContractError> {
         let d = iface.descriptor.clone();
         let active = Self::active_descriptors(inner, None);
@@ -432,6 +548,7 @@ impl ModuleRuntime {
             builtin: false,
             iface: Some(iface),
             gate,
+            lifecycle,
         };
         let previous = inner.records.remove(&d.name);
         inner.records.insert(d.name.clone(), candidate);
@@ -515,14 +632,24 @@ impl ModuleRuntime {
         let published = self.parts.catalog.publish(catalog);
         self.table.store(Arc::new(table));
         self.parts.locales.remove_module(name);
-        let r = &inner.records[name];
+        let version = inner.records[name].descriptor.version.clone();
+        let lifecycle = inner.records[name].lifecycle.clone();
+        let status = Self::status_of(name, &inner.records[name]);
+        // Release the state lock before the `stop` hook (never hold the sync mutex across
+        // an await).
+        drop(inner);
+        if let Some(m) = lifecycle
+            && let Err(e) = m.stop()
+        {
+            tracing::warn!(module = %name, error = %e, "stop hook failed (ignored)");
+        }
         tracing::info!(module = %name, generation = published.generation, "module unloaded");
         self.emit(ModuleEvent::Unloaded {
             module: name.to_string(),
-            version: r.descriptor.version.clone(),
+            version,
             generation: published.generation,
         });
-        Ok(Self::status_of(name, r))
+        Ok(status)
     }
 
     /// Revert a module left `Draining` by a cancelled `unload` back to `Active`
@@ -610,6 +737,19 @@ impl ModuleRuntime {
     async fn replace_locked(&self, source: ModuleSource) -> Result<ModuleStatus, ContractError> {
         let iface = self.loader.load(&source).await?;
         let bundles = Self::bundles_of(&source, &iface.descriptor.name).await?;
+        // Lifecycle of the NEW version: init then start, before the swap is published.
+        let lifecycle = match &source {
+            ModuleSource::Compiled(m) => Some(m.clone()),
+            _ => None,
+        };
+        if let Some(m) = &lifecycle {
+            let ran = m.init().and_then(|_| m.start());
+            if let Err(e) = ran {
+                return Err(ContractError::framework(codes::MODULE_UNAVAILABLE)
+                    .with_param("module", iface.descriptor.name.clone())
+                    .with_param("reason", e.to_string()));
+            }
+        }
         let mut inner = self.lock();
         let d = iface.descriptor.clone();
         let Some(old) = inner.records.get(&d.name) else {
@@ -649,6 +789,7 @@ impl ModuleRuntime {
 
         let old = inner.records.remove(&d.name).expect("checked");
         let from = old.descriptor.version.clone();
+        let old_lifecycle = old.lifecycle.clone();
         inner.records.insert(
             d.name.clone(),
             Record {
@@ -657,6 +798,7 @@ impl ModuleRuntime {
                 builtin: false,
                 iface: Some(iface),
                 gate: Arc::new(Gate::new()),
+                lifecycle,
             },
         );
         let (catalog, table) = match self.compose(&inner) {
@@ -669,6 +811,11 @@ impl ModuleRuntime {
         let published = self.parts.catalog.publish(catalog);
         self.table.store(Arc::new(table));
         self.publish_bundles(&d.name, bundles);
+        if let Some(m) = old_lifecycle
+            && let Err(e) = m.stop()
+        {
+            tracing::warn!(module = %d.name, error = %e, "replace: old version stop hook failed (ignored)");
+        }
         // The OLD version drains in the background: requests already in flight finish
         // on it (they hold its router), and after the grace delay its streams are
         // cancelled. Without this, a stream opened on the old version would stay open
