@@ -7,6 +7,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Soft delete, pour de vrai.** Le README promettait « Built-in soft delete
+  support » ; `DataService::delete` était un DELETE dur et `get`/`list`/`search`
+  ne regardaient jamais `deleted_at`. Le contrat est désormais écrit **une fois**
+  au lieu de neuf :
+  - `Entity::set_deleted_at(Option<DateTime<Utc>>) -> bool`, avec un défaut
+    `false`. Les entités engendrées répondent `true` ; un `Entity` écrit à la main
+    sans champ `deleted_at` garde `false`, donc l'appelant distingue « marqué » de
+    « ce type ne peut pas l'enregistrer ». Un défaut qui prétendrait réussir
+    serait pire que pas de suppression douce du tout.
+  - `SoftDeleting<S>`, décorateur de `DataService<T>` : `delete` marque,
+    `get`/`list`/`search` cachent, et `restore` / `purge` /
+    `get_including_deleted` / `list_including_deleted` rendent les échappatoires
+    explicites. `delete_reporting` dit si la suppression a été `Soft`, `Hard` (le
+    type ne porte pas la marque : le DELETE d'avant s'applique) ou `AlreadyGone`.
+    Une seconde suppression ne déplace pas l'horodatage de la première.
+  - `SoftDeleteFetcher` / `SoftDeleteCreator` sur les surfaces JSON — celles que
+    GraphQL, gRPC, les routes de liens et le WebSocket traversent réellement.
+    `list_query` reçoit `deleted_at IS NULL` **injecté dans le filtre**, pour que
+    le backend qui pousse la requête garde un `total` exact et des pages
+    correctes ; filtrer le résultat après coup rétrécirait la page et mentirait
+    sur le compte.
+  - `ServerBuilder::with_soft_delete()` **opt-in**. L'activer change le sens des
+    données existantes : une ligne dont `deleted_at` servait de simple drapeau
+    cesse d'être visible, et `delete` ne supprime plus. En faire le défaut est une
+    décision de version majeure, pas un correctif glissé.
+  - Une application qui écrit ses handlers REST (le framework ne voit pas ces
+    appels) obtient le même contrat en enveloppant son store :
+    `SoftDeleting::new(service)`.
+  9 tests nomment le comportement : marqué-pas-supprimé, restauration, purge,
+  horodatage idempotent, identifiant inconnu, repli `Hard` sur un type sans
+  champ, `fetch` qui répond « not found » sur une ligne marquée, page pleine
+  malgré des lignes cachées, et filtre injecté en `AND` sans écraser celui de
+  l'appelant.
+
 ### Security
 - **Le client ne choisit plus son locataire.** `tenant_resolver_middleware`
   (`src/server/middleware/tenant.rs`) lisait `x-tenant-id` **avant** `AuthContext`,
