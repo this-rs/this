@@ -347,13 +347,17 @@ impl ModuleRuntime {
         }
     }
 
-    /// Message bundles of `source` (stored modules only; other sources have none yet:
-    /// `Module` has no bundle hook). Refused, nothing published, when one belongs to
-    /// another module or would be refused by the catalog (`I18nCatalog::bundle_issues`).
+    /// Message bundles of `source`: a compiled module's own bundles (the `Module::bundles`
+    /// hook the host also reads at build time), or a stored module's bundles. Stored
+    /// bundles are refused - nothing published - when one belongs to another module or
+    /// would be refused by the catalog (`I18nCatalog::bundle_issues`).
     async fn bundles_of(
         source: &ModuleSource,
         module: &str,
     ) -> Result<Vec<crate::descriptor::MessageBundle>, ContractError> {
+        if let ModuleSource::Compiled(m) = source {
+            return Ok(m.bundles());
+        }
         let Some(stored) = crate::storage::vfs::read_source(source).await? else {
             return Ok(Vec::new());
         };
@@ -474,10 +478,15 @@ impl ModuleRuntime {
         self.ensure_hot_load("unload")?;
         let _op = self.ops.lock().await;
         let gate = self.begin_drain(name)?;
+        // Cancel-safety: if the caller drops this future while the module drains (e.g.
+        // the admin client disconnects), `DrainGuard` puts it back to `Active` instead of
+        // leaving it stuck in `Draining` (503) with no legal transition out.
+        let mut guard = DrainGuard::new(self, name);
         if !gate.wait_idle(self.options.drain_grace).await {
             tracing::warn!(module = %name, "drain grace elapsed: cancelling in-flight streams");
         }
         gate.cancel();
+        guard.disarm();
 
         let mut inner = self.lock();
         let r = inner.records.get_mut(name).expect("checked");
@@ -514,6 +523,26 @@ impl ModuleRuntime {
             generation: published.generation,
         });
         Ok(Self::status_of(name, r))
+    }
+
+    /// Revert a module left `Draining` by a cancelled `unload` back to `Active`
+    /// (`Draining -> Active` is the documented "unload cancelled" transition), and
+    /// republish the dispatch table without the draining set. No-op unless the module is
+    /// exactly `Draining`.
+    fn revert_drain(&self, name: &str) {
+        let mut inner = self.lock();
+        let Some(r) = inner.records.get_mut(name) else {
+            return;
+        };
+        if r.state != ModuleState::Draining {
+            return;
+        }
+        r.state = ModuleState::Active;
+        r.gate = Arc::new(Gate::new());
+        if let Ok((_, table)) = self.compose(&inner) {
+            self.table.store(Arc::new(table));
+        }
+        tracing::warn!(module = %name, "unload cancelled mid-drain: module back to Active");
     }
 
     /// Checks of `unload`, then `Active -> Draining` and the draining dispatch table.
@@ -809,14 +838,50 @@ impl ModuleRuntime {
     }
 }
 
+/// Reverts a module to `Active` if an `unload` future is dropped while it drains (e.g.
+/// the admin client disconnects). Armed the moment the module enters `Draining`, disarmed
+/// once the unload completes. Without it, a cancelled unload leaves the module stuck in
+/// `Draining` (503) with no legal transition out.
+struct DrainGuard<'a> {
+    rt: &'a ModuleRuntime,
+    name: String,
+    armed: bool,
+}
+
+impl<'a> DrainGuard<'a> {
+    fn new(rt: &'a ModuleRuntime, name: &str) -> Self {
+        Self {
+            rt,
+            name: name.to_string(),
+            armed: true,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for DrainGuard<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            self.rt.revert_drain(&self.name);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::LinksConfig;
+    use crate::core::module::Module;
     use crate::descriptor::{
-        EntityDesc, FieldDesc, FieldType, ModuleDescriptor, Operation, PolicyExpr,
+        EntityDesc, FieldDesc, FieldType, Locale, MessageBundle, MessageKey, ModuleDescriptor,
+        Operation, PolicyExpr,
     };
     use crate::server::RestExposure;
     use crate::server::builder::ServerBuilder;
+    use crate::server::entity_registry::EntityRegistry;
     use crate::storage::in_memory::InMemoryLinkService;
     use axum::body::Body;
     use axum::http::{Method, Request, StatusCode};
@@ -885,5 +950,48 @@ mod tests {
         let st = rt.unload("billing").await.expect("unload retry");
         assert_eq!(st.state, ModuleState::Unloaded);
         assert_eq!(get(&app, "/invoices").await, StatusCode::NOT_FOUND);
+    }
+
+    struct Bundled;
+
+    impl Module for Bundled {
+        fn name(&self) -> &str {
+            "bundled"
+        }
+        fn entity_types(&self) -> Vec<&str> {
+            vec![]
+        }
+        fn links_config(&self) -> anyhow::Result<LinksConfig> {
+            Ok(LinksConfig {
+                entities: vec![],
+                links: vec![],
+                validation_rules: None,
+                events: None,
+                sinks: None,
+                auth: None,
+            })
+        }
+        fn register_entities(&self, _: &mut EntityRegistry) {}
+        fn bundles(&self) -> Vec<MessageBundle> {
+            let mut b = MessageBundle {
+                module: "bundled".into(),
+                locale: Locale::new("en"),
+                ..Default::default()
+            };
+            b.messages
+                .insert(MessageKey::new("hello"), "bonjour".into());
+            vec![b]
+        }
+    }
+
+    #[tokio::test]
+    async fn compiled_module_bundles_are_returned_by_bundles_of() {
+        let source = ModuleSource::Compiled(Arc::new(Bundled));
+        let bundles = ModuleRuntime::bundles_of(&source, "bundled")
+            .await
+            .expect("bundles");
+        assert_eq!(bundles.len(), 1);
+        assert_eq!(bundles[0].module, "bundled");
+        assert_eq!(bundles[0].get(&MessageKey::new("hello")), Some("bonjour"));
     }
 }
