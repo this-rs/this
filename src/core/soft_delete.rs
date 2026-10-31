@@ -1164,3 +1164,106 @@ mod delegation_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod query_tests {
+    //! `list_query` is where a soft delete is easiest to get subtly wrong: filter
+    //! the result instead of the query and the page shrinks and the total lies.
+
+    use super::*;
+    use std::sync::Mutex;
+
+    /// Records the query it receives, so the test can look at what the decorator
+    /// actually asked the backend for.
+    struct Recording {
+        seen: Mutex<Option<Query>>,
+        docs: Vec<serde_json::Value>,
+    }
+
+    fn doc(n: usize, deleted: bool) -> serde_json::Value {
+        serde_json::json!({
+            "id": Uuid::from_u128(n as u128).to_string(),
+            "name": format!("row-{n}"),
+            "deleted_at": if deleted { serde_json::json!("2026-10-31T00:00:00Z") } else { serde_json::Value::Null },
+        })
+    }
+
+    #[async_trait]
+    impl EntityFetcher for Recording {
+        async fn fetch_as_json(&self, id: &Uuid) -> Result<serde_json::Value> {
+            self.docs
+                .iter()
+                .find(|d| d["id"] == id.to_string())
+                .cloned()
+                .ok_or_else(|| anyhow::anyhow!("not found"))
+        }
+
+        async fn list_as_json(
+            &self,
+            limit: Option<i32>,
+            offset: Option<i32>,
+        ) -> Result<Vec<serde_json::Value>> {
+            let skip = offset.unwrap_or(0).max(0) as usize;
+            let take = limit.unwrap_or(i32::MAX).max(0) as usize;
+            Ok(self.docs.iter().skip(skip).take(take).cloned().collect())
+        }
+
+        async fn list_query(&self, query: &Query) -> Result<(Vec<serde_json::Value>, usize)> {
+            *self.seen.lock().unwrap() = Some(query.clone());
+            // Pretend the backend pushed the filter down: only alive rows answer.
+            let alive: Vec<_> = self
+                .docs
+                .iter()
+                .filter(|d| !is_hidden(d))
+                .cloned()
+                .collect();
+            let total = alive.len();
+            Ok((alive, total))
+        }
+    }
+
+    #[tokio::test]
+    async fn list_query_asks_the_backend_for_the_hidden_filter() {
+        let inner = std::sync::Arc::new(Recording {
+            seen: Mutex::new(None),
+            docs: vec![doc(1, false), doc(2, true)],
+        });
+        let fetcher = SoftDeleteFetcher::new(inner.clone());
+
+        let (rows, total) = fetcher.list_query(&Query::new()).await.unwrap();
+
+        assert_eq!(rows.len(), 1, "only the alive row comes back");
+        assert_eq!(
+            total, 1,
+            "the total must count alive rows only, not the page"
+        );
+
+        // What the backend was actually asked for: the filter must be in the
+        // query, not applied to the result afterwards.
+        let rendered = format!("{:?}", inner.seen.lock().unwrap().clone().unwrap().filter);
+        assert!(
+            rendered.contains("deleted_at") && rendered.contains("IsNull"),
+            "the backend must be asked for `deleted_at IS NULL`, got {rendered}"
+        );
+    }
+
+    #[tokio::test]
+    async fn paginated_reads_walk_past_a_mostly_hidden_table() {
+        // 200 rows, every other one hidden, asked 5 at a time: the over-fetch loop
+        // has to grow its batch and stop only when the source is exhausted.
+        let docs: Vec<_> = (1..=200).map(|n| doc(n, n % 2 == 0)).collect();
+        let fetcher = SoftDeleteFetcher::new(std::sync::Arc::new(Recording {
+            seen: Mutex::new(None),
+            docs,
+        }));
+
+        let page = fetcher.list_as_json(Some(5), Some(0)).await.unwrap();
+        assert_eq!(page.len(), 5, "a full page, not a short one");
+        assert!(page.iter().all(|d| !is_hidden(d)));
+
+        // Past the end: fewer rows, and no infinite loop.
+        let tail = fetcher.list_as_json(Some(5), Some(95)).await.unwrap();
+        assert!(tail.len() <= 5);
+        assert!(tail.iter().all(|d| !is_hidden(d)));
+    }
+}
