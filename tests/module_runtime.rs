@@ -470,6 +470,178 @@ async fn replace_refuses_incompatible_proto_tags() {
     );
 }
 
+// ── lifecycle hooks (init/start/stop/health) and dry-run ────────────────────
+
+struct LifecycleRoutes;
+impl EntityDescriptor for LifecycleRoutes {
+    fn entity_type(&self) -> &str {
+        "job"
+    }
+    fn plural(&self) -> &str {
+        "jobs"
+    }
+    fn build_routes(&self) -> Router {
+        Router::new().route("/jobs", axum::routing::get(|| async { "[]" }))
+    }
+}
+
+struct LifecycleModule {
+    inited: Arc<std::sync::atomic::AtomicBool>,
+    started: Arc<std::sync::atomic::AtomicBool>,
+    stopped: Arc<std::sync::atomic::AtomicBool>,
+    fail_init: bool,
+    healthy: bool,
+}
+impl Module for LifecycleModule {
+    fn name(&self) -> &str {
+        "lifecycle"
+    }
+    fn entity_types(&self) -> Vec<&str> {
+        vec!["job"]
+    }
+    fn links_config(&self) -> anyhow::Result<LinksConfig> {
+        Ok(LinksConfig {
+            entities: vec![],
+            links: vec![],
+            validation_rules: None,
+            events: None,
+            sinks: None,
+            auth: None,
+        })
+    }
+    fn register_entities(&self, registry: &mut EntityRegistry) {
+        registry.register(Box::new(LifecycleRoutes));
+    }
+    fn init(&self) -> anyhow::Result<()> {
+        if self.fail_init {
+            return Err(anyhow::anyhow!("init boom"));
+        }
+        self.inited.store(true, std::sync::atomic::Ordering::SeqCst);
+        Ok(())
+    }
+    fn start(&self) -> anyhow::Result<()> {
+        self.started
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        Ok(())
+    }
+    fn stop(&self) -> anyhow::Result<()> {
+        self.stopped
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        Ok(())
+    }
+    fn health(&self) -> anyhow::Result<()> {
+        if self.healthy {
+            Ok(())
+        } else {
+            Err(anyhow::anyhow!("unhealthy"))
+        }
+    }
+}
+
+type Flags = [Arc<std::sync::atomic::AtomicBool>; 3];
+
+fn lifecycle_module(fail_init: bool, healthy: bool) -> (Arc<LifecycleModule>, Flags) {
+    let inited = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let started = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let stopped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let m = Arc::new(LifecycleModule {
+        inited: inited.clone(),
+        started: started.clone(),
+        stopped: stopped.clone(),
+        fail_init,
+        healthy,
+    });
+    (m, [inited, started, stopped])
+}
+
+#[tokio::test]
+async fn hot_loaded_compiled_module_runs_lifecycle_hooks() {
+    let h = harness(false);
+    let rt = h.runtime();
+    let (m, flags) = lifecycle_module(false, true);
+    rt.load(ModuleSource::Compiled(m)).await.expect("load");
+    assert!(
+        flags[0].load(std::sync::atomic::Ordering::SeqCst),
+        "init ran"
+    );
+    assert!(
+        flags[1].load(std::sync::atomic::Ordering::SeqCst),
+        "start ran"
+    );
+    rt.health("lifecycle").await.expect("healthy");
+    rt.unload("lifecycle").await.expect("unload");
+    assert!(
+        flags[2].load(std::sync::atomic::Ordering::SeqCst),
+        "stop ran"
+    );
+}
+
+#[tokio::test]
+async fn failing_init_refuses_the_load() {
+    let h = harness(false);
+    let rt = h.runtime();
+    let (m, flags) = lifecycle_module(true, true);
+    let err = rt.load(ModuleSource::Compiled(m)).await.unwrap_err();
+    assert_eq!(err.code.as_str(), "this.module.unavailable");
+    assert!(
+        !flags[0].load(std::sync::atomic::Ordering::SeqCst),
+        "init did not complete"
+    );
+    // Recorded as Failed, not served.
+    assert!(matches!(
+        rt.status("lifecycle").await.unwrap().state,
+        ModuleState::Failed { .. }
+    ));
+}
+
+#[tokio::test]
+async fn dry_run_validates_without_publishing() {
+    let h = harness(false);
+    let rt = h.runtime();
+    rt.load(manifest(&billing("1.0.0", PolicyExpr::Authenticated)))
+        .await
+        .unwrap();
+
+    // A valid upgrade previews as `Resolved` and changes nothing.
+    let preview = rt
+        .dry_run(manifest(&billing("1.1.0", PolicyExpr::Authenticated)))
+        .await
+        .expect("dry-run ok");
+    assert_eq!(
+        (preview.version.as_str(), preview.state.clone()),
+        ("1.1.0", ModuleState::Resolved)
+    );
+    assert_eq!(
+        rt.status("billing").await.unwrap().version,
+        "1.0.0",
+        "not published"
+    );
+
+    // A downgrade is refused exactly as `replace` would refuse it.
+    let err = rt
+        .dry_run(manifest(&billing("0.9.0", PolicyExpr::Authenticated)))
+        .await
+        .unwrap_err();
+    assert_eq!(err.code.as_str(), "this.module.version_not_newer");
+    assert_eq!(rt.status("billing").await.unwrap().version, "1.0.0");
+
+    // A brand-new module previews `Resolved` and is NOT registered.
+    let mut fresh = ModuleDescriptor::new("fresh", "1.0.0");
+    fresh
+        .entities
+        .push(entity("widget", PolicyExpr::Authenticated));
+    fresh.normalize();
+    let preview = rt.dry_run(manifest(&fresh)).await.expect("dry-run new ok");
+    assert_eq!(
+        (preview.version.as_str(), preview.state.clone()),
+        ("1.0.0", ModuleState::Resolved)
+    );
+    assert!(
+        rt.status("fresh").await.is_err(),
+        "a dry-run must not register the module"
+    );
+}
+
 #[tokio::test]
 async fn duplicate_entity_or_plural_with_host_is_refused_and_nothing_published() {
     let h = harness(false);
