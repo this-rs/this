@@ -55,6 +55,8 @@ pub struct ServerBuilder {
 
     // Armer l'application des politiques `auth:` (défaut : armé)
     authorize: bool,
+    /// Serve the soft-delete contract on the JSON surfaces (opt-in).
+    soft_delete: bool,
 
     // Application en OBSERVATION (défaut : non) — l'adoption d'un projet existant
     authorize_report_only: bool,
@@ -120,7 +122,25 @@ impl ServerBuilder {
             auth_config: None,
             resolver_registry: AuthResolverRegistry::new(),
             module_runtime: None,
+            soft_delete: false,
         }
+    }
+
+    /// Serve the soft-delete contract on the JSON surfaces (GraphQL, gRPC, the
+    /// link routes, WebSocket): reads hide rows whose `deleted_at` is set, and
+    /// `delete` marks the row instead of removing it.
+    ///
+    /// **Opt-in on purpose.** A deployment that has been writing `deleted_at` as
+    /// a mere flag would see those rows disappear the day this becomes the
+    /// default, and its `delete` calls would stop removing anything. Making that
+    /// the default is a major-version decision, not a patch.
+    ///
+    /// An application that owns its REST handlers (the framework never sees
+    /// those calls) gets the same contract by wrapping its store:
+    /// `SoftDeleting::new(service)`.
+    pub fn with_soft_delete(mut self) -> Self {
+        self.soft_delete = true;
+        self
     }
 
     /// Enable runtime module loading on the host: `ServerHost::module_runtime`, the
@@ -1077,6 +1097,13 @@ impl ServerBuilder {
             creators_map,
         )?;
         host.module_failures = module_failures;
+
+        // Soft delete first, so it sits INSIDE the validating creator: an
+        // application `delete` then validates (where a descriptor exists) and
+        // marks, instead of validating and removing.
+        if self.soft_delete {
+            host = host.with_soft_delete();
+        }
         if !descriptor_set.is_empty() {
             host = host.with_descriptors(descriptor_set);
         }

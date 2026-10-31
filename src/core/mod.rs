@@ -17,6 +17,9 @@ pub mod module;
 pub mod pluralize;
 pub mod query;
 pub mod service;
+/// Soft delete as a contract over any `DataService`: the README's promise,
+/// stated once instead of nine times.
+pub mod soft_delete;
 pub mod store;
 pub mod tenant;
 pub mod validation;
@@ -35,6 +38,7 @@ pub use module::{EntityCreator, EntityFetcher, Module};
 pub use pluralize::Pluralizer;
 pub use query::{PaginatedResponse, PaginationMeta, QueryParams};
 pub use service::{DataService, LinkService};
+pub use soft_delete::{DeleteOutcome, SoftDeleting};
 pub use store::QueryableStore;
 pub use tenant::TenantContext;
 pub use validation::{EntityValidationConfig, Validated};

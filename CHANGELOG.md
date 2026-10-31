@@ -7,6 +7,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Soft delete, pour de vrai.** Le README promettait « Built-in soft delete
+  support » ; `DataService::delete` était un DELETE dur et `get`/`list`/`search`
+  ne regardaient jamais `deleted_at`. Le contrat est désormais écrit **une fois**
+  au lieu de neuf :
+  - `Entity::set_deleted_at(Option<DateTime<Utc>>) -> bool`, avec un défaut
+    `false`. Les entités engendrées répondent `true` ; un `Entity` écrit à la main
+    sans champ `deleted_at` garde `false`, donc l'appelant distingue « marqué » de
+    « ce type ne peut pas l'enregistrer ». Un défaut qui prétendrait réussir
+    serait pire que pas de suppression douce du tout.
+  - `SoftDeleting<S>`, décorateur de `DataService<T>` : `delete` marque,
+    `get`/`list`/`search` cachent, et `restore` / `purge` /
+    `get_including_deleted` / `list_including_deleted` rendent les échappatoires
+    explicites. `delete_reporting` dit si la suppression a été `Soft`, `Hard` (le
+    type ne porte pas la marque : le DELETE d'avant s'applique) ou `AlreadyGone`.
+    Une seconde suppression ne déplace pas l'horodatage de la première.
+  - `SoftDeleteFetcher` / `SoftDeleteCreator` sur les surfaces JSON — celles que
+    GraphQL, gRPC, les routes de liens et le WebSocket traversent réellement.
+    `list_query` reçoit `deleted_at IS NULL` **injecté dans le filtre**, pour que
+    le backend qui pousse la requête garde un `total` exact et des pages
+    correctes ; filtrer le résultat après coup rétrécirait la page et mentirait
+    sur le compte.
+  - `ServerBuilder::with_soft_delete()` **opt-in**. L'activer change le sens des
+    données existantes : une ligne dont `deleted_at` servait de simple drapeau
+    cesse d'être visible, et `delete` ne supprime plus. En faire le défaut est une
+    décision de version majeure, pas un correctif glissé.
+  - Une application qui écrit ses handlers REST (le framework ne voit pas ces
+    appels) obtient le même contrat en enveloppant son store :
+    `SoftDeleting::new(service)`.
+  9 tests nomment le comportement : marqué-pas-supprimé, restauration, purge,
+  horodatage idempotent, identifiant inconnu, repli `Hard` sur un type sans
+  champ, `fetch` qui répond « not found » sur une ligne marquée, page pleine
+  malgré des lignes cachées, et filtre injecté en `AND` sans écraser celui de
+  l'appelant.
+
 ### Security
 - **Le client ne choisit plus son locataire.** `tenant_resolver_middleware`
   (`src/server/middleware/tenant.rs`) lisait `x-tenant-id` **avant** `AuthContext`,
@@ -28,6 +63,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   **Rupture pour un déploiement qui s'appuyait sur l'en-tête** sans identité ou
   avec un locataire différent du jeton : c'est exactement le comportement qui
   laissait passer d'un locataire à l'autre.
+
+### Removed — `tenant.resolver` ne promet plus une politique inexistante
+- `TenantResolver::Header` et `::Subdomain` (`src/config/auth.rs`) étaient
+  déclarés, désérialisables et testés, mais **lus par aucun code** : écrire
+  `tenant.resolver: header` ne changeait rien et ne le disait pas. `Header`
+  nommait précisément la politique que le correctif de sécurité ci-dessus refuse
+  (un client qui choisit son locataire), et `Subdomain` décrit le locataire d'un
+  domaine servi, posé par le garde de domaine (`middleware::origin`) avant que ce
+  résolveur ne s'exécute. Les deux variantes sont retirées ; seule `jwt_claim`
+  est acceptée, la source réelle étant le jeton. **Rupture assumée** : une
+  configuration qui écrit `resolver: header` ou `resolver: subdomain` ne démarre
+  plus, et le message d'erreur nomme la valeur attendue. Les tests qui
+  verrouillaient les variantes mortes ont été **réécrits, pas supprimés** : ils
+  exigent désormais le refus, et échouent si une variante revient.
+- **Deux commentaires décrivaient l'état d'avant le correctif**, ils sont remis
+  au vrai. `middleware/tenant.rs` annonçait un montage conditionné par
+  `auth.tenant_resolver: true` — clé inexistante, le montage suit la présence
+  d'un provider d'authentification. `grpc/event_service.rs` affirmait que le
+  middleware HTTP accordait à l'en-tête « la même confiance, sans rien
+  confronter ».
+- **Ce qui reste ouvert est dit, pas masqué** : côté gRPC, l'en-tête
+  `x-tenant-id` seul ouvre toujours un flux sur le locataire qu'il nomme, faute
+  d'interceptor d'identité tonic au dépôt. Le remède est nommé dans le fichier ;
+  le fermer est une décision de politique, pas un correctif glissé.
 
 ## [0.0.10] - 2026-10-30
 

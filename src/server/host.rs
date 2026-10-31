@@ -324,6 +324,59 @@ impl ServerHost {
         self
     }
 
+    /// Make the README's soft-delete promise true on every JSON surface.
+    ///
+    /// GraphQL, gRPC, the link routes and the WebSocket handlers never touch
+    /// `DataService`: they read through `EntityFetcher` and write through
+    /// `EntityCreator`. Wrapping those two here is therefore what covers all of
+    /// them at once, for every storage backend.
+    ///
+    /// **Opt-in, and deliberately so.** Turning it on changes what existing data
+    /// means: a row whose `deleted_at` was written by an application that used it
+    /// as a mere flag stops being visible, and `delete` stops removing rows.
+    /// Flipping the default is a major-version decision, not a patch.
+    ///
+    /// A creator whose entity has no fetcher is left untouched: without a way to
+    /// read the document there is no way to mark it without erasing the rest of
+    /// the row, and guessing would be worse than not acting.
+    pub fn with_soft_delete(mut self) -> Self {
+        let fetchers: HashMap<String, Arc<dyn EntityFetcher>> = self
+            .entity_fetchers
+            .iter()
+            .map(|(entity, fetcher)| {
+                let wrapped: Arc<dyn EntityFetcher> = Arc::new(
+                    crate::core::soft_delete::SoftDeleteFetcher::new(fetcher.clone()),
+                );
+                (entity.clone(), wrapped)
+            })
+            .collect();
+
+        let creators: HashMap<String, Arc<dyn EntityCreator>> = self
+            .entity_creators
+            .iter()
+            .map(|(entity, creator)| {
+                let wrapped: Arc<dyn EntityCreator> = match fetchers.get(entity) {
+                    Some(fetcher) => Arc::new(crate::core::soft_delete::SoftDeleteCreator::new(
+                        creator.clone(),
+                        fetcher.clone(),
+                    )),
+                    None => creator.clone(),
+                };
+                (entity.clone(), wrapped)
+            })
+            .collect();
+
+        self.entity_fetchers = Arc::new(fetchers.clone());
+        self.entity_creators = Arc::new(creators.clone());
+
+        let mut next = (*self.catalog.load()).clone();
+        next.fetchers = Arc::new(fetchers);
+        next.creators = Arc::new(creators);
+        next.generation = next.generation.saturating_add(1);
+        self.catalog.publish(next);
+        self
+    }
+
     /// Replace the message catalog (framework bundles plus the application's own).
     pub fn with_locales(mut self, locales: crate::core::i18n::LocaleCatalog) -> Self {
         self.locales = locales;
