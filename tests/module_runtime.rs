@@ -603,6 +603,48 @@ async fn draining_times_out_and_cancels_streams() {
     );
 }
 
+#[tokio::test]
+async fn unload_cancelled_mid_drain_reverts_to_active() {
+    let h = Arc::new(harness_with(
+        ServerBuilder::new()
+            .with_module_runtime_options(RuntimeOptions {
+                drain_grace: Duration::from_millis(500),
+                hot_load_enabled: true,
+                ..Default::default()
+            })
+            .offer_module(Streams("1.0.0")),
+        false,
+    ));
+    h.runtime().load_offered("streams").await.expect("load");
+
+    // Hold a stream in flight so the drain cannot go idle immediately.
+    let streaming = {
+        let h = h.clone();
+        tokio::spawn(async move { h.call(Method::GET, "/streams", None, None).await })
+    };
+    tokio::time::sleep(Duration::from_millis(40)).await;
+
+    // Start the unload, then drop its future mid-drain (before the grace elapses).
+    let unloading =
+        tokio::time::timeout(Duration::from_millis(40), h.runtime().unload("streams")).await;
+    assert!(
+        unloading.is_err(),
+        "unload must still be draining after 40ms"
+    );
+
+    // The drop reverted the module to Active, not stuck Draining (503).
+    assert_eq!(
+        h.runtime().status("streams").await.unwrap().state,
+        ModuleState::Active,
+        "a cancelled unload must not leave the module stuck in Draining"
+    );
+
+    // A later unload works normally (the module was not poisoned).
+    streaming.abort();
+    let st = h.runtime().unload("streams").await.expect("unload retry");
+    assert_eq!(st.state, ModuleState::Unloaded);
+}
+
 // ── admin interface and policies ───────────────────────────────────────────
 
 #[tokio::test]
