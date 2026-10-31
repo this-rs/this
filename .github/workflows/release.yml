@@ -58,10 +58,29 @@ jobs:
           generate_release_notes: true
 
   # ── Publish to crates.io ───────────────────────────────────────────
+  #
+  # DISABLED for v0.0.10, on purpose and reversibly.
+  #
+  # The manifest declares the six `obrain-*` crates as optional *path*
+  # dependencies (`../../banc-obrain-j4/crates/...`). cargo refuses to package a
+  # crate whose optional dependency is absent from the registry — proven on a
+  # scratch crate: both `cargo package` and `cargo publish --dry-run` answer
+  # "no matching package named ... found". Giving the dependency a `version`
+  # does not help, and neither does a git spec carrying a `version`. The only
+  # fixes are (a) publish obrain to crates.io, which is reserved for obrain's
+  # real v0.0.1 (crates.io is immutable: no draft for a database), or (b) move
+  # the obrain integration out of this crate's manifest.
+  #
+  # Until one of those lands, this job would fail *after* the GitHub Release was
+  # already created, leaving a red run for a release that is otherwise fine. It
+  # is therefore skipped unless the repository variable PUBLISH_CRATES_IO is set
+  # to 'true'. Turn that variable on the day `cargo package -p this-rs`
+  # succeeds locally.
   publish-crate:
     name: Publish to crates.io
     runs-on: ubuntu-latest
     needs: create-release
+    if: ${{ vars.PUBLISH_CRATES_IO == 'true' }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
