@@ -622,6 +622,24 @@ impl ModuleRuntime {
                 ContractError::framework(codes::MODULE_UNAVAILABLE).with_param("module", &d.name)
             );
         }
+        // A replacement must move forward: no downgrade, no same version. `check`
+        // guarantees both versions are valid semver (`invalid_version` is a descriptor
+        // issue), so `semver()` is `Some` here; the guard is only defensive.
+        if let (Some(new_v), Some(old_v)) = (d.semver(), old.descriptor.semver())
+            && new_v <= old_v
+        {
+            return Err(ContractError::framework(codes::MODULE_VERSION_NOT_NEWER)
+                .with_param("module", d.name.clone())
+                .with_param("from", old.descriptor.version.clone())
+                .with_param("to", d.version.clone()));
+        }
+        // Proto tags: a tag published once is never moved nor reused (the same rule
+        // `ModuleStore::put` enforces against stored versions), so a hot replacement
+        // cannot silently rewrite the wire contract.
+        let issues = crate::descriptor::compat::check_compat(old.descriptor.as_ref(), d.as_ref());
+        if !issues.is_empty() {
+            return Err(crate::descriptor::check::issues_to_error(&issues));
+        }
         // `resolve` checks the `requires` of EVERY module it sees, active ones included:
         // a dependent whose `VersionReq` rejects the new version is reported as
         // `this.module.dependency_version {module: <dependent>}`.

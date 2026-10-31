@@ -62,6 +62,7 @@ pub mod codes {
     pub const MODULE_REFERENCE_UNKNOWN: &str = "this.module.reference_unknown";
     pub const MODULE_NOT_FOUND: &str = "this.module.not_found";
     pub const MODULE_CONFIG_CONFLICT: &str = "this.module.config_conflict";
+    pub const MODULE_VERSION_NOT_NEWER: &str = "this.module.version_not_newer";
     pub const DESCRIPTOR_INVALID: &str = "this.descriptor.invalid";
     pub const DESCRIPTOR_PARSE: &str = "this.descriptor.parse";
     pub const DESCRIPTOR_TAG_REUSED: &str = "this.descriptor.tag_reused";
@@ -412,6 +413,13 @@ pub const FRAMEWORK_ERRORS: &[(&str, ErrorKind, &[&str], &str, &str)] = &[
         &["what", "key"],
         "Configuration en conflit ({what}): {key}",
         "Conflicting configuration ({what}): {key}",
+    ),
+    (
+        MODULE_VERSION_NOT_NEWER,
+        K::Conflict,
+        &["module", "from", "to"],
+        "Remplacement de {module} refusé: {to} n'est pas postérieur à {from}",
+        "Replacing {module} refused: {to} is not newer than {from}",
     ),
     (
         DESCRIPTOR_INVALID,

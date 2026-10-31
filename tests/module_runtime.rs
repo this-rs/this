@@ -378,6 +378,99 @@ async fn replace_checks_dependents_version_req() {
 }
 
 #[tokio::test]
+async fn replace_refuses_downgrade_and_same_version() {
+    let h = harness(false);
+    let rt = h.runtime();
+    rt.load(manifest(&billing("1.0.0", PolicyExpr::Authenticated)))
+        .await
+        .unwrap();
+
+    // Same version refused (a replacement must move forward).
+    let err = rt
+        .replace(manifest(&billing("1.0.0", PolicyExpr::Authenticated)))
+        .await
+        .unwrap_err();
+    assert_eq!(err.code.as_str(), "this.module.version_not_newer");
+    assert_eq!(rt.status("billing").await.unwrap().version, "1.0.0");
+
+    // Downgrade refused.
+    let err = rt
+        .replace(manifest(&billing("0.9.0", PolicyExpr::Authenticated)))
+        .await
+        .unwrap_err();
+    assert_eq!(err.code.as_str(), "this.module.version_not_newer");
+    assert_eq!(rt.status("billing").await.unwrap().version, "1.0.0");
+
+    // Upgrade accepted.
+    let s = rt
+        .replace(manifest(&billing("1.1.0", PolicyExpr::Authenticated)))
+        .await
+        .unwrap();
+    assert_eq!(
+        (s.version.as_str(), s.state),
+        ("1.1.0", ModuleState::Active)
+    );
+}
+
+#[tokio::test]
+async fn replace_refuses_incompatible_proto_tags() {
+    fn tagged(version: &str, a_tag: u32, b_tag: u32) -> ModuleDescriptor {
+        let mut d = ModuleDescriptor::new("tagged", version);
+        let mut e = EntityDesc::new("thing");
+        let mut fa = FieldDesc::new("a", FieldType::F64);
+        fa.proto_tag = Some(a_tag);
+        let mut fb = FieldDesc::new("b", FieldType::F64);
+        fb.proto_tag = Some(b_tag);
+        e.fields.push(fa);
+        e.fields.push(fb);
+        for op in Operation::CRUD {
+            e.permissions.ops.insert(op, PolicyExpr::Authenticated);
+        }
+        d.entities.push(e);
+        d.normalize();
+        d
+    }
+
+    let h = harness(false);
+    let rt = h.runtime();
+    rt.load(manifest(&tagged("1.0.0", 16, 17))).await.unwrap();
+
+    // Swapping tags 1 and 2 is incompatible: tags moved.
+    let err = rt
+        .replace(manifest(&tagged("1.1.0", 17, 16)))
+        .await
+        .unwrap_err();
+    assert_eq!(
+        err.code.as_str(),
+        "this.descriptor.invalid",
+        "issues: {:?}",
+        err.params
+    );
+    assert!(
+        err.params["issues"].as_str().unwrap_or("").contains("tag_"),
+        "expected a tag issue: {}",
+        err.params["issues"]
+    );
+    assert_eq!(
+        rt.status("tagged").await.unwrap().version,
+        "1.0.0",
+        "unchanged after a refused replace"
+    );
+
+    // Appending a NEW tag at the end is compatible.
+    let mut d = tagged("1.2.0", 16, 17);
+    let mut fc = FieldDesc::new("c", FieldType::F64);
+    fc.proto_tag = Some(18);
+    d.entities[0].fields.push(fc);
+    d.normalize();
+    let s = rt.replace(manifest(&d)).await.unwrap();
+    assert_eq!(
+        (s.version.as_str(), s.state),
+        ("1.2.0", ModuleState::Active)
+    );
+}
+
+#[tokio::test]
 async fn duplicate_entity_or_plural_with_host_is_refused_and_nothing_published() {
     let h = harness(false);
     let rt = h.runtime();
