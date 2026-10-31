@@ -17,7 +17,7 @@ resolver = "3"
 [dependencies]
 # Module descriptor (types, pure engines, error table) shared with this-cli and wasm32
 # fronts. `version` + `path`: publishable (this-descriptor is published BEFORE this-rs).
-this-descriptor = { version = "0.1", path = "crates/this-descriptor", features = ["yaml", "pattern", "http"] }
+this-descriptor = { version = "0.0.1", path = "crates/this-descriptor", features = ["yaml", "pattern", "http"] }
 # Atomic publication of the host catalog snapshot (readers never lock).
 arc-swap = "1"
 # Async runtime
