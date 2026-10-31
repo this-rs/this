@@ -207,15 +207,15 @@ mod tests {
 
     /// An entity that carries the mark — what the macros generate.
     #[derive(Clone, Debug)]
-    struct Markable {
-        id: Uuid,
-        name: String,
+    pub(super) struct Markable {
+        pub(super) id: Uuid,
+        pub(super) name: String,
         deleted_at: Option<DateTime<Utc>>,
         updated_at: DateTime<Utc>,
     }
 
     impl Markable {
-        fn new(name: &str) -> Self {
+        pub(super) fn new(name: &str) -> Self {
             Self {
                 id: Uuid::new_v4(),
                 name: name.into(),
@@ -282,14 +282,14 @@ mod tests {
     /// An entity that does **not** carry the mark — a hand-written `Entity`.
     /// The decorator must fall back to a real delete and say so.
     #[derive(Clone, Debug)]
-    struct Unmarkable {
-        id: Uuid,
-        name: String,
+    pub(super) struct Unmarkable {
+        pub(super) id: Uuid,
+        pub(super) name: String,
         updated_at: DateTime<Utc>,
     }
 
     impl Unmarkable {
-        fn new(name: &str) -> Self {
+        pub(super) fn new(name: &str) -> Self {
             Self {
                 id: Uuid::new_v4(),
                 name: name.into(),
@@ -346,6 +346,10 @@ mod tests {
     }
 
     fn service() -> SoftDeleting<InMemoryDataService<Markable>> {
+        SoftDeleting::new(InMemoryDataService::new())
+    }
+
+    pub(super) fn unmarkable_service() -> SoftDeleting<InMemoryDataService<Unmarkable>> {
         SoftDeleting::new(InMemoryDataService::new())
     }
 
@@ -1046,5 +1050,117 @@ mod host_tests {
             store.snapshot(&id).is_none(),
             "without the option, delete still removes the row"
         );
+    }
+}
+
+#[cfg(test)]
+mod delegation_tests {
+    //! The parts of the public surface that only delegate. They are trivial by
+    //! construction, which is exactly why nobody writes a test for them — and
+    //! why a delegation wired to the wrong method (create -> update, say) would
+    //! survive a green build.
+
+    use super::tests::Markable;
+    use super::*;
+    use crate::storage::in_memory::InMemoryDataService;
+
+    fn service() -> SoftDeleting<InMemoryDataService<Markable>> {
+        SoftDeleting::new(InMemoryDataService::new())
+    }
+
+    #[tokio::test]
+    async fn create_update_and_search_reach_the_wrapped_service() {
+        let svc = service();
+        let mut e = Markable::new("widget");
+        let id = e.id;
+
+        let created = svc.create(e.clone()).await.expect("create delegates");
+        assert_eq!(created.id, id);
+
+        e.name = "renamed".into();
+        let updated = svc.update(&id, e).await.expect("update delegates");
+        assert_eq!(updated.name, "renamed", "update must not be a no-op");
+
+        let found = svc
+            .search("name", "renamed")
+            .await
+            .expect("search delegates");
+        assert_eq!(found.len(), 1, "search must reach the service and filter");
+        assert_eq!(found[0].name, "renamed");
+    }
+
+    #[tokio::test]
+    async fn restore_refuses_a_type_that_can_never_be_marked() {
+        // A hand-written `Entity` without `deleted_at`: restoring it is not a
+        // no-op, it is a mistake worth reporting.
+        use super::tests::unmarkable_service;
+        let svc = unmarkable_service();
+        let e = super::tests::Unmarkable::new("thing");
+        let id = e.id;
+        svc.create(e).await.unwrap();
+
+        let err = svc.restore::<super::tests::Unmarkable>(&id).await;
+        assert!(
+            err.is_err(),
+            "restoring an unmarkable type must fail loudly"
+        );
+        assert!(
+            err.unwrap_err()
+                .to_string()
+                .contains("no `deleted_at` field"),
+            "the error must say why"
+        );
+    }
+
+    #[tokio::test]
+    async fn clone_and_accessors_keep_the_same_wrapped_service() {
+        let svc = service();
+        let _ = svc.inner();
+        let cloned = svc.clone();
+
+        let e = Markable::new("shared");
+        let id = e.id;
+        cloned.create(e).await.unwrap();
+        assert!(
+            svc.get(&id).await.unwrap().is_some(),
+            "a clone shares the same store"
+        );
+
+        let inner = svc.into_inner();
+        assert!(inner.get(&id).await.unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn the_fetcher_delegates_the_parts_it_does_not_change() {
+        // `get_sample_entity` and `list_query_max_rows` feed schema derivation and
+        // the query cap; the decorator must not invent its own answers.
+        let store = std::sync::Arc::new(SampleStore);
+        let fetcher = SoftDeleteFetcher::new(store.clone());
+
+        let sample = fetcher.get_sample_entity().await.unwrap();
+        assert_eq!(
+            sample["name"], "sample",
+            "the sample must come from the inner fetcher"
+        );
+        assert_eq!(
+            fetcher.list_query_max_rows(),
+            store.list_query_max_rows(),
+            "the cap must come from the inner fetcher"
+        );
+    }
+
+    struct SampleStore;
+
+    #[async_trait]
+    impl EntityFetcher for SampleStore {
+        async fn fetch_as_json(&self, _id: &Uuid) -> Result<serde_json::Value> {
+            Ok(serde_json::json!({ "id": "", "name": "sample", "deleted_at": null }))
+        }
+        async fn get_sample_entity(&self) -> Result<serde_json::Value> {
+            Ok(serde_json::json!({ "id": "", "name": "sample", "deleted_at": null }))
+        }
+        fn list_query_max_rows(&self) -> usize {
+            42
+        }
     }
 }
