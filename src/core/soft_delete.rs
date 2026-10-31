@@ -744,3 +744,114 @@ mod json_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod creator_tests {
+    use super::*;
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+
+    /// A tiny document store with interior mutability: enough to exercise the
+    /// creator path that GraphQL and gRPC mutations actually use.
+    struct Store {
+        docs: Mutex<HashMap<Uuid, serde_json::Value>>,
+        updates_supported: bool,
+    }
+
+    impl Store {
+        fn new(updates_supported: bool) -> Arc<Self> {
+            Arc::new(Self {
+                docs: Mutex::new(HashMap::new()),
+                updates_supported,
+            })
+        }
+        fn insert(&self, id: Uuid, name: &str) {
+            self.docs.lock().unwrap().insert(
+                id,
+                serde_json::json!({ "id": id.to_string(), "name": name, "deleted_at": null }),
+            );
+        }
+        fn snapshot(&self, id: &Uuid) -> Option<serde_json::Value> {
+            self.docs.lock().unwrap().get(id).cloned()
+        }
+    }
+
+    #[async_trait]
+    impl EntityFetcher for Store {
+        async fn fetch_as_json(&self, id: &Uuid) -> Result<serde_json::Value> {
+            self.snapshot(id)
+                .ok_or_else(|| anyhow::anyhow!("not found"))
+        }
+    }
+
+    #[async_trait]
+    impl EntityCreator for Store {
+        async fn create_from_json(&self, data: serde_json::Value) -> Result<serde_json::Value> {
+            Ok(data)
+        }
+
+        async fn update_from_json(
+            &self,
+            id: &Uuid,
+            data: serde_json::Value,
+        ) -> Result<serde_json::Value> {
+            if !self.updates_supported {
+                anyhow::bail!("Update operation not implemented for this entity type");
+            }
+            let mut docs = self.docs.lock().unwrap();
+            let slot = docs
+                .get_mut(id)
+                .ok_or_else(|| anyhow::anyhow!("not found"))?;
+            *slot = data.clone();
+            Ok(data)
+        }
+
+        async fn delete(&self, id: &Uuid) -> Result<()> {
+            self.docs.lock().unwrap().remove(id);
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn delete_marks_the_document_and_keeps_the_rest_of_it() {
+        let store = Store::new(true);
+        let id = Uuid::new_v4();
+        store.insert(id, "widget");
+
+        let creator = SoftDeleteCreator::new(store.clone(), store.clone());
+        creator.delete(&id).await.unwrap();
+
+        let row = store.snapshot(&id).expect("the row must still be there");
+        assert!(
+            !row["deleted_at"].is_null(),
+            "delete must mark the row: {row}"
+        );
+        assert_eq!(
+            row["name"], "widget",
+            "the mark must not erase the other fields -- update_from_json replaces the document"
+        );
+    }
+
+    #[tokio::test]
+    async fn delete_falls_back_to_a_real_delete_when_update_is_refused() {
+        // No silent no-op: a store that cannot update gets the delete it always got.
+        let store = Store::new(false);
+        let id = Uuid::new_v4();
+        store.insert(id, "widget");
+
+        let creator = SoftDeleteCreator::new(store.clone(), store.clone());
+        creator.delete(&id).await.unwrap();
+
+        assert!(
+            store.snapshot(&id).is_none(),
+            "a store that cannot update must still delete"
+        );
+    }
+
+    #[tokio::test]
+    async fn delete_of_an_absent_row_is_not_an_error() {
+        let store = Store::new(true);
+        let creator = SoftDeleteCreator::new(store.clone(), store.clone());
+        creator.delete(&Uuid::new_v4()).await.unwrap();
+    }
+}
