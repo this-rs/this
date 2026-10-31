@@ -304,6 +304,18 @@ macro_rules! impl_data_entity {
                 self.deleted_at
             }
 
+            /// The type carries `deleted_at`, so the mark is recorded here and
+            /// the caller is told it worked. `updated_at` follows, because the
+            /// mark is a write like any other.
+            fn set_deleted_at(
+                &mut self,
+                at: Option<::chrono::DateTime<::chrono::Utc>>,
+            ) -> bool {
+                self.deleted_at = at;
+                self.updated_at = ::chrono::Utc::now();
+                true
+            }
+
             fn status(&self) -> &str {
                 &self.status
             }
@@ -500,6 +512,18 @@ macro_rules! impl_link_entity {
 
             fn deleted_at(&self) -> Option<::chrono::DateTime<::chrono::Utc>> {
                 self.deleted_at
+            }
+
+            /// The type carries `deleted_at`, so the mark is recorded here and
+            /// the caller is told it worked. `updated_at` follows, because the
+            /// mark is a write like any other.
+            fn set_deleted_at(
+                &mut self,
+                at: Option<::chrono::DateTime<::chrono::Utc>>,
+            ) -> bool {
+                self.deleted_at = at;
+                self.updated_at = ::chrono::Utc::now();
+                true
             }
 
             fn status(&self) -> &str {
@@ -1033,6 +1057,32 @@ mod tests {
         assert!(!user.is_active());
     }
 
+    /// The generated `Entity::set_deleted_at` — the primitive the soft-delete
+    /// decorator relies on. It answers `true` (the type carries the field) and
+    /// `updated_at` follows the mark, because the mark is a write like any other.
+    /// This is the only test that exercises the *trait* method rather than the
+    /// inherent `soft_delete()`, which is why the generated code was uncovered.
+    #[test]
+    fn test_data_entity_set_deleted_at_through_the_trait() {
+        use crate::core::Entity as _;
+
+        let mut user = TestUser::new(
+            "John Doe".to_string(),
+            "active".to_string(),
+            "john@example.com".to_string(),
+        );
+        let before = user.updated_at();
+
+        assert!(user.set_deleted_at(Some(chrono::Utc::now())));
+        assert!(user.is_deleted());
+        assert!(user.updated_at() >= before, "the mark touches updated_at");
+
+        // Reinstate through the same primitive.
+        assert!(user.set_deleted_at(None));
+        assert!(!user.is_deleted());
+        assert!(user.deleted_at().is_none());
+    }
+
     #[test]
     fn test_data_entity_restore() {
         let mut user = TestUser::new(
@@ -1084,6 +1134,25 @@ mod tests {
 
         link.soft_delete();
         assert!(link.is_deleted());
+    }
+
+    /// Same primitive on a link entity: the trait method, not the inherent one.
+    #[test]
+    fn test_link_entity_set_deleted_at_through_the_trait() {
+        use crate::core::Entity as _;
+
+        let mut link = TestOwnerLink::new(
+            "owner".to_string(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            "active".to_string(),
+            Utc::now(),
+        );
+
+        assert!(link.set_deleted_at(Some(Utc::now())));
+        assert!(link.is_deleted());
+        assert!(link.set_deleted_at(None));
+        assert!(!link.is_deleted());
     }
 
     #[test]
