@@ -360,6 +360,17 @@ mod tests {
         lock.apply(&mut d);
         assert_eq!(d.entities[0].fields[0].proto_tag, Some(16));
         assert_eq!(d.entities[0].reserved_tags, vec![17]);
+    }
+
+    /// YAML round-trip: `parse`/`to_yaml` only exist with the `yaml` feature, so this
+    /// test is gated. Without the gate, `cargo test -p this-descriptor` (default
+    /// features) fails to compile the test target.
+    #[cfg(feature = "yaml")]
+    #[test]
+    fn lock_round_trips_through_yaml() {
+        let mut lock = DescriptorLock::default();
+        lock.update(&module(&[("sku", None), ("gone", None)]));
+        lock.update(&module(&[("sku", None)]));
         let back = DescriptorLock::parse(&lock.to_yaml()).unwrap();
         assert_eq!(back, lock);
     }
