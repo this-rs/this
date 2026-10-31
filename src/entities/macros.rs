@@ -304,6 +304,18 @@ macro_rules! impl_data_entity {
                 self.deleted_at
             }
 
+            /// The type carries `deleted_at`, so the mark is recorded here and
+            /// the caller is told it worked. `updated_at` follows, because the
+            /// mark is a write like any other.
+            fn set_deleted_at(
+                &mut self,
+                at: Option<::chrono::DateTime<::chrono::Utc>>,
+            ) -> bool {
+                self.deleted_at = at;
+                self.updated_at = ::chrono::Utc::now();
+                true
+            }
+
             fn status(&self) -> &str {
                 &self.status
             }
@@ -500,6 +512,18 @@ macro_rules! impl_link_entity {
 
             fn deleted_at(&self) -> Option<::chrono::DateTime<::chrono::Utc>> {
                 self.deleted_at
+            }
+
+            /// The type carries `deleted_at`, so the mark is recorded here and
+            /// the caller is told it worked. `updated_at` follows, because the
+            /// mark is a write like any other.
+            fn set_deleted_at(
+                &mut self,
+                at: Option<::chrono::DateTime<::chrono::Utc>>,
+            ) -> bool {
+                self.deleted_at = at;
+                self.updated_at = ::chrono::Utc::now();
+                true
             }
 
             fn status(&self) -> &str {
