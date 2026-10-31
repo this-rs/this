@@ -326,13 +326,24 @@ enum PorteeFlux {
 ///   explicite reste possible, il vient de la configuration d'exposition) ;
 /// - **rien du tout → `PermissionDenied`**, avec la raison et le remède.
 ///
-/// ⚠️ Ce qui **reste** ouvert, et qu'il faut savoir : l'en-tête `x-tenant-id`
-/// est un **choix du client**, pas une preuve — le middleware HTTP
-/// (`server/middleware/tenant.rs`) lui accorde la même confiance, et rien ne le
-/// confronte à l'identité. Le fermer demande de trancher une politique
-/// d'ensemble (en-tête honoré seulement pour un administrateur, ou seulement
-/// derrière une option déclarée) : c'est écrit ici pour que la décision se
-/// prenne, plutôt que d'être oubliée.
+/// ⚠️ Ce qui **reste** ouvert, et ici seulement : l'en-tête `x-tenant-id` est
+/// un **choix du client**, pas une preuve. Sur ce chemin, nul ne le confronte à
+/// une identité : un appelant qui n'en présente aucune ouvre un flux sur le
+/// locataire qu'il nomme, et lit donc les événements de ce locataire.
+///
+/// Le middleware HTTP **ne partage plus** ce défaut. Depuis le 31/10/2026
+/// (`46a80ba`, `server/middleware/tenant.rs`) il confronte la désignation au
+/// jeton : une valeur contraire est refusée (`this.auth.forbidden`,
+/// `tenant_mismatch`) comme une valeur sans identité (`tenant_without_identity`),
+/// la seule exception étant `AuthContext::Admin`. Un commentaire précédent
+/// affirmait ici le contraire — il décrivait l'état d'avant ce correctif.
+///
+/// La différence tient à ce que gRPC ne fournit pas : **aucun interceptor** ne
+/// pose d'`AuthContext` au dépôt, donc `portee_du_flux` ne peut pas confronter
+/// ce qu'il ne reçoit jamais. Le remède est donc nommé, pas appliqué : un
+/// `tonic::Interceptor` qui vérifie le jeton et pose l'`AuthContext` rendrait le
+/// premier branchement ci-dessus suffisant, et l'en-tête seul pourrait alors
+/// être refusé comme il l'est en HTTP.
 fn portee_du_flux<T>(request: &Request<T>) -> Result<PorteeFlux, Status> {
     // 1. L'identité d'abord — elle seule peut désigner un locataire *prouvé*.
     if let Some(auth) = request.extensions().get::<AuthContext>() {
