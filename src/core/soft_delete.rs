@@ -471,3 +471,276 @@ mod tests {
         );
     }
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// The JSON surfaces: GraphQL, gRPC and the link routes do not touch
+// `DataService` at all. They go through `EntityFetcher` / `EntityCreator`, which
+// speak `serde_json::Value`. The same contract is therefore stated again here,
+// once, over those two traits.
+// ─────────────────────────────────────────────────────────────────────────────
+
+use std::sync::Arc;
+
+use crate::core::{EntityCreator, EntityFetcher};
+use crate::descriptor::{FilterExpr, FilterOp, Query};
+
+/// A stored document is hidden when it carries a non-null `deleted_at`.
+fn is_hidden(document: &serde_json::Value) -> bool {
+    document
+        .get("deleted_at")
+        .map(|v| !v.is_null())
+        .unwrap_or(false)
+}
+
+/// `EntityFetcher` whose reads hide soft-deleted rows.
+pub struct SoftDeleteFetcher {
+    inner: Arc<dyn EntityFetcher>,
+}
+
+impl SoftDeleteFetcher {
+    pub fn new(inner: Arc<dyn EntityFetcher>) -> Self {
+        Self { inner }
+    }
+}
+
+/// Add `deleted_at IS NULL` to a query, once. A caller that already filters on
+/// `deleted_at` keeps its own condition: this is an AND, never a decision taken
+/// in the caller's place.
+fn with_hidden_filter(query: &Query) -> Query {
+    // Built through the public builder: `Query`'s `_entity` marker is private and
+    // must not be set by hand.
+    let mut q = Query::new();
+    if let Some(filter) = &query.filter {
+        q = q.filter(filter.clone());
+    }
+    for spec in &query.sort {
+        q = q.sort_by(&spec.field, spec.dir);
+    }
+    q.page = query.page.clone();
+    q.filter(FilterExpr::Cmp {
+        field: "deleted_at".into(),
+        op: FilterOp::IsNull,
+        value: serde_json::Value::Null,
+    })
+}
+
+#[async_trait]
+impl EntityFetcher for SoftDeleteFetcher {
+    async fn fetch_as_json(&self, entity_id: &Uuid) -> Result<serde_json::Value> {
+        let document = self.inner.fetch_as_json(entity_id).await?;
+        if is_hidden(&document) {
+            // Indistinguishable from "no such row": that is what a soft delete
+            // means to a reader, and telling the two apart would leak the fact
+            // that something was deleted.
+            anyhow::bail!("{entity_id}: not found");
+        }
+        Ok(document)
+    }
+
+    async fn get_sample_entity(&self) -> Result<serde_json::Value> {
+        self.inner.get_sample_entity().await
+    }
+
+    async fn list_as_json(
+        &self,
+        limit: Option<i32>,
+        offset: Option<i32>,
+    ) -> Result<Vec<serde_json::Value>> {
+        let Some(want) = limit else {
+            return Ok(self
+                .inner
+                .list_as_json(None, offset)
+                .await?
+                .into_iter()
+                .filter(|d| !is_hidden(d))
+                .collect());
+        };
+
+        // Filtering after the source paginated would return short pages. So the
+        // decorator reads in growing batches until it has `want` visible rows or
+        // the source is exhausted.
+        let want = want.max(0) as usize;
+        let mut skip = offset.unwrap_or(0).max(0) as usize;
+        let mut batch = (want.saturating_mul(2)).max(32);
+        let mut visible = Vec::with_capacity(want);
+
+        loop {
+            let page = self
+                .inner
+                .list_as_json(Some(batch as i32), Some(skip as i32))
+                .await?;
+            let exhausted = page.len() < batch;
+            for document in page {
+                if is_hidden(&document) {
+                    continue;
+                }
+                visible.push(document);
+                if visible.len() == want {
+                    return Ok(visible);
+                }
+            }
+            if exhausted {
+                return Ok(visible);
+            }
+            skip += batch;
+            batch = batch.saturating_mul(2);
+        }
+    }
+
+    fn list_query_max_rows(&self) -> usize {
+        self.inner.list_query_max_rows()
+    }
+
+    async fn list_query(&self, query: &Query) -> Result<(Vec<serde_json::Value>, usize)> {
+        // Delegated with the filter injected, so a backend that pushes the query
+        // down (SQL `WHERE`, Mongo filter) keeps an exact `total` and correct
+        // pages. Filtering the result here instead would shrink a page after the
+        // fact and lie about the count.
+        self.inner.list_query(&with_hidden_filter(query)).await
+    }
+}
+
+/// `EntityCreator` whose `delete` marks instead of removing.
+pub struct SoftDeleteCreator {
+    inner: Arc<dyn EntityCreator>,
+    fetcher: Arc<dyn EntityFetcher>,
+}
+
+impl SoftDeleteCreator {
+    pub fn new(inner: Arc<dyn EntityCreator>, fetcher: Arc<dyn EntityFetcher>) -> Self {
+        Self { inner, fetcher }
+    }
+}
+
+#[async_trait]
+impl EntityCreator for SoftDeleteCreator {
+    async fn create_from_json(&self, entity_data: serde_json::Value) -> Result<serde_json::Value> {
+        self.inner.create_from_json(entity_data).await
+    }
+
+    async fn update_from_json(
+        &self,
+        entity_id: &Uuid,
+        entity_data: serde_json::Value,
+    ) -> Result<serde_json::Value> {
+        self.inner.update_from_json(entity_id, entity_data).await
+    }
+
+    async fn delete(&self, entity_id: &Uuid) -> Result<()> {
+        // Read the whole document first: `update_from_json` is a replacement in
+        // most backends, so sending only `{"deleted_at": ...}` would erase the
+        // rest of the row.
+        let Ok(mut document) = self.fetcher.fetch_as_json(entity_id).await else {
+            // Already gone (or hidden): nothing to mark.
+            return Ok(());
+        };
+        document["deleted_at"] = serde_json::Value::String(Utc::now().to_rfc3339());
+
+        match self.inner.update_from_json(entity_id, document).await {
+            Ok(_) => Ok(()),
+            // The type or the store cannot carry the mark: fall back to the real
+            // delete rather than pretending it happened.
+            Err(_) => self.inner.delete(entity_id).await,
+        }
+    }
+}
+
+#[cfg(test)]
+mod json_tests {
+    use super::*;
+
+    /// A store of plain documents, enough to exercise the decorator.
+    struct StubFetcher {
+        docs: Vec<serde_json::Value>,
+    }
+
+    #[async_trait]
+    impl EntityFetcher for StubFetcher {
+        async fn fetch_as_json(&self, id: &Uuid) -> Result<serde_json::Value> {
+            self.docs
+                .iter()
+                .find(|d| d["id"] == id.to_string())
+                .cloned()
+                .ok_or_else(|| anyhow::anyhow!("not found"))
+        }
+
+        async fn list_as_json(
+            &self,
+            limit: Option<i32>,
+            offset: Option<i32>,
+        ) -> Result<Vec<serde_json::Value>> {
+            let skip = offset.unwrap_or(0).max(0) as usize;
+            let take = limit.unwrap_or(i32::MAX).max(0) as usize;
+            Ok(self.docs.iter().skip(skip).take(take).cloned().collect())
+        }
+    }
+
+    fn doc(n: usize, deleted: bool) -> serde_json::Value {
+        serde_json::json!({
+            "id": Uuid::from_u128(n as u128).to_string(),
+            "name": format!("row-{n}"),
+            "deleted_at": if deleted { serde_json::json!("2026-10-31T00:00:00Z") } else { serde_json::Value::Null },
+        })
+    }
+
+    #[tokio::test]
+    async fn fetch_hides_a_marked_row_and_says_not_found() {
+        let fetcher = SoftDeleteFetcher::new(Arc::new(StubFetcher {
+            docs: vec![doc(1, false), doc(2, true)],
+        }));
+
+        let alive = fetcher
+            .fetch_as_json(&Uuid::from_u128(1))
+            .await
+            .expect("row 1 is alive");
+        assert_eq!(alive["name"], "row-1");
+
+        let gone = fetcher.fetch_as_json(&Uuid::from_u128(2)).await;
+        assert!(gone.is_err(), "a marked row must read as absent");
+        assert_eq!(
+            gone.unwrap_err().to_string(),
+            format!("{}: not found", Uuid::from_u128(2))
+        );
+    }
+
+    #[tokio::test]
+    async fn list_returns_full_pages_when_some_rows_are_hidden() {
+        // Hidden rows sit inside the first page; a naive filter-after-paginate
+        // would return a short page.
+        let mut docs = Vec::new();
+        for n in 1..=12 {
+            docs.push(doc(n, n % 2 == 0));
+        }
+        let fetcher = SoftDeleteFetcher::new(Arc::new(StubFetcher { docs }));
+
+        let page = fetcher.list_as_json(Some(3), Some(0)).await.unwrap();
+        assert_eq!(page.len(), 3, "the page must be full, not filtered short");
+        assert!(page.iter().all(|d| !is_hidden(d)));
+
+        let all = fetcher.list_as_json(None, None).await.unwrap();
+        assert_eq!(all.len(), 6, "only the 6 alive rows");
+    }
+
+    #[tokio::test]
+    async fn list_query_carries_the_hidden_filter_to_the_backend() {
+        // The inner fetcher sees the query the decorator builds; it must contain
+        // `deleted_at IS NULL`, and must keep the caller's own filter.
+        let q = Query::new().filter(FilterExpr::Cmp {
+            field: "status".into(),
+            op: FilterOp::Eq,
+            value: serde_json::json!("active"),
+        });
+        let injected = with_hidden_filter(&q);
+
+        match injected.filter {
+            Some(FilterExpr::And(parts)) => {
+                assert_eq!(parts.len(), 2, "caller filter + hidden filter");
+                assert!(parts.iter().any(|p| matches!(
+                    p,
+                    FilterExpr::Cmp { field, op: FilterOp::IsNull, .. } if field == "deleted_at"
+                )));
+            }
+            other => panic!("expected an AND, got {other:?}"),
+        }
+    }
+}
