@@ -855,3 +855,179 @@ mod creator_tests {
         creator.delete(&Uuid::new_v4()).await.unwrap();
     }
 }
+
+#[cfg(test)]
+mod host_tests {
+    use super::*;
+    use crate::config::LinksConfig;
+    use crate::core::Module;
+    use crate::server::builder::ServerBuilder;
+    use crate::server::entity_registry::EntityRegistry;
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+
+    /// One document store, served as both fetcher and creator.
+    struct Store {
+        docs: Mutex<HashMap<Uuid, serde_json::Value>>,
+    }
+
+    impl Store {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                docs: Mutex::new(HashMap::new()),
+            })
+        }
+        fn insert(&self, id: Uuid, name: &str) {
+            self.docs.lock().unwrap().insert(
+                id,
+                serde_json::json!({ "id": id.to_string(), "name": name, "deleted_at": null }),
+            );
+        }
+        fn snapshot(&self, id: &Uuid) -> Option<serde_json::Value> {
+            self.docs.lock().unwrap().get(id).cloned()
+        }
+    }
+
+    #[async_trait]
+    impl EntityFetcher for Store {
+        async fn fetch_as_json(&self, id: &Uuid) -> Result<serde_json::Value> {
+            self.snapshot(id)
+                .ok_or_else(|| anyhow::anyhow!("not found"))
+        }
+        async fn get_sample_entity(&self) -> Result<serde_json::Value> {
+            Ok(serde_json::json!({ "id": "", "name": "", "deleted_at": null }))
+        }
+        async fn list_as_json(
+            &self,
+            limit: Option<i32>,
+            offset: Option<i32>,
+        ) -> Result<Vec<serde_json::Value>> {
+            let skip = offset.unwrap_or(0).max(0) as usize;
+            let take = limit.unwrap_or(i32::MAX).max(0) as usize;
+            Ok(self
+                .docs
+                .lock()
+                .unwrap()
+                .values()
+                .skip(skip)
+                .take(take)
+                .cloned()
+                .collect())
+        }
+    }
+
+    #[async_trait]
+    impl EntityCreator for Store {
+        async fn create_from_json(&self, data: serde_json::Value) -> Result<serde_json::Value> {
+            Ok(data)
+        }
+        async fn update_from_json(
+            &self,
+            id: &Uuid,
+            data: serde_json::Value,
+        ) -> Result<serde_json::Value> {
+            let mut docs = self.docs.lock().unwrap();
+            let slot = docs
+                .get_mut(id)
+                .ok_or_else(|| anyhow::anyhow!("not found"))?;
+            *slot = data.clone();
+            Ok(data)
+        }
+        async fn delete(&self, id: &Uuid) -> Result<()> {
+            self.docs.lock().unwrap().remove(id);
+            Ok(())
+        }
+    }
+
+    struct MemModule {
+        store: Arc<Store>,
+    }
+
+    impl Module for MemModule {
+        fn name(&self) -> &str {
+            "mem"
+        }
+        fn entity_types(&self) -> Vec<&str> {
+            vec!["widget"]
+        }
+        fn links_config(&self) -> anyhow::Result<LinksConfig> {
+            LinksConfig::from_yaml_str("entities: []\nlinks: []\n")
+        }
+        fn register_entities(&self, _registry: &mut EntityRegistry) {}
+        fn get_entity_fetcher(&self, entity_type: &str) -> Option<Arc<dyn EntityFetcher>> {
+            (entity_type == "widget").then(|| self.store.clone() as Arc<dyn EntityFetcher>)
+        }
+        fn get_entity_creator(&self, entity_type: &str) -> Option<Arc<dyn EntityCreator>> {
+            (entity_type == "widget").then(|| self.store.clone() as Arc<dyn EntityCreator>)
+        }
+    }
+
+    fn host_with(store: Arc<Store>) -> crate::server::host::ServerHost {
+        ServerBuilder::new()
+            .with_link_service(crate::storage::InMemoryLinkService::new())
+            .register_module(MemModule { store })
+            .expect("register module")
+            .with_soft_delete()
+            .build_host()
+            .expect("build host")
+    }
+
+    #[tokio::test]
+    async fn the_host_marks_on_delete_and_hides_on_read() {
+        // The whole point of the feature, exercised through the host the way
+        // GraphQL, gRPC and the link routes reach it.
+        let store = Store::new();
+        let id = Uuid::new_v4();
+        store.insert(id, "widget");
+        let host = host_with(store.clone());
+
+        host.entity_creators["widget"]
+            .delete(&id)
+            .await
+            .expect("delete through the host");
+
+        let row = store.snapshot(&id).expect("the row must still be stored");
+        assert!(!row["deleted_at"].is_null(), "delete must mark: {row}");
+        assert_eq!(row["name"], "widget", "the rest of the row is intact");
+
+        assert!(
+            host.entity_fetchers["widget"]
+                .fetch_as_json(&id)
+                .await
+                .is_err(),
+            "a marked row must read as absent through the host"
+        );
+        let listed = host.entity_fetchers["widget"]
+            .list_as_json(None, None)
+            .await
+            .unwrap();
+        assert!(
+            listed.is_empty(),
+            "a marked row must not be listed: {listed:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn without_the_option_the_host_behaves_as_before() {
+        // Opt-in means opt-in: the same host without `with_soft_delete()` must
+        // keep the old, hard delete. Otherwise the "opt-in" claim is a lie.
+        let store = Store::new();
+        let id = Uuid::new_v4();
+        store.insert(id, "widget");
+
+        let host = ServerBuilder::new()
+            .with_link_service(crate::storage::InMemoryLinkService::new())
+            .register_module(MemModule {
+                store: store.clone(),
+            })
+            .expect("register module")
+            .build_host()
+            .expect("build host");
+
+        host.entity_creators["widget"].delete(&id).await.unwrap();
+        assert!(
+            store.snapshot(&id).is_none(),
+            "without the option, delete still removes the row"
+        );
+    }
+}
