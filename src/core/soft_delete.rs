@@ -20,7 +20,7 @@
 //!
 //! ## What happens to a type that has no `deleted_at`
 //!
-//! [`Entity::set_deleted_at`](crate::core::Entity::set_deleted_at) answers
+//! [`crate::core::Entity::set_deleted_at`] answers
 //! `false` for a type that cannot carry the mark — a hand-written `Entity`, for
 //! instance. The decorator then performs the **hard** delete it always did, and
 //! [`delete_reporting`](SoftDeleting::delete_reporting) says so. A delete that
