@@ -103,6 +103,24 @@ pub trait Entity: Clone + Send + Sync + 'static {
     fn is_active(&self) -> bool {
         self.status() == "active" && !self.is_deleted()
     }
+
+    /// Mark this entity deleted (`Some(at)`), or reinstate it (`None`).
+    ///
+    /// Returns **`false` when the type cannot carry the mark**, i.e. it has no
+    /// `deleted_at` field. That return value is the whole point: the generated
+    /// entities implement this and answer `true`, so a caller that wants a soft
+    /// delete can tell the difference between "deleted softly" and "this type
+    /// has nowhere to record it" — and fall back to a hard delete instead of
+    /// silently doing nothing.
+    ///
+    /// The default body is `false` on purpose. Making it a required method
+    /// would break every hand-written `impl Entity` (see
+    /// `examples/aletheia_server.rs`), and defaulting it to a no-op that
+    /// *claims* success would be worse than having no soft delete at all.
+    fn set_deleted_at(&mut self, at: Option<DateTime<Utc>>) -> bool {
+        let _ = at;
+        false
+    }
 }
 
 /// Trait for data entities that represent concrete domain objects.
