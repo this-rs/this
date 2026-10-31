@@ -51,19 +51,28 @@ pub enum AuthMode {
 
 // ─── Tenant Configuration ───────────────────────────────────────────────────
 
-/// How tenant_id is resolved from requests
+/// Where the tenant of a request comes from.
+///
+/// There is exactly **one** source: the credential (the claim named by
+/// [`TenantConfig::claim_field`]). A client may *ask* for a tenant with
+/// `x-tenant-id` or `?tenant_id=`, but the middleware honours the ask only when
+/// the credential carries it, or when the caller is an administrator
+/// (`server/middleware/tenant.rs`).
+///
+/// The enum has a single variant on purpose. Two others existed — `Header` and
+/// `Subdomain` — and no code path ever read this enum: writing
+/// `tenant.resolver: header` changed nothing, silently. `Header` named exactly
+/// the policy the middleware now refuses (a client choosing its own tenant with
+/// a header it controls), so it was removed rather than wired: a configuration
+/// that still writes it fails to load and the message lists the value that
+/// works. `Subdomain` described the tenant of a served domain, which the domain
+/// guard (`middleware::origin`) poses before this resolver ever runs.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TenantResolver {
-    /// Extract from JWT claim (default)
+    /// Extract from the credential's claim (the only behaviour, and the default)
     #[default]
     JwtClaim,
-
-    /// Extract from X-Tenant-Id header
-    Header,
-
-    /// Extract from subdomain (tenant.api.example.com)
-    Subdomain,
 }
 
 /// Multi-tenant configuration
@@ -73,7 +82,8 @@ pub struct TenantConfig {
     #[serde(default)]
     pub enabled: bool,
 
-    /// How to resolve tenant_id from requests
+    /// Kept as a declared knob because configuration files mention it; the
+    /// only accepted value is `jwt_claim`. See [`TenantResolver`].
     #[serde(default)]
     pub resolver: TenantResolver,
 
@@ -405,18 +415,32 @@ tenant:
     }
 
     #[test]
-    fn test_tenant_resolver_variants() {
-        let yaml_jwt = "\"jwt_claim\"";
-        let parsed: TenantResolver = serde_yaml::from_str(yaml_jwt).unwrap();
+    fn test_tenant_resolver_accepts_the_credential_source() {
+        let parsed: TenantResolver = serde_yaml::from_str("\"jwt_claim\"").unwrap();
         assert_eq!(parsed, TenantResolver::JwtClaim);
+    }
 
-        let yaml_header = "\"header\"";
-        let parsed: TenantResolver = serde_yaml::from_str(yaml_header).unwrap();
-        assert_eq!(parsed, TenantResolver::Header);
+    /// `header` named a source no code ever read, and the one the middleware now
+    /// refuses: a client picking its tenant with a header it controls. It is
+    /// refused at load, not accepted in silence.
+    #[test]
+    fn test_tenant_resolver_refuses_header() {
+        let err = serde_yaml::from_str::<TenantResolver>("\"header\"")
+            .expect_err("`resolver: header` must not deserialize");
+        let text = err.to_string();
+        assert!(
+            text.contains("jwt_claim"),
+            "the refusal must list the value that works, got {text}"
+        );
+    }
 
-        let yaml_subdomain = "\"subdomain\"";
-        let parsed: TenantResolver = serde_yaml::from_str(yaml_subdomain).unwrap();
-        assert_eq!(parsed, TenantResolver::Subdomain);
+    /// Same for `subdomain`: the tenant of a served domain is posed by the domain
+    /// guard (`middleware::origin`), never by this enum.
+    #[test]
+    fn test_tenant_resolver_refuses_subdomain() {
+        let err = serde_yaml::from_str::<TenantResolver>("\"subdomain\"")
+            .expect_err("`resolver: subdomain` must not deserialize");
+        assert!(err.to_string().contains("jwt_claim"), "got {err}");
     }
 
     #[test]
@@ -482,7 +506,7 @@ provider: oidc
             }),
             tenant: TenantConfig {
                 enabled: true,
-                resolver: TenantResolver::Header,
+                resolver: TenantResolver::JwtClaim,
                 claim_field: "org_id".to_string(),
                 auto_provision: true,
             },
@@ -508,7 +532,7 @@ provider: oidc
         assert!(parsed.is_multi_tenant());
         assert!(parsed.has_erasure_cascade());
         assert!(parsed.oidc.is_some());
-        assert_eq!(parsed.tenant.resolver, TenantResolver::Header);
+        assert_eq!(parsed.tenant.resolver, TenantResolver::JwtClaim);
         assert_eq!(parsed.tenant.claim_field, "org_id");
     }
 
