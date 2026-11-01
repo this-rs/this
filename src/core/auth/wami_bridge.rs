@@ -26,9 +26,7 @@
 
 use crate::core::auth::AuthContext;
 use anyhow::{Result, anyhow, bail};
-use axum::http::HeaderMap;
 use std::collections::HashMap;
-use std::net::IpAddr;
 use std::sync::Mutex;
 use uuid::Uuid;
 use wami_core::WamiContext;
@@ -99,6 +97,17 @@ impl IdentityRegistry {
         Ok(TenantPath::new(vec![self.tenant_segment(tenant)?]))
     }
 
+    /// Every `(tenant, segment)` pair, sorted by segment: what a host persists
+    /// and hands back to [`IdentityRegistry::load`] after a restart. Without
+    /// this round trip, a restart would reallocate segments and an ARN minted
+    /// before it could name another tenant.
+    pub fn snapshot(&self) -> Result<Vec<(Uuid, u64)>> {
+        let state = self.lock()?;
+        let mut pairs: Vec<(Uuid, u64)> = state.by_uuid.iter().map(|(t, s)| (*t, *s)).collect();
+        pairs.sort_by_key(|(_, s)| *s);
+        Ok(pairs)
+    }
+
     /// Restore persisted `(tenant, segment)` pairs.
     ///
     /// Refuses the whole batch if any pair reuses a segment for another tenant,
@@ -148,58 +157,7 @@ impl IdentityRegistry {
     }
 }
 
-/// Per-request facts that wami conditions read.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct RequestMeta {
-    /// Client address used for IP conditions.
-    pub source_ip: Option<IpAddr>,
-    /// Whether the request arrived over TLS, as far as it is known.
-    pub secure_transport: Option<bool>,
-    /// Whether MFA was used. Unknown until the token carries an `amr` claim.
-    pub mfa_present: Option<bool>,
-}
-
-/// Whether `X-Forwarded-*` headers may be read.
-///
-/// `Ignore` is the default: a client can set those headers itself.
-/// Choose `Trust` only when the edge proxy overwrites them on every request.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub enum ForwardedHeaders {
-    #[default]
-    Ignore,
-    Trust,
-}
-
-impl RequestMeta {
-    /// Extract the request facts from headers and the peer address.
-    pub fn from_request(
-        headers: &HeaderMap,
-        peer: Option<IpAddr>,
-        forwarded: ForwardedHeaders,
-    ) -> Self {
-        match forwarded {
-            ForwardedHeaders::Ignore => Self {
-                source_ip: peer,
-                secure_transport: None,
-                mfa_present: None,
-            },
-            ForwardedHeaders::Trust => {
-                let header = |name: &str| headers.get(name).and_then(|v| v.to_str().ok());
-                let source_ip = header("x-forwarded-for")
-                    .and_then(|list| list.split(',').next())
-                    .and_then(|first| first.trim().parse::<IpAddr>().ok())
-                    .or(peer);
-                let secure_transport = header("x-forwarded-proto")
-                    .map(|proto| proto.trim().eq_ignore_ascii_case("https"));
-                Self {
-                    source_ip,
-                    secure_transport,
-                    mfa_present: None,
-                }
-            }
-        }
-    }
-}
+pub use crate::core::auth::{ForwardedHeaders, RequestMeta};
 
 /// Build the WAMI caller context for a verified `AuthContext`.
 ///
@@ -257,8 +215,8 @@ pub fn wami_context_for(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::http::HeaderValue;
-    use std::net::Ipv4Addr;
+    use axum::http::{HeaderMap, HeaderValue};
+    use std::net::{IpAddr, Ipv4Addr};
 
     fn user(tenant: Uuid) -> AuthContext {
         AuthContext::User {

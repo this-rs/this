@@ -53,7 +53,8 @@ pub async fn guard_of<T>(
         return Ok(SurfaceGuard::unenforced(AuthContext::Anonymous));
     }
     let ctx = context_of(host, request).await?;
-    Ok(SurfaceGuard::for_host(host, ctx, "gRPC"))
+    let headers = request.metadata().clone().into_headers();
+    Ok(SurfaceGuard::for_request(host, ctx, "gRPC", &headers))
 }
 
 /// axum layer of the armed gRPC routers: resolve the identity from the metadata

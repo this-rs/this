@@ -56,7 +56,12 @@ pub async fn ws_handler(
                 }
             },
         };
-        Some(SurfaceGuard::for_host(manager.host(), ctx, "WebSocket"))
+        Some(SurfaceGuard::for_request(
+            manager.host(),
+            ctx,
+            "WebSocket",
+            &headers,
+        ))
     } else {
         None
     };
