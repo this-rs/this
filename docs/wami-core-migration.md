@@ -66,6 +66,11 @@ wami-condition 0.18.1). Conséquence assumée : la publication crates.io de `thi
 les deps `path` (cf. plan `f33522d1`) — on est délibérément **en avance sur le registre**. `wami`
 apporte `jsonwebtoken 10` ; `this` garde `9` le temps de la migration (deux piles crypto
 coexistent), puis on retire la 9.
+**CI** : `.github/create-local-dep-stubs.sh` ne peut pas *stubber* wami (la feature `wami` est
+testée en CI) ; il clone `Lsh0x/wami@main` en sparse `--no-cone` (`crates/`, `Cargo.toml`,
+`Cargo.lock` ; 4,8 Mo, sans le `coverage.json` de 75 Mo) au chemin attendu
+`../../obrain/wami-main`. Conséquence assumée de « suivre main » : la CI teste le `main` de wami
+du moment, pas un commit épinglé.
 
 ### D4 — Tokens (double-acceptation)
 wami exige `aud` + `kid` ; les tokens `this` actuels n'en ont pas.

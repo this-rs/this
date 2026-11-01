@@ -52,9 +52,12 @@ fi
 WAMI_DIR="$REPO_ROOT/../../obrain/wami-main"
 if [ ! -d "$WAMI_DIR/crates/wami" ]; then
   mkdir -p "$(dirname "$WAMI_DIR")"
-  if git clone --depth 1 --branch main --filter=blob:none --sparse \
-       https://github.com/Lsh0x/wami.git "$WAMI_DIR"; then
-    git -C "$WAMI_DIR" sparse-checkout set crates Cargo.toml Cargo.lock
+  # --no-cone: cone mode always checks out the root files, coverage.json included.
+  if git clone --depth 1 --branch main --filter=blob:none --no-checkout \
+       https://github.com/Lsh0x/wami.git "$WAMI_DIR" \
+     && git -C "$WAMI_DIR" sparse-checkout set --no-cone '/Cargo.toml' '/Cargo.lock' '/crates/' \
+     && git -C "$WAMI_DIR" checkout main; then
+    echo "  sparse clone: crates/ only"
   else
     echo "sparse clone failed, falling back to a plain shallow clone"
     rm -rf "$WAMI_DIR"
