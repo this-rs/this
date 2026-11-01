@@ -109,6 +109,9 @@ struct Enforced {
         crate::storage::iam::Iam,
         Option<Arc<crate::server::middleware::authorization::PrincipalMapping>>,
     )>,
+    /// IAM WAMI armé par l'hôte : prioritaire sur `iam` pour `perm:`.
+    #[cfg(feature = "wami")]
+    wami: Option<Arc<crate::core::auth::wami_policy::WamiEnforcement>>,
 }
 
 /// Per-request guard (cheap to clone).
@@ -152,6 +155,8 @@ impl SurfaceGuard {
                     .graph_store
                     .as_ref()
                     .map(|s| (s.iam(), host.principal_mapping.clone())),
+                #[cfg(feature = "wami")]
+                wami: host.wami_enforcement.clone(),
             })),
         }
     }
@@ -189,6 +194,22 @@ impl SurfaceGuard {
         resource: Option<&Uuid>,
         f: impl FnOnce(&RegistryEnv<'_>) -> R,
     ) -> R {
+        #[cfg(feature = "wami")]
+        if let Some(w) = &e.wami {
+            // WAMI is the sole answer for `perm:` here. A caller WAMI cannot name
+            // (anonymous, service, admin, or a context that fails to build) gets
+            // `None`, which is unevaluable: refused, never read as allow.
+            let caller = w.caller_context(&self.ctx).ok().flatten();
+            let verdict = |p: &str| -> Option<bool> {
+                let ctx = caller.as_ref()?;
+                w.store.verdict(ctx, p).as_permission()
+            };
+            let perm_ref: &PermissionFn<'_> = &verdict;
+            let env = RegistryEnv::new(Some(&e.resolvers), &self.ctx)
+                .with_resource(resource)
+                .with_permission(perm_ref);
+            return f(&env);
+        }
         #[cfg(feature = "obrain")]
         {
             if let Some((iam, mapping)) = &e.iam {

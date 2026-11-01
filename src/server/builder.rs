@@ -71,6 +71,10 @@ pub struct ServerBuilder {
     // Mappage d'identité de l'application, pour l'IAM natif d'un modèle existant
     principal_mapping: Option<Arc<crate::server::middleware::authorization::PrincipalMapping>>,
 
+    // IAM WAMI : répond seul à `perm:` sur les surfaces non-REST quand armé
+    #[cfg(feature = "wami")]
+    wami_enforcement: Option<Arc<crate::core::auth::wami_policy::WamiEnforcement>>,
+
     // Armer le bail d'écriture sur un store obrain inscriptible (défaut : armé)
     #[cfg_attr(not(feature = "obrain"), allow(dead_code))]
     fence_writes: bool,
@@ -118,6 +122,8 @@ impl ServerBuilder {
             #[cfg(feature = "frontend")]
             frontend_sites: None,
             principal_mapping: None,
+            #[cfg(feature = "wami")]
+            wami_enforcement: None,
             fence_writes: true,
             auth_config: None,
             resolver_registry: AuthResolverRegistry::new(),
@@ -402,6 +408,17 @@ impl ServerBuilder {
         F: Fn(&crate::core::auth::AuthContext) -> Option<(String, String)> + Send + Sync + 'static,
     {
         self.principal_mapping = Some(Arc::new(mapping));
+        self
+    }
+
+    /// Arme l'IAM WAMI : `perm:` est alors répondu par wami seul sur les surfaces
+    /// non-REST (gRPC, GraphQL, WebSocket). Le REST reste sur son middleware en T5b.
+    #[cfg(feature = "wami")]
+    pub fn with_wami_enforcement(
+        mut self,
+        enforcement: crate::core::auth::wami_policy::WamiEnforcement,
+    ) -> Self {
+        self.wami_enforcement = Some(Arc::new(enforcement));
         self
     }
 
@@ -1153,6 +1170,10 @@ impl ServerBuilder {
             host.frontend_sites = self.frontend_sites.clone();
         }
         host.principal_mapping = self.principal_mapping.clone();
+        #[cfg(feature = "wami")]
+        {
+            host.wami_enforcement = self.wami_enforcement.clone();
+        }
 
         // Attach the obrain graph handle if one was provided.
         //
