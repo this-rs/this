@@ -105,10 +105,15 @@ gdpr:
         let dk = jsonwebtoken::DecodingKey::from_ed_pem(pub_pem.as_bytes()).expect("dk");
         let mut validation = jsonwebtoken::Validation::new(jsonwebtoken::Algorithm::EdDSA);
         validation.set_issuer(&["this-rs-example"]);
-        validation.set_audience::<&str>(&[]);
+        // Audience is checked against the STS, which issues for DEFAULT_AUDIENCE.
+        validation.validate_aud = false;
 
         let data = jsonwebtoken::decode::<StsClaims>(&pair.access_token, &dk, &validation)
             .expect("verify token");
+        assert_eq!(
+            data.claims.aud.as_deref(),
+            Some(this::core::auth::sts::DEFAULT_AUDIENCE)
+        );
         println!("\n[OK] Token verified:");
         println!("     Subject:   {}", data.claims.sub);
         println!("     Tenant:    {}", data.claims.tenant_id);

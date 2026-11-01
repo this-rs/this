@@ -134,8 +134,10 @@ impl WamiAuthProvider {
         if let Some(ref audience) = wami_config.audience {
             validation.set_audience(&[audience.as_str()]);
         } else {
-            // Don't require audience if not configured
-            validation.set_audience::<&str>(&[]);
+            // No audience configured: accept any `aud`, including none. jsonwebtoken
+            // would refuse an `aud` present with an empty expected set, and the STS
+            // now always sets one. Configure `wami.audience` to enforce it (ADR D4).
+            validation.validate_aud = false;
         }
 
         // Always validate expiration
@@ -306,6 +308,41 @@ mod tests {
         use ed25519_dalek::pkcs8::EncodePublicKey;
         vk.to_public_key_pem(ed25519_dalek::pkcs8::spki::der::pem::LineEnding::LF)
             .expect("failed to encode public key as PEM")
+    }
+
+    /// A token the STS issues must verify here, and audience must be enforced.
+    /// Covers ADR D4: new tokens (with `aud`) and legacy tokens (without) both
+    /// pass in the window; a foreign audience is refused once one is configured.
+    #[test]
+    fn sts_issued_token_verifies_here_and_audience_is_enforced() {
+        use crate::core::auth::sts::{DEFAULT_AUDIENCE, StsService};
+        use ed25519_dalek::pkcs8::EncodePrivateKey;
+
+        let signing = SigningKey::from_bytes(&[9u8; 32]);
+        let priv_pem = signing
+            .to_pkcs8_pem(ed25519_dalek::pkcs8::spki::der::pem::LineEnding::LF)
+            .expect("pkcs8 pem");
+        let sts = StsService::new(&priv_pem, "test-issuer".to_string()).expect("sts");
+        let pair = sts
+            .issue_token_pair(uuid::Uuid::new_v4(), uuid::Uuid::new_v4(), vec![])
+            .expect("issue");
+        let pub_pem = pub_key_to_pem(&signing.verifying_key());
+
+        // Audience not configured: any `aud` passes.
+        let mut cfg = test_config(&pub_pem);
+        cfg.wami.as_mut().unwrap().audience = None;
+        let open = WamiAuthProvider::from_config(&cfg).expect("provider");
+        assert!(open.verify_token(&pair.access_token).is_ok());
+
+        // Audience configured to the STS audience: accepted.
+        let mut cfg = test_config(&pub_pem);
+        cfg.wami.as_mut().unwrap().audience = Some(DEFAULT_AUDIENCE.to_string());
+        let matching = WamiAuthProvider::from_config(&cfg).expect("provider");
+        assert!(matching.verify_token(&pair.access_token).is_ok());
+
+        // Audience configured to another service: refused.
+        let other = WamiAuthProvider::from_config(&test_config(&pub_pem)).expect("provider");
+        assert!(other.verify_token(&pair.access_token).is_err());
     }
 
     /// Create an AuthConfig with the given public key
