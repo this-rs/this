@@ -322,63 +322,46 @@ enum PorteeFlux {
 ///   l'en-tête : un client ne choisit pas son locataire quand un jeton en
 ///   désigne un) ;
 /// - un `Admin` authentifié (sans locataire) → `Global`, explicitement ;
-/// - sinon, l'en-tête `x-tenant-id` **bien formé** → `Locataire` (le geste
-///   explicite reste possible, il vient de la configuration d'exposition) ;
 /// - **rien du tout → `PermissionDenied`**, avec la raison et le remède.
 ///
-/// ⚠️ Ce qui **reste** ouvert, et ici seulement : l'en-tête `x-tenant-id` est
-/// un **choix du client**, pas une preuve. Sur ce chemin, nul ne le confronte à
-/// une identité : un appelant qui n'en présente aucune ouvre un flux sur le
-/// locataire qu'il nomme, et lit donc les événements de ce locataire.
+/// ✅ **L'en-tête `x-tenant-id` n'ouvre plus rien, seul.** Il fut un temps où un
+/// appelant sans identité désignait le locataire qu'il voulait et lisait ses
+/// événements : c'était le dernier endroit où le client choisissait son
+/// locataire, côté gRPC, quand le HTTP avait déjà été fermé (`46a80ba`).
 ///
-/// Le middleware HTTP **ne partage plus** ce défaut. Depuis le 31/10/2026
-/// (`46a80ba`, `server/middleware/tenant.rs`) il confronte la désignation au
-/// jeton : une valeur contraire est refusée (`this.auth.forbidden`,
-/// `tenant_mismatch`) comme une valeur sans identité (`tenant_without_identity`),
-/// la seule exception étant `AuthContext::Admin`. Un commentaire précédent
-/// affirmait ici le contraire — il décrivait l'état d'avant ce correctif.
-///
-/// La différence tient à ce que gRPC ne fournit pas : **aucun interceptor** ne
-/// pose d'`AuthContext` au dépôt, donc `portee_du_flux` ne peut pas confronter
-/// ce qu'il ne reçoit jamais. Le remède est donc nommé, pas appliqué : un
-/// `tonic::Interceptor` qui vérifie le jeton et pose l'`AuthContext` rendrait le
-/// premier branchement ci-dessus suffisant, et l'en-tête seul pourrait alors
-/// être refusé comme il l'est en HTTP.
-fn portee_du_flux<T>(request: &Request<T>) -> Result<PorteeFlux, Status> {
-    // 1. L'identité d'abord — elle seule peut désigner un locataire *prouvé*.
-    if let Some(auth) = request.extensions().get::<AuthContext>() {
-        if let Some(tid) = auth.tenant_id() {
-            return Ok(PorteeFlux::Locataire(tid));
-        }
-        if matches!(auth, AuthContext::Admin { .. }) {
-            return Ok(PorteeFlux::Global);
-        }
-        // Un principal authentifié SANS locataire et sans rôle d'administration
-        // (un `User` sans locataire, p. ex.) n'a pas de portée : on ne lui
-        // invente pas « tout ».
-    }
+/// La cause était qu'aucune identité n'était résolue sur ce chemin :
+/// `portee_du_flux` ne pouvait pas confronter ce qu'il ne recevait jamais. Elle
+/// est levée : la portée est maintenant résolue par
+/// [`identity::context_of`](super::identity::context_of), l'accesseur par appel,
+/// qui lit l'`AuthContext` posé par `identity_layer` **ou**, quand la surface
+/// n'est pas armée et que la couche n'a donc pas tourné, les métadonnées
+/// `authorization` directement. Un locataire n'est plus jamais une déclaration.
+async fn portee_du_flux<T>(
+    host: &crate::server::host::ServerHost,
+    request: &Request<T>,
+) -> Result<PorteeFlux, Status> {
+    let auth = super::identity::context_of(host, request).await?;
 
-    // 2. L'en-tête explicite — le geste déclaré, pas la preuve.
-    if let Some(tid) = en_tete_locataire(request) {
+    if let Some(tid) = auth.tenant_id() {
         return Ok(PorteeFlux::Locataire(tid));
     }
+    if matches!(auth, AuthContext::Admin { .. }) {
+        return Ok(PorteeFlux::Global);
+    }
+    // Un principal authentifié SANS locataire et sans rôle d'administration
+    // (un `User` sans locataire, p. ex.) n'a pas de portée : on ne lui invente
+    // pas « tout » — et un anonyme n'en a aucune.
 
+    // Aucune identité : on refuse. Nommer un locataire par un en-tête n'est pas
+    // une preuve, et un flux d'événements ne s'ouvre pas sur une déclaration.
     Err(crate::core::errors::to_status(
         crate::core::errors::forbidden(
-            "event stream: no scope — present an identity (an interceptor setting \
-             `AuthContext`: a tenant token scopes the stream, an administrator sees it \
-             all) or declare the tenant with the `x-tenant-id` header",
+            "event stream: no scope — present an identity. gRPC reads \
+             `authorization` metadata and sets the context (a tenant token scopes \
+             the stream, an administrator sees it all); the `x-tenant-id` header \
+             alone no longer opens a stream",
         ),
     ))
-}
-
-/// Le locataire déclaré par l'en-tête `x-tenant-id` — s'il est bien formé.
-fn en_tete_locataire<T>(request: &Request<T>) -> Option<Uuid> {
-    request
-        .metadata()
-        .get("x-tenant-id")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|s| s.parse::<Uuid>().ok())
 }
 
 #[tonic::async_trait]
@@ -394,7 +377,7 @@ impl EventService for EventServiceImpl {
         // comme un incident), elle obtient un REFUS motivé. L'ordre compte aussi
         // pour une raison de fond : on ne veut pas qu'un serveur mal configuré
         // (sans bus) fasse passer le refus pour une panne.
-        let portee = portee_du_flux(&request)?;
+        let portee = portee_du_flux(&self.host, &request).await?;
         let guard = super::identity::guard_of(&self.host, &request, self.enforce).await?;
         let locataire_du_flux = match portee {
             PorteeFlux::Locataire(tid) => Some(tid),
@@ -479,8 +462,28 @@ impl EventService for EventServiceImpl {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::LinksConfig;
     use crate::core::events::EventBus;
+    use crate::server::entity_registry::EntityRegistry;
+    use crate::storage::InMemoryLinkService;
     use serde_json::json;
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    /// Un hôte sans provider d'authentification : la portée ne peut donc venir
+    /// que d'une identité déjà posée dans les extensions — jamais d'un en-tête.
+    fn test_host() -> Arc<crate::server::host::ServerHost> {
+        Arc::new(
+            crate::server::host::ServerHost::from_builder_components(
+                Arc::new(InMemoryLinkService::new()),
+                LinksConfig::default_config(),
+                EntityRegistry::new(),
+                HashMap::new(),
+                HashMap::new(),
+            )
+            .expect("should build host"),
+        )
+    }
 
     // === Portée du flux d'événements (fail-closed) ===
     //
@@ -513,22 +516,25 @@ mod tests {
         request
     }
 
-    #[test]
-    fn un_flux_sans_portee_est_refuse() {
-        let err = portee_du_flux(&requete_vide())
-            .expect_err("sans identité ni en-tête, le flux ne doit pas s'ouvrir");
+    #[tokio::test]
+    async fn un_flux_sans_portee_est_refuse() {
+        let host = test_host();
+        let err = portee_du_flux(&host, &requete_vide())
+            .await
+            .expect_err("sans identité, le flux ne doit pas s'ouvrir");
         assert_eq!(err.code(), tonic::Code::PermissionDenied);
         // Le refus doit DIRE la raison et le remède : un refus muet apprend à
         // désarmer la garde pour faire taire le symptôme.
         assert!(
-            err.message().contains("x-tenant-id") && err.message().contains("AuthContext"),
+            err.message().contains("authorization"),
             "le refus doit nommer le remède, obtenu : {}",
             err.message()
         );
     }
 
-    #[test]
-    fn une_identite_avec_locataire_scope_le_flux() {
+    #[tokio::test]
+    async fn une_identite_avec_locataire_scope_le_flux() {
+        let host = test_host();
         let tenant = Uuid::new_v4();
         let request = avec_identite(AuthContext::User {
             user_id: Uuid::new_v4(),
@@ -536,28 +542,35 @@ mod tests {
             roles: vec![],
         });
         assert_eq!(
-            portee_du_flux(&request).unwrap(),
+            portee_du_flux(&host, &request).await.unwrap(),
             PorteeFlux::Locataire(tenant)
         );
     }
 
-    #[test]
-    fn un_anonyme_sans_en_tete_est_refuse() {
-        let err = portee_du_flux(&avec_identite(AuthContext::Anonymous))
+    #[tokio::test]
+    async fn un_anonyme_est_refuse() {
+        let host = test_host();
+        let err = portee_du_flux(&host, &avec_identite(AuthContext::Anonymous))
+            .await
             .expect_err("un anonyme n'a pas de portée");
         assert_eq!(err.code(), tonic::Code::PermissionDenied);
     }
 
-    #[test]
-    fn un_administrateur_authentifie_voit_tout_explicitement() {
+    #[tokio::test]
+    async fn un_administrateur_authentifie_voit_tout_explicitement() {
+        let host = test_host();
         let request = avec_identite(AuthContext::Admin {
             admin_id: Uuid::new_v4(),
         });
-        assert_eq!(portee_du_flux(&request).unwrap(), PorteeFlux::Global);
+        assert_eq!(
+            portee_du_flux(&host, &request).await.unwrap(),
+            PorteeFlux::Global
+        );
     }
 
-    #[test]
-    fn l_identite_prime_sur_l_en_tete() {
+    #[tokio::test]
+    async fn l_identite_prime_sur_l_en_tete() {
+        let host = test_host();
         let tenant_du_jeton = Uuid::new_v4();
         let tenant_reclame = Uuid::new_v4();
         let mut request = avec_identite(AuthContext::User {
@@ -570,28 +583,35 @@ mod tests {
             .insert("x-tenant-id", tenant_reclame.to_string().parse().unwrap());
 
         assert_eq!(
-            portee_du_flux(&request).unwrap(),
+            portee_du_flux(&host, &request).await.unwrap(),
             PorteeFlux::Locataire(tenant_du_jeton),
             "un client ne choisit pas son locataire quand un jeton en désigne un"
         );
     }
 
-    #[test]
-    fn l_en_tete_seul_declare_une_portee_mais_ne_l_invente_pas() {
+    /// **Le retournement.** Ce test disait l'inverse : « l'en-tête seul déclare
+    /// une portée mais ne l'invente pas ». Or déclarer *est* inventer quand rien
+    /// ne confronte la déclaration : un appelant sans identité ouvrait un flux
+    /// sur le locataire qu'il nommait, et lisait ses événements. C'était le
+    /// dernier endroit où le client choisissait son locataire.
+    ///
+    /// Désormais l'en-tête seul n'ouvre rien — ni bien formé, ni mal formé.
+    #[tokio::test]
+    async fn l_en_tete_seul_n_ouvre_plus_rien() {
+        let host = test_host();
         let tenant = Uuid::new_v4();
-        assert_eq!(
-            portee_du_flux(&avec_en_tete(tenant)).unwrap(),
-            PorteeFlux::Locataire(tenant)
-        );
 
-        // Un en-tête MAL FORMÉ ne vaut rien : il ne devient pas « tout », il
-        // devient un refus.
+        let err = portee_du_flux(&host, &avec_en_tete(tenant))
+            .await
+            .expect_err("un en-tête n'est pas une preuve : pas de portée sans identité");
+        assert_eq!(err.code(), tonic::Code::PermissionDenied);
+
         let mut mal_forme = requete_vide();
         mal_forme
             .metadata_mut()
             .insert("x-tenant-id", "pas-un-uuid".parse().unwrap());
         assert_eq!(
-            portee_du_flux(&mal_forme).unwrap_err().code(),
+            portee_du_flux(&host, &mal_forme).await.unwrap_err().code(),
             tonic::Code::PermissionDenied
         );
     }
@@ -1068,8 +1088,10 @@ mod tests {
 
         let svc = EventServiceImpl::unenforced(host);
 
-        // Le client déclare son locataire par l'en-tête : le geste explicite
-        // reste possible (une identité, posée par un interceptor, primerait).
+        // Un flux s'ouvre sur une **identité**, pas sur une déclaration : le
+        // client ne peut plus nommer son locataire par un en-tête (cf.
+        // `l_en_tete_seul_n_ouvre_plus_rien`). On pose donc l'`AuthContext`
+        // comme le ferait l'`identity_layer` depuis les métadonnées.
         let mut request = Request::new(SubscribeRequest {
             entity_type: None,
             entity_id: None,
@@ -1077,9 +1099,11 @@ mod tests {
             kind: None,
             link_type: None,
         });
-        request
-            .metadata_mut()
-            .insert("x-tenant-id", Uuid::new_v4().to_string().parse().unwrap());
+        request.extensions_mut().insert(AuthContext::User {
+            user_id: Uuid::new_v4(),
+            tenant_id: Uuid::new_v4(),
+            roles: vec![],
+        });
 
         let response = svc.subscribe(request).await.unwrap();
 
