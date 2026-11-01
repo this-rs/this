@@ -13,8 +13,13 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::entity::{FIRST_USER_TAG, TENANT_ID, TENANT_ID_TAG};
+// `codes` and `ContractError` are only reached from the YAML reader (`DescriptorLock::parse`),
+// so importing them unconditionally warns on any build that leaves `yaml` out.
+#[cfg(feature = "yaml")]
+use crate::ContractError;
+#[cfg(feature = "yaml")]
 use crate::framework::codes;
-use crate::{ContractError, DescriptorIssue, EntityDesc, ErrorCode, ModuleDescriptor, base_fields};
+use crate::{DescriptorIssue, EntityDesc, ErrorCode, ModuleDescriptor, base_fields};
 use serde::{Deserialize, Serialize};
 
 pub const LOCK_FORMAT: u32 = 1;

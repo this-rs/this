@@ -88,6 +88,9 @@ jobs:
           rustup target add wasm32-unknown-unknown
           cargo check -p this-descriptor --target wasm32-unknown-unknown
           cargo check -p this-descriptor --target wasm32-unknown-unknown --features yaml,pattern
+          # The Leptos bridge (`impl FromServerFnError`) targets wasm32 on the client side.
+          # `--all-features` above only proves it for the host toolchain.
+          cargo check -p this-descriptor --target wasm32-unknown-unknown --features leptos
 
   # Code coverage
   coverage:
