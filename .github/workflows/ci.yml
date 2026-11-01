@@ -100,7 +100,11 @@ jobs:
       # `all,wami` build above never compiles that path, so a `cfg` mistake there stays green in
       # CI and breaks a real deployment (found on #92: `PermissionFn` was cfg-gated to
       # obrain/wami while the no-IAM branch used it unconditionally).
+      # Stable only: the invariant is about feature gating, not about the compiler, and the
+      # `graphql` half of this combination does not build on nightly (async-graphql, E0391).
+      # Running it on every leg added a red check for a property already proven here once.
       - name: Check the surfaces with no IAM plan (the OIDC shape)
+        if: matrix.rust == 'stable'
         run: cargo check --no-default-features --features graphql,grpc,websocket
 
       - name: Test this-descriptor (pure crate, every feature)
