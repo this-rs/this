@@ -49,7 +49,9 @@ EOF
 fi
 
 # wami (public, followed on main; local worktree in dev at ../../obrain/wami-main)
-WAMI_DIR="$REPO_ROOT/../../obrain/wami-main"
+# REPO_ROOT is the repository's PARENT (see above): Cargo.toml's `../../obrain/wami-main`
+# from the repo is `$REPO_ROOT/../obrain/wami-main`, like `$REPO_ROOT/../banc-obrain-j4`.
+WAMI_DIR="$REPO_ROOT/../obrain/wami-main"
 if [ ! -d "$WAMI_DIR/crates/wami" ]; then
   mkdir -p "$(dirname "$WAMI_DIR")"
   # --no-cone: cone mode always checks out the root files, coverage.json included.
