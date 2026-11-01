@@ -138,6 +138,10 @@ impl WamiAuthProvider {
             // would refuse an `aud` present with an empty expected set, and the STS
             // now always sets one. Configure `wami.audience` to enforce it (ADR D4).
             validation.validate_aud = false;
+            tracing::warn!(
+                "wami.audience is not set: tokens signed by this key are accepted \
+                 whatever their audience. Set wami.audience to enforce it (ADR D4)."
+            );
         }
 
         // Always validate expiration

@@ -69,9 +69,15 @@ coexistent), puis on retire la 9.
 
 ### D4 — Tokens (double-acceptation)
 wami exige `aud` + `kid` ; les tokens `this` actuels n'en ont pas.
-**Décision : fenêtre de double-acceptation** — accepter les tokens legacy (this-signed) et les
-nouveaux (wami `KeyManager`) pendant la migration ; `TypePolicy::Lenient` d'abord, puis `Strict`.
-Une valeur d'audience par déploiement. Contrôle `iss` fait **à la main** (wami ne le compare pas).
+**Décision (telle qu'implémentée, T4)** : le STS émet via `KeyManager` (kid RFC 7638, `aud` =
+`DEFAULT_AUDIENCE` = `"this-rs"`, configurable). Les tokens **sans `aud`** (legacy) restent acceptés
+tant que `with_legacy_tokens(true)` (défaut) ; passer à `false` ferme la fenêtre. Le refresh et la
+porte `verify_handler` contrôlent l'audience par `check_audience`, car jsonwebtoken refuse tout
+`aud` présent quand aucune audience attendue n'est fixée.
+**Écart assumé avec wami** : le `sub` reste l'UUID utilisateur (et non l'ARN), pour garder le
+contrat des consommateurs `this`. Conséquence : les jetons de `this` ne sont **pas** interopérables
+avec la struct `StsClaims` de wami (sub ARN, `scoped_*`) ; ils se vérifient avec `KeyManager`
++ une struct de claims propre. Voir §9, question ouverte Q1.
 
 ## 5. Carte de migration
 
@@ -92,7 +98,9 @@ Une valeur d'audience par déploiement. Contrôle `iss` fait **à la main** (wam
 1. **Principal `(tenant,name)` vs `Uuid`** (D1) — le plus dur.
 2. **`Decision` fail-closed** — `Err(UnreadablePolicy/Condition)` ≠ `Deny` ; traiter comme refus.
    `#[serde(deny_unknown_fields)]` sur `PolicyStatement` : un champ inconnu fait refuser tout le doc.
-3. **Audience obligatoire** — tokens en circulation rejetés sans fenêtre de double-acceptation.
+3. **Audience** — l'ADR visait « obligatoire ». Non appliqué : sans `wami.audience`, le vérifieur
+   accepte tout `aud` et journalise un `warn` au démarrage. Le rendre obligatoire est une
+   décision de déploiement (Q2), car cela casse les configs existantes.
 4. **Vocabulaire d'actions** obrain → les CRUD de `this` deviennent des chaînes `this:<entity>:<op>`.
 
 ## 6. Risques
@@ -108,3 +116,41 @@ Une valeur d'audience par déploiement. Contrôle `iss` fait **à la main** (wam
 4. Authz `perm:` → `evaluate_policy_document` (conditions, boundaries).
 5. Docs + tests + `this.rs` ; auto-review avant PR.
 6. (déféré) OAuth/OIDC + `wami-scope`.
+
+## 8. État de livraison (lot WAMI, branche `feat/wami-core-migration`)
+
+| Tâche | Commit | État | Ce qui est vrai |
+|---|---|---|---|
+| T1 ADR | `7bca269` | fait | ce document |
+| T2 dépendance `wami` main + portillon | `39ce7ad` | fait | `cargo check --features wami` vert |
+| T3 registre d'identité + pont | `af1c87d` | fait | `IdentityRegistry` alloue et refuse toute réutilisation ; `wami_context_for` ; `RequestMeta` (X-Forwarded-* ignorés par défaut) |
+| T4 STS → `KeyManager` | `1e20d9e` | fait | kid + aud émis ; porte et refresh corrigés (sans cela, tous les jetons étaient refusés) ; test croisé avec le vérifieur `wami_provider` |
+| T5 authz `perm:` → wami | `d1b3275` | fait (non-REST) | `wami_policy::decide` ; `WamiEnforcement` porté par l'hôte ; branché dans le guard (gRPC/GraphQL/WS) |
+| T5b authz REST → wami | — | **non fait** | le middleware REST (`authorization.rs`) n'appelle pas encore wami |
+| T6 docs + revue | ce commit | en cours | voir §9 |
+| T7 OAuth/OIDC + `wami-scope` | — | déféré | — |
+
+### Limites connues (à lever avant la mise en production)
+- **Registre d'identité en mémoire** : les segments ne survivent pas à un redémarrage. `load()`
+  existe pour restaurer une table persistée, mais aucune persistance n'est branchée.
+- **Permissions tenant-wide** : le seam `perm:` ne transporte pas la ressource. Une statement
+  dont `Resource` nomme une entité précise ne peut pas matcher.
+- **Pas de `RequestMeta` sur le guard** : les conditions IP/TLS échouent fermées sur les surfaces
+  non-REST.
+- **Policies en mémoire** : `PolicyStore` n'est pas persisté.
+- **Rotation de clé** : le vérifieur n'a qu'une clé publique ; une rotation réelle demande plusieurs
+  clés publiques côté vérifieur.
+- **REST** : le middleware d'autorisation REST reste sur l'ancien chemin (T5b).
+
+## 9. Points à trancher (utilisateur)
+- **Q1 — `sub` UUID ou ARN ?** Garder l'UUID préserve les consommateurs `this` mais rend les jetons
+  non interopérables avec wami. Passer à l'ARN est possible, mais casse le contrat actuel.
+- **Q2 — `wami.audience` obligatoire ?** Recommandé en production ; casse les configs sans audience.
+- **Q3 — T5b (REST)** : à faire dans ce lot ou dans un lot suivant ? Le REST est la surface principale.
+
+## 10. Guide de migration (ancien → wami)
+- Jetons émis avant ce lot : acceptés (pas d'`aud`) tant que `with_legacy_tokens(true)`.
+- Jetons émis après : `aud = "this-rs"` et `kid` dans le header. Configurer `wami.audience` pour
+  les vérifier strictement.
+- `builder.with_wami_enforcement(WamiEnforcement::new(registry, store, instance))` arme wami pour
+  les surfaces non-REST. Sans cet appel, le comportement est inchangé.
