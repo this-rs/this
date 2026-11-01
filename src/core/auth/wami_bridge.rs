@@ -281,6 +281,7 @@ mod tests {
             user_id: Uuid::new_v4(),
             tenant_id: tenant,
             roles: vec![],
+            scopes: Vec::new(),
         }
     }
 

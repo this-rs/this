@@ -194,6 +194,7 @@ mod tests {
             user_id: Uuid::new_v4(),
             tenant_id: tenant,
             roles: vec![],
+            scopes: Vec::new(),
         }
     }
 
@@ -339,6 +340,7 @@ mod tests {
                         user_id: uid,
                         tenant_id: tid,
                         roles: vec![],
+                        scopes: Vec::new(),
                     };
                     req.extensions_mut().insert(auth);
                     async move { next.run(req).await }

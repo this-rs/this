@@ -503,6 +503,7 @@ mod tests {
                 user_id: Uuid::nil(),
                 tenant_id: Uuid::nil(),
                 roles: vec!["reader".into()],
+                scopes: Vec::new(),
             },
             "test",
         );
@@ -648,6 +649,7 @@ mod tests {
             user_id: Uuid::nil(),
             tenant_id: Uuid::nil(),
             roles: vec!["reader".into()],
+            scopes: Vec::new(),
         };
         // Refused for anonymous BEFORE any lookup (even though no fetcher exists yet).
         let err = host

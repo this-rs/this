@@ -306,6 +306,7 @@ impl WamiAuthProvider {
             user_id,
             tenant_id,
             roles: claims.roles.clone(),
+            scopes: Vec::new(),
         })
     }
 }
@@ -729,6 +730,7 @@ mod tests {
                 user_id: uid,
                 tenant_id: tid,
                 roles,
+                ..
             } => {
                 assert_eq!(uid, user_id);
                 assert_eq!(tid, tenant_id);

@@ -540,6 +540,7 @@ mod tests {
             user_id: Uuid::new_v4(),
             tenant_id: tenant,
             roles: vec![],
+            scopes: Vec::new(),
         });
         assert_eq!(
             portee_du_flux(&host, &request).await.unwrap(),
@@ -577,6 +578,7 @@ mod tests {
             user_id: Uuid::new_v4(),
             tenant_id: tenant_du_jeton,
             roles: vec![],
+            scopes: Vec::new(),
         });
         request
             .metadata_mut()
@@ -970,6 +972,7 @@ mod tests {
             user_id: Uuid::new_v4(),
             tenant_id: Uuid::new_v4(),
             roles: vec![],
+            scopes: Vec::new(),
         });
 
         let response = svc.subscribe(request).await.unwrap();
@@ -1103,6 +1106,7 @@ mod tests {
             user_id: Uuid::new_v4(),
             tenant_id: Uuid::new_v4(),
             roles: vec![],
+            scopes: Vec::new(),
         });
 
         let response = svc.subscribe(request).await.unwrap();

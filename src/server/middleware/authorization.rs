@@ -182,6 +182,34 @@ pub fn is_known_policy(policy: &str) -> bool {
 }
 
 /// Le verdict d'une politique adossée à l'IAM.
+/// Does the token's own `scope` grant `permission`?
+///
+/// `perm:orders:read` is granted by the scopes `orders:read`, `orders:read` written with dots,
+/// `orders:*` and `*`. Nothing else: a scope names what it grants, and grants nothing beside it.
+/// Both separators are accepted because a descriptor writes `perm:orders:read` while an IdP's
+/// scope usually reads `orders:read` — they are the same permission.
+///
+/// The `perm:` prefix is optional: `Authorization::evaluate` strips it before calling back here,
+/// a descriptor's `PolicyExpr::Perm` hands it over, and both must read the same.
+fn scope_grants(context: &AuthContext, permission: &str) -> bool {
+    let AuthContext::User { scopes, .. } = context else {
+        return false;
+    };
+    let wanted = permission.strip_prefix("perm:").unwrap_or(permission);
+    let wanted = wanted.trim().replace(':', ".");
+    scopes.iter().any(|scope| {
+        let scope = scope.trim().replace(':', ".");
+        if scope == "*" || scope == wanted {
+            return true;
+        }
+        // A family grant: `orders.*` covers `orders.read` and `orders.write`.
+        scope
+            .strip_suffix('*')
+            .filter(|prefix| prefix.ends_with('.'))
+            .is_some_and(|prefix| wanted.starts_with(prefix))
+    })
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum IamVerdict {
     /// Le plan a été consulté et la décision accorde.
@@ -666,6 +694,30 @@ impl Authorization {
         }
     }
 
+    /// `perm:` answered by the configured IAM, then by the token's own `scope`.
+    ///
+    /// The scope is a **fallback**, never an override: it is consulted only where the IAM answers
+    /// nothing at all (no policy engine wired, or no principal to look up). A wired IAM keeps the
+    /// last word, so a scope added to a token cannot turn an existing refusal into a grant.
+    fn check_iam(
+        &self,
+        permission: &str,
+        context: &AuthContext,
+        target: &crate::core::auth::ResourceRef<'_>,
+        meta: &crate::core::auth::RequestMeta,
+        consulted: &mut bool,
+    ) -> IamVerdict {
+        let verdict = self.iam_verdict(permission, context, target, meta, consulted);
+        if matches!(verdict, IamVerdict::Unevaluable) && scope_grants(context, permission) {
+            tracing::debug!(
+                permission,
+                "`perm:` accordée par le scope du jeton (aucun plan IAM n'a tranché)"
+            );
+            return IamVerdict::Allowed;
+        }
+        verdict
+    }
+
     /// La décision **matérialisée** autorise-t-elle cette permission ?
     ///
     /// Une seule recherche indexée (`find_nodes_by_property` sur `acl_key`),
@@ -673,7 +725,7 @@ impl Authorization {
     /// décision, c'est **non**.
     #[cfg(feature = "obrain")]
     #[cfg_attr(not(feature = "wami"), allow(unused_variables))]
-    fn check_iam(
+    fn iam_verdict(
         &self,
         permission: &str,
         context: &AuthContext,
@@ -733,7 +785,7 @@ impl Authorization {
     /// Sans plan IAM, la compilation par défaut doit quand même refuser.
     #[cfg(not(feature = "obrain"))]
     #[cfg_attr(not(feature = "wami"), allow(unused_variables))]
-    fn check_iam(
+    fn iam_verdict(
         &self,
         permission: &str,
         context: &AuthContext,
@@ -1044,6 +1096,7 @@ impl Authorization {
                 user_id: *user_id,
                 tenant_id: *tenant_id,
                 roles: vec![],
+                scopes: Vec::new(),
             },
             _ => context.clone(),
         }
@@ -1778,6 +1831,7 @@ mod tests {
             user_id: uuid::Uuid::new_v4(),
             tenant_id: uuid::Uuid::new_v4(),
             roles: vec![],
+            scopes: Vec::new(),
         };
         assert!(a.decide(&Method::GET, "/orders/42", &user).is_allow());
     }
@@ -1797,11 +1851,13 @@ mod tests {
             user_id: uuid::Uuid::new_v4(),
             tenant_id: uuid::Uuid::new_v4(),
             roles: vec!["reader".into()],
+            scopes: Vec::new(),
         };
         let admin = AuthContext::User {
             user_id: uuid::Uuid::new_v4(),
             tenant_id: uuid::Uuid::new_v4(),
             roles: vec!["admin".into()],
+            scopes: Vec::new(),
         };
         assert!(!a.decide(&Method::DELETE, "/orders/1", &plain).is_allow());
         assert!(a.decide(&Method::DELETE, "/orders/1", &admin).is_allow());
@@ -1840,6 +1896,7 @@ mod tests {
             user_id: uuid::Uuid::new_v4(),
             tenant_id: uuid::Uuid::new_v4(),
             roles: vec!["admin".into()],
+            scopes: Vec::new(),
         };
         let decision = a.decide(&Method::POST, "/orders", &user);
         assert!(
@@ -1863,6 +1920,7 @@ mod tests {
             user_id: uuid::Uuid::new_v4(),
             tenant_id: uuid::Uuid::new_v4(),
             roles: vec![],
+            scopes: Vec::new(),
         };
         assert!(!a.decide(&Method::PUT, "/orders/1", &user).is_allow());
 
@@ -1934,6 +1992,7 @@ mod tests {
                 user_id: user,
                 tenant_id: tenant,
                 roles: vec![],
+                scopes: Vec::new(),
             }
         }
 
@@ -2065,6 +2124,7 @@ mod tests {
                 user_id: user,
                 tenant_id: tenant,
                 roles: vec!["auditor".into()],
+                scopes: Vec::new(),
             };
             match authz.decide(&Method::GET, "/orders", &auditor) {
                 Decision::Allow { origin, .. } => assert_eq!(
@@ -2130,6 +2190,7 @@ mod tests {
                     user_id: user,
                     tenant_id: tenant,
                     roles: vec!["admin".into()],
+                    scopes: Vec::new(),
                 },
                 AuthContext::Owner {
                     user_id: user,
@@ -2217,6 +2278,7 @@ mod tests {
             user_id: Uuid::new_v4(),
             tenant_id: Uuid::new_v4(),
             roles: vec![],
+            scopes: Vec::new(),
         };
         let key = wami
             .caller_context(&auth, &RequestMeta::default())
@@ -2298,6 +2360,7 @@ mod tests {
             user_id: user,
             tenant_id: tenant,
             roles: vec![],
+            scopes: Vec::new(),
         };
 
         // La décision est matérialisée sous les noms **du projet**, pas sous
@@ -2582,6 +2645,7 @@ mod tests {
             user_id: uuid::Uuid::new_v4(),
             tenant_id: uuid::Uuid::new_v4(),
             roles: vec![],
+            scopes: Vec::new(),
         };
         assert!(
             a.decide(&Method::GET, "/_this/descriptors", &user)
@@ -2707,6 +2771,84 @@ mod policy_perimeter {
         )
     }
 
+    /// Le `scope` du jeton accorde `perm:` **là où aucun plan IAM ne tranche** : le cas d'un hôte
+    /// qui vérifie les jetons d'un IdP externe et n'a pas de magasin de politiques.
+    #[test]
+    fn a_token_scope_answers_perm_when_no_iam_tranche() {
+        let authz = authz_policy("perm:orders:read");
+        let scoped = |scopes: &[&str]| AuthContext::User {
+            user_id: uid(USER),
+            tenant_id: uid(TENANT),
+            roles: vec![],
+            scopes: scopes.iter().map(|s| s.to_string()).collect(),
+        };
+        for grant in ["orders:read", "orders.read", "orders:*", "orders.*", "*"] {
+            assert!(
+                authz
+                    .decide(&Method::GET, "/orders", &scoped(&[grant]))
+                    .is_allow(),
+                "the scope `{grant}` must grant perm:orders:read"
+            );
+        }
+        // Un scope ne nomme que ce qu'il accorde : une autre permission reste non tranchable,
+        // donc refusée.
+        for other in ["orders:write", "invoices:read", "orders"] {
+            assert!(
+                !authz
+                    .decide(&Method::GET, "/orders", &scoped(&[other]))
+                    .is_allow(),
+                "the scope `{other}` must not grant perm:orders:read"
+            );
+        }
+        // Aucun scope : la permission reste non tranchable — refus, comme avant.
+        assert!(
+            !authz
+                .decide(&Method::GET, "/orders", &scoped(&[]))
+                .is_allow()
+        );
+    }
+
+    /// Un `scope` ne remplace pas un plan IAM : quand une politique tranche (ici un refus), elle
+    /// garde le dernier mot.
+    #[test]
+    fn a_scope_never_overrides_a_policy() {
+        let authz = authz_policy("admin_only");
+        let scoped = AuthContext::User {
+            user_id: uid(USER),
+            tenant_id: uid(TENANT),
+            roles: vec![],
+            scopes: vec!["*".to_string()],
+        };
+        assert!(
+            !authz.decide(&Method::GET, "/orders", &scoped).is_allow(),
+            "`*` in a token must not open an admin-only route"
+        );
+    }
+
+    #[test]
+    fn scope_matching_is_separator_agnostic_and_family_bounded() {
+        let ctx = |scopes: &[&str]| AuthContext::User {
+            user_id: uid(USER),
+            tenant_id: uid(TENANT),
+            roles: vec![],
+            scopes: scopes.iter().map(|s| s.to_string()).collect(),
+        };
+        assert!(scope_grants(&ctx(&["orders:read"]), "perm:orders.read"));
+        assert!(scope_grants(&ctx(&["orders.read"]), "perm:orders:read"));
+        assert!(scope_grants(&ctx(&["orders.*"]), "perm:orders:write"));
+        // La famille s'arrête au point : `order` ne doit pas couvrir `orders.read`.
+        assert!(!scope_grants(&ctx(&["order*"]), "perm:orders:read"));
+        assert!(!scope_grants(
+            &ctx(&["orders.read.more"]),
+            "perm:orders:read"
+        ));
+        // Un contexte sans scope, ou qui n'est pas un utilisateur, n'accorde rien.
+        assert!(!scope_grants(&AuthContext::Anonymous, "perm:orders:read"));
+        assert!(!scope_grants(&ctx(&[]), "perm:orders:read"));
+        // Le préfixe est facultatif : `evaluate` l'a déjà retiré quand il appelle.
+        assert!(scope_grants(&ctx(&["*"]), "orders:read"));
+    }
+
     // ── Contextes ────────────────────────────────────────────────────────
     //
     // Identifiants fixes : les matrices comparent des verdicts, et une
@@ -2728,6 +2870,7 @@ mod policy_perimeter {
             user_id: uid(USER),
             tenant_id: uid(TENANT),
             roles: roles.iter().map(|r| r.to_string()).collect(),
+            scopes: Vec::new(),
         }
     }
 
@@ -3822,6 +3965,7 @@ mod policy_perimeter {
                 user_id: uid(OTHER_USER),
                 tenant_id: uid(TENANT),
                 roles: vec![],
+                scopes: Vec::new(),
             };
             assert!(
                 !authz.decide(&Method::GET, "/orders", &neighbour).is_allow(),
@@ -3832,6 +3976,7 @@ mod policy_perimeter {
                 user_id: uid(USER),
                 tenant_id: uid(OTHER_USER),
                 roles: vec![],
+                scopes: Vec::new(),
             };
             assert!(
                 !authz
@@ -4004,6 +4149,7 @@ mod policy_perimeter {
                 user_id: uid(OTHER_USER),
                 tenant_id: uid(TENANT),
                 roles: vec![],
+                scopes: Vec::new(),
             };
             match deny_list.decide(&Method::GET, "/orders", &neighbour) {
                 Decision::Allow { origin, .. } => assert_eq!(
@@ -4171,6 +4317,7 @@ mod descriptor_tests {
             user_id: uuid::Uuid::from_u128(1),
             tenant_id: uuid::Uuid::from_u128(2),
             roles: roles.iter().map(|r| r.to_string()).collect(),
+            scopes: Vec::new(),
         }
     }
 

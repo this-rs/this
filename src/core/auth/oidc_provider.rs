@@ -337,10 +337,18 @@ impl OidcAuthProvider {
             .map(read_string_list)
             .unwrap_or_default();
 
+        // RFC 6749 §3.3: `scope` is a space-delimited list; RFC 9068 access tokens carry it and
+        // name a `typ` of `at+jwt`. Both forms are read: a list, or the string.
+        let scopes = claims
+            .get("scope")
+            .map(read_string_list)
+            .unwrap_or_default();
+
         Ok(AuthContext::User {
             user_id,
             tenant_id,
             roles,
+            scopes,
         })
     }
 }
@@ -534,6 +542,8 @@ mod tests {
             "sub": sub,
             "tenant_id": tenant,
             "roles": ["editeur"],
+            // RFC 6749 §3.3: one string, space-delimited (that is what IdPs publish).
+            "scope": "orders:read orders:write",
             "iat": now,
             "exp": now + 600,
         })
@@ -570,10 +580,16 @@ mod tests {
                 user_id,
                 tenant_id,
                 roles,
+                scopes,
             } => {
                 assert_eq!(user_id, sub);
                 assert_eq!(tenant_id, tenant);
                 assert_eq!(roles, vec!["editeur".to_string()]);
+                assert_eq!(
+                    scopes,
+                    vec!["orders:read".to_string(), "orders:write".to_string()],
+                    "the space-delimited `scope` claim becomes the token's grants"
+                );
             }
             other => panic!("expected a user, got {other:?}"),
         }

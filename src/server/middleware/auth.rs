@@ -239,6 +239,7 @@ mod tests {
                     user_id: uuid::Uuid::nil(),
                     tenant_id: uuid::Uuid::nil(),
                     roles: vec!["admin".to_string()],
+                    scopes: Vec::new(),
                 })
             }
 

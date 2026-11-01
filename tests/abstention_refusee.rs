@@ -86,6 +86,7 @@ async fn inject_user(mut request: Request, next: Next) -> Response {
         user_id: Uuid::new_v4(),
         tenant_id: Uuid::new_v4(),
         roles: vec!["admin".to_string()],
+        scopes: Vec::new(),
     });
     next.run(request).await
 }

@@ -487,6 +487,7 @@ fn banc_chaine() {
         user_id: utilisateur,
         tenant_id: tenant,
         roles: vec![],
+        scopes: Vec::new(),
     };
 
     let m = mesurer(

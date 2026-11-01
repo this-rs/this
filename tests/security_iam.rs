@@ -113,6 +113,7 @@ fn user(tenant: u128, id: u128) -> AuthContext {
         user_id: uuid::Uuid::from_u128(id),
         tenant_id: uuid::Uuid::from_u128(tenant),
         roles: vec![],
+        scopes: Vec::new(),
     }
 }
 
@@ -320,6 +321,7 @@ fn a_wildcard_decision_does_not_satisfy_a_role_policy() {
         user_id: uuid::Uuid::from_u128(1),
         tenant_id: uuid::Uuid::from_u128(1),
         roles: vec!["editor".into()],
+        scopes: Vec::new(),
     };
     assert!(
         !authz.decide(&Method::GET, "/orders", &ctx).is_allow(),

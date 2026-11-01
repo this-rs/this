@@ -658,6 +658,7 @@ async fn a_consumer_can_enforce_policies_on_its_own_router() {
             user_id: uuid::Uuid::from_u128(1),
             tenant_id: uuid::Uuid::from_u128(0xa),
             roles: vec![],
+            scopes: Vec::new(),
         }));
 
     let response = app
@@ -841,6 +842,7 @@ async fn a_reader_without_the_permission_is_refused_by_the_policy() {
                 user_id: uuid::Uuid::from_u128(2),
                 tenant_id: uuid::Uuid::from_u128(7),
                 roles: vec![],
+                scopes: Vec::new(),
             })
         )
         .await,
@@ -856,6 +858,7 @@ async fn a_reader_without_the_permission_is_refused_by_the_policy() {
                 user_id: uuid::Uuid::from_u128(1),
                 tenant_id: uuid::Uuid::from_u128(7),
                 roles: vec![],
+                scopes: Vec::new(),
             })
         )
         .await,
@@ -1000,6 +1003,7 @@ async fn the_graph_read_is_filtered_by_the_callers_own_decision() {
             user_id: user,
             tenant_id: tenant,
             roles: vec![],
+            scopes: Vec::new(),
         }));
         let response = app
             .oneshot(
