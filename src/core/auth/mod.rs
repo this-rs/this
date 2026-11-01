@@ -38,6 +38,8 @@ pub mod surface;
 #[cfg(feature = "wami")]
 pub mod sts;
 #[cfg(feature = "wami")]
+pub mod wami_bridge;
+#[cfg(feature = "wami")]
 pub mod wami_provider;
 
 use anyhow::Result;
