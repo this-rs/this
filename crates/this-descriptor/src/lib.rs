@@ -44,7 +44,7 @@ pub mod runtime;
 /// `wami::statements`: PermDesc -> sandbox policy statements (Track 4).
 pub mod wami;
 
-pub use check::{CheckProfile, DescriptorIssue};
+pub use check::{CheckProfile, DescriptorIssue, RESERVED_ROUTE_SEGMENTS};
 pub use custom::{Custom, CustomKind, CustomRegistry, CustomScope};
 pub use engine::i18n::{I18nCatalog, LocaleHints};
 pub use entity::{EntityDesc, EntityI18n, EntityKind, base_fields};

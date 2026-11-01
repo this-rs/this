@@ -65,6 +65,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   malgré des lignes cachées, et filtre injecté en `AND` sans écraser celui de
   l'appelant.
 
+### Fixed
+- **Une entité ne peut plus s'approprier une route du framework.** `ModuleDescriptor::check`
+  refusait un pluriel vide ou dupliqué, mais pas un pluriel déjà servi à la racine :
+  `RESERVED_ROUTE_SEGMENTS` (`crates/this-descriptor/src/check.rs`) nomme les neuf segments que
+  le framework occupe (`_this`, `auth`, `events`, `graph`, `health`, `healthz`, `notifications`,
+  `tenants`, `ui`) et `check` les refuse avec `this.descriptor.reserved_plural`. Avant, une entité
+  dont le pluriel valait `graph` ou `health` faisait **paniquer axum au montage** (deux routes
+  identiques, même méthode) au lieu de produire un `ContractError` ; `ui`, `events`, `tenants` et
+  `notifications` ne paniquaient pas mais **masquaient** en silence la route du framework
+  (`/events/stream` l'emportant sur `/events/{id}`). Le refus arrive au build, avec le chemin de
+  l'entité fautive. Un hôte qui ajoute une route racine doit inscrire son segment dans la même
+  livraison — les routes ajoutées sous `/_this` n'ont rien à déclarer.
+  **Portée du changement** : un module qui déclarait `graph` ou `health` ne démarrait déjà pas
+  (panic au montage) ; la seule régression possible est un module qui déclarait `ui`, `events`,
+  `tenants` ou `notifications` et « fonctionnait » en masquant une route du framework — il est
+  désormais refusé au build. Aucun module du dépôt n'est dans ce cas.
+- **Le pont Leptos est vérifié sur sa cible.** La CI contrôlait `this-descriptor` en wasm32 avec
+  `--features yaml,pattern` seulement ; la feature `leptos` (donc `impl FromServerFnError`,
+  `server_fn`) n'y passait jamais, alors que le CHANGELOG annonçait « y compris en wasm32 ».
+  `ci.yml` ajoute `cargo check --target wasm32-unknown-unknown --features leptos`. Vérifié
+  localement : compile, sans avertissement (deux imports de `lock.rs` réservés au lecteur YAML
+  sont désormais sous `#[cfg(feature = "yaml")]`, ce qui supprime le bruit sur les builds sans
+  `yaml`).
+
 ### Security
 - **gRPC : l'en-tête `x-tenant-id` seul n'ouvre plus de flux d'événements.**
   `portee_du_flux` (`src/server/exposure/grpc/event_service.rs`) acceptait un
