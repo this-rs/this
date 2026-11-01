@@ -49,7 +49,7 @@ aws-sdk-dynamodb = { version = "1.93", optional = true }
 serde_dynamo = { version = "4.0", optional = true }
 
 # UUID and datetime
-uuid = { version = "1.10", features = ["v4", "serde"] }
+uuid = { version = "1.10", features = ["v4", "v5", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 
 # Template engine (for map operator in event flows)
@@ -157,6 +157,9 @@ futures-util = "0.3"
 testcontainers = "0.27"
 testcontainers-modules = { version = "0.15", features = ["postgres", "mongo", "neo4j", "mysql"] }
 tempfile = "3"
+# Fixtures Ed25519 des tests OIDC (jetons signés en local, aucun réseau).
+ed25519-dalek = { version = "2", features = ["pkcs8", "pem", "rand_core"] }
+base64 = "0.22"
 
 [features]
 default = ["in-memory"]
@@ -178,6 +181,9 @@ powerdns = ["dep:reqwest"]
 proxy = ["dep:reqwest"]
 websocket = []
 wami = ["dep:jsonwebtoken", "dep:ed25519-dalek", "dep:base64", "dep:argon2", "dep:wami", "dep:wami-core", "dep:wami-condition"]
+# Validation des jetons d'un OpenID Provider externe, côté resource server (ADR D11) :
+# découverte, JWKS avec sélection par `kid` et rotation. Aucun émetteur embarqué.
+oidc = ["dep:jsonwebtoken", "dep:reqwest"]
 # Signatures des modules stockés : un manifeste signé (Ed25519) et une ancre de
 # confiance par hôte. Sans cette feature, un module stocké n'a que l'intégrité
 # (etags) — pas l'authentification.
@@ -190,7 +196,7 @@ obrain-cognitive = ["obrain"]
 # vite-rs based SPA frontend hosting (this::server::frontend). Not part of
 # `all` because it needs the local vite-rs checkout (path dep), like obrain.
 frontend = ["dep:this-vite"]
-all = ["in-memory", "dynamodb", "postgres", "mongodb_backend", "neo4j", "scylladb", "mysql", "lmdb", "graphql", "grpc", "websocket", "push", "module-signing"]
+all = ["in-memory", "dynamodb", "postgres", "mongodb_backend", "neo4j", "scylladb", "mysql", "lmdb", "graphql", "grpc", "websocket", "push", "module-signing", "oidc"]
 
 [lib]
 name = "this"
