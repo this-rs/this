@@ -38,6 +38,10 @@ pub mod surface;
 #[cfg(feature = "wami")]
 pub mod sts;
 #[cfg(feature = "wami")]
+pub mod wami_bridge;
+#[cfg(feature = "wami")]
+pub mod wami_policy;
+#[cfg(feature = "wami")]
 pub mod wami_provider;
 
 use anyhow::Result;
@@ -120,6 +124,110 @@ impl AuthContext {
     /// Check if user has a specific role
     pub fn has_role(&self, role: &str) -> bool {
         self.roles().iter().any(|r| r == role)
+    }
+}
+
+/// Per-request facts an IAM condition may read (IP, transport, MFA).
+///
+/// Defined here, outside any feature, so the middlewares can carry it whether or
+/// not an IAM that reads it is compiled in.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RequestMeta {
+    /// Client address used for IP conditions.
+    pub source_ip: Option<std::net::IpAddr>,
+    /// Whether the request arrived over TLS, as far as it is known.
+    pub secure_transport: Option<bool>,
+    /// Whether MFA was used. Unknown until the token carries an `amr` claim.
+    pub mfa_present: Option<bool>,
+}
+
+/// Whether `X-Forwarded-*` headers may be read.
+///
+/// `Ignore` is the default: a client can set those headers itself. Choose
+/// `Trust` only when the edge proxy overwrites them on every request. A host
+/// derives it from `domains.trust_forwarded_host`, the same trust it already
+/// grants the proxy for `X-Forwarded-Host`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ForwardedHeaders {
+    #[default]
+    Ignore,
+    Trust,
+}
+
+impl ForwardedHeaders {
+    /// `Trust` when the proxy is trusted, `Ignore` otherwise.
+    pub fn from_trusted(trusted: bool) -> Self {
+        if trusted { Self::Trust } else { Self::Ignore }
+    }
+}
+
+impl RequestMeta {
+    /// Extract the request facts from headers and the peer address.
+    ///
+    /// Without a peer address (no `ConnectInfo` on the listener) and in `Ignore`
+    /// mode, the IP is unknown and an IP condition fails closed.
+    pub fn from_request(
+        headers: &HeaderMap,
+        peer: Option<std::net::IpAddr>,
+        forwarded: ForwardedHeaders,
+    ) -> Self {
+        match forwarded {
+            ForwardedHeaders::Ignore => Self {
+                source_ip: peer,
+                secure_transport: None,
+                mfa_present: None,
+            },
+            ForwardedHeaders::Trust => {
+                let header = |name: &str| headers.get(name).and_then(|v| v.to_str().ok());
+                // The RIGHTMOST address: the one the trusted proxy itself appended.
+                // The leftmost is whatever the client wrote when the proxy appends
+                // instead of overwriting (nginx, Traefik, ALB).
+                let source_ip = header("x-forwarded-for")
+                    .and_then(|list| list.rsplit(',').next())
+                    .and_then(|last| last.trim().parse::<std::net::IpAddr>().ok())
+                    .or(peer);
+                let secure_transport = header("x-forwarded-proto")
+                    .map(|proto| proto.trim().eq_ignore_ascii_case("https"));
+                Self {
+                    source_ip,
+                    secure_transport,
+                    mfa_present: None,
+                }
+            }
+        }
+    }
+}
+
+/// What a permission check is about, as the call site knows it.
+///
+/// Bound into the `perm:` closure where the target is known, so an IAM that
+/// matches resources (wami ARNs) can tell one row from the whole type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResourceRef<'a> {
+    /// An entity type, and one row of it when the request names one.
+    Entity {
+        entity: &'a str,
+        id: Option<&'a Uuid>,
+    },
+    /// A link type, and its endpoint entity types when the request names them.
+    /// An endpoint the surface does not know is rendered `*` in the ARN, so a
+    /// statement written on the link type (`link/owns/**`) still applies.
+    Link {
+        link_type: &'a str,
+        source: Option<&'a str>,
+        target: Option<&'a str>,
+    },
+    /// No particular target (the caller could not say).
+    Any,
+}
+
+impl<'a> ResourceRef<'a> {
+    /// The row the check is about, when it names one.
+    pub fn resource_id(&self) -> Option<&'a Uuid> {
+        match self {
+            ResourceRef::Entity { id, .. } => *id,
+            _ => None,
+        }
     }
 }
 

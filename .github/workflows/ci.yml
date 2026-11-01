@@ -23,7 +23,12 @@ jobs:
   test:
     name: Test Suite
     runs-on: ubuntu-latest
+    # Nightly is an early-warning signal, not a gate: a nightly regression
+    # (e.g. rustc E0391 on async-graphql 7.2.1, nightly 2026-10-31) must not
+    # cancel the stable and beta legs, which are the ones that decide a merge.
+    continue-on-error: ${{ matrix.rust == 'nightly' }}
     strategy:
+      fail-fast: false
       matrix:
         rust:
           - stable
@@ -271,6 +276,9 @@ jobs:
         # RUSTSEC-2024-0384, 0436, 0449: transitive deps
         # RUSTSEC-2025-0012: backoff, 0111: tokio-tar, 0134, 0141: bincode
         # RUSTSEC-2026-0098, 0099, 0104, 0258, 0346, 0349, 0382: h2/rustls/rustls-webpki
+        # RUSTSEC-2026-0387: crypto-bigint 0.5 (timing) via jsonwebtoken 10 → p256/p384,
+        #   i.e. ECDSA paths; this-rs and wami sign/verify EdDSA only (ed25519-dalek).
+        #   Fix is crypto-bigint >=0.7.6, not yet reachable from the p256 0.13 line.
         run: >-
           cargo audit
           --ignore RUSTSEC-2023-0071
@@ -288,6 +296,7 @@ jobs:
           --ignore RUSTSEC-2026-0346
           --ignore RUSTSEC-2026-0349
           --ignore RUSTSEC-2026-0382
+          --ignore RUSTSEC-2026-0387
 
   # Vérification de la documentation
   docs:

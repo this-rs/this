@@ -147,6 +147,11 @@ pub struct ServerHost {
     /// d'authentification plus ancien.
     pub principal_mapping: Option<Arc<crate::server::middleware::authorization::PrincipalMapping>>,
 
+    /// IAM WAMI, quand l'hôte en arme un : il répond alors seul à `perm:` pour
+    /// les surfaces non-REST (ADR D2). Absent, le comportement est inchangé.
+    #[cfg(feature = "wami")]
+    pub wami_enforcement: Option<Arc<crate::core::auth::wami_policy::WamiEnforcement>>,
+
     /// **Le repli multi-sites**, quand l'application en déclare un.
     ///
     /// Monté par `RestExposure::build_router` **avant** les couches : c'est ce
@@ -293,6 +298,8 @@ impl ServerHost {
             authorize: true,
             authorize_report_only: false,
             principal_mapping: None,
+            #[cfg(feature = "wami")]
+            wami_enforcement: None,
             auth_provider: None,
             resolver_registry: Arc::new(AuthResolverRegistry::new()),
             validation_registry: crate::core::validation::shared_registry(),
@@ -718,6 +725,8 @@ impl ServerHost {
             authorize: true,
             authorize_report_only: false,
             principal_mapping: None,
+            #[cfg(feature = "wami")]
+            wami_enforcement: None,
             auth_provider: None,
             resolver_registry: Arc::new(AuthResolverRegistry::new()),
             validation_registry: crate::core::validation::shared_registry(),

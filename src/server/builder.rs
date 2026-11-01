@@ -71,6 +71,10 @@ pub struct ServerBuilder {
     // Mappage d'identité de l'application, pour l'IAM natif d'un modèle existant
     principal_mapping: Option<Arc<crate::server::middleware::authorization::PrincipalMapping>>,
 
+    // IAM WAMI : répond seul à `perm:` sur les surfaces non-REST quand armé
+    #[cfg(feature = "wami")]
+    wami_enforcement: Option<Arc<crate::core::auth::wami_policy::WamiEnforcement>>,
+
     // Armer le bail d'écriture sur un store obrain inscriptible (défaut : armé)
     #[cfg_attr(not(feature = "obrain"), allow(dead_code))]
     fence_writes: bool,
@@ -118,6 +122,8 @@ impl ServerBuilder {
             #[cfg(feature = "frontend")]
             frontend_sites: None,
             principal_mapping: None,
+            #[cfg(feature = "wami")]
+            wami_enforcement: None,
             fence_writes: true,
             auth_config: None,
             resolver_registry: AuthResolverRegistry::new(),
@@ -402,6 +408,17 @@ impl ServerBuilder {
         F: Fn(&crate::core::auth::AuthContext) -> Option<(String, String)> + Send + Sync + 'static,
     {
         self.principal_mapping = Some(Arc::new(mapping));
+        self
+    }
+
+    /// Arme l'IAM WAMI : `perm:` est alors répondu par wami seul sur les surfaces
+    /// non-REST (gRPC, GraphQL, WebSocket). Le REST reste sur son middleware en T5b.
+    #[cfg(feature = "wami")]
+    pub fn with_wami_enforcement(
+        mut self,
+        enforcement: crate::core::auth::wami_policy::WamiEnforcement,
+    ) -> Self {
+        self.wami_enforcement = Some(Arc::new(enforcement));
         self
     }
 
@@ -1153,6 +1170,10 @@ impl ServerBuilder {
             host.frontend_sites = self.frontend_sites.clone();
         }
         host.principal_mapping = self.principal_mapping.clone();
+        #[cfg(feature = "wami")]
+        {
+            host.wami_enforcement = self.wami_enforcement.clone();
+        }
 
         // Attach the obrain graph handle if one was provided.
         //
@@ -1272,6 +1293,22 @@ impl ServerBuilder {
                                             e
                                         );
                                     }
+                                }
+                            }
+
+                            // IAM WAMI depuis la config (`policies_path`) : armé sur
+                            // toutes les surfaces. Un fichier illisible refuse de
+                            // démarrer : on ne sert pas sur des droits qu'on n'a pas lus.
+                            if host.wami_enforcement.is_none() {
+                                use crate::core::auth::wami_policy::WamiEnforcement;
+                                if let Some(enforcement) =
+                                    WamiEnforcement::from_config(wami_config)?
+                                {
+                                    tracing::info!(
+                                        policies = %wami_config.policies_path.as_deref().map(|p| p.display().to_string()).unwrap_or_default(),
+                                        "WAMI IAM armed from config on every surface"
+                                    );
+                                    host.wami_enforcement = Some(Arc::new(enforcement));
                                 }
                             }
                         }
@@ -1571,7 +1608,18 @@ impl ServerBuilder {
             .clone()
             .unwrap_or_else(|| "this-rs".to_string());
 
-        let mut sts = StsService::new(&private_pem, issuer)?;
+        // The STS issues for the configured audience (ADR D9) and keeps the legacy
+        // window open in bootstrap only, unless the operator opens it explicitly.
+        let audience = wami_config
+            .audience
+            .clone()
+            .unwrap_or_else(|| crate::core::auth::sts::DEFAULT_AUDIENCE.to_string());
+        let legacy = wami_config
+            .accept_legacy_tokens
+            .unwrap_or(matches!(wami_config.mode, AuthMode::Bootstrap));
+        let mut sts = StsService::new(&private_pem, issuer)?
+            .with_audience(audience)
+            .with_legacy_tokens(legacy);
         sts.set_access_ttl_secs(wami_config.token_ttl_secs);
         sts.set_refresh_ttl_secs(wami_config.refresh_ttl_secs);
 

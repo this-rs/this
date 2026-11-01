@@ -84,6 +84,23 @@ pub struct WamiAuthProvider {
 
     /// Original config for reference
     config: AuthConfig,
+
+    /// ADR D4: accept tokens without `aud` when an audience is configured.
+    accept_legacy_tokens: bool,
+}
+
+/// The `token_use` claim, read from the payload of an already-verified token.
+///
+/// Only call this after the signature has been checked: the payload is data
+/// until then.
+fn token_use_of(token: &str) -> Option<String> {
+    use base64::Engine;
+    let payload = token.split('.').nth(1)?;
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(payload)
+        .ok()?;
+    let value: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    value.get("token_use")?.as_str().map(str::to_string)
 }
 
 impl std::fmt::Debug for WamiAuthProvider {
@@ -130,12 +147,25 @@ impl WamiAuthProvider {
             validation.set_issuer::<&str>(&[]);
         }
 
-        // Configure audience validation
-        if let Some(ref audience) = wami_config.audience {
-            validation.set_audience(&[audience.as_str()]);
-        } else {
-            // Don't require audience if not configured
-            validation.set_audience::<&str>(&[]);
+        // Audience: required outside bootstrap (ADR D9). A token for another
+        // service, signed by a shared key, would otherwise open every door here.
+        let strict = !matches!(wami_config.mode, crate::config::auth::AuthMode::Bootstrap);
+        match &wami_config.audience {
+            Some(audience) => validation.set_audience(&[audience.as_str()]),
+            None if strict => bail!(
+                "wami.audience is required in {:?} mode: without it a token issued for \
+                 another service would be accepted. Set it, or use bootstrap mode for development.",
+                wami_config.mode
+            ),
+            None => {
+                // Bootstrap (development): accept any `aud`, including none.
+                // jsonwebtoken would refuse an `aud` present with an empty expected set.
+                validation.validate_aud = false;
+                tracing::warn!(
+                    "wami.audience is not set (bootstrap mode): tokens signed by this key are \
+                     accepted whatever their audience."
+                );
+            }
         }
 
         // Always validate expiration
@@ -147,7 +177,21 @@ impl WamiAuthProvider {
             decoding_key,
             validation,
             config: config.clone(),
+            // ADR D4/D9: the legacy window is open in bootstrap only, unless the
+            // operator opens it explicitly for a migration.
+            accept_legacy_tokens: wami_config.accept_legacy_tokens.unwrap_or(!strict),
         })
+    }
+
+    /// Whether tokens without `aud` are accepted when an audience is configured.
+    ///
+    /// The ADR D4 window, during which tokens issued before the audience existed
+    /// still verify. From config: `wami.accept_legacy_tokens`, default `true` in
+    /// bootstrap mode only.
+    #[must_use]
+    pub fn with_legacy_tokens(mut self, accept: bool) -> Self {
+        self.accept_legacy_tokens = accept;
+        self
     }
 
     /// Parse an Ed25519 public key from base64 or PEM format
@@ -194,8 +238,24 @@ impl WamiAuthProvider {
             );
         }
 
-        jsonwebtoken::decode::<StsClaims>(token, &self.decoding_key, &self.validation)
-            .context("JWT verification failed")
+        let data = jsonwebtoken::decode::<StsClaims>(token, &self.decoding_key, &self.validation)
+            .context("JWT verification failed")?;
+
+        // Signature and expiry are checked; now the claims can be trusted.
+        if token_use_of(token).as_deref() == Some(crate::core::auth::sts::TOKEN_USE_REFRESH) {
+            bail!("a refresh token cannot authenticate a request");
+        }
+        // With an audience configured, a token that names none is only accepted
+        // inside the legacy window (ADR D4). jsonwebtoken alone would accept it.
+        let audience_configured = self
+            .config
+            .wami
+            .as_ref()
+            .is_some_and(|w| w.audience.is_some());
+        if audience_configured && data.claims.aud.is_none() && !self.accept_legacy_tokens {
+            bail!("token carries no audience and legacy tokens are refused");
+        }
+        Ok(data)
     }
 
     /// Extract Bearer token from Authorization header
@@ -207,40 +267,46 @@ impl WamiAuthProvider {
             .strip_prefix("Bearer ")
     }
 
-    /// Map verified StsClaims into an AuthContext
-    fn claims_to_context(claims: &StsClaims) -> AuthContext {
+    /// Map verified StsClaims into an AuthContext.
+    ///
+    /// A user token must name both a user and a tenant. Without them the claims
+    /// are refused, never mapped to the nil UUID: a nil identity is a real
+    /// identifier that the identity registry would then give a segment to.
+    fn claims_to_context(claims: &StsClaims) -> Result<AuthContext> {
         // Admin token
         if claims.is_admin {
             if let Some(user_id) = claims.user_id {
-                return AuthContext::Admin { admin_id: user_id };
+                return Ok(AuthContext::Admin { admin_id: user_id });
             }
             // Try to parse sub as UUID for admin
             if let Ok(admin_id) = Uuid::parse_str(&claims.sub) {
-                return AuthContext::Admin { admin_id };
+                return Ok(AuthContext::Admin { admin_id });
             }
         }
 
         // Service-to-service token
         if let Some(ref service_name) = claims.service_name {
-            return AuthContext::Service {
+            return Ok(AuthContext::Service {
                 service_name: service_name.clone(),
                 tenant_id: claims.tenant_id,
-            };
+            });
         }
 
         // Regular user token
         let user_id = claims
             .user_id
             .or_else(|| Uuid::parse_str(&claims.sub).ok())
-            .unwrap_or_else(Uuid::nil);
+            .ok_or_else(|| anyhow!("token names no user (sub is not a UUID)"))?;
 
-        let tenant_id = claims.tenant_id.unwrap_or_else(Uuid::nil);
+        let tenant_id = claims
+            .tenant_id
+            .ok_or_else(|| anyhow!("token names no tenant"))?;
 
-        AuthContext::User {
+        Ok(AuthContext::User {
             user_id,
             tenant_id,
             roles: claims.roles.clone(),
-        }
+        })
     }
 }
 
@@ -259,7 +325,7 @@ impl AuthProvider for WamiAuthProvider {
         };
 
         let token_data = self.verify_token(token)?;
-        Ok(Self::claims_to_context(&token_data.claims))
+        Self::claims_to_context(&token_data.claims)
     }
 
     async fn is_owner(
@@ -308,6 +374,83 @@ mod tests {
             .expect("failed to encode public key as PEM")
     }
 
+    /// A token the STS issues must verify here, and audience must be enforced.
+    /// Covers ADR D4: new tokens (with `aud`) and legacy tokens (without) both
+    /// pass in the window; a foreign audience is refused once one is configured.
+    #[test]
+    fn sts_issued_token_verifies_here_and_audience_is_enforced() {
+        use crate::core::auth::sts::{DEFAULT_AUDIENCE, StsService};
+        use ed25519_dalek::pkcs8::EncodePrivateKey;
+
+        let signing = SigningKey::from_bytes(&[9u8; 32]);
+        let priv_pem = signing
+            .to_pkcs8_pem(ed25519_dalek::pkcs8::spki::der::pem::LineEnding::LF)
+            .expect("pkcs8 pem");
+        let sts = StsService::new(&priv_pem, "test-issuer".to_string()).expect("sts");
+        let pair = sts
+            .issue_token_pair(uuid::Uuid::new_v4(), uuid::Uuid::new_v4(), vec![])
+            .expect("issue");
+        let pub_pem = pub_key_to_pem(&signing.verifying_key());
+
+        // Audience not configured: any `aud` passes.
+        let mut cfg = test_config(&pub_pem);
+        cfg.wami.as_mut().unwrap().audience = None;
+        // Sts mode refuses a missing audience; bootstrap tolerates it.
+        assert!(WamiAuthProvider::from_config(&cfg).is_err());
+        cfg.wami.as_mut().unwrap().mode = crate::config::auth::AuthMode::Bootstrap;
+        let open = WamiAuthProvider::from_config(&cfg).expect("provider");
+        assert!(open.verify_token(&pair.access_token).is_ok());
+
+        // Audience configured to the STS audience: accepted.
+        let mut cfg = test_config(&pub_pem);
+        cfg.wami.as_mut().unwrap().audience = Some(DEFAULT_AUDIENCE.to_string());
+        let matching = WamiAuthProvider::from_config(&cfg).expect("provider");
+        assert!(matching.verify_token(&pair.access_token).is_ok());
+
+        // Audience configured to another service: refused.
+        let other = WamiAuthProvider::from_config(&test_config(&pub_pem)).expect("provider");
+        assert!(other.verify_token(&pair.access_token).is_err());
+    }
+
+    /// ADR D4 on the verifier: a refresh token never authenticates a request;
+    /// a token with no `aud` is accepted in the window and refused once it closes.
+    #[test]
+    fn legacy_window_and_refresh_tokens_on_the_verifier() {
+        use crate::core::auth::sts::{DEFAULT_AUDIENCE, StsService};
+        use ed25519_dalek::pkcs8::EncodePrivateKey;
+
+        let signing = SigningKey::from_bytes(&[11u8; 32]);
+        let priv_pem = signing
+            .to_pkcs8_pem(ed25519_dalek::pkcs8::spki::der::pem::LineEnding::LF)
+            .expect("pkcs8 pem");
+        let sts = StsService::new(&priv_pem, "test-issuer".to_string()).expect("sts");
+        let pair = sts
+            .issue_token_pair(uuid::Uuid::new_v4(), uuid::Uuid::new_v4(), vec![])
+            .expect("issue");
+        let pub_pem = pub_key_to_pem(&signing.verifying_key());
+
+        let mut cfg = test_config(&pub_pem);
+        cfg.wami.as_mut().unwrap().audience = Some(DEFAULT_AUDIENCE.to_string());
+        // Sts mode: the window is closed by default; a migration opens it explicitly.
+        let strict = WamiAuthProvider::from_config(&cfg).expect("provider");
+        assert!(!strict.accept_legacy_tokens);
+        cfg.wami.as_mut().unwrap().accept_legacy_tokens = Some(true);
+        let lenient = WamiAuthProvider::from_config(&cfg).expect("provider");
+        assert!(lenient.accept_legacy_tokens);
+
+        // Refresh tokens never authenticate, whatever the window.
+        assert!(lenient.verify_token(&pair.refresh_token).is_err());
+        assert!(strict.verify_token(&pair.refresh_token).is_err());
+        assert!(lenient.verify_token(&pair.access_token).is_ok());
+
+        // A token with no aud: accepted in the window, refused once it closes.
+        let mut legacy = valid_claims();
+        legacy.aud = None;
+        let legacy_token = sign_token(&legacy, &signing);
+        assert!(lenient.verify_token(&legacy_token).is_ok());
+        assert!(strict.verify_token(&legacy_token).is_err());
+    }
+
     /// Create an AuthConfig with the given public key
     fn test_config(pub_key_b64: &str) -> AuthConfig {
         AuthConfig {
@@ -320,6 +463,9 @@ mod tests {
                 private_key: None,
                 token_ttl_secs: 3600,
                 refresh_ttl_secs: 86400,
+                accept_legacy_tokens: None,
+                policies_path: None,
+                identity_path: None,
             }),
             ..Default::default()
         }
@@ -391,6 +537,9 @@ mod tests {
                 private_key: None,
                 token_ttl_secs: 3600,
                 refresh_ttl_secs: 86400,
+                accept_legacy_tokens: None,
+                policies_path: None,
+                identity_path: None,
             }),
             ..Default::default()
         };
@@ -574,7 +723,7 @@ mod tests {
             ..valid_claims()
         };
 
-        let ctx = WamiAuthProvider::claims_to_context(&claims);
+        let ctx = WamiAuthProvider::claims_to_context(&claims).unwrap();
         match ctx {
             AuthContext::User {
                 user_id: uid,
@@ -599,7 +748,7 @@ mod tests {
             ..valid_claims()
         };
 
-        let ctx = WamiAuthProvider::claims_to_context(&claims);
+        let ctx = WamiAuthProvider::claims_to_context(&claims).unwrap();
         match ctx {
             AuthContext::Admin { admin_id: aid } => {
                 assert_eq!(aid, admin_id);
@@ -619,7 +768,7 @@ mod tests {
             ..valid_claims()
         };
 
-        let ctx = WamiAuthProvider::claims_to_context(&claims);
+        let ctx = WamiAuthProvider::claims_to_context(&claims).unwrap();
         match ctx {
             AuthContext::Service {
                 service_name,
@@ -644,7 +793,7 @@ mod tests {
             ..valid_claims()
         };
 
-        let ctx = WamiAuthProvider::claims_to_context(&claims);
+        let ctx = WamiAuthProvider::claims_to_context(&claims).unwrap();
         match ctx {
             AuthContext::User { user_id, .. } => {
                 assert_eq!(user_id, sub_uuid);
@@ -653,8 +802,10 @@ mod tests {
         }
     }
 
+    /// A token that names no tenant is refused. It is never mapped to the nil
+    /// UUID, which the identity registry would give a real segment (ADR D1).
     #[test]
-    fn test_claims_to_context_missing_tenant_id_defaults_to_nil() {
+    fn test_claims_to_context_missing_tenant_id_is_refused() {
         let claims = StsClaims {
             sub: Uuid::new_v4().to_string(),
             user_id: Some(Uuid::new_v4()),
@@ -663,14 +814,21 @@ mod tests {
             service_name: None,
             ..valid_claims()
         };
+        let err = WamiAuthProvider::claims_to_context(&claims).unwrap_err();
+        assert!(err.to_string().contains("no tenant"), "got: {err}");
+    }
 
-        let ctx = WamiAuthProvider::claims_to_context(&claims);
-        match ctx {
-            AuthContext::User { tenant_id, .. } => {
-                assert!(tenant_id.is_nil());
-            }
-            other => panic!("Expected User context, got {:?}", other),
-        }
+    #[test]
+    fn test_claims_to_context_unnamed_user_is_refused() {
+        let claims = StsClaims {
+            sub: "not-a-uuid".to_string(),
+            user_id: None,
+            tenant_id: Some(Uuid::new_v4()),
+            is_admin: false,
+            service_name: None,
+            ..valid_claims()
+        };
+        assert!(WamiAuthProvider::claims_to_context(&claims).is_err());
     }
 
     // --- extract_context via AuthProvider trait ---

@@ -5,7 +5,7 @@
 
 use anyhow::{Context, Result, bail};
 use chrono::{Duration, Utc};
-use jsonwebtoken::{Algorithm, DecodingKey, EncodingKey, Header, Validation, encode};
+use jsonwebtoken::{Algorithm, DecodingKey, Validation};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
@@ -28,6 +28,38 @@ pub struct StsClaims {
     pub jti: String,
     /// Issuer
     pub iss: String,
+    /// Audience the token is addressed to (RFC 7519 §4.1.3).
+    ///
+    /// Absent on tokens issued before the audience was introduced: those are
+    /// accepted only while [`StsService::accepts_legacy_tokens`] holds (ADR D4).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub aud: Option<String>,
+    /// `"access"` or `"refresh"`: what the token may be used for (ADR D4).
+    ///
+    /// A refresh token must not authenticate a request, and an access token must
+    /// not be exchanged for a new pair. Absent on tokens issued before this claim
+    /// existed, which are accepted only while the legacy window holds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_use: Option<String>,
+}
+
+/// The `token_use` value of an access token.
+pub const TOKEN_USE_ACCESS: &str = "access";
+/// The `token_use` value of a refresh token.
+pub const TOKEN_USE_REFRESH: &str = "refresh";
+
+/// Audience this STS issues for when none is configured.
+pub const DEFAULT_AUDIENCE: &str = "this-rs";
+
+/// RFC 7638 thumbprint of an Ed25519 public key: the `kid` wami's `KeyManager`
+/// gives the same key. Computed from the public bytes alone so a verifier that
+/// holds only the public key can name the key a token was signed with.
+pub fn kid_for_public_key(public: &[u8; 32]) -> String {
+    use base64::Engine;
+    use sha2::{Digest, Sha256};
+    let x = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(public);
+    let canonical = format!(r#"{{"crv":"Ed25519","kty":"OKP","x":"{x}"}}"#);
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(Sha256::digest(canonical.as_bytes()))
 }
 
 /// Token pair returned by login / refresh
@@ -94,8 +126,13 @@ struct UserRecord {
 ///
 /// Issues, refreshes, and revokes Ed25519-signed JWT tokens.
 pub struct StsService {
-    encoding_key: EncodingKey,
+    /// Signs every token; its active `kid` goes in the JOSE header.
+    keys: wami::wami::sts::jwt::KeyManager,
     issuer: String,
+    audience: String,
+    /// ADR D4: tokens without `aud` (issued before the audience existed) are
+    /// accepted while this holds. Flip to `false` once every client reissued.
+    accept_legacy_tokens: bool,
     access_token_ttl: Duration,
     refresh_token_ttl: Duration,
     revoked_tokens: Arc<RwLock<HashSet<String>>>,
@@ -112,18 +149,69 @@ impl StsService {
     ///
     /// `private_key_pem` must be a PEM-encoded Ed25519 private key (PKCS8).
     pub fn new(private_key_pem: &str, issuer: String) -> Result<Self> {
-        let encoding_key = EncodingKey::from_ed_pem(private_key_pem.as_bytes())
-            .context("Failed to parse Ed25519 private key PEM")?;
+        use ed25519_dalek::SigningKey;
+        use ed25519_dalek::pkcs8::DecodePrivateKey;
+
+        // PKCS8 is parsed once here, into the bytes `KeyManager` derives its
+        // `kid` from. Both the STS and wami's verifiers therefore name the key
+        // the same way, which the rotation path depends on.
+        let signing = SigningKey::from_pkcs8_pem(private_key_pem)
+            .context("Failed to parse Ed25519 private key PEM (PKCS8)")?;
+        let keys = wami::wami::sts::jwt::KeyManager::from_bytes(&signing.to_bytes());
 
         Ok(Self {
-            encoding_key,
+            keys,
             issuer,
+            audience: DEFAULT_AUDIENCE.to_string(),
+            accept_legacy_tokens: true,
             access_token_ttl: Duration::minutes(15),
             refresh_token_ttl: Duration::hours(24),
             revoked_tokens: Arc::new(RwLock::new(HashSet::new())),
             users: Arc::new(RwLock::new(HashMap::new())),
             annuaire: std::sync::OnceLock::new(),
         })
+    }
+
+    /// Set the audience this STS issues for and accepts on refresh.
+    #[must_use]
+    pub fn with_audience(mut self, audience: impl Into<String>) -> Self {
+        self.audience = audience.into();
+        self
+    }
+
+    /// Whether tokens without `aud` are still accepted (ADR D4 window).
+    #[must_use]
+    pub fn with_legacy_tokens(mut self, accept: bool) -> Self {
+        self.accept_legacy_tokens = accept;
+        self
+    }
+
+    /// The audience this STS issues for.
+    pub fn audience(&self) -> &str {
+        &self.audience
+    }
+
+    /// Whether a token with no `aud` is accepted. See ADR D4.
+    pub fn accepts_legacy_tokens(&self) -> bool {
+        self.accept_legacy_tokens
+    }
+
+    /// Check a token's `aud` against this STS.
+    ///
+    /// Done by hand because `jsonwebtoken` refuses any `aud` when no expected
+    /// audience is set, which would reject every token this STS issues.
+    pub fn check_audience(&self, aud: Option<&str>) -> Result<()> {
+        match aud {
+            Some(a) if a == self.audience => Ok(()),
+            None if self.accept_legacy_tokens => Ok(()),
+            Some(a) => bail!("token audience `{a}` is not `{}`", self.audience),
+            None => bail!("token carries no audience and legacy tokens are refused"),
+        }
+    }
+
+    /// The public keys as a JWK Set, with the active `kid`.
+    pub fn jwks(&self) -> serde_json::Value {
+        serde_json::to_value(self.keys.jwks()).unwrap_or_else(|_| serde_json::json!({ "keys": [] }))
     }
 
     /// Branche l'annuaire persisté : à partir d'ici, `login` ne consulte plus
@@ -202,7 +290,8 @@ impl StsService {
     pub fn refresh(&self, refresh_token: &str, decoding_key: &DecodingKey) -> Result<TokenPair> {
         let mut validation = Validation::new(Algorithm::EdDSA);
         validation.set_issuer(&[self.issuer.as_str()]);
-        validation.set_audience::<&str>(&[]);
+        // Audience is checked by `check_audience` below, not by jsonwebtoken.
+        validation.validate_aud = false;
         validation.validate_exp = true;
 
         let token_data =
@@ -210,6 +299,15 @@ impl StsService {
                 .context("refresh token verification failed")?;
 
         let claims = token_data.claims;
+        self.check_audience(claims.aud.as_deref())
+            .context("refresh token audience refused")?;
+        // An access token must not buy a new pair (ADR D4). Legacy tokens carry no
+        // `token_use`; they are accepted only while the legacy window is open.
+        match claims.token_use.as_deref() {
+            Some(TOKEN_USE_REFRESH) => {}
+            None if self.accept_legacy_tokens => {}
+            _ => bail!("token is not a refresh token"),
+        }
 
         // Check revocation
         if self.is_revoked(&claims.jti) {
@@ -285,6 +383,7 @@ impl StsService {
             .context("Failed to parse Ed25519 public key PEM for JWKS")?;
 
         let x = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(vk.as_bytes());
+        let kid = kid_for_public_key(vk.as_bytes());
 
         Ok(serde_json::json!({
             "keys": [
@@ -293,6 +392,7 @@ impl StsService {
                     "crv": "Ed25519",
                     "use": "sig",
                     "alg": "EdDSA",
+                    "kid": kid,
                     "x": x,
                 }
             ]
@@ -301,7 +401,7 @@ impl StsService {
 
     // ---- private helpers ----
 
-    fn issue_token_pair(
+    pub(crate) fn issue_token_pair(
         &self,
         user_id: Uuid,
         tenant_id: Uuid,
@@ -314,8 +414,6 @@ impl StsService {
         let access_jti = Uuid::new_v4().to_string();
         let refresh_jti = Uuid::new_v4().to_string();
 
-        let header = Header::new(Algorithm::EdDSA);
-
         let access_claims = StsClaims {
             sub: user_id.to_string(),
             tenant_id,
@@ -324,6 +422,8 @@ impl StsService {
             iat: now.timestamp(),
             jti: access_jti,
             iss: self.issuer.clone(),
+            aud: Some(self.audience.clone()),
+            token_use: Some(TOKEN_USE_ACCESS.to_string()),
         };
 
         let refresh_claims = StsClaims {
@@ -334,12 +434,19 @@ impl StsService {
             iat: now.timestamp(),
             jti: refresh_jti,
             iss: self.issuer.clone(),
+            aud: Some(self.audience.clone()),
+            token_use: Some(TOKEN_USE_REFRESH.to_string()),
         };
 
-        let access_token = encode(&header, &access_claims, &self.encoding_key)
+        // Signed through `KeyManager`: the header carries the active `kid`.
+        let access_token = self
+            .keys
+            .sign_claims(&access_claims)
             .context("failed to sign access token")?;
 
-        let refresh_token = encode(&header, &refresh_claims, &self.encoding_key)
+        let refresh_token = self
+            .keys
+            .sign_claims(&refresh_claims)
             .context("failed to sign refresh token")?;
 
         Ok(TokenPair {
@@ -507,7 +614,7 @@ mod tests {
         let dk = decoding_key(&pub_pem);
         let mut validation = Validation::new(Algorithm::EdDSA);
         validation.set_issuer(&["test-issuer"]);
-        validation.set_audience::<&str>(&[]);
+        validation.validate_aud = false;
         let claims = jsonwebtoken::decode::<StsClaims>(&pair.access_token, &dk, &validation)
             .unwrap()
             .claims;
@@ -678,7 +785,7 @@ mod tests {
         // Verify the access token
         let mut validation = Validation::new(Algorithm::EdDSA);
         validation.set_issuer(&["test-issuer"]);
-        validation.set_audience::<&str>(&[]);
+        validation.validate_aud = false;
 
         let token_data = jsonwebtoken::decode::<StsClaims>(&pair.access_token, &dk, &validation)
             .expect("access token should verify");
@@ -688,5 +795,116 @@ mod tests {
         assert_eq!(token_data.claims.roles, vec!["editor".to_string()]);
         assert_eq!(token_data.claims.iss, "test-issuer");
         assert!(!token_data.claims.jti.is_empty());
+    }
+
+    // ---- audience, kid, and agreement with wami's KeyManager (ADR D4) ----
+
+    fn secret_of(private_pem: &str) -> [u8; 32] {
+        use ed25519_dalek::pkcs8::DecodePrivateKey;
+        SigningKey::from_pkcs8_pem(private_pem)
+            .expect("pkcs8")
+            .to_bytes()
+    }
+
+    fn public_bytes_of(public_pem: &str) -> [u8; 32] {
+        use ed25519_dalek::pkcs8::DecodePublicKey;
+        ed25519_dalek::VerifyingKey::from_public_key_pem(public_pem)
+            .expect("spki")
+            .to_bytes()
+    }
+
+    #[test]
+    fn issued_token_carries_default_audience_and_active_kid() {
+        let (priv_pem, pub_pem) = generate_test_keypair();
+        let sts = build_sts(&priv_pem);
+        let pair = sts
+            .issue_token_pair(Uuid::new_v4(), Uuid::new_v4(), vec![])
+            .unwrap();
+
+        let mut validation = Validation::new(Algorithm::EdDSA);
+        validation.validate_aud = false;
+        validation.set_issuer(&["test-issuer"]);
+        let data = jsonwebtoken::decode::<StsClaims>(
+            &pair.access_token,
+            &decoding_key(&pub_pem),
+            &validation,
+        )
+        .unwrap();
+        assert_eq!(data.claims.aud.as_deref(), Some(DEFAULT_AUDIENCE));
+
+        let public = public_bytes_of(&pub_pem);
+        let kid = jsonwebtoken::decode_header(&pair.access_token)
+            .unwrap()
+            .kid
+            .unwrap();
+        assert_eq!(kid, kid_for_public_key(&public));
+        // The same key, named the same way by wami: the two sides agree.
+        let km = wami::wami::sts::jwt::KeyManager::from_bytes(&secret_of(&priv_pem));
+        assert_eq!(km.active().kid(), kid);
+    }
+
+    #[test]
+    fn jwks_names_the_same_kid_as_the_tokens() {
+        let (priv_pem, pub_pem) = generate_test_keypair();
+        let sts = build_sts(&priv_pem);
+        let expected = kid_for_public_key(&public_bytes_of(&pub_pem));
+        let from_sts = sts.jwks();
+        assert_eq!(from_sts["keys"][0]["kid"], expected);
+        let from_pem = StsService::jwks_response(&pub_pem).unwrap();
+        assert_eq!(from_pem["keys"][0]["kid"], expected);
+    }
+
+    #[test]
+    fn check_audience_enforces_match_and_legacy_window() {
+        let (priv_pem, _) = generate_test_keypair();
+        let sts = build_sts(&priv_pem);
+        assert!(sts.check_audience(Some(DEFAULT_AUDIENCE)).is_ok());
+        assert!(sts.check_audience(Some("other-service")).is_err());
+        assert!(
+            sts.check_audience(None).is_ok(),
+            "legacy window is open by default"
+        );
+
+        let strict = build_sts(&priv_pem).with_legacy_tokens(false);
+        assert!(strict.check_audience(None).is_err());
+        assert!(strict.check_audience(Some(DEFAULT_AUDIENCE)).is_ok());
+    }
+
+    #[test]
+    fn access_token_cannot_be_exchanged_for_a_new_pair() {
+        let (priv_pem, pub_pem) = generate_test_keypair();
+        let sts = build_sts(&priv_pem).with_legacy_tokens(false);
+        let pair = sts
+            .issue_token_pair(Uuid::new_v4(), Uuid::new_v4(), vec![])
+            .unwrap();
+        let dk = decoding_key(&pub_pem);
+        let err = sts.refresh(&pair.access_token, &dk).unwrap_err();
+        assert!(
+            err.to_string().contains("not a refresh token"),
+            "got: {err}"
+        );
+        // The refresh token of the same pair still works.
+        assert!(sts.refresh(&pair.refresh_token, &dk).is_ok());
+    }
+
+    #[test]
+    fn refresh_refuses_token_addressed_to_another_audience() {
+        let (priv_pem, pub_pem) = generate_test_keypair();
+        let sts = build_sts(&priv_pem);
+        let now = Utc::now();
+        let foreign = StsClaims {
+            sub: Uuid::new_v4().to_string(),
+            tenant_id: Uuid::new_v4(),
+            roles: vec![],
+            exp: (now + Duration::hours(1)).timestamp(),
+            iat: now.timestamp(),
+            jti: Uuid::new_v4().to_string(),
+            iss: "test-issuer".to_string(),
+            aud: Some("some-other-service".to_string()),
+            token_use: Some(TOKEN_USE_REFRESH.to_string()),
+        };
+        let token = sts.keys.sign_claims(&foreign).unwrap();
+        let err = sts.refresh(&token, &decoding_key(&pub_pem)).unwrap_err();
+        assert!(err.to_string().contains("audience"), "got: {err}");
     }
 }
