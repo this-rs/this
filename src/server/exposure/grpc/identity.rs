@@ -102,6 +102,7 @@ mod tests {
                     user_id: Uuid::from_u128(7),
                     tenant_id: Uuid::from_u128(8),
                     roles: vec!["admin".into()],
+                    scopes: Vec::new(),
                 }),
                 _ => anyhow::bail!("no or bad token"),
             }

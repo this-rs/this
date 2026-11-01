@@ -107,21 +107,28 @@ impl EntityDescriptor for Routes {
     }
 }
 
-/// `Bearer admin` → role `admin`; `Bearer user` → no role; anything else is refused.
+/// `Bearer admin` → role `admin`; `Bearer user` → no role; `Bearer scoped` → the token carries the
+/// grant `invoice.pay`, exactly like an OIDC `scope`; anything else is refused.
 struct Tokens;
 
 #[async_trait]
 impl AuthProvider for Tokens {
     async fn extract_context(&self, h: &HeaderMap) -> anyhow::Result<AuthContext> {
-        let roles = match h.get("authorization").and_then(|v| v.to_str().ok()) {
-            Some("Bearer admin") => vec!["admin".to_string()],
-            Some("Bearer user") => vec![],
-            _ => anyhow::bail!("no or bad token"),
-        };
+        let (roles, scopes): (Vec<String>, Vec<String>) =
+            match h.get("authorization").and_then(|v| v.to_str().ok()) {
+                Some("Bearer admin") => (vec!["admin".to_string()], Vec::new()),
+                Some("Bearer user") => (Vec::new(), Vec::new()),
+                Some("Bearer scoped") => (
+                    Vec::new(),
+                    vec!["invoice.pay".to_string(), "invoice.read".to_string()],
+                ),
+                _ => anyhow::bail!("no or bad token"),
+            };
         Ok(AuthContext::User {
             user_id: Uuid::from_u128(1),
             tenant_id: Uuid::from_u128(2),
             roles,
+            scopes,
         })
     }
     async fn is_owner(&self, _: &Uuid, _: &Uuid, _: &str) -> anyhow::Result<bool> {
@@ -163,6 +170,13 @@ struct Surfaces {
 }
 
 fn surfaces() -> Surfaces {
+    surfaces_with(
+        PolicyExpr::HasRole(vec!["admin".into()]),
+        PolicyExpr::Authenticated,
+    )
+}
+
+fn surfaces_with(create: PolicyExpr, list: PolicyExpr) -> Surfaces {
     let store = Arc::new(Store::default());
     let config = LinksConfig {
         entities: vec![EntityConfig {
@@ -183,7 +197,16 @@ fn surfaces() -> Surfaces {
     let mut creators: HashMap<String, Arc<dyn EntityCreator>> = HashMap::new();
     creators.insert("invoice".into(), store.clone());
     let mut set = DescriptorSet::new();
-    set.insert(billing()).unwrap();
+    let mut module = billing();
+    module.entities[0]
+        .permissions
+        .ops
+        .insert(Operation::Create, create);
+    module.entities[0]
+        .permissions
+        .ops
+        .insert(Operation::List, list);
+    set.insert(module).unwrap();
 
     let host = ServerHost::from_builder_components(
         Arc::new(InMemoryLinkService::new()),
@@ -279,6 +302,28 @@ async fn graphql_create(s: &Surfaces, token: &str, lang: &str, body: &str) -> Va
     out["errors"][0].clone()
 }
 
+/// Raw GraphQL response (data **and** errors): [`graphql_create`] only returns the first error, so
+/// it cannot tell a granted read from a refused one.
+async fn graphql_query(s: &Surfaces, token: &str, lang: &str, query: &str) -> Value {
+    let res = s
+        .graphql
+        .clone()
+        .oneshot(
+            Request::post("/graphql")
+                .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {token}"))
+                .header("accept-language", lang)
+                .body(Body::from(json!({ "query": query }).to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let bytes = axum::body::to_bytes(res.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    serde_json::from_slice(&bytes).unwrap()
+}
+
 fn grpc_struct(v: Value) -> prost_types::Struct {
     use prost_types::value::Kind;
     let Value::Object(map) = v else { panic!() };
@@ -296,6 +341,27 @@ fn grpc_struct(v: Value) -> prost_types::Struct {
             })
             .collect(),
     }
+}
+
+/// `CreateEntity` through the armed `EntityService`, success or refusal. [`grpc_create`] only
+/// exercises refusals (`expect_err`), and a scope-granted create is a success.
+async fn grpc_create_outcome(
+    s: &Surfaces,
+    token: &str,
+    lang: &str,
+    body: &str,
+) -> Result<(), tonic::Status> {
+    let mut req = tonic::Request::new(CreateEntityRequest {
+        entity_type: "invoice".into(),
+        data: Some(grpc_struct(serde_json::from_str(body).unwrap())),
+    });
+    let md = req.metadata_mut();
+    md.insert("authorization", format!("Bearer {token}").parse().unwrap());
+    md.insert("accept-language", lang.parse().unwrap());
+    EntityServiceImpl::new(s.host.clone())
+        .create_entity(req)
+        .await
+        .map(|_| ())
 }
 
 /// `CreateEntity` through the armed `EntityService`: identity and locale come from the
@@ -493,6 +559,61 @@ async fn policy_denied_on_all_protocols() {
     assert_ne!(rest.body["code"], "this.validation.failed");
 }
 
+/// A token's `scope` answers `perm:` on **every** surface, and only where no IAM plan is wired.
+///
+/// The rule lives in two places — `Authorization::check_iam` (REST) and `SurfaceGuard::with_env`
+/// (GraphQL, gRPC, WebSocket, host) — so a test on one surface proves nothing about the others.
+/// This one runs the same create through all three.
+#[tokio::test]
+async fn a_scope_grants_perm_on_rest_graphql_and_grpc() {
+    let s = surfaces_with(
+        PolicyExpr::Perm("invoice.pay".into()),
+        PolicyExpr::Perm("invoice.read".into()),
+    );
+
+    // The token carries `invoice.pay`: the policy `perm:invoice.pay` is answered by the scope.
+    let rest = rest_create(&s, "scoped", "en", VALID).await;
+    assert_eq!(rest.status, StatusCode::CREATED, "{}", rest.body);
+
+    let gql = graphql_create(&s, "scoped", "en", VALID).await;
+    assert!(
+        gql.is_null(),
+        "GraphQL refused a create the scope grants: {gql}"
+    );
+
+    grpc_create_outcome(&s, "scoped", "en", VALID)
+        .await
+        .expect("gRPC refused a create the scope grants");
+
+    // Same policy, no scope: refused everywhere, with the same code.
+    let rest = rest_create(&s, "user", "en", VALID).await;
+    assert_eq!(rest.status, StatusCode::FORBIDDEN, "{}", rest.body);
+    assert_eq!(rest.body["code"], "this.auth.forbidden");
+    let gql = graphql_create(&s, "user", "en", VALID).await;
+    assert_eq!(
+        gql["extensions"]["this_code"], "this.auth.forbidden",
+        "{gql}"
+    );
+    let status = grpc_create(&s, "user", "en", VALID).await;
+    assert_eq!(status.code(), tonic::Code::PermissionDenied);
+
+    // The read direction, on the surface an OIDC resource server serves most: `list =
+    // perm:invoice.read` must be answered by the scope, and refused without it.
+    let ok = graphql_query(&s, "scoped", "en", "{ invoices { id } }").await;
+    assert!(
+        ok["errors"].is_null(),
+        "GraphQL refused a list the scope grants: {ok}"
+    );
+    // The fixture store lists nothing (`list_as_json` is a write recorder): what is proven here is
+    // admission — no `this.auth.forbidden` — not the rows.
+    assert!(ok["data"]["invoices"].is_array(), "{ok}");
+    let refused = graphql_query(&s, "user", "en", "{ invoices { id } }").await;
+    assert_eq!(
+        refused["errors"][0]["extensions"]["this_code"], "this.auth.forbidden",
+        "{refused}"
+    );
+}
+
 // ── hot loading from a VFS ──────────────────────────────────────────────────
 
 /// `x-test-auth: user` → authenticated user; absent → anonymous.
@@ -507,6 +628,7 @@ impl AuthProvider for HeaderAuth {
                     user_id: Uuid::from_u128(1),
                     tenant_id: Uuid::from_u128(1),
                     roles: vec![],
+                    scopes: Vec::new(),
                 },
                 _ => AuthContext::Anonymous,
             },

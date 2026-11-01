@@ -1337,11 +1337,21 @@ impl ServerBuilder {
                     }
                 }
                 AuthProviderType::Oidc => {
-                    // Same rule: a configured provider that does not exist refuses the boot
-                    // instead of leaving the host with no authentication at all.
+                    #[cfg(feature = "oidc")]
+                    {
+                        use crate::core::auth::oidc_provider::OidcAuthProvider;
+                        // A resource server: the provider verifies tokens an external IdP signs.
+                        let provider = OidcAuthProvider::from_auth_config(auth_config)?;
+                        host = host.with_auth_provider(Arc::new(provider));
+                        tracing::info!("OIDC auth provider auto-wired (resource server)");
+                    }
+                    // Same rule as `wami`: a configured provider that does not exist refuses the
+                    // boot instead of leaving the host with no authentication at all.
+                    #[cfg(not(feature = "oidc"))]
                     anyhow::bail!(
-                        "auth.provider is `oidc` and this build has no OIDC provider: refusing \
-                         to start without authentication (use `wami`, or `none` for development)"
+                        "auth.provider is `oidc` and this build has no `oidc` feature: refusing \
+                         to start without authentication (rebuild with the feature, use `wami`, or \
+                         `none` for development)"
                     );
                 }
             }
@@ -2063,6 +2073,7 @@ mod tests {
     /// `provider: oidc` used to log "not yet implemented" and continue, leaving the host with
     /// `NoAuthProvider` — anonymous callers, `is_owner` true — and no way to notice from the
     /// outside. Refusing is the only honest outcome.
+    #[cfg(not(feature = "oidc"))]
     #[test]
     fn test_build_host_refuses_oidc_without_an_oidc_provider() {
         let config = crate::config::auth::AuthConfig {
@@ -2089,6 +2100,34 @@ mod tests {
             "error should name the provider: {msg}"
         );
         assert!(msg.contains("refusing"), "error should refuse: {msg}");
+    }
+
+    /// With the feature on, `provider: oidc` arms a resource server instead of refusing.
+    ///
+    /// Discovery is lazy (the builder is synchronous), so this only proves the wiring: a token is
+    /// what triggers the round-trip, and it fails closed if the provider is unreachable.
+    #[cfg(feature = "oidc")]
+    #[test]
+    fn test_build_host_arms_the_oidc_resource_server() {
+        let config = crate::config::auth::AuthConfig {
+            provider: crate::config::auth::AuthProviderType::Oidc,
+            oidc: Some(crate::config::auth::OidcConfig {
+                discovery_url: "https://idp.example.com/.well-known/openid-configuration".into(),
+                audience: Some("https://api.example.com".into()),
+                user_claim: "sub".into(),
+                roles_claim: "roles".into(),
+            }),
+            ..Default::default()
+        };
+        let host = ServerBuilder::new()
+            .with_link_service(InMemoryLinkService::new())
+            .with_auth_config(config)
+            .build_host()
+            .expect("a complete OIDC configuration arms the provider");
+        assert!(
+            host.auth_provider().is_some(),
+            "the provider must be attached to the host"
+        );
     }
 
     /// The same rule for `wami`: a key the provider cannot use refuses the boot.

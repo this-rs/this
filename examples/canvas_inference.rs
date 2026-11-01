@@ -119,6 +119,7 @@ async fn main() -> anyhow::Result<()> {
                 user_id: utilisateur,
                 tenant_id: tenant,
                 roles: vec![],
+                scopes: Vec::new(),
             }))
             .oneshot(
                 Request::builder()

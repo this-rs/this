@@ -240,6 +240,7 @@ mod tests {
                     user_id: uid(1),
                     tenant_id: uid(2),
                     roles: vec!["editor".into()],
+                    scopes: Vec::new(),
                 },
             ),
             (
@@ -248,6 +249,7 @@ mod tests {
                     user_id: uid(1),
                     tenant_id: uid(2),
                     roles: vec!["admin".into(), "editor".into()],
+                    scopes: Vec::new(),
                 },
             ),
             (

@@ -364,6 +364,7 @@ async fn main() -> anyhow::Result<()> {
         user_id: uuid::Uuid::from_u128(1),
         tenant_id: uuid::Uuid::from_u128(0xa),
         roles: vec![],
+        scopes: Vec::new(),
     };
 
     let plain_policy = stats(iters, || {
