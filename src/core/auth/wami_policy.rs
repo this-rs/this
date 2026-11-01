@@ -13,17 +13,37 @@
 //! The mapping is fail-closed. `Some(true)` means allowed, `Some(false)` denied,
 //! `None` unevaluable: the caller must refuse, never read `None` as allow.
 //!
-//! # Known limits
+//! # Resources
 //!
-//! - The seam carries no resource, so the evaluation resource is tenant-wide
-//!   (`resource/*`). A statement naming one specific entity cannot match yet.
-//!   Passing the resource through `PermissionFn` is a follow-up.
-//! - Documents are registered in memory. Persistence is a follow-up.
+//! The seam's closure is built where the target is known, so the target is bound
+//! into it as a [`ResourceRef`] and becomes the ARN the statements match:
+//!
+//! - entity `orders`, one instance → `…:orders/<uuid>`; the whole type → `…:orders/*`
+//! - link `owns` from `users` to `orders` → `…:link/owns/users/orders`
+//! - no particular target → `…:resource/*` (only a `Resource: "*"` statement matches)
+//!
+//! # Roles
+//!
+//! `this` carries roles in the token (`AuthContext::User.roles`); wami attaches
+//! policies to groups in its store. Here a role is a named set of documents
+//! ([`PolicyStore::register_role`]) read beside the principal's own: a Deny in a
+//! role document overrides, exactly as a group policy would.
+//!
+//! # Ownership
+//!
+//! `owner` stays with `PolicyExpr`: without a store, wami cannot know who owns a
+//! row. wami answers `perm:` only.
+//!
+//! # Known limit
+//!
+//! Documents and the identity registry live in memory; see [`WamiEnforcement`]
+//! for the snapshot/restore hooks a host persists with.
 
 use crate::core::auth::AuthContext;
 use crate::core::auth::wami_bridge::{IdentityRegistry, RequestMeta, wami_context_for};
-use anyhow::{Result, bail};
+use anyhow::{Result, anyhow, bail};
 use std::collections::HashMap;
+use uuid::Uuid;
 use wami::service::auth::decision::PolicySource;
 use wami::service::auth::policy_evaluator::{
     PolicyEffect, evaluate_policy_document, parse_policy_doc,
@@ -57,29 +77,72 @@ impl Verdict {
 
 /// Map a `this` permission string to a wami action.
 ///
-/// Accepts `perm:a.b` or `a.b`. Each segment must be non-empty and made of
-/// ASCII letters, digits, `_` or `-`, so no wildcard or separator can be smuggled
-/// in from the permission name. Anything else maps to `None`.
+/// `this` descriptors write permissions as `perm:orders:write` (the historical
+/// form) or `perm:orders.write`; both separators are accepted and become
+/// `this:orders:write`. Each segment must be non-empty and made of ASCII
+/// letters, digits, `_` or `-`, so no wildcard can be smuggled in from the
+/// permission name: a `*` in a request would otherwise match a policy's
+/// wildcard statements. Anything else maps to `None`.
 pub fn wami_action_for(perm: &str) -> Option<String> {
     let name = perm.strip_prefix("perm:").unwrap_or(perm);
+    let segments: Vec<&str> = name.split(['.', ':']).collect();
     let well_formed = !name.is_empty()
-        && name.split('.').all(|seg| {
+        && segments.iter().all(|seg| {
             !seg.is_empty()
                 && seg
                     .chars()
                     .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
         });
-    well_formed.then(|| format!("{ACTION_NAMESPACE}:{}", name.replace('.', ":")))
+    well_formed.then(|| format!("{ACTION_NAMESPACE}:{}", segments.join(":")))
 }
 
-/// The tenant-wide resource a permission check is evaluated against.
-pub fn tenant_resource(ctx: &WamiContext) -> Result<WamiArn> {
-    Ok(WamiArn::builder()
+pub use crate::core::auth::ResourceRef;
+
+/// A name usable as an ARN segment: letters, digits, `_`, `-`. Anything else
+/// (a `*`, a `/`, a `:`) would change what a policy's pattern matches.
+fn arn_safe(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+}
+
+/// The ARN a permission check is evaluated against. `None` when a name is not
+/// ARN-safe: the check is then unevaluable rather than matched against a
+/// pattern it was not written for.
+pub fn resource_arn(ctx: &WamiContext, target: &ResourceRef<'_>) -> Option<WamiArn> {
+    let (resource_type, resource_id) = match target {
+        ResourceRef::Entity { entity, id } => {
+            if !arn_safe(entity) {
+                return None;
+            }
+            let id = id.map(|u| u.to_string()).unwrap_or_else(|| "*".to_string());
+            ((*entity).to_string(), id)
+        }
+        ResourceRef::Link {
+            link_type,
+            source,
+            target,
+        } => {
+            if !(arn_safe(link_type) && arn_safe(source) && arn_safe(target)) {
+                return None;
+            }
+            ("link".to_string(), format!("{link_type}/{source}/{target}"))
+        }
+        ResourceRef::Any => ("resource".to_string(), "*".to_string()),
+    };
+    WamiArn::builder()
         .service(Service::Iam)
         .tenant_path(ctx.tenant_path().clone())
         .wami_instance(ctx.instance_id())
-        .resource("resource", "*")
-        .build()?)
+        .resource(resource_type, resource_id)
+        .build()
+        .ok()
+}
+
+/// The ARN of "no particular target". Kept for callers that have nothing better.
+pub fn tenant_resource(ctx: &WamiContext) -> Result<WamiArn> {
+    resource_arn(ctx, &ResourceRef::Any).ok_or_else(|| anyhow!("cannot build the tenant ARN"))
 }
 
 /// Borrowed grants for one decision: identity documents and an optional boundary.
@@ -131,6 +194,8 @@ struct OwnedGrants {
 #[derive(Debug, Default)]
 pub struct PolicyStore {
     principals: HashMap<ScopedName, OwnedGrants>,
+    /// Documents attached to a role name, read for every caller carrying the role.
+    roles: HashMap<String, Vec<(PolicySource, PolicyDocument)>>,
 }
 
 impl PolicyStore {
@@ -178,28 +243,74 @@ impl PolicyStore {
         Ok(())
     }
 
-    /// The verdict for `perm` for the caller of `ctx`.
+    /// Register the documents of a role. Every caller whose token carries the
+    /// role reads them beside its own (wami's group policies). Replaces any
+    /// previous set for that role; an unreadable document fails the whole call.
+    pub fn register_role(&mut self, role: &str, documents: &[(&str, &str)]) -> Result<()> {
+        let mut parsed = Vec::with_capacity(documents.len());
+        for (name, json) in documents {
+            let source = PolicySource::GroupInline {
+                group: role.to_string(),
+                name: (*name).to_string(),
+            };
+            let document = parse_policy_doc(json, &source)
+                .map_err(|e| anyhow!("role `{role}` policy `{name}` refused: {e}"))?;
+            parsed.push((source, document));
+        }
+        self.roles.insert(role.to_string(), parsed);
+        Ok(())
+    }
+
+    /// Whether `role` has documents registered.
+    pub fn has_role(&self, role: &str) -> bool {
+        self.roles.contains_key(role)
+    }
+
+    /// The verdict for `perm` on `target`, for the caller of `ctx` carrying `roles`.
     ///
-    /// A permission string that maps to no action is `Unevaluable`. A caller with
-    /// no registered principal has no grants, so the answer is `Deny`.
-    pub fn verdict(&self, ctx: &WamiContext, perm: &str) -> Verdict {
+    /// Unevaluable when the permission maps to no action, when the target is not
+    /// ARN-safe, or when the context names no caller. A caller with neither its
+    /// own grants nor a known role has nothing to read: `Deny`.
+    pub fn verdict_on(
+        &self,
+        ctx: &WamiContext,
+        roles: &[String],
+        perm: &str,
+        target: &ResourceRef<'_>,
+    ) -> Verdict {
         let Some(action) = wami_action_for(perm) else {
             return Verdict::Unevaluable;
         };
-        let Ok(resource) = tenant_resource(ctx) else {
+        let Some(resource) = resource_arn(ctx, target) else {
             return Verdict::Unevaluable;
         };
         let Some(key) = ctx.caller_key() else {
             return Verdict::Unevaluable;
         };
-        let Some(owned) = self.principals.get(key) else {
+        let owned = self.principals.get(key);
+        let mut identity: Vec<(PolicySource, &PolicyDocument)> = owned
+            .map(|o| o.identity.iter().map(|(s, d)| (s.clone(), d)).collect())
+            .unwrap_or_default();
+        for role in roles {
+            if let Some(docs) = self.roles.get(role) {
+                identity.extend(docs.iter().map(|(s, d)| (s.clone(), d)));
+            }
+        }
+        if identity.is_empty() && owned.is_none() {
             return Verdict::Deny;
-        };
+        }
         let grants = Grants {
-            identity: owned.identity.iter().map(|(s, d)| (s.clone(), d)).collect(),
-            boundary: owned.boundary.as_ref().map(|(s, d)| (s.clone(), d)),
+            identity,
+            boundary: owned
+                .and_then(|o| o.boundary.as_ref())
+                .map(|(s, d)| (s.clone(), d)),
         };
         decide(&grants, &action, &resource, ctx)
+    }
+
+    /// [`PolicyStore::verdict_on`] with no roles and no particular target.
+    pub fn verdict(&self, ctx: &WamiContext, perm: &str) -> Verdict {
+        self.verdict_on(ctx, &[], perm, &ResourceRef::Any)
     }
 
     /// The `PermissionFn` for one caller, ready for `RegistryEnv::with_permission`.
@@ -243,18 +354,126 @@ impl WamiEnforcement {
         }
     }
 
-    /// The WAMI caller of a verified `AuthContext`, if it has one.
+    /// The WAMI caller of a verified `AuthContext`, if it has one, with the
+    /// request facts conditions read (IP, transport, MFA). Without them, an IP
+    /// or TLS condition cannot be met and fails closed.
+    pub fn caller_context(
+        &self,
+        auth: &AuthContext,
+        meta: &RequestMeta,
+    ) -> Result<Option<WamiContext>> {
+        wami_context_for(auth, meta, &self.registry, &self.instance_id)
+    }
+
+    /// The verdict for `perm` on `target`, for a verified `AuthContext`.
     ///
-    /// `RequestMeta::default()`: the surface guard does not carry the request's
-    /// IP or transport yet, so an IP or TLS condition cannot be met and fails
-    /// closed. Threading `RequestMeta` through the guard is a follow-up.
-    pub fn caller_context(&self, auth: &AuthContext) -> Result<Option<WamiContext>> {
-        wami_context_for(
-            auth,
-            &RequestMeta::default(),
-            &self.registry,
-            &self.instance_id,
-        )
+    /// `None` when the caller has no WAMI identity or its context cannot be
+    /// built: unknown, so refused by every caller of this function.
+    pub fn verdict_for(
+        &self,
+        auth: &AuthContext,
+        meta: &RequestMeta,
+        perm: &str,
+        target: &ResourceRef<'_>,
+    ) -> Option<Verdict> {
+        let ctx = self.caller_context(auth, meta).ok().flatten()?;
+        Some(self.store.verdict_on(&ctx, auth.roles(), perm, target))
+    }
+}
+
+/// A policy document as a definition file carries it: inline JSON.
+pub type DocumentJson = serde_json::Value;
+
+/// One principal's grants, keyed by the `this` identifiers (tenant and user
+/// UUIDs), not by wami segments: the file stays valid across registries.
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+pub struct PrincipalDefinition {
+    pub tenant: Uuid,
+    pub user: Uuid,
+    /// Inline policies by name.
+    #[serde(default)]
+    pub policies: std::collections::BTreeMap<String, DocumentJson>,
+    /// Permissions boundary, if any.
+    #[serde(default)]
+    pub boundary: Option<BoundaryDefinition>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+pub struct BoundaryDefinition {
+    pub arn: String,
+    pub document: DocumentJson,
+}
+
+/// The whole IAM a host loads: principals and roles. Loaded atomically: one
+/// unreadable document refuses the whole definition and leaves the enforcement
+/// as it was.
+#[derive(Debug, Clone, Default, serde::Deserialize, serde::Serialize)]
+pub struct PolicyDefinition {
+    #[serde(default)]
+    pub principals: Vec<PrincipalDefinition>,
+    /// Role name → inline policies by name.
+    #[serde(default)]
+    pub roles: std::collections::BTreeMap<String, std::collections::BTreeMap<String, DocumentJson>>,
+}
+
+impl WamiEnforcement {
+    /// Replace the policy store with `definition`, atomically.
+    ///
+    /// Principals are resolved through the identity registry, which allocates a
+    /// segment for a tenant seen for the first time. Nothing is applied until
+    /// every document has been read: a half-loaded store would answer with
+    /// grants from two different files.
+    pub fn load_definition(&mut self, definition: &PolicyDefinition) -> Result<()> {
+        let mut store = PolicyStore::new();
+        for (role, policies) in &definition.roles {
+            let rendered: Vec<(String, String)> = policies
+                .iter()
+                .map(|(name, doc)| Ok((name.clone(), serde_json::to_string(doc)?)))
+                .collect::<Result<_>>()?;
+            let borrowed: Vec<(&str, &str)> = rendered
+                .iter()
+                .map(|(n, j)| (n.as_str(), j.as_str()))
+                .collect();
+            store.register_role(role, &borrowed)?;
+        }
+        for principal in &definition.principals {
+            let tenant = self.registry.tenant_path(principal.tenant)?;
+            let key = ScopedName::new(tenant, principal.user.to_string());
+            let rendered: Vec<(String, String)> = principal
+                .policies
+                .iter()
+                .map(|(name, doc)| Ok((name.clone(), serde_json::to_string(doc)?)))
+                .collect::<Result<_>>()?;
+            let borrowed: Vec<(&str, &str)> = rendered
+                .iter()
+                .map(|(n, j)| (n.as_str(), j.as_str()))
+                .collect();
+            let boundary_json = principal
+                .boundary
+                .as_ref()
+                .map(|b| {
+                    Ok::<_, anyhow::Error>((b.arn.clone(), serde_json::to_string(&b.document)?))
+                })
+                .transpose()?;
+            let boundary = boundary_json
+                .as_ref()
+                .map(|(arn, json)| (arn.as_str(), json.as_str()));
+            store.register(key, &borrowed, boundary)?;
+        }
+        self.store = store;
+        Ok(())
+    }
+
+    /// Parse and load a JSON definition. See [`WamiEnforcement::load_definition`].
+    pub fn load_definition_json(&mut self, json: &str) -> Result<()> {
+        let definition: PolicyDefinition =
+            serde_json::from_str(json).map_err(|e| anyhow!("policy definition unreadable: {e}"))?;
+        self.load_definition(&definition)
+    }
+
+    /// The identity registry's `(tenant, segment)` pairs, to persist.
+    pub fn identity_snapshot(&self) -> Result<Vec<(Uuid, u64)>> {
+        self.registry.snapshot()
     }
 }
 
@@ -324,8 +543,37 @@ mod tests {
             wami_action_for("project.read").as_deref(),
             Some("this:project:read")
         );
-        for bad in ["", "perm:", "a..b", "a b", "../x", "a.*", "a:b", ".a", "a."] {
+        // The historical descriptor form uses `:`; both separators are one action.
+        assert_eq!(
+            wami_action_for("perm:orders:write").as_deref(),
+            Some("this:orders:write")
+        );
+        assert_eq!(
+            wami_action_for("perm:orders.write"),
+            wami_action_for("perm:orders:write")
+        );
+        for bad in [
+            "", "perm:", "a..b", "a::b", "a b", "../x", "a.*", "a:*", ".a", "a.", ":a",
+        ] {
             assert_eq!(wami_action_for(bad), None, "must refuse {bad:?}");
+        }
+    }
+
+    /// The `perm:` strings this repository's own descriptors and tests use must
+    /// all map, or a policy that works today stops working the day wami is armed.
+    #[test]
+    fn real_descriptor_permissions_all_map() {
+        for perm in [
+            "perm:orders:write",
+            "perm:orders:read",
+            "perm:graph:read",
+            "perm:invoices.read",
+            "perm:project.read",
+        ] {
+            assert!(
+                wami_action_for(perm).is_some(),
+                "{perm} must map to an action"
+            );
         }
     }
 
@@ -452,6 +700,345 @@ mod tests {
         assert_eq!(store.verdict(&ctx_b, "perm:project.read"), Verdict::Deny);
     }
 
+    const ALLOW_ONE_ORDER: &str = r#"{
+        "Version": "2012-10-17",
+        "Statement": [
+            {"Effect": "Allow", "Action": "this:orders:read",
+             "Resource": "arn:wami:iam:${tenant}:wami:this:orders/11111111-1111-1111-1111-111111111111"}
+        ]
+    }"#;
+
+    const ALLOW_ALL_ORDERS: &str = r#"{
+        "Version": "2012-10-17",
+        "Statement": [
+            {"Effect": "Allow", "Action": "this:orders:*",
+             "Resource": "arn:wami:iam:${tenant}:wami:this:orders/*"}
+        ]
+    }"#;
+
+    const ALLOW_OWNS_LINK: &str = r#"{
+        "Version": "2012-10-17",
+        "Statement": [
+            {"Effect": "Allow", "Action": "this:link:create",
+             "Resource": "arn:wami:iam:${tenant}:wami:this:link/owns/**"}
+        ]
+    }"#;
+
+    #[test]
+    fn resource_arn_names_rows_types_and_links() {
+        let reg = IdentityRegistry::new();
+        let ctx = ctx_for(Uuid::new_v4(), Uuid::new_v4(), &reg);
+        let id = Uuid::nil();
+        let row = resource_arn(
+            &ctx,
+            &ResourceRef::Entity {
+                entity: "orders",
+                id: Some(&id),
+            },
+        )
+        .unwrap();
+        assert!(
+            row.to_string()
+                .ends_with(":orders/00000000-0000-0000-0000-000000000000")
+        );
+        let whole = resource_arn(
+            &ctx,
+            &ResourceRef::Entity {
+                entity: "orders",
+                id: None,
+            },
+        )
+        .unwrap();
+        assert!(whole.to_string().ends_with(":orders/*"));
+        let link = resource_arn(
+            &ctx,
+            &ResourceRef::Link {
+                link_type: "owns",
+                source: "users",
+                target: "orders",
+            },
+        )
+        .unwrap();
+        assert!(link.to_string().ends_with(":link/owns/users/orders"));
+        // A name that would alter the pattern is refused, not matched.
+        assert!(
+            resource_arn(
+                &ctx,
+                &ResourceRef::Entity {
+                    entity: "orders/*",
+                    id: None,
+                },
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn a_statement_on_one_row_matches_that_row_only() {
+        let reg = IdentityRegistry::new();
+        let ctx = ctx_for(Uuid::new_v4(), Uuid::new_v4(), &reg);
+        let mut store = PolicyStore::new();
+        store
+            .register(key_of(&ctx), &[("one", ALLOW_ONE_ORDER)], None)
+            .unwrap();
+        let mine = Uuid::parse_str("11111111-1111-1111-1111-111111111111").unwrap();
+        let other = Uuid::parse_str("22222222-2222-2222-2222-222222222222").unwrap();
+        let on = |id: Option<&Uuid>| {
+            store.verdict_on(
+                &ctx,
+                &[],
+                "perm:orders:read",
+                &ResourceRef::Entity {
+                    entity: "orders",
+                    id,
+                },
+            )
+        };
+        assert_eq!(on(Some(&mine)), Verdict::Allow);
+        assert_eq!(on(Some(&other)), Verdict::Deny);
+        // The whole type (a list) is not one row: refused.
+        assert_eq!(on(None), Verdict::Deny);
+        // And "no particular target" is not that row either.
+        assert_eq!(
+            store.verdict_on(&ctx, &[], "perm:orders:read", &ResourceRef::Any),
+            Verdict::Deny
+        );
+    }
+
+    #[test]
+    fn a_statement_on_the_type_covers_rows_and_lists_but_not_other_types() {
+        let reg = IdentityRegistry::new();
+        let ctx = ctx_for(Uuid::new_v4(), Uuid::new_v4(), &reg);
+        let mut store = PolicyStore::new();
+        store
+            .register(key_of(&ctx), &[("orders", ALLOW_ALL_ORDERS)], None)
+            .unwrap();
+        let id = Uuid::new_v4();
+        let orders_row = ResourceRef::Entity {
+            entity: "orders",
+            id: Some(&id),
+        };
+        let orders_all = ResourceRef::Entity {
+            entity: "orders",
+            id: None,
+        };
+        let invoices = ResourceRef::Entity {
+            entity: "invoices",
+            id: None,
+        };
+        assert_eq!(
+            store.verdict_on(&ctx, &[], "perm:orders:read", &orders_row),
+            Verdict::Allow
+        );
+        assert_eq!(
+            store.verdict_on(&ctx, &[], "perm:orders:list", &orders_all),
+            Verdict::Allow
+        );
+        assert_eq!(
+            store.verdict_on(&ctx, &[], "perm:orders:read", &invoices),
+            Verdict::Deny
+        );
+    }
+
+    #[test]
+    fn link_statements_match_the_link_type() {
+        let reg = IdentityRegistry::new();
+        let ctx = ctx_for(Uuid::new_v4(), Uuid::new_v4(), &reg);
+        let mut store = PolicyStore::new();
+        store
+            .register(key_of(&ctx), &[("owns", ALLOW_OWNS_LINK)], None)
+            .unwrap();
+        let owns = ResourceRef::Link {
+            link_type: "owns",
+            source: "users",
+            target: "orders",
+        };
+        let manages = ResourceRef::Link {
+            link_type: "manages",
+            source: "users",
+            target: "orders",
+        };
+        assert_eq!(
+            store.verdict_on(&ctx, &[], "perm:link:create", &owns),
+            Verdict::Allow
+        );
+        assert_eq!(
+            store.verdict_on(&ctx, &[], "perm:link:create", &manages),
+            Verdict::Deny
+        );
+    }
+
+    #[test]
+    fn roles_grant_like_groups_and_a_role_deny_overrides() {
+        let reg = IdentityRegistry::new();
+        let ctx = ctx_for(Uuid::new_v4(), Uuid::new_v4(), &reg);
+        let mut store = PolicyStore::new();
+        store
+            .register_role("reader", &[("read", ALLOW_PROJECT_READ)])
+            .unwrap();
+        store
+            .register_role("banned", &[("deny", DENY_PROJECT_READ)])
+            .unwrap();
+        let reader = vec!["reader".to_string()];
+        let both = vec!["reader".to_string(), "banned".to_string()];
+        let unknown = vec!["ghost".to_string()];
+
+        // A caller with no own grants reads its roles' documents.
+        assert_eq!(
+            store.verdict_on(&ctx, &reader, "perm:project.read", &ResourceRef::Any),
+            Verdict::Allow
+        );
+        // A Deny in another role overrides the Allow.
+        assert_eq!(
+            store.verdict_on(&ctx, &both, "perm:project.read", &ResourceRef::Any),
+            Verdict::Deny
+        );
+        // A role nobody registered grants nothing.
+        assert_eq!(
+            store.verdict_on(&ctx, &unknown, "perm:project.read", &ResourceRef::Any),
+            Verdict::Deny
+        );
+        // The principal's boundary still narrows what a role grants.
+        let mut bounded = PolicyStore::new();
+        bounded.register_role("all", &[("all", ALLOW_ALL)]).unwrap();
+        bounded
+            .register(
+                key_of(&ctx),
+                &[],
+                Some(("arn:boundary/read-only", BOUNDARY_READ_ONLY)),
+            )
+            .unwrap();
+        let all = vec!["all".to_string()];
+        assert_eq!(
+            bounded.verdict_on(&ctx, &all, "perm:project.read", &ResourceRef::Any),
+            Verdict::Allow
+        );
+        assert_eq!(
+            bounded.verdict_on(&ctx, &all, "perm:project.write", &ResourceRef::Any),
+            Verdict::Deny
+        );
+    }
+
+    #[test]
+    fn request_facts_reach_the_conditions() {
+        use std::net::{IpAddr, Ipv4Addr};
+        let mut enf = WamiEnforcement::new(IdentityRegistry::new(), PolicyStore::new(), "this");
+        let auth = AuthContext::User {
+            user_id: Uuid::new_v4(),
+            tenant_id: Uuid::new_v4(),
+            roles: vec![],
+        };
+        let key = enf
+            .caller_context(&auth, &RequestMeta::default())
+            .unwrap()
+            .unwrap()
+            .caller_key()
+            .unwrap()
+            .clone();
+        let office_only = r#"{
+            "Version": "2012-10-17",
+            "Statement": [{
+                "Effect": "Allow", "Action": "this:project:read", "Resource": "*",
+                "Condition": {"IpAddress": {"aws:SourceIp": "10.0.0.0/8"}}
+            }]
+        }"#;
+        enf.store
+            .register(key, &[("office", office_only)], None)
+            .unwrap();
+        let from_office = RequestMeta {
+            source_ip: Some(IpAddr::V4(Ipv4Addr::new(10, 1, 2, 3))),
+            ..RequestMeta::default()
+        };
+        let from_outside = RequestMeta {
+            source_ip: Some(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 9))),
+            ..RequestMeta::default()
+        };
+        let p = "perm:project.read";
+        assert_eq!(
+            enf.verdict_for(&auth, &from_office, p, &ResourceRef::Any),
+            Some(Verdict::Allow)
+        );
+        assert_eq!(
+            enf.verdict_for(&auth, &from_outside, p, &ResourceRef::Any),
+            Some(Verdict::Deny)
+        );
+        // No IP known: the condition cannot hold, the statement does not apply.
+        assert_eq!(
+            enf.verdict_for(&auth, &RequestMeta::default(), p, &ResourceRef::Any),
+            Some(Verdict::Deny)
+        );
+    }
+
+    #[test]
+    fn definition_loads_principals_roles_and_boundaries_atomically() {
+        let tenant = Uuid::new_v4();
+        let alice = Uuid::new_v4();
+        let bob = Uuid::new_v4();
+        let definition = serde_json::json!({
+            "roles": {
+                "reader": {"read": serde_json::from_str::<serde_json::Value>(ALLOW_PROJECT_READ).unwrap()}
+            },
+            "principals": [
+                {"tenant": tenant, "user": alice,
+                 "policies": {"all": serde_json::from_str::<serde_json::Value>(ALLOW_ALL).unwrap()},
+                 "boundary": {"arn": "arn:boundary/read-only",
+                              "document": serde_json::from_str::<serde_json::Value>(BOUNDARY_READ_ONLY).unwrap()}},
+                {"tenant": tenant, "user": bob}
+            ]
+        });
+        let mut enf = WamiEnforcement::new(IdentityRegistry::new(), PolicyStore::new(), "this");
+        enf.load_definition_json(&definition.to_string()).unwrap();
+
+        let user = |id: Uuid, roles: &[&str]| AuthContext::User {
+            user_id: id,
+            tenant_id: tenant,
+            roles: roles.iter().map(|r| r.to_string()).collect(),
+        };
+        let meta = RequestMeta::default();
+        let any = ResourceRef::Any;
+        // Alice: everything, narrowed by her boundary.
+        assert_eq!(
+            enf.verdict_for(&user(alice, &[]), &meta, "perm:project.read", &any),
+            Some(Verdict::Allow)
+        );
+        assert_eq!(
+            enf.verdict_for(&user(alice, &[]), &meta, "perm:project.write", &any),
+            Some(Verdict::Deny)
+        );
+        // Bob: nothing of his own, the reader role when his token carries it.
+        assert_eq!(
+            enf.verdict_for(&user(bob, &[]), &meta, "perm:project.read", &any),
+            Some(Verdict::Deny)
+        );
+        assert_eq!(
+            enf.verdict_for(&user(bob, &["reader"]), &meta, "perm:project.read", &any),
+            Some(Verdict::Allow)
+        );
+
+        // A broken file changes nothing: the previous store stays in force.
+        let broken = serde_json::json!({
+            "principals": [{"tenant": tenant, "user": bob,
+                "policies": {"bad": {"Version": "2012-10-17", "Statement": [{"Effect": "Allow", "Action": "this:*", "Resource": "*", "Typo": 1}]}}}]
+        });
+        assert!(enf.load_definition_json(&broken.to_string()).is_err());
+        assert_eq!(
+            enf.verdict_for(&user(alice, &[]), &meta, "perm:project.read", &any),
+            Some(Verdict::Allow)
+        );
+        assert!(enf.load_definition_json("not json").is_err());
+
+        // The registry allocated the tenant once; the snapshot restores it.
+        let snapshot = enf.identity_snapshot().unwrap();
+        assert_eq!(snapshot.len(), 1);
+        assert_eq!(snapshot[0].0, tenant);
+        let restored = IdentityRegistry::new();
+        restored.load(snapshot.iter().copied()).unwrap();
+        assert_eq!(
+            restored.tenant_segment(tenant).unwrap(),
+            enf.registry.tenant_segment(tenant).unwrap()
+        );
+    }
+
     #[test]
     fn enforcement_answers_only_for_named_callers() {
         let mut enf = WamiEnforcement::new(IdentityRegistry::new(), PolicyStore::new(), "this");
@@ -460,14 +1047,17 @@ mod tests {
             tenant_id: Uuid::new_v4(),
             roles: vec![],
         };
-        let ctx = enf.caller_context(&auth).unwrap().unwrap();
+        let ctx = enf
+            .caller_context(&auth, &RequestMeta::default())
+            .unwrap()
+            .unwrap();
         enf.store
             .register(key_of(&ctx), &[("write", ALLOW_PROJECT_WRITE)], None)
             .unwrap();
 
         // The named caller is answered from its own grants.
         let verdict = enf
-            .caller_context(&auth)
+            .caller_context(&auth, &RequestMeta::default())
             .unwrap()
             .map(|c| enf.store.verdict(&c, "perm:project.write"));
         assert_eq!(verdict, Some(Verdict::Allow));
@@ -475,14 +1065,17 @@ mod tests {
         // A caller WAMI cannot name has no WAMI identity at all: no answer, so none
         // can be read as an allow.
         assert!(
-            enf.caller_context(&AuthContext::Anonymous)
+            enf.caller_context(&AuthContext::Anonymous, &RequestMeta::default())
                 .unwrap()
                 .is_none()
         );
         assert!(
-            enf.caller_context(&AuthContext::Admin {
-                admin_id: Uuid::new_v4()
-            })
+            enf.caller_context(
+                &AuthContext::Admin {
+                    admin_id: Uuid::new_v4()
+                },
+                &RequestMeta::default()
+            )
             .unwrap()
             .is_none()
         );

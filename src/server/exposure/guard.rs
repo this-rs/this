@@ -23,11 +23,13 @@ use std::sync::Arc;
 use axum::http::HeaderMap;
 use uuid::Uuid;
 
-#[cfg(feature = "obrain")]
+#[cfg(any(feature = "obrain", feature = "wami"))]
 use crate::core::auth::descriptor_policy::PermissionFn;
 use crate::core::auth::descriptor_policy::RegistryEnv;
 use crate::core::auth::surface::{PolicyIndex, authorize_link_op, authorize_op};
-use crate::core::auth::{AuthContext, AuthResolverRegistry};
+use crate::core::auth::{
+    AuthContext, AuthResolverRegistry, ForwardedHeaders, RequestMeta, ResourceRef,
+};
 use crate::core::events::{EntityEvent, FrameworkEvent, LinkEvent};
 use crate::core::{EntityCreator, EntityFetcher};
 use crate::descriptor::framework::codes;
@@ -118,6 +120,9 @@ struct Enforced {
 #[derive(Clone)]
 pub struct SurfaceGuard {
     ctx: AuthContext,
+    /// Request facts an IAM condition may read (IP, transport). Default when the
+    /// surface could not provide them: such conditions then fail closed.
+    meta: RequestMeta,
     enforced: Option<Arc<Enforced>>,
 }
 
@@ -134,17 +139,49 @@ impl SurfaceGuard {
     pub fn unenforced(ctx: AuthContext) -> Self {
         Self {
             ctx,
+            meta: RequestMeta::default(),
             enforced: None,
         }
     }
 
     /// Guard of `host` for `ctx`: enforced iff the host's policies are armed.
+    /// No request facts: prefer [`SurfaceGuard::for_request`] when headers exist.
     pub fn for_host(host: &ServerHost, ctx: AuthContext, surface: &'static str) -> Self {
+        Self::build(host, ctx, surface, RequestMeta::default())
+    }
+
+    /// Guard of `host` for `ctx`, carrying the request facts read from `headers`.
+    /// `X-Forwarded-*` is believed only when the host trusts its proxy
+    /// (`domains.trust_forwarded_host`). No listener exposes the peer address, so
+    /// without a trusted proxy the IP stays unknown.
+    pub fn for_request(
+        host: &ServerHost,
+        ctx: AuthContext,
+        surface: &'static str,
+        headers: &HeaderMap,
+    ) -> Self {
+        let forwarded = ForwardedHeaders::from_trusted(host.security.domains.trust_forwarded_host);
+        let meta = RequestMeta::from_request(headers, None, forwarded);
+        Self::build(host, ctx, surface, meta)
+    }
+
+    /// The request facts this guard carries.
+    pub fn request_meta(&self) -> &RequestMeta {
+        &self.meta
+    }
+
+    fn build(
+        host: &ServerHost,
+        ctx: AuthContext,
+        surface: &'static str,
+        meta: RequestMeta,
+    ) -> Self {
         if !host.authorize {
             return Self::unenforced(ctx);
         }
         Self {
             ctx,
+            meta,
             enforced: Some(Arc::new(Enforced {
                 catalog: host.catalog.clone(),
                 resolvers: host.resolver_registry.clone(),
@@ -191,18 +228,19 @@ impl SurfaceGuard {
     fn with_env<R>(
         &self,
         e: &Enforced,
-        resource: Option<&Uuid>,
+        target: ResourceRef<'_>,
         f: impl FnOnce(&RegistryEnv<'_>) -> R,
     ) -> R {
+        let resource = target.resource_id();
         #[cfg(feature = "wami")]
         if let Some(w) = &e.wami {
             // WAMI is the sole answer for `perm:` here. A caller WAMI cannot name
             // (anonymous, service, admin, or a context that fails to build) gets
-            // `None`, which is unevaluable: refused, never read as allow.
-            let caller = w.caller_context(&self.ctx).ok().flatten();
+            // `None`, which is unevaluable: refused, never read as allow. The
+            // target is bound in, so a statement can name one row or one link type.
             let verdict = |p: &str| -> Option<bool> {
-                let ctx = caller.as_ref()?;
-                w.store.verdict(ctx, p).as_permission()
+                w.verdict_for(&self.ctx, &self.meta, p, &target)?
+                    .as_permission()
             };
             let perm_ref: &PermissionFn<'_> = &verdict;
             let env = RegistryEnv::new(Some(&e.resolvers), &self.ctx)
@@ -245,7 +283,11 @@ impl SurfaceGuard {
         let Some(e) = &self.enforced else {
             return Ok(());
         };
-        let res = self.with_env(e, resource, |env| {
+        let target = ResourceRef::Entity {
+            entity,
+            id: resource,
+        };
+        let res = self.with_env(e, target, |env| {
             authorize_op(&e.index(), entity, &op, &self.ctx, None, resource, env)
         });
         self.outcome(e, res)
@@ -319,7 +361,19 @@ impl SurfaceGuard {
         let policies = e
             .index()
             .link_policies(link_type, source, target, scope, &op);
-        let res = self.with_env(e, None, |env| authorize_link_op(&policies, &self.ctx, env));
+        // A link the request fully names is matched as such; a partial one (no
+        // type, or no endpoints) is "no particular target".
+        let target = match (link_type, source, target) {
+            (Some(link_type), Some(source), Some(target)) => ResourceRef::Link {
+                link_type,
+                source,
+                target,
+            },
+            _ => ResourceRef::Any,
+        };
+        let res = self.with_env(e, target, |env| {
+            authorize_link_op(&policies, &self.ctx, env)
+        });
         self.outcome(e, res)
     }
 

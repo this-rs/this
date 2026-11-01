@@ -242,6 +242,9 @@ pub struct Authorization {
     wami: Option<Arc<crate::core::auth::wami_policy::WamiEnforcement>>,
     /// Mode d'application (défaut : `Enforced`).
     mode: AuthorizationMode,
+    /// `X-Forwarded-*` cru ou non, pour les faits de requête (IP, transport)
+    /// qu'une condition IAM peut lire.
+    forwarded: crate::core::auth::ForwardedHeaders,
     /// Mappage `contexte → (principal, portée)`, s'il est fourni par
     /// l'application. `None` = le mappage par défaut de this-rs.
     mapping: Option<Arc<PrincipalMapping>>,
@@ -286,6 +289,7 @@ impl Authorization {
             #[cfg(feature = "wami")]
             wami: None,
             mode: AuthorizationMode::Enforced,
+            forwarded: crate::core::auth::ForwardedHeaders::default(),
             mapping: None,
             graph_policy: None,
             public_paths: Arc::new(vec![
@@ -365,15 +369,17 @@ impl Authorization {
         &self,
         resolved: &[crate::core::auth::surface::ResolvedPolicy],
         context: &AuthContext,
-        resource: Option<&uuid::Uuid>,
+        target: &crate::core::auth::ResourceRef<'_>,
+        meta: &crate::core::auth::RequestMeta,
         used_iam: &mut bool,
     ) -> Result<(), String> {
         use crate::core::auth::descriptor_policy::{PermissionFn, RegistryEnv};
         use std::sync::atomic::{AtomicBool, Ordering};
+        let resource = target.resource_id();
         let consulted = AtomicBool::new(false);
         let perm = |p: &str| -> Option<bool> {
             let mut c = false;
-            let verdict = match self.check_iam(p, context, &mut c) {
+            let verdict = match self.check_iam(p, context, target, meta, &mut c) {
                 IamVerdict::Allowed => Some(true),
                 IamVerdict::Denied => Some(false),
                 IamVerdict::Unevaluable => None,
@@ -559,7 +565,14 @@ impl Authorization {
     /// `the_pre_pass_agrees_with_the_framework_parser` vérifie cette égalité
     /// pour tout le vocabulaire qui n'utilise pas `perm:` — le pré-passage ne
     /// doit **rien** changer aux politiques existantes.
-    fn evaluate(&self, policy: &str, context: &AuthContext, used_iam: &mut bool) -> Option<bool> {
+    fn evaluate(
+        &self,
+        policy: &str,
+        context: &AuthContext,
+        target: &crate::core::auth::ResourceRef<'_>,
+        meta: &crate::core::auth::RequestMeta,
+        used_iam: &mut bool,
+    ) -> Option<bool> {
         // Pas de `trim()` ici : `parse_policy` n'élague pas, et une divergence
         // dans le sens permissif (« public » entouré d'espaces ouvrait la route
         // aux anonymes) est exactement ce qu'il ne faut pas.
@@ -570,7 +583,7 @@ impl Authorization {
                 let parts: Vec<&str> = rest.split(',').map(str::trim).collect();
                 let mut unevaluable = false;
                 for part in parts {
-                    match self.evaluate(part, context, used_iam) {
+                    match self.evaluate(part, context, target, meta, used_iam) {
                         // Court-circuit : un « et » faux, un « ou » vrai.
                         Some(true) if !conjunction => return Some(true),
                         Some(false) if conjunction => return Some(false),
@@ -587,11 +600,11 @@ impl Authorization {
             // IAM autorisait tout le monde, anonyme compris : une liste de
             // refus devenait une liste d'admission.
             return self
-                .evaluate(inner, context, used_iam)
+                .evaluate(inner, context, target, meta, used_iam)
                 .map(|verdict| !verdict);
         }
         if let Some(permission) = policy.strip_prefix(PERM_PREFIX) {
-            return match self.check_iam(permission.trim(), context, used_iam) {
+            return match self.check_iam(permission.trim(), context, target, meta, used_iam) {
                 IamVerdict::Allowed => Some(true),
                 IamVerdict::Denied => Some(false),
                 IamVerdict::Unevaluable => None,
@@ -613,6 +626,15 @@ impl Authorization {
         ))
     }
 
+    /// Croire ou non `X-Forwarded-*` pour les faits de requête (IP, transport).
+    pub fn with_forwarded_headers(
+        mut self,
+        forwarded: crate::core::auth::ForwardedHeaders,
+    ) -> Self {
+        self.forwarded = forwarded;
+        self
+    }
+
     /// Arme l'IAM WAMI : `perm:` est alors répondu par wami seul (ADR D2).
     #[cfg(feature = "wami")]
     pub fn with_wami(mut self, wami: Arc<crate::core::auth::wami_policy::WamiEnforcement>) -> Self {
@@ -627,15 +649,17 @@ impl Authorization {
         wami: &crate::core::auth::wami_policy::WamiEnforcement,
         permission: &str,
         context: &AuthContext,
+        target: &crate::core::auth::ResourceRef<'_>,
+        meta: &crate::core::auth::RequestMeta,
         consulted: &mut bool,
     ) -> IamVerdict {
         use crate::core::auth::wami_policy::Verdict;
-        let Ok(Some(caller)) = wami.caller_context(context) else {
+        let Some(verdict) = wami.verdict_for(context, meta, permission, target) else {
             return IamVerdict::Unevaluable;
         };
         // Ici wami est réellement consulté : la provenance peut l'affirmer.
         *consulted = true;
-        match wami.store.verdict(&caller, permission) {
+        match verdict {
             Verdict::Allow => IamVerdict::Allowed,
             Verdict::Deny => IamVerdict::Denied,
             Verdict::Unevaluable => IamVerdict::Unevaluable,
@@ -648,15 +672,18 @@ impl Authorization {
     /// aucune traversée. Fail-closed : sans plan IAM, sans principal, ou sans
     /// décision, c'est **non**.
     #[cfg(feature = "obrain")]
+    #[cfg_attr(not(feature = "wami"), allow(unused_variables))]
     fn check_iam(
         &self,
         permission: &str,
         context: &AuthContext,
+        target: &crate::core::auth::ResourceRef<'_>,
+        meta: &crate::core::auth::RequestMeta,
         consulted: &mut bool,
     ) -> IamVerdict {
         #[cfg(feature = "wami")]
         if let Some(wami) = &self.wami {
-            return Self::wami_verdict(wami, permission, context, consulted);
+            return Self::wami_verdict(wami, permission, context, target, meta, consulted);
         }
         let Some(iam) = &self.iam else {
             tracing::warn!(
@@ -710,11 +737,13 @@ impl Authorization {
         &self,
         permission: &str,
         context: &AuthContext,
+        target: &crate::core::auth::ResourceRef<'_>,
+        meta: &crate::core::auth::RequestMeta,
         consulted: &mut bool,
     ) -> IamVerdict {
         #[cfg(feature = "wami")]
         if let Some(wami) = &self.wami {
-            return Self::wami_verdict(wami, permission, context, consulted);
+            return Self::wami_verdict(wami, permission, context, target, meta, consulted);
         }
         tracing::warn!("politique `perm:` sans support IAM (feature `obrain`) — non tranchable");
         IamVerdict::Unevaluable
@@ -1020,8 +1049,25 @@ impl Authorization {
         }
     }
 
-    /// **La décision.** Fail-closed : illisible ⇒ refus.
+    /// **La décision.** Fail-closed : illisible ⇒ refus. Sans faits de requête :
+    /// une condition IAM sur l'IP ou le transport ne peut pas être satisfaite.
     pub fn decide(&self, method: &Method, path: &str, context: &AuthContext) -> Decision {
+        self.decide_with(
+            method,
+            path,
+            context,
+            &crate::core::auth::RequestMeta::default(),
+        )
+    }
+
+    /// [`Authorization::decide`] avec les faits de la requête (IP, transport).
+    pub fn decide_with(
+        &self,
+        method: &Method,
+        path: &str,
+        context: &AuthContext,
+        meta: &crate::core::auth::RequestMeta,
+    ) -> Decision {
         let (entity_type, operation, policy, origin) = match self.requirement(method, path) {
             Requirement::Policy {
                 entity_type,
@@ -1041,6 +1087,11 @@ impl Authorization {
             .and_then(|s| uuid::Uuid::parse_str(s).ok());
         let downgraded = Self::owner_scoped(context, resource.as_ref());
         let context = &downgraded;
+        // Ce que la requête vise : le type, et la ligne quand le chemin la nomme.
+        let target = crate::core::auth::ResourceRef::Entity {
+            entity: &entity_type,
+            id: resource.as_ref(),
+        };
 
         // Politique du descripteur : l'évaluateur unique (`engine::policy`), pas
         // la grammaire plate. Re-résolue ici sur le même instantané logique ; si
@@ -1050,7 +1101,7 @@ impl Authorization {
             let mut used_iam = false;
             let verdict = match self.descriptor_policies(&segments, &entity_type, &operation) {
                 Some(resolved) => {
-                    self.evaluate_descriptor(&resolved, context, resource.as_ref(), &mut used_iam)
+                    self.evaluate_descriptor(&resolved, context, &target, meta, &mut used_iam)
                 }
                 None => Err("catalogue republié pendant la décision — refus".to_string()),
             };
@@ -1074,7 +1125,7 @@ impl Authorization {
         // `parse_policy` retombe sur `Resolver("<texte>")`, que
         // `check_with_resolver` refuse déjà quand le résolveur est inconnu.
         let mut used_iam = false;
-        let verdict = self.evaluate(&policy, context, &mut used_iam);
+        let verdict = self.evaluate(&policy, context, &target, meta, &mut used_iam);
         // Une politique tranchée par l'IAM matérialisé le DIT : la provenance
         // d'une décision ne se devine pas.
         let origin = if used_iam { PolicyOrigin::Iam } else { origin };
@@ -1156,7 +1207,11 @@ pub async fn authorization_middleware(
 
     let method = request.method().clone();
     let path = request.uri().path().to_string();
-    let decision = authz.decide(&method, &path, &context);
+    // Les faits de la requête (IP, transport) : lus des en-têtes `X-Forwarded-*`
+    // seulement si le proxy est cru ; aucun écouteur n'expose l'adresse du pair.
+    let meta =
+        crate::core::auth::RequestMeta::from_request(request.headers(), None, authz.forwarded);
+    let decision = authz.decide_with(&method, &path, &context, &meta);
 
     match decision {
         Decision::Allow { .. } => next.run(request).await,
@@ -2116,7 +2171,13 @@ mod tests {
                 let _ = expected;
                 for context in &contexts {
                     let mut used_iam = false;
-                    let mine = authz.evaluate(policy, context, &mut used_iam);
+                    let mine = authz.evaluate(
+                        policy,
+                        context,
+                        &crate::core::auth::ResourceRef::Any,
+                        &crate::core::auth::RequestMeta::default(),
+                        &mut used_iam,
+                    );
                     let theirs = AuthPolicy::parse_policy(policy).check_with_resolver(
                         context,
                         Some(&resolvers),
@@ -2158,7 +2219,7 @@ mod tests {
             roles: vec![],
         };
         let key = wami
-            .caller_context(&auth)
+            .caller_context(&auth, &RequestMeta::default())
             .unwrap()
             .unwrap()
             .caller_key()
@@ -2168,15 +2229,30 @@ mod tests {
             .register(key, &[("read", ALLOW_READ)], None)
             .unwrap();
 
+        use crate::core::auth::{RequestMeta, ResourceRef};
+        let meta = RequestMeta::default();
+        let any = ResourceRef::Any;
         let mut consulted = false;
-        let allowed =
-            Authorization::wami_verdict(&wami, "perm:project.read", &auth, &mut consulted);
+        let allowed = Authorization::wami_verdict(
+            &wami,
+            "perm:project.read",
+            &auth,
+            &any,
+            &meta,
+            &mut consulted,
+        );
         assert!(matches!(allowed, IamVerdict::Allowed));
         assert!(consulted, "wami answered: the provenance may say so");
 
         let mut consulted = false;
-        let denied =
-            Authorization::wami_verdict(&wami, "perm:project.write", &auth, &mut consulted);
+        let denied = Authorization::wami_verdict(
+            &wami,
+            "perm:project.write",
+            &auth,
+            &any,
+            &meta,
+            &mut consulted,
+        );
         assert!(matches!(denied, IamVerdict::Denied));
 
         // Anonymous has no WAMI identity: unevaluable, and wami was not consulted.
@@ -2185,6 +2261,8 @@ mod tests {
             &wami,
             "perm:project.read",
             &AuthContext::Anonymous,
+            &any,
+            &meta,
             &mut consulted,
         );
         assert!(matches!(anon, IamVerdict::Unevaluable));
@@ -2786,7 +2864,13 @@ mod policy_perimeter {
         for (policy, expected) in cases {
             for (i, (name, ctx)) in all_contexts().iter().enumerate() {
                 let mut used_iam = false;
-                let got = authz.evaluate(policy, ctx, &mut used_iam);
+                let got = authz.evaluate(
+                    policy,
+                    ctx,
+                    &crate::core::auth::ResourceRef::Any,
+                    &crate::core::auth::RequestMeta::default(),
+                    &mut used_iam,
+                );
                 assert_eq!(
                     got,
                     Some(expected[i]),
@@ -2872,7 +2956,13 @@ mod policy_perimeter {
         for policy in ["", "foobar:x", "PUBLIC", "Public", "admin", "role"] {
             for (name, ctx) in all_contexts() {
                 let mut used_iam = false;
-                let allowed = authz.evaluate(policy, &ctx, &mut used_iam);
+                let allowed = authz.evaluate(
+                    policy,
+                    &ctx,
+                    &crate::core::auth::ResourceRef::Any,
+                    &crate::core::auth::RequestMeta::default(),
+                    &mut used_iam,
+                );
                 assert_eq!(
                     allowed,
                     Some(false),
@@ -2896,7 +2986,13 @@ mod policy_perimeter {
         for (name, ctx) in all_contexts() {
             let mut used_iam = false;
             assert_eq!(
-                authz.evaluate(" public ", &ctx, &mut used_iam),
+                authz.evaluate(
+                    " public ",
+                    &ctx,
+                    &crate::core::auth::ResourceRef::Any,
+                    &crate::core::auth::RequestMeta::default(),
+                    &mut used_iam
+                ),
                 Some(false),
                 "un mot-clé entouré d'espaces n'est pas du vocabulaire : refus pour {name}"
             );
@@ -2943,7 +3039,13 @@ mod policy_perimeter {
         ] {
             let mut used_iam = false;
             assert_eq!(
-                authz.evaluate(policy, &ctx, &mut used_iam),
+                authz.evaluate(
+                    policy,
+                    &ctx,
+                    &crate::core::auth::ResourceRef::Any,
+                    &crate::core::auth::RequestMeta::default(),
+                    &mut used_iam
+                ),
                 Some(false),
                 "`{policy}` n'est pas une liste de rôles (le framework la lit comme un rôle littéral) : {name} doit être refusé"
             );
@@ -3030,7 +3132,13 @@ mod policy_perimeter {
         for policy in policies {
             for (name, ctx) in &contexts {
                 let mut used_iam = false;
-                let mine = authz.evaluate(policy, ctx, &mut used_iam);
+                let mine = authz.evaluate(
+                    policy,
+                    ctx,
+                    &crate::core::auth::ResourceRef::Any,
+                    &crate::core::auth::RequestMeta::default(),
+                    &mut used_iam,
+                );
                 let theirs = AuthPolicy::parse_policy(policy).check_with_resolver(
                     ctx,
                     Some(&resolvers),
@@ -3080,7 +3188,13 @@ mod policy_perimeter {
                     let mut used = false;
                     // `None` (non tranchable) se lit comme un refus : c'est la
                     // seule lecture sûre.
-                    authz.evaluate(policy, ctx, &mut used) == Some(true)
+                    authz.evaluate(
+                        policy,
+                        ctx,
+                        &crate::core::auth::ResourceRef::Any,
+                        &crate::core::auth::RequestMeta::default(),
+                        &mut used,
+                    ) == Some(true)
                 })
                 .collect()
         };

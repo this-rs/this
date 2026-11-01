@@ -233,7 +233,11 @@ impl RestExposure {
             )
             // Descriptor policies decide before the YAML table, as on every
             // other surface (`core::auth::surface::PolicyIndex`).
-            .with_catalog(host.catalog.clone());
+            .with_catalog(host.catalog.clone())
+            // `X-Forwarded-*` n'est cru que si le proxy l'est déjà pour l'hôte.
+            .with_forwarded_headers(crate::core::auth::ForwardedHeaders::from_trusted(
+                host.security.domains.trust_forwarded_host,
+            ));
             // IAM WAMI armé : il répond seul à `perm:` sur le REST aussi (ADR D2).
             #[cfg(feature = "wami")]
             if let Some(wami) = &host.wami_enforcement {

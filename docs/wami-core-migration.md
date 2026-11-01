@@ -79,6 +79,35 @@ contrat des consommateurs `this`. Conséquence : les jetons de `this` ne sont **
 avec la struct `StsClaims` de wami (sub ARN, `scoped_*`) ; ils se vérifient avec `KeyManager`
 + une struct de claims propre. Voir §9, question ouverte Q1.
 
+### D5 — Ressources : la cible voyage dans le seam
+`PermissionFn` ne transporte qu'une chaîne, mais la fermeture est construite là où la cible est
+connue. Elle y est liée sous forme de `ResourceRef` (`core::auth`, hors feature) et devient
+l'ARN que les statements matchent :
+- entité `orders`, une ligne → `arn:wami:iam:<tenant>:wami:<instance>:orders/<uuid>` ;
+  tout le type (liste, création) → `…:orders/*` ;
+- lien `owns` de `users` vers `orders` → `…:link/owns/users/orders` (`**` couvre le lien entier) ;
+- cible inconnue → `…:resource/*` : seul un `Resource: "*"` matche.
+Un nom d'entité ou de lien non sûr pour un ARN (`*`, `/`, `:`) rend la décision **non tranchable**
+plutôt que de matcher un motif qu'il n'a pas écrit. Les permissions gardent leurs deux
+orthographes (`perm:orders:write` historique, `perm:orders.write`) → action `this:orders:write`.
+
+### D6 — Rôles = groupes
+`this` porte les rôles dans le jeton ; wami attache des politiques aux groupes de son store. Un
+rôle est ici un jeu de documents nommé (`PolicyStore::register_role`), lu à côté des documents
+propres du principal : un Deny dans un rôle l'emporte, exactement comme une politique de groupe.
+La frontière du principal continue de borner ce qu'un rôle accorde.
+
+### D7 — Propriété : reste sur `PolicyExpr`
+Sans store, wami ne sait pas qui possède une ligne. `owner` reste évalué par `engine::policy`
+(contexte `Owner`), wami ne répond qu'à `perm:`. Alternative écartée : encoder le propriétaire
+dans l'ARN (`orders/<uuid>/owner/<user>`) — demanderait une lecture de ligne avant chaque décision.
+
+### D8 — Faits de requête et proxy
+`RequestMeta` (IP, transport) est lu des en-têtes `X-Forwarded-*` **seulement si** le proxy est
+déjà cru pour `X-Forwarded-Host` (`domains.trust_forwarded_host`) : une seule notion de confiance.
+Aucun écouteur n'expose l'adresse du pair (`ConnectInfo`) : sans proxy cru, l'IP reste inconnue et
+une condition IP échoue fermée. MFA : inconnu tant que le jeton ne porte pas `amr`.
+
 ## 5. Carte de migration
 
 | Élément `this` | Équivalent wami | Action |
@@ -127,17 +156,18 @@ avec la struct `StsClaims` de wami (sub ARN, `scoped_*`) ; ils se vérifient ave
 | T4 STS → `KeyManager` | `1e20d9e` | fait | kid + aud émis ; porte et refresh corrigés (sans cela, tous les jetons étaient refusés) ; test croisé avec le vérifieur `wami_provider` |
 | T5 authz `perm:` → wami | `d1b3275` | fait (non-REST) | `wami_policy::decide` ; `WamiEnforcement` porté par l'hôte ; branché dans le guard (gRPC/GraphQL/WS) |
 | T5b authz REST → wami | `1849b62` | fait | `Authorization::with_wami` ; `check_iam` répond seul à `perm:` quand armé |
+| T5c ressources, rôles, faits de requête | (ce commit) | fait | `ResourceRef` lié dans la fermeture sur toutes les surfaces ; rôles = groupes ; `RequestMeta` depuis REST/gRPC/GraphQL/WS |
+| T5d persistance | (ce commit) | fait (crochets) | `IdentityRegistry::snapshot/load` ; `WamiEnforcement::load_definition(_json)` atomique ; l'hôte choisit le support |
 | T6 docs + revue | ce commit | en cours | voir §9 |
 | T7 OAuth/OIDC + `wami-scope` | — | déféré | — |
 
 ### Limites connues (à lever avant la mise en production)
-- **Registre d'identité en mémoire** : les segments ne survivent pas à un redémarrage. `load()`
-  existe pour restaurer une table persistée, mais aucune persistance n'est branchée.
-- **Permissions tenant-wide** : le seam `perm:` ne transporte pas la ressource. Une statement
-  dont `Resource` nomme une entité précise ne peut pas matcher.
-- **Pas de `RequestMeta` sur le guard** : les conditions IP/TLS échouent fermées sur les surfaces
-  non-REST.
-- **Policies en mémoire** : `PolicyStore` n'est pas persisté.
+- **Persistance = crochets, pas de support** : `identity_snapshot()` et `load_definition_json()`
+  existent ; c'est à l'hôte de les brancher sur un fichier ou un store **et d'appeler `load` avant
+  la première requête**. Sans ce branchement, un redémarrage réalloue les segments.
+- **Adresse du pair inconnue** sans proxy cru (pas de `ConnectInfo` sur les écouteurs) : les
+  conditions IP ne sont utilisables que derrière Caddy avec `trust_forwarded_host`.
+- **Lien partiellement nommé** (type ou extrémités absents) : évalué comme cible inconnue.
 - **Rotation de clé** : le vérifieur n'a qu'une clé publique ; une rotation réelle demande plusieurs
   clés publiques côté vérifieur.
 - **Fenêtre legacy (D4)** : tant qu'elle est ouverte, les jetons émis avant ce lot (sans `aud` ni
@@ -158,5 +188,11 @@ avec la struct `StsClaims` de wami (sub ARN, `scoped_*`) ; ils se vérifient ave
 - Vérification stricte : `wami.audience` configurée **et** `with_legacy_tokens(false)` côté
   `WamiAuthProvider` et `StsService`. Un jeton de refresh ne s'utilise jamais comme bearer.
 - Un jeton qui ne nomme ni utilisateur ni tenant est refusé (plus de repli sur l'UUID nul).
-- `builder.with_wami_enforcement(WamiEnforcement::new(registry, store, instance))` arme wami pour
-  les surfaces non-REST. Sans cet appel, le comportement est inchangé.
+- `builder.with_wami_enforcement(enf)` arme wami sur **toutes** les surfaces (REST compris). Sans
+  cet appel, le comportement est inchangé.
+- Définition des politiques : `enf.load_definition_json(json)` avec `{ "roles": {rôle: {nom: doc}},
+  "principals": [{tenant, user, policies: {nom: doc}, boundary?: {arn, document}}] }`. Les documents
+  sont des documents wami (`Version`, `Statement`) ; actions `this:<entité>:<op>`, ressources
+  `arn:wami:iam:${tenant}:wami:<instance>:<entité>/<uuid|*>` ou `…:link/<type>/<source>/<cible>`.
+- Au démarrage : `registry.load(snapshot persisté)` **puis** `load_definition` ; à l'arrêt ou après
+  tout nouveau tenant : persister `identity_snapshot()`.

@@ -177,7 +177,7 @@ pub(crate) async fn request_guard(
             }
         },
     };
-    Ok(SurfaceGuard::for_host(host, ctx, "GraphQL"))
+    Ok(SurfaceGuard::for_request(host, ctx, "GraphQL", headers))
 }
 
 #[cfg(feature = "graphql")]
