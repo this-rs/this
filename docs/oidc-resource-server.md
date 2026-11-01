@@ -22,12 +22,24 @@ maintenir, dont un sans les tests de conformité de l'autre.
 ## 2. Ce que la vérification fait
 
 1. **Découverte paresseuse** — `auth.oidc.discovery_url` → `{issuer, jwks_uri}` → jeu de clés.
-   Le jeu est mis en cache 15 minutes (`OidcAuthProvider::with_ttl` pour changer).
+   Le jeu est mis en cache **5 minutes** (`with_ttl` pour changer) : une clé révoquée par le
+   provider cesse vite de vérifier ici.
 2. **Sélection par `kid`** — un `kid` inconnu déclenche **un** refetch, sérialisé par un mutex : une
    rafale de requêtes coûte un aller-retour, pas un par requête. C'est ce qu'une rotation de clés
    produit vu d'ici. Un JWKS à clé unique sans `kid` répond aussi.
+
+   **Borné** : au plus un refetch toutes les 5 secondes (`with_refetch_interval`). Sans cette
+   borne, n'importe quel appelant pouvait envoyer un jeton au `kid` aléatoire et faire marteler le
+   provider — le refetch a lieu **avant** la vérification de signature, donc il est joignable sans
+   authentification. Le client HTTP a un timeout (10 s, connexion 3 s) pour qu'un provider figé ne
+   tienne pas le verrou de rafraîchissement ouvert.
 3. **Claims** — `iss` doit être l'issuer découvert, `aud` doit nommer ce resource server, `exp` est
-   requis (60 s de tolérance d'horloge, la valeur par défaut de `jsonwebtoken`).
+   requis (60 s de tolérance d'horloge, la valeur par défaut de `jsonwebtoken`), et `nbf` est
+   validé quand il est présent.
+
+   Limite assumée : `typ` n'est pas contrôlé, donc un jeton d'identité dont l'`aud` serait l'API
+   est accepté comme jeton d'accès. Refuser `typ: JWT` casserait des émetteurs réels qui ne
+   publient pas encore `at+jwt`.
 
 ### Pourquoi la découverte est paresseuse
 
@@ -60,10 +72,14 @@ jeton, là où elle a du sens.
 Un jeton OIDC porte `scope` — une seule chaîne, séparée par des espaces (RFC 6749 §3.3). Elle est
 lue dans `AuthContext::User::scopes`.
 
-**Règle** : un scope accorde `perm:` **là où aucun plan IAM ne tranche**. Un plan IAM branché garde
-le dernier mot, donc un scope ne peut jamais transformer un refus existant en autorisation :
-`admin_only` refuse encore un jeton qui porte `*`. C'est un **repli**, pas une couche d'autorisation
-parallèle.
+**Règle** : un scope accorde `perm:` **seulement quand aucun plan IAM n'est branché**. Un plan
+branché garde le dernier mot — y compris quand il répond *non tranchable*, qui est un refus
+délibéré (permission non mappable, cible non sûre pour un ARN, condition portant sur un fait que la
+requête n'a pas, document illisible, mappage de principal qui décline). Confondre « non tranchable »
+et « pas d'IAM » aurait laissé un scope `*` ouvrir chacun de ces refus.
+
+C'est un **repli**, pas une couche d'autorisation parallèle. Il s'applique sur toutes les surfaces :
+REST (`Authorization::check_iam`) et non-REST (`SurfaceGuard::with_env`), avec la même règle.
 
 Correspondance : `perm:orders:read` est accordé par `orders:read`, `orders.read`, `orders:*`,
 `orders.*` et `*`. Une famille s'arrête au point (`order*` n'accorde rien), et un scope ne nomme que

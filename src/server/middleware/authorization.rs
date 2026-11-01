@@ -191,7 +191,7 @@ pub fn is_known_policy(policy: &str) -> bool {
 ///
 /// The `perm:` prefix is optional: `Authorization::evaluate` strips it before calling back here,
 /// a descriptor's `PolicyExpr::Perm` hands it over, and both must read the same.
-fn scope_grants(context: &AuthContext, permission: &str) -> bool {
+pub(crate) fn scope_grants(context: &AuthContext, permission: &str) -> bool {
     let AuthContext::User { scopes, .. } = context else {
         return false;
     };
@@ -694,11 +694,14 @@ impl Authorization {
         }
     }
 
-    /// `perm:` answered by the configured IAM, then by the token's own `scope`.
+    /// `perm:` answered by the configured IAM, then — **only when no IAM is wired at all** — by
+    /// the token's own `scope`.
     ///
-    /// The scope is a **fallback**, never an override: it is consulted only where the IAM answers
-    /// nothing at all (no policy engine wired, or no principal to look up). A wired IAM keeps the
-    /// last word, so a scope added to a token cannot turn an existing refusal into a grant.
+    /// `Unevaluable` is not the same as "no IAM": a wired engine returns it on purpose when it
+    /// cannot decide (permission that maps to no action, target that is not ARN-safe, condition on
+    /// a fact the request does not carry, unreadable document, principal mapping that declines).
+    /// Every one of those is a refusal, and a scope must not turn it into a grant. So the scope is
+    /// consulted only when nothing was wired to answer in the first place.
     fn check_iam(
         &self,
         permission: &str,
@@ -708,7 +711,10 @@ impl Authorization {
         consulted: &mut bool,
     ) -> IamVerdict {
         let verdict = self.iam_verdict(permission, context, target, meta, consulted);
-        if matches!(verdict, IamVerdict::Unevaluable) && scope_grants(context, permission) {
+        if matches!(verdict, IamVerdict::Unevaluable)
+            && !self.iam_wired()
+            && scope_grants(context, permission)
+        {
             tracing::debug!(
                 permission,
                 "`perm:` accordée par le scope du jeton (aucun plan IAM n'a tranché)"
@@ -716,6 +722,22 @@ impl Authorization {
             return IamVerdict::Allowed;
         }
         verdict
+    }
+
+    /// Is any policy engine wired on this host?
+    ///
+    /// The scope fallback keys on this, not on the verdict: "cannot decide" from a wired engine is
+    /// a refusal, "nothing to decide with" is the OIDC case.
+    fn iam_wired(&self) -> bool {
+        #[cfg(feature = "wami")]
+        if self.wami.is_some() {
+            return true;
+        }
+        #[cfg(feature = "obrain")]
+        if self.iam.is_some() {
+            return true;
+        }
+        false
     }
 
     /// La décision **matérialisée** autorise-t-elle cette permission ?
@@ -2808,20 +2830,41 @@ mod policy_perimeter {
         );
     }
 
-    /// Un `scope` ne remplace pas un plan IAM : quand une politique tranche (ici un refus), elle
-    /// garde le dernier mot.
+    /// Un `scope` ne remplace pas un plan IAM branché — **même quand ce plan ne sait pas
+    /// trancher**. C'est le cas qui compte : `Unevaluable` n'est pas « pas d'IAM », c'est un refus
+    /// délibéré (permission non mappable, cible non sûre, condition sans fait, document illisible).
+    #[cfg(feature = "wami")]
     #[test]
-    fn a_scope_never_overrides_a_policy() {
-        let authz = authz_policy("admin_only");
-        let scoped = AuthContext::User {
+    fn a_scope_never_overrides_a_wired_iam() {
+        use crate::core::auth::wami_bridge::IdentityRegistry;
+        use crate::core::auth::wami_policy::{PolicyStore, WamiEnforcement};
+        use std::sync::Arc;
+
+        let wami = WamiEnforcement::new(IdentityRegistry::new(), PolicyStore::new(), "this");
+        // `perm:not a permission` ne se mappe sur aucune action wami : le moteur répond
+        // « non tranchable », pas « pas d'IAM ».
+        let policy = "perm:not a permission";
+        let scoped = |scopes: &[&str]| AuthContext::User {
             user_id: uid(USER),
             tenant_id: uid(TENANT),
             roles: vec![],
-            scopes: vec!["*".to_string()],
+            scopes: scopes.iter().map(|s| s.to_string()).collect(),
         };
+
+        // Sans IAM branché, le scope est la seule chose qui puisse répondre : il accorde.
         assert!(
-            !authz.decide(&Method::GET, "/orders", &scoped).is_allow(),
-            "`*` in a token must not open an admin-only route"
+            authz_policy(policy)
+                .decide(&Method::GET, "/orders", &scoped(&["*"]))
+                .is_allow(),
+            "with nothing wired, the scope answers"
+        );
+        // Avec un IAM branché, sa réponse — y compris « non tranchable » — garde le dernier mot.
+        assert!(
+            !authz_policy(policy)
+                .with_wami(Arc::new(wami))
+                .decide(&Method::GET, "/orders", &scoped(&["*"]))
+                .is_allow(),
+            "a wired IAM that cannot decide is a refusal, not an invitation for the scope"
         );
     }
 
