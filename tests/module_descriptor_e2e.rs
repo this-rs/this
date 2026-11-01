@@ -118,7 +118,10 @@ impl AuthProvider for Tokens {
             match h.get("authorization").and_then(|v| v.to_str().ok()) {
                 Some("Bearer admin") => (vec!["admin".to_string()], Vec::new()),
                 Some("Bearer user") => (Vec::new(), Vec::new()),
-                Some("Bearer scoped") => (Vec::new(), vec!["invoice.pay".to_string()]),
+                Some("Bearer scoped") => (
+                    Vec::new(),
+                    vec!["invoice.pay".to_string(), "invoice.read".to_string()],
+                ),
                 _ => anyhow::bail!("no or bad token"),
             };
         Ok(AuthContext::User {
@@ -167,10 +170,13 @@ struct Surfaces {
 }
 
 fn surfaces() -> Surfaces {
-    surfaces_with(PolicyExpr::HasRole(vec!["admin".into()]))
+    surfaces_with(
+        PolicyExpr::HasRole(vec!["admin".into()]),
+        PolicyExpr::Authenticated,
+    )
 }
 
-fn surfaces_with(create: PolicyExpr) -> Surfaces {
+fn surfaces_with(create: PolicyExpr, list: PolicyExpr) -> Surfaces {
     let store = Arc::new(Store::default());
     let config = LinksConfig {
         entities: vec![EntityConfig {
@@ -196,6 +202,10 @@ fn surfaces_with(create: PolicyExpr) -> Surfaces {
         .permissions
         .ops
         .insert(Operation::Create, create);
+    module.entities[0]
+        .permissions
+        .ops
+        .insert(Operation::List, list);
     set.insert(module).unwrap();
 
     let host = ServerHost::from_builder_components(
@@ -290,6 +300,28 @@ async fn graphql_create(s: &Surfaces, token: &str, lang: &str, body: &str) -> Va
         .unwrap();
     let out: Value = serde_json::from_slice(&bytes).unwrap();
     out["errors"][0].clone()
+}
+
+/// Raw GraphQL response (data **and** errors): [`graphql_create`] only returns the first error, so
+/// it cannot tell a granted read from a refused one.
+async fn graphql_query(s: &Surfaces, token: &str, lang: &str, query: &str) -> Value {
+    let res = s
+        .graphql
+        .clone()
+        .oneshot(
+            Request::post("/graphql")
+                .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {token}"))
+                .header("accept-language", lang)
+                .body(Body::from(json!({ "query": query }).to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let bytes = axum::body::to_bytes(res.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    serde_json::from_slice(&bytes).unwrap()
 }
 
 fn grpc_struct(v: Value) -> prost_types::Struct {
@@ -534,7 +566,10 @@ async fn policy_denied_on_all_protocols() {
 /// This one runs the same create through all three.
 #[tokio::test]
 async fn a_scope_grants_perm_on_rest_graphql_and_grpc() {
-    let s = surfaces_with(PolicyExpr::Perm("invoice.pay".into()));
+    let s = surfaces_with(
+        PolicyExpr::Perm("invoice.pay".into()),
+        PolicyExpr::Perm("invoice.read".into()),
+    );
 
     // The token carries `invoice.pay`: the policy `perm:invoice.pay` is answered by the scope.
     let rest = rest_create(&s, "scoped", "en", VALID).await;
@@ -561,6 +596,22 @@ async fn a_scope_grants_perm_on_rest_graphql_and_grpc() {
     );
     let status = grpc_create(&s, "user", "en", VALID).await;
     assert_eq!(status.code(), tonic::Code::PermissionDenied);
+
+    // The read direction, on the surface an OIDC resource server serves most: `list =
+    // perm:invoice.read` must be answered by the scope, and refused without it.
+    let ok = graphql_query(&s, "scoped", "en", "{ invoices { id } }").await;
+    assert!(
+        ok["errors"].is_null(),
+        "GraphQL refused a list the scope grants: {ok}"
+    );
+    // The fixture store lists nothing (`list_as_json` is a write recorder): what is proven here is
+    // admission — no `this.auth.forbidden` — not the rows.
+    assert!(ok["data"]["invoices"].is_array(), "{ok}");
+    let refused = graphql_query(&s, "user", "en", "{ invoices { id } }").await;
+    assert_eq!(
+        refused["errors"][0]["extensions"]["this_code"], "this.auth.forbidden",
+        "{refused}"
+    );
 }
 
 // ── hot loading from a VFS ──────────────────────────────────────────────────
