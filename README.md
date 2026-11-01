@@ -574,7 +574,28 @@ auth:
 - **Tenant identity** — `Uuid` tenants get an allocated `u64` segment, journalled through
   `identity_path` (write-through, tmp + rename). Nothing is derived by hashing: a collision would be a
   tenant crossing. `identity_path` is required with `policies_path` outside `bootstrap`.
-- Design, decisions and known limits: [docs/wami-core-migration.md](docs/wami-core-migration.md).
+- **An external IdP is a first-class provider.** `provider: oidc` verifies tokens minted by an
+  OpenID Provider — `this` is a resource server, not an authorization server (ADR D11):
+
+  ```yaml
+  auth:
+    provider: oidc
+    oidc:
+      discovery_url: https://idp.example.com/.well-known/openid-configuration
+      audience: https://api.example.com   # required
+  ```
+
+  The issuer and key set come from the discovery document, keys are selected by `kid`, and an
+  unknown `kid` costs exactly one refetch — what a rotation looks like from here. Symmetric
+  algorithms and `none` are refused, `aud` and `iss` must match, and a subject that is not a UUID
+  is mapped to a UUIDv5 derived from the subject, so it stays stable across restarts.
+- **`scope` grants where nothing else decides.** An OIDC access token carries `scope`
+  (RFC 6749 §3.3). It is read into `AuthContext::User::scopes`, and `Authorization` consults it only
+  where the IAM answers nothing — no policy engine wired, or no principal to look up. A wired IAM
+  keeps the last word, so `admin_only` still refuses a token carrying `*`. `perm:orders:read` is
+  granted by `orders:read`, `orders.read`, `orders:*`, `orders.*` or `*`.
+- Design, decisions and known limits: [docs/wami-core-migration.md](docs/wami-core-migration.md) ·
+  [docs/oidc-resource-server.md](docs/oidc-resource-server.md).
 
 ### Hot loading from a VFS
 
