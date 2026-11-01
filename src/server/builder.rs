@@ -15,6 +15,9 @@ use crate::events::sinks::device_tokens::DeviceTokenStore;
 use crate::events::sinks::in_app::NotificationStore;
 use crate::events::sinks::preferences::NotificationPreferencesStore;
 use anyhow::Result;
+// Only the `wami` wiring adds context to a provider/STS failure.
+#[cfg(feature = "wami")]
+use anyhow::Context;
 use axum::Router;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -1250,6 +1253,19 @@ impl ServerBuilder {
         let auth_config_owned = host.config.auth.clone();
         if let Some(ref auth_config) = auth_config_owned {
             use crate::config::auth::AuthProviderType;
+
+            // A provider that is configured but cannot be built must stop the boot. The old
+            // behaviour logged a warning and carried on, and the host then ran with
+            // `NoAuthProvider`: anonymous callers, `is_owner` true, and nothing in the returned
+            // value said so. A silent downgrade to no authentication is worse than a refusal.
+            #[cfg(not(feature = "wami"))]
+            if matches!(auth_config.provider, AuthProviderType::Wami) {
+                anyhow::bail!(
+                    "auth.provider is `wami` but this build has no `wami` feature: refusing to \
+                     start without authentication (enable the feature, or set auth.provider: none)"
+                );
+            }
+
             match auth_config.provider {
                 AuthProviderType::None => {
                     // No auth provider — use default NoAuthProvider behavior
@@ -1265,9 +1281,9 @@ impl ServerBuilder {
                                 tracing::info!("WAMI auth provider auto-wired");
                             }
                             Err(e) => {
-                                tracing::warn!(
-                                    "Failed to create WamiAuthProvider: {}. Continuing without auth.",
-                                    e
+                                return Err(e).context(
+                                    "auth.provider is `wami` but the provider could not be built: \
+                                     refusing to start without authentication",
                                 );
                             }
                         }
@@ -1288,9 +1304,9 @@ impl ServerBuilder {
                                         );
                                     }
                                     Err(e) => {
-                                        tracing::warn!(
-                                            "Failed to create STS service: {}. Auth endpoints won't be available.",
-                                            e
+                                        return Err(e).context(
+                                            "auth.wami.mode issues tokens but the STS could not be \
+                                             built: refusing to start with no way to authenticate",
                                         );
                                     }
                                 }
@@ -1321,7 +1337,12 @@ impl ServerBuilder {
                     }
                 }
                 AuthProviderType::Oidc => {
-                    tracing::warn!("OIDC auth provider not yet implemented. Ignoring.");
+                    // Same rule: a configured provider that does not exist refuses the boot
+                    // instead of leaving the host with no authentication at all.
+                    anyhow::bail!(
+                        "auth.provider is `oidc` and this build has no OIDC provider: refusing \
+                         to start without authentication (use `wami`, or `none` for development)"
+                    );
                 }
             }
         }
@@ -2035,6 +2056,74 @@ mod tests {
 
         assert!(host.config.entities.is_empty());
         assert!(host.config.links.is_empty());
+    }
+
+    /// A provider that is configured but unusable must stop the boot.
+    ///
+    /// `provider: oidc` used to log "not yet implemented" and continue, leaving the host with
+    /// `NoAuthProvider` — anonymous callers, `is_owner` true — and no way to notice from the
+    /// outside. Refusing is the only honest outcome.
+    #[test]
+    fn test_build_host_refuses_oidc_without_an_oidc_provider() {
+        let config = crate::config::auth::AuthConfig {
+            provider: crate::config::auth::AuthProviderType::Oidc,
+            oidc: Some(crate::config::auth::OidcConfig {
+                discovery_url: "https://idp.example.com/.well-known/openid-configuration".into(),
+                audience: None,
+                user_claim: "sub".into(),
+                roles_claim: "roles".into(),
+            }),
+            ..Default::default()
+        };
+        let err = match ServerBuilder::new()
+            .with_link_service(InMemoryLinkService::new())
+            .with_auth_config(config)
+            .build_host()
+        {
+            Ok(_) => panic!("a configured but unavailable provider must refuse the boot"),
+            Err(e) => e,
+        };
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("oidc"),
+            "error should name the provider: {msg}"
+        );
+        assert!(msg.contains("refusing"), "error should refuse: {msg}");
+    }
+
+    /// The same rule for `wami`: a key the provider cannot use refuses the boot.
+    #[cfg(feature = "wami")]
+    #[test]
+    fn test_build_host_refuses_a_wami_provider_it_cannot_build() {
+        let config = crate::config::auth::AuthConfig {
+            provider: crate::config::auth::AuthProviderType::Wami,
+            wami: Some(crate::config::auth::WamiConfig {
+                public_key: Some("not-a-key".into()),
+                private_key: None,
+                issuer: None,
+                audience: Some("https://api.example.com".into()),
+                mode: crate::config::auth::AuthMode::Sts,
+                token_ttl_secs: 3600,
+                refresh_ttl_secs: 86400,
+                accept_legacy_tokens: None,
+                policies_path: None,
+                identity_path: None,
+            }),
+            ..Default::default()
+        };
+        let err = match ServerBuilder::new()
+            .with_link_service(InMemoryLinkService::new())
+            .with_auth_config(config)
+            .build_host()
+        {
+            Ok(_) => panic!("an unbuildable provider must refuse the boot"),
+            Err(e) => e,
+        };
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("wami"),
+            "error should name the provider: {msg}"
+        );
     }
 
     // ── build (REST router) ──────────────────────────────────────────────
