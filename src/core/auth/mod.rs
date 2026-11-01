@@ -35,6 +35,8 @@
 pub mod descriptor_policy;
 pub mod surface;
 
+#[cfg(feature = "oidc")]
+pub mod oidc_provider;
 #[cfg(feature = "wami")]
 pub mod sts;
 #[cfg(feature = "wami")]
