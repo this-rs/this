@@ -126,7 +126,7 @@ avec la struct `StsClaims` de wami (sub ARN, `scoped_*`) ; ils se vérifient ave
 | T3 registre d'identité + pont | `af1c87d` | fait | `IdentityRegistry` alloue et refuse toute réutilisation ; `wami_context_for` ; `RequestMeta` (X-Forwarded-* ignorés par défaut) |
 | T4 STS → `KeyManager` | `1e20d9e` | fait | kid + aud émis ; porte et refresh corrigés (sans cela, tous les jetons étaient refusés) ; test croisé avec le vérifieur `wami_provider` |
 | T5 authz `perm:` → wami | `d1b3275` | fait (non-REST) | `wami_policy::decide` ; `WamiEnforcement` porté par l'hôte ; branché dans le guard (gRPC/GraphQL/WS) |
-| T5b authz REST → wami | — | **non fait** | le middleware REST (`authorization.rs`) n'appelle pas encore wami |
+| T5b authz REST → wami | `1849b62` | fait | `Authorization::with_wami` ; `check_iam` répond seul à `perm:` quand armé |
 | T6 docs + revue | ce commit | en cours | voir §9 |
 | T7 OAuth/OIDC + `wami-scope` | — | déféré | — |
 
@@ -140,17 +140,23 @@ avec la struct `StsClaims` de wami (sub ARN, `scoped_*`) ; ils se vérifient ave
 - **Policies en mémoire** : `PolicyStore` n'est pas persisté.
 - **Rotation de clé** : le vérifieur n'a qu'une clé publique ; une rotation réelle demande plusieurs
   clés publiques côté vérifieur.
-- **REST** : le middleware d'autorisation REST reste sur l'ancien chemin (T5b).
+- **Fenêtre legacy (D4)** : tant qu'elle est ouverte, les jetons émis avant ce lot (sans `aud` ni
+  `token_use`) sont acceptés. `with_legacy_tokens(false)` la ferme, côté STS (refresh) et vérifieur.
+- **Jetons antérieurs au lot, refresh** : un jeton d'accès *legacy* (sans `token_use`) peut encore
+  être échangé pendant la fenêtre. Le défaut existait sur `main` ; il est fermé pour tout jeton
+  émis après ce lot.
 
 ## 9. Points à trancher (utilisateur)
 - **Q1 — `sub` UUID ou ARN ?** Garder l'UUID préserve les consommateurs `this` mais rend les jetons
   non interopérables avec wami. Passer à l'ARN est possible, mais casse le contrat actuel.
 - **Q2 — `wami.audience` obligatoire ?** Recommandé en production ; casse les configs sans audience.
-- **Q3 — T5b (REST)** : à faire dans ce lot ou dans un lot suivant ? Le REST est la surface principale.
+- **Q3 — T5b (REST)** : fait dans ce lot (`1849b62`). À confirmer en revue.
 
 ## 10. Guide de migration (ancien → wami)
 - Jetons émis avant ce lot : acceptés (pas d'`aud`) tant que `with_legacy_tokens(true)`.
-- Jetons émis après : `aud = "this-rs"` et `kid` dans le header. Configurer `wami.audience` pour
-  les vérifier strictement.
+- Jetons émis après : `aud = "this-rs"`, `kid` dans le header, `token_use = "access" | "refresh"`.
+- Vérification stricte : `wami.audience` configurée **et** `with_legacy_tokens(false)` côté
+  `WamiAuthProvider` et `StsService`. Un jeton de refresh ne s'utilise jamais comme bearer.
+- Un jeton qui ne nomme ni utilisateur ni tenant est refusé (plus de repli sur l'UUID nul).
 - `builder.with_wami_enforcement(WamiEnforcement::new(registry, store, instance))` arme wami pour
   les surfaces non-REST. Sans cet appel, le comportement est inchangé.

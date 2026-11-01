@@ -112,6 +112,10 @@ impl IdentityRegistry {
             if segment == ROOT_SEGMENT {
                 bail!("tenant {tenant} mapped to the root segment 0");
             }
+            // `next` is segment + 1 after a load: u64::MAX would wrap it to the root.
+            if segment == u64::MAX {
+                bail!("tenant {tenant} mapped to u64::MAX: no segment can follow it");
+            }
             if let Some(existing) = staged_uuid.insert(tenant, segment)
                 && existing != segment
             {
@@ -306,6 +310,14 @@ mod tests {
         assert!(reg.load([(intruder, seg)]).is_err());
         // The refused batch left the mapping untouched.
         assert_eq!(reg.tenant_segment(known).unwrap(), seg);
+    }
+
+    #[test]
+    fn load_refuses_max_segment_that_would_wrap_to_root() {
+        let reg = IdentityRegistry::new();
+        assert!(reg.load([(Uuid::new_v4(), u64::MAX)]).is_err());
+        // Nothing wrapped: allocation still starts above the root.
+        assert_ne!(reg.tenant_segment(Uuid::new_v4()).unwrap(), ROOT_SEGMENT);
     }
 
     #[test]

@@ -34,7 +34,19 @@ pub struct StsClaims {
     /// accepted only while [`StsService::accepts_legacy_tokens`] holds (ADR D4).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub aud: Option<String>,
+    /// `"access"` or `"refresh"`: what the token may be used for (ADR D4).
+    ///
+    /// A refresh token must not authenticate a request, and an access token must
+    /// not be exchanged for a new pair. Absent on tokens issued before this claim
+    /// existed, which are accepted only while the legacy window holds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_use: Option<String>,
 }
+
+/// The `token_use` value of an access token.
+pub const TOKEN_USE_ACCESS: &str = "access";
+/// The `token_use` value of a refresh token.
+pub const TOKEN_USE_REFRESH: &str = "refresh";
 
 /// Audience this STS issues for when none is configured.
 pub const DEFAULT_AUDIENCE: &str = "this-rs";
@@ -289,6 +301,13 @@ impl StsService {
         let claims = token_data.claims;
         self.check_audience(claims.aud.as_deref())
             .context("refresh token audience refused")?;
+        // An access token must not buy a new pair (ADR D4). Legacy tokens carry no
+        // `token_use`; they are accepted only while the legacy window is open.
+        match claims.token_use.as_deref() {
+            Some(TOKEN_USE_REFRESH) => {}
+            None if self.accept_legacy_tokens => {}
+            _ => bail!("token is not a refresh token"),
+        }
 
         // Check revocation
         if self.is_revoked(&claims.jti) {
@@ -404,6 +423,7 @@ impl StsService {
             jti: access_jti,
             iss: self.issuer.clone(),
             aud: Some(self.audience.clone()),
+            token_use: Some(TOKEN_USE_ACCESS.to_string()),
         };
 
         let refresh_claims = StsClaims {
@@ -415,6 +435,7 @@ impl StsService {
             jti: refresh_jti,
             iss: self.issuer.clone(),
             aud: Some(self.audience.clone()),
+            token_use: Some(TOKEN_USE_REFRESH.to_string()),
         };
 
         // Signed through `KeyManager`: the header carries the active `kid`.
@@ -850,6 +871,23 @@ mod tests {
     }
 
     #[test]
+    fn access_token_cannot_be_exchanged_for_a_new_pair() {
+        let (priv_pem, pub_pem) = generate_test_keypair();
+        let sts = build_sts(&priv_pem).with_legacy_tokens(false);
+        let pair = sts
+            .issue_token_pair(Uuid::new_v4(), Uuid::new_v4(), vec![])
+            .unwrap();
+        let dk = decoding_key(&pub_pem);
+        let err = sts.refresh(&pair.access_token, &dk).unwrap_err();
+        assert!(
+            err.to_string().contains("not a refresh token"),
+            "got: {err}"
+        );
+        // The refresh token of the same pair still works.
+        assert!(sts.refresh(&pair.refresh_token, &dk).is_ok());
+    }
+
+    #[test]
     fn refresh_refuses_token_addressed_to_another_audience() {
         let (priv_pem, pub_pem) = generate_test_keypair();
         let sts = build_sts(&priv_pem);
@@ -863,6 +901,7 @@ mod tests {
             jti: Uuid::new_v4().to_string(),
             iss: "test-issuer".to_string(),
             aud: Some("some-other-service".to_string()),
+            token_use: Some(TOKEN_USE_REFRESH.to_string()),
         };
         let token = sts.keys.sign_claims(&foreign).unwrap();
         let err = sts.refresh(&token, &decoding_key(&pub_pem)).unwrap_err();

@@ -180,6 +180,12 @@ pub async fn verify_handler(State(state): State<Arc<StsState>>, headers: HeaderM
         return refusal("invalid_token");
     }
 
+    // Un jeton de rafraîchissement n'authentifie pas une requête (ADR D4).
+    if claims.token_use.as_deref() == Some(crate::core::auth::sts::TOKEN_USE_REFRESH) {
+        tracing::debug!("porte : jeton de rafraîchissement refusé comme bearer");
+        return refusal("invalid_token");
+    }
+
     if state.sts.is_revoked(&claims.jti) {
         tracing::debug!(jti = %claims.jti, "porte : jeton révoqué");
         return refusal("revoked_token");
