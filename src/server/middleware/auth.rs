@@ -116,11 +116,34 @@ impl AuthLayer {
 ///
 /// Policy enforcement (checking if the AuthContext satisfies the endpoint's policy)
 /// is done at the handler level, not here. This middleware only handles identity extraction.
+/// Paths that must answer **without** a token.
+///
+/// The middleware wraps every route mounted before it — including the ones that issue the
+/// tokens (`rest/mod.rs` merges `auth_routes` at :169 and layers at :318). Without this list,
+/// `POST /auth/token` demanded a token: on an armed host with `default_policy: authenticated`,
+/// nobody could ever log in.
+///
+/// The list is explicit on purpose. A prefix such as `/auth` would also open `/auth/revoke`
+/// and any future `/auth/users`, which are exactly the routes a token must protect. Liveness
+/// probes are here because a health check behind the gate makes the service unobservable.
+const PUBLIC_PATHS: &[&str] = &[
+    "/auth/token",   // issues the token pair
+    "/auth/refresh", // exchanges a refresh token for an access token
+    "/auth/keys",    // JWKS: verifiers must fetch it without a token
+    "/health",       // liveness
+    "/healthz",      // liveness (alias)
+];
+
 pub async fn auth_middleware(
     State(auth_layer): State<AuthLayer>,
     mut request: Request,
     next: Next,
 ) -> Response {
+    if PUBLIC_PATHS.contains(&request.uri().path()) {
+        request.extensions_mut().insert(AuthContext::Anonymous);
+        return next.run(request).await;
+    }
+
     match auth_layer.provider.extract_context(request.headers()).await {
         Ok(context) => {
             // Insert the auth context into extensions for handlers to use
@@ -172,7 +195,7 @@ mod tests {
     use axum::Extension;
     use axum::Router;
     use axum::body::Body;
-    use axum::http::Request;
+    use axum::http::{Method, Request};
     use axum::middleware;
     use axum::routing::get;
     use tower::ServiceExt;
@@ -192,6 +215,91 @@ mod tests {
         Router::new()
             .route("/test", get(echo_auth))
             .layer(middleware::from_fn_with_state(auth_layer, auth_middleware))
+    }
+
+    #[tokio::test]
+    async fn the_token_endpoint_is_reachable_but_revoke_is_not() {
+        use axum::routing::post;
+
+        // A provider that never accepts a token: the point is the middleware's path handling,
+        // not identity extraction.
+        struct AlwaysFailProvider;
+
+        #[async_trait::async_trait]
+        impl AuthProvider for AlwaysFailProvider {
+            async fn extract_context(
+                &self,
+                _headers: &axum::http::HeaderMap,
+            ) -> anyhow::Result<AuthContext> {
+                anyhow::bail!("No valid token")
+            }
+
+            async fn is_owner(
+                &self,
+                _: &uuid::Uuid,
+                _: &uuid::Uuid,
+                _: &str,
+            ) -> anyhow::Result<bool> {
+                Ok(false)
+            }
+
+            async fn has_role(&self, _: &uuid::Uuid, _: &str) -> anyhow::Result<bool> {
+                Ok(false)
+            }
+        }
+
+        let app = Router::new()
+            .route("/auth/token", post(|| async { "token" }))
+            .route("/auth/refresh", post(|| async { "refreshed" }))
+            .route("/auth/keys", get(|| async { "jwks" }))
+            .route("/auth/revoke", post(|| async { "revoked" }))
+            .route("/health", get(|| async { "ok" }))
+            .route("/orders", get(|| async { "orders" }))
+            .layer(middleware::from_fn_with_state(
+                AuthLayer::new(Arc::new(AlwaysFailProvider), "authenticated".to_string()),
+                auth_middleware,
+            ));
+
+        // The issuer hands out the tokens: it cannot demand one.
+        for (method, path) in [
+            (Method::POST, "/auth/token"),
+            (Method::POST, "/auth/refresh"),
+            (Method::GET, "/auth/keys"),
+            (Method::GET, "/health"),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(method.clone())
+                        .uri(path)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK, "{method} {path}");
+        }
+
+        // Everything else stays behind the gate — a `/auth` prefix would have opened these too.
+        for (method, path) in [(Method::POST, "/auth/revoke"), (Method::GET, "/orders")] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(method.clone())
+                        .uri(path)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                response.status(),
+                StatusCode::UNAUTHORIZED,
+                "{method} {path}"
+            );
+        }
     }
 
     #[tokio::test]
