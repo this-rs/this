@@ -47,6 +47,27 @@ pub enum CheckProfile {
     Framework,
 }
 
+/// Root route segments the framework already serves.
+///
+/// An entity's plural becomes its REST segment (`/invoices`), so a plural landing on one of these
+/// either panics axum at mount time (`/health`, `/graph`: same path and method on two routers) or
+/// silently shadows a framework route (`/events/{id}` vs `/events/stream`). Refused at build time
+/// rather than discovered in production: `this.descriptor.reserved_plural`.
+///
+/// A host that adds a root route of its own MUST add the segment here in the same commit. Routes
+/// added under the reserved `/_this` prefix need no entry.
+pub const RESERVED_ROUTE_SEGMENTS: &[&str] = &[
+    "_this",         // framework routes, `exposure::descriptor::PREFIX`
+    "auth",          // /auth/token, /auth/keys, /auth/refresh, /auth/revoke
+    "events",        // /events/stream (SSE)
+    "graph",         // /graph, /graph/hierarchy/{id}, /graph/procedures...
+    "health",        // /health
+    "healthz",       // /healthz
+    "notifications", // /notifications/{user_id}...
+    "tenants",       // /tenants/{tenant_id}/data
+    "ui",            // /ui/state/{portee}
+];
+
 /// Turn issues into one `this.descriptor.invalid` error.
 pub fn issues_to_error(issues: &[DescriptorIssue]) -> ContractError {
     ContractError::framework(codes::DESCRIPTOR_INVALID).with_param(
@@ -205,12 +226,22 @@ impl ModuleDescriptor {
             }
             if e.plural.is_empty() {
                 c.push("plural_missing", &p, "plural is empty (call normalize)");
-            } else if !plurals.insert(&e.plural) {
-                c.push(
-                    "duplicate_plural",
-                    &p,
-                    format!("plural `{}` used twice", e.plural),
-                );
+            } else {
+                if RESERVED_ROUTE_SEGMENTS.contains(&e.plural.as_str()) {
+                    let plural = &e.plural;
+                    c.push(
+                        "reserved_plural",
+                        &p,
+                        format!("plural `{plural}` is already served by the framework at the root: `/{plural}`"),
+                    );
+                }
+                if !plurals.insert(&e.plural) {
+                    c.push(
+                        "duplicate_plural",
+                        &p,
+                        format!("plural `{}` used twice", e.plural),
+                    );
+                }
             }
             check_fields(&mut c, &p, e.kind, &e.fields, &e.reserved_tags, true);
             for idx in &e.indexed {
@@ -636,6 +667,41 @@ mod tests {
     fn check_accepts_untagged_fields() {
         let m = module_with(vec![FieldDesc::new("amount", FieldType::F64)]);
         m.check(&reg(), CheckProfile::Compiled).unwrap();
+    }
+
+    #[test]
+    fn framework_route_segments_are_reserved_as_plurals() {
+        // Every segment the framework serves at the root is refused as a plural, however it got
+        // there: derived by `normalize` or written in YAML.
+        for segment in RESERVED_ROUTE_SEGMENTS {
+            let mut m = ModuleDescriptor::new("billing", "1.0.0");
+            let mut e = EntityDesc::new("thing");
+            e.plural = (*segment).to_string();
+            m.entities.push(e);
+            assert!(
+                codes_of(m.check(&reg(), CheckProfile::Compiled))
+                    .contains(&"this.descriptor.reserved_plural".into()),
+                "`{segment}` accepted as a plural"
+            );
+        }
+        // Derived, no YAML involved: `notification` -> `notifications`.
+        let mut m = ModuleDescriptor::new("billing", "1.0.0");
+        m.entities.push(EntityDesc::new("notification"));
+        assert!(
+            codes_of(m.check(&reg(), CheckProfile::Compiled))
+                .contains(&"this.descriptor.reserved_plural".into())
+        );
+        // An ordinary plural is untouched, and the reserved check does not mask duplicates.
+        module_with(vec![])
+            .check(&reg(), CheckProfile::Compiled)
+            .unwrap();
+        let mut dup = ModuleDescriptor::new("billing", "1.0.0");
+        dup.entities.push(EntityDesc::new("invoice"));
+        dup.entities.push(EntityDesc::new("invoice"));
+        assert!(
+            codes_of(dup.check(&reg(), CheckProfile::Compiled))
+                .contains(&"this.descriptor.duplicate_entity".into())
+        );
     }
 
     #[test]
