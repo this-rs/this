@@ -237,6 +237,9 @@ pub struct Authorization {
     /// défaut.
     #[cfg(feature = "obrain")]
     iam: Option<crate::storage::iam::Iam>,
+    /// IAM WAMI : quand il est présent, il répond seul à `perm:` (ADR D2).
+    #[cfg(feature = "wami")]
+    wami: Option<Arc<crate::core::auth::wami_policy::WamiEnforcement>>,
     /// Mode d'application (défaut : `Enforced`).
     mode: AuthorizationMode,
     /// Mappage `contexte → (principal, portée)`, s'il est fourni par
@@ -280,6 +283,8 @@ impl Authorization {
             resolvers,
             #[cfg(feature = "obrain")]
             iam: None,
+            #[cfg(feature = "wami")]
+            wami: None,
             mode: AuthorizationMode::Enforced,
             mapping: None,
             graph_policy: None,
@@ -608,6 +613,35 @@ impl Authorization {
         ))
     }
 
+    /// Arme l'IAM WAMI : `perm:` est alors répondu par wami seul (ADR D2).
+    #[cfg(feature = "wami")]
+    pub fn with_wami(mut self, wami: Arc<crate::core::auth::wami_policy::WamiEnforcement>) -> Self {
+        self.wami = Some(wami);
+        self
+    }
+
+    /// Verdict WAMI pour une permission. Un appelant que wami ne peut nommer
+    /// (anonyme, service, admin, contexte illisible) est inconnu, donc refusé.
+    #[cfg(feature = "wami")]
+    fn wami_verdict(
+        wami: &crate::core::auth::wami_policy::WamiEnforcement,
+        permission: &str,
+        context: &AuthContext,
+        consulted: &mut bool,
+    ) -> IamVerdict {
+        use crate::core::auth::wami_policy::Verdict;
+        let Ok(Some(caller)) = wami.caller_context(context) else {
+            return IamVerdict::Unevaluable;
+        };
+        // Ici wami est réellement consulté : la provenance peut l'affirmer.
+        *consulted = true;
+        match wami.store.verdict(&caller, permission) {
+            Verdict::Allow => IamVerdict::Allowed,
+            Verdict::Deny => IamVerdict::Denied,
+            Verdict::Unevaluable => IamVerdict::Unevaluable,
+        }
+    }
+
     /// La décision **matérialisée** autorise-t-elle cette permission ?
     ///
     /// Une seule recherche indexée (`find_nodes_by_property` sur `acl_key`),
@@ -620,6 +654,10 @@ impl Authorization {
         context: &AuthContext,
         consulted: &mut bool,
     ) -> IamVerdict {
+        #[cfg(feature = "wami")]
+        if let Some(wami) = &self.wami {
+            return Self::wami_verdict(wami, permission, context, consulted);
+        }
         let Some(iam) = &self.iam else {
             tracing::warn!(
                 permission,
@@ -667,12 +705,17 @@ impl Authorization {
 
     /// Sans plan IAM, la compilation par défaut doit quand même refuser.
     #[cfg(not(feature = "obrain"))]
+    #[cfg_attr(not(feature = "wami"), allow(unused_variables))]
     fn check_iam(
         &self,
-        _permission: &str,
-        _context: &AuthContext,
-        _consulted: &mut bool,
+        permission: &str,
+        context: &AuthContext,
+        consulted: &mut bool,
     ) -> IamVerdict {
+        #[cfg(feature = "wami")]
+        if let Some(wami) = &self.wami {
+            return Self::wami_verdict(wami, permission, context, consulted);
+        }
         tracing::warn!("politique `perm:` sans support IAM (feature `obrain`) — non tranchable");
         IamVerdict::Unevaluable
     }
@@ -2094,6 +2137,58 @@ mod tests {
                 }
             }
         }
+    }
+
+    // ── IAM WAMI sur le REST : le verdict ne lit jamais « inconnu » comme « permis » ──
+
+    #[cfg(feature = "wami")]
+    #[test]
+    fn wami_verdict_answers_named_callers_and_refuses_the_rest() {
+        use crate::core::auth::wami_bridge::IdentityRegistry;
+        use crate::core::auth::wami_policy::{PolicyStore, WamiEnforcement};
+        use uuid::Uuid;
+
+        const ALLOW_READ: &str = r#"{"Version":"2012-10-17","Statement":[
+            {"Effect":"Allow","Action":"this:project:read","Resource":"*"}]}"#;
+
+        let mut wami = WamiEnforcement::new(IdentityRegistry::new(), PolicyStore::new(), "this");
+        let auth = AuthContext::User {
+            user_id: Uuid::new_v4(),
+            tenant_id: Uuid::new_v4(),
+            roles: vec![],
+        };
+        let key = wami
+            .caller_context(&auth)
+            .unwrap()
+            .unwrap()
+            .caller_key()
+            .unwrap()
+            .clone();
+        wami.store
+            .register(key, &[("read", ALLOW_READ)], None)
+            .unwrap();
+
+        let mut consulted = false;
+        let allowed =
+            Authorization::wami_verdict(&wami, "perm:project.read", &auth, &mut consulted);
+        assert!(matches!(allowed, IamVerdict::Allowed));
+        assert!(consulted, "wami answered: the provenance may say so");
+
+        let mut consulted = false;
+        let denied =
+            Authorization::wami_verdict(&wami, "perm:project.write", &auth, &mut consulted);
+        assert!(matches!(denied, IamVerdict::Denied));
+
+        // Anonymous has no WAMI identity: unevaluable, and wami was not consulted.
+        let mut consulted = false;
+        let anon = Authorization::wami_verdict(
+            &wami,
+            "perm:project.read",
+            &AuthContext::Anonymous,
+            &mut consulted,
+        );
+        assert!(matches!(anon, IamVerdict::Unevaluable));
+        assert!(!consulted);
     }
 
     // ── Adoption d'un projet existant : observation + mappage d'identité ──

@@ -234,6 +234,11 @@ impl RestExposure {
             // Descriptor policies decide before the YAML table, as on every
             // other surface (`core::auth::surface::PolicyIndex`).
             .with_catalog(host.catalog.clone());
+            // IAM WAMI armé : il répond seul à `perm:` sur le REST aussi (ADR D2).
+            #[cfg(feature = "wami")]
+            if let Some(wami) = &host.wami_enforcement {
+                authz = authz.with_wami(wami.clone());
+            }
             // Avec un store obrain, les politiques `perm:<permission>` sont
             // tranchées par la **décision IAM matérialisée** (une lecture
             // indexée), au lieu d'être recalculées par traversée.
