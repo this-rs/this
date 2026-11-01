@@ -1275,7 +1275,29 @@ impl ServerBuilder {
                     {
                         use crate::config::auth::AuthMode;
                         use crate::core::auth::wami_provider::WamiAuthProvider;
-                        match WamiAuthProvider::from_config(auth_config) {
+
+                        // Resolve the pair BEFORE building the verifier, and share it: bootstrap
+                        // writes no key in the config, so the provider had nothing to verify with.
+                        let keys = match auth_config.wami.as_ref() {
+                            Some(wami_config)
+                                if matches!(
+                                    wami_config.mode,
+                                    AuthMode::Embedded | AuthMode::Bootstrap
+                                ) =>
+                            {
+                                Some(Self::resolve_wami_keys(wami_config)?)
+                            }
+                            _ => None,
+                        };
+                        let mut provider_config = auth_config.clone();
+                        if let (Some((_, public_pem)), Some(wami_config)) =
+                            (keys.as_ref(), provider_config.wami.as_mut())
+                            && matches!(wami_config.mode, AuthMode::Bootstrap)
+                        {
+                            // Bootstrap just generated the pair: hand the public half to the verifier.
+                            wami_config.public_key = Some(public_pem.clone());
+                        }
+                        match WamiAuthProvider::from_config(&provider_config) {
                             Ok(provider) => {
                                 host = host.with_auth_provider(Arc::new(provider));
                                 tracing::info!("WAMI auth provider auto-wired");
@@ -1295,7 +1317,11 @@ impl ServerBuilder {
                                 AuthMode::Embedded | AuthMode::Bootstrap
                             );
                             if needs_sts {
-                                match Self::build_sts_state(wami_config) {
+                                // `needs_sts` is exactly the branch that resolved `keys` above.
+                                let keys = keys
+                                    .clone()
+                                    .expect("bootstrap/embedded resolved the key pair above");
+                                match Self::build_sts_state(wami_config, keys) {
                                     Ok(sts_state) => {
                                         host = host.with_sts_state(sts_state);
                                         tracing::info!(
@@ -1576,63 +1602,21 @@ impl ServerBuilder {
         Ok(())
     }
 
-    /// Build the STS state from WAMI config (embedded/bootstrap modes)
+    /// Build the STS state for a mode that issues tokens locally (embedded / bootstrap).
+    ///
+    /// The key pair is passed in, never re-derived here: the verifier (`WamiAuthProvider`) and
+    /// the issuer must use the SAME key. Bootstrap used to generate its pair *after* the verifier
+    /// had been built from the raw config — a config the operator never gave a `public_key`, so
+    /// the documented dev mode refused to boot; and had it booted, it would have minted with a
+    /// second, unrelated key that nothing could verify.
     #[cfg(feature = "wami")]
     fn build_sts_state(
         wami_config: &crate::config::auth::WamiConfig,
+        (private_pem, public_pem): (String, String),
     ) -> anyhow::Result<Arc<crate::server::exposure::rest::auth_routes::StsState>> {
         use crate::config::auth::AuthMode;
         use crate::core::auth::sts::StsService;
         use crate::server::exposure::rest::auth_routes::StsState;
-
-        let (private_pem, public_pem) = match wami_config.mode {
-            AuthMode::Bootstrap => {
-                // Auto-generate a key pair for development
-                use ed25519_dalek::SigningKey;
-                use ed25519_dalek::pkcs8::EncodePublicKey;
-                use ed25519_dalek::pkcs8::{EncodePrivateKey, spki::der::pem::LineEnding};
-
-                // Generate a random 32-byte secret using UUIDs (no rand dependency needed)
-                let u1 = uuid::Uuid::new_v4();
-                let u2 = uuid::Uuid::new_v4();
-                let mut secret = [0u8; 32];
-                secret[..16].copy_from_slice(u1.as_bytes());
-                secret[16..].copy_from_slice(u2.as_bytes());
-                let signing_key = SigningKey::from_bytes(&secret);
-                let verifying_key = signing_key.verifying_key();
-
-                let priv_pem = signing_key
-                    .to_pkcs8_pem(LineEnding::LF)
-                    .map_err(|e| anyhow::anyhow!("Failed to encode bootstrap private key: {}", e))?
-                    .to_string();
-                let pub_pem = verifying_key
-                    .to_public_key_pem(LineEnding::LF)
-                    .map_err(|e| anyhow::anyhow!("Failed to encode bootstrap public key: {}", e))?;
-
-                tracing::info!("Bootstrap mode: auto-generated Ed25519 key pair");
-                (priv_pem, pub_pem)
-            }
-            AuthMode::Embedded => {
-                let priv_key = wami_config
-                    .private_key
-                    .as_ref()
-                    .ok_or_else(|| {
-                        anyhow::anyhow!("Embedded mode requires 'private_key' in wami config")
-                    })?
-                    .clone();
-                let pub_key = wami_config
-                    .public_key
-                    .as_ref()
-                    .ok_or_else(|| {
-                        anyhow::anyhow!("Embedded mode requires 'public_key' in wami config")
-                    })?
-                    .clone();
-                (priv_key, pub_key)
-            }
-            AuthMode::Sts => {
-                anyhow::bail!("STS mode does not need embedded token issuance");
-            }
-        };
 
         let issuer = wami_config
             .issuer
@@ -1662,6 +1646,64 @@ impl ServerBuilder {
             public_key_pem: public_pem,
             decoding_key,
         }))
+    }
+
+    /// The key pair an embedded/bootstrap host signs with, resolved once and shared by the
+    /// verifier and the issuer. `Sts` mode issues nothing locally, so it refuses here.
+    #[cfg(feature = "wami")]
+    fn resolve_wami_keys(
+        wami_config: &crate::config::auth::WamiConfig,
+    ) -> anyhow::Result<(String, String)> {
+        use crate::config::auth::AuthMode;
+
+        match wami_config.mode {
+            AuthMode::Bootstrap => {
+                // Auto-generate a key pair for development
+                use ed25519_dalek::SigningKey;
+                use ed25519_dalek::pkcs8::EncodePublicKey;
+                use ed25519_dalek::pkcs8::{EncodePrivateKey, spki::der::pem::LineEnding};
+
+                // Generate a random 32-byte secret using UUIDs (no rand dependency needed)
+                let u1 = uuid::Uuid::new_v4();
+                let u2 = uuid::Uuid::new_v4();
+                let mut secret = [0u8; 32];
+                secret[..16].copy_from_slice(u1.as_bytes());
+                secret[16..].copy_from_slice(u2.as_bytes());
+                let signing_key = SigningKey::from_bytes(&secret);
+                let verifying_key = signing_key.verifying_key();
+
+                let priv_pem = signing_key
+                    .to_pkcs8_pem(LineEnding::LF)
+                    .map_err(|e| anyhow::anyhow!("Failed to encode bootstrap private key: {}", e))?
+                    .to_string();
+                let pub_pem = verifying_key
+                    .to_public_key_pem(LineEnding::LF)
+                    .map_err(|e| anyhow::anyhow!("Failed to encode bootstrap public key: {}", e))?;
+
+                tracing::info!("Bootstrap mode: auto-generated Ed25519 key pair");
+                Ok((priv_pem, pub_pem))
+            }
+            AuthMode::Embedded => {
+                let priv_key = wami_config
+                    .private_key
+                    .as_ref()
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("Embedded mode requires 'private_key' in wami config")
+                    })?
+                    .clone();
+                let pub_key = wami_config
+                    .public_key
+                    .as_ref()
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("Embedded mode requires 'public_key' in wami config")
+                    })?
+                    .clone();
+                Ok((priv_key, pub_key))
+            }
+            AuthMode::Sts => {
+                anyhow::bail!("STS mode does not need embedded token issuance");
+            }
+        }
     }
 }
 
@@ -2780,5 +2822,44 @@ mod descriptor_tests {
         let c = crate::core::errors::from_anyhow(&err);
         assert_eq!(c.code.as_str(), "this.descriptor.declared_twice");
         assert!(c.params["what"].as_str().unwrap().contains("delete_link"));
+    }
+
+    #[cfg(feature = "wami")]
+    #[test]
+    fn bootstrap_resolves_the_key_pair_the_verifier_will_use() {
+        use crate::config::auth::{AuthMode, WamiConfig};
+
+        // The documented contract: "In bootstrap mode, if absent, a key pair is auto-generated
+        // at startup." The verifier is built from this same pair — before the fix it required a
+        // `public_key` the operator never wrote, so the documented dev mode could not boot.
+        let config_with = |mode: AuthMode| WamiConfig {
+            public_key: None,
+            private_key: None,
+            issuer: None,
+            audience: None,
+            mode,
+            token_ttl_secs: 3600,
+            refresh_ttl_secs: 86400,
+            accept_legacy_tokens: None,
+            policies_path: None,
+            identity_path: None,
+        };
+        let bootstrap = config_with(AuthMode::Bootstrap);
+        let (private_pem, public_pem) =
+            ServerBuilder::resolve_wami_keys(&bootstrap).expect("bootstrap resolves a pair");
+        assert!(public_pem.contains("BEGIN PUBLIC KEY"), "{public_pem}");
+        assert!(private_pem.contains("BEGIN PRIVATE KEY"));
+
+        // Two calls are two different pairs: bootstrap is for development, not for a stable key.
+        let (_, again) = ServerBuilder::resolve_wami_keys(&bootstrap).unwrap();
+        assert_ne!(public_pem, again);
+
+        // Embedded takes the operator's keys and refuses to invent any.
+        let embedded = config_with(AuthMode::Embedded);
+        assert!(ServerBuilder::resolve_wami_keys(&embedded).is_err());
+
+        // STS issues nothing locally.
+        let sts = config_with(AuthMode::Sts);
+        assert!(ServerBuilder::resolve_wami_keys(&sts).is_err());
     }
 }
