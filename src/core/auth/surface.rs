@@ -378,6 +378,7 @@ mod tests {
             user_id: Uuid::from_u128(1),
             tenant_id: Uuid::from_u128(2),
             roles: roles.iter().map(|r| r.to_string()).collect(),
+            scopes: Vec::new(),
         }
     }
 

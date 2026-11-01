@@ -176,6 +176,7 @@ mod tests {
             user_id: user,
             tenant_id: tenant,
             roles: vec![],
+            scopes: Vec::new(),
         }
     }
 

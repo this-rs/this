@@ -23,9 +23,9 @@ use std::sync::Arc;
 use axum::http::HeaderMap;
 use uuid::Uuid;
 
-#[cfg(any(feature = "obrain", feature = "wami"))]
-use crate::core::auth::descriptor_policy::PermissionFn;
-use crate::core::auth::descriptor_policy::RegistryEnv;
+// No `cfg`: the scope fallback below (`no IAM wired at all`) hands a `PermissionFn` to the env on
+// every build, so gating this import on the IAM features broke `--features graphql,grpc` alone.
+use crate::core::auth::descriptor_policy::{PermissionFn, RegistryEnv};
 use crate::core::auth::surface::{PolicyIndex, authorize_link_op, authorize_op};
 use crate::core::auth::{
     AuthContext, AuthResolverRegistry, ForwardedHeaders, RequestMeta, ResourceRef,
@@ -269,7 +269,16 @@ impl SurfaceGuard {
                 return f(&env);
             }
         }
-        let env = RegistryEnv::new(Some(&e.resolvers), &self.ctx).with_resource(resource);
+        // No IAM wired at all: the token's own `scope` is the only thing that can answer `perm:`,
+        // exactly as `Authorization::check_iam` does on REST. Same rule, same fallback — a surface
+        // that could not answer would otherwise refuse a caller the REST API allows.
+        let scope_perm = |p: &str| -> Option<bool> {
+            crate::server::middleware::authorization::scope_grants(&self.ctx, p).then_some(true)
+        };
+        let perm_ref: &PermissionFn<'_> = &scope_perm;
+        let env = RegistryEnv::new(Some(&e.resolvers), &self.ctx)
+            .with_resource(resource)
+            .with_permission(perm_ref);
         f(&env)
     }
 
@@ -503,6 +512,7 @@ mod tests {
                 user_id: Uuid::nil(),
                 tenant_id: Uuid::nil(),
                 roles: vec!["reader".into()],
+                scopes: Vec::new(),
             },
             "test",
         );
@@ -648,6 +658,7 @@ mod tests {
             user_id: Uuid::nil(),
             tenant_id: Uuid::nil(),
             roles: vec!["reader".into()],
+            scopes: Vec::new(),
         };
         // Refused for anonymous BEFORE any lookup (even though no fetcher exists yet).
         let err = host

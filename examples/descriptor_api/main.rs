@@ -202,6 +202,7 @@ impl AuthProvider for Tokens {
             user_id: Uuid::from_u128(1),
             tenant_id: Uuid::from_u128(2),
             roles,
+            scopes: Vec::new(),
         })
     }
     async fn is_owner(&self, _: &Uuid, _: &Uuid, _: &str) -> anyhow::Result<bool> {

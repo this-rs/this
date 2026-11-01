@@ -228,6 +228,7 @@ mod tests {
             user_id: Uuid::new_v4(),
             tenant_id,
             roles: vec!["user".to_string()],
+            scopes: Vec::new(),
         };
 
         let app = with_auth(test_app(state), auth);

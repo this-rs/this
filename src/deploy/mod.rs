@@ -1073,6 +1073,7 @@ attachments:
             user_id: uuid::Uuid::nil(),
             tenant_id: uuid::Uuid::nil(),
             roles: vec!["operator".to_string()],
+            scopes: Vec::new(),
         };
         assert_eq!(
             expand_identity("account:{user_id}", &user).as_deref(),
