@@ -532,6 +532,46 @@ default**. An authenticated identity that matches no rule gets `this.auth.forbid
 `AuthContext` comes from each protocol's own channel — the `Authorization` header, a session cookie, a
 GraphQL/WebSocket handshake, gRPC metadata — so a policy is written once and enforced everywhere.
 
+### IAM — WAMI policies behind `perm:`
+
+A descriptor (or `links.yaml`) can write `perm:orders:write` / `perm:orders.write` instead of a
+hand-rolled rule. With the `wami` feature and a policy definition, that permission is answered by
+[wami](https://github.com/Lsh0x/wami)'s evaluator — deny-overrides-allow, permission boundaries,
+conditions and ARN globbing, the AWS-shaped model:
+
+```yaml
+auth:
+  provider: wami
+  wami:
+    mode: sts                                   # bootstrap (dev) | sts | embedded
+    public_key: ${WAMI_PUBLIC_KEY}
+    audience: https://api.example.com           # required outside bootstrap
+    policies_path: ./config/wami-policies.json  # arms the IAM on every surface
+    identity_path: ./data/wami-identity.json    # tenant-segment journal
+```
+
+- **Permission → action** — `perm:orders:write` and `perm:orders.write` both map to `this:orders:write`.
+- **Target → resource** — the checked row travels with the question: `orders/<uuid>` for one row,
+  `orders/*` when the call names only a type, `link/<type>/<source>/<target>` for a link
+  (`link/owns/users/orders`, or `link/owns/*/*` when the surface knows only the link type), and
+  `resource/*` when it knows no target at all — only `Resource: "*"` matches that.
+- **Roles are groups** — every role in the token reads the documents registered for it, beside the
+  principal's own; a `Deny` in any of them still wins.
+- **Fail-closed** — an unreadable document, an unknown condition operator, a permission that cannot be
+  mapped to an action, an anonymous or service caller, or a condition key that is unknown (source IP,
+  transport, MFA) all make the decision *unevaluable*, which is a refusal. `owner`
+  (`PolicyExpr::Owner`) stays with the built-in evaluator: there is no row for wami to read a
+  proprietor from.
+- **Tokens** — Ed25519 through wami's `KeyManager`, `kid` in the JOSE header (RFC 7638), `aud` and
+  `token_use` (`access` / `refresh`); `GET /auth/keys` serves the JWKS. A refresh token never
+  authenticates a request.
+- **Migration window** — tokens minted before `aud` / `token_use` existed are accepted in `bootstrap`
+  mode only, or with `accept_legacy_tokens: true`; remove it once every client has reissued.
+- **Tenant identity** — `Uuid` tenants get an allocated `u64` segment, journalled through
+  `identity_path` (write-through, tmp + rename). Nothing is derived by hashing: a collision would be a
+  tenant crossing. `identity_path` is required with `policies_path` outside `bootstrap`.
+- Design, decisions and known limits: [docs/wami-core-migration.md](docs/wami-core-migration.md).
+
 ### Hot loading from a VFS
 
 A declarative module can be loaded into a **live** host, replaced and unloaded, from a `ModuleStore`
