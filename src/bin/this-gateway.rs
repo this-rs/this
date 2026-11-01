@@ -2960,6 +2960,9 @@ async fn main() -> anyhow::Result<()> {
             mode: this::config::auth::AuthMode::Sts,
             token_ttl_secs: 900,
             refresh_ttl_secs: 86400,
+            accept_legacy_tokens: None,
+            policies_path: None,
+            identity_path: None,
         }),
         ..Default::default()
     };

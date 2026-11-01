@@ -504,6 +504,39 @@ impl WamiEnforcement {
         Ok(())
     }
 
+    /// The enforcement a `wami` config section describes, or `None` when it sets
+    /// no `policies_path` (WAMI stays unarmed; `perm:` is then unevaluable).
+    ///
+    /// Outside `bootstrap` mode, `identity_path` is required with
+    /// `policies_path`: an in-memory registry would reallocate tenant segments at
+    /// every restart. An unreadable file is an error: the host must not start on
+    /// grants it could not read.
+    pub fn from_config(config: &crate::config::auth::WamiConfig) -> Result<Option<Self>> {
+        use crate::config::auth::AuthMode;
+        let Some(policies_path) = &config.policies_path else {
+            return Ok(None);
+        };
+        let registry = match &config.identity_path {
+            Some(path) => IdentityRegistry::with_journal(path)?,
+            None if matches!(config.mode, AuthMode::Bootstrap) => IdentityRegistry::new(),
+            None => bail!(
+                "wami.identity_path is required with wami.policies_path outside bootstrap mode: \
+                 an in-memory identity registry reallocates tenant segments at every restart"
+            ),
+        };
+        let instance = config
+            .issuer
+            .clone()
+            .unwrap_or_else(|| "this-rs".to_string());
+        let mut enforcement = Self::new(registry, PolicyStore::new(), instance);
+        let text = std::fs::read_to_string(policies_path)
+            .map_err(|e| anyhow!("reading wami policies {}: {e}", policies_path.display()))?;
+        enforcement
+            .load_definition_json(&text)
+            .map_err(|e| anyhow!("wami policies {}: {e}", policies_path.display()))?;
+        Ok(Some(enforcement))
+    }
+
     /// Parse and load a JSON definition. See [`WamiEnforcement::load_definition`].
     pub fn load_definition_json(&mut self, json: &str) -> Result<()> {
         let definition: PolicyDefinition =
@@ -1025,6 +1058,104 @@ mod tests {
         assert_eq!(
             enf.verdict_for(&auth, &elsewhere, p, &ResourceRef::Any),
             Some(Verdict::Allow)
+        );
+    }
+
+    fn wami_config(
+        mode: crate::config::auth::AuthMode,
+        policies: Option<std::path::PathBuf>,
+        identity: Option<std::path::PathBuf>,
+    ) -> crate::config::auth::WamiConfig {
+        crate::config::auth::WamiConfig {
+            public_key: None,
+            private_key: None,
+            issuer: Some("this-test".to_string()),
+            audience: Some("this-rs".to_string()),
+            mode,
+            token_ttl_secs: 60,
+            refresh_ttl_secs: 600,
+            accept_legacy_tokens: None,
+            policies_path: policies,
+            identity_path: identity,
+        }
+    }
+
+    #[test]
+    fn from_config_arms_from_files_and_requires_a_journal_outside_bootstrap() {
+        use crate::config::auth::AuthMode;
+        let dir = tempfile::tempdir().unwrap();
+        let policies = dir.path().join("policies.json");
+        let identity = dir.path().join("identity.json");
+        let tenant = Uuid::new_v4();
+        let alice = Uuid::new_v4();
+        std::fs::write(
+            &policies,
+            serde_json::json!({
+                "principals": [{"tenant": tenant, "user": alice,
+                    "policies": {"all": serde_json::from_str::<serde_json::Value>(ALLOW_ALL).unwrap()}}]
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        // No policies_path: unarmed.
+        assert!(
+            WamiEnforcement::from_config(&wami_config(AuthMode::Sts, None, None))
+                .unwrap()
+                .is_none()
+        );
+        // Sts mode without a journal: refused.
+        assert!(
+            WamiEnforcement::from_config(&wami_config(AuthMode::Sts, Some(policies.clone()), None))
+                .is_err()
+        );
+        // Bootstrap tolerates an in-memory registry.
+        assert!(
+            WamiEnforcement::from_config(&wami_config(
+                AuthMode::Bootstrap,
+                Some(policies.clone()),
+                None
+            ))
+            .unwrap()
+            .is_some()
+        );
+        // Sts with both files: armed, and the grants answer.
+        let enf = WamiEnforcement::from_config(&wami_config(
+            AuthMode::Sts,
+            Some(policies.clone()),
+            Some(identity.clone()),
+        ))
+        .unwrap()
+        .unwrap();
+        assert_eq!(enf.instance_id, "this-test");
+        let auth = AuthContext::User {
+            user_id: alice,
+            tenant_id: tenant,
+            roles: vec![],
+        };
+        assert_eq!(
+            enf.verdict_for(
+                &auth,
+                &RequestMeta::default(),
+                "perm:project.read",
+                &ResourceRef::Any
+            ),
+            Some(Verdict::Allow)
+        );
+        assert!(
+            identity.exists(),
+            "the tenant seen while loading was journaled"
+        );
+
+        // An unreadable policies file refuses to build.
+        std::fs::write(&policies, "{ not json").unwrap();
+        assert!(
+            WamiEnforcement::from_config(&wami_config(
+                AuthMode::Sts,
+                Some(policies),
+                Some(identity)
+            ))
+            .is_err()
         );
     }
 

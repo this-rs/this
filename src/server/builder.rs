@@ -1295,6 +1295,22 @@ impl ServerBuilder {
                                     }
                                 }
                             }
+
+                            // IAM WAMI depuis la config (`policies_path`) : armé sur
+                            // toutes les surfaces. Un fichier illisible refuse de
+                            // démarrer : on ne sert pas sur des droits qu'on n'a pas lus.
+                            if host.wami_enforcement.is_none() {
+                                use crate::core::auth::wami_policy::WamiEnforcement;
+                                if let Some(enforcement) =
+                                    WamiEnforcement::from_config(wami_config)?
+                                {
+                                    tracing::info!(
+                                        policies = %wami_config.policies_path.as_deref().map(|p| p.display().to_string()).unwrap_or_default(),
+                                        "WAMI IAM armed from config on every surface"
+                                    );
+                                    host.wami_enforcement = Some(Arc::new(enforcement));
+                                }
+                            }
                         }
                     }
                     #[cfg(not(feature = "wami"))]
@@ -1592,7 +1608,18 @@ impl ServerBuilder {
             .clone()
             .unwrap_or_else(|| "this-rs".to_string());
 
-        let mut sts = StsService::new(&private_pem, issuer)?;
+        // The STS issues for the configured audience (ADR D9) and keeps the legacy
+        // window open in bootstrap only, unless the operator opens it explicitly.
+        let audience = wami_config
+            .audience
+            .clone()
+            .unwrap_or_else(|| crate::core::auth::sts::DEFAULT_AUDIENCE.to_string());
+        let legacy = wami_config
+            .accept_legacy_tokens
+            .unwrap_or(matches!(wami_config.mode, AuthMode::Bootstrap));
+        let mut sts = StsService::new(&private_pem, issuer)?
+            .with_audience(audience)
+            .with_legacy_tokens(legacy);
         sts.set_access_ttl_secs(wami_config.token_ttl_secs);
         sts.set_refresh_ttl_secs(wami_config.refresh_ttl_secs);
 
