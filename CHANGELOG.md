@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.10] - 2026-11-01
+
 ### Added
 - **OIDC : un IdP externe devient un provider de première classe.** `provider: oidc` existait dans le
   contrat de configuration et **ne faisait rien** — un `warn`, puis un hôte sans authentification.
@@ -174,8 +176,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `x-tenant-id` seul ouvre toujours un flux sur le locataire qu'il nomme, faute
   d'interceptor d'identité tonic au dépôt. Le remède est nommé dans le fichier ;
   le fermer est une décision de politique, pas un correctif glissé.
-
-## [0.0.10] — en préparation
 
 ### Added — module-descriptor
 - **`ModuleDescriptor`** (crate `this-descriptor`, `default = []`, compatible wasm32) : un module est décrit une fois (entités, champs, validateurs, transformations, filtres typés, liens, politiques, erreurs, messages fr/en) et le descripteur pilote REST, GraphQL, gRPC et WebSocket. Même payload invalide = même code (`this.validation.positive`) sur les trois protocoles ; 422 / `INVALID_ARGUMENT` / `BAD_USER_INPUT`.
