@@ -139,12 +139,17 @@ impl WamiAuthProvider {
 
         let mut validation = Validation::new(Algorithm::EdDSA);
 
-        // Configure issuer validation
+        // Configure issuer validation.
+        //
+        // When no issuer is configured we must leave `Validation` alone. `set_issuer(&[])` does
+        // NOT mean "don't check the issuer": jsonwebtoken adds `iss` to `required_spec_claims`
+        // and then matches it against an empty set, so every token fails with `InvalidIssuer`.
+        // That was the state of every host without `wami.issuer` — bootstrap included, which is
+        // why the documented dev mode could issue tokens it then refused.
         if let Some(ref issuer) = wami_config.issuer {
             validation.set_issuer(&[issuer.as_str()]);
         } else {
-            // Don't require issuer if not configured
-            validation.set_issuer::<&str>(&[]);
+            validation.required_spec_claims.remove("iss");
         }
 
         // Audience: required outside bootstrap (ADR D9). A token for another
@@ -354,6 +359,58 @@ mod tests {
     use chrono::Utc;
     use ed25519_dalek::SigningKey;
     use jsonwebtoken::{EncodingKey, Header};
+
+    /// End to end, with the exact wiring `build_host` uses in bootstrap: one pair, shared by
+    /// the issuer and the verifier.
+    #[tokio::test]
+    async fn a_token_issued_by_the_sts_verifies_against_the_same_key_pair() {
+        use crate::core::auth::sts::{LoginCredentials, StsService};
+        use axum::http::{HeaderMap, HeaderValue};
+
+        let signing_key = generate_test_keys().0;
+        let verifying_key = signing_key.verifying_key();
+        use ed25519_dalek::pkcs8::EncodePublicKey;
+        use ed25519_dalek::pkcs8::{EncodePrivateKey, spki::der::pem::LineEnding};
+        let private_pem = signing_key
+            .to_pkcs8_pem(LineEnding::LF)
+            .unwrap()
+            .to_string();
+        let public_pem = verifying_key.to_public_key_pem(LineEnding::LF).unwrap();
+
+        let sts = StsService::new(&private_pem, "this-rs".to_string()).unwrap();
+        sts.register_user(
+            "admin".to_string(),
+            "admin".to_string(),
+            Uuid::from_u128(1),
+            Uuid::from_u128(9),
+            vec!["admin".to_string()],
+        );
+        let pair = sts
+            .login(&LoginCredentials {
+                username: "admin".to_string(),
+                password: "admin".to_string(),
+            })
+            .expect("the STS issues a token pair");
+
+        let config: AuthConfig = serde_json::from_value(serde_json::json!({
+            "provider": "wami",
+            "default_policy": "authenticated",
+            "wami": { "mode": "bootstrap", "public_key": public_pem }
+        }))
+        .expect("config from json");
+        let provider = WamiAuthProvider::from_config(&config).expect("provider");
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::AUTHORIZATION,
+            HeaderValue::from_str(&format!("Bearer {}", pair.access_token)).unwrap(),
+        );
+        let context = provider
+            .extract_context(&headers)
+            .await
+            .expect("a token this host issued must verify");
+        assert!(matches!(context, AuthContext::User { .. }));
+    }
 
     /// Generate a fresh Ed25519 key pair for testing
     fn generate_test_keys() -> (SigningKey, VerifyingKey) {
