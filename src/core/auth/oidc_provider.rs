@@ -50,7 +50,18 @@ const ACCEPTED: [Algorithm; 5] = [
 ];
 
 /// How long a fetched key set is trusted before a refresh is attempted on the next request.
-const DEFAULT_TTL: Duration = Duration::from_secs(15 * 60);
+///
+/// Five minutes, not an hour: a key the provider has revoked must stop verifying here quickly.
+/// The cost is one round-trip per five minutes per instance.
+const DEFAULT_TTL: Duration = Duration::from_secs(5 * 60);
+
+/// Minimum delay between two forced refetches.
+///
+/// Without it, any caller can send a token with a fresh random `kid` and make this host hammer the
+/// provider: the refetch happens *before* the signature is checked, so it is reachable
+/// unauthenticated. A legitimate rotation publishes its new key once; waiting a few seconds for it
+/// costs nothing, and an attacker gets one round-trip per interval instead of one per request.
+const MIN_REFETCH: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Deserialize)]
 struct DiscoveryDocument {
@@ -93,6 +104,8 @@ pub struct OidcAuthProvider {
     /// Serializes refreshes so a burst of unknown `kid`s costs one round-trip, not one each.
     refresh: Mutex<()>,
     ttl: Duration,
+    /// Minimum delay between two forced refetches (see [`MIN_REFETCH`]).
+    min_refetch: Duration,
 }
 
 impl std::fmt::Debug for OidcAuthProvider {
@@ -143,10 +156,16 @@ impl OidcAuthProvider {
             config,
             default_policy,
             tenant_claim,
-            http: reqwest::Client::new(),
+            http: reqwest::Client::builder()
+                // A hung provider must not hold the refresh lock (and every waiting request) open.
+                .timeout(Duration::from_secs(10))
+                .connect_timeout(Duration::from_secs(3))
+                .build()
+                .unwrap_or_else(|_| reqwest::Client::new()),
             cache: RwLock::new(None),
             refresh: Mutex::new(()),
             ttl: DEFAULT_TTL,
+            min_refetch: MIN_REFETCH,
         }
     }
 
@@ -154,6 +173,16 @@ impl OidcAuthProvider {
     #[must_use]
     pub fn with_ttl(mut self, ttl: Duration) -> Self {
         self.ttl = ttl;
+        self
+    }
+
+    /// Override the minimum delay between two forced refetches.
+    ///
+    /// Set it to `Duration::ZERO` only for a provider nobody untrusted can reach directly (tests,
+    /// or a single-tenant host behind its own gate).
+    #[must_use]
+    pub fn with_refetch_interval(mut self, min_refetch: Duration) -> Self {
+        self.min_refetch = min_refetch;
         self
     }
 
@@ -187,12 +216,21 @@ impl OidcAuthProvider {
     }
 
     /// Discard the cache and fetch again. Used when a token names a key we do not hold.
+    ///
+    /// Bounded by [`MIN_REFETCH`]: a token can name any `kid` it likes, and the refetch happens
+    /// before the signature is checked, so it is reachable unauthenticated.
     async fn refetch(&self, known: Option<&Arc<KeySet>>) -> Result<Arc<KeySet>> {
         let _guard = self.refresh.lock().await;
         if let Some(current) = self.cache.read().await.as_ref() {
             // A concurrent request already installed a set newer than the one we held.
             if known.is_some_and(|kept| Arc::ptr_eq(kept, current)) {
-                // fall through: same set, refetch
+                // fall through: same set, refetch unless it is too recent to be worth it
+                if current.fetched.elapsed() < self.min_refetch {
+                    bail!(
+                        "key set refreshed less than {:?} ago: unknown kid",
+                        self.min_refetch
+                    );
+                }
             } else {
                 return Ok(current.clone());
             }
@@ -288,14 +326,18 @@ impl OidcAuthProvider {
             bail!("no published key matches the token's kid {kid:?}");
         };
 
+        let Some(audience) = self.config.audience.as_deref() else {
+            // `new()` is public and does not check; refusing here keeps a misbuilt provider from
+            // panicking a request thread.
+            bail!("auth.oidc.audience is required: this provider cannot name its resource server");
+        };
         let mut validation = Validation::new(header.alg);
         validation.set_issuer(&[set.issuer.as_str()]);
-        validation.set_audience(&[self
-            .config
-            .audience
-            .as_deref()
-            .expect("checked in from_auth_config")]);
+        validation.set_audience(&[audience]);
         validation.set_required_spec_claims(&["exp", "aud", "iss"]);
+        // An access token may carry `nbf`; accepting a token that is not valid yet is a choice
+        // nobody made on purpose.
+        validation.validate_nbf = true;
 
         let data = decode::<Value>(token, &key, &validation).context("verifying the OIDC token")?;
         Ok((data.claims, set.issuer.clone()))
@@ -313,9 +355,13 @@ impl OidcAuthProvider {
                 )
             })?;
         let user_id = Uuid::parse_str(subject).unwrap_or_else(|_| {
-            // OIDC subjects are opaque (`auth0|…`, an email). Deriving a UUID from the issuer and
-            // the subject keeps the mapping stable across restarts without a table, and two
-            // providers naming the same string stay distinct.
+            // OIDC subjects are opaque (`auth0|…`, an email). Deriving the UUID from the subject
+            // alone keeps it stable across restarts and instances without a table.
+            //
+            // Limit, stated rather than hidden: the issuer is **not** mixed in, so two IdPs that
+            // issue the same `sub` for two different people map to the same user. A multi-IdP
+            // deployment must prefix its subjects, or issue UUID subjects (see
+            // docs/oidc-resource-server.md §5).
             Uuid::new_v5(&Uuid::NAMESPACE_URL, subject.as_bytes())
         });
 
@@ -696,7 +742,8 @@ mod tests {
         let (sk1, jwk1) = key(6, "k1");
         let (sk2, jwk2) = key(7, "k2");
         let idp = idp(&[jwk1]).await;
-        let provider = idp.provider();
+        // A real rotation is not limited by the anti-hammering cooldown.
+        let provider = idp.provider().with_refetch_interval(Duration::ZERO);
         let tenant = Uuid::new_v4();
         let sub = Uuid::new_v4();
         let claims = claims(&idp.base, AUDIENCE, &sub.to_string(), &tenant.to_string());
@@ -717,6 +764,106 @@ mod tests {
             idp.jwks_hits.load(Ordering::SeqCst),
             2,
             "an unknown kid must cost exactly one refetch"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_foreign_issuer_is_refused() {
+        let (sk, jwk) = key(11, "k1");
+        let idp = idp(&[jwk]).await;
+        // The signature is valid, the key is the provider's, and `iss` names another issuer.
+        let token = sign(
+            &sk,
+            "k1",
+            &claims(
+                "https://someone-else.example.com",
+                AUDIENCE,
+                &Uuid::new_v4().to_string(),
+                &Uuid::new_v4().to_string(),
+            ),
+        );
+        let err = idp
+            .provider()
+            .extract_context(&headers(&token))
+            .await
+            .expect_err("foreign issuer");
+        assert!(
+            format!("{err:#}").to_lowercase().contains("issuer"),
+            "{err:#}"
+        );
+    }
+
+    /// A token can name any `kid` it likes, and the refetch happens before the signature is
+    /// checked — so it is reachable unauthenticated. It must cost at most one round-trip per
+    /// interval, whatever the caller sends.
+    #[tokio::test]
+    async fn rapid_unknown_kids_do_not_hammer_the_provider() {
+        let (sk, jwk) = key(12, "k1");
+        let idp = idp(&[jwk]).await;
+        let provider = idp.provider();
+        let claims = claims(
+            &idp.base,
+            AUDIENCE,
+            &Uuid::new_v4().to_string(),
+            &Uuid::new_v4().to_string(),
+        );
+
+        // Prime the cache.
+        provider
+            .extract_context(&headers(&sign(&sk, "k1", &claims)))
+            .await
+            .expect("first key");
+        assert_eq!(idp.jwks_hits.load(Ordering::SeqCst), 1);
+
+        for kid in ["random-1", "random-2", "random-3"] {
+            assert!(
+                provider
+                    .extract_context(&headers(&sign(&sk, kid, &claims)))
+                    .await
+                    .is_err(),
+                "an unknown kid is not a key"
+            );
+        }
+        assert_eq!(
+            idp.jwks_hits.load(Ordering::SeqCst),
+            1,
+            "the cooldown must keep an unauthenticated caller from forcing refetches"
+        );
+    }
+
+    /// `new()` is public and does not check the audience; using such a provider must fail, not
+    /// panic a request thread.
+    #[tokio::test]
+    async fn a_provider_without_an_audience_refuses_instead_of_panicking() {
+        let (sk, jwk) = key(13, "k1");
+        let idp = idp(&[jwk]).await;
+        let provider = OidcAuthProvider::new(
+            OidcConfig {
+                discovery_url: format!("{}/discovery", idp.base),
+                audience: None,
+                user_claim: "sub".to_string(),
+                roles_claim: "roles".to_string(),
+            },
+            "authenticated".to_string(),
+            "tenant_id".to_string(),
+        );
+        let token = sign(
+            &sk,
+            "k1",
+            &claims(
+                &idp.base,
+                AUDIENCE,
+                &Uuid::new_v4().to_string(),
+                &Uuid::new_v4().to_string(),
+            ),
+        );
+        let err = provider
+            .extract_context(&headers(&token))
+            .await
+            .expect_err("no audience");
+        assert!(
+            format!("{err:#}").to_lowercase().contains("audience"),
+            "{err:#}"
         );
     }
 

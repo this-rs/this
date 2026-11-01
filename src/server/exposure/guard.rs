@@ -269,7 +269,16 @@ impl SurfaceGuard {
                 return f(&env);
             }
         }
-        let env = RegistryEnv::new(Some(&e.resolvers), &self.ctx).with_resource(resource);
+        // No IAM wired at all: the token's own `scope` is the only thing that can answer `perm:`,
+        // exactly as `Authorization::check_iam` does on REST. Same rule, same fallback — a surface
+        // that could not answer would otherwise refuse a caller the REST API allows.
+        let scope_perm = |p: &str| -> Option<bool> {
+            crate::server::middleware::authorization::scope_grants(&self.ctx, p).then_some(true)
+        };
+        let perm_ref: &PermissionFn<'_> = &scope_perm;
+        let env = RegistryEnv::new(Some(&e.resolvers), &self.ctx)
+            .with_resource(resource)
+            .with_permission(perm_ref);
         f(&env)
     }
 
