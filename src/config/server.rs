@@ -204,8 +204,19 @@ fn default_cors_methods() -> Vec<String> {
         .collect()
 }
 
+/// En-têtes acceptés par défaut en CORS.
+///
+/// `x-tenant-id` en est **retiré** (31/10/2026). Il y figurait pour permettre à
+/// un navigateur de désigner un locataire ; depuis que le middleware confronte
+/// cette désignation au jeton (HTTP, `46a80ba`) et que gRPC refuse l'en-tête
+/// seul, il n'accorde plus rien qu'un jeton ne donne déjà. Le laisser dans
+/// `allow_headers` ne servait donc qu'à maintenir ouverte une porte qu'on venait
+/// de fermer : si un jour un chemin la relisait sans confrontation, une page
+/// hostile pourrait retarger un locataire en silence. Un déploiement qui a
+/// besoin d'impersonation émet un jeton portant le locataire, ou passe par un
+/// client non-navigateur — CORS ne concerne que les navigateurs.
 fn default_cors_headers() -> Vec<String> {
-    ["authorization", "content-type", "x-tenant-id"]
+    ["authorization", "content-type"]
         .iter()
         .map(|s| (*s).to_string())
         .collect()
