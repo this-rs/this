@@ -43,6 +43,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   l'appelant.
 
 ### Security
+- **gRPC : l'en-tête `x-tenant-id` seul n'ouvre plus de flux d'événements.**
+  `portee_du_flux` (`src/server/exposure/grpc/event_service.rs`) acceptait un
+  en-tête bien formé comme portée du flux quand aucune identité n'était posée :
+  c'était le **dernier endroit où le client choisissait son locataire**, côté
+  gRPC, après la fermeture du HTTP (`46a80ba`). Un appelant sans identité
+  ouvrait un flux sur le locataire qu'il nommait et lisait ses événements.
+  La cause était qu'aucune identité n'était résolue sur ce chemin quand la
+  surface n'était pas armée (`identity_layer` ne tourne qu'avec `enforce`). La
+  portée passe désormais par `identity::context_of`, l'accesseur par appel, qui
+  lit l'`AuthContext` posé par la couche **ou** les métadonnées `authorization`
+  directement. Sans identité : `PermissionDenied`, avec le remède nommé.
+  Un locataire n'est plus jamais une déclaration.
+- **`x-tenant-id` retiré des en-têtes CORS par défaut** (`config/server.rs`). Il
+  n'accordait plus rien qu'un jeton ne donne déjà ; le laisser dans
+  `allow_headers` maintenait ouverte une porte qu'on venait de fermer. Aucun
+  effet sur un client non-navigateur (CORS ne concerne que les navigateurs).
 - **Le client ne choisit plus son locataire.** `tenant_resolver_middleware`
   (`src/server/middleware/tenant.rs`) lisait `x-tenant-id` **avant** `AuthContext`,
   puis `?tenant_id=`, sans jamais confronter la valeur réclamée au jeton. Un
