@@ -23,7 +23,12 @@ jobs:
   test:
     name: Test Suite
     runs-on: ubuntu-latest
+    # Nightly is an early-warning signal, not a gate: a nightly regression
+    # (e.g. rustc E0391 on async-graphql 7.2.1, nightly 2026-10-31) must not
+    # cancel the stable and beta legs, which are the ones that decide a merge.
+    continue-on-error: ${{ matrix.rust == 'nightly' }}
     strategy:
+      fail-fast: false
       matrix:
         rust:
           - stable
