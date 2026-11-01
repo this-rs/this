@@ -23,9 +23,9 @@ use std::sync::Arc;
 use axum::http::HeaderMap;
 use uuid::Uuid;
 
-#[cfg(any(feature = "obrain", feature = "wami"))]
-use crate::core::auth::descriptor_policy::PermissionFn;
-use crate::core::auth::descriptor_policy::RegistryEnv;
+// No `cfg`: the scope fallback below (`no IAM wired at all`) hands a `PermissionFn` to the env on
+// every build, so gating this import on the IAM features broke `--features graphql,grpc` alone.
+use crate::core::auth::descriptor_policy::{PermissionFn, RegistryEnv};
 use crate::core::auth::surface::{PolicyIndex, authorize_link_op, authorize_op};
 use crate::core::auth::{
     AuthContext, AuthResolverRegistry, ForwardedHeaders, RequestMeta, ResourceRef,

@@ -80,6 +80,14 @@ jobs:
       - name: Run doc tests
         run: cargo test --doc --features all,wami
 
+      # The scope fallback in `SurfaceGuard::with_env` and `Authorization::check_iam` only runs
+      # when NO IAM plan is wired — which is exactly the shape of an OIDC resource server. The
+      # `all,wami` build above never compiles that path, so a `cfg` mistake there stays green in
+      # CI and breaks a real deployment (found on #92: `PermissionFn` was cfg-gated to
+      # obrain/wami while the no-IAM branch used it unconditionally).
+      - name: Check the surfaces with no IAM plan (the OIDC shape)
+        run: cargo check --no-default-features --features graphql,grpc,websocket
+
       - name: Test this-descriptor (pure crate, every feature)
         run: cargo test -p this-descriptor --all-features
 
