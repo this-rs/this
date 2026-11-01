@@ -112,6 +112,24 @@ s'applique pas (fermé), mais `NotIpAddress` et `…IfExists` **s'appliquent** :
 conditionné deviendrait inconditionnel. Un document qui les utilise est donc **non tranchable**
 tant que l'IP est inconnue (`needs_known_ip`). MFA : inconnu tant que le jeton ne porte pas `amr`.
 
+### D9 — Audience et fenêtre legacy pilotées par le mode (tranché 2026-11-01)
+`wami.audience` est **obligatoire** en modes `sts` et `embedded` (déploiements réels) : sans elle,
+un jeton émis pour un autre service et signé par une clé partagée ouvrirait toutes les portes.
+Optionnelle en `bootstrap` (développement, `warn`). La fenêtre legacy (jetons sans `aud` /
+`token_use`) est **fermée** hors `bootstrap`, sauf `accept_legacy_tokens: true` posé explicitement
+pour une migration. Le STS émet pour `wami.audience` (défaut `this-rs`).
+**Q1 tranchée** : `sub` reste l'UUID utilisateur. Les consommateurs `this` (porte, refresh,
+en-têtes `x-this-subject`) le parsent ainsi ; l'ARN wami viendra avec T7 (OAuth/OIDC), où
+l'interopérabilité des jetons devient un objectif.
+
+### D10 — Persistance par fichiers à côté de la config
+`wami.policies_path` (définition JSON : principaux, rôles, frontières) **arme** l'IAM WAMI sur
+toutes les surfaces au `build_host` ; illisible ⇒ l'hôte refuse de démarrer. `wami.identity_path`
+est le **journal** du registre d'identité (`[{tenant, segment}]`), relu au démarrage et réécrit
+(tmp + rename) à **chaque nouveau tenant**, sous le verrou : une allocation non persistée est
+**refusée**. Requis avec `policies_path` hors `bootstrap`. Alternatives écartées : store obrain
+(couple l'IAM à un backend optionnel), sauvegarde à l'arrêt (perd les tenants d'un crash).
+
 ## 5. Carte de migration
 
 | Élément `this` | Équivalent wami | Action |
@@ -161,14 +179,14 @@ tant que l'IP est inconnue (`needs_known_ip`). MFA : inconnu tant que le jeton n
 | T5 authz `perm:` → wami | `d1b3275` | fait (non-REST) | `wami_policy::decide` ; `WamiEnforcement` porté par l'hôte ; branché dans le guard (gRPC/GraphQL/WS) |
 | T5b authz REST → wami | `1849b62` | fait | `Authorization::with_wami` ; `check_iam` répond seul à `perm:` quand armé |
 | T5c ressources, rôles, faits de requête | (ce commit) | fait | `ResourceRef` lié dans la fermeture sur toutes les surfaces ; rôles = groupes ; `RequestMeta` depuis REST/gRPC/GraphQL/WS |
-| T5d persistance | (ce commit) | fait (crochets) | `IdentityRegistry::snapshot/load` ; `WamiEnforcement::load_definition(_json)` atomique ; l'hôte choisit le support |
+| T5d persistance | `31a4861`, (ce commit) | fait | journal `identity_path` write-through ; `policies_path` chargé et armé par `build_host` (D10) |
 | T6 docs + revue | ce commit | en cours | voir §9 |
 | T7 OAuth/OIDC + `wami-scope` | — | déféré | — |
 
 ### Limites connues (à lever avant la mise en production)
-- **Persistance = crochets, pas de support** : `identity_snapshot()` et `load_definition_json()`
-  existent ; c'est à l'hôte de les brancher sur un fichier ou un store **et d'appeler `load` avant
-  la première requête**. Sans ce branchement, un redémarrage réalloue les segments.
+- **Persistance** : fichiers locaux (D10). Un déploiement multi-instances doit partager
+  `identity_path` (volume commun) ou passer par un store : le journal n'arbitre pas deux processus
+  qui allouent en même temps.
 - **Adresse du pair inconnue** sans proxy cru (pas de `ConnectInfo` sur les écouteurs) : les
   conditions IP ne sont utilisables que derrière Caddy avec `trust_forwarded_host`.
 - **Lien partiellement nommé** : avec le type seul (gRPC `CreateLink`, suppression par id), la cible
@@ -182,11 +200,10 @@ tant que l'IP est inconnue (`needs_known_ip`). MFA : inconnu tant que le jeton n
   être échangé pendant la fenêtre. Le défaut existait sur `main` ; il est fermé pour tout jeton
   émis après ce lot.
 
-## 9. Points à trancher (utilisateur)
-- **Q1 — `sub` UUID ou ARN ?** Garder l'UUID préserve les consommateurs `this` mais rend les jetons
-  non interopérables avec wami. Passer à l'ARN est possible, mais casse le contrat actuel.
-- **Q2 — `wami.audience` obligatoire ?** Recommandé en production ; casse les configs sans audience.
-- **Q3 — T5b (REST)** : fait dans ce lot (`1849b62`). À confirmer en revue.
+## 9. Points tranchés
+- **Q1** : `sub` = UUID (D9). **Q2** : audience obligatoire hors `bootstrap` (D9). **Q3** : REST
+  branché (`1849b62`). **Persistance** : fichiers (D10). Décisions prises en autonomie sur consigne
+  de l'utilisateur (« réponds par toi-même ») le 2026-11-01.
 
 ## 10. Guide de migration (ancien → wami)
 - Jetons émis avant ce lot : acceptés (pas d'`aud`) tant que `with_legacy_tokens(true)`.
@@ -200,5 +217,17 @@ tant que l'IP est inconnue (`needs_known_ip`). MFA : inconnu tant que le jeton n
   "principals": [{tenant, user, policies: {nom: doc}, boundary?: {arn, document}}] }`. Les documents
   sont des documents wami (`Version`, `Statement`) ; actions `this:<entité>:<op>`, ressources
   `arn:wami:iam:${tenant}:wami:<instance>:<entité>/<uuid|*>` ou `…:link/<type>/<source>/<cible>`.
-- Au démarrage : `registry.load(snapshot persisté)` **puis** `load_definition` ; à l'arrêt ou après
-  tout nouveau tenant : persister `identity_snapshot()`.
+- Configuration minimale en production :
+  ```yaml
+  auth:
+    provider: wami
+    wami:
+      mode: sts            # ou embedded
+      public_key: "-----BEGIN PUBLIC KEY-----…"
+      issuer: this-rs
+      audience: this-rs    # obligatoire hors bootstrap
+      policies_path: ./config/wami-policies.json
+      identity_path: ./data/wami-identity.json
+      # accept_legacy_tokens: true   # seulement pendant une migration
+  ```
+  Programmatique : `builder.with_wami_enforcement(enf)` prime sur la config.

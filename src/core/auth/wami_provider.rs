@@ -147,18 +147,25 @@ impl WamiAuthProvider {
             validation.set_issuer::<&str>(&[]);
         }
 
-        // Configure audience validation
-        if let Some(ref audience) = wami_config.audience {
-            validation.set_audience(&[audience.as_str()]);
-        } else {
-            // No audience configured: accept any `aud`, including none. jsonwebtoken
-            // would refuse an `aud` present with an empty expected set, and the STS
-            // now always sets one. Configure `wami.audience` to enforce it (ADR D4).
-            validation.validate_aud = false;
-            tracing::warn!(
-                "wami.audience is not set: tokens signed by this key are accepted \
-                 whatever their audience. Set wami.audience to enforce it (ADR D4)."
-            );
+        // Audience: required outside bootstrap (ADR D9). A token for another
+        // service, signed by a shared key, would otherwise open every door here.
+        let strict = !matches!(wami_config.mode, crate::config::auth::AuthMode::Bootstrap);
+        match &wami_config.audience {
+            Some(audience) => validation.set_audience(&[audience.as_str()]),
+            None if strict => bail!(
+                "wami.audience is required in {:?} mode: without it a token issued for \
+                 another service would be accepted. Set it, or use bootstrap mode for development.",
+                wami_config.mode
+            ),
+            None => {
+                // Bootstrap (development): accept any `aud`, including none.
+                // jsonwebtoken would refuse an `aud` present with an empty expected set.
+                validation.validate_aud = false;
+                tracing::warn!(
+                    "wami.audience is not set (bootstrap mode): tokens signed by this key are \
+                     accepted whatever their audience."
+                );
+            }
         }
 
         // Always validate expiration
@@ -170,14 +177,17 @@ impl WamiAuthProvider {
             decoding_key,
             validation,
             config: config.clone(),
-            accept_legacy_tokens: true,
+            // ADR D4/D9: the legacy window is open in bootstrap only, unless the
+            // operator opens it explicitly for a migration.
+            accept_legacy_tokens: wami_config.accept_legacy_tokens.unwrap_or(!strict),
         })
     }
 
     /// Whether tokens without `aud` are accepted when an audience is configured.
     ///
-    /// Defaults to `true`: the ADR D4 window, during which tokens issued before the
-    /// audience existed still verify. Pass `false` to enforce the audience strictly.
+    /// The ADR D4 window, during which tokens issued before the audience existed
+    /// still verify. From config: `wami.accept_legacy_tokens`, default `true` in
+    /// bootstrap mode only.
     #[must_use]
     pub fn with_legacy_tokens(mut self, accept: bool) -> Self {
         self.accept_legacy_tokens = accept;
@@ -385,6 +395,9 @@ mod tests {
         // Audience not configured: any `aud` passes.
         let mut cfg = test_config(&pub_pem);
         cfg.wami.as_mut().unwrap().audience = None;
+        // Sts mode refuses a missing audience; bootstrap tolerates it.
+        assert!(WamiAuthProvider::from_config(&cfg).is_err());
+        cfg.wami.as_mut().unwrap().mode = crate::config::auth::AuthMode::Bootstrap;
         let open = WamiAuthProvider::from_config(&cfg).expect("provider");
         assert!(open.verify_token(&pair.access_token).is_ok());
 
@@ -418,10 +431,12 @@ mod tests {
 
         let mut cfg = test_config(&pub_pem);
         cfg.wami.as_mut().unwrap().audience = Some(DEFAULT_AUDIENCE.to_string());
+        // Sts mode: the window is closed by default; a migration opens it explicitly.
+        let strict = WamiAuthProvider::from_config(&cfg).expect("provider");
+        assert!(!strict.accept_legacy_tokens);
+        cfg.wami.as_mut().unwrap().accept_legacy_tokens = Some(true);
         let lenient = WamiAuthProvider::from_config(&cfg).expect("provider");
-        let strict = WamiAuthProvider::from_config(&cfg)
-            .expect("provider")
-            .with_legacy_tokens(false);
+        assert!(lenient.accept_legacy_tokens);
 
         // Refresh tokens never authenticate, whatever the window.
         assert!(lenient.verify_token(&pair.refresh_token).is_err());
@@ -448,6 +463,9 @@ mod tests {
                 private_key: None,
                 token_ttl_secs: 3600,
                 refresh_ttl_secs: 86400,
+                accept_legacy_tokens: None,
+                policies_path: None,
+                identity_path: None,
             }),
             ..Default::default()
         }
@@ -519,6 +537,9 @@ mod tests {
                 private_key: None,
                 token_ttl_secs: 3600,
                 refresh_ttl_secs: 86400,
+                accept_legacy_tokens: None,
+                policies_path: None,
+                identity_path: None,
             }),
             ..Default::default()
         };

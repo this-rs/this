@@ -25,7 +25,7 @@
 //! deployment, or an ARN minted before a restart may point at another tenant.
 
 use crate::core::auth::AuthContext;
-use anyhow::{Result, anyhow, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use std::collections::HashMap;
 use std::sync::Mutex;
 use uuid::Uuid;
@@ -48,6 +48,16 @@ struct RegistryState {
 #[derive(Debug)]
 pub struct IdentityRegistry {
     state: Mutex<RegistryState>,
+    /// Written through on every new allocation, so a restart restores the same
+    /// segments. `None`: in memory only.
+    journal: Option<std::path::PathBuf>,
+}
+
+/// One journal entry.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+struct JournalEntry {
+    tenant: Uuid,
+    segment: u64,
 }
 
 impl Default for IdentityRegistry {
@@ -64,7 +74,46 @@ impl IdentityRegistry {
                 next: ROOT_SEGMENT + 1,
                 ..RegistryState::default()
             }),
+            journal: None,
         }
+    }
+
+    /// A registry journaled in `path`: restored from it when the file exists,
+    /// and rewritten (atomically, tmp + rename) on every new allocation. A
+    /// write failure refuses the allocation: a segment that cannot be persisted
+    /// could be handed to another tenant after a restart.
+    pub fn with_journal(path: impl Into<std::path::PathBuf>) -> Result<Self> {
+        let path = path.into();
+        let registry = Self::new();
+        if path.exists() {
+            let text = std::fs::read_to_string(&path)
+                .with_context(|| format!("reading identity journal {}", path.display()))?;
+            let entries: Vec<JournalEntry> = serde_json::from_str(&text)
+                .with_context(|| format!("identity journal {} unreadable", path.display()))?;
+            registry.load(entries.into_iter().map(|e| (e.tenant, e.segment)))?;
+        }
+        Ok(Self {
+            journal: Some(path),
+            ..registry
+        })
+    }
+
+    fn write_journal(path: &std::path::Path, state: &RegistryState) -> Result<()> {
+        let mut entries: Vec<JournalEntry> = state
+            .by_uuid
+            .iter()
+            .map(|(t, s)| JournalEntry {
+                tenant: *t,
+                segment: *s,
+            })
+            .collect();
+        entries.sort_by_key(|e| e.segment);
+        let text = serde_json::to_string_pretty(&entries)?;
+        let tmp = path.with_extension("json.tmp");
+        std::fs::write(&tmp, text).with_context(|| format!("writing {}", tmp.display()))?;
+        std::fs::rename(&tmp, path)
+            .with_context(|| format!("renaming {} to {}", tmp.display(), path.display()))?;
+        Ok(())
     }
 
     fn lock(&self) -> Result<std::sync::MutexGuard<'_, RegistryState>> {
@@ -89,6 +138,15 @@ impl IdentityRegistry {
         }
         state.by_uuid.insert(tenant, segment);
         state.by_segment.insert(segment, tenant);
+        if let Some(path) = &self.journal
+            && let Err(e) = Self::write_journal(path, &state)
+        {
+            // Not persisted: not allocated. The next call will try again.
+            state.by_uuid.remove(&tenant);
+            state.by_segment.remove(&segment);
+            state.next = segment;
+            return Err(e.context("identity journal not written: allocation refused"));
+        }
         Ok(segment)
     }
 
@@ -276,6 +334,46 @@ mod tests {
         assert!(reg.load([(Uuid::new_v4(), u64::MAX)]).is_err());
         // Nothing wrapped: allocation still starts above the root.
         assert_ne!(reg.tenant_segment(Uuid::new_v4()).unwrap(), ROOT_SEGMENT);
+    }
+
+    #[test]
+    fn journal_restores_segments_across_restarts() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("identity.json");
+        let (a, b) = (Uuid::new_v4(), Uuid::new_v4());
+        let (sa, sb) = {
+            let reg = IdentityRegistry::with_journal(&path).unwrap();
+            (
+                reg.tenant_segment(a).unwrap(),
+                reg.tenant_segment(b).unwrap(),
+            )
+        };
+        assert!(path.exists(), "written through on allocation");
+        // A new process: same tenants, same segments; a new tenant gets a fresh one.
+        let reg = IdentityRegistry::with_journal(&path).unwrap();
+        assert_eq!(reg.tenant_segment(a).unwrap(), sa);
+        assert_eq!(reg.tenant_segment(b).unwrap(), sb);
+        let c = reg.tenant_segment(Uuid::new_v4()).unwrap();
+        assert!(c > sa && c > sb);
+    }
+
+    #[test]
+    fn unwritable_journal_refuses_the_allocation() {
+        let dir = tempfile::tempdir().unwrap();
+        // A directory where the journal file should be: the write cannot succeed.
+        let path = dir.path().join("identity.json");
+        std::fs::create_dir(&path).unwrap();
+        let reg = IdentityRegistry {
+            state: Mutex::new(RegistryState {
+                next: ROOT_SEGMENT + 1,
+                ..RegistryState::default()
+            }),
+            journal: Some(path),
+        };
+        let t = Uuid::new_v4();
+        assert!(reg.tenant_segment(t).is_err());
+        // Nothing was kept: the snapshot is empty.
+        assert!(reg.snapshot().unwrap().is_empty());
     }
 
     #[test]
