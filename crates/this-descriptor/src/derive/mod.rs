@@ -15,12 +15,14 @@
 //! Note on gRPC: the served wire is `google.protobuf.Struct` (`proto/this_grpc.proto`);
 //! `proto_file` produces CLIENT-CODEGEN DOCUMENTATION, not the served contract, until a
 //! typed dynamic service exists. `Struct` carries numbers as doubles: I64/U64/Decimal lose
-//! precision on that wire. TypeScript derivation is out of this batch (no consumer: the
-//! front is Leptos).
+//! precision on that wire. [`typescript`] answers "what TypeScript type is this field?" from the
+//! descriptor — the consumer is `this-cli`, which generates `api-client.ts`, and any front that
+//! wants the wire type rather than a guess from the Rust struct (RFC front-back-nomenclature §6.3).
 
 pub mod graphql;
 pub mod json_schema;
 pub mod proto;
+pub mod typescript;
 
 use crate::engine::validate::WriteOp;
 use crate::entity::EntityDesc;
