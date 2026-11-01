@@ -23,17 +23,32 @@ jobs:
   test:
     name: Test Suite
     runs-on: ubuntu-latest
-    # Nightly is an early-warning signal, not a gate: a nightly regression
-    # (e.g. rustc E0391 on async-graphql 7.2.1, nightly 2026-10-31) must not
-    # cancel the stable and beta legs, which are the ones that decide a merge.
+    # Nightly is expected to be GREEN (see the feature set below). `continue-on-error`
+    # stays: if a dependency we add later stops building on nightly, this leg must report
+    # it without blocking a merge — stable and beta are the ones that decide a merge.
+    # A red nightly leg therefore means "look at this", not "you cannot ship".
     continue-on-error: ${{ matrix.rust == 'nightly' }}
     strategy:
       fail-fast: false
       matrix:
-        rust:
-          - stable
-          - beta
-          - nightly
+        include:
+          - rust: stable
+            features: all,wami
+          - rust: beta
+            features: all,wami
+          # Nightly answers ONE question: does OUR code compile and pass on tomorrow's
+          # compiler? It cannot answer the full-matrix question, because several third
+          # party async crates do not build on it today:
+          #   error[E0391]: cycle detected when computing when
+          #     `dynamic::field::FieldValueInner` needs async drop   (async-graphql 7.2.1)
+          #   error[E0391]: … when `error::Error` needs async drop     (mongodb)
+          # Those are upstream and unrelated to this crate. Running them nightly kept a
+          # check red on every single run — which is how a team learns to ignore red.
+          # This set covers everything written here (storage core, websocket, push,
+          # signed modules, OIDC, WAMI) and nothing that does not compile. If a real
+          # nightly regression appears in our code, this leg goes red and says so.
+          - rust: nightly
+            features: in-memory,websocket,push,module-signing,oidc,wami
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
@@ -72,13 +87,13 @@ jobs:
       # Use --features all,wami (not --all-features) because obrain and
       # frontend depend on local path checkouts not available on CI.
       - name: Run unit tests
-        run: cargo test --lib --features all,wami --verbose
+        run: cargo test --lib --features ${{ matrix.features }} --verbose
 
       - name: Run integration tests (sequential for DB isolation)
-        run: cargo test --features all,wami --test '*' -- --test-threads=1
+        run: cargo test --features ${{ matrix.features }} --test '*' -- --test-threads=1
 
       - name: Run doc tests
-        run: cargo test --doc --features all,wami
+        run: cargo test --doc --features ${{ matrix.features }}
 
       # The scope fallback in `SurfaceGuard::with_env` and `Authorization::check_iam` only runs
       # when NO IAM plan is wired — which is exactly the shape of an OIDC resource server. The
