@@ -8,6 +8,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Signature des modules stockés (ancre de confiance).** Un module stocké n'avait
+  que l'**intégrité** : ses fichiers devaient correspondre aux etags d'un
+  manifeste que quiconque peut écrire dans le store peut réécrire, de façon
+  parfaitement cohérente. Il manquait l'**authentification**.
+  `VfsModuleStore::with_trust_anchor(TrustAnchor)` (feature `module-signing`)
+  exige désormais que le manifeste porte une signature **Ed25519** d'une clé
+  connue de l'hôte ; `with_signing_key` signe à la publication, dans le même
+  geste que l'écriture — les octets signés et les octets stockés sont donc les
+  mêmes par construction, ce qui évite la signature qui ne vérifie nulle part.
+  Le manifeste est le bon point de scellement : il porte l'etag de chaque
+  fichier, donc le signer authentifie tout.
+  Refus nommés : `this.module.unsigned` (pas de signature alors qu'une ancre est
+  déclarée), `this.module.untrusted_key` (identifiant de clé inconnu),
+  `this.module.bad_signature` (manifeste modifié après signature, ou signature
+  forgée sous un identifiant connu). `verify_strict` plutôt que `verify` :
+  les signatures malléables et les clés d'ordre faible sont rejetées.
+  **Aucun changement sans ancre** : un hôte qui n'en déclare pas garde le
+  comportement historique (intégrité seule) — la protection s'active en la
+  demandant. 6 tests, dont celui de l'attaque visée : garder une signature
+  valide et changer ce qu'elle couvre.
+  Reste à faire, dit explicitement : un garde au **runtime** qui refuse
+  d'activer `hot_load` sur un store incapable d'authentifier. Aujourd'hui
+  l'application est une règle d'exploitation, pas encore un refus.
 - **Soft delete, pour de vrai.** Le README promettait « Built-in soft delete
   support » ; `DataService::delete` était un DELETE dur et `get`/`list`/`search`
   ne regardaient jamais `deleted_at`. Le contrat est désormais écrit **une fois**
@@ -43,6 +66,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   l'appelant.
 
 ### Security
+- **gRPC : l'en-tête `x-tenant-id` seul n'ouvre plus de flux d'événements.**
+  `portee_du_flux` (`src/server/exposure/grpc/event_service.rs`) acceptait un
+  en-tête bien formé comme portée du flux quand aucune identité n'était posée :
+  c'était le **dernier endroit où le client choisissait son locataire**, côté
+  gRPC, après la fermeture du HTTP (`46a80ba`). Un appelant sans identité
+  ouvrait un flux sur le locataire qu'il nommait et lisait ses événements.
+  La cause était qu'aucune identité n'était résolue sur ce chemin quand la
+  surface n'était pas armée (`identity_layer` ne tourne qu'avec `enforce`). La
+  portée passe désormais par `identity::context_of`, l'accesseur par appel, qui
+  lit l'`AuthContext` posé par la couche **ou** les métadonnées `authorization`
+  directement. Sans identité : `PermissionDenied`, avec le remède nommé.
+  Un locataire n'est plus jamais une déclaration.
+- **`x-tenant-id` retiré des en-têtes CORS par défaut** (`config/server.rs`). Il
+  n'accordait plus rien qu'un jeton ne donne déjà ; le laisser dans
+  `allow_headers` maintenait ouverte une porte qu'on venait de fermer. Aucun
+  effet sur un client non-navigateur (CORS ne concerne que les navigateurs).
 - **Le client ne choisit plus son locataire.** `tenant_resolver_middleware`
   (`src/server/middleware/tenant.rs`) lisait `x-tenant-id` **avant** `AuthContext`,
   puis `?tenant_id=`, sans jamais confronter la valeur réclamée au jeton. Un
