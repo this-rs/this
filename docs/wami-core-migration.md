@@ -1,6 +1,7 @@
 # WAMI — migration de `this` vers l'original publié
 
-Status: **draft (branche `feat/wami-core-migration`, non fusionnée)**
+Status: **fusionné** — PR #87 (`7751a66`, 2026-11-01). T7 (OAuth/OIDC, `wami-scope`) reste
+hors de ce lot et se planifie séparément.
 Réf. plan: `4ee15776-e317-4d80-8d05-003a373816cc`
 
 ## 1. Contexte
