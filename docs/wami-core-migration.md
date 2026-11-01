@@ -57,11 +57,15 @@ Fallback documentaire (dérivation déterministe) **interdit** pour des tenants 
 `PolicyDocument` par principal. Pas de store wami, pas de changement de signature de `PolicyEnv`.
 Le coût : écrire le chargeur/cache de documents et reproduire l'ordre deny-overrides + boundary.
 
-### D3 — Dépendance
-**Décision : versions publiées sur crates.io** (`wami`, `wami-core`, `wami-condition`), derrière la
-feature `wami`. Pas de `git`/`path` → `cargo package` reste possible. On bump à 0.19/0.20 quand
-publiées. `wami` apporte `jsonwebtoken 10` ; `this` garde `9` le temps de la migration (deux piles
-crypto coexistent), puis on retire la 9.
+### D3 — Dépendance (mise à jour 2026-11-01) : suivre `main`, pas les crates publiés
+**Décision (utilisateur) : « reste sur le main, on aura de l'avance sur le crates ».** On suit le
+`main` des crates frères, pas les versions publiées. `this` path-depe déjà `obrain-*` et `vite-rs`
+depuis leurs checkouts locaux ; wami rejoint le même schéma via un **worktree local sur
+`origin/main`** : `../../obrain/wami-main/crates/wami` (wami 0.19 / wami-core 0.20 /
+wami-condition 0.18.1). Conséquence assumée : la publication crates.io de `this` reste bloquée par
+les deps `path` (cf. plan `f33522d1`) — on est délibérément **en avance sur le registre**. `wami`
+apporte `jsonwebtoken 10` ; `this` garde `9` le temps de la migration (deux piles crypto
+coexistent), puis on retire la 9.
 
 ### D4 — Tokens (double-acceptation)
 wami exige `aud` + `kid` ; les tokens `this` actuels n'en ont pas.
