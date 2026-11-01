@@ -105,8 +105,12 @@ dans l'ARN (`orders/<uuid>/owner/<user>`) — demanderait une lecture de ligne a
 ### D8 — Faits de requête et proxy
 `RequestMeta` (IP, transport) est lu des en-têtes `X-Forwarded-*` **seulement si** le proxy est
 déjà cru pour `X-Forwarded-Host` (`domains.trust_forwarded_host`) : une seule notion de confiance.
-Aucun écouteur n'expose l'adresse du pair (`ConnectInfo`) : sans proxy cru, l'IP reste inconnue et
-une condition IP échoue fermée. MFA : inconnu tant que le jeton ne porte pas `amr`.
+Aucun écouteur n'expose l'adresse du pair (`ConnectInfo`) : sans proxy cru, l'IP reste inconnue.
+`X-Forwarded-For` est lu à **droite** (l'adresse ajoutée par le proxy cru), jamais à gauche (ce
+que le client a écrit). Sémantique AWS des conditions sur une clé absente : `IpAddress` ne
+s'applique pas (fermé), mais `NotIpAddress` et `…IfExists` **s'appliquent** : un Allow ainsi
+conditionné deviendrait inconditionnel. Un document qui les utilise est donc **non tranchable**
+tant que l'IP est inconnue (`needs_known_ip`). MFA : inconnu tant que le jeton ne porte pas `amr`.
 
 ## 5. Carte de migration
 
@@ -167,7 +171,9 @@ une condition IP échoue fermée. MFA : inconnu tant que le jeton ne porte pas `
   la première requête**. Sans ce branchement, un redémarrage réalloue les segments.
 - **Adresse du pair inconnue** sans proxy cru (pas de `ConnectInfo` sur les écouteurs) : les
   conditions IP ne sont utilisables que derrière Caddy avec `trust_forwarded_host`.
-- **Lien partiellement nommé** (type ou extrémités absents) : évalué comme cible inconnue.
+- **Lien partiellement nommé** : avec le type seul (gRPC `CreateLink`, suppression par id), la cible
+  est `link/<type>/*/*` ; un `Deny` sur `link/<type>/**` s'applique, un `Allow` sur une paire précise
+  ne matche pas. Sans le type : cible inconnue (`resource/*`).
 - **Rotation de clé** : le vérifieur n'a qu'une clé publique ; une rotation réelle demande plusieurs
   clés publiques côté vérifieur.
 - **Fenêtre legacy (D4)** : tant qu'elle est ouverte, les jetons émis avant ce lot (sans `aud` ni

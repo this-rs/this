@@ -124,9 +124,15 @@ pub fn resource_arn(ctx: &WamiContext, target: &ResourceRef<'_>) -> Option<WamiA
             source,
             target,
         } => {
-            if !(arn_safe(link_type) && arn_safe(source) && arn_safe(target)) {
+            if !arn_safe(link_type) || !source.is_none_or(arn_safe) || !target.is_none_or(arn_safe)
+            {
                 return None;
             }
+            // An unknown endpoint is a literal `*` on the REQUEST side: it matches
+            // only a pattern that is itself a wildcard there (`link/owns/**`,
+            // `link/owns/*/*`), never a statement on one specific endpoint.
+            let source = source.unwrap_or("*");
+            let target = target.unwrap_or("*");
             ("link".to_string(), format!("{link_type}/{source}/{target}"))
         }
         ResourceRef::Any => ("resource".to_string(), "*".to_string()),
@@ -151,10 +157,37 @@ pub struct Grants<'a> {
     pub boundary: Option<(PolicySource, &'a PolicyDocument)>,
 }
 
+/// Condition operators that hold when the IP is UNKNOWN (AWS semantics:
+/// `NotIpAddress` on an absent key is true, `…IfExists` passes). A statement
+/// using one would turn unconditional on a host that cannot learn the IP, so
+/// such a document is unevaluable without a known IP (fail closed).
+fn needs_known_ip(document: &PolicyDocument) -> bool {
+    document.statement.iter().any(|statement| {
+        statement
+            .condition
+            .as_ref()
+            .and_then(|c| c.as_object())
+            .is_some_and(|ops| {
+                ops.keys()
+                    .any(|op| op.starts_with("NotIpAddress") || op.ends_with("IfExists"))
+            })
+    })
+}
+
 /// Pure combination of the grants for one action on one resource.
 ///
 /// Errors from the per-document evaluator become [`Verdict::Unevaluable`].
 pub fn decide(grants: &Grants<'_>, action: &str, resource: &WamiArn, ctx: &WamiContext) -> Verdict {
+    if ctx.source_ip().is_none() {
+        let documents = grants
+            .identity
+            .iter()
+            .map(|(_, d)| *d)
+            .chain(grants.boundary.iter().map(|(_, d)| *d));
+        if documents.into_iter().any(needs_known_ip) {
+            return Verdict::Unevaluable;
+        }
+    }
     let mut allowed = false;
     for (source, document) in &grants.identity {
         match evaluate_policy_document(document, action, resource, ctx, source) {
@@ -386,7 +419,11 @@ pub type DocumentJson = serde_json::Value;
 
 /// One principal's grants, keyed by the `this` identifiers (tenant and user
 /// UUIDs), not by wami segments: the file stays valid across registries.
+///
+/// Unknown fields are refused: a misspelt `boundary` would otherwise load a
+/// principal WITHOUT its boundary, silently widening its grants.
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct PrincipalDefinition {
     pub tenant: Uuid,
     pub user: Uuid,
@@ -399,6 +436,7 @@ pub struct PrincipalDefinition {
 }
 
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct BoundaryDefinition {
     pub arn: String,
     pub document: DocumentJson,
@@ -408,6 +446,7 @@ pub struct BoundaryDefinition {
 /// unreadable document refuses the whole definition and leaves the enforcement
 /// as it was.
 #[derive(Debug, Clone, Default, serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct PolicyDefinition {
     #[serde(default)]
     pub principals: Vec<PrincipalDefinition>,
@@ -417,12 +456,13 @@ pub struct PolicyDefinition {
 }
 
 impl WamiEnforcement {
-    /// Replace the policy store with `definition`, atomically.
+    /// Replace the policy store with `definition`.
     ///
-    /// Principals are resolved through the identity registry, which allocates a
-    /// segment for a tenant seen for the first time. Nothing is applied until
-    /// every document has been read: a half-loaded store would answer with
-    /// grants from two different files.
+    /// The store is swapped only once every document has been read: on any
+    /// error the previous grants stay in force, never a mix of two files. The
+    /// identity registry is NOT rolled back: a tenant first seen while reading
+    /// keeps its segment (allocation is monotonic, and the same segment would be
+    /// allocated on that tenant's first request anyway).
     pub fn load_definition(&mut self, definition: &PolicyDefinition) -> Result<()> {
         let mut store = PolicyStore::new();
         for (role, policies) in &definition.roles {
@@ -754,12 +794,22 @@ mod tests {
             &ctx,
             &ResourceRef::Link {
                 link_type: "owns",
-                source: "users",
-                target: "orders",
+                source: Some("users"),
+                target: Some("orders"),
             },
         )
         .unwrap();
         assert!(link.to_string().ends_with(":link/owns/users/orders"));
+        let partial = resource_arn(
+            &ctx,
+            &ResourceRef::Link {
+                link_type: "owns",
+                source: None,
+                target: None,
+            },
+        )
+        .unwrap();
+        assert!(partial.to_string().ends_with(":link/owns/*/*"));
         // A name that would alter the pattern is refused, not matched.
         assert!(
             resource_arn(
@@ -850,13 +900,13 @@ mod tests {
             .unwrap();
         let owns = ResourceRef::Link {
             link_type: "owns",
-            source: "users",
-            target: "orders",
+            source: Some("users"),
+            target: Some("orders"),
         };
         let manages = ResourceRef::Link {
             link_type: "manages",
-            source: "users",
-            target: "orders",
+            source: Some("users"),
+            target: Some("orders"),
         };
         assert_eq!(
             store.verdict_on(&ctx, &[], "perm:link:create", &owns),
@@ -865,6 +915,130 @@ mod tests {
         assert_eq!(
             store.verdict_on(&ctx, &[], "perm:link:create", &manages),
             Verdict::Deny
+        );
+    }
+
+    /// A Deny written on a link type must bite even when the surface only knows
+    /// the type (gRPC CreateLink, delete by id): the partial link is `owns/*/*`,
+    /// which `link/owns/**` covers. And `*` on the request side is literal: it
+    /// does not match a statement on one specific endpoint pair.
+    #[test]
+    fn a_partially_named_link_still_meets_a_deny_on_its_type() {
+        let reg = IdentityRegistry::new();
+        let ctx = ctx_for(Uuid::new_v4(), Uuid::new_v4(), &reg);
+        let deny_owns = r#"{
+            "Version": "2012-10-17",
+            "Statement": [
+                {"Effect": "Allow", "Action": "this:*", "Resource": "*"},
+                {"Effect": "Deny", "Action": "this:link:create",
+                 "Resource": "arn:wami:iam:${tenant}:wami:this:link/owns/**"}
+            ]
+        }"#;
+        let mut store = PolicyStore::new();
+        store
+            .register(key_of(&ctx), &[("d", deny_owns)], None)
+            .unwrap();
+        let only_type = ResourceRef::Link {
+            link_type: "owns",
+            source: None,
+            target: None,
+        };
+        assert_eq!(
+            store.verdict_on(&ctx, &[], "perm:link:create", &only_type),
+            Verdict::Deny
+        );
+        // Another link type, partially named, is still allowed by the first statement.
+        let other = ResourceRef::Link {
+            link_type: "manages",
+            source: None,
+            target: None,
+        };
+        assert_eq!(
+            store.verdict_on(&ctx, &[], "perm:link:create", &other),
+            Verdict::Allow
+        );
+        // A request-side `*` does not match a statement on one specific pair.
+        let mut specific = PolicyStore::new();
+        specific
+            .register(key_of(&ctx), &[("owns", ALLOW_OWNS_LINK_SPECIFIC)], None)
+            .unwrap();
+        assert_eq!(
+            specific.verdict_on(&ctx, &[], "perm:link:create", &only_type),
+            Verdict::Deny
+        );
+    }
+
+    const ALLOW_OWNS_LINK_SPECIFIC: &str = r#"{
+        "Version": "2012-10-17",
+        "Statement": [
+            {"Effect": "Allow", "Action": "this:link:create",
+             "Resource": "arn:wami:iam:${tenant}:wami:this:link/owns/users/orders"}
+        ]
+    }"#;
+
+    /// `NotIpAddress` holds on an absent IP (AWS semantics), which would make a
+    /// conditional Allow unconditional on a host that cannot learn the IP. Such a
+    /// document is unevaluable without a known IP, and decided normally with one.
+    #[test]
+    fn negative_ip_conditions_are_unevaluable_without_a_known_ip() {
+        use std::net::{IpAddr, Ipv4Addr};
+        let mut enf = WamiEnforcement::new(IdentityRegistry::new(), PolicyStore::new(), "this");
+        let auth = AuthContext::User {
+            user_id: Uuid::new_v4(),
+            tenant_id: Uuid::new_v4(),
+            roles: vec![],
+        };
+        let key = enf
+            .caller_context(&auth, &RequestMeta::default())
+            .unwrap()
+            .unwrap()
+            .caller_key()
+            .unwrap()
+            .clone();
+        let all_but_banned = r#"{
+            "Version": "2012-10-17",
+            "Statement": [{
+                "Effect": "Allow", "Action": "this:project:read", "Resource": "*",
+                "Condition": {"NotIpAddress": {"aws:SourceIp": "203.0.113.0/24"}}
+            }]
+        }"#;
+        enf.store
+            .register(key, &[("banned", all_but_banned)], None)
+            .unwrap();
+        let p = "perm:project.read";
+        assert_eq!(
+            enf.verdict_for(&auth, &RequestMeta::default(), p, &ResourceRef::Any),
+            Some(Verdict::Unevaluable)
+        );
+        let banned = RequestMeta {
+            source_ip: Some(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 7))),
+            ..RequestMeta::default()
+        };
+        let elsewhere = RequestMeta {
+            source_ip: Some(IpAddr::V4(Ipv4Addr::new(198, 51, 100, 7))),
+            ..RequestMeta::default()
+        };
+        assert_eq!(
+            enf.verdict_for(&auth, &banned, p, &ResourceRef::Any),
+            Some(Verdict::Deny)
+        );
+        assert_eq!(
+            enf.verdict_for(&auth, &elsewhere, p, &ResourceRef::Any),
+            Some(Verdict::Allow)
+        );
+    }
+
+    #[test]
+    fn definition_refuses_unknown_fields() {
+        let mut enf = WamiEnforcement::new(IdentityRegistry::new(), PolicyStore::new(), "this");
+        let misspelt_boundary = serde_json::json!({
+            "principals": [{"tenant": Uuid::new_v4(), "user": Uuid::new_v4(),
+                "policies": {"all": serde_json::from_str::<serde_json::Value>(ALLOW_ALL).unwrap()},
+                "boundry": {"arn": "x", "document": serde_json::from_str::<serde_json::Value>(BOUNDARY_READ_ONLY).unwrap()}}]
+        });
+        assert!(
+            enf.load_definition_json(&misspelt_boundary.to_string())
+                .is_err()
         );
     }
 

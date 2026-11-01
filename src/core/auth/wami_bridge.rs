@@ -366,15 +366,16 @@ mod tests {
     }
 
     #[test]
-    fn trust_mode_reads_leftmost_forwarded_for_and_proto() {
+    fn trust_mode_reads_rightmost_forwarded_for_and_proto() {
         let mut h = HeaderMap::new();
+        // A client wrote 10.0.0.5; the trusted proxy appended the real peer.
         h.insert(
             "x-forwarded-for",
-            HeaderValue::from_static("203.0.113.5, 10.0.0.2"),
+            HeaderValue::from_static("10.0.0.5, 203.0.113.9"),
         );
         h.insert("x-forwarded-proto", HeaderValue::from_static("HTTPS"));
         let m = RequestMeta::from_request(&h, None, ForwardedHeaders::Trust);
-        assert_eq!(m.source_ip, Some(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 5))));
+        assert_eq!(m.source_ip, Some(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 9))));
         assert_eq!(m.secure_transport, Some(true));
     }
 }

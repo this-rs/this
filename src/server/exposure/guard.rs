@@ -361,15 +361,16 @@ impl SurfaceGuard {
         let policies = e
             .index()
             .link_policies(link_type, source, target, scope, &op);
-        // A link the request fully names is matched as such; a partial one (no
-        // type, or no endpoints) is "no particular target".
-        let target = match (link_type, source, target) {
-            (Some(link_type), Some(source), Some(target)) => ResourceRef::Link {
+        // The link type is what statements are written on; an endpoint the
+        // surface does not know (gRPC CreateLink, delete by id) is left open so
+        // a Deny on the type still bites. Without even the type: no target.
+        let target = match link_type {
+            Some(link_type) => ResourceRef::Link {
                 link_type,
                 source,
                 target,
             },
-            _ => ResourceRef::Any,
+            None => ResourceRef::Any,
         };
         let res = self.with_env(e, target, |env| {
             authorize_link_op(&policies, &self.ctx, env)

@@ -179,9 +179,12 @@ impl RequestMeta {
             },
             ForwardedHeaders::Trust => {
                 let header = |name: &str| headers.get(name).and_then(|v| v.to_str().ok());
+                // The RIGHTMOST address: the one the trusted proxy itself appended.
+                // The leftmost is whatever the client wrote when the proxy appends
+                // instead of overwriting (nginx, Traefik, ALB).
                 let source_ip = header("x-forwarded-for")
-                    .and_then(|list| list.split(',').next())
-                    .and_then(|first| first.trim().parse::<std::net::IpAddr>().ok())
+                    .and_then(|list| list.rsplit(',').next())
+                    .and_then(|last| last.trim().parse::<std::net::IpAddr>().ok())
                     .or(peer);
                 let secure_transport = header("x-forwarded-proto")
                     .map(|proto| proto.trim().eq_ignore_ascii_case("https"));
@@ -206,11 +209,13 @@ pub enum ResourceRef<'a> {
         entity: &'a str,
         id: Option<&'a Uuid>,
     },
-    /// A link type between two entity types.
+    /// A link type, and its endpoint entity types when the request names them.
+    /// An endpoint the surface does not know is rendered `*` in the ARN, so a
+    /// statement written on the link type (`link/owns/**`) still applies.
     Link {
         link_type: &'a str,
-        source: &'a str,
-        target: &'a str,
+        source: Option<&'a str>,
+        target: Option<&'a str>,
     },
     /// No particular target (the caller could not say).
     Any,
