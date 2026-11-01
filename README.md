@@ -567,6 +567,10 @@ auth:
   authenticates a request.
 - **Migration window** — tokens minted before `aud` / `token_use` existed are accepted in `bootstrap`
   mode only, or with `accept_legacy_tokens: true`; remove it once every client has reissued.
+- **A provider that cannot be built refuses to start.** `provider: wami` in a build without the
+  feature, an unusable key, an STS that cannot be created, or `provider: oidc` (no OIDC provider yet)
+  all stop `build_host` with a named error. They used to log a warning and carry on — which left the
+  host with `NoAuthProvider`, that is anonymous callers for whom `is_owner` answers `true`.
 - **Tenant identity** — `Uuid` tenants get an allocated `u64` segment, journalled through
   `identity_path` (write-through, tmp + rename). Nothing is derived by hashing: a collision would be a
   tenant crossing. `identity_path` is required with `policies_path` outside `bootstrap`.

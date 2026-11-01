@@ -623,6 +623,9 @@ impl VfsModuleStore {
                 .write(&Self::rel(&dir, rel)?, bytes, Precondition::None)
                 .await?;
         }
+        // `mut` exists only for the signing block below: without `module-signing` this is a
+        // plain binding, and `clippy -D warnings` on a build without that feature refuses it.
+        #[cfg_attr(not(feature = "module-signing"), allow(unused_mut))]
         let mut manifest = Manifest {
             format: MANIFEST_FORMAT,
             name: desc.name.clone(),
