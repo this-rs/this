@@ -68,6 +68,73 @@ struct Manifest {
     /// Path relative to the version directory -> etag.
     files: BTreeMap<String, String>,
     created: DateTime<Utc>,
+    /// Authentication of this record. **The manifest is the root of trust**: it
+    /// carries the etag of every file, so signing it authenticates them all. The
+    /// field is always part of the format (a store must stay readable by a host
+    /// built without the feature); it is only *enforced* by a host that declares
+    /// a [`TrustAnchor`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    signature: Option<SignatureBlock>,
+}
+
+/// Ed25519 signature over a manifest, with the identifier of the signing key.
+///
+/// The signed bytes are the manifest serialized **without** this block, so
+/// re-signing after a field change is always detectable: the signature covers
+/// the etags, hence the files.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SignatureBlock {
+    /// Which trusted key signed it. Lets a host rotate keys without a flag day.
+    pub key_id: String,
+    /// Ed25519 signature, base64 (standard alphabet, padded).
+    pub signature: String,
+}
+
+/// The keys a host accepts for stored modules.
+///
+/// Fail-closed by construction: a store that has an anchor refuses a manifest
+/// that carries no signature, and one signed by an unknown key. A store with no
+/// anchor behaves as before — integrity against the manifest, not
+/// authentication of it.
+#[cfg(feature = "module-signing")]
+#[derive(Debug, Clone, Default)]
+pub struct TrustAnchor {
+    keys: BTreeMap<String, ed25519_dalek::VerifyingKey>,
+}
+
+#[cfg(feature = "module-signing")]
+impl TrustAnchor {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Trust a key given as a SubjectPublicKeyInfo PEM (the format
+    /// `openssl genpkey`/`this sign` produce).
+    pub fn insert_pem(
+        &mut self,
+        key_id: impl Into<String>,
+        pem: &str,
+    ) -> Result<(), ContractError> {
+        use ed25519_dalek::pkcs8::DecodePublicKey;
+        let key = ed25519_dalek::VerifyingKey::from_public_key_pem(pem).map_err(|e| {
+            ContractError::framework(codes::MODULE_UNTRUSTED_KEY)
+                .with_param("reason", e.to_string())
+        })?;
+        self.keys.insert(key_id.into(), key);
+        Ok(())
+    }
+
+    /// Trust an already-parsed key (tests, or a host that reads keys from its own
+    /// configuration store).
+    pub fn insert(&mut self, key_id: impl Into<String>, key: ed25519_dalek::VerifyingKey) {
+        self.keys.insert(key_id.into(), key);
+    }
+
+    /// Is this anchor empty? An empty anchor is a misconfiguration, not a policy:
+    /// the store refuses everything rather than accepting everything.
+    pub fn is_empty(&self) -> bool {
+        self.keys.is_empty()
+    }
 }
 
 /// One stored version of a module.
@@ -141,12 +208,34 @@ fn json<T: Serialize>(v: &T) -> Result<Vec<u8>, ContractError> {
         .map_err(|e| ContractError::framework(codes::INTERNAL).with_param("reason", e.to_string()))
 }
 
+/// The exact bytes a signature covers: the manifest re-serialized **without** its
+/// signature block.
+///
+/// Deterministic because the fields are a fixed-order struct and `files` is a
+/// `BTreeMap`: the same manifest always produces the same bytes, on the signing
+/// side and on the verifying side, without a bespoke canonicalization format.
+#[cfg(feature = "module-signing")]
+fn canonical_manifest_bytes(m: &Manifest) -> Result<Vec<u8>, ContractError> {
+    let mut bare = m.clone();
+    bare.signature = None;
+    serde_json::to_vec(&bare).map_err(|e| {
+        ContractError::framework(codes::MODULE_BAD_SIGNATURE).with_param("reason", e.to_string())
+    })
+}
+
 /// `ModuleStore` over a `Vfs`.
 pub struct VfsModuleStore {
     vfs: Arc<dyn Vfs>,
     registry: Arc<CustomRegistry>,
     allow_public: bool,
     root: VfsPath,
+    /// Keys accepted for stored modules. `None` = no authentication of the
+    /// manifest (integrity only), the historical behaviour.
+    #[cfg(feature = "module-signing")]
+    trust: Option<TrustAnchor>,
+    /// Publisher side: the key this store signs committed manifests with.
+    #[cfg(feature = "module-signing")]
+    signing: Option<(String, ed25519_dalek::SigningKey)>,
     /// Serializes put/remove/yank in this process (check-then-commit sequences).
     write_lock: tokio::sync::Mutex<()>,
 }
@@ -169,8 +258,42 @@ impl VfsModuleStore {
             registry: Arc::new(CustomRegistry::default()),
             allow_public: false,
             root: VfsPath::parse("/modules").expect("static path"),
+            #[cfg(feature = "module-signing")]
+            trust: None,
+            #[cfg(feature = "module-signing")]
+            signing: None,
             write_lock: tokio::sync::Mutex::new(()),
         }
+    }
+
+    /// Require every stored manifest to be signed by one of these keys.
+    ///
+    /// This is the trust anchor the whole hot-load story was missing: without it
+    /// a stored module is only *integrity*-checked (its files match the etags of
+    /// a manifest anyone with write access can rewrite). With it, the manifest
+    /// must carry a signature by a known key, so an operator who can write to the
+    /// store still cannot invent a module.
+    ///
+    /// An **empty** anchor refuses everything: it is a misconfiguration, and
+    /// treating it as "no policy" would silently disable the protection.
+    #[cfg(feature = "module-signing")]
+    pub fn with_trust_anchor(mut self, anchor: TrustAnchor) -> Self {
+        self.trust = Some(anchor);
+        self
+    }
+
+    /// Sign every manifest this store commits.
+    ///
+    /// Publisher side: a host does not need it, a build step or a CLI that
+    /// publishes modules does.
+    #[cfg(feature = "module-signing")]
+    pub fn with_signing_key(
+        mut self,
+        key_id: impl Into<String>,
+        key: ed25519_dalek::SigningKey,
+    ) -> Self {
+        self.signing = Some((key_id.into(), key));
+        self
     }
 
     /// Registry of the host's custom validators / transforms / types (the one `check`
@@ -235,7 +358,51 @@ impl VfsModuleStore {
                 .with_param("expected", format!("{name}@{version}"))
                 .with_param("found", format!("{}@{}", m.name, m.version)));
         }
+        // Authentication before anything is read out of this manifest: the etags
+        // it carries become trustworthy only once the record itself is.
+        #[cfg(feature = "module-signing")]
+        self.verify_manifest(&path, &m)?;
         Ok(Some(m))
+    }
+
+    /// Refuse a manifest that is not signed by a trusted key, when the host
+    /// declared an anchor. No anchor = no authentication (historical behaviour).
+    #[cfg(feature = "module-signing")]
+    fn verify_manifest(&self, path: &VfsPath, m: &Manifest) -> Result<(), ContractError> {
+        let Some(anchor) = self.trust.as_ref() else {
+            return Ok(());
+        };
+        let Some(sig) = m.signature.as_ref() else {
+            return Err(ContractError::framework(codes::MODULE_UNSIGNED)
+                .with_param("path", path.as_str())
+                .with_param("module", format!("{}@{}", m.name, m.version)));
+        };
+        let Some(key) = anchor.keys.get(&sig.key_id) else {
+            return Err(ContractError::framework(codes::MODULE_UNTRUSTED_KEY)
+                .with_param("path", path.as_str())
+                .with_param("key_id", sig.key_id.clone()));
+        };
+        let bytes = canonical_manifest_bytes(m)?;
+        use base64::Engine as _;
+        let raw = base64::engine::general_purpose::STANDARD
+            .decode(&sig.signature)
+            .map_err(|e| {
+                ContractError::framework(codes::MODULE_BAD_SIGNATURE)
+                    .with_param("path", path.as_str())
+                    .with_param("reason", e.to_string())
+            })?;
+        let signature = ed25519_dalek::Signature::from_slice(&raw).map_err(|e| {
+            ContractError::framework(codes::MODULE_BAD_SIGNATURE)
+                .with_param("path", path.as_str())
+                .with_param("reason", e.to_string())
+        })?;
+        // `verify_strict` rather than `verify`: it rejects malleable signatures
+        // and small-order keys, which a permissive verifier would accept.
+        key.verify_strict(&bytes, &signature).map_err(|_| {
+            ContractError::framework(codes::MODULE_BAD_SIGNATURE)
+                .with_param("path", path.as_str())
+                .with_param("key_id", sig.key_id.clone())
+        })
     }
 
     /// Read a committed file and verify it against the manifest.
@@ -456,13 +623,30 @@ impl VfsModuleStore {
                 .write(&Self::rel(&dir, rel)?, bytes, Precondition::None)
                 .await?;
         }
-        let manifest = Manifest {
+        let mut manifest = Manifest {
             format: MANIFEST_FORMAT,
             name: desc.name.clone(),
             version: desc.version.clone(),
             files: etags,
             created: Utc::now(),
+            signature: None,
         };
+        // Publisher side: sign the record we are about to commit, so a host with
+        // an anchor can authenticate it. Signing here (rather than in a separate
+        // tool) keeps the signed bytes and the stored bytes the same by
+        // construction — the classic way to ship a signature that verifies
+        // nowhere.
+        #[cfg(feature = "module-signing")]
+        if let Some((key_id, key)) = self.signing.as_ref() {
+            use base64::Engine as _;
+            use ed25519_dalek::Signer as _;
+
+            let signature = key.sign(&canonical_manifest_bytes(&manifest)?);
+            manifest.signature = Some(SignatureBlock {
+                key_id: key_id.clone(),
+                signature: base64::engine::general_purpose::STANDARD.encode(signature.to_bytes()),
+            });
+        }
         match self
             .vfs
             .write(&manifest_path, &json(&manifest)?, Precondition::IfNoneMatch)
@@ -1234,5 +1418,146 @@ mod tests {
         let err = store.get("billing", None).await.unwrap_err();
         assert_eq!(err.code.0, codes::INTERNAL);
         assert!(format!("{:?}", err.params).contains("file missing"));
+    }
+}
+
+#[cfg(all(test, feature = "module-signing"))]
+mod signing_tests {
+    //! Signature des modules stockés : l'ancre de confiance, et ce qu'elle refuse.
+
+    use super::*;
+    use crate::descriptor::field::{FieldDesc, FieldType};
+    use crate::descriptor::{EntityDesc, Operation, PolicyExpr};
+    use crate::storage::vfs::InMemoryVfs;
+    use ed25519_dalek::SigningKey;
+
+    fn descriptor() -> ModuleDescriptor {
+        let mut m = ModuleDescriptor::new("billing", "0.0.1");
+        let mut e = EntityDesc::new("invoice");
+        e.fields = vec![FieldDesc::new("amount", FieldType::F64).tag(16)];
+        for op in Operation::CRUD {
+            e.permissions.ops.insert(op, PolicyExpr::Authenticated);
+        }
+        m.entities.push(e);
+        m
+    }
+
+    fn signing_key() -> SigningKey {
+        SigningKey::from_bytes(&[7u8; 32])
+    }
+
+    fn other_key() -> SigningKey {
+        SigningKey::from_bytes(&[9u8; 32])
+    }
+
+    fn anchor_trusting(key: &SigningKey) -> TrustAnchor {
+        let mut a = TrustAnchor::new();
+        a.insert("release-2026", key.verifying_key());
+        a
+    }
+
+    async fn store_with_signed_module() -> (Arc<InMemoryVfs>, VfsModuleStore) {
+        let vfs = Arc::new(InMemoryVfs::new());
+        let writer =
+            VfsModuleStore::new(vfs.clone()).with_signing_key("release-2026", signing_key());
+        writer
+            .put(&descriptor(), &[])
+            .await
+            .expect("put signed module");
+        (vfs, writer)
+    }
+
+    #[tokio::test]
+    async fn a_signed_module_loads_under_its_anchor() {
+        let (vfs, _) = store_with_signed_module().await;
+        let reader = VfsModuleStore::new(vfs).with_trust_anchor(anchor_trusting(&signing_key()));
+
+        let loaded = reader.get("billing", None).await.expect("verified");
+        assert_eq!(loaded.name, "billing");
+    }
+
+    #[tokio::test]
+    async fn an_unsigned_module_is_refused_once_an_anchor_is_declared() {
+        // The whole point: an operator who can write to the store cannot invent a
+        // module. Before the anchor, `put` alone was enough.
+        let vfs = Arc::new(InMemoryVfs::new());
+        VfsModuleStore::new(vfs.clone())
+            .put(&descriptor(), &[])
+            .await
+            .expect("put unsigned");
+
+        let reader = VfsModuleStore::new(vfs).with_trust_anchor(anchor_trusting(&signing_key()));
+        let err = reader
+            .get("billing", None)
+            .await
+            .expect_err("unsigned must be refused");
+        assert_eq!(err.code, codes::MODULE_UNSIGNED.into());
+    }
+
+    /// The anchor does not know the *key id* at all: a signer it never heard of.
+    #[tokio::test]
+    async fn a_module_signed_by_an_unknown_key_id_is_refused() {
+        let (vfs, _) = store_with_signed_module().await;
+        let mut anchor = TrustAnchor::new();
+        anchor.insert("someone-else", other_key().verifying_key());
+        let reader = VfsModuleStore::new(vfs).with_trust_anchor(anchor);
+
+        let err = reader
+            .get("billing", None)
+            .await
+            .expect_err("unknown signer");
+        assert_eq!(err.code, codes::MODULE_UNTRUSTED_KEY.into());
+    }
+
+    /// The anchor knows the key id but holds a different key: a forged signature
+    /// claiming a trusted name.
+    #[tokio::test]
+    async fn a_forged_signature_under_a_trusted_key_id_is_refused() {
+        let (vfs, _) = store_with_signed_module().await;
+        let reader = VfsModuleStore::new(vfs).with_trust_anchor(anchor_trusting(&other_key()));
+
+        let err = reader.get("billing", None).await.expect_err("forged");
+        assert_eq!(err.code, codes::MODULE_BAD_SIGNATURE.into());
+    }
+
+    #[tokio::test]
+    async fn a_manifest_rewritten_after_signing_is_refused() {
+        // The attack the signature exists for: keep a valid signature, change what
+        // it covers. Here, point an etag at another value.
+        let (vfs, writer) = store_with_signed_module().await;
+        let dir = writer.version_dir("billing", "0.0.1").expect("version dir");
+        let path = VfsModuleStore::rel(&dir, MANIFEST_FILE).expect("manifest path");
+
+        let bytes = vfs.read(&path).await.expect("read manifest");
+        let mut m: Manifest = serde_json::from_slice(&bytes).expect("parse manifest");
+        let victim = m.files.keys().next().cloned().expect("at least one file");
+        m.files.insert(victim, "etag-bricole".to_string());
+        vfs.write(&path, &serde_json::to_vec(&m).unwrap(), Precondition::None)
+            .await
+            .expect("rewrite manifest");
+
+        let reader =
+            VfsModuleStore::new(vfs.clone()).with_trust_anchor(anchor_trusting(&signing_key()));
+        let err = reader
+            .get("billing", None)
+            .await
+            .expect_err("tampered manifest");
+        assert_eq!(err.code, codes::MODULE_BAD_SIGNATURE.into());
+    }
+
+    #[tokio::test]
+    async fn without_an_anchor_the_historical_behaviour_is_kept() {
+        let vfs = Arc::new(InMemoryVfs::new());
+        VfsModuleStore::new(vfs.clone())
+            .put(&descriptor(), &[])
+            .await
+            .expect("put unsigned");
+
+        let reader = VfsModuleStore::new(vfs);
+        assert_eq!(
+            reader.get("billing", None).await.expect("no anchor").name,
+            "billing",
+            "a host that declares no anchor keeps integrity-only behaviour"
+        );
     }
 }

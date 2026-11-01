@@ -8,6 +8,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Signature des modules stockés (ancre de confiance).** Un module stocké n'avait
+  que l'**intégrité** : ses fichiers devaient correspondre aux etags d'un
+  manifeste que quiconque peut écrire dans le store peut réécrire, de façon
+  parfaitement cohérente. Il manquait l'**authentification**.
+  `VfsModuleStore::with_trust_anchor(TrustAnchor)` (feature `module-signing`)
+  exige désormais que le manifeste porte une signature **Ed25519** d'une clé
+  connue de l'hôte ; `with_signing_key` signe à la publication, dans le même
+  geste que l'écriture — les octets signés et les octets stockés sont donc les
+  mêmes par construction, ce qui évite la signature qui ne vérifie nulle part.
+  Le manifeste est le bon point de scellement : il porte l'etag de chaque
+  fichier, donc le signer authentifie tout.
+  Refus nommés : `this.module.unsigned` (pas de signature alors qu'une ancre est
+  déclarée), `this.module.untrusted_key` (identifiant de clé inconnu),
+  `this.module.bad_signature` (manifeste modifié après signature, ou signature
+  forgée sous un identifiant connu). `verify_strict` plutôt que `verify` :
+  les signatures malléables et les clés d'ordre faible sont rejetées.
+  **Aucun changement sans ancre** : un hôte qui n'en déclare pas garde le
+  comportement historique (intégrité seule) — la protection s'active en la
+  demandant. 6 tests, dont celui de l'attaque visée : garder une signature
+  valide et changer ce qu'elle couvre.
+  Reste à faire, dit explicitement : un garde au **runtime** qui refuse
+  d'activer `hot_load` sur un store incapable d'authentifier. Aujourd'hui
+  l'application est une règle d'exploitation, pas encore un refus.
 - **Soft delete, pour de vrai.** Le README promettait « Built-in soft delete
   support » ; `DataService::delete` était un DELETE dur et `get`/`list`/`search`
   ne regardaient jamais `deleted_at`. Le contrat est désormais écrit **une fois**
