@@ -156,10 +156,23 @@ une erreur d'architecture, pas une commodité.
 `EntityDesc::normalize` dérive le pluriel, `ServerBuilder` vérifie qu'il n'est pas dupliqué — mais pas qu'il
 n'entre en collision avec une route du framework. Le contrôle doit précéder l'usage :
 
-- `check.rs` refuse un pluriel appartenant à `["_this", "health", "healthz", "graph", "ui", "events",
-  "notifications"]`, avec un code stable (`this.module.duplicate_plural` suffit : la raison est la même).
+- `check.rs` refuse un pluriel appartenant à `RESERVED_ROUTE_SEGMENTS` — `_this`, `auth`, `events`,
+  `graph`, `health`, `healthz`, `notifications`, `tenants`, `ui` — avec `this.descriptor.reserved_plural`
+  (voir §6.1 bis : un code distinct, pas `duplicate_plural`).
 - Le refus arrive **au build**, pas au montage du routeur.
 - Un hôte qui ajoute une route framework à la racine doit l'inscrire dans cette liste dans le même commit.
+
+### 6.1 bis Ce que le contrôle refuse exactement
+
+`RESERVED_ROUTE_SEGMENTS` (`crates/this-descriptor/src/check.rs`, réexporté par `lib.rs`) nomme les neuf
+segments et `check()` les refuse avec un motif **distinct** de `duplicate_plural` :
+
+```
+this.descriptor.reserved_plural   entities.<entité>   "plural `graph` is already served by the framework at the root: `/graph`"
+```
+
+Un code distinct plutôt que `duplicate_plural` : la cause n'est pas la même, et un message qui dit « used
+twice » pour une collision avec le framework enverrait l'auteur chercher un doublon inexistant.
 
 ### 6.2 Rapatrier les routes framework sous `/_this`
 
@@ -234,3 +247,34 @@ Rien dans ce document n'est `MESURÉ`. Pour promouvoir chaque affirmation :
 
 **Suite** : plan `4b8d885a` (this-ui, this-leptos, hébergement, modules). Ce document en fixe le vocabulaire ;
 les tâches `85cb0520` et `c22851bc` en sont la première preuve.
+
+---
+
+## 10. État au 1er novembre 2026
+
+Ce qui a changé depuis la rédaction, et ce qui reste ouvert. Les PR sont citées par dépôt.
+
+| Point du RFC | État | Preuve |
+|---|---|---|
+| §6.1 pluriels réservés | **livré**, PR `this-rs/this#91` | `RESERVED_ROUTE_SEGMENTS` + `this.descriptor.reserved_plural` ; test `framework_route_segments_are_reserved_as_plurals` |
+| §1.5 feature `leptos` en wasm32 | **livré**, PR `this-rs/this#91` | `ci.yml` : `cargo check --target wasm32-unknown-unknown --features leptos` ; **MESURÉ** localement (compile) |
+| §1.4 gabarit webapp | **livré**, PR `this-rs/this-cli#17` | `fetch("/health")` + proxy `/health` ; 5 tests de gabarits verts |
+| §6.2 rapatriement sous `/_this` | **ouvert** | décision à prendre entre (a) et (b) ; touche des routes publiques |
+| §6.3 client TypeScript | **ouvert** | `derive::ts_client` ou suppression ; c'est la seule vraie bifurcation du lot |
+| §1.3 collision `this::ui` / `this-ui` | **ouvert** | à traiter quand `this-ui` naîtra, pas avant |
+
+**MESURÉ** (via `gate.sh exec`, avec `RUSTUP_HOME`/`CARGO_HOME` de l'utilisateur — le `HOME` du
+sous-shell ne les contient pas, c'est le piège qui fait mourir le premier `cargo` sous le gouverneur) :
+
+- `cargo test -p this-descriptor --all-features` → 127 ok, 2 doctests ok, 1 ignoré
+- `cargo clippy -p this-descriptor --all-targets --all-features -- -D warnings` → propre
+- `cargo check -p this-descriptor --target wasm32-unknown-unknown --features leptos` → propre
+- `cargo test --bin this templates` (this-cli) → 52 ok
+
+**Toujours non mesuré** : `cargo test --features all,wami` sur le workspace complet, et les trois
+comportements de §1.2/§1.4 en exécution réelle (déclarer une entité `graph`, générer un projet et ouvrir
+la page). Les correctifs sont testés unitairement, pas exercés de bout en bout.
+
+**Écart assumé** : `src/templates/desktop/tauri-main.rs.tera:51` sonde encore `/api/health`. Le fichier
+appelle `module.into_router()`, que je n'ai trouvé nulle part dans this-rs : il ne compile probablement
+pas. Corriger l'URL d'un gabarit déjà cassé ne prouverait rien ; c'est une tâche à part.
