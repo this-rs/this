@@ -172,6 +172,10 @@ powerdns = ["dep:reqwest"]
 proxy = ["dep:reqwest"]
 websocket = []
 wami = ["dep:jsonwebtoken", "dep:ed25519-dalek", "dep:base64", "dep:argon2"]
+# Signatures des modules stockés : un manifeste signé (Ed25519) et une ancre de
+# confiance par hôte. Sans cette feature, un module stocké n'a que l'intégrité
+# (etags) — pas l'authentification.
+module-signing = ["dep:ed25519-dalek", "dep:base64"]
 obrain = ["dep:obrain-engine", "dep:obrain-common", "dep:obrain-core", "dep:obrain-substrate", "dep:obrain-adapters", "dep:obrain-reactive"]
 # Alias conservé pour compatibilité, mais le relief cognitif n'est PAS branché :
 # `core::events::CognitiveSignal` est un vocabulaire propre à this-rs, et le
@@ -180,7 +184,7 @@ obrain-cognitive = ["obrain"]
 # vite-rs based SPA frontend hosting (this::server::frontend). Not part of
 # `all` because it needs the local vite-rs checkout (path dep), like obrain.
 frontend = ["dep:this-vite"]
-all = ["in-memory", "dynamodb", "postgres", "mongodb_backend", "neo4j", "scylladb", "mysql", "lmdb", "graphql", "grpc", "websocket", "push"]
+all = ["in-memory", "dynamodb", "postgres", "mongodb_backend", "neo4j", "scylladb", "mysql", "lmdb", "graphql", "grpc", "websocket", "push", "module-signing"]
 
 [lib]
 name = "this"

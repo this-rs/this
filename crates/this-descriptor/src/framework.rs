@@ -59,6 +59,12 @@ pub mod codes {
     pub const MODULE_UNAVAILABLE: &str = "this.module.unavailable";
     pub const MODULE_HOT_LOAD_DISABLED: &str = "this.module.hot_load_disabled";
     pub const MODULE_ILLEGAL_TRANSITION: &str = "this.module.illegal_transition";
+    /// A stored module carries no signature while the host requires one.
+    pub const MODULE_UNSIGNED: &str = "this.module.unsigned";
+    /// The manifest is signed by a key the host does not trust.
+    pub const MODULE_UNTRUSTED_KEY: &str = "this.module.untrusted_key";
+    /// The signature does not match the manifest bytes.
+    pub const MODULE_BAD_SIGNATURE: &str = "this.module.bad_signature";
     pub const MODULE_REFERENCE_UNKNOWN: &str = "this.module.reference_unknown";
     pub const MODULE_NOT_FOUND: &str = "this.module.not_found";
     pub const MODULE_CONFIG_CONFLICT: &str = "this.module.config_conflict";
