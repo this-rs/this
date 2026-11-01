@@ -16,13 +16,18 @@ ce que l'autre **déclare**. Une divergence entre les deux textes est un défaut
 Le socle `ModuleDescriptor` a réglé la question « qui déclare quoi » pour la donnée. Il n'a pas réglé la
 question « qui **nomme** quoi » pour ce qui traverse la frontière. Le résultat, constaté :
 
-**1.1 Deux vérités pour le client** — `derive/mod.rs:32-34` écrit « TypeScript derivation is out of this
+**1.1 Deux vérités pour le client** — `derive/mod.rs:32-34` écrivait « TypeScript derivation is out of this
 batch (no consumer: the front is Leptos) » (LU). Trois semaines plus tard,
 `this-cli/src/codegen/typescript.rs:12` (`pub fn generate`) produit un client API TypeScript complet, appelé
-depuis `commands/generate.rs:60`, à partir de `codegen/introspect.rs`, qui lit le code Rust **par regex**
-(LU, `introspect.rs:1-5`). Le client n'est donc pas dérivé du descripteur mais d'une seconde lecture
-du source. Deux producteurs pour un nom, c'est exactement la faute que `this.descriptor.declared_twice`
-refuse dans le descripteur.
+depuis `commands/generate.rs:60`, à partir de `codegen/introspect.rs`.
+
+**Correction du 1er novembre** : la première rédaction disait que cette introspection lisait « le code Rust
+par regex ». C'est plus juste et plus intéressant que ça — `introspect.rs:119-121` consulte **déjà**
+`descriptor::current(api_root)` pour le **pluriel** et les **liens**, la regex n'étant que le repli. Le
+désaccord ne portait donc que sur les **champs** : `rust_type_to_ts` se rabat sur
+`_ => trimmed.to_string()`, donc un type Rust inconnu (`Money`, `Option<MyEnum>`) était recopié tel quel
+dans l'interface générée, où ce n'est pas du TypeScript. Le défaut est réel, mais plus étroit que « deux
+vérités » : une seule facette échappait au descripteur — et une facette qui échappe est déjà une de trop.
 
 **1.2 L'espace d'URL n'a pas de propriétaire** — `server/exposure/descriptor.rs:35` déclare
 `pub const PREFIX: &str = "/_this"` avec le commentaire « Prefix of the framework's own routes » (LU). Quatre
@@ -36,6 +41,12 @@ axum refuse deux routes identiques, mais par un **panic au montage**, pas par un
 **1.3 Le nom `ui` est déjà pris deux fois** — `this/src/ui/` est un document d'état d'interface servi en
 REST (`ui/mod.rs:1-20`), pas une vue. Le jour où `this-ui` existe, `this::ui` et `this-ui` désignent deux
 choses différentes à une lettre près.
+
+**Décision (1er novembre 2026) : renommage différé, avec déclencheur.** `this::ui` devient `this::ui_state`
+dans la PR qui crée le crate `this-ui`, pas avant. Raison : aujourd'hui le renommage n'apporte rien de
+visible à l'utilisateur et casse une API publique (`this::ui::state::UiStateStore`, utilisée par
+`tests/policy_surfaces.rs:32`) ; le jour où `this-ui` naît, il devient gratuit parce que la PR touche déjà
+l'espace de noms du front. Un déclencheur nommé vaut mieux qu'un « plus tard ».
 
 **1.4 Le gabarit webapp pointe une route qui n'existe pas** — `templates/webapp/App.tsx.tera` appelle
 `fetch("/api/health")`, `vite.config.ts.tera` proxie `/api` **sans rewrite**, et le serveur sert `/health` à
@@ -184,8 +195,21 @@ Deux issues, à trancher dans la même PR :
 - **(b)** garder les chemins et écrire la liste réservée au §6.1, en documentant que la racine est
   **partagée** entre entités et framework.
 
-Recommandation : (a) pour `/ui` et `/graph` (jeunes, peu consommés), (b) pour `/health`, `/notifications` et
-`/events/stream` (déjà documentés dans `integration-consommateurs.md`).
+**Décision (1er novembre 2026) : (b) pour les neuf.** Les chemins restent où ils sont ; c'est la liste
+`RESERVED_ROUTE_SEGMENTS` qui fait foi, et toute route **nouvelle** du framework naît sous `/_this`.
+
+Ce qui a tranché, pièces en main :
+
+| Segment | Preuve qu'il est publié |
+|---|---|
+| `/graph*` | `deploy/mod.rs:638-643` — `surfaces_of()` compose le plan de déploiement avec `{mount}/graph/...` ; le relief publie lui-même ses chemins (`graph/relief.rs:365-402`) et `hierarchy.rs:306` fabrique des liens `drill_down` vers `/graph/hierarchy/...` |
+| `/ui/state/*` | consommé par un tableau de bord **hors dépôt** (atoms `subjectAtom`, cf. `ui/state.rs:14-18`) : le déplacer casserait un client qu'on ne voit pas d'ici |
+| `/health`, `/healthz`, `/notifications`, `/events`, `/auth`, `/tenants`, `/_this` | déjà servis ; la liste réservée les protège depuis `RESERVED_ROUTE_SEGMENTS` |
+
+Déplacer aurait changé la forme d'un document auto-descriptif (le relief) et d'un plan de déploiement
+(`surfaces_of`), pour un gain purement esthétique. La règle qui en sort vaut mieux que le déplacement :
+**un segment racine existant est gelé, un segment racine nouveau est interdit — donc une route nouvelle
+passe par `/_this`.**
 
 ### 6.3 Trancher le client TypeScript
 
@@ -195,7 +219,17 @@ Recommandation : (a) pour `/ui` et `/graph` (jeunes, peu consommés), (b) pour `
   `codegen/introspect.rs` devient un simple porteur de `ProjectIntrospection` alimenté par le descripteur ;
 - **le supprimer** → `derive/mod.rs:32` redevient vrai, et le gabarit webapp ne génère plus de client.
 
-Recommandation : le garder et le dériver. Le front React existe, il ne disparaîtra pas parce qu'on l'ignore.
+**Décision (1er novembre 2026) : le garder et le dériver** — livré.
+
+- `this_descriptor::derive::typescript` (`ts_type`, `ts_field`) : la table `FieldType` → TypeScript, pure,
+  wasm32, cinq tests dont un exhaustif sur l'énumération (PR `this-rs/this#93`).
+- `this-cli` : `FieldMeta.ts_type` rempli depuis `EntityDesc` quand le descripteur déclare le champ ;
+  `rust_type_to_ts` reste le repli, donc un projet sans `descriptor/module.yaml` est inchangé
+  (PR `this-rs/this-cli#18`).
+
+Le test qui prouve le changement : `price: Money` en Rust produit `price: unknown;` et **aucune** occurrence
+de `Money` dans le client généré. `unknown` et non `any` : `any` désactiverait le compilateur à chaque site
+d'appel.
 
 ---
 
@@ -259,9 +293,9 @@ Ce qui a changé depuis la rédaction, et ce qui reste ouvert. Les PR sont cité
 | §6.1 pluriels réservés | **livré**, PR `this-rs/this#91` | `RESERVED_ROUTE_SEGMENTS` + `this.descriptor.reserved_plural` ; test `framework_route_segments_are_reserved_as_plurals` |
 | §1.5 feature `leptos` en wasm32 | **livré**, PR `this-rs/this#91` | `ci.yml` : `cargo check --target wasm32-unknown-unknown --features leptos` ; **MESURÉ** localement (compile) |
 | §1.4 gabarit webapp | **livré**, PR `this-rs/this-cli#17` | `fetch("/health")` + proxy `/health` ; 5 tests de gabarits verts |
-| §6.2 rapatriement sous `/_this` | **ouvert** | décision à prendre entre (a) et (b) ; touche des routes publiques |
-| §6.3 client TypeScript | **ouvert** | `derive::ts_client` ou suppression ; c'est la seule vraie bifurcation du lot |
-| §1.3 collision `this::ui` / `this-ui` | **ouvert** | à traiter quand `this-ui` naîtra, pas avant |
+| §6.2 rapatriement sous `/_this` | **décidé : (b)**, aucun code | les neuf segments sont gelés et réservés ; une route nouvelle passe par `/_this` (§6.2) |
+| §6.3 client TypeScript | **livré**, PR `this-rs/this#93` + `this-rs/this-cli#18` | `derive::typescript` + `FieldMeta.ts_type` ; test discriminant `price: Money` → `price: unknown;` |
+| §1.3 collision `this::ui` / `this-ui` | **décidé : différé, déclencheur = création du crate `this-ui`** | `this::ui` → `this::ui_state` dans cette PR-là (§1.3) |
 
 **MESURÉ** (via `gate.sh exec`, avec `RUSTUP_HOME`/`CARGO_HOME` de l'utilisateur — le `HOME` du
 sous-shell ne les contient pas, c'est le piège qui fait mourir le premier `cargo` sous le gouverneur) :
@@ -270,11 +304,12 @@ sous-shell ne les contient pas, c'est le piège qui fait mourir le premier `carg
 - `cargo clippy -p this-descriptor --all-targets --all-features -- -D warnings` → propre
 - `cargo check -p this-descriptor --target wasm32-unknown-unknown --features leptos` → propre
 - `cargo test --bin this templates` (this-cli) → 52 ok
+- `cargo test --bin this` (this-cli, après §6.3) → 618 ok, 3 ignorés ; clippy propre
 
 **Toujours non mesuré** : `cargo test --features all,wami` sur le workspace complet, et les trois
 comportements de §1.2/§1.4 en exécution réelle (déclarer une entité `graph`, générer un projet et ouvrir
 la page). Les correctifs sont testés unitairement, pas exercés de bout en bout.
 
-**Écart assumé** : `src/templates/desktop/tauri-main.rs.tera:51` sonde encore `/api/health`. Le fichier
+**Défaut connu, non corrigé** : `src/templates/desktop/tauri-main.rs.tera:51` sonde encore `/api/health`. Le fichier
 appelle `module.into_router()`, que je n'ai trouvé nulle part dans this-rs : il ne compile probablement
 pas. Corriger l'URL d'un gabarit déjà cassé ne prouverait rien ; c'est une tâche à part.
