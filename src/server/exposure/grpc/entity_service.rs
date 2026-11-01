@@ -970,6 +970,7 @@ mod tests {
             user_id: Uuid::from_u128(1),
             tenant_id: Uuid::from_u128(2),
             roles: vec!["reader".into()],
+            scopes: Vec::new(),
         };
         let st = svc.create_entity(create_as(Some(plain))).await.unwrap_err();
         assert_eq!(st.code(), Code::PermissionDenied);
@@ -981,6 +982,7 @@ mod tests {
             user_id: Uuid::from_u128(1),
             tenant_id: Uuid::from_u128(2),
             roles: vec!["admin".into()],
+            scopes: Vec::new(),
         };
         assert!(svc.create_entity(create_as(Some(admin))).await.is_ok());
 

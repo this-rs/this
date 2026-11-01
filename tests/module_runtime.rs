@@ -58,6 +58,7 @@ impl AuthProvider for HeaderAuth {
                     user_id: uuid::Uuid::from_u128(1),
                     tenant_id: uuid::Uuid::from_u128(1),
                     roles: vec![],
+                    scopes: Vec::new(),
                 },
                 _ => AuthContext::Anonymous,
             },

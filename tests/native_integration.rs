@@ -115,6 +115,7 @@ fn user(tenant: u128, id: u128) -> AuthContext {
         user_id: uuid::Uuid::from_u128(id),
         tenant_id: uuid::Uuid::from_u128(tenant),
         roles: vec![],
+        scopes: Vec::new(),
     }
 }
 

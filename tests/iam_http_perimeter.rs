@@ -306,6 +306,7 @@ fn ctx_user() -> AuthContext {
         user_id: Uuid::from_u128(1),
         tenant_id: Uuid::from_u128(9),
         roles: vec![],
+        scopes: Vec::new(),
     }
 }
 
@@ -314,6 +315,7 @@ fn ctx_user_with(role: &str) -> AuthContext {
         user_id: Uuid::from_u128(1),
         tenant_id: Uuid::from_u128(9),
         roles: vec![role.to_string()],
+        scopes: Vec::new(),
     }
 }
 
@@ -949,6 +951,7 @@ fn ctx_user_named(user: Uuid, tenant: Uuid) -> AuthContext {
         user_id: user,
         tenant_id: tenant,
         roles: vec![],
+        scopes: Vec::new(),
     }
 }
 

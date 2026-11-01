@@ -596,6 +596,7 @@ mod tests {
             user_id: user,
             tenant_id: tenant,
             roles: vec![],
+            scopes: Vec::new(),
         };
         wami_context_for(&auth, &RequestMeta::default(), reg, "this")
             .unwrap()
@@ -1020,6 +1021,7 @@ mod tests {
             user_id: Uuid::new_v4(),
             tenant_id: Uuid::new_v4(),
             roles: vec![],
+            scopes: Vec::new(),
         };
         let key = enf
             .caller_context(&auth, &RequestMeta::default())
@@ -1132,6 +1134,7 @@ mod tests {
             user_id: alice,
             tenant_id: tenant,
             roles: vec![],
+            scopes: Vec::new(),
         };
         assert_eq!(
             enf.verdict_for(
@@ -1232,6 +1235,7 @@ mod tests {
             user_id: Uuid::new_v4(),
             tenant_id: Uuid::new_v4(),
             roles: vec![],
+            scopes: Vec::new(),
         };
         let key = enf
             .caller_context(&auth, &RequestMeta::default())
@@ -1298,6 +1302,7 @@ mod tests {
             user_id: id,
             tenant_id: tenant,
             roles: roles.iter().map(|r| r.to_string()).collect(),
+            scopes: Vec::new(),
         };
         let meta = RequestMeta::default();
         let any = ResourceRef::Any;
@@ -1351,6 +1356,7 @@ mod tests {
             user_id: Uuid::new_v4(),
             tenant_id: Uuid::new_v4(),
             roles: vec![],
+            scopes: Vec::new(),
         };
         let ctx = enf
             .caller_context(&auth, &RequestMeta::default())

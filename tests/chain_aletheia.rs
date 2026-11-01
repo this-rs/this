@@ -696,6 +696,7 @@ async fn the_canvas_drives_the_read_and_the_decision_caps_it() {
                 user_id: utilisateur,
                 tenant_id: tenant,
                 roles: vec![],
+                scopes: Vec::new(),
             }))
         } else {
             app

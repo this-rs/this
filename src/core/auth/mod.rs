@@ -61,6 +61,11 @@ pub enum AuthContext {
         user_id: Uuid,
         tenant_id: Uuid,
         roles: Vec<String>,
+        /// Permissions the token itself grants (`scope` in an OIDC access token, RFC 9068).
+        ///
+        /// Consulted only where the IAM cannot decide (see `Authorization::check_iam`): an
+        /// explicit policy `Deny` still wins, and no other layer is bypassed.
+        scopes: Vec<String>,
     },
 
     /// Owner of a specific resource
@@ -846,6 +851,7 @@ mod tests {
             user_id: Uuid::new_v4(),
             tenant_id: Uuid::new_v4(),
             roles: vec!["admin".to_string()],
+            scopes: Vec::new(),
         };
 
         assert!(AuthPolicy::Authenticated.check(&user_context));
@@ -878,6 +884,7 @@ mod tests {
             user_id: Uuid::new_v4(),
             tenant_id: Uuid::new_v4(),
             roles: vec!["editor".to_string()],
+            scopes: Vec::new(),
         };
         let policy = AuthPolicy::And(vec![
             AuthPolicy::Authenticated,
@@ -892,6 +899,7 @@ mod tests {
             user_id: Uuid::new_v4(),
             tenant_id: Uuid::new_v4(),
             roles: vec!["viewer".to_string()],
+            scopes: Vec::new(),
         };
         let policy = AuthPolicy::And(vec![
             AuthPolicy::Authenticated,
@@ -915,6 +923,7 @@ mod tests {
             user_id: Uuid::new_v4(),
             tenant_id: Uuid::new_v4(),
             roles: vec![],
+            scopes: Vec::new(),
         };
         let policy = AuthPolicy::Or(vec![AuthPolicy::ServiceOnly, AuthPolicy::AdminOnly]);
         assert!(!policy.check(&ctx));
@@ -950,6 +959,7 @@ mod tests {
             user_id: Uuid::new_v4(),
             tenant_id: Uuid::new_v4(),
             roles: vec![],
+            scopes: Vec::new(),
         };
         assert!(!AuthPolicy::ServiceOnly.check(&user_ctx));
     }
@@ -965,6 +975,7 @@ mod tests {
             user_id: Uuid::new_v4(),
             tenant_id: Uuid::new_v4(),
             roles: vec![],
+            scopes: Vec::new(),
         };
         assert!(!AuthPolicy::AdminOnly.check(&user_ctx));
     }
@@ -983,6 +994,7 @@ mod tests {
             user_id: Uuid::new_v4(),
             tenant_id: Uuid::new_v4(),
             roles: vec![],
+            scopes: Vec::new(),
         };
         assert!(!AuthPolicy::Owner.check(&user_ctx));
     }
@@ -1053,6 +1065,7 @@ mod tests {
             user_id: Uuid::new_v4(),
             tenant_id: tid,
             roles: vec![],
+            scopes: Vec::new(),
         };
         assert_eq!(ctx.tenant_id(), Some(tid));
     }
@@ -1108,6 +1121,7 @@ mod tests {
             user_id: uid,
             tenant_id: Uuid::new_v4(),
             roles: vec![],
+            scopes: Vec::new(),
         };
         assert_eq!(user_ctx.user_id(), Some(uid));
 
@@ -1202,6 +1216,7 @@ mod tests {
             user_id: Uuid::new_v4(),
             tenant_id: Uuid::new_v4(),
             roles: vec!["admin".into(), "editor".into()],
+            scopes: Vec::new(),
         };
         assert_eq!(ctx.roles(), &["admin", "editor"]);
         assert!(ctx.has_role("admin"));
@@ -1265,6 +1280,7 @@ mod tests {
             user_id: Uuid::new_v4(),
             tenant_id: Uuid::new_v4(),
             roles: vec!["manager".into()],
+            scopes: Vec::new(),
         };
         assert!(resolver.check(&manager_ctx, None));
 
@@ -1272,6 +1288,7 @@ mod tests {
             user_id: Uuid::new_v4(),
             tenant_id: Uuid::new_v4(),
             roles: vec!["viewer".into()],
+            scopes: Vec::new(),
         };
         assert!(!resolver.check(&viewer_ctx, None));
     }
@@ -1290,6 +1307,7 @@ mod tests {
             user_id: Uuid::new_v4(),
             tenant_id: Uuid::new_v4(),
             roles: vec![],
+            scopes: Vec::new(),
         };
         assert!(resolver.check(&ctx, Some(&target_id)));
         assert!(!resolver.check(&ctx, Some(&Uuid::new_v4())));
@@ -1333,6 +1351,7 @@ mod tests {
             user_id: Uuid::new_v4(),
             tenant_id: Uuid::new_v4(),
             roles: vec!["manager".into()],
+            scopes: Vec::new(),
         };
         assert!(policy.check_with_resolver(&manager, Some(&registry), None));
 
@@ -1340,6 +1359,7 @@ mod tests {
             user_id: Uuid::new_v4(),
             tenant_id: Uuid::new_v4(),
             roles: vec!["viewer".into()],
+            scopes: Vec::new(),
         };
         assert!(!policy.check_with_resolver(&viewer, Some(&registry), None));
     }
@@ -1353,6 +1373,7 @@ mod tests {
             user_id: Uuid::new_v4(),
             tenant_id: Uuid::new_v4(),
             roles: vec!["admin".into()],
+            scopes: Vec::new(),
         };
         // Fail-closed: unknown resolver denies access
         assert!(!policy.check_with_resolver(&ctx, Some(&registry), None));
@@ -1366,6 +1387,7 @@ mod tests {
             user_id: Uuid::new_v4(),
             tenant_id: Uuid::new_v4(),
             roles: vec![],
+            scopes: Vec::new(),
         };
         // Fail-closed: no registry denies access
         assert!(!policy.check_with_resolver(&ctx, None, None));
@@ -1398,6 +1420,7 @@ mod tests {
             user_id: Uuid::new_v4(),
             tenant_id: Uuid::new_v4(),
             roles: vec!["delegate".into()],
+            scopes: Vec::new(),
         };
         assert!(policy.check_with_resolver(&delegate, Some(&registry), None));
 
@@ -1406,6 +1429,7 @@ mod tests {
             user_id: Uuid::new_v4(),
             tenant_id: Uuid::new_v4(),
             roles: vec!["viewer".into()],
+            scopes: Vec::new(),
         };
         assert!(!policy.check_with_resolver(&random, Some(&registry), None));
     }
@@ -1530,6 +1554,7 @@ mod tests {
             user_id: Uuid::new_v4(),
             tenant_id: Uuid::new_v4(),
             roles: vec!["editor".into()],
+            scopes: Vec::new(),
         };
         assert!(policy.check(&editor));
 
@@ -1538,6 +1563,7 @@ mod tests {
             user_id: Uuid::new_v4(),
             tenant_id: Uuid::new_v4(),
             roles: vec!["viewer".into()],
+            scopes: Vec::new(),
         };
         assert!(!policy.check(&viewer));
 
@@ -1567,6 +1593,7 @@ mod tests {
             user_id: Uuid::new_v4(),
             tenant_id: Uuid::new_v4(),
             roles: vec![],
+            scopes: Vec::new(),
         };
         assert!(!policy.check(&user));
     }
@@ -1580,6 +1607,7 @@ mod tests {
             user_id: Uuid::new_v4(),
             tenant_id: Uuid::new_v4(),
             roles: vec![],
+            scopes: Vec::new(),
         };
         assert!(policy.check(&user));
 
@@ -1610,6 +1638,7 @@ mod tests {
             user_id: Uuid::new_v4(),
             tenant_id: Uuid::new_v4(),
             roles: vec!["editor".into()],
+            scopes: Vec::new(),
         };
         assert!(policy.check_with_resolver(&normal, Some(&registry), None));
 
@@ -1618,6 +1647,7 @@ mod tests {
             user_id: Uuid::new_v4(),
             tenant_id: Uuid::new_v4(),
             roles: vec!["readonly".into()],
+            scopes: Vec::new(),
         };
         assert!(!policy.check_with_resolver(&readonly, Some(&registry), None));
 
@@ -1643,6 +1673,7 @@ mod tests {
             user_id: Uuid::new_v4(),
             tenant_id: Uuid::new_v4(),
             roles: vec!["delegate".into()],
+            scopes: Vec::new(),
         };
         assert!(policy.check_with_resolver(&delegate, Some(&registry), None));
 
@@ -1651,6 +1682,7 @@ mod tests {
             user_id: Uuid::new_v4(),
             tenant_id: Uuid::new_v4(),
             roles: vec!["admin".into()],
+            scopes: Vec::new(),
         };
         assert!(policy.check_with_resolver(&admin, Some(&registry), None));
 
@@ -1659,6 +1691,7 @@ mod tests {
             user_id: Uuid::new_v4(),
             tenant_id: Uuid::new_v4(),
             roles: vec!["viewer".into()],
+            scopes: Vec::new(),
         };
         assert!(!policy.check_with_resolver(&nobody, Some(&registry), None));
     }
