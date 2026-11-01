@@ -128,6 +128,12 @@ obrain-reactive = { path = "../../banc-obrain-j4/crates/obrain-reactive", option
 # freshness). Local checkout: ~/projects/vite-rs (github this-rs/vite-rs).
 this-vite = { version = "0.0.1", path = "../../vite-rs", optional = true }
 
+# WAMI — original suivre main (worktree local sur origin/main, en avance sur crates.io).
+# Feature-gated : n'affecte PAS le build par défaut (feature `wami`).
+wami = { path = "../../obrain/wami-main/crates/wami", optional = true }
+wami-core = { path = "../../obrain/wami-main/crates/wami-core", optional = true }
+wami-condition = { path = "../../obrain/wami-main/crates/wami-condition", optional = true }
+
 # WAMI auth (optional, feature-gated)
 jsonwebtoken = { version = "9", optional = true }
 ed25519-dalek = { version = "2", optional = true, features = ["pkcs8", "pem", "rand_core"] }
@@ -171,7 +177,7 @@ powerdns = ["dep:reqwest"]
 # this-gateway) : un « service » derrière la porte, avec ses refus explicites.
 proxy = ["dep:reqwest"]
 websocket = []
-wami = ["dep:jsonwebtoken", "dep:ed25519-dalek", "dep:base64", "dep:argon2"]
+wami = ["dep:jsonwebtoken", "dep:ed25519-dalek", "dep:base64", "dep:argon2", "dep:wami", "dep:wami-core", "dep:wami-condition"]
 obrain = ["dep:obrain-engine", "dep:obrain-common", "dep:obrain-core", "dep:obrain-substrate", "dep:obrain-adapters", "dep:obrain-reactive"]
 # Alias conservé pour compatibilité, mais le relief cognitif n'est PAS branché :
 # `core::events::CognitiveSignal` est un vocabulaire propre à this-rs, et le
