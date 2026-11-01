@@ -67,9 +67,9 @@ les deps `path` (cf. plan `f33522d1`) — on est délibérément **en avance sur
 apporte `jsonwebtoken 10` ; `this` garde `9` le temps de la migration (deux piles crypto
 coexistent), puis on retire la 9.
 **CI** : `.github/create-local-dep-stubs.sh` ne peut pas *stubber* wami (la feature `wami` est
-testée en CI) ; il clone `Lsh0x/wami@main` en sparse `--no-cone` (`crates/`, `Cargo.toml`,
-`Cargo.lock` ; 4,8 Mo, sans le `coverage.json` de 75 Mo) au chemin attendu
-`../../obrain/wami-main`. Conséquence assumée de « suivre main » : la CI teste le `main` de wami
+testée en CI) ; il clone `Lsh0x/wami@main` (shallow, clone simple : la variante sparse `--no-cone`
+laissait `crates/` vide sous Git pour Windows) au chemin attendu `../../obrain/wami-main`, et
+vérifie la présence de `crates/wami/Cargo.toml` avant de rendre la main. Conséquence assumée de « suivre main » : la CI teste le `main` de wami
 du moment, pas un commit épinglé.
 
 ### D4 — Tokens (double-acceptation)

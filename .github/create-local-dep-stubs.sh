@@ -3,9 +3,8 @@
 #
 # - obrain-* and vite-rs: minimal STUBS, so cargo can resolve Cargo.toml. Their
 #   features are never activated in CI (--features all,wami, not --all-features).
-# - wami (Lsh0x/wami, followed on `main`, ADR D3): a REAL sparse clone, because
-#   the `wami` feature IS tested in CI and a stub cannot provide its API. The
-#   75 MB coverage.json tracked upstream is excluded by the blob filter.
+# - wami (Lsh0x/wami, followed on `main`, ADR D3): a REAL shallow clone, because
+#   the `wami` feature IS tested in CI and a stub cannot provide its API.
 
 set -euo pipefail
 
@@ -52,20 +51,18 @@ fi
 # REPO_ROOT is the repository's PARENT (see above): Cargo.toml's `../../obrain/wami-main`
 # from the repo is `$REPO_ROOT/../obrain/wami-main`, like `$REPO_ROOT/../banc-obrain-j4`.
 WAMI_DIR="$REPO_ROOT/../obrain/wami-main"
-if [ ! -d "$WAMI_DIR/crates/wami" ]; then
+if [ ! -f "$WAMI_DIR/crates/wami/Cargo.toml" ]; then
   mkdir -p "$(dirname "$WAMI_DIR")"
-  # --no-cone: cone mode always checks out the root files, coverage.json included.
-  if git clone --depth 1 --branch main --filter=blob:none --no-checkout \
-       https://github.com/Lsh0x/wami.git "$WAMI_DIR" \
-     && git -C "$WAMI_DIR" sparse-checkout set --no-cone '/Cargo.toml' '/Cargo.lock' '/crates/' \
-     && git -C "$WAMI_DIR" checkout main; then
-    echo "  sparse clone: crates/ only"
-  else
-    echo "sparse clone failed, falling back to a plain shallow clone"
-    rm -rf "$WAMI_DIR"
-    git clone --depth 1 --branch main https://github.com/Lsh0x/wami.git "$WAMI_DIR"
-  fi
+  rm -rf "$WAMI_DIR"
+  # A plain shallow clone: the sparse --no-cone variant left crates/ empty under
+  # Git for Windows. The 75 MB coverage.json upstream is the price, once per job.
+  git clone --depth 1 --branch main https://github.com/Lsh0x/wami.git "$WAMI_DIR"
   echo "  clone: wami main @ $(git -C "$WAMI_DIR" rev-parse --short HEAD)"
+fi
+# Fail HERE, with a readable message, rather than in cargo's manifest loader.
+if [ ! -f "$WAMI_DIR/crates/wami/Cargo.toml" ]; then
+  echo "wami clone incomplete: $WAMI_DIR/crates/wami/Cargo.toml missing" >&2
+  exit 1
 fi
 
 echo "Local dep stubs ready."
