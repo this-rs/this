@@ -103,36 +103,39 @@ indexmap = "2.13.0"
 #      `obrain-adapters::plugins::algorithms` est sous ce cfg).
 # Le dispatch générique des procédures `CALL` en dépend aussi (cf.
 # `cognitive-full = [..., "algos"]` dans obrain-engine).
-obrain-engine = { path = "../../banc-obrain-j4/crates/obrain-engine", optional = true, features = ["algos"] }
-obrain-common = { path = "../../banc-obrain-j4/crates/obrain-common", optional = true }
-obrain-core = { path = "../../banc-obrain-j4/crates/obrain-core", optional = true, default-features = false }
+obrain-engine = { version = "0.0.1", path = "../../banc-obrain-j4/crates/obrain-engine", optional = true, features = ["algos"] }
+obrain-common = { version = "0.0.1", path = "../../banc-obrain-j4/crates/obrain-common", optional = true }
+obrain-core = { version = "0.0.1", path = "../../banc-obrain-j4/crates/obrain-core", optional = true, default-features = false }
 # `obrain-substrate` doit être une dépendance DIRECTE (et non transitive via
 # l'engine) dès qu'on nomme ses types : `substrate_handle()` rend un
 # `Option<Arc<SubstrateStore>>`, et la couche simpliciale / courbure / énergie
 # ne vit que là (`simplex_passes`, `simplex_zone`, `geometric`). Aucune feature.
-obrain-substrate = { path = "../../banc-obrain-j4/crates/obrain-substrate", optional = true }
+obrain-substrate = { version = "0.0.1", path = "../../banc-obrain-j4/crates/obrain-substrate", optional = true }
 # `obrain-adapters` doit aussi être direct dès qu'on NOMME ses types : le
 # registre rend des `ParameterDef` dont le `param_type` est un
 # `obrain_adapters::plugins::ParameterType` (re-export `plugins/mod.rs:16`).
 # `plugins::traits` n'est PAS gaté par `algos` (seul `plugins::algorithms` l'est),
 # donc `default-features = false` suffit ici — les features dont on a besoin
 # (`algos`) sont demandées via `obrain-engine`, et l'unification les ramène.
-obrain-adapters = { path = "../../banc-obrain-j4/crates/obrain-adapters", optional = true, default-features = false }
+obrain-adapters = { version = "0.0.1", path = "../../banc-obrain-j4/crates/obrain-adapters", optional = true, default-features = false }
 # `obrain-reactive` porte les VRAIS types du pont : `MutationBus`, `MutationEvent`,
 # `MutationBatch`. Il manquait, et c'est pour ça que `events/bridge/types.rs`
 # recopiait des types locaux — recopie qui a DÉJÀ divergé (voir types.rs).
-obrain-reactive = { path = "../../banc-obrain-j4/crates/obrain-reactive", optional = true }
+obrain-reactive = { version = "0.0.1", path = "../../banc-obrain-j4/crates/obrain-reactive", optional = true }
 
 # vite-rs — Vite-like static/dev frontend serving reused by the `frontend`
 # feature (dev loop + AI bridge + static file rules + guaranteed cache
 # freshness). Local checkout: ~/projects/vite-rs (github this-rs/vite-rs).
 this-vite = { version = "0.0.1", path = "../../vite-rs", optional = true }
 
-# WAMI — original suivre main (worktree local sur origin/main, en avance sur crates.io).
+# WAMI — `version` + `git` + `rev` : le hash fixe le code pendant le développement, la `version`
+# est ce que cargo résout à la PUBLICATION (`path` et `git` sont retirés du manifeste empaqueté).
+# Donc publier `this-rs` exige que wami 0.19 / wami-core 0.20 / wami-condition 0.18.1 soient sur
+# crates.io. Tant qu'elles n'y sont pas, `cargo package` échoue : c'est voulu, pas un oubli.
 # Feature-gated : n'affecte PAS le build par défaut (feature `wami`).
-wami = { path = "../../obrain/wami-main/crates/wami", optional = true }
-wami-core = { path = "../../obrain/wami-main/crates/wami-core", optional = true }
-wami-condition = { path = "../../obrain/wami-main/crates/wami-condition", optional = true }
+wami = { version = "0.19", git = "https://github.com/Lsh0x/wami.git", rev = "5663db071a56285abd8c10219009964a569733bf", optional = true }
+wami-core = { version = "0.20", git = "https://github.com/Lsh0x/wami.git", rev = "5663db071a56285abd8c10219009964a569733bf", optional = true }
+wami-condition = { version = "0.18.1", git = "https://github.com/Lsh0x/wami.git", rev = "5663db071a56285abd8c10219009964a569733bf", optional = true }
 
 # WAMI auth (optional, feature-gated)
 jsonwebtoken = { version = "9", optional = true }
