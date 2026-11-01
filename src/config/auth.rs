@@ -201,6 +201,24 @@ pub struct WamiConfig {
     /// Refresh token TTL in seconds (default: 86400 = 24 hours)
     #[serde(default = "default_refresh_ttl")]
     pub refresh_ttl_secs: u64,
+
+    /// Accept tokens issued before `aud` / `token_use` existed (ADR D4 window).
+    ///
+    /// Default: `true` in `bootstrap` mode, `false` otherwise. Set it explicitly
+    /// to `true` during a migration, then remove it once every client reissued.
+    #[serde(default)]
+    pub accept_legacy_tokens: Option<bool>,
+
+    /// WAMI policy definition (JSON: principals, roles, boundaries). Setting it
+    /// arms the WAMI IAM on every surface; an unreadable file refuses to start.
+    #[serde(default)]
+    pub policies_path: Option<std::path::PathBuf>,
+
+    /// Identity registry journal (JSON `[{tenant, segment}]`), written through on
+    /// every new tenant. Without it the registry is in memory only and a restart
+    /// reallocates segments: required with `policies_path` outside `bootstrap`.
+    #[serde(default)]
+    pub identity_path: Option<std::path::PathBuf>,
 }
 
 #[cfg(feature = "wami")]

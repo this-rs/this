@@ -163,8 +163,9 @@ pub async fn verify_handler(State(state): State<Arc<StsState>>, headers: HeaderM
 
     let mut validation = Validation::new(Algorithm::EdDSA);
     validation.set_issuer(&[state.sts.issuer()]);
-    // Les jetons de ce STS ne portent pas d'`aud` : l'exiger les refuserait tous.
-    validation.set_audience::<&str>(&[]);
+    // L'audience est vérifiée par le STS (`check_audience`), pas par jsonwebtoken :
+    // celui-ci refuse tout `aud` présent quand aucune audience n'est attendue.
+    validation.validate_aud = false;
 
     let claims = match jsonwebtoken::decode::<StsClaims>(&token, &state.decoding_key, &validation) {
         Ok(data) => data.claims,
@@ -173,6 +174,17 @@ pub async fn verify_handler(State(state): State<Arc<StsState>>, headers: HeaderM
             return refusal("invalid_token");
         }
     };
+
+    if let Err(error) = state.sts.check_audience(claims.aud.as_deref()) {
+        tracing::debug!(%error, "porte : jeton refusé (audience)");
+        return refusal("invalid_token");
+    }
+
+    // Un jeton de rafraîchissement n'authentifie pas une requête (ADR D4).
+    if claims.token_use.as_deref() == Some(crate::core::auth::sts::TOKEN_USE_REFRESH) {
+        tracing::debug!("porte : jeton de rafraîchissement refusé comme bearer");
+        return refusal("invalid_token");
+    }
 
     if state.sts.is_revoked(&claims.jti) {
         tracing::debug!(jti = %claims.jti, "porte : jeton révoqué");
