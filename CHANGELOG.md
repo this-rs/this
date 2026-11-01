@@ -8,6 +8,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **OIDC : un IdP externe devient un provider de première classe.** `provider: oidc` existait dans le
+  contrat de configuration et **ne faisait rien** — un `warn`, puis un hôte sans authentification.
+  `this` est un **resource server**, pas un serveur d'autorisation (ADR D11) : il vérifie des jetons
+  qu'un OpenID Provider a émis, il n'en émet pas.
+  - découverte `/.well-known/openid-configuration` → `jwks_uri` → jeu de clés, cache 5 min ;
+  - rotation : un `kid` inconnu coûte **un** refetch, sérialisé et borné (un toutes les 5 s) ;
+  - refus nommés : `HS*` et `none`, `aud` étrangère, `iss` étranger, `exp` dépassé, `nbf` non atteint,
+    jeton sans tenant, provider injoignable (fermé, jamais ouvert) ; `auth.oidc.audience` obligatoire ;
+  - `sub` opaque (`auth0|…`) → UUIDv5 dérivé du sujet, stable entre redémarrages, sans table ;
+  - `Jwk::is_supported` n'est **pas** appelé : il déballe `key_algorithm`, donc un JWKS dont les
+    entrées omettent `alg` (permis par la spec) ferait paniquer le thread.
+  Feature `oidc` (`jsonwebtoken` + `reqwest`), ajoutée à `all` pour que la CI la couvre.
+  ADR : [`docs/oidc-resource-server.md`](docs/oidc-resource-server.md).
+- **Le `scope` du jeton devient un grant (RFC 9068).** `AuthContext::User` porte `scopes`, rempli par
+  le provider OIDC depuis la chaîne `scope` (RFC 6749 §3.3). `perm:orders:read` est accordé par
+  `orders:read`, `orders.read`, `orders:*`, `orders.*` ou `*` — une famille s'arrête au point
+  (`order*` n'accorde rien).
+  **Règle** : le scope n'accorde `perm:` que **lorsqu'aucun plan IAM n'est branché**. Un moteur
+  branché garde le dernier mot, **y compris quand il répond « non tranchable »**, qui est un refus
+  délibéré. Même règle sur REST (`Authorization::check_iam`) et sur les autres surfaces
+  (`SurfaceGuard::with_env` — GraphQL, gRPC, WebSocket, host).
+  **Limite assumée** : le scope est une **admission**, pas une restriction de lignes. `wami-scope`
+  (T4 de l'ADR) demanderait un traducteur de prédicat par backend pour être poussé avant pagination ;
+  il est reporté, et c'est écrit dans l'ADR §6 plutôt que sous-entendu.
 - **Signature des modules stockés (ancre de confiance).** Un module stocké n'avait
   que l'**intégrité** : ses fichiers devaient correspondre aux etags d'un
   manifeste que quiconque peut écrire dans le store peut réécrire, de façon
@@ -151,7 +175,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   d'interceptor d'identité tonic au dépôt. Le remède est nommé dans le fichier ;
   le fermer est une décision de politique, pas un correctif glissé.
 
-## [0.0.10] - 2026-10-30
+## [0.0.10] — en préparation
 
 ### Added — module-descriptor
 - **`ModuleDescriptor`** (crate `this-descriptor`, `default = []`, compatible wasm32) : un module est décrit une fois (entités, champs, validateurs, transformations, filtres typés, liens, politiques, erreurs, messages fr/en) et le descripteur pilote REST, GraphQL, gRPC et WebSocket. Même payload invalide = même code (`this.validation.positive`) sur les trois protocoles ; 422 / `INVALID_ARGUMENT` / `BAD_USER_INPUT`.
