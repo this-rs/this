@@ -69,7 +69,10 @@ coexistent), puis on retire la 9.
 **CI** : `.github/create-local-dep-stubs.sh` ne peut pas *stubber* wami (la feature `wami` est
 testée en CI) ; il clone `Lsh0x/wami@main` (shallow, clone simple : la variante sparse `--no-cone`
 laissait `crates/` vide sous Git pour Windows) au chemin attendu `../../obrain/wami-main`, et
-vérifie la présence de `crates/wami/Cargo.toml` avant de rendre la main. Conséquence assumée de « suivre main » : la CI teste le `main` de wami
+vérifie la présence de `crates/wami/Cargo.toml` avant de rendre la main.
+**Audit** : `wami` tire `jsonwebtoken 10` (`rust_crypto`) donc `p256`/`p384` → `crypto-bigint 0.5.5`
+(RUSTSEC-2026-0387, variabilité temporelle). Chemins ECDSA jamais exercés ici (EdDSA seul) ;
+avis ignoré en CI avec justification, à lever quand `p256` passera sur `crypto-bigint ≥ 0.7.6`. Conséquence assumée de « suivre main » : la CI teste le `main` de wami
 du moment, pas un commit épinglé.
 
 ### D4 — Tokens (double-acceptation)
