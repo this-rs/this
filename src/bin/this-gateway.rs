@@ -2391,6 +2391,7 @@ fn identite_en_entetes(ctx: &AuthContext) -> Vec<(&'static str, String)> {
             user_id,
             tenant_id,
             roles,
+            ..
         } => {
             let mut entetes = vec![
                 ("x-this-subject", user_id.to_string()),
