@@ -273,3 +273,151 @@ mod tests {
         assert_eq!(got.status(), StatusCode::OK);
     }
 }
+
+#[cfg(test)]
+mod golden_contract {
+    //! RFC descriptor-only, Décision 3: the descriptor-driven REST surface (`DescriptorEntity`)
+    //! is pinned by a GOLDEN contract — every verb's status, the list envelope and the error
+    //! code of a missing row. If the generated surface drifts, this breaks instead of a
+    //! migrated module silently diverging. (GraphQL/gRPC come from the `DescriptorSet` for
+    //! BOTH the hand-written and the descriptor path, so REST is what this adapter owns.)
+    use super::*;
+    use anyhow::Result;
+    use axum::Router;
+    use axum::body::{Body, to_bytes};
+    use axum::http::{Request, StatusCode};
+    use serde_json::{Value, json};
+    use std::sync::Arc;
+    use tower::ServiceExt;
+    use uuid::Uuid;
+
+    use crate::descriptor::ContractError;
+    use crate::descriptor::framework::codes;
+
+    const MISSING: &str = "00000000-0000-0000-0000-0000000000ff";
+
+    struct GoldenStore;
+
+    #[async_trait::async_trait]
+    impl EntityFetcher for GoldenStore {
+        async fn fetch_as_json(&self, id: &Uuid) -> Result<Value> {
+            if id.to_string() == MISSING {
+                return Err(anyhow::Error::new(
+                    ContractError::framework(codes::ENTITY_NOT_FOUND)
+                        .with_param("entity", "invoice")
+                        .with_param("id", id.to_string()),
+                ));
+            }
+            Ok(json!({ "id": id }))
+        }
+        async fn list_as_json(
+            &self,
+            _limit: Option<i32>,
+            _offset: Option<i32>,
+        ) -> Result<Vec<Value>> {
+            Ok(vec![
+                json!({ "id": "00000000-0000-0000-0000-000000000001" }),
+            ])
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl EntityCreator for GoldenStore {
+        async fn create_from_json(&self, entity_data: Value) -> Result<Value> {
+            Ok(entity_data)
+        }
+        async fn update_from_json(&self, id: &Uuid, entity_data: Value) -> Result<Value> {
+            Ok(json!({ "id": id, "patch": entity_data }))
+        }
+        async fn delete(&self, _id: &Uuid) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    fn app() -> Router {
+        let mut e = EntityDesc::new("invoice");
+        e.plural = "invoices".into();
+        DescriptorEntity::new(e, Arc::new(GoldenStore), Arc::new(GoldenStore)).build_routes()
+    }
+
+    async fn send(app: Router, req: Request<Body>) -> (StatusCode, Value) {
+        let res = app.oneshot(req).await.expect("infallible router");
+        let status = res.status();
+        let bytes = to_bytes(res.into_body(), usize::MAX).await.unwrap();
+        let body = if bytes.is_empty() {
+            Value::Null
+        } else {
+            serde_json::from_slice(&bytes).unwrap_or(Value::Null)
+        };
+        (status, body)
+    }
+
+    fn get(uri: &str) -> Request<Body> {
+        Request::builder().uri(uri).body(Body::empty()).unwrap()
+    }
+    fn verb(method: &str, uri: &str, body: &str) -> Request<Body> {
+        Request::builder()
+            .method(method)
+            .uri(uri)
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn golden_rest_contract_is_stable() {
+        let id = "00000000-0000-0000-0000-000000000001";
+
+        // list → 200 with the typed envelope
+        let (s, b) = send(app(), get("/invoices")).await;
+        assert_eq!(s, StatusCode::OK, "list status");
+        assert_eq!(b["pagination"]["total"], json!(1), "list envelope: {b}");
+        assert_eq!(b["data"].as_array().map(|a| a.len()), Some(1));
+
+        // create → 201
+        let (s, b) = send(app(), verb("POST", "/invoices", r#"{"amount":1}"#)).await;
+        assert_eq!(s, StatusCode::CREATED, "create status");
+        assert_eq!(
+            b,
+            json!({ "amount": 1 }),
+            "create echoes the validated body"
+        );
+
+        // get → 200
+        let (s, _) = send(app(), get(&format!("/invoices/{id}"))).await;
+        assert_eq!(s, StatusCode::OK, "get status");
+
+        // put / patch → 200
+        let (s, _) = send(app(), verb("PUT", &format!("/invoices/{id}"), r#"{"a":1}"#)).await;
+        assert_eq!(s, StatusCode::OK, "put status");
+        let (s, _) = send(
+            app(),
+            verb("PATCH", &format!("/invoices/{id}"), r#"{"a":2}"#),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "patch status");
+
+        // delete → 204, empty body
+        let (s, b) = send(
+            app(),
+            Request::builder()
+                .method("DELETE")
+                .uri(format!("/invoices/{id}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(s, StatusCode::NO_CONTENT, "delete status");
+        assert_eq!(b, Value::Null, "delete body is empty");
+
+        // missing row → 404 with the framework code (not a generic 500)
+        let (s, b) = send(app(), get(&format!("/invoices/{MISSING}"))).await;
+        assert_eq!(s, StatusCode::NOT_FOUND, "missing status");
+        assert!(
+            serde_json::to_string(&b)
+                .unwrap()
+                .contains("this.entity.not_found"),
+            "missing error code: {b}"
+        );
+    }
+}
