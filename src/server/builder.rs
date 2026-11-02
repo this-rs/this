@@ -1040,9 +1040,50 @@ impl ServerBuilder {
         // last-wins. Between legacy modules the historical last-wins is kept (warned).
         let mut described_types: std::collections::BTreeSet<String> = Default::default();
         for &i in &order {
+            let is_described = described_idx.contains(&i);
+            // Descriptor-only path: a DESCRIBED module whose entities are ALL backed by a
+            // store (`get_entity_fetcher` + `get_entity_creator`) is served by generated
+            // descriptor routes (`DescriptorEntity`); its hand-written `register_entities`
+            // is skipped (the descriptor wins — RFC « descriptor-only »). A module that is
+            // described but not fully backed falls through to the legacy path (unchanged),
+            // so backward compatibility is preserved.
+            if is_described {
+                let name = crate::descriptor::naming::to_snake_identifier(self.modules[i].name());
+                if let Some(desc) = descriptor_set.module(&name) {
+                    let all_backed = !desc.entities.is_empty()
+                        && desc.entities.iter().all(|e| {
+                            self.modules[i].get_entity_fetcher(&e.name).is_some()
+                                && self.modules[i].get_entity_creator(&e.name).is_some()
+                        });
+                    if all_backed {
+                        for e in &desc.entities {
+                            let fetcher = self.modules[i]
+                                .get_entity_fetcher(&e.name)
+                                .expect("all_backed checked above");
+                            let creator = self.modules[i]
+                                .get_entity_creator(&e.name)
+                                .expect("all_backed checked above");
+                            let entity = crate::server::descriptor_entity::DescriptorEntity::new(
+                                e.clone(),
+                                fetcher,
+                                creator,
+                            );
+                            self.entity_registry
+                                .try_register(Box::new(entity))
+                                .map_err(|err| {
+                                    anyhow::Error::new(
+                                        err.with_param("module", self.modules[i].name()),
+                                    )
+                                })?;
+                            described_types.insert(e.name.clone());
+                        }
+                        continue;
+                    }
+                }
+            }
+
             let mut local = EntityRegistry::new();
             self.modules[i].register_entities(&mut local);
-            let is_described = described_idx.contains(&i);
             for d in local.drain() {
                 let t = d.entity_type().to_string();
                 let collides_with_described = described_types.contains(&t)
@@ -2861,5 +2902,123 @@ mod descriptor_tests {
         // STS issues nothing locally.
         let sts = config_with(AuthMode::Sts);
         assert!(ServerBuilder::resolve_wami_keys(&sts).is_err());
+    }
+}
+
+#[cfg(test)]
+mod descriptor_only_serving {
+    //! RFC « descriptor-only » (P3): a DESCRIBED module whose entities are backed by a
+    //! store is served by generated descriptor routes (`DescriptorEntity`), NOT by
+    //! `register_entities`. This proves the wiring end to end.
+    use crate::config::{EntityAuthConfig, EntityConfig, LinksConfig};
+    use crate::core::module::{EntityCreator, EntityFetcher, Module};
+    use crate::descriptor::{EntityDesc, ModuleDescriptor};
+    use crate::server::builder::ServerBuilder;
+    use crate::server::entity_registry::EntityRegistry;
+    use crate::storage::InMemoryLinkService;
+    use anyhow::Result;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use serde_json::{Value, json};
+    use std::sync::Arc;
+    use tower::ServiceExt;
+    use uuid::Uuid;
+
+    struct WidgetStore;
+
+    #[async_trait::async_trait]
+    impl EntityFetcher for WidgetStore {
+        async fn fetch_as_json(&self, id: &Uuid) -> Result<Value> {
+            Ok(json!({ "id": id }))
+        }
+        async fn list_as_json(
+            &self,
+            _limit: Option<i32>,
+            _offset: Option<i32>,
+        ) -> Result<Vec<Value>> {
+            Ok(vec![
+                json!({ "id": "00000000-0000-0000-0000-000000000001" }),
+            ])
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl EntityCreator for WidgetStore {
+        async fn create_from_json(&self, entity_data: Value) -> Result<Value> {
+            Ok(entity_data)
+        }
+    }
+
+    struct Backed {
+        store: Arc<WidgetStore>,
+    }
+
+    impl Module for Backed {
+        fn name(&self) -> &str {
+            "backed"
+        }
+        fn version(&self) -> &str {
+            "1.0.0"
+        }
+        fn entity_types(&self) -> Vec<&str> {
+            vec!["widget"]
+        }
+        fn links_config(&self) -> anyhow::Result<LinksConfig> {
+            Ok(LinksConfig {
+                entities: vec![EntityConfig {
+                    singular: "widget".into(),
+                    plural: "widgets".into(),
+                    auth: EntityAuthConfig::default(),
+                }],
+                links: vec![],
+                validation_rules: None,
+                events: None,
+                sinks: None,
+                auth: None,
+            })
+        }
+        // Intentionally a no-op: the descriptor-only path must serve the entity WITHOUT it.
+        fn register_entities(&self, _registry: &mut EntityRegistry) {}
+        fn descriptor(&self) -> Option<ModuleDescriptor> {
+            let mut d = ModuleDescriptor::new("backed", "1.0.0");
+            d.entities.push(EntityDesc::new("widget"));
+            Some(d)
+        }
+        fn get_entity_fetcher(&self, entity_type: &str) -> Option<Arc<dyn EntityFetcher>> {
+            (entity_type == "widget").then(|| self.store.clone() as Arc<dyn EntityFetcher>)
+        }
+        fn get_entity_creator(&self, entity_type: &str) -> Option<Arc<dyn EntityCreator>> {
+            (entity_type == "widget").then(|| self.store.clone() as Arc<dyn EntityCreator>)
+        }
+    }
+
+    #[tokio::test]
+    async fn a_described_and_backed_module_is_served_by_its_descriptor() {
+        let store = Arc::new(WidgetStore);
+        let host = ServerBuilder::new()
+            .with_link_service(InMemoryLinkService::new())
+            .register_module(Backed { store })
+            .expect("register")
+            .build_host()
+            .expect("build_host");
+
+        // Registered through the descriptor path (register_entities is a no-op).
+        assert!(
+            host.entity_registry.contains("widget"),
+            "the described+backed entity must be registered from the descriptor"
+        );
+
+        // And its generated CRUD routes answer from the store.
+        let app = host.entity_registry.build_routes();
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .uri("/widgets")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
     }
 }

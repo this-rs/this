@@ -15,6 +15,9 @@
 pub mod builder;
 /// Live host catalog: one immutable snapshot published atomically (module descriptor RFC).
 pub mod catalog;
+/// `DescriptorEntity`: descriptor-driven CRUD routes for a compiled entity, delegating
+/// storage to the module's `EntityFetcher`/`EntityCreator` (the "declared once" bridge).
+pub mod descriptor_entity;
 pub mod entity_registry;
 pub mod exposure;
 pub mod host;
