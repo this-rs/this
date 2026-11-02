@@ -11,7 +11,7 @@
 //! - stable error codes (`ApiError` / `ContractError`), `201` on create, `204` on delete
 //!
 //! without any hand-written handler. It implements [`EntityDescriptor`], so it can be
-//! registered in an [`EntityRegistry`](crate::server::entity_registry::EntityRegistry)
+//! registered in an `EntityRegistry`
 //! like any other entity — by a module (`register_entities`), by the builder for a
 //! descriptor-only module, or directly.
 //!
