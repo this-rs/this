@@ -27,6 +27,17 @@
 //! silently does nothing would be the worst possible answer: the caller thinks
 //! the data is gone and it is not.
 //!
+//! ## What happens when the mark cannot be written (JSON path)
+//!
+//! `SoftDeleteCreator` has no `DeleteOutcome` to report through: `EntityCreator::delete`
+//! answers `Result<()>`. So when `update_from_json` refuses, or accepts the document
+//! but does not keep `deleted_at`, the delete is **refused** with an error naming
+//! the entity and the cause. The row stays. The previous behaviour fell back to
+//! the real delete, which made an application running *with* soft delete lose
+//! rows without a trace the day one of its entities lacked `update_from_json`
+//! (measured on `this-examples/billing`). A refusal costs one error message; an
+//! erasure cannot be taken back.
+//!
 //! ## What this does not cover
 //!
 //! REST CRUD handlers are written by the application against its own store; the
@@ -640,12 +651,33 @@ impl EntityCreator for SoftDeleteCreator {
         };
         document["deleted_at"] = serde_json::Value::String(Utc::now().to_rfc3339());
 
-        match self.inner.update_from_json(entity_id, document).await {
-            Ok(_) => Ok(()),
-            // The type or the store cannot carry the mark: fall back to the real
-            // delete rather than pretending it happened.
-            Err(_) => self.inner.delete(entity_id).await,
-        }
+        // Refuse, never fall back. This path has no `DeleteOutcome` to report through,
+        // so a real delete here would be an erasure the caller believes reversible —
+        // the one outcome this module exists to prevent. The row stays; the caller
+        // is told which entity cannot carry the mark and why.
+        let stored = self
+            .inner
+            .update_from_json(entity_id, document)
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "soft delete refused for {entity_id}: the store cannot write `deleted_at` \
+                     (update_from_json: {e}); implement `EntityCreator::update_from_json` for \
+                     this entity or do not enable soft delete"
+                )
+            })?;
+
+        // A store that accepts the document but drops the field (a type without
+        // `deleted_at`, unknown fields ignored) would leave a row that reads as live:
+        // a silent no-op. Check what came back, not what was sent.
+        let kept = stored.get("deleted_at").is_some_and(|v| !v.is_null());
+        anyhow::ensure!(
+            kept,
+            "soft delete refused for {entity_id}: the store accepted the update but did not \
+             keep `deleted_at`; the type cannot carry the mark, so do not enable soft delete \
+             for this entity"
+        );
+        Ok(())
     }
 }
 
@@ -760,6 +792,9 @@ mod creator_tests {
     struct Store {
         docs: Mutex<HashMap<Uuid, serde_json::Value>>,
         updates_supported: bool,
+        /// Accepts the update but does not keep `deleted_at`: what a type without
+        /// the field does when serde ignores unknown fields.
+        drops_mark: bool,
     }
 
     impl Store {
@@ -767,6 +802,14 @@ mod creator_tests {
             Arc::new(Self {
                 docs: Mutex::new(HashMap::new()),
                 updates_supported,
+                drops_mark: false,
+            })
+        }
+        fn dropping_mark() -> Arc<Self> {
+            Arc::new(Self {
+                docs: Mutex::new(HashMap::new()),
+                updates_supported: true,
+                drops_mark: true,
             })
         }
         fn insert(&self, id: Uuid, name: &str) {
@@ -801,6 +844,10 @@ mod creator_tests {
         ) -> Result<serde_json::Value> {
             if !self.updates_supported {
                 anyhow::bail!("Update operation not implemented for this entity type");
+            }
+            let mut data = data;
+            if let Some(obj) = data.as_object_mut().filter(|_| self.drops_mark) {
+                obj.remove("deleted_at");
             }
             let mut docs = self.docs.lock().unwrap();
             let slot = docs
@@ -837,18 +884,49 @@ mod creator_tests {
     }
 
     #[tokio::test]
-    async fn delete_falls_back_to_a_real_delete_when_update_is_refused() {
-        // No silent no-op: a store that cannot update gets the delete it always got.
+    async fn delete_is_refused_and_the_row_kept_when_the_mark_cannot_be_written() {
+        // Neither a silent no-op nor a silent erasure: the caller asked for a soft
+        // delete, the store cannot carry it, so the caller is told and nothing moves.
         let store = Store::new(false);
         let id = Uuid::new_v4();
         store.insert(id, "widget");
 
         let creator = SoftDeleteCreator::new(store.clone(), store.clone());
-        creator.delete(&id).await.unwrap();
-
+        let err = creator
+            .delete(&id)
+            .await
+            .expect_err("a store that cannot write the mark must refuse the delete");
         assert!(
-            store.snapshot(&id).is_none(),
-            "a store that cannot update must still delete"
+            err.to_string().contains("soft delete"),
+            "the error names the cause: {err}"
+        );
+        assert!(
+            store.snapshot(&id).is_some(),
+            "the row must still be stored after a refused soft delete"
+        );
+    }
+
+    #[tokio::test]
+    async fn delete_is_refused_when_the_store_accepts_but_drops_the_mark() {
+        // The store says yes and keeps nothing: left alone, the row would read as
+        // live forever — a silent no-op. The answer that came back is what counts.
+        let store = Store::dropping_mark();
+        let id = Uuid::new_v4();
+        store.insert(id, "widget");
+
+        let creator = SoftDeleteCreator::new(store.clone(), store.clone());
+        let err = creator
+            .delete(&id)
+            .await
+            .expect_err("a store that drops the mark must refuse the delete");
+        assert!(
+            err.to_string().contains("did not keep"),
+            "the error names the cause: {err}"
+        );
+        let row = store.snapshot(&id).expect("the row is still stored");
+        assert!(
+            row.get("deleted_at").is_none_or(|v| v.is_null()),
+            "nothing was marked behind the caller's back"
         );
     }
 
