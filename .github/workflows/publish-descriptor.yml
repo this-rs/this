@@ -1,0 +1,50 @@
+# Publie `this-descriptor` seul, sans attendre `this-rs`.
+#
+# Pourquoi un workflow séparé : `release.yml` publie `this-descriptor` COMME
+# ÉTAPE de la publication de `this-rs`. Or `this-rs` 0.0.10 ne peut pas être
+# publié aujourd'hui — ses six dépendances optionnelles `obrain-*` sont des
+# chemins locaux que crates.io ne connaît pas (détaillé dans release.yml).
+# Ce workflow débloque la première moitié sans exiger la seconde.
+#
+# `this-descriptor` est immuable sur crates.io : la v0.0.1 se publie une seule
+# fois. Le déclencheur par tag ne sera donc poussé qu'une fois.
+
+name: Publish this-descriptor
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Vérifier seulement (package + compile isolé), ne rien envoyer'
+        type: boolean
+        default: true
+  push:
+    tags:
+      - 'descriptor-v*'
+
+permissions:
+  contents: read
+
+jobs:
+  publish-descriptor:
+    name: Publish this-descriptor
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      # Vérifie TOUJOURS : `cargo publish --dry-run` empaquette puis recompile le
+      # paquet hors de l'arborescence. Une version non publiable échoue ici,
+      # avant tout envoi.
+      - name: Verify package
+        run: cargo publish -p this-descriptor --dry-run
+
+      # N'envoie que sur un tag, ou sur dispatch explicite avec dry_run décoché.
+      - name: Publish
+        if: ${{ github.event_name == 'push' || inputs.dry_run == 'false' }}
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_TOKEN }}
+        run: cargo publish -p this-descriptor --token "$CARGO_REGISTRY_TOKEN"
