@@ -33,6 +33,13 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v7
 
+      # Le manifest du workspace référence des path-deps optionnels (obrain-*,
+      # this-vite, wami) que le runner n'a pas. cargo résout les path-deps même
+      # non activés : sans stubs, le manifest ne charge pas (vu sur le premier
+      # dry-run : « failed to load manifest for workspace member »).
+      - name: Create local dep stubs
+        run: bash .github/create-local-dep-stubs.sh
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
