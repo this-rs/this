@@ -1852,6 +1852,23 @@ impl Module for Counted {
         })
     }
     fn register_entities(&self, _: &mut EntityRegistry) {}
+    /// Declared, so that `requires` can be exercised: the loader synthesises a
+    /// descriptor when this is `None`, and a synthesised one has no dependency.
+    fn descriptor(&self) -> Option<ModuleDescriptor> {
+        let mut d = ModuleDescriptor::new(self.name, self.version);
+        let mut e = EntityDesc::new(self.entity);
+        e.fields.push(FieldDesc::new("amount", FieldType::F64));
+        d.entities.push(e);
+        if let Some((name, version)) = self.requires {
+            d.requires.push(ModuleReq {
+                name: name.to_string(),
+                version: version.to_string(),
+                optional: false,
+            });
+        }
+        d.normalize();
+        Some(d)
+    }
     fn init(&self) -> anyhow::Result<()> {
         self.init.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         Ok(())
@@ -1909,6 +1926,11 @@ async fn a_missing_dependency_refuses_the_load_before_any_lifecycle_call() {
     let rt = h.host.module_runtime.clone().expect("runtime");
 
     let dependent = Counted::new("dependent", "1.0.0", "widget").requiring("ghost", "^1.0");
+    assert_eq!(
+        dependent.descriptor().map(|d| d.requires.len()),
+        Some(1),
+        "le descripteur du module de test doit porter la dependance"
+    );
 
     let err = rt
         .load(ModuleSource::Compiled(dependent.clone()))
@@ -1993,7 +2015,7 @@ async fn load_refused_by_composition_stops_the_started_module() {
 
 /// A `replace` refused on the version check must stop the NEW version.
 #[tokio::test]
-async fn replace_refused_for_a_non_newer_version_stops_the_new_version() {
+async fn replace_refused_for_a_non_newer_version_ne_starts_the_new_version() {
     let h = harness(false);
     let rt = h.host.module_runtime.clone().expect("runtime");
 
@@ -2010,8 +2032,16 @@ async fn replace_refused_for_a_non_newer_version_stops_the_new_version() {
         .expect_err("same version is not a valid replacement");
 
     assert_eq!(err.code.as_str(), "this.module.version_not_newer");
-    assert_eq!(same.starts(), 1, "the new version did start");
-    assert_eq!(same.stops(), 1, "the refused new version must be stopped");
+    // The reordering is exactly this: the new version is refused BEFORE the
+    // lifecycle, so it is not even initialised. It used to be started and then
+    // compensated by `stop()`; now there is nothing to compensate.
+    assert_eq!(
+        same.inits(),
+        0,
+        "the refused version must never be initialised"
+    );
+    assert_eq!(same.starts(), 0, "nor started");
+    assert_eq!(same.stops(), 0, "nothing ran, so there is nothing to stop");
     assert_eq!(v1.stops(), 0, "the served version keeps running");
     assert_eq!(
         rt.status("counted").await.unwrap().version,

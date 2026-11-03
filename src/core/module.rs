@@ -267,10 +267,15 @@ pub trait Module: Send + Sync {
     /// # What you may assume
     ///
     /// - The module is no longer published: no NEW request reaches it.
-    /// - On `replace`, in-flight requests have had up to the host's drain grace to
-    ///   finish before this runs, and the stream gate has been cancelled. So
-    ///   `stop()` does **not** need to protect in-flight work — it used to run
-    ///   before the drain, which made the drain pointless; that order was fixed.
+    /// - On `replace`, requests already in flight may still be holding the OLD
+    ///   router for up to the host's drain grace (`DEFAULT_DRAIN_GRACE_MS`, 30 s
+    ///   by default). This hook runs immediately, so **do not release what such a
+    ///   request may still need** — defer that yourself if you must, or keep the
+    ///   resource alive until the stream gate cancels.
+    ///
+    ///   The alternative — calling `stop()` after the drain — was considered and
+    ///   rejected: half a minute of open resources to let a handful of requests
+    ///   finish is the wrong trade for a default.
     /// - On a refused activation, `stop()` is the compensation for an activation
     ///   that was never published (see `ActivationGuard`).
     ///
