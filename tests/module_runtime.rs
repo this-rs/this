@@ -1773,6 +1773,9 @@ struct Counted {
     version: &'static str,
     entity: &'static str,
     fail_start: bool,
+    /// When set, the descriptor `requires` this module, which the test does not
+    /// load: the dependency resolution must refuse the load.
+    requires: Option<(&'static str, &'static str)>,
     init: std::sync::atomic::AtomicUsize,
     start: std::sync::atomic::AtomicUsize,
     stop: std::sync::atomic::AtomicUsize,
@@ -1794,10 +1797,21 @@ impl Counted {
             version,
             entity,
             fail_start,
+            requires: None,
             init: std::sync::atomic::AtomicUsize::new(0),
             start: std::sync::atomic::AtomicUsize::new(0),
             stop: std::sync::atomic::AtomicUsize::new(0),
         })
+    }
+
+    fn requiring(self: Arc<Self>, name: &'static str, version: &'static str) -> Arc<Self> {
+        match Arc::try_unwrap(self) {
+            Ok(mut inner) => {
+                inner.requires = Some((name, version));
+                Arc::new(inner)
+            }
+            Err(_) => panic!("`requiring` needs sole ownership of the module"),
+        }
     }
 
     fn count(&self, which: &std::sync::atomic::AtomicUsize) -> usize {
@@ -1882,6 +1896,62 @@ async fn start_failure_after_a_successful_init_stops_the_module() {
         matches!(state, ModuleState::Failed { .. }),
         "a refused load must be recorded Failed, got {state:?}"
     );
+}
+
+/// A dependency that cannot be satisfied refuses the load BEFORE `init()` and
+/// `start()`: nothing is started only to be turned away.
+///
+/// This is what the reordering bought. Before it, `resolve` ran inside
+/// `activate`, i.e. after the lifecycle had already started the module.
+#[tokio::test]
+async fn a_missing_dependency_refuses_the_load_before_any_lifecycle_call() {
+    let h = harness(false);
+    let rt = h.host.module_runtime.clone().expect("runtime");
+
+    let dependent = Counted::new("dependent", "1.0.0", "widget").requiring("ghost", "^1.0");
+
+    let err = rt
+        .load(ModuleSource::Compiled(dependent.clone()))
+        .await
+        .expect_err("`ghost` is not loaded, so the dependency cannot be satisfied");
+
+    assert_eq!(err.code.as_str(), "this.module.dependency_missing");
+    assert_eq!(dependent.inits(), 0, "init must not run");
+    assert_eq!(dependent.starts(), 0, "start must not run");
+    assert_eq!(
+        dependent.stops(),
+        0,
+        "nothing was started, so nothing to stop"
+    );
+}
+
+/// A refused *replace* must not start the new version either.
+#[tokio::test]
+async fn a_refused_replace_never_starts_the_new_version() {
+    let h = harness(false);
+    let rt = h.host.module_runtime.clone().expect("runtime");
+
+    let v1 = Counted::new("counted", "1.0.0", "widget");
+    rt.load(ModuleSource::Compiled(v1.clone()))
+        .await
+        .expect("load 1.0.0");
+
+    // Same version: refused by the forward-only rule, which now runs first.
+    let same = Counted::new("counted", "1.0.0", "widget");
+    let err = rt
+        .replace(ModuleSource::Compiled(same.clone()))
+        .await
+        .expect_err("same version is not a newer version");
+
+    assert_eq!(err.code.as_str(), "this.module.version_not_newer");
+    assert_eq!(
+        same.inits(),
+        0,
+        "the refused version must never be initialised"
+    );
+    assert_eq!(same.starts(), 0, "nor started");
+    assert_eq!(same.stops(), 0, "nor stopped — it never ran");
+    assert_eq!(v1.stops(), 0, "the served version keeps running");
 }
 
 /// The activation is refused by the catalog composition, AFTER `start()` ran.

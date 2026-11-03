@@ -262,8 +262,23 @@ pub trait Module: Send + Sync {
         Ok(())
     }
 
-    /// Lifecycle: called when the module stops serving (unload / replace). Best effort:
-    /// an error is logged, not propagated. Default: no-op.
+    /// Lifecycle: called when the module stops serving (unload / replace).
+    ///
+    /// # What you may assume
+    ///
+    /// - The module is no longer published: no NEW request reaches it.
+    /// - On `replace`, in-flight requests have had up to the host's drain grace to
+    ///   finish before this runs, and the stream gate has been cancelled. So
+    ///   `stop()` does **not** need to protect in-flight work — it used to run
+    ///   before the drain, which made the drain pointless; that order was fixed.
+    /// - On a refused activation, `stop()` is the compensation for an activation
+    ///   that was never published (see `ActivationGuard`).
+    ///
+    /// Best effort: an error is logged, not propagated. Default: no-op.
+    ///
+    /// No module implements this today — the framework ships the default and
+    /// this-examples uses it — so the contract is written for the first one that
+    /// does, not for existing behaviour.
     fn stop(&self) -> Result<()> {
         Ok(())
     }
