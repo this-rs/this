@@ -45,6 +45,21 @@ cargo publish             # irréversible : seule une version yanked peut être 
 
 `cargo publish` est **irréversible**. Il demande un jeton crates.io (`CARGO_REGISTRY_TOKEN`) que ce dépôt ne stocke pas. C'est donc une action humaine, à faire une fois.
 
+### Le paquet est prêt (mesuré le 03/11/2026)
+
+`cargo publish --dry-run` sur `crates/this-descriptor` va au bout :
+
+```
+Packaged 34 files, 409.5KiB (102.8KiB compressed)
+Verifying this-descriptor v0.0.1
+   Compiling this-descriptor v0.0.1 (.../slot2/package/this-descriptor-0.0.1)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 4.09s
+   Uploading this-descriptor v0.0.1
+warning: aborting upload due to dry run
+```
+
+La ligne qui compte est la recompilation dans `slot2/package/this-descriptor-0.0.1` : cargo a construit le paquet **tel qu'il serait publié**, hors de l'arborescence du dépôt. Le `--dry-run` s'arrête juste avant l'envoi. Il ne reste donc que l'upload, et il n'y a rien à corriger d'ici là.
+
 ## Travailler sur les trois dépôts
 
 Les manifestes se résolvent par chemin relatif. La disposition attendue sur le disque :
