@@ -7,7 +7,10 @@
 //! 2. For each incoming event, finds matching flows via EventMatcher
 //! 3. Executes the pipeline operators sequentially
 //! 4. Handles fan-out by recursively processing sub-pipelines
-//! 5. Logs errors without propagating them (one flow's error doesn't affect others)
+//! 5. Isolates flows (one flow's error doesn't stop the others) but does NOT
+//!    hide failures: an event is acknowledged only if every matching flow
+//!    succeeded, so a partial delivery is replayed instead of being lost
+//!    silently. A failed fan-out branch makes the whole pipeline fail.
 //!
 //! # Usage
 //!
@@ -121,6 +124,11 @@ impl FlowRuntime {
         while let Some(envelope) = stream.next().await {
             let event = &envelope.event;
 
+            // Every flow that matched must succeed before the event is
+            // acknowledged. One failure and the cursor stays behind, so a restart
+            // with `LastAcknowledged` replays it (decision 5a614d34).
+            let mut failures: Vec<String> = Vec::new();
+
             // Find matching flows (respecting tenant scoping)
             for flow in &self.flows {
                 // Tenant isolation: if this flow is scoped to a specific tenant,
@@ -154,22 +162,36 @@ impl FlowRuntime {
                         ctx.sink_registry = Some(registry.clone());
                     }
 
-                    // Execute the pipeline
+                    // Execute the pipeline. A failure is recorded, not swallowed:
+                    // isolating flows (one flow's error must not stop the others)
+                    // and acknowledging (which must reflect delivery) are two
+                    // different things, and the old code conflated them.
                     if let Err(e) = execute_pipeline(&flow.operators, &mut ctx).await {
                         tracing::warn!(
                             flow = %flow.name,
                             error = %e,
                             "pipeline execution failed"
                         );
+                        failures.push(format!("{}: {e:#}", flow.name));
                     }
                 }
             }
 
-            // Ack the exact event we just processed
-            if let Some(seq) = envelope.seq_no
-                && let Err(e) = self.event_log.ack(&self.consumer_name, seq).await
-            {
-                tracing::warn!(error = %e, "failed to ack event");
+            if failures.is_empty() {
+                // Ack the exact event we just processed
+                if let Some(seq) = envelope.seq_no
+                    && let Err(e) = self.event_log.ack(&self.consumer_name, seq).await
+                {
+                    tracing::warn!(error = %e, "failed to ack event");
+                }
+            } else {
+                tracing::error!(
+                    seq_no = envelope.seq_no,
+                    failed_flows = failures.len(),
+                    reasons = %failures.join("; "),
+                    "event NOT acknowledged: a delivery failed, so it will be replayed \
+                     from the last acknowledged position"
+                );
             }
         }
 
@@ -203,8 +225,14 @@ fn execute_pipeline<'a>(
                         "fan-out: processing remaining pipeline for each context"
                     );
 
-                    // Execute remaining operators for each fanned-out context
+                    // Execute remaining operators for each fanned-out context.
+                    // A failing branch used to be logged and forgotten, and the
+                    // function still returned Ok(()): the parent could not know
+                    // that N-1 of N deliveries were lost.
                     let remaining = &operators[i + 1..];
+                    let total = contexts.len();
+                    let mut failed = 0usize;
+                    let mut first_error: Option<String> = None;
                     for mut sub_ctx in contexts {
                         if let Err(e) = execute_pipeline(remaining, &mut sub_ctx).await {
                             tracing::warn!(
@@ -212,7 +240,18 @@ fn execute_pipeline<'a>(
                                 error = %e,
                                 "fan-out sub-pipeline failed"
                             );
+                            failed += 1;
+                            if first_error.is_none() {
+                                first_error = Some(format!("{e:#}"));
+                            }
                         }
+                    }
+                    if failed > 0 {
+                        return Err(anyhow::anyhow!(
+                            "fan-out `{}`: {failed}/{total} sub-pipelines failed (first: {})",
+                            op.name(),
+                            first_error.unwrap_or_default()
+                        ));
                     }
                     return Ok(());
                 }
@@ -704,5 +743,194 @@ mod tests {
 
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         handle.abort();
+    }
+    // ── Acknowledgement reflects delivery ────────────────────────────────
+
+    /// A pipeline that fails must NOT acknowledge the event.
+    ///
+    /// Before this, the error was logged and `ack` ran anyway, so a restart with
+    /// `SeekPosition::LastAcknowledged` skipped the failed delivery for good.
+    ///
+    /// No mock is needed to make it fail: `MockLinkService::find_by_source`
+    /// returns an empty list, so the `resolve` operator errors with "no link
+    /// found". The pre-existing `test_runtime_resolve_and_map` already ran
+    /// exactly this failing pipeline and asserted nothing about it.
+    #[tokio::test]
+    async fn failing_pipeline_is_not_acknowledged() {
+        let event_log = Arc::new(InMemoryEventLog::new());
+
+        let flow = compile_flow(&FlowConfig {
+            name: "failing_flow".to_string(),
+            description: None,
+            trigger: TriggerConfig {
+                kind: "link.created".to_string(),
+                link_type: Some("follows".to_string()),
+                entity_type: None,
+            },
+            pipeline: vec![PipelineStep::Resolve(ResolveConfig {
+                from: "source_id".to_string(),
+                via: None,
+                direction: "forward".to_string(),
+                output_var: "source".to_string(),
+            })],
+        })
+        .unwrap();
+
+        let link_service = Arc::new(MockLinkService) as Arc<dyn LinkService>;
+        let runtime = FlowRuntime::new(vec![flow], event_log.clone(), link_service, HashMap::new());
+        let handle = runtime.run(SeekPosition::Latest);
+
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        let event = make_link_event("follows");
+        let kind = event.event_kind().to_string();
+        event_log.append(EventEnvelope::new(event)).await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(120)).await;
+        handle.abort();
+
+        // The cursor stayed behind: the failed event is replayed.
+        let mut stream = event_log
+            .subscribe("flow-runtime", SeekPosition::LastAcknowledged)
+            .await
+            .unwrap();
+        let replayed = tokio::time::timeout(std::time::Duration::from_millis(300), stream.next())
+            .await
+            .expect("a failed delivery must be replayable from the last acknowledged position")
+            .expect("the log stream ended");
+        assert_eq!(
+            replayed.event.event_kind().to_string(),
+            kind,
+            "the replayed event is the one whose delivery failed"
+        );
+    }
+
+    /// The symmetric case: a successful pipeline IS acknowledged, so the event
+    /// is not replayed forever.
+    #[tokio::test]
+    async fn successful_pipeline_is_acknowledged() {
+        let event_log = Arc::new(InMemoryEventLog::new());
+
+        let flow = compile_flow(&FlowConfig {
+            name: "ok_flow".to_string(),
+            description: None,
+            trigger: TriggerConfig {
+                kind: "link.created".to_string(),
+                link_type: Some("follows".to_string()),
+                entity_type: None,
+            },
+            pipeline: vec![PipelineStep::Map(MapConfig {
+                template: json!({"title": "new follower"}),
+            })],
+        })
+        .unwrap();
+
+        let link_service = Arc::new(MockLinkService) as Arc<dyn LinkService>;
+        let runtime = FlowRuntime::new(vec![flow], event_log.clone(), link_service, HashMap::new());
+        let handle = runtime.run(SeekPosition::Latest);
+
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        event_log
+            .append(EventEnvelope::new(make_link_event("follows")))
+            .await
+            .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(120)).await;
+        handle.abort();
+
+        let mut stream = event_log
+            .subscribe("flow-runtime", SeekPosition::LastAcknowledged)
+            .await
+            .unwrap();
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(250), stream.next())
+                .await
+                .is_err(),
+            "an acknowledged event must not come back"
+        );
+    }
+
+    // ── Fan-out: a failing branch must reach the parent ──────────────────
+
+    /// Emits two sub-contexts, so the remaining operator runs once per branch.
+    #[derive(Debug)]
+    struct FanOutToTwo;
+
+    #[async_trait::async_trait]
+    impl PipelineOperator for FanOutToTwo {
+        fn name(&self) -> &str {
+            "fan_out_to_two"
+        }
+        async fn execute(&self, ctx: &mut FlowContext) -> anyhow::Result<OpResult> {
+            let mut a = FlowContext::new(
+                ctx.event.clone(),
+                ctx.link_service.clone(),
+                ctx.entity_fetchers.clone(),
+            );
+            let b = FlowContext::new(
+                ctx.event.clone(),
+                ctx.link_service.clone(),
+                ctx.entity_fetchers.clone(),
+            );
+            a.set_var("branch", json!("a"));
+            Ok(OpResult::FanOut(vec![a, b]))
+        }
+    }
+
+    fn link_event_ctx() -> FlowContext {
+        let link_service = Arc::new(MockLinkService) as Arc<dyn LinkService>;
+        FlowContext::new(
+            FrameworkEvent::Link(LinkEvent::Created {
+                link_type: "follows".to_string(),
+                link_id: Uuid::new_v4(),
+                source_id: Uuid::new_v4(),
+                target_id: Uuid::new_v4(),
+                metadata: None,
+            }),
+            link_service,
+            HashMap::new(),
+        )
+    }
+
+    /// A failing branch used to be logged and forgotten while the parent
+    /// returned `Ok(())`: N-1 of N deliveries could be lost invisibly.
+    #[tokio::test]
+    async fn fan_out_reports_a_failing_branch() {
+        let ops: Vec<Box<dyn PipelineOperator>> = vec![
+            Box::new(FanOutToTwo),
+            // `resolve` fails: the link service returns no link.
+            Box::new(crate::events::operators::ResolveOp::from_config(
+                &ResolveConfig {
+                    from: "source_id".to_string(),
+                    via: None,
+                    direction: "forward".to_string(),
+                    output_var: "source".to_string(),
+                },
+            )),
+        ];
+
+        let mut ctx = link_event_ctx();
+        let err = execute_pipeline(&ops, &mut ctx)
+            .await
+            .expect_err("both branches fail, so the pipeline must fail");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("fan-out"), "got: {msg}");
+        assert!(
+            msg.contains("2/2"),
+            "the message must count the failing branches, got: {msg}"
+        );
+    }
+
+    /// And a fan-out whose branches all succeed stays `Ok`.
+    #[tokio::test]
+    async fn fan_out_with_succeeding_branches_is_ok() {
+        let ops: Vec<Box<dyn PipelineOperator>> = vec![
+            Box::new(FanOutToTwo),
+            Box::new(crate::events::operators::MapOp::from_config(&MapConfig {
+                template: json!({"msg": "hello"}),
+            })),
+        ];
+
+        let mut ctx = link_event_ctx();
+        execute_pipeline(&ops, &mut ctx)
+            .await
+            .expect("both branches succeed");
     }
 }
