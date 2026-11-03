@@ -67,6 +67,31 @@ impl DescriptorEntity {
 }
 
 impl EntityDescriptor for DescriptorEntity {
+    /// Host-aware routes: every operation goes through the COMMON guard (`SurfaceGuard`),
+    /// exactly like GraphQL/gRPC — per-operation policy + the guarded (soft-delete) accessor.
+    /// The caller's `AuthContext` comes from the REST auth middleware (Extension); absent =
+    /// `Anonymous`. This is what makes REST a first-class protocol, not a bypass.
+    fn build_routes_with(
+        &self,
+        host: std::sync::Arc<crate::server::host::ServerHost>,
+    ) -> Option<Router> {
+        let st = GuardedState {
+            entity: self.state.entity.clone(),
+            host,
+        };
+        let collection = format!("/{}", st.entity.plural);
+        let item = format!("/{}/{{id}}", st.entity.plural);
+        Some(
+            Router::new()
+                .route(&collection, get(g_list).post(g_create))
+                .route(
+                    &item,
+                    get(g_get).put(g_update).patch(g_update).delete(g_delete),
+                )
+                .with_state(st),
+        )
+    }
+
     fn entity_type(&self) -> &str {
         &self.state.entity.name
     }
@@ -419,5 +444,134 @@ mod golden_contract {
                 .contains("this.entity.not_found"),
             "missing error code: {b}"
         );
+    }
+}
+
+// ── Host-aware (guarded) REST handlers ──────────────────────────────────────
+// Same contract as the raw handlers above, but every data access goes through the common
+// guard: `SurfaceGuard` judges the operation's policy (descriptor then YAML), then returns the
+// catalog's (soft-delete wrapped) fetcher/creator — so REST, GraphQL, gRPC and WebSocket share
+// ONE logic for auth and soft-delete.
+use crate::core::auth::AuthContext;
+use crate::descriptor::Operation;
+use crate::server::exposure::SurfaceGuard;
+use crate::server::host::ServerHost;
+use axum::Extension;
+
+#[derive(Clone)]
+struct GuardedState {
+    entity: EntityDesc,
+    host: Arc<ServerHost>,
+}
+type GState = State<GuardedState>;
+
+fn caller(auth: Option<Extension<AuthContext>>) -> AuthContext {
+    auth.map(|Extension(c)| c).unwrap_or(AuthContext::Anonymous)
+}
+
+async fn g_list(
+    State(s): GState,
+    auth: Option<Extension<AuthContext>>,
+    Query(p): Query<ListParams>,
+) -> Response {
+    let guard = SurfaceGuard::for_host(&s.host, caller(auth), "rest");
+    let fetcher = match guard.fetcher(&s.host, &s.entity.name, Operation::List, None) {
+        Ok(f) => f,
+        Err(e) => return ApiError(e).into_response(),
+    };
+    let schema = QuerySchema::for_entity(&s.entity);
+    let q = match parse_legacy(
+        &schema,
+        p.filter.as_deref(),
+        p.sort.as_deref(),
+        p.page,
+        p.limit,
+    ) {
+        Ok(q) => q,
+        Err(e) => return ApiError(e).into_response(),
+    };
+    match fetcher.list_query(&q).await {
+        Ok((data, total)) => {
+            let (page, limit) = match q.page {
+                Page::Offset { page, limit } => (page as usize, limit as usize),
+                _ => (p.page, p.limit),
+            };
+            axum::Json(serde_json::json!({
+                "data": data,
+                "pagination": {
+                    "page": page,
+                    "limit": limit,
+                    "total": total,
+                    "total_pages": total.div_ceil(limit.max(1)),
+                },
+            }))
+            .into_response()
+        }
+        Err(e) => err(e),
+    }
+}
+
+async fn g_create(
+    State(s): GState,
+    auth: Option<Extension<AuthContext>>,
+    body: axum::Json<Value>,
+) -> Response {
+    let guard = SurfaceGuard::for_host(&s.host, caller(auth), "rest");
+    let creator = match guard.creator(&s.host, &s.entity.name, Operation::Create, None) {
+        Ok(c) => c,
+        Err(e) => return ApiError(e).into_response(),
+    };
+    match creator.create_from_json(body.0).await {
+        Ok(v) => (StatusCode::CREATED, axum::Json(v)).into_response(),
+        Err(e) => err(e),
+    }
+}
+
+async fn g_get(
+    State(s): GState,
+    auth: Option<Extension<AuthContext>>,
+    Path(id): Path<Uuid>,
+) -> Response {
+    let guard = SurfaceGuard::for_host(&s.host, caller(auth), "rest");
+    let fetcher = match guard.fetcher(&s.host, &s.entity.name, Operation::Get, Some(&id)) {
+        Ok(f) => f,
+        Err(e) => return ApiError(e).into_response(),
+    };
+    match fetcher.fetch_as_json(&id).await {
+        Ok(v) => axum::Json(v).into_response(),
+        Err(e) => err(e),
+    }
+}
+
+async fn g_update(
+    State(s): GState,
+    auth: Option<Extension<AuthContext>>,
+    Path(id): Path<Uuid>,
+    body: axum::Json<Value>,
+) -> Response {
+    let guard = SurfaceGuard::for_host(&s.host, caller(auth), "rest");
+    let creator = match guard.creator(&s.host, &s.entity.name, Operation::Update, Some(&id)) {
+        Ok(c) => c,
+        Err(e) => return ApiError(e).into_response(),
+    };
+    match creator.update_from_json(&id, body.0).await {
+        Ok(v) => axum::Json(v).into_response(),
+        Err(e) => err(e),
+    }
+}
+
+async fn g_delete(
+    State(s): GState,
+    auth: Option<Extension<AuthContext>>,
+    Path(id): Path<Uuid>,
+) -> Response {
+    let guard = SurfaceGuard::for_host(&s.host, caller(auth), "rest");
+    let creator = match guard.creator(&s.host, &s.entity.name, Operation::Delete, Some(&id)) {
+        Ok(c) => c,
+        Err(e) => return ApiError(e).into_response(),
+    };
+    match creator.delete(&id).await {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(e) => err(e),
     }
 }
