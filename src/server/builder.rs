@@ -1041,13 +1041,18 @@ impl ServerBuilder {
         let mut described_types: std::collections::BTreeSet<String> = Default::default();
         for &i in &order {
             let is_described = described_idx.contains(&i);
-            // Descriptor-only path: a DESCRIBED module whose entities are ALL backed by a
-            // store (`get_entity_fetcher` + `get_entity_creator`) is served by generated
-            // descriptor routes (`DescriptorEntity`); its hand-written `register_entities`
-            // is skipped (the descriptor wins — RFC « descriptor-only »). A module that is
-            // described but not fully backed falls through to the legacy path (unchanged),
-            // so backward compatibility is preserved.
-            if is_described {
+            // `register_entities` is ALWAYS called first: a module that registers its own
+            // entities keeps its hand-written (legacy) routes, so adding a `descriptor()` is
+            // purely additive during migration.
+            let mut local = EntityRegistry::new();
+            self.modules[i].register_entities(&mut local);
+            let legacy = local.drain();
+
+            // Descriptor-only path: the module registers NO entity itself, but EVERY entity of
+            // its descriptor is backed by a store (`get_entity_fetcher` + `get_entity_creator`).
+            // It is then served by generated descriptor routes (`DescriptorEntity`). That is
+            // what "descriptor-only" means: stop declaring routes, declare the descriptor.
+            if is_described && legacy.is_empty() {
                 let name = crate::descriptor::naming::to_snake_identifier(self.modules[i].name());
                 if let Some(desc) = descriptor_set.module(&name) {
                     let all_backed = !desc.entities.is_empty()
@@ -1082,9 +1087,7 @@ impl ServerBuilder {
                 }
             }
 
-            let mut local = EntityRegistry::new();
-            self.modules[i].register_entities(&mut local);
-            for d in local.drain() {
+            for d in legacy {
                 let t = d.entity_type().to_string();
                 let collides_with_described = described_types.contains(&t)
                     || self
@@ -3020,5 +3023,128 @@ mod descriptor_only_serving {
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::OK);
+    }
+}
+
+#[cfg(test)]
+mod descriptor_additive {
+    //! RFC descriptor-only, phasing P4: a module that STILL registers its own entities keeps
+    //! its legacy routes; adding `descriptor()` is purely additive. The descriptor-only path
+    //! only takes over once `register_entities` yields nothing.
+    use crate::config::{EntityAuthConfig, EntityConfig, LinksConfig};
+    use crate::core::module::{EntityCreator, EntityFetcher, Module};
+    use crate::descriptor::{EntityDesc, ModuleDescriptor};
+    use crate::server::builder::ServerBuilder;
+    use crate::server::entity_registry::{EntityDescriptor, EntityRegistry};
+    use crate::storage::InMemoryLinkService;
+    use anyhow::Result;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use axum::{Router, routing::get};
+    use serde_json::{Value, json};
+    use std::sync::Arc;
+    use tower::ServiceExt;
+    use uuid::Uuid;
+
+    struct Store;
+    #[async_trait::async_trait]
+    impl EntityFetcher for Store {
+        async fn fetch_as_json(&self, id: &Uuid) -> Result<Value> {
+            Ok(json!({ "id": id }))
+        }
+    }
+    #[async_trait::async_trait]
+    impl EntityCreator for Store {
+        async fn create_from_json(&self, entity_data: Value) -> Result<Value> {
+            Ok(entity_data)
+        }
+    }
+
+    struct Marker;
+    impl EntityDescriptor for Marker {
+        fn entity_type(&self) -> &str {
+            "widget"
+        }
+        fn plural(&self) -> &str {
+            "widgets"
+        }
+        fn build_routes(&self) -> Router {
+            Router::new().route("/widgets", get(|| async { "legacy" }))
+        }
+    }
+
+    struct Both {
+        store: Arc<Store>,
+    }
+    impl Module for Both {
+        fn name(&self) -> &str {
+            "both"
+        }
+        fn version(&self) -> &str {
+            "1.0.0"
+        }
+        fn entity_types(&self) -> Vec<&str> {
+            vec!["widget"]
+        }
+        fn links_config(&self) -> anyhow::Result<LinksConfig> {
+            Ok(LinksConfig {
+                entities: vec![EntityConfig {
+                    singular: "widget".into(),
+                    plural: "widgets".into(),
+                    auth: EntityAuthConfig::default(),
+                }],
+                links: vec![],
+                validation_rules: None,
+                events: None,
+                sinks: None,
+                auth: None,
+            })
+        }
+        // Registers its own route: legacy must win.
+        fn register_entities(&self, registry: &mut EntityRegistry) {
+            registry.register(Box::new(Marker));
+        }
+        fn descriptor(&self) -> Option<ModuleDescriptor> {
+            let mut d = ModuleDescriptor::new("both", "1.0.0");
+            d.entities.push(EntityDesc::new("widget"));
+            Some(d)
+        }
+        fn get_entity_fetcher(&self, e: &str) -> Option<Arc<dyn EntityFetcher>> {
+            (e == "widget").then(|| self.store.clone() as Arc<dyn EntityFetcher>)
+        }
+        fn get_entity_creator(&self, e: &str) -> Option<Arc<dyn EntityCreator>> {
+            (e == "widget").then(|| self.store.clone() as Arc<dyn EntityCreator>)
+        }
+    }
+
+    #[tokio::test]
+    async fn a_module_that_registers_entities_keeps_its_legacy_routes() {
+        let host = ServerBuilder::new()
+            .with_link_service(InMemoryLinkService::new())
+            .register_module(Both {
+                store: Arc::new(Store),
+            })
+            .expect("register")
+            .build_host()
+            .expect("build_host");
+        let app = host.entity_registry.build_routes();
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .uri("/widgets")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(res.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(
+            &bytes[..],
+            b"legacy",
+            "hand-written route must win while register_entities yields entities"
+        );
     }
 }
