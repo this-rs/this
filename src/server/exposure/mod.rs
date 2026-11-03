@@ -32,9 +32,7 @@ pub use grpc::GrpcExposure;
 // Future expositions
 // pub mod openapi;
 
-#[cfg(any(feature = "graphql", feature = "grpc", feature = "websocket"))]
 pub mod guard;
-#[cfg(any(feature = "graphql", feature = "grpc", feature = "websocket"))]
 pub use guard::{SurfaceGuard, resolve_identity};
 
 #[cfg(any(feature = "graphql", feature = "grpc", feature = "websocket"))]

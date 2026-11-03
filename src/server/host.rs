@@ -416,7 +416,6 @@ impl ServerHost {
     /// (same evaluator as REST), then the fetcher comes from the LIVE catalog. GraphQL,
     /// gRPC, WebSocket and links reach fetchers only through it (or through
     /// `SurfaceGuard::fetcher`, which shares the evaluation of one request).
-    #[cfg(any(feature = "graphql", feature = "grpc", feature = "websocket"))]
     #[allow(clippy::result_large_err)] // `ContractError` is the cross-surface contract
     pub fn guarded_fetcher(
         &self,
@@ -429,7 +428,6 @@ impl ServerHost {
     }
 
     /// Creator counterpart of [`ServerHost::guarded_fetcher`].
-    #[cfg(any(feature = "graphql", feature = "grpc", feature = "websocket"))]
     #[allow(clippy::result_large_err)]
     pub fn guarded_creator(
         &self,

@@ -21,6 +21,16 @@ pub trait EntityDescriptor: Send + Sync {
     /// - POST /{plural}
     /// - GET /{plural}/:id
     fn build_routes(&self) -> Router;
+
+    /// Build the routes WITH the host available, so the generated handlers can reach the
+    /// common guard (`host.guarded_fetcher`/`guarded_creator`: per-op policy + soft-delete).
+    /// `None` = "no host-aware routes": the caller falls back to [`EntityDescriptor::build_routes`].
+    fn build_routes_with(
+        &self,
+        _host: std::sync::Arc<crate::server::host::ServerHost>,
+    ) -> Option<Router> {
+        None
+    }
 }
 
 /// Registry for all entities in the application
@@ -104,6 +114,23 @@ impl EntityRegistry {
             router = router.merge(descriptor.build_routes());
         }
 
+        router
+    }
+
+    /// Router of every registered entity, built WITH the host: entities that provide
+    /// host-aware routes (`DescriptorEntity`) reach the common guard; others fall back to
+    /// their plain `build_routes`.
+    pub fn build_routes_with(
+        &self,
+        host: std::sync::Arc<crate::server::host::ServerHost>,
+    ) -> Router {
+        let mut router = Router::new();
+        for descriptor in self.descriptors.values() {
+            match descriptor.build_routes_with(host.clone()) {
+                Some(r) => router = router.merge(r),
+                None => router = router.merge(descriptor.build_routes()),
+            }
+        }
         router
     }
 
