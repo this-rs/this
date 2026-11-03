@@ -462,17 +462,25 @@ impl ModuleRuntime {
         // `requires` cannot be satisfied must not be started only to be refused.
         // `compose` conflicts (duplicate plural, ...) still need the candidate in
         // place, so they stay inside `activate` — the guard covers that case.
-        {
+        // The guard MUST be released before `refuse_load` runs: `self.inner` is a
+        // `std::sync::Mutex`, which is not reentrant, and `refuse_load` takes it.
+        // Calling it from inside this block deadlocked the whole host — caught by
+        // the CI, whose test job hung instead of failing.
+        let resolve_error = {
             let inner = self.lock();
-            let others = Self::active_descriptors(&inner, Some(&name));
+            // The module itself is NOT excluded: loading an already-active module
+            // must report `duplicate_module`, exactly as it did when `resolve` ran
+            // inside `activate` on the full active set. Excluding it turned that
+            // into an `illegal_transition` further down — a worse message for the
+            // same situation.
+            let others = Self::active_descriptors(&inner, None);
             let refs: Vec<&ModuleDescriptor> = others.iter().map(|a| a.as_ref()).collect();
-            if let Err(issues) =
-                crate::descriptor::resolve::resolve(&[iface.descriptor.as_ref()], &refs)
-            {
-                let err = one_error(issues);
-                self.refuse_load(&name, &iface.descriptor, &err);
-                return Err(err);
-            }
+            crate::descriptor::resolve::resolve(&[iface.descriptor.as_ref()], &refs).err()
+        };
+        if let Some(issues) = resolve_error {
+            let err = one_error(issues);
+            self.refuse_load(&name, &iface.descriptor, &err);
+            return Err(err);
         }
 
         // Lifecycle of a hot-loaded compiled module: `init` then `start`, before it is
@@ -939,17 +947,21 @@ impl ModuleRuntime {
         if let Some(g) = guard.as_mut() {
             g.disarm();
         }
+        // `stop()` runs NOW, not after the drain: the drain grace defaults to 30
+        // seconds (`DEFAULT_DRAIN_GRACE_MS`), and deferring a module's cleanup by
+        // half a minute to let a few requests finish is the wrong trade. What the
+        // drain protects is the old ROUTER and its streams, not the module's own
+        // resources — so the contract on `Module::stop` says exactly that: do not
+        // release what an in-flight request may still need.
+        if let Some(m) = old_lifecycle
+            && let Err(e) = m.stop()
+        {
+            tracing::warn!(module = %d.name, error = %e, "replace: old version stop hook failed (ignored)");
+        }
         // The OLD version drains in the background: requests already in flight finish
         // on it (they hold its router), and after the grace delay its streams are
         // cancelled. Without this, a stream opened on the old version would stay open
         // forever on code that is no longer published (found in review).
-        //
-        // `stop()` is called AFTER the drain, not before. The two used to contradict
-        // each other: stopping first and then waiting for in-flight requests to
-        // finish is pointless if `stop()` releases what they are using. No module
-        // implements `stop()` today (checked in this-examples: the trait default is
-        // all there is), so this is not a behaviour change — it is the order the
-        // comment always promised, written down for the first module that will.
         let old_gate = old.gate.clone();
         let grace = self.options.drain_grace;
         let module = d.name.clone();
@@ -958,11 +970,6 @@ impl ModuleRuntime {
                 tracing::warn!(%module, "replace: grace elapsed, cancelling the old version's streams");
             }
             old_gate.cancel();
-            if let Some(m) = old_lifecycle
-                && let Err(e) = m.stop()
-            {
-                tracing::warn!(%module, error = %e, "replace: old version stop hook failed (ignored)");
-            }
         });
         self.emit(ModuleEvent::Replaced {
             module: d.name.clone(),
