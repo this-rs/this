@@ -22,6 +22,7 @@
 pub mod bridge;
 pub mod compiler;
 pub mod context;
+pub mod dlq;
 pub mod log;
 /// Journal ordonné et durable sur la zone journal d'obrain.
 #[cfg(feature = "obrain")]
@@ -35,6 +36,7 @@ pub mod types;
 
 pub use compiler::{CompiledFlow, compile_flow, compile_flows};
 pub use context::FlowContext;
+pub use dlq::{DeadLetter, DeadLetterSink, InMemoryDeadLetters, RetryPolicy};
 pub use log::EventLog;
 pub use matcher::EventMatcher;
 pub use memory::InMemoryEventLog;

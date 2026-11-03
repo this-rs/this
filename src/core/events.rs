@@ -38,6 +38,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::broadcast;
+use tokio::sync::mpsc;
 use uuid::Uuid;
 
 /// Events related to entity mutations (create, update, delete)
@@ -320,6 +321,67 @@ pub struct EventBus {
     sender: broadcast::Sender<EventEnvelope>,
     /// Optional persistent event log (bridge)
     event_log: Option<Arc<dyn EventLog>>,
+    /// Serialising writer for the log. `None` when no log is attached.
+    append: Option<Arc<AppendQueue>>,
+}
+
+/// Serialises appends to the `EventLog`, in publish order.
+///
+/// # Why a queue and not `tokio::spawn` per event
+///
+/// `publish` used to spawn one task per event. Two spawned tasks race for the
+/// log's internal lock, so the write order was whatever the scheduler decided —
+/// contradicting the "durable, ordered, replayable" contract this module
+/// advertises, and quietly breaking any replay that assumes causality between
+/// events (a link created before the entity it links, etc.).
+///
+/// One queue, one writer task: `send` is synchronous and FIFO, so the order of
+/// `send` is the order of `publish`, and the writer drains it sequentially.
+/// `publish` stays non-blocking.
+struct AppendQueue {
+    tx: mpsc::UnboundedSender<EventEnvelope>,
+    /// Taken once, by the writer task. `None` afterwards = the writer is running.
+    rx: std::sync::Mutex<Option<mpsc::UnboundedReceiver<EventEnvelope>>>,
+}
+
+impl AppendQueue {
+    fn new() -> Self {
+        let (tx, rx) = mpsc::unbounded_channel();
+        Self {
+            tx,
+            rx: std::sync::Mutex::new(Some(rx)),
+        }
+    }
+
+    /// Start the writer task. Idempotent: every `publish` may call it.
+    fn start(&self, log: Arc<dyn EventLog>) {
+        let taken = self.rx.lock().ok().and_then(|mut slot| slot.take());
+        let Some(rx) = taken else {
+            return; // already started
+        };
+
+        match tokio::runtime::Handle::try_current() {
+            Ok(handle) => {
+                handle.spawn(async move {
+                    let mut rx = rx;
+                    while let Some(envelope) = rx.recv().await {
+                        if let Err(e) = log.append(envelope).await {
+                            tracing::warn!(error = %e, "failed to append an event to the log");
+                        }
+                    }
+                });
+            }
+            Err(_) => {
+                // No runtime: nothing can drain the queue. Put the receiver back
+                // so a publish made from inside a runtime can still start the
+                // writer, and say what was lost.
+                if let Ok(mut slot) = self.rx.lock() {
+                    *slot = Some(rx);
+                }
+                tracing::warn!("no async runtime: the event was not appended to the event log");
+            }
+        }
+    }
 }
 
 impl std::fmt::Debug for EventBus {
@@ -345,17 +407,20 @@ impl EventBus {
         Self {
             sender,
             event_log: None,
+            append: None,
         }
     }
 
     /// Attach a persistent EventLog to this bus
     ///
     /// When set, every `publish()` call also appends the event to the log.
-    /// The append is done via `tokio::spawn` to avoid blocking the publisher.
+    /// The append is queued and written by one task, so the log's order is the
+    /// order of `publish` and the publisher never blocks.
     ///
     /// This enables the event flow system to consume events from the durable
     /// log instead of the ephemeral broadcast channel.
     pub fn with_event_log(mut self, event_log: Arc<dyn EventLog>) -> Self {
+        self.append = Some(Arc::new(AppendQueue::new()));
         self.event_log = Some(event_log);
         self
     }
@@ -401,15 +466,12 @@ impl EventBus {
 
     /// Internal: publish a pre-built envelope
     fn publish_envelope(&self, envelope: EventEnvelope) -> usize {
-        // If an EventLog is attached, append a clone to it (non-blocking)
-        if let Some(event_log) = &self.event_log {
-            let log = event_log.clone();
-            let envelope_clone = envelope.clone();
-            tokio::spawn(async move {
-                if let Err(e) = log.append(envelope_clone).await {
-                    tracing::warn!("Failed to append event to EventLog: {}", e);
-                }
-            });
+        // If an EventLog is attached, queue a clone for the single writer.
+        if let (Some(log), Some(queue)) = (&self.event_log, &self.append) {
+            queue.start(log.clone());
+            if queue.tx.send(envelope.clone()).is_err() {
+                tracing::warn!("the event-log writer is gone: append dropped");
+            }
         }
 
         // send() returns Err only if there are no receivers, which is fine
@@ -1043,5 +1105,85 @@ mod tests {
         assert_eq!(received.tenant_id(), Some(tenant));
         assert_eq!(received.event.event_kind(), "cognitive");
         assert_eq!(received.event.entity_id(), Some(node_id));
+    }
+    /// The log's order must be the publish order.
+    ///
+    /// With one `tokio::spawn` per event (the previous shape), two spawned tasks
+    /// race for the log's lock and the write order is whatever the scheduler
+    /// picked.
+    ///
+    /// **The runtime must be multi-threaded for this test to mean anything.** A
+    /// plain `#[tokio::test]` is current-thread, so spawned tasks only run when
+    /// the publishing task awaits, and the order is preserved by accident — which
+    /// is exactly why the defect went unnoticed.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn the_event_log_keeps_the_publish_order() {
+        use crate::events::log::EventLog;
+        use crate::events::memory::InMemoryEventLog;
+        use crate::events::types::SeekPosition;
+        use tokio_stream::StreamExt;
+
+        let event_log = Arc::new(InMemoryEventLog::new());
+        let bus = EventBus::new(64).with_event_log(event_log.clone());
+
+        for i in 0..50 {
+            bus.publish(FrameworkEvent::Entity(EntityEvent::Created {
+                entity_type: format!("type_{i:02}"),
+                entity_id: Uuid::new_v4(),
+                data: json!({}),
+            }));
+        }
+
+        // Let the single writer drain the queue.
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert_eq!(event_log.last_seq_no().await, Some(50));
+
+        let stream = event_log
+            .subscribe("order", SeekPosition::Beginning)
+            .await
+            .unwrap();
+        let events: Vec<_> = stream.take(50).collect().await;
+        let seen: Vec<String> = events
+            .iter()
+            .map(|e| e.event.entity_type().unwrap_or_default().to_string())
+            .collect();
+        let expected: Vec<String> = (0..50).map(|i| format!("type_{i:02}")).collect();
+
+        assert_eq!(seen, expected, "the log must keep the publish order");
+    }
+
+    /// The publisher still never blocks, and many publishers share the queue.
+    /// Multi-threaded on purpose, like the order test above.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_publishers_all_reach_the_log() {
+        use crate::events::log::EventLog;
+        use crate::events::memory::InMemoryEventLog;
+
+        let event_log = Arc::new(InMemoryEventLog::new());
+        let bus = EventBus::new(256).with_event_log(event_log.clone());
+
+        let mut handles = Vec::new();
+        for _ in 0..8 {
+            let bus = bus.clone();
+            handles.push(tokio::spawn(async move {
+                for _ in 0..25 {
+                    bus.publish(FrameworkEvent::Entity(EntityEvent::Created {
+                        entity_type: "item".to_string(),
+                        entity_id: Uuid::new_v4(),
+                        data: json!({}),
+                    }));
+                }
+            }));
+        }
+        for h in handles {
+            h.await.unwrap();
+        }
+
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        assert_eq!(
+            event_log.last_seq_no().await,
+            Some(200),
+            "no event may be lost when several tasks publish at once"
+        );
     }
 }
