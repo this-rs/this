@@ -20,10 +20,12 @@
 //! // handle is a JoinHandle that can be used to monitor/cancel the runtime
 //! ```
 
+use crate::core::events::EventEnvelope;
 use crate::core::module::EntityFetcher;
 use crate::core::service::LinkService;
 use crate::events::compiler::CompiledFlow;
 use crate::events::context::FlowContext;
+use crate::events::dlq::{DeadLetter, DeadLetterSink, RetryPolicy};
 use crate::events::log::EventLog;
 use crate::events::operators::{OpResult, PipelineOperator};
 use crate::events::sinks::SinkRegistry;
@@ -50,8 +52,15 @@ pub struct FlowRuntime {
     /// Sink registry for deliver operators
     sink_registry: Option<Arc<SinkRegistry>>,
 
-    /// Consumer name for tracking position
+    /// Prefix of the consumer name; each flow gets `<prefix>:<flow>`.
     consumer_name: String,
+
+    /// Where a delivery that exhausted its retries is kept. `None` = no
+    /// dead-letter store, and a failed delivery is simply not acknowledged.
+    dead_letters: Option<Arc<dyn DeadLetterSink>>,
+
+    /// How many times, and how far apart, a failing pipeline is retried.
+    retry: RetryPolicy,
 }
 
 impl std::fmt::Debug for FlowRuntime {
@@ -78,12 +87,34 @@ impl FlowRuntime {
             entity_fetchers,
             sink_registry: None,
             consumer_name: "flow-runtime".to_string(),
+            dead_letters: None,
+            retry: RetryPolicy::default(),
         }
     }
 
-    /// Set a custom consumer name (for multi-consumer setups)
+    /// Set the consumer name **prefix** (for multi-consumer setups).
+    ///
+    /// Each flow is a consumer of its own, named `<prefix>:<flow>`, so that one
+    /// flow falling behind does not drag the others.
     pub fn with_consumer_name(mut self, name: impl Into<String>) -> Self {
         self.consumer_name = name.into();
+        self
+    }
+
+    /// Set the dead-letter store.
+    ///
+    /// Without one, a delivery that fails is never acknowledged — it stays
+    /// replayable, at the cost of a cursor that cannot move past a poison event.
+    /// With one, the failure is written down and the cursor moves on.
+    pub fn with_dead_letters(mut self, sink: Arc<dyn DeadLetterSink>) -> Self {
+        self.dead_letters = Some(sink);
+        self
+    }
+
+    /// Set the retry policy (validation is the caller's: see
+    /// [`RetryPolicy::validate`]).
+    pub fn with_retry_policy(mut self, policy: RetryPolicy) -> Self {
+        self.retry = policy;
         self
     }
 
@@ -96,107 +127,217 @@ impl FlowRuntime {
         self
     }
 
-    /// Start the runtime as a background task
+    /// Start the runtime as a background task.
     ///
-    /// Returns a JoinHandle that resolves when the runtime stops.
-    /// The runtime runs indefinitely, processing events as they arrive.
+    /// One consumer per flow, each with **its own cursor**: a flow that cannot
+    /// deliver must not hold back the others. `with_consumer_name` is therefore
+    /// a prefix — consumers are named `<prefix>:<flow>`.
     pub fn run(self, position: SeekPosition) -> JoinHandle<()> {
         tokio::spawn(async move {
-            if let Err(e) = self.run_inner(position).await {
-                tracing::error!(error = %e, "flow runtime stopped with error");
+            let shared = Arc::new(Shared {
+                event_log: self.event_log,
+                link_service: self.link_service,
+                entity_fetchers: self.entity_fetchers,
+                sink_registry: self.sink_registry,
+                dead_letters: self.dead_letters,
+                retry: self.retry,
+            });
+
+            // `Latest` is resolved ONCE, before the flows subscribe. Resolved per
+            // consumer it would be a race: an event published between two
+            // subscriptions would be seen by the second flow and missed by the
+            // first, with no way to notice.
+            let position = match position {
+                SeekPosition::Latest => {
+                    SeekPosition::Sequence(shared.event_log.last_seq_no().await.unwrap_or(0))
+                }
+                other => other,
+            };
+
+            let prefix = self.consumer_name;
+            let mut tasks = tokio::task::JoinSet::new();
+            for flow in self.flows {
+                let consumer = format!("{prefix}:{}", flow.name);
+                let shared = shared.clone();
+                let position = position.clone();
+                tasks.spawn(async move { run_flow(flow, consumer, position, shared).await });
             }
+
+            // Dropping this task (the handle is aborted) drops the `JoinSet`,
+            // which aborts every flow task: nothing keeps consuming afterwards.
+            while tasks.join_next().await.is_some() {}
         })
     }
+}
 
-    /// Internal run loop
-    async fn run_inner(self, position: SeekPosition) -> anyhow::Result<()> {
-        tracing::info!(
-            flows = self.flows.len(),
-            consumer = %self.consumer_name,
-            "flow runtime starting"
-        );
+/// Everything the flow tasks share, moved out of `FlowRuntime` so each task can
+/// own an `Arc` of it instead of the whole runtime.
+struct Shared {
+    event_log: Arc<dyn EventLog>,
+    link_service: Arc<dyn LinkService>,
+    entity_fetchers: HashMap<String, Arc<dyn EntityFetcher>>,
+    sink_registry: Option<Arc<SinkRegistry>>,
+    dead_letters: Option<Arc<dyn DeadLetterSink>>,
+    retry: RetryPolicy,
+}
 
-        let mut stream = self
-            .event_log
-            .subscribe(&self.consumer_name, position)
-            .await?;
+/// One flow's consumer loop.
+///
+/// # Acknowledgement contract
+///
+/// The event is acknowledged when the delivery **succeeded**, or when its
+/// failure is **recorded in the dead-letter store**. Anything else leaves the
+/// cursor behind, so a restart replays it. Without a dead-letter store the
+/// original, safest behaviour is kept: a failed delivery is never acknowledged.
+async fn run_flow(
+    flow: CompiledFlow,
+    consumer: String,
+    position: SeekPosition,
+    shared: Arc<Shared>,
+) {
+    tracing::info!(flow = %flow.name, consumer = %consumer, "flow consumer starting");
 
-        while let Some(envelope) = stream.next().await {
-            let event = &envelope.event;
+    let mut stream = match shared.event_log.subscribe(&consumer, position).await {
+        Ok(stream) => stream,
+        Err(e) => {
+            tracing::error!(
+                flow = %flow.name,
+                consumer = %consumer,
+                error = %e,
+                "cannot subscribe: this flow will not run"
+            );
+            return;
+        }
+    };
 
-            // Every flow that matched must succeed before the event is
-            // acknowledged. One failure and the cursor stays behind, so a restart
-            // with `LastAcknowledged` replays it (decision 5a614d34).
-            let mut failures: Vec<String> = Vec::new();
-
-            // Find matching flows (respecting tenant scoping)
-            for flow in &self.flows {
-                // Tenant isolation: if this flow is scoped to a specific tenant,
-                // only trigger it for events from that tenant
-                if let Some(flow_tenant) = flow.tenant_id {
-                    match envelope.tenant_id {
-                        Some(event_tenant) if event_tenant == flow_tenant => {} // Match
-                        _ => continue, // Skip: flow is tenant-scoped but event is from a different tenant (or global)
-                    }
+    while let Some(envelope) = stream.next().await {
+        // Tenant isolation: a flow scoped to one tenant ignores the others.
+        if let Some(flow_tenant) = flow.tenant_id {
+            match envelope.tenant_id {
+                Some(event_tenant) if event_tenant == flow_tenant => {}
+                _ => {
+                    acknowledge(&shared, &consumer, &envelope).await;
+                    continue;
                 }
-
-                if flow.matcher.matches(event) {
-                    tracing::debug!(
-                        flow = %flow.name,
-                        event_kind = %event.event_kind(),
-                        "flow matched, executing pipeline"
-                    );
-
-                    // Create a FlowContext for this execution
-                    let mut ctx = FlowContext::new(
-                        event.clone(),
-                        self.link_service.clone(),
-                        self.entity_fetchers.clone(),
-                    );
-
-                    // Propagate tenant_id from the envelope
-                    ctx = ctx.with_tenant_id(envelope.tenant_id);
-
-                    // Attach sink registry if available
-                    if let Some(ref registry) = self.sink_registry {
-                        ctx.sink_registry = Some(registry.clone());
-                    }
-
-                    // Execute the pipeline. A failure is recorded, not swallowed:
-                    // isolating flows (one flow's error must not stop the others)
-                    // and acknowledging (which must reflect delivery) are two
-                    // different things, and the old code conflated them.
-                    if let Err(e) = execute_pipeline(&flow.operators, &mut ctx).await {
-                        tracing::warn!(
-                            flow = %flow.name,
-                            error = %e,
-                            "pipeline execution failed"
-                        );
-                        failures.push(format!("{}: {e:#}", flow.name));
-                    }
-                }
-            }
-
-            if failures.is_empty() {
-                // Ack the exact event we just processed
-                if let Some(seq) = envelope.seq_no
-                    && let Err(e) = self.event_log.ack(&self.consumer_name, seq).await
-                {
-                    tracing::warn!(error = %e, "failed to ack event");
-                }
-            } else {
-                tracing::error!(
-                    seq_no = envelope.seq_no,
-                    failed_flows = failures.len(),
-                    reasons = %failures.join("; "),
-                    "event NOT acknowledged: a delivery failed, so it will be replayed \
-                     from the last acknowledged position"
-                );
             }
         }
 
-        tracing::info!("flow runtime stream ended");
-        Ok(())
+        if !flow.matcher.matches(&envelope.event) {
+            // Not this flow's business. Its own cursor may still move on,
+            // otherwise a replay would re-deliver every unrelated event.
+            acknowledge(&shared, &consumer, &envelope).await;
+            continue;
+        }
+
+        tracing::debug!(
+            flow = %flow.name,
+            event_kind = %envelope.event.event_kind(),
+            "flow matched, executing pipeline"
+        );
+
+        match deliver(&flow, &envelope, &shared).await {
+            Ok(()) => {
+                acknowledge(&shared, &consumer, &envelope).await;
+            }
+            Err((attempts, error)) => match &shared.dead_letters {
+                Some(sink) => {
+                    let letter = DeadLetter {
+                        consumer: consumer.clone(),
+                        flow: flow.name.clone(),
+                        seq_no: envelope.seq_no,
+                        event: envelope.event.clone(),
+                        attempts,
+                        last_error: format!("{error:#}"),
+                        at: chrono::Utc::now(),
+                    };
+                    match sink.record(letter).await {
+                        Ok(()) => {
+                            tracing::error!(
+                                flow = %flow.name,
+                                attempts,
+                                seq_no = envelope.seq_no,
+                                error = %error,
+                                "delivery abandoned after retries: recorded as a dead \
+                                 letter, event acknowledged"
+                            );
+                            acknowledge(&shared, &consumer, &envelope).await;
+                        }
+                        Err(dead_letter_error) => {
+                            // Neither delivered nor written down: it must stay
+                            // replayable, so no acknowledgement.
+                            tracing::error!(
+                                flow = %flow.name,
+                                error = %dead_letter_error,
+                                "cannot record the dead letter: the event is NOT \
+                                 acknowledged and will be replayed"
+                            );
+                        }
+                    }
+                }
+                None => {
+                    tracing::error!(
+                        flow = %flow.name,
+                        attempts,
+                        seq_no = envelope.seq_no,
+                        error = %error,
+                        "delivery failed and no dead-letter store is configured: the \
+                         event is NOT acknowledged and will be replayed"
+                    );
+                }
+            },
+        }
+    }
+
+    tracing::info!(flow = %flow.name, consumer = %consumer, "flow consumer stream ended");
+}
+
+/// Run the pipeline, retrying per the policy. `Err` carries the attempt count and
+/// the last error.
+async fn deliver(
+    flow: &CompiledFlow,
+    envelope: &EventEnvelope,
+    shared: &Shared,
+) -> Result<(), (u32, anyhow::Error)> {
+    let mut attempt: u32 = 0;
+    loop {
+        attempt += 1;
+
+        let mut ctx = FlowContext::new(
+            envelope.event.clone(),
+            shared.link_service.clone(),
+            shared.entity_fetchers.clone(),
+        );
+        ctx = ctx.with_tenant_id(envelope.tenant_id);
+        if let Some(registry) = &shared.sink_registry {
+            ctx.sink_registry = Some(registry.clone());
+        }
+
+        match execute_pipeline(&flow.operators, &mut ctx).await {
+            Ok(()) => return Ok(()),
+            Err(e) if attempt >= shared.retry.max_attempts => return Err((attempt, e)),
+            Err(e) => {
+                let backoff = shared.retry.backoff_for(attempt);
+                tracing::warn!(
+                    flow = %flow.name,
+                    attempt,
+                    max_attempts = shared.retry.max_attempts,
+                    backoff_ms = backoff.as_millis() as u64,
+                    error = %e,
+                    "delivery failed, retrying"
+                );
+                tokio::time::sleep(backoff).await;
+            }
+        }
+    }
+}
+
+/// Advance this consumer's cursor. A failed ack is logged, not fatal: the stream
+/// already moved on, and the next restart replays from the old position.
+async fn acknowledge(shared: &Shared, consumer: &str, envelope: &EventEnvelope) {
+    if let Some(seq) = envelope.seq_no
+        && let Err(e) = shared.event_log.ack(consumer, seq).await
+    {
+        tracing::warn!(consumer, error = %e, "failed to ack event");
     }
 }
 
@@ -776,6 +917,7 @@ mod tests {
         })
         .unwrap();
 
+        let flow_name = flow.name.as_str().to_string();
         let link_service = Arc::new(MockLinkService) as Arc<dyn LinkService>;
         let runtime = FlowRuntime::new(vec![flow], event_log.clone(), link_service, HashMap::new());
         let handle = runtime.run(SeekPosition::Latest);
@@ -787,9 +929,14 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(120)).await;
         handle.abort();
 
-        // The cursor stayed behind: the failed event is replayed.
+        // Each flow is its own consumer: read the cursor of THIS one. Reading
+        // the old shared name would replay simply because it was never used,
+        // which would prove nothing.
         let mut stream = event_log
-            .subscribe("flow-runtime", SeekPosition::LastAcknowledged)
+            .subscribe(
+                &format!("flow-runtime:{}", flow_name),
+                SeekPosition::LastAcknowledged,
+            )
             .await
             .unwrap();
         let replayed = tokio::time::timeout(std::time::Duration::from_millis(300), stream.next())
@@ -823,6 +970,7 @@ mod tests {
         })
         .unwrap();
 
+        let flow_name = flow.name.as_str().to_string();
         let link_service = Arc::new(MockLinkService) as Arc<dyn LinkService>;
         let runtime = FlowRuntime::new(vec![flow], event_log.clone(), link_service, HashMap::new());
         let handle = runtime.run(SeekPosition::Latest);
@@ -836,7 +984,10 @@ mod tests {
         handle.abort();
 
         let mut stream = event_log
-            .subscribe("flow-runtime", SeekPosition::LastAcknowledged)
+            .subscribe(
+                &format!("flow-runtime:{}", flow_name),
+                SeekPosition::LastAcknowledged,
+            )
             .await
             .unwrap();
         assert!(
@@ -932,5 +1083,217 @@ mod tests {
         execute_pipeline(&ops, &mut ctx)
             .await
             .expect("both branches succeed");
+    }
+    // ── One cursor per flow, retry, dead letters ─────────────────────────
+
+    /// A flow that cannot deliver must NOT hold back the one that can.
+    ///
+    /// Before the per-flow cursors, a single consumer carried every flow: one
+    /// poison event froze the whole runtime's position. (With the unconditional
+    /// ack it was worse — the event was lost for everyone.)
+    #[tokio::test]
+    async fn a_failing_flow_does_not_hold_back_a_succeeding_one() {
+        let event_log = Arc::new(InMemoryEventLog::new());
+
+        let ok_flow = compile_flow(&FlowConfig {
+            name: "ok_flow".to_string(),
+            description: None,
+            trigger: TriggerConfig {
+                kind: "link.created".to_string(),
+                link_type: Some("follows".to_string()),
+                entity_type: None,
+            },
+            pipeline: vec![PipelineStep::Map(MapConfig {
+                template: json!({"title": "new follower"}),
+            })],
+        })
+        .unwrap();
+
+        // `resolve` fails: MockLinkService returns no link.
+        let bad_flow = compile_flow(&FlowConfig {
+            name: "bad_flow".to_string(),
+            description: None,
+            trigger: TriggerConfig {
+                kind: "link.created".to_string(),
+                link_type: Some("follows".to_string()),
+                entity_type: None,
+            },
+            pipeline: vec![PipelineStep::Resolve(ResolveConfig {
+                from: "source_id".to_string(),
+                via: None,
+                direction: "forward".to_string(),
+                output_var: "source".to_string(),
+            })],
+        })
+        .unwrap();
+
+        let link_service = Arc::new(MockLinkService) as Arc<dyn LinkService>;
+        let runtime = FlowRuntime::new(
+            vec![ok_flow, bad_flow],
+            event_log.clone(),
+            link_service,
+            HashMap::new(),
+        )
+        // Three attempts with 50 ms and 100 ms of backoff: wait past that.
+        .with_retry_policy(RetryPolicy {
+            max_attempts: 3,
+            initial_backoff: std::time::Duration::from_millis(10),
+            max_backoff: std::time::Duration::from_millis(20),
+        });
+        let handle = runtime.run(SeekPosition::Latest);
+
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        event_log
+            .append(EventEnvelope::new(make_link_event("follows")))
+            .await
+            .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+        handle.abort();
+
+        // The healthy flow moved on: its event is not replayed.
+        let mut ok_stream = event_log
+            .subscribe("flow-runtime:ok_flow", SeekPosition::LastAcknowledged)
+            .await
+            .unwrap();
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(200), ok_stream.next())
+                .await
+                .is_err(),
+            "the healthy flow must have acknowledged its event"
+        );
+
+        // The failing flow stayed behind: its event IS replayed.
+        let mut bad_stream = event_log
+            .subscribe("flow-runtime:bad_flow", SeekPosition::LastAcknowledged)
+            .await
+            .unwrap();
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(200), bad_stream.next())
+                .await
+                .is_ok(),
+            "the failing flow must keep its event replayable"
+        );
+    }
+
+    /// A delivery that exhausts its retries is written to the dead-letter store,
+    /// and only then acknowledged: the failure is no longer silent, and the
+    /// cursor is no longer stuck behind a poison event.
+    #[tokio::test]
+    async fn an_exhausted_delivery_becomes_a_dead_letter_and_is_acknowledged() {
+        let event_log = Arc::new(InMemoryEventLog::new());
+        let dead_letters = Arc::new(crate::events::dlq::InMemoryDeadLetters::new());
+
+        let flow = compile_flow(&FlowConfig {
+            name: "poison".to_string(),
+            description: None,
+            trigger: TriggerConfig {
+                kind: "link.created".to_string(),
+                link_type: Some("follows".to_string()),
+                entity_type: None,
+            },
+            pipeline: vec![PipelineStep::Resolve(ResolveConfig {
+                from: "source_id".to_string(),
+                via: None,
+                direction: "forward".to_string(),
+                output_var: "source".to_string(),
+            })],
+        })
+        .unwrap();
+
+        let link_service = Arc::new(MockLinkService) as Arc<dyn LinkService>;
+        let runtime = FlowRuntime::new(vec![flow], event_log.clone(), link_service, HashMap::new())
+            .with_retry_policy(RetryPolicy {
+                max_attempts: 2,
+                initial_backoff: std::time::Duration::from_millis(10),
+                max_backoff: std::time::Duration::from_millis(20),
+            })
+            .with_dead_letters(dead_letters.clone());
+        let handle = runtime.run(SeekPosition::Latest);
+
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        event_log
+            .append(EventEnvelope::new(make_link_event("follows")))
+            .await
+            .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        handle.abort();
+
+        let letters = dead_letters.list().await.unwrap();
+        assert_eq!(letters.len(), 1, "the failure must be written down");
+        assert_eq!(letters[0].flow, "poison");
+        assert_eq!(letters[0].consumer, "flow-runtime:poison");
+        assert_eq!(letters[0].attempts, 2, "exactly the configured attempts");
+        // The cause travels with the letter. Which `resolve` failure it is
+        // depends on the mocks (no fetcher here), so assert the operator prefix
+        // rather than a message that would make this test brittle.
+        assert!(
+            letters[0].last_error.starts_with("resolve:"),
+            "the cause is kept: {}",
+            letters[0].last_error
+        );
+
+        // Recorded, therefore acknowledged: the cursor is no longer stuck.
+        let mut stream = event_log
+            .subscribe("flow-runtime:poison", SeekPosition::LastAcknowledged)
+            .await
+            .unwrap();
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(200), stream.next())
+                .await
+                .is_err(),
+            "an event durably recorded as a dead letter must not be replayed"
+        );
+    }
+
+    /// Without a dead-letter store, the safe behaviour is kept: a failed delivery
+    /// is never acknowledged.
+    #[tokio::test]
+    async fn without_a_dead_letter_store_a_failure_is_never_acknowledged() {
+        let event_log = Arc::new(InMemoryEventLog::new());
+
+        let flow = compile_flow(&FlowConfig {
+            name: "poison".to_string(),
+            description: None,
+            trigger: TriggerConfig {
+                kind: "link.created".to_string(),
+                link_type: Some("follows".to_string()),
+                entity_type: None,
+            },
+            pipeline: vec![PipelineStep::Resolve(ResolveConfig {
+                from: "source_id".to_string(),
+                via: None,
+                direction: "forward".to_string(),
+                output_var: "source".to_string(),
+            })],
+        })
+        .unwrap();
+
+        let link_service = Arc::new(MockLinkService) as Arc<dyn LinkService>;
+        let runtime = FlowRuntime::new(vec![flow], event_log.clone(), link_service, HashMap::new())
+            .with_retry_policy(RetryPolicy {
+                max_attempts: 2,
+                initial_backoff: std::time::Duration::from_millis(10),
+                max_backoff: std::time::Duration::from_millis(20),
+            });
+        let handle = runtime.run(SeekPosition::Latest);
+
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        event_log
+            .append(EventEnvelope::new(make_link_event("follows")))
+            .await
+            .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        handle.abort();
+
+        let mut stream = event_log
+            .subscribe("flow-runtime:poison", SeekPosition::LastAcknowledged)
+            .await
+            .unwrap();
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(200), stream.next())
+                .await
+                .is_ok(),
+            "with nowhere to record the failure, the event must stay replayable"
+        );
     }
 }
