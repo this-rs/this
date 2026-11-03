@@ -457,6 +457,32 @@ impl ModuleRuntime {
             }
         };
         let name = iface.descriptor.name.clone();
+
+        // Descriptor-only validation, BEFORE any side effect. A module whose
+        // `requires` cannot be satisfied must not be started only to be refused.
+        // `compose` conflicts (duplicate plural, ...) still need the candidate in
+        // place, so they stay inside `activate` — the guard covers that case.
+        // The guard MUST be released before `refuse_load` runs: `self.inner` is a
+        // `std::sync::Mutex`, which is not reentrant, and `refuse_load` takes it.
+        // Calling it from inside this block deadlocked the whole host — caught by
+        // the CI, whose test job hung instead of failing.
+        let resolve_error = {
+            let inner = self.lock();
+            // The module itself is NOT excluded: loading an already-active module
+            // must report `duplicate_module`, exactly as it did when `resolve` ran
+            // inside `activate` on the full active set. Excluding it turned that
+            // into an `illegal_transition` further down — a worse message for the
+            // same situation.
+            let others = Self::active_descriptors(&inner, None);
+            let refs: Vec<&ModuleDescriptor> = others.iter().map(|a| a.as_ref()).collect();
+            crate::descriptor::resolve::resolve(&[iface.descriptor.as_ref()], &refs).err()
+        };
+        if let Some(issues) = resolve_error {
+            let err = one_error(issues);
+            self.refuse_load(&name, &iface.descriptor, &err);
+            return Err(err);
+        }
+
         // Lifecycle of a hot-loaded compiled module: `init` then `start`, before it is
         // served. A failure refuses the load (the module is recorded `Failed`).
         let lifecycle = match &source {
@@ -475,32 +501,7 @@ impl ModuleRuntime {
             let err = ContractError::framework(codes::MODULE_UNAVAILABLE)
                 .with_param("module", name.clone())
                 .with_param("reason", e.to_string());
-            {
-                let mut inner = self.lock();
-                let live = inner.records.get(&name).is_some_and(|r| {
-                    matches!(r.state, ModuleState::Active | ModuleState::Draining)
-                });
-                if !live {
-                    inner.records.insert(
-                        name.clone(),
-                        Record {
-                            descriptor: iface.descriptor.clone(),
-                            state: ModuleState::Failed {
-                                code: err.code.clone(),
-                                at: now(),
-                            },
-                            builtin: false,
-                            iface: None,
-                            gate: Arc::new(Gate::new()),
-                            lifecycle: None,
-                        },
-                    );
-                }
-            }
-            self.emit(ModuleEvent::Failed {
-                module: name,
-                code: err.code.as_str().to_string(),
-            });
+            self.refuse_load(&name, &iface.descriptor, &err);
             return Err(err);
         }
         let descriptor = iface.descriptor.clone();
@@ -543,6 +544,42 @@ impl ModuleRuntime {
                 Err(e)
             }
         }
+    }
+
+    /// Record a refused load: `Failed` unless the module is live (never overwrite
+    /// an active record — a duplicate load of a live module must not erase it),
+    /// then emit the failure event.
+    ///
+    /// One place, because the refusal paths multiplied: `init`/`start` failing,
+    /// a dependency that cannot be satisfied, and the activation itself.
+    fn refuse_load(&self, name: &str, descriptor: &Arc<ModuleDescriptor>, err: &ContractError) {
+        {
+            let mut inner = self.lock();
+            let live = inner
+                .records
+                .get(name)
+                .is_some_and(|r| matches!(r.state, ModuleState::Active | ModuleState::Draining));
+            if !live {
+                inner.records.insert(
+                    name.to_string(),
+                    Record {
+                        descriptor: descriptor.clone(),
+                        state: ModuleState::Failed {
+                            code: err.code.clone(),
+                            at: now(),
+                        },
+                        builtin: false,
+                        iface: None,
+                        gate: Arc::new(Gate::new()),
+                        lifecycle: None,
+                    },
+                );
+            }
+        }
+        self.emit(ModuleEvent::Failed {
+            module: name.to_string(),
+            code: err.code.as_str().to_string(),
+        });
     }
 
     /// Message bundles of `source`: a compiled module's own bundles (the `Module::bundles`
@@ -608,9 +645,10 @@ impl ModuleRuntime {
         lifecycle: Option<Arc<dyn Module>>,
     ) -> Result<ModuleStatus, ContractError> {
         let d = iface.descriptor.clone();
-        let active = Self::active_descriptors(inner, None);
-        let refs: Vec<&ModuleDescriptor> = active.iter().map(|a| a.as_ref()).collect();
-        crate::descriptor::resolve::resolve(&[d.as_ref()], &refs).map_err(one_error)?;
+        // No `resolve` here: `load` runs it before `init()`/`start()`, so a module
+        // whose dependencies cannot be satisfied is never started. What is left
+        // for this function is what needs the candidate in place: state
+        // transitions and composition.
 
         let mut state = match inner.records.get(&d.name) {
             // Reload after unload / failure: Unloaded|Failed -> Discovered.
@@ -825,9 +863,49 @@ impl ModuleRuntime {
             ModuleSource::Compiled(m) => Some(m.clone()),
             _ => None,
         };
-        // Same guard as `load`. It matters more here: five validations below can
-        // still refuse the replacement after the new version has started, and the
-        // refused handle would otherwise be dropped without a `stop()`.
+        let d = iface.descriptor.clone();
+
+        // Every validation of a replacement reads only the descriptor and the
+        // published records: none needs the new version to have been started.
+        // Running them first means a refused replacement never starts a version
+        // that will not be served. `self.ops` is held for the whole operation, so
+        // what is read here is still true after `start()`.
+        {
+            let inner = self.lock();
+            let Some(old) = inner.records.get(&d.name) else {
+                return Err(
+                    ContractError::framework(codes::MODULE_NOT_FOUND).with_param("module", &d.name)
+                );
+            };
+            if old.builtin || old.state != ModuleState::Active {
+                return Err(ContractError::framework(codes::MODULE_UNAVAILABLE)
+                    .with_param("module", &d.name));
+            }
+            // A replacement must move forward: no downgrade, no same version.
+            if let (Some(new_v), Some(old_v)) = (d.semver(), old.descriptor.semver())
+                && new_v <= old_v
+            {
+                return Err(ContractError::framework(codes::MODULE_VERSION_NOT_NEWER)
+                    .with_param("module", d.name.clone())
+                    .with_param("from", old.descriptor.version.clone())
+                    .with_param("to", d.version.clone()));
+            }
+            // Proto tags: a tag published once is never moved nor reused.
+            let issues =
+                crate::descriptor::compat::check_compat(old.descriptor.as_ref(), d.as_ref());
+            if !issues.is_empty() {
+                return Err(crate::descriptor::check::issues_to_error(&issues));
+            }
+            // `resolve` checks the `requires` of EVERY module it sees, active ones
+            // included: a dependent whose `VersionReq` rejects the new version is
+            // reported as `this.module.dependency_version {module: <dependent>}`.
+            let others = Self::active_descriptors(&inner, Some(&d.name));
+            let refs: Vec<&ModuleDescriptor> = others.iter().map(|a| a.as_ref()).collect();
+            crate::descriptor::resolve::resolve(&[d.as_ref()], &refs).map_err(one_error)?;
+        }
+
+        // The guard still matters: `compose` can refuse AFTER `start()`, and that
+        // path needs the compensation.
         let mut guard = lifecycle
             .as_ref()
             .map(|m| ActivationGuard::new(iface.descriptor.name.clone(), m.clone()));
@@ -839,43 +917,9 @@ impl ModuleRuntime {
                 .with_param("reason", e.to_string()));
         }
         let mut inner = self.lock();
-        let d = iface.descriptor.clone();
-        let Some(old) = inner.records.get(&d.name) else {
-            return Err(
-                ContractError::framework(codes::MODULE_NOT_FOUND).with_param("module", &d.name)
-            );
-        };
-        if old.builtin || old.state != ModuleState::Active {
-            return Err(
-                ContractError::framework(codes::MODULE_UNAVAILABLE).with_param("module", &d.name)
-            );
-        }
-        // A replacement must move forward: no downgrade, no same version. `check`
-        // guarantees both versions are valid semver (`invalid_version` is a descriptor
-        // issue), so `semver()` is `Some` here; the guard is only defensive.
-        if let (Some(new_v), Some(old_v)) = (d.semver(), old.descriptor.semver())
-            && new_v <= old_v
-        {
-            return Err(ContractError::framework(codes::MODULE_VERSION_NOT_NEWER)
-                .with_param("module", d.name.clone())
-                .with_param("from", old.descriptor.version.clone())
-                .with_param("to", d.version.clone()));
-        }
-        // Proto tags: a tag published once is never moved nor reused (the same rule
-        // `ModuleStore::put` enforces against stored versions), so a hot replacement
-        // cannot silently rewrite the wire contract.
-        let issues = crate::descriptor::compat::check_compat(old.descriptor.as_ref(), d.as_ref());
-        if !issues.is_empty() {
-            return Err(crate::descriptor::check::issues_to_error(&issues));
-        }
-        // `resolve` checks the `requires` of EVERY module it sees, active ones included:
-        // a dependent whose `VersionReq` rejects the new version is reported as
-        // `this.module.dependency_version {module: <dependent>}`.
-        let others = Self::active_descriptors(&inner, Some(&d.name));
-        let refs: Vec<&ModuleDescriptor> = others.iter().map(|a| a.as_ref()).collect();
-        crate::descriptor::resolve::resolve(&[d.as_ref()], &refs).map_err(one_error)?;
-
-        let old = inner.records.remove(&d.name).expect("checked");
+        // The validations above ran before `start()`; `self.ops` is still held, so
+        // the record is the same one. Only the swap is left.
+        let old = inner.records.remove(&d.name).expect("validated above");
         let from = old.descriptor.version.clone();
         let old_lifecycle = old.lifecycle.clone();
         inner.records.insert(
@@ -903,6 +947,12 @@ impl ModuleRuntime {
         if let Some(g) = guard.as_mut() {
             g.disarm();
         }
+        // `stop()` runs NOW, not after the drain: the drain grace defaults to 30
+        // seconds (`DEFAULT_DRAIN_GRACE_MS`), and deferring a module's cleanup by
+        // half a minute to let a few requests finish is the wrong trade. What the
+        // drain protects is the old ROUTER and its streams, not the module's own
+        // resources — so the contract on `Module::stop` says exactly that: do not
+        // release what an in-flight request may still need.
         if let Some(m) = old_lifecycle
             && let Err(e) = m.stop()
         {
