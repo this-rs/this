@@ -59,7 +59,7 @@ impl RestExposure {
 
         // Build all routes
         let health_routes = Self::health_routes();
-        let entity_routes = host.entity_registry.build_routes();
+        let entity_routes = host.entity_registry.build_routes_with(host.clone());
         let link_routes = build_link_routes(link_state.clone());
 
         // Merge everything

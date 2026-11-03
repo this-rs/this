@@ -3148,3 +3148,176 @@ mod descriptor_additive {
         );
     }
 }
+
+#[cfg(test)]
+mod guarded_routes_coverage {
+    //! Exercises the host-aware guarded REST routes (`DescriptorEntity::build_routes_with`) end
+    //! to end so the common-guard handlers are covered: list/get/create/update/delete.
+    use crate::config::{EntityAuthConfig, EntityConfig, LinksConfig};
+    use crate::core::module::{EntityCreator, EntityFetcher, Module};
+    use crate::descriptor::{EntityDesc, ModuleDescriptor};
+    use crate::server::builder::ServerBuilder;
+    use crate::server::entity_registry::EntityRegistry;
+    use crate::storage::InMemoryLinkService;
+    use anyhow::Result;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use serde_json::{Value, json};
+    use std::sync::Arc;
+    use tower::ServiceExt;
+    use uuid::Uuid;
+
+    struct Store;
+    #[async_trait::async_trait]
+    impl EntityFetcher for Store {
+        async fn fetch_as_json(&self, id: &Uuid) -> Result<Value> {
+            Ok(json!({ "id": id }))
+        }
+        async fn list_as_json(&self, _l: Option<i32>, _o: Option<i32>) -> Result<Vec<Value>> {
+            Ok(vec![
+                json!({ "id": "00000000-0000-0000-0000-000000000001" }),
+            ])
+        }
+    }
+    #[async_trait::async_trait]
+    impl EntityCreator for Store {
+        async fn create_from_json(&self, v: Value) -> Result<Value> {
+            Ok(v)
+        }
+        async fn update_from_json(&self, id: &Uuid, v: Value) -> Result<Value> {
+            Ok(json!({ "id": id, "patch": v }))
+        }
+        async fn delete(&self, _id: &Uuid) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    struct Mod {
+        store: Arc<Store>,
+    }
+    impl Module for Mod {
+        fn name(&self) -> &str {
+            "covmod"
+        }
+        fn version(&self) -> &str {
+            "1.0.0"
+        }
+        fn entity_types(&self) -> Vec<&str> {
+            vec!["covitem"]
+        }
+        fn links_config(&self) -> anyhow::Result<LinksConfig> {
+            Ok(LinksConfig {
+                entities: vec![EntityConfig {
+                    singular: "covitem".into(),
+                    plural: "covitems".into(),
+                    auth: EntityAuthConfig::default(),
+                }],
+                links: vec![],
+                validation_rules: None,
+                events: None,
+                sinks: None,
+                auth: None,
+            })
+        }
+        fn register_entities(&self, _r: &mut EntityRegistry) {}
+        fn descriptor(&self) -> Option<ModuleDescriptor> {
+            let mut d = ModuleDescriptor::new("covmod", "1.0.0");
+            d.entities.push(EntityDesc::new("covitem"));
+            Some(d)
+        }
+        fn get_entity_fetcher(&self, e: &str) -> Option<Arc<dyn EntityFetcher>> {
+            (e == "covitem").then(|| self.store.clone() as Arc<dyn EntityFetcher>)
+        }
+        fn get_entity_creator(&self, e: &str) -> Option<Arc<dyn EntityCreator>> {
+            (e == "covitem").then(|| self.store.clone() as Arc<dyn EntityCreator>)
+        }
+    }
+
+    #[tokio::test]
+    async fn guarded_routes_serve_all_verbs() {
+        let host = Arc::new(
+            ServerBuilder::new()
+                .with_link_service(InMemoryLinkService::new())
+                .register_module(Mod {
+                    store: Arc::new(Store),
+                })
+                .expect("register")
+                .build_host()
+                .expect("build_host"),
+        );
+        let app = host
+            .entity_registry
+            .build_routes_with(host.clone())
+            .layer(axum::Extension(crate::prelude::AuthContext::User {
+                user_id: Uuid::from_u128(1),
+                tenant_id: Uuid::from_u128(9),
+                roles: vec!["admin".into()],
+                scopes: Vec::new(),
+            }));
+        let id = "00000000-0000-0000-0000-000000000001";
+
+        let list = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/covitems")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(list.status(), StatusCode::OK);
+
+        let get = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/covitems/{id}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(get.status(), StatusCode::OK);
+
+        let create = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/covitems")
+                    .header("content-type", "application/json")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(create.status(), StatusCode::CREATED);
+
+        let put = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/covitems/{id}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(put.status(), StatusCode::OK);
+
+        let del = app
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!("/covitems/{id}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(del.status(), StatusCode::NO_CONTENT);
+    }
+}
