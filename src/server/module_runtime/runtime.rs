@@ -99,6 +99,80 @@ struct Inner {
     offers: BTreeMap<String, ModuleSource>,
 }
 
+/// Owns a hot-loaded module between `init()` and the publication of the catalog.
+///
+/// # Why this exists
+///
+/// `stop()` is the compensation for an activation that never became visible. The
+/// handle used to live only in the module's `Record`, and a refused load replaced
+/// that `Record` with `lifecycle: None` — so the handle was dropped and nobody
+/// could stop what had already started. `start()` may have spawned tasks, opened
+/// connections or registered resources; a `replace` refused on a version check
+/// left all of it running on code published nowhere.
+///
+/// Until [`ActivationGuard::disarm`] is called — and it is called only once the
+/// catalog **and** the dispatch table are published — dropping the guard calls
+/// `stop()`. That covers, with one mechanism:
+/// - `init()` succeeded but `start()` failed;
+/// - `activate` / `compose` refused the module;
+/// - every early `return Err` in `replace_locked` (unknown module, not newer,
+///   incompatible proto tags, an unsatisfied dependent).
+///
+/// The failure of `stop()` itself is logged, never propagated: it happens while
+/// unwinding to an error the caller already has, and a compensation that panics
+/// would replace a clean refusal with a crash.
+struct ActivationGuard {
+    name: String,
+    module: Arc<dyn Module>,
+    armed: bool,
+}
+
+impl ActivationGuard {
+    fn new(name: String, module: Arc<dyn Module>) -> Self {
+        Self {
+            name,
+            module,
+            armed: false,
+        }
+    }
+
+    /// Run `init()` then `start()`.
+    ///
+    /// The guard arms only once `init()` succeeded: stopping a module whose
+    /// initialisation failed would ask it to release resources it never acquired.
+    fn run(&mut self) -> Result<(), anyhow::Error> {
+        self.module.init()?;
+        self.armed = true;
+        self.module.start()
+    }
+
+    /// The module is published and served: its handle now lives in the Record,
+    /// which owns the `stop()` call from here on.
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for ActivationGuard {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        if let Err(e) = self.module.stop() {
+            tracing::warn!(
+                module = %self.name,
+                error = %e,
+                "activation refused: the stop hook failed (ignored)"
+            );
+        } else {
+            tracing::info!(
+                module = %self.name,
+                "activation refused after start: the module was stopped"
+            );
+        }
+    }
+}
+
 /// The runtime of one host.
 pub struct ModuleRuntime {
     parts: HostParts,
@@ -389,45 +463,54 @@ impl ModuleRuntime {
             ModuleSource::Compiled(m) => Some(m.clone()),
             _ => None,
         };
-        if let Some(m) = &lifecycle {
-            let ran = m.init().and_then(|_| m.start());
-            if let Err(e) = ran {
-                let err = ContractError::framework(codes::MODULE_UNAVAILABLE)
-                    .with_param("module", name.clone())
-                    .with_param("reason", e.to_string());
-                {
-                    let mut inner = self.lock();
-                    let live = inner.records.get(&name).is_some_and(|r| {
-                        matches!(r.state, ModuleState::Active | ModuleState::Draining)
-                    });
-                    if !live {
-                        inner.records.insert(
-                            name.clone(),
-                            Record {
-                                descriptor: iface.descriptor.clone(),
-                                state: ModuleState::Failed {
-                                    code: err.code.clone(),
-                                    at: now(),
-                                },
-                                builtin: false,
-                                iface: None,
-                                gate: Arc::new(Gate::new()),
-                                lifecycle: None,
-                            },
-                        );
-                    }
-                }
-                self.emit(ModuleEvent::Failed {
-                    module: name,
-                    code: err.code.as_str().to_string(),
+        // From `init()` to the publication of the catalog, the guard owns the
+        // module: anything that refuses the activation drops it, and dropping an
+        // armed guard calls `stop()`.
+        let mut guard = lifecycle
+            .as_ref()
+            .map(|m| ActivationGuard::new(name.clone(), m.clone()));
+        if let Some(g) = guard.as_mut()
+            && let Err(e) = g.run()
+        {
+            let err = ContractError::framework(codes::MODULE_UNAVAILABLE)
+                .with_param("module", name.clone())
+                .with_param("reason", e.to_string());
+            {
+                let mut inner = self.lock();
+                let live = inner.records.get(&name).is_some_and(|r| {
+                    matches!(r.state, ModuleState::Active | ModuleState::Draining)
                 });
-                return Err(err);
+                if !live {
+                    inner.records.insert(
+                        name.clone(),
+                        Record {
+                            descriptor: iface.descriptor.clone(),
+                            state: ModuleState::Failed {
+                                code: err.code.clone(),
+                                at: now(),
+                            },
+                            builtin: false,
+                            iface: None,
+                            gate: Arc::new(Gate::new()),
+                            lifecycle: None,
+                        },
+                    );
+                }
             }
+            self.emit(ModuleEvent::Failed {
+                module: name,
+                code: err.code.as_str().to_string(),
+            });
+            return Err(err);
         }
         let descriptor = iface.descriptor.clone();
         let mut inner = self.lock();
         match self.activate(&mut inner, iface, lifecycle) {
             Ok(status) => {
+                // Published and served: the Record owns `stop()` from now on.
+                if let Some(g) = guard.as_mut() {
+                    g.disarm();
+                }
                 self.publish_bundles(&status.name, bundles);
                 Ok(status)
             }
@@ -742,13 +825,18 @@ impl ModuleRuntime {
             ModuleSource::Compiled(m) => Some(m.clone()),
             _ => None,
         };
-        if let Some(m) = &lifecycle {
-            let ran = m.init().and_then(|_| m.start());
-            if let Err(e) = ran {
-                return Err(ContractError::framework(codes::MODULE_UNAVAILABLE)
-                    .with_param("module", iface.descriptor.name.clone())
-                    .with_param("reason", e.to_string()));
-            }
+        // Same guard as `load`. It matters more here: five validations below can
+        // still refuse the replacement after the new version has started, and the
+        // refused handle would otherwise be dropped without a `stop()`.
+        let mut guard = lifecycle
+            .as_ref()
+            .map(|m| ActivationGuard::new(iface.descriptor.name.clone(), m.clone()));
+        if let Some(g) = guard.as_mut()
+            && let Err(e) = g.run()
+        {
+            return Err(ContractError::framework(codes::MODULE_UNAVAILABLE)
+                .with_param("module", iface.descriptor.name.clone())
+                .with_param("reason", e.to_string()));
         }
         let mut inner = self.lock();
         let d = iface.descriptor.clone();
@@ -811,6 +899,10 @@ impl ModuleRuntime {
         let published = self.parts.catalog.publish(catalog);
         self.table.store(Arc::new(table));
         self.publish_bundles(&d.name, bundles);
+        // Published and served: the new version's Record owns `stop()` from now on.
+        if let Some(g) = guard.as_mut() {
+            g.disarm();
+        }
         if let Some(m) = old_lifecycle
             && let Err(e) = m.stop()
         {

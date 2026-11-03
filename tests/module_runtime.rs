@@ -1758,3 +1758,221 @@ async fn owner_policy_compares_resource_id() {
         "owner of THIS resource passes the gate: {v}"
     );
 }
+
+// ── compensation of a refused activation (ActivationGuard) ──────────────────
+//
+// The defect these cover: `load` / `replace_locked` ran `init()` then `start()`
+// BEFORE the validations that can still refuse the module, and a refused Record
+// was written with `lifecycle: None` — the handle was dropped, so nobody could
+// call `stop()`. A module that had spawned tasks, opened connections or
+// registered resources kept running on code published nowhere.
+
+/// Counts its own lifecycle calls. A test must assert a number, never "no panic".
+struct Counted {
+    name: &'static str,
+    version: &'static str,
+    entity: &'static str,
+    fail_start: bool,
+    init: std::sync::atomic::AtomicUsize,
+    start: std::sync::atomic::AtomicUsize,
+    stop: std::sync::atomic::AtomicUsize,
+}
+
+impl Counted {
+    fn new(name: &'static str, version: &'static str, entity: &'static str) -> Arc<Counted> {
+        Self::fallible(name, version, entity, false)
+    }
+
+    fn fallible(
+        name: &'static str,
+        version: &'static str,
+        entity: &'static str,
+        fail_start: bool,
+    ) -> Arc<Counted> {
+        Arc::new(Counted {
+            name,
+            version,
+            entity,
+            fail_start,
+            init: std::sync::atomic::AtomicUsize::new(0),
+            start: std::sync::atomic::AtomicUsize::new(0),
+            stop: std::sync::atomic::AtomicUsize::new(0),
+        })
+    }
+
+    fn count(&self, which: &std::sync::atomic::AtomicUsize) -> usize {
+        which.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    fn stops(&self) -> usize {
+        self.count(&self.stop)
+    }
+
+    fn starts(&self) -> usize {
+        self.count(&self.start)
+    }
+
+    fn inits(&self) -> usize {
+        self.count(&self.init)
+    }
+}
+
+impl Module for Counted {
+    fn name(&self) -> &str {
+        self.name
+    }
+    fn version(&self) -> &str {
+        self.version
+    }
+    fn entity_types(&self) -> Vec<&str> {
+        vec![self.entity]
+    }
+    fn links_config(&self) -> anyhow::Result<LinksConfig> {
+        Ok(LinksConfig {
+            entities: vec![],
+            links: vec![],
+            validation_rules: None,
+            events: None,
+            sinks: None,
+            auth: None,
+        })
+    }
+    fn register_entities(&self, _: &mut EntityRegistry) {}
+    fn init(&self) -> anyhow::Result<()> {
+        self.init.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(())
+    }
+    fn start(&self) -> anyhow::Result<()> {
+        self.start.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if self.fail_start {
+            anyhow::bail!("start refuses to run");
+        }
+        Ok(())
+    }
+    fn stop(&self) -> anyhow::Result<()> {
+        self.stop.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(())
+    }
+}
+
+/// `start()` failed after a successful `init()`: the module must still be stopped.
+#[tokio::test]
+async fn start_failure_after_a_successful_init_stops_the_module() {
+    let h = harness(false);
+    let rt = h.host.module_runtime.clone().expect("runtime");
+
+    let m = Counted::fallible("fragile", "1.0.0", "widget", true);
+    let err = rt
+        .load(ModuleSource::Compiled(m.clone()))
+        .await
+        .expect_err("start() fails, so the load must be refused");
+
+    assert_eq!(err.code.as_str(), "this.module.unavailable");
+    assert_eq!(m.inits(), 1, "init ran once");
+    assert_eq!(m.starts(), 1, "start was attempted once");
+    assert_eq!(
+        m.stops(),
+        1,
+        "a module whose start() failed must still receive stop()"
+    );
+    // A refused load is recorded `Failed` — never `Active`: the module is not
+    // served, and the state machine says so.
+    let state = rt.status("fragile").await.unwrap().state;
+    assert!(
+        matches!(state, ModuleState::Failed { .. }),
+        "a refused load must be recorded Failed, got {state:?}"
+    );
+}
+
+/// The activation is refused by the catalog composition, AFTER `start()` ran.
+#[tokio::test]
+async fn load_refused_by_composition_stops_the_started_module() {
+    let h = harness(false);
+    let rt = h.host.module_runtime.clone().expect("runtime");
+
+    // `shop` already owns the `orders` plural (see `Shop::entity_types`).
+    let collider = Counted::new("collider", "1.0.0", "order");
+    let err = rt
+        .load(ModuleSource::Compiled(collider.clone()))
+        .await
+        .expect_err("a duplicate plural must refuse the load");
+
+    let _ = err;
+    assert_eq!(
+        collider.starts(),
+        1,
+        "the module did start before the refusal"
+    );
+    assert_eq!(
+        collider.stops(),
+        1,
+        "a module refused after start() must be stopped, not leaked"
+    );
+    let state = rt.status("collider").await.unwrap().state;
+    assert!(
+        matches!(state, ModuleState::Failed { .. }),
+        "a refused load must be recorded Failed, got {state:?}"
+    );
+    // The host is untouched: `shop` (a built-in, not a runtime Record) still
+    // owns the `orders` plural in the published catalog.
+    assert!(
+        h.host.catalog.load().entity_of_plural("orders").is_some(),
+        "the refused load must not disturb the published catalog"
+    );
+}
+
+/// A `replace` refused on the version check must stop the NEW version.
+#[tokio::test]
+async fn replace_refused_for_a_non_newer_version_stops_the_new_version() {
+    let h = harness(false);
+    let rt = h.host.module_runtime.clone().expect("runtime");
+
+    let v1 = Counted::new("counted", "1.0.0", "widget");
+    rt.load(ModuleSource::Compiled(v1.clone()))
+        .await
+        .expect("load 1.0.0");
+    assert_eq!(v1.stops(), 0, "an active module is not stopped");
+
+    let same = Counted::new("counted", "1.0.0", "widget");
+    let err = rt
+        .replace(ModuleSource::Compiled(same.clone()))
+        .await
+        .expect_err("same version is not a valid replacement");
+
+    assert_eq!(err.code.as_str(), "this.module.version_not_newer");
+    assert_eq!(same.starts(), 1, "the new version did start");
+    assert_eq!(same.stops(), 1, "the refused new version must be stopped");
+    assert_eq!(v1.stops(), 0, "the served version keeps running");
+    assert_eq!(
+        rt.status("counted").await.unwrap().version,
+        "1.0.0",
+        "the served version is unchanged"
+    );
+}
+
+/// A successful replace must NOT stop the new version (the guard is disarmed).
+#[tokio::test]
+async fn successful_replace_keeps_the_new_version_running() {
+    let h = harness(false);
+    let rt = h.host.module_runtime.clone().expect("runtime");
+
+    let v1 = Counted::new("counted", "1.0.0", "widget");
+    rt.load(ModuleSource::Compiled(v1.clone()))
+        .await
+        .expect("load 1.0.0");
+
+    let v2 = Counted::new("counted", "2.0.0", "widget");
+    let status = rt
+        .replace(ModuleSource::Compiled(v2.clone()))
+        .await
+        .expect("2.0.0 is newer");
+
+    assert_eq!(status.version, "2.0.0");
+    assert_eq!(v2.starts(), 1);
+    assert_eq!(
+        v2.stops(),
+        0,
+        "a published module must not be stopped by the guard"
+    );
+    assert_eq!(v1.stops(), 1, "the replaced version is stopped");
+}
