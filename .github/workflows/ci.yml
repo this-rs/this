@@ -9,18 +9,48 @@ on:
       - '**/*.mmd'
   pull_request:
     branches: [ main, develop ]
-    paths-ignore:
-      - '**/*.md'
-      - 'docs/**'
-      - '**/*.mmd'
 
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
 
 jobs:
+  # ── Documentation-only changes ─────────────────────────────────────────────
+  # Every other job needs `code == 'true'`. `paths-ignore` used to live on
+  # `pull_request` too: a docs-only PR then had NO check at all, and a required
+  # status check that never reports blocks the merge forever. Computing it here
+  # instead keeps a docs-only PR at a few seconds and gives the required
+  # `CI gate` check something to report on every single PR.
+  changes:
+    name: Changes
+    runs-on: ubuntu-latest
+    outputs:
+      code: ${{ steps.filter.outputs.code }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Did anything other than documentation change?
+        id: filter
+        run: |
+          base="${{ github.event.pull_request.base.sha || github.event.before }}"
+          if [ -z "$base" ] || ! git cat-file -e "$base^{commit}" 2>/dev/null; then
+            echo "no base commit to diff against: assume code changed"
+            echo "code=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          changed=$(git diff --name-only "$base" "$GITHUB_SHA" || true)
+          echo "changed files:"; printf '%s\n' "$changed"
+          code=$(printf '%s\n' "$changed" | grep -vE '(\.md$|\.mmd$|^docs/)' | grep -c . || true)
+          echo "code files: $code"
+          if [ "$code" -gt 0 ]; then echo "code=true" >> "$GITHUB_OUTPUT"; else echo "code=false" >> "$GITHUB_OUTPUT"; fi
+
   # Test sur plusieurs versions de Rust
   test:
+    # Skipped when the change is documentation-only (see `changes`).
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     name: Test Suite
     runs-on: ubuntu-latest
     # Nightly is expected to be GREEN (see the feature set below). `continue-on-error`
@@ -121,6 +151,9 @@ jobs:
 
   # Code coverage
   coverage:
+    # Skipped when the change is documentation-only (see `changes`).
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     name: Code Coverage
     runs-on: ubuntu-latest
     steps:
@@ -178,6 +211,9 @@ jobs:
 
   # Vérification du formatage
   fmt:
+    # Skipped when the change is documentation-only (see `changes`).
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     name: Rustfmt
     runs-on: ubuntu-latest
     steps:
@@ -197,6 +233,9 @@ jobs:
 
   # Clippy linting
   clippy:
+    # Skipped when the change is documentation-only (see `changes`).
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     name: Clippy
     runs-on: ubuntu-latest
     steps:
@@ -239,6 +278,9 @@ jobs:
 
   # Vérification de la compilation des exemples
   examples:
+    # Skipped when the change is documentation-only (see `changes`).
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     name: Build Examples
     runs-on: ubuntu-latest
     steps:
@@ -285,6 +327,9 @@ jobs:
 
   # Vérification de sécurité avec cargo-audit
   security_audit:
+    # Skipped when the change is documentation-only (see `changes`).
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     name: Security Audit
     runs-on: ubuntu-latest
     steps:
@@ -330,6 +375,9 @@ jobs:
 
   # Vérification de la documentation
   docs:
+    # Skipped when the change is documentation-only (see `changes`).
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     name: Documentation
     runs-on: ubuntu-latest
     steps:
@@ -372,6 +420,9 @@ jobs:
 
   # Vérification de la compilation sur différentes plateformes
   cross-platform:
+    # Skipped when the change is documentation-only (see `changes`).
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     name: Cross Platform Check
     runs-on: ${{ matrix.os }}
     strategy:
@@ -407,3 +458,26 @@ jobs:
 
   # Note: Minimal Versions (feature-powerset) check moved to release.yml
   # as it's too slow for PR/push CI (~10+ min) and only needed before release.
+
+  # ── The one check a branch protection rule should require ──────────────────
+  # `if: always()` makes it report even when a dependency failed, which is the
+  # whole point: a red CI must be able to block a merge. A skipped job counts as
+  # fine here, and that is honest — a docs-only PR genuinely had nothing to check.
+  gate:
+    name: CI gate
+    if: always()
+    needs: [changes, test, coverage, fmt, clippy, examples, security_audit, docs, cross-platform]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Nothing failed, nothing was cancelled
+        run: |
+          results="${{ join(needs.*.result, ',') }}"
+          echo "job results: $results"
+          case ",$results," in
+            *,failure,*|*,cancelled,*)
+              echo "::error::at least one CI job failed or was cancelled"
+              exit 1
+              ;;
+          esac
+          echo "all jobs passed, or were skipped by design (documentation-only change)"
+
