@@ -133,10 +133,14 @@ impl CognitiveNotificationBridge {
 
     /// Start the bridge as a background task
     ///
+    /// The EventBus subscription is created synchronously here, before this
+    /// method returns, so every event published after `start()` is received
+    /// even if the spawned task has not been polled yet.
+    ///
     /// Returns a `JoinHandle` for the spawned task.
     pub fn start(self) -> tokio::task::JoinHandle<()> {
+        let mut rx = self.event_bus.subscribe();
         tokio::spawn(async move {
-            let mut rx = self.event_bus.subscribe();
             loop {
                 match rx.recv().await {
                     Ok(envelope) => {
@@ -763,5 +767,77 @@ mod tests {
         );
 
         handle.abort();
+    }
+
+    /// Regression: `start()` must subscribe to the EventBus before returning.
+    /// On a current_thread runtime the spawned task has not run yet when the
+    /// signal is published right after `start()`, so a subscription made inside
+    /// the task would miss it.
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_bridge_receives_signal_published_right_after_start() {
+        use std::sync::Mutex;
+
+        #[derive(Debug)]
+        struct RecordingSink {
+            delivered: Mutex<Vec<serde_json::Value>>,
+        }
+
+        #[async_trait::async_trait]
+        impl crate::events::sinks::Sink for RecordingSink {
+            async fn deliver(
+                &self,
+                payload: serde_json::Value,
+                _recipient_id: Option<&str>,
+                _context_vars: &HashMap<String, serde_json::Value>,
+            ) -> anyhow::Result<()> {
+                self.delivered.lock().unwrap().push(payload);
+                Ok(())
+            }
+
+            fn name(&self) -> &str {
+                "recording"
+            }
+
+            fn sink_type(&self) -> crate::config::sinks::SinkType {
+                crate::config::sinks::SinkType::InApp
+            }
+        }
+
+        let event_bus = Arc::new(EventBus::new(16));
+        let registry = Arc::new(SinkRegistry::new());
+        let sink = Arc::new(RecordingSink {
+            delivered: Mutex::new(Vec::new()),
+        });
+        registry.register("in_app", sink.clone());
+
+        let bridge = CognitiveNotificationBridge::with_defaults(event_bus.clone(), registry);
+        let handle = bridge.start();
+
+        // No yield and no sleep between start() and publish().
+        event_bus.publish(FrameworkEvent::Cognitive(
+            CognitiveSignal::StigmergyLockIn {
+                path: vec![Uuid::new_v4(), Uuid::new_v4()],
+                intensity: 0.95,
+            },
+        ));
+
+        let received = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                let done = !sink.delivered.lock().unwrap().is_empty();
+                if done {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await;
+
+        handle.abort();
+
+        assert!(
+            received.is_ok(),
+            "signal published right after start() was not delivered"
+        );
+        assert_eq!(sink.delivered.lock().unwrap().len(), 1);
     }
 }
