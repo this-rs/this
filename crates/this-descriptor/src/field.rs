@@ -44,6 +44,30 @@ pub struct FieldDesc {
     pub immutable: bool,
     #[serde(default, skip_serializing_if = "is_false")]
     pub deprecated: bool,
+    /// Ce que devient **cet** enregistrement quand celui qu'il référence est supprimé.
+    ///
+    /// N'a de sens que pour un [`FieldType::Ref`]. Le défaut est [`OnDelete::Restrict`] :
+    /// on refuse la suppression tant qu'une référence existe, plutôt que d'effacer des
+    /// données par surprise.
+    #[serde(default, skip_serializing_if = "OnDelete::is_restrict")]
+    pub on_delete: OnDelete,
+}
+
+/// La règle de suppression appliquée aux enregistrements qui référencent celui qu'on efface.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum OnDelete {
+    /// La suppression du référencé est refusée tant que la référence existe.
+    #[default]
+    Restrict,
+    /// Ces enregistrements sont supprimés avec le référencé (ligne de commande ↔ commande).
+    Cascade,
+}
+
+impl OnDelete {
+    pub fn is_restrict(&self) -> bool {
+        matches!(self, OnDelete::Restrict)
+    }
 }
 
 fn is_false(b: &bool) -> bool {
@@ -67,6 +91,7 @@ impl FieldDesc {
             read_only: false,
             immutable: false,
             deprecated: false,
+            on_delete: OnDelete::Restrict,
         }
     }
     pub fn optional(mut self) -> Self {
@@ -79,6 +104,16 @@ impl FieldDesc {
     }
     pub fn immutable(mut self) -> Self {
         self.immutable = true;
+        self
+    }
+
+    /// Supprime aussi cet enregistrement quand le référencé disparaît.
+    ///
+    /// À déclarer sur le champ `Ref` qui pointe vers le parent : une ligne de commande
+    /// porte `order: Ref(order)` avec `cascade`, donc supprimer la commande supprime ses
+    /// lignes — au lieu de rendre la commande indestructible.
+    pub fn cascade_on_delete(mut self) -> Self {
+        self.on_delete = OnDelete::Cascade;
         self
     }
     pub fn tag(mut self, tag: u32) -> Self {

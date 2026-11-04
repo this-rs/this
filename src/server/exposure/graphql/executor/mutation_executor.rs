@@ -13,7 +13,6 @@ use uuid::Uuid;
 use super::field_resolver;
 use super::link_mutations;
 use super::utils;
-use crate::core::events::{EntityEvent, FrameworkEvent};
 use crate::descriptor::Operation;
 use crate::server::exposure::guard::SurfaceGuard;
 use crate::server::host::ServerHost;
@@ -134,16 +133,6 @@ async fn create_entity_mutation(
     {
         let created = creator.create_from_json(data).await?;
 
-        // Publish event to EventBus
-        if let Some(event_bus) = host.event_bus() {
-            let entity_id = utils::extract_uuid_from_value(&created).unwrap_or_default();
-            event_bus.publish(FrameworkEvent::Entity(EntityEvent::Created {
-                entity_type: entity_type.clone(),
-                entity_id,
-                data: created.clone(),
-            }));
-        }
-
         // Resolve sub-fields
         let resolved = field_resolver::resolve_entity_fields(
             host,
@@ -182,15 +171,6 @@ async fn update_entity_mutation(
     {
         let updated = creator.update_from_json(&uuid, data).await?;
 
-        // Publish event to EventBus
-        if let Some(event_bus) = host.event_bus() {
-            event_bus.publish(FrameworkEvent::Entity(EntityEvent::Updated {
-                entity_type: entity_type.clone(),
-                entity_id: uuid,
-                data: updated.clone(),
-            }));
-        }
-
         // Resolve sub-fields
         let resolved = field_resolver::resolve_entity_fields(
             host,
@@ -226,14 +206,6 @@ async fn delete_entity_mutation(
     // Delete the entity
     {
         creator.delete(&uuid).await?;
-
-        // Publish event to EventBus
-        if let Some(event_bus) = host.event_bus() {
-            event_bus.publish(FrameworkEvent::Entity(EntityEvent::Deleted {
-                entity_type: entity_type.clone(),
-                entity_id: uuid,
-            }));
-        }
 
         Ok(Value::Bool(true))
     }

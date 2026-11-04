@@ -17,7 +17,7 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 use crate::config::LinksConfig;
-use crate::core::events::{EventBus, FrameworkEvent, LinkEvent};
+use crate::core::events::{EventBus, FrameworkEvent};
 use crate::core::extractors::{
     DirectLinkExtractor, ExtractorError, LinkExtractor, RecursiveLinkExtractor,
 };
@@ -541,14 +541,7 @@ pub async fn create_link(
         .await
         .map_err(|e| ExtractorError::from_anyhow(&e))?;
 
-    // Emit link created event
-    state.publish_event(FrameworkEvent::Link(LinkEvent::Created {
-        link_type: created_link.link_type.clone(),
-        link_id: created_link.id,
-        source_id: created_link.source_id,
-        target_id: created_link.target_id,
-        metadata: created_link.metadata.clone(),
-    }));
+    // The `LinkEvent::Created` is published by `EventedLinkService` (the host's link service).
 
     Ok((StatusCode::CREATED, Json(created_link)).into_response())
 }
@@ -632,23 +625,9 @@ pub async fn create_linked_entity(
         .await
         .map_err(|e| ExtractorError::from_anyhow(&e))?;
 
-    // Emit entity created event
-    state.publish_event(FrameworkEvent::Entity(
-        crate::core::events::EntityEvent::Created {
-            entity_type: target_entity_type.clone(),
-            entity_id: target_entity_id,
-            data: created_entity.clone(),
-        },
-    ));
+    // The `EntityEvent::Created` is published by the decorated creator (`publishing_creators`).
 
-    // Emit link created event
-    state.publish_event(FrameworkEvent::Link(LinkEvent::Created {
-        link_type: created_link.link_type.clone(),
-        link_id: created_link.id,
-        source_id: created_link.source_id,
-        target_id: created_link.target_id,
-        metadata: created_link.metadata.clone(),
-    }));
+    // The `LinkEvent::Created` is published by `EventedLinkService` (the host's link service).
 
     // Return both the created entity and the link
     let response = serde_json::json!({
@@ -750,13 +729,7 @@ pub async fn delete_link(
         .await
         .map_err(|e| ExtractorError::from_anyhow(&e))?;
 
-    // Emit link deleted event
-    state.publish_event(FrameworkEvent::Link(LinkEvent::Deleted {
-        link_type: existing_link.link_type.clone(),
-        link_id: existing_link.id,
-        source_id: existing_link.source_id,
-        target_id: existing_link.target_id,
-    }));
+    // The `LinkEvent::Deleted` is published by `EventedLinkService`.
 
     Ok(StatusCode::NO_CONTENT.into_response())
 }
@@ -1223,23 +1196,9 @@ pub async fn handle_nested_path_post(
         .await
         .map_err(|e| ExtractorError::from_anyhow(&e))?;
 
-    // Emit entity created event
-    state.publish_event(FrameworkEvent::Entity(
-        crate::core::events::EntityEvent::Created {
-            entity_type: target_entity_type.clone(),
-            entity_id: target_entity_id,
-            data: created_entity.clone(),
-        },
-    ));
+    // The `EntityEvent::Created` is published by the decorated creator (`publishing_creators`).
 
-    // Emit link created event
-    state.publish_event(FrameworkEvent::Link(LinkEvent::Created {
-        link_type: created_link.link_type.clone(),
-        link_id: created_link.id,
-        source_id: created_link.source_id,
-        target_id: created_link.target_id,
-        metadata: created_link.metadata.clone(),
-    }));
+    // The `LinkEvent::Created` is published by `EventedLinkService` (the host's link service).
 
     let response = serde_json::json!({
         "entity": created_entity,
@@ -1254,6 +1213,7 @@ mod tests {
     use super::*;
     use crate::config::EntityConfig;
     use crate::core::LinkDefinition;
+    use crate::core::events::LinkEvent;
     use crate::storage::InMemoryLinkService;
 
     fn create_test_state() -> AppState {
@@ -3058,6 +3018,11 @@ mod tests {
     async fn test_create_link_emits_event() {
         let bus = Arc::new(EventBus::new(16));
         let mut state = create_test_state();
+        // Same assembly as `ServerHost::with_event_bus`: events come from the decorator.
+        state.link_service = Arc::new(crate::core::evented_links::EventedLinkService::new(
+            state.link_service.clone(),
+            bus.clone(),
+        ));
         state.event_bus = Some(bus.clone());
 
         let mut rx = bus.subscribe();
@@ -3098,6 +3063,11 @@ mod tests {
     async fn test_delete_link_emits_event() {
         let bus = Arc::new(EventBus::new(16));
         let mut state = create_test_state();
+        // Same assembly as `ServerHost::with_event_bus`: events come from the decorator.
+        state.link_service = Arc::new(crate::core::evented_links::EventedLinkService::new(
+            state.link_service.clone(),
+            bus.clone(),
+        ));
         state.event_bus = Some(bus.clone());
 
         let user_id = Uuid::new_v4();

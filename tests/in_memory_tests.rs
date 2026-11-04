@@ -12,6 +12,7 @@ use this::storage::{InMemoryDataService, InMemoryLinkService};
 data_service_tests!(InMemoryDataService::<TestDataEntity>::new());
 link_service_tests!(InMemoryLinkService::new());
 rest_integration_tests!(InMemoryDataService::<TestDataEntity>::new());
+event_contract_tests!(InMemoryDataService::<TestDataEntity>::new());
 
 // ---------------------------------------------------------------------------
 // Native `list_query` (EntityFetcher) — filter/sort/page evaluated in the store

@@ -295,6 +295,20 @@ impl PolicyExpr {
         out
     }
 
+    /// Les permissions IAM mentionnées par la politique (`perm:…`), sans doublon.
+    ///
+    /// Symétrique de [`PolicyExpr::resolvers`] : un hôte peut savoir ce qu'il faudrait
+    /// accorder pour rendre la politique décidable — c'est la base d'une demande
+    /// d'autorisation in-app.
+    pub fn permissions(&self) -> Vec<&str> {
+        let mut out: Vec<&str> = Vec::new();
+        self.walk(&mut |e| match e {
+            PolicyExpr::Perm(name) if !out.contains(&name.as_str()) => out.push(name.as_str()),
+            _ => {}
+        });
+        out
+    }
+
     fn walk<'a>(&'a self, f: &mut impl FnMut(&'a PolicyExpr)) {
         f(self);
         match self {
