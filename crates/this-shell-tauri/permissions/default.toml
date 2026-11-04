@@ -1,0 +1,3 @@
+[default]
+description = "Lets the app read its window chrome and quit through this-shell."
+permissions = ["allow-env", "allow-quit"]
