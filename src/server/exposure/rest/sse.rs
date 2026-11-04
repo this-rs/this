@@ -10,7 +10,20 @@
 //! - `entity_type` — Filter by entity type (e.g., "user", "order") or link type (e.g., "follows")
 //! - `event_type` — Filter by action: "created", "updated", "deleted"
 //!
-//! All filters are optional. When absent, all events are streamed.
+//! All filters are optional. When absent, all events the caller may see are streamed.
+//!
+//! # Tenant isolation (fail-closed)
+//!
+//! Every event is checked against the caller's tenant before the query filters
+//! are applied:
+//!
+//! - An event **carrying a tenant** (`EventEnvelope::tenant_id`, or the tenant of a
+//!   `GdprErasure` event) is delivered **only** to a caller authenticated for that
+//!   same tenant. A caller without a tenant (anonymous, system admin, tenant-less
+//!   service account) never receives it.
+//! - An event **without a tenant** (`tenant_id == None`, the pre-multi-tenant
+//!   events kept for backward compatibility) is deliverable to every caller,
+//!   anonymous ones included.
 //!
 //! # Example
 //!
@@ -36,6 +49,7 @@ use std::convert::Infallible;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio_stream::wrappers::BroadcastStream;
+use uuid::Uuid;
 
 /// Query parameters for SSE event filtering
 #[derive(Debug, Deserialize, Default)]
@@ -56,7 +70,9 @@ pub struct SseFilter {
 /// Sends heartbeat comments every 30 seconds to keep the connection alive.
 ///
 /// When auth middleware is active, the `AuthContext` is extracted and used
-/// for tenant-scoped event isolation.
+/// for tenant-scoped event isolation (see the module documentation: events
+/// carrying a tenant are never delivered to a caller of another tenant, nor
+/// to a caller without a tenant).
 pub async fn sse_handler(
     State(event_bus): State<Arc<EventBus>>,
     Query(filter): Query<SseFilter>,
@@ -68,11 +84,8 @@ pub async fn sse_handler(
     let stream = BroadcastStream::new(rx).filter_map(move |result| {
         let item = match result {
             Ok(envelope) => {
-                // Tenant isolation: skip events from other tenants
-                if let Some(conn_tenant) = tenant_id
-                    && let Some(event_tenant) = envelope.tenant_id()
-                    && conn_tenant != event_tenant
-                {
+                // Tenant isolation (fail-closed): see `tenant_allows`
+                if !tenant_allows(tenant_id, event_tenant_id(&envelope)) {
                     return std::future::ready(None);
                 }
 
@@ -98,6 +111,30 @@ pub async fn sse_handler(
             .interval(Duration::from_secs(30))
             .text("heartbeat"),
     )
+}
+
+/// Tenant of an event, if it carries one.
+///
+/// The envelope's `tenant_id` is authoritative. A `GdprErasure` event also
+/// names its tenant in its payload, which is checked as well so that an
+/// envelope published without the tenant field cannot leak it.
+fn event_tenant_id(envelope: &EventEnvelope) -> Option<Uuid> {
+    envelope.tenant_id().or(match &envelope.event {
+        FrameworkEvent::GdprErasure { tenant_id, .. } => Some(*tenant_id),
+        _ => None,
+    })
+}
+
+/// Decide whether an event may be delivered to a connection (fail-closed).
+///
+/// - Event with a tenant: delivered only if the connection has that same tenant.
+///   A connection without a tenant (anonymous, admin, tenant-less service) gets nothing.
+/// - Event without a tenant: delivered to every connection.
+fn tenant_allows(conn_tenant: Option<Uuid>, event_tenant: Option<Uuid>) -> bool {
+    match event_tenant {
+        None => true,
+        Some(event_tenant) => conn_tenant == Some(event_tenant),
+    }
 }
 
 /// Check if an event envelope matches the SSE filter
@@ -442,5 +479,65 @@ mod tests {
         };
         assert!(matches_filter(&created, &filter));
         assert!(!matches_filter(&deleted, &filter));
+    }
+
+    fn make_tenant_envelope(tenant: Uuid) -> EventEnvelope {
+        let mut envelope = make_entity_envelope("user", "created");
+        envelope.tenant_id = Some(tenant);
+        envelope
+    }
+
+    #[test]
+    fn test_tenant_isolation_anonymous_does_not_receive_tenant_event() {
+        // (a) anonymous caller (no tenant) never gets an event carrying a tenant
+        let tenant_a = Uuid::new_v4();
+        let envelope = make_tenant_envelope(tenant_a);
+        assert!(!tenant_allows(None, event_tenant_id(&envelope)));
+    }
+
+    #[test]
+    fn test_tenant_isolation_other_tenant_is_filtered() {
+        // (b) caller of tenant A never gets an event of tenant B
+        let tenant_a = Uuid::new_v4();
+        let tenant_b = Uuid::new_v4();
+        let envelope = make_tenant_envelope(tenant_b);
+        assert!(!tenant_allows(Some(tenant_a), event_tenant_id(&envelope)));
+    }
+
+    #[test]
+    fn test_tenant_isolation_same_tenant_is_delivered() {
+        // (c) caller of tenant A receives an event of tenant A
+        let tenant_a = Uuid::new_v4();
+        let envelope = make_tenant_envelope(tenant_a);
+        assert!(tenant_allows(Some(tenant_a), event_tenant_id(&envelope)));
+    }
+
+    #[test]
+    fn test_tenant_isolation_event_without_tenant_is_delivered_to_all() {
+        // Events without tenant_id stay deliverable to every caller
+        let envelope = make_entity_envelope("user", "created");
+        let tenant_a = Uuid::new_v4();
+        assert!(tenant_allows(None, event_tenant_id(&envelope)));
+        assert!(tenant_allows(Some(tenant_a), event_tenant_id(&envelope)));
+    }
+
+    #[test]
+    fn test_tenant_isolation_gdpr_erasure_uses_payload_tenant() {
+        // A GdprErasure envelope without the envelope tenant field must still
+        // be hidden from anonymous callers and from other tenants.
+        let tenant_a = Uuid::new_v4();
+        let tenant_b = Uuid::new_v4();
+        let envelope = EventEnvelope::new(FrameworkEvent::GdprErasure {
+            tenant_id: tenant_a,
+            entities_deleted: 0,
+            links_deleted: 0,
+            notifications_deleted: 0,
+            erased_at: chrono::Utc::now(),
+        });
+        let tenant = event_tenant_id(&envelope);
+        assert_eq!(tenant, Some(tenant_a));
+        assert!(!tenant_allows(None, tenant));
+        assert!(!tenant_allows(Some(tenant_b), tenant));
+        assert!(tenant_allows(Some(tenant_a), tenant));
     }
 }
