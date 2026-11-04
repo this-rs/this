@@ -14,6 +14,7 @@ use crate::core::link::LinkEntity;
 use crate::descriptor::Operation;
 use crate::server::exposure::guard::SurfaceGuard;
 use crate::server::host::ServerHost;
+use std::collections::HashMap;
 use std::sync::Arc;
 use tonic::{Request, Response, Status};
 use uuid::Uuid;
@@ -52,12 +53,19 @@ impl LinkServiceImpl {
     }
 
     /// Convert a LinkEntity to a gRPC LinkResponse, optionally enriching with entity data
-    async fn link_to_response(&self, link: &LinkEntity, guard: &SurfaceGuard) -> LinkResponse {
+    /// `cache` is shared by all the links of one response, so an entity that several
+    /// links point to is read once (see `fetch_entity_data`).
+    async fn link_to_response(
+        &self,
+        link: &LinkEntity,
+        guard: &SurfaceGuard,
+        cache: &mut HashMap<Uuid, Option<prost_types::Struct>>,
+    ) -> LinkResponse {
         let metadata = link.metadata.as_ref().map(json_to_struct);
 
         // Try to fetch source and target entity data for enrichment
-        let source_data = self.fetch_entity_data(&link.source_id, guard).await;
-        let target_data = self.fetch_entity_data(&link.target_id, guard).await;
+        let source_data = self.fetch_entity_data(&link.source_id, guard, cache).await;
+        let target_data = self.fetch_entity_data(&link.target_id, guard, cache).await;
 
         LinkResponse {
             id: link.id.to_string(),
@@ -76,17 +84,28 @@ impl LinkServiceImpl {
     ///
     /// Enrichment is a READ of the entity: a type whose `get` policy refuses the
     /// caller is skipped (no data rather than a leak through the link).
+    ///
+    /// `cache` memoizes the result per id for one request (the guard is the same for
+    /// every link of the request, so an id always resolves the same way); a miss is
+    /// cached as `None` too.
     async fn fetch_entity_data(
         &self,
         entity_id: &Uuid,
         guard: &SurfaceGuard,
+        cache: &mut HashMap<Uuid, Option<prost_types::Struct>>,
     ) -> Option<prost_types::Struct> {
+        if let Some(hit) = cache.get(entity_id) {
+            return hit.clone();
+        }
+        let mut data = None;
         for fetcher in guard.readable_fetchers(&self.host, entity_id) {
             if let Ok(json) = fetcher.fetch_as_json(entity_id).await {
-                return Some(json_to_struct(&json));
+                data = Some(json_to_struct(&json));
+                break;
             }
         }
-        None
+        cache.insert(*entity_id, data.clone());
+        data
     }
 }
 
@@ -145,7 +164,9 @@ impl LinkServiceTrait for LinkServiceImpl {
             ));
         }
 
-        let response = self.link_to_response(&created, &guard).await;
+        let response = self
+            .link_to_response(&created, &guard, &mut HashMap::new())
+            .await;
         Ok(Response::new(response))
     }
 
@@ -174,7 +195,9 @@ impl LinkServiceTrait for LinkServiceImpl {
             .check_link(Some(&link.link_type), None, None, None, Operation::GetLink)
             .map_err(to_status)?;
 
-        let response = self.link_to_response(&link, &guard).await;
+        let response = self
+            .link_to_response(&link, &guard, &mut HashMap::new())
+            .await;
         Ok(Response::new(response))
     }
 
@@ -216,8 +239,9 @@ impl LinkServiceTrait for LinkServiceImpl {
             .map_err(|e| crate::core::errors::grpc::status_from_anyhow(&e))?;
 
         let mut responses = Vec::with_capacity(links.len());
+        let mut cache = HashMap::new();
         for link in &links {
-            responses.push(self.link_to_response(link, &guard).await);
+            responses.push(self.link_to_response(link, &guard, &mut cache).await);
         }
 
         Ok(Response::new(LinkListResponse { links: responses }))
@@ -261,8 +285,9 @@ impl LinkServiceTrait for LinkServiceImpl {
             .map_err(|e| crate::core::errors::grpc::status_from_anyhow(&e))?;
 
         let mut responses = Vec::with_capacity(links.len());
+        let mut cache = HashMap::new();
         for link in &links {
-            responses.push(self.link_to_response(link, &guard).await);
+            responses.push(self.link_to_response(link, &guard, &mut cache).await);
         }
 
         Ok(Response::new(LinkListResponse { links: responses }))
@@ -370,6 +395,33 @@ mod tests {
                 .get(entity_id)
                 .cloned()
                 .ok_or_else(|| anyhow::anyhow!("Entity not found: {}", entity_id))
+        }
+    }
+
+    /// Wraps `MockEntityFetcher` and counts every `fetch_as_json` call.
+    struct CountingFetcher {
+        inner: MockEntityFetcher,
+        reads: std::sync::atomic::AtomicUsize,
+    }
+
+    impl CountingFetcher {
+        fn new() -> Self {
+            Self {
+                inner: MockEntityFetcher::new(),
+                reads: std::sync::atomic::AtomicUsize::new(0),
+            }
+        }
+
+        fn reads(&self) -> usize {
+            self.reads.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl EntityFetcher for CountingFetcher {
+        async fn fetch_as_json(&self, entity_id: &Uuid) -> anyhow::Result<serde_json::Value> {
+            self.reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.inner.fetch_as_json(entity_id).await
         }
     }
 
@@ -881,6 +933,50 @@ mod tests {
         assert!(
             inner.target_data.is_some(),
             "target_data should be enriched from fetcher"
+        );
+    }
+
+    #[tokio::test]
+    async fn find_links_by_target_reads_each_distinct_entity_once() {
+        let link_svc = Arc::new(InMemoryLinkService::new());
+        let target = Uuid::new_v4();
+        let sources: Vec<Uuid> = (0..4).map(|_| Uuid::new_v4()).collect();
+
+        let fetcher = Arc::new(CountingFetcher::new());
+        fetcher.inner.insert(target, json!({"name": "Target"}));
+        for s in &sources {
+            fetcher.inner.insert(*s, json!({"name": "Source"}));
+            link_svc
+                .create(LinkEntity::new("has_invoice", *s, target, None))
+                .await
+                .expect("should create link in store");
+        }
+
+        let host = make_host_with_fetcher(link_svc.clone(), fetcher.clone());
+        let svc = LinkServiceImpl::unenforced(host);
+
+        let resp = svc
+            .find_links_by_target(Request::new(FindLinksRequest {
+                entity_id: target.to_string(),
+                link_type: String::new(),
+                entity_type: String::new(),
+            }))
+            .await
+            .expect("find_links_by_target should succeed")
+            .into_inner();
+
+        assert_eq!(resp.links.len(), 4);
+        assert!(
+            resp.links
+                .iter()
+                .all(|l| l.source_data.is_some() && l.target_data.is_some()),
+            "every link should carry both entities"
+        );
+        // 4 links over 5 distinct entities (4 sources + 1 shared target). The per-link code read 2 per link (8).
+        assert!(
+            fetcher.reads() <= 5,
+            "expected at most one read per distinct entity (5), got {}",
+            fetcher.reads()
         );
     }
 }
