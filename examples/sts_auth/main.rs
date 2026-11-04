@@ -6,8 +6,10 @@
 //! # Running
 //!
 //! ```sh
-//! cargo run --example sts_auth --features wami
+//! STS_DEMO_PASSWORD=<password> cargo run --example sts_auth --features wami
 //! ```
+//!
+//! `STS_DEMO_PASSWORD` is required: the demo users' password is not hardcoded.
 
 fn main() {
     println!("=== this-rs STS Auth Example ===\n");
@@ -72,17 +74,20 @@ gdpr:
         // Register demo users
         let tenant_a = uuid::Uuid::new_v4();
         let tenant_b = uuid::Uuid::new_v4();
+        // Demo password comes from the environment: there is no built-in fallback.
+        let demo_password = std::env::var("STS_DEMO_PASSWORD")
+            .expect("set STS_DEMO_PASSWORD to the password for the demo users");
 
         sts.register_user(
             "alice".into(),
-            "secret".into(),
+            demo_password.clone(),
             uuid::Uuid::new_v4(),
             tenant_a,
             vec!["admin".into()],
         );
         sts.register_user(
             "bob".into(),
-            "secret".into(),
+            demo_password.clone(),
             uuid::Uuid::new_v4(),
             tenant_b,
             vec!["viewer".into()],
@@ -93,7 +98,7 @@ gdpr:
         let pair = sts
             .login(&LoginCredentials {
                 username: "alice".into(),
-                password: "secret".into(),
+                password: demo_password,
             })
             .expect("login");
         println!("\n[OK] Alice logged in:");

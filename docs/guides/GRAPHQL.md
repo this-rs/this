@@ -43,7 +43,7 @@ async fn main() -> Result<()> {
     );
     
     // Create REST router
-    let rest_router = RestExposure::build_router(host.clone())?;
+    let rest_router = RestExposure::build_router(host.clone(), vec![])?;
     
     // Create GraphQL router
     let graphql_router = GraphQLExposure::build_router(host)?;
