@@ -4,7 +4,6 @@ use anyhow::Result;
 use graphql_parser::query::{Field, Selection, Value as GqlValue, VariableDefinition};
 use serde_json::{Value, json};
 use std::collections::HashMap;
-use uuid::Uuid;
 
 /// Get string argument from field
 pub fn get_string_arg(field: &Field<String>, arg_name: &str) -> Option<String> {
@@ -236,17 +235,6 @@ pub fn camel_to_snake(s: &str) -> String {
 pub fn mutation_name_to_entity_type(mutation_name: &str, prefix: &str) -> String {
     let name_without_prefix = mutation_name.strip_prefix(prefix).unwrap_or(mutation_name);
     pascal_to_snake(name_without_prefix)
-}
-
-/// Extract a UUID from a JSON value's "id" field
-///
-/// Tries to parse the `id` field as a UUID string. Returns `None` if the
-/// field is missing or cannot be parsed.
-pub fn extract_uuid_from_value(value: &Value) -> Option<Uuid> {
-    value
-        .get("id")
-        .and_then(|v| v.as_str())
-        .and_then(|s| Uuid::parse_str(s).ok())
 }
 
 /// Find link type from configuration

@@ -151,18 +151,7 @@ impl LinkServiceTrait for LinkServiceImpl {
             .await
             .map_err(|e| crate::core::errors::grpc::status_from_anyhow(&e))?;
 
-        // Publish event if event bus is configured
-        if let Some(ref bus) = self.host.event_bus {
-            bus.publish(crate::core::events::FrameworkEvent::Link(
-                crate::core::events::LinkEvent::Created {
-                    link_type: req.link_type.clone(),
-                    link_id: created.id,
-                    source_id,
-                    target_id,
-                    metadata: created.metadata.clone(),
-                },
-            ));
-        }
+        // `LinkEvent::Created` is published by the host's `EventedLinkService`.
 
         let response = self
             .link_to_response(&created, &guard, &mut HashMap::new())
@@ -332,19 +321,7 @@ impl LinkServiceTrait for LinkServiceImpl {
             .await
             .map_err(|e| crate::core::errors::grpc::status_from_anyhow(&e))?;
 
-        // Publish event if event bus is configured
-        if let Some(ref bus) = self.host.event_bus
-            && let Some(link) = link
-        {
-            bus.publish(crate::core::events::FrameworkEvent::Link(
-                crate::core::events::LinkEvent::Deleted {
-                    link_type: link.link_type.clone(),
-                    link_id,
-                    source_id: link.source_id,
-                    target_id: link.target_id,
-                },
-            ));
-        }
+        // `LinkEvent::Deleted` is published by the host's `EventedLinkService`.
 
         Ok(Response::new(DeleteLinkResponse { success: true }))
     }

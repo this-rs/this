@@ -4,6 +4,7 @@ pub mod auth;
 pub mod entity;
 /// `ContractError` across layers: `from_anyhow` and protocol adapters (module descriptor RFC).
 pub mod errors;
+pub mod evented_links;
 pub mod events;
 pub mod extractors;
 pub mod field;

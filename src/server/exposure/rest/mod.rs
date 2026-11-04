@@ -53,7 +53,10 @@ impl RestExposure {
             config: host.config.clone(),
             registry: host.registry.clone(),
             entity_fetchers: host.entity_fetchers.clone(),
-            entity_creators: host.entity_creators.clone(),
+            entity_creators: crate::server::exposure::guard::publishing_creators(
+                &host.entity_creators,
+                host.event_bus.as_ref(),
+            ),
             event_bus: host.event_bus.clone(),
         };
 

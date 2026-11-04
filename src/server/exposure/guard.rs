@@ -30,11 +30,91 @@ use crate::core::auth::surface::{PolicyIndex, authorize_link_op, authorize_op};
 use crate::core::auth::{
     AuthContext, AuthResolverRegistry, ForwardedHeaders, RequestMeta, ResourceRef,
 };
-use crate::core::events::{EntityEvent, FrameworkEvent, LinkEvent};
+use crate::core::events::{EntityEvent, EventBus, FrameworkEvent, LinkEvent};
 use crate::core::{EntityCreator, EntityFetcher};
 use crate::descriptor::framework::codes;
 use crate::descriptor::{ContractError, Operation};
 use crate::server::host::ServerHost;
+
+/// Decorator returned by [`SurfaceGuard::creator`] when the host has an event bus: a
+/// successful write publishes exactly one `EntityEvent` (Created / Updated / Deleted).
+/// A failed write publishes nothing. Created without a parseable `id` in the result
+/// publishes nothing either (an event needs an entity id).
+struct PublishingCreator {
+    inner: Arc<dyn EntityCreator>,
+    bus: Arc<EventBus>,
+    entity: String,
+}
+
+#[async_trait::async_trait]
+impl EntityCreator for PublishingCreator {
+    async fn create_from_json(&self, data: serde_json::Value) -> anyhow::Result<serde_json::Value> {
+        let created = self.inner.create_from_json(data).await?;
+        if let Some(entity_id) = created
+            .get("id")
+            .and_then(|v| v.as_str())
+            .and_then(|s| Uuid::parse_str(s).ok())
+        {
+            self.bus
+                .publish(FrameworkEvent::Entity(EntityEvent::Created {
+                    entity_type: self.entity.clone(),
+                    entity_id,
+                    data: created.clone(),
+                }));
+        }
+        Ok(created)
+    }
+
+    async fn update_from_json(
+        &self,
+        entity_id: &Uuid,
+        data: serde_json::Value,
+    ) -> anyhow::Result<serde_json::Value> {
+        let updated = self.inner.update_from_json(entity_id, data).await?;
+        self.bus
+            .publish(FrameworkEvent::Entity(EntityEvent::Updated {
+                entity_type: self.entity.clone(),
+                entity_id: *entity_id,
+                data: updated.clone(),
+            }));
+        Ok(updated)
+    }
+
+    async fn delete(&self, entity_id: &Uuid) -> anyhow::Result<()> {
+        self.inner.delete(entity_id).await?;
+        self.bus
+            .publish(FrameworkEvent::Entity(EntityEvent::Deleted {
+                entity_type: self.entity.clone(),
+                entity_id: *entity_id,
+            }));
+        Ok(())
+    }
+}
+
+/// Wrap every creator of `creators` in the same event decorator `SurfaceGuard::creator` uses,
+/// for the link handlers' `createAndLink`, which hold the creator map instead of calling the
+/// guard. No bus: the map is returned as is.
+pub(crate) fn publishing_creators(
+    creators: &Arc<std::collections::HashMap<String, Arc<dyn EntityCreator>>>,
+    bus: Option<&Arc<EventBus>>,
+) -> Arc<std::collections::HashMap<String, Arc<dyn EntityCreator>>> {
+    let Some(bus) = bus else {
+        return creators.clone();
+    };
+    Arc::new(
+        creators
+            .iter()
+            .map(|(entity, inner)| {
+                let wrapped: Arc<dyn EntityCreator> = Arc::new(PublishingCreator {
+                    inner: inner.clone(),
+                    bus: bus.clone(),
+                    entity: entity.clone(),
+                });
+                (entity.clone(), wrapped)
+            })
+            .collect(),
+    )
+}
 
 /// Resolve the caller of a non-REST request from its HTTP headers (and the query
 /// string of a WebSocket handshake). Same rule as the REST `auth_middleware`.
@@ -330,12 +410,24 @@ impl SurfaceGuard {
         resource: Option<&Uuid>,
     ) -> Result<Arc<dyn EntityCreator>, ContractError> {
         self.check(entity, op, resource)?;
-        host.catalog
+        let creator = host
+            .catalog
             .load()
             .creators
             .get(entity)
             .cloned()
-            .ok_or_else(|| unknown_entity(entity))
+            .ok_or_else(|| unknown_entity(entity))?;
+        // THE shared write seam: every JSON surface (REST descriptor routes, GraphQL, gRPC,
+        // createAndLink) writes through the creator returned here, so the event is emitted
+        // here and nowhere else. No bus configured: the creator is returned untouched.
+        Ok(match host.event_bus() {
+            Some(bus) => Arc::new(PublishingCreator {
+                inner: creator,
+                bus: bus.clone(),
+                entity: entity.to_string(),
+            }),
+            None => creator,
+        })
     }
 
     /// Fetchers (from the live catalog) of every entity type whose `get` policy allows

@@ -479,8 +479,17 @@ impl ServerHost {
     }
 
     /// Set the event bus for real-time notifications
+    ///
+    /// Also decorates `link_service` with [`EventedLinkService`](crate::core::evented_links::EventedLinkService):
+    /// that is the one place where `LinkEvent`s are published, for every surface. Call it
+    /// once; a second call would publish each link event on both buses.
     pub fn with_event_bus(mut self, event_bus: EventBus) -> Self {
-        self.event_bus = Some(Arc::new(event_bus));
+        let bus = Arc::new(event_bus);
+        self.link_service = Arc::new(crate::core::evented_links::EventedLinkService::new(
+            self.link_service.clone(),
+            bus.clone(),
+        ));
+        self.event_bus = Some(bus);
         self
     }
 

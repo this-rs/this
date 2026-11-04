@@ -23,6 +23,13 @@ pub mod websocket;
 #[cfg(feature = "websocket")]
 pub use websocket::WebSocketExposure;
 
+/// SSE transport of the `EventBus` (same payloads as the WebSocket; reuses its protocol types).
+#[cfg(feature = "websocket")]
+pub mod sse;
+
+#[cfg(feature = "websocket")]
+pub use sse::SseExposure;
+
 #[cfg(feature = "grpc")]
 pub mod grpc;
 
