@@ -50,8 +50,32 @@ jobs:
         run: cargo publish -p this-descriptor --dry-run
 
       # N'envoie que sur un tag, ou sur dispatch explicite avec dry_run décoché.
+      #
+      # `!inputs.dry_run` et non `inputs.dry_run == 'false'` : un input typé
+      # `boolean` est un BOOLÉEN, et le comparer à la chaîne 'false' est
+      # toujours faux. Cette erreur a rendu un run vert alors que l'étape était
+      # sautée — rien n'était publié et rien ne le signalait.
       - name: Publish
-        if: ${{ github.event_name == 'push' || inputs.dry_run == 'false' }}
+        if: ${{ github.event_name == 'push' || !inputs.dry_run }}
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_TOKEN }}
         run: cargo publish -p this-descriptor --token "$CARGO_REGISTRY_TOKEN"
+
+      # Une étape qui peut être sautée en silence doit être vérifiée après coup.
+      # Sans ce contrôle, un `if:` faux laisse un run vert pour une publication
+      # qui n'a pas eu lieu.
+      - name: Confirm the version is live
+        if: ${{ github.event_name == 'push' || !inputs.dry_run }}
+        run: |
+          V=$(cargo metadata --no-deps --format-version 1 \
+                | jq -r '.packages[] | select(.name=="this-descriptor") | .version')
+          for i in $(seq 1 24); do
+            if curl -sf "https://crates.io/api/v1/crates/this-descriptor/$V" \
+                 -A "this-rs-release" > /dev/null; then
+              echo "this-descriptor $V is live on crates.io"
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "::error::this-descriptor $V was published but is NOT on crates.io"
+          exit 1
