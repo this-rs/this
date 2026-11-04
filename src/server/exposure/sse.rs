@@ -2,7 +2,7 @@
 //!
 //! Same events, same JSON as the WebSocket exposure: every `FrameworkEvent`
 //! published on the bus becomes one SSE message whose `data` is the
-//! [`ServerMessage::Event`] the WebSocket sends (`{"type":"event",
+//! `ServerMessage::Event` the WebSocket sends (`{"type":"event",
 //! "subscription_id":…, "data":<EventEnvelope>}`), built from the same types.
 //!
 //! ```text
