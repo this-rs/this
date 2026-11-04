@@ -17,6 +17,8 @@
 #[macro_use]
 pub mod data_service_tests;
 #[macro_use]
+pub mod event_contract;
+#[macro_use]
 pub mod link_service_tests;
 #[macro_use]
 pub mod integration;

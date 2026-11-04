@@ -455,7 +455,9 @@ impl ConnectionManager {
     /// For `EntityEvent::Created` and `EntityEvent::Updated`, checks the `data`
     /// JSON for a top-level `"user_id"` string field. Returns `None` for all
     /// other event types or if the field is absent.
-    fn extract_event_user_id(event: &crate::core::events::FrameworkEvent) -> Option<String> {
+    pub(crate) fn extract_event_user_id(
+        event: &crate::core::events::FrameworkEvent,
+    ) -> Option<String> {
         use crate::core::events::{EntityEvent, FrameworkEvent};
         match event {
             FrameworkEvent::Entity(

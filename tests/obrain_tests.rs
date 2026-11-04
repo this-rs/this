@@ -26,3 +26,4 @@ fn make_link_service() -> ObrainLinkService {
 data_service_tests!(make_data_service());
 link_service_tests!(make_link_service());
 rest_integration_tests!(make_data_service());
+event_contract_tests!(make_data_service());

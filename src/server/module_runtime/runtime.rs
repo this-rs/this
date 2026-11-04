@@ -1117,7 +1117,10 @@ impl ModuleRuntime {
                 config: links_config.clone(),
                 registry: Arc::new(LinkRouteRegistry::new(links_config.clone())),
                 entity_fetchers: fetchers.clone(),
-                entity_creators: creators.clone(),
+                entity_creators: crate::server::exposure::guard::publishing_creators(
+                    &creators,
+                    self.parts.event_bus.as_ref(),
+                ),
                 event_bus: self.parts.event_bus.clone(),
             }));
         }
