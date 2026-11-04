@@ -37,6 +37,8 @@ use crate::events::types::SeqNo;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use tokio::sync::broadcast;
 use tokio::sync::mpsc;
 use uuid::Uuid;
@@ -323,6 +325,11 @@ pub struct EventBus {
     event_log: Option<Arc<dyn EventLog>>,
     /// Serialising writer for the log. `None` when no log is attached.
     append: Option<Arc<AppendQueue>>,
+    /// Number of events published through this bus (and its clones) so far.
+    ///
+    /// It counts publications, whether or not anyone was listening. It only sees writes
+    /// that go through this process: a change made elsewhere is not counted.
+    revision: Arc<AtomicU64>,
 }
 
 /// Serialises appends to the `EventLog`, in publish order.
@@ -408,6 +415,7 @@ impl EventBus {
             sender,
             event_log: None,
             append: None,
+            revision: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -466,6 +474,7 @@ impl EventBus {
 
     /// Internal: publish a pre-built envelope
     fn publish_envelope(&self, envelope: EventEnvelope) -> usize {
+        self.revision.fetch_add(1, Ordering::AcqRel);
         // If an EventLog is attached, queue a clone for the single writer.
         if let (Some(log), Some(queue)) = (&self.event_log, &self.append) {
             queue.start(log.clone());
@@ -489,6 +498,15 @@ impl EventBus {
     /// Get the current number of active subscribers
     pub fn receiver_count(&self) -> usize {
         self.sender.receiver_count()
+    }
+
+    /// The revision: how many events this bus has published so far.
+    ///
+    /// Two reads with the same value mean no event went through this bus in between. It is
+    /// a hint for a client that resynchronises, not a proof that nothing changed: a write
+    /// made by another process, or straight to the store, does not move it.
+    pub fn revision(&self) -> u64 {
+        self.revision.load(Ordering::Acquire)
     }
 }
 
@@ -1185,5 +1203,47 @@ mod tests {
             Some(200),
             "no event may be lost when several tasks publish at once"
         );
+    }
+}
+
+#[cfg(test)]
+mod revision_tests {
+    use super::*;
+
+    fn event() -> FrameworkEvent {
+        FrameworkEvent::Entity(crate::core::events::EntityEvent::Created {
+            entity_type: "order".into(),
+            entity_id: Uuid::new_v4(),
+            data: serde_json::json!({}),
+        })
+    }
+
+    #[test]
+    fn a_new_bus_starts_at_zero() {
+        assert_eq!(EventBus::new(8).revision(), 0);
+    }
+
+    #[test]
+    fn every_publication_moves_the_revision_even_without_subscribers() {
+        let bus = EventBus::new(8);
+        bus.publish(event());
+        bus.publish(event());
+        assert_eq!(bus.revision(), 2);
+    }
+
+    #[test]
+    fn clones_share_one_counter() {
+        let bus = EventBus::new(8);
+        let other = bus.clone();
+        other.publish(event());
+        assert_eq!(bus.revision(), 1);
+    }
+
+    #[test]
+    fn a_read_without_publication_does_not_move_it() {
+        let bus = EventBus::new(8);
+        let _ = bus.subscribe();
+        assert_eq!(bus.revision(), 0);
+        assert_eq!(bus.revision(), 0);
     }
 }
