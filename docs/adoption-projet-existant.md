@@ -73,6 +73,11 @@ Ce seul appel obtient :
 
 ## 2. Observer **avant** d'armer
 
+> **Avertissement : en `authorization_report_only()`, le RBAC ne bloque rien.**
+> Chaque refus calculé est journalisé et publié (`x-this-rs-authz`), mais la requête
+> passe. Ce mode sert à observer ; il ne protège pas. Pour appliquer les politiques,
+> retirer `authorization_report_only()` (l'hôte est alors armé).
+
 C'est l'étape qui évite de casser une production. Vos politiques déclarées n'ont
 jamais été vérifiées contre le trafic réel : les activer d'un coup est un pari.
 
@@ -195,7 +200,7 @@ les mettre avec un défaut silencieux laisserait croire qu'il sait les faire).
 |---|---|---|
 | Ne plus appliquer les politiques | `.without_authorization()` | journalisé en avertissement ; les `auth:` deviennent **décoratives** |
 | Ne plus arbitrer les écritures | `.without_write_fencing()` | journalisé ; un second écrivain n'est plus refusé |
-| Voir sans bloquer | `.authorization_report_only()` | aucun coût : les décisions sont publiées, pas imposées |
+| Voir sans bloquer | `.authorization_report_only()` | **rien n'est bloqué** : les décisions sont publiées, pas imposées. En report-only, le RBAC n'arrête aucune requête |
 
 Aucun de ces appels n'est silencieux : chacun écrit une ligne d'avertissement.
 
