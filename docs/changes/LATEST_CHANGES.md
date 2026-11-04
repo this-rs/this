@@ -453,7 +453,7 @@ Body: {
 - From source (`/orders/{id}/invoices`) → Only target entities included
 - From target (`/invoices/{id}/order`) → Only source entity included
 - Direct link (`/orders/{id}/invoices/{inv_id}`) → Both entities included
-- **No N+1 queries** - efficient batch fetching
+- **Linked entities in the response** - fetched per link, not batched (see `docs/guides/ENRICHED_LINKS.md`)
 
 ### 6. ✅ Updated Module Trait
 
@@ -588,7 +588,10 @@ Body: { "entity": {...}, "metadata": {...} }
 
 ## ✨ New Features
 
-### 1. Built-in Soft Delete
+### 1. Entity-level Soft Delete (`soft_delete()` / `restore()`)
+
+> Note: these methods only mark the entity. They do not change DELETE routes, which are hard deletes by default. See the README (Soft Deletes) for `ServerBuilder::with_soft_delete()` and `SoftDeleting`.
+
 
 ```rust
 let mut order = Order::new(...);

@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Documentation
+- **Alignement sur le code** (aucun changement de comportement) :
+  - « No N+1 queries » retiré du README, de `docs/architecture/ARCHITECTURE.md`, de `docs/guides/ENRICHED_LINKS.md` et de `docs/changes/LATEST_CHANGES.md`. L'enrichissement des liens (`src/links/handlers.rs`, `enrich_links_with_entities`) récupère les entités liées une par une, en séquence, sans regroupement : les entités sont incluses dans la réponse, mais le coût est d'un accès par entité.
+  - Suppression : le `DELETE` REST est un **hard delete** par défaut. Le soft delete est opt-in : `ServerBuilder::with_soft_delete()` couvre GraphQL, gRPC, les routes de liens et WebSocket, pas les handlers REST écrits par l'application, qui obtiennent le contrat avec `SoftDeleting::new(service)`. `soft_delete()` / `restore()` sur les entités ne modifient que `deleted_at`.
+  - Mode `authorization_report_only()` : les décisions sont calculées, journalisées et publiées (`x-this-rs-authz`), mais rien n'est bloqué. Avertissement ajouté dans le README et `docs/adoption-projet-existant.md`.
+  - Backend Obrain : la feature `obrain` dépend de chemins locaux (`../../banc-obrain-j4/...`, `Cargo.toml`) ; il n'est pas installable seul.
+
 ## [0.0.10] - 2026-11-01
 
 ### Added
