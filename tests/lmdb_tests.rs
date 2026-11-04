@@ -56,3 +56,4 @@ fn fresh_lmdb_link_service() -> LmdbLinkService {
 data_service_tests!(fresh_lmdb_data_service());
 link_service_tests!(fresh_lmdb_link_service());
 rest_integration_tests!(fresh_lmdb_data_service());
+event_contract_tests!(fresh_lmdb_data_service());

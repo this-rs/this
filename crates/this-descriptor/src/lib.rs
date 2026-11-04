@@ -8,6 +8,8 @@
 //!   [`PermDesc`] / [`PolicyExpr`], [`ErrorDesc`] / [`ContractError`], [`I18nDecl`],
 //!   [`Query`].
 //! - Checks: [`ModuleDescriptor::check`], [`resolve::resolve`], [`compat::check_compat`].
+//! - Fronts: [`Capabilities`] — ce qu'une interface peut proposer, calculé depuis les
+//!   politiques du descripteur (trois valeurs : autorisé / refusé / indéterminé).
 //! - Pure engines: [`engine::validate`], [`engine::query`], [`engine::policy`],
 //!   [`engine::i18n`].
 //!
@@ -18,6 +20,7 @@
 // would make each call site heavier for a cold path (errors are not the hot path here).
 #![allow(clippy::result_large_err)]
 
+pub mod capabilities;
 pub mod check;
 pub mod compat;
 pub mod custom;
@@ -40,17 +43,22 @@ pub mod perm;
 pub mod query;
 pub mod resolve;
 pub mod runtime;
+pub mod topics;
 #[cfg(feature = "wami")]
 /// `wami::statements`: PermDesc -> sandbox policy statements (Track 4).
 pub mod wami;
 
+pub use capabilities::{
+    Capabilities, Capability, EntityCapabilities, Gap, PermissionDecision, PermissionRequest,
+    Requirement, Session, SessionKind,
+};
 pub use check::{CheckProfile, DescriptorIssue, RESERVED_ROUTE_SEGMENTS};
 pub use custom::{Custom, CustomKind, CustomRegistry, CustomScope};
 pub use engine::i18n::{I18nCatalog, LocaleHints};
 pub use entity::{EntityDesc, EntityI18n, EntityKind, base_fields};
 pub use error::{ContractError, ErrorCode, ErrorDesc, ErrorKind, FieldViolation};
 pub use field::{
-    Applies, FieldDesc, FieldI18n, FieldType, FieldTypeOf, TransformRule, TransformSpec,
+    Applies, FieldDesc, FieldI18n, FieldType, FieldTypeOf, OnDelete, TransformRule, TransformSpec,
     ValidatorRule, ValidatorSpec,
 };
 pub use i18n::{I18nDecl, Locale, MessageBundle, MessageDecl, MessageKey, MessageSyntax};
@@ -60,6 +68,7 @@ pub use module::{CompiledEntity, DESCRIPTOR_FORMAT, DescriptorSet, ModuleDescrip
 pub use perm::{Operation, PermDesc, PolicyExpr, PrincipalView};
 pub use query::{FilterExpr, FilterOp, Page, Query, QuerySchema, SortDir, SortSpec, Untyped};
 pub use runtime::{Handle, RuntimeDesc, RuntimeLimits};
+pub use topics::{EMITTING_OPERATIONS, EventTopic};
 #[cfg(feature = "wami")]
 pub use wami::{Effect, WamiStatement, statements};
 

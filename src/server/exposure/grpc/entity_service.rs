@@ -255,20 +255,6 @@ impl EntityServiceImpl {
             .await
             .map_err(|e| status_from_anyhow(&e))?;
 
-        // Publish event if event bus is configured
-        if let Some(ref bus) = self.host.event_bus
-            && let Some(id) = result.get("id").and_then(|v| v.as_str())
-            && let Ok(entity_id) = Uuid::parse_str(id)
-        {
-            bus.publish(crate::core::events::FrameworkEvent::Entity(
-                crate::core::events::EntityEvent::Created {
-                    entity_type: req.entity_type.clone(),
-                    entity_id,
-                    data: result.clone(),
-                },
-            ));
-        }
-
         Ok(Response::new(EntityResponse {
             data: Some(json_to_struct(&result)),
         }))
@@ -302,17 +288,6 @@ impl EntityServiceImpl {
             .await
             .map_err(|e| status_from_anyhow(&e))?;
 
-        // Publish event if event bus is configured
-        if let Some(ref bus) = self.host.event_bus {
-            bus.publish(crate::core::events::FrameworkEvent::Entity(
-                crate::core::events::EntityEvent::Updated {
-                    entity_type: req.entity_type.clone(),
-                    entity_id,
-                    data: result.clone(),
-                },
-            ));
-        }
-
         Ok(Response::new(EntityResponse {
             data: Some(json_to_struct(&result)),
         }))
@@ -339,16 +314,6 @@ impl EntityServiceImpl {
             .delete(&entity_id)
             .await
             .map_err(|e| status_from_anyhow(&e))?;
-
-        // Publish event if event bus is configured
-        if let Some(ref bus) = self.host.event_bus {
-            bus.publish(crate::core::events::FrameworkEvent::Entity(
-                crate::core::events::EntityEvent::Deleted {
-                    entity_type: req.entity_type.clone(),
-                    entity_id,
-                },
-            ));
-        }
 
         Ok(Response::new(DeleteEntityResponse { success: true }))
     }

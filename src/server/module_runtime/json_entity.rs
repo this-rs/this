@@ -82,6 +82,36 @@ impl JsonEntityService {
         }
     }
 
+    /// `Created` from the row just stored (the row carries the generated `id`).
+    fn publish_created(&self, row: &Value) {
+        if let Some(id) = row
+            .get("id")
+            .and_then(|v| v.as_str())
+            .and_then(|s| Uuid::parse_str(s).ok())
+        {
+            self.publish(EntityEvent::Created {
+                entity_type: self.entity_type().to_string(),
+                entity_id: id,
+                data: row.clone(),
+            });
+        }
+    }
+
+    fn publish_updated(&self, entity_id: &Uuid, row: &Value) {
+        self.publish(EntityEvent::Updated {
+            entity_type: self.entity_type().to_string(),
+            entity_id: *entity_id,
+            data: row.clone(),
+        });
+    }
+
+    fn publish_deleted(&self, entity_id: &Uuid) {
+        self.publish(EntityEvent::Deleted {
+            entity_type: self.entity_type().to_string(),
+            entity_id: *entity_id,
+        });
+    }
+
     /// REST routes of this entity (no state leaks out: the router owns an `Arc<Self>`).
     pub fn routes(self: &Arc<Self>) -> Router {
         let collection = format!("/{}", self.plural());
@@ -144,11 +174,10 @@ impl EntityCreator for JsonEntityService {
         obj.entry("status").or_insert_with(|| json!("active"));
         let row = Value::Object(obj);
         self.rows.write().await.insert(id, row.clone());
-        self.publish(EntityEvent::Created {
-            entity_type: self.entity_type().to_string(),
-            entity_id: id,
-            data: row.clone(),
-        });
+        // No event here: the write seam is `SurfaceGuard::creator` (which decorates this
+        // creator with `PublishingCreator`) for the surfaces that reach the catalog, and the
+        // REST handlers below for the service's own routes. Publishing here as well would
+        // emit the event twice on every guard-routed surface (GraphQL, gRPC, createAndLink).
         Ok(row)
     }
 
@@ -167,11 +196,7 @@ impl EntityCreator for JsonEntityService {
         }
         let row = row.clone();
         drop(rows);
-        self.publish(EntityEvent::Updated {
-            entity_type: self.entity_type().to_string(),
-            entity_id: *entity_id,
-            data: row.clone(),
-        });
+        // No event here: see `create_from_json` (the guard and the REST handlers publish).
         Ok(row)
     }
 
@@ -181,10 +206,7 @@ impl EntityCreator for JsonEntityService {
             .await
             .shift_remove(entity_id)
             .ok_or_else(|| self.not_found(entity_id))?;
-        self.publish(EntityEvent::Deleted {
-            entity_type: self.entity_type().to_string(),
-            entity_id: *entity_id,
-        });
+        // No event here: see `create_from_json` (the guard and the REST handlers publish).
         Ok(())
     }
 }
@@ -248,7 +270,10 @@ async fn list_handler(State(svc): Svc, Query(p): Query<ListParams>) -> Response 
 
 async fn create_handler(State(svc): Svc, body: axum::Json<Value>) -> Response {
     match svc.create_from_json(body.0).await {
-        Ok(v) => (StatusCode::CREATED, axum::Json(v)).into_response(),
+        Ok(v) => {
+            svc.publish_created(&v);
+            (StatusCode::CREATED, axum::Json(v)).into_response()
+        }
         Err(e) => err(e),
     }
 }
@@ -266,14 +291,20 @@ async fn update_handler(
     body: axum::Json<Value>,
 ) -> Response {
     match svc.update_from_json(&id, body.0).await {
-        Ok(v) => axum::Json(v).into_response(),
+        Ok(v) => {
+            svc.publish_updated(&id, &v);
+            axum::Json(v).into_response()
+        }
         Err(e) => err(e),
     }
 }
 
 async fn delete_handler(State(svc): Svc, Path(id): Path<Uuid>) -> Response {
     match EntityCreator::delete(&*svc, &id).await {
-        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Ok(()) => {
+            svc.publish_deleted(&id);
+            StatusCode::NO_CONTENT.into_response()
+        }
         Err(e) => err(e),
     }
 }

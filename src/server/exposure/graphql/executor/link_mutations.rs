@@ -11,7 +11,6 @@ use uuid::Uuid;
 
 use super::field_resolver;
 use super::utils;
-use crate::core::events::{FrameworkEvent, LinkEvent};
 use crate::core::link::LinkEntity;
 use crate::descriptor::Operation;
 use crate::server::exposure::guard::SurfaceGuard;
@@ -44,17 +43,6 @@ pub async fn create_link_mutation(
     // Create the link
     let link_entity = LinkEntity::new(link_type, source_uuid, target_uuid, metadata);
     let created_link = host.link_service.create(link_entity).await?;
-
-    // Publish event to EventBus
-    if let Some(event_bus) = host.event_bus() {
-        event_bus.publish(FrameworkEvent::Link(LinkEvent::Created {
-            link_type: created_link.link_type.clone(),
-            link_id: created_link.id,
-            source_id: created_link.source_id,
-            target_id: created_link.target_id,
-            metadata: created_link.metadata.clone(),
-        }));
-    }
 
     // Return the created link as JSON
     Ok(json!({
@@ -91,16 +79,6 @@ pub async fn delete_link_mutation(
         .map_err(anyhow::Error::new)?;
 
     host.link_service.delete(&uuid).await?;
-
-    // Publish event to EventBus (only if we found the link details)
-    if let (Some(event_bus), Some(link)) = (host.event_bus(), link) {
-        event_bus.publish(FrameworkEvent::Link(LinkEvent::Deleted {
-            link_type: link.link_type,
-            link_id: link.id,
-            source_id: link.source_id,
-            target_id: link.target_id,
-        }));
-    }
 
     Ok(Value::Bool(true))
 }
@@ -154,17 +132,6 @@ pub async fn create_and_link_mutation(
             .ok_or_else(|| anyhow::anyhow!("Created entity missing id field"))?;
         let entity_uuid = Uuid::parse_str(entity_id)?;
 
-        // Publish entity creation event
-        if let Some(event_bus) = host.event_bus() {
-            event_bus.publish(FrameworkEvent::Entity(
-                crate::core::events::EntityEvent::Created {
-                    entity_type: entity_type.clone(),
-                    entity_id: entity_uuid,
-                    data: created.clone(),
-                },
-            ));
-        }
-
         // Find the appropriate link type from config
         let actual_link_type = if let Some(lt) = link_type {
             lt
@@ -179,18 +146,8 @@ pub async fn create_and_link_mutation(
 
         // Create the link
         let link_entity = LinkEntity::new(actual_link_type, parent_uuid, entity_uuid, None);
-        let created_link = host.link_service.create(link_entity).await?;
-
-        // Publish link creation event
-        if let Some(event_bus) = host.event_bus() {
-            event_bus.publish(FrameworkEvent::Link(LinkEvent::Created {
-                link_type: created_link.link_type,
-                link_id: created_link.id,
-                source_id: created_link.source_id,
-                target_id: created_link.target_id,
-                metadata: created_link.metadata,
-            }));
-        }
+        // `LinkEvent::Created` is published by the host's `EventedLinkService`.
+        host.link_service.create(link_entity).await?;
 
         // Resolve sub-fields for the created entity
         let resolved = field_resolver::resolve_entity_fields(
@@ -265,17 +222,6 @@ pub async fn link_entities_mutation(
     // Create the link
     let link_entity = LinkEntity::new(actual_link_type, source_uuid, target_uuid, metadata);
     let created_link = host.link_service.create(link_entity).await?;
-
-    // Publish event to EventBus
-    if let Some(event_bus) = host.event_bus() {
-        event_bus.publish(FrameworkEvent::Link(LinkEvent::Created {
-            link_type: created_link.link_type.clone(),
-            link_id: created_link.id,
-            source_id: created_link.source_id,
-            target_id: created_link.target_id,
-            metadata: created_link.metadata.clone(),
-        }));
-    }
 
     // Return the created link
     Ok(json!({
@@ -355,16 +301,6 @@ pub async fn unlink_entities_mutation(
     for link in links {
         if link.target_id == target_uuid {
             host.link_service.delete(&link.id).await?;
-
-            // Publish event to EventBus
-            if let Some(event_bus) = host.event_bus() {
-                event_bus.publish(FrameworkEvent::Link(LinkEvent::Deleted {
-                    link_type: link.link_type,
-                    link_id: link.id,
-                    source_id: link.source_id,
-                    target_id: link.target_id,
-                }));
-            }
 
             return Ok(Value::Bool(true));
         }
