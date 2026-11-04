@@ -28,7 +28,7 @@
 ### 🔗 Relationship Management
 - 🔗 **Flexible Relationships** — Multiple link types between same entities
 - ↔️ **Bidirectional Navigation** — Query relationships from both directions
-- ✨ **Auto-Enriched Links** — Full entities in responses, no N+1 queries
+- ✨ **Auto-Enriched Links** — Linked entities (source and/or target) included in link responses; they are fetched one by one, not batched
 - 🎯 **Smart Entity Creation** — Create new entities + links in one API call
 
 ### 🌐 Multi-Protocol Support
@@ -47,7 +47,7 @@
 - **MySQL** — Traditional relational backend
 - **DynamoDB** — AWS serverless storage
 - **LMDB** — Embedded key-value store (zero-copy reads)
-- **Obrain** — Cognitive graph database with hybrid intelligence; the backend now couples with the this-rs/obrain engine checkout and records durable per-mutation WAL commits
+- **Obrain** — Cognitive graph database with hybrid intelligence; the backend now couples with the this-rs/obrain engine checkout and records durable per-mutation WAL commits. **Not installable on its own:** the `obrain` feature uses path dependencies on a local `banc-obrain-j4` checkout (`Cargo.toml`, `../../banc-obrain-j4/crates/...`), so it builds only where that checkout exists
 
 ### 📣 Event System
 - 🔔 **EventBus** — Built-in non-blocking broadcast on all CRUD operations
@@ -69,6 +69,7 @@
 - 🚀 **Bootstrap Mode** — Auto-generates keys at startup for zero-config development
 - 🛡️ **RBAC Policies** — Per-entity authorization policies in YAML (authenticated, owner, admin_only, service_only)
 - 🧩 **Custom Resolvers** — Reusable authorization logic referenced with `resolver:name` in YAML
+- 👁️ **Report-only mode** — `ServerBuilder::authorization_report_only()` computes denials, logs them and publishes them in the `x-this-rs-authz` response header, but **blocks nothing**: in this mode RBAC and `perm:` policies do not stop a single request. Use it to observe policies on real traffic before enforcing them.
 - 🏢 **Multi-Tenant** — Opt-in tenant isolation via `impl_entity_multi_tenant!` macro
 - 🗑️ **GDPR Erasure** — One-call tenant data deletion: `DELETE /tenants/:tenant_id/data`
 
@@ -128,7 +129,7 @@
 // 2. CRUD handlers (✓ same in both - you still write business logic)
 // 3. Routes registration (❌ REPETITIVE - 30+ lines per entity)
 // 4. Link routes (❌ REPETITIVE - 50+ lines per relationship)
-// 5. Link enrichment (❌ MANUAL - N+1 queries if not careful)
+// 5. Link enrichment (❌ MANUAL - one lookup per linked entity, N+1 round trips unless you batch)
 // 6. GraphQL schema (❌ MANUAL - duplicate type definitions)
 
 // Example: 10 entities with 15 relationships
@@ -146,7 +147,7 @@ impl_data_entity!(Product, "product", ["name", "sku"], {
 // 2. CRUD handlers (✓ you still write these - it's your business logic)
 // 3. Routes registration (✅ AUTO-GENERATED)
 // 4. Link routes (✅ AUTO-GENERATED from YAML)
-// 5. Link enrichment (✅ AUTOMATIC - no N+1 queries)
+// 5. Link enrichment (✅ AUTOMATIC - linked entities included in the response, still one fetch per entity, not batched)
 // 6. GraphQL schema (✅ AUTO-GENERATED from entities)
 
 // Main.rs for 10 entities with 15 relationships
@@ -429,7 +430,7 @@ When you query links, you automatically get full entity data:
 }
 ```
 
-**No N+1 queries!** Entities are fetched efficiently in the background.
+**Linked entities are included in the response.** They are fetched one link at a time (up to two fetches per link, depending on the route), not batched: `src/links/handlers.rs` (`enrich_links_with_entities`).
 
 ---
 
@@ -824,7 +825,7 @@ Entity (Base Trait)
 ✅ **Custom Auth Resolvers** — Reusable authorization closures (`resolver:name` in YAML)  
 ✅ **Multi-Tenant** — Opt-in tenant isolation per entity  
 ✅ **GDPR Erasure** — One-call cascade delete across entities and links  
-✅ **9 Storage Backends** — In-Memory, PostgreSQL, MongoDB, Neo4j, ScyllaDB, MySQL, DynamoDB, LMDB, Obrain  
+✅ **9 Storage Backends** — In-Memory, PostgreSQL, MongoDB, Neo4j, ScyllaDB, MySQL, DynamoDB, LMDB, Obrain (Obrain needs a local `banc-obrain-j4` engine checkout, see above)  
 ✅ **Cognitive Signals** — Anomaly detection, co-change tracking, threshold-based routing  
 ✅ **Event Flows** — Declarative pipelines with webhooks, push notifications, and SSE  
 ✅ **Notifications** — In-app NotificationStore with read/unread tracking  

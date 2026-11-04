@@ -2,7 +2,7 @@
 
 ## 🎯 Overview
 
-this-rs automatically **enriches link responses** with full entity data, eliminating the need for separate queries and preventing N+1 query problems.
+this-rs automatically **enriches link responses** with full entity data, so the client does not need a second request for them. The server still fetches each linked entity separately; nothing is batched yet.
 
 ## ✨ What Are Enriched Links?
 
@@ -227,40 +227,31 @@ GET /links/link-uuid
 
 ## 🔥 Performance Optimization
 
-### No N+1 Queries
+### Lookups per link
 
-**Traditional Approach (N+1 Problem)**:
-```
-1 query: Get links (N results)
-N queries: Get each target entity
-Total: N+1 queries ❌
-```
+The client gets everything in one response, but the server does the work
+link by link:
 
-**this-rs Approach**:
 ```
-1 query: Get links
-1 batch operation: Fetch all entities efficiently
-Total: Effectively 2 operations ✅
+1 query: get the links (N results)
+then, for each link: one fetch per linked entity included (source and/or target)
+Total: up to 2N entity fetches, one after the other (no batching yet)
 ```
 
-### Efficient Fetching
+### Fetch order
 
 ```rust
-// Entities are fetched in parallel when possible
+// Simplified from src/links/handlers.rs (enrich_links_with_entities):
+// links are walked in order and each entity is awaited in turn.
 async fn enrich_links_with_entities(...) {
-    let mut tasks = vec![];
-    
     for link in links {
         if need_source {
-            tasks.push(fetch_entity(..., link.source_id));
+            let source = fetch_entity(..., link.source_id).await.ok();
         }
         if need_target {
-            tasks.push(fetch_entity(..., link.target_id));
+            let target = fetch_entity(..., link.target_id).await.ok();
         }
     }
-    
-    // Execute all fetches concurrently
-    let results = join_all(tasks).await;
 }
 ```
 
@@ -448,7 +439,7 @@ The framework automatically chooses the right context:
 
 ## 🎁 Benefits
 
-✅ **No N+1 Queries** - All data fetched efficiently  
+✅ **One client request** - Linked entities come back in the same response  
 ✅ **Better UX** - Clients get complete data in one request  
 ✅ **Reduced Network** - Fewer round trips  
 ✅ **Type-Safe** - EntityFetcher trait ensures correctness  

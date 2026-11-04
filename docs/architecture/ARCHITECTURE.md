@@ -220,6 +220,8 @@ impl Order {
 }
 ```
 
+`soft_delete()` and `restore()` only set and clear `deleted_at` on the entity value. They do not change the DELETE routes: a REST `DELETE` removes the row by default (`src/server/module_runtime/json_entity.rs`). The contract applies to the JSON surfaces only after `ServerBuilder::with_soft_delete()`, and to REST handlers you own through `SoftDeleting::new(service)` (`src/core/soft_delete.rs`).
+
 ### `impl_link_entity!`
 
 Generates a custom Link entity:
@@ -442,7 +444,7 @@ impl EntityCreator for OrderStore {
      }
 ```
 
-**Key**: No N+1 queries! Entities are fetched efficiently.
+**Key**: linked entities are included in the response. They are fetched one link at a time, not batched (see `src/links/handlers.rs`).
 
 ## 📦 Config Module
 
@@ -601,7 +603,7 @@ impl Module for BillingModule {
 ✅ **Auto-Generated Routes**: No manual routing code  
 ✅ **Type Safety**: Full Rust compile-time checks  
 ✅ **Consistent Patterns**: Same structure everywhere  
-✅ **Link Enrichment**: No N+1 query problems  
+✅ **Link Enrichment**: linked entities included in responses (one fetch per entity, not batched)  
 
 ### For Framework Developers
 

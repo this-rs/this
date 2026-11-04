@@ -694,7 +694,7 @@ You've built a complete RESTful API with:
 - ✅ Auto-generated CRUD routes
 - ✅ Auto-generated link routes
 - ✅ Bidirectional navigation
-- ✅ Link enrichment (no N+1 queries!)
+- ✅ Link enrichment (linked entities included in the response, fetched per link)
 - ✅ Automatic entity creation with linking
 - ✅ Zero boilerplate code
 
