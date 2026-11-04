@@ -239,53 +239,76 @@ pub async fn list_links(
 }
 
 /// Helper function to enrich links with full entity data
+///
+/// Each distinct `(entity type, id)` is read once per call, however many links
+/// point to it. A missing or unreadable entity resolves to `None` (and is not
+/// retried for the other links that point to it).
 async fn enrich_links_with_entities(
     state: &AppState,
     links: Vec<LinkEntity>,
     context: EnrichmentContext,
     link_definition: &LinkDefinition,
 ) -> Result<Vec<EnrichedLink>, ExtractorError> {
-    let mut enriched = Vec::new();
+    let needs_source = !matches!(context, EnrichmentContext::FromSource);
+    let needs_target = !matches!(context, EnrichmentContext::FromTarget);
+    let source_type = link_definition.source_type.as_str();
+    let target_type = link_definition.target_type.as_str();
 
-    for link in links {
-        // Fetch source entity only if needed
-        let source_entity = match context {
-            EnrichmentContext::FromSource => None,
-            EnrichmentContext::FromTarget | EnrichmentContext::DirectLink => {
-                // Fetch source entity using the type from link definition
-                fetch_entity_by_type(state, &link_definition.source_type, &link.source_id)
-                    .await
-                    .ok()
-            }
-        };
-
-        // Fetch target entity only if needed
-        let target_entity = match context {
-            EnrichmentContext::FromTarget => None,
-            EnrichmentContext::FromSource | EnrichmentContext::DirectLink => {
-                // Fetch target entity using the type from link definition
-                fetch_entity_by_type(state, &link_definition.target_type, &link.target_id)
-                    .await
-                    .ok()
-            }
-        };
-
-        enriched.push(EnrichedLink {
-            id: link.id,
-            entity_type: link.entity_type,
-            link_type: link.link_type,
-            source_id: link.source_id,
-            target_id: link.target_id,
-            source: source_entity,
-            target: target_entity,
-            metadata: link.metadata,
-            created_at: link.created_at,
-            updated_at: link.updated_at,
-            status: link.status,
-        });
+    let mut cache: HashMap<(&str, Uuid), Option<Value>> = HashMap::new();
+    for link in &links {
+        if needs_source {
+            resolve_entity_once(state, &mut cache, source_type, link.source_id).await;
+        }
+        if needs_target {
+            resolve_entity_once(state, &mut cache, target_type, link.target_id).await;
+        }
     }
 
+    let enriched: Vec<EnrichedLink> = links
+        .into_iter()
+        .map(|link| {
+            let source = if needs_source {
+                cache.get(&(source_type, link.source_id)).cloned().flatten()
+            } else {
+                None
+            };
+            let target = if needs_target {
+                cache.get(&(target_type, link.target_id)).cloned().flatten()
+            } else {
+                None
+            };
+
+            EnrichedLink {
+                id: link.id,
+                entity_type: link.entity_type,
+                link_type: link.link_type,
+                source_id: link.source_id,
+                target_id: link.target_id,
+                source,
+                target,
+                metadata: link.metadata,
+                created_at: link.created_at,
+                updated_at: link.updated_at,
+                status: link.status,
+            }
+        })
+        .collect();
+
     Ok(enriched)
+}
+
+/// Fetch `(entity_type, id)` into `cache` unless it is already there.
+/// A failed fetch is cached as `None`, so it is not retried.
+async fn resolve_entity_once<'a>(
+    state: &AppState,
+    cache: &mut HashMap<(&'a str, Uuid), Option<Value>>,
+    entity_type: &'a str,
+    id: Uuid,
+) {
+    if let std::collections::hash_map::Entry::Vacant(slot) = cache.entry((entity_type, id)) {
+        let value = fetch_entity_by_type(state, entity_type, &id).await.ok();
+        slot.insert(value);
+    }
 }
 
 /// Fetch an entity dynamically by type
@@ -1810,6 +1833,33 @@ mod tests {
         }
     }
 
+    /// Wraps `MockEntityFetcher` and counts every `fetch_as_json` call.
+    struct CountingFetcher {
+        inner: MockEntityFetcher,
+        reads: std::sync::atomic::AtomicUsize,
+    }
+
+    impl CountingFetcher {
+        fn new() -> Self {
+            Self {
+                inner: MockEntityFetcher::new(),
+                reads: std::sync::atomic::AtomicUsize::new(0),
+            }
+        }
+
+        fn reads(&self) -> usize {
+            self.reads.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl crate::core::EntityFetcher for CountingFetcher {
+        async fn fetch_as_json(&self, entity_id: &Uuid) -> anyhow::Result<serde_json::Value> {
+            self.reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.inner.fetch_as_json(entity_id).await
+        }
+    }
+
     /// Simple EntityCreator for tests that returns the input with a generated id
     struct MockEntityCreator;
 
@@ -2040,6 +2090,78 @@ mod tests {
             .await
             .expect("should succeed");
         assert_eq!(result["model"], "Audi");
+    }
+
+    // ------------------------------------------------------------------
+    // enrich_links_with_entities: batching
+    // ------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_enrich_links_reads_each_distinct_entity_once() {
+        let users = [Uuid::new_v4(), Uuid::new_v4()];
+        let cars = [Uuid::new_v4(), Uuid::new_v4()];
+        let user_fetcher = Arc::new(CountingFetcher::new());
+        let car_fetcher = Arc::new(CountingFetcher::new());
+        for u in users {
+            user_fetcher
+                .inner
+                .insert(u, serde_json::json!({ "id": u.to_string() }));
+        }
+        for c in cars {
+            car_fetcher
+                .inner
+                .insert(c, serde_json::json!({ "id": c.to_string() }));
+        }
+
+        let mut fetchers: HashMap<String, Arc<dyn crate::core::EntityFetcher>> = HashMap::new();
+        fetchers.insert("user".to_string(), user_fetcher.clone());
+        fetchers.insert("car".to_string(), car_fetcher.clone());
+        let mut state = create_test_state();
+        state.entity_fetchers = Arc::new(fetchers);
+
+        // 4 links covering every (user, car) pair, plus one link to a car that does not exist.
+        let mut links: Vec<crate::core::link::LinkEntity> = Vec::new();
+        for u in users {
+            for c in cars {
+                links.push(crate::core::link::LinkEntity::new("owner", u, c, None));
+            }
+        }
+        links.push(crate::core::link::LinkEntity::new(
+            "owner",
+            users[0],
+            Uuid::new_v4(),
+            None,
+        ));
+
+        let link_def = &state.config.links[0];
+        let enriched =
+            enrich_links_with_entities(&state, links, EnrichmentContext::DirectLink, link_def)
+                .await
+                .expect("enrichment should succeed");
+
+        assert_eq!(enriched.len(), 5);
+        assert!(
+            enriched[..4]
+                .iter()
+                .all(|l| l.source.is_some() && l.target.is_some()),
+            "existing entities should be attached to every link"
+        );
+        assert!(
+            enriched[4].target.is_none(),
+            "a missing entity resolves to None, not an error"
+        );
+
+        // 2 users + 3 distinct cars = 5 distinct entities. The per-link code read 2 per link (10).
+        assert!(
+            user_fetcher.reads() <= 2,
+            "users read at most once each, got {}",
+            user_fetcher.reads()
+        );
+        assert!(
+            car_fetcher.reads() <= 3,
+            "cars read at most once each, got {}",
+            car_fetcher.reads()
+        );
     }
 
     // ------------------------------------------------------------------
