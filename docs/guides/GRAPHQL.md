@@ -21,7 +21,7 @@ Add the GraphQL feature to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-this-rs = { version = "0.0.6", features = ["graphql"] }
+this-rs = { version = "0.0.9", features = ["graphql"] }
 ```
 
 ### Build Server with GraphQL
