@@ -70,7 +70,7 @@
 - 🛡️ **RBAC Policies** — Per-entity authorization policies in YAML (authenticated, owner, admin_only, service_only)
 - 🧩 **Custom Resolvers** — Reusable authorization logic referenced with `resolver:name` in YAML
 - 👁️ **Report-only mode** — `ServerBuilder::authorization_report_only()` computes denials, logs them and publishes them in the `x-this-rs-authz` response header, but **blocks nothing**: in this mode RBAC and `perm:` policies do not stop a single request. Use it to observe policies on real traffic before enforcing them.
-- 🏢 **Multi-Tenant** — Opt-in tenant isolation via `impl_entity_multi_tenant!` macro
+- 🏢 **Multi-Tenant** — The tenant is read from a `tenant_id` field; `impl_entity_multi_tenant!` only generates that reader and does not enable anything. Isolation is applied by the request's `TenantContext`, fed by `Entity::tenant_id()`, which you override in your `impl Entity` (see [docs/guides/MULTI_TENANCY.md](docs/guides/MULTI_TENANCY.md))
 - 🗑️ **GDPR Erasure** — One-call tenant data deletion: `DELETE /tenants/:tenant_id/data`
 
 ### ⚡ Developer Experience
