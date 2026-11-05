@@ -83,10 +83,6 @@ impl Rule {
         })
     }
 
-    pub fn name(&self) -> &str {
-        &self.name
-    }
-
     /// La fonction que `CustomRegistry` attend. Elle capture la règle compilée :
     /// une requête ne paie jamais la compilation.
     pub fn validator(self: &Arc<Self>) -> CustomValidatorFn {
@@ -369,6 +365,59 @@ mod tests {
         // Fail-closed : un nom inconnu n'est jamais ignoré, même quand la valeur
         // est manifestement valide.
         assert!(apply(&entity, WriteOp::Create, json!({"amount": 1}), &ctx).is_err());
+    }
+
+    /// Un paramètre `Str` se compile (`fn run(s: Str) -> Bool { true }` est
+    /// typable : `s` n'est jamais utilisé) mais ne peut pas être alimenté — le
+    /// langage n'a pas de modèle mémoire. Le refus doit être explicite, pas un
+    /// `panic` ni une règle silencieusement vraie.
+    #[test]
+    fn a_string_parameter_is_refused_at_call_time() {
+        // Un paramètre `Str` se compile (`s` n'est jamais utilisé, donc le corps
+        // type) mais ne peut pas être alimenté : le langage n'a pas de modèle
+        // mémoire. Le champ doit porter le même nom pour que l'entrée soit
+        // seulement candidate — puis refusée.
+        let r = rule("fn run(s: Str) -> Bool { true }");
+        let violation = r.apply("s", &json!("abc"), &json!({})).unwrap_err();
+        assert_eq!(violation.code.as_str(), CODE_INPUT_TYPE);
+        assert_eq!(
+            violation.params.get("expected").and_then(|v| v.as_str()),
+            Some("Str")
+        );
+    }
+
+    /// Un membre de `params` qui n'est ni un nombre ni un booléen n'est pas une
+    /// entrée : il ne doit pas être converti à l'aveugle.
+    #[test]
+    fn a_non_scalar_param_falls_through_to_the_field_name() {
+        let r = rule("fn run(value: Int, max: Int) -> Bool { value <= max }");
+        // `max` est une chaîne dans les params : elle ne compte pas, et comme le
+        // champ ne s'appelle pas `max`, l'entrée manque.
+        let violation = r
+            .apply("amount", &json!(1), &json!({"max": "10"}))
+            .unwrap_err();
+        assert_eq!(violation.code.as_str(), CODE_MISSING_INPUT);
+    }
+
+    /// La recherche d'appels doit descendre partout, pas seulement à la racine.
+    #[test]
+    fn a_call_nested_in_a_branch_is_still_refused() {
+        let error = Rule::compile(
+            "billing.x",
+            "fn run(value: Int) -> Bool { if value > 0 { now() > 0 } else { false } }",
+        )
+        .unwrap_err();
+        assert!(error.contains("now"), "{error}");
+    }
+
+    #[test]
+    fn a_call_nested_in_a_binding_is_still_refused() {
+        let error = Rule::compile(
+            "billing.x",
+            "fn run(value: Int) -> Bool { let t: Bool = now() > 0; t && value > 0 }",
+        )
+        .unwrap_err();
+        assert!(error.contains("now"), "{error}");
     }
 
     #[test]
