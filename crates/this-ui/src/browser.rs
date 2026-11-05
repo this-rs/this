@@ -13,7 +13,7 @@
 
 use leptos::prelude::*;
 
-use crate::design::{badge, meter, Tone};
+use crate::design::{Tone, badge, meter};
 
 /// Le crayon de l'action de ligne : générique, il ne dépend d'aucune app.
 const EDIT: &str = r#"<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 20h4l10-10a2.5 2.5 0 0 0-3.5-3.5L4.5 16.5 4 20Z"/><path d="m13.5 7 3.5 3.5"/></svg>"#;
