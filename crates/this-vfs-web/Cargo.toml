@@ -1,0 +1,23 @@
+[package]
+name = "this-vfs-web"
+version = "0.0.1"
+edition = "2024"
+authors = ["Riviere Théotime <t@ffs.holdings>"]
+license = "MIT OR Apache-2.0"
+description = "A browser Vfs for this-rs: paths, etags and preconditions over IndexedDB, so a page can store a module and load it back."
+repository = "https://github.com/this-rs/this"
+keywords = ["framework", "vfs", "indexeddb", "wasm"]
+categories = ["wasm", "filesystem"]
+
+# Crate wasm uniquement : il porte son propre workspace, comme this-ui et
+# this-client-web, pour qu'un `cargo build` côté serveur ne le voie pas.
+[workspace]
+
+[dependencies]
+this-vfs = { version = "0.0.1", path = "../this-vfs" }
+async-trait = "0.1"
+chrono = { version = "0.4", features = ["wasmbind"] }
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+anyhow = "1.0"

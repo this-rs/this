@@ -234,7 +234,12 @@ fn from_anyhow(err: &anyhow::Error) -> ContractError {
 /// - writes are atomic per file (a reader never sees a partial content) and the
 ///   precondition is checked under the backend's write lock (`check_precondition`);
 /// - `etag` = `etag_of(content)`, so equal contents have equal etags on every backend.
-#[async_trait]
+// Les futures d'un backend navigateur ne peuvent pas être `Send` : `JsFuture`
+// tient un `Rc<RefCell<…>>`. Sur le serveur, ils doivent l'être (les handlers axum
+// l'exigent). Le trait dit donc la vérité par cible, au lieu d'imposer à l'un la
+// contrainte de l'autre — ou de dupliquer le contrat.
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 pub trait Vfs: Send + Sync {
     async fn read(&self, path: &VfsPath) -> Result<Vec<u8>, VfsError>;
     async fn write(
