@@ -37,8 +37,10 @@
 pub mod executor;
 
 use chrono::Utc;
+use executor::{Executor, ExecutorError, Outcome};
 use std::collections::BTreeMap;
 use this_module_lang::assemble::compile_to_wasm;
+use this_module_lang::eval::Value;
 use this_vfs::layout::{MANIFEST_FILE, MANIFEST_FORMAT, Manifest};
 use this_vfs::{Precondition, Vfs, VfsError, VfsPath, etag_of};
 
@@ -59,6 +61,8 @@ pub enum Error {
     Manifest(String),
     #[error("intégrité : l'etag de `{path}` ne correspond pas au manifeste")]
     Integrity { path: String },
+    #[error("exécution : {0}")]
+    Execution(#[from] ExecutorError),
 }
 
 /// What a compilation produced, and where it landed.
@@ -141,6 +145,23 @@ impl<'a, V: Vfs> Harness<'a, V> {
         }
     }
 
+    /// Load `name`/`version` **from the store** and run it.
+    ///
+    /// This is the gesture that makes a module testable rather than viewable: the
+    /// artifact is read back from the `Vfs` — not from a buffer still in hand —
+    /// then handed to whichever engine the caller chose.
+    pub async fn run<E: Executor>(
+        &self,
+        executor: &E,
+        name: &str,
+        version: &str,
+        args: &[Value],
+        now: i64,
+    ) -> Result<Outcome, Error> {
+        let program = self.load(name, version).await?;
+        Ok(executor.run(&program, args, now).await?)
+    }
+
     /// The source that produced a stored artifact.
     pub async fn source(&self, name: &str, version: &str) -> Result<String, Error> {
         let dir = version_dir(name, version)?;
@@ -214,6 +235,50 @@ mod tests {
             Err(Error::Integrity { .. }) => {}
             other => panic!("un artefact corrompu doit être refusé, reçu {other:?}"),
         }
+    }
+
+    #[cfg(feature = "wasmi")]
+    #[tokio::test]
+    async fn a_stored_module_can_be_asked_things_after_forgetting_it() {
+        use crate::executor::WasmiExecutor;
+        use this_module_lang::eval::Value;
+
+        let vfs = InMemoryVfs::default();
+        let harness = Harness::new(&vfs);
+        harness
+            .compile(
+                "shop",
+                "0.3.0",
+                "fn run(a: Int) -> Int { emit(\"commande\"); a + 1 }",
+            )
+            .await
+            .unwrap();
+
+        // On ne garde plus l'artefact : ni octets, ni source en mémoire.
+        // Seuls le nom et la version subsistent.
+        let outcome = harness
+            .run(&WasmiExecutor, "shop", "0.3.0", &[Value::Int(41)], 0)
+            .await
+            .unwrap();
+
+        assert_eq!(outcome.value, "42");
+        assert_eq!(outcome.effects, vec!["emit(\"commande\")".to_string()]);
+    }
+
+    #[cfg(feature = "wasmi")]
+    #[tokio::test]
+    async fn an_absent_module_is_reported_rather_than_improvised() {
+        use crate::executor::WasmiExecutor;
+
+        let vfs = InMemoryVfs::default();
+        let harness = Harness::new(&vfs);
+        assert!(
+            harness
+                .run(&WasmiExecutor, "shop", "9.9.9", &[], 0)
+                .await
+                .is_err(),
+            "un module absent ne doit pas être inventé"
+        );
     }
 
     #[tokio::test]
