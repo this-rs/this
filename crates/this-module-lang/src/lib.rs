@@ -49,10 +49,15 @@
 
 pub mod ast;
 pub mod check;
+#[cfg(feature = "descriptor")]
+pub mod descriptor;
 pub mod eval;
 pub mod lex;
 pub mod parse;
 pub mod wat;
+
+#[cfg(feature = "descriptor")]
+pub use descriptor::{Rule, register_rule};
 
 pub use ast::{Function, Type};
 pub use check::{HOST, HostFn, check};
