@@ -60,7 +60,7 @@ pub mod wat;
 pub use descriptor::{Rule, register_rule};
 
 pub use ast::{Function, Type};
-pub use check::{HOST, HostFn, check};
+pub use check::{HOST, HostFn, PURE, check, check_with};
 pub use eval::{Host, NoHost, Value, run};
 pub use parse::parse;
 pub use wat::{Wat, emit};
