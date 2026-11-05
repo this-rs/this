@@ -765,6 +765,30 @@ Entity (Base Trait)
 12. **SinkRegistry** — Routes signals to webhooks, in-app notifications, push, SSE
 13. **Exposures** — Protocol adapters: RestExposure, GraphQLExposure, GrpcExposure, WebSocketExposure
 
+### Workspace layout
+
+`crates/` holds the contracts and the frontend of a this-rs app, so an
+application does not rewrite them. Four are members of the root workspace and
+build with `cargo build`. Three keep their own workspace, because they target
+`wasm32` (or Tauri) and a backend that needs none of it must not compile them.
+
+| Crate | What it is | Built as |
+|---|---|---|
+| `this-descriptor` | The serializable module descriptor shared by `this-rs`, `this-cli` and wasm32 fronts: types, validation, query filters, policies, errors, i18n | root workspace |
+| `this-platform` | The platform shell contract: form factor, window chrome, device cutouts, lifecycle decisions, device capabilities. Pure — no Tauri, no DOM | root workspace |
+| `this-app` | The pure contracts of an app: boot sequence, settings, notices, device capabilities. No DOM, no Tauri, no HTTP — testable on the host | root workspace |
+| `this-module-lang` | The module language: AST, type checker, interpreter and WAT emission. Total by construction — no loop, no undeclared I/O | root workspace |
+| `this-ui` | The Leptos components of an app: splash, panel, settings, window chrome, notices. Consumed by a wasm front | own workspace, `wasm32` |
+| `this-client-web` | The wasm client of a this-rs server's protocols: gRPC-Web framing, minimal protobuf, unary calls and server streams | own workspace, `wasm32` |
+| `this-shell-tauri` | The Tauri 2 plugin that connects an app's window, Dock and lifecycle to the `this-platform` decisions | own workspace, Tauri (needs GTK on Linux) |
+
+The three crates with their own workspace are built from their own directory:
+
+```bash
+cd crates/this-ui && cargo test                                   # host tests
+cd crates/this-client-web && cargo check --target wasm32-unknown-unknown
+```
+
 ### Macro System
 
 - `impl_data_entity!` - Generate a complete Data entity
