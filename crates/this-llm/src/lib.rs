@@ -258,7 +258,10 @@ mod tests {
         for preset in [Preset::Ollama, Preset::LmStudio, Preset::LlamaCpp] {
             let provider = Provider::local(preset);
             assert!(provider.base_url.starts_with("http://localhost:"));
-            assert!(!provider.model.is_empty(), "{preset:?} doit nommer un modèle");
+            assert!(
+                !provider.model.is_empty(),
+                "{preset:?} doit nommer un modèle"
+            );
             assert!(provider.is_local());
         }
     }
