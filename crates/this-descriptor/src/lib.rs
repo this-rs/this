@@ -20,6 +20,7 @@
 // would make each call site heavier for a cold path (errors are not the hot path here).
 #![allow(clippy::result_large_err)]
 
+pub mod page;
 pub mod capabilities;
 pub mod check;
 pub mod compat;
