@@ -63,7 +63,10 @@ impl<C: Completion> ModuleDrafter<C> {
                 },
             )
             .map_err(|issues| Error::Rejected {
-                issues: issues.iter().map(|issue| format!("{issue:?}")).collect(),
+                issues: issues
+                    .iter()
+                    .map(|issue| format!("{} : {}", issue.path, issue.message))
+                    .collect(),
             })?;
 
         Ok(ModuleDraft { descriptor })
@@ -101,9 +104,11 @@ ENTITY
                  list, get, create, update, delete,
                  list_links, get_link, create_link, update_link, delete_link
                policy strings are exactly:
-                 "public"  "authenticated"  "deny"
+                 "authenticated"  "deny"
                  "role:<name>"  "owner_or_role:<name>"
                  "all:<p>"  "any:<p>"  "not:<p>"
+               NEVER use "public": a stored module may not grant public access — the
+               validator refuses it, and rightly so. Use "authenticated" instead.
                a STORED module needs an EXPLICIT policy for each operation it exposes.
                <policy> is one of:
                  {"kind": "deny"}
@@ -307,6 +312,32 @@ mod tests {
                 "le refus doit nommer la règle de namespace, reçu {issues:?}"
             ),
             other => panic!("un code hors namespace doit être refusé, reçu {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_public_permission_is_refused_with_a_readable_message() {
+        // Un modèle a réellement écrit "public" : le profil `Stored` le refuse, et
+        // le message doit nommer le chemin et la règle, pas déverser un Debug.
+        let answer = valid_module().replace(r#""list": "authenticated""#, r#""list": "public""#);
+        let leaked: &'static str = Box::leak(answer.into_boxed_str());
+        match draft_from(leaked).await {
+            Err(Error::Rejected { issues }) => {
+                let joined = issues.join(" | ");
+                assert!(
+                    joined.contains("permissions"),
+                    "le chemin doit être nommé : {joined}"
+                );
+                assert!(
+                    joined.contains("public"),
+                    "la règle doit être nommée : {joined}"
+                );
+                assert!(
+                    !joined.contains("DescriptorIssue"),
+                    "pas de Debug brut : {joined}"
+                );
+            }
+            other => panic!("une permission publique doit être refusée, reçu {other:?}"),
         }
     }
 
