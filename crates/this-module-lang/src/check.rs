@@ -15,6 +15,9 @@ pub struct HostFn {
     pub returns: Type,
 }
 
+/// Les primitives d'un **module exécuté** : deux, et deux seulement. L'une écrit
+/// (`emit`), l'autre lit l'horloge (`now`). Tout le reste d'un module est du
+/// calcul pur.
 pub const HOST: &[HostFn] = &[
     HostFn {
         name: "emit",
@@ -28,8 +31,48 @@ pub const HOST: &[HostFn] = &[
     },
 ];
 
-fn host(name: &str) -> Option<&'static HostFn> {
-    HOST.iter().find(|function| function.name == name)
+/// Les primitives d'une **règle** : pures, déterministes, sans effet.
+///
+/// C'est une surface différente de [`HOST`], et c'est le point : une règle ne
+/// peut ni écrire ni lire l'horloge, parce qu'une règle doit rendre le même
+/// verdict sur le serveur et dans le front, et deux fois de suite. Ce qui n'est
+/// pas ici n'est pas appelable — la sûreté est dans la table, pas dans la
+/// discipline de l'auteur.
+///
+/// Les chaînes y entrent, mais restent **opaques** : on les compare, on les
+/// mesure, on cherche un préfixe. Aucune n'est construite, donc aucune mémoire
+/// n'est allouée — c'est ce qui permet de traiter des chaînes sans modèle
+/// mémoire.
+pub const PURE: &[HostFn] = &[
+    HostFn {
+        name: "str_len",
+        params: &[Type::Str],
+        returns: Type::Int,
+    },
+    HostFn {
+        name: "str_eq",
+        params: &[Type::Str, Type::Str],
+        returns: Type::Bool,
+    },
+    HostFn {
+        name: "str_starts_with",
+        params: &[Type::Str, Type::Str],
+        returns: Type::Bool,
+    },
+    HostFn {
+        name: "str_ends_with",
+        params: &[Type::Str, Type::Str],
+        returns: Type::Bool,
+    },
+    HostFn {
+        name: "str_contains",
+        params: &[Type::Str, Type::Str],
+        returns: Type::Bool,
+    },
+];
+
+fn host<'a>(surface: &'a [HostFn], name: &str) -> Option<&'a HostFn> {
+    surface.iter().find(|function| function.name == name)
 }
 
 struct Env(Vec<(String, Type)>);
@@ -44,8 +87,15 @@ impl Env {
     }
 }
 
-/// Vérifie le programme entier et rend le type de son corps.
+/// Vérifie un programme contre la surface d'un **module exécuté**.
 pub fn check(function: &Function) -> Result<Type, String> {
+    check_with(function, HOST)
+}
+
+/// Vérifie un programme contre une surface donnée. Le typeur ne connaît aucune
+/// primitive en dur : ce qu'un programme peut appeler est exactement ce que
+/// l'appelant met dans `surface`.
+pub fn check_with(function: &Function, surface: &[HostFn]) -> Result<Type, String> {
     let mut env = Env(function
         .params
         .iter()
@@ -53,7 +103,7 @@ pub fn check(function: &Function) -> Result<Type, String> {
         .collect());
 
     for binding in &function.bindings {
-        let value = infer(&binding.value, &env)?;
+        let value = infer(&binding.value, &env, surface)?;
         if value != binding.ty {
             return Err(format!(
                 "`{}` est déclaré {} mais vaut {}",
@@ -71,7 +121,7 @@ pub fn check(function: &Function) -> Result<Type, String> {
         env.0.push((binding.name.clone(), binding.ty));
     }
 
-    let body = infer(&function.body, &env)?;
+    let body = infer(&function.body, &env, surface)?;
     if body != function.returns {
         return Err(format!(
             "le corps rend {} alors que la fonction annonce {}",
@@ -82,7 +132,7 @@ pub fn check(function: &Function) -> Result<Type, String> {
     Ok(body)
 }
 
-fn infer(expr: &Expr, env: &Env) -> Result<Type, String> {
+fn infer(expr: &Expr, env: &Env, surface: &[HostFn]) -> Result<Type, String> {
     match expr {
         Expr::Int(_) => Ok(Type::Int),
         Expr::Bool(_) => Ok(Type::Bool),
@@ -91,7 +141,7 @@ fn infer(expr: &Expr, env: &Env) -> Result<Type, String> {
             .get(name)
             .ok_or_else(|| format!("`{name}` n'est ni un paramètre ni une liaison")),
         Expr::Unary { op, expr } => {
-            let inner = infer(expr, env)?;
+            let inner = infer(expr, env, surface)?;
             match (op, inner) {
                 (UnOp::Not, Type::Bool) => Ok(Type::Bool),
                 (UnOp::Neg, Type::Int) => Ok(Type::Int),
@@ -99,8 +149,8 @@ fn infer(expr: &Expr, env: &Env) -> Result<Type, String> {
             }
         }
         Expr::Binary { op, left, right } => {
-            let left = infer(left, env)?;
-            let right = infer(right, env)?;
+            let left = infer(left, env, surface)?;
+            let right = infer(right, env, surface)?;
             match (op, left, right) {
                 (
                     BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem,
@@ -127,11 +177,11 @@ fn infer(expr: &Expr, env: &Env) -> Result<Type, String> {
             then_branch,
             else_branch,
         } => {
-            if infer(condition, env)? != Type::Bool {
+            if infer(condition, env, surface)? != Type::Bool {
                 return Err("la condition d'un `if` doit être Bool".into());
             }
-            let then_ty = infer(then_branch, env)?;
-            let else_ty = infer(else_branch, env)?;
+            let then_ty = infer(then_branch, env, surface)?;
+            let else_ty = infer(else_branch, env, surface)?;
             if then_ty != else_ty {
                 return Err(format!(
                     "les deux branches d'un `if` doivent avoir le même type : {} et {}",
@@ -146,7 +196,7 @@ fn infer(expr: &Expr, env: &Env) -> Result<Type, String> {
                 .split_last()
                 .ok_or_else(|| "une séquence vide n'a pas de type".to_string())?;
             for item in earlier {
-                let ty = infer(item, env)?;
+                let ty = infer(item, env, surface)?;
                 if ty != Type::Unit {
                     return Err(format!(
                         "une expression intermédiaire doit être Unit, pas {} — sa valeur serait perdue",
@@ -154,11 +204,11 @@ fn infer(expr: &Expr, env: &Env) -> Result<Type, String> {
                     ));
                 }
             }
-            infer(last, env)
+            infer(last, env, surface)
         }
         Expr::Call { name, args } => {
-            let Some(signature) = host(name) else {
-                return Err(format!("`{name}` n'est pas une primitive de l'hôte"));
+            let Some(signature) = host(surface, name) else {
+                return Err(format!("`{name}` n'est pas une primitive disponible ici"));
             };
             if args.len() != signature.params.len() {
                 return Err(format!(
@@ -168,7 +218,7 @@ fn infer(expr: &Expr, env: &Env) -> Result<Type, String> {
                 ));
             }
             for (index, (arg, expected)) in args.iter().zip(signature.params).enumerate() {
-                let actual = infer(arg, env)?;
+                let actual = infer(arg, env, surface)?;
                 if actual != *expected {
                     return Err(format!(
                         "argument {} de `{name}` : attendu {}, reçu {}",

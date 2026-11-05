@@ -29,7 +29,8 @@ use std::sync::Arc;
 use this_descriptor::custom::{CustomRegistry, CustomScope, CustomValidatorFn};
 use this_descriptor::error::FieldViolation;
 
-use crate::ast::{Expr, Function, Type};
+use crate::ast::{Function, Type};
+use crate::check::PURE;
 use crate::eval::{self, Host, Value};
 use crate::{check, parse};
 
@@ -57,23 +58,14 @@ impl Rule {
     /// refusé ici ne sera jamais exécuté.
     pub fn compile(name: impl Into<String>, source: &str) -> Result<Self, String> {
         let function = parse::parse(source)?;
-        check::check(&function)?;
+        // La surface d'une règle, et non celle d'un module : `emit` et `now`
+        // n'y figurent pas, donc une règle qui les appelle ne type même pas.
+        check::check_with(&function, PURE)?;
 
         if function.returns != Type::Bool {
             return Err(format!(
                 "une règle rend Bool (true = valide), pas {}",
                 function.returns.name()
-            ));
-        }
-
-        let mut called = Vec::new();
-        for binding in &function.bindings {
-            calls(&binding.value, &mut called);
-        }
-        calls(&function.body, &mut called);
-        if let Some(name) = called.first() {
-            return Err(format!(
-                "une règle de validation n'appelle aucune primitive : `{name}` est appelé"
             ));
         }
 
@@ -112,7 +104,7 @@ impl Rule {
             args.push(to_value(field, &param.name, param.ty, raw)?);
         }
 
-        match eval::run(&self.function, &args, &mut NoEffects) {
+        match eval::run(&self.function, &args, &mut Pure) {
             Ok(Value::Bool(true)) => Ok(()),
             Ok(Value::Bool(false)) => Err(FieldViolation::new(field, self.name.as_str())),
             Ok(other) => {
@@ -143,17 +135,43 @@ fn to_value(
             .map(Value::Int)
             .ok_or_else(mismatch),
         Type::Bool => raw.as_bool().map(Value::Bool).ok_or_else(mismatch),
-        Type::Str | Type::Unit => Err(mismatch()),
+        // Une chaîne entre, mais ne se lie pas : elle va directement d'un champ à
+        // une primitive pure. C'est un choix, pas un oubli — c'est ce qui permet
+        // de traiter des chaînes sans allouer, donc sans modèle mémoire.
+        Type::Str => raw
+            .as_str()
+            .map(|text| Value::Str(text.to_string()))
+            .ok_or_else(mismatch),
+        Type::Unit => Err(mismatch()),
     }
 }
 
-/// Un hôte qui refuse : une règle compilée ne peut donc rien déclencher. Le refus
-/// est déjà intervenu à la compilation ; ceci est la seconde barrière.
-struct NoEffects;
+/// L'hôte d'une règle : les primitives pures de [`PURE`], et rien d'autre.
+///
+/// Le refus d'un appel hors surface a déjà eu lieu au typage ; ceci est la
+/// seconde barrière, celle qui tient même si un jour une règle arrivait ici sans
+/// être passée par le typeur.
+struct Pure;
 
-impl Host for NoEffects {
-    fn call(&mut self, name: &str, _args: &[Value]) -> Result<Value, String> {
-        Err(format!("une règle ne peut pas appeler `{name}`"))
+impl Host for Pure {
+    fn call(&mut self, name: &str, args: &[Value]) -> Result<Value, String> {
+        match (name, args) {
+            // La longueur est celle des **caractères**, pas des octets : une règle
+            // qui dit « au plus 40 » parle de ce qu'un humain voit, et « éé » vaut
+            // deux, pas quatre.
+            ("str_len", [Value::Str(text)]) => Ok(Value::Int(text.chars().count() as i64)),
+            ("str_eq", [Value::Str(a), Value::Str(b)]) => Ok(Value::Bool(a == b)),
+            ("str_starts_with", [Value::Str(text), Value::Str(prefix)]) => {
+                Ok(Value::Bool(text.starts_with(prefix.as_str())))
+            }
+            ("str_ends_with", [Value::Str(text), Value::Str(suffix)]) => {
+                Ok(Value::Bool(text.ends_with(suffix.as_str())))
+            }
+            ("str_contains", [Value::Str(text), Value::Str(needle)]) => {
+                Ok(Value::Bool(text.contains(needle.as_str())))
+            }
+            _ => Err(format!("une règle ne peut pas appeler `{name}`")),
+        }
     }
 }
 
@@ -171,38 +189,6 @@ pub fn register_rule(
     let rule = Arc::new(Rule::compile(name, source)?);
     registry.register_validator(name, scope, rule.validator());
     Ok(())
-}
-
-/// Tous les noms de primitives appelés, dans l'ordre de lecture.
-fn calls(expr: &Expr, out: &mut Vec<String>) {
-    match expr {
-        Expr::Call { name, args } => {
-            out.push(name.clone());
-            for arg in args {
-                calls(arg, out);
-            }
-        }
-        Expr::Binary { left, right, .. } => {
-            calls(left, out);
-            calls(right, out);
-        }
-        Expr::Unary { expr, .. } => calls(expr, out),
-        Expr::If {
-            condition,
-            then_branch,
-            else_branch,
-        } => {
-            calls(condition, out);
-            calls(then_branch, out);
-            calls(else_branch, out);
-        }
-        Expr::Seq(items) => {
-            for item in items {
-                calls(item, out);
-            }
-        }
-        Expr::Int(_) | Expr::Bool(_) | Expr::Str(_) | Expr::Var(_) => {}
-    }
 }
 
 #[cfg(test)]
@@ -270,15 +256,27 @@ mod tests {
         );
     }
 
+    /// Une règle ne dispose pas de la surface d'un module : `emit` n'y figure pas,
+    /// donc le typeur refuse. Il n'y a plus de balayage d'appels à maintenir, ni
+    /// de discipline à espérer de l'auteur.
     #[test]
-    fn a_rule_that_would_emit_is_refused_at_compilation() {
+    fn a_rule_cannot_emit() {
         let error = Rule::compile(
             "billing.x",
             "fn run(value: Int) -> Bool { emit(\"a\"); value > 0 }",
         )
         .unwrap_err();
-        assert!(error.contains("emit"), "{error}");
-        assert!(error.contains("aucune primitive"), "{error}");
+        assert!(error.contains("`emit`"), "{error}");
+        assert!(error.contains("pas une primitive disponible"), "{error}");
+    }
+
+    /// Ni lire l'horloge : une règle doit rendre le même verdict sur le serveur et
+    /// dans le front, et deux fois de suite.
+    #[test]
+    fn a_rule_cannot_read_the_clock() {
+        let error =
+            Rule::compile("billing.x", "fn run(value: Int) -> Bool { now() > 0 }").unwrap_err();
+        assert!(error.contains("`now`"), "{error}");
     }
 
     #[test]
@@ -342,6 +340,62 @@ mod tests {
         assert_eq!(codes, vec!["amount:billing.amount_in_range"]);
     }
 
+    /// Le même chemin, sur un champ **chaîne** : c'est le cas réel (un numéro, un
+    /// code, une adresse) et celui qui aurait été impossible sans surface pure.
+    #[test]
+    fn a_descriptor_applies_a_string_rule_through_the_real_engine() {
+        use this_descriptor::CompiledEntity;
+        use this_descriptor::ValidatorSpec;
+        use this_descriptor::custom::Custom;
+        use this_descriptor::engine::validate::{Side, ValidateCtx, WriteOp, apply};
+        use this_descriptor::entity::EntityDesc;
+        use this_descriptor::field::{Applies, FieldDesc, FieldType};
+
+        let mut registry = CustomRegistry::default();
+        register_rule(
+            &mut registry,
+            "billing.number_prefixed",
+            "fn run(value: Str) -> Bool { str_starts_with(value, \"INV-\") && str_len(value) <= 12 }",
+            CustomScope::Both,
+        )
+        .unwrap();
+
+        let mut entity = EntityDesc::new("invoice");
+        entity.fields = vec![FieldDesc::new("number", FieldType::String).validator(
+            ValidatorSpec::Custom(Custom::named("billing.number_prefixed")),
+            Applies::Always,
+        )];
+        let entity = CompiledEntity::new("billing", entity).unwrap();
+        let ctx = ValidateCtx {
+            registry: &registry,
+            side: Side::Server,
+        };
+
+        assert!(
+            apply(
+                &entity,
+                WriteOp::Create,
+                json!({"number": "INV-2026"}),
+                &ctx
+            )
+            .is_ok()
+        );
+
+        let error = apply(
+            &entity,
+            WriteOp::Create,
+            json!({"number": "FAC-2026"}),
+            &ctx,
+        )
+        .unwrap_err();
+        let codes: Vec<String> = error
+            .fields
+            .iter()
+            .map(|v| format!("{}:{}", v.path, v.code.as_str()))
+            .collect();
+        assert_eq!(codes, vec!["number:billing.number_prefixed"]);
+    }
+
     #[test]
     fn a_descriptor_naming_an_unregistered_rule_is_refused() {
         use this_descriptor::ValidatorSpec;
@@ -367,23 +421,61 @@ mod tests {
         assert!(apply(&entity, WriteOp::Create, json!({"amount": 1}), &ctx).is_err());
     }
 
-    /// Un paramètre `Str` se compile (`fn run(s: Str) -> Bool { true }` est
-    /// typable : `s` n'est jamais utilisé) mais ne peut pas être alimenté — le
-    /// langage n'a pas de modèle mémoire. Le refus doit être explicite, pas un
-    /// `panic` ni une règle silencieusement vraie.
+    /// Une chaîne entre dans une règle — opaque, jamais liée, mais utilisable.
+    /// C'est la forme la plus fréquente d'une vraie règle métier.
     #[test]
-    fn a_string_parameter_is_refused_at_call_time() {
-        // Un paramètre `Str` se compile (`s` n'est jamais utilisé, donc le corps
-        // type) mais ne peut pas être alimenté : le langage n'a pas de modèle
-        // mémoire. Le champ doit porter le même nom pour que l'entrée soit
-        // seulement candidate — puis refusée.
-        let r = rule("fn run(s: Str) -> Bool { true }");
-        let violation = r.apply("s", &json!("abc"), &json!({})).unwrap_err();
-        assert_eq!(violation.code.as_str(), CODE_INPUT_TYPE);
-        assert_eq!(
-            violation.params.get("expected").and_then(|v| v.as_str()),
-            Some("Str")
+    fn a_string_prefix_rule_accepts_and_refuses() {
+        let r = rule("fn run(value: Str) -> Bool { str_starts_with(value, \"INV-\") }");
+        assert!(
+            r.apply("number", &json!("INV-2026-001"), &json!({}))
+                .is_ok()
         );
+        assert!(
+            r.apply("number", &json!("FAC-2026-001"), &json!({}))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn a_length_rule_counts_characters_not_bytes() {
+        let r = rule("fn run(value: Str, max: Int) -> Bool { str_len(value) <= max }");
+        let params = json!({"max": 4});
+        // Quatre caractères, six octets : c'est la longueur visible qui compte.
+        assert!(r.apply("label", &json!("créé"), &params).is_ok());
+        assert!(r.apply("label", &json!("créés"), &params).is_err());
+    }
+
+    #[test]
+    fn the_string_predicates_cover_the_usual_moves() {
+        let ends = rule("fn run(value: Str) -> Bool { str_ends_with(value, \"@this.rs\") }");
+        assert!(ends.apply("email", &json!("a@this.rs"), &json!({})).is_ok());
+        assert!(
+            ends.apply("email", &json!("a@elsewhere.dev"), &json!({}))
+                .is_err()
+        );
+
+        let contains = rule("fn run(value: Str) -> Bool { str_contains(value, \"::\") }");
+        assert!(
+            contains
+                .apply("arn", &json!("arn:wami::x"), &json!({}))
+                .is_ok()
+        );
+
+        let exact = rule("fn run(value: Str) -> Bool { str_eq(value, \"paid\") }");
+        assert!(exact.apply("status", &json!("paid"), &json!({})).is_ok());
+        assert!(exact.apply("status", &json!("unpaid"), &json!({})).is_err());
+    }
+
+    /// Une chaîne ne se *lie* toujours pas (pas de modèle mémoire) : seul le
+    /// passage direct champ → primitive est ouvert.
+    #[test]
+    fn a_string_still_cannot_be_bound() {
+        let error = Rule::compile(
+            "billing.x",
+            "fn run(value: Str) -> Bool { let s: Str = value; str_eq(s, s) }",
+        )
+        .unwrap_err();
+        assert!(error.contains("ne se lie pas"), "{error}");
     }
 
     /// Un membre de `params` qui n'est ni un nombre ni un booléen n'est pas une
