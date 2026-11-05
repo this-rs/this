@@ -302,7 +302,7 @@ fn entry_path(e: &VfsEntry) -> &VfsPath {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::vfs::conformance;
+    use this_vfs::conformance;
 
     fn fresh() -> (tempfile::TempDir, LocalFsVfs) {
         let dir = tempfile::tempdir().unwrap();
