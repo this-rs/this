@@ -161,6 +161,17 @@ jobs:
           # tests go through the real validation engine).
           cargo test -p this-module-lang --all-features
 
+      # Le harness ne tourne pas sous `all,wami` non plus : son exécuteur `wasmi`
+      # est une feature à lui. Sans cette étape, les tests qui comparent
+      # l'interpréteur et le moteur wasm ne tournent nulle part en CI — et une
+      # couverture sur du code jamais compilé ne prouverait rien.
+      - name: Test this-module-harness (engine behind a feature)
+        run: |
+          # Sans la feature : le crate pur (compiler, ranger, relire).
+          cargo test -p this-module-harness
+          # Avec : l'exécuteur wasmi, comparé à l'interpréteur sur valeur ET effets.
+          cargo test -p this-module-harness --features wasmi
+
       # A language rule is `CustomScope::Both` by default: it runs on the server AND in
       # the front, written once instead of reimplemented in TypeScript. That promise is
       # only true if the crate builds for wasm32 with the bridge enabled.
@@ -228,7 +239,10 @@ jobs:
           done
 
       - name: Generate code coverage
-        run: cargo llvm-cov --features all,wami --workspace --lcov --output-path lcov.info -- --test-threads=1
+        # `this-module-harness/wasmi` : sans cette feature, l'exécuteur n'est pas
+        # compilé, ses lignes n'ont aucune donnée de couverture, et `codecov/patch`
+        # les compte comme non couvertes. On ne peut pas couvrir ce qu'on ne compile pas.
+        run: cargo llvm-cov --features all,wami,this-module-harness/wasmi --workspace --lcov --output-path lcov.info -- --test-threads=1
 
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v7
@@ -308,6 +322,7 @@ jobs:
           # Workspace members are not covered by the command above: it lints the root
           # package only. A new member with warnings would stay green otherwise.
           cargo clippy -p this-module-lang --all-targets --all-features -- -D warnings
+          cargo clippy -p this-module-harness --all-targets --all-features -- -D warnings
 
   # Vérification de la compilation des exemples
   examples:
