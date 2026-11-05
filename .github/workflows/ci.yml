@@ -148,6 +148,15 @@ jobs:
       - name: Test this-descriptor (pure crate, every feature)
         run: cargo test -p this-descriptor --all-features
 
+      # The module language: lexer, parser, type checker, interpreter and the WAT
+      # emitter. `--test '*'` matters as much as `--lib`: `tests/parity.rs` runs every
+      # program through a real wasm engine (`wasmi`) and compares the result with the
+      # interpreter. Without that step the emitter is checked by nothing.
+      - name: Test this-module-lang (pure crate)
+        run: |
+          cargo test -p this-module-lang --lib
+          cargo test -p this-module-lang --test '*'
+
       - name: Check this-descriptor on wasm32 (no server dependency)
         run: |
           rustup target add wasm32-unknown-unknown
@@ -282,7 +291,11 @@ jobs:
           key: ${{ runner.os }}-cargo-build-target-clippy-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Run clippy
-        run: cargo clippy --all-targets --features all,wami -- -D warnings
+        run: |
+          cargo clippy --all-targets --features all,wami -- -D warnings
+          # Workspace members are not covered by the command above: it lints the root
+          # package only. A new member with warnings would stay green otherwise.
+          cargo clippy -p this-module-lang --all-targets -- -D warnings
 
   # Vérification de la compilation des exemples
   examples:
