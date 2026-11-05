@@ -154,8 +154,20 @@ jobs:
       # interpreter. Without that step the emitter is checked by nothing.
       - name: Test this-module-lang (pure crate)
         run: |
+          # Default features: the language alone, zero dependencies.
           cargo test -p this-module-lang --lib
           cargo test -p this-module-lang --test '*'
+          # `descriptor` adds the rule bridge into this-descriptor (two end-to-end
+          # tests go through the real validation engine).
+          cargo test -p this-module-lang --all-features
+
+      # A language rule is `CustomScope::Both` by default: it runs on the server AND in
+      # the front, written once instead of reimplemented in TypeScript. That promise is
+      # only true if the crate builds for wasm32 with the bridge enabled.
+      - name: Check this-module-lang on wasm32 (rules run in the front too)
+        run: |
+          rustup target add wasm32-unknown-unknown
+          cargo check -p this-module-lang --features descriptor --target wasm32-unknown-unknown
 
       - name: Check this-descriptor on wasm32 (no server dependency)
         run: |
@@ -295,7 +307,7 @@ jobs:
           cargo clippy --all-targets --features all,wami -- -D warnings
           # Workspace members are not covered by the command above: it lints the root
           # package only. A new member with warnings would stay green otherwise.
-          cargo clippy -p this-module-lang --all-targets -- -D warnings
+          cargo clippy -p this-module-lang --all-targets --all-features -- -D warnings
 
   # Vérification de la compilation des exemples
   examples:
