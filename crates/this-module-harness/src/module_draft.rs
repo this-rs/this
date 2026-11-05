@@ -120,7 +120,8 @@ LINK
   permissions   : same shape as for entities (a map operation -> policy string)
 
 ERROR
-  code        : "module.<name>.<reason>" (e.g. "module.inventory.out_of_stock")
+  code        : "<module name>.<reason>" — it MUST start with the module name
+                (e.g. "inventory.out_of_stock", NOT "module.inventory.…")
   kind        : "validation" | "conflict" | "not_found" | "forbidden"
   message_key : an i18n key (e.g. "inventory.out_of_stock")
   params      : list of field names the message interpolates (may be empty)
@@ -158,7 +159,7 @@ EXAMPLE — a module that passes validation
   "links": [],
   "errors": [
     {
-      "code": "module.inventory.out_of_stock",
+      "code": "inventory.out_of_stock",
       "kind": "validation",
       "message_key": "inventory.out_of_stock",
       "params": ["item"]
@@ -284,6 +285,28 @@ mod tests {
         match draft_from(leaked).await {
             Err(Error::Rejected { issues }) => assert!(!issues.is_empty()),
             other => panic!("des politiques implicites doivent être refusées, reçu {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn an_error_code_outside_the_module_namespace_is_refused() {
+        // Le validateur exige que le code commence par le nom du module. Mon
+        // premier prompt disait `module.<nom>.<raison>` : le vrai vérificateur l'a
+        // refusé, et ce test garde la correction.
+        let answer = valid_module().replace(
+            r#""errors": []"#,
+            r#""errors": [{"code": "module.inventory.out_of_stock", "kind": "validation",
+                          "message_key": "inventory.out_of_stock", "params": []}]"#,
+        );
+        let leaked: &'static str = Box::leak(answer.into_boxed_str());
+        match draft_from(leaked).await {
+            Err(Error::Rejected { issues }) => assert!(
+                issues
+                    .iter()
+                    .any(|i| i.contains("namespace") || i.contains("must start")),
+                "le refus doit nommer la règle de namespace, reçu {issues:?}"
+            ),
+            other => panic!("un code hors namespace doit être refusé, reçu {other:?}"),
         }
     }
 
