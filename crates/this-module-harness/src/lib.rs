@@ -34,6 +34,7 @@
 //! # Ok(()) }
 //! ```
 
+pub mod drafter;
 pub mod executor;
 
 use chrono::Utc;
@@ -64,6 +65,13 @@ pub enum Error {
     Integrity { path: String },
     #[error("exécution : {0}")]
     Execution(#[from] ExecutorError),
+    #[error("le modèle n'a pas répondu : {0}")]
+    Model(String),
+    #[error("la réponse du modèle ne contient aucun programme : {0}")]
+    NoProgram(String),
+    #[error("le programme proposé ne compile pas ({message})")]
+    /// `program` et non `source` : `thiserror` réserve `source` à la cause d'une erreur.
+    NotCompiling { program: String, message: String },
 }
 
 /// What a compilation produced, and where it landed.
