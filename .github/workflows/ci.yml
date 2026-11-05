@@ -14,6 +14,14 @@ env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
 
+# Un push qui en remplace un autre annule le run précédent. Sans ça, chaque
+# correction poussée coup sur coup empile un run complet ; le dernier — le seul
+# qui compte — attend que les périmés finissent. Mesuré sur this-examples le
+# 05/11/2026 : quatre pushes, quatre runs de ~25 min en file.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   # ── Documentation-only changes ─────────────────────────────────────────────
   # Every other job needs `code == 'true'`. `paths-ignore` used to live on
