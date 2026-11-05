@@ -1,5 +1,8 @@
 # Rust
-/target/
+# `target/` sans ancre : un crate à son propre workspace (this-client-web,
+# this-ui, this-shell-tauri) construit sous `crates/<nom>/target/`, et `/target/`
+# ne matche qu'à la racine du dépôt.
+target/
 **/*.rs.bk
 *.pdb
 Cargo.lock
