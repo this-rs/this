@@ -92,7 +92,9 @@ pub(crate) fn list_flat<'a>(
     out.into_values().collect()
 }
 
-#[async_trait]
+// Comme le trait : sur wasm les futures ne sont pas `Send`.
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl Vfs for InMemoryVfs {
     async fn read(&self, path: &VfsPath) -> Result<Vec<u8>, VfsError> {
         let files = self.files.read().map_err(|_| poisoned())?;
