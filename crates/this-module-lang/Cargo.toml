@@ -1,0 +1,19 @@
+[package]
+name = "this-module-lang"
+version = "0.0.1"
+edition = "2024"
+authors = ["Riviere Théotime <t@ffs.holdings>"]
+license = "MIT OR Apache-2.0"
+description = "Le langage de module de this-rs : un AST, un typeur, un interpréteur et une émission WAT. Total par construction — pas de boucle, pas d'I/O non déclarée."
+repository = "https://github.com/this-rs/this"
+keywords = ["framework", "module", "wasm", "language"]
+categories = ["development-tools"]
+# Pas encore publiée : elle n'est la dépendance publiée de personne, et un
+# `cargo publish --workspace` ne doit pas l'emporter par accident.
+publish = false
+
+[dependencies]
+
+[dev-dependencies]
+wasmi = "2.0.0"
+wat = "1.263.0"
