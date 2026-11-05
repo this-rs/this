@@ -511,10 +511,41 @@ jobs:
   # `if: always()` makes it report even when a dependency failed, which is the
   # whole point: a red CI must be able to block a merge. A skipped job counts as
   # fine here, and that is honest — a docs-only PR genuinely had nothing to check.
+  # Les crates wasm-only portent leur propre `[workspace]`, donc ils sont absents
+  # de `cargo check --workspace` : aucun job ne les compilait. Cinq crates — dont
+  # l'interface Leptos et le client des protocoles — pouvaient cesser de compiler
+  # pendant des semaines sans qu'un voyant ne s'allume.
+  wasm_crates:
+    # Skipped when the change is documentation-only (see `changes`).
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    name: Wasm-only crates
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Compile the crates that keep their own workspace
+        run: |
+          set -euo pipefail
+          for crate in this-ui this-client-web this-vfs-web this-module-harness-web; do
+            echo "::group::$crate"
+            ( cd "crates/$crate" && cargo check --target wasm32-unknown-unknown )
+            echo "::endgroup::"
+          done
+          # `this-shell-tauri` est exclu volontairement : Tauri exige GTK et WebKit,
+          # que ce runner n'a pas. C'est une exclusion assumée, pas un oubli — et
+          # elle est écrite ici pour que personne ne la prenne pour une couverture.
+
   gate:
     name: CI gate
     if: always()
-    needs: [changes, test, coverage, fmt, clippy, examples, security_audit, docs, cross-platform]
+    needs: [changes, test, coverage, fmt, clippy, examples, security_audit, docs, cross-platform, wasm_crates]
     runs-on: ubuntu-latest
     steps:
       - name: Nothing failed, nothing was cancelled
