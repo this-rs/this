@@ -173,9 +173,23 @@ pub enum CutoutSource {
 // ---- Platform dimensions (documented, not measured here) --------------------------------
 
 /// The macOS traffic lights in an `Overlay` bar: about 70 px of buttons, plus margin.
+/// The band the three window buttons occupy, measured — not recalled.
+///
+/// These numbers follow a norm that changes with the macOS version, exactly
+/// like the window's corner radius. They said 78x28 (an older norm) until they
+/// were measured on macOS 26.5.2 with AppKit's own frames:
+///
+/// ```text
+/// close x=9 y=9 14x14 · minimize x=32 · zoom x=55
+/// span of the three: 60 · inset 9 · title bar: 32 high
+/// ```
+///
+/// so 9 + 60 = 69 wide, 32 tall. The measuring script lives in the examples
+/// repo (`examples/desktop-modules/tools/measure-traffic-lights.swift`): run it
+/// on the target machine before changing these numbers.
 pub const MACOS_TRAFFIC_LIGHTS: Size = Size {
-    width: 78.0,
-    height: 28.0,
+    width: 69.0,
+    height: 32.0,
 };
 /// Minimise / maximise / close on Windows: three 46 px buttons.
 pub const WINDOWS_CAPTION_BUTTONS: Size = Size {
@@ -762,8 +776,18 @@ mod tests {
     fn the_wire_is_css_and_attributes_nothing_else() {
         let l = layout(&mac(TitleBar::Overlay, false));
         let vars: std::collections::HashMap<_, _> = l.css_vars().into_iter().collect();
-        assert_eq!(vars["--chrome-lead"], "78px");
-        assert_eq!(vars["--chrome-header-min"], "28px");
+        // Asserted against the constant, not against a number: the test's job is
+        // "the band reaches the wire", not "the band is 78" — the numbers follow
+        // the macOS version and are measured, so freezing them here would be a
+        // second source of truth that drifts silently.
+        assert_eq!(
+            vars["--chrome-lead"],
+            format!("{}px", MACOS_TRAFFIC_LIGHTS.width)
+        );
+        assert_eq!(
+            vars["--chrome-header-min"],
+            format!("{}px", MACOS_TRAFFIC_LIGHTS.height)
+        );
         assert!(!vars.contains_key("--chrome-cutout-x"));
         let attrs: std::collections::HashMap<_, _> = l.attributes().into_iter().collect();
         assert_eq!(attrs["data-platform"], "macos");
