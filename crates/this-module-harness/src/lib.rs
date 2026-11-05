@@ -36,6 +36,7 @@
 
 pub mod drafter;
 pub mod executor;
+pub mod module_draft;
 
 use chrono::Utc;
 use executor::{Executor, ExecutorError, Outcome};
@@ -72,6 +73,10 @@ pub enum Error {
     #[error("le programme proposé ne compile pas ({message})")]
     /// `program` et non `source` : `thiserror` réserve `source` à la cause d'une erreur.
     NotCompiling { program: String, message: String },
+    #[error("le descripteur proposé n'est pas un JSON valide : {0}")]
+    InvalidDescriptor(String),
+    #[error("le module proposé ne chargerait pas : {issues:?}")]
+    Rejected { issues: Vec<String> },
 }
 
 /// What a compilation produced, and where it landed.
