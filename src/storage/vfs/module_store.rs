@@ -48,47 +48,17 @@ use crate::descriptor::{
     ModuleDescriptor,
 };
 use crate::server::module_runtime::ModuleSource;
+// La disposition sur le VFS et le format du manifeste sont partagés avec le client :
+// ils viennent de `this-vfs`, pas d'ici. C'est ce qui rend un module écrit par une
+// page lisible (et vérifiable) par un serveur qui n'a jamais vu ce client.
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
-
-const DESCRIPTOR_FILE: &str = "descriptor.json";
-const MANIFEST_FILE: &str = "manifest.json";
-const YANKED_DIR: &str = "_yanked";
-const MANIFEST_FORMAT: u32 = 1;
-
-/// Commit record of one version.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-struct Manifest {
-    format: u32,
-    name: String,
-    version: String,
-    /// Path relative to the version directory -> etag.
-    files: BTreeMap<String, String>,
-    created: DateTime<Utc>,
-    /// Authentication of this record. **The manifest is the root of trust**: it
-    /// carries the etag of every file, so signing it authenticates them all. The
-    /// field is always part of the format (a store must stay readable by a host
-    /// built without the feature); it is only *enforced* by a host that declares
-    /// a [`TrustAnchor`].
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    signature: Option<SignatureBlock>,
-}
-
-/// Ed25519 signature over a manifest, with the identifier of the signing key.
-///
-/// The signed bytes are the manifest serialized **without** this block, so
-/// re-signing after a field change is always detectable: the signature covers
-/// the etags, hence the files.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SignatureBlock {
-    /// Which trusted key signed it. Lets a host rotate keys without a flag day.
-    pub key_id: String,
-    /// Ed25519 signature, base64 (standard alphabet, padded).
-    pub signature: String,
-}
+#[cfg(feature = "module-signing")]
+use this_vfs::layout::SignatureBlock;
+use this_vfs::layout::{DESCRIPTOR_FILE, MANIFEST_FILE, MANIFEST_FORMAT, Manifest, YANKED_DIR};
 
 /// The keys a host accepts for stored modules.
 ///
