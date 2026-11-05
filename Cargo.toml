@@ -11,7 +11,7 @@ categories = ["web-programming", "web-programming::http-server", "database"]
 readme = "README.md"
 
 [workspace]
-members = [".", "crates/this-descriptor", "crates/this-platform", "crates/this-app", "crates/this-module-lang", "crates/this-vfs", "crates/this-module-harness"]
+members = [".", "crates/this-descriptor", "crates/this-platform", "crates/this-app", "crates/this-module-lang", "crates/this-vfs", "crates/this-module-harness", "crates/this-llm"]
 resolver = "3"
 
 [dependencies]
