@@ -17,12 +17,18 @@ default = []
 # Un programme comme règle de descripteur (`register_rule`). Hors de cette feature
 # la crate reste sans aucune dépendance, donc trivialement wasm32.
 descriptor = ["dep:this-descriptor", "dep:serde_json"]
+# Assembler le WAT émis en binaire wasm, dans le processus. C'est ce qui permet
+# d'exécuter un module DANS la page : le navigateur reçoit des octets et appelle
+# `WebAssembly.instantiate`, sans `wabt.js` à charger. Pur Rust, compile wasm32.
+assemble = ["dep:wat"]
 
 [dependencies]
 # Un module stocké qui porte des règles est validé par `this-descriptor` ; la
 # dépendance est optionnelle pour que le langage seul n'entraîne rien.
 this-descriptor = { version = "0.0.1", path = "../this-descriptor", optional = true, default-features = false }
 serde_json = { version = "1.0", optional = true }
+# Même version que la dev-dependency : l'assembleur des tests est celui du produit.
+wat = { version = "1.263.0", optional = true }
 
 [[example]]
 name = "rules"

@@ -56,6 +56,9 @@ pub mod lex;
 pub mod parse;
 pub mod wat;
 
+#[cfg(feature = "assemble")]
+pub mod assemble;
+
 #[cfg(feature = "descriptor")]
 pub use descriptor::{Rule, register_rule};
 
