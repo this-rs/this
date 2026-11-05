@@ -45,24 +45,6 @@ pub struct Manifest {
     pub signature: Option<SignatureBlock>,
 }
 
-impl Manifest {
-    /// A manifest for a version, with the current format and timestamp.
-    pub fn new(
-        name: impl Into<String>,
-        version: impl Into<String>,
-        files: BTreeMap<String, String>,
-    ) -> Self {
-        Self {
-            format: MANIFEST_FORMAT,
-            name: name.into(),
-            version: version.into(),
-            files,
-            created: Utc::now(),
-            signature: None,
-        }
-    }
-}
-
 /// Ed25519 signature over a manifest, with the identifier of the signing key.
 ///
 /// The signed bytes are the manifest serialized **without** this block, so
