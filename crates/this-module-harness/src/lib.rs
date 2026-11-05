@@ -34,6 +34,8 @@
 //! # Ok(()) }
 //! ```
 
+pub mod executor;
+
 use chrono::Utc;
 use std::collections::BTreeMap;
 use this_module_lang::assemble::compile_to_wasm;
