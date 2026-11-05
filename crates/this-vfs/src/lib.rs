@@ -15,6 +15,7 @@ use std::fmt;
 use this_descriptor::framework::codes;
 use this_descriptor::{ContractError, MessageBundle, ModuleDescriptor};
 
+pub mod layout;
 pub mod memory;
 
 // Le banc de conformité est public : chaque backend du contrat le fait tourner,
