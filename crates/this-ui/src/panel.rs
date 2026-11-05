@@ -23,6 +23,7 @@ pub fn Panel(
                 aria-label=title.clone()
                 on:click=move |ev: web_sys::MouseEvent| ev.stop_propagation()
             >
+                <span class="panel-grab" aria-hidden="true"></span>
                 <header class="panel-head">
                     <div>
                         <p class="eyebrow">{eyebrow}</p>

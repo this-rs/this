@@ -82,7 +82,15 @@ pub struct Row {
     pub cells: Vec<Cell>,
 }
 
-/// Le tableau : en-tête collant, montants alignés, cartes étiquetées en mobile.
+/// Le tableau : en-tête collant, montants alignés sur desktop ; sous 700 px, une
+/// liste d'items compacts — une ligne par enregistrement, pas six.
+///
+/// Les deux formes vivent dans le même rendu : le CSS choisit celle qui s'affiche.
+/// `display: none` retire l'autre de l'arbre d'accessibilité, donc un lecteur d'écran
+/// n'en voit qu'une. La forme mobile n'est pas le tableau redécoré : elle applique une
+/// règle de lecture — **la première colonne est l'identité**, la première valeur
+/// chiffrée (ou la première pastille) est **le chiffre qui compte**, le reste devient
+/// une ligne secondaire.
 #[component]
 pub fn EntityTable(
     columns: Vec<Column>,
@@ -101,6 +109,12 @@ pub fn EntityTable(
         .collect_view();
 
     let labels: Vec<String> = columns.iter().map(|c| c.label.clone()).collect();
+
+    let items = rows
+        .iter()
+        .cloned()
+        .map(|row| item(row, on_open))
+        .collect_view();
 
     let body = rows
         .into_iter()
@@ -141,6 +155,74 @@ pub fn EntityTable(
                 </thead>
                 <tbody>{body}</tbody>
             </table>
+            <ul class="items">{items}</ul>
         </div>
     }
+}
+
+/// Le chevron de l'item mobile : elle dit « ça s'ouvre », sans bouton.
+const CHEVRON: &str = r#"<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m9 5 7 7-7 7"/></svg>"#;
+
+/// Une ligne, vue du téléphone : identité, chiffre qui compte, puis le reste en
+/// second plan. Aucun libellé répété : la position porte le sens.
+fn item(row: Row, on_open: Callback<String>) -> AnyView {
+    let title = row.cells.first().cloned().unwrap_or(Cell::Empty);
+
+    // Le chiffre qui compte : le premier montant, sinon la première pastille d'état.
+    // On ne regarde qu'après l'identité — un montant en première colonne EST l'identité.
+    let trail_at = row
+        .cells
+        .iter()
+        .enumerate()
+        .skip(1)
+        .find(|(_, cell)| matches!(cell, Cell::Amount(_)))
+        .or_else(|| {
+            row.cells
+                .iter()
+                .enumerate()
+                .skip(1)
+                .find(|(_, cell)| matches!(cell, Cell::Badge { .. }))
+        })
+        .map(|(index, _)| index);
+
+    let trail = trail_at.and_then(|index| row.cells.get(index)).cloned();
+
+    // La ligne secondaire : ce qui reste de lisible. Une jauge n'y a pas sa place
+    // (elle demande une largeur), et deux éléments suffisent à situer la ligne —
+    // au-delà, elle se casse sur un téléphone étroit et le point séparateur se
+    // retrouve seul en début de ligne.
+    let sub: Vec<Cell> = row
+        .cells
+        .iter()
+        .enumerate()
+        .skip(1)
+        .filter(|(index, cell)| Some(*index) != trail_at && !matches!(cell, Cell::Meter { .. }))
+        .map(|(_, cell)| cell.clone())
+        .filter(|cell| !matches!(cell, Cell::Empty))
+        .take(2)
+        .collect();
+
+    let id = row.id.clone();
+
+    view! {
+        <li class="item">
+            <button class="item-hit" on:click=move |_| on_open.run(id.clone())>
+                <span class="item-body">
+                    <span class="item-title">{title.render()}</span>
+                    {(!sub.is_empty()).then(|| view! {
+                        <span class="item-sub">
+                            {sub.into_iter().map(|cell| view! {
+                                <span class="item-sub-cell">{cell.render()}</span>
+                            }).collect_view()}
+                        </span>
+                    })}
+                </span>
+                <span class="item-end">
+                    {trail.map(|cell| cell.render())}
+                    <span class="item-chevron" inner_html=CHEVRON></span>
+                </span>
+            </button>
+        </li>
+    }
+    .into_any()
 }
