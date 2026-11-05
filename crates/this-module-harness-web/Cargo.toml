@@ -1,0 +1,21 @@
+[package]
+name = "this-module-harness-web"
+version = "0.0.1"
+edition = "2024"
+authors = ["Riviere Théotime <t@ffs.holdings>"]
+license = "MIT OR Apache-2.0"
+description = "The browser Executor of a this-rs module harness: WebAssembly.instantiate, host calls and effect trace."
+repository = "https://github.com/this-rs/this"
+keywords = ["framework", "module", "wasm", "executor"]
+categories = ["wasm"]
+
+# Crate wasm uniquement : son propre workspace, comme this-ui et this-vfs-web.
+[workspace]
+
+[dependencies]
+this-module-harness = { version = "0.0.1", path = "../this-module-harness" }
+this-module-lang = { version = "0.0.1", path = "../this-module-lang", default-features = false }
+async-trait = "0.1"
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"

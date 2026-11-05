@@ -37,8 +37,17 @@ pub enum ExecutorError {
 /// `now` is passed in rather than read by the engine: two runs compared for
 /// equality must see the same clock, otherwise a program that reads the time
 /// diverges by a few milliseconds and the comparison says nothing.
+///
+/// Asynchrone, et `Send` seulement hors wasm : `js-sys` n'expose que la forme
+/// asynchrone de `WebAssembly` (`compile`, `instantiate_buffer`), et les futures
+/// d'un moteur navigateur ne sont pas `Send` (`JsFuture` tient un `Rc`). Sur
+/// l'hôte, les handlers exigent `Send`. Le trait dit donc la vérité par cible,
+/// comme `Vfs` — au lieu d'imposer à l'un la contrainte de l'autre.
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 pub trait Executor {
-    fn run(&self, program: &[u8], args: &[Value], now: i64) -> Result<Outcome, ExecutorError>;
+    async fn run(&self, program: &[u8], args: &[Value], now: i64)
+    -> Result<Outcome, ExecutorError>;
 }
 
 /// Renders a value the same way for every engine, so outcomes are comparable.
@@ -71,8 +80,15 @@ mod wasmi_engine {
     /// An `Executor` backed by `wasmi`, for hosts.
     pub struct WasmiExecutor;
 
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+    #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
     impl Executor for WasmiExecutor {
-        fn run(&self, program: &[u8], args: &[Value], now: i64) -> Result<Outcome, ExecutorError> {
+        async fn run(
+            &self,
+            program: &[u8],
+            args: &[Value],
+            now: i64,
+        ) -> Result<Outcome, ExecutorError> {
             let engine = Engine::default();
             let module =
                 Module::new(&engine, program).map_err(|e| ExecutorError::Module(e.to_string()))?;
@@ -212,16 +228,19 @@ mod tests {
         }
     }
 
-    fn through_wasmi(source: &str, args: &[Value]) -> Outcome {
+    async fn through_wasmi(source: &str, args: &[Value]) -> Outcome {
         let program = compile_to_wasm(source).expect("assemblage");
-        WasmiExecutor.run(&program, args, NOW).expect("exécution")
+        WasmiExecutor
+            .run(&program, args, NOW)
+            .await
+            .expect("exécution")
     }
 
-    #[test]
-    fn the_engine_agrees_with_the_interpreter_on_value_and_effects() {
+    #[tokio::test]
+    async fn the_engine_agrees_with_the_interpreter_on_value_and_effects() {
         let args = [Value::Int(1)];
         let expected = reference(PROGRAM, &args);
-        let got = through_wasmi(PROGRAM, &args);
+        let got = through_wasmi(PROGRAM, &args).await;
         assert_eq!(
             got, expected,
             "les deux exécuteurs doivent dire la même chose"
@@ -233,18 +252,18 @@ mod tests {
         );
     }
 
-    #[test]
-    fn the_clock_is_the_one_that_was_passed() {
+    #[tokio::test]
+    async fn the_clock_is_the_one_that_was_passed() {
         let program = "fn run() -> Int { now() }";
         let expected = reference(program, &[]);
-        let got = through_wasmi(program, &[]);
+        let got = through_wasmi(program, &[]).await;
         assert_eq!(got.value, expected.value, "même horloge, même valeur");
         assert_eq!(got.effects, vec!["now()".to_string()]);
     }
 
-    #[test]
-    fn a_program_without_effects_reports_none() {
-        let got = through_wasmi("fn run() -> Int { 40 + 2 }", &[]);
+    #[tokio::test]
+    async fn a_program_without_effects_reports_none() {
+        let got = through_wasmi("fn run() -> Int { 40 + 2 }", &[]).await;
         assert_eq!(got.value, "42");
         assert!(
             got.effects.is_empty(),
