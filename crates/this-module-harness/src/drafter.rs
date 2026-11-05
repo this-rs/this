@@ -23,16 +23,10 @@
 
 use crate::Error;
 
-/// The seam: how a request reaches a model.
-///
-/// Asynchronous, and `Send` only off `wasm32`, because a browser completion goes
-/// through a `!Send` future while a server's handlers need `Send`.
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-pub trait Completion {
-    /// `system` describes the language; `request` is what the user asked for.
-    async fn complete(&self, system: &str, request: &str) -> Result<String, String>;
-}
+// Le contrat vit dans `this-llm` : le drafter le consomme, il ne le redéfinit pas.
+// Deux traits de même forme, un par endroit, obligeraient chaque app à écrire un
+// adaptateur — exactement la duplication que ce dépôt retire ailleurs.
+pub use this_llm::Completion;
 
 /// Asks a model for a program, and refuses what does not compile.
 pub struct Drafter<C: Completion> {
