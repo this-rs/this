@@ -24,6 +24,12 @@ descriptor = ["dep:this-descriptor", "dep:serde_json"]
 this-descriptor = { version = "0.0.1", path = "../this-descriptor", optional = true, default-features = false }
 serde_json = { version = "1.0", optional = true }
 
+[[example]]
+name = "rules"
+# La démo a besoin du pont vers this-descriptor ; le langage seul reste sans
+# aucune dépendance.
+required-features = ["descriptor"]
+
 [dev-dependencies]
 wasmi = "2.0.0"
 wat = "1.263.0"
