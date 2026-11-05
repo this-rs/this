@@ -41,8 +41,9 @@ use executor::{Executor, ExecutorError, Outcome};
 use std::collections::BTreeMap;
 use this_module_lang::assemble::compile_to_wasm;
 use this_module_lang::eval::Value;
+use this_vfs::layout::YANKED_DIR;
 use this_vfs::layout::{MANIFEST_FILE, MANIFEST_FORMAT, Manifest};
-use this_vfs::{Precondition, Vfs, VfsError, VfsPath, etag_of};
+use this_vfs::{Precondition, Vfs, VfsEntry, VfsError, VfsPath, etag_of};
 
 /// The binary, inside the version directory.
 pub const PROGRAM_FILE: &str = "program.wasm";
@@ -162,6 +163,40 @@ impl<'a, V: Vfs> Harness<'a, V> {
         Ok(executor.run(&program, args, now).await?)
     }
 
+    /// Every version stored for `name`, oldest first.
+    ///
+    /// Sorting is numeric per component, so `0.10.0` comes after `0.9.0` — a plain
+    /// string sort would put it before, and a harness that reads "the latest"
+    /// would silently run an older module.
+    ///
+    /// The reserved directory of the layout is skipped: a yanked version is not a
+    /// version you can ask for.
+    pub async fn versions(&self, name: &str) -> Result<Vec<String>, Error> {
+        let dir = VfsPath::parse(&format!("/modules/{name}")).map_err(Error::Vfs)?;
+        let prefix = format!("/modules/{name}/");
+        let mut versions: Vec<String> = self
+            .vfs
+            .list(&dir)
+            .await?
+            .into_iter()
+            .filter_map(|entry| match entry {
+                VfsEntry::Dir { path } => path
+                    .as_str()
+                    .strip_prefix(&prefix)
+                    .map(|rest| rest.to_string()),
+                VfsEntry::File { .. } => None,
+            })
+            .filter(|rest| !rest.is_empty() && !rest.contains('/') && rest != YANKED_DIR)
+            .collect();
+        versions.sort_by(|a, b| compare_versions(a, b));
+        Ok(versions)
+    }
+
+    /// The highest stored version of `name`, if any.
+    pub async fn latest(&self, name: &str) -> Result<Option<String>, Error> {
+        Ok(self.versions(name).await?.pop())
+    }
+
     /// The source that produced a stored artifact.
     pub async fn source(&self, name: &str, version: &str) -> Result<String, Error> {
         let dir = version_dir(name, version)?;
@@ -173,6 +208,19 @@ impl<'a, V: Vfs> Harness<'a, V> {
         self.vfs.write(path, bytes, Precondition::None).await?;
         Ok(())
     }
+}
+
+/// Compare deux versions composant par composant, numériquement quand c'est
+/// possible. `0.10.0 > 0.9.0`, ce qu'un tri de chaînes ne donne pas.
+fn compare_versions(a: &str, b: &str) -> std::cmp::Ordering {
+    let num = |s: &str, i: usize| s.split('.').nth(i).and_then(|p| p.parse::<u64>().ok());
+    for i in 0..4 {
+        match (num(a, i), num(b, i)) {
+            (Some(x), Some(y)) if x != y => return x.cmp(&y),
+            _ => continue,
+        }
+    }
+    a.cmp(b)
 }
 
 fn version_dir(name: &str, version: &str) -> Result<VfsPath, Error> {
@@ -278,6 +326,61 @@ mod tests {
                 .await
                 .is_err(),
             "un module absent ne doit pas être inventé"
+        );
+    }
+
+    #[tokio::test]
+    async fn versions_are_ordered_numerically_not_alphabetically() {
+        let vfs = InMemoryVfs::default();
+        let harness = Harness::new(&vfs);
+        for version in ["0.9.0", "0.10.0", "0.2.0"] {
+            harness.compile("shop", version, PROGRAM).await.unwrap();
+        }
+
+        assert_eq!(
+            harness.versions("shop").await.unwrap(),
+            vec!["0.2.0", "0.9.0", "0.10.0"],
+            "0.10.0 vient après 0.9.0 : un tri de chaînes le placerait avant"
+        );
+        assert_eq!(
+            harness.latest("shop").await.unwrap(),
+            Some("0.10.0".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn a_yanked_directory_is_not_a_version() {
+        let vfs = InMemoryVfs::default();
+        let harness = Harness::new(&vfs);
+        harness.compile("shop", "0.1.0", PROGRAM).await.unwrap();
+
+        // Le dossier réservé de la disposition, créé comme le ferait un retrait.
+        let yanked = VfsPath::parse("/modules/shop/_yanked/0.1.0.json").unwrap();
+        vfs.write(&yanked, b"{}", Precondition::None).await.unwrap();
+
+        assert_eq!(harness.versions("shop").await.unwrap(), vec!["0.1.0"]);
+    }
+
+    #[tokio::test]
+    async fn two_versions_are_two_programs_not_one() {
+        let vfs = InMemoryVfs::default();
+        let harness = Harness::new(&vfs);
+        harness
+            .compile("shop", "0.1.0", "fn run() -> Int { 1 }")
+            .await
+            .unwrap();
+        harness
+            .compile("shop", "0.2.0", "fn run() -> Int { 2 }")
+            .await
+            .unwrap();
+
+        assert_eq!(
+            harness.source("shop", "0.1.0").await.unwrap(),
+            "fn run() -> Int { 1 }"
+        );
+        assert_eq!(
+            harness.source("shop", "0.2.0").await.unwrap(),
+            "fn run() -> Int { 2 }"
         );
     }
 
