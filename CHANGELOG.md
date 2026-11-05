@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **`crates/` — the contracts and the frontend of an app, inside the framework.** Seven crates an application no longer rewrites:
+  - `this-descriptor` — the serializable module descriptor shared by `this-rs`, `this-cli` and wasm32 fronts: types, validation, query filters, policies, errors, i18n.
+  - `this-platform` — the platform shell contract: form factor, window chrome, device cutouts, lifecycle decisions, device capabilities. Pure — no Tauri, no DOM.
+  - `this-app` — the pure contracts of an app: boot sequence, settings, notices, device capabilities. No DOM, no Tauri, no HTTP; 29 tests on the host.
+  - `this-module-lang` — the module language: AST, type checker, interpreter and WAT emission. Total by construction — no loop, no undeclared I/O.
+  - `this-ui` — the Leptos components of an app: splash, panel, settings, window chrome, notices. Consumed by a wasm front; 9 tests.
+  - `this-client-web` — the wasm client of a this-rs server's protocols: gRPC-Web framing, minimal protobuf, unary calls and server streams.
+  - `this-shell-tauri` — the Tauri 2 plugin that connects an app's window, Dock and lifecycle to the `this-platform` decisions.
+
+  The last three keep their own `[workspace]` and are **not** members of the root one: a backend that needs none of it must not compile Leptos, a wasm client or Tauri. They are built from their own directory, for `wasm32` (or Tauri), which also means a root `cargo build` does not see them.
+
+### Fixed
+- **Compiled output was tracked.** `.gitignore` only carried `/target/`, a pattern anchored at the repository root, so `crates/this-client-web/target/` was never matched. 554 of the 1 006 tracked files were build artifacts. The pattern is now `target/` and the files left the index; a build no longer re-adds anything.
+
 ### Documentation
 - **Alignement sur le code** (aucun changement de comportement) :
   - « No N+1 queries » retiré du README, de `docs/architecture/ARCHITECTURE.md`, de `docs/guides/ENRICHED_LINKS.md` et de `docs/changes/LATEST_CHANGES.md`. L'enrichissement des liens (`src/links/handlers.rs`, `enrich_links_with_entities`) récupère les entités liées une par une, en séquence, sans regroupement : les entités sont incluses dans la réponse, mais le coût est d'un accès par entité.
