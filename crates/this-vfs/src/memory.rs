@@ -167,7 +167,7 @@ impl Vfs for InMemoryVfs {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::vfs::conformance;
+    use crate::conformance;
 
     #[tokio::test]
     async fn vfs_conformance_read_write_roundtrip_memory() {

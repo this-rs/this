@@ -1,0 +1,25 @@
+[package]
+name = "this-vfs"
+version = "0.0.1"
+edition = "2024"
+authors = ["Riviere Théotime <t@ffs.holdings>"]
+license = "MIT OR Apache-2.0"
+description = "The virtual file system contract of a this-rs app: paths, etags, preconditions, capabilities — and the in-memory backend. Pure: no tokio, no axum, wasm32-safe."
+repository = "https://github.com/this-rs/this"
+keywords = ["framework", "vfs", "wasm", "contract"]
+categories = ["filesystem"]
+
+[dependencies]
+# Le contrat parle du descripteur (bundles, erreurs) et rien d'autre.
+this-descriptor = { version = "0.0.1", path = "../this-descriptor", default-features = false }
+async-trait = "0.1"
+# `wasmbind` : sans lui, `Utc::now()` panique sur wasm32-unknown-unknown.
+chrono = { version = "0.4", features = ["serde", "wasmbind"] }
+anyhow = "1.0"
+thiserror = "2.0"
+sha2 = "0.10"
+
+[dev-dependencies]
+# Uniquement pour les tests : les backends sont asynchrones et les tests les
+# attendent. Rien de tout cela n'entre dans le crate compilé.
+tokio = { version = "1", features = ["rt", "macros"] }

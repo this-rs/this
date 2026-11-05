@@ -11,13 +11,15 @@ categories = ["web-programming", "web-programming::http-server", "database"]
 readme = "README.md"
 
 [workspace]
-members = [".", "crates/this-descriptor", "crates/this-platform", "crates/this-app", "crates/this-module-lang"]
+members = [".", "crates/this-descriptor", "crates/this-platform", "crates/this-app", "crates/this-module-lang", "crates/this-vfs"]
 resolver = "3"
 
 [dependencies]
 # Module descriptor (types, pure engines, error table) shared with this-cli and wasm32
 # fronts. `version` + `path`: publishable (this-descriptor is published BEFORE this-rs).
 this-descriptor = { version = "0.0.1", path = "crates/this-descriptor", features = ["yaml", "pattern", "http"] }
+# Le contrat VFS, partagé avec le client : il compile pour wasm32, contrairement à ce crate.
+this-vfs = { version = "0.0.1", path = "crates/this-vfs" }
 # Atomic publication of the host catalog snapshot (readers never lock).
 arc-swap = "1"
 # Async runtime

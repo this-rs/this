@@ -8,7 +8,7 @@ fn p(s: &str) -> VfsPath {
     VfsPath::parse(s).unwrap()
 }
 
-pub(crate) async fn read_write_roundtrip(v: &dyn Vfs) {
+pub async fn read_write_roundtrip(v: &dyn Vfs) {
     let path = p("/rw/module.wasm");
     assert!(v.stat(&path).await.unwrap().is_none());
     let bytes: Vec<u8> = (0..=255u8).cycle().take(4096).collect();
@@ -31,7 +31,7 @@ pub(crate) async fn read_write_roundtrip(v: &dyn Vfs) {
     ));
 }
 
-pub(crate) async fn if_match_conflict(v: &dyn Vfs) {
+pub async fn if_match_conflict(v: &dyn Vfs) {
     let path = p("/im/descriptor.json");
     let m1 = v.write(&path, b"one", Precondition::None).await.unwrap();
     let m2 = v
@@ -70,7 +70,7 @@ pub(crate) async fn if_match_conflict(v: &dyn Vfs) {
     assert!(v.stat(&path).await.unwrap().is_none());
 }
 
-pub(crate) async fn if_none_match_create_only(v: &dyn Vfs) {
+pub async fn if_none_match_create_only(v: &dyn Vfs) {
     let path = p("/inm/manifest.json");
     v.write(&path, b"first", Precondition::IfNoneMatch)
         .await
@@ -85,7 +85,7 @@ pub(crate) async fn if_none_match_create_only(v: &dyn Vfs) {
     assert_eq!(v.read(&path).await.unwrap(), b"first");
 }
 
-pub(crate) async fn list_dir(v: &dyn Vfs) {
+pub async fn list_dir(v: &dyn Vfs) {
     for f in [
         "/ls/m/1.0.0/descriptor.json",
         "/ls/m/1.0.0/i18n/fr.json",
@@ -138,7 +138,7 @@ pub(crate) async fn list_dir(v: &dyn Vfs) {
     assert_eq!(names(v.list(&p("/ls/m")).await.unwrap()), ["D /ls/m/1.0.0"]);
 }
 
-pub(crate) async fn delete_missing_not_found(v: &dyn Vfs) {
+pub async fn delete_missing_not_found(v: &dyn Vfs) {
     let path = p("/del/x");
     assert!(matches!(
         v.delete(&path, Precondition::None).await,
@@ -153,7 +153,7 @@ pub(crate) async fn delete_missing_not_found(v: &dyn Vfs) {
     assert!(matches!(v.read(&path).await, Err(VfsError::NotFound(_))));
 }
 
-pub(crate) async fn shape_conflicts(v: &dyn Vfs) {
+pub async fn shape_conflicts(v: &dyn Vfs) {
     v.write(&p("/shape/a/b"), b"x", Precondition::None)
         .await
         .unwrap();
@@ -173,8 +173,7 @@ pub(crate) async fn shape_conflicts(v: &dyn Vfs) {
 }
 
 /// Every case, in one call (backends with an expensive setup).
-#[cfg_attr(not(feature = "obrain"), allow(dead_code))]
-pub(crate) async fn run_all(v: &dyn Vfs) {
+pub async fn run_all(v: &dyn Vfs) {
     read_write_roundtrip(v).await;
     if_match_conflict(v).await;
     if_none_match_create_only(v).await;
