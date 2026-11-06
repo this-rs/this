@@ -131,8 +131,25 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
+/// The message of a transport error, with its cause. reqwest's own message stops at
+/// "error sending request for url (…)", which hides *why*: a refused connection, an unknown
+/// host, a local-network permission. The chain is what a user needs to act on.
+fn cause_chain(error: &dyn std::error::Error) -> String {
+    let mut message = error.to_string();
+    let mut source = error.source();
+    while let Some(cause) = source {
+        let text = cause.to_string();
+        if !message.contains(&text) {
+            message.push_str(" — ");
+            message.push_str(&text);
+        }
+        source = cause.source();
+    }
+    message
+}
+
 fn transport(error: reqwest::Error) -> ProviderError {
-    ProviderError::Transport(error.to_string())
+    ProviderError::Transport(cause_chain(&error))
 }
 
 fn excerpt(text: &str) -> String {
