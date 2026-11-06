@@ -134,7 +134,10 @@ pub struct Budget {
 impl Default for Budget {
     fn default() -> Self {
         Self {
-            max_output_tokens: 4096,
+            // 16384, not 4096: an agent writes a whole module in one tool call, and a
+            // local engine serves 128k-262k windows. The cap still shrinks to the room the
+            // window leaves after the input (see `ProviderClient::prepare`).
+            max_output_tokens: 16_384,
             max_tokens_per_day: None,
             max_cost_micros_per_day: None,
         }
