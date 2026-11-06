@@ -496,7 +496,19 @@ fn un_etat_sauvegarde_se_repare_et_se_rejoue() {
         Limits::default(),
     );
     autre.restore(relu);
-    assert_eq!(autre_handle.pending(), saved.pending);
+    let restaure = autre_handle.pending();
+    assert_eq!(restaure.len(), saved.pending.len());
+    for (apres, avant) in restaure.iter().zip(&saved.pending) {
+        assert_eq!((apres.id, &apres.text), (avant.id, &avant.text));
+        // `serde_json` relit un `f64` à un ULP près sans la fonctionnalité `float_roundtrip` :
+        // on compare l'instant, pas ses bits — sinon le test échoue une fois sur vingt.
+        assert!(
+            (apres.at_ms - avant.at_ms).abs() < 1e-3,
+            "l'instant d'arrivée doit survivre à la sauvegarde : {} / {}",
+            apres.at_ms,
+            avant.at_ms
+        );
+    }
     assert_eq!(
         autre_handle.pending()[0].text,
         "message tapé juste avant la fermeture"
