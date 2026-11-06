@@ -385,6 +385,30 @@ pub fn surface() -> Surface {
                 Status::Live,
             ),
             Capability::new(
+                "graph",
+                Tier::Shell,
+                "lire et écrire des nœuds et des arêtes du graphe de l'app",
+                Some("graph_put / graph_link / graph_query"),
+                &[Ios, Ipados, Macos],
+                Status::Live,
+            ),
+            Capability::new(
+                "memory",
+                Tier::Shell,
+                "notes durables de l'agent, retrouvées par le graphe",
+                Some("remember / recall / forget"),
+                &[Ios, Ipados, Macos],
+                Status::Live,
+            ),
+            Capability::new(
+                "rows",
+                Tier::Shell,
+                "lignes des entités déclarées par les modules, persistées dans le graphe",
+                Some("row_list / row_create / row_patch / row_remove"),
+                &[Ios, Ipados, Macos],
+                Status::Live,
+            ),
+            Capability::new(
                 "file.pick",
                 Tier::Shell,
                 "choisir un fichier ou une photo",
@@ -496,6 +520,28 @@ mod tests {
         assert_eq!(carte.capability("ui.render").unwrap().status, Status::Live);
         assert_eq!(carte.slot("boot").unwrap().status, Status::Missing);
         assert_eq!(carte.slot("module.screen").unwrap().status, Status::Live);
+    }
+
+    #[test]
+    fn la_carte_dit_que_l_agent_a_un_graphe_une_memoire_et_des_lignes() {
+        let texte = surface().describe(100_000);
+        for id in ["graph", "memory", "rows"] {
+            assert!(
+                texte.contains(&format!("· {id} —")),
+                "{id} absent de la carte"
+            );
+            let c = surface().capability(id).cloned().unwrap();
+            assert_eq!(c.tier, Tier::Shell);
+            assert_eq!(c.status, Status::Live);
+            assert!(c.platforms.contains(&Platform::Ios));
+            assert!(c.platforms.contains(&Platform::Macos));
+        }
+        assert!(
+            texte.contains("graph_put")
+                && texte.contains("graph_link")
+                && texte.contains("graph_query")
+        );
+        assert!(texte.contains("remember") && texte.contains("recall") && texte.contains("forget"));
     }
 
     #[test]
