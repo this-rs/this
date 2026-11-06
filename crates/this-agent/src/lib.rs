@@ -140,8 +140,14 @@ impl Step {
         self
     }
 
+    /// L'outil a **échoué** : il a planté, ou n'a pas pu faire ce qu'on lui demandait. Ce n'est
+    /// ni un refus (une décision) ni un succès : la cause se garde, et le harnais la relit.
     pub fn failed(mut self, erreur: impl Into<String>) -> Self {
-        self.failure = Some(erreur.into());
+        let erreur = erreur.into();
+        if self.resume.is_empty() {
+            self.resume = erreur.clone();
+        }
+        self.failure = Some(erreur);
         self
     }
 
@@ -272,6 +278,15 @@ impl Run {
             .find(|etape| !etape.before.is_empty() && !etape.a_change())
     }
 
+    /// Le dernier échec d'outil **du tour en cours**. Comme pour les refus, un échec ancien ne
+    /// doit pas condamner chaque tour suivant.
+    pub fn derniere_en_echec(&self) -> Option<&Step> {
+        self.du_tour()
+            .iter()
+            .rev()
+            .find(|etape| etape.failure.is_some())
+    }
+
     /// Le dernier refus **du tour en cours**. Cherché sur tout le run, un refus
     /// ancien condamnait chaque tour suivant.
     pub fn derniere_refusee(&self) -> Option<&Step> {
@@ -336,20 +351,25 @@ impl Run {
         let refus = self
             .derniere_refusee()
             .and_then(|etape| etape.motif.clone());
+        // Un échec d'outil est une cause à corriger, au même titre qu'un refus : sans cette
+        // ligne, un tour conclu après un outil planté passait pour un succès.
+        let echec = self
+            .derniere_en_echec()
+            .and_then(|etape| etape.failure.clone());
         let muet = !a_parle;
         // Une étape qui n'a rien changé n'est pas un progrès : la relance doit
         // exiger un changement, sinon on tourne en rond en croyant avancer.
         let sans_effet = self.dernier_sans_effet().is_some();
 
-        if refus.is_some() || muet || sans_effet {
-            let (compteur, max) = match (refus.is_some(), muet) {
+        if refus.is_some() || echec.is_some() || muet || sans_effet {
+            let (compteur, max) = match (refus.is_some() || echec.is_some(), muet) {
                 (true, _) => (self.relances_refus, self.max_relances),
                 (false, true) => (self.relances_muet, self.max_relances),
                 _ => (self.relances_refus, self.max_relances),
             };
             self.tour_debut = fin_du_tour;
             if compteur < max {
-                if refus.is_some() {
+                if refus.is_some() || echec.is_some() {
                     self.relances_refus += 1;
                 } else {
                     self.relances_muet += 1;
@@ -358,6 +378,10 @@ impl Run {
             }
             return self.halt(match refus {
                 Some(raison) => Stop::Refused(raison),
+                None if echec.is_some() => Stop::Failed(format!(
+                    "l'outil a échoué : {}",
+                    echec.clone().unwrap_or_default()
+                )),
                 None if muet => Stop::Failed("le modèle n'a rendu ni texte ni outil".to_string()),
                 None => Stop::Failed("les actions n'ont rien changé".to_string()),
             });
@@ -457,6 +481,57 @@ mod tests {
         let mut r = Run::new(Goal::new("boucle"), 2);
         r.after_turn(false, true);
         assert_eq!(r.after_turn(false, true), Decision::Halt(Stop::Budget));
+    }
+
+    // ---- un échec d'outil est vu ----
+
+    /// Un outil qui plante, puis un modèle qui conclut : ce n'est pas un succès. Le run relance,
+    /// et quand les relances sont épuisées, il s'arrête en disant la cause.
+    #[test]
+    fn un_echec_d_outil_relance_puis_echoue_en_disant_la_cause() {
+        let mut r = Run::new(Goal::new("installe"), 20);
+        r.max_relances = 1;
+        r.record(Step::tool("install_module", 5).failed("module introuvable"));
+        assert_eq!(
+            r.after_turn(true, false),
+            Decision::Continue,
+            "première relance"
+        );
+
+        r.record(Step::tool("install_module", 5).failed("module introuvable"));
+        match r.after_turn(true, false) {
+            Decision::Halt(Stop::Failed(cause)) => {
+                assert!(
+                    cause.contains("module introuvable"),
+                    "la cause est dite : {cause}"
+                )
+            }
+            autre => panic!("attendu un arrêt sur échec, obtenu {autre:?}"),
+        }
+    }
+
+    /// Un échec d'un tour ancien ne condamne pas les tours suivants.
+    #[test]
+    fn un_echec_ancien_ne_condamne_pas_le_tour_suivant() {
+        let mut r = Run::new(Goal::new("installe"), 20);
+        r.record(Step::tool("install_module", 5).failed("réseau"));
+        assert_eq!(r.after_turn(true, false), Decision::Continue);
+
+        // Le tour suivant n'a pas d'échec : un modèle qui conclut conclut.
+        assert!(r.derniere_en_echec().is_none());
+        assert_eq!(r.after_turn(true, false), Decision::Halt(Stop::Done));
+    }
+
+    /// Un échec n'est pas un refus, et inversement : les deux restent distinguables.
+    #[test]
+    fn un_echec_n_est_pas_un_refus() {
+        let mut r = Run::new(Goal::new("x"), 20);
+        r.record(Step::tool("a", 1).failed("cassé"));
+        r.record(Step::tool("b", 1).refused("interdit"));
+        assert_eq!(r.derniere_en_echec().map(|e| e.tool.as_str()), Some("a"));
+        assert_eq!(r.derniere_refusee().map(|e| e.tool.as_str()), Some("b"));
+        assert!(!r.steps[0].refused);
+        assert!(r.steps[1].failure.is_none());
     }
 
     // ---- la politique est un port, pas une loi ----

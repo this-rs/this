@@ -132,7 +132,11 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 }
 
 fn transport(error: reqwest::Error) -> ProviderError {
-    ProviderError::Transport(error.to_string())
+    if error.is_timeout() {
+        ProviderError::Timeout(error.to_string())
+    } else {
+        ProviderError::Transport(error.to_string())
+    }
 }
 
 fn excerpt(text: &str) -> String {
@@ -522,9 +526,7 @@ impl Turn {
             }
             if self.ended {
                 if self.finish.is_none() && !self.done_seen && self.calls.is_empty() {
-                    return Err(ProviderError::Parse(
-                        "flux coupé avant la fin : ni [DONE] ni finish_reason".to_string(),
-                    ));
+                    return Err(ProviderError::StreamCut);
                 }
                 return Ok(None);
             }

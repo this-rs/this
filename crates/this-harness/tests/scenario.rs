@@ -288,6 +288,66 @@ fn un_refus_relance_avec_le_motif() {
     );
 }
 
+/// Un outil qui PLANTE n'est ni un succès, ni un refus : le harnais doit le voir, le dire au
+/// modèle avec la cause, et l'événement doit le porter à l'interface.
+#[test]
+fn un_echec_d_outil_relance_avec_la_cause() {
+    let transport = Script::new(vec![
+        Reply {
+            text: String::new(),
+            calls: vec![call("a1")],
+            finish: Finish::Tools,
+        },
+        Reply {
+            text: "je m'arrête là".into(),
+            calls: vec![],
+            finish: Finish::Stop,
+        },
+    ]);
+    let tools = Tools::new(|_| Outcome::failed("échec : module introuvable", "module introuvable"));
+    let (harness, _, log) = build(transport, tools, Limits::default());
+
+    let stop = match run(harness.send("installe")) {
+        Running::Ran(stop) => stop,
+        autre => panic!("attendu Ran, obtenu {autre:?}"),
+    };
+    assert_eq!(stop, Stop::Done);
+
+    let hints: Vec<String> = log
+        .borrow()
+        .iter()
+        .filter_map(|event| match event {
+            Event::Hint { text } => Some(text.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(hints.len(), 1, "un échec relance : {hints:?}");
+    assert!(
+        hints[0].contains("module introuvable"),
+        "la cause doit être relue : {hints:?}"
+    );
+    assert!(
+        hints[0].contains("échoué"),
+        "et dite comme un échec, pas comme un refus : {hints:?}"
+    );
+
+    let result = log
+        .borrow()
+        .iter()
+        .find_map(|event| match event {
+            Event::ToolResult {
+                failed, refused, ..
+            } => Some((*failed, *refused)),
+            _ => None,
+        })
+        .expect("un ToolResult");
+    assert_eq!(
+        result,
+        (true, false),
+        "l'interface voit un échec, pas un refus"
+    );
+}
+
 #[test]
 fn une_reponse_tronquee_n_est_pas_une_conclusion() {
     let transport = Script::new(vec![Reply {

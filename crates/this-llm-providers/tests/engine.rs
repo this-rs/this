@@ -11,7 +11,7 @@ use std::sync::Arc;
 use serde_json::{Value, json};
 use this_llm::{Completion, CredentialRef, Preset};
 use this_llm_providers::{
-    Budget, ChatRequest, Clock, Finish, Hub, MemoryStore, ProviderConfig, ProviderError,
+    Budget, ChatRequest, Clock, ErrorKind, Finish, Hub, MemoryStore, ProviderConfig, ProviderError,
     ProviderId, Secrets, TurnRequest,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -417,7 +417,7 @@ async fn a_stream_that_ends_without_done_is_an_error_not_an_answer() {
         }
     }
     assert!(
-        matches!(failure, Some(ProviderError::Parse(_))),
+        matches!(failure, Some(ProviderError::StreamCut)),
         "un flux coupé n'est pas une réponse : {failure:?}"
     );
     assert_eq!(turn.received(), "Bon", "ce qui est arrivé reste lisible");
@@ -464,4 +464,77 @@ async fn a_whole_turn_with_tools_returns_the_assistant_message() {
     assert_eq!(reply.finish, Finish::ToolCalls);
     assert_eq!(reply.tool_calls[0]["function"]["name"], "lire");
     assert_eq!(reply.model, "qwen-test");
+}
+
+/// Chaque panne arrive avec sa famille : l'hôte commute dessus au lieu de lire un message.
+#[tokio::test]
+async fn every_failure_arrives_with_its_family() {
+    let base = start_engine().await;
+
+    // Un statut d'erreur du moteur : Http, avec le statut.
+    let mut config = provider(&base, Budget::default());
+    config.model = Some("modele-absent".into());
+    let hub = hub_with(config, 20_000);
+    let client = hub.client(&local()).expect("client");
+    let error = client
+        .chat(ChatRequest::new("sys", "hi"))
+        .await
+        .expect_err("400");
+    assert_eq!(error.kind(), ErrorKind::Http(400));
+    assert_eq!(error.kind().code(), "http");
+    assert_eq!(error.kind().status(), Some(400));
+
+    // Une requête trop grosse pour la fenêtre : décision du provider, rien n'est parti.
+    let hub = hub_with(provider(&base, Budget::default()), 20_000);
+    let client = hub.client(&local()).expect("client");
+    let mut grosse = ChatRequest::new("sys", "x".repeat(30_000));
+    grosse.max_output_tokens = Some(64);
+    let error = client.chat(grosse).await.expect_err("contexte");
+    assert_eq!(error.kind(), ErrorKind::Provider);
+
+    // Un budget épuisé : même famille.
+    let hub = hub_with(provider(&base, one_call_a_day()), 20_000);
+    let client = hub.client(&local()).expect("client");
+    client
+        .chat(ChatRequest::new("Tu es bref.", "Dis bonjour."))
+        .await
+        .expect("premier");
+    let error = client
+        .chat(ChatRequest::new("Tu es bref.", "Dis bonjour."))
+        .await
+        .expect_err("budget");
+    assert_eq!(error.kind(), ErrorKind::Provider);
+
+    // Un flux coupé : Truncated.
+    let hub = hub_with(provider(&base, Budget::default()), 20_000);
+    let client = hub.client(&local()).expect("client");
+    let mut turn = client
+        .open_turn(TurnRequest::new(conversation("SCENARIO:cut")))
+        .await
+        .expect("ouvert");
+    let error = loop {
+        match turn.next().await {
+            Ok(Some(_)) => {}
+            Ok(None) => panic!("un flux coupé ne finit pas proprement"),
+            Err(error) => break error,
+        }
+    };
+    assert_eq!(error.kind(), ErrorKind::Truncated);
+
+    // Un moteur qui n'écoute pas : Unreachable.
+    let closed = {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("port");
+        let address = listener.local_addr().expect("adresse");
+        drop(listener);
+        format!("http://{address}/v1")
+    };
+    let mut config = provider(&closed, Budget::default());
+    config.model = Some("qwen-test".into());
+    let hub = hub_with(config, 20_000);
+    let client = hub.client(&local()).expect("client");
+    let error = client
+        .chat(ChatRequest::new("sys", "hi"))
+        .await
+        .expect_err("injoignable");
+    assert_eq!(error.kind(), ErrorKind::Unreachable);
 }
