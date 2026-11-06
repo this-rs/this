@@ -155,14 +155,16 @@ pub async fn perform<R: Runtime>(app: &AppHandle<R>, request: &Request) -> Reply
         };
     };
     let native = match request {
-        // Chaque famille a SA méthode de statut (`contactsStatus`, `captureStatus`…) ; le
-        // `status` du pilote ne connaît que le gyroscope et le Bluetooth. Sans ce routage,
-        // toutes les autres capacités répondaient `unsupported` alors que leur permission
-        // existait — mesuré sur l'appareil le 06/11 : contacts, caméra et santé toutes
-        // « unsupported », seul le gyroscope « granted ».
+        // Une seule table decide quelle méthode lit quel état (`device_bridge::status_request`).
+        // Le plugin avait sa propre copie du routage et des arguments : elles ont divergé, et
+        // camera et santé ont répondu `internal` une après-midi entière.
         Request::Status { capability } => {
-            match this_platform::device_bridge::status_method(*capability) {
-                Some("status") => {
+            match this_platform::device_bridge::status_request(*capability) {
+                // Rien à demander : un sélecteur système n'a pas d'état.
+                None => Ok(Reply::Status {
+                    state: PermissionState::Unsupported,
+                }),
+                Some(Request::Status { capability }) => {
                     plugin
                         .handle
                         .run_mobile_plugin_async::<Reply>(
@@ -171,13 +173,13 @@ pub async fn perform<R: Runtime>(app: &AppHandle<R>, request: &Request) -> Reply
                         )
                         .await
                 }
-                Some(method) => match plugin
+                Some(Request::Call { method, args }) => match plugin
                     .handle
-                    .run_mobile_plugin_async::<Value>(method, status_args(method, *capability))
+                    .run_mobile_plugin_async::<Value>(&method, args)
                     .await
                 {
-                    // Les familles répondent `{"kind":"status","state":"…"}`. `limited` (photos,
-                    // accès partiel iOS 14+) est un état du système, pas un refus.
+                    // Les familles répondent `{"kind":"status","state":"…"}`. `limited`
+                    // (photos, accès partiel iOS 14+) est un état, pas un refus.
                     Ok(reply) => Ok(Reply::Status {
                         state: reply
                             .get("state")
@@ -185,17 +187,15 @@ pub async fn perform<R: Runtime>(app: &AppHandle<R>, request: &Request) -> Reply
                             .unwrap_or(PermissionState::Unsupported),
                     }),
                     Err(error) => {
-                        // Le message de Tauri ne peut pas voyager dans le contrat (aucun code
-                        // pour « le natif a refusé de répondre ») : il part dans le journal de
-                        // l'app, à côté des traces du noyau.
                         note(&format!("status {method} a échoué : {error:?}"));
                         Ok(Reply::Error {
                             code: DeviceError::Internal,
                         })
                     }
                 },
-                // Le pont n'a aucune méthode pour lire cet état : on ne devine pas.
-                None => Ok(Reply::Status {
+                // `status_request` ne rend qu'un statut ou un appel. Toute autre forme serait
+                // un bug du contrat, pas une requête de module : on ne devine pas.
+                Some(_) => Ok(Reply::Status {
                     state: PermissionState::Unsupported,
                 }),
             }
@@ -275,26 +275,6 @@ pub async fn commands<R: Runtime>(app: &AppHandle<R>) -> Value {
 #[cfg(not(target_os = "ios"))]
 pub async fn commands<R: Runtime>(_app: &AppHandle<R>) -> Value {
     json!({ "kind": "error", "code": "not_supported" })
-}
-
-/// The arguments a family's status method requires.
-#[cfg(target_os = "ios")]
-///
-/// Most `…Status` methods take nothing. Two do: `captureStatus` names which of its two
-/// capabilities is meant, and `healthStatus` names a quantity — HealthKit has no "the
-/// health permission", only per-type answers. Sending `{}` to either makes the parse fail
-/// natively, which reached the contract as `internal` instead of an answer (measured on the
-/// device: camera and health both `internal`, contacts correct).
-fn status_args(method: &str, capability: Capability) -> Value {
-    match method {
-        "captureStatus" => json!({
-            "capability": if capability == Capability::Microphone { "microphone" } else { "camera" }
-        }),
-        // A representative read type: the answer says whether HealthKit is available and the
-        // system has answered for that type, which is what a status can honestly report.
-        "healthStatus" => json!({ "quantity": "step_count" }),
-        _ => json!({}),
-    }
 }
 
 /// Answer one request. Off iOS there is no device: every request is refused as unsupported.

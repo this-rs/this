@@ -22,6 +22,37 @@ struct BluetoothScanArgs: Decodable {
 }
 
 class ThisDevicePlugin: Plugin {
+  /// Prises de référence sur les méthodes des familles, pour forcer l'éditeur de liens à
+  /// garder leur fichier objet.
+  ///
+  /// Mesuré le 06/11 : `captureStatus:`, `clipboardRead:`, `faceIdStatus:` et
+  /// `locationSample:` sont présents dans `libapp.a` et **absents du binaire final**. Ce sont
+  /// des méthodes `@objc` sur une extension, que rien n'appelle statiquement : le dead-strip
+  /// supprime l'objet entier, et le pont répond « No command … found for plugin this-device ».
+  /// La caméra, le micro, le presse-papiers, Face ID et la localisation étaient donc
+  /// inaccessibles alors que leur code compilait.
+  ///
+  /// Une référence par fichier suffit. Elle est volontairement portée par une propriété
+  /// stockée, initialisée avec l'instance : un global `let` serait lui-même paresseux et
+  /// pourrait être retiré.
+  private let famillesLiees: [Selector]
+
+  override init() {
+    famillesLiees = [
+      #selector(ThisDevicePlugin.captureStatus(_:)),
+      #selector(ThisDevicePlugin.captureRequest(_:)),
+      #selector(ThisDevicePlugin.liveActivityStatus(_:)),
+      #selector(ThisDevicePlugin.clipboardRead(_:)),
+      #selector(ThisDevicePlugin.clipboardWrite(_:)),
+      #selector(ThisDevicePlugin.shareText(_:)),
+      #selector(ThisDevicePlugin.faceIdStatus(_:)),
+      #selector(ThisDevicePlugin.faceIdConfirm(_:)),
+      #selector(ThisDevicePlugin.locationRequest(_:)),
+      #selector(ThisDevicePlugin.locationSample(_:)),
+    ]
+    super.init()
+  }
+
   /// The permission state of a capability, read without prompting the person.
   @objc public func status(_ invoke: Invoke) throws {
     let args = try invoke.parseArgs(StatusArgs.self)

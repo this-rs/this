@@ -194,7 +194,12 @@ pub const METHODS: &[&str] = &[
 /// `capability` field of the arguments rather than assumed.
 pub fn capability_of(method: &str, args: &Value) -> Option<Capability> {
     let capability = match method {
-        "status" | "captureStatus" | "captureRequest" => return declared_capability(args),
+        // One native method, two capabilities: the argument says which. `locationRequest`
+        // belongs here too — it asks for in-use OR always, and gating it on `Location` alone
+        // would let a module get the background permission by naming the foreground one.
+        "status" | "captureStatus" | "captureRequest" | "locationRequest" => {
+            return declared_capability(args);
+        }
         "gyroscopeSample" => Capability::Gyroscope,
         "bluetoothScan" => Capability::Bluetooth,
         "notificationsStatus"
@@ -216,7 +221,7 @@ pub fn capability_of(method: &str, args: &Value) -> Option<Capability> {
         "speechStatus" | "speechRequest" | "speechTranscribeFile" => Capability::Speech,
         "nfcStatus" | "nfcReadOnce" => Capability::Nfc,
         "localNetworkStatus" | "localNetworkBrowse" => Capability::LocalNetwork,
-        "locationRequest" | "locationSample" => Capability::Location,
+        "locationSample" => Capability::Location,
         "motionActivityStatus" | "motionActivityRequest" | "motionStepsSample" => {
             Capability::MotionActivity
         }
@@ -228,6 +233,73 @@ pub fn capability_of(method: &str, args: &Value) -> Option<Capability> {
 /// The capability named by the `capability` field of `args`, when it is a catalogue entry.
 fn declared_capability(args: &Value) -> Option<Capability> {
     serde_json::from_value(args.get("capability")?.clone()).ok()
+}
+
+/// The arguments a family's status method requires.
+///
+/// Most `…Status` methods take nothing. Three do: `captureStatus` and `status` name which of
+/// their capabilities is meant, and `healthStatus` names a quantity — HealthKit has no "the
+/// health permission", only per-type answers.
+pub fn status_args(method: &str, capability: Capability) -> Value {
+    match method {
+        "status" | "captureStatus" => serde_json::json!({ "capability": capability }),
+        "healthStatus" => serde_json::json!({ "quantity": "step_count" }),
+        _ => serde_json::json!({}),
+    }
+}
+
+/// The request that reports the permission state of `capability`, if the bridge can ask it.
+///
+/// One place builds it, so the shell and the plugin cannot disagree on which method reads
+/// which state — they did, and camera and health answered `internal` for a whole afternoon.
+pub fn status_request(capability: Capability) -> Option<Request> {
+    let method = status_method(capability)?;
+    if method == "status" {
+        return Some(Request::Status { capability });
+    }
+    Some(Request::Call {
+        method: method.to_string(),
+        args: status_args(method, capability),
+    })
+}
+
+/// The native method that ASKS the system for a capability, and the arguments it needs.
+///
+/// Two permissions stack, and they are not the same one. The person allows a module through
+/// [`gate`]; iOS separately needs its own answer, and only a `…Request` method shows that
+/// prompt. Wiring the first without the second is what made a person who had authorised
+/// contacts in the app still get `not_authorized` from the system.
+///
+/// `None` means the system never asks: pickers (a person chooses what to hand over), and
+/// capabilities whose access is decided per use (Face ID, NFC, Bonjour).
+pub fn permission_request(capability: Capability) -> Option<(&'static str, Value)> {
+    let method = match capability {
+        Capability::Contacts => "contactsRequest",
+        Capability::Camera => "captureRequest",
+        Capability::Microphone => "captureRequest",
+        Capability::Photos => "photosRequest",
+        Capability::Calendar => "calendarRequest",
+        Capability::Health => "healthRequest",
+        Capability::Speech => "speechRequest",
+        Capability::MotionActivity => "motionActivityRequest",
+        Capability::Notifications => "notificationsRequest",
+        Capability::Location => "locationRequest",
+        Capability::LocationAlways => "locationRequest",
+        _ => return None,
+    };
+    let args = match capability {
+        // These two families take one argument each, and it names which of their behaviours
+        // is asked for. The catalogue spelling is the one the native side reads.
+        Capability::Camera
+        | Capability::Microphone
+        | Capability::Location
+        | Capability::LocationAlways => serde_json::json!({ "capability": capability }),
+        Capability::Health => {
+            serde_json::json!({ "quantities": ["step_count", "heart_rate", "body_mass"] })
+        }
+        _ => serde_json::json!({}),
+    };
+    Some((method, args))
 }
 
 /// The native method that reports the permission state of `capability`, if one exists.
@@ -242,7 +314,7 @@ pub fn status_method(capability: Capability) -> Option<&'static str> {
         Capability::LiveActivity => "liveActivityStatus",
         Capability::Camera | Capability::Microphone => "captureStatus",
         Capability::Contacts => "contactsStatus",
-        Capability::Photos | Capability::PhotosPick => "photosStatus",
+        Capability::Photos => "photosStatus",
         Capability::Calendar => "calendarStatus",
         Capability::Health => "healthStatus",
         Capability::FaceId => "faceIdStatus",
@@ -250,11 +322,13 @@ pub fn status_method(capability: Capability) -> Option<&'static str> {
         Capability::Nfc => "nfcStatus",
         Capability::LocalNetwork => "localNetworkStatus",
         Capability::MotionActivity => "motionActivityStatus",
-        Capability::Location
-        | Capability::LocationAlways
+        // No state to read: the person decides at each use, so there is nothing to ask.
+        Capability::PhotosPick
+        | Capability::FilesPick
         | Capability::Clipboard
         | Capability::Share
-        | Capability::FilesPick => return None,
+        | Capability::Location
+        | Capability::LocationAlways => return None,
     })
 }
 
@@ -556,7 +630,10 @@ mod tests {
     #[test]
     fn every_known_method_has_a_capability() {
         for method in METHODS {
-            let args = if matches!(*method, "status" | "captureStatus" | "captureRequest") {
+            let args = if matches!(
+                *method,
+                "status" | "captureStatus" | "captureRequest" | "locationRequest"
+            ) {
                 json!({"capability": "camera"})
             } else {
                 json!({})
@@ -599,6 +676,58 @@ mod tests {
     }
 
     #[test]
+    fn a_status_request_is_answered_by_the_method_that_knows_that_capability() {
+        for capability in Capability::ALL {
+            match status_request(capability) {
+                Some(request) => assert_eq!(
+                    required_capability(&request),
+                    Some(capability),
+                    "{capability:?} reads its state through a request about another capability"
+                ),
+                None => assert!(status_method(capability).is_none(), "{capability:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn a_permission_request_names_a_method_the_bridge_knows() {
+        for capability in Capability::ALL {
+            if let Some((method, args)) = permission_request(capability) {
+                assert!(
+                    METHODS.contains(&method),
+                    "{capability:?} asks through {method}, which is not a known method"
+                );
+                assert_eq!(
+                    capability_of(method, &args),
+                    Some(capability),
+                    "{capability:?} asks through {method}, which is gated on another capability"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_capabilities_the_system_never_asks_are_exactly_the_expected_ones() {
+        for capability in Capability::ALL {
+            let asks = permission_request(capability).is_some();
+            let expected = !matches!(
+                capability,
+                Capability::PhotosPick
+                    | Capability::FilesPick
+                    | Capability::Clipboard
+                    | Capability::Share
+                    | Capability::FaceId
+                    | Capability::Nfc
+                    | Capability::LocalNetwork
+                    | Capability::Bluetooth
+                    | Capability::Gyroscope
+                    | Capability::LiveActivity
+            );
+            assert_eq!(asks, expected, "{capability:?}");
+        }
+    }
+
+    #[test]
     fn every_capability_has_a_status_decision_and_a_known_method() {
         for capability in Capability::ALL {
             match status_method(capability) {
@@ -609,11 +738,12 @@ mod tests {
                 None => assert!(
                     matches!(
                         capability,
-                        Capability::Location
-                            | Capability::LocationAlways
+                        Capability::PhotosPick
+                            | Capability::FilesPick
                             | Capability::Clipboard
                             | Capability::Share
-                            | Capability::FilesPick
+                            | Capability::Location
+                            | Capability::LocationAlways
                     ),
                     "{capability:?} should report a state"
                 ),

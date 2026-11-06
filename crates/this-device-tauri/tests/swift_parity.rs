@@ -88,7 +88,7 @@ fn every_native_selector_derives_a_capability() {
     for method in swift {
         let args = if matches!(
             method.as_str(),
-            "status" | "captureStatus" | "captureRequest"
+            "status" | "captureStatus" | "captureRequest" | "locationRequest"
         ) {
             json!({ "capability": "camera" })
         } else {
