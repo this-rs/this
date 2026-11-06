@@ -418,7 +418,6 @@ fn s3_outil_invente_via_toolboxes_est_refuse_et_jamais_done() {
 }
 
 #[test]
-#[ignore = "trouvaille (moyenne) : le harnais ne confronte pas call.name à toolbox.specs() — un Toolbox nu qui ne filtre pas exécute l'outil inventé et rend ok ; seul Toolboxes refuse"]
 fn s3_outil_invente_hors_specs_est_refuse_par_le_harnais() {
     let model = Model::new(vec![calls("delete_everything", "x1"), says("C'est fait.")]);
     // Un Toolbox naïf : il répond ok à tout nom, déclaré ou non.
@@ -674,7 +673,6 @@ fn s6_annulation_sourde_est_interrupted_avec_la_raison() {
 }
 
 #[test]
-#[ignore = "trouvaille (haute) : un outil qui ne rend jamais la main bloque le run pour toujours — toolbox.call n'est sous aucune garde (ni silence, ni grâce d'annulation) ; même interrupt() ne libère pas la session"]
 fn s6_outil_qui_ne_rend_pas_la_main_est_interrompu() {
     let model = Model::new(vec![calls("install_module", "a1")]);
     let b = bench(&model, Rc::new(Hanging), Limits::default());

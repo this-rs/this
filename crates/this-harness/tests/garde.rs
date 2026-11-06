@@ -433,7 +433,9 @@ fn aucune_relance_apres_du_texte_montre() {
 }
 
 #[test]
-fn aucune_relance_apres_un_outil() {
+fn une_panne_au_tour_suivant_un_outil_est_relancee_sans_rejouer_l_outil() {
+    // W10#9 : l'outil a tourné au tour 1 ; le tour 2 échoue avant d'avoir rien
+    // montré. Relancer le tour 2 ne rejoue que l'appel au modèle, pas l'outil.
     let clock = Rc::new(FakeClock::default());
     let engine = Engine::new(
         clock.clone(),
@@ -452,17 +454,16 @@ fn aucune_relance_apres_un_outil() {
     );
     let (harness, log) = build(&clock, &engine, Limits::default());
 
-    assert!(matches!(
-        run(harness.send("installe")),
-        Running::Ran(Stop::Failed(_))
-    ));
-    assert_eq!(
-        engine.calls.get(),
-        2,
-        "un effet déjà produit ne se rejoue pas"
-    );
+    assert_eq!(run(harness.send("installe")), Running::Ran(Stop::Done));
+    assert_eq!(engine.calls.get(), 3, "tour 1, tour 2 échoué, sa relance");
+    let tool_results = log
+        .borrow()
+        .iter()
+        .filter(|e| matches!(e, Event::ToolResult { .. }))
+        .count();
+    assert_eq!(tool_results, 1, "l'outil n'est joué qu'une fois");
     assert!(
-        !hints(&log).iter().any(|h| h.contains("tentative")),
+        hints(&log).iter().any(|h| h.contains("tentative 1/3")),
         "{:?}",
         hints(&log)
     );
@@ -480,4 +481,180 @@ fn une_panne_durable_n_est_pas_relancee() {
     ));
     assert_eq!(engine.calls.get(), 1);
     assert!(hints(&log).is_empty());
+}
+
+// ---- La relance annulée pendant son attente ----------------------------------
+
+/// L'horloge factice, plus une main qui interrompt le run dès que l'heure
+/// atteint `at_ms` : l'annulation tombe AU MILIEU d'une attente.
+struct CancelAt {
+    inner: Rc<FakeClock>,
+    at_ms: f64,
+    handle: RefCell<Option<this_harness::Handle>>,
+}
+
+impl Clock for CancelAt {
+    fn now_ms(&self) -> f64 {
+        self.inner.now_ms()
+    }
+    fn sleep(&self, ms: u64) -> Option<Sleep> {
+        let sleep = self.inner.sleep(ms);
+        if self.inner.now_ms() >= self.at_ms
+            && let Some(handle) = self.handle.borrow().as_ref()
+        {
+            handle.interrupt();
+        }
+        sleep
+    }
+}
+
+#[test]
+fn une_relance_annulee_pendant_son_attente_rend_la_main_tout_de_suite() {
+    let fake = Rc::new(FakeClock::default());
+    let timeout = || Act::Fail(Failure::new(Code::Timeout, "délai dépassé"));
+    let engine = Engine::new(fake.clone(), vec![timeout(), timeout(), timeout()]);
+    // Attentes : 1 s, 2 s, puis 4 s. L'annulation tombe à 4 s, pendant la
+    // troisième attente (de 3 s à 7 s).
+    let clock = Rc::new(CancelAt {
+        inner: fake.clone(),
+        at_ms: 4_000.0,
+        handle: RefCell::new(None),
+    });
+    let (harness, log) = build(&fake, &engine, Limits::default());
+    let harness = harness.with_clock(clock.clone());
+    *clock.handle.borrow_mut() = Some(harness.handle());
+
+    assert_eq!(run(harness.send("parle")), Running::Ran(Stop::Cancelled));
+    assert_eq!(engine.calls.get(), 3, "aucune relance après l'annulation");
+    assert_eq!(hints(&log).len(), 3, "{:?}", hints(&log));
+    // Sans course, l'attente irait au bout : 7 s. Avec, elle s'arrête au pas
+    // suivant l'annulation.
+    assert!(fake.now_ms() <= 5_000.0, "{}", fake.now_ms());
+}
+
+// ---- Un outil qui ne rend pas la main ----------------------------------------
+
+/// Un outil qui ne rend jamais la main.
+struct Hanging;
+
+#[async_trait(?Send)]
+impl Toolbox for Hanging {
+    fn specs(&self) -> Vec<ToolSpec> {
+        Tools.specs()
+    }
+    async fn call(&self, _call: &ToolCall) -> Outcome {
+        std::future::pending::<()>().await;
+        unreachable!()
+    }
+}
+
+fn install_call() -> Act {
+    Act::Reply(Reply {
+        text: String::new(),
+        calls: vec![ToolCall {
+            id: "a1".to_string(),
+            name: "install_module".to_string(),
+            arguments: json!({}),
+        }],
+        finish: Finish::Tools,
+    })
+}
+
+fn build_with(
+    clock: &Rc<FakeClock>,
+    engine: &Rc<Engine>,
+    limits: Limits,
+    toolbox: Rc<dyn Toolbox>,
+) -> (Harness, Log) {
+    let log: Log = Rc::new(RefCell::new(Vec::new()));
+    let seen = log.clone();
+    let harness = Harness::new(
+        "tu es l'atelier",
+        limits,
+        engine.clone(),
+        toolbox,
+        move |event| seen.borrow_mut().push(event),
+    )
+    .with_clock(clock.clone());
+    (harness, log)
+}
+
+fn tool_results(log: &Log) -> Vec<(String, bool, bool)> {
+    log.borrow()
+        .iter()
+        .filter_map(|event| match event {
+            Event::ToolResult {
+                text,
+                refused,
+                failed,
+                ..
+            } => Some((text.clone(), *refused, *failed)),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn un_outil_qui_depasse_son_plafond_rend_delai_depasse() {
+    let clock = Rc::new(FakeClock::default());
+    let engine = Engine::new(clock.clone(), vec![install_call()]);
+    let limits = Limits {
+        tool_timeout_ms: Some(30_000),
+        ..Limits::default()
+    };
+    let (harness, log) = build_with(&clock, &engine, limits, Rc::new(Hanging));
+
+    // Le run rend la main : l'outil abandonné ne bloque plus la session.
+    assert!(matches!(run(harness.send("installe")), Running::Ran(_)));
+    assert!(!harness.handle().busy());
+
+    let results = tool_results(&log);
+    assert_eq!(results.len(), 1, "{results:?}");
+    let (text, refused, failed) = &results[0];
+    assert!(text.starts_with("délai dépassé"), "{text}");
+    assert!(*failed && !*refused, "un échec, jamais un succès");
+    assert!(hints(&log).iter().any(|h| h.contains("en 30 s")));
+    // Le fil reste valide : l'appel a sa réponse.
+    let transcript = harness.transcript();
+    assert!(
+        transcript
+            .iter()
+            .any(|m| matches!(m, Message::Tool { id, .. } if id == "a1")),
+        "{transcript:?}"
+    );
+    // Le modèle a été relancé avec la cause, et l'a lue.
+    assert!(engine.calls.get() >= 2);
+    assert!(clock.now_ms() >= 30_000.0 && clock.now_ms() < 40_000.0);
+}
+
+#[test]
+fn sans_plafond_l_annulation_libere_quand_meme_un_outil_pendu() {
+    let fake = Rc::new(FakeClock::default());
+    let engine = Engine::new(fake.clone(), vec![install_call()]);
+    let limits = Limits {
+        tool_timeout_ms: None,
+        ..Limits::default()
+    };
+    let clock = Rc::new(CancelAt {
+        inner: fake.clone(),
+        at_ms: 60_000.0,
+        handle: RefCell::new(None),
+    });
+    let (harness, log) = build_with(&fake, &engine, limits, Rc::new(Hanging));
+    let harness = harness.with_clock(clock.clone());
+    *clock.handle.borrow_mut() = Some(harness.handle());
+
+    assert_eq!(
+        run(harness.send("installe")),
+        Running::Ran(Stop::Interrupted)
+    );
+    assert!(!harness.handle().busy(), "la session est libre");
+    assert_eq!(stopped(&log)[0].1.as_deref(), Some("aborted"));
+    let results = tool_results(&log);
+    assert_eq!(results.len(), 1, "{results:?}");
+    assert!(results[0].0.starts_with("annulé"), "{results:?}");
+    assert!(results[0].1, "refusé, jamais un succès");
+    // La grâce est accordée, pas plus : 60 s d'outil + 10 s de grâce.
+    assert!(fake.now_ms() < 72_000.0, "{}", fake.now_ms());
+    assert_eq!(engine.calls.get(), 1, "aucun tour après l'annulation");
 }
