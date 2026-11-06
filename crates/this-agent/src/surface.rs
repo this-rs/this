@@ -234,6 +234,31 @@ impl Surface {
         }
         sortie
     }
+
+    /// La carte restreinte à une plateforme : l'agent ne doit entendre que ce qui existe sur
+    /// l'appareil où il tourne, pas un catalogue toutes plateformes confondues. Un iPhone n'a
+    /// pas à savoir qu'une capacité Mac existe, et inversement.
+    pub fn for_platform(&self, platform: Platform) -> Surface {
+        Surface {
+            capabilities: self
+                .capabilities
+                .iter()
+                .filter(|c| c.platforms.contains(&platform))
+                .cloned()
+                .collect(),
+            slots: self.slots.clone(),
+        }
+    }
+
+    /// La carte telle que l'agent la lit sur une plateforme donnée : filtrée, et préfixée du
+    /// nom de l'appareil, pour que « disponible » veuille dire « disponible ICI ».
+    pub fn describe_for(&self, platform: Platform, budget_chars: usize) -> String {
+        format!(
+            "Plateforme : {}\n{}",
+            platform.as_str(),
+            self.for_platform(platform).describe(budget_chars)
+        )
+    }
 }
 
 /// La carte réelle du harness, telle qu'elle est **aujourd'hui**.
@@ -535,6 +560,20 @@ mod tests {
         assert_eq!(carte.capability("modules").unwrap().status, Status::Live);
         assert_eq!(carte.slot("boot").unwrap().status, Status::Missing);
         assert_eq!(carte.slot("module.screen").unwrap().status, Status::Live);
+    }
+
+    #[test]
+    fn une_plateforme_ne_voit_que_ses_capacites() {
+        let carte = surface();
+        let iphone = carte.describe_for(Platform::Ios, 100_000);
+        let mac = carte.describe_for(Platform::Macos, 100_000);
+        // window.control n'est que macOS/Windows/Linux : un iPhone ne doit pas l'entendre.
+        assert!(!iphone.contains("window.control"));
+        assert!(mac.contains("window.control"));
+        // widget est natif, iOS compris : il apparaît sur l'iPhone.
+        assert!(iphone.contains("widget"));
+        // la carte dit sur quelle plateforme elle parle.
+        assert!(iphone.starts_with("Plateforme : ios"));
     }
 
     #[test]
