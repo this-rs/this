@@ -248,9 +248,17 @@ pub fn surface() -> Surface {
         capabilities: vec![
             // ---- étage page
             Capability::new(
+                "modules",
+                Tier::Webview,
+                "installer, relire, lister et exécuter des modules (entités, programmes, chrome)",
+                None,
+                &[Web, Ios, Ipados, Macos, Windows, Linux, Android],
+                Status::Live,
+            ),
+            Capability::new(
                 "ui.render",
                 Tier::Webview,
-                "dessiner dans un emplacement",
+                "rendre un écran (via le code du module, pas par toi)",
                 None,
                 &[Web, Ios, Ipados, Macos, Windows, Linux, Android],
                 Status::Live,
@@ -266,7 +274,7 @@ pub fn surface() -> Surface {
             Capability::new(
                 "store.local",
                 Tier::Webview,
-                "lire et écrire le stockage de l'app",
+                "stocker dans la page (via le code du module)",
                 None,
                 &[Web, Ios, Ipados, Macos, Windows, Linux, Android],
                 Status::Live,
@@ -274,7 +282,7 @@ pub fn surface() -> Surface {
             Capability::new(
                 "http.fetch",
                 Tier::Webview,
-                "appeler un service HTTP",
+                "appeler HTTP (via le code du module)",
                 None,
                 &[Web, Ios, Ipados, Macos, Windows, Linux, Android],
                 Status::Live,
@@ -300,15 +308,15 @@ pub fn surface() -> Surface {
                 "window.control",
                 Tier::Shell,
                 "taille, plein écran, focus",
-                Some("window.*"),
+                None,
                 &[Macos, Windows, Linux],
-                Status::Live,
+                Status::Missing,
             ),
             Capability::new(
                 "chrome.read",
                 Tier::Shell,
                 "lire l'habillage posé par la platforme",
-                Some("plugin:this-shell|env"),
+                Some("get_chrome / set_chrome"),
                 &[Ios, Ipados, Macos, Windows, Linux, Android],
                 Status::Live,
             ),
@@ -379,8 +387,8 @@ pub fn surface() -> Surface {
             Capability::new(
                 "model.call",
                 Tier::Shell,
-                "appeler un modèle via le relais",
-                Some("chat_stream / model_detect"),
+                "appeler le modèle (le harnais le fait pour toi, tu n'as pas d'outil)",
+                Some("chat_stream"),
                 &[Ios, Ipados, Macos, Windows, Linux],
                 Status::Live,
             ),
@@ -518,6 +526,13 @@ mod tests {
             Status::Missing
         );
         assert_eq!(carte.capability("ui.render").unwrap().status, Status::Live);
+        // Une commande qui n'existe pas n'a pas le droit de se dire disponible.
+        assert_eq!(
+            carte.capability("window.control").unwrap().status,
+            Status::Missing
+        );
+        // Le pouvoir premier de l'agent est dit, pas supposé.
+        assert_eq!(carte.capability("modules").unwrap().status, Status::Live);
         assert_eq!(carte.slot("boot").unwrap().status, Status::Missing);
         assert_eq!(carte.slot("module.screen").unwrap().status, Status::Live);
     }
