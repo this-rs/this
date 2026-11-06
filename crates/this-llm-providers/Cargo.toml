@@ -1,0 +1,26 @@
+[package]
+name = "this-llm-providers"
+version = "0.0.1"
+edition = "2024"
+authors = ["Riviere Théotime <t@ffs.holdings>"]
+license = "MIT OR Apache-2.0"
+description = "The providers of a this-rs app: configure them, load their models, budget their tokens and money, fit prompts to their context window. The configuration is shared; the secrets are references."
+repository = "https://github.com/this-rs/this"
+keywords = ["llm", "provider", "budget", "context", "openai"]
+categories = ["api-bindings"]
+
+[features]
+default = ["http"]
+# The transport (reqwest) and the `Completion` implementation. Off on wasm front-ends
+# that only configure providers and display them.
+http = ["dep:reqwest", "dep:async-trait"]
+
+[dependencies]
+this-llm = { version = "0.0.1", path = "../this-llm" }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+async-trait = { version = "0.1", optional = true }
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"], optional = true }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util"] }
