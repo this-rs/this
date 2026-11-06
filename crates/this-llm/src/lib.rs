@@ -122,6 +122,10 @@ pub enum Preset {
     DeepSeek,
     /// OpenAI.
     OpenAi,
+    /// vLLM's OpenAI server, on its usual port.
+    Vllm,
+    /// OpenRouter: one key, many hosted models.
+    OpenRouter,
 }
 
 impl Preset {
@@ -131,19 +135,26 @@ impl Preset {
             Self::Ollama => "http://localhost:11434/v1",
             Self::LmStudio => "http://localhost:1234/v1",
             Self::LlamaCpp => "http://localhost:8080/v1",
+            Self::Vllm => "http://localhost:8000/v1",
             Self::DeepSeek => "https://api.deepseek.com",
             Self::OpenAi => "https://api.openai.com/v1",
+            Self::OpenRouter => "https://openrouter.ai/api/v1",
             Self::OpenAiCompatible => "http://localhost:8080/v1",
         }
     }
 
     /// A model that exists on a fresh install of this preset.
+    ///
+    /// Empty when the engine decides: a vLLM serves whatever it was started with,
+    /// so the model is asked to the engine, never guessed here.
     pub fn default_model(self) -> &'static str {
         match self {
             Self::Ollama => "llama3.2",
             Self::LmStudio | Self::LlamaCpp | Self::OpenAiCompatible => "local-model",
+            Self::Vllm => "",
             Self::DeepSeek => "deepseek-chat",
             Self::OpenAi => "gpt-4o-mini",
+            Self::OpenRouter => "openai/gpt-4o-mini",
         }
     }
 
@@ -151,7 +162,7 @@ impl Preset {
     pub fn is_local(self) -> bool {
         matches!(
             self,
-            Self::Ollama | Self::LmStudio | Self::LlamaCpp | Self::OpenAiCompatible
+            Self::Ollama | Self::LmStudio | Self::LlamaCpp | Self::Vllm | Self::OpenAiCompatible
         )
     }
 }
