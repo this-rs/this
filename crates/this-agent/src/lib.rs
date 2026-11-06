@@ -21,6 +21,7 @@
 //! elle se teste une fois — et `cargo test` remplace la foi.
 
 pub mod graph;
+pub mod playbook;
 pub mod substrate;
 
 use serde::{Deserialize, Serialize};
