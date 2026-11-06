@@ -95,6 +95,25 @@ fileprivate enum ContactsBridge {
   }
 }
 
+/// Écrit une ligne de diagnostic dans le journal de l'app (`$HOME/Documents/atelier.log`),
+/// le même fichier que la coquille trace. Ne sert qu'au diagnostic : rien de ce qui touche
+/// les données de la personne n'y transite, seulement des statuts et des messages génériques.
+enum ContactsDiagnostic {
+  static func log(_ message: String) {
+    guard let home = ProcessInfo.processInfo.environment["HOME"] else { return }
+    let path = home + "/Documents/atelier.log"
+    let ligne = "contacts \(message)\n"
+    guard let data = ligne.data(using: .utf8) else { return }
+    if let handle = try? FileHandle(forWritingTo: URL(fileURLWithPath: path)) {
+      handle.seekToEndOfFile()
+      handle.write(data)
+      try? handle.close()
+    } else {
+      try? data.write(to: URL(fileURLWithPath: path), options: .atomic)
+    }
+  }
+}
+
 extension ThisDevicePlugin {
   /// The contacts permission state, read without prompting the person.
   @objc public func contactsStatus(_ invoke: Invoke) {
@@ -118,14 +137,18 @@ extension ThisDevicePlugin {
     do {
       args = try invoke.parseArgs(ContactsListArgs.self)
     } catch {
+      ContactsDiagnostic.log("parseArgs: \(error)")
       invoke.resolve(Reply.error(code: "internal"))
       return
     }
     guard (ContactsBridge.limitMin...ContactsBridge.limitMax).contains(args.limit) else {
+      ContactsDiagnostic.log("limit hors borne: \(args.limit)")
       invoke.resolve(Reply.error(code: "internal"))
       return
     }
-    guard CNContactStore.authorizationStatus(for: .contacts) == .authorized else {
+    let statut = CNContactStore.authorizationStatus(for: .contacts)
+    ContactsDiagnostic.log("statut systeme: \(statut.rawValue)")
+    guard statut == .authorized else {
       invoke.resolve(Reply.error(code: ReplyCode.notAuthorized))
       return
     }
@@ -134,7 +157,9 @@ extension ThisDevicePlugin {
         let contacts = try ContactsBridge.fetch(limit: args.limit)
         invoke.resolve(ContactsAnswer(contacts: contacts))
       } catch {
-        // The error text is not forwarded: it may quote the book.
+        // Le TEXTE de l'erreur d'énumération est générique (code CNError), pas le contenu du
+        // carnet : on peut le tracer pour diagnostiquer sans rien faire fuiter.
+        ContactsDiagnostic.log("fetch: \(error)")
         invoke.resolve(Reply.error(code: "internal"))
       }
     }

@@ -248,6 +248,31 @@ impl<S: GrantStore> ConsentStore<S> {
             .retain(|request| !(request.module == module && request.capability == capability));
     }
 
+    /// Repose la question après un refus ou une révocation : la décision est retirée, la
+    /// capacité redevient `Ask`, et une question part en file.
+    ///
+    /// C'est ce qui rend une révocation **réversible**. Sans elle, une capacité révoquée
+    /// était niée pour toujours (`Decision::Deny`), et l'agent n'avait aucun moyen de
+    /// redemander — il lisait « en attente » alors que rien n'attendait plus. Une décision
+    /// ne doit être définitive que si la personne veut qu'elle le soit.
+    pub fn reask(
+        &mut self,
+        module: &str,
+        capability: Capability,
+        at_ms: u64,
+    ) -> Result<(), StoreError> {
+        let mut grants: Vec<Grant> = self
+            .grants
+            .iter()
+            .filter(|grant| !grant.is_for(module, capability))
+            .cloned()
+            .collect();
+        self.store.save(&grants)?;
+        self.grants = grants;
+        self.enqueue(module, capability, at_ms);
+        Ok(())
+    }
+
     fn set_state(
         &mut self,
         module: &str,
@@ -578,6 +603,33 @@ mod tests {
             assert_eq!(store.request_access("atelier", &status, AT), Ok(capability));
             assert!(store.list_pending().is_empty(), "{capability:?}");
         }
+    }
+
+    #[test]
+    fn a_revoked_grant_can_be_asked_again() {
+        let mut store = fresh();
+        store
+            .answer("atelier", Capability::Contacts, Answer::Allow, AT)
+            .unwrap();
+        store
+            .revoke("atelier", Capability::Contacts, AT + 1)
+            .unwrap();
+        assert_eq!(
+            store.decide("atelier", Capability::Contacts),
+            Decision::Deny
+        );
+        // Réversible : la décision est retirée, une question repart.
+        store
+            .reask("atelier", Capability::Contacts, AT + 2)
+            .unwrap();
+        assert_eq!(store.decide("atelier", Capability::Contacts), Decision::Ask);
+        assert_eq!(store.list_pending().len(), 1);
+        // Et la révocation a bien quitté le store persistant.
+        let relu = store.store.load().unwrap();
+        assert!(
+            relu.iter()
+                .all(|g| !(g.module == "atelier" && g.capability == Capability::Contacts))
+        );
     }
 
     #[test]

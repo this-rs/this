@@ -92,6 +92,8 @@ pub enum DeviceError {
     /// The device did not answer in time.
     Timeout,
     /// Something went wrong on the shell side.
+    /// A required argument is missing and no honest default can replace it.
+    MissingArgument,
     Internal,
 }
 
@@ -102,6 +104,7 @@ impl fmt::Display for DeviceError {
             DeviceError::NotSupported => "not supported",
             DeviceError::Unavailable => "unavailable",
             DeviceError::Timeout => "timeout",
+            DeviceError::MissingArgument => "missing argument",
             DeviceError::Internal => "internal error",
         };
         f.write_str(text)
@@ -300,6 +303,74 @@ pub fn permission_request(capability: Capability) -> Option<(&'static str, Value
         _ => serde_json::json!({}),
     };
     Some((method, args))
+}
+
+/// The arguments a native method requires and an honest default for each.
+///
+/// Measured on the device: every family whose read failed answered `internal` with a message
+/// naming the missing key (`Key 'quantity' not found`, `Key 'start_ms' not found`,
+/// `Key 'duration_ms' not found`…). The native decoder is strict — that is correct — but a
+/// caller that does not know a signature cannot guess it, and `internal` tells it nothing.
+///
+/// The defaults below are the ones the contract already documents (`LIMIT_DEFAULT`,
+/// `PICK_MAX`, `SCAN_MS_MIN`…). They are filled in HERE, in the bridge, so every path (the
+/// agent's tool, the shell, a diagnostic) benefits from the same answer.
+pub fn complete_args(method: &str, args: &Value, now_ms: f64) -> Value {
+    let jour = 24.0 * 3600.0 * 1000.0;
+    let depuis = (now_ms - jour).max(0.0) as i64;
+    let maintenant = now_ms as i64;
+    let defaults = match method {
+        "contactsList" => serde_json::json!({ "limit": 50 }),
+        "photosPick" => serde_json::json!({ "limit": 10 }),
+        "filesPick" => serde_json::json!({ "max": 5 }),
+        "nfcReadOnce" => serde_json::json!({ "timeout_ms": 15_000 }),
+        // Health is per type: `step_count` is the most common, and `healthStatus` already
+        // takes that default.
+        // `window_ms` en plus de `quantity` : mesuré, health le réclame aussi. 24 h est le
+        // maximum que la famille accepte (`WINDOW_MS_MAX`).
+        "healthStatus" | "healthQuantitySample" => {
+            // Trois champs, tous mesurés : `quantity`, `window_ms` (24 h, le maximum de la
+            // famille) et `limit` (le plus grand que la famille accepte sans tronquer).
+            serde_json::json!({ "quantity": "step_count", "window_ms": 86_400_000, "limit": 10 })
+        }
+        "healthRequest" => {
+            serde_json::json!({ "quantities": ["step_count", "heart_rate", "body_mass"] })
+        }
+        // A window without bounds means "the last 24 hours": what a caller means by
+        // "my events" when it does not say.
+        "calendarEvents" => serde_json::json!({ "start_ms": depuis, "end_ms": maintenant }),
+        "motionStepsSample" => serde_json::json!({ "from_ms": depuis, "to_ms": maintenant }),
+        // Camera and location carry their name in their arguments: without it the capability
+        // is not even derivable, and the bridge answers `not_supported`.
+        "captureRequest" | "captureStatus" => serde_json::json!({ "capability": "camera" }),
+        "locationRequest" | "locationSample" => serde_json::json!({ "capability": "location" }),
+        "bluetoothScan" => serde_json::json!({ "duration_ms": 3000, "services": [] }),
+        "localNetworkBrowse" => serde_json::json!({ "service_type": "_http._tcp" }),
+        _ => serde_json::json!({}),
+    };
+    let mut completed = defaults;
+    if let (Some(base), Some(given)) = (completed.as_object_mut(), args.as_object()) {
+        for (key, value) in given {
+            base.insert(key.clone(), value.clone());
+        }
+    }
+    completed
+}
+
+/// The arguments no default can honestly replace: a text to share, a file to transcribe, a
+/// bookmark to open, a row to create. `None` means the call is complete.
+pub fn missing_args(method: &str, args: &Value) -> Option<&'static str> {
+    let required: &[&'static str] = match method {
+        "shareText" => &["text"],
+        "speechTranscribeFile" => &["path"],
+        "filesRead" => &["bookmark"],
+        "calendarCreateEvent" => &["title", "start_ms", "end_ms"],
+        _ => &[],
+    };
+    required
+        .iter()
+        .find(|key| args.get(**key).is_none())
+        .copied()
 }
 
 /// The native method that reports the permission state of `capability`, if one exists.
@@ -687,6 +758,63 @@ mod tests {
                 None => assert!(status_method(capability).is_none(), "{capability:?}"),
             }
         }
+    }
+
+    #[test]
+    fn a_method_that_needs_arguments_gets_them_completed() {
+        let now = 1_700_000_000_000.0;
+        for (method, expected) in [
+            ("contactsList", "limit"),
+            ("photosPick", "limit"),
+            ("bluetoothScan", "duration_ms"),
+            ("healthQuantitySample", "quantity"),
+            ("calendarEvents", "start_ms"),
+            ("motionStepsSample", "from_ms"),
+            ("localNetworkBrowse", "service_type"),
+            ("captureRequest", "capability"),
+        ] {
+            let args = complete_args(method, &serde_json::json!({}), now);
+            assert!(
+                args.get(expected).is_some(),
+                "{method} should get {expected}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_completed_call_derives_its_capability() {
+        let now = 1_700_000_000_000.0;
+        let args = complete_args("captureRequest", &serde_json::json!({}), now);
+        assert_eq!(
+            capability_of("captureRequest", &args),
+            Some(Capability::Camera)
+        );
+        let args = complete_args("locationSample", &serde_json::json!({}), now);
+        assert_eq!(
+            capability_of("locationSample", &args),
+            Some(Capability::Location)
+        );
+    }
+
+    #[test]
+    fn a_given_argument_is_never_overwritten() {
+        let now = 1_700_000_000_000.0;
+        let args = complete_args("contactsList", &serde_json::json!({ "limit": 7 }), now);
+        assert_eq!(args, serde_json::json!({ "limit": 7 }));
+    }
+
+    #[test]
+    fn the_arguments_no_default_can_replace_are_named() {
+        let vide = serde_json::json!({});
+        assert_eq!(missing_args("shareText", &vide), Some("text"));
+        assert_eq!(missing_args("speechTranscribeFile", &vide), Some("path"));
+        assert_eq!(missing_args("filesRead", &vide), Some("bookmark"));
+        assert_eq!(missing_args("calendarCreateEvent", &vide), Some("title"));
+        assert_eq!(missing_args("contactsList", &vide), None);
+        assert_eq!(
+            missing_args("shareText", &serde_json::json!({ "text": "bonjour" })),
+            None
+        );
     }
 
     #[test]

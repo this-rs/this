@@ -16,6 +16,11 @@ use crate::secret::Secret;
 /// What the chat template adds around a conversation, estimated once per call.
 const TEMPLATE_OVERHEAD_TOKENS: u32 = 8;
 
+/// Ceiling on the connection phase alone (DNS, TCP, TLS): a reachable engine accepts its
+/// socket within seconds, even when it then reads a long prompt for minutes.
+#[cfg(not(target_arch = "wasm32"))]
+const CONNECT_TIMEOUT_SECS: u64 = 15;
+
 /// One question for a model, as two messages.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ChatRequest {
@@ -231,9 +236,21 @@ impl ProviderClient {
     ) -> Self {
         // On a native target the client carries the configured timeout. In a browser
         // the page's own network stack decides, and reqwest offers no timeout there.
+        //
+        // `timeout_secs` is a SILENCE limit, never a total deadline. `ClientBuilder::timeout`
+        // bounds the whole exchange, streamed body included: a local engine that reads a long
+        // prompt then writes 4096 tokens (measured 07/11/2026: 53 tok/s, so 77 s for the
+        // output alone) was cut at 120 s while it was still talking. A read timeout resets on
+        // every chunk: a live stream runs as long as it needs, a mute one stops after
+        // `timeout_secs`.
         let builder = reqwest::Client::builder();
         #[cfg(not(target_arch = "wasm32"))]
-        let builder = builder.timeout(std::time::Duration::from_secs(config.timeout_secs));
+        let builder = {
+            let silence = std::time::Duration::from_secs(config.timeout_secs);
+            builder
+                .connect_timeout(silence.min(std::time::Duration::from_secs(CONNECT_TIMEOUT_SECS)))
+                .read_timeout(silence)
+        };
         let http = builder.build().unwrap_or_else(|_| reqwest::Client::new());
         Self {
             config,
@@ -294,9 +311,16 @@ impl ProviderClient {
     async fn resolve_model(&self) -> Result<(String, Option<u32>), ProviderError> {
         let (model, announced) = match (&self.config.model, self.list_models().await) {
             (Some(name), Ok(models)) => {
+                // An engine that serves ONE model (llama-server) answers whatever name it is
+                // given: a configured name that differs from its file name still gets that
+                // model's window, instead of no window (and no fitting of the output cap).
                 let window = models
                     .iter()
                     .find(|model| &model.id == name)
+                    .or(match models.as_slice() {
+                        [only] => Some(only),
+                        _ => None,
+                    })
                     .and_then(|model| model.context_window);
                 (name.clone(), window)
             }
