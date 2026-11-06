@@ -20,6 +20,9 @@ resolver = "3"
 this-descriptor = { version = "0.0.1", path = "crates/this-descriptor", features = ["yaml", "pattern", "http"] }
 # Le contrat VFS, partagé avec le client : il compile pour wasm32, contrairement à ce crate.
 this-vfs = { version = "0.0.1", path = "crates/this-vfs" }
+# Le modèle du harness (pur) : nécessaire seulement pour l'écrire dans le
+# graphe, donc activé par la feature `obrain` avec le backend.
+this-agent = { version = "0.0.1", path = "crates/this-agent", optional = true }
 # Atomic publication of the host catalog snapshot (readers never lock).
 arc-swap = "1"
 # Async runtime
@@ -199,7 +202,7 @@ oidc = ["dep:jsonwebtoken", "dep:reqwest"]
 # confiance par hôte. Sans cette feature, un module stocké n'a que l'intégrité
 # (etags) — pas l'authentification.
 module-signing = ["dep:ed25519-dalek", "dep:base64"]
-obrain = ["dep:obrain-engine", "dep:obrain-common", "dep:obrain-core", "dep:obrain-substrate", "dep:obrain-adapters", "dep:obrain-reactive"]
+obrain = ["dep:obrain-engine", "dep:obrain-common", "dep:obrain-core", "dep:obrain-substrate", "dep:obrain-adapters", "dep:obrain-reactive", "dep:this-agent"]
 # Alias conservé pour compatibilité, mais le relief cognitif n'est PAS branché :
 # `core::events::CognitiveSignal` est un vocabulaire propre à this-rs, et le
 # moteur cognitif d'obrain (`obrain-cognitive`) n'est pas une dépendance.
