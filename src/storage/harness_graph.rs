@@ -17,8 +17,11 @@
 //! balayage de `load_run` lit). L'arête est unique par triplet : réécrire une
 //! étape met à jour son `_index`, sans doublon.
 //!
-//! `_out_hash` est le SHA-256 (hex) de la sortie gardée par l'étape
-//! (`this_agent::graph::step_output`) : `sha2` est déjà une dépendance non
+//! `_out_hash` est le SHA-256 (hex) de la sortie **complète** de l'outil, tel que
+//! la boucle de `this-harness` l'a posé dans `Step::out_hash` avant de tronquer
+//! le résumé. Pour une étape qui n'en porte pas (journal ancien), c'est le
+//! SHA-256 de la sortie gardée (`this_agent::graph::step_output`), possiblement
+//! tronquée. Dans les deux cas le format est le même : `sha2` est déjà une dépendance non
 //! optionnelle du crate (`core::identity`).
 //!
 //! # Une écriture par lot, pas une par nœud
@@ -185,8 +188,15 @@ impl HarnessGraph {
     /// Le nœud d'une étape, avec l'empreinte de sa sortie.
     fn step_node(step: &Step, run_id: &str) -> Node {
         let mut node = this_agent::graph::step_node(step, run_id);
-        let digest = Sha256::digest(this_agent::graph::step_output(step).as_bytes());
-        let hex: String = digest.iter().map(|b| format!("{b:02x}")).collect();
+        // L'empreinte posée par la boucle porte sur la sortie COMPLÈTE ; à défaut
+        // (journal ancien, étape écrite à la main), on hache ce que l'étape a
+        // gardé — le résumé, possiblement tronqué.
+        let hex = step.out_hash.clone().unwrap_or_else(|| {
+            Sha256::digest(this_agent::graph::step_output(step).as_bytes())
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect()
+        });
         node.props.push(("_out_hash".to_string(), hex));
         node
     }
@@ -580,6 +590,32 @@ mod tests {
             .collect();
         assert_eq!(prop("run-p#0", "_out_hash"), Some(attendu));
         assert_eq!(prop("run-p#1", "_ok").as_deref(), Some("false"));
+        drop(graph);
+        drop(store);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Une étape qui porte l'empreinte de sa sortie complète (posée par la
+    /// boucle) l'écrit telle quelle : le résumé tronqué n'est pas re-haché.
+    #[tokio::test]
+    async fn le_out_hash_de_l_etape_fait_foi() {
+        let dir = temp_dir("out-hash");
+        let store = ObrainStore::open(&dir).unwrap();
+        let graph = HarnessGraph::new(Arc::clone(&store));
+        let mut run = Run::new(Goal::new("lire"), 5);
+        run.record(
+            Step::tool("recall", 1)
+                .resume("début tronqué")
+                .out_hash("abc123"),
+        );
+        graph.record_run(&run, "run-h").unwrap();
+        let g = graph.graph();
+        let id = graph.find(STEP, "run-h#0").unwrap();
+        let hash = g.get_node(id).and_then(|n| {
+            n.get_property("_out_hash")
+                .and_then(|v| v.as_str().map(str::to_string))
+        });
+        assert_eq!(hash.as_deref(), Some("abc123"));
         drop(graph);
         drop(store);
         std::fs::remove_dir_all(&dir).ok();
