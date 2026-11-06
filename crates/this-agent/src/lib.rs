@@ -25,6 +25,7 @@ pub mod graph;
 pub mod playbook;
 pub mod substrate;
 pub mod surface;
+pub mod untrusted;
 
 use serde::{Deserialize, Serialize};
 
