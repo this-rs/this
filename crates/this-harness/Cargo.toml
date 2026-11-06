@@ -1,0 +1,28 @@
+[package]
+name = "this-harness"
+version = "0.0.1"
+edition = "2024"
+authors = ["Riviere Théotime <t@ffs.holdings>"]
+license = "MIT OR Apache-2.0"
+description = "The agent launch loop: turns, a queue of held messages, typed events, cancellation — transport, tools and storage stay in the app"
+repository = "https://github.com/this-rs/this"
+keywords = ["agent", "harness", "llm", "streaming"]
+categories = ["development-tools"]
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# The decisions of the loop are a separate, pure crate: this one adds the
+# effects (the model call, the tools, the events) around them.
+this-agent = { version = "0.0.1", path = "../this-agent" }
+async-trait = "0.1"
+
+# The clock the target actually has. A page has `Date.now`, a shell has the
+# system clock; asking either one for the other's API is a compile error, so
+# the dependency is per-target.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+js-sys = "0.3"
+
+[dev-dependencies]
+# Only for `block_on` in tests: the crate itself brings no runtime.
+futures = "0.3"
