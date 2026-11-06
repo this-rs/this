@@ -58,6 +58,9 @@ fn model_from(item: &Value) -> Option<ModelInfo> {
     ]
     .iter()
     .find_map(|key| item.get(*key).and_then(as_positive))
+    // llama.cpp: `meta.n_ctx` is the window the server really runs with (per slot);
+    // `n_ctx_train` is what the weights allow, possibly more than is served.
+    .or_else(|| item.pointer("/meta/n_ctx").and_then(as_positive))
     .or_else(|| item.pointer("/meta/n_ctx_train").and_then(as_positive));
     let max_output_tokens = item
         .pointer("/top_provider/max_completion_tokens")
@@ -133,6 +136,11 @@ mod tests {
         let body = json!({"models": [{"model": "llama3.2"}]});
         let models = parse_models(&body).expect("liste lisible");
         assert_eq!(models[0].id, "llama3.2");
+
+        // The window the server runs with wins over what the weights were trained for
+        // (llama-server --ctx-size 786432 --parallel 3: 262144 per slot).
+        let body = json!({"data": [{"id": "gguf", "meta": {"n_ctx": 262144, "n_ctx_train": 1048576}}]});
+        assert_eq!(parse_models(&body).unwrap()[0].context_window, Some(262144));
 
         let body = json!({"data": [{"id": "gguf", "meta": {"n_ctx_train": 4096}}]});
         assert_eq!(parse_models(&body).unwrap()[0].context_window, Some(4096));
