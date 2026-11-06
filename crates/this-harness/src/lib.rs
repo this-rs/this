@@ -59,7 +59,10 @@ mod wire;
 
 pub use event::{Event, Outcome, Pending, Snapshot};
 pub use ports::{Cancel, Delta, Toolbox, Toolboxes, Transport};
-pub use session::{Handle, Harness, Limits, Running, Shared};
+pub use session::{
+    Clock, Handle, Harness, INTERRUPT_GRACE_MS, Limits, MAX_RETRIES, RETRY_BACKOFF_MS, Running,
+    SILENCE_MS, Shared, Sleep, SystemClock,
+};
 pub use wire::{Code, Failure, Finish, Message, Reply, Request, ToolCall, ToolSpec};
 
 /// Les décisions pures de la boucle, réexportées : un utilisateur du harnais a

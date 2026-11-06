@@ -381,6 +381,7 @@ fn un_tour_muet_relance_puis_echoue_en_le_disant() {
             max_tours: 10,
             max_relances: 2,
             budget_ms: None,
+            ..Limits::default()
         },
     );
 
@@ -446,6 +447,7 @@ fn le_budget_de_tours_s_arrete_en_le_disant() {
             max_tours: 2,
             max_relances: 0,
             budget_ms: None,
+            ..Limits::default()
         },
     );
 
