@@ -2,7 +2,7 @@
 //
 // Status reads the authorization without prompting the person. Request asks it (alert, sound,
 // badge), then answers the state the system now reports. No Info.plist key is needed: iOS asks
-// at runtime. This file plans no notification: scheduling is out of scope here.
+// at runtime. Post shows a notification at once (no schedule, no trigger); Cancel withdraws one.
 //
 // Answers are `Reply` values (see Reply.swift). The completion handlers of UNUserNotificationCenter
 // run on an arbitrary queue, so every answer is hopped onto the main queue before `resolve`.
@@ -33,6 +33,18 @@ enum NotificationStatus {
   }
 }
 
+/// Arguments of `notificationsPost`.
+struct NotificationPostArgs: Decodable {
+  let id: String
+  let title: String
+  let body: String
+}
+
+/// Arguments of `notificationsCancel`.
+struct NotificationCancelArgs: Decodable {
+  let id: String
+}
+
 extension ThisDevicePlugin {
   /// The notification permission, read without prompting the person.
   @objc public func notificationsStatus(_ invoke: Invoke) {
@@ -50,5 +62,44 @@ extension ThisDevicePlugin {
       }
       NotificationStatus.read { invoke.resolve($0) }
     }
+  }
+
+  /// Shows a local notification now. `id` names it: posting again with the same `id` replaces the
+  /// one on screen instead of stacking a second.
+  ///
+  /// A notification is not a way around consent: when the system authorization is not granted,
+  /// nothing is posted and the answer is `not_authorized`. The permission is read, never asked
+  /// here — asking is `notificationsRequest`, a separate, visible act.
+  /// Title and body are never logged.
+  @objc public func notificationsPost(_ invoke: Invoke) throws {
+    let args = try invoke.parseArgs(NotificationPostArgs.self)
+    let center = UNUserNotificationCenter.current()
+    center.getNotificationSettings { settings in
+      let state = NotificationStatus.name(settings.authorizationStatus)
+      guard state == "granted" else {
+        DispatchQueue.main.async { invoke.resolve(Reply.error(code: ReplyCode.notAuthorized)) }
+        return
+      }
+      let content = UNMutableNotificationContent()
+      content.title = args.title
+      content.body = args.body
+      content.sound = .default
+      // `trigger: nil` = delivered immediately; the same identifier replaces a delivered one.
+      let request = UNNotificationRequest(identifier: args.id, content: content, trigger: nil)
+      center.add(request) { error in
+        let reply = error == nil ? Reply.status(state: state) : Reply.error(code: "internal")
+        DispatchQueue.main.async { invoke.resolve(reply) }
+      }
+    }
+  }
+
+  /// Withdraws the notification `id`, shown or still pending. Withdrawing one that is not there
+  /// is not an error: the goal (it is gone) is met. Needs no authorization.
+  @objc public func notificationsCancel(_ invoke: Invoke) throws {
+    let args = try invoke.parseArgs(NotificationCancelArgs.self)
+    let center = UNUserNotificationCenter.current()
+    center.removeDeliveredNotifications(withIdentifiers: [args.id])
+    center.removePendingNotificationRequests(withIdentifiers: [args.id])
+    NotificationStatus.read { invoke.resolve($0) }
   }
 }

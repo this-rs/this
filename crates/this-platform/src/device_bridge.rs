@@ -148,6 +148,10 @@ pub const METHODS: &[&str] = &[
     "captureRequest",
     "notificationsStatus",
     "notificationsRequest",
+    // Poster et retirer une notification locale : même capacité que la permission, donc la
+    // même décision de la personne — une notification n'est pas un contournement.
+    "notificationsPost",
+    "notificationsCancel",
     "liveActivityStatus",
     "clipboardRead",
     "clipboardWrite",
@@ -193,7 +197,10 @@ pub fn capability_of(method: &str, args: &Value) -> Option<Capability> {
         "status" | "captureStatus" | "captureRequest" => return declared_capability(args),
         "gyroscopeSample" => Capability::Gyroscope,
         "bluetoothScan" => Capability::Bluetooth,
-        "notificationsStatus" | "notificationsRequest" => Capability::Notifications,
+        "notificationsStatus"
+        | "notificationsRequest"
+        | "notificationsPost"
+        | "notificationsCancel" => Capability::Notifications,
         "liveActivityStatus" => Capability::LiveActivity,
         "clipboardRead" | "clipboardWrite" => Capability::Clipboard,
         "shareText" => Capability::Share,
@@ -559,6 +566,21 @@ mod tests {
                 "{method} is listed but maps to no capability"
             );
         }
+    }
+
+    #[test]
+    fn posting_and_cancelling_a_notification_need_the_notifications_capability() {
+        for method in ["notificationsPost", "notificationsCancel"] {
+            assert!(METHODS.contains(&method), "{method} n'est pas dans METHODS");
+            assert_eq!(
+                capability_of(method, &json!({"id": "a", "title": "t", "body": "b"})),
+                Some(Capability::Notifications)
+            );
+        }
+        assert_eq!(
+            status_method(Capability::Notifications),
+            Some("notificationsStatus")
+        );
     }
 
     #[test]

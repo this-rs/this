@@ -269,6 +269,14 @@ pub async fn commands<R: Runtime>(app: &AppHandle<R>) -> Value {
         .unwrap_or_else(|error| json!({ "kind": "error", "message": format!("{error:?}") }))
 }
 
+/// Hors iOS il n'y a pas de runtime natif à interroger. Sans cette version, l'Atelier (qui
+/// appelle `commands` dans son auto-test) ne compilait plus sur l'hôte : `cargo test --lib`
+/// échouait en E0425 — mesuré le 06/11.
+#[cfg(not(target_os = "ios"))]
+pub async fn commands<R: Runtime>(_app: &AppHandle<R>) -> Value {
+    json!({ "kind": "error", "code": "not_supported" })
+}
+
 /// The arguments a family's status method requires.
 #[cfg(target_os = "ios")]
 ///
