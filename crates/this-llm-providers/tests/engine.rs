@@ -1,15 +1,18 @@
 //! The whole path, against a real socket: a stand-in OpenAI-compatible engine answers
-//! `/v1/models` and `/v1/chat/completions`, and the hub drives it.
+//! `/v1/models` and `/v1/chat/completions` (whole or streamed), and the hub drives it.
+//!
+//! The engine picks its answer from a marker in the user message: `SCENARIO:tools`,
+//! `SCENARIO:length`, `SCENARIO:cut`. Anything else gets a plain two-piece answer.
 
 #![cfg(feature = "http")]
 
 use std::sync::Arc;
 
-use serde_json::json;
+use serde_json::{Value, json};
 use this_llm::{Completion, CredentialRef, Preset};
 use this_llm_providers::{
-    Budget, ChatRequest, Clock, Hub, MemoryStore, ProviderConfig, ProviderError, ProviderId,
-    Secrets,
+    Budget, ChatRequest, Clock, Finish, Hub, MemoryStore, ProviderConfig, ProviderError,
+    ProviderId, Secrets, TurnRequest,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
@@ -22,8 +25,8 @@ impl Clock for FixedClock {
     }
 }
 
-/// Answers the two routes it knows. Reads a whole request (headers, then the body
-/// announced by `Content-Length`) before answering, so the client never sees a reset.
+/// Answers the routes it knows. Reads a whole request (headers, then the body announced
+/// by `Content-Length`) before answering, so the client never sees a reset.
 async fn engine(listener: TcpListener) {
     loop {
         let Ok((mut socket, _)) = listener.accept().await else {
@@ -51,9 +54,9 @@ async fn engine(listener: TcpListener) {
                 }
             }
             let request = String::from_utf8_lossy(&raw).to_string();
-            let (status, body) = route(&request);
+            let (status, content_type, body) = route(&request);
             let response = format!(
-                "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                 body.len()
             );
             let _ = socket.write_all(response.as_bytes()).await;
@@ -68,10 +71,29 @@ fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
         .position(|window| window == needle)
 }
 
-fn route(request: &str) -> (&'static str, String) {
+/// Server-sent events: one `data:` line per chunk, then `[DONE]`.
+fn sse(events: &[Value]) -> String {
+    let mut body: String = events
+        .iter()
+        .map(|event| format!("data: {event}\n\n"))
+        .collect();
+    body.push_str("data: [DONE]\n\n");
+    body
+}
+
+fn delta(content: &str, finish: Option<&str>) -> Value {
+    json!({"choices": [{"index": 0, "delta": {"content": content}, "finish_reason": finish}]})
+}
+
+fn usage_chunk() -> Value {
+    json!({"choices": [], "usage": {"prompt_tokens": 10, "completion_tokens": 5}})
+}
+
+fn route(request: &str) -> (&'static str, &'static str, String) {
     if request.starts_with("GET /v1/models") {
         return (
             "200 OK",
+            "application/json",
             json!({"data": [{"id": "qwen-test", "max_model_len": 4096}]}).to_string(),
         );
     }
@@ -79,19 +101,76 @@ fn route(request: &str) -> (&'static str, String) {
         if !request.contains("\"model\":\"qwen-test\"") {
             return (
                 "400 Bad Request",
+                "application/json",
                 json!({"error": "modèle inconnu"}).to_string(),
             );
         }
+        let streamed = request.contains("\"stream\":true");
+        let tools = request.contains("SCENARIO:tools");
+        let scenario = if request.contains("SCENARIO:length") {
+            "length"
+        } else if request.contains("SCENARIO:cut") {
+            "cut"
+        } else {
+            "plain"
+        };
+
+        if streamed {
+            let events = match (tools, scenario) {
+                (true, _) => vec![
+                    json!({"choices": [{"index": 0, "delta": {"tool_calls": [
+                        {"index": 0, "id": "call_1", "function": {"name": "lire", "arguments": "{\"pa"}}
+                    ]}, "finish_reason": null}]}),
+                    json!({"choices": [{"index": 0, "delta": {"tool_calls": [
+                        {"index": 0, "function": {"arguments": "th\":\"a\"}"}}
+                    ]}, "finish_reason": null}]}),
+                    json!({"choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}]}),
+                    usage_chunk(),
+                ],
+                (false, "cut") => vec![delta("Bon", None)],
+                (false, "length") => vec![delta("Bon", None), delta("jour", Some("length"))],
+                (false, _) => vec![
+                    delta("Bon", None),
+                    delta("jour", Some("stop")),
+                    usage_chunk(),
+                ],
+            };
+            // A cut stream is sent without its `[DONE]`: the engine simply stops.
+            let body = if scenario == "cut" && !tools {
+                events
+                    .iter()
+                    .map(|event| format!("data: {event}\n\n"))
+                    .collect()
+            } else {
+                sse(&events)
+            };
+            return ("200 OK", "text/event-stream", body);
+        }
+
+        let message = if tools {
+            json!({"role": "assistant", "content": null, "tool_calls": [
+                {"id": "call_1", "type": "function",
+                 "function": {"name": "lire", "arguments": "{\"path\":\"a\"}"}}
+            ]})
+        } else {
+            json!({"role": "assistant", "content": "bonjour"})
+        };
+        let finish = if tools { "tool_calls" } else { "stop" };
         return (
             "200 OK",
+            "application/json",
             json!({
-                "choices": [{"message": {"content": "bonjour"}, "finish_reason": "stop"}],
+                "choices": [{"message": message, "finish_reason": finish}],
                 "usage": {"prompt_tokens": 10, "completion_tokens": 5}
             })
             .to_string(),
         );
     }
-    ("404 Not Found", json!({"error": "route"}).to_string())
+    (
+        "404 Not Found",
+        "application/json",
+        json!({"error": "route"}).to_string(),
+    )
 }
 
 /// Starts the engine and returns the base URL a provider should point at.
@@ -121,13 +200,32 @@ fn hub_with(config: ProviderConfig, day: u64) -> Hub {
     hub
 }
 
+fn local() -> ProviderId {
+    ProviderId::new("local").unwrap()
+}
+
+/// A budget whose daily limit fits one call (about 56 estimated tokens) but not two once
+/// the first has settled at its real 15 tokens: 15 + 56 > 60.
+fn one_call_a_day() -> Budget {
+    Budget {
+        max_output_tokens: 20,
+        max_tokens_per_day: Some(60),
+        max_cost_micros_per_day: None,
+    }
+}
+
+fn conversation(user: &str) -> Value {
+    json!([
+        { "role": "system", "content": "Tu es bref." },
+        { "role": "user", "content": user },
+    ])
+}
+
 #[tokio::test]
 async fn the_engine_model_is_discovered_and_the_real_usage_is_recorded() {
     let base = start_engine().await;
     let hub = hub_with(provider(&base, Budget::default()), 20_000);
-    let client = hub
-        .client(&ProviderId::new("local").unwrap())
-        .expect("client");
+    let client = hub.client(&local()).expect("client");
 
     let response = client
         .chat(ChatRequest::new("Tu es bref.", "Dis bonjour."))
@@ -144,19 +242,14 @@ async fn the_engine_model_is_discovered_and_the_real_usage_is_recorded() {
         response.usage.input_tokens, 10,
         "l'usage réel, pas l'estimation"
     );
-    assert_eq!(
-        hub.usage_today(&ProviderId::new("local").unwrap()).tokens(),
-        15
-    );
+    assert_eq!(hub.usage_today(&local()).tokens(), 15);
 }
 
 #[tokio::test]
 async fn a_request_larger_than_the_window_is_refused_before_it_is_sent() {
     let base = start_engine().await;
     let hub = hub_with(provider(&base, Budget::default()), 20_000);
-    let client = hub
-        .client(&ProviderId::new("local").unwrap())
-        .expect("client");
+    let client = hub.client(&local()).expect("client");
 
     let mut request = ChatRequest::new("sys", "x".repeat(30_000));
     request.max_output_tokens = Some(64);
@@ -165,7 +258,7 @@ async fn a_request_larger_than_the_window_is_refused_before_it_is_sent() {
         other => panic!("attendu un refus de contexte, obtenu {other:?}"),
     }
     assert_eq!(
-        hub.usage_today(&ProviderId::new("local").unwrap()).tokens(),
+        hub.usage_today(&local()).tokens(),
         0,
         "rien réservé, rien dépensé"
     );
@@ -174,39 +267,28 @@ async fn a_request_larger_than_the_window_is_refused_before_it_is_sent() {
 #[tokio::test]
 async fn the_daily_budget_stops_the_second_call_and_the_first_is_kept() {
     let base = start_engine().await;
-    // Each call reserves 30 estimated tokens (1 + 1 + 8 overhead + 20 output). The first
-    // settles at 15 real ones; the second would bring the day to 15 + 30 = 45, past 30.
-    let budget = Budget {
-        max_output_tokens: 20,
-        max_tokens_per_day: Some(30),
-        max_cost_micros_per_day: None,
-    };
-    let hub = hub_with(provider(&base, budget), 20_000);
-    let client = hub
-        .client(&ProviderId::new("local").unwrap())
-        .expect("client");
+    let hub = hub_with(provider(&base, one_call_a_day()), 20_000);
+    let client = hub.client(&local()).expect("client");
 
     client
-        .chat(ChatRequest::new("sys", "hi"))
+        .chat(ChatRequest::new("Tu es bref.", "Dis bonjour."))
         .await
         .expect("premier appel dans le budget");
-    match client.chat(ChatRequest::new("sys", "hi")).await {
+    match client
+        .chat(ChatRequest::new("Tu es bref.", "Dis bonjour."))
+        .await
+    {
         Err(ProviderError::Budget(_)) => {}
         other => panic!("attendu un refus de budget, obtenu {other:?}"),
     }
-    assert_eq!(
-        hub.usage_today(&ProviderId::new("local").unwrap()).tokens(),
-        15
-    );
+    assert_eq!(hub.usage_today(&local()).tokens(), 15);
 }
 
 #[tokio::test]
 async fn the_completion_contract_is_served_by_the_same_client() {
     let base = start_engine().await;
     let hub = hub_with(provider(&base, Budget::default()), 20_000);
-    let client = hub
-        .client(&ProviderId::new("local").unwrap())
-        .expect("client");
+    let client = hub.client(&local()).expect("client");
 
     let text = Completion::complete(&client, "sys", "bonjour")
         .await
@@ -220,33 +302,20 @@ async fn an_engine_error_is_reported_and_its_reservation_given_back() {
     let mut config = provider(&base, Budget::default());
     config.model = Some("modele-absent".into());
     let hub = hub_with(config, 20_000);
-    let client = hub
-        .client(&ProviderId::new("local").unwrap())
-        .expect("client");
+    let client = hub.client(&local()).expect("client");
 
     match client.chat(ChatRequest::new("sys", "hi")).await {
         Err(ProviderError::Status { code, .. }) => assert_eq!(code, 400),
         other => panic!("attendu un statut 400, obtenu {other:?}"),
     }
-    assert_eq!(
-        hub.usage_today(&ProviderId::new("local").unwrap()).tokens(),
-        0
-    );
+    assert_eq!(hub.usage_today(&local()).tokens(), 0);
 }
 
 #[tokio::test]
 async fn concurrent_calls_cannot_both_pass_a_limit_only_one_fits() {
     let base = start_engine().await;
-    let budget = Budget {
-        max_output_tokens: 20,
-        max_tokens_per_day: Some(30),
-        max_cost_micros_per_day: None,
-    };
-    let hub = Arc::new(hub_with(provider(&base, budget), 20_000));
-    let client = Arc::new(
-        hub.client(&ProviderId::new("local").unwrap())
-            .expect("client"),
-    );
+    let hub = Arc::new(hub_with(provider(&base, one_call_a_day()), 20_000));
+    let client = Arc::new(hub.client(&local()).expect("client"));
 
     let first = {
         let client = Arc::clone(&client);
@@ -262,4 +331,137 @@ async fn concurrent_calls_cannot_both_pass_a_limit_only_one_fits() {
         accepted, 1,
         "une seule réservation tient dans le budget : {outcomes:?}"
     );
+}
+
+#[tokio::test]
+async fn a_streamed_turn_yields_its_pieces_and_settles_the_reported_usage() {
+    let base = start_engine().await;
+    let hub = hub_with(provider(&base, Budget::default()), 20_000);
+    let client = hub.client(&local()).expect("client");
+
+    let mut turn = client
+        .open_turn(TurnRequest::new(conversation("Dis bonjour.")))
+        .await
+        .expect("tour ouvert");
+    let mut pieces = Vec::new();
+    while let Some(piece) = turn.next().await.expect("morceau") {
+        pieces.push(piece);
+    }
+    assert_eq!(pieces, vec!["Bon".to_string(), "jour".to_string()]);
+    assert_eq!(turn.received(), "Bonjour");
+
+    let reply = turn.complete().expect("tour terminé");
+    assert_eq!(reply.content, "Bonjour");
+    assert_eq!(reply.finish, Finish::Stop);
+    assert_eq!(reply.usage.input_tokens, 10, "l'usage annoncé par le flux");
+    assert_eq!(hub.usage_today(&local()).tokens(), 15);
+}
+
+#[tokio::test]
+async fn streamed_tool_calls_are_joined_from_their_fragments() {
+    let base = start_engine().await;
+    let hub = hub_with(provider(&base, Budget::default()), 20_000);
+    let client = hub.client(&local()).expect("client");
+
+    let mut turn = client
+        .open_turn(TurnRequest::new(conversation("SCENARIO:tools")).with_tools(json!([])))
+        .await
+        .expect("tour ouvert");
+    while turn.next().await.expect("morceau").is_some() {}
+    let reply = turn.complete().expect("tour terminé");
+
+    assert_eq!(reply.finish, Finish::ToolCalls);
+    assert_eq!(reply.tool_calls.len(), 1);
+    assert_eq!(reply.tool_calls[0]["id"], "call_1");
+    assert_eq!(reply.tool_calls[0]["function"]["name"], "lire");
+    assert_eq!(
+        reply.tool_calls[0]["function"]["arguments"],
+        "{\"path\":\"a\"}"
+    );
+}
+
+#[tokio::test]
+async fn a_streamed_turn_cut_by_the_output_cap_says_so() {
+    let base = start_engine().await;
+    let hub = hub_with(provider(&base, Budget::default()), 20_000);
+    let client = hub.client(&local()).expect("client");
+
+    let mut turn = client
+        .open_turn(TurnRequest::new(conversation("SCENARIO:length")))
+        .await
+        .expect("tour ouvert");
+    while turn.next().await.expect("morceau").is_some() {}
+    let reply = turn.complete().expect("tour terminé");
+    assert_eq!(reply.finish, Finish::Length);
+}
+
+#[tokio::test]
+async fn a_stream_that_ends_without_done_is_an_error_not_an_answer() {
+    let base = start_engine().await;
+    let hub = hub_with(provider(&base, Budget::default()), 20_000);
+    let client = hub.client(&local()).expect("client");
+
+    let mut turn = client
+        .open_turn(TurnRequest::new(conversation("SCENARIO:cut")))
+        .await
+        .expect("tour ouvert");
+    let mut failure = None;
+    loop {
+        match turn.next().await {
+            Ok(Some(_)) => {}
+            Ok(None) => break,
+            Err(error) => {
+                failure = Some(error);
+                break;
+            }
+        }
+    }
+    assert!(
+        matches!(failure, Some(ProviderError::Parse(_))),
+        "un flux coupé n'est pas une réponse : {failure:?}"
+    );
+    assert_eq!(turn.received(), "Bon", "ce qui est arrivé reste lisible");
+}
+
+#[tokio::test]
+async fn dropping_a_streamed_turn_gives_its_reservation_back() {
+    let base = start_engine().await;
+    let hub = hub_with(provider(&base, one_call_a_day()), 20_000);
+    let client = hub.client(&local()).expect("client");
+
+    let turn = client
+        .open_turn(TurnRequest::new(conversation("Dis bonjour.")))
+        .await
+        .expect("tour ouvert");
+    assert!(
+        hub.usage_today(&local()).tokens() > 0,
+        "réservé pendant le tour"
+    );
+    drop(turn);
+    assert_eq!(
+        hub.usage_today(&local()).tokens(),
+        0,
+        "annulé : budget rendu"
+    );
+
+    // And the budget is usable again.
+    client
+        .chat(ChatRequest::new("Tu es bref.", "Dis bonjour."))
+        .await
+        .expect("le budget a été rendu");
+}
+
+#[tokio::test]
+async fn a_whole_turn_with_tools_returns_the_assistant_message() {
+    let base = start_engine().await;
+    let hub = hub_with(provider(&base, Budget::default()), 20_000);
+    let client = hub.client(&local()).expect("client");
+
+    let reply = client
+        .send_turn(TurnRequest::new(conversation("SCENARIO:tools")).with_tools(json!([])))
+        .await
+        .expect("réponse");
+    assert_eq!(reply.finish, Finish::ToolCalls);
+    assert_eq!(reply.tool_calls[0]["function"]["name"], "lire");
+    assert_eq!(reply.model, "qwen-test");
 }

@@ -55,7 +55,9 @@ pub use model::{ContextFit, ModelInfo, ParseError, estimate_tokens, fit, parse_m
 pub use secret::{Secret, SecretError, SecretResolver, Secrets};
 pub use store::{JsonFileStore, MemoryStore, ProviderStore, Snapshot, StoreError};
 
+#[cfg(all(feature = "http", not(target_arch = "wasm32")))]
+pub use client::Turn;
 #[cfg(feature = "http")]
-pub use client::{ChatRequest, ChatResponse, ProviderClient};
+pub use client::{ChatRequest, ChatResponse, Finish, ProviderClient, TurnReply, TurnRequest};
 
 pub use this_llm::{Completion, CredentialRef, Preset};
