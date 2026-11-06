@@ -116,6 +116,11 @@ pub struct Step {
     pub after: String,
     #[serde(default)]
     pub resume: String,
+    /// Empreinte (SHA-256, hex) de la sortie **complète** de l'outil, calculée par la boucle
+    /// avant toute troncature. `resume` est borné pour l'affichage ; une empreinte prise sur
+    /// lui ne prouverait que les premiers caractères. Absente des journaux anciens.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub out_hash: Option<String>,
 }
 
 impl Step {
@@ -131,6 +136,7 @@ impl Step {
             before: String::new(),
             after: String::new(),
             resume: String::new(),
+            out_hash: None,
         }
     }
 
@@ -163,6 +169,12 @@ impl Step {
     pub fn state(mut self, before: impl Into<String>, after: impl Into<String>) -> Self {
         self.before = before.into();
         self.after = after.into();
+        self
+    }
+
+    /// L'empreinte de la sortie complète (voir [`Step::out_hash`]).
+    pub fn out_hash(mut self, empreinte: impl Into<String>) -> Self {
+        self.out_hash = Some(empreinte.into());
         self
     }
 

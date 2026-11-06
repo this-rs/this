@@ -656,7 +656,10 @@ impl Harness {
                             text: "annulé".to_string(),
                             refused: true,
                             failed: false,
+                            failure: None,
                             unchanged: false,
+                            before: String::new(),
+                            after: String::new(),
                             ms: 0,
                         });
                         self.push(Message::tool(
@@ -676,10 +679,16 @@ impl Harness {
                 // visible après. Sans ça, une action refusée était suivie d'un
                 // « je m'arrête là » accepté comme une conclusion.
                 let hint = relaunch_reason(&run, spoke, called);
+                // Le récit du tour est confié à la décision : sans lui, « c'est
+                // fait » après un refus n'est jamais confronté aux étapes.
+                run.said(&text);
 
                 match run.after_turn_with(self.policy.as_ref(), spoke, called) {
                     Decision::Continue => {
-                        if let Some(hint) = hint {
+                        // Le rappel est consommé dans tous les cas : laissé dans
+                        // le run, il serait périmé au tour suivant.
+                        let rappel = run.take_rappel();
+                        if let Some(hint) = hint.or(rappel) {
                             self.out.emit(Event::Hint { text: hint.clone() });
                             self.push(Message::user(hint));
                         }
@@ -733,20 +742,14 @@ impl Harness {
             text: outcome.text.clone(),
             refused: outcome.refused.is_some(),
             failed: outcome.failed.is_some(),
+            failure: outcome.failed.clone(),
             unchanged: outcome.unchanged(),
+            before: outcome.before.clone(),
+            after: outcome.after.clone(),
             ms,
         });
 
-        let mut step = Step::tool(call.name.clone(), ms)
-            .state(outcome.before.clone(), outcome.after.clone())
-            .resume(outcome.text.chars().take(200).collect::<String>());
-        if let Some(motif) = &outcome.refused {
-            step = step.refused(motif.clone());
-        }
-        if let Some(cause) = &outcome.failed {
-            step = step.failed(cause.clone());
-        }
-        run.record(step);
+        run.record(step_of(&call.name, ms, &outcome));
         outcome
     }
 
@@ -808,6 +811,41 @@ fn relaunch_reason(run: &Run, spoke: bool, called: bool) -> Option<String> {
         );
     }
     None
+}
+
+/// Le résumé d'une sortie d'outil gardé dans l'étape, en caractères.
+const RESUME_CHARS: usize = 200;
+
+/// L'étape qu'un appel d'outil laisse dans le run.
+///
+/// L'empreinte se prend sur la sortie COMPLÈTE, ici, avant la troncature du
+/// résumé : hachée plus loin (le magasin n'a que `resume`), elle ne prouverait
+/// que les [`RESUME_CHARS`] premiers caractères.
+fn step_of(tool: &str, ms: u64, outcome: &Outcome) -> Step {
+    let mut step = Step::tool(tool, ms)
+        .state(outcome.before.clone(), outcome.after.clone())
+        .resume(outcome.text.chars().take(RESUME_CHARS).collect::<String>())
+        .out_hash(out_hash(&outcome.text));
+    if let Some(motif) = &outcome.refused {
+        step = step.refused(motif.clone());
+    }
+    if let Some(cause) = &outcome.failed {
+        step = step.failed(cause.clone());
+    }
+    step
+}
+
+/// L'empreinte d'une sortie d'outil : SHA-256 en hexadécimal minuscule.
+///
+/// Même fonction que celle du magasin (`src/storage/harness_graph.rs`), pour
+/// qu'un `_out_hash` ait un seul format quel que soit l'endroit où il est
+/// calculé. `sha2` est du Rust pur : il compile en wasm32 sans `asm`.
+pub fn out_hash(text: &str) -> String {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(text.as_bytes())
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
 }
 
 /// La poignée que l'interface garde : elle commande sans attendre la fin d'un
@@ -959,5 +997,44 @@ impl Handle {
                 + 1;
         }
         self.emit_pending();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn out_hash_est_le_sha256_hex() {
+        assert_eq!(
+            out_hash("abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+    }
+
+    /// Deux sorties qui ne diffèrent qu'après le 200ᵉ caractère ont le même
+    /// résumé, mais pas la même empreinte : c'est la sortie complète qui est hachée.
+    #[test]
+    fn l_empreinte_de_l_etape_porte_sur_la_sortie_complete() {
+        let debut = "x".repeat(RESUME_CHARS);
+        let a = step_of("lire", 1, &Outcome::ok(format!("{debut}A")));
+        let b = step_of("lire", 1, &Outcome::ok(format!("{debut}B")));
+        assert_eq!(a.resume, b.resume, "le résumé est tronqué");
+        assert_eq!(a.out_hash, Some(out_hash(&format!("{debut}A"))));
+        assert_ne!(a.out_hash, b.out_hash, "l'empreinte voit la fin");
+    }
+
+    #[test]
+    fn l_etape_garde_refus_echec_et_empreintes() {
+        let refus = step_of("ecrire", 2, &Outcome::refused("non", "même version"));
+        assert!(refus.refused);
+        assert_eq!(refus.motif.as_deref(), Some("même version"));
+        let echec = step_of(
+            "ecrire",
+            2,
+            &Outcome::failed("échec", "disque plein").observed("a", "a"),
+        );
+        assert_eq!(echec.failure.as_deref(), Some("disque plein"));
+        assert_eq!((echec.before.as_str(), echec.after.as_str()), ("a", "a"));
     }
 }

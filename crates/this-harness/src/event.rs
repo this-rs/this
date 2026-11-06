@@ -65,9 +65,19 @@ pub enum Event {
         /// d'un refus : une décision se contourne, une erreur se corrige.
         #[serde(default)]
         failed: bool,
+        /// La cause de l'échec (`Outcome::failed`), pour que l'interface dise
+        /// *pourquoi* au lieu d'afficher un simple « échec ».
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        failure: Option<String>,
         /// L'état n'a pas bougé : une action qui ne change rien n'est pas un
         /// progrès, et la boucle doit le voir.
         unchanged: bool,
+        /// Empreintes de l'état avant et après l'appel (`Outcome::before` /
+        /// `Outcome::after`) — vides quand l'outil n'observe rien.
+        #[serde(default)]
+        before: String,
+        #[serde(default)]
+        after: String,
         ms: u64,
     },
     /// Le texte définitif du tour (il remplace les deltas accumulés).
