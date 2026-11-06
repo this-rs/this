@@ -24,7 +24,11 @@
 //! |---|---|
 //! | `_harness` | `_uuid`, `_name`, `_version`, `_fingerprint` |
 //! | `_run` | `_uuid`, `_goal`, `_stop` |
-//! | `_step` | `_uuid`, `_run`, `_index`, `_tool`, `_refused`, `_failed` |
+//! | `_step` | `_uuid`, `_run`, `_index`, `_tool`, `_refused`, `_failed`, `_ok`, `_out_excerpt` |
+//!
+//! Les propriétés de **preuve** d'une étape (`_ok`, `_out_excerpt`, et
+//! `_out_hash` posé par le magasin) sont calculées par le harness depuis
+//! l'étape observée, jamais recopiées d'une affirmation du modèle.
 //!
 //! ## Ce que ça change, et ce que ça ne protège pas
 //!
@@ -93,8 +97,29 @@ pub const ABOUT: &str = "ABOUT";
 /// Unique par triplet. Un message n'est dans qu'une seule conversation.
 pub const IN: &str = "IN";
 
+/// `_note` → `_step` : la note a été tirée de cette étape (sa preuve d'origine). Unique par triplet.
+pub const DERIVED_FROM: &str = "DERIVED_FROM";
+/// `_step` → n'importe quel nœud : l'étape a lu ce nœud (ce que l'outil a vu). Unique par triplet.
+pub const SAW: &str = "SAW";
+/// `_note` → `_note` : la note remplace une note antérieure, qui reste lisible. Unique par triplet.
+pub const SUPERSEDES: &str = "SUPERSEDES";
+
 /// Tous les types d'arêtes connus, dans l'ordre du contrat.
-pub const EDGE_TYPES: [&str; 7] = [DECLARES, LINKS, REQUIRES, REFERENCES, HAS_STEP, ABOUT, IN];
+pub const EDGE_TYPES: [&str; 10] = [
+    DECLARES,
+    LINKS,
+    REQUIRES,
+    REFERENCES,
+    HAS_STEP,
+    ABOUT,
+    IN,
+    DERIVED_FROM,
+    SAW,
+    SUPERSEDES,
+];
+
+/// Longueur maximale (en caractères) de `_out_excerpt` sur un nœud `_step`.
+pub const OUT_EXCERPT_CHARS: usize = 200;
 
 /// Un nœud, tel qu'un magasin le range : un label et des propriétés textuelles.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -245,8 +270,32 @@ pub fn run_nodes(run: &Run, run_id: &str) -> Result<Vec<Node>, String> {
     Ok(nodes)
 }
 
+/// La sortie de l'outil telle que l'étape l'a gardée : `resume`.
+///
+/// C'est le texte rendu par l'outil (ou, à défaut, le motif du refus / la cause
+/// de l'échec, cf. [`Step::refused`] et [`Step::failed`]). Attention : la boucle
+/// de `this-harness` le tronque déjà à 200 caractères avant de l'enregistrer ;
+/// ce qui n'est pas dans l'étape n'existe pas pour le graphe.
+pub fn step_output(step: &Step) -> &str {
+    &step.resume
+}
+
+/// L'étape a-t-elle réussi ? Ni refusée, ni échouée.
+pub fn step_ok(step: &Step) -> bool {
+    !step.refused && step.failure.is_none()
+}
+
+/// Le début de la sortie, borné à [`OUT_EXCERPT_CHARS`] caractères (jamais
+/// coupé au milieu d'un caractère).
+pub fn step_out_excerpt(step: &Step) -> String {
+    step_output(step).chars().take(OUT_EXCERPT_CHARS).collect()
+}
+
 /// Un nœud d'étape. `_index` porte l'ordre : un graphe ne garantit aucun ordre
 /// de lecture, et un journal d'étapes qui se relit mélangé n'est pas un journal.
+///
+/// `_ok` et `_out_excerpt` sont dérivés de l'étape elle-même ; `_out_hash`
+/// (empreinte de la sortie) est posé par le magasin, qui a la fonction de hachage.
 pub fn step_node(step: &Step, run_id: &str) -> Node {
     let data = serde_json::to_string(step).unwrap_or_default();
     Node {
@@ -259,6 +308,8 @@ pub fn step_node(step: &Step, run_id: &str) -> Node {
             ("_refused".to_string(), step.refused.to_string()),
             ("_failed".to_string(), step.failure.is_some().to_string()),
             ("_ms".to_string(), step.ms.to_string()),
+            ("_ok".to_string(), step_ok(step).to_string()),
+            ("_out_excerpt".to_string(), step_out_excerpt(step)),
             ("_data".to_string(), data),
         ],
     }
@@ -445,7 +496,10 @@ mod tests {
                 "REFERENCES",
                 "HAS_STEP",
                 "ABOUT",
-                "IN"
+                "IN",
+                "DERIVED_FROM",
+                "SAW",
+                "SUPERSEDES"
             ]
         );
         let uniques: std::collections::BTreeSet<_> = EDGE_TYPES.iter().collect();
@@ -455,6 +509,28 @@ mod tests {
             assert!(!t.starts_with('_'), "{t} ressemble à un label réservé");
             assert_eq!(t, t.to_uppercase());
         }
+    }
+
+    #[test]
+    fn une_etape_porte_ses_preuves_calculees() {
+        let ok = step_node(&Step::tool("lire", 2).resume("x".repeat(500)), "r");
+        assert_eq!(ok.get("_ok"), Some("true"));
+        assert_eq!(
+            ok.get("_out_excerpt").map(|s| s.chars().count()),
+            Some(OUT_EXCERPT_CHARS),
+            "l'extrait est borné"
+        );
+        let refus = step_node(&Step::tool("ecrire", 1).refused("même version"), "r");
+        assert_eq!(refus.get("_ok"), Some("false"));
+        assert_eq!(refus.get("_out_excerpt"), Some("même version"));
+        let echec = step_node(&Step::tool("ecrire", 1).failed("disque plein"), "r");
+        assert_eq!(echec.get("_ok"), Some("false"));
+        // Un extrait multi-octets ne se coupe pas au milieu d'un caractère.
+        let accents = step_node(&Step::tool("t", 1).resume("é".repeat(300)), "r");
+        assert_eq!(
+            accents.get("_out_excerpt"),
+            Some("é".repeat(OUT_EXCERPT_CHARS).as_str())
+        );
     }
 
     #[test]
