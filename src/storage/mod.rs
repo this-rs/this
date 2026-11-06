@@ -6,6 +6,8 @@
 pub mod annuaire_identites;
 #[cfg(feature = "dynamodb")]
 pub mod dynamodb;
+#[cfg(feature = "obrain")]
+pub mod harness_graph;
 /// IAM **matérialisé** : la décision d'autorisation est une lecture indexée.
 #[cfg(feature = "obrain")]
 pub mod iam;
