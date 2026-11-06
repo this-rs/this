@@ -53,7 +53,6 @@ fn s2_je_me_souviens_sans_recall_rappelle() {
 }
 
 #[test]
-#[ignore = "trouvaille (moyenne) : les formes de mémoire sans « souviens/rappelle/mémoire » passent — « D'après nos échanges, tu préfères X », « Tu m'avais dit que… », \"As you told me before\" ne déclenchent aucun rappel"]
 fn s2_memoire_paraphrasee_rappelle() {
     let manques: Vec<&str> = [
         "D'après nos échanges précédents, tu préfères le thé vert.",
@@ -99,7 +98,6 @@ fn s7_un_seul_rappel_par_run() {
 }
 
 #[test]
-#[ignore = "trouvaille (moyenne) : sans aucun outil, « c'est fait » répété après le rappel rend Done (verdict Unverified) — un récit jamais prouvé finit « terminé »"]
 fn s7_recit_jamais_prouve_sans_outil_n_est_pas_done() {
     let mut r = run();
     r.said("C'est fait.");
@@ -167,7 +165,6 @@ fn s8_variantes_typographiques_reconnues() {
 }
 
 #[test]
-#[ignore = "trouvaille (moyenne) : sans apostrophe, « cest fait » / « c est fait » ne sont pas reconnus — mots() rend « cest » ou « c », fait_fr exige « c' »"]
 fn s8_c_est_fait_sans_apostrophe() {
     let manques: Vec<&str> = ["cest fait", "Cest fait !", "c est fait"]
         .into_iter()
@@ -177,7 +174,6 @@ fn s8_c_est_fait_sans_apostrophe() {
 }
 
 #[test]
-#[ignore = "trouvaille (moyenne) : sans accents, « j'ai cree », « j'ai ajoute », « j'ai supprime » ne sont pas reconnus — participe() n'accepte que les suffixes é/ée/és/ées"]
 fn s8_participes_sans_accents() {
     let manques: Vec<&str> = [
         "j'ai cree le module",
@@ -191,7 +187,6 @@ fn s8_participes_sans_accents() {
 }
 
 #[test]
-#[ignore = "trouvaille (haute) : les tournures sans sujet ou passives — les plus fréquentes chez un LLM — échappent à la détection : « Module créé avec succès. », « Le module est installé. », « Le module a été créé. », « Voilà, c'est en place. », \"The module has been created.\", \"I did create it.\""]
 fn s8_tournures_sans_sujet_ou_passives() {
     let manques: Vec<&str> = [
         "Module créé avec succès.",
@@ -206,4 +201,36 @@ fn s8_tournures_sans_sujet_ou_passives() {
     .filter(|said| !action(said))
     .collect();
     assert!(manques.is_empty(), "manqués : {manques:?}");
+}
+
+// ---- 9. Vague 4 ---------------------------------------------------------------
+
+#[test]
+fn s9_recit_jamais_prouve_l_arret_dit_non_verifie() {
+    let mut r = run();
+    r.said("Le module a été installé.");
+    assert_eq!(r.after_turn(true, false), Decision::Continue);
+    assert!(r.take_rappel().is_some());
+    r.said("Module installé avec succès.");
+    match r.after_turn(true, false) {
+        Decision::Halt(Stop::Failed(raison)) => assert!(raison.contains("non vérifié"), "{raison}"),
+        autre => panic!("{autre:?}"),
+    }
+    assert!(r.stop.as_ref().unwrap().phrase().contains("non vérifié"));
+}
+
+#[test]
+fn s9_paraphrases_de_memoire_niees_ou_au_present_ne_rappellent_pas() {
+    for said in [
+        "Tu ne m'avais rien dit à ce sujet.",
+        "Tu m'as dit à l'instant que tu préfères le thé.",
+        "You never told me before.",
+    ] {
+        assert!(
+            !evidence::claims(said)
+                .iter()
+                .any(|(c, _)| *c == Claim::Memory),
+            "faux positif : {said}"
+        );
+    }
 }

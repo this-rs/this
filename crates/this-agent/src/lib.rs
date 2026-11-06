@@ -442,23 +442,44 @@ impl Run {
         // passait pour une conclusion, la frontière du tour ayant effacé le refus.
         self.tour_debut = fin_du_tour;
         let en_suspens = evidence::unresolved(&self.steps).cloned();
-        if self.rappels_recit == 0
-            && let Some(rappel) = evidence::claim_check(&recit, &self.steps)
-        {
-            self.rappels_recit += 1;
-            self.rappel = Some(match &en_suspens {
-                Some(etape) => format!(
-                    "{rappel} Pour mémoire, `{}` n'a pas abouti dans ce run : {}.",
-                    etape.tool,
-                    etape
-                        .motif
-                        .clone()
-                        .or_else(|| etape.failure.clone())
-                        .unwrap_or_default()
-                ),
-                None => rappel,
-            });
-            return Decision::Continue;
+        if let Some(non_prouve) = evidence::unproven(&recit, &self.steps) {
+            if self.rappels_recit == 0 {
+                self.rappels_recit += 1;
+                let rappel = non_prouve.rappel();
+                self.rappel = Some(match &en_suspens {
+                    Some(etape) if !rappel.contains(&format!("`{}`", etape.tool)) => format!(
+                        "{rappel} Pour mémoire, `{}` n'a pas abouti dans ce run : {}.",
+                        etape.tool,
+                        etape
+                            .motif
+                            .clone()
+                            .or_else(|| etape.failure.clone())
+                            .unwrap_or_default()
+                    ),
+                    _ => rappel,
+                });
+                return Decision::Continue;
+            }
+            // Le rappel a été envoyé et le récit reste non prouvé : ce n'est pas `Done`. Un
+            // refus en suspens se dit plus bas ; sinon, l'écriture contredite (refusée,
+            // jamais reprise) dit son motif, et à défaut le verdict « non vérifié » devient
+            // la raison d'arrêt — `Stop::Failed`, parce que l'objectif n'est pas atteint et
+            // que rien n'a été refusé.
+            if en_suspens.is_none() {
+                return self.halt(match &non_prouve.etape {
+                    Some(etape) if etape.refused => {
+                        Stop::Refused(etape.motif.clone().unwrap_or(etape.resume.clone()))
+                    }
+                    Some(etape) => Stop::Failed(format!(
+                        "l'outil a échoué : {}",
+                        etape.failure.clone().unwrap_or(etape.resume.clone())
+                    )),
+                    None => Stop::Failed(format!(
+                        "récit non vérifié : « {} » — {}, même après un rappel",
+                        non_prouve.phrase, non_prouve.manque
+                    )),
+                });
+            }
         }
         if let Some(etape) = en_suspens {
             return self.halt(match (&etape.motif, &etape.failure) {
@@ -661,15 +682,90 @@ mod tests {
         assert_eq!(r.take_rappel(), None);
     }
 
+    /// W12 MOY 5 : avant, le récit répété après le rappel finissait en `Done` (verdict
+    /// `Unverified` caché derrière « terminé »). Désormais l'arrêt le dit.
     #[test]
-    fn un_seul_rappel_puis_done_si_rien_n_a_echoue() {
+    fn un_seul_rappel_puis_non_verifie_si_le_recit_reste_non_prouve() {
         let mut r = run();
         r.said("J'ai créé la fiche.");
         assert_eq!(r.after_turn(true, false), Decision::Continue);
         r.said("J'ai créé la fiche.");
-        assert_eq!(r.after_turn(true, false), Decision::Halt(Stop::Done));
-        // Le récit n'a rien prouvé : le verdict le dit, la fin n'est pas un succès prouvé.
+        match r.after_turn(true, false) {
+            Decision::Halt(Stop::Failed(raison)) => {
+                assert!(raison.contains("récit non vérifié"), "{raison}");
+                assert!(raison.contains("J'ai créé la fiche"), "{raison}");
+            }
+            autre => panic!("attendu un arrêt non vérifié, obtenu {autre:?}"),
+        }
+        assert_eq!(r.rappels_recit, 1);
         assert_eq!(r.verdict(), evidence::Verdict::Unverified);
+        assert!(r.resume_pour_l_utilisateur().contains("non vérifié"));
+    }
+
+    #[test]
+    fn un_rappel_puis_une_phrase_honnete_termine() {
+        let mut r = run();
+        r.said("J'ai créé la fiche.");
+        assert_eq!(r.after_turn(true, false), Decision::Continue);
+        r.said("Je n'ai pas créé la fiche : je n'ai appelé aucun outil.");
+        assert_eq!(r.after_turn(true, false), Decision::Halt(Stop::Done));
+        assert_eq!(r.verdict(), evidence::Verdict::Unverified);
+    }
+
+    #[test]
+    fn un_rappel_puis_l_outil_reellement_appele_termine() {
+        let mut r = run();
+        r.said("J'ai créé la fiche.");
+        assert_eq!(r.after_turn(true, false), Decision::Continue);
+        r.record(Step::tool("row_create", 3).state("0", "1"));
+        assert_eq!(r.after_turn(false, true), Decision::Continue);
+        r.said("J'ai créé la fiche.");
+        assert_eq!(r.after_turn(true, false), Decision::Halt(Stop::Done));
+        assert_eq!(r.verdict(), evidence::Verdict::Proven);
+    }
+
+    /// W10#2 : une écriture sans rapport ne blanchit pas un refus que le récit nomme.
+    #[test]
+    fn une_ecriture_sans_rapport_ne_rattrape_pas_le_refus_nomme() {
+        let mut r = run();
+        r.record(Step::tool("install_module", 10).refused("même version"));
+        r.after_turn(false, true);
+        r.record(Step::tool("row_create", 3).state("0", "1"));
+        r.after_turn(false, true);
+        r.said("C'est fait : j'ai installé le module.");
+        assert_eq!(r.after_turn(true, false), Decision::Continue);
+        let rappel = r.take_rappel().unwrap();
+        assert!(rappel.contains("`install_module`"), "{rappel}");
+        r.said("C'est fait.");
+        assert_eq!(
+            r.after_turn(true, false),
+            Decision::Halt(Stop::Refused("même version".into()))
+        );
+    }
+
+    #[test]
+    fn une_ecriture_sans_empreinte_ne_rattrape_pas_un_refus() {
+        let mut r = run();
+        r.record(Step::tool("install_module", 10).refused("même version"));
+        r.after_turn(false, true);
+        r.record(Step::tool("row_create", 3));
+        r.after_turn(false, true);
+        assert_eq!(
+            r.after_turn(true, false),
+            Decision::Halt(Stop::Refused("même version".into()))
+        );
+    }
+
+    #[test]
+    fn une_ecriture_observee_rattrape_un_refus_quand_le_recit_dit_ce_qui_a_ete_fait() {
+        let mut r = run();
+        r.record(Step::tool("install_module", 10).refused("même version"));
+        r.after_turn(false, true);
+        r.record(Step::tool("row_create", 3).state("0", "1"));
+        r.after_turn(false, true);
+        r.said("Le module était déjà à jour ; j'ai ajouté la ligne demandée.");
+        assert_eq!(r.after_turn(true, false), Decision::Halt(Stop::Done));
+        assert_eq!(r.take_rappel(), None);
     }
 
     #[test]
