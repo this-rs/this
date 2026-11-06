@@ -1,10 +1,16 @@
 //! The device bridge: the pure contract between a module and the device.
 //!
 //! A module never touches the device. It sends a [`Request`]; the shell answers with a
-//! [`Reply`]. Every request goes through [`gate`], which asks the person's consent through
-//! a [`Consent`] and refuses unless the answer is [`Decision::Allow`]. The gate is
-//! fail-closed: [`Decision::Ask`] and [`Decision::Deny`] are both refusals, and a
-//! capability the bridge does not support is refused before consent is even asked.
+//! [`Reply`]. Every request that touches the device or its data goes through [`gate`], which
+//! asks the person's consent through a [`Consent`] and refuses unless the answer is
+//! [`Decision::Allow`]. The gate is fail-closed: [`Decision::Ask`] and [`Decision::Deny`] are
+//! both refusals, and a capability the bridge does not support is refused before consent is
+//! even asked.
+//!
+//! One exception, and it is deliberate: reading the permission *state* (`Request::Status`) is
+//! a meta-question, not a data access. It is answered without consent, exactly as the system
+//! reports it to any app, because asking permission in order to learn whether permission was
+//! granted would turn a diagnostic into a queue of questions.
 //!
 //! No I/O and no async: the shell implements the device side, this module only decides.
 
@@ -247,6 +253,22 @@ pub fn status_method(capability: Capability) -> Option<&'static str> {
 /// A capability the bridge does not support is refused with
 /// [`DeviceError::NotSupported`] before `consent` is consulted.
 pub fn gate(module: &str, request: &Request, consent: &dyn Consent) -> Result<Capability, Reply> {
+    // Reading the STATE of a permission is not reading data: it is the meta-information the
+    // system already gives any app (iOS and Android both answer it without asking again).
+    // Sending it through consent had two measured effects: a diagnostic over the 21
+    // capabilities asked the person 21 questions, and the queue filled with requests that
+    // grant access to nothing. A refusal is learned from the answer (`denied`), not from a
+    // permission one would have asked for in order to observe it.
+    //
+    // Still gated: anything that touches the sensor or the data (a `Call`, the gyroscope, a
+    // Bluetooth scan).
+    if let Request::Status { capability } = request {
+        return if Capability::ALL.contains(capability) {
+            Ok(*capability)
+        } else {
+            Err(refused(DeviceError::NotSupported))
+        };
+    }
     gate_within(module, request, consent, bridged_for(request))
 }
 
@@ -315,22 +337,22 @@ mod tests {
         }
     }
 
-    fn every_request() -> Vec<Request> {
+    /// The requests that reach the device or its data: all of them are gated.
+    fn every_device_request() -> Vec<Request> {
         vec![
-            Request::Status {
-                capability: Capability::Gyroscope,
-            },
             Request::GyroscopeSample,
             Request::BluetoothScan {
                 duration_ms: 3000,
                 services: vec!["180d".into()],
             },
+            call("contactsList", json!({"limit": 5})),
+            call("photosPick", json!({"limit": 1})),
         ]
     }
 
     #[test]
-    fn deny_refuses_every_request_as_not_authorized() {
-        for request in every_request() {
+    fn deny_refuses_every_device_request_as_not_authorized() {
+        for request in every_device_request() {
             let consent = Fixed::new(Decision::Deny);
             let result = gate("atelier", &request, &consent);
             assert_eq!(
@@ -346,7 +368,7 @@ mod tests {
 
     #[test]
     fn ask_is_never_an_implicit_agreement() {
-        for request in every_request() {
+        for request in every_device_request() {
             let consent = Fixed::new(Decision::Ask);
             assert_eq!(
                 gate("atelier", &request, &consent),
@@ -362,17 +384,43 @@ mod tests {
     fn allow_returns_the_capability_the_request_needs() {
         let consent = Fixed::new(Decision::Allow);
         assert_eq!(
-            gate("atelier", &every_request()[0], &consent),
+            gate("atelier", &every_device_request()[0], &consent),
             Ok(Capability::Gyroscope)
         );
         assert_eq!(
-            gate("atelier", &every_request()[1], &consent),
-            Ok(Capability::Gyroscope)
-        );
-        assert_eq!(
-            gate("atelier", &every_request()[2], &consent),
+            gate("atelier", &every_device_request()[1], &consent),
             Ok(Capability::Bluetooth)
         );
+        assert_eq!(
+            gate("atelier", &every_device_request()[2], &consent),
+            Ok(Capability::Contacts)
+        );
+        assert_eq!(
+            gate("atelier", &every_device_request()[3], &consent),
+            Ok(Capability::PhotosPick)
+        );
+    }
+
+    // La seule requête qui ne demande rien : sans cela, un diagnostic poserait une question
+    // par capacité, et remplirait la file de demandes qui ne donnent accès à rien.
+    #[test]
+    fn reading_a_permission_state_asks_nobody_and_queues_nothing() {
+        for capability in Capability::ALL {
+            let request = Request::Status { capability };
+            for answer in [Decision::Allow, Decision::Ask, Decision::Deny] {
+                let consent = Fixed::new(answer);
+                assert_eq!(
+                    gate("atelier", &request, &consent),
+                    Ok(capability),
+                    "{capability:?} with {answer:?}"
+                );
+                assert_eq!(
+                    consent.calls.get(),
+                    0,
+                    "{capability:?} with {answer:?}: consent must not be consulted"
+                );
+            }
+        }
     }
 
     #[test]
@@ -381,6 +429,21 @@ mod tests {
             let request = Request::Status { capability };
             let consent = Fixed::new(Decision::Allow);
             assert_eq!(gate("atelier", &request, &consent), Ok(capability));
+        }
+    }
+
+    #[test]
+    fn requests_that_reach_the_device_are_still_gated_after_the_status_exception() {
+        for request in every_device_request() {
+            let deny = Fixed::new(Decision::Deny);
+            assert_eq!(
+                gate("atelier", &request, &deny),
+                Err(Reply::Error {
+                    code: DeviceError::NotAuthorized
+                }),
+                "{request:?}"
+            );
+            assert_eq!(deny.calls.get(), 1, "{request:?} must consult consent");
         }
     }
 
@@ -458,14 +521,22 @@ mod tests {
     fn a_call_is_gated_on_the_capability_of_its_method() {
         let denied = Fixed::new(Decision::Deny);
         assert_eq!(
-            gate("atelier", &call("contactsList", json!({"limit": 5})), &denied),
+            gate(
+                "atelier",
+                &call("contactsList", json!({"limit": 5})),
+                &denied
+            ),
             Err(Reply::Error {
                 code: DeviceError::NotAuthorized
             })
         );
         let allowed = Fixed::new(Decision::Allow);
         assert_eq!(
-            gate("atelier", &call("contactsList", json!({"limit": 5})), &allowed),
+            gate(
+                "atelier",
+                &call("contactsList", json!({"limit": 5})),
+                &allowed
+            ),
             Ok(Capability::Contacts)
         );
         assert_eq!(allowed.calls.get(), 1);
@@ -489,7 +560,10 @@ mod tests {
     #[test]
     fn the_capability_reading_methods_refuse_an_unknown_capability_word() {
         for method in ["status", "captureStatus", "captureRequest"] {
-            assert_eq!(capability_of(method, &json!({"capability": "telepathy"})), None);
+            assert_eq!(
+                capability_of(method, &json!({"capability": "telepathy"})),
+                None
+            );
             assert_eq!(capability_of(method, &json!({})), None);
             assert_eq!(
                 capability_of(method, &json!({"capability": "microphone"})),
@@ -558,7 +632,11 @@ mod tests {
 
     #[test]
     fn requests_round_trip() {
-        for request in every_request() {
+        let mut every = every_device_request();
+        every.push(Request::Status {
+            capability: Capability::Health,
+        });
+        for request in every {
             let value = serde_json::to_value(&request).unwrap();
             let back: Request = serde_json::from_value(value).unwrap();
             assert_eq!(back, request);

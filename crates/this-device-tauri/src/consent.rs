@@ -567,20 +567,17 @@ mod tests {
         assert!(store.list_pending().is_empty());
     }
 
+    // Lire un état n'est pas lire une donnée : la question ne se pose pas, donc rien n'est
+    // mis en file. C'est ce qui rend un diagnostic des 21 capacités utilisable — la version
+    // précédente posait 21 questions et remplissait la file de demandes sans objet.
     #[test]
-    fn request_access_queues_a_status_of_any_catalogue_capability() {
+    fn reading_a_status_is_answered_without_queueing_anything() {
         let mut store = fresh();
-        let status = Request::Status {
-            capability: Capability::Camera,
-        };
-        // A status is gated against the whole catalogue, so Camera is asked, not refused.
-        assert_eq!(
-            store.request_access("atelier", &status, AT),
-            Err(Reply::Error {
-                code: DeviceError::NotAuthorized
-            })
-        );
-        assert_eq!(store.list_pending().len(), 1);
+        for capability in Capability::ALL {
+            let status = Request::Status { capability };
+            assert_eq!(store.request_access("atelier", &status, AT), Ok(capability));
+            assert!(store.list_pending().is_empty(), "{capability:?}");
+        }
     }
 
     #[test]
