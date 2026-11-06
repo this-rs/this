@@ -67,6 +67,8 @@ pub use wire::{Code, Failure, Finish, Message, Reply, Request, ToolCall, ToolSpe
 
 /// Le verdict que porte `Event::Stopped`.
 pub use this_agent::evidence::Verdict;
+/// Ce qu'un hôte déclare de ses outils ([`Toolbox::declarations`]).
+pub use this_agent::evidence::{Declaration, Effect};
 /// Les décisions pures de la boucle, réexportées : un utilisateur du harnais a
 /// besoin de `Stop` et de `Step` pour lire ce que le harnais raconte.
 pub use this_agent::{Decision, DefaultPolicy, Goal, Policy, Run, Step, Stop};
