@@ -91,10 +91,16 @@ prost-types = { version = "0.14", optional = true }
 reqwest = { version = "0.13", features = ["json", "stream"], optional = true }
 indexmap = "2.13.0"
 
-# Obrain graph database — cognitive graph engine (this-rs/obrain, the
+# Obrain graph database — cognitive graph engine (github obrain-db/obrain, the
 # ultra-benchmarked engine: fastest tested graph DB on LDBC Social Network
-# Benchmark in embedded and server configurations). Workspace checkout:
-# ~/projects/banc-obrain (github this-rs/obrain). Optional, feature-gated.
+# Benchmark in embedded and server configurations). Checkout local :
+# ~/projects/obrain/obrain-db (les crates vivent sous crates/). Optional,
+# feature-gated.
+#
+# Le chemin a longtemps été `../../banc-obrain-j4`, un **snapshot figé** de la
+# consolidation d'octobre (branche consolidation/m4-2026-10-31) : le framework
+# compilait donc contre un moteur qui ne bougeait plus. Repointé le 06/11/2026
+# sur le dépôt vivant.
 #
 # `algos` est requis pour DEUX raisons distinctes :
 #   1. `obrain-engine::procedures` (le registre des procédures) est gaté
@@ -105,25 +111,25 @@ indexmap = "2.13.0"
 #      `obrain-adapters::plugins::algorithms` est sous ce cfg).
 # Le dispatch générique des procédures `CALL` en dépend aussi (cf.
 # `cognitive-full = [..., "algos"]` dans obrain-engine).
-obrain-engine = { version = "0.0.1", path = "../../banc-obrain-j4/crates/obrain-engine", optional = true, features = ["algos"] }
-obrain-common = { version = "0.0.1", path = "../../banc-obrain-j4/crates/obrain-common", optional = true }
-obrain-core = { version = "0.0.1", path = "../../banc-obrain-j4/crates/obrain-core", optional = true, default-features = false }
+obrain-engine = { version = "0.0.1", path = "../../obrain/obrain-db/crates/obrain-engine", optional = true, features = ["algos"] }
+obrain-common = { version = "0.0.1", path = "../../obrain/obrain-db/crates/obrain-common", optional = true }
+obrain-core = { version = "0.0.1", path = "../../obrain/obrain-db/crates/obrain-core", optional = true, default-features = false }
 # `obrain-substrate` doit être une dépendance DIRECTE (et non transitive via
 # l'engine) dès qu'on nomme ses types : `substrate_handle()` rend un
 # `Option<Arc<SubstrateStore>>`, et la couche simpliciale / courbure / énergie
 # ne vit que là (`simplex_passes`, `simplex_zone`, `geometric`). Aucune feature.
-obrain-substrate = { version = "0.0.1", path = "../../banc-obrain-j4/crates/obrain-substrate", optional = true }
+obrain-substrate = { version = "0.0.1", path = "../../obrain/obrain-db/crates/obrain-substrate", optional = true }
 # `obrain-adapters` doit aussi être direct dès qu'on NOMME ses types : le
 # registre rend des `ParameterDef` dont le `param_type` est un
 # `obrain_adapters::plugins::ParameterType` (re-export `plugins/mod.rs:16`).
 # `plugins::traits` n'est PAS gaté par `algos` (seul `plugins::algorithms` l'est),
 # donc `default-features = false` suffit ici — les features dont on a besoin
 # (`algos`) sont demandées via `obrain-engine`, et l'unification les ramène.
-obrain-adapters = { version = "0.0.1", path = "../../banc-obrain-j4/crates/obrain-adapters", optional = true, default-features = false }
+obrain-adapters = { version = "0.0.1", path = "../../obrain/obrain-db/crates/obrain-adapters", optional = true, default-features = false }
 # `obrain-reactive` porte les VRAIS types du pont : `MutationBus`, `MutationEvent`,
 # `MutationBatch`. Il manquait, et c'est pour ça que `events/bridge/types.rs`
 # recopiait des types locaux — recopie qui a DÉJÀ divergé (voir types.rs).
-obrain-reactive = { version = "0.0.1", path = "../../banc-obrain-j4/crates/obrain-reactive", optional = true }
+obrain-reactive = { version = "0.0.1", path = "../../obrain/obrain-db/crates/obrain-reactive", optional = true }
 
 # vite-rs — Vite-like static/dev frontend serving reused by the `frontend`
 # feature (dev loop + AI bridge + static file rules + guaranteed cache

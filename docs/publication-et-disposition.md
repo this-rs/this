@@ -74,7 +74,7 @@ Les manifestes se résolvent par chemin relatif. La disposition attendue sur le 
 Les features optionnelles ajoutent deux voisins :
 
 ```
-<parent>/../banc-obrain-j4/   # obrain-engine, -core, -common, -substrate, -adapters, -reactive
+<parent>/../obrain/obrain-db/   # obrain-engine, -core, -common, -substrate, -adapters, -reactive
 <parent>/../vite-rs/          # this-vite (préférer la version publiée pour un usage externe)
 ```
 

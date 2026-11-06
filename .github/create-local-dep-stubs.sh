@@ -11,8 +11,10 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
-# obrain crates (private, local-only)
-OBRAIN_DIR="$REPO_ROOT/../banc-obrain-j4/crates"
+# obrain crates (the live engine: github obrain-db/obrain, local checkout in dev).
+# Same convention as wami below: Cargo.toml's `../../obrain/obrain-db/crates/…`
+# from the repo is `$REPO_ROOT/../obrain/obrain-db/crates`.
+OBRAIN_DIR="$REPO_ROOT/../obrain/obrain-db/crates"
 for crate in obrain-engine obrain-common obrain-core obrain-substrate obrain-adapters obrain-reactive; do
   dir="$OBRAIN_DIR/$crate"
   if [ ! -d "$dir" ]; then
