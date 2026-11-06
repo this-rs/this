@@ -39,9 +39,7 @@ use serde_json::{Value, json};
 use tauri::plugin::{Builder, TauriPlugin};
 use tauri::{AppHandle, Manager, Runtime};
 use this_platform::capability::Capability;
-#[cfg(not(target_os = "ios"))]
-use this_platform::device_bridge::PermissionState;
-use this_platform::device_bridge::{DeviceError, Reply, Request};
+use this_platform::device_bridge::{DeviceError, PermissionState, Reply, Request};
 
 pub mod consent;
 pub mod families;
@@ -49,6 +47,11 @@ pub mod wire;
 
 #[cfg(target_os = "ios")]
 use tauri::plugin::PluginHandle;
+
+/// Combien de temps on attend le natif avant de répondre `timeout`. Un capteur peut être
+/// lent, mais une promesse qui ne se résout jamais bloque le tour de l'agent entier.
+#[cfg(target_os = "ios")]
+const NATIVE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 // The Swift entry point, defined in `ios/Sources/ThisDevicePlugin.swift`.
 #[cfg(target_os = "ios")]
@@ -112,12 +115,27 @@ async fn call_native<R: Runtime>(app: &AppHandle<R>, method: &str, args: &Value)
     if this_platform::device_bridge::capability_of(method, args).is_none() {
         return json!({ "kind": "error", "code": "not_supported" });
     }
-    let plugin = app.state::<ThisDevice<R>>();
-    plugin
-        .handle
-        .run_mobile_plugin_async::<Value>(method, args.clone())
-        .await
-        .unwrap_or_else(|_| json!({ "kind": "error", "code": "internal" }))
+    // `try_state`, jamais `state` : un plugin absent doit être une réponse, pas une panique.
+    // Une panique dans une commande async laisse la promesse d'invocation non résolue, donc
+    // l'appelant attend indéfiniment — mesuré : l'outil de l'agent restait bloqué sans
+    // jamais rendre la main ni poser la moindre question.
+    let Some(plugin) = app.try_state::<ThisDevice<R>>() else {
+        return json!({ "kind": "error", "code": "internal" });
+    };
+    match tokio::time::timeout(
+        NATIVE_TIMEOUT,
+        plugin
+            .handle
+            .run_mobile_plugin_async::<Value>(method, args.clone()),
+    )
+    .await
+    {
+        Ok(Ok(value)) => value,
+        // Un appel qui échoue n'est pas une réponse de l'appareil : c'est une panne du pont.
+        Ok(Err(_)) => json!({ "kind": "error", "code": "internal" }),
+        // Le natif ne répond pas : on le dit, au lieu d'attendre pour toujours.
+        Err(_) => json!({ "kind": "error", "code": "timeout" }),
+    }
 }
 
 /// Off iOS there is no device: a family call is refused as unsupported.
@@ -130,13 +148,57 @@ async fn call_native<R: Runtime>(_app: &AppHandle<R>, _method: &str, _args: &Val
 /// [`answer`].
 #[cfg(target_os = "ios")]
 pub async fn perform<R: Runtime>(app: &AppHandle<R>, request: &Request) -> Reply {
-    let plugin = app.state::<ThisDevice<R>>();
+    // Voir `call_native` : un plugin absent est une réponse, pas une panique.
+    let Some(plugin) = app.try_state::<ThisDevice<R>>() else {
+        return Reply::Error {
+            code: DeviceError::Internal,
+        };
+    };
     let native = match request {
+        // Chaque famille a SA méthode de statut (`contactsStatus`, `captureStatus`…) ; le
+        // `status` du pilote ne connaît que le gyroscope et le Bluetooth. Sans ce routage,
+        // toutes les autres capacités répondaient `unsupported` alors que leur permission
+        // existait — mesuré sur l'appareil le 06/11 : contacts, caméra et santé toutes
+        // « unsupported », seul le gyroscope « granted ».
         Request::Status { capability } => {
-            plugin
-                .handle
-                .run_mobile_plugin_async::<Reply>("status", json!({ "capability": capability }))
-                .await
+            match this_platform::device_bridge::status_method(*capability) {
+                Some("status") => {
+                    plugin
+                        .handle
+                        .run_mobile_plugin_async::<Reply>(
+                            "status",
+                            json!({ "capability": capability }),
+                        )
+                        .await
+                }
+                Some(method) => match plugin
+                    .handle
+                    .run_mobile_plugin_async::<Value>(method, status_args(method, *capability))
+                    .await
+                {
+                    // Les familles répondent `{"kind":"status","state":"…"}`. `limited` (photos,
+                    // accès partiel iOS 14+) est un état du système, pas un refus.
+                    Ok(reply) => Ok(Reply::Status {
+                        state: reply
+                            .get("state")
+                            .and_then(|state| serde_json::from_value(state.clone()).ok())
+                            .unwrap_or(PermissionState::Unsupported),
+                    }),
+                    Err(error) => {
+                        // Le message de Tauri ne peut pas voyager dans le contrat (aucun code
+                        // pour « le natif a refusé de répondre ») : il part dans le journal de
+                        // l'app, à côté des traces du noyau.
+                        note(&format!("status {method} a échoué : {error:?}"));
+                        Ok(Reply::Error {
+                            code: DeviceError::Internal,
+                        })
+                    }
+                },
+                // Le pont n'a aucune méthode pour lire cet état : on ne devine pas.
+                None => Ok(Reply::Status {
+                    state: PermissionState::Unsupported,
+                }),
+            }
         }
         Request::GyroscopeSample => {
             plugin
@@ -172,6 +234,59 @@ pub async fn perform<R: Runtime>(app: &AppHandle<R>, request: &Request) -> Reply
     native.unwrap_or(Reply::Error {
         code: DeviceError::Internal,
     })
+}
+
+/// Append one line to the app's journal (`$HOME/Documents/atelier.log`), the same file the
+/// shell's own `trace` writes. A native failure has no place in the device contract — the
+/// contract carries states, not Tauri messages — so it is recorded where it can be read.
+#[cfg(target_os = "ios")]
+fn note(line: &str) {
+    use std::io::Write;
+    let Ok(home) = std::env::var("HOME") else {
+        return;
+    };
+    let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(format!("{home}/Documents/atelier.log"))
+    else {
+        return;
+    };
+    let _ = writeln!(file, "device {line}");
+}
+
+/// Ask the native runtime which selectors it really exposes. A diagnostic, not a bridge
+/// call: it goes around the contract on purpose, because the contract is what is in doubt.
+#[cfg(target_os = "ios")]
+pub async fn commands<R: Runtime>(app: &AppHandle<R>) -> Value {
+    let Some(plugin) = app.try_state::<ThisDevice<R>>() else {
+        return json!({ "kind": "error", "code": "internal" });
+    };
+    plugin
+        .handle
+        .run_mobile_plugin_async::<Value>("listCommands", json!({}))
+        .await
+        .unwrap_or_else(|error| json!({ "kind": "error", "message": format!("{error:?}") }))
+}
+
+/// The arguments a family's status method requires.
+#[cfg(target_os = "ios")]
+///
+/// Most `…Status` methods take nothing. Two do: `captureStatus` names which of its two
+/// capabilities is meant, and `healthStatus` names a quantity — HealthKit has no "the
+/// health permission", only per-type answers. Sending `{}` to either makes the parse fail
+/// natively, which reached the contract as `internal` instead of an answer (measured on the
+/// device: camera and health both `internal`, contacts correct).
+fn status_args(method: &str, capability: Capability) -> Value {
+    match method {
+        "captureStatus" => json!({
+            "capability": if capability == Capability::Microphone { "microphone" } else { "camera" }
+        }),
+        // A representative read type: the answer says whether HealthKit is available and the
+        // system has answered for that type, which is what a status can honestly report.
+        "healthStatus" => json!({ "quantity": "step_count" }),
+        _ => json!({}),
+    }
 }
 
 /// Answer one request. Off iOS there is no device: every request is refused as unsupported.

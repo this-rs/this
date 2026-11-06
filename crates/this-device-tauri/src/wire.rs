@@ -124,6 +124,7 @@ mod tests {
             ("granted", PermissionState::Granted),
             ("denied", PermissionState::Denied),
             ("prompt", PermissionState::Prompt),
+            ("limited", PermissionState::Limited),
             ("unsupported", PermissionState::Unsupported),
         ] {
             let json = format!(r#"{{"kind":"status","state":"{wire}"}}"#);

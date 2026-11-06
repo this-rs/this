@@ -30,6 +30,10 @@ const BRIDGED: [Capability; 2] = [Capability::Gyroscope, Capability::Bluetooth];
 pub enum PermissionState {
     Granted,
     Denied,
+    /// Access to a subset the person picked (iOS 14+ on the photo library). Not a refusal:
+    /// what the app can read is exactly what was chosen, and saying `denied` would tell a
+    /// module to give up on data the person deliberately shared.
+    Limited,
     Prompt,
     Unsupported,
 }
