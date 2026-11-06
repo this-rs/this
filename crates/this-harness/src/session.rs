@@ -24,6 +24,8 @@ use std::pin::Pin;
 use std::rc::Rc;
 use std::task::Poll;
 
+use async_trait::async_trait;
+
 use crate::event::{Event, Outcome, Pending, Snapshot};
 use crate::ports::{Cancel, Delta, Toolbox, Transport};
 use crate::wire::{Code, Failure, Finish, Message, Reply, Request, ToolCall};
@@ -67,6 +69,22 @@ pub trait Clock {
     /// Une attente de `ms`, ou `None` si ce target ne sait pas attendre : les
     /// chiens de garde sont alors éteints et les relances partent sans délai.
     fn sleep(&self, ms: u64) -> Option<Sleep>;
+}
+
+/// Un contexte recalculé avant **chaque** appel au modèle, jamais conservé.
+///
+/// Le brief est figé au montage du harnais ; une mémoire qui dépend de ce que
+/// l'utilisateur vient de demander ne peut pas y vivre. Ce hook rend un message
+/// système éphémère : la boucle l'insère dans la requête du tour, juste avant
+/// le dernier message utilisateur, et ne l'écrit **jamais** dans le transcript
+/// (il serait sinon renvoyé, périmé, à tous les tours suivants, et sauvegardé).
+///
+/// `?Send`, comme [`Transport`] : l'hôte qui le lit (une page wasm) n'est pas
+/// `Send`. `None` (ou un texte vide) : la requête part telle quelle.
+#[async_trait(?Send)]
+pub trait TurnContext {
+    /// Le contexte de ce tour, d'après la conversation telle qu'elle est.
+    async fn before_turn(&self, transcript: &[Message]) -> Option<String>;
 }
 
 /// L'horloge du target. En natif, elle attend sur un fil ; en wasm, le crate
@@ -293,6 +311,8 @@ pub struct Harness {
     policy: Rc<dyn Policy>,
     /// L'heure et les minuteurs : `SystemClock` par défaut.
     clock: Rc<dyn Clock>,
+    /// Le contexte éphémère de chaque tour : aucun par défaut.
+    turn_context: Option<Rc<dyn TurnContext>>,
     state: Shared<State>,
     out: Out,
 }
@@ -310,6 +330,7 @@ impl Harness {
             toolbox,
             policy: Rc::new(DefaultPolicy),
             clock: Rc::new(SystemClock),
+            turn_context: None,
             state: Rc::new(RefCell::new(State {
                 system: system.into(),
                 limits,
@@ -366,6 +387,15 @@ impl Harness {
     /// un test y branche un temps qu'il fait avancer lui-même.
     pub fn with_clock(mut self, clock: Rc<dyn Clock>) -> Self {
         self.clock = clock;
+        self
+    }
+
+    /// Branche le contexte éphémère de chaque tour (voir [`TurnContext`]).
+    ///
+    /// Le hook est attendu avant chaque appel au modèle ; ce qu'il rend part
+    /// dans la requête de ce tour seulement, jamais dans le transcript.
+    pub fn with_turn_context(mut self, context: Rc<dyn TurnContext>) -> Self {
+        self.turn_context = Some(context);
         self
     }
 
@@ -491,7 +521,10 @@ impl Harness {
                 turns += 1;
                 // 2. Un tour du modèle, en flux — sous la garde du silence et
                 //    de la grâce d'annulation, avec des relances bornées.
-                let request = self.request(toolbox.as_ref());
+                // Le contexte du tour est recalculé ici, à chaque tour : il
+                // dépend de la conversation telle qu'elle est maintenant.
+                let context = self.turn_context().await;
+                let request = self.request(toolbox.as_ref(), context);
                 let gathered = Rc::new(RefCell::new(String::new()));
                 let mut tentative = 0u32;
                 let issue: Result<Result<Reply, Failure>, Watch> = loop {
@@ -750,9 +783,19 @@ impl Harness {
         outcome
     }
 
-    fn request(&self, toolbox: &dyn Toolbox) -> Request {
+    /// Ce que le hook de contexte rend pour ce tour. L'état n'est pas emprunté
+    /// pendant l'attente : le transcript est copié d'abord.
+    async fn turn_context(&self) -> Option<String> {
+        let hook = self.turn_context.clone()?;
+        let transcript = self.transcript();
+        hook.before_turn(&transcript).await
+    }
+
+    /// La requête du tour : le transcript, plus le contexte éphémère s'il y en
+    /// a un — inséré dans la copie, jamais dans le transcript lui-même.
+    fn request(&self, toolbox: &dyn Toolbox, context: Option<String>) -> Request {
         let (system, messages) = self.with(|s| (s.system.clone(), s.transcript.clone()));
-        Request::new(system, messages, toolbox.specs())
+        Request::new(system, messages, toolbox.specs()).with_context(context)
     }
 
     fn push(&self, message: Message) {

@@ -117,6 +117,23 @@ impl Request {
         }
     }
 
+    /// Ajoute le contexte éphémère d'un tour : un `Message::system` juste avant
+    /// le dernier message utilisateur — là où le modèle le lira comme « ce qui
+    /// vaut pour cette demande ». Sans message utilisateur, il va en fin de fil.
+    /// `None` ou un texte vide : la requête est rendue intacte.
+    pub(crate) fn with_context(mut self, context: Option<String>) -> Self {
+        let Some(context) = context.filter(|c| !c.trim().is_empty()) else {
+            return self;
+        };
+        let at = self
+            .messages
+            .iter()
+            .rposition(Message::is_user)
+            .unwrap_or(self.messages.len());
+        self.messages.insert(at, Message::system(context));
+        self
+    }
+
     /// Le fil tel que le modèle doit le lire : la consigne système, puis les
     /// messages. C'est la seule façon d'obtenir les messages.
     pub fn thread(&self) -> Vec<Message> {
