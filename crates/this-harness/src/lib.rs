@@ -57,7 +57,7 @@ mod ports;
 mod session;
 mod wire;
 
-pub use event::{Event, Outcome, Pending, Snapshot};
+pub use event::{Event, HintKind, Outcome, Pending, Snapshot};
 pub use ports::{Cancel, Delta, Toolbox, Toolboxes, Transport};
 pub use session::{
     Clock, Handle, Harness, INTERRUPT_GRACE_MS, Limits, MAX_RETRIES, RETRY_BACKOFF_MS, Running,
@@ -65,6 +65,8 @@ pub use session::{
 };
 pub use wire::{Code, Failure, Finish, Message, Reply, Request, ToolCall, ToolSpec};
 
+/// Le verdict que porte `Event::Stopped`.
+pub use this_agent::evidence::Verdict;
 /// Les décisions pures de la boucle, réexportées : un utilisateur du harnais a
 /// besoin de `Stop` et de `Step` pour lire ce que le harnais raconte.
 pub use this_agent::{Decision, DefaultPolicy, Goal, Policy, Run, Step, Stop};

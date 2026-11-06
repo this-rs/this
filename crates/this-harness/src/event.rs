@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use this_agent::Stop;
+use this_agent::evidence::Verdict;
 
 /// Un message écrit par l'utilisateur pendant qu'un tour tourne.
 ///
@@ -43,7 +44,14 @@ pub enum Event {
     /// Une consigne interne du harnais (relance après un refus, après un
     /// silence). Ce n'est pas l'utilisateur qui parle : l'interface la rend
     /// discrètement, ou pas du tout.
-    Hint { text: String },
+    ///
+    /// `kind` dit de quel genre elle est : l'interface n'a pas à le deviner
+    /// d'après le texte. Absent d'un ancien message, il vaut [`HintKind::Other`].
+    Hint {
+        text: String,
+        #[serde(default)]
+        kind: HintKind,
+    },
     /// Un tour commence.
     Turn { index: u32 },
     /// Un morceau de texte du modèle. S'accumule dans le tour courant.
@@ -92,7 +100,32 @@ pub enum Event {
         /// Code de panne du transport, quand l'arrêt vient d'une panne.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         code: Option<String>,
+        /// Ce que les faits du run disent de lui (`Run::verdict`) : prouvé, non
+        /// vérifié ou échec. Absent d'un ancien message.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        verdict: Option<Verdict>,
     },
+}
+
+/// Le genre d'un [`Event::Hint`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HintKind {
+    /// Le rappel de la décision : le récit du modèle n'est pas prouvé par les
+    /// étapes (en-tête `evidence::RAPPEL`).
+    Claim,
+    /// Une panne passagère du transport : le tour est rejoué.
+    Retry,
+    /// Le tour est interrompu : silence du flux, ou transport qui ne rend pas
+    /// la main après l'annulation.
+    Interrupted,
+    /// La relance après un refus ou un échec d'outil.
+    Refused,
+    /// Toute autre consigne (action sans effet, tour muet…), et tout genre
+    /// inconnu d'un message plus récent.
+    #[default]
+    #[serde(other)]
+    Other,
 }
 
 impl Event {
