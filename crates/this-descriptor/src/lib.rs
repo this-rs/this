@@ -44,6 +44,7 @@ pub mod query;
 pub mod resolve;
 pub mod runtime;
 pub mod topics;
+pub mod views;
 #[cfg(feature = "wami")]
 /// `wami::statements`: PermDesc -> sandbox policy statements (Track 4).
 pub mod wami;
@@ -69,6 +70,7 @@ pub use perm::{Operation, PermDesc, PolicyExpr, PrincipalView};
 pub use query::{FilterExpr, FilterOp, Page, Query, QuerySchema, SortDir, SortSpec, Untyped};
 pub use runtime::{Handle, RuntimeDesc, RuntimeLimits};
 pub use topics::{EMITTING_OPERATIONS, EventTopic};
+pub use views::{Surface, ViewDesc, ViewKind};
 #[cfg(feature = "wami")]
 pub use wami::{Effect, WamiStatement, statements};
 

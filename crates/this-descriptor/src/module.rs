@@ -7,6 +7,7 @@ use crate::framework::codes;
 use crate::i18n::I18nDecl;
 use crate::link::LinkDesc;
 use crate::runtime::RuntimeDesc;
+use crate::views::ViewDesc;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
@@ -36,6 +37,9 @@ pub struct ModuleDescriptor {
     /// Business error codes of the module (`<name>.…`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub errors: Vec<ErrorDesc>,
+    /// Ce que le module veut MONTRER, et où. Déclaratif comme le reste : l'hôte dessine.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub views: Vec<ViewDesc>,
     /// Declared message keys and default locale (texts live in `MessageBundle`s).
     #[serde(default)]
     pub i18n: I18nDecl,
@@ -70,6 +74,7 @@ impl ModuleDescriptor {
             entities: vec![],
             links: vec![],
             errors: vec![],
+            views: vec![],
             i18n: I18nDecl::default(),
             custom: vec![],
             runtime: None,
