@@ -112,6 +112,24 @@ pub async fn answer<R: Runtime>(app: &AppHandle<R>, request: &Request) -> Value 
 /// is sent, so a typo is a refusal here rather than an unknown selector on the native side.
 #[cfg(target_os = "ios")]
 async fn call_native<R: Runtime>(app: &AppHandle<R>, method: &str, args: &Value) -> Value {
+    // Les arguments que l'appelant peut omettre sont complétés ICI, dans le pont : c'est le
+    // seul endroit traversé par tous les chemins (outil de l'agent, coquille, diagnostic).
+    // Sans eux, le décodage natif répond `internal` en nommant une clé que l'appelant ne
+    // pouvait pas deviner (« Key 'duration_ms' not found »).
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as f64)
+        .unwrap_or(0.0);
+    let completed = this_platform::device_bridge::complete_args(method, args, now_ms);
+    if let Some(manquant) = this_platform::device_bridge::missing_args(method, &completed) {
+        note(&format!(
+            "call {method} : argument `{manquant}` requis et absent"
+        ));
+        // Code dédié : `internal` laissait l'agent conclure à une panne du pont alors qu'il
+        // manquait un argument qu'il peut fournir lui-même.
+        return json!({ "kind": "error", "code": "missing_argument" });
+    }
+    let args = &completed;
     if this_platform::device_bridge::capability_of(method, args).is_none() {
         return json!({ "kind": "error", "code": "not_supported" });
     }
@@ -132,7 +150,12 @@ async fn call_native<R: Runtime>(app: &AppHandle<R>, method: &str, args: &Value)
     {
         Ok(Ok(value)) => value,
         // Un appel qui échoue n'est pas une réponse de l'appareil : c'est une panne du pont.
-        Ok(Err(_)) => json!({ "kind": "error", "code": "internal" }),
+        // On trace le message natif : sans lui, `internal` est un fourre-tout qui ne dit pas
+        // si c'est un argument manquant, une clé absente ou un refus du système.
+        Ok(Err(error)) => {
+            note(&format!("call {method} args={args} a échoué : {error:?}"));
+            json!({ "kind": "error", "code": "internal" })
+        }
         // Le natif ne répond pas : on le dit, au lieu d'attendre pour toujours.
         Err(_) => json!({ "kind": "error", "code": "timeout" }),
     }

@@ -111,6 +111,7 @@ mod tests {
             ("unavailable", DeviceError::Unavailable),
             ("timeout", DeviceError::Timeout),
             ("internal", DeviceError::Internal),
+            ("missing_argument", DeviceError::MissingArgument),
         ] {
             let json = format!(r#"{{"kind":"error","code":"{wire}"}}"#);
             let reply: Reply = serde_json::from_str(&json).unwrap();
