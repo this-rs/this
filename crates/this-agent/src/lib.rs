@@ -20,6 +20,7 @@
 //! un harnais natif. Écrite trois fois, elle divergera trois fois. Écrite ici,
 //! elle se teste une fois — et `cargo test` remplace la foi.
 
+pub mod cite;
 pub mod graph;
 pub mod playbook;
 pub mod substrate;
