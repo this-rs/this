@@ -20,6 +20,7 @@
 //! un harnais natif. Écrite trois fois, elle divergera trois fois. Écrite ici,
 //! elle se teste une fois — et `cargo test` remplace la foi.
 
+pub mod evidence;
 pub mod graph;
 pub mod playbook;
 pub mod substrate;
@@ -197,6 +198,16 @@ pub struct Run {
     /// peser sur la décision d'aujourd'hui.
     #[serde(default)]
     pub tour_debut: usize,
+    /// Le texte final du tour en cours, confié par la boucle avant la décision
+    /// ([`Run::said`]). Il est consommé par la décision : un récit ne vaut que pour son tour.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub recit: String,
+    /// Rappels « ton récit n'est pas prouvé » déjà envoyés : un seul par run.
+    #[serde(default)]
+    pub rappels_recit: u32,
+    /// Le rappel à pousser au modèle quand la décision relance pour un récit non prouvé.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rappel: Option<String>,
     pub stop: Option<Stop>,
 }
 
@@ -244,6 +255,9 @@ impl Run {
             budget_ms: None,
             ecoule_ms: 0,
             tour_debut: 0,
+            recit: String::new(),
+            rappels_recit: 0,
+            rappel: None,
             stop: None,
         }
     }
@@ -255,6 +269,24 @@ impl Run {
         }
         self.ecoule_ms += step.ms;
         self.steps.push(step);
+    }
+
+    /// Confie à la décision le texte final du tour qui s'achève. La boucle l'appelle juste
+    /// avant [`Run::after_turn_with`] ; sans lui, le récit n'est pas confronté aux preuves
+    /// (mais un refus non rattrapé empêche toujours `Done`).
+    pub fn said(&mut self, texte: impl Into<String>) {
+        self.recit = texte.into();
+    }
+
+    /// Le rappel que la dernière décision `Continue` demande de pousser au modèle, s'il y en a
+    /// un. Le prendre le consomme.
+    pub fn take_rappel(&mut self) -> Option<String> {
+        self.rappel.take()
+    }
+
+    /// Ce que les faits disent du run : voir [`evidence::verdict`].
+    pub fn verdict(&self) -> evidence::Verdict {
+        evidence::verdict(&self.steps, self.stop == Some(Stop::Done))
     }
 
     /// Un budget de temps, en plus du budget de tours.
@@ -329,6 +361,9 @@ impl Run {
         self.tours += 1;
         // Le tour qui vient de s'achever ne doit plus être relu au suivant.
         let fin_du_tour = self.steps.len();
+        // Un récit ne vaut que pour son tour ; un rappel non pris est périmé.
+        let recit = std::mem::take(&mut self.recit);
+        self.rappel = None;
 
         if let Some(stop) = &self.stop {
             return Decision::Halt(stop.clone());
@@ -388,8 +423,38 @@ impl Run {
             });
         }
 
-        // Un tour qui aboutit remet les crédits de relance à zéro.
+        // Le tour n'a ni refus ni échec — mais le RUN peut en avoir : un refus au tour N
+        // (tour qui appelait, donc `Continue`) suivi d'un tour texte seul « c'est fait »
+        // passait pour une conclusion, la frontière du tour ayant effacé le refus.
         self.tour_debut = fin_du_tour;
+        let en_suspens = evidence::unresolved(&self.steps).cloned();
+        if self.rappels_recit == 0
+            && let Some(rappel) = evidence::claim_check(&recit, &self.steps)
+        {
+            self.rappels_recit += 1;
+            self.rappel = Some(match &en_suspens {
+                Some(etape) => format!(
+                    "{rappel} Pour mémoire, `{}` n'a pas abouti dans ce run : {}.",
+                    etape.tool,
+                    etape
+                        .motif
+                        .clone()
+                        .or_else(|| etape.failure.clone())
+                        .unwrap_or_default()
+                ),
+                None => rappel,
+            });
+            return Decision::Continue;
+        }
+        if let Some(etape) = en_suspens {
+            return self.halt(match (&etape.motif, &etape.failure) {
+                (Some(motif), _) if etape.refused => Stop::Refused(motif.clone()),
+                (_, Some(cause)) => Stop::Failed(format!("l'outil a échoué : {cause}")),
+                _ => Stop::Refused(etape.resume.clone()),
+            });
+        }
+
+        // Un tour qui aboutit remet les crédits de relance à zéro.
         self.relances_refus = 0;
         self.relances_muet = 0;
         self.halt(Stop::Done)
@@ -511,15 +576,161 @@ mod tests {
         }
     }
 
-    /// Un échec d'un tour ancien ne condamne pas les tours suivants.
+    /// Un échec d'un tour ancien ne condamne pas les tours suivants — une fois rattrapé.
+    /// (Avant la vague 2, ce test concluait `Done` SANS reprise : c'était le défaut.)
     #[test]
     fn un_echec_ancien_ne_condamne_pas_le_tour_suivant() {
         let mut r = Run::new(Goal::new("installe"), 20);
         r.record(Step::tool("install_module", 5).failed("réseau"));
         assert_eq!(r.after_turn(true, false), Decision::Continue);
 
-        // Le tour suivant n'a pas d'échec : un modèle qui conclut conclut.
+        // Le tour suivant reprend l'action avec succès : un modèle qui conclut conclut.
+        r.record(Step::tool("install_module", 5).state("v1", "v2"));
         assert!(r.derniere_en_echec().is_none());
+        assert_eq!(r.after_turn(true, false), Decision::Halt(Stop::Done));
+    }
+
+    /// Le cas relu en vague 1 : un échec non rattrapé, puis un tour texte seul, ne finit pas
+    /// en `Done`.
+    #[test]
+    fn un_echec_non_rattrape_puis_texte_seul_n_est_pas_done() {
+        let mut r = Run::new(Goal::new("installe"), 20);
+        r.record(Step::tool("install_module", 5).failed("réseau"));
+        assert_eq!(r.after_turn(false, true), Decision::Continue);
+        assert_eq!(
+            r.after_turn(true, false),
+            Decision::Halt(Stop::Failed("l'outil a échoué : réseau".into()))
+        );
+    }
+
+    #[test]
+    fn refus_puis_c_est_fait_relance_avec_un_rappel() {
+        let mut r = run();
+        // Tour N : le modèle appelle, l'outil refuse — un tour qui appelle continue.
+        r.record(Step::tool("install_module", 10).refused("même version"));
+        assert_eq!(r.after_turn(false, true), Decision::Continue);
+        // Tour N+1 : texte seul, il prétend avoir fini.
+        r.said("C'est fait !");
+        assert_eq!(r.after_turn(true, false), Decision::Continue);
+        let rappel = r.take_rappel().expect("un rappel à pousser");
+        assert!(rappel.starts_with(evidence::RAPPEL));
+        assert!(rappel.contains("même version"));
+        assert_eq!(r.take_rappel(), None);
+    }
+
+    #[test]
+    fn refus_puis_c_est_fait_sans_recit_transmis_bloque_au_lieu_de_done() {
+        // Sans `said` (boucle pas encore branchée), le refus du run suffit à refuser `Done`.
+        let mut r = run();
+        r.record(Step::tool("install_module", 10).refused("même version"));
+        assert_eq!(r.after_turn(false, true), Decision::Continue);
+        assert_eq!(
+            r.after_turn(true, false),
+            Decision::Halt(Stop::Refused("même version".into()))
+        );
+    }
+
+    #[test]
+    fn un_seul_rappel_de_recit_par_run() {
+        let mut r = run();
+        r.record(Step::tool("install_module", 10).refused("même version"));
+        r.after_turn(false, true);
+        r.said("C'est fait.");
+        assert_eq!(r.after_turn(true, false), Decision::Continue);
+        // Il insiste : pas de second rappel, et le refus en suspens interdit `Done`.
+        r.said("C'est fait, vraiment.");
+        assert_eq!(
+            r.after_turn(true, false),
+            Decision::Halt(Stop::Refused("même version".into()))
+        );
+        assert_eq!(r.rappels_recit, 1);
+        assert_eq!(r.take_rappel(), None);
+    }
+
+    #[test]
+    fn un_seul_rappel_puis_done_si_rien_n_a_echoue() {
+        let mut r = run();
+        r.said("J'ai créé la fiche.");
+        assert_eq!(r.after_turn(true, false), Decision::Continue);
+        r.said("J'ai créé la fiche.");
+        assert_eq!(r.after_turn(true, false), Decision::Halt(Stop::Done));
+        // Le récit n'a rien prouvé : le verdict le dit, la fin n'est pas un succès prouvé.
+        assert_eq!(r.verdict(), evidence::Verdict::Unverified);
+    }
+
+    #[test]
+    fn ecriture_reussie_puis_c_est_fait_termine() {
+        let mut r = run();
+        r.record(Step::tool("row_create", 10).state("0 ligne", "1 ligne"));
+        assert_eq!(r.after_turn(false, true), Decision::Continue);
+        r.said("C'est fait : la ligne est créée.");
+        assert_eq!(r.after_turn(true, false), Decision::Halt(Stop::Done));
+        assert_eq!(r.take_rappel(), None);
+        assert_eq!(r.verdict(), evidence::Verdict::Proven);
+    }
+
+    #[test]
+    fn refus_rattrape_puis_c_est_fait_termine() {
+        let mut r = run();
+        r.record(Step::tool("install_module", 10).refused("même version"));
+        r.after_turn(false, true);
+        r.record(Step::tool("install_module", 10).state("v1", "v2"));
+        r.after_turn(false, true);
+        r.said("C'est fait.");
+        assert_eq!(r.after_turn(true, false), Decision::Halt(Stop::Done));
+    }
+
+    #[test]
+    fn je_me_souviens_sans_recall_relance_avec_un_rappel() {
+        let mut r = run();
+        r.said("Je me souviens que tu préfères le thé.");
+        assert_eq!(r.after_turn(true, false), Decision::Continue);
+        assert!(r.take_rappel().unwrap().contains("recall"));
+    }
+
+    #[test]
+    fn je_me_souviens_apres_recall_termine() {
+        let mut r = run();
+        r.record(Step::tool("recall", 3).resume("préférence : thé"));
+        r.after_turn(false, true);
+        r.said("Je me souviens que tu préfères le thé.");
+        assert_eq!(r.after_turn(true, false), Decision::Halt(Stop::Done));
+    }
+
+    #[test]
+    fn negation_apres_refus_ne_rappelle_pas_et_dit_le_blocage() {
+        let mut r = run();
+        r.record(Step::tool("install_module", 10).refused("même version"));
+        r.after_turn(false, true);
+        r.said("Je n'ai pas installé le module : il est déjà à la même version.");
+        assert_eq!(
+            r.after_turn(true, false),
+            Decision::Halt(Stop::Refused("même version".into()))
+        );
+        assert_eq!(r.rappels_recit, 0);
+    }
+
+    #[test]
+    fn une_note_remember_ne_rattrape_pas_un_refus() {
+        let mut r = run();
+        r.record(Step::tool("install_module", 10).refused("même version"));
+        r.after_turn(false, true);
+        r.record(Step::tool("remember", 1).state("a", "b"));
+        r.after_turn(false, true);
+        assert_eq!(
+            r.after_turn(true, false),
+            Decision::Halt(Stop::Refused("même version".into()))
+        );
+    }
+
+    #[test]
+    fn le_recit_ne_vaut_que_pour_son_tour() {
+        let mut r = run();
+        r.said("C'est fait.");
+        // Tour qui appelle : le récit est consommé sans être jugé.
+        r.record(Step::tool("graph_query", 1));
+        assert_eq!(r.after_turn(true, true), Decision::Continue);
+        assert!(r.recit.is_empty());
         assert_eq!(r.after_turn(true, false), Decision::Halt(Stop::Done));
     }
 
