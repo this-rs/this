@@ -1,0 +1,16 @@
+[package]
+name = "this-agent"
+version = "0.0.1"
+edition = "2024"
+authors = ["Riviere Théotime <t@ffs.holdings>"]
+license = "MIT OR Apache-2.0"
+description = "The agent loop, as data: a run, its steps, its stop reason — pure, testable, wasm-safe"
+repository = "https://github.com/this-rs/this"
+keywords = ["agent", "harness", "loop"]
+categories = ["development-tools"]
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+serde_json = "1"
