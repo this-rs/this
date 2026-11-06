@@ -118,7 +118,9 @@ pub fn is_proof(step: &Step) -> bool {
 }
 
 /// Le dernier refus ou échec que rien n'a rattrapé ensuite : ni le même outil réussi, ni une
-/// autre écriture réussie. Une note (`remember`) ne rattrape rien.
+/// écriture réussie dont l'état observé a changé ([`is_proof`]). Une note (`remember`), une
+/// lecture, une écriture sans empreinte ou sans effet ne rattrapent rien : « l'outil a dit
+/// ok » n'est pas un fait.
 ///
 /// C'est la mémoire du **run**, pas du tour : un refus au tour N reste vrai au tour N+1 tant
 /// que personne ne l'a corrigé.
@@ -128,11 +130,29 @@ pub fn unresolved(steps: &[Step]) -> Option<&Step> {
             return None;
         }
         let rattrape = steps[i + 1..].iter().any(|apres| {
-            outcome(apres) == Outcome::Ok
-                && (apres.tool == etape.tool || kind(apres) == Kind::Write)
+            outcome(apres) == Outcome::Ok && (apres.tool == etape.tool || is_proof(apres))
         });
         (!rattrape).then_some(etape)
     })
+}
+
+/// Les écritures refusées ou en échec que **le même outil** n'a jamais reprises avec succès —
+/// même si une autre écriture a, depuis, prouvé autre chose. Un récit qui nomme cette action
+/// (« j'ai installé » après `install_module` refusé) ne s'appuie pas sur une écriture sans
+/// rapport.
+fn non_repris(steps: &[Step]) -> Vec<&Step> {
+    steps
+        .iter()
+        .enumerate()
+        .filter(|(i, etape)| {
+            outcome(etape) != Outcome::Ok
+                && !matches!(kind(etape), Kind::Read | Kind::Note)
+                && !steps[i + 1..]
+                    .iter()
+                    .any(|apres| outcome(apres) == Outcome::Ok && apres.tool == etape.tool)
+        })
+        .map(|(_, etape)| etape)
+        .collect()
 }
 
 /// Le verdict d'un run, d'après ses étapes. `completed` : le run s'est arrêté sur `Done`.
@@ -161,89 +181,283 @@ pub enum Claim {
     Memory,
 }
 
-/// Les affirmations du texte, chacune avec la phrase d'origine.
-pub fn claims(said: &str) -> Vec<(Claim, String)> {
-    let mut trouvees = Vec::new();
-    for (phrase, question) in phrases(said) {
-        if question {
-            continue;
-        }
-        let mots = mots(&phrase.to_lowercase());
-        if let Some(claim) = claim_of(&mots) {
-            trouvees.push((claim, phrase.trim().to_string()));
-        }
-    }
-    trouvees
+/// Une affirmation que les étapes ne prouvent pas.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Unproven {
+    pub claim: Claim,
+    /// La phrase d'origine, telle que le modèle l'a écrite.
+    pub phrase: String,
+    /// Ce qui manque, en une proposition (« aucune écriture réussie… »).
+    pub manque: String,
+    /// L'écriture refusée ou en échec que le récit contredit, quand il y en a une.
+    pub etape: Option<Step>,
 }
 
-/// Confronte le récit aux étapes. Rend le texte d'un rappel si une affirmation n'a aucune
-/// étape **réussie** correspondante, `None` sinon.
-pub fn claim_check(said: &str, steps: &[Step]) -> Option<String> {
-    let ok = |accepte: &dyn Fn(Kind) -> bool| {
+impl Unproven {
+    /// Le texte du rappel à pousser au modèle.
+    pub fn rappel(&self) -> String {
+        format!(
+            "{RAPPEL} Ta réponse affirme « {} », mais {}. Soit tu appelles maintenant l'outil qui le fait réellement, soit tu corriges ta phrase pour dire ce qui a vraiment été fait et ce qui reste.",
+            self.phrase, self.manque
+        )
+    }
+}
+
+/// Une affirmation trouvée : sa nature, sa phrase, et le verbe qui la porte (`None` pour une
+/// affirmation générique : « c'est fait », "done").
+struct Trouve {
+    claim: Claim,
+    verbe: Option<String>,
+}
+
+/// Les affirmations du texte, chacune avec la phrase d'origine.
+pub fn claims(said: &str) -> Vec<(Claim, String)> {
+    detections(said)
+        .into_iter()
+        .map(|(t, phrase)| (t.claim, phrase))
+        .collect()
+}
+
+fn detections(said: &str) -> Vec<(Trouve, String)> {
+    phrases(said)
+        .into_iter()
+        .filter_map(|p| {
+            let mots = mots_a_juger(&p)?;
+            claim_of(&mots).map(|t| (t, p.texte.trim().to_string()))
+        })
+        .collect()
+}
+
+/// La première affirmation du texte que les étapes ne prouvent pas.
+///
+/// - Une affirmation de mémoire exige une lecture réussie.
+/// - Une affirmation d'action exige une écriture **observée** ([`is_proof`]), ou une écriture
+///   réussie sans empreinte s'il n'y a aucun refus en suspens.
+/// - Une action qui **nomme** une écriture refusée et jamais reprise par le même outil
+///   (« j'ai installé » après `install_module` refusé) n'est pas prouvée, quelle que soit
+///   l'écriture qui a réussi à côté ; une affirmation générique (« c'est fait ») non plus,
+///   tant qu'une telle écriture reste en plan.
+pub fn unproven(said: &str, steps: &[Step]) -> Option<Unproven> {
+    let suspens = unresolved(steps).is_some();
+    let reussie = |k: Kind| {
         steps
             .iter()
-            .any(|etape| outcome(etape) == Outcome::Ok && accepte(kind(etape)))
+            .any(|etape| outcome(etape) == Outcome::Ok && kind(etape) == k)
     };
-    let (claim, phrase) = claims(said).into_iter().find(|(claim, _)| match claim {
-        Claim::Action => !ok(&|k| k == Kind::Write),
-        Claim::Noted => !ok(&|k| k == Kind::Write || k == Kind::Note),
-        Claim::Memory => !ok(&|k| k == Kind::Read),
-    })?;
-    let manque = match claim {
-        Claim::Action | Claim::Noted => {
-            "aucune écriture réussie dans ce run ne le prouve (un outil refusé, en échec ou sans effet ne compte pas)"
-        }
-        Claim::Memory => {
-            "aucun `recall` ni aucune lecture du graphe réussie dans ce run ne le prouve"
-        }
-    };
-    Some(format!(
-        "{RAPPEL} Ta réponse affirme « {phrase} », mais {manque}. Soit tu appelles maintenant l'outil qui le fait réellement, soit tu corriges ta phrase pour dire ce qui a vraiment été fait et ce qui reste."
-    ))
+    let ecriture = steps.iter().any(|etape| {
+        is_proof(etape)
+            || (!suspens
+                && outcome(etape) == Outcome::Ok
+                && kind(etape) == Kind::Write
+                && etape.before.is_empty())
+    });
+    let note = reussie(Kind::Note);
+    let lecture = reussie(Kind::Read);
+    let en_plan = non_repris(steps);
+
+    detections(said).into_iter().find_map(|(t, phrase)| {
+        let (manque, etape) = match t.claim {
+            Claim::Memory => {
+                if lecture {
+                    return None;
+                }
+                (
+                    "aucun `recall` ni aucune lecture du graphe réussie dans ce run ne le prouve"
+                        .to_string(),
+                    None,
+                )
+            }
+            Claim::Action | Claim::Noted => {
+                let vise = match (&t.verbe, t.claim) {
+                    (Some(verbe), _) => outils_de(verbe).and_then(|jetons| {
+                        en_plan
+                            .iter()
+                            .rev()
+                            .find(|etape| outil_fait(&etape.tool, jetons))
+                    }),
+                    (None, Claim::Action) => en_plan.last(),
+                    (None, _) => None,
+                };
+                if let Some(etape) = vise {
+                    let pourquoi = etape
+                        .motif
+                        .clone()
+                        .or_else(|| etape.failure.clone())
+                        .unwrap_or_else(|| etape.resume.clone());
+                    (
+                        format!(
+                            "`{}` n'a pas abouti dans ce run ({pourquoi}) et n'a jamais été repris avec succès — une autre écriture ne le remplace pas",
+                            etape.tool
+                        ),
+                        Some((*etape).clone()),
+                    )
+                } else if ecriture || (t.claim == Claim::Noted && note) {
+                    return None;
+                } else {
+                    (
+                        "aucune écriture réussie dans ce run ne le prouve (un outil refusé, en échec ou sans effet ne compte pas)"
+                            .to_string(),
+                        None,
+                    )
+                }
+            }
+        };
+        Some(Unproven {
+            claim: t.claim,
+            phrase,
+            manque,
+            etape,
+        })
+    })
+}
+
+/// Confronte le récit aux étapes. Rend le texte d'un rappel si une affirmation n'est pas
+/// prouvée (voir [`unproven`]), `None` sinon.
+pub fn claim_check(said: &str, steps: &[Step]) -> Option<String> {
+    unproven(said, steps).map(|u| u.rappel())
 }
 
 // ---------------------------------------------------------------------------------------
 // Découpage
 
-/// Les phrases du texte, avec « est-ce une question ? ».
-fn phrases(texte: &str) -> Vec<(String, bool)> {
-    let mut sortie = Vec::new();
-    let mut courante = String::new();
-    for c in texte.chars() {
-        match c {
-            '.' | '!' | '?' | '\n' | ';' | '…' => {
-                if !courante.trim().is_empty() {
-                    sortie.push((std::mem::take(&mut courante), c == '?'));
-                } else {
-                    courante.clear();
-                    // « Fait ?! » : le point d'interrogation suit une phrase déjà coupée.
-                    if c == '?'
-                        && let Some(derniere) = sortie.last_mut()
-                    {
-                        derniere.1 = true;
-                    }
-                }
+/// Une phrase : le texte d'origine (pour le citer), le texte à juger (sans les citations de la
+/// parole d'autrui), et « se termine-t-elle par un point d'interrogation ? ».
+struct Phrase {
+    texte: String,
+    a_juger: String,
+    question: bool,
+}
+
+/// Les caractères entre guillemets appariés (« », “ ”, " ") : une citation ne coupe pas la
+/// phrase, et ce qu'elle contient n'est pas la parole du modèle.
+fn masque_citations(chars: &[char]) -> Vec<bool> {
+    let mut masque = vec![false; chars.len()];
+    let mut pile: Vec<(usize, char)> = Vec::new();
+    let mut droit: Option<usize> = None;
+    for (i, &c) in chars.iter().enumerate() {
+        let span = match c {
+            '«' => {
+                pile.push((i, '»'));
+                None
             }
-            _ => courante.push(c),
+            '“' => {
+                pile.push((i, '”'));
+                None
+            }
+            '»' | '”' => pile.iter().rposition(|&(_, f)| f == c).map(|pos| {
+                let debut = pile[pos].0;
+                pile.truncate(pos);
+                debut
+            }),
+            '"' => match droit.take() {
+                Some(debut) => Some(debut),
+                None => {
+                    droit = Some(i);
+                    None
+                }
+            },
+            _ => None,
+        };
+        if let Some(debut) = span {
+            masque[debut..=i].iter_mut().for_each(|m| *m = true);
         }
     }
-    if !courante.trim().is_empty() {
-        sortie.push((courante, false));
+    masque
+}
+
+/// Les phrases du texte.
+fn phrases(texte: &str) -> Vec<Phrase> {
+    let chars: Vec<char> = texte.chars().collect();
+    let masque = masque_citations(&chars);
+    let mut sortie: Vec<Phrase> = Vec::new();
+    let mut courante: Vec<(char, bool)> = Vec::new();
+    let fermer = |courante: &mut Vec<(char, bool)>, question: bool| -> Option<Phrase> {
+        let morceau = std::mem::take(courante);
+        let texte: String = morceau.iter().map(|(c, _)| *c).collect();
+        if texte.trim().is_empty() {
+            return None;
+        }
+        // Une citation n'est retirée que si la phrase a commencé avant elle : un récit
+        // entièrement entre guillemets reste le récit du modèle.
+        let mut parle = false;
+        let a_juger = morceau
+            .iter()
+            .map(|&(c, cite)| {
+                if cite && parle {
+                    ' '
+                } else {
+                    if !cite && c.is_alphanumeric() {
+                        parle = true;
+                    }
+                    c
+                }
+            })
+            .collect();
+        Some(Phrase {
+            texte,
+            a_juger,
+            question,
+        })
+    };
+    for (i, &c) in chars.iter().enumerate() {
+        let fin = !masque[i] && matches!(c, '.' | '!' | '?' | '\n' | ';' | '…');
+        if !fin {
+            courante.push((c, masque[i]));
+            continue;
+        }
+        match fermer(&mut courante, c == '?') {
+            Some(phrase) => sortie.push(phrase),
+            None => {
+                // « Fait ?! » : le point d'interrogation suit une phrase déjà coupée.
+                if c == '?'
+                    && let Some(derniere) = sortie.last_mut()
+                {
+                    derniere.question = true;
+                }
+            }
+        }
+    }
+    if let Some(phrase) = fermer(&mut courante, false) {
+        sortie.push(phrase);
     }
     sortie
 }
 
-/// Les mots d'une phrase en minuscules ; l'élision reste collée au mot qu'elle précède
-/// (`j'ai` ⇒ `j'`, `ai`).
+/// Minuscules, sans accents (précomposés ou combinants, NFD compris), apostrophes unifiées :
+/// « CRÉÉ », « créé », « cre\u{301}e\u{301} » et « cree » se lisent pareil.
+fn normaliser(texte: &str) -> String {
+    let mut sortie = String::with_capacity(texte.len());
+    for c in texte.chars().flat_map(char::to_lowercase) {
+        match c {
+            '\u{300}'..='\u{36f}' => {}
+            'à' | 'á' | 'â' | 'ã' | 'ä' | 'å' => sortie.push('a'),
+            'ç' => sortie.push('c'),
+            'è' | 'é' | 'ê' | 'ë' => sortie.push('e'),
+            'ì' | 'í' | 'î' | 'ï' => sortie.push('i'),
+            'ñ' => sortie.push('n'),
+            'ò' | 'ó' | 'ô' | 'õ' | 'ö' => sortie.push('o'),
+            'ù' | 'ú' | 'û' | 'ü' => sortie.push('u'),
+            'ý' | 'ÿ' => sortie.push('y'),
+            'œ' => sortie.push_str("oe"),
+            'æ' => sortie.push_str("ae"),
+            '’' | '‘' | '`' | 'ʼ' => sortie.push('\''),
+            _ => sortie.push(c),
+        }
+    }
+    sortie
+}
+
+/// Une limite de proposition : la portée d'une condition s'arrête là.
+fn separateur(c: char) -> bool {
+    matches!(c, ',' | ':' | ';' | '—' | '–' | '(' | ')')
+}
+
+/// Les mots d'un texte déjà normalisé ; l'élision reste collée au mot qu'elle précède
+/// (`j'ai` ⇒ `j'`, `ai`), et chaque limite de proposition devient le jeton `,`.
 fn mots(phrase: &str) -> Vec<String> {
-    let mut sortie = Vec::new();
+    let mut sortie: Vec<String> = Vec::new();
     let mut mot = String::new();
     for c in phrase.chars() {
-        let c = if c == '’' || c == '`' || c == 'ʼ' {
-            '\''
-        } else {
-            c
-        };
         if c == '\'' {
             if !mot.is_empty() {
                 mot.push('\'');
@@ -251,8 +465,13 @@ fn mots(phrase: &str) -> Vec<String> {
             }
         } else if c.is_alphanumeric() {
             mot.push(c);
-        } else if !mot.is_empty() {
-            sortie.push(std::mem::take(&mut mot));
+        } else {
+            if !mot.is_empty() {
+                sortie.push(std::mem::take(&mut mot));
+            }
+            if separateur(c) && sortie.last().is_some_and(|m| m != ",") {
+                sortie.push(",".to_string());
+            }
         }
     }
     if !mot.is_empty() {
@@ -261,14 +480,69 @@ fn mots(phrase: &str) -> Vec<String> {
     sortie
 }
 
+const INTERROGATIFS: &[&str] = &[
+    "pourquoi", "comment", "quel", "quelle", "quels", "quelles", "combien", "did", "do", "does",
+    "is", "are", "was", "were", "can", "could", "would", "should", "will", "shall", "have", "has",
+    "may", "what", "how", "why", "where", "which", "who", "anything", "any",
+];
+const PRONOMS_INVERSES: &[&str] = &[
+    "tu", "vous", "il", "elle", "on", "je", "nous", "ils", "elles",
+];
+
+/// Une proposition interrogative : « est-ce », une inversion (« veux-tu », « a-t-il »), ou un
+/// mot interrogatif en tête. L'intonation seule (« c'est fait ? ») ne compte que pour la
+/// dernière proposition de la phrase.
+fn interrogative(proposition: &str) -> bool {
+    if proposition.contains("est-ce") {
+        return true;
+    }
+    let chars: Vec<char> = proposition.chars().collect();
+    for (i, &c) in chars.iter().enumerate() {
+        if c != '-' || i == 0 || !chars[i - 1].is_alphabetic() {
+            continue;
+        }
+        let suite: String = chars[i + 1..]
+            .iter()
+            .take_while(|c| c.is_alphabetic())
+            .collect();
+        if PRONOMS_INVERSES.contains(&suite.as_str()) {
+            return true;
+        }
+    }
+    mots(proposition)
+        .first()
+        .is_some_and(|m| INTERROGATIFS.contains(&m.as_str()))
+}
+
+/// Les mots à juger d'une phrase. Dans une question, la dernière proposition est la question,
+/// et toute proposition à partir de la première interrogative aussi ; ce qui précède reste une
+/// affirmation (« J'ai créé X, veux-tu… ? », "Done — anything else?").
+fn mots_a_juger(phrase: &Phrase) -> Option<Vec<String>> {
+    let texte = normaliser(&phrase.a_juger);
+    if !phrase.question {
+        return Some(mots(&texte));
+    }
+    let propositions: Vec<&str> = texte.split(separateur).collect();
+    let dernieres = propositions.len().saturating_sub(1);
+    let gardees: Vec<&str> = propositions[..dernieres]
+        .iter()
+        .take_while(|p| !interrogative(p))
+        .copied()
+        .collect();
+    if gardees.iter().all(|p| p.trim().is_empty()) {
+        return None;
+    }
+    Some(mots(&gardees.join(",")))
+}
+
 // ---------------------------------------------------------------------------------------
-// Motifs
+// Motifs (tous écrits sans accents : le texte est normalisé avant d'être jugé)
 
 const ADVERBES_FR: &[&str] = &[
     "bien",
-    "déjà",
+    "deja",
     "aussi",
-    "également",
+    "egalement",
     "maintenant",
     "enfin",
     "donc",
@@ -280,37 +554,23 @@ const ADVERBES_FR: &[&str] = &[
     "correctement",
     "bel",
     "et",
+    "desormais",
 ];
-const NEGATIONS_FR: &[&str] = &["pas", "jamais", "rien", "point", "plus", "guère", "ni"];
-const CONDITIONS_FR: &[&str] = &["si", "quand", "lorsque", "lorsqu'", "dès", "fois"];
+const NEGATIONS_FR: &[&str] = &["pas", "jamais", "rien", "point", "plus", "guere", "ni"];
+/// `des` et `fois` ne sont des conditions que suivis de `que` (« dès que », « une fois que ») :
+/// « une fois de plus » n'en est pas une, « des modules » non plus.
+const CONDITIONS_FR: &[&str] = &["si", "quand", "lorsque", "lorsqu'", "des", "fois"];
 const PRONOMS_FR: &[&str] = &[
     "l'", "les", "le", "la", "lui", "leur", "y", "en", "vous", "te", "t'", "m'", "me", "nous",
 ];
 
 const PARTICIPES_FR: &[&str] = &[
-    "cré",
-    "ajout",
-    "rajout",
-    "install",
-    "supprim",
-    "reli",
-    "li",
-    "modifi",
-    "retir",
-    "activ",
-    "désactiv",
-    "effac",
-    "renomm",
-    "corrig",
-    "connect",
-    "branch",
-    "configur",
-    "déplac",
-    "chang",
+    "cre", "ajout", "rajout", "install", "supprim", "reli", "li", "modifi", "retir", "activ",
+    "desactiv", "effac", "renomm", "corrig", "connect", "branch", "configur", "deplac", "chang",
     "remplac",
 ];
-const PARTICIPES_NOTE_FR: &[&str] = &["not", "enregistr", "mémoris", "sauvegard", "consign"];
-const IRREGULIERS_FR: &[&str] = &["mis", "mise", "mises", "écrit", "écrite", "écrits"];
+const PARTICIPES_NOTE_FR: &[&str] = &["not", "enregistr", "memoris", "sauvegard", "consign"];
+const IRREGULIERS_FR: &[&str] = &["mis", "mise", "mises", "ecrit", "ecrite", "ecrits"];
 const IRREGULIERS_NOTE_FR: &[&str] = &["inscrit", "inscrite", "inscrits", "retenu", "retenue"];
 
 const ADVERBES_EN: &[&str] = &[
@@ -322,13 +582,13 @@ const ADVERBES_EN: &[&str] = &[
     "now",
     "successfully",
     "went",
+    "gone",
     "ahead",
     "and",
     "finally",
 ];
-const CONDITIONS_EN: &[&str] = &[
-    "if", "once", "when", "whether", "unless", "after", "until", "before",
-];
+/// Ni `after` ni `before` : « After checking, I created… » affirme bel et bien.
+const CONDITIONS_EN: &[&str] = &["if", "once", "when", "whether", "unless", "until"];
 const VERBES_EN: &[&str] = &[
     "created",
     "added",
@@ -351,33 +611,139 @@ const VERBES_EN: &[&str] = &[
     "changed",
 ];
 const VERBES_NOTE_EN: &[&str] = &["saved", "stored", "recorded", "noted", "memorized"];
+/// Après « I did » : "I did create it".
+const BASES_EN: &[&str] = &[
+    "create",
+    "add",
+    "install",
+    "remove",
+    "delete",
+    "link",
+    "connect",
+    "update",
+    "write",
+    "enable",
+    "disable",
+    "rename",
+    "fix",
+    "configure",
+    "register",
+    "replace",
+    "move",
+    "change",
+];
+const BASES_NOTE_EN: &[&str] = &["save", "store", "record", "note", "memorize"];
+const MODAUX_EN: &[&str] = &[
+    "will", "would", "should", "could", "might", "may", "must", "can", "ll", "d", "to",
+];
 
-/// `cré` + `é`, `ée`, `és`, `ées`.
+/// `cre` + `e`, `ee`, `es`, `ees` (le texte est sans accents). Sans accents, la coupe est
+/// ambiguë (« cree » = `cre` + `e` ou `cr` + `ee`) : toutes les coupes sont essayées.
 fn participe(mot: &str, radicaux: &[&str]) -> bool {
-    let racine = mot
-        .strip_suffix("ées")
-        .or_else(|| mot.strip_suffix("és"))
-        .or_else(|| mot.strip_suffix("ée"))
-        .or_else(|| mot.strip_suffix('é'));
-    racine.is_some_and(|r| radicaux.contains(&r))
+    ["ees", "es", "ee", "e"]
+        .iter()
+        .filter_map(|suffixe| mot.strip_suffix(suffixe))
+        .any(|r| radicaux.contains(&r))
 }
 
+/// Le début de la proposition qui contient le mot `i`.
+fn debut_proposition(mots: &[String], i: usize) -> usize {
+    mots[..i]
+        .iter()
+        .rposition(|m| m == ",")
+        .map_or(0, |p| p + 1)
+}
+
+/// Une condition avant le mot `i`, **dans sa proposition** : « Si besoin, dis-le moi : j'ai
+/// créé » affirme.
 fn condition_avant(mots: &[String], i: usize, conditions: &[&str]) -> bool {
-    mots[..i].iter().any(|m| conditions.contains(&m.as_str()))
+    (debut_proposition(mots, i)..i).any(|k| {
+        let m = mots[k].as_str();
+        let suite = mots.get(k + 1).map(String::as_str);
+        match m {
+            "des" | "fois" => matches!(suite, Some("que" | "qu'")),
+            "s'" => matches!(suite, Some("il" | "ils")),
+            _ => conditions.contains(&m),
+        }
+    })
 }
 
-fn claim_of(mots: &[String]) -> Option<Claim> {
+fn est_negation(mot: &str) -> bool {
+    matches!(
+        mot,
+        "ne" | "pas" | "jamais" | "rien" | "aucun" | "aucune" | "guere" | "not" | "never" | "no"
+    ) || mot.ends_with("n'")
+}
+
+/// Une négation dans la proposition, avant le mot `i`.
+fn nie_avant(mots: &[String], i: usize) -> bool {
+    mots[debut_proposition(mots, i)..i]
+        .iter()
+        .any(|m| est_negation(m))
+}
+
+/// Pour les tournures sans sujet ou passives, plus ambiguës : ni négation, ni condition, ni
+/// subordonnée (« vérifie que le module est installé », "I think that it has been created"),
+/// ni modal ("will have been created") dans la proposition.
+fn proposition_reservee(mots: &[String], i: usize) -> bool {
+    let debut = debut_proposition(mots, i);
+    nie_avant(mots, i)
+        || condition_avant(mots, i, CONDITIONS_FR)
+        || condition_avant(mots, i, CONDITIONS_EN)
+        || mots[debut..i].iter().any(|m| {
+            matches!(m.as_str(), "que" | "qu'" | "that") || MODAUX_EN.contains(&m.as_str())
+        })
+}
+
+fn action(verbe: &str) -> Option<Trouve> {
+    Some(Trouve {
+        claim: Claim::Action,
+        verbe: Some(verbe.to_string()),
+    })
+}
+
+fn generique(claim: Claim) -> Option<Trouve> {
+    Some(Trouve { claim, verbe: None })
+}
+
+fn participe_fr(mot: &str) -> Option<Trouve> {
+    if participe(mot, PARTICIPES_NOTE_FR) || IRREGULIERS_NOTE_FR.contains(&mot) {
+        return Some(Trouve {
+            claim: Claim::Noted,
+            verbe: Some(mot.to_string()),
+        });
+    }
+    if participe(mot, PARTICIPES_FR) || IRREGULIERS_FR.contains(&mot) {
+        return action(mot);
+    }
+    None
+}
+
+fn verbe_en(mot: &str) -> Option<Trouve> {
+    if VERBES_NOTE_EN.contains(&mot) {
+        return Some(Trouve {
+            claim: Claim::Noted,
+            verbe: Some(mot.to_string()),
+        });
+    }
+    VERBES_EN.contains(&mot).then(|| action(mot)).flatten()
+}
+
+fn claim_of(mots: &[String]) -> Option<Trouve> {
     action_fr(mots)
         .or_else(|| fait_fr(mots))
+        .or_else(|| passif_fr(mots))
         .or_else(|| memoire_fr(mots))
         .or_else(|| action_en(mots))
         .or_else(|| fait_en(mots))
+        .or_else(|| passif_en(mots))
+        .or_else(|| sans_sujet(mots))
         .or_else(|| memoire_en(mots))
 }
 
 /// « j'ai créé », « je l'ai ajoutée », « nous avons relié » ; pas « je n'ai pas créé », pas
 /// « si j'ai créé ».
-fn action_fr(mots: &[String]) -> Option<Claim> {
+fn action_fr(mots: &[String]) -> Option<Trouve> {
     for (i, mot) in mots.iter().enumerate() {
         let sujet = match mot.as_str() {
             "ai" => ["j'", "je"],
@@ -414,11 +780,8 @@ fn action_fr(mots: &[String]) -> Option<Claim> {
             if NEGATIONS_FR.contains(&m) {
                 break;
             }
-            if participe(m, PARTICIPES_NOTE_FR) || IRREGULIERS_NOTE_FR.contains(&m) {
-                return Some(Claim::Noted);
-            }
-            if participe(m, PARTICIPES_FR) || IRREGULIERS_FR.contains(&m) {
-                return Some(Claim::Action);
+            if let Some(trouve) = participe_fr(m) {
+                return Some(trouve);
             }
             break;
         }
@@ -426,40 +789,124 @@ fn action_fr(mots: &[String]) -> Option<Claim> {
     None
 }
 
-/// « c'est fait », « c'est noté », « voilà qui est fait », « c'est chose faite ».
-fn fait_fr(mots: &[String]) -> Option<Claim> {
+/// « c'est fait », « c'est noté », « voilà qui est fait », « c'est chose faite », « c'est en
+/// place », et sans apostrophe « cest fait », « c est fait ».
+fn fait_fr(mots: &[String]) -> Option<Trouve> {
     for (i, mot) in mots.iter().enumerate() {
-        if mot != "est" || i == 0 {
+        let tete = match mot.as_str() {
+            "cest" => i,
+            "est" if i > 0 && matches!(mots[i - 1].as_str(), "c'" | "c" | "qui") => i - 1,
+            _ => continue,
+        };
+        if condition_avant(mots, tete, CONDITIONS_FR) {
             continue;
         }
-        let avant = mots[i - 1].as_str();
-        if avant != "c'" && avant != "qui" {
-            continue;
+        let mut k = i + 1;
+        while k < mots.len() && (ADVERBES_FR.contains(&mots[k].as_str()) || mots[k] == "chose") {
+            k += 1;
         }
-        if condition_avant(mots, i - 1, CONDITIONS_FR) {
+        let Some(m) = mots.get(k).map(String::as_str) else {
             continue;
-        }
-        for suivant in &mots[i + 1..] {
-            let m = suivant.as_str();
-            if ADVERBES_FR.contains(&m) || m == "chose" {
-                continue;
+        };
+        let trouve = match m {
+            "fait" | "faite" | "termine" | "terminee" | "regle" | "reglee" => {
+                generique(Claim::Action)
             }
-            return match m {
-                "fait" | "faite" | "installé" | "installée" | "créé" | "créée" | "ajouté"
-                | "ajoutée" | "supprimé" | "supprimée" => Some(Claim::Action),
-                "noté" | "notée" | "enregistré" | "enregistrée" | "mémorisé" | "retenu" => {
-                    Some(Claim::Noted)
-                }
-                _ => None,
-            };
+            "en" if mots.get(k + 1).is_some_and(|s| s == "place") => generique(Claim::Action),
+            "installe" | "installee" | "cree" | "creee" | "ajoute" | "ajoutee" | "supprime"
+            | "supprimee" => action(m),
+            "note" | "notee" | "enregistre" | "enregistree" | "memorise" | "retenu" => {
+                generique(Claim::Noted)
+            }
+            _ => None,
+        };
+        if trouve.is_some() {
+            return trouve;
         }
     }
     None
 }
 
-/// « je me souviens », « je m'en souviens », « je me rappelle », « d'après ma mémoire » ;
-/// pas « je ne me souviens pas ». Un « si je me souviens bien » reste une affirmation.
-fn memoire_fr(mots: &[String]) -> Option<Claim> {
+/// « Le module a été créé », « les fiches ont bien été ajoutées », « le module est maintenant
+/// installé » ; pas « n'a pas été créé », pas « sera créé », pas « le module est déjà
+/// installé » (un état, pas une action), pas « c'est lié à… » (une relation).
+fn passif_fr(mots: &[String]) -> Option<Trouve> {
+    for (i, mot) in mots.iter().enumerate() {
+        let ete = match mot.as_str() {
+            "a" | "ont" => true,
+            "est" | "sont" => false,
+            _ => continue,
+        };
+        if i > 0 && matches!(mots[i - 1].as_str(), "c'" | "c" | "qui" | "y" | "n'" | "ne") {
+            continue;
+        }
+        if proposition_reservee(mots, i) {
+            continue;
+        }
+        let mut deja = false;
+        let mut k = i + 1;
+        let mut sauter = |k: &mut usize| {
+            while *k < mots.len() && ADVERBES_FR.contains(&mots[*k].as_str()) {
+                deja |= mots[*k] == "deja";
+                *k += 1;
+            }
+        };
+        sauter(&mut k);
+        if ete {
+            if mots.get(k).is_none_or(|m| m != "ete") {
+                continue;
+            }
+            k += 1;
+            sauter(&mut k);
+        }
+        if deja {
+            continue;
+        }
+        let Some(p) = mots.get(k) else { continue };
+        let suite = mots.get(k + 1).map(String::as_str);
+        if !ete {
+            let relation = participe(p, &["li", "reli", "connect", "branch"])
+                && matches!(suite, Some("a" | "au" | "aux" | "avec"));
+            let defaut = suite == Some("par") && mots.get(k + 2).is_some_and(|m| m == "defaut");
+            if relation || defaut {
+                continue;
+            }
+        }
+        if let Some(trouve) = participe_fr(p) {
+            return Some(trouve);
+        }
+    }
+    None
+}
+
+/// « Module créé avec succès », "Successfully created the module", "created successfully".
+fn sans_sujet(mots: &[String]) -> Option<Trouve> {
+    for (i, mot) in mots.iter().enumerate() {
+        let m = mot.as_str();
+        let trouve = if mots.get(i + 1).is_some_and(|s| s == "avec")
+            && mots.get(i + 2).is_some_and(|s| s == "succes")
+        {
+            participe_fr(m)
+        } else if m == "successfully" {
+            mots.get(i + 1).and_then(|s| verbe_en(s))
+        } else if mots.get(i + 1).is_some_and(|s| s == "successfully") {
+            verbe_en(m)
+        } else {
+            None
+        };
+        if trouve.is_some() && !proposition_reservee(mots, i) {
+            return trouve;
+        }
+    }
+    None
+}
+
+/// « je me souviens », « je m'en souviens », « je me rappelle », « d'après ma mémoire », et
+/// les paraphrases d'une conversation passée : « tu m'avais dit », « d'après nos échanges
+/// précédents » ; pas « je ne me souviens pas », pas « tu m'as dit » (le fil courant). Un
+/// « si je me souviens bien » reste une affirmation.
+fn memoire_fr(mots: &[String]) -> Option<Trouve> {
+    let memoire = generique(Claim::Memory);
     for (i, mot) in mots.iter().enumerate() {
         let m = mot.as_str();
         if m == "souviens" || m == "rappelle" {
@@ -481,30 +928,87 @@ fn memoire_fr(mots: &[String]) -> Option<Claim> {
             let apres = mots.get(i + 1).map(String::as_str);
             let nie = nie || apres.is_some_and(|a| NEGATIONS_FR.contains(&a));
             if sujet && !nie {
-                return Some(Claim::Memory);
+                return memoire;
             }
         }
-        if m == "mémoire" && i >= 2 {
+        if m == "memoire" && i >= 2 {
             let det = mots[i - 1].as_str();
             let prep = mots[i - 2].as_str();
             let nie = i >= 3 && NEGATIONS_FR.contains(&mots[i - 3].as_str());
             if matches!(det, "ma" | "mes")
-                && matches!(prep, "d'après" | "après" | "selon" | "dans")
+                && matches!(prep, "d'apres" | "apres" | "selon" | "dans")
                 && !nie
             {
-                return Some(Claim::Memory);
+                return memoire;
             }
         }
         // « De mémoire, tu préfères… » : seulement en tête de phrase.
-        if m == "mémoire" && i == 1 && mots[0] == "de" {
-            return Some(Claim::Memory);
+        if m == "memoire" && i == 1 && mots[0] == "de" {
+            return memoire;
+        }
+        // « Tu m'avais dit », « vous nous aviez indiqué » : le plus-que-parfait renvoie à une
+        // conversation passée, que seul un `recall` peut rapporter.
+        if matches!(m, "avais" | "aviez") && !nie_avant(mots, i) {
+            let mut j = i;
+            let mut sujet = false;
+            while j > 0 {
+                j -= 1;
+                match mots[j].as_str() {
+                    "tu" | "vous" => {
+                        sujet = true;
+                        break;
+                    }
+                    "m'" | "me" | "nous" | "l'" | "le" | "en" => {}
+                    _ => break,
+                }
+            }
+            let dit = mots[i + 1..]
+                .iter()
+                .map(String::as_str)
+                .find(|m| !matches!(*m, "deja" | "bien"))
+                .is_some_and(|m| {
+                    matches!(
+                        m,
+                        "dit"
+                            | "indique"
+                            | "confie"
+                            | "explique"
+                            | "precise"
+                            | "raconte"
+                            | "parle"
+                            | "ecrit"
+                            | "mentionne"
+                            | "demande"
+                    )
+                });
+            if sujet && dit {
+                return memoire;
+            }
+        }
+        // « nos échanges précédents », « notre dernière conversation ».
+        if matches!(m, "nos" | "notre") && !nie_avant(mots, i) {
+            let suite: Vec<&str> = mots[i + 1..].iter().take(3).map(String::as_str).collect();
+            let fil = suite.iter().any(|s| {
+                ["echange", "conversation", "discussion", "session"]
+                    .iter()
+                    .any(|n| s.starts_with(n))
+            });
+            let passe = suite.iter().any(|s| {
+                ["precedent", "passe", "anterieur", "dernier", "derniere"]
+                    .iter()
+                    .any(|q| s.starts_with(q))
+            });
+            if fil && passe {
+                return memoire;
+            }
         }
     }
     None
 }
 
-/// "I created", "I've added", "we have removed" ; pas "I haven't created", pas "if I added".
-fn action_en(mots: &[String]) -> Option<Claim> {
+/// "I created", "I've added", "we have removed", "I did create it" ; pas "I haven't created",
+/// pas "if I added".
+fn action_en(mots: &[String]) -> Option<Trouve> {
     for (i, mot) in mots.iter().enumerate() {
         if !matches!(mot.as_str(), "i" | "i'" | "we" | "we'") {
             continue;
@@ -512,16 +1016,30 @@ fn action_en(mots: &[String]) -> Option<Claim> {
         if condition_avant(mots, i, CONDITIONS_EN) {
             continue;
         }
+        let mut did = false;
         for suivant in &mots[i + 1..] {
             let m = suivant.as_str();
+            if m == "did" {
+                did = true;
+                continue;
+            }
             if ADVERBES_EN.contains(&m) {
                 continue;
             }
-            if VERBES_NOTE_EN.contains(&m) {
-                return Some(Claim::Noted);
+            if did {
+                if BASES_NOTE_EN.contains(&m) {
+                    return Some(Trouve {
+                        claim: Claim::Noted,
+                        verbe: Some(m.to_string()),
+                    });
+                }
+                if BASES_EN.contains(&m) {
+                    return action(m);
+                }
+                break;
             }
-            if VERBES_EN.contains(&m) {
-                return Some(Claim::Action);
+            if let Some(trouve) = verbe_en(m) {
+                return Some(trouve);
             }
             break;
         }
@@ -530,9 +1048,9 @@ fn action_en(mots: &[String]) -> Option<Claim> {
 }
 
 /// "Done.", "It's done", "all done", "that is done" ; pas "not done", pas "once done".
-fn fait_en(mots: &[String]) -> Option<Claim> {
+fn fait_en(mots: &[String]) -> Option<Trouve> {
     if mots.first().is_some_and(|m| m == "done") {
-        return Some(Claim::Action);
+        return generique(Claim::Action);
     }
     for (i, mot) in mots.iter().enumerate() {
         if mot != "done" || i == 0 {
@@ -552,21 +1070,77 @@ fn fait_en(mots: &[String]) -> Option<Claim> {
         if let Some(t) = tete
             && !condition_avant(mots, t, CONDITIONS_EN)
         {
-            return Some(Claim::Action);
+            return generique(Claim::Action);
         }
     }
     None
 }
 
-/// "I remember", "I recall", "from memory" ; pas "I don't remember".
-fn memoire_en(mots: &[String]) -> Option<Claim> {
+/// "The module has been created", "it's been added", "the rows were deleted", "the module is
+/// now installed" ; pas "has not been created", pas "will have been created", pas "is
+/// already installed" (un état), pas "is linked to" (une relation).
+fn passif_en(mots: &[String]) -> Option<Trouve> {
+    for (i, mot) in mots.iter().enumerate() {
+        let precedent = i.checked_sub(1).map(|p| mots[p].as_str());
+        let etat = match mot.as_str() {
+            "been" if matches!(precedent, Some("has" | "have" | "ve" | "s")) => false,
+            "was" | "were" => false,
+            "is" | "are" => true,
+            "s" if precedent.is_some_and(|p| p.ends_with('\'')) => true,
+            _ => continue,
+        };
+        if proposition_reservee(mots, i) {
+            continue;
+        }
+        let mut k = i + 1;
+        let mut deja = false;
+        while k < mots.len()
+            && matches!(
+                mots[k].as_str(),
+                "now"
+                    | "just"
+                    | "successfully"
+                    | "also"
+                    | "correctly"
+                    | "properly"
+                    | "finally"
+                    | "already"
+            )
+        {
+            deja |= mots[k] == "already";
+            k += 1;
+        }
+        if deja {
+            continue;
+        }
+        let Some(v) = mots.get(k) else { continue };
+        let suite = mots.get(k + 1).map(String::as_str);
+        if etat {
+            let relation = matches!(v.as_str(), "linked" | "connected")
+                && matches!(suite, Some("to" | "with"));
+            if relation || suite == Some("by") {
+                continue;
+            }
+        }
+        if let Some(trouve) = verbe_en(v) {
+            return Some(trouve);
+        }
+    }
+    None
+}
+
+/// "I remember", "I recall", "from memory", et les renvois à une conversation passée : "as you
+/// told me before", "our previous conversation" ; pas "I don't remember", pas "you never told
+/// me before".
+fn memoire_en(mots: &[String]) -> Option<Trouve> {
+    let memoire = generique(Claim::Memory);
     for (i, mot) in mots.iter().enumerate() {
         let m = mot.as_str();
         if m == "i" {
             for suivant in &mots[i + 1..] {
                 match suivant.as_str() {
                     "still" | "clearly" | "do" | "also" | "definitely" | "vaguely" => continue,
-                    "remember" | "recall" => return Some(Claim::Memory),
+                    "remember" | "recall" => return memoire,
                     _ => break,
                 }
             }
@@ -574,11 +1148,123 @@ fn memoire_en(mots: &[String]) -> Option<Claim> {
         if m == "memory" && i >= 1 {
             let avant = mots[i - 1].as_str();
             if avant == "from" || (avant == "my" && (i < 2 || mots[i - 2] != "in")) {
-                return Some(Claim::Memory);
+                return memoire;
+            }
+        }
+        if (m == "you" || m == "you'") && !nie_avant(mots, i) {
+            let mut k = i + 1;
+            while k < mots.len() && matches!(mots[k].as_str(), "had" | "d" | "already") {
+                k += 1;
+            }
+            let dit = mots
+                .get(k)
+                .is_some_and(|v| matches!(v.as_str(), "told" | "mentioned" | "said"));
+            let fin = mots[k.min(mots.len())..]
+                .iter()
+                .position(|m| m == ",")
+                .map_or(mots.len(), |p| k + p);
+            let passe = mots[k.min(fin)..fin]
+                .iter()
+                .any(|m| matches!(m.as_str(), "before" | "earlier" | "previously" | "last"));
+            if dit && passe {
+                return memoire;
+            }
+        }
+        if m == "our" && !nie_avant(mots, i) {
+            let suite: Vec<&str> = mots[i + 1..].iter().take(2).map(String::as_str).collect();
+            let passe = suite
+                .first()
+                .is_some_and(|s| matches!(*s, "previous" | "past" | "earlier" | "last"));
+            let fil = suite.get(1).is_some_and(|s| {
+                ["conversation", "chat", "discussion", "session"]
+                    .iter()
+                    .any(|n| s.starts_with(n))
+            });
+            if passe && fil {
+                return memoire;
             }
         }
     }
     None
+}
+
+// ---------------------------------------------------------------------------------------
+// Du verbe à l'outil
+
+/// Chaque action nommée par un récit : ses radicaux français (sans accents), ses préfixes
+/// anglais, et les jetons d'un nom d'outil qui la font.
+const ACTIONS: &[(&[&str], &[&str], &[&str])] = &[
+    (&["install"], &["install"], &["install"]),
+    (&["cre"], &["creat"], &["create"]),
+    (&["ajout", "rajout"], &["add"], &["add"]),
+    (
+        &["supprim", "effac"],
+        &["delet"],
+        &["delete", "remove", "drop"],
+    ),
+    (&["retir"], &["remov"], &["remove", "delete"]),
+    (
+        &["reli", "li", "connect", "branch"],
+        &["link", "connect"],
+        &["link", "connect"],
+    ),
+    (
+        &["modifi", "chang"],
+        &["updat", "chang", "modif"],
+        &["update", "edit", "modify", "set", "change"],
+    ),
+    (&["activ"], &["enabl", "activat"], &["enable", "activate"]),
+    (
+        &["desactiv"],
+        &["disabl", "deactivat"],
+        &["disable", "deactivate"],
+    ),
+    (&["renomm"], &["renam"], &["rename"]),
+    (&["configur"], &["configur"], &["configure", "config"]),
+    (&["deplac"], &["mov"], &["move"]),
+    (&["remplac"], &["replac"], &["replace"]),
+    (&["corrig"], &["fix"], &["fix"]),
+    (&[], &["wrot", "writ"], &["write"]),
+];
+
+/// Les jetons d'outil de l'action que porte `verbe` (« installé » ⇒ `install`).
+fn outils_de(verbe: &str) -> Option<&'static [&'static str]> {
+    let ecrit = matches!(verbe, "ecrit" | "ecrite" | "ecrits");
+    ACTIONS
+        .iter()
+        .find(|(fr, en, outils)| {
+            participe(verbe, fr)
+                || en.iter().any(|p| verbe.starts_with(p))
+                || (ecrit && outils.contains(&"write"))
+        })
+        .map(|(_, _, outils)| *outils)
+}
+
+/// L'outil fait-il cette action ? `install_module`, `installModule`, `module-install` ⇒
+/// `install`.
+fn outil_fait(outil: &str, jetons: &[&str]) -> bool {
+    let mut morceaux: Vec<String> = Vec::new();
+    let mut courant = String::new();
+    let mut precedent_minuscule = false;
+    for c in outil.chars() {
+        if (!c.is_alphanumeric() || (c.is_uppercase() && precedent_minuscule))
+            && !courant.is_empty()
+        {
+            morceaux.push(std::mem::take(&mut courant));
+        }
+        precedent_minuscule = c.is_lowercase();
+        if c.is_alphanumeric() {
+            courant.extend(c.to_lowercase());
+        }
+    }
+    if !courant.is_empty() {
+        morceaux.push(courant);
+    }
+    morceaux.iter().any(|morceau| {
+        jetons
+            .iter()
+            .any(|j| morceau == j || (j.len() >= 4 && morceau.starts_with(j)))
+    })
 }
 
 #[cfg(test)]
@@ -846,5 +1532,291 @@ mod tests {
             rappel.contains("« J'ai créé la fiche « Dupont » »"),
             "{rappel}"
         );
+    }
+
+    // ------------------------------------------------------------------ W10#2 rattrapage
+
+    fn affirme(texte: &str) -> bool {
+        claims(texte)
+            .iter()
+            .any(|(c, _)| matches!(c, Claim::Action | Claim::Noted))
+    }
+
+    fn ne_dit_rien(textes: &[&str]) {
+        for texte in textes {
+            assert!(
+                claims(texte).is_empty(),
+                "faux positif sur {texte:?} : {:?}",
+                claims(texte)
+            );
+        }
+    }
+
+    fn dit_une_action(textes: &[&str]) {
+        for texte in textes {
+            assert!(affirme(texte), "manqué : {texte:?}");
+        }
+    }
+
+    #[test]
+    fn rattrapage_par_ecriture_sans_empreinte_ou_sans_effet_refuse() {
+        let refus = Step::tool("install_module", 1).refused("non");
+        for apres in [
+            Step::tool("row_create", 1),
+            Step::tool("row_create", 1).state("a", "a"),
+        ] {
+            let etapes = [refus.clone(), apres];
+            assert_eq!(
+                unresolved(&etapes).map(|e| e.tool.as_str()),
+                Some("install_module")
+            );
+        }
+    }
+
+    #[test]
+    fn rattrapage_par_le_meme_outil_ou_une_ecriture_observee() {
+        let refus = Step::tool("install_module", 1).refused("non");
+        // Le même outil réussi, même sans empreinte.
+        assert!(unresolved(&[refus.clone(), Step::tool("install_module", 1)]).is_none());
+        // Une écriture dont l'état observé a changé.
+        assert!(unresolved(&[refus, ecriture_ok()]).is_none());
+    }
+
+    #[test]
+    fn un_recit_qui_nomme_l_action_refusee_n_est_pas_couvert_par_une_autre_ecriture() {
+        let etapes = [
+            Step::tool("install_module", 1).refused("même version"),
+            ecriture_ok(),
+        ];
+        for texte in [
+            "J'ai installé le module stock.",
+            "Le module a été installé.",
+            "I installed the module.",
+            "C'est fait.",
+        ] {
+            let u = unproven(texte, &etapes).unwrap_or_else(|| panic!("rien pour {texte:?}"));
+            assert!(u.manque.contains("`install_module`"), "{}", u.manque);
+            assert_eq!(u.etape.map(|e| e.tool), Some("install_module".into()));
+        }
+    }
+
+    #[test]
+    fn un_recit_qui_dit_l_autre_ecriture_est_couvert() {
+        let etapes = [
+            Step::tool("install_module", 1).refused("même version"),
+            ecriture_ok(),
+        ];
+        assert_eq!(claim_check("J'ai ajouté la ligne.", &etapes), None);
+        assert_eq!(claim_check("I added the row.", &etapes), None);
+        // Le même outil repris : l'action nommée est prouvée.
+        let repris = [
+            Step::tool("install_module", 1).refused("même version"),
+            Step::tool("install_module", 1).state("v1", "v2"),
+        ];
+        assert_eq!(claim_check("J'ai installé le module.", &repris), None);
+    }
+
+    #[test]
+    fn une_ecriture_sans_empreinte_ne_couvre_le_recit_que_sans_refus_en_suspens() {
+        let seule = [Step::tool("row_create", 1)];
+        assert_eq!(claim_check("J'ai ajouté la ligne.", &seule), None);
+        let apres_refus = [
+            Step::tool("install_module", 1).refused("non"),
+            Step::tool("row_create", 1),
+        ];
+        assert!(claim_check("J'ai ajouté la ligne.", &apres_refus).is_some());
+    }
+
+    #[test]
+    fn outil_fait_lit_les_noms_d_outil() {
+        let install = outils_de("installe").unwrap();
+        assert!(outil_fait("install_module", install));
+        assert!(outil_fait("installModule", install));
+        assert!(outil_fait("module-install", install));
+        assert!(!outil_fait("row_create", install));
+        assert!(outil_fait("entity_create", outils_de("created").unwrap()));
+        assert_eq!(outils_de("mis"), None);
+    }
+
+    // ------------------------------------------------------------------ W10#3 question finale
+
+    #[test]
+    fn affirmation_suivie_d_une_question_est_une_affirmation() {
+        dit_une_action(&[
+            "J'ai créé la fiche, veux-tu que je l'ouvre ?",
+            "C'est fait : autre chose ?",
+            "Done — anything else?",
+            "I created the entity, do you want me to open it?",
+            "J'ai ajouté la ligne ; tu veux la voir ?",
+        ]);
+    }
+
+    #[test]
+    fn une_vraie_question_reste_une_question() {
+        ne_dit_rien(&[
+            "Veux-tu que je crée la fiche ?",
+            "Est-ce que j'ai créé la fiche, ou faut-il recommencer ?",
+            "Did I add it, or should I retry?",
+            "Tu veux que je vérifie si c'est fait ?",
+            "Est-ce que, comme prévu, j'ai créé la fiche ?",
+            "Le module a-t-il été créé ?",
+            "Has the module been created?",
+        ]);
+    }
+
+    // ------------------------------------------------------------------ W10#4 portée des conditions
+
+    #[test]
+    fn une_condition_ne_porte_que_sur_sa_proposition() {
+        dit_une_action(&[
+            "After checking the schema, I created the entity.",
+            "Before answering, I added the row.",
+            "Une fois de plus, j'ai créé la fiche.",
+            "Si besoin, dis-le moi : j'ai créé la fiche.",
+            "If needed, tell me: I created the row.",
+        ]);
+    }
+
+    #[test]
+    fn une_condition_dans_la_proposition_annule_toujours() {
+        ne_dit_rien(&[
+            "Si j'ai créé un doublon, dis-le moi.",
+            "Une fois que j'ai créé le module, tu pourras l'utiliser.",
+            "Dès que j'ai créé la fiche, je te préviens.",
+            "If I created a duplicate, tell me.",
+            "Once done, I will tell you.",
+            "Quand c'est fait, je te préviens.",
+            "S'il est installé, tu le verras.",
+        ]);
+    }
+
+    // ------------------------------------------------------------------ W10#5 passif, sans sujet, NFD
+
+    #[test]
+    fn passif_sans_sujet_et_nfd_sont_des_affirmations() {
+        dit_une_action(&[
+            "Module créé avec succès.",
+            "Le module est installé.",
+            "Le module est maintenant installé.",
+            "Le module a été créé.",
+            "La fiche a bien été créée.",
+            "Les deux fiches ont été reliées.",
+            "Voilà, c'est en place.",
+            "The module has been created.",
+            "It's been added.",
+            "The rows were deleted.",
+            "The module is now installed.",
+            "Successfully created the module.",
+            "Created successfully.",
+            "I did create it.",
+            "I've gone ahead and created the module.",
+            // NFD : accents combinants.
+            "J'ai cre\u{301}e\u{301} la fiche.",
+            "La fiche a e\u{301}te\u{301} cre\u{301}e\u{301}e.",
+        ]);
+    }
+
+    #[test]
+    fn passif_nie_futur_question_ou_cite_n_affirme_pas() {
+        ne_dit_rien(&[
+            "Le module n'a pas été créé.",
+            "Le module n'est pas installé.",
+            "Le module sera créé.",
+            "Le module va être installé.",
+            "Le module est déjà installé.",
+            "Le module est installé par défaut.",
+            "C'est lié à ton autre fiche.",
+            "La fiche est liée à Dupont.",
+            "Vérifie que le module est installé.",
+            "Tu m'as dit que le module est installé.",
+            "Tu m'as écrit : « le module a été créé ».",
+            "Tu as écrit « j'ai créé la fiche ».",
+            "Si le module a été créé, préviens-moi.",
+            "The module has not been created.",
+            "The module hasn't been created yet.",
+            "The module will be created.",
+            "It will have been created by then.",
+            "The module is already installed.",
+            "The entity is linked to the order.",
+            "If the module has been created, tell me.",
+            "I think that it has been created.",
+            "I didn't successfully create it.",
+            "Je n'ai pas cre\u{301}e\u{301} la fiche.",
+            "Voici la liste des modules installés.",
+        ]);
+    }
+
+    #[test]
+    fn un_recit_entierement_entre_guillemets_reste_le_recit() {
+        dit_une_action(&["« C'est fait. »", "\"I created the module.\""]);
+    }
+
+    // ------------------------------------------------------------------ W12 MOY 7 variantes
+
+    #[test]
+    fn sans_apostrophe_ni_accents() {
+        dit_une_action(&[
+            "cest fait",
+            "Cest fait !",
+            "c est fait",
+            "j'ai cree le module",
+            "J'ai ajoute la ligne.",
+            "j'ai supprime la fiche",
+            "le module a ete installe",
+            "J'AI CRÉÉ LE MODULE.",
+        ]);
+        ne_dit_rien(&[
+            "c est pas fait",
+            "cest pas encore fait",
+            "je n'ai pas cree le module",
+            "le module n'a pas ete cree",
+            "je vais creer le module",
+            "cest fait ?",
+        ]);
+    }
+
+    fn memoire(texte: &str) -> bool {
+        claims(texte).iter().any(|(c, _)| *c == Claim::Memory)
+    }
+
+    #[test]
+    fn paraphrases_de_memoire() {
+        for texte in [
+            "D'après nos échanges précédents, tu préfères le thé vert.",
+            "Tu m'avais dit que tu préfères le thé vert.",
+            "Vous m'aviez indiqué une préférence pour le thé.",
+            "Lors de notre dernière conversation, tu as choisi le thé.",
+            "As you told me before, you prefer green tea.",
+            "You mentioned earlier that you like tea.",
+            "In our previous conversation you chose tea.",
+        ] {
+            assert!(memoire(texte), "manqué : {texte:?}");
+        }
+        for texte in [
+            "Tu m'as dit que tu préfères le thé vert.",
+            "Tu ne m'avais pas dit ça.",
+            "Tu m'avais dit ça ?",
+            "Je ne trouve rien dans nos échanges précédents.",
+            "You never told me before.",
+            "As you told me, you prefer tea.",
+            "Tu as écrit « tu m'avais dit que j'aimais le thé ».",
+        ] {
+            assert!(
+                !memoire(texte),
+                "faux positif : {texte:?} : {:?}",
+                claims(texte)
+            );
+        }
+    }
+
+    #[test]
+    fn une_paraphrase_de_memoire_sans_lecture_rappelle_et_avec_lecture_non() {
+        let texte = "Tu m'avais dit que tu préfères le thé.";
+        assert!(
+            claim_check(texte, &[ecriture_ok()])
+                .unwrap()
+                .contains("recall")
+        );
+        assert_eq!(claim_check(texte, &[Step::tool("recall", 1)]), None);
     }
 }

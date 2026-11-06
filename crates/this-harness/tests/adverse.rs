@@ -334,7 +334,6 @@ fn s1_refus_puis_c_est_fait_n_est_jamais_done() {
 }
 
 #[test]
-#[ignore = "attend W01 : session.rs n'appelle ni run.said ni run.take_rappel — le récit n'est jamais confronté aux preuves, aucun rappel n'est poussé (0 mesuré)"]
 fn s1_refus_puis_c_est_fait_un_rappel_puis_refused() {
     let model = Model::new(vec![
         calls("install_module", "a1"),
@@ -360,7 +359,6 @@ fn s1_refus_puis_c_est_fait_un_rappel_puis_refused() {
 // ---- 2. « Je me souviens » sans recall ---------------------------------------
 
 #[test]
-#[ignore = "attend W01 : sans run.said, « Je me souviens que tu préfères X » sans recall finit en Done sans rappel (mesuré : Ran(Done), 0 rappel)"]
 fn s2_je_me_souviens_sans_recall_declenche_un_rappel() {
     let model = Model::new(vec![
         says("Je me souviens que tu préfères le thé vert."),
@@ -439,7 +437,6 @@ fn s3_outil_invente_hors_specs_est_refuse_par_le_harnais() {
 }
 
 #[test]
-#[ignore = "trouvaille (haute) : une écriture réussie sans rapport efface un refus — install_module refusé, row_create ok, « j'ai installé le module » finit en Done (evidence::unresolved accepte toute autre écriture, claim_check ne relie pas l'objet du récit à l'outil)"]
 fn s3_une_ecriture_sans_rapport_ne_blanchit_pas_un_refus() {
     let model = Model::new(vec![
         calls("install_module", "a1"),
@@ -720,7 +717,6 @@ fn s7_c_est_fait_en_boucle_apres_un_refus_s_arrete() {
 }
 
 #[test]
-#[ignore = "attend W01 : aucun rappel n'est poussé (0 mesuré), on ne peut pas vérifier « exactement un »"]
 fn s7_un_seul_rappel_par_run_meme_s_il_insiste() {
     let model = Model::new(vec![calls("install_module", "a1")]);
     let b = bench(&model, refuse_install(), Limits::default());
@@ -737,7 +733,6 @@ fn s7_un_seul_rappel_par_run_meme_s_il_insiste() {
 }
 
 #[test]
-#[ignore = "trouvaille (moyenne) + attend W01 : sans aucun outil, un « c'est fait » répété après le rappel finit en Done (choix de Run::decide_default : un seul rappel, puis Done si rien n'a échoué) — le verdict est Unverified mais l'interface lit « terminé »"]
 fn s7_recit_non_prouve_qui_insiste_sans_outil_n_est_pas_done() {
     let model = Model::new(vec![]);
     let b = bench(&model, refuse_install(), Limits::default());
@@ -788,4 +783,104 @@ fn s8_variantes_typographiques_apres_refus_ne_sont_jamais_done() {
         // sert qu'au rappel (voir crates/this-agent/tests/adverse.rs pour la détection).
         assert_ne!(stop, Running::Ran(Stop::Done), "{lie}");
     }
+}
+
+// ---- 9. Vague 4 : le récit robuste, à travers la boucle ----------------------
+
+#[test]
+fn s9_recit_non_prouve_apres_rappel_dit_non_verifie() {
+    let model = Model::new(vec![]);
+    let b = bench(&model, refuse_install(), Limits::default());
+
+    let stop = run(b.harness.send("crée la fiche client"));
+
+    assert!(
+        matches!(&stop, Running::Ran(Stop::Failed(m)) if m.contains("récit non vérifié")),
+        "{stop:?}"
+    );
+    assert_eq!(b.rappels(), 1, "{:?}", b.hints());
+    assert_eq!(model.calls(), 2, "récit + rappel, insistance puis arrêt");
+}
+
+#[test]
+fn s9_ecriture_sans_rapport_puis_recit_exact_est_done() {
+    // Témoin négatif de s3 : l'autre écriture prouve ce que le récit dit vraiment.
+    let model = Model::new(vec![
+        calls("install_module", "a1"),
+        calls("row_create", "a2"),
+        says("Le module était déjà à la même version ; j'ai ajouté la ligne demandée."),
+    ]);
+    let tools = Tools::new(&["install_module", "row_create"], |call| {
+        match call.name.as_str() {
+            "install_module" => Outcome::refused("refusé", "le module est déjà à la même version"),
+            _ => Outcome::ok("ligne créée").observed("0", "1"),
+        }
+    });
+    let b = bench(&model, tools, Limits::default());
+
+    assert_eq!(
+        run(b
+            .harness
+            .send("installe le module stock et ajoute la ligne")),
+        Running::Ran(Stop::Done)
+    );
+    assert_eq!(b.rappels(), 0, "{:?}", b.hints());
+}
+
+#[test]
+fn s9_ecriture_sans_rapport_puis_installe_rappelle_en_nommant_l_outil() {
+    let model = Model::new(vec![
+        calls("install_module", "a1"),
+        calls("row_create", "a2"),
+        says("C'est fait : j'ai installé le module stock."),
+    ]);
+    let tools = Tools::new(&["install_module", "row_create"], |call| {
+        match call.name.as_str() {
+            "install_module" => Outcome::refused("refusé", "le module est déjà à la même version"),
+            _ => Outcome::ok("ligne créée").observed("0", "1"),
+        }
+    });
+    let b = bench(&model, tools, Limits::default());
+
+    let stop = run(b.harness.send("installe le module stock"));
+
+    assert_eq!(b.rappels(), 1, "{:?}", b.hints());
+    assert!(
+        b.hints()
+            .iter()
+            .any(|h| h.contains(RAPPEL) && h.contains("`install_module`")),
+        "{:?}",
+        b.hints()
+    );
+    assert!(
+        matches!(&stop, Running::Ran(Stop::Refused(m)) if m.contains("même version")),
+        "{stop:?}"
+    );
+}
+
+#[test]
+fn s9_affirmation_puis_question_sans_outil_rappelle() {
+    let model = Model::new(vec![
+        says("J'ai créé la fiche client, veux-tu que je l'ouvre ?"),
+        says("Je n'ai pas créé la fiche : aucun outil n'a été appelé."),
+    ]);
+    let b = bench(&model, refuse_install(), Limits::default());
+
+    assert_eq!(
+        run(b.harness.send("crée la fiche client")),
+        Running::Ran(Stop::Done)
+    );
+    assert_eq!(b.rappels(), 1, "{:?}", b.hints());
+}
+
+#[test]
+fn s9_vraie_question_sans_outil_ne_rappelle_pas() {
+    let model = Model::new(vec![says("Veux-tu que je crée la fiche client ?")]);
+    let b = bench(&model, refuse_install(), Limits::default());
+
+    assert_eq!(
+        run(b.harness.send("crée la fiche client")),
+        Running::Ran(Stop::Done)
+    );
+    assert_eq!(b.rappels(), 0, "{:?}", b.hints());
 }
