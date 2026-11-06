@@ -26,9 +26,10 @@ use std::task::Poll;
 
 use async_trait::async_trait;
 
-use crate::event::{Event, Outcome, Pending, Snapshot};
+use crate::event::{Event, HintKind, Outcome, Pending, Snapshot};
 use crate::ports::{Cancel, Delta, Toolbox, Transport};
 use crate::wire::{Code, Failure, Finish, Message, Reply, Request, ToolCall};
+use this_agent::evidence::Verdict;
 use this_agent::{Decision, DefaultPolicy, Goal, Policy, Run, Step, Stop};
 
 /// L'état partagé. `Rc<RefCell<_>>` sans condition : la boucle est sur un seul
@@ -604,6 +605,9 @@ impl Harness {
         let mut stop: Option<Stop> = None;
         let mut said = String::new();
         let mut code: Option<String> = None;
+        // Le verdict du run qui a posé `stop` : lu à la sortie de ses tours, avant
+        // qu'un objectif suivant n'ouvre un autre run.
+        let mut verdict: Option<Verdict> = None;
 
         'goals: loop {
             // 1. Le prochain message tenu ouvre un objectif. Sans message, il
@@ -618,6 +622,8 @@ impl Harness {
 
             if cancel.is_cancelled() {
                 stop = Some(Stop::Cancelled);
+                // Aucun run n'a commencé : aucune étape, rien de terminé.
+                verdict = Some(this_agent::evidence::verdict(&[], false));
                 break 'goals;
             }
 
@@ -697,6 +703,7 @@ impl Harness {
                         tentative += 1;
                         let wait = RETRY_BACKOFF_MS << (tentative - 1);
                         self.out.emit(Event::Hint {
+                            kind: HintKind::Retry,
                             text: format!(
                                 "Panne passagère du moteur ({}) : nouvelle tentative {tentative}/{MAX_RETRIES} dans {} s.",
                                 failure.message,
@@ -741,7 +748,10 @@ impl Harness {
                                 Code::Aborted,
                             ),
                         };
-                        self.out.emit(Event::Hint { text: hint });
+                        self.out.emit(Event::Hint {
+                            text: hint,
+                            kind: HintKind::Interrupted,
+                        });
                         let partial = gathered.borrow().clone();
                         if !partial.trim().is_empty() {
                             said = partial.clone();
@@ -850,6 +860,8 @@ impl Harness {
                 // visible après. Sans ça, une action refusée était suivie d'un
                 // « je m'arrête là » accepté comme une conclusion.
                 let hint = relaunch_reason(&run, spoke, called);
+                // Son genre se lit au même instant, pour la même raison.
+                let hint_kind = relaunch_kind(&run);
                 // Le récit du tour est confié à la décision : sans lui, « c'est
                 // fait » après un refus n'est jamais confronté aux étapes.
                 run.said(&text);
@@ -859,8 +871,16 @@ impl Harness {
                         // Le rappel est consommé dans tous les cas : laissé dans
                         // le run, il serait périmé au tour suivant.
                         let rappel = run.take_rappel();
-                        if let Some(hint) = hint.or(rappel) {
-                            self.out.emit(Event::Hint { text: hint.clone() });
+                        let hint = match (hint, rappel) {
+                            (Some(hint), _) => Some((hint, hint_kind)),
+                            (None, Some(rappel)) => Some((rappel, HintKind::Claim)),
+                            (None, None) => None,
+                        };
+                        if let Some((hint, kind)) = hint {
+                            self.out.emit(Event::Hint {
+                                text: hint.clone(),
+                                kind,
+                            });
                             self.push(Message::user(hint));
                         }
                         continue 'turns;
@@ -871,6 +891,7 @@ impl Harness {
                     }
                 }
             }
+            verdict = Some(run.verdict());
 
             // Un objectif atteint, mais des messages attendent : la discussion
             // continue, elle ne s'arrête pas parce que le modèle a conclu.
@@ -893,6 +914,7 @@ impl Harness {
             turns,
             ms,
             code,
+            verdict,
         });
         Some(stop)
     }
@@ -1079,6 +1101,17 @@ fn relaunch_reason(run: &Run, spoke: bool, called: bool) -> Option<String> {
         );
     }
     None
+}
+
+/// Le genre de la relance que [`relaunch_reason`] vient de rendre : un refus ou
+/// un échec du tour la motive, sinon c'est une autre consigne (sans effet, tour
+/// muet). Lu sur le run, pas sur le texte : la phrase peut changer.
+fn relaunch_kind(run: &Run) -> HintKind {
+    if run.derniere_refusee().is_some() || run.derniere_en_echec().is_some() {
+        HintKind::Refused
+    } else {
+        HintKind::Other
+    }
 }
 
 /// Le résumé d'une sortie d'outil gardé dans l'étape, en caractères.

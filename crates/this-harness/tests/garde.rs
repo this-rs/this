@@ -196,7 +196,7 @@ fn hints(log: &Log) -> Vec<String> {
     log.borrow()
         .iter()
         .filter_map(|event| match event {
-            Event::Hint { text } => Some(text.clone()),
+            Event::Hint { text, .. } => Some(text.clone()),
             _ => None,
         })
         .collect()

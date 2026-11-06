@@ -15,7 +15,7 @@
 use crate::Step;
 
 /// Ce que les faits disent d'un run.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Verdict {
     /// Le run est terminé et au moins une écriture réussie a changé l'état observé.
     Proven,

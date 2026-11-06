@@ -277,7 +277,7 @@ fn un_refus_relance_avec_le_motif() {
         .borrow()
         .iter()
         .filter_map(|event| match event {
-            Event::Hint { text } => Some(text.clone()),
+            Event::Hint { text, .. } => Some(text.clone()),
             _ => None,
         })
         .collect();
@@ -321,7 +321,7 @@ fn un_echec_d_outil_relance_avec_la_cause() {
         .borrow()
         .iter()
         .filter_map(|event| match event {
-            Event::Hint { text } => Some(text.clone()),
+            Event::Hint { text, .. } => Some(text.clone()),
             _ => None,
         })
         .collect();
@@ -940,7 +940,7 @@ fn hints_of(log: &Log) -> Vec<String> {
     log.borrow()
         .iter()
         .filter_map(|event| match event {
-            Event::Hint { text } => Some(text.clone()),
+            Event::Hint { text, .. } => Some(text.clone()),
             _ => None,
         })
         .collect()
