@@ -13,11 +13,14 @@
 //! - [`lifecycle`] — closing, reopening, resuming: [`close_action`] and [`resume_plan`].
 //! - [`shell`] — the events a shell reports and the commands it receives.
 //! - [`capability`] — device capabilities and the permission strings each one requires.
+//! - [`device_bridge`] — the requests a module may make to the device, and the consent
+//!   gate that refuses them unless the person allowed it (fail-closed).
 //!
 //! Adapters live elsewhere: `this-shell-tauri` (Tauri 2 plugin), `this-shell-web`.
 
 pub mod capability;
 pub mod chrome;
+pub mod device_bridge;
 pub mod form;
 pub mod lifecycle;
 pub mod manifest;

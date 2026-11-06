@@ -1,0 +1,5 @@
+/target
+/.tauri
+/ios/.build
+/ios/Package.resolved
+/Cargo.lock

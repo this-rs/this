@@ -22,6 +22,7 @@
 pub mod app_mode;
 pub mod browser;
 pub mod chrome;
+pub mod consent_panel;
 pub mod design;
 pub mod device;
 pub mod lifecycle;

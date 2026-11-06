@@ -23,6 +23,36 @@ pub enum Capability {
     /// A live activity: content that lives outside the app (Dynamic Island, lock screen).
     /// Needs a native module (ActivityKit), not a webview.
     LiveActivity,
+    /// The contacts book, read by the app (`CNContactStore`).
+    Contacts,
+    /// Photos the person picks in the system picker: no permission, no declaration. The
+    /// app receives only what was chosen.
+    PhotosPick,
+    /// The whole photo library, read by the app (PhotoKit): a permission and a text.
+    Photos,
+    /// Files the person picks in the system document picker: no permission, no
+    /// declaration. Access outlives a restart only through a security-scoped bookmark.
+    FilesPick,
+    /// Bluetooth (CoreBluetooth): scanning and connecting to peripherals.
+    Bluetooth,
+    /// The gyroscope and the accelerometer, read raw: no permission and no declaration.
+    Gyroscope,
+    /// Activity and steps (CoreMotion activity, pedometer): a permission and a text.
+    MotionActivity,
+    /// Calendar events, read and written (full access, iOS 17 and later).
+    Calendar,
+    /// Health data, read (HealthKit).
+    Health,
+    /// Face ID, to confirm an action the person has authorised.
+    FaceId,
+    /// Speech recognition.
+    Speech,
+    /// NFC tags, read.
+    Nfc,
+    /// Devices on the local network (Bonjour, local discovery).
+    LocalNetwork,
+    /// Location in the background, as well as in use.
+    LocationAlways,
 }
 
 /// What a capability needs written into the app's manifest, before it can be requested.
@@ -46,6 +76,32 @@ const NONE: PermissionKeys = PermissionKeys {
 };
 
 impl Capability {
+    /// Every capability the app can ask for. The generated `Info.plist` covers this whole
+    /// list: an iOS key cannot be added after the build.
+    pub const ALL: [Capability; 21] = [
+        Capability::Notifications,
+        Capability::Camera,
+        Capability::Microphone,
+        Capability::Location,
+        Capability::LocationAlways,
+        Capability::Clipboard,
+        Capability::Share,
+        Capability::LiveActivity,
+        Capability::Contacts,
+        Capability::PhotosPick,
+        Capability::Photos,
+        Capability::FilesPick,
+        Capability::Bluetooth,
+        Capability::Gyroscope,
+        Capability::MotionActivity,
+        Capability::Calendar,
+        Capability::Health,
+        Capability::FaceId,
+        Capability::Speech,
+        Capability::Nfc,
+        Capability::LocalNetwork,
+    ];
+
     pub fn keys(self) -> PermissionKeys {
         match self {
             // iOS asks at runtime without an Info.plist key; Android 13+ needs the permission.
@@ -76,7 +132,58 @@ impl Capability {
                 ios_flags: &["NSSupportsLiveActivities"],
                 ..NONE
             },
-            Capability::Clipboard | Capability::Share => NONE,
+            // Android side not declared yet: this step targets iOS first.
+            Capability::Contacts => PermissionKeys {
+                ios_usage: &["NSContactsUsageDescription"],
+                android: &["android.permission.READ_CONTACTS"],
+                android_runtime_from: Some(23),
+                ..NONE
+            },
+            Capability::Photos => PermissionKeys {
+                ios_usage: &["NSPhotoLibraryUsageDescription"],
+                ..NONE
+            },
+            Capability::Bluetooth => PermissionKeys {
+                ios_usage: &["NSBluetoothAlwaysUsageDescription"],
+                ..NONE
+            },
+            Capability::MotionActivity => PermissionKeys {
+                ios_usage: &["NSMotionUsageDescription"],
+                ..NONE
+            },
+            Capability::Calendar => PermissionKeys {
+                ios_usage: &["NSCalendarsFullAccessUsageDescription"],
+                ..NONE
+            },
+            Capability::Health => PermissionKeys {
+                ios_usage: &["NSHealthShareUsageDescription"],
+                ..NONE
+            },
+            Capability::FaceId => PermissionKeys {
+                ios_usage: &["NSFaceIDUsageDescription"],
+                ..NONE
+            },
+            Capability::Speech => PermissionKeys {
+                ios_usage: &["NSSpeechRecognitionUsageDescription"],
+                ..NONE
+            },
+            Capability::Nfc => PermissionKeys {
+                ios_usage: &["NFCReaderUsageDescription"],
+                ..NONE
+            },
+            Capability::LocalNetwork => PermissionKeys {
+                ios_usage: &["NSLocalNetworkUsageDescription"],
+                ..NONE
+            },
+            Capability::LocationAlways => PermissionKeys {
+                ios_usage: &["NSLocationAlwaysAndWhenInUseUsageDescription"],
+                ..NONE
+            },
+            Capability::Clipboard
+            | Capability::Share
+            | Capability::PhotosPick
+            | Capability::FilesPick
+            | Capability::Gyroscope => NONE,
         }
     }
 
@@ -89,6 +196,20 @@ impl Capability {
             Capability::Clipboard => "Presse-papiers",
             Capability::Share => "Partage",
             Capability::LiveActivity => "Activité en direct",
+            Capability::Contacts => "Contacts",
+            Capability::PhotosPick => "Photos (sélection)",
+            Capability::Photos => "Photothèque",
+            Capability::FilesPick => "Fichiers (sélection)",
+            Capability::Bluetooth => "Bluetooth",
+            Capability::Gyroscope => "Gyroscope et accéléromètre",
+            Capability::MotionActivity => "Activité (pas, mouvement)",
+            Capability::Calendar => "Calendrier",
+            Capability::Health => "Santé",
+            Capability::FaceId => "Face ID",
+            Capability::Speech => "Reconnaissance vocale",
+            Capability::Nfc => "NFC",
+            Capability::LocalNetwork => "Réseau local",
+            Capability::LocationAlways => "Localisation en arrière-plan",
         }
     }
 }
@@ -124,22 +245,13 @@ pub fn required_android_permissions<'a>(
 mod tests {
     use super::*;
 
-    const ALL: [Capability; 7] = [
-        Capability::Notifications,
-        Capability::Camera,
-        Capability::Microphone,
-        Capability::Location,
-        Capability::Clipboard,
-        Capability::Share,
-        Capability::LiveActivity,
-    ];
-
     #[test]
     fn every_ios_usage_key_is_a_usage_description() {
-        for c in ALL {
+        for c in Capability::ALL {
             for k in c.keys().ios_usage {
                 assert!(
-                    k.starts_with("NS") && k.ends_with("UsageDescription"),
+                    (k.starts_with("NS") || k.starts_with("NFC"))
+                        && k.ends_with("UsageDescription"),
                     "{c:?}: {k}"
                 );
             }
@@ -147,8 +259,13 @@ mod tests {
     }
 
     #[test]
+    fn the_gyroscope_is_read_raw_and_needs_no_declaration() {
+        assert_eq!(Capability::Gyroscope.keys(), NONE);
+    }
+
+    #[test]
     fn every_android_permission_is_a_system_permission() {
-        for c in ALL {
+        for c in Capability::ALL {
             for p in c.keys().android {
                 assert!(p.starts_with("android.permission."), "{c:?}: {p}");
             }
@@ -197,6 +314,45 @@ mod tests {
         for c in [Capability::Clipboard, Capability::Share] {
             assert_eq!(c.keys(), NONE);
         }
+    }
+
+    #[test]
+    fn system_pickers_need_no_declaration_at_all() {
+        // Le sélecteur système donne ce que la personne choisit : aucune permission.
+        for c in [Capability::PhotosPick, Capability::FilesPick] {
+            assert_eq!(c.keys(), NONE, "{c:?}");
+        }
+    }
+
+    #[test]
+    fn contacts_and_photo_library_each_need_their_text() {
+        assert_eq!(
+            required_ios_usage(&[Capability::Contacts, Capability::Photos]),
+            vec![
+                "NSContactsUsageDescription",
+                "NSPhotoLibraryUsageDescription"
+            ]
+        );
+        assert_eq!(
+            Capability::Contacts.keys().android,
+            &["android.permission.READ_CONTACTS"]
+        );
+    }
+
+    #[test]
+    fn the_new_wire_names_are_stable() {
+        assert_eq!(
+            serde_json::to_value(Capability::Contacts).unwrap(),
+            "contacts"
+        );
+        assert_eq!(
+            serde_json::to_value(Capability::PhotosPick).unwrap(),
+            "photos_pick"
+        );
+        assert_eq!(
+            serde_json::to_value(Capability::FilesPick).unwrap(),
+            "files_pick"
+        );
     }
 
     #[test]

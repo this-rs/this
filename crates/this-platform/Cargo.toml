@@ -13,6 +13,9 @@ categories = ["gui", "wasm"]
 # for wasm32-unknown-unknown (the web shell and the front read the same decisions).
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
+# The arguments of a family call cross the contract as JSON: each family owns the typed
+# shape, the contract only carries it. `serde_json` is pure and compiles for wasm32.
+serde_json = "1.0"
 
 [dev-dependencies]
 serde_json = "1.0"
