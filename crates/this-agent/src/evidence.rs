@@ -47,6 +47,122 @@ pub enum Kind {
     NoEffect,
 }
 
+/// Ce qu'un outil fait au monde, tel que l'hôte le déclare.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Effect {
+    /// Il agit sur le monde : sa réussite observée est une preuve, son refus contredit
+    /// « j'ai … ».
+    Write,
+    /// Il lit sans écrire : il prouve « je me souviens », jamais « j'ai créé ».
+    Read,
+    /// L'agent écrit pour lui-même (`remember`) : jamais une preuve d'action.
+    Note,
+}
+
+/// La déclaration d'un outil par l'hôte : son effet, et les mots qui le désignent dans un
+/// récit (verbes « déployer », "deploy" ; objets « module »).
+///
+/// Sans déclaration, le module devine : `remember`/`note` sont des notes, les préfixes
+/// `get_`, `list`… des lectures, et la table interne relie les verbes usuels (« installé »
+/// ⇒ un outil dont le nom contient `install`). Un hôte dont les outils portent d'autres noms
+/// (`deploy_app`) déclare, et le contrôle « j'ai déployé » contre « `deploy_app` refusé »
+/// fonctionne comme pour l'Atelier.
+///
+/// Les mots s'écrivent comme on veut (accents, majuscules, infinitif en -er) : « Déployer »
+/// se lit `deploy` et désigne « déployé », « déployée », "deployed", "deploys".
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Declaration {
+    /// Le nom de l'outil, tel que le modèle l'appelle.
+    pub tool: String,
+    pub effect: Effect,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub words: Vec<String>,
+}
+
+impl Declaration {
+    pub fn new(tool: impl Into<String>, effect: Effect) -> Self {
+        Self {
+            tool: tool.into(),
+            effect,
+            words: Vec::new(),
+        }
+    }
+
+    /// Un outil qui écrit.
+    pub fn writes(tool: impl Into<String>) -> Self {
+        Self::new(tool, Effect::Write)
+    }
+
+    /// Un outil qui lit.
+    pub fn reads(tool: impl Into<String>) -> Self {
+        Self::new(tool, Effect::Read)
+    }
+
+    /// Un outil de notes de l'agent.
+    pub fn notes(tool: impl Into<String>) -> Self {
+        Self::new(tool, Effect::Note)
+    }
+
+    /// Les mots qui désignent l'outil dans un récit.
+    pub fn words<I, S>(mut self, words: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.words.extend(words.into_iter().map(Into::into));
+        self
+    }
+
+    /// Le mot (déjà normalisé) désigne-t-il cet outil ?
+    fn designe(&self, mot: &str) -> bool {
+        self.words.iter().any(|w| forme_de(mot, &radical(w)))
+    }
+}
+
+/// Les déclarations d'un run ; vide = le comportement par défaut.
+type Decls<'a> = &'a [Declaration];
+
+/// La déclaration de `tool`, s'il y en a une (le nom se compare sans la casse).
+fn declaration<'a>(tool: &str, d: Decls<'a>) -> Option<&'a Declaration> {
+    d.iter().find(|x| x.tool.eq_ignore_ascii_case(tool))
+}
+
+/// Le radical d'un mot déclaré : normalisé, sans la terminaison d'infinitif `-er`.
+fn radical(mot: &str) -> String {
+    let mot = normaliser(mot.trim());
+    match mot.strip_suffix("er") {
+        Some(r) if r.chars().count() >= 4 => r.to_string(),
+        _ => mot,
+    }
+}
+
+/// `mot` est-il une forme de `radical` : lui-même, un participe (`-e`, `-ee`, `-es`, `-ees`),
+/// un passé ou un pluriel anglais (`-ed`, `-d`, `-s`), un gérondif (`-ing`) ?
+fn forme_de(mot: &str, radical: &str) -> bool {
+    const SUFFIXES: &[&str] = &["", "e", "ee", "es", "ees", "s", "d", "ed", "ing"];
+    radical.chars().count() >= 3
+        && mot
+            .strip_prefix(radical)
+            .is_some_and(|reste| SUFFIXES.contains(&reste))
+}
+
+/// L'affirmation que porte un verbe déclaré : une action pour un outil qui écrit, une note
+/// pour un outil de notes ; rien pour une lecture.
+fn declare(mot: &str, d: Decls) -> Option<Trouve> {
+    let x = d
+        .iter()
+        .find(|x| x.effect != Effect::Read && x.designe(mot))?;
+    Some(Trouve {
+        claim: if x.effect == Effect::Note {
+            Claim::Noted
+        } else {
+            Claim::Action
+        },
+        verbe: Some(mot.to_string()),
+    })
+}
+
 /// L'issue d'une étape.
 pub fn outcome(step: &Step) -> Outcome {
     if step.refused {
@@ -100,10 +216,17 @@ fn est_lecture(tool: &str) -> bool {
 /// et le récit « j'ai créé » ne doit pas être contredit faute de mesure. Elle ne suffit
 /// pas pour autant à [`Verdict::Proven`], qui exige l'observation.
 pub fn kind(step: &Step) -> Kind {
+    kind_with(step, &[])
+}
+
+/// La nature d'une étape, d'après la déclaration de son outil quand l'hôte en a fait une
+/// ([`Declaration`]), et sinon d'après son nom.
+pub fn kind_with(step: &Step, d: &[Declaration]) -> Kind {
     let tool = nom(step);
-    if est_note(&tool) {
+    let effet = declaration(&step.tool, d).map(|x| x.effect);
+    if effet == Some(Effect::Note) || (effet.is_none() && est_note(&tool)) {
         Kind::Note
-    } else if est_lecture(&tool) {
+    } else if effet == Some(Effect::Read) || (effet.is_none() && est_lecture(&tool)) {
         Kind::Read
     } else if !step.before.is_empty() && !step.a_change() {
         Kind::NoEffect
@@ -114,7 +237,12 @@ pub fn kind(step: &Step) -> Kind {
 
 /// Une étape est-elle une preuve au sens de PO : une écriture réussie dont l'état a bougé.
 pub fn is_proof(step: &Step) -> bool {
-    outcome(step) == Outcome::Ok && kind(step) == Kind::Write && step.a_change()
+    is_proof_with(step, &[])
+}
+
+/// [`is_proof`], avec les déclarations de l'hôte.
+pub fn is_proof_with(step: &Step, d: &[Declaration]) -> bool {
+    outcome(step) == Outcome::Ok && kind_with(step, d) == Kind::Write && step.a_change()
 }
 
 /// Le dernier refus ou échec que rien n'a rattrapé ensuite : ni le même outil réussi, ni une
@@ -125,12 +253,18 @@ pub fn is_proof(step: &Step) -> bool {
 /// C'est la mémoire du **run**, pas du tour : un refus au tour N reste vrai au tour N+1 tant
 /// que personne ne l'a corrigé.
 pub fn unresolved(steps: &[Step]) -> Option<&Step> {
+    unresolved_with(steps, &[])
+}
+
+/// [`unresolved`], avec les déclarations de l'hôte : un outil déclaré `Write` rattrape
+/// comme une écriture, un outil déclaré `Read` ou `Note` ne rattrape rien.
+pub fn unresolved_with<'a>(steps: &'a [Step], d: &[Declaration]) -> Option<&'a Step> {
     steps.iter().enumerate().rev().find_map(|(i, etape)| {
         if outcome(etape) == Outcome::Ok {
             return None;
         }
         let rattrape = steps[i + 1..].iter().any(|apres| {
-            outcome(apres) == Outcome::Ok && (apres.tool == etape.tool || is_proof(apres))
+            outcome(apres) == Outcome::Ok && (apres.tool == etape.tool || is_proof_with(apres, d))
         });
         (!rattrape).then_some(etape)
     })
@@ -140,13 +274,13 @@ pub fn unresolved(steps: &[Step]) -> Option<&Step> {
 /// même si une autre écriture a, depuis, prouvé autre chose. Un récit qui nomme cette action
 /// (« j'ai installé » après `install_module` refusé) ne s'appuie pas sur une écriture sans
 /// rapport.
-fn non_repris(steps: &[Step]) -> Vec<&Step> {
+fn non_repris<'a>(steps: &'a [Step], d: Decls) -> Vec<&'a Step> {
     steps
         .iter()
         .enumerate()
         .filter(|(i, etape)| {
             outcome(etape) != Outcome::Ok
-                && !matches!(kind(etape), Kind::Read | Kind::Note)
+                && !matches!(kind_with(etape, d), Kind::Read | Kind::Note)
                 && !steps[i + 1..]
                     .iter()
                     .any(|apres| outcome(apres) == Outcome::Ok && apres.tool == etape.tool)
@@ -157,10 +291,15 @@ fn non_repris(steps: &[Step]) -> Vec<&Step> {
 
 /// Le verdict d'un run, d'après ses étapes. `completed` : le run s'est arrêté sur `Done`.
 pub fn verdict(steps: &[Step], completed: bool) -> Verdict {
-    if unresolved(steps).is_some() {
+    verdict_with(steps, completed, &[])
+}
+
+/// [`verdict`], avec les déclarations de l'hôte.
+pub fn verdict_with(steps: &[Step], completed: bool, d: &[Declaration]) -> Verdict {
+    if unresolved_with(steps, d).is_some() {
         return Verdict::Failed;
     }
-    if completed && steps.iter().any(is_proof) {
+    if completed && steps.iter().any(|etape| is_proof_with(etape, d)) {
         Verdict::Proven
     } else {
         Verdict::Unverified
@@ -212,20 +351,58 @@ struct Trouve {
 
 /// Les affirmations du texte, chacune avec la phrase d'origine.
 pub fn claims(said: &str) -> Vec<(Claim, String)> {
-    detections(said)
+    claims_with(said, &[])
+}
+
+/// [`claims`], avec les déclarations de l'hôte : un verbe déclaré (« déployé ») est une
+/// affirmation d'action même s'il n'est pas dans le vocabulaire par défaut.
+pub fn claims_with(said: &str, d: &[Declaration]) -> Vec<(Claim, String)> {
+    detections(said, d)
         .into_iter()
-        .map(|(t, phrase)| (t.claim, phrase))
+        .map(|(t, phrase, _)| (t.claim, phrase))
         .collect()
 }
 
-fn detections(said: &str) -> Vec<(Trouve, String)> {
+/// Chaque affirmation, avec sa phrase d'origine et les mots jugés (pour retrouver un objet
+/// déclaré : « j'ai mis le module en place »).
+fn detections(said: &str, d: Decls) -> Vec<(Trouve, String, Vec<String>)> {
     phrases(said)
         .into_iter()
         .filter_map(|p| {
             let mots = mots_a_juger(&p)?;
-            claim_of(&mots).map(|t| (t, p.texte.trim().to_string()))
+            claim_of(&mots, d).map(|t| (t, p.texte.trim().to_string(), mots))
         })
         .collect()
+}
+
+/// L'écriture en plan que nomme le verbe d'une affirmation.
+///
+/// 1. Les outils dont la déclaration contient ce verbe, et ceux que la table par défaut relie
+///    à ce verbe (« installé » ⇒ `install_*`).
+/// 2. Si le verbe ne désigne aucun outil (« mis »), les outils déclarés dont un **objet** est
+///    nommé dans la phrase (« le module » ⇒ `install_module` s'il déclare `module`).
+fn vise_par<'a>(verbe: &str, mots: &[String], en_plan: &[&'a Step], d: Decls) -> Option<&'a Step> {
+    let declares: Vec<&Declaration> = d
+        .iter()
+        .filter(|x| x.effect != Effect::Read && x.designe(verbe))
+        .collect();
+    let jetons = outils_de(verbe);
+    let par_verbe = en_plan.iter().rev().find(|etape| {
+        declares
+            .iter()
+            .any(|x| x.tool.eq_ignore_ascii_case(&etape.tool))
+            || jetons.is_some_and(|j| outil_fait(&etape.tool, j))
+    });
+    if par_verbe.is_some() || !declares.is_empty() || jetons.is_some() {
+        return par_verbe.copied();
+    }
+    en_plan
+        .iter()
+        .rev()
+        .find(|etape| {
+            declaration(&etape.tool, d).is_some_and(|x| mots.iter().any(|m| x.designe(m)))
+        })
+        .copied()
 }
 
 /// La première affirmation du texte que les étapes ne prouvent pas.
@@ -238,24 +415,30 @@ fn detections(said: &str) -> Vec<(Trouve, String)> {
 ///   l'écriture qui a réussi à côté ; une affirmation générique (« c'est fait ») non plus,
 ///   tant qu'une telle écriture reste en plan.
 pub fn unproven(said: &str, steps: &[Step]) -> Option<Unproven> {
-    let suspens = unresolved(steps).is_some();
+    unproven_with(said, steps, &[])
+}
+
+/// [`unproven`], avec les déclarations de l'hôte ([`Declaration`]) : l'effet déclaré d'un
+/// outil remplace celui que son nom laisse deviner, et ses mots relient le récit à lui.
+pub fn unproven_with(said: &str, steps: &[Step], d: &[Declaration]) -> Option<Unproven> {
+    let suspens = unresolved_with(steps, d).is_some();
     let reussie = |k: Kind| {
         steps
             .iter()
-            .any(|etape| outcome(etape) == Outcome::Ok && kind(etape) == k)
+            .any(|etape| outcome(etape) == Outcome::Ok && kind_with(etape, d) == k)
     };
     let ecriture = steps.iter().any(|etape| {
-        is_proof(etape)
+        is_proof_with(etape, d)
             || (!suspens
                 && outcome(etape) == Outcome::Ok
-                && kind(etape) == Kind::Write
+                && kind_with(etape, d) == Kind::Write
                 && etape.before.is_empty())
     });
     let note = reussie(Kind::Note);
     let lecture = reussie(Kind::Read);
-    let en_plan = non_repris(steps);
+    let en_plan = non_repris(steps, d);
 
-    detections(said).into_iter().find_map(|(t, phrase)| {
+    detections(said, d).into_iter().find_map(|(t, phrase, mots)| {
         let (manque, etape) = match t.claim {
             Claim::Memory => {
                 if lecture {
@@ -269,13 +452,8 @@ pub fn unproven(said: &str, steps: &[Step]) -> Option<Unproven> {
             }
             Claim::Action | Claim::Noted => {
                 let vise = match (&t.verbe, t.claim) {
-                    (Some(verbe), _) => outils_de(verbe).and_then(|jetons| {
-                        en_plan
-                            .iter()
-                            .rev()
-                            .find(|etape| outil_fait(&etape.tool, jetons))
-                    }),
-                    (None, Claim::Action) => en_plan.last(),
+                    (Some(verbe), _) => vise_par(verbe, &mots, &en_plan, d),
+                    (None, Claim::Action) => en_plan.last().copied(),
                     (None, _) => None,
                 };
                 if let Some(etape) = vise {
@@ -289,7 +467,7 @@ pub fn unproven(said: &str, steps: &[Step]) -> Option<Unproven> {
                             "`{}` n'a pas abouti dans ce run ({pourquoi}) et n'a jamais été repris avec succès — une autre écriture ne le remplace pas",
                             etape.tool
                         ),
-                        Some((*etape).clone()),
+                        Some(etape.clone()),
                     )
                 } else if ecriture || (t.claim == Claim::Noted && note) {
                     return None;
@@ -314,7 +492,12 @@ pub fn unproven(said: &str, steps: &[Step]) -> Option<Unproven> {
 /// Confronte le récit aux étapes. Rend le texte d'un rappel si une affirmation n'est pas
 /// prouvée (voir [`unproven`]), `None` sinon.
 pub fn claim_check(said: &str, steps: &[Step]) -> Option<String> {
-    unproven(said, steps).map(|u| u.rappel())
+    claim_check_with(said, steps, &[])
+}
+
+/// [`claim_check`], avec les déclarations de l'hôte.
+pub fn claim_check_with(said: &str, steps: &[Step], d: &[Declaration]) -> Option<String> {
+    unproven_with(said, steps, d).map(|u| u.rappel())
 }
 
 // ---------------------------------------------------------------------------------------
@@ -706,7 +889,10 @@ fn generique(claim: Claim) -> Option<Trouve> {
     Some(Trouve { claim, verbe: None })
 }
 
-fn participe_fr(mot: &str) -> Option<Trouve> {
+fn participe_fr(mot: &str, d: Decls) -> Option<Trouve> {
+    if let Some(trouve) = declare(mot, d) {
+        return Some(trouve);
+    }
     if participe(mot, PARTICIPES_NOTE_FR) || IRREGULIERS_NOTE_FR.contains(&mot) {
         return Some(Trouve {
             claim: Claim::Noted,
@@ -719,7 +905,10 @@ fn participe_fr(mot: &str) -> Option<Trouve> {
     None
 }
 
-fn verbe_en(mot: &str) -> Option<Trouve> {
+fn verbe_en(mot: &str, d: Decls) -> Option<Trouve> {
+    if let Some(trouve) = declare(mot, d) {
+        return Some(trouve);
+    }
     if VERBES_NOTE_EN.contains(&mot) {
         return Some(Trouve {
             claim: Claim::Noted,
@@ -729,21 +918,21 @@ fn verbe_en(mot: &str) -> Option<Trouve> {
     VERBES_EN.contains(&mot).then(|| action(mot)).flatten()
 }
 
-fn claim_of(mots: &[String]) -> Option<Trouve> {
-    action_fr(mots)
-        .or_else(|| fait_fr(mots))
-        .or_else(|| passif_fr(mots))
+fn claim_of(mots: &[String], d: Decls) -> Option<Trouve> {
+    action_fr(mots, d)
+        .or_else(|| fait_fr(mots, d))
+        .or_else(|| passif_fr(mots, d))
         .or_else(|| memoire_fr(mots))
-        .or_else(|| action_en(mots))
+        .or_else(|| action_en(mots, d))
         .or_else(|| fait_en(mots))
-        .or_else(|| passif_en(mots))
-        .or_else(|| sans_sujet(mots))
+        .or_else(|| passif_en(mots, d))
+        .or_else(|| sans_sujet(mots, d))
         .or_else(|| memoire_en(mots))
 }
 
 /// « j'ai créé », « je l'ai ajoutée », « nous avons relié » ; pas « je n'ai pas créé », pas
 /// « si j'ai créé ».
-fn action_fr(mots: &[String]) -> Option<Trouve> {
+fn action_fr(mots: &[String], d: Decls) -> Option<Trouve> {
     for (i, mot) in mots.iter().enumerate() {
         let sujet = match mot.as_str() {
             "ai" => ["j'", "je"],
@@ -780,7 +969,7 @@ fn action_fr(mots: &[String]) -> Option<Trouve> {
             if NEGATIONS_FR.contains(&m) {
                 break;
             }
-            if let Some(trouve) = participe_fr(m) {
+            if let Some(trouve) = participe_fr(m, d) {
                 return Some(trouve);
             }
             break;
@@ -791,7 +980,7 @@ fn action_fr(mots: &[String]) -> Option<Trouve> {
 
 /// « c'est fait », « c'est noté », « voilà qui est fait », « c'est chose faite », « c'est en
 /// place », et sans apostrophe « cest fait », « c est fait ».
-fn fait_fr(mots: &[String]) -> Option<Trouve> {
+fn fait_fr(mots: &[String], d: Decls) -> Option<Trouve> {
     for (i, mot) in mots.iter().enumerate() {
         let tete = match mot.as_str() {
             "cest" => i,
@@ -818,7 +1007,8 @@ fn fait_fr(mots: &[String]) -> Option<Trouve> {
             "note" | "notee" | "enregistre" | "enregistree" | "memorise" | "retenu" => {
                 generique(Claim::Noted)
             }
-            _ => None,
+            // « c'est déployé » : un verbe que l'hôte a déclaré.
+            _ => declare(m, d),
         };
         if trouve.is_some() {
             return trouve;
@@ -830,7 +1020,7 @@ fn fait_fr(mots: &[String]) -> Option<Trouve> {
 /// « Le module a été créé », « les fiches ont bien été ajoutées », « le module est maintenant
 /// installé » ; pas « n'a pas été créé », pas « sera créé », pas « le module est déjà
 /// installé » (un état, pas une action), pas « c'est lié à… » (une relation).
-fn passif_fr(mots: &[String]) -> Option<Trouve> {
+fn passif_fr(mots: &[String], d: Decls) -> Option<Trouve> {
     for (i, mot) in mots.iter().enumerate() {
         let ete = match mot.as_str() {
             "a" | "ont" => true,
@@ -872,7 +1062,7 @@ fn passif_fr(mots: &[String]) -> Option<Trouve> {
                 continue;
             }
         }
-        if let Some(trouve) = participe_fr(p) {
+        if let Some(trouve) = participe_fr(p, d) {
             return Some(trouve);
         }
     }
@@ -880,17 +1070,17 @@ fn passif_fr(mots: &[String]) -> Option<Trouve> {
 }
 
 /// « Module créé avec succès », "Successfully created the module", "created successfully".
-fn sans_sujet(mots: &[String]) -> Option<Trouve> {
+fn sans_sujet(mots: &[String], d: Decls) -> Option<Trouve> {
     for (i, mot) in mots.iter().enumerate() {
         let m = mot.as_str();
         let trouve = if mots.get(i + 1).is_some_and(|s| s == "avec")
             && mots.get(i + 2).is_some_and(|s| s == "succes")
         {
-            participe_fr(m)
+            participe_fr(m, d)
         } else if m == "successfully" {
-            mots.get(i + 1).and_then(|s| verbe_en(s))
+            mots.get(i + 1).and_then(|s| verbe_en(s, d))
         } else if mots.get(i + 1).is_some_and(|s| s == "successfully") {
-            verbe_en(m)
+            verbe_en(m, d)
         } else {
             None
         };
@@ -1008,7 +1198,7 @@ fn memoire_fr(mots: &[String]) -> Option<Trouve> {
 
 /// "I created", "I've added", "we have removed", "I did create it" ; pas "I haven't created",
 /// pas "if I added".
-fn action_en(mots: &[String]) -> Option<Trouve> {
+fn action_en(mots: &[String], d: Decls) -> Option<Trouve> {
     for (i, mot) in mots.iter().enumerate() {
         if !matches!(mot.as_str(), "i" | "i'" | "we" | "we'") {
             continue;
@@ -1036,9 +1226,12 @@ fn action_en(mots: &[String]) -> Option<Trouve> {
                 if BASES_EN.contains(&m) {
                     return action(m);
                 }
+                if let Some(trouve) = declare(m, d) {
+                    return Some(trouve);
+                }
                 break;
             }
-            if let Some(trouve) = verbe_en(m) {
+            if let Some(trouve) = verbe_en(m, d) {
                 return Some(trouve);
             }
             break;
@@ -1079,7 +1272,7 @@ fn fait_en(mots: &[String]) -> Option<Trouve> {
 /// "The module has been created", "it's been added", "the rows were deleted", "the module is
 /// now installed" ; pas "has not been created", pas "will have been created", pas "is
 /// already installed" (un état), pas "is linked to" (une relation).
-fn passif_en(mots: &[String]) -> Option<Trouve> {
+fn passif_en(mots: &[String], d: Decls) -> Option<Trouve> {
     for (i, mot) in mots.iter().enumerate() {
         let precedent = i.checked_sub(1).map(|p| mots[p].as_str());
         let etat = match mot.as_str() {
@@ -1122,7 +1315,7 @@ fn passif_en(mots: &[String]) -> Option<Trouve> {
                 continue;
             }
         }
-        if let Some(trouve) = verbe_en(v) {
+        if let Some(trouve) = verbe_en(v, d) {
             return Some(trouve);
         }
     }
@@ -1818,5 +2011,177 @@ mod tests {
                 .contains("recall")
         );
         assert_eq!(claim_check(texte, &[Step::tool("recall", 1)]), None);
+    }
+
+    // ------------------------------------------------------------ déclarations
+
+    /// L'hôte qui déclare `deploy_app` (mots : déployer, deploy, application).
+    fn deploiement() -> Vec<Declaration> {
+        vec![
+            Declaration::writes("deploy_app").words(["Déployer", "deploy", "application"]),
+            Declaration::reads("inspect_app"),
+        ]
+    }
+
+    #[test]
+    fn declaration_un_outil_declare_se_comporte_comme_install_module() {
+        let d = deploiement();
+        let etapes = [
+            Step::tool("deploy_app", 1).refused("quota atteint"),
+            ecriture_ok(),
+        ];
+        for texte in [
+            "J'ai déployé l'application.",
+            "L'application a été déployée.",
+            "C'est déployé.",
+            "I deployed the app.",
+            "I did deploy it.",
+            "C'est fait.",
+        ] {
+            let u =
+                unproven_with(texte, &etapes, &d).unwrap_or_else(|| panic!("rien pour {texte:?}"));
+            assert!(
+                u.manque.contains("`deploy_app`"),
+                "{texte:?} : {}",
+                u.manque
+            );
+            assert_eq!(u.etape.map(|e| e.tool), Some("deploy_app".into()));
+            let rappel = claim_check_with(texte, &etapes, &d).unwrap();
+            assert!(rappel.starts_with(RAPPEL) && rappel.contains("quota atteint"));
+        }
+        // Une autre écriture reste couverte, et le même outil repris prouve l'action.
+        assert_eq!(claim_check_with("J'ai ajouté la ligne.", &etapes, &d), None);
+        let repris = [
+            Step::tool("deploy_app", 1).refused("quota atteint"),
+            Step::tool("deploy_app", 1).state("v1", "v2"),
+        ];
+        assert_eq!(
+            claim_check_with("J'ai déployé l'application.", &repris, &d),
+            None
+        );
+    }
+
+    #[test]
+    fn declaration_absente_le_verbe_inconnu_n_est_pas_controle() {
+        // Le trou constaté : sans déclaration, « déployé » n'est pas un verbe d'action, et
+        // `deploy_app` refusé ne contredit rien.
+        let etapes = [
+            Step::tool("deploy_app", 1).refused("quota atteint"),
+            ecriture_ok(),
+        ];
+        assert!(claims("J'ai déployé l'application.").is_empty());
+        assert_eq!(claim_check("J'ai déployé l'application.", &etapes), None);
+        // Et des déclarations vides valent l'absence de déclaration.
+        assert_eq!(
+            claim_check_with("J'ai installé le module.", &etapes, &[]),
+            claim_check("J'ai installé le module.", &etapes)
+        );
+    }
+
+    #[test]
+    fn declaration_un_objet_declare_designe_l_outil_quand_le_verbe_ne_le_fait_pas() {
+        let d = deploiement();
+        let etapes = [
+            Step::tool("deploy_app", 1).refused("quota atteint"),
+            ecriture_ok(),
+        ];
+        // « mis » ne désigne aucun outil : l'objet « application » désigne `deploy_app`.
+        let u = unproven_with("J'ai mis l'application en ligne.", &etapes, &d).unwrap();
+        assert_eq!(u.etape.map(|e| e.tool), Some("deploy_app".into()));
+        // Un verbe qui désigne un autre outil l'emporte sur l'objet.
+        assert_eq!(
+            claim_check_with("J'ai ajouté une ligne pour l'application.", &etapes, &d),
+            None
+        );
+    }
+
+    #[test]
+    fn declaration_l_effet_declare_remplace_celui_que_le_nom_laisse_deviner() {
+        let d = deploiement();
+        // `inspect_app` n'a pas un nom de lecture : sans déclaration, c'est une écriture.
+        let lecture = Step::tool("inspect_app", 1).state("a", "b");
+        assert_eq!(kind(&lecture), Kind::Write);
+        assert_eq!(kind_with(&lecture, &d), Kind::Read);
+        assert!(is_proof(&lecture) && !is_proof_with(&lecture, &d));
+        assert_eq!(
+            verdict(std::slice::from_ref(&lecture), true),
+            Verdict::Proven
+        );
+        assert_eq!(
+            verdict_with(std::slice::from_ref(&lecture), true, &d),
+            Verdict::Unverified
+        );
+        // Une lecture déclarée prouve la mémoire, pas l'action.
+        assert_eq!(
+            claim_check_with(
+                "Je me souviens de ton choix.",
+                std::slice::from_ref(&lecture),
+                &d
+            ),
+            None
+        );
+        assert!(
+            claim_check_with("J'ai créé la fiche.", std::slice::from_ref(&lecture), &d).is_some()
+        );
+        // Elle ne rattrape pas un refus.
+        let refus = Step::tool("deploy_app", 1).refused("quota atteint");
+        assert!(unresolved(&[refus.clone(), lecture.clone()]).is_none());
+        assert_eq!(
+            unresolved_with(&[refus.clone(), lecture], &d).map(|e| e.tool.clone()),
+            Some("deploy_app".into())
+        );
+        // Une écriture déclarée dont le nom ressemble à une lecture (`get_` …) prouve.
+        let d = [Declaration::writes("get_or_create")];
+        let ecrit = Step::tool("get_or_create", 1).state("0", "1");
+        assert_eq!(kind(&ecrit), Kind::Read);
+        assert_eq!(kind_with(&ecrit, &d), Kind::Write);
+        // Une note déclarée couvre « j'ai noté » et n'est pas une preuve.
+        let d = [Declaration::notes("jot").words(["consigner"])];
+        let note = Step::tool("jot", 1).state("0", "1");
+        assert_eq!(kind_with(&note, &d), Kind::Note);
+        assert_eq!(
+            claim_check_with("J'ai noté ta préférence.", std::slice::from_ref(&note), &d),
+            None
+        );
+        assert_eq!(verdict_with(&[note], true, &d), Verdict::Unverified);
+    }
+
+    #[test]
+    fn declaration_les_mots_se_lisent_sans_accents_ni_infinitif() {
+        let d = deploiement();
+        for texte in [
+            "J'ai déployé.",
+            "J'ai DÉPLOYÉ l'app.",
+            "Nous avons déployées les deux.",
+            "I've deployed it.",
+            "Successfully deployed.",
+        ] {
+            assert_eq!(
+                claims_with(texte, &d).first().map(|(c, _)| *c),
+                Some(Claim::Action),
+                "{texte:?}"
+            );
+        }
+        // Ni un futur, ni une négation, ni une question.
+        for texte in [
+            "Je vais déployer l'application.",
+            "Je n'ai pas déployé l'application.",
+            "Veux-tu que je déploie ?",
+        ] {
+            assert!(claims_with(texte, &d).is_empty(), "{texte:?}");
+        }
+    }
+
+    #[test]
+    fn declaration_se_serialise_en_snake_case() {
+        let d = Declaration::writes("deploy_app").words(["deploy"]);
+        let json = serde_json::to_string(&d).unwrap();
+        assert_eq!(
+            json,
+            r#"{"tool":"deploy_app","effect":"write","words":["deploy"]}"#
+        );
+        assert_eq!(serde_json::from_str::<Declaration>(&json).unwrap(), d);
+        let nu: Declaration = serde_json::from_str(r#"{"tool":"recall","effect":"read"}"#).unwrap();
+        assert!(nu.words.is_empty());
     }
 }

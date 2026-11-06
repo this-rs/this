@@ -642,6 +642,7 @@ impl Harness {
             let limits = self.with(|s| s.limits.clone());
             let mut run = Run::new(Goal::new(first.text.clone()), limits.max_tours);
             run.max_relances = limits.max_relances;
+            run.declare(toolbox.declarations());
             if let Some(budget) = limits.budget_ms {
                 run.budget(budget);
             }
@@ -877,6 +878,9 @@ impl Harness {
                 // Le récit du tour est confié à la décision : sans lui, « c'est
                 // fait » après un refus n'est jamais confronté aux étapes.
                 run.said(&text);
+                // Ce que l'hôte déclare de ses outils, relu à chaque décision : un module
+                // installé pendant le run apporte ses déclarations avec ses outils.
+                run.declare(toolbox.declarations());
 
                 match run.after_turn_with(self.policy.as_ref(), spoke, called) {
                     Decision::Continue => {

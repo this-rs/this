@@ -222,6 +222,10 @@ pub struct Run {
     /// Le rappel à pousser au modèle quand la décision relance pour un récit non prouvé.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rappel: Option<String>,
+    /// Ce que l'hôte déclare de ses outils (effet, mots du récit) : voir
+    /// [`evidence::Declaration`]. Vide, la preuve devine d'après les noms des outils.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub declarations: Vec<evidence::Declaration>,
     pub stop: Option<Stop>,
 }
 
@@ -272,8 +276,16 @@ impl Run {
             recit: String::new(),
             rappels_recit: 0,
             rappel: None,
+            declarations: Vec::new(),
             stop: None,
         }
+    }
+
+    /// Les déclarations d'outils de l'hôte ([`evidence::Declaration`]) ; elles **remplacent**
+    /// les précédentes : la boucle les relit à chaque tour, un module installé entre-temps
+    /// apporte les siennes.
+    pub fn declare(&mut self, declarations: impl IntoIterator<Item = evidence::Declaration>) {
+        self.declarations = declarations.into_iter().collect();
     }
 
     pub fn record(&mut self, mut step: Step) {
@@ -300,7 +312,11 @@ impl Run {
 
     /// Ce que les faits disent du run : voir [`evidence::verdict`].
     pub fn verdict(&self) -> evidence::Verdict {
-        evidence::verdict(&self.steps, self.stop == Some(Stop::Done))
+        evidence::verdict_with(
+            &self.steps,
+            self.stop == Some(Stop::Done),
+            &self.declarations,
+        )
     }
 
     /// Un budget de temps, en plus du budget de tours.
@@ -441,8 +457,8 @@ impl Run {
         // (tour qui appelait, donc `Continue`) suivi d'un tour texte seul « c'est fait »
         // passait pour une conclusion, la frontière du tour ayant effacé le refus.
         self.tour_debut = fin_du_tour;
-        let en_suspens = evidence::unresolved(&self.steps).cloned();
-        if let Some(non_prouve) = evidence::unproven(&recit, &self.steps) {
+        let en_suspens = evidence::unresolved_with(&self.steps, &self.declarations).cloned();
+        if let Some(non_prouve) = evidence::unproven_with(&recit, &self.steps, &self.declarations) {
             if self.rappels_recit == 0 {
                 self.rappels_recit += 1;
                 let rappel = non_prouve.rappel();
@@ -663,6 +679,37 @@ mod tests {
             r.after_turn(true, false),
             Decision::Halt(Stop::Refused("même version".into()))
         );
+    }
+
+    /// Un hôte qui déclare `deploy_app` obtient ce qu'`install_module` obtient sans rien
+    /// déclarer : refus, une écriture sans rapport réussie, « j'ai déployé » ⇒ rappel.
+    #[test]
+    fn un_outil_declare_par_l_hote_est_controle_comme_install_module() {
+        let scenario = |outil: &str, recit: &str, declarations: Vec<evidence::Declaration>| {
+            let mut r = run();
+            r.declare(declarations);
+            r.record(Step::tool(outil, 10).refused("quota atteint"));
+            r.record(Step::tool("row_create", 3).state("0", "1"));
+            assert_eq!(r.after_turn(false, true), Decision::Continue);
+            r.said(recit);
+            (r.after_turn(true, false), r.take_rappel())
+        };
+        let (decision, rappel) = scenario("install_module", "J'ai installé le module.", vec![]);
+        assert_eq!(decision, Decision::Continue);
+        assert!(rappel.unwrap().contains("`install_module`"));
+
+        let deploy = evidence::Declaration::writes("deploy_app").words(["déployer", "deploy"]);
+        let (decision, rappel) =
+            scenario("deploy_app", "J'ai déployé l'application.", vec![deploy]);
+        assert_eq!(decision, Decision::Continue);
+        let rappel = rappel.expect("un rappel");
+        assert!(rappel.starts_with(evidence::RAPPEL));
+        assert!(rappel.contains("`deploy_app`") && rappel.contains("quota atteint"));
+
+        // Sans déclaration, le même récit passe : c'est le trou que la déclaration ferme.
+        let (decision, rappel) = scenario("deploy_app", "J'ai déployé l'application.", vec![]);
+        assert_eq!(decision, Decision::Halt(Stop::Done));
+        assert_eq!(rappel, None);
     }
 
     #[test]
