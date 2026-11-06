@@ -538,3 +538,28 @@ async fn every_failure_arrives_with_its_family() {
         .expect_err("injoignable");
     assert_eq!(error.kind(), ErrorKind::Unreachable);
 }
+
+/// The message of a transport failure names its cause: a refused connection says so, instead
+/// of the generic "error sending request" that reqwest prints on its own.
+#[tokio::test]
+async fn a_transport_failure_says_why_it_failed() {
+    let closed = {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("port");
+        let address = listener.local_addr().expect("adresse");
+        drop(listener);
+        format!("http://{address}/v1")
+    };
+    let mut config = provider(&closed, Budget::default());
+    config.model = Some("qwen-test".into());
+    let hub = hub_with(config, 20_000);
+    let client = hub.client(&local()).expect("client");
+    let error = client
+        .chat(ChatRequest::new("sys", "hi"))
+        .await
+        .expect_err("injoignable");
+    let message = error.to_string();
+    assert!(
+        message.to_ascii_lowercase().contains("refused") || message.contains("refusé"),
+        "la cause doit être dite, pas seulement « error sending request » : {message}"
+    );
+}
