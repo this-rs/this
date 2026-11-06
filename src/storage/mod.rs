@@ -1,5 +1,7 @@
 //! Storage implementations for different backends
 
+#[cfg(feature = "obrain")]
+pub mod agent_substrate;
 /// Annuaire d'identités persisté (chantier STS-PERSISTANT) : les utilisateurs
 /// de la passerelle dans un store obrain dédié, mots de passe argon2id.
 #[cfg(all(feature = "obrain", feature = "wami"))]
