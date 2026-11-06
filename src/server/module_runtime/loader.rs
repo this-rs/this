@@ -2,6 +2,7 @@
 //! into the interface the host publishes in its catalog.
 
 use super::json_entity::JsonEntityService;
+use super::rows::{MemoryRowStores, RowStoreFactory};
 use crate::config::LinksConfig;
 use crate::core::events::EventBus;
 use crate::core::module::{EntityCreator, EntityFetcher, Module};
@@ -112,6 +113,10 @@ pub struct DefaultModuleLoader {
     custom: CustomRegistry,
     allow_public: bool,
     event_bus: Option<Arc<EventBus>>,
+    /// Where declarative entities keep their rows. Memory by default: a host that has a
+    /// database passes its own factory, and the modules it loads become durable without a
+    /// single line of module code changing.
+    row_stores: Arc<dyn RowStoreFactory>,
     plugins: HashMap<String, Arc<dyn ModuleLoader>>,
 }
 
@@ -127,6 +132,7 @@ impl DefaultModuleLoader {
             custom: CustomRegistry::default(),
             allow_public: false,
             event_bus: None,
+            row_stores: Arc::new(MemoryRowStores),
             plugins: HashMap::new(),
         }
     }
@@ -147,6 +153,17 @@ impl DefaultModuleLoader {
     /// Event bus the declarative entities publish their `EntityEvent`s on.
     pub fn with_event_bus(mut self, bus: Option<Arc<EventBus>>) -> Self {
         self.event_bus = bus;
+        self
+    }
+
+    /// Where the rows of DECLARATIVE entities live (default: memory).
+    ///
+    /// ```ignore
+    /// let loader = DefaultModuleLoader::new()
+    ///     .with_row_stores(Arc::new(ObrainRowStores::new(store)));
+    /// ```
+    pub fn with_row_stores(mut self, stores: Arc<dyn RowStoreFactory>) -> Self {
+        self.row_stores = stores;
         self
     }
 
@@ -180,10 +197,11 @@ impl DefaultModuleLoader {
         let mut router = axum::Router::new();
         for e in &d.entities {
             let compiled = Arc::new(CompiledEntity::new(&d.name, e.clone())?);
-            let svc = Arc::new(JsonEntityService::new(
+            let svc = Arc::new(JsonEntityService::with_row_store(
                 compiled,
                 self.custom.clone(),
                 self.event_bus.clone(),
+                self.row_stores.for_entity(&e.name, &e.plural),
             ));
             router = router.merge(svc.routes());
             fetchers.insert(e.name.clone(), svc.clone());

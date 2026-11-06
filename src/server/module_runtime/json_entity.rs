@@ -4,14 +4,16 @@
 //! host catalog see it like any other entity), the event bus (`EntityEvent::*`), and a
 //! generated REST surface (`GET/POST /{plural}`, `GET/PUT/PATCH/DELETE /{plural}/{id}`).
 //!
-//! Rows are kept in memory (one map per entity). Durable storage of declarative rows is
-//! a follow-up (`Vfs`-backed rows, vfs stream); the adapter only depends on the two
-//! traits, so swapping the store does not change the routes.
+//! Rows live in a [`RowStore`], one per entity: in memory by
+//! default, or in `obrain` when the host injects that factory (`rows_obrain`). The adapter
+//! only depends on the trait, so swapping the store does not change the routes, the
+//! validation or the events.
 //!
 //! Every write goes through the descriptor's validation engine
 //! (`engine::validate::apply`): unknown keys, read-only and immutable fields, presence,
 //! types and validators are enforced with the same codes as on every other surface.
 
+use super::rows::{MemoryRowStore, RowStore};
 use crate::core::errors::{ApiError, from_anyhow};
 use crate::core::events::{EntityEvent, EventBus, FrameworkEvent};
 use crate::core::module::{EntityCreator, EntityFetcher};
@@ -25,30 +27,42 @@ use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
-use indexmap::IndexMap;
 use serde_json::{Value, json};
 use std::sync::Arc;
-use tokio::sync::RwLock;
 use uuid::Uuid;
 
 /// One declarative entity, served from its descriptor.
 pub struct JsonEntityService {
     entity: Arc<CompiledEntity>,
     custom: CustomRegistry,
-    rows: RwLock<IndexMap<Uuid, Value>>,
+    /// Where this entity's rows live. `Arc<dyn RowStore>` and not a concrete map: the
+    /// same entity is served from memory in tests and from `obrain` in a durable host,
+    /// with the routes, the validation and the events unchanged (see [`super::rows`]).
+    rows: Arc<dyn RowStore>,
     event_bus: Option<Arc<EventBus>>,
 }
 
 impl JsonEntityService {
+    /// Rows in memory — the behaviour of every declarative module before the seam.
     pub fn new(
         entity: Arc<CompiledEntity>,
         custom: CustomRegistry,
         event_bus: Option<Arc<EventBus>>,
     ) -> Self {
+        Self::with_row_store(entity, custom, event_bus, Arc::new(MemoryRowStore::new()))
+    }
+
+    /// Rows in the store of the caller's choice (a database, a file, a graph).
+    pub fn with_row_store(
+        entity: Arc<CompiledEntity>,
+        custom: CustomRegistry,
+        event_bus: Option<Arc<EventBus>>,
+        rows: Arc<dyn RowStore>,
+    ) -> Self {
         Self {
             entity,
             custom,
-            rows: RwLock::new(IndexMap::new()),
+            rows,
             event_bus,
         }
     }
@@ -133,10 +147,8 @@ impl JsonEntityService {
 impl EntityFetcher for JsonEntityService {
     async fn fetch_as_json(&self, entity_id: &Uuid) -> Result<Value> {
         self.rows
-            .read()
-            .await
             .get(entity_id)
-            .cloned()
+            .await?
             .ok_or_else(|| self.not_found(entity_id))
     }
 
@@ -150,10 +162,9 @@ impl EntityFetcher for JsonEntityService {
     }
 
     async fn list_as_json(&self, limit: Option<i32>, offset: Option<i32>) -> Result<Vec<Value>> {
-        let rows = self.rows.read().await;
         let offset = offset.unwrap_or(0).max(0) as usize;
-        let limit = limit.map(|l| l.max(0) as usize).unwrap_or(usize::MAX);
-        Ok(rows.values().skip(offset).take(limit).cloned().collect())
+        let limit = limit.map(|l| l.max(0) as usize);
+        self.rows.list(limit, offset).await
     }
 }
 
@@ -173,7 +184,7 @@ impl EntityCreator for JsonEntityService {
         obj.insert("updated_at".into(), json!(now));
         obj.entry("status").or_insert_with(|| json!("active"));
         let row = Value::Object(obj);
-        self.rows.write().await.insert(id, row.clone());
+        self.rows.insert(id, row.clone()).await?;
         // No event here: the write seam is `SurfaceGuard::creator` (which decorates this
         // creator with `PublishingCreator`) for the surfaces that reach the catalog, and the
         // REST handlers below for the service's own routes. Publishing here as well would
@@ -184,28 +195,26 @@ impl EntityCreator for JsonEntityService {
     async fn update_from_json(&self, entity_id: &Uuid, entity_data: Value) -> Result<Value> {
         let outcome = apply(&self.entity, WriteOp::Update, entity_data, &self.ctx())
             .map_err(anyhow::Error::new)?;
-        let mut rows = self.rows.write().await;
-        let row = rows
-            .get_mut(entity_id)
-            .ok_or_else(|| self.not_found(entity_id))?;
-        if let (Value::Object(target), Value::Object(patch)) = (&mut *row, outcome.value) {
-            for (k, v) in patch {
-                target.insert(k, v);
-            }
-            target.insert("updated_at".into(), json!(chrono::Utc::now().to_rfc3339()));
+        // The merge is the store's job (one atomic read-modify-write on ONE row); the
+        // timestamp is ours. Splitting it the other way round would let two concurrent
+        // updates overwrite each other's keys.
+        let mut patch = outcome.value;
+        if let Value::Object(map) = &mut patch {
+            map.insert("updated_at".into(), json!(chrono::Utc::now().to_rfc3339()));
         }
-        let row = row.clone();
-        drop(rows);
+        let row = self
+            .rows
+            .patch(entity_id, &patch)
+            .await?
+            .ok_or_else(|| self.not_found(entity_id))?;
         // No event here: see `create_from_json` (the guard and the REST handlers publish).
         Ok(row)
     }
 
     async fn delete(&self, entity_id: &Uuid) -> Result<()> {
-        self.rows
-            .write()
-            .await
-            .shift_remove(entity_id)
-            .ok_or_else(|| self.not_found(entity_id))?;
+        if !self.rows.remove(entity_id).await? {
+            return Err(self.not_found(entity_id));
+        }
         // No event here: see `create_from_json` (the guard and the REST handlers publish).
         Ok(())
     }
