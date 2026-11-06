@@ -965,7 +965,11 @@ impl Harness {
                 Err(why) => {
                     abandoned = matches!(why, Watch::Abandoned(_));
                     let (hint, outcome) = abandoned_tool(&call.name, why);
-                    self.out.emit(Event::Hint { text: hint });
+                    // Un outil abandonné (plafond dépassé ou annulation sans réponse) : une interruption.
+                    self.out.emit(Event::Hint {
+                        text: hint,
+                        kind: HintKind::Interrupted,
+                    });
                     outcome
                 }
             }
