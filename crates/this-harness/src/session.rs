@@ -18,12 +18,15 @@
 //! Ce qui n'est **pas** repris : la base, le graphe, les fournisseurs, les
 //! permissions, les sous-agents. Ce crate ne fait aucune entrée/sortie.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
+use std::future::Future;
+use std::pin::Pin;
 use std::rc::Rc;
+use std::task::Poll;
 
 use crate::event::{Event, Outcome, Pending, Snapshot};
 use crate::ports::{Cancel, Delta, Toolbox, Transport};
-use crate::wire::{Finish, Message, Request, ToolCall};
+use crate::wire::{Code, Failure, Finish, Message, Reply, Request, ToolCall};
 use this_agent::{Decision, DefaultPolicy, Goal, Policy, Run, Step, Stop};
 
 /// L'état partagé. `Rc<RefCell<_>>` sans condition : la boucle est sur un seul
@@ -32,6 +35,172 @@ use this_agent::{Decision, DefaultPolicy, Goal, Policy, Run, Step, Stop};
 pub type Shared<T> = Rc<RefCell<T>>;
 
 type Sink = Box<dyn FnMut(Event)>;
+
+/// Combien de temps un transport annulé a pour rendre la main avant que le
+/// tour soit abandonné (la grâce de PO, `INTERRUPT_GRACE_DEFAULT`).
+pub const INTERRUPT_GRACE_MS: u64 = 10_000;
+
+/// Le silence toléré par défaut sur le flux d'un tour.
+pub const SILENCE_MS: u64 = 120_000;
+
+/// Relances accordées à un tour qui a échoué sur une panne passagère.
+pub const MAX_RETRIES: u32 = 3;
+
+/// Première attente avant une relance ; elle double à chaque tentative.
+pub const RETRY_BACKOFF_MS: u64 = 1_000;
+
+/// Le pas du chien de garde : le drapeau d'annulation est un simple `Cell`,
+/// il se lit, il ne prévient pas.
+const WATCH_TICK_MS: u64 = 1_000;
+
+/// Une attente rendue par une [`Clock`].
+pub type Sleep = Pin<Box<dyn Future<Output = ()>>>;
+
+/// L'heure et les minuteurs de la boucle.
+///
+/// Le crate n'apporte aucun exécuteur : attendre « 10 s » demande un minuteur
+/// que seul l'hôte connaît (`setTimeout` dans une page, un fil ou tokio dans
+/// un binaire). Injectable pour les tests, qui font avancer le temps à la main.
+pub trait Clock {
+    /// Maintenant, en millisecondes.
+    fn now_ms(&self) -> f64;
+    /// Une attente de `ms`, ou `None` si ce target ne sait pas attendre : les
+    /// chiens de garde sont alors éteints et les relances partent sans délai.
+    fn sleep(&self, ms: u64) -> Option<Sleep>;
+}
+
+/// L'horloge du target. En natif, elle attend sur un fil ; en wasm, le crate
+/// n'a pas de minuteur (pas de `wasm-bindgen-futures`) : l'hôte en injecte un
+/// avec [`Harness::with_clock`] pour armer les chiens de garde.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct SystemClock;
+
+impl Clock for SystemClock {
+    fn now_ms(&self) -> f64 {
+        crate::now_ms()
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn sleep(&self, ms: u64) -> Option<Sleep> {
+        Some(Box::pin(ThreadSleep { ms, shared: None }))
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn sleep(&self, _ms: u64) -> Option<Sleep> {
+        None
+    }
+}
+
+/// Une attente sans exécuteur : un fil dort, puis réveille la tâche.
+#[cfg(not(target_arch = "wasm32"))]
+type Wake = std::sync::Arc<std::sync::Mutex<(bool, Option<std::task::Waker>)>>;
+
+#[cfg(not(target_arch = "wasm32"))]
+struct ThreadSleep {
+    ms: u64,
+    shared: Option<Wake>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Future for ThreadSleep {
+    type Output = ();
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> Poll<()> {
+        let ms = self.ms;
+        let shared = self
+            .shared
+            .get_or_insert_with(|| {
+                let shared: Wake = Default::default();
+                let alarm = shared.clone();
+                std::thread::spawn(move || {
+                    std::thread::sleep(std::time::Duration::from_millis(ms));
+                    let mut state = alarm.lock().unwrap_or_else(|e| e.into_inner());
+                    state.0 = true;
+                    if let Some(waker) = state.1.take() {
+                        waker.wake();
+                    }
+                });
+                shared
+            })
+            .clone();
+        let mut state = shared.lock().unwrap_or_else(|e| e.into_inner());
+        if state.0 {
+            Poll::Ready(())
+        } else {
+            state.1 = Some(cx.waker().clone());
+            Poll::Pending
+        }
+    }
+}
+
+/// Pourquoi le chien de garde a coupé le flux.
+enum Watch {
+    /// Aucun événement pendant ce nombre de millisecondes.
+    Silent(u64),
+    /// Annulé, et le transport n'a pas rendu la main dans la grâce.
+    Abandoned(u64),
+}
+
+/// Veille sur un flux : rend dès que le silence dépasse `silence_ms`, ou que
+/// l'annulation dure plus que `grace_ms` sans que le transport ait rendu.
+async fn watch(
+    clock: Rc<dyn Clock>,
+    activity: Rc<Cell<f64>>,
+    cancel: Cancel,
+    silence_ms: Option<u64>,
+    grace_ms: u64,
+) -> Watch {
+    let mut cancelled_at: Option<f64> = None;
+    loop {
+        let now = clock.now_ms();
+        let left = if cancel.is_cancelled() {
+            let since = *cancelled_at.get_or_insert(now);
+            let waited = (now - since).max(0.0) as u64;
+            if waited >= grace_ms {
+                return Watch::Abandoned(grace_ms);
+            }
+            grace_ms - waited
+        } else if let Some(limit) = silence_ms {
+            let idle = (now - activity.get()).max(0.0) as u64;
+            if idle >= limit {
+                return Watch::Silent(limit);
+            }
+            limit - idle
+        } else {
+            WATCH_TICK_MS
+        };
+        match clock.sleep(left.min(WATCH_TICK_MS)) {
+            Some(sleep) => sleep.await,
+            // Pas de minuteur : la garde ne peut rien affirmer, elle se tait.
+            None => return std::future::pending().await,
+        }
+    }
+}
+
+/// Le premier des deux qui rend. Le flux est sondé d'abord : un transport qui
+/// répond tout de suite n'arme jamais la garde.
+async fn race<T>(
+    work: impl Future<Output = T>,
+    guard: impl Future<Output = Watch>,
+) -> Result<T, Watch> {
+    let mut work = std::pin::pin!(work);
+    let mut guard = std::pin::pin!(guard);
+    std::future::poll_fn(move |cx| {
+        if let Poll::Ready(value) = work.as_mut().poll(cx) {
+            return Poll::Ready(Ok(value));
+        }
+        if let Poll::Ready(why) = guard.as_mut().poll(cx) {
+            return Poll::Ready(Err(why));
+        }
+        Poll::Pending
+    })
+    .await
+}
+
+/// Une panne passagère : la limite de débit (429) ou un délai dépassé.
+fn transient(failure: &Failure) -> bool {
+    failure.code == Code::Timeout || failure.status == Some(429)
+}
 
 /// Les bornes d'un run : ce qui arrête une boucle qui n'a pas de fin naturelle.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -42,6 +211,10 @@ pub struct Limits {
     pub max_relances: u32,
     /// Budget de temps du run, en millisecondes (`None` : pas de borne).
     pub budget_ms: Option<u64>,
+    /// Silence toléré sur le flux d'un tour, en millisecondes : passé ce délai
+    /// sans un seul événement, le tour est interrompu et le dit (`None` : pas
+    /// de chien de garde).
+    pub silence_ms: Option<u64>,
 }
 
 impl Limits {
@@ -54,6 +227,7 @@ impl Limits {
             max_tours: doc.max_tours,
             max_relances: doc.max_relances,
             budget_ms: doc.budget_ms,
+            silence_ms: Some(SILENCE_MS),
         }
     }
 }
@@ -67,6 +241,7 @@ impl Default for Limits {
             max_tours: 12,
             max_relances: 3,
             budget_ms: Some(15 * 60 * 1000),
+            silence_ms: Some(SILENCE_MS),
         }
     }
 }
@@ -78,6 +253,9 @@ pub enum Running {
     Ran(Stop),
     /// Un run tournait déjà : le message est tenu pour le tour suivant.
     Queued,
+    /// Rien à faire (message vide, file déjà vidée) : aucun tour n'a eu lieu,
+    /// et aucun « terminé » n'est annoncé.
+    Idle,
 }
 
 struct State {
@@ -113,6 +291,8 @@ pub struct Harness {
     /// La politique du run. `DefaultPolicy` par défaut : les règles du crate ne
     /// changent pas parce qu'un hôte en branche une autre.
     policy: Rc<dyn Policy>,
+    /// L'heure et les minuteurs : `SystemClock` par défaut.
+    clock: Rc<dyn Clock>,
     state: Shared<State>,
     out: Out,
 }
@@ -129,6 +309,7 @@ impl Harness {
             transport,
             toolbox,
             policy: Rc::new(DefaultPolicy),
+            clock: Rc::new(SystemClock),
             state: Rc::new(RefCell::new(State {
                 system: system.into(),
                 limits,
@@ -181,6 +362,13 @@ impl Harness {
         self
     }
 
+    /// Remplace l'horloge : un hôte wasm y branche son minuteur (`setTimeout`),
+    /// un test y branche un temps qu'il fait avancer lui-même.
+    pub fn with_clock(mut self, clock: Rc<dyn Clock>) -> Self {
+        self.clock = clock;
+        self
+    }
+
     /// La poignée de commande : c'est tout ce que l'interface doit garder.
     pub fn handle(&self) -> Handle {
         Handle {
@@ -221,7 +409,10 @@ impl Harness {
         if !self.claim() {
             return Running::Queued;
         }
-        Running::Ran(self.pump().await)
+        match self.pump().await {
+            Some(stop) => Running::Ran(stop),
+            None => Running::Idle,
+        }
     }
 
     /// Reprend les messages tenus d'une session précédente. Rend `None` si
@@ -233,7 +424,7 @@ impl Harness {
         if !self.claim() {
             return None;
         }
-        Some(self.pump().await)
+        self.pump().await
     }
 
     /// Prend le tour pour soi, ou dit que quelqu'un d'autre l'a pris.
@@ -252,8 +443,11 @@ impl Harness {
         })
     }
 
-    async fn pump(&self) -> Stop {
-        let started = crate::now_ms();
+    /// Fait tourner la file jusqu'à l'arrêt. `None` : aucun objectif n'a été
+    /// ouvert (file vide) — rien n'a tourné, donc rien n'est « terminé ».
+    async fn pump(&self) -> Option<Stop> {
+        let clock = self.clock.clone();
+        let started = clock.now_ms();
         let cancel = self.with(|s| s.cancel.clone());
         cancel.reset();
         let transport = self.transport.clone();
@@ -295,36 +489,116 @@ impl Harness {
 
                 self.out.emit(Event::Turn { index: turns });
                 turns += 1;
-
-                // 2. Un tour du modèle, en flux.
+                // 2. Un tour du modèle, en flux — sous la garde du silence et
+                //    de la grâce d'annulation, avec des relances bornées.
                 let request = self.request(toolbox.as_ref());
                 let gathered = Rc::new(RefCell::new(String::new()));
-                let delta: Delta = {
-                    let gathered = gathered.clone();
-                    let out = self.out.clone();
-                    let cancel = cancel.clone();
-                    Rc::new(move |text: &str| {
-                        // Un flux annulé ne doit plus rien afficher : sinon le
-                        // texte du tour précédent se mélange au suivant.
-                        if cancel.is_cancelled() {
-                            return;
-                        }
-                        gathered.borrow_mut().push_str(text);
-                        out.emit(Event::Delta {
-                            text: text.to_string(),
+                let mut tentative = 0u32;
+                let issue: Result<Result<Reply, Failure>, Watch> = loop {
+                    // Le dernier signe de vie du flux : un tour qui commence en
+                    // est un, chaque morceau reçu en est un.
+                    let activity = Rc::new(Cell::new(clock.now_ms()));
+                    let delta: Delta = {
+                        let gathered = gathered.clone();
+                        let out = self.out.clone();
+                        let cancel = cancel.clone();
+                        let activity = activity.clone();
+                        let clock = clock.clone();
+                        Rc::new(move |text: &str| {
+                            activity.set(clock.now_ms());
+                            // Un flux annulé ne doit plus rien afficher : sinon le
+                            // texte du tour précédent se mélange au suivant.
+                            if cancel.is_cancelled() {
+                                return;
+                            }
+                            gathered.borrow_mut().push_str(text);
+                            out.emit(Event::Delta {
+                                text: text.to_string(),
+                            });
+                        })
+                    };
+                    let guard = watch(
+                        clock.clone(),
+                        activity,
+                        cancel.clone(),
+                        limits.silence_ms,
+                        INTERRUPT_GRACE_MS,
+                    );
+                    let issue = race(transport.stream(&request, &cancel, delta), guard).await;
+
+                    // Une panne passagère se rejoue, mais seulement si le tour
+                    // n'a rien montré et qu'aucun outil n'a tourné : rejouer
+                    // après coup doublerait un texte déjà lu ou un effet déjà
+                    // produit.
+                    if let Ok(Err(failure)) = &issue
+                        && transient(failure)
+                        && !failure.is_aborted()
+                        && !cancel.is_cancelled()
+                        && gathered.borrow().is_empty()
+                        && run.steps.is_empty()
+                        && tentative < MAX_RETRIES
+                    {
+                        tentative += 1;
+                        let wait = RETRY_BACKOFF_MS << (tentative - 1);
+                        self.out.emit(Event::Hint {
+                            text: format!(
+                                "Panne passagère du moteur ({}) : nouvelle tentative {tentative}/{MAX_RETRIES} dans {} s.",
+                                failure.message,
+                                wait / 1000
+                            ),
                         });
-                    })
+                        if let Some(sleep) = clock.sleep(wait) {
+                            sleep.await;
+                        }
+                        if cancel.is_cancelled() {
+                            break Ok(Err(Failure::aborted()));
+                        }
+                        continue;
+                    }
+                    break issue;
                 };
 
-                let reply = match transport.stream(&request, &cancel, delta).await {
-                    Ok(reply) => reply,
-                    Err(failure) => {
+                let reply = match issue {
+                    Ok(Ok(reply)) => reply,
+                    Ok(Err(failure)) => {
                         if failure.is_aborted() || cancel.is_cancelled() {
                             stop = Some(run.finish(Stop::Cancelled));
                         } else {
                             code = Some(format!("{:?}", failure.code).to_lowercase());
                             stop = Some(run.finish(Stop::Failed(failure.message)));
                         }
+                        break 'turns;
+                    }
+                    Err(why) => {
+                        // Le flux est abandonné (son futur est lâché) : la
+                        // session redevient libre, et elle dit pourquoi.
+                        let (hint, panne) = match why {
+                            Watch::Silent(ms) => (
+                                format!(
+                                    "Aucun événement du flux depuis {} s : le moteur ne répond plus, le tour est interrompu. Rien n'est perdu : le prochain message reprend la conversation.",
+                                    ms / 1000
+                                ),
+                                Code::Timeout,
+                            ),
+                            Watch::Abandoned(ms) => (
+                                format!(
+                                    "Le transport n'a pas rendu la main {} s après l'annulation : le tour est abandonné et la session est libre.",
+                                    ms / 1000
+                                ),
+                                Code::Aborted,
+                            ),
+                        };
+                        self.out.emit(Event::Hint { text: hint });
+                        let partial = gathered.borrow().clone();
+                        if !partial.trim().is_empty() {
+                            said = partial.clone();
+                            self.push(Message::Assistant {
+                                content: partial,
+                                calls: Vec::new(),
+                            });
+                        }
+                        code = Some(format!("{panne:?}").to_lowercase());
+                        stop = Some(run.finish(Stop::Interrupted));
                         break 'turns;
                     }
                 };
@@ -425,8 +699,13 @@ impl Harness {
             }
         }
 
-        let stop = stop.unwrap_or(Stop::Done);
-        let ms = (crate::now_ms() - started).max(0.0) as u64;
+        // Aucun objectif ouvert : annoncer « terminé » serait un faux succès.
+        // La session redevient libre, sans Stopped.
+        let Some(stop) = stop else {
+            self.with(|s| s.busy = false);
+            return None;
+        };
+        let ms = (clock.now_ms() - started).max(0.0) as u64;
         self.with(|s| s.busy = false);
         self.out.emit(Event::Stopped {
             stop: stop.clone(),
@@ -435,7 +714,7 @@ impl Harness {
             ms,
             code,
         });
-        stop
+        Some(stop)
     }
 
     async fn run_tool(&self, toolbox: &dyn Toolbox, call: &ToolCall, run: &mut Run) -> Outcome {
@@ -444,9 +723,9 @@ impl Harness {
             tool: call.name.clone(),
             input: call.arguments.clone(),
         });
-        let started = crate::now_ms();
+        let started = self.clock.now_ms();
         let outcome = toolbox.call(call).await;
-        let ms = (crate::now_ms() - started).max(0.0) as u64;
+        let ms = (self.clock.now_ms() - started).max(0.0) as u64;
 
         self.out.emit(Event::ToolResult {
             id: call.id.clone(),
