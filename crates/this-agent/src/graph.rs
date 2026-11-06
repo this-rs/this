@@ -24,7 +24,7 @@
 //! |---|---|
 //! | `_harness` | `_uuid`, `_name`, `_version`, `_fingerprint` |
 //! | `_run` | `_uuid`, `_goal`, `_stop` |
-//! | `_step` | `_uuid`, `_run`, `_index`, `_tool`, `_refused` |
+//! | `_step` | `_uuid`, `_run`, `_index`, `_tool`, `_refused`, `_failed` |
 //!
 //! ## Ce que ça change, et ce que ça ne protège pas
 //!
@@ -208,6 +208,7 @@ pub fn step_node(step: &Step, run_id: &str) -> Node {
             ("_index".to_string(), step.index.to_string()),
             ("_tool".to_string(), step.tool.clone()),
             ("_refused".to_string(), step.refused.to_string()),
+            ("_failed".to_string(), step.failure.is_some().to_string()),
             ("_ms".to_string(), step.ms.to_string()),
             ("_data".to_string(), data),
         ],
