@@ -1297,9 +1297,9 @@ fn script_prevol(decl: &Declaration, binaire: Option<&str>, unite: &str) -> Stri
     l.push_str(
         "if command -v cargo >/dev/null 2>&1; then ligne chaine OK \"cargo présent : le binaire peut être construit ici\"; \
          else ligne chaine ATTENTION \"cargo absent : construire ailleurs puis copier le binaire\"; fi\n\
-         OBRAIN=$(ls -d \"$HOME\"/projects/banc-obrain-j4 2>/dev/null | head -1)\n\
+         OBRAIN=$(ls -d \"$HOME\"/projects/obrain/obrain-db 2>/dev/null | head -1)\n\
          if [ -n \"$OBRAIN\" ]; then ligne moteur OK \"$OBRAIN\"; \
-         else ligne moteur ATTENTION \"checkout obrain-j4 absent : compiler à côté, ou adapter le chemin dans Cargo.toml\"; fi\n",
+         else ligne moteur ATTENTION \"checkout obrain-db absent : compiler à côté, ou adapter le chemin dans Cargo.toml\"; fi\n",
     );
 
     if let Some(expose) = &decl.expose {

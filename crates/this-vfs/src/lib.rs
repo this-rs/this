@@ -23,7 +23,12 @@ pub mod memory;
 // mérite un banc partagé.
 pub mod conformance;
 
-pub use memory::InMemoryVfs;
+// La règle de forme et l'aplatissement d'une carte plate sont partagés : `ObrainVfs`
+// vit dans `this-rs`, pas ici, et doit appliquer EXACTEMENT la même règle que le
+// backend mémoire (un fichier ne remplace pas un dossier, un dossier n'est pas un
+// fichier). Les laisser `pub(crate)` les rendait inaccessibles au seul backend qui
+// en a besoin hors de ce crate — `--features obrain` ne compilait plus.
+pub use memory::{InMemoryVfs, check_shape, list_flat};
 
 /// Etag of a content: sha256, lower-case hex. Same function for every backend, so an
 /// etag read from one backend is comparable with one computed by the caller.

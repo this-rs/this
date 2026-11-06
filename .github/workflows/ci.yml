@@ -542,10 +542,74 @@ jobs:
           # que ce runner n'a pas. C'est une exclusion assumée, pas un oubli — et
           # elle est écrite ici pour que personne ne la prenne pour une couverture.
 
+  # Le backend obrain est le seul dont les dépendances ne sont pas sur crates.io :
+  # `Cargo.toml` les déclare par PATH (`../../obrain/obrain-db/crates/...`). Deux
+  # conséquences qu'aucun job ne couvrait :
+  #   - `release.yml` EXCLUT `obrain` du feature-powerset
+  #     (`--exclude-features all,frontend,obrain,obrain-cognitive`) et la suite de
+  #     tests tourne avec `--features all,wami` : la feature n'était compilée NULLE PART ;
+  #   - elle a pourri en silence jusqu'à ne plus compiler du tout (06/11/2026 :
+  #     `src/storage/vfs/obrain.rs` importait `check_shape`/`list_flat`, devenus
+  #     `pub(crate)` dans le crate `this-vfs`, plus un `conformance` qui avait déménagé).
+  # Et son chemin pointait `../../banc-obrain-j4`, un snapshot figé de la consolidation
+  # d'octobre : le framework compilait contre un moteur qui ne bougeait plus, ce qui a
+  # masqué une rupture (obrain-db `dcba1fab` refuse désormais deux ouvertures en écriture
+  # dans le même processus).
+  # Ce job clone le moteur là où le path-dependency l'attend et fait tourner SES tests —
+  # les seuls qui ouvrent une vraie base et prouvent la durabilité au reopen.
+  obrain:
+    # Skipped when the change is documentation-only (see `changes`).
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    name: Obrain Backend
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      # `obrain-db/obrain` est PRIVÉ (mesuré le 06/11/2026 : `gh api` → private=true).
+      # Un clone anonyme échoue donc (« could not read Username »). Deux issues, et
+      # une seule honnête : avec un jeton, on couvre vraiment ; sans jeton, on le DIT
+      # au lieu de laisser croire que la feature est testée. Le job reste vert dans
+      # les deux cas, mais l'avertissement est visible dans l'onglet Actions.
+      - name: Checkout obrain-db (private, needs OBRAIN_TOKEN)
+        id: engine
+        env:
+          OBRAIN_TOKEN: ${{ secrets.OBRAIN_TOKEN }}
+        run: |
+          set -euo pipefail
+          DEP="$(cd "$GITHUB_WORKSPACE/../.." && pwd)/obrain/obrain-db"
+          if [ -z "${OBRAIN_TOKEN:-}" ]; then
+            echo "engine=false" >> "$GITHUB_OUTPUT"
+            echo "::warning title=Obrain Backend non couvert::obrain-db/obrain est privé et le secret OBRAIN_TOKEN n'est pas défini. La feature \`obrain\` n'est donc PAS compilée ni testée ici — ajouter un PAT en lecture sur obrain-db/obrain sous le nom OBRAIN_TOKEN active ce job."
+            exit 0
+          fi
+          rm -rf "$DEP"
+          mkdir -p "$(dirname "$DEP")"
+          git clone --depth 1 "https://x-access-token:${OBRAIN_TOKEN}@github.com/obrain-db/obrain.git" "$DEP"
+          echo "obrain engine at $DEP ($(git -C "$DEP" rev-parse --short HEAD))"
+          echo "engine=true" >> "$GITHUB_OUTPUT"
+
+      - name: Install protoc
+        if: steps.engine.outputs.engine == 'true'
+        uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install Rust toolchain
+        if: steps.engine.outputs.engine == 'true'
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Test the obrain backend against a real store
+        if: steps.engine.outputs.engine == 'true'
+        run: |
+          # `::` en fin de scalaire simple fait de la ligne une clé pour YAML : bloc.
+          cargo test --features obrain --lib storage::
+
   gate:
     name: CI gate
     if: always()
-    needs: [changes, test, coverage, fmt, clippy, examples, security_audit, docs, cross-platform, wasm_crates]
+    needs: [changes, test, coverage, fmt, clippy, examples, security_audit, docs, cross-platform, wasm_crates, obrain]
     runs-on: ubuntu-latest
     steps:
       - name: Nothing failed, nothing was cancelled

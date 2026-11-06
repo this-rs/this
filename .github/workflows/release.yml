@@ -62,7 +62,7 @@ jobs:
   # DISABLED for v0.0.10, on purpose and reversibly.
   #
   # The manifest declares the six `obrain-*` crates as optional *path*
-  # dependencies (`../../banc-obrain-j4/crates/...`). cargo refuses to package a
+  # dependencies (`../../obrain/obrain-db/crates/...`). cargo refuses to package a
   # crate whose optional dependency is absent from the registry — proven on a
   # scratch crate: both `cargo package` and `cargo publish --dry-run` answer
   # "no matching package named ... found". Giving the dependency a `version`

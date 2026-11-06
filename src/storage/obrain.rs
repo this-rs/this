@@ -14,9 +14,9 @@
 //!
 //! The backend couples **this-rs/obrain** (the ultra-benchmarked cognitive graph
 //! engine — fastest tested graph DB on the LDBC Social Network Benchmark, in
-//! embedded and server configurations). Local checkout: `~/projects/banc-obrain`
+//! embedded and server configurations). Local checkout: `~/projects/obrain/obrain-db`
 //! (workspace `crates/obrain-{engine,core,common,…}`); the path dependencies in
-//! `Cargo.toml` point at it, mirroring aletheia's path-dep convention.
+//! `Cargo.toml` point at it.
 //!
 //! `ObrainStore::open(path)` opens a **durable substrate store**: the engine
 //! persists mmap zones/dict columns and a write-ahead log with `EveryCommit`
@@ -2074,6 +2074,10 @@ mod tests {
         link_svc.update(&link.id, updated).await.unwrap();
         data_svc.delete(&alice.id).await.unwrap();
 
+        // Les deux services tiennent un `Arc` sur la même base : tant qu'ils vivent, la
+        // seconde ouverture est refusée par le moteur (« une base ouverte par processus »).
+        drop(data_svc);
+        drop(link_svc);
         drop(store);
         let store = ObrainStore::open(&dir).unwrap();
         assert_eq!(store.rebuild_index_for_label("test_data").unwrap(), 1);
@@ -2324,9 +2328,11 @@ mod tests {
     /// Ce test porte trois propriétés :
     /// 1. le bail se prend et les écritures passent tant qu'il est vivant ;
     /// 2. un **second store dans le même processus** sur le même répertoire est
-    ///    refusé — c'est exactement le trou d'obrain (`file.rs:179-207` rend la
-    ///    part de verrou existante, donc obrain les laisserait passer tous les
-    ///    deux) ;
+    ///    refusé — désormais **par le moteur lui-même** (obrain-db `dcba1fab`,
+    ///    « une base ouverte par processus ») : il rendait auparavant la part de
+    ///    verrou existante et laissait passer les deux, et c'était au bail de
+    ///    this-rs de combler ce trou. Le bail reste la garde de niveau supérieur
+    ///    (autre processus, autre machine) ;
     /// 3. une fois le bail perdu, **l'écriture est refusée mais la lecture
     ///    reste possible** — un writer périmé peut encore servir des lectures.
     #[tokio::test]
@@ -2346,14 +2352,14 @@ mod tests {
         // 1. Bail vivant : l'écriture passe.
         let entity = service.create(TestDataEntity::new("avant")).await.unwrap();
 
-        // 2. Un second store, MÊME processus, MÊME répertoire : obrain le laisse
-        //    passer, le bail non.
-        let store2 = ObrainStore::open(&dir).unwrap();
-        let refused = store2.enable_write_fencing_with(&authority);
+        // 2. Un second store, MÊME processus, MÊME répertoire : le MOTEUR le refuse
+        //    (garde introduit par obrain-db `dcba1fab`). Le bail n'a donc plus à
+        //    couvrir ce cas — il couvre ce que le moteur ne voit pas : un autre
+        //    processus, une autre machine.
+        let second = ObrainStore::open(&dir);
         assert!(
-            refused.is_err(),
-            "un second écrivain in-process doit être refusé, obtenu {:?}",
-            refused.ok()
+            second.is_err(),
+            "un second écrivain in-process doit être refusé par le moteur"
         );
 
         // 3. Notre writer est périmé (un autre a repris le bail).
@@ -2375,7 +2381,10 @@ mod tests {
         );
 
         // 4. Après relâchement, un successeur prend le bail avec l'époque SUIVANTE.
+        //    Il faut d'abord rendre la base : le successeur l'ouvre pour de vrai.
         store.release_write_fencing();
+        drop(service);
+        drop(store);
         let store3 = ObrainStore::open(&dir).unwrap();
         let epoch3 = store3.enable_write_fencing_with(&authority).unwrap();
         assert_eq!(epoch3, 2, "l'époque ne recule jamais");
