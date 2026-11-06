@@ -11,6 +11,9 @@ categories = ["development-tools"]
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
+# La projection vers un nœud de graphe est du JSON : c'est la convention de
+# this-rs (`_data`), pas un choix d'implémentation.
+serde_json = "1"
 
 [dev-dependencies]
 serde_json = "1"

@@ -774,3 +774,75 @@ fn un_outil_installe_pendant_le_run_devient_routable() {
     assert_eq!(routed.text, "module dit list_customers");
     assert_eq!(both.specs().len(), 1);
 }
+
+// ---- le harness vient du graphe ----------------------------------------------
+
+/// Une composition lue dans le graphe produit un harness qui tourne : le brief
+/// et les bornes viennent du document, la politique d'un emplacement.
+#[test]
+fn un_harness_compose_depuis_le_graphe_porte_son_brief_et_ses_bornes() {
+    use this_agent::graph::{HarnessDoc, Slot, SlotKind};
+
+    let doc = HarnessDoc {
+        id: "h-atelier".into(),
+        name: "atelier".into(),
+        version: 1,
+        brief: "tu es l'atelier, et tu écris des modules".into(),
+        slots: vec![Slot {
+            kind: SlotKind::Policy,
+            module: "harness-default".into(),
+            version: "0.1.0".into(),
+            entry: "policy".into(),
+        }],
+        max_tours: 2,
+        max_relances: 0,
+        budget_ms: None,
+    };
+
+    let script = Script::new(vec![
+        Reply {
+            text: String::new(),
+            calls: vec![call("a1")],
+            finish: Finish::Tools,
+        },
+        Reply {
+            text: String::new(),
+            calls: vec![call("a2")],
+            finish: Finish::Tools,
+        },
+    ]);
+    let seen = script.clone();
+    let tools = Tools::new(|_| Outcome::ok("fait"));
+    let log: Log = Rc::new(RefCell::new(Vec::new()));
+    let sink = log.clone();
+
+    let harness = Harness::from_doc(
+        &doc,
+        script,
+        tools,
+        Rc::new(this_agent::DefaultPolicy),
+        move |event| sink.borrow_mut().push(event),
+    );
+
+    let stop = match run(harness.send("installe")) {
+        Running::Ran(stop) => stop,
+        autre => panic!("attendu Ran, obtenu {autre:?}"),
+    };
+
+    // Le brief du document est bien le message système du premier tour.
+    let first = seen
+        .seen
+        .borrow()
+        .first()
+        .cloned()
+        .expect("un tour a eu lieu");
+    let thread = first.thread();
+    assert!(
+        matches!(&thread[0], Message::System { content } if content == &doc.brief),
+        "le brief du document est la consigne système"
+    );
+
+    // Les bornes du document s'appliquent : 2 tours, puis Budget.
+    assert_eq!(stop, Stop::Budget, "max_tours vient de la composition");
+    assert_eq!(seen.seen.borrow().len(), 2);
+}
