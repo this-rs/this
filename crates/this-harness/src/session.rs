@@ -381,6 +381,7 @@ impl Harness {
                             tool: call.name.clone(),
                             text: "annulé".to_string(),
                             refused: true,
+                            failed: false,
                             unchanged: false,
                             ms: 0,
                         });
@@ -452,6 +453,7 @@ impl Harness {
             tool: call.name.clone(),
             text: outcome.text.clone(),
             refused: outcome.refused.is_some(),
+            failed: outcome.failed.is_some(),
             unchanged: outcome.unchanged(),
             ms,
         });
@@ -461,6 +463,9 @@ impl Harness {
             .resume(outcome.text.chars().take(200).collect::<String>());
         if let Some(motif) = &outcome.refused {
             step = step.refused(motif.clone());
+        }
+        if let Some(cause) = &outcome.failed {
+            step = step.failed(cause.clone());
         }
         run.record(step);
         outcome
@@ -501,6 +506,12 @@ fn relaunch_reason(run: &Run, spoke: bool, called: bool) -> Option<String> {
         let motif = step.motif.clone().unwrap_or_else(|| step.resume.clone());
         return Some(format!(
             "La dernière tentative a été refusée ({motif}). Change d'approche, ou dis clairement ce qui manque."
+        ));
+    }
+    if let Some(step) = run.derniere_en_echec() {
+        let cause = step.failure.clone().unwrap_or_else(|| step.resume.clone());
+        return Some(format!(
+            "La dernière action a échoué ({cause}). Corrige la cause, ou dis clairement ce qui manque."
         ));
     }
     if run.dernier_sans_effet().is_some() {

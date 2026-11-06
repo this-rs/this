@@ -61,6 +61,10 @@ pub enum Event {
         text: String,
         /// L'outil a refusé — ce n'est pas la même chose qu'une erreur.
         refused: bool,
+        /// L'outil a échoué (il a planté, ou n'a pas pu faire ce qu'on lui demandait). Distinct
+        /// d'un refus : une décision se contourne, une erreur se corrige.
+        #[serde(default)]
+        failed: bool,
         /// L'état n'a pas bougé : une action qui ne change rien n'est pas un
         /// progrès, et la boucle doit le voir.
         unchanged: bool,
@@ -130,6 +134,8 @@ pub struct Outcome {
     pub text: String,
     /// Le motif, si l'outil a refusé.
     pub refused: Option<String>,
+    /// La cause, si l'outil a échoué.
+    pub failed: Option<String>,
     /// Empreinte de l'état avant l'appel — vide quand l'outil ne touche rien.
     pub before: String,
     /// Empreinte de l'état après l'appel.
@@ -147,6 +153,14 @@ impl Outcome {
         Self {
             text: text.into(),
             refused: Some(motif.into()),
+            ..Self::default()
+        }
+    }
+    /// L'outil a échoué : le texte est ce que lira le modèle, `cause` ce que le harnais relance.
+    pub fn failed(text: impl Into<String>, cause: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            failed: Some(cause.into()),
             ..Self::default()
         }
     }
