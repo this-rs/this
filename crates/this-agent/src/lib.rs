@@ -22,6 +22,7 @@
 
 pub mod graph;
 pub mod substrate;
+pub mod surface;
 
 use serde::{Deserialize, Serialize};
 
