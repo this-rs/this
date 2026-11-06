@@ -570,3 +570,67 @@ mod tests {
         assert!(page < coquille && coquille < natif);
     }
 }
+
+#[cfg(test)]
+mod couverture {
+    use super::*;
+
+    #[test]
+    fn les_noms_d_etage_et_de_plateforme_sont_tous_couverts() {
+        // Une capacité qui nomme mal son étage est illisible dans le prompt.
+        assert_eq!(Tier::Webview.as_str(), "webview");
+        assert_eq!(Tier::Shell.as_str(), "coquille");
+        assert_eq!(Tier::Native.as_str(), "natif");
+        for (plateforme, nom) in [
+            (Platform::Web, "web"),
+            (Platform::Ios, "ios"),
+            (Platform::Ipados, "ipados"),
+            (Platform::Macos, "macos"),
+            (Platform::Windows, "windows"),
+            (Platform::Linux, "linux"),
+            (Platform::Android, "android"),
+            (Platform::Watchos, "watchos"),
+            (Platform::Carplay, "carplay"),
+            (Platform::AndroidAuto, "android_auto"),
+        ] {
+            assert_eq!(plateforme.as_str(), nom);
+        }
+    }
+
+    #[test]
+    fn les_accesseurs_rendent_none_sur_un_identifiant_absent() {
+        let carte = surface();
+        assert!(carte.capability("n.existe.pas").is_none());
+        assert!(carte.slot("n.existe.pas").is_none());
+        assert!(carte.capability("ui.render").is_some());
+        assert!(carte.slot("message").is_some());
+    }
+
+    #[test]
+    fn la_carte_se_partitionne_entre_livre_et_attendu() {
+        let carte = surface();
+        let livres = carte.live().count();
+        let attendus = carte.missing().count();
+        assert_eq!(livres + attendus, carte.capabilities.len());
+        assert!(
+            livres > 0 && attendus > 0,
+            "les deux familles doivent exister"
+        );
+    }
+
+    #[test]
+    fn un_budget_nul_tronque_tout_et_le_dit() {
+        // Le cas extrême : rien ne tient. La carte doit rester utilisable et
+        // annoncer qu'elle est vide plutôt que de rendre une chaîne trompeuse.
+        let texte = surface().describe(0);
+        assert!(texte.contains("omise"));
+        assert!(!texte.contains("[webview]"));
+    }
+
+    #[test]
+    fn les_emplacements_manquants_sont_nommes_meme_sans_capacite() {
+        let texte = surface().describe(100_000);
+        assert!(texte.contains("Emplacements pas encore ouverts"));
+        assert!(texte.contains("boot") && texte.contains("message"));
+    }
+}
