@@ -45,6 +45,17 @@ pub const INTERRUPT_GRACE_MS: u64 = 10_000;
 /// Le silence toléré par défaut sur le flux d'un tour.
 pub const SILENCE_MS: u64 = 120_000;
 
+/// Le plafond par défaut d'un appel d'outil.
+///
+/// Un outil n'émet aucun signe de vie pendant qu'il travaille : on ne peut pas
+/// lui appliquer une garde de *silence*, seulement un plafond sur sa durée
+/// totale. Ce plafond doit donc couvrir l'outil légitime le plus long, pas un
+/// silence anormal : une compilation de module à froid se compte en minutes.
+/// Cinq minutes, c'est plus que deux fois le silence toléré sur le flux
+/// ([`SILENCE_MS`]) et un tiers du budget par défaut d'un run (15 min) : un
+/// outil pendu libère la session sans que trois outils lents l'épuisent.
+pub const TOOL_TIMEOUT_MS: u64 = 5 * 60 * 1000;
+
 /// Relances accordées à un tour qui a échoué sur une panne passagère.
 pub const MAX_RETRIES: u32 = 3;
 
@@ -109,10 +120,93 @@ impl Clock for SystemClock {
     }
 }
 
-/// Une attente sans exécuteur : un fil dort, puis réveille la tâche.
+/// L'état d'une attente native : échue ou non, et qui réveiller.
 #[cfg(not(target_arch = "wasm32"))]
 type Wake = std::sync::Arc<std::sync::Mutex<(bool, Option<std::task::Waker>)>>;
 
+/// Le minuteur natif : **un seul** fil pour tout le processus, qui tient les
+/// échéances et réveille les tâches à l'heure.
+///
+/// La garde du flux s'endort par pas d'une seconde : un fil par attente en
+/// lançait un par seconde de flux et par session. Ici, une attente n'est
+/// qu'une entrée dans une liste ; le fil dort jusqu'à la plus proche échéance.
+/// Une liste et non un tas : il n'y a jamais que quelques attentes en vol
+/// (une garde et une relance par session), le balayage est négligeable.
+#[cfg(not(target_arch = "wasm32"))]
+struct Timer {
+    queue: std::sync::Mutex<Vec<(std::time::Instant, Wake)>>,
+    ring: std::sync::Condvar,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn timer() -> &'static Timer {
+    static TIMER: Timer = Timer {
+        queue: std::sync::Mutex::new(Vec::new()),
+        ring: std::sync::Condvar::new(),
+    };
+    static START: std::sync::Once = std::sync::Once::new();
+    START.call_once(|| {
+        std::thread::Builder::new()
+            .name("this-harness-timer".to_string())
+            .spawn(|| TIMER.run())
+            .expect("le fil du minuteur");
+    });
+    &TIMER
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Timer {
+    fn add(&self, deadline: std::time::Instant, wake: Wake) {
+        let mut queue = self.queue.lock().unwrap_or_else(|e| e.into_inner());
+        queue.push((deadline, wake));
+        self.ring.notify_one();
+    }
+
+    fn run(&self) {
+        let mut queue = self.queue.lock().unwrap_or_else(|e| e.into_inner());
+        loop {
+            let now = std::time::Instant::now();
+            let mut due = Vec::new();
+            queue.retain(|(deadline, wake)| {
+                if *deadline <= now {
+                    due.push(wake.clone());
+                    false
+                } else {
+                    true
+                }
+            });
+            if !due.is_empty() {
+                // Réveiller hors du verrou : un réveil peut sonder une tâche
+                // qui ajoute aussitôt une nouvelle attente.
+                drop(queue);
+                for wake in due {
+                    let waker = {
+                        let mut state = wake.lock().unwrap_or_else(|e| e.into_inner());
+                        state.0 = true;
+                        state.1.take()
+                    };
+                    if let Some(waker) = waker {
+                        waker.wake();
+                    }
+                }
+                queue = self.queue.lock().unwrap_or_else(|e| e.into_inner());
+                continue;
+            }
+            queue = match queue.iter().map(|(deadline, _)| *deadline).min() {
+                Some(next) => {
+                    let left = next.saturating_duration_since(now);
+                    self.ring
+                        .wait_timeout(queue, left)
+                        .unwrap_or_else(|e| e.into_inner())
+                        .0
+                }
+                None => self.ring.wait(queue).unwrap_or_else(|e| e.into_inner()),
+            };
+        }
+    }
+}
+
+/// Une attente sans exécuteur : une échéance confiée au minuteur partagé.
 #[cfg(not(target_arch = "wasm32"))]
 struct ThreadSleep {
     ms: u64,
@@ -129,15 +223,8 @@ impl Future for ThreadSleep {
             .shared
             .get_or_insert_with(|| {
                 let shared: Wake = Default::default();
-                let alarm = shared.clone();
-                std::thread::spawn(move || {
-                    std::thread::sleep(std::time::Duration::from_millis(ms));
-                    let mut state = alarm.lock().unwrap_or_else(|e| e.into_inner());
-                    state.0 = true;
-                    if let Some(waker) = state.1.take() {
-                        waker.wake();
-                    }
-                });
+                let deadline = std::time::Instant::now() + std::time::Duration::from_millis(ms);
+                timer().add(deadline, shared.clone());
                 shared
             })
             .clone();
@@ -215,6 +302,30 @@ async fn race<T>(
     .await
 }
 
+/// Attend `ms`, mais rend dès que l'annulation est vue : vrai si l'attente a
+/// été coupée par elle.
+///
+/// L'annulation est un drapeau qui se lit, pas un signal qui prévient : elle
+/// est relue à chaque pas de [`WATCH_TICK_MS`]. Une relance annulée rend donc
+/// la main en une seconde au plus, et non à la fin de son attente (jusqu'à 4 s).
+async fn pause(clock: &dyn Clock, ms: u64, cancel: &Cancel) -> bool {
+    let end = clock.now_ms() + ms as f64;
+    loop {
+        if cancel.is_cancelled() {
+            return true;
+        }
+        let left = (end - clock.now_ms()).max(0.0) as u64;
+        if left == 0 {
+            return false;
+        }
+        match clock.sleep(left.min(WATCH_TICK_MS)) {
+            Some(sleep) => sleep.await,
+            // Pas de minuteur : la relance part sans délai.
+            None => return cancel.is_cancelled(),
+        }
+    }
+}
+
 /// Une panne passagère : la limite de débit (429) ou un délai dépassé.
 fn transient(failure: &Failure) -> bool {
     failure.code == Code::Timeout || failure.status == Some(429)
@@ -233,6 +344,10 @@ pub struct Limits {
     /// sans un seul événement, le tour est interrompu et le dit (`None` : pas
     /// de chien de garde).
     pub silence_ms: Option<u64>,
+    /// Durée maximale d'un appel d'outil, en millisecondes : passé ce délai,
+    /// l'appel est abandonné et le modèle lit « délai dépassé » (`None` : pas
+    /// de plafond — l'annulation reste, elle, toujours gardée).
+    pub tool_timeout_ms: Option<u64>,
 }
 
 impl Limits {
@@ -246,6 +361,7 @@ impl Limits {
             max_relances: doc.max_relances,
             budget_ms: doc.budget_ms,
             silence_ms: Some(SILENCE_MS),
+            tool_timeout_ms: Some(TOOL_TIMEOUT_MS),
         }
     }
 }
@@ -260,6 +376,7 @@ impl Default for Limits {
             max_relances: 3,
             budget_ms: Some(15 * 60 * 1000),
             silence_ms: Some(SILENCE_MS),
+            tool_timeout_ms: Some(TOOL_TIMEOUT_MS),
         }
     }
 }
@@ -526,6 +643,12 @@ impl Harness {
                 let context = self.turn_context().await;
                 let request = self.request(toolbox.as_ref(), context);
                 let gathered = Rc::new(RefCell::new(String::new()));
+                // Les étapes de l'objectif au début de CE tour : un outil joué
+                // à un tour précédent n'est pas rejoué par la relance de
+                // celui-ci (elle ne rejoue que l'appel au modèle). Comparer à
+                // `run.steps.is_empty()` interdisait toute relance dès le
+                // deuxième tour d'un objectif qui avait appelé un outil.
+                let steps_at_turn = run.steps.len();
                 let mut tentative = 0u32;
                 let issue: Result<Result<Reply, Failure>, Watch> = loop {
                     // Le dernier signe de vie du flux : un tour qui commence en
@@ -560,15 +683,15 @@ impl Harness {
                     let issue = race(transport.stream(&request, &cancel, delta), guard).await;
 
                     // Une panne passagère se rejoue, mais seulement si le tour
-                    // n'a rien montré et qu'aucun outil n'a tourné : rejouer
-                    // après coup doublerait un texte déjà lu ou un effet déjà
-                    // produit.
+                    // n'a rien montré et qu'aucun outil n'a tourné DANS CE
+                    // TOUR : rejouer après coup doublerait un texte déjà lu ou
+                    // un effet déjà produit.
                     if let Ok(Err(failure)) = &issue
                         && transient(failure)
                         && !failure.is_aborted()
                         && !cancel.is_cancelled()
                         && gathered.borrow().is_empty()
-                        && run.steps.is_empty()
+                        && run.steps.len() == steps_at_turn
                         && tentative < MAX_RETRIES
                     {
                         tentative += 1;
@@ -580,10 +703,7 @@ impl Harness {
                                 wait / 1000
                             ),
                         });
-                        if let Some(sleep) = clock.sleep(wait) {
-                            sleep.await;
-                        }
-                        if cancel.is_cancelled() {
+                        if pause(clock.as_ref(), wait, &cancel).await {
                             break Ok(Err(Failure::aborted()));
                         }
                         continue;
@@ -678,6 +798,7 @@ impl Harness {
                 });
 
                 // 3. Les outils demandés, un par un, avec leur observation.
+                let mut abandoned = false;
                 for call in &reply.calls {
                     if cancel.is_cancelled() {
                         // Une annulation au milieu d'un lot laisserait des
@@ -701,8 +822,25 @@ impl Harness {
                         ));
                         continue;
                     }
-                    let outcome = self.run_tool(toolbox.as_ref(), call, &mut run).await;
+                    let (outcome, dropped) = self
+                        .run_tool(toolbox.as_ref(), call, &mut run, &cancel, &limits)
+                        .await;
+                    abandoned |= dropped;
                     self.push(Message::tool(call.id.clone(), outcome.text.clone()));
+                }
+
+                // Annulé pendant les outils : le run s'arrête ici, sans passer
+                // par la décision — un « annulé » n'est pas un refus à relancer.
+                // Un outil abandonné après la grâce se dit comme un flux
+                // abandonné : interrompu, code `aborted`.
+                if cancel.is_cancelled() {
+                    stop = Some(run.finish(if abandoned {
+                        code = Some(format!("{:?}", Code::Aborted).to_lowercase());
+                        Stop::Interrupted
+                    } else {
+                        Stop::Cancelled
+                    }));
+                    break 'turns;
                 }
 
                 let spoke = !text.trim().is_empty();
@@ -759,14 +897,57 @@ impl Harness {
         Some(stop)
     }
 
-    async fn run_tool(&self, toolbox: &dyn Toolbox, call: &ToolCall, run: &mut Run) -> Outcome {
+    /// Un appel d'outil, sous garde.
+    ///
+    /// Deux gardes, les mêmes que pour le flux du modèle :
+    /// - le **nom** est confronté à `toolbox.specs()` avant tout appel : un
+    ///   outil inventé par le modèle est refusé par le harnais lui-même, sans
+    ///   qu'une toolbox naïve (qui répondrait « ok » à tout) l'exécute ;
+    /// - l'appel **court contre l'annulation** (avec la même grâce que le flux)
+    ///   et contre le plafond [`Limits::tool_timeout_ms`]. Un outil qui ne rend
+    ///   jamais la main est abandonné ; le modèle lit « annulé » ou « délai
+    ///   dépassé », jamais un succès, et l'appel n'est jamais laissé sans
+    ///   réponse dans le fil. Le booléen dit si l'appel a été abandonné après
+    ///   la grâce d'annulation.
+    async fn run_tool(
+        &self,
+        toolbox: &dyn Toolbox,
+        call: &ToolCall,
+        run: &mut Run,
+        cancel: &Cancel,
+        limits: &Limits,
+    ) -> (Outcome, bool) {
         self.out.emit(Event::ToolUse {
             id: call.id.clone(),
             tool: call.name.clone(),
             input: call.arguments.clone(),
         });
         let started = self.clock.now_ms();
-        let outcome = toolbox.call(call).await;
+        let declared = toolbox.specs().iter().any(|spec| spec.name == call.name);
+        let mut abandoned = false;
+        let outcome = if !declared {
+            unknown_tool(&call.name)
+        } else {
+            // Un outil n'émet rien pendant qu'il travaille : son « dernier
+            // signe de vie » reste son départ, et la garde de silence devient
+            // un plafond sur la durée totale de l'appel.
+            let guard = watch(
+                self.clock.clone(),
+                Rc::new(Cell::new(started)),
+                cancel.clone(),
+                limits.tool_timeout_ms,
+                INTERRUPT_GRACE_MS,
+            );
+            match race(toolbox.call(call), guard).await {
+                Ok(outcome) => outcome,
+                Err(why) => {
+                    abandoned = matches!(why, Watch::Abandoned(_));
+                    let (hint, outcome) = abandoned_tool(&call.name, why);
+                    self.out.emit(Event::Hint { text: hint });
+                    outcome
+                }
+            }
+        };
         let ms = (self.clock.now_ms() - started).max(0.0) as u64;
 
         self.out.emit(Event::ToolResult {
@@ -783,7 +964,7 @@ impl Harness {
         });
 
         run.record(step_of(&call.name, ms, &outcome));
-        outcome
+        (outcome, abandoned)
     }
 
     /// Ce que le hook de contexte rend pour ce tour. L'état n'est pas emprunté
@@ -818,6 +999,50 @@ impl Harness {
             self.out.emit(Event::Pending { messages: left });
         }
         first
+    }
+}
+
+/// Le résultat d'un appel à un outil absent de `toolbox.specs()`.
+///
+/// Refusé par le harnais, sans appeler la toolbox : le modèle a inventé un nom,
+/// et une toolbox qui ne filtre pas l'exécuterait quand même.
+fn unknown_tool(name: &str) -> Outcome {
+    Outcome::refused(
+        format!("refusé : l'outil n'existe pas : « {name} ». N'appelle que les outils déclarés."),
+        format!("l'outil n'existe pas : « {name} » n'est pas dans la surface déclarée"),
+    )
+}
+
+/// Ce qu'un appel d'outil abandonné laisse : le message d'interface, et le
+/// résultat que lira le modèle — « annulé » ou « délai dépassé », jamais un
+/// succès. L'effet de l'outil, s'il en a eu un, est inconnu : le résultat le dit.
+fn abandoned_tool(name: &str, why: Watch) -> (String, Outcome) {
+    match why {
+        Watch::Silent(ms) => (
+            format!(
+                "L'outil « {name} » n'a pas rendu la main en {} s : l'appel est abandonné.",
+                ms / 1000
+            ),
+            Outcome::failed(
+                format!(
+                    "délai dépassé : l'outil « {name} » n'a pas rendu la main en {} s. Son effet est inconnu : vérifie l'état avant de réessayer.",
+                    ms / 1000
+                ),
+                format!("délai dépassé ({} s)", ms / 1000),
+            ),
+        ),
+        Watch::Abandoned(ms) => (
+            format!(
+                "L'outil « {name} » n'a pas rendu la main {} s après l'annulation : l'appel est abandonné et la session est libre.",
+                ms / 1000
+            ),
+            Outcome::refused(
+                format!(
+                    "annulé : l'utilisateur a interrompu le tour pendant « {name} ». Son effet est inconnu."
+                ),
+                "annulé : l'outil n'a pas rendu la main après l'interruption".to_string(),
+            ),
+        ),
     }
 }
 
