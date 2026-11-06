@@ -44,6 +44,20 @@ pub struct Limits {
     pub budget_ms: Option<u64>,
 }
 
+impl Limits {
+    /// Les bornes d'une composition lue dans le graphe.
+    ///
+    /// Une composition porte ses bornes : changer `max_tours` est un acte de
+    /// composition (versionné, empreinté), pas un réglage d'interface.
+    pub fn from_doc(doc: &this_agent::graph::HarnessDoc) -> Self {
+        Self {
+            max_tours: doc.max_tours,
+            max_relances: doc.max_relances,
+            budget_ms: doc.budget_ms,
+        }
+    }
+}
+
 impl Default for Limits {
     fn default() -> Self {
         Self {
@@ -127,6 +141,29 @@ impl Harness {
             })),
             out: Out(Rc::new(RefCell::new(Box::new(sink)))),
         }
+    }
+
+    /// Compose un harness depuis sa définition dans le graphe.
+    ///
+    /// Le brief, les bornes et la politique viennent du document : la boucle ne
+    /// change pas, c'est la **donnée** qui décide. Les emplacements `Tools` et
+    /// `Guard` sont tenus par qui les a chargés — le harnais ne va pas chercher
+    /// un module lui-même (il ne fait aucune entrée/sortie).
+    pub fn from_doc(
+        doc: &this_agent::graph::HarnessDoc,
+        transport: Rc<dyn Transport>,
+        toolbox: Rc<dyn Toolbox>,
+        policy: Rc<dyn Policy>,
+        sink: impl FnMut(Event) + 'static,
+    ) -> Self {
+        Self::new(
+            doc.brief.clone(),
+            Limits::from_doc(doc),
+            transport,
+            toolbox,
+            sink,
+        )
+        .with_policy(policy)
     }
 
     /// Remplace la politique de décision du run.

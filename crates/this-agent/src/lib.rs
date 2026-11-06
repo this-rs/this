@@ -20,6 +20,8 @@
 //! un harnais natif. Écrite trois fois, elle divergera trois fois. Écrite ici,
 //! elle se teste une fois — et `cargo test` remplace la foi.
 
+pub mod graph;
+
 use serde::{Deserialize, Serialize};
 
 /// Pourquoi le run s'est arrêté. Jamais « parce que la boucle est finie ».
