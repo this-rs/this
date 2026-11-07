@@ -67,7 +67,7 @@ pub trait Transport {
     ) -> Result<Reply, Failure>;
 }
 
-/// Ce que le harnais peut faire faire au noyau de l'application.
+/// Ce que le harnais peut faire faire au noyau de l’application.
 ///
 /// `&self` et non `&mut self` : les outils d'une interface vivent dans des
 /// signaux, pas dans une structure qu'on possède. Le harnais ne doit pas
@@ -80,6 +80,18 @@ pub trait Toolbox {
 
     /// Exécute un appel et rend ce que le modèle lira, plus l'observation.
     async fn call(&self, call: &ToolCall) -> Outcome;
+
+    /// [`Self::call`], avec le drapeau d'annulation du run en cours.
+    ///
+    /// Un outil qui attend quelque chose (une réponse de permission, un
+    /// `fetch`, un `sleep`) doit consulter `cancel` et rendre un
+    /// `Outcome::failed(...)` au lieu de continuer à attendre : « l'arrêt est
+    /// un état, pas un espoir » vaut aussi pour les outils. Par défaut, un
+    /// outil qui ne la surcharge pas garde exactement le comportement d'avant.
+    async fn call_with_cancel(&self, call: &ToolCall, cancel: &Cancel) -> Outcome {
+        let _ = cancel;
+        self.call(call).await
+    }
 }
 
 /// Un [`Toolbox`] fait de plusieurs : l'hôte apporte ses outils, un module
@@ -87,7 +99,7 @@ pub trait Toolbox {
 ///
 /// C'est la pièce qui rend le harnais **composable** côté outils : un module
 /// installé peut ajouter une capacité sans qu'on touche au `Toolbox` de
-/// l'application, et sans que la boucle change d'une ligne.
+/// l’application, et sans que la boucle change d'une ligne.
 ///
 /// La table de routage est reconstruite **à chaque appel** : un module peut être
 /// installé pendant un run, et un cache figé servirait l'ancien monde. Le coût
@@ -125,12 +137,22 @@ impl Toolbox for Toolboxes {
     }
 
     async fn call(&self, call: &ToolCall) -> Outcome {
-        // Le premier qui déclare l'outil l'exécute : deux modules qui
-        // exposeraient le même nom ne se disputent pas l'appel, l'ordre de
-        // composition décide — et il est visible dans l'application.
+        // Le premier qui déclare l’outil l’exécute : deux modules qui
+        // exposeraient le même nom ne se disputent pas l’appel, l’ordre de
+        // composition décide — et il est visible dans l’application.
+        //
+        // Une seule table de routage, celle de `call_with_cancel` : deux copies
+        // de la même règle divergent au premier changement. Un appel hors run
+        // n’a rien à annuler, d’où le drapeau neuf.
+        self.call_with_cancel(call, &Cancel::new()).await
+    }
+
+    async fn call_with_cancel(&self, call: &ToolCall, cancel: &Cancel) -> Outcome {
+        // La table de routage, avec le drapeau du run : le premier qui déclare
+        // l’outil l’exécute et reçoit l’annulation.
         for part in &self.parts {
             if part.specs().iter().any(|spec| spec.name == call.name) {
-                return part.call(call).await;
+                return part.call_with_cancel(call, cancel).await;
             }
         }
         Outcome::refused(

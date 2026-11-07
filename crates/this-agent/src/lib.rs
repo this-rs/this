@@ -50,7 +50,8 @@ impl Stop {
         match self {
             Stop::Done => "terminé".to_string(),
             Stop::Budget => {
-                "j'ai atteint la limite de tours sans conclure — dis-moi de continuer".to_string()
+                "j'ai atteint ma limite de tours ou de temps sans conclure — dis-moi de continuer"
+                    .to_string()
             }
             Stop::Refused(raison) => format!("bloqué : {raison}"),
             Stop::Failed(erreur) => format!("échec : {erreur}"),
@@ -255,6 +256,18 @@ impl Run {
         }
         self.ecoule_ms += step.ms;
         self.steps.push(step);
+    }
+
+    /// Ajoute du temps écoulé au run.
+    ///
+    /// C'est l'horloge murale d'un **tour du modèle**, pas la durée d'un outil :
+    /// les outils s'ajoutent déjà par [`Step::ms`] via [`Run::record`], et les
+    /// deux se cumulent dans [`Run::ecoule_ms`]. Mesuré : sans cette entrée, un
+    /// budget de 10 ms face à un modèle à 20 ms/tour et des outils instantanés
+    /// laissait passer 40 appels au modèle, arrêté par `max_tours` et non par le
+    /// budget.
+    pub fn add_elapsed(&mut self, ms: u64) {
+        self.ecoule_ms += ms;
     }
 
     /// Un budget de temps, en plus du budget de tours.
@@ -636,6 +649,18 @@ mod tests {
         assert_eq!(r.stop, Some(Stop::Budget));
     }
 
+    /// Le temps de mur des tours compte dans le budget, pas seulement le temps
+    /// des outils. Deux tours de 600 ms sans aucun outil dépassent un budget de
+    /// 1000 ms : l'arrêt vient de l'horloge, pas de `max_tours`.
+    #[test]
+    fn le_temps_des_tours_compte_dans_le_budget() {
+        let mut r = Run::new(Goal::new("boucle"), 100);
+        r.budget(1000);
+        r.add_elapsed(600);
+        r.add_elapsed(600);
+        assert_eq!(r.after_turn(true, false), Decision::Halt(Stop::Budget));
+    }
+
     #[test]
     fn un_succes_remet_les_relances_a_zero() {
         let mut r = run();
@@ -659,7 +684,11 @@ mod tests {
     #[test]
     fn chaque_arret_sait_se_dire() {
         assert_eq!(Stop::Done.phrase(), "terminé");
-        assert!(Stop::Budget.phrase().contains("limite de tours"));
+        assert!(
+            Stop::Budget
+                .phrase()
+                .contains("limite de tours ou de temps")
+        );
         assert!(Stop::Interrupted.phrase().contains("interrompu"));
         assert!(Stop::Refused("x".into()).phrase().contains("bloqué"));
     }
