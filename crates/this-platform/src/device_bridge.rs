@@ -171,6 +171,10 @@ pub const METHODS: &[&str] = &[
     // même décision de la personne — une notification n'est pas un contournement.
     "notificationsPost",
     "notificationsCancel",
+    // Planifier, et savoir ce qui attend : `notificationsPost` ne sait que poster tout de suite,
+    // ce qui oblige l'app à rester ouverte pour rappeler quelque chose.
+    "notificationsSchedule",
+    "notificationsPending",
     "liveActivityStatus",
     // Démarrer, mettre à jour et terminer une Live Activity : même capacité que la
     // permission. Une activité qui s'afficherait sur l'écran verrouillé sans que la
@@ -228,6 +232,9 @@ pub const METHODS: &[&str] = &[
     "motionActivityStatus",
     "motionActivityRequest",
     "motionStepsSample",
+    // Distance et étages : le podomètre les donne aussi, et « combien de kilomètres » est la
+    // question qu'on pose reellement, pas « combien de pas ».
+    "motionDistance",
 ];
 
 /// The capability a native method needs, derived from the method and its arguments.
@@ -258,7 +265,9 @@ pub fn capability_of(method: &str, args: &Value) -> Option<Capability> {
         "notificationsStatus"
         | "notificationsRequest"
         | "notificationsPost"
-        | "notificationsCancel" => Capability::Notifications,
+        | "notificationsCancel"
+        | "notificationsSchedule"
+        | "notificationsPending" => Capability::Notifications,
         "liveActivityStatus" | "liveActivityStart" | "liveActivityUpdate" | "liveActivityEnd" => {
             Capability::LiveActivity
         }
@@ -283,9 +292,10 @@ pub fn capability_of(method: &str, args: &Value) -> Option<Capability> {
         "nfcStatus" | "nfcReadOnce" => Capability::Nfc,
         "localNetworkStatus" | "localNetworkBrowse" => Capability::LocalNetwork,
         "locationSample" => Capability::Location,
-        "motionActivityStatus" | "motionActivityRequest" | "motionStepsSample" => {
-            Capability::MotionActivity
-        }
+        "motionActivityStatus"
+        | "motionActivityRequest"
+        | "motionStepsSample"
+        | "motionDistance" => Capability::MotionActivity,
         _ => return None,
     };
     Some(capability)
@@ -408,7 +418,9 @@ pub fn complete_args(method: &str, args: &Value, now_ms: f64) -> Value {
         // Une recherche sans borne rendrait le carnet entier : 20 est une réponse, pas un dump.
         "contactsSearch" => serde_json::json!({ "limit": 20 }),
         "contactsCreate" => serde_json::json!({ "emails": [], "phones": [] }),
-        "motionStepsSample" => serde_json::json!({ "from_ms": depuis, "to_ms": maintenant }),
+        "motionStepsSample" | "motionDistance" => {
+            serde_json::json!({ "from_ms": depuis, "to_ms": maintenant })
+        }
         // Camera and location carry their name in their arguments: without it the capability
         // is not even derivable, and the bridge answers `not_supported`.
         "captureRequest" | "captureStatus" => serde_json::json!({ "capability": "camera" }),
@@ -456,6 +468,8 @@ pub fn missing_args(method: &str, args: &Value) -> Option<&'static str> {
         "contactsCreate" => &["name"],
         "calendarUpdateEvent" | "calendarDeleteEvent" => &["id"],
         "photosRead" => &["id"],
+        // Un rappel sans texte ni délai n'est pas un rappel.
+        "notificationsSchedule" => &["title", "in_ms"],
         "filesWrite" => &["name", "data_base64"],
         "bluetoothRead" | "bluetoothSubscribe" | "bluetoothNotifications" => {
             &["id", "characteristic"]

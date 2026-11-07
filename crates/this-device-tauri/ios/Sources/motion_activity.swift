@@ -199,3 +199,66 @@ final class MotionStepsSample {
     Int64((date.timeIntervalSince1970 * 1000).rounded())
   }
 }
+
+// ---- Distance et étages ---------------------------------------------------------------
+//
+// Le podomètre donne la distance et les étages en même temps que les pas. « Combien de
+// kilomètres » est la question qu'on pose réellement ; la réponse tient dans la même requête.
+
+private struct MotionDistanceArgs: Decodable {
+  let fromMs: Int64
+  let toMs: Int64
+
+  private enum CodingKeys: String, CodingKey {
+    case fromMs = "from_ms"
+    case toMs = "to_ms"
+  }
+}
+
+private struct MotionDistanceReply: Encodable {
+  let kind = "distance"
+  let meters: Double
+  let floors_up: Int
+  let floors_down: Int
+}
+
+extension ThisDevicePlugin {
+  /// La distance et les étages d'une fenêtre. Les deux sont facultatifs côté système : un
+  /// appareil sans baromètre rend `floors_up` à 0, ce qui est une réponse, pas une panne.
+  @objc public func motionDistance(_ invoke: Invoke) throws {
+    let args = try invoke.parseArgs(MotionDistanceArgs.self)
+    guard CMPedometer.isDistanceAvailable() || CMPedometer.isFloorCountingAvailable() else {
+      invoke.resolve(Reply.error(code: ReplyCode.notSupported))
+      return
+    }
+    guard args.toMs > args.fromMs else {
+      invoke.resolve(Reply.error(code: "internal"))
+      return
+    }
+    let pedometer = CMPedometer()
+    // Le podomètre n'a pas de poignée à garder : la fermeture retient l'objet pendant l'appel.
+    MotionDistanceSession.active.insert(ObjectIdentifier(pedometer))
+    pedometer.queryPedometerData(
+      from: Date(timeIntervalSince1970: Double(args.fromMs) / 1000),
+      to: Date(timeIntervalSince1970: Double(args.toMs) / 1000)
+    ) { data, error in
+      MotionDistanceSession.active.remove(ObjectIdentifier(pedometer))
+      guard error == nil, let data = data else {
+        DispatchQueue.main.async { invoke.resolve(Reply.error(code: "internal")) }
+        return
+      }
+      let reply = MotionDistanceReply(
+        meters: data.distance?.doubleValue ?? 0,
+        floors_up: data.floorsAscended?.intValue ?? 0,
+        floors_down: data.floorsDescended?.intValue ?? 0
+      )
+      DispatchQueue.main.async { invoke.resolve(reply) }
+    }
+  }
+}
+
+/// Garde les podomètres en vol : sans ça, l'objet peut être libéré avant la réponse et la
+/// promesse d'invocation ne serait jamais résolue.
+enum MotionDistanceSession {
+  static var active: Set<ObjectIdentifier> = []
+}

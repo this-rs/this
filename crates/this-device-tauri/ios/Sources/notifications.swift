@@ -103,3 +103,105 @@ extension ThisDevicePlugin {
     NotificationStatus.read { invoke.resolve($0) }
   }
 }
+
+// ---- Planifier, et savoir ce qui attend -----------------------------------------------
+//
+// `notificationsPost` ne sait que poster tout de suite : rappeler quelque chose dans une heure
+// obligeait l'app à rester ouverte. Ces deux méthodes utilisent le déclencheur de temps du
+// système, et rendent la liste de ce qui attend — sans quoi une notification planifiée est
+// invisible jusqu'à ce qu'elle sonne.
+
+private struct NotificationScheduleArgs: Decodable {
+  let title: String
+  let body: String
+  let id: String
+  let inMs: Int64
+
+  private enum CodingKeys: String, CodingKey {
+    case title, body, id
+    case inMs = "in_ms"
+  }
+}
+
+/// Les bornes d'une planification, alignées sur `families/notif_live.rs`.
+enum ScheduleLimits {
+  static let delayMsMin: Int64 = 1_000
+  static let delayMsMax: Int64 = 30 * 24 * 60 * 60 * 1000
+  static let pendingMax = 50
+}
+
+private struct NotificationScheduledReply: Encodable {
+  let kind = "scheduled"
+  let id: String
+  let in_ms: Int64
+}
+
+private struct PendingEntryOut: Encodable {
+  let id: String
+  let title: String
+  let in_ms: Int64
+}
+
+private struct NotificationsPendingReply: Encodable {
+  let kind = "pending"
+  let notifications: [PendingEntryOut]
+}
+
+extension ThisDevicePlugin {
+  /// Planifie une notification dans `in_ms` millisecondes. Un identifiant qui existe déjà
+  /// remplace la planification précédente, comme le fait le système.
+  @objc public func notificationsSchedule(_ invoke: Invoke) throws {
+    let args = try invoke.parseArgs(NotificationScheduleArgs.self)
+    guard args.inMs >= ScheduleLimits.delayMsMin, args.inMs <= ScheduleLimits.delayMsMax,
+      !args.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    else {
+      invoke.resolve(Reply.error(code: "internal"))
+      return
+    }
+    let center = UNUserNotificationCenter.current()
+    center.getNotificationSettings { settings in
+      let state = NotificationStatus.name(settings.authorizationStatus)
+      guard state == "granted" else {
+        DispatchQueue.main.async { invoke.resolve(Reply.error(code: ReplyCode.notAuthorized)) }
+        return
+      }
+      let content = UNMutableNotificationContent()
+      content.title = args.title
+      content.body = args.body
+      content.sound = .default
+      let trigger = UNTimeIntervalNotificationTrigger(
+        timeInterval: Double(args.inMs) / 1000, repeats: false)
+      let request = UNNotificationRequest(identifier: args.id, content: content, trigger: trigger)
+      center.add(request) { error in
+        let reply: Encodable =
+          error == nil
+          ? NotificationScheduledReply(id: args.id, in_ms: args.inMs)
+          : Reply.error(code: "internal")
+        DispatchQueue.main.async { invoke.resolve(reply) }
+      }
+    }
+  }
+
+  /// Ce qui attend de sonner, dans l'ordre où le système le rendra. Ne demande aucune
+  /// autorisation : c'est une lecture de ce que l'app a elle-même planifié.
+  @objc public func notificationsPending(_ invoke: Invoke) {
+    UNUserNotificationCenter.current().getPendingNotificationRequests { requests in
+      let entries = requests.prefix(ScheduleLimits.pendingMax).map { request -> PendingEntryOut in
+        // Le délai restant vient du déclencheur : c'est lui qui dit « dans combien de temps »,
+        // et il n'y a pas d'autre source pour une planification encore en attente.
+        var inMs: Int64 = 0
+        if let trigger = request.trigger as? UNTimeIntervalNotificationTrigger {
+          inMs = Int64(trigger.timeInterval * 1000)
+        }
+        return PendingEntryOut(
+          id: request.identifier,
+          title: request.content.title,
+          in_ms: inMs
+        )
+      }
+      DispatchQueue.main.async {
+        invoke.resolve(NotificationsPendingReply(notifications: Array(entries)))
+      }
+    }
+  }
+}

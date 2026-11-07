@@ -498,6 +498,16 @@ pub fn surface() -> Surface {
                 &[Ios, Ipados, Macos],
                 Status::Live,
             ),
+            // Planifier et lire les attentes : iOS seulement pour l'instant (le pont macOS ne
+            // connaît que poster et retirer, `macos/Sources/notifications.swift`).
+            Capability::new(
+                "device.notifications.schedule",
+                Tier::Shell,
+                "PLANIFIER une notification (1 s à 30 jours) et lire celles qui attendent",
+                Some("notificationsSchedule / notificationsPending"),
+                &[Ios, Ipados],
+                Status::Live,
+            ),
             Capability::new(
                 "device.camera",
                 Tier::Shell,
@@ -694,8 +704,10 @@ pub fn surface() -> Surface {
             Capability::new(
                 "device.motion_activity",
                 Tier::Shell,
-                "pas et activité physique sur une fenêtre bornée",
-                Some("motionActivityStatus / motionActivityRequest / motionStepsSample"),
+                "pas, activité physique, DISTANCE et ÉTAGES sur une fenêtre bornée",
+                Some(
+                    "motionActivityStatus / motionActivityRequest / motionStepsSample / motionDistance",
+                ),
                 &[Ios, Ipados],
                 Status::Live,
             ),

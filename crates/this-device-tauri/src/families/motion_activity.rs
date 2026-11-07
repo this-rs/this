@@ -54,12 +54,23 @@ pub struct StepsSample {
 }
 
 /// What the native side answers for this family.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum MotionReply {
-    Status { state: PermissionState },
+    Status {
+        state: PermissionState,
+    },
     Steps(StepsSample),
-    Error { code: DeviceError },
+    /// La distance et les étages d'une fenêtre. `None` n'existe pas : un appareil sans baromètre
+    /// rend zéro étage, ce qui est une réponse et non une absence.
+    Distance {
+        meters: f64,
+        floors_up: i32,
+        floors_down: i32,
+    },
+    Error {
+        code: DeviceError,
+    },
 }
 
 #[cfg(test)]
@@ -208,5 +219,19 @@ mod tests {
     #[test]
     fn an_unknown_kind_is_refused_not_guessed() {
         assert!(serde_json::from_str::<MotionReply>(r#"{"kind":"accelerometer","x":0}"#).is_err());
+    }
+
+    #[test]
+    fn a_distance_answer_keeps_its_three_numbers() {
+        let brut = r#"{"kind":"distance","meters":1234.5,"floors_up":3,"floors_down":1}"#;
+        let reply: MotionReply = serde_json::from_str(brut).unwrap();
+        assert_eq!(
+            reply,
+            MotionReply::Distance {
+                meters: 1234.5,
+                floors_up: 3,
+                floors_down: 1,
+            }
+        );
     }
 }

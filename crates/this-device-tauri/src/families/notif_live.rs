@@ -173,6 +173,42 @@ pub enum ActivityReply {
     Error { code: String },
 }
 
+/// Les bornes d'une planification, en millisecondes. En dessous d'une seconde, le système
+/// déclenche « tout de suite » et la promesse « dans un instant » est fausse ; au-delà de trente
+/// jours, ce n'est plus un rappel, c'est une date.
+pub const SCHEDULE_MS_MIN: i64 = 1_000;
+pub const SCHEDULE_MS_MAX: i64 = 30 * 24 * 60 * 60 * 1000;
+/// Le plus de notifications en attente qu'une lecture rend.
+pub const PENDING_MAX: usize = 50;
+
+/// One notification waiting to be shown.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PendingEntry {
+    pub id: String,
+    pub title: String,
+    pub in_ms: i64,
+}
+
+/// Ce que la planification et la lecture des attentes répondent.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ScheduledReply {
+    Scheduled { id: String, in_ms: i64 },
+    Pending { notifications: Vec<PendingEntry> },
+    Error { code: String },
+}
+
+/// Le délai vérifié d'une planification : un texte, et une échéance dans les bornes.
+pub fn checked_schedule(title: &str, in_ms: i64) -> Result<i64, ScheduledReply> {
+    if title.trim().is_empty() || !(SCHEDULE_MS_MIN..=SCHEDULE_MS_MAX).contains(&in_ms) {
+        return Err(ScheduledReply::Error {
+            code: "internal".to_string(),
+        });
+    }
+    Ok(in_ms)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -405,5 +441,48 @@ mod tests {
             assert_eq!(serde_json::from_str::<ActivityReply>(wire).unwrap(), reply);
             assert_eq!(serde_json::to_string(&reply).unwrap(), wire);
         }
+    }
+
+    #[test]
+    fn a_schedule_keeps_its_delay_in_the_native_range() {
+        assert!(checked_schedule("Rappel", 500).is_err());
+        assert!(checked_schedule("Rappel", 60_000).is_ok());
+        assert!(checked_schedule("Rappel", 60 * 24 * 60 * 60 * 1000).is_err());
+        assert!(checked_schedule("   ", 60_000).is_err());
+    }
+
+    #[test]
+    fn the_pending_list_and_the_scheduled_answer_decode() {
+        let scheduled: ScheduledReply =
+            serde_json::from_str(r#"{"kind":"scheduled","id":"a","in_ms":60000}"#).unwrap();
+        assert_eq!(
+            scheduled,
+            ScheduledReply::Scheduled {
+                id: "a".into(),
+                in_ms: 60_000
+            }
+        );
+        let pending: ScheduledReply = serde_json::from_str(
+            r#"{"kind":"pending","notifications":[{"id":"a","title":"Rappel","in_ms":60000}]}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            pending,
+            ScheduledReply::Pending {
+                notifications: vec![PendingEntry {
+                    id: "a".into(),
+                    title: "Rappel".into(),
+                    in_ms: 60_000
+                }]
+            }
+        );
+    }
+
+    #[test]
+    fn a_pending_entry_refuses_a_field_it_does_not_know() {
+        assert!(
+            serde_json::from_str::<PendingEntry>(r#"{"id":"a","title":"t","in_ms":1,"x":2}"#)
+                .is_err()
+        );
     }
 }
