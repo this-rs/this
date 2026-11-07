@@ -476,25 +476,36 @@ impl Run {
                 });
                 return Decision::Continue;
             }
-            // Le rappel a été envoyé et le récit reste non prouvé : ce n'est pas `Done`. Un
-            // refus en suspens se dit plus bas ; sinon, l'écriture contredite (refusée,
-            // jamais reprise) dit son motif, et à défaut le verdict « non vérifié » devient
-            // la raison d'arrêt — `Stop::Failed`, parce que l'objectif n'est pas atteint et
-            // que rien n'a été refusé.
+            // Le rappel a été envoyé et le récit reste non prouvé. Un refus en suspens se dit
+            // plus bas ; sinon, l'écriture contredite (refusée, jamais reprise) dit son motif.
+            // « Récit non vérifié » n'est un échec que si une écriture refusée ou en échec
+            // reste en plan dans le run : le récit couvre alors peut-être ce qui a raté. Sans
+            // écriture en plan (en particulier sans aucune écriture), le récit non prouvé
+            // n'est contredit par aucun fait : le run finit en `Done` et le verdict
+            // `Unverified` le dit — une explication honnête ne devient pas un échec.
             if en_suspens.is_none() {
-                return self.halt(match &non_prouve.etape {
+                let en_plan =
+                    !evidence::unrepaired_with(&self.steps, &self.declarations).is_empty();
+                match &non_prouve.etape {
                     Some(etape) if etape.refused => {
-                        Stop::Refused(etape.motif.clone().unwrap_or(etape.resume.clone()))
+                        return self.halt(Stop::Refused(
+                            etape.motif.clone().unwrap_or(etape.resume.clone()),
+                        ));
                     }
-                    Some(etape) => Stop::Failed(format!(
-                        "l'outil a échoué : {}",
-                        etape.failure.clone().unwrap_or(etape.resume.clone())
-                    )),
-                    None => Stop::Failed(format!(
-                        "récit non vérifié : « {} » — {}, même après un rappel",
-                        non_prouve.phrase, non_prouve.manque
-                    )),
-                });
+                    Some(etape) => {
+                        return self.halt(Stop::Failed(format!(
+                            "l'outil a échoué : {}",
+                            etape.failure.clone().unwrap_or(etape.resume.clone())
+                        )));
+                    }
+                    None if en_plan => {
+                        return self.halt(Stop::Failed(format!(
+                            "récit non vérifié : « {} » — {}, même après un rappel",
+                            non_prouve.phrase, non_prouve.manque
+                        )));
+                    }
+                    None => {}
+                }
             }
         }
         if let Some(etape) = en_suspens {
@@ -729,24 +740,58 @@ mod tests {
         assert_eq!(r.take_rappel(), None);
     }
 
-    /// W12 MOY 5 : avant, le récit répété après le rappel finissait en `Done` (verdict
-    /// `Unverified` caché derrière « terminé »). Désormais l'arrêt le dit.
+    /// Y09 BLOQUANT 1 (remplace W12 MOY 5) : sans aucune écriture dans le run, un récit qui
+    /// reste non prouvé après le rappel n'est contredit par aucun fait. Le run finit en
+    /// `Done`, et c'est le verdict `Unverified` qui le dit — pas un `Failed` qui ferait
+    /// d'une réponse peut-être honnête un échec.
     #[test]
-    fn un_seul_rappel_puis_non_verifie_si_le_recit_reste_non_prouve() {
+    fn un_seul_rappel_puis_done_non_verifie_sans_aucune_ecriture() {
         let mut r = run();
         r.said("J'ai créé la fiche.");
         assert_eq!(r.after_turn(true, false), Decision::Continue);
+        assert!(r.take_rappel().is_some());
         r.said("J'ai créé la fiche.");
+        assert_eq!(r.after_turn(true, false), Decision::Halt(Stop::Done));
+        assert_eq!(r.rappels_recit, 1);
+        assert_eq!(r.verdict(), evidence::Verdict::Unverified);
+    }
+
+    /// Avec une écriture refusée restée en plan (rattrapée pour le run par une autre
+    /// écriture, mais jamais reprise par le même outil), le récit non prouvé après le rappel
+    /// reste un échec : « récit non vérifié ».
+    #[test]
+    fn un_seul_rappel_puis_non_verifie_si_une_ecriture_reste_en_plan() {
+        let mut r = run();
+        r.record(Step::tool("install_module", 10).refused("même version"));
+        r.after_turn(false, true);
+        r.record(Step::tool("row_create", 3).state("0", "1"));
+        r.after_turn(false, true);
+        r.said("Je me souviens que tu préfères le thé.");
+        assert_eq!(r.after_turn(true, false), Decision::Continue);
+        r.said("Je me souviens que tu préfères le thé.");
         match r.after_turn(true, false) {
             Decision::Halt(Stop::Failed(raison)) => {
                 assert!(raison.contains("récit non vérifié"), "{raison}");
-                assert!(raison.contains("J'ai créé la fiche"), "{raison}");
+                assert!(raison.contains("Je me souviens"), "{raison}");
             }
             autre => panic!("attendu un arrêt non vérifié, obtenu {autre:?}"),
         }
         assert_eq!(r.rappels_recit, 1);
-        assert_eq!(r.verdict(), evidence::Verdict::Unverified);
         assert!(r.resume_pour_l_utilisateur().contains("non vérifié"));
+    }
+
+    /// Une explication de l'Atelier, sans aucune écriture : ni rappel, ni échec.
+    #[test]
+    fn une_explication_au_passif_sans_ecriture_termine_sans_rappel() {
+        let mut r = run();
+        r.said(
+            "Un module est installé dans l'espace de travail : il apporte ses tables. \
+             La fiche est créée automatiquement à la première saisie.",
+        );
+        assert_eq!(r.after_turn(true, false), Decision::Halt(Stop::Done));
+        assert_eq!(r.take_rappel(), None);
+        assert_eq!(r.rappels_recit, 0);
+        assert_eq!(r.verdict(), evidence::Verdict::Unverified);
     }
 
     #[test]
