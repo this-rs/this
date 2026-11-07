@@ -1165,7 +1165,8 @@ impl Authorization {
     }
 
     /// [`Authorization::decide_with`] plus, when the MODULE (not the caller) was refused, the
-    /// named [`ContractError`] (`this.auth.module_forbidden`) the surface must send as is.
+    /// named [`ContractError`](crate::descriptor::ContractError)
+    /// (`this.auth.module_forbidden`) the surface must send as is.
     #[allow(clippy::result_large_err)]
     pub fn decide_traced(
         &self,
