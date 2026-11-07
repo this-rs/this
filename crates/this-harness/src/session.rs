@@ -76,6 +76,15 @@ pub const NO_PROGRESS_MS: u64 = 10 * 60 * 1000;
 /// outil pendu libère la session sans que trois outils lents l'épuisent.
 pub const TOOL_TIMEOUT_MS: u64 = 5 * 60 * 1000;
 
+/// Budget de contexte par défaut d'un tour, en jetons **estimés**.
+///
+/// C'est la troisième borne du run, après les tours et le temps. Sans elle, le
+/// transcript grossit jusqu'au refus du moteur (« prompt is too long »), qui
+/// arrive comme une panne opaque au milieu d'une conversation. La valeur est un
+/// plancher pour un hôte qui ne connaît pas la fenêtre du modèle : un hôte qui la
+/// connaît doit la fixer lui-même (`Limits::context_budget`), pas la deviner.
+pub const CONTEXT_BUDGET: usize = 120_000;
+
 /// Relances accordées à un tour qui a échoué sur une panne passagère.
 pub const MAX_RETRIES: u32 = 3;
 
@@ -445,6 +454,14 @@ pub struct Limits {
     /// l'appel est abandonné et le modèle lit « délai dépassé » (`None` : pas
     /// de plafond — l'annulation reste, elle, toujours gardée).
     pub tool_timeout_ms: Option<u64>,
+    /// Budget de **contexte** d'un tour, en jetons estimés (`None` : tout envoyer).
+    ///
+    /// La troisième borne du run, après les tours et le temps : passé ce budget,
+    /// les messages les plus anciens sortent de la requête (un appel d'outil et
+    /// ses réponses sortent ensemble) et un [`Event::Trimmed`] dit ce qui a été
+    /// retiré. Rien n'est coupé en silence. L'estimation est approximative —
+    /// c'est un plancher, à fixer depuis la fenêtre réelle du modèle.
+    pub context_budget: Option<usize>,
 }
 
 impl Limits {
@@ -457,6 +474,7 @@ impl Limits {
             max_tours: doc.max_tours,
             max_relances: doc.max_relances,
             budget_ms: doc.budget_ms,
+            context_budget: Some(CONTEXT_BUDGET),
             silence_ms: Some(SILENCE_MS),
             no_progress_ms: Some(NO_PROGRESS_MS),
             tool_timeout_ms: Some(TOOL_TIMEOUT_MS),
@@ -473,6 +491,7 @@ impl Default for Limits {
             max_tours: 12,
             max_relances: 3,
             budget_ms: Some(15 * 60 * 1000),
+            context_budget: Some(CONTEXT_BUDGET),
             silence_ms: Some(SILENCE_MS),
             no_progress_ms: Some(NO_PROGRESS_MS),
             tool_timeout_ms: Some(TOOL_TIMEOUT_MS),
@@ -1347,8 +1366,36 @@ impl Harness {
 
     /// La requête du tour : le transcript, plus le contexte éphémère s'il y en
     /// a un — inséré dans la copie, jamais dans le transcript lui-même.
+    /// La requête d'un tour, ramenée sous le budget de contexte s'il y en a un.
+    ///
+    /// Le fit se fait ICI et pas dans `Request` : c'est le harnais qui porte la
+    /// borne (elle vient de `Limits`), et un transport qui devrait la respecter
+    /// lui-même serait un transport qu'on ne peut pas brancher deux fois.
     fn request(&self, toolbox: &dyn Toolbox, context: Option<String>) -> Request {
-        let (system, messages) = self.with(|s| (s.system.clone(), s.transcript.clone()));
+        let (system, messages, budget) = self.with(|s| {
+            (
+                s.system.clone(),
+                s.transcript.clone(),
+                s.limits.context_budget,
+            )
+        });
+        let messages = match budget {
+            None => messages,
+            Some(budget) => {
+                let fitted = crate::context::fit(&messages, budget);
+                if !fitted.dropped.is_empty() {
+                    // Un oubli se dit, toujours : c'est la différence entre un
+                    // modèle qui a la mémoire courte et un modèle qui invente.
+                    self.out.emit(Event::Trimmed {
+                        messages: fitted.dropped.messages,
+                        tokens: fitted.dropped.tokens,
+                        over_budget: fitted.dropped.over_budget,
+                        excess: fitted.dropped.excess,
+                    });
+                }
+                fitted.kept
+            }
+        };
         Request::new(system, messages, toolbox.specs()).with_context(context)
     }
 

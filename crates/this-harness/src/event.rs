@@ -97,6 +97,21 @@ pub enum Event {
     },
     /// Le texte définitif du tour (il remplace les deltas accumulés).
     Spoke { text: String },
+    /// La requête a été ramenée sous le budget de contexte, et voici ce qui n'y
+    /// est plus. Un tour qui oublie doit le dire : un fil coupé en silence se lit
+    /// comme un modèle qui a perdu la mémoire, et personne ne peut le distinguer
+    /// d'une hallucination.
+    Trimmed {
+        /// Messages retirés de la requête.
+        messages: usize,
+        /// Jetons estimés retirés.
+        tokens: usize,
+        /// Le fil gardé dépasse quand même le budget : le dernier message
+        /// utilisateur ou une consigne système ne se coupent pas.
+        over_budget: bool,
+        /// De combien, en jetons estimés.
+        excess: usize,
+    },
     /// Le run s'est arrêté, et il dit pourquoi.
     Stopped {
         stop: Stop,
@@ -156,6 +171,7 @@ impl Event {
             Self::ToolUse { .. } => "tool_use",
             Self::ToolResult { .. } => "tool_result",
             Self::Spoke { .. } => "spoke",
+            Self::Trimmed { .. } => "trimmed",
             Self::Stopped { .. } => "stopped",
         }
     }

@@ -62,9 +62,9 @@ pub use context::{Dropped, Fitted, estimate_tokens, fit};
 pub use event::{Event, HintKind, Outcome, Pending, Snapshot};
 pub use ports::{Cancel, Delta, Toolbox, Toolboxes, Transport};
 pub use session::{
-    Clock, Handle, Harness, INTERRUPT_GRACE_MS, KEEP_ALIVE, Limits, MAX_RETRIES, NO_PROGRESS_MS,
-    RETRY_BACKOFF_MS, Running, SILENCE_MS, Shared, Sleep, SystemClock, TOOL_TIMEOUT_MS,
-    TurnContext, out_hash,
+    CONTEXT_BUDGET, Clock, Handle, Harness, INTERRUPT_GRACE_MS, KEEP_ALIVE, Limits, MAX_RETRIES,
+    NO_PROGRESS_MS, RETRY_BACKOFF_MS, Running, SILENCE_MS, Shared, Sleep, SystemClock,
+    TOOL_TIMEOUT_MS, TurnContext, out_hash,
 };
 pub use wire::{
     Code, Failure, Finish, ImagePart, ImageSource, Message, Reply, Request, ToolCall, ToolSpec,
