@@ -226,6 +226,12 @@ pub struct Run {
     /// [`evidence::Declaration`]. Vide, la preuve devine d'après les noms des outils.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub declarations: Vec<evidence::Declaration>,
+    /// Rangs des étapes dont l'effet est **inconnu** : un outil abandonné (plafond dépassé,
+    /// sourd à l'annulation) a pu finir après coup. Son étape porte « délai dépassé » pour
+    /// que le modèle ne la croie pas réussie, mais ce n'est ni un échec prouvé, ni un refus
+    /// à rattraper, ni une preuve : la décision ne la lit pas (voir [`Run::effet_inconnu`]).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub inconnues: Vec<usize>,
     pub stop: Option<Stop>,
 }
 
@@ -277,6 +283,7 @@ impl Run {
             rappels_recit: 0,
             rappel: None,
             declarations: Vec::new(),
+            inconnues: Vec::new(),
             stop: None,
         }
     }
@@ -286,6 +293,29 @@ impl Run {
     /// apporte les siennes.
     pub fn declare(&mut self, declarations: impl IntoIterator<Item = evidence::Declaration>) {
         self.declarations = declarations.into_iter().collect();
+    }
+
+    /// L'étape de rang `index` a un effet **inconnu** (outil abandonné) : la décision ne la
+    /// compte ni comme refus ou échec à rattraper, ni comme preuve. Un récit qui s'appuie
+    /// sur elle reçoit un rappel qui demande de VÉRIFIER l'effet, pas de refaire l'action.
+    pub fn effet_inconnu(&mut self, index: usize) {
+        if !self.inconnues.contains(&index) {
+            self.inconnues.push(index);
+        }
+    }
+
+    /// L'étape a-t-elle un effet inconnu ?
+    pub fn est_inconnue(&self, etape: &Step) -> bool {
+        self.inconnues.contains(&(etape.index as usize))
+    }
+
+    /// Les étapes dont l'effet est connu : ce que la décision confronte au récit.
+    fn connues(&self) -> Vec<Step> {
+        self.steps
+            .iter()
+            .filter(|etape| !self.est_inconnue(etape))
+            .cloned()
+            .collect()
     }
 
     pub fn record(&mut self, mut step: Step) {
@@ -311,9 +341,10 @@ impl Run {
     }
 
     /// Ce que les faits disent du run : voir [`evidence::verdict`].
+    /// Les étapes à l'effet inconnu ([`Run::effet_inconnu`]) n'y comptent pas.
     pub fn verdict(&self) -> evidence::Verdict {
         evidence::verdict_with(
-            &self.steps,
+            &self.connues(),
             self.stop == Some(Stop::Done),
             &self.declarations,
         )
@@ -335,10 +366,9 @@ impl Run {
         // Seules les étapes qui portent une observation peuvent être jugées :
         // sans empreinte, on ne sait pas si l'état a bougé, et conclure « rien
         // n'a changé » serait une affirmation sans mesure.
-        self.du_tour()
-            .iter()
-            .rev()
-            .find(|etape| !etape.before.is_empty() && !etape.a_change())
+        self.du_tour().iter().rev().find(|etape| {
+            !self.est_inconnue(etape) && !etape.before.is_empty() && !etape.a_change()
+        })
     }
 
     /// Le dernier échec d'outil **du tour en cours**. Comme pour les refus, un échec ancien ne
@@ -347,13 +377,16 @@ impl Run {
         self.du_tour()
             .iter()
             .rev()
-            .find(|etape| etape.failure.is_some())
+            .find(|etape| !self.est_inconnue(etape) && etape.failure.is_some())
     }
 
     /// Le dernier refus **du tour en cours**. Cherché sur tout le run, un refus
     /// ancien condamnait chaque tour suivant.
     pub fn derniere_refusee(&self) -> Option<&Step> {
-        self.du_tour().iter().rev().find(|etape| etape.refused)
+        self.du_tour()
+            .iter()
+            .rev()
+            .find(|etape| etape.refused && !self.est_inconnue(etape))
     }
 
     /// Décide de la suite, après un tour du modèle.
@@ -457,11 +490,46 @@ impl Run {
         // (tour qui appelait, donc `Continue`) suivi d'un tour texte seul « c'est fait »
         // passait pour une conclusion, la frontière du tour ayant effacé le refus.
         self.tour_debut = fin_du_tour;
-        let en_suspens = evidence::unresolved_with(&self.steps, &self.declarations).cloned();
-        if let Some(non_prouve) = evidence::unproven_with(&recit, &self.steps, &self.declarations) {
+        // Une étape à l'effet inconnu (outil abandonné) n'est ni un refus non rattrapé, ni une
+        // preuve : les faits se lisent sur les autres étapes.
+        let connues = self.connues();
+        let inconnue = self
+            .steps
+            .iter()
+            .rev()
+            .find(|etape| self.est_inconnue(etape))
+            .cloned();
+        let en_suspens = evidence::unresolved_with(&connues, &self.declarations).cloned();
+        let non_prouve =
+            evidence::unproven_with(&recit, &connues, &self.declarations).or_else(|| {
+                // Retirée des faits, l'écriture abandonnée ne compte plus comme « tentée » : un
+                // récit au passif qui ne s'appuie que sur elle passerait. Relu sur tout le run,
+                // il n'est retenu que s'il vise justement l'étape inconnue.
+                inconnue.as_ref()?;
+                evidence::unproven_with(&recit, &self.steps, &self.declarations)
+                    .filter(|u| u.etape.as_ref().is_some_and(|e| self.est_inconnue(e)))
+            });
+        if let Some(mut non_prouve) = non_prouve {
+            // Le récit s'appuie sur l'étape inconnue (il la vise, ou rien d'autre ne le prouve) :
+            // le rappel demande de vérifier l'effet, pas de refaire l'action.
+            let outil_inconnu = match &non_prouve.etape {
+                Some(etape) if self.est_inconnue(etape) => Some(etape.tool.clone()),
+                Some(_) => None,
+                None => inconnue.as_ref().map(|etape| etape.tool.clone()),
+            };
+            if non_prouve
+                .etape
+                .as_ref()
+                .is_some_and(|etape| self.est_inconnue(etape))
+            {
+                non_prouve.etape = None;
+            }
             if self.rappels_recit == 0 {
                 self.rappels_recit += 1;
-                let rappel = non_prouve.rappel();
+                let rappel = match &outil_inconnu {
+                    Some(outil) => non_prouve.rappel_effet_inconnu(outil),
+                    None => non_prouve.rappel(),
+                };
                 self.rappel = Some(match &en_suspens {
                     Some(etape) if !rappel.contains(&format!("`{}`", etape.tool)) => format!(
                         "{rappel} Pour mémoire, `{}` n'a pas abouti dans ce run : {}.",
@@ -484,8 +552,7 @@ impl Run {
             // n'est contredit par aucun fait : le run finit en `Done` et le verdict
             // `Unverified` le dit — une explication honnête ne devient pas un échec.
             if en_suspens.is_none() {
-                let en_plan =
-                    !evidence::unrepaired_with(&self.steps, &self.declarations).is_empty();
+                let en_plan = !evidence::unrepaired_with(&connues, &self.declarations).is_empty();
                 match &non_prouve.etape {
                     Some(etape) if etape.refused => {
                         return self.halt(Stop::Refused(
@@ -936,6 +1003,73 @@ mod tests {
         assert_eq!(r.after_turn(true, false), Decision::Halt(Stop::Done));
     }
 
+    // ---- Z01 : étape abandonnée (effet inconnu) ------------------------------------
+
+    /// L'étape d'un outil abandonné, telle que la boucle l'enregistre (« délai dépassé »).
+    fn abandonnee(r: &mut Run, outil: &str) {
+        r.record(Step::tool(outil, 30_000).failed("délai dépassé (30 s)"));
+        let index = r.steps.len() - 1;
+        r.effet_inconnu(index);
+    }
+
+    #[test]
+    fn une_etape_abandonnee_n_est_pas_un_echec_pour_la_decision() {
+        let mut r = run();
+        abandonnee(&mut r, "install_module");
+        assert_eq!(r.derniere_en_echec(), None);
+        assert_eq!(r.after_turn(false, true), Decision::Continue);
+        r.said("L'outil n'a pas répondu à temps : je ne sais pas si le module est installé.");
+        assert_eq!(r.after_turn(true, false), Decision::Halt(Stop::Done));
+        assert_eq!(r.take_rappel(), None);
+    }
+
+    /// Le même tour sans le marquage : l'échec bloque (c'est ce que la session évitait mal).
+    #[test]
+    fn sans_marquage_le_delai_depasse_reste_un_echec() {
+        let mut r = run();
+        r.record(Step::tool("install_module", 30_000).failed("délai dépassé (30 s)"));
+        assert_eq!(r.after_turn(false, true), Decision::Continue);
+        r.said("L'outil n'a pas répondu à temps.");
+        assert!(matches!(
+            r.after_turn(true, false),
+            Decision::Halt(Stop::Failed(_))
+        ));
+    }
+
+    #[test]
+    fn un_recit_appuye_sur_une_etape_abandonnee_demande_de_verifier() {
+        let mut r = run();
+        abandonnee(&mut r, "install_module");
+        assert_eq!(r.after_turn(false, true), Decision::Continue);
+        r.said("J'ai installé le module.");
+        assert_eq!(r.after_turn(true, false), Decision::Continue);
+        let rappel = r.take_rappel().expect("un rappel");
+        assert!(rappel.starts_with(evidence::RAPPEL), "{rappel}");
+        assert!(rappel.contains("`install_module`"), "{rappel}");
+        assert!(
+            rappel.contains("vérifie son effet en relisant l'état"),
+            "{rappel}"
+        );
+        assert!(rappel.contains("Ne refais pas l'action"), "{rappel}");
+        // Il insiste sans rien vérifier : aucun fait ne le contredit, le run finit et le
+        // verdict dit `Unverified` (pas un échec inventé).
+        r.said("J'ai installé le module.");
+        assert_eq!(r.after_turn(true, false), Decision::Halt(Stop::Done));
+        assert_eq!(r.verdict(), evidence::Verdict::Unverified);
+    }
+
+    /// L'étape inconnue ne blanchit pas un vrai refus antérieur.
+    #[test]
+    fn une_etape_abandonnee_ne_rattrape_pas_un_refus() {
+        let mut r = run();
+        r.record(Step::tool("install_module", 10).refused("même version"));
+        abandonnee(&mut r, "install_module");
+        assert_eq!(r.after_turn(false, true), Decision::Continue);
+        assert_eq!(
+            r.after_turn(true, false),
+            Decision::Halt(Stop::Refused("même version".into()))
+        );
+    }
     /// Un échec n'est pas un refus, et inversement : les deux restent distinguables.
     #[test]
     fn un_echec_n_est_pas_un_refus() {
