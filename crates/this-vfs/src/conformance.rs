@@ -172,6 +172,36 @@ pub async fn shape_conflicts(v: &dyn Vfs) {
     ));
 }
 
+/// Empty content is a valid file: it is written, read back as empty, and its etag is
+/// the etag of the empty content (never a path-derived or missing value). The module
+/// store refuses empty *assets* at its own level; at the VFS level an empty file must
+/// still be storable and readable.
+pub async fn empty_file(v: &dyn Vfs) {
+    let path = p("/empty/descriptor.json");
+    let meta = v.write(&path, b"", Precondition::None).await.unwrap();
+    assert_eq!(meta.size, 0);
+    assert_eq!(meta.etag, etag_of(b""));
+    assert_eq!(v.read(&path).await.unwrap(), b"");
+    assert_eq!(v.stat(&path).await.unwrap().unwrap().etag, meta.etag);
+}
+
+/// Etags are content-addressed: equal bytes produce equal etags on the same backend,
+/// whatever the path, and different bytes produce different etags. This is the property
+/// idempotent puts (immutability) and integrity checks rely on.
+pub async fn etag_is_content_addressed(v: &dyn Vfs) {
+    let a = p("/ca/a");
+    let b = p("/ca/b");
+    let bytes = b"same content";
+    let ma = v.write(&a, bytes, Precondition::None).await.unwrap();
+    let mb = v.write(&b, bytes, Precondition::None).await.unwrap();
+    assert_eq!(ma.etag, mb.etag, "equal content => equal etag");
+    let other = v.write(&a, b"other", Precondition::None).await.unwrap();
+    assert_ne!(ma.etag, other.etag, "different content => different etag");
+    // Re-writing the same bytes keeps the etag (idempotence of the content address).
+    let again = v.write(&a, bytes, Precondition::None).await.unwrap();
+    assert_eq!(again.etag, ma.etag, "same content rewritten => same etag");
+}
+
 /// Every case, in one call (backends with an expensive setup).
 pub async fn run_all(v: &dyn Vfs) {
     read_write_roundtrip(v).await;
@@ -180,4 +210,6 @@ pub async fn run_all(v: &dyn Vfs) {
     list_dir(v).await;
     delete_missing_not_found(v).await;
     shape_conflicts(v).await;
+    empty_file(v).await;
+    etag_is_content_addressed(v).await;
 }

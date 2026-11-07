@@ -197,6 +197,15 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn vfs_conformance_empty_file_memory() {
+        conformance::empty_file(&InMemoryVfs::new()).await;
+    }
+    #[tokio::test]
+    async fn vfs_conformance_etag_is_content_addressed_memory() {
+        conformance::etag_is_content_addressed(&InMemoryVfs::new()).await;
+    }
+
+    #[tokio::test]
     async fn memory_snapshot_is_read_only() {
         let v = InMemoryVfs::new();
         let p = VfsPath::parse("/a").unwrap();

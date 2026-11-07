@@ -14,10 +14,14 @@
 //! # Guarantees
 //!
 //! - **Fail-closed put**: `check(Stored)`, bundle checks (module, syntax, key namespace,
-//!   locale declared and unique case-insensitively), asset path checks, and
+//!   locale declared and unique case-insensitively), asset checks (valid path, no
+//!   case-insensitive duplicate, non-empty, under [`MAX_ASSET_BYTES`]), and
 //!   `check_compat` against EVERY stored version in semver order (yanked included: a
 //!   yanked version's tags stay published; a backport is checked against the versions
 //!   above it) run BEFORE anything is written.
+//! - **Fail-closed code**: a version that carries executable code (`program.wasm` or any
+//!   `.wasm` asset) is admitted only under a declared trust anchor. A store with no
+//!   anchor refuses such a version with `this.module.unsigned`.
 //! - **Immutable versions**: a committed version is never rewritten. Putting the same
 //!   content again is idempotent (returns the manifest's meta); different content is
 //!   refused with `this.vfs.precondition_failed` (`Aborted`, 409).
@@ -58,7 +62,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 #[cfg(feature = "module-signing")]
 use this_vfs::layout::SignatureBlock;
-use this_vfs::layout::{DESCRIPTOR_FILE, MANIFEST_FILE, MANIFEST_FORMAT, Manifest, YANKED_DIR};
+use this_vfs::layout::{
+    DESCRIPTOR_FILE, MANIFEST_FILE, MANIFEST_FORMAT, MAX_ASSET_BYTES, Manifest, YANKED_DIR,
+};
 
 /// The keys a host accepts for stored modules.
 ///
@@ -161,6 +167,12 @@ fn locale_ok(l: &Locale) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
 }
 
+/// Whether an asset carries executable code: `program.wasm` and any other `.wasm`
+/// file. Such a version is admitted only under a declared trust anchor (fail-closed).
+fn is_code_asset(rel: &str) -> bool {
+    rel.ends_with(".wasm")
+}
+
 fn immutable(path: &VfsPath) -> ContractError {
     ContractError::framework(codes::VFS_PRECONDITION_FAILED)
         .with_param("path", path.as_str())
@@ -178,21 +190,6 @@ fn json<T: Serialize>(v: &T) -> Result<Vec<u8>, ContractError> {
         .map_err(|e| ContractError::framework(codes::INTERNAL).with_param("reason", e.to_string()))
 }
 
-/// The exact bytes a signature covers: the manifest re-serialized **without** its
-/// signature block.
-///
-/// Deterministic because the fields are a fixed-order struct and `files` is a
-/// `BTreeMap`: the same manifest always produces the same bytes, on the signing
-/// side and on the verifying side, without a bespoke canonicalization format.
-#[cfg(feature = "module-signing")]
-fn canonical_manifest_bytes(m: &Manifest) -> Result<Vec<u8>, ContractError> {
-    let mut bare = m.clone();
-    bare.signature = None;
-    serde_json::to_vec(&bare).map_err(|e| {
-        ContractError::framework(codes::MODULE_BAD_SIGNATURE).with_param("reason", e.to_string())
-    })
-}
-
 /// `ModuleStore` over a `Vfs`.
 pub struct VfsModuleStore {
     vfs: Arc<dyn Vfs>,
@@ -206,9 +203,6 @@ pub struct VfsModuleStore {
     /// Publisher side: the key this store signs committed manifests with.
     #[cfg(feature = "module-signing")]
     signing: Option<(String, ed25519_dalek::SigningKey)>,
-    /// Strict mode: a version that carries code (`.wasm` artifact) is refused unless a
-    /// trust anchor is declared. Off by default: the historical behaviour is kept.
-    code_requires_anchor: bool,
     /// Serializes put/remove/yank in this process (check-then-commit sequences).
     write_lock: tokio::sync::Mutex<()>,
 }
@@ -233,7 +227,6 @@ impl VfsModuleStore {
             root: VfsPath::parse("/modules").expect("static path"),
             #[cfg(feature = "module-signing")]
             trust: None,
-            code_requires_anchor: false,
             #[cfg(feature = "module-signing")]
             signing: None,
             write_lock: tokio::sync::Mutex::new(()),
@@ -272,12 +265,6 @@ impl VfsModuleStore {
 
     /// Registry of the host's custom validators / transforms / types (the one `check`
     /// must see, at put AND at get).
-    /// Strict mode: refuse a version that carries code unless an anchor is declared.
-    pub fn require_anchor_for_code(mut self, on: bool) -> Self {
-        self.code_requires_anchor = on;
-        self
-    }
-
     pub fn with_registry(mut self, registry: Arc<CustomRegistry>) -> Self {
         self.registry = registry;
         self
@@ -375,7 +362,7 @@ impl VfsModuleStore {
                 .with_param("path", path.as_str())
                 .with_param("key_id", sig.key_id.clone()));
         };
-        let bytes = canonical_manifest_bytes(m)?;
+        let bytes = m.signing_bytes();
         use base64::Engine as _;
         let raw = base64::engine::general_purpose::STANDARD
             .decode(&sig.signature)
@@ -476,12 +463,11 @@ impl VfsModuleStore {
         desc.normalize();
         desc.check(&self.registry, self.profile())
             .map_err(invalid)?;
-        // Fail-closed : un module qui porte du code n'est admis que sous une ancre de
-        // confiance déclarée. Sans ancre, rien ne peut authentifier ce code.
-        if self.code_requires_anchor
-            && !self.anchor_declared()
-            && assets.iter().any(|(rel, _)| rel.ends_with(".wasm"))
-        {
+        // Fail-closed: a module that carries code (`program.wasm` or any `.wasm`
+        // asset) is admitted only under a declared trust anchor. Without an anchor,
+        // nothing can authenticate that code, so the version is refused before any
+        // byte is written.
+        if !self.anchor_declared() && assets.iter().any(|(rel, _)| is_code_asset(rel)) {
             return Err(ContractError::framework(codes::MODULE_UNSIGNED)
                 .with_param("module", format!("{}@{}", desc.name, desc.version))
                 .with_param("reason", "module with code, no trust anchor declared"));
@@ -544,11 +530,24 @@ impl VfsModuleStore {
         // no asset below another (`a` and `a/b`): the Vfs would refuse the second write
         // AFTER the first files are written.
         let mut asset_names: BTreeSet<String> = BTreeSet::new();
-        for (rel, _) in assets {
+        for (rel, bytes) in assets {
             if VfsPath::parse(&format!("/assets/{rel}")).is_err()
                 || !asset_names.insert(rel.to_ascii_lowercase())
             {
                 issues.push(issue("invalid_asset", "assets", rel.to_string()));
+            }
+            if bytes.is_empty() {
+                issues.push(issue("empty_asset", "assets", rel.to_string()));
+            }
+            if bytes.len() > MAX_ASSET_BYTES {
+                issues.push(issue(
+                    "asset_too_large",
+                    "assets",
+                    format!(
+                        "`{rel}` is {} bytes, over the {MAX_ASSET_BYTES}-byte limit",
+                        bytes.len()
+                    ),
+                ));
             }
         }
         for a in &asset_names {
@@ -647,7 +646,7 @@ impl VfsModuleStore {
             use base64::Engine as _;
             use ed25519_dalek::Signer as _;
 
-            let signature = key.sign(&canonical_manifest_bytes(&manifest)?);
+            let signature = key.sign(&manifest.signing_bytes());
             manifest.signature = Some(SignatureBlock {
                 key_id: key_id.clone(),
                 signature: base64::engine::general_purpose::STANDARD.encode(signature.to_bytes()),
@@ -1097,25 +1096,48 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn module_with_code_needs_a_trust_anchor() {
+    async fn module_with_code_is_refused_without_a_trust_anchor() {
         let vfs = Arc::new(InMemoryVfs::new());
-        let store = VfsModuleStore::new(vfs).require_anchor_for_code(true);
+        // No `with_trust_anchor`: a store with no anchor refuses code, by default.
+        let store = VfsModuleStore::new(vfs.clone());
         let m = v1("1.0.0");
-        let err = store
-            .put_with_assets(
-                &m,
-                &[bundle("fr", "Facture")],
-                &[("program.wasm", b"\0asm")],
-            )
+        // `program.wasm` and any other `.wasm` asset both carry executable code.
+        for asset in ["program.wasm", "lib.wasm"] {
+            let err = store
+                .put_with_assets(&m, &[bundle("fr", "Facture")], &[(asset, b"\0asm")])
+                .await
+                .unwrap_err();
+            assert_eq!(err.code.0, codes::MODULE_UNSIGNED, "asset {asset}");
+            assert!(
+                store.get("billing", Some("1.0.0")).await.is_err(),
+                "rien n'a été écrit pour {asset}"
+            );
+            assert_eq!(all_files(vfs.as_ref()).await, 0, "no file for {asset}");
+        }
+    }
+
+    #[tokio::test]
+    async fn declarative_module_is_accepted_without_a_trust_anchor() {
+        let (_vfs, store) = mem();
+        // Descriptor + i18n only.
+        store
+            .put(&v1("1.0.0"), &[bundle("fr", "Facture")])
             .await
-            .unwrap_err();
-        assert_eq!(err.code.0, codes::MODULE_UNSIGNED);
-        assert!(
-            store.get("billing", Some("1.0.0")).await.is_err(),
-            "rien n'a été écrit"
+            .unwrap();
+        // A non-executable asset is not code and stays accepted.
+        store
+            .put_with_assets(&v1("1.1.0"), &[], &[("schema.json", b"{}")])
+            .await
+            .unwrap();
+        assert_eq!(store.get("billing", None).await.unwrap().version, "1.1.0");
+        assert_eq!(
+            store
+                .asset("billing", "1.1.0", "schema.json")
+                .await
+                .unwrap()
+                .unwrap(),
+            b"{}"
         );
-        // Le même module sans code passe.
-        store.put(&m, &[bundle("fr", "Facture")]).await.unwrap();
     }
 
     #[tokio::test]
@@ -1195,22 +1217,22 @@ mod tests {
     #[tokio::test]
     async fn module_store_remove_and_assets() {
         let (vfs, store) = mem();
-        let wasm = b"\0asm\x01\0\0\0";
+        let asset = b"\0asm\x01\0\0\0";
         store
             .put_with_assets(
                 &v1("1.0.0"),
                 &[bundle("fr", "Facture")],
-                &[("front.wasm", wasm)],
+                &[("front.bin", asset)],
             )
             .await
             .unwrap();
         assert_eq!(
             store
-                .asset("billing", "1.0.0", "front.wasm")
+                .asset("billing", "1.0.0", "front.bin")
                 .await
                 .unwrap()
                 .unwrap(),
-            wasm
+            asset
         );
         assert!(
             store
@@ -1382,7 +1404,7 @@ mod tests {
             .put_with_assets(
                 &v1("1.0.0"),
                 &[],
-                &[("Front.wasm", b"a"), ("front.wasm", b"b")],
+                &[("Front.txt", b"a"), ("front.txt", b"b")],
             )
             .await
             .unwrap_err();
@@ -1393,6 +1415,33 @@ mod tests {
             .unwrap_err();
         assert!(
             format!("{:?}", err.params).contains("both a file and a directory"),
+            "{err:?}"
+        );
+        // Every refusal happened before any write.
+        assert_eq!(all_files(vfs.as_ref()).await, 0);
+    }
+
+    #[tokio::test]
+    async fn module_store_put_rejects_empty_or_oversized_assets() {
+        let (vfs, store) = mem();
+        // An empty asset is refused: an asset is content, and a content-less
+        // artifact is a mistake (a dropped write, a truncated upload).
+        let err = store
+            .put_with_assets(&v1("1.0.0"), &[], &[("empty.bin", b"")])
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{:?}", err.params).contains("empty_asset"),
+            "{err:?}"
+        );
+        // An asset over `MAX_ASSET_BYTES` is refused before anything is written.
+        let oversized = vec![0u8; MAX_ASSET_BYTES + 1];
+        let err = store
+            .put_with_assets(&v1("1.0.0"), &[], &[("big.bin", oversized.as_slice())])
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{:?}", err.params).contains("asset_too_large"),
             "{err:?}"
         );
         // Every refusal happened before any write.
@@ -1427,20 +1476,16 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = VfsModuleStore::new(Arc::new(LocalFsVfs::open(dir.path()).unwrap()));
         store
-            .put_with_assets(
-                &v1("1.0.0"),
-                &[bundle("fr", "Facture")],
-                &[("x.wasm", b"x")],
-            )
+            .put_with_assets(&v1("1.0.0"), &[bundle("fr", "Facture")], &[("x.bin", b"x")])
             .await
             .unwrap();
         // Edited behind the store's back, on disk.
         std::fs::write(
-            dir.path().join("modules/billing/1.0.0/assets/x.wasm"),
+            dir.path().join("modules/billing/1.0.0/assets/x.bin"),
             b"evil",
         )
         .unwrap();
-        let err = store.asset("billing", "1.0.0", "x.wasm").await.unwrap_err();
+        let err = store.asset("billing", "1.0.0", "x.bin").await.unwrap_err();
         assert_eq!(err.code.0, codes::INTERNAL);
         std::fs::remove_file(dir.path().join("modules/billing/1.0.0/descriptor.json")).unwrap();
         let err = store.get("billing", None).await.unwrap_err();
@@ -1501,6 +1546,63 @@ mod signing_tests {
         let reader = VfsModuleStore::new(vfs).with_trust_anchor(anchor_trusting(&signing_key()));
 
         let loaded = reader.get("billing", None).await.expect("verified");
+        assert_eq!(loaded.name, "billing");
+    }
+
+    /// The canonical bytes come from `this-vfs` (`Manifest::signing_bytes`), not from a
+    /// bespoke canonicalization in the store. A signature produced by a third-party
+    /// signer using only `this-vfs` must therefore verify in the store.
+    #[tokio::test]
+    async fn a_signature_produced_by_this_vfs_verifies_in_the_store() {
+        use crate::storage::vfs::etag_of;
+        use base64::Engine as _;
+        use ed25519_dalek::Signer as _;
+
+        let key = signing_key();
+        let vfs = Arc::new(InMemoryVfs::new());
+        let dir = VfsPath::parse("/modules/billing/0.0.1").unwrap();
+
+        // The descriptor the manifest will point at, normalized as `put` stores it.
+        let mut desc = descriptor();
+        desc.normalize();
+        let desc_bytes = serde_json::to_vec_pretty(&desc).unwrap();
+        vfs.write(
+            &VfsModuleStore::rel(&dir, DESCRIPTOR_FILE).unwrap(),
+            &desc_bytes,
+            Precondition::None,
+        )
+        .await
+        .unwrap();
+
+        // Sign the manifest's canonical bytes using `this-vfs` alone — no store helper.
+        let mut files = BTreeMap::new();
+        files.insert(DESCRIPTOR_FILE.to_string(), etag_of(&desc_bytes));
+        let mut manifest = Manifest {
+            format: MANIFEST_FORMAT,
+            name: "billing".into(),
+            version: "0.0.1".into(),
+            files,
+            created: Utc::now(),
+            signature: None,
+        };
+        let signature = key.sign(&manifest.signing_bytes());
+        manifest.signature = Some(SignatureBlock {
+            key_id: "release-2026".into(),
+            signature: base64::engine::general_purpose::STANDARD.encode(signature.to_bytes()),
+        });
+        vfs.write(
+            &VfsModuleStore::rel(&dir, MANIFEST_FILE).unwrap(),
+            &serde_json::to_vec_pretty(&manifest).unwrap(),
+            Precondition::None,
+        )
+        .await
+        .unwrap();
+
+        let reader = VfsModuleStore::new(vfs).with_trust_anchor(anchor_trusting(&key));
+        let loaded = reader
+            .get("billing", None)
+            .await
+            .expect("signature produced by this-vfs must verify in the store");
         assert_eq!(loaded.name, "billing");
     }
 
