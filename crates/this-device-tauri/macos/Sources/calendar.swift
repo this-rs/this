@@ -135,6 +135,94 @@ enum MacCalendar {
         }
     }
 
+    /// `calendarCalendars` — every event calendar, with its write permission.
+    static func calendars() -> String {
+        guard currentState() == "granted" else {
+            return errorReply(code: ReplyCode.notAuthorized)
+        }
+        let list = store.calendars(for: .event).map {
+            CalendarSummaryOut(
+                id: $0.calendarIdentifier,
+                title: $0.title,
+                allows_modifications: $0.allowsContentModifications)
+        }
+        return encodeJson(CalendarSummariesReply(calendars: list))
+    }
+
+    /// `calendarUpdateEvent` — patches an existing event. An absent field changes nothing; at
+    /// least one must change. Unknown id: `not_supported`.
+    static func updateEvent(_ args: [String: Any]) -> String {
+        guard let id = args["id"] as? String, !id.isEmpty else {
+            return errorReply(code: ReplyCode.internalError)
+        }
+        guard currentState() == "granted" else {
+            return errorReply(code: ReplyCode.notAuthorized)
+        }
+        guard let event = store.event(withIdentifier: id) else {
+            return errorReply(code: ReplyCode.notSupported)
+        }
+        var changed = false
+        if let title = trimmedCalText(args["title"] as? String) {
+            event.title = title
+            changed = true
+        }
+        if args["start_ms"] != nil {
+            guard let ms = intArg(args, "start_ms") else {
+                return errorReply(code: ReplyCode.internalError)
+            }
+            event.startDate = calDate(ms: ms)
+            changed = true
+        }
+        if args["end_ms"] != nil {
+            guard let ms = intArg(args, "end_ms") else {
+                return errorReply(code: ReplyCode.internalError)
+            }
+            event.endDate = calDate(ms: ms)
+            changed = true
+        }
+        if let location = args["location"] as? String {
+            event.location = location
+            changed = true
+        }
+        if let notes = args["notes"] as? String {
+            event.notes = notes
+            changed = true
+        }
+        // A patch that changes nothing is not sent.
+        guard changed else {
+            return errorReply(code: ReplyCode.internalError)
+        }
+        // Checked on the MODIFIED event: the Rust side does not know the stored dates.
+        guard event.endDate > event.startDate else {
+            return errorReply(code: ReplyCode.internalError)
+        }
+        do {
+            try store.save(event, span: .thisEvent)
+            return encodeJson(CalendarEventChangedReply(kind: "event_updated", event_id: id))
+        } catch {
+            return errorReply(code: ReplyCode.internalError)
+        }
+    }
+
+    /// `calendarDeleteEvent` — removes one event (this occurrence only, not the series).
+    static func deleteEvent(_ args: [String: Any]) -> String {
+        guard let id = args["id"] as? String, !id.isEmpty else {
+            return errorReply(code: ReplyCode.internalError)
+        }
+        guard currentState() == "granted" else {
+            return errorReply(code: ReplyCode.notAuthorized)
+        }
+        guard let event = store.event(withIdentifier: id) else {
+            return errorReply(code: ReplyCode.notSupported)
+        }
+        do {
+            try store.remove(event, span: .thisEvent)
+            return encodeJson(CalendarEventChangedReply(kind: "event_deleted", event_id: id))
+        } catch {
+            return errorReply(code: ReplyCode.internalError)
+        }
+    }
+
     // MARK: - Helpers
 
     private static func isValidCalendarWindow(startMs: Int64, endMs: Int64) -> Bool {
@@ -214,4 +302,22 @@ private struct CalendarCreatedReply: Encodable {
         try c.encode("calendar_created", forKey: .kind)
         try c.encode(eventId, forKey: .event_id)
     }
+}
+
+private struct CalendarSummaryOut: Encodable {
+    let id: String
+    let title: String
+    let allows_modifications: Bool
+}
+
+/// `{"kind":"calendars","calendars":[...]}`
+private struct CalendarSummariesReply: Encodable {
+    let kind = "calendars"
+    let calendars: [CalendarSummaryOut]
+}
+
+/// `{"kind":"event_updated"|"event_deleted","event_id":"..."}`
+private struct CalendarEventChangedReply: Encodable {
+    let kind: String
+    let event_id: String
 }

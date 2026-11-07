@@ -37,12 +37,18 @@ func macos_device_call(
     case "contactsStatus":  result = MacContacts.status()
     case "contactsRequest": result = MacContacts.request()
     case "contactsList":    result = MacContacts.list(args)
+    case "contactsGet":     result = MacContacts.get(args)
+    case "contactsSearch":  result = MacContacts.search(args)
+    case "contactsCreate":  result = MacContacts.create(args)
 
     // ── Calendar (EventKit) ─────────────────────────────────────────
     case "calendarStatus":      result = MacCalendar.status()
     case "calendarRequest":     result = MacCalendar.request()
     case "calendarEvents":      result = MacCalendar.events(args)
     case "calendarCreateEvent": result = MacCalendar.createEvent(args)
+    case "calendarCalendars":   result = MacCalendar.calendars()
+    case "calendarUpdateEvent": result = MacCalendar.updateEvent(args)
+    case "calendarDeleteEvent": result = MacCalendar.deleteEvent(args)
 
     // ── Bluetooth (CoreBluetooth) ───────────────────────────────────
     case "bluetoothScan":   result = MacBluetooth.scan(args)
@@ -73,11 +79,14 @@ func macos_device_call(
     // ── Files (AppKit / NSOpenPanel) ────────────────────────────────
     case "filesPick":       result = MacFiles.pick(args)
     case "filesRead":       result = MacFiles.read(args)
+    case "filesWrite":      result = MacFiles.write(args)
 
     // ── Photos (Photos + PhotosUI) ──────────────────────────────────
     case "photosStatus":    result = MacPhotos.status()
     case "photosRequest":   result = MacPhotos.request()
     case "photosPick":      result = MacPhotos.pick(args)
+    case "photosList":      result = MacPhotos.list(args)
+    case "photosRead":      result = MacPhotos.readPhoto(args)
 
     // ── Local Network (Network / NWBrowser) ─────────────────────────
     case "localNetworkStatus": result = MacLocalNetwork.status()

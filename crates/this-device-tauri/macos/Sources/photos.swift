@@ -78,6 +78,109 @@ enum MacPhotos {
         }
     }
 
+    // MARK: - List / read (PhotoKit, same shapes as iOS)
+
+    /// Library access sufficient to read assets: full or limited.
+    private static func canReadLibrary() -> Bool {
+        let status = PHPhotoLibrary.authorizationStatus(for: .readWrite)
+        return status == .authorized || status == .limited
+    }
+
+    private static func int64Arg(_ args: [String: Any], _ key: String) -> Int64? {
+        if let v = args[key] as? Int64 { return v }
+        if let v = args[key] as? Int { return Int64(v) }
+        if let v = args[key] as? Double { return Int64(v) }
+        return nil
+    }
+
+    /// `photosList` — photos taken inside the window, newest first.
+    static func list(_ args: [String: Any]) -> String {
+        guard let startMs = int64Arg(args, "start_ms"),
+              let endMs = int64Arg(args, "end_ms"),
+              let limit = int64Arg(args, "limit"),
+              limit > 0, limit <= 100, endMs > startMs else {
+            return errorReply(code: ReplyCode.internalError)
+        }
+        guard canReadLibrary() else {
+            return errorReply(code: ReplyCode.notAuthorized)
+        }
+        // The predicate carries the window: PhotoKit returns only what is asked for.
+        let options = PHFetchOptions()
+        options.predicate = NSPredicate(
+            format: "mediaType == %d AND creationDate >= %@ AND creationDate <= %@",
+            PHAssetMediaType.image.rawValue,
+            Date(timeIntervalSince1970: Double(startMs) / 1000) as NSDate,
+            Date(timeIntervalSince1970: Double(endMs) / 1000) as NSDate
+        )
+        options.sortDescriptors = [NSSortDescriptor(key: "creationDate", ascending: false)]
+        options.fetchLimit = Int(limit)
+        let assets = PHAsset.fetchAssets(with: options)
+        var photos: [[String: Any]] = []
+        assets.enumerateObjects { asset, _, _ in
+            photos.append([
+                "id": asset.localIdentifier,
+                "created_ms": Int64(((asset.creationDate?.timeIntervalSince1970 ?? 0) * 1000).rounded()),
+                "width": asset.pixelWidth,
+                "height": asset.pixelHeight,
+                "favorite": asset.isFavorite,
+            ])
+        }
+        return encodeDictJson(["kind": "album", "photos": photos])
+    }
+
+    /// `photosRead` — one photo as JPEG, longest side at most `max_px` (clamped 64...4096).
+    static func readPhoto(_ args: [String: Any]) -> String {
+        guard let id = args["id"] as? String, !id.isEmpty else {
+            return errorReply(code: ReplyCode.internalError)
+        }
+        let requested = int64Arg(args, "max_px") ?? 1024
+        guard canReadLibrary() else {
+            return errorReply(code: ReplyCode.notAuthorized)
+        }
+        guard let asset = PHAsset.fetchAssets(withLocalIdentifiers: [id], options: nil).firstObject else {
+            // An identifier the library no longer knows (photo deleted): explicit refusal.
+            return errorReply(code: ReplyCode.notSupported)
+        }
+        let maxPx = CGFloat(max(64, min(requested, 4096)))
+        let options = PHImageRequestOptions()
+        options.isSynchronous = false
+        options.isNetworkAccessAllowed = true
+        options.deliveryMode = .highQualityFormat
+        options.resizeMode = .exact
+
+        return blockingCall(timeout: 60) { done in
+            // PhotoKit may call twice (blurry preview, then the sharp image): only the final
+            // version answers, and only once.
+            var answered = false
+            PHImageManager.default().requestImage(
+                for: asset,
+                targetSize: CGSize(width: maxPx, height: maxPx),
+                contentMode: .aspectFit,
+                options: options
+            ) { image, info in
+                if let degraded = info?[PHImageResultIsDegradedKey] as? Bool, degraded { return }
+                guard !answered else { return }
+                answered = true
+                guard let image = image,
+                      let tiff = image.tiffRepresentation,
+                      let rep = NSBitmapImageRep(data: tiff),
+                      let jpeg = rep.representation(
+                          using: .jpeg, properties: [.compressionFactor: quality])
+                else {
+                    done(errorReply(code: ReplyCode.unavailable))
+                    return
+                }
+                done(encodeDictJson([
+                    "kind": "photo",
+                    "data_base64": jpeg.base64EncodedString(),
+                    "width": rep.pixelsWide,
+                    "height": rep.pixelsHigh,
+                    "bytes": jpeg.count,
+                ]))
+            }
+        }
+    }
+
     // MARK: - Image shrinking
 
     /// Shrink an image to fit within maxImageBytes as JPEG.

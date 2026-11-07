@@ -583,14 +583,13 @@ pub fn surface() -> Surface {
                 &[Ios, Ipados, Macos],
                 Status::Live,
             ),
-            // Le pont macOS ne lit et n'écrit que du texte (`macos/Sources/clipboard.swift`) :
-            // un lien ou une image n'y sont pas annoncés, pour ne pas promettre un refus.
+            // Un lien ou une image dans le presse-papiers. Porté sur macOS le 08/11.
             Capability::new(
                 "device.clipboard.media",
                 Tier::Shell,
                 "lire et écrire un LIEN ou une IMAGE dans le presse-papiers (4 Mio au plus)",
                 Some("clipboardRead / clipboardWrite"),
-                &[Ios, Ipados],
+                &[Ios, Ipados, Macos],
                 Status::Live,
             ),
             Capability::new(
@@ -630,14 +629,14 @@ pub fn surface() -> Surface {
                 &[Ios, Ipados, Macos],
                 Status::Live,
             ),
-            // Chercher, lire un contact précis et en créer un : iOS seulement, le pont macOS
-            // ne connaît que la liste (`macos/Sources/contacts.swift`).
+            // Chercher, lire un contact précis et en créer un. Porté sur macOS le 08/11 :
+            // `macos/Sources/contacts.swift` implémente les trois.
             Capability::new(
                 "device.contacts.more",
                 Tier::Shell,
                 "chercher un contact par nom, en lire un par son identifiant, en créer un",
                 Some("contactsGet / contactsSearch / contactsCreate"),
-                &[Ios, Ipados],
+                &[Ios, Ipados, Macos],
                 Status::Live,
             ),
             Capability::new(
@@ -653,7 +652,7 @@ pub fn surface() -> Surface {
                 Tier::Shell,
                 "lire la photothèque : métadonnées d'une fenêtre, puis les octets d'UNE photo (bornés en pixels)",
                 Some("photosList / photosRead"),
-                &[Ios, Ipados],
+                &[Ios, Ipados, Macos],
                 Status::Live,
             ),
             Capability::new(
@@ -678,7 +677,7 @@ pub fn surface() -> Surface {
                 Tier::Shell,
                 "écrire un fichier produit par l'app, puis le partager",
                 Some("filesWrite"),
-                &[Ios, Ipados],
+                &[Ios, Ipados, Macos],
                 Status::Live,
             ),
             Capability::new(
@@ -728,13 +727,13 @@ pub fn surface() -> Surface {
                 &[Ios, Ipados, Macos],
                 Status::Live,
             ),
-            // Les calendriers eux-mêmes, la modification et la suppression : iOS seulement.
+            // Les calendriers eux-mêmes, la modification et la suppression — portés sur macOS.
             Capability::new(
                 "device.calendar.edit",
                 Tier::Shell,
                 "lister les calendriers et leur droit d'écriture, modifier et supprimer un événement",
                 Some("calendarCalendars / calendarUpdateEvent / calendarDeleteEvent"),
-                &[Ios, Ipados],
+                &[Ios, Ipados, Macos],
                 Status::Live,
             ),
             Capability::new(
@@ -777,7 +776,7 @@ pub fn surface() -> Surface {
                 &[Ios, Ipados, Macos],
                 Status::Live,
             ),
-            // Résoudre un service en hôte et port : iOS seulement.
+            // Résoudre un service en hôte et port : iOS seulement (le pont macOS ne l'a pas).
             Capability::new(
                 "device.local_network.resolve",
                 Tier::Shell,
