@@ -213,10 +213,7 @@ mod tests {
         let anchor = anchor_a();
         let mut m = signed(&with_code(), &key_a());
         m.files.insert(PROGRAM_FILE.into(), "evil".into());
-        assert_eq!(
-            verify_manifest(&m, &anchor),
-            Err(TrustError::BadSignature)
-        );
+        assert_eq!(verify_manifest(&m, &anchor), Err(TrustError::BadSignature));
     }
 
     #[test]
