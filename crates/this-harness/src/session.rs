@@ -18,7 +18,8 @@
 //! Ce qui n'est **pas** repris : la base, le graphe, les fournisseurs, les
 //! permissions, les sous-agents. Ce crate ne fait aucune entrée/sortie.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
+use std::collections::VecDeque;
 use std::rc::Rc;
 
 use crate::event::{Event, Outcome, Pending, Snapshot};
@@ -95,12 +96,120 @@ struct State {
 ///
 /// Séparée de l'état exprès : une interface qui, depuis le rappel d'événement,
 /// relit la file d'attente ne doit pas se heurter à un emprunt déjà pris.
+///
+/// ## Ce que `emit` garantit
+///
+/// `emit` n'appelle jamais le puits en tenant l'emprunt de la cellule : chaque
+/// événement est poussé dans une file, vidée un par un, drapeau « en train de
+/// parler » posé. Un rappel qui réagit à un événement en émettant à son tour —
+/// le geste naturel pour « renvoyer le message tenu » sur un `Stopped` — ne
+/// panique plus : son émission atterrit dans la file, et c'est le vidage en
+/// cours qui la livre. L'ordre est préservé (FIFO), aucun événement n'est
+/// perdu, et le drapeau retombe même si le puits panique (il tue le run, pas
+/// le harnais).
+///
+/// Ce que ça ne garantit PAS : un puits qui réagit à sa propre émission en
+/// émettant sans condition ne s'arrête pas — la file grandit à l'infini. La
+/// borne est la volonté du rappel, pas une limite du harnais.
 #[derive(Clone)]
-struct Out(Rc<RefCell<Sink>>);
+struct Out {
+    sink: Rc<RefCell<Sink>>,
+    /// Les événements à livrer, dans l'ordre. `emit` pousse toujours ici.
+    queue: Rc<RefCell<VecDeque<Event>>>,
+    /// « Je suis en train de parler au puits » : posé pendant le vidage, pour
+    /// qu'une émission réentrante rende la main et laisse le vidage livrer.
+    talking: Rc<Cell<bool>>,
+}
 
 impl Out {
+    fn new(sink: Sink) -> Self {
+        Self {
+            sink: Rc::new(RefCell::new(sink)),
+            queue: Rc::new(RefCell::new(VecDeque::new())),
+            talking: Rc::new(Cell::new(false)),
+        }
+    }
+
     fn emit(&self, event: Event) {
-        (self.0.borrow_mut())(event);
+        self.queue.borrow_mut().push_back(event);
+        if self.talking.get() {
+            // Un vidage est déjà en cours : il prendra cet événement au
+            // passage. Rejouer le puits ici serait de la réentrance.
+            return;
+        }
+        self.talking.set(true);
+        // Le drapeau doit retomber même si le puits panique : une petite garde
+        // locale s'en charge, sans empoisonner le harnais.
+        let _reset = ResetTalking(self.talking.clone());
+        loop {
+            let next = self.queue.borrow_mut().pop_front();
+            match next {
+                Some(event) => (self.sink.borrow_mut())(event),
+                None => break,
+            }
+        }
+    }
+}
+
+/// Remet le drapeau « en train de parler » à faux en quittant [`Out::emit`],
+/// y compris quand le puits a paniqué.
+struct ResetTalking(Rc<Cell<bool>>);
+
+impl Drop for ResetTalking {
+    fn drop(&mut self) {
+        self.0.set(false);
+    }
+}
+
+/// Une garde RAII sur la place prise par [`Harness::claim`].
+///
+/// `claim` pose `busy = true` avant que [`Harness::pump`] tourne, et `pump` le
+/// remet à `false` à la toute fin. Si la future rendue par `send` est lâchée
+/// avant cette fin — écran démonté, `Owner` leptos disposé, page suspendue,
+/// tâche annulée — `busy` resterait `true` pour toujours : tous les `send`
+/// suivants rendraient `Running::Queued` et ne tourneraient jamais, sans erreur
+/// ni événement. La garde remet `busy = false` et, si le run n'a pas conclu,
+/// émet un `Event::Stopped { stop: Stop::Interrupted }` : l'abandon se dit, il
+/// ne se constate pas.
+///
+/// Un puits qui panique sur cet événement fait remonter sa panique depuis un
+/// `Drop` : l’état du harnais, lui, reste cohérent (`busy` et le drapeau
+/// d’émission sont déjà remis), mais l’hôte qui lâche des futures doit le savoir.
+struct BusyGuard {
+    state: Shared<State>,
+    out: Out,
+    /// L'instant où le run a commencé, pour la durée annoncée.
+    started: f64,
+    /// Le nombre de tours déjà faits, lu au moment de l'abandon.
+    turns: Rc<Cell<u32>>,
+    /// Désarmée par la fin normale de `pump` : un seul `Stopped` par run.
+    armed: bool,
+}
+
+impl BusyGuard {
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for BusyGuard {
+    fn drop(&mut self) {
+        // La place se rend quoi qu'il arrive — même si la fin normale l'a déjà
+        // fait, c'est idempotent.
+        self.state.borrow_mut().busy = false;
+        // Un abandon se dit, sauf si on est déjà en train de dérouler une
+        // panique : ré-invoquer le puits ici ferait un double panic. Le cas
+        // normal (future lâchée, sans panique) passe toujours.
+        if self.armed && !std::thread::panicking() {
+            let ms = (crate::now_ms() - self.started).max(0.0) as u64;
+            self.out.emit(Event::Stopped {
+                stop: Stop::Interrupted,
+                text: String::new(),
+                turns: self.turns.get(),
+                ms,
+                code: None,
+            });
+        }
     }
 }
 
@@ -139,7 +248,7 @@ impl Harness {
                 generation: 0,
                 cancel: Cancel::new(),
             })),
-            out: Out(Rc::new(RefCell::new(Box::new(sink)))),
+            out: Out::new(Box::new(sink)),
         }
     }
 
@@ -268,7 +377,19 @@ impl Harness {
         let transport = self.transport.clone();
         let toolbox = self.toolbox.clone();
 
-        let mut turns = 0u32;
+        // La garde tient la place prise par `claim` : si cette future est
+        // lâchée avant la fin (écran démonté, page suspendue, tâche annulée),
+        // elle rend `busy` et dit l'abandon — sinon le harnais restait muet et
+        // `busy = true` pour toujours (mesuré : poll unique puis drop, second
+        // envoi = `Queued`).
+        let turns = Rc::new(Cell::new(0u32));
+        let mut garde = BusyGuard {
+            state: self.state.clone(),
+            out: self.out.clone(),
+            started,
+            turns: turns.clone(),
+            armed: true,
+        };
         let mut stop: Option<Stop> = None;
         let mut said = String::new();
         let mut code: Option<String> = None;
@@ -299,14 +420,36 @@ impl Harness {
                 run.budget(budget);
             }
 
+            // Les tours comptent PAR OBJECTIF : un message tenu ouvre un
+            // objectif neuf, comme `Run::new` remet ses compteurs à zéro.
+            let mut goal_turns = 0u32;
+
             'turns: loop {
                 if cancel.is_cancelled() {
                     stop = Some(run.finish(Stop::Cancelled));
                     break 'turns;
                 }
 
-                self.out.emit(Event::Turn { index: turns });
-                turns += 1;
+                // La ceinture, indépendante de la politique : une politique
+                // branchée qui rend `Continue` ne rencontre aucune borne dans
+                // `after_turn` (mesuré : une sonde tuée à 180 s). Avec
+                // `DefaultPolicy`, la ceinture et la politique se déclenchent
+                // au même tour : sans effet de bord.
+                //
+                // Elle lit `Limits`, la composition, et non `run` : une
+                // politique reçoit `&mut Run` et pouvait donc élargir le budget
+                // ou le retirer (`run.budget_ms = None`) tout en restant bornée
+                // sur les tours — deux bornes dont une seule tenait. Un plafond
+                // de zéro arrête avant le premier tour.
+                let budget_epuise = limits.budget_ms.is_some_and(|b| run.ecoule_ms >= b);
+                if goal_turns >= limits.max_tours || budget_epuise {
+                    stop = Some(run.finish(Stop::Budget));
+                    break 'turns;
+                }
+
+                self.out.emit(Event::Turn { index: turns.get() });
+                turns.set(turns.get() + 1);
+                goal_turns += 1;
 
                 // 2. Un tour du modèle, en flux.
                 let request = self.request(toolbox.as_ref());
@@ -328,18 +471,26 @@ impl Harness {
                     })
                 };
 
+                // Le temps du TOUR est de l'horloge murale : on le mesure autour
+                // du transport, panne comprise, et on l'ajoute au run AVANT la
+                // décision. Sans ça, un modèle lent et des outils instantanés
+                // n'avançaient jamais le budget (mesuré : 40 appels au modèle
+                // pour un budget de 10 ms qui ne protégeait rien).
+                let turn_started = crate::now_ms();
                 let reply = match transport.stream(&request, &cancel, delta).await {
                     Ok(reply) => reply,
                     Err(failure) => {
+                        run.add_elapsed((crate::now_ms() - turn_started).max(0.0) as u64);
                         if failure.is_aborted() || cancel.is_cancelled() {
                             stop = Some(run.finish(Stop::Cancelled));
                         } else {
-                            code = Some(format!("{:?}", failure.code).to_lowercase());
+                            code = Some(failure.code.as_str().to_string());
                             stop = Some(run.finish(Stop::Failed(failure.message)));
                         }
                         break 'turns;
                     }
                 };
+                run.add_elapsed((crate::now_ms() - turn_started).max(0.0) as u64);
 
                 let streamed = gathered.borrow().clone();
                 let text = if reply.text.is_empty() {
@@ -403,7 +554,9 @@ impl Harness {
                         ));
                         continue;
                     }
-                    let outcome = self.run_tool(toolbox.as_ref(), call, &mut run).await;
+                    let outcome = self
+                        .run_tool(toolbox.as_ref(), call, &cancel, &mut run)
+                        .await;
                     self.push(Message::tool(call.id.clone(), outcome.text.clone()));
                 }
 
@@ -439,25 +592,35 @@ impl Harness {
 
         let stop = stop.unwrap_or(Stop::Done);
         let ms = (crate::now_ms() - started).max(0.0) as u64;
+        // La fin normale rend la place AVANT de l'annoncer (un puits qui relit
+        // `busy()` sur `Stopped` voit déjà le run terminé), puis désarme la
+        // garde : un seul `Stopped` par run, jamais deux.
+        garde.disarm();
         self.with(|s| s.busy = false);
         self.out.emit(Event::Stopped {
             stop: stop.clone(),
             text: said,
-            turns,
+            turns: turns.get(),
             ms,
             code,
         });
         stop
     }
 
-    async fn run_tool(&self, toolbox: &dyn Toolbox, call: &ToolCall, run: &mut Run) -> Outcome {
+    async fn run_tool(
+        &self,
+        toolbox: &dyn Toolbox,
+        call: &ToolCall,
+        cancel: &Cancel,
+        run: &mut Run,
+    ) -> Outcome {
         self.out.emit(Event::ToolUse {
             id: call.id.clone(),
             tool: call.name.clone(),
             input: call.arguments.clone(),
         });
         let started = crate::now_ms();
-        let outcome = toolbox.call(call).await;
+        let outcome = toolbox.call_with_cancel(call, cancel).await;
         let ms = (crate::now_ms() - started).max(0.0) as u64;
 
         self.out.emit(Event::ToolResult {

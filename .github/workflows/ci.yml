@@ -323,6 +323,8 @@ jobs:
           # package only. A new member with warnings would stay green otherwise.
           cargo clippy -p this-module-lang --all-targets --all-features -- -D warnings
           cargo clippy -p this-module-harness --all-targets --all-features -- -D warnings
+          cargo clippy -p this-agent --all-targets --all-features -- -D warnings
+          cargo clippy -p this-harness --all-targets --all-features -- -D warnings
 
   # Vérification de la compilation des exemples
   examples:
@@ -529,6 +531,24 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
+
+      # Ce job ne chargeait jusqu’ici que des crates à `[workspace]` propre, donc jamais
+      # le manifeste racine. Le manifeste racine, lui, tire `../../obrain/…` et
+      # `../../vite-rs`, absents du runner : mêmes doublures que tous les autres jobs.
+      - name: Create local dep stubs
+        run: bash .github/create-local-dep-stubs.sh
+
+      # `this-agent` and `this-harness` are members of the ROOT workspace, so they are
+      # checked with `-p` from the root; the crates below carry their own `[workspace]`
+      # and can only be built from their own directory. `this-harness` has a
+      # `cfg(target_arch = "wasm32")` `now_ms()` (`js_sys::Date::now()`) that no other
+      # job ever compiles.
+      - name: Compile the root-workspace members for wasm32
+        run: |
+          set -euo pipefail
+          echo "::group::this-agent this-harness"
+          cargo check -p this-agent -p this-harness --target wasm32-unknown-unknown
+          echo "::endgroup::"
 
       - name: Compile the crates that keep their own workspace
         run: |

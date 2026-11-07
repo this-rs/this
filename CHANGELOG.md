@@ -20,6 +20,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   The last three keep their own `[workspace]` and are **not** members of the root one: a backend that needs none of it must not compile Leptos, a wasm client or Tauri. They are built from their own directory, for `wasm32` (or Tauri), which also means a root `cargo build` does not see them.
 
 ### Fixed
+- **Le harnais ne se bloquait plus en silence, et la boucle tient ses propres bornes** (`this-agent`, `this-harness`). Changements additifs : aucune API ni aucun champ filaire renommé.
+  - Le harnais tient sa place avec une garde. Une future de `send()` lâchée en cours de run (écran démonté, page suspendue) le laissait définitivement occupé : plus aucun envoi ne partait, sans erreur. La garde rend la place, et l'arrêt se dit (`Stop::Interrupted`, qui existait mais n'était produit par personne).
+  - Le puits d'événements est réentrant. Un rappel qui réagissait à `Stopped` en réutilisant la poignée (`enqueue`) paniquait en `RefCell already borrowed` ; il passe maintenant par une file d'émission.
+  - Le budget de temps compte les tours du modèle, plus seulement les outils. Mesuré : 10 ms de budget laissaient partir 40 appels de 20 ms avant que le plafond de tours n'arrête tout. `Limits::default()` borne donc vraiment 15 minutes.
+  - La boucle tient sa propre ceinture. Une `Policy` branchée qui rendait toujours `Continue` n'était arrêtée par rien, car `max_tours` vivait dans la politique par défaut ; la boucle applique désormais `max_tours` et le budget elle-même.
+  - L'annulation atteint les outils. `Toolbox::call_with_cancel` (méthode par défaut : aucune rupture pour les implémentations existantes) permet à un outil qui attend de s'arrêter ; le harnais l'appelle.
+  - Le code d'une panne dans `Event::Stopped` vient de `Code::as_str()`, la même source que serde ; sinon la même chose avait deux noms sur le fil.
 - **Compiled output was tracked.** `.gitignore` only carried `/target/`, a pattern anchored at the repository root, so `crates/this-client-web/target/` was never matched. 554 of the 1 006 tracked files were build artifacts. The pattern is now `target/` and the files left the index; a build no longer re-adds anything.
 
 ### Documentation

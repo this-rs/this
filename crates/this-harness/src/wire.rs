@@ -216,6 +216,26 @@ pub enum Code {
     Provider,
 }
 
+impl Code {
+    /// Le nom stable de la variante, tel que serde l'écrit.
+    ///
+    /// C'est LA forme qui part sur le fil : le jour où une variante porte deux
+    /// mots (`RateLimited`), `Debug` écrirait `ratelimited` là où serde écrit
+    /// `rate_limited` — deux noms pour la même chose. `as_str` est aligné sur
+    /// serde, pas sur `Debug` ; un test le prouve variante par variante.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Unreachable => "unreachable",
+            Self::Http => "http",
+            Self::Truncated => "truncated",
+            Self::Unreadable => "unreadable",
+            Self::Timeout => "timeout",
+            Self::Aborted => "aborted",
+            Self::Provider => "provider",
+        }
+    }
+}
+
 /// Une panne de transport, avec sa famille et sa phrase.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Failure {
