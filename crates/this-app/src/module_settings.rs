@@ -529,7 +529,16 @@ mod tests {
             Ok(SettingValue::Toggle(false))
         );
         let raw = store.raw().get(&store_key("sync")).expect("written");
-        assert_eq!(raw, r#"{"general":{"auto":false,"interval":"1m"}}"#);
+        // Comparer les VALEURS, pas les octets. L'ordre des clés dépend de
+        // `serde_json/preserve_order`, qu'une autre crate du graphe de dépendances peut
+        // allumer — le job de couverture le fait, pas un `cargo test -p this-app`. Une
+        // assertion sur la chaîne passait donc ici et échouait en CI : le pire des tests,
+        // celui qui apprend à ne pas croire la CI.
+        let ecrit: serde_json::Value = serde_json::from_str(raw).expect("JSON valide");
+        let attendu: serde_json::Value =
+            serde_json::from_str(r#"{"general":{"auto":false,"interval":"1m"}}"#)
+                .expect("attendu valide");
+        assert_eq!(ecrit, attendu);
     }
 
     #[test]
