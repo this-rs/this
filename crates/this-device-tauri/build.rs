@@ -45,7 +45,9 @@ fn compile_macos_swift() {
         .args(["--sdk", "macosx", "--show-sdk-path"])
         .output()
         .expect("xcrun failed — is Xcode or Command Line Tools installed?");
-    let sdk = String::from_utf8_lossy(&sdk_output.stdout).trim().to_string();
+    let sdk = String::from_utf8_lossy(&sdk_output.stdout)
+        .trim()
+        .to_string();
 
     // Target triple: match the Cargo target architecture.
     let arch = env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_else(|_| "aarch64".to_string());
