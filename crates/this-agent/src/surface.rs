@@ -266,9 +266,14 @@ impl Surface {
 /// C'est ce que `capacites` passe à [`Surface::describe_for`]. Il est ici, et non chez
 /// l'appelant, pour qu'une capacité ajoutée se heurte à un test plutôt qu'à une troncature
 /// silencieuse — le défaut d'origine : la carte ne contenait pas l'appareil parce que rien
-/// ne mesurait ce qu'elle contenait. Mesuré le 08/11/2026, carte entière : 5 798 caractères
-/// sur iOS, 4 838 sur macOS, 664 en navigateur.
-pub const BUDGET_CARTE: usize = 8_000;
+/// ne mesurait ce qu'elle contenait.
+///
+/// Mesuré le 08/11/2026 après le chantier appareil, carte entière : **7 907 caractères sur
+/// iOS** (30 entrées d'appareil), 5 557 sur macOS, 664 en navigateur. L'ancien budget de
+/// 8 000 était à 93 caractères de la troncature : un ajout et la moitié de l'appareil
+/// disparaissait sans le dire. Relevé à 12 000, soit la place d'une poignée d'entrées —
+/// et le test ci-dessous échouera avant que la marge ne soit mangée.
+pub const BUDGET_CARTE: usize = 12_000;
 
 /// La carte réelle du harness, telle qu'elle est **aujourd'hui**.
 ///
