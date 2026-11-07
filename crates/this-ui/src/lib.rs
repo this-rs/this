@@ -18,6 +18,8 @@
 //! - [`Panel`] — la coquille d'un panneau latéral (voile, en-tête, corps, fermeture).
 //! - [`SettingsPanel`] — apparence (thème, mouvement) + faits d'accès fournis par l'app.
 //! - [`storage`] / [`theme`] — la persistance `localStorage` et l'application au `<html>`.
+//! - [`views`] — le rendu du contrat de vues d'un module (`this_descriptor::views`) :
+//!   conteneurs, briques, actions remontées en intentions, emplacements, états.
 
 pub mod app_mode;
 pub mod browser;
@@ -34,6 +36,7 @@ pub mod storage;
 pub mod store;
 pub mod theme;
 pub mod toasts;
+pub mod views;
 
 pub use app_mode::behave_like_app;
 pub use browser::{Cell, Column, EntityTable, Row};
@@ -50,3 +53,4 @@ pub use store::Store;
 pub use theme::{apply_settings, now_ms};
 pub use this_platform as platform;
 pub use toasts::ToastHost;
+pub use views::{Feed, Intent, Portfolio, Snapshot, ViewState, Views};
