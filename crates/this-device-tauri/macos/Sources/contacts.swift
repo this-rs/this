@@ -76,6 +76,102 @@ enum MacContacts {
         }
     }
 
+    // MARK: - Get / search / create (same shapes as iOS)
+
+    /// One contact as the wire entry. Names are joined as in `fetch`.
+    private static func entry(_ contact: CNContact) -> ContactEntry {
+        let name = [contact.givenName, contact.familyName]
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
+        return ContactEntry(
+            id: contact.identifier,
+            name: name,
+            emails: contact.emailAddresses.map { $0.value as String },
+            phones: contact.phoneNumbers.map { $0.value.stringValue }
+        )
+    }
+
+    /// `contactsGet` — one contact by the identifier a list or a search returned.
+    /// An identifier the book no longer knows is `not_supported`, not a failure.
+    static func get(_ args: [String: Any]) -> String {
+        guard let id = args["id"] as? String,
+              !id.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return errorReply(code: ReplyCode.internalError)
+        }
+        guard currentState() == "granted" else {
+            return errorReply(code: ReplyCode.notAuthorized)
+        }
+        do {
+            let contact = try store.unifiedContact(withIdentifier: id, keysToFetch: keys)
+            return encodeJson(ContactAnswer(contact: entry(contact)))
+        } catch {
+            return errorReply(code: ReplyCode.notSupported)
+        }
+    }
+
+    /// `contactsSearch` — contacts whose name matches `query`, at most `limit` of them.
+    static func search(_ args: [String: Any]) -> String {
+        let limit = (args["limit"] as? Int) ?? 50
+        guard (limitMin...limitMax).contains(limit) else {
+            return errorReply(code: ReplyCode.internalError)
+        }
+        guard let raw = args["query"] as? String,
+              !raw.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return errorReply(code: ReplyCode.internalError)
+        }
+        guard currentState() == "granted" else {
+            return errorReply(code: ReplyCode.notAuthorized)
+        }
+        let query = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        do {
+            let predicate = CNContact.predicateForContacts(matchingName: query)
+            let found = try store.unifiedContacts(matching: predicate, keysToFetch: keys)
+            return encodeJson(ContactsAnswer(contacts: found.prefix(limit).map { entry($0) }))
+        } catch {
+            return errorReply(code: ReplyCode.internalError)
+        }
+    }
+
+    /// `contactsCreate` — adds one contact to the default container. Choosing an account
+    /// (iCloud, Google...) is the person's business, not this bridge's.
+    static func create(_ args: [String: Any]) -> String {
+        guard let rawName = args["name"] as? String else {
+            return errorReply(code: ReplyCode.internalError)
+        }
+        let name = rawName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty else {
+            return errorReply(code: ReplyCode.internalError)
+        }
+        guard currentState() == "granted" else {
+            return errorReply(code: ReplyCode.notAuthorized)
+        }
+        let emails = (args["emails"] as? [String]) ?? []
+        let phones = (args["phones"] as? [String]) ?? []
+
+        let contact = CNMutableContact()
+        let parts = name.split(separator: " ", maxSplits: 1, omittingEmptySubsequences: true)
+        contact.givenName = parts.first.map(String.init) ?? ""
+        contact.familyName = parts.count > 1 ? String(parts[1]) : ""
+        if !emails.isEmpty {
+            contact.emailAddresses = emails.map {
+                CNLabeledValue(label: CNLabelHome, value: $0 as NSString)
+            }
+        }
+        if !phones.isEmpty {
+            contact.phoneNumbers = phones.map {
+                CNLabeledValue(label: CNLabelPhoneNumberMobile, value: CNPhoneNumber(stringValue: $0))
+            }
+        }
+        let save = CNSaveRequest()
+        save.add(contact, toContainerWithIdentifier: nil)
+        do {
+            try store.execute(save)
+            return encodeJson(ContactAnswer(contact: entry(contact)))
+        } catch {
+            return errorReply(code: ReplyCode.internalError)
+        }
+    }
+
     // MARK: - Fetch
 
     /// Reads at most `limit` contacts, in the order the system returns them. Blocking.
@@ -121,5 +217,20 @@ private struct ContactsAnswer: Encodable {
         var c = encoder.container(keyedBy: Key.self)
         try c.encode("contacts", forKey: .kind)
         try c.encode(contacts, forKey: .contacts)
+    }
+}
+
+/// `{"kind":"contact","contact":{...}}` — the same card as in a list, alone.
+private struct ContactAnswer: Encodable {
+    let contact: ContactEntry
+
+    private enum Key: String, CodingKey {
+        case kind, contact
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: Key.self)
+        try c.encode("contact", forKey: .kind)
+        try c.encode(contact, forKey: .contact)
     }
 }

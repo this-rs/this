@@ -141,6 +141,52 @@ enum MacFiles {
         return encodeDictJson(result)
     }
 
+    // MARK: - Write
+
+    /// Largest payload `filesWrite` accepts: 8 MiB (same bound as the Rust side).
+    private static let writeMaxBytes = 8 * 1024 * 1024
+
+    /// Write a named file in the app's temporary directory.
+    /// Returns `{"kind":"saved","path":..,"bytes":N}`.
+    ///
+    /// The name must be a bare file name: no separator, no `.`/`..`, no control character.
+    /// A direct native call cannot aim at an arbitrary path.
+    static func write(_ args: [String: Any]) -> String {
+        guard let rawName = args["name"] as? String else {
+            return errorReply(code: "missing_argument")
+        }
+        let name = rawName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty else {
+            return errorReply(code: "missing_argument")
+        }
+        let hasControl = name.unicodeScalars.contains { $0.value < 0x20 || $0.value == 0x7F }
+        guard !name.contains("/"), !name.contains("\\"),
+              name != ".", name != "..", !hasControl, name.utf8.count <= 255 else {
+            return errorReply(code: FilesCode.internalError)
+        }
+        guard let b64 = args["data_base64"] as? String,
+              let data = Data(base64Encoded: b64) else {
+            return errorReply(code: "bad_base64")
+        }
+        guard data.count <= writeMaxBytes else {
+            return errorReply(code: FilesCode.tooLarge)
+        }
+        let dir = FileManager.default.temporaryDirectory
+        let url = dir.appendingPathComponent(name, isDirectory: false)
+        // Belt and braces: the resolved file must still be a direct child of the directory.
+        guard url.deletingLastPathComponent().standardizedFileURL.path
+                == dir.standardizedFileURL.path else {
+            return errorReply(code: FilesCode.internalError)
+        }
+        do {
+            try data.write(to: url, options: .atomic)
+            return encodeDictJson(["kind": "saved", "path": url.path, "bytes": data.count])
+        } catch {
+            // The name may designate an existing folder, or the volume may be full.
+            return errorReply(code: FilesCode.internalError)
+        }
+    }
+
     // MARK: - Helpers
 
     /// Describe one picked file: name, size, and a security-scoped bookmark.
