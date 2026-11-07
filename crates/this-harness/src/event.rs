@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use this_agent::Stop;
+use this_agent::evidence::Verdict;
 
 /// Un message écrit par l'utilisateur pendant qu'un tour tourne.
 ///
@@ -46,10 +47,21 @@ pub enum Event {
     /// Une consigne interne du harnais (relance après un refus, après un
     /// silence). Ce n'est pas l'utilisateur qui parle : l'interface la rend
     /// discrètement, ou pas du tout.
-    Hint { text: String },
+    ///
+    /// `kind` dit de quel genre elle est : l'interface n'a pas à le deviner
+    /// d'après le texte. Absent d'un ancien message, `null`, ou d'un genre inconnu, il
+    /// vaut [`HintKind::Other`].
+    Hint {
+        text: String,
+        #[serde(default, deserialize_with = "kind_or_other")]
+        kind: HintKind,
+    },
     /// Un tour commence.
     Turn { index: u32 },
     /// Un morceau de texte du modèle. S'accumule dans le tour courant.
+    ///
+    /// Jamais vide : un `delta("")` du transport est un signe de vie (appel d'outil ou
+    /// raisonnement en cours) qui réarme la garde de silence sans rien afficher.
     Delta { text: String },
     /// Le modèle demande un outil.
     ToolUse {
@@ -68,9 +80,19 @@ pub enum Event {
         /// d'un refus : une décision se contourne, une erreur se corrige.
         #[serde(default)]
         failed: bool,
+        /// La cause de l'échec (`Outcome::failed`), pour que l'interface dise
+        /// *pourquoi* au lieu d'afficher un simple « échec ».
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        failure: Option<String>,
         /// L'état n'a pas bougé : une action qui ne change rien n'est pas un
         /// progrès, et la boucle doit le voir.
         unchanged: bool,
+        /// Empreintes de l'état avant et après l'appel (`Outcome::before` /
+        /// `Outcome::after`) — vides quand l'outil n'observe rien.
+        #[serde(default)]
+        before: String,
+        #[serde(default)]
+        after: String,
         ms: u64,
     },
     /// Le texte définitif du tour (il remplace les deltas accumulés).
@@ -85,7 +107,41 @@ pub enum Event {
         /// Code de panne du transport, quand l'arrêt vient d'une panne.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         code: Option<String>,
+        /// Ce que les faits du run disent de lui (`Run::verdict`) : prouvé, non
+        /// vérifié ou échec. Absent d'un ancien message.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        verdict: Option<Verdict>,
     },
+}
+
+/// Le genre d'un [`Event::Hint`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HintKind {
+    /// Le rappel de la décision : le récit du modèle n'est pas prouvé par les
+    /// étapes (en-tête `evidence::RAPPEL`).
+    Claim,
+    /// Une panne passagère du transport : le tour est rejoué.
+    Retry,
+    /// Le tour est interrompu : silence du flux, ou transport qui ne rend pas
+    /// la main après l'annulation.
+    Interrupted,
+    /// La relance après un refus ou un échec d'outil.
+    Refused,
+    /// Toute autre consigne (action sans effet, tour muet…), et tout genre
+    /// inconnu d'un message plus récent.
+    #[default]
+    #[serde(other)]
+    Other,
+}
+
+/// `"kind": null` vaut [`HintKind::Other`], comme un genre absent : un client qui
+/// écrit `null` pour « pas de genre » ne doit pas faire rejeter tout l'événement.
+fn kind_or_other<'de, D>(deserializer: D) -> Result<HintKind, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(Option::<HintKind>::deserialize(deserializer)?.unwrap_or_default())
 }
 
 impl Event {
@@ -177,5 +233,88 @@ impl Outcome {
     /// Vrai si l'appel a été observé **et** n'a rien changé.
     pub fn unchanged(&self) -> bool {
         !self.before.is_empty() && self.before == self.after
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn hint_of(json: &str) -> Event {
+        serde_json::from_str(json).expect("un indice lisible")
+    }
+
+    #[test]
+    fn un_genre_nul_absent_ou_inconnu_vaut_other() {
+        for json in [
+            r#"{"type":"hint","text":"t","kind":null}"#,
+            r#"{"type":"hint","text":"t"}"#,
+            r#"{"type":"hint","text":"t","kind":"demain"}"#,
+        ] {
+            assert_eq!(
+                hint_of(json),
+                Event::Hint {
+                    text: "t".to_string(),
+                    kind: HintKind::Other
+                },
+                "{json}"
+            );
+        }
+        assert_eq!(
+            hint_of(r#"{"type":"hint","text":"t","kind":"retry"}"#),
+            Event::Hint {
+                text: "t".to_string(),
+                kind: HintKind::Retry
+            }
+        );
+    }
+
+    /// La casse du fil ne change pas : `snake_case` pour le genre d'un indice,
+    /// `PascalCase` pour le verdict (forme historique, lue par les journaux).
+    #[test]
+    fn la_casse_du_fil_est_stable() {
+        let event = Event::Stopped {
+            stop: Stop::Done,
+            text: String::new(),
+            turns: 1,
+            ms: 0,
+            code: None,
+            verdict: Some(Verdict::Unverified),
+        };
+        let json = serde_json::to_value(&event).unwrap();
+        assert_eq!(json["verdict"], "Unverified");
+        let hint = serde_json::to_value(Event::Hint {
+            text: "t".to_string(),
+            kind: HintKind::Interrupted,
+        })
+        .unwrap();
+        assert_eq!(hint["kind"], "interrupted");
+    }
+
+    #[test]
+    fn un_verdict_inconnu_se_lit_unknown() {
+        let lu: Verdict = serde_json::from_str("\"Demain\"").unwrap();
+        assert_eq!(lu, Verdict::Unknown);
+        let mut json = serde_json::to_value(Event::Stopped {
+            stop: Stop::Done,
+            text: String::new(),
+            turns: 1,
+            ms: 0,
+            code: None,
+            verdict: Some(Verdict::Proven),
+        })
+        .unwrap();
+        json["verdict"] = serde_json::json!("PasEncore");
+        let stop: Event = serde_json::from_value(json)
+            .expect("un verdict plus récent ne fait pas rejeter l'arrêt");
+        assert!(matches!(
+            stop,
+            Event::Stopped {
+                verdict: Some(Verdict::Unknown),
+                ..
+            }
+        ));
+        let proven: Verdict = serde_json::from_str("\"Proven\"").unwrap();
+        assert_eq!(proven, Verdict::Proven);
     }
 }

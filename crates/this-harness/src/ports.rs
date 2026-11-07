@@ -11,6 +11,7 @@ use async_trait::async_trait;
 
 use crate::event::Outcome;
 use crate::wire::{Failure, Reply, Request, ToolCall, ToolSpec};
+use this_agent::evidence::Declaration;
 
 /// Un fragment de texte poussé vers l'interface **pendant** la lecture du flux.
 ///
@@ -78,6 +79,14 @@ pub trait Toolbox {
     /// l'intérêt : ajouter un outil ne touche pas au crate.
     fn specs(&self) -> Vec<ToolSpec>;
 
+    /// Ce que chaque outil fait au monde (écrit, lit, note) et les mots qui le désignent
+    /// dans un récit : la preuve s'en sert pour confronter « j'ai déployé » à `deploy_app`
+    /// refusé ([`Declaration`]). Par défaut aucune : la preuve devine d'après les noms
+    /// (`install_module`, `row_create`, `remember`…), comme avant.
+    fn declarations(&self) -> Vec<Declaration> {
+        Vec::new()
+    }
+
     /// Exécute un appel et rend ce que le modèle lira, plus l'observation.
     async fn call(&self, call: &ToolCall) -> Outcome;
 
@@ -134,6 +143,31 @@ impl Toolboxes {
 impl Toolbox for Toolboxes {
     fn specs(&self) -> Vec<ToolSpec> {
         self.parts.iter().flat_map(|part| part.specs()).collect()
+    }
+
+    /// Chaque part ne déclare que **ses** outils, et seulement ceux qu'elle exécute : une
+    /// déclaration est gardée si sa part est la première, dans l'ordre de composition, à
+    /// exposer ce nom dans ses `specs()` — la même règle que le routage de l'appel. Un module
+    /// qui ne fournit que `memo` ne peut donc pas déclarer `reads("install_module")`, ni
+    /// redéclarer un outil qu'une part précédente expose déjà. Le reste est ignoré.
+    fn declarations(&self) -> Vec<Declaration> {
+        let mut proprietaire: std::collections::HashMap<String, usize> =
+            std::collections::HashMap::new();
+        for (i, part) in self.parts.iter().enumerate() {
+            for spec in part.specs() {
+                proprietaire.entry(spec.name).or_insert(i);
+            }
+        }
+        self.parts
+            .iter()
+            .enumerate()
+            .flat_map(|(i, part)| {
+                let proprietaire = &proprietaire;
+                part.declarations()
+                    .into_iter()
+                    .filter(move |x| proprietaire.get(&x.tool) == Some(&i))
+            })
+            .collect()
     }
 
     async fn call(&self, call: &ToolCall) -> Outcome {

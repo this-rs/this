@@ -57,13 +57,21 @@ mod ports;
 mod session;
 mod wire;
 
-pub use event::{Event, Outcome, Pending, Snapshot};
+pub use event::{Event, HintKind, Outcome, Pending, Snapshot};
 pub use ports::{Cancel, Delta, Toolbox, Toolboxes, Transport};
-pub use session::{Handle, Harness, Limits, Running, Shared};
+pub use session::{
+    Clock, Handle, Harness, INTERRUPT_GRACE_MS, KEEP_ALIVE, Limits, MAX_RETRIES, NO_PROGRESS_MS,
+    RETRY_BACKOFF_MS, Running, SILENCE_MS, Shared, Sleep, SystemClock, TOOL_TIMEOUT_MS,
+    TurnContext, out_hash,
+};
 pub use wire::{
     Code, Failure, Finish, ImagePart, ImageSource, Message, Reply, Request, ToolCall, ToolSpec,
 };
 
+/// Le verdict que porte `Event::Stopped`.
+pub use this_agent::evidence::Verdict;
+/// Ce qu'un hôte déclare de ses outils ([`Toolbox::declarations`]).
+pub use this_agent::evidence::{Declaration, Effect};
 /// Les décisions pures de la boucle, réexportées : un utilisateur du harnais a
 /// besoin de `Stop` et de `Step` pour lire ce que le harnais raconte.
 pub use this_agent::{Decision, DefaultPolicy, Goal, Policy, Run, Step, Stop};

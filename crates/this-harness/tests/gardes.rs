@@ -271,6 +271,9 @@ fn le_budget_de_temps_compte_les_tours_du_modele() {
             max_tours: 40,
             max_relances: 0,
             budget_ms: Some(10),
+            // Les gardes de silence de la branche anti-hallucination gardent leurs valeurs par
+            // défaut : ce banc ne vise que les bornes de tours et de temps.
+            ..Limits::default()
         },
         Rc::new(transport),
         Rc::new(OutilInstant),
@@ -330,6 +333,9 @@ fn une_politique_sans_fin_reste_bornee_par_la_ceinture() {
             max_tours: 3,
             max_relances: 0,
             budget_ms: None,
+            // Les gardes de silence de la branche anti-hallucination gardent leurs valeurs par
+            // défaut : ce banc ne vise que les bornes de tours et de temps.
+            ..Limits::default()
         },
         Rc::new(transport),
         Rc::new(Rien),
@@ -475,6 +481,9 @@ fn la_ceinture_borne_le_budget_meme_avec_une_politique_qui_l_ignore() {
             max_tours: 40,
             max_relances: 0,
             budget_ms: Some(10),
+            // Les gardes de silence de la branche anti-hallucination gardent leurs valeurs par
+            // défaut : ce banc ne vise que les bornes de tours et de temps.
+            ..Limits::default()
         },
         Rc::new(transport),
         Rc::new(OutilInstant),
