@@ -163,6 +163,9 @@ pub const METHODS: &[&str] = &[
     // The capture itself. Before these, "camera" and "microphone" meant the permission and
     // nothing else: an app that could ask for the camera and never take a picture.
     "cameraCapturePhoto",
+    // La vidéo : la carte la declare manquante depuis l'audit du 08/11, et filmer est la seule
+    // primitive que la caméra n'avait pas.
+    "cameraRecordVideo",
     "microphoneStart",
     "microphoneStop",
     "notificationsStatus",
@@ -260,7 +263,7 @@ pub fn capability_of(method: &str, args: &Value) -> Option<Capability> {
             return declared_capability(args);
         }
         "gyroscopeSample" => Capability::Gyroscope,
-        "cameraCapturePhoto" => Capability::Camera,
+        "cameraCapturePhoto" | "cameraRecordVideo" => Capability::Camera,
         "microphoneStart" | "microphoneStop" => Capability::Microphone,
         "bluetoothScan"
         | "bluetoothState"
@@ -444,6 +447,9 @@ pub fn complete_args(method: &str, args: &Value, now_ms: f64) -> Value {
         // 1280 px et une qualité honnête : assez pour lire un document photographié, assez
         // petit pour traverser le pont sans le saturer.
         "cameraCapturePhoto" => serde_json::json!({ "max_px": 1280, "quality": 0.8 }),
+        // Cinq secondes par défaut : une vidéo plus longue traverse mal le pont et occupe le
+        // stockage de l'app pour un clip que personne n'a demandé à garder.
+        "cameraRecordVideo" => serde_json::json!({ "duration_ms": 5_000, "max_px": 1280 }),
         // Une minute au plus : au-delà, ce n'est plus une note vocale, c'est un fichier — et
         // le pont n'a pas de raison de le porter.
         "microphoneStart" => serde_json::json!({ "max_ms": 60_000 }),

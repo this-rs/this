@@ -477,8 +477,8 @@ pub fn surface() -> Surface {
             // `tests/surface_parity.rs` compare cette liste à `METHODS`, et
             // `tests/swift_parity.rs` compare `METHODS` aux sélecteurs natifs.
             //
-            // CE QUI RESTE PARTIEL, et qui le dit : la caméra ne filme pas encore, et le
-            // sélecteur de fichiers n'a pas de mode écriture (on écrit dans le conteneur).
+            // CE QUI RESTE PARTIEL, et qui le dit : le sélecteur de fichiers n'a pas de mode
+            // écriture (on écrit dans le conteneur), et la santé ne s'écrit pas encore.
             // Les autres profondeurs manquantes, mesurées :
             // localisation (flux continu, adresse), parole (dictée live), notifications
             // (planifier, lister), mouvement (distance, étages), santé (écriture, workouts),
@@ -537,10 +537,10 @@ pub fn surface() -> Surface {
             Capability::new(
                 "device.camera.video",
                 Tier::Shell,
-                "filmer une vidéo (aujourd'hui : photo et audio seulement)",
-                None,
+                "filmer un clip (1 à 30 s) : le fichier va dans le conteneur de l'app",
+                Some("cameraRecordVideo"),
                 &[Ios, Ipados],
-                Status::Missing,
+                Status::Live,
             ),
             Capability::new(
                 "device.microphone.record",

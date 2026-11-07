@@ -184,3 +184,125 @@ extension ThisDevicePlugin {
     }
   }
 }
+
+// ---- Filmer ---------------------------------------------------------------------------
+//
+// La dernière primitive que la caméra n'avait pas. Le fichier, pas les octets : une vidéo de
+// cinq secondes fait plusieurs mégaoctets, et le pont garde des faits, pas des charges.
+// Elle va dans le dossier temporaire du conteneur et se partage par `shareItem`.
+
+private struct VideoArgs: Decodable {
+  let durationMs: Int
+  let maxPx: Int
+
+  private enum CodingKeys: String, CodingKey {
+    case durationMs = "duration_ms"
+    case maxPx = "max_px"
+  }
+}
+
+private struct VideoOut: Encodable {
+  let kind = "video"
+  let path: String
+  let bytes: Int
+  let duration_ms: Int
+}
+
+/// Un tournage en vol : la session et le délégué doivent survivre jusqu'à la réponse.
+final class VideoCapture: NSObject, AVCaptureFileOutputRecordingDelegate {
+  private static var active: [ObjectIdentifier: VideoCapture] = [:]
+
+  private let invoke: Invoke
+  private let session = AVCaptureSession()
+  private let output = AVCaptureMovieFileOutput()
+  private let url: URL
+  private var finished = false
+
+  private init(_ invoke: Invoke, url: URL) {
+    self.invoke = invoke
+    self.url = url
+    super.init()
+  }
+
+  /// Filme `durationMs` millisecondes, puis répond le chemin du fichier.
+  static func run(_ invoke: Invoke, durationMs: Int, maxPx: Int) {
+    guard AVCaptureDevice.authorizationStatus(for: .video) == .authorized else {
+      invoke.resolve(Reply.error(code: ReplyCode.notAuthorized))
+      return
+    }
+    guard let device = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .back)
+      ?? AVCaptureDevice.default(for: .video)
+    else {
+      invoke.resolve(Reply.error(code: "unsupported"))
+      return
+    }
+    let url = FileManager.default.temporaryDirectory
+      .appendingPathComponent("atelier-\(UUID().uuidString).mov")
+    let capture = VideoCapture(invoke, url: url)
+    active[ObjectIdentifier(capture)] = capture
+    // Configurer et démarrer une session ne doit pas se faire sur la file principale : le
+    // démarrage bloque jusqu'à ce que le matériel réponde.
+    DispatchQueue.global(qos: .userInitiated).async {
+      do {
+        capture.session.beginConfiguration()
+        // La qualité se choisit par la session, pas par le fichier : `medium` tient un clip de
+        // cinq secondes sous quelques mégaoctets, ce qui est le but.
+        capture.session.sessionPreset = maxPx >= 1280 ? .high : .medium
+        let input = try AVCaptureDeviceInput(device: device)
+        if capture.session.canAddInput(input) { capture.session.addInput(input) }
+        if capture.session.canAddOutput(capture.output) {
+          capture.session.addOutput(capture.output)
+        }
+        capture.session.commitConfiguration()
+        capture.session.startRunning()
+        capture.output.startRecording(to: url, recordingDelegate: capture)
+        // L'arrêt : c'est la durée demandée qui le décide, pas un geste.
+        DispatchQueue.global().asyncAfter(deadline: .now() + Double(durationMs) / 1000) {
+          if capture.output.isRecording { capture.output.stopRecording() }
+        }
+      } catch {
+        capture.finish(Reply.error(code: "unsupported"))
+      }
+    }
+  }
+
+  private func finish(_ reply: Encodable) {
+    guard !finished else { return }
+    finished = true
+    if session.isRunning { session.stopRunning() }
+    VideoCapture.active[ObjectIdentifier(self)] = nil
+    DispatchQueue.main.async { self.invoke.resolve(reply) }
+  }
+
+  func fileOutput(
+    _ output: AVCaptureFileOutput,
+    didFinishRecordingTo outputFileURL: URL,
+    from connections: [AVCaptureConnection],
+    error: Error?
+  ) {
+    if error != nil {
+      finish(Reply.error(code: "internal"))
+      return
+    }
+    let size = (try? FileManager.default.attributesOfItem(atPath: outputFileURL.path)[.size]
+      as? NSNumber).flatMap { $0 }?.intValue ?? 0
+    guard size > 0 else {
+      finish(Reply.error(code: "internal"))
+      return
+    }
+    finish(
+      VideoOut(
+        path: outputFileURL.path,
+        bytes: size,
+        duration_ms: Int(output.recordedDuration.seconds * 1000)
+      ))
+  }
+}
+
+extension ThisDevicePlugin {
+  /// Filme un clip de `duration_ms` millisecondes et rend son chemin.
+  @objc public func cameraRecordVideo(_ invoke: Invoke) throws {
+    let args = try invoke.parseArgs(VideoArgs.self)
+    VideoCapture.run(invoke, durationMs: args.durationMs, maxPx: args.maxPx)
+  }
+}
