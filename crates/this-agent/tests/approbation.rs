@@ -28,6 +28,10 @@ fn doc() -> HarnessDoc {
         max_relances: 3,
         budget_ms: Some(1000),
         approval: None,
+        silence_ms: None,
+        no_progress_ms: None,
+        tool_timeout_ms: None,
+        context_budget: None,
     }
 }
 

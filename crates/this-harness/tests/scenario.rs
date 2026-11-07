@@ -889,6 +889,7 @@ fn un_harness_compose_depuis_le_graphe_porte_son_brief_et_ses_bornes() {
         no_progress_ms: None,
         tool_timeout_ms: None,
         context_budget: None,
+        approval: None,
     };
 
     let script = Script::new(vec![
