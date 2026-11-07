@@ -521,6 +521,10 @@ impl ProviderClient {
             done_seen: false,
             ended: false,
             alive: false,
+            progress: false,
+            last_was_progress: false,
+            last_progress: std::time::Instant::now(),
+            no_progress: Turn::NO_PROGRESS_LIMIT,
             reported: None,
             model,
             pricing: self.config.pricing,
@@ -542,6 +546,14 @@ pub struct Turn {
     ended: bool,
     /// A line arrived since the last piece was handed out, but it carried no text.
     alive: bool,
+    /// A `data:` event that parses arrived since the last piece was handed out.
+    progress: bool,
+    /// What the last piece handed out by [`Turn::next`] stood for.
+    last_was_progress: bool,
+    /// When the last `data:` event that parses arrived (or the turn opened).
+    last_progress: std::time::Instant,
+    /// How long comments alone may keep the turn open.
+    no_progress: std::time::Duration,
     reported: Option<Value>,
     model: String,
     pricing: Option<Pricing>,
@@ -550,6 +562,34 @@ pub struct Turn {
 
 #[cfg(not(target_arch = "wasm32"))]
 impl Turn {
+    /// How long `:` comments ALONE may keep a turn open, with no `data:` event at all.
+    ///
+    /// A comment is a sign of life, not progress: an engine (or a proxy in front of it) that
+    /// sends `: keep-alive` forever re-arms the HTTP read timeout forever, and a caller that
+    /// guards silence around `next()` never fires either. Measured in the V20 review: one hour
+    /// of keep-alive, never cut. Ten minutes because OpenRouter sends `: OPENROUTER
+    /// PROCESSING` while a reasoning model thinks with its reasoning hidden, and the longest
+    /// of those (o1-pro / o3-pro class) think for several minutes before the first token;
+    /// ten minutes covers them with room, and stays under the 15 min run budget of a harness,
+    /// so a live shell that only guards silence (180 s around `next()`) is still bounded.
+    pub const NO_PROGRESS_LIMIT: std::time::Duration = std::time::Duration::from_secs(600);
+
+    /// Sets how long `:` comments alone may keep this turn open ([`Self::NO_PROGRESS_LIMIT`]
+    /// by default). Counted from the last `data:` event that parses, or from the opening.
+    pub fn with_no_progress_limit(mut self, limit: std::time::Duration) -> Self {
+        self.no_progress = limit;
+        self
+    }
+
+    /// Whether the last piece handed out by [`Self::next`] came from a `data:` event (text,
+    /// a tool call fragment, reasoning, usage, a role-only delta): PROGRESS. `false` after an
+    /// empty piece that only stood for `:` comments: a sign of life, not progress. A caller
+    /// guarding the stream re-arms its silence guard on both, its no-progress guard only on
+    /// progress.
+    pub fn last_was_progress(&self) -> bool {
+        self.last_was_progress
+    }
+
     /// The model the engine runs this turn on.
     pub fn model(&self) -> &str {
         &self.model
@@ -571,10 +611,13 @@ impl Turn {
     /// `next()` only returned text, that caller would cut it while the engine is talking.
     /// Callers that only want the text can append the empty piece or skip it.
     ///
-    /// Keep-alive comments count too: they come from the engine side of the connection
-    /// (OpenRouter sends `: OPENROUTER PROCESSING` while a reasoning model thinks), and the
-    /// HTTP read timeout already counts them as activity. A stream that is never cut by
-    /// silence stays bounded by the output cap and by the caller's run budget.
+    /// Keep-alive comments count too, but only as LIFE: they come from the engine side of
+    /// the connection (OpenRouter sends `: OPENROUTER PROCESSING` while a reasoning model
+    /// thinks), and the HTTP read timeout counts them as activity. They are not progress
+    /// ([`Self::last_was_progress`] is `false`): past [`Self::NO_PROGRESS_LIMIT`] without a
+    /// single `data:` event, `next()` fails with [`ProviderError::Timeout`] that says so. A
+    /// stream of comments alone is therefore bounded even when the caller guards nothing
+    /// but silence.
     ///
     /// A stream that stops without `[DONE]`, without a finish reason and without a tool
     /// call is an error: its text is a fragment, not an answer.
@@ -582,6 +625,8 @@ impl Turn {
         loop {
             if let Some(piece) = self.take_piece() {
                 self.alive = false;
+                self.progress = false;
+                self.last_was_progress = true;
                 return Ok(Some(piece));
             }
             if self.ended {
@@ -593,6 +638,16 @@ impl Turn {
             // Everything buffered is read and none of it was text: say the engine is alive
             // before waiting on the network again.
             if std::mem::take(&mut self.alive) {
+                let progressed = std::mem::take(&mut self.progress);
+                self.last_was_progress = progressed;
+                // Comments only: alive, but has it said anything for too long?
+                if !progressed && self.last_progress.elapsed() >= self.no_progress {
+                    return Err(ProviderError::Timeout(format!(
+                        "aucun progrès depuis {} s : le moteur n'envoie que des signes de vie \
+                         (commentaires `:`), ni texte, ni appel d'outil, ni raisonnement",
+                        self.no_progress.as_secs()
+                    )));
+                }
                 return Ok(Some(String::new()));
             }
             match self.response.chunk().await.map_err(transport)? {
@@ -659,6 +714,10 @@ impl Turn {
             let Ok(value) = serde_json::from_str::<Value>(data) else {
                 continue;
             };
+            // An event that parses is progress, whatever it carries: text, a tool call
+            // fragment, reasoning, usage. A `:` comment never reaches this line.
+            self.progress = true;
+            self.last_progress = std::time::Instant::now();
             if value.get("usage").is_some_and(|usage| !usage.is_null()) {
                 self.reported = value.get("usage").cloned();
             }
