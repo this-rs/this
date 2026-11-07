@@ -29,7 +29,9 @@ use async_trait::async_trait;
 
 use crate::event::{Event, HintKind, Outcome, Pending, Snapshot};
 use crate::ports::{Cancel, Compactor, Delta, Recorder, Recorders, Toolbox, Transport};
-use crate::wire::{Code, Failure, Finish, ImagePart, Message, Reply, Request, ToolCall};
+use crate::wire::{
+    Code, Failure, Finish, ImagePart, Message, Reply, Request, ThreadDefect, ToolCall,
+};
 use this_agent::evidence::Verdict;
 use this_agent::{Decision, DefaultPolicy, Goal, Policy, Run, Step, Stop};
 
@@ -1137,6 +1139,26 @@ impl Harness {
                 // dépend de la conversation telle qu'elle est maintenant.
                 let context = self.turn_context().await;
                 let request = self.request(toolbox.as_ref(), context).await;
+                // Un fil que le moteur refuserait (id vide, appel en double,
+                // réponse orpheline) s'arrête ICI, nommé et typé, au lieu de
+                // partir chez le moteur et de revenir en 400 opaque. La
+                // validation porte sur le fil TEL QU'ENVOYÉ (`thread`), après le
+                // fit/compaction et l'insertion du contexte de tour.
+                if let Err(defect) = Message::check_thread(&request.thread()) {
+                    let raison = match defect {
+                        ThreadDefect::EmptyId { index } => {
+                            format!("fil invalide : id d'appel vide (message {index})")
+                        }
+                        ThreadDefect::DuplicateCallId { index } => {
+                            format!("fil invalide : id d'appel en double (message {index})")
+                        }
+                        ThreadDefect::OrphanTool { index } => {
+                            format!("fil invalide : réponse d'outil sans appel (message {index})")
+                        }
+                    };
+                    stop = Some(run.finish(Stop::Failed(raison)));
+                    break 'turns;
+                }
                 // Le temps du TOUR est de l'horloge murale : mesuré autour du
                 // transport, relances comprises, et ajouté au run AVANT la
                 // décision. Sans ça, un modèle lent et des outils instantanés
