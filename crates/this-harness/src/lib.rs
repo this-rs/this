@@ -60,8 +60,9 @@ mod wire;
 pub use event::{Event, HintKind, Outcome, Pending, Snapshot};
 pub use ports::{Cancel, Delta, Toolbox, Toolboxes, Transport};
 pub use session::{
-    Clock, Handle, Harness, INTERRUPT_GRACE_MS, Limits, MAX_RETRIES, RETRY_BACKOFF_MS, Running,
-    SILENCE_MS, Shared, Sleep, SystemClock, TOOL_TIMEOUT_MS, TurnContext, out_hash,
+    Clock, Handle, Harness, INTERRUPT_GRACE_MS, KEEP_ALIVE, Limits, MAX_RETRIES, NO_PROGRESS_MS,
+    RETRY_BACKOFF_MS, Running, SILENCE_MS, Shared, Sleep, SystemClock, TOOL_TIMEOUT_MS,
+    TurnContext, out_hash,
 };
 pub use wire::{Code, Failure, Finish, Message, Reply, Request, ToolCall, ToolSpec};
 

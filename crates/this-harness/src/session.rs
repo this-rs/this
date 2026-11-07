@@ -46,6 +46,24 @@ pub const INTERRUPT_GRACE_MS: u64 = 10_000;
 /// Le silence toléré par défaut sur le flux d'un tour.
 pub const SILENCE_MS: u64 = 120_000;
 
+/// Ce qu'un transport passe à son [`Delta`] pour un simple **signe de vie** : le moteur a
+/// parlé, mais sans progrès (un commentaire SSE `: keep-alive`, `: OPENROUTER PROCESSING`).
+///
+/// Il réarme la garde de silence (la connexion vit), pas la garde « sans progrès »
+/// ([`Limits::no_progress_ms`]). Tout autre appel du rappel, y compris un morceau VIDE (un
+/// fragment d'appel d'outil, du raisonnement), est un progrès. Un caractère NUL seul : aucun
+/// moteur ne l'écrit comme texte, et il ne s'affiche jamais.
+pub const KEEP_ALIVE: &str = "\u{0}";
+
+/// Combien de temps des signes de vie SEULS ([`KEEP_ALIVE`]) peuvent tenir un tour ouvert.
+///
+/// Dix minutes : un modèle de raisonnement derrière OpenRouter pense en n'envoyant que
+/// `: OPENROUTER PROCESSING` quand son raisonnement est caché, et les plus lents pensent
+/// plusieurs minutes avant le premier jeton. C'est aussi la borne du client
+/// (`this_llm_providers::Turn::NO_PROGRESS_LIMIT`), et c'est moins que le budget par défaut
+/// d'un run (15 min) : une garde qui ne servirait qu'après l'échéance ne servirait à rien.
+pub const NO_PROGRESS_MS: u64 = 10 * 60 * 1000;
+
 /// Le plafond par défaut d'un appel d'outil.
 ///
 /// Un outil n'émet aucun signe de vie pendant qu'il travaille : on ne peut pas
@@ -262,17 +280,54 @@ impl Future for ThreadSleep {
 enum Watch {
     /// Aucun événement pendant ce nombre de millisecondes.
     Silent(u64),
+    /// Des signes de vie ([`KEEP_ALIVE`]) seulement, aucun progrès pendant ce nombre de
+    /// millisecondes.
+    Stalled(u64),
+    /// Le run a dépassé son budget de temps (ce nombre de millisecondes), en temps horloge.
+    Deadline(u64),
     /// Annulé, et le transport n'a pas rendu la main dans la grâce.
     Abandoned(u64),
 }
 
-/// Veille sur un flux : rend dès que le silence dépasse `silence_ms`, ou que
-/// l'annulation dure plus que `grace_ms` sans que le transport ait rendu.
+/// Les deux sortes de signes d'un flux, datées par la garde.
+///
+/// Un **progrès** (texte, fragment d'outil, raisonnement : tout `delta` sauf
+/// [`KEEP_ALIVE`]) réarme les deux gardes. Un simple **signe de vie** (un
+/// commentaire `:` du moteur) ne réarme que la garde de silence : il dit que la
+/// connexion vit, pas que le moteur avance.
+#[derive(Clone)]
+struct Signs {
+    life: Rc<Cell<f64>>,
+    progress: Rc<Cell<f64>>,
+}
+
+impl Signs {
+    fn new(now: f64) -> Self {
+        Self {
+            life: Rc::new(Cell::new(now)),
+            progress: Rc::new(Cell::new(now)),
+        }
+    }
+}
+
+/// Ce qui borne une veille : silence, absence de progrès, échéance du run.
+#[derive(Clone, Copy, Default)]
+struct Bounds {
+    silence_ms: Option<u64>,
+    no_progress_ms: Option<u64>,
+    /// L'échéance du run, en heure de l'horloge, et le budget qu'elle représente.
+    deadline: Option<(f64, u64)>,
+}
+
+/// Veille sur un flux : rend dès que le silence dépasse `silence_ms`, que les
+/// signes de vie sans progrès durent plus que `no_progress_ms`, que l'échéance
+/// du run est passée, ou que l'annulation dure plus que `grace_ms` sans que le
+/// transport ait rendu.
 async fn watch(
     clock: Rc<dyn Clock>,
-    activity: Rc<Cell<f64>>,
+    signs: Signs,
     cancel: Cancel,
-    silence_ms: Option<u64>,
+    bounds: Bounds,
     grace_ms: u64,
 ) -> Watch {
     let mut cancelled_at: Option<f64> = None;
@@ -285,16 +340,31 @@ async fn watch(
                 return Watch::Abandoned(grace_ms);
             }
             grace_ms - waited
-        } else if let Some(limit) = silence_ms {
-            let idle = (now - activity.get()).max(0.0) as u64;
-            if idle >= limit {
-                return Watch::Silent(limit);
-            }
-            limit - idle
         } else {
-            WATCH_TICK_MS
+            let mut left = WATCH_TICK_MS;
+            if let Some((at, budget)) = bounds.deadline {
+                if now >= at {
+                    return Watch::Deadline(budget);
+                }
+                left = left.min((at - now).ceil() as u64);
+            }
+            if let Some(limit) = bounds.silence_ms {
+                let idle = (now - signs.life.get()).max(0.0) as u64;
+                if idle >= limit {
+                    return Watch::Silent(limit);
+                }
+                left = left.min(limit - idle);
+            }
+            if let Some(limit) = bounds.no_progress_ms {
+                let idle = (now - signs.progress.get()).max(0.0) as u64;
+                if idle >= limit {
+                    return Watch::Stalled(limit);
+                }
+                left = left.min(limit - idle);
+            }
+            left
         };
-        match clock.sleep(left.min(WATCH_TICK_MS)) {
+        match clock.sleep(left.clamp(1, WATCH_TICK_MS)) {
             Some(sleep) => sleep.await,
             // Pas de minuteur : la garde ne peut rien affirmer, elle se tait.
             None => return std::future::pending().await,
@@ -358,12 +428,18 @@ pub struct Limits {
     pub max_tours: u32,
     /// Nombre de relances accordées après un refus ou un silence.
     pub max_relances: u32,
-    /// Budget de temps du run, en millisecondes (`None` : pas de borne).
+    /// Budget de temps du run, en millisecondes (`None` : pas de borne). Compté en temps
+    /// HORLOGE, du début du run à maintenant, temps du modèle compris : la garde du flux
+    /// coupe le tour à l'échéance, et la décision entre deux tours le relit.
     pub budget_ms: Option<u64>,
     /// Silence toléré sur le flux d'un tour, en millisecondes : passé ce délai
     /// sans un seul événement, le tour est interrompu et le dit (`None` : pas
     /// de chien de garde).
     pub silence_ms: Option<u64>,
+    /// Durée tolérée sans PROGRÈS : seuls des signes de vie ([`KEEP_ALIVE`]) sont arrivés,
+    /// ni texte, ni outil, ni raisonnement. Passé ce délai, le tour est interrompu et le dit
+    /// (`None` : pas de garde ; l'échéance du run borne encore).
+    pub no_progress_ms: Option<u64>,
     /// Durée maximale d'un appel d'outil, en millisecondes : passé ce délai,
     /// l'appel est abandonné et le modèle lit « délai dépassé » (`None` : pas
     /// de plafond — l'annulation reste, elle, toujours gardée).
@@ -381,6 +457,7 @@ impl Limits {
             max_relances: doc.max_relances,
             budget_ms: doc.budget_ms,
             silence_ms: Some(SILENCE_MS),
+            no_progress_ms: Some(NO_PROGRESS_MS),
             tool_timeout_ms: Some(TOOL_TIMEOUT_MS),
         }
     }
@@ -396,6 +473,7 @@ impl Default for Limits {
             max_relances: 3,
             budget_ms: Some(15 * 60 * 1000),
             silence_ms: Some(SILENCE_MS),
+            no_progress_ms: Some(NO_PROGRESS_MS),
             tool_timeout_ms: Some(TOOL_TIMEOUT_MS),
         }
     }
@@ -653,6 +731,17 @@ impl Harness {
             if let Some(budget) = limits.budget_ms {
                 run.budget(budget);
             }
+            // Le budget se compte en temps HORLOGE depuis ici : temps du modèle compris. Ne
+            // compter que la durée des outils laissait un flux de signes de vie tourner une
+            // heure (revue V20). L'échéance arme la garde du flux ; la décision la relit.
+            let run_started = clock.now_ms();
+            let deadline = limits
+                .budget_ms
+                .map(|budget| (run_started + budget as f64, budget));
+            let horloge = |run: &mut Run| {
+                let ecoule = (clock.now_ms() - run_started).max(0.0) as u64;
+                run.ecoule_ms = run.ecoule_ms.max(ecoule);
+            };
 
             'turns: loop {
                 if cancel.is_cancelled() {
@@ -677,14 +766,14 @@ impl Harness {
                 let steps_at_turn = run.steps.len();
                 let mut tentative = 0u32;
                 let issue: Result<Result<Reply, Failure>, Watch> = loop {
-                    // Le dernier signe de vie du flux : un tour qui commence en
-                    // est un, chaque morceau reçu en est un.
-                    let activity = Rc::new(Cell::new(clock.now_ms()));
+                    // Les derniers signes du flux : un tour qui commence en est
+                    // un, chaque morceau reçu en est un.
+                    let signs = Signs::new(clock.now_ms());
                     let delta: Delta = {
                         let gathered = gathered.clone();
                         let out = self.out.clone();
                         let cancel = cancel.clone();
-                        let activity = activity.clone();
+                        let signs = signs.clone();
                         let clock = clock.clone();
                         Rc::new(move |text: &str| {
                             // TOUT appel est un signe de vie, y compris un morceau
@@ -693,7 +782,17 @@ impl Harness {
                             // sans texte à montrer. Sans ça, un module écrit dans
                             // un seul appel d'outil (des minutes de flux) était
                             // coupé en `Silent` alors que le moteur parlait.
-                            activity.set(clock.now_ms());
+                            //
+                            // Mais un signe de vie n'est pas un progrès : un
+                            // [`KEEP_ALIVE`] (commentaire `:`) ne réarme que la garde
+                            // de silence. Des commentaires à l'infini ne tiennent plus
+                            // le tour ouvert au-delà de `no_progress_ms`.
+                            let now = clock.now_ms();
+                            signs.life.set(now);
+                            if text == KEEP_ALIVE {
+                                return;
+                            }
+                            signs.progress.set(now);
                             // Un flux annulé ne doit plus rien afficher : sinon le
                             // texte du tour précédent se mélange au suivant. Un
                             // signe de vie sans texte n'a rien à afficher non plus.
@@ -708,9 +807,13 @@ impl Harness {
                     };
                     let guard = watch(
                         clock.clone(),
-                        activity,
+                        signs,
                         cancel.clone(),
-                        limits.silence_ms,
+                        Bounds {
+                            silence_ms: limits.silence_ms,
+                            no_progress_ms: limits.no_progress_ms,
+                            deadline,
+                        },
                         INTERRUPT_GRACE_MS,
                     );
                     let issue = race(transport.stream(&request, &cancel, delta), guard).await;
@@ -759,20 +862,40 @@ impl Harness {
                     Err(why) => {
                         // Le flux est abandonné (son futur est lâché) : la
                         // session redevient libre, et elle dit pourquoi.
-                        let (hint, panne) = match why {
+                        let (hint, panne, arret) = match why {
                             Watch::Silent(ms) => (
                                 format!(
                                     "Aucun événement du flux depuis {} s : le moteur ne répond plus, le tour est interrompu. Rien n'est perdu : le prochain message reprend la conversation.",
                                     ms / 1000
                                 ),
-                                Code::Timeout,
+                                Some(Code::Timeout),
+                                Stop::Interrupted,
+                            ),
+                            Watch::Stalled(ms) => (
+                                format!(
+                                    "Aucun progrès du flux depuis {} s : le moteur n'envoie que des signes de vie (commentaires keep-alive), ni texte, ni outil, ni raisonnement. Le tour est interrompu ; le prochain message reprend la conversation.",
+                                    ms / 1000
+                                ),
+                                Some(Code::Timeout),
+                                Stop::Interrupted,
+                            ),
+                            // Le budget du run est épuisé pendant que le modèle parlait :
+                            // c'est un budget atteint, pas une panne du moteur.
+                            Watch::Deadline(ms) => (
+                                format!(
+                                    "Budget de temps du run atteint ({} s, temps du modèle compris) : le tour est interrompu à l'échéance. Rien n'est perdu : dis-moi de continuer.",
+                                    ms / 1000
+                                ),
+                                None,
+                                Stop::Budget,
                             ),
                             Watch::Abandoned(ms) => (
                                 format!(
                                     "Le transport n'a pas rendu la main {} s après l'annulation : le tour est abandonné et la session est libre.",
                                     ms / 1000
                                 ),
-                                Code::Aborted,
+                                Some(Code::Aborted),
+                                Stop::Interrupted,
                             ),
                         };
                         self.out.emit(Event::Hint {
@@ -787,12 +910,15 @@ impl Harness {
                                 calls: Vec::new(),
                             });
                         }
-                        code = Some(format!("{panne:?}").to_lowercase());
-                        stop = Some(run.finish(Stop::Interrupted));
+                        code = panne.map(|panne| format!("{panne:?}").to_lowercase());
+                        horloge(&mut run);
+                        stop = Some(run.finish(arret));
                         break 'turns;
                     }
                 };
 
+                // Le temps du modèle compte : les étapes de ce tour sont datées après lui.
+                horloge(&mut run);
                 let streamed = gathered.borrow().clone();
                 let text = if reply.text.is_empty() {
                     streamed
@@ -887,6 +1013,8 @@ impl Harness {
                     break 'turns;
                 }
 
+                // La décision relit le budget en temps horloge, outils et modèle compris.
+                horloge(&mut run);
                 let spoke = !text.trim().is_empty();
                 let called = !reply.calls.is_empty();
                 // Le motif se lit AVANT la décision : `after_turn` déplace la
@@ -992,9 +1120,12 @@ impl Harness {
             // un plafond sur la durée totale de l'appel.
             let guard = watch(
                 self.clock.clone(),
-                Rc::new(Cell::new(started)),
+                Signs::new(started),
                 cancel.clone(),
-                limits.tool_timeout_ms,
+                Bounds {
+                    silence_ms: limits.tool_timeout_ms,
+                    ..Bounds::default()
+                },
                 INTERRUPT_GRACE_MS,
             );
             match race(toolbox.call(call), guard).await {
@@ -1081,7 +1212,8 @@ fn unknown_tool(name: &str) -> Outcome {
 /// succès. L'effet de l'outil, s'il en a eu un, est inconnu : le résultat le dit.
 fn abandoned_tool(name: &str, why: Watch) -> (String, Outcome) {
     match why {
-        Watch::Silent(ms) => (
+        // Un outil n'est veillé que par son plafond : ni progrès ni échéance ne le coupent.
+        Watch::Silent(ms) | Watch::Stalled(ms) | Watch::Deadline(ms) => (
             format!(
                 "L'outil « {name} » n'a pas rendu la main en {} s : l'appel est abandonné. L'action a pu s'exécuter quand même : vérifie son effet avant de la refaire.",
                 ms / 1000
@@ -1627,6 +1759,12 @@ mod tests {
         Appel,
         /// Répond par du texte.
         Dit(&'static str),
+        /// `signes` appels `delta("")` espacés de `gap_ms`, puis « fini » : le
+        /// moteur bavard de la revue V20 (signes de vie sans texte ni outil).
+        Bavard { signes: u32, gap_ms: u64 },
+        /// `signes` [`KEEP_ALIVE`] espacés de `gap_ms` (des commentaires `:` relayés),
+        /// puis « fini ».
+        Vie { signes: u32, gap_ms: u64 },
     }
 
     struct Moteur {
@@ -1667,6 +1805,28 @@ mod tests {
                         delta("");
                     }
                     Ok(avec_appel)
+                }
+                Acte::Bavard { signes, gap_ms } => {
+                    for _ in 0..signes {
+                        self.clock.sleep(gap_ms).expect("minuteur").await;
+                        delta("");
+                    }
+                    Ok(Reply {
+                        text: "fini".to_string(),
+                        calls: vec![],
+                        finish: Finish::Stop,
+                    })
+                }
+                Acte::Vie { signes, gap_ms } => {
+                    for _ in 0..signes {
+                        self.clock.sleep(gap_ms).expect("minuteur").await;
+                        delta(KEEP_ALIVE);
+                    }
+                    Ok(Reply {
+                        text: "fini".to_string(),
+                        calls: vec![],
+                        finish: Finish::Stop,
+                    })
                 }
                 Acte::Muet => std::future::pending().await,
                 Acte::Appel => Ok(avec_appel),
@@ -1788,6 +1948,126 @@ mod tests {
             !indices(&journal)
                 .iter()
                 .any(|h| h.contains("Aucun événement"))
+        );
+    }
+
+    /// B1 (revue V20, `signes_de_vie_une_heure_sans_coupure`) : un moteur qui n'envoie que
+    /// des signes de vie pendant une heure, sans texte ni outil, tournait jusqu'au bout
+    /// (`Ran(Done)` après 3600 s). Le budget du run se compte désormais en temps horloge,
+    /// temps du modèle compris : le tour est coupé à l'échéance (15 min), et il le dit.
+    #[test]
+    fn revue_signes_de_vie_une_heure_coupes_par_le_budget() {
+        let (harness, journal, clock) = harnais(
+            vec![Acte::Bavard {
+                signes: 3_600,
+                gap_ms: 1_000,
+            }],
+            false,
+            Limits::default(),
+        );
+        let fini = futures::executor::block_on(harness.send("écris"));
+        assert_eq!(fini, Running::Ran(Stop::Budget), "{:?}", indices(&journal));
+        let budget = 15.0 * 60_000.0;
+        assert!(
+            clock.now_ms() >= budget && clock.now_ms() <= budget + 2_000.0,
+            "coupé à l'échéance, pas après une heure ({} ms)",
+            clock.now_ms()
+        );
+        assert!(
+            indices(&journal)
+                .iter()
+                .any(|h| h.contains("Budget de temps du run atteint (900 s")),
+            "{:?}",
+            indices(&journal)
+        );
+        let code = journal.borrow().iter().find_map(|e| match e {
+            Event::Stopped { code, .. } => Some(code.clone()),
+            _ => None,
+        });
+        assert_eq!(
+            code,
+            Some(None),
+            "un budget atteint n'est pas une panne du moteur"
+        );
+    }
+
+    /// Des commentaires `:` relayés en [`KEEP_ALIVE`] tiennent la garde de silence (la
+    /// connexion vit), pas la garde « sans progrès » : sans budget, le tour est coupé
+    /// après `no_progress_ms`, et l'indice dit pourquoi.
+    #[test]
+    fn des_signes_de_vie_seuls_sont_coupes_faute_de_progres() {
+        let limits = Limits {
+            budget_ms: None,
+            ..silence_120s()
+        };
+        let (harness, journal, clock) = harnais(
+            vec![Acte::Vie {
+                signes: 3_600,
+                gap_ms: 1_000,
+            }],
+            false,
+            limits,
+        );
+        let fini = futures::executor::block_on(harness.send("écris"));
+        assert_eq!(fini, Running::Ran(Stop::Interrupted));
+        assert!(
+            clock.now_ms() >= NO_PROGRESS_MS as f64
+                && clock.now_ms() <= NO_PROGRESS_MS as f64 + 2_000.0,
+            "{}",
+            clock.now_ms()
+        );
+        let indices = indices(&journal);
+        assert!(
+            indices
+                .iter()
+                .any(|h| h.contains("Aucun progrès du flux depuis 600 s")),
+            "{indices:?}"
+        );
+        assert!(
+            !indices.iter().any(|h| h.contains("Aucun événement")),
+            "un signe de vie réarme bien la garde de silence (120 s) : {indices:?}"
+        );
+        assert!(
+            !journal
+                .borrow()
+                .iter()
+                .any(|e| matches!(e, Event::Delta { .. })),
+            "un signe de vie ne s'affiche pas"
+        );
+    }
+
+    /// Un appel d'outil écrit en fragments (des `data:` : du progrès) pendant 12 min, plus
+    /// longtemps que la garde « sans progrès » (10 min) : jamais coupé, l'outil est joué. Le
+    /// budget est porté à une heure : l'horloge factice avance aussi pendant les veilles de
+    /// la garde, et c'est la garde de progrès qu'on éprouve ici, pas l'échéance.
+    #[test]
+    fn un_long_flux_d_outil_qui_progresse_n_est_jamais_coupe() {
+        let (harness, journal, clock) = harnais(
+            vec![Acte::Fragments {
+                fragments: 720,
+                gap_ms: 1_000,
+            }],
+            false,
+            Limits {
+                budget_ms: Some(60 * 60_000),
+                ..Limits::default()
+            },
+        );
+        let fini = futures::executor::block_on(harness.send("écris le module"));
+        assert_eq!(fini, Running::Ran(Stop::Done), "{:?}", indices(&journal));
+        assert!(clock.now_ms() >= 720_000.0, "{}", clock.now_ms());
+        assert!(
+            journal
+                .borrow()
+                .iter()
+                .any(|e| matches!(e, Event::ToolResult { tool, .. } if tool == "write_module"))
+        );
+        assert!(
+            !indices(&journal)
+                .iter()
+                .any(|h| h.contains("Aucun") || h.contains("Budget")),
+            "{:?}",
+            indices(&journal)
         );
     }
 
