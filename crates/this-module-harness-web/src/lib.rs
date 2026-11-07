@@ -16,22 +16,50 @@
 //! The value **and** the effect trace. A module that returns `1` in both engines
 //! but called `emit` once and not the other is not the same module.
 
+#[cfg(target_arch = "wasm32")]
 use std::cell::RefCell;
+#[cfg(target_arch = "wasm32")]
 use std::rc::Rc;
 
 use async_trait::async_trait;
+#[cfg(target_arch = "wasm32")]
 use js_sys::{Object, Reflect, Uint8Array};
-use this_module_harness::executor::{Executor, ExecutorError, Outcome, show};
+#[cfg(target_arch = "wasm32")]
+use this_module_harness::executor::show;
+use this_module_harness::executor::{Executor, ExecutorError, Outcome};
 use this_module_lang::eval::Value;
+#[cfg(target_arch = "wasm32")]
 use wasm_bindgen::closure::Closure;
+#[cfg(target_arch = "wasm32")]
 use wasm_bindgen::{JsCast, JsValue};
+#[cfg(target_arch = "wasm32")]
 use wasm_bindgen_futures::JsFuture;
 
 /// An `Executor` backed by the page's own WebAssembly engine.
 pub struct BrowserExecutor;
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+/// Hors wasm, le trait `Executor` exige un futur `Send` (les handlers hôtes l'imposent),
+/// alors que celui du navigateur tient des `Rc` et un `JsFuture` : il ne peut pas l'être.
+/// Il n'y a d'ailleurs pas de moteur `WebAssembly` hors navigateur. En natif, le type
+/// existe donc (pour que ses appelants compilent et que leurs tests tournent) mais
+/// refuse d'exécuter ; l'hôte a `WasmiExecutor`.
+#[cfg(not(target_arch = "wasm32"))]
+#[async_trait]
+impl Executor for BrowserExecutor {
+    async fn run(
+        &self,
+        _program: &[u8],
+        _args: &[Value],
+        _now: i64,
+    ) -> Result<Outcome, ExecutorError> {
+        Err(ExecutorError::Link(
+            "BrowserExecutor : moteur WebAssembly du navigateur absent hors wasm32".into(),
+        ))
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+#[async_trait(?Send)]
 impl Executor for BrowserExecutor {
     async fn run(
         &self,
@@ -125,6 +153,7 @@ impl Executor for BrowserExecutor {
 /// Le type de retour se lit dans la valeur rendue : `BigInt` pour `Int`, nombre
 /// pour `Bool`, `undefined` pour `Unit`. C'est ce qui permet d'exécuter un
 /// artefact relu du VFS, dont on n'a que les octets.
+#[cfg(target_arch = "wasm32")]
 fn render(value: &JsValue) -> String {
     if value.is_undefined() || value.is_null() {
         return show(&Ok(Value::Unit));
@@ -141,12 +170,14 @@ fn render(value: &JsValue) -> String {
     }
 }
 
+#[cfg(target_arch = "wasm32")]
 fn set(target: &Object, key: &str, value: &JsValue) -> Result<(), ExecutorError> {
     Reflect::set(target, &JsValue::from_str(key), value)
         .map(|_| ())
         .map_err(|error| ExecutorError::Link(describe(&error)))
 }
 
+#[cfg(target_arch = "wasm32")]
 fn describe(error: &JsValue) -> String {
     error
         .as_string()

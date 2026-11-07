@@ -31,6 +31,14 @@ pub enum Message {
         /// transport qui les traduit dans le dialecte du moteur.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         images: Vec<ImagePart>,
+        /// Un message écrit par le harnais (une relance après un refus, un
+        /// silence, une panne), pas par l'utilisateur : il ne doit pas passer
+        /// pour la question. Sans cette marque, la borne de contexte épinglait
+        /// la relance comme « dernier message utilisateur » et pouvait retirer
+        /// la vraie question. Additif : absent du JSON quand il est faux, donc
+        /// un message existant se relit et s'écrit à l'identique.
+        #[serde(default, skip_serializing_if = "is_false")]
+        synthetic: bool,
     },
     Assistant {
         #[serde(default)]
@@ -44,6 +52,10 @@ pub enum Message {
     },
 }
 
+fn is_false(valeur: &bool) -> bool {
+    !*valeur
+}
+
 impl Message {
     pub fn system(content: impl Into<String>) -> Self {
         Self::System {
@@ -54,6 +66,16 @@ impl Message {
         Self::User {
             content: content.into(),
             images: Vec::new(),
+            synthetic: false,
+        }
+    }
+    /// Une relance du harnais, rangée au rôle utilisateur (les moteurs n'en ont
+    /// pas d'autre) mais marquée `synthetic` : ce n'est pas la question.
+    pub fn hint(content: impl Into<String>) -> Self {
+        Self::User {
+            content: content.into(),
+            images: Vec::new(),
+            synthetic: true,
         }
     }
     /// Un message de l'utilisateur avec ses images.
@@ -61,6 +83,7 @@ impl Message {
         Self::User {
             content: content.into(),
             images,
+            synthetic: false,
         }
     }
     pub fn assistant(content: impl Into<String>) -> Self {
@@ -86,6 +109,16 @@ impl Message {
     }
     pub fn is_user(&self) -> bool {
         matches!(self, Self::User { .. })
+    }
+    /// Vrai pour une relance du harnais ([`Message::hint`]).
+    pub fn is_synthetic(&self) -> bool {
+        matches!(
+            self,
+            Self::User {
+                synthetic: true,
+                ..
+            }
+        )
     }
     /// Les images du message (aucune hors message utilisateur).
     pub fn images(&self) -> &[ImagePart] {
@@ -139,6 +172,23 @@ impl Request {
             messages,
             tools,
         }
+    }
+
+    /// Ajoute le contexte éphémère d'un tour : un `Message::system` juste avant
+    /// le dernier message utilisateur — là où le modèle le lira comme « ce qui
+    /// vaut pour cette demande ». Sans message utilisateur, il va en fin de fil.
+    /// `None` ou un texte vide : la requête est rendue intacte.
+    pub(crate) fn with_context(mut self, context: Option<String>) -> Self {
+        let Some(context) = context.filter(|c| !c.trim().is_empty()) else {
+            return self;
+        };
+        let at = self
+            .messages
+            .iter()
+            .rposition(Message::is_user)
+            .unwrap_or(self.messages.len());
+        self.messages.insert(at, Message::system(context));
+        self
     }
 
     /// Le fil tel que le modèle doit le lire : la consigne système, puis les
@@ -317,6 +367,25 @@ mod tests {
             serde_json::to_string(&thread).unwrap(),
             r#"[{"role":"system","content":"brief"},{"role":"user","content":"q"},{"role":"assistant","content":"r"},{"role":"tool","id":"c1","content":"ok"}]"#
         );
+    }
+
+    /// Le champ `synthetic` est additif : absent quand il est faux (octets
+    /// inchangés), relu à `false` s'il manque, écrit et relu quand il est vrai.
+    #[test]
+    fn synthetic_is_additive_on_the_wire() {
+        let old: Message = serde_json::from_str(r#"{"role":"user","content":"q"}"#).unwrap();
+        assert!(!old.is_synthetic());
+        assert_eq!(old, Message::user("q"));
+
+        let hint = Message::hint("relance");
+        let written = serde_json::to_string(&hint).unwrap();
+        assert_eq!(
+            written,
+            r#"{"role":"user","content":"relance","synthetic":true}"#
+        );
+        let back: Message = serde_json::from_str(&written).unwrap();
+        assert_eq!(back, hint);
+        assert!(back.is_user() && back.is_synthetic());
     }
 
     #[test]

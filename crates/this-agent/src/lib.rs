@@ -20,10 +20,14 @@
 //! un harnais natif. Écrite trois fois, elle divergera trois fois. Écrite ici,
 //! elle se teste une fois — et `cargo test` remplace la foi.
 
+pub mod cite;
+pub mod evidence;
 pub mod graph;
+pub mod masque;
 pub mod playbook;
 pub mod substrate;
 pub mod surface;
+pub mod untrusted;
 
 use serde::{Deserialize, Serialize};
 
@@ -114,6 +118,11 @@ pub struct Step {
     pub after: String,
     #[serde(default)]
     pub resume: String,
+    /// Empreinte (SHA-256, hex) de la sortie **complète** de l'outil, calculée par la boucle
+    /// avant toute troncature. `resume` est borné pour l'affichage ; une empreinte prise sur
+    /// lui ne prouverait que les premiers caractères. Absente des journaux anciens.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub out_hash: Option<String>,
 }
 
 impl Step {
@@ -129,6 +138,7 @@ impl Step {
             before: String::new(),
             after: String::new(),
             resume: String::new(),
+            out_hash: None,
         }
     }
 
@@ -161,6 +171,12 @@ impl Step {
     pub fn state(mut self, before: impl Into<String>, after: impl Into<String>) -> Self {
         self.before = before.into();
         self.after = after.into();
+        self
+    }
+
+    /// L'empreinte de la sortie complète (voir [`Step::out_hash`]).
+    pub fn out_hash(mut self, empreinte: impl Into<String>) -> Self {
+        self.out_hash = Some(empreinte.into());
         self
     }
 
@@ -198,6 +214,26 @@ pub struct Run {
     /// peser sur la décision d'aujourd'hui.
     #[serde(default)]
     pub tour_debut: usize,
+    /// Le texte final du tour en cours, confié par la boucle avant la décision
+    /// ([`Run::said`]). Il est consommé par la décision : un récit ne vaut que pour son tour.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub recit: String,
+    /// Rappels « ton récit n'est pas prouvé » déjà envoyés : un seul par run.
+    #[serde(default)]
+    pub rappels_recit: u32,
+    /// Le rappel à pousser au modèle quand la décision relance pour un récit non prouvé.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rappel: Option<String>,
+    /// Ce que l'hôte déclare de ses outils (effet, mots du récit) : voir
+    /// [`evidence::Declaration`]. Vide, la preuve devine d'après les noms des outils.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub declarations: Vec<evidence::Declaration>,
+    /// Rangs des étapes dont l'effet est **inconnu** : un outil abandonné (plafond dépassé,
+    /// sourd à l'annulation) a pu finir après coup. Son étape porte « délai dépassé » pour
+    /// que le modèle ne la croie pas réussie, mais ce n'est ni un échec prouvé, ni un refus
+    /// à rattraper, ni une preuve : la décision ne la lit pas (voir [`Run::effet_inconnu`]).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub inconnues: Vec<usize>,
     pub stop: Option<Stop>,
 }
 
@@ -245,8 +281,43 @@ impl Run {
             budget_ms: None,
             ecoule_ms: 0,
             tour_debut: 0,
+            recit: String::new(),
+            rappels_recit: 0,
+            rappel: None,
+            declarations: Vec::new(),
+            inconnues: Vec::new(),
             stop: None,
         }
+    }
+
+    /// Les déclarations d'outils de l'hôte ([`evidence::Declaration`]) ; elles **remplacent**
+    /// les précédentes : la boucle les relit à chaque tour, un module installé entre-temps
+    /// apporte les siennes.
+    pub fn declare(&mut self, declarations: impl IntoIterator<Item = evidence::Declaration>) {
+        self.declarations = declarations.into_iter().collect();
+    }
+
+    /// L'étape de rang `index` a un effet **inconnu** (outil abandonné) : la décision ne la
+    /// compte ni comme refus ou échec à rattraper, ni comme preuve. Un récit qui s'appuie
+    /// sur elle reçoit un rappel qui demande de VÉRIFIER l'effet, pas de refaire l'action.
+    pub fn effet_inconnu(&mut self, index: usize) {
+        if !self.inconnues.contains(&index) {
+            self.inconnues.push(index);
+        }
+    }
+
+    /// L'étape a-t-elle un effet inconnu ?
+    pub fn est_inconnue(&self, etape: &Step) -> bool {
+        self.inconnues.contains(&(etape.index as usize))
+    }
+
+    /// Les étapes dont l'effet est connu : ce que la décision confronte au récit.
+    fn connues(&self) -> Vec<Step> {
+        self.steps
+            .iter()
+            .filter(|etape| !self.est_inconnue(etape))
+            .cloned()
+            .collect()
     }
 
     pub fn record(&mut self, mut step: Step) {
@@ -270,6 +341,29 @@ impl Run {
         self.ecoule_ms += ms;
     }
 
+    /// Confie à la décision le texte final du tour qui s'achève. La boucle l'appelle juste
+    /// avant [`Run::after_turn_with`] ; sans lui, le récit n'est pas confronté aux preuves
+    /// (mais un refus non rattrapé empêche toujours `Done`).
+    pub fn said(&mut self, texte: impl Into<String>) {
+        self.recit = texte.into();
+    }
+
+    /// Le rappel que la dernière décision `Continue` demande de pousser au modèle, s'il y en a
+    /// un. Le prendre le consomme.
+    pub fn take_rappel(&mut self) -> Option<String> {
+        self.rappel.take()
+    }
+
+    /// Ce que les faits disent du run : voir [`evidence::verdict`].
+    /// Les étapes à l'effet inconnu ([`Run::effet_inconnu`]) n'y comptent pas.
+    pub fn verdict(&self) -> evidence::Verdict {
+        evidence::verdict_with(
+            &self.connues(),
+            self.stop == Some(Stop::Done),
+            &self.declarations,
+        )
+    }
+
     /// Un budget de temps, en plus du budget de tours.
     pub fn budget(&mut self, ms: u64) -> &mut Self {
         self.budget_ms = Some(ms);
@@ -286,10 +380,9 @@ impl Run {
         // Seules les étapes qui portent une observation peuvent être jugées :
         // sans empreinte, on ne sait pas si l'état a bougé, et conclure « rien
         // n'a changé » serait une affirmation sans mesure.
-        self.du_tour()
-            .iter()
-            .rev()
-            .find(|etape| !etape.before.is_empty() && !etape.a_change())
+        self.du_tour().iter().rev().find(|etape| {
+            !self.est_inconnue(etape) && !etape.before.is_empty() && !etape.a_change()
+        })
     }
 
     /// Le dernier échec d'outil **du tour en cours**. Comme pour les refus, un échec ancien ne
@@ -298,13 +391,16 @@ impl Run {
         self.du_tour()
             .iter()
             .rev()
-            .find(|etape| etape.failure.is_some())
+            .find(|etape| !self.est_inconnue(etape) && etape.failure.is_some())
     }
 
     /// Le dernier refus **du tour en cours**. Cherché sur tout le run, un refus
     /// ancien condamnait chaque tour suivant.
     pub fn derniere_refusee(&self) -> Option<&Step> {
-        self.du_tour().iter().rev().find(|etape| etape.refused)
+        self.du_tour()
+            .iter()
+            .rev()
+            .find(|etape| etape.refused && !self.est_inconnue(etape))
     }
 
     /// Décide de la suite, après un tour du modèle.
@@ -342,6 +438,9 @@ impl Run {
         self.tours += 1;
         // Le tour qui vient de s'achever ne doit plus être relu au suivant.
         let fin_du_tour = self.steps.len();
+        // Un récit ne vaut que pour son tour ; un rappel non pris est périmé.
+        let recit = std::mem::take(&mut self.recit);
+        self.rappel = None;
 
         if let Some(stop) = &self.stop {
             return Decision::Halt(stop.clone());
@@ -401,8 +500,104 @@ impl Run {
             });
         }
 
-        // Un tour qui aboutit remet les crédits de relance à zéro.
+        // Le tour n'a ni refus ni échec — mais le RUN peut en avoir : un refus au tour N
+        // (tour qui appelait, donc `Continue`) suivi d'un tour texte seul « c'est fait »
+        // passait pour une conclusion, la frontière du tour ayant effacé le refus.
         self.tour_debut = fin_du_tour;
+        // Une étape à l'effet inconnu (outil abandonné) n'est ni un refus non rattrapé, ni une
+        // preuve : les faits se lisent sur les autres étapes.
+        let connues = self.connues();
+        let inconnue = self
+            .steps
+            .iter()
+            .rev()
+            .find(|etape| self.est_inconnue(etape))
+            .cloned();
+        let en_suspens = evidence::unresolved_with(&connues, &self.declarations).cloned();
+        let non_prouve =
+            evidence::unproven_with(&recit, &connues, &self.declarations).or_else(|| {
+                // Retirée des faits, l'écriture abandonnée ne compte plus comme « tentée » : un
+                // récit au passif qui ne s'appuie que sur elle passerait. Relu sur tout le run,
+                // il n'est retenu que s'il vise justement l'étape inconnue.
+                inconnue.as_ref()?;
+                evidence::unproven_with(&recit, &self.steps, &self.declarations)
+                    .filter(|u| u.etape.as_ref().is_some_and(|e| self.est_inconnue(e)))
+            });
+        if let Some(mut non_prouve) = non_prouve {
+            // Le récit s'appuie sur l'étape inconnue (il la vise, ou rien d'autre ne le prouve) :
+            // le rappel demande de vérifier l'effet, pas de refaire l'action.
+            let outil_inconnu = match &non_prouve.etape {
+                Some(etape) if self.est_inconnue(etape) => Some(etape.tool.clone()),
+                Some(_) => None,
+                None => inconnue.as_ref().map(|etape| etape.tool.clone()),
+            };
+            if non_prouve
+                .etape
+                .as_ref()
+                .is_some_and(|etape| self.est_inconnue(etape))
+            {
+                non_prouve.etape = None;
+            }
+            if self.rappels_recit == 0 {
+                self.rappels_recit += 1;
+                let rappel = match &outil_inconnu {
+                    Some(outil) => non_prouve.rappel_effet_inconnu(outil),
+                    None => non_prouve.rappel(),
+                };
+                self.rappel = Some(match &en_suspens {
+                    Some(etape) if !rappel.contains(&format!("`{}`", etape.tool)) => format!(
+                        "{rappel} Pour mémoire, `{}` n'a pas abouti dans ce run : {}.",
+                        etape.tool,
+                        etape
+                            .motif
+                            .clone()
+                            .or_else(|| etape.failure.clone())
+                            .unwrap_or_default()
+                    ),
+                    _ => rappel,
+                });
+                return Decision::Continue;
+            }
+            // Le rappel a été envoyé et le récit reste non prouvé. Un refus en suspens se dit
+            // plus bas ; sinon, l'écriture contredite (refusée, jamais reprise) dit son motif.
+            // « Récit non vérifié » n'est un échec que si une écriture refusée ou en échec
+            // reste en plan dans le run : le récit couvre alors peut-être ce qui a raté. Sans
+            // écriture en plan (en particulier sans aucune écriture), le récit non prouvé
+            // n'est contredit par aucun fait : le run finit en `Done` et le verdict
+            // `Unverified` le dit — une explication honnête ne devient pas un échec.
+            if en_suspens.is_none() {
+                let en_plan = !evidence::unrepaired_with(&connues, &self.declarations).is_empty();
+                match &non_prouve.etape {
+                    Some(etape) if etape.refused => {
+                        return self.halt(Stop::Refused(
+                            etape.motif.clone().unwrap_or(etape.resume.clone()),
+                        ));
+                    }
+                    Some(etape) => {
+                        return self.halt(Stop::Failed(format!(
+                            "l'outil a échoué : {}",
+                            etape.failure.clone().unwrap_or(etape.resume.clone())
+                        )));
+                    }
+                    None if en_plan => {
+                        return self.halt(Stop::Failed(format!(
+                            "récit non vérifié : « {} » — {}, même après un rappel",
+                            non_prouve.phrase, non_prouve.manque
+                        )));
+                    }
+                    None => {}
+                }
+            }
+        }
+        if let Some(etape) = en_suspens {
+            return self.halt(match (&etape.motif, &etape.failure) {
+                (Some(motif), _) if etape.refused => Stop::Refused(motif.clone()),
+                (_, Some(cause)) => Stop::Failed(format!("l'outil a échoué : {cause}")),
+                _ => Stop::Refused(etape.resume.clone()),
+            });
+        }
+
+        // Un tour qui aboutit remet les crédits de relance à zéro.
         self.relances_refus = 0;
         self.relances_muet = 0;
         self.halt(Stop::Done)
@@ -524,18 +719,371 @@ mod tests {
         }
     }
 
-    /// Un échec d'un tour ancien ne condamne pas les tours suivants.
+    /// Un échec d'un tour ancien ne condamne pas les tours suivants — une fois rattrapé.
+    /// (Avant la vague 2, ce test concluait `Done` SANS reprise : c'était le défaut.)
     #[test]
     fn un_echec_ancien_ne_condamne_pas_le_tour_suivant() {
         let mut r = Run::new(Goal::new("installe"), 20);
         r.record(Step::tool("install_module", 5).failed("réseau"));
         assert_eq!(r.after_turn(true, false), Decision::Continue);
 
-        // Le tour suivant n'a pas d'échec : un modèle qui conclut conclut.
+        // Le tour suivant reprend l'action avec succès : un modèle qui conclut conclut.
+        r.record(Step::tool("install_module", 5).state("v1", "v2"));
         assert!(r.derniere_en_echec().is_none());
         assert_eq!(r.after_turn(true, false), Decision::Halt(Stop::Done));
     }
 
+    /// Le cas relu en vague 1 : un échec non rattrapé, puis un tour texte seul, ne finit pas
+    /// en `Done`.
+    #[test]
+    fn un_echec_non_rattrape_puis_texte_seul_n_est_pas_done() {
+        let mut r = Run::new(Goal::new("installe"), 20);
+        r.record(Step::tool("install_module", 5).failed("réseau"));
+        assert_eq!(r.after_turn(false, true), Decision::Continue);
+        assert_eq!(
+            r.after_turn(true, false),
+            Decision::Halt(Stop::Failed("l'outil a échoué : réseau".into()))
+        );
+    }
+
+    #[test]
+    fn refus_puis_c_est_fait_relance_avec_un_rappel() {
+        let mut r = run();
+        // Tour N : le modèle appelle, l'outil refuse — un tour qui appelle continue.
+        r.record(Step::tool("install_module", 10).refused("même version"));
+        assert_eq!(r.after_turn(false, true), Decision::Continue);
+        // Tour N+1 : texte seul, il prétend avoir fini.
+        r.said("C'est fait !");
+        assert_eq!(r.after_turn(true, false), Decision::Continue);
+        let rappel = r.take_rappel().expect("un rappel à pousser");
+        assert!(rappel.starts_with(evidence::RAPPEL));
+        assert!(rappel.contains("même version"));
+        assert_eq!(r.take_rappel(), None);
+    }
+
+    #[test]
+    fn refus_puis_c_est_fait_sans_recit_transmis_bloque_au_lieu_de_done() {
+        // Sans `said` (boucle pas encore branchée), le refus du run suffit à refuser `Done`.
+        let mut r = run();
+        r.record(Step::tool("install_module", 10).refused("même version"));
+        assert_eq!(r.after_turn(false, true), Decision::Continue);
+        assert_eq!(
+            r.after_turn(true, false),
+            Decision::Halt(Stop::Refused("même version".into()))
+        );
+    }
+
+    /// Un hôte qui déclare `deploy_app` obtient ce qu'`install_module` obtient sans rien
+    /// déclarer : refus, une écriture sans rapport réussie, « j'ai déployé » ⇒ rappel.
+    #[test]
+    fn un_outil_declare_par_l_hote_est_controle_comme_install_module() {
+        let scenario = |outil: &str, recit: &str, declarations: Vec<evidence::Declaration>| {
+            let mut r = run();
+            r.declare(declarations);
+            r.record(Step::tool(outil, 10).refused("quota atteint"));
+            r.record(Step::tool("row_create", 3).state("0", "1"));
+            assert_eq!(r.after_turn(false, true), Decision::Continue);
+            r.said(recit);
+            (r.after_turn(true, false), r.take_rappel())
+        };
+        let (decision, rappel) = scenario("install_module", "J'ai installé le module.", vec![]);
+        assert_eq!(decision, Decision::Continue);
+        assert!(rappel.unwrap().contains("`install_module`"));
+
+        let deploy = evidence::Declaration::writes("deploy_app").words(["déployer", "deploy"]);
+        let (decision, rappel) =
+            scenario("deploy_app", "J'ai déployé l'application.", vec![deploy]);
+        assert_eq!(decision, Decision::Continue);
+        let rappel = rappel.expect("un rappel");
+        assert!(rappel.starts_with(evidence::RAPPEL));
+        assert!(rappel.contains("`deploy_app`") && rappel.contains("quota atteint"));
+
+        // Sans déclaration, le même récit passe : c'est le trou que la déclaration ferme.
+        let (decision, rappel) = scenario("deploy_app", "J'ai déployé l'application.", vec![]);
+        assert_eq!(decision, Decision::Halt(Stop::Done));
+        assert_eq!(rappel, None);
+    }
+
+    #[test]
+    fn un_seul_rappel_de_recit_par_run() {
+        let mut r = run();
+        r.record(Step::tool("install_module", 10).refused("même version"));
+        r.after_turn(false, true);
+        r.said("C'est fait.");
+        assert_eq!(r.after_turn(true, false), Decision::Continue);
+        // Il insiste : pas de second rappel, et le refus en suspens interdit `Done`.
+        r.said("C'est fait, vraiment.");
+        assert_eq!(
+            r.after_turn(true, false),
+            Decision::Halt(Stop::Refused("même version".into()))
+        );
+        assert_eq!(r.rappels_recit, 1);
+        assert_eq!(r.take_rappel(), None);
+    }
+
+    /// Y09 BLOQUANT 1 (remplace W12 MOY 5) : sans aucune écriture dans le run, un récit qui
+    /// reste non prouvé après le rappel n'est contredit par aucun fait. Le run finit en
+    /// `Done`, et c'est le verdict `Unverified` qui le dit — pas un `Failed` qui ferait
+    /// d'une réponse peut-être honnête un échec.
+    #[test]
+    fn un_seul_rappel_puis_done_non_verifie_sans_aucune_ecriture() {
+        let mut r = run();
+        r.said("J'ai créé la fiche.");
+        assert_eq!(r.after_turn(true, false), Decision::Continue);
+        assert!(r.take_rappel().is_some());
+        r.said("J'ai créé la fiche.");
+        assert_eq!(r.after_turn(true, false), Decision::Halt(Stop::Done));
+        assert_eq!(r.rappels_recit, 1);
+        assert_eq!(r.verdict(), evidence::Verdict::Unverified);
+    }
+
+    /// Avec une écriture refusée restée en plan (rattrapée pour le run par une autre
+    /// écriture, mais jamais reprise par le même outil), le récit non prouvé après le rappel
+    /// reste un échec : « récit non vérifié ».
+    #[test]
+    fn un_seul_rappel_puis_non_verifie_si_une_ecriture_reste_en_plan() {
+        let mut r = run();
+        r.record(Step::tool("install_module", 10).refused("même version"));
+        r.after_turn(false, true);
+        r.record(Step::tool("row_create", 3).state("0", "1"));
+        r.after_turn(false, true);
+        r.said("Je me souviens que tu préfères le thé.");
+        assert_eq!(r.after_turn(true, false), Decision::Continue);
+        r.said("Je me souviens que tu préfères le thé.");
+        match r.after_turn(true, false) {
+            Decision::Halt(Stop::Failed(raison)) => {
+                assert!(raison.contains("récit non vérifié"), "{raison}");
+                assert!(raison.contains("Je me souviens"), "{raison}");
+            }
+            autre => panic!("attendu un arrêt non vérifié, obtenu {autre:?}"),
+        }
+        assert_eq!(r.rappels_recit, 1);
+        assert!(r.resume_pour_l_utilisateur().contains("non vérifié"));
+    }
+
+    /// Une explication de l'Atelier, sans aucune écriture : ni rappel, ni échec.
+    #[test]
+    fn une_explication_au_passif_sans_ecriture_termine_sans_rappel() {
+        let mut r = run();
+        r.said(
+            "Un module est installé dans l'espace de travail : il apporte ses tables. \
+             La fiche est créée automatiquement à la première saisie.",
+        );
+        assert_eq!(r.after_turn(true, false), Decision::Halt(Stop::Done));
+        assert_eq!(r.take_rappel(), None);
+        assert_eq!(r.rappels_recit, 0);
+        assert_eq!(r.verdict(), evidence::Verdict::Unverified);
+    }
+
+    #[test]
+    fn un_rappel_puis_une_phrase_honnete_termine() {
+        let mut r = run();
+        r.said("J'ai créé la fiche.");
+        assert_eq!(r.after_turn(true, false), Decision::Continue);
+        r.said("Je n'ai pas créé la fiche : je n'ai appelé aucun outil.");
+        assert_eq!(r.after_turn(true, false), Decision::Halt(Stop::Done));
+        assert_eq!(r.verdict(), evidence::Verdict::Unverified);
+    }
+
+    #[test]
+    fn un_rappel_puis_l_outil_reellement_appele_termine() {
+        let mut r = run();
+        r.said("J'ai créé la fiche.");
+        assert_eq!(r.after_turn(true, false), Decision::Continue);
+        r.record(Step::tool("row_create", 3).state("0", "1"));
+        assert_eq!(r.after_turn(false, true), Decision::Continue);
+        r.said("J'ai créé la fiche.");
+        assert_eq!(r.after_turn(true, false), Decision::Halt(Stop::Done));
+        assert_eq!(r.verdict(), evidence::Verdict::Proven);
+    }
+
+    /// W10#2 : une écriture sans rapport ne blanchit pas un refus que le récit nomme.
+    #[test]
+    fn une_ecriture_sans_rapport_ne_rattrape_pas_le_refus_nomme() {
+        let mut r = run();
+        r.record(Step::tool("install_module", 10).refused("même version"));
+        r.after_turn(false, true);
+        r.record(Step::tool("row_create", 3).state("0", "1"));
+        r.after_turn(false, true);
+        r.said("C'est fait : j'ai installé le module.");
+        assert_eq!(r.after_turn(true, false), Decision::Continue);
+        let rappel = r.take_rappel().unwrap();
+        assert!(rappel.contains("`install_module`"), "{rappel}");
+        r.said("C'est fait.");
+        assert_eq!(
+            r.after_turn(true, false),
+            Decision::Halt(Stop::Refused("même version".into()))
+        );
+    }
+
+    #[test]
+    fn une_ecriture_sans_empreinte_ne_rattrape_pas_un_refus() {
+        let mut r = run();
+        r.record(Step::tool("install_module", 10).refused("même version"));
+        r.after_turn(false, true);
+        r.record(Step::tool("row_create", 3));
+        r.after_turn(false, true);
+        assert_eq!(
+            r.after_turn(true, false),
+            Decision::Halt(Stop::Refused("même version".into()))
+        );
+    }
+
+    #[test]
+    fn une_ecriture_observee_rattrape_un_refus_quand_le_recit_dit_ce_qui_a_ete_fait() {
+        let mut r = run();
+        r.record(Step::tool("install_module", 10).refused("même version"));
+        r.after_turn(false, true);
+        r.record(Step::tool("row_create", 3).state("0", "1"));
+        r.after_turn(false, true);
+        r.said("Le module était déjà à jour ; j'ai ajouté la ligne demandée.");
+        assert_eq!(r.after_turn(true, false), Decision::Halt(Stop::Done));
+        assert_eq!(r.take_rappel(), None);
+    }
+
+    #[test]
+    fn ecriture_reussie_puis_c_est_fait_termine() {
+        let mut r = run();
+        r.record(Step::tool("row_create", 10).state("0 ligne", "1 ligne"));
+        assert_eq!(r.after_turn(false, true), Decision::Continue);
+        r.said("C'est fait : la ligne est créée.");
+        assert_eq!(r.after_turn(true, false), Decision::Halt(Stop::Done));
+        assert_eq!(r.take_rappel(), None);
+        assert_eq!(r.verdict(), evidence::Verdict::Proven);
+    }
+
+    #[test]
+    fn refus_rattrape_puis_c_est_fait_termine() {
+        let mut r = run();
+        r.record(Step::tool("install_module", 10).refused("même version"));
+        r.after_turn(false, true);
+        r.record(Step::tool("install_module", 10).state("v1", "v2"));
+        r.after_turn(false, true);
+        r.said("C'est fait.");
+        assert_eq!(r.after_turn(true, false), Decision::Halt(Stop::Done));
+    }
+
+    #[test]
+    fn je_me_souviens_sans_recall_relance_avec_un_rappel() {
+        let mut r = run();
+        r.said("Je me souviens que tu préfères le thé.");
+        assert_eq!(r.after_turn(true, false), Decision::Continue);
+        assert!(r.take_rappel().unwrap().contains("recall"));
+    }
+
+    #[test]
+    fn je_me_souviens_apres_recall_termine() {
+        let mut r = run();
+        r.record(Step::tool("recall", 3).resume("préférence : thé"));
+        r.after_turn(false, true);
+        r.said("Je me souviens que tu préfères le thé.");
+        assert_eq!(r.after_turn(true, false), Decision::Halt(Stop::Done));
+    }
+
+    #[test]
+    fn negation_apres_refus_ne_rappelle_pas_et_dit_le_blocage() {
+        let mut r = run();
+        r.record(Step::tool("install_module", 10).refused("même version"));
+        r.after_turn(false, true);
+        r.said("Je n'ai pas installé le module : il est déjà à la même version.");
+        assert_eq!(
+            r.after_turn(true, false),
+            Decision::Halt(Stop::Refused("même version".into()))
+        );
+        assert_eq!(r.rappels_recit, 0);
+    }
+
+    #[test]
+    fn une_note_remember_ne_rattrape_pas_un_refus() {
+        let mut r = run();
+        r.record(Step::tool("install_module", 10).refused("même version"));
+        r.after_turn(false, true);
+        r.record(Step::tool("remember", 1).state("a", "b"));
+        r.after_turn(false, true);
+        assert_eq!(
+            r.after_turn(true, false),
+            Decision::Halt(Stop::Refused("même version".into()))
+        );
+    }
+
+    #[test]
+    fn le_recit_ne_vaut_que_pour_son_tour() {
+        let mut r = run();
+        r.said("C'est fait.");
+        // Tour qui appelle : le récit est consommé sans être jugé.
+        r.record(Step::tool("graph_query", 1));
+        assert_eq!(r.after_turn(true, true), Decision::Continue);
+        assert!(r.recit.is_empty());
+        assert_eq!(r.after_turn(true, false), Decision::Halt(Stop::Done));
+    }
+
+    // ---- Z01 : étape abandonnée (effet inconnu) ------------------------------------
+
+    /// L'étape d'un outil abandonné, telle que la boucle l'enregistre (« délai dépassé »).
+    fn abandonnee(r: &mut Run, outil: &str) {
+        r.record(Step::tool(outil, 30_000).failed("délai dépassé (30 s)"));
+        let index = r.steps.len() - 1;
+        r.effet_inconnu(index);
+    }
+
+    #[test]
+    fn une_etape_abandonnee_n_est_pas_un_echec_pour_la_decision() {
+        let mut r = run();
+        abandonnee(&mut r, "install_module");
+        assert_eq!(r.derniere_en_echec(), None);
+        assert_eq!(r.after_turn(false, true), Decision::Continue);
+        r.said("L'outil n'a pas répondu à temps : je ne sais pas si le module est installé.");
+        assert_eq!(r.after_turn(true, false), Decision::Halt(Stop::Done));
+        assert_eq!(r.take_rappel(), None);
+    }
+
+    /// Le même tour sans le marquage : l'échec bloque (c'est ce que la session évitait mal).
+    #[test]
+    fn sans_marquage_le_delai_depasse_reste_un_echec() {
+        let mut r = run();
+        r.record(Step::tool("install_module", 30_000).failed("délai dépassé (30 s)"));
+        assert_eq!(r.after_turn(false, true), Decision::Continue);
+        r.said("L'outil n'a pas répondu à temps.");
+        assert!(matches!(
+            r.after_turn(true, false),
+            Decision::Halt(Stop::Failed(_))
+        ));
+    }
+
+    #[test]
+    fn un_recit_appuye_sur_une_etape_abandonnee_demande_de_verifier() {
+        let mut r = run();
+        abandonnee(&mut r, "install_module");
+        assert_eq!(r.after_turn(false, true), Decision::Continue);
+        r.said("J'ai installé le module.");
+        assert_eq!(r.after_turn(true, false), Decision::Continue);
+        let rappel = r.take_rappel().expect("un rappel");
+        assert!(rappel.starts_with(evidence::RAPPEL), "{rappel}");
+        assert!(rappel.contains("`install_module`"), "{rappel}");
+        assert!(
+            rappel.contains("vérifie son effet en relisant l'état"),
+            "{rappel}"
+        );
+        assert!(rappel.contains("Ne refais pas l'action"), "{rappel}");
+        // Il insiste sans rien vérifier : aucun fait ne le contredit, le run finit et le
+        // verdict dit `Unverified` (pas un échec inventé).
+        r.said("J'ai installé le module.");
+        assert_eq!(r.after_turn(true, false), Decision::Halt(Stop::Done));
+        assert_eq!(r.verdict(), evidence::Verdict::Unverified);
+    }
+
+    /// L'étape inconnue ne blanchit pas un vrai refus antérieur.
+    #[test]
+    fn une_etape_abandonnee_ne_rattrape_pas_un_refus() {
+        let mut r = run();
+        r.record(Step::tool("install_module", 10).refused("même version"));
+        abandonnee(&mut r, "install_module");
+        assert_eq!(r.after_turn(false, true), Decision::Continue);
+        assert_eq!(
+            r.after_turn(true, false),
+            Decision::Halt(Stop::Refused("même version".into()))
+        );
+    }
     /// Un échec n'est pas un refus, et inversement : les deux restent distinguables.
     #[test]
     fn un_echec_n_est_pas_un_refus() {

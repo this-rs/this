@@ -270,14 +270,14 @@ fn un_refus_relance_avec_le_motif() {
         Running::Ran(stop) => stop,
         autre => panic!("attendu Ran, obtenu {autre:?}"),
     };
-    // Le refus relance, puis le modèle conclut : le run finit « terminé »,
-    // mais le motif a été dit au modèle — c'est ce qui l'a fait changer.
-    assert_eq!(stop, Stop::Done);
+    // Le refus relance avec son motif, puis le modèle abandonne sans rien rattraper :
+    // le run finit « refusé », pas « terminé » — un refus non rattrapé n'est pas un succès.
+    assert_eq!(stop, Stop::Refused("même version".into()));
     let hints: Vec<String> = log
         .borrow()
         .iter()
         .filter_map(|event| match event {
-            Event::Hint { text } => Some(text.clone()),
+            Event::Hint { text, .. } => Some(text.clone()),
             _ => None,
         })
         .collect();
@@ -311,13 +311,17 @@ fn un_echec_d_outil_relance_avec_la_cause() {
         Running::Ran(stop) => stop,
         autre => panic!("attendu Ran, obtenu {autre:?}"),
     };
-    assert_eq!(stop, Stop::Done);
+    // L'échec relance avec sa cause ; le modèle abandonne sans corriger : le run le dit.
+    assert_eq!(
+        stop,
+        Stop::Failed("l'outil a échoué : module introuvable".into())
+    );
 
     let hints: Vec<String> = log
         .borrow()
         .iter()
         .filter_map(|event| match event {
-            Event::Hint { text } => Some(text.clone()),
+            Event::Hint { text, .. } => Some(text.clone()),
             _ => None,
         })
         .collect();
@@ -381,6 +385,7 @@ fn un_tour_muet_relance_puis_echoue_en_le_disant() {
             max_tours: 10,
             max_relances: 2,
             budget_ms: None,
+            ..Limits::default()
         },
     );
 
@@ -446,6 +451,7 @@ fn le_budget_de_tours_s_arrete_en_le_disant() {
             max_tours: 2,
             max_relances: 0,
             budget_ms: None,
+            ..Limits::default()
         },
     );
 
@@ -699,16 +705,25 @@ fn une_politique_branchee_change_l_issue_du_run() {
     };
     let tools = || Tools::new(|_| Outcome::refused("refusé : même version", "même version"));
 
-    // 1. Politique par défaut : le refus relance, le tour suivant conclut.
-    let (harness, _, _) = build(script(), tools(), Limits::default());
+    // 1. Politique par défaut : le refus relance (le modèle est rappelé), le tour
+    //    suivant abandonne, et le run finit sur le refus non rattrapé.
+    let defaut = script();
+    let (harness, _, _) = build(defaut.clone(), tools(), Limits::default());
     let stop = match run(harness.send("installe")) {
         Running::Ran(stop) => stop,
         autre => panic!("attendu Ran, obtenu {autre:?}"),
     };
     assert_eq!(
         stop,
-        Stop::Done,
-        "par défaut, un refus ne termine pas le run"
+        Stop::Refused("même version".into()),
+        "par défaut, un refus relance d'abord, puis l'abandon finit sur le refus"
+    );
+    // L'issue diffère de la politique stricte par le chemin : ici le modèle a
+    // été rappelé après le refus.
+    assert_eq!(
+        defaut.seen.borrow().len(),
+        2,
+        "par défaut, un refus ne termine pas le run : il relance"
     );
 
     // 2. Même script, même outil, politique stricte : on s'arrête au refus.
@@ -970,4 +985,133 @@ fn une_image_seule_est_un_message_pas_un_vide() {
     let pending = handle.pending();
     assert_eq!(pending.len(), 1, "le texte vide sans image reste ignoré");
     assert_eq!(pending[0].images, vec![image]);
+}
+
+// ---- la preuve contre le récit, branchée dans la boucle ------------------------
+
+fn hints_of(log: &Log) -> Vec<String> {
+    log.borrow()
+        .iter()
+        .filter_map(|event| match event {
+            Event::Hint { text, .. } => Some(text.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+fn dit(text: &str) -> Reply {
+    Reply {
+        text: text.into(),
+        calls: vec![],
+        finish: Finish::Stop,
+    }
+}
+
+fn appelle(id: &str) -> Reply {
+    Reply {
+        text: String::new(),
+        calls: vec![call(id)],
+        finish: Finish::Tools,
+    }
+}
+
+/// Un refus, puis « c'est fait » : le récit est confronté aux étapes, un rappel
+/// part au modèle (comme un message, pas comme l'utilisateur), et s'il insiste
+/// sans rien rattraper, le run finit sur le refus — jamais sur `Done`.
+#[test]
+fn un_refus_puis_c_est_fait_rappelle_puis_finit_refuse() {
+    let transport = Script::new(vec![appelle("a1"), dit("C'est fait."), dit("C'est fait.")]);
+    let seen = transport.clone();
+    let tools = Tools::new(|_| Outcome::refused("refusé : même version", "même version"));
+    let (harness, _, log) = build(transport, tools, Limits::default());
+
+    let stop = match run(harness.send("installe")) {
+        Running::Ran(stop) => stop,
+        autre => panic!("attendu Ran, obtenu {autre:?}"),
+    };
+    assert_eq!(stop, Stop::Refused("même version".into()));
+    assert_eq!(stop_of(&log), stop);
+
+    let hints = hints_of(&log);
+    assert_eq!(
+        hints.len(),
+        2,
+        "le motif du refus, puis le rappel : {hints:?}"
+    );
+    let rappel = &hints[1];
+    assert!(
+        rappel.starts_with(this_agent::evidence::RAPPEL),
+        "le rappel se présente comme tel : {rappel}"
+    );
+    assert!(
+        rappel.contains("C'est fait"),
+        "il cite la phrase : {rappel}"
+    );
+
+    // Le rappel est ENVOYÉ au modèle : il est dans la requête du troisième tour.
+    let requests = seen.seen.borrow();
+    assert_eq!(requests.len(), 3, "le rappel a coûté un tour de plus");
+    let envoye = requests[2]
+        .thread()
+        .iter()
+        .any(|message| matches!(message, Message::User { content, .. } if content == rappel));
+    assert!(envoye, "le rappel doit partir dans la conversation");
+}
+
+/// Une écriture réussie et observée, puis « c'est fait » : le récit est prouvé,
+/// aucun rappel, le run finit `Done`.
+#[test]
+fn une_ecriture_reussie_puis_c_est_fait_finit_done() {
+    let transport = Script::new(vec![appelle("a1"), dit("C'est fait.")]);
+    let seen = transport.clone();
+    let tools = Tools::new(|_| Outcome::ok("installé").observed("v1", "v2"));
+    let (harness, _, log) = build(transport, tools, Limits::default());
+
+    let stop = match run(harness.send("installe")) {
+        Running::Ran(stop) => stop,
+        autre => panic!("attendu Ran, obtenu {autre:?}"),
+    };
+    assert_eq!(stop, Stop::Done);
+    assert!(
+        hints_of(&log).is_empty(),
+        "rien à rappeler : {:?}",
+        hints_of(&log)
+    );
+    assert_eq!(seen.seen.borrow().len(), 2, "pas de tour de rappel");
+}
+
+/// Un outil qui échoue : l'événement porte la cause et les empreintes, pas
+/// seulement un drapeau.
+#[test]
+fn un_tool_result_en_echec_porte_sa_cause() {
+    let transport = Script::new(vec![appelle("a1"), dit("je m'arrête là")]);
+    let tools = Tools::new(|_| {
+        Outcome::failed("échec : module introuvable", "module introuvable").observed("v1", "v1")
+    });
+    let (harness, _, log) = build(transport, tools, Limits::default());
+    run(harness.send("installe"));
+
+    let result = log
+        .borrow()
+        .iter()
+        .find_map(|event| match event {
+            Event::ToolResult {
+                failed,
+                failure,
+                before,
+                after,
+                ..
+            } => Some((*failed, failure.clone(), before.clone(), after.clone())),
+            _ => None,
+        })
+        .expect("un ToolResult");
+    assert_eq!(
+        result,
+        (
+            true,
+            Some("module introuvable".to_string()),
+            "v1".to_string(),
+            "v1".to_string()
+        )
+    );
 }

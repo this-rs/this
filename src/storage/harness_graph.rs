@@ -7,9 +7,22 @@
 //! ```text
 //! (:_harness {_uuid, _name, _version, _data})
 //! (:_run     {_uuid, _goal, _stop, _tours, _data})
-//!     ├── (:_step {_uuid, _run, _index, _tool, _refused, _data})
+//!     ├─[:HAS_STEP {_index}]─▶ (:_step {_uuid, _run, _index, _tool, _refused,
+//!     │                                 _failed, _ok, _out_excerpt, _out_hash, _data})
 //!     └── …
 //! ```
+//!
+//! L'étape est rattachée à son run **deux fois** : par l'arête `HAS_STEP`
+//! (ce qu'un parcours de graphe suit) et par la propriété `_run` (ce que le
+//! balayage de `load_run` lit). L'arête est unique par triplet : réécrire une
+//! étape met à jour son `_index`, sans doublon.
+//!
+//! `_out_hash` est le SHA-256 (hex) de la sortie **complète** de l'outil, tel que
+//! la boucle de `this-harness` l'a posé dans `Step::out_hash` avant de tronquer
+//! le résumé. Pour une étape qui n'en porte pas (journal ancien), c'est le
+//! SHA-256 de la sortie gardée (`this_agent::graph::step_output`), possiblement
+//! tronquée. Dans les deux cas le format est le même : `sha2` est déjà une dépendance non
+//! optionnelle du crate (`core::identity`).
 //!
 //! # Une écriture par lot, pas une par nœud
 //!
@@ -36,21 +49,41 @@ use std::sync::Arc;
 
 use anyhow::{Result, anyhow};
 use obrain_common::types::{NodeId, Value as ObrainValue};
-use obrain_core::graph::GraphStoreMut;
+use obrain_core::graph::{Direction, GraphStoreMut};
+use sha2::{Digest, Sha256};
 
-use this_agent::graph::{HARNESS, HarnessDoc, Node, RUN, STEP};
+use this_agent::graph::{HARNESS, HAS_STEP, HarnessDoc, Node, RUN, STEP};
 use this_agent::{Run, Step};
 
 use super::obrain::ObrainStore;
 
+/// Le masque d'un hôte : le texte tel qu'il peut être écrit dans le journal.
+pub type MasqueFn = dyn Fn(&str) -> String + Send + Sync;
+
 /// Les objets du harness, dans un `ObrainStore`.
 pub struct HarnessGraph {
     store: Arc<ObrainStore>,
+    /// Appliqué à tout texte libre d'un run avant écriture (`_goal`, `_out_excerpt`,
+    /// chaînes de `_data`). Sans masque, le journal est écrit tel quel.
+    masque: Option<Arc<MasqueFn>>,
 }
 
 impl HarnessGraph {
     pub fn new(store: Arc<ObrainStore>) -> Self {
-        Self { store }
+        Self {
+            store,
+            masque: None,
+        }
+    }
+
+    /// Le même graphe, dont le journal passe par `masque` avant d'être écrit.
+    ///
+    /// C'est ici, au point d'écriture, que le masque doit vivre : tout chemin qui
+    /// écrit un run (`record_run`, `append_step`) y passe, quel que soit l'appelant.
+    /// Par exemple `this_agent::masque::masquer`.
+    pub fn with_masque(mut self, masque: impl Fn(&str) -> String + Send + Sync + 'static) -> Self {
+        self.masque = Some(Arc::new(masque));
+        self
     }
 
     fn graph(&self) -> Arc<dyn GraphStoreMut> {
@@ -100,7 +133,7 @@ impl HarnessGraph {
     /// `_data` est posé **en dernier** : une création interrompue laisse un
     /// nœud sans `_data`, que la lecture ignore — jamais une composition
     /// tronquée servie à l'hôte.
-    fn upsert(&self, node: &Node) -> Result<()> {
+    fn upsert(&self, node: &Node) -> Result<NodeId> {
         let graph = self.graph();
         let uuid = node
             .get("_uuid")
@@ -115,7 +148,7 @@ impl HarnessGraph {
         if let Some((_, data)) = node.props.iter().find(|(key, _)| key == "_data") {
             graph.set_node_property(node_id, "_data", ObrainValue::from(data.as_str()));
         }
-        Ok(())
+        Ok(node_id)
     }
 
     // ---- compositions ------------------------------------------------------
@@ -171,11 +204,59 @@ impl HarnessGraph {
 
     // ---- journal -----------------------------------------------------------
 
+    /// Le nœud d'une étape, avec l'empreinte de sa sortie.
+    fn step_node(&self, step: &Step, run_id: &str) -> Node {
+        let mut node = match &self.masque {
+            Some(masque) => this_agent::graph::step_node_with(step, run_id, masque.as_ref()),
+            None => this_agent::graph::step_node(step, run_id),
+        };
+        // L'empreinte posée par la boucle porte sur la sortie COMPLÈTE ; à défaut
+        // (journal ancien, étape écrite à la main), on hache ce que l'étape a
+        // gardé — le résumé, possiblement tronqué.
+        let hex = step.out_hash.clone().unwrap_or_else(|| {
+            Sha256::digest(this_agent::graph::step_output(step).as_bytes())
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect()
+        });
+        node.props.push(("_out_hash".to_string(), hex));
+        node
+    }
+
+    /// Pose l'arête `run -HAS_STEP-> step` (propriété `_index`), sans doublon.
+    ///
+    /// Une arête déjà présente pour ce triplet est réutilisée : seule sa
+    /// propriété `_index` est réécrite.
+    fn link_step(&self, run: NodeId, step: NodeId, index: u32) {
+        let graph = self.graph();
+        let existing = graph
+            .edges_from(run, Direction::Outgoing)
+            .into_iter()
+            .find(|(dst, edge)| *dst == step && graph.edge_type(*edge).as_deref() == Some(HAS_STEP))
+            .map(|(_, edge)| edge);
+        let edge = existing.unwrap_or_else(|| graph.create_edge(run, step, HAS_STEP));
+        graph.set_edge_property(
+            edge,
+            "_index",
+            ObrainValue::from(index.to_string().as_str()),
+        );
+    }
+
     /// Écrit un run **entier** : son nœud et toutes ses étapes, en un commit.
     pub fn record_run(&self, run: &Run, run_id: &str) -> Result<()> {
         self.writable()?;
-        for node in this_agent::graph::run_nodes(run, run_id).map_err(anyhow::Error::msg)? {
-            self.upsert(&node)?;
+        let nodes = match &self.masque {
+            Some(masque) => this_agent::graph::run_nodes_with(run, run_id, masque.as_ref()),
+            None => this_agent::graph::run_nodes(run, run_id),
+        }
+        .map_err(anyhow::Error::msg)?;
+        let Some(head) = nodes.iter().find(|node| node.label == RUN) else {
+            return Err(anyhow!("run {run_id} : pas de nœud de tête"));
+        };
+        let head_id = self.upsert(head)?;
+        for step in &run.steps {
+            let step_id = self.upsert(&self.step_node(step, run_id))?;
+            self.link_step(head_id, step_id, step.index);
         }
         self.store.commit_wal()
     }
@@ -187,7 +268,13 @@ impl HarnessGraph {
     /// quoi le graphe raconterait un run éternellement « en cours ».
     pub fn append_step(&self, run: &Run, run_id: &str, step: &Step) -> Result<()> {
         self.writable()?;
-        self.upsert(&this_agent::graph::step_node(step, run_id))?;
+        // Le run d'abord : une étape sur un run inconnu est refusée avant
+        // d'écrire quoi que ce soit (pas d'étape orpheline).
+        let head_id = self
+            .find(RUN, run_id)
+            .ok_or_else(|| anyhow!("run {run_id} inconnu : record_run d'abord"))?;
+        let step_id = self.upsert(&self.step_node(step, run_id))?;
+        self.link_step(head_id, step_id, step.index);
         // Le nœud de run suit : `_stop`, `_tours`, et le décompte d'étapes.
         let mut head = self
             .read_node(&Node {
@@ -200,7 +287,12 @@ impl HarnessGraph {
                 ],
             })
             .ok_or_else(|| anyhow!("run {run_id} inconnu : record_run d'abord"))?;
-        let data = serde_json::to_string(run)?;
+        let data = match &self.masque {
+            Some(masque) => {
+                this_agent::graph::masked_json(run, masque.as_ref()).map_err(anyhow::Error::msg)?
+            }
+            None => serde_json::to_string(run)?,
+        };
         let stop = run
             .stop
             .as_ref()
@@ -388,6 +480,252 @@ mod tests {
                 .append_step(&run, "run-inconnu", run.steps.last().unwrap())
                 .is_err()
         );
+        drop(graph);
+        drop(store);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Les arêtes `HAS_STEP` sortant du run : (étape `_uuid`, `_index` de l'arête).
+    fn has_step_edges(graph: &HarnessGraph, run_id: &str) -> Vec<(String, String)> {
+        let g = graph.graph();
+        let run = graph.find(RUN, run_id).expect("le run est là");
+        let mut out: Vec<(String, String)> = g
+            .edges_from(run, Direction::Outgoing)
+            .into_iter()
+            .filter(|(_, e)| g.edge_type(*e).as_deref() == Some(HAS_STEP))
+            .map(|(dst, e)| {
+                let uuid = g
+                    .get_node(dst)
+                    .and_then(|n| {
+                        n.get_property("_uuid")
+                            .and_then(|v| v.as_str().map(str::to_string))
+                    })
+                    .unwrap_or_default();
+                let index = g
+                    .get_edge_property(e, &"_index".into())
+                    .and_then(|v| v.as_str().map(str::to_string))
+                    .unwrap_or_default();
+                (uuid, index)
+            })
+            .collect();
+        out.sort();
+        out
+    }
+
+    fn run_a_deux_etapes() -> Run {
+        let mut run = Run::new(Goal::new("prouve"), 6);
+        run.record(Step::tool("lire", 2).state("a", "b").resume("contenu lu"));
+        run.record(Step::tool("ecrire", 3).refused("même version"));
+        run
+    }
+
+    #[tokio::test]
+    async fn record_run_ecrit_les_aretes_has_step() {
+        let dir = temp_dir("edges");
+        let store = ObrainStore::open(&dir).unwrap();
+        let graph = HarnessGraph::new(Arc::clone(&store));
+        assert_eq!(graph.graph().edge_count(), 0);
+
+        graph.record_run(&run_a_deux_etapes(), "run-e").unwrap();
+        assert!(graph.graph().edge_count() > 0, "des arêtes ont été écrites");
+        assert_eq!(
+            has_step_edges(&graph, "run-e"),
+            vec![
+                ("run-e#0".to_string(), "0".to_string()),
+                ("run-e#1".to_string(), "1".to_string())
+            ]
+        );
+        drop(graph);
+        drop(store);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn reecrire_un_run_ne_duplique_pas_les_aretes() {
+        let dir = temp_dir("dedup");
+        let store = ObrainStore::open(&dir).unwrap();
+        let graph = HarnessGraph::new(Arc::clone(&store));
+        let mut run = run_a_deux_etapes();
+        graph.record_run(&run, "run-d").unwrap();
+        graph.record_run(&run, "run-d").unwrap();
+        // Une étape réécrite par le chemin vivant ne double pas non plus.
+        graph.append_step(&run, "run-d", &run.steps[1]).unwrap();
+        assert_eq!(has_step_edges(&graph, "run-d").len(), 2, "pas de doublon");
+        assert_eq!(graph.graph().edge_count(), 2);
+
+        // Une étape nouvelle, elle, ajoute son arête.
+        run.record(Step::tool("verifier", 1).resume("ok"));
+        graph
+            .append_step(&run, "run-d", run.steps.last().unwrap())
+            .unwrap();
+        assert_eq!(has_step_edges(&graph, "run-d").len(), 3);
+        // Un run inconnu ne laisse ni étape ni arête.
+        assert!(graph.append_step(&run, "run-x", &run.steps[0]).is_err());
+        assert_eq!(graph.graph().edge_count(), 3);
+        assert!(
+            graph.find(STEP, "run-x#0").is_none(),
+            "pas d'étape orpheline"
+        );
+        drop(graph);
+        drop(store);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn les_aretes_has_step_survivent_a_la_reouverture() {
+        let dir = temp_dir("edges_reopen");
+        {
+            let store = ObrainStore::open(&dir).unwrap();
+            let graph = HarnessGraph::new(Arc::clone(&store));
+            graph.record_run(&run_a_deux_etapes(), "run-r").unwrap();
+            assert_eq!(has_step_edges(&graph, "run-r").len(), 2);
+        }
+        let store = ObrainStore::open(&dir).unwrap();
+        let graph = HarnessGraph::new(Arc::clone(&store));
+        assert_eq!(graph.graph().edge_count(), 2, "les arêtes sont sur disque");
+        assert_eq!(
+            has_step_edges(&graph, "run-r"),
+            vec![
+                ("run-r#0".to_string(), "0".to_string()),
+                ("run-r#1".to_string(), "1".to_string())
+            ],
+            "l'arête et sa propriété _index se relisent après réouverture"
+        );
+        drop(graph);
+        drop(store);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn une_etape_porte_ses_preuves_dans_le_graphe() {
+        let dir = temp_dir("preuves");
+        let store = ObrainStore::open(&dir).unwrap();
+        let graph = HarnessGraph::new(Arc::clone(&store));
+        graph.record_run(&run_a_deux_etapes(), "run-p").unwrap();
+        let g = graph.graph();
+        let prop = |uuid: &str, key: &str| {
+            let id = graph.find(STEP, uuid).unwrap();
+            g.get_node(id).and_then(|n| {
+                n.get_property(key)
+                    .and_then(|v| v.as_str().map(str::to_string))
+            })
+        };
+        assert_eq!(prop("run-p#0", "_ok").as_deref(), Some("true"));
+        assert_eq!(
+            prop("run-p#0", "_out_excerpt").as_deref(),
+            Some("contenu lu")
+        );
+        let attendu: String = Sha256::digest(b"contenu lu")
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        assert_eq!(prop("run-p#0", "_out_hash"), Some(attendu));
+        assert_eq!(prop("run-p#1", "_ok").as_deref(), Some("false"));
+        drop(graph);
+        drop(store);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Une étape qui porte l'empreinte de sa sortie complète (posée par la
+    /// boucle) l'écrit telle quelle : le résumé tronqué n'est pas re-haché.
+    #[tokio::test]
+    async fn le_out_hash_de_l_etape_fait_foi() {
+        let dir = temp_dir("out-hash");
+        let store = ObrainStore::open(&dir).unwrap();
+        let graph = HarnessGraph::new(Arc::clone(&store));
+        let mut run = Run::new(Goal::new("lire"), 5);
+        run.record(
+            Step::tool("recall", 1)
+                .resume("début tronqué")
+                .out_hash("abc123"),
+        );
+        graph.record_run(&run, "run-h").unwrap();
+        let g = graph.graph();
+        let id = graph.find(STEP, "run-h#0").unwrap();
+        let hash = g.get_node(id).and_then(|n| {
+            n.get_property("_out_hash")
+                .and_then(|v| v.as_str().map(str::to_string))
+        });
+        assert_eq!(hash.as_deref(), Some("abc123"));
+        drop(graph);
+        drop(store);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    const CLE: &str = "sk-ant-api03-abcdefghijklmnopqrstuvwxyz";
+
+    /// Toutes les propriétés textuelles des nœuds `_run` et `_step` du magasin.
+    fn textes_du_journal(graph: &HarnessGraph) -> Vec<String> {
+        let g = graph.graph();
+        let mut out = Vec::new();
+        for label in [RUN, STEP] {
+            for id in g.nodes_by_label(label) {
+                let node = g.get_node(id).unwrap();
+                for key in ["_goal", "_out_excerpt", "_data"] {
+                    if let Some(v) = node.get_property(key).and_then(|v| v.as_str()) {
+                        out.push(v.to_string());
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    fn run_avec_cle() -> Run {
+        let mut run = Run::new(Goal::new(format!("utilise {CLE}")), 6);
+        run.record(Step::tool("lire_env", 2).resume(format!("OPENAI={CLE}")));
+        run
+    }
+
+    #[tokio::test]
+    async fn un_journal_masque_n_ecrit_pas_la_cle() {
+        let dir = temp_dir("masque");
+        let store = ObrainStore::open(&dir).unwrap();
+        let graph = HarnessGraph::new(Arc::clone(&store)).with_masque(this_agent::masque::masquer);
+        let mut run = run_avec_cle();
+        graph.record_run(&run, "run-m").unwrap();
+        run.record(Step::tool("ecrire", 1).failed(format!("refus {CLE}")));
+        graph
+            .append_step(&run, "run-m", run.steps.last().unwrap())
+            .unwrap();
+
+        let textes = textes_du_journal(&graph);
+        assert!(textes.len() >= 5, "{textes:?}");
+        for t in &textes {
+            assert!(!t.contains("abcdefghij"), "secret écrit : {t}");
+        }
+        let excerpt = graph
+            .read_node(&Node {
+                label: STEP,
+                props: vec![
+                    ("_uuid".to_string(), "run-m#0".to_string()),
+                    ("_out_excerpt".to_string(), String::new()),
+                ],
+            })
+            .unwrap();
+        assert_eq!(excerpt.get("_out_excerpt"), Some("OPENAI=[secret masqué]"));
+        let back = graph.load_run("run-m").unwrap().unwrap();
+        assert_eq!(back.goal.text, "utilise [secret masqué]");
+        assert_eq!(back.steps[0].resume, "OPENAI=[secret masqué]");
+        assert_eq!(
+            back.steps[1].failure.as_deref(),
+            Some("refus [secret masqué]")
+        );
+        drop(graph);
+        drop(store);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn sans_masque_le_journal_est_ecrit_tel_quel() {
+        let dir = temp_dir("sans_masque");
+        let store = ObrainStore::open(&dir).unwrap();
+        let graph = HarnessGraph::new(Arc::clone(&store));
+        let run = run_avec_cle();
+        graph.record_run(&run, "run-s").unwrap();
+        let back = graph.load_run("run-s").unwrap().unwrap();
+        assert_eq!(back, run, "le run relu est le run écrit");
+        assert!(textes_du_journal(&graph).iter().any(|t| t.contains(CLE)));
         drop(graph);
         drop(store);
         std::fs::remove_dir_all(&dir).ok();
