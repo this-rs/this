@@ -28,7 +28,7 @@ use std::task::Poll;
 use async_trait::async_trait;
 
 use crate::event::{Event, HintKind, Outcome, Pending, Snapshot};
-use crate::ports::{Cancel, Compactor, Delta, Toolbox, Transport};
+use crate::ports::{Cancel, Compactor, Delta, Recorder, Recorders, Toolbox, Transport};
 use crate::wire::{Code, Failure, Finish, ImagePart, Message, Reply, Request, ToolCall};
 use this_agent::evidence::Verdict;
 use this_agent::{Decision, DefaultPolicy, Goal, Policy, Run, Step, Stop};
@@ -523,6 +523,8 @@ struct State {
     busy: bool,
     generation: u64,
     cancel: Cancel,
+    /// Le compteur d'objectifs ouverts : source des `run_id` (`run-1`, `run-2`, …).
+    run_seq: u64,
 }
 
 /// La sortie d'événements, dans sa propre cellule.
@@ -712,6 +714,9 @@ pub struct Harness {
     /// Le compacteur, s'il y en a un : aucun par défaut, donc la borne de contexte jette
     /// (voir [`Harness::with_compactor`]).
     compactor: Option<Rc<dyn Compactor>>,
+    /// Le journal vivant des runs : vide par défaut (voir [`Harness::with_recorder`]).
+    /// Ses méthodes rendent `()` : un échec d'enregistrement n'interrompt jamais le run.
+    recorder: Rc<dyn Recorder>,
     state: Shared<State>,
     out: Out,
 }
@@ -732,6 +737,7 @@ impl Harness {
             turn_context: None,
             grants: None,
             compactor: None,
+            recorder: Rc::new(Recorders::new()),
             state: Rc::new(RefCell::new(State {
                 system: system.into(),
                 limits,
@@ -741,6 +747,7 @@ impl Harness {
                 busy: false,
                 generation: 0,
                 cancel: Cancel::new(),
+                run_seq: 0,
             })),
             out: Out::new(Box::new(sink)),
         }
@@ -819,6 +826,14 @@ impl Harness {
     /// le même événement, la même `Step`, la même relance que tout autre refus.
     pub fn with_grants(mut self, grants: this_agent::substrate::Grants) -> Self {
         self.grants = Some(grants);
+        self
+    }
+
+    /// Branche un [`Recorder`] : chaque étape d'outil lui est poussée dès qu'elle est
+    /// mesurée, et l'arrêt du run lui est annoncé. Sans appel, le journal est vide et
+    /// la boucle ne change pas.
+    pub fn with_recorder(mut self, recorder: Rc<dyn Recorder>) -> Self {
+        self.recorder = recorder;
         self
     }
 
@@ -1021,6 +1036,8 @@ impl Harness {
         // Le verdict du run qui a posé `stop` : lu à la sortie de ses tours, avant
         // qu'un objectif suivant n'ouvre un autre run.
         let mut verdict: Option<Verdict> = None;
+        // Le dernier run arrêté (identité + état), pour `Recorder::stopped`.
+        let mut closed: Option<(String, Run)> = None;
 
         'goals: loop {
             // 1. Le prochain message tenu ouvre un objectif. Sans message, il
@@ -1044,6 +1061,11 @@ impl Harness {
             }
 
             let limits = self.with(|s| s.limits.clone());
+            // L'identité du run, stable pour toutes ses étapes.
+            let run_id = self.with(|s| {
+                s.run_seq += 1;
+                format!("run-{}", s.run_seq)
+            });
             let mut run = Run::new(Goal::new(first.text.clone()), limits.max_tours);
             run.max_relances = limits.max_relances;
             run.declare(toolbox.declarations());
@@ -1335,7 +1357,7 @@ impl Harness {
                         continue;
                     }
                     let (outcome, dropped) = self
-                        .run_tool(toolbox.as_ref(), call, &mut run, &cancel, &limits)
+                        .run_tool(toolbox.as_ref(), call, &run_id, &mut run, &cancel, &limits)
                         .await;
                     if let Some(why) = dropped {
                         // Abandonné ne veut pas dire « pas fait » : l'étape
@@ -1406,6 +1428,11 @@ impl Harness {
                 }
             }
             verdict = Some(verdict_of(&run, &run.inconnues));
+            // Le run qui a posé `stop` est retenu (déplacé, jamais cloné) pour l'annonce
+            // finale : `run` et `run_id` ne survivent pas à l'objectif.
+            if run.stop.is_some() {
+                closed = Some((run_id, run));
+            }
 
             // Un objectif atteint, mais des messages attendent : la discussion
             // continue, elle ne s'arrête pas parce que le modèle a conclu.
@@ -1427,6 +1454,9 @@ impl Harness {
         // La place est rendue AVANT l'annonce : un puits qui relit `busy()` sur
         // `Stopped` voit déjà le run terminé.
         self.with(|s| s.busy = false);
+        if let Some((run_id, run)) = &closed {
+            self.recorder.stopped(run_id, run, &stop).await;
+        }
         self.out.emit(Event::Stopped {
             stop: stop.clone(),
             text: said,
@@ -1454,6 +1484,7 @@ impl Harness {
         &self,
         toolbox: &dyn Toolbox,
         call: &ToolCall,
+        run_id: &str,
         run: &mut Run,
         cancel: &Cancel,
         limits: &Limits,
@@ -1515,6 +1546,9 @@ impl Harness {
         });
 
         run.record(step_of(&call.name, ms, &outcome));
+        if let Some(step) = run.steps.last() {
+            self.recorder.step(run_id, run, step).await;
+        }
         (outcome, abandoned)
     }
 

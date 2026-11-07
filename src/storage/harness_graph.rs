@@ -405,6 +405,7 @@ mod tests {
                 module: "harness-default".into(),
                 version: "0.1.0".into(),
                 entry: "policy".into(),
+                digest: None,
             }],
             max_tours: 12,
             max_relances: 3,

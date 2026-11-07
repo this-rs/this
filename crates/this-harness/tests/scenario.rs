@@ -881,6 +881,7 @@ fn un_harness_compose_depuis_le_graphe_porte_son_brief_et_ses_bornes() {
             module: "harness-default".into(),
             version: "0.1.0".into(),
             entry: "policy".into(),
+            digest: None,
         }],
         max_tours: 2,
         max_relances: 0,

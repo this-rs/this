@@ -82,6 +82,7 @@ fn doc() -> HarnessDoc {
             module: "pol".into(),
             version: "1.0.0".into(),
             entry: "main".into(),
+            digest: None,
         }],
         max_tours: 12,
         max_relances: 3,
@@ -99,6 +100,7 @@ fn approuve(mut d: HarnessDoc) -> (HarnessDoc, Vec<Approval>) {
         by: "alice".into(),
         at_ms: 1,
         fingerprint: d.fingerprint(),
+        digests: Default::default(),
     };
     d.approval = Some(a.clone());
     (d, vec![a])
