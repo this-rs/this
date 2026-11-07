@@ -48,6 +48,35 @@ pub const PHOTO_PX_MIN: u32 = 64;
 /// megabytes of JSON for a detail nobody reads.
 pub const PHOTO_PX_MAX: u32 = 4096;
 
+/// Les bornes d'une vidéo : de 1 à 30 secondes, et un plus grand côté qui reste raisonnable.
+pub const VIDEO_MS_MIN: u32 = 1_000;
+pub const VIDEO_MS_MAX: u32 = 30_000;
+
+/// Le délai d'une vidéo, borné. Une vidéo de trente secondes est déjà un fichier de plusieurs
+/// mégaoctets : au-delà, ce n'est plus une capture, c'est un tournage.
+pub fn checked_video(args: &serde_json::Value) -> (u32, u32) {
+    let duration = args
+        .get("duration_ms")
+        .and_then(serde_json::Value::as_u64)
+        .map(|ms| (ms as u32).clamp(VIDEO_MS_MIN, VIDEO_MS_MAX))
+        .unwrap_or(VIDEO_MS_MIN * 5);
+    let max_px = args
+        .get("max_px")
+        .and_then(serde_json::Value::as_u64)
+        .map(|px| (px as u32).clamp(PHOTO_PX_MIN, PHOTO_PX_MAX))
+        .unwrap_or(1280);
+    (duration, max_px)
+}
+
+/// Une vidéo, écrite dans le dossier temporaire de l'app (le fichier, pas les octets).
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Video {
+    pub path: String,
+    pub bytes: u64,
+    pub duration_ms: u64,
+}
+
 /// The shortest recording. Below, the file is a click.
 pub const RECORD_MS_MIN: u32 = 500;
 /// The longest recording one call carries: a minute.
@@ -107,6 +136,7 @@ pub struct Audio {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum CaptureReply {
     Photo(Photo),
+    Video(Video),
     Audio(Audio),
     /// A recording is running: it stops on `microphoneStop`, or alone at `max_ms`.
     Recording {
@@ -319,5 +349,34 @@ mod tests {
             let valeur = serde_json::to_value(CaptureReply::Error { code }).unwrap();
             assert_eq!(valeur, json!({"kind":"error","code":texte}));
         }
+    }
+
+    #[test]
+    fn a_video_duration_stays_in_the_native_range() {
+        assert_eq!(
+            checked_video(&serde_json::json!({"duration_ms": 1})).0,
+            VIDEO_MS_MIN
+        );
+        assert_eq!(
+            checked_video(&serde_json::json!({"duration_ms": 600_000})).0,
+            VIDEO_MS_MAX
+        );
+        assert_eq!(checked_video(&serde_json::json!({})).0, 5_000);
+    }
+
+    #[test]
+    fn a_video_answer_decodes_with_its_path() {
+        let video: CaptureReply = serde_json::from_str(
+            r#"{"kind":"video","path":"/var/tmp/atelier-x.mov","bytes":4200000,"duration_ms":5000}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            video,
+            CaptureReply::Video(Video {
+                path: "/var/tmp/atelier-x.mov".into(),
+                bytes: 4_200_000,
+                duration_ms: 5_000,
+            })
+        );
     }
 }

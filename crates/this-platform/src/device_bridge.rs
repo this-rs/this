@@ -163,6 +163,9 @@ pub const METHODS: &[&str] = &[
     // The capture itself. Before these, "camera" and "microphone" meant the permission and
     // nothing else: an app that could ask for the camera and never take a picture.
     "cameraCapturePhoto",
+    // La vidéo : la carte la declare manquante depuis l'audit du 08/11, et filmer est la seule
+    // primitive que la caméra n'avait pas.
+    "cameraRecordVideo",
     "microphoneStart",
     "microphoneStop",
     "notificationsStatus",
@@ -260,7 +263,7 @@ pub fn capability_of(method: &str, args: &Value) -> Option<Capability> {
             return declared_capability(args);
         }
         "gyroscopeSample" => Capability::Gyroscope,
-        "cameraCapturePhoto" => Capability::Camera,
+        "cameraCapturePhoto" | "cameraRecordVideo" => Capability::Camera,
         "microphoneStart" | "microphoneStop" => Capability::Microphone,
         "bluetoothScan"
         | "bluetoothState"
@@ -444,6 +447,9 @@ pub fn complete_args(method: &str, args: &Value, now_ms: f64) -> Value {
         // 1280 px et une qualité honnête : assez pour lire un document photographié, assez
         // petit pour traverser le pont sans le saturer.
         "cameraCapturePhoto" => serde_json::json!({ "max_px": 1280, "quality": 0.8 }),
+        // Cinq secondes par défaut : une vidéo plus longue traverse mal le pont et occupe le
+        // stockage de l'app pour un clip que personne n'a demandé à garder.
+        "cameraRecordVideo" => serde_json::json!({ "duration_ms": 5_000, "max_px": 1280 }),
         // Une minute au plus : au-delà, ce n'est plus une note vocale, c'est un fichier — et
         // le pont n'a pas de raison de le porter.
         "microphoneStart" => serde_json::json!({ "max_ms": 60_000 }),
@@ -1162,5 +1168,127 @@ mod tests {
             let back: Reply = serde_json::from_value(value).unwrap();
             assert_eq!(back, reply);
         }
+    }
+
+    // ---- Le contrat de la profondeur d'appareil -------------------------------------
+    //
+    // Chaque méthode ajoutée par le chantier du 08/11 a trois propriétés à tenir : sa
+    // capacité est dérivée (une méthode sans capacité est inatteignable), ses arguments
+    // manquants ont un défaut honnête (sinon le natif répond `internal` en nommant une clé
+    // que l'appelant ne pouvait pas deviner), et ceux qu'aucun défaut ne remplace sont
+    // nommés (sinon l'appelant reçoit `missing_argument` sans savoir lequel).
+
+    #[test]
+    fn every_method_added_by_the_device_depth_derives_its_capability() {
+        for (method, capability) in [
+            ("bluetoothState", Capability::Bluetooth),
+            ("bluetoothConnect", Capability::Bluetooth),
+            ("bluetoothDisconnect", Capability::Bluetooth),
+            ("bluetoothServices", Capability::Bluetooth),
+            ("bluetoothRead", Capability::Bluetooth),
+            ("bluetoothWrite", Capability::Bluetooth),
+            ("bluetoothSubscribe", Capability::Bluetooth),
+            ("bluetoothNotifications", Capability::Bluetooth),
+            ("cameraCapturePhoto", Capability::Camera),
+            ("cameraRecordVideo", Capability::Camera),
+            ("microphoneStart", Capability::Microphone),
+            ("microphoneStop", Capability::Microphone),
+            ("shareItem", Capability::Share),
+            ("contactsGet", Capability::Contacts),
+            ("contactsSearch", Capability::Contacts),
+            ("contactsCreate", Capability::Contacts),
+            ("calendarCalendars", Capability::Calendar),
+            ("calendarUpdateEvent", Capability::Calendar),
+            ("calendarDeleteEvent", Capability::Calendar),
+            ("photosList", Capability::Photos),
+            ("photosRead", Capability::Photos),
+            ("filesWrite", Capability::FilesPick),
+            ("notificationsSchedule", Capability::Notifications),
+            ("notificationsPending", Capability::Notifications),
+            ("motionDistance", Capability::MotionActivity),
+            ("locationStreamStart", Capability::Location),
+            ("locationStreamStop", Capability::Location),
+            ("locationRecent", Capability::Location),
+            ("localNetworkResolve", Capability::LocalNetwork),
+            ("healthWorkouts", Capability::Health),
+        ] {
+            assert_eq!(
+                capability_of(method, &Value::Null),
+                Some(capability),
+                "{method}"
+            );
+            assert!(METHODS.contains(&method), "{method} absent de METHODS");
+        }
+    }
+
+    #[test]
+    fn the_methods_that_need_an_argument_name_it() {
+        // Ce qu'aucun défaut ne peut remplacer honnêtement.
+        for (method, missing) in [
+            ("bluetoothConnect", "id"),
+            ("bluetoothRead", "id"),
+            ("bluetoothWrite", "id"),
+            ("contactsGet", "id"),
+            ("contactsSearch", "query"),
+            ("contactsCreate", "name"),
+            ("calendarUpdateEvent", "id"),
+            ("calendarDeleteEvent", "id"),
+            ("photosRead", "id"),
+            ("filesWrite", "name"),
+            ("notificationsSchedule", "title"),
+            ("localNetworkResolve", "name"),
+        ] {
+            assert_eq!(missing_args(method, &json!({})), Some(missing), "{method}");
+        }
+    }
+
+    #[test]
+    fn the_arguments_that_have_an_honest_default_get_it() {
+        let now = 1_700_000_000_000.0;
+        // Une connexion doit rendre la main : la borne par défaut est le timeout du pont.
+        assert_eq!(
+            complete_args("bluetoothConnect", &json!({}), now)["timeout_ms"],
+            10_000
+        );
+        // Une écriture attend l'accusé sauf demande contraire.
+        assert_eq!(
+            complete_args("bluetoothWrite", &json!({}), now)["with_response"],
+            true
+        );
+        // Une photo sans réglage : 1280 px, qualité 0.8.
+        assert_eq!(
+            complete_args("cameraCapturePhoto", &json!({}), now)["max_px"],
+            1280
+        );
+        assert_eq!(
+            complete_args("cameraRecordVideo", &json!({}), now)["duration_ms"],
+            5_000
+        );
+        // Un flux sans réglage : 10 m et 1 m de filtre.
+        assert_eq!(
+            complete_args("locationStreamStart", &json!({}), now)["accuracy"],
+            "ten_meters"
+        );
+        // Les fenêtres par défaut sont reculées dans le temps, jamais vides.
+        for method in ["healthWorkouts", "photosList", "calendarEvents"] {
+            let args = complete_args(method, &json!({}), now);
+            assert!(
+                args["from_ms"].as_i64().is_some() || args["start_ms"].as_i64().is_some(),
+                "{method}"
+            );
+        }
+        assert_eq!(
+            complete_args("localNetworkResolve", &json!({}), now)["timeout_ms"],
+            5_000
+        );
+    }
+
+    #[test]
+    fn a_default_never_overrides_what_the_caller_gave() {
+        let now = 1_700_000_000_000.0;
+        let donne = json!({ "duration_ms": 12_000, "max_px": 640 });
+        let args = complete_args("cameraRecordVideo", &donne, now);
+        assert_eq!(args["duration_ms"], 12_000);
+        assert_eq!(args["max_px"], 640);
     }
 }
