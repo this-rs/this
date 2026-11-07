@@ -404,6 +404,49 @@ async fn race<T>(
     .await
 }
 
+/// Le délai accordé à un appel de [`Recorder`] : deux secondes d'horloge du harnais.
+///
+/// Un enregistreur qui ne rend jamais la main (écriture bloquée, canal plein) ne retarde
+/// pas le run au-delà : l'appel est abandonné (la future est lâchée) et la boucle continue.
+/// L'étape ou l'arrêt concerné est alors perdu pour ce journal, et c'est assumé : un journal
+/// muet ne doit pas figer l'agent.
+pub const RECORDER_TIMEOUT_MS: u64 = 2_000;
+
+/// Un appel au [`Recorder`], isolé : une **panique** est avalée, un **blocage** est borné
+/// par [`RECORDER_TIMEOUT_MS`] sur l'horloge du harnais.
+///
+/// Limites : sans minuteur (`Clock::sleep` rend `None`), seule la panique est couverte ;
+/// un enregistreur qui bloque le fil *sans jamais rendre la main au poll* (calcul
+/// synchrone infini) ne peut être borné par aucun minuteur coopératif ; et en
+/// `panic = "abort"` (wasm32), la panique n'est pas rattrapable.
+async fn guarded(clock: &dyn Clock, call: impl Future<Output = ()>) {
+    let mut call = Box::pin(call);
+    // Le minuteur n'est armé qu'au premier `Pending` : un enregistreur qui rend tout de suite
+    // (le cas courant) ne coûte aucun minuteur.
+    let mut deadline: Option<Sleep> = None;
+    let mut armed = false;
+    std::future::poll_fn(move |cx| {
+        let polled =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| call.as_mut().poll(cx)));
+        match polled {
+            Ok(Poll::Pending) => {}
+            // Rendu, ou paniqué : dans les deux cas le run continue.
+            Ok(Poll::Ready(())) | Err(_) => return Poll::Ready(()),
+        }
+        if !armed {
+            armed = true;
+            deadline = clock.sleep(RECORDER_TIMEOUT_MS);
+        }
+        if let Some(deadline) = deadline.as_mut()
+            && deadline.as_mut().poll(cx).is_ready()
+        {
+            return Poll::Ready(());
+        }
+        Poll::Pending
+    })
+    .await
+}
+
 /// Attend `ms`, mais rend dès que l'annulation est vue : vrai si l'attente a
 /// été coupée par elle.
 ///
@@ -696,6 +739,8 @@ impl Drop for BusyGuard {
         // panique : ré-invoquer le puits ici ferait un double panic. Le cas
         // normal (future lâchée, sans panique) passe toujours.
         if self.armed && !std::thread::panicking() {
+            // Run lâché : l'annulation qui visait ce run meurt avec lui.
+            self.state.borrow().cancel.reset();
             let ms = (self.clock.now_ms() - self.started).max(0.0) as u64;
             self.out.emit(Event::Stopped {
                 stop: Stop::Interrupted,
@@ -1028,8 +1073,10 @@ impl Harness {
     async fn pump(&self) -> Option<Stop> {
         let clock = self.clock.clone();
         let started = clock.now_ms();
+        // Pas de `reset` ici : `interrupt` ne pose le drapeau que pendant un run (`busy`), donc
+        // rien d'obsolète n'attend. Le drapeau est consommé en fin de run, ou à l'abandon
+        // (`BusyGuard`) : une annulation pendant ce run ne vise que lui.
         let cancel = self.with(|s| s.cancel.clone());
-        cancel.reset();
         let transport = self.transport.clone();
         let toolbox = self.toolbox.clone();
 
@@ -1483,6 +1530,8 @@ impl Harness {
         // La session redevient libre, sans Stopped.
         // La garde est désarmée dans les deux cas : la fin normale rend la place
         // elle-même, et dit son `Stopped` (un seul par run, jamais deux).
+        // Le run est fini : son annulation avec lui (et seulement la sienne).
+        cancel.reset();
         let Some(stop) = stop else {
             self.with(|s| s.busy = false);
             garde.disarm();
@@ -1502,7 +1551,7 @@ impl Harness {
             verdict,
         });
         if let Some((run_id, run)) = &closed {
-            self.recorder.stopped(run_id, run, &stop).await;
+            guarded(clock.as_ref(), self.recorder.stopped(run_id, run, &stop)).await;
         }
         if let Some(finale) = garde.finale.take() {
             self.out.emit(finale);
@@ -1589,7 +1638,7 @@ impl Harness {
 
         run.record(step_of(&call.name, ms, &outcome));
         if let Some(step) = run.steps.last() {
-            self.recorder.step(run_id, run, step).await;
+            guarded(self.clock.as_ref(), self.recorder.step(run_id, run, step)).await;
         }
         (outcome, abandoned)
     }
@@ -2065,8 +2114,16 @@ impl Handle {
     /// par le transport (qui peut couper la connexion) et par la boucle entre
     /// deux outils — pas seulement par l'interface, qui continuerait sinon à
     /// recevoir le texte d'une réponse qu'on croyait annulée.
+    ///
+    /// **Règle.** Le drapeau n'est posé que si un run tourne (`busy`) : appuyer alors que rien
+    /// ne tourne est ignoré et n'empoisonne pas le message suivant. Une annulation pendant un
+    /// run arrête CE run ; le drapeau est remis à zéro en fin de run (ou à son abandon), pas
+    /// au début, pour que le run suivant reparte proprement.
     pub fn interrupt(&self) {
-        self.state.borrow().cancel.cancel();
+        let s = self.state.borrow();
+        if s.busy {
+            s.cancel.cancel();
+        }
     }
 
     pub fn busy(&self) -> bool {

@@ -273,6 +273,12 @@ impl HarnessGraph {
         nodes
             .into_iter()
             .find(|node| node.label == RUN)
+            .map(|mut node| {
+                if let Some(origin) = Self::origin_of(run) {
+                    node.props.push(("_origin".to_string(), origin));
+                }
+                node
+            })
             .ok_or_else(|| anyhow!("run {run_id} : pas de nœud de tête"))
     }
 
@@ -300,9 +306,58 @@ impl HarnessGraph {
         }
     }
 
+    /// L'identifiant tel qu'il est écrit : masqué comme le reste du texte libre (`_uuid` du run,
+    /// `_uuid` et `_run` des étapes). Toute recherche par identifiant passe par ici.
+    fn rid(&self, run_id: &str) -> String {
+        match &self.masque {
+            Some(masque) => masque(run_id),
+            None => run_id.to_string(),
+        }
+    }
+
+    /// L'empreinte d'origine d'un run : sa **première** étape (outil, rang, durée, sortie).
+    /// Réécrire le même run (plus d'étapes, un arrêt) la garde ; un autre run qui réutilise
+    /// le même id et le même but ne l'a presque jamais. `None` : pas encore d'étape.
+    fn origin_of(run: &Run) -> Option<String> {
+        let step = run.steps.first()?;
+        let out = step
+            .out_hash
+            .clone()
+            .unwrap_or_else(|| this_agent::graph::step_output(step).to_string());
+        let digest =
+            Sha256::digest(format!("{}|{}|{}|{out}", step.tool, step.index, step.ms).as_bytes());
+        Some(digest.iter().take(8).map(|b| format!("{b:02x}")).collect())
+    }
+
+    /// L'identifiant sous lequel `run` s'écrit : `base` (déjà masqué), ou `base@<empreinte>` si un
+    /// AUTRE run (empreinte d'origine différente) occupe déjà `base`. Un run sans étape, ou un
+    /// nœud sans empreinte, s'adopte sous `base` : la réécriture légitime reste une réécriture.
+    fn slot_for(&self, base: &str, run: &Run) -> String {
+        let Some(origin) = Self::origin_of(run) else {
+            return base.to_string();
+        };
+        let Some(head) = self.find(RUN, base) else {
+            return base.to_string();
+        };
+        // Un but différent n'est pas une réécriture ni un homonyme à distinguer : c'est la
+        // collision que `same_run` refuse (#178). Le slot par empreinte ne vaut que à but égal.
+        if self.same_run(head, run, base).is_err() {
+            return base.to_string();
+        }
+        let held = self.graph().get_node(head).and_then(|n| {
+            n.get_property("_origin")
+                .and_then(|v| v.as_str().map(str::to_string))
+        });
+        match held {
+            Some(held) if held != origin => format!("{base}@{origin}"),
+            _ => base.to_string(),
+        }
+    }
+
     /// Écrit un run **entier** : son nœud et toutes ses étapes, en un commit.
     pub fn record_run(&self, run: &Run, run_id: &str) -> Result<()> {
         self.writable()?;
+        let run_id = &self.slot_for(&self.rid(run_id), run);
         if let Some(existing) = self.find(RUN, run_id) {
             self.same_run(existing, run, run_id)?;
         }
@@ -324,6 +379,7 @@ impl HarnessGraph {
     /// d'abord) : une étape sur un run inconnu est refusée, pas inventée.
     pub fn append_step(&self, run: &Run, run_id: &str, step: &Step) -> Result<()> {
         self.writable()?;
+        let run_id = &self.slot_for(&self.rid(run_id), run);
         // Le run d'abord : une étape sur un run inconnu est refusée avant
         // d'écrire quoi que ce soit (pas d'étape orpheline).
         let head_id = self
@@ -340,6 +396,7 @@ impl HarnessGraph {
     /// écrit par ce chemin ; `record_run` le couvre à l'arrêt.
     pub fn append_step_live(&self, run: &Run, run_id: &str, step: &Step) -> Result<()> {
         self.writable()?;
+        let run_id = &self.slot_for(&self.rid(run_id), run);
         let head_id = match self.find(RUN, run_id) {
             Some(id) => id,
             None => self.upsert(&self.run_head_node(run, run_id)?)?,
@@ -394,6 +451,36 @@ impl HarnessGraph {
 
     /// Relit un run et ses étapes, dans l'ordre de `_index`.
     pub fn load_run(&self, run_id: &str) -> Result<Option<Run>> {
+        self.load_exact(&self.rid(run_id))
+    }
+
+    /// Tous les runs écrits sous cet id : le premier, puis ceux qui ont réutilisé le même id (et
+    /// le même but) avec une autre empreinte d'origine. Dans l'ordre des identifiants.
+    pub fn load_runs(&self, run_id: &str) -> Result<Vec<Run>> {
+        let base = self.rid(run_id);
+        let prefix = format!("{base}@");
+        let graph = self.graph();
+        let mut ids: Vec<String> = graph
+            .nodes_by_label(RUN)
+            .into_iter()
+            .filter_map(|n| graph.get_node(n))
+            .filter_map(|n| {
+                n.get_property("_uuid")
+                    .and_then(|v| v.as_str().map(str::to_string))
+            })
+            .filter(|id| *id == base || id.starts_with(&prefix))
+            .collect();
+        ids.sort();
+        let mut out = Vec::new();
+        for id in ids {
+            if let Some(run) = self.load_exact(&id)? {
+                out.push(run);
+            }
+        }
+        Ok(out)
+    }
+
+    fn load_exact(&self, run_id: &str) -> Result<Option<Run>> {
         let graph = self.graph();
         let mut nodes = Vec::new();
 
@@ -601,6 +688,40 @@ mod tests {
         run.record(Step::tool("lire", 2).state("a", "b").resume("contenu lu"));
         run.record(Step::tool("ecrire", 3).refused("même version"));
         run
+    }
+
+    #[tokio::test]
+    async fn deux_runs_de_meme_id_et_de_meme_but_se_relisent_distincts() {
+        let dir = temp_dir("jumeaux");
+        let store = ObrainStore::open(&dir).unwrap();
+        let graph = HarnessGraph::new(Arc::clone(&store));
+        let mut un = Run::new(Goal::new("prouve"), 6);
+        un.record(Step::tool("lire", 2).resume("premier"));
+        let mut deux = Run::new(Goal::new("prouve"), 6);
+        deux.record(Step::tool("ecrire", 3).resume("second"));
+
+        graph.record_run(&un, "run-1").unwrap();
+        graph.record_run(&deux, "run-1").unwrap();
+        let tous = graph.load_runs("run-1").unwrap();
+        assert_eq!(tous.len(), 2, "le second n'écrase pas le premier");
+        let outils: Vec<_> = tous.iter().map(|r| r.steps[0].tool.as_str()).collect();
+        assert!(
+            outils.contains(&"lire") && outils.contains(&"ecrire"),
+            "{outils:?}"
+        );
+        assert_eq!(
+            graph.load_run("run-1").unwrap().unwrap().steps[0].tool,
+            "lire"
+        );
+
+        // Réécrire LE MÊME run (plus d'étapes) reste une réécriture.
+        un.record(Step::tool("lire", 4).resume("suite"));
+        graph.record_run(&un, "run-1").unwrap();
+        assert_eq!(graph.load_runs("run-1").unwrap().len(), 2);
+        assert_eq!(graph.load_run("run-1").unwrap().unwrap().steps.len(), 2);
+        drop(graph);
+        drop(store);
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[tokio::test]

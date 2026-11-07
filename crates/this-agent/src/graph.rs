@@ -308,6 +308,10 @@ pub fn run_nodes(run: &Run, run_id: &str) -> Result<Vec<Node>, String> {
 /// étapes). Le run relu depuis ces nœuds est le run **masqué**.
 pub fn run_nodes_with(run: &Run, run_id: &str, masque: Masque<'_>) -> Result<Vec<Node>, String> {
     let data = masked_json(run, masque).map_err(|e| format!("run: {e}"))?;
+    // L'identifiant du run (`_uuid`, et `_run` de chaque étape) est un texte comme un autre : un
+    // hôte qui le dérive d'une entrée utilisateur ne doit pas l'écrire en clair.
+    let run_id = masque(run_id);
+    let run_id = run_id.as_str();
     run_nodes_from(run, run_id, data, masque(&run.goal.text), masque)
 }
 
@@ -386,6 +390,8 @@ pub fn step_node(step: &Step, run_id: &str) -> Node {
 /// [`step_node`], où `_out_excerpt` et chaque chaîne de `_data` passent par `masque`.
 pub fn step_node_with(step: &Step, run_id: &str, masque: Masque<'_>) -> Node {
     let data = masked_json(step, masque).unwrap_or_default();
+    let run_id = masque(run_id);
+    let run_id = run_id.as_str();
     step_node_from(step, run_id, data, step_out_excerpt_with(step, masque))
 }
 
@@ -509,6 +515,22 @@ mod tests {
             relu.steps[1].failure.as_deref(),
             Some("refusée : [secret masqué]")
         );
+    }
+
+    #[test]
+    fn l_identifiant_du_run_passe_par_le_masque() {
+        let cle = "sk-aaaaaaaaaaaaaaaaaaaaaaaa";
+        let mut run = Run::new(Goal::new("prouve"), 3);
+        run.record(Step::tool("lire", 1));
+        let masque: &dyn Fn(&str) -> String = &crate::masque::masquer;
+        let nodes = run_nodes_with(&run, &format!("run {cle}"), masque).unwrap();
+        for node in &nodes {
+            for (k, v) in &node.props {
+                if k == "_uuid" || k == "_run" {
+                    assert!(!v.contains("aaaaaaaa"), "{k} = {v}");
+                }
+            }
+        }
     }
 
     #[test]
