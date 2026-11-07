@@ -54,7 +54,7 @@ impl Stop {
         match self {
             Stop::Done => "terminé".to_string(),
             Stop::Budget => {
-                "j'ai atteint la limite de tours sans conclure — dis-moi de continuer".to_string()
+                "j'ai atteint la limite du run (tours ou temps) sans conclure — dis-moi de continuer".to_string()
             }
             Stop::Refused(raison) => format!("bloqué : {raison}"),
             Stop::Failed(erreur) => format!("échec : {erreur}"),
@@ -1207,7 +1207,7 @@ mod tests {
     #[test]
     fn chaque_arret_sait_se_dire() {
         assert_eq!(Stop::Done.phrase(), "terminé");
-        assert!(Stop::Budget.phrase().contains("limite de tours"));
+        assert!(Stop::Budget.phrase().contains("limite du run"));
         assert!(Stop::Interrupted.phrase().contains("interrompu"));
         assert!(Stop::Refused("x".into()).phrase().contains("bloqué"));
     }
