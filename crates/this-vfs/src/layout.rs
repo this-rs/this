@@ -28,6 +28,10 @@ pub const MANIFEST_FILE: &str = "manifest.json";
 pub const YANKED_DIR: &str = "_yanked";
 /// Version of the commit record format itself.
 pub const MANIFEST_FORMAT: u32 = 1;
+/// The binary, relative to a version directory. Its presence makes a version a
+/// version *with code*: such a version is admitted only with a valid signature
+/// from a key of the trust anchor (see `trust::check_put`).
+pub const PROGRAM_FILE: &str = "program.wasm";
 
 /// Commit record of one version.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -47,13 +51,86 @@ pub struct Manifest {
 
 /// Ed25519 signature over a manifest, with the identifier of the signing key.
 ///
-/// The signed bytes are the manifest serialized **without** this block, so
-/// re-signing after a field change is always detectable: the signature covers
-/// the etags, hence the files.
+/// The signed bytes are the manifest serialized **without** this block (see
+/// [`Manifest::signing_bytes`]), so re-signing after a field change is always
+/// detectable: the signature covers the etags, hence the files.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SignatureBlock {
     /// Which trusted key signed it. Lets a host rotate keys without a flag day.
     pub key_id: String,
     /// Ed25519 signature, base64 (standard alphabet, padded).
     pub signature: String,
+}
+
+/// The exact value a signature covers: every field of [`Manifest`] except
+/// `signature`.
+///
+/// This struct *is* the signing format. Signer and verifier both serialize it
+/// with `serde_json::to_vec`, so the bytes are fixed by:
+/// - the field set and the **declaration order** below (`format`, `name`,
+///   `version`, `files`, `created`): reordering or renaming a field is a format
+///   change and invalidates every existing signature;
+/// - `files` being a `BTreeMap`: its keys come out sorted, whatever the order of
+///   insertion;
+/// - serde_json's compact output (no spaces, no trailing newline).
+///
+/// Do not add a field here without bumping [`MANIFEST_FORMAT`].
+#[derive(Debug, Serialize)]
+pub struct ManifestBody<'a> {
+    pub format: u32,
+    pub name: &'a str,
+    pub version: &'a str,
+    pub files: &'a BTreeMap<String, String>,
+    pub created: &'a DateTime<Utc>,
+}
+
+impl Manifest {
+    /// The bytes covered by the signature: the canonical [`ManifestBody`] of this
+    /// record. Any `signature` it carries is ignored.
+    pub fn signing_bytes(&self) -> Vec<u8> {
+        // Serializing this struct cannot fail: no map has non-string keys and no
+        // field has a custom serializer that might return an error.
+        serde_json::to_vec(&ManifestBody {
+            format: self.format,
+            name: &self.name,
+            version: &self.version,
+            files: &self.files,
+            created: &self.created,
+        })
+        .expect("ManifestBody serializes to JSON")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn signing_bytes_format_is_pinned() {
+        let created = DateTime::parse_from_rfc3339("2026-01-01T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let mut files = BTreeMap::new();
+        files.insert("program.wasm".to_string(), "e2".to_string());
+        files.insert("descriptor.json".to_string(), "e1".to_string());
+        let m = Manifest {
+            format: MANIFEST_FORMAT,
+            name: "shop".into(),
+            version: "0.3.0".into(),
+            files,
+            created,
+            signature: Some(SignatureBlock {
+                key_id: "k".into(),
+                signature: "ignored".into(),
+            }),
+        };
+        assert_eq!(
+            String::from_utf8(m.signing_bytes()).unwrap(),
+            concat!(
+                r#"{"format":1,"name":"shop","version":"0.3.0","files":"#,
+                r#"{"descriptor.json":"e1","program.wasm":"e2"},"#,
+                r#""created":"2026-01-01T00:00:00Z"}"#
+            )
+        );
+    }
 }

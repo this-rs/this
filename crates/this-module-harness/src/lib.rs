@@ -45,8 +45,8 @@ use this_vfs::layout::YANKED_DIR;
 use this_vfs::layout::{MANIFEST_FILE, MANIFEST_FORMAT, Manifest};
 use this_vfs::{Precondition, Vfs, VfsEntry, VfsError, VfsPath, etag_of};
 
-/// The binary, inside the version directory.
-pub const PROGRAM_FILE: &str = "program.wasm";
+/// The binary, inside the version directory. Defined in `this_vfs::layout`, re-exported here.
+pub use this_vfs::layout::PROGRAM_FILE;
 /// The source, next to it: what produced the artifact, kept so it can be read back.
 pub const SOURCE_FILE: &str = "source.txt";
 

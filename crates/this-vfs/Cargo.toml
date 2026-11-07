@@ -19,6 +19,12 @@ anyhow = "1.0"
 thiserror = "2.0"
 sha2 = "0.10"
 serde = { version = "1.0", features = ["derive"] }
+# Signature des manifestes : Ed25519 en Rust pur (pas de C, pas de rand : les
+# clés se construisent depuis des octets). Les octets signés sont un JSON
+# sérialisé par serde_json, voir `layout::ManifestBody`.
+ed25519-dalek = { version = "2", default-features = false, features = ["std"] }
+base64 = "0.22"
+serde_json = "1.0"
 
 [dev-dependencies]
 # Uniquement pour les tests : les backends sont asynchrones et les tests les
