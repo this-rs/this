@@ -206,6 +206,9 @@ pub struct VfsModuleStore {
     /// Publisher side: the key this store signs committed manifests with.
     #[cfg(feature = "module-signing")]
     signing: Option<(String, ed25519_dalek::SigningKey)>,
+    /// Strict mode: a version that carries code (`.wasm` artifact) is refused unless a
+    /// trust anchor is declared. Off by default: the historical behaviour is kept.
+    code_requires_anchor: bool,
     /// Serializes put/remove/yank in this process (check-then-commit sequences).
     write_lock: tokio::sync::Mutex<()>,
 }
@@ -230,6 +233,7 @@ impl VfsModuleStore {
             root: VfsPath::parse("/modules").expect("static path"),
             #[cfg(feature = "module-signing")]
             trust: None,
+            code_requires_anchor: false,
             #[cfg(feature = "module-signing")]
             signing: None,
             write_lock: tokio::sync::Mutex::new(()),
@@ -268,6 +272,12 @@ impl VfsModuleStore {
 
     /// Registry of the host's custom validators / transforms / types (the one `check`
     /// must see, at put AND at get).
+    /// Strict mode: refuse a version that carries code unless an anchor is declared.
+    pub fn require_anchor_for_code(mut self, on: bool) -> Self {
+        self.code_requires_anchor = on;
+        self
+    }
+
     pub fn with_registry(mut self, registry: Arc<CustomRegistry>) -> Self {
         self.registry = registry;
         self
@@ -291,6 +301,19 @@ impl VfsModuleStore {
     fn profile(&self) -> CheckProfile {
         CheckProfile::Stored {
             allow_public: self.allow_public,
+        }
+    }
+
+    /// `true` when the host declared a trust anchor. Without the `module-signing`
+    /// feature no anchor can exist, so code modules are always refused.
+    fn anchor_declared(&self) -> bool {
+        #[cfg(feature = "module-signing")]
+        {
+            self.trust.is_some()
+        }
+        #[cfg(not(feature = "module-signing"))]
+        {
+            false
         }
     }
 
@@ -453,6 +476,16 @@ impl VfsModuleStore {
         desc.normalize();
         desc.check(&self.registry, self.profile())
             .map_err(invalid)?;
+        // Fail-closed : un module qui porte du code n'est admis que sous une ancre de
+        // confiance déclarée. Sans ancre, rien ne peut authentifier ce code.
+        if self.code_requires_anchor
+            && !self.anchor_declared()
+            && assets.iter().any(|(rel, _)| rel.ends_with(".wasm"))
+        {
+            return Err(ContractError::framework(codes::MODULE_UNSIGNED)
+                .with_param("module", format!("{}@{}", desc.name, desc.version))
+                .with_param("reason", "module with code, no trust anchor declared"));
+        }
         let mut issues = Vec::new();
         let mut locales = BTreeSet::new();
         let ns = format!("{}.", desc.name);
@@ -1061,6 +1094,28 @@ mod tests {
         // The descriptor carries no text.
         let d = store.get("billing", None).await.unwrap();
         assert!(!d.to_json_pretty().contains("Facture"));
+    }
+
+    #[tokio::test]
+    async fn module_with_code_needs_a_trust_anchor() {
+        let vfs = Arc::new(InMemoryVfs::new());
+        let store = VfsModuleStore::new(vfs).require_anchor_for_code(true);
+        let m = v1("1.0.0");
+        let err = store
+            .put_with_assets(
+                &m,
+                &[bundle("fr", "Facture")],
+                &[("program.wasm", b"\0asm")],
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(err.code.0, codes::MODULE_UNSIGNED);
+        assert!(
+            store.get("billing", Some("1.0.0")).await.is_err(),
+            "rien n'a été écrit"
+        );
+        // Le même module sans code passe.
+        store.put(&m, &[bundle("fr", "Facture")]).await.unwrap();
     }
 
     #[tokio::test]

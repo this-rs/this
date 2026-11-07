@@ -109,6 +109,16 @@ pub fn seed() -> Vec<Section> {
     ]
 }
 
+/// La version du socle sous laquelle un run a tourné.
+///
+/// Écrite dans la source de chaque leçon (`socle v1 · …`), elle ne servait qu'à
+/// lire. La rendre interrogeable permet à un hôte de dire « ce run a tourné sous
+/// le socle v1 » — sans quoi on ne sait jamais quelle connaissance a produit quel
+/// résultat, exactement le défaut qu'on corrige pour les modules.
+pub fn version() -> u32 {
+    VERSION
+}
+
 /// Le socle assemblé dans un budget : ce qui est retenu, ce qui est laissé dehors.
 pub fn brief(base: &str, budget_chars: usize) -> crate::substrate::Rendered {
     let mut contexte = Context::new("atelier", base);
@@ -169,6 +179,21 @@ mod tests {
         let rendu = brief("base", 300);
         assert!(!rendu.dropped.is_empty());
         assert!(rendu.text.contains("omise"), "la coupe doit être nommée");
+    }
+
+    #[test]
+    fn chaque_lecon_porte_la_version_courante() {
+        // Si une leçon garde « socle v1 » alors que VERSION passe à 2, le run
+        // mentirait sur la connaissance qu'il a utilisée.
+        for section in seed() {
+            assert!(
+                section.source.contains(&format!("socle v{VERSION}")),
+                "{} n'annonce pas la version courante : {}",
+                section.id,
+                section.source
+            );
+        }
+        assert_eq!(version(), VERSION);
     }
 
     #[test]

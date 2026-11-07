@@ -70,7 +70,7 @@ pub use perm::{Operation, PermDesc, PolicyExpr, PrincipalView};
 pub use query::{FilterExpr, FilterOp, Page, Query, QuerySchema, SortDir, SortSpec, Untyped};
 pub use runtime::{Handle, RuntimeDesc, RuntimeLimits};
 pub use topics::{EMITTING_OPERATIONS, EventTopic};
-pub use views::{Surface, ViewDesc, ViewKind};
+pub use views::{Action, Brick, Node, Surface, ViewDesc};
 #[cfg(feature = "wami")]
 pub use wami::{Effect, WamiStatement, statements};
 

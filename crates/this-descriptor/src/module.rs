@@ -40,6 +40,9 @@ pub struct ModuleDescriptor {
     /// Ce que le module veut MONTRER, et où. Déclaratif comme le reste : l'hôte dessine.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub views: Vec<ViewDesc>,
+    /// Actions déclarées, que les briques `button` et `form` référencent par nom.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub actions: Vec<crate::views::Action>,
     /// Declared message keys and default locale (texts live in `MessageBundle`s).
     #[serde(default)]
     pub i18n: I18nDecl,
@@ -75,6 +78,7 @@ impl ModuleDescriptor {
             links: vec![],
             errors: vec![],
             views: vec![],
+            actions: vec![],
             i18n: I18nDecl::default(),
             custom: vec![],
             runtime: None,
