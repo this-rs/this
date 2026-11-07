@@ -37,6 +37,27 @@ pub fn is_service_uuid(service: &str) -> bool {
     }
 }
 
+/// The decoded length of a base64 string, or `None` when it is not base64 at all.
+///
+/// Hand-rolled on purpose: the bridge has no `base64` dependency, and the check needed before
+/// crossing it is the length and the alphabet, not the bytes.
+pub fn base64_len(text: &str) -> Option<usize> {
+    let bytes = text.as_bytes();
+    if bytes.is_empty() || !bytes.len().is_multiple_of(4) {
+        return None;
+    }
+    let padding = bytes.iter().rev().take_while(|b| **b == b'=').count();
+    if padding > 2 {
+        return None;
+    }
+    let body = &text[..text.len() - padding];
+    let alphabet = |b: u8| b.is_ascii_alphanumeric() || b == b'+' || b == b'/';
+    if !body.bytes().all(alphabet) {
+        return None;
+    }
+    Some(bytes.len() / 4 * 3 - padding)
+}
+
 /// The checked arguments of a Bluetooth scan, or the refusal to send back.
 pub fn scan_args(duration_ms: u32, services: &[String]) -> Result<(u32, Vec<String>), Reply> {
     if services.iter().any(|s| !is_service_uuid(s)) {

@@ -10,6 +10,7 @@
 //! Adding a family means adding its module here **and** its methods to that table: a module
 //! that is not in the table answers `not_supported`.
 
+pub mod bluetooth;
 pub mod calendar;
 pub mod camera_mic;
 pub mod clipboard_share;

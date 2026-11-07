@@ -165,3 +165,137 @@ extension ThisDevicePlugin {
     }
   }
 }
+
+// ---- Un contact, une recherche, une création -------------------------------------------
+//
+// `contactsList` ne permettait ni de désigner quelqu'un précisément, ni d'en ajouter un. Ces
+// trois méthodes comblent ce trou, avec les MÊMES clés (`ContactsBridge.keys`) : le pont ne lit
+// jamais un champ que `families/contacts.rs` ne déclare pas.
+
+private struct ContactIdArgs: Decodable {
+  let id: String
+}
+
+private struct ContactsSearchArgs: Decodable {
+  let query: String
+  let limit: Int
+}
+
+private struct ContactsCreateArgs: Decodable {
+  let name: String
+  let emails: [String]
+  let phones: [String]
+}
+
+/// `{"kind":"contact","contact":{…}}` — la même fiche que dans une liste, seule.
+private struct ContactAnswer: Encodable {
+  let kind = "contact"
+  let contact: ContactEntry
+}
+
+extension ContactsBridge {
+  /// One contact, as the Rust side reads it. Missing names are joined as in `fetch`.
+  static func entry(_ contact: CNContact) -> ContactEntry {
+    let name = [contact.givenName, contact.familyName]
+      .filter { !$0.isEmpty }
+      .joined(separator: " ")
+    return ContactEntry(
+      id: contact.identifier,
+      name: name,
+      emails: contact.emailAddresses.map { $0.value as String },
+      phones: contact.phoneNumbers.map { $0.value.stringValue }
+    )
+  }
+}
+
+extension ThisDevicePlugin {
+  /// One contact, by the identifier a list or a search returned.
+  @objc public func contactsGet(_ invoke: Invoke) throws {
+    let args = try invoke.parseArgs(ContactIdArgs.self)
+    guard CNContactStore.authorizationStatus(for: .contacts) == .authorized else {
+      invoke.resolve(Reply.error(code: ReplyCode.notAuthorized))
+      return
+    }
+    DispatchQueue.global(qos: .userInitiated).async {
+      do {
+        let contact = try ContactsBridge.store.unifiedContact(
+          withIdentifier: args.id, keysToFetch: ContactsBridge.keys)
+        invoke.resolve(ContactAnswer(contact: ContactsBridge.entry(contact)))
+      } catch {
+        // Un identifiant que le carnet ne connaît plus : `not_supported`, pas une panne.
+        ContactsDiagnostic.log("get: \(error)")
+        invoke.resolve(Reply.error(code: "not_supported"))
+      }
+    }
+  }
+
+  /// Contacts whose name matches `query`, at most `limit` of them.
+  @objc public func contactsSearch(_ invoke: Invoke) throws {
+    let args = try invoke.parseArgs(ContactsSearchArgs.self)
+    guard (ContactsBridge.limitMin...ContactsBridge.limitMax).contains(args.limit) else {
+      invoke.resolve(Reply.error(code: "internal"))
+      return
+    }
+    guard CNContactStore.authorizationStatus(for: .contacts) == .authorized else {
+      invoke.resolve(Reply.error(code: ReplyCode.notAuthorized))
+      return
+    }
+    let query = args.query.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !query.isEmpty else {
+      invoke.resolve(Reply.error(code: "missing_argument"))
+      return
+    }
+    DispatchQueue.global(qos: .userInitiated).async {
+      let predicate = CNContact.predicateForContacts(matchingName: query)
+      do {
+        let found = try ContactsBridge.store.unifiedContacts(
+          matching: predicate, keysToFetch: ContactsBridge.keys)
+        let entries = found.prefix(args.limit).map { ContactsBridge.entry($0) }
+        invoke.resolve(ContactsAnswer(contacts: Array(entries)))
+      } catch {
+        ContactsDiagnostic.log("search: \(error)")
+        invoke.resolve(Reply.error(code: "internal"))
+      }
+    }
+  }
+
+  /// Adds one contact to the person's book. The container is the default one: choosing an
+  /// account (iCloud, Google…) is the person's business, not this bridge's.
+  @objc public func contactsCreate(_ invoke: Invoke) throws {
+    let args = try invoke.parseArgs(ContactsCreateArgs.self)
+    guard CNContactStore.authorizationStatus(for: .contacts) == .authorized else {
+      invoke.resolve(Reply.error(code: ReplyCode.notAuthorized))
+      return
+    }
+    let name = args.name.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !name.isEmpty else {
+      invoke.resolve(Reply.error(code: "missing_argument"))
+      return
+    }
+    let contact = CNMutableContact()
+    let parts = name.split(separator: " ", maxSplits: 1, omittingEmptySubsequences: true)
+    contact.givenName = parts.first.map(String.init) ?? ""
+    contact.familyName = parts.count > 1 ? String(parts[1]) : ""
+    if !args.emails.isEmpty {
+      contact.emailAddresses = args.emails.map {
+        CNLabeledValue(label: CNLabelHome, value: $0 as NSString)
+      }
+    }
+    if !args.phones.isEmpty {
+      contact.phoneNumbers = args.phones.map {
+        CNLabeledValue(label: CNLabelPhoneNumberMobile, value: CNPhoneNumber(stringValue: $0))
+      }
+    }
+    let save = CNSaveRequest()
+    save.add(contact, toContainerWithIdentifier: nil)
+    DispatchQueue.global(qos: .userInitiated).async {
+      do {
+        try ContactsBridge.store.execute(save)
+        invoke.resolve(ContactAnswer(contact: ContactsBridge.entry(contact)))
+      } catch {
+        ContactsDiagnostic.log("create: \(error)")
+        invoke.resolve(Reply.error(code: "internal"))
+      }
+    }
+  }
+}

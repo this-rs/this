@@ -48,6 +48,9 @@ pub mod wire;
 #[cfg(target_os = "ios")]
 use tauri::plugin::PluginHandle;
 
+#[cfg(target_os = "macos")]
+mod macos;
+
 /// Combien de temps on attend le natif avant de répondre `timeout`. Un capteur peut être
 /// lent, mais une promesse qui ne se résout jamais bloque le tour de l'agent entier.
 #[cfg(target_os = "ios")]
@@ -133,6 +136,25 @@ async fn call_native<R: Runtime>(app: &AppHandle<R>, method: &str, args: &Value)
     if this_platform::device_bridge::capability_of(method, args).is_none() {
         return json!({ "kind": "error", "code": "not_supported" });
     }
+    // Les bornes d'une famille se vérifient ICI, avant que quoi que ce soit n'atteigne le
+    // natif : une écriture Bluetooth de 10 Ko ne doit pas partir chez le périphérique en
+    // morceaux silencieux, et un identifiant inventé ne doit pas devenir un `unavailable`
+    // qui accuse la radio.
+    for refus in [
+        families::bluetooth::check(method, args),
+        families::clipboard_share::check(method, args),
+    ]
+    .into_iter()
+    .flatten()
+    .map(|refus| {
+        serde_json::to_value(refus)
+            .unwrap_or_else(|_| json!({ "kind": "error", "code": "internal" }))
+    }) {
+        note(&format!(
+            "call {method} : refusé avant le natif ({refus:?})"
+        ));
+        return refus;
+    }
     // `try_state`, jamais `state` : un plugin absent doit être une réponse, pas une panique.
     // Une panique dans une commande async laisse la promesse d'invocation non résolue, donc
     // l'appelant attend indéfiniment — mesuré : l'outil de l'agent restait bloqué sans
@@ -161,8 +183,20 @@ async fn call_native<R: Runtime>(app: &AppHandle<R>, method: &str, args: &Value)
     }
 }
 
-/// Off iOS there is no device: a family call is refused as unsupported.
-#[cfg(not(target_os = "ios"))]
+/// On macOS the Swift bridge is called synchronously via C FFI, so it runs on a blocking
+/// thread to avoid stalling the Tokio runtime.
+#[cfg(target_os = "macos")]
+async fn call_native<R: Runtime>(_app: &AppHandle<R>, method: &str, args: &Value) -> Value {
+    let method = method.to_string();
+    let args = args.clone();
+    match tokio::task::spawn_blocking(move || macos::call(&method, &args)).await {
+        Ok(value) => value,
+        Err(_) => json!({ "kind": "error", "code": "internal" }),
+    }
+}
+
+/// Off iOS and macOS there is no device: a family call is refused as unsupported.
+#[cfg(not(any(target_os = "ios", target_os = "macos")))]
 async fn call_native<R: Runtime>(_app: &AppHandle<R>, _method: &str, _args: &Value) -> Value {
     json!({ "kind": "error", "code": "not_supported" })
 }
@@ -292,16 +326,72 @@ pub async fn commands<R: Runtime>(app: &AppHandle<R>) -> Value {
         .unwrap_or_else(|error| json!({ "kind": "error", "message": format!("{error:?}") }))
 }
 
-/// Hors iOS il n'y a pas de runtime natif à interroger. Sans cette version, l'Atelier (qui
-/// appelle `commands` dans son auto-test) ne compilait plus sur l'hôte : `cargo test --lib`
-/// échouait en E0425 — mesuré le 06/11.
-#[cfg(not(target_os = "ios"))]
+/// On macOS, the Swift bridge is present: list the supported methods.
+#[cfg(target_os = "macos")]
+pub async fn commands<R: Runtime>(_app: &AppHandle<R>) -> Value {
+    json!({
+        "kind": "commands",
+        "platform": "macos",
+        "methods": this_platform::device_bridge::METHODS
+    })
+}
+
+/// Hors iOS et macOS il n'y a pas de runtime natif à interroger. Sans cette version,
+/// l'Atelier (qui appelle `commands` dans son auto-test) ne compilait plus sur l'hôte :
+/// `cargo test --lib` échouait en E0425 — mesuré le 06/11.
+#[cfg(not(any(target_os = "ios", target_os = "macos")))]
 pub async fn commands<R: Runtime>(_app: &AppHandle<R>) -> Value {
     json!({ "kind": "error", "code": "not_supported" })
 }
 
-/// Answer one request. Off iOS there is no device: every request is refused as unsupported.
-#[cfg(not(target_os = "ios"))]
+/// On macOS the Swift bridge answers permission states and Bluetooth scans. The gyroscope
+/// does not exist on macOS, and family calls go through [`call_native`] (via [`answer`]).
+#[cfg(target_os = "macos")]
+pub async fn perform<R: Runtime>(_app: &AppHandle<R>, request: &Request) -> Reply {
+    match request {
+        Request::Status { capability } => {
+            let cap_json = serde_json::to_value(capability).unwrap_or_default();
+            let cap_str = cap_json.as_str().unwrap_or("").to_string();
+            match tokio::task::spawn_blocking(move || macos::status(&cap_str)).await {
+                Ok(value) => serde_json::from_value(value).unwrap_or(Reply::Status {
+                    state: PermissionState::Unsupported,
+                }),
+                Err(_) => Reply::Status {
+                    state: PermissionState::Unsupported,
+                },
+            }
+        }
+        // Gyroscope: CoreMotion is not available on macOS.
+        Request::GyroscopeSample => Reply::Error {
+            code: DeviceError::NotSupported,
+        },
+        // Bluetooth: CoreBluetooth IS available on macOS.
+        Request::BluetoothScan {
+            duration_ms,
+            services,
+        } => {
+            let (duration_ms, services) = match wire::scan_args(*duration_ms, services) {
+                Ok(args) => args,
+                Err(refusal) => return refusal,
+            };
+            let args = json!({ "duration_ms": duration_ms, "services": services });
+            match tokio::task::spawn_blocking(move || macos::call("bluetoothScan", &args)).await {
+                Ok(value) => serde_json::from_value(value).unwrap_or(Reply::Error {
+                    code: DeviceError::Internal,
+                }),
+                Err(_) => Reply::Error {
+                    code: DeviceError::Internal,
+                },
+            }
+        }
+        Request::Call { .. } => Reply::Error {
+            code: DeviceError::NotSupported,
+        },
+    }
+}
+
+/// Off iOS and macOS there is no device: every request is refused as unsupported.
+#[cfg(not(any(target_os = "ios", target_os = "macos")))]
 pub async fn perform<R: Runtime>(_app: &AppHandle<R>, request: &Request) -> Reply {
     match request {
         Request::Status { .. } => Reply::Status {

@@ -106,3 +106,81 @@ extension ThisDevicePlugin {
     CaptureStatus.request(capability, invoke)
   }
 }
+
+// ---- La capture ------------------------------------------------------------------------
+//
+// Une photo, un enregistrement audio borné. Le moteur est `CameraCapture.swift` (photo) et
+// `AudioRecorder.swift` (audio), type-checkés seuls contre le SDK iOS ; ici on lit les
+// arguments et on répond, comme les autres familles.
+//
+// Contrat des réponses : `families/camera_mic.rs` (`CaptureReply`). Aucun `reject` : une erreur
+// est une réponse, avec le code du contrat.
+
+/// `cameraCapturePhoto` : la plus grande côté en pixels, et la qualité JPEG (le pont a déjà
+/// borné les deux).
+private struct PhotoArgs: Decodable {
+  let maxPx: Int
+  let quality: Double
+
+  private enum CodingKeys: String, CodingKey {
+    case maxPx = "max_px"
+    case quality
+  }
+}
+
+/// `microphoneStart` : la durée maximale, en millisecondes (bornée par le pont à une minute).
+private struct RecordArgs: Decodable {
+  let maxMs: Int
+
+  private enum CodingKeys: String, CodingKey {
+    case maxMs = "max_ms"
+  }
+}
+
+/// `{"kind":"recording","max_ms":60000}` — l'enregistrement tourne, il s'arrête seul au bout.
+private struct RecordingAnswer: Encodable {
+  let kind = "recording"
+  let max_ms: Int
+}
+
+extension ThisDevicePlugin {
+  /// Prendre une photo. Nécessite `captureRequest` accordé : la réponse est `not_authorized`
+  /// sinon, jamais une boîte de dialogue ouverte au milieu d'un tour.
+  @objc public func cameraCapturePhoto(_ invoke: Invoke) throws {
+    let args = try invoke.parseArgs(PhotoArgs.self)
+    CameraCapture.shared.capture(
+      maxPx: args.maxPx,
+      quality: args.quality,
+      timeoutSeconds: 10
+    ) { result in
+      switch result {
+      case let .success(photo):
+        invoke.resolve(photo)
+      case let .failure(failure):
+        invoke.resolve(Reply.error(code: failure.code))
+      }
+    }
+  }
+
+  /// Démarrer un enregistrement. Rend tout de suite : attendre la fin bloquerait le tour
+  /// entier, et le pont coupe à 10 s.
+  @objc public func microphoneStart(_ invoke: Invoke) throws {
+    let args = try invoke.parseArgs(RecordArgs.self)
+    switch AudioRecorder.shared.start(maxMs: args.maxMs) {
+    case let .success(maxMs):
+      invoke.resolve(RecordingAnswer(max_ms: maxMs))
+    case let .failure(failure):
+      invoke.resolve(Reply.error(code: failure.code))
+    }
+  }
+
+  /// Arrêter l'enregistrement en cours, ou ramasser celui qui s'est arrêté tout seul au bout.
+  @objc public func microphoneStop(_ invoke: Invoke) {
+    switch AudioRecorder.shared.stop() {
+    case let .success(audio):
+      invoke.resolve(audio)
+    case let .failure(failure):
+      invoke.resolve(Reply.error(code: failure.code))
+    }
+  }
+}

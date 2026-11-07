@@ -272,3 +272,151 @@ final class PhotoPickSession: NSObject, PHPickerViewControllerDelegate {
     PhotoPickSession.active[ObjectIdentifier(self)] = nil
   }
 }
+
+// ---- Lire la photothèque : la liste, puis une image précise ----------------------------
+//
+// `photosPick` passe par le sélecteur système : la personne choisit à l'aveugle, et rien ne
+// permet de retrouver une photo déjà citée. Ces deux méthodes lisent la photothèque elle-même
+// (elle exige donc la permission `photos`, pas `photos_pick`) : d'abord des MÉTADONNÉES, puis les
+// octets d'UNE photo, bornés en pixels.
+
+private struct PhotoListArgs: Decodable {
+  let startMs: Int64
+  let endMs: Int64
+  let limit: Int
+
+  private enum CodingKeys: String, CodingKey {
+    case startMs = "start_ms"
+    case endMs = "end_ms"
+    case limit
+  }
+}
+
+private struct PhotoReadArgs: Decodable {
+  let id: String
+  let maxPx: Int
+
+  private enum CodingKeys: String, CodingKey {
+    case id
+    case maxPx = "max_px"
+  }
+}
+
+private struct PhotoEntryOut: Encodable {
+  let id: String
+  let createdMs: Int64
+  let width: Int
+  let height: Int
+  let favorite: Bool
+
+  private enum Key: String, CodingKey {
+    case id, created_ms, width, height, favorite
+  }
+
+  func encode(to encoder: Encoder) throws {
+    var c = encoder.container(keyedBy: Key.self)
+    try c.encode(id, forKey: .id)
+    try c.encode(createdMs, forKey: .created_ms)
+    try c.encode(width, forKey: .width)
+    try c.encode(height, forKey: .height)
+    try c.encode(favorite, forKey: .favorite)
+  }
+}
+
+private struct PhotoAlbumReply: Encodable {
+  let kind = "album"
+  let photos: [PhotoEntryOut]
+}
+
+extension ThisDevicePlugin {
+  /// Les photos dont la date de prise est dans la fenêtre, les plus récentes d'abord.
+  @objc public func photosList(_ invoke: Invoke) throws {
+    let args = try invoke.parseArgs(PhotoListArgs.self)
+    guard #available(iOS 14, *) else {
+      invoke.resolve(PhotosReply.error(code: PhotosCode.notSupported))
+      return
+    }
+    let status = PHPhotoLibrary.authorizationStatus(for: .readWrite)
+    guard status == .authorized || status == .limited else {
+      invoke.resolve(PhotosReply.error(code: ReplyCode.notAuthorized))
+      return
+    }
+    guard args.limit > 0, args.limit <= 100, args.endMs > args.startMs else {
+      invoke.resolve(PhotosReply.error(code: PhotosCode.internalError))
+      return
+    }
+    // Le prédicat porte la fenêtre : PhotoKit ne rend que ce qu'on demande, pas toute la
+    // photothèque qu'on filtrerait ensuite en mémoire.
+    let options = PHFetchOptions()
+    options.predicate = NSPredicate(
+      format: "mediaType == %d AND creationDate >= %@ AND creationDate <= %@",
+      PHAssetMediaType.image.rawValue,
+      Date(timeIntervalSince1970: Double(args.startMs) / 1000),
+      Date(timeIntervalSince1970: Double(args.endMs) / 1000)
+    )
+    options.sortDescriptors = [NSSortDescriptor(key: "creationDate", ascending: false)]
+    options.fetchLimit = args.limit
+    let assets = PHAsset.fetchAssets(with: options)
+    var entries: [PhotoEntryOut] = []
+    entries.reserveCapacity(assets.count)
+    assets.enumerateObjects { asset, _, _ in
+      entries.append(
+        PhotoEntryOut(
+          id: asset.localIdentifier,
+          createdMs: Int64((asset.creationDate?.timeIntervalSince1970 ?? 0) * 1000),
+          width: asset.pixelWidth,
+          height: asset.pixelHeight,
+          favorite: asset.isFavorite
+        ))
+    }
+    invoke.resolve(PhotoAlbumReply(photos: entries))
+  }
+
+  /// Les octets d'une photo, réduits pour que le plus grand côté fasse `max_px` au plus.
+  @objc public func photosRead(_ invoke: Invoke) throws {
+    let args = try invoke.parseArgs(PhotoReadArgs.self)
+    guard #available(iOS 14, *) else {
+      invoke.resolve(PhotosReply.error(code: PhotosCode.notSupported))
+      return
+    }
+    let status = PHPhotoLibrary.authorizationStatus(for: .readWrite)
+    guard status == .authorized || status == .limited else {
+      invoke.resolve(PhotosReply.error(code: ReplyCode.notAuthorized))
+      return
+    }
+    let found = PHAsset.fetchAssets(withLocalIdentifiers: [args.id], options: nil)
+    guard let asset = found.firstObject else {
+      // Un identifiant que la photothèque ne connaît plus (photo supprimée) : refus explicite.
+      invoke.resolve(PhotosReply.error(code: ReplyCode.notSupported))
+      return
+    }
+    let maxPx = max(64, min(args.maxPx, 4096))
+    let size = CGSize(width: maxPx, height: maxPx)
+    let options = PHImageRequestOptions()
+    options.isSynchronous = false
+    options.isNetworkAccessAllowed = true
+    options.deliveryMode = .highQualityFormat
+    options.resizeMode = .exact
+    PHImageManager.default().requestImage(
+      for: asset,
+      targetSize: size,
+      contentMode: .aspectFit,
+      options: options
+    ) { image, info in
+      // PhotoKit peut appeler deux fois (aperçu flou puis image nette) : on ne répond qu'à la
+      // version définitive, sinon la promesse est résolue deux fois.
+      if let degraded = info?[PHImageResultIsDegradedKey] as? Bool, degraded { return }
+      guard let image = image, let data = image.jpegData(compressionQuality: 0.8) else {
+        invoke.resolve(Reply.error(code: ReplyCode.unavailable))
+        return
+      }
+      invoke.resolve(
+        CapturedPhoto(
+          data_base64: data.base64EncodedString(),
+          width: Int(image.size.width.rounded()),
+          height: Int(image.size.height.rounded()),
+          bytes: data.count
+        ))
+    }
+  }
+}

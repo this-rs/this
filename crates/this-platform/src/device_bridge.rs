@@ -146,15 +146,35 @@ pub const METHODS: &[&str] = &[
     "status",
     "gyroscopeSample",
     "bluetoothScan",
+    // Bluetooth beyond the scan: the radio's own state (distinct from the permission), then a
+    // connection and what a connection makes possible. Added after the audit of 08/11/2026 —
+    // a scan was the only thing the bridge could do, so "Bluetooth" meant "look, don't touch".
+    "bluetoothState",
+    "bluetoothConnect",
+    "bluetoothDisconnect",
+    "bluetoothServices",
+    "bluetoothRead",
+    "bluetoothWrite",
+    "bluetoothSubscribe",
+    "bluetoothNotifications",
     // Camera and microphone share one native pair; the capability is read from the arguments.
     "captureStatus",
     "captureRequest",
+    // The capture itself. Before these, "camera" and "microphone" meant the permission and
+    // nothing else: an app that could ask for the camera and never take a picture.
+    "cameraCapturePhoto",
+    "microphoneStart",
+    "microphoneStop",
     "notificationsStatus",
     "notificationsRequest",
     // Poster et retirer une notification locale : même capacité que la permission, donc la
     // même décision de la personne — une notification n'est pas un contournement.
     "notificationsPost",
     "notificationsCancel",
+    // Planifier, et savoir ce qui attend : `notificationsPost` ne sait que poster tout de suite,
+    // ce qui oblige l'app à rester ouverte pour rappeler quelque chose.
+    "notificationsSchedule",
+    "notificationsPending",
     "liveActivityStatus",
     // Démarrer, mettre à jour et terminer une Live Activity : même capacité que la
     // permission. Une activité qui s'afficherait sur l'écran verrouillé sans que la
@@ -165,18 +185,36 @@ pub const METHODS: &[&str] = &[
     "clipboardRead",
     "clipboardWrite",
     "shareText",
+    // Un partage qui n'est pas du texte : un lien, une image, un fichier du conteneur.
+    "shareItem",
     "contactsStatus",
     "contactsRequest",
     "contactsList",
+    // Un contact, une recherche, une création : la liste seule ne permettait ni de désigner
+    // quelqu'un précisément, ni d'en ajouter un.
+    "contactsGet",
+    "contactsSearch",
+    "contactsCreate",
     "photosStatus",
     "photosRequest",
     "photosPick",
+    // Lire la photothèque : des métadonnées d'abord, une image précise ensuite. Le sélecteur
+    // seul ne permettait ni de choisir par date, ni de retrouver une photo déjà citée.
+    "photosList",
+    "photosRead",
     "filesPick",
     "filesRead",
+    // Écrire un fichier produit par l'app : sans ça, une note ou un document ne sort pas.
+    "filesWrite",
     "calendarStatus",
     "calendarRequest",
     "calendarEvents",
     "calendarCreateEvent",
+    // Les calendriers eux-mêmes, puis la modification et la suppression : un événement créé
+    // qu'on ne peut plus corriger est une promesse à moitié tenue.
+    "calendarCalendars",
+    "calendarUpdateEvent",
+    "calendarDeleteEvent",
     "healthStatus",
     "healthRequest",
     "healthQuantitySample",
@@ -194,6 +232,9 @@ pub const METHODS: &[&str] = &[
     "motionActivityStatus",
     "motionActivityRequest",
     "motionStepsSample",
+    // Distance et étages : le podomètre les donne aussi, et « combien de kilomètres » est la
+    // question qu'on pose reellement, pas « combien de pas ».
+    "motionDistance",
 ];
 
 /// The capability a native method needs, derived from the method and its arguments.
@@ -210,32 +251,51 @@ pub fn capability_of(method: &str, args: &Value) -> Option<Capability> {
             return declared_capability(args);
         }
         "gyroscopeSample" => Capability::Gyroscope,
-        "bluetoothScan" => Capability::Bluetooth,
+        "cameraCapturePhoto" => Capability::Camera,
+        "microphoneStart" | "microphoneStop" => Capability::Microphone,
+        "bluetoothScan"
+        | "bluetoothState"
+        | "bluetoothConnect"
+        | "bluetoothDisconnect"
+        | "bluetoothServices"
+        | "bluetoothRead"
+        | "bluetoothWrite"
+        | "bluetoothSubscribe"
+        | "bluetoothNotifications" => Capability::Bluetooth,
         "notificationsStatus"
         | "notificationsRequest"
         | "notificationsPost"
-        | "notificationsCancel" => Capability::Notifications,
+        | "notificationsCancel"
+        | "notificationsSchedule"
+        | "notificationsPending" => Capability::Notifications,
         "liveActivityStatus" | "liveActivityStart" | "liveActivityUpdate" | "liveActivityEnd" => {
             Capability::LiveActivity
         }
         "clipboardRead" | "clipboardWrite" => Capability::Clipboard,
-        "shareText" => Capability::Share,
-        "contactsStatus" | "contactsRequest" | "contactsList" => Capability::Contacts,
+        "shareText" | "shareItem" => Capability::Share,
+        "contactsStatus" | "contactsRequest" | "contactsList" | "contactsGet"
+        | "contactsSearch" | "contactsCreate" => Capability::Contacts,
         "photosStatus" | "photosRequest" => Capability::Photos,
         "photosPick" => Capability::PhotosPick,
-        "filesPick" | "filesRead" => Capability::FilesPick,
-        "calendarStatus" | "calendarRequest" | "calendarEvents" | "calendarCreateEvent" => {
-            Capability::Calendar
-        }
+        "photosList" | "photosRead" => Capability::Photos,
+        "filesPick" | "filesRead" | "filesWrite" => Capability::FilesPick,
+        "calendarStatus"
+        | "calendarRequest"
+        | "calendarEvents"
+        | "calendarCreateEvent"
+        | "calendarCalendars"
+        | "calendarUpdateEvent"
+        | "calendarDeleteEvent" => Capability::Calendar,
         "healthStatus" | "healthRequest" | "healthQuantitySample" => Capability::Health,
         "faceIdStatus" | "faceIdConfirm" => Capability::FaceId,
         "speechStatus" | "speechRequest" | "speechTranscribeFile" => Capability::Speech,
         "nfcStatus" | "nfcReadOnce" => Capability::Nfc,
         "localNetworkStatus" | "localNetworkBrowse" => Capability::LocalNetwork,
         "locationSample" => Capability::Location,
-        "motionActivityStatus" | "motionActivityRequest" | "motionStepsSample" => {
-            Capability::MotionActivity
-        }
+        "motionActivityStatus"
+        | "motionActivityRequest"
+        | "motionStepsSample"
+        | "motionDistance" => Capability::MotionActivity,
         _ => return None,
     };
     Some(capability)
@@ -330,6 +390,14 @@ pub fn complete_args(method: &str, args: &Value, now_ms: f64) -> Value {
     let defaults = match method {
         "contactsList" => serde_json::json!({ "limit": 50 }),
         "photosPick" => serde_json::json!({ "limit": 10 }),
+        // Sans fenêtre : les 30 derniers jours. C'est ce qu'on veut dire par « mes photos
+        // récentes » quand on ne précise rien, et la famille borne à un an.
+        "photosList" => serde_json::json!({
+            "start_ms": (now_ms - 30.0 * jour).max(0.0) as i64,
+            "end_ms": maintenant,
+            "limit": 20,
+        }),
+        "photosRead" => serde_json::json!({ "max_px": 1280 }),
         "filesPick" => serde_json::json!({ "max": 5 }),
         "nfcReadOnce" => serde_json::json!({ "timeout_ms": 15_000 }),
         // Health is per type: `step_count` is the most common, and `healthStatus` already
@@ -347,12 +415,29 @@ pub fn complete_args(method: &str, args: &Value, now_ms: f64) -> Value {
         // A window without bounds means "the last 24 hours": what a caller means by
         // "my events" when it does not say.
         "calendarEvents" => serde_json::json!({ "start_ms": depuis, "end_ms": maintenant }),
-        "motionStepsSample" => serde_json::json!({ "from_ms": depuis, "to_ms": maintenant }),
+        // Une recherche sans borne rendrait le carnet entier : 20 est une réponse, pas un dump.
+        "contactsSearch" => serde_json::json!({ "limit": 20 }),
+        "contactsCreate" => serde_json::json!({ "emails": [], "phones": [] }),
+        "motionStepsSample" | "motionDistance" => {
+            serde_json::json!({ "from_ms": depuis, "to_ms": maintenant })
+        }
         // Camera and location carry their name in their arguments: without it the capability
         // is not even derivable, and the bridge answers `not_supported`.
         "captureRequest" | "captureStatus" => serde_json::json!({ "capability": "camera" }),
+        // 1280 px et une qualité honnête : assez pour lire un document photographié, assez
+        // petit pour traverser le pont sans le saturer.
+        "cameraCapturePhoto" => serde_json::json!({ "max_px": 1280, "quality": 0.8 }),
+        // Une minute au plus : au-delà, ce n'est plus une note vocale, c'est un fichier — et
+        // le pont n'a pas de raison de le porter.
+        "microphoneStart" => serde_json::json!({ "max_ms": 60_000 }),
         "locationRequest" | "locationSample" => serde_json::json!({ "capability": "location" }),
         "bluetoothScan" => serde_json::json!({ "duration_ms": 3000, "services": [] }),
+        // Une connexion qui n'aboutit pas doit rendre la main : la borne est celle du pont
+        // (`NATIVE_TIMEOUT`, 10 s), et la famille la ramène à 15 s au plus.
+        "bluetoothConnect" => serde_json::json!({ "timeout_ms": 10_000 }),
+        // Une écriture attend l'accusé par défaut : « sans réponse » est plus rapide mais ne
+        // dit pas si le périphérique a reçu — un appelant qui le veut le demande.
+        "bluetoothWrite" => serde_json::json!({ "with_response": true }),
         "localNetworkBrowse" => serde_json::json!({ "service_type": "_http._tcp" }),
         _ => serde_json::json!({}),
     };
@@ -373,6 +458,23 @@ pub fn missing_args(method: &str, args: &Value) -> Option<&'static str> {
         "speechTranscribeFile" => &["path"],
         "filesRead" => &["bookmark"],
         "calendarCreateEvent" => &["title", "start_ms", "end_ms"],
+        // Sans identifiant de périphérique, une connexion ne peut viser personne : c'est
+        // l'identifiant que le scan a rendu, et lui seul (CoreBluetooth ne donne pas d'adresse
+        // MAC, et n'en donnera pas).
+        "bluetoothConnect" | "bluetoothDisconnect" | "bluetoothServices" => &["id"],
+        "contactsGet" => &["id"],
+        "contactsSearch" => &["query"],
+        // Sans nom, un contact créé est une fiche vide : le nom est le minimum qui a un sens.
+        "contactsCreate" => &["name"],
+        "calendarUpdateEvent" | "calendarDeleteEvent" => &["id"],
+        "photosRead" => &["id"],
+        // Un rappel sans texte ni délai n'est pas un rappel.
+        "notificationsSchedule" => &["title", "in_ms"],
+        "filesWrite" => &["name", "data_base64"],
+        "bluetoothRead" | "bluetoothSubscribe" | "bluetoothNotifications" => {
+            &["id", "characteristic"]
+        }
+        "bluetoothWrite" => &["id", "characteristic", "data_base64"],
         _ => &[],
     };
     required

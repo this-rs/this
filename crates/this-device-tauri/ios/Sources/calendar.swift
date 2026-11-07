@@ -249,3 +249,152 @@ extension ThisDevicePlugin {
     }
   }
 }
+
+// ---- Les calendriers, la modification, la suppression -----------------------------------
+//
+// Un événement créé qu'on ne peut plus corriger est une promesse à moitié tenue. Ces trois
+// méthodes donnent la liste des calendriers (avec leur droit d'écriture), la modification et la
+// suppression. Mêmes bornes et mêmes contrôles que le reste du fichier.
+
+private struct CalendarIdArgs: Decodable {
+  let id: String
+}
+
+/// Un changement : l'identifiant, et ce qui change. Les champs absents ne changent rien.
+private struct CalendarUpdateArgs: Decodable {
+  let id: String
+  let title: String?
+  let startMs: Int64?
+  let endMs: Int64?
+  let location: String?
+  let notes: String?
+
+  private enum CodingKeys: String, CodingKey {
+    case id, title, location, notes
+    case startMs = "start_ms"
+    case endMs = "end_ms"
+  }
+}
+
+/// `{"kind":"calendars","calendars":[{…}]}`
+private struct CalendarSummariesReply: Encodable {
+  let kind = "calendars"
+  let calendars: [CalendarSummaryOut]
+}
+
+private struct CalendarSummaryOut: Encodable {
+  let id: String
+  let title: String
+  let allows_modifications: Bool
+}
+
+/// `{"kind":"event_updated","event_id":"…"}` / `{"kind":"event_deleted","event_id":"…"}`
+private struct CalendarEventChangedReply: Encodable {
+  let kind: String
+  let event_id: String
+}
+
+extension ThisDevicePlugin {
+  /// Tous les calendriers d'événements, avec leur droit d'écriture.
+  @objc public func calendarCalendars(_ invoke: Invoke) throws {
+    guard #available(iOS 17.0, *) else {
+      invoke.resolve(Reply.error(code: CalendarCode.notSupported))
+      return
+    }
+    guard CalendarAccess.statusName() == "granted" else {
+      invoke.resolve(Reply.error(code: ReplyCode.notAuthorized))
+      return
+    }
+    let calendars = CalendarAccess.store.calendars(for: .event).map {
+      CalendarSummaryOut(
+        id: $0.calendarIdentifier,
+        title: $0.title,
+        allows_modifications: $0.allowsContentModifications
+      )
+    }
+    invoke.resolve(CalendarSummariesReply(calendars: calendars))
+  }
+
+  /// Modifie un événement existant. Un champ absent ne change rien ; au moins un doit changer.
+  @objc public func calendarUpdateEvent(_ invoke: Invoke) throws {
+    let args = try invoke.parseArgs(CalendarUpdateArgs.self)
+    guard #available(iOS 17.0, *) else {
+      invoke.resolve(Reply.error(code: CalendarCode.notSupported))
+      return
+    }
+    guard CalendarAccess.statusName() == "granted" else {
+      invoke.resolve(Reply.error(code: ReplyCode.notAuthorized))
+      return
+    }
+    let store = CalendarAccess.store
+    guard let event = store.event(withIdentifier: args.id) else {
+      // Un identifiant que le calendrier ne connaît plus : `not_supported`, pas une panne.
+      invoke.resolve(Reply.error(code: CalendarCode.notSupported))
+      return
+    }
+    var changed = false
+    if let title = trimmedText(args.title) {
+      event.title = title
+      changed = true
+    }
+    if let startMs = args.startMs {
+      event.startDate = calendarDate(ms: startMs)
+      changed = true
+    }
+    if let endMs = args.endMs {
+      event.endDate = calendarDate(ms: endMs)
+      changed = true
+    }
+    if let location = args.location {
+      event.location = location
+      changed = true
+    }
+    if let notes = args.notes {
+      event.notes = notes
+      changed = true
+    }
+    // Un patch qui ne change rien n'est pas envoyé : la personne verrait une écriture vide.
+    guard changed else {
+      invoke.resolve(Reply.error(code: CalendarCode.internalError))
+      return
+    }
+    // Le résultat doit rester un événement qui finit après son début — vérifié sur l'objet
+    // MODIFIÉ, puisque le pont Rust ne connaît pas les dates stockées.
+    guard event.endDate > event.startDate else {
+      invoke.resolve(Reply.error(code: CalendarCode.internalError))
+      return
+    }
+    do {
+      try store.save(event, span: .thisEvent)
+      invoke.resolve(
+        CalendarEventChangedReply(kind: "event_updated", event_id: args.id))
+    } catch {
+      invoke.resolve(Reply.error(code: CalendarCode.internalError))
+    }
+  }
+
+  /// Supprime un événement (cette occurrence seulement, pas la série).
+  @objc public func calendarDeleteEvent(_ invoke: Invoke) throws {
+    let args = try invoke.parseArgs(CalendarIdArgs.self)
+    guard #available(iOS 17.0, *) else {
+      invoke.resolve(Reply.error(code: CalendarCode.notSupported))
+      return
+    }
+    guard CalendarAccess.statusName() == "granted" else {
+      invoke.resolve(Reply.error(code: ReplyCode.notAuthorized))
+      return
+    }
+    let store = CalendarAccess.store
+    guard let event = store.event(withIdentifier: args.id) else {
+      invoke.resolve(Reply.error(code: CalendarCode.notSupported))
+      return
+    }
+    do {
+      try store.remove(event, span: .thisEvent)
+      invoke.resolve(
+        CalendarEventChangedReply(kind: "event_deleted", event_id: args.id))
+    } catch {
+      invoke.resolve(Reply.error(code: CalendarCode.internalError))
+    }
+  }
+}

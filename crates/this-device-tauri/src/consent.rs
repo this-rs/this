@@ -261,7 +261,7 @@ impl<S: GrantStore> ConsentStore<S> {
         capability: Capability,
         at_ms: u64,
     ) -> Result<(), StoreError> {
-        let mut grants: Vec<Grant> = self
+        let grants: Vec<Grant> = self
             .grants
             .iter()
             .filter(|grant| !grant.is_for(module, capability))
