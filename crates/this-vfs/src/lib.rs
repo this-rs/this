@@ -17,7 +17,6 @@ use this_descriptor::{ContractError, MessageBundle, ModuleDescriptor};
 
 pub mod layout;
 pub mod memory;
-pub mod trust;
 
 // Le banc de conformité est public : chaque backend du contrat le fait tourner,
 // y compris ceux qui vivent dans `this-rs` (fs, obrain). Un contrat partagé
