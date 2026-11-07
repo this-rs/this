@@ -1007,6 +1007,16 @@ fn enums() -> Vec<EnumSchema> {
                 ("main", "The main screen."),
                 ("panel", "A panel beside or over the main content."),
                 ("header", "A thin bar: only small bricks."),
+                (
+                    "widget",
+                    "The home-screen widget: drawn by another host, same bricks.",
+                ),
+                ("lock_widget", "The lock-screen widget (iOS 16+)."),
+                (
+                    "activity",
+                    "A Live Activity: a state the app pushes, not a screen.",
+                ),
+                ("island", "The Dynamic Island layouts of a Live Activity."),
             ],
         ),
         enum_s(

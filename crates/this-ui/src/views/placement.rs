@@ -165,6 +165,31 @@ pub fn frame(surface: Surface) -> Frame {
             role: Some("complementary"),
             label: "Panneau latéral",
         },
+        // Surfaces d'un autre hôte : l'app les montre en aperçu, sans prétendre les rendre.
+        Surface::Widget => Frame {
+            tag: "section",
+            class: "vw-surface vw-host vw-widget",
+            role: None,
+            label: "Widget (aperçu)",
+        },
+        Surface::LockWidget => Frame {
+            tag: "section",
+            class: "vw-surface vw-host vw-lock-widget",
+            role: None,
+            label: "Widget d'écran verrouillé (aperçu)",
+        },
+        Surface::Activity => Frame {
+            tag: "section",
+            class: "vw-surface vw-host vw-activity",
+            role: None,
+            label: "Activité (aperçu)",
+        },
+        Surface::Island => Frame {
+            tag: "section",
+            class: "vw-surface vw-host vw-island",
+            role: None,
+            label: "Dynamic Island (aperçu)",
+        },
     }
 }
 
