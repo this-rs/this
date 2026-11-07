@@ -174,3 +174,37 @@ fn deterministe() {
     let fil = vec![Message::user(gros('a', 900)), Message::user("q")];
     assert_eq!(fit(&fil, 20), fit(&fil, 20));
 }
+
+#[test]
+fn la_borne_epingle_la_question_et_pas_la_relance() {
+    let fil = vec![
+        Message::user("question d'origine"),
+        Message::assistant(gros('a', 800)),
+        Message::hint("relance du harnais"),
+        Message::assistant(gros('b', 800)),
+    ];
+    // Budget serré : seul l'épinglé tient, les assistants partent.
+    let r = fit(&fil, 10);
+    assert!(
+        r.kept
+            .iter()
+            .any(|m| matches!(m, Message::User { content, synthetic: false, .. } if content == "question d'origine")),
+        "la question doit survivre : {:?}",
+        r.kept
+    );
+}
+
+#[test]
+fn sans_question_la_derniere_relance_est_gardee() {
+    let fil = vec![
+        Message::assistant(gros('a', 800)),
+        Message::hint("relance du harnais"),
+        Message::assistant(gros('b', 800)),
+    ];
+    let r = fit(&fil, 10);
+    assert!(
+        r.kept.iter().any(|m| m.is_synthetic()),
+        "mieux que rien : la relance reste : {:?}",
+        r.kept
+    );
+}

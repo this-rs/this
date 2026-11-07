@@ -121,3 +121,52 @@ fn la_borne_de_contexte_mord_et_le_dit() {
         "le fil gardé doit encore contenir la question"
     );
 }
+
+/// Un outil bavard qui ÉCHOUE : chaque échec fait pousser une relance au rôle
+/// utilisateur par le harnais, ce qui est exactement le piège de l'épinglage.
+struct GrosOutilEnEchec;
+
+#[async_trait(?Send)]
+impl Toolbox for GrosOutilEnEchec {
+    fn specs(&self) -> Vec<ToolSpec> {
+        GrosOutil.specs()
+    }
+    async fn call(&self, _: &ToolCall) -> Outcome {
+        Outcome::failed("echec", "y".repeat(400))
+    }
+}
+
+#[test]
+fn la_question_d_origine_survit_a_la_borne_et_aux_relances() {
+    let vus = Rc::new(Grossit(RefCell::new(Vec::new())));
+    let harness = Harness::new(
+        "consigne",
+        Limits {
+            max_tours: 8,
+            max_relances: 8,
+            budget_ms: None,
+            context_budget: Some(400),
+            ..Limits::default()
+        },
+        vus.clone(),
+        Rc::new(GrosOutilEnEchec),
+        |_| {},
+    );
+    let _ = futures::executor::block_on(harness.send("la vraie question"));
+    let vus = vus.0.borrow();
+    // Le test ne prouve rien si aucune relance n'est partie.
+    assert!(
+        vus.iter().any(|fil| fil.iter().any(Message::is_synthetic)),
+        "aucune relance dans les fils envoyés : le test ne mord pas"
+    );
+    // Invariant : chaque fil envoyé au transport contient la question d'origine,
+    // même quand le harnais a poussé des relances au rôle utilisateur.
+    for fil in vus.iter() {
+        assert!(
+            fil.iter().any(
+                |m| matches!(m, Message::User { content, synthetic: false, .. } if content == "la vraie question")
+            ),
+            "la question a été éjectée du fil envoyé : {fil:?}"
+        );
+    }
+}

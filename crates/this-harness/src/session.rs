@@ -1276,7 +1276,7 @@ impl Harness {
                                 text: hint.clone(),
                                 kind,
                             });
-                            self.push(Message::user(hint));
+                            self.push(Message::hint(hint));
                         }
                         continue 'turns;
                     }

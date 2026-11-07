@@ -138,7 +138,8 @@ fn decouper(messages: &[Message]) -> Vec<Unite> {
 ///   fil d'origine (plus les messages épinglés), dans l'ordre d'origine.
 /// - Un appel d'outil et ses réponses partent ou restent **ensemble**.
 /// - Sont épinglés, gardés même au-delà du budget : le **dernier message
-///   utilisateur** (un fil sans la question est pire qu'un dépassement) et les
+///   utilisateur non synthétique** — la question, pas une relance du harnais
+///   (`Message::hint`) ; sans question, la dernière relance (un fil sans la question est pire qu'un dépassement) et les
 ///   messages **système** (les consignes ne sont pas de l'historique). Leur
 ///   coût est décompté du budget d'abord ; si le total dépasse, c'est signalé
 ///   dans [`Dropped::over_budget`].
@@ -146,7 +147,15 @@ fn decouper(messages: &[Message]) -> Vec<Unite> {
 ///   traité comme un message ordinaire.
 pub fn fit(messages: &[Message], budget: usize) -> Fitted {
     let mut unites = decouper(messages);
-    if let Some(derniere) = messages.iter().rposition(Message::is_user)
+    // La question épinglée est le dernier message utilisateur NON synthétique :
+    // le harnais pousse ses relances au rôle utilisateur, et épingler l'une
+    // d'elles laissait la borne retirer la vraie question. Faute de question,
+    // la dernière relance vaut mieux que rien.
+    let derniere_question = messages
+        .iter()
+        .rposition(|m| m.is_user() && !m.is_synthetic())
+        .or_else(|| messages.iter().rposition(Message::is_user));
+    if let Some(derniere) = derniere_question
         && let Some(u) = unites
             .iter_mut()
             .find(|u| u.debut <= derniere && derniere < u.fin)
