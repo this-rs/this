@@ -191,6 +191,11 @@ pub struct HarnessDoc {
     pub max_relances: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub budget_ms: Option<u64>,
+    /// L'approbation affirmée par le document : une **affirmation**, que seule la
+    /// liste de confiance de l'hôte valide (voir [`crate::approval`]). Additif :
+    /// un document d'hier, sans ce champ, reste lisible. Exclu de l'empreinte.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approval: Option<crate::approval::Approval>,
 }
 
 impl HarnessDoc {
@@ -216,21 +221,6 @@ impl HarnessDoc {
         }
         let data = node.get("_data").ok_or("nœud _harness sans _data")?;
         serde_json::from_str(data).map_err(|e| format!("harness illisible: {e}"))
-    }
-
-    /// Empreinte du contenu : **détecte** qu'une composition a changé.
-    ///
-    /// FNV-1a sur le JSON sérialisé, sans dépendance. Ce n'est pas une preuve
-    /// d'autorisation — deux contenus différents ont deux empreintes, mais
-    /// n'importe qui peut en produire une. L'approbation vit dans l'hôte.
-    pub fn fingerprint(&self) -> String {
-        let data = serde_json::to_string(self).unwrap_or_default();
-        let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-        for octet in data.as_bytes() {
-            hash ^= u64::from(*octet);
-            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
-        }
-        format!("{hash:016x}")
     }
 
     /// L'emplacement d'un genre donné, s'il est tenu.
@@ -556,6 +546,7 @@ mod tests {
             max_tours: 12,
             max_relances: 3,
             budget_ms: Some(900_000),
+            approval: None,
         }
     }
 
