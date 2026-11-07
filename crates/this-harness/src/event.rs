@@ -46,15 +46,19 @@ pub enum Event {
     /// discrètement, ou pas du tout.
     ///
     /// `kind` dit de quel genre elle est : l'interface n'a pas à le deviner
-    /// d'après le texte. Absent d'un ancien message, il vaut [`HintKind::Other`].
+    /// d'après le texte. Absent d'un ancien message, `null`, ou d'un genre inconnu, il
+    /// vaut [`HintKind::Other`].
     Hint {
         text: String,
-        #[serde(default)]
+        #[serde(default, deserialize_with = "kind_or_other")]
         kind: HintKind,
     },
     /// Un tour commence.
     Turn { index: u32 },
     /// Un morceau de texte du modèle. S'accumule dans le tour courant.
+    ///
+    /// Jamais vide : un `delta("")` du transport est un signe de vie (appel d'outil ou
+    /// raisonnement en cours) qui réarme la garde de silence sans rien afficher.
     Delta { text: String },
     /// Le modèle demande un outil.
     ToolUse {
@@ -126,6 +130,15 @@ pub enum HintKind {
     #[default]
     #[serde(other)]
     Other,
+}
+
+/// `"kind": null` vaut [`HintKind::Other`], comme un genre absent : un client qui
+/// écrit `null` pour « pas de genre » ne doit pas faire rejeter tout l'événement.
+fn kind_or_other<'de, D>(deserializer: D) -> Result<HintKind, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(Option::<HintKind>::deserialize(deserializer)?.unwrap_or_default())
 }
 
 impl Event {
@@ -217,5 +230,88 @@ impl Outcome {
     /// Vrai si l'appel a été observé **et** n'a rien changé.
     pub fn unchanged(&self) -> bool {
         !self.before.is_empty() && self.before == self.after
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn hint_of(json: &str) -> Event {
+        serde_json::from_str(json).expect("un indice lisible")
+    }
+
+    #[test]
+    fn un_genre_nul_absent_ou_inconnu_vaut_other() {
+        for json in [
+            r#"{"type":"hint","text":"t","kind":null}"#,
+            r#"{"type":"hint","text":"t"}"#,
+            r#"{"type":"hint","text":"t","kind":"demain"}"#,
+        ] {
+            assert_eq!(
+                hint_of(json),
+                Event::Hint {
+                    text: "t".to_string(),
+                    kind: HintKind::Other
+                },
+                "{json}"
+            );
+        }
+        assert_eq!(
+            hint_of(r#"{"type":"hint","text":"t","kind":"retry"}"#),
+            Event::Hint {
+                text: "t".to_string(),
+                kind: HintKind::Retry
+            }
+        );
+    }
+
+    /// La casse du fil ne change pas : `snake_case` pour le genre d'un indice,
+    /// `PascalCase` pour le verdict (forme historique, lue par les journaux).
+    #[test]
+    fn la_casse_du_fil_est_stable() {
+        let event = Event::Stopped {
+            stop: Stop::Done,
+            text: String::new(),
+            turns: 1,
+            ms: 0,
+            code: None,
+            verdict: Some(Verdict::Unverified),
+        };
+        let json = serde_json::to_value(&event).unwrap();
+        assert_eq!(json["verdict"], "Unverified");
+        let hint = serde_json::to_value(Event::Hint {
+            text: "t".to_string(),
+            kind: HintKind::Interrupted,
+        })
+        .unwrap();
+        assert_eq!(hint["kind"], "interrupted");
+    }
+
+    #[test]
+    fn un_verdict_inconnu_se_lit_unknown() {
+        let lu: Verdict = serde_json::from_str("\"Demain\"").unwrap();
+        assert_eq!(lu, Verdict::Unknown);
+        let mut json = serde_json::to_value(Event::Stopped {
+            stop: Stop::Done,
+            text: String::new(),
+            turns: 1,
+            ms: 0,
+            code: None,
+            verdict: Some(Verdict::Proven),
+        })
+        .unwrap();
+        json["verdict"] = serde_json::json!("PasEncore");
+        let stop: Event = serde_json::from_value(json)
+            .expect("un verdict plus récent ne fait pas rejeter l'arrêt");
+        assert!(matches!(
+            stop,
+            Event::Stopped {
+                verdict: Some(Verdict::Unknown),
+                ..
+            }
+        ));
+        let proven: Verdict = serde_json::from_str("\"Proven\"").unwrap();
+        assert_eq!(proven, Verdict::Proven);
     }
 }

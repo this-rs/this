@@ -199,7 +199,13 @@ impl Timer {
                         state.1.take()
                     };
                     if let Some(waker) = waker {
-                        waker.wake();
+                        // Un réveil appartient à l'exécuteur de l'hôte : s'il
+                        // panique, ce fil-ci ne doit pas mourir avec lui, sinon
+                        // plus aucune échéance ne sonne pour personne (ni garde
+                        // de silence, ni pause de relance) dans tout le processus.
+                        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            waker.wake();
+                        }));
                     }
                 }
                 queue = self.queue.lock().unwrap_or_else(|e| e.into_inner());
@@ -252,6 +258,7 @@ impl Future for ThreadSleep {
 }
 
 /// Pourquoi le chien de garde a coupé le flux.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Watch {
     /// Aucun événement pendant ce nombre de millisecondes.
     Silent(u64),
@@ -641,6 +648,9 @@ impl Harness {
 
             let limits = self.with(|s| s.limits.clone());
             let mut run = Run::new(Goal::new(first.text.clone()), limits.max_tours);
+            // Les étapes dont l'effet est inconnu (outil abandonné) : ni échec
+            // ni preuve pour le verdict.
+            let mut unknown: Vec<usize> = Vec::new();
             run.max_relances = limits.max_relances;
             run.declare(toolbox.declarations());
             if let Some(budget) = limits.budget_ms {
@@ -680,10 +690,17 @@ impl Harness {
                         let activity = activity.clone();
                         let clock = clock.clone();
                         Rc::new(move |text: &str| {
+                            // TOUT appel est un signe de vie, y compris un morceau
+                            // vide : c'est ainsi qu'un transport dit « le moteur
+                            // parle » quand il écrit un appel d'outil ou raisonne
+                            // sans texte à montrer. Sans ça, un module écrit dans
+                            // un seul appel d'outil (des minutes de flux) était
+                            // coupé en `Silent` alors que le moteur parlait.
                             activity.set(clock.now_ms());
                             // Un flux annulé ne doit plus rien afficher : sinon le
-                            // texte du tour précédent se mélange au suivant.
-                            if cancel.is_cancelled() {
+                            // texte du tour précédent se mélange au suivant. Un
+                            // signe de vie sans texte n'a rien à afficher non plus.
+                            if cancel.is_cancelled() || text.is_empty() {
                                 return;
                             }
                             gathered.borrow_mut().push_str(text);
@@ -848,7 +865,12 @@ impl Harness {
                     let (outcome, dropped) = self
                         .run_tool(toolbox.as_ref(), call, &mut run, &cancel, &limits)
                         .await;
-                    abandoned |= dropped;
+                    if let Some(why) = dropped {
+                        // Abandonné ne veut pas dire « pas fait » : l'étape
+                        // vient d'être enregistrée, son effet est inconnu.
+                        unknown.push(run.steps.len().saturating_sub(1));
+                        abandoned |= matches!(why, Watch::Abandoned(_));
+                    }
                     self.push(Message::tool(call.id.clone(), outcome.text.clone()));
                 }
 
@@ -907,7 +929,7 @@ impl Harness {
                     }
                 }
             }
-            verdict = Some(run.verdict());
+            verdict = Some(verdict_of(&run, &unknown));
 
             // Un objectif atteint, mais des messages attendent : la discussion
             // continue, elle ne s'arrête pas parce que le modèle a conclu.
@@ -954,7 +976,7 @@ impl Harness {
         run: &mut Run,
         cancel: &Cancel,
         limits: &Limits,
-    ) -> (Outcome, bool) {
+    ) -> (Outcome, Option<Watch>) {
         self.out.emit(Event::ToolUse {
             id: call.id.clone(),
             tool: call.name.clone(),
@@ -962,7 +984,7 @@ impl Harness {
         });
         let started = self.clock.now_ms();
         let declared = toolbox.specs().iter().any(|spec| spec.name == call.name);
-        let mut abandoned = false;
+        let mut abandoned = None;
         let outcome = if !declared {
             unknown_tool(&call.name)
         } else {
@@ -979,7 +1001,7 @@ impl Harness {
             match race(toolbox.call(call), guard).await {
                 Ok(outcome) => outcome,
                 Err(why) => {
-                    abandoned = matches!(why, Watch::Abandoned(_));
+                    abandoned = Some(why);
                     let (hint, outcome) = abandoned_tool(&call.name, why);
                     // Un outil abandonné (plafond dépassé ou annulation sans réponse) : une interruption.
                     self.out.emit(Event::Hint {
@@ -1062,7 +1084,7 @@ fn abandoned_tool(name: &str, why: Watch) -> (String, Outcome) {
     match why {
         Watch::Silent(ms) => (
             format!(
-                "L'outil « {name} » n'a pas rendu la main en {} s : l'appel est abandonné.",
+                "L'outil « {name} » n'a pas rendu la main en {} s : l'appel est abandonné. L'action a pu s'exécuter quand même : vérifie son effet avant de la refaire.",
                 ms / 1000
             ),
             Outcome::failed(
@@ -1075,7 +1097,7 @@ fn abandoned_tool(name: &str, why: Watch) -> (String, Outcome) {
         ),
         Watch::Abandoned(ms) => (
             format!(
-                "L'outil « {name} » n'a pas rendu la main {} s après l'annulation : l'appel est abandonné et la session est libre.",
+                "L'outil « {name} » n'a pas rendu la main {} s après l'annulation : l'appel est abandonné et la session est libre. L'action a pu s'exécuter quand même : vérifie son effet avant de la refaire.",
                 ms / 1000
             ),
             Outcome::refused(
@@ -1193,6 +1215,29 @@ fn step_of(tool: &str, ms: u64, outcome: &Outcome) -> Step {
         step = step.failed(cause.clone());
     }
     step
+}
+
+/// Le verdict du run, sans les étapes dont l'effet est **inconnu**.
+///
+/// Un outil abandonné (plafond dépassé, ou sourd à l'annulation) a pu finir
+/// après coup : son étape porte « délai dépassé » ou « annulé » pour que le
+/// modèle ne la croie pas réussie, mais ce n'est pas un échec *prouvé*. Comptée
+/// telle quelle, elle donnait [`Verdict::Failed`] à un run dont l'action a
+/// peut-être eu lieu. Elle ne compte donc ni comme échec, ni comme preuve, ni
+/// comme reprise d'un refus antérieur : le verdict se lit sur les autres
+/// étapes (au pire [`Verdict::Unverified`], « pas d'avis »).
+fn verdict_of(run: &Run, unknown: &[usize]) -> Verdict {
+    if unknown.is_empty() {
+        return run.verdict();
+    }
+    let known: Vec<Step> = run
+        .steps
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| !unknown.contains(index))
+        .map(|(_, step)| step.clone())
+        .collect();
+    this_agent::evidence::verdict(&known, run.stop == Some(Stop::Done))
 }
 
 /// L'empreinte d'une sortie d'outil : SHA-256 en hexadécimal minuscule.
@@ -1537,5 +1582,320 @@ mod tests {
         let a = SystemClock.nonce();
         assert_eq!(a.len(), 32);
         assert_ne!(a, SystemClock.nonce());
+    }
+
+    // ---- Signes de vie du flux, et outils abandonnés ---------------------------
+
+    use crate::ports::Cancel as Annulation;
+    use crate::wire::{Request as Requete, ToolSpec};
+    use std::cell::RefCell as Cellule;
+    use std::collections::VecDeque;
+
+    /// Une horloge factice : chaque attente avance l'heure de sa durée et cède
+    /// la main une fois.
+    #[derive(Default)]
+    struct Factice {
+        now: Cell<f64>,
+    }
+
+    struct CedeUneFois(bool);
+
+    impl Future for CedeUneFois {
+        type Output = ();
+        fn poll(mut self: Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> Poll<()> {
+            if self.0 {
+                Poll::Ready(())
+            } else {
+                self.0 = true;
+                cx.waker().wake_by_ref();
+                Poll::Pending
+            }
+        }
+    }
+
+    impl Clock for Factice {
+        fn now_ms(&self) -> f64 {
+            self.now.get()
+        }
+        fn sleep(&self, ms: u64) -> Option<Sleep> {
+            self.now.set(self.now.get() + ms as f64);
+            Some(Box::pin(CedeUneFois(false)))
+        }
+    }
+
+    enum Acte {
+        /// Écrit un appel d'outil en `fragments` signes de vie (`delta("")`)
+        /// espacés de `gap_ms`, sans un mot de texte, puis rend l'appel.
+        Fragments { fragments: u32, gap_ms: u64 },
+        /// Se tait pour toujours.
+        Muet,
+        /// Demande l'outil tout de suite.
+        Appel,
+        /// Répond par du texte.
+        Dit(&'static str),
+    }
+
+    struct Moteur {
+        actes: Cellule<VecDeque<Acte>>,
+        clock: Rc<Factice>,
+    }
+
+    fn appel() -> ToolCall {
+        ToolCall {
+            id: "c1".to_string(),
+            name: "write_module".to_string(),
+            arguments: serde_json::json!({"code": "…"}),
+        }
+    }
+
+    #[async_trait(?Send)]
+    impl Transport for Moteur {
+        async fn stream(
+            &self,
+            _request: &Requete,
+            _cancel: &Annulation,
+            delta: Delta,
+        ) -> Result<Reply, Failure> {
+            let acte = self
+                .actes
+                .borrow_mut()
+                .pop_front()
+                .unwrap_or(Acte::Dit("fini"));
+            let avec_appel = Reply {
+                text: String::new(),
+                calls: vec![appel()],
+                finish: Finish::Tools,
+            };
+            match acte {
+                Acte::Fragments { fragments, gap_ms } => {
+                    for _ in 0..fragments {
+                        self.clock.sleep(gap_ms).expect("minuteur").await;
+                        delta("");
+                    }
+                    Ok(avec_appel)
+                }
+                Acte::Muet => std::future::pending().await,
+                Acte::Appel => Ok(avec_appel),
+                Acte::Dit(texte) => {
+                    delta(texte);
+                    Ok(Reply {
+                        text: texte.to_string(),
+                        calls: vec![],
+                        finish: Finish::Stop,
+                    })
+                }
+            }
+        }
+    }
+
+    /// `write_module` répond tout de suite, ou ne rend jamais la main.
+    struct Outils {
+        pendu: bool,
+    }
+
+    #[async_trait(?Send)]
+    impl Toolbox for Outils {
+        fn specs(&self) -> Vec<ToolSpec> {
+            vec![ToolSpec {
+                name: "write_module".to_string(),
+                description: "écrit un module".to_string(),
+                parameters: serde_json::json!({"type": "object"}),
+            }]
+        }
+        async fn call(&self, _call: &ToolCall) -> Outcome {
+            if self.pendu {
+                std::future::pending().await
+            } else {
+                Outcome::ok("écrit").observed("a", "b")
+            }
+        }
+    }
+
+    type Journal = Rc<Cellule<Vec<Event>>>;
+
+    fn harnais(actes: Vec<Acte>, pendu: bool, limits: Limits) -> (Harness, Journal, Rc<Factice>) {
+        let clock = Rc::new(Factice::default());
+        let moteur = Rc::new(Moteur {
+            actes: Cellule::new(actes.into()),
+            clock: clock.clone(),
+        });
+        let journal: Journal = Rc::new(Cellule::new(Vec::new()));
+        let vu = journal.clone();
+        let harness = Harness::new(
+            "tu es l'atelier",
+            limits,
+            moteur,
+            Rc::new(Outils { pendu }),
+            move |event| vu.borrow_mut().push(event),
+        )
+        .with_clock(clock.clone());
+        (harness, journal, clock)
+    }
+
+    fn silence_120s() -> Limits {
+        Limits {
+            silence_ms: Some(120_000),
+            ..Limits::default()
+        }
+    }
+
+    fn arret(journal: &Journal) -> (Stop, Option<Verdict>) {
+        journal
+            .borrow()
+            .iter()
+            .find_map(|event| match event {
+                Event::Stopped { stop, verdict, .. } => Some((stop.clone(), *verdict)),
+                _ => None,
+            })
+            .expect("un arrêt")
+    }
+
+    fn indices(journal: &Journal) -> Vec<String> {
+        journal
+            .borrow()
+            .iter()
+            .filter_map(|event| match event {
+                Event::Hint { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// 400 fragments d'outil espacés d'une seconde : 400 s d'appel d'outil
+    /// (≈ 16384 tokens à 53 tok/s ≈ 309 s), pas un seul morceau de texte.
+    #[test]
+    fn un_appel_d_outil_plus_long_que_le_silence_n_est_pas_coupe() {
+        let (harness, journal, clock) = harnais(
+            vec![Acte::Fragments {
+                fragments: 400,
+                gap_ms: 1_000,
+            }],
+            false,
+            silence_120s(),
+        );
+        let fini = futures::executor::block_on(harness.send("écris le module"));
+        assert_eq!(fini, Running::Ran(Stop::Done), "{:?}", indices(&journal));
+        assert!(clock.now_ms() >= 400_000.0, "{}", clock.now_ms());
+        assert!(
+            journal
+                .borrow()
+                .iter()
+                .any(|e| matches!(e, Event::ToolResult { tool, .. } if tool == "write_module")),
+            "l'appel d'outil est allé au bout et a été joué"
+        );
+        assert!(
+            !journal
+                .borrow()
+                .iter()
+                .any(|e| matches!(e, Event::Delta { text } if text.is_empty())),
+            "un signe de vie ne s'affiche pas"
+        );
+        assert!(
+            !indices(&journal)
+                .iter()
+                .any(|h| h.contains("Aucun événement"))
+        );
+    }
+
+    #[test]
+    fn un_flux_vraiment_muet_est_toujours_coupe() {
+        let (harness, journal, clock) = harnais(vec![Acte::Muet], false, silence_120s());
+        let fini = futures::executor::block_on(harness.send("écris le module"));
+        assert_eq!(fini, Running::Ran(Stop::Interrupted));
+        assert!(
+            indices(&journal)
+                .iter()
+                .any(|h| h.contains("Aucun événement du flux depuis 120 s"))
+        );
+        assert!(clock.now_ms() < 125_000.0, "{}", clock.now_ms());
+    }
+
+    /// Un outil abandonné a pu finir après coup : la personne le lit, et le
+    /// verdict ne compte pas l'étape comme un échec prouvé.
+    #[test]
+    fn un_outil_abandonne_a_un_effet_inconnu_pas_un_echec_prouve() {
+        let limits = Limits {
+            tool_timeout_ms: Some(30_000),
+            ..silence_120s()
+        };
+        let (harness, journal, _) = harnais(vec![Acte::Appel], true, limits);
+        futures::executor::block_on(harness.send("écris le module"));
+        assert!(
+            indices(&journal)
+                .iter()
+                .any(|h| h.contains("en 30 s") && h.contains("a pu s'exécuter quand même")),
+            "{:?}",
+            indices(&journal)
+        );
+        let (_, verdict) = arret(&journal);
+        assert_ne!(
+            verdict,
+            Some(Verdict::Failed),
+            "effet inconnu ≠ échec prouvé"
+        );
+        assert_eq!(verdict, Some(Verdict::Unverified));
+    }
+
+    #[test]
+    fn le_verdict_ignore_l_etape_inconnue_mais_garde_le_reste() {
+        let mut run = Run::new(Goal::new("installe"), 5);
+        run.record(step_of(
+            "write_module",
+            1,
+            &Outcome::failed("délai", "délai dépassé (30 s)"),
+        ));
+        assert_eq!(
+            run.verdict(),
+            Verdict::Failed,
+            "sans le marquage : faux échec"
+        );
+        assert_eq!(verdict_of(&run, &[0]), Verdict::Unverified);
+        // Un vrai refus antérieur reste un refus : l'étape inconnue ne le rattrape pas.
+        let mut run = Run::new(Goal::new("installe"), 5);
+        run.record(step_of(
+            "write_module",
+            1,
+            &Outcome::refused("non", "interdit"),
+        ));
+        run.record(step_of(
+            "write_module",
+            1,
+            &Outcome::failed("délai", "délai dépassé (30 s)"),
+        ));
+        assert_eq!(verdict_of(&run, &[1]), Verdict::Failed);
+    }
+
+    /// Un réveil qui panique ne tue pas le minuteur partagé : l'échéance
+    /// suivante sonne quand même.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn un_reveil_qui_panique_ne_tue_pas_le_minuteur() {
+        use std::sync::Arc;
+        use std::task::{Wake as Reveil, Waker};
+
+        struct Panique;
+        impl Reveil for Panique {
+            fn wake(self: Arc<Self>) {
+                panic!("réveil de test qui panique");
+            }
+        }
+        let piege: Wake = Default::default();
+        piege.lock().unwrap().1 = Some(Waker::from(Arc::new(Panique)));
+        timer().add(std::time::Instant::now(), piege.clone());
+
+        // Une attente ordinaire, après le piège : elle doit sonner.
+        // Dans un autre fil : si le minuteur était mort, l'attente ne rendrait
+        // jamais, et le test échoue au lieu de pendre.
+        let (envoi, recu) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            futures::executor::block_on(ThreadSleep {
+                ms: 50,
+                shared: None,
+            });
+            let _ = envoi.send(());
+        });
+        recu.recv_timeout(std::time::Duration::from_secs(5))
+            .expect("le minuteur a survécu au réveil qui panique");
+        assert!(piege.lock().unwrap().0, "le piège a bien sonné");
     }
 }
