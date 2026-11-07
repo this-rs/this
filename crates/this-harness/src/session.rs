@@ -474,10 +474,13 @@ impl Limits {
             max_tours: doc.max_tours,
             max_relances: doc.max_relances,
             budget_ms: doc.budget_ms,
-            context_budget: Some(CONTEXT_BUDGET),
-            silence_ms: Some(SILENCE_MS),
-            no_progress_ms: Some(NO_PROGRESS_MS),
-            tool_timeout_ms: Some(TOOL_TIMEOUT_MS),
+            // Une borne absente du document garde sa constante : un graphe écrit avant
+            // ces champs se relit comme avant. Une borne PRÉSENTE gagne, y compris
+            // `context_budget` — celle qui évite le refus du moteur.
+            context_budget: doc.context_budget.or(Some(CONTEXT_BUDGET)),
+            silence_ms: doc.silence_ms.or(Some(SILENCE_MS)),
+            no_progress_ms: doc.no_progress_ms.or(Some(NO_PROGRESS_MS)),
+            tool_timeout_ms: doc.tool_timeout_ms.or(Some(TOOL_TIMEOUT_MS)),
         }
     }
 }
@@ -703,6 +706,9 @@ pub struct Harness {
     clock: Rc<dyn Clock>,
     /// Le contexte éphémère de chaque tour : aucun par défaut.
     turn_context: Option<Rc<dyn TurnContext>>,
+    /// Les autorisations d'outils. `None` : le harnais ne fait RIEN respecter
+    /// (voir [`Harness::with_grants`]).
+    grants: Option<this_agent::substrate::Grants>,
     state: Shared<State>,
     out: Out,
 }
@@ -721,6 +727,7 @@ impl Harness {
             policy: Rc::new(DefaultPolicy),
             clock: Rc::new(SystemClock),
             turn_context: None,
+            grants: None,
             state: Rc::new(RefCell::new(State {
                 system: system.into(),
                 limits,
@@ -741,6 +748,11 @@ impl Harness {
     /// change pas, c'est la **donnée** qui décide. Les emplacements `Tools` et
     /// `Guard` sont tenus par qui les a chargés — le harnais ne va pas chercher
     /// un module lui-même (il ne fait aucune entrée/sortie).
+    ///
+    /// **Cette fonction ne vérifie AUCUNE approbation.** Un document dont
+    /// l'approbation est absente, périmée ou non reconnue par l'hôte est construit
+    /// comme un autre. L'hôte doit appeler `HarnessDoc::is_approved` avant, ou —
+    /// chemin sûr, le plus court — passer par [`Harness::from_approved_doc`].
     pub fn from_doc(
         doc: &this_agent::graph::HarnessDoc,
         transport: Rc<dyn Transport>,
@@ -756,6 +768,54 @@ impl Harness {
             sink,
         )
         .with_policy(policy)
+    }
+
+    /// Compose un harness depuis un document **approuvé par l'hôte** : le chemin sûr.
+    ///
+    /// Appelle `doc.is_approved(trusted)` et **refuse de construire** si le verdict
+    /// est `Refuse` : l'`Err` porte ce verdict (avec son motif) et aucun harnais
+    /// n'existe — ni transport touché, ni sortie émise. `trusted` est la liste de
+    /// confiance de l'**hôte** ; l'approbation que le document affirme de lui-même
+    /// n'y suffit pas.
+    pub fn from_approved_doc(
+        doc: &this_agent::graph::HarnessDoc,
+        trusted: &[this_agent::approval::Approval],
+        transport: Rc<dyn Transport>,
+        toolbox: Rc<dyn Toolbox>,
+        policy: Rc<dyn Policy>,
+        sink: impl FnMut(Event) + 'static,
+    ) -> Result<Self, this_agent::substrate::Verdict> {
+        match doc.is_approved(trusted) {
+            this_agent::substrate::Verdict::Allow => {
+                Ok(Self::from_doc(doc, transport, toolbox, policy, sink))
+            }
+            refus => Err(refus),
+        }
+    }
+
+    /// Installe les autorisations d'outils : la porte entre ce qu'un outil **déclare**
+    /// et ce qu'il a le **droit** de faire.
+    ///
+    /// POURQUOI un constructeur chaînable et pas un champ de [`Limits`] : `Limits` est
+    /// une donnée numérique, versionnée et empreintée avec la composition ; des
+    /// autorisations sont une décision de l'hôte (qui a le droit, accordé par qui), qui
+    /// change en cours de vie et ne se lit pas dans le même document. Les mêler ferait
+    /// qu'une relecture de composition efface des droits, ou en accorde.
+    ///
+    /// **Sans cet appel, le harnais ne fait respecter AUCUNE autorisation** : c'est alors
+    /// l'hôte (son `Toolbox`) qui décide seul. Ce n'est PAS un défaut sûr, c'est
+    /// l'absence de garde ; un hôte dont l'agent écrit des modules, donc sa propre
+    /// politique, doit installer des autorisations.
+    ///
+    /// Avec des autorisations, la règle est **fail-closed**, vérifiée avant toute
+    /// exécution : un outil absent de `Toolbox::declarations()` est refusé (une
+    /// déclaration manquante ne vaut pas un droit), et un outil déclaré que
+    /// [`Grants::allows`](this_agent::substrate::Grants::allows) ne permet pas l'est aussi,
+    /// avec le motif de l'autorisation. Le refus est un `Outcome::refused` ordinaire :
+    /// le même événement, la même `Step`, la même relance que tout autre refus.
+    pub fn with_grants(mut self, grants: this_agent::substrate::Grants) -> Self {
+        self.grants = Some(grants);
+        self
     }
 
     /// Remplace la politique de décision du run.
@@ -1349,6 +1409,9 @@ impl Harness {
         let mut abandoned = None;
         let outcome = if !declared {
             unknown_tool(&call.name)
+        } else if let Some(motif) = self.gate(toolbox, &call.name) {
+            // Refusé AVANT exécution : `call_with_cancel` n'est pas appelé.
+            Outcome::refused(format!("outil non autorisé : {}", call.name), motif)
         } else {
             // Un outil n'émet rien pendant qu'il travaille : son « dernier
             // signe de vie » reste son départ, et la garde de silence devient
@@ -1394,6 +1457,27 @@ impl Harness {
 
         run.record(step_of(&call.name, ms, &outcome));
         (outcome, abandoned)
+    }
+
+    /// La porte d'autorisation : le motif du refus, ou `None` si l'appel peut partir.
+    ///
+    /// Sans `grants` installés, rien n'est vérifié (voir [`Harness::with_grants`]).
+    /// Avec, l'effet déclaré est relu à CHAQUE appel (un module peut être installé en
+    /// cours de run, comme pour le routage de `Toolboxes`).
+    fn gate(&self, toolbox: &dyn Toolbox, tool: &str) -> Option<String> {
+        let grants = self.grants.as_ref()?;
+        let declarations = toolbox.declarations();
+        let Some(declaration) = declarations.iter().find(|d| d.tool == tool) else {
+            return Some(format!(
+                "« {tool} » n'a pas de déclaration d'effet : sans elle, aucun droit ne peut lui être accordé"
+            ));
+        };
+        match grants.allows(tool) {
+            this_agent::substrate::Verdict::Allow => None,
+            this_agent::substrate::Verdict::Refuse(why) => {
+                Some(format!("{why} (effet déclaré : {:?})", declaration.effect))
+            }
+        }
     }
 
     /// Ce que le hook de contexte rend pour ce tour. L'état n'est pas emprunté

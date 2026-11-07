@@ -51,6 +51,8 @@ pub mod writer_lease;
 #[cfg(all(feature = "obrain", feature = "wami"))]
 pub use self::annuaire_identites::{AnnuaireIdentites, Utilisateur};
 #[cfg(feature = "obrain")]
+pub use self::harness_graph::HarnessGraph;
+#[cfg(feature = "obrain")]
 pub use self::iam::{AclStamp, IAM_SCHEMA, Iam, IamError, RoleGrant};
 #[cfg(feature = "lmdb")]
 pub use self::lmdb::{LmdbDataService, LmdbLinkService};
