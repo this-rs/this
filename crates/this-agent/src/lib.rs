@@ -23,6 +23,7 @@
 pub mod cite;
 pub mod evidence;
 pub mod graph;
+pub mod masque;
 pub mod playbook;
 pub mod substrate;
 pub mod surface;

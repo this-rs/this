@@ -57,14 +57,33 @@ use this_agent::{Run, Step};
 
 use super::obrain::ObrainStore;
 
+/// Le masque d'un hôte : le texte tel qu'il peut être écrit dans le journal.
+pub type MasqueFn = dyn Fn(&str) -> String + Send + Sync;
+
 /// Les objets du harness, dans un `ObrainStore`.
 pub struct HarnessGraph {
     store: Arc<ObrainStore>,
+    /// Appliqué à tout texte libre d'un run avant écriture (`_goal`, `_out_excerpt`,
+    /// chaînes de `_data`). Sans masque, le journal est écrit tel quel.
+    masque: Option<Arc<MasqueFn>>,
 }
 
 impl HarnessGraph {
     pub fn new(store: Arc<ObrainStore>) -> Self {
-        Self { store }
+        Self {
+            store,
+            masque: None,
+        }
+    }
+
+    /// Le même graphe, dont le journal passe par `masque` avant d'être écrit.
+    ///
+    /// C'est ici, au point d'écriture, que le masque doit vivre : tout chemin qui
+    /// écrit un run (`record_run`, `append_step`) y passe, quel que soit l'appelant.
+    /// Par exemple `this_agent::masque::masquer`.
+    pub fn with_masque(mut self, masque: impl Fn(&str) -> String + Send + Sync + 'static) -> Self {
+        self.masque = Some(Arc::new(masque));
+        self
     }
 
     fn graph(&self) -> Arc<dyn GraphStoreMut> {
@@ -186,8 +205,11 @@ impl HarnessGraph {
     // ---- journal -----------------------------------------------------------
 
     /// Le nœud d'une étape, avec l'empreinte de sa sortie.
-    fn step_node(step: &Step, run_id: &str) -> Node {
-        let mut node = this_agent::graph::step_node(step, run_id);
+    fn step_node(&self, step: &Step, run_id: &str) -> Node {
+        let mut node = match &self.masque {
+            Some(masque) => this_agent::graph::step_node_with(step, run_id, masque.as_ref()),
+            None => this_agent::graph::step_node(step, run_id),
+        };
         // L'empreinte posée par la boucle porte sur la sortie COMPLÈTE ; à défaut
         // (journal ancien, étape écrite à la main), on hache ce que l'étape a
         // gardé — le résumé, possiblement tronqué.
@@ -223,13 +245,17 @@ impl HarnessGraph {
     /// Écrit un run **entier** : son nœud et toutes ses étapes, en un commit.
     pub fn record_run(&self, run: &Run, run_id: &str) -> Result<()> {
         self.writable()?;
-        let nodes = this_agent::graph::run_nodes(run, run_id).map_err(anyhow::Error::msg)?;
+        let nodes = match &self.masque {
+            Some(masque) => this_agent::graph::run_nodes_with(run, run_id, masque.as_ref()),
+            None => this_agent::graph::run_nodes(run, run_id),
+        }
+        .map_err(anyhow::Error::msg)?;
         let Some(head) = nodes.iter().find(|node| node.label == RUN) else {
             return Err(anyhow!("run {run_id} : pas de nœud de tête"));
         };
         let head_id = self.upsert(head)?;
         for step in &run.steps {
-            let step_id = self.upsert(&Self::step_node(step, run_id))?;
+            let step_id = self.upsert(&self.step_node(step, run_id))?;
             self.link_step(head_id, step_id, step.index);
         }
         self.store.commit_wal()
@@ -247,7 +273,7 @@ impl HarnessGraph {
         let head_id = self
             .find(RUN, run_id)
             .ok_or_else(|| anyhow!("run {run_id} inconnu : record_run d'abord"))?;
-        let step_id = self.upsert(&Self::step_node(step, run_id))?;
+        let step_id = self.upsert(&self.step_node(step, run_id))?;
         self.link_step(head_id, step_id, step.index);
         // Le nœud de run suit : `_stop`, `_tours`, et le décompte d'étapes.
         let mut head = self
@@ -261,7 +287,12 @@ impl HarnessGraph {
                 ],
             })
             .ok_or_else(|| anyhow!("run {run_id} inconnu : record_run d'abord"))?;
-        let data = serde_json::to_string(run)?;
+        let data = match &self.masque {
+            Some(masque) => {
+                this_agent::graph::masked_json(run, masque.as_ref()).map_err(anyhow::Error::msg)?
+            }
+            None => serde_json::to_string(run)?,
+        };
         let stop = run
             .stop
             .as_ref()
@@ -616,6 +647,85 @@ mod tests {
                 .and_then(|v| v.as_str().map(str::to_string))
         });
         assert_eq!(hash.as_deref(), Some("abc123"));
+        drop(graph);
+        drop(store);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    const CLE: &str = "sk-ant-api03-abcdefghijklmnopqrstuvwxyz";
+
+    /// Toutes les propriétés textuelles des nœuds `_run` et `_step` du magasin.
+    fn textes_du_journal(graph: &HarnessGraph) -> Vec<String> {
+        let g = graph.graph();
+        let mut out = Vec::new();
+        for label in [RUN, STEP] {
+            for id in g.nodes_by_label(label) {
+                let node = g.get_node(id).unwrap();
+                for key in ["_goal", "_out_excerpt", "_data"] {
+                    if let Some(v) = node.get_property(key).and_then(|v| v.as_str()) {
+                        out.push(v.to_string());
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    fn run_avec_cle() -> Run {
+        let mut run = Run::new(Goal::new(format!("utilise {CLE}")), 6);
+        run.record(Step::tool("lire_env", 2).resume(format!("OPENAI={CLE}")));
+        run
+    }
+
+    #[tokio::test]
+    async fn un_journal_masque_n_ecrit_pas_la_cle() {
+        let dir = temp_dir("masque");
+        let store = ObrainStore::open(&dir).unwrap();
+        let graph = HarnessGraph::new(Arc::clone(&store)).with_masque(this_agent::masque::masquer);
+        let mut run = run_avec_cle();
+        graph.record_run(&run, "run-m").unwrap();
+        run.record(Step::tool("ecrire", 1).failed(format!("refus {CLE}")));
+        graph
+            .append_step(&run, "run-m", run.steps.last().unwrap())
+            .unwrap();
+
+        let textes = textes_du_journal(&graph);
+        assert!(textes.len() >= 5, "{textes:?}");
+        for t in &textes {
+            assert!(!t.contains("abcdefghij"), "secret écrit : {t}");
+        }
+        let excerpt = graph
+            .read_node(&Node {
+                label: STEP,
+                props: vec![
+                    ("_uuid".to_string(), "run-m#0".to_string()),
+                    ("_out_excerpt".to_string(), String::new()),
+                ],
+            })
+            .unwrap();
+        assert_eq!(excerpt.get("_out_excerpt"), Some("OPENAI=[secret masqué]"));
+        let back = graph.load_run("run-m").unwrap().unwrap();
+        assert_eq!(back.goal.text, "utilise [secret masqué]");
+        assert_eq!(back.steps[0].resume, "OPENAI=[secret masqué]");
+        assert_eq!(
+            back.steps[1].failure.as_deref(),
+            Some("refus [secret masqué]")
+        );
+        drop(graph);
+        drop(store);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn sans_masque_le_journal_est_ecrit_tel_quel() {
+        let dir = temp_dir("sans_masque");
+        let store = ObrainStore::open(&dir).unwrap();
+        let graph = HarnessGraph::new(Arc::clone(&store));
+        let run = run_avec_cle();
+        graph.record_run(&run, "run-s").unwrap();
+        let back = graph.load_run("run-s").unwrap().unwrap();
+        assert_eq!(back, run, "le run relu est le run écrit");
+        assert!(textes_du_journal(&graph).iter().any(|t| t.contains(CLE)));
         drop(graph);
         drop(store);
         std::fs::remove_dir_all(&dir).ok();
