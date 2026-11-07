@@ -41,6 +41,9 @@ enum Pace {
     ToolFragments { pieces: usize, gap: Duration },
     /// Only `: keep-alive` comments, one every `gap`, then one piece.
     KeepAlive { comments: usize, gap: Duration },
+    /// `rounds` times: two `: keep-alive` comments then one text piece, one write every
+    /// `gap`. Comments in between, but progress all along.
+    Interleaved { rounds: usize, gap: Duration },
 }
 
 async fn read_request(socket: &mut TcpStream) -> String {
@@ -157,6 +160,21 @@ async fn engine(listener: TcpListener, pace: Pace) {
                         }
                     }
                     let _ = socket.write_all(event("enfin ", None).as_bytes()).await;
+                }
+                Pace::Interleaved { rounds, gap } => {
+                    for index in 0..rounds {
+                        for _ in 0..2 {
+                            tokio::time::sleep(gap).await;
+                            if socket.write_all(b": keep-alive\n\n").await.is_err() {
+                                return;
+                            }
+                        }
+                        tokio::time::sleep(gap).await;
+                        let piece = event(&format!("r{index} "), None);
+                        if socket.write_all(piece.as_bytes()).await.is_err() {
+                            return;
+                        }
+                    }
                 }
             }
             let _ = socket.write_all(event("", Some("stop")).as_bytes()).await;
@@ -328,4 +346,95 @@ async fn keep_alive_comments_are_signs_of_life() {
         text.push_str(&piece);
     }
     assert_eq!(text, "enfin ");
+}
+
+/// B1 (V20 review): comments alone re-arm the HTTP read timeout and any silence guard around
+/// `next()`. Past the no-progress limit without one `data:` event, the turn fails, and says
+/// why — a live shell that only guards silence is bounded too.
+#[tokio::test]
+async fn comments_alone_past_the_no_progress_limit_end_in_an_explicit_error() {
+    // A comment every 300 ms for 6 s; the limit is 1 s, the read timeout 5 s.
+    let client = client_with(
+        Pace::KeepAlive {
+            comments: 20,
+            gap: Duration::from_millis(300),
+        },
+        5,
+    )
+    .await;
+    let started = Instant::now();
+    let mut turn = client
+        .open_turn(TurnRequest::new(conversation()))
+        .await
+        .expect("le tour s'ouvre")
+        .with_no_progress_limit(Duration::from_secs(1));
+    let error = loop {
+        match turn.next().await {
+            Ok(Some(piece)) => {
+                assert!(piece.is_empty(), "aucun texte avant la borne : {piece:?}");
+                assert!(
+                    !turn.last_was_progress(),
+                    "un commentaire n'est pas un progrès"
+                );
+            }
+            Ok(None) => panic!("des commentaires seuls ne doivent pas aller au bout"),
+            Err(error) => break error,
+        }
+    };
+    assert_eq!(error.kind(), this_llm_providers::ErrorKind::Timeout);
+    assert!(
+        error.to_string().contains("aucun progrès depuis 1 s"),
+        "{error}"
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(3),
+        "coupé à la borne, pas à la fin des commentaires ({:?})",
+        started.elapsed()
+    );
+}
+
+/// Comments in between `data:` events do not trip the no-progress limit: each event re-arms
+/// it, and the turn runs to its end even when it lasts longer than the limit.
+#[tokio::test]
+async fn comments_interleaved_with_data_run_to_the_end() {
+    // 4 rounds of (comment, comment, text) 250 ms apart: 3 s in total, an event every 750 ms.
+    let client = client_with(
+        Pace::Interleaved {
+            rounds: 4,
+            gap: Duration::from_millis(250),
+        },
+        5,
+    )
+    .await;
+    let started = Instant::now();
+    let mut turn = client
+        .open_turn(TurnRequest::new(conversation()))
+        .await
+        .expect("le tour s'ouvre")
+        .with_no_progress_limit(Duration::from_millis(1_500));
+    let mut text = String::new();
+    let mut comments = 0usize;
+    while let Some(piece) = turn
+        .next()
+        .await
+        .expect("le moteur progresse : aucune coupure")
+    {
+        if piece.is_empty() && !turn.last_was_progress() {
+            comments += 1;
+        }
+        if !piece.is_empty() {
+            assert!(turn.last_was_progress());
+        }
+        text.push_str(&piece);
+    }
+    assert!(
+        started.elapsed() > Duration::from_millis(2_000),
+        "plus long que la borne de 1,5 s ({:?})",
+        started.elapsed()
+    );
+    assert!(
+        comments >= 4,
+        "les commentaires sont vus comme vie ({comments})"
+    );
+    assert_eq!(text, "r0 r1 r2 r3 ");
 }
