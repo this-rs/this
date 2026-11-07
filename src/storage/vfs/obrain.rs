@@ -21,7 +21,6 @@
 //! Creation is not atomic in obrain (node, then properties): `_path` is set LAST, so a
 //! node interrupted half-way has no path and is ignored by `scan`.
 
-use super::memory::{check_shape, list_flat};
 use super::{
     Precondition, Vfs, VfsCaps, VfsEntry, VfsError, VfsMeta, VfsPath, check_precondition, etag_of,
 };
@@ -31,6 +30,7 @@ use chrono::{DateTime, Utc};
 use obrain_common::types::{NodeId, Value as ObrainValue};
 use obrain_core::graph::GraphStoreMut;
 use std::sync::{Arc, Mutex};
+use this_vfs::memory::{check_shape, list_flat};
 
 /// Label of the VFS file nodes.
 pub const FILE_LABEL: &str = "_vfs_file";
@@ -261,7 +261,7 @@ impl Vfs for ObrainVfs {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::vfs::conformance;
+    use this_vfs::conformance;
 
     #[tokio::test]
     async fn obrain_vfs_conformance() {
