@@ -28,7 +28,7 @@ use std::task::Poll;
 use async_trait::async_trait;
 
 use crate::event::{Event, HintKind, Outcome, Pending, Snapshot};
-use crate::ports::{Cancel, Delta, Toolbox, Transport};
+use crate::ports::{Cancel, Compactor, Delta, Toolbox, Transport};
 use crate::wire::{Code, Failure, Finish, ImagePart, Message, Reply, Request, ToolCall};
 use this_agent::evidence::Verdict;
 use this_agent::{Decision, DefaultPolicy, Goal, Policy, Run, Step, Stop};
@@ -709,6 +709,9 @@ pub struct Harness {
     /// Les autorisations d'outils. `None` : le harnais ne fait RIEN respecter
     /// (voir [`Harness::with_grants`]).
     grants: Option<this_agent::substrate::Grants>,
+    /// Le compacteur, s'il y en a un : aucun par défaut, donc la borne de contexte jette
+    /// (voir [`Harness::with_compactor`]).
+    compactor: Option<Rc<dyn Compactor>>,
     state: Shared<State>,
     out: Out,
 }
@@ -728,6 +731,7 @@ impl Harness {
             clock: Rc::new(SystemClock),
             turn_context: None,
             grants: None,
+            compactor: None,
             state: Rc::new(RefCell::new(State {
                 system: system.into(),
                 limits,
@@ -815,6 +819,61 @@ impl Harness {
     /// le même événement, la même `Step`, la même relance que tout autre refus.
     pub fn with_grants(mut self, grants: this_agent::substrate::Grants) -> Self {
         self.grants = Some(grants);
+        self
+    }
+
+    /// Compose un harnais depuis un document approuvé **et** installe ses autorisations
+    /// d'outils, en un seul appel : LE constructeur d'un hôte qui exécute du code écrit
+    /// par un agent.
+    ///
+    /// POURQUOI un troisième constructeur : [`Harness::from_approved_doc`] vérifie
+    /// l'approbation mais n'installe aucune autorisation, et [`Harness::with_grants`] est
+    /// facultatif — un hôte qui oublie l'un des deux obtient un harnais qui *semble*
+    /// gardé. Ici l'approbation et les autorisations sont des arguments obligatoires :
+    /// impossible d'en omettre une. Sur refus d'approbation, l'`Err` porte le verdict et
+    /// aucun harnais n'existe. Une fois construit, tout outil absent de
+    /// [`Toolbox::declarations`] ou non permis par `grants` est refusé avant d'être
+    /// appelé (règle fail-closed de [`Harness::with_grants`]).
+    ///
+    /// `from_doc` et `from_approved_doc` restent, avec leur doc, pour les hôtes qui
+    /// posent eux-mêmes ces gardes.
+    pub fn from_approved_doc_guarded(
+        doc: &this_agent::graph::HarnessDoc,
+        trusted: &[this_agent::approval::Approval],
+        grants: this_agent::substrate::Grants,
+        transport: Rc<dyn Transport>,
+        toolbox: Rc<dyn Toolbox>,
+        policy: Rc<dyn Policy>,
+        sink: impl FnMut(Event) + 'static,
+    ) -> Result<Self, this_agent::substrate::Verdict> {
+        Self::from_approved_doc(doc, trusted, transport, toolbox, policy, sink)
+            .map(|harness| harness.with_grants(grants))
+    }
+
+    /// Installe un compacteur : quand la borne de contexte devrait retirer des
+    /// messages, on les **résume** d'abord au lieu de les jeter.
+    ///
+    /// POURQUOI : jeter est brutal, et une mémoire courte ne se distingue pas d'une
+    /// invention. Sans compacteur (défaut), rien ne change : `fit` jette et
+    /// [`Event::Trimmed`] le dit.
+    ///
+    /// Avec un compacteur, à chaque tour où `fit` retirerait quelque chose :
+    /// 1. le compacteur reçoit **exactement** ce que `fit` voulait retirer (mêmes
+    ///    frontières de groupe : jamais un appel d'outil coupé de ses réponses), pas un
+    ///    préfixe déjà rogné ;
+    /// 2. son résumé remplace ces messages — **dans le transcript lui-même**, pour ne
+    ///    pas être recalculé (un appel au modèle) à chaque tour. Le résumé est rangé au
+    ///    rôle utilisateur et marqué synthétique (`Message::hint`) : il ne passe pas
+    ///    pour la question ;
+    /// 3. le fil est refait sous le budget et [`Event::Compacted`] le dit.
+    ///
+    /// Repli sur la jetée pure (`fit` seul, [`Event::Trimmed`] émis) si : le compacteur
+    /// échoue ; son message est invalide (vide, `Tool`/`System`, `Assistant` portant des
+    /// appels) ; il ne coûte pas **strictement moins** que ce qu'il remplace (on ne fait
+    /// pas grossir un fil en le compactant) ; le fil gardé ne contiendrait pas le résumé
+    /// (il ne tient pas dans le budget) ; ou le transcript a changé pendant l'attente.
+    pub fn with_compactor(mut self, compactor: Rc<dyn Compactor>) -> Self {
+        self.compactor = Some(compactor);
         self
     }
 
@@ -1039,7 +1098,7 @@ impl Harness {
                 // Le contexte du tour est recalculé ici, à chaque tour : il
                 // dépend de la conversation telle qu'elle est maintenant.
                 let context = self.turn_context().await;
-                let request = self.request(toolbox.as_ref(), context);
+                let request = self.request(toolbox.as_ref(), context).await;
                 // Le temps du TOUR est de l'horloge murale : mesuré autour du
                 // transport, relances comprises, et ajouté au run AVANT la
                 // décision. Sans ça, un modèle lent et des outils instantanés
@@ -1495,8 +1554,8 @@ impl Harness {
     /// Le fit se fait ICI et pas dans `Request` : c'est le harnais qui porte la
     /// borne (elle vient de `Limits`), et un transport qui devrait la respecter
     /// lui-même serait un transport qu'on ne peut pas brancher deux fois.
-    fn request(&self, toolbox: &dyn Toolbox, context: Option<String>) -> Request {
-        let (system, messages, budget) = self.with(|s| {
+    async fn request(&self, toolbox: &dyn Toolbox, context: Option<String>) -> Request {
+        let (system, mut messages, budget) = self.with(|s| {
             (
                 s.system.clone(),
                 s.transcript.clone(),
@@ -1506,6 +1565,10 @@ impl Harness {
         let messages = match budget {
             None => messages,
             Some(budget) => {
+                // D'abord résumer ce qui serait jeté ; en cas d'échec, `fit` seul.
+                if let Some(compacted) = self.compact(&messages, budget).await {
+                    messages = compacted;
+                }
                 let fitted = crate::context::fit(&messages, budget);
                 if !fitted.dropped.is_empty() {
                     // Un oubli se dit, toujours : c'est la différence entre un
@@ -1521,6 +1584,81 @@ impl Harness {
             }
         };
         Request::new(system, messages, toolbox.specs()).with_context(context)
+    }
+
+    /// Tente de résumer ce que `fit` retirerait de `messages` (voir
+    /// [`Harness::with_compactor`]). `Some(fil)` : le fil compacté, déjà écrit dans le
+    /// transcript et annoncé par [`Event::Compacted`]. `None` : rien à compacter, ou
+    /// repli — l'appelant applique alors `fit` au fil d'origine.
+    async fn compact(&self, messages: &[Message], budget: usize) -> Option<Vec<Message>> {
+        let compactor = self.compactor.clone()?;
+        let removal = crate::context::removable(messages, budget);
+        let first = *removal.indices.first()?;
+        let anciens: Vec<Message> = removal
+            .indices
+            .iter()
+            .map(|&i| messages[i].clone())
+            .collect();
+        let summary = match compactor.compact(&anciens).await {
+            Ok(message) => message,
+            Err(_) => return None,
+        };
+        // Le résumé est rangé au rôle utilisateur et synthétique : un `User` non
+        // synthétique, placé après la vraie question, serait épinglé à sa place.
+        let summary = match summary {
+            Message::User {
+                content, images, ..
+            } if !content.trim().is_empty() => Message::User {
+                content,
+                images,
+                synthetic: true,
+            },
+            Message::Assistant { content, calls }
+                if calls.is_empty() && !content.trim().is_empty() =>
+            {
+                Message::Assistant { content, calls }
+            }
+            _ => return None,
+        };
+        let summary_tokens = crate::context::estimate_tokens(std::slice::from_ref(&summary));
+        if summary_tokens >= removal.tokens {
+            return None;
+        }
+        let mut candidate = Vec::with_capacity(messages.len() - removal.indices.len() + 1);
+        for (i, message) in messages.iter().enumerate() {
+            if i == first {
+                candidate.push(summary.clone());
+            }
+            if removal.indices.binary_search(&i).is_err() {
+                candidate.push(message.clone());
+            }
+        }
+        // Le résumé doit survivre au refit : sinon on aurait payé un appel pour rien
+        // et annoncé un remplacement qui n'a pas eu lieu.
+        if !crate::context::fit(&candidate, budget)
+            .kept
+            .contains(&summary)
+        {
+            return None;
+        }
+        // Le transcript a pu bouger pendant l'attente : on n'écrase que ce qu'on a lu.
+        let written = self.with(|s| {
+            if s.transcript == messages {
+                s.transcript = candidate.clone();
+                true
+            } else {
+                false
+            }
+        });
+        if !written {
+            return None;
+        }
+        self.out.emit(Event::Compacted {
+            messages: removal.indices.len(),
+            tokens: removal.tokens,
+            summary_tokens,
+        });
+        Some(candidate)
     }
 
     fn push(&self, message: Message) {

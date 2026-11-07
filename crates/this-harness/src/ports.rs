@@ -1,4 +1,4 @@
-//! Les trois ports par lesquels le harnais touche le monde.
+//! Les ports par lesquels le harnais touche le monde.
 //!
 //! Le harnais ne fait aucune entrée/sortie lui-même : il **appelle**. Un crate
 //! qui décide de son transport est un crate qu'on ne peut pas brancher deux
@@ -10,7 +10,7 @@ use std::rc::Rc;
 use async_trait::async_trait;
 
 use crate::event::Outcome;
-use crate::wire::{Failure, Reply, Request, ToolCall, ToolSpec};
+use crate::wire::{Failure, Message, Reply, Request, ToolCall, ToolSpec};
 use this_agent::evidence::Declaration;
 
 /// Un fragment de texte poussé vers l'interface **pendant** la lecture du flux.
@@ -101,6 +101,24 @@ pub trait Toolbox {
         let _ = cancel;
         self.call(call).await
     }
+}
+
+/// Comment le harnais résume ses tours anciens au lieu de les jeter.
+///
+/// POURQUOI un port et pas un appel interne : résumer demande un modèle, donc
+/// une entrée/sortie, et le harnais n'en fait aucune lui-même. L'hôte branche ce
+/// qu'il veut — le même moteur, un modèle moins cher, une extraction sans modèle.
+///
+/// Contrat : recevoir une suite de messages anciens (jamais coupée au milieu d'un
+/// groupe d'outils) et rendre **un** message qui la remplace. Le harnais ne lui
+/// fait pas confiance : un message vide, un `Tool`/`System`, un `Assistant` qui
+/// porte des appels, ou un résumé qui ne coûte pas strictement moins que ce qu'il
+/// remplace est jeté, et l'on retombe sur la jetée pure (voir `Harness::with_compactor`).
+/// Un échec ne tue jamais le tour.
+#[async_trait(?Send)]
+pub trait Compactor {
+    /// Résume une suite de messages anciens en UN message qui la remplace.
+    async fn compact(&self, anciens: &[Message]) -> Result<Message, Failure>;
 }
 
 /// Un [`Toolbox`] fait de plusieurs : l'hôte apporte ses outils, un module

@@ -146,6 +146,57 @@ fn decouper(messages: &[Message]) -> Vec<Unite> {
 /// - Un `Message::Tool` déjà orphelin dans l'entrée n'est pas réparé : il est
 ///   traité comme un message ordinaire.
 pub fn fit(messages: &[Message], budget: usize) -> Fitted {
+    let (unites, garde) = planifier(messages, budget);
+    let mut kept = Vec::new();
+    let mut dropped = Dropped::default();
+    for (k, u) in unites.iter().enumerate() {
+        if garde[k] {
+            kept.extend_from_slice(&messages[u.debut..u.fin]);
+        } else {
+            dropped.messages += u.fin - u.debut;
+            dropped.tokens = dropped.tokens.saturating_add(u.cout);
+        }
+    }
+    let total = estimate_tokens(&kept);
+    if total > budget {
+        dropped.over_budget = true;
+        dropped.excess = total - budget;
+    }
+    Fitted { kept, dropped }
+}
+
+/// Ce que [`fit`] voudrait retirer, sans rien retirer : les indices des messages
+/// et leur coût estimé.
+///
+/// POURQUOI une fonction à part et pas une copie de la logique : une compaction
+/// doit résumer **exactement** ce que `fit` jetterait, sur les **mêmes frontières
+/// de groupe** (un appel d'outil et ses réponses ne se séparent pas). Deux
+/// découpages qui divergent produiraient un `Tool` orphelin, que le moteur refuse.
+/// Les indices sont croissants ; ils ne sont pas forcément contigus (un message
+/// système épinglé peut s'intercaler entre deux messages retirés).
+pub fn removable(messages: &[Message], budget: usize) -> Removal {
+    let (unites, garde) = planifier(messages, budget);
+    let mut removal = Removal::default();
+    for (k, u) in unites.iter().enumerate() {
+        if !garde[k] {
+            removal.indices.extend(u.debut..u.fin);
+            removal.tokens = removal.tokens.saturating_add(u.cout);
+        }
+    }
+    removal
+}
+
+/// Les messages que [`fit`] retirerait, et ce qu'ils coûtent.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Removal {
+    /// Indices (croissants) dans le fil d'origine.
+    pub indices: Vec<usize>,
+    /// Jetons estimés qu'ils représentent.
+    pub tokens: usize,
+}
+
+/// Le plan commun de [`fit`] et [`removable`] : les unités, et lesquelles sont gardées.
+fn planifier(messages: &[Message], budget: usize) -> (Vec<Unite>, Vec<bool>) {
     let mut unites = decouper(messages);
     // La question épinglée est le dernier message utilisateur NON synthétique :
     // le harnais pousse ses relances au rôle utilisateur, et épingler l'une
@@ -184,21 +235,5 @@ pub fn fit(messages: &[Message], budget: usize) -> Fitted {
         reste -= u.cout;
         garde[k] = true;
     }
-
-    let mut kept = Vec::new();
-    let mut dropped = Dropped::default();
-    for (k, u) in unites.iter().enumerate() {
-        if garde[k] {
-            kept.extend_from_slice(&messages[u.debut..u.fin]);
-        } else {
-            dropped.messages += u.fin - u.debut;
-            dropped.tokens = dropped.tokens.saturating_add(u.cout);
-        }
-    }
-    let total = estimate_tokens(&kept);
-    if total > budget {
-        dropped.over_budget = true;
-        dropped.excess = total - budget;
-    }
-    Fitted { kept, dropped }
+    (unites, garde)
 }
