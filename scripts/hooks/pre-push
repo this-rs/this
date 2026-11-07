@@ -1,0 +1,26 @@
+#!/bin/sh
+#
+# Ce que la CI vérifie, pour le savoir avant de pousser.
+#
+# `cargo fmt` ne suffit PAS : il ne voit que les membres du workspace, alors que le job
+# Rustfmt formate tous les fichiers suivis (`git ls-files '*.rs'`). `this-ui`,
+# `this-client-web`, `this-device-tauri` et `this-shell-tauri` sont hors workspace : une PR
+# est partie rouge alors qu'un `cargo fmt --check` local était vert.
+#
+# Installation : git config core.hooksPath scripts/hooks
+#
+# La version de rustfmt compte aussi. Le dépôt n'épingle aucune toolchain, donc la CI suit
+# le stable du jour ; si ce hook réclame un fichier que tu viens de formater, c'est que ton
+# rustfmt est plus ancien — `rustup update stable`.
+
+set -e
+
+echo "── rustfmt (tous les fichiers suivis, comme la CI) ──"
+git ls-files '*.rs' | xargs rustfmt --edition 2024 --check
+echo "✅ Formatting OK"
+
+echo "── clippy ──"
+cargo clippy -p this-rs --lib --tests --all-features -- -D warnings
+echo "✅ Clippy OK"
+
+echo "🚀 All checks passed, pushing..."
