@@ -502,3 +502,113 @@ fn la_ceinture_borne_le_budget_meme_avec_une_politique_qui_l_ignore() {
         appels.get()
     );
 }
+
+// ---- 8. Une future lâchée pendant un outil ne laisse pas d'appel sans réponse --
+
+/// Premier appel : demande l'outil `attendre`. Les suivants concluent.
+struct DemandeUnOutilPuisConclut(Cell<usize>);
+
+#[async_trait(?Send)]
+impl Transport for DemandeUnOutilPuisConclut {
+    async fn stream(&self, _: &Request, _: &Cancel, _: Delta) -> Result<Reply, Failure> {
+        let n = self.0.get();
+        self.0.set(n + 1);
+        if n == 0 {
+            Ok(Reply {
+                text: String::new(),
+                calls: vec![ToolCall {
+                    id: "c1".into(),
+                    name: "attendre".into(),
+                    arguments: json!({}),
+                }],
+                finish: Finish::Tools,
+            })
+        } else {
+            Ok(Reply {
+                text: "fini".into(),
+                calls: vec![],
+                finish: Finish::Stop,
+            })
+        }
+    }
+}
+
+/// Un outil dont `call` ne rend JAMAIS la main : l'écran est démonté pendant lui.
+struct OutilSansFin;
+
+#[async_trait(?Send)]
+impl Toolbox for OutilSansFin {
+    fn specs(&self) -> Vec<ToolSpec> {
+        vec![ToolSpec {
+            name: "attendre".into(),
+            description: "un outil qui ne rend jamais".into(),
+            parameters: json!({"type": "object"}),
+        }]
+    }
+    async fn call(&self, _: &ToolCall) -> Outcome {
+        std::future::pending::<Outcome>().await
+    }
+}
+
+/// L'invariant du fil : pour chaque `Assistant { calls }`, l'identifiant de
+/// chaque appel a un `Tool` APRÈS lui. Sans cela le moteur refuse la
+/// conversation (« tool_calls without tool messages »).
+fn appels_sans_reponse(fil: &[this_harness::Message]) -> Vec<String> {
+    use this_harness::Message;
+    let mut sans = Vec::new();
+    for (i, message) in fil.iter().enumerate() {
+        if let Message::Assistant { calls, .. } = message {
+            for call in calls {
+                let repondu = fil[i + 1..]
+                    .iter()
+                    .any(|m| matches!(m, Message::Tool { id, .. } if *id == call.id));
+                if !repondu {
+                    sans.push(call.id.clone());
+                }
+            }
+        }
+    }
+    sans
+}
+
+#[test]
+fn une_future_lachee_pendant_un_outil_laisse_un_fil_valide() {
+    let log: Rc<RefCell<Vec<Event>>> = Rc::new(RefCell::new(Vec::new()));
+    let seen = log.clone();
+    let harness = Harness::new(
+        "s",
+        Limits::default(),
+        Rc::new(DemandeUnOutilPuisConclut(Cell::new(0))),
+        Rc::new(OutilSansFin),
+        move |event| seen.borrow_mut().push(event),
+    );
+    let handle = harness.handle();
+
+    let mut future = Box::pin(harness.send("lance l'outil"));
+    assert!(
+        poll_once(&mut future).is_pending(),
+        "l'outil ne rend jamais la main"
+    );
+    drop(future);
+
+    // (a) la place est rendue.
+    assert!(!handle.busy(), "busy doit retomber");
+    // (b) aucun appel sans réponse.
+    let fil = harness.transcript();
+    assert!(
+        appels_sans_reponse(&fil).is_empty(),
+        "appels restés sans réponse : {:?}",
+        appels_sans_reponse(&fil)
+    );
+    // La réparation précède le `Stopped` : l'interface relit le fil à sa réception.
+    assert!(log.borrow().iter().any(|e| matches!(
+        e,
+        Event::Stopped {
+            stop: Stop::Interrupted,
+            ..
+        }
+    )));
+
+    // (c) un second envoi aboutit : le fil est redevenu valide pour le moteur.
+    assert_eq!(run(harness.send("et ensuite")), Running::Ran(Stop::Done));
+}

@@ -625,6 +625,45 @@ impl BusyGuard {
     }
 }
 
+impl BusyGuard {
+    /// Referme les appels d'outils restés sans réponse dans le fil.
+    ///
+    /// `pump` pose `Assistant { calls }` AVANT d'exécuter les outils, et chaque
+    /// `Tool` n'arrive qu'une fois l'outil rendu. Une future lâchée entre les
+    /// deux (écran démonté pendant un outil) laissait des `tool_calls` sans
+    /// `tool` : le moteur refuse alors la conversation suivante, et l'app
+    /// paraît cassée pour de bon alors que `busy` était rendu.
+    ///
+    /// C'est le seul endroit où le harnais répare un fil qu'il a lui-même laissé
+    /// ouvert : le run qui l'aurait fait est mort avec sa future, et aucun autre
+    /// code ne sait qu'il a été abandonné. Les appels restés ouverts reçoivent
+    /// une réponse qui dit l'abandon ; rien d'autre n'est touché. Doit tourner
+    /// AVANT le `Stopped` : l'interface relit le fil à sa réception.
+    fn repair_thread(&self) {
+        // Un état déjà emprunté (puits qui rentre) ne doit pas faire paniquer un
+        // `Drop` : on renonce à réparer plutôt que de paniquer.
+        let Ok(mut state) = self.state.try_borrow_mut() else {
+            return;
+        };
+        let mut ouverts: Vec<String> = Vec::new();
+        for message in &state.transcript {
+            match message {
+                Message::Assistant { calls, .. } => {
+                    ouverts.extend(calls.iter().map(|call| call.id.clone()));
+                }
+                Message::Tool { id, .. } => ouverts.retain(|ouvert| ouvert != id),
+                _ => {}
+            }
+        }
+        for id in ouverts {
+            state.transcript.push(Message::tool(
+                id,
+                "interrompu : le run a été abandonné avant la réponse de l'outil",
+            ));
+        }
+    }
+}
+
 impl Drop for BusyGuard {
     fn drop(&mut self) {
         // La place se rend quoi qu'il arrive — même si la fin normale l'a déjà
@@ -634,6 +673,7 @@ impl Drop for BusyGuard {
         // panique : ré-invoquer le puits ici ferait un double panic. Le cas
         // normal (future lâchée, sans panique) passe toujours.
         if self.armed && !std::thread::panicking() {
+            self.repair_thread();
             let ms = (self.clock.now_ms() - self.started).max(0.0) as u64;
             self.out.emit(Event::Stopped {
                 stop: Stop::Interrupted,
