@@ -382,7 +382,9 @@ final class LocationStream: NSObject, CLLocationManagerDelegate {
     return fixes.count
   }
 
-  func recent(sinceMs: Int64) -> [StreamFixOut] {
+  // Rend `StreamFixOut`, qui est privé : Swift exige que la visibilité suive. L'appel
+  // (ligne 439) est dans ce même fichier.
+  fileprivate func recent(sinceMs: Int64) -> [StreamFixOut] {
     fixes.filter { $0.ts_ms >= sinceMs }
   }
 
@@ -404,10 +406,14 @@ final class LocationStream: NSObject, CLLocationManagerDelegate {
   /// L'autorisation en cours : un flux qui n'a pas le droit de lire ne doit pas être annoncé
   /// comme démarré.
   static func authorized() -> Bool {
-    let status = CLLocationManager().authorizationStatus
+    // `authorizationStatus` en propriété est iOS 14+ : le test de disponibilité doit donc
+    // ENCADRER la lecture, pas la suivre. Avant 14, c'est la méthode de classe.
+    // Les deux branches étaient identiques — la condition ne décidait de rien.
     if #available(iOS 14.0, *) {
+      let status = CLLocationManager().authorizationStatus
       return status == .authorizedWhenInUse || status == .authorizedAlways
     }
+    let status = CLLocationManager.authorizationStatus()
     return status == .authorizedWhenInUse || status == .authorizedAlways
   }
 }

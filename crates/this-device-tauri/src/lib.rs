@@ -140,16 +140,23 @@ async fn call_native<R: Runtime>(app: &AppHandle<R>, method: &str, args: &Value)
     // natif : une écriture Bluetooth de 10 Ko ne doit pas partir chez le périphérique en
     // morceaux silencieux, et un identifiant inventé ne doit pas devenir un `unavailable`
     // qui accuse la radio.
+    // Les deux familles rendent des types DIFFÉRENTS (`BluetoothReply`,
+    // `ClipboardShareReply`) : les mettre dans un même tableau ne compilait pas (E0308,
+    // « expected Option<BluetoothReply> »). On aplatit chacun en JSON dans son propre
+    // élément, si bien que le tableau est homogène.
+    fn refus_en_json<T: serde::Serialize>(refus: Option<T>) -> Option<serde_json::Value> {
+        refus.map(|refus| {
+            serde_json::to_value(refus)
+                .unwrap_or_else(|_| json!({ "kind": "error", "code": "internal" }))
+        })
+    }
     for refus in [
-        families::bluetooth::check(method, args),
-        families::clipboard_share::check(method, args),
+        refus_en_json(families::bluetooth::check(method, args)),
+        refus_en_json(families::clipboard_share::check(method, args)),
     ]
     .into_iter()
     .flatten()
-    .map(|refus| {
-        serde_json::to_value(refus)
-            .unwrap_or_else(|_| json!({ "kind": "error", "code": "internal" }))
-    }) {
+    {
         note(&format!(
             "call {method} : refusé avant le natif ({refus:?})"
         ));

@@ -8,7 +8,9 @@ let package = Package(
   name: "tauri-plugin-this-device",
   platforms: [
     .macOS(.v10_13),
-    .iOS(.v13),
+    // Le code utilise `authorizationStatus` (iOS 14+) et d'autres API du même âge : une
+    // déclaration en v13 ne compilait plus. L'app hôte, elle, cible iOS 17.
+    .iOS(.v14),
   ],
   products: [
     .library(
