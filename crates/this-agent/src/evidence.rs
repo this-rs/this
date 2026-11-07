@@ -360,6 +360,10 @@ struct Trouve {
 }
 
 /// Les affirmations du texte, chacune avec la phrase d'origine.
+///
+/// Sans le run, on ne sait pas si une écriture a été tentée : c'est la lecture **la plus
+/// large** (passif et tournures sans sujet compris), celle d'un run où une écriture a été
+/// tentée. La décision lit le récit contre ses étapes : voir [`claims_in`].
 pub fn claims(said: &str) -> Vec<(Claim, String)> {
     claims_with(said, &[])
 }
@@ -367,20 +371,47 @@ pub fn claims(said: &str) -> Vec<(Claim, String)> {
 /// [`claims`], avec les déclarations de l'hôte : un verbe déclaré (« déployé ») est une
 /// affirmation d'action même s'il n'est pas dans le vocabulaire par défaut.
 pub fn claims_with(said: &str, d: &[Declaration]) -> Vec<(Claim, String)> {
-    detections(said, d)
+    detections(said, d, true)
         .into_iter()
         .map(|(t, phrase, _)| (t.claim, phrase))
         .collect()
 }
 
+/// Les affirmations du texte **lues contre le run** : le passif (« la fiche est créée ») et
+/// les tournures sans sujet (« module créé avec succès ») ne comptent que si le run contient
+/// au moins une écriture tentée — réussie, refusée ou en échec ([`write_attempted`]). Sans
+/// elle, seules comptent les affirmations à la première personne (« j'ai créé », « c'est
+/// fait », "I created") : « la fiche est créée à la première saisie » est une explication.
+pub fn claims_in(said: &str, steps: &[Step], d: &[Declaration]) -> Vec<(Claim, String)> {
+    detections(said, d, write_attempted(steps, d))
+        .into_iter()
+        .map(|(t, phrase, _)| (t.claim, phrase))
+        .collect()
+}
+
+/// Le run contient-il une écriture tentée, quelle qu'en soit l'issue (réussie, refusée, en
+/// échec, sans effet) ? Une lecture ou une note (`remember`) n'en est pas une.
+pub fn write_attempted(steps: &[Step], d: &[Declaration]) -> bool {
+    steps
+        .iter()
+        .any(|etape| matches!(kind_with(etape, d), Kind::Write | Kind::NoEffect))
+}
+
+/// Les écritures refusées ou en échec que le même outil n'a jamais reprises avec succès :
+/// ce qui reste en plan dans le run, même si une autre écriture a réussi depuis.
+pub fn unrepaired_with<'a>(steps: &'a [Step], d: &[Declaration]) -> Vec<&'a Step> {
+    non_repris(steps, d)
+}
+
 /// Chaque affirmation, avec sa phrase d'origine et les mots jugés (pour retrouver un objet
-/// déclaré : « j'ai mis le module en place »).
-fn detections(said: &str, d: Decls) -> Vec<(Trouve, String, Vec<String>)> {
+/// déclaré : « j'ai mis le module en place »). `tentee` : le run contient une écriture
+/// tentée ; sinon le passif et les tournures sans sujet ne sont pas lus ([`claims_in`]).
+fn detections(said: &str, d: Decls, tentee: bool) -> Vec<(Trouve, String, Vec<String>)> {
     phrases(said)
         .into_iter()
         .filter_map(|p| {
             let mots = mots_a_juger(&p)?;
-            claim_of(&mots, d).map(|t| (t, p.texte.trim().to_string(), mots))
+            claim_of(&mots, d, tentee).map(|t| (t, p.texte.trim().to_string(), mots))
         })
         .collect()
 }
@@ -448,7 +479,7 @@ pub fn unproven_with(said: &str, steps: &[Step], d: &[Declaration]) -> Option<Un
     let lecture = reussie(Kind::Read);
     let en_plan = non_repris(steps, d);
 
-    detections(said, d).into_iter().find_map(|(t, phrase, mots)| {
+    detections(said, d, write_attempted(steps, d)).into_iter().find_map(|(t, phrase, mots)| {
         let (manque, etape) = match t.claim {
             Claim::Memory => {
                 if lecture {
@@ -928,16 +959,71 @@ fn verbe_en(mot: &str, d: Decls) -> Option<Trouve> {
     VERBES_EN.contains(&mot).then(|| action(mot)).flatten()
 }
 
-fn claim_of(mots: &[String], d: Decls) -> Option<Trouve> {
+/// La première affirmation de la phrase. `tentee` (une écriture a été tentée dans le run)
+/// ouvre la lecture du passif et des tournures sans sujet : sans écriture, « la fiche est
+/// créée automatiquement » ou « les données sont enregistrées localement » expliquent, elles
+/// n'affirment pas qu'une action vient d'avoir lieu.
+fn claim_of(mots: &[String], d: Decls, tentee: bool) -> Option<Trouve> {
+    let passif = |f: fn(&[String], Decls) -> Option<Trouve>| {
+        if tentee { f(mots, d) } else { None }
+    };
     action_fr(mots, d)
         .or_else(|| fait_fr(mots, d))
-        .or_else(|| passif_fr(mots, d))
+        .or_else(|| passif(passif_fr))
         .or_else(|| memoire_fr(mots))
         .or_else(|| action_en(mots, d))
         .or_else(|| fait_en(mots))
-        .or_else(|| passif_en(mots, d))
-        .or_else(|| sans_sujet(mots, d))
+        .or_else(|| passif(passif_en))
+        .or_else(|| passif(sans_sujet))
         .or_else(|| memoire_en(mots))
+}
+
+/// Les marques d'un présent générique (une règle, pas un événement) : « automatiquement »,
+/// « par défaut », « à chaque », « dès que », "on first use", "by default"…
+const GENERIQUES: &[&[&str]] = &[
+    &["automatiquement"],
+    &["partout"],
+    &["generalement"],
+    &["habituellement"],
+    &["toujours"],
+    &["en", "general"],
+    &["par", "defaut"],
+    &["a", "chaque"],
+    &["chaque", "fois"],
+    &["des", "que"],
+    &["des", "qu'"],
+    &["a", "la", "premiere"],
+    &["au", "premier"],
+    &["lors", "de", "la", "premiere"],
+    &["automatically"],
+    &["always"],
+    &["usually"],
+    &["typically"],
+    &["whenever"],
+    &["everywhere"],
+    &["per"],
+    &["by", "default"],
+    &["on", "first"],
+    &["each", "time"],
+    &["every", "time"],
+];
+
+/// La proposition du mot `i` (entre deux limites, avant **et** après lui) porte-t-elle une
+/// marque de présent générique ? « la fiche est créée automatiquement à la première saisie »,
+/// "each table is created on first use" : une règle expliquée, pas une action rapportée.
+fn generique_autour(mots: &[String], i: usize) -> bool {
+    let debut = debut_proposition(mots, i.min(mots.len()));
+    let fin = mots[debut..]
+        .iter()
+        .position(|m| m == ",")
+        .map_or(mots.len(), |p| debut + p);
+    let prop = &mots[debut..fin];
+    (0..prop.len()).any(|k| {
+        GENERIQUES.iter().any(|motif| {
+            prop.len() >= k + motif.len()
+                && motif.iter().zip(&prop[k..]).all(|(a, b)| *a == b.as_str())
+        })
+    })
 }
 
 /// « j'ai créé », « je l'ai ajoutée », « nous avons relié » ; pas « je n'ai pas créé », pas
@@ -997,7 +1083,7 @@ fn fait_fr(mots: &[String], d: Decls) -> Option<Trouve> {
             "est" if i > 0 && matches!(mots[i - 1].as_str(), "c'" | "c" | "qui") => i - 1,
             _ => continue,
         };
-        if condition_avant(mots, tete, CONDITIONS_FR) {
+        if condition_avant(mots, tete, CONDITIONS_FR) || generique_autour(mots, i) {
             continue;
         }
         let mut k = i + 1;
@@ -1040,7 +1126,7 @@ fn passif_fr(mots: &[String], d: Decls) -> Option<Trouve> {
         if i > 0 && matches!(mots[i - 1].as_str(), "c'" | "c" | "qui" | "y" | "n'" | "ne") {
             continue;
         }
-        if proposition_reservee(mots, i) {
+        if proposition_reservee(mots, i) || generique_autour(mots, i) {
             continue;
         }
         let mut deja = false;
@@ -1064,11 +1150,15 @@ fn passif_fr(mots: &[String], d: Decls) -> Option<Trouve> {
         }
         let Some(p) = mots.get(k) else { continue };
         let suite = mots.get(k + 1).map(String::as_str);
+        // « créée par Paul », « créé par défaut » : un agent nommé ou une règle, pas le
+        // modèle — pour « a été » comme pour « est ».
+        if suite == Some("par") {
+            continue;
+        }
         if !ete {
             let relation = participe(p, &["li", "reli", "connect", "branch"])
                 && matches!(suite, Some("a" | "au" | "aux" | "avec"));
-            let defaut = suite == Some("par") && mots.get(k + 2).is_some_and(|m| m == "defaut");
-            if relation || defaut {
+            if relation {
                 continue;
             }
         }
@@ -1094,7 +1184,7 @@ fn sans_sujet(mots: &[String], d: Decls) -> Option<Trouve> {
         } else {
             None
         };
-        if trouve.is_some() && !proposition_reservee(mots, i) {
+        if trouve.is_some() && !proposition_reservee(mots, i) && !generique_autour(mots, i) {
             return trouve;
         }
     }
@@ -1272,6 +1362,7 @@ fn fait_en(mots: &[String]) -> Option<Trouve> {
         };
         if let Some(t) = tete
             && !condition_avant(mots, t, CONDITIONS_EN)
+            && !generique_autour(mots, i)
         {
             return generique(Claim::Action);
         }
@@ -1292,7 +1383,7 @@ fn passif_en(mots: &[String], d: Decls) -> Option<Trouve> {
             "s" if precedent.is_some_and(|p| p.ends_with('\'')) => true,
             _ => continue,
         };
-        if proposition_reservee(mots, i) {
+        if proposition_reservee(mots, i) || generique_autour(mots, i) {
             continue;
         }
         let mut k = i + 1;
@@ -1318,10 +1409,14 @@ fn passif_en(mots: &[String], d: Decls) -> Option<Trouve> {
         }
         let Some(v) = mots.get(k) else { continue };
         let suite = mots.get(k + 1).map(String::as_str);
+        // "created by Paul" : un agent nommé, pour "has been" comme pour "is".
+        if suite == Some("by") {
+            continue;
+        }
         if etat {
             let relation = matches!(v.as_str(), "linked" | "connected")
                 && matches!(suite, Some("to" | "with"));
-            if relation || suite == Some("by") {
+            if relation {
                 continue;
             }
         }
@@ -2193,5 +2288,141 @@ mod tests {
         assert_eq!(serde_json::from_str::<Declaration>(&json).unwrap(), d);
         let nu: Declaration = serde_json::from_str(r#"{"tool":"recall","effect":"read"}"#).unwrap();
         assert!(nu.words.is_empty());
+    }
+
+    // ------------------------------------------------------------------ Y09 BLOQUANT 1 explications
+
+    /// Les phrases du banc Y09 : seize explications ordinaires de l'Atelier, et une vraie
+    /// affirmation. Mesuré avant correctif : 10 faux positifs sur 16.
+    const BANC_Y09_EXPLICATIONS: &[&str] = &[
+        "Un module est installé dans l'espace de travail : il apporte ses tables, ses vues et ses outils.",
+        "La fiche est créée automatiquement à la première saisie.",
+        "Les données sont enregistrées localement, dans le magasin de l'Atelier.",
+        "La table a été créée par Paul.",
+        "Each table is created on first use.",
+        "Les relations sont ajoutées dans l'onglet Liens.",
+        "Une colonne est ajoutée à chaque nouveau champ.",
+        "Les modules installés apparaissent dans la barre latérale.",
+        "Quand un module est supprimé, ses tables restent dans le graphe.",
+        "Les notes sont enregistrées dans la mémoire de l'agent.",
+        "Les fiches supprimées sont conservées trente jours.",
+        "Le journal est mis à jour dès que tu valides.",
+        "Rows are created per entry in the form.",
+        "Data is stored locally by default.",
+        "The schema has been updated by the module author.",
+        "Les tables ont été ajoutées par le module Stock lors de son installation.",
+    ];
+    const BANC_Y09_AFFIRMATION: &str = "C'est noté.";
+
+    /// Les mêmes explications, mais générales ou attribuées à un agent : elles restent des
+    /// explications même quand le run a tenté une écriture.
+    const BANC_Y09_GENERALES: &[&str] = &[
+        "La fiche est créée automatiquement à la première saisie.",
+        "La table a été créée par Paul.",
+        "Each table is created on first use.",
+        "Une colonne est ajoutée à chaque nouveau champ.",
+        "Quand un module est supprimé, ses tables restent dans le graphe.",
+        "Le journal est mis à jour dès que tu valides.",
+        "Rows are created per entry in the form.",
+        "Data is stored locally by default.",
+        "The schema has been updated by the module author.",
+        "Les tables ont été ajoutées par le module Stock lors de son installation.",
+    ];
+
+    fn refus_d_ecriture() -> Step {
+        Step::tool("row_create", 1).refused("champ obligatoire manquant")
+    }
+
+    #[test]
+    fn banc_y09_explications_sans_ecriture_zero_faux_positif() {
+        let faux: Vec<&str> = BANC_Y09_EXPLICATIONS
+            .iter()
+            .copied()
+            .filter(|t| !claims_in(t, &[], &[]).is_empty() || unproven(t, &[]).is_some())
+            .collect();
+        assert!(faux.is_empty(), "faux positifs : {faux:?}");
+        // La vraie affirmation reste détectée, sans écriture comme après un refus.
+        assert_eq!(
+            claims_in(BANC_Y09_AFFIRMATION, &[], &[])
+                .first()
+                .map(|(c, _)| *c),
+            Some(Claim::Noted)
+        );
+        assert!(unproven(BANC_Y09_AFFIRMATION, &[]).is_some());
+        assert!(unproven(BANC_Y09_AFFIRMATION, &[refus_d_ecriture()]).is_some());
+    }
+
+    #[test]
+    fn banc_y09_explications_generales_ou_attribuees_meme_apres_une_ecriture() {
+        let refus = [refus_d_ecriture()];
+        let faux: Vec<&str> = BANC_Y09_GENERALES
+            .iter()
+            .copied()
+            .filter(|t| !claims_in(t, &refus, &[]).is_empty() || !claims(t).is_empty())
+            .collect();
+        assert!(faux.is_empty(), "faux positifs : {faux:?}");
+    }
+
+    #[test]
+    fn explications_ajoutees_ne_sont_pas_des_affirmations() {
+        for texte in [
+            "Par défaut, chaque fiche est reliée à son module.",
+            "Une sauvegarde est enregistrée automatiquement toutes les cinq minutes.",
+            "Le module Contacts est installé partout où tu ouvres l'Atelier.",
+            "Les liens sont créés quand tu glisses une fiche sur une autre.",
+            "Records are usually deleted after thirty days.",
+        ] {
+            assert!(
+                claims_in(texte, &[], &[]).is_empty() && unproven(texte, &[]).is_none(),
+                "faux positif sur {texte:?} : {:?}",
+                claims_in(texte, &[], &[])
+            );
+        }
+    }
+
+    #[test]
+    fn affirmations_ajoutees_sont_detectees_sans_ecriture() {
+        for texte in [
+            "J'ai créé la fiche Dupont.",
+            "C'est fait : le module est installé.",
+            "Je l'ai ajoutée à la table Clients.",
+            "Nous avons supprimé les doublons.",
+            "I've added the column to the table.",
+        ] {
+            assert!(
+                claims_in(texte, &[], &[])
+                    .iter()
+                    .any(|(c, _)| matches!(c, Claim::Action | Claim::Noted)),
+                "manqué : {texte:?}"
+            );
+            assert!(unproven(texte, &[]).is_some(), "non rappelé : {texte:?}");
+        }
+    }
+
+    /// Le passif compte dès qu'une écriture a été tentée, quelle qu'en soit l'issue ; une
+    /// lecture ou une note n'en est pas une.
+    #[test]
+    fn le_passif_compte_seulement_apres_une_ecriture_tentee() {
+        let texte = "La fiche a été créée.";
+        assert!(claims_in(texte, &[], &[]).is_empty());
+        assert!(claims_in(texte, &[Step::tool("recall", 1)], &[]).is_empty());
+        assert!(claims_in(texte, &[Step::tool("remember", 1)], &[]).is_empty());
+        for etape in [
+            refus_d_ecriture(),
+            Step::tool("row_create", 1).failed("réseau"),
+            Step::tool("row_create", 1).state("0", "1"),
+        ] {
+            assert_eq!(
+                claims_in(texte, std::slice::from_ref(&etape), &[])
+                    .first()
+                    .map(|(c, _)| *c),
+                Some(Claim::Action),
+                "{etape:?}"
+            );
+        }
+        // Après le refus, le passif non prouvé est rappelé, comme avant.
+        assert!(unproven(texte, &[refus_d_ecriture()]).is_some());
+        assert!(unproven("Module créé avec succès.", &[refus_d_ecriture()]).is_some());
+        assert!(unproven("Module créé avec succès.", &[]).is_none());
     }
 }

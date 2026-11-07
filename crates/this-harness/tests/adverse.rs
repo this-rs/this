@@ -297,6 +297,17 @@ impl Bench {
             .count();
         par_hint.max(par_fil)
     }
+    /// Les verdicts portés par les événements `Stopped`.
+    fn verdicts(&self) -> Vec<Option<this_agent::evidence::Verdict>> {
+        self.log
+            .borrow()
+            .iter()
+            .filter_map(|event| match event {
+                Event::Stopped { verdict, .. } => Some(*verdict),
+                _ => None,
+            })
+            .collect()
+    }
     fn tool_results(&self) -> Vec<(String, bool)> {
         self.log
             .borrow()
@@ -728,15 +739,23 @@ fn s7_un_seul_rappel_par_run_meme_s_il_insiste() {
     );
 }
 
+/// Y09 BLOQUANT 1 : sans aucune écriture tentée, rien ne contredit le récit. Il est rappelé
+/// une fois ; s'il insiste, le run finit en `Done` et le verdict `Unverified` (porté par
+/// `Stopped`) dit que rien ne le prouve. Avant : `Failed("récit non vérifié")`, qui faisait
+/// d'une explication honnête un échec.
 #[test]
-fn s7_recit_non_prouve_qui_insiste_sans_outil_n_est_pas_done() {
+fn s7_recit_non_prouve_qui_insiste_sans_outil_finit_done_non_verifie() {
     let model = Model::new(vec![]);
     let b = bench(&model, refuse_install(), Limits::default());
 
     let stop = run(b.harness.send("crée la fiche client"));
 
     assert_eq!(b.rappels(), 1, "{:?}", b.hints());
-    assert_ne!(stop, Running::Ran(Stop::Done));
+    assert_eq!(stop, Running::Ran(Stop::Done));
+    assert_eq!(
+        b.verdicts(),
+        vec![Some(this_agent::evidence::Verdict::Unverified)]
+    );
 }
 
 // ---- 8. Négations et variantes, à travers la boucle --------------------------
@@ -783,19 +802,72 @@ fn s8_variantes_typographiques_apres_refus_ne_sont_jamais_done() {
 
 // ---- 9. Vague 4 : le récit robuste, à travers la boucle ----------------------
 
+/// Y09 BLOQUANT 1 : « récit non vérifié » reste un échec quand une écriture refusée est
+/// restée en plan (jamais reprise par le même outil, même si une autre a réussi).
 #[test]
-fn s9_recit_non_prouve_apres_rappel_dit_non_verifie() {
-    let model = Model::new(vec![]);
-    let b = bench(&model, refuse_install(), Limits::default());
+fn s9_recit_non_prouve_apres_rappel_avec_ecriture_en_plan_dit_non_verifie() {
+    let souvenir = "Je me souviens que tu préfères le thé vert.";
+    let model = Model::new(vec![
+        calls("install_module", "a1"),
+        calls("row_create", "a2"),
+        says(souvenir),
+        says(souvenir),
+    ]);
+    let tools = Tools::new(&["install_module", "row_create"], |call| {
+        match call.name.as_str() {
+            "install_module" => Outcome::refused("refusé", "le module est déjà à la même version"),
+            _ => Outcome::ok("ligne créée").observed("0", "1"),
+        }
+    });
+    let b = bench(&model, tools, Limits::default());
 
-    let stop = run(b.harness.send("crée la fiche client"));
+    let stop = run(b
+        .harness
+        .send("installe le module stock et ajoute la ligne"));
 
     assert!(
         matches!(&stop, Running::Ran(Stop::Failed(m)) if m.contains("récit non vérifié")),
         "{stop:?}"
     );
     assert_eq!(b.rappels(), 1, "{:?}", b.hints());
+    assert_eq!(
+        model.calls(),
+        4,
+        "deux outils, récit + rappel, insistance puis arrêt"
+    );
+}
+
+/// Sans aucune écriture, le même récit non prouvé finit en `Done` + `Unverified`.
+#[test]
+fn s9_recit_non_prouve_apres_rappel_sans_ecriture_est_done_non_verifie() {
+    let model = Model::new(vec![]);
+    let b = bench(&model, refuse_install(), Limits::default());
+
+    let stop = run(b.harness.send("crée la fiche client"));
+
+    assert_eq!(stop, Running::Ran(Stop::Done));
+    assert_eq!(b.rappels(), 1, "{:?}", b.hints());
     assert_eq!(model.calls(), 2, "récit + rappel, insistance puis arrêt");
+    assert_eq!(
+        b.verdicts(),
+        vec![Some(this_agent::evidence::Verdict::Unverified)]
+    );
+}
+
+/// Une explication ordinaire de l'Atelier, sans écriture : ni rappel, ni échec.
+#[test]
+fn s9_explication_au_passif_sans_ecriture_est_done_sans_rappel() {
+    let model = Model::new(vec![says(
+        "Un module est installé dans l'espace de travail : il apporte ses tables. \
+         La fiche est créée automatiquement à la première saisie.",
+    )]);
+    let b = bench(&model, refuse_install(), Limits::default());
+
+    let stop = run(b.harness.send("comment marche un module ?"));
+
+    assert_eq!(stop, Running::Ran(Stop::Done));
+    assert_eq!(b.rappels(), 0, "{:?}", b.hints());
+    assert_eq!(model.calls(), 1);
 }
 
 #[test]

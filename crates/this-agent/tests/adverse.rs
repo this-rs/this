@@ -97,16 +97,39 @@ fn s7_un_seul_rappel_par_run() {
     assert_eq!(tours, 2);
 }
 
+/// Y09 BLOQUANT 1 : sans aucune écriture, aucun fait ne contredit le récit. Il est rappelé
+/// une fois ; s'il insiste, le run finit en `Done` et c'est le verdict `Unverified` qui dit
+/// que rien ne le prouve (avant : `Failed("récit non vérifié")`, qui faisait d'une
+/// explication honnête un échec).
 #[test]
-fn s7_recit_jamais_prouve_sans_outil_n_est_pas_done() {
+fn s7_recit_jamais_prouve_sans_outil_finit_done_non_verifie() {
     let mut r = run();
     r.said("C'est fait.");
     assert_eq!(r.after_turn(true, false), Decision::Continue);
     assert!(r.take_rappel().is_some());
     r.said("C'est fait, vraiment.");
     let decision = r.after_turn(true, false);
+    assert_eq!(decision, Decision::Halt(Stop::Done));
     assert_eq!(r.verdict(), evidence::Verdict::Unverified);
-    assert_ne!(decision, Decision::Halt(Stop::Done));
+    assert_eq!(r.rappels_recit, 1);
+}
+
+/// Le même récit, avec une écriture refusée que le même outil n'a jamais reprise (une
+/// autre écriture a réussi à côté) : là, il reste un échec.
+#[test]
+fn s7_recit_jamais_prouve_avec_une_ecriture_en_plan_n_est_pas_done() {
+    let mut r = run();
+    apres_refus(&mut r);
+    r.record(Step::tool("row_create", 2).state("0", "1"));
+    assert_eq!(r.after_turn(false, true), Decision::Continue);
+    r.said("Je me souviens que tu préfères le thé vert.");
+    assert_eq!(r.after_turn(true, false), Decision::Continue);
+    assert!(r.take_rappel().is_some());
+    r.said("Je me souviens que tu préfères le thé vert.");
+    match r.after_turn(true, false) {
+        Decision::Halt(Stop::Failed(raison)) => assert!(raison.contains("non vérifié"), "{raison}"),
+        autre => panic!("{autre:?}"),
+    }
 }
 
 // ---- 8. Négations et variantes -----------------------------------------------
@@ -205,18 +228,27 @@ fn s8_tournures_sans_sujet_ou_passives() {
 
 // ---- 9. Vague 4 ---------------------------------------------------------------
 
+/// Y09 BLOQUANT 1 : après une écriture refusée, le passif et la tournure sans sujet restent
+/// des affirmations ; le refus en suspens interdit `Done`. Sans aucune écriture, les mêmes
+/// phrases ne déclenchent ni rappel ni échec.
 #[test]
-fn s9_recit_jamais_prouve_l_arret_dit_non_verifie() {
+fn s9_passif_apres_refus_rappelle_sans_ecriture_termine() {
     let mut r = run();
+    apres_refus(&mut r);
     r.said("Le module a été installé.");
     assert_eq!(r.after_turn(true, false), Decision::Continue);
     assert!(r.take_rappel().is_some());
     r.said("Module installé avec succès.");
-    match r.after_turn(true, false) {
-        Decision::Halt(Stop::Failed(raison)) => assert!(raison.contains("non vérifié"), "{raison}"),
-        autre => panic!("{autre:?}"),
-    }
-    assert!(r.stop.as_ref().unwrap().phrase().contains("non vérifié"));
+    assert!(matches!(
+        r.after_turn(true, false),
+        Decision::Halt(Stop::Refused(_))
+    ));
+
+    let mut r = run();
+    r.said("Le module a été installé. Module installé avec succès.");
+    assert_eq!(r.after_turn(true, false), Decision::Halt(Stop::Done));
+    assert_eq!(r.take_rappel(), None);
+    assert_eq!(r.verdict(), evidence::Verdict::Unverified);
 }
 
 #[test]
