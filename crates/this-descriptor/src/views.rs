@@ -140,7 +140,7 @@ pub enum Node {
     /// Une feuille modale : ouverte par-dessus, avec un titre.
     Modal { title: String, children: Vec<Node> },
     /// Une feuille : une brique.
-    Leaf { brick: Brick },
+    Leaf { brick: Box<Brick> },
 }
 
 /// Un onglet de [`Node::Tabs`].
@@ -1025,7 +1025,7 @@ fn collecte<'a>(chemin: &str, noeud: &'a Node, out: &mut Vec<(String, &'a Brick)
                 }
             }
         }
-        Node::Leaf { brick } => out.push((format!("{chemin}.brick"), brick)),
+        Node::Leaf { brick } => out.push((format!("{chemin}.brick"), brick.as_ref())),
     }
 }
 
@@ -1085,7 +1085,12 @@ mod tests {
     }
 
     fn leaf_view(name: &str, json: &str) -> ViewDesc {
-        view(name, Node::Leaf { brick: brick(json) })
+        view(
+            name,
+            Node::Leaf {
+                brick: Box::new(brick(json)),
+            },
+        )
     }
 
     fn codes(m: &ModuleDescriptor) -> Vec<String> {
@@ -1372,16 +1377,16 @@ mod tests {
             Node::Stack {
                 children: vec![
                     Node::Leaf {
-                        brick: brick(r#"{"type":"list","entity":"invoice","label":"titre","subtitle":"id","on_click":{"kind":"open_detail"}}"#),
+                        brick: Box::new(brick(r#"{"type":"list","entity":"invoice","label":"titre","subtitle":"id","on_click":{"kind":"open_detail"}}"#)),
                     },
                     Node::Leaf {
-                        brick: brick(r#"{"type":"button","entity":"invoice","action":"new"}"#),
+                        brick: Box::new(brick(r#"{"type":"button","entity":"invoice","action":"new"}"#)),
                     },
                     Node::Leaf {
-                        brick: brick(r#"{"type":"field","entity":"invoice","field":"titre","input":"reference","target":"conversation"}"#),
+                        brick: Box::new(brick(r#"{"type":"field","entity":"invoice","field":"titre","input":"reference","target":"conversation"}"#)),
                     },
                     Node::Leaf {
-                        brick: brick(r#"{"type":"relation","entity":"invoice","link":"invoice_conversation","mode":"edit"}"#),
+                        brick: Box::new(brick(r#"{"type":"relation","entity":"invoice","link":"invoice_conversation","mode":"edit"}"#)),
                     },
                 ],
             },
