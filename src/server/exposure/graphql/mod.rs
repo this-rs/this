@@ -206,7 +206,11 @@ fn error_object(
 ) -> serde_json::Value {
     for cause in e.chain() {
         if let Some(c) = cause.downcast_ref::<crate::descriptor::ContractError>() {
-            let c = localize_in(host, headers, query, c.clone());
+            // A module's code is resolved against its DECLARATION: the declared kind decides
+            // `extensions.code`, and a code no loaded module declares is a named refusal.
+            let set = host.descriptors();
+            let c = crate::server::exposure::module_errors::normalize(&set, c.clone());
+            let c = localize_in(host, headers, query, c);
             return serde_json::json!({ "message": c.message, "extensions": c.graphql_extensions() });
         }
     }

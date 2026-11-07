@@ -8,6 +8,15 @@ pub mod rest;
 // Export of the module descriptors and derived documents (`/_this/*`).
 pub mod descriptor;
 
+// Export of the INTERFACE a module declares: its views, the entities they read, its actions
+// (`/_this/views`, and `_thisViews` on the GraphQL Query root). Read from the live catalog.
+pub mod views;
+
+// The error CODES a module declares, mapped to each surface (`/_this/errors`), and the one
+// rule every surface applies to them: the declaration decides the status, an undeclared code
+// is a NAMED refusal (never an anonymous 500).
+pub mod module_errors;
+
 #[cfg(feature = "graphql")]
 pub mod graphql;
 

@@ -68,8 +68,15 @@ fn query_metadata(md: &tonic::metadata::MetadataMap, key: &str) -> Result<Option
 /// Status of a store failure: a `ContractError` anywhere in the chain (validation, business
 /// code) keeps its code and kind (`this.validation.failed` → `INVALID_ARGUMENT`); anything
 /// else is `this.internal` (`INTERNAL`, logged, its text never sent to the client).
-fn status_from_anyhow(e: &anyhow::Error) -> Status {
-    to_status(crate::core::errors::from_anyhow(e))
+///
+/// A module's own codes are resolved against its DECLARATION
+/// ([`module_errors::normalize`](crate::server::exposure::module_errors::normalize)): the
+/// declared kind decides the status, and a code no loaded module declares is a named refusal
+/// instead of a status nobody can justify.
+fn status_from_anyhow(host: &ServerHost, e: &anyhow::Error) -> Status {
+    to_status(crate::server::exposure::module_errors::normalize_anyhow(
+        host, e,
+    ))
 }
 
 /// `INVALID_ARGUMENT` `this.transport.bad_request` with `reason`.
@@ -172,7 +179,7 @@ impl EntityServiceImpl {
         let json = fetcher
             .fetch_as_json(&entity_id)
             .await
-            .map_err(|e| status_from_anyhow(&e))?;
+            .map_err(|e| status_from_anyhow(&self.host, &e))?;
 
         Ok(Response::new(EntityResponse {
             data: Some(json_to_struct(&json)),
@@ -207,7 +214,7 @@ impl EntityServiceImpl {
             let (rows, total) = fetcher
                 .list_query(&q)
                 .await
-                .map_err(|e| status_from_anyhow(&e))?;
+                .map_err(|e| status_from_anyhow(&self.host, &e))?;
             return Ok(Response::new(ListEntitiesResponse {
                 entities: rows.iter().map(json_to_struct).collect(),
                 total: i32::try_from(total).unwrap_or(i32::MAX),
@@ -224,7 +231,7 @@ impl EntityServiceImpl {
         let entities = fetcher
             .list_as_json(limit, offset)
             .await
-            .map_err(|e| status_from_anyhow(&e))?;
+            .map_err(|e| status_from_anyhow(&self.host, &e))?;
 
         let total = entities.len() as i32;
         let proto_entities = entities.iter().map(json_to_struct).collect();
@@ -253,7 +260,7 @@ impl EntityServiceImpl {
         let result = creator
             .create_from_json(data)
             .await
-            .map_err(|e| status_from_anyhow(&e))?;
+            .map_err(|e| status_from_anyhow(&self.host, &e))?;
 
         Ok(Response::new(EntityResponse {
             data: Some(json_to_struct(&result)),
@@ -286,7 +293,7 @@ impl EntityServiceImpl {
         let result = creator
             .update_from_json(&entity_id, data)
             .await
-            .map_err(|e| status_from_anyhow(&e))?;
+            .map_err(|e| status_from_anyhow(&self.host, &e))?;
 
         Ok(Response::new(EntityResponse {
             data: Some(json_to_struct(&result)),
@@ -313,7 +320,7 @@ impl EntityServiceImpl {
         creator
             .delete(&entity_id)
             .await
-            .map_err(|e| status_from_anyhow(&e))?;
+            .map_err(|e| status_from_anyhow(&self.host, &e))?;
 
         Ok(Response::new(DeleteEntityResponse { success: true }))
     }
