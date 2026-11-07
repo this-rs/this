@@ -120,6 +120,45 @@ impl Message {
             }
         )
     }
+    /// Refuse, **à la construction**, un fil que le moteur refuserait : un id vide,
+    /// deux appels de même id dans un `Assistant`, un `Tool` sans appel en attente
+    /// (ou une seconde réponse au même appel).
+    /// DÉFAUT corrigé : rien de cela n'était vérifié ici ; l'erreur n'arrivait qu'au
+    /// tour suivant, depuis le moteur distant, sans dire quel message.
+    pub fn check_thread(messages: &[Message]) -> Result<(), ThreadDefect> {
+        // Appels du dernier `Assistant` sans réponse encore.
+        let mut pending: Vec<&str> = Vec::new();
+        for (index, m) in messages.iter().enumerate() {
+            match m {
+                Self::Assistant { calls, .. } => {
+                    let mut seen = std::collections::HashSet::new();
+                    for c in calls {
+                        if c.id.is_empty() {
+                            return Err(ThreadDefect::EmptyId { index });
+                        }
+                        if !seen.insert(c.id.as_str()) {
+                            return Err(ThreadDefect::DuplicateCallId { index });
+                        }
+                    }
+                    pending = calls.iter().map(|c| c.id.as_str()).collect();
+                }
+                Self::Tool { id, .. } => {
+                    if id.is_empty() {
+                        return Err(ThreadDefect::EmptyId { index });
+                    }
+                    match pending.iter().position(|p| p == id) {
+                        Some(at) => {
+                            pending.swap_remove(at);
+                        }
+                        None => return Err(ThreadDefect::OrphanTool { index }),
+                    }
+                }
+                Self::User { .. } => pending.clear(),
+                Self::System { .. } => {}
+            }
+        }
+        Ok(())
+    }
     /// Les images du message (aucune hors message utilisateur).
     pub fn images(&self) -> &[ImagePart] {
         match self {
@@ -127,6 +166,17 @@ impl Message {
             _ => &[],
         }
     }
+}
+
+/// Pourquoi un fil est invalide ([`Message::check_thread`]) ; `index` est celui du message fautif.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ThreadDefect {
+    /// Un identifiant d'appel ou de réponse est vide.
+    EmptyId { index: usize },
+    /// Deux appels d'un même `Assistant` portent le même id.
+    DuplicateCallId { index: usize },
+    /// Un `Tool` ne répond à aucun appel en attente.
+    OrphanTool { index: usize },
 }
 
 /// Un outil demandé par le modèle.

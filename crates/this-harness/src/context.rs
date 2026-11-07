@@ -33,21 +33,27 @@ const COUT_APPEL: usize = 4;
 /// Forfait par image : leur coût réel dépend de la taille, que l'on ne lit pas.
 const COUT_IMAGE: usize = 1000;
 
-fn jetons_texte(caracteres: usize) -> usize {
-    caracteres.div_ceil(CHARS_PAR_JETON)
+/// DÉFAUT corrigé : tout caractère comptait un quart de jeton. Le CJK, les emoji et
+/// l'écriture non latine coûtent environ un jeton PAR caractère : 4 000 idéogrammes
+/// étaient estimés 1 000 jetons, et `fit` ne coupait rien avant le refus du moteur.
+/// ASCII : 4 caractères par jeton ; tout autre caractère : un jeton (borne haute prudente).
+fn jetons_texte(texte: &str) -> usize {
+    let ascii = texte.bytes().filter(|b| b.is_ascii()).count();
+    let autres = texte.chars().count().saturating_sub(ascii);
+    ascii.div_ceil(CHARS_PAR_JETON).saturating_add(autres)
 }
 
 fn cout_message(message: &Message) -> usize {
-    let corps = jetons_texte(message.text().chars().count());
+    let corps = jetons_texte(message.text());
     let images = message.images().len().saturating_mul(COUT_IMAGE);
     let appels = match message {
         Message::Assistant { calls, .. } => calls
             .iter()
             .map(|appel| {
-                let texte = appel.id.chars().count()
-                    + appel.name.chars().count()
-                    + appel.arguments.to_string().chars().count();
-                COUT_APPEL + jetons_texte(texte)
+                COUT_APPEL
+                    .saturating_add(jetons_texte(&appel.id))
+                    .saturating_add(jetons_texte(&appel.name))
+                    .saturating_add(jetons_texte(&appel.arguments.to_string()))
             })
             .fold(0usize, usize::saturating_add),
         _ => 0,
@@ -114,13 +120,30 @@ fn decouper(messages: &[Message]) -> Vec<Unite> {
     let mut i = 0;
     while i < messages.len() {
         let mut fin = i + 1;
+        let mut systeme_dedans = false;
         if matches!(&messages[i], Message::Assistant { calls, .. } if !calls.is_empty()) {
-            while fin < messages.len() && matches!(messages[fin], Message::Tool { .. }) {
-                fin += 1;
+            // DÉFAUT corrigé : un message système intercalé (contexte éphémère) arrêtait le
+            // groupe ; la réponse `Tool` d'après devenait une unité à part, gardable alors
+            // que son appel était retiré. Les systèmes intercalés restent dans le groupe
+            // tant qu'une réponse suit ; le groupe est alors épinglé (les consignes ne
+            // se retirent pas).
+            loop {
+                let mut suite = fin;
+                while suite < messages.len() && matches!(messages[suite], Message::System { .. }) {
+                    suite += 1;
+                }
+                if suite < messages.len() && matches!(messages[suite], Message::Tool { .. }) {
+                    if suite > fin {
+                        systeme_dedans = true;
+                    }
+                    fin = suite + 1;
+                } else {
+                    break;
+                }
             }
         }
         let cout = estimate_tokens(&messages[i..fin]);
-        let epinglee = matches!(messages[i], Message::System { .. });
+        let epinglee = systeme_dedans || matches!(messages[i], Message::System { .. });
         unites.push(Unite {
             debut: i,
             fin,

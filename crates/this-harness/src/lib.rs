@@ -67,7 +67,8 @@ pub use session::{
     TOOL_TIMEOUT_MS, TurnContext, out_hash,
 };
 pub use wire::{
-    Code, Failure, Finish, ImagePart, ImageSource, Message, Reply, Request, ToolCall, ToolSpec,
+    Code, Failure, Finish, ImagePart, ImageSource, Message, Reply, Request, ThreadDefect, ToolCall,
+    ToolSpec,
 };
 
 /// Le verdict que porte `Event::Stopped`.
