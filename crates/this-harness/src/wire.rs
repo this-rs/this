@@ -8,6 +8,7 @@
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+pub use this_llm::{ImagePart, ImageSource};
 
 /// Un message de la conversation, tel que le modèle le lira.
 ///
@@ -22,6 +23,14 @@ pub enum Message {
     },
     User {
         content: String,
+        /// Les images jointes au message. Absent du JSON quand il n'y en a pas : un
+        /// message texte seul s'écrit exactement comme avant ce champ (test
+        /// `a_text_only_user_message_is_byte_for_byte_unchanged`).
+        ///
+        /// La source dit OÙ sont les octets, pas comment les envoyer : c'est le
+        /// transport qui les traduit dans le dialecte du moteur.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        images: Vec<ImagePart>,
     },
     Assistant {
         #[serde(default)]
@@ -44,6 +53,14 @@ impl Message {
     pub fn user(content: impl Into<String>) -> Self {
         Self::User {
             content: content.into(),
+            images: Vec::new(),
+        }
+    }
+    /// Un message de l'utilisateur avec ses images.
+    pub fn user_with_images(content: impl Into<String>, images: Vec<ImagePart>) -> Self {
+        Self::User {
+            content: content.into(),
+            images,
         }
     }
     pub fn assistant(content: impl Into<String>) -> Self {
@@ -61,7 +78,7 @@ impl Message {
     /// Le texte visible d'un message, quel qu'il soit.
     pub fn text(&self) -> &str {
         match self {
-            Self::System { content } | Self::User { content } | Self::Tool { content, .. } => {
+            Self::System { content } | Self::User { content, .. } | Self::Tool { content, .. } => {
                 content
             }
             Self::Assistant { content, .. } => content,
@@ -69,6 +86,13 @@ impl Message {
     }
     pub fn is_user(&self) -> bool {
         matches!(self, Self::User { .. })
+    }
+    /// Les images du message (aucune hors message utilisateur).
+    pub fn images(&self) -> &[ImagePart] {
+        match self {
+            Self::User { images, .. } => images,
+            _ => &[],
+        }
     }
 }
 
@@ -242,3 +266,71 @@ impl std::fmt::Display for Failure {
 }
 
 impl std::error::Error for Failure {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// L'exigence dure : ajouter `images` ne change RIEN au JSON d'un message texte
+    /// seul. Les chaînes attendues sont écrites à la main, telles que la version
+    /// précédente du contrat les produisait.
+    #[test]
+    fn a_text_only_user_message_is_byte_for_byte_unchanged() {
+        let message = Message::user("bonjour « là » \n\"x\"");
+        let written = serde_json::to_string(&message).unwrap();
+        assert_eq!(
+            written,
+            r#"{"role":"user","content":"bonjour « là » \n\"x\""}"#
+        );
+        assert_eq!(
+            serde_json::to_vec(&Message::user("")).unwrap(),
+            br#"{"role":"user","content":""}"#.to_vec()
+        );
+        // Une conversation entière, comme `Snapshot` la sauvegarde.
+        let thread = vec![
+            Message::system("brief"),
+            Message::user("q"),
+            Message::assistant("r"),
+            Message::tool("c1", "ok"),
+        ];
+        assert_eq!(
+            serde_json::to_string(&thread).unwrap(),
+            r#"[{"role":"system","content":"brief"},{"role":"user","content":"q"},{"role":"assistant","content":"r"},{"role":"tool","id":"c1","content":"ok"}]"#
+        );
+    }
+
+    #[test]
+    fn an_old_user_message_reads_with_no_image() {
+        let message: Message = serde_json::from_str(r#"{"role":"user","content":"q"}"#).unwrap();
+        assert_eq!(message, Message::user("q"));
+        assert!(message.images().is_empty());
+    }
+
+    #[test]
+    fn a_user_message_with_images_round_trips_and_names_its_sources() {
+        let message = Message::user_with_images(
+            "regarde",
+            vec![
+                ImagePart::new("image/png", ImageSource::Ref("ab".repeat(32))).named("a.png"),
+                ImagePart::new("image/jpeg", ImageSource::Base64("AAAA".into())),
+                ImagePart::new("image/webp", ImageSource::Url("https://x/y.webp".into())),
+            ],
+        );
+        let written = serde_json::to_value(&message).unwrap();
+        assert_eq!(
+            written,
+            serde_json::json!({
+                "role": "user",
+                "content": "regarde",
+                "images": [
+                    { "mime": "image/png", "source": { "ref": "ab".repeat(32) }, "name": "a.png" },
+                    { "mime": "image/jpeg", "source": { "base64": "AAAA" } },
+                    { "mime": "image/webp", "source": { "url": "https://x/y.webp" } },
+                ]
+            })
+        );
+        let back: Message = serde_json::from_value(written).unwrap();
+        assert_eq!(back, message);
+        assert_eq!(back.text(), "regarde");
+    }
+}

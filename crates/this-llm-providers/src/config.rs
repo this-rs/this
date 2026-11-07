@@ -170,6 +170,12 @@ pub struct ProviderConfig {
     pub timeout_secs: u64,
     #[serde(default = "default_enabled")]
     pub enabled: bool,
+    /// Whether the model reads images. `None`: unknown, images are sent and the engine
+    /// answers for itself (an engine that refuses them answers an HTTP error, which is
+    /// shown). `Some(false)`: a request with images is refused before it leaves, with the
+    /// reason. Absent from the JSON when unknown, so existing configurations are unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vision: Option<bool>,
 }
 
 fn default_timeout_secs() -> u64 {
@@ -201,6 +207,7 @@ impl ProviderConfig {
             thinking: false,
             timeout_secs: default_timeout_secs(),
             enabled: true,
+            vision: None,
         }
     }
 
@@ -276,6 +283,18 @@ mod tests {
 
     fn id(text: &str) -> ProviderId {
         ProviderId::new(text).expect("identifiant valide")
+    }
+
+    #[test]
+    fn an_unknown_vision_is_absent_from_the_json_and_read_back_as_unknown() {
+        let config = ProviderConfig::new(id("local"), "Local", Preset::Ollama, CredentialRef::None);
+        let written = serde_json::to_value(&config).unwrap();
+        assert!(written.get("vision").is_none(), "{written}");
+        let back: ProviderConfig = serde_json::from_value(written).unwrap();
+        assert_eq!(back.vision, None);
+        let mut blind = config;
+        blind.vision = Some(false);
+        assert_eq!(serde_json::to_value(&blind).unwrap()["vision"], false);
     }
 
     #[test]

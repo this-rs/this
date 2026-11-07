@@ -24,6 +24,10 @@
 
 use std::fmt;
 
+mod image;
+
+pub use image::{ImagePart, ImageSource};
+
 /// How a request reaches a model.
 ///
 /// Asynchronous, and `Send` only off `wasm32`: a browser completion goes through a
