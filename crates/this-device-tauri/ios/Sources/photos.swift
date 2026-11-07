@@ -351,8 +351,10 @@ extension ThisDevicePlugin {
     options.predicate = NSPredicate(
       format: "mediaType == %d AND creationDate >= %@ AND creationDate <= %@",
       PHAssetMediaType.image.rawValue,
-      Date(timeIntervalSince1970: Double(args.startMs) / 1000),
-      Date(timeIntervalSince1970: Double(args.endMs) / 1000)
+      // `NSDate`, pas `Date` : `NSPredicate(format:)` exige un `CVarArg`, et `Date`
+      // n'en est pas un (erreur de compilation, pas un détail de style).
+      Date(timeIntervalSince1970: Double(args.startMs) / 1000) as NSDate,
+      Date(timeIntervalSince1970: Double(args.endMs) / 1000) as NSDate
     )
     options.sortDescriptors = [NSSortDescriptor(key: "creationDate", ascending: false)]
     options.fetchLimit = args.limit

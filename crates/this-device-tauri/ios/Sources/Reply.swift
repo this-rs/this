@@ -69,4 +69,7 @@ enum ReplyCode {
   static let unavailable = "unavailable"
   static let notAuthorized = "not_authorized"
   static let timeout = "timeout"
+  /// Réponse d'une méthode que cette plateforme ne sait pas rendre. `wire.rs:131` la
+  /// décode en `DeviceError::NotSupported` : c'est cette chaîne-là, et pas une autre.
+  static let notSupported = "not_supported"
 }
