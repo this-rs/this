@@ -125,3 +125,67 @@ mod tests {
         );
     }
 }
+
+/// Les précisions qu'un flux accepte, du plus grossier au plus fin. Une chaîne inconnue est
+/// refusée plutôt que traduite en silence : « précision » veut dire quelque chose de précis.
+pub const ACCURACIES: [&str; 5] = [
+    "three_kilometers",
+    "hundred_meters",
+    "ten_meters",
+    "best",
+    "best_for_navigation",
+];
+
+/// Le plus d'échantillons qu'un flux garde en tampon. Au-delà, les plus anciens tombent : un
+/// flux qui grandit sans fin est une fuite qui s'appelle un historique.
+pub const RING_MAX: usize = 200;
+
+/// Les bornes d'un démarrage de flux : une précision connue, et un filtre de distance sensé.
+pub fn check_stream(accuracy: &str, distance_filter_m: u32) -> Result<(&'static str, u32), String> {
+    let Some(accuracy) = ACCURACIES.iter().copied().find(|a| *a == accuracy) else {
+        return Err("précision inconnue".to_string());
+    };
+    Ok((accuracy, distance_filter_m.min(1_000)))
+}
+
+/// Une position du tampon, telle que le natif l'écrit.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StreamFix {
+    pub lat: f64,
+    pub lon: f64,
+    pub accuracy_m: f64,
+    pub ts_ms: i64,
+}
+
+#[cfg(test)]
+mod stream_tests {
+    use super::*;
+
+    #[test]
+    fn an_unknown_accuracy_is_refused() {
+        assert!(check_stream("teleport", 5).is_err());
+        assert_eq!(check_stream("ten_meters", 5), Ok(("ten_meters", 5)));
+    }
+
+    #[test]
+    fn the_distance_filter_is_bounded_not_refused() {
+        // Un filtre absurde ne mérite pas un refus : la borne haute dit ce qu'on peut faire.
+        assert_eq!(check_stream("best", 50_000), Ok(("best", 1_000)));
+    }
+
+    #[test]
+    fn a_fix_decodes_and_refuses_an_unknown_field() {
+        let fix: StreamFix = serde_json::from_str(
+            r#"{"lat":48.85,"lon":2.35,"accuracy_m":12.5,"ts_ms":1700000000000}"#,
+        )
+        .unwrap();
+        assert_eq!(fix.accuracy_m, 12.5);
+        assert!(
+            serde_json::from_str::<StreamFix>(
+                r#"{"lat":1.0,"lon":2.0,"accuracy_m":1.0,"ts_ms":0,"x":1}"#
+            )
+            .is_err()
+        );
+    }
+}

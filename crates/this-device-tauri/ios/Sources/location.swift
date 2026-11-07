@@ -289,3 +289,153 @@ final class LocationSampleSession: NSObject, CLLocationManagerDelegate {
     ThisDeviceLocationKeeper.release(self)
   }
 }
+
+// ---- Le flux de positions ---------------------------------------------------------------
+//
+// `locationSample` donne un point. Un point ne dit pas où l'on va, et le redemander en boucle
+// depuis la page coûte un aller-retour par seconde. Ici le manager reste vivant entre deux
+// appels, garde les positions dans un tampon borné, et l'appelant les relit.
+//
+// Une position est une donnée personnelle : rien de ce fichier ne l'écrit dans un journal.
+
+private struct StreamStartArgs: Decodable {
+  let accuracy: String
+  let distanceFilterM: Double
+
+  private enum CodingKeys: String, CodingKey {
+    case accuracy
+    case distanceFilterM = "distance_filter_m"
+  }
+}
+
+private struct RecentArgs: Decodable {
+  let sinceMs: Int64
+
+  private enum CodingKeys: String, CodingKey {
+    case sinceMs = "since_ms"
+  }
+}
+
+/// Une position du tampon : latitude, longitude, précision en mètres, instant.
+private struct StreamFixOut: Encodable {
+  let lat: Double
+  let lon: Double
+  let accuracy_m: Double
+  let ts_ms: Int64
+}
+
+private struct StreamingReply: Encodable {
+  let kind = "streaming"
+  let accuracy: String
+  let distance_filter_m: Double
+}
+
+private struct StoppedReply: Encodable {
+  let kind = "stopped"
+  let fixes: Int
+}
+
+private struct FixesReply: Encodable {
+  let kind = "fixes"
+  let fixes: [StreamFixOut]
+}
+
+/// Le flux, retenu pour la vie de l'app : un `CLLocationManager` relâché cesse de livrer.
+final class LocationStream: NSObject, CLLocationManagerDelegate {
+  static let shared = LocationStream()
+  /// Le plus de positions gardées : un flux sans borne est un historique qui grossit.
+  static let ringMax = 200
+
+  private let manager = CLLocationManager()
+  private var fixes: [StreamFixOut] = []
+  private(set) var running = false
+
+  override init() {
+    super.init()
+    manager.delegate = self
+    manager.desiredAccuracy = kCLLocationAccuracyHundredMeters
+  }
+
+  static func accuracy(_ name: String) -> CLLocationAccuracy? {
+    switch name {
+    case "three_kilometers": return kCLLocationAccuracyThreeKilometers
+    case "hundred_meters": return kCLLocationAccuracyHundredMeters
+    case "ten_meters": return kCLLocationAccuracyNearestTenMeters
+    case "best": return kCLLocationAccuracyBest
+    case "best_for_navigation": return kCLLocationAccuracyBestForNavigation
+    default: return nil
+    }
+  }
+
+  func start(name: String, distanceFilter: Double) -> Bool {
+    guard let accuracy = Self.accuracy(name) else { return false }
+    manager.desiredAccuracy = accuracy
+    manager.distanceFilter = distanceFilter
+    running = true
+    manager.startUpdatingLocation()
+    return true
+  }
+
+  func stop() -> Int {
+    manager.stopUpdatingLocation()
+    running = false
+    return fixes.count
+  }
+
+  func recent(sinceMs: Int64) -> [StreamFixOut] {
+    fixes.filter { $0.ts_ms >= sinceMs }
+  }
+
+  func locationManager(_ manager: CLLocationManager, didUpdateLocations locations: [CLLocation]) {
+    for location in locations {
+      fixes.append(
+        StreamFixOut(
+          lat: location.coordinate.latitude,
+          lon: location.coordinate.longitude,
+          accuracy_m: location.horizontalAccuracy,
+          ts_ms: Int64((location.timestamp.timeIntervalSince1970 * 1000).rounded())
+        ))
+    }
+    if fixes.count > Self.ringMax {
+      fixes.removeFirst(fixes.count - Self.ringMax)
+    }
+  }
+
+  /// L'autorisation en cours : un flux qui n'a pas le droit de lire ne doit pas être annoncé
+  /// comme démarré.
+  static func authorized() -> Bool {
+    let status = CLLocationManager().authorizationStatus
+    if #available(iOS 14.0, *) {
+      return status == .authorizedWhenInUse || status == .authorizedAlways
+    }
+    return status == .authorizedWhenInUse || status == .authorizedAlways
+  }
+}
+
+extension ThisDevicePlugin {
+  /// Démarre le flux de positions. La permission doit déjà être accordée (`locationRequest`).
+  @objc public func locationStreamStart(_ invoke: Invoke) throws {
+    let args = try invoke.parseArgs(StreamStartArgs.self)
+    guard LocationStream.authorized() else {
+      invoke.resolve(Reply.error(code: ReplyCode.notAuthorized))
+      return
+    }
+    guard LocationStream.shared.start(name: args.accuracy, distanceFilter: args.distanceFilterM)
+    else {
+      invoke.resolve(Reply.error(code: "internal"))
+      return
+    }
+    invoke.resolve(
+      StreamingReply(accuracy: args.accuracy, distance_filter_m: args.distanceFilterM))
+  }
+
+  @objc public func locationStreamStop(_ invoke: Invoke) {
+    invoke.resolve(StoppedReply(fixes: LocationStream.shared.stop()))
+  }
+
+  /// Les positions reçues depuis `since_ms`. Vide veut dire « rien de neuf », pas une panne.
+  @objc public func locationRecent(_ invoke: Invoke) throws {
+    let args = try invoke.parseArgs(RecentArgs.self)
+    invoke.resolve(FixesReply(fixes: LocationStream.shared.recent(sinceMs: args.sinceMs)))
+  }
+}

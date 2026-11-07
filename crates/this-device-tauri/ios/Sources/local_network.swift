@@ -208,3 +208,99 @@ extension ThisDevicePlugin {
     LocalNetworkBrowse.run(invoke, serviceType: args.serviceType)
   }
 }
+
+// ---- Résoudre un service ---------------------------------------------------------------
+//
+// Un browse rend des noms (« MacBook de Théotime ») ; pour s'y connecter il faut un hôte et un
+// port. `NetService.resolve` les donne, avec une borne de temps — sans elle, un service qui ne
+// répond pas laisserait la promesse ouverte pour toujours.
+//
+// L'hôte trouvé est une donnée d'infrastructure (un nom sur le réseau local), pas une donnée de
+// la personne : il est rendu à l'appelant, jamais journalisé.
+
+private struct ResolveArgs: Decodable {
+  let name: String
+  let serviceType: String
+  let timeoutMs: Int
+
+  private enum CodingKeys: String, CodingKey {
+    case name
+    case serviceType = "service_type"
+    case timeoutMs = "timeout_ms"
+  }
+}
+
+private struct ResolvedReply: Encodable {
+  let kind = "resolved"
+  let host: String
+  let port: Int
+}
+
+/// Une résolution en vol. Retenue jusqu'à la réponse : `NetService` ne garde pas son délégué.
+final class LocalNetworkResolve: NSObject, NetServiceDelegate {
+  private static var active: [ObjectIdentifier: LocalNetworkResolve] = [:]
+
+  private let invoke: Invoke
+  private let service: NetService
+  private var finished = false
+
+  private init(_ invoke: Invoke, service: NetService) {
+    self.invoke = invoke
+    self.service = service
+    super.init()
+  }
+
+  static func run(_ invoke: Invoke, name: String, serviceType: String, timeoutSeconds: Double) {
+    let service = NetService(
+      domain: "local.", type: serviceType, name: name, port: 0)
+    let resolve = LocalNetworkResolve(invoke, service: service)
+    active[ObjectIdentifier(resolve)] = resolve
+    service.delegate = resolve
+    service.resolve(withTimeout: timeoutSeconds)
+  }
+
+  private func finish(_ reply: Encodable) {
+    guard !finished else { return }
+    finished = true
+    service.stop()
+    service.delegate = nil
+    LocalNetworkResolve.active[ObjectIdentifier(self)] = nil
+    DispatchQueue.main.async { self.invoke.resolve(reply) }
+  }
+
+  func netServiceDidResolveAddress(_ sender: NetService) {
+    // `hostName` peut être nil alors que l'adresse est résolue : on préfère un refus explicite à
+    // une chaîne vide que l'appelant prendrait pour un hôte.
+    guard let host = sender.hostName, !host.isEmpty, sender.port > 0 else {
+      finish(Reply.error(code: ReplyCode.notSupported))
+      return
+    }
+    finish(ResolvedReply(host: host, port: sender.port))
+  }
+
+  func netService(_ sender: NetService, didNotResolve errorDict: [String: NSNumber]) {
+    // Le service a disparu, ou il ne répond pas : ce n'est pas une panne du pont.
+    finish(Reply.error(code: ReplyCode.unavailable))
+  }
+}
+
+extension ThisDevicePlugin {
+  /// Résout un service Bonjour (nom + type) en hôte et port, avec une borne de temps.
+  @objc public func localNetworkResolve(_ invoke: Invoke) throws {
+    let args = try invoke.parseArgs(ResolveArgs.self)
+    guard LocalNetworkServiceTypes.isAllowed(args.serviceType) else {
+      invoke.resolve(Reply.error(code: "not_supported"))
+      return
+    }
+    guard !args.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+      invoke.resolve(Reply.error(code: "missing_argument"))
+      return
+    }
+    LocalNetworkResolve.run(
+      invoke,
+      name: args.name,
+      serviceType: args.serviceType,
+      timeoutSeconds: Double(max(1_000, min(args.timeoutMs, 15_000))) / 1000
+    )
+  }
+}

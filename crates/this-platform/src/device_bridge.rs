@@ -218,6 +218,8 @@ pub const METHODS: &[&str] = &[
     "healthStatus",
     "healthRequest",
     "healthQuantitySample",
+    // Les séances : une quantité ne dit pas « j'ai couru 40 minutes hier ».
+    "healthWorkouts",
     "faceIdStatus",
     "faceIdConfirm",
     "speechStatus",
@@ -227,8 +229,15 @@ pub const METHODS: &[&str] = &[
     "nfcReadOnce",
     "localNetworkStatus",
     "localNetworkBrowse",
+    // Résoudre un service trouvé par un browse : sans ça, un nom ne dit pas où se connecter.
+    "localNetworkResolve",
     "locationRequest",
     "locationSample",
+    // Le flux : une position ponctuelle ne dit pas où l'on va. Démarrer / arrêter / relire,
+    // plutôt qu'une boucle de l'appelant qui redemanderait un point toutes les secondes.
+    "locationStreamStart",
+    "locationStreamStop",
+    "locationRecent",
     "motionActivityStatus",
     "motionActivityRequest",
     "motionStepsSample",
@@ -286,12 +295,20 @@ pub fn capability_of(method: &str, args: &Value) -> Option<Capability> {
         | "calendarCalendars"
         | "calendarUpdateEvent"
         | "calendarDeleteEvent" => Capability::Calendar,
-        "healthStatus" | "healthRequest" | "healthQuantitySample" => Capability::Health,
+        "healthStatus" | "healthRequest" | "healthQuantitySample" | "healthWorkouts" => {
+            Capability::Health
+        }
         "faceIdStatus" | "faceIdConfirm" => Capability::FaceId,
         "speechStatus" | "speechRequest" | "speechTranscribeFile" => Capability::Speech,
         "nfcStatus" | "nfcReadOnce" => Capability::Nfc,
-        "localNetworkStatus" | "localNetworkBrowse" => Capability::LocalNetwork,
-        "locationSample" => Capability::Location,
+        "localNetworkStatus" | "localNetworkBrowse" | "localNetworkResolve" => {
+            Capability::LocalNetwork
+        }
+        "locationSample" | "locationStreamStart" | "locationStreamStop" | "locationRecent" => {
+            Capability::Location
+        }
+        "localNetworkResolve" => Capability::LocalNetwork,
+        "healthWorkouts" => Capability::Health,
         "motionActivityStatus"
         | "motionActivityRequest"
         | "motionStepsSample"
@@ -439,6 +456,20 @@ pub fn complete_args(method: &str, args: &Value, now_ms: f64) -> Value {
         // dit pas si le périphérique a reçu — un appelant qui le veut le demande.
         "bluetoothWrite" => serde_json::json!({ "with_response": true }),
         "localNetworkBrowse" => serde_json::json!({ "service_type": "_http._tcp" }),
+        // Une seconde de filtre : sans lui, le flux crache une position par seconde et le
+        // tampon se remplit pour rien.
+        "locationStreamStart" => {
+            serde_json::json!({ "accuracy": "ten_meters", "distance_filter_m": 1 })
+        }
+        // Une heure de recul : ce qu'on veut dire par « où je suis passé » sans le préciser.
+        "locationRecent" => serde_json::json!({ "since_ms": (now_ms - 3600.0 * 1000.0) as i64 }),
+        "localNetworkResolve" => serde_json::json!({ "timeout_ms": 5_000 }),
+        // 30 jours de séances, 20 au plus.
+        "healthWorkouts" => serde_json::json!({
+            "from_ms": (now_ms - 30.0 * jour).max(0.0) as i64,
+            "to_ms": maintenant,
+            "limit": 20,
+        }),
         _ => serde_json::json!({}),
     };
     let mut completed = defaults;
@@ -463,6 +494,7 @@ pub fn missing_args(method: &str, args: &Value) -> Option<&'static str> {
         // MAC, et n'en donnera pas).
         "bluetoothConnect" | "bluetoothDisconnect" | "bluetoothServices" => &["id"],
         "contactsGet" => &["id"],
+        "localNetworkResolve" => &["name"],
         "contactsSearch" => &["query"],
         // Sans nom, un contact créé est une fiche vide : le nom est le minimum qui a un sens.
         "contactsCreate" => &["name"],

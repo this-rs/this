@@ -204,3 +204,39 @@ mod tests {
         );
     }
 }
+
+/// Une résolution : le nom du service, son type, et la borne de temps.
+///
+/// `host` est une adresse ou un nom sur le réseau local. C'est une donnée d'infrastructure, pas
+/// une donnée de la personne : elle est rendue telle quelle, sans être enregistrée nulle part.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Resolved {
+    pub host: String,
+    pub port: u16,
+}
+
+/// Le délai d'une résolution : borné. Une résolution qui ne répond pas doit rendre la main.
+pub fn clamp_resolve_timeout(timeout_ms: u32) -> u32 {
+    timeout_ms.clamp(1_000, 15_000)
+}
+
+#[cfg(test)]
+mod resolve_tests {
+    use super::*;
+
+    #[test]
+    fn a_resolution_timeout_is_bounded() {
+        assert_eq!(clamp_resolve_timeout(1), 1_000);
+        assert_eq!(clamp_resolve_timeout(5_000), 5_000);
+        assert_eq!(clamp_resolve_timeout(99_000), 15_000);
+    }
+
+    #[test]
+    fn a_resolved_service_keeps_its_host_and_port() {
+        let resolved: Resolved =
+            serde_json::from_str(r#"{"host":"macbook.local.","port":9902}"#).unwrap();
+        assert_eq!(resolved.port, 9902);
+        assert!(serde_json::from_str::<Resolved>(r#"{"host":"x","port":1,"extra":true}"#).is_err());
+    }
+}
