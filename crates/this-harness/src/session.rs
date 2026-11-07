@@ -28,7 +28,7 @@ use std::task::Poll;
 use async_trait::async_trait;
 
 use crate::event::{Event, HintKind, Outcome, Pending, Snapshot};
-use crate::ports::{Cancel, Delta, Toolbox, Transport};
+use crate::ports::{Cancel, Compactor, Delta, Recorder, Recorders, Toolbox, Transport};
 use crate::wire::{Code, Failure, Finish, ImagePart, Message, Reply, Request, ToolCall};
 use this_agent::evidence::Verdict;
 use this_agent::{Decision, DefaultPolicy, Goal, Policy, Run, Step, Stop};
@@ -474,10 +474,13 @@ impl Limits {
             max_tours: doc.max_tours,
             max_relances: doc.max_relances,
             budget_ms: doc.budget_ms,
-            context_budget: Some(CONTEXT_BUDGET),
-            silence_ms: Some(SILENCE_MS),
-            no_progress_ms: Some(NO_PROGRESS_MS),
-            tool_timeout_ms: Some(TOOL_TIMEOUT_MS),
+            // Une borne absente du document garde sa constante : un graphe écrit avant
+            // ces champs se relit comme avant. Une borne PRÉSENTE gagne, y compris
+            // `context_budget` — celle qui évite le refus du moteur.
+            context_budget: doc.context_budget.or(Some(CONTEXT_BUDGET)),
+            silence_ms: doc.silence_ms.or(Some(SILENCE_MS)),
+            no_progress_ms: doc.no_progress_ms.or(Some(NO_PROGRESS_MS)),
+            tool_timeout_ms: doc.tool_timeout_ms.or(Some(TOOL_TIMEOUT_MS)),
         }
     }
 }
@@ -520,6 +523,8 @@ struct State {
     busy: bool,
     generation: u64,
     cancel: Cancel,
+    /// Le compteur d'objectifs ouverts : source des `run_id` (`run-1`, `run-2`, …).
+    run_seq: u64,
 }
 
 /// La sortie d'événements, dans sa propre cellule.
@@ -703,6 +708,15 @@ pub struct Harness {
     clock: Rc<dyn Clock>,
     /// Le contexte éphémère de chaque tour : aucun par défaut.
     turn_context: Option<Rc<dyn TurnContext>>,
+    /// Les autorisations d'outils. `None` : le harnais ne fait RIEN respecter
+    /// (voir [`Harness::with_grants`]).
+    grants: Option<this_agent::substrate::Grants>,
+    /// Le compacteur, s'il y en a un : aucun par défaut, donc la borne de contexte jette
+    /// (voir [`Harness::with_compactor`]).
+    compactor: Option<Rc<dyn Compactor>>,
+    /// Le journal vivant des runs : vide par défaut (voir [`Harness::with_recorder`]).
+    /// Ses méthodes rendent `()` : un échec d'enregistrement n'interrompt jamais le run.
+    recorder: Rc<dyn Recorder>,
     state: Shared<State>,
     out: Out,
 }
@@ -721,6 +735,9 @@ impl Harness {
             policy: Rc::new(DefaultPolicy),
             clock: Rc::new(SystemClock),
             turn_context: None,
+            grants: None,
+            compactor: None,
+            recorder: Rc::new(Recorders::new()),
             state: Rc::new(RefCell::new(State {
                 system: system.into(),
                 limits,
@@ -730,6 +747,7 @@ impl Harness {
                 busy: false,
                 generation: 0,
                 cancel: Cancel::new(),
+                run_seq: 0,
             })),
             out: Out::new(Box::new(sink)),
         }
@@ -741,6 +759,11 @@ impl Harness {
     /// change pas, c'est la **donnée** qui décide. Les emplacements `Tools` et
     /// `Guard` sont tenus par qui les a chargés — le harnais ne va pas chercher
     /// un module lui-même (il ne fait aucune entrée/sortie).
+    ///
+    /// **Cette fonction ne vérifie AUCUNE approbation.** Un document dont
+    /// l'approbation est absente, périmée ou non reconnue par l'hôte est construit
+    /// comme un autre. L'hôte doit appeler `HarnessDoc::is_approved` avant, ou —
+    /// chemin sûr, le plus court — passer par [`Harness::from_approved_doc`].
     pub fn from_doc(
         doc: &this_agent::graph::HarnessDoc,
         transport: Rc<dyn Transport>,
@@ -756,6 +779,117 @@ impl Harness {
             sink,
         )
         .with_policy(policy)
+    }
+
+    /// Compose un harness depuis un document **approuvé par l'hôte** : le chemin sûr.
+    ///
+    /// Appelle `doc.is_approved(trusted)` et **refuse de construire** si le verdict
+    /// est `Refuse` : l'`Err` porte ce verdict (avec son motif) et aucun harnais
+    /// n'existe — ni transport touché, ni sortie émise. `trusted` est la liste de
+    /// confiance de l'**hôte** ; l'approbation que le document affirme de lui-même
+    /// n'y suffit pas.
+    pub fn from_approved_doc(
+        doc: &this_agent::graph::HarnessDoc,
+        trusted: &[this_agent::approval::Approval],
+        transport: Rc<dyn Transport>,
+        toolbox: Rc<dyn Toolbox>,
+        policy: Rc<dyn Policy>,
+        sink: impl FnMut(Event) + 'static,
+    ) -> Result<Self, this_agent::substrate::Verdict> {
+        match doc.is_approved(trusted) {
+            this_agent::substrate::Verdict::Allow => {
+                Ok(Self::from_doc(doc, transport, toolbox, policy, sink))
+            }
+            refus => Err(refus),
+        }
+    }
+
+    /// Installe les autorisations d'outils : la porte entre ce qu'un outil **déclare**
+    /// et ce qu'il a le **droit** de faire.
+    ///
+    /// POURQUOI un constructeur chaînable et pas un champ de [`Limits`] : `Limits` est
+    /// une donnée numérique, versionnée et empreintée avec la composition ; des
+    /// autorisations sont une décision de l'hôte (qui a le droit, accordé par qui), qui
+    /// change en cours de vie et ne se lit pas dans le même document. Les mêler ferait
+    /// qu'une relecture de composition efface des droits, ou en accorde.
+    ///
+    /// **Sans cet appel, le harnais ne fait respecter AUCUNE autorisation** : c'est alors
+    /// l'hôte (son `Toolbox`) qui décide seul. Ce n'est PAS un défaut sûr, c'est
+    /// l'absence de garde ; un hôte dont l'agent écrit des modules, donc sa propre
+    /// politique, doit installer des autorisations.
+    ///
+    /// Avec des autorisations, la règle est **fail-closed**, vérifiée avant toute
+    /// exécution : un outil absent de `Toolbox::declarations()` est refusé (une
+    /// déclaration manquante ne vaut pas un droit), et un outil déclaré que
+    /// [`Grants::allows`](this_agent::substrate::Grants::allows) ne permet pas l'est aussi,
+    /// avec le motif de l'autorisation. Le refus est un `Outcome::refused` ordinaire :
+    /// le même événement, la même `Step`, la même relance que tout autre refus.
+    pub fn with_grants(mut self, grants: this_agent::substrate::Grants) -> Self {
+        self.grants = Some(grants);
+        self
+    }
+
+    /// Branche un [`Recorder`] : chaque étape d'outil lui est poussée dès qu'elle est
+    /// mesurée, et l'arrêt du run lui est annoncé. Sans appel, le journal est vide et
+    /// la boucle ne change pas.
+    pub fn with_recorder(mut self, recorder: Rc<dyn Recorder>) -> Self {
+        self.recorder = recorder;
+        self
+    }
+
+    /// Compose un harnais depuis un document approuvé **et** installe ses autorisations
+    /// d'outils, en un seul appel : LE constructeur d'un hôte qui exécute du code écrit
+    /// par un agent.
+    ///
+    /// POURQUOI un troisième constructeur : [`Harness::from_approved_doc`] vérifie
+    /// l'approbation mais n'installe aucune autorisation, et [`Harness::with_grants`] est
+    /// facultatif — un hôte qui oublie l'un des deux obtient un harnais qui *semble*
+    /// gardé. Ici l'approbation et les autorisations sont des arguments obligatoires :
+    /// impossible d'en omettre une. Sur refus d'approbation, l'`Err` porte le verdict et
+    /// aucun harnais n'existe. Une fois construit, tout outil absent de
+    /// [`Toolbox::declarations`] ou non permis par `grants` est refusé avant d'être
+    /// appelé (règle fail-closed de [`Harness::with_grants`]).
+    ///
+    /// `from_doc` et `from_approved_doc` restent, avec leur doc, pour les hôtes qui
+    /// posent eux-mêmes ces gardes.
+    pub fn from_approved_doc_guarded(
+        doc: &this_agent::graph::HarnessDoc,
+        trusted: &[this_agent::approval::Approval],
+        grants: this_agent::substrate::Grants,
+        transport: Rc<dyn Transport>,
+        toolbox: Rc<dyn Toolbox>,
+        policy: Rc<dyn Policy>,
+        sink: impl FnMut(Event) + 'static,
+    ) -> Result<Self, this_agent::substrate::Verdict> {
+        Self::from_approved_doc(doc, trusted, transport, toolbox, policy, sink)
+            .map(|harness| harness.with_grants(grants))
+    }
+
+    /// Installe un compacteur : quand la borne de contexte devrait retirer des
+    /// messages, on les **résume** d'abord au lieu de les jeter.
+    ///
+    /// POURQUOI : jeter est brutal, et une mémoire courte ne se distingue pas d'une
+    /// invention. Sans compacteur (défaut), rien ne change : `fit` jette et
+    /// [`Event::Trimmed`] le dit.
+    ///
+    /// Avec un compacteur, à chaque tour où `fit` retirerait quelque chose :
+    /// 1. le compacteur reçoit **exactement** ce que `fit` voulait retirer (mêmes
+    ///    frontières de groupe : jamais un appel d'outil coupé de ses réponses), pas un
+    ///    préfixe déjà rogné ;
+    /// 2. son résumé remplace ces messages — **dans le transcript lui-même**, pour ne
+    ///    pas être recalculé (un appel au modèle) à chaque tour. Le résumé est rangé au
+    ///    rôle utilisateur et marqué synthétique (`Message::hint`) : il ne passe pas
+    ///    pour la question ;
+    /// 3. le fil est refait sous le budget et [`Event::Compacted`] le dit.
+    ///
+    /// Repli sur la jetée pure (`fit` seul, [`Event::Trimmed`] émis) si : le compacteur
+    /// échoue ; son message est invalide (vide, `Tool`/`System`, `Assistant` portant des
+    /// appels) ; il ne coûte pas **strictement moins** que ce qu'il remplace (on ne fait
+    /// pas grossir un fil en le compactant) ; le fil gardé ne contiendrait pas le résumé
+    /// (il ne tient pas dans le budget) ; ou le transcript a changé pendant l'attente.
+    pub fn with_compactor(mut self, compactor: Rc<dyn Compactor>) -> Self {
+        self.compactor = Some(compactor);
+        self
     }
 
     /// Remplace la politique de décision du run.
@@ -902,6 +1036,8 @@ impl Harness {
         // Le verdict du run qui a posé `stop` : lu à la sortie de ses tours, avant
         // qu'un objectif suivant n'ouvre un autre run.
         let mut verdict: Option<Verdict> = None;
+        // Le dernier run arrêté (identité + état), pour `Recorder::stopped`.
+        let mut closed: Option<(String, Run)> = None;
 
         'goals: loop {
             // 1. Le prochain message tenu ouvre un objectif. Sans message, il
@@ -925,6 +1061,11 @@ impl Harness {
             }
 
             let limits = self.with(|s| s.limits.clone());
+            // L'identité du run, stable pour toutes ses étapes.
+            let run_id = self.with(|s| {
+                s.run_seq += 1;
+                format!("run-{}", s.run_seq)
+            });
             let mut run = Run::new(Goal::new(first.text.clone()), limits.max_tours);
             run.max_relances = limits.max_relances;
             run.declare(toolbox.declarations());
@@ -979,7 +1120,7 @@ impl Harness {
                 // Le contexte du tour est recalculé ici, à chaque tour : il
                 // dépend de la conversation telle qu'elle est maintenant.
                 let context = self.turn_context().await;
-                let request = self.request(toolbox.as_ref(), context);
+                let request = self.request(toolbox.as_ref(), context).await;
                 // Le temps du TOUR est de l'horloge murale : mesuré autour du
                 // transport, relances comprises, et ajouté au run AVANT la
                 // décision. Sans ça, un modèle lent et des outils instantanés
@@ -1216,7 +1357,7 @@ impl Harness {
                         continue;
                     }
                     let (outcome, dropped) = self
-                        .run_tool(toolbox.as_ref(), call, &mut run, &cancel, &limits)
+                        .run_tool(toolbox.as_ref(), call, &run_id, &mut run, &cancel, &limits)
                         .await;
                     if let Some(why) = dropped {
                         // Abandonné ne veut pas dire « pas fait » : l'étape
@@ -1287,6 +1428,11 @@ impl Harness {
                 }
             }
             verdict = Some(verdict_of(&run, &run.inconnues));
+            // Le run qui a posé `stop` est retenu (déplacé, jamais cloné) pour l'annonce
+            // finale : `run` et `run_id` ne survivent pas à l'objectif.
+            if run.stop.is_some() {
+                closed = Some((run_id, run));
+            }
 
             // Un objectif atteint, mais des messages attendent : la discussion
             // continue, elle ne s'arrête pas parce que le modèle a conclu.
@@ -1308,6 +1454,9 @@ impl Harness {
         // La place est rendue AVANT l'annonce : un puits qui relit `busy()` sur
         // `Stopped` voit déjà le run terminé.
         self.with(|s| s.busy = false);
+        if let Some((run_id, run)) = &closed {
+            self.recorder.stopped(run_id, run, &stop).await;
+        }
         self.out.emit(Event::Stopped {
             stop: stop.clone(),
             text: said,
@@ -1335,6 +1484,7 @@ impl Harness {
         &self,
         toolbox: &dyn Toolbox,
         call: &ToolCall,
+        run_id: &str,
         run: &mut Run,
         cancel: &Cancel,
         limits: &Limits,
@@ -1349,6 +1499,9 @@ impl Harness {
         let mut abandoned = None;
         let outcome = if !declared {
             unknown_tool(&call.name)
+        } else if let Some(motif) = self.gate(toolbox, &call.name) {
+            // Refusé AVANT exécution : `call_with_cancel` n'est pas appelé.
+            Outcome::refused(format!("outil non autorisé : {}", call.name), motif)
         } else {
             // Un outil n'émet rien pendant qu'il travaille : son « dernier
             // signe de vie » reste son départ, et la garde de silence devient
@@ -1393,7 +1546,31 @@ impl Harness {
         });
 
         run.record(step_of(&call.name, ms, &outcome));
+        if let Some(step) = run.steps.last() {
+            self.recorder.step(run_id, run, step).await;
+        }
         (outcome, abandoned)
+    }
+
+    /// La porte d'autorisation : le motif du refus, ou `None` si l'appel peut partir.
+    ///
+    /// Sans `grants` installés, rien n'est vérifié (voir [`Harness::with_grants`]).
+    /// Avec, l'effet déclaré est relu à CHAQUE appel (un module peut être installé en
+    /// cours de run, comme pour le routage de `Toolboxes`).
+    fn gate(&self, toolbox: &dyn Toolbox, tool: &str) -> Option<String> {
+        let grants = self.grants.as_ref()?;
+        let declarations = toolbox.declarations();
+        let Some(declaration) = declarations.iter().find(|d| d.tool == tool) else {
+            return Some(format!(
+                "« {tool} » n'a pas de déclaration d'effet : sans elle, aucun droit ne peut lui être accordé"
+            ));
+        };
+        match grants.allows(tool) {
+            this_agent::substrate::Verdict::Allow => None,
+            this_agent::substrate::Verdict::Refuse(why) => {
+                Some(format!("{why} (effet déclaré : {:?})", declaration.effect))
+            }
+        }
     }
 
     /// Ce que le hook de contexte rend pour ce tour. L'état n'est pas emprunté
@@ -1411,8 +1588,8 @@ impl Harness {
     /// Le fit se fait ICI et pas dans `Request` : c'est le harnais qui porte la
     /// borne (elle vient de `Limits`), et un transport qui devrait la respecter
     /// lui-même serait un transport qu'on ne peut pas brancher deux fois.
-    fn request(&self, toolbox: &dyn Toolbox, context: Option<String>) -> Request {
-        let (system, messages, budget) = self.with(|s| {
+    async fn request(&self, toolbox: &dyn Toolbox, context: Option<String>) -> Request {
+        let (system, mut messages, budget) = self.with(|s| {
             (
                 s.system.clone(),
                 s.transcript.clone(),
@@ -1422,6 +1599,10 @@ impl Harness {
         let messages = match budget {
             None => messages,
             Some(budget) => {
+                // D'abord résumer ce qui serait jeté ; en cas d'échec, `fit` seul.
+                if let Some(compacted) = self.compact(&messages, budget).await {
+                    messages = compacted;
+                }
                 let fitted = crate::context::fit(&messages, budget);
                 if !fitted.dropped.is_empty() {
                     // Un oubli se dit, toujours : c'est la différence entre un
@@ -1437,6 +1618,81 @@ impl Harness {
             }
         };
         Request::new(system, messages, toolbox.specs()).with_context(context)
+    }
+
+    /// Tente de résumer ce que `fit` retirerait de `messages` (voir
+    /// [`Harness::with_compactor`]). `Some(fil)` : le fil compacté, déjà écrit dans le
+    /// transcript et annoncé par [`Event::Compacted`]. `None` : rien à compacter, ou
+    /// repli — l'appelant applique alors `fit` au fil d'origine.
+    async fn compact(&self, messages: &[Message], budget: usize) -> Option<Vec<Message>> {
+        let compactor = self.compactor.clone()?;
+        let removal = crate::context::removable(messages, budget);
+        let first = *removal.indices.first()?;
+        let anciens: Vec<Message> = removal
+            .indices
+            .iter()
+            .map(|&i| messages[i].clone())
+            .collect();
+        let summary = match compactor.compact(&anciens).await {
+            Ok(message) => message,
+            Err(_) => return None,
+        };
+        // Le résumé est rangé au rôle utilisateur et synthétique : un `User` non
+        // synthétique, placé après la vraie question, serait épinglé à sa place.
+        let summary = match summary {
+            Message::User {
+                content, images, ..
+            } if !content.trim().is_empty() => Message::User {
+                content,
+                images,
+                synthetic: true,
+            },
+            Message::Assistant { content, calls }
+                if calls.is_empty() && !content.trim().is_empty() =>
+            {
+                Message::Assistant { content, calls }
+            }
+            _ => return None,
+        };
+        let summary_tokens = crate::context::estimate_tokens(std::slice::from_ref(&summary));
+        if summary_tokens >= removal.tokens {
+            return None;
+        }
+        let mut candidate = Vec::with_capacity(messages.len() - removal.indices.len() + 1);
+        for (i, message) in messages.iter().enumerate() {
+            if i == first {
+                candidate.push(summary.clone());
+            }
+            if removal.indices.binary_search(&i).is_err() {
+                candidate.push(message.clone());
+            }
+        }
+        // Le résumé doit survivre au refit : sinon on aurait payé un appel pour rien
+        // et annoncé un remplacement qui n'a pas eu lieu.
+        if !crate::context::fit(&candidate, budget)
+            .kept
+            .contains(&summary)
+        {
+            return None;
+        }
+        // Le transcript a pu bouger pendant l'attente : on n'écrase que ce qu'on a lu.
+        let written = self.with(|s| {
+            if s.transcript == messages {
+                s.transcript = candidate.clone();
+                true
+            } else {
+                false
+            }
+        });
+        if !written {
+            return None;
+        }
+        self.out.emit(Event::Compacted {
+            messages: removal.indices.len(),
+            tokens: removal.tokens,
+            summary_tokens,
+        });
+        Some(candidate)
     }
 
     fn push(&self, message: Message) {

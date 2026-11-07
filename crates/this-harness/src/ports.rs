@@ -1,4 +1,4 @@
-//! Les trois ports par lesquels le harnais touche le monde.
+//! Les ports par lesquels le harnais touche le monde.
 //!
 //! Le harnais ne fait aucune entrée/sortie lui-même : il **appelle**. Un crate
 //! qui décide de son transport est un crate qu'on ne peut pas brancher deux
@@ -10,8 +10,9 @@ use std::rc::Rc;
 use async_trait::async_trait;
 
 use crate::event::Outcome;
-use crate::wire::{Failure, Reply, Request, ToolCall, ToolSpec};
+use crate::wire::{Failure, Message, Reply, Request, ToolCall, ToolSpec};
 use this_agent::evidence::Declaration;
+use this_agent::{Run, Step, Stop};
 
 /// Un fragment de texte poussé vers l'interface **pendant** la lecture du flux.
 ///
@@ -101,6 +102,24 @@ pub trait Toolbox {
         let _ = cancel;
         self.call(call).await
     }
+}
+
+/// Comment le harnais résume ses tours anciens au lieu de les jeter.
+///
+/// POURQUOI un port et pas un appel interne : résumer demande un modèle, donc
+/// une entrée/sortie, et le harnais n'en fait aucune lui-même. L'hôte branche ce
+/// qu'il veut — le même moteur, un modèle moins cher, une extraction sans modèle.
+///
+/// Contrat : recevoir une suite de messages anciens (jamais coupée au milieu d'un
+/// groupe d'outils) et rendre **un** message qui la remplace. Le harnais ne lui
+/// fait pas confiance : un message vide, un `Tool`/`System`, un `Assistant` qui
+/// porte des appels, ou un résumé qui ne coûte pas strictement moins que ce qu'il
+/// remplace est jeté, et l'on retombe sur la jetée pure (voir `Harness::with_compactor`).
+/// Un échec ne tue jamais le tour.
+#[async_trait(?Send)]
+pub trait Compactor {
+    /// Résume une suite de messages anciens en UN message qui la remplace.
+    async fn compact(&self, anciens: &[Message]) -> Result<Message, Failure>;
 }
 
 /// Un [`Toolbox`] fait de plusieurs : l'hôte apporte ses outils, un module
@@ -193,5 +212,87 @@ impl Toolbox for Toolboxes {
             format!("outil inconnu : {}", call.name),
             format!("aucun toolbox ne déclare « {} »", call.name),
         )
+    }
+}
+
+// ---- enregistrement -------------------------------------------------------
+
+/// L'enregistrement d'un run : chaque étape dès qu'elle est mesurée, la fin
+/// dès qu'elle est sue.
+///
+/// Le harnais ne sait pas ce que devient une étape : elle peut être écrite dans
+/// un graphe (obrain), poussée sur un canal, rejouée par un test, ou jetée.
+/// C'est tout l'intérêt du port : la boucle **pousse**, l'hôte **décide**. Un
+/// run qui tourne n'est plus un secret jusqu'à sa fin — un crash, une page
+/// fermée, une interruption laissent les étapes déjà poussées, au lieu d'un
+/// journal entier perdu parce qu'il n'était recollé qu'à la sortie.
+///
+/// `?Send`, comme [`Transport`] et [`Toolbox`] : le trait doit vivre dans une
+/// page (`!Send`) et dans une coquille native.
+///
+/// # Un échec d'enregistrement n'interrompt jamais le run
+///
+/// Les méthodes ne rendent **rien** : la boucle n'a aucun `Result` à propager,
+/// donc aucune raison de s'arrêter parce qu'une écriture a échoué. C'est
+/// l'implémentation (l'hôte) qui avale ses propres erreurs ; le harnais, lui,
+/// n'a même pas la possibilité d'en voir une. La composition [`Recorders`]
+/// pousse chaque événement à toutes les parts, sans s'arrêter si l'une échoue.
+#[async_trait(?Send)]
+pub trait Recorder {
+    /// Une étape vient d'être mesurée. `run` la porte déjà : la boucle a appelé
+    /// `Run::record` juste avant, et `run.steps` la contient — l'hôte qui veut
+    /// écrire le run **partiel** (son `_data`, son décompte de tours) l'a sous
+    /// la main sans rien reconstruire.
+    async fn step(&self, run_id: &str, run: &Run, step: &Step);
+
+    /// Le run s'est arrêté — `run.stop` vaut déjà `stop` (la boucle a appelé
+    /// `Run::finish`). Après cela, plus aucune étape n'arrive pour ce `run_id`.
+    async fn stopped(&self, run_id: &str, run: &Run, stop: &Stop);
+}
+
+/// Un [`Recorder`] fait de plusieurs : l'hôte apporte le sien, un module peut
+/// apporter le sien, et la boucle ne sait pas combien il y en a.
+///
+/// Même composition que [`Toolboxes`] : chaque événement est poussé à toutes
+/// les parts, dans l'ordre d'ajout. Une part qui échoue n'arrête pas les
+/// autres — elle n'a de toute façon rien à rendre (voir [`Recorder`]).
+#[derive(Default)]
+pub struct Recorders {
+    parts: Vec<Rc<dyn Recorder>>,
+}
+
+impl Recorders {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Ajoute un enregistreur (constructeur chaînable).
+    pub fn with(mut self, part: Rc<dyn Recorder>) -> Self {
+        self.parts.push(part);
+        self
+    }
+
+    /// Ajoute un enregistreur à un `Recorders` déjà partagé.
+    pub fn push(&mut self, part: Rc<dyn Recorder>) {
+        self.parts.push(part);
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.parts.is_empty()
+    }
+}
+
+#[async_trait(?Send)]
+impl Recorder for Recorders {
+    async fn step(&self, run_id: &str, run: &Run, step: &Step) {
+        for part in &self.parts {
+            part.step(run_id, run, step).await;
+        }
+    }
+
+    async fn stopped(&self, run_id: &str, run: &Run, stop: &Stop) {
+        for part in &self.parts {
+            part.stopped(run_id, run, stop).await;
+        }
     }
 }
