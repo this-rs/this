@@ -147,10 +147,11 @@ fn secrets(texte: &str) -> Vec<(usize, usize, &'static str)> {
     ];
     for (prefixe, minimum, accepte, motif) in prefixes {
         for (i, _) in texte.match_indices(prefixe) {
-            // `borne` : le caractère d'avant n'est pas de jeton — un `=` (`cle=sk-…`), un
-            // blanc ou un guillemet ouvrent bien un mot.
+            // `borne` : le caractère d'avant n'est pas alphanumérique — `=`, blanc, guillemet, mais
+            // aussi `_` ou `-` (`outil_sk-…`, `x-ghp_…`) : un séparateur collé à une clé ne la
+            // cache pas, il suffisait d'un `_` devant pour qu'elle passe en clair.
             let (octets, n) = suite_coupee(texte, i + prefixe.len(), accepte);
-            if n >= minimum && borne(texte, i, jeton) {
+            if n >= minimum && borne(texte, i, |c| c.is_ascii_alphanumeric()) {
                 trouves.push((i, i + prefixe.len() + octets, motif));
             }
         }
@@ -435,6 +436,24 @@ mod tests {
         }
         let deux = masquer("sk-aaaaaaaaaaaaaaaaaaaaaaaa et ghp_bbbbbbbbbbbbbbbbbbbbbbbb");
         assert_eq!(deux, "[secret masqué] et [secret masqué]");
+    }
+
+    #[test]
+    fn un_separateur_colle_a_une_cle_ne_la_cache_pas() {
+        for texte in [
+            "outil_sk-aaaaaaaaaaaaaaaaaaaaaaaa",
+            "outil-sk-aaaaaaaaaaaaaaaaaaaaaaaa",
+            "x_ghp_bbbbbbbbbbbbbbbbbbbbbbbb",
+            "x-AKIAIOSFODNN7EXAMPLE",
+        ] {
+            assert!(secret_dans(texte).is_some(), "{texte}");
+            let m = masquer(texte);
+            assert!(m.contains(MASQUE), "{texte} -> {m}");
+            assert!(
+                !m.contains("aaaaaaaa") && !m.contains("bbbbbbbb") && !m.contains("IOSFODNN"),
+                "{m}"
+            );
+        }
     }
 
     #[test]

@@ -63,8 +63,8 @@ pub use event::{Event, HintKind, Outcome, Pending, Snapshot};
 pub use ports::{Cancel, Compactor, Delta, Recorder, Recorders, Toolbox, Toolboxes, Transport};
 pub use session::{
     CONTEXT_BUDGET, Clock, Handle, Harness, INTERRUPT_GRACE_MS, KEEP_ALIVE, Limits, MAX_RETRIES,
-    NO_PROGRESS_MS, RETRY_BACKOFF_MS, Running, SILENCE_MS, Shared, Sleep, SystemClock,
-    TOOL_TIMEOUT_MS, TurnContext, out_hash,
+    NO_PROGRESS_MS, RECORDER_TIMEOUT_MS, RETRY_BACKOFF_MS, Running, SILENCE_MS, Shared, Sleep,
+    SystemClock, TOOL_TIMEOUT_MS, TurnContext, out_hash,
 };
 pub use wire::{
     Code, Failure, Finish, ImagePart, ImageSource, Message, Reply, Request, ThreadDefect, ToolCall,

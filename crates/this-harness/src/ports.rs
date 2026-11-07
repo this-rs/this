@@ -41,7 +41,8 @@ impl Cancel {
     pub fn is_cancelled(&self) -> bool {
         self.0.get()
     }
-    /// Remis à zéro au début d'un run : une annulation ne vaut que pour elle.
+    /// Consommé en **fin** de run (jamais au début) : une annulation ne vaut que pour le run
+    /// qui la voit, et une annulation arrivée entre deux runs est vue dès le premier tour du suivant.
     pub fn reset(&self) {
         self.0.set(false);
     }
@@ -158,6 +159,22 @@ impl Toolboxes {
     }
 }
 
+/// Les `specs()` d'une part, isolées : une part qui **panique** est ignorée (liste vide),
+/// elle ne fait pas échouer le routage des autres.
+///
+/// Ce que cela ne protège pas : une part qui **boucle sans fin** dans `specs()` (la méthode
+/// est synchrone, rien ne peut la borner), ni un build `panic = "abort"` (wasm32 inclus),
+/// où la panique n'est pas rattrapable.
+fn part_specs(part: &Rc<dyn Toolbox>) -> Vec<ToolSpec> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| part.specs())).unwrap_or_default()
+}
+
+/// [`part_specs`] pour `declarations()` : même isolation, même limite.
+fn part_declarations(part: &Rc<dyn Toolbox>) -> Vec<Declaration> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| part.declarations()))
+        .unwrap_or_default()
+}
+
 #[async_trait(?Send)]
 impl Toolbox for Toolboxes {
     /// DÉFAUT FERMÉ : deux parts qui exposaient le même nom l'annonçaient deux fois au
@@ -168,7 +185,7 @@ impl Toolbox for Toolboxes {
         let mut vus = std::collections::HashSet::new();
         self.parts
             .iter()
-            .flat_map(|part| part.specs())
+            .flat_map(part_specs)
             .filter(|spec| vus.insert(spec.name.clone()))
             .collect()
     }
@@ -182,7 +199,7 @@ impl Toolbox for Toolboxes {
         let mut proprietaire: std::collections::HashMap<String, usize> =
             std::collections::HashMap::new();
         for (i, part) in self.parts.iter().enumerate() {
-            for spec in part.specs() {
+            for spec in part_specs(part) {
                 proprietaire.entry(spec.name).or_insert(i);
             }
         }
@@ -191,7 +208,7 @@ impl Toolbox for Toolboxes {
             .enumerate()
             .flat_map(|(i, part)| {
                 let proprietaire = &proprietaire;
-                part.declarations()
+                part_declarations(part)
                     .into_iter()
                     .filter(move |x| proprietaire.get(&x.tool) == Some(&i))
             })
@@ -213,7 +230,7 @@ impl Toolbox for Toolboxes {
         // La table de routage, avec le drapeau du run : le premier qui déclare
         // l’outil l’exécute et reçoit l’annulation.
         for part in &self.parts {
-            if part.specs().iter().any(|spec| spec.name == call.name) {
+            if part_specs(part).iter().any(|spec| spec.name == call.name) {
                 return part.call_with_cancel(call, cancel).await;
             }
         }
