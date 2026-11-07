@@ -163,6 +163,50 @@ Trois conséquences pour le contrat, déjà visibles dans le code :
    Android n'a pas de sens ; la bonne réponse est de ne pas l'annoncer dans la
    carte, pas de rendre `internal` à l'appel.
 
+## Le setup de l'app hôte
+
+Une méthode peut exister dans le pont et **échouer quand même** sur l'appareil,
+parce que le *build* de l'app ne lui donne pas ce qu'iOS exige. Trois choses,
+mesurées sur l'Atelier le 08/11/2026.
+
+**1. Les phrases d'usage vivent dans la source du projet, pas dans le plist.**
+`xcodegen` **génère** `Info.plist` à partir de `project.yml`. Quatorze phrases
+avaient été écrites à la main dans le plist : un `xcodegen generate` les efface
+d'un coup, et une app qui demande la caméra sans sa phrase est **tuée** par iOS.
+Elles doivent donc être dans `project.yml` (`info.properties`), et le contrôle se
+fait sur **l'archive**, pas sur la source :
+
+```sh
+plutil -p gen/apple/build/*.xcarchive/Products/Applications/*.app/Info.plist \
+  | grep -c UsageDescription      # 14 attendues
+```
+
+**2. `location_always` demande `UIBackgroundModes: [location]`.** Sans cette clé,
+iOS suspend les mises à jour dès que l'app passe en arrière-plan : la capacité
+est annoncée, elle ne marche pas, et rien ne le dit.
+
+**3. HealthKit et NFC demandent un *entitlement*, et un entitlement ne vit pas
+sur un profil wildcard.** Mesuré en les ajoutant : le build échoue à la
+signature — « Provisioning profile « iOS Team Provisioning Profile: * » doesn't
+include the HealthKit capability ». Avec un profil d'équipe générique,
+`device.health` et `device.nfc` répondront `unavailable` quel que soit le code.
+Pour les activer : un App ID explicite dans le portail Apple avec **HealthKit**
+et **NFC Tag Reading** cochés, puis les clés
+`com.apple.developer.healthkit` et
+`com.apple.developer.nfc.readersession.formats: [NDEF, TAG]` dans les
+entitlements.
+
+Un fichier d'entitlements **vide** est lui-même un piège : Xcode refuse un
+fichier dont le mtime bouge pendant la compilation (« was modified during the
+build »). Sans entitlement à déclarer, ne pas en déclarer du tout.
+
+### Ce que ça implique pour la carte
+
+Une capacité peut être `Live` dans la carte du framework et **impossible dans un
+build donné**. C'est une limite de l'hôte, pas du pont, et c'est à l'hôte de le
+dire — pas à la carte de mentir dans les deux sens. L'Atelier documente son
+propre cas : profil wildcard, donc santé et NFC non signés.
+
 ## Ajouter une méthode
 
 Quatre endroits, dans cet ordre — et les tests de parité vous disent lequel vous
