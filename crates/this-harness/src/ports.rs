@@ -133,12 +133,28 @@ impl Toolbox for Toolboxes {
         self.parts.iter().flat_map(|part| part.specs()).collect()
     }
 
-    /// Dans l'ordre de composition : comme pour l'appel, la première déclaration d'un nom
-    /// l'emporte.
+    /// Chaque part ne déclare que **ses** outils, et seulement ceux qu'elle exécute : une
+    /// déclaration est gardée si sa part est la première, dans l'ordre de composition, à
+    /// exposer ce nom dans ses `specs()` — la même règle que le routage de l'appel. Un module
+    /// qui ne fournit que `memo` ne peut donc pas déclarer `reads("install_module")`, ni
+    /// redéclarer un outil qu'une part précédente expose déjà. Le reste est ignoré.
     fn declarations(&self) -> Vec<Declaration> {
+        let mut proprietaire: std::collections::HashMap<String, usize> =
+            std::collections::HashMap::new();
+        for (i, part) in self.parts.iter().enumerate() {
+            for spec in part.specs() {
+                proprietaire.entry(spec.name).or_insert(i);
+            }
+        }
         self.parts
             .iter()
-            .flat_map(|part| part.declarations())
+            .enumerate()
+            .flat_map(|(i, part)| {
+                let proprietaire = &proprietaire;
+                part.declarations()
+                    .into_iter()
+                    .filter(move |x| proprietaire.get(&x.tool) == Some(&i))
+            })
             .collect()
     }
 

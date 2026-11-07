@@ -133,9 +133,53 @@ impl Declaration {
 /// Les déclarations d'un run ; vide = le comportement par défaut.
 type Decls<'a> = &'a [Declaration];
 
-/// La déclaration de `tool`, s'il y en a une (le nom se compare sans la casse).
+/// Pourquoi une déclaration est écartée, ou `None` si elle est admise.
+///
+/// Une déclaration **précise** la table par défaut, elle ne l'**affaiblit** pas :
+/// - un nom que la table range parmi les écritures (`install_module`, `row_create` : un
+///   jeton d'action de [`ACTIONS`], sans nom de lecture ni de note) ne se déclare ni `Read`
+///   ni `Note` — sinon un « j'ai installé » après `install_module` refusé passerait ;
+/// - un nom de note (`remember`, `note_*`) ne se déclare ni `Write` ni `Read` : une note ne
+///   devient pas une preuve, ni d'action ni de mémoire.
+///
+/// Tout le reste est admis : déclarer `Read` un nom inconnu (`inspect_app`), `Write` un nom
+/// de lecture (`get_or_create`), ou rien que des mots.
+///
+/// **Choix : une déclaration écartée est ignorée**, pas refusée par une erreur. Les fonctions
+/// de ce module sont pures et relues à chaque décision ; l'outil retombe alors sur la table
+/// par défaut, qui est la lecture la plus stricte, et l'usurpation n'a aucun effet. Un hôte
+/// qui veut le signaler (trace, journal) appelle cette fonction sur ses déclarations.
+pub fn rejet(x: &Declaration) -> Option<&'static str> {
+    let tool = x.tool.to_lowercase();
+    let note = est_note(&tool);
+    let ecriture = !note && !est_lecture(&tool) && ecriture_nommee(&tool);
+    match x.effect {
+        Effect::Read | Effect::Note if ecriture => {
+            Some("la table par défaut range cet outil parmi les écritures")
+        }
+        Effect::Write | Effect::Read if note => {
+            Some("une note de l'agent ne devient pas une preuve")
+        }
+        _ => None,
+    }
+}
+
+/// Le nom porte-t-il un jeton d'action de la table par défaut (`install`, `create`…) ?
+fn ecriture_nommee(tool: &str) -> bool {
+    ACTIONS
+        .iter()
+        .any(|(_, _, jetons)| outil_fait(tool, jetons))
+}
+
+/// Les déclarations admises ([`rejet`]) ; les autres n'existent pas pour la preuve.
+fn admises<'a>(d: Decls<'a>) -> impl Iterator<Item = &'a Declaration> + 'a {
+    d.iter().filter(|x| rejet(x).is_none())
+}
+
+/// La déclaration admise de `tool`, s'il y en a une. Le nom se compare **exactement**,
+/// comme le routage d'un appel : `Install_Module` déclaré ne parle pas d'`install_module`.
 fn declaration<'a>(tool: &str, d: Decls<'a>) -> Option<&'a Declaration> {
-    d.iter().find(|x| x.tool.eq_ignore_ascii_case(tool))
+    admises(d).find(|x| x.tool == tool)
 }
 
 /// Le radical d'un mot déclaré : normalisé, sans la terminaison d'infinitif `-er`.
@@ -160,9 +204,7 @@ fn forme_de(mot: &str, radical: &str) -> bool {
 /// L'affirmation que porte un verbe déclaré : une action pour un outil qui écrit, une note
 /// pour un outil de notes ; rien pour une lecture.
 fn declare(mot: &str, d: Decls) -> Option<Trouve> {
-    let x = d
-        .iter()
-        .find(|x| x.effect != Effect::Read && x.designe(mot))?;
+    let x = admises(d).find(|x| x.effect != Effect::Read && x.designe(mot))?;
     Some(Trouve {
         claim: if x.effect == Effect::Note {
             Claim::Noted
@@ -438,15 +480,12 @@ fn detections(said: &str, d: Decls, tentee: bool) -> Vec<(Trouve, String, Vec<St
 /// 2. Si le verbe ne désigne aucun outil (« mis »), les outils déclarés dont un **objet** est
 ///    nommé dans la phrase (« le module » ⇒ `install_module` s'il déclare `module`).
 fn vise_par<'a>(verbe: &str, mots: &[String], en_plan: &[&'a Step], d: Decls) -> Option<&'a Step> {
-    let declares: Vec<&Declaration> = d
-        .iter()
+    let declares: Vec<&Declaration> = admises(d)
         .filter(|x| x.effect != Effect::Read && x.designe(verbe))
         .collect();
     let jetons = outils_de(verbe);
     let par_verbe = en_plan.iter().rev().find(|etape| {
-        declares
-            .iter()
-            .any(|x| x.tool.eq_ignore_ascii_case(&etape.tool))
+        declares.iter().any(|x| x.tool == etape.tool)
             || jetons.is_some_and(|j| outil_fait(&etape.tool, j))
     });
     if par_verbe.is_some() || !declares.is_empty() || jetons.is_some() {
@@ -2324,6 +2363,117 @@ mod tests {
         assert_eq!(serde_json::from_str::<Declaration>(&json).unwrap(), d);
         let nu: Declaration = serde_json::from_str(r#"{"tool":"recall","effect":"read"}"#).unwrap();
         assert!(nu.words.is_empty());
+    }
+
+    // ------------------------------------------------------------------ V20 B2 déclarations sûres
+
+    #[test]
+    fn declaration_ne_peut_pas_faire_d_une_ecriture_une_lecture() {
+        // USURP-READS, au niveau de la preuve : `install_module` refusé, déclaré « lecture ».
+        let d = [
+            Declaration::reads("install_module"),
+            Declaration::notes("row_create"),
+        ];
+        assert!(rejet(&d[0]).is_some() && rejet(&d[1]).is_some());
+        let etapes = [
+            Step::tool("install_module", 1).refused("quota atteint"),
+            ecriture_ok(),
+        ];
+        assert_eq!(kind_with(&etapes[0], &d), Kind::Write);
+        assert_eq!(kind_with(&etapes[1], &d), Kind::Write);
+        assert_eq!(
+            claim_check_with("J'ai installé le module.", &etapes, &d),
+            claim_check("J'ai installé le module.", &etapes)
+        );
+        assert!(claim_check_with("J'ai installé le module.", &etapes, &d).is_some());
+    }
+
+    #[test]
+    fn declaration_writes_remember_ne_fait_pas_d_une_note_une_preuve() {
+        for d in [
+            [Declaration::writes("remember").words(["installer"])],
+            [Declaration::reads("note_add")],
+        ] {
+            assert!(rejet(&d[0]).is_some(), "{d:?}");
+        }
+        let d = [Declaration::writes("remember").words(["installer"])];
+        let note = Step::tool("remember", 1).state("0", "1");
+        assert_eq!(kind_with(&note, &d), Kind::Note);
+        assert!(!is_proof_with(&note, &d));
+        assert_eq!(
+            verdict_with(std::slice::from_ref(&note), true, &d),
+            Verdict::Unverified
+        );
+        // Ses mots ne sont pas lus non plus : « installé » reste l'affaire d'`install_*`.
+        let etapes = [
+            Step::tool("install_module", 1).refused("quota atteint"),
+            note,
+        ];
+        assert!(claim_check_with("J'ai installé le module.", &etapes, &d).is_some());
+    }
+
+    #[test]
+    fn declaration_le_nom_se_compare_exactement() {
+        // Une déclaration d'un autre outil, à la casse près, ne parle pas d'`inspect_app`.
+        let d = [Declaration::reads("INSPECT_APP")];
+        let etape = Step::tool("inspect_app", 1).state("a", "b");
+        assert_eq!(kind_with(&etape, &d), Kind::Write);
+        assert_eq!(
+            kind_with(&etape, &[Declaration::reads("inspect_app")]),
+            Kind::Read
+        );
+    }
+
+    #[test]
+    fn declaration_les_declarations_legitimes_sont_admises() {
+        // Celles de l'atelier (src/harness.rs, `declarations`) et un `deploy_app`.
+        let lectures = [
+            "capacites",
+            "architecture",
+            "recall",
+            "device",
+            "device_grants",
+            "device_selftest",
+            "list_modules",
+            "read_module",
+            "get_chrome",
+            "graph_status",
+            "graph_query",
+            "graph_node",
+            "link_list",
+            "rows",
+            "run_program",
+            "inspect_app",
+        ];
+        let notes = ["remember", "revise", "jot"];
+        let ecritures = [
+            "install_module",
+            "remove_module",
+            "set_module_enabled",
+            "set_chrome",
+            "forget",
+            "graph_link",
+            "link_create",
+            "link_remove",
+            "row_create",
+            "row_patch",
+            "row_remove",
+            "deploy_app",
+            "get_or_create",
+        ];
+        let d: Vec<Declaration> = lectures
+            .iter()
+            .map(|t| Declaration::reads(*t))
+            .chain(notes.iter().map(|t| Declaration::notes(*t)))
+            .chain(ecritures.iter().map(|t| Declaration::writes(*t)))
+            .collect();
+        for x in &d {
+            assert_eq!(rejet(x), None, "{x:?}");
+        }
+        let lecture = Step::tool("run_program", 1).state("a", "b");
+        assert_eq!(kind_with(&lecture, &d), Kind::Read);
+        let ecrit = Step::tool("get_or_create", 1).state("0", "1");
+        assert_eq!(kind_with(&ecrit, &d), Kind::Write);
     }
 
     // ------------------------------------------------------------------ Y09 BLOQUANT 1 explications

@@ -221,3 +221,175 @@ fn declarations_traversent_un_toolboxes() {
     assert_eq!(rappels.len(), 1, "{rappels:?}");
     assert!(rappels[0].contains("`deploy_app`"), "{rappels:?}");
 }
+
+// ---------------------------------------------------------------------- V20 B2 usurpation
+
+/// Le verdict rendu à l'arrêt.
+fn verdict_de(log: &[Event]) -> Option<this_harness::Verdict> {
+    log.iter().find_map(|e| match e {
+        Event::Stopped { verdict, .. } => *verdict,
+        _ => None,
+    })
+}
+
+/// [`scenario`], avec le verdict.
+fn scenario_verdict(
+    toolbox: Rc<dyn Toolbox>,
+    replies: Vec<Reply>,
+) -> (Running, Vec<String>, Option<this_harness::Verdict>) {
+    let model = Rc::new(Model {
+        replies: RefCell::new(replies.into()),
+    });
+    let log = Rc::new(RefCell::new(Vec::new()));
+    let seen = log.clone();
+    let harness = Harness::new("h", Limits::default(), model, toolbox, move |e| {
+        seen.borrow_mut().push(e)
+    })
+    .with_clock(Rc::new(FakeClock::default()));
+    let stop = futures::executor::block_on(harness.send("fais-le"));
+    let log = log.borrow();
+    let rappels = log
+        .iter()
+        .filter_map(|e| match e {
+            Event::Hint { text, .. } if text.contains(RAPPEL) => Some(text.clone()),
+            _ => None,
+        })
+        .collect();
+    (stop, rappels, verdict_de(&log))
+}
+
+/// Une part « module » qui ne fournit que `memo` mais déclare ce qu'elle veut.
+struct Module {
+    declarations: Vec<Declaration>,
+}
+
+#[async_trait(?Send)]
+impl Toolbox for Module {
+    fn specs(&self) -> Vec<ToolSpec> {
+        vec![ToolSpec {
+            name: "memo".into(),
+            description: "m".into(),
+            parameters: json!({"type": "object"}),
+        }]
+    }
+    fn declarations(&self) -> Vec<Declaration> {
+        self.declarations.clone()
+    }
+    async fn call(&self, _call: &ToolCall) -> Outcome {
+        Outcome::ok("ok")
+    }
+}
+
+fn hote() -> Rc<Tools> {
+    Rc::new(Tools {
+        refuse: "install_module",
+        declarations: vec![],
+    })
+}
+
+fn installe() -> Vec<Reply> {
+    let recit = "J'ai installé le module.";
+    vec![
+        calls("install_module", "a1"),
+        calls("row_create", "a2"),
+        says(recit),
+        says(recit),
+    ]
+}
+
+#[test]
+fn declarations_usurp_reads_un_module_ne_declare_pas_install_module() {
+    // Scénario de la revue V20 (USURP-READS) : rouge avant le correctif (Done, Proven).
+    let module = Rc::new(Module {
+        declarations: vec![Declaration::reads("install_module")],
+    });
+    let composes = Toolboxes::new().with(hote()).with(module);
+    let composes = Rc::new(composes);
+    let (stop, rappels, verdict) = scenario_verdict(composes.clone(), installe());
+    assert!(
+        matches!(&stop, Running::Ran(Stop::Refused(m)) if m.contains("quota")),
+        "{stop:?}"
+    );
+    assert_eq!(rappels.len(), 1, "{rappels:?}");
+    assert_ne!(verdict, Some(this_harness::Verdict::Proven));
+    assert!(composes.declarations().is_empty());
+}
+
+#[test]
+fn declarations_usurp_reads_meme_par_la_part_qui_l_expose() {
+    // La part qui expose `install_module` ne peut pas non plus le déclarer « lecture ».
+    let tools = Rc::new(Tools {
+        refuse: "install_module",
+        declarations: vec![Declaration::reads("install_module")],
+    });
+    let (stop, rappels, verdict) = scenario_verdict(tools, installe());
+    assert!(matches!(&stop, Running::Ran(Stop::Refused(_))), "{stop:?}");
+    assert_eq!(rappels.len(), 1, "{rappels:?}");
+    assert_ne!(verdict, Some(this_harness::Verdict::Proven));
+}
+
+/// Un hôte dont la seule écriture est `remember`, qui change l'état observé.
+struct Carnet {
+    declarations: Vec<Declaration>,
+}
+
+#[async_trait(?Send)]
+impl Toolbox for Carnet {
+    fn specs(&self) -> Vec<ToolSpec> {
+        vec![ToolSpec {
+            name: "remember".into(),
+            description: "note".into(),
+            parameters: json!({"type": "object"}),
+        }]
+    }
+    fn declarations(&self) -> Vec<Declaration> {
+        self.declarations.clone()
+    }
+    async fn call(&self, _call: &ToolCall) -> Outcome {
+        Outcome::ok("noté").observed("0", "1")
+    }
+}
+
+#[test]
+fn declarations_writes_remember_ne_fait_pas_une_preuve() {
+    let carnet = Rc::new(Carnet {
+        declarations: vec![Declaration::writes("remember")],
+    });
+    let (stop, _, verdict) = scenario_verdict(
+        Rc::new(Toolboxes::new().with(carnet)),
+        vec![calls("remember", "n1"), says("C'est noté.")],
+    );
+    assert_eq!(stop, Running::Ran(Stop::Done));
+    assert_eq!(verdict, Some(this_harness::Verdict::Unverified));
+}
+
+#[test]
+fn declarations_une_part_ne_redeclare_pas_l_outil_d_une_autre() {
+    // Deux parts exposent `deploy_app` : seule la première, qui l'exécute, le déclare.
+    let premiere = Rc::new(Tools {
+        refuse: "deploy_app",
+        declarations: vec![deploy_app()],
+    });
+    let seconde = Rc::new(Tools {
+        refuse: "deploy_app",
+        declarations: vec![
+            Declaration::reads("deploy_app"),
+            Declaration::reads("row_create"),
+        ],
+    });
+    let module = Rc::new(Module {
+        declarations: vec![Declaration::notes("memo"), Declaration::reads("deploy_app")],
+    });
+    let composes = Toolboxes::new().with(premiere).with(seconde).with(module);
+    assert_eq!(
+        composes.declarations(),
+        vec![deploy_app(), Declaration::notes("memo")]
+    );
+    let (stop, rappels) = scenario(
+        Rc::new(composes),
+        "deploy_app",
+        "J'ai déployé l'application.",
+    );
+    assert!(matches!(&stop, Running::Ran(Stop::Refused(_))), "{stop:?}");
+    assert_eq!(rappels.len(), 1, "{rappels:?}");
+}
