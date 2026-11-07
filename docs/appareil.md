@@ -122,6 +122,47 @@ jamais la phrase lue.
 - **L'adresse d'une position.** `locationReverse` enverrait la position à un
   serveur d'Apple pour un gain cosmétique.
 
+## Les autres systèmes
+
+Le pont n'existe que pour iOS, iPadOS et une partie de macOS. Sur Android,
+Windows, Linux et le Web, la carte ne nomme **aucune** capacité d'appareil — et
+depuis le 08/11/2026 elle le **dit** (`device`, en `Missing`) au lieu de laisser
+un vide que l'agent prendrait pour une ignorance.
+
+Ce tableau n'est pas une feuille de route : c'est ce qu'un pont devrait faire,
+système par système, pour que les mêmes méthodes veuillent dire la même chose.
+Les écarts de **modèle** comptent plus que les écarts d'API.
+
+| Capacité | iOS (fait) | Android | Windows / Linux / Web |
+|---|---|---|---|
+| identifiant d'un appareil Bluetooth | UUID opaque, stable par app | **adresse MAC** | MAC aussi (BlueZ) / opaque (Web Bluetooth) |
+| permission Bluetooth | demandée une fois, par le système | `BLUETOOTH_SCAN` + `BLUETOOTH_CONNECT` (API 31+), **révocables** ; drapeau `neverForLocation` | pas de modèle unifié (BlueZ D-Bus) / geste utilisateur (Web) |
+| caméra, micro | `NSCameraUsageDescription` + permission | `CAMERA`, `RECORD_AUDIO` à l'exécution | manifeste / `getUserMedia` |
+| position | par capacité, `always` séparé | `ACCESS_FINE_LOCATION`, + `ACCESS_BACKGROUND_LOCATION` avec **service au premier plan visible** | géoloc système / `navigator.geolocation` |
+| contacts | lire tout, créer | `READ_CONTACTS` / `WRITE_CONTACTS` (`ContactsContract`) | People API limitée / rien |
+| calendrier | EventKit | `READ_CALENDAR` / `WRITE_CALENDAR` (`CalendarContract`) | rien de standard / rien |
+| santé | HealthKit, lecture seule ici | **Health Connect**, permissions par type, lecture et écriture séparées, app tierce | rien |
+| notifications | poster / retirer / planifier | `POST_NOTIFICATIONS` (API 33+), planification par `AlarmManager`/`WorkManager` — **pas d'équivalent direct** du déclencheur de temps | Windows App SDK / D-Bus / Notification API |
+| activité en direct | Live Activity, Dynamic Island | **aucun équivalent** : au plus une notification de service | aucun / aucune |
+| Face ID | LocalAuthentication | `BiometricPrompt` (classe 3) | Windows Hello / PAM / WebAuthn |
+| parole | reconnaissance sur l'appareil | `SpeechRecognizer` — souvent **sur réseau**, pas de transcription de fichier | rien / Web Speech |
+| NFC | CoreNFC, lecture et écriture | `NfcAdapter`, foreground dispatch, écriture NDEF | rien / Web NFC (Chrome) |
+| réseau local | Bonjour | `NsdManager` (+ `CHANGE_WIFI_MULTICAST_STATE` pour le multicast) | mDNS selon l'OS / pas d'API |
+| presse-papiers | texte, lien, image | texte et URI partout ; image selon la version | texte / API Clipboard (permission) |
+
+Trois conséquences pour le contrat, déjà visibles dans le code :
+
+1. **L'identifiant doit rester opaque à l'appelant.** `bluetoothConnect { id }`
+   prend ce qu'un scan a rendu ; sur iOS c'est un UUID, sur Android une adresse
+   MAC. Un module qui analyserait l'identifiant casserait en changeant de
+   système — c'est pourquoi rien dans le pont ne le laisse deviner.
+2. **Une permission peut être révoquée entre deux appels.** Le pont revérifie à
+   chaque appel et répond `not_authorized` ; il ne met jamais la décision en
+   cache. Sur Android, iOS et le Web, « accordé » n'est pas un état acquis.
+3. **Ce qui n'a pas d'équivalent ne s'annonce pas.** `liveActivityStart` sur
+   Android n'a pas de sens ; la bonne réponse est de ne pas l'annoncer dans la
+   carte, pas de rendre `internal` à l'appel.
+
 ## Ajouter une méthode
 
 Quatre endroits, dans cet ordre — et les tests de parité vous disent lequel vous

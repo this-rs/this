@@ -460,6 +460,20 @@ pub fn surface() -> Surface {
                 &[Ios, Ipados, Macos, Windows, Linux, Android],
                 Status::Live,
             ),
+            // Ce qui reste VRAI sur les autres systèmes, et qu'il faut dire plutôt que de
+            // laisser un vide : le pont natif n'existe que pour iOS, iPadOS et une partie de
+            // macOS. Sans cette entrée, la carte d'un Android ne parlait pas du tout de
+            // l'appareil — l'agent ne pouvait pas distinguer « pas de pont » de « je ne sais
+            // pas », et la seule réponse honnête (« il n'y a pas de pont ici ») n'était écrite
+            // nulle part.
+            Capability::new(
+                "device",
+                Tier::Native,
+                "appareil : aucun pont natif sur cette plateforme — les capacités d'appareil existent sur iOS/iPadOS et, en partie, sur macOS",
+                None,
+                &[Android, Windows, Linux, Web],
+                Status::Missing,
+            ),
             // ---- étage coquille : l'appareil
             //
             // Une entrée par capacité du pont natif (`this_platform::capability::Capability::ALL`),
@@ -999,6 +1013,42 @@ mod tests {
             carte.capability("device.camera.video").unwrap().status,
             Status::Live
         );
+    }
+
+    #[test]
+    fn sur_un_systeme_sans_pont_la_carte_dit_pourquoi() {
+        // Un vide n'est pas une réponse : l'agent doit pouvoir distinguer « pas de pont ici »
+        // de « je ne sais pas ». Mesuré le 08/11/2026 : la carte d'un Android ne nommait
+        // aucune capacité d'appareil, sans un mot pour dire que c'était voulu.
+        for plateforme in [
+            Platform::Android,
+            Platform::Windows,
+            Platform::Linux,
+            Platform::Web,
+        ] {
+            let texte = surface().describe_for(plateforme, usize::MAX);
+            assert!(
+                texte.contains("device\\n") || texte.contains("· device "),
+                "{:?} ne dit rien de l'appareil : {texte}",
+                plateforme
+            );
+            // Et elle ne promet AUCUNE méthode d'appareil sur ces systèmes.
+            for interdit in [
+                "device.contacts",
+                "device.bluetooth",
+                "device.camera.capture",
+            ] {
+                assert!(
+                    !texte.contains(interdit),
+                    "{:?} annonce {interdit}",
+                    plateforme
+                );
+            }
+        }
+        // iOS, lui, les annonce toutes.
+        let ios = surface().describe_for(Platform::Ios, usize::MAX);
+        assert!(ios.contains("device.bluetooth"));
+        assert!(ios.contains("device.camera.capture"));
     }
 
     #[test]
