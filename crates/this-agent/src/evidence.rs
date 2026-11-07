@@ -55,6 +55,10 @@ pub enum Kind {
     Note,
     /// Une action dont l'empreinte avant/après est égale : elle n'a rien fait.
     NoEffect,
+    /// Une exécution hors de notre état : voir [`Effect::Exec`]. Jamais une preuve.
+    Exec,
+    /// Une sortie de la machine : voir [`Effect::Network`]. Jamais une preuve.
+    Network,
 }
 
 /// Ce qu'un outil fait au monde, tel que l'hôte le déclare.
@@ -68,6 +72,12 @@ pub enum Effect {
     Read,
     /// L'agent écrit pour lui-même (`remember`) : jamais une preuve d'action.
     Note,
+    /// Il exécute quelque chose hors de notre état (un binaire, une commande) : cela peut
+    /// tout changer sans que nos empreintes le voient. Jamais une preuve d'écriture.
+    Exec,
+    /// Il sort de la machine (HTTP) : ne prouve rien sur notre état, ni sur ce qui a été
+    /// fait de l'autre côté. Un « 200 » n'est pas une écriture.
+    Network,
 }
 
 /// La déclaration d'un outil par l'hôte : son effet, et les mots qui le désignent dans un
@@ -114,6 +124,16 @@ impl Declaration {
         Self::new(tool, Effect::Note)
     }
 
+    /// Un outil qui exécute hors de notre état (un binaire, une commande).
+    pub fn execs(tool: impl Into<String>) -> Self {
+        Self::new(tool, Effect::Exec)
+    }
+
+    /// Un outil qui sort de la machine (HTTP).
+    pub fn networks(tool: impl Into<String>) -> Self {
+        Self::new(tool, Effect::Network)
+    }
+
     /// Les mots qui désignent l'outil dans un récit.
     pub fn words<I, S>(mut self, words: I) -> Self
     where
@@ -154,13 +174,13 @@ pub fn rejet(x: &Declaration) -> Option<&'static str> {
     let note = est_note(&tool);
     let ecriture = !note && !est_lecture(&tool) && ecriture_nommee(&tool);
     match x.effect {
-        Effect::Read | Effect::Note if ecriture => {
+        Effect::Read | Effect::Note | Effect::Exec | Effect::Network if ecriture => {
             Some("la table par défaut range cet outil parmi les écritures")
         }
-        Effect::Write | Effect::Read if note => {
+        Effect::Write | Effect::Read | Effect::Exec | Effect::Network if note => {
             Some("une note de l'agent ne devient pas une preuve")
         }
-        _ => None,
+        Effect::Write | Effect::Read | Effect::Note | Effect::Exec | Effect::Network => None,
     }
 }
 
@@ -271,14 +291,41 @@ pub fn kind(step: &Step) -> Kind {
     kind_with(step, &[])
 }
 
+/// Le genre de preuve que vaut un effet déclaré.
+///
+/// **La règle d'évidence tient ici, en un seul endroit.** Seul [`Effect::Write`] est une
+/// écriture capable de prouver qu'on a modifié l'état (voir [`is_proof_with`]) : son
+/// empreinte avant/après est l'observation. [`Effect::Read`] et [`Effect::Note`] ne touchent
+/// pas l'état ; [`Effect::Exec`] et [`Effect::Network`] agissent **hors** de nos empreintes
+/// — un binaire lancé ou une requête HTTP qui répond « 200 » ne prouve pas qu'on a écrit
+/// quoi que ce soit, et ne doit jamais blanchir un récit « c'est fait ». Ce `match` est
+/// exhaustif : une nouvelle variante d'[`Effect`] ne retombe jamais sur une écriture par
+/// défaut, elle doit décider ici.
+fn genre(effet: Effect) -> Kind {
+    match effet {
+        Effect::Write => Kind::Write,
+        Effect::Read => Kind::Read,
+        Effect::Note => Kind::Note,
+        Effect::Exec => Kind::Exec,
+        Effect::Network => Kind::Network,
+    }
+}
+
 /// La nature d'une étape, d'après la déclaration de son outil quand l'hôte en a fait une
 /// ([`Declaration`]), et sinon d'après son nom.
 pub fn kind_with(step: &Step, d: &[Declaration]) -> Kind {
     let tool = nom(step);
-    let effet = declaration(&step.tool, d).map(|x| x.effect);
-    if effet == Some(Effect::Note) || (effet.is_none() && est_note(&tool)) {
+    if let Some(effet) = declaration(&step.tool, d).map(|x| x.effect) {
+        // Une écriture déclarée sans empreinte ou dont l'empreinte n'a pas bougé ne prouve
+        // rien ; Exec et Network ne retombent jamais ici : ils n'ont pas d'état à observer.
+        if effet == Effect::Write && !step.before.is_empty() && !step.a_change() {
+            Kind::NoEffect
+        } else {
+            genre(effet)
+        }
+    } else if est_note(&tool) {
         Kind::Note
-    } else if effet == Some(Effect::Read) || (effet.is_none() && est_lecture(&tool)) {
+    } else if est_lecture(&tool) {
         Kind::Read
     } else if !step.before.is_empty() && !step.a_change() {
         Kind::NoEffect
