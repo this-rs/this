@@ -10,6 +10,7 @@ use this_llm::Completion;
 use crate::budget::{Clock, Ledger, Usage};
 use crate::config::{Pricing, ProviderConfig, ProviderId};
 use crate::error::ProviderError;
+use crate::images::{IMAGE_TOKENS_ESTIMATE, count_images, render_openai, without_images};
 use crate::model::{ContextFit, ModelInfo, estimate_tokens, fit, parse_models};
 use crate::secret::Secret;
 
@@ -339,17 +340,29 @@ impl ProviderClient {
 
     /// Fits, reserves, and says which model answers. The reservation is returned, not
     /// held: whoever sends the request owns it, and dropping it gives the budget back.
+    ///
+    /// Also renders the messages in the engine's dialect (images included): a request
+    /// whose images cannot go is refused here, before any network call.
     async fn prepare(
         &self,
         request: &TurnRequest,
-    ) -> Result<(String, u32, Reservation), ProviderError> {
+    ) -> Result<(String, u32, Reservation, Value), ProviderError> {
+        let messages = render_openai(
+            &request.messages,
+            self.config.id.as_str(),
+            self.config.vision,
+        )?;
         let (model, window) = self.resolve_model().await?;
 
-        let mut payload = request.messages.to_string();
+        // An image is counted at a flat estimate, not as the characters of its base64.
+        let images = u32::try_from(count_images(&request.messages)).unwrap_or(u32::MAX);
+        let mut payload = without_images(&request.messages).to_string();
         if let Some(tools) = &request.tools {
             payload.push_str(&tools.to_string());
         }
-        let input = estimate_tokens(&payload).saturating_add(TEMPLATE_OVERHEAD_TOKENS);
+        let input = estimate_tokens(&payload)
+            .saturating_add(TEMPLATE_OVERHEAD_TOKENS)
+            .saturating_add(images.saturating_mul(IMAGE_TOKENS_ESTIMATE));
 
         // An explicit output cap is kept or refused. The default cap is only a ceiling:
         // it shrinks to the room the window leaves after the input, so a small window
@@ -392,15 +405,23 @@ impl ProviderClient {
             reserved: estimate,
             settled: false,
         };
-        Ok((model, max_output, reservation))
+        Ok((model, max_output, reservation, messages))
     }
 
-    /// The JSON body for one request. `stream` asks for server-sent events and the usage
-    /// of the stream, which OpenAI-compatible engines send as a final chunk.
-    fn body(&self, model: &str, request: &TurnRequest, max_output: u32, stream: bool) -> Value {
+    /// The JSON body for one request. `messages` are the ones [`Self::prepare`] rendered.
+    /// `stream` asks for server-sent events and the usage of the stream, which
+    /// OpenAI-compatible engines send as a final chunk.
+    fn body(
+        &self,
+        model: &str,
+        messages: Value,
+        request: &TurnRequest,
+        max_output: u32,
+        stream: bool,
+    ) -> Value {
         let mut body = json!({
             "model": model,
-            "messages": request.messages,
+            "messages": messages,
             "temperature": request.temperature,
             "max_tokens": max_output,
         });
@@ -442,8 +463,8 @@ impl ProviderClient {
 
     /// Sends a conversation (and its tools) and waits for the whole assistant message.
     pub async fn send_turn(&self, request: TurnRequest) -> Result<TurnReply, ProviderError> {
-        let (model, max_output, reservation) = self.prepare(&request).await?;
-        let body = self.body(&model, &request, max_output, false);
+        let (model, max_output, reservation, messages) = self.prepare(&request).await?;
+        let body = self.body(&model, messages, &request, max_output, false);
         // Any error below drops the reservation, which gives the budget back.
         let response = self
             .authorize(self.http.post(self.url("chat/completions")).json(&body))
@@ -497,8 +518,8 @@ impl ProviderClient {
     /// Native targets only: a browser answers in one piece, through [`Self::send_turn`].
     #[cfg(not(target_arch = "wasm32"))]
     pub async fn open_turn(&self, request: TurnRequest) -> Result<Turn, ProviderError> {
-        let (model, max_output, reservation) = self.prepare(&request).await?;
-        let body = self.body(&model, &request, max_output, true);
+        let (model, max_output, reservation, messages) = self.prepare(&request).await?;
+        let body = self.body(&model, messages, &request, max_output, true);
         let response = self
             .authorize(self.http.post(self.url("chat/completions")).json(&body))
             .send()

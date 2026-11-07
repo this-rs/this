@@ -60,7 +60,9 @@ mod wire;
 pub use event::{Event, Outcome, Pending, Snapshot};
 pub use ports::{Cancel, Delta, Toolbox, Toolboxes, Transport};
 pub use session::{Handle, Harness, Limits, Running, Shared};
-pub use wire::{Code, Failure, Finish, Message, Reply, Request, ToolCall, ToolSpec};
+pub use wire::{
+    Code, Failure, Finish, ImagePart, ImageSource, Message, Reply, Request, ToolCall, ToolSpec,
+};
 
 /// Les décisions pures de la boucle, réexportées : un utilisateur du harnais a
 /// besoin de `Stop` et de `Step` pour lire ce que le harnais raconte.
