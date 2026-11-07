@@ -764,8 +764,8 @@ pub fn surface() -> Surface {
             Capability::new(
                 "device.nfc",
                 Tier::Shell,
-                "lire une étiquette NFC une fois (aucune écriture)",
-                Some("nfcStatus / nfcReadOnce"),
+                "lire une étiquette NFC, et lui ÉCRIRE un texte",
+                Some("nfcStatus / nfcReadOnce / nfcWrite"),
                 &[Ios, Ipados],
                 Status::Live,
             ),
