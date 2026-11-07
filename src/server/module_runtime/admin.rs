@@ -6,6 +6,15 @@
 //! | GET | `{prefix}/{name}` | status of one module |
 //! | POST | `{prefix}` | load: `{"module": "<offered name>"}`, `{"manifest": {…descriptor…}}` or `{"store": {"name": "…", "version": "…"}}` |
 //! | DELETE | `{prefix}/{name}` | unload (refused with active dependents) |
+//! | PUT | `{prefix}/{name}` | replace by another version (same body as load; the source must name `{name}`) |
+//! | POST | `{prefix}/_dry_run` | validate a load or replace without publishing (same body as load) |
+//! | GET | `{prefix}/_health/{name}` | health of one module |
+//! | GET | `{prefix}/_descriptors` | descriptors SERVED, views and actions included (what the host draws) |
+//! | GET | `{prefix}/_descriptors/{name}` | the served descriptor of one module |
+//!
+//! `_`-prefixed segments cannot collide with a module name (`^[a-z][a-z0-9_]*$`).
+//! Every refusal is a `ContractError` with a `this.*` code and parameters saying why
+//! (policy refused, hot loading closed, illegal transition…).
 //!
 //! The interface is a layer mounted OUTSIDE the legacy `Authorization` layer (which
 //! would refuse its paths by abstention) and INSIDE authentication: it reads the
@@ -72,38 +81,90 @@ pub async fn admin_middleware(
         None,
         "this.module.admin",
     ) {
-        return ApiError(e).into_response();
+        // Say why: which policy the interface requires.
+        let why = format!(
+            "the module admin interface requires `{:?}`",
+            rt.options.admin_policy
+        );
+        return ApiError(e.with_param("reason", why)).into_response();
     }
 
     let method = request.method().clone();
-    let op = if method == Method::DELETE {
-        "unload"
-    } else {
-        "load"
+    let op = match (&method, rest.as_str()) {
+        (&Method::DELETE, _) => "unload",
+        (&Method::PUT, _) => "replace",
+        (&Method::POST, "_dry_run") => "dry_run",
+        _ => "load",
     };
     if method != Method::GET
         && let Err(e) = rt.ensure_hot_load(op)
     {
         return ApiError(e).into_response();
     }
-    let result = match (method, rest.as_str()) {
-        (Method::GET, "") => Ok((StatusCode::OK, Json(serde_json::json!(rt.list().await)))),
-        (Method::GET, name) if !name.contains('/') => rt
+    let segs: Vec<&str> = rest.split('/').filter(|s| !s.is_empty()).collect();
+    let result = match (&method, segs.as_slice()) {
+        (&Method::GET, []) => Ok((StatusCode::OK, Json(serde_json::json!(rt.list().await)))),
+        (&Method::GET, ["_descriptors"]) => Ok((
+            StatusCode::OK,
+            Json(serde_json::json!(rt.descriptors().await)),
+        )),
+        (&Method::GET, ["_descriptors", name]) => rt
+            .descriptor(name)
+            .await
+            .map(|d| (StatusCode::OK, Json(serde_json::json!(d)))),
+        (&Method::GET, ["_health", name]) => rt
+            .health(name)
+            .await
+            .map(|()| (StatusCode::OK, Json(serde_json::json!({"healthy": true})))),
+        (&Method::GET, [name]) => rt
             .status(name)
             .await
             .map(|s| (StatusCode::OK, Json(serde_json::json!(s)))),
-        (Method::DELETE, name) if !name.is_empty() && !name.contains('/') => rt
+        (&Method::DELETE, [name]) => rt
             .unload(name)
             .await
             .map(|s| (StatusCode::OK, Json(serde_json::json!(s)))),
-        (Method::POST, "") => load(&rt, request)
-            .await
-            .map(|s| (StatusCode::CREATED, Json(serde_json::json!(s)))),
+        (&Method::POST, []) => {
+            match body_of(request)
+                .await
+                .and_then(|b| source_of(&rt, b).map(|x| x.1))
+            {
+                Ok(src) => rt
+                    .load(src)
+                    .await
+                    .map(|s| (StatusCode::CREATED, Json(serde_json::json!(s)))),
+                Err(e) => Err(e),
+            }
+        }
+        (&Method::POST, ["_dry_run"]) => {
+            match body_of(request)
+                .await
+                .and_then(|b| source_of(&rt, b).map(|x| x.1))
+            {
+                Ok(src) => rt
+                    .dry_run(src)
+                    .await
+                    .map(|s| (StatusCode::OK, Json(serde_json::json!(s)))),
+                Err(e) => Err(e),
+            }
+        }
+        (&Method::PUT, [name]) => match body_of(request).await.and_then(|b| source_of(&rt, b)) {
+            Ok((named, _)) if named.as_deref().is_some_and(|n| n != *name) => Err(bad(format!(
+                "the source names `{}`, the path names `{name}`",
+                named.unwrap_or_default()
+            ))),
+            Ok((_, src)) => rt
+                .replace(src)
+                .await
+                .map(|s| (StatusCode::OK, Json(serde_json::json!(s)))),
+            Err(e) => Err(e),
+        },
         // Unsupported method/shape: say so, instead of a misleading `module.not_found`
-        // on an existing module (e.g. `PUT {prefix}/billing`).
-        (m, r) => Err(bad(format!(
-            "`{m} {prefix}/{r}` is not an operation of the module admin interface \
-             (GET/POST {prefix}, GET/DELETE {prefix}/{{name}})"
+        // on an existing module.
+        (m, _) => Err(bad(format!(
+            "`{m} {prefix}/{rest}` is not an operation of the module admin interface \
+             (GET/POST {prefix}, GET/DELETE/PUT {prefix}/{{name}}, POST {prefix}/_dry_run, \
+             GET {prefix}/_descriptors[/{{name}}], GET {prefix}/_health/{{name}})"
         ))),
     };
     match result {
@@ -112,28 +173,46 @@ pub async fn admin_middleware(
     }
 }
 
-async fn load(
-    rt: &Arc<ModuleRuntime>,
-    request: Request,
-) -> Result<super::loader::ModuleStatus, ContractError> {
+async fn body_of(request: Request) -> Result<LoadRequest, ContractError> {
     let bytes = axum::body::to_bytes(request.into_body(), 4 * 1024 * 1024)
         .await
         .map_err(|e| bad(e.to_string()))?;
-    let body: LoadRequest = serde_json::from_slice(&bytes).map_err(|e| bad(e.to_string()))?;
+    serde_json::from_slice(&bytes).map_err(|e| bad(e.to_string()))
+}
+
+/// The source a load / replace / dry-run body designates, and the module name it states
+/// (known without loading for `module`, `store` and a manifest with a `name`).
+fn source_of(
+    rt: &Arc<ModuleRuntime>,
+    body: LoadRequest,
+) -> Result<(Option<String>, ModuleSource), ContractError> {
     match (body.module, body.manifest, body.store) {
-        (Some(name), None, None) => rt.load_offered(&name).await,
-        (None, Some(manifest), None) => rt.load(ModuleSource::Manifest(manifest.to_string())).await,
+        (Some(name), None, None) => {
+            let src = rt.offered(&name).ok_or_else(|| {
+                ContractError::framework(codes::MODULE_NOT_FOUND).with_param("module", &name)
+            })?;
+            Ok((Some(name), src))
+        }
+        (None, Some(manifest), None) => {
+            let named = manifest
+                .get("name")
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            Ok((named, ModuleSource::Manifest(manifest.to_string())))
+        }
         (None, None, Some(s)) => {
             let store = rt
                 .store()
                 .cloned()
                 .ok_or_else(|| bad("no ModuleStore attached to the runtime"))?;
-            rt.load(ModuleSource::Stored {
-                store,
-                name: s.name,
-                version: s.version,
-            })
-            .await
+            Ok((
+                Some(s.name.clone()),
+                ModuleSource::Stored {
+                    store,
+                    name: s.name,
+                    version: s.version,
+                },
+            ))
         }
         _ => Err(bad(
             "exactly one of `module`, `manifest`, `store` is expected",

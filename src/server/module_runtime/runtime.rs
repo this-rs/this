@@ -99,6 +99,61 @@ struct Inner {
     offers: BTreeMap<String, ModuleSource>,
 }
 
+/// One module as the host serves it: its identity, state AND its whole descriptor, views
+/// and actions included. This is what the host reads to draw what a module declares.
+///
+/// Built under the same lock as the catalog composition, so the descriptor listed here is
+/// the one the dispatch table and the catalog serve (no window where a replaced module
+/// shows its old views).
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ServedDescriptor {
+    pub name: String,
+    pub version: String,
+    #[serde(flatten)]
+    pub state: ModuleState,
+    /// `true` for a module compiled into the host at build time.
+    pub builtin: bool,
+    /// The full descriptor (`views` and `actions` included).
+    #[serde(serialize_with = "serialize_descriptor")]
+    pub descriptor: Arc<ModuleDescriptor>,
+}
+
+fn serialize_descriptor<S: serde::Serializer>(
+    d: &Arc<ModuleDescriptor>,
+    s: S,
+) -> Result<S::Ok, S::Error> {
+    serde::Serialize::serialize(d.as_ref(), s)
+}
+
+/// A module the runtime has loaded (name and exact version): what a host persists to
+/// reload its modules at the next start (see [`ModuleRuntime::restore`]).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct LoadedModule {
+    pub name: String,
+    pub version: String,
+}
+
+/// A module `restore` could not reload. Reported, never fatal.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct RestoreFailure {
+    pub name: String,
+    pub version: String,
+    /// `this.module.*` code of the refusal (e.g. `this.module.not_found` when the module
+    /// disappeared from the store).
+    pub code: String,
+}
+
+/// Outcome of [`ModuleRuntime::restore`].
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize)]
+pub struct RestoreReport {
+    /// Reloaded from the store.
+    pub restored: Vec<LoadedModule>,
+    /// Already served at the requested version: nothing to do.
+    pub already_active: Vec<LoadedModule>,
+    /// Could not be reloaded (gone from the store, refused, dependency unsatisfied).
+    pub missing: Vec<RestoreFailure>,
+}
+
 /// Owns a hot-loaded module between `init()` and the publication of the catalog.
 ///
 /// # Why this exists
@@ -293,6 +348,11 @@ impl ModuleRuntime {
         self.lock().offers.insert(name.into(), source);
     }
 
+    /// The source offered under `name`, if any.
+    pub(crate) fn offered(&self, name: &str) -> Option<ModuleSource> {
+        self.lock().offers.get(name).cloned()
+    }
+
     /// Status of every known module (active, draining, unloaded, failed, offered).
     pub async fn list(&self) -> Vec<ModuleStatus> {
         let inner = self.lock();
@@ -367,7 +427,7 @@ impl ModuleRuntime {
             let record = inner.records.get(name).ok_or_else(|| {
                 ContractError::framework(codes::MODULE_NOT_FOUND).with_param("module", name)
             })?;
-            if matches!(record.state, ModuleState::Failed { .. }) {
+            if !matches!(record.state, ModuleState::Active | ModuleState::Draining) {
                 return Err(
                     ContractError::framework(codes::MODULE_UNAVAILABLE).with_param("module", name)
                 );
@@ -382,6 +442,154 @@ impl ModuleRuntime {
             }),
             None => Ok(()),
         }
+    }
+
+    /// Every module the host currently SERVES (`Active` or `Draining`, built-in ones
+    /// included), each with its full descriptor: entities, links, **views and actions**.
+    /// Sorted by name. This is the integration point of the interface: the host reads it
+    /// to draw what each module declares.
+    pub async fn descriptors(&self) -> Vec<ServedDescriptor> {
+        let inner = self.lock();
+        inner
+            .records
+            .iter()
+            .filter(|(_, r)| matches!(r.state, ModuleState::Active | ModuleState::Draining))
+            .map(|(name, r)| Self::served_of(name, r))
+            .collect()
+    }
+
+    /// The served descriptor of one module. `this.module.not_found` if unknown,
+    /// `this.module.unavailable` if known but not served (offered, unloaded, failed).
+    pub async fn descriptor(&self, name: &str) -> Result<ServedDescriptor, ContractError> {
+        let inner = self.lock();
+        let r = inner
+            .records
+            .get(name)
+            .ok_or_else(|| Self::not_found(name))?;
+        if !matches!(r.state, ModuleState::Active | ModuleState::Draining) {
+            return Err(
+                ContractError::framework(codes::MODULE_UNAVAILABLE).with_param("module", name)
+            );
+        }
+        Ok(Self::served_of(name, r))
+    }
+
+    fn served_of(name: &str, r: &Record) -> ServedDescriptor {
+        ServedDescriptor {
+            name: name.to_string(),
+            version: r.descriptor.version.clone(),
+            state: r.state.clone(),
+            builtin: r.builtin,
+            descriptor: r.descriptor.clone(),
+        }
+    }
+
+    fn not_found(name: &str) -> ContractError {
+        ContractError::framework(codes::MODULE_NOT_FOUND).with_param("module", name)
+    }
+
+    /// The hot-loaded modules (name, exact version) currently served: the list a host
+    /// persists to reload its modules at the next start. Built-in modules are not listed
+    /// (the host rebuilds them).
+    pub async fn loaded(&self) -> Vec<LoadedModule> {
+        let inner = self.lock();
+        inner
+            .records
+            .iter()
+            .filter(|(_, r)| {
+                !r.builtin && matches!(r.state, ModuleState::Active | ModuleState::Draining)
+            })
+            .map(|(name, r)| LoadedModule {
+                name: name.clone(),
+                version: r.descriptor.version.clone(),
+            })
+            .collect()
+    }
+
+    /// Reload `wanted` from the attached `ModuleStore` (restart path).
+    ///
+    /// A module gone from the store, refused by the checks, or whose dependency cannot be
+    /// satisfied is REPORTED in [`RestoreReport::missing`] and logged: it never aborts the
+    /// others nor the start of the host. Entries are tried in passes so that a module is
+    /// loaded after the modules it requires, whatever the order of `wanted`; a pass that
+    /// loads nothing ends the attempt (bounded: at most `wanted.len()` passes).
+    pub async fn restore(&self, wanted: &[LoadedModule]) -> RestoreReport {
+        let mut report = RestoreReport::default();
+        let Some(store) = self.store.clone() else {
+            for w in wanted {
+                report.missing.push(RestoreFailure {
+                    name: w.name.clone(),
+                    version: w.version.clone(),
+                    code: codes::MODULE_UNAVAILABLE.to_string(),
+                });
+            }
+            return report;
+        };
+        let mut pending: Vec<&LoadedModule> = Vec::new();
+        for w in wanted {
+            let same = self.lock().records.get(&w.name).is_some_and(|r| {
+                matches!(r.state, ModuleState::Active | ModuleState::Draining)
+                    && r.descriptor.version == w.version
+            });
+            if same {
+                report.already_active.push(w.clone());
+            } else {
+                pending.push(w);
+            }
+        }
+        let mut last_code: HashMap<String, String> = HashMap::new();
+        for _ in 0..wanted.len().max(1) {
+            if pending.is_empty() {
+                break;
+            }
+            let mut still = Vec::new();
+            let mut progress = false;
+            for w in pending {
+                let source = ModuleSource::Stored {
+                    store: store.clone(),
+                    name: w.name.clone(),
+                    version: Some(w.version.clone()),
+                };
+                match self.load(source).await {
+                    Ok(_) => {
+                        progress = true;
+                        report.restored.push(w.clone());
+                    }
+                    Err(e) => {
+                        last_code.insert(w.name.clone(), e.code.as_str().to_string());
+                        let retry = e.code.as_str() == codes::MODULE_DEPENDENCY_MISSING
+                            || e.code.as_str() == codes::MODULE_DEPENDENCY_VERSION;
+                        if retry {
+                            still.push(w);
+                        } else {
+                            report.missing.push(RestoreFailure {
+                                name: w.name.clone(),
+                                version: w.version.clone(),
+                                code: e.code.as_str().to_string(),
+                            });
+                        }
+                    }
+                }
+            }
+            pending = still;
+            if !progress {
+                break;
+            }
+        }
+        for w in pending {
+            report.missing.push(RestoreFailure {
+                name: w.name.clone(),
+                version: w.version.clone(),
+                code: last_code
+                    .get(&w.name)
+                    .cloned()
+                    .unwrap_or_else(|| codes::MODULE_UNAVAILABLE.to_string()),
+            });
+        }
+        for m in &report.missing {
+            tracing::warn!(module = %m.name, version = %m.version, code = %m.code, "restore: module not reloaded");
+        }
+        report
     }
 
     /// Validate a load or replace WITHOUT publishing: check the descriptor, resolve it
@@ -473,9 +681,28 @@ impl ModuleRuntime {
             // inside `activate` on the full active set. Excluding it turned that
             // into an `illegal_transition` further down — a worse message for the
             // same situation.
-            let others = Self::active_descriptors(&inner, None);
-            let refs: Vec<&ModuleDescriptor> = others.iter().map(|a| a.as_ref()).collect();
-            crate::descriptor::resolve::resolve(&[iface.descriptor.as_ref()], &refs).err()
+            // Explicit transition check first: the refusal names BOTH versions and the
+            // way out (`replace`), whichever version is requested.
+            let live = inner
+                .records
+                .get(&name)
+                .filter(|r| matches!(r.state, ModuleState::Active | ModuleState::Draining));
+            if let Some(r) = live {
+                Some(vec![
+                    ContractError::framework(codes::MODULE_DUPLICATE_MODULE)
+                        .with_param("module", name.clone())
+                        .with_param("loaded_version", r.descriptor.version.clone())
+                        .with_param("requested_version", iface.descriptor.version.clone())
+                        .with_param(
+                            "hint",
+                            "use replace to move a loaded module to another version",
+                        ),
+                ])
+            } else {
+                let others = Self::active_descriptors(&inner, None);
+                let refs: Vec<&ModuleDescriptor> = others.iter().map(|a| a.as_ref()).collect();
+                crate::descriptor::resolve::resolve(&[iface.descriptor.as_ref()], &refs).err()
+            }
         };
         if let Some(issues) = resolve_error {
             let err = one_error(issues);
@@ -663,7 +890,7 @@ impl ModuleRuntime {
 
         // Compose with the candidate as active; nothing is published on error.
         let gate = Arc::new(Gate::new());
-        let mut candidate = Record {
+        let candidate = Record {
             descriptor: d.clone(),
             state: ModuleState::Active,
             builtin: false,
@@ -677,10 +904,10 @@ impl ModuleRuntime {
         let (catalog, table) = match composed {
             Ok(x) => x,
             Err(e) => {
-                let mut c = inner.records.remove(&d.name).expect("just inserted");
+                let candidate = inner.records.remove(&d.name);
                 if let Some(p) = previous {
                     inner.records.insert(d.name.clone(), p);
-                } else {
+                } else if let Some(mut c) = candidate {
                     c.state = ModuleState::Failed {
                         code: e.code.clone(),
                         at: now(),
@@ -692,9 +919,9 @@ impl ModuleRuntime {
             }
         };
         state.transition(ModuleState::Active)?;
-        candidate = inner.records.remove(&d.name).expect("just inserted");
-        candidate.state = state;
-        inner.records.insert(d.name.clone(), candidate);
+        if let Some(c) = inner.records.get_mut(&d.name) {
+            c.state = state;
+        }
 
         let published = self.parts.catalog.publish(catalog);
         self.table.store(Arc::new(table));
@@ -704,7 +931,11 @@ impl ModuleRuntime {
             version: d.version.clone(),
             generation: published.generation,
         });
-        Ok(Self::status_of(&d.name, &inner.records[&d.name]))
+        let r = inner
+            .records
+            .get(&d.name)
+            .ok_or_else(|| Self::not_found(&d.name))?;
+        Ok(Self::status_of(&d.name, r))
     }
 
     /// Unload a module: refused while an active module requires it
@@ -727,7 +958,10 @@ impl ModuleRuntime {
         guard.disarm();
 
         let mut inner = self.lock();
-        let r = inner.records.get_mut(name).expect("checked");
+        let r = inner
+            .records
+            .get_mut(name)
+            .ok_or_else(|| Self::not_found(name))?;
         r.state.transition(ModuleState::Unloaded)?;
         let saved_iface = r.iface.take();
         let (catalog, table) = match self.compose(&inner) {
@@ -736,10 +970,11 @@ impl ModuleRuntime {
                 // Compose failed: the module must stay served, coherently. Back to `Active`
                 // with its interface and a fresh gate (the old one was cancelled), and the
                 // dispatch table recomposed WITHOUT the draining state.
-                let r = inner.records.get_mut(name).expect("checked");
-                r.state = ModuleState::Active;
-                r.iface = saved_iface;
-                r.gate = Arc::new(Gate::new());
+                if let Some(r) = inner.records.get_mut(name) {
+                    r.state = ModuleState::Active;
+                    r.iface = saved_iface;
+                    r.gate = Arc::new(Gate::new());
+                }
                 if let Ok((_, table)) = self.compose(&inner) {
                     self.table.store(Arc::new(table));
                 }
@@ -753,9 +988,13 @@ impl ModuleRuntime {
         let published = self.parts.catalog.publish(catalog);
         self.table.store(Arc::new(table));
         self.parts.locales.remove_module(name);
-        let version = inner.records[name].descriptor.version.clone();
-        let lifecycle = inner.records[name].lifecycle.clone();
-        let status = Self::status_of(name, &inner.records[name]);
+        let r = inner
+            .records
+            .get(name)
+            .ok_or_else(|| Self::not_found(name))?;
+        let version = r.descriptor.version.clone();
+        let lifecycle = r.lifecycle.clone();
+        let status = Self::status_of(name, r);
         // Release the state lock before the `stop` hook (never hold the sync mutex across
         // an await).
         drop(inner);
@@ -820,7 +1059,10 @@ impl ModuleRuntime {
 
         // Draining: dispatch answers 503 for this module from now on.
         let gate = {
-            let r = inner.records.get_mut(name).expect("checked");
+            let r = inner
+                .records
+                .get_mut(name)
+                .ok_or_else(|| Self::not_found(name))?;
             r.state.transition(ModuleState::Draining)?;
             r.gate.clone()
         };
@@ -830,7 +1072,9 @@ impl ModuleRuntime {
                 Ok(gate)
             }
             Err(e) => {
-                inner.records.get_mut(name).expect("checked").state = ModuleState::Active;
+                if let Some(r) = inner.records.get_mut(name) {
+                    r.state = ModuleState::Active;
+                }
                 Err(e)
             }
         }
@@ -919,7 +1163,9 @@ impl ModuleRuntime {
         let mut inner = self.lock();
         // The validations above ran before `start()`; `self.ops` is still held, so
         // the record is the same one. Only the swap is left.
-        let old = inner.records.remove(&d.name).expect("validated above");
+        let Some(old) = inner.records.remove(&d.name) else {
+            return Err(Self::not_found(&d.name));
+        };
         let from = old.descriptor.version.clone();
         let old_lifecycle = old.lifecycle.clone();
         inner.records.insert(
@@ -977,7 +1223,11 @@ impl ModuleRuntime {
             to: d.version.clone(),
             generation: published.generation,
         });
-        Ok(Self::status_of(&d.name, &inner.records[&d.name]))
+        let r = inner
+            .records
+            .get(&d.name)
+            .ok_or_else(|| Self::not_found(&d.name))?;
+        Ok(Self::status_of(&d.name, r))
     }
 
     /// A runtime module's REST router behind the descriptor validation layer. The dispatch
@@ -1303,5 +1553,571 @@ mod tests {
         assert_eq!(bundles.len(), 1);
         assert_eq!(bundles[0].module, "bundled");
         assert_eq!(bundles[0].get(&MessageKey::new("hello")), Some("bonjour"));
+    }
+
+    // ── lifecycle, atomicity, drain, restart, served descriptors ───────────────
+
+    fn billing_v(version: &str) -> ModuleDescriptor {
+        let mut d = billing();
+        d.version = version.into();
+        d
+    }
+
+    /// `billing` plus one declared view reading `invoice`.
+    fn billing_with_view(version: &str) -> ModuleDescriptor {
+        let mut d = billing_v(version);
+        let view: crate::descriptor::ViewDesc = serde_json::from_value(serde_json::json!({
+            "name": "invoices", "surface": "main", "title": format!("Invoices {version}"),
+            "root": {"type": "leaf", "brick": {"type": "list", "entity": "invoice", "label": "amount"}}
+        }))
+        .expect("view json");
+        d.views.push(view);
+        d.normalize();
+        d
+    }
+
+    fn manifest_of(d: &ModuleDescriptor) -> ModuleSource {
+        ModuleSource::Manifest(d.to_json_pretty())
+    }
+
+    fn open_host(builder: ServerBuilder) -> (Arc<crate::server::host::ServerHost>, axum::Router) {
+        let host = Arc::new(
+            builder
+                .with_link_service(InMemoryLinkService::new())
+                .with_module_runtime_options(RuntimeOptions {
+                    hot_load_enabled: true,
+                    admin_policy: PolicyExpr::Public,
+                    drain_grace: Duration::from_millis(2000),
+                    ..Default::default()
+                })
+                .without_authorization()
+                .build_host()
+                .expect("host"),
+        );
+        let app = RestExposure::build_router(host.clone(), vec![]).expect("router");
+        (host, app)
+    }
+
+    async fn call_json(
+        app: &axum::Router,
+        method: Method,
+        uri: &str,
+        body: Option<serde_json::Value>,
+    ) -> (StatusCode, serde_json::Value) {
+        let req = Request::builder().method(method).uri(uri);
+        let req = match body {
+            Some(b) => req
+                .header("content-type", "application/json")
+                .body(Body::from(b.to_string())),
+            None => req.body(Body::empty()),
+        }
+        .expect("request");
+        let res = app.clone().oneshot(req).await.expect("response");
+        let status = res.status();
+        let bytes = axum::body::to_bytes(res.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        let v = serde_json::from_slice(&bytes)
+            .unwrap_or_else(|_| serde_json::Value::String(String::from_utf8_lossy(&bytes).into()));
+        (status, v)
+    }
+
+    #[tokio::test]
+    async fn served_descriptors_carry_views_and_follow_load_replace_unload() {
+        let (host, _app) = open_host(ServerBuilder::new());
+        let rt = host.module_runtime.clone().expect("runtime");
+        assert!(rt.descriptors().await.is_empty());
+
+        rt.load(manifest_of(&billing_with_view("1.0.0")))
+            .await
+            .expect("load");
+        let served = rt.descriptors().await;
+        assert_eq!(served.len(), 1);
+        assert_eq!(served[0].version, "1.0.0");
+        assert_eq!(served[0].descriptor.views.len(), 1, "views are served");
+        assert_eq!(
+            served[0].descriptor.views[0].title.as_deref(),
+            Some("Invoices 1.0.0")
+        );
+
+        rt.replace(manifest_of(&billing_with_view("1.1.0")))
+            .await
+            .expect("replace");
+        let d = rt.descriptor("billing").await.expect("served");
+        assert_eq!(
+            (d.version.as_str(), d.descriptor.views[0].title.as_deref()),
+            ("1.1.0", Some("Invoices 1.1.0")),
+            "the replaced module shows its NEW views"
+        );
+
+        rt.unload("billing").await.expect("unload");
+        assert!(rt.descriptors().await.is_empty());
+        assert_eq!(
+            rt.descriptor("billing").await.unwrap_err().code.as_str(),
+            "this.module.unavailable"
+        );
+        assert_eq!(
+            rt.descriptor("ghost").await.unwrap_err().code.as_str(),
+            "this.module.not_found"
+        );
+    }
+
+    #[tokio::test]
+    async fn admin_serves_descriptors_dry_run_replace_and_health() {
+        let (host, app) = open_host(ServerBuilder::new());
+        let rt = host.module_runtime.clone().expect("runtime");
+        let v1 = serde_json::to_value(billing_with_view("1.0.0")).expect("json");
+        let v2 = serde_json::to_value(billing_with_view("1.1.0")).expect("json");
+
+        let (s, _) = call_json(
+            &app,
+            Method::POST,
+            "/admin/modules",
+            Some(serde_json::json!({"manifest": v1})),
+        )
+        .await;
+        assert_eq!(s, StatusCode::CREATED);
+
+        let (s, v) = call_json(&app, Method::GET, "/admin/modules/_descriptors", None).await;
+        assert_eq!(s, StatusCode::OK);
+        assert_eq!(v[0]["name"], "billing");
+        assert_eq!(v[0]["descriptor"]["views"][0]["name"], "invoices");
+        assert_eq!(v[0]["state"], "active");
+
+        let (s, v) = call_json(
+            &app,
+            Method::GET,
+            "/admin/modules/_descriptors/billing",
+            None,
+        )
+        .await;
+        assert_eq!((s, v["version"].clone()), (StatusCode::OK, "1.0.0".into()));
+        let (s, v) = call_json(&app, Method::GET, "/admin/modules/_descriptors/ghost", None).await;
+        assert_eq!(
+            (s, v["code"].clone()),
+            (StatusCode::NOT_FOUND, "this.module.not_found".into())
+        );
+
+        let (s, _) = call_json(&app, Method::GET, "/admin/modules/_health/billing", None).await;
+        assert_eq!(s, StatusCode::OK);
+
+        // dry_run publishes nothing.
+        let (s, v) = call_json(
+            &app,
+            Method::POST,
+            "/admin/modules/_dry_run",
+            Some(serde_json::json!({"manifest": v2.clone()})),
+        )
+        .await;
+        assert_eq!((s, v["state"].clone()), (StatusCode::OK, "resolved".into()));
+        assert_eq!(rt.descriptor("billing").await.expect("d").version, "1.0.0");
+
+        // PUT names another module than the source: refused, nothing changes.
+        let (s, v) = call_json(
+            &app,
+            Method::PUT,
+            "/admin/modules/crm",
+            Some(serde_json::json!({"manifest": v2.clone()})),
+        )
+        .await;
+        assert_eq!(
+            (s, v["code"].clone()),
+            (StatusCode::BAD_REQUEST, "this.transport.bad_request".into())
+        );
+        assert_eq!(rt.descriptor("billing").await.expect("d").version, "1.0.0");
+
+        let (s, v) = call_json(
+            &app,
+            Method::PUT,
+            "/admin/modules/billing",
+            Some(serde_json::json!({"manifest": v2})),
+        )
+        .await;
+        assert_eq!((s, v["version"].clone()), (StatusCode::OK, "1.1.0".into()));
+        assert_eq!(rt.descriptor("billing").await.expect("d").version, "1.1.0");
+
+        // An unknown module id is not a module name.
+        let (s, v) = call_json(&app, Method::GET, "/admin/modules/_health/ghost", None).await;
+        assert_eq!(
+            (s, v["code"].clone()),
+            (StatusCode::NOT_FOUND, "this.module.not_found".into())
+        );
+    }
+
+    #[tokio::test]
+    async fn admin_closed_by_default_says_why() {
+        // Default options: admin_only, hot loading closed.
+        let host = Arc::new(
+            ServerBuilder::new()
+                .with_link_service(InMemoryLinkService::new())
+                .with_module_runtime()
+                .without_authorization()
+                .build_host()
+                .expect("host"),
+        );
+        let app = RestExposure::build_router(host, vec![]).expect("router");
+        let body = serde_json::json!({"manifest": serde_json::to_value(billing()).expect("json")});
+        let (s, v) = call_json(
+            &app,
+            Method::PUT,
+            "/admin/modules/billing",
+            Some(body.clone()),
+        )
+        .await;
+        // Anonymous caller: refused by the admin policy, and the body says which one.
+        assert_eq!(s, StatusCode::UNAUTHORIZED, "{v}");
+        assert!(
+            v.to_string().contains("admin_only") || v.to_string().contains("AdminOnly"),
+            "refusal explains the policy: {v}"
+        );
+    }
+
+    #[tokio::test]
+    async fn hot_load_closed_refuses_replace_and_dry_run_with_the_operation() {
+        let host = Arc::new(
+            ServerBuilder::new()
+                .with_link_service(InMemoryLinkService::new())
+                .with_module_runtime_options(RuntimeOptions {
+                    admin_policy: PolicyExpr::Public,
+                    ..Default::default()
+                })
+                .without_authorization()
+                .build_host()
+                .expect("host"),
+        );
+        let app = RestExposure::build_router(host, vec![]).expect("router");
+        let body = serde_json::json!({"manifest": serde_json::to_value(billing()).expect("json")});
+        for (m, uri, op) in [
+            (Method::PUT, "/admin/modules/billing", "replace"),
+            (Method::POST, "/admin/modules/_dry_run", "dry_run"),
+        ] {
+            let (s, v) = call_json(&app, m, uri, Some(body.clone())).await;
+            assert_eq!(v["code"], "this.module.hot_load_disabled", "{op}: {v}");
+            assert!(v.to_string().contains(op), "names the operation: {v}");
+            assert_ne!(s, StatusCode::OK);
+        }
+        // Reading stays possible.
+        let (s, _) = call_json(&app, Method::GET, "/admin/modules/_descriptors", None).await;
+        assert_eq!(s, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn invalid_lifecycle_transitions_are_refused_with_named_codes() {
+        let (host, _app) = open_host(ServerBuilder::new());
+        let rt = host.module_runtime.clone().expect("runtime");
+        let code = |e: ContractError| e.code.as_str().to_string();
+
+        // Nothing loaded: unload / replace / health on an absent module.
+        assert_eq!(
+            code(rt.unload("billing").await.unwrap_err()),
+            "this.module.not_found"
+        );
+        assert_eq!(
+            code(
+                rt.replace(manifest_of(&billing_v("2.0.0")))
+                    .await
+                    .unwrap_err()
+            ),
+            "this.module.not_found",
+            "replace of a module never loaded"
+        );
+        assert_eq!(
+            code(rt.health("billing").await.unwrap_err()),
+            "this.module.not_found"
+        );
+
+        rt.load(manifest_of(&billing_v("1.0.0")))
+            .await
+            .expect("load");
+        // Double load, same and another version: refused, the loaded one is untouched.
+        let e = rt.load(manifest_of(&billing_v("1.0.0"))).await.unwrap_err();
+        assert_eq!(e.code.as_str(), "this.module.duplicate_module");
+        let e = rt.load(manifest_of(&billing_v("2.0.0"))).await.unwrap_err();
+        assert_eq!(e.code.as_str(), "this.module.duplicate_module");
+        assert!(
+            format!("{:?}", e.params).contains("loaded_version"),
+            "{:?}",
+            e.params
+        );
+        let st = rt.status("billing").await.expect("status");
+        assert_eq!(
+            (st.state, st.version.as_str()),
+            (ModuleState::Active, "1.0.0")
+        );
+
+        rt.unload("billing").await.expect("unload");
+        // Unload twice, replace and health of an unloaded module.
+        assert_eq!(
+            code(rt.unload("billing").await.unwrap_err()),
+            "this.module.illegal_transition"
+        );
+        assert_eq!(
+            code(
+                rt.replace(manifest_of(&billing_v("2.0.0")))
+                    .await
+                    .unwrap_err()
+            ),
+            "this.module.unavailable"
+        );
+        assert_eq!(
+            code(rt.health("billing").await.unwrap_err()),
+            "this.module.unavailable"
+        );
+        // And it can be loaded again (Unloaded -> Discovered -> ... -> Active).
+        rt.load(manifest_of(&billing_v("2.0.0")))
+            .await
+            .expect("reload");
+    }
+
+    #[tokio::test]
+    async fn failed_load_after_partial_composition_leaves_the_host_unchanged() {
+        let (host, app) = open_host(ServerBuilder::new());
+        let rt = host.module_runtime.clone().expect("runtime");
+        rt.load(manifest_of(&billing_v("1.0.0")))
+            .await
+            .expect("billing");
+        let before = host.catalog.load().generation;
+
+        // `shop` declares two entities; the 2nd one repeats billing's plural. Whichever
+        // check catches it, no entity of `shop` may stay registered.
+        let mut shop = ModuleDescriptor::new("shop", "1.0.0");
+        let mut order = EntityDesc::new("order");
+        order.fields.push(FieldDesc::new("amount", FieldType::F64));
+        let mut dup = EntityDesc::new("bill");
+        dup.plural = "invoices".into();
+        for e in [&mut order, &mut dup] {
+            for op in Operation::CRUD {
+                e.permissions.ops.insert(op, PolicyExpr::Authenticated);
+            }
+        }
+        shop.entities.push(order);
+        shop.entities.push(dup);
+        let err = rt.load(manifest_of(&shop)).await.unwrap_err();
+        assert!(
+            err.code.as_str().starts_with("this.module."),
+            "{}",
+            err.code.as_str()
+        );
+
+        assert_eq!(host.catalog.load().generation, before, "nothing published");
+        assert!(host.catalog.load().entity_of_plural("orders").is_none());
+        assert!(
+            get(&app, "/orders").await.is_client_error(),
+            "never registered: not served"
+        );
+        assert!(rt.descriptors().await.iter().all(|d| d.name != "shop"));
+        assert_eq!(
+            get(&app, "/invoices").await,
+            StatusCode::OK,
+            "billing still served"
+        );
+    }
+
+    #[tokio::test]
+    async fn load_failing_in_composition_registers_nothing_and_can_be_retried() {
+        let (host, app) = open_host(ServerBuilder::new());
+        let rt = host.module_runtime.clone().expect("runtime");
+        let before = host.catalog.load().generation;
+
+        // The 1st compose of the load fails: after the candidate was put in place.
+        rt.fail_compose_at
+            .store(1, std::sync::atomic::Ordering::SeqCst);
+        let err = rt.load(manifest_of(&billing_v("1.0.0"))).await.unwrap_err();
+        assert_eq!(err.code.as_str(), "this.internal");
+        assert_eq!(host.catalog.load().generation, before);
+        assert!(host.catalog.load().entity_of_plural("invoices").is_none());
+        assert!(get(&app, "/invoices").await.is_client_error(), "not served");
+        assert!(rt.descriptors().await.is_empty());
+        assert!(rt.loaded().await.is_empty());
+        let st = rt.status("billing").await.expect("recorded");
+        assert!(
+            matches!(st.state, ModuleState::Failed { .. }),
+            "{:?}",
+            st.state
+        );
+
+        // Failed -> Discovered -> ... -> Active.
+        rt.load(manifest_of(&billing_v("1.0.0")))
+            .await
+            .expect("retry");
+        assert_eq!(get(&app, "/invoices").await, StatusCode::OK);
+    }
+
+    /// Loader of a module whose `/invoices` handler waits for `release`.
+    struct SlowLoader {
+        release: Arc<tokio::sync::Notify>,
+    }
+
+    #[async_trait::async_trait]
+    impl ModuleLoader for SlowLoader {
+        async fn load(&self, _: &ModuleSource) -> Result<ModuleInterface, ContractError> {
+            let release = self.release.clone();
+            let routes = axum::Router::new().route(
+                "/invoices",
+                axum::routing::get(move || {
+                    let release = release.clone();
+                    async move {
+                        release.notified().await;
+                        "done"
+                    }
+                }),
+            );
+            Ok(ModuleInterface {
+                descriptor: Arc::new(billing()),
+                fetchers: Default::default(),
+                creators: Default::default(),
+                routes: Some(routes),
+                links_config: LinksConfig {
+                    entities: vec![],
+                    links: vec![],
+                    validation_rules: None,
+                    events: None,
+                    sinks: None,
+                    auth: None,
+                },
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn in_flight_request_finishes_within_grace_before_unload_completes() {
+        let release = Arc::new(tokio::sync::Notify::new());
+        let (host, app) = open_host(ServerBuilder::new().with_module_loader(Arc::new(
+            SlowLoader {
+                release: release.clone(),
+            },
+        )));
+        let rt = host.module_runtime.clone().expect("runtime");
+        rt.load(ModuleSource::Manifest(String::new()))
+            .await
+            .expect("load");
+
+        let in_flight = {
+            let app = app.clone();
+            tokio::spawn(async move { call_json(&app, Method::GET, "/invoices", None).await })
+        };
+        tokio::time::sleep(Duration::from_millis(60)).await;
+        let unloading = {
+            let rt = rt.clone();
+            tokio::spawn(async move { rt.unload("billing").await })
+        };
+        tokio::time::sleep(Duration::from_millis(60)).await;
+        // Draining: new requests are refused cleanly, the module is not gone yet.
+        let (s, v) = call_json(&app, Method::GET, "/invoices", None).await;
+        assert_eq!(
+            (s, v["code"].clone()),
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "this.module.unavailable".into()
+            )
+        );
+        assert!(
+            !unloading.is_finished(),
+            "unload waits for the in-flight request"
+        );
+        assert_eq!(
+            rt.status("billing").await.expect("s").state,
+            ModuleState::Draining
+        );
+
+        let started = std::time::Instant::now();
+        release.notify_waiters();
+        let st = tokio::time::timeout(Duration::from_millis(1500), unloading)
+            .await
+            .expect("unload ends well before the 2 s grace")
+            .expect("join")
+            .expect("unload");
+        assert_eq!(st.state, ModuleState::Unloaded);
+        assert!(started.elapsed() < Duration::from_millis(1500));
+        // The request that was in flight was served to the end, not cut.
+        let (s, v) = in_flight.await.expect("join");
+        assert_eq!(
+            (s, v),
+            (StatusCode::OK, serde_json::Value::String("done".into()))
+        );
+        assert_eq!(get(&app, "/invoices").await, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn restore_reloads_from_store_in_dependency_order_and_reports_missing() {
+        use crate::storage::vfs::{InMemoryVfs, ModuleStore, VfsModuleStore};
+        let store: Arc<dyn ModuleStore> =
+            Arc::new(VfsModuleStore::new(Arc::new(InMemoryVfs::new())));
+        let mut crm = ModuleDescriptor::new("crm", "1.0.0");
+        crm.requires.push(crate::descriptor::ModuleReq {
+            name: "billing".into(),
+            version: "^1".into(),
+            optional: false,
+        });
+        let mut customer = EntityDesc::new("customer");
+        customer
+            .fields
+            .push(FieldDesc::new("name", FieldType::String));
+        for op in Operation::CRUD {
+            customer
+                .permissions
+                .ops
+                .insert(op, PolicyExpr::Authenticated);
+        }
+        crm.entities.push(customer);
+        crm.normalize();
+        store
+            .put(&billing_v("1.0.0"), &[])
+            .await
+            .expect("put billing");
+        store.put(&crm, &[]).await.expect("put crm");
+
+        let (host, app) = open_host(ServerBuilder::new().with_module_store(store));
+        let rt = host.module_runtime.clone().expect("runtime");
+        let wanted = vec![
+            LoadedModule {
+                name: "crm".into(),
+                version: "1.0.0".into(),
+            },
+            LoadedModule {
+                name: "ghost".into(),
+                version: "1.0.0".into(),
+            },
+            LoadedModule {
+                name: "billing".into(),
+                version: "1.0.0".into(),
+            },
+        ];
+        let report = rt.restore(&wanted).await;
+        assert_eq!(report.restored.len(), 2, "{report:?}");
+        assert_eq!(report.missing.len(), 1, "{report:?}");
+        assert_eq!(report.missing[0].name, "ghost");
+        assert!(report.missing[0].code.starts_with("this."), "{report:?}");
+        assert_eq!(get(&app, "/invoices").await, StatusCode::OK);
+        assert_eq!(
+            rt.loaded().await,
+            vec![
+                LoadedModule {
+                    name: "billing".into(),
+                    version: "1.0.0".into()
+                },
+                LoadedModule {
+                    name: "crm".into(),
+                    version: "1.0.0".into()
+                },
+            ]
+        );
+        // A second restore is a no-op: everything is already served.
+        let again = rt.restore(&wanted[..1]).await;
+        assert_eq!((again.restored.len(), again.already_active.len()), (0, 1));
+    }
+
+    #[tokio::test]
+    async fn restore_without_store_reports_every_module_and_does_not_panic() {
+        let (host, _app) = open_host(ServerBuilder::new());
+        let rt = host.module_runtime.clone().expect("runtime");
+        let report = rt
+            .restore(&[LoadedModule {
+                name: "billing".into(),
+                version: "1.0.0".into(),
+            }])
+            .await;
+        assert_eq!(report.missing.len(), 1);
+        assert_eq!(report.missing[0].code, "this.module.unavailable");
     }
 }
