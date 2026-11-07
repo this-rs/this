@@ -1,5 +1,9 @@
 //! Banc de l'approbation : une composition modifiée après approbation est refusée,
-//! et une approbation écrite par le document seul ne vaut rien.
+//! et une approbation écrite par le document seul ne vaut rien. Le digest de contenu
+//! d'un emplacement épingle les octets du module : republié sous la même version,
+//! il est refusé et **nommé**.
+
+use std::collections::BTreeMap;
 
 use this_agent::approval::Approval;
 use this_agent::graph::{HarnessDoc, Slot, SlotKind};
@@ -11,6 +15,7 @@ fn slot(kind: SlotKind, module: &str, version: &str) -> Slot {
         module: module.into(),
         version: version.into(),
         entry: "main".into(),
+        digest: None,
     }
 }
 
@@ -35,11 +40,26 @@ fn doc() -> HarnessDoc {
     }
 }
 
+/// Une composition dont chaque emplacement épingle le contenu de son module.
+fn doc_avec_digests() -> HarnessDoc {
+    let mut d = doc();
+    d.slots[0].digest = Some("d0".into());
+    d.slots[1].digest = Some("d1".into());
+    d
+}
+
 fn approuve(mut d: HarnessDoc, par: &str) -> (HarnessDoc, Vec<Approval>) {
+    // L'hôte épingle ce qu'il a chargé : chaque digest de contenu, par module.
+    let digests: BTreeMap<String, String> = d
+        .slots
+        .iter()
+        .filter_map(|s| s.digest.as_ref().map(|g| (s.module.clone(), g.clone())))
+        .collect();
     let a = Approval {
         by: par.into(),
         at_ms: 42,
         fingerprint: d.fingerprint(),
+        digests,
     };
     d.approval = Some(a.clone());
     (d, vec![a])
@@ -100,6 +120,7 @@ fn un_approbateur_inconnu_est_refuse() {
         by: "quelqu-un".into(),
         at_ms: 1,
         fingerprint: d.fingerprint(),
+        digests: BTreeMap::new(),
     };
     assert!(motif(d.is_approved(&[autre])).contains("inconnu"));
     assert!(motif(d.is_approved(&[])).contains("inconnu"));
@@ -116,6 +137,7 @@ fn une_approbation_que_le_document_s_ecrit_seul_est_refusee() {
         by: "theo".into(),
         at_ms: 7,
         fingerprint: modifie.fingerprint(),
+        digests: BTreeMap::new(),
     });
     assert!(motif(modifie.is_approved(&trusted)).contains("l'hôte"));
 }
@@ -159,4 +181,64 @@ fn un_document_d_hier_sans_champ_approval_reste_lisible() {
     let hier = r#"{"id":"h","name":"n","version":1,"brief":"b","slots":[],"max_tours":1,"max_relances":1}"#;
     let d: HarnessDoc = serde_json::from_str(hier).unwrap();
     assert!(d.approval.is_none());
+}
+
+// --- Le digest de contenu ---
+
+#[test]
+fn un_digest_change_apres_approbation_est_refuse_et_nomme_l_emplacement() {
+    // Le module est republié sous la même version : l'hôte recalcule le digest,
+    // qui ne correspond plus à celui approuvé. Le refus nomme l'emplacement.
+    let (mut d, trusted) = approuve(doc_avec_digests(), "theo");
+    d.slots[0].digest = Some("d9".into());
+    let m = motif(d.is_approved(&trusted));
+    assert!(
+        m.contains("policy:pol@1.0.0"),
+        "le motif doit nommer l'emplacement fautif : {m}"
+    );
+}
+
+#[test]
+fn is_approved_strict_refuse_un_emplacement_sans_digest() {
+    let mut d = doc();
+    d.slots[0].digest = Some("d0".into());
+    // slots[1] (guard) reste sans digest : tolérant accepte, strict refuse et nomme.
+    let (d, trusted) = approuve(d, "theo");
+    assert_eq!(d.is_approved(&trusted), Verdict::Allow);
+    let m = motif(d.is_approved_strict(&trusted));
+    assert!(
+        m.contains("guard:gard@1.0.0"),
+        "le motif doit nommer l'emplacement sans digest : {m}"
+    );
+}
+
+#[test]
+fn is_approved_tolerant_accepte_encore_un_document_sans_digest() {
+    let (d, trusted) = approuve(doc(), "theo");
+    assert_eq!(d.is_approved(&trusted), Verdict::Allow);
+}
+
+#[test]
+fn le_digest_entre_dans_l_empreinte() {
+    let a = doc_avec_digests();
+    let mut b = doc_avec_digests();
+    b.slots[0].digest = Some("autre".into());
+    assert_ne!(a.fingerprint(), b.fingerprint());
+}
+
+#[test]
+fn un_aller_retour_json_conserve_les_digests() {
+    let (d, trusted) = approuve(doc_avec_digests(), "theo");
+    let json = serde_json::to_string(&d).unwrap();
+    let back: HarnessDoc = serde_json::from_str(&json).unwrap();
+    assert_eq!(back.slots[0].digest.as_deref(), Some("d0"));
+    assert_eq!(back.slots[1].digest.as_deref(), Some("d1"));
+    assert_eq!(back.approval, d.approval);
+    assert_eq!(back.is_approved(&trusted), Verdict::Allow);
+}
+
+#[test]
+fn is_approved_strict_accepte_un_document_entierement_digeste() {
+    let (d, trusted) = approuve(doc_avec_digests(), "theo");
+    assert_eq!(d.is_approved_strict(&trusted), Verdict::Allow);
 }

@@ -142,12 +142,24 @@ impl Node {
 /// `entry` est le point d'entrée **dans** le module (un programme, une fonction
 /// exportée) : deux versions d'un module peuvent tenir le même emplacement avec
 /// un code différent, et c'est la version qui le dit, pas le nom.
+///
+/// `digest` est l'empreinte du **contenu** du module tel que l'hôte l'a chargé
+/// (hexadécimal, calculé par l'hôte qui possède les octets — ce crate est pur et
+/// ne lit rien). POURQUOI : une version peut être republiée — un registre qui
+/// accepte l'écrasement le permet — alors qu'un contenu haché ne peut pas être
+/// republié sans changer d'empreinte. La référence (`module`, `version`) dit
+/// *quel* module, pas *quels octets* ; le digest dit les octets.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Slot {
     pub kind: SlotKind,
     pub module: String,
     pub version: String,
     pub entry: String,
+    /// Empreinte hexadécimale du contenu chargé, posée par l'hôte. Absent : la
+    /// composition n'épingle pas le contenu (compatibilité — une approbation
+    /// d'hier ne couvrait que la référence).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub digest: Option<String>,
 }
 
 /// Les quatre emplacements qu'un harness compose.
@@ -557,6 +569,7 @@ mod tests {
                 module: "harness-default".into(),
                 version: "0.1.0".into(),
                 entry: "policy".into(),
+                digest: None,
             }],
             max_tours: 12,
             max_relances: 3,

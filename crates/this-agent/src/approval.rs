@@ -16,18 +16,23 @@
 //!   l'empreinte approuvée.
 //! - [`Approval`] : *qui*, *quand*, et *l'empreinte de ce qui a été approuvé*.
 //!   C'est l'empreinte qui rend l'approbation non transférable : modifier la
-//!   composition après coup l'invalide mécaniquement.
+//!   composition après coup l'invalide mécaniquement. Une approbation peut en plus
+//!   épingler le **contenu** de chaque module (`digests`) : elle est alors plus
+//!   forte — un module republié sous la même version est refusé, et nommé.
 //! - [`HarnessDoc::is_approved`] : la vérification, pure. Le champ `approval` du
 //!   document est une **affirmation**, écrite par n'importe qui (l'agent compris).
 //!   Seule la liste `trusted`, tenue par l'hôte, fait foi : l'approbation du
 //!   document doit y trouver le même approbateur **et** la même empreinte.
+//! - [`HarnessDoc::is_approved_strict`] : la même vérification, plus l'exigence
+//!   qu'**aucun emplacement ne reste sans digest** — pour un hôte qui refuse de
+//!   faire confiance à une référence seule.
 //!
 //! ## Ce que l'empreinte couvre
 //!
 //! Tout ce que sérialise `HarnessDoc` sauf `approval` : id, nom, version, brief,
-//! emplacements, bornes — et tout champ ajouté plus tard, sans rien changer ici
-//! (on hache le JSON canonique, pas une liste de champs écrite à la main : un
-//! champ oublié serait un trou d'autorisation silencieux).
+//! emplacements (référence **et** digest de contenu), bornes — et tout champ ajouté
+//! plus tard, sans rien changer ici (on hache le JSON canonique, pas une liste de
+//! champs écrite à la main : un champ oublié serait un trou d'autorisation silencieux).
 //!
 //! `slots` est une **liste ordonnée** : l'ordre de composition décide qui tient un
 //! emplacement (le premier du genre, voir [`HarnessDoc::slot`]). Permuter deux
@@ -46,12 +51,24 @@ use crate::substrate::Verdict;
 ///
 /// `at_ms` est informatif (audit) : il n'entre dans aucune décision, une
 /// approbation n'expire pas toute seule.
+///
+/// `digests` épingle le **contenu** des modules au moment d'approuver
+/// (`module` → digest hexadécimal). POURQUOI : la référence d'un module
+/// (`module` + `version`) peut être republiée sous un autre code, pas un contenu
+/// haché. Une approbation qui porte des digests est donc **plus forte** qu'une
+/// approbation de référence seule : [`HarnessDoc::is_approved`] refuse un module
+/// dont le contenu a bougé, en nommant l'emplacement. Absent (ou vide) :
+/// approbation de référence, compatible avec les documents d'hier. Ce champ ne
+/// change pas l'empreinte : il est porté par `approval`, exclue de l'empreinte.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Approval {
     pub by: String,
     pub at_ms: u64,
     /// L'empreinte de la composition au moment où elle a été approuvée.
     pub fingerprint: String,
+    /// Les digests de contenu épinglés : `module` → digest hexadécimal.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub digests: BTreeMap<String, String>,
 }
 
 /// La forme canonique d'une valeur JSON : clés triées (indépendamment de la
@@ -111,15 +128,44 @@ impl HarnessDoc {
     /// enregistrées. Le refus dit *lequel des deux a bougé* :
     ///
     /// 1. pas d'`approval` dans le document → refusé ;
-    /// 2. l'empreinte approuvée n'est plus celle du document → **le document** a
+    /// 2. un emplacement dont le digest de contenu ne correspond plus à celui
+    ///    approuvé → **le contenu** d'un module a changé, l'emplacement est nommé ;
+    /// 3. l'empreinte approuvée n'est plus celle du document → **le document** a
     ///    changé depuis l'approbation ;
-    /// 3. aucun approbateur de ce nom chez l'hôte → approbateur inconnu ;
-    /// 4. l'hôte connaît l'approbateur mais pas pour cette empreinte → **l'hôte**
+    /// 4. aucun approbateur de ce nom chez l'hôte → approbateur inconnu ;
+    /// 5. l'hôte connaît l'approbateur mais pas pour cette empreinte → **l'hôte**
     ///    n'a pas approuvé cette composition (l'affirmation du document est seule).
     pub fn is_approved(&self, trusted: &[Approval]) -> Verdict {
         let Some(approval) = &self.approval else {
             return Verdict::Refuse("aucune approbation : composition non approuvée".into());
         };
+        // Le contenu d'abord : si l'approbation a épinglé des digests, un module
+        // republié sous la même version est nommé ici, précisément. L'empreinte
+        // couvre déjà le digest (elle hache le JSON canonique) — mais elle ne dit
+        // pas *lequel* des emplacements a bougé ; ce contrôle le dit.
+        for slot in &self.slots {
+            match (slot.digest.as_deref(), approval.digests.get(&slot.module)) {
+                (Some(actuel), Some(attendu)) if actuel != attendu.as_str() => {
+                    return Verdict::Refuse(format!(
+                        "le contenu de l'emplacement {}:{}@{} a changé depuis \
+                         l'approbation (digest {actuel}, approuvé {attendu})",
+                        slot.kind.as_str(),
+                        slot.module,
+                        slot.version
+                    ));
+                }
+                (None, Some(attendu)) => {
+                    return Verdict::Refuse(format!(
+                        "l'emplacement {}:{}@{} a perdu son digest de contenu depuis \
+                         l'approbation (approuvé {attendu})",
+                        slot.kind.as_str(),
+                        slot.module,
+                        slot.version
+                    ));
+                }
+                _ => {}
+            }
+        }
         let actuelle = self.fingerprint();
         if approval.fingerprint != actuelle {
             return Verdict::Refuse(format!(
@@ -147,5 +193,29 @@ impl HarnessDoc {
                 approval.by
             ))
         }
+    }
+
+    /// [`HarnessDoc::is_approved`], plus l'exigence que **chaque emplacement porte
+    /// un digest de contenu**.
+    ///
+    /// Une approbation sans digest ne lie que la référence (`module`, `version`) :
+    /// un registre qui accepte de republier `module 0.3.0` sous un autre code la
+    /// laisse intacte. L'hôte qui exige que l'approbation épingle le **contenu**
+    /// passe par ici — le refus nomme l'emplacement fautif. C'est l'hôte qui
+    /// choisit : [`HarnessDoc::is_approved`] reste tolérant pour les documents
+    /// d'hier qui n'ont pas de digest.
+    pub fn is_approved_strict(&self, trusted: &[Approval]) -> Verdict {
+        for slot in &self.slots {
+            if slot.digest.is_none() {
+                return Verdict::Refuse(format!(
+                    "l'emplacement {}:{}@{} n'a pas de digest de contenu : \
+                     l'approbation ne peut pas garantir ce qui y tourne",
+                    slot.kind.as_str(),
+                    slot.module,
+                    slot.version
+                ));
+            }
+        }
+        self.is_approved(trusted)
     }
 }
