@@ -1121,3 +1121,33 @@ fn un_tool_result_en_echec_porte_sa_cause() {
         )
     );
 }
+
+#[test]
+fn un_fil_invalide_s_arrete_nomme_sans_partir_chez_le_moteur() {
+    // Un Tool sans appel en attente : `check_thread` (branché dans la boucle,
+    // juste avant l'envoi) doit l'arrêter AVANT que le moteur ne le voie et ne
+    // réponde un 400 opaque.
+    let transport = Script::new(vec![]);
+    let tools = Tools::new(|_| Outcome::ok("ok").observed("v1", "v2"));
+    let (harness, _, log) = build(transport.clone(), tools, Limits::default());
+
+    harness.seed(vec![Message::tool("orphelin", "résultat sans appel")]);
+
+    let fini = run(harness.send("continue"));
+    assert!(
+        matches!(&fini, Running::Ran(Stop::Failed(m)) if m.contains("sans appel")),
+        "{fini:?}"
+    );
+
+    // Nommé ET typé : la raison porte le défaut, pas un 400 générique.
+    match stop_of(&log) {
+        Stop::Failed(raison) => {
+            assert!(raison.contains("fil invalide"), "{raison}");
+            assert!(raison.contains("sans appel"), "{raison}");
+        }
+        other => panic!("attendu Stop::Failed, reçu {other:?}"),
+    }
+
+    // Le transport n'a jamais été appelé : l'arrêt a eu lieu AVANT l'envoi.
+    assert!(transport.seen.borrow().is_empty());
+}

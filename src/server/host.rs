@@ -840,14 +840,22 @@ impl this_harness::Recorder for HostRecorder {
     async fn step(&self, run_id: &str, run: &this_agent::Run, step: &this_agent::Step) {
         // Un échec d'écriture n'arrête pas le run : le harnais n'attend rien,
         // l'hôte avale son erreur (le trait ne rend rien, c'est le contrat).
-        let _ = self.0.append_step_live(run, run_id, step);
+        // DÉFAUT FERMÉ : le masque est un `Fn` de l'hôte ; s'il panique, la panique
+        // traversait ce `Recorder` jusque dans la boucle du harnais (le contrat dit
+        // pourtant qu'un échec d'enregistrement n'interrompt jamais le run). Les appels
+        // sont synchrones : `catch_unwind` suffit.
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.0.append_step_live(run, run_id, step)
+        }));
     }
 
     async fn stopped(&self, run_id: &str, run: &this_agent::Run, _stop: &this_agent::Stop) {
         // `run.stop` vaut déjà `stop` (la boucle a appelé `Run::finish`) :
         // `record_run` fige la fin ; réécrire les étapes déjà posées est un
         // no-op (upsert + arête réutilisée).
-        let _ = self.0.record_run(run, run_id);
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.0.record_run(run, run_id)
+        }));
     }
 }
 

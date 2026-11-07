@@ -213,13 +213,34 @@ impl HarnessGraph {
         // L'empreinte posée par la boucle porte sur la sortie COMPLÈTE ; à défaut
         // (journal ancien, étape écrite à la main), on hache ce que l'étape a
         // gardé — le résumé, possiblement tronqué.
-        let hex = step.out_hash.clone().unwrap_or_else(|| {
-            Sha256::digest(this_agent::graph::step_output(step).as_bytes())
-                .iter()
-                .map(|b| format!("{b:02x}"))
-                .collect()
-        });
+        //
+        // DÉFAUT FERMÉ : `Step::out_hash` est une chaîne libre ; recopiée telle quelle
+        // en propriété, elle contournait le masque (un secret y passait en clair).
+        // Elle passe donc par le masque comme tout texte libre (une vraie empreinte hex
+        // en ressort intacte).
+        let hex = step
+            .out_hash
+            .as_ref()
+            .map(|h| match &self.masque {
+                Some(masque) => masque(h),
+                None => h.clone(),
+            })
+            .unwrap_or_else(|| {
+                Sha256::digest(this_agent::graph::step_output(step).as_bytes())
+                    .iter()
+                    .map(|b| format!("{b:02x}"))
+                    .collect()
+            });
         node.props.push(("_out_hash".to_string(), hex));
+        // DÉFAUT FERMÉ : `_tool` (nom d'outil, texte libre venu du modèle) est posé en clair
+        // par `this_agent::graph` — ni masqué ni borné. Masqué ici, au point d'écriture.
+        if let Some(masque) = &self.masque {
+            for (key, value) in node.props.iter_mut() {
+                if key == "_tool" {
+                    *value = masque(value);
+                }
+            }
+        }
         node
     }
 
@@ -255,9 +276,36 @@ impl HarnessGraph {
             .ok_or_else(|| anyhow!("run {run_id} : pas de nœud de tête"))
     }
 
+    /// Refuse d'écrire sur un `run_id` déjà pris par un AUTRE run.
+    ///
+    /// DÉFAUT FERMÉ (perte de données) : `upsert` met à jour le nœud existant sans rien
+    /// demander, donc un second run de même id écrasait le but, l'arrêt et le `_data`
+    /// du premier, et mélangeait leurs étapes (`run#index`). Un run qui se réécrit
+    /// (vivant, puis `stopped`) garde son but ; un but différent est une collision.
+    fn same_run(&self, head: NodeId, run: &Run, run_id: &str) -> Result<()> {
+        let goal = match &self.masque {
+            Some(masque) => masque(&run.goal.text),
+            None => run.goal.text.clone(),
+        };
+        let stored = self.graph().get_node(head).and_then(|n| {
+            n.get_property("_goal")
+                .and_then(|v| v.as_str())
+                .map(str::to_string)
+        });
+        match stored {
+            Some(stored) if stored != goal => Err(anyhow!(
+                "run {run_id} : l'identifiant appartient déjà à un autre run (but différent)"
+            )),
+            _ => Ok(()),
+        }
+    }
+
     /// Écrit un run **entier** : son nœud et toutes ses étapes, en un commit.
     pub fn record_run(&self, run: &Run, run_id: &str) -> Result<()> {
         self.writable()?;
+        if let Some(existing) = self.find(RUN, run_id) {
+            self.same_run(existing, run, run_id)?;
+        }
         let head_id = self.upsert(&self.run_head_node(run, run_id)?)?;
         for step in &run.steps {
             let step_id = self.upsert(&self.step_node(step, run_id))?;
@@ -302,6 +350,7 @@ impl HarnessGraph {
     /// La part commune des deux chemins d'ajout : l'étape, son arête, puis le
     /// nœud de run mis à jour (`_stop`, `_tours`, `_data`), en un commit.
     fn append_step_to(&self, head_id: NodeId, run: &Run, run_id: &str, step: &Step) -> Result<()> {
+        self.same_run(head_id, run, run_id)?;
         let step_id = self.upsert(&self.step_node(step, run_id))?;
         self.link_step(head_id, step_id, step.index);
         // Le nœud de run suit : `_stop`, `_tours`, et le décompte d'étapes.

@@ -205,8 +205,11 @@ impl HarnessDoc {
     /// choisit : [`HarnessDoc::is_approved`] reste tolérant pour les documents
     /// d'hier qui n'ont pas de digest.
     pub fn is_approved_strict(&self, trusted: &[Approval]) -> Verdict {
+        // Attaque : un digest `Some("")` (champ présent mais vide) passait le strict,
+        // l'hôte croyant le contenu épinglé alors que rien ne l'était. Un digest vide
+        // vaut un digest absent : il n'épingle aucun octet.
         for slot in &self.slots {
-            if slot.digest.is_none() {
+            if slot.digest.as_deref().is_none_or(str::is_empty) {
                 return Verdict::Refuse(format!(
                     "l'emplacement {}:{}@{} n'a pas de digest de contenu : \
                      l'approbation ne peut pas garantir ce qui y tourne",

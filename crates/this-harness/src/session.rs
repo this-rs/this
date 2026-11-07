@@ -29,7 +29,9 @@ use async_trait::async_trait;
 
 use crate::event::{Event, HintKind, Outcome, Pending, Snapshot};
 use crate::ports::{Cancel, Compactor, Delta, Recorder, Recorders, Toolbox, Transport};
-use crate::wire::{Code, Failure, Finish, ImagePart, Message, Reply, Request, ToolCall};
+use crate::wire::{
+    Code, Failure, Finish, ImagePart, Message, Reply, Request, ThreadDefect, ToolCall,
+};
 use this_agent::evidence::Verdict;
 use this_agent::{Decision, DefaultPolicy, Goal, Policy, Run, Step, Stop};
 
@@ -622,6 +624,10 @@ struct BusyGuard {
     turns: Rc<Cell<u32>>,
     /// Désarmée par la fin normale de `pump` : un seul `Stopped` par run.
     armed: bool,
+    /// Le `Stopped` VRAI du run, posé avant d'attendre l'enregistreur. Une future lâchée
+    /// pendant cette attente (garde déjà désarmée) ne disait aucun arrêt : le run restait
+    /// sans `Stopped`. La garde le livre alors, à la place d'un `Interrupted` inventé.
+    finale: Option<Event>,
 }
 
 impl BusyGuard {
@@ -671,14 +677,25 @@ impl BusyGuard {
 
 impl Drop for BusyGuard {
     fn drop(&mut self) {
-        // La place se rend quoi qu'il arrive — même si la fin normale l'a déjà
-        // fait, c'est idempotent.
-        self.state.borrow_mut().busy = false;
+        // La place se rend tant que CE run la tient. Une fois la fin normale passée, `busy`
+        // appartient peut-être au run suivant (lancé pendant l'attente de l'enregistreur) :
+        // le remettre à faux ici ouvrait la porte à deux boucles sur le même fil.
+        if self.armed {
+            self.state.borrow_mut().busy = false;
+            // Une panique (outil, transport, puits) laissait des `tool_calls` sans réponse :
+            // le moteur refuse alors la conversation suivante pour de bon. La réparation ne
+            // touche pas au puits, elle se fait donc aussi en dépliant une panique.
+            self.repair_thread();
+        }
+        if let Some(finale) = self.finale.take()
+            && !std::thread::panicking()
+        {
+            self.out.emit(finale);
+        }
         // Un abandon se dit, sauf si on est déjà en train de dérouler une
         // panique : ré-invoquer le puits ici ferait un double panic. Le cas
         // normal (future lâchée, sans panique) passe toujours.
         if self.armed && !std::thread::panicking() {
-            self.repair_thread();
             let ms = (self.clock.now_ms() - self.started).max(0.0) as u64;
             self.out.emit(Event::Stopped {
                 stop: Stop::Interrupted,
@@ -1029,6 +1046,7 @@ impl Harness {
             started,
             turns: turns.clone(),
             armed: true,
+            finale: None,
         };
         let mut stop: Option<Stop> = None;
         let mut said = String::new();
@@ -1121,6 +1139,26 @@ impl Harness {
                 // dépend de la conversation telle qu'elle est maintenant.
                 let context = self.turn_context().await;
                 let request = self.request(toolbox.as_ref(), context).await;
+                // Un fil que le moteur refuserait (id vide, appel en double,
+                // réponse orpheline) s'arrête ICI, nommé et typé, au lieu de
+                // partir chez le moteur et de revenir en 400 opaque. La
+                // validation porte sur le fil TEL QU'ENVOYÉ (`thread`), après le
+                // fit/compaction et l'insertion du contexte de tour.
+                if let Err(defect) = Message::check_thread(&request.thread()) {
+                    let raison = match defect {
+                        ThreadDefect::EmptyId { index } => {
+                            format!("fil invalide : id d'appel vide (message {index})")
+                        }
+                        ThreadDefect::DuplicateCallId { index } => {
+                            format!("fil invalide : id d'appel en double (message {index})")
+                        }
+                        ThreadDefect::OrphanTool { index } => {
+                            format!("fil invalide : réponse d'outil sans appel (message {index})")
+                        }
+                    };
+                    stop = Some(run.finish(Stop::Failed(raison)));
+                    break 'turns;
+                }
                 // Le temps du TOUR est de l'horloge murale : mesuré autour du
                 // transport, relances comprises, et ajouté au run AVANT la
                 // décision. Sans ça, un modèle lent et des outils instantanés
@@ -1445,19 +1483,17 @@ impl Harness {
         // La session redevient libre, sans Stopped.
         // La garde est désarmée dans les deux cas : la fin normale rend la place
         // elle-même, et dit son `Stopped` (un seul par run, jamais deux).
-        garde.disarm();
         let Some(stop) = stop else {
             self.with(|s| s.busy = false);
+            garde.disarm();
             return None;
         };
         let ms = (clock.now_ms() - started).max(0.0) as u64;
         // La place est rendue AVANT l'annonce : un puits qui relit `busy()` sur
         // `Stopped` voit déjà le run terminé.
         self.with(|s| s.busy = false);
-        if let Some((run_id, run)) = &closed {
-            self.recorder.stopped(run_id, run, &stop).await;
-        }
-        self.out.emit(Event::Stopped {
+        garde.disarm();
+        garde.finale = Some(Event::Stopped {
             stop: stop.clone(),
             text: said,
             turns: turns.get(),
@@ -1465,6 +1501,12 @@ impl Harness {
             code,
             verdict,
         });
+        if let Some((run_id, run)) = &closed {
+            self.recorder.stopped(run_id, run, &stop).await;
+        }
+        if let Some(finale) = garde.finale.take() {
+            self.out.emit(finale);
+        }
         Some(stop)
     }
 
@@ -1898,6 +1940,9 @@ pub fn out_hash(text: &str) -> String {
         .collect()
 }
 
+/// Le nombre maximal de messages tenus en file.
+const MAX_PENDING: usize = 1000;
+
 /// La poignée que l'interface garde : elle commande sans attendre la fin d'un
 /// tour.
 #[derive(Clone)]
@@ -1920,6 +1965,7 @@ impl Handle {
 
     /// [`Self::enqueue`], avec des images jointes au message.
     pub fn enqueue_with_images(&self, text: impl Into<String>, images: Vec<ImagePart>) -> u64 {
+        let mut full = false;
         let id = {
             let mut state = self.state.borrow_mut();
             let id = state.next_id;
@@ -1927,7 +1973,13 @@ impl Handle {
             let text = text.into();
             // Une image seule est un message : la jeter parce que le texte est vide
             // serait la perdre en silence.
-            if !text.trim().is_empty() || !images.is_empty() {
+            // La file est bornée : 10 000 messages tenus coûtaient un événement `Pending`
+            // de la file entière à chaque ajout (quadratique), sans fin. Au-delà, le
+            // message est refusé et le dit (voir plus bas).
+            if state.pending.len() >= MAX_PENDING && (!text.trim().is_empty() || !images.is_empty())
+            {
+                full = true;
+            } else if !text.trim().is_empty() || !images.is_empty() {
                 state.pending.push(Pending {
                     id,
                     text,
@@ -1937,6 +1989,15 @@ impl Handle {
             }
             id
         };
+        if full {
+            self.out.emit(Event::Hint {
+                kind: HintKind::Other,
+                text: format!(
+                    "File pleine ({MAX_PENDING} messages tenus) : le message est refusé."
+                ),
+            });
+            return id;
+        }
         self.emit_pending();
         id
     }
@@ -1963,6 +2024,9 @@ impl Handle {
         let edited = {
             let mut state = self.state.borrow_mut();
             match state.pending.iter_mut().find(|entry| entry.id == id) {
+                // Un texte vidé partait ensuite comme un tour utilisateur vide : refusé,
+                // sauf si le message porte des images (une image seule est un message).
+                Some(entry) if text.trim().is_empty() && entry.images.is_empty() => false,
                 Some(entry) => {
                     entry.text = text;
                     true
@@ -2042,17 +2106,29 @@ impl Handle {
     }
 
     pub fn restore(&self, snapshot: Snapshot) {
+        if self.state.borrow().busy {
+            // Remplacer le fil sous une boucle qui tourne lui faisait pousser des réponses
+            // d'outil sans leur appel : refusé, et dit.
+            self.out.emit(Event::Hint {
+                kind: HintKind::Other,
+                text: "restore ignoré : un run tourne, le fil ne peut pas être remplacé.".into(),
+            });
+            return;
+        }
         {
             let mut state = self.state.borrow_mut();
             state.transcript = snapshot.transcript;
             state.pending = snapshot.pending;
-            state.next_id = state
+            // Les identifiants ne reculent jamais : une interface qui garde l'id d'un message
+            // disparu retirerait sinon un AUTRE message réutilisant ce numéro.
+            let next = state
                 .pending
                 .iter()
                 .map(|entry| entry.id)
                 .max()
                 .unwrap_or(0)
                 + 1;
+            state.next_id = state.next_id.max(next);
         }
         self.emit_pending();
     }

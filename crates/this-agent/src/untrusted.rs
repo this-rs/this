@@ -403,7 +403,17 @@ pub fn wrap_with(
     attrs: &[(&str, &str)],
     body: &str,
 ) -> String {
+    // Attaque : un nonce vide (`wrap_with("", …)`) ou faible (`"abc"`, `"id"`,
+    // `"!!!"` passé au filtre) produisait `id=""` ou `id="abc"` — un conteneur
+    // sans identité infalsifiable, dont `strip_nonce` ne retirait alors rien. Le
+    // contrat dit « 32 hexadécimaux » : tout nonce hors contrat est remplacé par
+    // un nonce frais, jamais accepté tel quel.
     let nonce = whitelist(nonce);
+    let nonce = if nonce.len() == 32 && nonce.bytes().all(|b| b.is_ascii_hexdigit()) {
+        nonce
+    } else {
+        fresh_nonce()
+    };
     let body = sanitize(body, &nonce, max_chars);
     let mut extra = String::new();
     for (k, v) in attrs {

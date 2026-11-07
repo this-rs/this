@@ -160,8 +160,17 @@ impl Toolboxes {
 
 #[async_trait(?Send)]
 impl Toolbox for Toolboxes {
+    /// DÉFAUT FERMÉ : deux parts qui exposaient le même nom l'annonçaient deux fois au
+    /// modèle (un fournisseur rejette des noms d'outil dupliqués : tout le tour en 400),
+    /// alors que l'appel, lui, va à la première. L'annonce suit donc le routage : un nom,
+    /// sa première part.
     fn specs(&self) -> Vec<ToolSpec> {
-        self.parts.iter().flat_map(|part| part.specs()).collect()
+        let mut vus = std::collections::HashSet::new();
+        self.parts
+            .iter()
+            .flat_map(|part| part.specs())
+            .filter(|spec| vus.insert(spec.name.clone()))
+            .collect()
     }
 
     /// Chaque part ne déclare que **ses** outils, et seulement ceux qu'elle exécute : une
