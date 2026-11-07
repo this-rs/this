@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-bluetooth-scan"
+description = "Enables the bluetooth_scan command without any pre-configured scope."
+commands.allow = ["bluetooth_scan"]
+
+[[permission]]
+identifier = "deny-bluetooth-scan"
+description = "Denies the bluetooth_scan command without any pre-configured scope."
+commands.deny = ["bluetooth_scan"]

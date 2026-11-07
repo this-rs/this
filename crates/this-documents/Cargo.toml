@@ -1,0 +1,77 @@
+[package]
+name = "this-documents"
+version = "0.0.1"
+edition = "2024"
+authors = ["Riviere Théotime <t@ffs.holdings>"]
+license = "MIT OR Apache-2.0"
+description = "The pure core of a document pipeline: format sniffing, text extraction contract, chunks that tile the source, provenance alignment, graph-ready records. No I/O, no async, wasm32-safe."
+repository = "https://github.com/this-rs/this"
+keywords = ["framework", "documents", "chunking", "provenance", "wasm"]
+categories = ["text-processing"]
+
+[dependencies]
+# Les enregistrements (DocumentRecord, ChunkRecord) et les intervalles sont des
+# données qui traversent le fil : ils doivent se sérialiser.
+serde = { version = "1.0", features = ["derive"] }
+# Les erreurs (ExtractError, RecordError) sont des types d'erreur à part entière,
+# sans écrire à la main les impl Display/Error.
+thiserror = "2.0"
+# Identité du contenu : sha256 des octets d'origine (`sha256_hex`). Le même crate
+# que this-vfs, donc le même etag des deux côtés.
+sha2 = "0.10"
+
+# --- Extracteur DOCX (feature `docx`, désactivée par défaut) -----------------
+# Un .docx est une archive ZIP de parties XML. Ni l'un ni l'autre n'est écrit à la
+# main : un lecteur ZIP maison serait une surface d'attaque (bombes, tailles
+# mensongères), et la feature reste hors de `default` pour que les consommateurs
+# qui ne lisent pas de Word ne paient ni le code ni les dépendances.
+[features]
+default = []
+docx = ["dep:zip", "dep:quick-xml"]
+# Un PDF cesse d'être une pièce muette : son texte est lu page par page. Hors de
+# `default` pour la même raison que `docx`, en plus lourd : `pdf_oxide` est un
+# outillage PDF complet (36 dépendances non optionnelles, dont office_oxide et
+# taffy), et un consommateur qui ne lit que du Markdown ne doit pas le compiler.
+pdf = ["dep:pdf_oxide"]
+
+[dependencies.zip]
+# Ouvre le conteneur et lit `word/document.xml`. Déflate seulement : c'est la seule
+# compression qu'écrit un traitement de texte ; bzip2/lzma/zstd/aes tireraient des
+# crates C ou lourdes (et casseraient wasm32) pour des archives que Word ne produit
+# pas. Version 9 : les avis GHSA-m665-v7pm-7grj et GHSA-8hxf-qr8p-62x4 sont
+# corrigés dès 9.0.5 (même ligne que le backend de project-orchestrator).
+version = "9"
+default-features = false
+features = ["deflate"]
+optional = true
+
+[dependencies.quick-xml]
+# Lecture en flux du XML WordprocessingML : on n'a besoin que de « suis-je dans un
+# <w:t> », pas d'un arbre DOM, donc un pull-parser sans allocation par nœud.
+version = "0.42"
+optional = true
+
+# --- Extracteur PDF (feature `pdf`, désactivée par défaut) --------------------
+[dependencies.pdf_oxide]
+# Lit le texte page par page. MIT OR Apache-2.0, pur Rust, maintenu.
+# `default-features = false` retire les deux features par défaut du crate, et
+# c'est le point de tout ce bloc :
+#   - `icc` (profils couleur) : un profil de couleur ne change pas un caractère.
+#     Sans lui, `qcms` (ou `lcms2` en C via `icc-lcms2`) n'est pas compilé.
+#   - `legacy-crypto` (RC4/MD5) : ne concerne que les PDF chiffrés d'avant AES-2005.
+#     Sans lui, aucun PDF de ce type ne s'ouvre — `pdf` le dit dans `extract` au
+#     lieu de rendre des pages blanches — mais `md-5` n'entre pas au build.
+# Le reste du sous-arbre (`aws-lc-rs` via `fips`, `ort` via `ocr`/`gpu`) n'est tiré
+# que par des features qui ne sont pas activées ici : aucune dépendance C.
+# Version 0.3.78 : la ligne mesurée par le backend de project-orchestrator ; la
+# même version des deux côtés évite deux copies du parseur dans un même binaire.
+version = "0.3.78"
+default-features = false
+optional = true
+
+[dev-dependencies.zip]
+# Les tests fabriquent leurs archives en mémoire (`ZipWriter`) plutôt que de
+# versionner des .docx binaires dont on ne voit pas le contenu. Même déflate seul.
+version = "9"
+default-features = false
+features = ["deflate"]

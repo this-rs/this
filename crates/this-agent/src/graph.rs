@@ -47,6 +47,55 @@ pub const RUN: &str = "_run";
 /// Label d'une étape de run.
 pub const STEP: &str = "_step";
 
+// ---- Types d'arêtes
+//
+// Le vocabulaire des relations, partagé par le framework et l'application
+// Atelier (contrat : `atelier/GRAPHE.md`, section 1). Contrairement aux labels
+// de nœuds, aucun préfixe `_` : un type d'arête est un verbe en majuscules.
+//
+// **Règle commune à toutes** : une arête `(from, type, to)` est unique. Écrire
+// deux fois le même triplet ne crée pas une seconde arête : la première est
+// mise à jour (ses propriétés) et son identifiant est rendu tel quel.
+
+/// `_module` → `_entity` : le module déclare cette entité.
+///
+/// Écrite par l'indexeur quand un descripteur est validé. Unique par triplet.
+pub const DECLARES: &str = "DECLARES";
+/// `_entity` → `_entity` : un lien déclaré entre deux entités.
+///
+/// Porte `_name` (le nom du lien) et `_target`. Unique par triplet : deux liens
+/// de noms différents entre les mêmes entités se distinguent par leurs
+/// propriétés, jamais par un doublon d'arête.
+pub const LINKS: &str = "LINKS";
+/// `_module` → `_module` : le module en exige un autre (`requires[]`).
+///
+/// Sans elle, un lien vers une entité d'un autre module est refusé
+/// (`this.module.reference_unknown`). Unique par triplet.
+pub const REQUIRES: &str = "REQUIRES";
+/// ligne → ligne : un champ `{"ref": …}` pointe vers une autre ligne.
+///
+/// Porte `_field` (le champ qui référence). Écrite à la création ou au patch de
+/// la ligne. Unique par triplet.
+pub const REFERENCES: &str = "REFERENCES";
+/// `_run` → `_step` : l'étape appartient au run.
+///
+/// Porte `_index`, qui seul donne l'ordre : un graphe ne garantit aucun ordre de
+/// lecture. Unique par triplet.
+pub const HAS_STEP: &str = "HAS_STEP";
+/// `_note` → n'importe quel nœud : de quoi parle la note.
+///
+/// C'est ce qui fait d'une mémoire autre chose qu'un journal : `recall` rend les
+/// voisins des notes trouvées. Unique par triplet.
+pub const ABOUT: &str = "ABOUT";
+/// ligne (`message`) → ligne (`conversation`) : le message est dans la
+/// conversation.
+///
+/// Unique par triplet. Un message n'est dans qu'une seule conversation.
+pub const IN: &str = "IN";
+
+/// Tous les types d'arêtes connus, dans l'ordre du contrat.
+pub const EDGE_TYPES: [&str; 7] = [DECLARES, LINKS, REQUIRES, REFERENCES, HAS_STEP, ABOUT, IN];
+
 /// Un nœud, tel qu'un magasin le range : un label et des propriétés textuelles.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Node {
@@ -383,6 +432,29 @@ mod tests {
             Some(Stop::Refused("même version".into()).code())
         );
         assert_eq!(stop.code(), "refused");
+    }
+
+    #[test]
+    fn les_types_d_aretes_suivent_le_contrat_et_restent_distincts() {
+        assert_eq!(
+            EDGE_TYPES,
+            [
+                "DECLARES",
+                "LINKS",
+                "REQUIRES",
+                "REFERENCES",
+                "HAS_STEP",
+                "ABOUT",
+                "IN"
+            ]
+        );
+        let uniques: std::collections::BTreeSet<_> = EDGE_TYPES.iter().collect();
+        assert_eq!(uniques.len(), EDGE_TYPES.len());
+        // Un type d'arête n'est pas un label de nœud : pas de `_` en tête.
+        for t in EDGE_TYPES {
+            assert!(!t.starts_with('_'), "{t} ressemble à un label réservé");
+            assert_eq!(t, t.to_uppercase());
+        }
     }
 
     #[test]

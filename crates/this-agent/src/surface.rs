@@ -234,6 +234,31 @@ impl Surface {
         }
         sortie
     }
+
+    /// La carte restreinte à une plateforme : l'agent ne doit entendre que ce qui existe sur
+    /// l'appareil où il tourne, pas un catalogue toutes plateformes confondues. Un iPhone n'a
+    /// pas à savoir qu'une capacité Mac existe, et inversement.
+    pub fn for_platform(&self, platform: Platform) -> Surface {
+        Surface {
+            capabilities: self
+                .capabilities
+                .iter()
+                .filter(|c| c.platforms.contains(&platform))
+                .cloned()
+                .collect(),
+            slots: self.slots.clone(),
+        }
+    }
+
+    /// La carte telle que l'agent la lit sur une plateforme donnée : filtrée, et préfixée du
+    /// nom de l'appareil, pour que « disponible » veuille dire « disponible ICI ».
+    pub fn describe_for(&self, platform: Platform, budget_chars: usize) -> String {
+        format!(
+            "Plateforme : {}\n{}",
+            platform.as_str(),
+            self.for_platform(platform).describe(budget_chars)
+        )
+    }
 }
 
 /// La carte réelle du harness, telle qu'elle est **aujourd'hui**.
@@ -248,9 +273,17 @@ pub fn surface() -> Surface {
         capabilities: vec![
             // ---- étage page
             Capability::new(
+                "modules",
+                Tier::Webview,
+                "installer, relire, lister et exécuter des modules (entités, programmes, chrome)",
+                None,
+                &[Web, Ios, Ipados, Macos, Windows, Linux, Android],
+                Status::Live,
+            ),
+            Capability::new(
                 "ui.render",
                 Tier::Webview,
-                "dessiner dans un emplacement",
+                "rendre un écran (via le code du module, pas par toi)",
                 None,
                 &[Web, Ios, Ipados, Macos, Windows, Linux, Android],
                 Status::Live,
@@ -266,7 +299,7 @@ pub fn surface() -> Surface {
             Capability::new(
                 "store.local",
                 Tier::Webview,
-                "lire et écrire le stockage de l'app",
+                "stocker dans la page (via le code du module)",
                 None,
                 &[Web, Ios, Ipados, Macos, Windows, Linux, Android],
                 Status::Live,
@@ -274,7 +307,7 @@ pub fn surface() -> Surface {
             Capability::new(
                 "http.fetch",
                 Tier::Webview,
-                "appeler un service HTTP",
+                "appeler HTTP (via le code du module)",
                 None,
                 &[Web, Ios, Ipados, Macos, Windows, Linux, Android],
                 Status::Live,
@@ -300,15 +333,15 @@ pub fn surface() -> Surface {
                 "window.control",
                 Tier::Shell,
                 "taille, plein écran, focus",
-                Some("window.*"),
+                None,
                 &[Macos, Windows, Linux],
-                Status::Live,
+                Status::Missing,
             ),
             Capability::new(
                 "chrome.read",
                 Tier::Shell,
                 "lire l'habillage posé par la platforme",
-                Some("plugin:this-shell|env"),
+                Some("get_chrome / set_chrome"),
                 &[Ios, Ipados, Macos, Windows, Linux, Android],
                 Status::Live,
             ),
@@ -379,9 +412,33 @@ pub fn surface() -> Surface {
             Capability::new(
                 "model.call",
                 Tier::Shell,
-                "appeler un modèle via le relais",
-                Some("chat_stream / model_detect"),
+                "appeler le modèle (le harnais le fait pour toi, tu n'as pas d'outil)",
+                Some("chat_stream"),
                 &[Ios, Ipados, Macos, Windows, Linux],
+                Status::Live,
+            ),
+            Capability::new(
+                "graph",
+                Tier::Shell,
+                "lire et écrire des nœuds et des arêtes du graphe de l'app",
+                Some("graph_put / graph_link / graph_query"),
+                &[Ios, Ipados, Macos],
+                Status::Live,
+            ),
+            Capability::new(
+                "memory",
+                Tier::Shell,
+                "notes durables de l'agent, retrouvées par le graphe",
+                Some("remember / recall / forget"),
+                &[Ios, Ipados, Macos],
+                Status::Live,
+            ),
+            Capability::new(
+                "rows",
+                Tier::Shell,
+                "lignes des entités déclarées par les modules, persistées dans le graphe",
+                Some("row_list / row_create / row_patch / row_remove"),
+                &[Ios, Ipados, Macos],
                 Status::Live,
             ),
             Capability::new(
@@ -494,8 +551,51 @@ mod tests {
             Status::Missing
         );
         assert_eq!(carte.capability("ui.render").unwrap().status, Status::Live);
+        // Une commande qui n'existe pas n'a pas le droit de se dire disponible.
+        assert_eq!(
+            carte.capability("window.control").unwrap().status,
+            Status::Missing
+        );
+        // Le pouvoir premier de l'agent est dit, pas supposé.
+        assert_eq!(carte.capability("modules").unwrap().status, Status::Live);
         assert_eq!(carte.slot("boot").unwrap().status, Status::Missing);
         assert_eq!(carte.slot("module.screen").unwrap().status, Status::Live);
+    }
+
+    #[test]
+    fn une_plateforme_ne_voit_que_ses_capacites() {
+        let carte = surface();
+        let iphone = carte.describe_for(Platform::Ios, 100_000);
+        let mac = carte.describe_for(Platform::Macos, 100_000);
+        // window.control n'est que macOS/Windows/Linux : un iPhone ne doit pas l'entendre.
+        assert!(!iphone.contains("window.control"));
+        assert!(mac.contains("window.control"));
+        // widget est natif, iOS compris : il apparaît sur l'iPhone.
+        assert!(iphone.contains("widget"));
+        // la carte dit sur quelle plateforme elle parle.
+        assert!(iphone.starts_with("Plateforme : ios"));
+    }
+
+    #[test]
+    fn la_carte_dit_que_l_agent_a_un_graphe_une_memoire_et_des_lignes() {
+        let texte = surface().describe(100_000);
+        for id in ["graph", "memory", "rows"] {
+            assert!(
+                texte.contains(&format!("· {id} —")),
+                "{id} absent de la carte"
+            );
+            let c = surface().capability(id).cloned().unwrap();
+            assert_eq!(c.tier, Tier::Shell);
+            assert_eq!(c.status, Status::Live);
+            assert!(c.platforms.contains(&Platform::Ios));
+            assert!(c.platforms.contains(&Platform::Macos));
+        }
+        assert!(
+            texte.contains("graph_put")
+                && texte.contains("graph_link")
+                && texte.contains("graph_query")
+        );
+        assert!(texte.contains("remember") && texte.contains("recall") && texte.contains("forget"));
     }
 
     #[test]
