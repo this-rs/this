@@ -310,8 +310,6 @@ pub fn capability_of(method: &str, args: &Value) -> Option<Capability> {
         "locationSample" | "locationStreamStart" | "locationStreamStop" | "locationRecent" => {
             Capability::Location
         }
-        "localNetworkResolve" => Capability::LocalNetwork,
-        "healthWorkouts" => Capability::Health,
         "motionActivityStatus"
         | "motionActivityRequest"
         | "motionStepsSample"
