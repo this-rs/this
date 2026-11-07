@@ -190,33 +190,11 @@ impl ModuleDescriptor {
             );
         }
 
-        // views : une vue qui lit une entité doit la nommer, et cette entité doit exister.
-        // Sans cette règle, l'hôte dessinerait une liste vide et la personne conclurait à une
-        // panne au lieu d'un oubli — le même défaut que le menu qui citait un module absent.
-        let entites: BTreeSet<&str> = self.entities.iter().map(|e| e.name.as_str()).collect();
-        let mut vus = BTreeSet::new();
-        for (i, v) in self.views.iter().enumerate() {
-            let p = format!("views[{i}]");
-            if !is_identifier(&v.name) {
-                c.push("invalid_name", &p, format!("`{}`", v.name));
-            }
-            if !vus.insert(v.name.as_str()) {
-                c.push("duplicate_view", &p, format!("`{}` declared twice", v.name));
-            }
-            match v.entity.as_deref() {
-                Some(nom) if !entites.contains(nom) => c.push(
-                    "view_entity_unknown",
-                    &p,
-                    format!("`{nom}` is not a declared entity"),
-                ),
-                Some(_) => {}
-                None if v.needs_entity() => c.push(
-                    "view_entity_required",
-                    &p,
-                    format!("a {:?} view must name its entity", v.kind),
-                ),
-                None => {}
-            }
+        // Vues et actions : entités, champs, cibles, remplacements. Sans ces règles, l'hôte
+        // dessinerait une liste vide ou un bouton mort, et la personne conclurait à une panne
+        // au lieu d'un oubli. Le détail est dans `views::issues`.
+        for (reason, path, message) in crate::views::issues(self) {
+            c.push(reason, path, message);
         }
 
         // requires
