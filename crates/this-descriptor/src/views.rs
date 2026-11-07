@@ -58,6 +58,23 @@ pub enum Surface {
     Panel,
     /// L'en-tête : une barre fine ; seules les petites briques y ont leur place.
     Header,
+
+    // ---- Les surfaces d'un AUTRE hôte ------------------------------------------------
+    //
+    // Les quatre ci-dessus sont l'écran de l'app : elle décide où la vue se place. Celles
+    // qui suivent ne se dessinent PAS dans l'app : un autre processus s'en charge, avec le
+    // même vocabulaire de briques. C'est ce qui rend un module capable de décrire un widget
+    // ou une activité sans savoir qui le peindra — et l'hôte, lui, dit franchement ce qu'il
+    // sait rendre (voir la carte des capacités).
+    /// Le widget de l'écran d'accueil (WidgetKit sur iOS, App Widget sur Android).
+    Widget,
+    /// Le widget de l'écran de verrouillage (iOS 16+).
+    LockWidget,
+    /// Une Live Activity : l'état poussé par l'app, pas une vue de l'écran.
+    Activity,
+    /// La Dynamic Island, qui est un jeu de dispositions d'une Live Activity — et non une
+    /// surface à part : les tailles (compacte, minimale, étendue) sont imposées par l'OS.
+    Island,
 }
 
 /// Apparence déclarée : des choix fermés, pas de CSS. Absente = défauts de l'hôte.
@@ -1402,6 +1419,25 @@ mod tests {
     }
 
     // ---------- JSON : fermé et stable, une famille à la fois ----------
+
+    /// Un module doit pouvoir décrire ce qui se dessine HORS de l'app : un widget d'écran
+    /// d'accueil, un d'écran verrouillé, une Live Activity et ses dispositions d'île. Ce
+    /// sont les mêmes briques, un autre hôte — et la carte des capacités dit lequel sait
+    /// rendre quoi.
+    #[test]
+    fn les_surfaces_d_un_autre_hote_sont_declarables() {
+        for (json, attendu) in [
+            (r#""widget""#, Surface::Widget),
+            (r#""lock_widget""#, Surface::LockWidget),
+            (r#""activity""#, Surface::Activity),
+            (r#""island""#, Surface::Island),
+        ] {
+            let surface: Surface = serde_json::from_str(json).expect(json);
+            assert_eq!(surface, attendu, "{json}");
+            // Et le nom repart tel qu'il est venu : le contrat ne se renomme pas.
+            assert_eq!(serde_json::to_string(&attendu).unwrap(), json);
+        }
+    }
 
     #[test]
     fn a_view_defaults_to_the_main_surface() {

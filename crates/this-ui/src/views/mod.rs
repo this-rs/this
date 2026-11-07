@@ -152,5 +152,12 @@ fn surface_frame(
             <aside class=class_name aria-label=label>{body}</aside>
         }
         .into_any(),
+        // Les surfaces d'un autre hôte : l'app les montre comme un aperçu neutre. Ce n'est
+        // pas là qu'elles se dessinent — le widget et l'activité sont peints par l'OS, dans
+        // un autre processus, à partir des mêmes briques.
+        Surface::Widget | Surface::LockWidget | Surface::Activity | Surface::Island => view! {
+            <section class=class_name aria-label=label>{body}</section>
+        }
+        .into_any(),
     }
 }
