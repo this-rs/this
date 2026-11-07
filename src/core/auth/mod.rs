@@ -33,6 +33,7 @@
 //! - `wami` — enables `WamiAuthProvider` (Ed25519 JWT verification)
 
 pub mod descriptor_policy;
+pub mod module_guard;
 pub mod surface;
 
 #[cfg(feature = "oidc")]

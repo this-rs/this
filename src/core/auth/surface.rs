@@ -64,6 +64,10 @@ pub struct ResolvedPolicy {
     /// `Err(raw)`: the declared text does not parse — refusal.
     pub policy: Result<PolicyExpr, String>,
     pub source: PolicySource,
+    /// The module whose DESCRIPTOR declared this policy (`None` for a YAML `auth:` entry or the
+    /// default). It is the module held to the `perm:` permissions the policy names
+    /// (`core::auth::module_guard`).
+    pub module: Option<String>,
 }
 
 /// Snapshot of every declared policy (descriptors + YAML), cheap to clone.
@@ -88,18 +92,18 @@ impl PolicyIndex {
     /// Policy of an entity operation.
     pub fn entity_policy(&self, entity: &str, op: &Operation) -> ResolvedPolicy {
         let scope = format!("{entity} · {op}");
-        let desc = self.descriptors.entity(entity).map(|(_, e)| e).or_else(|| {
+        let found = self.descriptors.entity(entity).or_else(|| {
             self.descriptors
                 .entity_by_plural(entity)
                 .and_then(|s| self.descriptors.entity(s))
-                .map(|(_, e)| e)
         });
-        if let Some(p) = desc.and_then(|d| d.permissions.policy(op)) {
+        if let Some((m, p)) = found.and_then(|(m, e)| e.permissions.policy(op).map(|p| (m, p))) {
             return ResolvedPolicy {
                 scope,
                 operation: op.clone(),
                 policy: Ok(p.clone()),
                 source: PolicySource::Descriptor,
+                module: Some(m.name.clone()),
             };
         }
         let yaml = self
@@ -114,6 +118,7 @@ impl PolicyIndex {
                 operation: op.clone(),
                 policy: Self::declared(raw),
                 source: PolicySource::Config,
+                module: None,
             };
         }
         ResolvedPolicy {
@@ -121,6 +126,7 @@ impl PolicyIndex {
             operation: op.clone(),
             policy: Ok(PermDesc::default_policy(op)),
             source: PolicySource::Default,
+            module: None,
         }
     }
 
@@ -157,6 +163,7 @@ impl PolicyIndex {
                         operation: op.clone(),
                         policy: Ok(p.clone()),
                         source: PolicySource::LinkDescriptor,
+                        module: Some(m.name.clone()),
                     },
                     None => self.link_fallback(scope.unwrap_or(&l.source), op, scope_name, &key),
                 };
@@ -185,6 +192,7 @@ impl PolicyIndex {
                     operation: op.clone(),
                     policy: Self::declared(raw),
                     source: PolicySource::LinkConfig,
+                    module: None,
                 },
                 None => self.link_fallback(scope.unwrap_or(&d.source_type), op, scope_name, &key),
             };
@@ -219,6 +227,7 @@ impl PolicyIndex {
                 operation: op.clone(),
                 policy: Self::declared(raw),
                 source: PolicySource::LinkConfig,
+                module: None,
             };
         }
         let mut r = self.entity_policy(scope_entity, op);
