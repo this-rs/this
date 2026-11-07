@@ -581,6 +581,36 @@ impl ServerHost {
         self.graph_store.as_ref()
     }
 
+    /// Le journal du harness, sur le store obrain attaché (s'il y en a un).
+    ///
+    /// `None` sans store : le journal est **facultatif**, rien n'est écrit et rien
+    /// ne casse. Le masque des secrets du harness (`this_agent::masque::masquer`)
+    /// est posé ici, au point d'écriture : un hôte ne peut pas l'oublier.
+    ///
+    /// ```rust,ignore
+    /// if let Some(journal) = host.harness_journal() {
+    ///     journal.record_run(&run, "run-1")?;          // écrire
+    ///     let relu = journal.load_run("run-1")?;       // relire
+    /// }
+    /// ```
+    #[cfg(feature = "obrain")]
+    pub fn harness_journal(&self) -> Option<crate::storage::HarnessGraph> {
+        self.graph_store.as_ref().map(|store| {
+            crate::storage::HarnessGraph::new(Arc::clone(store))
+                .with_masque(this_agent::masque::masquer)
+        })
+    }
+
+    /// Écrit un run entier dans le journal. `Ok(false)` — sans rien écrire — si
+    /// aucun store n'est attaché ; `Ok(true)` une fois le run commité.
+    #[cfg(feature = "obrain")]
+    pub fn record_harness_run(&self, run: &this_agent::Run, run_id: &str) -> Result<bool> {
+        match self.harness_journal() {
+            Some(journal) => journal.record_run(run, run_id).map(|()| true),
+            None => Ok(false),
+        }
+    }
+
     /// Attach an identity registry — how entities are named across engines.
     ///
     /// ```rust,ignore
