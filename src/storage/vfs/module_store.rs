@@ -195,6 +195,10 @@ pub struct VfsModuleStore {
     vfs: Arc<dyn Vfs>,
     registry: Arc<CustomRegistry>,
     allow_public: bool,
+    /// `true` : hôte à principal unique (app locale, CLI, runtime embarqué). Le module est
+    /// écrit par celui qui l'exécute, donc l'exigence de politique explicite tombe — la
+    /// validation structurelle, elle, reste entière.
+    local: bool,
     root: VfsPath,
     /// Keys accepted for stored modules. `None` = no authentication of the
     /// manifest (integrity only), the historical behaviour.
@@ -224,6 +228,7 @@ impl VfsModuleStore {
             vfs,
             registry: Arc::new(CustomRegistry::default()),
             allow_public: false,
+            local: false,
             root: VfsPath::parse("/modules").expect("static path"),
             #[cfg(feature = "module-signing")]
             trust: None,
@@ -271,6 +276,13 @@ impl VfsModuleStore {
     }
 
     /// Host decision: may a stored module declare `public` policies?
+    /// Déclare le magasin « à principal unique » : un module déposé n'a personne à qui être
+    /// accordé. C'est le régime d'une app locale, pas celui d'un serveur multi-locataire.
+    pub fn local(mut self, local: bool) -> Self {
+        self.local = local;
+        self
+    }
+
     pub fn allow_public(mut self, allow: bool) -> Self {
         self.allow_public = allow;
         self
@@ -286,8 +298,14 @@ impl VfsModuleStore {
     }
 
     fn profile(&self) -> CheckProfile {
-        CheckProfile::Stored {
-            allow_public: self.allow_public,
+        if self.local {
+            CheckProfile::Local {
+                allow_public: self.allow_public,
+            }
+        } else {
+            CheckProfile::Stored {
+                allow_public: self.allow_public,
+            }
         }
     }
 

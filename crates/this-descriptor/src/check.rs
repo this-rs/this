@@ -43,6 +43,12 @@ pub enum CheckProfile {
     /// Uploaded / stored module (`ModuleStore`): every CRUD operation of every entity needs
     /// an EXPLICIT policy, and `public` is refused unless `allow_public` is set by the host.
     Stored { allow_public: bool },
+    /// A single-principal host: a local app, a CLI, an embedded runtime. The module is
+    /// written by the same principal that runs it, so there is nobody to grant to — a
+    /// missing policy keeps the compiled default instead of being refused. Every STRUCTURAL
+    /// rule still applies (names, types, references, base fields, reserved plurals, semver):
+    /// what disappears is the admission model, not the validation.
+    Local { allow_public: bool },
     /// The framework's own descriptor (namespace `this`).
     Framework,
 }
@@ -354,8 +360,11 @@ fn check_key(c: &mut Ctx, ns: &str, key: &str, path: &str, profile: CheckProfile
 }
 
 fn check_perms(c: &mut Ctx, path: &str, perms: &PermDesc, profile: CheckProfile, entity: bool) {
-    if let CheckProfile::Stored { allow_public } = profile {
-        if entity {
+    // `public` reste refusé dans les deux régimes (un hôte local n'a pas de surface anonyme
+    // non plus) ; c'est l'exigence de politique EXPLICITE qui n'a de sens que pour un module
+    // déposé par un tiers.
+    if let CheckProfile::Stored { allow_public } | CheckProfile::Local { allow_public } = profile {
+        if entity && matches!(profile, CheckProfile::Stored { .. }) {
             for op in Operation::CRUD {
                 if perms.policy(&op).is_none() {
                     c.push(
@@ -591,6 +600,54 @@ mod tests {
     }
     fn reg() -> CustomRegistry {
         CustomRegistry::default()
+    }
+
+    /// Le même descripteur, deux régimes. Un module DÉPOSÉ doit déclarer ses politiques ;
+    /// une app à principal unique n'a personne à qui accorder, et n'a donc pas à les
+    /// inventer. Les règles structurelles, elles, ne bougent pas d'un iota.
+    #[test]
+    fn un_hote_a_principal_unique_n_exige_pas_de_politique() {
+        let sans_politique = r#"{"format":1,"name":"taches","version":"0.1.0",
+            "entities":[{"name":"tache","plural":"taches","kind":"data",
+              "fields":[{"name":"titre","ty":"string"}]}],
+            "links":[]}"#;
+        let m = ModuleDescriptor::from_json(sans_politique).expect("descripteur valide");
+
+        let codes = codes_of(m.check(
+            &reg(),
+            CheckProfile::Stored {
+                allow_public: false,
+            },
+        ));
+        assert!(
+            codes.iter().any(|c| c == "this.descriptor.policy_missing"),
+            "un module déposé doit déclarer ses politiques : {codes:?}"
+        );
+
+        m.check(
+            &reg(),
+            CheckProfile::Local {
+                allow_public: false,
+            },
+        )
+        .expect("une app locale n'a pas de tiers à qui accorder");
+
+        // `public` reste refusé : un hôte local n'a pas de surface anonyme non plus.
+        let avec_public = sans_politique.replace(
+            r#""kind":"data""#,
+            r#""kind":"data","permissions":{"list":"public"}"#,
+        );
+        let m = ModuleDescriptor::from_json(&avec_public).expect("descripteur valide");
+        let codes = codes_of(m.check(
+            &reg(),
+            CheckProfile::Local {
+                allow_public: false,
+            },
+        ));
+        assert!(
+            codes.iter().any(|c| c == "this.descriptor.public_refused"),
+            "public doit rester refusé en local : {codes:?}"
+        );
     }
 
     #[test]
