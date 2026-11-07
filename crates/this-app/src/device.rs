@@ -9,37 +9,9 @@
 
 use serde::{Deserialize, Serialize};
 
-/// Une capacité liée à l'appareil, pas au module.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Capability {
-    /// Notifications (locales ou poussées).
-    Notifications,
-    Camera,
-    Microphone,
-    Location,
-    Clipboard,
-    /// Partage système (feuille de partage, AirDrop, Quick Share…).
-    Share,
-    /// Une activité en direct : un état qui vit hors de l'app (Dynamic Island et écran
-    /// verrouillé sur iPhone, notification persistante ailleurs). Exige un module natif ;
-    /// une coquille qui ne l'a pas répond « non supportée ».
-    LiveActivity,
-}
-
-impl Capability {
-    pub fn label(self) -> &'static str {
-        match self {
-            Capability::Notifications => "Notifications",
-            Capability::Camera => "Caméra",
-            Capability::Microphone => "Microphone",
-            Capability::Location => "Localisation",
-            Capability::Clipboard => "Presse-papiers",
-            Capability::Share => "Partage",
-            Capability::LiveActivity => "Activité en direct",
-        }
-    }
-}
+/// Une capacité liée à l'appareil, pas au module. Une seule définition, dans
+/// `this_platform` : deux enums identiques auraient divergé au premier ajout.
+pub use this_platform::Capability;
 
 /// Où en est une autorisation **de l'appareil**.
 ///

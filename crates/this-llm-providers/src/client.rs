@@ -16,6 +16,11 @@ use crate::secret::Secret;
 /// What the chat template adds around a conversation, estimated once per call.
 const TEMPLATE_OVERHEAD_TOKENS: u32 = 8;
 
+/// Ceiling on the connection phase alone (DNS, TCP, TLS): a reachable engine accepts its
+/// socket within seconds, even when it then reads a long prompt for minutes.
+#[cfg(not(target_arch = "wasm32"))]
+const CONNECT_TIMEOUT_SECS: u64 = 15;
+
 /// One question for a model, as two messages.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ChatRequest {
@@ -231,9 +236,21 @@ impl ProviderClient {
     ) -> Self {
         // On a native target the client carries the configured timeout. In a browser
         // the page's own network stack decides, and reqwest offers no timeout there.
+        //
+        // `timeout_secs` is a SILENCE limit, never a total deadline. `ClientBuilder::timeout`
+        // bounds the whole exchange, streamed body included: a local engine that reads a long
+        // prompt then writes 4096 tokens (measured 07/11/2026: 53 tok/s, so 77 s for the
+        // output alone) was cut at 120 s while it was still talking. A read timeout resets on
+        // every chunk: a live stream runs as long as it needs, a mute one stops after
+        // `timeout_secs`.
         let builder = reqwest::Client::builder();
         #[cfg(not(target_arch = "wasm32"))]
-        let builder = builder.timeout(std::time::Duration::from_secs(config.timeout_secs));
+        let builder = {
+            let silence = std::time::Duration::from_secs(config.timeout_secs);
+            builder
+                .connect_timeout(silence.min(std::time::Duration::from_secs(CONNECT_TIMEOUT_SECS)))
+                .read_timeout(silence)
+        };
         let http = builder.build().unwrap_or_else(|_| reqwest::Client::new());
         Self {
             config,
@@ -294,9 +311,16 @@ impl ProviderClient {
     async fn resolve_model(&self) -> Result<(String, Option<u32>), ProviderError> {
         let (model, announced) = match (&self.config.model, self.list_models().await) {
             (Some(name), Ok(models)) => {
+                // An engine that serves ONE model (llama-server) answers whatever name it is
+                // given: a configured name that differs from its file name still gets that
+                // model's window, instead of no window (and no fitting of the output cap).
                 let window = models
                     .iter()
                     .find(|model| &model.id == name)
+                    .or(match models.as_slice() {
+                        [only] => Some(only),
+                        _ => None,
+                    })
                     .and_then(|model| model.context_window);
                 (name.clone(), window)
             }
@@ -496,6 +520,11 @@ impl ProviderClient {
             finish: None,
             done_seen: false,
             ended: false,
+            alive: false,
+            progress: false,
+            last_was_progress: false,
+            last_progress: std::time::Instant::now(),
+            no_progress: Turn::NO_PROGRESS_LIMIT,
             reported: None,
             model,
             pricing: self.config.pricing,
@@ -515,6 +544,16 @@ pub struct Turn {
     finish: Option<Finish>,
     done_seen: bool,
     ended: bool,
+    /// A line arrived since the last piece was handed out, but it carried no text.
+    alive: bool,
+    /// A `data:` event that parses arrived since the last piece was handed out.
+    progress: bool,
+    /// What the last piece handed out by [`Turn::next`] stood for.
+    last_was_progress: bool,
+    /// When the last `data:` event that parses arrived (or the turn opened).
+    last_progress: std::time::Instant,
+    /// How long comments alone may keep the turn open.
+    no_progress: std::time::Duration,
     reported: Option<Value>,
     model: String,
     pricing: Option<Pricing>,
@@ -523,6 +562,34 @@ pub struct Turn {
 
 #[cfg(not(target_arch = "wasm32"))]
 impl Turn {
+    /// How long `:` comments ALONE may keep a turn open, with no `data:` event at all.
+    ///
+    /// A comment is a sign of life, not progress: an engine (or a proxy in front of it) that
+    /// sends `: keep-alive` forever re-arms the HTTP read timeout forever, and a caller that
+    /// guards silence around `next()` never fires either. Measured in the V20 review: one hour
+    /// of keep-alive, never cut. Ten minutes because OpenRouter sends `: OPENROUTER
+    /// PROCESSING` while a reasoning model thinks with its reasoning hidden, and the longest
+    /// of those (o1-pro / o3-pro class) think for several minutes before the first token;
+    /// ten minutes covers them with room, and stays under the 15 min run budget of a harness,
+    /// so a live shell that only guards silence (180 s around `next()`) is still bounded.
+    pub const NO_PROGRESS_LIMIT: std::time::Duration = std::time::Duration::from_secs(600);
+
+    /// Sets how long `:` comments alone may keep this turn open ([`Self::NO_PROGRESS_LIMIT`]
+    /// by default). Counted from the last `data:` event that parses, or from the opening.
+    pub fn with_no_progress_limit(mut self, limit: std::time::Duration) -> Self {
+        self.no_progress = limit;
+        self
+    }
+
+    /// Whether the last piece handed out by [`Self::next`] came from a `data:` event (text,
+    /// a tool call fragment, reasoning, usage, a role-only delta): PROGRESS. `false` after an
+    /// empty piece that only stood for `:` comments: a sign of life, not progress. A caller
+    /// guarding the stream re-arms its silence guard on both, its no-progress guard only on
+    /// progress.
+    pub fn last_was_progress(&self) -> bool {
+        self.last_was_progress
+    }
+
     /// The model the engine runs this turn on.
     pub fn model(&self) -> &str {
         &self.model
@@ -535,11 +602,31 @@ impl Turn {
 
     /// The next piece of text, or `None` once the engine has ended the turn.
     ///
+    /// An **empty** piece is a sign of life: the engine sent something that is not text —
+    /// a tool call fragment, reasoning, a role-only or empty `delta`, usage, or a `:`
+    /// keep-alive comment. It is handed out (at most once per network read, never more
+    /// often than the text itself would be) so that a caller guarding the stream with its
+    /// own silence timeout around `next()` sees the engine talk. A model writing a whole
+    /// module in ONE tool call streams for minutes without a single `content` piece: if
+    /// `next()` only returned text, that caller would cut it while the engine is talking.
+    /// Callers that only want the text can append the empty piece or skip it.
+    ///
+    /// Keep-alive comments count too, but only as LIFE: they come from the engine side of
+    /// the connection (OpenRouter sends `: OPENROUTER PROCESSING` while a reasoning model
+    /// thinks), and the HTTP read timeout counts them as activity. They are not progress
+    /// ([`Self::last_was_progress`] is `false`): past [`Self::NO_PROGRESS_LIMIT`] without a
+    /// single `data:` event, `next()` fails with [`ProviderError::Timeout`] that says so. A
+    /// stream of comments alone is therefore bounded even when the caller guards nothing
+    /// but silence.
+    ///
     /// A stream that stops without `[DONE]`, without a finish reason and without a tool
     /// call is an error: its text is a fragment, not an answer.
     pub async fn next(&mut self) -> Result<Option<String>, ProviderError> {
         loop {
             if let Some(piece) = self.take_piece() {
+                self.alive = false;
+                self.progress = false;
+                self.last_was_progress = true;
                 return Ok(Some(piece));
             }
             if self.ended {
@@ -547,6 +634,21 @@ impl Turn {
                     return Err(ProviderError::StreamCut);
                 }
                 return Ok(None);
+            }
+            // Everything buffered is read and none of it was text: say the engine is alive
+            // before waiting on the network again.
+            if std::mem::take(&mut self.alive) {
+                let progressed = std::mem::take(&mut self.progress);
+                self.last_was_progress = progressed;
+                // Comments only: alive, but has it said anything for too long?
+                if !progressed && self.last_progress.elapsed() >= self.no_progress {
+                    return Err(ProviderError::Timeout(format!(
+                        "aucun progrès depuis {} s : le moteur n'envoie que des signes de vie \
+                         (commentaires `:`), ni texte, ni appel d'outil, ni raisonnement",
+                        self.no_progress.as_secs()
+                    )));
+                }
+                return Ok(Some(String::new()));
             }
             match self.response.chunk().await.map_err(transport)? {
                 Some(bytes) => self.pending.extend_from_slice(&bytes),
@@ -588,11 +690,15 @@ impl Turn {
         Ok(reply)
     }
 
-    /// Reads the complete lines already buffered, and returns the first text piece.
+    /// Reads the complete lines already buffered, and returns the first text piece. Any
+    /// other non-blank line (an event without text, a comment) marks the turn `alive`.
     fn take_piece(&mut self) -> Option<String> {
         while let Some(position) = self.pending.iter().position(|byte| *byte == b'\n') {
             let line: Vec<u8> = self.pending.drain(..=position).collect();
             let text = String::from_utf8_lossy(&line);
+            if !text.trim().is_empty() {
+                self.alive = true;
+            }
             let Some(data) = text.trim().strip_prefix("data:") else {
                 continue;
             };
@@ -608,6 +714,10 @@ impl Turn {
             let Ok(value) = serde_json::from_str::<Value>(data) else {
                 continue;
             };
+            // An event that parses is progress, whatever it carries: text, a tool call
+            // fragment, reasoning, usage. A `:` comment never reaches this line.
+            self.progress = true;
+            self.last_progress = std::time::Instant::now();
             if value.get("usage").is_some_and(|usage| !usage.is_null()) {
                 self.reported = value.get("usage").cloned();
             }

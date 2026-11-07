@@ -1,0 +1,38 @@
+[package]
+name = "tauri-plugin-this-device"
+version = "0.0.1"
+edition = "2024"
+authors = ["Riviere Théotime <t@ffs.holdings>"]
+license = "MIT OR Apache-2.0"
+description = "Tauri 2 iOS plugin, raw device bridge: gyroscope sample, Bluetooth scan and permission status, as the this-platform device contract. Not for direct exposure to a webview."
+repository = "https://github.com/this-rs/this"
+keywords = ["tauri", "plugin", "ios", "gyroscope", "bluetooth"]
+categories = ["gui"]
+# Tauri plugin convention: package `tauri-plugin-<name>` and `links` equal to it.
+links = "tauri-plugin-this-device"
+
+# Hors du workspace racine, comme `this-shell-tauri` : Tauri tire GTK/WebKit sur Linux, et la
+# CI Ubuntu compile le workspace racine. Ce crate se construit et se teste seul.
+[workspace]
+
+[lib]
+name = "this_device_tauri"
+path = "src/lib.rs"
+
+[dependencies]
+this-platform = { path = "../this-platform" }
+# No default features: on desktop and Linux, Tauri's default webview stack (WebKitGTK) is not
+# pulled in. The iOS webview backend is enabled below.
+tauri = { version = "2.12", default-features = false }
+# `timeout` autour de l'appel natif : un plugin muet ne doit pas bloquer un tour.
+tokio = { version = "1", features = ["time"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[build-dependencies]
+tauri-plugin = { version = "2.7", features = ["build"] }
+
+[target.'cfg(target_os = "ios")'.dependencies.tauri]
+version = "2.12"
+features = ["wry"]
+default-features = false

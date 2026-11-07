@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-gyroscope-sample"
+description = "Enables the gyroscope_sample command without any pre-configured scope."
+commands.allow = ["gyroscope_sample"]
+
+[[permission]]
+identifier = "deny-gyroscope-sample"
+description = "Denies the gyroscope_sample command without any pre-configured scope."
+commands.deny = ["gyroscope_sample"]
