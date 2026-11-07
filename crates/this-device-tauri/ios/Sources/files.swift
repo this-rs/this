@@ -262,3 +262,50 @@ extension ThisDevicePlugin {
     }
   }
 }
+
+// ---- Écrire un fichier produit par l'app -----------------------------------------------
+//
+// Sans écriture, une note transcrite ou un document produit ne sort pas de l'app. Le fichier va
+// dans le dossier temporaire du conteneur : il survit à la session, pas à une désinstallation,
+// et il se partage par `shareItem` (le pont n'a pas de sélecteur en écriture).
+
+private struct FilesWriteArgs: Decodable {
+  let name: String
+  let dataBase64: String
+
+  private enum CodingKeys: String, CodingKey {
+    case name
+    case dataBase64 = "data_base64"
+  }
+}
+
+private struct FileSavedReply: Encodable {
+  let kind = "saved"
+  let path: String
+  let bytes: Int
+}
+
+extension ThisDevicePlugin {
+  /// Écrit un fichier nommé dans le dossier temporaire de l'app. Le nom vient du pont Rust, qui
+  /// a déjà refusé un séparateur de chemin, `..` et les caractères de contrôle.
+  @objc public func filesWrite(_ invoke: Invoke) throws {
+    let args = try invoke.parseArgs(FilesWriteArgs.self)
+    let name = args.name.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !name.isEmpty else {
+      invoke.resolve(Reply.error(code: "missing_argument"))
+      return
+    }
+    guard let data = Data(base64Encoded: args.dataBase64) else {
+      invoke.resolve(Reply.error(code: "bad_base64"))
+      return
+    }
+    let url = FileManager.default.temporaryDirectory.appendingPathComponent(name)
+    do {
+      try data.write(to: url, options: .atomic)
+      invoke.resolve(FileSavedReply(path: url.path, bytes: data.count))
+    } catch {
+      // Le nom peut désigner un dossier existant, ou le volume peut être plein : un refus.
+      invoke.resolve(Reply.error(code: "internal"))
+    }
+  }
+}

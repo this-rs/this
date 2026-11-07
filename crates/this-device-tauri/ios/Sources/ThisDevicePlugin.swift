@@ -49,6 +49,10 @@ class ThisDevicePlugin: Plugin {
       #selector(ThisDevicePlugin.faceIdConfirm(_:)),
       #selector(ThisDevicePlugin.locationRequest(_:)),
       #selector(ThisDevicePlugin.locationSample(_:)),
+      // Bluetooth au-delà du scan : le moteur est dans `BluetoothCentral.swift`, les
+      // sélecteurs dans `Bluetooth.swift` (en extension). Sans cette référence, le dead-strip
+      // les retire — c'est exactement le défaut mesuré ci-dessus sur quatre autres fichiers.
+      #selector(ThisDevicePlugin.bluetoothConnect(_:)),
     ]
     super.init()
   }

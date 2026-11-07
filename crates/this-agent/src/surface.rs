@@ -261,6 +261,15 @@ impl Surface {
     }
 }
 
+/// Le budget en caractères dans lequel la carte d'un appareil doit tenir.
+///
+/// C'est ce que `capacites` passe à [`Surface::describe_for`]. Il est ici, et non chez
+/// l'appelant, pour qu'une capacité ajoutée se heurte à un test plutôt qu'à une troncature
+/// silencieuse — le défaut d'origine : la carte ne contenait pas l'appareil parce que rien
+/// ne mesurait ce qu'elle contenait. Mesuré le 08/11/2026, carte entière : 5 798 caractères
+/// sur iOS, 4 838 sur macOS, 664 en navigateur.
+pub const BUDGET_CARTE: usize = 8_000;
+
 /// La carte réelle du harness, telle qu'elle est **aujourd'hui**.
 ///
 /// Chaque entrée est une affirmation vérifiable : `Status::Live` veut dire que le
@@ -291,10 +300,10 @@ pub fn surface() -> Surface {
             Capability::new(
                 "ui.markdown",
                 Tier::Webview,
-                "rendre du markdown dans une bulle",
+                "rendre du markdown dans une bulle (titres, listes, citations, code, tableaux)",
                 None,
                 &[Web, Ios, Ipados, Macos, Windows, Linux, Android],
-                Status::Missing,
+                Status::Live,
             ),
             Capability::new(
                 "store.local",
@@ -315,10 +324,10 @@ pub fn surface() -> Surface {
             Capability::new(
                 "fs.index",
                 Tier::Webview,
-                "lister le VFS (artefacts compilés)",
+                "lister les fichiers du VFS de la coquille (artefacts compilés, modules)",
                 None,
                 &[Web, Ios, Ipados, Macos, Windows, Linux, Android],
-                Status::Missing,
+                Status::Live,
             ),
             // ---- étage coquille
             Capability::new(
@@ -356,10 +365,10 @@ pub fn surface() -> Surface {
             Capability::new(
                 "notify",
                 Tier::Shell,
-                "notifier l'utilisateur",
-                Some("notification.*"),
+                "notifier la personne : poster ou retirer une notification locale",
+                Some("notify (notificationsPost / notificationsCancel)"),
                 &[Ios, Ipados, Macos, Windows, Linux, Android],
-                Status::Missing,
+                Status::Live,
             ),
             Capability::new(
                 "haptics",
@@ -372,10 +381,10 @@ pub fn surface() -> Surface {
             Capability::new(
                 "share",
                 Tier::Shell,
-                "feuille de partage du système",
-                Some("share.*"),
+                "ouvrir la feuille de partage du système (texte, lien, image, fichier de l'app)",
+                Some("shareText / shareItem"),
                 &[Ios, Ipados, Macos, Android],
-                Status::Missing,
+                Status::Live,
             ),
             Capability::new(
                 "deep_link",
@@ -404,10 +413,12 @@ pub fn surface() -> Surface {
             Capability::new(
                 "activity",
                 Tier::Shell,
-                "Live Activity / Dynamic Island",
-                Some("activity.*"),
-                &[Ios],
-                Status::Missing,
+                "Live Activity / Dynamic Island : démarrer, mettre à jour, terminer",
+                Some(
+                    "liveActivityStart / liveActivityUpdate / liveActivityEnd / liveActivityStatus",
+                ),
+                &[Ios, Ipados],
+                Status::Live,
             ),
             Capability::new(
                 "model.call",
@@ -444,10 +455,306 @@ pub fn surface() -> Surface {
             Capability::new(
                 "file.pick",
                 Tier::Shell,
-                "choisir un fichier ou une photo",
-                Some("dialog.*"),
+                "choisir un fichier ou une photo dans le sélecteur système, et relire un fichier choisi",
+                Some("filesPick / filesRead / photosPick"),
                 &[Ios, Ipados, Macos, Windows, Linux, Android],
+                Status::Live,
+            ),
+            // ---- étage coquille : l'appareil
+            //
+            // Une entrée par capacité du pont natif (`this_platform::capability::Capability::ALL`),
+            // identifiant `device.<nom de fil>`, et une commande qui nomme les méthodes
+            // réellement exposées par `this_platform::device_bridge::METHODS`.
+            //
+            // POURQUOI CE BLOC EXISTE. La carte ne parlait pas de l'appareil du tout : ni
+            // contacts, ni calendrier, ni santé, ni Bluetooth. L'agent, qui lit cette carte
+            // (`capacites`), répondait donc « pas encore » pour des capacités livrées depuis
+            // la mise en place du pont — et la personne concluait que rien ne marchait.
+            //
+            // `Platform` n'est pas décoratif : une famille que `macos/Sources/dispatch.swift`
+            // ne traite pas (santé, mouvement, NFC, gyroscope, activité en direct) n'est pas
+            // annoncée sur macOS. Vérifié par `tauri-plugin-this-device` :
+            // `tests/surface_parity.rs` compare cette liste à `METHODS`, et
+            // `tests/swift_parity.rs` compare `METHODS` aux sélecteurs natifs.
+            //
+            // CE QUI RESTE PARTIEL, et qui le dit : la caméra ne filme pas encore, et le
+            // sélecteur de fichiers n'a pas de mode écriture (on écrit dans le conteneur).
+            // Les autres profondeurs manquantes, mesurées :
+            // localisation (flux continu, adresse), parole (dictée live), notifications
+            // (planifier, lister), mouvement (distance, étages), santé (écriture, workouts),
+            // fichiers (écrire dans le sélecteur).
+            //
+            // Une capacité peut être plus profonde sur un appareil que sur l'autre : le
+            // Bluetooth se connecte sur iPhone et se contente de scanner sur Mac. D'où les
+            // entrées `device.<nom>.<aspect>`, que `tests/surface_parity.rs` accepte comme
+            // faisant partie de la capacité `device.<nom>`.
+            Capability::new(
+                "device.notifications",
+                Tier::Shell,
+                "notifications locales : état, demande d'autorisation, poster, retirer",
+                Some(
+                    "notificationsStatus / notificationsRequest / notificationsPost / notificationsCancel",
+                ),
+                &[Ios, Ipados, Macos],
+                Status::Live,
+            ),
+            Capability::new(
+                "device.camera",
+                Tier::Shell,
+                "caméra : état de la permission et demande ; la capture est sous device.camera.capture",
+                Some("captureStatus / captureRequest"),
+                &[Ios, Ipados, Macos],
+                Status::Live,
+            ),
+            Capability::new(
+                "device.microphone",
+                Tier::Shell,
+                "microphone : état de la permission et demande ; l'enregistrement est sous device.microphone.record",
+                Some("captureStatus / captureRequest"),
+                &[Ios, Ipados, Macos],
+                Status::Live,
+            ),
+            // Le rattachement est porté par le préfixe : `device.camera.capture` est un aspect
+            // de `device.camera`, pas une capacité de plus.
+            Capability::new(
+                "device.camera.capture",
+                Tier::Shell,
+                "prendre une photo (JPEG borné en pixels et en qualité) : la vidéo n'est pas encore là",
+                Some("cameraCapturePhoto"),
+                &[Ios, Ipados],
+                Status::Live,
+            ),
+            Capability::new(
+                "device.camera.video",
+                Tier::Shell,
+                "filmer une vidéo (aujourd'hui : photo et audio seulement)",
+                None,
+                &[Ios, Ipados],
                 Status::Missing,
+            ),
+            Capability::new(
+                "device.microphone.record",
+                Tier::Shell,
+                "enregistrer une note audio bornée, écrite dans un fichier de l'app",
+                Some("microphoneStart / microphoneStop"),
+                &[Ios, Ipados],
+                Status::Live,
+            ),
+            Capability::new(
+                "device.location",
+                Tier::Shell,
+                "position ponctuelle, et demande d'autorisation",
+                Some("locationRequest / locationSample"),
+                &[Ios, Ipados, Macos],
+                Status::Live,
+            ),
+            Capability::new(
+                "device.location_always",
+                Tier::Shell,
+                "localisation en arrière-plan",
+                Some("locationRequest"),
+                &[Ios, Ipados],
+                Status::Live,
+            ),
+            Capability::new(
+                "device.clipboard",
+                Tier::Shell,
+                "lire et écrire du TEXTE dans le presse-papiers",
+                Some("clipboardRead / clipboardWrite"),
+                &[Ios, Ipados, Macos],
+                Status::Live,
+            ),
+            // Le pont macOS ne lit et n'écrit que du texte (`macos/Sources/clipboard.swift`) :
+            // un lien ou une image n'y sont pas annoncés, pour ne pas promettre un refus.
+            Capability::new(
+                "device.clipboard.media",
+                Tier::Shell,
+                "lire et écrire un LIEN ou une IMAGE dans le presse-papiers (4 Mio au plus)",
+                Some("clipboardRead / clipboardWrite"),
+                &[Ios, Ipados],
+                Status::Live,
+            ),
+            Capability::new(
+                "device.share",
+                Tier::Shell,
+                "ouvrir la feuille de partage système avec du texte",
+                Some("shareText"),
+                &[Ios, Ipados, Macos],
+                Status::Live,
+            ),
+            // Le partage d'un lien, d'une image ou d'un fichier. Sur macOS le picker
+            // (`NSSharingServicePicker`) répond « présenté », pas « partagé » : macOS n'a pas de
+            // callback de fermeture fiable, et le code le dit au lieu de le laisser croire.
+            Capability::new(
+                "device.share.item",
+                Tier::Shell,
+                "partager un lien, une image ou un fichier de l'app",
+                Some("shareItem"),
+                &[Ios, Ipados, Macos],
+                Status::Live,
+            ),
+            Capability::new(
+                "device.live_activity",
+                Tier::Shell,
+                "activité en direct : démarrer, mettre à jour, terminer",
+                Some(
+                    "liveActivityStatus / liveActivityStart / liveActivityUpdate / liveActivityEnd",
+                ),
+                &[Ios, Ipados],
+                Status::Live,
+            ),
+            Capability::new(
+                "device.contacts",
+                Tier::Shell,
+                "carnet d'adresses : lister (borné) et demander l'autorisation",
+                Some("contactsStatus / contactsRequest / contactsList"),
+                &[Ios, Ipados, Macos],
+                Status::Live,
+            ),
+            // Chercher, lire un contact précis et en créer un : iOS seulement, le pont macOS
+            // ne connaît que la liste (`macos/Sources/contacts.swift`).
+            Capability::new(
+                "device.contacts.more",
+                Tier::Shell,
+                "chercher un contact par nom, en lire un par son identifiant, en créer un",
+                Some("contactsGet / contactsSearch / contactsCreate"),
+                &[Ios, Ipados],
+                Status::Live,
+            ),
+            Capability::new(
+                "device.photos",
+                Tier::Shell,
+                "photothèque : état de la permission et demande (aucune lecture en masse)",
+                Some("photosStatus / photosRequest"),
+                &[Ios, Ipados, Macos],
+                Status::Live,
+            ),
+            Capability::new(
+                "device.photos.read",
+                Tier::Shell,
+                "lire la photothèque : métadonnées d'une fenêtre, puis les octets d'UNE photo (bornés en pixels)",
+                Some("photosList / photosRead"),
+                &[Ios, Ipados],
+                Status::Live,
+            ),
+            Capability::new(
+                "device.photos_pick",
+                Tier::Shell,
+                "choisir des photos dans le sélecteur système et recevoir leurs octets",
+                Some("photosPick"),
+                &[Ios, Ipados, Macos],
+                Status::Live,
+            ),
+            Capability::new(
+                "device.files_pick",
+                Tier::Shell,
+                "choisir des fichiers, puis les relire par signet (bookmark)",
+                Some("filesPick / filesRead"),
+                &[Ios, Ipados, Macos],
+                Status::Live,
+            ),
+            // Écrire un fichier produit par l'app : iOS seulement.
+            Capability::new(
+                "device.files_pick.write",
+                Tier::Shell,
+                "écrire un fichier produit par l'app, puis le partager",
+                Some("filesWrite"),
+                &[Ios, Ipados],
+                Status::Live,
+            ),
+            Capability::new(
+                "device.bluetooth",
+                Tier::Shell,
+                "Bluetooth : état de la permission et SCAN des appareils à portée",
+                Some("status / bluetoothScan"),
+                &[Ios, Ipados, Macos],
+                Status::Live,
+            ),
+            Capability::new(
+                "device.bluetooth.connect",
+                Tier::Shell,
+                "se connecter à un périphérique, lire ses services, lire et écrire une caractéristique, s'abonner à ses notifications (valeurs tirées, pas poussées)",
+                Some(
+                    "bluetoothState / bluetoothConnect / bluetoothDisconnect / bluetoothServices / bluetoothRead / bluetoothWrite / bluetoothSubscribe / bluetoothNotifications",
+                ),
+                // iOS d'abord : le pont macOS ne sait toujours que scanner (`dispatch.swift`
+                // répond `not_supported` à ces huit méthodes, et la carte ne les annonce donc
+                // pas sur un Mac).
+                &[Ios, Ipados],
+                Status::Live,
+            ),
+            Capability::new(
+                "device.gyroscope",
+                Tier::Shell,
+                "un échantillon du gyroscope (aucun flux continu)",
+                Some("status / gyroscopeSample"),
+                &[Ios, Ipados],
+                Status::Live,
+            ),
+            Capability::new(
+                "device.motion_activity",
+                Tier::Shell,
+                "pas et activité physique sur une fenêtre bornée",
+                Some("motionActivityStatus / motionActivityRequest / motionStepsSample"),
+                &[Ios, Ipados],
+                Status::Live,
+            ),
+            Capability::new(
+                "device.calendar",
+                Tier::Shell,
+                "calendrier : lire une fenêtre d'événements et en créer un",
+                Some("calendarStatus / calendarRequest / calendarEvents / calendarCreateEvent"),
+                &[Ios, Ipados, Macos],
+                Status::Live,
+            ),
+            // Les calendriers eux-mêmes, la modification et la suppression : iOS seulement.
+            Capability::new(
+                "device.calendar.edit",
+                Tier::Shell,
+                "lister les calendriers et leur droit d'écriture, modifier et supprimer un événement",
+                Some("calendarCalendars / calendarUpdateEvent / calendarDeleteEvent"),
+                &[Ios, Ipados],
+                Status::Live,
+            ),
+            Capability::new(
+                "device.health",
+                Tier::Shell,
+                "santé : lire une mesure (pas, fréquence cardiaque, masse) sur 24 h au plus",
+                Some("healthStatus / healthRequest / healthQuantitySample"),
+                &[Ios, Ipados],
+                Status::Live,
+            ),
+            Capability::new(
+                "device.face_id",
+                Tier::Shell,
+                "confirmer une action par Face ID / Touch ID",
+                Some("faceIdStatus / faceIdConfirm"),
+                &[Ios, Ipados, Macos],
+                Status::Live,
+            ),
+            Capability::new(
+                "device.speech",
+                Tier::Shell,
+                "transcrire un fichier audio (1 à 60 s), sur l'appareil",
+                Some("speechStatus / speechRequest / speechTranscribeFile"),
+                &[Ios, Ipados, Macos],
+                Status::Live,
+            ),
+            Capability::new(
+                "device.nfc",
+                Tier::Shell,
+                "lire une étiquette NFC une fois (aucune écriture)",
+                Some("nfcStatus / nfcReadOnce"),
+                &[Ios, Ipados],
+                Status::Live,
+            ),
+            Capability::new(
+                "device.local_network",
+                Tier::Shell,
+                "voir les services Bonjour du réseau local (_http._tcp)",
+                Some("localNetworkStatus / localNetworkBrowse"),
+                &[Ios, Ipados, Macos],
+                Status::Live,
             ),
             // ---- étage natif
             Capability::new(
@@ -547,7 +854,21 @@ mod tests {
         let carte = surface();
         // Ce qui est mesuré comme absent doit être dit absent.
         assert_eq!(
-            carte.capability("ui.markdown").unwrap().status,
+            carte.capability("device.files_pick").unwrap().status,
+            Status::Live
+        );
+        // Ce qui reste réellement absent : filmer, et un sélecteur en écriture.
+        assert_eq!(
+            carte.capability("device.camera.video").unwrap().status,
+            Status::Missing
+        );
+        assert_eq!(
+            carte.capability("device.files_pick").unwrap().status,
+            Status::Live
+        );
+        // Ce qui reste réellement absent : filmer, et un sélecteur en écriture.
+        assert_eq!(
+            carte.capability("device.camera.video").unwrap().status,
             Status::Missing
         );
         assert_eq!(carte.capability("ui.render").unwrap().status, Status::Live);
@@ -556,10 +877,124 @@ mod tests {
             carte.capability("window.control").unwrap().status,
             Status::Missing
         );
+        assert_eq!(carte.capability("haptics").unwrap().status, Status::Missing);
         // Le pouvoir premier de l'agent est dit, pas supposé.
         assert_eq!(carte.capability("modules").unwrap().status, Status::Live);
         assert_eq!(carte.slot("boot").unwrap().status, Status::Missing);
         assert_eq!(carte.slot("module.screen").unwrap().status, Status::Live);
+    }
+
+    #[test]
+    fn la_carte_d_un_appareil_tient_dans_le_budget_annonce() {
+        // Une carte plus longue que le budget est tronquée par `describe`, et l'agent perd
+        // des capacités sans le savoir dans le feu de l'action. Le budget est donc mesuré ici.
+        for plateforme in [Platform::Ios, Platform::Macos, Platform::Web] {
+            let texte = surface().describe_for(plateforme, usize::MAX);
+            assert!(
+                texte.chars().count() <= BUDGET_CARTE,
+                "{:?} : {} caractères, budget {BUDGET_CARTE}",
+                plateforme,
+                texte.chars().count()
+            );
+        }
+    }
+
+    #[test]
+    fn la_carte_dit_l_appareil_et_ses_limites() {
+        // Mesuré le 08/11/2026 : la carte ne nommait AUCUNE capacité d'appareil. L'agent
+        // répondait « pas encore » pour les contacts ou le Bluetooth, qui existaient.
+        let carte = surface();
+        for id in [
+            "device.contacts",
+            "device.calendar",
+            "device.health",
+            "device.bluetooth",
+            "device.nfc",
+            "device.location",
+            "device.speech",
+            "device.face_id",
+            "device.photos_pick",
+            "device.files_pick",
+            "device.clipboard",
+            "device.share",
+            "device.notifications",
+            "device.live_activity",
+            "device.motion_activity",
+            "device.gyroscope",
+            "device.local_network",
+            "device.camera",
+            "device.microphone",
+            "device.photos",
+            "device.location_always",
+        ] {
+            let c = carte
+                .capability(id)
+                .unwrap_or_else(|| panic!("{id} absent de la carte"));
+            assert_eq!(c.tier, Tier::Shell, "{id}");
+            assert_eq!(c.status, Status::Live, "{id}");
+            assert!(c.command.is_some(), "{id} doit nommer ses méthodes");
+            assert!(c.platforms.contains(&Platform::Ios), "{id}");
+        }
+        // Une capacité partielle le dit dans son titre, elle ne se cache pas derrière
+        // « Live » : la photothèque sans lecture en masse est `device.photos` seul.
+        let photos = carte.capability("device.photos").unwrap();
+        assert!(
+            photos.title.contains("aucune lecture en masse"),
+            "{}",
+            photos.title
+        );
+        // Et la capture, qui vient d'arriver, est annoncée avec ses méthodes.
+        let capture = carte.capability("device.camera.capture").unwrap();
+        assert_eq!(capture.status, Status::Live);
+        assert!(
+            capture
+                .command
+                .as_deref()
+                .unwrap()
+                .contains("cameraCapturePhoto")
+        );
+        // Ce qui est plus profond qu'avant est dit disponible, avec ses méthodes.
+        let bt = carte.capability("device.bluetooth.connect").unwrap();
+        assert_eq!(bt.status, Status::Live);
+        let commande = bt.command.clone().unwrap();
+        for methode in ["bluetoothConnect", "bluetoothServices", "bluetoothWrite"] {
+            assert!(commande.contains(methode), "{methode} absent de {commande}");
+        }
+        // Et ce qui n'existe pas du tout reste dit absent, à côté de ce qui existe.
+        assert_eq!(
+            carte.capability("device.files_pick").unwrap().status,
+            Status::Live
+        );
+        // Ce qui reste réellement absent : filmer, et un sélecteur en écriture.
+        assert_eq!(
+            carte.capability("device.camera.video").unwrap().status,
+            Status::Missing
+        );
+    }
+
+    #[test]
+    fn l_appareil_est_filtre_par_plateforme() {
+        let carte = surface();
+        let iphone = carte.describe_for(Platform::Ios, 100_000);
+        let mac = carte.describe_for(Platform::Macos, 100_000);
+        // Ce que le pont macOS ne traite pas (`macos/Sources/dispatch.swift`).
+        for absent_sur_mac in [
+            "device.health",
+            "device.nfc",
+            "device.motion_activity",
+            "device.gyroscope",
+            "device.live_activity",
+        ] {
+            assert!(
+                iphone.contains(absent_sur_mac),
+                "{absent_sur_mac} sur iPhone"
+            );
+            assert!(!mac.contains(absent_sur_mac), "{absent_sur_mac} sur Mac");
+        }
+        // Et ce qu'il traite y est.
+        for present_sur_mac in ["device.contacts", "device.bluetooth", "device.clipboard"] {
+            assert!(mac.contains(present_sur_mac), "{present_sur_mac} sur Mac");
+        }
     }
 
     #[test]

@@ -113,3 +113,216 @@ final class BluetoothScan: NSObject, CBCentralManagerDelegate {
     BluetoothScan.active[ObjectIdentifier(self)] = nil
   }
 }
+
+// ---- Beyond the scan ------------------------------------------------------------------
+//
+// A connection, and what it makes possible. The engine is `BluetoothCentral.swift` (CoreBluetooth
+// only, type-checked on its own); everything here parses the arguments and resolves the
+// invocation, exactly as the other families do.
+//
+// Contrat des réponses : voir `families/bluetooth.rs` (`BluetoothReply`). Aucun `reject` : une
+// erreur est une réponse, avec le code du contrat.
+
+/// Les arguments d'un appel qui ne nomme qu'un périphérique.
+private struct BluetoothIdArgs: Decodable {
+  let id: String
+}
+
+/// Les arguments d'un appel qui nomme un périphérique et une caractéristique.
+private struct BluetoothCharArgs: Decodable {
+  let id: String
+  let characteristic: String
+}
+
+/// `bluetoothConnect` : le périphérique, et une borne de temps que le pont a déjà bornée.
+private struct BluetoothConnectArgs: Decodable {
+  let id: String
+  let timeoutMs: Int
+
+  private enum CodingKeys: String, CodingKey {
+    case id
+    case timeoutMs = "timeout_ms"
+  }
+}
+
+/// `bluetoothWrite` : la charge utile en base64, et l'accusé demandé ou non.
+private struct BluetoothWriteArgs: Decodable {
+  let id: String
+  let characteristic: String
+  let dataBase64: String
+  let withResponse: Bool
+
+  private enum CodingKeys: String, CodingKey {
+    case id, characteristic
+    case dataBase64 = "data_base64"
+    case withResponse = "with_response"
+  }
+}
+
+private struct BtStateAnswer: Encodable {
+  let kind = "state"
+  let state: String
+}
+
+/// `{"kind":"device","id":..,"name":null,"state":"connected"}` — `name` est écrit même quand
+/// il est absent (`null`), comme `Reply` le fait pour un périphérique sans nom.
+private struct BtDeviceAnswer: Encodable {
+  let kind = "device"
+  let id: String
+  let name: String?
+  let state: String
+
+  private enum Key: String, CodingKey {
+    case kind, id, name, state
+  }
+
+  func encode(to encoder: Encoder) throws {
+    var c = encoder.container(keyedBy: Key.self)
+    try c.encode(kind, forKey: .kind)
+    try c.encode(id, forKey: .id)
+    try c.encode(name, forKey: .name)
+    try c.encode(state, forKey: .state)
+  }
+}
+
+private struct BtServicesAnswer: Encodable {
+  let kind = "services"
+  let services: [BtServiceInfo]
+}
+
+private struct BtValueAnswer: Encodable {
+  let kind = "value"
+  let characteristic: String
+  let data_base64: String
+}
+
+private struct BtWrittenAnswer: Encodable {
+  let kind = "written"
+  let bytes: Int
+}
+
+private struct BtSubscribedAnswer: Encodable {
+  let kind = "subscribed"
+  let characteristic: String
+}
+
+private struct BtNotificationsAnswer: Encodable {
+  let kind = "notifications"
+  let notifications: [BtNotification]
+}
+
+extension ThisDevicePlugin {
+  /// L'état de la RADIO (allumée, éteinte, refusée, absente) — distinct de la permission que
+  /// rend `status`. Un téléphone dont le Bluetooth est coupé n'est pas « non autorisé ».
+  @objc public func bluetoothState(_ invoke: Invoke) {
+    BluetoothCentral.shared.radioState { state in
+      invoke.resolve(BtStateAnswer(state: state))
+    }
+  }
+
+  /// Se connecter à un périphérique qu'un scan a rendu (son `id`), avec une borne de temps.
+  @objc public func bluetoothConnect(_ invoke: Invoke) throws {
+    let args = try invoke.parseArgs(BluetoothConnectArgs.self)
+    BluetoothCentral.shared.connect(
+      id: args.id,
+      timeoutSeconds: Double(args.timeoutMs) / 1000
+    ) { result in
+      switch result {
+      case let .success(peer):
+        invoke.resolve(BtDeviceAnswer(id: peer.id, name: peer.name, state: peer.state))
+      case let .failure(failure):
+        invoke.resolve(Reply.error(code: failure.code))
+      }
+    }
+  }
+
+  @objc public func bluetoothDisconnect(_ invoke: Invoke) throws {
+    let args = try invoke.parseArgs(BluetoothIdArgs.self)
+    BluetoothCentral.shared.disconnect(id: args.id) { result in
+      switch result {
+      case let .success(peer):
+        invoke.resolve(BtDeviceAnswer(id: peer.id, name: peer.name, state: peer.state))
+      case let .failure(failure):
+        invoke.resolve(Reply.error(code: failure.code))
+      }
+    }
+  }
+
+  /// Les services et leurs caractéristiques. À appeler après `bluetoothConnect` : c'est ce qui
+  /// remplit la table que `bluetoothRead` et `bluetoothWrite` consultent ensuite.
+  @objc public func bluetoothServices(_ invoke: Invoke) throws {
+    let args = try invoke.parseArgs(BluetoothIdArgs.self)
+    BluetoothCentral.shared.services(id: args.id) { result in
+      switch result {
+      case let .success(services):
+        invoke.resolve(BtServicesAnswer(services: services))
+      case let .failure(failure):
+        invoke.resolve(Reply.error(code: failure.code))
+      }
+    }
+  }
+
+  @objc public func bluetoothRead(_ invoke: Invoke) throws {
+    let args = try invoke.parseArgs(BluetoothCharArgs.self)
+    BluetoothCentral.shared.read(id: args.id, characteristic: args.characteristic) { result in
+      switch result {
+      case let .success(data):
+        invoke.resolve(
+          BtValueAnswer(
+            characteristic: args.characteristic.uppercased(),
+            data_base64: data.base64EncodedString()
+          )
+        )
+      case let .failure(failure):
+        invoke.resolve(Reply.error(code: failure.code))
+      }
+    }
+  }
+
+  @objc public func bluetoothWrite(_ invoke: Invoke) throws {
+    let args = try invoke.parseArgs(BluetoothWriteArgs.self)
+    // Le pont a déjà refusé un base64 invalide et une charge au-delà de 512 octets ; ici on
+    // décode pour de bon, et un décodage impossible reste un refus, jamais un envoi vide.
+    guard let data = Data(base64Encoded: args.dataBase64) else {
+      invoke.resolve(Reply.error(code: "bad_base64"))
+      return
+    }
+    BluetoothCentral.shared.write(
+      id: args.id,
+      characteristic: args.characteristic,
+      data: data,
+      withResponse: args.withResponse
+    ) { result in
+      switch result {
+      case let .success(bytes):
+        invoke.resolve(BtWrittenAnswer(bytes: bytes))
+      case let .failure(failure):
+        invoke.resolve(Reply.error(code: failure.code))
+      }
+    }
+  }
+
+  /// S'abonner aux notifications d'une caractéristique. Les valeurs sont mises en tampon par
+  /// le moteur (32 au plus) et retirées par `bluetoothNotifications` : c'est un PULL assumé,
+  /// pas un flux poussé — voir l'en-tête de `families/bluetooth.rs`.
+  @objc public func bluetoothSubscribe(_ invoke: Invoke) throws {
+    let args = try invoke.parseArgs(BluetoothCharArgs.self)
+    BluetoothCentral.shared.subscribe(id: args.id, characteristic: args.characteristic) { result in
+      switch result {
+      case let .success(characteristic):
+        invoke.resolve(BtSubscribedAnswer(characteristic: characteristic))
+      case let .failure(failure):
+        invoke.resolve(Reply.error(code: failure.code))
+      }
+    }
+  }
+
+  @objc public func bluetoothNotifications(_ invoke: Invoke) throws {
+    let args = try invoke.parseArgs(BluetoothCharArgs.self)
+    let values = BluetoothCentral.shared.notifications(
+      id: args.id,
+      characteristic: args.characteristic
+    )
+    invoke.resolve(BtNotificationsAnswer(notifications: values))
+  }
+}

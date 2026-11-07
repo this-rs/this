@@ -42,12 +42,55 @@ pub struct NewEvent {
     pub location: Option<String>,
 }
 
+/// One calendar the person has, as the bridge lists it. `allows_modifications` is what decides
+/// whether an event may be created or changed there: a read-only calendar (a subscribed one)
+/// accepts a create and then refuses it, which is worse than saying so first.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CalendarSummary {
+    pub id: String,
+    pub title: String,
+    pub allows_modifications: bool,
+}
+
+/// A change to an existing event. Every field but the `id` is optional: a patch names what it
+/// changes, and a patch that changes nothing is refused rather than sent.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EventPatch {
+    pub id: String,
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub start_ms: Option<i64>,
+    #[serde(default)]
+    pub end_ms: Option<i64>,
+    #[serde(default)]
+    pub location: Option<String>,
+    #[serde(default)]
+    pub notes: Option<String>,
+}
+
+impl EventPatch {
+    /// True when the patch asks for no change at all.
+    pub fn is_empty(&self) -> bool {
+        self.title.is_none()
+            && self.start_ms.is_none()
+            && self.end_ms.is_none()
+            && self.location.is_none()
+            && self.notes.is_none()
+    }
+}
+
 /// What the calendar methods answer with data. A state or an error is a [`Reply`] instead.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum CalendarAnswer {
     CalendarEvents { events: Vec<CalendarEvent> },
     CalendarCreated { event_id: Option<String> },
+    Calendars { calendars: Vec<CalendarSummary> },
+    EventUpdated { event_id: String },
+    EventDeleted { event_id: String },
 }
 
 /// The refusal for an argument the native side must not receive.
@@ -76,6 +119,38 @@ pub fn check_new_event(event: &NewEvent) -> Result<(), Reply> {
         Some(span) if span > 0 => Ok(()),
         _ => Err(refused()),
     }
+}
+
+/// The checked id of an event: blank is a caller bug, not an event to look for.
+pub fn check_id(id: &str) -> Result<(), Reply> {
+    if id.trim().is_empty() {
+        Err(refused())
+    } else {
+        Ok(())
+    }
+}
+
+/// The checked patch: it changes something, and if it gives both dates, the end is after the
+/// start. A patch that gives only the end cannot be checked against the start it does not
+/// know — the native side does that against the stored event, and answers `internal` if the
+/// result would be an event that ends before it begins.
+pub fn check_patch(patch: &EventPatch) -> Result<(), Reply> {
+    check_id(&patch.id)?;
+    if patch.is_empty() {
+        return Err(refused());
+    }
+    if let (Some(start), Some(end)) = (patch.start_ms, patch.end_ms) {
+        match end.checked_sub(start) {
+            Some(span) if span > 0 => {}
+            _ => return Err(refused()),
+        }
+    }
+    if let Some(title) = &patch.title
+        && title.trim().is_empty()
+    {
+        return Err(refused());
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -265,5 +340,101 @@ mod tests {
     fn the_bounds_are_the_ones_the_native_side_checks() {
         assert_eq!(WINDOW_MS_MAX, 2_678_400_000);
         assert_eq!(EVENTS_MAX, 200);
+    }
+
+    #[test]
+    fn an_empty_patch_is_refused_instead_of_sent() {
+        let vide = EventPatch {
+            id: "E1".into(),
+            title: None,
+            start_ms: None,
+            end_ms: None,
+            location: None,
+            notes: None,
+        };
+        assert!(vide.is_empty());
+        assert!(check_patch(&vide).is_err());
+    }
+
+    #[test]
+    fn a_patch_that_names_no_event_is_refused() {
+        let sans_id = EventPatch {
+            id: "  ".into(),
+            title: Some("Rendez-vous".into()),
+            start_ms: None,
+            end_ms: None,
+            location: None,
+            notes: None,
+        };
+        assert!(check_patch(&sans_id).is_err());
+        assert!(check_id("").is_err());
+    }
+
+    #[test]
+    fn a_patch_with_both_dates_keeps_them_in_order() {
+        let inversee = EventPatch {
+            id: "E1".into(),
+            title: None,
+            start_ms: Some(2_000),
+            end_ms: Some(1_000),
+            location: None,
+            notes: None,
+        };
+        assert!(check_patch(&inversee).is_err());
+
+        let bonne = EventPatch {
+            id: "E1".into(),
+            title: Some("Dejeuner".into()),
+            start_ms: Some(1_000),
+            end_ms: Some(2_000),
+            location: None,
+            notes: None,
+        };
+        assert_eq!(check_patch(&bonne), Ok(()));
+    }
+
+    #[test]
+    fn a_calendar_list_decodes_with_its_right_to_write() {
+        let brut = r#"{"kind":"calendars","calendars":[{"id":"C1","title":"Perso","allows_modifications":true}]}"#;
+        let answer: CalendarAnswer = serde_json::from_str(brut).unwrap();
+        assert_eq!(
+            answer,
+            CalendarAnswer::Calendars {
+                calendars: vec![CalendarSummary {
+                    id: "C1".into(),
+                    title: "Perso".into(),
+                    allows_modifications: true,
+                }],
+            }
+        );
+    }
+
+    #[test]
+    fn an_update_carries_the_event_it_changed() {
+        let brut = r#"{"kind":"event_updated","event_id":"E1"}"#;
+        let answer: CalendarAnswer = serde_json::from_str(brut).unwrap();
+        assert_eq!(
+            answer,
+            CalendarAnswer::EventUpdated {
+                event_id: "E1".into()
+            }
+        );
+        let supprime: CalendarAnswer =
+            serde_json::from_str(r#"{"kind":"event_deleted","event_id":"E2"}"#).unwrap();
+        assert_eq!(
+            supprime,
+            CalendarAnswer::EventDeleted {
+                event_id: "E2".into()
+            }
+        );
+    }
+
+    #[test]
+    fn a_calendar_summary_refuses_a_field_it_does_not_know() {
+        // Les STRUCTS sont stricts : un champ ajouté côté natif par erreur est une erreur, pas
+        // un silence. (L'enum, lui, est étiqueté par `kind` : serde ignore un champ en plus à ce
+        // niveau — c'est pourquoi la vérification porte sur les types qui portent des données.)
+        let brut = r#"{"id":"C1","title":"Perso","allows_modifications":true,"surprise":1}"#;
+        assert!(serde_json::from_str::<CalendarSummary>(brut).is_err());
     }
 }

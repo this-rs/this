@@ -71,6 +71,10 @@ pub struct PickedImage {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum PhotosReply {
+    /// Une lecture de photothèque : des métadonnées, pas des octets.
+    Album {
+        photos: Vec<PhotoEntry>,
+    },
     /// The images chosen. Empty when the person cancelled the picker.
     Picked {
         items: Vec<PickedImage>,
@@ -91,6 +95,38 @@ pub const MAX_IMAGE_BYTES: u64 = 2 * 1024 * 1024;
 /// The size bound of a whole answer. Ten images at the per-image bound is 20 MB; above this,
 /// the batch is refused rather than sent through the IPC bridge.
 pub const MAX_TOTAL_BYTES: u64 = 12 * 1024 * 1024;
+
+/// La fenêtre la plus large qu'une lecture de photothèque peut couvrir : un an.
+pub const LIST_WINDOW_MS_MAX: i64 = 366 * 24 * 60 * 60 * 1000;
+/// Le plus de photos qu'une lecture rend.
+pub const LIST_MAX: u32 = 100;
+
+/// Une photo de la photothèque, en métadonnées seulement : les octets ne viennent que par
+/// `photosRead`, et seulement pour celle qu'on a choisie.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PhotoEntry {
+    pub id: String,
+    pub created_ms: i64,
+    pub width: u32,
+    pub height: u32,
+    pub favorite: bool,
+}
+
+/// La fenêtre d'une lecture de photothèque, et sa borne.
+pub fn check_list_window(start_ms: i64, end_ms: i64, limit: u32) -> Result<u32, PhotosReply> {
+    let Some(span) = end_ms.checked_sub(start_ms) else {
+        return Err(PhotosReply::Error {
+            code: DeviceError::Internal,
+        });
+    };
+    if span <= 0 || span > LIST_WINDOW_MS_MAX || limit == 0 || limit > LIST_MAX {
+        return Err(PhotosReply::Error {
+            code: DeviceError::Internal,
+        });
+    }
+    Ok(limit)
+}
 
 /// Checks a picked batch against the transfer bounds.
 ///

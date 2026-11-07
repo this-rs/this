@@ -44,8 +44,12 @@ pub enum FilesError {
     Unavailable,
     /// The bookmark is not valid base64, does not resolve, or names a directory.
     InvalidBookmark,
-    /// The file is larger than [`READ_MAX_BYTES`].
+    /// The file is larger than [`READ_MAX_BYTES`], or than [`WRITE_MAX_BYTES`] for a write.
     TooLarge,
+    /// A write whose name could leave the app's directory (a separator, `..`, a control char).
+    InvalidName,
+    /// The payload is not base64.
+    BadBase64,
     /// Something went wrong on the native side.
     Internal,
 }
@@ -58,6 +62,8 @@ impl fmt::Display for FilesError {
             FilesError::Unavailable => "unavailable",
             FilesError::InvalidBookmark => "invalid bookmark",
             FilesError::TooLarge => "too large",
+            FilesError::InvalidName => "invalid name",
+            FilesError::BadBase64 => "bad base64",
             FilesError::Internal => "internal error",
         };
         f.write_str(text)
@@ -215,6 +221,38 @@ pub fn check_read(size: u64, data: &Base64) -> Result<(), FilesError> {
 }
 
 /// Whether `text` is padded standard base64. Pure: no decoding, no allocation of the bytes.
+/// Le plus gros fichier qu'une écriture accepte, décodé. Au-delà, l'appelant découpe : le pont
+/// n'a pas de raison de porter un film.
+pub const WRITE_MAX_BYTES: u64 = 8 * 1024 * 1024;
+
+/// La requête d'écriture : un nom de fichier, et le contenu en base64.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WriteRequest {
+    pub name: String,
+    pub data_base64: String,
+}
+
+/// Contrôle une écriture : un nom qui ne peut pas sortir du dossier, et une charge bornée.
+///
+/// Le nom est refusé s'il contient un séparateur de chemin, un `..` ou un caractère de contrôle :
+/// une écriture ne doit pas pouvoir viser `/var/mobile/...` parce que l'appelant l'a demandé.
+pub fn check_write(request: &WriteRequest) -> Result<u64, FilesError> {
+    let name = request.name.trim();
+    if name.is_empty()
+        || name.contains('/')
+        || name.contains('\\')
+        || name.contains("..")
+        || name.chars().any(|c| c.is_control())
+    {
+        return Err(FilesError::InvalidName);
+    }
+    let bytes = decoded_len(&request.data_base64).ok_or(FilesError::BadBase64)?;
+    if bytes > WRITE_MAX_BYTES {
+        return Err(FilesError::TooLarge);
+    }
+    Ok(bytes)
+}
+
 pub fn is_base64(text: &str) -> bool {
     decoded_len(text).is_some()
 }
