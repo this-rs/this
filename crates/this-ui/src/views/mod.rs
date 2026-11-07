@@ -52,13 +52,13 @@ pub mod text;
 pub use data::{Feed, Feeds, Reading, Rows, Snapshot};
 pub use intent::{FieldValue, Intent, LinkOp, Values};
 pub use placement::{Frame, Hidden, Portfolio, SURFACES};
-pub use render::{render_brick, render_node, render_view, Ctx};
+pub use render::{Ctx, render_brick, render_node, render_view};
 pub use state::ViewState;
 pub use style::CSS;
 
 use leptos::prelude::*;
-use this_descriptor::views::{Surface, ViewDesc};
 use this_descriptor::ModuleDescriptor;
+use this_descriptor::views::{Surface, ViewDesc};
 
 use crate::views::placement::frame;
 use crate::views::style::class;

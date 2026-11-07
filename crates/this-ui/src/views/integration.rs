@@ -10,7 +10,7 @@ use this_descriptor::{CheckProfile, CustomRegistry, ModuleDescriptor};
 
 use crate::views::data::{self, Feed, Reading, Snapshot};
 use crate::views::placement::Portfolio;
-use crate::views::state::{view_state, ViewState};
+use crate::views::state::{ViewState, view_state};
 
 /// A billing module with a sidebar list, a detail view, a read-only replacement of it, a
 /// header summary, and one action of every kind the contract allows.
