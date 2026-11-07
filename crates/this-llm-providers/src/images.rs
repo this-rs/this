@@ -211,6 +211,10 @@ pub fn refuses_images(body: &str) -> bool {
 
 /// The engine's own sentence in an error body: `error.message` for an OpenAI-shaped body,
 /// the body itself otherwise.
+///
+/// Seul `client.rs` l'appelle en production, et ce module n'existe que sous la
+/// feature `http` : sans elle, seuls les tests d'ici s'en servent.
+#[cfg(any(feature = "http", test))]
 pub(crate) fn error_message(body: &str) -> String {
     serde_json::from_str::<Value>(body)
         .ok()
@@ -224,6 +228,10 @@ pub(crate) fn error_message(body: &str) -> String {
 }
 
 /// The conversation without its image payloads, for the token estimate.
+///
+/// Même raison que [`error_message`] : `client.rs` (feature `http`) en production,
+/// les tests d'ici sinon.
+#[cfg(any(feature = "http", test))]
 pub(crate) fn without_images(messages: &Value) -> Value {
     let mut copy = messages.clone();
     if let Some(all) = copy.as_array_mut() {
