@@ -196,6 +196,21 @@ pub struct HarnessDoc {
     /// un document d'hier, sans ce champ, reste lisible. Exclu de l'empreinte.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub approval: Option<crate::approval::Approval>,
+    /// Silence toléré sur le flux d'un tour (ms). Absent : la constante du harnais.
+    /// Les quatre bornes suivantes sont dans le document pour qu'une composition lue du
+    /// graphe puisse les régler, au lieu de subir des constantes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub silence_ms: Option<u64>,
+    /// Durée tolérée sans progrès (ms). Absent : la constante du harnais.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub no_progress_ms: Option<u64>,
+    /// Plafond d'un appel d'outil (ms). Absent : la constante du harnais.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_timeout_ms: Option<u64>,
+    /// Budget de contexte d'un tour (jetons estimés) : la borne qui évite le refus du
+    /// moteur. Absent : la constante du harnais.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_budget: Option<usize>,
 }
 
 impl HarnessDoc {
@@ -547,6 +562,10 @@ mod tests {
             max_relances: 3,
             budget_ms: Some(900_000),
             approval: None,
+            silence_ms: None,
+            no_progress_ms: None,
+            tool_timeout_ms: None,
+            context_budget: None,
         }
     }
 
