@@ -648,9 +648,6 @@ impl Harness {
 
             let limits = self.with(|s| s.limits.clone());
             let mut run = Run::new(Goal::new(first.text.clone()), limits.max_tours);
-            // Les étapes dont l'effet est inconnu (outil abandonné) : ni échec
-            // ni preuve pour le verdict.
-            let mut unknown: Vec<usize> = Vec::new();
             run.max_relances = limits.max_relances;
             run.declare(toolbox.declarations());
             if let Some(budget) = limits.budget_ms {
@@ -868,7 +865,9 @@ impl Harness {
                     if let Some(why) = dropped {
                         // Abandonné ne veut pas dire « pas fait » : l'étape
                         // vient d'être enregistrée, son effet est inconnu.
-                        unknown.push(run.steps.len().saturating_sub(1));
+                        // Ni échec ni preuve, pour la décision comme pour le verdict.
+                        let index = run.steps.len().saturating_sub(1);
+                        run.effet_inconnu(index);
                         abandoned |= matches!(why, Watch::Abandoned(_));
                     }
                     self.push(Message::tool(call.id.clone(), outcome.text.clone()));
@@ -929,7 +928,7 @@ impl Harness {
                     }
                 }
             }
-            verdict = Some(verdict_of(&run, &unknown));
+            verdict = Some(verdict_of(&run, &run.inconnues));
 
             // Un objectif atteint, mais des messages attendent : la discussion
             // continue, elle ne s'arrête pas parce que le modèle a conclu.
@@ -1227,17 +1226,12 @@ fn step_of(tool: &str, ms: u64, outcome: &Outcome) -> Step {
 /// comme reprise d'un refus antérieur : le verdict se lit sur les autres
 /// étapes (au pire [`Verdict::Unverified`], « pas d'avis »).
 fn verdict_of(run: &Run, unknown: &[usize]) -> Verdict {
-    if unknown.is_empty() {
-        return run.verdict();
+    let mut run = run.clone();
+    for &index in unknown {
+        run.effet_inconnu(index);
     }
-    let known: Vec<Step> = run
-        .steps
-        .iter()
-        .enumerate()
-        .filter(|(index, _)| !unknown.contains(index))
-        .map(|(_, step)| step.clone())
-        .collect();
-    this_agent::evidence::verdict(&known, run.stop == Some(Stop::Done))
+    // `Run::verdict` écarte les étapes inconnues, et garde les déclarations de l'hôte.
+    run.verdict()
 }
 
 /// L'empreinte d'une sortie d'outil : SHA-256 en hexadécimal minuscule.
@@ -1833,6 +1827,62 @@ mod tests {
             Some(Verdict::Failed),
             "effet inconnu ≠ échec prouvé"
         );
+        assert_eq!(verdict, Some(Verdict::Unverified));
+    }
+
+    /// Z01 : une étape abandonnée n'est ni un refus non rattrapé ni une preuve, pour la
+    /// DÉCISION aussi (pas seulement le verdict). Le récit qui s'appuie dessus reçoit un
+    /// rappel qui demande de vérifier l'effet, pas de refaire l'action.
+    #[test]
+    fn une_etape_abandonnee_n_arrete_pas_le_run_en_echec() {
+        let limits = Limits {
+            tool_timeout_ms: Some(30_000),
+            ..silence_120s()
+        };
+        let (harness, journal, _) = harnais(
+            vec![Acte::Appel, Acte::Dit("J'ai écrit le module.")],
+            true,
+            limits,
+        );
+        futures::executor::block_on(harness.send("écris le module"));
+        let (stop, verdict) = arret(&journal);
+        assert_eq!(stop, Stop::Done, "effet inconnu ≠ refus non rattrapé");
+        assert_eq!(verdict, Some(Verdict::Unverified));
+        let rappels: Vec<String> = indices(&journal)
+            .into_iter()
+            .filter(|h| h.starts_with(this_agent::evidence::RAPPEL))
+            .collect();
+        assert_eq!(rappels.len(), 1, "{rappels:?}");
+        assert!(
+            rappels[0].contains("vérifie") && rappels[0].contains("write_module"),
+            "{}",
+            rappels[0]
+        );
+        assert!(
+            !rappels[0].contains("appelles maintenant"),
+            "{}",
+            rappels[0]
+        );
+    }
+
+    /// Sans récit d'action, l'étape abandonnée ne bloque pas non plus la fin.
+    #[test]
+    fn une_etape_abandonnee_puis_un_compte_rendu_honnete_termine() {
+        let limits = Limits {
+            tool_timeout_ms: Some(30_000),
+            ..silence_120s()
+        };
+        let (harness, journal, _) = harnais(
+            vec![
+                Acte::Appel,
+                Acte::Dit("L'outil n'a pas répondu à temps ; je ne sais pas si le module existe."),
+            ],
+            true,
+            limits,
+        );
+        futures::executor::block_on(harness.send("écris le module"));
+        let (stop, verdict) = arret(&journal);
+        assert_eq!(stop, Stop::Done);
         assert_eq!(verdict, Some(Verdict::Unverified));
     }
 

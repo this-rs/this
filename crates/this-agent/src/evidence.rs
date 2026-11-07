@@ -344,10 +344,25 @@ pub struct Unproven {
 
 impl Unproven {
     /// Le texte du rappel à pousser au modèle.
+    ///
+    /// La phrase fautive n'est souvent qu'une formulation, et personne n'a demandé d'action :
+    /// le rappel propose d'abord de corriger la phrase (ou de dire « je ne l'ai pas fait »),
+    /// et l'appel d'outil seulement si la demande de la personne l'exige.
     pub fn rappel(&self) -> String {
         format!(
-            "{RAPPEL} Ta réponse affirme « {} », mais {}. Soit tu appelles maintenant l'outil qui le fait réellement, soit tu corriges ta phrase pour dire ce qui a vraiment été fait et ce qui reste.",
+            "{RAPPEL} Ta réponse affirme « {} », mais {}. Corrige ta phrase pour dire ce qui a réellement été fait, ou dis « je ne l'ai pas fait ». Seulement si la demande de la personne exige cette action, appelle l'outil qui la fait réellement.",
             self.phrase, self.manque
+        )
+    }
+
+    /// Le rappel quand le récit s'appuie sur une étape à l'effet **inconnu** : `outil` a été
+    /// abandonné (plafond dépassé, sourd à l'annulation) et a pu s'exécuter quand même. Le
+    /// refaire à l'aveugle risque de le faire deux fois : le rappel demande de VÉRIFIER l'effet
+    /// en relisant l'état, ou de dire qu'on ne sait pas.
+    pub fn rappel_effet_inconnu(&self, outil: &str) -> String {
+        format!(
+            "{RAPPEL} Ta réponse affirme « {} », mais `{outil}` n'a pas rendu la main : son effet est inconnu, rien ne prouve qu'il a eu lieu. Ne refais pas l'action à l'aveugle : vérifie son effet en relisant l'état, puis dis ce que tu as constaté ; ou corrige ta phrase pour dire que tu ne sais pas si c'est fait.",
+            self.phrase
         )
     }
 }
@@ -1820,6 +1835,27 @@ mod tests {
         ] {
             assert_eq!(claim_check(texte, &[]), None, "faux positif sur {texte:?}");
         }
+    }
+
+    /// Z02 : la phrase fautive n'est souvent qu'une formulation. Le rappel propose d'abord de
+    /// la corriger (ou de dire « je ne l'ai pas fait »), et l'outil seulement si la demande
+    /// l'exige — jamais « appelle maintenant l'outil » en premier.
+    #[test]
+    fn le_rappel_propose_d_abord_de_corriger_la_phrase() {
+        let rappel = claim_check("J'ai créé la fiche « Dupont ».", &[]).unwrap();
+        assert!(
+            rappel.starts_with(&format!("{RAPPEL} Ta réponse affirme « ")),
+            "{rappel}"
+        );
+        let corriger = rappel
+            .find("Corrige ta phrase pour dire ce qui a réellement été fait")
+            .expect(&rappel);
+        let pas_fait = rappel.find("« je ne l'ai pas fait »").expect(&rappel);
+        let outil = rappel
+            .find("Seulement si la demande de la personne exige cette action, appelle l'outil")
+            .expect(&rappel);
+        assert!(corriger < pas_fait && pas_fait < outil, "{rappel}");
+        assert!(!rappel.contains("appelles maintenant"), "{rappel}");
     }
 
     #[test]
