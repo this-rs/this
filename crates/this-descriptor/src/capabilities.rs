@@ -866,7 +866,7 @@ mod tests {
         );
         assert!(gaps[0].is_required());
         assert_eq!(gaps[0].verdict, Capability::Denied);
-        assert!(gaps[1].is_required() == false);
+        assert!(!gaps[1].is_required());
         assert!(
             gaps.iter()
                 .all(|g| !(g.entity == "customer" && g.op == Operation::Update))

@@ -190,6 +190,13 @@ impl ModuleDescriptor {
             );
         }
 
+        // Vues et actions : entités, champs, cibles, remplacements. Sans ces règles, l'hôte
+        // dessinerait une liste vide ou un bouton mort, et la personne conclurait à une panne
+        // au lieu d'un oubli. Le détail est dans `views::issues`.
+        for (reason, path, message) in crate::views::issues(self) {
+            c.push(reason, path, message);
+        }
+
         // requires
         let mut seen = BTreeSet::new();
         for (i, r) in self.requires.iter().enumerate() {
