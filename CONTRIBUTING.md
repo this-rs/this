@@ -277,6 +277,24 @@ To add a new storage backend (e.g., PostgreSQL, MongoDB):
 
 ## ✅ Code Quality Standards
 
+### Le hook de pre-push (recommandé)
+
+Le dépôt en fournit un, versionné, qui exécute exactement ce que la CI exécute :
+
+```bash
+git config core.hooksPath scripts/hooks
+```
+
+**Pourquoi pas `cargo fmt --check` tout seul ?** Il ne voit que les membres du workspace.
+Le job Rustfmt formate **tous les fichiers suivis** (`git ls-files '*.rs'`), et `this-ui`,
+`this-client-web`, `this-device-tauri` et `this-shell-tauri` sont volontairement hors du
+workspace (cibles wasm et Tauri). Une PR est déjà partie rouge avec un `cargo fmt --check`
+local vert pour cette seule raison.
+
+**Pourquoi la version de rustfmt compte ?** Aucune toolchain n'est épinglée : la CI suit le
+stable du jour, et deux rustfmt séparés de quelques mois ne rangent pas les `use` de la même
+façon. Si le hook réclame un fichier que tu viens de formater, `rustup update stable`.
+
 ### Testing
 
 - Write unit tests for all new functionality
