@@ -25,6 +25,9 @@ pub struct Pending {
     pub text: String,
     /// Date de mise en file, en millisecondes epoch.
     pub at_ms: f64,
+    /// Les images jointes : elles attendent avec le texte, et partent avec lui.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<crate::wire::ImagePart>,
 }
 
 /// Ce qui sort du harnais, dans l'ordre où ça arrive.

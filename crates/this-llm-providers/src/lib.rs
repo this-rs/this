@@ -40,6 +40,7 @@ mod budget;
 mod config;
 mod error;
 mod hub;
+pub mod images;
 mod model;
 mod secret;
 mod store;
@@ -60,4 +61,4 @@ pub use client::Turn;
 #[cfg(feature = "http")]
 pub use client::{ChatRequest, ChatResponse, Finish, ProviderClient, TurnReply, TurnRequest};
 
-pub use this_llm::{Completion, CredentialRef, Preset};
+pub use this_llm::{Completion, CredentialRef, ImagePart, ImageSource, Preset};

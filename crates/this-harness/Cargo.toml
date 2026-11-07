@@ -16,6 +16,8 @@ serde_json = "1"
 # effects (the model call, the tools, the events) around them.
 this-agent = { version = "0.0.1", path = "../this-agent" }
 async-trait = "0.1"
+# Le type d'une image jointe : défini une fois, là où le provider le lit aussi.
+this-llm = { version = "0.0.1", path = "../this-llm" }
 
 # The clock the target actually has. A page has `Date.now`, a shell has the
 # system clock; asking either one for the other's API is a compile error, so

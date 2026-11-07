@@ -645,6 +645,7 @@ fn un_pending_se_relit_dans_le_json() {
         id: 3,
         text: "coucou".into(),
         at_ms: 12.0,
+        images: Vec::new(),
     };
     let texte = serde_json::to_string(&entry).unwrap();
     let relu: Pending = serde_json::from_str(&texte).unwrap();
@@ -917,4 +918,56 @@ fn un_harness_compose_depuis_le_graphe_porte_son_brief_et_ses_bornes() {
     // Les bornes du document s'appliquent : 2 tours, puis Budget.
     assert_eq!(stop, Stop::Budget, "max_tours vient de la composition");
     assert_eq!(seen.seen.borrow().len(), 2);
+}
+
+#[test]
+fn les_images_d_un_message_arrivent_au_transport_a_chaque_tour() {
+    use this_harness::{ImagePart, ImageSource};
+    // Un tour d'outil puis une conclusion : le fil est renvoyé deux fois, et l'image
+    // doit y être les deux fois — elle fait partie de la conversation, pas du clic.
+    let transport = Script::new(vec![
+        Reply {
+            text: String::new(),
+            calls: vec![call("a1")],
+            finish: Finish::Tools,
+        },
+        Reply {
+            text: "vu".into(),
+            calls: vec![],
+            finish: Finish::Stop,
+        },
+    ]);
+    let tools = Tools::new(|_| Outcome::ok("ok").observed("v1", "v2"));
+    let (harness, _, _) = build(transport.clone(), tools, Limits::default());
+    let image = ImagePart::new("image/png", ImageSource::Ref("ab".repeat(32))).named("a.png");
+
+    run(harness.send_with_images("regarde", vec![image.clone()]));
+
+    let seen = transport.seen.borrow();
+    assert_eq!(seen.len(), 2);
+    for request in seen.iter() {
+        let thread = request.thread();
+        let user = thread
+            .iter()
+            .find(|m| m.is_user())
+            .expect("un message utilisateur");
+        assert_eq!(user.text(), "regarde");
+        assert_eq!(user.images(), std::slice::from_ref(&image));
+    }
+}
+
+#[test]
+fn une_image_seule_est_un_message_pas_un_vide() {
+    use this_harness::{ImagePart, ImageSource};
+    let transport = Script::new(vec![]);
+    let tools = Tools::new(|_| Outcome::ok("ok"));
+    let (_, handle, _) = build(transport, tools, Limits::default());
+    let image = ImagePart::new("image/png", ImageSource::Base64("AAAA".into()));
+
+    handle.enqueue_with_images("", vec![image.clone()]);
+    handle.enqueue("   ");
+
+    let pending = handle.pending();
+    assert_eq!(pending.len(), 1, "le texte vide sans image reste ignoré");
+    assert_eq!(pending[0].images, vec![image]);
 }

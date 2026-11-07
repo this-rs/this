@@ -41,6 +41,10 @@ pub enum ProviderError {
     },
     /// The engine answered with something that is not the expected shape.
     Parse(String),
+    /// Images were joined that this request cannot carry (a provider declared without
+    /// vision, a reference the host did not resolve, a malformed part). Refused before
+    /// sending: an image is never dropped in silence.
+    Images(String),
 }
 
 impl fmt::Display for ProviderError {
@@ -75,6 +79,7 @@ impl fmt::Display for ProviderError {
                 write!(formatter, "le moteur a répondu {code} : {excerpt}")
             }
             Self::Parse(reason) => write!(formatter, "réponse inattendue : {reason}"),
+            Self::Images(reason) => write!(formatter, "images refusées : {reason}"),
         }
     }
 }
@@ -142,7 +147,8 @@ impl ProviderError {
             | Self::Disabled(_)
             | Self::MissingSecret(_)
             | Self::Context { .. }
-            | Self::NoModel(_) => ErrorKind::Provider,
+            | Self::NoModel(_)
+            | Self::Images(_) => ErrorKind::Provider,
         }
     }
 }

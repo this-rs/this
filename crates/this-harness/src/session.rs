@@ -23,7 +23,7 @@ use std::rc::Rc;
 
 use crate::event::{Event, Outcome, Pending, Snapshot};
 use crate::ports::{Cancel, Delta, Toolbox, Transport};
-use crate::wire::{Finish, Message, Request, ToolCall};
+use crate::wire::{Finish, ImagePart, Message, Request, ToolCall};
 use this_agent::{Decision, DefaultPolicy, Goal, Policy, Run, Step, Stop};
 
 /// L'état partagé. `Rc<RefCell<_>>` sans condition : la boucle est sur un seul
@@ -217,7 +217,16 @@ impl Harness {
     /// rend tout de suite : c'est ce qui permet à l'interface d'écrire
     /// pendant que l'agent répond.
     pub async fn send(&self, text: impl Into<String>) -> Running {
-        self.handle().enqueue(text);
+        self.send_with_images(text, Vec::new()).await
+    }
+
+    /// [`Self::send`], avec des images jointes au message.
+    pub async fn send_with_images(
+        &self,
+        text: impl Into<String>,
+        images: Vec<ImagePart>,
+    ) -> Running {
+        self.handle().enqueue_with_images(text, images);
         if !self.claim() {
             return Running::Queued;
         }
@@ -270,7 +279,10 @@ impl Harness {
             let Some(first) = self.take_pending() else {
                 break 'goals;
             };
-            self.push(Message::user(first.text.clone()));
+            self.push(Message::user_with_images(
+                first.text.clone(),
+                first.images.clone(),
+            ));
             self.out.emit(Event::User {
                 text: first.text.clone(),
             });
@@ -548,16 +560,24 @@ impl Handle {
     /// Met un message en file. Rend son identifiant, pour pouvoir le retirer
     /// ou le modifier tant qu'il attend.
     pub fn enqueue(&self, text: impl Into<String>) -> u64 {
+        self.enqueue_with_images(text, Vec::new())
+    }
+
+    /// [`Self::enqueue`], avec des images jointes au message.
+    pub fn enqueue_with_images(&self, text: impl Into<String>, images: Vec<ImagePart>) -> u64 {
         let id = {
             let mut state = self.state.borrow_mut();
             let id = state.next_id;
             state.next_id += 1;
             let text = text.into();
-            if !text.trim().is_empty() {
+            // Une image seule est un message : la jeter parce que le texte est vide
+            // serait la perdre en silence.
+            if !text.trim().is_empty() || !images.is_empty() {
                 state.pending.push(Pending {
                     id,
                     text,
                     at_ms: crate::now_ms(),
+                    images,
                 });
             }
             id
