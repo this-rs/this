@@ -202,3 +202,41 @@ mod tests {
         );
     }
 }
+
+/// Le plus de texte qu'une etiquette NDEF accepte d'un coup. Un tag courant tient quelques
+/// centaines d'octets ; au-dela de 8 Ko, c'est une carte speciale et l'appelant le sait.
+pub const WRITE_MAX_BYTES: usize = 8 * 1024;
+
+/// Le texte verifie d'une ecriture : non vide, et borne en octets (UTF-8, pas en caracteres —
+/// c'est l'octet qui remplit l'etiquette).
+pub fn checked_text(text: &str) -> Result<&str, String> {
+    let text = text.trim();
+    if text.is_empty() {
+        return Err("texte vide".to_string());
+    }
+    if text.len() > WRITE_MAX_BYTES {
+        return Err(format!("texte trop long ({} octets)", text.len()));
+    }
+    Ok(text)
+}
+
+#[cfg(test)]
+mod write_tests {
+    use super::*;
+
+    #[test]
+    fn an_empty_text_is_refused() {
+        assert!(checked_text("   ").is_err());
+    }
+
+    #[test]
+    fn the_bound_counts_bytes_not_characters() {
+        // 2 octets par caractere accentue : 5 000 caracteres font 10 Ko, au-dela de la borne,
+        // alors que 5 000 caracteres ASCII tiendraient.
+        let long = "é".repeat(5_000);
+        assert_eq!(long.len(), 10_000);
+        assert!(checked_text(&long).is_err(), "{} octets", long.len());
+        assert!(checked_text(&"a".repeat(5_000)).is_ok());
+        assert!(checked_text("bonjour").is_ok());
+    }
+}

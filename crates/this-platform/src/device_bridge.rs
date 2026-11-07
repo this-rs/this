@@ -230,6 +230,9 @@ pub const METHODS: &[&str] = &[
     "speechTranscribeFile",
     "nfcStatus",
     "nfcReadOnce",
+    // L'ecriture : lire une etiquette sans pouvoir en poser une fait de l'app un lecteur,
+    // pas un outil.
+    "nfcWrite",
     "localNetworkStatus",
     "localNetworkBrowse",
     // Résoudre un service trouvé par un browse : sans ça, un nom ne dit pas où se connecter.
@@ -303,7 +306,7 @@ pub fn capability_of(method: &str, args: &Value) -> Option<Capability> {
         }
         "faceIdStatus" | "faceIdConfirm" => Capability::FaceId,
         "speechStatus" | "speechRequest" | "speechTranscribeFile" => Capability::Speech,
-        "nfcStatus" | "nfcReadOnce" => Capability::Nfc,
+        "nfcStatus" | "nfcReadOnce" | "nfcWrite" => Capability::Nfc,
         "localNetworkStatus" | "localNetworkBrowse" | "localNetworkResolve" => {
             Capability::LocalNetwork
         }
@@ -470,6 +473,8 @@ pub fn complete_args(method: &str, args: &Value, now_ms: f64) -> Value {
         // Une heure de recul : ce qu'on veut dire par « où je suis passé » sans le préciser.
         "locationRecent" => serde_json::json!({ "since_ms": (now_ms - 3600.0 * 1000.0) as i64 }),
         "localNetworkResolve" => serde_json::json!({ "timeout_ms": 5_000 }),
+        // Le meme delai qu'une lecture : une session NFC qui ne voit rien doit rendre la main.
+        "nfcWrite" => serde_json::json!({ "timeout_ms": 15_000 }),
         // 30 jours de séances, 20 au plus.
         "healthWorkouts" => serde_json::json!({
             "from_ms": (now_ms - 30.0 * jour).max(0.0) as i64,
@@ -501,6 +506,7 @@ pub fn missing_args(method: &str, args: &Value) -> Option<&'static str> {
         "bluetoothConnect" | "bluetoothDisconnect" | "bluetoothServices" => &["id"],
         "contactsGet" => &["id"],
         "localNetworkResolve" => &["name"],
+        "nfcWrite" => &["text"],
         "contactsSearch" => &["query"],
         // Sans nom, un contact créé est une fiche vide : le nom est le minimum qui a un sens.
         "contactsCreate" => &["name"],

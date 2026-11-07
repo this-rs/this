@@ -192,3 +192,160 @@ final class NfcReadSession: NSObject, NFCNDEFReaderSessionDelegate {
     }
   }
 }
+
+// ---- Écrire une étiquette --------------------------------------------------------------
+//
+// Lire sans pouvoir écrire fait de l'app un lecteur, pas un outil. La session est la même que
+// pour la lecture, sauf qu'elle ne s'invalide PAS au premier tag : il faut d'abord s'y
+// connecter, demander son statut, et seulement alors écrire.
+//
+// ## Pourquoi `didDetect tags:` et pas `didDetectNDEFs:`
+//
+// `didDetectNDEFs` livre le contenu lu : avec cette méthode le tag n'est pas connecté, donc
+// impossible à écrire. L'écriture passe par `didDetect tags:`, qui donne la poignée.
+
+private struct NfcWriteArgs: Decodable {
+  let text: String
+  let timeoutMs: Int?
+
+  private enum CodingKeys: String, CodingKey {
+    case text
+    case timeoutMs = "timeout_ms"
+  }
+}
+
+/// `{"kind":"written","bytes":N}` — l'étiquette a accepté le message.
+private struct NfcWrittenReply: Encodable {
+  let kind = "written"
+  let bytes: Int
+}
+
+final class NfcWriteSession: NSObject, NFCNDEFReaderSessionDelegate {
+  private static var active: [ObjectIdentifier: NfcWriteSession] = [:]
+
+  private let invoke: Invoke
+  private let text: String
+  private var session: NFCNDEFReaderSession?
+  private var finished = false
+
+  private init(_ invoke: Invoke, text: String) {
+    self.invoke = invoke
+    self.text = text
+    super.init()
+  }
+
+  static func write(_ invoke: Invoke, text: String, timeoutMs: Int) {
+    guard NFCNDEFReaderSession.readingAvailable else {
+      invoke.resolve(NfcReply.error(code: "unavailable"))
+      return
+    }
+    let payload = text.data(using: .utf8) ?? Data()
+    // Un tag qui n'a pas la place doit être refusé AVANT d'ouvrir la session : la personne
+    // approcherait son étiquette pour rien.
+    guard payload.count <= familiesByteBound else {
+      invoke.resolve(NfcReply.error(code: "too_large"))
+      return
+    }
+    let pending = NfcWriteSession(invoke, text: text)
+    active[ObjectIdentifier(pending)] = pending
+    let reader = NFCNDEFReaderSession(delegate: pending, queue: nil, invalidateAfterFirstRead: false)
+    reader.alertMessage = "Approchez l'étiquette à écrire."
+    pending.session = reader
+    reader.begin()
+    DispatchQueue.main.asyncAfter(deadline: .now() + Double(timeoutMs) / 1000) { [weak pending] in
+      pending?.finish(NfcReply.error(code: "timeout"))
+    }
+  }
+
+  /// La borne du module pur (`families/nfc.rs`, `WRITE_MAX_BYTES`).
+  private static let familiesByteBound = 8 * 1024
+
+  private func finish(_ reply: Encodable) {
+    guard !finished else { return }
+    finished = true
+    session?.invalidate()
+    NfcWriteSession.active[ObjectIdentifier(self)] = nil
+    DispatchQueue.main.async { self.invoke.resolve(reply) }
+  }
+
+  // MARK: NFCNDEFReaderSessionDelegate
+
+  /// Never called with `didDetectNDEFs` in a write session: we connect to the tag instead.
+  func readerSession(_ session: NFCNDEFReaderSession, didDetectNDEFs messages: [NFCNDEFMessage]) {
+    // Nothing to do: the write path answers from `didDetect tags:`.
+  }
+
+  func readerSession(_ session: NFCNDEFReaderSession, didDetect tags: [NFCNDEFTag]) {
+    guard tags.count == 1, let tag = tags.first else {
+      // Deux étiquettes dans le champ : on ne choisit pas à la place de la personne.
+      finish(NfcReply.error(code: "unavailable"))
+      return
+    }
+    session.connect(to: tag) { [weak self] error in
+      guard let self = self else { return }
+      if error != nil {
+        self.finish(NfcReply.error(code: "internal"))
+        return
+      }
+      tag.queryNDEFStatus { status, capacity, _ in
+        guard status == .readWrite else {
+          // Une étiquette en lecture seule : refus explicite, la personne le verra.
+          self.finish(NfcReply.error(code: "not_supported"))
+          return
+        }
+        let payload = self.text.data(using: .utf8) ?? Data()
+        guard payload.count <= capacity else {
+          self.finish(NfcReply.error(code: "too_large"))
+          return
+        }
+        // Un enregistrement « well known / T » : du texte, lisible par n'importe quel lecteur.
+        guard let record = NFCNDEFPayload.wellKnownTypeTextPayload(
+          string: self.text, locale: Locale(identifier: "fr"))
+        else {
+          self.finish(NfcReply.error(code: "internal"))
+          return
+        }
+        let message = NFCNDEFMessage(records: [record])
+        tag.writeNDEF(message) { error in
+          if error != nil {
+            self.finish(NfcReply.error(code: "internal"))
+            return
+          }
+          self.finish(NfcWrittenReply(bytes: payload.count))
+        }
+      }
+    }
+  }
+
+  func readerSession(_ session: NFCNDEFReaderSession, didInvalidateWithError error: Error) {
+    guard let nfcError = error as? NFCReaderError else {
+      finish(NfcReply.error(code: "internal"))
+      return
+    }
+    switch nfcError.code {
+    case .readerSessionInvalidationErrorUserCanceled:
+      finish(NfcReply.error(code: "cancelled"))
+    case .readerSessionInvalidationErrorSystemIsBusy:
+      finish(NfcReply.error(code: "unavailable"))
+    default:
+      finish(NfcReply.error(code: "internal"))
+    }
+  }
+}
+
+extension ThisDevicePlugin {
+  /// Écrit un texte sur une étiquette NDEF. La session se ferme sur tous les chemins.
+  @objc public func nfcWrite(_ invoke: Invoke) throws {
+    let args = try invoke.parseArgs(NfcWriteArgs.self)
+    let text = args.text.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !text.isEmpty else {
+      invoke.resolve(NfcReply.error(code: "missing_argument"))
+      return
+    }
+    NfcWriteSession.write(
+      invoke,
+      text: text,
+      timeoutMs: NfcReadSession.clampedTimeoutMs(args.timeoutMs)
+    )
+  }
+}
