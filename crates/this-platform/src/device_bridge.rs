@@ -156,6 +156,12 @@ pub const METHODS: &[&str] = &[
     "notificationsPost",
     "notificationsCancel",
     "liveActivityStatus",
+    // Démarrer, mettre à jour et terminer une Live Activity : même capacité que la
+    // permission. Une activité qui s'afficherait sur l'écran verrouillé sans que la
+    // personne l'ait accordée serait exactement le contournement que cette table empêche.
+    "liveActivityStart",
+    "liveActivityUpdate",
+    "liveActivityEnd",
     "clipboardRead",
     "clipboardWrite",
     "shareText",
@@ -209,7 +215,9 @@ pub fn capability_of(method: &str, args: &Value) -> Option<Capability> {
         | "notificationsRequest"
         | "notificationsPost"
         | "notificationsCancel" => Capability::Notifications,
-        "liveActivityStatus" => Capability::LiveActivity,
+        "liveActivityStatus" | "liveActivityStart" | "liveActivityUpdate" | "liveActivityEnd" => {
+            Capability::LiveActivity
+        }
         "clipboardRead" | "clipboardWrite" => Capability::Clipboard,
         "shareText" => Capability::Share,
         "contactsStatus" | "contactsRequest" | "contactsList" => Capability::Contacts,
@@ -382,6 +390,8 @@ pub fn status_method(capability: Capability) -> Option<&'static str> {
     Some(match capability {
         Capability::Gyroscope | Capability::Bluetooth => "status",
         Capability::Notifications => "notificationsStatus",
+        // Une capacité, plusieurs sélecteurs : la parité vérifie que CHACUN est atteignable
+        // par le contrat, pas seulement le premier.
         Capability::LiveActivity => "liveActivityStatus",
         Capability::Camera | Capability::Microphone => "captureStatus",
         Capability::Contacts => "contactsStatus",
