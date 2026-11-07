@@ -29,6 +29,11 @@ pub enum ProviderError {
     NoModel(String),
     /// The engine could not be reached.
     Transport(String),
+    /// The engine did not answer in time.
+    Timeout(String),
+    /// A stream stopped without `[DONE]`, without a finish reason and without a tool call:
+    /// what arrived is a fragment, not an answer.
+    StreamCut,
     /// The engine answered with an error status.
     Status {
         code: u16,
@@ -60,6 +65,12 @@ impl fmt::Display for ProviderError {
                 "`{id}` n'annonce aucun modèle et aucun n'est configuré"
             ),
             Self::Transport(reason) => write!(formatter, "moteur injoignable : {reason}"),
+            Self::Timeout(reason) => {
+                write!(formatter, "le moteur n'a pas répondu à temps : {reason}")
+            }
+            Self::StreamCut => formatter.write_str(
+                "flux coupé avant la fin : ni [DONE] ni finish_reason, et aucun appel d'outil",
+            ),
             Self::Status { code, excerpt } => {
                 write!(formatter, "le moteur a répondu {code} : {excerpt}")
             }
@@ -69,6 +80,72 @@ impl fmt::Display for ProviderError {
 }
 
 impl std::error::Error for ProviderError {}
+
+/// The family of a failure. A host switches on it; a message is for reading.
+///
+/// The names are stable and match the transport failure codes of a harness
+/// (`unreachable`, `http`, `truncated`, `unreadable`, `timeout`, `provider`), so an app can
+/// hand them over without translating.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ErrorKind {
+    /// The engine did not answer at all (DNS, refused connection).
+    Unreachable,
+    /// The engine answered with an error status.
+    Http(u16),
+    /// The stream stopped without saying it was done.
+    Truncated,
+    /// The answer does not read.
+    Unreadable,
+    /// The engine did not answer in time.
+    Timeout,
+    /// The provider's own rules refused the call: a budget, a context window, a missing
+    /// key, an invalid configuration. Nothing was sent to the engine.
+    Provider,
+}
+
+impl ErrorKind {
+    /// The stable code, as a harness names it.
+    pub fn code(self) -> &'static str {
+        match self {
+            Self::Unreachable => "unreachable",
+            Self::Http(_) => "http",
+            Self::Truncated => "truncated",
+            Self::Unreadable => "unreadable",
+            Self::Timeout => "timeout",
+            Self::Provider => "provider",
+        }
+    }
+
+    /// The HTTP status, when there is one.
+    pub fn status(self) -> Option<u16> {
+        match self {
+            Self::Http(status) => Some(status),
+            _ => None,
+        }
+    }
+}
+
+impl ProviderError {
+    /// The family of this failure.
+    pub fn kind(&self) -> ErrorKind {
+        match self {
+            Self::Transport(_) => ErrorKind::Unreachable,
+            Self::Timeout(_) => ErrorKind::Timeout,
+            Self::Status { code, .. } => ErrorKind::Http(*code),
+            Self::StreamCut => ErrorKind::Truncated,
+            Self::Parse(_) => ErrorKind::Unreadable,
+            Self::Config(_)
+            | Self::Store(_)
+            | Self::Secret(_)
+            | Self::Budget(_)
+            | Self::NotFound(_)
+            | Self::Disabled(_)
+            | Self::MissingSecret(_)
+            | Self::Context { .. }
+            | Self::NoModel(_) => ErrorKind::Provider,
+        }
+    }
+}
 
 impl From<ConfigError> for ProviderError {
     fn from(error: ConfigError) -> Self {

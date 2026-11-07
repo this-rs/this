@@ -49,7 +49,7 @@ mod client;
 
 pub use budget::{BudgetError, Clock, Ledger, SystemClock, Usage};
 pub use config::{Budget, ConfigError, Pricing, ProviderConfig, ProviderId};
-pub use error::ProviderError;
+pub use error::{ErrorKind, ProviderError};
 pub use hub::Hub;
 pub use model::{ContextFit, ModelInfo, ParseError, estimate_tokens, fit, parse_models};
 pub use secret::{Secret, SecretError, SecretResolver, Secrets};

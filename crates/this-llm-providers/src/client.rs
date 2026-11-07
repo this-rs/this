@@ -149,7 +149,12 @@ fn cause_chain(error: &dyn std::error::Error) -> String {
 }
 
 fn transport(error: reqwest::Error) -> ProviderError {
-    ProviderError::Transport(cause_chain(&error))
+    let message = cause_chain(&error);
+    if error.is_timeout() {
+        ProviderError::Timeout(message)
+    } else {
+        ProviderError::Transport(message)
+    }
 }
 
 fn excerpt(text: &str) -> String {
@@ -539,9 +544,7 @@ impl Turn {
             }
             if self.ended {
                 if self.finish.is_none() && !self.done_seen && self.calls.is_empty() {
-                    return Err(ProviderError::Parse(
-                        "flux coupé avant la fin : ni [DONE] ni finish_reason".to_string(),
-                    ));
+                    return Err(ProviderError::StreamCut);
                 }
                 return Ok(None);
             }
