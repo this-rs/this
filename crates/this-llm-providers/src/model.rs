@@ -139,7 +139,8 @@ mod tests {
 
         // The window the server runs with wins over what the weights were trained for
         // (llama-server --ctx-size 786432 --parallel 3: 262144 per slot).
-        let body = json!({"data": [{"id": "gguf", "meta": {"n_ctx": 262144, "n_ctx_train": 1048576}}]});
+        let body =
+            json!({"data": [{"id": "gguf", "meta": {"n_ctx": 262144, "n_ctx_train": 1048576}}]});
         assert_eq!(parse_models(&body).unwrap()[0].context_window, Some(262144));
 
         let body = json!({"data": [{"id": "gguf", "meta": {"n_ctx_train": 4096}}]});
