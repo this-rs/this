@@ -520,6 +520,7 @@ impl ProviderClient {
             finish: None,
             done_seen: false,
             ended: false,
+            alive: false,
             reported: None,
             model,
             pricing: self.config.pricing,
@@ -539,6 +540,8 @@ pub struct Turn {
     finish: Option<Finish>,
     done_seen: bool,
     ended: bool,
+    /// A line arrived since the last piece was handed out, but it carried no text.
+    alive: bool,
     reported: Option<Value>,
     model: String,
     pricing: Option<Pricing>,
@@ -559,11 +562,26 @@ impl Turn {
 
     /// The next piece of text, or `None` once the engine has ended the turn.
     ///
+    /// An **empty** piece is a sign of life: the engine sent something that is not text —
+    /// a tool call fragment, reasoning, a role-only or empty `delta`, usage, or a `:`
+    /// keep-alive comment. It is handed out (at most once per network read, never more
+    /// often than the text itself would be) so that a caller guarding the stream with its
+    /// own silence timeout around `next()` sees the engine talk. A model writing a whole
+    /// module in ONE tool call streams for minutes without a single `content` piece: if
+    /// `next()` only returned text, that caller would cut it while the engine is talking.
+    /// Callers that only want the text can append the empty piece or skip it.
+    ///
+    /// Keep-alive comments count too: they come from the engine side of the connection
+    /// (OpenRouter sends `: OPENROUTER PROCESSING` while a reasoning model thinks), and the
+    /// HTTP read timeout already counts them as activity. A stream that is never cut by
+    /// silence stays bounded by the output cap and by the caller's run budget.
+    ///
     /// A stream that stops without `[DONE]`, without a finish reason and without a tool
     /// call is an error: its text is a fragment, not an answer.
     pub async fn next(&mut self) -> Result<Option<String>, ProviderError> {
         loop {
             if let Some(piece) = self.take_piece() {
+                self.alive = false;
                 return Ok(Some(piece));
             }
             if self.ended {
@@ -571,6 +589,11 @@ impl Turn {
                     return Err(ProviderError::StreamCut);
                 }
                 return Ok(None);
+            }
+            // Everything buffered is read and none of it was text: say the engine is alive
+            // before waiting on the network again.
+            if std::mem::take(&mut self.alive) {
+                return Ok(Some(String::new()));
             }
             match self.response.chunk().await.map_err(transport)? {
                 Some(bytes) => self.pending.extend_from_slice(&bytes),
@@ -612,11 +635,15 @@ impl Turn {
         Ok(reply)
     }
 
-    /// Reads the complete lines already buffered, and returns the first text piece.
+    /// Reads the complete lines already buffered, and returns the first text piece. Any
+    /// other non-blank line (an event without text, a comment) marks the turn `alive`.
     fn take_piece(&mut self) -> Option<String> {
         while let Some(position) = self.pending.iter().position(|byte| *byte == b'\n') {
             let line: Vec<u8> = self.pending.drain(..=position).collect();
             let text = String::from_utf8_lossy(&line);
+            if !text.trim().is_empty() {
+                self.alive = true;
+            }
             let Some(data) = text.trim().strip_prefix("data:") else {
                 continue;
             };

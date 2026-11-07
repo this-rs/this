@@ -36,6 +36,11 @@ enum Pace {
     Steady { pieces: usize, gap: Duration },
     /// Headers, then nothing for `mute`, then one piece.
     Mute { mute: Duration },
+    /// ONE tool call written in `pieces` argument fragments, one every `gap`, and no text
+    /// at all: a model writing a whole module through a tool.
+    ToolFragments { pieces: usize, gap: Duration },
+    /// Only `: keep-alive` comments, one every `gap`, then one piece.
+    KeepAlive { comments: usize, gap: Duration },
 }
 
 async fn read_request(socket: &mut TcpStream) -> String {
@@ -64,7 +69,20 @@ async fn read_request(socket: &mut TcpStream) -> String {
 }
 
 fn event(content: &str, finish: Option<&str>) -> String {
-    let body = json!({"choices": [{"index": 0, "delta": {"content": content}, "finish_reason": finish}]});
+    let body =
+        json!({"choices": [{"index": 0, "delta": {"content": content}, "finish_reason": finish}]});
+    format!("data: {body}\n\n")
+}
+
+/// A tool call fragment: the name comes with the first one only, as engines send it.
+fn tool_event(name: Option<&str>, arguments: &str) -> String {
+    let mut call = json!({"index": 0, "function": {"arguments": arguments}});
+    if let Some(name) = name {
+        call["id"] = json!("call_1");
+        call["function"]["name"] = json!(name);
+    }
+    let body =
+        json!({"choices": [{"index": 0, "delta": {"tool_calls": [call]}, "finish_reason": null}]});
     format!("data: {body}\n\n")
 }
 
@@ -76,8 +94,8 @@ async fn engine(listener: TcpListener, pace: Pace) {
         tokio::spawn(async move {
             let request = read_request(&mut socket).await;
             if request.starts_with("GET /v1/models") {
-                let body = json!({"data": [{"id": "qwen-test", "meta": {"n_ctx": 262144}}]})
-                    .to_string();
+                let body =
+                    json!({"data": [{"id": "qwen-test", "meta": {"n_ctx": 262144}}]}).to_string();
                 let response = format!(
                     "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                     body.len()
@@ -87,7 +105,8 @@ async fn engine(listener: TcpListener, pace: Pace) {
                 return;
             }
             // A streamed answer with no length: the body ends when the socket closes.
-            let head = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n";
+            let head =
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n";
             if socket.write_all(head.as_bytes()).await.is_err() {
                 return;
             }
@@ -95,7 +114,11 @@ async fn engine(listener: TcpListener, pace: Pace) {
                 Pace::Steady { pieces, gap } => {
                     for index in 0..pieces {
                         tokio::time::sleep(gap).await;
-                        if socket.write_all(event(&format!("m{index} "), None).as_bytes()).await.is_err() {
+                        if socket
+                            .write_all(event(&format!("m{index} "), None).as_bytes())
+                            .await
+                            .is_err()
+                        {
                             return;
                         }
                     }
@@ -103,6 +126,37 @@ async fn engine(listener: TcpListener, pace: Pace) {
                 Pace::Mute { mute } => {
                     tokio::time::sleep(mute).await;
                     let _ = socket.write_all(event("tard ", None).as_bytes()).await;
+                }
+                Pace::ToolFragments { pieces, gap } => {
+                    let _ = socket
+                        .write_all(tool_event(Some("write_module"), "{\"code\":\"").as_bytes())
+                        .await;
+                    for index in 0..pieces {
+                        tokio::time::sleep(gap).await;
+                        if socket
+                            .write_all(tool_event(None, &format!("l{index};")).as_bytes())
+                            .await
+                            .is_err()
+                        {
+                            return;
+                        }
+                    }
+                    let _ = socket.write_all(tool_event(None, "\"}").as_bytes()).await;
+                    let finish = json!({"choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}]});
+                    let _ = socket
+                        .write_all(format!("data: {finish}\n\ndata: [DONE]\n\n").as_bytes())
+                        .await;
+                    let _ = socket.shutdown().await;
+                    return;
+                }
+                Pace::KeepAlive { comments, gap } => {
+                    for _ in 0..comments {
+                        tokio::time::sleep(gap).await;
+                        if socket.write_all(b": keep-alive\n\n").await.is_err() {
+                            return;
+                        }
+                    }
+                    let _ = socket.write_all(event("enfin ", None).as_bytes()).await;
                 }
             }
             let _ = socket.write_all(event("", Some("stop")).as_bytes()).await;
@@ -151,7 +205,11 @@ async fn a_stream_longer_than_the_timeout_but_never_silent_runs_to_its_end() {
         .await
         .expect("le tour s'ouvre");
     let mut text = String::new();
-    while let Some(piece) = turn.next().await.expect("aucune coupure tant que le moteur parle") {
+    while let Some(piece) = turn
+        .next()
+        .await
+        .expect("aucune coupure tant que le moteur parle")
+    {
         text.push_str(&piece);
     }
     assert!(
@@ -159,7 +217,10 @@ async fn a_stream_longer_than_the_timeout_but_never_silent_runs_to_its_end() {
         "le tour a bien duré plus que le délai de 1 s ({:?})",
         started.elapsed()
     );
-    assert_eq!(text, "m0 m1 m2 m3 m4 m5 m6 m7 ", "toute la réponse, rien de coupé");
+    assert_eq!(
+        text, "m0 m1 m2 m3 m4 m5 m6 m7 ",
+        "toute la réponse, rien de coupé"
+    );
 }
 
 #[tokio::test]
@@ -194,4 +255,77 @@ async fn a_mute_stream_is_still_cut_after_the_tolerated_silence() {
         "coupé à la fin du silence toléré, pas à la fin du mutisme ({:?})",
         started.elapsed()
     );
+}
+
+/// What the native shell does around `turn.next()`: its own silence timeout. Here it is the
+/// same 1 s as the client's, so a `next()` that only returned on text would trip it.
+async fn next_within(turn: &mut this_llm_providers::Turn, silence: Duration) -> Option<String> {
+    tokio::time::timeout(silence, turn.next())
+        .await
+        .expect("`next()` rend la main à chaque signe de vie, pas seulement au texte")
+        .expect("aucune coupure tant que le moteur parle")
+}
+
+#[tokio::test]
+async fn a_tool_call_streamed_longer_than_the_timeout_is_alive_and_joined() {
+    // 8 argument fragments, 400 ms apart: 3.2 s of tool call, not one `content` piece.
+    let client = client_with(
+        Pace::ToolFragments {
+            pieces: 8,
+            gap: Duration::from_millis(400),
+        },
+        1,
+    )
+    .await;
+    let started = Instant::now();
+    let mut turn = client
+        .open_turn(TurnRequest::new(conversation()).with_tools(json!([])))
+        .await
+        .expect("le tour s'ouvre");
+    let mut signs = 0usize;
+    let mut text = String::new();
+    while let Some(piece) = next_within(&mut turn, Duration::from_secs(1)).await {
+        if piece.is_empty() {
+            signs += 1;
+        }
+        text.push_str(&piece);
+    }
+    assert!(
+        started.elapsed() > Duration::from_secs(2),
+        "le tour a bien duré plus que le délai de 1 s ({:?})",
+        started.elapsed()
+    );
+    assert!(signs >= 8, "un signe de vie par fragment reçu ({signs})");
+    assert_eq!(text, "", "un appel d'outil n'est pas du texte");
+    let reply = turn.complete().expect("tour terminé");
+    assert_eq!(reply.finish, this_llm_providers::Finish::ToolCalls);
+    assert_eq!(reply.tool_calls.len(), 1);
+    assert_eq!(reply.tool_calls[0]["id"], "call_1");
+    assert_eq!(reply.tool_calls[0]["function"]["name"], "write_module");
+    assert_eq!(
+        reply.tool_calls[0]["function"]["arguments"], "{\"code\":\"l0;l1;l2;l3;l4;l5;l6;l7;\"}",
+        "les fragments sont recomposés dans l'ordre"
+    );
+}
+
+#[tokio::test]
+async fn keep_alive_comments_are_signs_of_life() {
+    // Only comments for 2.4 s, 400 ms apart, then the text.
+    let client = client_with(
+        Pace::KeepAlive {
+            comments: 6,
+            gap: Duration::from_millis(400),
+        },
+        1,
+    )
+    .await;
+    let mut turn = client
+        .open_turn(TurnRequest::new(conversation()))
+        .await
+        .expect("le tour s'ouvre");
+    let mut text = String::new();
+    while let Some(piece) = next_within(&mut turn, Duration::from_secs(1)).await {
+        text.push_str(&piece);
+    }
+    assert_eq!(text, "enfin ");
 }

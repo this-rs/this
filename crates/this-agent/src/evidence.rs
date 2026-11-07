@@ -15,6 +15,12 @@
 use crate::Step;
 
 /// Ce que les faits disent d'un run.
+///
+/// **Sur le fil**, le nom de la variante tel quel, en `PascalCase` (`"Proven"`,
+/// `"Unverified"`, `"Failed"`) — et non en `snake_case` comme `HintKind` : c'est la forme
+/// déjà rangée dans les journaux et le graphe (`_verdict` d'un `_run`), on ne la change pas.
+/// Un nom inconnu (venu d'une version plus récente) se lit [`Verdict::Unknown`] au lieu de
+/// faire rejeter tout le message.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Verdict {
     /// Le run est terminé et au moins une écriture réussie a changé l'état observé.
@@ -24,6 +30,10 @@ pub enum Verdict {
     Unverified,
     /// Un refus ou un échec n'a été suivi d'aucune reprise réussie.
     Failed,
+    /// Un verdict que cette version ne connaît pas (lecture tolérante). [`verdict`] ne le
+    /// rend jamais ; un lecteur le traite comme « pas d'avis ».
+    #[serde(other)]
+    Unknown,
 }
 
 /// L'issue d'une étape, telle que l'outil l'a rendue.
