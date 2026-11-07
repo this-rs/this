@@ -349,6 +349,86 @@ list, remove }`. Disposition : `descriptor.json` **sans textes**, `i18n/<locale>
 langue, `assets/**`. `put` appelle `check(Stored)` **et** `check_compat` contre la plus haute version.
 Implémentations (`InMemoryVfs`, `LocalFsVfs`, `ObrainVfs`, `VfsModuleStore`) : flux vfs.
 
+### 3.9 Vues et actions : le contrat, son schéma, sa validation
+
+`views.rs` : un module déclare un **arbre** (`ViewDesc { name, surface, title?, replaces?, look?, root }`) et des
+**actions** nommées ; l'hôte dessine, le module n'exécute rien. Vocabulaire **fermé** (`deny_unknown_fields`
+partout, variantes d'énumération) : un type inconnu est refusé à la désérialisation, jamais deviné.
+
+- **Conteneurs** (`Node`, tag `type`) : `stack`, `row`, `tabs`, `drawer`, `modal`, `leaf` (porte une brique).
+- **Briques** (`Brick`, tag `type`) : `text`, `button`, `banner`, `indicator`, `list`, `card`, `form`, `field`,
+  `relation`, `chat`, `tool_step`, `queue`, `code_block`, `result`, `capability_request`, `metrics`, `program`.
+  Emplacement `header` : seulement `text`, `banner`, `indicator`, `metrics`, `button`.
+- **Actions** (`Action`, tag `kind`) : `create`, `update`, `delete`, `navigate`, `agent_tool`, `device_capability`.
+- **Champs éditables** : `field.input` ∈ `text` (défaut), `multiline`, `number`, `file`, `reference` (exige
+  `target`), `toggle`. `number` a été ajouté par l'audit de complétude (additif) : aucune saisie numérique
+  n'existait.
+
+**Audit de couverture** (mesuré par `coverage_points_at_types_that_exist_and_the_audited_needs_are_listed`) :
+liste → `list` · détail → `card` · formulaire → `form` · chat → `chat` · indicateurs → `metrics`,
+`indicator(counter)` · onglets → `tabs` · feuille → `modal` · tiroir → `drawer` · bouton → `button` · texte →
+`text` · bannière → `banner` · indicateur → `indicator` · champs texte/nombre/bascule/fichier/référence →
+`field` selon `input` · relation → `relation` · étape d'outil → `tool_step` · file d'attente → `queue` · bloc de
+code → `code_block` · résultat → `result` · demande de capacité → `capability_request` + `device_capability` ·
+programme → `program`. **Non couvert, listé comme tel dans le schéma** : tableau multi-colonnes (`list` n'a
+qu'un libellé et un sous-titre), champ date / liste de choix (`text` en tient lieu), image / média.
+
+#### Export de schéma — `this_descriptor::view_schema`
+
+`view_schema() -> ViewSchema` est la description **sérialisable** du contrat, écrite à la main (aucune
+dépendance, aucun derive), destinée à un agent : il la lit, puis écrit une vue correcte sans deviner.
+Contenu : noms de variantes de chaque famille (`nodes`, `bricks`, `actions`, `clicks`, `column_sources`,
+`filter`), pour chaque variante ses champs (`name`, `ty`, `required`, `default`, `summary`, `refers_to`), un
+**exemple minimal** et un **exemple complet** (tous les champs à une valeur non défaut), `header_ok` ; les
+structures imbriquées (`objects`), les énumérations fermées (`enums`, avec leur défaut), `header_bricks`,
+`max_depth`, les **règles de validation** (`rules` : code, résumé, remède), la **table de couverture**
+(`coverage`) et un `example_module` qui passe `check`. `to_json_pretty()` le rend prêt à coller dans un prompt.
+
+Les analyseurs `parse_view` / `parse_node` / `parse_brick` / `parse_action` rendent une `ViewParseError
+{ message, hint }` : l'indice liste les choix valides, propose le plus proche (« Did you mean `list`? ») et
+renvoie au schéma.
+
+**Garde-fou contre la dérive** (tests de `view_schema`) : le schéma est comparé à **serde lui-même**. Une
+sonde `{"type":"__nope__"}` fait lister à serde les variantes réelles (`unknown variant … expected one of …`),
+une sonde `{"type":"x","__nope__":1}` les champs réels : les ensembles doivent être égaux à ceux du schéma
+(variante manquante **ou** fantôme = échec). Pour chaque variante : l'exemple minimal se désérialise ; l'exemple
+complet se re-sérialise à l'identique (aucun champ perdu) et porte exactement les champs décrits ; retirer un
+champ `required` est refusé, retirer un champ optionnel est accepté ; la valeur `default` décrite est celle que
+prend l'absence ; chaque exemple de brique, de conteneur et d'action passe `check` ; `header_ok` est vrai selon
+`check`. Ce garde-fou repose sur le texte des erreurs de serde : si une montée de version le change, le test
+échoue bruyamment, il ne se tait pas.
+
+#### Règles de validation (`ModuleDescriptor::check` → `this.descriptor.<code>`)
+
+Chaque message dit quoi corriger : il liste les candidats déclarés et propose le plus proche.
+
+| Code | Refuse |
+|---|---|
+| `invalid_name` | nom de vue, action, argument, colonne hors `^[a-z][a-z0-9_]*$` ; onglet ou champ de formulaire vide |
+| `duplicate_view`, `duplicate_action` | deux vues / deux actions de même nom |
+| `action_entity_unknown`, `action_field_unknown` | entité non déclarée ; champ non déclaré (les champs de base ne s'écrivent pas) |
+| `action_fields_empty`, `duplicate_action_field` | `create`/`update` sans champ ; champ listé deux fois |
+| `view_entity_unknown`, `view_entity_required` | brique sur une entité absente ; indicateur autre que `connection` sans entité |
+| `view_field_unknown`, `view_field_required` | champ lu absent de l'entité ; indicateur `activity`/`badge` sans `field` |
+| `view_action_unknown`, `view_action_kind_mismatch` | action absente ; `submit` d'un formulaire qui n'est pas un `create`/`update` de **la même entité** ; `capability_request` vers autre chose que le `device_capability` de la **même capacité** |
+| `view_target_unknown` | `navigate` (action ou clic) ou `replaces` vers une vue absente |
+| `view_relation_unknown` | `link` qui ne part pas de l'entité |
+| `field_input_invalid` | `reference` sans `target`, `target` hors `reference`, `toggle` sur un champ non booléen, `number` sur un champ non numérique |
+| `surface_brick_refused` | grande brique dans un `header` |
+| `invalid_page_size` | `page_size` 0 ou > 100 (la borne de `Query`) |
+| `program_name_duplicate`, `duplicate_form_field`, `duplicate_tab` | doublons dans une même portée |
+| `tabs_empty`, `view_too_deep` | `tabs` sans onglet ; plus de `MAX_VIEW_DEPTH` (16) niveaux de conteneurs |
+| `view_replaces_self`, `view_replaced_twice`, `view_replaces_cycle` | remplacement de soi, deux remplaçantes, cycle (chaque membre est signalé) |
+
+Un test (`every_documented_rule_is_provoked_by_one_case_and_no_other_code_is_emitted`) provoque chaque règle
+par un cas et vérifie qu'aucun code émis n'est absent du schéma ; un second balaie le source de `views.rs`
+pour qu'une raison ajoutée sans documentation échoue.
+
+**Limites connues** (mesurées) : serde ignore une clé en trop sur une variante *unité* d'une énumération à
+tag interne même avec `deny_unknown_fields` (`{"kind":"select","x":1}`, `{"op":"count","x":1}` sont acceptés) ;
+`SortSpec` (partagé avec l'API de requête) n'a pas `deny_unknown_fields` : `{"field":"a","dirr":"desc"}` est
+accepté et trie en `asc`.
+
 ## 4. Alternatives rejetées
 
 | Alternative | Pourquoi rejetée |

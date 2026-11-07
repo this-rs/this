@@ -37,6 +37,7 @@
 //! [`issues`] est la vérification, appelée par `ModuleDescriptor::check`.
 
 use crate::entity::{EntityDesc, base_fields};
+use crate::field::FieldType;
 use crate::link::LinkDesc;
 use crate::module::ModuleDescriptor;
 use crate::naming::is_identifier;
@@ -364,6 +365,8 @@ pub enum Input {
     #[default]
     Text,
     Multiline,
+    /// A numeric entry. The field must be declared with a numeric type.
+    Number,
     File,
     /// Une référence vers une autre entité, avec sélecteur : exige `target`.
     Reference,
@@ -532,6 +535,63 @@ pub fn issues(m: &ModuleDescriptor) -> Vec<(&'static str, String, String)> {
     c.out
 }
 
+/// Deepest nesting of containers the checker accepts. A deeper tree is almost certainly a
+/// mistake (or hostile) and would make every host recurse through it.
+pub const MAX_VIEW_DEPTH: usize = 16;
+
+/// Levenshtein distance, small inputs only (names of entities, fields, actions, views).
+fn distance(a: &str, b: &str) -> usize {
+    let b: Vec<char> = b.chars().collect();
+    let mut prev: Vec<usize> = (0..=b.len()).collect();
+    for (i, ca) in a.chars().enumerate() {
+        let mut cur = vec![i + 1];
+        for (j, cb) in b.iter().enumerate() {
+            let cost = usize::from(ca != *cb);
+            cur.push((prev[j] + cost).min(prev[j + 1] + 1).min(cur[j] + 1));
+        }
+        prev = cur;
+    }
+    prev[b.len()]
+}
+
+/// The candidate closest to `name`, if it is close enough to be a typo.
+pub(crate) fn closest<'a>(
+    name: &str,
+    candidates: impl IntoIterator<Item = &'a str>,
+) -> Option<&'a str> {
+    candidates
+        .into_iter()
+        .map(|c| (distance(name, c), c))
+        .filter(|(d, c)| *d <= 2.max(c.len() / 3) && *d < name.len().max(1))
+        .min_by_key(|(d, _)| *d)
+        .map(|(_, c)| c)
+}
+
+/// `"`x` is not <what> (declared: a, b). Did you mean `a`? <fix>"`: names the candidates and the
+/// remedy, so the author does not have to guess.
+fn unknown_msg<'a>(
+    name: &str,
+    what: &str,
+    candidates: impl IntoIterator<Item = &'a str> + Clone,
+    fix: &str,
+) -> String {
+    let list: Vec<&str> = candidates.clone().into_iter().collect();
+    let mut m = format!("`{name}` is not {what}");
+    if list.is_empty() {
+        m.push_str(" (none is declared)");
+    } else {
+        m.push_str(&format!(" (declared: {})", list.join(", ")));
+    }
+    if let Some(c) = closest(name, candidates) {
+        m.push_str(&format!(". Did you mean `{c}`?"));
+    } else {
+        m.push('.');
+    }
+    m.push(' ');
+    m.push_str(fix);
+    m
+}
+
 struct Checks<'a> {
     m: &'a ModuleDescriptor,
     entities: BTreeMap<&'a str, &'a EntityDesc>,
@@ -577,28 +637,38 @@ impl<'a> Checks<'a> {
         if self.entities.contains_key(entity) {
             true
         } else {
-            self.push(reason, path, format!("`{entity}` is not a declared entity"));
+            let msg = unknown_msg(
+                entity,
+                "a declared entity",
+                self.entities.keys().copied(),
+                "Declare it in `entities` or fix the name.",
+            );
+            self.push(reason, path, msg);
             false
         }
     }
 
     fn action_ref(&mut self, path: &str, name: &str) {
         if !self.actions.contains_key(name) {
-            self.push(
-                "view_action_unknown",
-                path,
-                format!("`{name}` is not a declared action"),
+            let msg = unknown_msg(
+                name,
+                "a declared action",
+                self.actions.keys().copied(),
+                "Add it to the module's `actions` or fix the name.",
             );
+            self.push("view_action_unknown", path, msg);
         }
     }
 
     fn view_ref(&mut self, reason: &'static str, path: &str, name: &str) {
         if !self.views.contains(name) {
-            self.push(
-                reason,
-                path,
-                format!("`{name}` is not a view of this module"),
+            let msg = unknown_msg(
+                name,
+                "a view of this module",
+                self.views.iter().copied(),
+                "Declare that view in `views` or fix the name.",
             );
+            self.push(reason, path, msg);
         }
     }
 
@@ -620,15 +690,34 @@ impl<'a> Checks<'a> {
             }
             match a {
                 Action::Create { entity, fields, .. } | Action::Update { entity, fields, .. } => {
+                    if fields.is_empty() {
+                        self.push(
+                            "action_fields_empty",
+                            format!("{p}.fields"),
+                            "a create/update action must name at least one field to write",
+                        );
+                    }
+                    let mut written = BTreeSet::new();
+                    for (j, f) in fields.iter().enumerate() {
+                        if !written.insert(f.as_str()) {
+                            self.push(
+                                "duplicate_action_field",
+                                format!("{p}.fields[{j}]"),
+                                format!("`{f}` is listed twice; list each written field once"),
+                            );
+                        }
+                    }
                     if self.entity_ref("action_entity_unknown", &format!("{p}.entity"), entity) {
                         let ok = self.writable(entity);
                         for (j, f) in fields.iter().enumerate() {
                             if !ok.contains(f) {
-                                self.push(
-                                    "action_field_unknown",
-                                    format!("{p}.fields[{j}]"),
-                                    format!("`{f}` is not a declared field of `{entity}`"),
+                                let msg = unknown_msg(
+                                    f,
+                                    &format!("a declared field of `{entity}`"),
+                                    ok.iter().map(String::as_str),
+                                    "Base fields (id, created_at...) are never written by an action.",
                                 );
+                                self.push("action_field_unknown", format!("{p}.fields[{j}]"), msg);
                             }
                         }
                     }
@@ -662,7 +751,17 @@ impl<'a> Checks<'a> {
                 self.push("duplicate_view", &p, format!("`{}` declared twice", v.name));
             }
             let mut briques = Vec::new();
-            collecte(&format!("{p}.root"), &v.root, &mut briques);
+            let mut structure = Vec::new();
+            collecte(
+                &format!("{p}.root"),
+                &v.root,
+                1,
+                &mut briques,
+                &mut structure,
+            );
+            for (chemin, raison, msg) in structure {
+                self.push(raison, chemin, msg);
+            }
             for (chemin, b) in briques {
                 self.brick(&chemin, b, v.surface);
             }
@@ -683,13 +782,34 @@ impl<'a> Checks<'a> {
             self.push(
                 "surface_brick_refused",
                 chemin,
-                "this brick does not fit in a header".to_string(),
+                "this brick does not fit in a header; a header only takes text, banner, indicator, \
+                 metrics and button. Move the view to the `main`, `sidebar` or `panel` surface, \
+                 or use one of those bricks"
+                    .to_string(),
             );
         }
         match b {
             Brick::Banner { .. } => {}
-            Brick::CapabilityRequest { action, .. } => {
-                self.action_ref(&format!("{chemin}.action"), action);
+            Brick::CapabilityRequest { capability, action } => {
+                let p = format!("{chemin}.action");
+                self.action_ref(&p, action);
+                match self.actions.get(action.as_str()) {
+                    Some(Action::DeviceCapability { capability: c, .. }) if c == capability => {}
+                    Some(Action::DeviceCapability { capability: c, .. }) => self.push(
+                        "view_action_kind_mismatch",
+                        &p,
+                        format!(
+                            "`{action}` decides {c:?} but this request asks for {capability:?}; \
+                             point it at a `device_capability` action for {capability:?}"
+                        ),
+                    ),
+                    Some(_) => self.push(
+                        "view_action_kind_mismatch",
+                        &p,
+                        format!("`{action}` is not a `device_capability` action; a capability request needs one"),
+                    ),
+                    None => {}
+                }
             }
             Brick::Indicator {
                 signal,
@@ -710,6 +830,20 @@ impl<'a> Checks<'a> {
                 };
                 if !self.entity_ref("view_entity_unknown", &format!("{chemin}.entity"), e) {
                     return;
+                }
+                if matches!(signal, Signal::Activity | Signal::Badge) && field.is_none() {
+                    self.push(
+                        "view_field_required",
+                        chemin,
+                        format!(
+                            "a {signal:?} indicator must name `field` ({})",
+                            if *signal == Signal::Activity {
+                                "the phase"
+                            } else {
+                                "the value"
+                            }
+                        ),
+                    );
                 }
                 let lis = self.readable(e);
                 let mut lus: Vec<&str> = field
@@ -746,7 +880,16 @@ impl<'a> Checks<'a> {
                     self.push(
                         "view_relation_unknown",
                         format!("{chemin}.link"),
-                        format!("`{link}` is not a link from `{entity}`"),
+                        unknown_msg(
+                            link,
+                            &format!("a link whose source is `{entity}`"),
+                            self.m
+                                .links
+                                .iter()
+                                .filter(|l| l.source == *entity)
+                                .map(|l| l.link_type.as_str()),
+                            "Declare the link in `links` with this entity as source, or fix the name.",
+                        ),
                     );
                 }
             }
@@ -768,23 +911,38 @@ impl<'a> Checks<'a> {
 
         match b {
             Brick::Button { action, .. } => self.action_ref(&format!("{chemin}.action"), action),
-            Brick::Field { input, target, .. } => match (input, target) {
-                (Input::Reference, None) => self.push(
-                    "field_input_invalid",
-                    chemin,
-                    "a reference input must name its target entity".to_string(),
-                ),
-                (Input::Reference, Some(t)) => {
-                    self.entity_ref("view_entity_unknown", &format!("{chemin}.target"), t);
+            Brick::Field {
+                input,
+                target,
+                field,
+                entity,
+                ..
+            } => {
+                self.input_matches_type(chemin, entity, field, *input);
+                match (input, target) {
+                    (Input::Reference, None) => self.push(
+                        "field_input_invalid",
+                        chemin,
+                        "a reference input must name its target entity".to_string(),
+                    ),
+                    (Input::Reference, Some(t)) => {
+                        self.entity_ref("view_entity_unknown", &format!("{chemin}.target"), t);
+                    }
+                    (_, Some(_)) => self.push(
+                        "field_input_invalid",
+                        chemin,
+                        "only a reference input takes a target".to_string(),
+                    ),
+                    (_, None) => {}
                 }
-                (_, Some(_)) => self.push(
-                    "field_input_invalid",
-                    chemin,
-                    "only a reference input takes a target".to_string(),
-                ),
-                (_, None) => {}
-            },
-            Brick::Form { fields, submit, .. } => {
+            }
+            Brick::Form {
+                fields,
+                submit,
+                entity,
+                ..
+            } => {
+                let mut vus = BTreeSet::new();
                 for (j, f) in fields.iter().enumerate() {
                     if f.field.is_empty() {
                         self.push(
@@ -792,10 +950,37 @@ impl<'a> Checks<'a> {
                             format!("{chemin}.fields[{j}]"),
                             "empty field name".to_string(),
                         );
+                    } else if !vus.insert(f.field.as_str()) {
+                        self.push(
+                            "duplicate_form_field",
+                            format!("{chemin}.fields[{j}]"),
+                            format!(
+                                "`{}` appears twice in this form; list each field once",
+                                f.field
+                            ),
+                        );
                     }
                 }
                 if let Some(s) = submit {
-                    self.action_ref(&format!("{chemin}.submit"), s);
+                    let p = format!("{chemin}.submit");
+                    self.action_ref(&p, s);
+                    match self.actions.get(s.as_str()) {
+                        Some(Action::Create { entity: e, .. } | Action::Update { entity: e, .. })
+                            if e == entity => {}
+                        Some(Action::Create { entity: e, .. } | Action::Update { entity: e, .. }) => {
+                            self.push(
+                                "view_action_kind_mismatch",
+                                &p,
+                                format!("`{s}` writes `{e}` but this form is on `{entity}`; submit an action on `{entity}`"),
+                            );
+                        }
+                        Some(_) => self.push(
+                            "view_action_kind_mismatch",
+                            &p,
+                            format!("`{s}` is not a create or update action; a form submits one of those"),
+                        ),
+                        None => {}
+                    }
                 }
             }
             Brick::List {
@@ -808,6 +993,16 @@ impl<'a> Checks<'a> {
                         "invalid_page_size",
                         format!("{chemin}.page_size"),
                         "a page holds at least one row".to_string(),
+                    );
+                }
+                if page_size.is_some_and(|n| n > crate::query::MAX_LIMIT) {
+                    self.push(
+                        "invalid_page_size",
+                        format!("{chemin}.page_size"),
+                        format!(
+                            "a page holds at most {} rows (the query clamp)",
+                            crate::query::MAX_LIMIT
+                        ),
                     );
                 }
                 if let Some(Click::Navigate { view }) = on_click {
@@ -852,15 +1047,43 @@ impl<'a> Checks<'a> {
         }
     }
 
+    /// A toggle needs a boolean field, a number input a numeric one. Only a DECLARED field is
+    /// judged: base fields and unknown fields are reported elsewhere.
+    fn input_matches_type(&mut self, chemin: &str, entity: &str, field: &str, input: Input) {
+        let Some(e) = self.entities.get(entity) else {
+            return;
+        };
+        let Some(f) = e.fields.iter().find(|f| f.name == field) else {
+            return;
+        };
+        let (ok, want) = match input {
+            Input::Toggle => (matches!(f.ty, FieldType::Bool), "a bool field"),
+            Input::Number => (f.ty.is_numeric(), "a numeric field"),
+            _ => return,
+        };
+        if !ok {
+            self.push(
+                "field_input_invalid",
+                chemin,
+                format!(
+                    "a {input:?} input needs {want}, but `{field}` of `{entity}` is {:?}; change the input or the field type",
+                    f.ty
+                ),
+            );
+        }
+    }
+
     /// Vérifie que chaque champ lu existe ; un chemin pointé (`target.name`) est validé ailleurs.
     fn reads(&mut self, chemin: &str, entite: &str, lis: &BTreeSet<String>, lus: &[&str]) {
         for c in lus {
             if !c.contains('.') && !lis.contains(*c) {
-                self.push(
-                    "view_field_unknown",
-                    chemin,
-                    format!("`{c}` is not a field of `{entite}`"),
+                let msg = unknown_msg(
+                    c,
+                    &format!("a field of `{entite}`"),
+                    lis.iter().map(String::as_str),
+                    &format!("Declare the field on `{entite}` or fix the name."),
                 );
+                self.push("view_field_unknown", chemin, msg);
             }
         }
     }
@@ -1007,21 +1230,78 @@ fn lectures(b: &Brick) -> Vec<&str> {
     v
 }
 
-/// Toutes les briques d'un arbre, avec leur chemin (`views[0].root.children[1]`).
-fn collecte<'a>(chemin: &str, noeud: &'a Node, out: &mut Vec<(String, &'a Brick)>) {
+/// Un problème de structure : `(chemin, raison, message)`.
+type StructureIssue = (String, &'static str, String);
+
+/// Toutes les briques d'un arbre, avec leur chemin (`views[0].root.children[1]`), et les
+/// problèmes de structure rencontrés (profondeur, onglets).
+fn collecte<'a>(
+    chemin: &str,
+    noeud: &'a Node,
+    profondeur: usize,
+    out: &mut Vec<(String, &'a Brick)>,
+    structure: &mut Vec<StructureIssue>,
+) {
+    if profondeur > MAX_VIEW_DEPTH {
+        structure.push((
+            chemin.to_string(),
+            "view_too_deep",
+            format!(
+                "containers are nested more than {MAX_VIEW_DEPTH} levels deep; flatten the tree or split it into several views"
+            ),
+        ));
+        return;
+    }
     match noeud {
         Node::Stack { children }
         | Node::Row { children }
         | Node::Drawer { children, .. }
         | Node::Modal { children, .. } => {
             for (i, c) in children.iter().enumerate() {
-                collecte(&format!("{chemin}.children[{i}]"), c, out);
+                collecte(
+                    &format!("{chemin}.children[{i}]"),
+                    c,
+                    profondeur + 1,
+                    out,
+                    structure,
+                );
             }
         }
         Node::Tabs { tabs } => {
+            if tabs.is_empty() {
+                structure.push((
+                    chemin.to_string(),
+                    "tabs_empty",
+                    "a `tabs` container needs at least one tab; add a tab or use `stack`"
+                        .to_string(),
+                ));
+            }
+            let mut labels = BTreeSet::new();
             for (i, t) in tabs.iter().enumerate() {
+                if t.label.is_empty() {
+                    structure.push((
+                        format!("{chemin}.tabs[{i}].label"),
+                        "invalid_name",
+                        "a tab needs a non-empty label".to_string(),
+                    ));
+                } else if !labels.insert(t.label.as_str()) {
+                    structure.push((
+                        format!("{chemin}.tabs[{i}].label"),
+                        "duplicate_tab",
+                        format!(
+                            "tab `{}` appears twice in this container; give each tab its own label",
+                            t.label
+                        ),
+                    ));
+                }
                 for (j, c) in t.children.iter().enumerate() {
-                    collecte(&format!("{chemin}.tabs[{i}].children[{j}]"), c, out);
+                    collecte(
+                        &format!("{chemin}.tabs[{i}].children[{j}]"),
+                        c,
+                        profondeur + 1,
+                        out,
+                        structure,
+                    );
                 }
             }
         }
@@ -1749,6 +2029,288 @@ mod tests {
         assert!(
             m.check(&CustomRegistry::default(), CheckProfile::Compiled)
                 .is_ok()
+        );
+    }
+
+    // ---------- hardening: actionable messages and new rules ----------
+
+    fn messages(m: &ModuleDescriptor) -> Vec<String> {
+        m.check(&CustomRegistry::default(), CheckProfile::Compiled)
+            .err()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|i| i.message)
+            .collect()
+    }
+
+    #[test]
+    fn an_unknown_entity_message_lists_the_declared_ones_and_suggests_the_closest() {
+        let mut m = module();
+        m.views.push(leaf_view(
+            "x",
+            r#"{"type":"list","entity":"invoce","label":"titre"}"#,
+        ));
+        let msg = messages(&m).join(" | ");
+        assert!(msg.contains("declared: conversation, invoice"), "{msg}");
+        assert!(msg.contains("Did you mean `invoice`?"), "{msg}");
+        assert!(msg.contains("Declare it in `entities`"), "{msg}");
+    }
+
+    #[test]
+    fn an_unknown_field_action_and_view_message_say_what_to_fix() {
+        let mut m = module();
+        m.actions.push(Action::Create {
+            name: "new".into(),
+            entity: "invoice".into(),
+            fields: vec!["titre".into()],
+        });
+        m.views.push(leaf_view(
+            "x",
+            r#"{"type":"list","entity":"invoice","label":"titr"}"#,
+        ));
+        m.views.push(leaf_view(
+            "y",
+            r#"{"type":"button","entity":"invoice","action":"nev"}"#,
+        ));
+        m.views.push(leaf_view(
+            "z",
+            r#"{"type":"list","entity":"invoice","label":"titre","on_click":{"kind":"navigate","view":"zz"}}"#,
+        ));
+        let msg = messages(&m).join(" | ");
+        assert!(msg.contains("Did you mean `titre`?"), "{msg}");
+        assert!(msg.contains("Did you mean `new`?"), "{msg}");
+        assert!(msg.contains("Add it to the module's `actions`"), "{msg}");
+        assert!(msg.contains("Did you mean `z`?"), "{msg}");
+    }
+
+    #[test]
+    fn a_number_input_needs_a_numeric_field_and_a_toggle_a_bool() {
+        let mut m = module();
+        m.entities[0]
+            .fields
+            .push(FieldDesc::new("paid", FieldType::Bool));
+        m.entities[0]
+            .fields
+            .push(FieldDesc::new("qty", FieldType::I32));
+        for (field, input) in [("qty", "number"), ("paid", "toggle"), ("titre", "text")] {
+            let mut ok = m.clone();
+            ok.views.push(leaf_view(
+                "x",
+                &format!(
+                    r#"{{"type":"field","entity":"invoice","field":"{field}","input":"{input}"}}"#
+                ),
+            ));
+            assert!(
+                ok.check(&CustomRegistry::default(), CheckProfile::Compiled)
+                    .is_ok(),
+                "{field} as {input}"
+            );
+        }
+        for (field, input) in [("titre", "number"), ("titre", "toggle"), ("paid", "number")] {
+            let mut bad = m.clone();
+            bad.views.push(leaf_view(
+                "x",
+                &format!(
+                    r#"{{"type":"field","entity":"invoice","field":"{field}","input":"{input}"}}"#
+                ),
+            ));
+            assert_refused(&bad, "field_input_invalid");
+        }
+    }
+
+    #[test]
+    fn a_form_submit_must_be_a_create_or_update_of_its_own_entity() {
+        let mut m = module();
+        m.actions.push(Action::Create {
+            name: "mk_conv".into(),
+            entity: "conversation".into(),
+            fields: vec![],
+        });
+        // `fields: []` is itself refused; isolate the submit rule on a valid action.
+        m.actions.clear();
+        m.actions.push(Action::Delete {
+            name: "drop".into(),
+            entity: "invoice".into(),
+        });
+        m.views.push(leaf_view(
+            "x",
+            r#"{"type":"form","entity":"invoice","fields":[{"field":"titre"}],"submit":"drop"}"#,
+        ));
+        assert_refused(&m, "view_action_kind_mismatch");
+
+        let mut m = module();
+        m.entities[1]
+            .fields
+            .push(FieldDesc::new("titre", FieldType::String));
+        m.actions.push(Action::Create {
+            name: "mk_conv".into(),
+            entity: "conversation".into(),
+            fields: vec!["titre".into()],
+        });
+        m.views.push(leaf_view(
+            "x",
+            r#"{"type":"form","entity":"invoice","fields":[{"field":"titre"}],"submit":"mk_conv"}"#,
+        ));
+        assert_refused(&m, "view_action_kind_mismatch");
+    }
+
+    #[test]
+    fn a_capability_request_must_point_at_the_matching_device_capability_action() {
+        let mut m = module();
+        m.actions.push(Action::DeviceCapability {
+            name: "cam_ok".into(),
+            capability: DeviceCapability::Camera,
+            grant: Grant::Allow,
+        });
+        m.actions.push(Action::Delete {
+            name: "drop".into(),
+            entity: "invoice".into(),
+        });
+        let mut bad = m.clone();
+        bad.views.push(leaf_view(
+            "x",
+            r#"{"type":"capability_request","capability":"camera","action":"drop"}"#,
+        ));
+        assert_refused(&bad, "view_action_kind_mismatch");
+        let mut wrong = m.clone();
+        wrong.views.push(leaf_view(
+            "x",
+            r#"{"type":"capability_request","capability":"microphone","action":"cam_ok"}"#,
+        ));
+        assert_refused(&wrong, "view_action_kind_mismatch");
+        let mut ok = m;
+        ok.views.push(leaf_view(
+            "x",
+            r#"{"type":"capability_request","capability":"camera","action":"cam_ok"}"#,
+        ));
+        assert!(
+            ok.check(&CustomRegistry::default(), CheckProfile::Compiled)
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn duplicate_form_fields_tabs_and_action_fields_are_refused() {
+        let mut m = module();
+        m.views.push(leaf_view(
+            "x",
+            r#"{"type":"form","entity":"invoice","fields":[{"field":"titre"},{"field":"titre","label":"again"}]}"#,
+        ));
+        assert_refused(&m, "duplicate_form_field");
+
+        let mut m = module();
+        m.views.push(view(
+            "x",
+            serde_json::from_str(
+                r#"{"type":"tabs","tabs":[{"label":"A","children":[]},{"label":"A","children":[]}]}"#,
+            )
+            .unwrap(),
+        ));
+        assert_refused(&m, "duplicate_tab");
+
+        let mut m = module();
+        m.actions.push(Action::Update {
+            name: "fix".into(),
+            entity: "invoice".into(),
+            fields: vec!["amount".into(), "amount".into()],
+        });
+        assert_refused(&m, "duplicate_action_field");
+    }
+
+    #[test]
+    fn empty_tabs_and_a_too_deep_tree_are_refused() {
+        let mut m = module();
+        m.views.push(view("x", Node::Tabs { tabs: vec![] }));
+        assert_refused(&m, "tabs_empty");
+
+        let mut deep = Node::Stack { children: vec![] };
+        for _ in 0..MAX_VIEW_DEPTH {
+            deep = Node::Stack {
+                children: vec![deep],
+            };
+        }
+        let mut m = module();
+        m.views.push(view("x", deep));
+        assert_refused(&m, "view_too_deep");
+
+        // Exactly the maximum depth is accepted.
+        let mut ok = Node::Stack { children: vec![] };
+        for _ in 0..MAX_VIEW_DEPTH - 1 {
+            ok = Node::Stack { children: vec![ok] };
+        }
+        let mut m = module();
+        m.views.push(view("x", ok));
+        assert!(
+            m.check(&CustomRegistry::default(), CheckProfile::Compiled)
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn activity_and_badge_indicators_need_a_field_and_page_size_has_an_upper_bound() {
+        for signal in ["activity", "badge"] {
+            let mut m = module();
+            m.views.push(leaf_view(
+                "x",
+                &format!(r#"{{"type":"indicator","signal":"{signal}","entity":"invoice"}}"#),
+            ));
+            assert_refused(&m, "view_field_required");
+        }
+        let mut m = module();
+        m.views.push(leaf_view(
+            "x",
+            r#"{"type":"list","entity":"invoice","label":"titre","page_size":100}"#,
+        ));
+        assert!(
+            m.check(&CustomRegistry::default(), CheckProfile::Compiled)
+                .is_ok(),
+            "100 is the clamp and is accepted"
+        );
+        let mut m = module();
+        m.views.push(leaf_view(
+            "x",
+            r#"{"type":"list","entity":"invoice","label":"titre","page_size":101}"#,
+        ));
+        assert_refused(&m, "invalid_page_size");
+    }
+
+    #[test]
+    fn a_three_view_replacement_cycle_is_reported_on_each_member() {
+        let mut m = module();
+        for (n, t) in [("a", "b"), ("b", "c"), ("c", "a")] {
+            m.views.push(ViewDesc {
+                replaces: Some(t.into()),
+                ..leaf_view(n, r#"{"type":"metrics","entity":"invoice"}"#)
+            });
+        }
+        let cycles = codes(&m)
+            .into_iter()
+            .filter(|c| c == "this.descriptor.view_replaces_cycle")
+            .count();
+        assert_eq!(cycles, 3);
+    }
+
+    #[test]
+    fn a_view_leading_into_a_cycle_does_not_loop_and_the_cycle_is_still_reported() {
+        let mut m = module();
+        for (n, t) in [("tail", "a"), ("a", "b"), ("b", "a")] {
+            m.views.push(ViewDesc {
+                replaces: Some(t.into()),
+                ..leaf_view(n, r#"{"type":"metrics","entity":"invoice"}"#)
+            });
+        }
+        let got = codes(&m);
+        let cycles = got
+            .iter()
+            .filter(|c| *c == "this.descriptor.view_replaces_cycle")
+            .count();
+        assert_eq!(cycles, 2, "only a and b are on the cycle: {got:?}");
+    }
+
+    #[test]
+    fn the_number_input_round_trips() {
+        assert_stable::<Brick>(
+            r#"{"type":"field","entity":"invoice","field":"amount","input":"number"}"#,
         );
     }
 }
