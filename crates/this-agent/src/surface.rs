@@ -558,6 +558,15 @@ pub fn surface() -> Surface {
                 &[Ios, Ipados, Macos],
                 Status::Live,
             ),
+            // Le flux de positions : iOS seulement (le pont macOS n'a que le point).
+            Capability::new(
+                "device.location.stream",
+                Tier::Shell,
+                "démarrer un flux de positions, l'arrêter, relire ce qui a été reçu",
+                Some("locationStreamStart / locationStreamStop / locationRecent"),
+                &[Ios, Ipados],
+                Status::Live,
+            ),
             Capability::new(
                 "device.location_always",
                 Tier::Shell,
@@ -731,8 +740,8 @@ pub fn surface() -> Surface {
             Capability::new(
                 "device.health",
                 Tier::Shell,
-                "santé : lire une mesure (pas, fréquence cardiaque, masse) sur 24 h au plus",
-                Some("healthStatus / healthRequest / healthQuantitySample"),
+                "santé : lire une mesure (pas, fréquence cardiaque, masse) sur 24 h au plus, et les SÉANCES sur un an au plus",
+                Some("healthStatus / healthRequest / healthQuantitySample / healthWorkouts"),
                 &[Ios, Ipados],
                 Status::Live,
             ),
@@ -766,6 +775,15 @@ pub fn surface() -> Surface {
                 "voir les services Bonjour du réseau local (_http._tcp)",
                 Some("localNetworkStatus / localNetworkBrowse"),
                 &[Ios, Ipados, Macos],
+                Status::Live,
+            ),
+            // Résoudre un service en hôte et port : iOS seulement.
+            Capability::new(
+                "device.local_network.resolve",
+                Tier::Shell,
+                "résoudre un service trouvé en hôte et port",
+                Some("localNetworkResolve"),
+                &[Ios, Ipados],
                 Status::Live,
             ),
             // ---- étage natif

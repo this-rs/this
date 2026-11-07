@@ -224,3 +224,111 @@ extension ThisDevicePlugin {
     HealthKitSession.store.execute(query)
   }
 }
+
+// ---- Les séances -----------------------------------------------------------------------
+//
+// Une quantité dit « 8 000 pas » ; elle ne dit pas « j'ai couru 40 minutes hier ». `HKWorkout`
+// porte l'activité et ses bornes. Pas de calories ni de distance : elles varient par type et par
+// montre, et une valeur absente serait lue comme un zéro.
+//
+// HealthKit ne révèle PAS une autorisation de lecture : une liste vide peut vouloir dire « pas de
+// séance » ou « pas d'accès ». C'est une réponse, pas une erreur — et le module pur le dit.
+
+private struct WorkoutsArgs: Decodable {
+  let fromMs: Int64
+  let toMs: Int64
+  let limit: Int
+
+  private enum CodingKeys: String, CodingKey {
+    case fromMs = "from_ms"
+    case toMs = "to_ms"
+    case limit
+  }
+}
+
+private struct WorkoutOut: Encodable {
+  let activity: String
+  let startMs: Int64
+  let endMs: Int64
+  let durationS: Int64
+
+  private enum Key: String, CodingKey {
+    case activity, duration_s
+    case start_ms
+    case end_ms
+  }
+
+  func encode(to encoder: Encoder) throws {
+    var c = encoder.container(keyedBy: Key.self)
+    try c.encode(activity, forKey: .activity)
+    try c.encode(startMs, forKey: .start_ms)
+    try c.encode(endMs, forKey: .end_ms)
+    try c.encode(durationS, forKey: .duration_s)
+  }
+}
+
+private struct WorkoutsReply: Encodable {
+  let kind = "workouts"
+  let workouts: [WorkoutOut]
+}
+
+extension ThisDevicePlugin {
+  /// L'activité d'une séance, en mots stables. Un type non listé est `other` : inventer un nom
+  /// pour chaque variante d'Apple donnerait des libellés qui changent d'une version à l'autre.
+  private func workoutName(_ type: HKWorkoutActivityType) -> String {
+    switch type {
+    case .running: return "running"
+    case .walking: return "walking"
+    case .cycling: return "cycling"
+    case .swimming: return "swimming"
+    case .hiking: return "hiking"
+    case .yoga: return "yoga"
+    case .functionalStrengthTraining, .traditionalStrengthTraining: return "strength"
+    case .rowing: return "rowing"
+    case .elliptical: return "elliptical"
+    case .highIntensityIntervalTraining: return "hiit"
+    default: return "other"
+    }
+  }
+
+  /// Les séances d'une fenêtre, les plus récentes d'abord.
+  @objc public func healthWorkouts(_ invoke: Invoke) throws {
+    let args = try invoke.parseArgs(WorkoutsArgs.self)
+    guard HKHealthStore.isHealthDataAvailable() else {
+      invoke.resolve(Reply.error(code: "unsupported"))
+      return
+    }
+    guard args.toMs > args.fromMs, args.limit > 0, args.limit <= 50 else {
+      invoke.resolve(Reply.error(code: "internal"))
+      return
+    }
+    let start = Date(timeIntervalSince1970: Double(args.fromMs) / 1000)
+    let end = Date(timeIntervalSince1970: Double(args.toMs) / 1000)
+    let predicate = HKQuery.predicateForSamples(withStart: start, end: end, options: [])
+    let newestFirst = NSSortDescriptor(key: HKSampleSortIdentifierEndDate, ascending: false)
+    let query = HKSampleQuery(
+      sampleType: HKObjectType.workoutType(),
+      predicate: predicate,
+      limit: args.limit,
+      sortDescriptors: [newestFirst]
+    ) { _, results, error in
+      DispatchQueue.main.async {
+        if error != nil {
+          invoke.resolve(Reply.error(code: "unavailable"))
+          return
+        }
+        let found = (results as? [HKWorkout]) ?? []
+        let workouts = found.map { workout in
+          WorkoutOut(
+            activity: self.workoutName(workout.workoutActivityType),
+            startMs: Int64((workout.startDate.timeIntervalSince1970 * 1000).rounded()),
+            endMs: Int64((workout.endDate.timeIntervalSince1970 * 1000).rounded()),
+            durationS: Int64(workout.duration.rounded())
+          )
+        }
+        invoke.resolve(WorkoutsReply(workouts: workouts))
+      }
+    }
+    HealthKitSession.store.execute(query)
+  }
+}

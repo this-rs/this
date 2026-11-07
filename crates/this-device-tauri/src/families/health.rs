@@ -362,3 +362,58 @@ mod tests {
         assert!(serde_json::from_str::<HealthReply>(r#"{"kind":"read_all","data":[]}"#).is_err());
     }
 }
+
+/// La plus longue fenêtre qu'une lecture de séances couvre : un an.
+pub const WORKOUT_WINDOW_MS_MAX: i64 = 366 * 24 * 60 * 60 * 1000;
+/// Le plus de séances qu'une lecture rend.
+pub const WORKOUTS_MAX: u32 = 50;
+
+/// Une séance, telle que le natif l'écrit : le type d'activité et ses bornes.
+///
+/// Pas de calories ni de distance : elles varient par type d'activité et par montre, et une
+/// valeur absente serait lue comme un zéro. Ce que la personne a fait, et combien de temps.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Workout {
+    pub activity: String,
+    pub start_ms: i64,
+    pub end_ms: i64,
+    pub duration_s: i64,
+}
+
+/// Les bornes d'une lecture de séances.
+pub fn check_workouts(from_ms: i64, to_ms: i64, limit: u32) -> Result<u32, HealthReply> {
+    let refus = || HealthReply::Error {
+        code: DeviceError::Internal,
+    };
+    let Some(span) = to_ms.checked_sub(from_ms) else {
+        return Err(refus());
+    };
+    if span <= 0 || span > WORKOUT_WINDOW_MS_MAX || limit == 0 || limit > WORKOUTS_MAX {
+        return Err(refus());
+    }
+    Ok(limit)
+}
+
+#[cfg(test)]
+mod workout_tests {
+    use super::*;
+
+    #[test]
+    fn a_workout_window_is_bounded() {
+        assert!(check_workouts(0, 1_000, 10).is_ok());
+        assert!(check_workouts(1_000, 0, 10).is_err());
+        assert!(check_workouts(0, WORKOUT_WINDOW_MS_MAX + 1, 10).is_err());
+        assert!(check_workouts(0, 1_000, 0).is_err());
+        assert!(check_workouts(0, 1_000, WORKOUTS_MAX + 1).is_err());
+    }
+
+    #[test]
+    fn a_workout_decodes_with_its_duration() {
+        let w: Workout = serde_json::from_str(
+            r#"{"activity":"running","start_ms":1700000000000,"end_ms":1700002400000,"duration_s":2400}"#,
+        )
+        .unwrap();
+        assert_eq!(w.duration_s, 2400);
+    }
+}
