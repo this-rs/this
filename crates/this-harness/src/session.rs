@@ -748,6 +748,11 @@ impl Harness {
     /// change pas, c'est la **donnée** qui décide. Les emplacements `Tools` et
     /// `Guard` sont tenus par qui les a chargés — le harnais ne va pas chercher
     /// un module lui-même (il ne fait aucune entrée/sortie).
+    ///
+    /// **Cette fonction ne vérifie AUCUNE approbation.** Un document dont
+    /// l'approbation est absente, périmée ou non reconnue par l'hôte est construit
+    /// comme un autre. L'hôte doit appeler `HarnessDoc::is_approved` avant, ou —
+    /// chemin sûr, le plus court — passer par [`Harness::from_approved_doc`].
     pub fn from_doc(
         doc: &this_agent::graph::HarnessDoc,
         transport: Rc<dyn Transport>,
@@ -763,6 +768,29 @@ impl Harness {
             sink,
         )
         .with_policy(policy)
+    }
+
+    /// Compose un harness depuis un document **approuvé par l'hôte** : le chemin sûr.
+    ///
+    /// Appelle `doc.is_approved(trusted)` et **refuse de construire** si le verdict
+    /// est `Refuse` : l'`Err` porte ce verdict (avec son motif) et aucun harnais
+    /// n'existe — ni transport touché, ni sortie émise. `trusted` est la liste de
+    /// confiance de l'**hôte** ; l'approbation que le document affirme de lui-même
+    /// n'y suffit pas.
+    pub fn from_approved_doc(
+        doc: &this_agent::graph::HarnessDoc,
+        trusted: &[this_agent::approval::Approval],
+        transport: Rc<dyn Transport>,
+        toolbox: Rc<dyn Toolbox>,
+        policy: Rc<dyn Policy>,
+        sink: impl FnMut(Event) + 'static,
+    ) -> Result<Self, this_agent::substrate::Verdict> {
+        match doc.is_approved(trusted) {
+            this_agent::substrate::Verdict::Allow => {
+                Ok(Self::from_doc(doc, transport, toolbox, policy, sink))
+            }
+            refus => Err(refus),
+        }
     }
 
     /// Installe les autorisations d'outils : la porte entre ce qu'un outil **déclare**

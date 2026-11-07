@@ -380,6 +380,11 @@ mod tests {
             max_tours: 12,
             max_relances: 3,
             budget_ms: None,
+            silence_ms: None,
+            no_progress_ms: None,
+            tool_timeout_ms: None,
+            context_budget: None,
+            approval: None,
         }
     }
 
