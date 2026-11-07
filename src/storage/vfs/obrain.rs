@@ -30,7 +30,7 @@ use chrono::{DateTime, Utc};
 use obrain_common::types::{NodeId, Value as ObrainValue};
 use obrain_core::graph::GraphStoreMut;
 use std::sync::{Arc, Mutex};
-use this_vfs::memory::{check_shape, list_flat};
+use this_vfs::{check_shape, list_flat};
 
 /// Label of the VFS file nodes.
 pub const FILE_LABEL: &str = "_vfs_file";

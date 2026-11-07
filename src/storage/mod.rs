@@ -1,11 +1,15 @@
 //! Storage implementations for different backends
 
+#[cfg(feature = "obrain")]
+pub mod agent_substrate;
 /// Annuaire d'identités persisté (chantier STS-PERSISTANT) : les utilisateurs
 /// de la passerelle dans un store obrain dédié, mots de passe argon2id.
 #[cfg(all(feature = "obrain", feature = "wami"))]
 pub mod annuaire_identites;
 #[cfg(feature = "dynamodb")]
 pub mod dynamodb;
+#[cfg(feature = "obrain")]
+pub mod harness_graph;
 /// IAM **matérialisé** : la décision d'autorisation est une lecture indexée.
 #[cfg(feature = "obrain")]
 pub mod iam;
