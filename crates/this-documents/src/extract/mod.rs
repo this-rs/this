@@ -19,14 +19,32 @@
 //!
 //! ## Les images n'ont pas de texte
 //!
-//! [`image`] les reconnaît, mais n'extrait rien : une image part au modèle.
+//! [`image`] les reconnaît et nomme leur format (le type de média, lu dans les
+//! magic bytes) ; il n'en extrait rien. Ranger les octets de l'image revient à
+//! l'application, et l'envoyer au modèle relève du contrat de message
+//! (`this-harness`), pas de ce crate : à l'extraction, une image n'a pas de texte,
+//! et c'est tout ce qu'on en dit ici.
+//!
+//! ## Les formats Office partagent un conteneur
+//!
+//! `.docx`, `.xlsx` et `.pptx` sont tous des ZIP (`PK\x03\x04`). Ce qui les
+//! distingue est leur partie principale — `word/document.xml`,
+//! `xl/workbook.xml`, `ppt/presentation.xml` — lue dans l'annuaire de l'archive,
+//! jamais l'extension. Chaque extracteur revendique une archive par sa partie ;
+//! quand aucun n'est compilé pour elle, [`ExtractorRegistry::extract`] la
+//! reconnaît quand même (voir `office_kind`) pour dire `FeatureDisabled` avec
+//! le bon format, plutôt qu'un « format inconnu ».
 
 #[cfg(feature = "docx")]
 pub mod docx;
 pub mod image;
 #[cfg(feature = "pdf")]
 pub mod pdf;
+#[cfg(feature = "pptx")]
+pub mod pptx;
 pub mod text;
+#[cfg(feature = "xlsx")]
+pub mod xlsx;
 
 use serde::{Deserialize, Serialize};
 
@@ -45,7 +63,7 @@ pub enum DocumentFormat {
     Xlsx,
     /// PowerPoint (`.pptx`).
     Pptx,
-    /// Une image : pas de texte, elle part au modèle (voir [`image`]).
+    /// Une image : reconnue et typée, sans texte à extraire (voir [`image`]).
     Image,
     /// Tout le reste, gardé comme pièce opaque : aucun extracteur ne l'a lu.
     /// Jamais produit par un extracteur.
@@ -80,7 +98,7 @@ impl DocumentFormat {
     }
 
     /// Ce format porte-t-il du texte qu'on peut extraire, découper et indexer ?
-    /// Faux pour une image (elle part au modèle) et pour une pièce opaque.
+    /// Faux pour une image (elle n'a pas de texte) et pour une pièce opaque.
     pub fn is_text_bearing(&self) -> bool {
         !matches!(self, Self::Image | Self::Binary)
     }
@@ -206,12 +224,19 @@ impl ExtractorRegistry {
         }
     }
 
-    /// Les extracteurs de cette construction, dans l'ordre de sondage : DOCX si la
-    /// feature `docx` est active, PDF si la feature `pdf` l'est, puis le texte brut
-    /// (XLSX et PPTX ne sont pas encore écrits).
+    /// Les extracteurs de cette construction, dans l'ordre de sondage : XLSX,
+    /// PPTX et DOCX, PDF, chacun si sa feature est active, puis le texte brut.
     pub fn with_builtins() -> Self {
         let mut reg = Self::new();
-        // Les formats conteneurs d'abord, avant le fourre-tout.
+        // Les formats conteneurs d'abord, avant le fourre-tout. XLSX et PPTX avant
+        // DOCX : l'extracteur Word revendique toute archive nommée `.docx`, même un
+        // classeur renommé ; les deux autres ne revendiquent par leur extension
+        // qu'une archive sans partie Office d'un autre format. Sondés en premier,
+        // ils prennent leur contenu quel que soit le nom, et laissent le Word à DOCX.
+        #[cfg(feature = "xlsx")]
+        reg.register(Box::new(xlsx::XlsxExtractor));
+        #[cfg(feature = "pptx")]
+        reg.register(Box::new(pptx::PptxExtractor));
         #[cfg(feature = "docx")]
         reg.register(Box::new(docx::DocxExtractor));
         // Un PDF est binaire : le fourre-tout refuserait déjà `%PDF-`, mais l'ordre
@@ -264,15 +289,23 @@ impl ExtractorRegistry {
             });
         }
         if probe.starts_with(b"PK\x03\x04") {
-            let (format, name, feature) = match probe.extension().as_deref() {
-                Some("docx") => (DocumentFormat::Docx, "DOCX", "docx"),
-                Some("xlsx") => (DocumentFormat::Xlsx, "XLSX", "xlsx"),
-                Some("pptx") => (DocumentFormat::Pptx, "PPTX", "pptx"),
-                _ => {
-                    return Err(ExtractError::UnsupportedFormat {
-                        sniffed: probe.describe(),
-                    });
-                }
+            // Le contenu d'abord (la partie principale nommée dans l'archive),
+            // l'extension seulement quand l'archive ne dit rien.
+            let format = office_kind(bytes).or_else(|| match probe.extension().as_deref() {
+                Some("docx") => Some(DocumentFormat::Docx),
+                Some("xlsx") => Some(DocumentFormat::Xlsx),
+                Some("pptx") => Some(DocumentFormat::Pptx),
+                _ => None,
+            });
+            let Some(format) = format else {
+                return Err(ExtractError::UnsupportedFormat {
+                    sniffed: probe.describe(),
+                });
+            };
+            let (name, feature) = match format {
+                DocumentFormat::Xlsx => ("XLSX", "xlsx"),
+                DocumentFormat::Pptx => ("PPTX", "pptx"),
+                _ => ("DOCX", "docx"),
             };
             if !self.has(format) {
                 return Err(ExtractError::FeatureDisabled {
@@ -283,7 +316,7 @@ impl ExtractorRegistry {
         }
         if let Some(media) = image::sniff_image(bytes) {
             return Err(ExtractError::UnsupportedFormat {
-                sniffed: format!("{} (image: no text, send it to the model)", media.as_str()),
+                sniffed: format!("{} (image: no text to extract)", media.as_str()),
             });
         }
 
@@ -296,6 +329,83 @@ impl ExtractorRegistry {
 impl Default for ExtractorRegistry {
     fn default() -> Self {
         Self::with_builtins()
+    }
+}
+
+/// Les parties principales des formats Office, et le format qu'elles prouvent.
+const OFFICE_PARTS: [(&[u8], DocumentFormat); 3] = [
+    (b"word/document.xml", DocumentFormat::Docx),
+    (b"xl/workbook.xml", DocumentFormat::Xlsx),
+    (b"ppt/presentation.xml", DocumentFormat::Pptx),
+];
+
+/// Quel format Office une archive ZIP porte, d'après les **noms** de ses entrées.
+///
+/// Ne sert qu'à choisir le diagnostic quand aucun extracteur n'a revendiqué
+/// l'archive — typiquement parce que la feature du format n'est pas compilée,
+/// donc sans le crate `zip` sous la main. Ce n'est pas un lecteur ZIP : rien n'est
+/// décompressé ni alloué. On parcourt les en-têtes (locaux `PK\x03\x04` et
+/// centraux `PK\x01\x02`), on lit la longueur du nom à son offset fixe, et l'on
+/// compare le nom, avec des bornes vérifiées : une archive hostile ou tronquée
+/// rend `None`, jamais une panique. Les en-têtes locaux comptent aussi, pour
+/// qu'une archive dont l'annuaire central est coupé soit encore reconnue.
+///
+/// En cas d'ambiguïté (une archive qui porterait deux parties principales), le
+/// premier de [`OFFICE_PARTS`] l'emporte : un hasard de fabrication, pas un
+/// format réel.
+pub(crate) fn office_kind(bytes: &[u8]) -> Option<DocumentFormat> {
+    // (signature, offset de la longueur du nom, offset du nom)
+    const HEADERS: [(&[u8; 4], usize, usize); 2] =
+        [(b"PK\x03\x04", 26, 30), (b"PK\x01\x02", 28, 46)];
+    let mut found: Option<usize> = None;
+    let mut at = 0;
+    while let Some(rel) = bytes.get(at..)?.windows(2).position(|w| w == b"PK") {
+        let start = at + rel;
+        at = start + 2;
+        for (sig, len_at, name_at) in HEADERS {
+            if bytes.get(start..start + 4) != Some(&sig[..]) {
+                continue;
+            }
+            let Some(len) = bytes
+                .get(start + len_at..start + len_at + 2)
+                .map(|b| u16::from_le_bytes([b[0], b[1]]) as usize)
+            else {
+                continue;
+            };
+            let Some(name) = bytes.get(start + name_at..start + name_at + len) else {
+                continue;
+            };
+            if let Some(i) = OFFICE_PARTS.iter().position(|(part, _)| *part == name) {
+                found = Some(found.map_or(i, |f| f.min(i)));
+            }
+        }
+    }
+    found.map(|i| OFFICE_PARTS[i].1)
+}
+
+/// L'archive porte-t-elle la partie principale d'un **autre** format Office que
+/// celui de `own_part` ? Un extracteur qui revendique par l'extension doit d'abord
+/// s'en assurer : un `.docx` renommé `.xlsx` reste du Word.
+#[cfg(any(feature = "xlsx", feature = "pptx"))]
+pub(crate) fn has_other_office_part<R: std::io::Read + std::io::Seek>(
+    archive: &zip::ZipArchive<R>,
+    own_part: &str,
+) -> bool {
+    OFFICE_PARTS.iter().any(|(part, _)| {
+        let part = std::str::from_utf8(part).unwrap_or_default();
+        part != own_part && archive.index_for_name(part).is_some()
+    })
+}
+
+/// Meilleur effort sur la charge d'une panique, `&str` ou `String` en pratique.
+#[cfg(feature = "xlsx")]
+pub(crate) fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
+    if let Some(s) = payload.downcast_ref::<&str>() {
+        (*s).to_string()
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "unknown payload".to_string()
     }
 }
 
@@ -541,5 +651,171 @@ mod tests {
         assert!(DocumentFormat::PlainText.is_text_bearing());
         assert!(!DocumentFormat::Image.is_text_bearing());
         assert!(!DocumentFormat::Binary.is_text_bearing());
+    }
+
+    /// Archive ZIP en mémoire (dev-dependency `zip`, présente dans tous les builds de test).
+    fn zip_of(entries: &[(&str, &[u8])]) -> Vec<u8> {
+        use std::io::Write;
+        let mut w = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        for (name, content) in entries {
+            w.start_file(*name, zip::write::SimpleFileOptions::default())
+                .unwrap();
+            w.write_all(content).unwrap();
+        }
+        w.finish().unwrap().into_inner()
+    }
+
+    // Le format Office se lit dans les noms d'entrées, quel que soit le nom du fichier.
+    #[test]
+    fn office_kind_reads_the_main_part_from_entry_names() {
+        let docx = zip_of(&[("word/document.xml", b"<w:document/>")]);
+        // La partie principale en premier : la coupe à mi-archive ci-dessous garde
+        // son en-tête local et perd l'annuaire central.
+        let xlsx = zip_of(&[
+            ("xl/workbook.xml", b"<w/>"),
+            ("[Content_Types].xml", b"<x/>"),
+        ]);
+        let pptx = zip_of(&[("ppt/presentation.xml", b"<p/>")]);
+        let jar = zip_of(&[("META-INF/MANIFEST.MF", b"Manifest-Version: 1.0\n")]);
+        assert_eq!(office_kind(&docx), Some(DocumentFormat::Docx));
+        assert_eq!(office_kind(&xlsx), Some(DocumentFormat::Xlsx));
+        assert_eq!(office_kind(&pptx), Some(DocumentFormat::Pptx));
+        assert_eq!(office_kind(&jar), None);
+        // Un nom de partie qui n'apparaît que dans le CONTENU d'une entrée ne compte pas.
+        let tricky = zip_of(&[("readme.txt", b"see xl/workbook.xml")]);
+        assert_eq!(office_kind(&tricky), None);
+        // Annuaire central coupé : les en-têtes locaux suffisent encore.
+        assert_eq!(
+            office_kind(&xlsx[..xlsx.len() / 2]),
+            Some(DocumentFormat::Xlsx)
+        );
+    }
+
+    // Octets hostiles : longueurs de nom mensongères, signatures en fin de tampon,
+    // archive tronquée à chaque octet. Jamais de panique.
+    #[test]
+    fn office_kind_never_panics_on_hostile_bytes() {
+        let full = zip_of(&[("ppt/presentation.xml", b"<p/>")]);
+        for cut in 0..full.len() {
+            let _ = office_kind(&full[..cut]);
+        }
+        for bytes in [
+            &b"PK"[..],
+            b"PK\x03\x04",
+            b"PK\x01\x02\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff",
+            b"PK\x03\x04\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\xff\xffxl/",
+        ] {
+            assert_eq!(office_kind(bytes), None);
+        }
+    }
+
+    // Une archive ZIP qui n'est ni xlsx ni pptx ni docx : « non supporté », jamais
+    // une panique ni « malformé », quel que soit le jeu de features.
+    #[test]
+    fn a_zip_that_is_no_office_format_is_unsupported_in_every_build() {
+        let reg = ExtractorRegistry::with_builtins();
+        let jar = zip_of(&[("META-INF/MANIFEST.MF", b"Manifest-Version: 1.0\n")]);
+        for name in [Some("app.jar"), Some("archive.zip"), None] {
+            let err = reg.extract(&jar, name).unwrap_err();
+            assert!(
+                matches!(err, ExtractError::UnsupportedFormat { .. }),
+                "{name:?}: {err:?}"
+            );
+        }
+        // Et un ZIP illisible sans extension Office non plus.
+        let err = reg
+            .extract(b"PK\x03\x04\xff\xff garbage", None)
+            .unwrap_err();
+        assert!(
+            matches!(err, ExtractError::UnsupportedFormat { .. }),
+            "{err:?}"
+        );
+    }
+
+    // Sans la feature `xlsx` : un classeur reconnu par son CONTENU répond « pas
+    // compilé » avec le bon format, même nommé autrement ou pas nommé du tout.
+    #[cfg(not(feature = "xlsx"))]
+    #[test]
+    fn a_workbook_without_the_xlsx_feature_is_feature_disabled() {
+        let reg = ExtractorRegistry::with_builtins();
+        assert!(!reg.supported_formats().contains(&DocumentFormat::Xlsx));
+        let xlsx = zip_of(&[("xl/workbook.xml", b"<workbook/>")]);
+        for name in [Some("a.xlsx"), Some("a.bin"), None] {
+            match reg.extract(&xlsx, name) {
+                Err(ExtractError::FeatureDisabled { format, feature }) => {
+                    assert_eq!((format, feature), ("XLSX", "xlsx"), "{name:?}")
+                }
+                other => panic!("{name:?}: {other:?}"),
+            }
+        }
+        // Le dernier recours reste l'extension, quand l'archive ne dit rien.
+        assert!(matches!(
+            reg.extract(b"PK\x03\x04rest", Some("a.xlsx")),
+            Err(ExtractError::FeatureDisabled { format: "XLSX", .. })
+        ));
+    }
+
+    #[cfg(not(feature = "pptx"))]
+    #[test]
+    fn a_presentation_without_the_pptx_feature_is_feature_disabled() {
+        let reg = ExtractorRegistry::with_builtins();
+        assert!(!reg.supported_formats().contains(&DocumentFormat::Pptx));
+        let pptx = zip_of(&[("ppt/presentation.xml", b"<p:presentation/>")]);
+        for name in [Some("a.pptx"), Some("a.bin"), None] {
+            match reg.extract(&pptx, name) {
+                Err(ExtractError::FeatureDisabled { format, feature }) => {
+                    assert_eq!((format, feature), ("PPTX", "pptx"), "{name:?}")
+                }
+                other => panic!("{name:?}: {other:?}"),
+            }
+        }
+        assert!(matches!(
+            reg.extract(b"PK\x03\x04rest", Some("a.pptx")),
+            Err(ExtractError::FeatureDisabled { format: "PPTX", .. })
+        ));
+    }
+
+    // Avec la feature : un ZIP illisible nommé .xlsx est revendiqué et dit
+    // « malformé » ; le registre déclare XLSX avant le texte.
+    #[cfg(feature = "xlsx")]
+    #[test]
+    fn xlsx_feature_claims_a_broken_archive_named_xlsx() {
+        let reg = ExtractorRegistry::with_builtins();
+        let f = reg.supported_formats();
+        let pos = |x| f.iter().position(|g| *g == x).unwrap();
+        assert!(pos(DocumentFormat::Xlsx) < pos(DocumentFormat::PlainText));
+        assert!(matches!(
+            reg.extract(b"PK\x03\x04rest", Some("a.xlsx")),
+            Err(ExtractError::Malformed { format: "XLSX", .. })
+        ));
+    }
+
+    #[cfg(feature = "pptx")]
+    #[test]
+    fn pptx_feature_claims_a_broken_archive_named_pptx() {
+        let reg = ExtractorRegistry::with_builtins();
+        let f = reg.supported_formats();
+        let pos = |x| f.iter().position(|g| *g == x).unwrap();
+        assert!(pos(DocumentFormat::Pptx) < pos(DocumentFormat::PlainText));
+        assert!(matches!(
+            reg.extract(b"PK\x03\x04rest", Some("a.pptx")),
+            Err(ExtractError::Malformed { format: "PPTX", .. })
+        ));
+    }
+
+    // Toutes features : chaque format Office va à son extracteur par son contenu,
+    // même sous l'extension d'un autre — Word compris, qui revendique par extension.
+    #[cfg(all(feature = "docx", feature = "xlsx", feature = "pptx"))]
+    #[test]
+    fn office_content_wins_over_a_misleading_extension() {
+        let reg = ExtractorRegistry::with_builtins();
+        let docx = zip_of(&[(
+            "word/document.xml",
+            br#"<w:document xmlns:w="x"><w:body><w:p><w:r><w:t>mot</w:t></w:r></w:p></w:body></w:document>"#,
+        )]);
+        for name in ["a.xlsx", "a.pptx", "a.docx"] {
+            let out = reg.extract(&docx, Some(name)).unwrap();
+            assert_eq!(out.format, DocumentFormat::Docx, "{name}");
+        }
     }
 }

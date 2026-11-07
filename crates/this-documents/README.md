@@ -4,13 +4,15 @@ Le cœur pur d'une pipeline de documents : reconnaître un format par ses octets
 
 ## Ce que le crate ne fait pas
 
-Aucun I/O, aucun async, aucun graphe, aucune horloge : il consomme des octets et rend des données. Stocker les octets, écrire les nœuds, exposer des outils à un agent, c'est le travail de l'application. Il n'extrait pas XLSX ni PPTX, ne fait pas d'OCR, et ne lit pas le texte d'une image.
+Aucun I/O, aucun async, aucun graphe, aucune horloge : il consomme des octets et rend des données. Stocker les octets, écrire les nœuds, exposer des outils à un agent, c'est le travail de l'application. Il ne fait pas d'OCR et ne lit pas le texte d'une image : il la reconnaît et nomme son format, l'envoyer au modèle n'est pas son affaire.
 
 ## Features
 
 - *(défaut)* : texte brut, reconnaissance des images.
 - `docx` : Word, via `zip` et `quick-xml`.
 - `pdf` : texte par page, via `pdf_oxide` (pur Rust, nettement plus lourd).
+- `xlsx` : Excel, une page par feuille, via `calamine` (et `zip` pour borner la décompression).
+- `pptx` : PowerPoint, une page par diapositive dans l'ordre de la présentation, notes comprises, via `zip` et `quick-xml` (comme `docx`).
 
 Un format reconnu mais non compilé donne `ExtractError::FeatureDisabled`, distinct de `UnsupportedFormat`.
 

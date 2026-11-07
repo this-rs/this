@@ -33,6 +33,14 @@ docx = ["dep:zip", "dep:quick-xml"]
 # outillage PDF complet (36 dépendances non optionnelles, dont office_oxide et
 # taffy), et un consommateur qui ne lit que du Markdown ne doit pas le compiler.
 pdf = ["dep:pdf_oxide"]
+# Un tableur cesse d'être une pièce muette : une page par feuille. `calamine` lit
+# les cellules typées (chaînes partagées, nombres, dates, erreurs) ; `zip` sert à
+# reconnaître le classeur par son contenu et à mesurer ce qui se décompresse
+# AVANT de le confier à calamine, qui n'offre aucune borne de décompression.
+xlsx = ["dep:calamine", "dep:zip"]
+# Une présentation, une page par diapositive. Même conteneur et même XML en flux
+# que `docx` : aucune dépendance de plus que lui.
+pptx = ["dep:zip", "dep:quick-xml"]
 
 [dependencies.zip]
 # Ouvre le conteneur et lit `word/document.xml`. Déflate seulement : c'est la seule
@@ -66,6 +74,18 @@ optional = true
 # Version 0.3.78 : la ligne mesurée par le backend de project-orchestrator ; la
 # même version des deux côtés évite deux copies du parseur dans un même binaire.
 version = "0.3.78"
+default-features = false
+optional = true
+
+# --- Extracteur XLSX (feature `xlsx`, désactivée par défaut) ------------------
+[dependencies.calamine]
+# Lit les cellules en flux (`worksheet_cells_reader`) depuis un `Cursor<&[u8]>`.
+# MIT, pur Rust. Ses features par défaut sont vides ; `default-features = false`
+# le rend explicite et ferme la porte à `dates`/`chrono` et `picture` : une date
+# s'affiche telle que calamine la formate, une image de feuille n'a pas de texte.
+# Version 0.38 : même ligne que le backend de project-orchestrator, et elle
+# partage `zip` 9 et `quick-xml` 0.42 avec la feature `docx` (une seule copie).
+version = "0.38"
 default-features = false
 optional = true
 
