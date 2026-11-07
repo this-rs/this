@@ -44,6 +44,7 @@ pub mod query;
 pub mod resolve;
 pub mod runtime;
 pub mod topics;
+pub mod view_schema;
 pub mod views;
 #[cfg(feature = "wami")]
 /// `wami::statements`: PermDesc -> sandbox policy statements (Track 4).

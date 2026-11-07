@@ -30,6 +30,36 @@ pub enum ExecutorError {
     MissingEntry,
     #[error("exécution interrompue : {0}")]
     Trap(String),
+
+    // --- Contrat d'appel de vue (`crate::render`) ---
+    #[error(
+        "le contrat de vue n'admet aucun import ; le module en déclare {count} ({found}) : \
+         un module de vue reçoit ses données en argument et n'appelle pas l'hôte"
+    )]
+    ImportsRefused { count: usize, found: String },
+    #[error("le module n'exporte pas `{name}` : {how}")]
+    MissingExport { name: String, how: String },
+    #[error("`{name}` a la signature {found}, attendu {expected}")]
+    WrongSignature {
+        name: String,
+        expected: String,
+        found: String,
+    },
+    #[error("budget d'exécution épuisé ({fuel} unités de fuel) : la boucle du module est arrêtée")]
+    OutOfFuel { fuel: u64 },
+    #[error("mémoire refusée (plafond {limit_bytes} octets) : {message}")]
+    Memory { limit_bytes: usize, message: String },
+    #[error("requête trop grande : {len} octets, plafond {max}")]
+    RequestTooLarge { len: usize, max: usize },
+    #[error("réponse trop grande : {len} octets, plafond {max}")]
+    ResponseTooLarge { len: usize, max: usize },
+    #[error("tampon hors mémoire : {ptr}+{len} alors que la mémoire fait {size} octets ({why})")]
+    BadBuffer {
+        ptr: i64,
+        len: usize,
+        size: usize,
+        why: String,
+    },
 }
 
 /// Runs a module and reports its value and effects.
@@ -182,6 +212,21 @@ mod wasmi_engine {
                 value,
                 effects: store.data().effects.clone(),
             })
+        }
+    }
+
+    /// Le contrat de vue, tenu par `wasmi` : borné en fuel et en mémoire (voir
+    /// [`crate::render::bounded`]).
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+    #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+    impl crate::render::ViewRenderer for WasmiExecutor {
+        async fn render(
+            &self,
+            program: &[u8],
+            request: &[u8],
+            limits: &crate::render::Limits,
+        ) -> Result<crate::render::Call, ExecutorError> {
+            crate::render::call_bounded(program, request, limits)
         }
     }
 }

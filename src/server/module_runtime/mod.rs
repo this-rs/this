@@ -35,4 +35,7 @@ pub use loader::{DefaultModuleLoader, ModuleInterface, ModuleLoader, ModuleSourc
 pub use rows::{MemoryRowStore, MemoryRowStores, RowStore, RowStoreFactory};
 #[cfg(feature = "obrain")]
 pub use rows_obrain::ObrainRowStore;
-pub use runtime::{HostParts, ModuleRuntime, RuntimeOptions};
+pub use runtime::{
+    HostParts, LoadedModule, ModuleRuntime, RestoreFailure, RestoreReport, RuntimeOptions,
+    ServedDescriptor,
+};

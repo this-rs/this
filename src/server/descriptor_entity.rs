@@ -469,6 +469,16 @@ fn caller(auth: Option<Extension<AuthContext>>) -> AuthContext {
     auth.map(|Extension(c)| c).unwrap_or(AuthContext::Anonymous)
 }
 
+/// A store failure on the GUARDED path: a module's own code is resolved against its
+/// DECLARATION (`module_errors::normalize`) — the declared kind decides the HTTP status, and
+/// a code no loaded module declares is a named refusal instead of an anonymous 500.
+fn err_for(host: &ServerHost, e: anyhow::Error) -> Response {
+    ApiError(crate::server::exposure::module_errors::normalize_anyhow(
+        host, &e,
+    ))
+    .into_response()
+}
+
 async fn g_list(
     State(s): GState,
     auth: Option<Extension<AuthContext>>,
@@ -507,7 +517,7 @@ async fn g_list(
             }))
             .into_response()
         }
-        Err(e) => err(e),
+        Err(e) => err_for(&s.host, e),
     }
 }
 
@@ -523,7 +533,7 @@ async fn g_create(
     };
     match creator.create_from_json(body.0).await {
         Ok(v) => (StatusCode::CREATED, axum::Json(v)).into_response(),
-        Err(e) => err(e),
+        Err(e) => err_for(&s.host, e),
     }
 }
 
@@ -539,7 +549,7 @@ async fn g_get(
     };
     match fetcher.fetch_as_json(&id).await {
         Ok(v) => axum::Json(v).into_response(),
-        Err(e) => err(e),
+        Err(e) => err_for(&s.host, e),
     }
 }
 
@@ -556,7 +566,7 @@ async fn g_update(
     };
     match creator.update_from_json(&id, body.0).await {
         Ok(v) => axum::Json(v).into_response(),
-        Err(e) => err(e),
+        Err(e) => err_for(&s.host, e),
     }
 }
 
@@ -572,6 +582,6 @@ async fn g_delete(
     };
     match creator.delete(&id).await {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
-        Err(e) => err(e),
+        Err(e) => err_for(&s.host, e),
     }
 }

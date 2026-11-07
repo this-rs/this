@@ -33,6 +33,15 @@ pub const MANIFEST_FORMAT: u32 = 1;
 /// from a key of the trust anchor (see `trust::check_put`).
 pub const PROGRAM_FILE: &str = "program.wasm";
 
+/// Upper bound on the size of a single asset a module version may carry, in bytes.
+///
+/// Assets are small declarative artifacts (schemas, icons, i18n payloads), never
+/// blobs; a module version is a set of such files plus, at most, one `program.wasm`.
+/// The bound is shared between the writer (`this-vfs` / the harness) and the
+/// store that admits a version, so a writer cannot produce a version the store
+/// will refuse. Mirrors the 64 MiB attachment cap used elsewhere in the project.
+pub const MAX_ASSET_BYTES: usize = 64 * 1024 * 1024;
+
 /// Commit record of one version.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Manifest {

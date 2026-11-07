@@ -16,7 +16,7 @@ use crate::server::host::ServerHost;
 #[cfg(feature = "graphql")]
 use serde_json::Value;
 #[cfg(feature = "graphql")]
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 #[cfg(feature = "graphql")]
 use std::sync::{Arc, Mutex, OnceLock};
 
@@ -61,6 +61,94 @@ pub struct DescribedSdl {
 #[cfg(feature = "graphql")]
 /// GraphQL name of the link object type returned by `createLink` / `link<A>To<B>`.
 const LINK_TYPE: &str = "Link";
+
+#[cfg(feature = "graphql")]
+/// One link between two entities, as the host knows it: from the merged `links_config` OR
+/// from a module's declaration (`ModuleDescriptor::links`).
+#[derive(Debug, Clone)]
+pub struct RelationLink {
+    pub source: String,
+    pub target: String,
+    pub link_type: String,
+    /// Forward route name as declared (the REST grammar allows `-` there).
+    pub forward: String,
+    /// Reverse route name as declared.
+    pub reverse: String,
+}
+
+#[cfg(feature = "graphql")]
+/// Every link of the host: the merged `links_config` PLUS the links the modules of the live
+/// descriptor set declare, deduplicated by `(link type, source, target)`.
+///
+/// The runtime merges a loaded module's links into `links_config`, so both sources describe
+/// the same link there. A host that carries a descriptor WITHOUT the runtime (a compiled
+/// module, a `DescriptorSet` assembled by the application) has them only in the declaration:
+/// reading both makes the declaration the contract, not the YAML file it happened to be
+/// written in.
+pub fn relation_links(host: &ServerHost) -> Vec<RelationLink> {
+    let catalog = host.catalog();
+    let mut out: Vec<RelationLink> = Vec::new();
+    let mut seen: HashSet<(String, String, String)> = HashSet::new();
+    for link in &catalog.links_config.links {
+        add_link(
+            &mut out,
+            &mut seen,
+            &link.source_type,
+            &link.target_type,
+            &link.link_type,
+            &link.forward_route_name,
+            &link.reverse_route_name,
+        );
+    }
+    for module in catalog.descriptors.modules() {
+        for link in &module.links {
+            add_link(
+                &mut out,
+                &mut seen,
+                &link.source,
+                &link.target,
+                &link.link_type,
+                &link.forward_route,
+                &link.reverse_route,
+            );
+        }
+    }
+    out
+}
+
+#[cfg(feature = "graphql")]
+fn add_link(
+    out: &mut Vec<RelationLink>,
+    seen: &mut HashSet<(String, String, String)>,
+    source: &str,
+    target: &str,
+    link_type: &str,
+    forward: &str,
+    reverse: &str,
+) {
+    if seen.insert((
+        link_type.to_string(),
+        source.to_string(),
+        target.to_string(),
+    )) {
+        out.push(RelationLink {
+            source: source.to_string(),
+            target: target.to_string(),
+            link_type: link_type.to_string(),
+            forward: forward.to_string(),
+            reverse: reverse.to_string(),
+        });
+    }
+}
+
+#[cfg(feature = "graphql")]
+/// A link route name as a GraphQL field name. The route grammar allows `-`
+/// (`payments-settles`, the default of a declared link); GraphQL does not. Sanitizing BOTH
+/// sources keeps the document parseable AND resolvable: a relation named with a dash made
+/// the whole SDL invalid, so a declared link was unusable from GraphQL.
+pub fn graphql_field_name(route: &str) -> String {
+    route.replace('-', "_")
+}
 
 #[cfg(feature = "graphql")]
 /// Number of descriptor sets whose derived SDL is kept (a host publishes a new set on each
@@ -322,6 +410,16 @@ impl SchemaGenerator {
             ));
         }
 
+        // The interface a module declares (its views and actions), readable without the raw
+        // descriptor: the same document as `GET /_this/views`. Declared only when there IS a
+        // descriptor, because the `JSON` scalar it returns is defined with them.
+        if !self.host.descriptors().is_empty() {
+            query.push_str(
+                "\n  # Module interface: views and actions (same document as `GET /_this/views`)\n",
+            );
+            query.push_str("  _thisViews(module: String, surface: String): JSON!\n");
+        }
+
         // Add notification queries if NotificationStore is configured
         if self.host.notification_store().is_some() {
             query.push_str("\n  # Notification queries\n");
@@ -498,32 +596,35 @@ impl SchemaGenerator {
         .to_string()
     }
 
-    /// Get relations for an entity from links config
+    /// The relations of an entity: every link of the host (see [`relation_links`]), turned
+    /// into the GraphQL field names a client selects.
     fn get_relations_for(&self, entity_type: &str) -> Vec<RelationInfo> {
-        let mut relations = Vec::new();
-
-        for link_def in &self.links_config().links {
-            // Forward relation: order -> invoices
-            if link_def.source_type == entity_type {
-                relations.push(RelationInfo {
-                    name: link_def.forward_route_name.clone(),
-                    target_type: link_def.target_type.clone(),
-                    is_list: true,
-                    link_type: link_def.link_type.clone(),
-                });
+        let mut relations: Vec<RelationInfo> = Vec::new();
+        let mut seen: HashSet<(String, String)> = HashSet::new();
+        for link in relation_links(&self.host) {
+            if link.source == entity_type {
+                let name = graphql_field_name(&link.forward);
+                if seen.insert((name.clone(), link.link_type.clone())) {
+                    relations.push(RelationInfo {
+                        name,
+                        target_type: link.target.clone(),
+                        is_list: true,
+                        link_type: link.link_type.clone(),
+                    });
+                }
             }
-
-            // Reverse relation: invoice -> order
-            if link_def.target_type == entity_type {
-                relations.push(RelationInfo {
-                    name: link_def.reverse_route_name.clone(),
-                    target_type: link_def.source_type.clone(),
-                    is_list: false,
-                    link_type: link_def.link_type.clone(),
-                });
+            if link.target == entity_type {
+                let name = graphql_field_name(&link.reverse);
+                if seen.insert((name.clone(), link.link_type.clone())) {
+                    relations.push(RelationInfo {
+                        name,
+                        target_type: link.source.clone(),
+                        is_list: false,
+                        link_type: link.link_type.clone(),
+                    });
+                }
             }
         }
-
         relations
     }
 

@@ -341,6 +341,17 @@ mod tests {
         conformance::shape_conflicts(&v).await;
     }
 
+    #[tokio::test]
+    async fn vfs_conformance_empty_file_fs() {
+        let (_d, v) = fresh();
+        conformance::empty_file(&v).await;
+    }
+    #[tokio::test]
+    async fn vfs_conformance_etag_is_content_addressed_fs() {
+        let (_d, v) = fresh();
+        conformance::etag_is_content_addressed(&v).await;
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn fs_vfs_sandboxed() {

@@ -16,9 +16,12 @@
 //!
 //! ## What it deliberately does not do
 //!
-//! - **No execution.** Running a module needs an engine (`wasmi` on a host,
+//! - **No engine of its own.** Running a module needs an engine (`wasmi` on a host,
 //!   `WebAssembly` in a page); that belongs behind the `Executor` trait, so this
-//!   crate stays compilable for both.
+//!   crate stays compilable for both. The one call the harness describes itself is
+//!   the **view render call** ([`render`]): bounded in fuel and memory, refused
+//!   before execution when the module does not hold the contract, and validated
+//!   against `this-descriptor` before anything is drawn.
 //! - **No DOM, no tokio.** Nothing here knows whether it runs in a page or on a
 //!   server; only [`Vfs`] does, and it is injected.
 //!
@@ -37,9 +40,11 @@
 pub mod drafter;
 pub mod executor;
 pub mod module_draft;
+pub mod render;
 
 use chrono::Utc;
 use executor::{Executor, ExecutorError, Outcome};
+use render::{Limits, Rendered, ViewRenderer};
 use std::collections::BTreeMap;
 use this_module_lang::assemble::compile_to_wasm;
 use this_module_lang::eval::Value;
@@ -77,6 +82,19 @@ pub enum Error {
     InvalidDescriptor(String),
     #[error("le module proposé ne chargerait pas : {issues:?}")]
     Rejected { issues: Vec<String> },
+
+    #[error(
+        "un module stocké ne se remplace pas : `{path}` existe déjà (compilez une nouvelle version)"
+    )]
+    AlreadyStored { path: String },
+    #[error("ce n'est pas un module wasm ({bytes} octets) : {message}")]
+    NotWasm { bytes: usize, message: String },
+    #[error("la requête de rendu n'est pas du JSON : {0}")]
+    InvalidRequest(String),
+    #[error("le module a rendu un arbre hors contrat : {0}")]
+    InvalidViews(String),
+    #[error("l'arbre rendu contredit le descripteur du module : {issues:?}")]
+    ViewsRejected { issues: Vec<String> },
 }
 
 /// What a compilation produced, and where it landed.
@@ -109,16 +127,57 @@ impl<'a, V: Vfs> Harness<'a, V> {
         source: &str,
     ) -> Result<Artifact, Error> {
         let wasm = compile_to_wasm(source).map_err(Error::Assemble)?;
+        self.write_version(name, version, &wasm, Some(source)).await
+    }
+
+    /// Store a binary that was assembled elsewhere — a page that compiled it, another
+    /// host that shipped it, or a fixture in a test.
+    ///
+    /// The bytes are admitted by the same door as [`Harness::compile`]: checked to be a
+    /// wasm module, never written over an existing version, and the manifest that
+    /// declares them is written **before** them. No source is stored (there is none to
+    /// store), so [`Harness::source`] will not answer for such a version — the manifest
+    /// declares `program.wasm` alone.
+    pub async fn store_program(
+        &self,
+        name: &str,
+        version: &str,
+        wasm: &[u8],
+    ) -> Result<Artifact, Error> {
+        self.write_version(name, version, wasm, None).await
+    }
+
+    /// The single door through which code enters the store.
+    ///
+    /// Fail-closed, in this order:
+    ///
+    /// 1. the bytes must be a wasm module (fully validated when an engine is available);
+    /// 2. an existing version is never replaced — `IfNoneMatch` on every file;
+    /// 3. the **manifest comes first**, and the binary last: an interruption leaves at
+    ///    worst a record that declares code which is not there (a version a reader
+    ///    refuses), never code that no record declares.
+    ///
+    /// What this does not do, and cannot do here: *authenticate* the record. A version
+    /// with code is admitted by a store only when its manifest carries a signature from
+    /// the trust anchor (`this_vfs::layout`), and the harness holds no key. So the write
+    /// is the trust boundary, and the signature belongs to the caller — `this.module.load`
+    /// in the RFC trust model. Anything that writes the layout's paths itself (a fixture,
+    /// a page, another host) is outside this door and outside its guarantees.
+    async fn write_version(
+        &self,
+        name: &str,
+        version: &str,
+        wasm: &[u8],
+        source: Option<&str>,
+    ) -> Result<Artifact, Error> {
+        check_program(wasm)?;
         let dir = version_dir(name, version)?;
 
-        self.write(&dir.join(PROGRAM_FILE)?, &wasm).await?;
-        self.write(&dir.join(SOURCE_FILE)?, source.as_bytes())
-            .await?;
-
         let mut files = BTreeMap::new();
-        files.insert(PROGRAM_FILE.to_string(), etag_of(&wasm));
-        files.insert(SOURCE_FILE.to_string(), etag_of(source.as_bytes()));
-
+        files.insert(PROGRAM_FILE.to_string(), etag_of(wasm));
+        if let Some(source) = source {
+            files.insert(SOURCE_FILE.to_string(), etag_of(source.as_bytes()));
+        }
         let manifest = Manifest {
             format: MANIFEST_FORMAT,
             name: name.to_string(),
@@ -129,14 +188,78 @@ impl<'a, V: Vfs> Harness<'a, V> {
         };
         let encoded =
             serde_json::to_vec_pretty(&manifest).map_err(|e| Error::Manifest(e.to_string()))?;
-        self.write(&dir.join(MANIFEST_FILE)?, &encoded).await?;
+
+        // Le manifeste d'abord : une version n'entre dans le store qu'avec son acte.
+        self.create(&dir.join(MANIFEST_FILE)?, &encoded).await?;
+        if let Some(source) = source {
+            self.create(&dir.join(SOURCE_FILE)?, source.as_bytes())
+                .await?;
+        }
+        // Le code ensuite, en dernier.
+        self.create(&dir.join(PROGRAM_FILE)?, wasm).await?;
 
         Ok(Artifact {
             name: name.to_string(),
             version: version.to_string(),
-            etag: etag_of(&wasm),
+            etag: etag_of(wasm),
             bytes: wasm.len(),
         })
+    }
+
+    /// Run the **view render call** of a stored module, and validate what comes back.
+    ///
+    /// The contract — the three exports, the memory round trip, what is refused before
+    /// execution — is in [`render`]. Two bounds hold on the host side of this call:
+    ///
+    /// - the response is re-checked against [`Limits::response_bytes`] and parsed into
+    ///   [`this_descriptor::views::ViewDesc`] (closed vocabulary, `deny_unknown_fields`);
+    /// - a tree outside the contract becomes [`Error::InvalidViews`]: it is **refused,
+    ///   never drawn**.
+    ///
+    /// [`Harness::render_against`] adds the semantic pass (declared entities, declared
+    /// actions, known fields) using `this-descriptor`'s own checks.
+    pub async fn render<E: ViewRenderer>(
+        &self,
+        executor: &E,
+        name: &str,
+        version: &str,
+        request: &serde_json::Value,
+        limits: &Limits,
+    ) -> Result<Rendered, Error> {
+        let program = self.load(name, version).await?;
+        let request =
+            serde_json::to_vec(request).map_err(|e| Error::InvalidRequest(e.to_string()))?;
+        let call = executor.render(&program, &request, limits).await?;
+        let views = render::views_of(&call.response, limits.response_bytes)
+            .map_err(|e| Error::InvalidViews(e.to_string()))?;
+        Ok(Rendered {
+            views,
+            fuel_used: call.fuel_used,
+            bytes: call.response.len(),
+        })
+    }
+
+    /// [`Harness::render`], then the semantic pass: the rendered views are confronted
+    /// with `descriptor` by `this_descriptor::views::issues` — the same check that
+    /// guards a stored module. A tree that names an entity, an action or a field the
+    /// module does not declare is refused with the list of what contradicts what.
+    pub async fn render_against<E: ViewRenderer>(
+        &self,
+        executor: &E,
+        name: &str,
+        version: &str,
+        request: &serde_json::Value,
+        limits: &Limits,
+        descriptor: &this_descriptor::ModuleDescriptor,
+    ) -> Result<Rendered, Error> {
+        let rendered = self
+            .render(executor, name, version, request, limits)
+            .await?;
+        let issues = render::issues_against(descriptor, &rendered.views);
+        if !issues.is_empty() {
+            return Err(Error::ViewsRejected { issues });
+        }
+        Ok(rendered)
     }
 
     /// Read the stored binary back. The bytes are checked against the manifest's
@@ -217,10 +340,46 @@ impl<'a, V: Vfs> Harness<'a, V> {
         String::from_utf8(bytes).map_err(|e| Error::Manifest(e.to_string()))
     }
 
-    async fn write(&self, path: &VfsPath, bytes: &[u8]) -> Result<(), Error> {
-        self.vfs.write(path, bytes, Precondition::None).await?;
-        Ok(())
+    /// Writes only where nothing exists: a stored artifact is not replaced silently.
+    async fn create(&self, path: &VfsPath, bytes: &[u8]) -> Result<(), Error> {
+        match self.vfs.write(path, bytes, Precondition::IfNoneMatch).await {
+            Ok(_) => Ok(()),
+            Err(VfsError::PreconditionFailed { .. }) => Err(Error::AlreadyStored {
+                path: path.as_str().to_string(),
+            }),
+            Err(other) => Err(Error::Vfs(other)),
+        }
     }
+}
+
+/// Le contrôle que le harness fait sur tout code qui entre : une en-tête wasm, et — quand
+/// un moteur est disponible — la validation complète du module, sans l'exécuter. Un store
+/// qui ne retient que des bytes validés n'est pas un store qui exécutera n'importe quoi.
+fn check_program(wasm: &[u8]) -> Result<(), Error> {
+    let not_wasm = |message: String| Error::NotWasm {
+        bytes: wasm.len(),
+        message,
+    };
+    if wasm.len() < 8 {
+        return Err(not_wasm("- de 8 octets".to_string()));
+    }
+    if &wasm[..4] != b"\0asm" {
+        return Err(not_wasm(
+            "l'en-tête ne commence pas par `\\0asm`".to_string(),
+        ));
+    }
+    if wasm[4..8] != [1, 0, 0, 0] {
+        return Err(not_wasm(format!(
+            "version de binaire {:?}, seule la 1 est admise",
+            &wasm[4..8]
+        )));
+    }
+    #[cfg(feature = "wasmi")]
+    {
+        let engine = wasmi::Engine::default();
+        wasmi::Module::new(&engine, wasm).map_err(|e| not_wasm(e.to_string()))?;
+    }
+    Ok(())
 }
 
 /// Compare deux versions composant par composant, numériquement quand c'est
@@ -372,6 +531,41 @@ mod tests {
         vfs.write(&yanked, b"{}", Precondition::None).await.unwrap();
 
         assert_eq!(harness.versions("shop").await.unwrap(), vec!["0.1.0"]);
+    }
+
+    #[tokio::test]
+    async fn a_stored_version_is_not_replaced_silently() {
+        let vfs = InMemoryVfs::default();
+        let harness = Harness::new(&vfs);
+        harness.compile("shop", "0.3.0", PROGRAM).await.unwrap();
+
+        match harness
+            .compile("shop", "0.3.0", "fn run() -> Int { 99 }")
+            .await
+        {
+            Err(Error::AlreadyStored { .. }) => {}
+            other => panic!("un module stocké ne se remplace pas, reçu {other:?}"),
+        }
+        assert_eq!(
+            harness.source("shop", "0.3.0").await.unwrap(),
+            PROGRAM,
+            "le code d'origine est toujours celui qu'on relit"
+        );
+    }
+
+    #[tokio::test]
+    async fn something_that_is_not_wasm_does_not_enter_the_store() {
+        let vfs = InMemoryVfs::default();
+        let harness = Harness::new(&vfs);
+        match harness.store_program("shop", "0.4.0", b"pas du wasm").await {
+            Err(Error::NotWasm { .. }) => {}
+            other => panic!("un binaire non wasm doit être refusé, reçu {other:?}"),
+        }
+        let dir = VfsPath::parse("/modules/shop/0.4.0").unwrap();
+        assert!(
+            vfs.list(&dir).await.unwrap().is_empty(),
+            "un refus ne doit rien laisser dans le store"
+        );
     }
 
     #[tokio::test]

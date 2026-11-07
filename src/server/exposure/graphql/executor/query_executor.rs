@@ -20,6 +20,20 @@ pub async fn resolve_query_field(
 ) -> Result<Value> {
     let field_name = field.name.as_str();
 
+    // The interface a module declares (views, actions, i18n hints): the same document as
+    // `GET /_this/views`, judged with the same rule (authenticated on an armed host).
+    if field_name == crate::server::exposure::views::GRAPHQL_FIELD {
+        let module = utils::get_string_arg(field, "module");
+        let surface = utils::get_string_arg(field, "surface");
+        return crate::server::exposure::views::document_guarded(
+            guard,
+            host,
+            module.as_deref(),
+            surface.as_deref(),
+        )
+        .map_err(|e| anyhow::Error::new(*e));
+    }
+
     // Check if this is a plural query (e.g., "orders", "invoices")
     if let Some(entity_type) = get_entity_type_from_plural(host, field_name) {
         let entity_type = entity_type.as_str();

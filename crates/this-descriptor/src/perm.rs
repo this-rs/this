@@ -477,6 +477,402 @@ pub struct PrincipalView<'a> {
     pub owner: Option<bool>,
 }
 
+// ---------------------------------------------------------------------------------------------
+// Module-scoped permissions: what a module may REQUIRE, and what it may be GRANTED.
+// ---------------------------------------------------------------------------------------------
+
+/// Codes of the module-permission contract. Namespaced (`this.module.*` for the install /
+/// load decisions, `this.auth.*` for the call-time refusal), stable, and mapped by
+/// [`ContractError::kind`] to HTTP and gRPC like every other `ContractError`.
+///
+/// They are built with [`ContractError::new`] (the framework table of `framework.rs` belongs
+/// to another stream and does not list them yet): the kind is fixed here, once, by
+/// [`module_perm_error`].
+pub mod permission_codes {
+    /// A permission is empty, has an empty segment, a single segment, or characters outside
+    /// `[A-Za-z0-9_-]`. Install refusal (422).
+    pub const MALFORMED: &str = "this.module.permission_malformed";
+    /// A permission lives in the namespace of ANOTHER module (or in none the module owns).
+    /// Install refusal (422).
+    pub const FOREIGN_NAMESPACE: &str = "this.module.permission_foreign_namespace";
+    /// A permission lives in a namespace reserved to the framework (`this`, `iam`, ...).
+    /// Install refusal (422).
+    pub const RESERVED_NAMESPACE: &str = "this.module.permission_reserved_namespace";
+    /// A permission is an administration permission (`admin` segment, wildcard).
+    /// Install refusal (422).
+    pub const ADMIN: &str = "this.module.permission_admin";
+    /// A permission the module requires is granted by NO policy rule. Load refusal (412).
+    pub const UNGRANTED: &str = "this.module.permission_ungranted";
+    /// The MODULE (not the caller) lacks the permission a route needs. Call refusal (403).
+    pub const MODULE_FORBIDDEN: &str = "this.auth.module_forbidden";
+}
+
+/// Namespaces a module can never use: they belong to the framework and to its IAM.
+pub const RESERVED_PERMISSION_NAMESPACES: [&str; 7] = [
+    "this",
+    "iam",
+    "wami",
+    "admin",
+    "system",
+    "framework",
+    "root",
+];
+
+/// Permission segments that mean administration. A module cannot grant itself one, whatever
+/// the namespace in front of it (`billing.admin`, `billing.invoice.root`).
+pub const ADMIN_PERMISSION_SEGMENTS: [&str; 3] = ["admin", "root", "superuser"];
+
+/// `perm:billing:invoice.read` and `billing.invoice.read` are the same permission (the
+/// separators `:` and `.` are interchangeable, as in `wami_action_for` and the token scopes).
+/// Returns the canonical dotted form without the optional `perm:` prefix.
+pub fn canonical_permission(raw: &str) -> String {
+    raw.strip_prefix("perm:")
+        .unwrap_or(raw)
+        .trim()
+        .replace(':', ".")
+}
+
+/// Namespace of a permission: its first segment (`billing` for `billing.invoice.read`).
+pub fn permission_namespace(raw: &str) -> &str {
+    raw.strip_prefix("perm:")
+        .unwrap_or(raw)
+        .trim()
+        .split(['.', ':'])
+        .next()
+        .unwrap_or("")
+}
+
+/// Error of the module-permission contract, with its kind fixed in one place.
+fn module_perm_error(
+    code: &str,
+    kind: crate::error::ErrorKind,
+    message: String,
+) -> crate::error::ContractError {
+    crate::error::ContractError::new(code, kind).with_message(message)
+}
+
+/// Is `perm` an acceptable requirement for module `module`? The single rule behind install,
+/// load and call time. `Err` carries a named, parameterized [`ContractError`]
+/// (`module`, `permission`, `namespace`).
+pub fn check_permission_for_module(
+    module: &str,
+    perm: &str,
+) -> Result<(), crate::error::ContractError> {
+    use crate::error::ErrorKind;
+    let canonical = canonical_permission(perm);
+    let segments: Vec<&str> = canonical.split('.').collect();
+    let namespace = segments.first().copied().unwrap_or("");
+    let fail = |code: &str, why: String| {
+        module_perm_error(code, ErrorKind::Validation, why)
+            .with_param("module", module)
+            .with_param("permission", &canonical)
+            .with_param("namespace", namespace)
+    };
+    // A wildcard is a blanket grant: administration, not a name.
+    if segments.iter().any(|s| s.contains('*')) {
+        return Err(fail(
+            permission_codes::ADMIN,
+            format!(
+                "module `{module}` requires the wildcard permission `{canonical}`: a wildcard is an administration permission a module cannot give itself"
+            ),
+        ));
+    }
+    let well_formed = segments.len() >= 2
+        && segments.iter().all(|s| {
+            !s.is_empty()
+                && s.chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+        });
+    if !well_formed {
+        return Err(fail(
+            permission_codes::MALFORMED,
+            format!(
+                "module `{module}` requires the malformed permission `{canonical}`: expected `{module}.<action>` (at least two non-empty segments of letters, digits, `_`, `-`)"
+            ),
+        ));
+    }
+    if RESERVED_PERMISSION_NAMESPACES.contains(&namespace) {
+        return Err(fail(
+            permission_codes::RESERVED_NAMESPACE,
+            format!(
+                "module `{module}` requires `{canonical}`: namespace `{namespace}` is reserved to the framework"
+            ),
+        ));
+    }
+    if segments
+        .iter()
+        .any(|s| ADMIN_PERMISSION_SEGMENTS.contains(&s.to_ascii_lowercase().as_str()))
+    {
+        return Err(fail(
+            permission_codes::ADMIN,
+            format!(
+                "module `{module}` requires the administration permission `{canonical}`: a module cannot give itself one"
+            ),
+        ));
+    }
+    if namespace != module {
+        return Err(fail(
+            permission_codes::FOREIGN_NAMESPACE,
+            format!(
+                "module `{module}` requires `{canonical}`, which belongs to namespace `{namespace}`: a module may only require permissions of its own namespace (`{module}.*`)"
+            ),
+        ));
+    }
+    Ok(())
+}
+
+/// Every `(where, permission)` the module's policies name through `perm:`, in declaration
+/// order (entities, then links), duplicates kept: `where` locates it for the operator.
+pub fn declared_permissions(m: &crate::module::ModuleDescriptor) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    let mut scan = |place: String, perms: &PermDesc| {
+        for (op, expr) in &perms.ops {
+            for p in expr.permissions() {
+                out.push((format!("{place}.{op}"), p.to_string()));
+            }
+        }
+    };
+    for e in &m.entities {
+        scan(format!("entity `{}`", e.name), &e.permissions);
+    }
+    for l in &m.links {
+        scan(
+            format!("link `{}({}→{})`", l.link_type, l.source, l.target),
+            &l.permissions,
+        );
+    }
+    out
+}
+
+/// The distinct permissions (canonical form) the module requires, sorted.
+pub fn required_permissions(m: &crate::module::ModuleDescriptor) -> Vec<String> {
+    let set: std::collections::BTreeSet<String> = declared_permissions(m)
+        .into_iter()
+        .map(|(_, p)| canonical_permission(&p))
+        .collect();
+    set.into_iter().collect()
+}
+
+/// INSTALL-time check: every permission the module's policies name must be in the module's own
+/// namespace and not an administration permission. Returns ALL violations (not only the first),
+/// each located (`where`) so the operator can fix the descriptor in one pass. Empty = valid;
+/// a module that declares no `perm:` is valid (nothing to steal).
+pub fn check_module_permissions(
+    m: &crate::module::ModuleDescriptor,
+) -> Vec<crate::error::ContractError> {
+    declared_permissions(m)
+        .into_iter()
+        .filter_map(|(place, p)| {
+            check_permission_for_module(&m.name, &p)
+                .err()
+                .map(|e| e.with_param("declared_at", place))
+        })
+        .collect()
+}
+
+/// Who grants a module its permissions: the host's policy rules, seen from the module.
+///
+/// Three-valued like `perm:` everywhere else: `Some(true)` granted, `Some(false)` refused,
+/// `None` unevaluable. Only `Some(true)` is a grant; the other two refuse.
+pub trait ModulePermissionSource: Send + Sync {
+    /// May `module` itself exercise `permission` (canonical dotted form)?
+    fn module_allows(&self, module: &str, permission: &str) -> Option<bool>;
+}
+
+impl<F> ModulePermissionSource for F
+where
+    F: Fn(&str, &str) -> Option<bool> + Send + Sync,
+{
+    fn module_allows(&self, module: &str, permission: &str) -> Option<bool> {
+        self(module, permission)
+    }
+}
+
+/// In-memory policy of module grants: `Allow`/`Deny` patterns per module, deny-overrides, and
+/// NO inheritance: a module only ever sees ITS OWN rules, and never a permission outside its own
+/// namespace, whatever a rule says. Nothing is granted by a module being loaded.
+///
+/// A pattern is an exact permission (`billing.invoice.read`) or a family of the module's own
+/// namespace (`billing.invoice.*`, `billing.*`). The bare `*` matches nothing.
+#[derive(Debug, Clone, Default)]
+pub struct ModuleGrants {
+    allow: BTreeMap<String, Vec<String>>,
+    deny: BTreeMap<String, Vec<String>>,
+}
+
+impl ModuleGrants {
+    pub fn new() -> Self {
+        Self::default()
+    }
+    /// Allow `pattern` to `module`.
+    pub fn allow(mut self, module: &str, pattern: &str) -> Self {
+        self.allow
+            .entry(module.to_string())
+            .or_default()
+            .push(canonical_permission(pattern));
+        self
+    }
+    /// Deny `pattern` to `module` (wins over any allow).
+    pub fn deny(mut self, module: &str, pattern: &str) -> Self {
+        self.deny
+            .entry(module.to_string())
+            .or_default()
+            .push(canonical_permission(pattern));
+        self
+    }
+
+    fn matches(pattern: &str, permission: &str) -> bool {
+        if pattern == permission {
+            return true;
+        }
+        pattern.strip_suffix(".*").is_some_and(|family| {
+            !family.is_empty() && permission.starts_with(&format!("{family}."))
+        })
+    }
+}
+
+impl ModulePermissionSource for ModuleGrants {
+    fn module_allows(&self, module: &str, permission: &str) -> Option<bool> {
+        let permission = canonical_permission(permission);
+        // No inheritance between modules, whatever the rule table contains.
+        if permission_namespace(&permission) != module {
+            return Some(false);
+        }
+        let hit = |t: &BTreeMap<String, Vec<String>>| {
+            t.get(module)
+                .is_some_and(|v| v.iter().any(|p| Self::matches(p, &permission)))
+        };
+        if hit(&self.deny) {
+            return Some(false);
+        }
+        Some(hit(&self.allow))
+    }
+}
+
+/// What to do with a module whose required permissions are not all granted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LoadPosture {
+    /// Refuse to load: `this.module.permission_ungranted` (default, fail-closed).
+    #[default]
+    Strict,
+    /// Load, and SAY SO: the verdict lists the ungranted permissions, and every route whose
+    /// policy names one of them is refused at call time (`this.auth.module_forbidden`). The
+    /// rest of the module works.
+    Degraded,
+}
+
+/// The documented outcome of a load decision.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize)]
+pub struct LoadVerdict {
+    pub module: String,
+    /// Required and granted.
+    pub granted: Vec<String>,
+    /// Required and NOT granted (non-empty only under [`LoadPosture::Degraded`]).
+    pub ungranted: Vec<String>,
+}
+
+impl LoadVerdict {
+    /// Was the module admitted with missing permissions?
+    pub fn is_degraded(&self) -> bool {
+        !self.ungranted.is_empty()
+    }
+}
+
+/// LOAD-time check: is every permission the module requires granted to IT by `source`?
+/// `Strict`: any gap refuses, naming the module and the missing permissions. `Degraded`: the gap
+/// is reported in the verdict (never silent). The install rules ([`check_module_permissions`])
+/// are NOT repeated here; use [`admit_module`] for both.
+pub fn check_load(
+    m: &crate::module::ModuleDescriptor,
+    source: &dyn ModulePermissionSource,
+    posture: LoadPosture,
+) -> Result<LoadVerdict, crate::error::ContractError> {
+    let mut verdict = LoadVerdict {
+        module: m.name.clone(),
+        ..LoadVerdict::default()
+    };
+    for p in required_permissions(m) {
+        if source.module_allows(&m.name, &p) == Some(true) {
+            verdict.granted.push(p);
+        } else {
+            verdict.ungranted.push(p);
+        }
+    }
+    if verdict.is_degraded() && posture == LoadPosture::Strict {
+        return Err(module_perm_error(
+            permission_codes::UNGRANTED,
+            crate::error::ErrorKind::PreconditionFailed,
+            format!(
+                "module `{}` is not loaded: no policy rule grants it {}",
+                m.name,
+                verdict
+                    .ungranted
+                    .iter()
+                    .map(|p| format!("`{p}`"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        )
+        .with_param("module", &m.name)
+        .with_param("permissions", &verdict.ungranted)
+        .with_param("posture", "strict"));
+    }
+    Ok(verdict)
+}
+
+/// Install check THEN load check: the single call N3 makes before registering a module.
+/// Install violations come first and are all returned; the load verdict only exists for a
+/// module that passed them.
+pub fn admit_module(
+    m: &crate::module::ModuleDescriptor,
+    source: &dyn ModulePermissionSource,
+    posture: LoadPosture,
+) -> Result<LoadVerdict, Vec<crate::error::ContractError>> {
+    let violations = check_module_permissions(m);
+    if !violations.is_empty() {
+        return Err(violations);
+    }
+    check_load(m, source, posture).map_err(|e| vec![e])
+}
+
+/// CALL-time check on the MODULE side: may `module` exercise `permission`? Called IN ADDITION
+/// to the caller's own check; both must pass. Re-validates the namespace (a descriptor that
+/// reached the runtime without `check_module_permissions` cannot borrow another module's
+/// grants). The error names the module and the permission; the surface adds caller and resource.
+pub fn check_module_call(
+    module: &str,
+    permission: &str,
+    source: &dyn ModulePermissionSource,
+) -> Result<(), crate::error::ContractError> {
+    let canonical = canonical_permission(permission);
+    let refuse = |reason: String| {
+        module_perm_error(
+            permission_codes::MODULE_FORBIDDEN,
+            crate::error::ErrorKind::PermissionDenied,
+            format!("module `{module}` may not exercise `{canonical}`: {reason}"),
+        )
+        .with_param("module", module)
+        .with_param("permission", &canonical)
+    };
+    if let Err(e) = check_permission_for_module(module, &canonical) {
+        return Err(refuse(format!(
+            "not a permission of its own namespace ({})",
+            e.code
+        ))
+        .with_param("cause", e.code.as_str()));
+    }
+    match source.module_allows(module, &canonical) {
+        Some(true) => Ok(()),
+        Some(false) => Err(refuse("no policy rule grants it to the module".to_string())
+            .with_param("cause", "not_granted")),
+        None => Err(
+            refuse("the module's grant could not be evaluated (fail-closed)".to_string())
+                .with_param("cause", "unevaluable"),
+        ),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -606,5 +1002,275 @@ mod tests {
             PermDesc::default().effective(&Operation::Delete),
             PolicyExpr::Authenticated
         );
+    }
+
+    // ----- module-scoped permissions -----
+
+    use crate::entity::EntityDesc;
+    use crate::module::ModuleDescriptor;
+
+    /// A module whose single entity guards `get` and `create` with the given policies.
+    fn module(name: &str, policies: &[(&str, &str)]) -> ModuleDescriptor {
+        let mut m = ModuleDescriptor::new(name, "1.0.0");
+        let mut e = EntityDesc::new("invoice");
+        for (op, pol) in policies {
+            e.permissions
+                .ops
+                .insert(op.parse().unwrap(), PolicyExpr::parse(pol).unwrap());
+        }
+        m.entities.push(e);
+        m
+    }
+
+    fn codes_of(errs: &[crate::error::ContractError]) -> Vec<&str> {
+        errs.iter().map(|e| e.code.as_str()).collect()
+    }
+
+    #[test]
+    fn module_permissions_in_own_namespace_are_accepted() {
+        let m = module(
+            "billing",
+            &[
+                ("get", "perm:billing.invoice.read"),
+                ("create", "all(authenticated, perm:billing:invoice.write)"),
+            ],
+        );
+        assert!(check_module_permissions(&m).is_empty());
+        assert_eq!(
+            required_permissions(&m),
+            vec!["billing.invoice.read", "billing.invoice.write"]
+        );
+    }
+
+    #[test]
+    fn a_module_without_perm_policies_has_nothing_to_validate() {
+        let m = module("billing", &[("get", "authenticated"), ("list", "public")]);
+        assert!(check_module_permissions(&m).is_empty());
+        assert!(required_permissions(&m).is_empty());
+    }
+
+    #[test]
+    fn stolen_namespace_is_refused_with_a_named_code_and_location() {
+        let m = module(
+            "billing",
+            &[
+                ("get", "perm:catalog.product.read"),
+                ("create", "perm:billing.invoice.write"),
+            ],
+        );
+        let errs = check_module_permissions(&m);
+        assert_eq!(codes_of(&errs), vec![permission_codes::FOREIGN_NAMESPACE]);
+        let e = &errs[0];
+        assert_eq!(e.kind, crate::error::ErrorKind::Validation);
+        assert_eq!(e.params["module"], "billing");
+        assert_eq!(e.params["permission"], "catalog.product.read");
+        assert_eq!(e.params["namespace"], "catalog");
+        assert_eq!(e.params["declared_at"], "entity `invoice`.get");
+        assert!(e.message.contains("billing") && e.message.contains("catalog"));
+    }
+
+    #[test]
+    fn a_namespace_that_merely_starts_like_the_module_is_foreign() {
+        let m = module("billing", &[("get", "perm:billing_admin_tools.read")]);
+        assert_eq!(
+            codes_of(&check_module_permissions(&m)),
+            vec![permission_codes::FOREIGN_NAMESPACE]
+        );
+    }
+
+    #[test]
+    fn framework_reserved_namespaces_are_refused() {
+        for ns in ["this", "iam", "wami", "admin", "system"] {
+            let m = module("billing", &[("get", &format!("perm:{ns}.users.read"))]);
+            assert_eq!(
+                codes_of(&check_module_permissions(&m)),
+                vec![permission_codes::RESERVED_NAMESPACE],
+                "{ns}"
+            );
+        }
+    }
+
+    #[test]
+    fn administration_permissions_are_refused_even_in_the_own_namespace() {
+        for p in [
+            "billing.admin",
+            "billing.invoice.admin",
+            "billing.root",
+            "billing.*",
+            "*",
+            "billing.invoice.*",
+        ] {
+            let m = module("billing", &[("delete", &format!("perm:{p}"))]);
+            let errs = check_module_permissions(&m);
+            assert_eq!(codes_of(&errs), vec![permission_codes::ADMIN], "{p}");
+            assert_eq!(errs[0].kind, crate::error::ErrorKind::Validation);
+        }
+    }
+
+    #[test]
+    fn malformed_permissions_are_refused() {
+        // `perm:` parsing already rejects empty/space names; the rest reaches the check.
+        for p in ["billing", "billing..read", "billing.re/ad", ".billing.read"] {
+            let err = check_permission_for_module("billing", p).unwrap_err();
+            assert_eq!(err.code.as_str(), permission_codes::MALFORMED, "{p}");
+        }
+    }
+
+    #[test]
+    fn every_violation_is_reported_in_one_pass_including_negated_ones() {
+        let m = module(
+            "billing",
+            &[
+                ("get", "perm:catalog.read"),
+                ("update", "not(perm:this.users.read)"),
+                (
+                    "delete",
+                    "any(perm:billing.admin, perm:billing.invoice.read)",
+                ),
+            ],
+        );
+        let errs = check_module_permissions(&m);
+        assert_eq!(
+            codes_of(&errs),
+            vec![
+                // Operation order: get, update, delete.
+                permission_codes::FOREIGN_NAMESPACE,
+                permission_codes::RESERVED_NAMESPACE,
+                permission_codes::ADMIN
+            ]
+        );
+    }
+
+    #[test]
+    fn link_permissions_are_checked_like_entity_ones() {
+        let mut m = module("billing", &[]);
+        let mut l = crate::link::LinkDesc::new("billed_to", "invoice", "user");
+        l.permissions.ops.insert(
+            Operation::CreateLink,
+            PolicyExpr::parse("perm:iam.attach").unwrap(),
+        );
+        m.links.push(l);
+        let errs = check_module_permissions(&m);
+        assert_eq!(codes_of(&errs), vec![permission_codes::RESERVED_NAMESPACE]);
+        assert!(
+            errs[0].params["declared_at"]
+                .as_str()
+                .unwrap()
+                .contains("billed_to")
+        );
+    }
+
+    #[test]
+    fn load_is_granted_when_every_required_permission_is_allowed() {
+        let m = module("billing", &[("get", "perm:billing.invoice.read")]);
+        let grants = ModuleGrants::new().allow("billing", "billing.invoice.*");
+        let v = check_load(&m, &grants, LoadPosture::Strict).unwrap();
+        assert_eq!(v.granted, vec!["billing.invoice.read"]);
+        assert!(!v.is_degraded());
+    }
+
+    #[test]
+    fn load_is_refused_with_a_named_code_when_no_rule_grants_a_permission() {
+        let m = module(
+            "billing",
+            &[
+                ("get", "perm:billing.invoice.read"),
+                ("create", "perm:billing.invoice.write"),
+            ],
+        );
+        let grants = ModuleGrants::new().allow("billing", "billing.invoice.read");
+        let e = check_load(&m, &grants, LoadPosture::Strict).unwrap_err();
+        assert_eq!(e.code.as_str(), permission_codes::UNGRANTED);
+        assert_eq!(e.kind, crate::error::ErrorKind::PreconditionFailed);
+        assert_eq!(e.params["module"], "billing");
+        assert_eq!(e.params["permissions"][0], "billing.invoice.write");
+        assert!(e.message.contains("billing.invoice.write"));
+    }
+
+    #[test]
+    fn degraded_load_reports_the_gap_instead_of_hiding_it() {
+        let m = module(
+            "billing",
+            &[
+                ("get", "perm:billing.invoice.read"),
+                ("create", "perm:billing.invoice.write"),
+            ],
+        );
+        let grants = ModuleGrants::new().allow("billing", "billing.invoice.read");
+        let v = check_load(&m, &grants, LoadPosture::Degraded).unwrap();
+        assert!(v.is_degraded());
+        assert_eq!(v.ungranted, vec!["billing.invoice.write"]);
+        assert_eq!(v.granted, vec!["billing.invoice.read"]);
+    }
+
+    #[test]
+    fn a_module_with_no_rule_at_all_is_not_granted_by_being_present() {
+        let m = module("billing", &[("get", "perm:billing.invoice.read")]);
+        let e = check_load(&m, &ModuleGrants::new(), LoadPosture::Strict).unwrap_err();
+        assert_eq!(e.code.as_str(), permission_codes::UNGRANTED);
+    }
+
+    #[test]
+    fn admit_module_reports_install_violations_before_load_ones() {
+        let m = module("billing", &[("get", "perm:catalog.read")]);
+        let errs = admit_module(&m, &ModuleGrants::new(), LoadPosture::Strict).unwrap_err();
+        assert_eq!(codes_of(&errs), vec![permission_codes::FOREIGN_NAMESPACE]);
+    }
+
+    #[test]
+    fn module_grants_never_cross_namespaces_and_deny_overrides() {
+        // A rule table that (wrongly) hands billing a catalog permission and a blanket `*`.
+        let g = ModuleGrants::new()
+            .allow("billing", "catalog.product.read")
+            .allow("billing", "*")
+            .allow("billing", "billing.*")
+            .deny("billing", "billing.invoice.delete");
+        assert_eq!(
+            g.module_allows("billing", "catalog.product.read"),
+            Some(false)
+        );
+        assert_eq!(
+            g.module_allows("billing", "billing.invoice.read"),
+            Some(true)
+        );
+        assert_eq!(
+            g.module_allows("billing", "billing.invoice.delete"),
+            Some(false)
+        );
+        // catalog has no rules of its own: billing's rules are not inherited.
+        assert_eq!(
+            g.module_allows("catalog", "catalog.product.read"),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn module_call_check_is_granted_refused_or_unevaluable_and_names_everything() {
+        let g = ModuleGrants::new().allow("billing", "billing.invoice.read");
+        assert!(check_module_call("billing", "billing.invoice.read", &g).is_ok());
+        assert!(check_module_call("billing", "perm:billing:invoice.read", &g).is_ok());
+
+        let e = check_module_call("billing", "billing.invoice.write", &g).unwrap_err();
+        assert_eq!(e.code.as_str(), permission_codes::MODULE_FORBIDDEN);
+        assert_eq!(e.kind, crate::error::ErrorKind::PermissionDenied);
+        assert_eq!(e.kind.http_status(), 403);
+        assert_eq!(e.kind.grpc_code(), 7);
+        assert_eq!(e.params["module"], "billing");
+        assert_eq!(e.params["permission"], "billing.invoice.write");
+        assert_eq!(e.params["cause"], "not_granted");
+
+        let unknown = |_: &str, _: &str| -> Option<bool> { None };
+        let e = check_module_call("billing", "billing.invoice.read", &unknown).unwrap_err();
+        assert_eq!(e.params["cause"], "unevaluable");
+    }
+
+    #[test]
+    fn module_call_check_refuses_a_foreign_permission_even_if_the_source_says_yes() {
+        let yes = |_: &str, _: &str| -> Option<bool> { Some(true) };
+        let e = check_module_call("billing", "catalog.product.read", &yes).unwrap_err();
+        assert_eq!(e.code.as_str(), permission_codes::MODULE_FORBIDDEN);
+        assert_eq!(e.params["cause"], permission_codes::FOREIGN_NAMESPACE);
+        let e = check_module_call("billing", "this.users.read", &yes).unwrap_err();
+        assert_eq!(e.params["cause"], permission_codes::RESERVED_NAMESPACE);
     }
 }

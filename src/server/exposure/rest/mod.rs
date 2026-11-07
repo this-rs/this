@@ -76,6 +76,12 @@ impl RestExposure {
         app = app.merge(crate::server::exposure::descriptor::descriptor_routes(
             host.clone(),
         ));
+        // The interface a module declares (its views and actions), same prefix, same catalog.
+        app = app.merge(crate::server::exposure::views::views_routes(host.clone()));
+        // Declared error codes and their per-surface mapping, same prefix, same catalog.
+        app = app.merge(crate::server::exposure::module_errors::error_routes(
+            host.clone(),
+        ));
 
         app = app.merge(link_routes);
 

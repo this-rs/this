@@ -117,20 +117,22 @@ async fn resolve_relation_field_inner(
         .ok_or_else(|| anyhow::anyhow!("Entity missing id field"))?;
     let source_uuid = Uuid::parse_str(entity_id)?;
 
-    // Get links configuration for this entity type
-    let links_config = host.catalog().links_config.clone();
-
-    // Find the link configuration for this relation
-    for link_config in &links_config.links {
-        if link_config.source_type == entity_type && link_config.forward_route_name == field_name {
+    // Every link the host knows: the merged `links_config` PLUS the links the module
+    // declarations carry (see `relation_links`). Field names are compared SANITIZED, the way
+    // the SDL names them: a declared link defaults to `payments-settles`, which GraphQL
+    // cannot spell, so the schema publishes `payments_settles`.
+    for link_config in &super::super::schema_generator::relation_links(host) {
+        let forward = super::super::schema_generator::graphql_field_name(&link_config.forward);
+        let reverse = super::super::schema_generator::graphql_field_name(&link_config.reverse);
+        if link_config.source == entity_type && forward == field_name {
             // This is a forward relation (e.g., order -> invoices)
             // Navigating links is `list_links` on the link (then the source entity),
             // and every target read is a `get` on the target entity.
             guard
                 .check_link(
                     Some(&link_config.link_type),
-                    Some(&link_config.source_type),
-                    Some(&link_config.target_type),
+                    Some(&link_config.source),
+                    Some(&link_config.target),
                     Some(entity_type),
                     Operation::ListLinks,
                 )
@@ -140,7 +142,7 @@ async fn resolve_relation_field_inner(
                 .find_by_source(
                     &source_uuid,
                     Some(&link_config.link_type),
-                    Some(&link_config.target_type),
+                    Some(&link_config.target),
                 )
                 .await?;
 
@@ -153,7 +155,7 @@ async fn resolve_relation_field_inner(
                     let fetcher = guard
                         .fetcher(
                             host,
-                            &link_config.target_type,
+                            &link_config.target,
                             Operation::Get,
                             Some(&link.target_id),
                         )
@@ -164,7 +166,7 @@ async fn resolve_relation_field_inner(
                             guard,
                             target_entity,
                             &field.selection_set.items,
-                            &link_config.target_type,
+                            &link_config.target,
                         )
                         .await?;
                         targets.push(resolved);
@@ -173,15 +175,13 @@ async fn resolve_relation_field_inner(
 
                 return Ok(Some(Value::Array(targets)));
             }
-        } else if link_config.target_type == entity_type
-            && link_config.reverse_route_name == field_name
-        {
+        } else if link_config.target == entity_type && reverse == field_name {
             // This is a reverse relation (e.g., invoice -> order)
             guard
                 .check_link(
                     Some(&link_config.link_type),
-                    Some(&link_config.source_type),
-                    Some(&link_config.target_type),
+                    Some(&link_config.source),
+                    Some(&link_config.target),
                     Some(entity_type),
                     Operation::ListLinks,
                 )
@@ -191,7 +191,7 @@ async fn resolve_relation_field_inner(
                 .find_by_target(
                     &source_uuid,
                     Some(&link_config.link_type),
-                    Some(&link_config.source_type),
+                    Some(&link_config.source),
                 )
                 .await?;
 
@@ -200,7 +200,7 @@ async fn resolve_relation_field_inner(
                 && let fetcher = guard
                     .fetcher(
                         host,
-                        &link_config.source_type,
+                        &link_config.source,
                         Operation::Get,
                         Some(&link.source_id),
                     )
@@ -212,7 +212,7 @@ async fn resolve_relation_field_inner(
                     guard,
                     source_entity,
                     &field.selection_set.items,
-                    &link_config.source_type,
+                    &link_config.source,
                 )
                 .await?;
                 return Ok(Some(resolved));

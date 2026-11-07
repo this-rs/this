@@ -299,6 +299,10 @@ pub struct Authorization {
     /// (`core::auth::surface::PolicyIndex`, même résolution que les autres
     /// surfaces). `None` = résolution YAML seule (historique).
     catalog: Option<Arc<crate::server::catalog::LiveCatalog>>,
+    /// Le côté **module** du double contrôle : quand il est branché, une route servie pour un
+    /// module exige AUSSI que le module détienne les permissions `perm:` que sa politique
+    /// nomme (`core::auth::module_guard`). `None` = comportement historique, inchangé.
+    module_guard: Option<Arc<crate::core::auth::module_guard::ModuleGuard>>,
 }
 
 impl Authorization {
@@ -326,7 +330,21 @@ impl Authorization {
                 "/auth/".to_string(),
             ]),
             catalog: None,
+            module_guard: None,
         }
+    }
+
+    /// Arme le **contrôle du module** : en plus de l'appelant, le module qui sert la route doit
+    /// détenir chaque permission `perm:` que la politique de la route nomme. Les deux doivent
+    /// passer ; un refus du module est `this.auth.module_forbidden` (403 / `PERMISSION_DENIED`)
+    /// et dit le module, la permission, l'appelant et la ressource. Sans cet appel, rien ne
+    /// change.
+    pub fn with_module_guard(
+        mut self,
+        guard: Arc<crate::core::auth::module_guard::ModuleGuard>,
+    ) -> Self {
+        self.module_guard = Some(guard);
+        self
     }
 
     /// Branche le **catalogue vivant** de l'hôte : les politiques déclarées dans
@@ -1143,6 +1161,33 @@ impl Authorization {
         context: &AuthContext,
         meta: &crate::core::auth::RequestMeta,
     ) -> Decision {
+        self.decide_traced(method, path, context, meta).0
+    }
+
+    /// [`Authorization::decide_with`] plus, when the MODULE (not the caller) was refused, the
+    /// named [`ContractError`](crate::descriptor::ContractError)
+    /// (`this.auth.module_forbidden`) the surface must send as is.
+    #[allow(clippy::result_large_err)]
+    pub fn decide_traced(
+        &self,
+        method: &Method,
+        path: &str,
+        context: &AuthContext,
+        meta: &crate::core::auth::RequestMeta,
+    ) -> (Decision, Option<crate::descriptor::ContractError>) {
+        let mut module_error = None;
+        let decision = self.decide_inner(method, path, context, meta, &mut module_error);
+        (decision, module_error)
+    }
+
+    fn decide_inner(
+        &self,
+        method: &Method,
+        path: &str,
+        context: &AuthContext,
+        meta: &crate::core::auth::RequestMeta,
+        module_error: &mut Option<crate::descriptor::ContractError>,
+    ) -> Decision {
         let (entity_type, operation, policy, origin) = match self.requirement(method, path) {
             Requirement::Policy {
                 entity_type,
@@ -1176,7 +1221,32 @@ impl Authorization {
             let mut used_iam = false;
             let verdict = match self.descriptor_policies(&segments, &entity_type, &operation) {
                 Some(resolved) => {
-                    self.evaluate_descriptor(&resolved, context, &target, meta, &mut used_iam)
+                    match self.evaluate_descriptor(&resolved, context, &target, meta, &mut used_iam)
+                    {
+                        // The caller passed: the MODULE must hold the permissions too.
+                        Ok(()) => match &self.module_guard {
+                            Some(guard) => guard
+                                .authorize(&resolved, context, resource.as_ref())
+                                .map_err(|e| {
+                                    let reason = e.message.clone();
+                                    *module_error = Some(e);
+                                    reason
+                                }),
+                            None => Ok(()),
+                        },
+                        Err(reason) => {
+                            // Name the module and the caller on the caller's refusal too.
+                            let module = resolved.iter().find_map(|r| r.module.as_deref());
+                            Err(match module {
+                                Some(m) => format!(
+                                    "{reason} [module `{m}`, caller {}, resource {}]",
+                                    crate::core::auth::module_guard::caller_label(context),
+                                    resource.map_or_else(|| "*".to_string(), |r| r.to_string())
+                                ),
+                                None => reason,
+                            })
+                        }
+                    }
                 }
                 None => Err("catalogue republié pendant la décision — refus".to_string()),
             };
@@ -1286,7 +1356,7 @@ pub async fn authorization_middleware(
     // seulement si le proxy est cru ; aucun écouteur n'expose l'adresse du pair.
     let meta =
         crate::core::auth::RequestMeta::from_request(request.headers(), None, authz.forwarded);
-    let decision = authz.decide_with(&method, &path, &context, &meta);
+    let (decision, module_error) = authz.decide_traced(&method, &path, &context, &meta);
 
     match decision {
         Decision::Allow { .. } => next.run(request).await,
@@ -1368,16 +1438,29 @@ pub async fn authorization_middleware(
             }
 
             tracing::debug!(%method, %path, %scope, %policy, "autorisation refusée");
-            forbidden_response(
-                &format!("{method} {path}"),
-                json!({
-                    "error": "forbidden",
-                    "scope": scope,
-                    "policy": policy,
-                    "origin": origin,
-                    "reason": reason,
-                }),
-            )
+            let legacy = json!({
+                "error": "forbidden",
+                "scope": scope,
+                "policy": policy,
+                "origin": origin,
+                "reason": reason,
+            });
+            match module_error {
+                // The MODULE was refused: send its own named code (module, permission, caller,
+                // resource in the body), not the generic `this.auth.forbidden`.
+                Some(err) => {
+                    let extras = match legacy {
+                        serde_json::Value::Object(m) => m,
+                        _ => serde_json::Map::new(),
+                    };
+                    crate::core::errors::error_response_with(
+                        err,
+                        Some(StatusCode::FORBIDDEN),
+                        extras,
+                    )
+                }
+                None => forbidden_response(&format!("{method} {path}"), legacy),
+            }
         }
     }
 }
@@ -4509,5 +4592,137 @@ mod descriptor_tests {
             &Operation::ListLinks,
         );
         assert_eq!(p[0].policy, Ok(PolicyExpr::HasRole(vec!["auditor".into()])));
+    }
+
+    // ----- the module side of the double check, over REST -----
+
+    /// `billing.invoice`: `get` needs `perm:billing.invoice.read`. The caller's permission comes
+    /// from the token scopes (no IAM wired); the module's from the in-memory grant table.
+    fn billing_authz(grants: crate::descriptor::perm::ModuleGrants) -> Authorization {
+        let mut m = ModuleDescriptor::new("billing", "1.0.0");
+        let mut e = EntityDesc::new("invoice");
+        e.permissions.ops.insert(
+            Operation::Get,
+            PolicyExpr::parse("perm:billing.invoice.read").unwrap(),
+        );
+        m.entities.push(e);
+        let mut set = DescriptorSet::new();
+        set.insert(m).unwrap();
+        let config = LinksConfig {
+            entities: vec![],
+            links: vec![],
+            validation_rules: None,
+            events: None,
+            sinks: None,
+            auth: None,
+        };
+        let mut registry = EntityRegistry::new();
+        registry.register(Box::new(Stub("invoice", "invoices")));
+        let host = ServerHost::from_builder_components(
+            Arc::new(InMemoryLinkService::new()),
+            config,
+            registry,
+            HashMap::new(),
+            HashMap::new(),
+        )
+        .unwrap()
+        .with_descriptors(set);
+        Authorization::new(
+            host.config.clone(),
+            &host.entity_registry,
+            host.resolver_registry.clone(),
+        )
+        .with_catalog(host.catalog.clone())
+        .with_module_guard(Arc::new(
+            crate::core::auth::module_guard::ModuleGuard::from_grants(grants),
+        ))
+    }
+
+    fn with_scopes(scopes: &[&str]) -> AuthContext {
+        AuthContext::User {
+            user_id: uuid::Uuid::from_u128(1),
+            tenant_id: uuid::Uuid::from_u128(2),
+            roles: vec![],
+            scopes: scopes.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn rest_requires_the_module_permission_in_addition_to_the_callers() {
+        use crate::descriptor::perm::{ModuleGrants, permission_codes};
+        let path = format!("/invoices/{}", uuid::Uuid::from_u128(9));
+        let meta = crate::core::auth::RequestMeta::default();
+        let caller = with_scopes(&["billing.invoice.read"]);
+
+        // Both hold it: allowed.
+        let ok = billing_authz(ModuleGrants::new().allow("billing", "billing.invoice.read"));
+        assert!(allowed(&ok, Method::GET, &path, &caller));
+
+        // Authorized caller, module without the grant: refused with the MODULE's code.
+        let none = billing_authz(ModuleGrants::new());
+        let (decision, err) = none.decide_traced(&Method::GET, &path, &caller, &meta);
+        assert!(matches!(decision, Decision::Deny { .. }), "{decision:?}");
+        let err = err.expect("the module refusal is named");
+        assert_eq!(err.code.as_str(), permission_codes::MODULE_FORBIDDEN);
+        assert_eq!(err.params["module"], "billing");
+        assert_eq!(err.params["permission"], "billing.invoice.read");
+        assert!(err.params["caller"].as_str().unwrap().starts_with("user:"));
+        assert!(
+            err.params["resource"]
+                .as_str()
+                .unwrap()
+                .ends_with(&uuid::Uuid::from_u128(9).to_string())
+        );
+
+        // Module holds it, caller does not: refused, and NOT as a module refusal.
+        let (decision, err) = ok.decide_traced(&Method::GET, &path, &with_scopes(&[]), &meta);
+        match decision {
+            Decision::Deny { reason, .. } => assert!(reason.contains("billing"), "{reason}"),
+            other => panic!("{other:?}"),
+        }
+        assert!(err.is_none());
+    }
+
+    #[tokio::test]
+    async fn the_module_refusal_is_a_named_403_over_http() {
+        use crate::descriptor::perm::{ModuleGrants, permission_codes};
+        use axum::body::Body;
+        use tower::ServiceExt;
+        let authz = billing_authz(ModuleGrants::new());
+        let caller = with_scopes(&["billing.invoice.read"]);
+        let app = axum::Router::new()
+            .route("/invoices/{id}", axum::routing::get(|| async { "ok" }))
+            .layer(axum::middleware::from_fn_with_state(
+                authz,
+                authorization_middleware,
+            ))
+            .layer(axum::middleware::from_fn(
+                move |mut req: axum::extract::Request, next: axum::middleware::Next| {
+                    let caller = caller.clone();
+                    async move {
+                        req.extensions_mut().insert(caller);
+                        next.run(req).await
+                    }
+                },
+            ));
+        let res = app
+            .oneshot(
+                axum::http::Request::get(format!("/invoices/{}", uuid::Uuid::from_u128(9)))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::FORBIDDEN);
+        assert_eq!(
+            res.headers().get("x-this-error").unwrap(),
+            permission_codes::MODULE_FORBIDDEN
+        );
+        let body = axum::body::to_bytes(res.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["params"]["module"], "billing");
+        assert_eq!(body["params"]["permission"], "billing.invoice.read");
     }
 }
