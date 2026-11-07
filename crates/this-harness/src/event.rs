@@ -112,6 +112,21 @@ pub enum Event {
         /// De combien, en jetons estimés.
         excess: usize,
     },
+    /// Des messages anciens ont été **résumés** au lieu d'être jetés : un seul
+    /// message les remplace dans le fil (et dans le transcript du harnais).
+    ///
+    /// Distinct de [`Event::Trimmed`] parce que ce n'est pas le même oubli : ici
+    /// l'essentiel est gardé, sous forme de résumé écrit par le compacteur — donc
+    /// résumé *avec perte*, et à lire comme tel. Additif : un client qui ne connaît
+    /// pas ce type l'ignore.
+    Compacted {
+        /// Messages anciens remplacés par le résumé.
+        messages: usize,
+        /// Jetons estimés de ce qui a été remplacé.
+        tokens: usize,
+        /// Jetons estimés du résumé qui le remplace (toujours ≤ `tokens`).
+        summary_tokens: usize,
+    },
     /// Le run s'est arrêté, et il dit pourquoi.
     Stopped {
         stop: Stop,
@@ -172,6 +187,7 @@ impl Event {
             Self::ToolResult { .. } => "tool_result",
             Self::Spoke { .. } => "spoke",
             Self::Trimmed { .. } => "trimmed",
+            Self::Compacted { .. } => "compacted",
             Self::Stopped { .. } => "stopped",
         }
     }

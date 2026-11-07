@@ -23,6 +23,10 @@ this-vfs = { version = "0.0.1", path = "crates/this-vfs" }
 # Le modèle du harness (pur) : nécessaire seulement pour l'écrire dans le
 # graphe, donc activé par la feature `obrain` avec le backend.
 this-agent = { version = "0.0.1", path = "crates/this-agent", optional = true }
+# Le port d'enregistrement du harnais (`this_harness::Recorder`) : le serveur
+# l'implémente au-dessus de `HarnessGraph`. Gaté derrière `obrain` comme
+# `this-agent` — sans magasin, rien à enregistrer.
+this-harness = { version = "0.0.1", path = "crates/this-harness", optional = true }
 # Atomic publication of the host catalog snapshot (readers never lock).
 arc-swap = "1"
 # Async runtime
@@ -202,7 +206,7 @@ oidc = ["dep:jsonwebtoken", "dep:reqwest"]
 # confiance par hôte. Sans cette feature, un module stocké n'a que l'intégrité
 # (etags) — pas l'authentification.
 module-signing = ["dep:ed25519-dalek", "dep:base64"]
-obrain = ["dep:obrain-engine", "dep:obrain-common", "dep:obrain-core", "dep:obrain-substrate", "dep:obrain-adapters", "dep:obrain-reactive", "dep:this-agent"]
+obrain = ["dep:obrain-engine", "dep:obrain-common", "dep:obrain-core", "dep:obrain-substrate", "dep:obrain-adapters", "dep:obrain-reactive", "dep:this-agent", "dep:this-harness"]
 # Alias conservé pour compatibilité, mais le relief cognitif n'est PAS branché :
 # `core::events::CognitiveSignal` est un vocabulaire propre à this-rs, et le
 # moteur cognitif d'obrain (`obrain-cognitive`) n'est pas une dépendance.
