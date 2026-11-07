@@ -45,6 +45,17 @@ pub enum ProviderError {
     /// vision, a reference the host did not resolve, a malformed part). Refused before
     /// sending: an image is never dropped in silence.
     Images(String),
+    /// The engine answered an error status to a request that carried images, and its body
+    /// says it does not read images (llama.cpp started without `--mmproj`, a text-only
+    /// model behind an OpenAI-compatible API). Distinct from [`Self::Status`] because the
+    /// remedy is known: the same turn, without its images, has a chance to go through.
+    /// Recognized by [`crate::images::refuses_images`] only when the request carried
+    /// images; an error status on a text-only request stays a [`Self::Status`].
+    ImagesUnsupported {
+        code: u16,
+        /// What the engine said, its `error.message` when the body is OpenAI-shaped.
+        detail: String,
+    },
 }
 
 impl fmt::Display for ProviderError {
@@ -80,6 +91,10 @@ impl fmt::Display for ProviderError {
             }
             Self::Parse(reason) => write!(formatter, "réponse inattendue : {reason}"),
             Self::Images(reason) => write!(formatter, "images refusées : {reason}"),
+            Self::ImagesUnsupported { code, detail } => write!(
+                formatter,
+                "ce moteur ne lit pas les images (il a répondu {code} : {detail})"
+            ),
         }
     }
 }
@@ -136,7 +151,11 @@ impl ProviderError {
         match self {
             Self::Transport(_) => ErrorKind::Unreachable,
             Self::Timeout(_) => ErrorKind::Timeout,
-            Self::Status { code, .. } => ErrorKind::Http(*code),
+            // The engine was reached and answered an error status: a host that does not
+            // know the variant still sees what happened on the wire.
+            Self::Status { code, .. } | Self::ImagesUnsupported { code, .. } => {
+                ErrorKind::Http(*code)
+            }
             Self::StreamCut => ErrorKind::Truncated,
             Self::Parse(_) => ErrorKind::Unreadable,
             Self::Config(_)
