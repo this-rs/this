@@ -53,7 +53,7 @@ fn poisoned() -> VfsError {
 
 /// Shape rule shared by the backends that store a flat path -> file map: a file cannot
 /// replace a directory (some file below it) nor live below a file.
-pub(crate) fn check_shape<'a>(
+pub fn check_shape<'a>(
     path: &VfsPath,
     mut existing: impl Iterator<Item = &'a VfsPath>,
 ) -> Result<(), VfsError> {
@@ -67,7 +67,7 @@ pub(crate) fn check_shape<'a>(
 }
 
 /// Immediate children of `dir` from a flat file map (directories are implicit).
-pub(crate) fn list_flat<'a>(
+pub fn list_flat<'a>(
     dir: &VfsPath,
     files: impl Iterator<Item = (&'a VfsPath, &'a VfsMeta)>,
 ) -> Vec<VfsEntry> {
