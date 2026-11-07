@@ -60,7 +60,9 @@ mod wire;
 
 pub use context::{Dropped, Fitted, Removal, estimate_tokens, fit, removable};
 pub use event::{Event, HintKind, Outcome, Pending, Snapshot};
-pub use ports::{Cancel, Compactor, Delta, Toolbox, Toolboxes, Transport};
+pub use ports::{
+    Cancel, Compactor, Delta, Recorder, Recorders, Toolbox, Toolboxes, Transport,
+};
 pub use session::{
     CONTEXT_BUDGET, Clock, Handle, Harness, INTERRUPT_GRACE_MS, KEEP_ALIVE, Limits, MAX_RETRIES,
     NO_PROGRESS_MS, RETRY_BACKOFF_MS, Running, SILENCE_MS, Shared, Sleep, SystemClock,

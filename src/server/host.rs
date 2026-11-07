@@ -611,6 +611,17 @@ impl ServerHost {
         }
     }
 
+    /// L'enregistreur **vivant** du harness : chaque étape dès qu'elle est
+    /// mesurée, la fin dès qu'elle est sue.
+    ///
+    /// `None` sans store : rien n'est enregistré, rien ne casse — le même
+    /// caractère facultatif que [`ServerHost::harness_journal`]. Le masque des
+    /// secrets est celui du journal, posé au même endroit.
+    #[cfg(feature = "obrain")]
+    pub fn harness_recorder(&self) -> Option<HostRecorder> {
+        self.harness_journal().map(HostRecorder::new)
+    }
+
     /// Attach an identity registry — how entities are named across engines.
     ///
     /// ```rust,ignore
@@ -802,6 +813,41 @@ impl ServerHost {
     /// upstream, en-têtes) et l'exploitant relit puis applique.
     pub fn caddyfile(&self) -> Option<String> {
         self.security.caddyfile()
+    }
+}
+
+/// Un [`this_harness::Recorder`] qui écrit dans le journal obrain de l'hôte.
+///
+/// C'est l'autre bout du port d'enregistrement : le harnais pousse des étapes
+/// sans rien savoir d'obrain, et cet objet les écrit. Le caractère facultatif
+/// est porté par [`ServerHost::harness_recorder`] (`None` sans magasin) ; ici,
+/// un journal existe toujours — et un échec d'écriture est avalé, jamais une
+/// panique, pour que le run continue.
+#[cfg(feature = "obrain")]
+pub struct HostRecorder(crate::storage::HarnessGraph);
+
+#[cfg(feature = "obrain")]
+impl HostRecorder {
+    /// Un enregistreur sur un journal.
+    pub fn new(journal: crate::storage::HarnessGraph) -> Self {
+        Self(journal)
+    }
+}
+
+#[cfg(feature = "obrain")]
+#[async_trait::async_trait(?Send)]
+impl this_harness::Recorder for HostRecorder {
+    async fn step(&self, run_id: &str, run: &this_agent::Run, step: &this_agent::Step) {
+        // Un échec d'écriture n'arrête pas le run : le harnais n'attend rien,
+        // l'hôte avale son erreur (le trait ne rend rien, c'est le contrat).
+        let _ = self.0.append_step_live(run, run_id, step);
+    }
+
+    async fn stopped(&self, run_id: &str, run: &this_agent::Run, _stop: &this_agent::Stop) {
+        // `run.stop` vaut déjà `stop` (la boucle a appelé `Run::finish`) :
+        // `record_run` fige la fin ; réécrire les étapes déjà posées est un
+        // no-op (upsert + arête réutilisée).
+        let _ = self.0.record_run(run, run_id);
     }
 }
 

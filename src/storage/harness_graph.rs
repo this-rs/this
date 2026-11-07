@@ -242,18 +242,23 @@ impl HarnessGraph {
         );
     }
 
-    /// Écrit un run **entier** : son nœud et toutes ses étapes, en un commit.
-    pub fn record_run(&self, run: &Run, run_id: &str) -> Result<()> {
-        self.writable()?;
+    /// Le nœud de tête d'un run, avec le masque en vigueur (ou tel quel).
+    fn run_head_node(&self, run: &Run, run_id: &str) -> Result<Node> {
         let nodes = match &self.masque {
             Some(masque) => this_agent::graph::run_nodes_with(run, run_id, masque.as_ref()),
             None => this_agent::graph::run_nodes(run, run_id),
         }
         .map_err(anyhow::Error::msg)?;
-        let Some(head) = nodes.iter().find(|node| node.label == RUN) else {
-            return Err(anyhow!("run {run_id} : pas de nœud de tête"));
-        };
-        let head_id = self.upsert(head)?;
+        nodes
+            .into_iter()
+            .find(|node| node.label == RUN)
+            .ok_or_else(|| anyhow!("run {run_id} : pas de nœud de tête"))
+    }
+
+    /// Écrit un run **entier** : son nœud et toutes ses étapes, en un commit.
+    pub fn record_run(&self, run: &Run, run_id: &str) -> Result<()> {
+        self.writable()?;
+        let head_id = self.upsert(&self.run_head_node(run, run_id)?)?;
         for step in &run.steps {
             let step_id = self.upsert(&self.step_node(step, run_id))?;
             self.link_step(head_id, step_id, step.index);
@@ -266,6 +271,9 @@ impl HarnessGraph {
     /// C'est le chemin d'un run vivant : l'hôte voit les étapes arriver. Le
     /// nœud de run voit son `_stop` et son `_tours` mis à jour au passage, sans
     /// quoi le graphe raconterait un run éternellement « en cours ».
+    ///
+    /// Le nœud de run doit exister (`record_run` ou [`Self::append_step_live`]
+    /// d'abord) : une étape sur un run inconnu est refusée, pas inventée.
     pub fn append_step(&self, run: &Run, run_id: &str, step: &Step) -> Result<()> {
         self.writable()?;
         // Le run d'abord : une étape sur un run inconnu est refusée avant
@@ -273,6 +281,27 @@ impl HarnessGraph {
         let head_id = self
             .find(RUN, run_id)
             .ok_or_else(|| anyhow!("run {run_id} inconnu : record_run d'abord"))?;
+        self.append_step_to(head_id, run, run_id, step)
+    }
+
+    /// [`Self::append_step`], en **matérialisant** le nœud de run au premier
+    /// passage : c'est le chemin du `Recorder` vivant, qui ne connaît pas de
+    /// « run démarré » — la première étape fait exister le run.
+    ///
+    /// Un run sans aucune étape (annulé avant le premier outil) n'est donc pas
+    /// écrit par ce chemin ; `record_run` le couvre à l'arrêt.
+    pub fn append_step_live(&self, run: &Run, run_id: &str, step: &Step) -> Result<()> {
+        self.writable()?;
+        let head_id = match self.find(RUN, run_id) {
+            Some(id) => id,
+            None => self.upsert(&self.run_head_node(run, run_id)?)?,
+        };
+        self.append_step_to(head_id, run, run_id, step)
+    }
+
+    /// La part commune des deux chemins d'ajout : l'étape, son arête, puis le
+    /// nœud de run mis à jour (`_stop`, `_tours`, `_data`), en un commit.
+    fn append_step_to(&self, head_id: NodeId, run: &Run, run_id: &str, step: &Step) -> Result<()> {
         let step_id = self.upsert(&self.step_node(step, run_id))?;
         self.link_step(head_id, step_id, step.index);
         // Le nœud de run suit : `_stop`, `_tours`, et le décompte d'étapes.
