@@ -10,7 +10,10 @@ use this_llm::Completion;
 use crate::budget::{Clock, Ledger, Usage};
 use crate::config::{Pricing, ProviderConfig, ProviderId};
 use crate::error::ProviderError;
-use crate::images::{IMAGE_TOKENS_ESTIMATE, count_images, render_openai, without_images};
+use crate::images::{
+    IMAGE_TOKENS_ESTIMATE, count_images, error_message, refuses_images, render_openai,
+    without_images,
+};
 use crate::model::{ContextFit, ModelInfo, estimate_tokens, fit, parse_models};
 use crate::secret::Secret;
 
@@ -167,15 +170,29 @@ fn excerpt(text: &str) -> String {
     text.chars().take(300).collect()
 }
 
-/// Reads an answer: a non-2xx status becomes an error with a short excerpt of the body.
-async fn read_json(response: reqwest::Response) -> Result<Value, ProviderError> {
+/// The error for a non-2xx answer. A request that carried images and a body that says the
+/// engine reads none become [`ProviderError::ImagesUnsupported`]; anything else stays a
+/// status with a short excerpt of the body.
+fn status_error(code: u16, text: &str, images: usize) -> ProviderError {
+    if images > 0 && refuses_images(text) {
+        return ProviderError::ImagesUnsupported {
+            code,
+            detail: excerpt(&error_message(text)),
+        };
+    }
+    ProviderError::Status {
+        code,
+        excerpt: excerpt(text),
+    }
+}
+
+/// Reads an answer: a non-2xx status becomes an error (see [`status_error`]). `images` is
+/// how many images the request carried.
+async fn read_json(response: reqwest::Response, images: usize) -> Result<Value, ProviderError> {
     let status = response.status();
     let text = response.text().await.map_err(transport)?;
     if !status.is_success() {
-        return Err(ProviderError::Status {
-            code: status.as_u16(),
-            excerpt: excerpt(&text),
-        });
+        return Err(status_error(status.as_u16(), &text, images));
     }
     serde_json::from_str(&text).map_err(|error| {
         ProviderError::Parse(format!("JSON invalide : {error} ({})", excerpt(&text)))
@@ -302,7 +319,7 @@ impl ProviderClient {
             .send()
             .await
             .map_err(transport)?;
-        let body = read_json(response).await?;
+        let body = read_json(response, 0).await?;
         Ok(parse_models(&body)?)
     }
 
@@ -471,7 +488,7 @@ impl ProviderClient {
             .send()
             .await
             .map_err(transport)?;
-        let value = read_json(response).await?;
+        let value = read_json(response, count_images(&request.messages)).await?;
 
         let message = value.pointer("/choices/0/message");
         let content = message
@@ -528,10 +545,7 @@ impl ProviderClient {
         if !response.status().is_success() {
             let code = response.status().as_u16();
             let text = response.text().await.unwrap_or_default();
-            return Err(ProviderError::Status {
-                code,
-                excerpt: excerpt(&text),
-            });
+            return Err(status_error(code, &text, count_images(&request.messages)));
         }
         Ok(Turn {
             response,

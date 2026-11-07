@@ -159,6 +159,70 @@ pub fn resolve_refs(
     missing
 }
 
+/// Removes every image of the conversation; each one is replaced by `sentence` in its own
+/// message. Returns how many were removed.
+///
+/// For an engine that does not read images: the turn goes on as text, and the model is
+/// told, image by image, that something was joined that it cannot see.
+pub fn strip_images(messages: &mut Value, sentence: &str) -> usize {
+    let Some(all) = messages.as_array_mut() else {
+        return 0;
+    };
+    let mut removed = 0usize;
+    for message in all.iter_mut() {
+        let Some(count) = images_of(message).map(Vec::len) else {
+            continue;
+        };
+        for _ in 0..count {
+            mention(message, sentence);
+        }
+        removed += count;
+        if let Some(object) = message.as_object_mut() {
+            object.remove(IMAGES_KEY);
+        }
+    }
+    removed
+}
+
+/// What engines say when a request carries images and the model behind them reads none.
+///
+/// Each pattern is one seen verbatim, not guessed; matched without regard to case:
+/// - llama.cpp `llama-server` without `--mmproj`: `image input is not supported - hint: if
+///   this is unexpected, you may need to provide the mmproj` (HTTP 500), and on the
+///   `multimodal_data` path `Multimodal data provided, but model does not support
+///   multimodal requests.` Both strings read in `libllama-server-impl` of the Homebrew
+///   build 0.0.9910.
+/// - OpenAI, for a model without image input: `Invalid content type. image_url is only
+///   supported by certain models.` (HTTP 400, reported on the OpenAI community forum).
+pub const IMAGE_REFUSALS: [&str; 3] = [
+    "image input is not supported",
+    "does not support multimodal requests",
+    "image_url is only supported by certain models",
+];
+
+/// Whether an error body says that the engine does not read images.
+///
+/// Only meaningful for a request that carried images: the caller checks that first, so a
+/// text-only request that fails stays a plain status error.
+pub fn refuses_images(body: &str) -> bool {
+    let body = body.to_lowercase();
+    IMAGE_REFUSALS.iter().any(|pattern| body.contains(pattern))
+}
+
+/// The engine's own sentence in an error body: `error.message` for an OpenAI-shaped body,
+/// the body itself otherwise.
+pub(crate) fn error_message(body: &str) -> String {
+    serde_json::from_str::<Value>(body)
+        .ok()
+        .and_then(|value| {
+            value
+                .pointer("/error/message")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| body.trim().to_string())
+}
+
 /// The conversation without its image payloads, for the token estimate.
 pub(crate) fn without_images(messages: &Value) -> Value {
     let mut copy = messages.clone();
@@ -416,5 +480,47 @@ mod tests {
             { "mime": "image/png", "source": { "base64": "A".repeat(100_000) } }
         ]));
         assert!(without_images(&messages).to_string().len() < 200);
+    }
+
+    #[test]
+    fn stripping_names_each_image_and_leaves_text_only_messages() {
+        let image = json!({ "mime": "image/png", "source": { "base64": "A" } });
+        let mut messages = json!([
+            { "role": "system", "content": "brief" },
+            { "role": "user", "content": "un", "images": [image.clone(), image.clone()] },
+            { "role": "user", "content": "", "images": [image] },
+        ]);
+        assert_eq!(strip_images(&mut messages, "[sans image]"), 3);
+        assert_eq!(count_images(&messages), 0);
+        assert_eq!(messages[0], json!({ "role": "system", "content": "brief" }));
+        assert_eq!(
+            messages[1],
+            json!({ "role": "user", "content": "un\n[sans image]\n[sans image]" })
+        );
+        assert_eq!(
+            messages[2],
+            json!({ "role": "user", "content": "[sans image]" })
+        );
+    }
+
+    #[test]
+    fn the_known_refusals_are_recognized_and_other_errors_are_not() {
+        let llama = r#"{"error":{"code":500,"message":"image input is not supported - hint: if this is unexpected, you may need to provide the mmproj","type":"server_error"}}"#;
+        assert!(refuses_images(llama));
+        assert!(refuses_images(
+            "Multimodal data provided, but model does not support multimodal requests."
+        ));
+        assert!(refuses_images(
+            r#"{"error":{"message":"Invalid content type. image_url is only supported by certain models.","type":"invalid_request_error"}}"#
+        ));
+        assert!(!refuses_images(
+            r#"{"error":{"code":500,"message":"failed to load model","type":"server_error"}}"#
+        ));
+        assert!(!refuses_images("audio input is not supported"));
+        assert_eq!(
+            error_message(llama),
+            "image input is not supported - hint: if this is unexpected, you may need to provide the mmproj"
+        );
+        assert_eq!(error_message(" brut "), "brut");
     }
 }

@@ -29,7 +29,8 @@ fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
         .position(|window| window == needle)
 }
 
-async fn engine(listener: TcpListener, posted: Posted) {
+/// `failure`: when set, every `POST` is answered `500` with this body.
+async fn engine(listener: TcpListener, posted: Posted, failure: Option<&'static str>) {
     loop {
         let Ok((mut socket, _)) = listener.accept().await else {
             return;
@@ -58,22 +59,28 @@ async fn engine(listener: TcpListener, posted: Posted) {
                     }
                 }
             }
+            let mut status = "200 OK";
             let answer = if raw.starts_with(b"GET /v1/models") {
-                json!({"data": [{"id": "vision-test", "max_model_len": 8192}]})
+                json!({"data": [{"id": "vision-test", "max_model_len": 8192}]}).to_string()
             } else {
                 if let Some(at) = body_at
                     && let Ok(body) = serde_json::from_slice::<Value>(&raw[at..])
                 {
                     posted.lock().unwrap().push(body);
                 }
-                json!({
+                if let Some(failure) = failure {
+                    status = "500 Internal Server Error";
+                    failure.to_string()
+                } else {
+                    json!({
                     "choices": [{"message": {"role": "assistant", "content": "vu"}, "finish_reason": "stop"}],
                     "usage": {"prompt_tokens": 10, "completion_tokens": 1}
                 })
-            }
-            .to_string();
+                .to_string()
+                }
+            };
             let response = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{answer}",
+                "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{answer}",
                 answer.len()
             );
             let _ = socket.write_all(response.as_bytes()).await;
@@ -83,10 +90,17 @@ async fn engine(listener: TcpListener, posted: Posted) {
 }
 
 async fn start(vision: Option<bool>) -> (Hub, ProviderId, Posted) {
+    start_with(vision, None).await
+}
+
+async fn start_with(
+    vision: Option<bool>,
+    failure: Option<&'static str>,
+) -> (Hub, ProviderId, Posted) {
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("port libre");
     let address = listener.local_addr().expect("adresse locale");
     let posted: Posted = Arc::default();
-    tokio::spawn(engine(listener, posted.clone()));
+    tokio::spawn(engine(listener, posted.clone(), failure));
     let id = ProviderId::new("local").unwrap();
     let mut config = ProviderConfig::new(
         id.clone(),
@@ -186,4 +200,75 @@ async fn an_unresolved_reference_refuses_and_nothing_is_posted() {
         .expect("refus");
     assert!(error.to_string().contains("non résolue"), "{error}");
     assert!(posted.lock().unwrap().is_empty());
+}
+
+/// The body llama-server (started without `--mmproj`) answered on 07/11/2026, verbatim.
+const LLAMA_NO_MMPROJ: &str = r#"{"error":{"code":500,"message":"image input is not supported - hint: if this is unexpected, you may need to provide the mmproj","type":"server_error"}}"#;
+
+#[tokio::test]
+async fn an_engine_that_refuses_images_answers_a_typed_error_streamed_or_not() {
+    let (hub, id, posted) = start_with(None, Some(LLAMA_NO_MMPROJ)).await;
+    let client = hub.client(&id).unwrap();
+    let streamed = client
+        .open_turn(TurnRequest::new(with_image(json!({ "base64": "AAAA" }))))
+        .await
+        .err()
+        .expect("refus du moteur");
+    let whole = client
+        .send_turn(TurnRequest::new(with_image(json!({ "base64": "AAAA" }))))
+        .await
+        .unwrap_err();
+    for error in [streamed, whole] {
+        match &error {
+            ProviderError::ImagesUnsupported { code, detail } => {
+                assert_eq!(*code, 500);
+                assert!(
+                    detail.starts_with("image input is not supported"),
+                    "{detail}"
+                );
+            }
+            other => panic!("attendu ImagesUnsupported, reçu {other:?}"),
+        }
+        assert_eq!(error.kind().code(), "http");
+        assert_eq!(error.kind().status(), Some(500));
+    }
+    // The images did leave: the refusal is the engine's, not a guess made before sending.
+    assert_eq!(posted.lock().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn the_same_body_on_a_text_only_request_stays_a_plain_status() {
+    let (hub, id, _posted) = start_with(None, Some(LLAMA_NO_MMPROJ)).await;
+    let messages = json!([{ "role": "user", "content": "bonjour" }]);
+    let error = hub
+        .client(&id)
+        .unwrap()
+        .open_turn(TurnRequest::new(messages))
+        .await
+        .err()
+        .expect("500");
+    match error {
+        ProviderError::Status { code, excerpt } => {
+            assert_eq!(code, 500);
+            assert_eq!(excerpt, LLAMA_NO_MMPROJ);
+        }
+        other => panic!("attendu Status, reçu {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn another_500_with_images_stays_a_plain_status() {
+    const OTHER: &str =
+        r#"{"error":{"code":500,"message":"failed to decode","type":"server_error"}}"#;
+    let (hub, id, _posted) = start_with(None, Some(OTHER)).await;
+    let error = hub
+        .client(&id)
+        .unwrap()
+        .send_turn(TurnRequest::new(with_image(json!({ "base64": "AAAA" }))))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(error, ProviderError::Status { code: 500, .. }),
+        "{error:?}"
+    );
 }
