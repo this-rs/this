@@ -52,11 +52,13 @@
 //! handle.interrupt();                               // ou arrêté, et dit
 //! ```
 
+mod context;
 mod event;
 mod ports;
 mod session;
 mod wire;
 
+pub use context::{Dropped, Fitted, estimate_tokens, fit};
 pub use event::{Event, HintKind, Outcome, Pending, Snapshot};
 pub use ports::{Cancel, Delta, Toolbox, Toolboxes, Transport};
 pub use session::{
