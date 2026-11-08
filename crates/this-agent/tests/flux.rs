@@ -413,9 +413,19 @@ fn une_capacite_nulle_est_refusee() {
 // ------------------------------------------------------------- catalogue
 
 #[test]
-fn le_catalogue_ne_declare_rien_de_live_et_ses_ids_sont_uniques() {
+fn seuls_les_flux_prouves_sont_live_et_les_ids_sont_uniques() {
     let flux = catalogue();
-    assert!(flux.iter().all(|s| s.status == Status::Missing));
+    // Seuls les flux prouvés sur l'appareil sont `Live` ; tout autre `Live` est un mensonge.
+    let live: Vec<&str> = flux
+        .iter()
+        .filter(|s| s.status == Status::Live)
+        .map(|s| s.id.as_str())
+        .collect();
+    assert_eq!(live, vec!["battery.level", "orientation"]);
+    assert!(
+        flux.iter()
+            .all(|s| matches!(s.status, Status::Live | Status::Missing))
+    );
     let mut ids: Vec<&str> = flux.iter().map(|s| s.id.as_str()).collect();
     ids.sort_unstable();
     let avant = ids.len();

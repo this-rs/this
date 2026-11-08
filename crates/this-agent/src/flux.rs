@@ -309,9 +309,11 @@ impl std::fmt::Display for Refus {
     }
 }
 
-/// Le catalogue des flux, **tel qu'il est aujourd'hui** : tous `Missing`.
+/// Le catalogue des flux, **tel qu'il est aujourd'hui** : deux `Live`, le reste `Missing`.
 ///
-/// Aucun flux n'existe encore sur l'appareil. Le jour où un événement sort
+/// `orientation` et `battery.level` sont `Live` : abonnement ET livraison prouvés sur
+/// l'iPhone (journal `atelier.log` du 09/11/2026, échantillon initial reçu pour chacun). Le
+/// jour où un autre événement sort
 /// réellement de la coquille, c'est ici que le flux passe à `Live`, et nulle part
 /// ailleurs. Un flux déclaré `Live` qui n'émet rien est pire qu'un flux absent.
 pub fn catalogue() -> Vec<Stream> {
@@ -327,7 +329,7 @@ pub fn catalogue() -> Vec<Stream> {
             // source émet au changement, elle n'échantillonne pas.
             Cadence::OnChange,
             &[Ios, Ipados, Android, Macos, Windows, Linux],
-            Status::Missing,
+            Status::Live,
         ),
         Stream::new(
             "network.state",
@@ -372,7 +374,7 @@ pub fn catalogue() -> Vec<Stream> {
             ),
             Cadence::OnChange,
             &[Ios, Ipados, Android],
-            Status::Missing,
+            Status::Live,
         ),
         Stream::new(
             "location.position",

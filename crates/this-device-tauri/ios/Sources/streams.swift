@@ -12,12 +12,12 @@ import Foundation
 import Tauri
 import UIKit
 
-struct StreamStartArgs: Decodable {
+private struct SystemStreamStartArgs: Decodable {
   let stream: String
   let channel: Channel
 }
 
-struct StreamStopArgs: Decodable {
+private struct SystemStreamStopArgs: Decodable {
   let stream: String
 }
 
@@ -60,7 +60,7 @@ private func batterySample() -> JsonObject {
 extension ThisDevicePlugin {
   /// Démarre un flux (`orientation` ou `battery`). Un second départ remplace le premier.
   @objc public func streamStart(_ invoke: Invoke) {
-    guard let args = try? invoke.parseArgs(StreamStartArgs.self) else {
+    guard let args = try? invoke.parseArgs(SystemStreamStartArgs.self) else {
       invoke.resolve(["kind": "error", "code": "bad_args"])
       return
     }
@@ -79,7 +79,10 @@ extension ThisDevicePlugin {
       switch args.stream {
       case "orientation":
         UIDevice.current.beginGeneratingDeviceOrientationNotifications()
-        let send = { channel.send(["kind": "orientation", "angle": screenAngle()]) }
+        let send = {
+          let sample: JsonObject = ["kind": "orientation", "angle": screenAngle()]
+          channel.send(sample)
+        }
         observers.append(
           center.addObserver(
             forName: UIDevice.orientationDidChangeNotification, object: nil, queue: .main
@@ -109,7 +112,7 @@ extension ThisDevicePlugin {
 
   /// Arrête un flux. Arrêter un flux qui ne tourne pas n'est pas une erreur.
   @objc public func streamStop(_ invoke: Invoke) {
-    guard let args = try? invoke.parseArgs(StreamStopArgs.self) else {
+    guard let args = try? invoke.parseArgs(SystemStreamStopArgs.self) else {
       invoke.resolve(["kind": "error", "code": "bad_args"])
       return
     }
