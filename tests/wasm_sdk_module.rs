@@ -89,7 +89,10 @@ async fn post(router: axum::Router, uri: &str, body: Value) -> (StatusCode, Valu
     let bytes = axum::body::to_bytes(res.into_body(), 1 << 20)
         .await
         .unwrap();
-    (status, serde_json::from_slice(&bytes).unwrap_or(Value::Null))
+    (
+        status,
+        serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+    )
 }
 
 #[tokio::test]
@@ -160,11 +163,14 @@ async fn an_action_invoke_reaches_the_modules_operation() {
     let router = i.routes.clone().expect("the module serves routes");
 
     let (status, body) = post(router.clone(), "/taches/ops/terminer", json!({ "id": id })).await;
-    assert_eq!(status, StatusCode::OK, "the named operation answers: {body}");
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "the named operation answers: {body}"
+    );
     assert_eq!(body["fait"], true, "the module flipped the row itself");
 
-    let after = i
-        .fetchers["tache"]
+    let after = i.fetchers["tache"]
         .fetch_as_json(&id.parse().unwrap())
         .await
         .unwrap();

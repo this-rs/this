@@ -796,9 +796,26 @@ fn action_intent(
             capability,
             grant,
         },
+        Some(Action::Invoke {
+            name,
+            operation,
+            entity,
+        }) => Intent::Invoke {
+            action: name,
+            operation,
+            entity,
+            id,
+            values,
+        },
+        // Action inconnue d'une surface qui n'a pas classé : l'opération retombe sur le
+        // nom de l'action, et la ligne (si elle existe) est quand même transmise — c'est
+        // ce qui distingue « pas encore branché » de « perdu en route ».
         _ => Intent::Invoke {
             action: name.to_owned(),
+            operation: name.to_owned(),
             entity: entity.map(str::to_owned),
+            id,
+            values,
         },
     }
 }

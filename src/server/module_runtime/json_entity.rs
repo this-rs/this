@@ -142,7 +142,13 @@ impl JsonEntityService {
         } else {
             WriteOp::Create
         };
-        apply(&self.entity, op, self.writable_only(body.clone()), &self.ctx()).map(|_| ())
+        apply(
+            &self.entity,
+            op,
+            self.writable_only(body.clone()),
+            &self.ctx(),
+        )
+        .map(|_| ())
     }
 
     #[cfg(feature = "wasm-modules")]

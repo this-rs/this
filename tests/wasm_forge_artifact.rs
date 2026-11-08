@@ -95,7 +95,10 @@ async fn post(router: axum::Router, uri: &str, body: Value) -> (StatusCode, Valu
     let bytes = axum::body::to_bytes(res.into_body(), 1 << 20)
         .await
         .unwrap();
-    (status, serde_json::from_slice(&bytes).unwrap_or(Value::Null))
+    (
+        status,
+        serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+    )
 }
 
 #[tokio::test]
@@ -103,12 +106,18 @@ async fn post(router: axum::Router, uri: &str, body: Value) -> (StatusCode, Valu
 async fn the_forge_artifact_loads_and_serves_create_and_terminer() {
     if let Ok(want) = std::env::var("FORGE_WASM_SHA256") {
         use sha2::{Digest, Sha256};
-        let got: String = Sha256::digest(wasm()).iter().map(|b| format!("{b:02x}")).collect();
+        let got: String = Sha256::digest(wasm())
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
         assert_eq!(got, want, "le binaire testé est celui que la forge a signé");
         println!("sha256 = {got} (identique à la charge signée)");
     }
     let d = declared_manifest();
-    println!("module déclaré par le binaire de la forge : {}@{}", d.name, d.version);
+    println!(
+        "module déclaré par le binaire de la forge : {}@{}",
+        d.name, d.version
+    );
     let i = loaded().await;
     let created = i.creators["tache"]
         .create_from_json(json!({"titre": "  produit par la forge  "}))
@@ -122,8 +131,20 @@ async fn the_forge_artifact_loads_and_serves_create_and_terminer() {
     println!("POST /taches/ops/terminer -> {status} {body}");
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["fait"], true);
-    let after = i.fetchers["tache"].fetch_as_json(&id.parse().unwrap()).await.unwrap();
+    let after = i.fetchers["tache"]
+        .fetch_as_json(&id.parse().unwrap())
+        .await
+        .unwrap();
     assert_eq!(after["fait"], true);
-    let err = contract(i.creators["tache"].create_from_json(json!({"titre": "  "})).await.expect_err("vide"));
-    println!("titre vide refusé par le code du module : {} ({})", err.message, err.code.as_str());
+    let err = contract(
+        i.creators["tache"]
+            .create_from_json(json!({"titre": "  "}))
+            .await
+            .expect_err("vide"),
+    );
+    println!(
+        "titre vide refusé par le code du module : {} ({})",
+        err.message,
+        err.code.as_str()
+    );
 }

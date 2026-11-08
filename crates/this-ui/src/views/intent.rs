@@ -133,11 +133,22 @@ pub enum Intent {
     RequestAccess { entity: String },
     /// The person dismissed a modal.
     Dismiss { view: String },
-    /// The contract named an action this surface could not classify. A checked descriptor
-    /// cannot produce it; a host that loads descriptors without `check` can.
+    /// Une opération nommée du module (`operations` du descripteur), ou une action que
+    /// cette surface n'a pas su classer.
+    ///
+    /// C'est le SEUL intent qui atteint le code d'un module compilé. Il porte donc de quoi
+    /// l'appeler : le nom de l'opération, la ligne visée quand le bouton est sur une ligne,
+    /// et les valeurs d'un formulaire éventuel. Sans `id`, un bouton « terminer » posé sur
+    /// une ligne ne pourrait pas dire laquelle — mesuré : l'opération refusait alors faute
+    /// d'identifiant, et l'interface semblait morte.
     Invoke {
         action: String,
+        /// Nom de l'opération déclarée ; à défaut, celui de l'action.
+        operation: String,
         entity: Option<String>,
+        /// Ligne visée, quand la brique appartient à une ligne.
+        id: Option<String>,
+        values: Values,
     },
 }
 
