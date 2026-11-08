@@ -1106,54 +1106,6 @@ pub fn surface() -> Surface {
                 Status::Missing,
             ),
             Capability::new(
-                "network_state",
-                Tier::Shell,
-                "état du réseau (en ligne, type) : pas de pont",
-                None,
-                &[Ios, Ipados, Macos, Android, Windows, Linux],
-                Status::Missing,
-            ),
-            Capability::new(
-                "battery",
-                Tier::Shell,
-                "niveau et état de la batterie : pas de pont",
-                None,
-                &[Ios, Ipados, Macos, Android, Windows, Linux],
-                Status::Missing,
-            ),
-            Capability::new(
-                "screen_state",
-                Tier::Shell,
-                "luminosité et verrouillage de l'écran : pas de pont",
-                None,
-                &[Ios, Ipados, Android],
-                Status::Missing,
-            ),
-            Capability::new(
-                "device_info",
-                Tier::Shell,
-                "modèle, OS et identifiants de l'appareil : pas de pont",
-                None,
-                &[Ios, Ipados, Macos, Android, Windows, Linux],
-                Status::Missing,
-            ),
-            Capability::new(
-                "locale",
-                Tier::Shell,
-                "langue et région du système : pas de pont",
-                None,
-                &[Ios, Ipados, Macos, Android, Windows, Linux],
-                Status::Missing,
-            ),
-            Capability::new(
-                "volume",
-                Tier::Shell,
-                "volume audio du système : pas de pont",
-                None,
-                &[Ios, Ipados, Macos, Android, Windows, Linux],
-                Status::Missing,
-            ),
-            Capability::new(
                 "ar_session",
                 Tier::Shell,
                 "session de réalité augmentée (ARKit) : entitlement et pont à écrire",
@@ -1744,8 +1696,8 @@ mod couverture {
         assert_eq!(livres + attendus, carte.capabilities.len());
         // Le compte est exact, pas « au moins » : une capacité ajoutée ou retirée sans le
         // dire se voit ici, avant que la carte ne mente à l'agent.
-        assert_eq!(livres, 49, "nombre de capacités Live");
-        assert_eq!(attendus, 37, "nombre de capacités Missing");
+        assert_eq!(livres, 54, "nombre de capacités Live");
+        assert_eq!(attendus, 32, "nombre de capacités Missing");
         // Aucun identifiant en double : un module ne doit jamais hésiter entre deux entrées.
         let mut vus = std::collections::BTreeSet::new();
         for capacite in &carte.capabilities {
