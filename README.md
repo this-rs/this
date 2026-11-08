@@ -816,6 +816,7 @@ cd crates/this-client-web && cargo check --target wasm32-unknown-unknown
 - **[Link Authorization](docs/guides/LINK_AUTHORIZATION.md)** - Securing relationships
 
 ### 🏗️ Architecture
+- **[Modules & harness](docs/modules-et-harnais.md)** - 🆕 what a module can extend today (pages, views, tools…) and what it cannot
 - **[Device bridge](docs/appareil.md)** - 🆕 76 device methods (camera, Bluetooth, contacts, NFC…) behind one consent gate, and the card the agent reads
 - **[Architecture](docs/architecture/ARCHITECTURE.md)** - Technical deep dive
 - **[ServerBuilder](docs/architecture/SERVER_BUILDER_IMPLEMENTATION.md)** - Auto-routing details
