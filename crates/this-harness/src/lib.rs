@@ -56,6 +56,7 @@ mod context;
 mod event;
 mod mcp;
 mod ports;
+mod recall;
 mod search;
 mod session;
 mod wire;
@@ -64,6 +65,7 @@ pub use context::{Dropped, Fitted, Removal, estimate_tokens, fit, removable};
 pub use event::{Event, HintKind, Outcome, Pending, Snapshot};
 pub use mcp::{McpLink, McpServer, McpToolbox};
 pub use ports::{Cancel, Compactor, Delta, Recorder, Recorders, Toolbox, Toolboxes, Transport};
+pub use recall::{Anchors, Citation, Fact, Recall, anchors, rappel};
 pub use search::{SearchHit, SearchLink, SearchToolbox};
 pub use session::{
     CONTEXT_BUDGET, Clock, Handle, Harness, INTERRUPT_GRACE_MS, KEEP_ALIVE, Limits, MAX_RETRIES,
