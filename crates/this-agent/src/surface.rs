@@ -252,12 +252,100 @@ impl Surface {
 
     /// La carte telle que l'agent la lit sur une plateforme donnée : filtrée, et préfixée du
     /// nom de l'appareil, pour que « disponible » veuille dire « disponible ICI ».
+    /// Ajoute les entrées d'un hôte à la carte.
+    ///
+    /// `this-agent` décrit ce que le HARNAIS fournit (le tour d'outils : modules, graphe,
+    /// mémoire, rangées, modèle). Ce qu'une coquille fournit en plus — sa fenêtre, son bac, ses
+    /// notifications, son pont d'appareil — ne regarde qu'elle : c'est à l'hôte de le déclarer
+    /// au lieu de le voir écrit en dur dans le framework.
+    ///
+    /// Une entrée de l'hôte portant un identifiant déjà présent **remplace** celle du framework :
+    /// l'hôte sait mieux que le framework ce que sa coquille expose. Les emplacements se
+    /// fusionnent de la même façon.
+    pub fn with_host_entries(&self, host: Surface) -> Surface {
+        let mut surface = self.clone();
+        for entree in host.capabilities {
+            match surface
+                .capabilities
+                .iter_mut()
+                .find(|existante| existante.id == entree.id)
+            {
+                Some(existante) => *existante = entree,
+                None => surface.capabilities.push(entree),
+            }
+        }
+        for emplacement in host.slots {
+            match surface
+                .slots
+                .iter_mut()
+                .find(|existant| existant.id == emplacement.id)
+            {
+                Some(existant) => *existant = emplacement,
+                None => surface.slots.push(emplacement),
+            }
+        }
+        surface
+    }
+
+    /// La carte telle que CE build la peut : les entrées déclarées indisponibles passent en
+    /// `Missing`, et leur titre porte la raison.
+    ///
+    /// Un identifiant inconnu est ignoré : un hôte qui déclare un manque sur une entrée
+    /// supprimée depuis ne doit pas faire tomber la carte.
+    pub fn with_limits(&self, limits: &HostLimits) -> Surface {
+        let mut surface = self.clone();
+        for entree in surface.capabilities.iter_mut() {
+            if let Some((_, raison)) = limits.entries().iter().find(|(id, _)| *id == entree.id) {
+                entree.status = Status::Missing;
+                entree.title = format!("{} — indisponible sur ce build : {raison}", entree.title);
+            }
+        }
+        surface
+    }
+
     pub fn describe_for(&self, platform: Platform, budget_chars: usize) -> String {
         format!(
             "Plateforme : {}\n{}",
             platform.as_str(),
             self.for_platform(platform).describe(budget_chars)
         )
+    }
+}
+
+/// Ce que le BUILD d'un hôte ne peut pas faire, alors que le pont, lui, sait le faire.
+///
+/// Un hôte n'est pas le pont. Il peut manquer une phrase dans son `Info.plist`, un entitlement
+/// que son profil de signature ne porte pas, ou une permission que son manifeste oublie. La
+/// carte décrit le PONT (`surface()`) ; [`Surface::with_limits`] la fait parler du BUILD.
+///
+/// Rien ici ne connaît un hôte en particulier : c'est l'hôte qui déclare ses manques, avec leur
+/// raison. Un framework ne peut pas deviner ce qu'un profil de signature contient.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct HostLimits {
+    unavailable: Vec<(String, String)>,
+}
+
+impl HostLimits {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Déclare qu'une entrée de la carte n'est pas disponible dans ce build, et pourquoi.
+    ///
+    /// La raison est montrée à l'agent : « profil de signature sans l'entitlement HealthKit »
+    /// lui dit qu'insister ne servira à rien, ce qu'un simple `not_authorized` ne dit pas.
+    pub fn unavailable(mut self, id: &str, reason: &str) -> Self {
+        self.unavailable.push((id.to_string(), reason.to_string()));
+        self
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.unavailable.is_empty()
+    }
+
+    /// Les entrées déclarées, dans l'ordre où l'hôte les a nommées.
+    pub fn entries(&self) -> &[(String, String)] {
+        &self.unavailable
     }
 }
 
@@ -464,6 +552,20 @@ pub fn surface() -> Surface {
                 Some("filesPick / filesRead / photosPick"),
                 &[Ios, Ipados, Macos, Windows, Linux, Android],
                 Status::Live,
+            ),
+            // Ce qui reste VRAI sur les autres systèmes, et qu'il faut dire plutôt que de
+            // laisser un vide : le pont natif n'existe que pour iOS, iPadOS et une partie de
+            // macOS. Sans cette entrée, la carte d'un Android ne parlait pas du tout de
+            // l'appareil — l'agent ne pouvait pas distinguer « pas de pont » de « je ne sais
+            // pas », et la seule réponse honnête (« il n'y a pas de pont ici ») n'était écrite
+            // nulle part.
+            Capability::new(
+                "device",
+                Tier::Native,
+                "appareil : aucun pont natif sur cette plateforme — les capacités d'appareil existent sur iOS/iPadOS et, en partie, sur macOS",
+                None,
+                &[Android, Windows, Linux, Web],
+                Status::Missing,
             ),
             // ---- étage coquille : l'appareil
             //
@@ -926,6 +1028,105 @@ mod tests {
     }
 
     #[test]
+    fn un_hote_peut_declarer_ce_que_son_build_ne_peut_pas() {
+        // Le pont sait lire la santé ; le BUILD peut ne pas avoir l'entitlement HealthKit. La
+        // carte doit dire lequel des deux ment — et le dire à l'agent, pas seulement au
+        // développeur : « indisponible sur ce build : <raison> ».
+        let limites = HostLimits::new()
+            .unavailable(
+                "device.health",
+                "profil de signature sans l'entitlement HealthKit",
+            )
+            .unavailable("device.nfc", "profil de signature sans l'entitlement NFC")
+            // Un identifiant qui n'existe pas ne doit rien casser.
+            .unavailable("device.teleport", "n'existe pas");
+        assert!(!limites.is_empty());
+        assert_eq!(limites.entries().len(), 3);
+
+        let bridee = surface().with_limits(&limites);
+        let sante = bridee.capability("device.health").unwrap();
+        assert_eq!(sante.status, Status::Missing);
+        assert!(
+            sante.title.contains("indisponible sur ce build"),
+            "{}",
+            sante.title
+        );
+        assert!(sante.title.contains("HealthKit"), "{}", sante.title);
+
+        // Ce qui n'est pas déclaré ne bouge pas.
+        let bluetooth = bridee.capability("device.bluetooth").unwrap();
+        assert_eq!(bluetooth.status, Status::Live);
+        assert!(!bluetooth.title.contains("indisponible"));
+
+        // Et la carte d'origine n'est pas modifiée : `with_limits` rend une copie.
+        assert_eq!(
+            surface().capability("device.health").unwrap().status,
+            Status::Live
+        );
+
+        // Le rendu d'un appareil porte la raison.
+        let texte = bridee.describe_for(Platform::Ios, usize::MAX);
+        assert!(texte.contains("indisponible sur ce build"), "{texte}");
+    }
+
+    #[test]
+    fn un_hote_ajoute_ses_propres_entrees_sans_toucher_au_framework() {
+        // Une coquille sait des choses que le cadre ignore (son bac, sa fenêtre). Elle les
+        // déclare, et le framework n'a pas à les connaître.
+        let hote = Surface {
+            capabilities: vec![
+                Capability::new(
+                    "pastebin",
+                    Tier::Shell,
+                    "le presse-papiers de cet hôte",
+                    Some("paste_read / paste_write"),
+                    &[Platform::Macos],
+                    Status::Live,
+                ),
+                // Un identifiant déjà connu : l'hôte REMPLACE l'entrée du framework.
+                Capability::new(
+                    "ui.render",
+                    Tier::Webview,
+                    "le rendu de cet hôte (le sien, pas celui du framework)",
+                    Some("screen_show"),
+                    &[Platform::Web],
+                    Status::Live,
+                ),
+            ],
+            slots: Vec::new(),
+        };
+        let fusion = surface().with_host_entries(hote);
+        assert!(fusion.capability("pastebin").is_some());
+        let rendu = fusion.capability("ui.render").unwrap();
+        assert_eq!(rendu.command.as_deref(), Some("screen_show"));
+        assert_ne!(
+            surface()
+                .capability("ui.render")
+                .unwrap()
+                .command
+                .as_deref(),
+            Some("screen_show")
+        );
+        // Le reste de la carte est intact.
+        assert_eq!(
+            fusion.capability("device.bluetooth").unwrap().status,
+            Status::Live
+        );
+        // Et la carte du framework n'a pas bougé.
+        assert!(surface().capability("pastebin").is_none());
+    }
+
+    #[test]
+    fn sans_limite_la_carte_est_celle_du_pont() {
+        let aucune = HostLimits::new();
+        assert!(aucune.is_empty());
+        assert_eq!(
+            surface().with_limits(&aucune).capabilities,
+            surface().capabilities
+        );
+    }
+
+    #[test]
     fn la_carte_d_un_appareil_tient_dans_le_budget_annonce() {
         // Une carte plus longue que le budget est tronquée par `describe`, et l'agent perd
         // des capacités sans le savoir dans le feu de l'action. Le budget est donc mesuré ici.
@@ -1013,6 +1214,42 @@ mod tests {
             carte.capability("device.camera.video").unwrap().status,
             Status::Live
         );
+    }
+
+    #[test]
+    fn sur_un_systeme_sans_pont_la_carte_dit_pourquoi() {
+        // Un vide n'est pas une réponse : l'agent doit pouvoir distinguer « pas de pont ici »
+        // de « je ne sais pas ». Mesuré le 08/11/2026 : la carte d'un Android ne nommait
+        // aucune capacité d'appareil, sans un mot pour dire que c'était voulu.
+        for plateforme in [
+            Platform::Android,
+            Platform::Windows,
+            Platform::Linux,
+            Platform::Web,
+        ] {
+            let texte = surface().describe_for(plateforme, usize::MAX);
+            assert!(
+                texte.contains("device\\n") || texte.contains("· device "),
+                "{:?} ne dit rien de l'appareil : {texte}",
+                plateforme
+            );
+            // Et elle ne promet AUCUNE méthode d'appareil sur ces systèmes.
+            for interdit in [
+                "device.contacts",
+                "device.bluetooth",
+                "device.camera.capture",
+            ] {
+                assert!(
+                    !texte.contains(interdit),
+                    "{:?} annonce {interdit}",
+                    plateforme
+                );
+            }
+        }
+        // iOS, lui, les annonce toutes.
+        let ios = surface().describe_for(Platform::Ios, usize::MAX);
+        assert!(ios.contains("device.bluetooth"));
+        assert!(ios.contains("device.camera.capture"));
     }
 
     #[test]
