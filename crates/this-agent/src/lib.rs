@@ -23,6 +23,7 @@
 pub mod approval;
 pub mod cite;
 pub mod evidence;
+pub mod flux;
 pub mod graph;
 pub mod masque;
 pub mod playbook;
