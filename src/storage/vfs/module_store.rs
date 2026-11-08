@@ -342,6 +342,32 @@ impl VfsModuleStore {
     }
 
     async fn manifest(&self, name: &str, version: &str) -> Result<Option<Manifest>, ContractError> {
+        let Some((path, m)) = self.manifest_unverified(name, version).await? else {
+            return Ok(None);
+        };
+        // Authentication before anything is read out of this manifest: the etags
+        // it carries become trustworthy only once the record itself is.
+        #[cfg(feature = "module-signing")]
+        self.verify_manifest(&path, &m)?;
+        Ok(Some(m))
+    }
+
+    /// Le manifeste tel qu'il est écrit, identité vérifiée mais signature NON authentifiée.
+    ///
+    /// Sert à l'INVENTAIRE (`versions`) : il doit **lister** une version héritée non signée
+    /// pour que l'hôte sache qu'elle existe et puisse la remplacer, sans jamais la servir —
+    /// `get` passe par [`Self::manifest`] et la refuse.
+    ///
+    /// Mesuré le 08/11/2026 dans l'Atelier : une seule version héritée non signée faisait
+    /// échouer la liste ENTIÈRE, et comme `put` relit les versions du module pour vérifier
+    /// la compatibilité, plus aucune version ne pouvait être rangée — le journal disait
+    /// « modules non relus — échec : this.module.unsigned », puis « MANQUE — atelier
+    /// installé en 0.7.0 n'a pas ses fichiers ».
+    async fn manifest_unverified(
+        &self,
+        name: &str,
+        version: &str,
+    ) -> Result<Option<(VfsPath, Manifest)>, ContractError> {
         let path = Self::rel(&self.version_dir(name, version)?, MANIFEST_FILE)?;
         let bytes = match self.vfs.read(&path).await {
             Ok(b) => b,
@@ -356,11 +382,7 @@ impl VfsModuleStore {
                 .with_param("expected", format!("{name}@{version}"))
                 .with_param("found", format!("{}@{}", m.name, m.version)));
         }
-        // Authentication before anything is read out of this manifest: the etags
-        // it carries become trustworthy only once the record itself is.
-        #[cfg(feature = "module-signing")]
-        self.verify_manifest(&path, &m)?;
-        Ok(Some(m))
+        Ok(Some((path, m)))
     }
 
     /// Refuse a manifest that is not signed by a trusted key, when the host
@@ -445,7 +467,17 @@ impl VfsModuleStore {
             if ModuleDescriptor::new("_", v).semver().is_none() {
                 continue; // `_yanked` and anything that is not a version
             }
-            if let Some(m) = self.manifest(name, v).await? {
+            // Une version rangée AVANT que l'hôte ne déclare une ancre n'a pas de
+            // signature. `get` doit continuer à la refuser — rien de non signé n'est
+            // jamais servi —, mais l'INVENTAIRE ne peut pas échouer pour autant : `put`
+            // relit les versions du module pour vérifier la compatibilité, donc une seule
+            // version héritée rendait le module IMPOSSIBLE À RÉÉCRIRE. Mesuré le
+            // 08/11/2026 dans l'Atelier : « modules non relus — échec :
+            // this.module.unsigned », puis « MANQUE — atelier installé en 0.7.0 n'a pas
+            // ses fichiers ». On saute donc la version NON SIGNÉE, et rien d'autre : une
+            // clé inconnue ou une signature invalide reste une erreur, parce que c'est
+            // une altération, pas une migration.
+            if let Some((_, m)) = self.manifest_unverified(name, v).await? {
                 out.push(StoredVersion {
                     version: v.to_string(),
                     yanked: yanked.contains(v),
@@ -1640,6 +1672,44 @@ mod signing_tests {
             .await
             .expect_err("unsigned must be refused");
         assert_eq!(err.code, codes::MODULE_UNSIGNED.into());
+    }
+
+    /// LE PIÈGE DE MIGRATION, mesuré le 08/11/2026 dans l'Atelier : `list()` sert à
+    /// savoir ce qui est DÉJÀ rangé avant d'écrire. Si une seule version héritée n'est pas
+    /// signée, la liste entière échoue — donc l'hôte ne peut plus rien ranger, et la
+    /// nouvelle version d'un module système n'arrive jamais dans le VFS. Le journal de
+    /// l'app le disait sans détour : « modules non relus — échec : this.module.unsigned »,
+    /// suivi de « MANQUE — atelier installé en 0.7.0 n'a pas ses fichiers ».
+    #[tokio::test]
+    async fn a_legacy_unsigned_version_stays_visible_and_writable() {
+        let vfs = Arc::new(InMemoryVfs::new());
+        VfsModuleStore::new(vfs.clone())
+            .put(&descriptor(), &[])
+            .await
+            .expect("put unsigned, avant l'ancre");
+
+        let reader =
+            VfsModuleStore::new(vfs.clone()).with_trust_anchor(anchor_trusting(&signing_key()));
+        let versions = reader
+            .list()
+            .await
+            .expect("l'inventaire doit survivre à une version héritée non signée");
+        assert_eq!(versions.len(), 1, "elle reste VISIBLE : {versions:?}");
+        assert_eq!(versions[0].0, "billing");
+        // Ce qui NE change pas : la version non signée n'est jamais chargée.
+        let err = reader
+            .get("billing", None)
+            .await
+            .expect_err("get refuse toujours une version non signée");
+        assert_eq!(err.code, codes::MODULE_UNSIGNED.into());
+
+        // Et la conséquence qui comptait : le module redevient ÉCRIVABLE, signé par la
+        // clé de l'appareil, malgré la version héritée à côté.
+        let writer = VfsModuleStore::new(vfs).with_signing_key("device", signing_key());
+        writer
+            .put(&descriptor(), &[])
+            .await
+            .expect("une nouvelle version signée doit pouvoir être rangée");
     }
 
     /// The anchor does not know the *key id* at all: a signer it never heard of.
