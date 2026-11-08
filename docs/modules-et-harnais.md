@@ -11,8 +11,8 @@ Mesuré le 08/11/2026.
 | Point d'extension | État | Preuve |
 |---|---|---|
 | **Pages** (surface `main`) | ✅ | `atelier/src/ecran.rs` — `Portfolio::at(Surface::Main)` |
-| **Vues** (`header`, `panel`) | ✅ (livré ce jour) | `ecran.rs` : même moteur de briques, seule la place change |
-| **Menus** (surface `sidebar`) | ⚠️ **liste seulement** | `atelier/src/lib.rs::vues_laterales` saute toute vue dont la racine n'est pas `Leaf{List}` |
+| **Vues** (`header`, `panel`) | ❌ **faux jusqu'ici** | MESURÉ : `grep "Surface::Header\|Surface::Panel" atelier/src/*.rs` ne rend **rien**. Le contrat les exprime, l'Atelier ne les dessine pas — le brief du modèle a donc raison d'écrire « ne déclare jamais header ni panel » |
+| **Menus** (surface `sidebar`) | ✅ liste + vue dessinée | `vues_laterales_riches` (atelier#13) envoie au moteur complet tout ce qui n'est pas `Leaf{List}` ; la règle sort dans `choisir_vues_riches` pour être testée, et le brief le dit au modèle (atelier#14) |
 | **Composants** (17 briques, 6 conteneurs) | ✅ | `this-ui/src/views/render.rs` rend les 17 |
 | **Outils** (les programmes d'un module deviennent des outils nommés) | ✅ | `atelier/src/harness.rs::outils_des_modules` |
 | **Parler dans le fil** (`Intent::Send`) | ✅ (livré ce jour) | `atelier/src/ecran.rs::poster` — un message `role: "module"`, attribué, borné à 4000 caractères |
