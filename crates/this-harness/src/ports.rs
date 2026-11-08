@@ -5,7 +5,9 @@
 //! fois — dans une page et dans une coquille native, par exemple.
 
 use std::cell::Cell;
+use std::cell::RefCell;
 use std::rc::Rc;
+use this_agent::cite::SeenLedger;
 
 use async_trait::async_trait;
 
@@ -87,6 +89,20 @@ pub trait Toolbox {
     /// (`install_module`, `row_create`, `remember`…), comme avant.
     fn declarations(&self) -> Vec<Declaration> {
         Vec::new()
+    }
+
+    /// Le registre des ids que cet outillage a fait PARAÎTRE.
+    ///
+    /// Le contexte du tour s'en sert pour que les ids qu'il montre au modèle
+    /// comptent comme lus. Sans ce partage, le contexte et les outils tiennent
+    /// deux comptes séparés : une citation vérifiée par l'un est « jamais
+    /// parue » pour l'autre, et la preuve se contredit elle-même.
+    ///
+    /// Par défaut `None` : un outillage qui ne tient pas de registre n'en
+    /// partage pas. Une implémentation qui en tient un doit rendre LE SIEN,
+    /// pas une copie — c'est le partage qui fait la garantie.
+    fn vus(&self) -> Option<Rc<RefCell<SeenLedger>>> {
+        None
     }
 
     /// Exécute un appel et rend ce que le modèle lira, plus l'observation.
@@ -320,5 +336,76 @@ impl Recorder for Recorders {
         for part in &self.parts {
             part.stopped(run_id, run, stop).await;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests_vus {
+    use super::*;
+    use crate::wire::{ToolCall, ToolSpec};
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    /// Un outillage qui ne tient aucun registre — le cas de l'immense majorité.
+    struct SansRegistre;
+
+    #[async_trait(?Send)]
+    impl Toolbox for SansRegistre {
+        fn specs(&self) -> Vec<ToolSpec> {
+            Vec::new()
+        }
+        async fn call(&self, _call: &ToolCall) -> Outcome {
+            Outcome::failed("aucun outil", "outillage de test")
+        }
+    }
+
+    /// Un outillage qui tient le sien.
+    struct AvecRegistre(Rc<RefCell<SeenLedger>>);
+
+    #[async_trait(?Send)]
+    impl Toolbox for AvecRegistre {
+        fn specs(&self) -> Vec<ToolSpec> {
+            Vec::new()
+        }
+        fn vus(&self) -> Option<Rc<RefCell<SeenLedger>>> {
+            Some(Rc::clone(&self.0))
+        }
+        async fn call(&self, _call: &ToolCall) -> Outcome {
+            Outcome::failed("aucun outil", "outillage de test")
+        }
+    }
+
+    #[test]
+    fn le_registre_se_partage_quand_l_outillage_en_tient_un() {
+        assert!(
+            SansRegistre.vus().is_none(),
+            "par défaut, aucun registre n'est partagé : une implémentation muette ne casse rien"
+        );
+        let mien = Rc::new(RefCell::new(SeenLedger::new()));
+        let partage = AvecRegistre(Rc::clone(&mien))
+            .vus()
+            .expect("cet outillage en tient un");
+        assert!(
+            Rc::ptr_eq(&partage, &mien),
+            "c'est LE registre de l'outillage, pas une copie : le partage fait la garantie"
+        );
+
+        // Les deux outillages de test traversent aussi leur `call` : ces lignes-là
+        // sont du code ajouté, et un refus muet qui ne s'exécute jamais ne prouve rien.
+        let appel = ToolCall {
+            id: "1".into(),
+            name: "rien".into(),
+            arguments: serde_json::json!({}),
+        };
+        assert!(
+            futures::executor::block_on(SansRegistre.call(&appel))
+                .failed
+                .is_some()
+        );
+        assert!(
+            futures::executor::block_on(AvecRegistre(Rc::clone(&mien)).call(&appel))
+                .failed
+                .is_some()
+        );
     }
 }
