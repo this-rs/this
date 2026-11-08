@@ -793,9 +793,14 @@ fn actions() -> Vec<VariantSchema> {
                 name(),
                 req("op", "enum:AgentOp", "The operation."),
                 opt("entity", "string", "The entity it applies to.").refers("entity"),
+                opt(
+                    "text",
+                    "string",
+                    "What to ask the agent. Required for send_message: the host never writes the request itself.",
+                ),
             ],
             json!({"kind": "agent_tool", "name": "halt", "op": "stop_run"}),
-            json!({"kind": "agent_tool", "name": "say", "op": "send_message", "entity": "conversation"}),
+            json!({"kind": "agent_tool", "name": "demander", "op": "send_message", "entity": "conversation", "text": "Quels articles manquent ?"}),
         ),
         variant(
             "device_capability",
@@ -1187,6 +1192,16 @@ fn rules() -> Vec<RuleSchema> {
             "duplicate_view",
             "Two views share a name.",
             "Rename one; view names are unique in the module.",
+        ),
+        rule(
+            "action_agent_text_missing",
+            "A `send_message` action does not say what it asks.",
+            "Add `text`: the host never writes the request in the module's place.",
+        ),
+        rule(
+            "action_agent_text_unused",
+            "A `stop_run` action carries a `text` that would never be sent.",
+            "Remove `text`; only `send_message` sends something.",
         ),
         rule(
             "duplicate_action",
@@ -1620,7 +1635,7 @@ mod tests {
             r#"{"kind":"delete","name":"drop","entity":"invoice"}"#,
             r#"{"kind":"navigate","name":"go","view":"invoices"}"#,
             r#"{"kind":"agent_tool","name":"halt","op":"stop_run"}"#,
-            r#"{"kind":"agent_tool","name":"say","op":"send_message","entity":"conversation"}"#,
+            r#"{"kind":"agent_tool","name":"say","op":"send_message","entity":"conversation","text":"Quels articles manquent ?"}"#,
             r#"{"kind":"device_capability","name":"cam_ok","capability":"camera","grant":"allow"}"#,
             r#"{"kind":"device_capability","name":"mic_no","capability":"microphone","grant":"deny"}"#,
         ] {
@@ -2187,6 +2202,16 @@ mod tests {
                 with_view(leaf(
                     r#"{"type":"relation","entity":"conversation","link":"invoice_conversation","mode":"show"}"#,
                 )),
+            ),
+            (
+                "action_agent_text_missing",
+                with_action(r#"{"kind":"agent_tool","name":"demander","op":"send_message"}"#),
+            ),
+            (
+                "action_agent_text_unused",
+                with_action(
+                    r#"{"kind":"agent_tool","name":"halt","op":"stop_run","text":"arrete"}"#,
+                ),
             ),
             (
                 "field_input_invalid",

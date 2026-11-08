@@ -36,7 +36,7 @@ const MODULE: &str = r#"
     { "kind": "update", "name": "mark_paid", "entity": "invoice", "fields": ["state"] },
     { "kind": "delete", "name": "delete_invoice", "entity": "invoice" },
     { "kind": "navigate", "name": "show_detail", "view": "invoice_detail" },
-    { "kind": "agent_tool", "name": "ask", "op": "send_message", "entity": "invoice" },
+    { "kind": "agent_tool", "name": "ask", "op": "send_message", "entity": "invoice", "text": "Quelles factures sont en retard ?" },
     { "kind": "device_capability", "name": "scan", "capability": "camera", "grant": "allow" }
   ],
   "views": [

@@ -94,6 +94,8 @@ pub enum Intent {
         action: String,
         op: AgentOp,
         entity: Option<String>,
+        /// Ce que le module demande à l'agent. `None` pour un arrêt.
+        text: Option<String>,
     },
     /// A declared device capability decision.
     Capability {

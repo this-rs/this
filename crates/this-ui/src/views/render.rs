@@ -776,10 +776,16 @@ fn action_intent(
             view,
             action: Some(name),
         },
-        Some(Action::AgentTool { name, op, entity }) => Intent::Tool {
+        Some(Action::AgentTool {
+            name,
+            op,
+            entity,
+            text,
+        }) => Intent::Tool {
             action: name,
             op,
             entity,
+            text: text.clone(),
         },
         Some(Action::DeviceCapability {
             name,

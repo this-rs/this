@@ -487,11 +487,17 @@ pub enum Action {
     /// Ouvre la vue `view` de ce module.
     Navigate { name: String, view: String },
     /// Une opération d'agent : envoyer un message, arrêter un run. Liée à une entité si besoin.
+    ///
+    /// `send_message` **exige** `text` : l'hôte ne doit pas inventer la demande. Un module
+    /// qui dit seulement « envoie un message » obligerait l'hôte à écrire à la place de la
+    /// personne, et c'est ainsi qu'on fait dire à un bouton ce que personne n'a demandé.
     AgentTool {
         name: String,
         op: AgentOp,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         entity: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        text: Option<String>,
     },
     /// Autoriser ou refuser une capacité de l'appareil.
     DeviceCapability {
@@ -766,11 +772,26 @@ impl<'a> Checks<'a> {
                     self.entity_ref("action_entity_unknown", &format!("{p}.entity"), entity);
                 }
                 Action::AgentTool {
-                    entity: Some(e), ..
+                    entity, op, text, ..
                 } => {
-                    self.entity_ref("action_entity_unknown", &format!("{p}.entity"), e);
+                    if let Some(e) = entity {
+                        self.entity_ref("action_entity_unknown", &format!("{p}.entity"), e);
+                    }
+                    // La règle qui compte : l'hôte n'écrit pas à la place du module.
+                    match (op, text.as_deref().map(str::trim)) {
+                        (AgentOp::SendMessage, None | Some("")) => self.push(
+                            "action_agent_text_missing",
+                            format!("{p}.text"),
+                            "une action `send_message` doit dire ce qu'elle demande (champ `text`)",
+                        ),
+                        (AgentOp::StopRun, Some(_)) => self.push(
+                            "action_agent_text_unused",
+                            format!("{p}.text"),
+                            "`stop_run` n'envoie aucun texte : retire le champ `text`",
+                        ),
+                        _ => {}
+                    }
                 }
-                Action::AgentTool { entity: None, .. } => {}
                 Action::Navigate { view, .. } => {
                     self.view_ref("view_target_unknown", &format!("{p}.view"), view);
                 }
@@ -1776,6 +1797,57 @@ mod tests {
         assert_refused(&m, "action_entity_unknown");
     }
 
+    /// L'hôte n'écrit pas à la place du module : une demande sans texte est refusée.
+    #[test]
+    fn check_refuses_a_send_message_without_text() {
+        let mut m = module();
+        m.actions.push(Action::AgentTool {
+            name: "demander".into(),
+            op: AgentOp::SendMessage,
+            entity: None,
+            text: None,
+        });
+        assert_refused(&m, "action_agent_text_missing");
+    }
+
+    /// Un texte sur un arrêt ne ferait rien : mieux vaut le dire que l'ignorer.
+    #[test]
+    fn check_refuses_a_text_on_stop_run() {
+        let mut m = module();
+        m.actions.push(Action::AgentTool {
+            name: "halt".into(),
+            op: AgentOp::StopRun,
+            entity: None,
+            text: Some("arrête".into()),
+        });
+        assert_refused(&m, "action_agent_text_unused");
+    }
+
+    #[test]
+    fn check_accepts_a_send_message_that_says_what_it_asks() {
+        let mut m = module();
+        m.actions.push(Action::AgentTool {
+            name: "demander".into(),
+            op: AgentOp::SendMessage,
+            entity: None,
+            text: Some("Quels articles manquent ?".into()),
+        });
+        assert!(codes(&m).is_empty(), "codes : {:?}", codes(&m));
+    }
+
+    /// Un texte fait d'espaces ne dit rien non plus.
+    #[test]
+    fn check_refuses_a_blank_text() {
+        let mut m = module();
+        m.actions.push(Action::AgentTool {
+            name: "demander".into(),
+            op: AgentOp::SendMessage,
+            entity: None,
+            text: Some("   ".into()),
+        });
+        assert_refused(&m, "action_agent_text_missing");
+    }
+
     #[test]
     fn check_refuses_an_agent_op_on_an_unknown_entity() {
         let mut m = module();
@@ -1783,6 +1855,7 @@ mod tests {
             name: "halt".into(),
             op: AgentOp::StopRun,
             entity: Some("ghost".into()),
+            text: None,
         });
         assert_refused(&m, "action_entity_unknown");
     }
