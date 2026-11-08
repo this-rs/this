@@ -53,6 +53,15 @@ class ThisDevicePlugin: Plugin {
       // sélecteurs dans `Bluetooth.swift` (en extension). Sans cette référence, le dead-strip
       // les retire — c'est exactement le défaut mesuré ci-dessus sur quatre autres fichiers.
       #selector(ThisDevicePlugin.bluetoothConnect(_:)),
+      // État système : lectures passives, sans consentement. Sans ces références, le
+      // dead-strip retire le fichier `system_state.swift` entier — même défaut mesuré
+      // le 06/11 sur caméra, presse-papiers, Face ID et localisation.
+      #selector(ThisDevicePlugin.deviceInfo(_:)),
+      #selector(ThisDevicePlugin.batteryLevel(_:)),
+      #selector(ThisDevicePlugin.networkState(_:)),
+      #selector(ThisDevicePlugin.locale(_:)),
+      #selector(ThisDevicePlugin.screenState(_:)),
+      #selector(ThisDevicePlugin.volume(_:)),
     ]
     super.init()
   }

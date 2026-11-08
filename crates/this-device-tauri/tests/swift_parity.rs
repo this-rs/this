@@ -11,6 +11,7 @@
 use std::collections::BTreeSet;
 
 use serde_json::json;
+use this_device_tauri::SYSTEM_METHODS;
 use this_platform::device_bridge::{METHODS, capability_of};
 
 /// Every `@objc public func <name>` declared by the plugin's Swift sources.
@@ -52,7 +53,14 @@ fn every_native_selector_is_reachable_through_the_contract() {
         "only {} selectors found: the extraction is broken, not the sources",
         swift.len()
     );
-    let known: BTreeSet<&str> = METHODS.iter().copied().collect();
+    // Deux chemins : `METHODS` (familles consenties) et `SYSTEM_METHODS` (lectures passives
+    // d'état système, sans consentement, servies par `system_state`). Un sélecteur qui n'est
+    // dans AUCUNE des deux listes n'est joignable par rien.
+    let known: BTreeSet<&str> = METHODS
+        .iter()
+        .copied()
+        .chain(SYSTEM_METHODS.iter().copied())
+        .collect();
     let unreachable: Vec<&String> = swift
         .iter()
         .filter(|m| !known.contains(m.as_str()))
@@ -86,6 +94,11 @@ fn every_native_selector_derives_a_capability() {
         return;
     };
     for method in swift {
+        // État système : lectures passives, aucune capacité consentie — le chemin est
+        // `system_state`, pas `capability_of`. Rien à dériver ici.
+        if SYSTEM_METHODS.contains(&method.as_str()) {
+            continue;
+        }
         let args = if matches!(
             method.as_str(),
             "status" | "captureStatus" | "captureRequest" | "locationRequest"
@@ -99,4 +112,20 @@ fn every_native_selector_derives_a_capability() {
             "{method} is declared natively but maps to no capability"
         );
     }
+}
+
+#[test]
+fn every_system_method_exists_on_the_native_side() {
+    let Some(swift) = swift_methods() else {
+        eprintln!("ios/Sources not readable: parity not checked");
+        return;
+    };
+    let missing: Vec<&&str> = SYSTEM_METHODS
+        .iter()
+        .filter(|m| !swift.contains(**m as &str))
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "SYSTEM_METHODS lists selectors the native side does not declare: {missing:?}"
+    );
 }

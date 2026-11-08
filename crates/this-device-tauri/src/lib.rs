@@ -111,6 +111,58 @@ pub async fn answer<R: Runtime>(app: &AppHandle<R>, request: &Request) -> Value 
     }
 }
 
+/// Les méthodes « état système » que le pont expose SANS consentement : des lectures passives
+/// de l'appareil (modèle, batterie, réseau, langue, écran, volume). Ni permission, ni
+/// entitlement, ni donnée personnelle — c'est ce qui les distingue des familles `device.*`,
+/// qui passent par le consentement. Tout nom hors de cette liste est refusé `not_supported`.
+pub const SYSTEM_METHODS: &[&str] = &[
+    "deviceInfo",
+    "batteryLevel",
+    "networkState",
+    "locale",
+    "screenState",
+    "volume",
+];
+
+/// Une lecture d'état système, sans consentement. `method` doit être dans [`SYSTEM_METHODS`] ;
+/// tout autre nom est refusé. Aucune donnée personnelle n'est lue ni écrite.
+///
+/// Ce chemin est volontairement séparé d'[`answer`] : `answer` suppose un `Request` du
+/// contrat (consenti par la personne via `gate`) ; ici il n'y a rien à consentir, donc pas de
+/// `Request`. Hors iOS il n'y a pas d'appareil : `not_supported`.
+pub async fn system_state<R: Runtime>(app: &AppHandle<R>, method: &str) -> Value {
+    #[cfg(target_os = "ios")]
+    {
+        if !SYSTEM_METHODS.contains(&method) {
+            return json!({ "kind": "error", "code": "not_supported" });
+        }
+        // `try_state`, jamais `state` : un plugin absent doit être une réponse, pas une panique.
+        let Some(plugin) = app.try_state::<ThisDevice<R>>() else {
+            return json!({ "kind": "error", "code": "internal" });
+        };
+        match tokio::time::timeout(
+            NATIVE_TIMEOUT,
+            plugin
+                .handle
+                .run_mobile_plugin_async::<Value>(method, json!({})),
+        )
+        .await
+        {
+            Ok(Ok(value)) => value,
+            Ok(Err(error)) => {
+                note(&format!("system_state {method} a échoué : {error:?}"));
+                json!({ "kind": "error", "code": "internal" })
+            }
+            Err(_) => json!({ "kind": "error", "code": "timeout" }),
+        }
+    }
+    #[cfg(not(target_os = "ios"))]
+    {
+        let _ = (app, method);
+        json!({ "kind": "error", "code": "not_supported" })
+    }
+}
+
 /// One call of a device family. The method is checked against the contract's table before it
 /// is sent, so a typo is a refusal here rather than an unknown selector on the native side.
 #[cfg(target_os = "ios")]
@@ -439,4 +491,36 @@ async fn bluetooth_scan<R: Runtime>(
         },
     )
     .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SYSTEM_METHODS;
+
+    /// Les six méthodes d'état système sont nommées, exactement comme les sélecteurs Swift
+    /// (`ios/Sources/system_state.swift`) — un nom qui diverge devient `not_supported` sans
+    /// que rien ne le dise à la compilation.
+    #[test]
+    fn the_six_system_methods_are_the_whitelist() {
+        for m in [
+            "deviceInfo",
+            "batteryLevel",
+            "networkState",
+            "locale",
+            "screenState",
+            "volume",
+        ] {
+            assert!(SYSTEM_METHODS.contains(&m), "{m} absent de la liste");
+        }
+        assert_eq!(SYSTEM_METHODS.len(), 6);
+    }
+
+    /// Tout nom hors liste est refusé : `system_state` ne laisse passer que des lectures
+    /// passives connues, jamais un sélecteur inventé.
+    #[test]
+    fn an_unknown_system_method_is_not_whitelisted() {
+        assert!(!SYSTEM_METHODS.contains(&"status"));
+        assert!(!SYSTEM_METHODS.contains(&"cameraCapturePhoto"));
+        assert!(!SYSTEM_METHODS.contains(&"deviceInfoExtra"));
+    }
 }
