@@ -233,6 +233,24 @@ Un identifiant inconnu est ignoré, et la carte d'origine n'est pas modifiée.
 où son App ID portera HealthKit et NFC : `appareil::limites_de_ce_build()`.
 Changer le nom de l'app, ou son bundle, ne demande rien au framework.
 
+### Et pour une coquille qui n'est pas celle-là
+
+`this-agent` décrit ce que le **harnais** fournit (le tour d'outils : modules,
+graphe, mémoire, rangées, modèle). Ce qu'une coquille fournit **en plus** — sa
+fenêtre, son bac, ses notifications — ne regarde qu'elle :
+
+```rust
+let carte = surface().with_host_entries(hote_surface);
+```
+
+Une entrée de l'hôte portant un identifiant déjà connu **remplace** celle du
+framework : l'hôte sait mieux que le framework ce que sa coquille expose. Les
+emplacements se fusionnent de la même façon.
+
+C'est la règle générale : **le framework décrit ce qu'il fournit, l'hôte déclare
+ce qu'il ajoute et ce qu'il ne peut pas.** Rien de l'un ne doit être écrit en dur
+chez l'autre.
+
 ## Ajouter une méthode
 
 Quatre endroits, dans cet ordre — et les tests de parité vous disent lequel vous

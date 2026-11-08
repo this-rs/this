@@ -252,6 +252,41 @@ impl Surface {
 
     /// La carte telle que l'agent la lit sur une plateforme donnée : filtrée, et préfixée du
     /// nom de l'appareil, pour que « disponible » veuille dire « disponible ICI ».
+    /// Ajoute les entrées d'un hôte à la carte.
+    ///
+    /// `this-agent` décrit ce que le HARNAIS fournit (le tour d'outils : modules, graphe,
+    /// mémoire, rangées, modèle). Ce qu'une coquille fournit en plus — sa fenêtre, son bac, ses
+    /// notifications, son pont d'appareil — ne regarde qu'elle : c'est à l'hôte de le déclarer
+    /// au lieu de le voir écrit en dur dans le framework.
+    ///
+    /// Une entrée de l'hôte portant un identifiant déjà présent **remplace** celle du framework :
+    /// l'hôte sait mieux que le framework ce que sa coquille expose. Les emplacements se
+    /// fusionnent de la même façon.
+    pub fn with_host_entries(&self, host: Surface) -> Surface {
+        let mut surface = self.clone();
+        for entree in host.capabilities {
+            match surface
+                .capabilities
+                .iter_mut()
+                .find(|existante| existante.id == entree.id)
+            {
+                Some(existante) => *existante = entree,
+                None => surface.capabilities.push(entree),
+            }
+        }
+        for emplacement in host.slots {
+            match surface
+                .slots
+                .iter_mut()
+                .find(|existant| existant.id == emplacement.id)
+            {
+                Some(existant) => *existant = emplacement,
+                None => surface.slots.push(emplacement),
+            }
+        }
+        surface
+    }
+
     /// La carte telle que CE build la peut : les entrées déclarées indisponibles passent en
     /// `Missing`, et leur titre porte la raison.
     ///
@@ -1020,6 +1055,53 @@ mod tests {
         // Le rendu d'un appareil porte la raison.
         let texte = bridee.describe_for(Platform::Ios, usize::MAX);
         assert!(texte.contains("indisponible sur ce build"), "{texte}");
+    }
+
+    #[test]
+    fn un_hote_ajoute_ses_propres_entrees_sans_toucher_au_framework() {
+        // Une coquille sait des choses que le cadre ignore (son bac, sa fenêtre). Elle les
+        // déclare, et le framework n'a pas à les connaître.
+        let hote = Surface {
+            capabilities: vec![
+                Capability::new(
+                    "pastebin",
+                    Tier::Shell,
+                    "le presse-papiers de cet hôte",
+                    Some("paste_read / paste_write"),
+                    &[Platform::Macos],
+                    Status::Live,
+                ),
+                // Un identifiant déjà connu : l'hôte REMPLACE l'entrée du framework.
+                Capability::new(
+                    "ui.render",
+                    Tier::Webview,
+                    "le rendu de cet hôte (le sien, pas celui du framework)",
+                    Some("screen_show"),
+                    &[Platform::Web],
+                    Status::Live,
+                ),
+            ],
+            slots: Vec::new(),
+        };
+        let fusion = surface().with_host_entries(hote);
+        assert!(fusion.capability("pastebin").is_some());
+        let rendu = fusion.capability("ui.render").unwrap();
+        assert_eq!(rendu.command.as_deref(), Some("screen_show"));
+        assert_ne!(
+            surface()
+                .capability("ui.render")
+                .unwrap()
+                .command
+                .as_deref(),
+            Some("screen_show")
+        );
+        // Le reste de la carte est intact.
+        assert_eq!(
+            fusion.capability("device.bluetooth").unwrap().status,
+            Status::Live
+        );
+        // Et la carte du framework n'a pas bougé.
+        assert!(surface().capability("pastebin").is_none());
     }
 
     #[test]
