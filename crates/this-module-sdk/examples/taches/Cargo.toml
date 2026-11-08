@@ -1,0 +1,18 @@
+[package]
+name = "this-module-taches"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "Exemple de module this compilé en wasm : des tâches, avec validation, opération nommée et liste configurable."
+
+[lib]
+# cdylib pour le .wasm ; rlib pour les tests hôte.
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+this-module-sdk = { path = "../.." }
+
+[dev-dependencies]
+# Test seulement : le vrai ModuleDescriptor relit le manifeste et passe check(Stored).
+this-descriptor = { path = "../../../this-descriptor" }
+serde_json = "1.0"

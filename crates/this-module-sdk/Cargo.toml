@@ -1,0 +1,13 @@
+[package]
+name = "this-module-sdk"
+version = "0.0.1"
+edition = "2024"
+authors = ["Riviere Théotime <t@ffs.holdings>"]
+license = "MIT OR Apache-2.0"
+description = "Guest SDK for this modules compiled to wasm32-unknown-unknown (ABI v1): Module trait, Request/Response/Effect, Manifest, export! macro. No proc-macro, no build.rs."
+repository = "https://github.com/this-rs/this"
+
+# Liste blanche de la forge : serde et serde_json, rien d'autre.
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
