@@ -203,9 +203,35 @@ build »). Sans entitlement à déclarer, ne pas en déclarer du tout.
 ### Ce que ça implique pour la carte
 
 Une capacité peut être `Live` dans la carte du framework et **impossible dans un
-build donné**. C'est une limite de l'hôte, pas du pont, et c'est à l'hôte de le
-dire — pas à la carte de mentir dans les deux sens. L'Atelier documente son
-propre cas : profil wildcard, donc santé et NFC non signés.
+build donné**. C'est une limite de l'hôte, pas du pont, et le framework ne peut
+pas la deviner : il ne connaît ni le profil de signature, ni le bundle, ni le nom
+de l'app.
+
+L'hôte le déclare donc, et la carte en tient compte :
+
+```rust
+use this_agent::surface::{HostLimits, Platform, surface};
+
+let limites = HostLimits::new()
+    .unavailable("device.health", "profil de signature sans l'entitlement HealthKit")
+    .unavailable("device.nfc", "profil de signature sans l'entitlement NFC Tag Reading");
+
+let cartepour_l_agent = surface().with_limits(&limites).describe_for(Platform::Ios, 12_000);
+```
+
+`with_limits` rend une **copie** : les entrées déclarées passent en `Missing` et
+leur titre porte la raison. L'agent lit alors
+
+```text
+· device.health — indisponible sur ce build : profil de signature sans l'entitlement HealthKit [pas encore]
+```
+
+ce qui lui dit qu'insister ne servira à rien — un `not_authorized` ne le dit pas.
+Un identifiant inconnu est ignoré, et la carte d'origine n'est pas modifiée.
+
+`HostLimits` ne connaît aucun hôte. L'Atelier n'a qu'une fonction à vider le jour
+où son App ID portera HealthKit et NFC : `appareil::limites_de_ce_build()`.
+Changer le nom de l'app, ou son bundle, ne demande rien au framework.
 
 ## Ajouter une méthode
 

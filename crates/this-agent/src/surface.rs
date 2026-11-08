@@ -252,12 +252,65 @@ impl Surface {
 
     /// La carte telle que l'agent la lit sur une plateforme donnée : filtrée, et préfixée du
     /// nom de l'appareil, pour que « disponible » veuille dire « disponible ICI ».
+    /// La carte telle que CE build la peut : les entrées déclarées indisponibles passent en
+    /// `Missing`, et leur titre porte la raison.
+    ///
+    /// Un identifiant inconnu est ignoré : un hôte qui déclare un manque sur une entrée
+    /// supprimée depuis ne doit pas faire tomber la carte.
+    pub fn with_limits(&self, limits: &HostLimits) -> Surface {
+        let mut surface = self.clone();
+        for entree in surface.capabilities.iter_mut() {
+            if let Some((_, raison)) = limits.entries().iter().find(|(id, _)| *id == entree.id) {
+                entree.status = Status::Missing;
+                entree.title = format!("{} — indisponible sur ce build : {raison}", entree.title);
+            }
+        }
+        surface
+    }
+
     pub fn describe_for(&self, platform: Platform, budget_chars: usize) -> String {
         format!(
             "Plateforme : {}\n{}",
             platform.as_str(),
             self.for_platform(platform).describe(budget_chars)
         )
+    }
+}
+
+/// Ce que le BUILD d'un hôte ne peut pas faire, alors que le pont, lui, sait le faire.
+///
+/// Un hôte n'est pas le pont. Il peut manquer une phrase dans son `Info.plist`, un entitlement
+/// que son profil de signature ne porte pas, ou une permission que son manifeste oublie. La
+/// carte décrit le PONT (`surface()`) ; [`Surface::with_limits`] la fait parler du BUILD.
+///
+/// Rien ici ne connaît un hôte en particulier : c'est l'hôte qui déclare ses manques, avec leur
+/// raison. Un framework ne peut pas deviner ce qu'un profil de signature contient.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct HostLimits {
+    unavailable: Vec<(String, String)>,
+}
+
+impl HostLimits {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Déclare qu'une entrée de la carte n'est pas disponible dans ce build, et pourquoi.
+    ///
+    /// La raison est montrée à l'agent : « profil de signature sans l'entitlement HealthKit »
+    /// lui dit qu'insister ne servira à rien, ce qu'un simple `not_authorized` ne dit pas.
+    pub fn unavailable(mut self, id: &str, reason: &str) -> Self {
+        self.unavailable.push((id.to_string(), reason.to_string()));
+        self
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.unavailable.is_empty()
+    }
+
+    /// Les entrées déclarées, dans l'ordre où l'hôte les a nommées.
+    pub fn entries(&self) -> &[(String, String)] {
+        &self.unavailable
     }
 }
 
@@ -925,6 +978,58 @@ mod tests {
         assert_eq!(carte.capability("modules").unwrap().status, Status::Live);
         assert_eq!(carte.slot("boot").unwrap().status, Status::Missing);
         assert_eq!(carte.slot("module.screen").unwrap().status, Status::Live);
+    }
+
+    #[test]
+    fn un_hote_peut_declarer_ce_que_son_build_ne_peut_pas() {
+        // Le pont sait lire la santé ; le BUILD peut ne pas avoir l'entitlement HealthKit. La
+        // carte doit dire lequel des deux ment — et le dire à l'agent, pas seulement au
+        // développeur : « indisponible sur ce build : <raison> ».
+        let limites = HostLimits::new()
+            .unavailable(
+                "device.health",
+                "profil de signature sans l'entitlement HealthKit",
+            )
+            .unavailable("device.nfc", "profil de signature sans l'entitlement NFC")
+            // Un identifiant qui n'existe pas ne doit rien casser.
+            .unavailable("device.teleport", "n'existe pas");
+        assert!(!limites.is_empty());
+        assert_eq!(limites.entries().len(), 3);
+
+        let bridee = surface().with_limits(&limites);
+        let sante = bridee.capability("device.health").unwrap();
+        assert_eq!(sante.status, Status::Missing);
+        assert!(
+            sante.title.contains("indisponible sur ce build"),
+            "{}",
+            sante.title
+        );
+        assert!(sante.title.contains("HealthKit"), "{}", sante.title);
+
+        // Ce qui n'est pas déclaré ne bouge pas.
+        let bluetooth = bridee.capability("device.bluetooth").unwrap();
+        assert_eq!(bluetooth.status, Status::Live);
+        assert!(!bluetooth.title.contains("indisponible"));
+
+        // Et la carte d'origine n'est pas modifiée : `with_limits` rend une copie.
+        assert_eq!(
+            surface().capability("device.health").unwrap().status,
+            Status::Live
+        );
+
+        // Le rendu d'un appareil porte la raison.
+        let texte = bridee.describe_for(Platform::Ios, usize::MAX);
+        assert!(texte.contains("indisponible sur ce build"), "{texte}");
+    }
+
+    #[test]
+    fn sans_limite_la_carte_est_celle_du_pont() {
+        let aucune = HostLimits::new();
+        assert!(aucune.is_empty());
+        assert_eq!(
+            surface().with_limits(&aucune).capabilities,
+            surface().capabilities
+        );
     }
 
     #[test]
