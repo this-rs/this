@@ -100,6 +100,20 @@ pub enum Expr {
         name: String,
         args: Vec<Expr>,
     },
+    /// `set nom = expr;` — la seule écriture du langage, et seulement sur une
+    /// liaison `var`. Rend `Unit` : une valeur jetée n'aurait pas de sens.
+    Set {
+        name: String,
+        value: Box<Expr>,
+    },
+    /// `while condition { corps }` — rend `Unit`.
+    ///
+    /// L'hôte borne le nombre de tours (`fuel`) : une boucle infinie écrite par
+    /// un modèle ne doit pas figer l'application qui l'exécute.
+    While {
+        condition: Box<Expr>,
+        body: Box<Expr>,
+    },
     /// Des expressions évaluées dans l'ordre ; seule la dernière rend une
     /// valeur. Les précédentes doivent être `Unit` : sans mutation, une valeur
     /// jetée n'aurait aucun sens.
@@ -117,6 +131,10 @@ pub struct Binding {
     pub name: String,
     pub ty: Type,
     pub value: Expr,
+    /// `var` plutôt que `let` : `set` peut la changer. Une seule liste ordonnée
+    /// pour les deux, pour que l'initialisation suive l'ordre de la source (et
+    /// l'indexation des locaux wasm).
+    pub mutable: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]

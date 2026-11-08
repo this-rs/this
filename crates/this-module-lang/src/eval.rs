@@ -65,7 +65,34 @@ impl Host for NoHost {
     }
 }
 
+/// La profondeur maximale d'un appel récursif.
+///
+/// Sans elle, un programme qui s'appelle sans condition ferait déborder la pile
+/// du processus hôte : c'est un défaut d'application, pas un refus de sécurité.
+const PROFONDEUR_MAX: usize = 256;
+
+/// Le nombre de tours qu'un `while` peut faire avant d'être déclaré infini.
+///
+/// La même raison, côté temps : un modèle qui écrit `while true` ne doit pas
+/// figer l'application qui exécute son programme.
+pub const TOURS_MAX: usize = 1_000_000;
+
 pub fn run(function: &Function, args: &[Value], host: &mut impl Host) -> Result<Value, String> {
+    appeler(function, args, host, 0)
+}
+
+fn appeler(
+    function: &Function,
+    args: &[Value],
+    host: &mut impl Host,
+    depth: usize,
+) -> Result<Value, String> {
+    if depth > PROFONDEUR_MAX {
+        return Err(format!(
+            "la récursion a dépassé {PROFONDEUR_MAX} appels : `{}` ne s'arrête pas",
+            function.name
+        ));
+    }
     if args.len() != function.params.len() {
         return Err(format!(
             "`{}` attend {} argument(s), reçu {}",
@@ -90,7 +117,7 @@ pub fn run(function: &Function, args: &[Value], host: &mut impl Host) -> Result<
     }
 
     for binding in &function.bindings {
-        let value = evaluate(&binding.value, &mut scope, host)?;
+        let value = evaluate(&binding.value, &mut scope, host, function, depth)?;
         if value.ty() != binding.ty {
             return Err(format!(
                 "`{}` est déclaré {} mais vaut {}",
@@ -102,7 +129,7 @@ pub fn run(function: &Function, args: &[Value], host: &mut impl Host) -> Result<
         scope.push((binding.name.clone(), value));
     }
 
-    let result = evaluate(&function.body, &mut scope, host)?;
+    let result = evaluate(&function.body, &mut scope, host, function, depth)?;
     if result.ty() != function.returns {
         return Err(format!(
             "`{}` rend {} alors qu'elle annonce {}",
@@ -118,6 +145,8 @@ fn evaluate(
     expr: &Expr,
     scope: &mut Vec<(String, Value)>,
     host: &mut impl Host,
+    function: &Function,
+    depth: usize,
 ) -> Result<Value, String> {
     match expr {
         Expr::Int(value) => Ok(Value::Int(*value)),
@@ -130,7 +159,7 @@ fn evaluate(
             .map(|(_, value)| value.clone())
             .ok_or_else(|| format!("`{name}` n'est pas lié à l'exécution")),
         Expr::Unary { op, expr } => {
-            let inner = evaluate(expr, scope, host)?;
+            let inner = evaluate(expr, scope, host, function, depth)?;
             match (op, inner) {
                 (UnOp::Not, Value::Bool(value)) => Ok(Value::Bool(!value)),
                 (UnOp::Neg, Value::Int(value)) => value
@@ -144,48 +173,85 @@ fn evaluate(
             // Les deux opérateurs logiques court-circuitent : `false && boom()`
             // ne doit pas appeler `boom`. Le compilateur wasm doit faire pareil.
             if let BinOp::And = op {
-                let left = evaluate(left, scope, host)?;
+                let left = evaluate(left, scope, host, function, depth)?;
                 return match left {
                     Value::Bool(false) => Ok(Value::Bool(false)),
-                    Value::Bool(true) => evaluate(right, scope, host),
+                    Value::Bool(true) => evaluate(right, scope, host, function, depth),
                     other => Err(format!("`&&` ne s'applique pas à {}", other.name())),
                 };
             }
             if let BinOp::Or = op {
-                let left = evaluate(left, scope, host)?;
+                let left = evaluate(left, scope, host, function, depth)?;
                 return match left {
                     Value::Bool(true) => Ok(Value::Bool(true)),
-                    Value::Bool(false) => evaluate(right, scope, host),
+                    Value::Bool(false) => evaluate(right, scope, host, function, depth),
                     other => Err(format!("`||` ne s'applique pas à {}", other.name())),
                 };
             }
 
-            let left = evaluate(left, scope, host)?;
-            let right = evaluate(right, scope, host)?;
+            let left = evaluate(left, scope, host, function, depth)?;
+            let right = evaluate(right, scope, host, function, depth)?;
             binary(*op, left, right)
         }
         Expr::If {
             condition,
             then_branch,
             else_branch,
-        } => match evaluate(condition, scope, host)? {
-            Value::Bool(true) => evaluate(then_branch, scope, host),
-            Value::Bool(false) => evaluate(else_branch, scope, host),
+        } => match evaluate(condition, scope, host, function, depth)? {
+            Value::Bool(true) => evaluate(then_branch, scope, host, function, depth),
+            Value::Bool(false) => evaluate(else_branch, scope, host, function, depth),
             other => Err(format!("une condition ne peut pas être {}", other.name())),
         },
         Expr::Seq(items) => {
             let mut last = Value::Unit;
             for item in items {
-                last = evaluate(item, scope, host)?;
+                last = evaluate(item, scope, host, function, depth)?;
             }
             Ok(last)
         }
         Expr::Call { name, args } => {
             let mut values = Vec::with_capacity(args.len());
             for arg in args {
-                values.push(evaluate(arg, scope, host)?);
+                values.push(evaluate(arg, scope, host, function, depth)?);
+            }
+            if name == &function.name {
+                // Un programme qui s'appelle lui-même : la récursion.
+                return appeler(function, &values, host, depth + 1);
             }
             host.call(name, &values)
+        }
+        Expr::Set { name, value } => {
+            let value = evaluate(value, scope, host, function, depth)?;
+            let Some(slot) = scope
+                .iter_mut()
+                .rev()
+                .find(|(candidate, _)| candidate == name)
+            else {
+                return Err(format!("`{name}` n'est pas lié à l'exécution"));
+            };
+            slot.1 = value;
+            Ok(Value::Unit)
+        }
+        Expr::While { condition, body } => {
+            let mut tours = 0usize;
+            loop {
+                match evaluate(condition, scope, host, function, depth)? {
+                    Value::Bool(false) => break,
+                    Value::Bool(true) => {}
+                    other => {
+                        return Err(format!("une condition ne peut pas être {}", other.name()));
+                    }
+                }
+                // Le typeur a vérifié que le corps rend Unit : rien ne s'empile.
+                evaluate(body, scope, host, function, depth)?;
+                tours += 1;
+                if tours >= TOURS_MAX {
+                    return Err(format!(
+                        "la boucle a dépassé {TOURS_MAX} tours sans s'arrêter"
+                    ));
+                }
+            }
+            Ok(Value::Unit)
         }
     }
 }

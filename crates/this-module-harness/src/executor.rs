@@ -105,6 +105,9 @@ mod wasmi_engine {
     struct Recorder {
         effects: Vec<String>,
         now: i64,
+        /// Le budget de tours restant. Un programme peut boucler ; l'hôte
+        /// décide jusqu'où. Épuisé, le module piège au lieu de figer l'app.
+        fuel: u64,
     }
 
     /// An `Executor` backed by `wasmi`, for hosts.
@@ -128,6 +131,9 @@ mod wasmi_engine {
                 Recorder {
                     effects: Vec::new(),
                     now,
+                    // Le même plafond que l'interprète : les deux chemins
+                    // s'arrêtent au même tour, ce qui rend la parité vérifiable.
+                    fuel: this_module_lang::eval::TOURS_MAX as u64,
                 },
             );
             let mut linker = <Linker<Recorder>>::new(&engine);
@@ -159,6 +165,17 @@ mod wasmi_engine {
                 .func_wrap("host", "now", |mut caller: Caller<'_, Recorder>| -> i64 {
                     caller.data_mut().effects.push("now()".to_string());
                     caller.data().now
+                })
+                .map_err(|e| ExecutorError::Link(e.to_string()))?;
+
+            linker
+                .func_wrap("host", "fuel", |mut caller: Caller<'_, Recorder>| -> i32 {
+                    let left = &mut caller.data_mut().fuel;
+                    if *left == 0 {
+                        return 0;
+                    }
+                    *left -= 1;
+                    1
                 })
                 .map_err(|e| ExecutorError::Link(e.to_string()))?;
 
@@ -294,6 +311,43 @@ mod tests {
         assert_eq!(
             got.effects,
             vec!["emit(\"bonjour depuis le module\")".to_string()]
+        );
+    }
+
+    /// Une boucle passe par le vrai moteur : c'est ce qui prouve que l'import
+    /// `fuel` est fourni, et pas seulement que le WAT est bien formé.
+    #[tokio::test]
+    async fn a_loop_runs_in_the_engine_like_in_the_interpreter() {
+        let program = "fn run(n: Int) -> Int { var i: Int = 0; var total: Int = 0; \
+                       while i < n { set total = total + i; set i = i + 1; }; total }";
+        let args = [Value::Int(6)];
+        let expected = reference(program, &args);
+        let got = through_wasmi(program, &args).await;
+        assert_eq!(got, expected, "boucle : même valeur des deux côtés");
+        assert_eq!(got.value, "15");
+    }
+
+    /// La récursion aussi : le module s'appelle lui-même par son nom exporté.
+    #[tokio::test]
+    async fn recursion_runs_in_the_engine_like_in_the_interpreter() {
+        let program = "fn run(n: Int) -> Int { if n <= 1 { 1 } else { n * run(n - 1) } }";
+        let args = [Value::Int(5)];
+        let expected = reference(program, &args);
+        let got = through_wasmi(program, &args).await;
+        assert_eq!(got, expected, "récursion : même valeur des deux côtés");
+        assert_eq!(got.value, "120");
+    }
+
+    /// Un `while true` ne doit pas figer l'hôte : il piège, et l'appel rend une
+    /// erreur au lieu de tourner sans fin.
+    #[tokio::test]
+    async fn an_endless_loop_traps_instead_of_hanging() {
+        let program = "fn run() -> Unit { var i: Int = 0; while true { set i = i + 1; }; }";
+        let built = compile_to_wasm(program).expect("assemblage");
+        let outcome = WasmiExecutor.run(&built, &[], NOW).await;
+        assert!(
+            outcome.is_err(),
+            "une boucle infinie doit piéger, reçu {outcome:?}"
         );
     }
 

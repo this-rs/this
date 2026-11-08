@@ -17,10 +17,22 @@ use wasmi::{Caller, Engine, Extern, Linker, Module, Store, Val};
 
 /// Ce que l'hôte observe. Identique des deux côtés : c'est ce qui rend la
 /// comparaison honnête.
-#[derive(Default)]
 struct Recorder {
     emitted: Vec<String>,
     calls: usize,
+    /// Le budget de boucle restant. Le wasm le consomme par un import ; la
+    /// référence le compte chez elle. Les deux doivent s'arrêter au même tour.
+    fuel: u64,
+}
+
+impl Default for Recorder {
+    fn default() -> Self {
+        Self {
+            emitted: Vec::new(),
+            calls: 0,
+            fuel: this_module_lang::eval::TOURS_MAX as u64,
+        }
+    }
 }
 
 impl Host for Recorder {
@@ -89,6 +101,17 @@ fn through_wasm(source: &str, args: &[Value]) -> (Result<Value, String>, Recorde
             1000
         })
         .expect("import now");
+    linker
+        .func_wrap("host", "fuel", |mut caller: Caller<'_, Recorder>| -> i32 {
+            let left = &mut caller.data_mut().fuel;
+            if *left == 0 {
+                0
+            } else {
+                *left -= 1;
+                1
+            }
+        })
+        .expect("import fuel");
 
     let instance = linker
         .instantiate_and_start(&mut store, &module)
@@ -125,6 +148,58 @@ fn through_reference(source: &str, args: &[Value]) -> (Result<Value, String>, Re
     let mut host = Recorder::default();
     let value = run(&compiled.function, args, &mut host);
     (value, host)
+}
+
+#[cfg(test)]
+mod boucles {
+    use super::*;
+
+    #[test]
+    fn a_loop_accumulates_like_the_reference() {
+        agree(
+            "fn run() -> Int { var i: Int = 0; var somme: Int = 0; \
+             while i < 10 { set somme = somme + i; set i = i + 1; }; somme }",
+            &[],
+        );
+    }
+
+    #[test]
+    fn a_loop_emits_the_same_effects_in_the_same_order() {
+        agree(
+            "fn run() -> Unit { var i: Int = 0; \
+             while i < 3 { emit(\"tour\"); set i = i + 1; } }",
+            &[],
+        );
+    }
+
+    #[test]
+    fn a_nested_loop_counts_both_levels() {
+        agree(
+            "fn run() -> Int { var i: Int = 0; var j: Int = 0; var n: Int = 0; \
+             while i < 4 { set j = 0; while j < 3 { set n = n + 1; set j = j + 1; }; \
+             set i = i + 1; }; n }",
+            &[],
+        );
+    }
+
+    #[test]
+    fn recursion_matches_on_both_paths() {
+        agree(
+            "fn run(n: Int) -> Int { if n <= 1 { 1 } else { n * run(n - 1) } }",
+            &[Value::Int(6)],
+        );
+    }
+
+    #[test]
+    fn a_loop_that_never_ends_fails_on_both_paths() {
+        // Le budget est le même des deux côtés : la référence s'arrête par une
+        // erreur, le wasm par un import qui rend 0 puis un résultat incomplet —
+        // ce qui compte, c'est qu'aucun des deux ne bloque.
+        agree(
+            "fn run() -> Unit { var i: Int = 0; while true { set i = i + 1; } }",
+            &[],
+        );
+    }
 }
 
 /// Les deux chemins, comparés. C'est l'unique assertion de ce fichier.
