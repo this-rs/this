@@ -151,9 +151,17 @@ pub struct ProviderConfig {
     pub label: String,
     pub preset: Preset,
     pub base_url: String,
-    /// `None`: the first model the engine announces.
+    /// `None`: the first model the engine announces (or the first of `models`).
     #[serde(default)]
     pub model: Option<String>,
+    /// Les modèles que la personne a cochés dans la liste annoncée par le moteur.
+    ///
+    /// Vide (le cas de toutes les configurations existantes) : rien n'est filtré, le moteur
+    /// décide. Renseigné : c'est une liste de travail, pas une permission — elle ordonne
+    /// ce qu'un écran propose, et `model` absent veut dire « le premier coché ».
+    /// Absent du JSON quand vide, pour que les configurations déjà rangées ne bougent pas.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub models: Vec<String>,
     pub credential: CredentialRef,
     /// Overrides the context window the engine announces (or when it announces none).
     #[serde(default)]
@@ -200,6 +208,7 @@ impl ProviderConfig {
             preset,
             base_url: preset.base_url().to_string(),
             model: None,
+            models: Vec::new(),
             credential,
             context_window: None,
             pricing: None,
@@ -311,6 +320,58 @@ mod tests {
         ] {
             assert!(ProviderId::new(bad).is_err(), "`{bad}` doit être refusé");
         }
+    }
+
+    #[test]
+    fn nvidia_nim_comes_with_its_address_and_no_guessed_model() {
+        let config = ProviderConfig::new(
+            id("nim"),
+            "NVIDIA NIM",
+            Preset::NvidiaNim,
+            CredentialRef::Vault("nim-key".to_string()),
+        );
+        assert_eq!(config.base_url, "https://integrate.api.nvidia.com/v1");
+        assert_eq!(config.model, None, "aucun nom deviné : la liste décide");
+        assert_eq!(
+            config.validate(),
+            Ok(()),
+            "hébergé, avec sa référence de clé"
+        );
+    }
+
+    #[test]
+    fn une_liste_de_modeles_vide_ne_change_pas_le_json_ecrit() {
+        let config = ProviderConfig::new(
+            id("nim"),
+            "NVIDIA NIM",
+            Preset::NvidiaNim,
+            CredentialRef::Vault("nim-key".to_string()),
+        );
+        let written = serde_json::to_value(&config).unwrap();
+        assert!(
+            written.get("models").is_none(),
+            "les configurations déjà rangées ne doivent pas changer de forme : {written}"
+        );
+        let back: ProviderConfig = serde_json::from_value(written).unwrap();
+        assert!(back.models.is_empty());
+    }
+
+    #[test]
+    fn les_modeles_coches_sont_ranges_et_relus_dans_l_ordre() {
+        let mut config = ProviderConfig::new(
+            id("nim"),
+            "NVIDIA NIM",
+            Preset::NvidiaNim,
+            CredentialRef::Vault("nim-key".to_string()),
+        );
+        config.models = vec![
+            "meta/llama-3.3-70b-instruct".to_string(),
+            "nvidia/nemotron-4-340b".to_string(),
+        ];
+        let written = serde_json::to_value(&config).unwrap();
+        assert_eq!(written["models"][1], "nvidia/nemotron-4-340b");
+        let back: ProviderConfig = serde_json::from_value(written).unwrap();
+        assert_eq!(back.models, config.models);
     }
 
     #[test]
