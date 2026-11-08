@@ -3,8 +3,8 @@
 # Ce fichier est la liste blanche : ajouter une dépendance = la vendorer dans l'image
 # (docker/Dockerfile), régénérer Cargo.lock, et rien d'autre.
 #
-# Point d'extension du SDK : `this-module-sdk` s'ajoute ICI quand il existera (path ou
-# registre vendoré dans l'image). Aucune version n'est inventée en attendant.
+# Le SDK (`this-module-sdk`) est copié DANS l'image à /forge/sdk par `build-image.sh`
+# (source unique : crates/this-module-sdk). Il n'a que serde/serde_json pour dépendances.
 [package]
 name = "module"
 version = "0.0.0"
@@ -18,6 +18,7 @@ path = "src/lib.rs"
 [dependencies]
 serde = { version = "1", default-features = false, features = ["derive", "std"] }
 serde_json = { version = "1", default-features = false, features = ["std"] }
+this-module-sdk = { path = "/forge/sdk" }
 
 [profile.release]
 opt-level = "s"

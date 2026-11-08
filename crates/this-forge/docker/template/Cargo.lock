@@ -20,6 +20,7 @@ version = "0.0.0"
 dependencies = [
  "serde",
  "serde_json",
+ "this-module-sdk",
 ]
 
 [[package]]
@@ -92,6 +93,14 @@ dependencies = [
  "proc-macro2",
  "quote",
  "unicode-ident",
+]
+
+[[package]]
+name = "this-module-sdk"
+version = "0.0.1"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
