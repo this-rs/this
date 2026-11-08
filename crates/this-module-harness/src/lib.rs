@@ -37,6 +37,7 @@
 //! # Ok(()) }
 //! ```
 
+pub mod call;
 pub mod drafter;
 pub mod executor;
 pub mod module_draft;
