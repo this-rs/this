@@ -53,6 +53,16 @@ pub trait ModuleStore: Send + Sync {
     ) -> Result<Option<MessageBundle>, ContractError>;
     async fn list(&self) -> Result<Vec<(String, String)>, ContractError>;
     async fn remove(&self, name: &str, version: &str) -> Result<(), ContractError>;
+
+    /// The compiled artifact (`assets/program.wasm`) of a stored version, verified against
+    /// the manifest like every other read: a file that was modified is refused, never
+    /// served. `Ok(None)` = the version carries no code (a declarative module).
+    ///
+    /// Default `Ok(None)`: a store that cannot hold artifacts stays valid, and a module
+    /// loader asking it for code gets "none", not a guess.
+    async fn code(&self, _name: &str, _version: &str) -> Result<Option<Vec<u8>>, ContractError> {
+        Ok(None)
+    }
 }
 
 #[cfg(test)]

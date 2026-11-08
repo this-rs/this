@@ -20,6 +20,9 @@ resolver = "3"
 this-descriptor = { version = "0.0.1", path = "crates/this-descriptor", features = ["yaml", "pattern", "http"] }
 # Le contrat VFS, partagé avec le client : il compile pour wasm32, contrairement à ce crate.
 this-vfs = { version = "0.0.1", path = "crates/this-vfs" }
+# Exécuter un module compilé (wasm) : le primitif d'appel borné vit dans le harnais.
+# Optionnel : sans la feature `wasm-modules`, aucun moteur wasm n'est lié.
+this-module-harness = { version = "0.0.1", path = "crates/this-module-harness", optional = true }
 # Le modèle du harness (pur) : nécessaire seulement pour l'écrire dans le
 # graphe, donc activé par la feature `obrain` avec le backend.
 this-agent = { version = "0.0.1", path = "crates/this-agent", optional = true }
@@ -177,6 +180,7 @@ testcontainers-modules = { version = "0.15", features = ["postgres", "mongo", "n
 tempfile = "3"
 # Fixtures Ed25519 des tests OIDC (jetons signés en local, aucun réseau).
 ed25519-dalek = { version = "2", features = ["pkcs8", "pem", "rand_core"] }
+wat = "1.263.0"
 base64 = "0.22"
 
 [features]
@@ -206,6 +210,10 @@ oidc = ["dep:jsonwebtoken", "dep:reqwest"]
 # confiance par hôte. Sans cette feature, un module stocké n'a que l'intégrité
 # (etags) — pas l'authentification.
 module-signing = ["dep:ed25519-dalek", "dep:base64"]
+# Modules compilés (wasm) : `WasmModuleLoader` exécute `program.wasm` sous fuel et plafond
+# mémoire (ABI : docs/modules-wasm-abi.md). Implique `module-signing` : un module à code
+# n'est admis par le store que sous une ancre de confiance (fail-closed).
+wasm-modules = ["dep:this-module-harness", "this-module-harness/wasmi", "module-signing"]
 obrain = ["dep:obrain-engine", "dep:obrain-common", "dep:obrain-core", "dep:obrain-substrate", "dep:obrain-adapters", "dep:obrain-reactive", "dep:this-agent", "dep:this-harness"]
 # Alias conservé pour compatibilité, mais le relief cognitif n'est PAS branché :
 # `core::events::CognitiveSignal` est un vocabulaire propre à this-rs, et le

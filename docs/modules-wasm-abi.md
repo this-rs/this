@@ -50,6 +50,18 @@ Accès direct au stockage = v2, décision séparée.
   l'hôte décide de la portée, jamais le module.
 - `ctx.now_ms` : le temps est une **donnée**, pas un import.
 
+Précisions de l'implémentation hôte (F1), additives :
+- `update` et `delete` portent aussi `id` (chaîne) au niveau de la requête ; `rows` y contient
+  la ligne courante (une seule). `delete` met `{"id":…}` dans `input`.
+- `get` : `input` est la ligne ; `output` (si non nul) est servi à la place.
+  `list` : `rows` = lignes de la page ; `output` (tableau, si non nul) est servi à la place.
+- `create`/`update` : `input` est déjà validé par le descripteur ; un `output` non nul remplace
+  le corps, et repasse par la validation du descripteur avant écriture.
+- `call` : servi par `POST /{pluriel}/ops/{name}` sur chaque entité du module. Le descripteur
+  n'a pas (encore) de champ `operations` : le nom n'est donc pas vérifié côté hôte, c'est au
+  module de répondre `ok:false` pour un nom inconnu.
+- `ctx.tenant` et `ctx.account` valent `null`, `ctx.config` `{}` tant que le runtime ne les porte pas.
+
 ## 5. Réponse — JSON UTF-8
 
 Succès :
@@ -67,7 +79,7 @@ Succès :
 |---|---|---|
 | `put` | `{"kind":"put","entity":"task","body":{ }}` | écrit la ligne (create si pas d'`id`, update sinon) |
 | `delete` | `{"kind":"delete","entity":"task","id":"…"}` | supprime la ligne |
-| `emit` | `{"kind":"emit","topic":"…","payload":{ }}` | publie un `EntityEvent` sur l'`EventBus` |
+| `emit` | `{"kind":"emit","topic":"…","payload":{ }}` | publie un `EntityEvent::Created` dont `entity_type` = `topic` (id = `payload.id` sinon nil) : le bus n'a pas de variante libre |
 | `log` | `{"kind":"log","level":"info\|warn\|error","message":"…"}` | journalise |
 
 Un `kind` inconnu est refusé (réponse entière rejetée, rien n'est appliqué) : un effet partiel

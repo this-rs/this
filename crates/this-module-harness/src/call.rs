@@ -409,7 +409,7 @@ fn how_to_declare(name: &str, expected: &str) -> String {
             "l'hôte y écrit la requête : ajoutez `(func (export \"{ALLOC_EXPORT}\") (param i32) (result i32) ...)` qui rend le décalage d'un tampon de `n` octets"
         ),
         "render" => String::from(
-            "c'est l'entrée du contrat de vue : ajoutez `(func (export \"render\") (param i32 i32) (result i64) ...)` — il reçoit `(ptr, len)` de la requête et rend `((ptr << 32) | len)` de la réponse"
+            "c'est l'entrée du contrat de vue : ajoutez `(func (export \"render\") (param i32 i32) (result i64) ...)` — il reçoit `(ptr, len)` de la requête et rend `((ptr << 32) | len)` de la réponse",
         ),
         _ => format!("ajoutez {expected} : le contrat d'appel de `{name}` le demande"),
     }
