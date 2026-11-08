@@ -246,6 +246,8 @@ impl BuildRunner {
         ])
         .args(["--cap-drop", "ALL", "--security-opt", "no-new-privileges"])
         .args(["--cpus", &self.cfg.cpus.to_string()])
+        .args(["--cpu-shares", &self.cfg.cpu_shares.to_string()])
+        .args(["--blkio-weight", &self.cfg.blkio_weight.to_string()])
         .args([
             "--memory",
             &self.cfg.memory,

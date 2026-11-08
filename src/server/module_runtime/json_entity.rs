@@ -95,7 +95,6 @@ impl JsonEntityService {
     /// module croirait avoir écrit un champ qu'il n'a pas le droit de toucher. Ici ils
     /// sont **retirés avant validation**, et seul un champ que le descripteur ne connaît
     /// pas du tout est refusé par `apply`.
-    #[cfg(feature = "wasm-modules")]
     fn writable_only(&self, body: Value) -> Value {
         let Value::Object(map) = body else {
             return body;

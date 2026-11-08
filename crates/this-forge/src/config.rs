@@ -33,6 +33,11 @@ pub struct ForgeConfig {
     pub cpus: u32,
     /// Mémoire du conteneur (`--memory`).
     pub memory: String,
+    /// Poids CPU relatif du conteneur (`--cpu-shares`, défaut docker 1024) : bas = cède
+    /// devant les autres charges de la machine.
+    pub cpu_shares: u32,
+    /// Poids d'E/S du conteneur (`--blkio-weight`, 10..1000).
+    pub blkio_weight: u16,
     /// Builds autorisés par compte et par jour UTC.
     pub builds_per_day: u32,
     /// Budget de durée de build par compte et par jour UTC (secondes de mur).
@@ -64,6 +69,8 @@ impl ForgeConfig {
             build_timeout: Duration::from_secs(180),
             cpus: 6,
             memory: "4g".into(),
+            cpu_shares: 1024,
+            blkio_weight: 500,
             builds_per_day: 20,
             cpu_seconds_per_day: 1800,
             max_pending_per_account: 2,

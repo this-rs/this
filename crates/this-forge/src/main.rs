@@ -2,6 +2,7 @@
 //!
 //!   this-forge serve  [--listen 127.0.0.1:8480] [--data-dir ./forge-data]
 //!                     [--signing-key <chemin>] [--image this-forge-builder:1.93]
+//!                     [--cpus 6] [--memory 4g] [--cpu-shares 1024] [--blkio-weight 500]
 //!   this-forge invite [--data-dir ./forge-data] [--uses 1] [--note "…"]
 
 use std::net::SocketAddr;
@@ -30,6 +31,18 @@ async fn main() -> anyhow::Result<()> {
     }
     if let Some(i) = arg(&args, "--image") {
         cfg.image = i;
+    }
+    if let Some(c) = arg(&args, "--cpus") {
+        cfg.cpus = c.parse()?;
+    }
+    if let Some(m) = arg(&args, "--memory") {
+        cfg.memory = m;
+    }
+    if let Some(c) = arg(&args, "--cpu-shares") {
+        cfg.cpu_shares = c.parse()?;
+    }
+    if let Some(c) = arg(&args, "--blkio-weight") {
+        cfg.blkio_weight = c.parse()?;
     }
     match cmd {
         "serve" => {
