@@ -126,15 +126,28 @@ fn host<'a>(surface: &'a [HostFn], name: &str) -> Option<&'a HostFn> {
     surface.iter().find(|function| function.name == name)
 }
 
-struct Env(Vec<(String, Type)>);
+struct Env {
+    vars: Vec<(String, Type, bool)>,
+    /// La signature de la fonction en cours : un programme peut s'appeler
+    /// lui-même. `None` pour une règle, qui n'a pas de nom à rappeler.
+    recursion: Option<(String, Vec<Type>, Type)>,
+}
 
 impl Env {
     fn get(&self, name: &str) -> Option<Type> {
-        self.0
+        self.vars
             .iter()
             .rev()
-            .find(|(candidate, _)| candidate == name)
-            .map(|(_, ty)| *ty)
+            .find(|(candidate, _, _)| candidate == name)
+            .map(|(_, ty, _)| *ty)
+    }
+
+    fn mutable(&self, name: &str) -> Option<bool> {
+        self.vars
+            .iter()
+            .rev()
+            .find(|(candidate, _, _)| candidate == name)
+            .map(|(_, _, mutable)| *mutable)
     }
 }
 
@@ -147,11 +160,18 @@ pub fn check(function: &Function) -> Result<Type, String> {
 /// primitive en dur : ce qu'un programme peut appeler est exactement ce que
 /// l'appelant met dans `surface`.
 pub fn check_with(function: &Function, surface: &[HostFn]) -> Result<Type, String> {
-    let mut env = Env(function
-        .params
-        .iter()
-        .map(|param| (param.name.clone(), param.ty))
-        .collect());
+    let mut env = Env {
+        vars: function
+            .params
+            .iter()
+            .map(|param| (param.name.clone(), param.ty, false))
+            .collect(),
+        recursion: Some((
+            function.name.clone(),
+            function.params.iter().map(|param| param.ty).collect(),
+            function.returns,
+        )),
+    };
 
     for binding in &function.bindings {
         let value = infer(&binding.value, &env, surface)?;
@@ -169,7 +189,8 @@ pub fn check_with(function: &Function, surface: &[HostFn]) -> Result<Type, Strin
                 binding.name
             ));
         }
-        env.0.push((binding.name.clone(), binding.ty));
+        env.vars
+            .push((binding.name.clone(), binding.ty, binding.mutable));
     }
 
     let body = infer(&function.body, &env, surface)?;
@@ -257,7 +278,68 @@ fn infer(expr: &Expr, env: &Env, surface: &[HostFn]) -> Result<Type, String> {
             }
             infer(last, env, surface)
         }
+        Expr::Set { name, value } => {
+            let Some(declared) = env.get(name) else {
+                return Err(format!("`{name}` n'est pas déclaré"));
+            };
+            if !env.mutable(name).unwrap_or(false) {
+                return Err(format!(
+                    "`{name}` est une liaison `let` : déclare-la `var` pour pouvoir la changer"
+                ));
+            }
+            let actual = infer(value, env, surface)?;
+            if actual != declared {
+                return Err(format!(
+                    "`{name}` est {} : on ne peut pas y mettre {}",
+                    declared.name(),
+                    actual.name()
+                ));
+            }
+            Ok(Type::Unit)
+        }
+        Expr::While { condition, body } => {
+            let condition = infer(condition, env, surface)?;
+            if condition != Type::Bool {
+                return Err(format!(
+                    "la condition d'un `while` doit être Bool, pas {}",
+                    condition.name()
+                ));
+            }
+            let body = infer(body, env, surface)?;
+            if body != Type::Unit {
+                return Err(format!(
+                    "le corps d'un `while` doit être Unit, pas {} — sa valeur serait perdue à chaque tour",
+                    body.name()
+                ));
+            }
+            Ok(Type::Unit)
+        }
         Expr::Call { name, args } => {
+            // Un programme peut s'appeler lui-même : c'est la récursion, bornée
+            // à l'exécution par la profondeur de pile.
+            if let Some((own, params, returns)) = &env.recursion
+                && own == name
+            {
+                if args.len() != params.len() {
+                    return Err(format!(
+                        "`{name}` attend {} argument(s), reçu {}",
+                        params.len(),
+                        args.len()
+                    ));
+                }
+                for (index, (arg, expected)) in args.iter().zip(params).enumerate() {
+                    let actual = infer(arg, env, surface)?;
+                    if actual != *expected {
+                        return Err(format!(
+                            "argument {} de `{name}` : attendu {}, reçu {}",
+                            index + 1,
+                            expected.name(),
+                            actual.name()
+                        ));
+                    }
+                }
+                return Ok(*returns);
+            }
             let Some(signature) = host(surface, name) else {
                 return Err(format!("`{name}` n'est pas une primitive disponible ici"));
             };

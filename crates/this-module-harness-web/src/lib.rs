@@ -17,7 +17,7 @@
 //! but called `emit` once and not the other is not the same module.
 
 #[cfg(target_arch = "wasm32")]
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 #[cfg(target_arch = "wasm32")]
 use std::rc::Rc;
 
@@ -105,9 +105,24 @@ impl Executor for BrowserExecutor {
             })
         };
 
+        // Le budget de tours : épuisé, le module piège (`unreachable`) au lieu
+        // de figer l'onglet, qui ne pourrait plus être interrompu.
+        let fuel = {
+            let left = Rc::new(Cell::new(this_module_lang::eval::TOURS_MAX as u64));
+            Closure::<dyn FnMut() -> i32>::new(move || {
+                let n = left.get();
+                if n == 0 {
+                    return 0;
+                }
+                left.set(n - 1);
+                1
+            })
+        };
+
         let host = Object::new();
         set(&host, "emit", emit.as_ref().unchecked_ref())?;
         set(&host, "now", clock.as_ref().unchecked_ref())?;
+        set(&host, "fuel", fuel.as_ref().unchecked_ref())?;
         let imports = Object::new();
         set(&imports, "host", &host)?;
 

@@ -99,7 +99,11 @@ impl Parser {
         self.expect(Token::LBrace, "`{`")?;
 
         let mut bindings = Vec::new();
-        while *self.peek() == Token::Let {
+        // `let` et `var` se déclarent au même endroit, dans l'ordre de la source :
+        // l'initialisation d'une liaison peut lire la précédente, et l'indexation
+        // des locaux wasm suit cet ordre.
+        while matches!(*self.peek(), Token::Let | Token::Var) {
+            let mutable = *self.peek() == Token::Var;
             self.advance();
             let name = self.ident()?;
             self.expect(Token::Colon, "`:`")?;
@@ -107,7 +111,12 @@ impl Parser {
             self.expect(Token::Eq, "`=`")?;
             let value = self.expression()?.node;
             self.expect(Token::Semi, "`;`")?;
-            bindings.push(Binding { name, ty, value });
+            bindings.push(Binding {
+                name,
+                ty,
+                value,
+                mutable,
+            });
         }
 
         let body = self.sequence()?.node;
@@ -341,6 +350,33 @@ impl Parser {
                     span,
                 })
             }
+            Token::While => {
+                self.advance();
+                let condition = self.expression()?;
+                self.expect(Token::LBrace, "`{`")?;
+                let body = self.sequence()?;
+                self.expect(Token::RBrace, "`}`")?;
+                Ok(SpannedExpr {
+                    node: Expr::While {
+                        condition: Box::new(condition.node),
+                        body: Box::new(body.node),
+                    },
+                    span,
+                })
+            }
+            Token::Set => {
+                self.advance();
+                let name = self.ident()?;
+                self.expect(Token::Eq, "`=`")?;
+                let value = self.expression()?;
+                Ok(SpannedExpr {
+                    node: Expr::Set {
+                        name,
+                        value: Box::new(value.node),
+                    },
+                    span,
+                })
+            }
             Token::Ident(name) => {
                 self.advance();
                 if *self.peek() != Token::LParen {
@@ -447,10 +483,22 @@ mod tests {
     }
 
     #[test]
-    fn a_loop_cannot_be_written() {
-        // Le langage est total : ce mot n'existe pas, donc le parseur le refuse
-        // comme un identifiant, puis comme une expression mal formée.
-        let error = parse("fn run() -> Int { while true { 1 } }").unwrap_err();
-        assert!(error.contains("attendu"), "{error}");
+    fn a_loop_and_its_mutation_are_parsed() {
+        let function =
+            parse("fn run() -> Unit { var i: Int = 0; while i < 3 { set i = i + 1; } }").unwrap();
+        assert_eq!(function.bindings.len(), 1);
+        assert!(
+            function.bindings[0].mutable,
+            "`var` doit marquer la liaison comme mutable"
+        );
+        assert!(matches!(function.body, Expr::While { .. }));
+    }
+
+    #[test]
+    fn a_loop_body_that_throws_a_value_is_refused() {
+        // Une valeur jetée à chaque tour n'a pas de sens : le typeur le dit.
+        let function = parse("fn run() -> Unit { while true { 1 } }").unwrap();
+        let error = crate::check::check(&function).unwrap_err();
+        assert!(error.contains("Unit"), "{error}");
     }
 }

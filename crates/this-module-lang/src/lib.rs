@@ -7,18 +7,25 @@
 //! lire une mémoire qu'il n'a pas écrite. Signer dit **qui** a produit le
 //! module, pas **ce qu'il fait**.
 //!
-//! Ce langage dit ce qu'un module peut faire en le rendant impossible à écrire
-//! autrement :
+//! Ce langage dit ce qu'un module peut faire, et **ce qu'il ne peut pas
+//! dépasser** :
 //!
-//! - **pas de boucle** — un module termine, donc il ne peut pas affamer l'hôte ;
-//! - **pas de récursion** — un programme est une fonction, et une fonction ne
-//!   peut pas s'appeler (seules les primitives d'hôte sont appelables) ;
-//! - **pas d'état** — aucune mutation, donc aucune course entre deux appels ;
+//! - **des boucles bornées** — `while` existe. C'est l'hôte qui compte les tours
+//!   (`host.fuel`, un import que l'exécuteur fournit) ; épuisé, le module piège.
+//!   Un programme ne peut donc pas affamer l'hôte : la borne n'est pas dans la
+//!   grammaire, elle est dans l'exécution, et elle est la même des deux côtés ;
+//! - **une récursion bornée** — un programme peut s'appeler lui-même, jusqu'à
+//!   `eval::PROFONDEUR_MAX` appels ;
+//! - **une seule écriture** — `set`, sur une liaison `var` déclarée par le
+//!   programme. Aucun état ne survit à l'appel : deux exécutions ne partagent
+//!   rien, donc aucune course n'est possible ;
 //! - **pas d'I/O implicite** — tout effet passe par une primitive d'hôte
 //!   nommée, visible dans `check::HOST` et dans la section imports du wasm.
 //!
-//! La sûreté ne vient pas d'un bac à sable qu'on espère étanche : elle vient de
-//! la grammaire. Il n'y a rien à échapper parce que rien n'est exprimable.
+//! La sûreté ne vient donc pas de la seule grammaire — elle ne suffirait plus.
+//! Elle vient de la grammaire **et** des bornes que l'hôte impose à l'exécution :
+//! le budget de tours et la profondeur d'appel. Les deux vivent dans l'exécuteur,
+//! jamais dans le module : un module ne peut pas les relever.
 //!
 //! ## Le trajet
 //!

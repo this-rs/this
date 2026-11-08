@@ -63,9 +63,12 @@ pub fn system_prompt() -> &'static str {
 
 GRAMMAR
   fn <name>(<param>: <Type>, ...) -> <Type> { <statements> }
-  let <name>: <Type> = <expression>;
+  let <name>: <Type> = <expression>;      immutable
+  var <name>: <Type> = <expression>;      mutable — that is what `set` changes
+  set <name> = <expression>;              only on a `var`, same type
+  while <condition> { <statements> }      repeats while the condition is true
   if <expression> { <statements> } else { <statements> }
-  the last expression of a block is its value
+  statements end with `;`; the last expression of a block is its value
 
 TYPES
   Int (64-bit), Bool, Str, Unit
@@ -85,21 +88,34 @@ PURE PRIMITIVES
   str_ends_with(s: Str, suffix: Str) -> Bool
   str_contains(s: Str, needle: Str) -> Bool
 
+RECURSION
+  a program may call itself by its own name:
+    fn run(n: Int) -> Int { if n <= 1 { 1 } else { n * run(n - 1) } }
+
+WHY THESE EXIST — a loop is bounded by the host
+  A program is not alone: the host counts iterations. A `while` that never ends
+  fails the program with an error; it never freezes the app that runs it. Write
+  loops that terminate, and prefer a bound you can explain.
+
 WHAT DOES NOT EXIST — do not emit these
-  no loops (no while, for, loop), no recursion, no mutation, no reassignment
+  no `for` or `loop` keyword (use `while`), no mutation other than `set` on a `var`
   no floating point, no arrays, no structs, no generics, no closures
-  no string concatenation with +, no string literals indexing
+  no method calls (`x.len()` is not a thing)
+  no string concatenation with +, no indexing into a string
   no I/O other than emit
 
 ENTRY POINT
   the program must define `fn run(...)`. Its parameters are the inputs, its return
   type is the answer.
 
-EXAMPLE
-  fn run(a: Int) -> Int {
-      let doubled: Int = a * 2;
-      emit("calcul fait");
-      if doubled > 100 { doubled } else { doubled + 1 }
+EXAMPLE — an accumulation, a loop and a condition
+  fn run(limit: Int) -> Int {
+      let start: Int = 1;
+      var i: Int = start;
+      var total: Int = 0;
+      while i <= limit { set total = total + i; set i = i + 1; };
+      emit("somme calculée");
+      if total > 100 { total } else { total * 2 }
   }"#
 }
 
@@ -176,7 +192,8 @@ mod tests {
 
     #[tokio::test]
     async fn a_program_that_does_not_compile_is_refused_with_the_compiler_message() {
-        // Une boucle n'existe pas dans ce langage : le modèle a inventé.
+        // Le corps d'un `while` doit être Unit : une valeur jetée à chaque tour
+        // est refusée, donc ce programme ne compile pas.
         let answer = "```\nfn run() -> Int { while true { 1 } }\n```";
         match draft_from(answer).await {
             Err(Error::NotCompiling { program, message }) => {
@@ -193,8 +210,32 @@ mod tests {
     #[test]
     fn the_prompt_names_what_does_not_exist() {
         let prompt = system_prompt();
-        for absent in ["no loops", "no recursion", "no floating point", "emit"] {
+        for absent in [
+            "no floating point",
+            "no arrays",
+            "no closures",
+            "no method calls",
+            "emit",
+        ] {
             assert!(prompt.contains(absent), "le prompt doit dire : {absent}");
+        }
+    }
+
+    /// Une capacité que le modèle ne connaît pas n'existe pas : la consigne est
+    /// la seule chose qui lui apprend le langage.
+    #[test]
+    fn the_prompt_teaches_loops_mutation_and_recursion() {
+        let prompt = system_prompt();
+        for present in [
+            "var <name>",
+            "set <name>",
+            "while <condition>",
+            "run(n - 1)",
+        ] {
+            assert!(
+                prompt.contains(present),
+                "le prompt doit montrer : {present}"
+            );
         }
     }
 }

@@ -35,9 +35,19 @@ impl Wat {
     pub const EXPORT: &'static str = "run";
 }
 
+/// L'import qui porte le budget de boucle. Il n'est pas dans la table des
+/// primitives : le modèle ne l'écrit jamais, l'émetteur l'insère dans chaque
+/// `while`. Séparé, il ne peut pas être confondu avec une capacité du langage.
+const FUEL: &str = "fuel";
+
 struct Emitter {
     lines: Vec<String>,
     indent: usize,
+    /// Le nom du programme : un appel à ce nom est une récursion, pas un hôte.
+    own: String,
+    /// Ce que le programme rend — un appel récursif dans une branche `if` a
+    /// besoin de son type pour ouvrir le bloc au bon type.
+    returns: Type,
     /// Les chaînes littérales, dans l'ordre d'apparition, avec leur position
     /// dans la mémoire linéaire.
     data: Vec<(u32, Vec<u8>)>,
@@ -117,6 +127,45 @@ impl Emitter {
                 }
                 self.line(format!("local.get {index}"));
             }
+            Expr::Set { name, value } => {
+                let Some((index, _)) = self.local_of(name) else {
+                    return Err(format!("`{name}` n'a pas de local wasm"));
+                };
+                self.expr(value)?;
+                self.line(format!("local.set {index}"));
+            }
+            Expr::While { condition, body } => {
+                // Le nom des étiquettes suit l'indentation : deux boucles
+                // imbriquées ont forcément des indentations différentes, donc
+                // des noms différents. Deux boucles voisines les partagent, ce
+                // qui est sans effet : aucune ne contient l'autre.
+                let label = self.indent;
+                self.line(format!("block $break{label}"));
+                self.indent += 1;
+                self.line(format!("loop $again{label}"));
+                self.indent += 1;
+                // Le budget de tours : une boucle infinie écrite par un modèle
+                // ne doit pas figer l'application qui l'exécute.
+                self.import(FUEL);
+                self.line("call $fuel");
+                self.line("i32.eqz");
+                self.line("if");
+                self.indent += 1;
+                // Budget épuisé : on piège, on ne rend pas un résultat faux.
+                // L'interprète, lui, rend une erreur — les deux échouent.
+                self.line("unreachable");
+                self.indent -= 1;
+                self.line("end");
+                self.expr(condition)?;
+                self.line("i32.eqz");
+                self.line(format!("br_if $break{label}"));
+                self.expr(body)?;
+                self.line(format!("br $again{label}"));
+                self.indent -= 1;
+                self.line("end");
+                self.indent -= 1;
+                self.line("end");
+            }
             Expr::Unary {
                 op: UnOp::Not,
                 expr,
@@ -162,14 +211,21 @@ impl Emitter {
                 for arg in args {
                     self.expr(arg)?;
                 }
-                // La table HOST est la seule source : une primitive qui y figure a son
-                // import, une qui n'y figure pas n'a pas de wasm. Le typeur l'a déjà
-                // refusée ; ce bras ne fait que le redire.
-                let Some(primitive) = check::host_fn(name) else {
-                    return Err(format!("`{name}` n'a pas d'import wasm"));
-                };
-                self.import(primitive.name);
-                self.line(format!("call ${}", primitive.name));
+                // Un appel à son propre nom est une récursion : la pile wasm
+                // borne la profondeur, et un dépassement est un piège, pas un
+                // blocage de l'hôte.
+                if name == &self.own {
+                    self.line(format!("call ${}", Wat::EXPORT));
+                } else {
+                    // La table HOST est la seule source : une primitive qui y figure a
+                    // son import, une qui n'y figure pas n'a pas de wasm. Le typeur l'a
+                    // déjà refusée ; ce bras ne fait que le redire.
+                    let Some(primitive) = check::host_fn(name) else {
+                        return Err(format!("`{name}` n'a pas d'import wasm"));
+                    };
+                    self.import(primitive.name);
+                    self.line(format!("call ${}", primitive.name));
+                }
             }
         }
         Ok(())
@@ -209,7 +265,13 @@ impl Emitter {
                 other => other,
             },
             Expr::Seq(items) => items.last().and_then(|last| self.type_of(last)),
-            Expr::Call { name, .. } => check::host_fn(name).map(|primitive| primitive.returns),
+            Expr::Call { name, .. } => {
+                if name == &self.own {
+                    return Some(self.returns);
+                }
+                check::host_fn(name).map(|primitive| primitive.returns)
+            }
+            Expr::Set { .. } | Expr::While { .. } => Some(Type::Unit),
         }
     }
 
@@ -312,6 +374,8 @@ pub fn emit(function: &Function) -> Result<Wat, String> {
     let mut emitter = Emitter {
         lines: Vec::new(),
         indent: 0,
+        own: function.name.clone(),
+        returns,
         data: Vec::new(),
         imports: Vec::new(),
         locals: function
@@ -342,7 +406,11 @@ pub fn emit(function: &Function) -> Result<Wat, String> {
 
     let mut module = String::from("(module\n");
     for import in &emitter.imports {
-        if let Some(primitive) = check::host_fn(import) {
+        if *import == FUEL {
+            // Le budget de boucle. Ce n'est pas une primitive du langage : le
+            // modèle ne l'écrit pas, l'émetteur l'insère dans chaque `while`.
+            module.push_str("  (import \"host\" \"fuel\" (func $fuel (result i32)))\n");
+        } else if let Some(primitive) = check::host_fn(import) {
             module.push_str(&import_declaration(primitive));
         }
     }
@@ -356,7 +424,7 @@ pub fn emit(function: &Function) -> Result<Wat, String> {
         }
     }
 
-    let mut signature = format!("  (func (export \"{}\")", Wat::EXPORT);
+    let mut signature = format!("  (func ${} (export \"{}\")", Wat::EXPORT, Wat::EXPORT);
     for (index, param) in emitter.params.iter().enumerate() {
         signature.push_str(&format!(
             " (param ${} {})",
@@ -407,7 +475,7 @@ mod tests {
         assert!(
             module
                 .text
-                .contains("(func (export \"run\") (param $0 i64) (result i64)")
+                .contains("(func $run (export \"run\") (param $0 i64) (result i64)")
         );
         assert!(module.text.contains("i64.const 1"));
         assert!(module.text.contains("i64.add"));
@@ -480,7 +548,7 @@ mod tests {
         let module = wat("fn run() -> Unit { emit(\"a\") }");
         assert!(!module.text.contains("(result"), "{}", module.text);
         assert!(
-            module.text.contains("(func (export \"run\")"),
+            module.text.contains("(func $run (export \"run\")"),
             "{}",
             module.text
         );
