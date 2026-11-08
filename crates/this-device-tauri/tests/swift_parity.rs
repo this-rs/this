@@ -11,7 +11,7 @@
 use std::collections::BTreeSet;
 
 use serde_json::json;
-use this_device_tauri::SYSTEM_METHODS;
+use this_device_tauri::{STREAM_METHODS, SYSTEM_METHODS};
 use this_platform::device_bridge::{METHODS, capability_of};
 
 /// Every `@objc public func <name>` declared by the plugin's Swift sources.
@@ -60,6 +60,7 @@ fn every_native_selector_is_reachable_through_the_contract() {
         .iter()
         .copied()
         .chain(SYSTEM_METHODS.iter().copied())
+        .chain(STREAM_METHODS.iter().copied())
         .collect();
     let unreachable: Vec<&String> = swift
         .iter()
@@ -96,7 +97,7 @@ fn every_native_selector_derives_a_capability() {
     for method in swift {
         // État système : lectures passives, aucune capacité consentie — le chemin est
         // `system_state`, pas `capability_of`. Rien à dériver ici.
-        if SYSTEM_METHODS.contains(&method.as_str()) {
+        if SYSTEM_METHODS.contains(&method.as_str()) || STREAM_METHODS.contains(&method.as_str()) {
             continue;
         }
         let args = if matches!(
@@ -128,4 +129,37 @@ fn every_system_method_exists_on_the_native_side() {
         missing.is_empty(),
         "SYSTEM_METHODS lists selectors the native side does not declare: {missing:?}"
     );
+}
+
+#[test]
+fn every_stream_method_exists_on_the_native_side() {
+    let Some(swift) = swift_methods() else {
+        eprintln!("ios/Sources not readable: parity not checked");
+        return;
+    };
+    let missing: Vec<&&str> = STREAM_METHODS
+        .iter()
+        .filter(|m| !swift.contains(**m as &str))
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "STREAM_METHODS lists selectors the native side does not declare: {missing:?}"
+    );
+}
+
+/// Chaque flux que le pont accepte est traité par `streamStart` côté natif : un nom de flux
+/// sans `case` répondrait `not_supported` alors que Rust l'a laissé passer.
+#[test]
+fn every_bridged_stream_has_a_native_case() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("ios/Sources/streams.swift");
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        eprintln!("streams.swift not readable: parity not checked");
+        return;
+    };
+    for stream in this_device_tauri::STREAMS {
+        assert!(
+            text.contains(&format!("case \"{stream}\":")),
+            "{stream} : aucun `case` dans streamStart"
+        );
+    }
 }
