@@ -266,9 +266,14 @@ impl Surface {
 /// C'est ce que `capacites` passe à [`Surface::describe_for`]. Il est ici, et non chez
 /// l'appelant, pour qu'une capacité ajoutée se heurte à un test plutôt qu'à une troncature
 /// silencieuse — le défaut d'origine : la carte ne contenait pas l'appareil parce que rien
-/// ne mesurait ce qu'elle contenait. Mesuré le 08/11/2026, carte entière : 5 798 caractères
-/// sur iOS, 4 838 sur macOS, 664 en navigateur.
-pub const BUDGET_CARTE: usize = 8_000;
+/// ne mesurait ce qu'elle contenait.
+///
+/// Mesuré le 08/11/2026 après le chantier appareil, carte entière : **7 907 caractères sur
+/// iOS** (30 entrées d'appareil), 5 557 sur macOS, 664 en navigateur. L'ancien budget de
+/// 8 000 était à 93 caractères de la troncature : un ajout et la moitié de l'appareil
+/// disparaissait sans le dire. Relevé à 12 000, soit la place d'une poignée d'entrées —
+/// et le test ci-dessous échouera avant que la marge ne soit mangée.
+pub const BUDGET_CARTE: usize = 12_000;
 
 /// La carte réelle du harness, telle qu'elle est **aujourd'hui**.
 ///
@@ -529,7 +534,7 @@ pub fn surface() -> Surface {
             Capability::new(
                 "device.camera.capture",
                 Tier::Shell,
-                "prendre une photo (JPEG borné en pixels et en qualité) : la vidéo n'est pas encore là",
+                "prendre une photo (JPEG borné en pixels et en qualité)",
                 Some("cameraCapturePhoto"),
                 &[Ios, Ipados],
                 Status::Live,
@@ -642,7 +647,7 @@ pub fn surface() -> Surface {
             Capability::new(
                 "device.photos",
                 Tier::Shell,
-                "photothèque : état de la permission et demande (aucune lecture en masse)",
+                "photothèque : état de la permission et demande (la lecture est sous device.photos.read)",
                 Some("photosStatus / photosRequest"),
                 &[Ios, Ipados, Macos],
                 Status::Live,
@@ -736,10 +741,17 @@ pub fn surface() -> Surface {
                 &[Ios, Ipados, Macos],
                 Status::Live,
             ),
+            // L'ÉCRITURE N'EST PAS EXPOSÉE, décision du 08/11/2026. `healthRequest` ne demande
+            // aujourd'hui que la lecture (`toShare: []`), et c'est volontaire : HealthKit ne
+            // permet pas de savoir ensuite ce que l'app a écrit, donc une écriture décidée par
+            // un modèle dans une boucle d'outils serait irréversible ET non attribuable. La
+            // personne lirait « 12 000 pas » sans pouvoir dire d'où ça vient. Si l'écriture
+            // devient nécessaire, elle passe par une capacité distincte avec son propre
+            // consentement et une confirmation à chaque geste — pas par un argument oublié.
             Capability::new(
                 "device.health",
                 Tier::Shell,
-                "santé : lire une mesure (pas, fréquence cardiaque, masse) sur 24 h au plus, et les SÉANCES sur un an au plus",
+                "santé : LECTURE seule — une mesure (pas, fréquence cardiaque, masse) sur 24 h au plus, et les séances sur un an au plus ; l'écriture n'est pas exposée",
                 Some("healthStatus / healthRequest / healthQuantitySample / healthWorkouts"),
                 &[Ios, Ipados],
                 Status::Live,
@@ -755,7 +767,7 @@ pub fn surface() -> Surface {
             Capability::new(
                 "device.speech",
                 Tier::Shell,
-                "transcrire un fichier audio (1 à 60 s), sur l'appareil",
+                "transcrire un fichier audio (1 à 60 s), sur l'appareil — pour une dictée : microphoneStart, puis microphoneStop, puis ce fichier",
                 Some("speechStatus / speechRequest / speechTranscribeFile"),
                 &[Ios, Ipados, Macos],
                 Status::Live,
@@ -964,14 +976,16 @@ mod tests {
             assert!(c.command.is_some(), "{id} doit nommer ses méthodes");
             assert!(c.platforms.contains(&Platform::Ios), "{id}");
         }
-        // Une capacité partielle le dit dans son titre, elle ne se cache pas derrière
-        // « Live » : la photothèque sans lecture en masse est `device.photos` seul.
+        // Une capacité partielle le dit : `device.photos` ne porte que la permission, la
+        // lecture est sous `device.photos.read`. Et la santé dit qu'elle est en LECTURE seule.
         let photos = carte.capability("device.photos").unwrap();
         assert!(
-            photos.title.contains("aucune lecture en masse"),
+            photos.title.contains("device.photos.read"),
             "{}",
             photos.title
         );
+        let health = carte.capability("device.health").unwrap();
+        assert!(health.title.contains("LECTURE seule"), "{}", health.title);
         // Et la capture, qui vient d'arriver, est annoncée avec ses méthodes.
         let capture = carte.capability("device.camera.capture").unwrap();
         assert_eq!(capture.status, Status::Live);
