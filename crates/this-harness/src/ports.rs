@@ -389,5 +389,23 @@ mod tests_vus {
             Rc::ptr_eq(&partage, &mien),
             "c'est LE registre de l'outillage, pas une copie : le partage fait la garantie"
         );
+
+        // Les deux outillages de test traversent aussi leur `call` : ces lignes-là
+        // sont du code ajouté, et un refus muet qui ne s'exécute jamais ne prouve rien.
+        let appel = ToolCall {
+            id: "1".into(),
+            name: "rien".into(),
+            arguments: serde_json::json!({}),
+        };
+        assert!(
+            futures::executor::block_on(SansRegistre.call(&appel))
+                .failed
+                .is_some()
+        );
+        assert!(
+            futures::executor::block_on(AvecRegistre(Rc::clone(&mien)).call(&appel))
+                .failed
+                .is_some()
+        );
     }
 }
