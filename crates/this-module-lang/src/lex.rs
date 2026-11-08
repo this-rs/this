@@ -217,6 +217,27 @@ pub fn lex(source: &str) -> Result<Vec<Lexed>, String> {
                                 "ligne {line}, colonne {column} : chaîne non terminée"
                             ));
                         }
+                        // Trois échappements, pas plus : le guillemet (du JSON dans un
+                        // littéral), la barre elle-même, et le saut de ligne. Un autre
+                        // `\x` est une faute, pas un caractère : on la dit.
+                        Some('\\') => {
+                            width += 2;
+                            match chars.next() {
+                                Some('"') => value.push('"'),
+                                Some('\\') => value.push('\\'),
+                                Some('n') => value.push('\n'),
+                                Some(other) => {
+                                    return Err(format!(
+                                        "ligne {line}, colonne {column} : échappement inconnu `\\{other}` — seuls \\\" \\\\ et \\n existent"
+                                    ));
+                                }
+                                None => {
+                                    return Err(format!(
+                                        "ligne {line}, colonne {column} : chaîne non terminée"
+                                    ));
+                                }
+                            }
+                        }
                         Some(other) => {
                             value.push(other);
                             width += 1;
@@ -321,6 +342,17 @@ mod tests {
     fn a_string_keeps_its_content_and_its_position() {
         let lexed = lex("  \"abc\"").unwrap();
         assert_eq!(lexed[0].token, Token::Str("abc".into()));
+        // Du JSON dans un littéral : les guillemets s'échappent, et la largeur compte
+        // les caractères SOURCE, pas ceux de la valeur.
+        let json = lex("\"{\\\"a\\\":1}\"").unwrap();
+        assert_eq!(json[0].token, Token::Str("{\"a\":1}".into()));
+        assert_eq!(
+            lex("\"x\\ny\"").unwrap()[0].token,
+            Token::Str("x\ny".into())
+        );
+        assert_eq!(lex("\"\\\\\"").unwrap()[0].token, Token::Str("\\".into()));
+        let e = lex("\"\\q\"").unwrap_err();
+        assert!(e.contains("échappement inconnu"), "{e}");
         assert_eq!(lexed[0].span.line, 1);
         assert_eq!(lexed[0].span.column, 3);
     }

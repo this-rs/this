@@ -377,7 +377,7 @@ pub fn surface() -> Surface {
             Capability::new(
                 "modules",
                 Tier::Webview,
-                "installer, relire, lister et exécuter des modules (entités, programmes, chrome)",
+                "installer, relire, lister et exécuter des modules (entités, programmes, chrome). Un programme peut appeler l'appareil et le réseau (device, device_int, device_emit, http_int, http_emit) : il s'exécute alors dans la coquille, et le consentement est demandé au nom du module, une fois par capacité",
                 None,
                 &[Web, Ios, Ipados, Macos, Windows, Linux, Android],
                 Status::Live,

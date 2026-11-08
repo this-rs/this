@@ -63,7 +63,7 @@ pub mod assemble;
 pub use descriptor::{Rule, register_rule};
 
 pub use ast::{Function, Type};
-pub use check::{HOST, HostFn, PURE, check, check_with};
+pub use check::{HOST, HOST_NAVIGATEUR, HostFn, PURE, check, check_with, host_fn};
 pub use eval::{Host, NoHost, Value, run};
 pub use parse::parse;
 pub use wat::{Wat, emit};

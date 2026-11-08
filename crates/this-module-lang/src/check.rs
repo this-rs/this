@@ -15,9 +15,18 @@ pub struct HostFn {
     pub returns: Type,
 }
 
-/// Les primitives d'un **module exécuté** : deux, et deux seulement. L'une écrit
-/// (`emit`), l'autre lit l'horloge (`now`). Tout le reste d'un module est du
-/// calcul pur.
+/// Les primitives d'un **module exécuté**. Deux vivent partout : `emit` écrit un
+/// effet, `now` lit l'horloge. Les autres demandent la **coquille** (l'hôte natif) :
+/// l'appareil et le réseau. Un navigateur ne les fournit pas, parce qu'un appel
+/// d'appareil est asynchrone et consenti — l'hôte qui les exécute le dit par
+/// [`crate::wat::Wat::shell_only`].
+///
+/// Les chaînes du langage sont des littéraux : une primitive peut en recevoir, pas
+/// en rendre une exploitable. L'appareil rend donc un **nombre** ou un **booléen**
+/// au programme, et verse le texte de sa réponse dans les effets, que la personne
+/// et l'agent lisent. La capacité (caméra, position…) est dérivée de la méthode par
+/// l'hôte, jamais déclarée par le programme, et le consentement est demandé au nom
+/// du module, une fois par capacité.
 pub const HOST: &[HostFn] = &[
     HostFn {
         name: "emit",
@@ -29,7 +38,49 @@ pub const HOST: &[HostFn] = &[
         params: &[],
         returns: Type::Int,
     },
+    /// `device(méthode, arguments JSON)` : l'appel a réussi. La réponse va dans les effets.
+    HostFn {
+        name: "device",
+        params: &[Type::Str, Type::Str],
+        returns: Type::Bool,
+    },
+    /// `device_int(méthode, arguments JSON, clé)` : le nombre à cette clé de la réponse.
+    /// Une réponse sans ce nombre est un échec du programme, pas un zéro silencieux.
+    HostFn {
+        name: "device_int",
+        params: &[Type::Str, Type::Str, Type::Str],
+        returns: Type::Int,
+    },
+    /// `device_emit(méthode, arguments JSON, clé)` : verse dans les effets la valeur à
+    /// cette clé (clé vide : toute la réponse).
+    HostFn {
+        name: "device_emit",
+        params: &[Type::Str, Type::Str, Type::Str],
+        returns: Type::Unit,
+    },
+    /// `http_int(url, clé)` : un GET borné, le nombre à cette clé du JSON reçu.
+    HostFn {
+        name: "http_int",
+        params: &[Type::Str, Type::Str],
+        returns: Type::Int,
+    },
+    /// `http_emit(url, clé)` : verse dans les effets la valeur à cette clé (clé vide :
+    /// le corps entier, borné).
+    HostFn {
+        name: "http_emit",
+        params: &[Type::Str, Type::Str],
+        returns: Type::Unit,
+    },
 ];
+
+/// Les primitives qu'un **navigateur** sait fournir à un module compilé en wasm :
+/// synchrones et sans consentement. Tout autre import exige la coquille.
+pub const HOST_NAVIGATEUR: &[&str] = &["emit", "now"];
+
+/// La primitive de [`HOST`] qui porte ce nom.
+pub fn host_fn(name: &str) -> Option<&'static HostFn> {
+    host(HOST, name)
+}
 
 /// Les primitives d'une **règle** : pures, déterministes, sans effet.
 ///
@@ -321,6 +372,57 @@ mod tests {
     #[test]
     fn an_unknown_host_function_is_refused() {
         refuses("fn run() -> Int { exists(\"x\") }", "pas une primitive");
+        // L'appareil : des littéraux en entrée, un nombre ou un booléen en sortie.
+        assert_eq!(
+            check(&parse("fn run() -> Bool { device(\"notificationsPost\", \"{}\") }").unwrap())
+                .unwrap(),
+            Type::Bool
+        );
+        assert_eq!(
+            check(
+                &parse("fn run() -> Int { device_int(\"healthSteps\", \"{}\", \"count\") }")
+                    .unwrap()
+            )
+            .unwrap(),
+            Type::Int
+        );
+        assert_eq!(
+            check(
+                &parse("fn run() -> Unit { device_emit(\"locationCurrent\", \"{}\", \"\") }")
+                    .unwrap()
+            )
+            .unwrap(),
+            Type::Unit
+        );
+        assert_eq!(
+            check(
+                &parse("fn run() -> Int { http_int(\"https://x.test/a.json\", \"n\") }").unwrap()
+            )
+            .unwrap(),
+            Type::Int
+        );
+        assert_eq!(
+            check(
+                &parse("fn run() -> Unit { http_emit(\"https://x.test/a.json\", \"\") }").unwrap()
+            )
+            .unwrap(),
+            Type::Unit
+        );
+        refuses("fn run() -> Bool { device(\"a\") }", "attend 2 argument(s)");
+        refuses(
+            "fn run() -> Int { device_int(\"a\", 3, \"k\") }",
+            "attendu Str, reçu Int",
+        );
+        // Une primitive d'appareil ne peut pas être une règle.
+        assert!(
+            check_with(
+                &parse("fn run() -> Bool { device(\"a\", \"{}\") }").unwrap(),
+                PURE
+            )
+            .is_err()
+        );
+        assert_eq!(host_fn("device").map(|h| h.returns), Some(Type::Bool));
+        assert!(host_fn("exists").is_none());
     }
 
     #[test]
