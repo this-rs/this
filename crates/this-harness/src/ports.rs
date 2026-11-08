@@ -338,3 +338,56 @@ impl Recorder for Recorders {
         }
     }
 }
+
+#[cfg(test)]
+mod tests_vus {
+    use super::*;
+    use crate::wire::{ToolCall, ToolSpec};
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    /// Un outillage qui ne tient aucun registre — le cas de l'immense majorité.
+    struct SansRegistre;
+
+    #[async_trait(?Send)]
+    impl Toolbox for SansRegistre {
+        fn specs(&self) -> Vec<ToolSpec> {
+            Vec::new()
+        }
+        async fn call(&self, _call: &ToolCall) -> Outcome {
+            Outcome::failed("aucun outil", "outillage de test")
+        }
+    }
+
+    /// Un outillage qui tient le sien.
+    struct AvecRegistre(Rc<RefCell<SeenLedger>>);
+
+    #[async_trait(?Send)]
+    impl Toolbox for AvecRegistre {
+        fn specs(&self) -> Vec<ToolSpec> {
+            Vec::new()
+        }
+        fn vus(&self) -> Option<Rc<RefCell<SeenLedger>>> {
+            Some(Rc::clone(&self.0))
+        }
+        async fn call(&self, _call: &ToolCall) -> Outcome {
+            Outcome::failed("aucun outil", "outillage de test")
+        }
+    }
+
+    #[test]
+    fn le_registre_se_partage_quand_l_outillage_en_tient_un() {
+        assert!(
+            SansRegistre.vus().is_none(),
+            "par défaut, aucun registre n'est partagé : une implémentation muette ne casse rien"
+        );
+        let mien = Rc::new(RefCell::new(SeenLedger::new()));
+        let partage = AvecRegistre(Rc::clone(&mien))
+            .vus()
+            .expect("cet outillage en tient un");
+        assert!(
+            Rc::ptr_eq(&partage, &mien),
+            "c'est LE registre de l'outillage, pas une copie : le partage fait la garantie"
+        );
+    }
+}
