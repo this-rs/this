@@ -650,7 +650,7 @@ impl VfsModuleStore {
         //    backport is checked against the versions above it.
         let mut issues = Vec::new();
         for other in self.versions(&desc.name).await? {
-            let other = self.get_checked(&desc.name, &other.version, false).await?;
+            let other = self.get_for_compat(&desc.name, &other.version).await?;
             issues.extend(compat_with(&other, &desc));
         }
         if !issues.is_empty() {
@@ -740,6 +740,38 @@ impl VfsModuleStore {
         if check {
             desc.check(&self.registry, self.profile())
                 .map_err(invalid)?;
+        }
+        Ok(desc)
+    }
+
+    /// La même lecture que [`Self::get_checked`], mais **sans authentifier** le manifeste.
+    ///
+    /// Sert à la vérification de compatibilité d'un `put` : elle compare les étiquettes de
+    /// versions déjà rangées, elle ne sert pas leur code. Exiger la signature là faisait
+    /// échouer TOUT `put` sur un magasin qui garde une version héritée non signée — mesuré
+    /// le 08/11/2026 dans l'Atelier : « atelier 0.7.0 NON rangé — échec :
+    /// this.module.unsigned », alors que l'écriture était signée par la clé de l'appareil.
+    /// `get` reste authentifié : rien de non signé n'est jamais servi.
+    async fn get_for_compat(
+        &self,
+        name: &str,
+        version: &str,
+    ) -> Result<ModuleDescriptor, ContractError> {
+        let dir = self.version_dir(name, version)?;
+        let Some((_, m)) = self.manifest_unverified(name, version).await? else {
+            return Err(ContractError::from(VfsError::NotFound(dir.clone())));
+        };
+        let bytes = self
+            .read_verified(&dir, &m, DESCRIPTOR_FILE)
+            .await?
+            .ok_or_else(|| integrity(&dir, "manifest lists no descriptor"))?;
+        let text =
+            std::str::from_utf8(&bytes).map_err(|_| integrity(&dir, "descriptor is not UTF-8"))?;
+        let desc = ModuleDescriptor::from_json(text)?;
+        if desc.name != name || desc.version != version {
+            return Err(ContractError::framework(codes::MODULE_IDENTITY_MISMATCH)
+                .with_param("path", dir.as_str())
+                .with_param("found", format!("{}@{}", desc.name, desc.version)));
         }
         Ok(desc)
     }
@@ -1704,10 +1736,13 @@ mod signing_tests {
         assert_eq!(err.code, codes::MODULE_UNSIGNED.into());
 
         // Et la conséquence qui comptait : le module redevient ÉCRIVABLE, signé par la
-        // clé de l'appareil, malgré la version héritée à côté.
+        // clé de l'appareil, malgré la version héritée à côté — c'est exactement ce que
+        // fait l'hôte quand il range une nouvelle version d'un module système.
         let writer = VfsModuleStore::new(vfs).with_signing_key("device", signing_key());
+        let mut nouvelle = descriptor();
+        nouvelle.version = "0.0.2".into();
         writer
-            .put(&descriptor(), &[])
+            .put(&nouvelle, &[])
             .await
             .expect("une nouvelle version signée doit pouvoir être rangée");
     }
