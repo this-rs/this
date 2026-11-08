@@ -396,7 +396,12 @@ impl EntityLogic for WasmLogic {
     }
 
     async fn get(&self, row: &Value) -> Result<LogicOutcome, ContractError> {
-        self.handle("get", None, None, row, &[]).await
+        // La ligne demandée est dans `input` ET dans `rows` : un module qui cherche par
+        // identifiant (`req.row(id)`) et un module qui lit `input` doivent tous deux
+        // trouver la ligne. Sans ça, un `get` rendait « introuvable » une ligne qui existe
+        // — mesuré sur le premier module Rust réel.
+        self.handle("get", None, None, row, std::slice::from_ref(row))
+            .await
     }
 
     async fn list(&self, rows: &[Value]) -> Result<LogicOutcome, ContractError> {

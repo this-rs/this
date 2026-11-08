@@ -49,6 +49,16 @@ Accès direct au stockage = v2, décision séparée.
   (plafond `max_rows`, défaut 500). Ce que le module ne voit pas, il ne peut pas le valider :
   l'hôte décide de la portée, jamais le module.
 - `ctx.now_ms` : le temps est une **donnée**, pas un import.
+- **`get`** : `input` **et** `rows` portent la ligne demandée (un module qui cherche par
+  `id` et un module qui lit `input` doivent tous deux la trouver).
+- **`create` / `update`** : le premier effet `put` sur l'entité visée (sans `id` au
+  create, avec le `id` de la ligne à l'update) **est** l'écriture ; l'hôte l'applique et
+  n'écrit pas en plus `output`. Sans un tel effet, `output` fait la ligne.
+- Les champs en lecture seule (`id`, `created_at`, `updated_at`, `type`) rendus par le
+  module sont **retirés** avant validation : un module rend la ligne entière, pas une
+  écriture illégale.
+- **`list`** : `output` est soit un tableau de lignes, soit `{"items": [...], "total": n}`.
+  L'hôte ne garde que les lignes (la pagination est la sienne, pas celle du module).
 
 Précisions de l'implémentation hôte (F1), additives :
 - `update` et `delete` portent aussi `id` (chaîne) au niveau de la requête ; `rows` y contient

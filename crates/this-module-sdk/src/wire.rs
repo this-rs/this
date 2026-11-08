@@ -34,10 +34,14 @@ impl Op {
 pub struct Ctx {
     #[serde(default)]
     pub now_ms: i64,
+    /// Le tenant courant. **`null` est normal** : un hôte qui n'isole pas encore par
+    /// tenant l'envoie absent. Le typer `String` faisait echouer TOUTE requete d'un tel
+    /// hote - mesure sur le premier module Rust reel charge par le framework.
     #[serde(default)]
-    pub tenant: String,
+    pub tenant: Option<String>,
+    /// Le compte appelant, meme remarque que `tenant`.
     #[serde(default)]
-    pub account: String,
+    pub account: Option<String>,
     #[serde(default)]
     pub locale: String,
     #[serde(default)]

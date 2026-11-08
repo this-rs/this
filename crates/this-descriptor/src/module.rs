@@ -43,6 +43,13 @@ pub struct ModuleDescriptor {
     /// Actions déclarées, que les briques `button` et `form` référencent par nom.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub actions: Vec<crate::views::Action>,
+    /// Opérations nommées du module : le geste qu'une action `invoke` déclenche.
+    ///
+    /// Déclarées ici, jamais devinées : l'hôte refuse une action qui référence une
+    /// opération absente, donc un bouton mort ne peut pas être dessiné. C'est le seul
+    /// chemin par lequel le CODE du module est atteignable depuis une interface.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub operations: Vec<OperationDesc>,
     /// Declared message keys and default locale (texts live in `MessageBundle`s).
     #[serde(default)]
     pub i18n: I18nDecl,
@@ -54,6 +61,66 @@ pub struct ModuleDescriptor {
     /// derived with `crate::wami::statements`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime: Option<RuntimeDesc>,
+}
+
+/// Une opération nommée exposée par le module.
+///
+/// Elle porte ce qu'un appelant doit savoir pour l'appeler : le nom, l'entité visée, et
+/// la forme du corps attendu et rendu. Ce n'est PAS une opération CRUD (`Operation`) :
+/// c'est un geste propre au module — « terminer », « envoyer », « recalculer » — que
+/// l'hôte atteint par `handle(op:"call", name:<ici>)` d'un module compilé.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OperationDesc {
+    /// `^[a-z][a-z0-9_]*$`, unique dans le module.
+    pub name: String,
+    /// Texte lisible (`fr` par défaut) : ce que le bouton dit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    /// Entité visée ; `None` = opération de module (aucune ligne en particulier).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entity: Option<String>,
+    /// Forme du corps attendu, en JSON libre (documentaire pour l'hôte et l'agent).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input: Option<serde_json::Value>,
+    /// Forme de la réponse rendue.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output: Option<serde_json::Value>,
+    /// Ce que l'opération fait, en une phrase.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
+impl OperationDesc {
+    pub fn new(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            label: None,
+            entity: None,
+            input: None,
+            output: None,
+            description: None,
+        }
+    }
+
+    pub fn label(mut self, label: impl Into<String>) -> Self {
+        self.label = Some(label.into());
+        self
+    }
+
+    pub fn entity(mut self, entity: impl Into<String>) -> Self {
+        self.entity = Some(entity.into());
+        self
+    }
+
+    pub fn input(mut self, input: serde_json::Value) -> Self {
+        self.input = Some(input);
+        self
+    }
+
+    pub fn output(mut self, output: serde_json::Value) -> Self {
+        self.output = Some(output);
+        self
+    }
 }
 
 /// Dependency on another module.
@@ -79,6 +146,7 @@ impl ModuleDescriptor {
             errors: vec![],
             views: vec![],
             actions: vec![],
+            operations: vec![],
             i18n: I18nDecl::default(),
             custom: vec![],
             runtime: None,

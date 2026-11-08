@@ -85,6 +85,35 @@ impl JsonEntityService {
 
     /// Check the logic's effects (nothing applied), then hand them over once the caller has
     /// done its own write.
+    /// Ne garde d'un corps rendu par le module que les champs que le descripteur
+    /// déclare ÉCRIVABLES.
+    ///
+    /// Un module rend la ligne qu'il veut, entière : `id`, `created_at`, `type`,
+    /// `updated_at` y figurent naturellement (le SDK les remet dans son `output`). Les
+    /// refuser faisait échouer toute opération nommée sur une ligne existante — mesuré
+    /// sur le premier module Rust réel. Les ignorer silencieusement serait pire : le
+    /// module croirait avoir écrit un champ qu'il n'a pas le droit de toucher. Ici ils
+    /// sont **retirés avant validation**, et seul un champ que le descripteur ne connaît
+    /// pas du tout est refusé par `apply`.
+    #[cfg(feature = "wasm-modules")]
+    fn writable_only(&self, body: Value) -> Value {
+        let Value::Object(map) = body else {
+            return body;
+        };
+        let known: std::collections::BTreeSet<&str> = self
+            .entity
+            .desc
+            .fields
+            .iter()
+            .map(|f| f.name.as_str())
+            .collect();
+        Value::Object(
+            map.into_iter()
+                .filter(|(k, _)| known.contains(k.as_str()))
+                .collect(),
+        )
+    }
+
     async fn check_effects(&self, effects: &[Effect]) -> Result<()> {
         if effects.is_empty() {
             return Ok(());
@@ -114,20 +143,13 @@ impl JsonEntityService {
         } else {
             WriteOp::Create
         };
-        let mut payload = body.clone();
-        if let Value::Object(map) = &mut payload {
-            map.remove("id");
-        }
-        apply(&self.entity, op, payload, &self.ctx()).map(|_| ())
+        apply(&self.entity, op, self.writable_only(body.clone()), &self.ctx()).map(|_| ())
     }
 
     #[cfg(feature = "wasm-modules")]
     pub(crate) async fn put_effect(&self, body: Value) -> Result<()> {
         let id = body.get("id").and_then(|v| v.as_str()).map(str::to_string);
-        let mut payload = body;
-        if let Value::Object(map) = &mut payload {
-            map.remove("id");
-        }
+        let payload = self.writable_only(body);
         match id {
             None => {
                 let row = self.store_new(payload).await?;
@@ -348,9 +370,23 @@ impl EntityFetcher for JsonEntityService {
             logic.list(&rows).await.map_err(anyhow::Error::new)?;
         self.check_effects(&effects).await?;
         self.run_effects(effects).await?;
+        // Deux formes admises, et une seule règle : les LIGNES sont ce qui est rendu.
+        // - un tableau : la liste, nue ;
+        // - `{"items": [...], "total": n}` : la liste et son compte, ce qu'un module qui
+        //   filtre veut dire (le `total` porte sur ce qu'il a rendu, l'hôte pagine avant).
+        // Refuser la seconde faisait échouer un module correct — mesuré.
         match output {
             None => Ok(rows),
             Some(Value::Array(items)) => Ok(items),
+            Some(Value::Object(mut map)) => match map.remove("items") {
+                Some(Value::Array(items)) => Ok(items),
+                _ => Err(anyhow::Error::new(
+                    ContractError::framework(codes::INTERNAL).with_param(
+                        "reason",
+                        "logic.list must answer an array or {\"items\": [...]}",
+                    ),
+                )),
+            },
             Some(other) => Err(anyhow::Error::new(
                 ContractError::framework(codes::INTERNAL).with_param(
                     "reason",
@@ -380,7 +416,24 @@ impl EntityCreator for JsonEntityService {
             effects = answer.effects;
             self.check_effects(&effects).await?;
         }
-        let row = self.insert_validated(validated).await?;
+        // Un module qui rend `output` ET un effet `put` ne doit pas créer DEUX lignes
+        // (mesuré : un `create` en produisait deux, et l'id rendu ne désignait plus la
+        // bonne). Règle : le premier `put` sans `id` sur cette entité EST l'écriture, et
+        // il est retiré des effets ; sans un tel effet, `output` fait la ligne.
+        let entity = self.entity.desc.name.clone();
+        let pending = effects.iter().position(|e| {
+            matches!(e, Effect::Put { entity: name, body }
+                if *name == entity && body.get("id").is_none())
+        });
+        let row = match pending {
+            Some(pos) => {
+                let Effect::Put { body, .. } = effects.remove(pos) else {
+                    unreachable!("position came from a Put match")
+                };
+                self.insert_validated(self.writable_only(body)).await?
+            }
+            None => self.insert_validated(validated).await?,
+        };
         self.run_effects(effects).await?;
         // No event here: the write seam is `SurfaceGuard::creator` (which decorates this
         // creator with `PublishingCreator`) for the surfaces that reach the catalog, and the
@@ -412,7 +465,24 @@ impl EntityCreator for JsonEntityService {
             effects = answer.effects;
             self.check_effects(&effects).await?;
         }
-        let row = self.patch_validated(entity_id, patch).await?;
+        // Même règle qu'au create : un `put` qui vise CETTE ligne est la modification
+        // elle-même, pas une seconde écriture.
+        let entity = self.entity.desc.name.clone();
+        let me = entity_id.to_string();
+        let pending = effects.iter().position(|e| {
+            matches!(e, Effect::Put { entity: name, body }
+                if *name == entity && body.get("id").and_then(|v| v.as_str()) == Some(me.as_str()))
+        });
+        let row = match pending {
+            Some(pos) => {
+                let Effect::Put { body, .. } = effects.remove(pos) else {
+                    unreachable!("position came from a Put match")
+                };
+                self.patch_validated(entity_id, self.writable_only(body))
+                    .await?
+            }
+            None => self.patch_validated(entity_id, patch).await?,
+        };
         self.run_effects(effects).await?;
         // No event here: see `create_from_json` (the guard and the REST handlers publish).
         Ok(row)
