@@ -38,34 +38,34 @@ pub const HOST: &[HostFn] = &[
         params: &[],
         returns: Type::Int,
     },
-    /// `device(méthode, arguments JSON)` : l'appel a réussi. La réponse va dans les effets.
+    // `device(méthode, arguments JSON)` : l'appel a réussi. La réponse va dans les effets.
     HostFn {
         name: "device",
         params: &[Type::Str, Type::Str],
         returns: Type::Bool,
     },
-    /// `device_int(méthode, arguments JSON, clé)` : le nombre à cette clé de la réponse.
-    /// Une réponse sans ce nombre est un échec du programme, pas un zéro silencieux.
+    // `device_int(méthode, arguments JSON, clé)` : le nombre à cette clé de la réponse.
+    // Une réponse sans ce nombre est un échec du programme, pas un zéro silencieux.
     HostFn {
         name: "device_int",
         params: &[Type::Str, Type::Str, Type::Str],
         returns: Type::Int,
     },
-    /// `device_emit(méthode, arguments JSON, clé)` : verse dans les effets la valeur à
-    /// cette clé (clé vide : toute la réponse).
+    // `device_emit(méthode, arguments JSON, clé)` : verse dans les effets la valeur à
+    // cette clé (clé vide : toute la réponse).
     HostFn {
         name: "device_emit",
         params: &[Type::Str, Type::Str, Type::Str],
         returns: Type::Unit,
     },
-    /// `http_int(url, clé)` : un GET borné, le nombre à cette clé du JSON reçu.
+    // `http_int(url, clé)` : un GET borné, le nombre à cette clé du JSON reçu.
     HostFn {
         name: "http_int",
         params: &[Type::Str, Type::Str],
         returns: Type::Int,
     },
-    /// `http_emit(url, clé)` : verse dans les effets la valeur à cette clé (clé vide :
-    /// le corps entier, borné).
+    // `http_emit(url, clé)` : verse dans les effets la valeur à cette clé (clé vide :
+    // le corps entier, borné).
     HostFn {
         name: "http_emit",
         params: &[Type::Str, Type::Str],
