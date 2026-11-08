@@ -130,6 +130,12 @@ pub enum Preset {
     Vllm,
     /// OpenRouter: one key, many hosted models.
     OpenRouter,
+    /// NVIDIA NIM: one key, a catalogue of hosted models.
+    ///
+    /// Its `/models` answer is the only useful list — the catalogue is large and it moves —
+    /// so no default model is announced here: the app asks the endpoint and the person
+    /// ticks what they want (see `ProviderConfig::models`).
+    NvidiaNim,
 }
 
 impl Preset {
@@ -143,6 +149,7 @@ impl Preset {
             Self::DeepSeek => "https://api.deepseek.com",
             Self::OpenAi => "https://api.openai.com/v1",
             Self::OpenRouter => "https://openrouter.ai/api/v1",
+            Self::NvidiaNim => "https://integrate.api.nvidia.com/v1",
             Self::OpenAiCompatible => "http://localhost:8080/v1",
         }
     }
@@ -159,6 +166,8 @@ impl Preset {
             Self::DeepSeek => "deepseek-chat",
             Self::OpenAi => "gpt-4o-mini",
             Self::OpenRouter => "openai/gpt-4o-mini",
+            // The catalogue is the list; a name guessed here would be a name that ages.
+            Self::NvidiaNim => "",
         }
     }
 

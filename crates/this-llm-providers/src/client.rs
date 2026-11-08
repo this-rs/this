@@ -344,13 +344,24 @@ impl ProviderClient {
             }
             (Some(name), Err(_)) => (name.clone(), None),
             (None, Ok(models)) => {
-                let first = models
-                    .into_iter()
-                    .next()
+                // La liste cochée est un ORDRE de préférence, pas un filtre : le premier
+                // coché que le moteur annonce gagne, sinon le premier qu'il annonce. Un
+                // modèle coché puis retiré du catalogue ne bloque donc rien.
+                let choisi = self
+                    .config
+                    .models
+                    .iter()
+                    .find_map(|voulu| models.iter().find(|model| &model.id == voulu))
+                    .or_else(|| models.first())
                     .ok_or_else(|| ProviderError::NoModel(self.config.id.to_string()))?;
-                (first.id, first.context_window)
+                (choisi.id.clone(), choisi.context_window)
             }
-            (None, Err(error)) => return Err(error),
+            // Un moteur qui cache sa liste (`/models` en erreur) mais sert un modèle coché
+            // reste utilisable : la fenêtre est inconnue, le plafond n'est pas rétréci.
+            (None, Err(error)) => match self.config.models.first() {
+                Some(premier) => (premier.clone(), None),
+                None => return Err(error),
+            },
         };
         Ok((model, self.config.context_window.or(announced)))
     }
