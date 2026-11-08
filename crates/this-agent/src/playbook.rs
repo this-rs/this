@@ -28,7 +28,7 @@ use crate::substrate::{Context, Section, SectionKind};
 
 /// La version du socle. À incrémenter quand une leçon change de fond : un harnais
 /// peut ainsi savoir qu'il tourne sur un socle plus ancien que le code.
-pub const VERSION: u32 = 1;
+pub const VERSION: u32 = 2;
 
 /// Une leçon : un identifiant stable, un corps court, une source vérifiable.
 fn lecon(id: &str, titre: &str, corps: &str, source: &str) -> Section {
@@ -58,10 +58,11 @@ pub fn seed() -> Vec<Section> {
         lecon(
             "version",
             "Un descripteur modifié exige une version",
-            "Le magasin de modules utilise (nom, version) comme clé : un descripteur qui change \
-             sans que la version change est SILENCIEUSEMENT ignoré — le magasin rend l'ancienne \
-             version, sans erreur. Toute modification d'entité ou de lien impose d'incrémenter \
-             la version.",
+            "Le magasin de modules utilise (nom, version) comme clé : un descripteur qui CHANGE \
+             sans que la version change est REFUSÉ — une version ne se réécrit pas. À l'inverse, \
+             un numéro nouveau pour un contenu IDENTIQUE ne range rien : la version n'est pas un \
+             progrès, le contenu en est un. Toute modification d'entité ou de lien impose donc \
+             d'incrémenter la version APRÈS avoir changé le contenu.",
             "mesuré : desktop-modules est passé de 0.2.0 à 0.3.0 en ajoutant l'entité shipment",
         ),
         lecon(
@@ -88,7 +89,19 @@ pub fn seed() -> Vec<Section> {
              Aujourd'hui : l'écran du module, l'habillage (déclaratif), l'écran de réglages. \
              Pas encore : boot, message, composer, tool. Écrire un module markdown avant que \
              l'emplacement `message` existe produit du code mort — le dire, au lieu de le faire.",
-            "mesuré : 0 occurrence de rendu markdown dans l'app",
+            "mesuré : la carte de capacités répond Missing pour boot, message, composer et tool",
+        ),
+        lecon(
+            "ecran",
+            "Un écran, pas un menu",
+            "Le menu latéral (surface `sidebar`) est une liste de navigation : il OUVRE les \
+             choses. Ce qu'on regarde et ce qu'on manipule vit dans une vue de surface `main`, \
+             dessinée en plein cadre. `header` et `panel` se dessinent AVEC l'écran, jamais sans \
+             lui : ils encadrent `main`, ils ne le remplacent pas. Un module sans vue `main` n'a \
+             pas d'écran, et il n'entre même pas dans le menu : il est invisible, sans un mot. \
+             Un formulaire, un compteur ou un paragraphe posé dans le menu n'est pas « quelque \
+             chose d'affiché » : c'est un écran qu'on n'a pas construit.",
+            "mesuré : l'app ne dessinait que la surface sidebar, donc l'agent y entassait tout",
         ),
         lecon(
             "capacites",
@@ -141,6 +154,7 @@ mod tests {
             "socle.requires",
             "socle.systeme",
             "socle.emplacements",
+            "socle.ecran",
             "socle.capacites",
             "socle.verification",
         ] {
@@ -198,7 +212,9 @@ mod tests {
 
     #[test]
     fn les_lecons_sont_stables_et_versionnees() {
-        assert_eq!(VERSION, 1);
+        // v2 : la leçon `ecran` (08/11/2026). Le numéro ne monte QUE quand une leçon
+        // change de fond ou s'ajoute — c'est ce qui rend un run traçable.
+        assert_eq!(VERSION, 2);
         let a: Vec<String> = seed().into_iter().map(|s| s.id).collect();
         let b: Vec<String> = seed().into_iter().map(|s| s.id).collect();
         assert_eq!(a, b, "l'ordre du socle doit être déterministe");
