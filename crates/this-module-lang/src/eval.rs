@@ -261,6 +261,19 @@ mod tests {
                     Ok(Value::Unit)
                 }
                 ("now", []) => Ok(Value::Int(self.now)),
+                // L'appareil factice : il répond 42 à toute clé, et note l'appel.
+                ("device", [Value::Str(m), Value::Str(a)]) => {
+                    self.emitted.push(format!("{m}({a})"));
+                    Ok(Value::Bool(true))
+                }
+                ("device_int", [Value::Str(m), Value::Str(a), Value::Str(k)]) => {
+                    self.emitted.push(format!("{m}({a}).{k}"));
+                    Ok(Value::Int(42))
+                }
+                ("device_emit", [Value::Str(m), Value::Str(a), Value::Str(k)]) => {
+                    self.emitted.push(format!("{m}({a}).{k} →"));
+                    Ok(Value::Unit)
+                }
                 _ => Err(format!("l'hôte ne connaît pas `{name}` avec ces arguments")),
             }
         }
@@ -376,5 +389,30 @@ mod tests {
         let function = parse("fn run() -> Int { now() }").unwrap();
         let error = run(&function, &[], &mut NoHost).unwrap_err();
         assert!(error.contains("pas d'hôte"), "{error}");
+    }
+
+    #[test]
+    fn un_programme_appelle_l_appareil_et_lit_un_nombre() {
+        let (result, host) = execute_with(
+            "fn run() -> Int { if device(\"notificationsPost\", \"{\\\"title\\\":\\\"ok\\\"}\") { device_int(\"healthSteps\", \"{}\", \"count\") + 1 } else { 0 } }",
+            &[],
+        );
+        assert_eq!(result, Ok(Value::Int(43)));
+        assert_eq!(
+            host.emitted,
+            vec![
+                "notificationsPost({\"title\":\"ok\"})".to_string(),
+                "healthSteps({}).count".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn un_hote_sans_appareil_refuse_sans_rien_executer_d_autre() {
+        let function =
+            parse("fn run() -> Int { device_int(\"healthSteps\", \"{}\", \"count\") }").unwrap();
+        check::check(&function).unwrap();
+        let error = run(&function, &[], &mut NoHost).unwrap_err();
+        assert!(error.contains("device_int"), "{error}");
     }
 }

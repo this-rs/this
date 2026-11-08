@@ -20,6 +20,17 @@ pub struct Wat {
 }
 
 impl Wat {
+    /// Vrai si le programme importe une primitive qu'un navigateur ne fournit pas
+    /// (appareil, réseau) : il doit alors s'exécuter dans la coquille, par l'interprète,
+    /// où ces appels peuvent être asynchrones et consentis.
+    pub fn shell_only(&self) -> bool {
+        self.imports
+            .iter()
+            .any(|import| !check::HOST_NAVIGATEUR.contains(import))
+    }
+}
+
+impl Wat {
     /// Le nom de la fonction exportée. Un module n'en exporte qu'une.
     pub const EXPORT: &'static str = "run";
 }
@@ -151,17 +162,14 @@ impl Emitter {
                 for arg in args {
                     self.expr(arg)?;
                 }
-                match name.as_str() {
-                    "emit" => {
-                        self.import("emit");
-                        self.line("call $emit");
-                    }
-                    "now" => {
-                        self.import("now");
-                        self.line("call $now");
-                    }
-                    other => return Err(format!("`{other}` n'a pas d'import wasm")),
-                }
+                // La table HOST est la seule source : une primitive qui y figure a son
+                // import, une qui n'y figure pas n'a pas de wasm. Le typeur l'a déjà
+                // refusée ; ce bras ne fait que le redire.
+                let Some(primitive) = check::host_fn(name) else {
+                    return Err(format!("`{name}` n'a pas d'import wasm"));
+                };
+                self.import(primitive.name);
+                self.line(format!("call ${}", primitive.name));
             }
         }
         Ok(())
@@ -201,11 +209,7 @@ impl Emitter {
                 other => other,
             },
             Expr::Seq(items) => items.last().and_then(|last| self.type_of(last)),
-            Expr::Call { name, .. } => match name.as_str() {
-                "emit" => Some(Type::Unit),
-                "now" => Some(Type::Int),
-                _ => None,
-            },
+            Expr::Call { name, .. } => check::host_fn(name).map(|primitive| primitive.returns),
         }
     }
 
@@ -274,6 +278,34 @@ fn escape(bytes: &[u8]) -> String {
 }
 
 /// Émet le module. Le programme doit avoir été vérifié par `check::check`.
+/// La déclaration wasm d'une primitive : une chaîne occupe deux i32 (adresse, longueur),
+/// un entier un i64, un booléen un i32, et Unit ne rend rien. C'est la même règle que
+/// [`Emitter::wasm_type`], appliquée à la signature de la table.
+fn import_declaration(primitive: &check::HostFn) -> String {
+    let mut params = String::new();
+    for ty in primitive.params {
+        match ty {
+            Type::Str => params.push_str(" i32 i32"),
+            Type::Int => params.push_str(" i64"),
+            Type::Bool => params.push_str(" i32"),
+            Type::Unit => {}
+        }
+    }
+    let params = if params.is_empty() {
+        String::new()
+    } else {
+        format!(" (param{params})")
+    };
+    let result = match primitive.returns {
+        Type::Unit => String::new(),
+        ty => format!(" (result {})", Emitter::wasm_type(ty)),
+    };
+    format!(
+        "  (import \"host\" \"{n}\" (func ${n}{params}{result}))\n",
+        n = primitive.name
+    )
+}
+
 pub fn emit(function: &Function) -> Result<Wat, String> {
     let returns = check::check(function)?;
 
@@ -310,12 +342,9 @@ pub fn emit(function: &Function) -> Result<Wat, String> {
 
     let mut module = String::from("(module\n");
     for import in &emitter.imports {
-        let declaration = match *import {
-            "emit" => "  (import \"host\" \"emit\" (func $emit (param i32 i32)))\n",
-            "now" => "  (import \"host\" \"now\" (func $now (result i64)))\n",
-            _ => continue,
-        };
-        module.push_str(declaration);
+        if let Some(primitive) = check::host_fn(import) {
+            module.push_str(&import_declaration(primitive));
+        }
     }
     if !emitter.data.is_empty() {
         module.push_str("  (memory (export \"memory\") 1)\n");
@@ -476,5 +505,27 @@ mod tests {
     fn an_ill_typed_program_is_refused_before_emitting() {
         let function = parse("fn run() -> Bool { 1 }").unwrap();
         assert!(emit(&function).is_err());
+    }
+
+    #[test]
+    fn une_primitive_d_appareil_a_son_import_et_marque_la_coquille() {
+        let function =
+            parse("fn run() -> Int { device_int(\"healthSteps\", \"{}\", \"count\") }").unwrap();
+        let wat = emit(&function).unwrap();
+        assert_eq!(wat.imports, vec!["device_int"]);
+        assert!(wat.text.contains(
+            "(import \"host\" \"device_int\" (func $device_int (param i32 i32 i32 i32 i32 i32) (result i64)))"
+        ));
+        assert!(wat.shell_only());
+        let pur = emit(&parse("fn run() -> Int { emit(\"a\"); now() }").unwrap()).unwrap();
+        assert!(!pur.shell_only());
+        assert!(
+            pur.text
+                .contains("(import \"host\" \"emit\" (func $emit (param i32 i32)))")
+        );
+        assert!(
+            pur.text
+                .contains("(import \"host\" \"now\" (func $now (result i64)))")
+        );
     }
 }
