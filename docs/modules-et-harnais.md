@@ -19,7 +19,7 @@ Mesuré le 08/11/2026.
 | **Agir sur son harnais** | ❌ | 33 outils, aucun ne change les bornes, le modèle ou le consigne du harnais |
 | **Widget / LockWidget / Activity / Island** | ⚠️ | surfaces déclarables, rendues par un autre processus ; l'extension iOS de l'Atelier ne lit pas encore les vues de module |
 
-## Les intentions : cinq sur seize
+## Les intentions : six sur seize
 
 Une vue déclare des actions (`Intent`). L'hôte en exécute **cinq** :
 
@@ -30,7 +30,7 @@ Une vue déclare des actions (`Intent`). L'hôte en exécute **cinq** :
 | `Reload`, `Select`, `Open`, `Edit`, `Navigate`, `Dismiss` | ⚪ rendues sans effet : le rendu s'en occupe, ou l'hôte n'a pas d'état à changer |
 | `Tool` (piloter l'agent) | ❌ refusée |
 | `Send` (poster dans le fil) | ❌ refusée |
-| `Capability` (demander une autorisation) | ❌ refusée — la porte existe pourtant (`gate`) |
+| `Capability` (enregistrer la décision de la personne sur un accès appareil) | ✅ **livrée** — avec un garde : la décision n'est enregistrée que si une question est réellement en attente (`ask`), sinon un module s'octroierait un accès que personne n'a vu demander |
 | `Invoke`, `RequestAccess`, `Reload`, `Select`, `Open`, `Edit`, `Navigate` | ❌ refusées |
 
 Une intention refusée répond « pas branché » : c'est honnête, mais ça veut dire
@@ -50,9 +50,11 @@ ligne.
 5. **Agir sur son harnais** — un ou deux outils explicites, bornés et consentis :
    lire sa configuration, la modifier. Aujourd'hui un module ne peut rien dire du
    harnais qui l'exécute.
-6. **`Intent::Capability`** — une vue de module qui demande un accès appareil : la
-   porte (`this_platform::device_bridge::gate`) et la carte des capacités existent,
-   l'intention reste à brancher.
+6. ~~**`Intent::Capability`**~~ — **fait**, avec un garde : la décision n'est
+   enregistrée que si une question est en attente. Et le contrat de vues ne
+   connaissait que **cinq** capacités (caméra, micro, position, écran, mouvement) :
+   `DeviceCapability` porte maintenant les vingt et une du pont, `screen` et
+   `device_motion` restant explicitement sans équivalent.
 
 Chaque point est vérifiable : la preuve est un fichier et une ligne, pas une
 intention. Tant qu'un point est ❌ ou ⚠️, « un module peut tout faire » est faux, et
