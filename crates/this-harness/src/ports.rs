@@ -5,7 +5,9 @@
 //! fois — dans une page et dans une coquille native, par exemple.
 
 use std::cell::Cell;
+use std::cell::RefCell;
 use std::rc::Rc;
+use this_agent::cite::SeenLedger;
 
 use async_trait::async_trait;
 
@@ -87,6 +89,20 @@ pub trait Toolbox {
     /// (`install_module`, `row_create`, `remember`…), comme avant.
     fn declarations(&self) -> Vec<Declaration> {
         Vec::new()
+    }
+
+    /// Le registre des ids que cet outillage a fait PARAÎTRE.
+    ///
+    /// Le contexte du tour s'en sert pour que les ids qu'il montre au modèle
+    /// comptent comme lus. Sans ce partage, le contexte et les outils tiennent
+    /// deux comptes séparés : une citation vérifiée par l'un est « jamais
+    /// parue » pour l'autre, et la preuve se contredit elle-même.
+    ///
+    /// Par défaut `None` : un outillage qui ne tient pas de registre n'en
+    /// partage pas. Une implémentation qui en tient un doit rendre LE SIEN,
+    /// pas une copie — c'est le partage qui fait la garantie.
+    fn vus(&self) -> Option<Rc<RefCell<SeenLedger>>> {
+        None
     }
 
     /// Exécute un appel et rend ce que le modèle lira, plus l'observation.
