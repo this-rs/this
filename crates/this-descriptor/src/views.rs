@@ -1675,10 +1675,12 @@ mod tests {
         );
         // capacité — `bluetooth` est VALIDE depuis le 08/11/2026 : le nom doit être inconnu,
         // sinon ce test cesse de tester ce qu'il annonce.
-        assert!(serde_json::from_str::<Action>(
-            r#"{"kind":"device_capability","name":"b","capability":"teleport","grant":"allow"}"#
-        )
-        .is_err());
+        assert!(
+            serde_json::from_str::<Action>(
+                r#"{"kind":"device_capability","name":"b","capability":"teleport","grant":"allow"}"#
+            )
+            .is_err()
+        );
         // opération d'agent libre
         assert!(
             serde_json::from_str::<Action>(r#"{"kind":"agent_tool","name":"a","op":"rm -rf"}"#)
