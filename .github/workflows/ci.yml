@@ -513,6 +513,41 @@ jobs:
   # `if: always()` makes it report even when a dependency failed, which is the
   # whole point: a red CI must be able to block a merge. A skipped job counts as
   # fine here, and that is honest — a docs-only PR genuinely had nothing to check.
+  # Les sources Swift du pont iOS ne sont compilées par AUCUN job : le crate
+  # `tauri-plugin-this-device` est hors workspace, et `cargo build --target
+  # aarch64-apple-ios` ne compile que le Rust (mesuré le 08/11/2026 : un `touch` sur
+  # un `.swift` ne déclenche aucune recompilation). Cinq erreurs Swift ont donc vécu
+  # dans `main` jusqu'à ce qu'une session construise l'app pour de vrai (PR #185).
+  #
+  # On ne peut pas lancer `cargo tauri ios build` en CI (il faut Xcode et le projet
+  # de l'app), mais les fichiers qui n'importent PAS Tauri — les moteurs :
+  # CoreBluetooth, AVFoundation, et les types de réponse — se type-checkent avec le
+  # SDK iOS. C'est la partie qu'on pouvait casser sans qu'aucun voyant ne s'allume.
+  swift_ios:
+    # Skipped when the change is documentation-only (see `changes`).
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    name: Swift (moteurs iOS)
+    runs-on: macos-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Type-check the iOS sources that do not import Tauri
+        run: |
+          set -euo pipefail
+          if ! xcrun --sdk iphoneos --show-sdk-path >/dev/null 2>&1; then
+            echo "pas de SDK iOS sur ce runner : rien à vérifier (le job ne prétend pas passer)"
+            exit 0
+          fi
+          cd crates/this-device-tauri/ios/Sources
+          # `grep -L` : les fichiers SANS `import Tauri`. Les sélecteurs `@objc` (qui
+          # importent Tauri) ne peuvent être vérifiés que par un build d'app complet.
+          files=$(grep -L "import Tauri" *.swift | tr '\n' ' ')
+          echo "fichiers vérifiés : $files"
+          # shellcheck disable=SC2086
+          xcrun --sdk iphoneos swiftc -typecheck -target arm64-apple-ios17.0 $files
+
   # Les crates wasm-only portent leur propre `[workspace]`, donc ils sont absents
   # de `cargo check --workspace` : aucun job ne les compilait. Cinq crates — dont
   # l'interface Leptos et le client des protocoles — pouvaient cesser de compiler
@@ -629,7 +664,7 @@ jobs:
   gate:
     name: CI gate
     if: always()
-    needs: [changes, test, coverage, fmt, clippy, examples, security_audit, docs, cross-platform, wasm_crates, obrain]
+    needs: [changes, test, coverage, fmt, clippy, examples, security_audit, docs, cross-platform, wasm_crates, obrain, swift_ios]
     runs-on: ubuntu-latest
     steps:
       - name: Nothing failed, nothing was cancelled
