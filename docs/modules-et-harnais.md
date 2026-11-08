@@ -19,17 +19,18 @@ Mesuré le 08/11/2026.
 | **Agir sur son harnais** | ❌ | 33 outils, aucun ne change les bornes, le modèle ou le consigne du harnais |
 | **Widget / LockWidget / Activity / Island** | ⚠️ | surfaces déclarables, rendues par un autre processus ; l'extension iOS de l'Atelier ne lit pas encore les vues de module |
 
-## Les intentions : quatre sur quinze
+## Les intentions : six sur seize
 
-Une vue déclare des actions (`Intent`). L'hôte en exécute **quatre** :
+Une vue déclare des actions (`Intent`). L'hôte en exécute **cinq** :
 
 | Intention | État |
 |---|---|
 | `Create`, `Update`, `Delete`, `Link` | ✅ exécutées (`ecran.rs::executer`) |
-| `Run` (lancer un programme du module) | ❌ **refusée** — alors que le programme est déjà joignable par l'outil `run_program` |
-| `Send` (poster dans le fil) | ❌ refusée |
+| `Run` (lancer un programme du module) | ✅ **livrée** — `lancer_programme` est sorti de l'outil `run_program` pour être joignable depuis une vue |
+| `Reload`, `Select`, `Open`, `Edit`, `Navigate`, `Dismiss` | ⚪ rendues sans effet : le rendu s'en occupe, ou l'hôte n'a pas d'état à changer |
 | `Tool` (piloter l'agent) | ❌ refusée |
-| `Capability` (demander une autorisation) | ❌ refusée — la porte existe pourtant (`gate`) |
+| `Send` (poster dans le fil) | ❌ refusée |
+| `Capability` (enregistrer la décision de la personne sur un accès appareil) | ✅ **livrée** — avec un garde : la décision n'est enregistrée que si une question est réellement en attente (`ask`), sinon un module s'octroierait un accès que personne n'a vu demander |
 | `Invoke`, `RequestAccess`, `Reload`, `Select`, `Open`, `Edit`, `Navigate` | ❌ refusées |
 
 Une intention refusée répond « pas branché » : c'est honnête, mais ça veut dire
@@ -40,9 +41,8 @@ ligne.
 
 1. **Menus riches** — dessiner une vue `sidebar` avec le même moteur que `main`
    quand sa racine n'est pas une liste (le chemin rapide reste pour les listes).
-2. **`Intent::Run`** — un bouton qui lance un programme du module. La mécanique
-   existe (`run_program`) ; il faut l'extraire de `run_tool` pour l'appeler depuis
-   `ecran::executer`.
+2. ~~**`Intent::Run`**~~ — **fait** : `lancer_programme` est une fonction publique,
+   appelée par l'outil `run_program` et par l'intention.
 3. **`Intent::Send`** — poster dans le fil de l'app depuis une vue de module.
 4. **Représentations dans le chat** — une manière déclarative pour qu'un module
    ajoute une bulle ou un composant à une conversation (par exemple une brique
@@ -50,9 +50,11 @@ ligne.
 5. **Agir sur son harnais** — un ou deux outils explicites, bornés et consentis :
    lire sa configuration, la modifier. Aujourd'hui un module ne peut rien dire du
    harnais qui l'exécute.
-6. **`Intent::Capability`** — une vue de module qui demande un accès appareil : la
-   porte (`this_platform::device_bridge::gate`) et la carte des capacités existent,
-   l'intention reste à brancher.
+6. ~~**`Intent::Capability`**~~ — **fait**, avec un garde : la décision n'est
+   enregistrée que si une question est en attente. Et le contrat de vues ne
+   connaissait que **cinq** capacités (caméra, micro, position, écran, mouvement) :
+   `DeviceCapability` porte maintenant les vingt et une du pont, `screen` et
+   `device_motion` restant explicitement sans équivalent.
 
 Chaque point est vérifiable : la preuve est un fichier et une ligne, pas une
 intention. Tant qu'un point est ❌ ou ⚠️, « un module peut tout faire » est faux, et

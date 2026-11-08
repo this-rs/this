@@ -540,6 +540,29 @@ pub enum DeviceCapability {
     Location,
     Screen,
     DeviceMotion,
+    // Les capacités du pont d'appareil (`this_platform::capability::Capability`), ajoutées le
+    // 08/11/2026. Sans elles, une vue de module ne pouvait demander que cinq accès sur
+    // vingt et une : ni Bluetooth, ni NFC, ni contacts, ni calendrier, ni santé, ni photos…
+    // `Screen` et `DeviceMotion` n'ont PAS d'équivalent dans le pont : un hôte qui les reçoit
+    // ne peut rien demander, et doit le dire plutôt que d'inventer une capacité.
+    Contacts,
+    Calendar,
+    Health,
+    Bluetooth,
+    Gyroscope,
+    MotionActivity,
+    Nfc,
+    LocationAlways,
+    Speech,
+    FaceId,
+    Photos,
+    PhotosPick,
+    FilesPick,
+    Clipboard,
+    Share,
+    Notifications,
+    LiveActivity,
+    LocalNetwork,
 }
 
 /// Les problèmes de vues et d'actions d'un module, sous forme `(raison, chemin, message)`.
@@ -1650,11 +1673,14 @@ mod tests {
             serde_json::from_str::<Action>(r#"{"kind":"publish","name":"p","entity":"invoice"}"#)
                 .is_err()
         );
-        // capacité
-        assert!(serde_json::from_str::<Action>(
-            r#"{"kind":"device_capability","name":"b","capability":"bluetooth","grant":"allow"}"#
-        )
-        .is_err());
+        // capacité — `bluetooth` est VALIDE depuis le 08/11/2026 : le nom doit être inconnu,
+        // sinon ce test cesse de tester ce qu'il annonce.
+        assert!(
+            serde_json::from_str::<Action>(
+                r#"{"kind":"device_capability","name":"b","capability":"teleport","grant":"allow"}"#
+            )
+            .is_err()
+        );
         // opération d'agent libre
         assert!(
             serde_json::from_str::<Action>(r#"{"kind":"agent_tool","name":"a","op":"rm -rf"}"#)
