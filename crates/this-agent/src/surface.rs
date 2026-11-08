@@ -899,6 +899,211 @@ pub fn surface() -> Surface {
                 &[Ios, Ipados],
                 Status::Live,
             ),
+            // ---- étage coquille : le matériel et le système PAS ENCORE LIVRÉS
+            //
+            // Suite du chantier appareil : la carte nomme ce qu'un module POURRA appeler, et
+            // tout est `Missing` parce que rien ne le sert aujourd'hui. Chaque titre dit
+            // POURQUOI (permission du système, entitlement du profil, ou pont natif à écrire) —
+            // c'est ce qui permet de la faire passer `Live` une par une en nommant le vrai
+            // obstacle, au lieu d'inventer une commande qui n'existe pas.
+            //
+            // Aucune n'est `Live` (le marquer serait un mensonge). Ce qui existe DÉJÀ — caméra,
+            // micro, Bluetooth, NFC, gyroscope, localisation, presse-papiers, sélecteur de
+            // fichiers, partage, biométrie, contacts, calendrier, photos, santé, parole, pas et
+            // fréquence cardiaque — reste sous `device.*` ou son nom court ; on ne le duplique
+            // pas ici sous un second nom.
+            Capability::new(
+                "audio_playback",
+                Tier::Shell,
+                "lire un son : aucun pont natif n'expose la lecture audio",
+                None,
+                &[Ios, Ipados, Macos, Android, Windows, Linux],
+                Status::Missing,
+            ),
+            Capability::new(
+                "video_playback",
+                Tier::Shell,
+                "lire une vidéo : aucun pont natif n'expose la lecture vidéo",
+                None,
+                &[Ios, Ipados, Macos, Android, Windows, Linux],
+                Status::Missing,
+            ),
+            Capability::new(
+                "wifi",
+                Tier::Shell,
+                "état et contrôle du Wi-Fi : pas de pont (permission réseau à exposer)",
+                None,
+                &[Ios, Ipados, Macos, Android, Windows, Linux],
+                Status::Missing,
+            ),
+            Capability::new(
+                "uwb",
+                Tier::Shell,
+                "bande ultra-large : entitlement UWB et pont à écrire (iPhone)",
+                None,
+                &[Ios],
+                Status::Missing,
+            ),
+            Capability::new(
+                "cellular_info",
+                Tier::Shell,
+                "opérateur et signal cellulaires : pas de pont (CoreTelephony)",
+                None,
+                &[Ios, Ipados, Android],
+                Status::Missing,
+            ),
+            Capability::new(
+                "accelerometer",
+                Tier::Shell,
+                "accéléromètre : pas de pont (seul le gyroscope est exposé)",
+                None,
+                &[Ios, Ipados, Android],
+                Status::Missing,
+            ),
+            Capability::new(
+                "magnetometer",
+                Tier::Shell,
+                "boussole : pas de pont",
+                None,
+                &[Ios, Ipados, Android],
+                Status::Missing,
+            ),
+            Capability::new(
+                "barometer",
+                Tier::Shell,
+                "pression atmosphérique : pas de pont",
+                None,
+                &[Ios, Ipados, Android],
+                Status::Missing,
+            ),
+            Capability::new(
+                "proximity",
+                Tier::Shell,
+                "détecteur de proximité : pas de pont",
+                None,
+                &[Ios, Ipados, Android],
+                Status::Missing,
+            ),
+            Capability::new(
+                "ambient_light",
+                Tier::Shell,
+                "luminosité ambiante : pas de pont",
+                None,
+                &[Ios, Ipados, Android],
+                Status::Missing,
+            ),
+            Capability::new(
+                "print",
+                Tier::Shell,
+                "imprimer via le système : pas de pont",
+                None,
+                &[Ios, Ipados, Macos, Android, Windows, Linux],
+                Status::Missing,
+            ),
+            Capability::new(
+                "document_scan",
+                Tier::Shell,
+                "scanner un document (Vision) : pas de pont",
+                None,
+                &[Ios, Ipados],
+                Status::Missing,
+            ),
+            Capability::new(
+                "notification_push",
+                Tier::Shell,
+                "notifications distantes (APNs/FCM) : entitlement et pont à écrire",
+                None,
+                &[Ios, Ipados, Android],
+                Status::Missing,
+            ),
+            Capability::new(
+                "badge",
+                Tier::Shell,
+                "pastille sur l'icône de l'app : pas de pont",
+                None,
+                &[Ios, Ipados, Macos, Android],
+                Status::Missing,
+            ),
+            Capability::new(
+                "keychain",
+                Tier::Shell,
+                "trousseau de clés : pas de pont (entitlement Keychain)",
+                None,
+                &[Ios, Ipados, Macos],
+                Status::Missing,
+            ),
+            Capability::new(
+                "secure_storage",
+                Tier::Shell,
+                "stockage chiffré persistant : pas de pont",
+                None,
+                &[Ios, Ipados, Macos, Android, Windows, Linux],
+                Status::Missing,
+            ),
+            Capability::new(
+                "text_to_speech",
+                Tier::Shell,
+                "synthèse vocale : pas de pont",
+                None,
+                &[Ios, Ipados, Macos, Android, Windows, Linux],
+                Status::Missing,
+            ),
+            Capability::new(
+                "network_state",
+                Tier::Shell,
+                "état du réseau (en ligne, type) : pas de pont",
+                None,
+                &[Ios, Ipados, Macos, Android, Windows, Linux],
+                Status::Missing,
+            ),
+            Capability::new(
+                "battery",
+                Tier::Shell,
+                "niveau et état de la batterie : pas de pont",
+                None,
+                &[Ios, Ipados, Macos, Android, Windows, Linux],
+                Status::Missing,
+            ),
+            Capability::new(
+                "screen_state",
+                Tier::Shell,
+                "luminosité et verrouillage de l'écran : pas de pont",
+                None,
+                &[Ios, Ipados, Android],
+                Status::Missing,
+            ),
+            Capability::new(
+                "device_info",
+                Tier::Shell,
+                "modèle, OS et identifiants de l'appareil : pas de pont",
+                None,
+                &[Ios, Ipados, Macos, Android, Windows, Linux],
+                Status::Missing,
+            ),
+            Capability::new(
+                "locale",
+                Tier::Shell,
+                "langue et région du système : pas de pont",
+                None,
+                &[Ios, Ipados, Macos, Android, Windows, Linux],
+                Status::Missing,
+            ),
+            Capability::new(
+                "volume",
+                Tier::Shell,
+                "volume audio du système : pas de pont",
+                None,
+                &[Ios, Ipados, Macos, Android, Windows, Linux],
+                Status::Missing,
+            ),
+            Capability::new(
+                "ar_session",
+                Tier::Shell,
+                "session de réalité augmentée (ARKit) : entitlement et pont à écrire",
+                None,
+                &[Ios, Ipados],
+                Status::Missing,
+            ),
             // ---- étage natif
             Capability::new(
                 "widget",
@@ -1427,10 +1632,19 @@ mod couverture {
         let livres = carte.live().count();
         let attendus = carte.missing().count();
         assert_eq!(livres + attendus, carte.capabilities.len());
-        assert!(
-            livres > 0 && attendus > 0,
-            "les deux familles doivent exister"
-        );
+        // Le compte est exact, pas « au moins » : une capacité ajoutée ou retirée sans le
+        // dire se voit ici, avant que la carte ne mente à l'agent.
+        assert_eq!(livres, 49, "nombre de capacités Live");
+        assert_eq!(attendus, 37, "nombre de capacités Missing");
+        // Aucun identifiant en double : un module ne doit jamais hésiter entre deux entrées.
+        let mut vus = std::collections::BTreeSet::new();
+        for capacite in &carte.capabilities {
+            assert!(
+                vus.insert(capacite.id.clone()),
+                "identifiant en double : {}",
+                capacite.id
+            );
+        }
     }
 
     #[test]
