@@ -495,6 +495,63 @@ pub fn surface() -> Surface {
                 &[Ios, Ipados, Macos, Windows, Linux, Android],
                 Status::Missing,
             ),
+            // ---- état système : lectures passives, sans consentement
+            //
+            // Modèle, batterie, réseau, langue, écran, volume : ce que la coquille sait de
+            // l'appareil SANS demander de permission ni porter d'entitlement. Chemin distinct
+            // du pont `device.*` (consenti) : une commande unique `system_state`, et chaque
+            // méthode est un sélecteur Swift du plugin (`ios/Sources/system_state.swift`).
+            Capability::new(
+                "device_info",
+                Tier::Shell,
+                "appareil : modèle, système et version",
+                Some("system_state (deviceInfo)"),
+                &[Ios, Ipados],
+                Status::Live,
+            ),
+            Capability::new(
+                "battery",
+                Tier::Shell,
+                "niveau et état de charge de la batterie",
+                Some("system_state (batteryLevel)"),
+                &[Ios, Ipados],
+                Status::Live,
+            ),
+            Capability::new(
+                "network_state",
+                Tier::Shell,
+                "connectivité réseau : connecté ou non, et le type d'interface",
+                Some("system_state (networkState)"),
+                &[Ios, Ipados],
+                Status::Live,
+            ),
+            Capability::new(
+                "locale",
+                Tier::Shell,
+                "langue et région du système",
+                Some("system_state (locale)"),
+                &[Ios, Ipados],
+                Status::Live,
+            ),
+            Capability::new(
+                "screen_state",
+                Tier::Shell,
+                "luminosité et échelle de l'écran",
+                Some("system_state (screenState)"),
+                &[Ios, Ipados],
+                Status::Live,
+            ),
+            // Le volume système n'est PAS lisible sur iOS sans session audio active : la
+            // méthode `volume` du pont le refuse honnêtement (`not_supported`). La capacité
+            // reste donc `Missing`, avec la raison — une information, pas un échec.
+            Capability::new(
+                "volume",
+                Tier::Shell,
+                "volume du système — indisponible sur iOS : aucune lecture du volume système sans session audio active",
+                Some("system_state (volume)"),
+                &[Ios, Ipados],
+                Status::Missing,
+            ),
             Capability::new(
                 "background",
                 Tier::Shell,
@@ -1328,6 +1385,59 @@ mod tests {
         assert_eq!(
             surface().with_limits(&aucune).capabilities,
             surface().capabilities
+        );
+    }
+
+    /// Les six lectures d'état système existent, au bon étage et sur la bonne plateforme.
+    /// Cinq sont `Live` (le pont les rend) ; `volume` reste `Missing` parce qu'iOS ne lit pas
+    /// le volume système sans session audio active — la raison est dans le titre, pas tuée.
+    #[test]
+    fn les_six_lectures_d_etat_systeme_sont_dans_la_carte() {
+        let carte = surface();
+        for id in [
+            "device_info",
+            "battery",
+            "network_state",
+            "locale",
+            "screen_state",
+        ] {
+            let c = carte
+                .capability(id)
+                .unwrap_or_else(|| panic!("{id} absent de la carte"));
+            assert_eq!(c.tier, Tier::Shell, "{id}");
+            assert_eq!(c.status, Status::Live, "{id}");
+            assert!(c.command.is_some(), "{id} doit nommer sa commande");
+            assert!(c.platforms.contains(&Platform::Ios), "{id}");
+        }
+        let volume = carte.capability("volume").unwrap();
+        assert_eq!(volume.tier, Tier::Shell);
+        assert_eq!(volume.status, Status::Missing);
+        assert!(
+            volume.title.contains("indisponible sur iOS"),
+            "{}",
+            volume.title
+        );
+        // Chacune nomme `system_state` et son sélecteur natif.
+        for (id, methode) in [
+            ("device_info", "deviceInfo"),
+            ("battery", "batteryLevel"),
+            ("network_state", "networkState"),
+            ("locale", "locale"),
+            ("screen_state", "screenState"),
+            ("volume", "volume"),
+        ] {
+            let commande = carte.capability(id).unwrap().command.clone().unwrap();
+            assert!(
+                commande.contains("system_state") && commande.contains(methode),
+                "{id} : commande « {commande} » ne nomme ni system_state ni {methode}"
+            );
+        }
+        // La carte iOS reste dans le budget annoncé malgré les six entrées de plus.
+        let texte = carte.describe_for(Platform::Ios, usize::MAX);
+        assert!(
+            texte.chars().count() <= BUDGET_CARTE,
+            "ios : {} caractères, budget {BUDGET_CARTE}",
+            texte.chars().count()
         );
     }
 
