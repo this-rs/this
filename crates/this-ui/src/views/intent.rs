@@ -125,6 +125,19 @@ pub enum Intent {
     /// The chat composer was submitted. No action of the contract covers it: the host maps
     /// it onto the module's own send-message action.
     Send { entity: String, text: String },
+    /// The person answered a question the agent asked and is waiting on.
+    ///
+    /// No action of the contract covers it: the question is not a row of the module, it is
+    /// the agent's gateway (`id`), and the answer is what the person typed or chose. The
+    /// host hands it back to that gateway; the module is not called at all.
+    Answer {
+        /// The entity the card reads, for the host's logs.
+        entity: String,
+        /// The gateway's identifier — the `id` of the row the card drew.
+        id: String,
+        /// What the person answered.
+        choice: String,
+    },
     /// A relation was edited.
     Link {
         entity: String,
@@ -180,6 +193,7 @@ impl Intent {
             | Intent::Link { entity, .. }
             | Intent::Run { entity, .. }
             | Intent::Reload { entity }
+            | Intent::Answer { entity, .. }
             | Intent::RequestAccess { entity } => Some(entity),
             Intent::Tool { entity, .. } | Intent::Invoke { entity, .. } => entity.as_deref(),
             Intent::Navigate { .. }
@@ -220,6 +234,7 @@ impl Intent {
             Intent::Open { .. } => "open",
             Intent::Edit { .. } => "edit",
             Intent::Send { .. } => "send",
+            Intent::Answer { .. } => "answer",
             Intent::Link { .. } => "link",
             Intent::Run { .. } => "run",
             Intent::Reload { .. } => "reload",

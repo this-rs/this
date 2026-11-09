@@ -61,3 +61,13 @@ pub const ONLINE: &str = "En ligne";
 pub const OFFLINE: &str = "Hors ligne";
 /// Metrics brick with no rows.
 pub const ZERO: &str = "0";
+/// Thread window: the button that widens it towards older messages.
+pub const OLDER: &str = "Voir les anciens";
+pub const OLDER_HIDDEN: &str = "au-dessus";
+/// The question card the agent poses inside a thread.
+pub const QUESTION: &str = "Question";
+pub const ANSWER: &str = "Répondre";
+pub const ANSWERED: &str = "répondu";
+pub const ANSWER_FREE: &str = "Autre réponse…";
+/// A tool step, when the row carries one but says nothing about it.
+pub const STEP: &str = "outil";

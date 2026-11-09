@@ -123,6 +123,8 @@ fn filter_of(brick: &Brick) -> Option<&this_descriptor::FilterExpr> {
         | Brick::Chat { filter, .. }
         | Brick::Message { filter, .. }
         | Brick::ToolStep { filter, .. }
+        | Brick::Question { filter, .. }
+        | Brick::Notice { filter, .. }
         | Brick::Queue { filter, .. }
         | Brick::CodeBlock { filter, .. }
         | Brick::Result { filter, .. }

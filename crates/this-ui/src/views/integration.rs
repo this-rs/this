@@ -308,6 +308,8 @@ fn a_chat_thread_is_one_message_brick_per_message_in_order() {
                             op: FilterOp::Eq,
                             value: json!(key),
                         }),
+                        markdown: false,
+                        page_size: None,
                     }),
                 })
                 .collect(),
@@ -367,6 +369,8 @@ fn a_chat_thread_is_one_message_brick_on_the_open_conversation() {
                     op: FilterOp::Eq,
                     value: json!({ "$context": "conversation" }),
                 }),
+                markdown: false,
+                page_size: None,
             }),
         },
     };

@@ -26,6 +26,8 @@ fn une_vue_de_chat_avec_des_messages_passe_le_contrat() {
                 brick: Box::new(Brick::Message {
                     entity: "message".into(),
                     filter: None,
+                    markdown: false,
+                    page_size: None,
                 }),
             }],
         },
