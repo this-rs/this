@@ -134,7 +134,8 @@ fn filter_of(brick: &Brick) -> Option<&this_descriptor::FilterExpr> {
         Brick::Banner { .. }
         | Brick::CapabilityRequest { .. }
         | Brick::Composer { .. }
-        | Brick::Settings { .. } => None,
+        | Brick::Settings { .. }
+        | Brick::Secret { .. } => None,
     }
 }
 
@@ -214,6 +215,7 @@ mod tests {
             filterable: vec![],
             page_size: None,
             on_click: None,
+            row_actions: vec![],
         })
     }
 
