@@ -188,3 +188,22 @@ fn a_second_call_replaces_the_previous_output() {
     // Rappeler `manifest` redonne la même longueur : la sortie est reconstruite, pas cumulée.
     assert_eq!(packed_len(rt::manifest::<Echo>()), first);
 }
+
+// `export!` génère les trois exports de l'ABI v1 : ici, dans ce crate de test, on les appelle
+// comme le ferait l'hôte (avec des tampons vides : aucun pointeur n'est déréférencé).
+this_module_sdk::export!(Echo);
+
+#[test]
+fn the_export_macro_generates_functions_that_delegate_to_the_runtime() {
+    assert_eq!(alloc(0), rt::alloc(0));
+    assert_eq!(
+        packed_len(manifest()),
+        serde_json::to_vec(&Echo::manifest()).unwrap().len()
+    );
+    assert_eq!(
+        packed_len(handle(0, 0, 0, 0)),
+        serde_json::to_vec(&rt::run::<Echo>(b"", b""))
+            .unwrap()
+            .len()
+    );
+}
