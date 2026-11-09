@@ -69,12 +69,17 @@ impl Scripted {
     fn seen(&self) -> Vec<String> {
         self.seen.lock().unwrap().clone()
     }
-    fn answer(&self, o: &Option<LogicOutcome>) -> Result<LogicOutcome, ContractError> {
+    /// `None` : la logique refuse. Sinon la réponse posée (ou une réponse vide).
+    fn answer(&self, o: &Option<LogicOutcome>) -> Option<LogicOutcome> {
         if self.refuse {
-            return Err(ContractError::framework(codes::VALIDATION_FAILED)
-                .with_param("reason", "refus de la logique"));
+            None
+        } else {
+            Some(o.clone().unwrap_or_default())
         }
-        Ok(o.clone().unwrap_or_default())
+    }
+    fn refused() -> ContractError {
+        ContractError::framework(codes::VALIDATION_FAILED)
+            .with_param("reason", "refus de la logique")
     }
 }
 
@@ -82,7 +87,7 @@ impl Scripted {
 impl EntityLogic for Scripted {
     async fn create(&self, input: &Value) -> Result<LogicOutcome, ContractError> {
         self.note(format!("create {input}"));
-        self.answer(&self.create)
+        self.answer(&self.create).ok_or_else(Self::refused)
     }
     async fn update(
         &self,
@@ -91,19 +96,19 @@ impl EntityLogic for Scripted {
         current: &Value,
     ) -> Result<LogicOutcome, ContractError> {
         self.note(format!("update {id} {patch} {}", current["title"]));
-        self.answer(&self.update)
+        self.answer(&self.update).ok_or_else(Self::refused)
     }
     async fn delete(&self, id: &str, current: &Value) -> Result<LogicOutcome, ContractError> {
         self.note(format!("delete {id} {}", current["title"]));
-        self.answer(&self.delete)
+        self.answer(&self.delete).ok_or_else(Self::refused)
     }
     async fn get(&self, row: &Value) -> Result<LogicOutcome, ContractError> {
         self.note(format!("get {}", row["title"]));
-        self.answer(&self.get)
+        self.answer(&self.get).ok_or_else(Self::refused)
     }
     async fn list(&self, rows: &[Value]) -> Result<LogicOutcome, ContractError> {
         self.note(format!("list {}", rows.len()));
-        self.answer(&self.list)
+        self.answer(&self.list).ok_or_else(Self::refused)
     }
     async fn call(
         &self,
