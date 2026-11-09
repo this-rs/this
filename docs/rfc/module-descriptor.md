@@ -359,6 +359,8 @@ partout, variantes d'énumération) : un type inconnu est refusé à la déséri
 - **Briques** (`Brick`, tag `type`) : `text`, `button`, `banner`, `indicator`, `list`, `card`, `form`, `field`,
   `relation`, `chat`, `tool_step`, `queue`, `code_block`, `result`, `capability_request`, `metrics`, `program`,
   `composer` (ce que la saisie du fil offre : `placeholder?`, `actions[]`, `attachments` ; ne lit aucune ligne).
+  `settings` (écran de réglages : `sections[]` titrées, chacune des `items[]` `{label, hint?, action}` ; ne lit aucune ligne ; un secret n'y a jamais de valeur).
+  Actions : `navigate` accepte `module?` (vue d'un AUTRE module, déclaré dans `requires[]` ; la vue est résolue par l'hôte à l'exécution, pas à la compilation) ; `request_secret {secret}` demande à l'hôte de recueillir un secret par son NOM.
   Emplacement `header` : seulement `text`, `banner`, `indicator`, `metrics`, `button`.
 - **Actions** (`Action`, tag `kind`) : `create`, `update`, `delete`, `navigate`, `agent_tool`, `device_capability`.
 - **Champs éditables** : `field.input` ∈ `text` (défaut), `multiline`, `number`, `file`, `reference` (exige

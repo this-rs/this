@@ -242,14 +242,15 @@ fn every_brick_of_the_contract_deserialises() {
         r#"{"type":"program","entity":"invoice","args":[{"name":"n","kind":"number"}],
            "run":"manual","columns":[{"name":"total","source":{"op":"sum","field":"amount"}}]}"#,
         r#"{"type":"composer","placeholder":"Écris…","actions":["ask"],"attachments":true}"#,
+        r#"{"type":"settings","sections":[{"title":"Moteur","items":[{"label":"Providers","action":"go"}]}]}"#,
     ];
     let parsed: Vec<Brick> = bricks
         .iter()
         .map(|json| serde_json::from_str::<Brick>(json).expect("the brick parses"))
         .collect();
-    assert_eq!(parsed.len(), 18);
+    assert_eq!(parsed.len(), 19);
     // Four bricks read no row: a banner, a device request, an indicator of connection and
-    // the composer.
+    // the composer, and the settings.
     let with_entity = parsed
         .iter()
         .filter(|brick| brick.entity().is_some())

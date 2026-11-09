@@ -21,7 +21,8 @@ use leptos::prelude::*;
 use serde_json::Value;
 use this_descriptor::views::{
     Action, ArgKind, Brick, Click, Column, ColumnSource, DeviceCapability, FormField, Grant, Input,
-    Node, ProgramArg, RelationMode, Run, Signal as IndicatorSignal, Surface, Tab, Tone, ViewDesc,
+    Node, ProgramArg, RelationMode, Run, SettingsSection, Signal as IndicatorSignal, Surface, Tab,
+    Tone, ViewDesc,
 };
 use this_descriptor::{FilterExpr, ModuleDescriptor, SortSpec};
 
@@ -382,6 +383,7 @@ pub fn render_brick(ctx: Ctx, brick: &Brick) -> AnyView {
         Brick::CapabilityRequest { capability, action } => {
             capability_request(ctx, *capability, action)
         }
+        Brick::Settings { sections } => settings(ctx, sections),
         Brick::Composer { .. } => match ComposerSpec::of(brick) {
             Some(spec) => composer(ctx, &spec, composer_slot(&spec)),
             None => fallback(&describe_brick(brick)),
@@ -800,9 +802,14 @@ fn intent_of(
             entity,
             id,
         },
-        Some(Action::Navigate { name, view }) => Intent::Navigate {
+        Some(Action::Navigate { name, view, module }) => Intent::Navigate {
             view,
             action: Some(name),
+            module,
+        },
+        Some(Action::RequestSecret { name, secret }) => Intent::Secret {
+            action: name,
+            secret,
         },
         Some(Action::AgentTool {
             name,
@@ -947,6 +954,56 @@ pub fn without_composer(node: &Node) -> Option<Node> {
 pub fn composer_intent(module: &ModuleDescriptor, action: &str) -> Intent {
     let declared = module.actions.iter().find(|a| a.name() == action).cloned();
     intent_of(declared, action, None, None, Vec::new())
+}
+
+/// The intent a settings line emits: the one its action means, with no row.
+pub fn settings_intent(module: &ModuleDescriptor, action: &str) -> Intent {
+    composer_intent(module, action)
+}
+
+/// A settings screen: a titled section, then one line per item. A line is a button, so it
+/// is 44 px tall and reachable; clicking it emits the intent of its action. The brick never
+/// draws a value — a secret's line only asks the host to collect it.
+fn settings(ctx: Ctx, sections: &[SettingsSection]) -> AnyView {
+    let sections = sections
+        .iter()
+        .map(|section| {
+            let title = section.title.clone();
+            let hint = section.hint.clone();
+            let items = section
+                .items
+                .iter()
+                .map(|item| {
+                    let name = item.action.clone();
+                    let label = item.label.clone();
+                    let hint = item.hint.clone();
+                    view! {
+                        <button class=format!("{} {}", class::BUTTON, class::SETTINGS_ITEM)
+                            type="button" title=name.clone() data-action=name.clone()
+                            on:click=move |_| {
+                                let intent = ctx
+                                    .module
+                                    .try_with_value(|module| settings_intent(module, &name));
+                                if let Some(intent) = intent {
+                                    ctx.on_intent.run(intent);
+                                }
+                            }>
+                            <span>{label}</span>
+                            {hint.map(|h| view! { <span class=class::SETTINGS_HINT>{h}</span> })}
+                        </button>
+                    }
+                })
+                .collect_view();
+            view! {
+                <section class=class::SETTINGS_SECTION>
+                    <h3 class=class::SETTINGS_TITLE>{title}</h3>
+                    {hint.map(|h| view! { <p class=class::SETTINGS_HINT>{h}</p> })}
+                    {items}
+                </section>
+            }
+        })
+        .collect_view();
+    view! { <div class=class::SETTINGS>{sections}</div> }.into_any()
 }
 
 /// The module's actions, as buttons for the host to place around its field. Each click
@@ -1532,6 +1589,7 @@ fn click_intent(click: &Click, entity: &str, id: &str) -> Intent {
         Click::Navigate { view } => Intent::Navigate {
             view: view.clone(),
             action: None,
+            module: None,
         },
         _ => Intent::Select {
             entity: entity.to_owned(),
@@ -2267,6 +2325,40 @@ mod tests {
     }
 
     #[test]
+    fn settings_lines_emit_navigate_with_its_module_and_a_secret_by_name() {
+        let mut m = ModuleDescriptor::new("atelier", "1.0.0");
+        m.actions.push(
+            serde_json::from_str(
+                r#"{"kind":"navigate","name":"ouvrir","view":"providers","module":"reglages"}"#,
+            )
+            .unwrap(),
+        );
+        m.actions.push(
+            serde_json::from_str(r#"{"kind":"request_secret","name":"cle","secret":"api-key"}"#)
+                .unwrap(),
+        );
+        assert_eq!(
+            settings_intent(&m, "ouvrir"),
+            Intent::Navigate {
+                view: "providers".into(),
+                action: Some("ouvrir".into()),
+                module: Some("reglages".into()),
+            }
+        );
+        let secret = settings_intent(&m, "cle");
+        assert_eq!(
+            secret,
+            Intent::Secret {
+                action: "cle".into(),
+                secret: "api-key".into()
+            }
+        );
+        // The intent carries a NAME: there is no field in which a value could travel.
+        assert_eq!(secret.kind(), "secret");
+        assert_eq!(secret.entity(), None);
+    }
+
+    #[test]
     fn a_composer_action_emits_the_intent_a_button_would_without_a_row() {
         let m = composer_module();
         assert_eq!(
@@ -2353,7 +2445,8 @@ mod tests {
             ),
             Intent::Navigate {
                 view: "detail".into(),
-                action: None
+                action: None,
+                module: None
             }
         );
     }

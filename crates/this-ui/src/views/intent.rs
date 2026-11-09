@@ -85,10 +85,18 @@ pub enum Intent {
     },
     /// Show another view of the module. `action` is `Some` when a declared `navigate`
     /// action was clicked, `None` when a list row carried `click: navigate`.
+    ///
+    /// `module` is `Some` when the action names ANOTHER module's view: the host resolves it
+    /// at run time (the contract could not check it) and refuses with a message when that
+    /// module is not installed or has no such view.
     Navigate {
         view: String,
         action: Option<String>,
+        module: Option<String>,
     },
+    /// A declared `request_secret` action: the host collects the secret `secret`. It carries
+    /// a NAME and never a value — nothing typed in the host's secure input comes back here.
+    Secret { action: String, secret: String },
     /// A declared agent tool: send a message, stop a run.
     Tool {
         action: String,
@@ -168,7 +176,10 @@ impl Intent {
             | Intent::Reload { entity }
             | Intent::RequestAccess { entity } => Some(entity),
             Intent::Tool { entity, .. } | Intent::Invoke { entity, .. } => entity.as_deref(),
-            Intent::Navigate { .. } | Intent::Capability { .. } | Intent::Dismiss { .. } => None,
+            Intent::Navigate { .. }
+            | Intent::Capability { .. }
+            | Intent::Secret { .. }
+            | Intent::Dismiss { .. } => None,
         }
     }
 
@@ -180,6 +191,7 @@ impl Intent {
             | Intent::Delete { action, .. }
             | Intent::Tool { action, .. }
             | Intent::Capability { action, .. }
+            | Intent::Secret { action, .. }
             | Intent::Invoke { action, .. } => Some(action),
             Intent::Navigate { action, .. } => action.as_deref(),
             _ => None,
@@ -193,6 +205,7 @@ impl Intent {
             Intent::Update { .. } => "update",
             Intent::Delete { .. } => "delete",
             Intent::Navigate { .. } => "navigate",
+            Intent::Secret { .. } => "secret",
             Intent::Tool { .. } => "tool",
             Intent::Capability { .. } => "capability",
             Intent::Select { .. } => "select",
@@ -238,6 +251,7 @@ mod tests {
         let navigation = Intent::Navigate {
             view: "detail".into(),
             action: None,
+            module: None,
         };
         assert_eq!(navigation.entity(), None);
         assert_eq!(navigation.action(), None);

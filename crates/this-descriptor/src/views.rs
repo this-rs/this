@@ -353,6 +353,14 @@ pub enum Brick {
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         attachments: bool,
     },
+    /// Un écran de réglages : des sections titrées, et dans chacune des lignes qui déclenchent
+    /// une action du module (ouvrir un sous-écran, appeler une opération, demander un secret).
+    ///
+    /// Ne lit aucune ligne. Les autres briques lisent une entité ; les réglages d'une app
+    /// (moteurs, autorisations, comptes) n'en sont pas, et aucune brique ne porte un titre de
+    /// section ni le libellé d'une action. Un secret n'y a jamais de valeur : la ligne ne
+    /// fait que demander à l'hôte de le recueillir (`request_secret`).
+    Settings { sections: Vec<SettingsSection> },
     /// Un programme : arguments typés, exécution fermée, colonnes calculées.
     Program {
         entity: String,
@@ -371,7 +379,10 @@ impl Brick {
     /// capacité, indicateur de connexion sans entité).
     pub fn entity(&self) -> Option<&str> {
         match self {
-            Brick::Banner { .. } | Brick::CapabilityRequest { .. } | Brick::Composer { .. } => None,
+            Brick::Banner { .. }
+            | Brick::CapabilityRequest { .. }
+            | Brick::Composer { .. }
+            | Brick::Settings { .. } => None,
             Brick::Indicator { entity, .. } => entity.as_deref(),
             Brick::Text { entity, .. }
             | Brick::Button { entity, .. }
@@ -390,6 +401,27 @@ impl Brick {
             | Brick::Program { entity, .. } => Some(entity),
         }
     }
+}
+
+/// Une section d'un écran de réglages.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SettingsSection {
+    pub title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hint: Option<String>,
+    pub items: Vec<SettingsItem>,
+}
+
+/// Une ligne de réglage : un libellé, une aide, l'action qu'elle déclenche.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SettingsItem {
+    pub label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hint: Option<String>,
+    /// Une action de ce module, qui n'exige aucune ligne.
+    pub action: String,
 }
 
 /// Ton d'une bannière.
@@ -521,8 +553,25 @@ pub enum Action {
     },
     /// Supprime une ligne de `entity`.
     Delete { name: String, entity: String },
-    /// Ouvre la vue `view` de ce module.
-    Navigate { name: String, view: String },
+    /// Ouvre la vue `view` de ce module — ou, avec `module`, une vue d'un AUTRE module.
+    ///
+    /// `module` doit être déclaré dans `requires[]` du module appelant : un module n'ouvre
+    /// pas l'écran d'un module dont il ne dit pas dépendre. La vue d'un autre module ne se
+    /// vérifie PAS ici (on n'a pas son descripteur) : c'est l'hôte qui la résout à
+    /// l'exécution, et qui refuse avec un message si le module n'est pas installé ou n'a pas
+    /// cette vue.
+    Navigate {
+        name: String,
+        view: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        module: Option<String>,
+    },
+    /// Demande à l'hôte de recueillir le secret `secret` (une clé d'API, un jeton).
+    ///
+    /// Le module déclare QU'un secret existe et comment il s'appelle ; la saisie, le coffre et
+    /// la lecture restent à l'hôte. Aucune valeur ne passe par le module : ni en entrée, ni en
+    /// retour, ni dans ce que la vue rend.
+    RequestSecret { name: String, secret: String },
     /// Une opération d'agent : envoyer un message, arrêter un run. Liée à une entité si besoin.
     ///
     /// `send_message` **exige** `text` : l'hôte ne doit pas inventer la demande. Un module
@@ -568,6 +617,7 @@ impl Action {
             | Action::Navigate { name, .. }
             | Action::AgentTool { name, .. }
             | Action::Invoke { name, .. }
+            | Action::RequestSecret { name, .. }
             | Action::DeviceCapability { name, .. } => name,
         }
     }
@@ -773,6 +823,96 @@ impl<'a> Checks<'a> {
         }
     }
 
+    /// `navigate` vers une vue d'un autre module : le module doit être déclaré dans
+    /// `requires[]`. La vue elle-même n'est pas vérifiable ici (le descripteur de l'autre
+    /// module n'est pas là) : l'hôte la résout à l'exécution et refuse avec un message.
+    fn navigate_module(&mut self, chemin: &str, cible: &str, view: &str) {
+        if view.trim().is_empty() {
+            self.push(
+                "view_target_unknown",
+                format!("{chemin}.view"),
+                "a navigate to another module must name the view to open",
+            );
+        }
+        if cible == self.m.name {
+            self.push(
+                "navigate_module_is_self",
+                format!("{chemin}.module"),
+                format!("`{cible}` is this module; drop `module` to open one of its own views"),
+            );
+        } else if !self.m.requires.iter().any(|r| r.name == cible) {
+            let msg = unknown_msg(
+                cible,
+                "a module this one requires",
+                self.m.requires.iter().map(|r| r.name.as_str()),
+                "Declare it in `requires[]` (as `this.module.reference_unknown` does for links), or fix the name.",
+            );
+            self.push(
+                "navigate_module_not_required",
+                format!("{chemin}.module"),
+                msg,
+            );
+        }
+    }
+
+    /// L'écran de réglages : des sections titrées, des lignes dont l'action ne veut aucune ligne.
+    fn settings(&mut self, chemin: &str, sections: &[SettingsSection]) {
+        if sections.is_empty() {
+            self.push(
+                "settings_empty",
+                format!("{chemin}.sections"),
+                "a settings brick needs at least one section",
+            );
+        }
+        for (i, sec) in sections.iter().enumerate() {
+            let p = format!("{chemin}.sections[{i}]");
+            if sec.title.trim().is_empty() {
+                self.push(
+                    "settings_text_empty",
+                    format!("{p}.title"),
+                    "a section needs a title",
+                );
+            }
+            if sec.items.is_empty() {
+                self.push(
+                    "settings_empty",
+                    format!("{p}.items"),
+                    "a section needs at least one item; remove it otherwise",
+                );
+            }
+            for (j, it) in sec.items.iter().enumerate() {
+                let q = format!("{p}.items[{j}]");
+                if it.label.trim().is_empty() {
+                    self.push(
+                        "settings_text_empty",
+                        format!("{q}.label"),
+                        "an item needs a label",
+                    );
+                }
+                self.action_ref(&format!("{q}.action"), &it.action);
+                let refus = match self.actions.get(it.action.as_str()) {
+                    Some(Action::Create { .. }) => Some("creates a row from values nobody typed"),
+                    Some(Action::Update { .. }) => Some("modifies a row"),
+                    Some(Action::Delete { .. }) => Some("deletes a row"),
+                    Some(Action::Invoke {
+                        entity: Some(_), ..
+                    }) => Some("invokes an operation on a row"),
+                    _ => None,
+                };
+                if let Some(pourquoi) = refus {
+                    self.push(
+                        "settings_action_refused",
+                        format!("{q}.action"),
+                        format!(
+                            "`{}` {pourquoi}, and a settings line has no row; use navigate, request_secret, agent_tool, device_capability or a module-level invoke",
+                            it.action
+                        ),
+                    );
+                }
+            }
+        }
+    }
+
     /// Les opérations déclarées : nom, unicité, entité. Un bouton `invoke` ne doit
     /// jamais référencer un geste que le module n'a pas déclaré.
     fn operations(&mut self) {
@@ -870,8 +1010,24 @@ impl<'a> Checks<'a> {
                         _ => {}
                     }
                 }
-                Action::Navigate { view, .. } => {
-                    self.view_ref("view_target_unknown", &format!("{p}.view"), view);
+                Action::Navigate { view, module, .. } => match module {
+                    None => self.view_ref("view_target_unknown", &format!("{p}.view"), view),
+                    Some(cible) => self.navigate_module(&p, cible, view),
+                },
+                Action::RequestSecret { secret, .. } => {
+                    let ok = !secret.is_empty()
+                        && secret
+                            .chars()
+                            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'));
+                    if !ok {
+                        self.push(
+                            "action_secret_invalid",
+                            format!("{p}.secret"),
+                            format!(
+                                "`{secret}` is not a secret name: use letters, digits, `_`, `-` or `.`, no space"
+                            ),
+                        );
+                    }
                 }
                 Action::Invoke {
                     operation, entity, ..
@@ -945,6 +1101,7 @@ impl<'a> Checks<'a> {
         }
         match b {
             Brick::Banner { .. } => {}
+            Brick::Settings { sections } => self.settings(chemin, sections),
             Brick::Composer {
                 placeholder,
                 actions,
@@ -1436,6 +1593,7 @@ fn lectures(b: &Brick) -> Vec<&str> {
         | Brick::Indicator { .. }
         | Brick::Relation { .. }
         | Brick::CapabilityRequest { .. }
+        | Brick::Settings { .. }
         | Brick::Composer { .. } => {}
     }
     v
@@ -2248,6 +2406,99 @@ mod tests {
         assert_refused(&m, "invalid_page_size");
     }
 
+    // ---------- réglages : navigation inter-modules, secret, brique settings ----------
+
+    fn module_requiring(name: &str) -> ModuleDescriptor {
+        let mut m = module();
+        m.requires.push(crate::ModuleReq {
+            name: name.into(),
+            version: "*".into(),
+            optional: false,
+        });
+        m
+    }
+
+    #[test]
+    fn navigate_to_another_module_needs_it_in_requires_and_not_the_view_locally() {
+        let json =
+            r#"{"kind":"navigate","name":"ailleurs","view":"providers","module":"reglages"}"#;
+        // Required: accepted, and the view is NOT looked up locally.
+        let mut m = module_requiring("reglages");
+        m.actions.push(serde_json::from_str(json).unwrap());
+        assert_eq!(codes(&m), Vec::<String>::new());
+        // Not required: refused with a readable reason.
+        let mut m = module();
+        m.actions.push(serde_json::from_str(json).unwrap());
+        assert_refused(&m, "navigate_module_not_required");
+        let msg = m
+            .check(&CustomRegistry::default(), CheckProfile::Compiled)
+            .unwrap_err()
+            .remove(0)
+            .message;
+        assert!(msg.contains("requires[]"), "{msg}");
+        // Naming itself is refused too.
+        let mut m = module();
+        m.actions.push(Action::Navigate {
+            name: "x".into(),
+            view: "v".into(),
+            module: Some(m.name.clone()),
+        });
+        assert_refused(&m, "navigate_module_is_self");
+    }
+
+    #[test]
+    fn navigate_module_is_absent_from_the_json_when_unset() {
+        let a: Action =
+            serde_json::from_str(r#"{"kind":"navigate","name":"go","view":"cockpit"}"#).unwrap();
+        assert!(!serde_json::to_string(&a).unwrap().contains("module"));
+        assert_stable::<Action>(
+            r#"{"kind":"navigate","name":"go","view":"cockpit","module":"reglages"}"#,
+        );
+    }
+
+    #[test]
+    fn a_settings_brick_with_navigate_and_secret_lines_is_accepted() {
+        let mut m = module_requiring("reglages");
+        m.actions.push(
+            serde_json::from_str(
+                r#"{"kind":"navigate","name":"ailleurs","view":"providers","module":"reglages"}"#,
+            )
+            .unwrap(),
+        );
+        m.actions.push(
+            serde_json::from_str(r#"{"kind":"request_secret","name":"cle","secret":"api-key"}"#)
+                .unwrap(),
+        );
+        m.views.push(leaf_view(
+            "reglages",
+            r#"{"type":"settings","sections":[{"title":"Moteur","hint":"d","items":[
+                {"label":"Providers","action":"ailleurs"},
+                {"label":"Clé API","hint":"jamais affichée","action":"cle"}]}]}"#,
+        ));
+        assert_eq!(codes(&m), Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_settings_line_cannot_name_a_row_action_and_a_header_refuses_settings() {
+        let mut m = module();
+        m.views.push(leaf_view(
+            "x",
+            r#"{"type":"settings","sections":[{"title":"t","items":[{"label":"a","action":"ghost"}]}]}"#,
+        ));
+        assert_refused(&m, "view_action_unknown");
+        let mut m = module();
+        m.views.push(view(
+            "x",
+            Node::Leaf {
+                brick: Box::new(brick(
+                    r#"{"type":"settings","sections":[{"title":"t","items":[]}]}"#,
+                )),
+            },
+        ));
+        m.views[0].surface = Surface::Header;
+        assert!(codes(&m).contains(&"this.descriptor.surface_brick_refused".to_string()));
+    }
+
     // ---------- check : action absente, cible absente ----------
 
     #[test]
@@ -2288,6 +2539,7 @@ mod tests {
 
         let mut m = module();
         m.actions.push(Action::Navigate {
+            module: None,
             name: "go".into(),
             view: "ghost".into(),
         });

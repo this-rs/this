@@ -81,6 +81,11 @@ pub mod class {
     pub const COMPOSER: &str = "vw-composer";
     pub const COMPOSER_ACTIONS: &str = "vw-composer-actions";
     pub const COMPOSER_SLOT: &str = "vw-composer-slot";
+    pub const SETTINGS: &str = "vw-settings";
+    pub const SETTINGS_SECTION: &str = "vw-settings-section";
+    pub const SETTINGS_TITLE: &str = "vw-settings-title";
+    pub const SETTINGS_HINT: &str = "vw-settings-hint";
+    pub const SETTINGS_ITEM: &str = "vw-settings-item";
     pub const TOOLSTEP: &str = "vw-toolstep";
     pub const QUEUE: &str = "vw-queue";
     pub const QUEUE_ITEM: &str = "vw-queue-item";
@@ -182,6 +187,11 @@ pub const ALL: &[&str] = &[
     class::COMPOSER,
     class::COMPOSER_ACTIONS,
     class::COMPOSER_SLOT,
+    class::SETTINGS,
+    class::SETTINGS_SECTION,
+    class::SETTINGS_TITLE,
+    class::SETTINGS_HINT,
+    class::SETTINGS_ITEM,
     class::TOOLSTEP,
     class::QUEUE,
     class::QUEUE_ITEM,
@@ -372,6 +382,13 @@ pub const CSS: &str = r#"
 .vw-composer { display: flex; gap: 8px; align-items: flex-end; }
 .vw-composer-actions { display: flex; flex-wrap: wrap; gap: 8px; }
 .vw-composer-slot { flex: 1; min-width: 0; min-height: 44px; }
+.vw-settings { display: flex; flex-direction: column; gap: 24px; min-width: 0; }
+.vw-settings-section { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.vw-settings-title { margin: 0; font-size: 14px; font-weight: 600; }
+.vw-settings-hint { margin: 0; font-size: 12px; opacity: .7; }
+.vw-settings-item { display: flex; flex-direction: column; align-items: flex-start; gap: 2px;
+  min-height: 44px; width: 100%; min-width: 0; text-align: left; }
+.vw-settings-item .vw-settings-hint { overflow-wrap: anywhere; }
 .vw-toolstep { display: flex; align-items: center; gap: 8px; min-height: 32px; }
 
 .vw-queue { display: flex; flex-direction: column; gap: 4px; margin: 0; padding: 0; list-style: none; }

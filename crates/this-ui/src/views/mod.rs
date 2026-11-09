@@ -54,7 +54,7 @@ pub use intent::{FieldValue, Intent, LinkOp, Values};
 pub use placement::{Frame, Hidden, Portfolio, SURFACES};
 pub use render::{
     ComposerSpec, Ctx, composer, composer_actions, composer_intent, render_brick, render_node,
-    render_view, without_composer,
+    render_view, settings_intent, without_composer,
 };
 pub use state::ViewState;
 pub use style::CSS;
