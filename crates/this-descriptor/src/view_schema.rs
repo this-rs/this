@@ -703,6 +703,59 @@ fn bricks() -> Vec<VariantSchema> {
             false,
         ),
         brick_v(
+            "composer",
+            "The thread's composer: what the input zone OFFERS, declared by the module. Reads no \
+             row. The host keeps the real field and its keyboard, sending, stopping a run, \
+             drag-and-drop and the attachment queue; the module says the invitation, whether \
+             attachments are accepted, and which of its actions sit around the field.",
+            vec![
+                opt(
+                    "placeholder",
+                    "string",
+                    "The field's invitation. Absent = the host's; empty or blank = refused.",
+                ),
+                opt(
+                    "actions",
+                    "list<string>",
+                    "Actions of this module, drawn as buttons around the field, in order; each \
+                     once. Not an update, a delete, an invoke on an entity or a \
+                     device_capability: a composer has no row and no pending question.",
+                )
+                .refers("action"),
+                opt(
+                    "attachments",
+                    "bool",
+                    "Whether the composer accepts attachments (the `+` button, drop, paste).",
+                )
+                .default_value(json!(false)),
+            ],
+            json!({"type": "composer"}),
+            json!({"type": "composer", "placeholder": "Écris ta question…",
+                   "actions": ["say", "new"], "attachments": true}),
+            false,
+        ),
+        brick_v(
+            "settings",
+            "A settings screen: titled sections, and in each section lines that trigger an \
+             action of the module (open a sub-screen, call an operation, ask the host for a \
+             secret). Reads no row. Bricks read entities and settings are not entities; no \
+             other brick carries a section title or an action's label. A secret has no value \
+             here: its line only asks the host to collect it.",
+            vec![req(
+                "sections",
+                "list<object:SettingsSection>",
+                "The sections, in order; at least one.",
+            )],
+            json!({"type": "settings", "sections": [
+                {"title": "Engine", "items": [{"label": "Open", "action": "go"}]}
+            ]}),
+            json!({"type": "settings", "sections": [
+                {"title": "Engine", "hint": "Where answers come from",
+                 "items": [{"label": "Providers", "hint": "Pick one", "action": "go"}]}
+            ]}),
+            false,
+        ),
+        brick_v(
             "metrics",
             "Numbers: without `field`, the row count; with it, the sum of the field.",
             vec![
@@ -794,13 +847,41 @@ fn actions() -> Vec<VariantSchema> {
         ),
         variant(
             "navigate",
-            "Opens a view of this module.",
+            "Opens a view of this module, or (with `module`) a view of another module.",
             vec![
                 name(),
-                req("view", "string", "The view opened.").refers("view"),
+                req(
+                    "view",
+                    "string",
+                    "The view opened. Without `module` it must be a view of this module; with \
+                     `module` it is NOT checked here (the other module's descriptor is not at \
+                     hand): the host resolves it at run time and refuses with a message.",
+                ),
+                opt(
+                    "module",
+                    "string",
+                    "Open a view of this other module. It must be listed in this module's \
+                     `requires[]`.",
+                ),
             ],
             json!({"kind": "navigate", "name": "go", "view": "invoices"}),
-            json!({"kind": "navigate", "name": "go", "view": "invoices"}),
+            json!({"kind": "navigate", "name": "go", "view": "providers", "module": "reglages"}),
+        ),
+        variant(
+            "request_secret",
+            "Asks the host to collect the secret `secret` (an API key, a token). The module \
+             declares that a secret exists and what it is called; typing it, storing it and \
+             reading it stay the host's. No value ever passes through the module or its view.",
+            vec![
+                name(),
+                req(
+                    "secret",
+                    "string",
+                    "The secret's name: letters, digits, `_`, `-` or `.`, no space.",
+                ),
+            ],
+            json!({"kind": "request_secret", "name": "cle_api", "secret": "provider-api-key"}),
+            json!({"kind": "request_secret", "name": "cle_api", "secret": "provider-api-key"}),
         ),
         variant(
             "agent_tool",
@@ -966,6 +1047,39 @@ fn objects() -> Vec<ObjectSchema> {
             ],
             json!({"label": "All", "children": []}),
             json!({"label": "All", "children": [{"type": "stack", "children": []}]}),
+        ),
+        object(
+            "SettingsSection",
+            "A titled section of a `settings` brick.",
+            vec![
+                req("title", "string", "Non-blank."),
+                opt("hint", "string", "A sentence under the title."),
+                req(
+                    "items",
+                    "list<object:SettingsItem>",
+                    "The lines; at least one.",
+                ),
+            ],
+            json!({"title": "Engine", "items": [{"label": "Open", "action": "go"}]}),
+            json!({"title": "Engine", "hint": "Where answers come from",
+                   "items": [{"label": "Open", "action": "go"}]}),
+        ),
+        object(
+            "SettingsItem",
+            "A line of a settings section: a label, a hint, the action it triggers.",
+            vec![
+                req("label", "string", "Non-blank."),
+                opt("hint", "string", "A sentence under the label."),
+                req(
+                    "action",
+                    "string",
+                    "An action of this module that needs no row: navigate, request_secret, \
+                     agent_tool, device_capability, or a module-level invoke.",
+                )
+                .refers("action"),
+            ],
+            json!({"label": "Open", "action": "go"}),
+            json!({"label": "Open", "hint": "Pick one", "action": "go"}),
         ),
         object(
             "Look",
@@ -1337,6 +1451,51 @@ fn rules() -> Vec<RuleSchema> {
             "Use text, banner, indicator, metrics or button, or move the view to main/sidebar/panel.",
         ),
         rule(
+            "composer_placeholder_empty",
+            "A composer declares an empty or blank `placeholder`.",
+            "Write a short invitation, or remove `placeholder` to keep the host's.",
+        ),
+        rule(
+            "duplicate_composer_action",
+            "A composer lists an action twice.",
+            "List each composer action once.",
+        ),
+        rule(
+            "composer_action_refused",
+            "A composer names an action that needs a row (update, delete, invoke on an entity) or decides a device question (device_capability).",
+            "Use a create, navigate, agent_tool or module-level invoke action; put row actions on a `button` of a view that reads the row.",
+        ),
+        rule(
+            "navigate_module_not_required",
+            "A navigate action opens a view of another module that this module does not list in `requires[]`.",
+            "Declare the module in `requires[]`, or fix its name. The view itself is not checked here: the host resolves it at run time and refuses with a message.",
+        ),
+        rule(
+            "navigate_module_is_self",
+            "A navigate action names this very module in `module`.",
+            "Drop `module` to open one of this module's own views.",
+        ),
+        rule(
+            "action_secret_invalid",
+            "A request_secret action names a secret with an empty name, a space or a character outside letters, digits, `_`, `-`, `.`.",
+            "Use a short name such as `provider-api-key`.",
+        ),
+        rule(
+            "settings_empty",
+            "A settings brick has no section, or a section has no item.",
+            "Add the section or the item, or remove the empty one.",
+        ),
+        rule(
+            "settings_text_empty",
+            "A settings section has a blank title, or an item a blank label.",
+            "Write the title or the label.",
+        ),
+        rule(
+            "settings_action_refused",
+            "A settings line names an action that needs a row (create, update, delete, invoke on an entity).",
+            "Use navigate, request_secret, agent_tool, device_capability or a module-level invoke.",
+        ),
+        rule(
             "invalid_page_size",
             "A list `page_size` is 0 or above 100.",
             "Use 1..=100, or omit it for no pagination.",
@@ -1416,6 +1575,19 @@ fn coverage() -> Vec<CoverageEntry> {
             "A fold-away section under a label.",
         ),
         cover("button", &["brick:button"], "Triggers an action."),
+        cover(
+            "composer",
+            &["brick:composer"],
+            "What the thread's input offers: invitation, attachments, the module's actions \
+             around the field. The field, sending and stopping stay the host's.",
+        ),
+        cover(
+            "settings",
+            &["brick:settings", "action:request_secret"],
+            "Titled sections of lines that open a sub-screen (also of another required \
+             module), call an operation or ask the host for a secret. Secrets and the vault \
+             stay the host's.",
+        ),
         cover("text", &["brick:text"], "One field of the first row."),
         cover("banner", &["brick:banner"], "Closed tone, key or text."),
         cover(
@@ -1636,6 +1808,8 @@ mod tests {
             "column_source" => go::<ColumnSource>(v),
             "filter" => go::<crate::query::FilterExpr>(v),
             "Tab" => go::<crate::views::Tab>(v),
+            "SettingsSection" => go::<crate::views::SettingsSection>(v),
+            "SettingsItem" => go::<crate::views::SettingsItem>(v),
             "Look" => go::<Look>(v),
             "FormField" => go::<crate::views::FormField>(v),
             "SortSpec" => go::<crate::query::SortSpec>(v),
@@ -1693,6 +1867,8 @@ mod tests {
             r#"{"kind":"update","name":"edit","entity":"invoice","fields":["amount"]}"#,
             r#"{"kind":"delete","name":"drop","entity":"invoice"}"#,
             r#"{"kind":"navigate","name":"go","view":"invoices"}"#,
+            r#"{"kind":"navigate","name":"go_other","view":"providers","module":"reglages"}"#,
+            r#"{"kind":"request_secret","name":"cle_api","secret":"provider-api-key"}"#,
             r#"{"kind":"agent_tool","name":"halt","op":"stop_run"}"#,
             r#"{"kind":"agent_tool","name":"say","op":"send_message","entity":"conversation","text":"Quels articles manquent ?"}"#,
             r#"{"kind":"device_capability","name":"cam_ok","capability":"camera","grant":"allow"}"#,
@@ -1700,6 +1876,11 @@ mod tests {
         ] {
             m.actions.push(parse_action(a).expect("fixture action"));
         }
+        m.requires.push(crate::ModuleReq {
+            name: "reglages".into(),
+            version: "*".into(),
+            optional: false,
+        });
         m.views.push(
             parse_view(r#"{"name":"invoices","root":{"type":"stack","children":[]}}"#)
                 .expect("fixture view"),
@@ -1840,6 +2021,8 @@ mod tests {
             let probe = json!({"__nope__": 1});
             let msg = match o.name.as_str() {
                 "Tab" => err_of::<crate::views::Tab>(probe),
+                "SettingsSection" => err_of::<crate::views::SettingsSection>(probe),
+                "SettingsItem" => err_of::<crate::views::SettingsItem>(probe),
                 "Look" => err_of::<Look>(probe),
                 "FormField" => err_of::<crate::views::FormField>(probe),
                 "ProgramArg" => err_of::<crate::views::ProgramArg>(probe),
@@ -2237,6 +2420,34 @@ mod tests {
                 with_action(r#"{"kind":"navigate","name":"x","view":"ghost"}"#),
             ),
             (
+                "navigate_module_not_required",
+                with_action(r#"{"kind":"navigate","name":"x","view":"v","module":"ghost"}"#),
+            ),
+            (
+                "navigate_module_is_self",
+                with_action(r#"{"kind":"navigate","name":"x","view":"v","module":"billing"}"#),
+            ),
+            (
+                "action_secret_invalid",
+                with_action(r#"{"kind":"request_secret","name":"x","secret":"a b"}"#),
+            ),
+            (
+                "settings_empty",
+                with_view(leaf(r#"{"type":"settings","sections":[]}"#)),
+            ),
+            (
+                "settings_text_empty",
+                with_view(leaf(
+                    r#"{"type":"settings","sections":[{"title":" ","items":[{"label":"a","action":"go"}]}]}"#,
+                )),
+            ),
+            (
+                "settings_action_refused",
+                with_view(leaf(
+                    r#"{"type":"settings","sections":[{"title":"t","items":[{"label":"a","action":"drop"}]}]}"#,
+                )),
+            ),
+            (
                 "view_entity_unknown",
                 with_view(leaf(r#"{"type":"list","entity":"ghost","label":"titre"}"#)),
             ),
@@ -2305,6 +2516,18 @@ mod tests {
             (
                 "surface_brick_refused",
                 with_header(r#"{"type":"chat","entity":"conversation"}"#),
+            ),
+            (
+                "composer_placeholder_empty",
+                with_view(leaf(r#"{"type":"composer","placeholder":"   "}"#)),
+            ),
+            (
+                "duplicate_composer_action",
+                with_view(leaf(r#"{"type":"composer","actions":["say","say"]}"#)),
+            ),
+            (
+                "composer_action_refused",
+                with_view(leaf(r#"{"type":"composer","actions":["edit"]}"#)),
             ),
             (
                 "invalid_page_size",
@@ -2390,6 +2613,9 @@ mod tests {
             "program_",
             "surface_",
             "tabs_",
+            "composer_",
+            "settings_",
+            "navigate_",
         ];
         let mut seen = 0;
         for lit in body.split('"').skip(1).step_by(2) {

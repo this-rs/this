@@ -129,7 +129,10 @@ fn filter_of(brick: &Brick) -> Option<&this_descriptor::FilterExpr> {
         | Brick::Metrics { filter, .. }
         | Brick::Program { filter, .. } => filter.as_ref(),
         Brick::Indicator { filter, .. } => filter.as_ref(),
-        Brick::Banner { .. } | Brick::CapabilityRequest { .. } => None,
+        Brick::Banner { .. }
+        | Brick::CapabilityRequest { .. }
+        | Brick::Composer { .. }
+        | Brick::Settings { .. } => None,
     }
 }
 
