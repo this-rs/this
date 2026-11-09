@@ -512,10 +512,26 @@ impl VfsModuleStore {
         bundles: &[MessageBundle],
         assets: &[(&str, &[u8])],
     ) -> Result<VfsMeta, ContractError> {
+        self.put_with_assets_with_required(descriptor, bundles, assets, &[])
+            .await
+    }
+
+    /// [`put_with_assets`](Self::put_with_assets), where the descriptor is also checked
+    /// against the entities of the modules it requires (transitively), looked up in `known`
+    /// (see [`ModuleDescriptor::check_with_required`]). A module citing an entity of a
+    /// module it does not require is still refused. With `known = &[]` this is exactly
+    /// `put_with_assets`.
+    pub async fn put_with_assets_with_required(
+        &self,
+        descriptor: &ModuleDescriptor,
+        bundles: &[MessageBundle],
+        assets: &[(&str, &[u8])],
+        known: &[&ModuleDescriptor],
+    ) -> Result<VfsMeta, ContractError> {
         // 1. Checks, nothing written yet.
         let mut desc = descriptor.clone();
         desc.normalize();
-        desc.check(&self.registry, self.profile())
+        desc.check_with_required(&self.registry, self.profile(), known)
             .map_err(invalid)?;
         // Fail-closed: a module that carries code (`program.wasm` or any `.wasm`
         // asset) is admitted only under a declared trust anchor. Without an anchor,
@@ -742,10 +758,39 @@ impl VfsModuleStore {
                 .with_param("found", format!("{}@{}", desc.name, desc.version)));
         }
         if check {
-            desc.check(&self.registry, self.profile())
+            // A module that requires another may name its entities: the same verdict as at
+            // `put`, or a version stored with `put_with_assets_with_required` would be
+            // refused on every read.
+            let required = self.required_from_store(&desc).await;
+            let known: Vec<&ModuleDescriptor> = required.iter().collect();
+            desc.check_with_required(&self.registry, self.profile(), &known)
                 .map_err(invalid)?;
         }
         Ok(desc)
+    }
+
+    /// The stored descriptors (active version, unchecked) of the modules `desc` requires,
+    /// transitively. A missing or unreadable one is skipped: its entities stay unknown and
+    /// the check refuses what cites them.
+    async fn required_from_store(&self, desc: &ModuleDescriptor) -> Vec<ModuleDescriptor> {
+        let mut seen: BTreeSet<String> = BTreeSet::new();
+        seen.insert(desc.name.clone());
+        let mut queue: Vec<String> = desc.requires.iter().map(|r| r.name.clone()).collect();
+        let mut out = Vec::new();
+        while let Some(name) = queue.pop() {
+            if !seen.insert(name.clone()) {
+                continue;
+            }
+            let Ok(Some(version)) = self.active_version(&name).await else {
+                continue;
+            };
+            let Ok(dep) = Box::pin(self.get_checked(&name, &version, false)).await else {
+                continue;
+            };
+            queue.extend(dep.requires.iter().map(|r| r.name.clone()));
+            out.push(dep);
+        }
+        out
     }
 
     /// La même lecture que [`Self::get_checked`], mais **sans authentifier** le manifeste.
@@ -1582,6 +1627,116 @@ mod tests {
         let err = store.get("billing", None).await.unwrap_err();
         assert_eq!(err.code.0, codes::INTERNAL);
         assert!(format!("{:?}", err.params).contains("file missing"));
+    }
+
+    // ---------- entities of the required modules ----------
+
+    fn owner(name: &str, requires: &[&str], entity: &str) -> ModuleDescriptor {
+        let mut m = ModuleDescriptor::new(name, "1.0.0");
+        m.requires = requires.iter().map(|n| req(n)).collect();
+        let mut e = EntityDesc::new(entity);
+        e.fields = vec![FieldDesc::new("titre", FieldType::String).tag(16)];
+        for op in Operation::CRUD {
+            e.permissions.ops.insert(op, PolicyExpr::Authenticated);
+        }
+        m.entities.push(e);
+        m
+    }
+
+    fn req(name: &str) -> crate::descriptor::ModuleReq {
+        crate::descriptor::ModuleReq {
+            name: name.into(),
+            version: "*".into(),
+            optional: false,
+        }
+    }
+
+    fn lister(name: &str, requires: &[&str], entity: &str) -> ModuleDescriptor {
+        let mut m = ModuleDescriptor::new(name, "1.0.0");
+        m.requires = requires.iter().map(|n| req(n)).collect();
+        m.views.push(
+            serde_json::from_value(serde_json::json!({
+                "name": "liste",
+                "surface": "main",
+                "root": {"type": "leaf", "brick": {"type": "list", "entity": entity, "label": "titre"}}
+            }))
+            .unwrap(),
+        );
+        m
+    }
+
+    #[tokio::test]
+    async fn put_with_assets_without_known_refuses_a_required_entity_as_before() {
+        let (_vfs, store) = mem();
+        let menu = lister("menu", &["socle"], "conversation");
+        let err = store.put_with_assets(&menu, &[], &[]).await.unwrap_err();
+        assert_eq!(err.code.0, codes::DESCRIPTOR_INVALID);
+        assert!(
+            err.to_string().contains("view_entity_unknown")
+                || format!("{err:?}").contains("view_entity_unknown"),
+            "{err:?}"
+        );
+        // Same refusal through the new entry point with nothing known.
+        let err = store
+            .put_with_assets_with_required(&menu, &[], &[], &[])
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{err:?}").contains("view_entity_unknown"),
+            "{err:?}"
+        );
+        assert!(store.get("menu", None).await.is_err(), "nothing written");
+    }
+
+    #[tokio::test]
+    async fn put_with_required_stores_a_module_that_cites_a_required_entity_and_get_reads_it() {
+        let (_vfs, store) = mem();
+        let socle = owner("socle", &[], "conversation");
+        store.put(&socle, &[]).await.unwrap();
+        let menu = lister("menu", &["socle"], "conversation");
+        store
+            .put_with_assets_with_required(&menu, &[], &[], &[&socle])
+            .await
+            .unwrap();
+        // `get` re-checks: it resolves the required module from the store itself.
+        assert_eq!(store.get("menu", None).await.unwrap().name, "menu");
+    }
+
+    #[tokio::test]
+    async fn put_with_required_follows_requires_transitively() {
+        let (_vfs, store) = mem();
+        let socle = owner("socle", &[], "conversation");
+        let milieu = lister("milieu", &["socle"], "conversation");
+        store.put(&socle, &[]).await.unwrap();
+        store
+            .put_with_assets_with_required(&milieu, &[], &[], &[&socle])
+            .await
+            .unwrap();
+        let menu = lister("menu", &["milieu"], "conversation");
+        store
+            .put_with_assets_with_required(&menu, &[], &[], &[&socle, &milieu])
+            .await
+            .unwrap();
+        assert_eq!(store.get("menu", None).await.unwrap().name, "menu");
+    }
+
+    #[tokio::test]
+    async fn put_with_required_still_refuses_the_entity_of_a_module_not_required() {
+        let (_vfs, store) = mem();
+        let socle = owner("socle", &[], "conversation");
+        store.put(&socle, &[]).await.unwrap();
+        // `menu` does not require `socle`, even though `socle` is known and stored.
+        let menu = lister("menu", &[], "conversation");
+        let err = store
+            .put_with_assets_with_required(&menu, &[], &[], &[&socle])
+            .await
+            .unwrap_err();
+        assert_eq!(err.code.0, codes::DESCRIPTOR_INVALID);
+        assert!(
+            format!("{err:?}").contains("view_entity_unknown"),
+            "{err:?}"
+        );
+        assert!(store.get("menu", None).await.is_err(), "nothing written");
     }
 }
 
