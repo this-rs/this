@@ -33,7 +33,7 @@ pub struct Limits {
     /// Unités d'exécution accordées à l'appel, posées **avant** l'instanciation.
     ///
     /// `wasmi` les compte en instructions ; un moteur navigateur n'a pas de fuel et
-    /// doit borner autrement (horloge, instrumentations) — c'est le moteur qui
+    /// doit borner autrement (instrumentation du binaire : `this-module-harness-web`) — c'est le moteur qui
     /// interprète ce champ, et il doit refuser l'appel s'il ne sait pas le tenir.
     pub fuel: u64,
     /// Plafond de la mémoire linéaire du module, en pages de 64 Kio.
@@ -67,6 +67,34 @@ impl Limits {
     /// Le plafond de mémoire en octets.
     pub fn memory_bytes(&self) -> usize {
         self.memory_pages as usize * PAGE_BYTES
+    }
+
+    /// Les bornes d'un **rendu de vue** : réponse 32 Kio, fuel 30 M, requête 64 Kio,
+    /// 64 pages (4 Mio).
+    ///
+    /// D'où viennent ces chiffres (note R0 du 09/11/2026, mesurés dans une WebView) :
+    ///
+    /// - **réponse 32 Kio** : le plafond nécessaire, pas le confortable. Le défaut de
+    ///   1 Mio laisse passer ~14 200 briques, soit ≈ 97 ms de dessin : un arbre que
+    ///   personne ne lit et qui fige l'écran. 32 Kio tiennent un écran réel ;
+    /// - **fuel 30 M** : `Limits::default()` (2 M) coupe un arbre de 30 briques, donc un
+    ///   rendu ordinaire. Le calcul n'est pas le coût (un `render` chaud mesure 1,2 µs
+    ///   à vide, 569 µs pour 1 000 briques) : la borne n'est là que pour arrêter une
+    ///   boucle, et 30 M laissent une marge de plusieurs ordres de grandeur ;
+    /// - **requête 64 Kio** : un JSON de données d'écran, pas un document ;
+    /// - **mémoire 64 pages** : comme l'ABI des modules compilés.
+    ///
+    /// L'unité de fuel dépend du moteur : `wasmi` compte des instructions exécutées,
+    /// le moteur de la page (`this-module-harness-web`) des instructions d'un bloc de
+    /// base, injectées dans le binaire. L'ordre de grandeur est le même ; le nombre exact
+    /// n'est pas comparable d'un moteur à l'autre.
+    pub fn view() -> Self {
+        Self {
+            fuel: 30_000_000,
+            memory_pages: 64,
+            request_bytes: 64 * 1024,
+            response_bytes: 32 * 1024,
+        }
     }
 
     /// Les bornes par appel de l'ABI des modules compilés (`docs/modules-wasm-abi.md` §8) :
@@ -443,5 +471,22 @@ fn classify(error: wasmi::Error, limits: &Limits, step: &str) -> ExecutorError {
             message: error.to_string(),
         },
         _ => ExecutorError::Trap(format!("{step} : {error}")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn view_limits_are_the_measured_ones() {
+        let view = Limits::view();
+        assert_eq!(view.response_bytes, 32 * 1024);
+        assert_eq!(view.request_bytes, 64 * 1024);
+        assert_eq!(view.fuel, 30_000_000);
+        assert_eq!(view.memory_pages, 64);
+        // Plus large que le défaut sur le fuel, plus étroit sur la réponse.
+        assert!(view.fuel > Limits::default().fuel);
+        assert!(view.response_bytes < Limits::default().response_bytes);
     }
 }
