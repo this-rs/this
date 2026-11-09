@@ -25,6 +25,14 @@ fn compile(avec_render: bool) -> Vec<u8> {
     if !avec_render {
         cmd.arg("--no-default-features");
     }
+    // Sous `cargo llvm-cov`, RUSTFLAGS porte `-C instrument-coverage` : rustc l'applique
+    // aussi au build wasm32, qui échoue (mesuré en CI : serde_core, itoa, zmij). Le build
+    // enfant n'appartient pas à la couverture, il est donc lancé SANS ces réglages.
+    cmd.env_remove("RUSTFLAGS")
+        .env_remove("CARGO_ENCODED_RUSTFLAGS")
+        .env_remove("LLVM_PROFILE_FILE")
+        .env_remove("RUSTC_WRAPPER")
+        .env_remove("CARGO_INCREMENTAL");
     let sortie = cmd.output().expect("cargo se lance");
     assert!(
         sortie.status.success(),
