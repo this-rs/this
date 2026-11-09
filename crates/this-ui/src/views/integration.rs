@@ -6,11 +6,11 @@
 
 use serde_json::json;
 use this_descriptor::views::{Action, Brick, Node, Surface, ViewDesc};
-use this_descriptor::{CheckProfile, CustomRegistry, ModuleDescriptor};
+use this_descriptor::{CheckProfile, CustomRegistry, FilterExpr, FilterOp, ModuleDescriptor};
 
 use crate::views::data::{self, Feed, Reading, Snapshot};
 use crate::views::placement::Portfolio;
-use crate::views::state::{ViewState, view_state};
+use crate::views::state::{ViewState, brick_reading, view_state};
 
 /// A billing module with a sidebar list, a detail view, a read-only replacement of it, a
 /// header summary, and one action of every kind the contract allows.
@@ -280,4 +280,66 @@ fn a_reference_input_in_a_form_is_read_from_the_declared_field_type() {
         })
         .collect();
     assert_eq!(kinds, vec!["text", "number", "text"]);
+}
+
+/// The chat surface: one `message` brick per message, each filtered on its own key. A
+/// brick reads one row, so its filter is what says which message it draws.
+#[test]
+fn a_chat_thread_is_one_message_brick_per_message_in_order() {
+    let keys = ["m1", "m2", "m3"];
+    let thread = ViewDesc {
+        name: "fil".into(),
+        surface: Surface::Chat,
+        title: None,
+        replaces: None,
+        look: None,
+        root: Node::Stack {
+            children: keys
+                .iter()
+                .map(|key| Node::Leaf {
+                    brick: Box::new(Brick::Message {
+                        entity: "message".into(),
+                        filter: Some(FilterExpr::Cmp {
+                            field: "local".into(),
+                            op: FilterOp::Eq,
+                            value: json!(key),
+                        }),
+                    }),
+                })
+                .collect(),
+        },
+    };
+    let portfolio = Portfolio::of(std::slice::from_ref(&thread));
+    assert_eq!(portfolio.occupied(), vec![Surface::Chat]);
+    assert_eq!(portfolio.at(Surface::Chat).len(), 1);
+
+    let snapshot = Snapshot::new().with(
+        "message",
+        Feed::Ready(vec![
+            json!({ "local": "m1", "role": "utilisateur", "contenu": "bonjour" }),
+            json!({ "local": "m2", "role": "agent", "contenu": "que crée-t-on ?" }),
+            json!({ "local": "m3", "role": "utilisateur", "contenu": "une liste de courses" }),
+        ]),
+    );
+    let Node::Stack { children } = &thread.root else {
+        panic!("the thread is a stack of bubbles");
+    };
+    let read: Vec<String> = children
+        .iter()
+        .map(|node| {
+            let Node::Leaf { brick } = node else {
+                panic!("each bubble is a leaf");
+            };
+            let reading = brick_reading(brick, &snapshot).expect("a message brick reads an entity");
+            let rows = reading
+                .rows()
+                .expect("the filter keeps exactly one message");
+            assert_eq!(rows.rows.len(), 1);
+            data::display(data::value_of(rows.rows[0], "contenu"))
+        })
+        .collect();
+    assert_eq!(
+        read,
+        vec!["bonjour", "que crée-t-on ?", "une liste de courses"]
+    );
 }
