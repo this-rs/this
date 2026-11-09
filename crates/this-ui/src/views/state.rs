@@ -121,6 +121,7 @@ fn filter_of(brick: &Brick) -> Option<&this_descriptor::FilterExpr> {
         | Brick::Field { filter, .. }
         | Brick::Relation { filter, .. }
         | Brick::Chat { filter, .. }
+        | Brick::Message { filter, .. }
         | Brick::ToolStep { filter, .. }
         | Brick::Queue { filter, .. }
         | Brick::CodeBlock { filter, .. }

@@ -58,6 +58,11 @@ pub enum Surface {
     Panel,
     /// L'en-tête : une barre fine ; seules les petites briques y ont leur place.
     Header,
+    /// Le fil de conversation : la surface où l'échange entre la personne, l'agent et les
+    /// modules se déroule. C'est la même que les autres — mêmes briques, mêmes actions —
+    /// posée dans le chat au lieu d'un écran. Sans elle, le fil restait le seul endroit de
+    /// l'app qu'aucun module ne pouvait dessiner, ni l'utilisateur modifier.
+    Chat,
 
     // ---- Les surfaces d'un AUTRE hôte ------------------------------------------------
     //
@@ -271,6 +276,14 @@ pub enum Brick {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         filter: Option<FilterExpr>,
     },
+    /// UN message d'une conversation : l'auteur (rôle) et le contenu d'une ligne. C'est la
+    /// brique qui permet à un module de redessiner CE QU'UNE BULLE DIT et à quoi elle
+    /// ressemble, là où `Chat` ne savait rendre qu'une liste brute de l'entité du module.
+    Message {
+        entity: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        filter: Option<FilterExpr>,
+    },
     /// Une étape d'outil dans un fil de messages : son état est un champ.
     ToolStep {
         entity: String,
@@ -345,6 +358,7 @@ impl Brick {
             | Brick::Form { entity, .. }
             | Brick::Field { entity, .. }
             | Brick::Chat { entity, .. }
+            | Brick::Message { entity, .. }
             | Brick::ToolStep { entity, .. }
             | Brick::Queue { entity, .. }
             | Brick::CodeBlock { entity, .. }
@@ -1335,7 +1349,7 @@ fn lectures(b: &Brick) -> Vec<&str> {
                 chemins_du_filtre(f, &mut v);
             }
         }
-        Brick::Button { filter, .. } | Brick::Chat { filter, .. } => {
+        Brick::Button { filter, .. } | Brick::Chat { filter, .. } | Brick::Message { filter, .. } => {
             if let Some(f) = filter {
                 chemins_du_filtre(f, &mut v);
             }

@@ -616,6 +616,14 @@ fn bricks() -> Vec<VariantSchema> {
             false,
         ),
         brick_v(
+            "message",
+            "One message of a conversation: its author and its content.",
+            vec![entity_f(), filter_f()],
+            json!({"type": "message", "entity": "conversation"}),
+            json!({"type": "message", "entity": "conversation", "filter": f}),
+            false,
+        ),
+        brick_v(
             "tool_step",
             "A tool step inside a message thread: its state is a field.",
             vec![
@@ -801,6 +809,17 @@ fn actions() -> Vec<VariantSchema> {
             ],
             json!({"kind": "agent_tool", "name": "halt", "op": "stop_run"}),
             json!({"kind": "agent_tool", "name": "demander", "op": "send_message", "entity": "conversation", "text": "Quels articles manquent ?"}),
+        ),
+        variant(
+            "invoke",
+            "Runs a named operation of the module: the only way a view reaches its code.",
+            vec![
+                name(),
+                req("operation", "string", "The operation declared in `operations`.").refers("operation"),
+                opt("entity", "string", "The entity the operation targets.").refers("entity"),
+            ],
+            json!({"kind": "invoke", "name": "terminer", "operation": "terminer"}),
+            json!({"kind": "invoke", "name": "terminer", "operation": "terminer", "entity": "invoice"}),
         ),
         variant(
             "device_capability",
@@ -1013,6 +1032,10 @@ fn enums() -> Vec<EnumSchema> {
                 ("panel", "A panel beside or over the main content."),
                 ("header", "A thin bar: only small bricks."),
                 (
+                    "chat",
+                    "The conversation thread: the same bricks, in the chat.",
+                ),
+                (
                     "widget",
                     "The home-screen widget: drawn by another host, same bricks.",
                 ),
@@ -1207,6 +1230,21 @@ fn rules() -> Vec<RuleSchema> {
             "duplicate_action",
             "Two actions share a name.",
             "Rename one; action names are unique in the module.",
+        ),
+        rule(
+            "duplicate_operation",
+            "Two operations share a name.",
+            "Rename one; operation names are unique in the module.",
+        ),
+        rule(
+            "operation_entity_unknown",
+            "An operation names an entity the module does not declare.",
+            "Declare the entity in `entities` or fix the name.",
+        ),
+        rule(
+            "action_operation_unknown",
+            "An invoke action names an operation the module does not declare.",
+            "Declare the operation in `operations` or fix the name.",
         ),
         rule(
             "action_entity_unknown",
@@ -1645,6 +1683,8 @@ mod tests {
             parse_view(r#"{"name":"invoices","root":{"type":"stack","children":[]}}"#)
                 .expect("fixture view"),
         );
+        m.operations
+            .push(crate::OperationDesc::new("terminer").entity("invoice"));
         m
     }
 
@@ -2115,6 +2155,13 @@ mod tests {
             m.actions.push(parse_action(a).expect("action"));
             m
         }
+        fn with_operations(ops: &[(&str, &str)]) -> ModuleDescriptor {
+            let mut m = fixture();
+            for (name, entity) in ops {
+                m.operations.push(crate::OperationDesc::new(*name).entity(*entity));
+            }
+            m
+        }
         fn replacing(pairs: &[(&str, &str)]) -> ModuleDescriptor {
             let mut m = fixture();
             for (name, target) in pairs {
@@ -2170,6 +2217,20 @@ mod tests {
             (
                 "view_entity_unknown",
                 with_view(leaf(r#"{"type":"list","entity":"ghost","label":"titre"}"#)),
+            ),
+            (
+                "duplicate_operation",
+                with_operations(&[("terminer", "invoice"), ("terminer", "invoice")]),
+            ),
+            (
+                "operation_entity_unknown",
+                with_operations(&[("envoyer", "ghost")]),
+            ),
+            (
+                "action_operation_unknown",
+                with_action(
+                    r#"{"kind":"invoke","name":"x","operation":"ghost","entity":"invoice"}"#,
+                ),
             ),
             (
                 "view_entity_required",

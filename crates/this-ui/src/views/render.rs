@@ -462,6 +462,7 @@ pub fn render_brick(ctx: Ctx, brick: &Brick) -> AnyView {
             mode,
         } => relation(ctx, entity, filter.as_ref(), link, *mode),
         Brick::Chat { entity, filter } => chat(ctx, entity, filter.as_ref()),
+        Brick::Message { entity, filter } => message(ctx, entity, filter.as_ref()),
         Brick::ToolStep {
             entity,
             filter,
@@ -1765,6 +1766,44 @@ fn chat(ctx: Ctx, entity: &str, filter: Option<&FilterExpr>) -> AnyView {
         </div>
     }
     .into_any()
+}
+
+/// Une bulle de conversation : UNE ligne, son auteur et son contenu. C'est la brique que
+/// le fil utilisera pour qu'un module puisse redessiner chaque message — le contenu reste
+/// celui de la ligne, la forme est celle du contrat.
+fn message(ctx: Ctx, entity: &str, filter: Option<&FilterExpr>) -> AnyView {
+    let entity = entity.to_owned();
+    let filter = filter.cloned();
+    let content = display_field(
+        ctx.module,
+        &entity,
+        &["content", "text", "body", "message", "contenu"],
+    );
+    let author = display_field(ctx.module, &entity, &["role", "author", "sender", "from"]);
+    let log = move || {
+        let snapshot = ctx.data.get();
+        match data::read(&snapshot, &entity, filter.as_ref(), &[], 0, None) {
+            Reading::Rows(rows) => {
+                let row = rows.rows.into_iter().next();
+                let Some(row) = row else {
+                    return tile_for(ctx, &entity, &Reading::Empty, text::NOTHING).into_any();
+                };
+                let text = data::display(data::value_of(&row, &content));
+                let who = data::value_of(&row, &author).map(|value| data::display(Some(value)));
+                view! {
+                    <div class=class::MESSAGE>
+                        {who.map(|who| {
+                            view! { <span class=class::MESSAGE_META>{who}</span> }.into_any()
+                        })}
+                        <span>{text}</span>
+                    </div>
+                }
+                .into_any()
+            }
+            other => tile_for(ctx, &entity, &other, text::NOTHING),
+        }
+    };
+    view! { <div class=class::CHAT>{log}</div> }.into_any()
 }
 
 /// The tone that reads a tool step's state without the colour carrying the meaning alone.
