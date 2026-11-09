@@ -630,6 +630,21 @@ where
     .into_any()
 }
 
+/// Cette action a-t-elle besoin de la ligne sous le bouton pour avoir un sens ?
+///
+/// `Update` et `Delete` écrivent une ligne : oui. `Invoke` aussi **quand l'opération vise
+/// une entité** — sans son `id`, le module reçoit un appel qu'il ne peut pas situer
+/// (mesuré sur l'appareil : un bouton « terminer » posé sur une ligne envoyait `{}`, le
+/// module refusait faute d'identifiant, l'interface semblait morte). Une opération de
+/// module (`entity` absente) n'a pas besoin de ligne : elle reste active sur une entité vide.
+pub(crate) fn action_needs_row(declared: Option<&Action>) -> bool {
+    match declared {
+        Some(Action::Update { .. }) | Some(Action::Delete { .. }) => true,
+        Some(Action::Invoke { entity, .. }) => entity.is_some(),
+        _ => false,
+    }
+}
+
 fn button(ctx: Ctx, entity: &str, filter: Option<&FilterExpr>, action: &str) -> AnyView {
     let label = placement::humanise(action);
     let declared = ctx
@@ -637,10 +652,7 @@ fn button(ctx: Ctx, entity: &str, filter: Option<&FilterExpr>, action: &str) -> 
         .try_with_value(|module| module.actions.iter().find(|a| a.name() == action).cloned())
         .flatten();
     let is_delete = matches!(declared, Some(Action::Delete { .. }));
-    let needs_row = matches!(
-        declared,
-        Some(Action::Update { .. }) | Some(Action::Delete { .. })
-    );
+    let needs_row = action_needs_row(declared.as_ref());
     let entity = entity.to_owned();
     let name = action.to_owned();
     let filter_click = filter.cloned();
@@ -2126,5 +2138,53 @@ mod tests {
             Some("7".to_owned())
         );
         assert_eq!(data::target_id(&snapshot, "customer", None), None);
+    }
+}
+
+#[cfg(test)]
+mod tests_action_row {
+    use super::*;
+
+    /// Le bouton qui atteint le code d'un module doit dire LAQUELLE des lignes.
+    #[test]
+    fn une_operation_qui_vise_une_entite_a_besoin_de_la_ligne() {
+        let vise_une_entite = Action::Invoke {
+            name: "terminer".into(),
+            operation: "terminer".into(),
+            entity: Some("tache".into()),
+        };
+        assert!(action_needs_row(Some(&vise_une_entite)));
+
+        let operation_de_module = Action::Invoke {
+            name: "recalculer".into(),
+            operation: "recalculer".into(),
+            entity: None,
+        };
+        assert!(
+            !action_needs_row(Some(&operation_de_module)),
+            "une opération de module ne doit pas être désactivée sur une entité vide"
+        );
+    }
+
+    #[test]
+    fn les_ecritures_ont_besoin_de_la_ligne_et_la_creation_non() {
+        let update = Action::Update {
+            name: "ranger".into(),
+            entity: "tache".into(),
+            fields: vec!["fait".into()],
+        };
+        let delete = Action::Delete {
+            name: "jeter".into(),
+            entity: "tache".into(),
+        };
+        let create = Action::Create {
+            name: "ajouter".into(),
+            entity: "tache".into(),
+            fields: vec!["titre".into()],
+        };
+        assert!(action_needs_row(Some(&update)));
+        assert!(action_needs_row(Some(&delete)));
+        assert!(!action_needs_row(Some(&create)));
+        assert!(!action_needs_row(None));
     }
 }
