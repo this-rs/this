@@ -360,11 +360,19 @@ pub const CSS: &str = r#"
 .vw-confirm { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 
 .vw-banner { display: flex; gap: 8px; align-items: flex-start; margin: 0; padding: 10px 12px;
-  border-radius: 10px; border: 1px solid var(--vw-line, rgba(0,0,0,.12)); }
-.vw-tone-info { border-color: #b6d4fe; background: #eff6ff; }
-.vw-tone-success { border-color: #a7e0bd; background: #effaf3; }
-.vw-tone-warning { border-color: #f3d59b; background: #fff9ec; }
-.vw-tone-error { border-color: #f2b8b5; background: #fdf1f0; }
+  border-radius: 10px; border: 1px solid var(--vw-line, rgba(0,0,0,.12));
+  color: var(--vw-ink); }
+/* Les tons se pilotent par variables : une couleur claire codée en dur donnait un pavé
+   blanc au texte pâle sur un thème sombre (mesuré sur l'appareil : « 28 messages ·
+   ~2718 jetons » illisible). Les valeurs de repli restent celles d'un thème clair. */
+.vw-tone-info { border-color: var(--vw-tone-info-line, #b6d4fe);
+  background: var(--vw-tone-info-bg, #eff6ff); color: var(--vw-tone-info-ink, #0b2b5b); }
+.vw-tone-success { border-color: var(--vw-tone-success-line, #a7e0bd);
+  background: var(--vw-tone-success-bg, #effaf3); color: var(--vw-tone-success-ink, #0d3b25); }
+.vw-tone-warning { border-color: var(--vw-tone-warning-line, #f3d59b);
+  background: var(--vw-tone-warning-bg, #fff9ec); color: var(--vw-tone-warning-ink, #4a3508); }
+.vw-tone-error { border-color: var(--vw-tone-error-line, #f2b8b5);
+  background: var(--vw-tone-error-bg, #fdf1f0); color: var(--vw-tone-error-ink, #5b1512); }
 
 .vw-indicator { display: inline-flex; align-items: center; gap: 8px; min-height: 32px; font: inherit; }
 .vw-dot { width: 8px; height: 8px; border-radius: 50%; background: currentColor; flex: 0 0 auto; }
@@ -419,8 +427,8 @@ pub const CSS: &str = r#"
   min-height: 44px; }
 .vw-chat { display: flex; flex-direction: column; gap: 8px; }
 .vw-chat-log { display: flex; flex-direction: column; gap: 8px; margin: 0; padding: 0; list-style: none; }
-.vw-message { display: flex; flex-direction: column; gap: 2px; padding: 8px 12px; border-radius: 12px;
-  background: var(--vw-hover, rgba(0,0,0,.04)); }
+.vw-message { display: flex; flex-direction: column; gap: 2px; padding: 0; border-radius: 0;
+  background: transparent; }
 .vw-message-meta { font-size: 12px; opacity: .7; }
 .vw-message-body { min-width: 0; overflow-wrap: anywhere; }
 .vw-message-body > :first-child { margin-top: 0; }
@@ -433,8 +441,12 @@ pub const CSS: &str = r#"
 .vw-message-body th, .vw-message-body td { border: 1px solid var(--vw-line, rgba(0,0,0,.12));
   padding: 4px 8px; text-align: left; }
 .vw-message-body ul, .vw-message-body ol { margin: 8px 0; padding-left: 20px; }
-.vw-message-user { background: var(--vw-user-bg, rgba(37,99,235,.10)); }
-.vw-message-module { background: var(--vw-module-bg, rgba(14,116,144,.10)); }
+/* Une réponse de l'agent se LIT : pas de cartouche autour d'elle, elle occupe la largeur et
+   se suffit à elle-même. Le message de la personne reste une bulle, pour qu'on distingue qui
+   parle d'un coup d'œil. Un fil où tout est encadré ne hiérarchise plus rien. */
+.vw-message-user { padding: 8px 12px; border-radius: 12px; align-self: flex-end;
+  max-width: 92%; background: var(--vw-user-bg, rgba(37,99,235,.10)); }
+.vw-message-module { padding: 2px 0; background: transparent; align-self: stretch; }
 .vw-message-live { opacity: .92; }
 .vw-steps { display: flex; flex-direction: column; gap: 4px; margin: 6px 0 0; padding: 0;
   list-style: none; }

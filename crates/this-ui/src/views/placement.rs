@@ -215,7 +215,10 @@ pub fn title(view: &ViewDesc) -> String {
 /// takes the room the bar's own content needs. The title stays on the wrapper as its
 /// accessible name (`aria-label`); only the visible heading is dropped.
 pub fn shows_title(view: &ViewDesc) -> bool {
-    view.surface != Surface::Header
+    // Une barre n'est pas une page : son titre est le nom du contrat qui la dessine
+    // (« Entete »), pas une information. Un fil non plus : il se lit par ses messages, et
+    // « Fil » y occupait la première ligne pour ne rien dire.
+    !matches!(view.surface, Surface::Header | Surface::Chat)
 }
 
 /// Turn a contract identifier into something a person can read: underscores become
@@ -258,19 +261,18 @@ mod tests {
             .collect()
     }
 
+    /// Une barre et un fil ne portent pas de titre visible : le titre y serait le nom
+    /// interne de la vue (« Entete », « Fil »). Une page et un panneau, si.
     #[test]
-    fn a_header_view_draws_no_heading_but_a_page_does() {
+    fn only_a_page_or_a_panel_draws_a_heading() {
         assert!(!shows_title(&view("entete", Surface::Header, None)));
-        for surface in [
-            Surface::Main,
-            Surface::Sidebar,
-            Surface::Panel,
-            Surface::Chat,
-        ] {
+        assert!(!shows_title(&view("fil", Surface::Chat, None)));
+        for surface in [Surface::Main, Surface::Sidebar, Surface::Panel] {
             assert!(shows_title(&view("detail", surface, None)), "{surface:?}");
         }
         // The accessible name survives: the title is still computed.
         assert_eq!(title(&view("entete", Surface::Header, None)), "Entete");
+        assert_eq!(title(&view("fil", Surface::Chat, None)), "Fil");
     }
 
     #[test]
