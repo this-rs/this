@@ -67,6 +67,43 @@ pub fn handle<M: Module>(op_ptr: i32, op_len: i32, req_ptr: i32, req_len: i32) -
     packed
 }
 
+/// Corps de l'export `render` : lit la requête (JSON libre, décidé par l'hôte), appelle la
+/// fonction de rendu, rend l'arbre. **Total** : une requête illisible ou un rendu en échec
+/// devient une vue d'erreur valide ([`crate::views::error_view`]), jamais un trap.
+pub fn render<R: crate::views::IntoViews>(
+    ptr: i32,
+    len: i32,
+    f: impl FnOnce(serde_json::Value) -> R,
+) -> i64 {
+    let packed = pack(render_bytes(input(ptr, len), f));
+    INBOX.with(|i| i.borrow_mut().clear());
+    packed
+}
+
+/// Cœur testable hors wasm de `render` : octets de la requête -> octets de la réponse.
+pub fn render_bytes<R: crate::views::IntoViews>(
+    req: &[u8],
+    f: impl FnOnce(serde_json::Value) -> R,
+) -> Vec<u8> {
+    let value = if req.is_empty() {
+        Ok(serde_json::Value::Null)
+    } else {
+        serde_json::from_slice(req).map_err(|e| format!("requête de rendu illisible : {e}"))
+    };
+    let views = value.and_then(|v| f(v).into_views());
+    let bytes = match views {
+        Ok(views) => {
+            serde_json::to_vec(&views).map_err(|e| format!("rendu non sérialisable : {e}"))
+        }
+        Err(m) => Err(m),
+    };
+    bytes.unwrap_or_else(|m| {
+        serde_json::to_vec(&[crate::views::error_view(&m)]).unwrap_or_else(|_| {
+            br#"[{"name":"render_error","surface":"main","root":{"type":"leaf","brick":{"type":"banner","tone":"error","text":"erreur de rendu"}}}]"#.to_vec()
+        })
+    })
+}
+
 /// Cœur testable hors wasm : octets -> `Response`.
 pub fn run<M: Module>(op: &[u8], req: &[u8]) -> Response {
     let mut v: serde_json::Value = match serde_json::from_slice(req) {
@@ -90,11 +127,13 @@ pub fn run<M: Module>(op: &[u8], req: &[u8]) -> Response {
     }
 }
 
-/// Génère les quatre exports de l'ABI v1 : `memory` (fourni par la cible wasm), `alloc`,
-/// `manifest`, `handle`.
+/// Génère les exports de l'ABI v1 : `memory` (fourni par la cible wasm), `alloc`, `manifest`,
+/// `handle` — et `render` **seulement** si le module nomme une fonction de rendu.
 ///
 /// ```ignore
-/// this_module_sdk::export!(MonModule);
+/// this_module_sdk::export!(MonModule);                    // pas de `render`
+/// this_module_sdk::export!(MonModule, render = mon_rendu); // + `render`
+/// // fn mon_rendu(requete: serde_json::Value) -> Result<View, ViewError>
 /// ```
 #[macro_export]
 macro_rules! export {
@@ -110,6 +149,13 @@ macro_rules! export {
         #[unsafe(no_mangle)]
         pub extern "C" fn handle(op_ptr: i32, op_len: i32, req_ptr: i32, req_len: i32) -> i64 {
             $crate::rt::handle::<$module>(op_ptr, op_len, req_ptr, req_len)
+        }
+    };
+    ($module:ty, render = $render:path) => {
+        $crate::export!($module);
+        #[unsafe(no_mangle)]
+        pub extern "C" fn render(ptr: i32, len: i32) -> i64 {
+            $crate::rt::render(ptr, len, $render)
         }
     };
 }
