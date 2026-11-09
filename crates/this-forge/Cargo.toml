@@ -47,3 +47,5 @@ wasmparser = "0.228"
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
+# Assemble de vrais binaires wasm pour les tests du contrôle ABI et du runner.
+wat = "1.263.0"
