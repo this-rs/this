@@ -341,6 +341,10 @@ impl VfsModuleStore {
         ))?)
     }
 
+    // `path` ne sert qu'a l'authentification (`module-signing`) : sans la feature, le
+    // binding reste inutilise et `clippy -D warnings` refuse le fichier. Le taire ici
+    // plutot que de renommer, pour que le code garde son sens quand la feature est active.
+    #[cfg_attr(not(feature = "module-signing"), allow(unused_variables))]
     async fn manifest(&self, name: &str, version: &str) -> Result<Option<Manifest>, ContractError> {
         let Some((path, m)) = self.manifest_unverified(name, version).await? else {
             return Ok(None);
