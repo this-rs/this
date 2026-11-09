@@ -8,7 +8,7 @@
 //! | `call_json` recompile le module à chaque appel : 1,3 ms au lieu de 18 µs | `Engine` + `Module` gardés par module installé, libérés à la désinstallation ou au remplacement | [`WasmiViews`] (`CompiledModule`, [`crate::call`]) |
 //! | l'`INBOX` du SDK fuit 32,8 o/appel sur une instance réutilisée | **jamais d'instance réutilisée** : chaque appel instancie à neuf depuis le module compilé, donc rien à vider — la fuite ne peut pas exister | [`crate::call::CompiledModule`] |
 //! | publier un arbre identique coûte un remontage (6,2 ms) contre 0,85–1,23 ms | l'arbre est comparé à celui déjà publié ; identique ⇒ pas de redessin | [`Screen::publish`] |
-//! | `issues_against` n'est pas incrémental : 1,95 ms à 1 000 vues déclarées, à chaque appel | verdict mémoïsé par (version de module, arbre rendu) ; un appel qui rend le même arbre ne revalide pas | [`ViewHost`] |
+//! | `issues_against` n'est pas incrémental : 1,95 ms à 1 000 vues déclarées, à chaque appel | verdict mémoïsé par (version de module, arbre rendu) ; un appel qui rend le même arbre ne revalide pas. **R7** : un arbre NEUF ne revalide plus les N vues déclarées non plus (`ViewBaseline`, voir [`crate::render`], chiffres avant/après) | [`ViewHost`] |
 //!
 //! Et ce qui ne coûte rien parce qu'on ne le refait pas : un appel **identique** (même
 //! module, même version, même surface, même requête) est rendu depuis le cache, sans
@@ -35,9 +35,9 @@ use std::collections::{HashMap, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::mem::{Discriminant, discriminant};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 use this_descriptor::ModuleDescriptor;
-use this_descriptor::views::{Surface, ViewDesc};
+use this_descriptor::views::{Surface, ViewBaseline, ViewDesc};
 
 /// Ce qui autorise l'exécution d'un module de vue. Trois, et seulement trois.
 ///
@@ -153,6 +153,9 @@ struct Installed {
     key: ModuleKey,
     program: Arc<[u8]>,
     descriptor: Arc<ModuleDescriptor>,
+    /// Les problèmes de chaque vue déclarée, calculés à la première validation et gardés
+    /// tant que cette version est installée : un arbre rendu n'a plus à les revalider.
+    baseline: Arc<OnceLock<ViewBaseline>>,
     /// Verdicts de validation par hash de la réponse. Né avec la version, mort avec elle.
     memo: HashMap<u64, Vec<MemoEntry>>,
 }
@@ -227,6 +230,7 @@ impl<R: ViewRenderer + Sync> ViewHost<R> {
                 key,
                 program,
                 descriptor: Arc::new(descriptor),
+                baseline: Arc::new(OnceLock::new()),
                 memo: HashMap::new(),
             },
         );
@@ -266,7 +270,7 @@ impl<R: ViewRenderer + Sync> ViewHost<R> {
             .into();
         let request_hash = hash_of(&bytes);
 
-        let (key, program, descriptor) = {
+        let (key, program, descriptor, baseline) = {
             let mut inner = self.lock();
             inner.stats.requests += 1;
             inner.stats.by_trigger[trigger.index()] += 1;
@@ -276,6 +280,7 @@ impl<R: ViewRenderer + Sync> ViewHost<R> {
             let key = installed.key.clone();
             let program = installed.program.clone();
             let descriptor = installed.descriptor.clone();
+            let baseline = installed.baseline.clone();
             let cache_key = CacheKey {
                 module: key.name.clone(),
                 version: key.version.clone(),
@@ -292,7 +297,7 @@ impl<R: ViewRenderer + Sync> ViewHost<R> {
                     from_cache: true,
                 });
             }
-            (key, program, descriptor)
+            (key, program, descriptor, baseline)
         };
 
         // L'exécution se fait sans tenir le verrou : un module peut être lent.
@@ -303,7 +308,13 @@ impl<R: ViewRenderer + Sync> ViewHost<R> {
             .await;
         let verdict = match called {
             Err(e) => Err(ServeError::Execution(e)),
-            Ok(call) => self.judge(&key, &descriptor, &call.response, limits, surface),
+            Ok(call) => self.judge(
+                &key,
+                (&descriptor, &baseline),
+                &call.response,
+                limits,
+                surface,
+            ),
         };
 
         let mut inner = self.lock();
@@ -345,7 +356,7 @@ impl<R: ViewRenderer + Sync> ViewHost<R> {
     fn judge(
         &self,
         key: &ModuleKey,
-        descriptor: &ModuleDescriptor,
+        (descriptor, baseline): (&ModuleDescriptor, &OnceLock<ViewBaseline>),
         response: &[u8],
         limits: &Limits,
         surface: Surface,
@@ -369,7 +380,7 @@ impl<R: ViewRenderer + Sync> ViewHost<R> {
             Some(v) => v,
             None => {
                 self.lock().stats.validations += 1;
-                let v = Self::validate(descriptor, response, limits);
+                let v = Self::validate(descriptor, baseline, response, limits);
                 let mut inner = self.lock();
                 if let Some(installed) = inner.installed.get_mut(&key.name)
                     && installed.key == *key
@@ -404,10 +415,19 @@ impl<R: ViewRenderer + Sync> ViewHost<R> {
         Ok(Arc::new(only))
     }
 
-    fn validate(descriptor: &ModuleDescriptor, response: &[u8], limits: &Limits) -> Verdict {
+    fn validate(
+        descriptor: &ModuleDescriptor,
+        baseline: &OnceLock<ViewBaseline>,
+        response: &[u8],
+        limits: &Limits,
+    ) -> Verdict {
         let views = render::views_of(response, limits.response_bytes)
             .map_err(|e| ServeError::Views(e.to_string()))?;
-        let issues = render::issues_against(descriptor, &views);
+        let issues = render::issues_against_with(
+            baseline.get_or_init(|| ViewBaseline::new(descriptor)),
+            descriptor,
+            &views,
+        );
         if !issues.is_empty() {
             return Err(ServeError::Rejected { issues });
         }

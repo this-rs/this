@@ -798,12 +798,116 @@ pub enum DeviceCapability {
 /// Les problèmes de vues et d'actions d'un module, sous forme `(raison, chemin, message)`.
 /// `ModuleDescriptor::check` les rend en `this.descriptor.<raison>`.
 pub fn issues(m: &ModuleDescriptor) -> Vec<(&'static str, String, String)> {
-    let mut c = Checks::new(m);
+    let vues: Vec<&ViewDesc> = m.views.iter().collect();
+    issues_over(m, vues)
+}
+
+/// A reported problem: `(reason, path, message)`.
+pub type Issue = (&'static str, String, String);
+
+fn issues_over<'a>(m: &'a ModuleDescriptor, vues: Vec<&'a ViewDesc>) -> Vec<Issue> {
+    let mut c = Checks::new(m, vues);
     c.operations();
     c.actions();
     c.views();
     c.replacements();
     c.out
+}
+
+/// The merged view list of a module once `rendered` views are in: declared views whose name a
+/// rendered view carries are dropped, the rendered ones follow. No clone of the descriptor.
+fn merged<'a>(m: &'a ModuleDescriptor, rendered: &'a [ViewDesc]) -> Vec<&'a ViewDesc> {
+    let remplacees: BTreeSet<&str> = rendered.iter().map(|v| v.name.as_str()).collect();
+    m.views
+        .iter()
+        .filter(|v| !remplacees.contains(v.name.as_str()))
+        .chain(rendered.iter())
+        .collect()
+}
+
+/// Same verdict as `issues` on a clone of `m` whose views were replaced by `rendered` (same
+/// name) and extended with them, without cloning `m`. Revalidates every declared view.
+pub fn issues_with_rendered(m: &ModuleDescriptor, rendered: &[ViewDesc]) -> Vec<Issue> {
+    issues_over(m, merged(m, rendered))
+}
+
+/// What is known about the declared views of one descriptor, computed once: the problems of
+/// each declared view, so that a rendered tree is validated without revalidating the N declared
+/// views. Bound to the descriptor it was built from: use it only with that descriptor.
+///
+/// Why this is exact: a view's own problems depend on the entities, the actions and the
+/// operations of the module (unchanged by a render) and on the *set of view names* — and only
+/// through a reference to a view (`view_target_unknown`). Adding names can only remove such a
+/// problem, so a declared view whose baseline problems include one is revalidated every time.
+/// Duplicate names among declared views vanish or stay together (a rendered name removes all
+/// declared views of that name), so the baseline duplicate flags stay valid.
+pub struct ViewBaseline {
+    /// Per declared view: its problems, paths relative to `views[i]`, or `None` when the view
+    /// must be revalidated each time.
+    per_view: Vec<Option<Vec<Issue>>>,
+}
+
+impl ViewBaseline {
+    pub fn new(m: &ModuleDescriptor) -> Self {
+        let vues: Vec<&ViewDesc> = m.views.iter().collect();
+        let mut c = Checks::new(m, vues);
+        c.operations();
+        c.actions();
+        let mut per_view = Vec::with_capacity(m.views.len());
+        let mut vus = BTreeSet::new();
+        for (i, v) in m.views.iter().enumerate() {
+            let avant = c.out.len();
+            c.view_at(i, v, &mut vus);
+            let prefixe = format!("views[{i}]");
+            let mine: Vec<Issue> = c.out.drain(avant..).collect();
+            let stable = mine
+                .iter()
+                .all(|(r, p, _)| *r != "view_target_unknown" && p.starts_with(&prefixe));
+            per_view.push(stable.then(|| {
+                mine.into_iter()
+                    .map(|(r, p, msg)| (r, p[prefixe.len()..].to_string(), msg))
+                    .collect()
+            }));
+        }
+        Self { per_view }
+    }
+
+    /// Same verdict, same order, same text as [`issues_with_rendered`] — and as `issues` on the
+    /// cloned merged descriptor — for the descriptor `m` this baseline was built from.
+    pub fn issues_with(&self, m: &ModuleDescriptor, rendered: &[ViewDesc]) -> Vec<Issue> {
+        if self.per_view.len() != m.views.len() {
+            return issues_with_rendered(m, rendered);
+        }
+        let remplacees: BTreeSet<&str> = rendered.iter().map(|v| v.name.as_str()).collect();
+        let vues = merged(m, rendered);
+        let mut c = Checks::new(m, vues);
+        c.operations();
+        c.actions();
+        let mut vus = BTreeSet::new();
+        let mut position = 0usize;
+        for (i, v) in m.views.iter().enumerate() {
+            if remplacees.contains(v.name.as_str()) {
+                continue;
+            }
+            match &self.per_view[i] {
+                Some(cache) => {
+                    vus.insert(v.name.as_str());
+                    for (r, suffixe, msg) in cache {
+                        c.out
+                            .push((r, format!("views[{position}]{suffixe}"), msg.clone()));
+                    }
+                }
+                None => c.view_at(position, v, &mut vus),
+            }
+            position += 1;
+        }
+        for v in rendered {
+            c.view_at(position, v, &mut vus);
+            position += 1;
+        }
+        c.replacements();
+        c.out
+    }
 }
 
 /// Deepest nesting of containers the checker accepts. A deeper tree is almost certainly a
@@ -869,17 +973,20 @@ struct Checks<'a> {
     actions: BTreeMap<&'a str, &'a Action>,
     operations: BTreeMap<&'a str, &'a crate::module::OperationDesc>,
     views: BTreeSet<&'a str>,
+    /// The views being checked, in order (a merged list for a render).
+    vues: Vec<&'a ViewDesc>,
     out: Vec<(&'static str, String, String)>,
 }
 
 impl<'a> Checks<'a> {
-    fn new(m: &'a ModuleDescriptor) -> Self {
+    fn new(m: &'a ModuleDescriptor, vues: Vec<&'a ViewDesc>) -> Self {
         Self {
             m,
             entities: m.entities.iter().map(|e| (e.name.as_str(), e)).collect(),
             actions: BTreeMap::new(),
             operations: BTreeMap::new(),
-            views: m.views.iter().map(|v| v.name.as_str()).collect(),
+            views: vues.iter().map(|v| v.name.as_str()).collect(),
+            vues,
             out: Vec::new(),
         }
     }
@@ -1176,31 +1283,36 @@ impl<'a> Checks<'a> {
     }
 
     fn views(&mut self) {
-        let m = self.m;
+        let vues = self.vues.clone();
         let mut vus = BTreeSet::new();
-        for (i, v) in m.views.iter().enumerate() {
-            let p = format!("views[{i}]");
-            if !is_identifier(&v.name) {
-                self.push("invalid_name", &p, format!("`{}`", v.name));
-            }
-            if !vus.insert(v.name.as_str()) {
-                self.push("duplicate_view", &p, format!("`{}` declared twice", v.name));
-            }
-            let mut briques = Vec::new();
-            let mut structure = Vec::new();
-            collecte(
-                &format!("{p}.root"),
-                &v.root,
-                1,
-                &mut briques,
-                &mut structure,
-            );
-            for (chemin, raison, msg) in structure {
-                self.push(raison, chemin, msg);
-            }
-            for (chemin, b) in briques {
-                self.brick(&chemin, b, v.surface);
-            }
+        for (i, v) in vues.into_iter().enumerate() {
+            self.view_at(i, v, &mut vus);
+        }
+    }
+
+    /// One view, at position `i` of the list being checked.
+    fn view_at(&mut self, i: usize, v: &'a ViewDesc, vus: &mut BTreeSet<&'a str>) {
+        let p = format!("views[{i}]");
+        if !is_identifier(&v.name) {
+            self.push("invalid_name", &p, format!("`{}`", v.name));
+        }
+        if !vus.insert(v.name.as_str()) {
+            self.push("duplicate_view", &p, format!("`{}` declared twice", v.name));
+        }
+        let mut briques = Vec::new();
+        let mut structure = Vec::new();
+        collecte(
+            &format!("{p}.root"),
+            &v.root,
+            1,
+            &mut briques,
+            &mut structure,
+        );
+        for (chemin, raison, msg) in structure {
+            self.push(raison, chemin, msg);
+        }
+        for (chemin, b) in briques {
+            self.brick(&chemin, b, v.surface);
         }
     }
 
@@ -1606,10 +1718,10 @@ impl<'a> Checks<'a> {
     }
 
     fn replacements(&mut self) {
-        let m = self.m;
+        let vues = self.vues.clone();
         let mut remplacees: HashMap<&str, &str> = HashMap::new();
         let mut suivant: HashMap<&str, &str> = HashMap::new();
-        for (i, v) in m.views.iter().enumerate() {
+        for (i, v) in vues.iter().copied().enumerate() {
             let Some(cible) = v.replaces.as_deref() else {
                 continue;
             };
@@ -1639,7 +1751,7 @@ impl<'a> Checks<'a> {
             }
             suivant.insert(v.name.as_str(), cible);
         }
-        for (i, v) in m.views.iter().enumerate() {
+        for (i, v) in vues.iter().copied().enumerate() {
             let mut courant = v.name.as_str();
             let mut vu = BTreeSet::new();
             while let Some(&n) = suivant.get(courant) {
