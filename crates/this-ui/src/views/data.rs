@@ -633,11 +633,17 @@ mod tests {
         let open_c2 = Snapshot::new()
             .with("message", Feed::Ready(rows.clone()))
             .with_context("conversation", json!("c-2"));
-        assert_eq!(ids(&read(&open_c2, "message", Some(&filter), &[], 0, None)), vec!["m2"]);
+        assert_eq!(
+            ids(&read(&open_c2, "message", Some(&filter), &[], 0, None)),
+            vec!["m2"]
+        );
 
         // No such key in the context: nothing, said as `Empty`, never every row.
         let no_context = Snapshot::new().with("message", Feed::Ready(rows));
-        assert_eq!(read(&no_context, "message", Some(&filter), &[], 0, None), Reading::Empty);
+        assert_eq!(
+            read(&no_context, "message", Some(&filter), &[], 0, None),
+            Reading::Empty
+        );
         assert_eq!(first(&no_context, "message", Some(&filter)), None);
     }
 
@@ -649,7 +655,10 @@ mod tests {
             value: json!(0),
         };
         let snapshot = invoices().with_context("conversation", json!("c-1"));
-        assert!(matches!(snapshot.resolve(Some(&plain)), Some(Cow::Borrowed(_))));
+        assert!(matches!(
+            snapshot.resolve(Some(&plain)),
+            Some(Cow::Borrowed(_))
+        ));
         assert!(snapshot.resolve(None).is_none());
     }
 }

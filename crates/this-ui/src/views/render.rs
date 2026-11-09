@@ -1789,8 +1789,7 @@ fn message(ctx: Ctx, entity: &str, filter: Option<&FilterExpr>) -> AnyView {
                 .into_iter()
                 .map(|row| {
                     let text = data::display(data::value_of(row, &content));
-                    let who =
-                        data::value_of(row, &author).map(|value| data::display(Some(value)));
+                    let who = data::value_of(row, &author).map(|value| data::display(Some(value)));
                     view! {
                         <div class=class::MESSAGE>
                             {who.map(|who| {
