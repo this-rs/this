@@ -36,11 +36,21 @@ fn absent_key_is_created_with_parent_dirs_hex_and_0600_for_both_keys() {
         let text = std::fs::read_to_string(f).unwrap();
         assert_eq!(text.len(), 65);
         assert!(text.ends_with('\n'));
-        assert!(text.trim().chars().all(|c| c.is_ascii_hexdigit() && !c.is_uppercase()));
-        assert_eq!(std::fs::metadata(f).unwrap().permissions().mode() & 0o777, 0o600);
+        assert!(
+            text.trim()
+                .chars()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_uppercase())
+        );
+        assert_eq!(
+            std::fs::metadata(f).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
     }
     // les deux clés sont distinctes
-    assert_ne!(std::fs::read_to_string(&p).unwrap(), std::fs::read_to_string(&jwt).unwrap());
+    assert_ne!(
+        std::fs::read_to_string(&p).unwrap(),
+        std::fs::read_to_string(&jwt).unwrap()
+    );
     assert_eq!(k.public_hex().len(), 64);
 }
 
@@ -63,7 +73,10 @@ fn key_file_with_loose_permissions_is_refused() {
     let d = tempfile::tempdir().unwrap();
     let p = key_file(d.path(), "k", &"ab".repeat(32), 0o644);
     let e = err(ForgeKeys::load_or_create(&p).map(|_| ()));
-    assert!(e.contains("est lisible par d'autres que son propriétaire (mode 644) : chmod 600"), "{e}");
+    assert!(
+        e.contains("est lisible par d'autres que son propriétaire (mode 644) : chmod 600"),
+        "{e}"
+    );
     let p = key_file(d.path(), "k2", &"ab".repeat(32), 0o640);
     assert!(err(ForgeKeys::load_or_create(&p).map(|_| ())).contains("mode 640"));
 }
@@ -71,10 +84,17 @@ fn key_file_with_loose_permissions_is_refused() {
 #[test]
 fn key_file_with_wrong_length_is_unreadable() {
     let d = tempfile::tempdir().unwrap();
-    for (n, content) in [("empty", ""), ("short", "abcd"), ("long", &"a".repeat(66)[..])] {
+    for (n, content) in [
+        ("empty", ""),
+        ("short", "abcd"),
+        ("long", &"a".repeat(66)[..]),
+    ] {
         let p = key_file(d.path(), n, content, 0o600);
         let e = err(ForgeKeys::load_or_create(&p).map(|_| ()));
-        assert!(e.contains("clé illisible (64 caractères hex attendus)"), "{n}: {e}");
+        assert!(
+            e.contains("clé illisible (64 caractères hex attendus)"),
+            "{n}: {e}"
+        );
     }
 }
 
@@ -89,7 +109,12 @@ fn key_file_with_non_hex_content_is_refused() {
 #[test]
 fn pem_header_instead_of_hex_is_not_accepted() {
     let d = tempfile::tempdir().unwrap();
-    let p = key_file(d.path(), "k", "-----BEGIN PRIVATE KEY-----\nMC4CAQ\n-----END PRIVATE KEY-----\n", 0o600);
+    let p = key_file(
+        d.path(),
+        "k",
+        "-----BEGIN PRIVATE KEY-----\nMC4CAQ\n-----END PRIVATE KEY-----\n",
+        0o600,
+    );
     assert!(err(ForgeKeys::load_or_create(&p).map(|_| ())).contains("clé illisible"));
 }
 
@@ -148,8 +173,18 @@ fn bad_jwt_key_file_fails_the_whole_load() {
 #[test]
 fn accessors_expose_consistent_key_material() {
     let (_d, k) = fresh();
-    assert_eq!(k.public_hex(), k.verifying_key().as_bytes().iter().map(|b| format!("{b:02x}")).collect::<String>());
-    assert_eq!(k.fingerprint(), format!("sha256:{}", sha256_hex(k.verifying_key().as_bytes())));
+    assert_eq!(
+        k.public_hex(),
+        k.verifying_key()
+            .as_bytes()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<String>()
+    );
+    assert_eq!(
+        k.fingerprint(),
+        format!("sha256:{}", sha256_hex(k.verifying_key().as_bytes()))
+    );
     // jetons : ce qu'encode l'une se décode avec l'autre (clé jwt distincte de la clé d'artefact)
     let _ = (k.jwt_encoding(), k.jwt_decoding());
     use jsonwebtoken::{Algorithm, Header, Validation, decode, encode};
@@ -196,8 +231,14 @@ fn verify_rejects_signature_from_another_key() {
 fn verify_rejects_bad_public_key_forms() {
     let (_d, k) = fresh();
     let sig = k.sign(b"m");
-    assert_eq!(err(verify("abcd", b"m", &sig)), "clé publique : 64 caractères hex attendus");
-    assert_eq!(err(verify("", b"m", &sig)), "clé publique : 64 caractères hex attendus");
+    assert_eq!(
+        err(verify("abcd", b"m", &sig)),
+        "clé publique : 64 caractères hex attendus"
+    );
+    assert_eq!(
+        err(verify("", b"m", &sig)),
+        "clé publique : 64 caractères hex attendus"
+    );
     // 64 caractères mais pas de l'hexadécimal
     let e = err(verify(&"zz".repeat(32), b"m", &sig));
     assert!(e.contains("invalid digit"), "{e}");
@@ -215,8 +256,14 @@ fn verify_rejects_bad_signature_encodings() {
     assert!(verify(&pk, b"m", "ab+/cd==").is_err());
     assert!(verify(&pk, b"m", "!!!").is_err());
     // base64url valide mais mauvaise longueur
-    assert_eq!(err(verify(&pk, b"m", &b64url(&[0u8; 63]))), "signature : 64 octets");
-    assert_eq!(err(verify(&pk, b"m", &b64url(&[0u8; 65]))), "signature : 64 octets");
+    assert_eq!(
+        err(verify(&pk, b"m", &b64url(&[0u8; 63]))),
+        "signature : 64 octets"
+    );
+    assert_eq!(
+        err(verify(&pk, b"m", &b64url(&[0u8; 65]))),
+        "signature : 64 octets"
+    );
     assert_eq!(err(verify(&pk, b"m", "")), "signature : 64 octets");
     // 64 octets nuls : bonne longueur, signature fausse
     assert!(verify(&pk, b"m", &b64url(&[0u8; 64])).is_err());
@@ -266,7 +313,10 @@ fn canonical_nested_objects_sorted_at_every_level_arrays_keep_order() {
         canon(r#"{"b":{"d":1,"c":[3,{"y":0,"x":null}]},"a":[2,1]}"#),
         r#"{"a":[2,1],"b":{"c":[3,{"x":null,"y":0}],"d":1}}"#
     );
-    assert_eq!(canon(r#"[ {"b":1,"a":2} , [ ] , "x" ]"#), r#"[{"a":2,"b":1},[],"x"]"#);
+    assert_eq!(
+        canon(r#"[ {"b":1,"a":2} , [ ] , "x" ]"#),
+        r#"[{"a":2,"b":1},[],"x"]"#
+    );
 }
 
 #[test]
@@ -283,7 +333,10 @@ fn canonical_sorts_keys_by_utf8_bytes_not_by_locale_or_case() {
 #[test]
 fn canonical_keeps_unicode_values_unescaped_and_escapes_controls() {
     assert_eq!(canon(r#"{"k":"héllo ✓ 日本"}"#), r#"{"k":"héllo ✓ 日本"}"#);
-    assert_eq!(canonical_json(&json!({"k": "\u{1}\t"})), "{\"k\":\"\\u0001\\t\"}");
+    assert_eq!(
+        canonical_json(&json!({"k": "\u{1}\t"})),
+        "{\"k\":\"\\u0001\\t\"}"
+    );
     assert_eq!(canonical_json(&json!({"é\n": 1})), "{\"é\\n\":1}");
 }
 
@@ -299,8 +352,14 @@ fn canonical_is_idempotent_and_order_independent() {
 
 #[test]
 fn sha256_hex_known_vectors() {
-    assert_eq!(sha256_hex(b""), "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
-    assert_eq!(sha256_hex(b"abc"), "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+    assert_eq!(
+        sha256_hex(b""),
+        "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    );
+    assert_eq!(
+        sha256_hex(b"abc"),
+        "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+    );
     // octets non ASCII : « é » en UTF-8
     assert_eq!(sha256_hex("é".as_bytes()), sha256_hex(&[0xc3, 0xa9]));
     assert_ne!(sha256_hex(&[0xff]), sha256_hex(&[0xfe]));
