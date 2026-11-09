@@ -343,3 +343,57 @@ fn a_chat_thread_is_one_message_brick_per_message_in_order() {
         vec!["bonjour", "que crée-t-on ?", "une liste de courses"]
     );
 }
+
+/// The chat surface as a module declares it: ONE `message` brick, filtered on the open
+/// conversation through a context reference. The host provides the conversation; the
+/// module never learns which one it is, and the brick reads every message of it, in order.
+#[test]
+fn a_chat_thread_is_one_message_brick_on_the_open_conversation() {
+    let thread = ViewDesc {
+        name: "fil".into(),
+        surface: Surface::Chat,
+        title: None,
+        replaces: None,
+        look: None,
+        root: Node::Leaf {
+            brick: Box::new(Brick::Message {
+                entity: "message".into(),
+                filter: Some(FilterExpr::Cmp {
+                    field: "conversation".into(),
+                    op: FilterOp::Eq,
+                    value: json!({ "$context": "conversation" }),
+                }),
+            }),
+        },
+    };
+    let portfolio = Portfolio::of(std::slice::from_ref(&thread));
+    assert_eq!(portfolio.at(Surface::Chat).len(), 1);
+
+    let rows = vec![
+        json!({ "local": "m1", "conversation": "c-1", "role": "utilisateur", "contenu": "bonjour" }),
+        json!({ "local": "m2", "conversation": "c-2", "role": "utilisateur", "contenu": "autre fil" }),
+        json!({ "local": "m3", "conversation": "c-1", "role": "agent", "contenu": "que crée-t-on ?" }),
+    ];
+    let Node::Leaf { brick } = &thread.root else {
+        panic!("the thread is one brick");
+    };
+    let read_in = |conversation: &str| -> Vec<String> {
+        let snapshot = Snapshot::new()
+            .with("message", Feed::Ready(rows.clone()))
+            .with_context("conversation", json!(conversation));
+        let reading = brick_reading(brick, &snapshot).expect("a message brick reads an entity");
+        reading
+            .rows()
+            .expect("the open conversation has messages")
+            .rows
+            .iter()
+            .map(|row| data::display(data::value_of(row, "contenu")))
+            .collect()
+    };
+    assert_eq!(read_in("c-1"), vec!["bonjour", "que crée-t-on ?"]);
+    assert_eq!(read_in("c-2"), vec!["autre fil"]);
+
+    // No open conversation: the brick is empty, not the union of every conversation.
+    let closed = Snapshot::new().with("message", Feed::Ready(rows.clone()));
+    assert_eq!(brick_reading(brick, &closed), Some(Reading::Empty));
+}
