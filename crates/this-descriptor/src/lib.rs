@@ -70,7 +70,10 @@ pub use module::{
     CompiledEntity, DESCRIPTOR_FORMAT, DescriptorSet, ModuleDescriptor, ModuleReq, OperationDesc,
 };
 pub use perm::{Operation, PermDesc, PolicyExpr, PrincipalView};
-pub use query::{FilterExpr, FilterOp, Page, Query, QuerySchema, SortDir, SortSpec, Untyped};
+pub use query::{
+    CONTEXT_REF, Context, FilterExpr, FilterOp, Page, Query, QuerySchema, SortDir, SortSpec,
+    Untyped,
+};
 pub use runtime::{Handle, RuntimeDesc, RuntimeLimits};
 pub use topics::{EMITTING_OPERATIONS, EventTopic};
 pub use views::{Action, Brick, Node, Surface, ViewDesc};
