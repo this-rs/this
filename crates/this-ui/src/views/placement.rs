@@ -19,11 +19,12 @@ use crate::views::text;
 
 /// The order the four surfaces are drawn in: a sidebar first, then the banner, the main
 /// area and the panel. Fixed, so two runs never disagree.
-pub const SURFACES: [Surface; 4] = [
+pub const SURFACES: [Surface; 5] = [
     Surface::Sidebar,
     Surface::Header,
     Surface::Main,
     Surface::Panel,
+    Surface::Chat,
 ];
 
 /// A view that is not drawn because another one replaced it.
@@ -146,6 +147,12 @@ pub fn frame(surface: Surface) -> Frame {
             class: "vw-surface vw-sidebar",
             role: None,
             label: "Navigation du module",
+        },
+        Surface::Chat => Frame {
+            tag: "section",
+            class: "vw-surface vw-chat",
+            role: None,
+            label: "Conversation du module",
         },
         Surface::Header => Frame {
             tag: "header",

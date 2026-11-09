@@ -47,6 +47,14 @@ pub fn view_state(root: &Node, snapshot: &Snapshot) -> ViewState {
     if readings.iter().any(|(_, reading)| reading.has_rows()) {
         return ViewState::Ready;
     }
+    // Un formulaire ou un champ n'a pas besoin de lignes : c'est justement ainsi qu'on en
+    // CRÉE. Les cacher derrière « rien à afficher » rendait invisible le seul écran qui
+    // permet d'écrire dans une entité vide — mesuré : un `Form` de création sur une entité
+    // neuve ne s'affichait pas, et la personne n'avait aucun moyen d'ajouter la première
+    // ligne. On dessine donc l'arbre, et chaque brique montre son propre état.
+    if has_writable_control(root) {
+        return ViewState::Ready;
+    }
     if let Some((entity, reason)) = find(&readings, |reading| match reading {
         Reading::Denied(reason) => Some(*reason),
         _ => None,
@@ -113,6 +121,7 @@ fn filter_of(brick: &Brick) -> Option<&this_descriptor::FilterExpr> {
         | Brick::Field { filter, .. }
         | Brick::Relation { filter, .. }
         | Brick::Chat { filter, .. }
+        | Brick::Message { filter, .. }
         | Brick::ToolStep { filter, .. }
         | Brick::Queue { filter, .. }
         | Brick::CodeBlock { filter, .. }
@@ -131,6 +140,22 @@ fn find<'a>(
     readings
         .iter()
         .find_map(|(entity, reading)| pick(reading).map(|reason| (entity.clone(), reason)))
+}
+
+/// L'arbre porte-t-il de quoi ÉCRIRE (un formulaire, un champ éditable) ?
+///
+/// Distinct d'« a des lignes » : un formulaire de création, lui, n'en a aucune par nature.
+pub fn has_writable_control(node: &Node) -> bool {
+    match node {
+        Node::Leaf { brick } => matches!(**brick, Brick::Form { .. } | Brick::Field { .. }),
+        Node::Stack { children }
+        | Node::Row { children }
+        | Node::Drawer { children, .. }
+        | Node::Modal { children, .. } => children.iter().any(has_writable_control),
+        Node::Tabs { tabs } => tabs
+            .iter()
+            .any(|t| t.children.iter().any(has_writable_control)),
+    }
 }
 
 fn collect<'a>(node: &Node, snapshot: &'a Snapshot, out: &mut Vec<(String, Reading<'a>)>) {
@@ -198,6 +223,42 @@ mod tests {
         Node::Stack {
             children: vec![list("invoice"), list("customer")],
         }
+    }
+
+    /// Une entité neuve n'a aucune ligne : c'est exactement l'état où l'on veut CRÉER la
+    /// première. La porte « rien à afficher » cachait le formulaire de création — mesuré :
+    /// aucune façon d'ajouter la première ligne depuis l'interface.
+    #[test]
+    fn un_formulaire_se_dessine_sur_une_entite_vide() {
+        let form = leaf(Brick::Form {
+            entity: "tache".into(),
+            filter: None,
+            fields: vec![this_descriptor::views::FormField {
+                field: "titre".into(),
+                label: None,
+                read_only: false,
+            }],
+            submit: None,
+        });
+        let arbre = Node::Stack {
+            children: vec![list("tache"), form],
+        };
+        let snapshot = Snapshot::new().with("tache", Feed::Ready(Vec::new()));
+        assert_eq!(
+            view_state(&arbre, &snapshot),
+            ViewState::Ready,
+            "le formulaire de création doit s'afficher même sans aucune ligne"
+        );
+    }
+
+    /// La règle ne doit pas ouvrir la porte à tout : une liste vide reste « vide ».
+    #[test]
+    fn une_liste_vide_reste_vide() {
+        let snapshot = Snapshot::new().with("invoice", Feed::Ready(Vec::new()));
+        assert!(matches!(
+            view_state(&list("invoice"), &snapshot),
+            ViewState::Empty { .. }
+        ));
     }
 
     #[test]

@@ -144,6 +144,10 @@ fn surface_frame(
             <header class=class_name aria-label=label>{body}</header>
         }
         .into_any(),
+        Surface::Chat => view! {
+            <section class=class_name aria-label=label>{body}</section>
+        }
+        .into_any(),
         Surface::Main => view! {
             <main class=class_name aria-label=label>{body}</main>
         }

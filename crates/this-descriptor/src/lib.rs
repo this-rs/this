@@ -66,7 +66,9 @@ pub use field::{
 pub use i18n::{I18nDecl, Locale, MessageBundle, MessageDecl, MessageKey, MessageSyntax};
 pub use lifecycle::ModuleState;
 pub use link::LinkDesc;
-pub use module::{CompiledEntity, DESCRIPTOR_FORMAT, DescriptorSet, ModuleDescriptor, ModuleReq};
+pub use module::{
+    CompiledEntity, DESCRIPTOR_FORMAT, DescriptorSet, ModuleDescriptor, ModuleReq, OperationDesc,
+};
 pub use perm::{Operation, PermDesc, PolicyExpr, PrincipalView};
 pub use query::{FilterExpr, FilterOp, Page, Query, QuerySchema, SortDir, SortSpec, Untyped};
 pub use runtime::{Handle, RuntimeDesc, RuntimeLimits};

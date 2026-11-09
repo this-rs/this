@@ -890,6 +890,11 @@ impl ModuleStore for VfsModuleStore {
         Ok(Some(b))
     }
 
+    async fn code(&self, name: &str, version: &str) -> Result<Option<Vec<u8>>, ContractError> {
+        self.asset(name, version, this_vfs::layout::PROGRAM_FILE)
+            .await
+    }
+
     async fn list(&self) -> Result<Vec<(String, String)>, ContractError> {
         let mut out = Vec::new();
         for e in self.vfs.list(&self.root).await? {

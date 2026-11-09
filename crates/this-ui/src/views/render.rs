@@ -462,6 +462,7 @@ pub fn render_brick(ctx: Ctx, brick: &Brick) -> AnyView {
             mode,
         } => relation(ctx, entity, filter.as_ref(), link, *mode),
         Brick::Chat { entity, filter } => chat(ctx, entity, filter.as_ref()),
+        Brick::Message { entity, filter } => message(ctx, entity, filter.as_ref()),
         Brick::ToolStep {
             entity,
             filter,
@@ -630,6 +631,21 @@ where
     .into_any()
 }
 
+/// Cette action a-t-elle besoin de la ligne sous le bouton pour avoir un sens ?
+///
+/// `Update` et `Delete` écrivent une ligne : oui. `Invoke` aussi **quand l'opération vise
+/// une entité** — sans son `id`, le module reçoit un appel qu'il ne peut pas situer
+/// (mesuré sur l'appareil : un bouton « terminer » posé sur une ligne envoyait `{}`, le
+/// module refusait faute d'identifiant, l'interface semblait morte). Une opération de
+/// module (`entity` absente) n'a pas besoin de ligne : elle reste active sur une entité vide.
+pub(crate) fn action_needs_row(declared: Option<&Action>) -> bool {
+    match declared {
+        Some(Action::Update { .. }) | Some(Action::Delete { .. }) => true,
+        Some(Action::Invoke { entity, .. }) => entity.is_some(),
+        _ => false,
+    }
+}
+
 fn button(ctx: Ctx, entity: &str, filter: Option<&FilterExpr>, action: &str) -> AnyView {
     let label = placement::humanise(action);
     let declared = ctx
@@ -637,10 +653,7 @@ fn button(ctx: Ctx, entity: &str, filter: Option<&FilterExpr>, action: &str) -> 
         .try_with_value(|module| module.actions.iter().find(|a| a.name() == action).cloned())
         .flatten();
     let is_delete = matches!(declared, Some(Action::Delete { .. }));
-    let needs_row = matches!(
-        declared,
-        Some(Action::Update { .. }) | Some(Action::Delete { .. })
-    );
+    let needs_row = action_needs_row(declared.as_ref());
     let entity = entity.to_owned();
     let name = action.to_owned();
     let filter_click = filter.cloned();
@@ -796,9 +809,26 @@ fn action_intent(
             capability,
             grant,
         },
+        Some(Action::Invoke {
+            name,
+            operation,
+            entity,
+        }) => Intent::Invoke {
+            action: name,
+            operation,
+            entity,
+            id,
+            values,
+        },
+        // Action inconnue d'une surface qui n'a pas classé : l'opération retombe sur le
+        // nom de l'action, et la ligne (si elle existe) est quand même transmise — c'est
+        // ce qui distingue « pas encore branché » de « perdu en route ».
         _ => Intent::Invoke {
             action: name.to_owned(),
+            operation: name.to_owned(),
             entity: entity.map(str::to_owned),
+            id,
+            values,
         },
     }
 }
@@ -1738,6 +1768,44 @@ fn chat(ctx: Ctx, entity: &str, filter: Option<&FilterExpr>) -> AnyView {
     .into_any()
 }
 
+/// Une bulle de conversation : UNE ligne, son auteur et son contenu. C'est la brique que
+/// le fil utilisera pour qu'un module puisse redessiner chaque message — le contenu reste
+/// celui de la ligne, la forme est celle du contrat.
+fn message(ctx: Ctx, entity: &str, filter: Option<&FilterExpr>) -> AnyView {
+    let entity = entity.to_owned();
+    let filter = filter.cloned();
+    let content = display_field(
+        ctx.module,
+        &entity,
+        &["content", "text", "body", "message", "contenu"],
+    );
+    let author = display_field(ctx.module, &entity, &["role", "author", "sender", "from"]);
+    let log = move || {
+        let snapshot = ctx.data.get();
+        match data::read(&snapshot, &entity, filter.as_ref(), &[], 0, None) {
+            Reading::Rows(rows) => {
+                let row = rows.rows.into_iter().next();
+                let Some(row) = row else {
+                    return tile_for(ctx, &entity, &Reading::Empty, text::NOTHING).into_any();
+                };
+                let text = data::display(data::value_of(&row, &content));
+                let who = data::value_of(&row, &author).map(|value| data::display(Some(value)));
+                view! {
+                    <div class=class::MESSAGE>
+                        {who.map(|who| {
+                            view! { <span class=class::MESSAGE_META>{who}</span> }.into_any()
+                        })}
+                        <span>{text}</span>
+                    </div>
+                }
+                .into_any()
+            }
+            other => tile_for(ctx, &entity, &other, text::NOTHING),
+        }
+    };
+    view! { <div class=class::CHAT>{log}</div> }.into_any()
+}
+
 /// The tone that reads a tool step's state without the colour carrying the meaning alone.
 fn step_tone(state: &str) -> DesignTone {
     match state.to_ascii_lowercase().as_str() {
@@ -2109,5 +2177,53 @@ mod tests {
             Some("7".to_owned())
         );
         assert_eq!(data::target_id(&snapshot, "customer", None), None);
+    }
+}
+
+#[cfg(test)]
+mod tests_action_row {
+    use super::*;
+
+    /// Le bouton qui atteint le code d'un module doit dire LAQUELLE des lignes.
+    #[test]
+    fn une_operation_qui_vise_une_entite_a_besoin_de_la_ligne() {
+        let vise_une_entite = Action::Invoke {
+            name: "terminer".into(),
+            operation: "terminer".into(),
+            entity: Some("tache".into()),
+        };
+        assert!(action_needs_row(Some(&vise_une_entite)));
+
+        let operation_de_module = Action::Invoke {
+            name: "recalculer".into(),
+            operation: "recalculer".into(),
+            entity: None,
+        };
+        assert!(
+            !action_needs_row(Some(&operation_de_module)),
+            "une opération de module ne doit pas être désactivée sur une entité vide"
+        );
+    }
+
+    #[test]
+    fn les_ecritures_ont_besoin_de_la_ligne_et_la_creation_non() {
+        let update = Action::Update {
+            name: "ranger".into(),
+            entity: "tache".into(),
+            fields: vec!["fait".into()],
+        };
+        let delete = Action::Delete {
+            name: "jeter".into(),
+            entity: "tache".into(),
+        };
+        let create = Action::Create {
+            name: "ajouter".into(),
+            entity: "tache".into(),
+            fields: vec!["titre".into()],
+        };
+        assert!(action_needs_row(Some(&update)));
+        assert!(action_needs_row(Some(&delete)));
+        assert!(!action_needs_row(Some(&create)));
+        assert!(!action_needs_row(None));
     }
 }

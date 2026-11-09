@@ -598,6 +598,7 @@ pub fn descriptor() -> ModuleDescriptor {
         links: vec![],
         views: vec![],
         actions: vec![],
+        operations: vec![],
         errors: errors(),
         i18n: I18nDecl {
             default_locale: Locale::new("fr"),

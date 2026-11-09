@@ -1,0 +1,30 @@
+# GABARIT IMPOSÉ par la forge. Le client ne fournit jamais de Cargo.toml : c'est la
+# seule façon d'interdire `build.rs`, les proc-macros et toute dépendance hors liste.
+# Ce fichier est la liste blanche : ajouter une dépendance = la vendorer dans l'image
+# (docker/Dockerfile), régénérer Cargo.lock, et rien d'autre.
+#
+# Le SDK (`this-module-sdk`) est copié DANS l'image à /forge/sdk par `build-image.sh`
+# (source unique : crates/this-module-sdk). Il n'a que serde/serde_json pour dépendances.
+[package]
+name = "module"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+path = "src/lib.rs"
+
+[dependencies]
+serde = { version = "1", default-features = false, features = ["derive", "std"] }
+serde_json = { version = "1", default-features = false, features = ["std"] }
+this-module-sdk = { path = "/forge/sdk" }
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+
+[workspace]

@@ -58,6 +58,11 @@ pub enum Surface {
     Panel,
     /// L'en-tête : une barre fine ; seules les petites briques y ont leur place.
     Header,
+    /// Le fil de conversation : la surface où l'échange entre la personne, l'agent et les
+    /// modules se déroule. C'est la même que les autres — mêmes briques, mêmes actions —
+    /// posée dans le chat au lieu d'un écran. Sans elle, le fil restait le seul endroit de
+    /// l'app qu'aucun module ne pouvait dessiner, ni l'utilisateur modifier.
+    Chat,
 
     // ---- Les surfaces d'un AUTRE hôte ------------------------------------------------
     //
@@ -271,6 +276,14 @@ pub enum Brick {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         filter: Option<FilterExpr>,
     },
+    /// UN message d'une conversation : l'auteur (rôle) et le contenu d'une ligne. C'est la
+    /// brique qui permet à un module de redessiner CE QU'UNE BULLE DIT et à quoi elle
+    /// ressemble, là où `Chat` ne savait rendre qu'une liste brute de l'entité du module.
+    Message {
+        entity: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        filter: Option<FilterExpr>,
+    },
     /// Une étape d'outil dans un fil de messages : son état est un champ.
     ToolStep {
         entity: String,
@@ -345,6 +358,7 @@ impl Brick {
             | Brick::Form { entity, .. }
             | Brick::Field { entity, .. }
             | Brick::Chat { entity, .. }
+            | Brick::Message { entity, .. }
             | Brick::ToolStep { entity, .. }
             | Brick::Queue { entity, .. }
             | Brick::CodeBlock { entity, .. }
@@ -499,6 +513,20 @@ pub enum Action {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         text: Option<String>,
     },
+    /// Déclenche une opération nommée du module (`operations` de son descripteur).
+    ///
+    /// C'est le seul bouton qui fait travailler le CODE du module : sans lui, une vue ne
+    /// pouvait que créer, modifier, supprimer, naviguer ou parler à l'agent — jamais
+    /// exécuter un geste propre. Un refus du module remonte à la personne, il ne devient
+    /// pas un silence.
+    Invoke {
+        name: String,
+        /// Nom de l'opération déclarée dans `operations`.
+        operation: String,
+        /// Entité visée ; `None` = l'opération décide (opération de module).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        entity: Option<String>,
+    },
     /// Autoriser ou refuser une capacité de l'appareil.
     DeviceCapability {
         name: String,
@@ -516,6 +544,7 @@ impl Action {
             | Action::Delete { name, .. }
             | Action::Navigate { name, .. }
             | Action::AgentTool { name, .. }
+            | Action::Invoke { name, .. }
             | Action::DeviceCapability { name, .. } => name,
         }
     }
@@ -575,6 +604,7 @@ pub enum DeviceCapability {
 /// `ModuleDescriptor::check` les rend en `this.descriptor.<raison>`.
 pub fn issues(m: &ModuleDescriptor) -> Vec<(&'static str, String, String)> {
     let mut c = Checks::new(m);
+    c.operations();
     c.actions();
     c.views();
     c.replacements();
@@ -642,6 +672,7 @@ struct Checks<'a> {
     m: &'a ModuleDescriptor,
     entities: BTreeMap<&'a str, &'a EntityDesc>,
     actions: BTreeMap<&'a str, &'a Action>,
+    operations: BTreeMap<&'a str, &'a crate::module::OperationDesc>,
     views: BTreeSet<&'a str>,
     out: Vec<(&'static str, String, String)>,
 }
@@ -652,6 +683,7 @@ impl<'a> Checks<'a> {
             m,
             entities: m.entities.iter().map(|e| (e.name.as_str(), e)).collect(),
             actions: BTreeMap::new(),
+            operations: BTreeMap::new(),
             views: m.views.iter().map(|v| v.name.as_str()).collect(),
             out: Vec::new(),
         }
@@ -715,6 +747,29 @@ impl<'a> Checks<'a> {
                 "Declare that view in `views` or fix the name.",
             );
             self.push(reason, path, msg);
+        }
+    }
+
+    /// Les opérations déclarées : nom, unicité, entité. Un bouton `invoke` ne doit
+    /// jamais référencer un geste que le module n'a pas déclaré.
+    fn operations(&mut self) {
+        let m = self.m;
+        for (i, op) in m.operations.iter().enumerate() {
+            let p = format!("operations[{i}]");
+            if !is_identifier(&op.name) {
+                self.push("invalid_name", &p, format!("`{}`", op.name));
+            }
+            if self.operations.insert(op.name.as_str(), op).is_some() {
+                self.push(
+                    "duplicate_operation",
+                    &p,
+                    format!("`{}` declared twice", op.name),
+                );
+                continue;
+            }
+            if let Some(e) = &op.entity {
+                self.entity_ref("operation_entity_unknown", &format!("{p}.entity"), e);
+            }
         }
     }
 
@@ -794,6 +849,22 @@ impl<'a> Checks<'a> {
                 }
                 Action::Navigate { view, .. } => {
                     self.view_ref("view_target_unknown", &format!("{p}.view"), view);
+                }
+                Action::Invoke {
+                    operation, entity, ..
+                } => {
+                    if let Some(e) = entity {
+                        self.entity_ref("action_entity_unknown", &format!("{p}.entity"), e);
+                    }
+                    if !self.operations.contains_key(operation.as_str()) {
+                        let msg = unknown_msg(
+                            operation,
+                            "a declared operation",
+                            self.operations.keys().copied(),
+                            "Declare it in `operations` or fix the name.",
+                        );
+                        self.push("action_operation_unknown", format!("{p}.operation"), msg);
+                    }
                 }
                 Action::DeviceCapability { .. } => {}
             }
@@ -1278,7 +1349,9 @@ fn lectures(b: &Brick) -> Vec<&str> {
                 chemins_du_filtre(f, &mut v);
             }
         }
-        Brick::Button { filter, .. } | Brick::Chat { filter, .. } => {
+        Brick::Button { filter, .. }
+        | Brick::Chat { filter, .. }
+        | Brick::Message { filter, .. } => {
             if let Some(f) = filter {
                 chemins_du_filtre(f, &mut v);
             }

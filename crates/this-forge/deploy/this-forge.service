@@ -1,0 +1,16 @@
+[Unit]
+Description=this-forge (compilation de modules wasm signés, LAN)
+After=network-online.target docker.service
+
+[Service]
+ExecStart=/home/triviere/forge/bin/this-forge serve --data-dir /home/triviere/forge/data --listen 0.0.0.0:9910 --cpus 4 --memory 3g --cpu-shares 128 --blkio-weight 100
+Restart=always
+RestartSec=3
+Nice=10
+CPUQuota=400%
+MemoryMax=4G
+IOWeight=20
+Environment=RUST_LOG=info
+
+[Install]
+WantedBy=default.target

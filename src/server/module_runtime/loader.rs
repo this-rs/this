@@ -2,6 +2,7 @@
 //! into the interface the host publishes in its catalog.
 
 use super::json_entity::JsonEntityService;
+use super::logic::{EffectSink, EntityLogic};
 use super::rows::{MemoryRowStores, RowStoreFactory};
 use crate::config::LinksConfig;
 use crate::core::events::EventBus;
@@ -100,6 +101,64 @@ pub struct ModuleStatus {
     pub builtin: bool,
 }
 
+/// Normalize and check a descriptor under `profile`: THE check, shared by every loader (a
+/// module with code gets no other one than a stored module).
+pub(crate) fn check_descriptor(
+    custom: &CustomRegistry,
+    mut d: ModuleDescriptor,
+    profile: CheckProfile,
+) -> Result<ModuleDescriptor, ContractError> {
+    d.normalize();
+    d.check(custom, profile)
+        .map_err(|issues| crate::descriptor::check::issues_to_error(&issues))?;
+    Ok(d)
+}
+
+/// One `JsonEntityService` per entity of an already-checked descriptor, merged into the
+/// module's routes. `logic_for` lets a caller attach business logic to an entity (a compiled
+/// module); declarative modules pass `|_| None`, and get exactly the service they always
+/// had. Also returns the services by entity name, for a caller that must reach them (the
+/// effects of a compiled module land on its own entities).
+pub(crate) type EntityLogicWiring = (Arc<dyn EntityLogic>, Arc<dyn EffectSink>);
+
+pub(crate) fn build_services(
+    d: ModuleDescriptor,
+    custom: &CustomRegistry,
+    event_bus: &Option<Arc<EventBus>>,
+    row_stores: &dyn RowStoreFactory,
+    logic_for: impl Fn(&EntityDesc) -> Option<EntityLogicWiring>,
+) -> Result<(ModuleInterface, HashMap<String, Arc<JsonEntityService>>), ContractError> {
+    let mut fetchers: HashMap<String, Arc<dyn EntityFetcher>> = HashMap::new();
+    let mut creators: HashMap<String, Arc<dyn EntityCreator>> = HashMap::new();
+    let mut services = HashMap::new();
+    let mut router = axum::Router::new();
+    for e in &d.entities {
+        let compiled = Arc::new(CompiledEntity::new(&d.name, e.clone())?);
+        let mut svc = JsonEntityService::with_row_store(
+            compiled,
+            custom.clone(),
+            event_bus.clone(),
+            row_stores.for_entity(&e.name, &e.plural),
+        );
+        if let Some((logic, sink)) = logic_for(e) {
+            svc = svc.with_logic(logic, sink);
+        }
+        let svc = Arc::new(svc);
+        router = router.merge(svc.routes());
+        fetchers.insert(e.name.clone(), svc.clone());
+        creators.insert(e.name.clone(), svc.clone());
+        services.insert(e.name.clone(), svc);
+    }
+    let interface = ModuleInterface {
+        links_config: LinksConfig::from_descriptor(&d),
+        descriptor: Arc::new(d),
+        fetchers,
+        creators,
+        routes: Some(router),
+    };
+    Ok((interface, services))
+}
+
 /// Read and check a module, build its interface. Does NOT activate it.
 #[async_trait]
 pub trait ModuleLoader: Send + Sync {
@@ -175,13 +234,25 @@ impl DefaultModuleLoader {
 
     fn checked(
         &self,
-        mut d: ModuleDescriptor,
+        d: ModuleDescriptor,
         profile: CheckProfile,
     ) -> Result<ModuleDescriptor, ContractError> {
-        d.normalize();
-        d.check(&self.custom, profile)
-            .map_err(|issues| crate::descriptor::check::issues_to_error(&issues))?;
-        Ok(d)
+        check_descriptor(&self.custom, d, profile)
+    }
+
+    /// Register the loader of compiled (wasm) modules under `"wasm"`, reading code and
+    /// descriptors from `store`. It inherits this loader's registry, `allow_public`, event
+    /// bus and row stores, so a module with code is checked and served exactly like a
+    /// declarative one. Equivalent to
+    /// `with_plugin("wasm", Arc::new(WasmModuleLoader::new(store)...))`.
+    #[cfg(feature = "wasm-modules")]
+    pub fn with_wasm_modules(self, store: Arc<dyn ModuleStore>) -> Self {
+        let loader = super::wasm::WasmModuleLoader::new(store)
+            .with_custom_registry(self.custom.clone())
+            .allow_public(self.allow_public)
+            .with_event_bus(self.event_bus.clone())
+            .with_row_stores(self.row_stores.clone());
+        self.with_plugin("wasm", Arc::new(loader))
     }
 
     /// Interface of a declarative descriptor: one `JsonEntityService` per entity.
@@ -192,28 +263,14 @@ impl DefaultModuleLoader {
                 allow_public: self.allow_public,
             },
         )?;
-        let mut fetchers: HashMap<String, Arc<dyn EntityFetcher>> = HashMap::new();
-        let mut creators: HashMap<String, Arc<dyn EntityCreator>> = HashMap::new();
-        let mut router = axum::Router::new();
-        for e in &d.entities {
-            let compiled = Arc::new(CompiledEntity::new(&d.name, e.clone())?);
-            let svc = Arc::new(JsonEntityService::with_row_store(
-                compiled,
-                self.custom.clone(),
-                self.event_bus.clone(),
-                self.row_stores.for_entity(&e.name, &e.plural),
-            ));
-            router = router.merge(svc.routes());
-            fetchers.insert(e.name.clone(), svc.clone());
-            creators.insert(e.name.clone(), svc);
-        }
-        Ok(ModuleInterface {
-            links_config: LinksConfig::from_descriptor(&d),
-            descriptor: Arc::new(d),
-            fetchers,
-            creators,
-            routes: Some(router),
-        })
+        Ok(build_services(
+            d,
+            &self.custom,
+            &self.event_bus,
+            self.row_stores.as_ref(),
+            |_| None,
+        )?
+        .0)
     }
 
     /// Interface of a compiled module. Without `Module::descriptor()`, a minimal

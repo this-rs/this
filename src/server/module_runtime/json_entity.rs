@@ -13,6 +13,7 @@
 //! (`engine::validate::apply`): unknown keys, read-only and immutable fields, presence,
 //! types and validators are enforced with the same codes as on every other surface.
 
+use super::logic::{Effect, EffectSink, EntityLogic, LogicOutcome};
 use super::rows::{MemoryRowStore, RowStore};
 use crate::core::errors::{ApiError, from_anyhow};
 use crate::core::events::{EntityEvent, EventBus, FrameworkEvent};
@@ -26,7 +27,7 @@ use axum::Router;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::{get, post};
 use serde_json::{Value, json};
 use std::sync::Arc;
 use uuid::Uuid;
@@ -40,6 +41,11 @@ pub struct JsonEntityService {
     /// with the routes, the validation and the events unchanged (see [`super::rows`]).
     rows: Arc<dyn RowStore>,
     event_bus: Option<Arc<EventBus>>,
+    /// Business logic of the entity (a compiled module). `None` = purely declarative, the
+    /// behaviour before the seam: every code path below reduces to what it was.
+    logic: Option<Arc<dyn EntityLogic>>,
+    /// Where the logic's effects are applied (the module's other entities, the bus, the log).
+    effects: Option<Arc<dyn EffectSink>>,
 }
 
 impl JsonEntityService {
@@ -64,7 +70,189 @@ impl JsonEntityService {
             custom,
             rows,
             event_bus,
+            logic: None,
+            effects: None,
         }
+    }
+
+    /// Attach business logic. The descriptor's validation still runs first (and again on any
+    /// value the logic returns), so the logic cannot widen what the descriptor allows.
+    pub fn with_logic(mut self, logic: Arc<dyn EntityLogic>, effects: Arc<dyn EffectSink>) -> Self {
+        self.logic = Some(logic);
+        self.effects = Some(effects);
+        self
+    }
+
+    /// Check the logic's effects (nothing applied), then hand them over once the caller has
+    /// done its own write.
+    /// Ne garde d'un corps rendu par le module que les champs que le descripteur
+    /// déclare ÉCRIVABLES.
+    ///
+    /// Un module rend la ligne qu'il veut, entière : `id`, `created_at`, `type`,
+    /// `updated_at` y figurent naturellement (le SDK les remet dans son `output`). Les
+    /// refuser faisait échouer toute opération nommée sur une ligne existante — mesuré
+    /// sur le premier module Rust réel. Les ignorer silencieusement serait pire : le
+    /// module croirait avoir écrit un champ qu'il n'a pas le droit de toucher. Ici ils
+    /// sont **retirés avant validation**, et seul un champ que le descripteur ne connaît
+    /// pas du tout est refusé par `apply`.
+    fn writable_only(&self, body: Value) -> Value {
+        let Value::Object(map) = body else {
+            return body;
+        };
+        let known: std::collections::BTreeSet<&str> = self
+            .entity
+            .desc
+            .fields
+            .iter()
+            .map(|f| f.name.as_str())
+            .collect();
+        Value::Object(
+            map.into_iter()
+                .filter(|(k, _)| known.contains(k.as_str()))
+                .collect(),
+        )
+    }
+
+    async fn check_effects(&self, effects: &[Effect]) -> Result<()> {
+        if effects.is_empty() {
+            return Ok(());
+        }
+        match &self.effects {
+            Some(sink) => sink.check(effects).await.map_err(anyhow::Error::new),
+            None => Ok(()),
+        }
+    }
+
+    async fn run_effects(&self, effects: Vec<Effect>) -> Result<()> {
+        if effects.is_empty() {
+            return Ok(());
+        }
+        match &self.effects {
+            Some(sink) => sink.apply(effects).await.map_err(anyhow::Error::new),
+            None => Ok(()),
+        }
+    }
+
+    /// `put` effect: create (no `id`) or update (`id`), validated like any other write, and
+    /// the matching event published. Does NOT call the logic again (no recursion).
+    #[cfg(feature = "wasm-modules")]
+    pub(crate) fn precheck_put(&self, body: &Value) -> Result<(), ContractError> {
+        let op = if body.get("id").is_some() {
+            WriteOp::Update
+        } else {
+            WriteOp::Create
+        };
+        apply(
+            &self.entity,
+            op,
+            self.writable_only(body.clone()),
+            &self.ctx(),
+        )
+        .map(|_| ())
+    }
+
+    #[cfg(feature = "wasm-modules")]
+    pub(crate) async fn put_effect(&self, body: Value) -> Result<()> {
+        let id = body.get("id").and_then(|v| v.as_str()).map(str::to_string);
+        let payload = self.writable_only(body);
+        match id {
+            None => {
+                let row = self.store_new(payload).await?;
+                self.publish_created(&row);
+            }
+            Some(id) => {
+                let id = Uuid::parse_str(&id).map_err(|e| {
+                    anyhow::Error::new(
+                        ContractError::framework(codes::VALIDATION_FAILED)
+                            .with_param("reason", format!("effect put: invalid id: {e}")),
+                    )
+                })?;
+                let row = self.store_patch(&id, payload).await?;
+                self.publish_updated(&id, &row);
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(feature = "wasm-modules")]
+    pub(crate) async fn delete_effect(&self, id: &Uuid) -> Result<()> {
+        if !self.rows.remove(id).await? {
+            return Err(self.not_found(id));
+        }
+        self.publish_deleted(id);
+        Ok(())
+    }
+
+    /// Validate, stamp and insert a new row (shared by `create_from_json` and the `put`
+    /// effect: one write path).
+    #[cfg(feature = "wasm-modules")]
+    async fn store_new(&self, payload: Value) -> Result<Value> {
+        let outcome = apply(&self.entity, WriteOp::Create, payload, &self.ctx())
+            .map_err(anyhow::Error::new)?;
+        self.insert_validated(outcome.value).await
+    }
+
+    async fn insert_validated(&self, validated: Value) -> Result<Value> {
+        let Value::Object(mut obj) = validated else {
+            unreachable!("validated payload is an object")
+        };
+        let id = Uuid::new_v4();
+        let now = chrono::Utc::now().to_rfc3339();
+        obj.insert("id".into(), json!(id));
+        obj.insert("type".into(), json!(self.entity_type()));
+        obj.insert("created_at".into(), json!(now));
+        obj.insert("updated_at".into(), json!(now));
+        obj.entry("status").or_insert_with(|| json!("active"));
+        let row = Value::Object(obj);
+        self.rows.insert(id, row.clone()).await?;
+        Ok(row)
+    }
+
+    #[cfg(feature = "wasm-modules")]
+    async fn store_patch(&self, id: &Uuid, payload: Value) -> Result<Value> {
+        let outcome = apply(&self.entity, WriteOp::Update, payload, &self.ctx())
+            .map_err(anyhow::Error::new)?;
+        self.patch_validated(id, outcome.value).await
+    }
+
+    async fn patch_validated(&self, id: &Uuid, mut patch: Value) -> Result<Value> {
+        // The merge is the store's job (one atomic read-modify-write on ONE row); the
+        // timestamp is ours. Splitting it the other way round would let two concurrent
+        // updates overwrite each other's keys.
+        if let Value::Object(map) = &mut patch {
+            map.insert("updated_at".into(), json!(chrono::Utc::now().to_rfc3339()));
+        }
+        self.rows
+            .patch(id, &patch)
+            .await?
+            .ok_or_else(|| self.not_found(id))
+    }
+
+    /// A named operation of the module's logic (`POST /{plural}/ops/{name}`).
+    pub async fn call_operation(&self, name: &str, input: Value) -> Result<Value> {
+        let Some(logic) = &self.logic else {
+            return Err(self.no_operation(name));
+        };
+        let rows = self.rows.list(None, 0).await?;
+        let Some(outcome) = logic
+            .call(name, &input, &rows)
+            .await
+            .map_err(anyhow::Error::new)?
+        else {
+            return Err(self.no_operation(name));
+        };
+        self.check_effects(&outcome.effects).await?;
+        self.run_effects(outcome.effects).await?;
+        Ok(outcome.output.unwrap_or(Value::Null))
+    }
+
+    fn no_operation(&self, name: &str) -> anyhow::Error {
+        anyhow::Error::new(
+            ContractError::framework(codes::TRANSPORT_NOT_FOUND).with_param(
+                "what",
+                format!("operation `{name}` of `{}`", self.entity_type()),
+            ),
+        )
     }
 
     pub fn entity_type(&self) -> &str {
@@ -130,7 +318,14 @@ impl JsonEntityService {
     pub fn routes(self: &Arc<Self>) -> Router {
         let collection = format!("/{}", self.plural());
         let item = format!("/{}/{{id}}", self.plural());
-        Router::new()
+        let mut router = Router::new();
+        if self.logic.is_some() {
+            router = router.route(
+                &format!("/{}/ops/{{name}}", self.plural()),
+                post(call_handler),
+            );
+        }
+        router
             .route(&collection, get(list_handler).post(create_handler))
             .route(
                 &item,
@@ -146,10 +341,18 @@ impl JsonEntityService {
 #[async_trait]
 impl EntityFetcher for JsonEntityService {
     async fn fetch_as_json(&self, entity_id: &Uuid) -> Result<Value> {
-        self.rows
+        let row = self
+            .rows
             .get(entity_id)
             .await?
-            .ok_or_else(|| self.not_found(entity_id))
+            .ok_or_else(|| self.not_found(entity_id))?;
+        let Some(logic) = &self.logic else {
+            return Ok(row);
+        };
+        let LogicOutcome { output, effects } = logic.get(&row).await.map_err(anyhow::Error::new)?;
+        self.check_effects(&effects).await?;
+        self.run_effects(effects).await?;
+        Ok(output.unwrap_or(row))
     }
 
     async fn get_sample_entity(&self) -> Result<Value> {
@@ -164,7 +367,38 @@ impl EntityFetcher for JsonEntityService {
     async fn list_as_json(&self, limit: Option<i32>, offset: Option<i32>) -> Result<Vec<Value>> {
         let offset = offset.unwrap_or(0).max(0) as usize;
         let limit = limit.map(|l| l.max(0) as usize);
-        self.rows.list(limit, offset).await
+        let rows = self.rows.list(limit, offset).await?;
+        let Some(logic) = &self.logic else {
+            return Ok(rows);
+        };
+        let LogicOutcome { output, effects } =
+            logic.list(&rows).await.map_err(anyhow::Error::new)?;
+        self.check_effects(&effects).await?;
+        self.run_effects(effects).await?;
+        // Deux formes admises, et une seule règle : les LIGNES sont ce qui est rendu.
+        // - un tableau : la liste, nue ;
+        // - `{"items": [...], "total": n}` : la liste et son compte, ce qu'un module qui
+        //   filtre veut dire (le `total` porte sur ce qu'il a rendu, l'hôte pagine avant).
+        // Refuser la seconde faisait échouer un module correct — mesuré.
+        match output {
+            None => Ok(rows),
+            Some(Value::Array(items)) => Ok(items),
+            Some(Value::Object(mut map)) => match map.remove("items") {
+                Some(Value::Array(items)) => Ok(items),
+                _ => Err(anyhow::Error::new(
+                    ContractError::framework(codes::INTERNAL).with_param(
+                        "reason",
+                        "logic.list must answer an array or {\"items\": [...]}",
+                    ),
+                )),
+            },
+            Some(other) => Err(anyhow::Error::new(
+                ContractError::framework(codes::INTERNAL).with_param(
+                    "reason",
+                    format!("logic.list must answer an array, got {other}"),
+                ),
+            )),
+        }
     }
 }
 
@@ -173,18 +407,39 @@ impl EntityCreator for JsonEntityService {
     async fn create_from_json(&self, entity_data: Value) -> Result<Value> {
         let outcome = apply(&self.entity, WriteOp::Create, entity_data, &self.ctx())
             .map_err(anyhow::Error::new)?;
-        let Value::Object(mut obj) = outcome.value else {
-            unreachable!("validated payload is an object")
+        let mut validated = outcome.value;
+        let mut effects = Vec::new();
+        if let Some(logic) = &self.logic {
+            let answer = logic.create(&validated).await.map_err(anyhow::Error::new)?;
+            if let Some(replacement) = answer.output {
+                // The logic's value goes through the descriptor again: it cannot persist a
+                // field the descriptor forbids.
+                validated = apply(&self.entity, WriteOp::Create, replacement, &self.ctx())
+                    .map_err(anyhow::Error::new)?
+                    .value;
+            }
+            effects = answer.effects;
+            self.check_effects(&effects).await?;
+        }
+        // Un module qui rend `output` ET un effet `put` ne doit pas créer DEUX lignes
+        // (mesuré : un `create` en produisait deux, et l'id rendu ne désignait plus la
+        // bonne). Règle : le premier `put` sans `id` sur cette entité EST l'écriture, et
+        // il est retiré des effets ; sans un tel effet, `output` fait la ligne.
+        let entity = self.entity.desc.name.clone();
+        let pending = effects.iter().position(|e| {
+            matches!(e, Effect::Put { entity: name, body }
+                if *name == entity && body.get("id").is_none())
+        });
+        let row = match pending {
+            Some(pos) => {
+                let Effect::Put { body, .. } = effects.remove(pos) else {
+                    unreachable!("position came from a Put match")
+                };
+                self.insert_validated(self.writable_only(body)).await?
+            }
+            None => self.insert_validated(validated).await?,
         };
-        let id = Uuid::new_v4();
-        let now = chrono::Utc::now().to_rfc3339();
-        obj.insert("id".into(), json!(id));
-        obj.insert("type".into(), json!(self.entity_type()));
-        obj.insert("created_at".into(), json!(now));
-        obj.insert("updated_at".into(), json!(now));
-        obj.entry("status").or_insert_with(|| json!("active"));
-        let row = Value::Object(obj);
-        self.rows.insert(id, row.clone()).await?;
+        self.run_effects(effects).await?;
         // No event here: the write seam is `SurfaceGuard::creator` (which decorates this
         // creator with `PublishingCreator`) for the surfaces that reach the catalog, and the
         // REST handlers below for the service's own routes. Publishing here as well would
@@ -195,26 +450,68 @@ impl EntityCreator for JsonEntityService {
     async fn update_from_json(&self, entity_id: &Uuid, entity_data: Value) -> Result<Value> {
         let outcome = apply(&self.entity, WriteOp::Update, entity_data, &self.ctx())
             .map_err(anyhow::Error::new)?;
-        // The merge is the store's job (one atomic read-modify-write on ONE row); the
-        // timestamp is ours. Splitting it the other way round would let two concurrent
-        // updates overwrite each other's keys.
         let mut patch = outcome.value;
-        if let Value::Object(map) = &mut patch {
-            map.insert("updated_at".into(), json!(chrono::Utc::now().to_rfc3339()));
+        let mut effects = Vec::new();
+        if let Some(logic) = &self.logic {
+            let current = self
+                .rows
+                .get(entity_id)
+                .await?
+                .ok_or_else(|| self.not_found(entity_id))?;
+            let answer = logic
+                .update(&entity_id.to_string(), &patch, &current)
+                .await
+                .map_err(anyhow::Error::new)?;
+            if let Some(replacement) = answer.output {
+                patch = apply(&self.entity, WriteOp::Update, replacement, &self.ctx())
+                    .map_err(anyhow::Error::new)?
+                    .value;
+            }
+            effects = answer.effects;
+            self.check_effects(&effects).await?;
         }
-        let row = self
-            .rows
-            .patch(entity_id, &patch)
-            .await?
-            .ok_or_else(|| self.not_found(entity_id))?;
+        // Même règle qu'au create : un `put` qui vise CETTE ligne est la modification
+        // elle-même, pas une seconde écriture.
+        let entity = self.entity.desc.name.clone();
+        let me = entity_id.to_string();
+        let pending = effects.iter().position(|e| {
+            matches!(e, Effect::Put { entity: name, body }
+                if *name == entity && body.get("id").and_then(|v| v.as_str()) == Some(me.as_str()))
+        });
+        let row = match pending {
+            Some(pos) => {
+                let Effect::Put { body, .. } = effects.remove(pos) else {
+                    unreachable!("position came from a Put match")
+                };
+                self.patch_validated(entity_id, self.writable_only(body))
+                    .await?
+            }
+            None => self.patch_validated(entity_id, patch).await?,
+        };
+        self.run_effects(effects).await?;
         // No event here: see `create_from_json` (the guard and the REST handlers publish).
         Ok(row)
     }
 
     async fn delete(&self, entity_id: &Uuid) -> Result<()> {
+        let mut effects = Vec::new();
+        if let Some(logic) = &self.logic {
+            let current = self
+                .rows
+                .get(entity_id)
+                .await?
+                .ok_or_else(|| self.not_found(entity_id))?;
+            let answer = logic
+                .delete(&entity_id.to_string(), &current)
+                .await
+                .map_err(anyhow::Error::new)?;
+            effects = answer.effects;
+            self.check_effects(&effects).await?;
+        }
         if !self.rows.remove(entity_id).await? {
             return Err(self.not_found(entity_id));
         }
+        self.run_effects(effects).await?;
         // No event here: see `create_from_json` (the guard and the REST handlers publish).
         Ok(())
     }
@@ -283,6 +580,18 @@ async fn create_handler(State(svc): Svc, body: axum::Json<Value>) -> Response {
             svc.publish_created(&v);
             (StatusCode::CREATED, axum::Json(v)).into_response()
         }
+        Err(e) => err(e),
+    }
+}
+
+async fn call_handler(
+    State(svc): Svc,
+    Path(name): Path<String>,
+    body: Option<axum::Json<Value>>,
+) -> Response {
+    let input = body.map(|b| b.0).unwrap_or(Value::Null);
+    match svc.call_operation(&name, input).await {
+        Ok(v) => axum::Json(v).into_response(),
         Err(e) => err(e),
     }
 }

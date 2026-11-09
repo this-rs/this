@@ -11,6 +11,8 @@
 //! - `json_entity.rs`: `JsonEntityService`, adapter of declarative entities.
 //! - `rows.rs`: `RowStore` — where the rows of a declarative entity live (memory, or
 //!   `obrain` via `rows_obrain.rs`, feature `obrain`).
+//! - `logic.rs`: `EntityLogic` / `Effect` — the hook a compiled (wasm) module plugs into.
+//! - `wasm.rs`: `WasmModuleLoader` (feature `wasm-modules`).
 //! - `admin.rs`: REST admin interface (list / get / load / unload), admin policy.
 //!
 //! No native code is loaded at runtime (no stable Rust ABI); the WASM/WAMI extension
@@ -24,14 +26,18 @@ pub mod admin;
 pub mod dispatch;
 pub mod json_entity;
 pub mod loader;
+pub mod logic;
 pub mod rows;
 #[cfg(feature = "obrain")]
 pub mod rows_obrain;
 pub mod runtime;
+#[cfg(feature = "wasm-modules")]
+pub mod wasm;
 
 pub use dispatch::ModuleCancellation;
 pub use json_entity::JsonEntityService;
 pub use loader::{DefaultModuleLoader, ModuleInterface, ModuleLoader, ModuleSource, ModuleStatus};
+pub use logic::{Effect, EffectSink, EntityLogic, LogLevel, LogicOutcome};
 pub use rows::{MemoryRowStore, MemoryRowStores, RowStore, RowStoreFactory};
 #[cfg(feature = "obrain")]
 pub use rows_obrain::ObrainRowStore;
@@ -39,3 +45,5 @@ pub use runtime::{
     HostParts, LoadedModule, ModuleRuntime, RestoreFailure, RestoreReport, RuntimeOptions,
     ServedDescriptor,
 };
+#[cfg(feature = "wasm-modules")]
+pub use wasm::WasmModuleLoader;
