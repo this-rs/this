@@ -100,6 +100,45 @@ pub trait ViewRenderer {
         request: &[u8],
         limits: &Limits,
     ) -> Result<Call, ExecutorError>;
+
+    /// [`render`](Self::render) pour un module **installé** : `key` nomme ce que `program`
+    /// est, ce qui permet à un moteur de garder la compilation d'un appel à l'autre.
+    /// Par défaut, l'identité est ignorée (chaque appel repart du binaire).
+    async fn render_module(
+        &self,
+        key: &ModuleKey,
+        program: &[u8],
+        request: &[u8],
+        limits: &Limits,
+    ) -> Result<Call, ExecutorError>
+    where
+        Self: Sync,
+    {
+        let _ = key;
+        self.render(program, request, limits).await
+    }
+
+    /// Un module désinstallé, ou remplacé par une autre version : le moteur libère ce
+    /// qu'il gardait pour `key`. Sans effet par défaut.
+    fn release(&self, key: &ModuleKey) {
+        let _ = key;
+    }
+}
+
+/// Un module installé : son nom et sa version.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct ModuleKey {
+    pub name: String,
+    pub version: String,
+}
+
+impl ModuleKey {
+    pub fn new(name: impl Into<String>, version: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            version: version.into(),
+        }
+    }
 }
 
 /// Lit la requête, rend `((ptr << 32) | len)` de la réponse.

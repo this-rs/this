@@ -42,6 +42,7 @@ pub mod drafter;
 pub mod executor;
 pub mod module_draft;
 pub mod render;
+pub mod serving;
 
 use chrono::Utc;
 use executor::{Executor, ExecutorError, Outcome};

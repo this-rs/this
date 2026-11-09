@@ -144,20 +144,16 @@ impl<'a> Args<'a> {
 /// Les erreurs d'appel sont celles de l'exécuteur : un seul vocabulaire de refus.
 pub type CallError = ExecutorError;
 
-/// Appelle `export` de `wasm` avec `args`, sous `limits`, et rend les octets de la réponse.
+/// L'état du `Store` : le plafond mémoire.
 #[cfg(feature = "wasmi")]
-pub fn call_json(
-    wasm: &[u8],
-    export: &str,
-    args: &Args<'_>,
-    limits: &Limits,
-) -> Result<Call, CallError> {
-    use wasmi::{Config, Engine, Instance, Module, Store, StoreLimitsBuilder, Val, ValType};
+struct State {
+    limits: wasmi::StoreLimits,
+}
 
-    struct State {
-        limits: wasmi::StoreLimits,
-    }
-
+/// Les trois refus qui ne demandent ni de compiler ni d'instancier : fuel nul, mémoire
+/// nulle, requête hors plafond. Même ordre que toujours, **avant** la compilation.
+#[cfg(feature = "wasmi")]
+fn precheck(args: &Args<'_>, limits: &Limits) -> Result<(), ExecutorError> {
     if limits.fuel == 0 {
         return Err(ExecutorError::OutOfFuel { fuel: 0 });
     }
@@ -174,123 +170,187 @@ pub fn call_json(
             max: limits.request_bytes,
         });
     }
+    Ok(())
+}
 
-    let mut config = Config::default();
-    config.consume_fuel(true);
-    let engine = Engine::new(&config);
-    let module = Module::new(&engine, wasm).map_err(|e| ExecutorError::Module(e.to_string()))?;
+/// Appelle `export` de `wasm` avec `args`, sous `limits`, et rend les octets de la réponse.
+///
+/// Compile le module **à chaque appel** (mesuré R0 : 1,3 ms contre 18 µs une fois
+/// compilé). Un appelant qui rend la même vue plusieurs fois garde un
+/// [`CompiledModule`] ; c'est ce que fait [`crate::serving`].
+#[cfg(feature = "wasmi")]
+pub fn call_json(
+    wasm: &[u8],
+    export: &str,
+    args: &Args<'_>,
+    limits: &Limits,
+) -> Result<Call, CallError> {
+    precheck(args, limits)?;
+    CompiledModule::compile(wasm)?.call(export, args, limits)
+}
 
-    refuse_imports(&module)?;
-    check_memory(&module, limits)?;
-    check_signature(
-        &module,
-        ALLOC_EXPORT,
-        "`(func (export \"alloc\") (param i32) (result i32) ...)`",
-        &[ValType::I32],
-        &[ValType::I32],
-    )?;
-    let params = vec![ValType::I32; args.buffers.len() * 2];
-    let expected = format!(
-        "`(func (export \"{export}\") {}(result i64) ...)`",
-        if params.is_empty() {
-            String::new()
-        } else {
-            format!("(param{}) ", " i32".repeat(params.len()))
-        }
-    );
-    check_signature(&module, export, &expected, &params, &[ValType::I64])?;
+/// Un module wasm compilé **une fois** (`Engine` + `Module`), appelable autant de fois
+/// qu'on veut.
+///
+/// Ce qui est gardé, c'est la compilation, pas l'instance : chaque [`call`](Self::call)
+/// instancie à neuf (un `Store` et une mémoire propres). C'est ce qui garantit
+/// qu'**aucun état ne fuit d'un appel à l'autre** — ni l'`INBOX` du SDK (un `Vec<u8>` de
+/// plus par `alloc`, mesuré 32,8 o/appel sur une instance réutilisée), ni le pointeur
+/// d'un allocateur « bump », ni un fuel épuisé. Instancier depuis un `Module` compilé
+/// coûte des microsecondes ; c'est la compilation qui coûtait 70×.
+#[cfg(feature = "wasmi")]
+pub struct CompiledModule {
+    engine: wasmi::Engine,
+    module: wasmi::Module,
+}
 
-    let store_limits = StoreLimitsBuilder::new()
-        .memory_size(limits.memory_bytes())
-        .trap_on_grow_failure(true)
-        .build();
-    let mut store = Store::new(
-        &engine,
-        State {
-            limits: store_limits,
-        },
-    );
-    store.limiter(|state| &mut state.limits);
-    store
-        .set_fuel(limits.fuel)
-        .map_err(|e| ExecutorError::Trap(format!("fuel : {e}")))?;
+#[cfg(feature = "wasmi")]
+impl CompiledModule {
+    /// Compile `wasm`. Un binaire illisible est refusé ici ([`ExecutorError::Module`]).
+    pub fn compile(wasm: &[u8]) -> Result<Self, CallError> {
+        let mut config = wasmi::Config::default();
+        config.consume_fuel(true);
+        let engine = wasmi::Engine::new(&config);
+        let module =
+            wasmi::Module::new(&engine, wasm).map_err(|e| ExecutorError::Module(e.to_string()))?;
+        Ok(Self { engine, module })
+    }
 
-    let instance = Instance::new(&mut store, &module, &[])
-        .map_err(|e| classify(e, limits, "instanciation"))?;
-    let memory = instance
-        .get_memory(&store, MEMORY_EXPORT)
-        .ok_or_else(missing_memory)?;
-    let alloc = instance
-        .get_typed_func::<i32, i32>(&store, ALLOC_EXPORT)
-        .map_err(|e| ExecutorError::WrongSignature {
-            name: ALLOC_EXPORT.to_string(),
-            expected: "`(param i32) (result i32)`".to_string(),
-            found: e.to_string(),
-        })?;
-    let function =
-        instance
-            .get_func(&store, export)
-            .ok_or_else(|| ExecutorError::MissingExport {
-                name: export.to_string(),
-                how: how_to_declare(export, &expected),
+    /// Les mêmes refus, dans le même ordre, que [`call_json`].
+    pub fn call(&self, export: &str, args: &Args<'_>, limits: &Limits) -> Result<Call, CallError> {
+        self.run(export, args, limits).map(|(call, _, _)| call)
+    }
+
+    /// [`call`](Self::call), en rendant aussi le `Store` et l'instance : les tests y lisent
+    /// l'état que l'appel a laissé derrière lui.
+    #[allow(clippy::type_complexity)]
+    pub(crate) fn run(
+        &self,
+        export: &str,
+        args: &Args<'_>,
+        limits: &Limits,
+    ) -> Result<(Call, wasmi::Store<impl Sized>, wasmi::Instance), CallError> {
+        use wasmi::{Instance, Store, StoreLimitsBuilder, Val, ValType};
+        precheck(args, limits)?;
+        let engine = &self.engine;
+        let module = &self.module;
+
+        refuse_imports(module)?;
+        check_memory(module, limits)?;
+        check_signature(
+            module,
+            ALLOC_EXPORT,
+            "`(func (export \"alloc\") (param i32) (result i32) ...)`",
+            &[ValType::I32],
+            &[ValType::I32],
+        )?;
+        let params = vec![ValType::I32; args.buffers.len() * 2];
+        let expected = format!(
+            "`(func (export \"{export}\") {}(result i64) ...)`",
+            if params.is_empty() {
+                String::new()
+            } else {
+                format!("(param{}) ", " i32".repeat(params.len()))
+            }
+        );
+        check_signature(module, export, &expected, &params, &[ValType::I64])?;
+
+        let store_limits = StoreLimitsBuilder::new()
+            .memory_size(limits.memory_bytes())
+            .trap_on_grow_failure(true)
+            .build();
+        let mut store = Store::new(
+            engine,
+            State {
+                limits: store_limits,
+            },
+        );
+        store.limiter(|state| &mut state.limits);
+        store
+            .set_fuel(limits.fuel)
+            .map_err(|e| ExecutorError::Trap(format!("fuel : {e}")))?;
+
+        let instance = Instance::new(&mut store, module, &[])
+            .map_err(|e| classify(e, limits, "instanciation"))?;
+        let memory = instance
+            .get_memory(&store, MEMORY_EXPORT)
+            .ok_or_else(missing_memory)?;
+        let alloc = instance
+            .get_typed_func::<i32, i32>(&store, ALLOC_EXPORT)
+            .map_err(|e| ExecutorError::WrongSignature {
+                name: ALLOC_EXPORT.to_string(),
+                expected: "`(param i32) (result i32)`".to_string(),
+                found: e.to_string(),
             })?;
-
-    // Chaque entrée entre par la mémoire : `alloc(len)` en donne le décalage.
-    let mut inputs: Vec<Val> = Vec::with_capacity(params.len());
-    for buffer in &args.buffers {
-        let len = i32::try_from(buffer.len()).map_err(|_| ExecutorError::RequestTooLarge {
-            len: buffer.len(),
-            max: i32::MAX as usize,
-        })?;
-        let mut ptr = 0i32;
-        if !buffer.is_empty() {
-            ptr = alloc
-                .call(&mut store, len)
-                .map_err(|e| classify(e, limits, ALLOC_EXPORT))?;
-            let size = memory.data_size(&store);
-            let start = usable(ptr, buffer.len(), size)?;
-            memory
-                .write(&mut store, start, buffer)
-                .map_err(|e| ExecutorError::BadBuffer {
-                    ptr: i64::from(ptr),
-                    len: buffer.len(),
-                    size,
-                    why: e.to_string(),
+        let function =
+            instance
+                .get_func(&store, export)
+                .ok_or_else(|| ExecutorError::MissingExport {
+                    name: export.to_string(),
+                    how: how_to_declare(export, &expected),
                 })?;
+
+        // Chaque entrée entre par la mémoire : `alloc(len)` en donne le décalage.
+        let mut inputs: Vec<Val> = Vec::with_capacity(params.len());
+        for buffer in &args.buffers {
+            let len = i32::try_from(buffer.len()).map_err(|_| ExecutorError::RequestTooLarge {
+                len: buffer.len(),
+                max: i32::MAX as usize,
+            })?;
+            let mut ptr = 0i32;
+            if !buffer.is_empty() {
+                ptr = alloc
+                    .call(&mut store, len)
+                    .map_err(|e| classify(e, limits, ALLOC_EXPORT))?;
+                let size = memory.data_size(&store);
+                let start = usable(ptr, buffer.len(), size)?;
+                memory
+                    .write(&mut store, start, buffer)
+                    .map_err(|e| ExecutorError::BadBuffer {
+                        ptr: i64::from(ptr),
+                        len: buffer.len(),
+                        size,
+                        why: e.to_string(),
+                    })?;
+            }
+            inputs.push(Val::I32(ptr));
+            inputs.push(Val::I32(len));
         }
-        inputs.push(Val::I32(ptr));
-        inputs.push(Val::I32(len));
+
+        let mut outputs = [Val::I64(0)];
+        function
+            .call(&mut store, &inputs, &mut outputs)
+            .map_err(|e| classify(e, limits, export))?;
+        let Val::I64(packed) = outputs[0] else {
+            return Err(ExecutorError::Trap(format!(
+                "{export} : résultat inattendu"
+            )));
+        };
+        let remaining = store
+            .get_fuel()
+            .map_err(|e| ExecutorError::Trap(format!("fuel : {e}")))?;
+        let fuel_used = limits.fuel.saturating_sub(remaining);
+
+        // La réponse sort par le même chemin, bornée avant d'être lue.
+        let out_ptr = ((packed as u64) >> 32) as u32 as usize;
+        let out_len = ((packed as u64) & 0xffff_ffff) as u32 as usize;
+        let size = memory.data_size(&store);
+        let max = limits.response_bytes.min(size);
+        if out_len > max {
+            return Err(ExecutorError::ResponseTooLarge { len: out_len, max });
+        }
+        let start = usable(out_ptr as i32, out_len, size)?;
+        let response = memory.data(&store)[start..start + out_len].to_vec();
+
+        Ok((
+            Call {
+                response,
+                fuel_used,
+            },
+            store,
+            instance,
+        ))
     }
-
-    let mut outputs = [Val::I64(0)];
-    function
-        .call(&mut store, &inputs, &mut outputs)
-        .map_err(|e| classify(e, limits, export))?;
-    let Val::I64(packed) = outputs[0] else {
-        return Err(ExecutorError::Trap(format!(
-            "{export} : résultat inattendu"
-        )));
-    };
-    let remaining = store
-        .get_fuel()
-        .map_err(|e| ExecutorError::Trap(format!("fuel : {e}")))?;
-    let fuel_used = limits.fuel.saturating_sub(remaining);
-
-    // La réponse sort par le même chemin, bornée avant d'être lue.
-    let out_ptr = ((packed as u64) >> 32) as u32 as usize;
-    let out_len = ((packed as u64) & 0xffff_ffff) as u32 as usize;
-    let size = memory.data_size(&store);
-    let max = limits.response_bytes.min(size);
-    if out_len > max {
-        return Err(ExecutorError::ResponseTooLarge { len: out_len, max });
-    }
-    let start = usable(out_ptr as i32, out_len, size)?;
-    let response = memory.data(&store)[start..start + out_len].to_vec();
-
-    Ok(Call {
-        response,
-        fuel_used,
-    })
 }
 
 #[cfg(feature = "wasmi")]
