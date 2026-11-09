@@ -135,6 +135,22 @@ pub struct ModuleReq {
 }
 
 impl ModuleDescriptor {
+    /// A clone whose `entities` also hold those of the modules it requires (transitively),
+    /// looked up in `known`. Its own entities come first and win over a homonym; order is kept,
+    /// no duplicate. What a renderer needs to resolve a field of an entity the module does not
+    /// declare itself.
+    pub fn with_required_entities(&self, known: &[&ModuleDescriptor]) -> ModuleDescriptor {
+        let mut out = self.clone();
+        for dep in crate::views::required_modules(self, known) {
+            for e in &dep.entities {
+                if !out.entities.iter().any(|x| x.name == e.name) {
+                    out.entities.push(e.clone());
+                }
+            }
+        }
+        out
+    }
+
     pub fn new(name: impl Into<String>, version: impl Into<String>) -> Self {
         Self {
             format: DESCRIPTOR_FORMAT,
@@ -427,6 +443,83 @@ impl DescriptorSet {
 
 #[cfg(test)]
 mod tests {
+    fn avec(name: &str, requis: &[&str], entites: &[(&str, &str)]) -> ModuleDescriptor {
+        let mut d = ModuleDescriptor::new(name, "1.0.0");
+        d.requires = requis
+            .iter()
+            .map(|n| ModuleReq {
+                name: n.to_string(),
+                version: "*".into(),
+                optional: false,
+            })
+            .collect();
+        for (n, champ) in entites {
+            let mut e = EntityDesc::new(*n);
+            e.fields = vec![crate::field::FieldDesc::new(
+                *champ,
+                crate::field::FieldType::String,
+            )];
+            d.entities.push(e);
+        }
+        d
+    }
+
+    fn noms(d: &ModuleDescriptor) -> Vec<&str> {
+        d.entities.iter().map(|e| e.name.as_str()).collect()
+    }
+
+    #[test]
+    fn with_required_entities_ajoute_celles_du_module_requis() {
+        let socle = avec("socle", &[], &[("message", "contenu")]);
+        let atelier = avec("atelier", &["socle"], &[("outil", "nom")]);
+        let d = atelier.with_required_entities(&[&socle, &atelier]);
+        assert_eq!(noms(&d), ["outil", "message"]);
+        assert_eq!(atelier.entities.len(), 1, "l'original est intact");
+    }
+
+    #[test]
+    fn with_required_entities_est_transitif_et_sans_doublon() {
+        let socle = avec(
+            "socle",
+            &[],
+            &[("message", "contenu"), ("conversation", "titre")],
+        );
+        let milieu = avec(
+            "milieu",
+            &["socle"],
+            &[("note", "texte"), ("message", "autre")],
+        );
+        let haut = avec("haut", &["milieu"], &[]);
+        let d = haut.with_required_entities(&[&socle, &milieu, &haut]);
+        let mut n = noms(&d);
+        n.sort();
+        assert_eq!(n, ["conversation", "message", "note"]);
+    }
+
+    #[test]
+    fn with_required_entities_ne_boucle_pas_sur_un_cycle() {
+        let a = avec("a", &["b"], &[("x", "f")]);
+        let b = avec("b", &["a"], &[("y", "f")]);
+        let d = a.with_required_entities(&[&a, &b]);
+        assert_eq!(noms(&d), ["x", "y"]);
+    }
+
+    #[test]
+    fn with_required_entities_garde_les_entites_propres_face_a_un_homonyme() {
+        let socle = avec("socle", &[], &[("message", "du_socle")]);
+        let atelier = avec("atelier", &["socle"], &[("message", "le_mien")]);
+        let d = atelier.with_required_entities(&[&socle, &atelier]);
+        assert_eq!(d.entities.len(), 1);
+        assert_eq!(d.entities[0].fields[0].name, "le_mien");
+    }
+
+    #[test]
+    fn with_required_entities_ignore_un_module_non_requis() {
+        let autre = avec("autre", &[], &[("z", "f")]);
+        let a = avec("a", &[], &[("x", "f")]);
+        assert_eq!(noms(&a.with_required_entities(&[&autre, &a])), ["x"]);
+    }
+
     use super::*;
     use crate::entity::EntityDesc;
 
