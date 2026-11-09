@@ -76,7 +76,7 @@
 
 pub use crate::call::{ALLOC_EXPORT, Call, Limits, MEMORY_EXPORT, PAGE_BYTES};
 use crate::executor::ExecutorError;
-use this_descriptor::views::ViewDesc;
+use this_descriptor::views::{ViewBaseline, ViewDesc};
 use this_descriptor::{ModuleDescriptor, views};
 
 /// Un moteur qui sait tenir le contrat de vue.
@@ -226,18 +226,75 @@ pub fn views_of(bytes: &[u8], max: usize) -> Result<Vec<ViewDesc>, ViewsError> {
 /// références entre vues gardent un sens.
 pub fn issues_against(descriptor: &ModuleDescriptor, rendered: &[ViewDesc]) -> Vec<String> {
     if rendered.is_empty() {
-        return vec!["aucune vue rendue : l'appel doit rendre au moins un arbre".to_string()];
+        return vec![AUCUNE_VUE.to_string()];
+    }
+    format(views::issues_with_rendered(descriptor, rendered))
+}
+
+/// [`issues_against`] avec le [`ViewBaseline`] du descripteur (calculé une fois par version
+/// de module) : les N vues déclarées ne sont **pas** revalidées, seules les vues rendues le
+/// sont. Même verdict, même ordre, même texte — le test `differential` le vérifie sur un
+/// corpus valide et invalide. `baseline` doit venir de `descriptor`.
+///
+/// # Mesure R7 (09/11/2026, `cargo test --release -p this-module-harness r7_bench -- --ignored --nocapture`)
+///
+/// 1 000 vues déclarées, arbre rendu de 100 vues d'une brique, 25 itérations, `--release`,
+/// MacBook (médiane / p95, µs) :
+///
+/// | méthode | médiane | p95 |
+/// |---|---|---|
+/// | avant : clone du descripteur + `views::issues` (`issues_against_reference`) | 744 | 808 |
+/// | `issues_against` : sans clone, mais revalide les 1 000 vues | 652 | 694 |
+/// | **`issues_against_with`** : baseline chaude, seules les vues rendues sont validées | **170** | **176** |
+/// | coût UNIQUE de `ViewBaseline::new` (une fois par version de module installée) | 592 | 632 |
+///
+/// Avec une seule vue rendue : 100 / 105 µs. Ce plancher d'environ 100 µs est le coût fixe
+/// que la baseline ne supprime pas : l'ensemble des noms de vues (1 000 insertions, deux
+/// fois) et le passage `replaces`, qui regardent tout le module. Choix : **baseline par
+/// version de module** plutôt que mémoïsation par empreinte — hacher un descripteur de
+/// 1 000 vues coûte autant que le valider, alors que le baseline se range à côté de
+/// `Installed` et meurt avec elle. Les messages d'une action qui ouvre une vue inconnue
+/// énumèrent toutes les vues (distance de Levenshtein sur chacune) : un descripteur fautif
+/// reste lent (2 ms à 1 000 vues) — le chemin sain est celui qui est rapide.
+///
+/// La mesure se rejoue : `cargo test --release -p this-module-harness --lib r7_bench --
+/// --ignored --nocapture`.
+pub fn issues_against_with(
+    baseline: &ViewBaseline,
+    descriptor: &ModuleDescriptor,
+    rendered: &[ViewDesc],
+) -> Vec<String> {
+    if rendered.is_empty() {
+        return vec![AUCUNE_VUE.to_string()];
+    }
+    format(baseline.issues_with(descriptor, rendered))
+}
+
+const AUCUNE_VUE: &str = "aucune vue rendue : l'appel doit rendre au moins un arbre";
+
+fn format(issues: Vec<views::Issue>) -> Vec<String> {
+    issues
+        .into_iter()
+        .map(|(reason, path, message)| format!("{path} [{reason}] : {message}"))
+        .collect()
+}
+
+/// L'ancienne implémentation, gardée pour le test différentiel : clone du descripteur
+/// entier, puis validation de TOUT.
+#[cfg(test)]
+pub(crate) fn issues_against_reference(
+    descriptor: &ModuleDescriptor,
+    rendered: &[ViewDesc],
+) -> Vec<String> {
+    if rendered.is_empty() {
+        return vec![AUCUNE_VUE.to_string()];
     }
     let replaced: std::collections::BTreeSet<&str> =
         rendered.iter().map(|v| v.name.as_str()).collect();
     let mut module = descriptor.clone();
     module.views.retain(|v| !replaced.contains(v.name.as_str()));
     module.views.extend(rendered.iter().cloned());
-
-    views::issues(&module)
-        .into_iter()
-        .map(|(reason, path, message)| format!("{path} [{reason}] : {message}"))
-        .collect()
+    format(views::issues(&module))
 }
 
 fn json_kind(value: &serde_json::Value) -> &'static str {
@@ -740,5 +797,282 @@ mod engine_tests {
             .await
             .expect("une vue conforme passe le descripteur");
         assert_eq!(rendered.views[0].name, "orders");
+    }
+}
+
+#[cfg(test)]
+mod differential {
+    use super::*;
+    use serde_json::{Value, json};
+
+    fn list(name: &str, entity: &str, label: &str) -> Value {
+        json!({"name":name,"surface":"main","root":{"type":"leaf",
+            "brick":{"type":"list","entity":entity,"label":label}}})
+    }
+
+    fn nested(depth: usize) -> Value {
+        let mut node = json!({"type":"leaf","brick":{"type":"list","entity":"order","label":"id"}});
+        for _ in 0..depth {
+            node = json!({"type":"stack","children":[node]});
+        }
+        node
+    }
+
+    fn descriptor(views: Vec<Value>) -> ModuleDescriptor {
+        let mut d = serde_json::to_value(ModuleDescriptor::new("shop", "1.0.0")).expect("json");
+        d["entities"] = json!([{"name":"order"}]);
+        d["operations"] = json!([{"name":"ship","entity":"order"}]);
+        d["actions"] = json!([
+            {"kind":"navigate","name":"go_home","view":"home"},
+            {"kind":"navigate","name":"go_later","view":"later"},
+            {"kind":"delete","name":"drop_order","entity":"order"},
+            {"kind":"invoke","name":"ship_it","operation":"ship","entity":"order"}
+        ]);
+        d["views"] = Value::Array(views);
+        serde_json::from_value(d).expect("descripteur de test")
+    }
+
+    /// Des descripteurs déclarés : sains, fautifs, avec `replaces`, avec une référence à une
+    /// vue qui n'existe pas encore (`later`), avec un doublon, vides.
+    fn declared() -> Vec<(&'static str, ModuleDescriptor)> {
+        let mut with_replace = list("wrap", "order", "id");
+        with_replace["replaces"] = json!("home");
+        let mut click = list("clicky", "order", "id");
+        click["root"]["brick"]["on_click"] = json!({"kind":"navigate","view":"later"});
+        vec![
+            (
+                "sain",
+                descriptor(vec![
+                    list("home", "order", "id"),
+                    list("other", "order", "id"),
+                ]),
+            ),
+            ("fautif", {
+                let mut d = descriptor(vec![
+                    list("home", "order", "id"),
+                    list("ghosty", "ghost", "id"),
+                    list("typo", "order", "idd"),
+                    list("Bad-Name", "order", "id"),
+                    list("other", "order", "id"),
+                ]);
+                d.actions.push(
+                    serde_json::from_value(
+                        json!({"kind":"invoke","name":"ghost_op","operation":"nope"}),
+                    )
+                    .expect("action"),
+                );
+                d
+            }),
+            (
+                "replaces",
+                descriptor(vec![list("home", "order", "id"), with_replace.clone()]),
+            ),
+            (
+                "ref_future",
+                descriptor(vec![list("home", "order", "id"), click]),
+            ),
+            (
+                "doublon",
+                descriptor(vec![
+                    list("dupe", "order", "id"),
+                    list("home", "order", "id"),
+                    list("dupe", "order", "id"),
+                ]),
+            ),
+            ("vide", descriptor(vec![])),
+        ]
+    }
+
+    /// Des arbres rendus, valides ou non.
+    fn rendered_corpus() -> Vec<(&'static str, Vec<Value>)> {
+        let mut replaces_broken = list("r1", "order", "id");
+        replaces_broken["replaces"] = json!("nowhere");
+        let mut replaces_self = list("r2", "order", "id");
+        replaces_self["replaces"] = json!("r2");
+        let mut replaces_declared = list("r3", "order", "id");
+        replaces_declared["replaces"] = json!("other");
+        let mut replaces_twice = list("r4", "order", "id");
+        replaces_twice["replaces"] = json!("other");
+        let mut header_list = list("h", "order", "id");
+        header_list["surface"] = json!("header");
+        let button_unknown_action = json!({"name":"b1","surface":"main","root":{"type":"leaf",
+                "brick":{"type":"button","entity":"order","action":"nope"}}});
+        let button_ok = json!({"name":"b2","surface":"main","root":{"type":"leaf",
+                "brick":{"type":"button","entity":"order","action":"go_later"}}});
+        let click_unknown = {
+            let mut v = list("c1", "order", "id");
+            v["root"]["brick"]["on_click"] = json!({"kind":"navigate","view":"ailleurs"});
+            v
+        };
+        let refers_declared_unrendered = {
+            let mut v = list("c2", "order", "id");
+            v["root"]["brick"]["on_click"] = json!({"kind":"navigate","view":"other"});
+            v
+        };
+        vec![
+            ("aucune", vec![]),
+            ("valide", vec![list("v1", "order", "id")]),
+            ("remplace_home", vec![list("home", "order", "id")]),
+            ("remplace_wrap", vec![list("wrap", "order", "id")]),
+            ("remplace_dupe", vec![list("dupe", "order", "id")]),
+            ("later_resolu", vec![list("later", "order", "id")]),
+            ("entite_inconnue", vec![list("e", "ghost", "id")]),
+            ("champ_inconnu", vec![list("f", "order", "zzz")]),
+            ("action_inconnue", vec![button_unknown_action]),
+            ("action_ok", vec![button_ok]),
+            ("replaces_casse", vec![replaces_broken]),
+            ("replaces_soi", vec![replaces_self]),
+            ("replaces_declaree", vec![replaces_declared.clone()]),
+            (
+                "replaces_deux_fois",
+                vec![replaces_declared, replaces_twice],
+            ),
+            ("surface_interdite", vec![header_list]),
+            (
+                "profondeur_16",
+                vec![json!({"name":"d16","surface":"main","root":nested(15)})],
+            ),
+            (
+                "profondeur_17",
+                vec![json!({"name":"d17","surface":"main","root":nested(40)})],
+            ),
+            ("nom_invalide", vec![list("Mauvais Nom", "order", "id")]),
+            (
+                "doublon_rendu",
+                vec![list("same", "order", "id"), list("same", "order", "id")],
+            ),
+            (
+                "arbre_vide",
+                vec![json!({"name":"vide","surface":"main",
+                    "root":{"type":"stack","children":[]}})],
+            ),
+            ("click_inconnu", vec![click_unknown]),
+            ("ref_non_rendue", vec![refers_declared_unrendered]),
+            (
+                "melange",
+                vec![
+                    list("home", "order", "id"),
+                    list("zz", "ghost", "id"),
+                    list("later", "order", "q"),
+                ],
+            ),
+        ]
+    }
+
+    #[test]
+    fn the_incremental_verdict_equals_the_reference_one() {
+        let mut compared = 0;
+        let mut non_empty = 0;
+        for (dname, d) in declared() {
+            let baseline = ViewBaseline::new(&d);
+            for (rname, tree) in rendered_corpus() {
+                let tree: Vec<ViewDesc> = tree
+                    .into_iter()
+                    .map(|v| serde_json::from_value(v).unwrap_or_else(|e| panic!("{rname}: {e}")))
+                    .collect();
+                let old = issues_against_reference(&d, &tree);
+                let one_shot = issues_against(&d, &tree);
+                let new = issues_against_with(&baseline, &d, &tree);
+                assert_eq!(old, one_shot, "sans baseline : {dname} × {rname}");
+                assert_eq!(old, new, "avec baseline : {dname} × {rname}");
+                compared += 1;
+                non_empty += usize::from(!old.is_empty());
+            }
+        }
+        // Le corpus doit contenir des verdicts vides ET non vides, sinon il ne prouve rien.
+        assert_eq!(compared, 6 * 23);
+        assert!(
+            non_empty > 50 && non_empty < compared,
+            "{non_empty}/{compared}"
+        );
+    }
+
+    #[test]
+    fn the_corpus_reaches_every_required_failure() {
+        let all: String = declared()
+            .iter()
+            .flat_map(|(_, d)| {
+                rendered_corpus().into_iter().flat_map(move |(_, t)| {
+                    let t: Vec<ViewDesc> = t
+                        .into_iter()
+                        .map(|v| serde_json::from_value(v).unwrap())
+                        .collect();
+                    issues_against_reference(d, &t)
+                })
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        for reason in [
+            "view_entity_unknown",
+            "view_action_unknown",
+            "view_field_unknown",
+            "action_operation_unknown",
+            "view_target_unknown",
+            "view_replaces_self",
+            "surface_brick_refused",
+            "invalid_name",
+            "duplicate_view",
+            "view_replaced_twice",
+        ] {
+            assert!(all.contains(reason), "le corpus n'atteint pas `{reason}`");
+        }
+        assert!(
+            all.contains("nested more than"),
+            "profondeur > MAX_VIEW_DEPTH"
+        );
+        assert!(all.contains("aucune vue rendue"), "arbre absent");
+    }
+
+    /// Mesure R7. `cargo test --release -p this-module-harness r7_bench -- --ignored --nocapture`
+    #[test]
+    #[ignore = "mesure, pas une vérification"]
+    fn r7_bench() {
+        let views: Vec<Value> = (0..1000)
+            .map(|i| match i {
+                // Les actions du descripteur de test ouvrent `home` et `later` : un
+                // descripteur sain les déclare (sinon `actions()` formule un message qui
+                // énumère les 1 000 noms, et c'est ça qu'on mesurerait).
+                0 => list("home", "order", "id"),
+                1 => list("later", "order", "id"),
+                _ => list(&format!("decl_{i}"), "order", "id"),
+            })
+            .collect();
+        let d = descriptor(views);
+        let tree: Vec<ViewDesc> = (0..100)
+            .map(|i| {
+                serde_json::from_value(list(&format!("rend_{i}"), "order", "id")).expect("vue")
+            })
+            .collect();
+        let baseline = ViewBaseline::new(&d);
+        assert_eq!(
+            issues_against_reference(&d, &tree),
+            issues_against_with(&baseline, &d, &tree)
+        );
+        let time = |f: &dyn Fn() -> Vec<String>| {
+            let mut t: Vec<f64> = (0..25)
+                .map(|_| {
+                    let s = std::time::Instant::now();
+                    std::hint::black_box(f());
+                    s.elapsed().as_secs_f64() * 1e6
+                })
+                .collect();
+            t.sort_by(|a, b| a.total_cmp(b));
+            (t[12], t[23])
+        };
+        let (m0, p0) = time(&|| issues_against_reference(&d, &tree));
+        let (m1, p1) = time(&|| issues_against(&d, &tree));
+        let (m2, p2) = time(&|| issues_against_with(&baseline, &d, &tree));
+        let (mb, pb) = time(&|| {
+            std::hint::black_box(ViewBaseline::new(&d));
+            vec![]
+        });
+        let one = &tree[..1];
+        let (a, b) = time(&|| issues_against_with(&baseline, &d, one));
+        println!("BENCH baseline chaude, 1 vue rendue {a:.0} / {b:.0}");
+        println!("BENCH 1000 vues déclarées, 100 rendues, n=25 (µs, médiane / p95)");
+        println!("BENCH avant (clone + tout)        {m0:.0} / {p0:.0}");
+        println!("BENCH sans clone (one-shot)       {m1:.0} / {p1:.0}");
+        println!("BENCH baseline chaude             {m2:.0} / {p2:.0}");
+        println!("BENCH construction de la baseline {mb:.0} / {pb:.0}");
     }
 }
