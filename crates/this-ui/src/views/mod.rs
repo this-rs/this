@@ -43,6 +43,7 @@ pub mod data;
 #[cfg(test)]
 mod integration;
 pub mod intent;
+pub mod markdown;
 pub mod placement;
 pub mod render;
 pub mod state;
@@ -53,8 +54,9 @@ pub use data::{Feed, Feeds, Reading, Rows, Snapshot};
 pub use intent::{FieldValue, Intent, LinkOp, Values};
 pub use placement::{Frame, Hidden, Portfolio, SURFACES};
 pub use render::{
-    ComposerSpec, Ctx, composer, composer_actions, composer_intent, render_brick, render_node,
-    render_view, settings_intent, without_composer,
+    ComposerSpec, Ctx, StepEntry, annonce, composer, composer_actions, composer_intent,
+    render_brick, render_node, render_view, settings_intent, step_entries, thread_hidden,
+    thread_window, without_composer,
 };
 pub use state::ViewState;
 pub use style::CSS;

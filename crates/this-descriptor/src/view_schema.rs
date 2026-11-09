@@ -622,13 +622,102 @@ fn bricks() -> Vec<VariantSchema> {
         ),
         brick_v(
             "message",
-            "A message bubble per row read: its author and its content. Filtered on one row, it \
-             is one message; filtered on a conversation (`{\"$context\": \"conversation\"}`), \
-             it is the thread — without the input, which `chat` has.",
-            vec![entity_f(), filter_f()],
+            "A message bubble per row read: its author, its content, and the tool steps the row \
+             carries. Filtered on one row, it is one message; filtered on a conversation \
+             (`{\"$context\": \"conversation\"}`), it is the thread — without the input, \
+             which `chat` has. The content is markdown when `markdown` is true, plain text \
+             otherwise; tool steps are read from a field holding a list of \
+             `{outil, etat, resume, ms}` objects (a row that has none draws none). A thread is \
+             read from the bottom: `page_size` draws the LAST rows and offers a button that \
+             widens the window.",
+            vec![
+                entity_f(),
+                filter_f(),
+                opt(
+                    "markdown",
+                    "bool",
+                    "The content of a bubble is markdown, rendered by the host. Absent: plain \
+                     text — what is read is what is written.",
+                )
+                .default_value(json!(false)),
+                opt(
+                    "page_size",
+                    "u32",
+                    "Thread window, 1..=100. Absent = the whole thread. Draws the LAST rows and \
+                     a button that widens the window by as much.",
+                ),
+            ],
             json!({"type": "message", "entity": "conversation"}),
             json!({"type": "message", "entity": "conversation",
-                   "filter": {"cmp": {"field": "titre", "op": "eq", "value": {"$context": "conversation"}}}}),
+                   "filter": {"cmp": {"field": "titre", "op": "eq", "value": {"$context": "conversation"}}},
+                   "markdown": true, "page_size": 40}),
+            false,
+        ),
+        brick_v(
+            "notice",
+            "A notice read from one row: a tone and a field. For what a host must announce \
+             about a turn — why it stopped, a failure, the context size — and cannot write in \
+             advance. An EMPTY field announces nothing and the brick is not drawn; a FAILED \
+             reading is always drawn, in the error tone. `action` puts a button inside the \
+             notice, so that the announcement and its gesture appear and disappear together.",
+            vec![
+                req("tone", "enum:Tone", "The tone."),
+                entity_f(),
+                filter_f(),
+                req(
+                    "field",
+                    "string",
+                    "The field read: its text is what the notice says.",
+                )
+                .refers("field"),
+                opt(
+                    "action",
+                    "string",
+                    "An action of this module, drawn as a button inside the notice.",
+                )
+                .refers("action"),
+            ],
+            json!({"type": "notice", "tone": "info", "entity": "invoice", "field": "titre"}),
+            json!({"type": "notice", "tone": "warning", "entity": "invoice", "filter": f,
+                   "field": "titre", "action": "go"}),
+            false,
+        ),
+        brick_v(
+            "question",
+            "The card of a question the agent asks and waits on, in the middle of the thread: \
+             its text, its choices, the answer already given. It reads the entity this brick \
+             names, and the HOST fills it: pending questions live in the running turn, not in \
+             any table. The host provides one row per question under that entity, in the \
+             fields named here — `id` carries the gateway's identifier, by which the answer \
+             reaches the agent. A click emits an answer intent; the host answers the gateway. \
+             No action of the module is called: answering the agent is the person's gesture.",
+            vec![
+                entity_f(),
+                filter_f(),
+                req(
+                    "text",
+                    "string",
+                    "The field holding the question, in one sentence.",
+                )
+                .refers("field"),
+                req(
+                    "options",
+                    "string",
+                    "The field holding the possible answers (a list of texts).",
+                )
+                .refers("field"),
+                opt(
+                    "answer",
+                    "string",
+                    "The field holding the answer already given. Absent = the card shows none.",
+                )
+                .refers("field"),
+            ],
+            json!({"type": "question", "entity": "demande", "text": "texte",
+                   "options": "choix"}),
+            json!({"type": "question", "entity": "demande",
+                   "filter": {"cmp": {"field": "texte", "op": "starts_with", "value": "A"}},
+                   "text": "texte", "options": "choix", "answer": "reponse"}),
             false,
         ),
         brick_v(
@@ -1606,6 +1695,12 @@ fn coverage() -> Vec<CoverageEntry> {
         ),
         cover("button", &["brick:button"], "Triggers an action."),
         cover(
+            "question",
+            &["brick:question"],
+            "The card of a question the agent asks and waits on: its text, its choices, the \
+             answer already given. The host fills the row; a click answers the agent's gateway.",
+        ),
+        cover(
             "composer",
             &["brick:composer"],
             "What the thread's input offers: invitation, attachments, the module's actions \
@@ -1619,7 +1714,12 @@ fn coverage() -> Vec<CoverageEntry> {
              stay the host's.",
         ),
         cover("text", &["brick:text"], "One field of the first row."),
-        cover("banner", &["brick:banner"], "Closed tone, key or text."),
+        cover(
+            "banner",
+            &["brick:banner", "brick:notice"],
+            "`banner`: a closed tone and a declared text. `notice`: a closed tone and a FIELD — \
+             for what the host must announce about a turn; an empty field draws nothing.",
+        ),
         cover(
             "indicator",
             &["brick:indicator"],
@@ -1885,8 +1985,16 @@ mod tests {
         ];
         let mut conversation = EntityDesc::new("conversation");
         conversation.fields = vec![FieldDesc::new("titre", FieldType::String)];
+        // L'entité d'une carte de question : l'hôte la remplit, le module la déclare.
+        let mut demande = EntityDesc::new("demande");
+        demande.fields = vec![
+            FieldDesc::new("texte", FieldType::String),
+            FieldDesc::new("choix", FieldType::Json),
+            FieldDesc::new("reponse", FieldType::String),
+        ];
         m.entities.push(invoice);
         m.entities.push(conversation);
+        m.entities.push(demande);
         m.links.push(LinkDesc::new(
             "invoice_conversation",
             "invoice",

@@ -206,7 +206,12 @@ pub enum Brick {
         filter: Option<FilterExpr>,
         action: String,
     },
-    /// Une bannière d'alerte : un ton fermé et un texte (clé de message ou texte).
+    /// Une bannière : un ton fermé et un texte déclaré (clé de message ou texte).
+    ///
+    /// Pour ce que l'hôte peut annoncer sans rien lire. Quand le texte vient d'une LIGNE —
+    /// le motif d'arrêt d'un tour, une panne, une phrase d'état — c'est [`Brick::Notice`] :
+    /// une bannière au texte lu serait une bannière dont le texte change sans qu'on puisse
+    /// le vérifier sur la déclaration.
     Banner { tone: Tone, text: String },
     /// Un indicateur : connexion, activité (phase et durée), compteur ou badge.
     Indicator {
@@ -297,13 +302,89 @@ pub enum Brick {
         entity: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         filter: Option<FilterExpr>,
+        /// Le contenu d'une bulle est du **markdown**, rendu par l'hôte.
+        ///
+        /// Absent (le défaut), le contenu est du texte : ce qu'on lit est ce qui est écrit.
+        /// C'est un choix que le module fait, pas une convention que l'hôte impose — un
+        /// module qui affiche du JSON, du code ou une phrase contenant `*` garde son texte
+        /// intact, et un module qui affiche de la prose d'agent demande le rendu.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        markdown: bool,
+        /// La taille de la fenêtre du fil. Absente = tout le fil.
+        ///
+        /// Un fil se lit par le bas : la brique dessine les `page_size` **derniers**
+        /// messages, et un bouton qui élargit la fenêtre d'autant, vers le haut. C'est
+        /// l'inverse d'une `list` (qui pagine du début) parce que c'est l'inverse d'un
+        /// besoin : personne ne lit une conversation en commençant par la première ligne.
+        /// Les messages déjà dessinés ne bougent pas quand la fenêtre s'élargit.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        page_size: Option<u32>,
     },
-    /// Une étape d'outil dans un fil de messages : son état est un champ.
+    /// Une étape d'outil, lue sur UNE ligne : son état est un champ.
+    ///
+    /// Pour un fil dont les étapes sont des lignes à part. Quand une bulle porte ses étapes
+    /// dans un champ à elle (une liste JSON), c'est [`Brick::Message`] qui les dessine : ce
+    /// vocabulaire-ci n'a pas de « la ligne de la bulle en cours », et une étape ne peut pas
+    /// dire à quelle bulle elle appartient si les deux ne sont pas la même ligne.
     ToolStep {
         entity: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         filter: Option<FilterExpr>,
         field: String,
+    },
+    /// Un avis lu dans une ligne : un ton et un champ.
+    ///
+    /// C'est la brique des choses qu'un hôte annonce sur l'état d'un tour — le motif d'un
+    /// arrêt, une panne, le compte de contexte, une coupure — et qu'il ne peut pas écrire à
+    /// l'avance. Elle lit la première ligne du filtre et annonce son champ.
+    ///
+    /// **Un champ vide n'annonce rien** : la brique ne se dessine pas. C'est la seule façon,
+    /// dans ce vocabulaire, de faire apparaître et disparaître un avis : les états d'une
+    /// brique (`rows`, `empty`, `failed`, `denied`) parlent de la LECTURE, et aucune
+    /// expression de filtre ne dit « si ce champ est vide ». Une lecture en ÉCHEC, elle, se
+    /// dit toujours, en ton d'erreur — un avis muet serait un trou.
+    ///
+    /// `action` pose un bouton dans l'avis : c'est ainsi qu'un bandeau d'arrêt offre
+    /// « Continuer ». L'annonce et le geste viennent de la même ligne et disparaissent
+    /// ensemble ; deux briques séparées ne pourraient pas le garantir, parce qu'un bouton
+    /// ne sait pas encore ne pas se dessiner quand sa ligne est vide.
+    Notice {
+        tone: Tone,
+        entity: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        filter: Option<FilterExpr>,
+        /// Le champ lu : son texte est ce que l'avis annonce.
+        field: String,
+        /// Une action de ce module, posée en bouton dans l'avis.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        action: Option<String>,
+    },
+    /// La carte d'une question que l'agent pose et attend, au milieu du fil.
+    ///
+    /// Une question sans guichet est un silence : l'agent s'arrête, la personne ne sait pas
+    /// qu'il attend, et le tour meurt à la fin de son budget. Cette brique déclare la carte
+    /// qui rend la question visible — son texte, ses choix, la réponse déjà donnée.
+    ///
+    /// Elle lit l'entité que le module nomme, et **c'est l'hôte qui la remplit** : les
+    /// questions en attente ne sont dans aucune table, elles vivent dans le tour en cours.
+    /// L'hôte fournit donc, sous l'entité déclarée ici et dans les champs déclarés ici, une
+    /// ligne par question — `id` porte l'identifiant du guichet, par lequel la réponse
+    /// revient à l'agent. Le module choisit les noms ; l'hôte les lit dans la brique.
+    ///
+    /// Un clic sur un choix émet une intention de réponse que l'hôte remet au guichet.
+    /// Aucune action du module n'est appelée : répondre à l'agent est le geste de la
+    /// personne, pas celui du module.
+    Question {
+        entity: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        filter: Option<FilterExpr>,
+        /// Le champ qui porte la question, en une phrase.
+        text: String,
+        /// Le champ qui porte les réponses possibles : une liste de textes.
+        options: String,
+        /// Le champ qui porte la réponse déjà donnée. Absent = la carte n'en montre pas.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        answer: Option<String>,
     },
     /// Une file d'attente : les éléments à traiter, dans l'ordre de `sort`.
     Queue {
@@ -405,6 +486,8 @@ impl Brick {
             | Brick::Chat { entity, .. }
             | Brick::Message { entity, .. }
             | Brick::ToolStep { entity, .. }
+            | Brick::Question { entity, .. }
+            | Brick::Notice { entity, .. }
             | Brick::Queue { entity, .. }
             | Brick::CodeBlock { entity, .. }
             | Brick::Result { entity, .. }
@@ -1318,6 +1401,12 @@ impl<'a> Checks<'a> {
 
         match b {
             Brick::Button { action, .. } => self.action_ref(&format!("{chemin}.action"), action),
+            // L'avis peut porter un geste (« Continuer ») : il doit exister.
+            Brick::Notice { action, .. } => {
+                if let Some(a) = action {
+                    self.action_ref(&format!("{chemin}.action"), a);
+                }
+            }
             Brick::Field {
                 input,
                 target,
@@ -1418,6 +1507,28 @@ impl<'a> Checks<'a> {
                         &format!("{chemin}.on_click.view"),
                         view,
                     );
+                }
+            }
+            // Un fil se lit par le bas : la fenêtre est un nombre de messages, pas une
+            // page du début. Les bornes sont celles du reste (une fenêtre vide ne montre
+            // rien, une fenêtre géante n'est pas une fenêtre).
+            Brick::Message { page_size, .. } => {
+                if let Some(n) = page_size {
+                    if *n == 0 || *n > crate::query::MAX_LIMIT {
+                        self.push(
+                            "invalid_page_size",
+                            format!("{chemin}.page_size"),
+                            format!(
+                                "a thread window holds 1..={} messages: `{n}` would show {}",
+                                crate::query::MAX_LIMIT,
+                                if *n == 0 {
+                                    "nothing"
+                                } else {
+                                    "everything at once"
+                                }
+                            ),
+                        );
+                    }
                 }
             }
             Brick::Program { args, columns, .. } => {
@@ -1624,9 +1735,29 @@ fn lectures(b: &Brick) -> Vec<&str> {
                 chemins_du_filtre(f, &mut v);
             }
         }
+        Brick::Question {
+            text,
+            options,
+            answer,
+            filter,
+            ..
+        } => {
+            v.push(text);
+            v.push(options);
+            v.extend(answer.as_deref());
+            if let Some(f) = filter {
+                chemins_du_filtre(f, &mut v);
+            }
+        }
         Brick::Button { filter, .. }
         | Brick::Chat { filter, .. }
         | Brick::Message { filter, .. } => {
+            if let Some(f) = filter {
+                chemins_du_filtre(f, &mut v);
+            }
+        }
+        Brick::Notice { field, filter, .. } => {
+            v.push(field);
             if let Some(f) = filter {
                 chemins_du_filtre(f, &mut v);
             }

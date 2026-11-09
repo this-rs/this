@@ -25,11 +25,13 @@ use this_descriptor::views::{
     Tone, ViewDesc,
 };
 use this_descriptor::{FilterExpr, ModuleDescriptor, SortSpec};
+use wasm_bindgen::JsCast;
 
 use crate::design::{self, Tone as DesignTone};
 use crate::model::Kind as FieldKind;
 use crate::views::data::{self, Feed, Reading, Snapshot};
 use crate::views::intent::{FieldValue, Intent, LinkOp, Values};
+use crate::views::markdown;
 use crate::views::placement;
 use crate::views::state::{self, ViewState};
 use crate::views::style::{self, class};
@@ -468,7 +470,40 @@ pub fn render_brick(ctx: Ctx, brick: &Brick) -> AnyView {
             mode,
         } => relation(ctx, entity, filter.as_ref(), link, *mode),
         Brick::Chat { entity, filter } => chat(ctx, entity, filter.as_ref()),
-        Brick::Message { entity, filter } => message(ctx, entity, filter.as_ref()),
+        Brick::Message {
+            entity,
+            filter,
+            markdown,
+            page_size,
+        } => message(ctx, entity, filter.as_ref(), *markdown, *page_size),
+        Brick::Notice {
+            tone,
+            entity,
+            filter,
+            field,
+            action,
+        } => notice(
+            ctx,
+            *tone,
+            entity,
+            filter.as_ref(),
+            field,
+            action.as_deref(),
+        ),
+        Brick::Question {
+            entity,
+            filter,
+            text,
+            options,
+            answer,
+        } => question_card(
+            ctx,
+            entity,
+            filter.as_ref(),
+            text,
+            options,
+            answer.as_deref(),
+        ),
         Brick::ToolStep {
             entity,
             filter,
@@ -1168,6 +1203,28 @@ fn field_kind(
                 .iter()
                 .find(|f| f.name == field)
                 .map(|f| FieldKind::of(&f.ty))
+        })
+        .flatten()
+}
+
+/// The field among `preferred` that the entity declares, or nothing.
+///
+/// Unlike [`display_field`] there is NO fallback: a brick that reads a role, a state or a
+/// journal must not read the content because the module named none of them. A fallback is
+/// right for the thing that must always show something (the text of a bubble); it is wrong
+/// for anything else, where reading the wrong field is worse than reading none.
+fn named_field(
+    module: StoredValue<ModuleDescriptor>,
+    entity: &str,
+    preferred: &[&str],
+) -> Option<String> {
+    module
+        .try_with_value(|module| {
+            let entity = module.entities.iter().find(|e| e.name == entity)?;
+            preferred
+                .iter()
+                .find(|wanted| entity.fields.iter().any(|f| f.name == **wanted))
+                .map(|wanted| (*wanted).to_owned())
         })
         .flatten()
 }
@@ -2000,44 +2057,600 @@ fn chat(ctx: Ctx, entity: &str, filter: Option<&FilterExpr>) -> AnyView {
     .into_any()
 }
 
-/// Une bulle par ligne lue : son auteur et son contenu. Filtrée sur une ligne, c'est UN
-/// message ; filtrée sur la conversation ouverte (`{"$context": "conversation"}`), c'est le
-/// fil, dans l'ordre des lignes. C'est la brique qui permet à un module de redessiner chaque
-/// message — le contenu reste celui de la ligne, la forme est celle du contrat.
-fn message(ctx: Ctx, entity: &str, filter: Option<&FilterExpr>) -> AnyView {
+/// Une bulle par ligne lue : son auteur, son contenu, et les étapes d'outil que la ligne
+/// porte. Filtrée sur une ligne, c'est UN message ; filtrée sur la conversation ouverte
+/// (`{"$context": "conversation"}`), c'est le fil, dans l'ordre des lignes.
+///
+/// Trois décisions y sont prises, et une seule fois pour tous les hôtes :
+///
+/// - **le contenu est du markdown quand le module le dit** (`markdown: true`) ; sinon c'est
+///   du texte, et ce qui est écrit est ce qui se lit ;
+/// - **les étapes d'outil sont lues dans un champ de la ligne** (une liste JSON d'objets) :
+///   `{"outil": "…", "etat": "fait|en cours|refusé|échec", "resume": "…", "ms": 12}`, plus
+///   `{"dit": "…"}` pour une phrase écrite pendant le tour et `{"avis": "…"}` pour un avis.
+///   Une ligne qui n'en a pas n'en dessine pas : rien n'est inventé ;
+/// - **un fil se lit par le bas** : avec `page_size`, la brique ne dessine que les derniers
+///   messages, et un bouton élargit la fenêtre vers le haut sans rien perdre de ce qui est
+///   déjà affiché.
+fn message(
+    ctx: Ctx,
+    entity: &str,
+    filter: Option<&FilterExpr>,
+    markdown: bool,
+    page_size: Option<u32>,
+) -> AnyView {
     let entity = entity.to_owned();
     let filter = filter.cloned();
     let content = display_field(
         ctx.module,
         &entity,
-        &["content", "text", "body", "message", "contenu"],
+        &["contenu", "content", "text", "body", "message"],
     );
-    let author = display_field(ctx.module, &entity, &["role", "author", "sender", "from"]);
+    // Pas de repli pour ceux-ci : une brique qui lit un rôle ne doit pas lire le contenu
+    // parce qu'elle n'a pas trouvé de rôle. `display_field` a un repli, et c'est ce qu'il
+    // faut pour un CONTENU (quelque chose plutôt que rien) ; pas pour un rôle.
+    let author = named_field(
+        ctx.module,
+        &entity,
+        &["auteur", "author", "sender", "from", "nom", "name"],
+    );
+    let role = named_field(ctx.module, &entity, &["role", "kind", "type"]);
+    let state = named_field(ctx.module, &entity, &["etat", "state", "status"]);
+    let steps = named_field(
+        ctx.module,
+        &entity,
+        &["journal", "etapes", "steps", "outils", "tools"],
+    );
+    let window = page_size.map(|size| size as usize).unwrap_or(0);
+    let fenetre = RwSignal::new(window);
+
     let log = move || {
         let snapshot = ctx.data.get();
         match data::read(&snapshot, &entity, filter.as_ref(), &[], 0, None) {
-            Reading::Rows(rows) => rows
-                .rows
-                .into_iter()
-                .map(|row| {
-                    let text = data::display(data::value_of(row, &content));
-                    let who = data::value_of(row, &author).map(|value| data::display(Some(value)));
+            Reading::Rows(rows) => {
+                let total = rows.rows.len();
+                let (hidden, _) = if window == 0 {
+                    (0, total)
+                } else {
+                    thread_window(total, fenetre.get())
+                };
+                let bubbles = rows.rows[hidden..]
+                    .iter()
+                    .map(|row| {
+                        let text = data::display(data::value_of(row, &content));
+                        let who =
+                            author
+                                .as_deref()
+                                .and_then(|field| match data::value_of(row, field) {
+                                    None | Some(Value::Null) => None,
+                                    Some(Value::String(s)) if s.is_empty() => None,
+                                    Some(value) => Some(data::display(Some(value))),
+                                });
+                        let role_value = role
+                            .as_deref()
+                            .map(|field| data::value_of(row, field))
+                            .and_then(|value| value.and_then(Value::as_str).map(str::to_owned))
+                            .unwrap_or_default();
+                        let state_value = state
+                            .as_deref()
+                            .map(|field| data::value_of(row, field))
+                            .and_then(|value| value.and_then(Value::as_str).map(str::to_owned))
+                            .unwrap_or_default();
+                        let entries = steps
+                            .as_deref()
+                            .and_then(|field| data::value_of(row, field))
+                            .map(step_entries)
+                            .unwrap_or_default();
+                        bubble(row_view(
+                            &role_value,
+                            &state_value,
+                            who,
+                            &text,
+                            markdown,
+                            &entries,
+                        ))
+                    })
+                    .collect_view();
+                let older = (hidden > 0).then(|| {
+                    let label = format!("{} · {hidden} {}", text::OLDER, text::OLDER_HIDDEN);
+                    let pas = window.max(1);
                     view! {
-                        <div class=class::MESSAGE>
-                            {who.map(|who| {
-                                view! { <span class=class::MESSAGE_META>{who}</span> }.into_any()
-                            })}
-                            <span>{text}</span>
-                        </div>
+                        <button class=class::OLDER on:click=move |_| {
+                            fenetre.update(|seen| *seen += pas);
+                        }>{label}</button>
                     }
-                    .into_any()
-                })
-                .collect_view()
-                .into_any(),
+                });
+                view! {
+                    <div class=class::CHAT>
+                        {older}
+                        <div class=class::CHAT_LOG>{bubbles}</div>
+                    </div>
+                }
+                .into_any()
+            }
             other => tile_for(ctx, &entity, &other, text::NOTHING),
         }
     };
-    view! { <div class=class::CHAT>{log}</div> }.into_any()
+    view! { {log} }.into_any()
+}
+
+/// Le fil d'une fenêtre : combien de messages restent cachés en haut. Une fenêtre de `0`
+/// (ou plus grande que le fil) ne cache rien.
+///
+/// Pure, et publique, parce que c'est la règle qui compte — élargir la fenêtre ne doit
+/// jamais perdre un message déjà affiché — et qu'une règle se mesure sans DOM.
+pub fn thread_hidden(total: usize, window: usize) -> usize {
+    total.saturating_sub(window)
+}
+
+/// Les deux indices d'une fenêtre de fil : `(cachés, dessinés)`. Le fil se lit par le bas :
+/// les messages dessinés sont les DERNIERS, et la fenêtre ne fait que grandir vers le haut.
+pub fn thread_window(total: usize, window: usize) -> (usize, usize) {
+    let hidden = thread_hidden(total, window);
+    (hidden, total - hidden)
+}
+
+/// Un message prêt à dessiner : ce que la ligne porte, déjà trié.
+struct RowView {
+    role: String,
+    state: String,
+    author: Option<String>,
+    text: String,
+    markdown: bool,
+    entries: Vec<StepEntry>,
+}
+
+fn row_view(
+    role: &str,
+    state: &str,
+    author: Option<String>,
+    text: &str,
+    markdown: bool,
+    entries: &[StepEntry],
+) -> RowView {
+    RowView {
+        role: role.to_owned(),
+        state: state.to_owned(),
+        author,
+        text: text.to_owned(),
+        markdown,
+        entries: entries.to_vec(),
+    }
+}
+
+/// Une entrée du journal d'une bulle : une étape d'outil, une phrase du tour, un avis.
+#[derive(Clone, Debug, PartialEq)]
+pub enum StepEntry {
+    /// Un appel d'outil : son nom, son état, son résumé, sa durée.
+    Tool {
+        name: String,
+        state: String,
+        resume: String,
+        ms: i64,
+    },
+    /// Ce que le modèle a écrit pendant le tour.
+    Said(String),
+    /// Un avis posé par l'hôte pendant le tour.
+    Noted(String),
+}
+
+/// Les entrées d'un champ de journal : une liste d'objets, ou son texte JSON.
+///
+/// Un champ vide, un texte qui n'est pas du JSON, un objet sans nom d'outil : rien n'est
+/// dessiné. Le rendu d'un journal n'est pas l'endroit où deviner.
+pub fn step_entries(value: &Value) -> Vec<StepEntry> {
+    let parsed;
+    let list = match value {
+        Value::Array(items) => items,
+        Value::String(raw) if raw.trim_start().starts_with('[') => {
+            match serde_json::from_str::<Value>(raw) {
+                Ok(Value::Array(items)) => {
+                    parsed = items;
+                    &parsed
+                }
+                _ => return Vec::new(),
+            }
+        }
+        _ => return Vec::new(),
+    };
+    list.iter()
+        .filter_map(|event| {
+            // Deux écritures pour la même chose, et les deux se lisent : la forme `genre` de
+            // l'Atelier (`{"genre":"dit","texte":"…"}`) et la forme courte (`{"dit":"…"}`),
+            // qui est celle qu'un module écrira naturellement.
+            match event.get("genre").and_then(Value::as_str) {
+                Some("dit") => {
+                    return field_text(event, &["texte", "text", "dit"]).map(StepEntry::Said);
+                }
+                Some("avis") => {
+                    return field_text(event, &["texte", "text", "avis"]).map(StepEntry::Noted);
+                }
+                _ => {}
+            }
+            if let Some(said) = field_text(event, &["dit"]) {
+                return Some(StepEntry::Said(said));
+            }
+            if let Some(note) = field_text(event, &["avis"]) {
+                return Some(StepEntry::Noted(note));
+            }
+            let name = field_text(event, &["outil", "tool", "name", "nom"])?;
+            let state = match (
+                event.get("en_cours"),
+                event.get("refus"),
+                event.get("echec"),
+            ) {
+                (Some(Value::Bool(true)), _, _) => "en cours".to_owned(),
+                (_, Some(Value::Bool(true)), _) => "refusé".to_owned(),
+                (_, _, Some(Value::Bool(true))) => "échec".to_owned(),
+                _ => {
+                    field_text(event, &["etat", "state", "status"]).unwrap_or_else(|| "fait".into())
+                }
+            };
+            Some(StepEntry::Tool {
+                name,
+                state,
+                resume: field_text(event, &["resume", "result", "resultat", "detail"])
+                    .unwrap_or_default(),
+                ms: event.get("ms").and_then(Value::as_i64).unwrap_or(0),
+            })
+        })
+        .collect()
+}
+
+/// Le premier de `names` dont la valeur est une chaîne non vide.
+fn field_text(value: &Value, names: &[&str]) -> Option<String> {
+    names.iter().find_map(|name| {
+        value
+            .get(*name)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+            .map(str::to_owned)
+    })
+}
+
+/// The classes of one bubble, from its role and its state. A module message is neither the
+/// person nor the agent; a message still being written is not a finished answer; a refused
+/// one says so.
+fn bubble_class(role: &str, state: &str) -> String {
+    let mut classes = vec![class::MESSAGE];
+    match role {
+        "utilisateur" | "user" | "personne" => classes.push(class::MESSAGE_USER),
+        "module" => classes.push(class::MESSAGE_MODULE),
+        _ => {}
+    }
+    if state == "en_cours" || state == "running" || state == "live" {
+        classes.push(class::MESSAGE_LIVE);
+    }
+    classes.join(" ")
+}
+
+/// One bubble: author, prose, tool steps.
+fn bubble(row: RowView) -> AnyView {
+    let RowView {
+        role,
+        state,
+        author,
+        text,
+        markdown: as_markdown,
+        entries,
+    } = row;
+    let class_name = bubble_class(&role, &state);
+    let prose = (!text.trim().is_empty()).then(|| {
+        if as_markdown {
+            view! { <div class=class::MESSAGE_BODY inner_html=markdown::markdown(&text)></div> }
+                .into_any()
+        } else {
+            view! { <p class=class::MESSAGE_BODY>{text.clone()}</p> }.into_any()
+        }
+    });
+    let steps = (!entries.is_empty()).then(|| {
+        let items = entries
+            .into_iter()
+            .map(|entry| match entry {
+                StepEntry::Said(said) => view! {
+                    <li class=class::STEP>
+                        <span class=class::MESSAGE_BODY inner_html=markdown::markdown(&said)></span>
+                    </li>
+                }
+                .into_any(),
+                StepEntry::Noted(note) => view! {
+                    <li class=class::STEP role="status">{note}</li>
+                }
+                .into_any(),
+                StepEntry::Tool {
+                    name,
+                    state,
+                    resume,
+                    ms,
+                } => {
+                    let tone = step_tone(&state);
+                    let time = (ms > 0).then(|| {
+                        view! {
+                            <span class=class::STEP_TIME>{format!("{ms} ms")}</span>
+                        }
+                    });
+                    let detail = (!resume.is_empty()).then(|| {
+                        let short: String = resume.chars().take(400).collect();
+                        view! { <span class=class::STEP_RESUME>{short}</span> }
+                    });
+                    view! {
+                        <li class=class::STEP>
+                            {design::badge(state, tone)}
+                            <span class=class::STEP_NAME>{name}</span>
+                            {time}
+                            {detail}
+                        </li>
+                    }
+                    .into_any()
+                }
+            })
+            .collect_view();
+        view! { <ol class=class::STEPS>{items}</ol> }.into_any()
+    });
+    view! {
+        <div class=class_name>
+            {author.map(|author| {
+                view! { <span class=class::MESSAGE_META>{author}</span> }.into_any()
+            })}
+            {prose}
+            {steps}
+        </div>
+    }
+    .into_any()
+}
+
+/// Ce qu'un avis annonce, ou `None` quand il n'a rien à dire.
+///
+/// C'est LA règle de la brique `notice`, isolée pour être mesurée sans DOM : une valeur
+/// absente, nulle ou blanche n'annonce rien. Le contrat n'a pas de brique conditionnelle, et
+/// aucun filtre ne sait dire « si ce champ est vide » ; c'est donc ici, et une seule fois,
+/// que se décide ce qui apparaît et ce qui disparaît.
+pub fn annonce(value: Option<&Value>) -> Option<String> {
+    match value {
+        None | Some(Value::Null) => None,
+        Some(Value::String(text)) if text.trim().is_empty() => None,
+        Some(Value::String(text)) => Some(text.trim().to_owned()),
+        Some(other) => Some(data::display(Some(other))),
+    }
+}
+
+/// Un avis lu dans une ligne : une bannière dont le texte est un champ.
+///
+/// Le point qui compte : **un champ vide n'annonce rien**. Les états d'une brique parlent de
+/// la LECTURE (chargement, vide, échec, refus) et aucun filtre ne dit « si ce champ est
+/// vide » ; sans cette règle, un bandeau d'arrêt resterait affiché après la reprise, et un
+/// bouton « Continuer » resterait sous un fil qui n'attend plus rien. Une lecture en échec,
+/// elle, se dit toujours.
+fn notice(
+    ctx: Ctx,
+    tone: Tone,
+    entity: &str,
+    filter: Option<&FilterExpr>,
+    field: &str,
+    action: Option<&str>,
+) -> AnyView {
+    let entity = entity.to_owned();
+    let filter = filter.cloned();
+    let field = field.to_owned();
+    let action = action.map(str::to_owned);
+    (move || {
+        let snapshot = ctx.data.get();
+        let reading = data::read(&snapshot, &entity, filter.as_ref(), &[], 0, None);
+        let (tone, message) = match &reading {
+            Reading::Rows(rows) => {
+                let Some(row) = rows.rows.first().copied() else {
+                    return ().into_any();
+                };
+                let Some(text) = annonce(data::value_of(row, &field)) else {
+                    return ().into_any();
+                };
+                (tone, text)
+            }
+            // Rien à annoncer tant que rien n'est arrivé : un avis n'est pas une tuile.
+            Reading::Loading | Reading::Empty => return ().into_any(),
+            Reading::Failed(reason) => (Tone::Error, (*reason).to_owned()),
+            Reading::Denied(reason) => (Tone::Error, (*reason).to_owned()),
+            Reading::Unknown => {
+                return fallback(&format!("avis : {entity} ({})", text::UNKNOWN_ENTITY)).into_any();
+            }
+        };
+        let id = match &reading {
+            Reading::Rows(rows) => rows
+                .rows
+                .first()
+                .and_then(|row| data::value_of(row, "id"))
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+            _ => None,
+        };
+        let (class_name, role) = match tone {
+            Tone::Error => (class::TONE_ERROR, "alert"),
+            Tone::Warning => (class::TONE_WARNING, "status"),
+            Tone::Success => (class::TONE_SUCCESS, "status"),
+            Tone::Info => (class::TONE_INFO, "status"),
+        };
+        let gesture = action.clone().map(|name| {
+            let label = placement::humanise(&name);
+            let intent = action_intent(ctx, &name, Some(&entity), id.clone(), Vec::new());
+            view! {
+                <button class=class::BUTTON title=name.clone()
+                    on:click=move |_| ctx.on_intent.run(intent.clone())>{label}</button>
+            }
+            .into_any()
+        });
+        view! {
+            <div class=format!("{} {}", class::BANNER, class_name) role=role>
+                <span>{message}</span>
+                {gesture}
+            </div>
+        }
+        .into_any()
+    })
+    .into_any()
+}
+
+/// La carte d'une question posée par l'agent : son texte, ses choix, la réponse déjà donnée.
+///
+/// Les lignes viennent de l'hôte (le tour en cours les tient, aucune table ne les range) ;
+/// la carte vient du module. Un clic — ou une réponse tapée — émet une intention de réponse
+/// que l'hôte remet au guichet de l'agent. Aucune action du module n'est appelée.
+fn question_card(
+    ctx: Ctx,
+    entity: &str,
+    filter: Option<&FilterExpr>,
+    text_field: &str,
+    options_field: &str,
+    answer_field: Option<&str>,
+) -> AnyView {
+    let entity = entity.to_owned();
+    let filter = filter.cloned();
+    let text_field = text_field.to_owned();
+    let options_field = options_field.to_owned();
+    let answer_field = answer_field.map(str::to_owned);
+    (move || {
+        let snapshot = ctx.data.get();
+        match data::read(&snapshot, &entity, filter.as_ref(), &[], 0, None) {
+            Reading::Rows(rows) => {
+                let cards = rows
+                    .rows
+                    .iter()
+                    .map(|row| {
+                        let id = data::value_of(row, "id")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .to_owned();
+                        let question = data::value_of(row, &text_field)
+                            .map(|value| data::display(Some(value)))
+                            .unwrap_or_default();
+                        let answer = answer_field
+                            .as_deref()
+                            .and_then(|field| data::value_of(row, field))
+                            .and_then(Value::as_str)
+                            .map(str::trim)
+                            .filter(|text| !text.is_empty())
+                            .map(str::to_owned);
+                        let choices: Vec<String> = data::value_of(row, &options_field)
+                            .map(choice_list)
+                            .unwrap_or_default();
+                        let entity_click = entity.clone();
+                        let already = answer.is_some();
+                        let buttons = choices.into_iter().map(|choice| {
+                            let (entity_click, id_click) =
+                                (entity_click.clone(), id.clone());
+                            let label = choice.clone();
+                            view! {
+                                <button class=class::QUESTION_CHOICE
+                                    disabled=already
+                                    on:click=move |_| {
+                                        ctx.on_intent.run(Intent::Answer {
+                                            entity: entity_click.clone(),
+                                            id: id_click.clone(),
+                                            choice: choice.clone(),
+                                        });
+                                    }>{label}</button>
+                            }
+                            .into_any()
+                        });
+                        let free = answer.is_none().then(|| {
+                            let field_id = format!("vw-answer-{}", sanitise(&id));
+                            let entity_key =
+                                (entity.clone(), id.clone(), field_id.clone());
+                            let entity_send =
+                                (entity.clone(), id.clone(), field_id.clone());
+                            view! {
+                                <div class=class::QUESTION_FREE>
+                                    <input class=class::INPUT
+                                        id=field_id.clone()
+                                        type="text"
+                                        aria-label=text::ANSWER_FREE
+                                        placeholder=text::ANSWER_FREE
+                                        on:keydown=move |ev: web_sys::KeyboardEvent| {
+                                            if ev.key() != "Enter" {
+                                                return;
+                                            }
+                                            if let Some(value) = input_value(&entity_key.2) {
+                                                ctx.on_intent.run(Intent::Answer {
+                                                    entity: entity_key.0.clone(),
+                                                    id: entity_key.1.clone(),
+                                                    choice: value,
+                                                });
+                                            }
+                                        } />
+                                    <button class=class::BUTTON aria-label=text::ANSWER
+                                        title=text::ANSWER
+                                        on:click=move |_| {
+                                            if let Some(value) = input_value(&entity_send.2) {
+                                                ctx.on_intent.run(Intent::Answer {
+                                                    entity: entity_send.0.clone(),
+                                                    id: entity_send.1.clone(),
+                                                    choice: value,
+                                                });
+                                            }
+                                        }>{text::ANSWER}</button>
+                                </div>
+                            }
+                            .into_any()
+                        });
+                        let answered = answer.map(|answer| {
+                            view! {
+                                <p class=class::QUESTION_ANSWER>{format!("{} : {answer}", text::ANSWERED)}</p>
+                            }
+                            .into_any()
+                        });
+                        view! {
+                            <div class=class::QUESTION role="group" aria-label=text::QUESTION>
+                                <p class=class::QUESTION_TEXT>{question}</p>
+                                <div class=class::QUESTION_CHOICES>{buttons.collect_view()}</div>
+                                {answered}
+                                {free}
+                            </div>
+                        }
+                        .into_any()
+                    })
+                    .collect_view();
+                view! { <div class=class::CHAT>{cards}</div> }.into_any()
+            }
+            Reading::Empty | Reading::Loading => ().into_any(),
+            other => tile_for(ctx, &entity, &other, text::NOTHING),
+        }
+    })
+    .into_any()
+}
+
+/// Les réponses possibles d'une ligne : une liste de textes, ou son texte JSON. Un texte
+/// qui n'est pas une liste se lit comme UN choix — il ne disparaît pas.
+fn choice_list(value: &Value) -> Vec<String> {
+    match value {
+        Value::Array(items) => items
+            .iter()
+            .filter_map(|item| match item {
+                Value::String(text) => Some(text.clone()),
+                other => other.as_str().map(str::to_owned),
+            })
+            .collect(),
+        Value::String(raw) => match serde_json::from_str::<Value>(raw) {
+            Ok(Value::Array(items)) => choice_list(&Value::Array(items)),
+            _ if !raw.trim().is_empty() => vec![raw.clone()],
+            _ => Vec::new(),
+        },
+        _ => Vec::new(),
+    }
+}
+
+/// Un identifiant qui peut servir d'`id` HTML.
+fn sanitise(raw: &str) -> String {
+    raw.chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect()
+}
+
+/// La valeur du champ `id`, lue dans le document de l'hôte.
+fn input_value(id: &str) -> Option<String> {
+    let element = web_sys::window()?.document()?.get_element_by_id(id)?;
+    let element: web_sys::HtmlInputElement = element.dyn_into().ok()?;
+    let value = element.value();
+    (!value.trim().is_empty()).then(|| value.trim().to_owned())
 }
 
 /// The tone that reads a tool step's state without the colour carrying the meaning alone.
@@ -2620,5 +3233,255 @@ mod tests_action_row {
         assert!(action_needs_row(Some(&delete)));
         assert!(!action_needs_row(Some(&create)));
         assert!(!action_needs_row(None));
+    }
+}
+
+#[cfg(test)]
+mod tests_fil {
+    //! Le corps du fil, mesuré sans DOM : ce qu'un journal d'outil devient, ce qu'une fenêtre
+    //! de fil montre, ce qu'un avis annonce, ce qu'une carte de question propose.
+    use super::*;
+    use serde_json::json;
+
+    // ---- les étapes d'outil d'une bulle --------------------------------------------------
+
+    /// MESURÉ : le journal d'une bulle de l'Atelier est une LISTE d'objets rangée dans le
+    /// champ `journal` d'une ligne. La brique `tool_step` lit UNE ligne d'une entité, donc
+    /// elle ne peut pas atteindre l'étape d'une bulle : c'est la bulle qui les dessine.
+    #[test]
+    fn un_journal_de_bulle_devient_des_etapes_lisibles() {
+        let journal = json!([
+            { "genre": "dit", "texte": "je regarde" },
+            { "id": "t1", "genre": "outil", "outil": "lire", "ms": 42,
+              "refus": false, "echec": false, "en_cours": false, "resume": "3 lignes" },
+            { "id": "t2", "genre": "outil", "outil": "ecrire", "ms": 7,
+              "refus": true, "echec": false, "en_cours": false, "resume": "refusé" },
+            { "id": "t3", "genre": "outil", "outil": "compiler", "ms": 0,
+              "refus": false, "echec": true, "en_cours": false, "resume": "erreur" },
+            { "id": "t4", "genre": "outil", "outil": "attendre", "ms": 0,
+              "refus": false, "echec": false, "en_cours": true, "resume": "" },
+            { "genre": "avis", "texte": "contexte coupé" }
+        ]);
+        let entrees = step_entries(&journal);
+        assert_eq!(entrees.len(), 6, "{entrees:?}");
+        assert_eq!(entrees[0], StepEntry::Said("je regarde".into()));
+        assert_eq!(
+            entrees[1],
+            StepEntry::Tool {
+                name: "lire".into(),
+                state: "fait".into(),
+                resume: "3 lignes".into(),
+                ms: 42
+            }
+        );
+        // Les trois états qui comptent se lisent sans le texte : refusé, échoué, en cours.
+        for (entree, attendu) in [
+            (&entrees[2], "refusé"),
+            (&entrees[3], "échec"),
+            (&entrees[4], "en cours"),
+        ] {
+            let StepEntry::Tool { state, .. } = entree else {
+                panic!("une étape d'outil attendue, pas {entree:?}");
+            };
+            assert_eq!(state, attendu);
+        }
+        assert_eq!(entrees[5], StepEntry::Noted("contexte coupé".into()));
+    }
+
+    #[test]
+    fn un_journal_range_en_texte_json_se_lit_comme_un_journal() {
+        let brut = json!(r#"[{"outil":"lire","etat":"fait","resume":"ok","ms":3}]"#);
+        assert_eq!(
+            step_entries(&brut),
+            vec![StepEntry::Tool {
+                name: "lire".into(),
+                state: "fait".into(),
+                resume: "ok".into(),
+                ms: 3
+            }]
+        );
+    }
+
+    /// Une bulle qui n'a pas de journal n'en dessine pas, et un champ qui n'est pas du JSON
+    /// ne devient pas une étape inventée : le rendu d'un journal n'est pas un endroit où
+    /// deviner.
+    #[test]
+    fn un_journal_absent_ou_illisible_ne_dessine_rien() {
+        for vide in [
+            json!(""),
+            json!("pas du json"),
+            json!("{}"),
+            json!([]),
+            json!(null),
+        ] {
+            assert!(
+                step_entries(&vide).is_empty(),
+                "{vide} a produit des étapes"
+            );
+        }
+        // Un objet sans nom d'outil n'est pas une étape.
+        assert!(step_entries(&json!([{"etat": "fait"}])).is_empty());
+    }
+
+    // ---- la fenêtre du fil ---------------------------------------------------------------
+
+    /// La règle qui compte : un fil se lit par le BAS, et élargir la fenêtre ne perd rien.
+    #[test]
+    fn une_fenetre_de_fil_montre_les_derniers_et_grandit_vers_le_haut() {
+        // 5 messages, fenêtre de 2 : les 2 derniers, 3 cachés en haut.
+        assert_eq!(thread_window(5, 2), (3, 2));
+        // On élargit de 2 : les 4 derniers, dont les 2 déjà affichés. Rien n'est perdu.
+        assert_eq!(thread_window(5, 4), (1, 4));
+        // Plus large que le fil : tout, rien de caché.
+        assert_eq!(thread_window(5, 40), (0, 5));
+        assert_eq!(thread_hidden(5, 40), 0);
+        // Une fenêtre nulle ou un fil vide ne cachent rien.
+        assert_eq!(thread_hidden(0, 40), 0);
+        assert_eq!(thread_window(5, 0), (5, 0));
+    }
+
+    /// Mesure de la propriété qui compte, sur toutes les tailles : la fenêtre élargie
+    /// CONTIENT la fenêtre étroite, et la fin du fil est toujours visible.
+    #[test]
+    fn elargir_la_fenetre_garde_ce_qui_etait_deja_affiche() {
+        for total in 0..12usize {
+            for pas in 1..=4u32 {
+                let (mut premier, _) = thread_window(total, pas as usize);
+                let mut vu = Vec::new();
+                for fenetre in 1..=6u32 {
+                    let (debut, _) = thread_window(total, (pas * fenetre) as usize);
+                    assert!(
+                        debut <= premier,
+                        "élargir a caché un message (total {total}, pas {pas})"
+                    );
+                    premier = debut;
+                    vu.push(debut);
+                }
+                let fin = thread_window(total, u32::MAX as usize);
+                assert_eq!(fin, (0, total), "une fenêtre immense montre tout");
+            }
+        }
+    }
+
+    // ---- ce qu'un avis annonce ------------------------------------------------------------
+
+    #[test]
+    fn un_avis_ne_se_dessine_que_s_il_a_quelque_chose_a_dire() {
+        assert_eq!(annonce(None), None);
+        assert_eq!(annonce(Some(&json!(null))), None);
+        assert_eq!(annonce(Some(&json!(""))), None);
+        assert_eq!(annonce(Some(&json!("   "))), None);
+        assert_eq!(
+            annonce(Some(&json!("Le travail est plus long que prévu."))),
+            Some("Le travail est plus long que prévu.".into())
+        );
+        // Un champ qui n'est pas du texte s'annonce quand même : 3 tentatives, c'est un fait.
+        assert_eq!(annonce(Some(&json!(3))), Some("3".into()));
+    }
+
+    // ---- une carte de question ------------------------------------------------------------
+
+    #[test]
+    fn les_choix_d_une_question_se_lisent_en_liste_ou_en_texte() {
+        assert_eq!(
+            choice_list(&json!(["Budget", "Sport"])),
+            vec!["Budget".to_string(), "Sport".to_string()]
+        );
+        assert_eq!(
+            choice_list(&json!(r#"["Budget","Sport"]"#)),
+            vec!["Budget".to_string(), "Sport".to_string()]
+        );
+        // Un choix unique écrit comme un texte ne disparaît pas : il vaut UN choix.
+        assert_eq!(choice_list(&json!("Budget")), vec!["Budget".to_string()]);
+        assert!(choice_list(&json!("")).is_empty());
+        assert!(choice_list(&json!(null)).is_empty());
+    }
+
+    /// La carte de question d'un fil : son texte, ses choix, la réponse déjà donnée.
+    #[test]
+    fn une_carte_de_question_se_lit_dans_les_champs_que_le_module_nomme() {
+        let module = ModuleDescriptor::from_json(
+            &json!({
+                "name": "atelier", "version": "1.0.0",
+                "entities": [{
+                    "name": "demande", "plural": "demandes",
+                    "fields": [
+                        {"name": "texte", "ty": "string"},
+                        {"name": "choix", "ty": {"list": "string"}},
+                        {"name": "reponse", "ty": "string", "optional": true}
+                    ]
+                }],
+                "views": []
+            })
+            .to_string(),
+        )
+        .expect("le module se lit");
+        let brique = Brick::Question {
+            entity: "demande".into(),
+            filter: None,
+            text: "texte".into(),
+            options: "choix".into(),
+            answer: Some("reponse".into()),
+        };
+        let mut module = module;
+        module.normalize();
+        brique.entity().map(|entite| assert_eq!(entite, "demande"));
+
+        let snapshot = Snapshot::new().with(
+            "demande",
+            Feed::Ready(vec![json!({
+                "id": "question-1", "texte": "Sur quoi ?", "choix": ["Budget", "Sport"],
+                "reponse": ""
+            })]),
+        );
+        let lecture = crate::views::state::brick_reading(&brique, &snapshot)
+            .expect("une carte de question lit une entité");
+        let rows = lecture.rows().expect("une question posée");
+        assert_eq!(rows.rows.len(), 1);
+        assert_eq!(
+            data::display(data::value_of(rows.rows[0], "texte")),
+            "Sur quoi ?"
+        );
+        assert!(annonce(data::value_of(rows.rows[0], "reponse")).is_none());
+        assert_eq!(
+            choice_list(data::value_of(rows.rows[0], "choix").expect("les choix")),
+            vec!["Budget".to_string(), "Sport".to_string()]
+        );
+        assert_eq!(
+            data::value_of(rows.rows[0], "id").and_then(Value::as_str),
+            Some("question-1"),
+            "l'identifiant du guichet est ce que la réponse doit nommer"
+        );
+    }
+
+    /// Le contrat refuse une carte de question dont les champs n'existent pas : une vue
+    /// fausse se dit à la validation, pas à l'écran.
+    #[test]
+    fn une_carte_de_question_sur_un_champ_inconnu_est_refusee() {
+        let module = ModuleDescriptor::from_json(
+            &json!({
+                "name": "atelier", "version": "1.0.0",
+                "entities": [{"name": "demande", "plural": "demandes",
+                    "fields": [{"name": "texte", "ty": "string"}]}],
+                "views": [{ "name": "fil", "surface": "chat", "root": {"type": "leaf",
+                    "brick": {"type": "question", "entity": "demande", "text": "texte",
+                              "options": "choix"}}}]
+            })
+            .to_string(),
+        )
+        .expect("le module se lit");
+        let refus = module
+            .check(
+                &this_descriptor::CustomRegistry::default(),
+                this_descriptor::CheckProfile::Compiled,
+            )
+            .expect_err("un champ lu qui n'existe pas est refusé");
+        let codes: Vec<&str> = refus.iter().map(|i| i.code.0.as_str()).collect();
+        assert!(
+            codes
+                .iter()
+                .any(|code| code.ends_with("view_field_unknown")),
+            "{codes:?}"
+        );
     }
 }

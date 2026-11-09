@@ -78,6 +78,22 @@ pub mod class {
     pub const CHAT_LOG: &str = "vw-chat-log";
     pub const MESSAGE: &str = "vw-message";
     pub const MESSAGE_META: &str = "vw-message-meta";
+    pub const MESSAGE_BODY: &str = "vw-message-body";
+    pub const MESSAGE_USER: &str = "vw-message-user";
+    pub const MESSAGE_MODULE: &str = "vw-message-module";
+    pub const MESSAGE_LIVE: &str = "vw-message-live";
+    pub const STEPS: &str = "vw-steps";
+    pub const STEP: &str = "vw-step";
+    pub const STEP_NAME: &str = "vw-step-name";
+    pub const STEP_TIME: &str = "vw-step-time";
+    pub const STEP_RESUME: &str = "vw-step-resume";
+    pub const OLDER: &str = "vw-older";
+    pub const QUESTION: &str = "vw-question";
+    pub const QUESTION_TEXT: &str = "vw-question-text";
+    pub const QUESTION_CHOICES: &str = "vw-question-choices";
+    pub const QUESTION_CHOICE: &str = "vw-question-choice";
+    pub const QUESTION_ANSWER: &str = "vw-question-answer";
+    pub const QUESTION_FREE: &str = "vw-question-free";
     pub const COMPOSER: &str = "vw-composer";
     pub const COMPOSER_ACTIONS: &str = "vw-composer-actions";
     pub const COMPOSER_SLOT: &str = "vw-composer-slot";
@@ -184,6 +200,22 @@ pub const ALL: &[&str] = &[
     class::CHAT_LOG,
     class::MESSAGE,
     class::MESSAGE_META,
+    class::MESSAGE_BODY,
+    class::MESSAGE_USER,
+    class::MESSAGE_MODULE,
+    class::MESSAGE_LIVE,
+    class::STEPS,
+    class::STEP,
+    class::STEP_NAME,
+    class::STEP_TIME,
+    class::STEP_RESUME,
+    class::OLDER,
+    class::QUESTION,
+    class::QUESTION_TEXT,
+    class::QUESTION_CHOICES,
+    class::QUESTION_CHOICE,
+    class::QUESTION_ANSWER,
+    class::QUESTION_FREE,
     class::COMPOSER,
     class::COMPOSER_ACTIONS,
     class::COMPOSER_SLOT,
@@ -379,6 +411,41 @@ pub const CSS: &str = r#"
 .vw-message { display: flex; flex-direction: column; gap: 2px; padding: 8px 12px; border-radius: 12px;
   background: var(--vw-hover, rgba(0,0,0,.04)); }
 .vw-message-meta { font-size: 12px; opacity: .7; }
+.vw-message-body { min-width: 0; overflow-wrap: anywhere; }
+.vw-message-body > :first-child { margin-top: 0; }
+.vw-message-body > :last-child { margin-bottom: 0; }
+.vw-message-body p { margin: 0 0 8px; }
+.vw-message-body pre { margin: 8px 0; padding: 12px; border-radius: 10px; overflow-x: auto;
+  background: var(--vw-code-bg, rgba(0,0,0,.05)); font: 13px/1.5 ui-monospace, monospace; }
+.vw-message-body code { font: 13px/1.5 ui-monospace, monospace; }
+.vw-message-body table { border-collapse: collapse; margin: 8px 0; display: block; overflow-x: auto; }
+.vw-message-body th, .vw-message-body td { border: 1px solid var(--vw-line, rgba(0,0,0,.12));
+  padding: 4px 8px; text-align: left; }
+.vw-message-body ul, .vw-message-body ol { margin: 8px 0; padding-left: 20px; }
+.vw-message-user { background: var(--vw-user-bg, rgba(37,99,235,.10)); }
+.vw-message-module { background: var(--vw-module-bg, rgba(14,116,144,.10)); }
+.vw-message-live { opacity: .92; }
+.vw-steps { display: flex; flex-direction: column; gap: 4px; margin: 6px 0 0; padding: 0;
+  list-style: none; }
+.vw-step { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px; min-width: 0;
+  font-size: 13px; opacity: .85; }
+.vw-step-name { font-weight: 600; }
+.vw-step-time { font-variant-numeric: tabular-nums; opacity: .7; }
+.vw-step-resume { flex-basis: 100%; min-width: 0; overflow-wrap: anywhere; opacity: .8; }
+.vw-older { min-height: 44px; width: 100%; border-radius: 10px;
+  border: 1px dashed var(--vw-line, rgba(0,0,0,.16)); background: none; color: inherit;
+  font: inherit; cursor: pointer; }
+.vw-question { display: flex; flex-direction: column; gap: 8px; padding: 12px;
+  border-radius: 12px; border: 1px solid var(--vw-line, rgba(0,0,0,.12));
+  background: var(--vw-card, #fff); }
+.vw-question-text { margin: 0; font-weight: 600; }
+.vw-question-choices { display: flex; flex-wrap: wrap; gap: 8px; }
+.vw-question-choice { min-height: 44px; padding: 0 14px; border-radius: 10px;
+  border: 1px solid var(--vw-line, rgba(0,0,0,.16)); background: var(--vw-card, #fff);
+  color: inherit; font: inherit; cursor: pointer; }
+.vw-question-choice[disabled] { opacity: .5; cursor: not-allowed; }
+.vw-question-answer { margin: 0; font-size: 13px; opacity: .8; }
+.vw-question-free { display: flex; gap: 8px; align-items: center; }
 .vw-composer { display: flex; gap: 8px; align-items: flex-end; }
 .vw-composer-actions { display: flex; flex-wrap: wrap; gap: 8px; }
 .vw-composer-slot { flex: 1; min-width: 0; min-height: 44px; }
