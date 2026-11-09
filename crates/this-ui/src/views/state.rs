@@ -152,7 +152,9 @@ pub fn has_writable_control(node: &Node) -> bool {
         | Node::Row { children }
         | Node::Drawer { children, .. }
         | Node::Modal { children, .. } => children.iter().any(has_writable_control),
-        Node::Tabs { tabs } => tabs.iter().any(|t| t.children.iter().any(has_writable_control)),
+        Node::Tabs { tabs } => tabs
+            .iter()
+            .any(|t| t.children.iter().any(has_writable_control)),
     }
 }
 
