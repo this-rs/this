@@ -1402,11 +1402,10 @@ impl<'a> Checks<'a> {
         match b {
             Brick::Button { action, .. } => self.action_ref(&format!("{chemin}.action"), action),
             // L'avis peut porter un geste (« Continuer ») : il doit exister.
-            Brick::Notice { action, .. } => {
-                if let Some(a) = action {
-                    self.action_ref(&format!("{chemin}.action"), a);
-                }
-            }
+            Brick::Notice {
+                action: Some(a), ..
+            } => self.action_ref(&format!("{chemin}.action"), a),
+            Brick::Notice { action: None, .. } => {}
             Brick::Field {
                 input,
                 target,
@@ -1513,22 +1512,22 @@ impl<'a> Checks<'a> {
             // page du début. Les bornes sont celles du reste (une fenêtre vide ne montre
             // rien, une fenêtre géante n'est pas une fenêtre).
             Brick::Message { page_size, .. } => {
-                if let Some(n) = page_size {
-                    if *n == 0 || *n > crate::query::MAX_LIMIT {
-                        self.push(
-                            "invalid_page_size",
-                            format!("{chemin}.page_size"),
-                            format!(
-                                "a thread window holds 1..={} messages: `{n}` would show {}",
-                                crate::query::MAX_LIMIT,
-                                if *n == 0 {
-                                    "nothing"
-                                } else {
-                                    "everything at once"
-                                }
-                            ),
-                        );
-                    }
+                if let Some(n) = page_size
+                    && (*n == 0 || *n > crate::query::MAX_LIMIT)
+                {
+                    self.push(
+                        "invalid_page_size",
+                        format!("{chemin}.page_size"),
+                        format!(
+                            "a thread window holds 1..={} messages: `{n}` would show {}",
+                            crate::query::MAX_LIMIT,
+                            if *n == 0 {
+                                "nothing"
+                            } else {
+                                "everything at once"
+                            }
+                        ),
+                    );
                 }
             }
             Brick::Program { args, columns, .. } => {
