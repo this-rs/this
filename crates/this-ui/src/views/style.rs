@@ -79,6 +79,8 @@ pub mod class {
     pub const MESSAGE: &str = "vw-message";
     pub const MESSAGE_META: &str = "vw-message-meta";
     pub const COMPOSER: &str = "vw-composer";
+    pub const COMPOSER_ACTIONS: &str = "vw-composer-actions";
+    pub const COMPOSER_SLOT: &str = "vw-composer-slot";
     pub const TOOLSTEP: &str = "vw-toolstep";
     pub const QUEUE: &str = "vw-queue";
     pub const QUEUE_ITEM: &str = "vw-queue-item";
@@ -178,6 +180,8 @@ pub const ALL: &[&str] = &[
     class::MESSAGE,
     class::MESSAGE_META,
     class::COMPOSER,
+    class::COMPOSER_ACTIONS,
+    class::COMPOSER_SLOT,
     class::TOOLSTEP,
     class::QUEUE,
     class::QUEUE_ITEM,
@@ -366,6 +370,8 @@ pub const CSS: &str = r#"
   background: var(--vw-hover, rgba(0,0,0,.04)); }
 .vw-message-meta { font-size: 12px; opacity: .7; }
 .vw-composer { display: flex; gap: 8px; align-items: flex-end; }
+.vw-composer-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.vw-composer-slot { flex: 1; min-width: 0; min-height: 44px; }
 .vw-toolstep { display: flex; align-items: center; gap: 8px; min-height: 32px; }
 
 .vw-queue { display: flex; flex-direction: column; gap: 4px; margin: 0; padding: 0; list-style: none; }

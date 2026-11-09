@@ -24,7 +24,8 @@
 //! - `detail` : une brique `card` (les champs d'une ligne) ;
 //! - `form` : une brique `form` (champs énumérés, ordre, libellé, lecture seule) ;
 //! - `metrics` : une brique `metrics` (compte, ou somme d'un champ) ;
-//! - `chat` : une brique `chat` (fil de messages et saisie).
+//! - `chat` : une brique `chat` (fil de messages et saisie) ; la brique `composer` déclare ce
+//!   que la saisie du fil offre (invite, pièces jointes, actions du module).
 //!
 //! Par emplacement : `header` n'accepte que les petites briques (`text`, `banner`, `indicator`,
 //! `metrics`, `button`) ; `sidebar`, `main`, `panel` acceptent tout.
@@ -332,6 +333,26 @@ pub enum Brick {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         field: Option<String>,
     },
+    /// Le composeur du fil : ce que la zone de saisie OFFRE, déclaré par le module.
+    ///
+    /// Ne lit aucune ligne. Le module dit le texte d'invite, s'il accepte des pièces jointes
+    /// et quelles de SES actions se posent autour du champ. L'hôte garde ce qui ne peut pas
+    /// être déclaratif : le champ réel et son clavier, l'envoi, l'arrêt d'un run, le
+    /// glisser-déposer et la file des pièces. Sans cette brique, la saisie était le seul
+    /// morceau du fil qu'aucun module ne pouvait toucher.
+    Composer {
+        /// Le texte d'invite du champ. Absent = celui de l'hôte ; vide = refusé.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        placeholder: Option<String>,
+        /// Des actions déclarées par ce module, posées en boutons autour du champ, dans
+        /// l'ordre. Une action qui exige une ligne (modifier, supprimer, opération sur une
+        /// entité) ou une décision d'appareil est refusée : le composeur n'en a pas.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        actions: Vec<String>,
+        /// Le composeur accepte-t-il des pièces jointes (bouton `+`, dépôt, collage) ?
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        attachments: bool,
+    },
     /// Un programme : arguments typés, exécution fermée, colonnes calculées.
     Program {
         entity: String,
@@ -350,7 +371,7 @@ impl Brick {
     /// capacité, indicateur de connexion sans entité).
     pub fn entity(&self) -> Option<&str> {
         match self {
-            Brick::Banner { .. } | Brick::CapabilityRequest { .. } => None,
+            Brick::Banner { .. } | Brick::CapabilityRequest { .. } | Brick::Composer { .. } => None,
             Brick::Indicator { entity, .. } => entity.as_deref(),
             Brick::Text { entity, .. }
             | Brick::Button { entity, .. }
@@ -924,6 +945,11 @@ impl<'a> Checks<'a> {
         }
         match b {
             Brick::Banner { .. } => {}
+            Brick::Composer {
+                placeholder,
+                actions,
+                ..
+            } => self.composer(chemin, placeholder.as_deref(), actions),
             Brick::CapabilityRequest { capability, action } => {
                 let p = format!("{chemin}.action");
                 self.action_ref(&p, action);
@@ -1028,6 +1054,54 @@ impl<'a> Checks<'a> {
                 }
             }
             _ => self.data_brick(chemin, b),
+        }
+    }
+
+    /// Le composeur : une invite non vide, des actions déclarées, chacune une fois, et
+    /// aucune qui exige ce qu'un composeur n'a pas (une ligne, une question d'appareil).
+    fn composer(&mut self, chemin: &str, placeholder: Option<&str>, actions: &[String]) {
+        if placeholder.is_some_and(|p| p.trim().is_empty()) {
+            self.push(
+                "composer_placeholder_empty",
+                format!("{chemin}.placeholder"),
+                "an empty placeholder leaves the field blank; write a short invitation, or \
+                 remove `placeholder` to keep the host's",
+            );
+        }
+        let mut vues = BTreeSet::new();
+        for (j, a) in actions.iter().enumerate() {
+            let p = format!("{chemin}.actions[{j}]");
+            if !vues.insert(a.as_str()) {
+                self.push(
+                    "duplicate_composer_action",
+                    &p,
+                    format!("`{a}` is listed twice; list each composer action once"),
+                );
+                continue;
+            }
+            self.action_ref(&p, a);
+            let refus = match self.actions.get(a.as_str()) {
+                Some(Action::Update { .. }) => Some("modifies a row"),
+                Some(Action::Delete { .. }) => Some("deletes a row"),
+                Some(Action::Invoke {
+                    entity: Some(_), ..
+                }) => Some("invokes an operation on a row"),
+                Some(Action::DeviceCapability { .. }) => {
+                    Some("decides a device question nobody asked here")
+                }
+                _ => None,
+            };
+            if let Some(pourquoi) = refus {
+                self.push(
+                    "composer_action_refused",
+                    &p,
+                    format!(
+                        "`{a}` {pourquoi}, and a composer has no row or question; use a create, \
+                         navigate, agent_tool or module-level invoke action, or put `{a}` on a \
+                         `button` of a view that reads the row"
+                    ),
+                );
+            }
         }
     }
 
@@ -1361,7 +1435,8 @@ fn lectures(b: &Brick) -> Vec<&str> {
         Brick::Banner { .. }
         | Brick::Indicator { .. }
         | Brick::Relation { .. }
-        | Brick::CapabilityRequest { .. } => {}
+        | Brick::CapabilityRequest { .. }
+        | Brick::Composer { .. } => {}
     }
     v
 }
@@ -2050,6 +2125,88 @@ mod tests {
             r#"{"type":"field","entity":"invoice","field":"titre","input":"text","target":"conversation"}"#,
         ));
         assert_refused(&m, "field_input_invalid");
+    }
+
+    /// Le composeur du fil : ce qu'il offre se déclare, et chaque refus a son motif.
+    fn module_a_composeur(brique: &str) -> ModuleDescriptor {
+        let mut m = module();
+        for a in [
+            r#"{"kind":"agent_tool","name":"resumer","op":"send_message","text":"Résume le fil."}"#,
+            r#"{"kind":"create","name":"noter","entity":"invoice","fields":["titre"]}"#,
+            r#"{"kind":"update","name":"corriger","entity":"invoice","fields":["titre"]}"#,
+            r#"{"kind":"device_capability","name":"micro","capability":"microphone","grant":"allow"}"#,
+        ] {
+            m.actions.push(serde_json::from_str(a).unwrap());
+        }
+        m.views.push(ViewDesc {
+            surface: Surface::Chat,
+            ..leaf_view("saisie", brique)
+        });
+        m
+    }
+
+    #[test]
+    fn a_valid_composer_passes_and_round_trips() {
+        let json = r#"{"type":"composer","placeholder":"Écris…","actions":["resumer","noter"],"attachments":true}"#;
+        assert_eq!(codes(&module_a_composeur(json)), Vec::<String>::new());
+        assert_stable::<Brick>(json);
+        // Le minimum : rien de déclaré, l'hôte garde ses défauts — et pas de pièces jointes.
+        let nu = brick(r#"{"type":"composer"}"#);
+        assert_eq!(
+            nu,
+            Brick::Composer {
+                placeholder: None,
+                actions: vec![],
+                attachments: false
+            }
+        );
+        assert_eq!(nu.entity(), None, "a composer reads no row");
+        assert_eq!(
+            serde_json::to_string(&nu).unwrap(),
+            r#"{"type":"composer"}"#
+        );
+        assert_eq!(
+            codes(&module_a_composeur(r#"{"type":"composer"}"#)),
+            Vec::<String>::new()
+        );
+    }
+
+    #[test]
+    fn a_composer_refuses_an_unknown_action_and_names_the_candidates() {
+        let m = module_a_composeur(r#"{"type":"composer","actions":["resumr"]}"#);
+        assert_refused(&m, "view_action_unknown");
+        let issues = issues(&m);
+        let (_, chemin, msg) = &issues[0];
+        assert_eq!(chemin, "views[0].root.brick.actions[0]");
+        assert!(msg.contains("Did you mean `resumer`?"), "{msg}");
+    }
+
+    #[test]
+    fn a_composer_refuses_an_empty_or_blank_placeholder() {
+        for p in ["", "   "] {
+            let json = format!(r#"{{"type":"composer","placeholder":"{p}"}}"#);
+            assert_refused(&module_a_composeur(&json), "composer_placeholder_empty");
+        }
+    }
+
+    #[test]
+    fn a_composer_refuses_a_duplicate_and_a_row_or_device_action() {
+        assert_refused(
+            &module_a_composeur(r#"{"type":"composer","actions":["resumer","resumer"]}"#),
+            "duplicate_composer_action",
+        );
+        for a in ["corriger", "micro"] {
+            let json = format!(r#"{{"type":"composer","actions":["{a}"]}}"#);
+            assert_refused(&module_a_composeur(&json), "composer_action_refused");
+        }
+    }
+
+    #[test]
+    fn a_composer_does_not_fit_a_header_and_refuses_unknown_keys() {
+        let mut m = module_a_composeur(r#"{"type":"composer"}"#);
+        m.views[0].surface = Surface::Header;
+        assert_refused(&m, "surface_brick_refused");
+        assert!(serde_json::from_str::<Brick>(r#"{"type":"composer","send":true}"#).is_err());
     }
 
     #[test]

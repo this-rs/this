@@ -703,6 +703,38 @@ fn bricks() -> Vec<VariantSchema> {
             false,
         ),
         brick_v(
+            "composer",
+            "The thread's composer: what the input zone OFFERS, declared by the module. Reads no \
+             row. The host keeps the real field and its keyboard, sending, stopping a run, \
+             drag-and-drop and the attachment queue; the module says the invitation, whether \
+             attachments are accepted, and which of its actions sit around the field.",
+            vec![
+                opt(
+                    "placeholder",
+                    "string",
+                    "The field's invitation. Absent = the host's; empty or blank = refused.",
+                ),
+                opt(
+                    "actions",
+                    "list<string>",
+                    "Actions of this module, drawn as buttons around the field, in order; each \
+                     once. Not an update, a delete, an invoke on an entity or a \
+                     device_capability: a composer has no row and no pending question.",
+                )
+                .refers("action"),
+                opt(
+                    "attachments",
+                    "bool",
+                    "Whether the composer accepts attachments (the `+` button, drop, paste).",
+                )
+                .default_value(json!(false)),
+            ],
+            json!({"type": "composer"}),
+            json!({"type": "composer", "placeholder": "Écris ta question…",
+                   "actions": ["say", "new"], "attachments": true}),
+            false,
+        ),
+        brick_v(
             "metrics",
             "Numbers: without `field`, the row count; with it, the sum of the field.",
             vec![
@@ -1337,6 +1369,21 @@ fn rules() -> Vec<RuleSchema> {
             "Use text, banner, indicator, metrics or button, or move the view to main/sidebar/panel.",
         ),
         rule(
+            "composer_placeholder_empty",
+            "A composer declares an empty or blank `placeholder`.",
+            "Write a short invitation, or remove `placeholder` to keep the host's.",
+        ),
+        rule(
+            "duplicate_composer_action",
+            "A composer lists an action twice.",
+            "List each composer action once.",
+        ),
+        rule(
+            "composer_action_refused",
+            "A composer names an action that needs a row (update, delete, invoke on an entity) or decides a device question (device_capability).",
+            "Use a create, navigate, agent_tool or module-level invoke action; put row actions on a `button` of a view that reads the row.",
+        ),
+        rule(
             "invalid_page_size",
             "A list `page_size` is 0 or above 100.",
             "Use 1..=100, or omit it for no pagination.",
@@ -1416,6 +1463,12 @@ fn coverage() -> Vec<CoverageEntry> {
             "A fold-away section under a label.",
         ),
         cover("button", &["brick:button"], "Triggers an action."),
+        cover(
+            "composer",
+            &["brick:composer"],
+            "What the thread's input offers: invitation, attachments, the module's actions \
+             around the field. The field, sending and stopping stay the host's.",
+        ),
         cover("text", &["brick:text"], "One field of the first row."),
         cover("banner", &["brick:banner"], "Closed tone, key or text."),
         cover(
@@ -2307,6 +2360,18 @@ mod tests {
                 with_header(r#"{"type":"chat","entity":"conversation"}"#),
             ),
             (
+                "composer_placeholder_empty",
+                with_view(leaf(r#"{"type":"composer","placeholder":"   "}"#)),
+            ),
+            (
+                "duplicate_composer_action",
+                with_view(leaf(r#"{"type":"composer","actions":["say","say"]}"#)),
+            ),
+            (
+                "composer_action_refused",
+                with_view(leaf(r#"{"type":"composer","actions":["edit"]}"#)),
+            ),
+            (
                 "invalid_page_size",
                 with_view(leaf(
                     r#"{"type":"list","entity":"invoice","label":"titre","page_size":101}"#,
@@ -2390,6 +2455,7 @@ mod tests {
             "program_",
             "surface_",
             "tabs_",
+            "composer_",
         ];
         let mut seen = 0;
         for lit in body.split('"').skip(1).step_by(2) {

@@ -52,7 +52,10 @@ pub mod text;
 pub use data::{Feed, Feeds, Reading, Rows, Snapshot};
 pub use intent::{FieldValue, Intent, LinkOp, Values};
 pub use placement::{Frame, Hidden, Portfolio, SURFACES};
-pub use render::{Ctx, render_brick, render_node, render_view};
+pub use render::{
+    ComposerSpec, Ctx, composer, composer_actions, composer_intent, render_brick, render_node,
+    render_view, without_composer,
+};
 pub use state::ViewState;
 pub use style::CSS;
 

@@ -357,7 +357,8 @@ partout, variantes d'énumération) : un type inconnu est refusé à la déséri
 
 - **Conteneurs** (`Node`, tag `type`) : `stack`, `row`, `tabs`, `drawer`, `modal`, `leaf` (porte une brique).
 - **Briques** (`Brick`, tag `type`) : `text`, `button`, `banner`, `indicator`, `list`, `card`, `form`, `field`,
-  `relation`, `chat`, `tool_step`, `queue`, `code_block`, `result`, `capability_request`, `metrics`, `program`.
+  `relation`, `chat`, `tool_step`, `queue`, `code_block`, `result`, `capability_request`, `metrics`, `program`,
+  `composer` (ce que la saisie du fil offre : `placeholder?`, `actions[]`, `attachments` ; ne lit aucune ligne).
   Emplacement `header` : seulement `text`, `banner`, `indicator`, `metrics`, `button`.
 - **Actions** (`Action`, tag `kind`) : `create`, `update`, `delete`, `navigate`, `agent_tool`, `device_capability`.
 - **Champs éditables** : `field.input` ∈ `text` (défaut), `multiline`, `number`, `file`, `reference` (exige
@@ -366,7 +367,7 @@ partout, variantes d'énumération) : un type inconnu est refusé à la déséri
 
 **Audit de couverture** (mesuré par `coverage_points_at_types_that_exist_and_the_audited_needs_are_listed`) :
 liste → `list` · détail → `card` · formulaire → `form` · chat → `chat` · indicateurs → `metrics`,
-`indicator(counter)` · onglets → `tabs` · feuille → `modal` · tiroir → `drawer` · bouton → `button` · texte →
+`indicator(counter)` · onglets → `tabs` · feuille → `modal` · tiroir → `drawer` · bouton → `button` · composeur → `composer` · texte →
 `text` · bannière → `banner` · indicateur → `indicator` · champs texte/nombre/bascule/fichier/référence →
 `field` selon `input` · relation → `relation` · étape d'outil → `tool_step` · file d'attente → `queue` · bloc de
 code → `code_block` · résultat → `result` · demande de capacité → `capability_request` + `device_capability` ·

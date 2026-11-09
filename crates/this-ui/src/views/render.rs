@@ -382,6 +382,10 @@ pub fn render_brick(ctx: Ctx, brick: &Brick) -> AnyView {
         Brick::CapabilityRequest { capability, action } => {
             capability_request(ctx, *capability, action)
         }
+        Brick::Composer { .. } => match ComposerSpec::of(brick) {
+            Some(spec) => composer(ctx, &spec, composer_slot(&spec)),
+            None => fallback(&describe_brick(brick)),
+        },
         Brick::Text {
             entity,
             filter,
@@ -757,6 +761,17 @@ fn action_intent(
                 .cloned()
         })
         .flatten();
+    intent_of(declared, name, entity, id, values)
+}
+
+/// The intent a declared action means: pure, so it is measured without a reactive owner.
+fn intent_of(
+    declared: Option<Action>,
+    name: &str,
+    entity: Option<&str>,
+    id: Option<String>,
+    values: Values,
+) -> Intent {
     #[allow(unreachable_patterns)]
     match declared {
         Some(Action::Create {
@@ -831,6 +846,159 @@ fn action_intent(
             values,
         },
     }
+}
+
+// ---------------------------------------------------------------------------------------
+// the composer
+// ---------------------------------------------------------------------------------------
+
+/// What a declared `composer` brick offers, read once. The host builds its REAL field from
+/// it — this crate draws no keyboard, sends nothing and stops nothing.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ComposerSpec {
+    /// The field's invitation; `None` = the host's.
+    pub placeholder: Option<String>,
+    /// The module's actions drawn around the field, in order.
+    pub actions: Vec<String>,
+    /// Whether the composer accepts attachments (button, drop, paste).
+    pub attachments: bool,
+}
+
+impl ComposerSpec {
+    /// The spec of a `composer` brick; `None` for any other brick.
+    pub fn of(brick: &Brick) -> Option<Self> {
+        match brick {
+            Brick::Composer {
+                placeholder,
+                actions,
+                attachments,
+            } => Some(Self {
+                placeholder: placeholder.clone(),
+                actions: actions.clone(),
+                attachments: *attachments,
+            }),
+            _ => None,
+        }
+    }
+
+    /// The first composer of a tree, in reading order (tabs included); `None` = the tree
+    /// declares none, and the host keeps its own.
+    pub fn find(node: &Node) -> Option<Self> {
+        match node {
+            Node::Leaf { brick } => Self::of(brick),
+            Node::Stack { children }
+            | Node::Row { children }
+            | Node::Drawer { children, .. }
+            | Node::Modal { children, .. } => children.iter().find_map(Self::find),
+            Node::Tabs { tabs } => tabs
+                .iter()
+                .flat_map(|tab| tab.children.iter())
+                .find_map(Self::find),
+        }
+    }
+}
+
+/// The tree without its composer leaves, for a host that draws the composer in its own
+/// place (under the thread) and the rest of the view in the thread. `None` = nothing is
+/// left to draw: the view WAS its composer.
+pub fn without_composer(node: &Node) -> Option<Node> {
+    let keep =
+        |children: &[Node]| -> Vec<Node> { children.iter().filter_map(without_composer).collect() };
+    let kept = match node {
+        Node::Leaf { brick } if matches!(brick.as_ref(), Brick::Composer { .. }) => return None,
+        Node::Leaf { .. } => return Some(node.clone()),
+        Node::Stack { children } => Node::Stack {
+            children: keep(children),
+        },
+        Node::Row { children } => Node::Row {
+            children: keep(children),
+        },
+        Node::Drawer { label, children } => Node::Drawer {
+            label: label.clone(),
+            children: keep(children),
+        },
+        Node::Modal { title, children } => Node::Modal {
+            title: title.clone(),
+            children: keep(children),
+        },
+        Node::Tabs { tabs } => Node::Tabs {
+            tabs: tabs
+                .iter()
+                .map(|tab| Tab {
+                    label: tab.label.clone(),
+                    children: keep(&tab.children),
+                })
+                .collect(),
+        },
+    };
+    let empty = match &kept {
+        Node::Stack { children }
+        | Node::Row { children }
+        | Node::Drawer { children, .. }
+        | Node::Modal { children, .. } => children.is_empty(),
+        Node::Tabs { tabs } => tabs.iter().all(|tab| tab.children.is_empty()),
+        Node::Leaf { .. } => false,
+    };
+    (!empty).then_some(kept)
+}
+
+/// The intent a composer action emits: the same as a `button`'s, with no row (a composer
+/// reads none — the contract refuses the actions that would need one).
+pub fn composer_intent(module: &ModuleDescriptor, action: &str) -> Intent {
+    let declared = module.actions.iter().find(|a| a.name() == action).cloned();
+    intent_of(declared, action, None, None, Vec::new())
+}
+
+/// The module's actions, as buttons for the host to place around its field. Each click
+/// emits the intent the action means — the host runs it by the same path as any view.
+pub fn composer_actions(ctx: Ctx, actions: &[String]) -> AnyView {
+    let buttons = actions
+        .iter()
+        .map(|action| {
+            let name = action.clone();
+            let label = placement::humanise(action);
+            view! {
+                <button class=class::BUTTON type="button" title=name.clone() data-action=name.clone()
+                    on:click=move |_| {
+                        let intent = ctx
+                            .module
+                            .try_with_value(|module| composer_intent(module, &name));
+                        if let Some(intent) = intent {
+                            ctx.on_intent.run(intent);
+                        }
+                    }>
+                    {label}
+                </button>
+            }
+        })
+        .collect_view();
+    view! { <div class=class::COMPOSER_ACTIONS>{buttons}</div> }.into_any()
+}
+
+/// The composer zone: the host's `field`, and the module's actions beside it. The zone says
+/// what was declared in `data-*` so the host's style can follow it.
+pub fn composer(ctx: Ctx, spec: &ComposerSpec, field: AnyView) -> AnyView {
+    let actions = (!spec.actions.is_empty()).then(|| composer_actions(ctx, &spec.actions));
+    view! {
+        <div class=class::COMPOSER data-attachments=spec.attachments.to_string()>
+            {field}
+            {actions}
+        </div>
+    }
+    .into_any()
+}
+
+/// What `render_brick` puts where the field goes: an empty slot the host fills, carrying the
+/// declared invitation. Never a fake field — a textarea that sends nothing would lie.
+fn composer_slot(spec: &ComposerSpec) -> AnyView {
+    let placeholder = spec
+        .placeholder
+        .clone()
+        .unwrap_or_else(|| text::COMPOSER.to_owned());
+    view! {
+        <div class=class::COMPOSER_SLOT data-placeholder=placeholder.clone() aria-label=placeholder></div>
+    }
+    .into_any()
 }
 
 fn indicator(
@@ -2029,6 +2197,98 @@ mod tests {
             look,
             root: Node::Stack { children: vec![] },
         }
+    }
+
+    fn composer_module() -> ModuleDescriptor {
+        ModuleDescriptor::from_json(
+            &json!({
+                "name": "atelier", "version": "1.0.0",
+                "entities": [{"name": "note", "fields": [{"name": "titre", "ty": "string"}]}],
+                "actions": [
+                    {"kind": "agent_tool", "name": "resumer", "op": "send_message", "text": "Résume."},
+                    {"kind": "create", "name": "noter", "entity": "note", "fields": ["titre"]},
+                    {"kind": "agent_tool", "name": "stop", "op": "stop_run"}
+                ],
+                "views": [{"name": "saisie", "surface": "chat", "root": {"type": "stack", "children": [
+                    {"type": "leaf", "brick": {"type": "text", "entity": "note", "field": "titre"}},
+                    {"type": "leaf", "brick": {"type": "composer", "placeholder": "Écris…",
+                        "actions": ["resumer", "noter"], "attachments": true}}
+                ]}}]
+            })
+            .to_string(),
+        )
+        .expect("module")
+    }
+
+    #[test]
+    fn a_composer_is_found_in_its_tree_and_read_as_a_spec() {
+        let m = composer_module();
+        let spec = ComposerSpec::find(&m.views[0].root).expect("a composer is declared");
+        assert_eq!(
+            spec,
+            ComposerSpec {
+                placeholder: Some("Écris…".into()),
+                actions: vec!["resumer".into(), "noter".into()],
+                attachments: true,
+            }
+        );
+        let other = Node::Stack { children: vec![] };
+        assert_eq!(
+            ComposerSpec::find(&other),
+            None,
+            "no composer, the host keeps its own"
+        );
+    }
+
+    #[test]
+    fn a_tree_without_its_composer_keeps_the_rest_and_a_bare_composer_leaves_nothing() {
+        let m = composer_module();
+        let rest = without_composer(&m.views[0].root).expect("a text is left");
+        let Node::Stack { children } = rest else {
+            panic!("still a stack")
+        };
+        assert_eq!(children.len(), 1);
+        let bare = Node::Leaf {
+            brick: Box::new(Brick::Composer {
+                placeholder: None,
+                actions: vec![],
+                attachments: false,
+            }),
+        };
+        assert_eq!(without_composer(&bare), None);
+        let only = Node::Stack {
+            children: vec![bare],
+        };
+        assert_eq!(
+            without_composer(&only),
+            None,
+            "an emptied container draws nothing"
+        );
+    }
+
+    #[test]
+    fn a_composer_action_emits_the_intent_a_button_would_without_a_row() {
+        let m = composer_module();
+        assert_eq!(
+            composer_intent(&m, "resumer"),
+            Intent::Tool {
+                action: "resumer".into(),
+                op: this_descriptor::views::AgentOp::SendMessage,
+                entity: None,
+                text: Some("Résume.".into()),
+            }
+        );
+        assert!(matches!(
+            composer_intent(&m, "noter"),
+            Intent::Create { ref entity, .. } if entity == "note"
+        ));
+        assert!(matches!(
+            composer_intent(&m, "stop"),
+            Intent::Tool {
+                op: this_descriptor::views::AgentOp::StopRun,
+                ..
+            }
+        ));
     }
 
     #[test]
