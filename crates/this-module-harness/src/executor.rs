@@ -20,7 +20,7 @@ pub struct Outcome {
     pub effects: Vec<String>,
 }
 
-#[derive(Debug, thiserror::Error)]
+#[derive(Clone, Debug, thiserror::Error)]
 pub enum ExecutorError {
     #[error("module wasm invalide : {0}")]
     Module(String),
