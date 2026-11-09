@@ -210,6 +210,11 @@ jobs:
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
+        with:
+          # Un test de cette suite compile un module en wasm32 pour vérifier ses exports
+          # (`render` présent seulement si le module nomme une fonction de rendu). Sans
+          # la cible, rustc répond « can't find crate for std » et le job tombe.
+          targets: wasm32-unknown-unknown
 
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@cargo-llvm-cov
