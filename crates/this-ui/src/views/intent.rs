@@ -9,7 +9,7 @@
 //! (running a program, sending a chat message, adding a link): it then emits a named intent
 //! that the host must answer itself.
 
-use this_descriptor::views::{AgentOp, DeviceCapability, Grant};
+use this_descriptor::views::{AgentOp, DeviceCapability, Grant, HostSurface};
 
 /// A value read from a control, on its way to the host.
 #[derive(Clone, Debug, PartialEq)]
@@ -141,6 +141,12 @@ pub enum Intent {
     RequestAccess { entity: String },
     /// The person dismissed a modal.
     Dismiss { view: String },
+    /// Une surface que l'hôte garde : le registre des modules, le choix du modèle, l'écran
+    /// de réglages. Le module l'OFFRE (un bouton de son menu) ; l'hôte seul sait l'ouvrir.
+    Host {
+        action: String,
+        surface: HostSurface,
+    },
     /// Une opération nommée du module (`operations` du descripteur), ou une action que
     /// cette surface n'a pas su classer.
     ///
@@ -179,6 +185,7 @@ impl Intent {
             Intent::Navigate { .. }
             | Intent::Capability { .. }
             | Intent::Secret { .. }
+            | Intent::Host { .. }
             | Intent::Dismiss { .. } => None,
         }
     }
@@ -192,6 +199,7 @@ impl Intent {
             | Intent::Tool { action, .. }
             | Intent::Capability { action, .. }
             | Intent::Secret { action, .. }
+            | Intent::Host { action, .. }
             | Intent::Invoke { action, .. } => Some(action),
             Intent::Navigate { action, .. } => action.as_deref(),
             _ => None,
@@ -217,6 +225,7 @@ impl Intent {
             Intent::Reload { .. } => "reload",
             Intent::RequestAccess { .. } => "request_access",
             Intent::Dismiss { .. } => "dismiss",
+            Intent::Host { .. } => "host",
             Intent::Invoke { .. } => "invoke",
         }
     }
