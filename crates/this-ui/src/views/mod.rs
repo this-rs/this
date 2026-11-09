@@ -51,7 +51,7 @@ pub mod style;
 pub mod text;
 
 pub use data::{Feed, Feeds, Reading, Rows, Snapshot};
-pub use intent::{FieldValue, Intent, LinkOp, Values};
+pub use intent::{FieldValue, Intent, LinkOp, SecretValue, Values};
 pub use placement::{Frame, Hidden, Portfolio, SURFACES};
 pub use render::{
     ComposerSpec, Ctx, StepEntry, annonce, composer, composer_actions, composer_intent,

@@ -244,14 +244,15 @@ fn every_brick_of_the_contract_deserialises() {
            "run":"manual","columns":[{"name":"total","source":{"op":"sum","field":"amount"}}]}"#,
         r#"{"type":"composer","placeholder":"Écris…","actions":["ask"],"attachments":true}"#,
         r#"{"type":"settings","sections":[{"title":"Moteur","items":[{"label":"Providers","action":"go"}]}]}"#,
+        r#"{"type":"secret","name":"provider-api-key"}"#,
     ];
     let parsed: Vec<Brick> = bricks
         .iter()
         .map(|json| serde_json::from_str::<Brick>(json).expect("the brick parses"))
         .collect();
-    assert_eq!(parsed.len(), 19);
-    // Four bricks read no row: a banner, a device request, an indicator of connection and
-    // the composer, and the settings.
+    assert_eq!(parsed.len(), 20);
+    // Six bricks read no row: a banner, a device request, an indicator of connection, the
+    // composer, the settings and the secret input.
     let with_entity = parsed
         .iter()
         .filter(|brick| brick.entity().is_some())
@@ -404,4 +405,64 @@ fn a_chat_thread_is_one_message_brick_on_the_open_conversation() {
     // No open conversation: the brick is empty, not the union of every conversation.
     let closed = Snapshot::new().with("message", Feed::Ready(rows.clone()));
     assert_eq!(brick_reading(brick, &closed), Some(Reading::Empty));
+}
+
+/// The test that matters: a module cannot observe the value of a secret, on three channels —
+/// the tree the module declares (and the host renders), the `Debug` of the view and of the
+/// intent, and the content of any intent that reaches a module.
+#[test]
+fn a_module_cannot_observe_a_secret_value() {
+    use crate::views::intent::{Intent, SecretValue};
+
+    let secret = "hunter2-super-secret";
+
+    // 1. The tree: the brick carries the NAME only; it has no field for a value, and a key
+    //    that tries to smuggle one is refused (deny_unknown_fields).
+    let brick: Brick = serde_json::from_str(r#"{"type":"secret","name":"provider-api-key"}"#)
+        .expect("the secret input parses");
+    let tree = serde_json::to_string(&brick).expect("serialises");
+    assert_eq!(tree, r#"{"type":"secret","name":"provider-api-key"}"#);
+    assert!(
+        serde_json::from_str::<Brick>(&format!(
+            r#"{{"type":"secret","name":"k","value":"{secret}"}}"#
+        ))
+        .is_err(),
+        "a secret brick has no place for a value"
+    );
+
+    // 2. Debug of the view and of the intent.
+    let view = ViewDesc {
+        name: "providers".into(),
+        surface: Surface::Main,
+        title: None,
+        replaces: None,
+        look: None,
+        root: Node::Leaf {
+            brick: Box::new(brick),
+        },
+    };
+    assert!(!format!("{view:?}").contains(secret));
+    let entry = Intent::SecretEntry {
+        name: "provider-api-key".into(),
+        value: SecretValue(secret.to_owned()),
+    };
+    assert!(!format!("{entry:?}").contains(secret));
+    assert!(!format!("{:?}", SecretValue(secret.into())).contains(secret));
+
+    // 3. What reaches a module: the typed secret is not an intent a module receives, and the
+    //    intents that are carry no trace of it.
+    assert!(!entry.reaches_module());
+    let delivered = Intent::Invoke {
+        action: "save".into(),
+        operation: "save".into(),
+        entity: Some("provider".into()),
+        id: Some("p1".into()),
+        values: vec![],
+    };
+    assert!(delivered.reaches_module());
+    assert!(!format!("{delivered:?}").contains(secret));
+    // Only the host's vault path reads the value.
+    if let Intent::SecretEntry { value, .. } = &entry {
+        assert_eq!(value.expose(), secret);
+    }
 }

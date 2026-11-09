@@ -249,6 +249,16 @@ pub enum Brick {
         /// Ce qui se passe quand on clique une ligne. Absent = rien.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         on_click: Option<Click>,
+        /// Des actions de ce module, posées en boutons DANS la rangée, chacune exécutée
+        /// avec l'identifiant de la ligne. Un clic sur l'un de ces boutons n'ouvre pas la
+        /// ligne : `on_click` ne se déclenche pas en même temps.
+        ///
+        /// C'est le chaînon qui manquait à [`Click`] : un bouton qui VISE une ligne doit
+        /// dire LAQUELLE, et une action de ligne produit une intention qui porte l'`id` de
+        /// la ligne et le nom de l'action. Seules les actions qui ont besoin d'une ligne y
+        /// ont leur place (modifier, supprimer, opération sur l'entité).
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        row_actions: Vec<String>,
     },
     /// Une fiche : plusieurs champs d'une même ligne (le genre `detail`).
     Card {
@@ -453,6 +463,28 @@ pub enum Brick {
     /// section ni le libellé d'une action. Un secret n'y a jamais de valeur : la ligne ne
     /// fait que demander à l'hôte de le recueillir (`request_secret`).
     Settings { sections: Vec<SettingsSection> },
+    /// Une saisie de secret : la personne tape, la valeur va directement au coffre de
+    /// l'hôte.
+    ///
+    /// L'arbre ne porte QUE le nom du secret (et de quoi l'afficher) : jamais une valeur.
+    /// La valeur tapée ne traverse aucune intention de module, aucun `Debug`, aucun journal
+    /// — elle n'existe que sur le chemin qui va du champ masqué au coffre de l'hôte.
+    ///
+    /// C'est le pendant **saisie** de [`Action::RequestSecret`] : l'action demande à l'hôte
+    /// de recueillir un secret, la brique est le champ où la personne le tape. Une action
+    /// porte un nom de secret fixé à l'avance ; un formulaire de réglages a besoin d'un
+    /// champ libre, et ce champ doit rester hors de portée du module — d'où une brique à
+    /// part, sans entité et sans action.
+    Secret {
+        /// Le nom du secret, tel que le coffre de l'hôte le connaît.
+        name: String,
+        /// Le libellé affiché. Absent = le nom, humanisé par l'hôte.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        label: Option<String>,
+        /// Une aide affichée sous le champ.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        hint: Option<String>,
+    },
     /// Un programme : arguments typés, exécution fermée, colonnes calculées.
     Program {
         entity: String,
@@ -474,7 +506,8 @@ impl Brick {
             Brick::Banner { .. }
             | Brick::CapabilityRequest { .. }
             | Brick::Composer { .. }
-            | Brick::Settings { .. } => None,
+            | Brick::Settings { .. }
+            | Brick::Secret { .. } => None,
             Brick::Indicator { entity, .. } => entity.as_deref(),
             Brick::Text { entity, .. }
             | Brick::Button { entity, .. }
@@ -1338,6 +1371,29 @@ impl<'a> Checks<'a> {
         }
         match b {
             Brick::Banner { .. } => {}
+            // La saisie de secret ne lit aucune entité et ne référence aucune action : elle
+            // ne porte qu'un NOM, vérifié ici comme celui d'une action `request_secret`.
+            // Le refus sur `header` tombe plus haut (une barre fine n'a pas de champ).
+            Brick::Secret { name, .. } => {
+                if name.is_empty() {
+                    self.push(
+                        "secret_name_empty",
+                        format!("{chemin}.name"),
+                        "a secret input must name the secret it writes",
+                    );
+                } else if !name
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
+                {
+                    self.push(
+                        "secret_name_invalid",
+                        format!("{chemin}.name"),
+                        format!(
+                            "`{name}` is not a secret name: use letters, digits, `_`, `-` or `.`, no space"
+                        ),
+                    );
+                }
+            }
             Brick::Settings { sections } => self.settings(chemin, sections),
             Brick::Composer {
                 placeholder,
@@ -1593,6 +1649,7 @@ impl<'a> Checks<'a> {
             Brick::List {
                 on_click,
                 page_size,
+                row_actions,
                 ..
             } => {
                 if *page_size == Some(0) {
@@ -1618,6 +1675,44 @@ impl<'a> Checks<'a> {
                         &format!("{chemin}.on_click.view"),
                         view,
                     );
+                }
+                let mut vus = BTreeSet::new();
+                for (j, a) in row_actions.iter().enumerate() {
+                    let p = format!("{chemin}.row_actions[{j}]");
+                    if !vus.insert(a.as_str()) {
+                        self.push(
+                            "duplicate_row_action",
+                            &p,
+                            format!("`{a}` is listed twice; list each row action once"),
+                        );
+                        continue;
+                    }
+                    self.action_ref(&p, a);
+                    let refus = match self.actions.get(a.as_str()) {
+                        Some(Action::Create { .. }) => {
+                            Some("creates a row from values nobody typed")
+                        }
+                        Some(Action::Navigate { .. }) => Some("opens a view"),
+                        Some(Action::RequestSecret { .. }) => Some("asks the host for a secret"),
+                        Some(Action::AgentTool { .. }) => Some("talks to the agent"),
+                        Some(Action::DeviceCapability { .. }) => {
+                            Some("decides a device question nobody asked here")
+                        }
+                        Some(Action::Host { .. }) => Some("opens a host surface"),
+                        Some(Action::Invoke { entity: None, .. }) => {
+                            Some("runs a module-level operation")
+                        }
+                        _ => None,
+                    };
+                    if let Some(pourquoi) = refus {
+                        self.push(
+                            "row_action_refused",
+                            &p,
+                            format!(
+                                "`{a}` {pourquoi}, and a row action must aim at the row; use an update, delete or entity invoke action"
+                            ),
+                        );
+                    }
                 }
             }
             // Un fil se lit par le bas : la fenêtre est un nombre de messages, pas une
@@ -1878,7 +1973,8 @@ fn lectures(b: &Brick) -> Vec<&str> {
         | Brick::Relation { .. }
         | Brick::CapabilityRequest { .. }
         | Brick::Settings { .. }
-        | Brick::Composer { .. } => {}
+        | Brick::Composer { .. }
+        | Brick::Secret { .. } => {}
     }
     v
 }

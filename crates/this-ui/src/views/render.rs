@@ -30,7 +30,7 @@ use wasm_bindgen::JsCast;
 use crate::design::{self, Tone as DesignTone};
 use crate::model::Kind as FieldKind;
 use crate::views::data::{self, Feed, Reading, Snapshot};
-use crate::views::intent::{FieldValue, Intent, LinkOp, Values};
+use crate::views::intent::{FieldValue, Intent, LinkOp, SecretValue, Values};
 use crate::views::markdown;
 use crate::views::placement;
 use crate::views::state::{self, ViewState};
@@ -386,6 +386,9 @@ pub fn render_brick(ctx: Ctx, brick: &Brick) -> AnyView {
             capability_request(ctx, *capability, action)
         }
         Brick::Settings { sections } => settings(ctx, sections),
+        Brick::Secret { name, label, hint } => {
+            secret_input(ctx, name, label.as_deref(), hint.as_deref())
+        }
         Brick::Composer { .. } => match ComposerSpec::of(brick) {
             Some(spec) => composer(ctx, &spec, composer_slot(&spec)),
             None => fallback(&describe_brick(brick)),
@@ -426,6 +429,7 @@ pub fn render_brick(ctx: Ctx, brick: &Brick) -> AnyView {
             filterable,
             page_size,
             on_click,
+            row_actions,
         } => list(
             ctx,
             entity,
@@ -437,6 +441,7 @@ pub fn render_brick(ctx: Ctx, brick: &Brick) -> AnyView {
             filterable,
             *page_size,
             on_click.as_ref(),
+            row_actions,
         ),
         Brick::Card {
             entity,
@@ -636,6 +641,45 @@ fn capability_request(ctx: Ctx, capability: DeviceCapability, action: &str) -> A
                     });
                 }>{text::DENY}</button>
             </div>
+        </div>
+    }
+    .into_any()
+}
+
+/// La saisie d'un secret : un champ masqué, un bouton, jamais une valeur qui repart vers
+/// le module. La personne tape ; à l'envoi, l'intention [`Intent::SecretEntry`] porte le nom
+/// et la valeur, le champ se vide, et rien ne reste dans le DOM ni dans un `Debug`.
+fn secret_input(ctx: Ctx, name: &str, label: Option<&str>, hint: Option<&str>) -> AnyView {
+    let name = name.to_owned();
+    let label = label
+        .map(str::to_owned)
+        .unwrap_or_else(|| placement::humanise(&name));
+    let hint = hint.map(str::to_owned);
+    let id = next_id("vw-secret");
+    let value = RwSignal::new(String::new());
+    let submit_name = name.clone();
+    view! {
+        <div class=class::FIELD>
+            <label class=class::LABEL for=id.clone() title=name.clone()>{label}</label>
+            <input class=class::INPUT type="password" id=id.clone() autocomplete="off"
+                prop:value=move || value.get()
+                on:input=move |ev| value.set(event_target_value(&ev)) />
+            {hint.map(|hint| view! { <span class=class::HINT>{hint}</span> }.into_any())}
+            <button class=class::BUTTON
+                disabled=move || value.get().is_empty()
+                on:click=move |_| {
+                    let secret = value.get_untracked();
+                    if secret.is_empty() {
+                        return;
+                    }
+                    ctx.on_intent.run(Intent::SecretEntry {
+                        name: submit_name.clone(),
+                        value: SecretValue(secret),
+                    });
+                    value.set(String::new());
+                }>
+                {text::SEND}
+            </button>
         </div>
     }
     .into_any()
@@ -1522,6 +1566,7 @@ fn list(
     filterable: &[String],
     page_size: Option<u32>,
     on_click: Option<&Click>,
+    row_actions: &[String],
 ) -> AnyView {
     let entity = entity.to_owned();
     let filter = filter.cloned();
@@ -1531,6 +1576,7 @@ fn list(
     let sort: Vec<SortSpec> = sort.to_vec();
     let filterable: Vec<String> = filterable.to_vec();
     let on_click = on_click.cloned();
+    let row_actions: Vec<String> = row_actions.to_vec();
     let page = RwSignal::new(0usize);
     let needle = RwSignal::new(String::new());
 
@@ -1557,6 +1603,7 @@ fn list(
         let sort = sort.clone();
         let filterable = filterable.clone();
         let on_click = on_click.clone();
+        let row_actions = row_actions.clone();
         move || {
             let snapshot = ctx.data.get();
             let local = data::search(&filterable, &needle.get());
@@ -1581,11 +1628,48 @@ fn list(
                             let sub = sub.map(|sub| {
                                 view! { <span class=class::LIST_SUB>{sub}</span> }.into_any()
                             });
+                            // Un bouton par action de ligne, chacun visant CETTE ligne. Un
+                            // clic dessus n'ouvre pas la ligne : le bouton est un frère du
+                            // bouton de `on_click`, pas un enfant.
+                            let actions = row_actions
+                                .iter()
+                                .map(|action| {
+                                    let name = action.clone();
+                                    let action_label = placement::humanise(action);
+                                    let action_entity = entity.clone();
+                                    let row_id = data::value_of(row, "id")
+                                        .and_then(|id| id.as_str())
+                                        .map(str::to_owned);
+                                    let disabled = row_id.is_none();
+                                    view! {
+                                        <button class=class::BUTTON title=name.clone()
+                                            disabled=disabled
+                                            on:click=move |_| {
+                                                let intent = action_intent(
+                                                    ctx,
+                                                    &name,
+                                                    Some(&action_entity),
+                                                    row_id.clone(),
+                                                    Vec::new(),
+                                                );
+                                                ctx.on_intent.run(intent);
+                                            }>
+                                            {action_label}
+                                        </button>
+                                    }
+                                    .into_any()
+                                })
+                                .collect_view();
+                            let actions = (!row_actions.is_empty()).then(|| {
+                                view! { <span class=class::LIST_ACTIONS>{actions}</span> }
+                                    .into_any()
+                            });
                             match &on_click {
                                 None => view! {
                                     <li class=class::LIST_ROW>
                                         <span class=class::LIST_LABEL>{title}</span>
                                         {sub}
+                                        {actions}
                                     </li>
                                 }
                                 .into_any(),
@@ -1593,12 +1677,13 @@ fn list(
                                     let id = data::display(data::value_of(row, "id"));
                                     let intent = click_intent(click, &entity, &id);
                                     view! {
-                                        <li>
-                                            <button class=class::LIST_ROW
+                                        <li class=class::LIST_ROW>
+                                            <button class=class::LIST_ROW_CLICK
                                                 on:click=move |_| ctx.on_intent.run(intent.clone())>
                                                 <span class=class::LIST_LABEL>{title}</span>
                                                 {sub}
                                             </button>
+                                            {actions}
                                         </li>
                                     }
                                     .into_any()
@@ -3243,6 +3328,53 @@ mod tests_action_row {
         assert!(!action_needs_row(Some(&create)));
         assert!(!action_needs_row(None));
     }
+
+    /// Le chaînon manquant : l'intention d'une action de ligne porte l'identifiant de la
+    /// ligne ET le nom de l'action — sinon le module reçoit un appel qu'il ne peut pas situer.
+    #[test]
+    fn une_action_de_ligne_porte_l_identifiant_de_la_ligne() {
+        let autoriser = Action::Invoke {
+            name: "autoriser".into(),
+            operation: "autoriser".into(),
+            entity: Some("autorisation".into()),
+        };
+        let intent = intent_of(
+            Some(autoriser),
+            "autoriser",
+            Some("autorisation"),
+            Some("cap-camera".into()),
+            Vec::new(),
+        );
+        assert_eq!(
+            intent,
+            Intent::Invoke {
+                action: "autoriser".into(),
+                operation: "autoriser".into(),
+                entity: Some("autorisation".into()),
+                id: Some("cap-camera".into()),
+                values: vec![],
+            }
+        );
+
+        let retirer = Action::Delete {
+            name: "retirer".into(),
+            entity: "autorisation".into(),
+        };
+        assert_eq!(
+            intent_of(
+                Some(retirer),
+                "retirer",
+                Some("autorisation"),
+                Some("cap-camera".into()),
+                Vec::new(),
+            ),
+            Intent::Delete {
+                action: "retirer".into(),
+                entity: "autorisation".into(),
+                id: Some("cap-camera".into()),
+            }
+        );
+    }
 }
 
 #[cfg(test)]
@@ -3434,7 +3566,9 @@ mod tests_fil {
         };
         let mut module = module;
         module.normalize();
-        brique.entity().map(|entite| assert_eq!(entite, "demande"));
+        if let Some(entite) = brique.entity() {
+            assert_eq!(entite, "demande");
+        }
 
         let snapshot = Snapshot::new().with(
             "demande",

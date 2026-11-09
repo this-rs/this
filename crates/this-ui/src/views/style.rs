@@ -50,6 +50,8 @@ pub mod class {
 
     pub const LIST: &str = "vw-list";
     pub const LIST_ROW: &str = "vw-list-row";
+    pub const LIST_ROW_CLICK: &str = "vw-list-row-click";
+    pub const LIST_ACTIONS: &str = "vw-list-actions";
     pub const LIST_LABEL: &str = "vw-list-label";
     pub const LIST_SUB: &str = "vw-list-sub";
     pub const LIST_TOOLS: &str = "vw-list-tools";
@@ -175,6 +177,8 @@ pub const ALL: &[&str] = &[
     class::METRICS,
     class::LIST,
     class::LIST_ROW,
+    class::LIST_ROW_CLICK,
+    class::LIST_ACTIONS,
     class::LIST_LABEL,
     class::LIST_SUB,
     class::LIST_TOOLS,
@@ -379,6 +383,13 @@ pub const CSS: &str = r#"
   border: 1px solid var(--vw-line, rgba(0,0,0,.10)); border-radius: 10px;
   background: var(--vw-card, #fff); color: inherit; font: inherit; cursor: pointer; }
 .vw-list-row:hover { background: var(--vw-hover, rgba(0,0,0,.03)); }
+/* Le bouton qui ouvre la ligne, quand `on_click` est déclaré : transparent, la rangée
+   (`.vw-list-row`) porte déjà la bordure. Les boutons d'action de ligne en sont des frères,
+   pas des enfants : un clic sur une action n'ouvre pas la ligne. */
+.vw-list-row-click { display: flex; flex-direction: column; align-items: flex-start; gap: 2px;
+  width: 100%; min-height: 44px; padding: 0; text-align: left; border: 0; background: none;
+  color: inherit; font: inherit; cursor: pointer; }
+.vw-list-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
 .vw-list-label { font-weight: 600; }
 .vw-list-sub { font-size: 13px; opacity: .72; }
 .vw-pager { display: flex; gap: 8px; align-items: center; }
@@ -593,6 +604,7 @@ mod tests {
             ".vw-icon-btn",
             ".vw-tab",
             ".vw-list-row",
+            ".vw-list-row-click",
             ".vw-input",
             ".vw-select",
             ".vw-file",

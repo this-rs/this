@@ -59,6 +59,31 @@ pub enum LinkOp {
     Remove,
 }
 
+/// Une valeur de secret en route vers le coffre de l'hôte.
+///
+/// Son [`Debug`] la masque : un secret qui fuit par un `{:?}` est un secret fuit, et cette
+/// valeur ne doit exister QUE sur le chemin du champ masqué au coffre. Le contenu n'est pas
+/// sérialisé par la brique (elle ne porte qu'un nom) et n'entre dans aucune intention livrée
+/// à un module.
+#[derive(Clone, PartialEq, Eq)]
+pub struct SecretValue(pub String);
+
+impl SecretValue {
+    /// The raw value. For the HOST's vault write path ONLY: the one place that reads it is the
+    /// handler of [`Intent::SecretEntry`], which hands it straight to the vault and never to a
+    /// module (the path: masked field -> `Intent::SecretEntry` -> host vault write; no
+    /// declared action, no `Invoke`, no `values`, no log line).
+    pub fn expose(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for SecretValue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("SecretValue(<redacted>)")
+    }
+}
+
 /// What the surface asks the host to do. The host decides, executes and reports back.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Intent {
@@ -97,6 +122,11 @@ pub enum Intent {
     /// A declared `request_secret` action: the host collects the secret `secret`. It carries
     /// a NAME and never a value — nothing typed in the host's secure input comes back here.
     Secret { action: String, secret: String },
+    /// La personne a tapé un secret dans une brique de saisie [`Brick::Secret`] : l'hôte
+    /// l'écrit au coffre sous le nom `name`. La valeur ne va JAMAIS à un module — c'est un
+    /// chemin de l'hôte, pas une action déclarée, et aucune brique ne la transporte. Son
+    /// `Debug` la masque (voir [`SecretValue`]).
+    SecretEntry { name: String, value: SecretValue },
     /// A declared agent tool: send a message, stop a run.
     Tool {
         action: String,
@@ -180,6 +210,13 @@ pub enum Intent {
 }
 
 impl Intent {
+    /// Does this intent reach the code of a module? Only [`Intent::Invoke`] does (and the
+    /// host-side intents that map onto an action of the module's own). A typed secret
+    /// ([`Intent::SecretEntry`]) never does: the host writes it to its vault.
+    pub fn reaches_module(&self) -> bool {
+        !matches!(self, Intent::SecretEntry { .. })
+    }
+
     /// The entity the intent concerns, when it concerns one.
     pub fn entity(&self) -> Option<&str> {
         match self {
@@ -199,6 +236,7 @@ impl Intent {
             Intent::Navigate { .. }
             | Intent::Capability { .. }
             | Intent::Secret { .. }
+            | Intent::SecretEntry { .. }
             | Intent::Host { .. }
             | Intent::Dismiss { .. } => None,
         }
@@ -228,6 +266,7 @@ impl Intent {
             Intent::Delete { .. } => "delete",
             Intent::Navigate { .. } => "navigate",
             Intent::Secret { .. } => "secret",
+            Intent::SecretEntry { .. } => "secret_entry",
             Intent::Tool { .. } => "tool",
             Intent::Capability { .. } => "capability",
             Intent::Select { .. } => "select",
@@ -286,5 +325,48 @@ mod tests {
         assert_eq!(reload.action(), None);
         assert_eq!(reload.entity(), Some("invoice"));
         assert_eq!(reload.kind(), "reload");
+    }
+
+    /// Un module ne doit jamais pouvoir observer la valeur d'un secret : ni dans le `Debug`
+    /// de l'intention, ni dans ce qu'elle expose (`entity`/`action`), ni dans une autre
+    /// intention qui lui serait livrée. Le contenu n'existe que pour l'hôte.
+    #[test]
+    fn a_secret_value_is_redacted_everywhere_a_module_could_see_it() {
+        let secret = "hunter2-super-secret";
+        let entry = Intent::SecretEntry {
+            name: "provider-api-key".into(),
+            value: SecretValue(secret.to_owned()),
+        };
+
+        // 1. Le `Debug` de l'intention ne porte jamais la valeur.
+        let debug = format!("{entry:?}");
+        assert!(
+            !debug.contains(secret),
+            "the value leaked into Debug: {debug}"
+        );
+        assert!(
+            debug.contains("SecretValue"),
+            "the shape is still named: {debug}"
+        );
+        assert!(
+            debug.contains("redacted"),
+            "the Debug form says the value is hidden: {debug}"
+        );
+
+        // 2. Ce qu'un hôte interroge d'une intention ne l'expose pas.
+        assert_eq!(entry.entity(), None);
+        assert_eq!(entry.action(), None);
+        assert_eq!(entry.kind(), "secret_entry");
+
+        // 3. Aucune autre intention ne peut la transporter : l'unique porteuse de la valeur
+        //    est `SecretEntry`, qui n'est pas une intention de module.
+        let module_intent = Intent::Invoke {
+            action: "terminer".into(),
+            operation: "terminer".into(),
+            entity: Some("tache".into()),
+            id: Some("42".into()),
+            values: vec![],
+        };
+        assert!(!format!("{module_intent:?}").contains(secret));
     }
 }

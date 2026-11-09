@@ -500,7 +500,7 @@ fn bricks() -> Vec<VariantSchema> {
         ),
         brick_v(
             "list",
-            "The rows of an entity: label, subtitle, sort, filter, pagination, click.",
+            "The rows of an entity: label, subtitle, sort, filter, pagination, click, and per-row actions.",
             vec![
                 entity_f(),
                 filter_f(),
@@ -528,12 +528,19 @@ fn bricks() -> Vec<VariantSchema> {
                     "click",
                     "What a row click does. Absent = nothing.",
                 ),
+                opt(
+                    "row_actions",
+                    "list<string>",
+                    "Actions of this module, drawn as a button in each row and executed with the row's id; each once. An update, delete or entity invoke — not a create, navigate, request_secret, agent_tool, device_capability, host or module-level invoke. A click on one does not open the row.",
+                )
+                .refers("action"),
             ],
             json!({"type": "list", "entity": "invoice", "label": "titre"}),
             json!({"type": "list", "entity": "invoice", "filter": f, "label": "titre",
                    "subtitle": "amount", "empty": "invoices.none",
                    "sort": [{"field": "amount", "dir": "desc"}], "filterable": ["titre"],
-                   "page_size": 25, "on_click": {"kind": "open_detail"}}),
+                   "page_size": 25, "on_click": {"kind": "open_detail"},
+                   "row_actions": ["edit"]}),
             false,
         ),
         brick_v(
@@ -842,6 +849,26 @@ fn bricks() -> Vec<VariantSchema> {
                 {"title": "Engine", "hint": "Where answers come from",
                  "items": [{"label": "Providers", "hint": "Pick one", "action": "go"}]}
             ]}),
+            false,
+        ),
+        brick_v(
+            "secret",
+            "A secret input: the person types, the value goes straight to the host's vault. \
+             The brick carries only the secret's NAME (and how to show it) — no value ever \
+             crosses the module or its view. The field is masked (`type=\"password\"`) and \
+             emptied after the value is sent. Reads no row, references no action.",
+            vec![
+                req(
+                    "name",
+                    "string",
+                    "The secret's name: letters, digits, `_`, `-` or `.`, no space.",
+                ),
+                opt("label", "string", "The label shown. Absent = the name, humanised."),
+                opt("hint", "string", "A sentence under the field."),
+            ],
+            json!({"type": "secret", "name": "provider-api-key"}),
+            json!({"type": "secret", "name": "provider-api-key",
+                   "label": "Clé API", "hint": "Ne quitte jamais l'appareil"}),
             false,
         ),
         brick_v(
@@ -1659,6 +1686,26 @@ fn rules() -> Vec<RuleSchema> {
             "Replacements form a cycle (a -> b -> a).",
             "Break the chain: the host would show no view of the cycle.",
         ),
+        rule(
+            "secret_name_empty",
+            "A secret brick declares an empty secret name.",
+            "Name the secret the host writes, e.g. `provider-api-key`.",
+        ),
+        rule(
+            "secret_name_invalid",
+            "A secret brick declares a secret name with a space or a character outside letters, digits, `_`, `-`, `.`.",
+            "Use a short name such as `provider-api-key`.",
+        ),
+        rule(
+            "row_action_refused",
+            "A list row action names an action that does not aim at the row (create, navigate, request_secret, agent_tool, device_capability, host, module-level invoke).",
+            "Use an update, delete or entity invoke action.",
+        ),
+        rule(
+            "duplicate_row_action",
+            "A list declares the same row action twice.",
+            "List each row action once.",
+        ),
     ]
 }
 
@@ -1712,6 +1759,17 @@ fn coverage() -> Vec<CoverageEntry> {
             "Titled sections of lines that open a sub-screen (also of another required \
              module), call an operation or ask the host for a secret. Secrets and the vault \
              stay the host's.",
+        ),
+        cover(
+            "secret input",
+            &["brick:secret"],
+            "The person types; the value goes straight to the host's vault, never through \
+             the module.",
+        ),
+        cover(
+            "row action",
+            &["brick:list"],
+            "A button per row, executing an action with the row's id.",
         ),
         cover("text", &["brick:text"], "One field of the first row."),
         cover(
@@ -2674,6 +2732,26 @@ mod tests {
                 with_view(leaf(
                     r#"{"type":"list","entity":"invoice","label":"titre","page_size":101}"#,
                 )),
+            ),
+            (
+                "row_action_refused",
+                with_view(leaf(
+                    r#"{"type":"list","entity":"invoice","label":"titre","row_actions":["new"]}"#,
+                )),
+            ),
+            (
+                "duplicate_row_action",
+                with_view(leaf(
+                    r#"{"type":"list","entity":"invoice","label":"titre","row_actions":["edit","edit"]}"#,
+                )),
+            ),
+            (
+                "secret_name_empty",
+                with_view(leaf(r#"{"type":"secret","name":""}"#)),
+            ),
+            (
+                "secret_name_invalid",
+                with_view(leaf(r#"{"type":"secret","name":"a b"}"#)),
             ),
             (
                 "program_name_duplicate",
