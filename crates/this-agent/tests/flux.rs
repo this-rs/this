@@ -5,6 +5,7 @@ use std::collections::BTreeMap;
 
 use this_agent::flux::{
     Diffuseur, Event, Filtre, Livraison, Proprietaire, Refus, Souscription, Valeur, catalogue,
+    depuis_appareil,
 };
 use this_agent::surface::Status;
 
@@ -412,9 +413,19 @@ fn une_capacite_nulle_est_refusee() {
 // ------------------------------------------------------------- catalogue
 
 #[test]
-fn le_catalogue_ne_declare_rien_de_live_et_ses_ids_sont_uniques() {
+fn seuls_les_flux_prouves_sont_live_et_les_ids_sont_uniques() {
     let flux = catalogue();
-    assert!(flux.iter().all(|s| s.status == Status::Missing));
+    // Seuls les flux prouvés sur l'appareil sont `Live` ; tout autre `Live` est un mensonge.
+    let live: Vec<&str> = flux
+        .iter()
+        .filter(|s| s.status == Status::Live)
+        .map(|s| s.id.as_str())
+        .collect();
+    assert_eq!(live, vec!["battery.level", "orientation"]);
+    assert!(
+        flux.iter()
+            .all(|s| matches!(s.status, Status::Live | Status::Missing))
+    );
     let mut ids: Vec<&str> = flux.iter().map(|s| s.id.as_str()).collect();
     ids.sort_unstable();
     let avant = ids.len();
@@ -428,4 +439,98 @@ fn le_catalogue_ne_declare_rien_de_live_et_ses_ids_sont_uniques() {
     ] {
         assert!(ids.contains(&attendu), "{attendu} manque au catalogue");
     }
+}
+
+// ------------------------------------------------------------- pont natif
+
+#[test]
+fn un_echantillon_de_batterie_du_pont_devient_un_evenement_du_catalogue() {
+    let ev = depuis_appareil(
+        &serde_json::json!({"kind":"battery","level":0.42,"state":"unplugged"}),
+        1_000,
+    )
+    .unwrap();
+    assert_eq!(ev.flux, "battery.level");
+    assert_eq!(ev.at_ms, 1_000);
+    assert_eq!(ev.champs["niveau"], Valeur::Nombre(0.42));
+    assert_eq!(ev.champs["en_charge"], Valeur::Booleen(false));
+    let charge = depuis_appareil(
+        &serde_json::json!({"kind":"battery","level":0.9,"state":"charging"}),
+        0,
+    )
+    .unwrap();
+    assert_eq!(charge.champs["en_charge"], Valeur::Booleen(true));
+}
+
+#[test]
+fn un_niveau_inconnu_n_est_pas_un_zero() {
+    // Simulateur : `level` vaut -1. Un zéro inventé franchirait tous les seuils bas.
+    assert!(
+        depuis_appareil(
+            &serde_json::json!({"kind":"battery","level":-1.0,"state":"unknown"}),
+            0
+        )
+        .is_none()
+    );
+}
+
+#[test]
+fn le_pont_alimente_le_diffuseur_et_le_seuil_franchit_une_fois() {
+    let mut d = Diffuseur::new();
+    let bas = d
+        .abonner(
+            module("m"),
+            "battery.level",
+            Souscription {
+                filtre: Some(Filtre::Below {
+                    champ: "niveau".into(),
+                    seuil: 0.50,
+                }),
+                ..Souscription::default()
+            },
+        )
+        .unwrap();
+    let orient = d
+        .abonner(module("m"), "orientation", Souscription::default())
+        .unwrap();
+    for (at, niveau) in [
+        (0, 0.55),
+        (1, 0.51),
+        (2, 0.49),
+        (3, 0.48),
+        (4, 0.52),
+        (5, 0.47),
+    ] {
+        let ev = depuis_appareil(
+            &serde_json::json!({"kind":"battery","level":niveau,"state":"unplugged"}),
+            at,
+        )
+        .unwrap();
+        d.pousser(ev).unwrap();
+    }
+    let niveaux: Vec<u64> = d
+        .lire(bas)
+        .unwrap()
+        .into_iter()
+        .filter_map(|l| match l {
+            Livraison::Evenement(e) => Some(e.at_ms),
+            Livraison::Perdus { .. } => None,
+        })
+        .collect();
+    // Deux franchissements vers le bas (0.49 puis 0.47), pas quatre échantillons sous le seuil.
+    assert_eq!(niveaux, vec![2, 5]);
+
+    let ev = depuis_appareil(
+        &serde_json::json!({"kind":"orientation","angle":"paysage_gauche"}),
+        9,
+    )
+    .unwrap();
+    assert_eq!(d.pousser(ev).unwrap(), vec![orient]);
+    // Un angle hors des quatre choix est refusé, jamais transmis.
+    let faux = depuis_appareil(
+        &serde_json::json!({"kind":"orientation","angle":"face_up"}),
+        10,
+    )
+    .unwrap();
+    assert!(matches!(d.pousser(faux), Err(Refus::HorsChoix { .. })));
 }

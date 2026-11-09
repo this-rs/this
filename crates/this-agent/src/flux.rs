@@ -309,9 +309,11 @@ impl std::fmt::Display for Refus {
     }
 }
 
-/// Le catalogue des flux, **tel qu'il est aujourd'hui** : tous `Missing`.
+/// Le catalogue des flux, **tel qu'il est aujourd'hui** : deux `Live`, le reste `Missing`.
 ///
-/// Aucun flux n'existe encore sur l'appareil. Le jour où un événement sort
+/// `orientation` et `battery.level` sont `Live` : abonnement ET livraison prouvés sur
+/// l'iPhone (journal `atelier.log` du 09/11/2026, échantillon initial reçu pour chacun). Le
+/// jour où un autre événement sort
 /// réellement de la coquille, c'est ici que le flux passe à `Live`, et nulle part
 /// ailleurs. Un flux déclaré `Live` qui n'émet rien est pire qu'un flux absent.
 pub fn catalogue() -> Vec<Stream> {
@@ -323,9 +325,11 @@ pub fn catalogue() -> Vec<Stream> {
                 "batterie",
                 vec![Champ::nombre("niveau"), Champ::booleen("en_charge")],
             ),
-            Cadence::Sampled { period_ms: 60_000 },
+            // iOS notifie un changement de niveau (`batteryLevelDidChangeNotification`) : la
+            // source émet au changement, elle n'échantillonne pas.
+            Cadence::OnChange,
             &[Ios, Ipados, Android, Macos, Windows, Linux],
-            Status::Missing,
+            Status::Live,
         ),
         Stream::new(
             "network.state",
@@ -370,7 +374,7 @@ pub fn catalogue() -> Vec<Stream> {
             ),
             Cadence::OnChange,
             &[Ios, Ipados, Android],
-            Status::Missing,
+            Status::Live,
         ),
         Stream::new(
             "location.position",
@@ -404,6 +408,53 @@ pub fn catalogue() -> Vec<Stream> {
             Status::Missing,
         ),
     ]
+}
+
+/// Traduit un échantillon du pont natif (`tauri-plugin-this-device`, `stream_start`) en
+/// [`Event`] du catalogue, horodaté `at_ms` par l'hôte.
+///
+/// - `{"kind":"orientation","angle":…}` → `orientation`, `angle` (valeur fermée : un angle
+///   hors des quatre choix est refusé par [`Diffuseur::pousser`], jamais transmis) ;
+/// - `{"kind":"battery","level":0…1,"state":…}` → `battery.level`, `niveau` et `en_charge`
+///   (`charging` ou `full`). Un niveau négatif (inconnu, ex. simulateur) n'est **pas** un
+///   niveau : `None`, plutôt qu'un zéro inventé qui franchirait tous les seuils bas.
+///
+/// Aucun champ n'est du texte libre (deux nombres, un booléen, un choix fermé) : rien à
+/// sceller par [`crate::untrusted::wrap`].
+pub fn depuis_appareil(echantillon: &serde_json::Value, at_ms: u64) -> Option<Event> {
+    let kind = echantillon.get("kind")?.as_str()?;
+    let (flux, champs) = match kind {
+        "orientation" => {
+            let angle = echantillon.get("angle")?.as_str()?;
+            (
+                "orientation",
+                BTreeMap::from([("angle".to_string(), Valeur::Texte(angle.into()))]),
+            )
+        }
+        "battery" => {
+            let niveau = echantillon.get("level")?.as_f64()?;
+            if !(0.0..=1.0).contains(&niveau) {
+                return None;
+            }
+            let etat = echantillon.get("state")?.as_str()?;
+            (
+                "battery.level",
+                BTreeMap::from([
+                    ("niveau".to_string(), Valeur::Nombre(niveau)),
+                    (
+                        "en_charge".to_string(),
+                        Valeur::Booleen(matches!(etat, "charging" | "full")),
+                    ),
+                ]),
+            )
+        }
+        _ => return None,
+    };
+    Some(Event {
+        flux: flux.into(),
+        at_ms,
+        champs,
+    })
 }
 
 /// État d'un filtre entre deux événements.

@@ -163,6 +163,96 @@ pub async fn system_state<R: Runtime>(app: &AppHandle<R>, method: &str) -> Value
     }
 }
 
+/// Les flux d'état système que le pont pousse SANS consentement : mêmes lectures passives
+/// que [`SYSTEM_METHODS`] (orientation de l'écran, batterie), envoyées à chaque changement au
+/// lieu d'être demandées. Tout autre nom est refusé `not_supported`, ici et côté natif.
+pub const STREAMS: &[&str] = &["orientation", "battery"];
+
+/// Les sélecteurs natifs des flux : départ (avec un canal) et arrêt.
+pub const STREAM_METHODS: &[&str] = &["streamStart", "streamStop"];
+
+/// Démarre un flux de [`STREAMS`]. `on_sample` reçoit chaque échantillon natif, tel quel
+/// (`{"kind":"orientation","angle":…}`, `{"kind":"battery","level":…,"state":…}`) : un
+/// échantillon initial tout de suite, puis un par notification du système. L'appelant le
+/// convertit et l'horodate ; le pont ne fait que transporter.
+///
+/// Le canal est un `tauri::ipc::Channel` créé côté Rust : aucune webview n'est traversée,
+/// aucune permission de webview n'est ouverte. Hors iOS : `not_supported`.
+pub async fn stream_start<R: Runtime>(
+    app: &AppHandle<R>,
+    stream: &str,
+    on_sample: impl Fn(Value) + Send + Sync + 'static,
+) -> Value {
+    if !STREAMS.contains(&stream) {
+        return json!({ "kind": "error", "code": "not_supported" });
+    }
+    #[cfg(target_os = "ios")]
+    {
+        let Some(plugin) = app.try_state::<ThisDevice<R>>() else {
+            return json!({ "kind": "error", "code": "internal" });
+        };
+        let channel = tauri::ipc::Channel::<Value>::new(move |body| {
+            if let tauri::ipc::InvokeResponseBody::Json(text) = body
+                && let Ok(value) = serde_json::from_str::<Value>(&text)
+            {
+                on_sample(value);
+            }
+            Ok(())
+        });
+        let args = json!({ "stream": stream, "channel": channel });
+        match tokio::time::timeout(
+            NATIVE_TIMEOUT,
+            plugin
+                .handle
+                .run_mobile_plugin_async::<Value>("streamStart", args),
+        )
+        .await
+        {
+            Ok(Ok(value)) => value,
+            Ok(Err(error)) => {
+                note(&format!("stream_start {stream} a échoué : {error:?}"));
+                json!({ "kind": "error", "code": "internal" })
+            }
+            Err(_) => json!({ "kind": "error", "code": "timeout" }),
+        }
+    }
+    #[cfg(not(target_os = "ios"))]
+    {
+        let _ = (app, on_sample);
+        json!({ "kind": "error", "code": "not_supported" })
+    }
+}
+
+/// Arrête un flux de [`STREAMS`]. Arrêter un flux qui ne tourne pas n'est pas une erreur.
+pub async fn stream_stop<R: Runtime>(app: &AppHandle<R>, stream: &str) -> Value {
+    if !STREAMS.contains(&stream) {
+        return json!({ "kind": "error", "code": "not_supported" });
+    }
+    #[cfg(target_os = "ios")]
+    {
+        let Some(plugin) = app.try_state::<ThisDevice<R>>() else {
+            return json!({ "kind": "error", "code": "internal" });
+        };
+        match tokio::time::timeout(
+            NATIVE_TIMEOUT,
+            plugin
+                .handle
+                .run_mobile_plugin_async::<Value>("streamStop", json!({ "stream": stream })),
+        )
+        .await
+        {
+            Ok(Ok(value)) => value,
+            Ok(Err(_)) => json!({ "kind": "error", "code": "internal" }),
+            Err(_) => json!({ "kind": "error", "code": "timeout" }),
+        }
+    }
+    #[cfg(not(target_os = "ios"))]
+    {
+        let _ = app;
+        json!({ "kind": "error", "code": "not_supported" })
+    }
+}
+
 /// One call of a device family. The method is checked against the contract's table before it
 /// is sent, so a typo is a refusal here rather than an unknown selector on the native side.
 #[cfg(target_os = "ios")]

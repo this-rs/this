@@ -62,6 +62,9 @@ class ThisDevicePlugin: Plugin {
       #selector(ThisDevicePlugin.locale(_:)),
       #selector(ThisDevicePlugin.screenState(_:)),
       #selector(ThisDevicePlugin.volume(_:)),
+      // Flux d'état système (`streams.swift`) : même défaut de dead-strip sans référence.
+      #selector(ThisDevicePlugin.streamStart(_:)),
+      #selector(ThisDevicePlugin.streamStop(_:)),
     ]
     super.init()
   }
