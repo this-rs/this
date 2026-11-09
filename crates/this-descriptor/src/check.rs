@@ -158,6 +158,21 @@ impl ModuleDescriptor {
         registry: &CustomRegistry,
         profile: CheckProfile,
     ) -> Result<(), Vec<DescriptorIssue>> {
+        self.check_with_required(registry, profile, &[])
+    }
+
+    /// Same verdict as [`check`](Self::check), but the entities the views and actions may
+    /// name also include those of the modules this one requires (transitively), looked up in
+    /// `known`. `known` may hold every module of the host, `self` included: only the
+    /// transitive `requires` are read. A module citing an entity of a module it does NOT
+    /// require is still refused (`view_entity_unknown`, `action_entity_unknown`...).
+    /// `check` is `check_with_required(.., &[])`.
+    pub fn check_with_required(
+        &self,
+        registry: &CustomRegistry,
+        profile: CheckProfile,
+        known: &[&ModuleDescriptor],
+    ) -> Result<(), Vec<DescriptorIssue>> {
         let mut c = Ctx {
             issues: vec![],
             reg: registry,
@@ -199,7 +214,7 @@ impl ModuleDescriptor {
         // Vues et actions : entités, champs, cibles, remplacements. Sans ces règles, l'hôte
         // dessinerait une liste vide ou un bouton mort, et la personne conclurait à une panne
         // au lieu d'un oubli. Le détail est dans `views::issues`.
-        for (reason, path, message) in crate::views::issues(self) {
+        for (reason, path, message) in crate::views::issues_with_required(self, known) {
             c.push(reason, path, message);
         }
 
@@ -989,6 +1004,92 @@ mod tests {
         assert_eq!(
             codes_of(m.check(&reg(), CheckProfile::Compiled)),
             vec!["this.descriptor.reference_unknown"]
+        );
+    }
+
+    // ---------- check_with_required ----------
+
+    fn requiring(name: &str, requires: &[&str], entity: Option<&str>) -> ModuleDescriptor {
+        let mut m = ModuleDescriptor::new(name, "1.0.0");
+        m.requires = requires
+            .iter()
+            .map(|n| crate::module::ModuleReq {
+                name: n.to_string(),
+                version: "*".into(),
+                optional: false,
+            })
+            .collect();
+        if let Some(entity) = entity {
+            m.views.push(
+                serde_json::from_value(serde_json::json!({
+                    "name": "liste",
+                    "surface": "main",
+                    "root": {"type": "leaf", "brick": {"type": "list", "entity": entity, "label": "titre"}}
+                }))
+                .unwrap(),
+            );
+        }
+        m
+    }
+
+    fn owner_of(name: &str, requires: &[&str], entity: &str) -> ModuleDescriptor {
+        let mut m = requiring(name, requires, None);
+        let mut e = EntityDesc::new(entity);
+        e.fields = vec![FieldDesc::new("titre", crate::field::FieldType::String).tag(16)];
+        m.entities.push(e);
+        m
+    }
+
+    #[test]
+    fn check_alone_still_refuses_the_entity_of_a_required_module() {
+        let menu = requiring("menu", &["socle"], Some("conversation"));
+        assert_eq!(
+            codes_of(menu.check(&reg(), CheckProfile::Compiled)),
+            vec!["this.descriptor.view_entity_unknown"]
+        );
+    }
+
+    #[test]
+    fn check_with_empty_known_is_check() {
+        let menu = requiring("menu", &["socle"], Some("conversation"));
+        assert_eq!(
+            codes_of(menu.check_with_required(&reg(), CheckProfile::Compiled, &[])),
+            codes_of(menu.check(&reg(), CheckProfile::Compiled)),
+        );
+    }
+
+    #[test]
+    fn check_with_required_accepts_the_entity_of_a_required_module() {
+        let socle = owner_of("socle", &[], "conversation");
+        let menu = requiring("menu", &["socle"], Some("conversation"));
+        assert_eq!(
+            codes_of(menu.check_with_required(&reg(), CheckProfile::Compiled, &[&socle, &menu])),
+            Vec::<String>::new()
+        );
+    }
+
+    #[test]
+    fn check_with_required_follows_requires_transitively() {
+        let socle = owner_of("socle", &[], "conversation");
+        let milieu = requiring("milieu", &["socle"], None);
+        let menu = requiring("menu", &["milieu"], Some("conversation"));
+        assert_eq!(
+            codes_of(menu.check_with_required(
+                &reg(),
+                CheckProfile::Compiled,
+                &[&socle, &milieu, &menu]
+            )),
+            Vec::<String>::new()
+        );
+    }
+
+    #[test]
+    fn check_with_required_still_refuses_the_entity_of_a_module_not_required() {
+        let socle = owner_of("socle", &[], "conversation");
+        let menu = requiring("menu", &[], Some("conversation"));
+        assert_eq!(
+            codes_of(menu.check_with_required(&reg(), CheckProfile::Compiled, &[&socle, &menu])),
+            vec!["this.descriptor.view_entity_unknown"]
         );
     }
 }
