@@ -1,0 +1,24 @@
+[package]
+name = "this-module-compteur"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "Exemple de module this qui CALCULE son arbre de vues (export `render`) : la bannière, le corps et les briques dépendent de l'état reçu."
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[features]
+# `render` est opt-in : sans cette feature le module n'exporte que `manifest` et `handle`
+# (mesure de la taille, et preuve que l'absence de fonction de rendu n'exporte rien).
+default = ["render"]
+render = []
+
+[dependencies]
+this-module-sdk = { path = "../.." }
+
+[dev-dependencies]
+this-descriptor = { path = "../../../this-descriptor" }
+this-module-harness = { path = "../../../this-module-harness", features = ["wasmi"] }
+serde_json = "1.0"
+tokio = { version = "1", features = ["rt", "macros"] }

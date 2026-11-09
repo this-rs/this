@@ -14,11 +14,15 @@
 //! this_module_sdk::export!(Mon);
 //! ```
 //!
+//! Un module qui calcule son arbre de vues ajoute une fonction de rendu :
+//! `export!(Mon, render = mon_rendu)` (voir [`views`]). Sans elle, il n'exporte pas `render`.
+//!
 //! Pas de proc-macro, pas de `build.rs` : la forge compile ce code hors ligne.
 
 pub mod manifest;
 pub mod module;
 pub mod rt;
+pub mod views;
 pub mod wire;
 
 pub use manifest::{Entity, Field, FieldType, Manifest, OperationDecl, Transform, Validator};
