@@ -1157,12 +1157,21 @@ fn indicator(
                         .into_any()
                     }
                     _ => {
+                        // Une activité SANS phase n'est pas une activité : au repos, il n'y a
+                        // rien à dire. Sans cette règle, un indicateur d'activité posé dans un
+                        // fil resterait affiché en permanence avec un tiret — et « — » ne veut
+                        // pas dire « au repos », il veut dire « je ne sais pas ». Même règle
+                        // que l'avis : un champ vide ne s'annonce pas.
                         let phase = match field.as_deref() {
                             Some(field) => {
-                                data::display(first.and_then(|row| data::value_of(row, field)))
+                                annonce(first.and_then(|row| data::value_of(row, field)))
+                                    .unwrap_or_default()
                             }
                             None => text::DASH.to_owned(),
                         };
+                        if phase.trim().is_empty() {
+                            return ().into_any();
+                        }
                         let elapsed = duration.as_deref().map(|field| {
                             data::display(first.and_then(|row| data::value_of(row, field)))
                         });
