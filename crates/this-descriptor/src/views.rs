@@ -51,6 +51,17 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 #[serde(rename_all = "snake_case")]
 pub enum Surface {
     /// Le menu latéral, quand il y en a un.
+    ///
+    /// Un hôte qui trouve **au moins une** vue `sidebar` déclarée dessine son menu avec
+    /// elles, dans l'ordre déclaré, et n'y ajoute **rien de lui-même** : un module décide
+    /// donc de ce que le menu offre — les conversations, les entrées, le pied — et chacune
+    /// avec l'action qu'elle déclenche. Sans aucune vue `sidebar`, l'hôte garde son menu
+    /// d'avant, mot pour mot.
+    ///
+    /// Ce qui reste à l'hôte est ce qu'aucune vue ne peut dire : le geste de bord, le bouton
+    /// qui ouvre le menu, l'ouverture et la fermeture du panneau. Une vue `sidebar` qui
+    /// remplace une autre (voir [`ViewDesc::replaces`]) la retire : c'est ainsi qu'un module
+    /// prend la place d'un autre dans le menu sans le nommer.
     Sidebar,
     /// L'écran principal : ce qu'on voit en ouvrant le module.
     #[default]
@@ -605,6 +616,33 @@ pub enum Action {
         capability: DeviceCapability,
         grant: Grant,
     },
+    /// Demander à l'hôte d'ouvrir une de SES surfaces (voir [`HostSurface`]).
+    ///
+    /// Le module ne les possède pas — il les **offre**. C'est lui qui décide si elles
+    /// apparaissent dans son menu, sous quel libellé (le nom de l'action, humanisé) et à
+    /// quelle place. Sans cette variante, un menu déclaré ne pouvait pas être complet : le
+    /// pied du tiroir de l'hôte (modules, modèle, réglages) restait chez l'hôte, et tout
+    /// module qui déclarait un menu le faisait disparaître — la personne perdait le chemin
+    /// vers ces trois écrans, sans un mot.
+    Host { name: String, surface: HostSurface },
+}
+
+/// Les surfaces de la coquille qu'un module peut **offrir** sans les posséder.
+///
+/// Trois choses ne se déclarent pas : le registre des modules installés (il décide de ce qui
+/// est chargé), le choix du modèle (il tient le fournisseur en cours) et l'écran de réglages
+/// de l'app (l'hôte seul sait quel module le porte). Un module qui déclare le menu doit
+/// pouvoir les proposer ; il ne peut pas les dessiner, et il n'en invente pas d'autres : le
+/// vocabulaire est fermé, et un hôte qui reçoit une surface qu'il ne connaît pas le dit.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HostSurface {
+    /// La liste des modules installés : les activer, les retirer, les ouvrir.
+    Modules,
+    /// Le choix du modèle en cours (les moteurs configurés).
+    Model,
+    /// L'écran de réglages de l'app — celui que l'hôte sait ouvrir, déclaré ou non.
+    Settings,
 }
 
 impl Action {
@@ -618,7 +656,8 @@ impl Action {
             | Action::AgentTool { name, .. }
             | Action::Invoke { name, .. }
             | Action::RequestSecret { name, .. }
-            | Action::DeviceCapability { name, .. } => name,
+            | Action::DeviceCapability { name, .. }
+            | Action::Host { name, .. } => name,
         }
     }
 }
@@ -904,7 +943,7 @@ impl<'a> Checks<'a> {
                         "settings_action_refused",
                         format!("{q}.action"),
                         format!(
-                            "`{}` {pourquoi}, and a settings line has no row; use navigate, request_secret, agent_tool, device_capability or a module-level invoke",
+                            "`{}` {pourquoi}, and a settings line has no row; use navigate, request_secret, agent_tool, device_capability, host or a module-level invoke",
                             it.action
                         ),
                     );
@@ -1046,6 +1085,9 @@ impl<'a> Checks<'a> {
                     }
                 }
                 Action::DeviceCapability { .. } => {}
+                // Une surface de l'hôte ne nomme ni entité, ni champ, ni opération : elle
+                // n'a rien à vérifier ici, et l'hôte seul sait s'il sait l'ouvrir.
+                Action::Host { .. } => {}
             }
         }
     }
@@ -1730,6 +1772,12 @@ mod tests {
             replaces: None,
             look: None,
             root,
+        }
+    }
+
+    fn leaf(json: &str) -> Node {
+        Node::Leaf {
+            brick: Box::new(brick(json)),
         }
     }
 
@@ -2474,6 +2522,61 @@ mod tests {
             r#"{"type":"settings","sections":[{"title":"Moteur","hint":"d","items":[
                 {"label":"Providers","action":"ailleurs"},
                 {"label":"Clé API","hint":"jamais affichée","action":"cle"}]}]}"#,
+        ));
+        assert_eq!(codes(&m), Vec::<String>::new());
+    }
+
+    /// Une surface de l'hôte se déclare et s'offre : un bouton du menu la cite par son nom,
+    /// et le contrat ne demande ni entité ni champ — l'hôte seul sait où elle vit.
+    #[test]
+    fn a_host_surface_is_a_declared_action_a_menu_can_offer() {
+        let mut m = module();
+        m.actions.push(
+            serde_json::from_str(r#"{"kind":"host","name":"modules","surface":"modules"}"#)
+                .unwrap(),
+        );
+        m.actions.push(
+            serde_json::from_str(r#"{"kind":"host","name":"modele","surface":"model"}"#).unwrap(),
+        );
+        m.actions.push(
+            serde_json::from_str(r#"{"kind":"host","name":"reglages","surface":"settings"}"#)
+                .unwrap(),
+        );
+        // Un bouton de menu n'a pas de ligne à lire : la brique cite l'action, c'est tout.
+        m.views.push(view(
+            "menu",
+            Node::Stack {
+                children: vec![
+                    leaf(r#"{"type":"button","entity":"invoice","action":"modules"}"#),
+                    leaf(r#"{"type":"button","entity":"invoice","action":"modele"}"#),
+                ],
+            },
+        ));
+        assert_eq!(codes(&m), Vec::<String>::new());
+        assert_eq!(
+            m.actions.iter().map(Action::name).collect::<Vec<_>>(),
+            vec!["modules", "modele", "reglages"]
+        );
+        assert_stable::<Action>(r#"{"kind":"host","name":"modules","surface":"modules"}"#);
+        // Une surface inconnue est refusée à la désérialisation : l'hôte n'en invente pas.
+        assert!(
+            serde_json::from_str::<Action>(r#"{"kind":"host","name":"x","surface":"mystere"}"#)
+                .is_err()
+        );
+    }
+
+    /// Une ligne de réglages peut offrir une surface de l'hôte : elle ne lit aucune ligne.
+    #[test]
+    fn a_settings_line_can_offer_a_host_surface() {
+        let mut m = module();
+        m.actions.push(
+            serde_json::from_str(r#"{"kind":"host","name":"modules","surface":"modules"}"#)
+                .unwrap(),
+        );
+        m.views.push(leaf_view(
+            "reglages",
+            r#"{"type":"settings","sections":[{"title":"L'application","items":[
+                {"label":"Modules installés","action":"modules"}]}]}"#,
         ));
         assert_eq!(codes(&m), Vec::<String>::new());
     }

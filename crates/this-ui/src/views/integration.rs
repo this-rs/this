@@ -201,6 +201,7 @@ fn every_action_kind_of_the_contract_is_deserialised() {
                 Action::Navigate { .. } => "navigate",
                 Action::AgentTool { .. } => "agent_tool",
                 Action::DeviceCapability { .. } => "device_capability",
+                Action::Host { .. } => "host",
                 _ => "unknown",
             }
         })

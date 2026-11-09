@@ -831,6 +831,12 @@ fn intent_of(
             capability,
             grant,
         },
+        // Une surface que l'hôte garde : le module l'offre, l'hôte l'ouvre. L'intention
+        // porte la surface, pas le nom du module : l'hôte seul sait où elle vit.
+        Some(Action::Host { name, surface }) => Intent::Host {
+            action: name,
+            surface,
+        },
         Some(Action::Invoke {
             name,
             operation,
@@ -2245,6 +2251,7 @@ mod tests {
 
     use super::*;
     use serde_json::json;
+    use this_descriptor::views::HostSurface;
 
     fn view_desc(look: Option<this_descriptor::views::Look>) -> ViewDesc {
         ViewDesc {
@@ -2356,6 +2363,39 @@ mod tests {
         // The intent carries a NAME: there is no field in which a value could travel.
         assert_eq!(secret.kind(), "secret");
         assert_eq!(secret.entity(), None);
+    }
+
+    /// Une surface de l'hôte : le module l'offre dans son menu, l'intention dit LAQUELLE et
+    /// sous quel nom. L'hôte seul sait où elle vit — l'intention ne porte donc aucune entité.
+    #[test]
+    fn a_host_action_emits_the_surface_it_offers() {
+        let mut m = ModuleDescriptor::new("atelier", "1.0.0");
+        m.actions.push(
+            serde_json::from_str(r#"{"kind":"host","name":"modules","surface":"modules"}"#)
+                .unwrap(),
+        );
+        m.actions.push(
+            serde_json::from_str(r#"{"kind":"host","name":"reglages","surface":"settings"}"#)
+                .unwrap(),
+        );
+        assert_eq!(
+            settings_intent(&m, "modules"),
+            Intent::Host {
+                action: "modules".into(),
+                surface: HostSurface::Modules,
+            }
+        );
+        let settings = settings_intent(&m, "reglages");
+        assert_eq!(settings.kind(), "host");
+        assert_eq!(settings.entity(), None);
+        assert_eq!(settings.action(), Some("reglages"));
+        assert!(matches!(
+            settings,
+            Intent::Host {
+                surface: HostSurface::Settings,
+                ..
+            }
+        ));
     }
 
     #[test]

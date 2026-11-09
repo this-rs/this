@@ -930,6 +930,23 @@ fn actions() -> Vec<VariantSchema> {
             json!({"kind": "device_capability", "name": "cam_ok", "capability": "camera", "grant": "allow"}),
             json!({"kind": "device_capability", "name": "mic_no", "capability": "microphone", "grant": "deny"}),
         ),
+        variant(
+            "host",
+            "Asks the host to open one of ITS surfaces: the installed-modules registry, the \
+             model chooser, the app's settings screen. The module does not own them — it \
+             offers them, in its own menu, under the label of its choice. No entity, no field: \
+             these are the app's own state.",
+            vec![
+                name(),
+                req(
+                    "surface",
+                    "enum:HostSurface",
+                    "Which of the host's surfaces to open.",
+                ),
+            ],
+            json!({"kind": "host", "name": "modules", "surface": "modules"}),
+            json!({"kind": "host", "name": "reglages", "surface": "settings"}),
+        ),
     ]
 }
 
@@ -1279,6 +1296,19 @@ fn enums() -> Vec<EnumSchema> {
             "Decision on a capability.",
             None,
             &[("allow", ""), ("deny", "")],
+        ),
+        enum_s(
+            "HostSurface",
+            "A surface the host keeps and a module may offer in its menu.",
+            None,
+            &[
+                (
+                    "modules",
+                    "The installed-modules registry: enable, remove, open.",
+                ),
+                ("model", "The chooser of the current model."),
+                ("settings", "The app's settings screen."),
+            ],
         ),
         enum_s(
             "DeviceCapability",
@@ -1778,8 +1808,8 @@ mod tests {
     use crate::link::LinkDesc;
     use crate::module::ModuleDescriptor;
     use crate::views::{
-        Accent, AgentOp, ArgKind, Click, ColumnSource, DeviceCapability, Grant, Input, Layout,
-        Look, RelationMode, Run, Signal, Surface, Tone, Transition,
+        Accent, AgentOp, ArgKind, Click, ColumnSource, DeviceCapability, Grant, HostSurface, Input,
+        Layout, Look, RelationMode, Run, Signal, Surface, Tone, Transition,
     };
     use std::collections::BTreeSet;
 
@@ -1954,6 +1984,7 @@ mod tests {
             ("Run", err_of::<Run>(json!("__nope__"))),
             ("AgentOp", err_of::<AgentOp>(json!("__nope__"))),
             ("Grant", err_of::<Grant>(json!("__nope__"))),
+            ("HostSurface", err_of::<HostSurface>(json!("__nope__"))),
             (
                 "DeviceCapability",
                 err_of::<DeviceCapability>(json!("__nope__")),
@@ -2247,6 +2278,7 @@ mod tests {
                     "Run" => rt::<Run>(&v),
                     "AgentOp" => rt::<AgentOp>(&v),
                     "Grant" => rt::<Grant>(&v),
+                    "HostSurface" => rt::<HostSurface>(&v),
                     "DeviceCapability" => rt::<DeviceCapability>(&v),
                     "SortDir" => rt::<crate::query::SortDir>(&v),
                     "FilterOp" => rt::<crate::query::FilterOp>(&v),
