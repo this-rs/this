@@ -487,6 +487,41 @@ async fn refresh_refuses_expired_orphaned_and_corrupted_sessions() {
     assert_eq!(r.status, StatusCode::UNAUTHORIZED);
     assert_eq!(message(&r), "compte inconnu");
 
+    // compte désactivé entre-temps : le jeton de rafraîchissement ne le réveille pas
+    let disabled = h
+        .forge
+        .store
+        .accounts
+        .create(Account::new(
+            "gele@b.co".into(),
+            "suspended".into(),
+            h.forge.dummy_hash.clone(),
+        ))
+        .await
+        .unwrap();
+    let frozen = "forge-refresh-compte-gele";
+    h.forge
+        .store
+        .sessions
+        .create(Session::new(
+            sha256_hex(frozen.as_bytes()),
+            "active".into(),
+            disabled.id.to_string(),
+            now_secs() as i64 + 600,
+        ))
+        .await
+        .unwrap();
+    let r = h
+        .call(
+            "POST",
+            "/v1/auth/refresh",
+            None,
+            Some(json!({"refresh": frozen})),
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::UNAUTHORIZED);
+    assert_eq!(message(&r), "compte inconnu");
+
     // session corrompue (`account_id` qui n'est pas un uuid) : 500 propre, pas de panique
     let broken = "forge-refresh-corrompu";
     h.forge
@@ -549,12 +584,30 @@ async fn logout_needs_a_token_and_revokes_every_session_of_the_account() {
         )
         .await;
     assert!(h.forge.store.sessions.list().await.unwrap().len() >= 2);
+    // une AUTRE personne est connectée en même temps : son jeton de rafraîchissement doit
+    // survivre au logout d'Alice
+    let (tb, refresh_b, _) = h.signup("bob@b.co").await;
+    let _ = tb;
     let out = h.call("POST", "/v1/auth/logout", Some(&t), None).await;
     assert_eq!(out.status, StatusCode::NO_CONTENT);
     assert_eq!(out.bytes.len(), 0, "un 204 n'a pas de corps");
+    let left = h.forge.store.sessions.list().await.unwrap();
+    assert_eq!(
+        left.len(),
+        1,
+        "le logout a révoqué trop de sessions : {left:?}"
+    );
     assert!(
-        h.forge.store.sessions.list().await.unwrap().is_empty(),
-        "des jetons de rafraîchissement survivent au logout"
+        h.call(
+            "POST",
+            "/v1/auth/refresh",
+            None,
+            Some(json!({"refresh": refresh_b}))
+        )
+        .await
+        .status
+            == StatusCode::OK,
+        "le logout d'Alice a révoqué le jeton de Bob"
     );
 }
 
