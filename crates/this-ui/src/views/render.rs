@@ -88,6 +88,7 @@ fn next_id(prefix: &str) -> String {
 /// lose what someone was typing.
 pub fn render_view(ctx: Ctx, view: &ViewDesc) -> AnyView {
     let title = placement::title(view);
+    let heading = placement::shows_title(view).then(|| title.clone());
     let classes = view_classes(view);
     let label = title.clone();
     let root = view.root.clone();
@@ -96,7 +97,7 @@ pub fn render_view(ctx: Ctx, view: &ViewDesc) -> AnyView {
     let tree = render_node(ctx, &root);
     view! {
         <section class=classes aria-label=label>
-            <h2 class=class::VIEW_TITLE>{title}</h2>
+            {heading.map(|heading| view! { <h2 class=class::VIEW_TITLE>{heading}</h2> })}
             {move || gate_tile(ctx, state.get())}
             <div class=class::VIEW_BODY hidden=move || state.get() != ViewState::Ready>
                 {tree}

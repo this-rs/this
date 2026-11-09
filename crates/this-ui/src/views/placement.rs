@@ -208,6 +208,16 @@ pub fn title(view: &ViewDesc) -> String {
     }
 }
 
+/// Whether the view draws its title as a heading.
+///
+/// A bar is not a page: on [`Surface::Header`] the view's name is an identifier the author
+/// chose for the contract (`entete`), not something to read, and a heading in a one-line bar
+/// takes the room the bar's own content needs. The title stays on the wrapper as its
+/// accessible name (`aria-label`); only the visible heading is dropped.
+pub fn shows_title(view: &ViewDesc) -> bool {
+    view.surface != Surface::Header
+}
+
 /// Turn a contract identifier into something a person can read: underscores become
 /// spaces, the first letter is capitalised. The contract has no label field, so this is
 /// the best a brick can do with a bare name.
@@ -246,6 +256,21 @@ mod tests {
             .iter()
             .map(|view| view.name.clone())
             .collect()
+    }
+
+    #[test]
+    fn a_header_view_draws_no_heading_but_a_page_does() {
+        assert!(!shows_title(&view("entete", Surface::Header, None)));
+        for surface in [
+            Surface::Main,
+            Surface::Sidebar,
+            Surface::Panel,
+            Surface::Chat,
+        ] {
+            assert!(shows_title(&view("detail", surface, None)), "{surface:?}");
+        }
+        // The accessible name survives: the title is still computed.
+        assert_eq!(title(&view("entete", Surface::Header, None)), "Entete");
     }
 
     #[test]
