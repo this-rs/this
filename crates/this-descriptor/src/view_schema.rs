@@ -302,6 +302,11 @@ pub fn view_schema() -> ViewSchema {
         type_grammar: vec![
             "string, bool, u32: JSON scalars".into(),
             "filter: a filter expression, see `filter`".into(),
+            "context: `{\"$context\": \"<key>\"}` as a `cmp` value: a value the host provides \
+             when the view is drawn (the open conversation, the selected row…), not one \
+             written in the module. The host documents its keys; an unknown key is `null` \
+             and matches no row."
+                .into(),
             "node: a container or leaf, see `nodes`".into(),
             "brick: a brick, see `bricks`".into(),
             "enum:<Name>: one of the strings of `enums[Name]`".into(),
@@ -617,10 +622,13 @@ fn bricks() -> Vec<VariantSchema> {
         ),
         brick_v(
             "message",
-            "One message of a conversation: its author and its content.",
+            "A message bubble per row read: its author and its content. Filtered on one row, it \
+             is one message; filtered on a conversation (`{\"$context\": \"conversation\"}`), \
+             it is the thread — without the input, which `chat` has.",
             vec![entity_f(), filter_f()],
             json!({"type": "message", "entity": "conversation"}),
-            json!({"type": "message", "entity": "conversation", "filter": f}),
+            json!({"type": "message", "entity": "conversation",
+                   "filter": {"cmp": {"field": "titre", "op": "eq", "value": {"$context": "conversation"}}}}),
             false,
         ),
         brick_v(
@@ -928,14 +936,21 @@ fn filter_variants() -> Vec<VariantSchema> {
         variant(
             "cmp",
             "A comparison. `field` is a path (`amount`, or `target.name` through a link); `op` is one of \
-             eq, ne, gt, gte, lt, lte, in, contains, starts_with, is_null.",
+             eq, ne, gt, gte, lt, lte, in, contains, starts_with, is_null. `value` may be a \
+             context reference, `{\"$context\": \"<key>\"}`: the host fills it in when the view \
+             is drawn (see `context` in the type grammar).",
             vec![
                 req("field", "string", "The field compared.").refers("field"),
                 req("op", "enum:FilterOp", "The operator."),
-                req("value", "json", "The value compared (any JSON)."),
+                req(
+                    "value",
+                    "json",
+                    "The value compared (any JSON), or `{\"$context\": \"<key>\"}` for a value the \
+                     host provides at render time.",
+                ),
             ],
             json!({"cmp": {"field": "amount", "op": "gt", "value": 0}}),
-            json!({"cmp": {"field": "titre", "op": "starts_with", "value": "A"}}),
+            json!({"cmp": {"field": "conversation", "op": "eq", "value": {"$context": "conversation"}}}),
         ),
     ]
 }
@@ -1384,8 +1399,9 @@ fn coverage() -> Vec<CoverageEntry> {
         ),
         cover(
             "chat",
-            &["brick:chat"],
-            "Thread and input; `tool_step` draws a tool step inside it.",
+            &["brick:chat", "brick:message"],
+            "Thread and input (`chat`); a bubble per row read, filtered on the open conversation \
+             through `{\"$context\": \"conversation\"}` (`message`); `tool_step` draws a tool step.",
         ),
         cover(
             "metrics",

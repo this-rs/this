@@ -11,12 +11,13 @@
 //! makes loading, emptiness, failure and refusal four distinct renders instead of one
 //! blank screen.
 
+use std::borrow::Cow;
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
 
 use serde_json::Value;
 use this_descriptor::engine::query::{get_path, matches};
-use this_descriptor::{FilterExpr, FilterOp, SortDir, SortSpec};
+use this_descriptor::{Context, FilterExpr, FilterOp, SortDir, SortSpec};
 
 use crate::views::text;
 
@@ -46,6 +47,10 @@ pub struct Snapshot {
     pub feeds: Feeds,
     /// Read by `Indicator::Connection`: the host is the one that can tell.
     pub online: bool,
+    /// The values a filter may refer to with `{"$context": "<key>"}`: what the host knows
+    /// and no row carries — the open conversation, the selected row, the signed-in person.
+    /// The host documents its keys; a module uses them without knowing their values.
+    pub context: Context,
 }
 
 impl Snapshot {
@@ -66,6 +71,23 @@ impl Snapshot {
     pub fn with(mut self, entity: impl Into<String>, feed: Feed) -> Self {
         self.feeds.insert(entity.into(), feed);
         self
+    }
+
+    /// Declare one value filters may refer to by `{"$context": key}`.
+    pub fn with_context(mut self, key: impl Into<String>, value: Value) -> Self {
+        self.context.insert(key.into(), value);
+        self
+    }
+
+    /// A brick's filter, with the host's values in place of its context references. A
+    /// filter without reference is borrowed, not copied.
+    pub fn resolve<'f>(&self, filter: Option<&'f FilterExpr>) -> Option<Cow<'f, FilterExpr>> {
+        let filter = filter?;
+        Some(if filter.needs_context() {
+            Cow::Owned(filter.resolve_context(&self.context))
+        } else {
+            Cow::Borrowed(filter)
+        })
     }
 }
 
@@ -134,9 +156,10 @@ pub fn read<'a>(
         Some(Feed::Denied(message)) => return Reading::Denied(message),
         None => return Reading::Unknown,
     };
+    let filter = snapshot.resolve(filter);
     let mut selected: Vec<&Value> = rows
         .iter()
-        .filter(|row| filter.is_none_or(|filter| matches(filter, row)))
+        .filter(|row| filter.as_deref().is_none_or(|filter| matches(filter, row)))
         .collect();
     let total = selected.len();
     if total == 0 {
@@ -173,8 +196,9 @@ pub fn first<'a>(
     filter: Option<&FilterExpr>,
 ) -> Option<&'a Value> {
     let rows = snapshot.rows(entity)?;
+    let filter = snapshot.resolve(filter);
     rows.iter()
-        .find(|row| filter.is_none_or(|filter| matches(filter, row)))
+        .find(|row| filter.as_deref().is_none_or(|filter| matches(filter, row)))
 }
 
 /// The row a brick targets, when it targets exactly one: used to carry an identifier on a
@@ -581,5 +605,60 @@ mod tests {
             Some("b".to_owned())
         );
         assert_eq!(target_id(&snapshot, "ghost", None), None);
+    }
+
+    #[test]
+    fn a_context_reference_in_a_filter_reads_the_host_value_at_read_time() {
+        let filter = FilterExpr::Cmp {
+            field: "conversation".into(),
+            op: FilterOp::Eq,
+            value: json!({ "$context": "conversation" }),
+        };
+        let rows = vec![
+            json!({"id": "m1", "conversation": "c-1"}),
+            json!({"id": "m2", "conversation": "c-2"}),
+            json!({"id": "m3", "conversation": "c-1"}),
+        ];
+        let open_c1 = Snapshot::new()
+            .with("message", Feed::Ready(rows.clone()))
+            .with_context("conversation", json!("c-1"));
+        let reading = read(&open_c1, "message", Some(&filter), &[], 0, None);
+        assert_eq!(ids(&reading), vec!["m1", "m3"]);
+        assert_eq!(
+            first(&open_c1, "message", Some(&filter)).and_then(|row| row.get("id")),
+            Some(&json!("m1"))
+        );
+
+        // The same filter, another context: the module wrote nothing new.
+        let open_c2 = Snapshot::new()
+            .with("message", Feed::Ready(rows.clone()))
+            .with_context("conversation", json!("c-2"));
+        assert_eq!(
+            ids(&read(&open_c2, "message", Some(&filter), &[], 0, None)),
+            vec!["m2"]
+        );
+
+        // No such key in the context: nothing, said as `Empty`, never every row.
+        let no_context = Snapshot::new().with("message", Feed::Ready(rows));
+        assert_eq!(
+            read(&no_context, "message", Some(&filter), &[], 0, None),
+            Reading::Empty
+        );
+        assert_eq!(first(&no_context, "message", Some(&filter)), None);
+    }
+
+    #[test]
+    fn a_filter_without_reference_is_borrowed_not_copied() {
+        let plain = FilterExpr::Cmp {
+            field: "amount".into(),
+            op: FilterOp::Gt,
+            value: json!(0),
+        };
+        let snapshot = invoices().with_context("conversation", json!("c-1"));
+        assert!(matches!(
+            snapshot.resolve(Some(&plain)),
+            Some(Cow::Borrowed(_))
+        ));
+        assert!(snapshot.resolve(None).is_none());
     }
 }

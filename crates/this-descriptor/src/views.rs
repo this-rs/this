@@ -276,7 +276,9 @@ pub enum Brick {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         filter: Option<FilterExpr>,
     },
-    /// UN message d'une conversation : l'auteur (rôle) et le contenu d'une ligne. C'est la
+    /// Une bulle par ligne lue : l'auteur (rôle) et le contenu. Filtrée sur UNE ligne, c'est
+    /// un message ; filtrée sur la conversation ouverte (`{"$context": "conversation"}`,
+    /// voir [`crate::FilterExpr`]), c'est le fil — sans la saisie, que `Chat` porte. C'est la
     /// brique qui permet à un module de redessiner CE QU'UNE BULLE DIT et à quoi elle
     /// ressemble, là où `Chat` ne savait rendre qu'une liste brute de l'entité du module.
     Message {

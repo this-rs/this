@@ -1768,9 +1768,10 @@ fn chat(ctx: Ctx, entity: &str, filter: Option<&FilterExpr>) -> AnyView {
     .into_any()
 }
 
-/// Une bulle de conversation : UNE ligne, son auteur et son contenu. C'est la brique que
-/// le fil utilisera pour qu'un module puisse redessiner chaque message — le contenu reste
-/// celui de la ligne, la forme est celle du contrat.
+/// Une bulle par ligne lue : son auteur et son contenu. Filtrée sur une ligne, c'est UN
+/// message ; filtrée sur la conversation ouverte (`{"$context": "conversation"}`), c'est le
+/// fil, dans l'ordre des lignes. C'est la brique qui permet à un module de redessiner chaque
+/// message — le contenu reste celui de la ligne, la forme est celle du contrat.
 fn message(ctx: Ctx, entity: &str, filter: Option<&FilterExpr>) -> AnyView {
     let entity = entity.to_owned();
     let filter = filter.cloned();
@@ -1783,23 +1784,24 @@ fn message(ctx: Ctx, entity: &str, filter: Option<&FilterExpr>) -> AnyView {
     let log = move || {
         let snapshot = ctx.data.get();
         match data::read(&snapshot, &entity, filter.as_ref(), &[], 0, None) {
-            Reading::Rows(rows) => {
-                let row = rows.rows.into_iter().next();
-                let Some(row) = row else {
-                    return tile_for(ctx, &entity, &Reading::Empty, text::NOTHING).into_any();
-                };
-                let text = data::display(data::value_of(&row, &content));
-                let who = data::value_of(&row, &author).map(|value| data::display(Some(value)));
-                view! {
-                    <div class=class::MESSAGE>
-                        {who.map(|who| {
-                            view! { <span class=class::MESSAGE_META>{who}</span> }.into_any()
-                        })}
-                        <span>{text}</span>
-                    </div>
-                }
-                .into_any()
-            }
+            Reading::Rows(rows) => rows
+                .rows
+                .into_iter()
+                .map(|row| {
+                    let text = data::display(data::value_of(row, &content));
+                    let who = data::value_of(row, &author).map(|value| data::display(Some(value)));
+                    view! {
+                        <div class=class::MESSAGE>
+                            {who.map(|who| {
+                                view! { <span class=class::MESSAGE_META>{who}</span> }.into_any()
+                            })}
+                            <span>{text}</span>
+                        </div>
+                    }
+                    .into_any()
+                })
+                .collect_view()
+                .into_any(),
             other => tile_for(ctx, &entity, &other, text::NOTHING),
         }
     };
