@@ -835,6 +835,43 @@ pub fn issues(m: &ModuleDescriptor) -> Vec<(&'static str, String, String)> {
     issues_over(m, vues)
 }
 
+/// Same verdict as [`issues`], but the entities a view may name also include those declared by
+/// the modules `m` requires (transitively), looked up in `known`. A module that lists an
+/// entity owned by a module it does NOT require is still refused (`view_entity_unknown`).
+///
+/// `known` may hold every module of the host, `m` itself included: only the transitive
+/// `requires` of `m` are read, and an entity `m` declares itself wins over a required one.
+/// [`issues`] is unchanged: it knows the module alone.
+pub fn issues_with_required(m: &ModuleDescriptor, known: &[&ModuleDescriptor]) -> Vec<Issue> {
+    let mut reach: BTreeSet<&str> = BTreeSet::new();
+    let mut stack: Vec<&str> = m.requires.iter().map(|r| r.name.as_str()).collect();
+    while let Some(name) = stack.pop() {
+        if name == m.name || !reach.insert(name) {
+            continue;
+        }
+        if let Some(dep) = known.iter().find(|k| k.name == name) {
+            stack.extend(dep.requires.iter().map(|r| r.name.as_str()));
+        }
+    }
+    let required: Vec<&ModuleDescriptor> = known
+        .iter()
+        .copied()
+        .filter(|k| k.name != m.name && reach.contains(k.name.as_str()))
+        .collect();
+    let vues: Vec<&ViewDesc> = m.views.iter().collect();
+    let mut c = Checks::new(m, vues);
+    for dep in required {
+        for e in &dep.entities {
+            c.entities.entry(e.name.as_str()).or_insert(e);
+        }
+    }
+    c.operations();
+    c.actions();
+    c.views();
+    c.replacements();
+    c.out
+}
+
 /// A reported problem: `(reason, path, message)`.
 pub type Issue = (&'static str, String, String);
 
@@ -2117,6 +2154,81 @@ mod tests {
         Node::Leaf {
             brick: Box::new(brick(json)),
         }
+    }
+
+    // ---------- issues_with_required ----------
+
+    /// Un module sans entité dont une vue liste `entite`, qui requiert `requis`.
+    fn liste_de(entite: &str, requis: &[&str]) -> ModuleDescriptor {
+        let mut m = ModuleDescriptor::new("menu", "1.0.0");
+        m.requires = requis
+            .iter()
+            .map(|n| crate::module::ModuleReq {
+                name: n.to_string(),
+                version: "*".into(),
+                optional: false,
+            })
+            .collect();
+        m.views.push(view(
+            "liste",
+            leaf(&format!(
+                r#"{{"type":"list","entity":"{entite}","label":"titre"}}"#
+            )),
+        ));
+        m
+    }
+
+    fn socle_de(entite: &str) -> ModuleDescriptor {
+        let mut s = ModuleDescriptor::new("socle", "1.0.0");
+        let mut e = EntityDesc::new(entite);
+        e.fields = vec![FieldDesc::new("titre", FieldType::String)];
+        s.entities.push(e);
+        s
+    }
+
+    #[test]
+    fn une_vue_qui_liste_l_entite_d_un_module_requis_passe() {
+        let socle = socle_de("conversation");
+        let menu = liste_de("conversation", &["socle"]);
+        // `issues` seul ne connaît que le module : l'entité lui est inconnue (inchangé).
+        assert!(!issues(&menu).is_empty());
+        assert!(issues_with_required(&menu, &[&socle, &menu]).is_empty());
+    }
+
+    #[test]
+    fn la_meme_vue_sur_l_entite_d_un_module_non_requis_est_refusee_et_nommee() {
+        let socle = socle_de("conversation");
+        let menu = liste_de("conversation", &[]);
+        let refus = issues_with_required(&menu, &[&socle, &menu]);
+        assert!(
+            refus.iter().any(|(raison, chemin, message)| {
+                *raison == "view_entity_unknown"
+                    && chemin.ends_with(".entity")
+                    && message.contains("conversation")
+            }),
+            "{refus:?}"
+        );
+    }
+
+    #[test]
+    fn les_requis_se_suivent_en_transitif_et_un_cycle_ne_boucle_pas() {
+        let socle = socle_de("conversation");
+        let mut milieu = ModuleDescriptor::new("milieu", "1.0.0");
+        milieu.requires = vec![crate::module::ModuleReq {
+            name: "socle".into(),
+            version: "*".into(),
+            optional: false,
+        }];
+        // `socle` requiert `menu` : un cycle que `resolve` signale, ici on ne doit pas boucler.
+        let mut socle_cyclique = socle.clone();
+        socle_cyclique.requires = vec![crate::module::ModuleReq {
+            name: "menu".into(),
+            version: "*".into(),
+            optional: false,
+        }];
+        let menu = liste_de("conversation", &["milieu"]);
+        assert!(issues_with_required(&menu, &[&socle, &milieu, &menu]).is_empty());
+        assert!(issues_with_required(&menu, &[&socle_cyclique, &milieu, &menu]).is_empty());
     }
 
     fn leaf_view(name: &str, json: &str) -> ViewDesc {
