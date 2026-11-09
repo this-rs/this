@@ -10,4 +10,14 @@ ignore = [
     # tokio-tar PAX extended header parsing — transitive via testcontainers
     # Only affects dev/test dependencies. No fixed version available.
     "RUSTSEC-2025-0111",
+
+    # libsqlite3-sys 0.37.0 via SQLite CVE-2026-119375 — transitive via
+    # sqlx-sqlite, the OPTIONAL sqlite driver of sqlx. Measured on 09/11/2026:
+    # no feature of this workspace enables it (`cargo tree --all-features`
+    # contains zero sqlite crate), so the vulnerable C code is never compiled
+    # nor linked. The advisory is in Cargo.lock only because a lock file lists
+    # optional dependencies whatever the features.
+    # No fix is reachable: the fix needs libsqlite3-sys >= 0.39, and
+    # sqlx-sqlite 0.9.0 — the latest published — pins ^0.37.
+    "RUSTSEC-2026-0459",
 ]
