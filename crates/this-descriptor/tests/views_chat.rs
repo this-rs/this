@@ -32,6 +32,14 @@ fn une_vue_de_chat_avec_des_messages_passe_le_contrat() {
     });
 
     d.normalize();
-    let issues = d.check(&Default::default(), CheckProfile::Stored { allow_public: false });
-    assert!(issues.is_ok(), "le fil de chat est un contrat valide : {issues:?}");
+    let issues = d.check(
+        &Default::default(),
+        CheckProfile::Stored {
+            allow_public: false,
+        },
+    );
+    assert!(
+        issues.is_ok(),
+        "le fil de chat est un contrat valide : {issues:?}"
+    );
 }

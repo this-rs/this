@@ -1349,7 +1349,9 @@ fn lectures(b: &Brick) -> Vec<&str> {
                 chemins_du_filtre(f, &mut v);
             }
         }
-        Brick::Button { filter, .. } | Brick::Chat { filter, .. } | Brick::Message { filter, .. } => {
+        Brick::Button { filter, .. }
+        | Brick::Chat { filter, .. }
+        | Brick::Message { filter, .. } => {
             if let Some(f) = filter {
                 chemins_du_filtre(f, &mut v);
             }

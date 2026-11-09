@@ -815,7 +815,12 @@ fn actions() -> Vec<VariantSchema> {
             "Runs a named operation of the module: the only way a view reaches its code.",
             vec![
                 name(),
-                req("operation", "string", "The operation declared in `operations`.").refers("operation"),
+                req(
+                    "operation",
+                    "string",
+                    "The operation declared in `operations`.",
+                )
+                .refers("operation"),
                 opt("entity", "string", "The entity the operation targets.").refers("entity"),
             ],
             json!({"kind": "invoke", "name": "terminer", "operation": "terminer"}),
@@ -2158,7 +2163,8 @@ mod tests {
         fn with_operations(ops: &[(&str, &str)]) -> ModuleDescriptor {
             let mut m = fixture();
             for (name, entity) in ops {
-                m.operations.push(crate::OperationDesc::new(*name).entity(*entity));
+                m.operations
+                    .push(crate::OperationDesc::new(*name).entity(*entity));
             }
             m
         }
