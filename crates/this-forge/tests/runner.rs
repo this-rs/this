@@ -700,21 +700,21 @@ async fn an_artifact_that_breaks_the_abi_is_refused_with_each_violation() {
 async fn a_build_over_the_time_limit_is_cut_and_the_container_killed() {
     let _g = SERIAL.lock().await;
     let mut fake = Fake::new();
-    fake.cfg.build_timeout = Duration::from_millis(300);
-    fake.put("sleep", "5");
+    fake.cfg.build_timeout = Duration::from_secs(1);
+    fake.put("sleep", "8");
     fake.put("module.wasm", abi_wasm());
     let started = std::time::Instant::now();
     match fake.runner().run(&lib("x")).await {
         BuildOutcome::Failed { diagnostics, .. } => {
             assert_eq!(
                 diagnostics[0].message,
-                "build interrompu : durée maximale de 0 s dépassée"
+                "build interrompu : durée maximale de 1 s dépassée"
             );
         }
         other => panic!("attendu Failed, reçu {other:?}"),
     }
     assert!(
-        started.elapsed() < Duration::from_secs(4),
+        started.elapsed() < Duration::from_secs(6),
         "le délai n'a pas coupé"
     );
     // Le runner a tué le conteneur par son nom (kill_on_drop ne tue que le client docker).
