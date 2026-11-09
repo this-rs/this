@@ -640,3 +640,154 @@ fn a_response_at_the_very_end_of_the_memory_is_read() {
         b"fin!!"
     );
 }
+
+// ───────────────────────── bords restants ─────────────────────────
+
+#[test]
+fn growing_memory_inside_alloc_past_the_cap_is_a_memory_refusal() {
+    let wasm = raw(r#"(module
+        (memory (export "memory") 1)
+        (func (export "alloc") (param i32) (result i32)
+          (drop (memory.grow (i32.const 10))) (i32.const 0))
+        (func (export "echo1") (param i32 i32) (result i64) (i64.const 0)))"#);
+    let limits = Limits {
+        memory_pages: 2,
+        ..Limits::default()
+    };
+    match err(call_json(&wasm, "echo1", &Args::one(b"x"), &limits)) {
+        ExecutorError::Memory { limit_bytes, .. } => assert_eq!(limit_bytes, 2 * PAGE_BYTES),
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn running_out_of_fuel_inside_alloc_is_an_out_of_fuel_refusal() {
+    let wasm = raw(r#"(module
+        (memory (export "memory") 1)
+        (func (export "alloc") (param i32) (result i32) (loop $l (br $l)) (i32.const 0))
+        (func (export "echo1") (param i32 i32) (result i64) (i64.const 0)))"#);
+    let limits = Limits {
+        fuel: 3_000,
+        ..Limits::default()
+    };
+    let e = err(call_json(&wasm, "echo1", &Args::one(b"x"), &limits));
+    assert!(
+        matches!(e, ExecutorError::OutOfFuel { fuel: 3_000 }),
+        "{e:?}"
+    );
+}
+
+#[test]
+fn a_start_function_growing_memory_past_the_cap_is_refused_at_instantiation() {
+    let wasm = raw(r#"(module
+        (memory (export "memory") 1)
+        (func (export "alloc") (param i32) (result i32) (i32.const 0))
+        (func (export "hello") (result i64) (i64.const 0))
+        (func $start (drop (memory.grow (i32.const 50))))
+        (start $start))"#);
+    let limits = Limits {
+        memory_pages: 4,
+        ..Limits::default()
+    };
+    match err(call_json(&wasm, "hello", &Args::none(), &limits)) {
+        ExecutorError::Memory { limit_bytes, .. } => assert_eq!(limit_bytes, 4 * PAGE_BYTES),
+        ExecutorError::Trap(m) => assert!(m.starts_with("instanciation : "), "{m}"),
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn an_alloc_whose_block_ends_exactly_at_the_memory_end_is_accepted() {
+    // 65 533 + 3 = 65 536 : le dernier octet de la mémoire, pas un de plus.
+    let wasm = raw(r#"(module
+        (memory (export "memory") 1)
+        (func (export "alloc") (param i32) (result i32) (i32.const 65533))
+        (func (export "echo1") (param i32 i32) (result i64)
+          (i64.or (i64.shl (i64.extend_i32_u (local.get 0)) (i64.const 32))
+                  (i64.extend_i32_u (local.get 1)))))"#);
+    assert_eq!(
+        ok(default_call(&wasm, "echo1", &Args::one(b"abc"))).response,
+        b"abc"
+    );
+}
+
+#[test]
+fn a_second_input_that_does_not_fit_is_refused_with_its_own_length() {
+    // Le premier tampon tient ; le second, placé 8 octets avant la fin, dépasse.
+    let wasm = raw(r#"(module
+        (memory (export "memory") 1)
+        (global $n (mut i32) (i32.const 0))
+        (func (export "alloc") (param i32) (result i32)
+          (global.set $n (i32.add (global.get $n) (i32.const 1)))
+          (if (result i32) (i32.eq (global.get $n) (i32.const 1))
+            (then (i32.const 100))
+            (else (i32.const 65528))))
+        (func (export "echo2") (param i32 i32 i32 i32) (result i64) (i64.const 0)))"#);
+    match err(default_call(
+        &wasm,
+        "echo2",
+        &Args::two(b"ab", b"0123456789"),
+    )) {
+        ExecutorError::BadBuffer {
+            ptr,
+            len,
+            size,
+            why,
+        } => {
+            assert_eq!((ptr, len, size), (65528, 10, PAGE_BYTES));
+            assert!(why.contains("65528+10 dépasse"), "{why}");
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn a_response_length_with_the_high_bit_set_is_refused_not_wrapped() {
+    // len = 0xFFFF_FFFF : refusé comme réponse trop grande, jamais lu comme -1.
+    let wasm = module(r#"(func (export "huge") (result i64) (i64.const 0xFFFFFFFF))"#);
+    let e = err(default_call(&wasm, "huge", &Args::none()));
+    assert!(
+        matches!(e, ExecutorError::ResponseTooLarge { len: 4_294_967_295, max } if max == PAGE_BYTES),
+        "{e:?}"
+    );
+}
+
+#[test]
+fn a_zero_length_response_anywhere_in_memory_is_empty() {
+    // ptr = 0xFFFF_FFFF (hors i32 positif) mais len = 0 : `usable` refuse le décalage négatif.
+    let wasm = module(
+        r#"(func (export "neg") (result i64) (i64.or (i64.shl (i64.const 0xFFFFFFFF) (i64.const 32)) (i64.const 0)))"#,
+    );
+    match err(default_call(&wasm, "neg", &Args::none())) {
+        ExecutorError::BadBuffer { ptr, len, why, .. } => {
+            assert_eq!((ptr, len), (-1, 0));
+            assert!(why.contains("n'est pas un décalage"), "{why}");
+        }
+        other => panic!("{other:?}"),
+    }
+    // Et à la borne exacte (ptr = taille mémoire, len = 0) la lecture vide passe.
+    let wasm =
+        module(r#"(func (export "end") (result i64) (i64.shl (i64.const 65536) (i64.const 32)))"#);
+    assert_eq!(ok(default_call(&wasm, "end", &Args::none())).response, b"");
+}
+
+#[test]
+fn fuel_used_grows_with_the_work_done() {
+    let wasm = module(
+        r#"(func (export "work") (param i32 i32) (result i64)
+             (local $i i32)
+             (loop $l
+               (local.set $i (i32.add (local.get $i) (i32.const 1)))
+               (br_if $l (i32.lt_u (local.get $i) (local.get 1))))
+             (i64.const 0))"#,
+    );
+    let few = ok(default_call(&wasm, "work", &Args::one(&[0u8; 5])));
+    let many = ok(default_call(&wasm, "work", &Args::one(&[0u8; 100])));
+    assert!(few.fuel_used > 0);
+    assert!(
+        many.fuel_used > few.fuel_used,
+        "{} <= {}",
+        many.fuel_used,
+        few.fuel_used
+    );
+}

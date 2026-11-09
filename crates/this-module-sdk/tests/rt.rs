@@ -207,3 +207,40 @@ fn the_export_macro_generates_functions_that_delegate_to_the_runtime() {
             .len()
     );
 }
+
+#[test]
+fn run_keeps_the_body_op_when_the_argument_is_empty_and_inserts_nothing_in_non_objects() {
+    // `op` vide : le corps fait foi même s'il contient un champ `op` inconnu du vocabulaire.
+    let e = error(rt::run::<Echo>(b"", br#"{"op":"frobnicate"}"#));
+    assert_eq!(e.code, "bad_request");
+    // Un scalaire JSON n'est pas une requête, avec ou sans argument `op`.
+    let e = error(rt::run::<Echo>(b"", b"42"));
+    assert!(
+        e.message.starts_with("requête invalide : "),
+        "{}",
+        e.message
+    );
+    let e = error(rt::run::<Echo>(b"get", b"null"));
+    assert!(
+        e.message.starts_with("requête invalide : "),
+        "{}",
+        e.message
+    );
+}
+
+#[test]
+fn run_reports_the_parse_position_of_an_unreadable_body() {
+    let e = error(rt::run::<Echo>(b"get", br#"{"op":"get","rows":[1,2"#));
+    assert_eq!(e.code, "bad_request");
+    assert!(e.message.contains("EOF while parsing"), "{}", e.message);
+}
+
+#[test]
+fn a_failed_handle_still_clears_the_inbox_and_replaces_the_output() {
+    // Deux `handle` d'affilée sur des entrées vides rendent la même longueur : la sortie est
+    // remplacée, pas accumulée, et les blocs d'`alloc` sont libérés à la sortie.
+    let _ = rt::alloc(16);
+    let a = packed_len(rt::handle::<Echo>(0, 0, 0, 0));
+    let b = packed_len(rt::handle::<Echo>(0, 0, 0, 0));
+    assert_eq!(a, b);
+}
