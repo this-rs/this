@@ -64,7 +64,9 @@ mod wire;
 pub use context::{Dropped, Fitted, Removal, estimate_tokens, fit, removable};
 pub use event::{Event, HintKind, Outcome, Pending, Snapshot};
 pub use mcp::{McpLink, McpServer, McpToolbox};
-pub use ports::{Cancel, Compactor, Delta, Recorder, Recorders, Toolbox, Toolboxes, Transport};
+pub use ports::{
+    Cancel, Compactor, Delta, Permission, Recorder, Recorders, Toolbox, Toolboxes, Transport,
+};
 pub use recall::{Anchors, Citation, Fact, Recall, anchors, rappel};
 pub use search::{SearchHit, SearchLink, SearchToolbox};
 pub use session::{

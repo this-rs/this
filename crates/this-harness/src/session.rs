@@ -28,7 +28,7 @@ use std::task::Poll;
 use async_trait::async_trait;
 
 use crate::event::{Event, HintKind, Outcome, Pending, Snapshot};
-use crate::ports::{Cancel, Compactor, Delta, Recorder, Recorders, Toolbox, Transport};
+use crate::ports::{Cancel, Compactor, Delta, Permission, Recorder, Recorders, Toolbox, Transport};
 use crate::wire::{
     Code, Failure, Finish, ImagePart, Message, Reply, Request, ThreadDefect, ToolCall,
 };
@@ -1102,7 +1102,7 @@ impl Harness {
         // qu'un objectif suivant n'ouvre un autre run.
         let mut verdict: Option<Verdict> = None;
         // Le dernier run arrêté (identité + état), pour `Recorder::stopped`.
-        let mut closed: Option<(String, Run)> = None;
+        let mut closed: Option<(String, Rc<RefCell<Run>>)> = None;
 
         'goals: loop {
             // 1. Le prochain message tenu ouvre un objectif. Sans message, il
@@ -1131,12 +1131,27 @@ impl Harness {
                 s.run_seq += 1;
                 format!("run-{}", s.run_seq)
             });
-            let mut run = Run::new(Goal::new(first.text.clone()), limits.max_tours);
-            run.max_relances = limits.max_relances;
-            run.declare(toolbox.declarations());
+            let run = Rc::new(RefCell::new(Run::new(
+                Goal::new(first.text.clone()),
+                limits.max_tours,
+            )));
+            run.borrow_mut().max_relances = limits.max_relances;
+            run.borrow_mut().declare(toolbox.declarations());
             if let Some(budget) = limits.budget_ms {
-                run.budget(budget);
+                run.borrow_mut().budget(budget);
             }
+            // La porte du run, rendue au transport de la famille A avant le
+            // flux : la même décision que `gate` et la même journalisation que
+            // `run_tool`, hors-bande. Un transport qui n'exécute pas les outils
+            // lui-même l'ignore (`Transport::set_permission` est un défaut no-op).
+            transport.set_permission(Rc::new(RunPorts {
+                grants: self.grants.clone(),
+                toolbox: toolbox.clone(),
+                run: run.clone(),
+                run_id: run_id.clone(),
+                recorder: self.recorder.clone(),
+                clock: clock.clone(),
+            }));
             // Le budget se compte en temps HORLOGE depuis ici : temps du modèle compris. Ne
             // compter que la durée des outils laissait un flux de signes de vie tourner une
             // heure (revue V20). L'échéance arme la garde du flux ; la décision la relit.
@@ -1155,7 +1170,7 @@ impl Harness {
 
             'turns: loop {
                 if cancel.is_cancelled() {
-                    stop = Some(run.finish(Stop::Cancelled));
+                    stop = Some(run.borrow_mut().finish(Stop::Cancelled));
                     break 'turns;
                 }
 
@@ -1170,9 +1185,9 @@ impl Harness {
                 // ou le retirer (`run.budget_ms = None`) tout en restant bornée
                 // sur les tours — deux bornes dont une seule tenait. Un plafond
                 // de zéro arrête avant le premier tour.
-                let budget_epuise = limits.budget_ms.is_some_and(|b| run.ecoule_ms >= b);
+                let budget_epuise = limits.budget_ms.is_some_and(|b| run.borrow().ecoule_ms >= b);
                 if goal_turns >= limits.max_tours || budget_epuise {
-                    stop = Some(run.finish(Stop::Budget));
+                    stop = Some(run.borrow_mut().finish(Stop::Budget));
                     break 'turns;
                 }
 
@@ -1203,7 +1218,7 @@ impl Harness {
                             format!("fil invalide : réponse d'outil sans appel (message {index})")
                         }
                     };
-                    stop = Some(run.finish(Stop::Failed(raison)));
+                    stop = Some(run.borrow_mut().finish(Stop::Failed(raison)));
                     break 'turns;
                 }
                 // Le temps du TOUR est de l'horloge murale : mesuré autour du
@@ -1218,7 +1233,7 @@ impl Harness {
                 // celui-ci (elle ne rejoue que l'appel au modèle). Comparer à
                 // `run.steps.is_empty()` interdisait toute relance dès le
                 // deuxième tour d'un objectif qui avait appelé un outil.
-                let steps_at_turn = run.steps.len();
+                let steps_at_turn = run.borrow().steps.len();
                 let mut tentative = 0u32;
                 let issue: Result<Result<Reply, Failure>, Watch> = loop {
                     // Les derniers signes du flux : un tour qui commence en est
@@ -1282,7 +1297,7 @@ impl Harness {
                         && !failure.is_aborted()
                         && !cancel.is_cancelled()
                         && gathered.borrow().is_empty()
-                        && run.steps.len() == steps_at_turn
+                        && run.borrow().steps.len() == steps_at_turn
                         && tentative < MAX_RETRIES
                     {
                         tentative += 1;
@@ -1302,16 +1317,16 @@ impl Harness {
                     }
                     break issue;
                 };
-                run.add_elapsed((clock.now_ms() - turn_started).max(0.0) as u64);
+                run.borrow_mut().add_elapsed((clock.now_ms() - turn_started).max(0.0) as u64);
 
                 let reply = match issue {
                     Ok(Ok(reply)) => reply,
                     Ok(Err(failure)) => {
                         if failure.is_aborted() || cancel.is_cancelled() {
-                            stop = Some(run.finish(Stop::Cancelled));
+                            stop = Some(run.borrow_mut().finish(Stop::Cancelled));
                         } else {
                             code = Some(failure.code.as_str().to_string());
-                            stop = Some(run.finish(Stop::Failed(failure.message)));
+                            stop = Some(run.borrow_mut().finish(Stop::Failed(failure.message)));
                         }
                         break 'turns;
                     }
@@ -1367,14 +1382,14 @@ impl Harness {
                             });
                         }
                         code = panne.map(|panne| format!("{panne:?}").to_lowercase());
-                        horloge(&mut run);
-                        stop = Some(run.finish(arret));
+                        horloge(&mut *run.borrow_mut());
+                        stop = Some(run.borrow_mut().finish(arret));
                         break 'turns;
                     }
                 };
 
                 // Le temps du modèle compte : les étapes de ce tour sont datées après lui.
-                horloge(&mut run);
+                horloge(&mut *run.borrow_mut());
                 let streamed = gathered.borrow().clone();
                 let text = if reply.text.is_empty() {
                     streamed
@@ -1407,7 +1422,7 @@ impl Harness {
                         content: text.clone(),
                         calls: Vec::new(),
                     });
-                    stop = Some(run.finish(motif));
+                    stop = Some(run.borrow_mut().finish(motif));
                     break 'turns;
                 }
 
@@ -1442,14 +1457,14 @@ impl Harness {
                         continue;
                     }
                     let (outcome, dropped) = self
-                        .run_tool(toolbox.as_ref(), call, &run_id, &mut run, &cancel, &limits)
+                        .run_tool(toolbox.as_ref(), call, &run_id, &mut *run.borrow_mut(), &cancel, &limits)
                         .await;
                     if let Some(why) = dropped {
                         // Abandonné ne veut pas dire « pas fait » : l'étape
                         // vient d'être enregistrée, son effet est inconnu.
                         // Ni échec ni preuve, pour la décision comme pour le verdict.
-                        let index = run.steps.len().saturating_sub(1);
-                        run.effet_inconnu(index);
+                        let index = run.borrow().steps.len().saturating_sub(1);
+                        run.borrow_mut().effet_inconnu(index);
                         abandoned |= matches!(why, Watch::Abandoned(_));
                     }
                     self.push(Message::tool(call.id.clone(), outcome.text.clone()));
@@ -1460,7 +1475,7 @@ impl Harness {
                 // Un outil abandonné après la grâce se dit comme un flux
                 // abandonné : interrompu, code `aborted`.
                 if cancel.is_cancelled() {
-                    stop = Some(run.finish(if abandoned {
+                    stop = Some(run.borrow_mut().finish(if abandoned {
                         code = Some(format!("{:?}", Code::Aborted).to_lowercase());
                         Stop::Interrupted
                     } else {
@@ -1470,28 +1485,33 @@ impl Harness {
                 }
 
                 // La décision relit le budget en temps horloge, outils et modèle compris.
-                horloge(&mut run);
+                horloge(&mut *run.borrow_mut());
                 let spoke = !text.trim().is_empty();
                 let called = !reply.calls.is_empty();
                 // Le motif se lit AVANT la décision : `after_turn` déplace la
                 // frontière du tour, et le refus d'aujourd'hui ne serait plus
                 // visible après. Sans ça, une action refusée était suivie d'un
                 // « je m'arrête là » accepté comme une conclusion.
-                let hint = relaunch_reason(&run, spoke, called, clock.as_ref());
+                let hint = relaunch_reason(&run.borrow(), spoke, called, clock.as_ref());
                 // Son genre se lit au même instant, pour la même raison.
-                let hint_kind = relaunch_kind(&run);
+                let hint_kind = relaunch_kind(&run.borrow());
                 // Le récit du tour est confié à la décision : sans lui, « c'est
                 // fait » après un refus n'est jamais confronté aux étapes.
-                run.said(&text);
+                run.borrow_mut().said(&text);
                 // Ce que l'hôte déclare de ses outils, relu à chaque décision : un module
                 // installé pendant le run apporte ses déclarations avec ses outils.
-                run.declare(toolbox.declarations());
+                run.borrow_mut().declare(toolbox.declarations());
 
-                match run.after_turn_with(self.policy.as_ref(), spoke, called) {
+                // La décision est calculée PUIS relue : le garde `RefMut` de
+                // `after_turn_with` doit tomber avant que les bras ne reborrent
+                // le run (`take_rappel`, `finish`) — sinon double emprunt.
+                let decision =
+                    run.borrow_mut().after_turn_with(self.policy.as_ref(), spoke, called);
+                match decision {
                     Decision::Continue => {
                         // Le rappel est consommé dans tous les cas : laissé dans
                         // le run, il serait périmé au tour suivant.
-                        let rappel = run.take_rappel();
+                        let rappel = run.borrow_mut().take_rappel();
                         let hint = match (hint, rappel) {
                             (Some(hint), _) => Some((hint, hint_kind)),
                             (None, Some(rappel)) => Some((rappel, HintKind::Claim)),
@@ -1507,15 +1527,15 @@ impl Harness {
                         continue 'turns;
                     }
                     Decision::Halt(reason) => {
-                        stop = Some(run.finish(reason));
+                        stop = Some(run.borrow_mut().finish(reason));
                         break 'turns;
                     }
                 }
             }
-            verdict = Some(verdict_of(&run, &run.inconnues));
+            verdict = Some(verdict_of(&run.borrow(), &run.borrow().inconnues));
             // Le run qui a posé `stop` est retenu (déplacé, jamais cloné) pour l'annonce
             // finale : `run` et `run_id` ne survivent pas à l'objectif.
-            if run.stop.is_some() {
+            if run.borrow().stop.is_some() {
                 closed = Some((run_id, run));
             }
 
@@ -1551,7 +1571,11 @@ impl Harness {
             verdict,
         });
         if let Some((run_id, run)) = &closed {
-            guarded(clock.as_ref(), self.recorder.stopped(run_id, run, &stop)).await;
+            guarded(
+                clock.as_ref(),
+                self.recorder.stopped(run_id, &run.borrow(), &stop),
+            )
+            .await;
         }
         if let Some(finale) = garde.finale.take() {
             self.out.emit(finale);
@@ -1649,19 +1673,7 @@ impl Harness {
     /// Avec, l'effet déclaré est relu à CHAQUE appel (un module peut être installé en
     /// cours de run, comme pour le routage de `Toolboxes`).
     fn gate(&self, toolbox: &dyn Toolbox, tool: &str) -> Option<String> {
-        let grants = self.grants.as_ref()?;
-        let declarations = toolbox.declarations();
-        let Some(declaration) = declarations.iter().find(|d| d.tool == tool) else {
-            return Some(format!(
-                "« {tool} » n'a pas de déclaration d'effet : sans elle, aucun droit ne peut lui être accordé"
-            ));
-        };
-        match grants.allows(tool) {
-            this_agent::substrate::Verdict::Allow => None,
-            this_agent::substrate::Verdict::Refuse(why) => {
-                Some(format!("{why} (effet déclaré : {:?})", declaration.effect))
-            }
-        }
+        gate_decision(self.grants.as_ref(), &toolbox.declarations(), tool).err()
     }
 
     /// Ce que le hook de contexte rend pour ce tour. L'état n'est pas emprunté
@@ -1803,6 +1815,67 @@ impl Harness {
             self.out.emit(Event::Pending { messages: left });
         }
         first
+    }
+}
+
+/// La décision d'autorisation, isolée : la même porte pour `run_tool` (hors
+/// flux) et pour un transport de la famille A (dans le flux, via
+/// [`Permission`](crate::ports::Permission)).
+///
+/// `Ok(())` : l'outil peut partir. `Err(motif)` : le refus, exactement ce que
+/// [`Harness::gate`] transforme en `Outcome::refused`.
+fn gate_decision(
+    grants: Option<&this_agent::substrate::Grants>,
+    declarations: &[this_agent::evidence::Declaration],
+    tool: &str,
+) -> Result<(), String> {
+    let Some(grants) = grants else {
+        return Ok(());
+    };
+    let Some(declaration) = declarations.iter().find(|d| d.tool == tool) else {
+        return Err(format!(
+            "« {tool} » n'a pas de déclaration d'effet : sans elle, aucun droit ne peut lui être accordé"
+        ));
+    };
+    match grants.allows(tool) {
+        this_agent::substrate::Verdict::Allow => Ok(()),
+        this_agent::substrate::Verdict::Refuse(why) => {
+            Err(format!("{why} (effet déclaré : {:?})", declaration.effect))
+        }
+    }
+}
+
+/// La porte qu'un transport de la famille A reçoit pendant le flux : la même
+/// décision que [`Harness::gate`], et la même journalisation que `run_tool`.
+struct RunPorts {
+    grants: Option<this_agent::substrate::Grants>,
+    toolbox: Rc<dyn Toolbox>,
+    run: Rc<RefCell<Run>>,
+    run_id: String,
+    recorder: Rc<dyn Recorder>,
+    clock: Rc<dyn Clock>,
+}
+
+#[async_trait(?Send)]
+impl Permission for RunPorts {
+    fn allows(&self, tool: &str) -> Result<(), String> {
+        gate_decision(self.grants.as_ref(), &self.toolbox.declarations(), tool)
+    }
+
+    async fn record(&self, call: &ToolCall, ms: u64, outcome: &Outcome) {
+        let step = step_of(&call.name, ms, outcome);
+        {
+            let mut run = self.run.borrow_mut();
+            run.record(step);
+        }
+        let run = self.run.borrow();
+        if let Some(step) = run.steps.last() {
+            guarded(
+                self.clock.as_ref(),
+                self.recorder.step(&self.run_id, &run, step),
+            )
+            .await;
+        }
     }
 }
 
