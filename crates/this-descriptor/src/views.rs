@@ -835,14 +835,12 @@ pub fn issues(m: &ModuleDescriptor) -> Vec<(&'static str, String, String)> {
     issues_over(m, vues)
 }
 
-/// Same verdict as [`issues`], but the entities a view may name also include those declared by
-/// the modules `m` requires (transitively), looked up in `known`. A module that lists an
-/// entity owned by a module it does NOT require is still refused (`view_entity_unknown`).
-///
-/// `known` may hold every module of the host, `m` itself included: only the transitive
-/// `requires` of `m` are read, and an entity `m` declares itself wins over a required one.
-/// [`issues`] is unchanged: it knows the module alone.
-pub fn issues_with_required(m: &ModuleDescriptor, known: &[&ModuleDescriptor]) -> Vec<Issue> {
+/// The modules `m` requires, transitively, taken from `known` (in `known`'s order).
+/// `m` itself is never part of the result, and a `requires` cycle terminates.
+pub(crate) fn required_modules<'a>(
+    m: &ModuleDescriptor,
+    known: &[&'a ModuleDescriptor],
+) -> Vec<&'a ModuleDescriptor> {
     let mut reach: BTreeSet<&str> = BTreeSet::new();
     let mut stack: Vec<&str> = m.requires.iter().map(|r| r.name.as_str()).collect();
     while let Some(name) = stack.pop() {
@@ -853,11 +851,22 @@ pub fn issues_with_required(m: &ModuleDescriptor, known: &[&ModuleDescriptor]) -
             stack.extend(dep.requires.iter().map(|r| r.name.as_str()));
         }
     }
-    let required: Vec<&ModuleDescriptor> = known
+    known
         .iter()
         .copied()
         .filter(|k| k.name != m.name && reach.contains(k.name.as_str()))
-        .collect();
+        .collect()
+}
+
+/// Same verdict as [`issues`], but the entities a view may name also include those declared by
+/// the modules `m` requires (transitively), looked up in `known`. A module that lists an
+/// entity owned by a module it does NOT require is still refused (`view_entity_unknown`).
+///
+/// `known` may hold every module of the host, `m` itself included: only the transitive
+/// `requires` of `m` are read, and an entity `m` declares itself wins over a required one.
+/// [`issues`] is unchanged: it knows the module alone.
+pub fn issues_with_required(m: &ModuleDescriptor, known: &[&ModuleDescriptor]) -> Vec<Issue> {
+    let required = required_modules(m, known);
     let vues: Vec<&ViewDesc> = m.views.iter().collect();
     let mut c = Checks::new(m, vues);
     for dep in required {

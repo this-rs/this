@@ -3385,6 +3385,40 @@ mod tests_fil {
     use super::*;
     use serde_json::json;
 
+    // ---- le champ d'une entité d'un module requis --------------------------------------
+
+    fn module_requerant(entites: &[&str], requis: &[&str]) -> ModuleDescriptor {
+        let entites: Vec<_> = entites
+            .iter()
+            .map(|n| json!({"name": n, "fields": [{"name": "contenu", "ty": "text"}]}))
+            .collect();
+        let requis: Vec<_> = requis
+            .iter()
+            .map(|n| json!({"name": n, "version": "*"}))
+            .collect();
+        ModuleDescriptor::from_json(
+            &json!({"name": if requis.is_empty() { "socle" } else { "atelier" },
+                "version": "1.0.0", "requires": requis, "entities": entites})
+            .to_string(),
+        )
+        .expect("module")
+    }
+
+    /// LE défaut de l'appareil : une bulle dont l'entité appartient à un module REQUIS lisait
+    /// le champ « id » et affichait l'uuid. Avec le descripteur complété, elle lit `contenu`.
+    #[test]
+    fn le_champ_d_affichage_d_une_entite_d_un_module_requis_est_trouve() {
+        let socle = module_requerant(&["message"], &[]);
+        let atelier = module_requerant(&[], &["socle"]);
+        let voulus = ["content", "text", "body", "message", "contenu"];
+
+        let brut = StoredValue::new(atelier.clone());
+        assert_eq!(display_field(brut, "message", &voulus), "id", "la cause");
+
+        let complet = StoredValue::new(atelier.with_required_entities(&[&socle, &atelier]));
+        assert_eq!(display_field(complet, "message", &voulus), "contenu");
+    }
+
     // ---- les étapes d'outil d'une bulle --------------------------------------------------
 
     /// MESURÉ : le journal d'une bulle de l'Atelier est une LISTE d'objets rangée dans le
