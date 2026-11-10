@@ -540,7 +540,9 @@ mod tests {
     /// donnent la même largeur) ; seule la bulle de la personne est bornée, à 92 %.
     #[test]
     fn les_lignes_du_fil_ont_toute_la_largeur() {
-        assert!(CSS.contains(".vw-chat-log > .vw-message { box-sizing: border-box; min-width: 0; width: 100%; }"));
+        assert!(CSS.contains(
+            ".vw-chat-log > .vw-message { box-sizing: border-box; min-width: 0; width: 100%; }"
+        ));
         assert!(CSS.contains(".vw-chat-log > .vw-message-user { width: 92%; }"));
     }
 
