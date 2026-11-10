@@ -36,6 +36,7 @@ pub mod class {
     pub const MODAL_BODY: &str = "vw-modal-body";
 
     pub const TEXT: &str = "vw-text";
+    pub const CAPTION: &str = "vw-caption";
     pub const BUTTON: &str = "vw-btn";
     pub const ICON_BUTTON: &str = "vw-icon-btn";
     pub const BANNER: &str = "vw-banner";
@@ -164,6 +165,7 @@ pub const ALL: &[&str] = &[
     class::MODAL_HEAD,
     class::MODAL_BODY,
     class::TEXT,
+    class::CAPTION,
     class::BUTTON,
     class::ICON_BUTTON,
     class::BANNER,
@@ -350,6 +352,9 @@ pub const CSS: &str = r#"
 .vw-modal-body { display: flex; flex-direction: column; gap: 12px; }
 
 .vw-text { font: inherit; }
+.vw-caption { display: block; margin: 0; padding: 0; border: 0; background: none;
+  font-size: .8em; line-height: 1.3; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  color: var(--vw-muted, color-mix(in srgb, currentColor 60%, transparent)); }
 .vw-btn { min-height: 44px; min-width: 44px; padding: 0 14px; border-radius: 10px;
   border: 1px solid var(--vw-line, rgba(0,0,0,.16)); background: var(--vw-card, #fff);
   color: inherit; font: inherit; cursor: pointer; }
@@ -637,6 +642,22 @@ mod tests {
                 .unwrap_or_default()
                 .contains("min-width: 44px")
         );
+    }
+
+    #[test]
+    fn a_caption_is_small_muted_and_has_no_frame_nor_background() {
+        let block = rule_of(CSS, ".vw-caption").unwrap_or_default();
+        for needed in [
+            "font-size: .8em",
+            "border: 0",
+            "background: none",
+            "margin: 0",
+            "white-space: nowrap",
+            "text-overflow: ellipsis",
+            "--vw-muted",
+        ] {
+            assert!(block.contains(needed), "caption lacks `{needed}`: {block}");
+        }
     }
 
     #[test]

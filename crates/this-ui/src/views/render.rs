@@ -455,6 +455,13 @@ pub fn render_brick(ctx: Ctx, brick: &Brick) -> AnyView {
         } => value_brick(ctx, entity, filter.as_ref(), field, |value| {
             view! { <p class=class::TEXT>{value}</p> }.into_any()
         }),
+        Brick::Caption {
+            entity,
+            filter,
+            field,
+        } => value_brick(ctx, entity, filter.as_ref(), field, |value| {
+            view! { <small class=class::CAPTION>{value}</small> }.into_any()
+        }),
         Brick::Button {
             entity,
             filter,
