@@ -289,22 +289,55 @@ fn modal(ctx: Ctx, title: &str, children: &[Node]) -> AnyView {
         .collect_view();
     let heading = title.to_owned();
     let label = heading.clone();
+    // La feuille s'ouvre dessinée ; la refermer (croix, fond, Échap) est un geste LOCAL du
+    // rendu — la personne n'est jamais enfermée, même si le module n'a pas prévu de bouton.
+    // L'hôte en est averti par `Dismiss`. L'état DÉCLARÉ (ouvert/fermé) vit dans la condition
+    // d'un `when` qui enveloppe la feuille, fermée par une action du module.
+    let open = RwSignal::new(true);
+    let dismiss = move || {
+        if let Some(intent) = dismiss_intent(&ctx.view.get_value(), open.get_untracked()) {
+            open.set(false);
+            ctx.on_intent.run(intent);
+        }
+    };
+    let escape = window_event_listener(leptos::ev::keydown, move |ev: web_sys::KeyboardEvent| {
+        if is_escape(&ev.key()) {
+            dismiss();
+        }
+    });
+    on_cleanup(move || escape.remove());
     view! {
-        <section class=class::MODAL role="dialog" aria-modal="false" aria-label=label>
-            <div class=class::MODAL_HEAD>
-                <h3>{heading}</h3>
-                <button class=class::ICON_BUTTON aria-label=text::CLOSE title=text::CLOSE
-                    on:click=move |_| {
-                        let name = ctx.view.get_value();
-                        ctx.on_intent.run(Intent::Dismiss { view: name });
-                    }>
-                    <span aria-hidden="true">"×"</span>
-                </button>
-            </div>
-            <div class=class::MODAL_BODY>{items}</div>
-        </section>
+        <div class=class::MODAL_LAYER hidden=move || (!open.get()).then_some("hidden")>
+            <div class=class::MODAL_BACKDROP on:click=move |_| dismiss()></div>
+            <section class=class::MODAL role="dialog" aria-modal="true" aria-label=label>
+                <div class=class::MODAL_HEAD>
+                    <h3>{heading}</h3>
+                    <button class=class::ICON_BUTTON aria-label=text::CLOSE title=text::CLOSE
+                        on:click=move |_| dismiss()>
+                        <span aria-hidden="true">"×"</span>
+                    </button>
+                </div>
+                <div class=class::MODAL_BODY>{items}</div>
+            </section>
+        </div>
     }
     .into_any()
+}
+
+/// L'intention qu'émet un geste de fermeture (croix, fond, Échap) : l'hôte est averti que la
+/// feuille a été refermée. Une feuille déjà fermée n'émet rien — un second geste ne réveille
+/// pas un `Dismiss` fantôme.
+fn dismiss_intent(view: &str, was_open: bool) -> Option<Intent> {
+    was_open.then(|| Intent::Dismiss {
+        view: view.to_owned(),
+    })
+}
+
+/// La touche qui referme une feuille : `Escape`. (Le clic sur le fond est un événement DOM
+/// posé sur la couche, pas une décision testable sans navigateur ; la décision de la touche,
+/// elle, l'est.)
+fn is_escape(key: &str) -> bool {
+    key == "Escape"
 }
 
 // ---------------------------------------------------------------- tiles
@@ -3369,6 +3402,58 @@ mod tests {
             Some("7".to_owned())
         );
         assert_eq!(data::target_id(&snapshot, "customer", None), None);
+    }
+
+    /// Une feuille enveloppée dans un `when` : l'état d'ouverture EST la condition, portée
+    /// par une ligne de l'entité — la feuille n'est dessinée que si la condition tient.
+    #[test]
+    fn a_popup_draws_only_while_its_condition_holds() {
+        let filter = FilterExpr::Cmp {
+            field: "ouverte".into(),
+            op: this_descriptor::FilterOp::Eq,
+            value: json!("oui"),
+        };
+        let ouverte = Snapshot::new().with(
+            "popup",
+            Feed::Ready(vec![json!({"id": "1", "ouverte": "oui"})]),
+        );
+        assert_eq!(
+            data::condition(&ouverte, "popup", &filter),
+            data::Condition::Holds
+        );
+        let fermee = Snapshot::new().with(
+            "popup",
+            Feed::Ready(vec![json!({"id": "1", "ouverte": "non"})]),
+        );
+        assert_eq!(
+            data::condition(&fermee, "popup", &filter),
+            data::Condition::Fails
+        );
+        let absente = Snapshot::new().with("popup", Feed::Ready(vec![]));
+        assert_eq!(
+            data::condition(&absente, "popup", &filter),
+            data::Condition::Absent
+        );
+    }
+
+    /// Refermer une feuille émet un `Dismiss` UNE fois ; une feuille déjà fermée n'émet rien.
+    #[test]
+    fn closing_a_popup_emits_dismiss_only_while_open() {
+        assert_eq!(
+            dismiss_intent("detail", true),
+            Some(Intent::Dismiss {
+                view: "detail".into()
+            })
+        );
+        assert_eq!(dismiss_intent("detail", false), None);
+    }
+
+    /// `Escape` est la touche qui referme une feuille (le fond, lui, est un clic DOM).
+    #[test]
+    fn escape_is_the_key_that_closes_a_popup() {
+        assert!(is_escape("Escape"));
+        assert!(!is_escape("Enter"));
+        assert!(!is_escape(""));
     }
 }
 
