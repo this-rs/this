@@ -34,6 +34,8 @@ pub mod class {
     pub const MODAL: &str = "vw-modal";
     pub const MODAL_HEAD: &str = "vw-modal-head";
     pub const MODAL_BODY: &str = "vw-modal-body";
+    pub const MODAL_LAYER: &str = "vw-modal-layer";
+    pub const MODAL_BACKDROP: &str = "vw-modal-backdrop";
 
     pub const TEXT: &str = "vw-text";
     pub const CAPTION: &str = "vw-caption";
@@ -164,6 +166,8 @@ pub const ALL: &[&str] = &[
     class::MODAL,
     class::MODAL_HEAD,
     class::MODAL_BODY,
+    class::MODAL_LAYER,
+    class::MODAL_BACKDROP,
     class::TEXT,
     class::CAPTION,
     class::BUTTON,
@@ -345,8 +349,15 @@ pub const CSS: &str = r#"
   font-weight: 600; cursor: pointer; }
 .vw-drawer-body { padding: 8px 12px 12px; display: flex; flex-direction: column; gap: 8px; }
 
-.vw-modal { position: relative; border: 1px solid var(--vw-line, rgba(0,0,0,.12)); border-radius: 14px;
-  background: var(--vw-card, #fff); box-shadow: 0 18px 48px rgba(0,0,0,.18); padding: 12px; }
+.vw-modal-layer { position: fixed; inset: 0; z-index: 1000; display: flex;
+  align-items: center; justify-content: center; padding: 16px; }
+.vw-modal-layer[hidden] { display: none; }
+.vw-modal-backdrop { position: absolute; inset: 0;
+  background: var(--vw-backdrop, rgba(0,0,0,.5)); }
+.vw-modal { position: relative; z-index: 1; max-width: 100%; max-height: 100%; overflow: auto;
+  border: 1px solid var(--vw-line, rgba(0,0,0,.12)); border-radius: 14px;
+  background: var(--vw-card, #fff); color: var(--vw-ink, #16181d);
+  box-shadow: 0 18px 48px rgba(0,0,0,.18); padding: 12px; }
 .vw-modal-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .vw-modal-head h3 { margin: 0; font: 600 15px/1.3 inherit; }
 .vw-modal-body { display: flex; flex-direction: column; gap: 12px; }
