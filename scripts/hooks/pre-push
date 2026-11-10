@@ -1,26 +1,29 @@
-#!/bin/sh
-#
-# Ce que la CI vérifie, pour le savoir avant de pousser.
-#
-# `cargo fmt` ne suffit PAS : il ne voit que les membres du workspace, alors que le job
-# Rustfmt formate tous les fichiers suivis (`git ls-files '*.rs'`). `this-ui`,
-# `this-client-web`, `this-device-tauri` et `this-shell-tauri` sont hors workspace : une PR
-# est partie rouge alors qu'un `cargo fmt --check` local était vert.
-#
-# Installation : git config core.hooksPath scripts/hooks
-#
-# La version de rustfmt compte aussi. Le dépôt n'épingle aucune toolchain, donc la CI suit
-# le stable du jour ; si ce hook réclame un fichier que tu viens de formater, c'est que ton
-# rustfmt est plus ancien — `rustup update stable`.
+#!/usr/bin/env bash
+# pre-push : rustfmt + clippy sur les fichiers/paquets RÉELLEMENT modifiés.
+# La CI reste l'autorité sur toute la workspace. Ce hook doit être rapide et
+# ne jamais bloquer un push pour du code que le push n'a pas touché — mesuré
+# deux fois le 10/11/2026 : un fichier non formaté d'un autre agent, puis un
+# clippy::result_large_err dans le paquet racine que nos branches n'ont pas touché.
+set -euo pipefail
 
-set -e
+base=$(git merge-base origin/main HEAD 2>/dev/null || echo HEAD)
 
-echo "── rustfmt (tous les fichiers suivis, comme la CI) ──"
-git ls-files '*.rs' | xargs rustfmt --edition 2024 --check
-echo "✅ Formatting OK"
+echo "── rustfmt (fichiers modifiés) ──"
+fmt_files=$(git diff --name-only "$base" HEAD -- '*.rs')
+if [ -n "$fmt_files" ]; then
+  echo "$fmt_files" | xargs rustfmt --edition 2024 --check
+fi
 
-echo "── clippy ──"
-cargo clippy -p this-rs --lib --tests --all-features -- -D warnings
-echo "✅ Clippy OK"
+echo "── clippy (paquets modifiés) ──"
+pkgs=$(git diff --name-only "$base" HEAD -- '*.rs' | while read -r f; do
+  d=$(dirname "$f")
+  while [ "$d" != "." ] && [ ! -f "$d/Cargo.toml" ]; do d=$(dirname "$d"); done
+  [ -f "$d/Cargo.toml" ] && printf '%s\n' "$d"
+done | sort -u)
 
-echo "🚀 All checks passed, pushing..."
+for d in $pkgs; do
+  echo "  clippy --manifest-path $d/Cargo.toml"
+  cargo clippy --manifest-path "$d/Cargo.toml" --all-targets --all-features -- -D warnings
+done
+
+echo "✅ Pre-push checks passed."
