@@ -2507,6 +2507,127 @@ fn bubble_class(role: &str, state: &str) -> String {
     classes.join(" ")
 }
 
+/// La prose d'une bulle, hors étapes : `None` quand le journal porte déjà le texte.
+///
+/// Le journal d'une bulle range, dans l'ordre, ce que le modèle a dit (`dit`) et les
+/// appels d'outil. Quand il contient au moins une phrase, le champ `contenu` en est la
+/// copie fondue : le rendre en plus ferait apparaître le texte deux fois, et les outils
+/// seraient groupés après tout le texte au lieu de s'intercaler entre les phrases.
+fn prose_de_bulle(texte: &str, entrees: &[StepEntry]) -> Option<String> {
+    let le_journal_porte_le_texte = entrees.iter().any(|e| matches!(e, StepEntry::Said(_)));
+    if le_journal_porte_le_texte || texte.trim().is_empty() {
+        None
+    } else {
+        Some(texte.to_string())
+    }
+}
+
+/// Une durée courte, lisible d'un coup d'œil : « 12 ms », « 1,2 s », « 45 s ».
+fn duree_lisible(ms: i64) -> String {
+    if ms < 1000 {
+        format!("{ms} ms")
+    } else if ms < 10_000 {
+        format!("{:.1} s", ms as f64 / 1000.0)
+    } else {
+        format!("{} s", ms / 1000)
+    }
+}
+
+/// Ce qu'une bulle dessine, entrée par entrée. Une phrase et un avis restent seuls ; les
+/// appels d'outil CONSECUTIFS se replient en UN groupe. L'ordre chronologique du journal
+/// est conservé : une phrase entre deux outils coupe le groupe.
+#[derive(Clone, Debug, PartialEq)]
+enum Segment {
+    Said(String),
+    Noted(String),
+    Tools(Vec<StepEntry>),
+}
+
+/// Découpe les entrées d'une bulle en segments : les outils qui se suivent forment un
+/// groupe, une phrase ou un avis reste à sa place.
+fn segmente(entries: &[StepEntry]) -> Vec<Segment> {
+    let mut segments: Vec<Segment> = Vec::new();
+    let mut outils: Vec<StepEntry> = Vec::new();
+    for entry in entries {
+        if matches!(entry, StepEntry::Tool { .. }) {
+            outils.push(entry.clone());
+            continue;
+        }
+        if !outils.is_empty() {
+            segments.push(Segment::Tools(std::mem::take(&mut outils)));
+        }
+        segments.push(match entry {
+            StepEntry::Said(texte) => Segment::Said(texte.clone()),
+            StepEntry::Noted(texte) => Segment::Noted(texte.clone()),
+            StepEntry::Tool { .. } => unreachable!("déjà filtré"),
+        });
+    }
+    if !outils.is_empty() {
+        segments.push(Segment::Tools(outils));
+    }
+    segments
+}
+
+/// Le libellé d'un groupe d'outils : « 3 outils · lire, écrire, compiler · 1,2 s ». Sans
+/// durée, la ligne ne nomme que les outils.
+fn tool_group_label(tools: &[StepEntry]) -> String {
+    let n = tools.len();
+    let noms: Vec<&str> = tools
+        .iter()
+        .filter_map(|entry| match entry {
+            StepEntry::Tool { name, .. } => Some(name.as_str()),
+            _ => None,
+        })
+        .collect();
+    let total_ms: i64 = tools
+        .iter()
+        .filter_map(|entry| match entry {
+            StepEntry::Tool { ms, .. } => Some(*ms),
+            _ => None,
+        })
+        .sum();
+    let mot = if n == 1 { "outil" } else { "outils" };
+    let mut label = format!("{n} {mot} · {}", noms.join(", "));
+    if total_ms > 0 {
+        label.push_str(&format!(" · {}", duree_lisible(total_ms)));
+    }
+    label
+}
+
+/// Une étape d'outil, dessinée telle quelle : son état, son nom, sa durée, son résultat.
+/// Le résultat n'est PAS déversé par défaut : il ne s'ouvre qu'à l'intérieur d'un groupe.
+fn tool_item(tool: StepEntry) -> AnyView {
+    match tool {
+        StepEntry::Tool {
+            name,
+            state,
+            resume,
+            ms,
+        } => {
+            let tone = step_tone(&state);
+            let time = (ms > 0).then(|| {
+                view! {
+                    <span class=class::STEP_TIME>{format!("{ms} ms")}</span>
+                }
+            });
+            let detail = (!resume.is_empty()).then(|| {
+                let short: String = resume.chars().take(400).collect();
+                view! { <span class=class::STEP_RESUME>{short}</span> }
+            });
+            view! {
+                <li class=class::STEP>
+                    {design::badge(state, tone)}
+                    <span class=class::STEP_NAME>{name}</span>
+                    {time}
+                    {detail}
+                </li>
+            }
+            .into_any()
+        }
+        _ => ().into_any(),
+    }
+}
+
 /// One bubble: author, prose, tool steps.
 fn bubble(row: RowView) -> AnyView {
     let RowView {
@@ -2518,50 +2639,40 @@ fn bubble(row: RowView) -> AnyView {
         entries,
     } = row;
     let class_name = bubble_class(&role, &state);
-    let prose = (!text.trim().is_empty()).then(|| {
+    let prose = prose_de_bulle(&text, &entries).map(|texte| {
         if as_markdown {
-            view! { <div class=class::MESSAGE_BODY inner_html=markdown::markdown(&text)></div> }
+            view! { <div class=class::MESSAGE_BODY inner_html=markdown::markdown(&texte)></div> }
                 .into_any()
         } else {
-            view! { <p class=class::MESSAGE_BODY>{text.clone()}</p> }.into_any()
+            view! { <p class=class::MESSAGE_BODY>{texte}</p> }.into_any()
         }
     });
     let steps = (!entries.is_empty()).then(|| {
-        let items = entries
+        // Les outils CONSECUTIFS se replient en UNE ligne ; une phrase les coupe, comme
+        // dans le journal. Le résultat brut d'un outil n'est pas déversé par défaut : il
+        // s'ouvre dans le groupe, sur demande.
+        let items = segmente(&entries)
             .into_iter()
-            .map(|entry| match entry {
-                StepEntry::Said(said) => view! {
-                    <li class=class::STEP>
-                        <span class=class::MESSAGE_BODY inner_html=markdown::markdown(&said)></span>
-                    </li>
+            .map(|segment| match segment {
+                Segment::Said(said) => view! {
+                    <li class=class::MESSAGE_BODY inner_html=markdown::markdown(&said)></li>
                 }
                 .into_any(),
-                StepEntry::Noted(note) => view! {
+                Segment::Noted(note) => view! {
                     <li class=class::STEP role="status">{note}</li>
                 }
                 .into_any(),
-                StepEntry::Tool {
-                    name,
-                    state,
-                    resume,
-                    ms,
-                } => {
-                    let tone = step_tone(&state);
-                    let time = (ms > 0).then(|| {
-                        view! {
-                            <span class=class::STEP_TIME>{format!("{ms} ms")}</span>
-                        }
-                    });
-                    let detail = (!resume.is_empty()).then(|| {
-                        let short: String = resume.chars().take(400).collect();
-                        view! { <span class=class::STEP_RESUME>{short}</span> }
-                    });
+                Segment::Tools(tools) => {
+                    let label = tool_group_label(&tools);
+                    let details = tools.into_iter().map(tool_item).collect_view();
                     view! {
-                        <li class=class::STEP>
-                            {design::badge(state, tone)}
-                            <span class=class::STEP_NAME>{name}</span>
-                            {time}
-                            {detail}
+                        <li class=class::STEP_GROUP>
+                            <details>
+                                <summary class=class::STEP_GROUP_SUMMARY>
+                                    <span class=class::STEP_NAME>{label}</span>
+                                </summary>
+                                <ol class=class::STEPS>{details}</ol>
+                            </details>
                         </li>
                     }
                     .into_any()
@@ -3593,6 +3704,193 @@ mod tests_fil {
         }
         // Un objet sans nom d'outil n'est pas une étape.
         assert!(step_entries(&json!([{"etat": "fait"}])).is_empty());
+    }
+
+    /// L'ordre du journal est l'ordre affiché : les phrases (`dit`) et les appels d'outil
+    /// s'intercalent dans leur ordre chronologique, pas les outils groupés à la fin.
+    #[test]
+    fn un_journal_garde_l_ordre_des_phrases_et_des_outils() {
+        let journal = json!([
+            { "genre": "dit", "texte": "d'abord je regarde" },
+            { "id": "t1", "genre": "outil", "outil": "lire", "ms": 42,
+              "refus": false, "echec": false, "en_cours": false, "resume": "3 lignes" },
+            { "genre": "dit", "texte": "puis j'écris" },
+            { "id": "t2", "genre": "outil", "outil": "ecrire", "ms": 7,
+              "refus": false, "echec": false, "en_cours": false, "resume": "écrit" }
+        ]);
+        let noms: Vec<String> = step_entries(&journal)
+            .iter()
+            .map(|e| match e {
+                StepEntry::Said(texte) => format!("dit:{texte}"),
+                StepEntry::Tool { name, .. } => format!("outil:{name}"),
+                StepEntry::Noted(texte) => format!("avis:{texte}"),
+            })
+            .collect();
+        assert_eq!(
+            noms,
+            vec!["dit:d'abord je regarde", "outil:lire", "dit:puis j'écris", "outil:ecrire"]
+        );
+    }
+
+    /// Quand le journal porte les phrases, la prose n'est pas rendue une seconde fois :
+    /// le champ `contenu` en est la copie fondue, et le doublerait en repoussant les
+    /// outils après tout le texte.
+    #[test]
+    fn la_prose_n_est_pas_doublee_quand_le_journal_porte_les_phrases() {
+        let dit_outil = vec![
+            StepEntry::Said("je regarde".into()),
+            StepEntry::Tool {
+                name: "lire".into(),
+                state: "fait".into(),
+                resume: "3 lignes".into(),
+                ms: 42,
+            },
+            StepEntry::Said("voici".into()),
+        ];
+        assert_eq!(
+            prose_de_bulle("je regarde\n\nvoici", &dit_outil),
+            None,
+            "le texte est déjà dans le journal"
+        );
+
+        // Sans phrase dans le journal, la prose est le contenu de la ligne.
+        let outils_seuls = vec![StepEntry::Tool {
+            name: "lire".into(),
+            state: "fait".into(),
+            resume: String::new(),
+            ms: 0,
+        }];
+        assert_eq!(
+            prose_de_bulle("un texte", &outils_seuls),
+            Some("un texte".to_string())
+        );
+        // Un texte blanc ne se rend jamais.
+        assert_eq!(prose_de_bulle("   ", &[]), None);
+    }
+
+    // ---- le regroupement des outils d'une bulle ------------------------------------------
+
+    /// Trois outils qui se suivent forment UN groupe d'une ligne, qui les nomme tous.
+    #[test]
+    fn trois_outils_consecutifs_forment_un_groupe_qui_les_nomme() {
+        let outils = vec![
+            StepEntry::Tool {
+                name: "architecture".into(),
+                state: "fait".into(),
+                resume: "…".into(),
+                ms: 67,
+            },
+            StepEntry::Tool {
+                name: "doc_forge".into(),
+                state: "fait".into(),
+                resume: "…".into(),
+                ms: 1,
+            },
+            StepEntry::Tool {
+                name: "read_module".into(),
+                state: "fait".into(),
+                resume: "…".into(),
+                ms: 90,
+            },
+        ];
+        let segments = segmente(&outils);
+        assert_eq!(segments.len(), 1, "{segments:?}");
+        let Segment::Tools(groupe) = &segments[0] else {
+            panic!("un groupe attendu, pas {segments:?}");
+        };
+        assert_eq!(groupe.len(), 3);
+        let label = tool_group_label(groupe);
+        assert_eq!(
+            label, "3 outils · architecture, doc_forge, read_module · 158 ms",
+            "la ligne nomme les trois outils et la durée totale"
+        );
+    }
+
+    /// Un texte de l'agent entre deux outils coupe le groupe : quatre outils, deux groupes,
+    /// et le texte garde sa place chronologique.
+    #[test]
+    fn un_texte_entre_deux_outils_coupe_le_groupe() {
+        let entries = vec![
+            StepEntry::Tool {
+                name: "a".into(),
+                state: "fait".into(),
+                resume: String::new(),
+                ms: 1,
+            },
+            StepEntry::Tool {
+                name: "b".into(),
+                state: "fait".into(),
+                resume: String::new(),
+                ms: 1,
+            },
+            StepEntry::Said("je regarde".into()),
+            StepEntry::Tool {
+                name: "c".into(),
+                state: "fait".into(),
+                resume: String::new(),
+                ms: 1,
+            },
+            StepEntry::Tool {
+                name: "d".into(),
+                state: "fait".into(),
+                resume: String::new(),
+                ms: 1,
+            },
+        ];
+        let segments = segmente(&entries);
+        assert_eq!(
+            segments,
+            vec![
+                Segment::Tools(vec![
+                    StepEntry::Tool {
+                        name: "a".into(),
+                        state: "fait".into(),
+                        resume: String::new(),
+                        ms: 1,
+                    },
+                    StepEntry::Tool {
+                        name: "b".into(),
+                        state: "fait".into(),
+                        resume: String::new(),
+                        ms: 1,
+                    },
+                ]),
+                Segment::Said("je regarde".into()),
+                Segment::Tools(vec![
+                    StepEntry::Tool {
+                        name: "c".into(),
+                        state: "fait".into(),
+                        resume: String::new(),
+                        ms: 1,
+                    },
+                    StepEntry::Tool {
+                        name: "d".into(),
+                        state: "fait".into(),
+                        resume: String::new(),
+                        ms: 1,
+                    },
+                ]),
+            ],
+            "le texte coupe le groupe, les outils qui se suivent se regroupent"
+        );
+    }
+
+    /// Le résultat brut d'un outil ne fait pas partie de la ligne de groupe : replié, il ne
+    /// s'ouvre que sur demande.
+    #[test]
+    fn le_resultat_brut_ne_est_pas_deverse_dans_la_ligne_de_groupe() {
+        let outils = vec![StepEntry::Tool {
+            name: "read_module".into(),
+            state: "fait".into(),
+            resume: "{\"compile\":{},\"enabled\":true}".into(),
+            ms: 90,
+        }];
+        let label = tool_group_label(&outils);
+        assert!(
+            !label.contains("compile"),
+            "le brut n'est pas dans la ligne : {label}"
+        );
+        assert!(label.contains("read_module"), "{label}");
     }
 
     // ---- la fenêtre du fil ---------------------------------------------------------------
