@@ -19,6 +19,8 @@ use this_module_sdk::{
     Effect, Entity, Field, FieldType, Manifest, Module, Op, Request, Response, Value, json,
 };
 
+pub mod ecran;
+
 pub struct PlanModule;
 
 /// Les cinq entités du domaine, dans l'ordre de déclaration. Source unique du descripteur.
@@ -83,7 +85,11 @@ fn task() -> Entity {
         )
         .field(Field::new("estimated_complexity", FieldType::U32).optional())
         .field(Field::new("actual_complexity", FieldType::U32).optional())
-        .field(Field::new("due_date", FieldType::Date).optional())
+        .field(
+            Field::new("due_date", FieldType::Date)
+                .optional()
+                .sortable(),
+        )
         .field(Field::new("estimated_minutes", FieldType::U32).optional())
         .field(Field::new("frustration_score", FieldType::F64).default(json!(0.0)))
 }
@@ -478,7 +484,7 @@ mod tests {
         let vue = m.views.iter().find(|v| v["name"] == "taches").unwrap();
         assert_eq!(
             vue["root"]["brick"]["sort"],
-            json!([{"field": "priority", "dir": "asc"}])
+            json!([{"field": "priority", "dir": "asc"}, {"field": "due_date", "dir": "asc"}])
         );
     }
 }
