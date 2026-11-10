@@ -53,6 +53,7 @@
 //! ```
 
 mod context;
+mod embed;
 mod event;
 mod mcp;
 mod ports;
@@ -62,6 +63,7 @@ mod session;
 mod wire;
 
 pub use context::{Dropped, Fitted, Removal, estimate_tokens, fit, removable};
+pub use embed::{Embed, EmbedError, EmbeddingModel, SansEmbed, vecteur_dense, vectoriser};
 pub use event::{Event, HintKind, Outcome, Pending, Snapshot};
 pub use mcp::{McpLink, McpServer, McpToolbox};
 pub use ports::{Cancel, Compactor, Delta, Recorder, Recorders, Toolbox, Toolboxes, Transport};
