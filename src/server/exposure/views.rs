@@ -262,6 +262,12 @@ fn collect_entities(node: &Node, out: &mut BTreeSet<String>) {
                 out.insert(entity.to_string());
             }
         }
+        // La condition lit son entité : la vue en dépend autant que d'une brique, et un
+        // consommateur sans droit sur elle ne doit pas la voir passer par un `when`.
+        Node::When { entity, child, .. } => {
+            out.insert(entity.clone());
+            collect_entities(child, out);
+        }
     }
 }
 
@@ -458,5 +464,17 @@ mod tests {
         assert_eq!(v["views"], json!([]));
         assert_eq!(v["actions"], json!([]));
         assert_eq!(v["modules"], json!([]));
+    }
+
+    #[test]
+    fn a_when_condition_makes_its_entity_a_dependency_of_the_view() {
+        let node: Node = serde_json::from_value(json!({
+            "type": "when", "entity": "session",
+            "filter": {"cmp": {"field": "connected", "op": "eq", "value": true}},
+            "child": {"type": "leaf", "brick": {"type": "list", "entity": "key", "label": "name"}}
+        }))
+        .expect("node");
+        let got: Vec<String> = referenced_entities(&node).into_iter().collect();
+        assert_eq!(got, ["key", "session"]);
     }
 }

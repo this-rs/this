@@ -429,6 +429,32 @@ fn nodes() -> Vec<VariantSchema> {
             json!({"type": "modal", "title": "Confirm", "children": [leaf.clone()]}),
         ),
         variant(
+            "when",
+            "\"Show `child` only if\": a visibility condition on ONE node — a brick (a leaf) or a \
+             whole group. The host evaluates it against what it already knows, BEFORE drawing: \
+             `child` is drawn if and only if at least one row of `entity` satisfies `filter`. \
+             False => not drawn. Data absent (entity not read yet, or no row at all) => not \
+             drawn: a condition that cannot be evaluated never shows a button at random. A \
+             failed or refused read => not drawn, and the refusal is named in the host's log. \
+             A hidden node does not count in the view's verdict, so a tree whose every \
+             conditional node is hidden draws empty, without error.",
+            vec![
+                req("entity", "string", "The entity the condition reads.").refers("entity"),
+                req(
+                    "filter",
+                    "filter",
+                    "The condition, as a list filter: known fields only, `$context` allowed.",
+                ),
+                req("child", "node", "The node shown when the condition holds."),
+            ],
+            json!({"type": "when", "entity": "invoice",
+                   "filter": {"cmp": {"field": "titre", "op": "eq", "value": "A"}},
+                   "child": {"type": "stack", "children": []}}),
+            json!({"type": "when", "entity": "invoice",
+                   "filter": {"cmp": {"field": "titre", "op": "ne", "value": null}},
+                   "child": {"type": "leaf", "brick": {"type": "metrics", "entity": "invoice"}}}),
+        ),
+        variant(
             "leaf",
             "A leaf: draws one brick.",
             vec![req("brick", "brick", "The brick drawn.")],
@@ -460,9 +486,17 @@ fn bricks() -> Vec<VariantSchema> {
                 entity_f(),
                 filter_f(),
                 req("action", "string", "The action called.").refers("action"),
+                opt(
+                    "label",
+                    "string",
+                    "The button's text, as interface text (\"Pin this key\"): no `_`, not empty. \
+                     Wins over the action's own `label`, which wins over the action name \
+                     humanised by the host.",
+                ),
             ],
             json!({"type": "button", "entity": "invoice", "action": "new"}),
-            json!({"type": "button", "entity": "invoice", "filter": f, "action": "new"}),
+            json!({"type": "button", "entity": "invoice", "filter": f, "action": "new",
+                   "label": "New invoice"}),
             true,
         ),
         brick_v(
@@ -683,10 +717,17 @@ fn bricks() -> Vec<VariantSchema> {
                     "An action of this module, drawn as a button inside the notice.",
                 )
                 .refers("action"),
+                opt(
+                    "label",
+                    "string",
+                    "The text of that button (interface text: no `_`, not empty). Same \
+                     precedence as a button's `label`. Needs `action`: without a button there \
+                     is nothing to label.",
+                ),
             ],
             json!({"type": "notice", "tone": "info", "entity": "invoice", "field": "titre"}),
             json!({"type": "notice", "tone": "warning", "entity": "invoice", "filter": f,
-                   "field": "titre", "action": "go"}),
+                   "field": "titre", "action": "go", "label": "Keep going"}),
             false,
         ),
         brick_v(
@@ -918,12 +959,22 @@ fn actions() -> Vec<VariantSchema> {
             "Identifier, `^[a-z][a-z0-9_]*$`, unique among the module's actions.",
         )
     };
+    let label = || {
+        opt(
+            "label",
+            "string",
+            "What a button for this action reads: interface text (\"Pin this key\"), not an \
+             identifier — no `_`, not empty. A brick's own `label` wins over it; absent, the \
+             host shows the action name humanised.",
+        )
+    };
     vec![
         variant(
             "create",
             "Creates a row of `entity` with the fields `fields`.",
             vec![
                 name(),
+                label(),
                 req("entity", "string", "The entity created.").refers("entity"),
                 req(
                     "fields",
@@ -933,13 +984,14 @@ fn actions() -> Vec<VariantSchema> {
                 .refers("field"),
             ],
             json!({"kind": "create", "name": "new", "entity": "invoice", "fields": ["titre"]}),
-            json!({"kind": "create", "name": "new", "entity": "invoice", "fields": ["titre", "amount"]}),
+            json!({"kind": "create", "name": "new", "label": "Do it", "entity": "invoice", "fields": ["titre", "amount"]}),
         ),
         variant(
             "update",
             "Modifies the fields `fields` of a row of `entity`.",
             vec![
                 name(),
+                label(),
                 req("entity", "string", "The entity modified.").refers("entity"),
                 req(
                     "fields",
@@ -949,23 +1001,25 @@ fn actions() -> Vec<VariantSchema> {
                 .refers("field"),
             ],
             json!({"kind": "update", "name": "edit", "entity": "invoice", "fields": ["amount"]}),
-            json!({"kind": "update", "name": "edit", "entity": "invoice", "fields": ["amount", "titre"]}),
+            json!({"kind": "update", "name": "edit", "label": "Do it", "entity": "invoice", "fields": ["amount", "titre"]}),
         ),
         variant(
             "delete",
             "Deletes a row of `entity`.",
             vec![
                 name(),
+                label(),
                 req("entity", "string", "The entity deleted.").refers("entity"),
             ],
             json!({"kind": "delete", "name": "drop", "entity": "invoice"}),
-            json!({"kind": "delete", "name": "drop", "entity": "invoice"}),
+            json!({"kind": "delete", "name": "drop", "label": "Do it", "entity": "invoice"}),
         ),
         variant(
             "navigate",
             "Opens a view of this module, or (with `module`) a view of another module.",
             vec![
                 name(),
+                label(),
                 req(
                     "view",
                     "string",
@@ -981,7 +1035,7 @@ fn actions() -> Vec<VariantSchema> {
                 ),
             ],
             json!({"kind": "navigate", "name": "go", "view": "invoices"}),
-            json!({"kind": "navigate", "name": "go", "view": "providers", "module": "reglages"}),
+            json!({"kind": "navigate", "name": "go", "label": "Do it", "view": "providers", "module": "reglages"}),
         ),
         variant(
             "request_secret",
@@ -990,6 +1044,7 @@ fn actions() -> Vec<VariantSchema> {
              reading it stay the host's. No value ever passes through the module or its view.",
             vec![
                 name(),
+                label(),
                 req(
                     "secret",
                     "string",
@@ -997,13 +1052,14 @@ fn actions() -> Vec<VariantSchema> {
                 ),
             ],
             json!({"kind": "request_secret", "name": "cle_api", "secret": "provider-api-key"}),
-            json!({"kind": "request_secret", "name": "cle_api", "secret": "provider-api-key"}),
+            json!({"kind": "request_secret", "name": "cle_api", "label": "Do it", "secret": "provider-api-key"}),
         ),
         variant(
             "agent_tool",
             "An agent operation: send a message, stop a run. Bound to an entity if needed.",
             vec![
                 name(),
+                label(),
                 req("op", "enum:AgentOp", "The operation."),
                 opt("entity", "string", "The entity it applies to.").refers("entity"),
                 opt(
@@ -1013,13 +1069,14 @@ fn actions() -> Vec<VariantSchema> {
                 ),
             ],
             json!({"kind": "agent_tool", "name": "halt", "op": "stop_run"}),
-            json!({"kind": "agent_tool", "name": "demander", "op": "send_message", "entity": "conversation", "text": "Quels articles manquent ?"}),
+            json!({"kind": "agent_tool", "name": "demander", "label": "Do it", "op": "send_message", "entity": "conversation", "text": "Quels articles manquent ?"}),
         ),
         variant(
             "invoke",
             "Runs a named operation of the module: the only way a view reaches its code.",
             vec![
                 name(),
+                label(),
                 req(
                     "operation",
                     "string",
@@ -1029,13 +1086,14 @@ fn actions() -> Vec<VariantSchema> {
                 opt("entity", "string", "The entity the operation targets.").refers("entity"),
             ],
             json!({"kind": "invoke", "name": "terminer", "operation": "terminer"}),
-            json!({"kind": "invoke", "name": "terminer", "operation": "terminer", "entity": "invoice"}),
+            json!({"kind": "invoke", "name": "terminer", "label": "Do it", "operation": "terminer", "entity": "invoice"}),
         ),
         variant(
             "device_capability",
             "Allow or deny a device capability.",
             vec![
                 name(),
+                label(),
                 req(
                     "capability",
                     "enum:DeviceCapability",
@@ -1044,7 +1102,7 @@ fn actions() -> Vec<VariantSchema> {
                 req("grant", "enum:Grant", "The decision."),
             ],
             json!({"kind": "device_capability", "name": "cam_ok", "capability": "camera", "grant": "allow"}),
-            json!({"kind": "device_capability", "name": "mic_no", "capability": "microphone", "grant": "deny"}),
+            json!({"kind": "device_capability", "name": "mic_no", "label": "Do it", "capability": "microphone", "grant": "deny"}),
         ),
         variant(
             "host",
@@ -1054,6 +1112,7 @@ fn actions() -> Vec<VariantSchema> {
              these are the app's own state.",
             vec![
                 name(),
+                label(),
                 req(
                     "surface",
                     "enum:HostSurface",
@@ -1061,7 +1120,7 @@ fn actions() -> Vec<VariantSchema> {
                 ),
             ],
             json!({"kind": "host", "name": "modules", "surface": "modules"}),
-            json!({"kind": "host", "name": "reglages", "surface": "settings"}),
+            json!({"kind": "host", "name": "reglages", "label": "Do it", "surface": "settings"}),
         ),
     ]
 }
@@ -1667,6 +1726,21 @@ fn rules() -> Vec<RuleSchema> {
             "Add a tab, or use `stack`.",
         ),
         rule(
+            "label_empty",
+            "A `label` (on an action, a button or a notice) is empty or only spaces.",
+            "Write the text the person should read, or drop `label` to get the action name humanised.",
+        ),
+        rule(
+            "label_not_text",
+            "A `label` is not interface text: it holds a `_` (an identifier) or a control character.",
+            "Write plain text with accents and spaces, e.g. \"Épingler cette clé\".",
+        ),
+        rule(
+            "notice_label_without_action",
+            "A notice has a `label` but no `action`: there is no button to label.",
+            "Add the `action`, or drop the `label`.",
+        ),
+        rule(
             "view_too_deep",
             "Containers are nested deeper than the maximum depth.",
             "Flatten the tree or split it in several views.",
@@ -1741,6 +1815,19 @@ fn coverage() -> Vec<CoverageEntry> {
             "A fold-away section under a label.",
         ),
         cover("button", &["brick:button"], "Triggers an action."),
+        cover(
+            "label",
+            &["brick:button", "brick:notice", "action:create"],
+            "A button reads the `label` of the brick, else the `label` of the action (every \
+             action kind has one), else the action name humanised. Row actions and composer \
+             actions take the action's label. Interface text: no `_`, not empty.",
+        ),
+        cover(
+            "conditional",
+            &["node:when"],
+            "Show a node (a brick or a whole group) only if a row of an entity satisfies a \
+             filter. Absent data or a failed read hides it; never shows it at random.",
+        ),
         cover(
             "question",
             &["brick:question"],
@@ -2772,6 +2859,24 @@ mod tests {
                 ),
             ),
             ("tabs_empty", with_view(json!({"type":"tabs","tabs":[]}))),
+            (
+                "label_empty",
+                with_action(
+                    r#"{"kind":"delete","name":"retirer","entity":"invoice","label":"  "}"#,
+                ),
+            ),
+            (
+                "label_not_text",
+                with_view(leaf(
+                    r#"{"type":"button","entity":"invoice","action":"new","label":"epingler_cle"}"#,
+                )),
+            ),
+            (
+                "notice_label_without_action",
+                with_view(leaf(
+                    r#"{"type":"notice","tone":"info","entity":"invoice","field":"titre","label":"Go"}"#,
+                )),
+            ),
             ("view_too_deep", with_view(deep)),
             ("view_replaces_self", self_replace),
             ("view_replaced_twice", twice),
@@ -2834,6 +2939,8 @@ mod tests {
             "composer_",
             "settings_",
             "navigate_",
+            "label_",
+            "notice_",
         ];
         let mut seen = 0;
         for lit in body.split('"').skip(1).step_by(2) {

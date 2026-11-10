@@ -13,6 +13,7 @@
 //!
 //! Everything in this module is pure: no DOM, no reaction, no data.
 
+use this_descriptor::ModuleDescriptor;
 use this_descriptor::views::{Surface, ViewDesc};
 
 use crate::views::text;
@@ -237,6 +238,28 @@ pub fn humanise(identifier: &str) -> String {
     }
 }
 
+/// What a button for `action` reads — one answer, for every place the host draws one (a
+/// `button`, a `notice`'s gesture, a row action, a composer action, a form's submit, the
+/// empty tile's create).
+///
+/// **Precedence**: the brick's own `label` (`brick_label`), then the `label` the module
+/// declared on the action, then the action name [`humanise`]d. A declared label is interface
+/// text and is shown as written — accents and all (`Épingler cette clé`); only a blank one
+/// is ignored, so a button is never drawn without a word.
+pub fn action_label(module: &ModuleDescriptor, action: &str, brick_label: Option<&str>) -> String {
+    let declared = module
+        .actions
+        .iter()
+        .find(|a| a.name() == action)
+        .and_then(|a| a.label());
+    [brick_label, declared]
+        .into_iter()
+        .flatten()
+        .find(|label| !label.trim().is_empty())
+        .map(str::to_owned)
+        .unwrap_or_else(|| humanise(action))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -388,5 +411,43 @@ mod tests {
             "Invoice detail"
         );
         assert_eq!(humanise(""), text::DASH);
+    }
+
+    fn module_with(actions: Vec<this_descriptor::Action>) -> ModuleDescriptor {
+        let mut m = ModuleDescriptor::new("keys", "1.0.0");
+        m.actions = actions;
+        m
+    }
+
+    fn pin(label: Option<&str>) -> this_descriptor::Action {
+        this_descriptor::Action::Navigate {
+            name: "epingler_cle".into(),
+            label: label.map(str::to_owned),
+            view: "keys".into(),
+            module: None,
+        }
+    }
+
+    #[test]
+    fn a_label_wins_over_the_actions_which_wins_over_the_humanised_name() {
+        let with = module_with(vec![pin(Some("Épingler cette clé"))]);
+        let without = module_with(vec![pin(None)]);
+        // brick > action > humanised name
+        assert_eq!(
+            action_label(&with, "epingler_cle", Some("Garder")),
+            "Garder"
+        );
+        assert_eq!(
+            action_label(&with, "epingler_cle", None),
+            "Épingler cette clé"
+        );
+        assert_eq!(action_label(&without, "epingler_cle", None), "Epingler cle");
+        // An action the module never declared still reads something.
+        assert_eq!(action_label(&without, "ghost_action", None), "Ghost action");
+        // A blank label never draws a wordless button: it falls through.
+        assert_eq!(
+            action_label(&with, "epingler_cle", Some("  ")),
+            "Épingler cette clé"
+        );
     }
 }

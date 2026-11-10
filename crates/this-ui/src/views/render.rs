@@ -69,6 +69,13 @@ impl Ctx {
             view: StoredValue::new(view.into()),
         }
     }
+
+    /// What a button for `action` reads: see [`placement::action_label`].
+    fn label_of(&self, action: &str, brick_label: Option<&str>) -> String {
+        self.module
+            .try_with_value(|module| placement::action_label(module, action, brick_label))
+            .unwrap_or_else(|| placement::humanise(action))
+    }
 }
 
 /// A process-wide counter, so two controls on the same screen never share an `id`.
@@ -144,7 +151,53 @@ pub fn render_node(ctx: Ctx, node: &Node) -> AnyView {
         Node::Drawer { label, children } => drawer(ctx, label, children),
         Node::Modal { title, children } => modal(ctx, title, children),
         Node::Leaf { brick } => render_brick(ctx, brick),
+        Node::When {
+            entity,
+            filter,
+            child,
+        } => conditional(ctx, entity, filter, child),
     }
+}
+
+/// A `when` node: the child is drawn only while the condition holds, evaluated against the
+/// snapshot BEFORE drawing. The verdict is a `Memo` of a bool, so a snapshot that changes
+/// without flipping the condition does not rebuild the child (a form keeps its focus).
+///
+/// False, absent or unreadable data draws nothing — never a button at random. An unreadable
+/// condition (failed or refused read, entity the host never provided) is named in the log,
+/// once per distinct cause, not on every snapshot.
+fn conditional(ctx: Ctx, entity: &str, filter: &FilterExpr, child: &Node) -> AnyView {
+    let entity = entity.to_owned();
+    let filter = filter.clone();
+    let child = child.clone();
+    let named = StoredValue::new(None::<String>);
+    let shown = Memo::new(move |_| {
+        let verdict = ctx
+            .data
+            .with(|snapshot| data::condition(snapshot, &entity, &filter));
+        let cause = match &verdict {
+            data::Condition::Unreadable(why) => Some(why.clone()),
+            _ => None,
+        };
+        if named.get_value() != cause {
+            if let Some(why) = &cause {
+                log_refusal(&format!(
+                    "when `{entity}` : condition non évaluable, nœud masqué ({why})"
+                ));
+            }
+            named.set_value(cause);
+        }
+        verdict.holds()
+    });
+    view! { {move || shown.get().then(|| render_node(ctx, &child))} }.into_any()
+}
+
+/// Name a refusal in the host's log: the browser console on the device, stderr elsewhere.
+fn log_refusal(message: &str) {
+    #[cfg(target_arch = "wasm32")]
+    web_sys::console::warn_1(&message.into());
+    #[cfg(not(target_arch = "wasm32"))]
+    eprintln!("this-ui: {message}");
 }
 
 fn grouped(ctx: Ctx, children: &[Node], class_name: &'static str) -> AnyView {
@@ -317,13 +370,14 @@ fn empty_tile(ctx: Ctx, entity: &str, message: &str) -> AnyView {
                     name,
                     entity: target,
                     fields,
+                    ..
                 } if target == entity => Some((name.clone(), target.clone(), fields.clone())),
                 _ => None,
             })
         })
         .flatten();
     let button = create.map(|(name, target, fields)| {
-        let label = placement::humanise(&name);
+        let label = ctx.label_of(&name, None);
         view! {
             <button class=class::BUTTON title=name.clone() on:click=move |_| {
                 ctx.on_intent.run(Intent::Create {
@@ -405,7 +459,8 @@ pub fn render_brick(ctx: Ctx, brick: &Brick) -> AnyView {
             entity,
             filter,
             action,
-        } => button(ctx, entity, filter.as_ref(), action),
+            label,
+        } => button(ctx, entity, filter.as_ref(), action, label.as_deref()),
         Brick::Indicator {
             signal,
             entity,
@@ -488,6 +543,7 @@ pub fn render_brick(ctx: Ctx, brick: &Brick) -> AnyView {
             filter,
             field,
             action,
+            label,
         } => notice(
             ctx,
             *tone,
@@ -495,6 +551,7 @@ pub fn render_brick(ctx: Ctx, brick: &Brick) -> AnyView {
             filter.as_ref(),
             field,
             action.as_deref(),
+            label.as_deref(),
         ),
         Brick::Question {
             entity,
@@ -732,8 +789,14 @@ pub(crate) fn action_needs_row(declared: Option<&Action>) -> bool {
     }
 }
 
-fn button(ctx: Ctx, entity: &str, filter: Option<&FilterExpr>, action: &str) -> AnyView {
-    let label = placement::humanise(action);
+fn button(
+    ctx: Ctx,
+    entity: &str,
+    filter: Option<&FilterExpr>,
+    action: &str,
+    brick_label: Option<&str>,
+) -> AnyView {
+    let label = ctx.label_of(action, brick_label);
     let declared = ctx
         .module
         .try_with_value(|module| module.actions.iter().find(|a| a.name() == action).cloned())
@@ -860,6 +923,7 @@ fn intent_of(
             name,
             entity,
             fields,
+            ..
         }) => Intent::Create {
             action: name,
             entity,
@@ -870,6 +934,7 @@ fn intent_of(
             name,
             entity,
             fields,
+            ..
         }) => Intent::Update {
             action: name,
             entity,
@@ -877,17 +942,19 @@ fn intent_of(
             id,
             values,
         },
-        Some(Action::Delete { name, entity }) => Intent::Delete {
+        Some(Action::Delete { name, entity, .. }) => Intent::Delete {
             action: name,
             entity,
             id,
         },
-        Some(Action::Navigate { name, view, module }) => Intent::Navigate {
+        Some(Action::Navigate {
+            name, view, module, ..
+        }) => Intent::Navigate {
             view,
             action: Some(name),
             module,
         },
-        Some(Action::RequestSecret { name, secret }) => Intent::Secret {
+        Some(Action::RequestSecret { name, secret, .. }) => Intent::Secret {
             action: name,
             secret,
         },
@@ -896,6 +963,7 @@ fn intent_of(
             op,
             entity,
             text,
+            ..
         }) => Intent::Tool {
             action: name,
             op,
@@ -906,6 +974,7 @@ fn intent_of(
             name,
             capability,
             grant,
+            ..
         }) => Intent::Capability {
             action: name,
             capability,
@@ -913,7 +982,7 @@ fn intent_of(
         },
         // Une surface que l'hôte garde : le module l'offre, l'hôte l'ouvre. L'intention
         // porte la surface, pas le nom du module : l'hôte seul sait où elle vit.
-        Some(Action::Host { name, surface }) => Intent::Host {
+        Some(Action::Host { name, surface, .. }) => Intent::Host {
             action: name,
             surface,
         },
@@ -921,6 +990,7 @@ fn intent_of(
             name,
             operation,
             entity,
+            ..
         }) => Intent::Invoke {
             action: name,
             operation,
@@ -987,6 +1057,7 @@ impl ComposerSpec {
                 .iter()
                 .flat_map(|tab| tab.children.iter())
                 .find_map(Self::find),
+            Node::When { child, .. } => Self::find(child),
         }
     }
 }
@@ -1023,6 +1094,15 @@ pub fn without_composer(node: &Node) -> Option<Node> {
                 })
                 .collect(),
         },
+        Node::When {
+            entity,
+            filter,
+            child,
+        } => Node::When {
+            entity: entity.clone(),
+            filter: filter.clone(),
+            child: Box::new(without_composer(child)?),
+        },
     };
     let empty = match &kept {
         Node::Stack { children }
@@ -1030,7 +1110,7 @@ pub fn without_composer(node: &Node) -> Option<Node> {
         | Node::Drawer { children, .. }
         | Node::Modal { children, .. } => children.is_empty(),
         Node::Tabs { tabs } => tabs.iter().all(|tab| tab.children.is_empty()),
-        Node::Leaf { .. } => false,
+        Node::Leaf { .. } | Node::When { .. } => false,
     };
     (!empty).then_some(kept)
 }
@@ -1099,7 +1179,7 @@ pub fn composer_actions(ctx: Ctx, actions: &[String]) -> AnyView {
         .iter()
         .map(|action| {
             let name = action.clone();
-            let label = placement::humanise(action);
+            let label = ctx.label_of(action, None);
             view! {
                 <button class=class::BUTTON type="button" title=name.clone() data-action=name.clone()
                     on:click=move |_| {
@@ -1636,7 +1716,7 @@ fn list(
                                 .iter()
                                 .map(|action| {
                                     let name = action.clone();
-                                    let action_label = placement::humanise(action);
+                                    let action_label = ctx.label_of(action, None);
                                     let action_entity = entity.clone();
                                     let row_id = data::value_of(row, "id")
                                         .and_then(|id| id.as_str())
@@ -1850,7 +1930,7 @@ fn form(
     let submit_name = submit.map(str::to_owned);
     let submit_label = submit_name
         .as_deref()
-        .map(placement::humanise)
+        .map(|name| ctx.label_of(name, None))
         .unwrap_or_default();
     let submit_value = submit_name.clone();
     let on_submit = {
@@ -2524,11 +2604,13 @@ fn notice(
     filter: Option<&FilterExpr>,
     field: &str,
     action: Option<&str>,
+    label: Option<&str>,
 ) -> AnyView {
     let entity = entity.to_owned();
     let filter = filter.cloned();
     let field = field.to_owned();
     let action = action.map(str::to_owned);
+    let label = label.map(str::to_owned);
     (move || {
         let snapshot = ctx.data.get();
         let reading = data::read(&snapshot, &entity, filter.as_ref(), &[], 0, None);
@@ -2566,7 +2648,7 @@ fn notice(
             Tone::Info => (class::TONE_INFO, "status"),
         };
         let gesture = action.clone().map(|name| {
-            let label = placement::humanise(&name);
+            let label = ctx.label_of(&name, label.as_deref());
             let intent = action_intent(ctx, &name, Some(&entity), id.clone(), Vec::new());
             view! {
                 <button class=class::BUTTON title=name.clone()
@@ -3291,6 +3373,7 @@ mod tests_action_row {
     #[test]
     fn une_operation_qui_vise_une_entite_a_besoin_de_la_ligne() {
         let vise_une_entite = Action::Invoke {
+            label: None,
             name: "terminer".into(),
             operation: "terminer".into(),
             entity: Some("tache".into()),
@@ -3298,6 +3381,7 @@ mod tests_action_row {
         assert!(action_needs_row(Some(&vise_une_entite)));
 
         let operation_de_module = Action::Invoke {
+            label: None,
             name: "recalculer".into(),
             operation: "recalculer".into(),
             entity: None,
@@ -3311,15 +3395,18 @@ mod tests_action_row {
     #[test]
     fn les_ecritures_ont_besoin_de_la_ligne_et_la_creation_non() {
         let update = Action::Update {
+            label: None,
             name: "ranger".into(),
             entity: "tache".into(),
             fields: vec!["fait".into()],
         };
         let delete = Action::Delete {
+            label: None,
             name: "jeter".into(),
             entity: "tache".into(),
         };
         let create = Action::Create {
+            label: None,
             name: "ajouter".into(),
             entity: "tache".into(),
             fields: vec!["titre".into()],
@@ -3335,6 +3422,7 @@ mod tests_action_row {
     #[test]
     fn une_action_de_ligne_porte_l_identifiant_de_la_ligne() {
         let autoriser = Action::Invoke {
+            label: None,
             name: "autoriser".into(),
             operation: "autoriser".into(),
             entity: Some("autorisation".into()),
@@ -3358,6 +3446,7 @@ mod tests_action_row {
         );
 
         let retirer = Action::Delete {
+            label: None,
             name: "retirer".into(),
             entity: "autorisation".into(),
         };

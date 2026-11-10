@@ -176,6 +176,26 @@ pub enum Node {
     Modal { title: String, children: Vec<Node> },
     /// Une feuille : une brique.
     Leaf { brick: Box<Brick> },
+    /// « Montre `child` seulement si » : une condition de visibilité posée sur UN nœud — une
+    /// brique, ou un groupe entier.
+    ///
+    /// La condition se dit comme un filtre de brique : `entity` et `filter` (voir
+    /// [`FilterExpr`]). L'hôte l'évalue contre ce qu'il sait déjà, **avant** de dessiner :
+    /// `child` est dessiné si et seulement si au moins une ligne de `entity` satisfait
+    /// `filter`. Rien ne ressemble à un état :
+    ///
+    /// - faux (aucune ligne ne satisfait) ⇒ `child` n'est pas dessiné ;
+    /// - donnée absente (entité pas encore lue, ou aucune ligne) ⇒ pas dessiné : une
+    ///   condition qu'on ne peut pas évaluer ne montre pas un bouton au hasard ;
+    /// - lecture en échec ou refusée ⇒ pas dessiné, et l'hôte nomme le refus à son journal.
+    ///
+    /// Un nœud masqué ne compte pas dans le verdict de la vue (voir `ViewState`) : un arbre
+    /// dont tous les nœuds conditionnels sont masqués se dessine, vide, sans erreur.
+    When {
+        entity: String,
+        filter: FilterExpr,
+        child: Box<Node>,
+    },
 }
 
 /// Un onglet de [`Node::Tabs`].
@@ -205,6 +225,11 @@ pub enum Brick {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         filter: Option<FilterExpr>,
         action: String,
+        /// Le libellé du bouton, en texte d'interface (« Épingler cette clé »). Il gagne sur
+        /// le libellé de l'action ([`Action::label`]), qui gagne sur le nom de l'action
+        /// humanisé par l'hôte. Pas d'identifiant, pas de `_`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        label: Option<String>,
     },
     /// Une bannière : un ton fermé et un texte déclaré (clé de message ou texte).
     ///
@@ -368,6 +393,10 @@ pub enum Brick {
         /// Une action de ce module, posée en bouton dans l'avis.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         action: Option<String>,
+        /// Le libellé de ce bouton de secours. Même précédence que [`Brick::Button`] :
+        /// celui-ci, puis le libellé de l'action, puis son nom humanisé.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        label: Option<String>,
     },
     /// La carte d'une question que l'agent pose et attend, au milieu du fil.
     ///
@@ -669,17 +698,29 @@ pub enum Action {
     /// Crée une ligne de `entity` avec les champs `fields`.
     Create {
         name: String,
+        /// Le libellé affiché, en texte d'interface. Absent = le nom, humanisé par l'hôte.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        label: Option<String>,
         entity: String,
         fields: Vec<String>,
     },
     /// Modifie les champs `fields` d'une ligne de `entity`.
     Update {
         name: String,
+        /// Le libellé affiché, en texte d'interface. Absent = le nom, humanisé par l'hôte.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        label: Option<String>,
         entity: String,
         fields: Vec<String>,
     },
     /// Supprime une ligne de `entity`.
-    Delete { name: String, entity: String },
+    Delete {
+        name: String,
+        /// Le libellé affiché, en texte d'interface. Absent = le nom, humanisé par l'hôte.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        label: Option<String>,
+        entity: String,
+    },
     /// Ouvre la vue `view` de ce module — ou, avec `module`, une vue d'un AUTRE module.
     ///
     /// `module` doit être déclaré dans `requires[]` du module appelant : un module n'ouvre
@@ -689,6 +730,9 @@ pub enum Action {
     /// cette vue.
     Navigate {
         name: String,
+        /// Le libellé affiché, en texte d'interface. Absent = le nom, humanisé par l'hôte.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        label: Option<String>,
         view: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         module: Option<String>,
@@ -698,7 +742,13 @@ pub enum Action {
     /// Le module déclare QU'un secret existe et comment il s'appelle ; la saisie, le coffre et
     /// la lecture restent à l'hôte. Aucune valeur ne passe par le module : ni en entrée, ni en
     /// retour, ni dans ce que la vue rend.
-    RequestSecret { name: String, secret: String },
+    RequestSecret {
+        name: String,
+        /// Le libellé affiché, en texte d'interface. Absent = le nom, humanisé par l'hôte.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        label: Option<String>,
+        secret: String,
+    },
     /// Une opération d'agent : envoyer un message, arrêter un run. Liée à une entité si besoin.
     ///
     /// `send_message` **exige** `text` : l'hôte ne doit pas inventer la demande. Un module
@@ -706,6 +756,9 @@ pub enum Action {
     /// personne, et c'est ainsi qu'on fait dire à un bouton ce que personne n'a demandé.
     AgentTool {
         name: String,
+        /// Le libellé affiché, en texte d'interface. Absent = le nom, humanisé par l'hôte.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        label: Option<String>,
         op: AgentOp,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         entity: Option<String>,
@@ -720,6 +773,9 @@ pub enum Action {
     /// pas un silence.
     Invoke {
         name: String,
+        /// Le libellé affiché, en texte d'interface. Absent = le nom, humanisé par l'hôte.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        label: Option<String>,
         /// Nom de l'opération déclarée dans `operations`.
         operation: String,
         /// Entité visée ; `None` = l'opération décide (opération de module).
@@ -729,6 +785,9 @@ pub enum Action {
     /// Autoriser ou refuser une capacité de l'appareil.
     DeviceCapability {
         name: String,
+        /// Le libellé affiché, en texte d'interface. Absent = le nom, humanisé par l'hôte.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        label: Option<String>,
         capability: DeviceCapability,
         grant: Grant,
     },
@@ -740,7 +799,13 @@ pub enum Action {
     /// pied du tiroir de l'hôte (modules, modèle, réglages) restait chez l'hôte, et tout
     /// module qui déclarait un menu le faisait disparaître — la personne perdait le chemin
     /// vers ces trois écrans, sans un mot.
-    Host { name: String, surface: HostSurface },
+    Host {
+        name: String,
+        /// Le libellé affiché, en texte d'interface. Absent = le nom, humanisé par l'hôte.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        label: Option<String>,
+        surface: HostSurface,
+    },
 }
 
 /// Les surfaces de la coquille qu'un module peut **offrir** sans les posséder.
@@ -776,6 +841,50 @@ impl Action {
             | Action::Host { name, .. } => name,
         }
     }
+
+    /// Le libellé que le module donne à l'action, quand il en donne un.
+    ///
+    /// **Précédence** de ce que l'hôte affiche sur un bouton qui déclenche l'action : le
+    /// `label` de la brique ([`Brick::Button`], [`Brick::Notice`]), puis ce libellé-ci, puis
+    /// le nom de l'action humanisé. Un libellé est du texte d'interface : voir
+    /// [`label_problem`].
+    pub fn label(&self) -> Option<&str> {
+        match self {
+            Action::Create { label, .. }
+            | Action::Update { label, .. }
+            | Action::Delete { label, .. }
+            | Action::Navigate { label, .. }
+            | Action::AgentTool { label, .. }
+            | Action::Invoke { label, .. }
+            | Action::RequestSecret { label, .. }
+            | Action::DeviceCapability { label, .. }
+            | Action::Host { label, .. } => label.as_deref(),
+        }
+    }
+}
+
+/// Pourquoi un libellé n'est pas acceptable, ou `None`. Contrôle minimal : le libellé est du
+/// TEXTE d'interface, donc il n'est pas vide, ne porte aucun caractère de contrôle (un
+/// retour à la ligne n'est pas un libellé) et aucun `_` — c'est la marque d'un identifiant
+/// (`epingler_cle`), que l'hôte humanise déjà sans qu'on ait à le déclarer. Rien d'autre
+/// n'est refusé : accents, espaces, ponctuation et casse sont à l'auteur.
+pub fn label_problem(label: &str) -> Option<LabelProblem> {
+    if label.trim().is_empty() {
+        Some(LabelProblem::Empty)
+    } else if label.chars().any(char::is_control) || label.contains('_') {
+        Some(LabelProblem::NotText)
+    } else {
+        None
+    }
+}
+
+/// Le défaut d'un libellé, tel que [`label_problem`] le dit.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LabelProblem {
+    /// Vide, ou fait d'espaces.
+    Empty,
+    /// Un caractère de contrôle, ou un `_` : ce n'est pas du texte d'interface.
+    NotText,
 }
 
 /// Les opérations d'agent exposées. Fermé.
@@ -1107,6 +1216,26 @@ impl<'a> Checks<'a> {
         }
     }
 
+    /// Un libellé déclaré (action, bouton, avis) : du texte d'interface, pas un identifiant.
+    fn label_ref(&mut self, path: &str, label: Option<&str>) {
+        match label.and_then(label_problem) {
+            Some(LabelProblem::Empty) => self.push(
+                "label_empty",
+                path,
+                "a label cannot be empty; drop `label` to let the host humanise the action name",
+            ),
+            Some(LabelProblem::NotText) => self.push(
+                "label_not_text",
+                path,
+                format!(
+                    "`{}` is not interface text (no `_`, no control character): write what the person should read, e.g. \"Pin this key\"",
+                    label.unwrap_or_default().escape_debug()
+                ),
+            ),
+            None => {}
+        }
+    }
+
     fn action_ref(&mut self, path: &str, name: &str) {
         if !self.actions.contains_key(name) {
             let msg = unknown_msg(
@@ -1251,6 +1380,7 @@ impl<'a> Checks<'a> {
             if !is_identifier(a.name()) {
                 self.push("invalid_name", &p, format!("`{}`", a.name()));
             }
+            self.label_ref(&format!("{p}.label"), a.label());
             if self.actions.contains_key(a.name()) {
                 self.push(
                     "duplicate_action",
@@ -1380,19 +1510,36 @@ impl<'a> Checks<'a> {
         }
         let mut briques = Vec::new();
         let mut structure = Vec::new();
+        let mut conditions = Vec::new();
         collecte(
             &format!("{p}.root"),
             &v.root,
             1,
             &mut briques,
             &mut structure,
+            &mut conditions,
         );
         for (chemin, raison, msg) in structure {
             self.push(raison, chemin, msg);
         }
+        for (chemin, entite, filtre) in conditions {
+            self.condition(&chemin, entite, filtre);
+        }
         for (chemin, b) in briques {
             self.brick(&chemin, b, v.surface);
         }
+    }
+
+    /// La condition d'un nœud `when` : une entité connue, des champs connus — les règles
+    /// d'un filtre de liste, avec les mêmes raisons.
+    fn condition(&mut self, chemin: &str, entite: &str, filtre: &FilterExpr) {
+        if !self.entity_ref("view_entity_unknown", &format!("{chemin}.entity"), entite) {
+            return;
+        }
+        let lis = self.readable(entite);
+        let mut lus = Vec::new();
+        chemins_du_filtre(filtre, &mut lus);
+        self.reads(&format!("{chemin}.filter"), entite, &lis, &lus);
     }
 
     fn brick(&mut self, chemin: &str, b: &Brick, surface: Surface) {
@@ -1614,12 +1761,32 @@ impl<'a> Checks<'a> {
         self.reads(chemin, entite, &lis, &lus);
 
         match b {
-            Brick::Button { action, .. } => self.action_ref(&format!("{chemin}.action"), action),
+            Brick::Button { action, label, .. } => {
+                self.action_ref(&format!("{chemin}.action"), action);
+                self.label_ref(&format!("{chemin}.label"), label.as_deref());
+            }
             // L'avis peut porter un geste (« Continuer ») : il doit exister.
             Brick::Notice {
-                action: Some(a), ..
-            } => self.action_ref(&format!("{chemin}.action"), a),
-            Brick::Notice { action: None, .. } => {}
+                action: Some(a),
+                label,
+                ..
+            } => {
+                self.action_ref(&format!("{chemin}.action"), a);
+                self.label_ref(&format!("{chemin}.label"), label.as_deref());
+            }
+            Brick::Notice {
+                action: None,
+                label,
+                ..
+            } => {
+                if label.is_some() {
+                    self.push(
+                        "notice_label_without_action",
+                        format!("{chemin}.label"),
+                        "a notice `label` names its button: without an `action` there is no button to label",
+                    );
+                }
+            }
             Brick::Field {
                 input,
                 target,
@@ -2028,14 +2195,18 @@ fn lectures(b: &Brick) -> Vec<&str> {
 /// Un problème de structure : `(chemin, raison, message)`.
 type StructureIssue = (String, &'static str, String);
 
-/// Toutes les briques d'un arbre, avec leur chemin (`views[0].root.children[1]`), et les
-/// problèmes de structure rencontrés (profondeur, onglets).
+/// Une condition `when` : le chemin du nœud, l'entité lue, le filtre.
+type ConditionRef<'a> = (String, &'a str, &'a FilterExpr);
+
+/// Toutes les briques d'un arbre, avec leur chemin (`views[0].root.children[1]`), les
+/// conditions `when` et les problèmes de structure rencontrés (profondeur, onglets).
 fn collecte<'a>(
     chemin: &str,
     noeud: &'a Node,
     profondeur: usize,
     out: &mut Vec<(String, &'a Brick)>,
     structure: &mut Vec<StructureIssue>,
+    conditions: &mut Vec<ConditionRef<'a>>,
 ) {
     if profondeur > MAX_VIEW_DEPTH {
         structure.push((
@@ -2059,8 +2230,24 @@ fn collecte<'a>(
                     profondeur + 1,
                     out,
                     structure,
+                    conditions,
                 );
             }
+        }
+        Node::When {
+            entity,
+            filter,
+            child,
+        } => {
+            conditions.push((chemin.to_string(), entity.as_str(), filter));
+            collecte(
+                &format!("{chemin}.child"),
+                child,
+                profondeur + 1,
+                out,
+                structure,
+                conditions,
+            );
         }
         Node::Tabs { tabs } => {
             if tabs.is_empty() {
@@ -2096,6 +2283,7 @@ fn collecte<'a>(
                         profondeur + 1,
                         out,
                         structure,
+                        conditions,
                     );
                 }
             }
@@ -2546,6 +2734,7 @@ mod tests {
     fn a_coherent_module_passes_check() {
         let mut m = module();
         m.actions.push(Action::Create {
+            label: None,
             name: "new".into(),
             entity: "invoice".into(),
             fields: vec!["titre".into()],
@@ -2606,6 +2795,7 @@ mod tests {
     fn check_refuses_an_action_on_an_unknown_entity() {
         let mut m = module();
         m.actions.push(Action::Delete {
+            label: None,
             name: "drop".into(),
             entity: "ghost".into(),
         });
@@ -2617,6 +2807,7 @@ mod tests {
     fn check_refuses_a_send_message_without_text() {
         let mut m = module();
         m.actions.push(Action::AgentTool {
+            label: None,
             name: "demander".into(),
             op: AgentOp::SendMessage,
             entity: None,
@@ -2630,6 +2821,7 @@ mod tests {
     fn check_refuses_a_text_on_stop_run() {
         let mut m = module();
         m.actions.push(Action::AgentTool {
+            label: None,
             name: "halt".into(),
             op: AgentOp::StopRun,
             entity: None,
@@ -2642,6 +2834,7 @@ mod tests {
     fn check_accepts_a_send_message_that_says_what_it_asks() {
         let mut m = module();
         m.actions.push(Action::AgentTool {
+            label: None,
             name: "demander".into(),
             op: AgentOp::SendMessage,
             entity: None,
@@ -2655,6 +2848,7 @@ mod tests {
     fn check_refuses_a_blank_text() {
         let mut m = module();
         m.actions.push(Action::AgentTool {
+            label: None,
             name: "demander".into(),
             op: AgentOp::SendMessage,
             entity: None,
@@ -2667,6 +2861,7 @@ mod tests {
     fn check_refuses_an_agent_op_on_an_unknown_entity() {
         let mut m = module();
         m.actions.push(Action::AgentTool {
+            label: None,
             name: "halt".into(),
             op: AgentOp::StopRun,
             entity: Some("ghost".into()),
@@ -2747,6 +2942,7 @@ mod tests {
 
         let mut m = module();
         m.actions.push(Action::Update {
+            label: None,
             name: "fix".into(),
             entity: "invoice".into(),
             fields: vec!["id".into()],
@@ -2758,6 +2954,7 @@ mod tests {
     fn check_refuses_an_action_writing_an_unknown_field() {
         let mut m = module();
         m.actions.push(Action::Create {
+            label: None,
             name: "new".into(),
             entity: "invoice".into(),
             fields: vec!["ghost".into()],
@@ -2946,6 +3143,7 @@ mod tests {
         // Naming itself is refused too.
         let mut m = module();
         m.actions.push(Action::Navigate {
+            label: None,
             name: "x".into(),
             view: "v".into(),
             module: Some(m.name.clone()),
@@ -3101,6 +3299,7 @@ mod tests {
 
         let mut m = module();
         m.actions.push(Action::Navigate {
+            label: None,
             module: None,
             name: "go".into(),
             view: "ghost".into(),
@@ -3124,10 +3323,12 @@ mod tests {
     fn check_refuses_a_duplicate_action_name() {
         let mut m = module();
         m.actions.push(Action::Delete {
+            label: None,
             name: "d".into(),
             entity: "invoice".into(),
         });
         m.actions.push(Action::Delete {
+            label: None,
             name: "d".into(),
             entity: "invoice".into(),
         });
@@ -3138,6 +3339,7 @@ mod tests {
     fn check_refuses_an_invalid_action_name() {
         let mut m = module();
         m.actions.push(Action::Delete {
+            label: None,
             name: "Supprimer tout".into(),
             entity: "invoice".into(),
         });
@@ -3241,6 +3443,7 @@ mod tests {
     fn an_unknown_field_action_and_view_message_say_what_to_fix() {
         let mut m = module();
         m.actions.push(Action::Create {
+            label: None,
             name: "new".into(),
             entity: "invoice".into(),
             fields: vec!["titre".into()],
@@ -3303,6 +3506,7 @@ mod tests {
     fn a_form_submit_must_be_a_create_or_update_of_its_own_entity() {
         let mut m = module();
         m.actions.push(Action::Create {
+            label: None,
             name: "mk_conv".into(),
             entity: "conversation".into(),
             fields: vec![],
@@ -3310,6 +3514,7 @@ mod tests {
         // `fields: []` is itself refused; isolate the submit rule on a valid action.
         m.actions.clear();
         m.actions.push(Action::Delete {
+            label: None,
             name: "drop".into(),
             entity: "invoice".into(),
         });
@@ -3324,6 +3529,7 @@ mod tests {
             .fields
             .push(FieldDesc::new("titre", FieldType::String));
         m.actions.push(Action::Create {
+            label: None,
             name: "mk_conv".into(),
             entity: "conversation".into(),
             fields: vec!["titre".into()],
@@ -3339,11 +3545,13 @@ mod tests {
     fn a_capability_request_must_point_at_the_matching_device_capability_action() {
         let mut m = module();
         m.actions.push(Action::DeviceCapability {
+            label: None,
             name: "cam_ok".into(),
             capability: DeviceCapability::Camera,
             grant: Grant::Allow,
         });
         m.actions.push(Action::Delete {
+            label: None,
             name: "drop".into(),
             entity: "invoice".into(),
         });
@@ -3391,6 +3599,7 @@ mod tests {
 
         let mut m = module();
         m.actions.push(Action::Update {
+            label: None,
             name: "fix".into(),
             entity: "invoice".into(),
             fields: vec!["amount".into(), "amount".into()],
@@ -3492,6 +3701,109 @@ mod tests {
     fn the_number_input_round_trips() {
         assert_stable::<Brick>(
             r#"{"type":"field","entity":"invoice","field":"amount","input":"number"}"#,
+        );
+    }
+
+    // ---------- libellés et conditions ----------
+
+    #[test]
+    fn a_label_is_interface_text_and_nothing_else_is_refused() {
+        assert_eq!(label_problem("Épingler cette clé"), None);
+        assert_eq!(label_problem("Se connecter — vite !"), None);
+        assert_eq!(label_problem(""), Some(LabelProblem::Empty));
+        assert_eq!(label_problem("  "), Some(LabelProblem::Empty));
+        assert_eq!(label_problem("epingler_cle"), Some(LabelProblem::NotText));
+        assert_eq!(label_problem("Deux\nlignes"), Some(LabelProblem::NotText));
+    }
+
+    #[test]
+    fn a_label_on_a_brick_an_action_or_a_notice_is_checked_and_round_trips() {
+        assert_stable::<Brick>(
+            r#"{"type":"button","entity":"invoice","action":"new","label":"Nouvelle facture"}"#,
+        );
+        assert_stable::<Action>(
+            r#"{"kind":"delete","name":"revoquer","label":"Révoquer","entity":"invoice"}"#,
+        );
+        let mut m = module();
+        m.actions.push(Action::Delete {
+            name: "revoquer".into(),
+            label: Some("Révoquer".into()),
+            entity: "invoice".into(),
+        });
+        m.views.push(leaf_view(
+            "ok",
+            r#"{"type":"button","entity":"invoice","action":"revoquer","label":"Retirer la clé"}"#,
+        ));
+        assert!(
+            !codes(&m).iter().any(|c| c.contains("label")),
+            "{:?}",
+            codes(&m)
+        );
+        assert_eq!(m.actions.last().and_then(Action::label), Some("Révoquer"));
+
+        m.views.push(leaf_view(
+            "bad",
+            r#"{"type":"button","entity":"invoice","action":"revoquer","label":"retirer_cle"}"#,
+        ));
+        m.actions.push(Action::Delete {
+            name: "autre".into(),
+            label: Some("".into()),
+            entity: "invoice".into(),
+        });
+        let got = codes(&m);
+        assert!(
+            got.contains(&"this.descriptor.label_not_text".to_string()),
+            "{got:?}"
+        );
+        assert!(
+            got.contains(&"this.descriptor.label_empty".to_string()),
+            "{got:?}"
+        );
+    }
+
+    #[test]
+    fn a_when_node_round_trips_and_wraps_any_node() {
+        let json = r#"{"type":"when","entity":"invoice","filter":{"cmp":{"field":"titre","op":"eq","value":"A"}},"child":{"type":"stack","children":[]}}"#;
+        let n: Node = serde_json::from_str(json).expect("when parses");
+        assert_eq!(serde_json::to_string(&n).expect("ser"), json);
+    }
+
+    #[test]
+    fn a_when_condition_names_a_known_entity_and_known_fields() {
+        let ok = r#"{"type":"when","entity":"invoice","filter":{"cmp":{"field":"titre","op":"eq","value":"A"}},"child":{"type":"leaf","brick":{"type":"metrics","entity":"invoice"}}}"#;
+        let bad_entity = ok.replace(
+            r#""entity":"invoice","filter""#,
+            r#""entity":"ghost","filter""#,
+        );
+        let bad_field = ok.replace(r#""field":"titre""#, r#""field":"nom""#);
+        for (json, want) in [
+            (ok.to_string(), None),
+            (bad_entity, Some("this.descriptor.view_entity_unknown")),
+            (bad_field, Some("this.descriptor.view_field_unknown")),
+        ] {
+            let mut m = module();
+            m.views
+                .push(view("c", serde_json::from_str(&json).expect("node")));
+            let got = codes(&m);
+            match want {
+                None => assert!(got.is_empty(), "{got:?}"),
+                Some(code) => assert!(got.contains(&code.to_string()), "{got:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn a_when_node_counts_as_a_nesting_level_and_its_child_is_still_checked() {
+        let mut m = module();
+        let child = r#"{"type":"leaf","brick":{"type":"list","entity":"invoice","label":"nom"}}"#;
+        let json = format!(
+            r#"{{"type":"when","entity":"invoice","filter":{{"cmp":{{"field":"titre","op":"eq","value":"A"}}}},"child":{child}}}"#
+        );
+        m.views
+            .push(view("c", serde_json::from_str(&json).expect("node")));
+        assert!(
+            codes(&m).contains(&"this.descriptor.view_field_unknown".to_string()),
+            "a brick under a `when` is checked like any other"
         );
     }
 }

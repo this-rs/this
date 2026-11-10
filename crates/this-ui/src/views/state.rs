@@ -52,7 +52,7 @@ pub fn view_state(root: &Node, snapshot: &Snapshot) -> ViewState {
     // permet d'écrire dans une entité vide — mesuré : un `Form` de création sur une entité
     // neuve ne s'affichait pas, et la personne n'avait aucun moyen d'ajouter la première
     // ligne. On dessine donc l'arbre, et chaque brique montre son propre état.
-    if has_writable_control(root) {
+    if has_visible_writable_control(root, snapshot) {
         return ViewState::Ready;
     }
     if let Some((entity, reason)) = find(&readings, |reading| match reading {
@@ -151,43 +151,96 @@ fn find<'a>(
 /// L'arbre porte-t-il de quoi ÉCRIRE (un formulaire, un champ éditable) ?
 ///
 /// Distinct d'« a des lignes » : un formulaire de création, lui, n'en a aucune par nature.
+///
+/// Les nœuds `when` sont comptés comme vrais : voir [`has_visible_writable_control`] pour la
+/// réponse devant un snapshot.
 pub fn has_writable_control(node: &Node) -> bool {
+    writable(node, None)
+}
+
+/// Comme [`has_writable_control`], mais un nœud `when` dont la condition ne tient pas ne
+/// compte pas : un formulaire masqué n'est pas un formulaire qu'on peut remplir.
+pub fn has_visible_writable_control(node: &Node, snapshot: &Snapshot) -> bool {
+    writable(node, Some(snapshot))
+}
+
+fn writable(node: &Node, snapshot: Option<&Snapshot>) -> bool {
+    let any = |children: &[Node]| children.iter().any(|c| writable(c, snapshot));
     match node {
         Node::Leaf { brick } => matches!(**brick, Brick::Form { .. } | Brick::Field { .. }),
         Node::Stack { children }
         | Node::Row { children }
         | Node::Drawer { children, .. }
-        | Node::Modal { children, .. } => children.iter().any(has_writable_control),
-        Node::Tabs { tabs } => tabs
-            .iter()
-            .any(|t| t.children.iter().any(has_writable_control)),
+        | Node::Modal { children, .. } => any(children),
+        Node::Tabs { tabs } => tabs.iter().any(|t| any(&t.children)),
+        Node::When {
+            entity,
+            filter,
+            child,
+        } => visible(snapshot, entity, filter) && writable(child, snapshot),
     }
 }
 
-fn collect<'a>(node: &Node, snapshot: &'a Snapshot, out: &mut Vec<(String, Reading<'a>)>) {
+/// La condition d'un nœud `when` tient-elle ? Sans snapshot, on suppose que oui.
+fn visible(
+    snapshot: Option<&Snapshot>,
+    entity: &str,
+    filter: &this_descriptor::FilterExpr,
+) -> bool {
+    snapshot.is_none_or(|snapshot| data::condition(snapshot, entity, filter).holds())
+}
+
+/// The bricks the tree draws for this snapshot, in reading order: those under a `when`
+/// whose condition does not hold are not in it. This is the one place the walk and the
+/// renderer's `when` agree on (both ask [`data::condition`]); the verdict of the view and
+/// the tests read it here.
+pub fn drawn<'a>(node: &'a Node, snapshot: &Snapshot) -> Vec<&'a Brick> {
+    let mut out = Vec::new();
+    walk(node, snapshot, &mut out);
+    out
+}
+
+fn walk<'a>(node: &'a Node, snapshot: &Snapshot, out: &mut Vec<&'a Brick>) {
     match node {
-        Node::Leaf { brick } => {
-            let (Some(entity), Some(reading)) = (brick.entity(), brick_reading(brick, snapshot))
-            else {
-                return;
-            };
-            out.push((entity.to_owned(), reading));
-        }
+        Node::Leaf { brick } => out.push(brick),
         Node::Stack { children }
         | Node::Row { children }
         | Node::Drawer { children, .. }
         | Node::Modal { children, .. } => {
             for child in children {
-                collect(child, snapshot, out);
+                walk(child, snapshot, out);
             }
         }
         Node::Tabs { tabs } => {
             for tab in tabs {
                 for child in &tab.children {
-                    collect(child, snapshot, out);
+                    walk(child, snapshot, out);
                 }
             }
         }
+        // Un nœud masqué ne lit rien qui compte : sa lecture ne fait pas le verdict de la
+        // vue (une liste en échec sous une condition fausse n'est pas une vue en échec).
+        // La lecture de la condition elle-même ne compte pas non plus : elle ne dessine
+        // rien. Si tout est masqué, il ne reste aucune lecture et la vue se dessine, vide
+        // (`ViewState::Ready`), sans erreur.
+        Node::When {
+            entity,
+            filter,
+            child,
+        } => {
+            if data::condition(snapshot, entity, filter).holds() {
+                walk(child, snapshot, out);
+            }
+        }
+    }
+}
+
+fn collect<'a>(node: &Node, snapshot: &'a Snapshot, out: &mut Vec<(String, Reading<'a>)>) {
+    for brick in drawn(node, snapshot) {
+        let (Some(entity), Some(reading)) = (brick.entity(), brick_reading(brick, snapshot)) else {
+            continue;
+        };
+        out.push((entity.to_owned(), reading));
     }
 }
 
@@ -399,5 +452,159 @@ mod tests {
             ),
             None
         );
+    }
+
+    fn when(entity: &str, field: &str, value: serde_json::Value, child: Node) -> Node {
+        Node::When {
+            entity: entity.into(),
+            filter: this_descriptor::FilterExpr::Cmp {
+                field: field.into(),
+                op: this_descriptor::FilterOp::Eq,
+                value,
+            },
+            child: Box::new(child),
+        }
+    }
+
+    fn session(connected: bool) -> Snapshot {
+        Snapshot::new().with(
+            "session",
+            Feed::Ready(vec![json!({"id": "s", "connected": connected})]),
+        )
+    }
+
+    fn button(action: &str) -> Node {
+        leaf(Brick::Button {
+            entity: "session".into(),
+            filter: None,
+            action: action.into(),
+            label: None,
+        })
+    }
+
+    fn actions(node: &Node, snapshot: &Snapshot) -> Vec<String> {
+        drawn(node, snapshot)
+            .into_iter()
+            .map(|b| match b {
+                Brick::Button { action, .. } => action.clone(),
+                other => format!("{other:?}"),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_false_conditional_node_is_not_drawn_and_a_true_one_is() {
+        let tree = Node::Stack {
+            children: vec![
+                when("session", "connected", json!(true), button("sign_out")),
+                when("session", "connected", json!(false), button("sign_in")),
+            ],
+        };
+        assert_eq!(actions(&tree, &session(true)), ["sign_out"]);
+        assert_eq!(actions(&tree, &session(false)), ["sign_in"]);
+    }
+
+    #[test]
+    fn a_whole_group_disappears_with_its_condition() {
+        let group = Node::Row {
+            children: vec![button("a"), button("b")],
+        };
+        let tree = Node::Stack {
+            children: vec![
+                when("session", "connected", json!(true), group),
+                button("always"),
+            ],
+        };
+        assert_eq!(actions(&tree, &session(true)), ["a", "b", "always"]);
+        assert_eq!(actions(&tree, &session(false)), ["always"]);
+    }
+
+    #[test]
+    fn a_condition_that_cannot_be_evaluated_draws_nothing() {
+        let node = when("session", "connected", json!(true), button("sign_out"));
+        let no_rows = Snapshot::new().with("session", Feed::Ready(vec![]));
+        let loading = Snapshot::new().with("session", Feed::Loading);
+        let idle = Snapshot::new().with("session", Feed::Idle);
+        let failed = Snapshot::new().with("session", Feed::Failed("boom".into()));
+        let denied = Snapshot::new().with("session", Feed::Denied("perm".into()));
+        for (name, snapshot) in [
+            ("no row", no_rows),
+            ("loading", loading),
+            ("idle", idle),
+            ("failed", failed),
+            ("denied", denied),
+            ("entity never provided", Snapshot::new()),
+        ] {
+            assert!(
+                actions(&node, &snapshot).is_empty(),
+                "{name}: an unevaluable condition must not show a button"
+            );
+        }
+    }
+
+    #[test]
+    fn the_verdicts_of_a_condition_name_their_cause() {
+        use crate::views::data::{Condition, condition};
+        let f = this_descriptor::FilterExpr::Cmp {
+            field: "connected".into(),
+            op: this_descriptor::FilterOp::Eq,
+            value: json!(true),
+        };
+        assert_eq!(condition(&session(true), "session", &f), Condition::Holds);
+        assert_eq!(condition(&session(false), "session", &f), Condition::Fails);
+        assert_eq!(
+            condition(
+                &Snapshot::new().with("session", Feed::Ready(vec![])),
+                "session",
+                &f
+            ),
+            Condition::Absent
+        );
+        assert!(matches!(
+            condition(&Snapshot::new().with("session", Feed::Failed("boom".into())), "session", &f),
+            Condition::Unreadable(why) if why.contains("boom")
+        ));
+        assert!(matches!(
+            condition(&Snapshot::new(), "session", &f),
+            Condition::Unreadable(_)
+        ));
+    }
+
+    #[test]
+    fn a_tree_whose_conditional_nodes_are_all_hidden_is_ready_not_an_error() {
+        let tree = Node::Stack {
+            children: vec![
+                when("session", "connected", json!(true), list("invoice")),
+                when("session", "connected", json!(true), button("sign_out")),
+            ],
+        };
+        // The hidden list would have FAILED; hidden, it does not make the view fail.
+        let snapshot = session(false).with("invoice", Feed::Failed("boom".into()));
+        assert_eq!(view_state(&tree, &snapshot), ViewState::Ready);
+        // And the same tree, shown, does report what it reads.
+        let only_list = when("session", "connected", json!(true), list("invoice"));
+        let shown = session(true).with("invoice", Feed::Failed("boom".into()));
+        assert!(matches!(
+            view_state(&only_list, &shown),
+            ViewState::Failed { .. }
+        ));
+        assert_eq!(view_state(&only_list, &snapshot), ViewState::Ready);
+    }
+
+    #[test]
+    fn a_hidden_form_does_not_make_the_view_ready() {
+        let form = leaf(Brick::Form {
+            entity: "invoice".into(),
+            filter: None,
+            fields: vec![],
+            submit: None,
+        });
+        let tree = when("session", "connected", json!(true), form);
+        let hidden = session(false).with("invoice", Feed::Ready(vec![]));
+        // Nothing drawn, nothing read: the view draws (empty) rather than erroring.
+        assert_eq!(view_state(&tree, &hidden), ViewState::Ready);
+        assert!(!has_visible_writable_control(&tree, &hidden));
+        assert!(has_visible_writable_control(&tree, &session(true)));
+        assert!(has_writable_control(&tree));
     }
 }
