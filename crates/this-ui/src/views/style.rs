@@ -92,6 +92,8 @@ pub mod class {
     pub const STEP_NAME: &str = "vw-step-name";
     pub const STEP_TIME: &str = "vw-step-time";
     pub const STEP_RESUME: &str = "vw-step-resume";
+    pub const STEP_GROUP: &str = "vw-step-group";
+    pub const STEP_GROUP_SUMMARY: &str = "vw-step-group-summary";
     pub const OLDER: &str = "vw-older";
     pub const QUESTION: &str = "vw-question";
     pub const QUESTION_TEXT: &str = "vw-question-text";
@@ -219,6 +221,8 @@ pub const ALL: &[&str] = &[
     class::STEP_NAME,
     class::STEP_TIME,
     class::STEP_RESUME,
+    class::STEP_GROUP,
+    class::STEP_GROUP_SUMMARY,
     class::OLDER,
     class::QUESTION,
     class::QUESTION_TEXT,
@@ -476,6 +480,13 @@ pub const CSS: &str = r#"
 .vw-step-name { font-weight: 600; }
 .vw-step-time { font-variant-numeric: tabular-nums; opacity: .7; }
 .vw-step-resume { flex-basis: 100%; min-width: 0; overflow-wrap: anywhere; opacity: .8; }
+/* Un groupe d'outils : une ligne repliée qui nomme les outils, ouverte sur demande. Le
+   résultat brut d'un outil n'est PAS déversé dans le fil par défaut. */
+.vw-step-group { margin: 0; min-width: 0; }
+.vw-step-group > details > summary { cursor: pointer; user-select: none;
+  display: inline-flex; align-items: baseline; gap: 8px; min-width: 0; }
+.vw-step-group-summary { font-weight: 600; font-size: 13px; opacity: .85; }
+.vw-step-group > details > .vw-steps { margin-top: 4px; }
 .vw-older { min-height: 44px; width: 100%; border-radius: 10px;
   border: 1px dashed var(--vw-line, rgba(0,0,0,.16)); background: none; color: inherit;
   font: inherit; cursor: pointer; }
