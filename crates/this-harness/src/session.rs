@@ -1385,14 +1385,14 @@ impl Harness {
                             });
                         }
                         code = panne.map(|panne| format!("{panne:?}").to_lowercase());
-                        horloge(&mut *run.borrow_mut());
+                        horloge(&mut run.borrow_mut());
                         stop = Some(run.borrow_mut().finish(arret));
                         break 'turns;
                     }
                 };
 
                 // Le temps du modèle compte : les étapes de ce tour sont datées après lui.
-                horloge(&mut *run.borrow_mut());
+                horloge(&mut run.borrow_mut());
                 let streamed = gathered.borrow().clone();
                 let text = if reply.text.is_empty() {
                     streamed
@@ -1460,14 +1460,7 @@ impl Harness {
                         continue;
                     }
                     let (outcome, dropped) = self
-                        .run_tool(
-                            toolbox.as_ref(),
-                            call,
-                            &run_id,
-                            &mut *run.borrow_mut(),
-                            &cancel,
-                            &limits,
-                        )
+                        .run_tool(toolbox.as_ref(), call, &run_id, &run, &cancel, &limits)
                         .await;
                     if let Some(why) = dropped {
                         // Abandonné ne veut pas dire « pas fait » : l'étape
@@ -1495,7 +1488,7 @@ impl Harness {
                 }
 
                 // La décision relit le budget en temps horloge, outils et modèle compris.
-                horloge(&mut *run.borrow_mut());
+                horloge(&mut run.borrow_mut());
                 let spoke = !text.trim().is_empty();
                 let called = !reply.calls.is_empty();
                 // Le motif se lit AVANT la décision : `after_turn` déplace la
@@ -1582,9 +1575,10 @@ impl Harness {
             verdict,
         });
         if let Some((run_id, run)) = &closed {
+            let snapshot = run.borrow().clone();
             guarded(
                 clock.as_ref(),
-                self.recorder.stopped(run_id, &run.borrow(), &stop),
+                self.recorder.stopped(run_id, &snapshot, &stop),
             )
             .await;
         }
@@ -1611,7 +1605,7 @@ impl Harness {
         toolbox: &dyn Toolbox,
         call: &ToolCall,
         run_id: &str,
-        run: &mut Run,
+        run: &RefCell<Run>,
         cancel: &Cancel,
         limits: &Limits,
     ) -> (Outcome, Option<Watch>) {
@@ -1671,9 +1665,14 @@ impl Harness {
             ms,
         });
 
-        run.record(step_of(&call.name, ms, &outcome));
-        if let Some(step) = run.steps.last() {
-            guarded(self.clock.as_ref(), self.recorder.step(run_id, run, step)).await;
+        run.borrow_mut().record(step_of(&call.name, ms, &outcome));
+        let snapshot = run.borrow().clone();
+        if let Some(step) = snapshot.steps.last() {
+            guarded(
+                self.clock.as_ref(),
+                self.recorder.step(run_id, &snapshot, step),
+            )
+            .await;
         }
         (outcome, abandoned)
     }
@@ -1875,15 +1874,12 @@ impl Permission for RunPorts {
 
     async fn record(&self, call: &ToolCall, ms: u64, outcome: &Outcome) {
         let step = step_of(&call.name, ms, outcome);
-        {
-            let mut run = self.run.borrow_mut();
-            run.record(step);
-        }
-        let run = self.run.borrow();
-        if let Some(step) = run.steps.last() {
+        self.run.borrow_mut().record(step);
+        let snapshot = self.run.borrow().clone();
+        if let Some(step) = snapshot.steps.last() {
             guarded(
                 self.clock.as_ref(),
-                self.recorder.step(&self.run_id, &run, step),
+                self.recorder.step(&self.run_id, &snapshot, step),
             )
             .await;
         }
