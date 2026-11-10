@@ -1,4 +1,7 @@
 //! Le rappel cite, dit l'introuvable, reste synthétique et borné.
+use std::cell::RefCell;
+use std::rc::Rc;
+
 use futures::executor::block_on;
 use serde_json::json;
 use this_harness::{Anchors, Fact, Message, Recall, ToolCall, anchors, rappel};
@@ -113,4 +116,41 @@ fn nothing_to_recall_produces_nothing() {
     let a = anchors(&[Message::user("bonjour"), Message::assistant("salut")]);
     assert_eq!(a, Anchors::default());
     assert!(block_on(rappel(&a, &Scripted(vec![]))).is_none());
+}
+
+/// Un port qui compte ses appels : la preuve qu'un rappel sans ancre ne tente
+/// rien, et qu'avec des ancres il n'appelle qu'une fois, avec les ids dédupliqués.
+struct Compteur(Rc<RefCell<Vec<Vec<String>>>>);
+
+#[async_trait::async_trait(?Send)]
+impl Recall for Compteur {
+    async fn recall(&self, ids: &[String]) -> Vec<Fact> {
+        self.0.borrow_mut().push(ids.to_vec());
+        vec![]
+    }
+}
+
+#[test]
+fn sans_ancre_le_port_de_rappel_n_est_jamais_appele() {
+    let appels = Rc::new(RefCell::new(Vec::new()));
+    let port = Compteur(Rc::clone(&appels));
+    // Rien à rappeler : ni id ni chemin — donc aucune tentative vers le port.
+    let a = anchors(&[Message::user("bonjour"), Message::assistant("salut")]);
+    assert_eq!(a, Anchors::default());
+    assert!(block_on(rappel(&a, &port)).is_none());
+    assert!(
+        appels.borrow().is_empty(),
+        "un rappel sans ancre ne doit pas toucher le port (aucune tentative réseau)"
+    );
+}
+
+#[test]
+fn avec_des_ancres_le_port_est_appele_une_fois_avec_les_ids_dedupliques() {
+    let appels = Rc::new(RefCell::new(Vec::new()));
+    let port = Compteur(Rc::clone(&appels));
+    // conv() cite A deux fois : le port reçoit la liste dédupliquée, une fois.
+    let a = anchors(&conv());
+    block_on(rappel(&a, &port)).unwrap();
+    assert_eq!(appels.borrow().len(), 1, "un seul appel au port");
+    assert_eq!(appels.borrow()[0], [A, B, FAKE]);
 }
