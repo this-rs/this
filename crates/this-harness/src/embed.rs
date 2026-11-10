@@ -89,6 +89,30 @@ impl Embed for SansEmbed {
     }
 }
 
+/// La règle de dimension, en fonction **pure** : chaque vecteur du lot doit avoir la
+/// dimension annoncée par l'estampille.
+///
+/// Synchrone, sans `async` et sans réseau : elle vit donc aussi bien du côté d'une
+/// page que d'une coquille native dont le futur doit être `Send` — le port est
+/// `?Send`, cette règle ne l'est pas. Le lot est vérifié **entier** : un seul
+/// vecteur fautif, même loin du premier, refuse le lot, et les deux dimensions
+/// sont nommées ([`EmbedError::Dimension`]).
+///
+/// C'est le SEUL endroit où la règle est écrite : [`vectoriser`] l'applique, et
+/// un hôte qui vectorise sans passer par le port (coquille native) l'appelle
+/// directement au lieu de la réécrire.
+pub fn verifier(attendue: &EmbeddingModel, recues: &[Vec<f32>]) -> Result<(), EmbedError> {
+    for vecteur in recues {
+        if vecteur.len() != attendue.dimension {
+            return Err(EmbedError::Dimension {
+                attendue: attendue.dimension,
+                recue: vecteur.len(),
+            });
+        }
+    }
+    Ok(())
+}
+
 /// Vectorise via le port, en confrontant le résultat à l'estampille annoncée.
 ///
 /// C'est le consommateur : sans estampille (`modele() == None`), `embed` n'est
@@ -99,14 +123,9 @@ impl Embed for SansEmbed {
 pub async fn vectoriser(embed: &dyn Embed, textes: &[String]) -> Result<Vec<Vec<f32>>, EmbedError> {
     let modele = embed.modele().ok_or(EmbedError::Unsupported)?;
     let vecteurs = embed.embed(textes).await?;
-    for vecteur in &vecteurs {
-        if vecteur.len() != modele.dimension {
-            return Err(EmbedError::Dimension {
-                attendue: modele.dimension,
-                recue: vecteur.len(),
-            });
-        }
-    }
+    // La règle n'est pas réécrite ici : `verifier` la porte, et un hôte qui
+    // vectorise hors du port (futur `Send`) l'appelle sans la dupliquer.
+    verifier(modele, &vecteurs)?;
     Ok(vecteurs)
 }
 
