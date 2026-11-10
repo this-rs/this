@@ -189,6 +189,55 @@ pub fn read<'a>(
     })
 }
 
+/// The verdict of a `when` node's condition, read from what the host holds.
+///
+/// A condition holds when at least one row of its entity satisfies its filter. Everything
+/// else hides the node, but not for the same reason, and the host wants to tell them apart:
+/// a false condition is the module speaking, an unreadable one is something to name in the log.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Condition {
+    /// A row satisfies the filter: draw the node.
+    Holds,
+    /// Rows are there and none satisfies the filter: do not draw.
+    Fails,
+    /// There is nothing to evaluate against (not read yet, or no row at all): do not draw.
+    /// A condition that cannot be evaluated never shows a button at random.
+    Absent,
+    /// The read failed, was refused, or names an entity the host never provided: do not
+    /// draw, and say why in the log. The text names the cause.
+    Unreadable(String),
+}
+
+impl Condition {
+    /// Is the node drawn?
+    pub fn holds(&self) -> bool {
+        matches!(self, Condition::Holds)
+    }
+}
+
+/// Evaluate a `when` condition against the snapshot, with the same filter semantics as a
+/// brick's own read (context references included).
+pub fn condition(snapshot: &Snapshot, entity: &str, filter: &FilterExpr) -> Condition {
+    match snapshot.feeds.get(entity) {
+        None => Condition::Unreadable(format!("{} : `{entity}`", text::UNKNOWN_ENTITY)),
+        Some(Feed::Idle) | Some(Feed::Loading) => Condition::Absent,
+        Some(Feed::Failed(why)) => Condition::Unreadable(format!("lecture en échec : {why}")),
+        Some(Feed::Denied(why)) => Condition::Unreadable(format!("lecture refusée : {why}")),
+        Some(Feed::Ready(rows)) if rows.is_empty() => Condition::Absent,
+        Some(Feed::Ready(rows)) => {
+            let filter = snapshot.resolve(Some(filter));
+            let holds = rows
+                .iter()
+                .any(|row| filter.as_deref().is_none_or(|filter| matches(filter, row)));
+            if holds {
+                Condition::Holds
+            } else {
+                Condition::Fails
+            }
+        }
+    }
+}
+
 /// The first row a brick reads: `text`, `card`, `code_block`, `result`, `tool_step`.
 pub fn first<'a>(
     snapshot: &'a Snapshot,
