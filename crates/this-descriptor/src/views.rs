@@ -219,6 +219,14 @@ pub enum Brick {
         filter: Option<FilterExpr>,
         field: String,
     },
+    /// Une ligne secondaire : le champ `field` de la première ligne du filtre, petit, atténué,
+    /// sans cadre ni fond, sur une seule ligne (tronqué à l'ellipse). Aucune action.
+    Caption {
+        entity: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        filter: Option<FilterExpr>,
+        field: String,
+    },
     /// Un bouton qui déclenche une action déclarée par le module.
     Button {
         entity: String,
@@ -539,6 +547,7 @@ impl Brick {
             | Brick::Secret { .. } => None,
             Brick::Indicator { entity, .. } => entity.as_deref(),
             Brick::Text { entity, .. }
+            | Brick::Caption { entity, .. }
             | Brick::Button { entity, .. }
             | Brick::Relation { entity, .. }
             | Brick::List { entity, .. }
@@ -1547,6 +1556,7 @@ impl<'a> Checks<'a> {
             && !matches!(
                 b,
                 Brick::Text { .. }
+                    | Brick::Caption { .. }
                     | Brick::Banner { .. }
                     | Brick::Indicator { .. }
                     | Brick::Metrics { .. }
@@ -1556,8 +1566,8 @@ impl<'a> Checks<'a> {
             self.push(
                 "surface_brick_refused",
                 chemin,
-                "this brick does not fit in a header; a header only takes text, banner, indicator, \
-                 metrics and button. Move the view to the `main`, `sidebar` or `panel` surface, \
+                "this brick does not fit in a header; a header only takes text, caption, banner, \
+                 indicator, metrics and button. Move the view to the `main`, `sidebar` or `panel` surface, \
                  or use one of those bricks"
                     .to_string(),
             );
@@ -2086,6 +2096,7 @@ fn lectures(b: &Brick) -> Vec<&str> {
     let mut v: Vec<&str> = Vec::new();
     match b {
         Brick::Text { field, filter, .. }
+        | Brick::Caption { field, filter, .. }
         | Brick::Field { field, filter, .. }
         | Brick::ToolStep { field, filter, .. }
         | Brick::CodeBlock { field, filter, .. }

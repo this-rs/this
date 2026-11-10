@@ -335,10 +335,17 @@ pub fn view_schema() -> ViewSchema {
         filter: filter_variants(),
         objects: objects(),
         enums: enums(),
-        header_bricks: ["text", "banner", "indicator", "metrics", "button"]
-            .iter()
-            .map(|s| (*s).to_string())
-            .collect(),
+        header_bricks: [
+            "text",
+            "caption",
+            "banner",
+            "indicator",
+            "metrics",
+            "button",
+        ]
+        .iter()
+        .map(|s| (*s).to_string())
+        .collect(),
         max_depth: crate::views::MAX_VIEW_DEPTH,
         rules: rules(),
         coverage: coverage(),
@@ -477,6 +484,18 @@ fn bricks() -> Vec<VariantSchema> {
             ],
             json!({"type": "text", "entity": "invoice", "field": "titre"}),
             json!({"type": "text", "entity": "invoice", "filter": f, "field": "titre"}),
+            true,
+        ),
+        brick_v(
+            "caption",
+            "A secondary line: `field` of the first row, small, muted, no frame, no background, one line (ellipsis). No action.",
+            vec![
+                entity_f(),
+                filter_f(),
+                req("field", "string", "The field shown.").refers("field"),
+            ],
+            json!({"type": "caption", "entity": "invoice", "field": "titre"}),
+            json!({"type": "caption", "entity": "invoice", "filter": f, "field": "titre"}),
             true,
         ),
         brick_v(
@@ -1653,7 +1672,7 @@ fn rules() -> Vec<RuleSchema> {
         rule(
             "surface_brick_refused",
             "A brick that does not fit a `header` is on a header surface.",
-            "Use text, banner, indicator, metrics or button, or move the view to main/sidebar/panel.",
+            "Use text, caption, banner, indicator, metrics or button, or move the view to main/sidebar/panel.",
         ),
         rule(
             "composer_placeholder_empty",
@@ -1859,6 +1878,11 @@ fn coverage() -> Vec<CoverageEntry> {
             "A button per row, executing an action with the row's id.",
         ),
         cover("text", &["brick:text"], "One field of the first row."),
+        cover(
+            "secondary line",
+            &["brick:caption"],
+            "One field of the first row, small and muted, without frame.",
+        ),
         cover(
             "banner",
             &["brick:banner", "brick:notice"],
@@ -2987,6 +3011,7 @@ mod tests {
             "drawer",
             "button",
             "text",
+            "secondary line",
             "banner",
             "indicator",
             "text field",
