@@ -434,6 +434,11 @@ pub const CSS: &str = r#"
 .vw-chat-log { display: flex; flex-direction: column; gap: 8px; margin: 0; padding: 0; list-style: none; }
 .vw-message { display: flex; flex-direction: column; gap: 2px; padding: 0; border-radius: 0;
   background: transparent; }
+/* Une ligne du fil occupe TOUTE la largeur, quel que soit son texte : un texte court ne
+   donne pas une ligne étroite. Seul le CONTENU est borné (la bulle de la personne : 92 %, à
+   droite). */
+.vw-chat-log > .vw-message { box-sizing: border-box; min-width: 0; width: 100%; }
+.vw-chat-log > .vw-message-user { width: 92%; }
 .vw-message-meta { font-size: 12px; opacity: .7; }
 .vw-message-body { min-width: 0; overflow-wrap: anywhere; }
 .vw-message-body > :first-child { margin-top: 0; }
@@ -450,7 +455,7 @@ pub const CSS: &str = r#"
    se suffit à elle-même. Le message de la personne reste une bulle, pour qu'on distingue qui
    parle d'un coup d'œil. Un fil où tout est encadré ne hiérarchise plus rien. */
 .vw-message-user { padding: 8px 12px; border-radius: 12px; align-self: flex-end;
-  max-width: 92%; background: var(--vw-user-bg, rgba(37,99,235,.10)); }
+  width: 92%; max-width: 92%; background: var(--vw-user-bg, rgba(37,99,235,.10)); }
 .vw-message-module { padding: 2px 0; background: transparent; align-self: stretch; }
 .vw-message-live { opacity: .92; }
 .vw-steps { display: flex; flex-direction: column; gap: 4px; margin: 6px 0 0; padding: 0;
@@ -530,6 +535,14 @@ pub const CSS: &str = r#"
 mod tests {
     use super::*;
     use std::collections::BTreeSet;
+
+    /// Une ligne du fil occupe toute la largeur (mesuré dans Chrome à 390 px : court et long
+    /// donnent la même largeur) ; seule la bulle de la personne est bornée, à 92 %.
+    #[test]
+    fn les_lignes_du_fil_ont_toute_la_largeur() {
+        assert!(CSS.contains(".vw-chat-log > .vw-message { box-sizing: border-box; min-width: 0; width: 100%; }"));
+        assert!(CSS.contains(".vw-chat-log > .vw-message-user { width: 92%; }"));
+    }
 
     /// Every `vw-…` token the sheet mentions.
     fn sheet_classes(css: &str) -> BTreeSet<String> {
