@@ -3728,7 +3728,12 @@ mod tests_fil {
             .collect();
         assert_eq!(
             noms,
-            vec!["dit:d'abord je regarde", "outil:lire", "dit:puis j'écris", "outil:ecrire"]
+            vec![
+                "dit:d'abord je regarde",
+                "outil:lire",
+                "dit:puis j'écris",
+                "outil:ecrire"
+            ]
         );
     }
 
