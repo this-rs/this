@@ -1185,7 +1185,9 @@ impl Harness {
                 // ou le retirer (`run.budget_ms = None`) tout en restant bornée
                 // sur les tours — deux bornes dont une seule tenait. Un plafond
                 // de zéro arrête avant le premier tour.
-                let budget_epuise = limits.budget_ms.is_some_and(|b| run.borrow().ecoule_ms >= b);
+                let budget_epuise = limits
+                    .budget_ms
+                    .is_some_and(|b| run.borrow().ecoule_ms >= b);
                 if goal_turns >= limits.max_tours || budget_epuise {
                     stop = Some(run.borrow_mut().finish(Stop::Budget));
                     break 'turns;
@@ -1317,7 +1319,8 @@ impl Harness {
                     }
                     break issue;
                 };
-                run.borrow_mut().add_elapsed((clock.now_ms() - turn_started).max(0.0) as u64);
+                run.borrow_mut()
+                    .add_elapsed((clock.now_ms() - turn_started).max(0.0) as u64);
 
                 let reply = match issue {
                     Ok(Ok(reply)) => reply,
@@ -1457,7 +1460,14 @@ impl Harness {
                         continue;
                     }
                     let (outcome, dropped) = self
-                        .run_tool(toolbox.as_ref(), call, &run_id, &mut *run.borrow_mut(), &cancel, &limits)
+                        .run_tool(
+                            toolbox.as_ref(),
+                            call,
+                            &run_id,
+                            &mut *run.borrow_mut(),
+                            &cancel,
+                            &limits,
+                        )
                         .await;
                     if let Some(why) = dropped {
                         // Abandonné ne veut pas dire « pas fait » : l'étape
@@ -1506,7 +1516,8 @@ impl Harness {
                 // `after_turn_with` doit tomber avant que les bras ne reborrent
                 // le run (`take_rappel`, `finish`) — sinon double emprunt.
                 let decision =
-                    run.borrow_mut().after_turn_with(self.policy.as_ref(), spoke, called);
+                    run.borrow_mut()
+                        .after_turn_with(self.policy.as_ref(), spoke, called);
                 match decision {
                     Decision::Continue => {
                         // Le rappel est consommé dans tous les cas : laissé dans

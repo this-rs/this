@@ -51,10 +51,8 @@ impl Transport for EngineFamilleA {
             }),
             Err(motif) => {
                 // Le refus est journalisé sous la même forme que `run_tool`…
-                let outcome = Outcome::refused(
-                    format!("outil non autorisé : {}", call.name),
-                    motif.clone(),
-                );
+                let outcome =
+                    Outcome::refused(format!("outil non autorisé : {}", call.name), motif.clone());
                 permission.record(&call, 0, &outcome).await;
                 // …puis renvoyé au moteur : le run s'arrête en échec.
                 Err(Failure::new(
@@ -146,11 +144,17 @@ fn un_refus_de_la_porte_remonte_au_moteur_et_journalise_la_meme_etape() {
     assert_eq!(step.tool, "lire");
     assert!(step.refused, "le refus est marqué dans l'étape");
     assert!(
-        step.motif.as_deref().unwrap().contains("aucune autorisation"),
+        step.motif
+            .as_deref()
+            .unwrap()
+            .contains("aucune autorisation"),
         "motif : {:?}",
         step.motif
     );
-    assert!(step.out_hash.is_some(), "l'empreinte de la sortie est posée");
+    assert!(
+        step.out_hash.is_some(),
+        "l'empreinte de la sortie est posée"
+    );
     assert!(!step.resume.is_empty(), "le résumé porte le texte du refus");
 
     // Le run arrêté est annoncé une fois, avec la même identité.
