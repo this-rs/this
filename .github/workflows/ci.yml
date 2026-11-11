@@ -34,6 +34,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       code: ${{ steps.filter.outputs.code }}
+      harness: ${{ steps.filter.outputs.harness }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -46,6 +47,7 @@ jobs:
           if [ -z "$base" ] || ! git cat-file -e "$base^{commit}" 2>/dev/null; then
             echo "no base commit to diff against: assume code changed"
             echo "code=true" >> "$GITHUB_OUTPUT"
+            echo "harness=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
           changed=$(git diff --name-only "$base" "$GITHUB_SHA" || true)
@@ -53,6 +55,8 @@ jobs:
           code=$(printf '%s\n' "$changed" | grep -vE '(\.md$|\.mmd$|^docs/)' | grep -c . || true)
           echo "code files: $code"
           if [ "$code" -gt 0 ]; then echo "code=true" >> "$GITHUB_OUTPUT"; else echo "code=false" >> "$GITHUB_OUTPUT"; fi
+          # Le harnais et ce qu'il tire (this-agent, this-llm) : un changement là peut casser wasm32.
+          if printf '%s\n' "$changed" | grep -qE '^(crates/(this-harness|this-agent|this-llm)/|scripts/lint-harness-portability\.rs|Cargo\.(toml|lock)$|\.github/workflows/ci\.yml)'; then echo "harness=true" >> "$GITHUB_OUTPUT"; else echo "harness=false" >> "$GITHUB_OUTPUT"; fi
 
   # Test sur plusieurs versions de Rust
   test:
@@ -609,6 +613,39 @@ jobs:
           # que ce runner n'a pas. C'est une exclusion assumée, pas un oubli — et
           # elle est écrite ici pour que personne ne la prenne pour une couverture.
 
+  # Le harnais doit tourner dans une page, une app mobile et sur un serveur : il se
+  # compile donc en wasm32, SANS feature par défaut. Rien ne protégeait cette propriété —
+  # une dépendance de plateforme pouvait entrer et casser wasm32 sans qu'on le voie avant
+  # la livraison. Deux gardes : (1) la compilation, (2) un lint de liste noire qui nomme
+  # fichier:ligne:symbole. Le lint vit ICI et non dans `clippy` : il n'a besoin que de
+  # `rustc`, et c'est dans ce job qu'on lit l'échec wasm32 — un seul endroit à regarder.
+  # Filtré sur les chemins par `changes.harness` (et non `paths:` du workflow : un
+  # `paths:` ferait disparaître le check, et un check requis absent bloque la fusion).
+  wasm32_harness:
+    needs: changes
+    if: needs.changes.outputs.harness == 'true'
+    name: Harness wasm32
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Create local dep stubs
+        run: bash .github/create-local-dep-stubs.sh
+
+      - name: Blacklist lint (no platform API in the harness)
+        run: |
+          rustc --edition 2024 -O scripts/lint-harness-portability.rs -o "$RUNNER_TEMP/lint-harness"
+          "$RUNNER_TEMP/lint-harness" crates/this-harness/src
+
+      - name: Compile this-harness for wasm32
+        run: cargo check -p this-harness --target wasm32-unknown-unknown --no-default-features
+
   # Le backend obrain est le seul dont les dépendances ne sont pas sur crates.io :
   # `Cargo.toml` les déclare par PATH (`../../obrain/obrain-db/crates/...`). Deux
   # conséquences qu'aucun job ne couvrait :
@@ -676,7 +713,7 @@ jobs:
   gate:
     name: CI gate
     if: always()
-    needs: [changes, test, coverage, fmt, clippy, examples, security_audit, docs, cross-platform, wasm_crates, obrain, swift_ios]
+    needs: [changes, test, coverage, fmt, clippy, examples, security_audit, docs, cross-platform, wasm_crates, wasm32_harness, obrain, swift_ios]
     runs-on: ubuntu-latest
     steps:
       - name: Nothing failed, nothing was cancelled
