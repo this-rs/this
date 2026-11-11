@@ -86,6 +86,18 @@ pub fn issues_to_error(issues: &[DescriptorIssue]) -> ContractError {
     )
 }
 
+/// Une heure locale `HH:MM` valide (00:00..23:59).
+fn heure_locale_valide(at: &str) -> bool {
+    let mut parts = at.split(':');
+    let (Some(heures), Some(minutes), None) = (parts.next(), parts.next(), parts.next()) else {
+        return false;
+    };
+    let (Ok(h), Ok(m)) = (heures.parse::<u32>(), minutes.parse::<u32>()) else {
+        return false;
+    };
+    heures.len() == 2 && minutes.len() == 2 && h < 24 && m < 60
+}
+
 struct Ctx<'a> {
     issues: Vec<DescriptorIssue>,
     reg: &'a CustomRegistry,
@@ -342,11 +354,101 @@ impl ModuleDescriptor {
             c.custom(CustomKind::Capability, &cap.name, "custom");
         }
 
+        // jobs
+        c.issues.extend(self.check_jobs(known));
+
         if c.issues.is_empty() {
             Ok(())
         } else {
             Err(c.issues)
         }
+    }
+
+    /// Verify ONLY the `jobs` section — the refusals a host can enforce without running
+    /// the whole admission check: `job_name_duplicate`, `job_program_unknown`,
+    /// `job_schedule_missing`, `job_schedule_conflict`, `job_needs_unknown`.
+    ///
+    /// `known` = the descriptors of the modules this one requires (transitively), so a
+    /// `needs` entry may name their entities too; `&[]` means local entities only.
+    pub fn check_jobs(&self, known: &[&ModuleDescriptor]) -> Vec<DescriptorIssue> {
+        let mut issues = Vec::new();
+        let mut noms = BTreeSet::new();
+        let mut connues: BTreeSet<&str> = self.entities.iter().map(|e| e.name.as_str()).collect();
+        for dep in crate::views::required_modules(self, known) {
+            for e in &dep.entities {
+                connues.insert(e.name.as_str());
+            }
+        }
+        for (i, job) in self.jobs.iter().enumerate() {
+            let p = format!("jobs[{i}]");
+            let mut push = |raison: &str, chemin: &str, message: String| {
+                issues.push(DescriptorIssue {
+                    code: ErrorCode::new(format!("this.descriptor.{raison}")),
+                    path: chemin.to_string(),
+                    message,
+                });
+            };
+            if !is_identifier(&job.name) {
+                push(
+                    "invalid_name",
+                    &format!("{p}.name"),
+                    format!("`{}`", job.name),
+                );
+            }
+            if !noms.insert(&job.name) {
+                push(
+                    "job_name_duplicate",
+                    &p,
+                    format!("`{}` is declared twice", job.name),
+                );
+            }
+            if !is_identifier(&job.program) {
+                push(
+                    "invalid_name",
+                    &format!("{p}.program"),
+                    format!("`{}`", job.program),
+                );
+            } else if !self.programs.iter().any(|pr| pr == &job.program) {
+                push(
+                    "job_program_unknown",
+                    &p,
+                    format!("`{}` is not a declared program", job.program),
+                );
+            }
+            match (job.every_secs, job.at.as_deref()) {
+                (None, None) => push(
+                    "job_schedule_missing",
+                    &p,
+                    "declare `every_secs` or `at`".to_string(),
+                ),
+                (Some(_), Some(_)) => push(
+                    "job_schedule_conflict",
+                    &p,
+                    "`every_secs` and `at` are mutually exclusive".to_string(),
+                ),
+                (Some(0), None) => push(
+                    "job_schedule_missing",
+                    &p,
+                    "`every_secs` must be > 0".to_string(),
+                ),
+                (None, Some(at)) if !heure_locale_valide(at) => push(
+                    "job_schedule_missing",
+                    &p,
+                    "`at` must be `HH:MM` (00:00..23:59)".to_string(),
+                ),
+                _ => {}
+            }
+            for besoin in &job.needs {
+                if !connues.contains(besoin.as_str()) {
+                    push(
+                        "job_needs_unknown",
+                        &p,
+                        format!("`{besoin}` is neither local nor in a required module"),
+                    );
+                }
+            }
+        }
+        issues
     }
 
     /// Reject Fluent bundles until an engine renders them.
@@ -596,6 +698,7 @@ mod tests {
     use crate::custom::Custom;
     use crate::entity::EntityDesc;
     use crate::field::FieldDesc;
+    use crate::module::JobDesc;
     use crate::perm::PolicyExpr;
     use crate::runtime::{Handle, RuntimeDesc, RuntimeLimits};
 
@@ -1090,6 +1193,121 @@ mod tests {
         assert_eq!(
             codes_of(menu.check_with_required(&reg(), CheckProfile::Compiled, &[&socle, &menu])),
             vec!["this.descriptor.view_entity_unknown"]
+        );
+    }
+
+    // ---------- jobs ----------
+
+    fn avec_jobs(jobs: Vec<JobDesc>) -> ModuleDescriptor {
+        let mut m = ModuleDescriptor::new("rappels", "1.0.0");
+        m.programs = vec!["rappels".to_string()];
+        m.jobs = jobs;
+        m
+    }
+
+    fn job(program: &str) -> JobDesc {
+        let mut j = JobDesc::new("relancer", program);
+        j.every_secs = Some(3600);
+        j
+    }
+
+    #[test]
+    fn un_job_valide_passe() {
+        let m = avec_jobs(vec![job("rappels")]);
+        assert_eq!(
+            codes_of(m.check(&reg(), CheckProfile::Compiled)),
+            Vec::<String>::new()
+        );
+    }
+
+    #[test]
+    fn un_descripteur_avec_jobs_se_lit_et_se_valide_depuis_le_json() {
+        let json = r#"{"format":1,"name":"rappels","version":"1.0.0",
+            "programs":["rappels"],
+            "jobs":[{"name":"relancer","program":"rappels","every_secs":3600}]}"#;
+        let m = ModuleDescriptor::from_json(json).expect("descripteur valide");
+        assert_eq!(m.programs, vec!["rappels".to_string()]);
+        assert_eq!(m.jobs.len(), 1);
+        assert_eq!(m.jobs[0].every_secs, Some(3600));
+        assert_eq!(
+            codes_of(m.check(&reg(), CheckProfile::Compiled)),
+            Vec::<String>::new()
+        );
+    }
+
+    #[test]
+    fn job_name_duplicate_est_refuse() {
+        let m = avec_jobs(vec![job("rappels"), job("rappels")]);
+        assert_eq!(
+            codes_of(m.check(&reg(), CheckProfile::Compiled)),
+            vec!["this.descriptor.job_name_duplicate"]
+        );
+    }
+
+    #[test]
+    fn job_program_unknown_est_refuse() {
+        let m = avec_jobs(vec![job("inconnu")]);
+        assert_eq!(
+            codes_of(m.check(&reg(), CheckProfile::Compiled)),
+            vec!["this.descriptor.job_program_unknown"]
+        );
+    }
+
+    #[test]
+    fn job_schedule_missing_est_refuse() {
+        let mut j = JobDesc::new("relancer", "rappels");
+        j.every_secs = None;
+        j.at = None;
+        let m = avec_jobs(vec![j]);
+        assert_eq!(
+            codes_of(m.check(&reg(), CheckProfile::Compiled)),
+            vec!["this.descriptor.job_schedule_missing"]
+        );
+    }
+
+    #[test]
+    fn job_schedule_conflict_est_refuse() {
+        let mut j = JobDesc::new("relancer", "rappels");
+        j.every_secs = Some(3600);
+        j.at = Some("07:30".to_string());
+        let m = avec_jobs(vec![j]);
+        assert_eq!(
+            codes_of(m.check(&reg(), CheckProfile::Compiled)),
+            vec!["this.descriptor.job_schedule_conflict"]
+        );
+    }
+
+    #[test]
+    fn job_needs_unknown_est_refuse() {
+        let mut j = JobDesc::new("relancer", "rappels");
+        j.every_secs = Some(3600);
+        j.needs = vec!["absent".to_string()];
+        let m = avec_jobs(vec![j]);
+        assert_eq!(
+            codes_of(m.check(&reg(), CheckProfile::Compiled)),
+            vec!["this.descriptor.job_needs_unknown"]
+        );
+    }
+
+    #[test]
+    fn job_at_valide_passe() {
+        let mut j = JobDesc::new("relancer", "rappels");
+        j.at = Some("07:30".to_string());
+        let m = avec_jobs(vec![j]);
+        assert_eq!(
+            codes_of(m.check(&reg(), CheckProfile::Compiled)),
+            Vec::<String>::new()
+        );
+    }
+
+    #[test]
+    fn job_at_mal_forme_est_refuse() {
+        let mut j = JobDesc::new("relancer", "rappels");
+        j.at = Some("7:30".to_string());
+        let m = avec_jobs(vec![j]);
+        assert_eq!(
+            codes_of(m.check(&reg(), CheckProfile::Compiled)),
+            vec!["this.descriptor.job_schedule_missing"]
         );
     }
 }

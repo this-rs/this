@@ -61,6 +61,51 @@ pub struct ModuleDescriptor {
     /// derived with `crate::wami::statements`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime: Option<RuntimeDesc>,
+    /// Noms des programmes embarqués que le module expose (les sources vivent hors
+    /// descripteur, dans le document du module). Un job référence un programme par ce nom.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub programs: Vec<String>,
+    /// Tâches d'arrière-plan que le module DÉCLARE. Jamais exécutées par lui-même : un
+    /// module compilé est une fonction pure (ni horloge, ni réseau, ni disque). C'est
+    /// l'hôte qui décide quand exécuter chaque job, au premier plan ou via le système.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub jobs: Vec<JobDesc>,
+}
+
+/// Un job déclaré par le module : *quoi faire et quand*, jamais *le faire soi-même*.
+///
+/// Le module nomme un de ses programmes (`program`) et un déclencheur — une périodicité
+/// (`every_secs`) OU une heure locale (`at`, `HH:MM`), jamais les deux. `needs` liste les
+/// entités que le job va lire, pour que l'hôte puisse vérifier qu'elles existent avant de
+/// promettre l'exécution. L'hôte exécute le programme au nom du module, avec un budget et
+/// une trace, et mémorise `derniere_execution` pour ne pas rejouer un job déjà dû.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct JobDesc {
+    /// `^[a-z][a-z0-9_]*$`, unique parmi les jobs du module.
+    pub name: String,
+    /// Le nom d'un programme du module (`programs`).
+    pub program: String,
+    /// Période, en secondes. Présent OU `at`, jamais les deux.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub every_secs: Option<u64>,
+    /// Heure locale `HH:MM` (24 h). Présent OU `every_secs`, jamais les deux.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub at: Option<String>,
+    /// Les entités que le job lira (locales ou d'un module requis).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub needs: Vec<String>,
+}
+
+impl JobDesc {
+    pub fn new(name: impl Into<String>, program: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            program: program.into(),
+            every_secs: None,
+            at: None,
+            needs: Vec::new(),
+        }
+    }
 }
 
 /// Une opération nommée exposée par le module.
@@ -166,6 +211,8 @@ impl ModuleDescriptor {
             i18n: I18nDecl::default(),
             custom: vec![],
             runtime: None,
+            programs: vec![],
+            jobs: vec![],
         }
     }
 
