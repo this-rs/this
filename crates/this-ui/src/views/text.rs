@@ -76,3 +76,5 @@ pub const ANSWERED: &str = "répondu";
 pub const ANSWER_FREE: &str = "Autre réponse…";
 /// A tool step, when the row carries one but says nothing about it.
 pub const STEP: &str = "outil";
+/// A group of tool steps one of which has not returned yet.
+pub const STEP_RUNNING: &str = "en cours";

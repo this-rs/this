@@ -508,9 +508,7 @@ pub fn render_brick(ctx: Ctx, brick: &Brick) -> AnyView {
             entity,
             filter,
             field,
-        } => value_brick(ctx, entity, filter.as_ref(), field, |value| {
-            view! { <small class=class::CAPTION>{value}</small> }.into_any()
-        }),
+        } => caption(ctx, entity, filter.as_ref(), field),
         Brick::Chart {
             entity,
             field,
@@ -840,6 +838,36 @@ where
                     .copied()
                     .and_then(|row| data::value_of(row, &field));
                 wrap(data::display(value))
+            }
+            other => tile_for(ctx, &entity, &other, text::NOTHING),
+        }
+    })
+    .into_any()
+}
+
+/// Une légende : une ligne discrète sous ce qu'elle commente.
+///
+/// **Une valeur vide ne s'annonce pas**, comme pour l'avis ([`annonce`]). Une légende n'est
+/// pas une cellule : elle n'a pas de place à tenir, et « — » posé au-dessus d'un fil (la
+/// taille du contexte, vide tant que le fil est court) est un tiret orphelin, pas une
+/// information. Une lecture en échec, refusée ou inconnue se dit toujours.
+fn caption(ctx: Ctx, entity: &str, filter: Option<&FilterExpr>, field: &str) -> AnyView {
+    let entity = entity.to_owned();
+    let filter = filter.cloned();
+    let field = field.to_owned();
+    (move || {
+        let snapshot = ctx.data.get();
+        match data::read(&snapshot, &entity, filter.as_ref(), &[], 0, None) {
+            Reading::Rows(rows) => {
+                let value = rows
+                    .rows
+                    .first()
+                    .copied()
+                    .and_then(|row| data::value_of(row, &field));
+                match annonce(value) {
+                    Some(texte) => view! { <small class=class::CAPTION>{texte}</small> }.into_any(),
+                    None => ().into_any(),
+                }
             }
             other => tile_for(ctx, &entity, &other, text::NOTHING),
         }
@@ -2520,7 +2548,7 @@ fn ligne_en_bulle(
     markdown: bool,
 ) -> Option<RowView> {
     let row = snapshot.ligne(entity, id)?;
-    let text = data::display(data::value_of(row, &champs.content));
+    let text = contenu_de_bulle(data::value_of(row, &champs.content));
     let who = champs
         .author
         .as_deref()
@@ -2555,6 +2583,29 @@ fn ligne_en_bulle(
         markdown,
         &entries,
     ))
+}
+
+/// Le texte d'une bulle, tel que la ligne le porte : un contenu absent, nul ou vide reste
+/// VIDE.
+///
+/// `data::display` rend « — » pour une valeur absente, et c'est juste dans une cellule de
+/// table (« je ne sais pas » plutôt qu'un trou). Dans un fil, c'est faux : la bulle d'un tour
+/// qui vient de s'ouvrir n'a encore rien reçu, et elle s'affichait comme un tiret seul sous
+/// le message de la personne — pendant toute l'attente d'un moteur qui ne répond pas (mesuré
+/// dans Chrome : `<p>—</p>`, 120 s durant).
+fn contenu_de_bulle(value: Option<&Value>) -> String {
+    match value {
+        None | Some(Value::Null) => String::new(),
+        Some(Value::String(texte)) => texte.clone(),
+        Some(autre) => data::display(Some(autre)),
+    }
+}
+
+/// Une bulle a-t-elle quelque chose à montrer ? Ni auteur, ni texte, ni journal : elle ne
+/// se dessine pas. Un cadre vide dans un fil ne dit rien, et l'activité d'un tour en cours
+/// se lit dans l'indicateur que le module pose sous le fil, pas dans une bulle creuse.
+fn bulle_vide(row: &RowView) -> bool {
+    row.author.is_none() && row.entries.is_empty() && row.text.trim().is_empty()
 }
 
 /// Une entrée du journal d'une bulle : une étape d'outil, une phrase du tour, un avis.
@@ -2613,17 +2664,17 @@ pub fn step_entries(value: &Value) -> Vec<StepEntry> {
                 return Some(StepEntry::Noted(note));
             }
             let name = field_text(event, &["outil", "tool", "name", "nom"])?;
-            let state = match (
-                event.get("en_cours"),
-                event.get("refus"),
-                event.get("echec"),
-            ) {
-                (Some(Value::Bool(true)), _, _) => "en cours".to_owned(),
-                (_, Some(Value::Bool(true)), _) => "refusé".to_owned(),
-                (_, _, Some(Value::Bool(true))) => "échec".to_owned(),
-                _ => {
-                    field_text(event, &["etat", "state", "status"]).unwrap_or_else(|| "fait".into())
-                }
+            let vrai = |cle: &str| event.get(cle) == Some(&Value::Bool(true));
+            let state = if vrai("en_cours") {
+                "en cours".to_owned()
+            } else if vrai("refus") {
+                "refusé".to_owned()
+            } else if vrai("echec") {
+                "échec".to_owned()
+            } else if vrai("sans_effet") {
+                "sans effet".to_owned()
+            } else {
+                field_text(event, &["etat", "state", "status"]).unwrap_or_else(|| "fait".into())
             };
             Some(StepEntry::Tool {
                 name,
@@ -2725,10 +2776,91 @@ fn segmente(entries: &[StepEntry]) -> Vec<Segment> {
     segments
 }
 
-/// Le libellé d'un groupe d'outils : « 3 outils · lire, écrire, compiler · 1,2 s ». Sans
-/// durée, la ligne ne nomme que les outils.
-fn tool_group_label(tools: &[StepEntry]) -> String {
-    let n = tools.len();
+/// L'issue d'une étape d'outil, lue de l'état qu'elle écrit — en français (le journal de
+/// l'Atelier : « fait », « en cours », « refusé », « échec ») comme en anglais.
+///
+/// C'est elle qui décide de ce qui se VOIT : la pastille, la couleur, le mot. Avant, seuls
+/// les mots anglais étaient reconnus et tout état français tombait dans « neutre » : un
+/// outil refusé avait la même pastille grise qu'un outil réussi (mesuré dans Chrome :
+/// `badge muted` sur « fait », « refusé », « échec » et « en cours »).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StepKind {
+    /// L'outil a rendu son résultat.
+    Done,
+    /// L'outil tourne : aucun résultat reçu.
+    Running,
+    /// L'outil a échoué.
+    Failed,
+    /// L'outil a été refusé (garde, validation, consentement).
+    Refused,
+    /// L'outil attend son tour.
+    Waiting,
+    /// L'outil a rendu, sans rien changer.
+    NoEffect,
+    /// Un état que le rendu ne connaît pas : il s'écrit tel quel, sans couleur.
+    Other,
+}
+
+impl StepKind {
+    /// L'issue d'un état écrit.
+    pub fn of(state: &str) -> Self {
+        match state.trim().to_lowercase().as_str() {
+            "fait" | "ok" | "done" | "success" | "succeeded" | "completed" | "terminé"
+            | "termine" => Self::Done,
+            "en cours" | "en_cours" | "running" | "in_progress" | "active" => Self::Running,
+            "échec" | "echec" | "erreur" | "error" | "failed" | "failure" => Self::Failed,
+            "refusé" | "refuse" | "refus" | "refused" | "denied" => Self::Refused,
+            "en attente" | "en_attente" | "waiting" | "pending" | "queued" => Self::Waiting,
+            "sans effet" | "sans_effet" | "unchanged" => Self::NoEffect,
+            _ => Self::Other,
+        }
+    }
+
+    /// La valeur de l'attribut `data-etat` : ce que la feuille de style lit.
+    pub fn slug(self) -> &'static str {
+        match self {
+            Self::Done => "fait",
+            Self::Running => "en-cours",
+            Self::Failed => "echec",
+            Self::Refused => "refuse",
+            Self::Waiting => "attente",
+            Self::NoEffect => "sans-effet",
+            Self::Other => "autre",
+        }
+    }
+
+    /// Une étape qui n'a pas abouti : échec ou refus.
+    fn en_erreur(self) -> bool {
+        matches!(self, Self::Failed | Self::Refused)
+    }
+}
+
+/// Les issues des outils d'un groupe, dans l'ordre.
+fn issues(tools: &[StepEntry]) -> Vec<StepKind> {
+    tools
+        .iter()
+        .filter_map(|entry| match entry {
+            StepEntry::Tool { state, .. } => Some(StepKind::of(state)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// L'issue d'un GROUPE : il tourne tant qu'un de ses outils tourne ; sinon il est en erreur
+/// dès qu'un outil a échoué ou a été refusé ; sinon il est fait.
+fn tool_group_kind(tools: &[StepEntry]) -> StepKind {
+    let issues = issues(tools);
+    if issues.contains(&StepKind::Running) {
+        StepKind::Running
+    } else if issues.iter().any(|issue| issue.en_erreur()) {
+        StepKind::Failed
+    } else {
+        StepKind::Done
+    }
+}
+
+/// La tête d'un groupe d'outils : « 3 outils · lire, écrire, compiler ».
+fn tool_group_head(tools: &[StepEntry]) -> String {
     let noms: Vec<&str> = tools
         .iter()
         .filter_map(|entry| match entry {
@@ -2736,6 +2868,18 @@ fn tool_group_label(tools: &[StepEntry]) -> String {
             _ => None,
         })
         .collect();
+    let mot = if noms.len() == 1 { "outil" } else { "outils" };
+    format!("{} {mot} · {}", noms.len(), noms.join(", "))
+}
+
+/// La queue d'un groupe d'outils : ce qui s'est passé, et en combien de temps — « 158 ms »,
+/// « en cours », « 2 en erreur · 26 ms ». `None` quand il n'y a rien à dire : des outils
+/// faits dont le journal ne porte aucune durée.
+///
+/// La durée est la SOMME des durées que les étapes portent (`ms`), jamais une horloge du
+/// rendu : une étape sans durée n'en ajoute pas, et rien n'est inventé.
+fn tool_group_tail(tools: &[StepEntry]) -> Option<String> {
+    let issues = issues(tools);
     let total_ms: i64 = tools
         .iter()
         .filter_map(|entry| match entry {
@@ -2743,16 +2887,36 @@ fn tool_group_label(tools: &[StepEntry]) -> String {
             _ => None,
         })
         .sum();
-    let mot = if n == 1 { "outil" } else { "outils" };
-    let mut label = format!("{n} {mot} · {}", noms.join(", "));
-    if total_ms > 0 {
-        label.push_str(&format!(" · {}", duree_lisible(total_ms)));
+    let mut parts: Vec<String> = Vec::new();
+    let erreurs = issues.iter().filter(|issue| issue.en_erreur()).count();
+    if erreurs > 0 {
+        parts.push(format!("{erreurs} en erreur"));
     }
-    label
+    if issues.contains(&StepKind::Running) {
+        parts.push(text::STEP_RUNNING.to_owned());
+    }
+    if total_ms > 0 {
+        parts.push(duree_lisible(total_ms));
+    }
+    (!parts.is_empty()).then(|| parts.join(" · "))
 }
 
-/// Une étape d'outil, dessinée telle quelle : son état, son nom, sa durée, son résultat.
-/// Le résultat n'est PAS déversé par défaut : il ne s'ouvre qu'à l'intérieur d'un groupe.
+/// Le libellé d'un groupe d'outils : « 3 outils · lire, écrire, compiler · 1,2 s ». Sans
+/// durée, la ligne ne nomme que les outils.
+fn tool_group_label(tools: &[StepEntry]) -> String {
+    match tool_group_tail(tools) {
+        Some(tail) => format!("{} · {tail}", tool_group_head(tools)),
+        None => tool_group_head(tools),
+    }
+}
+
+/// Une étape d'outil, sur une ligne : sa pastille, son nom, son état, SA durée ; son
+/// résultat dessous. Le résultat n'est PAS déversé par défaut : il ne s'ouvre qu'à
+/// l'intérieur d'un groupe.
+///
+/// La durée est celle que l'étape porte (`ms`). Une étape en cours n'en a pas encore, et
+/// une étape dont le journal ne dit rien (`ms` absent ou nul) n'en affiche pas : zéro ne
+/// se distingue pas d'« inconnu », et « 0 ms » serait une invention.
 fn tool_item(tool: StepEntry) -> AnyView {
     match tool {
         StepEntry::Tool {
@@ -2761,10 +2925,10 @@ fn tool_item(tool: StepEntry) -> AnyView {
             resume,
             ms,
         } => {
-            let tone = step_tone(&state);
-            let time = (ms > 0).then(|| {
+            let kind = StepKind::of(&state);
+            let time = (ms > 0 && kind != StepKind::Running).then(|| {
                 view! {
-                    <span class=class::STEP_TIME>{format!("{ms} ms")}</span>
+                    <span class=class::STEP_TIME>{duree_lisible(ms)}</span>
                 }
             });
             let detail = (!resume.is_empty()).then(|| {
@@ -2772,9 +2936,10 @@ fn tool_item(tool: StepEntry) -> AnyView {
                 view! { <span class=class::STEP_RESUME>{short}</span> }
             });
             view! {
-                <li class=class::STEP>
-                    {design::badge(state, tone)}
+                <li class=class::STEP data-etat=kind.slug()>
+                    <span class=class::STEP_MARK aria-hidden="true"></span>
                     <span class=class::STEP_NAME>{name}</span>
+                    <span class=class::STEP_STATE>{state}</span>
                     {time}
                     {detail}
                 </li>
@@ -2785,8 +2950,40 @@ fn tool_item(tool: StepEntry) -> AnyView {
     }
 }
 
+/// Un groupe d'outils : un CADRE, replié sur une ligne qui dit combien, lesquels, comment
+/// ça s'est fini et en combien de temps ; déplié, une ligne par outil.
+fn tool_group(tools: Vec<StepEntry>) -> AnyView {
+    let kind = tool_group_kind(&tools);
+    // La ligne entière en infobulle : les noms se replient sur deux lignes au plus, et
+    // au-delà ils restent lisibles ici.
+    let label = tool_group_label(&tools);
+    let head = tool_group_head(&tools);
+    let tail = tool_group_tail(&tools).map(|tail| {
+        // Le séparateur vit dans le texte : la ligne se lit « 3 outils · noms · durée »
+        // d'un seul tenant, y compris pour un lecteur d'écran.
+        view! { <span class=class::STEP_TIME>{format!("· {tail}")}</span> }
+    });
+    let details = tools.into_iter().map(tool_item).collect_view();
+    view! {
+        <li class=class::STEP_GROUP data-etat=kind.slug()>
+            <details>
+                <summary class=class::STEP_GROUP_SUMMARY title=label>
+                    <span class=class::STEP_MARK aria-hidden="true"></span>
+                    <span class=class::STEP_NAME>{head}</span>
+                    {tail}
+                </summary>
+                <ol class=class::STEPS>{details}</ol>
+            </details>
+        </li>
+    }
+    .into_any()
+}
+
 /// One bubble: author, prose, tool steps.
 fn bubble(row: RowView) -> AnyView {
+    if bulle_vide(&row) {
+        return ().into_any();
+    }
     let RowView {
         role,
         state,
@@ -2819,21 +3016,7 @@ fn bubble(row: RowView) -> AnyView {
                     <li class=class::STEP role="status">{note}</li>
                 }
                 .into_any(),
-                Segment::Tools(tools) => {
-                    let label = tool_group_label(&tools);
-                    let details = tools.into_iter().map(tool_item).collect_view();
-                    view! {
-                        <li class=class::STEP_GROUP>
-                            <details>
-                                <summary class=class::STEP_GROUP_SUMMARY>
-                                    <span class=class::STEP_NAME>{label}</span>
-                                </summary>
-                                <ol class=class::STEPS>{details}</ol>
-                            </details>
-                        </li>
-                    }
-                    .into_any()
-                }
+                Segment::Tools(tools) => tool_group(tools),
             })
             .collect_view();
         view! { <ol class=class::STEPS>{items}</ol> }.into_any()
@@ -3107,12 +3290,12 @@ fn input_value(id: &str) -> Option<String> {
 
 /// The tone that reads a tool step's state without the colour carrying the meaning alone.
 fn step_tone(state: &str) -> DesignTone {
-    match state.to_ascii_lowercase().as_str() {
-        "ok" | "done" | "success" | "succeeded" | "completed" => DesignTone::Ok,
-        "error" | "failed" | "failure" | "refused" => DesignTone::Danger,
-        "running" | "in_progress" | "active" => DesignTone::Info,
-        "waiting" | "pending" | "queued" => DesignTone::Warn,
-        _ => DesignTone::Muted,
+    match StepKind::of(state) {
+        StepKind::Done => DesignTone::Ok,
+        StepKind::Failed | StepKind::Refused => DesignTone::Danger,
+        StepKind::Running => DesignTone::Info,
+        StepKind::Waiting => DesignTone::Warn,
+        StepKind::NoEffect | StepKind::Other => DesignTone::Muted,
     }
 }
 
@@ -4087,6 +4270,109 @@ mod tests_fil {
         );
     }
 
+    fn outil(name: &str, state: &str, ms: i64) -> StepEntry {
+        StepEntry::Tool {
+            name: name.into(),
+            state: state.into(),
+            resume: String::new(),
+            ms,
+        }
+    }
+
+    /// L'état d'une étape se lit en français comme en anglais : c'est le journal de
+    /// l'Atelier (« fait », « en cours », « refusé », « échec ») qui tombait en « neutre ».
+    #[test]
+    fn l_etat_d_un_outil_se_lit_en_francais_comme_en_anglais() {
+        for (etat, issue, slug) in [
+            ("fait", StepKind::Done, "fait"),
+            ("succeeded", StepKind::Done, "fait"),
+            ("en cours", StepKind::Running, "en-cours"),
+            ("running", StepKind::Running, "en-cours"),
+            ("échec", StepKind::Failed, "echec"),
+            ("FAILED", StepKind::Failed, "echec"),
+            ("refusé", StepKind::Refused, "refuse"),
+            ("sans effet", StepKind::NoEffect, "sans-effet"),
+            ("pending", StepKind::Waiting, "attente"),
+            ("quelque chose", StepKind::Other, "autre"),
+        ] {
+            assert_eq!(StepKind::of(etat), issue, "{etat}");
+            assert_eq!(StepKind::of(etat).slug(), slug, "{etat}");
+        }
+        // Et le ton suit : un refus français n'est plus gris.
+        assert_eq!(step_tone("refusé"), DesignTone::Danger);
+        assert_eq!(step_tone("fait"), DesignTone::Ok);
+        assert_eq!(step_tone("en cours"), DesignTone::Info);
+    }
+
+    /// Le journal de l'Atelier porte l'issue en drapeaux : chacun se lit, « sans effet »
+    /// compris, et un outil en cours ne passe jamais pour fait.
+    #[test]
+    fn les_drapeaux_du_journal_donnent_l_issue_de_chaque_outil() {
+        let journal = json!([
+            {"genre": "outil", "outil": "a", "ms": 12, "en_cours": false, "refus": false},
+            {"genre": "outil", "outil": "b", "ms": 0, "en_cours": true},
+            {"genre": "outil", "outil": "c", "ms": 3, "refus": true},
+            {"genre": "outil", "outil": "d", "ms": 4, "echec": true},
+            {"genre": "outil", "outil": "e", "ms": 5, "sans_effet": true},
+        ]);
+        let issues: Vec<StepKind> = step_entries(&journal)
+            .iter()
+            .map(|entree| match entree {
+                StepEntry::Tool { state, .. } => StepKind::of(state),
+                autre => panic!("un outil attendu, pas {autre:?}"),
+            })
+            .collect();
+        assert_eq!(
+            issues,
+            vec![
+                StepKind::Done,
+                StepKind::Running,
+                StepKind::Refused,
+                StepKind::Failed,
+                StepKind::NoEffect
+            ]
+        );
+    }
+
+    /// La ligne repliée dit ce qui s'est passé : un groupe tourne tant qu'un outil tourne,
+    /// il est en erreur dès qu'un outil a échoué ou a été refusé, et sa durée est la somme
+    /// des durées que les étapes PORTENT — une étape sans durée n'en invente pas.
+    #[test]
+    fn la_ligne_d_un_groupe_dit_l_issue_et_la_duree_reelle() {
+        // (a) Un outil, fait.
+        let un = vec![outil("list_modules", "fait", 20)];
+        assert_eq!(tool_group_kind(&un), StepKind::Done);
+        assert_eq!(tool_group_label(&un), "1 outil · list_modules · 20 ms");
+
+        // (c) Un outil en cours : le groupe tourne, et la durée est celle des outils finis.
+        let en_cours = vec![
+            outil("list_modules", "fait", 1),
+            outil("demander_choix", "en cours", 0),
+        ];
+        assert_eq!(tool_group_kind(&en_cours), StepKind::Running);
+        assert_eq!(
+            tool_group_label(&en_cours),
+            "2 outils · list_modules, demander_choix · en cours · 1 ms"
+        );
+
+        // (d) Des outils en erreur : comptés, et le groupe le dit.
+        let erreurs = vec![
+            outil("list_modules", "fait", 25),
+            outil("rows", "refusé", 1),
+            outil("graph_node", "échec", 0),
+        ];
+        assert_eq!(tool_group_kind(&erreurs), StepKind::Failed);
+        assert_eq!(
+            tool_group_label(&erreurs),
+            "3 outils · list_modules, rows, graph_node · 2 en erreur · 26 ms"
+        );
+
+        // Aucune durée dans le journal : la ligne n'en affiche pas, elle n'écrit pas « 0 ms ».
+        let sans_duree = vec![outil("lire", "fait", 0), outil("ecrire", "fait", 0)];
+        assert_eq!(tool_group_tail(&sans_duree), None);
+        assert_eq!(tool_group_label(&sans_duree), "2 outils · lire, ecrire");
+    }
+
     /// Un texte de l'agent entre deux outils coupe le groupe : quatre outils, deux groupes,
     /// et le texte garde sa place chronologique.
     #[test]
@@ -4368,6 +4654,41 @@ mod tests_fil {
         assert_eq!(bulle.role, "module");
         // Une ligne absente : rien, pas la première ligne du feed.
         assert!(ligne_en_bulle(&snapshot, "message", "absent", &champs, false).is_none());
+    }
+
+    /// Un tour qui vient de s'ouvrir n'a rien reçu : sa ligne n'a ni contenu ni journal. Elle
+    /// ne se lit PAS comme un tiret (« — » veut dire « je ne sais pas » dans une cellule, pas
+    /// « j'attends » dans un fil), et une bulle qui n'a rien à montrer ne se dessine pas.
+    #[test]
+    fn une_bulle_sans_contenu_ne_montre_ni_tiret_ni_cadre() {
+        let snapshot = Snapshot::new().with(
+            "message",
+            Feed::Ready(vec![
+                // Le tour ouvert de l'Atelier : champs vides absents de la ligne.
+                json!({"id": "vivant", "role": "agent", "etat": "en_cours"}),
+                json!({"id": "nul", "role": "agent", "contenu": null}),
+                json!({"id": "blanc", "role": "agent", "contenu": "  \n"}),
+                json!({"id": "outil", "role": "agent",
+                       "journal": [{"outil": "lire", "en_cours": true}]}),
+                json!({"id": "plein", "role": "agent", "contenu": "bonjour"}),
+            ]),
+        );
+        let champs = ChampsBulle {
+            steps: Some("journal".into()),
+            state: Some("etat".into()),
+            ..champs_message()
+        };
+        let bulle = |id: &str| ligne_en_bulle(&snapshot, "message", id, &champs, true).unwrap();
+        for id in ["vivant", "nul", "blanc"] {
+            let ligne = bulle(id);
+            assert!(!ligne.text.contains(text::DASH), "{id} : {:?}", ligne.text);
+            assert_eq!(prose_de_bulle(&ligne.text, &ligne.entries), None, "{id}");
+            assert!(bulle_vide(&ligne), "{id} n'a rien à montrer");
+        }
+        // Un outil en cours, sans un mot : la bulle existe, elle montre son outil.
+        assert!(!bulle_vide(&bulle("outil")));
+        assert!(!bulle_vide(&bulle("plein")));
+        assert_eq!(bulle("plein").text, "bonjour");
     }
 
     /// Un fil se lit ligne par ligne : une ligne qui change ne redessine qu'ELLE. C'est la

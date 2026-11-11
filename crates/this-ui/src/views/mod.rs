@@ -63,7 +63,7 @@ pub use image::{ImageHost, clamped_height, content_type_of, object_fit, src_of_v
 pub use intent::{Emitted, FieldValue, Intent, LinkOp, Origin, SecretValue, Values};
 pub use placement::{Frame, Hidden, Portfolio, SURFACES};
 pub use render::{
-    ComposerSpec, Ctx, StepEntry, annonce, composer, composer_actions, composer_intent,
+    ComposerSpec, Ctx, StepEntry, StepKind, annonce, composer, composer_actions, composer_intent,
     render_brick, render_node, render_view, settings_intent, step_entries, thread_hidden,
     thread_window, without_composer,
 };

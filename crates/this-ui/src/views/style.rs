@@ -95,6 +95,8 @@ pub mod class {
     pub const STEP_NAME: &str = "vw-step-name";
     pub const STEP_TIME: &str = "vw-step-time";
     pub const STEP_RESUME: &str = "vw-step-resume";
+    pub const STEP_MARK: &str = "vw-step-mark";
+    pub const STEP_STATE: &str = "vw-step-state";
     pub const STEP_GROUP: &str = "vw-step-group";
     pub const STEP_GROUP_SUMMARY: &str = "vw-step-group-summary";
     pub const OLDER: &str = "vw-older";
@@ -229,6 +231,8 @@ pub const ALL: &[&str] = &[
     class::STEP_NAME,
     class::STEP_TIME,
     class::STEP_RESUME,
+    class::STEP_MARK,
+    class::STEP_STATE,
     class::STEP_GROUP,
     class::STEP_GROUP_SUMMARY,
     class::OLDER,
@@ -394,9 +398,16 @@ pub const CSS: &str = r#"
   color: inherit; cursor: pointer; }
 .vw-confirm { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 
-.vw-banner { display: flex; gap: 8px; align-items: flex-start; margin: 0; padding: 10px 12px;
-  border-radius: 10px; border: 1px solid var(--vw-line, rgba(0,0,0,.12));
+.vw-banner { display: flex; flex-wrap: wrap; gap: 8px; align-items: flex-start; margin: 0;
+  padding: 10px 12px; border-radius: 10px; border: 1px solid var(--vw-line, rgba(0,0,0,.12));
   color: var(--vw-ink); }
+/* Le texte d'un avis cède la place, son bouton jamais. `.vw-btn` porte `min-width: 44px`,
+   qui REMPLACE le `min-width: auto` d'un enfant flex : sans la règle du bouton, un avis long
+   le comprimait à 44 px et son libellé sortait du cadre (mesuré à 390 px : « Continuer »
+   dépassait de 19 px, « Configurer » de 44 px). Le texte se replie sur une base de 14em :
+   quand elle ne tient plus à côté du bouton (320 px), le bouton passe dessous, à droite. */
+.vw-banner > span { flex: 1 1 14em; min-width: 0; overflow-wrap: anywhere; white-space: pre-line; }
+.vw-banner > .vw-btn { flex: 0 0 auto; margin-left: auto; white-space: nowrap; }
 /* Les tons se pilotent par variables : une couleur claire codée en dur donnait un pavé
    blanc au texte pâle sur un thème sombre (mesuré sur l'appareil : « 28 messages ·
    ~2718 jetons » illisible). Les valeurs de repli restent celles d'un thème clair. */
@@ -490,18 +501,64 @@ pub const CSS: &str = r#"
 .vw-message-live { opacity: .92; }
 .vw-steps { display: flex; flex-direction: column; gap: 4px; margin: 6px 0 0; padding: 0;
   list-style: none; }
-.vw-step { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px; min-width: 0;
-  font-size: 13px; opacity: .85; }
+.vw-step { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; min-width: 0;
+  font-size: 13px; }
 .vw-step-name { font-weight: 600; }
-.vw-step-time { font-variant-numeric: tabular-nums; opacity: .7; }
-.vw-step-resume { flex-basis: 100%; min-width: 0; overflow-wrap: anywhere; opacity: .8; }
-/* Un groupe d'outils : une ligne repliée qui nomme les outils, ouverte sur demande. Le
-   résultat brut d'un outil n'est PAS déversé dans le fil par défaut. */
-.vw-step-group { margin: 0; min-width: 0; }
-.vw-step-group > details > summary { cursor: pointer; user-select: none;
-  display: inline-flex; align-items: baseline; gap: 8px; min-width: 0; }
-.vw-step-group-summary { font-weight: 600; font-size: 13px; opacity: .85; }
-.vw-step-group > details > .vw-steps { margin-top: 4px; }
+.vw-step > .vw-step-name { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
+.vw-step-state { flex: 0 0 auto; font-size: 12px; opacity: .75; }
+.vw-step-time { flex: 0 0 auto; font-variant-numeric: tabular-nums; white-space: nowrap;
+  opacity: .75; }
+/* Le résultat d'un outil se lit en trois lignes au plus : il renseigne, il ne se déverse pas. */
+.vw-step-resume { flex-basis: 100%; min-width: 0; overflow-wrap: anywhere; opacity: .7;
+  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; line-clamp: 3;
+  overflow: hidden; }
+/* La pastille d'une étape ou d'un groupe : son issue, lue dans `data-etat`. La couleur ne
+   porte jamais le sens seule — le mot (« refusé », « en cours », « 2 en erreur ») est écrit.
+   Trois variables que l'hôte peut poser : `--vw-ok`, `--vw-info`, `--vw-danger`. Pas
+   `--vw-accent` pour « en cours » : c'est l'accent de la VUE, et une vue neutre le met en
+   gris — un outil qui tourne avait alors la pastille d'un outil éteint (mesuré). */
+.vw-step-mark { flex: 0 0 auto; width: 8px; height: 8px; border-radius: 50%;
+  background: currentColor; opacity: .4; }
+.vw-step[data-etat="fait"] > .vw-step-mark,
+.vw-step-group[data-etat="fait"] > details > summary > .vw-step-mark {
+  background: var(--vw-ok, #2e9e5b); opacity: 1; }
+.vw-step[data-etat="en-cours"] > .vw-step-mark,
+.vw-step-group[data-etat="en-cours"] > details > summary > .vw-step-mark {
+  background: var(--vw-info, #2563eb); opacity: 1;
+  animation: vw-pulse 1.1s ease-in-out infinite; }
+.vw-step[data-etat="echec"] > .vw-step-mark, .vw-step[data-etat="refuse"] > .vw-step-mark,
+.vw-step-group[data-etat="echec"] > details > summary > .vw-step-mark {
+  background: var(--vw-danger, #d9534f); opacity: 1; }
+.vw-step[data-etat="echec"] > .vw-step-state, .vw-step[data-etat="refuse"] > .vw-step-state {
+  color: var(--vw-danger, #d9534f); font-weight: 600; opacity: 1; }
+.vw-step[data-etat="en-cours"] > .vw-step-state { color: var(--vw-info, #2563eb);
+  font-weight: 600; opacity: 1; }
+/* Un groupe d'outils : un CADRE, replié sur une ligne qui dit combien, lesquels, comment ça
+   s'est fini et en combien de temps ; ouvert sur demande, une ligne par outil. Le résultat
+   brut d'un outil n'est PAS déversé dans le fil par défaut. Sans cadre, la ligne se
+   confondait avec la prose de la réponse (mesuré : bordure 0, fond transparent). */
+.vw-step-group { margin: 0; min-width: 0; overflow: hidden; border-radius: 10px;
+  border: 1px solid var(--vw-line, rgba(0,0,0,.14)); background: var(--vw-card, rgba(0,0,0,.03)); }
+.vw-step-group[data-etat="echec"] {
+  border-color: color-mix(in srgb, var(--vw-danger, #d9534f) 45%, var(--vw-line, rgba(0,0,0,.14))); }
+.vw-step-group > details > summary { cursor: pointer; user-select: none; list-style: none;
+  display: flex; align-items: center; gap: 8px; min-width: 0; min-height: 44px;
+  box-sizing: border-box; padding: 6px 12px; }
+.vw-step-group > details > summary::-webkit-details-marker { display: none; }
+.vw-step-group > details > summary::after { content: "⌄"; flex: 0 0 auto;
+  font-size: 12px; opacity: .5; }
+.vw-step-group > details[open] > summary::after { content: "⌃"; }
+.vw-step-group > details[open] > summary {
+  border-bottom: 1px solid var(--vw-line, rgba(0,0,0,.14)); }
+.vw-step-group-summary { font-size: 13px; }
+/* Les noms cèdent, la durée jamais : c'est elle qu'on vient lire. À 390 px trois noms ne
+   tiennent pas sur une ligne à côté d'elle : ils se replient sur deux lignes au plus,
+   plutôt que de se cacher derrière des points de suspension. */
+.vw-step-group-summary > .vw-step-name { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere;
+  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2;
+  overflow: hidden; }
+.vw-step-group-summary > .vw-step-time { opacity: .85; }
+.vw-step-group > details > .vw-steps { margin: 0; padding: 10px 12px; gap: 10px; }
 .vw-older { min-height: 44px; width: 100%; border-radius: 10px;
   border: 1px dashed var(--vw-line, rgba(0,0,0,.16)); background: none; color: inherit;
   font: inherit; cursor: pointer; }
@@ -564,7 +621,8 @@ pub const CSS: &str = r#"
 .vw-surface :is(button, input, select, textarea, summary) { touch-action: manipulation; }
 
 @media (prefers-reduced-motion: reduce) {
-  .vw-transition-fade, .vw-transition-slide, .vw-skeleton, .vw-activity .vw-dot { animation: none; }
+  .vw-transition-fade, .vw-transition-slide, .vw-skeleton, .vw-activity .vw-dot,
+  .vw-step-mark { animation: none; }
 }
 @media (max-width: 700px) {
   .vw-row { flex-direction: column; align-items: stretch; }
@@ -698,6 +756,52 @@ mod tests {
                 .unwrap_or_default()
                 .contains("min-width: 44px")
         );
+    }
+
+    /// Le bouton d'un avis garde la largeur de son libellé : c'est le texte qui se replie.
+    #[test]
+    fn le_bouton_d_un_avis_ne_se_comprime_pas_sous_son_libelle() {
+        let bouton = rule_of(CSS, ".vw-banner > .vw-btn").unwrap_or_default();
+        for attendu in ["flex: 0 0 auto", "white-space: nowrap"] {
+            assert!(
+                bouton.contains(attendu),
+                "bouton d'avis sans `{attendu}`: {bouton}"
+            );
+        }
+        let texte = rule_of(CSS, ".vw-banner > span").unwrap_or_default();
+        for attendu in ["min-width: 0", "overflow-wrap: anywhere"] {
+            assert!(
+                texte.contains(attendu),
+                "texte d'avis sans `{attendu}`: {texte}"
+            );
+        }
+        assert!(
+            rule_of(CSS, ".vw-banner")
+                .unwrap_or_default()
+                .contains("flex-wrap: wrap"),
+            "à 320 px le bouton doit pouvoir passer sous le texte"
+        );
+    }
+
+    /// Un groupe d'outils est un CADRE (bordure, fond, coins arrondis), sa ligne repliée
+    /// est une cible de 44 px, et chaque issue a sa pastille.
+    #[test]
+    fn un_groupe_d_outils_est_un_cadre_dont_la_ligne_se_touche() {
+        let cadre = rule_of(CSS, ".vw-step-group").unwrap_or_default();
+        for attendu in ["border: 1px solid", "border-radius: 10px", "background:"] {
+            assert!(cadre.contains(attendu), "groupe sans `{attendu}`: {cadre}");
+        }
+        let ligne = rule_of(CSS, ".vw-step-group > details > summary").unwrap_or_default();
+        assert!(
+            ligne.contains("min-height: 44px"),
+            "ligne repliée : {ligne}"
+        );
+        for etat in ["fait", "en-cours", "echec", "refuse"] {
+            assert!(
+                CSS.contains(&format!(".vw-step[data-etat=\"{etat}\"] > .vw-step-mark")),
+                "aucune pastille pour l'issue `{etat}`"
+            );
+        }
     }
 
     #[test]
