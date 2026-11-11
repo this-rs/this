@@ -2,7 +2,7 @@
 //! mode × étape × rôle qui dit si le choix est utilisé.
 //!
 //! [`decide`] est pure : le même `(id, demande, bras, indices)` donne toujours
-//! la même décision — c'est ce qui la rend rejouable. Elle ne lit ni horloge ni
+//! la même décision (à plateforme égale, voir `scorer.rs`) — c'est ce qui la rend rejouable. Elle ne lit ni horloge ni
 //! magasin : l'identifiant (donc la graine) est **injecté**.
 //!
 //! Portage de PO : `src/chat/provider/cognitive/decider.rs` (`decide_with`,
@@ -102,7 +102,9 @@ impl DecideRequest {
 /// Ce que le routeur répond — et ce que l'hôte peut persister, appliqué ou non.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Decision {
-    /// L'identifiant de la décision : c'est aussi sa graine.
+    /// L'identifiant de la décision : c'est aussi sa graine. Sérialisé en
+    /// **chaîne** : un `u128` ne survit pas à un `Number` JavaScript.
+    #[serde(with = "id_string")]
     pub id: u128,
     pub signature: TurnSignature,
     /// La paire choisie, `None` quand personne n'était éligible (ou emplacement explicite).
@@ -121,9 +123,38 @@ pub struct Decision {
     pub alternatives: Vec<Alternative>,
     /// Le choix est-il utilisé (mode × étape × rôle) ?
     pub applied: bool,
+    /// La paire sur laquelle le tour part **réellement** (l'équivalent du champ
+    /// `used` de PO, `decision.rs:187`) : le choix quand il est appliqué, sinon la
+    /// paire en vigueur. `None` : la décision n'a pas encore été confrontée à
+    /// l'état d'un routeur (sortie brute de [`decide`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub used: Option<Pick>,
     pub mode: ProviderRoutingMode,
     pub stage: LearningStage,
     pub turn_index: Option<u32>,
+}
+
+/// Sérialise un `u128` en chaîne décimale ; relit une chaîne (ou un entier
+/// qui tient dans un `u64`, forme d'avant).
+mod id_string {
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(id: &u128, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&id.to_string())
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<u128, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Id {
+            Text(String),
+            Number(u64),
+        }
+        match Id::deserialize(deserializer)? {
+            Id::Text(text) => text.parse().map_err(serde::de::Error::custom),
+            Id::Number(n) => Ok(u128::from(n)),
+        }
+    }
 }
 
 fn class_words(signature: &TurnSignature) -> String {
@@ -297,7 +328,8 @@ fn decide_free(
     hints: &PriorHints,
 ) -> Decision {
     let signature = &request.signature;
-    let settings = &request.settings;
+    let sanitized = request.settings.sanitized();
+    let settings = &sanitized;
     let mut decision = Decision {
         id,
         signature: signature.clone(),
@@ -309,6 +341,7 @@ fn decide_free(
         reason: String::new(),
         alternatives: Vec::new(),
         applied: false,
+        used: None,
         mode: settings.mode,
         stage: settings.stage,
         turn_index: request.turn_index,
@@ -325,11 +358,35 @@ fn decide_free(
         })
         .cloned()
         .collect();
-    let Some(filtered) = candidate::filter(request.slot, signature, &pool) else {
+    let Some(mut filtered) = candidate::filter(request.slot, signature, &pool) else {
         decision.reason =
             "explicit choice: a provider named by the caller is never replaced".into();
         return decision;
     };
+    // Un bras stocké qui n'est pas un postérieur (infini, `NaN`, nul, négatif) ferait
+    // boucler le tirage ou classer une note `NaN` en tête : la paire est écartée,
+    // avec un motif nommé, et le reste décide.
+    let class = signature.arm_key();
+    let (valid, broken): (Vec<Candidate>, Vec<Candidate>) =
+        filtered.eligible.into_iter().partition(|facts| {
+            arms.iter()
+                .find(|arm| {
+                    arm.key.class == class
+                        && arm.key.provider_id == facts.provider_id
+                        && arm.key.model == facts.model
+                })
+                .is_none_or(|arm| {
+                    let posterior = |v: f64| v.is_finite() && v > 0.0;
+                    posterior(arm.alpha) && posterior(arm.beta) && arm.cost_sum_usd.is_finite()
+                })
+        });
+    filtered.eligible = valid;
+    filtered
+        .rejected
+        .extend(broken.into_iter().map(|candidate| candidate::Rejected {
+            candidate,
+            reason: RejectReason::InvalidArm,
+        }));
     let rejected = |decision: &mut Decision| {
         decision
             .alternatives
@@ -885,5 +942,97 @@ mod tests {
                 resets_at_ms: 42,
                 window: Some("seven_day".into())
             })));
+    }
+}
+
+#[cfg(test)]
+mod revue {
+    //! Revue de la PR #249, constat 8 : les données de l'hôte ne sont pas sûres.
+    use super::super::candidate::{Capabilities, CostBasis, Price};
+    use super::super::scorer::ArmKey;
+    use super::super::signature::ContextHints;
+    use super::*;
+
+    fn facts(provider: &str, price: f64) -> Candidate {
+        Candidate {
+            price: Some(Price {
+                input_per_mtok: price,
+                output_per_mtok: price,
+            }),
+            cost_basis: CostBasis::Priced,
+            ..Candidate::new(
+                provider,
+                "m",
+                Capabilities {
+                    tools: true,
+                    images: false,
+                    reasoning: false,
+                    context_window: Some(128_000),
+                },
+            )
+        }
+    }
+
+    fn request(pool: Vec<Candidate>) -> DecideRequest {
+        DecideRequest::new(
+            TurnSignature::from_chat("hello", false, ContextHints::default()),
+            RoutingSettings {
+                mode: ProviderRoutingMode::Full,
+                stage: LearningStage::Auto,
+                exploration_epsilon: 0.0,
+                ..RoutingSettings::default()
+            },
+            pool,
+        )
+    }
+
+    /// Un prix `NaN` ne met jamais sa paire en tête, et aucune note n'est `NaN`.
+    #[test]
+    fn un_prix_nan_ne_passe_jamais_en_tete() {
+        for bad in [f64::NAN, f64::INFINITY, -1.0] {
+            let req = request(vec![facts("bad", bad), facts("good", 1.0)]);
+            for id in 0..50u128 {
+                let d = decide(id, &req, &[], &PriorHints::new());
+                assert_eq!(d.chosen, Some(Pick::new("good", "m")), "{bad} graine {id}");
+                assert!(
+                    d.alternatives
+                        .iter()
+                        .all(|a| a.score.is_none_or(f64::is_finite))
+                );
+            }
+        }
+    }
+
+    /// Un bras au postérieur infini (ou `NaN`, ou négatif) ne fait jamais
+    /// boucler le tirage : la décision rend.
+    #[test]
+    fn un_bras_infini_ne_fait_jamais_boucler() {
+        let req = request(vec![facts("bad", 1.0), facts("good", 1.0)]);
+        for (alpha, beta) in [
+            (f64::INFINITY, 1.0),
+            (1.0, f64::INFINITY),
+            (f64::NAN, 1.0),
+            (-3.0, 1.0),
+            (0.0, 0.0),
+        ] {
+            let arm = ArmStats::fresh(ArmKey::new("chat.general", "bad", "m"), alpha, beta);
+            let d = decide(7, &req, &[arm], &PriorHints::new());
+            assert_eq!(d.chosen, Some(Pick::new("good", "m")), "{alpha}/{beta}");
+        }
+    }
+
+    /// `u128` ne survit pas à un `Number` JavaScript : l'identifiant sort en chaîne.
+    #[test]
+    fn l_identifiant_sort_en_chaine_et_se_relit() {
+        let id = u128::MAX - 12_345;
+        let d = decide(
+            id,
+            &request(vec![facts("good", 1.0)]),
+            &[],
+            &PriorHints::new(),
+        );
+        let json = serde_json::to_value(&d).unwrap();
+        assert_eq!(json["id"], serde_json::json!(id.to_string()));
+        assert_eq!(serde_json::from_value::<Decision>(json).unwrap().id, id);
     }
 }

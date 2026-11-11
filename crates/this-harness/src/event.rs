@@ -127,7 +127,12 @@ pub enum Event {
         /// Jetons estimés du résumé qui le remplace (toujours ≤ `tokens`).
         summary_tokens: usize,
     },
-    /// Le routeur (mode Auto) a dit sur quelle paire ce message part, et pourquoi.
+    /// Le routeur (mode Auto) a dit sur quelle paire ce message **devrait** partir,
+    /// et pourquoi.
+    ///
+    /// C'est ce que le routeur a décidé, pas ce que le moteur a servi : la paire
+    /// n'est réellement servie que si le transport l'honore
+    /// ([`crate::Transport::honors_route`]) ; sinon `advisory` vaut `true`.
     ///
     /// Émis une fois par message tenu, **seulement** quand un routeur est branché
     /// (`Harness::with_router`) : sans routeur, aucun événement de plus. Additif :
@@ -142,7 +147,7 @@ pub enum Event {
         changed: bool,
         /// Code stable de la raison (`routed`, `kept`, `single_candidate`,
         /// `no_candidate`, `recorded_only`, `pinned`, `manual`, `not_routed`,
-        /// `exploration_never_moves`, `under_margin`).
+        /// `exploration_never_moves`, `under_margin`, `superseded`, `timed_out`).
         why: String,
         /// Le motif lisible de la décision, quand il y en a eu une.
         #[serde(default, skip_serializing_if = "String::is_empty")]
@@ -150,6 +155,12 @@ pub enum Event {
         /// Le mode de la conversation (`primary`, `mixed`, `full`), quand elle en a demandé un.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         mode: Option<String>,
+        /// La décision est **consultative** : le transport ne déclare pas honorer la
+        /// paire ([`crate::Transport::honors_route`] faux), il sert son modèle à lui.
+        /// Une interface ne doit alors pas afficher « servi par <paire> », et la fin du
+        /// tour n'est pas rendue à l'apprentissage comme servie par elle. Absent : faux.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        advisory: bool,
     },
     /// Le run s'est arrêté, et il dit pourquoi.
     Stopped {

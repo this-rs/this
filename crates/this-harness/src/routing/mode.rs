@@ -159,6 +159,34 @@ pub struct RoutingSettings {
     pub quota_weight: f64,
 }
 
+impl RoutingSettings {
+    /// Les mêmes réglages, ramenés dans leurs bornes : un poids ou un taux qui
+    /// n'est pas un nombre fini (`NaN`, infini) reprend son défaut, les autres
+    /// sont bornés. Les réglages viennent de l'hôte : le cœur ne note jamais
+    /// avec un `NaN`.
+    pub fn sanitized(&self) -> Self {
+        let bounded = |v: f64, default: f64, max: f64| {
+            if v.is_finite() {
+                v.clamp(0.0, max)
+            } else {
+                default
+            }
+        };
+        Self {
+            mode: self.mode,
+            stage: self.stage,
+            exploration_epsilon: bounded(
+                self.exploration_epsilon,
+                DEFAULT_EXPLORATION_EPSILON,
+                MAX_EXPLORATION_EPSILON,
+            ),
+            cost_weight: bounded(self.cost_weight, DEFAULT_COST_WEIGHT, 1.0),
+            latency_weight: bounded(self.latency_weight, DEFAULT_LATENCY_WEIGHT, 1.0),
+            quota_weight: bounded(self.quota_weight, DEFAULT_QUOTA_WEIGHT, 1.0),
+        }
+    }
+}
+
 impl Default for RoutingSettings {
     fn default() -> Self {
         Self {
