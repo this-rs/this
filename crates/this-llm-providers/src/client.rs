@@ -331,11 +331,32 @@ impl ProviderClient {
         Ok(parse_models(&body)?)
     }
 
+    /// `/models`, bounded by the OPENING delay. Here the catalogue only serves the window of
+    /// a configured model (or the choice among the checked ones): it is asked at every turn,
+    /// and a catalogue that hangs must not hold the turn for the whole silence delay
+    /// (`timeout_secs`, 120 s by default) before the turn has even opened.
+    async fn announced_models(&self) -> Result<Vec<ModelInfo>, ProviderError> {
+        let open = self.config.open_timeout();
+        match tokio::time::timeout(open, self.list_models()).await {
+            Ok(result) => result,
+            Err(_) => Err(ProviderError::Timeout(format!(
+                "{} : le catalogue (/models) n'a pas répondu en {} s",
+                self.config.label,
+                open.as_secs()
+            ))),
+        }
+    }
+
     /// The model to ask and the window it has, resolved from the configuration and the
     /// engine's announcement. An engine without `/models` is still usable when a model is
     /// configured: the window then comes from the configuration, or stays unknown.
     async fn resolve_model(&self) -> Result<(String, Option<u32>), ProviderError> {
-        let (model, announced) = match (&self.config.model, self.list_models().await) {
+        // A configured model with a configured window needs nothing from the engine: no
+        // `/models` round trip per turn, and no exposure to a catalogue that is slow or down.
+        if let (Some(name), Some(window)) = (&self.config.model, self.config.context_window) {
+            return Ok((name.clone(), Some(window)));
+        }
+        let (model, announced) = match (&self.config.model, self.announced_models().await) {
             (Some(name), Ok(models)) => {
                 // An engine that serves ONE model (llama-server) answers whatever name it is
                 // given: a configured name that differs from its file name still gets that
