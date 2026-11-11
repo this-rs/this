@@ -68,6 +68,7 @@ fn note() -> Entity {
             .sortable(),
         )
         .field(tags())
+        .field(Field::new("source_url", FieldType::String).optional())
         .field(Field::new("project_id", FieldType::Uuid).optional())
         .field(Field::string("created_by").default(json!("agent")))
         .field(
