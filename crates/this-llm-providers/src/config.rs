@@ -174,8 +174,17 @@ pub struct ProviderConfig {
     /// Asks a local reasoning model to think. Off by default: latency beats meditation.
     #[serde(default)]
     pub thinking: bool,
+    /// The SILENCE limit: how long a stream that has begun may say nothing between two
+    /// pieces. A reasoning model may think for minutes between two chunks.
     #[serde(default = "default_timeout_secs")]
     pub timeout_secs: u64,
+    /// The OPENING limit: how long to wait for the headers of a streamed answer. A healthy
+    /// engine opens its stream within seconds; one that accepts the request and never opens
+    /// (a model listed in a catalogue but not served to this account) would otherwise keep
+    /// the turn mute for the whole `timeout_secs`. `None`: 30 s, or `timeout_secs` when that
+    /// is shorter. Absent from the JSON when unset, so stored configurations do not change.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub open_timeout_secs: Option<u64>,
     #[serde(default = "default_enabled")]
     pub enabled: bool,
     /// Whether the model reads images. `None`: unknown, images are sent and the engine
@@ -185,6 +194,9 @@ pub struct ProviderConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vision: Option<bool>,
 }
+
+/// The opening limit when the configuration sets none.
+const DEFAULT_OPEN_TIMEOUT_SECS: u64 = 30;
 
 fn default_timeout_secs() -> u64 {
     120
@@ -215,6 +227,7 @@ impl ProviderConfig {
             budget: Budget::default(),
             thinking: false,
             timeout_secs: default_timeout_secs(),
+            open_timeout_secs: None,
             enabled: true,
             vision: None,
         }
@@ -282,7 +295,21 @@ impl ProviderConfig {
         if self.timeout_secs == 0 || self.timeout_secs > 3600 {
             return Err(ConfigError::Timeout);
         }
+        if self
+            .open_timeout_secs
+            .is_some_and(|secs| secs == 0 || secs > 3600)
+        {
+            return Err(ConfigError::Timeout);
+        }
         Ok(())
+    }
+
+    /// How long to wait for the headers of a streamed answer.
+    pub fn open_timeout(&self) -> std::time::Duration {
+        let secs = self
+            .open_timeout_secs
+            .unwrap_or_else(|| DEFAULT_OPEN_TIMEOUT_SECS.min(self.timeout_secs));
+        std::time::Duration::from_secs(secs)
     }
 }
 
@@ -304,6 +331,33 @@ mod tests {
         let mut blind = config;
         blind.vision = Some(false);
         assert_eq!(serde_json::to_value(&blind).unwrap()["vision"], false);
+    }
+
+    #[test]
+    fn an_unset_open_timeout_leaves_a_stored_configuration_byte_for_byte() {
+        let config = ProviderConfig::new(id("local"), "Local", Preset::Ollama, CredentialRef::None);
+        let written = serde_json::to_string(&config).unwrap();
+        assert!(!written.contains("open_timeout"), "{written}");
+        // A configuration stored before the field existed reads back and writes back unchanged.
+        let back: ProviderConfig = serde_json::from_str(&written).unwrap();
+        assert_eq!(back.open_timeout_secs, None);
+        assert_eq!(serde_json::to_string(&back).unwrap(), written);
+        let mut set = config;
+        set.open_timeout_secs = Some(12);
+        assert_eq!(serde_json::to_value(&set).unwrap()["open_timeout_secs"], 12);
+    }
+
+    #[test]
+    fn the_open_timeout_is_thirty_seconds_or_the_silence_limit_when_shorter() {
+        let mut config =
+            ProviderConfig::new(id("local"), "Local", Preset::Ollama, CredentialRef::None);
+        assert_eq!(config.open_timeout().as_secs(), 30);
+        config.timeout_secs = 10;
+        assert_eq!(config.open_timeout().as_secs(), 10);
+        config.open_timeout_secs = Some(45);
+        assert_eq!(config.open_timeout().as_secs(), 45);
+        config.open_timeout_secs = Some(0);
+        assert_eq!(config.validate(), Err(ConfigError::Timeout));
     }
 
     #[test]

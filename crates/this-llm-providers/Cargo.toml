@@ -13,7 +13,7 @@ categories = ["api-bindings"]
 default = ["http"]
 # The transport (reqwest) and the `Completion` implementation. Off on wasm front-ends
 # that only configure providers and display them.
-http = ["dep:reqwest", "dep:async-trait"]
+http = ["dep:reqwest", "dep:async-trait", "dep:tokio"]
 
 [dependencies]
 this-llm = { version = "0.0.1", path = "../this-llm" }
@@ -21,6 +21,10 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 async-trait = { version = "0.1", optional = true }
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"], optional = true }
+
+# The opening delay of a streamed answer needs a timer; a browser has none (and no delay at all).
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+tokio = { version = "1", features = ["time"], optional = true }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util"] }

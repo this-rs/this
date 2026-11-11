@@ -13,6 +13,9 @@
 //!   fits and budgets a request, sends it, settles the real usage. It implements
 //!   [`this_llm::Completion`], so an app's harness does not change.
 //!
+//! - [`ProviderClient::probe`] — one minimal request that says whether a model announced by
+//!   the engine really answers for this account ([`ProbeVerdict`]).
+//!
 //! The chat wire format is OpenAI-compatible (`/models`, `/chat/completions`), which
 //! covers Ollama, LM Studio, llama.cpp, vLLM, OpenRouter, DeepSeek and OpenAI.
 //!
@@ -42,6 +45,7 @@ mod error;
 mod hub;
 pub mod images;
 mod model;
+mod probe;
 mod secret;
 mod store;
 
@@ -53,6 +57,9 @@ pub use config::{Budget, ConfigError, Pricing, ProviderConfig, ProviderId};
 pub use error::{ErrorKind, ProviderError};
 pub use hub::Hub;
 pub use model::{ContextFit, ModelInfo, ParseError, estimate_tokens, fit, parse_models};
+pub use probe::{
+    DEFAULT_PROBE_TIMEOUT, MAX_PROBE_CONCURRENCY, ProbeOptions, ProbeVerdict, Refusal,
+};
 pub use secret::{Secret, SecretError, SecretResolver, Secrets};
 pub use store::{JsonFileStore, MemoryStore, ProviderStore, Snapshot, StoreError};
 
