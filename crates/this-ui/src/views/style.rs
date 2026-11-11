@@ -446,7 +446,8 @@ pub const CSS: &str = r#"
 .vw-list-row-click { display: flex; flex-direction: column; align-items: flex-start; gap: 2px;
   width: 100%; min-height: 44px; padding: 0; text-align: left; border: 0; background: none;
   color: inherit; font: inherit; cursor: pointer; }
-.vw-list-actions { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 8px; align-items: center; }
+.vw-list-actions { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 8px; align-items: center;
+  width: 100%; align-self: stretch; }
 .vw-list-actions .vw-btn { width: 100%; padding: 0 8px; }
 .vw-list-label { font-weight: 600; }
 .vw-list-sub { font-size: 13px; opacity: .72; }
