@@ -348,15 +348,25 @@ impl ProviderClient {
     /// a configured model (or the choice among the checked ones): it is asked at every turn,
     /// and a catalogue that hangs must not hold the turn for the whole silence delay
     /// (`timeout_secs`, 120 s by default) before the turn has even opened.
+    ///
+    /// In a page (wasm32) there is no timer here: the browser's fetch is the only bound, as
+    /// it already was. That path is the development one, not the target.
     async fn announced_models(&self) -> Result<Vec<ModelInfo>, ProviderError> {
-        let open = self.config.open_timeout();
-        match tokio::time::timeout(open, self.list_models()).await {
-            Ok(result) => result,
-            Err(_) => Err(ProviderError::Timeout(format!(
-                "{} : le catalogue (/models) n'a pas répondu en {} s",
-                self.config.label,
-                open.as_secs()
-            ))),
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let open = self.config.open_timeout();
+            match tokio::time::timeout(open, self.list_models()).await {
+                Ok(result) => result,
+                Err(_) => Err(ProviderError::Timeout(format!(
+                    "{} : le catalogue (/models) n'a pas répondu en {} s",
+                    self.config.label,
+                    open.as_secs()
+                ))),
+            }
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            self.list_models().await
         }
     }
 

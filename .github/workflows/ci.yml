@@ -56,7 +56,7 @@ jobs:
           echo "code files: $code"
           if [ "$code" -gt 0 ]; then echo "code=true" >> "$GITHUB_OUTPUT"; else echo "code=false" >> "$GITHUB_OUTPUT"; fi
           # Le harnais et ce qu'il tire (this-agent, this-llm) : un changement là peut casser wasm32.
-          if printf '%s\n' "$changed" | grep -qE '^(crates/(this-harness|this-agent|this-llm)/|scripts/lint-harness-portability\.rs|Cargo\.(toml|lock)$|\.github/workflows/ci\.yml)'; then echo "harness=true" >> "$GITHUB_OUTPUT"; else echo "harness=false" >> "$GITHUB_OUTPUT"; fi
+          if printf '%s\n' "$changed" | grep -qE '^(crates/(this-harness|this-agent|this-llm|this-llm-providers)/|scripts/lint-harness-portability\.rs|Cargo\.(toml|lock)$|\.github/workflows/ci\.yml)'; then echo "harness=true" >> "$GITHUB_OUTPUT"; else echo "harness=false" >> "$GITHUB_OUTPUT"; fi
 
   # Test sur plusieurs versions de Rust
   test:
@@ -645,6 +645,12 @@ jobs:
 
       - name: Compile this-harness for wasm32
         run: cargo check -p this-harness --target wasm32-unknown-unknown --no-default-features
+
+      # Le client des providers tourne AUSSI dans la page (chemin navigateur de l'Atelier) :
+      # un `tokio::time` hors garde `cfg(not(wasm32))` y casse la compilation sans que ce
+      # workspace ne le voie (mesuré le 11/11/2026 sur #255 : vert ici, rouge dans l'app).
+      - name: Compile this-llm-providers for wasm32
+        run: cargo check -p this-llm-providers --target wasm32-unknown-unknown
 
   # Le backend obrain est le seul dont les dépendances ne sont pas sur crates.io :
   # `Cargo.toml` les déclare par PATH (`../../obrain/obrain-db/crates/...`). Deux
