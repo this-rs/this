@@ -195,6 +195,12 @@ pub enum Node {
         /// [`HTML_MAX_HEIGHT`].
         #[serde(default, skip_serializing_if = "Option::is_none")]
         height: Option<u32>,
+        /// Les données que la page demande, EXPLICITEMENT : au plus [`HTML_DATA_MAX_GRANTS`]
+        /// demandes, une par entité. Sans elles, la page ne reçoit que ce que les AUTRES
+        /// nœuds de la vue lisent — donc rien si elle est seule. Avec elles, `rows` porte
+        /// exactement ces entités, filtrées et projetées : voir [`DataGrant`].
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        data: Vec<DataGrant>,
     },
     /// « Montre `child` seulement si » : une condition de visibilité posée sur UN nœud — une
     /// brique, ou un groupe entier.
@@ -216,6 +222,51 @@ pub enum Node {
         filter: FilterExpr,
         child: Box<Node>,
     },
+}
+
+/// Une demande de données d'un nœud [`Node::Html`] : ce que la page lira dans `rows`.
+///
+/// ```json
+/// {"entity":"tache","filter":{"cmp":{"field":"fait","op":"eq","value":false}},
+///  "fields":["titre","fait"],"limit":200}
+/// ```
+///
+/// - `entity` (requis) : une entité du module, ou d'un module qu'il requiert ;
+/// - `filter` : la forme d'un filtre de liste ([`FilterExpr`]) ;
+/// - `fields` : les champs DÉCLARÉS envoyés. Absent = tous les champs déclarés de l'entité,
+///   jamais les champs de base (`id`, dates…) ;
+/// - `limit` : 1..=[`HTML_DATA_MAX_LIMIT`], défaut [`HTML_DATA_DEFAULT_LIMIT`].
+///
+/// C'est la frontière de sécurité de la page : ce qui n'est pas demandé ici ne franchit pas
+/// l'iframe.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DataGrant {
+    pub entity: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filter: Option<FilterExpr>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fields: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u32>,
+}
+
+/// Le nombre maximal de demandes de données d'un nœud [`Node::Html`].
+pub const HTML_DATA_MAX_GRANTS: usize = 5;
+/// La limite de lignes d'une demande qui n'en dit pas.
+pub const HTML_DATA_DEFAULT_LIMIT: u32 = 200;
+/// La limite de lignes la plus haute qu'une demande puisse porter.
+pub const HTML_DATA_MAX_LIMIT: u32 = 1000;
+
+impl DataGrant {
+    /// La limite effective : celle de la demande, ou le défaut, **bornée** à
+    /// `1..=`[`HTML_DATA_MAX_LIMIT`] (un descripteur qui aurait contourné la validation ne
+    /// sort pas du cadre).
+    pub fn effective_limit(&self) -> usize {
+        self.limit
+            .unwrap_or(HTML_DATA_DEFAULT_LIMIT)
+            .clamp(1, HTML_DATA_MAX_LIMIT) as usize
+    }
 }
 
 /// La hauteur maximale d'un nœud [`Node::Html`], en px.
@@ -1621,7 +1672,8 @@ impl<'a> Checks<'a> {
             &mut conditions,
             &mut htmls,
         );
-        for (chemin, path) in htmls {
+        for (chemin, path, data) in htmls {
+            self.html_data(&chemin, data);
             if v.surface == Surface::Header {
                 self.push(
                     "html_in_header",
@@ -1641,6 +1693,85 @@ impl<'a> Checks<'a> {
         }
         for (chemin, b) in briques {
             self.brick(&chemin, b, v.surface);
+        }
+    }
+
+    /// Les demandes de données d'un nœud `html` : au plus cinq, une par entité, chaque
+    /// entité connue (du module ou de ses requêtes), chaque champ déclaré, une limite dans
+    /// les bornes. Tout refus nomme la demande.
+    fn html_data(&mut self, chemin: &str, data: &[DataGrant]) {
+        if data.len() > HTML_DATA_MAX_GRANTS {
+            self.push(
+                "html_data_too_many",
+                format!("{chemin}.data"),
+                format!(
+                    "{} data requests, the most an `html` node may ask is {HTML_DATA_MAX_GRANTS}; \
+                     merge them or split the page",
+                    data.len()
+                ),
+            );
+        }
+        let mut vues = BTreeSet::new();
+        for (i, g) in data.iter().enumerate() {
+            let p = format!("{chemin}.data[{i}]");
+            if !self.entity_ref(
+                "html_data_entity_unknown",
+                &format!("{p}.entity"),
+                &g.entity,
+            ) {
+                continue;
+            }
+            if !vues.insert(g.entity.as_str()) {
+                self.push(
+                    "html_data_entity_twice",
+                    format!("{p}.entity"),
+                    format!(
+                        "`{}` is requested twice: `rows` is keyed by entity, one request each",
+                        g.entity
+                    ),
+                );
+            }
+            let declares: BTreeSet<String> = self
+                .entities
+                .get(g.entity.as_str())
+                .map(|e| e.fields.iter().map(|f| f.name.clone()).collect())
+                .unwrap_or_default();
+            for (j, f) in g.fields.iter().flatten().enumerate() {
+                if !declares.contains(f) {
+                    let msg = unknown_msg(
+                        f,
+                        &format!("a declared field of `{}`", g.entity),
+                        declares.iter().map(String::as_str),
+                        "Only declared fields cross into the page, never base fields.",
+                    );
+                    self.push("html_data_field_unknown", format!("{p}.fields[{j}]"), msg);
+                }
+            }
+            if let Some(filtre) = &g.filter {
+                let lis = self.readable(&g.entity);
+                let mut lus = Vec::new();
+                chemins_du_filtre(filtre, &mut lus);
+                for c in lus {
+                    if !c.contains('.') && !lis.contains(c) {
+                        let msg = unknown_msg(
+                            c,
+                            &format!("a field of `{}`", g.entity),
+                            lis.iter().map(String::as_str),
+                            "Declare the field or fix the name.",
+                        );
+                        self.push("html_data_field_unknown", format!("{p}.filter"), msg);
+                    }
+                }
+            }
+            if let Some(l) = g.limit
+                && !(1..=HTML_DATA_MAX_LIMIT).contains(&l)
+            {
+                self.push(
+                    "html_data_limit_out_of_range",
+                    format!("{p}.limit"),
+                    format!("limit {l} is outside 1..={HTML_DATA_MAX_LIMIT}"),
+                );
+            }
         }
     }
 
@@ -2311,6 +2442,9 @@ fn lectures(b: &Brick) -> Vec<&str> {
 /// Un problème de structure : `(chemin, raison, message)`.
 type StructureIssue = (String, &'static str, String);
 
+/// Un nœud `html` : le chemin du nœud, son fichier, ses demandes de données.
+type HtmlRef<'a> = (String, &'a str, &'a [DataGrant]);
+
 /// Une condition `when` : le chemin du nœud, l'entité lue, le filtre.
 type ConditionRef<'a> = (String, &'a str, &'a FilterExpr);
 
@@ -2323,7 +2457,7 @@ fn collecte<'a>(
     out: &mut Vec<(String, &'a Brick)>,
     structure: &mut Vec<StructureIssue>,
     conditions: &mut Vec<ConditionRef<'a>>,
-    htmls: &mut Vec<(String, &'a str)>,
+    htmls: &mut Vec<HtmlRef<'a>>,
 ) {
     if profondeur > MAX_VIEW_DEPTH {
         structure.push((
@@ -2408,7 +2542,7 @@ fn collecte<'a>(
                 }
             }
         }
-        Node::Html { path, .. } => htmls.push((chemin.to_string(), path.as_str())),
+        Node::Html { path, data, .. } => htmls.push((chemin.to_string(), path.as_str(), data)),
         Node::Leaf { brick } => out.push((format!("{chemin}.brick"), brick.as_ref())),
     }
 }
@@ -3699,6 +3833,121 @@ mod tests {
         );
     }
 
+    fn html_data(data: Vec<DataGrant>) -> ModuleDescriptor {
+        let mut m = module();
+        m.views.push(view(
+            "x",
+            Node::Html {
+                path: "ui/index.html".into(),
+                height: None,
+                data,
+            },
+        ));
+        m
+    }
+
+    fn grant(entity: &str) -> DataGrant {
+        DataGrant {
+            entity: entity.into(),
+            filter: None,
+            fields: None,
+            limit: None,
+        }
+    }
+
+    #[test]
+    fn html_data_roundtrips_in_its_documented_shape() {
+        let json = r#"{"type":"html","path":"ui/index.html","data":[{"entity":"invoice","filter":{"cmp":{"field":"amount","op":"eq","value":"1"}},"fields":["titre"],"limit":200}]}"#;
+        let n: Node = serde_json::from_str(json).unwrap();
+        let Node::Html { data, .. } = &n else {
+            panic!("html")
+        };
+        assert_eq!(data.len(), 1);
+        assert_eq!(data[0].fields.as_deref(), Some(&["titre".to_string()][..]));
+        assert_eq!(
+            serde_json::to_value(&n).unwrap(),
+            serde_json::from_str::<serde_json::Value>(json).unwrap()
+        );
+        assert!(
+            html_data(vec![grant("invoice")])
+                .check(&CustomRegistry::default(), CheckProfile::Compiled)
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn html_data_refusals_are_named() {
+        assert_refused(&html_data(vec![grant("ghost")]), "html_data_entity_unknown");
+        // Un champ non déclaré, y compris un champ de base.
+        for champ in ["nope", "id"] {
+            assert_refused(
+                &html_data(vec![DataGrant {
+                    fields: Some(vec![champ.into()]),
+                    ..grant("invoice")
+                }]),
+                "html_data_field_unknown",
+            );
+        }
+        let filtre: FilterExpr =
+            serde_json::from_str(r#"{"cmp":{"field":"nope","op":"eq","value":1}}"#).unwrap();
+        assert_refused(
+            &html_data(vec![DataGrant {
+                filter: Some(filtre),
+                ..grant("invoice")
+            }]),
+            "html_data_field_unknown",
+        );
+        for l in [0, HTML_DATA_MAX_LIMIT + 1] {
+            assert_refused(
+                &html_data(vec![DataGrant {
+                    limit: Some(l),
+                    ..grant("invoice")
+                }]),
+                "html_data_limit_out_of_range",
+            );
+        }
+        assert_refused(
+            &html_data(vec![grant("invoice"), grant("invoice")]),
+            "html_data_entity_twice",
+        );
+        let six: Vec<DataGrant> = (0..=HTML_DATA_MAX_GRANTS)
+            .map(|_| grant("invoice"))
+            .collect();
+        assert!(codes(&html_data(six)).contains(&"this.descriptor.html_data_too_many".to_string()));
+    }
+
+    #[test]
+    fn an_html_data_entity_must_belong_to_the_module_or_one_it_requires() {
+        let mut socle = ModuleDescriptor::new("socle", "1.0.0");
+        socle.entities.push(EntityDesc::new("tache"));
+        let mut menu = html_data(vec![grant("tache")]);
+        // Hors du module et de ses requêtes : refusé.
+        let refus = issues_with_required(&menu, &[&socle, &menu]);
+        assert!(refus.iter().any(|(r, ..)| *r == "html_data_entity_unknown"));
+        menu.requires.push(crate::module::ModuleReq {
+            name: "socle".into(),
+            version: "*".into(),
+            optional: false,
+        });
+        assert!(
+            issues_with_required(&menu, &[&socle, &menu])
+                .iter()
+                .all(|(r, ..)| !r.starts_with("html_data"))
+        );
+    }
+
+    #[test]
+    fn the_effective_limit_is_defaulted_and_clamped() {
+        assert_eq!(grant("a").effective_limit(), 200);
+        let g = |l| DataGrant {
+            limit: Some(l),
+            ..grant("a")
+        };
+        assert_eq!(g(50).effective_limit(), 50);
+        assert_eq!(g(5000).effective_limit(), 1000);
+        assert_eq!(g(0).effective_limit(), 1);
+    }
+
     #[test]
     fn html_node_roundtrips_and_names_its_five_refusals() {
         let n: Node =
@@ -3707,7 +3956,8 @@ mod tests {
             n,
             Node::Html {
                 path: "ui/index.html".into(),
-                height: Some(320)
+                height: Some(320),
+                data: vec![]
             }
         );
         assert_eq!(
@@ -3726,6 +3976,7 @@ mod tests {
                 Node::Html {
                     path: p.into(),
                     height: None,
+                    data: vec![],
                 },
             ));
             m

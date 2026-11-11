@@ -483,9 +483,17 @@ fn nodes() -> Vec<VariantSchema> {
                     "integer",
                     "Height in px. Absent = intrinsic height; the host caps it at 2000.",
                 ),
+                opt(
+                    "data",
+                    "list<object:DataGrant>",
+                    "The data the page asks for, explicitly (at most 5, one per entity). With it, \
+                     `rows` carries exactly those entities, filtered and projected; without it, \
+                     only what the OTHER nodes of the view read — nothing if the page is alone.",
+                ),
             ],
             json!({"type": "html", "path": "ui/index.html"}),
-            json!({"type": "html", "path": "ui/index.html", "height": 320}),
+            json!({"type": "html", "path": "ui/index.html", "height": 320,
+                   "data": [{"entity": "invoice", "fields": ["titre"], "limit": 200}]}),
         ),
         variant(
             "leaf",
@@ -1347,6 +1355,30 @@ fn objects() -> Vec<ObjectSchema> {
             json!({"field": "titre", "label": "Title", "read_only": true}),
         ),
         object(
+            "DataGrant",
+            "A data request of an `html` node: what the page reads in `rows`. The security \
+             boundary of the page: what is not asked here does not cross the iframe. A read \
+             the host refuses is refused and logged, never sent silently.",
+            vec![
+                req(
+                    "entity",
+                    "string",
+                    "An entity of the module or of a module it requires.",
+                )
+                .refers("entity"),
+                opt("filter", "filter", "Which rows. Absent = all rows."),
+                opt(
+                    "fields",
+                    "list<string>",
+                    "DECLARED fields sent (never base fields). Absent = every declared field.",
+                ),
+                opt("limit", "integer", "Rows sent, 1..=1000."),
+            ],
+            json!({"entity": "invoice"}),
+            json!({"entity": "invoice", "fields": ["titre"], "limit": 50,
+                   "filter": {"cmp": {"field": "titre", "op": "ne", "value": null}}}),
+        ),
+        object(
             "SortSpec",
             "One sort criterion.",
             vec![
@@ -1816,6 +1848,31 @@ fn rules() -> Vec<RuleSchema> {
             "Move the view to `main`, `sidebar` or `panel`.",
         ),
         rule(
+            "html_data_too_many",
+            "An `html` node asks for more than 5 data requests.",
+            "Merge the requests or split the page.",
+        ),
+        rule(
+            "html_data_entity_unknown",
+            "An `html` data request names an entity that is neither the module's nor one it requires.",
+            "Declare the entity, require its module, or fix the name.",
+        ),
+        rule(
+            "html_data_entity_twice",
+            "An `html` node requests the same entity twice (`rows` is keyed by entity).",
+            "Keep one request per entity.",
+        ),
+        rule(
+            "html_data_field_unknown",
+            "An `html` data request names a field the entity does not declare (base fields cannot be requested).",
+            "Name declared fields only.",
+        ),
+        rule(
+            "html_data_limit_out_of_range",
+            "An `html` data request carries a `limit` outside 1..=1000.",
+            "Pick a limit in 1..=1000, or drop it for the default 200.",
+        ),
+        rule(
             "view_replaces_self",
             "A view replaces itself.",
             "Point `replaces` at another view, or remove it.",
@@ -2168,6 +2225,7 @@ mod tests {
             "Look" => go::<Look>(v),
             "FormField" => go::<crate::views::FormField>(v),
             "SortSpec" => go::<crate::query::SortSpec>(v),
+            "DataGrant" => go::<crate::views::DataGrant>(v),
             "ProgramArg" => go::<crate::views::ProgramArg>(v),
             "Column" => go::<crate::views::Column>(v),
             other => Err(format!("test bug: no type for `{other}`")),
@@ -2391,6 +2449,7 @@ mod tests {
                 "FormField" => err_of::<crate::views::FormField>(probe),
                 "ProgramArg" => err_of::<crate::views::ProgramArg>(probe),
                 "Column" => err_of::<crate::views::Column>(probe),
+                "DataGrant" => err_of::<crate::views::DataGrant>(probe),
                 other => panic!("test bug: object `{other}`"),
             };
             assert_eq!(
@@ -2981,6 +3040,36 @@ mod tests {
             (
                 "html_in_header",
                 header_view(json!({"type":"html","path":"ui/index.html"})),
+            ),
+            (
+                "html_data_entity_unknown",
+                with_view(
+                    json!({"type":"html","path":"ui/index.html","data":[{"entity":"ghost"}]}),
+                ),
+            ),
+            (
+                "html_data_entity_twice",
+                with_view(
+                    json!({"type":"html","path":"ui/index.html","data":[{"entity":"invoice"},{"entity":"invoice"}]}),
+                ),
+            ),
+            (
+                "html_data_field_unknown",
+                with_view(
+                    json!({"type":"html","path":"ui/index.html","data":[{"entity":"invoice","fields":["nope"]}]}),
+                ),
+            ),
+            (
+                "html_data_limit_out_of_range",
+                with_view(
+                    json!({"type":"html","path":"ui/index.html","data":[{"entity":"invoice","limit":1001}]}),
+                ),
+            ),
+            (
+                "html_data_too_many",
+                with_view(json!({"type":"html","path":"ui/index.html","data":[
+                    {"entity":"invoice"},{"entity":"invoice"},{"entity":"invoice"},
+                    {"entity":"invoice"},{"entity":"invoice"},{"entity":"invoice"}]})),
             ),
             ("view_too_deep", with_view(deep)),
             ("view_replaces_self", self_replace),
