@@ -326,12 +326,11 @@ pub fn score(
         return Vec::new();
     }
     let class = signature.arm_key();
+    let index = arms_of_class(arms, &class);
     let stored = |facts: &Candidate| {
-        arms.iter().find(|arm| {
-            arm.key.class == class
-                && arm.key.provider_id == facts.provider_id
-                && arm.key.model == facts.model
-        })
+        index
+            .get(&(facts.provider_id.as_str(), facts.model.as_str()))
+            .copied()
     };
 
     let costs: Vec<Option<f64>> = candidates
@@ -409,6 +408,22 @@ pub fn score(
         scored.insert(0, explored);
     }
     scored
+}
+
+/// Les bras de la classe `class`, indexés par (instance, modèle) : une recherche
+/// en temps constant au lieu d'un parcours par candidat. À clé égale, le **premier**
+/// bras gagne — la même règle que le parcours linéaire qu'il remplace (et que PO).
+pub(crate) fn arms_of_class<'a>(
+    arms: &'a [ArmStats],
+    class: &str,
+) -> HashMap<(&'a str, &'a str), &'a ArmStats> {
+    let mut index = HashMap::new();
+    for arm in arms.iter().filter(|arm| arm.key.class == class) {
+        index
+            .entry((arm.key.provider_id.as_str(), arm.key.model.as_str()))
+            .or_insert(arm);
+    }
+    index
 }
 
 /// La clé du bras auquel une paire notée appartient.

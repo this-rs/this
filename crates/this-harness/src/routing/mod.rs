@@ -38,8 +38,9 @@ mod scorer;
 mod signature;
 
 pub use candidate::{
-    Candidate, Capabilities, CostBasis, Filtered, MemoryQuota, Pick, Price, QuotaExhaustion,
-    QuotaView, RejectReason, Rejected, Slot, UnknownWindow, apply_quota, filter, is_auto_model,
+    Candidate, Capabilities, CostBasis, Filtered, MAX_PRICE_PER_MTOK, MemoryQuota, Pick, Price,
+    QuotaExhaustion, QuotaView, RejectReason, Rejected, Slot, UnknownWindow, apply_quota, filter,
+    is_auto_model,
 };
 pub use decide::{
     Alternative, DecideRequest, Decision, HYSTERESIS_MARGIN, HYSTERESIS_WARMUP, NO_CANDIDATE,
