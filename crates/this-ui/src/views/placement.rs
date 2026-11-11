@@ -14,7 +14,7 @@
 //! Everything in this module is pure: no DOM, no reaction, no data.
 
 use this_descriptor::ModuleDescriptor;
-use this_descriptor::views::{Surface, ViewDesc};
+use this_descriptor::views::{Brick, Node, Surface, ViewDesc};
 
 use crate::views::text;
 
@@ -215,11 +215,49 @@ pub fn title(view: &ViewDesc) -> String {
 /// chose for the contract (`entete`), not something to read, and a heading in a one-line bar
 /// takes the room the bar's own content needs. The title stays on the wrapper as its
 /// accessible name (`aria-label`); only the visible heading is dropped.
+/// The first `empty` text a list of this tree declares, in reading order: what the view
+/// says when it has nothing to show, in its own words.
+pub fn first_empty_text(node: &Node) -> Option<String> {
+    match node {
+        Node::Leaf { brick } => match brick.as_ref() {
+            Brick::List { empty, .. } => empty.clone(),
+            _ => None,
+        },
+        Node::Stack { children } | Node::Row { children } => {
+            children.iter().find_map(first_empty_text)
+        }
+        Node::Tabs { tabs } => tabs
+            .iter()
+            .find_map(|tab| tab.children.iter().find_map(first_empty_text)),
+        Node::Drawer { children, .. } => children.iter().find_map(first_empty_text),
+        _ => None,
+    }
+}
+
 pub fn shows_title(view: &ViewDesc) -> bool {
     // Une barre n'est pas une page : son titre est le nom du contrat qui la dessine
     // (« Entete »), pas une information. Un fil non plus : il se lit par ses messages, et
     // « Fil » y occupait la première ligne pour ne rien dire.
-    !matches!(view.surface, Surface::Header | Surface::Chat)
+    if matches!(view.surface, Surface::Header | Surface::Chat) {
+        return false;
+    }
+    // Dans le menu latéral, une vue faite de sections de réglages titrées n'a pas besoin
+    // d'un titre AU-DESSUS de ses titres (mesuré : « L'APPLICATION » puis « RÉGLAGES ET
+    // OUTILS », deux en-têtes pour trois lignes).
+    !(view.surface == Surface::Sidebar && is_titled_settings(&view.root))
+}
+
+/// Un arbre qui n'est qu'une brique `settings` dont chaque section porte un titre.
+fn is_titled_settings(node: &Node) -> bool {
+    match node {
+        Node::Leaf { brick } => match brick.as_ref() {
+            Brick::Settings { sections } => {
+                !sections.is_empty() && sections.iter().all(|s| !s.title.trim().is_empty())
+            }
+            _ => false,
+        },
+        _ => false,
+    }
 }
 
 /// Turn a contract identifier into something a person can read: underscores become
@@ -275,6 +313,54 @@ mod tests {
             look: None,
             root: Node::Stack { children: vec![] },
         }
+    }
+
+    fn liste_vide(empty: Option<&str>) -> Node {
+        Node::Leaf {
+            brick: Box::new(
+                serde_json::from_value(serde_json::json!({
+                    "type": "list", "entity": "conversation", "label": "titre",
+                    "empty": empty
+                }))
+                .unwrap(),
+            ),
+        }
+    }
+
+    #[test]
+    fn the_first_list_empty_text_is_the_view_s_own_words() {
+        assert_eq!(
+            first_empty_text(&liste_vide(Some("Rien à toi"))).as_deref(),
+            Some("Rien à toi")
+        );
+        assert_eq!(first_empty_text(&liste_vide(None)), None);
+        let arbre = Node::Stack {
+            children: vec![Node::Row { children: vec![] }, liste_vide(Some("Vide"))],
+        };
+        assert_eq!(first_empty_text(&arbre).as_deref(), Some("Vide"));
+        assert_eq!(first_empty_text(&Node::Stack { children: vec![] }), None);
+    }
+
+    #[test]
+    fn a_sidebar_of_titled_settings_sections_shows_no_title_over_its_titles() {
+        let settings = |titre: &str| Node::Leaf {
+            brick: Box::new(
+                serde_json::from_value(serde_json::json!({
+                    "type": "settings",
+                    "sections": [{ "title": titre, "items": [{ "label": "A", "action": "a" }] }]
+                }))
+                .unwrap(),
+            ),
+        };
+        let mut menu = view("application", Surface::Sidebar, None);
+        menu.root = settings("Réglages et outils");
+        assert!(!shows_title(&menu), "les sections sont les titres");
+        let mut page = view("reglages", Surface::Main, None);
+        page.root = settings("Moteur");
+        assert!(shows_title(&page), "une page garde son titre");
+        let mut liste = view("conversations", Surface::Sidebar, None);
+        liste.root = liste_vide(None);
+        assert!(shows_title(&liste), "une liste du menu garde son titre");
     }
 
     fn names(portfolio: &Portfolio) -> Vec<String> {

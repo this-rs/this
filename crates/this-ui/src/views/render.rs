@@ -103,11 +103,15 @@ pub fn render_view(ctx: Ctx, view: &ViewDesc) -> AnyView {
     let root = view.root.clone();
     let gate_root = view.root.clone();
     let state = Memo::new(move |_| state::view_state(&gate_root, &ctx.data.get()));
+    // The view's own words for "nothing here": the first list's `empty`, when it has one.
+    // Without this, a declared `empty` was only shown when the list was the whole view and
+    // the feed itself had rows; a filtered-out list said the generic "Rien à afficher."
+    let empty_text = placement::first_empty_text(&view.root);
     let tree = render_node(ctx, &root);
     view! {
         <section class=classes aria-label=label>
             {heading.map(|heading| view! { <h2 class=class::VIEW_TITLE>{heading}</h2> })}
-            {move || gate_tile(ctx, state.get())}
+            {move || gate_tile(ctx, state.get(), empty_text.as_deref())}
             <div class=class::VIEW_BODY hidden=move || state.get() != ViewState::Ready>
                 {tree}
             </div>
@@ -129,7 +133,7 @@ fn view_classes(view: &ViewDesc) -> String {
 }
 
 /// The block a view shows instead of its tree, when it has no tree to show.
-fn gate_tile(ctx: Ctx, state: ViewState) -> Option<AnyView> {
+fn gate_tile(ctx: Ctx, state: ViewState, empty_text: Option<&str>) -> Option<AnyView> {
     match state {
         ViewState::Ready => None,
         ViewState::Loading => Some(loading_tile()),
@@ -139,7 +143,7 @@ fn gate_tile(ctx: Ctx, state: ViewState) -> Option<AnyView> {
         ViewState::Empty { entity } => Some(empty_tile(
             ctx,
             entity.as_deref().unwrap_or_default(),
-            text::NOTHING,
+            empty_text.unwrap_or(text::NOTHING),
         )),
     }
 }
