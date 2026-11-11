@@ -11,7 +11,7 @@ categories = ["web-programming", "web-programming::http-server", "database"]
 readme = "README.md"
 
 [workspace]
-members = [".", "crates/this-agent", "crates/this-descriptor", "crates/this-platform", "crates/this-app", "crates/this-module-lang", "crates/this-vfs", "crates/this-module-harness", "crates/this-llm", "crates/this-llm-providers", "crates/this-harness", "crates/this-documents", "crates/this-module-sdk", "crates/this-module-sdk/examples/taches", "crates/this-module-sdk/examples/compteur", "crates/this-module-plan", "crates/this-forge"]
+members = [".", "crates/this-agent", "crates/this-descriptor", "crates/this-platform", "crates/this-app", "crates/this-module-lang", "crates/this-vfs", "crates/this-module-harness", "crates/this-llm", "crates/this-llm-providers", "crates/this-harness", "crates/this-documents", "crates/this-module-sdk", "crates/this-module-sdk/examples/taches", "crates/this-module-sdk/examples/compteur", "crates/this-module-plan", "crates/plan-store", "crates/this-forge"]
 resolver = "3"
 
 [dependencies]
