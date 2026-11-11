@@ -129,3 +129,22 @@ async fn un_modele_et_une_fenetre_configures_n_appellent_pas_le_catalogue() {
         started.elapsed()
     );
 }
+
+/// A routed pair names the model of THIS turn: it replaces the configured one, for this
+/// turn only, and follows the same rules (a configured window spares the catalogue).
+#[tokio::test]
+async fn le_modele_d_une_paire_routee_remplace_celui_de_la_configuration_pour_ce_tour() {
+    let (client, models_seen) = client(Some(32_768)).await;
+    let turn = client
+        .open_turn(request().with_model(Some("nvidia/nemotron-route")))
+        .await
+        .expect("the chat opens");
+    assert_eq!(turn.model(), "nvidia/nemotron-route");
+    assert_eq!(models_seen.load(Ordering::SeqCst), 0);
+    // An empty or blank name is no choice: the configuration rules again.
+    let turn = client
+        .open_turn(request().with_model(Some("  ")))
+        .await
+        .expect("the chat opens");
+    assert_eq!(turn.model(), "qwen-test");
+}

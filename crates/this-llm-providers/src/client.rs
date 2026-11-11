@@ -75,6 +75,9 @@ pub struct TurnRequest {
     /// Overrides the provider's `budget.max_output_tokens` for this turn.
     pub max_output_tokens: Option<u32>,
     pub temperature: f32,
+    /// The model of THIS turn, when a router decided one (`Route::model`): it replaces the
+    /// provider's configured model, and only for this turn. `None`: the configuration rules.
+    pub model: Option<String>,
 }
 
 impl TurnRequest {
@@ -84,7 +87,17 @@ impl TurnRequest {
             tools: None,
             max_output_tokens: None,
             temperature: 0.0,
+            model: None,
         }
+    }
+
+    /// Asks this model for this turn (a routed pair). An empty name means `None`.
+    pub fn with_model(mut self, model: Option<&str>) -> Self {
+        self.model = model
+            .map(str::trim)
+            .filter(|m| !m.is_empty())
+            .map(str::to_string);
+        self
     }
 
     pub fn with_tools(mut self, tools: Value) -> Self {
@@ -347,16 +360,23 @@ impl ProviderClient {
         }
     }
 
-    /// The model to ask and the window it has, resolved from the configuration and the
-    /// engine's announcement. An engine without `/models` is still usable when a model is
-    /// configured: the window then comes from the configuration, or stays unknown.
-    async fn resolve_model(&self) -> Result<(String, Option<u32>), ProviderError> {
-        // A configured model with a configured window needs nothing from the engine: no
-        // `/models` round trip per turn, and no exposure to a catalogue that is slow or down.
-        if let (Some(name), Some(window)) = (&self.config.model, self.config.context_window) {
+    /// The model to ask and the window it has, resolved from the turn's own choice (a routed
+    /// pair), else the configuration, and the engine's announcement. An engine without
+    /// `/models` is still usable when a model is named: the window then comes from the
+    /// configuration, or stays unknown.
+    async fn resolve_model(
+        &self,
+        wanted: Option<&str>,
+    ) -> Result<(String, Option<u32>), ProviderError> {
+        let named = wanted
+            .map(str::to_string)
+            .or_else(|| self.config.model.clone());
+        // A named model with a configured window needs nothing from the engine: no `/models`
+        // round trip per turn, and no exposure to a catalogue that is slow or down.
+        if let (Some(name), Some(window)) = (&named, self.config.context_window) {
             return Ok((name.clone(), Some(window)));
         }
-        let (model, announced) = match (&self.config.model, self.announced_models().await) {
+        let (model, announced) = match (&named, self.announced_models().await) {
             (Some(name), Ok(models)) => {
                 // An engine that serves ONE model (llama-server) answers whatever name it is
                 // given: a configured name that differs from its file name still gets that
@@ -409,7 +429,7 @@ impl ProviderClient {
             self.config.id.as_str(),
             self.config.vision,
         )?;
-        let (model, window) = self.resolve_model().await?;
+        let (model, window) = self.resolve_model(request.model.as_deref()).await?;
 
         // An image is counted at a flat estimate, not as the characters of its base64.
         let images = u32::try_from(count_images(&request.messages)).unwrap_or(u32::MAX);
@@ -508,6 +528,7 @@ impl ProviderClient {
             tools: None,
             max_output_tokens: request.max_output_tokens,
             temperature: request.temperature,
+            model: None,
         };
         let reply = self.send_turn(turn).await?;
         Ok(ChatResponse {
