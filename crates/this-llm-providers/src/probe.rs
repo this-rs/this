@@ -17,6 +17,7 @@
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
+#[cfg(feature = "http")]
 use serde_json::Value;
 
 /// How long a probe waits for an answer before calling the model mute.
@@ -25,6 +26,7 @@ pub const DEFAULT_PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 /// The most probes in flight at once (a catalogue has dozens of models; an engine rate-limits).
 pub const MAX_PROBE_CONCURRENCY: usize = 6;
 
+#[cfg(feature = "http")]
 /// Longest detail kept from an engine's answer.
 const DETAIL_LIMIT: usize = 200;
 
@@ -100,6 +102,7 @@ impl ProbeOptions {
     }
 }
 
+#[cfg(feature = "http")]
 /// The reason for a refused status.
 pub(crate) fn refusal_of(status: u16) -> Refusal {
     match status {
@@ -110,6 +113,7 @@ pub(crate) fn refusal_of(status: u16) -> Refusal {
     }
 }
 
+#[cfg(feature = "http")]
 /// The verdict for a non-200 answer.
 pub(crate) fn verdict_of_status(status: u16, body: &str, secret: Option<&str>) -> ProbeVerdict {
     let detail = clean_detail(body, secret);
@@ -123,6 +127,7 @@ pub(crate) fn verdict_of_status(status: u16, body: &str, secret: Option<&str>) -
     }
 }
 
+#[cfg(feature = "http")]
 /// What an engine said, reduced to one short line that is safe to show: the message of its
 /// JSON error when it has one (`detail`, `error.message`, `error`, `message`), the key
 /// masked wherever it appears, the account identifier masked, truncated.
@@ -143,6 +148,7 @@ pub(crate) fn clean_detail(body: &str, secret: Option<&str>) -> String {
     redact(&message, secret)
 }
 
+#[cfg(feature = "http")]
 /// Masks the key and the account identifier in `text`, collapses whitespace, truncates.
 pub(crate) fn redact(text: &str, secret: Option<&str>) -> String {
     let mut text = text.to_string();
@@ -160,6 +166,7 @@ pub(crate) fn redact(text: &str, secret: Option<&str>) -> String {
     }
 }
 
+#[cfg(feature = "http")]
 /// `Not found for account 'abc123'` becomes `Not found for account '…'`: the identifier of
 /// the account is not for a screenshot. Every quoted value after the word `account` is masked.
 fn mask_account(text: &str) -> String {
@@ -192,6 +199,7 @@ fn mask_account(text: &str) -> String {
 mod tests {
     use super::*;
 
+    #[cfg(feature = "http")]
     #[test]
     fn the_nvidia_404_keeps_its_words_and_loses_the_account() {
         let body = r#"{"status":404,"title":"Not Found","detail":"Function 'abc-123': Not found for account 'SECRETACCT9'"}"#;
@@ -204,6 +212,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "http")]
     #[test]
     fn the_key_never_survives_in_a_detail() {
         let body = r#"{"error":{"message":"bad key nvapi-SECRET-KEY-1234 for you"}}"#;
@@ -211,12 +220,14 @@ mod tests {
         assert!(!detail.contains("SECRET"), "{detail}");
     }
 
+    #[cfg(feature = "http")]
     #[test]
     fn a_long_detail_is_cut() {
         let detail = redact(&"x".repeat(1000), None);
         assert!(detail.chars().count() <= DETAIL_LIMIT + 1);
     }
 
+    #[cfg(feature = "http")]
     #[test]
     fn statuses_say_key_rate_or_server() {
         assert_eq!(refusal_of(401), Refusal::Key);
