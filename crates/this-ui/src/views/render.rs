@@ -151,6 +151,7 @@ pub fn render_node(ctx: Ctx, node: &Node) -> AnyView {
         Node::Drawer { label, children } => drawer(ctx, label, children),
         Node::Modal { title, children } => modal(ctx, title, children),
         Node::Leaf { brick } => render_brick(ctx, brick),
+        Node::Html { path, height } => super::html::render_html(ctx, path, *height),
         Node::When {
             entity,
             filter,
@@ -193,9 +194,18 @@ fn conditional(ctx: Ctx, entity: &str, filter: &FilterExpr, child: &Node) -> Any
 }
 
 /// Name a refusal in the host's log: the browser console on the device, stderr elsewhere.
-fn log_refusal(message: &str) {
+pub(crate) fn log_refusal(message: &str) {
     #[cfg(target_arch = "wasm32")]
     web_sys::console::warn_1(&message.into());
+    #[cfg(not(target_arch = "wasm32"))]
+    eprintln!("this-ui: {message}");
+}
+
+/// A line in the host's log: the browser console on the device, stderr elsewhere.
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+pub(crate) fn log_line(message: &str) {
+    #[cfg(target_arch = "wasm32")]
+    web_sys::console::log_1(&message.into());
     #[cfg(not(target_arch = "wasm32"))]
     eprintln!("this-ui: {message}");
 }
@@ -433,6 +443,10 @@ fn empty_tile(ctx: Ctx, entity: &str, message: &str) -> AnyView {
 }
 
 /// A readable fallback: what the renderer could not draw, said in words.
+pub(crate) fn fallback_public(what: &str) -> AnyView {
+    fallback(what)
+}
+
 fn fallback(what: &str) -> AnyView {
     view! {
         <div class=class::UNRENDERED role="note">
@@ -950,7 +964,7 @@ fn action_intent(
 }
 
 /// The intent a declared action means: pure, so it is measured without a reactive owner.
-fn intent_of(
+pub(crate) fn intent_of(
     declared: Option<Action>,
     name: &str,
     entity: Option<&str>,
@@ -1098,6 +1112,7 @@ impl ComposerSpec {
                 .flat_map(|tab| tab.children.iter())
                 .find_map(Self::find),
             Node::When { child, .. } => Self::find(child),
+            Node::Html { .. } => None,
         }
     }
 }
@@ -1110,7 +1125,7 @@ pub fn without_composer(node: &Node) -> Option<Node> {
         |children: &[Node]| -> Vec<Node> { children.iter().filter_map(without_composer).collect() };
     let kept = match node {
         Node::Leaf { brick } if matches!(brick.as_ref(), Brick::Composer { .. }) => return None,
-        Node::Leaf { .. } => return Some(node.clone()),
+        Node::Leaf { .. } | Node::Html { .. } => return Some(node.clone()),
         Node::Stack { children } => Node::Stack {
             children: keep(children),
         },
@@ -1150,7 +1165,7 @@ pub fn without_composer(node: &Node) -> Option<Node> {
         | Node::Drawer { children, .. }
         | Node::Modal { children, .. } => children.is_empty(),
         Node::Tabs { tabs } => tabs.iter().all(|tab| tab.children.is_empty()),
-        Node::Leaf { .. } | Node::When { .. } => false,
+        Node::Leaf { .. } | Node::When { .. } | Node::Html { .. } => false,
     };
     (!empty).then_some(kept)
 }

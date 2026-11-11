@@ -169,6 +169,8 @@ fn writable(node: &Node, snapshot: Option<&Snapshot>) -> bool {
     let any = |children: &[Node]| children.iter().any(|c| writable(c, snapshot));
     match node {
         Node::Leaf { brick } => matches!(**brick, Brick::Form { .. } | Brick::Field { .. }),
+        // L'intérieur d'une page est opaque : l'hôte ne sait pas s'il y a de quoi écrire.
+        Node::Html { .. } => false,
         Node::Stack { children }
         | Node::Row { children }
         | Node::Drawer { children, .. }
@@ -204,6 +206,7 @@ pub fn drawn<'a>(node: &'a Node, snapshot: &Snapshot) -> Vec<&'a Brick> {
 fn walk<'a>(node: &'a Node, snapshot: &Snapshot, out: &mut Vec<&'a Brick>) {
     match node {
         Node::Leaf { brick } => out.push(brick),
+        Node::Html { .. } => {}
         Node::Stack { children }
         | Node::Row { children }
         | Node::Drawer { children, .. }

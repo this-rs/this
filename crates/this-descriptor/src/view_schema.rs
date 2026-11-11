@@ -462,6 +462,32 @@ fn nodes() -> Vec<VariantSchema> {
                    "child": {"type": "leaf", "brick": {"type": "metrics", "entity": "invoice"}}}),
         ),
         variant(
+            "html",
+            "A web page the MODULE ships: one file of its VFS folder, mounted by the host in a \
+             sandboxed iframe (never `allow-same-origin`). The unlimited door of the interface: \
+             when you write HTML/CSS/JS you leave the contract — no imposed theme, no verified \
+             contrast, no 44 px touch target; the host cannot measure the inside. Bridge: the \
+             host posts `{type:\"this:data\", rows, theme, locale}` (only the entities the module \
+             declares), the page posts `{type:\"this:intent\", …}`, validated like any intent \
+             (create/update/delete/invoke/navigate); an unknown intent is logged and ignored. \
+             Refused: empty path, path outside the module (absolute elsewhere, `..`), extension \
+             other than .html/.htm (an .svg is refused), and placement in a `header`.",
+            vec![
+                req(
+                    "path",
+                    "string",
+                    "File in the module folder: `ui/index.html` or `/modules/<name>/<version>/ui/index.html`.",
+                ),
+                opt(
+                    "height",
+                    "integer",
+                    "Height in px. Absent = intrinsic height; the host caps it at 2000.",
+                ),
+            ],
+            json!({"type": "html", "path": "ui/index.html"}),
+            json!({"type": "html", "path": "ui/index.html", "height": 320}),
+        ),
+        variant(
             "leaf",
             "A leaf: draws one brick.",
             vec![req("brick", "brick", "The brick drawn.")],
@@ -1765,6 +1791,31 @@ fn rules() -> Vec<RuleSchema> {
             "Flatten the tree or split it in several views.",
         ),
         rule(
+            "html_path_empty",
+            "An `html` node has an empty path.",
+            "Name the file the module ships, e.g. `ui/index.html`.",
+        ),
+        rule(
+            "html_path_outside_module",
+            "An `html` path is absolute outside the module folder, or climbs out with `..`.",
+            "Use a path relative to the module, e.g. `ui/index.html`.",
+        ),
+        rule(
+            "html_extension_refused",
+            "An `html` path does not end in .html or .htm.",
+            "Serve an .html page (scripts and styles go inline or in that page).",
+        ),
+        rule(
+            "html_svg_refused",
+            "An `html` path is an .svg: its own scripts and external references escape a <meta> CSP.",
+            "Serve the SVG as an image, not as an `html` page.",
+        ),
+        rule(
+            "html_in_header",
+            "An `html` node sits in a `header` view: a thin bar cannot host an iframe.",
+            "Move the view to `main`, `sidebar` or `panel`.",
+        ),
+        rule(
             "view_replaces_self",
             "A view replaces itself.",
             "Point `replaces` at another view, or remove it.",
@@ -1827,6 +1878,11 @@ fn coverage() -> Vec<CoverageEntry> {
             "Row count, or sum of a field.",
         ),
         cover("tabs", &["node:tabs"], "One subtree per tab."),
+        cover(
+            "html",
+            &["node:html"],
+            "A page the module ships, in a sandboxed iframe: the unlimited door, outside the contract.",
+        ),
         cover("sheet", &["node:modal"], "A titled sheet over the content."),
         cover(
             "drawer",
@@ -2657,6 +2713,11 @@ mod tests {
             m.views.push(view_with_root("probe", Surface::Main, root));
             m
         }
+        fn header_view(root: Value) -> ModuleDescriptor {
+            let mut m = fixture();
+            m.views.push(view_with_root("probe", Surface::Header, root));
+            m
+        }
         fn with_header(brick: &str) -> ModuleDescriptor {
             let mut m = fixture();
             m.views
@@ -2900,6 +2961,26 @@ mod tests {
                 with_view(leaf(
                     r#"{"type":"notice","tone":"info","entity":"invoice","field":"titre","label":"Go"}"#,
                 )),
+            ),
+            (
+                "html_path_empty",
+                with_view(json!({"type":"html","path":""})),
+            ),
+            (
+                "html_path_outside_module",
+                with_view(json!({"type":"html","path":"../../etc/passwd.html"})),
+            ),
+            (
+                "html_extension_refused",
+                with_view(json!({"type":"html","path":"ui/app.js"})),
+            ),
+            (
+                "html_svg_refused",
+                with_view(json!({"type":"html","path":"ui/logo.svg"})),
+            ),
+            (
+                "html_in_header",
+                header_view(json!({"type":"html","path":"ui/index.html"})),
             ),
             ("view_too_deep", with_view(deep)),
             ("view_replaces_self", self_replace),

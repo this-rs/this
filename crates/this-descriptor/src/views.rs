@@ -176,6 +176,26 @@ pub enum Node {
     Modal { title: String, children: Vec<Node> },
     /// Une feuille : une brique.
     Leaf { brick: Box<Brick> },
+    /// Une page web que le MODULE livre : un fichier de son dossier VFS, montée par l'hôte
+    /// dans une iframe sandboxée (sans `allow-same-origin`).
+    ///
+    /// C'est la porte ILLIMITÉE de l'interface : tout ce que les briques ne disent pas, le
+    /// module l'écrit en HTML/CSS/JS. Le prix : plus de thème imposé, plus de contraste
+    /// vérifié, plus de cible tactile de 44 px — et un intérieur que l'hôte ne peut pas
+    /// mesurer. Le pont est explicite : l'hôte envoie `{type:"this:data", rows, theme,
+    /// locale}`, la page renvoie `{type:"this:intent", …}`, validé comme une intention.
+    ///
+    /// `path` est relatif au module : `ui/index.html`, ou le chemin complet
+    /// `/modules/<nom>/<version>/ui/index.html`. Hors du module, `..`, extension autre que
+    /// `.html`/`.htm` (un `.svg` est refusé : il peut porter ses propres scripts), ou
+    /// placement dans un `header` : refusés, nommément.
+    Html {
+        path: String,
+        /// Hauteur en px. Absente = hauteur intrinsèque ; l'hôte borne à
+        /// [`HTML_MAX_HEIGHT`].
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        height: Option<u32>,
+    },
     /// « Montre `child` seulement si » : une condition de visibilité posée sur UN nœud — une
     /// brique, ou un groupe entier.
     ///
@@ -196,6 +216,77 @@ pub enum Node {
         filter: FilterExpr,
         child: Box<Node>,
     },
+}
+
+/// La hauteur maximale d'un nœud [`Node::Html`], en px.
+pub const HTML_MAX_HEIGHT: u32 = 2000;
+
+/// Les extensions qu'un nœud [`Node::Html`] accepte de servir. Un `.svg` n'y est pas : il
+/// peut porter ses propres scripts et références externes qu'un `<meta>` CSP ne couvre pas —
+/// il est refusé nommément (`html_svg_refused`) et se sert comme image, pas comme page.
+pub const HTML_EXTENSIONS: [&str; 2] = [".html", ".htm"];
+
+/// Résout le `path` d'un nœud `html` contre le dossier du module `<name>@<version>` :
+/// `Ok(chemin VFS complet)` ou `Err(raison, message)`.
+pub fn html_resolve(
+    name: &str,
+    version: &str,
+    path: &str,
+) -> Result<String, (&'static str, String)> {
+    if path.trim().is_empty() {
+        return Err((
+            "html_path_empty",
+            "an `html` node must name the file it serves, e.g. `ui/index.html`".into(),
+        ));
+    }
+    let racine = format!("/modules/{name}/{version}/");
+    let relatif = if let Some(r) = path.strip_prefix(&racine) {
+        r
+    } else if path.starts_with('/') {
+        return Err((
+            "html_path_outside_module",
+            format!(
+                "`{path}` is outside this module; an `html` file lives under `{racine}`. \
+                 Use a path relative to the module, e.g. `ui/index.html`"
+            ),
+        ));
+    } else {
+        path
+    };
+    if relatif.is_empty()
+        || relatif
+            .split('/')
+            .any(|seg| seg == ".." || seg == "." || seg.is_empty() || seg.contains('\\'))
+    {
+        return Err((
+            "html_path_outside_module",
+            format!(
+                "`{path}` climbs out of the module (`..`) or is not a clean relative path; \
+                 name a file inside the module folder"
+            ),
+        ));
+    }
+    let bas = relatif.to_ascii_lowercase();
+    if bas.ends_with(".svg") {
+        return Err((
+            "html_svg_refused",
+            format!(
+                "`{path}` is an SVG: it can carry its own scripts and external references, \
+                 and a <meta> CSP does not apply in an SVG document; serve it as an image, \
+                 not as an `html` page"
+            ),
+        ));
+    }
+    if !HTML_EXTENSIONS.iter().any(|e| bas.ends_with(e)) {
+        return Err((
+            "html_extension_refused",
+            format!(
+                "`{path}` is not servable: an `html` node serves only {}",
+                HTML_EXTENSIONS.join(", ")
+            ),
+        ));
+    }
+    Ok(format!("{racine}{relatif}"))
 }
 
 /// Un onglet de [`Node::Tabs`].
@@ -1520,6 +1611,7 @@ impl<'a> Checks<'a> {
         let mut briques = Vec::new();
         let mut structure = Vec::new();
         let mut conditions = Vec::new();
+        let mut htmls = Vec::new();
         collecte(
             &format!("{p}.root"),
             &v.root,
@@ -1527,7 +1619,20 @@ impl<'a> Checks<'a> {
             &mut briques,
             &mut structure,
             &mut conditions,
+            &mut htmls,
         );
+        for (chemin, path) in htmls {
+            if v.surface == Surface::Header {
+                self.push(
+                    "html_in_header",
+                    &chemin,
+                    "a header is a thin bar and cannot host an iframe; move the view to the `main`, `sidebar` or `panel` surface",
+                );
+            }
+            if let Err((raison, msg)) = html_resolve(&self.m.name, &self.m.version, path) {
+                self.push(raison, format!("{chemin}.path"), msg);
+            }
+        }
         for (chemin, raison, msg) in structure {
             self.push(raison, chemin, msg);
         }
@@ -2218,6 +2323,7 @@ fn collecte<'a>(
     out: &mut Vec<(String, &'a Brick)>,
     structure: &mut Vec<StructureIssue>,
     conditions: &mut Vec<ConditionRef<'a>>,
+    htmls: &mut Vec<(String, &'a str)>,
 ) {
     if profondeur > MAX_VIEW_DEPTH {
         structure.push((
@@ -2242,6 +2348,7 @@ fn collecte<'a>(
                     out,
                     structure,
                     conditions,
+                    htmls,
                 );
             }
         }
@@ -2258,6 +2365,7 @@ fn collecte<'a>(
                 out,
                 structure,
                 conditions,
+                htmls,
             );
         }
         Node::Tabs { tabs } => {
@@ -2295,10 +2403,12 @@ fn collecte<'a>(
                         out,
                         structure,
                         conditions,
+                        htmls,
                     );
                 }
             }
         }
+        Node::Html { path, .. } => htmls.push((chemin.to_string(), path.as_str())),
         Node::Leaf { brick } => out.push((format!("{chemin}.brick"), brick.as_ref())),
     }
 }
@@ -3587,6 +3697,64 @@ mod tests {
             ok.check(&CustomRegistry::default(), CheckProfile::Compiled)
                 .is_ok()
         );
+    }
+
+    #[test]
+    fn html_node_roundtrips_and_names_its_five_refusals() {
+        let n: Node =
+            serde_json::from_str(r#"{"type":"html","path":"ui/index.html","height":320}"#).unwrap();
+        assert_eq!(
+            n,
+            Node::Html {
+                path: "ui/index.html".into(),
+                height: Some(320)
+            }
+        );
+        assert_eq!(
+            serde_json::to_value(&n).unwrap(),
+            serde_json::json!({"type":"html","path":"ui/index.html","height":320})
+        );
+        let sans: Node = serde_json::from_str(r#"{"type":"html","path":"ui/a.svg"}"#).unwrap();
+        assert_eq!(
+            serde_json::to_value(&sans).unwrap(),
+            serde_json::json!({"type":"html","path":"ui/a.svg"})
+        );
+        let racine = |p: &str| {
+            let mut m = module();
+            m.views.push(view(
+                "x",
+                Node::Html {
+                    path: p.into(),
+                    height: None,
+                },
+            ));
+            m
+        };
+        // Acceptés : relatif, et chemin complet du module.
+        for ok in ["ui/index.html", "/modules/billing/1.0.0/ui/index.htm"] {
+            assert!(
+                racine(ok)
+                    .check(&CustomRegistry::default(), CheckProfile::Compiled)
+                    .is_ok(),
+                "{ok}"
+            );
+        }
+        assert_refused(&racine(""), "html_path_empty");
+        assert_refused(&racine("   "), "html_path_empty");
+        assert_refused(&racine("../../etc/passwd.html"), "html_path_outside_module");
+        assert_refused(&racine("ui/../../x.html"), "html_path_outside_module");
+        assert_refused(&racine("/etc/passwd.html"), "html_path_outside_module");
+        assert_refused(
+            &racine("/modules/autre/1.0.0/ui/index.html"),
+            "html_path_outside_module",
+        );
+        assert_refused(&racine("ui/app.js"), "html_extension_refused");
+        assert_refused(&racine("ui/index"), "html_extension_refused");
+        assert_refused(&racine("ui/logo.svg"), "html_svg_refused");
+        assert_refused(&racine("a/b.SVG"), "html_svg_refused");
+        let mut h = racine("ui/index.html");
+        h.views[0].surface = Surface::Header;
+        assert_refused(&h, "html_in_header");
     }
 
     #[test]
