@@ -178,6 +178,13 @@ impl ModuleDescriptor {
     /// `known`. `known` may hold every module of the host, `self` included: only the
     /// transitive `requires` are read. A module citing an entity of a module it does NOT
     /// require is still refused (`view_entity_unknown`, `action_entity_unknown`...).
+    ///
+    /// It is also what lets a view replace (`replaces`) a view of a module this one requires
+    /// **directly**: same surface, a name only one required module declares. Without the
+    /// required module in `known` (and so with [`check`](Self::check)) that `replaces` is
+    /// refused, never accepted on trust. See [`crate::views::issues_with_required`] for the
+    /// refusals and for what the contract cannot decide (two unrelated modules replacing the
+    /// same view: the host arbitrates).
     /// `check` is `check_with_required(.., &[])`.
     pub fn check_with_required(
         &self,

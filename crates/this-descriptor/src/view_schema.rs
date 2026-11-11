@@ -365,7 +365,7 @@ fn view_object() -> ObjectSchema {
             opt(
                 "replaces",
                 "string",
-                "Name of another view of this module that this one replaces (the host shows only the replacement).",
+                "Bare name of the view this one replaces (the host shows only the replacement): another view of this module, or else a view of a module listed in `requires[]`. A view of a required module must be on the same surface, and is only verified when the module is checked together with the modules it requires; checked alone, it is refused.",
             )
             .refers("view"),
             opt("look", "object:Look", "Declared appearance: closed choices, no CSS."),
@@ -1782,8 +1782,8 @@ fn rules() -> Vec<RuleSchema> {
         ),
         rule(
             "view_target_unknown",
-            "A navigate action, a click or `replaces` names a view that does not exist.",
-            "Declare the view in `views` or fix the name.",
+            "A navigate action, a click or `replaces` names a view that does not exist. For `replaces`, also: the name is not a view of this module and a module of `requires[]` was not provided to the check, so its views cannot be verified.",
+            "Declare the view in `views` or fix the name. To replace the view of a required module, check the module together with the modules it requires.",
         ),
         rule(
             "view_entity_unknown",
@@ -2032,13 +2032,33 @@ fn rules() -> Vec<RuleSchema> {
         ),
         rule(
             "view_replaced_twice",
-            "Two views replace the same one.",
-            "Keep one replacement per view.",
+            "Two views replace the same one — two views of this module, or a view of this module and a view of a required module that already replaces it.",
+            "Keep one replacement per view; replace the view already in place instead. Two modules that do not require each other and replace the same view are NOT seen here: the host arbitrates.",
         ),
         rule(
             "view_replaces_cycle",
-            "Replacements form a cycle (a -> b -> a).",
+            "Replacements form a cycle (a -> b -> a), within the module or through the views of a required module.",
             "Break the chain: the host would show no view of the cycle.",
+        ),
+        rule(
+            "view_replaces_module_not_required",
+            "`replaces` names a view of another module that this module does not list in `requires[]` (requiring it through another module is not enough).",
+            "Declare that module in `requires[]`, or fix the view name.",
+        ),
+        rule(
+            "view_replaces_not_in_required",
+            "`replaces` names a view that neither this module nor any module of `requires[]` declares.",
+            "Fix the name (the message lists the views of each required module), or require the module that declares it.",
+        ),
+        rule(
+            "view_replaces_ambiguous",
+            "`replaces` names a view that several required modules declare: the host resolves the bare name and would hide all of them.",
+            "Require only the module whose view is replaced.",
+        ),
+        rule(
+            "view_replaces_surface_mismatch",
+            "A view replaces a view of a required module drawn on another surface.",
+            "Set `surface` to the surface of the replaced view, or replace a view of the same surface.",
         ),
         rule(
             "secret_name_empty",
@@ -3310,14 +3330,207 @@ mod tests {
         ]
     }
 
+    /// The rules that only show with the modules a module requires: `(code, module, known)`.
+    fn required_rule_cases() -> Vec<(&'static str, ModuleDescriptor, Vec<ModuleDescriptor>)> {
+        fn zone(module: &str, view: &str, surface: Surface) -> ModuleDescriptor {
+            let mut z = ModuleDescriptor::new(module, "1.0.0");
+            z.views.push(view_with_root(
+                view,
+                surface,
+                json!({"type":"stack","children":[]}),
+            ));
+            z
+        }
+        fn replacing(target: &str, requires: &[&str]) -> ModuleDescriptor {
+            let mut m = fixture();
+            m.requires = requires
+                .iter()
+                .map(|n| crate::module::ModuleReq {
+                    name: (*n).to_string(),
+                    version: "*".into(),
+                    optional: false,
+                })
+                .collect();
+            let mut v = view_with_root(
+                "my_menu",
+                Surface::Sidebar,
+                json!({"type":"stack","children":[]}),
+            );
+            v.replaces = Some(target.to_string());
+            m.views.push(v);
+            m
+        }
+        let menu = zone("zone_menu", "menu", Surface::Sidebar);
+        vec![
+            (
+                "view_replaces_module_not_required",
+                replacing("menu", &[]),
+                vec![menu.clone()],
+            ),
+            (
+                "view_replaces_not_in_required",
+                replacing("menus", &["zone_menu"]),
+                vec![menu.clone()],
+            ),
+            (
+                "view_replaces_ambiguous",
+                replacing("menu", &["zone_menu", "zone_other"]),
+                vec![menu, zone("zone_other", "menu", Surface::Sidebar)],
+            ),
+            (
+                "view_replaces_surface_mismatch",
+                replacing("banner", &["zone_banner"]),
+                vec![zone("zone_banner", "banner", Surface::Header)],
+            ),
+        ]
+    }
+
+    fn check_codes_with(m: &ModuleDescriptor, known: &[ModuleDescriptor]) -> Vec<String> {
+        let known: Vec<&ModuleDescriptor> = known.iter().collect();
+        m.check_with_required(&CustomRegistry::default(), CheckProfile::Compiled, &known)
+            .err()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|i| i.code.0)
+            .collect()
+    }
+
+    // ---------- differential: nothing moved outside cross-module `replaces` ----------
+
+    /// Every descriptor the tests of this file check: the rule cases, the fixture, each
+    /// brick / node / action example, the example module.
+    fn corpus() -> Vec<ModuleDescriptor> {
+        let s = view_schema();
+        let mut all: Vec<ModuleDescriptor> = rule_cases().into_iter().map(|(_, m)| m).collect();
+        all.extend(required_rule_cases().into_iter().map(|(_, m, _)| m));
+        all.push(fixture());
+        for b in &s.bricks {
+            for ex in [&b.example, &b.full_example] {
+                let mut m = fixture();
+                m.views.push(view_with_root(
+                    "probe",
+                    Surface::Main,
+                    json!({"type": "leaf", "brick": ex}),
+                ));
+                all.push(m);
+            }
+        }
+        for n in &s.nodes {
+            for ex in [&n.example, &n.full_example] {
+                let mut m = fixture();
+                m.views
+                    .push(view_with_root("probe", Surface::Main, ex.clone()));
+                all.push(m);
+            }
+        }
+        for a in &s.actions {
+            for ex in [&a.example, &a.full_example] {
+                let mut m = fixture();
+                m.actions.clear();
+                m.actions
+                    .push(parse_action(&ex.to_string()).expect("action"));
+                all.push(m);
+            }
+        }
+        all.push(ModuleDescriptor::from_json(&s.example_module.to_string()).expect("example"));
+        all
+    }
+
+    /// `replaces` names something that is neither the view itself nor a view of the module.
+    fn replaces_outside(m: &ModuleDescriptor) -> bool {
+        m.views.iter().any(|v| {
+            v.replaces
+                .as_deref()
+                .is_some_and(|t| !m.views.iter().any(|w| w.name == t))
+        })
+    }
+
+    /// A required module built to disturb: for each view of `m` it declares a view of the
+    /// same name, on another surface, replacing the next one (a ring). Views of `m` win, so
+    /// none of it may change the verdict of a module that replaces only its own views.
+    fn shadow_of(m: &ModuleDescriptor) -> ModuleDescriptor {
+        let mut shadow = ModuleDescriptor::new("shadow", "1.0.0");
+        let names: Vec<&str> = m.views.iter().map(|v| v.name.as_str()).collect();
+        for (i, name) in names.iter().enumerate() {
+            let mut v = view_with_root(
+                "placeholder",
+                Surface::Island,
+                json!({"type":"stack","children":[]}),
+            );
+            v.name = (*name).to_string();
+            v.replaces = Some(names[(i + 1) % names.len()].to_string());
+            shadow.views.push(v);
+        }
+        shadow
+    }
+
+    #[test]
+    fn the_verdict_is_unchanged_for_every_descriptor_without_a_cross_module_replaces() {
+        use crate::views::reference::issues_with_required_before as before;
+        use crate::views::{issues, issues_with_required};
+        let corpus = corpus();
+        let others: Vec<ModuleDescriptor> = required_rule_cases()
+            .into_iter()
+            .flat_map(|(_, _, known)| known)
+            .collect();
+        let (mut compared, mut refused, mut replacing, mut outside) = (0, 0, 0, 0);
+        for m in &corpus {
+            if replaces_outside(m) {
+                outside += 1;
+                // Alone and requiring nothing, even these keep their verdict, word for word.
+                if m.requires.is_empty() {
+                    assert_eq!(issues(m), before(m, &[]), "module {m:?}");
+                }
+                continue;
+            }
+            replacing += usize::from(m.views.iter().any(|v| v.replaces.is_some()));
+            // The same module, now requiring modules built to collide with its view names.
+            let shadow = shadow_of(m);
+            let mut requiring = m.clone();
+            for name in ["shadow", "zone_menu", "absent"] {
+                requiring.requires.push(crate::module::ModuleReq {
+                    name: name.into(),
+                    version: "*".into(),
+                    optional: false,
+                });
+            }
+            for subject in [m, &requiring] {
+                let mut everything: Vec<&ModuleDescriptor> = others.iter().collect();
+                everything.push(&shadow);
+                everything.push(subject);
+                everything.extend(corpus.iter().filter(|o| o.name != subject.name));
+                let expected = before(subject, &[]);
+                assert_eq!(issues(subject), expected, "issues, module {subject:?}");
+                for known in [&[][..], &[&shadow][..], &everything[..]] {
+                    assert_eq!(
+                        issues_with_required(subject, known),
+                        before(subject, known),
+                        "issues_with_required, module {subject:?}"
+                    );
+                    compared += 1;
+                }
+                refused += usize::from(!expected.is_empty());
+            }
+        }
+        // The comparison is not vacuous: many descriptors, refused ones, replacing ones.
+        assert!(
+            compared >= 600 && refused >= 100 && replacing >= 3 && outside >= 4,
+            "compared={compared} refused={refused} replacing={replacing} outside={outside}"
+        );
+    }
+
     #[test]
     fn every_documented_rule_is_provoked_by_one_case_and_no_other_code_is_emitted() {
         let s = view_schema();
-        let cases = rule_cases();
+        let cases: Vec<(&'static str, ModuleDescriptor, Vec<ModuleDescriptor>)> = rule_cases()
+            .into_iter()
+            .map(|(code, m)| (code, m, Vec::new()))
+            .chain(required_rule_cases())
+            .collect();
         let mut provoked = BTreeSet::new();
-        for (code, m) in &cases {
+        for (code, m, known) in &cases {
             let full = format!("this.descriptor.{code}");
-            let got = check_codes(m);
+            let got = check_codes_with(m, known);
             assert!(
                 got.contains(&full),
                 "case `{code}` must provoke it, got {got:?}"

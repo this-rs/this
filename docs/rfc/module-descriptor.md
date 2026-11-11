@@ -422,6 +422,16 @@ Chaque message dit quoi corriger : il liste les candidats déclarés et propose 
 | `program_name_duplicate`, `duplicate_form_field`, `duplicate_tab` | doublons dans une même portée |
 | `tabs_empty`, `view_too_deep` | `tabs` sans onglet ; plus de `MAX_VIEW_DEPTH` (16) niveaux de conteneurs |
 | `view_replaces_self`, `view_replaced_twice`, `view_replaces_cycle` | remplacement de soi, deux remplaçantes, cycle (chaque membre est signalé) |
+| `view_replaces_module_not_required`, `view_replaces_not_in_required` | `replaces` vers la vue d'un module connu mais absent de `requires[]` ; vers une vue qu'aucun module requis ne déclare |
+| `view_replaces_ambiguous`, `view_replaces_surface_mismatch` | nom de vue porté par plusieurs modules requis ; remplaçante et vue requise sur deux surfaces différentes |
+
+**`replaces` entre modules.** La cible est un nom de vue nu, tel que l'hôte le résout : une vue du module
+d'abord, sinon une vue d'un module **requis directement** (`requires[]`), sur la même surface. Cela ne se
+vérifie qu'avec les descripteurs des modules requis (`check_with_required`, `views::issues_with_required`) ;
+vérifié seul (`check`), le module est refusé (`view_target_unknown`, le message nomme les modules manquants).
+Le verdict ne dépend que du module et de ses requis directs. **Non décidable au contrat** : deux modules qui
+ne se requièrent pas et remplacent la même vue ne se voient pas — l'hôte tranche (le premier dans son ordre
+gagne, avec un avertissement). La règle de surface ne s'applique pas entre deux vues d'un même module.
 
 Un test (`every_documented_rule_is_provoked_by_one_case_and_no_other_code_is_emitted`) provoque chaque règle
 par un cas et vérifie qu'aucun code émis n'est absent du schéma ; un second balaie le source de `views.rs`
