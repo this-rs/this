@@ -39,6 +39,9 @@ pub mod class {
 
     pub const TEXT: &str = "vw-text";
     pub const CAPTION: &str = "vw-caption";
+    pub const CHART: &str = "vw-chart";
+    pub const CHART_TITLE: &str = "vw-chart-title";
+    pub const CHART_SCROLL: &str = "vw-chart-scroll";
     pub const BUTTON: &str = "vw-btn";
     pub const ICON_BUTTON: &str = "vw-icon-btn";
     pub const BANNER: &str = "vw-banner";
@@ -172,6 +175,9 @@ pub const ALL: &[&str] = &[
     class::MODAL_BACKDROP,
     class::TEXT,
     class::CAPTION,
+    class::CHART,
+    class::CHART_TITLE,
+    class::CHART_SCROLL,
     class::BUTTON,
     class::ICON_BUTTON,
     class::BANNER,
@@ -370,6 +376,11 @@ pub const CSS: &str = r#"
 .vw-caption { display: block; margin: 0; padding: 0; border: 0; background: none;
   font-size: .8em; line-height: 1.3; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   color: var(--vw-muted, color-mix(in srgb, currentColor 60%, transparent)); }
+.vw-chart { display: flex; flex-direction: column; gap: 4px; min-width: 0; max-width: 100%; }
+.vw-chart-title { font-size: .8em; line-height: 1.3; margin: 0;
+  color: var(--vw-muted, color-mix(in srgb, currentColor 60%, transparent)); }
+.vw-chart-scroll { min-width: 0; max-width: 100%; overflow-x: auto; }
+.vw-chart-scroll svg { display: block; }
 .vw-btn { min-height: 44px; min-width: 44px; padding: 0 14px; border-radius: 10px;
   border: 1px solid var(--vw-line, rgba(0,0,0,.16)); background: var(--vw-card, #fff);
   color: inherit; font: inherit; cursor: pointer; }

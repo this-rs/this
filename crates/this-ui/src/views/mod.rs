@@ -39,6 +39,7 @@
 //!
 //! Everything else is Leptos views; the tests that need a DOM are left to the host.
 
+pub mod chart;
 pub mod data;
 pub mod html;
 #[cfg(test)]
