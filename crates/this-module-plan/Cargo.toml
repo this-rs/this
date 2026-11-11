@@ -11,9 +11,10 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 this-module-sdk = { path = "../this-module-sdk" }
+# L'écran (`ecran.rs`) lit le descripteur typé relu du manifeste : la même source que le
+# front (`this-ui`), mais sans Leptos, pour rester vérifiable sans navigateur.
+this-descriptor = { path = "../this-descriptor" }
 serde_json = "1.0"
 
 [dev-dependencies]
-# Test seulement : le vrai ModuleDescriptor relit le manifeste et passe check(Stored).
-this-descriptor = { path = "../this-descriptor" }
 serde_json = "1.0"

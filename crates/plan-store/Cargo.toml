@@ -11,4 +11,5 @@ serde_json = "1.0"
 
 [dev-dependencies]
 this-module-plan = { path = "../this-module-plan" }
+this-descriptor = { path = "../this-descriptor" }
 serde_json = "1.0"
