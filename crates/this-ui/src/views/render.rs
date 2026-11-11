@@ -508,9 +508,7 @@ pub fn render_brick(ctx: Ctx, brick: &Brick) -> AnyView {
             entity,
             filter,
             field,
-        } => value_brick(ctx, entity, filter.as_ref(), field, |value| {
-            view! { <small class=class::CAPTION>{value}</small> }.into_any()
-        }),
+        } => caption(ctx, entity, filter.as_ref(), field),
         Brick::Chart {
             entity,
             field,
@@ -840,6 +838,36 @@ where
                     .copied()
                     .and_then(|row| data::value_of(row, &field));
                 wrap(data::display(value))
+            }
+            other => tile_for(ctx, &entity, &other, text::NOTHING),
+        }
+    })
+    .into_any()
+}
+
+/// Une légende : une ligne discrète sous ce qu'elle commente.
+///
+/// **Une valeur vide ne s'annonce pas**, comme pour l'avis ([`annonce`]). Une légende n'est
+/// pas une cellule : elle n'a pas de place à tenir, et « — » posé au-dessus d'un fil (la
+/// taille du contexte, vide tant que le fil est court) est un tiret orphelin, pas une
+/// information. Une lecture en échec, refusée ou inconnue se dit toujours.
+fn caption(ctx: Ctx, entity: &str, filter: Option<&FilterExpr>, field: &str) -> AnyView {
+    let entity = entity.to_owned();
+    let filter = filter.cloned();
+    let field = field.to_owned();
+    (move || {
+        let snapshot = ctx.data.get();
+        match data::read(&snapshot, &entity, filter.as_ref(), &[], 0, None) {
+            Reading::Rows(rows) => {
+                let value = rows
+                    .rows
+                    .first()
+                    .copied()
+                    .and_then(|row| data::value_of(row, &field));
+                match annonce(value) {
+                    Some(texte) => view! { <small class=class::CAPTION>{texte}</small> }.into_any(),
+                    None => ().into_any(),
+                }
             }
             other => tile_for(ctx, &entity, &other, text::NOTHING),
         }
@@ -2520,7 +2548,7 @@ fn ligne_en_bulle(
     markdown: bool,
 ) -> Option<RowView> {
     let row = snapshot.ligne(entity, id)?;
-    let text = data::display(data::value_of(row, &champs.content));
+    let text = contenu_de_bulle(data::value_of(row, &champs.content));
     let who = champs
         .author
         .as_deref()
@@ -2555,6 +2583,29 @@ fn ligne_en_bulle(
         markdown,
         &entries,
     ))
+}
+
+/// Le texte d'une bulle, tel que la ligne le porte : un contenu absent, nul ou vide reste
+/// VIDE.
+///
+/// `data::display` rend « — » pour une valeur absente, et c'est juste dans une cellule de
+/// table (« je ne sais pas » plutôt qu'un trou). Dans un fil, c'est faux : la bulle d'un tour
+/// qui vient de s'ouvrir n'a encore rien reçu, et elle s'affichait comme un tiret seul sous
+/// le message de la personne — pendant toute l'attente d'un moteur qui ne répond pas (mesuré
+/// dans Chrome : `<p>—</p>`, 120 s durant).
+fn contenu_de_bulle(value: Option<&Value>) -> String {
+    match value {
+        None | Some(Value::Null) => String::new(),
+        Some(Value::String(texte)) => texte.clone(),
+        Some(autre) => data::display(Some(autre)),
+    }
+}
+
+/// Une bulle a-t-elle quelque chose à montrer ? Ni auteur, ni texte, ni journal : elle ne
+/// se dessine pas. Un cadre vide dans un fil ne dit rien, et l'activité d'un tour en cours
+/// se lit dans l'indicateur que le module pose sous le fil, pas dans une bulle creuse.
+fn bulle_vide(row: &RowView) -> bool {
+    row.author.is_none() && row.entries.is_empty() && row.text.trim().is_empty()
 }
 
 /// Une entrée du journal d'une bulle : une étape d'outil, une phrase du tour, un avis.
@@ -2787,6 +2838,9 @@ fn tool_item(tool: StepEntry) -> AnyView {
 
 /// One bubble: author, prose, tool steps.
 fn bubble(row: RowView) -> AnyView {
+    if bulle_vide(&row) {
+        return ().into_any();
+    }
     let RowView {
         role,
         state,
@@ -4368,6 +4422,41 @@ mod tests_fil {
         assert_eq!(bulle.role, "module");
         // Une ligne absente : rien, pas la première ligne du feed.
         assert!(ligne_en_bulle(&snapshot, "message", "absent", &champs, false).is_none());
+    }
+
+    /// Un tour qui vient de s'ouvrir n'a rien reçu : sa ligne n'a ni contenu ni journal. Elle
+    /// ne se lit PAS comme un tiret (« — » veut dire « je ne sais pas » dans une cellule, pas
+    /// « j'attends » dans un fil), et une bulle qui n'a rien à montrer ne se dessine pas.
+    #[test]
+    fn une_bulle_sans_contenu_ne_montre_ni_tiret_ni_cadre() {
+        let snapshot = Snapshot::new().with(
+            "message",
+            Feed::Ready(vec![
+                // Le tour ouvert de l'Atelier : champs vides absents de la ligne.
+                json!({"id": "vivant", "role": "agent", "etat": "en_cours"}),
+                json!({"id": "nul", "role": "agent", "contenu": null}),
+                json!({"id": "blanc", "role": "agent", "contenu": "  \n"}),
+                json!({"id": "outil", "role": "agent",
+                       "journal": [{"outil": "lire", "en_cours": true}]}),
+                json!({"id": "plein", "role": "agent", "contenu": "bonjour"}),
+            ]),
+        );
+        let champs = ChampsBulle {
+            steps: Some("journal".into()),
+            state: Some("etat".into()),
+            ..champs_message()
+        };
+        let bulle = |id: &str| ligne_en_bulle(&snapshot, "message", id, &champs, true).unwrap();
+        for id in ["vivant", "nul", "blanc"] {
+            let ligne = bulle(id);
+            assert!(!ligne.text.contains(text::DASH), "{id} : {:?}", ligne.text);
+            assert_eq!(prose_de_bulle(&ligne.text, &ligne.entries), None, "{id}");
+            assert!(bulle_vide(&ligne), "{id} n'a rien à montrer");
+        }
+        // Un outil en cours, sans un mot : la bulle existe, elle montre son outil.
+        assert!(!bulle_vide(&bulle("outil")));
+        assert!(!bulle_vide(&bulle("plein")));
+        assert_eq!(bulle("plein").text, "bonjour");
     }
 
     /// Un fil se lit ligne par ligne : une ligne qui change ne redessine qu'ELLE. C'est la
