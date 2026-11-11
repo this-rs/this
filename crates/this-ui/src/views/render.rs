@@ -201,6 +201,15 @@ pub(crate) fn log_refusal(message: &str) {
     eprintln!("this-ui: {message}");
 }
 
+/// A line in the host's log: the browser console on the device, stderr elsewhere.
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+pub(crate) fn log_line(message: &str) {
+    #[cfg(target_arch = "wasm32")]
+    web_sys::console::log_1(&message.into());
+    #[cfg(not(target_arch = "wasm32"))]
+    eprintln!("this-ui: {message}");
+}
+
 fn grouped(ctx: Ctx, children: &[Node], class_name: &'static str) -> AnyView {
     let items = children
         .iter()

@@ -471,7 +471,7 @@ fn nodes() -> Vec<VariantSchema> {
              declares), the page posts `{type:\"this:intent\", …}`, validated like any intent \
              (create/update/delete/invoke/navigate); an unknown intent is logged and ignored. \
              Refused: empty path, path outside the module (absolute elsewhere, `..`), extension \
-             other than .html/.htm/.svg, and placement in a `header`.",
+             other than .html/.htm (an .svg is refused), and placement in a `header`.",
             vec![
                 req(
                     "path",
@@ -1802,8 +1802,13 @@ fn rules() -> Vec<RuleSchema> {
         ),
         rule(
             "html_extension_refused",
-            "An `html` path does not end in .html, .htm or .svg.",
+            "An `html` path does not end in .html or .htm.",
             "Serve an .html page (scripts and styles go inline or in that page).",
+        ),
+        rule(
+            "html_svg_refused",
+            "An `html` path is an .svg: its own scripts and external references escape a <meta> CSP.",
+            "Serve the SVG as an image, not as an `html` page.",
         ),
         rule(
             "html_in_header",
@@ -2968,6 +2973,10 @@ mod tests {
             (
                 "html_extension_refused",
                 with_view(json!({"type":"html","path":"ui/app.js"})),
+            ),
+            (
+                "html_svg_refused",
+                with_view(json!({"type":"html","path":"ui/logo.svg"})),
             ),
             (
                 "html_in_header",

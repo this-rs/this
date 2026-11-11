@@ -77,6 +77,312 @@ pub fn content_type(path: &str) -> &'static str {
     }
 }
 
+/// La politique que l'hôte impose à chaque page qu'il sert. `default-src 'none'` ferme tout ce
+/// que la politique ne nomme pas ; `connect-src 'none'` coupe `fetch`, `XHR`, `sendBeacon` et
+/// `WebSocket` — rien ne sort. `script-src`/`style-src 'unsafe-inline'` gardent la liberté du
+/// module (CSS et JS en ligne) ; `img-src`/`font-src` n'autorisent que les données embarquées.
+pub const HOST_CSP: &str = "default-src 'none'; style-src 'unsafe-inline'; img-src data: blob:; script-src 'unsafe-inline'; font-src data:; connect-src 'none'; form-action 'none'; base-uri 'none'";
+
+/// La ligne de journal d'un montage : la politique de l'hôte a été imposée.
+pub fn csp_imposed_line(module: &str, view: &str) -> String {
+    format!("html : {module}/{view} — CSP imposée (default-src 'none')")
+}
+
+/// La réécriture que l'hôte impose aux octets servis, avant le Blob. Un `.svg` est refusé
+/// nommément : il peut porter ses propres scripts et références externes, et un `<meta>` CSP ne
+/// s'applique pas dans un document SVG. Sinon la CSP de l'hôte est injectée, intersectée avec
+/// celle du module — la plus stricte gagne, un module ne peut pas relâcher la règle de l'hôte.
+pub fn rewrite_served(path: &str, bytes: Vec<u8>) -> Result<Vec<u8>, (&'static str, String)> {
+    if content_type(path) == "image/svg+xml" {
+        return Err((
+            "html_svg_refused",
+            format!(
+                "`{path}` est un SVG : il peut porter ses propres scripts et références \
+                 externes, et un <meta> CSP ne s'applique pas dans un document SVG — \
+                 servez-le comme image, pas comme page"
+            ),
+        ));
+    }
+    let html = String::from_utf8(bytes).map_err(|_| {
+        (
+            "html_not_utf8",
+            format!("`{path}` n'est pas du texte UTF-8 ; un nœud `html` ne sert que du HTML"),
+        )
+    })?;
+    Ok(inject_csp(&html).into_bytes())
+}
+
+/// Injecte la politique de l'hôte (intersectée avec celle du module) dans le HTML : dans le
+/// `<head>` s'il existe, sinon après le doctype, sinon tout en tête — le parseur HTML hisse
+/// toujours un `<meta>` de tête dans le `head`, aucun contenu du module ne peut le précéder.
+pub fn inject_csp(html: &str) -> String {
+    let (stripped, module_policy) = strip_csp_metas(html);
+    let policy = intersect_policies(&module_policy);
+    inject_meta(&stripped, &csp_meta(&policy))
+}
+
+/// Une directive d'une politique : `default-src` → `'none'`.
+type Directive = (String, String);
+
+/// Découpe une politique en directives (nom en minuscules, valeur).
+fn parse_policy(policy: &str) -> Vec<Directive> {
+    policy
+        .split(';')
+        .map(str::trim)
+        .filter(|d| !d.is_empty())
+        .filter_map(|d| {
+            let mut it = d.splitn(2, char::is_whitespace);
+            let name = it.next()?.to_ascii_lowercase();
+            let value = it.next()?.trim().to_owned();
+            Some((name, value))
+        })
+        .collect()
+}
+
+/// `list` contient le `token` exact, séparé par des espaces.
+fn has_token(list: &str, token: &str) -> bool {
+    list.split_whitespace().any(|t| t == token)
+}
+
+/// L'intersection de deux listes de sources : la plus stricte gagne. `'none'` (l'ensemble vide)
+/// écrase tout ; `*` cède à l'autre côté ; deux listes concrètes différentes ne prouvent pas
+/// une intersection non vide, donc échouent fermées.
+fn intersect_sources(a: &str, b: &str) -> String {
+    if has_token(a, "'none'") || has_token(b, "'none'") {
+        return "'none'".into();
+    }
+    if has_token(a, "*") {
+        return b.to_owned();
+    }
+    if has_token(b, "*") {
+        return a.to_owned();
+    }
+    let ta: BTreeSet<_> = a.split_whitespace().collect();
+    let tb: BTreeSet<_> = b.split_whitespace().collect();
+    if ta == tb {
+        return a.to_owned();
+    }
+    "'none'".into()
+}
+
+/// L'intersection de la politique de l'hôte avec celle du module, directive par directive. Le
+/// `default-src 'none'` de l'hôte est le repli de toute directive qu'il ne nomme pas : une
+/// directive du module sans contrepartie de l'hôte est déjà fermée par ce repli.
+fn intersect_policies(module: &str) -> String {
+    let host = parse_policy(HOST_CSP);
+    let module = parse_policy(module);
+    let module_value = |name: &str| -> Option<String> {
+        module
+            .iter()
+            .find(|(n, _)| n == name)
+            .map(|(_, v)| v.clone())
+            .or_else(|| {
+                module
+                    .iter()
+                    .find(|(n, _)| n == "default-src")
+                    .map(|(_, v)| v.clone())
+            })
+    };
+    let mut out: Vec<String> = Vec::new();
+    for (name, host_value) in host {
+        let value = match module_value(&name) {
+            Some(mv) => intersect_sources(&host_value, &mv),
+            None => host_value.clone(),
+        };
+        out.push(format!("{name} {value}"));
+    }
+    out.join("; ")
+}
+
+/// Le `<meta>` qui porte une politique.
+fn csp_meta(policy: &str) -> String {
+    format!(r#"<meta http-equiv="Content-Security-Policy" content="{policy}">"#)
+}
+
+/// Retire chaque `<meta http-equiv="Content-Security-Policy">` de `html` et rend le HTML sans
+/// elles, plus la concaténation de leurs politiques.
+fn strip_csp_metas(html: &str) -> (String, String) {
+    let mut out = String::with_capacity(html.len());
+    let mut policies: Vec<String> = Vec::new();
+    let mut rest = html;
+    loop {
+        let lower = rest.to_ascii_lowercase();
+        let Some(open) = lower.find("<meta") else {
+            out.push_str(rest);
+            break;
+        };
+        let is_tag = match rest.as_bytes().get(open + 5).copied() {
+            Some(b' ' | b'\t' | b'\n' | b'\r' | b'/' | b'>') | None => true,
+            Some(_) => false,
+        };
+        if !is_tag {
+            out.push_str(&rest[..open + 5]);
+            rest = &rest[open + 5..];
+            continue;
+        }
+        let Some(close) = close_of_tag(rest, open) else {
+            out.push_str(rest);
+            break;
+        };
+        let tag = &rest[open..close];
+        let inner = &tag[1..tag.len() - 1];
+        let attrs = attributes(inner);
+        let is_csp = attrs
+            .iter()
+            .any(|(n, v)| n == "http-equiv" && v.eq_ignore_ascii_case("content-security-policy"));
+        if is_csp {
+            if let Some((_, content)) = attrs.iter().find(|(n, _)| n == "content") {
+                policies.push(content.clone());
+            }
+            out.push_str(&rest[..open]);
+        } else {
+            out.push_str(&rest[..close]);
+        }
+        rest = &rest[close..];
+    }
+    (out, policies.join("; "))
+}
+
+/// L'index juste après le `>` qui ferme la balise ouverte à `open` (l'index du `<`), en
+/// respectant les valeurs d'attribut entre guillemets.
+fn close_of_tag(s: &str, open: usize) -> Option<usize> {
+    let bytes = s.as_bytes();
+    let mut quote: Option<u8> = None;
+    let mut i = open;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if let Some(q) = quote {
+            if b == q {
+                quote = None;
+            }
+        } else {
+            match b {
+                b'\'' | b'"' => quote = Some(b),
+                b'>' => return Some(i + 1),
+                _ => {}
+            }
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Les attributs d'une balise (le texte entre `<` et `>`), nom en minuscules, valeur telle
+/// quelle.
+fn attributes(tag: &str) -> Vec<(String, String)> {
+    let bytes = tag.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        while i < bytes.len() && (bytes[i].is_ascii_whitespace() || bytes[i] == b'/') {
+            i += 1;
+        }
+        if i >= bytes.len() {
+            break;
+        }
+        let name_start = i;
+        while i < bytes.len() && !bytes[i].is_ascii_whitespace() && bytes[i] != b'=' {
+            i += 1;
+        }
+        let name = tag[name_start..i].to_ascii_lowercase();
+        while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        if i < bytes.len() && bytes[i] == b'=' {
+            i += 1;
+            while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+                i += 1;
+            }
+            let value = if i < bytes.len() && (bytes[i] == b'"' || bytes[i] == b'\'') {
+                let q = bytes[i];
+                i += 1;
+                let start = i;
+                while i < bytes.len() && bytes[i] != q {
+                    i += 1;
+                }
+                let value = tag[start..i].to_owned();
+                if i < bytes.len() {
+                    i += 1;
+                }
+                value
+            } else {
+                let start = i;
+                while i < bytes.len() && !bytes[i].is_ascii_whitespace() {
+                    i += 1;
+                }
+                tag[start..i].to_owned()
+            };
+            out.push((name, value));
+        } else {
+            out.push((name, String::new()));
+        }
+    }
+    out
+}
+
+/// Insère la politique dans le `<head>` réel — ou, sans lui, après le doctype, sinon tout en
+/// tête. Le `head` est cherché en sautant commentaires, `<script>` et `<style>`, et jamais
+/// après `<body>` : une balise `<head>` posée dans le corps n'en est pas une.
+fn inject_meta(html: &str, meta: &str) -> String {
+    if let Some(end) = real_head_end(html) {
+        return splice(html, end, meta);
+    }
+    if let Some(end) = tag_end_after(html, "<!doctype") {
+        return splice(html, end, meta);
+    }
+    splice(html, 0, meta)
+}
+
+fn splice(html: &str, at: usize, insert: &str) -> String {
+    let mut out = String::with_capacity(html.len() + insert.len());
+    out.push_str(&html[..at]);
+    out.push_str(insert);
+    out.push_str(&html[at..]);
+    out
+}
+
+/// L'index juste après le `>` du `<head>` que la page porte réellement.
+fn real_head_end(html: &str) -> Option<usize> {
+    let lower = html.to_ascii_lowercase();
+    let bytes = html.as_bytes();
+    let mut i = 0;
+    let mut seen_body = false;
+    while i < bytes.len() {
+        let rel = lower[i..].find('<')?;
+        let lt = i + rel;
+        if lower[lt..].starts_with("<!--") {
+            let off = lower[lt + 4..].find("-->")?;
+            i = lt + 4 + off + 3;
+            continue;
+        }
+        let after = &lower[lt + 1..];
+        let name_end = after
+            .find(|c: char| c.is_ascii_whitespace() || c == '>' || c == '/')
+            .unwrap_or(after.len());
+        let name = &after[..name_end];
+        match name {
+            "script" | "style" => {
+                let close = format!("</{name}");
+                let off = lower[lt..].find(&close)?;
+                i = lt + off;
+                continue;
+            }
+            "head" if !seen_body => return close_of_tag(html, lt),
+            "body" => seen_body = true,
+            _ => {}
+        }
+        i = close_of_tag(html, lt)?;
+    }
+    None
+}
+
+/// L'index juste après le `>` de la balise ouverte par le préfixe `prefix` (minuscule), s'il
+/// en existe une.
+fn tag_end_after(html: &str, prefix: &str) -> Option<usize> {
+    let open = html.to_ascii_lowercase().find(prefix)?;
+    close_of_tag(html, open)
+}
+
 /// Les entités que l'arbre lit : ce que `this:data` peut porter.
 pub fn declared_entities(node: &Node) -> BTreeSet<String> {
     fn walk(node: &Node, out: &mut BTreeSet<String>) {
@@ -205,6 +511,11 @@ fn mount(ctx: Ctx, host: HtmlHost, full: String, height: u32) -> AnyView {
     // L'état du montage : rien (lecture en cours), l'URL du Blob, ou la raison d'un refus.
     let state = RwSignal::new(None::<Result<String, String>>);
     let created = StoredValue::new_local(None::<String>);
+    let module_name = ctx
+        .module
+        .try_with_value(|m| m.name.clone())
+        .unwrap_or_default();
+    let view_name = ctx.view.try_get_value().unwrap_or_default();
     {
         let full = full.clone();
         let read = host.read.run(full.clone());
@@ -215,15 +526,22 @@ fn mount(ctx: Ctx, host: HtmlHost, full: String, height: u32) -> AnyView {
                     "{full} fait {} octets, la limite est {MAX_BYTES}",
                     bytes.len()
                 )),
-                Some(bytes) => {
-                    let parts = js_sys::Array::new();
-                    parts.push(&js_sys::Uint8Array::from(bytes.as_slice()));
-                    let opts = web_sys::BlobPropertyBag::new();
-                    opts.set_type(content_type(&full));
-                    web_sys::Blob::new_with_u8_array_sequence_and_options(&parts, &opts)
-                        .and_then(|b| web_sys::Url::create_object_url_with_blob(&b))
-                        .map_err(|_| "impossible de créer le Blob".to_owned())
-                }
+                Some(bytes) => match rewrite_served(&full, bytes) {
+                    Err((reason, why)) => {
+                        render::log_refusal(&format!("html {reason} : {why}"));
+                        Err(why)
+                    }
+                    Ok(served) => {
+                        render::log_line(&csp_imposed_line(&module_name, &view_name));
+                        let parts = js_sys::Array::new();
+                        parts.push(&js_sys::Uint8Array::from(served.as_slice()));
+                        let opts = web_sys::BlobPropertyBag::new();
+                        opts.set_type(content_type(&full));
+                        web_sys::Blob::new_with_u8_array_sequence_and_options(&parts, &opts)
+                            .and_then(|b| web_sys::Url::create_object_url_with_blob(&b))
+                            .map_err(|_| "impossible de créer le Blob".to_owned())
+                    }
+                },
             };
             if let Ok(url) = &verdict {
                 // `try_set` rend `Some(valeur)` quand le signal est déjà démonté : personne
@@ -457,5 +775,91 @@ mod tests {
     fn content_type_follows_the_extension() {
         assert_eq!(content_type("a/b.svg"), "image/svg+xml");
         assert!(content_type("a/b.html").starts_with("text/html"));
+    }
+
+    #[test]
+    fn the_served_html_carries_the_host_csp() {
+        let served = rewrite_served(
+            "ui/index.html",
+            "<!doctype html><html><head><title>x</title></head><body><p>hi</p></body></html>"
+                .as_bytes()
+                .to_vec(),
+        )
+        .expect("servi");
+        let html = String::from_utf8(served).expect("utf8");
+        assert!(html.contains("default-src 'none'"), "{html}");
+        assert!(html.contains("connect-src 'none'"), "{html}");
+        assert!(html.contains("form-action 'none'"), "{html}");
+        // Injectée dans le <head>, pas à côté.
+        let head_close = html.find("</head>").expect("head");
+        assert!(
+            html[..head_close].contains("Content-Security-Policy"),
+            "{html}"
+        );
+    }
+
+    #[test]
+    fn a_more_permissive_module_csp_is_intersected_away() {
+        let served = rewrite_served(
+            "ui/index.html",
+            concat!(
+                "<!doctype html><html><head>",
+                "<meta http-equiv=\"Content-Security-Policy\" content=\"default-src *; connect-src *\">",
+                "</head><body>x</body></html>",
+            )
+            .as_bytes()
+            .to_vec(),
+        )
+        .expect("servi");
+        let html = String::from_utf8(served).expect("utf8");
+        assert!(html.contains("default-src 'none'"), "{html}");
+        assert!(html.contains("connect-src 'none'"), "{html}");
+        assert!(!html.contains("default-src *"), "{html}");
+        assert!(!html.contains("connect-src *"), "{html}");
+    }
+
+    #[test]
+    fn html_without_head_still_gets_the_csp() {
+        let served = rewrite_served(
+            "ui/index.html",
+            "<html><body><button>x</button></body></html>"
+                .as_bytes()
+                .to_vec(),
+        )
+        .expect("servi");
+        let html = String::from_utf8(served).expect("utf8");
+        assert!(html.contains("default-src 'none'"), "{html}");
+        assert!(html.contains("form-action 'none'"), "{html}");
+    }
+
+    #[test]
+    fn inline_script_and_style_survive() {
+        let page = "<!doctype html><html><head><style>body{color:red}</style></head><body><script>parent.postMessage(1)</script></body></html>";
+        let served = rewrite_served("ui/index.html", page.as_bytes().to_vec()).expect("servi");
+        let html = String::from_utf8(served).expect("utf8");
+        assert!(html.contains("<style>body{color:red}</style>"), "{html}");
+        assert!(
+            html.contains("<script>parent.postMessage(1)</script>"),
+            "{html}"
+        );
+    }
+
+    #[test]
+    fn an_svg_is_refused_by_name() {
+        let err = rewrite_served(
+            "ui/logo.svg",
+            b"<svg xmlns='http://www.w3.org/2000/svg'/>".to_vec(),
+        )
+        .expect_err("refusé");
+        assert_eq!(err.0, "html_svg_refused");
+    }
+
+    #[test]
+    fn the_imposed_line_names_module_and_view() {
+        let line = csp_imposed_line("compteur", "ecran");
+        assert_eq!(
+            line,
+            "html : compteur/ecran — CSP imposée (default-src 'none')"
+        );
     }
 }

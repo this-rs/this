@@ -187,7 +187,8 @@ pub enum Node {
     ///
     /// `path` est relatif au module : `ui/index.html`, ou le chemin complet
     /// `/modules/<nom>/<version>/ui/index.html`. Hors du module, `..`, extension autre que
-    /// `.html`/`.htm`/`.svg`, ou placement dans un `header` : refusés, nommément.
+    /// `.html`/`.htm` (un `.svg` est refusé : il peut porter ses propres scripts), ou
+    /// placement dans un `header` : refusés, nommément.
     Html {
         path: String,
         /// Hauteur en px. Absente = hauteur intrinsèque ; l'hôte borne à
@@ -220,8 +221,10 @@ pub enum Node {
 /// La hauteur maximale d'un nœud [`Node::Html`], en px.
 pub const HTML_MAX_HEIGHT: u32 = 2000;
 
-/// Les extensions qu'un nœud [`Node::Html`] accepte de servir.
-pub const HTML_EXTENSIONS: [&str; 3] = [".html", ".htm", ".svg"];
+/// Les extensions qu'un nœud [`Node::Html`] accepte de servir. Un `.svg` n'y est pas : il
+/// peut porter ses propres scripts et références externes qu'un `<meta>` CSP ne couvre pas —
+/// il est refusé nommément (`html_svg_refused`) et se sert comme image, pas comme page.
+pub const HTML_EXTENSIONS: [&str; 2] = [".html", ".htm"];
 
 /// Résout le `path` d'un nœud `html` contre le dossier du module `<name>@<version>` :
 /// `Ok(chemin VFS complet)` ou `Err(raison, message)`.
@@ -264,6 +267,16 @@ pub fn html_resolve(
         ));
     }
     let bas = relatif.to_ascii_lowercase();
+    if bas.ends_with(".svg") {
+        return Err((
+            "html_svg_refused",
+            format!(
+                "`{path}` is an SVG: it can carry its own scripts and external references, \
+                 and a <meta> CSP does not apply in an SVG document; serve it as an image, \
+                 not as an `html` page"
+            ),
+        ));
+    }
     if !HTML_EXTENSIONS.iter().any(|e| bas.ends_with(e)) {
         return Err((
             "html_extension_refused",
@@ -3687,7 +3700,7 @@ mod tests {
     }
 
     #[test]
-    fn html_node_roundtrips_and_names_its_four_refusals() {
+    fn html_node_roundtrips_and_names_its_five_refusals() {
         let n: Node =
             serde_json::from_str(r#"{"type":"html","path":"ui/index.html","height":320}"#).unwrap();
         assert_eq!(
@@ -3718,11 +3731,7 @@ mod tests {
             m
         };
         // Acceptés : relatif, et chemin complet du module.
-        for ok in [
-            "ui/index.html",
-            "/modules/billing/1.0.0/ui/index.htm",
-            "a/b.SVG",
-        ] {
+        for ok in ["ui/index.html", "/modules/billing/1.0.0/ui/index.htm"] {
             assert!(
                 racine(ok)
                     .check(&CustomRegistry::default(), CheckProfile::Compiled)
@@ -3741,6 +3750,8 @@ mod tests {
         );
         assert_refused(&racine("ui/app.js"), "html_extension_refused");
         assert_refused(&racine("ui/index"), "html_extension_refused");
+        assert_refused(&racine("ui/logo.svg"), "html_svg_refused");
+        assert_refused(&racine("a/b.SVG"), "html_svg_refused");
         let mut h = racine("ui/index.html");
         h.views[0].surface = Surface::Header;
         assert_refused(&h, "html_in_header");
