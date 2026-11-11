@@ -369,6 +369,22 @@ pub enum Brick {
         filter: Option<FilterExpr>,
         field: String,
     },
+    /// Un graph borné : une série numérique, UN point par ligne du filtre (dans l'ordre de la
+    /// lecture), dessinée en SVG en ligne aux couleurs du thème. `kind` : `bar` ou `line`
+    /// (rien d'autre : deux formes qui se dessinent proprement). `field` doit être déclaré
+    /// numérique. `height` : [`CHART_HEIGHT_DEFAULT`] par défaut, `80..=400`.
+    Chart {
+        entity: String,
+        field: String,
+        kind: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        filter: Option<FilterExpr>,
+        /// Le titre du graph : petit, au-dessus.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        label: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        height: Option<u32>,
+    },
     /// Un bouton qui déclenche une action déclarée par le module.
     Button {
         entity: String,
@@ -690,6 +706,7 @@ impl Brick {
             Brick::Indicator { entity, .. } => entity.as_deref(),
             Brick::Text { entity, .. }
             | Brick::Caption { entity, .. }
+            | Brick::Chart { entity, .. }
             | Brick::Button { entity, .. }
             | Brick::Relation { entity, .. }
             | Brick::List { entity, .. }
@@ -730,6 +747,15 @@ pub struct SettingsItem {
     /// Une action de ce module, qui n'exige aucune ligne.
     pub action: String,
 }
+
+/// Les formes d'un [`Brick::Chart`].
+pub const CHART_KINDS: [&str; 2] = ["bar", "line"];
+/// Hauteur par défaut d'un graph, en px.
+pub const CHART_HEIGHT_DEFAULT: u32 = 120;
+/// Hauteur minimale d'un graph, en px.
+pub const CHART_HEIGHT_MIN: u32 = 80;
+/// Hauteur maximale d'un graph, en px.
+pub const CHART_HEIGHT_MAX: u32 = 400;
 
 /// Ton d'une bannière.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -1942,6 +1968,21 @@ impl<'a> Checks<'a> {
                     );
                 }
             }
+            Brick::Chart {
+                entity,
+                field,
+                kind,
+                label,
+                height,
+                ..
+            } => {
+                if !self.entity_ref("chart_entity_unknown", &format!("{chemin}.entity"), entity) {
+                    return;
+                }
+                let lis = self.readable(entity);
+                self.reads(chemin, entity, &lis, &lectures(b));
+                self.chart(chemin, entity, field, kind, label.as_deref(), *height);
+            }
             _ => self.data_brick(chemin, b),
         }
     }
@@ -2256,6 +2297,67 @@ impl<'a> Checks<'a> {
         }
     }
 
+    /// Un graph : une forme connue, un champ DÉCLARÉ numérique (un texte n'est pas une série),
+    /// une hauteur dans la plage. Tout est refusé ici, avant qu'un rendu existe.
+    fn chart(
+        &mut self,
+        chemin: &str,
+        entite: &str,
+        champ: &str,
+        kind: &str,
+        label: Option<&str>,
+        height: Option<u32>,
+    ) {
+        if !CHART_KINDS.contains(&kind) {
+            self.push(
+                "chart_kind_unknown",
+                format!("{chemin}.kind"),
+                unknown_msg(
+                    kind,
+                    "a chart kind",
+                    CHART_KINDS.iter().copied(),
+                    "Use `bar` or `line`.",
+                ),
+            );
+        }
+        let numerique = self.entities.get(entite).is_some_and(|e| {
+            e.fields.iter().any(|f| {
+                f.name == champ
+                    && matches!(
+                        f.ty,
+                        FieldType::I32
+                            | FieldType::I64
+                            | FieldType::U32
+                            | FieldType::U64
+                            | FieldType::F32
+                            | FieldType::F64
+                            | FieldType::Decimal { .. }
+                    )
+            })
+        });
+        // Un champ inconnu est déjà dit par `view_field_unknown` : ne pas le redire.
+        if !numerique && (champ.contains('.') || self.readable(entite).contains(champ)) {
+            self.push(
+                "chart_field_not_numeric",
+                format!("{chemin}.field"),
+                format!(
+                    "`{champ}` is not a declared numeric field of `{entite}`; a chart plots \
+                     i32, i64, u32, u64, f32, f64 or decimal fields, one point per row"
+                ),
+            );
+        }
+        if let Some(h) = height
+            && !(CHART_HEIGHT_MIN..=CHART_HEIGHT_MAX).contains(&h)
+        {
+            self.push(
+                "chart_height_out_of_range",
+                format!("{chemin}.height"),
+                format!("height {h} is outside {CHART_HEIGHT_MIN}..={CHART_HEIGHT_MAX}"),
+            );
+        }
+        self.label_ref(&format!("{chemin}.label"), label);
+    }
+
     /// Vérifie que chaque champ lu existe ; un chemin pointé (`target.name`) est validé ailleurs.
     fn reads(&mut self, chemin: &str, entite: &str, lis: &BTreeSet<String>, lus: &[&str]) {
         for c in lus {
@@ -2333,6 +2435,7 @@ fn lectures(b: &Brick) -> Vec<&str> {
     match b {
         Brick::Text { field, filter, .. }
         | Brick::Caption { field, filter, .. }
+        | Brick::Chart { field, filter, .. }
         | Brick::Field { field, filter, .. }
         | Brick::ToolStep { field, filter, .. }
         | Brick::CodeBlock { field, filter, .. }
@@ -3946,6 +4049,86 @@ mod tests {
         assert_eq!(g(50).effective_limit(), 50);
         assert_eq!(g(5000).effective_limit(), 1000);
         assert_eq!(g(0).effective_limit(), 1);
+    }
+
+    /// Un module dont `invoice` porte un entier (`qty`) en plus des deux textes.
+    fn module_with_qty() -> ModuleDescriptor {
+        let mut m = module();
+        m.entities[0]
+            .fields
+            .push(FieldDesc::new("qty", FieldType::I32));
+        m
+    }
+
+    fn chart_module(brick: &str) -> ModuleDescriptor {
+        let mut m = module_with_qty();
+        m.views.push(leaf_view("x", brick));
+        m
+    }
+
+    #[test]
+    fn chart_roundtrips_and_a_valid_one_passes() {
+        let json = r#"{"type":"chart","entity":"invoice","field":"qty","kind":"line","label":"Quantités","height":160}"#;
+        assert_stable::<Brick>(json);
+        let minimal = r#"{"type":"chart","entity":"invoice","field":"qty","kind":"bar"}"#;
+        assert_stable::<Brick>(minimal);
+        assert_eq!(
+            serde_json::to_value(brick(minimal)).unwrap(),
+            serde_json::json!({"type":"chart","entity":"invoice","field":"qty","kind":"bar"})
+        );
+        for ok in [json, minimal] {
+            assert!(
+                chart_module(ok)
+                    .check(&CustomRegistry::default(), CheckProfile::Compiled)
+                    .is_ok(),
+                "{ok}"
+            );
+        }
+        // Les bornes de hauteur sont incluses.
+        for h in [80, 400] {
+            let b = format!(
+                r#"{{"type":"chart","entity":"invoice","field":"qty","kind":"bar","height":{h}}}"#
+            );
+            assert!(
+                chart_module(&b)
+                    .check(&CustomRegistry::default(), CheckProfile::Compiled)
+                    .is_ok(),
+                "{h}"
+            );
+        }
+    }
+
+    #[test]
+    fn chart_names_its_five_refusals() {
+        assert_refused(
+            &chart_module(r#"{"type":"chart","entity":"invoice","field":"qty","kind":"pie"}"#),
+            "chart_kind_unknown",
+        );
+        // Un texte n'est pas une série.
+        assert_refused(
+            &chart_module(r#"{"type":"chart","entity":"invoice","field":"titre","kind":"bar"}"#),
+            "chart_field_not_numeric",
+        );
+        for h in [79, 401] {
+            let b = format!(
+                r#"{{"type":"chart","entity":"invoice","field":"qty","kind":"bar","height":{h}}}"#
+            );
+            assert_refused(&chart_module(&b), "chart_height_out_of_range");
+        }
+        assert_refused(
+            &chart_module(r#"{"type":"chart","entity":"ghost","field":"qty","kind":"bar"}"#),
+            "chart_entity_unknown",
+        );
+        // Placement : pas dans un `header`.
+        let mut m = module_with_qty();
+        m.views.push(ViewDesc {
+            surface: Surface::Header,
+            ..leaf_view(
+                "x",
+                r#"{"type":"chart","entity":"invoice","field":"qty","kind":"bar"}"#,
+            )
+        });
+        assert_refused(&m, "surface_brick_refused");
     }
 
     #[test]

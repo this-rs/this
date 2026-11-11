@@ -115,6 +115,7 @@ fn filter_of(brick: &Brick) -> Option<&this_descriptor::FilterExpr> {
     match brick {
         Brick::Text { filter, .. }
         | Brick::Caption { filter, .. }
+        | Brick::Chart { filter, .. }
         | Brick::Button { filter, .. }
         | Brick::List { filter, .. }
         | Brick::Card { filter, .. }

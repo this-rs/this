@@ -29,6 +29,7 @@ use wasm_bindgen::JsCast;
 
 use crate::design::{self, Tone as DesignTone};
 use crate::model::Kind as FieldKind;
+use crate::views::chart;
 use crate::views::data::{self, Feed, Reading, Snapshot};
 use crate::views::intent::{FieldValue, Intent, LinkOp, SecretValue, Values};
 use crate::views::markdown;
@@ -509,6 +510,22 @@ pub fn render_brick(ctx: Ctx, brick: &Brick) -> AnyView {
         } => value_brick(ctx, entity, filter.as_ref(), field, |value| {
             view! { <small class=class::CAPTION>{value}</small> }.into_any()
         }),
+        Brick::Chart {
+            entity,
+            field,
+            kind,
+            filter,
+            label,
+            height,
+        } => chart(
+            ctx,
+            entity,
+            filter.as_ref(),
+            field,
+            kind,
+            label.as_deref(),
+            *height,
+        ),
         Brick::Button {
             entity,
             filter,
@@ -3157,6 +3174,71 @@ fn queue(
             }
             other => tile_for(ctx, &entity, &other, text::QUEUE_EMPTY),
         }
+    })
+    .into_any()
+}
+
+/// A bounded chart: one point per row of the reading, in read order. Rows whose field holds
+/// no number are skipped; if none holds one, the state says so instead of an empty frame.
+fn chart(
+    ctx: Ctx,
+    entity: &str,
+    filter: Option<&FilterExpr>,
+    field: &str,
+    kind: &str,
+    label: Option<&str>,
+    height: Option<u32>,
+) -> AnyView {
+    let entity = entity.to_owned();
+    let filter = filter.cloned();
+    let field = field.to_owned();
+    let kind = kind.to_owned();
+    let label = label.map(str::to_owned);
+    (move || {
+        let snapshot = ctx.data.get();
+        let reading = data::read(&snapshot, &entity, filter.as_ref(), &[], 0, None);
+        let values: Vec<f64> = match &reading {
+            Reading::Rows(rows) => rows
+                .rows
+                .iter()
+                .filter_map(|row| match data::value_of(row, &field) {
+                    Some(Value::Number(n)) => n.as_f64(),
+                    Some(Value::String(s)) => s.parse::<f64>().ok(),
+                    _ => None,
+                })
+                .collect(),
+            _ => Vec::new(),
+        };
+        // The container always says how many points it drew and which field it plots, even
+        // when that is none: a measuring host (`apercu`) must see an empty chart.
+        let points = values.len().to_string();
+        if values.is_empty() {
+            let why = match reading {
+                Reading::Rows(_) => text::CHART_NO_NUMBER,
+                _ => text::CHART_NO_ROW,
+            };
+            let body = match reading {
+                Reading::Rows(_) | Reading::Empty => empty_tile(ctx, &entity, why),
+                other => tile_for(ctx, &entity, &other, why),
+            };
+            return view! {
+                <div class=class::CHART data-chart-points=points data-chart-field=field.clone()>
+                    {body}
+                </div>
+            }
+            .into_any();
+        }
+        let drawn = chart::draw(&kind, &values, height, label.as_deref());
+        let title = label
+            .clone()
+            .map(|t| view! { <p class=class::CHART_TITLE>{t}</p> });
+        view! {
+            <div class=class::CHART data-chart-points=points data-chart-field=field.clone()>
+                {title}
+                <div class=class::CHART_SCROLL inner_html=drawn.svg></div>
+            </div>
+        }
+        .into_any()
     })
     .into_any()
 }

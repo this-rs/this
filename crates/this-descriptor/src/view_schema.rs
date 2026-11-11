@@ -533,6 +533,23 @@ fn bricks() -> Vec<VariantSchema> {
             true,
         ),
         brick_v(
+            "chart",
+            "A bounded chart: one point per row of the filter, in read order, drawn as inline SVG in the theme's colours. `kind` is `bar` or `line` only; `field` must be declared numeric (i32/i64/u32/u64/f32/f64/decimal). Not for a header.",
+            vec![
+                entity_f(),
+                req("field", "string", "The numeric field plotted, one point per row.")
+                    .refers("field"),
+                req("kind", "string", "`bar` or `line`."),
+                filter_f(),
+                opt("label", "string", "The chart's title: small, above."),
+                opt("height", "integer", "Height in px, 80..=400. Default 120."),
+            ],
+            json!({"type": "chart", "entity": "invoice", "field": "amount", "kind": "bar"}),
+            json!({"type": "chart", "entity": "invoice", "field": "amount", "kind": "line",
+                   "filter": f, "label": "Montant par facture", "height": 160}),
+            false,
+        ),
+        brick_v(
             "button",
             "A button that triggers an action of the module.",
             vec![
@@ -1733,6 +1750,26 @@ fn rules() -> Vec<RuleSchema> {
             "Use text, caption, banner, indicator, metrics or button, or move the view to main/sidebar/panel.",
         ),
         rule(
+            "chart_kind_unknown",
+            "A chart's `kind` is neither `bar` nor `line`.",
+            "Use `bar` or `line`.",
+        ),
+        rule(
+            "chart_field_not_numeric",
+            "A chart's `field` is not a declared numeric field.",
+            "Plot an i32/i64/u32/u64/f32/f64/decimal field; a text is not a series.",
+        ),
+        rule(
+            "chart_height_out_of_range",
+            "A chart's `height` is outside 80..=400.",
+            "Pick a height between 80 and 400 px, or remove it (120).",
+        ),
+        rule(
+            "chart_entity_unknown",
+            "A chart names an entity the module does not declare.",
+            "Declare the entity in `entities` or fix the name.",
+        ),
+        rule(
             "composer_placeholder_empty",
             "A composer declares an empty or blank `placeholder`.",
             "Write a short invitation, or remove `placeholder` to keep the host's.",
@@ -1933,6 +1970,11 @@ fn coverage() -> Vec<CoverageEntry> {
             "metrics",
             &["brick:metrics", "brick:indicator(signal=counter)"],
             "Row count, or sum of a field.",
+        ),
+        cover(
+            "chart",
+            &["brick:chart"],
+            "A bar or line chart of one numeric field, a point per row.",
         ),
         cover("tabs", &["node:tabs"], "One subtree per tab."),
         cover(
@@ -3071,6 +3113,30 @@ mod tests {
                     {"entity":"invoice"},{"entity":"invoice"},{"entity":"invoice"},
                     {"entity":"invoice"},{"entity":"invoice"},{"entity":"invoice"}]})),
             ),
+            (
+                "chart_kind_unknown",
+                with_view(leaf(
+                    r#"{"type":"chart","entity":"invoice","field":"amount","kind":"pie"}"#,
+                )),
+            ),
+            (
+                "chart_field_not_numeric",
+                with_view(leaf(
+                    r#"{"type":"chart","entity":"invoice","field":"titre","kind":"bar"}"#,
+                )),
+            ),
+            (
+                "chart_height_out_of_range",
+                with_view(leaf(
+                    r#"{"type":"chart","entity":"invoice","field":"amount","kind":"line","height":500}"#,
+                )),
+            ),
+            (
+                "chart_entity_unknown",
+                with_view(leaf(
+                    r#"{"type":"chart","entity":"ghost","field":"amount","kind":"bar"}"#,
+                )),
+            ),
             ("view_too_deep", with_view(deep)),
             ("view_replaces_self", self_replace),
             ("view_replaced_twice", twice),
@@ -3182,6 +3248,7 @@ mod tests {
             "button",
             "text",
             "secondary line",
+            "chart",
             "banner",
             "indicator",
             "text field",

@@ -59,6 +59,11 @@ pub const NO_FILE: &str = "Aucun fichier";
 /// Online / offline indicator.
 pub const ONLINE: &str = "En ligne";
 pub const OFFLINE: &str = "Hors ligne";
+/// Chart brick with no row to plot.
+pub const CHART_NO_ROW: &str = "Aucun point à tracer : aucune ligne.";
+/// Chart brick whose rows hold no number in the plotted field.
+pub const CHART_NO_NUMBER: &str = "Aucun point à tracer : le champ ne porte aucun nombre.";
+
 /// Metrics brick with no rows.
 pub const ZERO: &str = "0";
 /// Thread window: the button that widens it towards older messages.
