@@ -67,6 +67,20 @@ impl Snapshot {
         }
     }
 
+    /// The one row of an entity whose `id` is `id`, read without touching the other rows.
+    ///
+    /// This is the per-line read a chat log needs: a bubble drawn from one row must not
+    /// depend on its neighbours, so that an update of one message does not redraw the
+    /// others. `None` when the entity is not ready or no row carries that `id`.
+    pub fn ligne(&self, entity: &str, id: &str) -> Option<&Value> {
+        match self.feeds.get(entity) {
+            Some(Feed::Ready(rows)) => rows
+                .iter()
+                .find(|row| get_path(row, "id").and_then(Value::as_str) == Some(id)),
+            _ => None,
+        }
+    }
+
     /// Declare what is known about one entity.
     pub fn with(mut self, entity: impl Into<String>, feed: Feed) -> Self {
         self.feeds.insert(entity.into(), feed);
@@ -709,5 +723,22 @@ mod tests {
             Some(Cow::Borrowed(_))
         ));
         assert!(snapshot.resolve(None).is_none());
+    }
+
+    #[test]
+    fn une_ligne_se_lit_par_son_id_sans_toucher_aux_autres() {
+        let snapshot = invoices();
+        assert_eq!(
+            snapshot
+                .ligne("invoice", "b")
+                .and_then(|row| row.get("name")),
+            Some(&json!("Beta"))
+        );
+        // Une entité inconnue, un id absent, une entité pas encore prête : rien, jamais la
+        // première ligne du feed.
+        assert_eq!(snapshot.ligne("ghost", "b"), None);
+        assert_eq!(snapshot.ligne("invoice", "absent"), None);
+        let idle = Snapshot::new().with("invoice", Feed::Idle);
+        assert_eq!(idle.ligne("invoice", "a"), None);
     }
 }

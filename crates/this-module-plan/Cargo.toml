@@ -1,0 +1,20 @@
+[package]
+name = "this-module-plan"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "Module this : le domaine de plans de Project Orchestrator (plan, task, step, decision, constraint), CRUD générique piloté par le descripteur."
+
+[lib]
+# cdylib pour le .wasm ; rlib pour les tests hôte.
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+this-module-sdk = { path = "../this-module-sdk" }
+# L'écran (`ecran.rs`) lit le descripteur typé relu du manifeste : la même source que le
+# front (`this-ui`), mais sans Leptos, pour rester vérifiable sans navigateur.
+this-descriptor = { path = "../this-descriptor" }
+serde_json = "1.0"
+
+[dev-dependencies]
+serde_json = "1.0"

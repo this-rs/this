@@ -39,6 +39,9 @@ pub mod class {
 
     pub const TEXT: &str = "vw-text";
     pub const CAPTION: &str = "vw-caption";
+    pub const CHART: &str = "vw-chart";
+    pub const CHART_TITLE: &str = "vw-chart-title";
+    pub const CHART_SCROLL: &str = "vw-chart-scroll";
     pub const BUTTON: &str = "vw-btn";
     pub const ICON_BUTTON: &str = "vw-icon-btn";
     pub const BANNER: &str = "vw-banner";
@@ -115,6 +118,8 @@ pub mod class {
     pub const QUEUE_INDEX: &str = "vw-queue-index";
     pub const CODE: &str = "vw-code";
     pub const RESULT: &str = "vw-result";
+    pub const IMAGE: &str = "vw-image";
+    pub const IMAGE_UNAVAILABLE: &str = "vw-image-unavailable";
     pub const CAPABILITY: &str = "vw-capability";
     pub const CAPABILITY_ACTIONS: &str = "vw-capability-actions";
     pub const PROGRAM: &str = "vw-program";
@@ -172,6 +177,9 @@ pub const ALL: &[&str] = &[
     class::MODAL_BACKDROP,
     class::TEXT,
     class::CAPTION,
+    class::CHART,
+    class::CHART_TITLE,
+    class::CHART_SCROLL,
     class::BUTTON,
     class::ICON_BUTTON,
     class::BANNER,
@@ -244,6 +252,8 @@ pub const ALL: &[&str] = &[
     class::QUEUE_INDEX,
     class::CODE,
     class::RESULT,
+    class::IMAGE,
+    class::IMAGE_UNAVAILABLE,
     class::CAPABILITY,
     class::CAPABILITY_ACTIONS,
     class::PROGRAM,
@@ -370,6 +380,11 @@ pub const CSS: &str = r#"
 .vw-caption { display: block; margin: 0; padding: 0; border: 0; background: none;
   font-size: .8em; line-height: 1.3; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   color: var(--vw-muted, color-mix(in srgb, currentColor 60%, transparent)); }
+.vw-chart { display: flex; flex-direction: column; gap: 4px; min-width: 0; max-width: 100%; }
+.vw-chart-title { font-size: .8em; line-height: 1.3; margin: 0;
+  color: var(--vw-muted, color-mix(in srgb, currentColor 60%, transparent)); }
+.vw-chart-scroll { min-width: 0; max-width: 100%; overflow-x: auto; }
+.vw-chart-scroll svg { display: block; }
 .vw-btn { min-height: 44px; min-width: 44px; padding: 0 14px; border-radius: 10px;
   border: 1px solid var(--vw-line, rgba(0,0,0,.16)); background: var(--vw-card, #fff);
   color: inherit; font: inherit; cursor: pointer; }
@@ -520,6 +535,10 @@ pub const CSS: &str = r#"
   background: var(--vw-code-bg, rgba(0,0,0,.05)); font: 13px/1.5 ui-monospace, monospace; }
 .vw-result { margin: 0; padding: 12px; border-radius: 10px; overflow-x: auto; white-space: pre-wrap;
   border: 1px solid var(--vw-line, rgba(0,0,0,.10)); font: 13px/1.5 ui-monospace, monospace; }
+.vw-image { display: block; max-width: 100%; border-radius: 10px; }
+.vw-image-unavailable { display: flex; align-items: center; justify-content: center; min-height: 64px;
+  padding: 12px; border-radius: 10px; color: var(--vw-muted, rgba(0,0,0,.55));
+  border: 1px dashed var(--vw-line, rgba(0,0,0,.16)); }
 .vw-capability { display: flex; flex-direction: column; gap: 8px; padding: 12px; border-radius: 12px;
   border: 1px solid var(--vw-line, rgba(0,0,0,.12)); background: var(--vw-card, #fff); }
 .vw-capability-actions { display: flex; gap: 8px; flex-wrap: wrap; }

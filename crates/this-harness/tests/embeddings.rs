@@ -4,7 +4,9 @@ use std::cell::Cell;
 use std::rc::Rc;
 
 use futures::executor::block_on;
-use this_harness::{Embed, EmbedError, EmbeddingModel, SansEmbed, vecteur_dense, vectoriser};
+use this_harness::{
+    Embed, EmbedError, EmbeddingModel, SansEmbed, vecteur_dense, vectoriser, verifier,
+};
 
 /// Un double : estampille configurable, compteur d'appels, résultat scripté.
 struct Double {
@@ -128,4 +130,72 @@ fn un_vecteur_de_bonne_dimension_passe() {
     };
     let r = block_on(vectoriser(&double, &["a".into(), "b".into()]));
     assert_eq!(r.unwrap().len(), 2, "un vecteur par texte, dans l'ordre");
+}
+
+// ---- la règle de dimension, seule : une fonction pure, donc appelable par un
+//      hôte dont le futur doit être `Send` (coquille native), sans le port.
+
+fn estampille(dimension: usize) -> EmbeddingModel {
+    EmbeddingModel {
+        nom: "bge-m3".into(),
+        dimension,
+    }
+}
+
+#[test]
+fn verifier_accepte_un_lot_conforme() {
+    let modele = estampille(384);
+    let lot = vec![taille(384), taille(384), taille(384)];
+    assert_eq!(verifier(&modele, &lot), Ok(()), "un lot conforme passe");
+    assert_eq!(
+        verifier(&modele, &[]),
+        Ok(()),
+        "un lot vide ne contredit rien : il passe"
+    );
+}
+
+#[test]
+fn verifier_refuse_un_seul_vecteur_fautif_meme_pas_le_premier() {
+    // Le fautif est au TROISIÈME rang : un contrôle qui ne regarderait que le
+    // premier (ou le dernier) laisserait passer ce lot, et le cosinus entre
+    // deux espaces serait calculé en silence.
+    let modele = estampille(384);
+    let lot = vec![taille(384), taille(384), taille(256), taille(384)];
+    match verifier(&modele, &lot) {
+        Err(EmbedError::Dimension { attendue, recue }) => {
+            assert_eq!((attendue, recue), (384, 256), "les deux dimensions");
+        }
+        other => panic!("attendu un refus de dimension, reçu {other:?}"),
+    }
+}
+
+#[test]
+fn le_refus_de_verifier_nomme_les_deux_dimensions() {
+    let dit = match verifier(&estampille(384), &[taille(384), taille(256)]) {
+        Err(raison) => raison.to_string(),
+        Ok(()) => panic!("un vecteur de 256 dans un espace de 384 doit être refusé"),
+    };
+    assert!(
+        dit.contains("384") && dit.contains("256"),
+        "le refus doit nommer les deux dimensions : {dit}"
+    );
+}
+
+#[test]
+fn vectoriser_applique_la_regle_du_lot_entier() {
+    // `vectoriser` n'a pas sa propre copie de la règle : un lot dont le second
+    // vecteur est fautif est refusé par `verifier`, pas accepté par omission.
+    let double = Double {
+        modele: Some(estampille(384)),
+        appels: Rc::new(Cell::new(0)),
+        resultat: Ok(vec![taille(384), taille(256)]),
+    };
+    let r = block_on(vectoriser(&double, &["a".into(), "b".into()]));
+    assert_eq!(
+        r,
+        Err(EmbedError::Dimension {
+            attendue: 384,
+            recue: 256
+        })
+    );
 }

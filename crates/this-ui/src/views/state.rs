@@ -115,6 +115,7 @@ fn filter_of(brick: &Brick) -> Option<&this_descriptor::FilterExpr> {
     match brick {
         Brick::Text { filter, .. }
         | Brick::Caption { filter, .. }
+        | Brick::Chart { filter, .. }
         | Brick::Button { filter, .. }
         | Brick::List { filter, .. }
         | Brick::Card { filter, .. }
@@ -136,7 +137,8 @@ fn filter_of(brick: &Brick) -> Option<&this_descriptor::FilterExpr> {
         | Brick::CapabilityRequest { .. }
         | Brick::Composer { .. }
         | Brick::Settings { .. }
-        | Brick::Secret { .. } => None,
+        | Brick::Secret { .. }
+        | Brick::Image { .. } => None,
     }
 }
 
@@ -169,6 +171,8 @@ fn writable(node: &Node, snapshot: Option<&Snapshot>) -> bool {
     let any = |children: &[Node]| children.iter().any(|c| writable(c, snapshot));
     match node {
         Node::Leaf { brick } => matches!(**brick, Brick::Form { .. } | Brick::Field { .. }),
+        // L'intérieur d'une page est opaque : l'hôte ne sait pas s'il y a de quoi écrire.
+        Node::Html { .. } => false,
         Node::Stack { children }
         | Node::Row { children }
         | Node::Drawer { children, .. }
@@ -204,6 +208,7 @@ pub fn drawn<'a>(node: &'a Node, snapshot: &Snapshot) -> Vec<&'a Brick> {
 fn walk<'a>(node: &'a Node, snapshot: &Snapshot, out: &mut Vec<&'a Brick>) {
     match node {
         Node::Leaf { brick } => out.push(brick),
+        Node::Html { .. } => {}
         Node::Stack { children }
         | Node::Row { children }
         | Node::Drawer { children, .. }

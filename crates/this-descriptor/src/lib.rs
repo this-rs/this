@@ -67,7 +67,8 @@ pub use i18n::{I18nDecl, Locale, MessageBundle, MessageDecl, MessageKey, Message
 pub use lifecycle::ModuleState;
 pub use link::LinkDesc;
 pub use module::{
-    CompiledEntity, DESCRIPTOR_FORMAT, DescriptorSet, ModuleDescriptor, ModuleReq, OperationDesc,
+    CompiledEntity, DESCRIPTOR_FORMAT, DescriptorSet, JobDesc, ModuleDescriptor, ModuleReq,
+    OperationDesc,
 };
 pub use perm::{Operation, PermDesc, PolicyExpr, PrincipalView};
 pub use query::{
@@ -76,7 +77,9 @@ pub use query::{
 };
 pub use runtime::{Handle, RuntimeDesc, RuntimeLimits};
 pub use topics::{EMITTING_OPERATIONS, EventTopic};
-pub use views::{Action, Brick, LabelProblem, Node, Surface, ViewDesc, label_problem};
+pub use views::{
+    Action, Brick, DataGrant, LabelProblem, Live, Node, Surface, ViewDesc, label_problem,
+};
 #[cfg(feature = "wami")]
 pub use wami::{Effect, WamiStatement, statements};
 

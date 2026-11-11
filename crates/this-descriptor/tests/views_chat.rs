@@ -16,6 +16,7 @@ fn une_vue_de_chat_avec_des_messages_passe_le_contrat() {
     d.entities.push(e);
 
     d.views.push(ViewDesc {
+        live: None,
         name: "fil".into(),
         surface: Surface::Chat,
         title: Some("Conversation".into()),

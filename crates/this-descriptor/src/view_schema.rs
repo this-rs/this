@@ -369,12 +369,18 @@ fn view_object() -> ObjectSchema {
             )
             .refers("view"),
             opt("look", "object:Look", "Declared appearance: closed choices, no CSS."),
+            opt(
+                "live",
+                "object:Live",
+                "Polling cadence: the host re-reads this view's rows while it is shown. Polling, NOT push.",
+            ),
             req("root", "node", "The tree."),
         ],
         json!({"name": "invoices", "root": {"type": "stack", "children": []}}),
         json!({
             "name": "invoices", "surface": "panel", "title": "Invoices", "replaces": "old_invoices",
             "look": {"accent": "primary", "layout": "grid", "transition": "fade"},
+            "live": {"every_secs": 30},
             "root": {"type": "stack", "children": []}
         }),
     )
@@ -462,6 +468,40 @@ fn nodes() -> Vec<VariantSchema> {
                    "child": {"type": "leaf", "brick": {"type": "metrics", "entity": "invoice"}}}),
         ),
         variant(
+            "html",
+            "A web page the MODULE ships: one file of its VFS folder, mounted by the host in a \
+             sandboxed iframe (never `allow-same-origin`). The unlimited door of the interface: \
+             when you write HTML/CSS/JS you leave the contract — no imposed theme, no verified \
+             contrast, no 44 px touch target; the host cannot measure the inside. Bridge: the \
+             host posts `{type:\"this:data\", rows, theme, locale}` (only the entities the module \
+             declares), the page posts `{type:\"this:intent\", …}`, validated like any intent \
+             (create/update/delete/invoke/navigate); an unknown intent is logged and ignored. \
+             Refused: empty path, path outside the module (absolute elsewhere, `..`), extension \
+             other than .html/.htm (an .svg is refused), and placement in a `header`.",
+            vec![
+                req(
+                    "path",
+                    "string",
+                    "File in the module folder: `ui/index.html` or `/modules/<name>/<version>/ui/index.html`.",
+                ),
+                opt(
+                    "height",
+                    "integer",
+                    "Height in px. Absent = intrinsic height; the host caps it at 2000.",
+                ),
+                opt(
+                    "data",
+                    "list<object:DataGrant>",
+                    "The data the page asks for, explicitly (at most 5, one per entity). With it, \
+                     `rows` carries exactly those entities, filtered and projected; without it, \
+                     only what the OTHER nodes of the view read — nothing if the page is alone.",
+                ),
+            ],
+            json!({"type": "html", "path": "ui/index.html"}),
+            json!({"type": "html", "path": "ui/index.html", "height": 320,
+                   "data": [{"entity": "invoice", "fields": ["titre"], "limit": 200}]}),
+        ),
+        variant(
             "leaf",
             "A leaf: draws one brick.",
             vec![req("brick", "brick", "The brick drawn.")],
@@ -497,6 +537,23 @@ fn bricks() -> Vec<VariantSchema> {
             json!({"type": "caption", "entity": "invoice", "field": "titre"}),
             json!({"type": "caption", "entity": "invoice", "filter": f, "field": "titre"}),
             true,
+        ),
+        brick_v(
+            "chart",
+            "A bounded chart: one point per row of the filter, in read order, drawn as inline SVG in the theme's colours. `kind` is `bar` or `line` only; `field` must be declared numeric (i32/i64/u32/u64/f32/f64/decimal). Not for a header.",
+            vec![
+                entity_f(),
+                req("field", "string", "The numeric field plotted, one point per row.")
+                    .refers("field"),
+                req("kind", "string", "`bar` or `line`."),
+                filter_f(),
+                opt("label", "string", "The chart's title: small, above."),
+                opt("height", "integer", "Height in px, 80..=400. Default 120."),
+            ],
+            json!({"type": "chart", "entity": "invoice", "field": "amount", "kind": "bar"}),
+            json!({"type": "chart", "entity": "invoice", "field": "amount", "kind": "line",
+                   "filter": f, "label": "Montant par facture", "height": 160}),
+            false,
         ),
         brick_v(
             "button",
@@ -967,6 +1024,33 @@ fn bricks() -> Vec<VariantSchema> {
                    "columns": [{"name": "total", "source": {"op": "sum", "field": "amount"}}]}),
             false,
         ),
+        brick_v(
+            "image",
+            "An image: a module file, or a data URL read from a row. NEVER a remote URL — the \
+             network is forbidden to views. `source.vfs` names a file of the module (resolved \
+             inside it, refused if it climbs out); `source.entity` + `source.field` read a data \
+             URL from the first row. `alt` is required; `height` is 24..=600; `fit` is cover \
+             (default) or contain. Not for a header.",
+            vec![
+                req(
+                    "source",
+                    "object:ImageSource",
+                    "The source: a module file ({\"vfs\": \"assets/logo.png\"}), or a row's data \
+                     URL ({\"entity\": \"produit\", \"field\": \"photo\"}). Exactly one.",
+                ),
+                req(
+                    "alt",
+                    "string",
+                    "The alternative text. Required: an image without `alt` is refused.",
+                ),
+                opt("height", "integer", "Height in px, 24..=600. Absent = intrinsic."),
+                opt("fit", "enum:ImageFit", "How it fills its frame: cover (default) or contain."),
+            ],
+            json!({"type": "image", "source": {"vfs": "assets/logo.png"}, "alt": "Logo"}),
+            json!({"type": "image", "source": {"vfs": "assets/logo.png"}, "alt": "Logo",
+                   "height": 160, "fit": "contain"}),
+            false,
+        ),
     ]
 }
 
@@ -1293,6 +1377,17 @@ fn objects() -> Vec<ObjectSchema> {
             json!({"label": "Open", "hint": "Pick one", "action": "go"}),
         ),
         object(
+            "Live",
+            "A view that refreshes by POLLING (not push): the host re-reads its rows every `every_secs` seconds, only while the view is shown and the app is in the foreground. Refused on a `header`.",
+            vec![req(
+                "every_secs",
+                "integer",
+                "Seconds between two reads, 5 to 3600.",
+            )],
+            json!({"every_secs": 30}),
+            json!({"every_secs": 30}),
+        ),
+        object(
             "Look",
             "Declared appearance. Closed choices; the host styles them.",
             vec![
@@ -1319,6 +1414,30 @@ fn objects() -> Vec<ObjectSchema> {
             ],
             json!({"field": "titre"}),
             json!({"field": "titre", "label": "Title", "read_only": true}),
+        ),
+        object(
+            "DataGrant",
+            "A data request of an `html` node: what the page reads in `rows`. The security \
+             boundary of the page: what is not asked here does not cross the iframe. A read \
+             the host refuses is refused and logged, never sent silently.",
+            vec![
+                req(
+                    "entity",
+                    "string",
+                    "An entity of the module or of a module it requires.",
+                )
+                .refers("entity"),
+                opt("filter", "filter", "Which rows. Absent = all rows."),
+                opt(
+                    "fields",
+                    "list<string>",
+                    "DECLARED fields sent (never base fields). Absent = every declared field.",
+                ),
+                opt("limit", "integer", "Rows sent, 1..=1000."),
+            ],
+            json!({"entity": "invoice"}),
+            json!({"entity": "invoice", "fields": ["titre"], "limit": 50,
+                   "filter": {"cmp": {"field": "titre", "op": "ne", "value": null}}}),
         ),
         object(
             "SortSpec",
@@ -1361,6 +1480,34 @@ fn objects() -> Vec<ObjectSchema> {
             ],
             json!({"name": "n", "source": {"op": "count"}}),
             json!({"name": "total", "source": {"op": "sum", "field": "amount"}}),
+        ),
+        object(
+            "ImageSource",
+            "The source of an image: a module file (`vfs`, a path relative to the module or its \
+             full `/modules/<name>/<version>/…` path — a `..`, an absolute path outside the \
+             module, or a remote URL is refused), or a row's data URL (`entity` + `field`, both \
+             required together). Exactly one of the two.",
+            vec![
+                opt(
+                    "vfs",
+                    "string",
+                    "The file path, relative to the module, e.g. `assets/logo.png`.",
+                ),
+                opt(
+                    "entity",
+                    "string",
+                    "The entity whose first row carries the data URL. Needs `field`.",
+                )
+                .refers("entity"),
+                opt(
+                    "field",
+                    "string",
+                    "The field holding the data URL. Needs `entity`.",
+                )
+                .refers("field"),
+            ],
+            json!({}),
+            json!({"vfs": "assets/logo.png", "entity": "produit", "field": "photo"}),
         ),
     ]
 }
@@ -1477,6 +1624,15 @@ fn enums() -> Vec<EnumSchema> {
             &[
                 ("manual", "On demand, by a button or a tool."),
                 ("on_change", "On every change of the rows read."),
+            ],
+        ),
+        enum_s(
+            "ImageFit",
+            "How an image fills its frame.",
+            Some("cover"),
+            &[
+                ("cover", "Fill the frame, cropping if needed."),
+                ("contain", "Fit inside the frame, without cropping."),
             ],
         ),
         enum_s(
@@ -1675,6 +1831,56 @@ fn rules() -> Vec<RuleSchema> {
             "Use text, caption, banner, indicator, metrics or button, or move the view to main/sidebar/panel.",
         ),
         rule(
+            "chart_kind_unknown",
+            "A chart's `kind` is neither `bar` nor `line`.",
+            "Use `bar` or `line`.",
+        ),
+        rule(
+            "chart_field_not_numeric",
+            "A chart's `field` is not a declared numeric field.",
+            "Plot an i32/i64/u32/u64/f32/f64/decimal field; a text is not a series.",
+        ),
+        rule(
+            "chart_height_out_of_range",
+            "A chart's `height` is outside 80..=400.",
+            "Pick a height between 80 and 400 px, or remove it (120).",
+        ),
+        rule(
+            "chart_entity_unknown",
+            "A chart names an entity the module does not declare.",
+            "Declare the entity in `entities` or fix the name.",
+        ),
+        rule(
+            "image_source_missing",
+            "An image declares neither `source.vfs` nor a complete `entity`+`field`.",
+            "Give it one source: `source.vfs` for a module file, or `entity`+`field` for a data URL.",
+        ),
+        rule(
+            "image_source_ambiguous",
+            "An image declares BOTH `source.vfs` and `entity`/`field`.",
+            "Keep one source: a module file, or a row's data URL — not both.",
+        ),
+        rule(
+            "image_alt_missing",
+            "An image has no `alt` (or an empty one).",
+            "Write the alternative text: what the person should hear when the image cannot load.",
+        ),
+        rule(
+            "image_height_out_of_range",
+            "An image `height` is outside 24..=600.",
+            "Pick a height between 24 and 600 px, or remove it for the intrinsic height.",
+        ),
+        rule(
+            "image_vfs_outside_module",
+            "An image `source.vfs` is empty, absolute outside the module folder, or climbs out with `..`.",
+            "Use a path relative to the module, e.g. `assets/logo.png`.",
+        ),
+        rule(
+            "image_remote_refused",
+            "An image `source.vfs` is a remote URL (`http(s)://` or `//`).",
+            "Serve a module file, or read a data URL from a field — never a network request.",
+        ),
+        rule(
             "composer_placeholder_empty",
             "A composer declares an empty or blank `placeholder`.",
             "Write a short invitation, or remove `placeholder` to keep the host's.",
@@ -1765,6 +1971,61 @@ fn rules() -> Vec<RuleSchema> {
             "Flatten the tree or split it in several views.",
         ),
         rule(
+            "html_path_empty",
+            "An `html` node has an empty path.",
+            "Name the file the module ships, e.g. `ui/index.html`.",
+        ),
+        rule(
+            "html_path_outside_module",
+            "An `html` path is absolute outside the module folder, or climbs out with `..`.",
+            "Use a path relative to the module, e.g. `ui/index.html`.",
+        ),
+        rule(
+            "html_extension_refused",
+            "An `html` path does not end in .html or .htm.",
+            "Serve an .html page (scripts and styles go inline or in that page).",
+        ),
+        rule(
+            "html_svg_refused",
+            "An `html` path is an .svg: its own scripts and external references escape a <meta> CSP.",
+            "Serve the SVG as an image, not as an `html` page.",
+        ),
+        rule(
+            "html_in_header",
+            "An `html` node sits in a `header` view: a thin bar cannot host an iframe.",
+            "Move the view to `main`, `sidebar` or `panel`.",
+        ),
+        rule(
+            "html_data_too_many",
+            "An `html` node asks for more than 5 data requests.",
+            "Merge the requests or split the page.",
+        ),
+        rule(
+            "html_data_entity_unknown",
+            "An `html` data request names an entity that is neither the module's nor one it requires.",
+            "Declare the entity, require its module, or fix the name.",
+        ),
+        rule(
+            "html_data_entity_twice",
+            "An `html` node requests the same entity twice (`rows` is keyed by entity).",
+            "Keep one request per entity.",
+        ),
+        rule(
+            "html_data_field_unknown",
+            "An `html` data request names a field the entity does not declare.",
+            "Name declared fields only (or `id`, to target a row).",
+        ),
+        rule(
+            "html_data_field_reserved",
+            "An `html` data request asks for a base field other than `id` (created_at, updated_at, deleted_at).",
+            "Only `id` may be requested among base fields: it lets the page target a row.",
+        ),
+        rule(
+            "html_data_limit_out_of_range",
+            "An `html` data request carries a `limit` outside 1..=1000.",
+            "Pick a limit in 1..=1000, or drop it for the default 200.",
+        ),
+        rule(
             "view_replaces_self",
             "A view replaces itself.",
             "Point `replaces` at another view, or remove it.",
@@ -1826,7 +2087,17 @@ fn coverage() -> Vec<CoverageEntry> {
             &["brick:metrics", "brick:indicator(signal=counter)"],
             "Row count, or sum of a field.",
         ),
+        cover(
+            "chart",
+            &["brick:chart"],
+            "A bar or line chart of one numeric field, a point per row.",
+        ),
         cover("tabs", &["node:tabs"], "One subtree per tab."),
+        cover(
+            "html",
+            &["node:html"],
+            "A page the module ships, in a sandboxed iframe: the unlimited door, outside the contract.",
+        ),
         cover("sheet", &["node:modal"], "A titled sheet over the content."),
         cover(
             "drawer",
@@ -1948,7 +2219,11 @@ fn coverage() -> Vec<CoverageEntry> {
             &[],
             "NOT covered: no `date` or enum-select control in `Input`; `text` stands in.",
         ),
-        cover("image / media", &[], "NOT covered: no media brick."),
+        cover(
+            "image / media",
+            &["brick:image"],
+            "A module file (`source.vfs`), or a data URL read from a row (`entity`+`field`).              Never a remote URL: the network is forbidden to views.",
+        ),
     ]
 }
 
@@ -2077,8 +2352,8 @@ mod tests {
     use crate::link::LinkDesc;
     use crate::module::ModuleDescriptor;
     use crate::views::{
-        Accent, AgentOp, ArgKind, Click, ColumnSource, DeviceCapability, Grant, HostSurface, Input,
-        Layout, Look, RelationMode, Run, Signal, Surface, Tone, Transition,
+        Accent, AgentOp, ArgKind, Click, ColumnSource, DeviceCapability, Grant, HostSurface,
+        ImageFit, Input, Layout, Look, RelationMode, Run, Signal, Surface, Tone, Transition,
     };
     use std::collections::BTreeSet;
 
@@ -2110,10 +2385,13 @@ mod tests {
             "SettingsSection" => go::<crate::views::SettingsSection>(v),
             "SettingsItem" => go::<crate::views::SettingsItem>(v),
             "Look" => go::<Look>(v),
+            "Live" => go::<crate::views::Live>(v),
             "FormField" => go::<crate::views::FormField>(v),
             "SortSpec" => go::<crate::query::SortSpec>(v),
+            "DataGrant" => go::<crate::views::DataGrant>(v),
             "ProgramArg" => go::<crate::views::ProgramArg>(v),
             "Column" => go::<crate::views::Column>(v),
+            "ImageSource" => go::<crate::views::ImageSource>(v),
             other => Err(format!("test bug: no type for `{other}`")),
         }
     }
@@ -2257,6 +2535,7 @@ mod tests {
             ("Signal", err_of::<Signal>(json!("__nope__"))),
             ("Input", err_of::<Input>(json!("__nope__"))),
             ("RelationMode", err_of::<RelationMode>(json!("__nope__"))),
+            ("ImageFit", err_of::<ImageFit>(json!("__nope__"))),
             ("ArgKind", err_of::<ArgKind>(json!("__nope__"))),
             ("Run", err_of::<Run>(json!("__nope__"))),
             ("AgentOp", err_of::<AgentOp>(json!("__nope__"))),
@@ -2332,9 +2611,12 @@ mod tests {
                 "SettingsSection" => err_of::<crate::views::SettingsSection>(probe),
                 "SettingsItem" => err_of::<crate::views::SettingsItem>(probe),
                 "Look" => err_of::<Look>(probe),
+                "Live" => err_of::<crate::views::Live>(probe),
                 "FormField" => err_of::<crate::views::FormField>(probe),
                 "ProgramArg" => err_of::<crate::views::ProgramArg>(probe),
                 "Column" => err_of::<crate::views::Column>(probe),
+                "DataGrant" => err_of::<crate::views::DataGrant>(probe),
+                "ImageSource" => err_of::<crate::views::ImageSource>(probe),
                 other => panic!("test bug: object `{other}`"),
             };
             assert_eq!(
@@ -2551,6 +2833,7 @@ mod tests {
                     "Signal" => rt::<Signal>(&v),
                     "Input" => rt::<Input>(&v),
                     "RelationMode" => rt::<RelationMode>(&v),
+                    "ImageFit" => rt::<ImageFit>(&v),
                     "ArgKind" => rt::<ArgKind>(&v),
                     "Run" => rt::<Run>(&v),
                     "AgentOp" => rt::<AgentOp>(&v),
@@ -2655,6 +2938,11 @@ mod tests {
         fn with_view(root: Value) -> ModuleDescriptor {
             let mut m = fixture();
             m.views.push(view_with_root("probe", Surface::Main, root));
+            m
+        }
+        fn header_view(root: Value) -> ModuleDescriptor {
+            let mut m = fixture();
+            m.views.push(view_with_root("probe", Surface::Header, root));
             m
         }
         fn with_header(brick: &str) -> ModuleDescriptor {
@@ -2901,6 +3189,120 @@ mod tests {
                     r#"{"type":"notice","tone":"info","entity":"invoice","field":"titre","label":"Go"}"#,
                 )),
             ),
+            (
+                "html_path_empty",
+                with_view(json!({"type":"html","path":""})),
+            ),
+            (
+                "html_path_outside_module",
+                with_view(json!({"type":"html","path":"../../etc/passwd.html"})),
+            ),
+            (
+                "html_extension_refused",
+                with_view(json!({"type":"html","path":"ui/app.js"})),
+            ),
+            (
+                "html_svg_refused",
+                with_view(json!({"type":"html","path":"ui/logo.svg"})),
+            ),
+            (
+                "html_in_header",
+                header_view(json!({"type":"html","path":"ui/index.html"})),
+            ),
+            (
+                "html_data_entity_unknown",
+                with_view(
+                    json!({"type":"html","path":"ui/index.html","data":[{"entity":"ghost"}]}),
+                ),
+            ),
+            (
+                "html_data_entity_twice",
+                with_view(
+                    json!({"type":"html","path":"ui/index.html","data":[{"entity":"invoice"},{"entity":"invoice"}]}),
+                ),
+            ),
+            (
+                "html_data_field_reserved",
+                with_view(
+                    json!({"type":"html","path":"ui/index.html","data":[{"entity":"invoice","fields":["created_at"]}]}),
+                ),
+            ),
+            (
+                "html_data_field_unknown",
+                with_view(
+                    json!({"type":"html","path":"ui/index.html","data":[{"entity":"invoice","fields":["nope"]}]}),
+                ),
+            ),
+            (
+                "html_data_limit_out_of_range",
+                with_view(
+                    json!({"type":"html","path":"ui/index.html","data":[{"entity":"invoice","limit":1001}]}),
+                ),
+            ),
+            (
+                "html_data_too_many",
+                with_view(json!({"type":"html","path":"ui/index.html","data":[
+                    {"entity":"invoice"},{"entity":"invoice"},{"entity":"invoice"},
+                    {"entity":"invoice"},{"entity":"invoice"},{"entity":"invoice"}]})),
+            ),
+            (
+                "chart_kind_unknown",
+                with_view(leaf(
+                    r#"{"type":"chart","entity":"invoice","field":"amount","kind":"pie"}"#,
+                )),
+            ),
+            (
+                "chart_field_not_numeric",
+                with_view(leaf(
+                    r#"{"type":"chart","entity":"invoice","field":"titre","kind":"bar"}"#,
+                )),
+            ),
+            (
+                "chart_height_out_of_range",
+                with_view(leaf(
+                    r#"{"type":"chart","entity":"invoice","field":"amount","kind":"line","height":500}"#,
+                )),
+            ),
+            (
+                "chart_entity_unknown",
+                with_view(leaf(
+                    r#"{"type":"chart","entity":"ghost","field":"amount","kind":"bar"}"#,
+                )),
+            ),
+            (
+                "image_source_missing",
+                with_view(leaf(r#"{"type":"image","source":{},"alt":"Logo"}"#)),
+            ),
+            (
+                "image_source_ambiguous",
+                with_view(leaf(
+                    r#"{"type":"image","source":{"vfs":"assets/logo.png","entity":"invoice","field":"amount"},"alt":"Logo"}"#,
+                )),
+            ),
+            (
+                "image_alt_missing",
+                with_view(leaf(
+                    r#"{"type":"image","source":{"vfs":"assets/logo.png"},"alt":"  "}"#,
+                )),
+            ),
+            (
+                "image_height_out_of_range",
+                with_view(leaf(
+                    r#"{"type":"image","source":{"vfs":"assets/logo.png"},"alt":"Logo","height":700}"#,
+                )),
+            ),
+            (
+                "image_vfs_outside_module",
+                with_view(leaf(
+                    r#"{"type":"image","source":{"vfs":"../../secret.png"},"alt":"Logo"}"#,
+                )),
+            ),
+            (
+                "image_remote_refused",
+                with_view(leaf(
+                    r#"{"type":"image","source":{"vfs":"https://evil.example/x.png"},"alt":"Logo"}"#,
+                )),
+            ),
             ("view_too_deep", with_view(deep)),
             ("view_replaces_self", self_replace),
             ("view_replaced_twice", twice),
@@ -3012,6 +3414,7 @@ mod tests {
             "button",
             "text",
             "secondary line",
+            "chart",
             "banner",
             "indicator",
             "text field",
