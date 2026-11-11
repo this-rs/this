@@ -14,8 +14,12 @@
 //!
 //! ## Le pont (explicite, dans les deux sens)
 //!
-//! - hôte → page : `{type:"this:data", rows:{entité:[…]}, theme, locale}` — uniquement les
-//!   entités que la vue déclare (celles que ses autres nœuds lisent) ;
+//! - hôte → page : `{type:"this:data", rows:{entité:[…]}, theme, locale}`. Si le nœud porte
+//!   `data` (des [`DataGrant`]), `rows` contient EXACTEMENT ces entités — filtrées, bornées
+//!   par `limit`, projetées sur les champs demandés — et rien d'autre ; une lecture refusée
+//!   ou en échec n'envoie aucune ligne et dit pourquoi au journal ([`grants_message`]).
+//!   Sans `data`, uniquement les entités que la vue déclare (celles que ses autres nœuds
+//!   lisent). Le message est renvoyé à chaque changement des données ;
 //! - page → hôte : `{type:"this:intent", kind, action, id?, values?}`, validé par
 //!   [`intent_from_message`] : le genre est l'un de create/update/delete/invoke/navigate,
 //!   l'action est DÉCLARÉE par le module et de ce genre. Le reste est refusé : l'appelant
@@ -25,9 +29,10 @@
 use std::collections::BTreeSet;
 
 use leptos::prelude::*;
-use serde_json::{Map, Value, json};
+use serde_json::{json, Map, Value};
+use this_descriptor::engine::query::matches;
+use this_descriptor::views::{html_resolve, DataGrant, Node, HTML_DATA_MAX_LIMIT};
 use this_descriptor::ModuleDescriptor;
-use this_descriptor::views::{Node, html_resolve};
 
 use crate::views::data::Snapshot;
 use crate::views::intent::{FieldValue, Intent, Values};
@@ -490,6 +495,115 @@ pub fn data_message(
     json!({"type": "this:data", "rows": rows, "theme": theme, "locale": locale})
 }
 
+/// Les champs DÉCLARÉS d'une entité du module, dans l'ordre : ce qu'une demande sans `fields`
+/// envoie. Jamais les champs de base.
+fn declared_fields(module: &ModuleDescriptor, entity: &str) -> Option<Vec<String>> {
+    module
+        .entities
+        .iter()
+        .find(|e| e.name == entity)
+        .map(|e| e.fields.iter().map(|f| f.name.clone()).collect())
+}
+
+/// Le message hôte → page d'un nœud qui porte des demandes `data` : `(message, lignes de
+/// journal)`.
+///
+/// `rows` porte, par entité DEMANDÉE, les lignes qui satisfont le filtre (au plus `limit`,
+/// bornée à [`HTML_DATA_MAX_LIMIT`]), réduites aux champs demandés — ni plus, ni moins : c'est
+/// la frontière de sécurité de la page. Une demande refusée (entité hors du module, champ
+/// non déclaré, lecture refusée ou en échec, entité que l'hôte ne fournit pas) n'envoie
+/// AUCUNE ligne et laisse une ligne de journal qui la nomme ; une lecture pas encore revenue
+/// n'envoie rien et ne dit rien (elle arrive au prochain message).
+pub fn grants_message(
+    snapshot: &Snapshot,
+    grants: &[DataGrant],
+    module: &ModuleDescriptor,
+    theme: &str,
+    locale: &str,
+) -> (Value, Vec<String>) {
+    use crate::views::data::Feed;
+    let mut rows = Map::new();
+    let mut lines = Vec::new();
+    for g in grants {
+        let e = g.entity.as_str();
+        let declared = declared_fields(module, e);
+        if declared.is_none() && module.requires.is_empty() {
+            lines.push(format!(
+                "html data : html_data_entity_unknown — `{e}` n'est pas une entité de ce module"
+            ));
+            continue;
+        }
+        let fields = match (&g.fields, &declared) {
+            (Some(f), Some(d)) => {
+                if let Some(bad) = f.iter().find(|x| !d.contains(x)) {
+                    lines.push(format!(
+                        "html data : html_data_field_unknown — `{bad}` n'est pas un champ déclaré de `{e}`"
+                    ));
+                    continue;
+                }
+                f.clone()
+            }
+            (Some(f), None) => f.clone(),
+            (None, Some(d)) => d.clone(),
+            (None, None) => {
+                lines.push(format!(
+                    "html data : `{e}` vient d'un module requis : nommer `fields`"
+                ));
+                continue;
+            }
+        };
+        let source = match snapshot.feeds.get(e) {
+            Some(Feed::Ready(r)) => r,
+            Some(Feed::Idle) | Some(Feed::Loading) => continue,
+            Some(Feed::Denied(why)) => {
+                lines.push(format!(
+                    "html data : lecture de `{e}` refusée ({why}) — aucune ligne envoyée"
+                ));
+                continue;
+            }
+            Some(Feed::Failed(why)) => {
+                lines.push(format!(
+                    "html data : lecture de `{e}` en échec ({why}) — aucune ligne envoyée"
+                ));
+                continue;
+            }
+            None => {
+                lines.push(format!(
+                    "html data : l'hôte ne fournit pas `{e}` — aucune ligne envoyée"
+                ));
+                continue;
+            }
+        };
+        let out_of_range = g.limit.filter(|l| !(1..=HTML_DATA_MAX_LIMIT).contains(l));
+        if let Some(asked) = out_of_range {
+            lines.push(format!(
+                "html data : limit {asked} de `{e}` hors 1..={HTML_DATA_MAX_LIMIT} — bornée à {}",
+                g.effective_limit()
+            ));
+        }
+        let filter = snapshot.resolve(g.filter.as_ref());
+        let out: Vec<Value> = source
+            .iter()
+            .filter(|r| filter.as_deref().is_none_or(|f| matches(f, r)))
+            .take(g.effective_limit())
+            .map(|r| {
+                let mut o = Map::new();
+                for f in &fields {
+                    if let Some(v) = r.get(f) {
+                        o.insert(f.clone(), v.clone());
+                    }
+                }
+                Value::Object(o)
+            })
+            .collect();
+        rows.insert(e.to_owned(), Value::Array(out));
+    }
+    (
+        json!({"type": "this:data", "rows": rows, "theme": theme, "locale": locale}),
+        lines,
+    )
+}
+
 /// Les genres d'intention qu'une page a le droit d'émettre.
 pub const INTENT_KINDS: [&str; 5] = ["create", "update", "delete", "invoke", "navigate"];
 
@@ -545,7 +659,7 @@ pub fn refusal_line(why: &str) -> String {
 }
 
 /// Le nœud `html` : monte la page, ou dit pourquoi il ne le fait pas.
-pub fn render_html(ctx: Ctx, path: &str, height: Option<u32>) -> AnyView {
+pub fn render_html(ctx: Ctx, path: &str, height: Option<u32>, data: &[DataGrant]) -> AnyView {
     let full = ctx
         .module
         .try_with_value(|m| html_resolve(&m.name, &m.version, path))
@@ -557,18 +671,18 @@ pub fn render_html(ctx: Ctx, path: &str, height: Option<u32>) -> AnyView {
     let Some(host) = use_context::<HtmlHost>() else {
         return render::fallback_public("html : l'hôte ne livre pas les fichiers du module");
     };
-    mount(ctx, host, full, height_px(height))
+    mount(ctx, host, full, height_px(height), data.to_vec())
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn mount(_ctx: Ctx, _host: HtmlHost, full: String, _height: u32) -> AnyView {
+fn mount(_ctx: Ctx, _host: HtmlHost, full: String, _height: u32, _data: Vec<DataGrant>) -> AnyView {
     render::fallback_public(&format!("html : {full} ne se monte que dans le navigateur"))
 }
 
 #[cfg(target_arch = "wasm32")]
-fn mount(ctx: Ctx, host: HtmlHost, full: String, height: u32) -> AnyView {
-    use wasm_bindgen::JsCast;
+fn mount(ctx: Ctx, host: HtmlHost, full: String, height: u32, data: Vec<DataGrant>) -> AnyView {
     use wasm_bindgen::closure::Closure;
+    use wasm_bindgen::JsCast;
 
     // L'état du montage : rien (lecture en cours), l'URL du Blob, ou la raison d'un refus.
     let state = RwSignal::new(None::<Result<String, String>>);
@@ -642,15 +756,41 @@ fn mount(ctx: Ctx, host: HtmlHost, full: String, height: u32) -> AnyView {
         .unwrap_or_default();
     let entities = StoredValue::new(entities);
     let tall = RwSignal::new(height);
+    let refused = StoredValue::new(Vec::<String>::new());
+    let data = StoredValue::new(data);
 
     let post = move || {
         let Some(el) = frame.get() else { return };
         let Some(win) = el.content_window() else {
             return;
         };
-        let msg = ctx.data.with(|s| {
-            entities.with_value(|e| data_message(s, e, &host.theme.get(), &host.locale.get()))
-        });
+        let (theme, locale) = (host.theme.get(), host.locale.get());
+        let msg = if data.with_value(|d| d.is_empty()) {
+            ctx.data
+                .with(|s| entities.with_value(|e| data_message(s, e, &theme, &locale)))
+        } else {
+            let (msg, lines) = ctx.data.with(|s| {
+                ctx.module
+                    .try_with_value(|m| {
+                        data.with_value(|d| grants_message(s, d, m, &theme, &locale))
+                    })
+                    .unwrap_or_else(|| {
+                        (
+                            json!({"type":"this:data","rows":{},"theme":theme,"locale":locale}),
+                            vec![],
+                        )
+                    })
+            });
+            // Un refus se dit une fois, pas à chaque message : on ne journalise que quand
+            // l'ensemble des lignes change.
+            if refused.get_value() != lines {
+                for l in &lines {
+                    render::log_refusal(l);
+                }
+                refused.set_value(lines);
+            }
+            msg
+        };
         if let Ok(js) = js_sys::JSON::parse(&msg.to_string()) {
             let _ = win.post_message(&js, "*");
         }
@@ -839,6 +979,130 @@ mod tests {
         assert_eq!(msg["locale"], "fr");
         assert!(msg["rows"].get("compte").is_some());
         assert!(msg["rows"].get("secret").is_none());
+    }
+
+    fn taches() -> (ModuleDescriptor, Vec<serde_json::Value>) {
+        use this_descriptor::{EntityDesc, FieldDesc, FieldType};
+        let mut m = module();
+        let mut t = EntityDesc::new("tache");
+        t.fields = vec![
+            FieldDesc::new("titre", FieldType::String),
+            FieldDesc::new("fait", FieldType::Bool),
+            FieldDesc::new("note", FieldType::String),
+        ];
+        m.entities.push(t);
+        let rows = vec![
+            json!({"id":"1","created_at":"x","titre":"a","fait":false,"note":"n1"}),
+            json!({"id":"2","created_at":"x","titre":"b","fait":true,"note":"n2"}),
+            json!({"id":"3","created_at":"x","titre":"c","fait":false,"note":"n3"}),
+        ];
+        (m, rows)
+    }
+
+    fn grant(json: serde_json::Value) -> DataGrant {
+        serde_json::from_value(json).expect("grant")
+    }
+
+    #[test]
+    fn a_grant_sends_the_filtered_projected_rows_and_nothing_else() {
+        let (m, rows) = taches();
+        let snap = Snapshot::new()
+            .with("tache", Feed::Ready(rows))
+            .with("secret", Feed::Ready(vec![json!({"id":"x"})]));
+        let g = grant(json!({"entity":"tache","fields":["titre","fait"],
+            "filter":{"cmp":{"field":"fait","op":"eq","value":false}}}));
+        let (msg, lines) = grants_message(&snap, &[g], &m, "dark", "fr");
+        assert!(lines.is_empty(), "{lines:?}");
+        assert_eq!(
+            msg["rows"],
+            json!({"tache":[{"titre":"a","fait":false},{"titre":"c","fait":false}]})
+        );
+        // Ni l'entité non demandée, ni les champs non demandés, ni les champs de base.
+        assert!(msg["rows"].get("secret").is_none());
+        assert_eq!(msg["theme"], "dark");
+    }
+
+    #[test]
+    fn a_grant_without_fields_sends_the_declared_fields_never_the_base_ones() {
+        let (m, rows) = taches();
+        let snap = Snapshot::new().with("tache", Feed::Ready(rows));
+        let (msg, _) = grants_message(&snap, &[grant(json!({"entity":"tache"}))], &m, "t", "l");
+        let first = &msg["rows"]["tache"][0];
+        assert_eq!(first, &json!({"titre":"a","fait":false,"note":"n1"}));
+        assert!(first.get("id").is_none() && first.get("created_at").is_none());
+    }
+
+    #[test]
+    fn an_undeclared_field_is_refused_by_name_before_any_send() {
+        let (m, rows) = taches();
+        let snap = Snapshot::new().with("tache", Feed::Ready(rows));
+        for champ in ["secret", "id"] {
+            let g = grant(json!({"entity":"tache","fields":["titre", champ]}));
+            let (msg, lines) = grants_message(&snap, &[g], &m, "t", "l");
+            assert_eq!(msg["rows"], json!({}), "{champ}");
+            assert_eq!(lines.len(), 1);
+            assert!(lines[0].contains("html_data_field_unknown"), "{lines:?}");
+            assert!(lines[0].contains(champ), "{lines:?}");
+        }
+    }
+
+    #[test]
+    fn an_entity_the_module_may_not_read_is_refused_and_logged_with_empty_rows() {
+        let (m, _) = taches();
+        let snap = Snapshot::new().with("tache", Feed::Denied("perm:tache.list".into()));
+        let (msg, lines) = grants_message(&snap, &[grant(json!({"entity":"tache"}))], &m, "t", "l");
+        assert_eq!(msg["rows"], json!({}));
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].contains("refusée") && lines[0].contains("perm:tache.list"));
+        // Une entité hors du module : refusée nommément, même si l'hôte la détient.
+        let snap = Snapshot::new().with("autre", Feed::Ready(vec![json!({"x":1})]));
+        let (msg, lines) = grants_message(&snap, &[grant(json!({"entity":"autre"}))], &m, "t", "l");
+        assert_eq!(msg["rows"], json!({}));
+        assert!(lines[0].contains("html_data_entity_unknown"), "{lines:?}");
+        // Un échec n'est pas un envoi silencieux non plus ; une lecture en cours attend.
+        let snap = Snapshot::new().with("tache", Feed::Failed("réseau".into()));
+        let (_, lines) = grants_message(&snap, &[grant(json!({"entity":"tache"}))], &m, "t", "l");
+        assert!(lines[0].contains("en échec"));
+        let snap = Snapshot::new().with("tache", Feed::Loading);
+        let (msg, lines) = grants_message(&snap, &[grant(json!({"entity":"tache"}))], &m, "t", "l");
+        assert!(lines.is_empty() && msg["rows"] == json!({}));
+    }
+
+    #[test]
+    fn a_limit_is_applied_and_one_past_the_max_is_clamped_out_loud() {
+        let (m, _) = taches();
+        let beaucoup: Vec<_> = (0..1500).map(|i| json!({"titre": i.to_string()})).collect();
+        let snap = Snapshot::new().with("tache", Feed::Ready(beaucoup));
+        let (msg, lines) = grants_message(
+            &snap,
+            &[grant(
+                json!({"entity":"tache","fields":["titre"],"limit":2}),
+            )],
+            &m,
+            "t",
+            "l",
+        );
+        assert_eq!(msg["rows"]["tache"].as_array().map(Vec::len), Some(2));
+        assert!(lines.is_empty());
+        let (msg, lines) = grants_message(
+            &snap,
+            &[grant(
+                json!({"entity":"tache","fields":["titre"],"limit":5000}),
+            )],
+            &m,
+            "t",
+            "l",
+        );
+        assert_eq!(msg["rows"]["tache"].as_array().map(Vec::len), Some(1000));
+        assert!(lines[0].contains("bornée à 1000"), "{lines:?}");
+        let (msg, _) = grants_message(
+            &snap,
+            &[grant(json!({"entity":"tache","fields":["titre"]}))],
+            &m,
+            "t",
+            "l",
+        );
+        assert_eq!(msg["rows"]["tache"].as_array().map(Vec::len), Some(200));
     }
 
     #[test]

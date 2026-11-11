@@ -151,7 +151,7 @@ pub fn render_node(ctx: Ctx, node: &Node) -> AnyView {
         Node::Drawer { label, children } => drawer(ctx, label, children),
         Node::Modal { title, children } => modal(ctx, title, children),
         Node::Leaf { brick } => render_brick(ctx, brick),
-        Node::Html { path, height } => super::html::render_html(ctx, path, *height),
+        Node::Html { path, height, data } => super::html::render_html(ctx, path, *height, data),
         Node::When {
             entity,
             filter,
