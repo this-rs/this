@@ -156,8 +156,33 @@ pub struct ViewDesc {
     pub replaces: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub look: Option<Look>,
+    /// Une vue VIVANTE : l'hôte rafraîchit ses lignes à cette cadence tant qu'elle est affichée.
+    /// Absent = comportement inchangé (rafraîchie sur écriture, jamais par minuterie).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub live: Option<Live>,
     /// L'arbre dessiné.
     pub root: Node,
+}
+
+/// Borne basse de [`Live::every_secs`].
+pub const LIVE_MIN_SECS: u32 = 5;
+/// Borne haute de [`Live::every_secs`].
+pub const LIVE_MAX_SECS: u32 = 3600;
+
+/// La cadence d'une vue vivante : `{ "every_secs": 30 }`.
+///
+/// **C'est un SONDAGE, pas du push.** L'hôte relit les lignes de la vue toutes les
+/// `every_secs` secondes, seulement quand elle est affichée et que l'app est au premier plan,
+/// sans chevaucher deux lectures ; un échec est journalisé et la cadence continue.
+///
+/// Pour du VRAI temps réel il faudrait : un flux (SSE/WebSocket) côté hôte, un port `Watch`
+/// dans le framework, et un serveur qui émet. Rien de cela n'existe : le graphe est local, la
+/// forge est HTTP ponctuelle, aucun module n'émet de flux. `live` ne doit donc jamais être lu
+/// comme une promesse de push.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Live {
+    pub every_secs: u32,
 }
 
 /// Un nœud de l'arbre : un conteneur, ou une feuille qui porte une brique.
@@ -1812,6 +1837,31 @@ impl<'a> Checks<'a> {
             &mut conditions,
             &mut htmls,
         );
+        if let Some(live) = v.live {
+            if v.surface == Surface::Header {
+                self.push(
+                    "live_on_header",
+                    format!("{p}.live"),
+                    "a header is a thin bar and does not justify a timer; drop `live` or move the view to `main`, `sidebar` or `panel`",
+                );
+            }
+            if live.every_secs < LIVE_MIN_SECS {
+                self.push(
+                    "live_interval_too_small",
+                    format!("{p}.live.every_secs"),
+                    format!("`every_secs` is {} ; the minimum is {LIVE_MIN_SECS} (this is polling, not push)", live.every_secs),
+                );
+            } else if live.every_secs > LIVE_MAX_SECS {
+                self.push(
+                    "live_interval_too_large",
+                    format!("{p}.live.every_secs"),
+                    format!(
+                        "`every_secs` is {} ; the maximum is {LIVE_MAX_SECS}",
+                        live.every_secs
+                    ),
+                );
+            }
+        }
         for (chemin, path, data) in htmls {
             self.html_data(&chemin, data);
             if v.surface == Surface::Header {
@@ -2893,6 +2943,7 @@ mod tests {
 
     fn view(name: &str, root: Node) -> ViewDesc {
         ViewDesc {
+            live: None,
             name: name.into(),
             surface: Surface::Main,
             title: None,
@@ -3119,10 +3170,12 @@ mod tests {
         // Header : une vue d'en-tête avec un compteur est valide.
         let mut m = module();
         m.views.push(ViewDesc {
+            live: None,
             surface: Surface::Header,
             ..leaf_view("count", r#"{"type":"metrics","entity":"invoice"}"#)
         });
         m.views.push(ViewDesc {
+            live: None,
             surface: Surface::Panel,
             ..leaf_view("thread", r#"{"type":"chat","entity":"conversation"}"#)
         });
@@ -3187,6 +3240,49 @@ mod tests {
             r##"{"name":"x","look":{"accent":"#ff00ff"},"root":{"type":"stack","children":[]}}"##
         )
         .is_err());
+    }
+
+    fn module_live(every_secs: u32, surface: Surface) -> ModuleDescriptor {
+        let mut m = module();
+        let mut v = view("x", Node::Stack { children: vec![] });
+        v.surface = surface;
+        v.live = Some(Live { every_secs });
+        m.views.push(v);
+        m
+    }
+
+    #[test]
+    fn a_live_view_is_declared_as_polling_and_round_trips() {
+        assert_stable::<ViewDesc>(
+            r#"{"name":"x","live":{"every_secs":30},"root":{"type":"stack","children":[]}}"#,
+        );
+        let sans: ViewDesc =
+            serde_json::from_str(r#"{"name":"x","root":{"type":"stack","children":[]}}"#).unwrap();
+        assert_eq!(sans.live, None);
+        assert!(!serde_json::to_string(&sans).unwrap().contains("live"));
+        assert!(
+            serde_json::from_str::<ViewDesc>(
+                r#"{"name":"x","live":{"every_secs":30,"push":true},"root":{"type":"stack","children":[]}}"#
+            )
+            .is_err()
+        );
+        for n in [LIVE_MIN_SECS, 30, LIVE_MAX_SECS] {
+            assert!(codes(&module_live(n, Surface::Main)).is_empty(), "{n}");
+        }
+    }
+
+    #[test]
+    fn a_live_view_refuses_a_bad_interval_and_a_header() {
+        assert_refused(&module_live(0, Surface::Main), "live_interval_too_small");
+        assert_refused(
+            &module_live(LIVE_MIN_SECS - 1, Surface::Main),
+            "live_interval_too_small",
+        );
+        assert_refused(
+            &module_live(LIVE_MAX_SECS + 1, Surface::Main),
+            "live_interval_too_large",
+        );
+        assert_refused(&module_live(30, Surface::Header), "live_on_header");
     }
 
     #[test]
@@ -3556,6 +3652,7 @@ mod tests {
             m.actions.push(serde_json::from_str(a).unwrap());
         }
         m.views.push(ViewDesc {
+            live: None,
             surface: Surface::Chat,
             ..leaf_view("saisie", brique)
         });
@@ -3630,6 +3727,7 @@ mod tests {
     fn check_refuses_a_big_brick_in_a_header() {
         let mut m = module();
         m.views.push(ViewDesc {
+            live: None,
             surface: Surface::Header,
             ..leaf_view("x", r#"{"type":"chat","entity":"conversation"}"#)
         });
@@ -3905,6 +4003,7 @@ mod tests {
     fn check_refuses_a_view_replacing_an_unknown_view() {
         let mut m = module();
         m.views.push(ViewDesc {
+            live: None,
             replaces: Some("ghost".into()),
             ..leaf_view("new_list", r#"{"type":"metrics","entity":"invoice"}"#)
         });
@@ -3915,6 +4014,7 @@ mod tests {
     fn check_refuses_a_view_replacing_itself() {
         let mut m = module();
         m.views.push(ViewDesc {
+            live: None,
             replaces: Some("x".into()),
             ..leaf_view("x", r#"{"type":"metrics","entity":"invoice"}"#)
         });
@@ -3927,10 +4027,12 @@ mod tests {
         m.views
             .push(leaf_view("old", r#"{"type":"metrics","entity":"invoice"}"#));
         m.views.push(ViewDesc {
+            live: None,
             replaces: Some("old".into()),
             ..leaf_view("a", r#"{"type":"metrics","entity":"invoice"}"#)
         });
         m.views.push(ViewDesc {
+            live: None,
             replaces: Some("old".into()),
             ..leaf_view("b", r#"{"type":"metrics","entity":"invoice"}"#)
         });
@@ -3941,10 +4043,12 @@ mod tests {
     fn check_refuses_a_replacement_cycle() {
         let mut m = module();
         m.views.push(ViewDesc {
+            live: None,
             replaces: Some("b".into()),
             ..leaf_view("a", r#"{"type":"metrics","entity":"invoice"}"#)
         });
         m.views.push(ViewDesc {
+            live: None,
             replaces: Some("a".into()),
             ..leaf_view("b", r#"{"type":"metrics","entity":"invoice"}"#)
         });
@@ -3957,10 +4061,12 @@ mod tests {
         m.views
             .push(leaf_view("v1", r#"{"type":"metrics","entity":"invoice"}"#));
         m.views.push(ViewDesc {
+            live: None,
             replaces: Some("v1".into()),
             ..leaf_view("v2", r#"{"type":"metrics","entity":"invoice"}"#)
         });
         m.views.push(ViewDesc {
+            live: None,
             replaces: Some("v2".into()),
             ..leaf_view("v3", r#"{"type":"metrics","entity":"invoice"}"#)
         });
@@ -4319,6 +4425,7 @@ mod tests {
         // Placement : pas dans un `header`.
         let mut m = module_with_qty();
         m.views.push(ViewDesc {
+            live: None,
             surface: Surface::Header,
             ..leaf_view(
                 "x",
@@ -4553,6 +4660,7 @@ mod tests {
         let mut m = module();
         for (n, t) in [("a", "b"), ("b", "c"), ("c", "a")] {
             m.views.push(ViewDesc {
+                live: None,
                 replaces: Some(t.into()),
                 ..leaf_view(n, r#"{"type":"metrics","entity":"invoice"}"#)
             });
@@ -4569,6 +4677,7 @@ mod tests {
         let mut m = module();
         for (n, t) in [("tail", "a"), ("a", "b"), ("b", "a")] {
             m.views.push(ViewDesc {
+                live: None,
                 replaces: Some(t.into()),
                 ..leaf_view(n, r#"{"type":"metrics","entity":"invoice"}"#)
             });

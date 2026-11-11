@@ -77,7 +77,9 @@ pub use query::{
 };
 pub use runtime::{Handle, RuntimeDesc, RuntimeLimits};
 pub use topics::{EMITTING_OPERATIONS, EventTopic};
-pub use views::{Action, Brick, DataGrant, LabelProblem, Node, Surface, ViewDesc, label_problem};
+pub use views::{
+    Action, Brick, DataGrant, LabelProblem, Live, Node, Surface, ViewDesc, label_problem,
+};
 #[cfg(feature = "wami")]
 pub use wami::{Effect, WamiStatement, statements};
 
