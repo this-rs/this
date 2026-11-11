@@ -182,7 +182,7 @@ Une session PO est liée à **un** fournisseur. Donc deux chemins :
   ne rendait rien : la `Request` portait la consigne, le fil et les outils
   (`crates/this-harness/src/wire.rs:212`), et c'est le `Transport` de l'hôte qui
   choisissait son modèle, seul.
-- **Abstraction de fournisseur** : `Transport` (`src/ports.rs:60`), `?Send`, un flux par
+- **Abstraction de fournisseur** : `Transport` (`src/ports.rs:127`), `?Send`, un flux par
   tour. Pas de capacités déclarées côté harnais. Côté `this-llm` : `Provider`
   (base, modèle, référence de secret, `crates/this-llm/src/lib.rs:185`) ; côté
   `this-llm-providers` : `ModelInfo { id, context_window, max_output_tokens }`
@@ -210,22 +210,22 @@ port ; **plus tard** = lot suivant.
 | 1 | Signature de conversation (`from_chat_request`) | `routing/signature.rs:244` | **porté** ; le projet et la persona sortent (hôte) ; le fil tenu compte dans le besoin (divergence D2) |
 | 2 | Détecteur d'intention bilingue | `routing/signature.rs:113` | **porté** (mêmes mots-clés, même priorité) |
 | 3 | Signatures de tâche, délégation, sous-agent | — | **plus tard** (lot 5) |
-| 4 | `ModelFacts` | `routing/candidate.rs:123` (`Candidate`, `Capabilities`) | **porté** ; `allowed_for_project` → `allowed`, préfixe distant → `remote` (D3) ; `reasoning` ajouté, informatif |
-| 5 | Filtres 1–8 et leur ordre | `routing/candidate.rs:290` | **porté** ; plus le filtre 0 `sentinel` (D1) |
-| 6 | `QuotaRegistry` (horloge, fenêtres, retenues) | port `QuotaView` `routing/candidate.rs:380` ; `MemoryQuota` `:407` (impl `:455`) | **hôte** : c'est lui qui a l'horloge |
+| 4 | `ModelFacts` | `routing/candidate.rs:139` (`Candidate`, `Capabilities`) | **porté** ; `allowed_for_project` → `allowed`, préfixe distant → `remote` (D3) ; `reasoning` ajouté, informatif |
+| 5 | Filtres 1–8 et leur ordre | `routing/candidate.rs:306` | **porté** ; plus le filtre 0 `sentinel` (D1) |
+| 6 | `QuotaRegistry` (horloge, fenêtres, retenues) | port `QuotaView` `routing/candidate.rs:396` ; `MemoryQuota` `:423` (impl `:471`) | **hôte** : c'est lui qui a l'horloge |
 | 7 | `HealthCache`, sondes de capacité | — | **hôte** (E/S, horloge) : l'hôte remplit `healthy` et `capabilities` |
 | 8 | Catalogue vivant (`claude_code_facts`) | — | **hôte** : il remplit `context_window` / `window_unknown` |
 | 9 | Scoreur de Thompson | `routing/scorer.rs:317` | **porté** ligne à ligne ; `p_top1` reste au lot d'apprentissage (D5) |
-| 10 | `decide_with` (hystérésis, tour stable, motif) | `routing/decide.rs:311` | **porté** ; l'identifiant est un `u128` injecté, sans UUID ni date (D4) |
+| 10 | `decide_with` (hystérésis, tour stable, motif) | `routing/decide.rs:317` | **porté** ; l'identifiant est un `u128` injecté, sans UUID ni date (D4) |
 | 11 | `is_applied` | `routing/decide.rs:35` | **porté** |
 | 12 | Modes des réglages et de la conversation, étape | `routing/mode.rs` | **porté** ; `parse` lit aussi les mots de l'écran |
 | 13 | Validation et stockage des réglages (`/api/chat/routing`, projet > global) | — | **hôte** |
-| 14 | Liste de la personne (`auto_models`) : la règle | `routing/router.rs:491` | **porté** |
+| 14 | Liste de la personne (`auto_models`) : la règle | `routing/router.rs:478` | **porté** |
 | 15 | Liste de la personne : le document, l'API | — | **hôte** |
-| 16 | `TurnRouter` : droits, pool, gardes, repli | `routing/router.rs:416`, `route` `:666` | **repensé** : une seule décision par message, sans relais de session (D6) |
-| 17 | `reroute`, `mark_manual` | `routing/router.rs:550`, `:604` | **porté** |
+| 16 | `TurnRouter` : droits, pool, gardes, repli | `routing/router.rs:419`, `route` `:653` | **repensé** : une seule décision par message, sans relais de session (D6) |
+| 17 | `reroute`, `mark_manual` | `routing/router.rs:537`, `:591` | **porté** |
 | 18 | `model_for_images` (décider avant l'envoi) | dans `route` : `needs_images` + garde « aveugle » | **repensé** : la décision précède déjà la requête, il n'y a pas de second chemin |
-| 19 | `plan_provider_move` + relais | gardes dans `route` `verdict` `routing/router.rs:882` | **repensé** (D6) |
+| 19 | `plan_provider_move` + relais | gardes dans `route` `verdict` `routing/router.rs:896` | **repensé** (D6) |
 | 20 | `model_after_limit` | — | **plus tard** (lot 3) |
 | 21 | Ouverture (`resolve_provider_choice_for` : rôles, alias, politique, repli du parent) | — | **hôte** : le harnais n'ouvre pas de session ; il reçoit la paire de départ |
 | 22 | Sentinelle `auto` | `routing/candidate.rs:30`, `Route::of` `routing/router.rs:56` | **repensé** : garanti par construction (D1) |
@@ -313,8 +313,13 @@ port ; **plus tard** = lot suivant.
     l'entrée de son API (`validate_routing_settings`, bornes identiques), elles ne
     peuvent donc pas exister chez lui ; ici le cœur n'a pas d'API à refuser, il borne.
   - Identifiant de décision : **chaîne**, et seulement une chaîne (un `u128` ne survit
-    pas à un `Number` JavaScript ; une forme « chaîne ou nombre » exigerait
-    `deserialize_any`, illisible par un format non auto-descriptif comme bincode).
+    pas à un `Number` JavaScript ; un nombre est refusé plutôt que lu faux). Une
+    décision persistée avec un identifiant numérique (forme de #249) ne se relit plus.
+  - **Format de persistance : JSON** (ou tout format auto-descriptif). `RejectReason`
+    est étiqueté en interne (`{"reason": …}`) et `Decision.used` est omis quand il est
+    vide : ces choix exigent `deserialize_any`, que bincode ou postcard ne savent pas
+    faire. Choisi, pas subi : c'est la forme JSON que lisent l'interface et le journal
+    de PO (`d.json`), et aucune persistance binaire n'est demandée.
 - **D10 — « même graine, même décision » vaut à plateforme égale.** `ln`, `cos`,
   `powf` n'ont pas de précision garantie d'une plateforme à l'autre : natif et wasm
   peuvent différer au dernier bit d'un tirage. Un rejeu d'une décision persistée sur
@@ -379,11 +384,11 @@ Le cœur est pur ; tout ce qui sort de lui passe par un port, et chaque port a u
 
 | Port | Ce que l'hôte garantit | Ce que le harnais garantit |
 |---|---|---|
-| `Transport::honors_route` | `true` seulement s'il lit `Request::provider()` / `model()` et parle au moteur nommé | tant que c'est faux : `Event::Routed.advisory = true`, décision enregistrée `applied: false`, `used: None`, et `Learning::settle(served = None)` |
+| `Transport::honors_route` | `true` seulement s'il lit `Request::provider()` / `model()` et parle au moteur nommé | tant que c'est faux : `Event::Routed.advisory = true` et `changed = false`, décision enregistrée `applied: false`, `used: None` (même `superseded`), l'état servi ne bouge pas (paire en vigueur, garde de fournisseur), rien n'est ouvert chez le routeur et aucune fin n'est rendue à l'apprentissage |
 | `PoolSource::pool` | rend les candidats vivants (santé, consentement, quotas déjà appliqués) | borné à 2 s (`ROUTER_TIMEOUT_MS`) sur le `Clock` de l'hôte ; au-delà, le tour part sur la paire en vigueur (`timed_out`) ; **coupé par l'annulation, avec ou sans minuteur** (`Cancel` réveille son attente) |
 | `Learning::arms`, `hints` | rend des postérieurs valides | un bras invalide écarte sa paire (`invalid_arm`), jamais une boucle ni un `NaN` |
 | `Learning::record` | au mieux : peut être perdu | appelé une fois par décision, APRÈS que l'état a été réécrit et `Event::Routed` émis ; borné et annulable ; `used` = la paire du tour (`None` si inconnue : consultative, ou sentinelle — jamais `auto`), `applied` vrai seulement si le choix est cette paire |
-| `Learning::settle` | traite un identifiant inconnu comme un no-op ; garde la **première** fin reçue pour un identifiant | borné à 2 s, ne retient ni `Stopped` ni `busy` (avec minuteur) ; `served = Some` seulement si le transport honore la paire ET qu'une requête est partie ; la décision reste ouverte tant que `settle` n'a pas rendu : un `settle` coupé, ou un tour abandonné, est redit au tour suivant en `Stop::Interrupted`, `served = None` |
+| `Learning::settle` | traite un identifiant inconnu comme un no-op ; garde la **première** fin reçue pour un identifiant | borné à 2 s, ne retient ni `Stopped` ni `busy` (avec minuteur) ; `served = Some` seulement si le transport honore la paire ET que le moteur a répondu (morceau, réponse, ou refus du moteur ; pas `Unreachable`, ni `Timeout` d'ouverture, ni une annulation avant toute réponse) ; si le moteur n'a jamais été joint, la paire **décidée mais jamais atteinte** est oubliée (l'état servi revient à l'avant du changement, comme `forget_change` chez PO) ; la décision reste ouverte tant que `settle` n'a pas rendu : un `settle` coupé la range parmi les abandonnées, réparées **après** la décision du message suivant, dans leur propre borne (`TurnRouter::repair`, une par message, `Stop::Interrupted`, `served = None`), et lâchées quand `REPAIR_ATTEMPTS` (3) tentatives ont été coupées — à l'appel suivant, sans nouvel appel à l'apprentissage, donc au 4e message. **Coût d'un apprentissage en panne** : si `settle`, `record` et la réparation pendent, jusqu'à trois bornes par message (chacune 2 s, soit 6 s) sans routage coupé ; si `arms` pend aussi, `route` l'attend dans sa propre borne : quatre bornes (8 s) et le tour part en repli (`timed_out`). La file des abandonnées est bornée à 8 : au-delà, la plus ancienne est lâchée **sans trace** (ni appel, ni événement) — un hôte qui veut tout savoir répare son magasin, le routeur ne garde pas un journal. Si le moteur n'a jamais été joint, la restauration de la paire d'avant se fait **avant** d'attendre l'apprentissage, et jamais par-dessus un réglage de la personne fait pendant le tour (génération) |
 | `Seeds::next_id` | un `u128` par décision | l'identifiant est la graine ; sérialisé en chaîne |
 | `QuotaView` | une échéance passée n'est plus rendue | — |
 
@@ -401,8 +406,10 @@ d'une autre tâche après la suspension).
   horloge avec `Harness::with_clock`.
 - Avec minuteur, la borne a une granularité d'au plus `WATCH_TICK_MS` (1 s). Une
   horloge dont `sleep` rend tout de suite SANS que l'heure avance n'atteint jamais
-  l'échéance : la veille cède la main à chaque pas (le travail et l'annulation restent
-  sondés), mais elle tourne sans fin.
+  l'échéance : la veille cède la main à chaque pas, donc le travail et l'annulation
+  restent sondés — un port qui finit par répondre répond (test
+  `une_horloge_figee_ne_gele_pas_le_routeur`) —, mais la borne de temps n'arrive
+  jamais, et la veille consomme du calcul tant que le port pend.
 
 **Coût.** Le besoin d'images parcourt le fil à chaque objectif (O(fil)) : c'est la
 même passe que l'estimation de jetons faite juste avant (`estimate_tokens` sur le même

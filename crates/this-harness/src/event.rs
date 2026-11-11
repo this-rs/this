@@ -160,8 +160,9 @@ pub enum Event {
         mode: Option<String>,
         /// La décision est **consultative** : le transport ne déclare pas honorer la
         /// paire ([`crate::Transport::honors_route`] faux), il sert son modèle à lui.
-        /// Une interface ne doit alors pas afficher « servi par telle paire », et la fin du
-        /// tour n'est pas rendue à l'apprentissage comme servie par elle. Absent : faux.
+        /// Une interface ne doit alors pas afficher « servi par telle paire » : le choix
+        /// n'ouvre rien chez le routeur, et la fin du tour n'est pas rendue à
+        /// l'apprentissage. Absent : faux.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         advisory: bool,
     },

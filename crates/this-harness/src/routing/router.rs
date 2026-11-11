@@ -12,12 +12,13 @@
 //! PO est dit là où ça diverge, et repris dans `docs/harnais-mode-auto.md`.
 
 use std::cell::{Cell, RefCell};
+use std::collections::VecDeque;
 use std::rc::Rc;
 
 use async_trait::async_trait;
 use this_agent::Stop;
 
-use super::candidate::{self, Candidate, Pick, Slot, is_auto_model};
+use super::candidate::{self, Candidate, Pick, Slot, is_auto_model, same_model, same_pair};
 use super::decide::{DecideRequest, Decision, HYSTERESIS_MARGIN, decide};
 use super::mode::{
     ConversationRoutingMode, LearningStage, PoolEntry, ProviderRoutingMode, RoutingSettings,
@@ -106,10 +107,12 @@ pub trait Learning {
     /// Le tour décidé par `decision_id` s'est terminé sur `stop`. `code` est le
     /// code de panne du transport, s'il y en a un.
     ///
-    /// `served` est la paire qui a **réellement** servi le tour : `None` quand
-    /// le transport ne déclare pas honorer la paire du routeur
-    /// ([`Transport::honors_route`](crate::Transport::honors_route) faux) — la
-    /// décision n'était que consultative, aucun bras ne doit être nourri.
+    /// `served` est la paire qui a **réellement** servi le tour : `None` quand le
+    /// moteur n'a jamais été joint (connexion refusée, délai d'ouverture, annulation
+    /// avant toute réponse) — aucun bras ne doit être nourri. Une décision
+    /// consultative (transport qui n'honore pas la paire,
+    /// [`Transport::honors_route`](crate::Transport::honors_route) faux) n'arrive
+    /// jamais ici : elle n'ouvre aucun tour, donc aucune fin.
     ///
     /// # Contrat
     ///
@@ -122,9 +125,11 @@ pub trait Learning {
     ///   tour abandonné : à ne pas nourrir. Le routeur le dit lui-même au tour
     ///   suivant par un `settle` avec [`Stop::Interrupted`] (jamais une récompense).
     /// - un `settle` coupé (borne, future lâchée) laisse la décision ouverte : le
-    ///   routeur la redit au tour suivant en [`Stop::Interrupted`], `served = None`.
-    ///   L'hôte garde **la première** fin reçue pour un identifiant et ignore les
-    ///   suivantes : c'est la seule façon de recevoir deux fois la même décision.
+    ///   routeur la redit ensuite en [`Stop::Interrupted`], `served = None`, par une
+    ///   réparation à part ([`TurnRouter::repair`]), jusqu'à [`REPAIR_ATTEMPTS`]
+    ///   fois ; au-delà, elle est lâchée. L'hôte garde **la première** fin reçue
+    ///   pour un identifiant et ignore les suivantes : c'est la seule façon de
+    ///   recevoir deux fois la même décision.
     /// - `record` reçoit `applied` et `used` tels qu'ils sont : une décision
     ///   consultative (transport qui n'honore pas la paire) arrive `applied: false`,
     ///   `used: None`.
@@ -392,6 +397,43 @@ struct Choice {
     asked: Option<ConversationRoutingMode>,
 }
 
+/// Une décision appliquée, ouverte jusqu'à la fin de son tour.
+#[derive(Debug, Clone)]
+struct Open {
+    id: u128,
+    pick: Pick,
+    /// Ce que le tour a quitté, quand il a changé de paire : si le moteur n'est
+    /// jamais joint, on y revient ([`TurnRouter::settle`]).
+    before: Option<Before>,
+    /// La génération des réglages de la personne au moment du changement : un
+    /// réglage fait depuis (même sur la même paire) n'est jamais annulé par le retour.
+    ///
+    /// Tout réglage compte, y compris ceux qui ne touchent pas la paire
+    /// ([`TurnRouter::set_auto_models`], [`TurnRouter::follow_settings`]) : une liste
+    /// Auto modifiée pendant le tour laisse alors en vigueur une paire jamais
+    /// atteinte. C'est voulu, et cohérent avec [`RouteWhy::Superseded`] dans
+    /// [`TurnRouter::route`] : après un réglage de la personne, le routeur ne réécrit
+    /// plus rien de lui-même, et le message suivant redécide sous ce réglage.
+    generation: u64,
+}
+
+/// L'état servi d'avant un changement de paire.
+#[derive(Debug, Clone)]
+struct Before {
+    provider: String,
+    model: String,
+    last_change_turn: Option<u32>,
+    last_change_class: Option<String>,
+    last_move_turn: Option<u32>,
+}
+
+/// Réparations tentées pour une décision abandonnée ([`TurnRouter::repair`])
+/// avant qu'elle soit lâchée : un apprentissage qui pend durablement ne coûte
+/// qu'autant de messages, jamais toute la conversation.
+pub const REPAIR_ATTEMPTS: u32 = 3;
+/// Décisions abandonnées retenues au plus, en attente de réparation.
+const ABANDONED_CAP: usize = 8;
+
 struct State {
     choice: Choice,
     provider: String,
@@ -406,7 +448,11 @@ struct State {
     last_move_turn: Option<u32>,
     /// La dernière décision appliquée, et la paire qui a servi : ce que
     /// [`TurnRouter::settle`] rend à l'apprentissage.
-    open: Option<(u128, Pick)>,
+    open: Option<Open>,
+    /// Les décisions dont le tour n'a jamais reçu de fin, avec le nombre de
+    /// réparations déjà tentées ([`TurnRouter::repair`]). Bornée : au-delà de
+    /// [`ABANDONED_CAP`], la plus ancienne est lâchée.
+    abandoned: VecDeque<(u128, u32)>,
     /// Compteur de réglages de la personne (menu, main, liste) : une décision
     /// qui a attendu un port ne réécrit l'état que si rien n'a changé entre-temps.
     generation: u64,
@@ -456,30 +502,16 @@ fn settings_for(routing: &RoutingSettings, apply: bool) -> RoutingSettings {
     settings
 }
 
-/// Deux identifiants nomment-ils le même modèle ? Le suffixe de fenêtre
-/// (`[1m]`) et la casse ne font pas partie du nom.
-fn same_model(a: &str, b: &str) -> bool {
-    fn base(id: &str) -> &str {
-        let id = id.trim();
-        id.strip_suffix("[1m]").unwrap_or(id).trim_end()
-    }
-    base(a).eq_ignore_ascii_case(base(b))
-}
-
-/// Deux paires sont-elles la même ? Même instance, et même modèle au sens de
-/// [`same_model`] (suffixe `[1m]` et casse ignorés).
-fn same_pair(a: &Pick, b: &Pick) -> bool {
-    a.provider_id == b.provider_id && same_model(&a.model, &b.model)
-}
-
 /// La paire en vigueur, si c'en est une : jamais la sentinelle (`auto`, vide).
 fn real_pair(provider: &str, model: &str) -> Option<Pick> {
     (!is_auto_model(model)).then(|| Pick::new(provider, model))
 }
 
+/// La paire est-elle sur la liste ? Le modèle se compare au sens de
+/// [`same_model`] : `m` coché retient `m[1m]` (relecture de #254, constat 7).
 fn listed(list: &[PoolEntry], facts: &Candidate) -> bool {
     list.iter()
-        .any(|e| e.provider == facts.provider_id && e.model == facts.model)
+        .any(|e| e.provider == facts.provider_id && same_model(&e.model, &facts.model))
 }
 
 /// Restreint `pool` à la `list` de la personne pour une décision de
@@ -538,6 +570,7 @@ impl TurnRouter {
                 last_change_class: None,
                 last_move_turn: None,
                 open: None,
+                abandoned: VecDeque::new(),
                 generation: 0,
             }),
         }
@@ -665,12 +698,18 @@ impl TurnRouter {
     /// n'est réécrit qu'en un seul bloc, sans attente au milieu.
     pub async fn route(&self, turn: TurnInput<'_>) -> Routed {
         // Un tour appliqué dont la fin n'est jamais venue (future lâchée, page
-        // suspendue) est abandonné : dit explicitement, jamais nourri.
-        let abandoned = self.state.borrow_mut().open.take();
-        if let Some((id, _)) = abandoned {
-            self.learning
-                .settle(id, None, &Stop::Interrupted, None)
-                .await;
+        // suspendue, `settle` coupé) est abandonné : rangé pour être dit à
+        // l'apprentissage par [`TurnRouter::repair`] — jamais ICI, où une réparation
+        // qui pend mangerait la borne de la décision et éteindrait Auto pour toute la
+        // conversation (relecture de #254, constat 1).
+        {
+            let mut state = self.state.borrow_mut();
+            if let Some(open) = state.open.take() {
+                if state.abandoned.len() >= ABANDONED_CAP {
+                    state.abandoned.pop_front();
+                }
+                state.abandoned.push_back((open.id, 0));
+            }
         }
         let (choice, manual, current, index, held_turn, held_class, last_move, generation) = {
             let mut state = self.state.borrow_mut();
@@ -818,19 +857,49 @@ impl TurnRouter {
                 // La personne a réglé la conversation pendant l'attente (menu, main,
                 // liste Auto) : son réglage gagne, la décision n'écrit rien.
                 decision.applied = false;
-                decision.used = real_pair(&state.provider, &state.model);
+                decision.used = if turn.honored {
+                    real_pair(&state.provider, &state.model)
+                } else {
+                    None
+                };
                 Routed {
                     route: Route::of(&state.provider, &state.model),
                     changed: false,
                     why: RouteWhy::Superseded,
                     decision: Some(decision),
                 }
+            } else if !turn.honored {
+                // Consultatif : le transport sert SON modèle. Le choix est rendu comme
+                // conseil (la requête le porte, l'événement le dit `advisory`), mais
+                // l'état SERVI ne bouge pas : ni paire en vigueur, ni garde « pas deux
+                // changements de fournisseur de suite », ni décision ouverte — rien de
+                // tout cela n'a eu lieu.
+                decision.applied = false;
+                decision.used = None;
+                let advice = decision.chosen.clone().filter(|_| apply);
+                let route = match &advice {
+                    Some(pick) => Route::of(&pick.provider_id, &pick.model),
+                    None => Route::of(&state.provider, &state.model),
+                };
+                Routed {
+                    route,
+                    changed: false,
+                    why,
+                    decision: Some(decision),
+                }
             } else {
                 let mut changed = false;
                 if let (true, Some(pick)) = (apply, decision.chosen.clone()) {
-                    state.open = Some((decision.id, pick.clone()));
+                    let mut before = None;
                     if !same_pair(&pick, &current) {
                         let moves = has_pair && pick.provider_id != current.provider_id;
+                        before = Some(Before {
+                            provider: state.provider.clone(),
+                            model: state.model.clone(),
+                            last_change_turn: state.last_change_turn,
+                            last_change_class: state.last_change_class.clone(),
+                            last_move_turn: state.last_move_turn,
+                        });
                         state.provider = pick.provider_id.clone();
                         state.model = pick.model.clone();
                         state.last_change_turn = Some(index);
@@ -840,22 +909,21 @@ impl TurnRouter {
                         }
                         changed = true;
                     }
+                    state.open = Some(Open {
+                        id: decision.id,
+                        pick,
+                        before,
+                        generation: state.generation,
+                    });
                 }
                 // Ce que le tour fait vraiment : la décision le dit, pour que
                 // l'apprentissage ne prenne jamais pour servie une paire qui ne
                 // l'a pas été (exploration refusée, écart sous la marge, étape
-                // consultative, transport qui n'honore pas la paire).
-                if turn.honored {
-                    let used = real_pair(&state.provider, &state.model);
-                    decision.applied = apply
-                        && matches!((&decision.chosen, &used), (Some(c), Some(u)) if same_pair(c, u));
-                    decision.used = used;
-                } else {
-                    // Le transport sert SON modèle : personne ne sait lequel, et le
-                    // choix du routeur n'a rien appliqué.
-                    decision.applied = false;
-                    decision.used = None;
-                }
+                // consultative).
+                let used = real_pair(&state.provider, &state.model);
+                decision.applied = apply
+                    && matches!((&decision.chosen, &used), (Some(c), Some(u)) if same_pair(c, u));
+                decision.used = used;
                 Routed {
                     route: Route::of(&state.provider, &state.model),
                     changed,
@@ -911,7 +979,7 @@ impl TurnRouter {
                 decision
                     .alternatives
                     .iter()
-                    .find(|a| a.pick == *wanted && a.rejected.is_none())
+                    .find(|a| same_pair(&a.pick, wanted) && a.rejected.is_none())
                     .and_then(|a| a.score)
             };
             if let (Some(best), Some(now)) = (decision.score, score_of(current))
@@ -940,23 +1008,95 @@ impl TurnRouter {
     /// décision appliquée qui l'a servi. Sans décision appliquée, rien n'est dit
     /// (un bras jamais servi n'est jamais nourri).
     ///
-    /// `honored` : le transport a-t-il honoré la paire
-    /// ([`Transport::honors_route`](crate::Transport::honors_route)) ? Faux :
-    /// `served` est `None`, la décision n'était que consultative.
+    /// `honored` : le transport honore la paire ET le moteur a répondu. Faux avec une
+    /// décision ouverte (ce qui n'arrive qu'avec un transport qui honore : en
+    /// consultatif, rien n'est ouvert) : le moteur n'a jamais été joint, `served` est
+    /// `None`, et la paire **décidée mais jamais atteinte** est oubliée — l'état servi
+    /// revient à ce qu'il était avant le changement (l'équivalent de `forget_change`
+    /// chez PO), pour que l'hystérésis ne favorise pas une paire qui n'a pas servi.
     ///
     /// La décision reste ouverte tant que `settle` n'a pas rendu : un `settle` coupé
-    /// (borne de temps, future lâchée) la laisse ouverte, et le tour suivant la
-    /// déclare [`Stop::Interrupted`] — jamais une décision perdue en silence.
+    /// (borne de temps, future lâchée) la laisse ouverte, et le message suivant la
+    /// range parmi les abandonnées ([`TurnRouter::repair`]) — jamais une décision
+    /// perdue en silence.
     pub async fn settle(&self, stop: &Stop, code: Option<&str>, honored: bool) {
-        let open = self.state.borrow().open.clone();
-        if let Some((id, pair)) = open {
-            let served = honored.then_some(&pair);
-            self.learning.settle(id, served, stop, code).await;
+        // Seuls l'identifiant, la paire et la génération sont lus : `before` n'est
+        // jamais copié hors de l'état (il y est consommé une fois, juste dessous).
+        let (id, pick) = {
             let mut state = self.state.borrow_mut();
-            if state.open.as_ref().is_some_and(|(open, _)| *open == id) {
-                state.open = None;
+            let Some((id, pick, generation)) = state
+                .open
+                .as_ref()
+                .map(|o| (o.id, o.pick.clone(), o.generation))
+            else {
+                return;
+            };
+            // La paire décidée n'a jamais été atteinte : l'état servi revient à l'avant
+            // du changement, AVANT d'attendre l'apprentissage — cette restauration ne
+            // dépend pas de sa réponse, et un `settle` coupé la perdrait pour toujours
+            // (re-relecture de #254, constat A). Une seule fois (`before` est consommé),
+            // et jamais par-dessus un réglage de la personne fait depuis (génération).
+            if !honored
+                && let Some(before) = state.open.as_mut().and_then(|o| o.before.take())
+                && state.generation == generation
+            {
+                state.provider = before.provider;
+                state.model = before.model;
+                state.last_change_turn = before.last_change_turn;
+                state.last_change_class = before.last_change_class;
+                state.last_move_turn = before.last_move_turn;
             }
+            (id, pick)
+        };
+        let served = honored.then_some(&pick);
+        self.learning.settle(id, served, stop, code).await;
+        let mut state = self.state.borrow_mut();
+        if state.open.as_ref().is_some_and(|o| o.id == id) {
+            state.open = None;
         }
+    }
+
+    /// Des décisions abandonnées attendent-elles une réparation ?
+    pub fn needs_repair(&self) -> bool {
+        !self.state.borrow().abandoned.is_empty()
+    }
+
+    /// Répare UNE décision abandonnée : la dit à l'apprentissage en
+    /// [`Stop::Interrupted`], sans paire servie, puis l'oublie. Rend `true` s'il en
+    /// reste d'autres.
+    ///
+    /// Appelée par le harnais **après** la décision du message, dans sa propre
+    /// borne : une réparation qui pend ne retarde ni ne coupe le routage. Chaque
+    /// appel compte une tentative ; une décision dont [`REPAIR_ATTEMPTS`] tentatives
+    /// ont été coupées est lâchée **à l'appel suivant**, sans nouvel appel à
+    /// l'apprentissage (donc au 4e message : il ne saura jamais sa fin — il est en
+    /// panne, et Auto continue sans lui).
+    pub async fn repair(&self) -> bool {
+        let next = {
+            let mut state = self.state.borrow_mut();
+            loop {
+                let Some(&(id, attempts)) = state.abandoned.front() else {
+                    break None;
+                };
+                if attempts >= REPAIR_ATTEMPTS {
+                    state.abandoned.pop_front();
+                    continue;
+                }
+                if let Some(entry) = state.abandoned.front_mut() {
+                    entry.1 += 1;
+                }
+                break Some(id);
+            }
+        };
+        let Some(id) = next else {
+            return false;
+        };
+        self.learning
+            .settle(id, None, &Stop::Interrupted, None)
+            .await;
+        let mut state = self.state.borrow_mut();
+        state.abandoned.retain(|(open, _)| *open != id);
+        !state.abandoned.is_empty()
     }
 }
 
@@ -1005,6 +1145,7 @@ pub struct MemoryLearning {
     hints: RefCell<PriorHints>,
     decisions: RefCell<Vec<Decision>>,
     settled: RefCell<Vec<Settled>>,
+    duplicates: Cell<u32>,
 }
 
 impl MemoryLearning {
@@ -1028,6 +1169,11 @@ impl MemoryLearning {
     /// Les fins de tour reçues, dans l'ordre.
     pub fn settled(&self) -> Vec<Settled> {
         self.settled.borrow().clone()
+    }
+
+    /// Les fins reçues pour un identifiant qui en avait déjà une : ignorées.
+    pub fn duplicates(&self) -> u32 {
+        self.duplicates.get()
     }
 }
 
@@ -1057,7 +1203,15 @@ impl Learning for MemoryLearning {
         stop: &Stop,
         code: Option<&str>,
     ) {
-        self.settled.borrow_mut().push(Settled {
+        // Le contrat de `Learning::settle` : la PREMIÈRE fin reçue pour un identifiant
+        // fait foi, les suivantes sont ignorées (et comptées, pour que les tests voient
+        // un doublon).
+        let mut settled = self.settled.borrow_mut();
+        if settled.iter().any(|s| s.decision_id == decision_id) {
+            self.duplicates.set(self.duplicates.get() + 1);
+            return;
+        }
+        settled.push(Settled {
             decision_id,
             served: served.cloned(),
             stop: stop.clone(),
