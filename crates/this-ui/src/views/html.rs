@@ -20,13 +20,71 @@
 //!   ou en échec n'envoie aucune ligne et dit pourquoi au journal ([`grants_message`]).
 //!   Sans `data`, uniquement les entités que la vue déclare (celles que ses autres nœuds
 //!   lisent). Le message est renvoyé à chaque changement des données ;
-//! - page → hôte : `{type:"this:intent", kind, action, id?, values?}`, validé par
-//!   [`intent_from_message`] : le genre est l'un de create/update/delete/invoke/navigate,
-//!   l'action est DÉCLARÉE par le module et de ce genre. Le reste est refusé : l'appelant
-//!   journalise et n'exécute rien ;
-//! - page → hôte : `{type:"this:height", px}` règle la hauteur (bornée à [`MAX_HEIGHT`]).
+//! - page → hôte : `{type:"this:intent", kind, action, id?, values?, request?}`, validé par
+//!   [`page_demand`] : le genre est l'un de [`INTENT_KINDS`], l'action est DÉCLARÉE par le
+//!   module et de ce genre. Le reste est refusé : l'hôte journalise et n'exécute rien ;
+//! - page → hôte : `{type:"this:height", px}` règle la hauteur (bornée à [`MAX_HEIGHT`]) ;
+//! - hôte → page : `{type:"this:result", id, ok:true}` ou `{type:"this:refused", id, reason}`,
+//!   seulement si la demande portait `request` (voir « La réponse »).
+//!
+//! ## Ce qu'une page atteint : tout ce que son module déclare, sous contrôle
+//!
+//! Il n'y a plus de genre interdit à une page. Une page émet tout genre d'action que son
+//! module DÉCLARE — ce qu'une brique du même module peut déclencher, ni plus ni moins. Mais
+//! les genres ne se valent pas, et [`INTENT_KINDS`] les sépare :
+//!
+//! - **ordinaires** (`create`, `update`, `delete`, `invoke`, `navigate`) : remis à l'hôte
+//!   dès qu'ils sont validés, comme avant ;
+//! - **sensibles** (`secret`, `tool`, `capability`, `host`) : un secret, un outil d'agent,
+//!   une capacité de l'appareil, une surface de l'hôte. **Fermés par défaut** : ils ne sont
+//!   remis à l'hôte que si celui-ci fournit une porte ([`HtmlHost::gate`]) ET qu'elle répond
+//!   [`GateAnswer::Approved`]. Sans porte, le refus est nommé (`no_gate`) et rien n'est
+//!   exécuté : un hôte qui ne connaît pas la porte se comporte exactement comme avant.
+//!
+//! La raison de la porte : une brique ne s'active que par un geste de la personne sur un
+//! contrôle que l'hôte a dessiné ; le script d'une page émet seul, sans geste. L'approbation
+//! remet la personne dans la boucle. La porte reçoit une [`GateRequest`] (module, genre,
+//! action déclarée) : de quoi écrire « le module X veut utiliser le micro ». L'écran
+//! d'approbation est celui de l'hôte, pas de cette crate.
+//!
+//! Le chemin est trois fonctions pures, testées sans navigateur, et le montage n'en est que
+//! le câblage : [`page_demand`] (valider) → [`admit`] (porte présente ? débit ?) →
+//! [`settle`] (la réponse de la porte).
+//!
+//! ### L'origine
+//!
+//! Une intention née d'une page est remise dans une enveloppe [`Emitted`] qui porte
+//! [`Origin::Page`], à [`HtmlHost::on_page_intent`] si l'hôte le fournit (sinon, comme avant,
+//! l'intention nue va au `on_intent` de la vue). L'origine est une enveloppe et pas un champ
+//! de chaque variante d'[`Intent`] : elle décrit le chemin d'arrivée, pas le contenu —
+//! l'intention d'une page reste égale à celle d'une brique pour la même action, et aucun
+//! hôte existant n'a de `match` à réécrire. La [`GateRequest`] porte aussi l'origine.
+//!
+//! ### La réponse
+//!
+//! Si le message porte `request` (une chaîne d'au plus [`CORRELATION_MAX_LEN`] caractères ou
+//! un nombre — `id` est déjà pris : c'est la ligne visée), l'hôte répond à la fenêtre de
+//! CETTE iframe, et à elle seule, avec `id` = la valeur de `request` :
+//! `{type:"this:result", id, ok:true}` quand l'intention a été REMISE à l'hôte (ce n'est pas
+//! la preuve que l'hôte a réussi : `this-ui` n'exécute rien), ou
+//! `{type:"this:refused", id, reason}` où `reason` est un code stable de [`Reason`]. La
+//! réponse ne porte jamais de valeur : ni secret, ni ligne. Sans `request`, rien n'est
+//! répondu — le comportement d'avant.
+//!
+//! ### Le débit
+//!
+//! Un script ne doit pas inonder la porte : au plus [`SENSITIVE_MAX_PER_WINDOW`] demandes
+//! sensibles par fenêtre glissante de [`SENSITIVE_WINDOW_MS`] ms et par page montée
+//! ([`RateWindow`]). Au-delà, refus `rate_limited`, la porte n'est pas appelée.
+//!
+//! ### Ce qui ne bouge pas
+//!
+//! Une action non déclarée ne passe jamais ; une action émise sous un autre genre que le
+//! sien est refusée ; la valeur d'un secret ne transite jamais par le pont (une demande
+//! `secret` porte un NOM, ses `values` sont ignorées, et `secret_entry` n'est pas un genre
+//! qu'une page peut émettre).
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, VecDeque};
 
 use leptos::prelude::*;
 use serde_json::{Map, Value, json};
@@ -37,7 +95,9 @@ use this_descriptor::views::{
 };
 
 use crate::views::data::Snapshot;
-use crate::views::intent::{FieldValue, Intent, Values};
+use this_descriptor::views::Action;
+
+use crate::views::intent::{Emitted, FieldValue, Intent, Origin, Values};
 use crate::views::render::{self, Ctx};
 
 /// Les droits de l'iframe : des scripts, rien d'autre. Surtout pas l'origine de l'hôte.
@@ -56,8 +116,44 @@ pub const MAX_BYTES: usize = 8 * 1024 * 1024;
 /// La lecture d'un fichier : les octets, ou rien s'il n'existe pas.
 pub type ReadFuture = std::pin::Pin<Box<dyn std::future::Future<Output = Option<Vec<u8>>>>>;
 
+/// La réponse de la porte, plus tard : la personne lit et décide.
+pub type GateFuture = std::pin::Pin<Box<dyn std::future::Future<Output = GateAnswer>>>;
+
+/// Ce que la porte de l'hôte répond à une demande sensible.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GateAnswer {
+    /// La personne (ou la politique de l'hôte) a dit oui : l'intention est remise.
+    Approved,
+    /// Non : rien n'est exécuté, la page reçoit `denied`.
+    Denied,
+}
+
+/// Ce que la porte reçoit : qui demande quoi. De quoi écrire « le module X veut utiliser le
+/// micro » sans rien deviner.
+#[derive(Clone, Debug, PartialEq)]
+pub struct GateRequest {
+    /// Le module dont la page émet la demande.
+    pub module: String,
+    /// Le genre sensible, tel que [`Intent::kind`] le nomme : `secret`, `tool`,
+    /// `capability` ou `host`.
+    pub kind: &'static str,
+    /// Le nom de l'action déclarée.
+    pub name: String,
+    /// L'action telle que le module la déclare (son libellé, sa capacité, sa surface…).
+    pub action: Action,
+    /// L'intention qui sera remise à l'hôte si la porte dit oui — celle qu'une brique aurait
+    /// produite pour cette action.
+    pub intent: Intent,
+    /// D'où vient la demande. Aujourd'hui toujours [`Origin::Page`] : les briques ne passent
+    /// pas par la porte.
+    pub origin: Origin,
+}
+
 /// Ce que l'hôte fournit (par le contexte Leptos) pour monter une page : lire un fichier du
 /// VFS, dire le thème et la langue. Sans lui, le nœud `html` dit pourquoi il est vide.
+///
+/// `gate` et `on_page_intent` sont optionnels : `None` pour les deux, c'est exactement le
+/// comportement d'avant la porte ([`HtmlHost::new`]).
 #[derive(Clone, Copy)]
 pub struct HtmlHost {
     /// Lit les octets d'un fichier du VFS (chemin complet `/modules/<nom>/<version>/…`).
@@ -67,6 +163,41 @@ pub struct HtmlHost {
     pub theme: Signal<String>,
     /// La langue courante (`fr`, `en`).
     pub locale: Signal<String>,
+    /// La porte des genres sensibles : l'hôte demande à la personne et répond. `None` =
+    /// fermé : toute demande sensible d'une page est refusée (`no_gate`), rien n'est exécuté.
+    pub gate: Option<Callback<GateRequest, GateFuture>>,
+    /// Où vont les intentions nées d'une page, avec leur origine. `None` = l'intention nue
+    /// va au `on_intent` de la vue, comme celle d'une brique.
+    pub on_page_intent: Option<Callback<Emitted>>,
+}
+
+impl HtmlHost {
+    /// Un hôte sans porte : les genres sensibles restent fermés aux pages.
+    pub fn new(
+        read: Callback<String, ReadFuture>,
+        theme: Signal<String>,
+        locale: Signal<String>,
+    ) -> Self {
+        Self {
+            read,
+            theme,
+            locale,
+            gate: None,
+            on_page_intent: None,
+        }
+    }
+
+    /// Avec la porte des genres sensibles.
+    pub fn with_gate(mut self, gate: Callback<GateRequest, GateFuture>) -> Self {
+        self.gate = Some(gate);
+        self
+    }
+
+    /// Avec un récepteur des intentions de page qui en connaît l'origine.
+    pub fn with_page_intents(mut self, on_page_intent: Callback<Emitted>) -> Self {
+        self.on_page_intent = Some(on_page_intent);
+        self
+    }
 }
 
 /// La hauteur d'une iframe : celle déclarée, bornée à `1..=MAX_HEIGHT`, sinon la hauteur par
@@ -611,32 +742,159 @@ pub fn grants_message(
     )
 }
 
-/// Les genres d'intention qu'une page a le droit d'émettre.
-pub const INTENT_KINDS: [&str; 5] = ["create", "update", "delete", "invoke", "navigate"];
+/// La classe d'un genre qu'une page peut émettre.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum KindClass {
+    /// Remis à l'hôte dès que validé.
+    Ordinary,
+    /// Remis à l'hôte seulement si sa porte dit oui ([`HtmlHost::gate`]).
+    Sensitive,
+}
 
-/// Valide un message page → hôte et en tire l'intention, ou dit pourquoi non.
+/// Les genres d'intention qu'une page a le droit d'émettre, et leur classe : l'UNIQUE liste.
+/// Les noms sont ceux que [`Intent::kind`] rend pour les actions qu'un module déclare ; un
+/// test vérifie que chaque variante d'`Action` y tombe. Un genre absent d'ici est inconnu.
+pub const INTENT_KINDS: [(&str, KindClass); 9] = [
+    ("create", KindClass::Ordinary),
+    ("update", KindClass::Ordinary),
+    ("delete", KindClass::Ordinary),
+    ("invoke", KindClass::Ordinary),
+    ("navigate", KindClass::Ordinary),
+    ("secret", KindClass::Sensitive),
+    ("tool", KindClass::Sensitive),
+    ("capability", KindClass::Sensitive),
+    ("host", KindClass::Sensitive),
+];
+
+/// La classe d'un genre, ou `None` s'il n'est pas de ceux qu'une page émet.
+pub fn kind_class(kind: &str) -> Option<KindClass> {
+    INTENT_KINDS
+        .iter()
+        .find(|(name, _)| *name == kind)
+        .map(|(_, class)| *class)
+}
+
+/// Les genres d'une classe, dans l'ordre de [`INTENT_KINDS`].
+pub fn kinds_of(class: KindClass) -> impl Iterator<Item = &'static str> {
+    INTENT_KINDS
+        .iter()
+        .filter(move |(_, c)| *c == class)
+        .map(|(name, _)| *name)
+}
+
+/// Pourquoi une demande de page n'est pas exécutée. Les codes ([`Reason::code`]) sont
+/// stables : c'est ce que la page lit dans `this:refused`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Reason {
+    /// Le message n'a pas de `kind` ou pas d'`action`.
+    Malformed,
+    /// Le genre n'est pas dans [`INTENT_KINDS`].
+    UnknownKind,
+    /// Le module ne déclare pas d'action de ce nom.
+    UndeclaredAction,
+    /// L'action existe, mais elle est d'un autre genre que celui annoncé.
+    WrongKind,
+    /// Genre sensible, et l'hôte ne fournit pas de porte.
+    NoGate,
+    /// La porte a dit non.
+    Denied,
+    /// Trop de demandes sensibles dans la fenêtre ([`SENSITIVE_MAX_PER_WINDOW`]).
+    RateLimited,
+}
+
+impl Reason {
+    /// Toutes les raisons, pour qui documente ou teste le vocabulaire.
+    pub const ALL: [Reason; 7] = [
+        Reason::Malformed,
+        Reason::UnknownKind,
+        Reason::UndeclaredAction,
+        Reason::WrongKind,
+        Reason::NoGate,
+        Reason::Denied,
+        Reason::RateLimited,
+    ];
+
+    /// Le code stable, celui de `this:refused`.
+    pub fn code(self) -> &'static str {
+        match self {
+            Reason::Malformed => "malformed",
+            Reason::UnknownKind => "unknown_kind",
+            Reason::UndeclaredAction => "undeclared_action",
+            Reason::WrongKind => "wrong_kind",
+            Reason::NoGate => "no_gate",
+            Reason::Denied => "denied",
+            Reason::RateLimited => "rate_limited",
+        }
+    }
+}
+
+/// Un refus : la raison (pour la page) et le détail (pour le journal de l'hôte).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Refusal {
+    /// Le code stable.
+    pub reason: Reason,
+    /// La phrase du journal. Elle ne part pas vers la page.
+    pub detail: String,
+}
+
+impl Refusal {
+    fn new(reason: Reason, detail: impl Into<String>) -> Self {
+        Self {
+            reason,
+            detail: detail.into(),
+        }
+    }
+}
+
+impl std::fmt::Display for Refusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.detail)
+    }
+}
+
+/// Une demande de page validée : l'action est déclarée, et du genre annoncé.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Demand {
+    /// Un genre ordinaire : prêt à être remis.
+    Ordinary(Emitted),
+    /// Un genre sensible : il lui faut encore la porte.
+    Sensitive(GateRequest),
+}
+
+/// Valide un message page → hôte : le genre est connu, l'action est DÉCLARÉE par le module et
+/// de ce genre. Rien n'est exécuté ici, et un `Demand::Sensitive` n'est pas une autorisation :
+/// il doit encore passer [`admit`] puis [`settle`].
 ///
-/// Rien n'est exécuté ici : `Ok` rend une [`Intent`] que l'hôte traite comme n'importe
-/// quelle autre ; `Err` est une ligne de journal. Les secrets, capacités d'appareil, surfaces
-/// de l'hôte et outils d'agent ne sont pas atteignables : ce ne sont pas des genres admis.
-pub fn intent_from_message(module: &ModuleDescriptor, message: &Value) -> Result<Intent, String> {
+/// L'intention est construite par la même fonction que pour une brique : une page n'obtient
+/// rien qu'une brique du même module n'aurait obtenu. Les `values` du message ne sont lues
+/// que par les genres qui en portent (`create`, `update`, `invoke`) : une demande `secret`
+/// ne porte qu'un nom.
+pub fn page_demand(module: &ModuleDescriptor, message: &Value) -> Result<Demand, Refusal> {
     let kind = message
         .get("kind")
         .and_then(Value::as_str)
-        .ok_or("intention sans `kind`")?;
-    if !INTENT_KINDS.contains(&kind) {
-        return Err(format!("genre d'intention inconnu `{kind}`"));
-    }
+        .ok_or_else(|| Refusal::new(Reason::Malformed, "intention sans `kind`"))?;
+    let class = kind_class(kind).ok_or_else(|| {
+        Refusal::new(
+            Reason::UnknownKind,
+            format!("genre d'intention inconnu `{kind}`"),
+        )
+    })?;
     let name = message
         .get("action")
         .and_then(Value::as_str)
-        .ok_or("intention sans `action`")?;
+        .ok_or_else(|| Refusal::new(Reason::Malformed, "intention sans `action`"))?;
     let declared = module
         .actions
         .iter()
         .find(|a| a.name() == name)
         .cloned()
-        .ok_or_else(|| format!("action `{name}` non déclarée par le module"))?;
+        .ok_or_else(|| {
+            Refusal::new(
+                Reason::UndeclaredAction,
+                format!("action `{name}` non déclarée par le module"),
+            )
+        })?;
     let id = message.get("id").and_then(Value::as_str).map(str::to_owned);
     let mut values: Values = Vec::new();
     if let Some(Value::Object(map)) = message.get("values") {
@@ -650,14 +908,179 @@ pub fn intent_from_message(module: &ModuleDescriptor, message: &Value) -> Result
             values.push((field.clone(), v));
         }
     }
-    let intent = render::intent_of(Some(declared), name, None, id, values);
+    let intent = render::intent_of(Some(declared.clone()), name, None, id, values);
     if intent.kind() != kind {
-        return Err(format!(
-            "`{name}` est une action `{}`, la page l'a émise comme `{kind}`",
-            intent.kind()
+        return Err(Refusal::new(
+            Reason::WrongKind,
+            format!(
+                "`{name}` est une action `{}`, la page l'a émise comme `{kind}`",
+                intent.kind()
+            ),
         ));
     }
-    Ok(intent)
+    Ok(match class {
+        KindClass::Ordinary => Demand::Ordinary(Emitted {
+            intent,
+            origin: Origin::Page,
+        }),
+        KindClass::Sensitive => Demand::Sensitive(GateRequest {
+            module: module.name.clone(),
+            kind: intent.kind(),
+            name: name.to_owned(),
+            action: declared,
+            intent,
+            origin: Origin::Page,
+        }),
+    })
+}
+
+/// Valide un message page → hôte et en tire l'intention ORDINAIRE, ou dit pourquoi non.
+///
+/// Rien n'est exécuté ici : `Ok` rend une [`Intent`] que l'hôte traite comme n'importe
+/// quelle autre ; `Err` est une ligne de journal. Cette fonction ne rend jamais un genre
+/// sensible (secret, outil d'agent, capacité d'appareil, surface de l'hôte) : une page peut
+/// désormais les demander, mais ils passent par la porte ([`page_demand`] → [`admit`] →
+/// [`settle`]), pas par ici. Un hôte qui appelle encore cette fonction seule reste donc
+/// fermé, comme avant.
+pub fn intent_from_message(module: &ModuleDescriptor, message: &Value) -> Result<Intent, String> {
+    match page_demand(module, message) {
+        Ok(Demand::Ordinary(emitted)) => Ok(emitted.intent),
+        Ok(Demand::Sensitive(request)) => Err(format!(
+            "genre sensible `{}` : `{}` ne passe que par la porte de l'hôte",
+            request.kind, request.name
+        )),
+        Err(refusal) => Err(refusal.detail),
+    }
+}
+
+/// Le nombre de demandes sensibles qu'une page montée peut porter à la porte par fenêtre.
+pub const SENSITIVE_MAX_PER_WINDOW: usize = 5;
+
+/// La fenêtre glissante du débit, en millisecondes.
+pub const SENSITIVE_WINDOW_MS: u64 = 60_000;
+
+/// Le compteur de débit d'UNE page montée : les instants des demandes sensibles admises.
+/// Pur : le temps est un argument, rien n'est lu de l'horloge.
+#[derive(Clone, Debug, Default)]
+pub struct RateWindow {
+    admitted: VecDeque<u64>,
+}
+
+impl RateWindow {
+    /// Admet une demande à l'instant `now_ms` (millisecondes, horloge quelconque mais la
+    /// même d'un appel à l'autre), ou la refuse si [`SENSITIVE_MAX_PER_WINDOW`] demandes ont
+    /// déjà été admises depuis moins de [`SENSITIVE_WINDOW_MS`]. Une demande refusée ne
+    /// compte pas : insister ne rallonge pas l'attente, et ne l'abrège pas non plus. Une
+    /// horloge qui recule ne libère rien (les instants « futurs » restent dans la fenêtre).
+    pub fn admit(&mut self, now_ms: u64) -> bool {
+        while self
+            .admitted
+            .front()
+            .is_some_and(|at| now_ms.saturating_sub(*at) >= SENSITIVE_WINDOW_MS)
+        {
+            self.admitted.pop_front();
+        }
+        if self.admitted.len() >= SENSITIVE_MAX_PER_WINDOW {
+            return false;
+        }
+        self.admitted.push_back(now_ms);
+        true
+    }
+}
+
+/// Ce que l'hôte fait d'une demande validée.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Admission {
+    /// Remettre l'intention maintenant.
+    Run(Emitted),
+    /// Poser la question à la porte ; la suite est [`settle`].
+    Ask(GateRequest),
+}
+
+/// Décide du sort d'une demande validée. Une demande ordinaire est remise. Une demande
+/// sensible n'est JAMAIS rendue comme exécutable : sans porte (`gate_present == false`) elle
+/// est refusée `no_gate` ; avec, elle consomme une place du débit de la page (`rate`,
+/// `now_ms`) ou est refusée `rate_limited`, et ne rend qu'une question à poser.
+pub fn admit(
+    demand: Demand,
+    gate_present: bool,
+    rate: &mut RateWindow,
+    now_ms: u64,
+) -> Result<Admission, Refusal> {
+    match demand {
+        Demand::Ordinary(emitted) => Ok(Admission::Run(emitted)),
+        Demand::Sensitive(request) if !gate_present => Err(Refusal::new(
+            Reason::NoGate,
+            format!(
+                "`{}` est une action `{}` : l'hôte ne fournit pas de porte d'approbation",
+                request.name, request.kind
+            ),
+        )),
+        Demand::Sensitive(request) => {
+            if rate.admit(now_ms) {
+                Ok(Admission::Ask(request))
+            } else {
+                Err(Refusal::new(
+                    Reason::RateLimited,
+                    format!(
+                        "`{}` : plus de {SENSITIVE_MAX_PER_WINDOW} demandes sensibles en \
+                         {SENSITIVE_WINDOW_MS} ms, la porte n'est pas sollicitée",
+                        request.name
+                    ),
+                ))
+            }
+        }
+    }
+}
+
+/// La suite d'une question posée à la porte : oui rend l'intention à remettre (celle de la
+/// demande, d'origine page), non la refuse `denied`.
+pub fn settle(request: GateRequest, answer: GateAnswer) -> Result<Emitted, Refusal> {
+    match answer {
+        GateAnswer::Approved => Ok(Emitted {
+            intent: request.intent,
+            origin: request.origin,
+        }),
+        GateAnswer::Denied => Err(Refusal::new(
+            Reason::Denied,
+            format!(
+                "`{}` (`{}`) refusée par la porte de l'hôte",
+                request.name, request.kind
+            ),
+        )),
+    }
+}
+
+/// Le champ d'un `this:intent` qui porte l'identifiant de corrélation. Pas `id` : dans ce
+/// message, `id` est la ligne visée par l'action.
+pub const CORRELATION_FIELD: &str = "request";
+
+/// La longueur maximale (en caractères) d'un identifiant de corrélation en chaîne. Au-delà,
+/// il est ignoré : l'hôte ne renvoie pas à la page un texte arbitrairement long.
+pub const CORRELATION_MAX_LEN: usize = 64;
+
+/// L'identifiant de corrélation d'un message, s'il en porte un recevable : une chaîne non
+/// vide d'au plus [`CORRELATION_MAX_LEN`] caractères, ou un nombre. Sinon `None` : la demande
+/// est traitée, mais sans réponse.
+pub fn correlation(message: &Value) -> Option<Value> {
+    match message.get(CORRELATION_FIELD)? {
+        Value::String(s) if !s.is_empty() && s.chars().count() <= CORRELATION_MAX_LEN => {
+            Some(Value::String(s.clone()))
+        }
+        Value::Number(n) => Some(Value::Number(n.clone())),
+        _ => None,
+    }
+}
+
+/// La réponse hôte → page d'une demande REMISE à l'hôte. `ok:true` dit « transmis », pas
+/// « réussi » : `this-ui` n'exécute rien et ne connaît pas l'issue.
+pub fn result_message(id: &Value) -> Value {
+    json!({"type": "this:result", "id": id, "ok": true})
+}
+
+/// La réponse hôte → page d'une demande refusée : le code stable, rien d'autre.
+pub fn refused_message(id: &Value, reason: Reason) -> Value {
+    json!({"type": "this:refused", "id": id, "reason": reason.code()})
 }
 
 /// La ligne de journal d'une intention refusée : ce que l'hôte écrit, jamais exécute.
@@ -803,13 +1226,38 @@ fn mount(ctx: Ctx, host: HtmlHost, full: String, height: u32, data: Vec<DataGran
         }
     };
     // Rejoue à chaque changement de données, de thème ou de langue.
-    let post_again = post.clone();
+    let post_again = post;
     Effect::new(move |_| {
         ctx.data.track();
         host.theme.track();
         host.locale.track();
         post_again();
     });
+
+    // Le débit des demandes sensibles de CETTE page montée.
+    let rate = std::rc::Rc::new(std::cell::RefCell::new(RateWindow::default()));
+    // Remet une intention de page à l'hôte : avec son origine s'il la demande, nue sinon.
+    // `false` si plus personne n'écoute (vue démontée) : rien n'a été remis.
+    let deliver = move |emitted: Emitted| match host.on_page_intent {
+        Some(sink) => sink.try_run(emitted).is_some(),
+        None => ctx.on_intent.try_run(emitted.intent).is_some(),
+    };
+    // Journalise un refus, et répond à la page si elle a donné un identifiant. `win` est la
+    // fenêtre de l'iframe dont le message vient d'être reconnu : la réponse ne va qu'à elle
+    // (cible `*` parce que son origine est opaque, pas parce que le destinataire est large).
+    fn answer(win: &web_sys::Window, id: Option<&Value>, verdict: Result<(), &Refusal>) {
+        if let Err(refusal) = verdict {
+            render::log_refusal(&refusal_line(&refusal.detail));
+        }
+        let Some(id) = id else { return };
+        let message = match verdict {
+            Ok(()) => result_message(id),
+            Err(refusal) => refused_message(id, refusal.reason),
+        };
+        if let Ok(js) = js_sys::JSON::parse(&message.to_string()) {
+            let _ = win.post_message(&js, "*");
+        }
+    }
 
     // Le pont retour. On ne croit que la fenêtre de CETTE iframe.
     let listener =
@@ -845,10 +1293,52 @@ fn mount(ctx: Ctx, host: HtmlHost, full: String, height: u32, data: Vec<DataGran
                         let href = msg.get("href").and_then(Value::as_str).unwrap_or("");
                         render::log_refusal(&link_refused_line(href));
                     } else {
-                        match ctx.module.try_with_value(|m| intent_from_message(m, &msg)) {
-                            Some(Ok(intent)) => ctx.on_intent.run(intent),
-                            Some(Err(why)) => render::log_refusal(&refusal_line(&why)),
-                            None => {}
+                        let Some(demand) = ctx.module.try_with_value(|m| page_demand(m, &msg))
+                        else {
+                            return;
+                        };
+                        let id = correlation(&msg);
+                        let now_ms = js_sys::Date::now().max(0.0) as u64;
+                        let admission = demand.and_then(|d| {
+                            admit(d, host.gate.is_some(), &mut rate.borrow_mut(), now_ms)
+                        });
+                        match admission {
+                            Ok(Admission::Run(emitted)) => {
+                                if deliver(emitted) {
+                                    answer(&win, id.as_ref(), Ok(()));
+                                }
+                            }
+                            // Genre sensible : la porte décide, plus tard. Rien n'est remis
+                            // avant son oui ; si la vue est démontée entre-temps, `deliver`
+                            // ne trouve plus personne et rien n'est exécuté.
+                            Ok(Admission::Ask(request)) => {
+                                match host.gate.and_then(|g| g.try_run(request.clone())) {
+                                    Some(asked) => wasm_bindgen_futures::spawn_local(async move {
+                                        match settle(request, asked.await) {
+                                            Ok(emitted) => {
+                                                if deliver(emitted) {
+                                                    answer(&win, id.as_ref(), Ok(()));
+                                                }
+                                            }
+                                            Err(refusal) => {
+                                                answer(&win, id.as_ref(), Err(&refusal))
+                                            }
+                                        }
+                                    }),
+                                    None => answer(
+                                        &win,
+                                        id.as_ref(),
+                                        Err(&Refusal::new(
+                                            Reason::NoGate,
+                                            format!(
+                                                "`{}` : la porte de l'hôte n'est plus là",
+                                                request.name
+                                            ),
+                                        )),
+                                    ),
+                                }
+                            }
+                            Err(refusal) => answer(&win, id.as_ref(), Err(&refusal)),
                         }
                     }
                 }
@@ -900,8 +1390,6 @@ fn mount(ctx: Ctx, host: HtmlHost, full: String, height: u32, data: Vec<DataGran
 mod tests {
     use super::*;
     use crate::views::data::Feed;
-    use this_descriptor::views::Action;
-
     fn module() -> ModuleDescriptor {
         let mut m = ModuleDescriptor::new("compteur", "1.0.0");
         m.actions.push(
@@ -964,9 +1452,11 @@ mod tests {
             (json!({"action":"incrementer"}), "sans `kind`"),
             // une action existante, mais pas du genre annoncé
             (json!({"kind":"delete","action":"incrementer"}), "invoke"),
-            // un secret n'est pas atteignable par une page
+            // un secret émis sous un autre genre que le sien : refusé
             (json!({"kind":"invoke","action":"cle"}), "`secret`"),
-            (json!({"kind":"secret","action":"cle"}), "genre"),
+            // `secret` n'est plus un genre inconnu : une page peut le demander, mais il ne
+            // sort jamais de CETTE fonction — il lui faut la porte de l'hôte
+            (json!({"kind":"secret","action":"cle"}), "porte"),
         ] {
             let err = intent_from_message(&m, &msg).expect_err(&msg.to_string());
             assert!(err.contains(why), "{msg} → {err}");
@@ -1282,5 +1772,387 @@ mod tests {
         let html = String::from_utf8(served).expect("utf8");
         assert!(html.contains("link_refused"), "{html}");
         assert!(html.contains("default-src 'none'"), "{html}");
+    }
+
+    // ── La porte : genres sensibles, origine, réponses, débit ─────────────────────────────
+
+    use this_descriptor::views::{AgentOp, DeviceCapability, Grant, HostSurface};
+
+    /// Un module qui déclare une action de CHAQUE genre sensible, plus une ordinaire.
+    fn sensible() -> ModuleDescriptor {
+        let mut m = module();
+        for action in [
+            json!({"kind":"agent_tool","name":"demander","op":"send_message","text":"résume"}),
+            json!({"kind":"device_capability","name":"micro","capability":"microphone","grant":"allow"}),
+            json!({"kind":"host","name":"reglages","surface":"settings"}),
+        ] {
+            m.actions
+                .push(serde_json::from_value::<Action>(action).expect("action"));
+        }
+        m
+    }
+
+    /// Chaque genre sensible : (genre, action déclarée, intention qu'une BRIQUE produit).
+    fn sensitive_cases() -> Vec<(&'static str, &'static str, Intent)> {
+        vec![
+            (
+                "secret",
+                "cle",
+                Intent::Secret {
+                    action: "cle".into(),
+                    secret: "k".into(),
+                },
+            ),
+            (
+                "tool",
+                "demander",
+                Intent::Tool {
+                    action: "demander".into(),
+                    op: AgentOp::SendMessage,
+                    entity: None,
+                    text: Some("résume".into()),
+                },
+            ),
+            (
+                "capability",
+                "micro",
+                Intent::Capability {
+                    action: "micro".into(),
+                    capability: DeviceCapability::Microphone,
+                    grant: Grant::Allow,
+                },
+            ),
+            (
+                "host",
+                "reglages",
+                Intent::Host {
+                    action: "reglages".into(),
+                    surface: HostSurface::Settings,
+                },
+            ),
+        ]
+    }
+
+    fn message(kind: &str, action: &str) -> Value {
+        json!({"type":"this:intent","kind":kind,"action":action})
+    }
+
+    #[test]
+    fn the_kind_list_is_the_single_source_and_splits_ordinary_from_sensitive() {
+        assert_eq!(
+            kinds_of(KindClass::Ordinary).collect::<Vec<_>>(),
+            ["create", "update", "delete", "invoke", "navigate"]
+        );
+        assert_eq!(
+            kinds_of(KindClass::Sensitive).collect::<Vec<_>>(),
+            ["secret", "tool", "capability", "host"]
+        );
+        assert_eq!(kind_class("secret_entry"), None);
+        assert_eq!(kind_class("rm_rf"), None);
+        // Chaque variante d'`Action` rend un genre de la liste : rien de déclarable n'est
+        // hors d'atteinte, et les noms sont bien ceux d'`Intent::kind`.
+        let every = [
+            json!({"kind":"create","name":"a","entity":"e","fields":[]}),
+            json!({"kind":"update","name":"a","entity":"e","fields":[]}),
+            json!({"kind":"delete","name":"a","entity":"e"}),
+            json!({"kind":"navigate","name":"a","view":"v"}),
+            json!({"kind":"request_secret","name":"a","secret":"k"}),
+            json!({"kind":"agent_tool","name":"a","op":"stop_run"}),
+            json!({"kind":"invoke","name":"a","operation":"o"}),
+            json!({"kind":"device_capability","name":"a","capability":"camera","grant":"deny"}),
+            json!({"kind":"host","name":"a","surface":"modules"}),
+        ];
+        let mut seen = BTreeSet::new();
+        for action in every {
+            let action = serde_json::from_value::<Action>(action).expect("action");
+            let kind = render::intent_of(Some(action), "a", None, None, vec![]).kind();
+            assert!(kind_class(kind).is_some(), "`{kind}` hors de INTENT_KINDS");
+            seen.insert(kind);
+        }
+        assert_eq!(seen.len(), INTENT_KINDS.len());
+    }
+
+    #[test]
+    fn without_a_gate_every_sensitive_kind_is_refused_and_nothing_is_runnable() {
+        let m = sensible();
+        for (kind, action, _) in sensitive_cases() {
+            // L'ancien chemin ne rend jamais un genre sensible.
+            let err = intent_from_message(&m, &message(kind, action)).expect_err(kind);
+            assert!(err.contains("porte"), "{kind} → {err}");
+            // Le nouveau le valide, mais sans porte il est refusé et le débit n'est pas touché.
+            let demand = page_demand(&m, &message(kind, action)).expect(kind);
+            assert!(matches!(demand, Demand::Sensitive(_)), "{kind}");
+            let mut rate = RateWindow::default();
+            let refusal = admit(demand, false, &mut rate, 0).expect_err(kind);
+            assert_eq!(refusal.reason, Reason::NoGate, "{kind}");
+            assert_eq!(refusal.reason.code(), "no_gate");
+            assert!(rate.admitted.is_empty(), "{kind}");
+        }
+    }
+
+    #[test]
+    fn a_sensitive_demand_is_never_admitted_as_runnable_even_with_a_gate() {
+        let m = sensible();
+        for (kind, action, _) in sensitive_cases() {
+            let demand = page_demand(&m, &message(kind, action)).expect(kind);
+            let admission = admit(demand, true, &mut RateWindow::default(), 0).expect(kind);
+            assert!(matches!(admission, Admission::Ask(_)), "{kind}");
+        }
+    }
+
+    #[test]
+    fn an_approving_gate_yields_exactly_the_brick_intent_marked_as_page() {
+        let m = sensible();
+        for (kind, action, brick) in sensitive_cases() {
+            let demand = page_demand(&m, &message(kind, action)).expect(kind);
+            let Admission::Ask(request) =
+                admit(demand, true, &mut RateWindow::default(), 0).expect(kind)
+            else {
+                panic!("{kind} : une demande sensible doit passer par la porte");
+            };
+            // La porte sait qui demande quoi.
+            assert_eq!(request.module, "compteur");
+            assert_eq!(request.kind, kind);
+            assert_eq!(request.name, action);
+            assert_eq!(request.action.name(), action);
+            assert_eq!(request.origin, Origin::Page);
+            // Ce que la brique produit pour la même action déclarée, par la même fonction…
+            let declared = m.actions.iter().find(|a| a.name() == action).cloned();
+            assert_eq!(
+                render::intent_of(declared, action, None, None, vec![]),
+                brick
+            );
+            // …est exactement ce que la porte, en disant oui, laisse remettre.
+            let emitted = settle(request, GateAnswer::Approved).expect(kind);
+            assert_eq!(emitted.intent, brick, "{kind}");
+            assert_eq!(emitted.origin, Origin::Page, "{kind}");
+        }
+    }
+
+    #[test]
+    fn a_denying_gate_refuses_with_denied() {
+        let m = sensible();
+        for (kind, action, _) in sensitive_cases() {
+            let demand = page_demand(&m, &message(kind, action)).expect(kind);
+            let Admission::Ask(request) =
+                admit(demand, true, &mut RateWindow::default(), 0).expect(kind)
+            else {
+                panic!("{kind}");
+            };
+            let refusal = settle(request, GateAnswer::Denied).expect_err(kind);
+            assert_eq!(refusal.reason, Reason::Denied, "{kind}");
+            assert_eq!(refusal.reason.code(), "denied");
+        }
+    }
+
+    #[test]
+    fn an_ordinary_demand_runs_without_a_gate_and_is_marked_as_page() {
+        let m = sensible();
+        let msg = json!({"kind":"invoke","action":"incrementer","id":"7","values":{"n":"1"}});
+        let demand = page_demand(&m, &msg).expect("validé");
+        let mut rate = RateWindow::default();
+        let Admission::Run(emitted) = admit(demand, false, &mut rate, 0).expect("admis") else {
+            panic!("un genre ordinaire ne passe pas par la porte");
+        };
+        assert_eq!(emitted.origin, Origin::Page);
+        // La même intention que l'ancien chemin, qui reste celui des hôtes sans porte.
+        assert_eq!(emitted.intent, intent_from_message(&m, &msg).expect("ok"));
+        assert_eq!(
+            emitted.intent,
+            Intent::Invoke {
+                action: "incrementer".into(),
+                operation: "inc".into(),
+                entity: None,
+                id: Some("7".into()),
+                values: vec![("n".into(), FieldValue::text("1"))],
+            }
+        );
+        // Un genre ordinaire ne consomme pas le débit de la porte.
+        assert!(rate.admitted.is_empty());
+    }
+
+    #[test]
+    fn undeclared_and_wrong_kind_stay_refused_with_or_without_a_gate() {
+        let m = sensible();
+        for (msg, reason) in [
+            // non déclarée, sous un genre ordinaire comme sous un genre sensible
+            (message("invoke", "inconnue"), Reason::UndeclaredAction),
+            (message("capability", "camera"), Reason::UndeclaredAction),
+            (message("host", "inconnue"), Reason::UndeclaredAction),
+            // déclarée, mais émise sous un autre genre que le sien — dans les deux sens
+            (message("invoke", "micro"), Reason::WrongKind),
+            (message("capability", "incrementer"), Reason::WrongKind),
+            (message("tool", "cle"), Reason::WrongKind),
+            (message("host", "micro"), Reason::WrongKind),
+            // genres qu'aucune page n'émet
+            (message("secret_entry", "cle"), Reason::UnknownKind),
+            (message("request_secret", "cle"), Reason::UnknownKind),
+            (message("rm_rf", "incrementer"), Reason::UnknownKind),
+            (json!({"kind":"host"}), Reason::Malformed),
+            (json!({"action":"micro"}), Reason::Malformed),
+        ] {
+            let refusal = page_demand(&m, &msg).expect_err(&msg.to_string());
+            assert_eq!(refusal.reason, reason, "{msg} → {refusal}");
+            // Et l'ancien chemin refuse aussi.
+            assert!(intent_from_message(&m, &msg).is_err(), "{msg}");
+        }
+    }
+
+    #[test]
+    fn a_secret_value_never_crosses_the_bridge() {
+        let m = sensible();
+        let leak = "hunter2-super-secret";
+        // Une page qui glisse une valeur dans sa demande de secret : elle n'entre nulle part.
+        let msg = json!({"kind":"secret","action":"cle","id":leak,
+            "values":{"k":leak,"secret":leak},"request":"r1"});
+        let demand = page_demand(&m, &msg).expect("validé");
+        assert!(!format!("{demand:?}").contains(leak), "{demand:?}");
+        let Admission::Ask(request) =
+            admit(demand, true, &mut RateWindow::default(), 0).expect("admis")
+        else {
+            panic!("secret : par la porte");
+        };
+        let emitted = settle(request, GateAnswer::Approved).expect("oui");
+        assert_eq!(
+            emitted.intent,
+            Intent::Secret {
+                action: "cle".into(),
+                secret: "k".into()
+            }
+        );
+        assert!(emitted.intent.reaches_module());
+        // Les réponses ne portent que l'identifiant et un code.
+        let id = correlation(&msg).expect("id");
+        for reply in [
+            result_message(&id),
+            refused_message(&id, Reason::Denied),
+            refused_message(&id, Reason::NoGate),
+        ] {
+            assert!(!reply.to_string().contains(leak), "{reply}");
+        }
+        // Et une page ne peut pas émettre la saisie d'un secret, seule porteuse d'une valeur.
+        let entry = json!({"kind":"secret_entry","action":"cle","values":{"k":leak}});
+        assert_eq!(
+            page_demand(&m, &entry).expect_err("refusé").reason,
+            Reason::UnknownKind
+        );
+    }
+
+    #[test]
+    fn the_rate_window_refuses_the_one_past_the_max_then_readmits_after_the_window() {
+        let mut rate = RateWindow::default();
+        let t0 = 1_000_000;
+        for i in 0..SENSITIVE_MAX_PER_WINDOW as u64 {
+            assert!(rate.admit(t0 + i), "demande {i}");
+        }
+        // La N+1ᵉ, dans la fenêtre : refusée, et insister ne change rien.
+        assert!(!rate.admit(t0 + 10));
+        assert!(!rate.admit(t0 + SENSITIVE_WINDOW_MS - 1));
+        // La première sort de la fenêtre : UNE place se libère, pas plus.
+        assert!(rate.admit(t0 + SENSITIVE_WINDOW_MS));
+        assert!(!rate.admit(t0 + SENSITIVE_WINDOW_MS));
+        // Bien après : la fenêtre est vide, le plein est de nouveau admis.
+        let later = t0 + 10 * SENSITIVE_WINDOW_MS;
+        for i in 0..SENSITIVE_MAX_PER_WINDOW as u64 {
+            assert!(rate.admit(later + i), "demande {i} après la fenêtre");
+        }
+        assert!(!rate.admit(later + 100));
+        // Une horloge qui recule ne libère rien.
+        assert!(!rate.admit(0));
+    }
+
+    #[test]
+    fn the_gate_is_not_asked_past_the_rate_and_is_asked_again_after_the_window() {
+        let m = sensible();
+        let mut rate = RateWindow::default();
+        let ask = |rate: &mut RateWindow, now: u64| {
+            let demand = page_demand(&m, &message("capability", "micro")).expect("validé");
+            admit(demand, true, rate, now)
+        };
+        for i in 0..SENSITIVE_MAX_PER_WINDOW as u64 {
+            assert!(matches!(ask(&mut rate, i), Ok(Admission::Ask(_))), "{i}");
+        }
+        let refusal = ask(&mut rate, 50).expect_err("débit dépassé");
+        assert_eq!(refusal.reason, Reason::RateLimited);
+        assert_eq!(refusal.reason.code(), "rate_limited");
+        // Les genres ordinaires ne sont pas freinés par le débit de la porte.
+        let ordinary = page_demand(&m, &message("invoke", "incrementer")).expect("validé");
+        assert!(matches!(
+            admit(ordinary, true, &mut rate, 50),
+            Ok(Admission::Run(_))
+        ));
+        assert!(matches!(
+            ask(&mut rate, SENSITIVE_WINDOW_MS),
+            Ok(Admission::Ask(_))
+        ));
+    }
+
+    #[test]
+    fn the_replies_have_their_exact_json_shape() {
+        assert_eq!(
+            result_message(&json!("r-1")),
+            json!({"type":"this:result","id":"r-1","ok":true})
+        );
+        assert_eq!(
+            refused_message(&json!(42), Reason::NoGate),
+            json!({"type":"this:refused","id":42,"reason":"no_gate"})
+        );
+        // Le vocabulaire des raisons : stable, lisible, sans doublon.
+        let codes: Vec<_> = Reason::ALL.iter().map(|r| r.code()).collect();
+        assert_eq!(
+            codes,
+            [
+                "malformed",
+                "unknown_kind",
+                "undeclared_action",
+                "wrong_kind",
+                "no_gate",
+                "denied",
+                "rate_limited"
+            ]
+        );
+        for reason in Reason::ALL {
+            let reply = refused_message(&json!("x"), reason);
+            assert_eq!(reply["reason"], reason.code());
+            assert_eq!(reply.as_object().map(|o| o.len()), Some(3));
+        }
+    }
+
+    #[test]
+    fn the_correlation_is_the_request_field_never_the_row_id() {
+        // `id` est la ligne visée : ce n'est pas une demande de réponse.
+        assert_eq!(correlation(&json!({"kind":"delete","id":"7"})), None);
+        assert_eq!(
+            correlation(&json!({"request":"a1","id":"7"})),
+            Some(json!("a1"))
+        );
+        assert_eq!(correlation(&json!({"request":12})), Some(json!(12)));
+        // Ni vide, ni trop long, ni structuré : pas de réponse, la demande reste traitée.
+        assert_eq!(correlation(&json!({"request":""})), None);
+        let long = "x".repeat(CORRELATION_MAX_LEN + 1);
+        assert_eq!(correlation(&json!({"request":long})), None);
+        let max = "x".repeat(CORRELATION_MAX_LEN);
+        assert_eq!(
+            correlation(&json!({"request":max.clone()})),
+            Some(json!(max))
+        );
+        assert_eq!(correlation(&json!({"request":{"a":1}})), None);
+        assert_eq!(correlation(&json!({"request":null})), None);
+    }
+
+    #[test]
+    fn a_host_built_without_a_gate_is_closed() {
+        let owner = Owner::new();
+        owner.set();
+        let host = HtmlHost::new(
+            Callback::new(|_: String| -> ReadFuture { Box::pin(async { None }) }),
+            Signal::derive(|| "dark".to_owned()),
+            Signal::derive(|| "fr".to_owned()),
+        );
+        assert!(host.gate.is_none() && host.on_page_intent.is_none());
+        let gated = host.with_gate(Callback::new(|_: GateRequest| -> GateFuture {
+            Box::pin(async { GateAnswer::Denied })
+        }));
+        assert!(gated.gate.is_some() && gated.on_page_intent.is_none());
     }
 }
