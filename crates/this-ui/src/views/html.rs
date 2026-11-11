@@ -32,7 +32,9 @@ use leptos::prelude::*;
 use serde_json::{Map, Value, json};
 use this_descriptor::ModuleDescriptor;
 use this_descriptor::engine::query::matches;
-use this_descriptor::views::{DataGrant, HTML_DATA_MAX_LIMIT, Node, html_resolve};
+use this_descriptor::views::{
+    DataGrant, HTML_DATA_MAX_LIMIT, Node, html_field_verdict, html_resolve,
+};
 
 use crate::views::data::Snapshot;
 use crate::views::intent::{FieldValue, Intent, Values};
@@ -535,9 +537,14 @@ pub fn grants_message(
         }
         let fields = match (&g.fields, &declared) {
             (Some(f), Some(d)) => {
-                if let Some(bad) = f.iter().find(|x| !d.contains(x)) {
+                // `id` est accordable SEULEMENT s'il est demandé (il sert à cibler une ligne) ;
+                // `created_at` & co restent à l'hôte : refus nommé.
+                if let Some((bad, why)) = f
+                    .iter()
+                    .find_map(|x| html_field_verdict(x, d).err().map(|w| (x, w)))
+                {
                     lines.push(format!(
-                        "html data : html_data_field_unknown — `{bad}` n'est pas un champ déclaré de `{e}`"
+                        "html data : {why} — `{bad}` n'est pas un champ accordable de `{e}`"
                     ));
                     continue;
                 }
@@ -1036,14 +1043,30 @@ mod tests {
     fn an_undeclared_field_is_refused_by_name_before_any_send() {
         let (m, rows) = taches();
         let snap = Snapshot::new().with("tache", Feed::Ready(rows));
-        for champ in ["secret", "id"] {
+        for champ in ["secret", "created_at"] {
             let g = grant(json!({"entity":"tache","fields":["titre", champ]}));
             let (msg, lines) = grants_message(&snap, &[g], &m, "t", "l");
             assert_eq!(msg["rows"], json!({}), "{champ}");
             assert_eq!(lines.len(), 1);
-            assert!(lines[0].contains("html_data_field_unknown"), "{lines:?}");
+            let code = if champ == "secret" {
+                "html_data_field_unknown"
+            } else {
+                "html_data_field_reserved"
+            };
+            assert!(lines[0].contains(code), "{lines:?}");
             assert!(lines[0].contains(champ), "{lines:?}");
         }
+    }
+
+    #[test]
+    fn id_is_granted_when_asked_to_target_a_row_but_created_at_never() {
+        let (m, rows) = taches();
+        let snap = Snapshot::new().with("tache", Feed::Ready(rows));
+        let g = grant(json!({"entity":"tache","fields":["id","titre"]}));
+        let (msg, lines) = grants_message(&snap, &[g], &m, "t", "l");
+        assert!(lines.is_empty(), "{lines:?}");
+        assert_eq!(msg["rows"]["tache"][1], json!({"id":"2","titre":"b"}));
+        assert!(msg["rows"]["tache"][1].get("created_at").is_none());
     }
 
     #[test]

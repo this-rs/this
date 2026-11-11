@@ -258,8 +258,8 @@ pub enum Node {
 ///
 /// - `entity` (requis) : une entité du module, ou d'un module qu'il requiert ;
 /// - `filter` : la forme d'un filtre de liste ([`FilterExpr`]) ;
-/// - `fields` : les champs DÉCLARÉS envoyés. Absent = tous les champs déclarés de l'entité,
-///   jamais les champs de base (`id`, dates…) ;
+/// - `fields` : les champs DÉCLARÉS envoyés, plus `id` si on le demande. Absent = tous les
+///   champs déclarés de l'entité, sans `id` ni champ de base. Voir [`html_field_verdict`] ;
 /// - `limit` : 1..=[`HTML_DATA_MAX_LIMIT`], défaut [`HTML_DATA_DEFAULT_LIMIT`].
 ///
 /// C'est la frontière de sécurité de la page : ce qui n'est pas demandé ici ne franchit pas
@@ -274,6 +274,30 @@ pub struct DataGrant {
     pub fields: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limit: Option<u32>,
+}
+
+/// Les champs de base d'une ligne, posés par l'hôte et non déclarés par le module.
+pub const HTML_BASE_FIELDS: [&str; 4] = ["id", "created_at", "updated_at", "deleted_at"];
+
+/// Ce qu'une demande `fields` d'un nœud [`Node::Html`] peut nommer, et pourquoi.
+///
+/// - un champ DÉCLARÉ de l'entité : accordé ;
+/// - `id` : accordé **s'il est demandé**, jamais implicitement. Il sert à CIBLER : sans lui
+///   une page ne peut pas émettre `Update { id }` ni `Delete { id }` sur la ligne qu'elle
+///   affiche. Un `fields` absent ne le porte pas : la règle reste « on ne reçoit que ce
+///   qu'on demande » ;
+/// - tout autre champ de base (`created_at`, `updated_at`, `deleted_at`) : refusé,
+///   `html_data_field_reserved`. C'est une métadonnée de l'hôte, qui ne sert à cibler rien
+///   et n'a pas à franchir l'iframe ;
+/// - le reste : `html_data_field_unknown`.
+pub fn html_field_verdict(field: &str, declared: &[String]) -> Result<(), &'static str> {
+    if declared.iter().any(|d| d == field) || field == "id" {
+        Ok(())
+    } else if HTML_BASE_FIELDS.contains(&field) {
+        Err("html_data_field_reserved")
+    } else {
+        Err("html_data_field_unknown")
+    }
 }
 
 /// Le nombre maximal de demandes de données d'un nœud [`Node::Html`].
@@ -1927,14 +1951,25 @@ impl<'a> Checks<'a> {
                 .map(|e| e.fields.iter().map(|f| f.name.clone()).collect())
                 .unwrap_or_default();
             for (j, f) in g.fields.iter().flatten().enumerate() {
-                if !declares.contains(f) {
-                    let msg = unknown_msg(
-                        f,
-                        &format!("a declared field of `{}`", g.entity),
-                        declares.iter().map(String::as_str),
-                        "Only declared fields cross into the page, never base fields.",
-                    );
-                    self.push("html_data_field_unknown", format!("{p}.fields[{j}]"), msg);
+                let decl: Vec<String> = declares.iter().cloned().collect();
+                match html_field_verdict(f, &decl) {
+                    Ok(()) => {}
+                    Err("html_data_field_reserved") => self.push(
+                        "html_data_field_reserved",
+                        format!("{p}.fields[{j}]"),
+                        format!(
+                            "`{f}` is a base field of the host; only `id` may be requested (to target a row)"
+                        ),
+                    ),
+                    Err(_) => {
+                        let msg = unknown_msg(
+                            f,
+                            &format!("a declared field of `{}`", g.entity),
+                            declares.iter().map(String::as_str),
+                            "Only declared fields (and `id`, to target a row) cross into the page.",
+                        );
+                        self.push("html_data_field_unknown", format!("{p}.fields[{j}]"), msg);
+                    }
                 }
             }
             if let Some(filtre) = &g.filter {
@@ -4284,16 +4319,30 @@ mod tests {
     #[test]
     fn html_data_refusals_are_named() {
         assert_refused(&html_data(vec![grant("ghost")]), "html_data_entity_unknown");
-        // Un champ non déclaré, y compris un champ de base.
-        for champ in ["nope", "id"] {
-            assert_refused(
-                &html_data(vec![DataGrant {
-                    fields: Some(vec![champ.into()]),
-                    ..grant("invoice")
-                }]),
-                "html_data_field_unknown",
-            );
-        }
+        // Un champ non déclaré ; un champ de base autre que `id` a son propre refus.
+        assert_refused(
+            &html_data(vec![DataGrant {
+                fields: Some(vec!["nope".into()]),
+                ..grant("invoice")
+            }]),
+            "html_data_field_unknown",
+        );
+        assert_refused(
+            &html_data(vec![DataGrant {
+                fields: Some(vec!["created_at".into()]),
+                ..grant("invoice")
+            }]),
+            "html_data_field_reserved",
+        );
+        assert!(
+            codes(&html_data(vec![DataGrant {
+                fields: Some(vec!["id".into()]),
+                ..grant("invoice")
+            }]))
+            .iter()
+            .all(|c| !c.contains("html_data_field")),
+            "`id` est accordable"
+        );
         let filtre: FilterExpr =
             serde_json::from_str(r#"{"cmp":{"field":"nope","op":"eq","value":1}}"#).unwrap();
         assert_refused(
