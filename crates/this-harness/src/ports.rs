@@ -82,6 +82,19 @@ pub trait Transport {
     /// déclarée au moteur par le transport lui-même (MCP, `--allowedTools`…),
     /// pas par le Toolbox — voir [`Permission`].
     fn set_permission(&self, _permission: Rc<dyn Permission>) {}
+
+    /// Ce transport **honore-t-il** la paire que le routeur (mode Auto) a choisie
+    /// pour le tour — lit-il [`Request::model`] et [`Request::provider`] pour
+    /// parler au bon moteur ? Faux par défaut : un transport qui ne le déclare
+    /// pas sert son modèle à lui.
+    ///
+    /// Tant que c'est faux, la décision du routeur est **consultative** :
+    /// [`crate::Event::Routed`] porte `advisory: true`, et la fin du tour n'est pas
+    /// rendue à l'apprentissage comme servie par la paire décidée (un bras ne
+    /// se nourrit pas d'un tour qu'il n'a pas servi).
+    fn honors_route(&self) -> bool {
+        false
+    }
 }
 
 /// La porte du run, rendue à un transport de la famille A.

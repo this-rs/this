@@ -189,6 +189,15 @@ pub enum RejectReason {
     /// `auto` (ou vide) n'est pas un nom de modèle : jamais un candidat.
     /// Ajout de this-rs : PO traite la sentinelle à l'ouverture, pas dans le filtre.
     Sentinel,
+    /// Le prix donné par l'hôte n'est pas un nombre utilisable (`NaN`, infini,
+    /// négatif) : la paire est écartée plutôt que notée sur une valeur qui
+    /// empoisonnerait le classement. Ajout de this-rs.
+    InvalidPrice,
+    /// Le bras stocké de cette paire n'est pas un postérieur (`alpha` ou `beta`
+    /// nul, négatif, infini ou `NaN`, coût non fini) : elle est écartée, le
+    /// magasin de l'hôte est à réparer. Posé par la décision, pas par le filtre.
+    /// Ajout de this-rs.
+    InvalidArm,
     /// Une machine est choisie par une personne, jamais par le routeur.
     Remote,
     /// L'hôte n'autorise pas cette instance.
@@ -222,6 +231,8 @@ impl RejectReason {
     pub fn code(&self) -> &'static str {
         match self {
             Self::Sentinel => "sentinel",
+            Self::InvalidPrice => "invalid_price",
+            Self::InvalidArm => "invalid_arm",
             Self::Remote => "remote",
             Self::NotAllowed => "not_allowed",
             Self::QuotaExhausted { .. } => "quota_exhausted",
@@ -267,6 +278,14 @@ pub struct Filtered {
 fn check(signature: &TurnSignature, facts: &Candidate) -> Option<RejectReason> {
     if is_auto_model(&facts.model) {
         return Some(RejectReason::Sentinel);
+    }
+    // Les faits viennent de l'hôte : un prix qui n'est pas un nombre ne doit ni
+    // passer le filtre de budget par accident, ni donner une note `NaN`.
+    if let Some(price) = facts.price {
+        let usable = |v: f64| v.is_finite() && v >= 0.0;
+        if !usable(price.input_per_mtok) || !usable(price.output_per_mtok) {
+            return Some(RejectReason::InvalidPrice);
+        }
     }
     if facts.remote {
         return Some(RejectReason::Remote);

@@ -386,10 +386,7 @@ async fn watch(
 
 /// Le premier des deux qui rend. Le flux est sondé d'abord : un transport qui
 /// répond tout de suite n'arme jamais la garde.
-async fn race<T>(
-    work: impl Future<Output = T>,
-    guard: impl Future<Output = Watch>,
-) -> Result<T, Watch> {
+async fn race<T, G>(work: impl Future<Output = T>, guard: impl Future<Output = G>) -> Result<T, G> {
     let mut work = std::pin::pin!(work);
     let mut guard = std::pin::pin!(guard);
     std::future::poll_fn(move |cx| {
@@ -403,6 +400,17 @@ async fn race<T>(
     })
     .await
 }
+
+/// Le délai accordé à un appel du routeur du mode Auto (candidats, bras,
+/// enregistrement d'une décision, fin de tour) : deux secondes d'horloge du
+/// harnais, comme PO (`DECIDE_TIMEOUT`, `agent_hooks.rs:598`).
+///
+/// À l'expiration, `route` se replie sur la paire en vigueur ([`crate::routing::RouteWhy::TimedOut`]) et
+/// `settle` est abandonné : un port qui ne répond jamais ne retient ni le tour, ni
+/// `Stopped`, ni `busy`. **Limite** (la même que [`RECORDER_TIMEOUT_MS`]) : sans
+/// minuteur (`Clock::sleep` rend `None`, une page qui n'en a pas injecté) la borne
+/// de temps n'existe pas ; seule l'annulation coupe `route`.
+pub const ROUTER_TIMEOUT_MS: u64 = 2_000;
 
 /// Le délai accordé à un appel de [`Recorder`] : deux secondes d'horloge du harnais.
 ///
@@ -445,6 +453,33 @@ async fn guarded(clock: &dyn Clock, call: impl Future<Output = ()>) {
         Poll::Pending
     })
     .await
+}
+
+/// Pourquoi un appel au routeur a été coupé.
+enum Cut {
+    Timeout,
+    Cancelled,
+}
+
+/// La veille d'un appel au routeur : rend dès que `ms` d'horloge sont écoulées
+/// (`limit`) ou que l'annulation est vue (`cancel`, relue à chaque pas).
+async fn cut(clock: &dyn Clock, ms: u64, cancel: Option<&Cancel>) -> Cut {
+    let end = clock.now_ms() + ms as f64;
+    loop {
+        if cancel.is_some_and(Cancel::is_cancelled) {
+            return Cut::Cancelled;
+        }
+        let left = (end - clock.now_ms()).max(0.0) as u64;
+        if left == 0 {
+            return Cut::Timeout;
+        }
+        match clock.sleep(left.min(WATCH_TICK_MS)) {
+            Some(sleep) => sleep.await,
+            // Pas de minuteur : seule l'annulation peut couper, et elle se relit au
+            // prochain réveil du travail lui-même.
+            None => return std::future::pending().await,
+        }
+    }
 }
 
 /// Attend `ms`, mais rend dès que l'annulation est vue : vrai si l'attente a
@@ -992,9 +1027,15 @@ impl Harness {
     /// Branche le routeur du **mode Auto** (voir [`crate::routing`]).
     ///
     /// À chaque message tenu qui ouvre un objectif, le routeur dit sur quelle
-    /// paire (fournisseur, modèle) il part ; tous les tours de cet objectif
-    /// portent cette paire ([`Request::model`], [`Request::provider`]) et un
-    /// [`Event::Routed`] dit laquelle et pourquoi. La décision se prend par
+    /// paire (fournisseur, modèle) il **devrait** partir ; tous les tours de cet
+    /// objectif portent cette paire ([`Request::model`], [`Request::provider`]) et
+    /// un [`Event::Routed`] dit laquelle et pourquoi.
+    ///
+    /// **Un transport qui ne lit pas la paire ne la sert pas.** Tant qu'il ne
+    /// déclare pas [`Transport::honors_route`], la décision est consultative :
+    /// l'événement porte `advisory: true`, et la fin du tour est rendue à
+    /// l'apprentissage sans paire servie. Les appels au routeur sont bornés
+    /// ([`ROUTER_TIMEOUT_MS`]) et coupés par l'annulation. La décision se prend par
     /// message, pas par appel au modèle : un objectif ne change pas de modèle au
     /// milieu de ses outils.
     ///
@@ -1135,6 +1176,10 @@ impl Harness {
             let Some(first) = self.take_pending() else {
                 break 'goals;
             };
+            // Le code de panne est celui de CET objectif : un objectif en panne suivi
+            // d'un message qui réussit ne laisse pas son code périmé à `Stopped` ni à
+            // l'apprentissage.
+            code = None;
             self.push(Message::user_with_images(
                 first.text.clone(),
                 first.images.clone(),
@@ -1153,7 +1198,7 @@ impl Harness {
             let limits = self.with(|s| s.limits.clone());
             // Mode Auto : la paire de cet objectif, décidée une fois, sur le message
             // qui l'ouvre. Sans routeur, `None` : la requête ne porte rien.
-            let route = self.route(&first, toolbox.as_ref(), &limits).await;
+            let route = self.route(&first, toolbox.as_ref(), &limits, &cancel).await;
             // L'identité du run, stable pour toutes ses étapes.
             let run_id = self.with(|s| {
                 s.run_seq += 1;
@@ -1570,10 +1615,15 @@ impl Harness {
             verdict = Some(verdict_of(&run.borrow(), &run.borrow().inconnues));
             // Mode Auto : la fin de l'objectif est rendue à l'apprentissage, pour la
             // décision qui l'a servi. L'emprunt du run est relâché avant l'attente.
-            if let Some(router) = &self.router {
+            if let Some(router) = self.router.clone() {
                 let ending = run.borrow().stop.clone();
                 if let Some(ending) = ending {
-                    router.settle(&ending, code.as_deref()).await;
+                    // Bornée : un apprentissage qui pend ne retient ni `Stopped`,
+                    // ni `busy`. Pas coupée par l'annulation : un run annulé est
+                    // lui aussi rendu (`Cancelled`, jamais une récompense).
+                    let honored = transport.honors_route();
+                    let settle = router.settle(&ending, code.as_deref(), honored);
+                    let _ = race(settle, cut(clock.as_ref(), ROUTER_TIMEOUT_MS, None)).await;
                 }
             }
             // Le run qui a posé `stop` est retenu (déplacé, jamais cloné) pour l'annonce
@@ -1726,17 +1776,23 @@ impl Harness {
     }
 
     /// La paire sur laquelle l'objectif ouvert par `first` part, quand un routeur
-    /// est branché — et l'événement qui le dit. `None` sans routeur.
+    /// est branché — et l'événement qui le dit. `None` sans routeur, ou quand
+    /// l'annulation a coupé l'attente (la boucle s'arrête alors sur `Cancelled`).
+    ///
+    /// L'appel est borné : [`ROUTER_TIMEOUT_MS`] d'horloge, après quoi le tour part
+    /// sur la paire en vigueur (`timed_out`) ; et l'annulation le coupe tout de suite.
     async fn route(
         &self,
         first: &Pending,
         toolbox: &dyn Toolbox,
         limits: &Limits,
+        cancel: &Cancel,
     ) -> Option<crate::routing::Route> {
         let router = self.router.clone()?;
+        let transcript = self.transcript();
         // Ce que le tour emportera : le fil (borné par le budget de contexte, la
         // requête ne dépassera pas) et les schémas d'outils. Estimation, pas mesure.
-        let history = crate::context::estimate_tokens(&self.transcript());
+        let history = crate::context::estimate_tokens(&transcript);
         let history = limits.context_budget.map_or(history, |b| history.min(b));
         let schemas: usize = toolbox
             .specs()
@@ -1745,17 +1801,31 @@ impl Harness {
                 spec.name.len() + spec.description.len() + spec.parameters.to_string().len()
             })
             .sum();
-        let routed = router
-            .route(crate::routing::TurnInput {
+        // Le besoin d'images est celui du fil que le transport enverra : un tour
+        // de texte qui suit une image la porte encore dans l'historique. PO ne
+        // regarde que le message du tour (`set_turn_input`, `agent_hooks.rs:863`,
+        // parce que le moteur de la session garde son historique) ; ici le harnais
+        // renvoie tout le fil à chaque tour, donc il compte tout le fil — au pire
+        // trop prudent (une image que la compaction a retirée), jamais aveugle.
+        let has_images =
+            !first.images.is_empty() || transcript.iter().any(|m| !m.images().is_empty());
+        let clock = self.clock.clone();
+        let routed = {
+            let work = router.route(crate::routing::TurnInput {
                 text: &first.text,
-                has_images: !first.images.is_empty(),
+                has_images,
                 hints: crate::routing::ContextHints {
                     history_tokens: history as u64,
                     tool_schema_tokens: (schemas / 4) as u64,
                     budget_remaining_usd: None,
                 },
-            })
-            .await;
+            });
+            match race(work, cut(clock.as_ref(), ROUTER_TIMEOUT_MS, Some(cancel))).await {
+                Ok(routed) => routed,
+                Err(Cut::Cancelled) => return None,
+                Err(Cut::Timeout) => router.fallback(crate::routing::RouteWhy::TimedOut),
+            }
+        };
         self.out.emit(Event::Routed {
             provider: routed.route.provider().to_string(),
             model: routed.route.model().map(str::to_string),
@@ -1767,6 +1837,7 @@ impl Harness {
                 .map(|d| d.reason.clone())
                 .unwrap_or_default(),
             mode: router.mode().map(|m| m.as_str().to_string()),
+            advisory: !self.transport.honors_route(),
         });
         Some(routed.route)
     }

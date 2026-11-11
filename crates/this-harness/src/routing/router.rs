@@ -98,12 +98,37 @@ pub trait Learning {
         PriorHints::new()
     }
 
-    /// Une décision vient d'être prise, appliquée ou non.
+    /// Une décision vient d'être prise, appliquée ou non. `decision.used` dit
+    /// la paire sur laquelle le tour part **réellement**.
     async fn record(&self, _decision: &Decision) {}
 
-    /// Le tour décidé par `decision_id` s'est terminé sur `stop`, servi par
-    /// `served`. `code` est le code de panne du transport, s'il y en a un.
-    async fn settle(&self, _decision_id: u128, _served: &Pick, _stop: &Stop, _code: Option<&str>) {}
+    /// Le tour décidé par `decision_id` s'est terminé sur `stop`. `code` est le
+    /// code de panne du transport, s'il y en a un.
+    ///
+    /// `served` est la paire qui a **réellement** servi le tour : `None` quand
+    /// le transport ne déclare pas honorer la paire du routeur
+    /// ([`Transport::honors_route`](crate::Transport::honors_route) faux) — la
+    /// décision n'était que consultative, aucun bras ne doit être nourri.
+    ///
+    /// # Contrat
+    ///
+    /// - `record` et `settle` sont des appels **au mieux** : l'un et l'autre sont
+    ///   bornés dans le temps par le harnais ([`crate::ROUTER_TIMEOUT_MS`]) et peuvent
+    ///   être abandonnés (future lâchée, page suspendue).
+    /// - `settle` peut donc arriver pour un identifiant jamais `record`é : le
+    ///   traiter comme un no-op, jamais comme une erreur.
+    /// - une décision `record`ée appliquée dont la fin ne vient jamais est un
+    ///   tour abandonné : à ne pas nourrir. Le routeur le dit lui-même au tour
+    ///   suivant par un `settle` avec [`Stop::Interrupted`] (jamais une récompense).
+    /// - au plus un `settle` par décision.
+    async fn settle(
+        &self,
+        _decision_id: u128,
+        _served: Option<&Pick>,
+        _stop: &Stop,
+        _code: Option<&str>,
+    ) {
+    }
 }
 
 /// Aucun apprentissage : pas de bras, rien d'écrit.
@@ -183,6 +208,12 @@ pub enum RouteWhy {
     ExplorationNeverMoves,
     /// L'écart est sous la marge d'hystérésis : le fournisseur reste.
     UnderMargin,
+    /// La personne a réglé la conversation (à la main, menu) pendant que la
+    /// décision se prenait : son réglage gagne, la décision est jetée.
+    Superseded,
+    /// Un port de l'hôte (candidats, apprentissage) n'a pas répondu à temps :
+    /// repli sur la paire en vigueur.
+    TimedOut,
 }
 
 impl RouteWhy {
@@ -199,6 +230,8 @@ impl RouteWhy {
             Self::NotRouted => "not_routed",
             Self::ExplorationNeverMoves => "exploration_never_moves",
             Self::UnderMargin => "under_margin",
+            Self::Superseded => "superseded",
+            Self::TimedOut => "timed_out",
         }
     }
 }
@@ -357,6 +390,9 @@ struct State {
     /// La dernière décision appliquée, et la paire qui a servi : ce que
     /// [`TurnRouter::settle`] rend à l'apprentissage.
     open: Option<(u128, Pick)>,
+    /// Compteur de réglages de la personne (menu, main, liste) : une décision
+    /// qui a attendu un port ne réécrit l'état que si rien n'a changé entre-temps.
+    generation: u64,
 }
 
 /// Le routeur d'UNE conversation.
@@ -474,6 +510,7 @@ impl TurnRouter {
                 last_change_class: None,
                 last_move_turn: None,
                 open: None,
+                generation: 0,
             }),
         }
     }
@@ -484,6 +521,7 @@ impl TurnRouter {
     /// à l'ouverture est relâché. Vaut dès le tour suivant.
     pub fn reroute(&self, menu: Menu) -> Result<ConversationRoutingMode, EmptyPool> {
         let mut state = self.state.borrow_mut();
+        state.generation += 1;
         let mode = match menu {
             Menu::Auto => {
                 state.choice.pool = None;
@@ -521,6 +559,7 @@ impl TurnRouter {
     /// La conversation rend la main aux réglages (elle ne demande plus rien).
     pub fn follow_settings(&self) {
         let mut state = self.state.borrow_mut();
+        state.generation += 1;
         state.choice.asked = None;
         state.choice.pool = None;
         state.choice.explicit_model = false;
@@ -534,6 +573,7 @@ impl TurnRouter {
     /// [`TurnRouter::reroute`].
     pub fn set_by_hand(&self, provider_id: impl Into<String>, model: impl Into<String>) {
         let mut state = self.state.borrow_mut();
+        state.generation += 1;
         state.provider = provider_id.into();
         state.model = model.into();
         state.manual = true;
@@ -543,7 +583,9 @@ impl TurnRouter {
 
     /// Remplace la liste « modèles qu'Auto peut utiliser » de la personne ; vide : tous.
     pub fn set_auto_models(&self, list: Vec<PoolEntry>) {
-        self.state.borrow_mut().choice.auto_models = (!list.is_empty()).then_some(list);
+        let mut state = self.state.borrow_mut();
+        state.generation += 1;
+        state.choice.auto_models = (!list.is_empty()).then_some(list);
     }
 
     /// La paire en vigueur.
@@ -579,15 +621,29 @@ impl TurnRouter {
     ///   modèle changé à la main : rien n'est demandé, la paire en vigueur part ;
     /// - sinon une décision est prise parmi les candidats de l'hôte (le pool de
     ///   la conversation s'il y en a un, sinon la liste de la personne en Auto),
-    ///   notée par [`Learning::record`], et appliquée quand l'étape le permet ;
+    ///   appliquée quand l'étape le permet, puis notée par [`Learning::record`] ;
     /// - **un seul** éligible : on part dessus ; **zéro** : repli sur la paire
-    ///   en vigueur. Jamais d'erreur « aucun candidat ».
+    ///   en vigueur. Jamais d'erreur « aucun candidat » ;
+    /// - le réglage de la personne gagne : si elle règle la conversation
+    ///   pendant que la décision attend un port, la décision est jetée
+    ///   ([`RouteWhy::Superseded`]).
+    ///
+    /// Cette future peut être lâchée à tout moment (le harnais la borne dans le
+    /// temps et la coupe sur annulation, voir [`TurnRouter::fallback`]) : l'état
+    /// n'est réécrit qu'en un seul bloc, sans attente au milieu.
     pub async fn route(&self, turn: TurnInput<'_>) -> Routed {
-        let (choice, manual, current, index, held_turn, held_class, last_move) = {
+        // Un tour appliqué dont la fin n'est jamais venue (future lâchée, page
+        // suspendue) est abandonné : dit explicitement, jamais nourri.
+        let abandoned = self.state.borrow_mut().open.take();
+        if let Some((id, _)) = abandoned {
+            self.learning
+                .settle(id, None, &Stop::Interrupted, None)
+                .await;
+        }
+        let (choice, manual, current, index, held_turn, held_class, last_move, generation) = {
             let mut state = self.state.borrow_mut();
             let index = state.next_turn;
             state.next_turn = state.next_turn.saturating_add(1);
-            state.open = None;
             (
                 state.choice.clone(),
                 state.manual,
@@ -596,6 +652,7 @@ impl TurnRouter {
                 state.last_change_turn,
                 state.last_change_class.clone(),
                 state.last_move_turn,
+                state.generation,
             )
         };
         let rights = rights_of(&choice, manual);
@@ -628,11 +685,18 @@ impl TurnRouter {
             _ => None,
         };
 
+        // Une session ouverte sur la sentinelle (`auto`, vide) n'a PAS de paire à
+        // quitter : le premier choix n'est ni un changement de fournisseur, ni
+        // soumis aux gardes qui le protègent (PO : la décision d'ouverture est
+        // hors de ces gardes, `agent_hooks.rs` 777-826).
+        let has_pair = !is_auto_model(&current.model);
+
         // Le tour porte une image et le pool SAIT que la paire en vigueur ne la
         // lit pas : rester n'est pas une option, les gardes anti-oscillation
         // cèdent à la contrainte dure. Une paire que le pool ne liste pas n'est
         // PAS aveugle : rien ne dit qu'elle ne lit pas l'image.
-        let blind = turn.has_images
+        let blind = has_pair
+            && turn.has_images
             && pool.iter().any(|f| {
                 f.provider_id == current.provider_id
                     && same_model(&f.model, &current.model)
@@ -652,7 +716,7 @@ impl TurnRouter {
             settings.mode = ProviderRoutingMode::Full;
         }
         let mut request = DecideRequest::new(signature, settings, pool);
-        request.current = Some(current.clone());
+        request.current = has_pair.then(|| current.clone());
         request.turn_index = Some(index);
         request.narrowed.extend(person);
         if held {
@@ -671,33 +735,122 @@ impl TurnRouter {
 
         let arms = self.learning.arms(&class).await;
         let hints = self.learning.hints();
-        let decision = decide(self.seeds.next_id(), &request, &arms, &hints);
-        self.learning.record(&decision).await;
+        let id = self.seeds.next_id();
+        let mut decision = decide(id, &request, &arms, &hints);
 
-        let Some(pick) = decision.chosen.clone() else {
-            return self.stay(RouteWhy::NoCandidate, Some(decision));
-        };
-        if !rights.auto || !decision.applied {
-            return self.stay(RouteWhy::RecordedOnly, Some(decision));
-        }
+        // Ce qui suit ne compte aucune attente : l'état est réécrit d'un bloc.
         let eligible = decision
             .alternatives
             .iter()
             .filter(|a| a.rejected.is_none())
             .count();
+        let current_eligible = decision
+            .alternatives
+            .iter()
+            .any(|a| a.rejected.is_none() && a.pick == current);
+        // Un tirage d'exploration ne doit jamais éloigner le tour d'une paire en
+        // vigueur qui reste éligible. Mais si la paire en vigueur est ELLE-MÊME
+        // hors du pool coché / de la liste de la personne, la garde n'a rien à
+        // protéger : le tour part sur le meilleur candidat non exploratoire, jamais
+        // sur un modèle qu'on n'a pas le droit de choisir.
+        if decision.explored && decision.applied && has_pair && !current_eligible && eligible > 0 {
+            request.settings.exploration_epsilon = 0.0;
+            decision = decide(id, &request, &arms, &hints);
+        }
+        let current_eligible = decision
+            .alternatives
+            .iter()
+            .any(|a| a.rejected.is_none() && a.pick == current);
+
+        let (why, apply) = self.verdict(
+            &decision,
+            &current,
+            has_pair,
+            current_eligible,
+            blind,
+            rights,
+            eligible,
+        );
+        let routed = {
+            let mut state = self.state.borrow_mut();
+            if state.generation != generation {
+                // La personne a réglé la conversation pendant l'attente : son
+                // réglage gagne, la décision n'écrit rien.
+                decision.applied = false;
+                decision.used = Some(Pick::new(&state.provider, &state.model));
+                Routed {
+                    route: Route::of(&state.provider, &state.model),
+                    changed: false,
+                    why: RouteWhy::Superseded,
+                    decision: Some(decision),
+                }
+            } else {
+                let mut changed = false;
+                if let (true, Some(pick)) = (apply, decision.chosen.clone()) {
+                    state.open = Some((decision.id, pick.clone()));
+                    if pick != current {
+                        let moves = has_pair && pick.provider_id != current.provider_id;
+                        state.provider = pick.provider_id.clone();
+                        state.model = pick.model.clone();
+                        state.last_change_turn = Some(index);
+                        state.last_change_class = Some(class);
+                        if moves {
+                            state.last_move_turn = Some(index);
+                        }
+                        changed = true;
+                    }
+                }
+                // Ce que le tour fait vraiment : la décision le dit, pour que
+                // l'apprentissage ne prenne jamais pour servie une paire qui ne
+                // l'a pas été (exploration refusée, écart sous la marge, étape
+                // consultative…).
+                let used = Pick::new(&state.provider, &state.model);
+                decision.applied = apply && decision.chosen.as_ref() == Some(&used);
+                decision.used = Some(used);
+                Routed {
+                    route: Route::of(&state.provider, &state.model),
+                    changed,
+                    why,
+                    decision: Some(decision),
+                }
+            }
+        };
+        if let Some(decision) = &routed.decision {
+            self.learning.record(decision).await;
+        }
+        routed
+    }
+
+    /// Ce que la décision devient : pourquoi, et si elle est appliquée.
+    #[allow(clippy::too_many_arguments)]
+    fn verdict(
+        &self,
+        decision: &Decision,
+        current: &Pick,
+        has_pair: bool,
+        current_eligible: bool,
+        blind: bool,
+        rights: Rights,
+        eligible: usize,
+    ) -> (RouteWhy, bool) {
+        let Some(pick) = &decision.chosen else {
+            return (RouteWhy::NoCandidate, false);
+        };
+        if !rights.auto || !decision.applied {
+            return (RouteWhy::RecordedOnly, false);
+        }
         if pick == current {
-            self.state.borrow_mut().open = Some((decision.id, pick));
             let why = if eligible == 1 {
                 RouteWhy::SingleCandidate
             } else {
                 RouteWhy::Kept
             };
-            return self.stay(why, Some(decision));
+            return (why, true);
         }
-        let moves = pick.provider_id != current.provider_id;
-        if moves {
+        let moves = has_pair && pick.provider_id != current.provider_id;
+        if moves && current_eligible {
             if decision.explored && !blind {
-                return self.stay(RouteWhy::ExplorationNeverMoves, Some(decision));
+                return (RouteWhy::ExplorationNeverMoves, false);
             }
             let score_of = |wanted: &Pick| {
                 decision
@@ -706,42 +859,40 @@ impl TurnRouter {
                     .find(|a| a.pick == *wanted && a.rejected.is_none())
                     .and_then(|a| a.score)
             };
-            if let (Some(best), Some(now)) = (decision.score, score_of(&current))
+            if let (Some(best), Some(now)) = (decision.score, score_of(current))
                 && best - now < HYSTERESIS_MARGIN
             {
-                return self.stay(RouteWhy::UnderMargin, Some(decision));
+                return (RouteWhy::UnderMargin, false);
             }
         }
-        {
-            let mut state = self.state.borrow_mut();
-            state.provider = pick.provider_id.clone();
-            state.model = pick.model.clone();
-            state.last_change_turn = Some(index);
-            state.last_change_class = Some(class);
-            if moves {
-                state.last_move_turn = Some(index);
-            }
-            state.open = Some((decision.id, pick.clone()));
-        }
-        Routed {
-            route: Route::of(&pick.provider_id, &pick.model),
-            changed: true,
-            why: if eligible == 1 {
-                RouteWhy::SingleCandidate
-            } else {
-                RouteWhy::Routed
-            },
-            decision: Some(decision),
-        }
+        let why = if eligible == 1 {
+            RouteWhy::SingleCandidate
+        } else {
+            RouteWhy::Routed
+        };
+        (why, true)
+    }
+
+    /// Le repli quand le routeur ne peut pas répondre (un port a pendu, ou la
+    /// future de [`TurnRouter::route`] a été coupée) : la paire en vigueur, sans
+    /// décision. Les gardes du tour restent comptées (`route` a déjà avancé le
+    /// compteur de tours).
+    pub fn fallback(&self, why: RouteWhy) -> Routed {
+        self.stay(why, None)
     }
 
     /// Le tour s'est terminé : sa fin est rendue à l'apprentissage, pour la
     /// décision appliquée qui l'a servi. Sans décision appliquée, rien n'est dit
     /// (un bras jamais servi n'est jamais nourri).
-    pub async fn settle(&self, stop: &Stop, code: Option<&str>) {
+    ///
+    /// `honored` : le transport a-t-il honoré la paire
+    /// ([`Transport::honors_route`](crate::Transport::honors_route)) ? Faux :
+    /// `served` est `None`, la décision n'était que consultative.
+    pub async fn settle(&self, stop: &Stop, code: Option<&str>, honored: bool) {
         let open = self.state.borrow_mut().open.take();
-        if let Some((id, served)) = open {
-            self.learning.settle(id, &served, stop, code).await;
+        if let Some((id, pair)) = open {
+            let served = honored.then_some(&pair);
+            self.learning.settle(id, served, stop, code).await;
         }
     }
 }
@@ -773,8 +924,8 @@ impl PoolSource for MemoryPool {
 pub struct Settled {
     /// La décision appliquée qui a servi le tour.
     pub decision_id: u128,
-    /// La paire qui a servi.
-    pub served: Pick,
+    /// La paire qui a servi ; `None` : décision consultative.
+    pub served: Option<Pick>,
     /// Comment le tour s'est arrêté.
     pub stop: Stop,
     /// Le code de panne du transport, s'il y en a un.
@@ -835,10 +986,16 @@ impl Learning for MemoryLearning {
         self.decisions.borrow_mut().push(decision.clone());
     }
 
-    async fn settle(&self, decision_id: u128, served: &Pick, stop: &Stop, code: Option<&str>) {
+    async fn settle(
+        &self,
+        decision_id: u128,
+        served: Option<&Pick>,
+        stop: &Stop,
+        code: Option<&str>,
+    ) {
         self.settled.borrow_mut().push(Settled {
             decision_id,
-            served: served.clone(),
+            served: served.cloned(),
             stop: stop.clone(),
             code: code.map(str::to_owned),
         });

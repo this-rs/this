@@ -767,6 +767,11 @@ impl Transport for Script {
         delta(&reply.text);
         Ok(reply)
     }
+
+    // Ce faux moteur lit la paire : il simule un transport qui honore le routeur.
+    fn honors_route(&self) -> bool {
+        true
+    }
 }
 
 struct Tools;
@@ -908,6 +913,7 @@ fn un_tour_en_auto_obtient_son_modele_par_le_routeur() {
         why,
         reason,
         mode,
+        advisory,
     } = &events[0]
     else {
         unreachable!()
@@ -917,12 +923,13 @@ fn un_tour_en_auto_obtient_son_modele_par_le_routeur() {
     assert_eq!(why, "routed");
     assert!(reason.starts_with("b/m2: chat general turn"), "{reason}");
     assert_eq!(mode.as_deref(), Some("full"));
+    assert!(!advisory, "ce transport honore la paire");
 
     // La fin de l'objectif est rendue au port d'apprentissage, pour la décision servie.
     let settled = world.learning.settled();
     assert_eq!(settled.len(), 1);
     assert_eq!(settled[0].decision_id, world.learning.decisions()[0].id);
-    assert_eq!(settled[0].served, Pick::new("b", "m2"));
+    assert_eq!(settled[0].served, Some(Pick::new("b", "m2")));
     assert_eq!(settled[0].stop, Stop::Done);
 }
 
@@ -944,17 +951,15 @@ fn le_harnais_suit_un_changement_de_mode_en_cours_de_conversation() {
     router
         .reroute(Menu::Ticked(vec![entry("a", "m1"), entry("c", "m3")]))
         .unwrap();
+    // `a/m1` gagne nettement parmi les cochés : une seule issue possible.
+    world.prefer(("a", "m1"), &[("b", "m2"), ("c", "m3")]);
     run(harness.send("hello"));
 
     let seen = transport.seen.borrow();
     let pairs: Vec<_> = seen.iter().map(|r| (r.provider(), r.model())).collect();
     assert_eq!(pairs[0], (Some("b"), Some("m2")), "auto");
     assert_eq!(pairs[1], (Some("c"), Some("m3")), "strict");
-    assert!(
-        pairs[2] == (Some("a"), Some("m1")) || pairs[2] == (Some("c"), Some("m3")),
-        "mixed : parmi les cochés, {:?}",
-        pairs[2]
-    );
+    assert_eq!(pairs[2], (Some("a"), Some("m1")), "mixed");
     let modes: Vec<_> = routed_events(&journal)
         .into_iter()
         .map(|e| match e {
@@ -1063,6 +1068,7 @@ fn l_evenement_routed_a_une_forme_stable_sur_le_fil() {
         why: "routed".into(),
         reason: "b/m2: chat general turn".into(),
         mode: Some("full".into()),
+        advisory: false,
     };
     assert_eq!(
         serde_json::to_value(&event).unwrap(),
@@ -1080,4 +1086,660 @@ fn l_evenement_routed_a_une_forme_stable_sur_le_fil() {
         json!({"type": "routed", "provider": "a", "changed": false, "why": "pinned"})
     );
     assert_eq!(event.name(), "routed");
+}
+
+// ── 7. Revue de la PR #249 : les constats, un test chacun ───────────────────
+
+fn eager() -> RoutingSettings {
+    RoutingSettings {
+        exploration_epsilon: 0.25,
+        ..RoutingSettings::default()
+    }
+}
+
+/// Constat 3 : en `mixed`, pool `{b/m2, c/m3}`, paire en vigueur `a/m1` (non
+/// cochée). Un tirage d'exploration ne doit pas laisser le tour sur `a/m1`.
+#[test]
+fn mixed_un_tirage_d_exploration_ne_laisse_jamais_le_tour_hors_du_pool_coche() {
+    for seed in 0..400u128 {
+        let world = World::new(three_providers());
+        let router = TurnRouter::new(
+            world
+                .spec("a", "m1", seed)
+                .settings(eager())
+                .ticked(vec![entry("b", "m2"), entry("c", "m3")]),
+        );
+        let routed = run(router.route(text("hello")));
+        assert_ne!(
+            routed.route.provider(),
+            "a",
+            "graine {seed} : a/m1 n'est pas coché ({})",
+            routed.why.code()
+        );
+    }
+}
+
+/// Constat 3 : en Auto, liste de la personne à plusieurs entrées chez d'autres
+/// fournisseurs. PO `agent_hooks.rs::provider_move_tests::auto_never_chooses_outside_the_persons_list`.
+#[test]
+fn auto_ne_choisit_jamais_hors_de_la_liste_meme_sur_un_tirage_d_exploration() {
+    for seed in 0..400u128 {
+        let world = World::new(three_providers());
+        let router = TurnRouter::new(
+            world
+                .spec("a", "m1", seed)
+                .settings(eager())
+                .auto()
+                .auto_models(vec![entry("b", "m2"), entry("c", "m3")]),
+        );
+        for message in ["hello", "pourquoi ça plante ?", "hello"] {
+            let routed = run(router.route(text(message)));
+            assert_ne!(routed.route.provider(), "a", "graine {seed}");
+        }
+    }
+}
+
+/// Constat 4 : une session ouverte sur la sentinelle n'a pas de paire à
+/// quitter. Le premier choix n'est pas un changement de fournisseur.
+#[test]
+fn l_ouverture_sur_la_sentinelle_n_est_pas_un_changement_de_fournisseur() {
+    let world = World::new(three_providers());
+    world.prefer(("b", "m2"), &[("a", "m1"), ("c", "m3")]);
+    let router = TurnRouter::new(world.spec("claude-code", "auto", 1).auto());
+    assert_eq!(pair(&run(router.route(text("hello")))), on("b", "m2"));
+    // Tour 1 : `a` devient le préféré. Rien n'a « bougé » au tour 0.
+    world.prefer(("a", "m1"), &[("b", "m2"), ("c", "m3")]);
+    let next = run(router.route(text("pourquoi ça plante ?")));
+    assert!(
+        !reason(&next).contains(AFTER_PROVIDER_MOVE),
+        "{}",
+        reason(&next)
+    );
+    assert_eq!(
+        looked_at(&next).len(),
+        3,
+        "aucune restriction de fournisseur"
+    );
+    assert_eq!(pair(&next), on("a", "m1"));
+
+    // Même sur un tirage d'exploration, l'ouverture part sur une vraie paire.
+    for seed in 0..300u128 {
+        let world = World::new(three_providers());
+        let router = TurnRouter::new(
+            world
+                .spec("claude-code", "auto", seed)
+                .settings(eager())
+                .auto(),
+        );
+        let routed = run(router.route(text("hello")));
+        assert!(routed.route.model().is_some(), "graine {seed}");
+        assert_ne!(routed.route.provider(), "claude-code");
+    }
+}
+
+/// Un pool dont l'appel règle le modèle à la main PENDANT que le routeur l'attend.
+struct Meddler {
+    pool: Vec<Candidate>,
+    router: RefCell<Option<Rc<TurnRouter>>>,
+}
+
+#[async_trait(?Send)]
+impl this_harness::routing::PoolSource for Meddler {
+    async fn pool(&self) -> Vec<Candidate> {
+        if let Some(router) = self.router.borrow().as_ref() {
+            router.set_by_hand("c", "m3");
+        }
+        self.pool.clone()
+    }
+}
+
+/// Constat 6 : le réglage de la personne gagne toujours, même s'il arrive
+/// pendant qu'une décision est en cours.
+#[test]
+fn un_reglage_a_la_main_pendant_la_decision_gagne() {
+    let world = World::new(three_providers());
+    world.prefer(("b", "m2"), &[("a", "m1"), ("c", "m3")]);
+    let meddler = Rc::new(Meddler {
+        pool: three_providers(),
+        router: RefCell::new(None),
+    });
+    let mut spec = world.spec("a", "m1", 1).auto();
+    spec.pool = meddler.clone();
+    let router = Rc::new(TurnRouter::new(spec));
+    *meddler.router.borrow_mut() = Some(router.clone());
+    let routed = run(router.route(text("hello")));
+    assert_eq!(
+        router.in_force(),
+        Pick::new("c", "m3"),
+        "la personne a choisi c/m3"
+    );
+    assert_eq!(pair(&routed), on("c", "m3"));
+    *meddler.router.borrow_mut() = None;
+}
+
+/// Constat 7 : une image déjà dans le fil part avec chaque requête. Un tour de
+/// texte ne doit pas partir vers un modèle sans vision.
+#[test]
+fn une_image_deja_dans_le_fil_compte_pour_un_tour_de_texte() {
+    use this_harness::{ImagePart, ImageSource, Message};
+    let world = World::new(vec![cand("a", "seer", true), cand("b", "blind", false)]);
+    world.prefer(("b", "blind"), &[("a", "seer")]);
+    let router = Rc::new(TurnRouter::new(world.spec("a", "seer", 1).auto()));
+    let transport = script(vec![]);
+    let (harness, _journal) = harnais(transport.clone(), Some(router));
+    harness.seed(vec![
+        Message::user_with_images(
+            "regarde",
+            vec![ImagePart::new("image/png", ImageSource::Ref("abc".into()))],
+        ),
+        Message::assistant("vu"),
+    ]);
+    run(harness.send("et maintenant, résume"));
+    let seen = transport.seen.borrow();
+    assert!(seen[0].thread().iter().any(|m| !m.images().is_empty()));
+    assert_eq!(
+        (seen[0].provider(), seen[0].model()),
+        (Some("a"), Some("seer")),
+        "le fil porte une image : pas de modèle sans vision"
+    );
+}
+
+/// Un moteur dont le premier appel tombe en panne, après avoir tenu un
+/// second message : deux objectifs dans le même `pump`.
+struct FailsOnce {
+    handle: RefCell<Option<this_harness::Handle>>,
+    calls: std::cell::Cell<u32>,
+}
+
+#[async_trait(?Send)]
+impl Transport for FailsOnce {
+    async fn stream(
+        &self,
+        _request: &Request,
+        _cancel: &Cancel,
+        delta: Delta,
+    ) -> Result<Reply, Failure> {
+        self.calls.set(self.calls.get() + 1);
+        if self.calls.get() == 1 {
+            if let Some(handle) = self.handle.borrow().as_ref() {
+                handle.enqueue("et ça ?");
+            }
+            return Err(Failure::http(400));
+        }
+        delta("fini");
+        Ok(Reply {
+            text: "fini".to_string(),
+            calls: vec![],
+            finish: Finish::Stop,
+        })
+    }
+
+    fn honors_route(&self) -> bool {
+        true
+    }
+}
+
+/// Constat 5b : le code de panne d'un objectif ne déborde pas sur le suivant.
+#[test]
+fn le_code_de_panne_d_un_objectif_ne_deborde_pas_sur_le_suivant() {
+    let world = World::new(three_providers());
+    world.prefer(("b", "m2"), &[("a", "m1"), ("c", "m3")]);
+    let router = Rc::new(TurnRouter::new(world.spec("a", "m1", 1).auto()));
+    let transport = Rc::new(FailsOnce {
+        handle: RefCell::new(None),
+        calls: std::cell::Cell::new(0),
+    });
+    let journal: Journal = Rc::new(RefCell::new(Vec::new()));
+    let sink = journal.clone();
+    let harness = Harness::new(
+        "tu es l'atelier",
+        Limits::default(),
+        transport.clone(),
+        Rc::new(Tools),
+        move |event| sink.borrow_mut().push(event),
+    )
+    .with_router(router);
+    *transport.handle.borrow_mut() = Some(harness.handle());
+    assert_eq!(run(harness.send("hello")), Running::Ran(Stop::Done));
+    *transport.handle.borrow_mut() = None;
+
+    let settled = world.learning.settled();
+    assert_eq!(settled.len(), 2, "{settled:?}");
+    assert!(
+        settled[0].code.is_some(),
+        "le premier objectif est en panne"
+    );
+    assert_eq!(settled[1].stop, Stop::Done);
+    assert_eq!(settled[1].code, None, "le second a réussi : aucun code");
+    let stopped = journal.borrow().iter().rev().find_map(|e| match e {
+        Event::Stopped { stop, code, .. } => Some((stop.clone(), code.clone())),
+        _ => None,
+    });
+    assert_eq!(stopped, Some((Stop::Done, None)));
+}
+
+// ── 8. Revue de la PR #249, suite : transport, ports lents, fins de tour ────
+
+/// Un temps de test : `sleep` rend tout de suite et avance l'heure de ce qu'on
+/// a demandé. Un port qui ne répond jamais rencontre donc sa borne sans attendre.
+struct Fast(std::cell::Cell<f64>);
+
+impl this_harness::Clock for Fast {
+    fn now_ms(&self) -> f64 {
+        self.0.get()
+    }
+    fn sleep(&self, ms: u64) -> Option<this_harness::Sleep> {
+        self.0.set(self.0.get() + ms as f64);
+        Some(Box::pin(async {}))
+    }
+}
+
+/// Un pool qui ne répond jamais.
+struct Hangs;
+
+#[async_trait(?Send)]
+impl this_harness::routing::PoolSource for Hangs {
+    async fn pool(&self) -> Vec<Candidate> {
+        std::future::pending().await
+    }
+}
+
+/// Un apprentissage dont `settle` ne rend jamais la main (et `record` non plus si demandé).
+struct StuckLearning {
+    inner: Rc<this_harness::routing::MemoryLearning>,
+    stuck_settle: bool,
+}
+
+#[async_trait(?Send)]
+impl this_harness::routing::Learning for StuckLearning {
+    async fn arms(&self, class: &str) -> Vec<ArmStats> {
+        self.inner.arms(class).await
+    }
+    async fn record(&self, decision: &this_harness::routing::Decision) {
+        self.inner.record(decision).await;
+    }
+    async fn settle(&self, id: u128, served: Option<&Pick>, stop: &Stop, code: Option<&str>) {
+        if self.stuck_settle {
+            std::future::pending::<()>().await;
+        }
+        self.inner.settle(id, served, stop, code).await;
+    }
+}
+
+/// Un moteur qui NE déclare PAS honorer la paire (le défaut).
+struct Deaf(Rc<Script>);
+
+#[async_trait(?Send)]
+impl Transport for Deaf {
+    async fn stream(
+        &self,
+        request: &Request,
+        cancel: &Cancel,
+        delta: Delta,
+    ) -> Result<Reply, Failure> {
+        self.0.stream(request, cancel, delta).await
+    }
+}
+
+fn build(
+    transport: Rc<dyn Transport>,
+    router: Rc<TurnRouter>,
+    clock: Option<Rc<dyn this_harness::Clock>>,
+) -> (Harness, Journal) {
+    let journal: Journal = Rc::new(RefCell::new(Vec::new()));
+    let sink = journal.clone();
+    let mut harness = Harness::new(
+        "tu es l'atelier",
+        Limits::default(),
+        transport,
+        Rc::new(Tools),
+        move |event| sink.borrow_mut().push(event),
+    )
+    .with_router(router);
+    if let Some(clock) = clock {
+        harness = harness.with_clock(clock);
+    }
+    (harness, journal)
+}
+
+/// Constat 1 : un transport qui ne déclare pas honorer la paire ne la sert pas.
+/// L'événement dit « consultatif », et l'apprentissage ne reçoit AUCUNE paire servie.
+#[test]
+fn un_transport_qui_n_honore_pas_la_paire_rend_la_decision_consultative() {
+    let world = World::new(three_providers());
+    world.prefer(("b", "m2"), &[("a", "m1"), ("c", "m3")]);
+    let router = Rc::new(TurnRouter::new(world.spec("a", "m1", 1).auto()));
+    let (harness, journal) = build(Rc::new(Deaf(script(vec![]))), router, None);
+    assert_eq!(run(harness.send("hello")), Running::Ran(Stop::Done));
+
+    let events = routed_events(&journal);
+    let Event::Routed {
+        provider,
+        changed,
+        advisory,
+        ..
+    } = &events[0]
+    else {
+        unreachable!()
+    };
+    assert_eq!(provider, "b", "ce que le routeur a décidé");
+    assert!(*changed);
+    assert!(*advisory, "mais personne ne l'honore");
+    let settled = world.learning.settled();
+    assert_eq!(settled.len(), 1);
+    assert_eq!(settled[0].served, None, "aucun bras nourri");
+    assert_eq!(settled[0].stop, Stop::Done);
+}
+
+/// Constat 1 (forme sur le fil) : `advisory` s'écrit seulement quand il est vrai.
+#[test]
+fn advisory_s_ecrit_seulement_quand_il_est_vrai() {
+    let event = Event::Routed {
+        provider: "b".into(),
+        model: None,
+        changed: false,
+        why: "kept".into(),
+        reason: String::new(),
+        mode: None,
+        advisory: true,
+    };
+    assert_eq!(
+        serde_json::to_value(&event).unwrap()["advisory"],
+        json!(true)
+    );
+    let old: Event = serde_json::from_value(
+        json!({"type": "routed", "provider": "a", "changed": false, "why": "kept"}),
+    )
+    .unwrap();
+    assert!(matches!(
+        old,
+        Event::Routed {
+            advisory: false,
+            ..
+        }
+    ));
+}
+
+/// Constat 2 : un pool qui ne répond jamais ne retient pas le tour. Le tour
+/// part sur la paire en vigueur, et l'événement dit `timed_out`.
+#[test]
+fn un_pool_qui_pend_ne_bloque_pas_le_tour() {
+    let world = World::new(three_providers());
+    let mut spec = world.spec("a", "m1", 1).auto();
+    spec.pool = Rc::new(Hangs);
+    let router = Rc::new(TurnRouter::new(spec));
+    let transport = script(vec![]);
+    let (harness, journal) = build(
+        transport.clone(),
+        router,
+        Some(Rc::new(Fast(std::cell::Cell::new(0.0)))),
+    );
+    assert_eq!(run(harness.send("hello")), Running::Ran(Stop::Done));
+    assert!(!harness.handle().busy());
+    let seen = transport.seen.borrow();
+    assert_eq!(
+        (seen[0].provider(), seen[0].model()),
+        (Some("a"), Some("m1"))
+    );
+    let events = routed_events(&journal);
+    let Event::Routed { why, changed, .. } = &events[0] else {
+        unreachable!()
+    };
+    assert_eq!(why, "timed_out");
+    assert!(!changed);
+}
+
+/// Un pool qui, quand on l'attend, interrompt le run puis ne répond jamais.
+struct InterruptsThenHangs(RefCell<Option<this_harness::Handle>>);
+
+#[async_trait(?Send)]
+impl this_harness::routing::PoolSource for InterruptsThenHangs {
+    async fn pool(&self) -> Vec<Candidate> {
+        if let Some(handle) = self.0.borrow().as_ref() {
+            handle.interrupt();
+        }
+        std::future::pending().await
+    }
+}
+
+/// Constat 2 : `Stop` coupe un routeur qui pend, le harnais rend la main et
+/// n'est plus occupé.
+#[test]
+fn l_annulation_coupe_un_routeur_qui_pend() {
+    let world = World::new(three_providers());
+    let pool = Rc::new(InterruptsThenHangs(RefCell::new(None)));
+    let mut spec = world.spec("a", "m1", 1).auto();
+    spec.pool = pool.clone();
+    let router = Rc::new(TurnRouter::new(spec));
+    let transport = script(vec![]);
+    // Pas de minuteur : seule l'annulation peut couper.
+    let (harness, journal) = build(transport.clone(), router, None);
+    *pool.0.borrow_mut() = Some(harness.handle());
+    let ran = run(harness.send("hello"));
+    *pool.0.borrow_mut() = None;
+    assert_eq!(ran, Running::Ran(Stop::Cancelled));
+    assert!(!harness.handle().busy());
+    assert!(transport.seen.borrow().is_empty(), "aucun appel au moteur");
+    assert!(names(&journal).contains(&"stopped"));
+}
+
+/// Constat 2 : un apprentissage dont `settle` pend ne retient ni `Stopped`, ni `busy`.
+#[test]
+fn un_settle_qui_pend_ne_retient_ni_stopped_ni_busy() {
+    let world = World::new(three_providers());
+    let learning = Rc::new(StuckLearning {
+        inner: world.learning.clone(),
+        stuck_settle: true,
+    });
+    let router = Rc::new(TurnRouter::new(
+        world.spec("a", "m1", 1).auto().learning(learning),
+    ));
+    let (harness, journal) = build(
+        script(vec![]),
+        router,
+        Some(Rc::new(Fast(std::cell::Cell::new(0.0)))),
+    );
+    assert_eq!(run(harness.send("hello")), Running::Ran(Stop::Done));
+    assert!(!harness.handle().busy());
+    assert!(names(&journal).contains(&"stopped"));
+    assert!(
+        world.learning.settled().is_empty(),
+        "le settle n'est jamais venu"
+    );
+}
+
+/// Constat 5a : une future lâchée avant la clôture laisse une décision appliquée
+/// sans `settle` ; le tour suivant la déclare abandonnée (`Interrupted`, aucune
+/// paire servie), jamais une récompense.
+#[test]
+fn un_tour_abandonne_est_declare_au_tour_suivant() {
+    let world = World::new(three_providers());
+    world.prefer(("b", "m2"), &[("a", "m1"), ("c", "m3")]);
+    let router = Rc::new(TurnRouter::new(world.spec("a", "m1", 1).auto()));
+    let first = run(router.route(text("hello")));
+    assert!(first.changed);
+    // Le tour est abandonné ici : aucun `settle`. Le tour suivant le dit.
+    let _ = run(router.route(text("hello")));
+    let settled = world.learning.settled();
+    assert_eq!(settled.len(), 1, "{settled:?}");
+    assert_eq!(settled[0].decision_id, world.learning.decisions()[0].id);
+    assert_eq!(settled[0].stop, Stop::Interrupted);
+    assert_eq!(settled[0].served, None);
+}
+
+/// Constat 5a/9 : `settle` sur un échec et sur une annulation. Un échec rend le
+/// code du transport ; une annulation rend `Cancelled`. Dans les deux cas la
+/// paire servie est rendue (le transport honore).
+#[test]
+fn settle_sur_echec_et_sur_annulation() {
+    // Échec : le moteur répond 400.
+    let world = World::new(three_providers());
+    world.prefer(("b", "m2"), &[("a", "m1"), ("c", "m3")]);
+    let router = Rc::new(TurnRouter::new(world.spec("a", "m1", 1).auto()));
+    let transport = Rc::new(FailsOnce {
+        handle: RefCell::new(None),
+        calls: std::cell::Cell::new(0),
+    });
+    let (harness, _) = build(transport, router, None);
+    run(harness.send("hello"));
+    let settled = world.learning.settled();
+    assert!(
+        matches!(settled[0].stop, Stop::Failed(_)),
+        "{:?}",
+        settled[0]
+    );
+    assert_eq!(settled[0].code.as_deref(), Some("http"));
+    assert_eq!(settled[0].served, Some(Pick::new("b", "m2")));
+
+    // Annulation : le moteur interrompt le run pendant le flux.
+    struct Cancels(RefCell<Option<this_harness::Handle>>);
+    #[async_trait(?Send)]
+    impl Transport for Cancels {
+        async fn stream(&self, _r: &Request, _c: &Cancel, _d: Delta) -> Result<Reply, Failure> {
+            if let Some(handle) = self.0.borrow().as_ref() {
+                handle.interrupt();
+            }
+            Err(Failure::aborted())
+        }
+        fn honors_route(&self) -> bool {
+            true
+        }
+    }
+    let world = World::new(three_providers());
+    world.prefer(("b", "m2"), &[("a", "m1"), ("c", "m3")]);
+    let router = Rc::new(TurnRouter::new(world.spec("a", "m1", 1).auto()));
+    let transport = Rc::new(Cancels(RefCell::new(None)));
+    let (harness, _) = build(transport.clone(), router, None);
+    *transport.0.borrow_mut() = Some(harness.handle());
+    assert_eq!(run(harness.send("hello")), Running::Ran(Stop::Cancelled));
+    *transport.0.borrow_mut() = None;
+    let settled = world.learning.settled();
+    assert_eq!(settled.len(), 1);
+    assert_eq!(settled[0].stop, Stop::Cancelled);
+}
+
+/// Constat 5c : sur `exploration_never_moves`, la décision enregistrée dit
+/// `applied: false` et `used` = la paire en vigueur ; jamais une paire qui
+/// n'a pas servi.
+#[test]
+fn une_exploration_refusee_n_est_pas_notee_comme_appliquee() {
+    let mut seen = 0;
+    for seed in 0..600u128 {
+        let world = World::new(vec![cand("a", "m1", false), cand("b", "m2", false)]);
+        world.prefer(("a", "m1"), &[("b", "m2")]);
+        let router = TurnRouter::new(world.spec("a", "m1", seed).settings(eager()).auto());
+        let routed = run(router.route(text("hello")));
+        let d = routed.decision.as_ref().unwrap();
+        if routed.why == RouteWhy::ExplorationNeverMoves {
+            seen += 1;
+            assert!(!d.applied, "graine {seed}");
+            assert_eq!(d.used, Some(Pick::new("a", "m1")));
+            assert_eq!(d.chosen, Some(Pick::new("b", "m2")));
+            assert_eq!(world.learning.decisions()[0].used, d.used);
+        } else {
+            assert_eq!(d.used.as_ref(), Some(&routed_pair(&routed)));
+        }
+    }
+    assert!(seen > 20, "{seen}");
+}
+
+fn routed_pair(routed: &Routed) -> Pick {
+    Pick::new(
+        routed.route.provider(),
+        routed.route.model().unwrap_or("auto"),
+    )
+}
+
+/// Constat 5c : un exécuteur en `full` + `advisory` n'applique rien ; la
+/// décision dit `used` = la paire en vigueur.
+#[test]
+fn un_executeur_en_full_advisory_n_est_pas_note_comme_applique() {
+    use this_harness::routing::Role;
+    let world = World::new(three_providers());
+    world.prefer(("b", "m2"), &[("a", "m1"), ("c", "m3")]);
+    let settings = RoutingSettings {
+        mode: ProviderRoutingMode::Full,
+        stage: LearningStage::Advisory,
+        ..quiet()
+    };
+    let mut spec = world.spec("a", "m1", 1).settings(settings);
+    spec.role = Role::Executor;
+    let router = TurnRouter::new(spec);
+    let routed = run(router.route(text("hello")));
+    let d = routed.decision.as_ref().unwrap();
+    assert!(!d.applied);
+    assert_eq!(d.used, Some(Pick::new("a", "m1")));
+    assert_eq!(routed.why, RouteWhy::RecordedOnly);
+}
+
+/// Constat 9 : `under_margin`. Tour stable (même classe juste après un
+/// changement de modèle) : la décision compare les moyennes, mais le garde de
+/// fournisseur lit les notes tirées — un challenger meilleur en moyenne dont le
+/// tirage ne passe pas la marge ne fait pas changer de fournisseur.
+#[test]
+fn un_ecart_sous_la_marge_ne_change_pas_de_fournisseur() {
+    let arm_of = |provider: &str, model: &str, alpha: f64, beta: f64, n: u64| ArmStats {
+        n,
+        ..ArmStats::fresh(ArmKey::new(GENERAL, provider, model), alpha, beta)
+    };
+    let mut held = 0;
+    for seed in 0..800u128 {
+        let world = World::new(vec![cand("a", "m1", false), cand("a", "m2", false)]);
+        world.learning.set_arms(vec![
+            arm_of("a", "m1", 1.0, 30.0, 30),
+            arm_of("a", "m2", 8.0, 12.0, 5),
+            arm_of("b", "m3", 12.0, 8.0, 5),
+        ]);
+        let router = TurnRouter::new(world.spec("a", "m1", seed * 2).auto());
+        let first = run(router.route(text("hello")));
+        if pair(&first) != on("a", "m2") {
+            continue; // tirage rare : a/m2 sous la marge de a/m1, pas le cas visé
+        }
+        world.pool.set(vec![
+            cand("a", "m1", false),
+            cand("a", "m2", false),
+            cand("b", "m3", false),
+        ]);
+        let second = run(router.route(text("hello again")));
+        if second.why == RouteWhy::UnderMargin {
+            held += 1;
+            assert_eq!(pair(&second), on("a", "m2"), "le fournisseur ne change pas");
+            let d = second.decision.as_ref().unwrap();
+            assert_eq!(d.chosen, Some(Pick::new("b", "m3")));
+            assert!(!d.applied);
+            assert_eq!(d.used, Some(Pick::new("a", "m2")));
+        }
+    }
+    assert!(held > 5, "le cas existe : {held}");
+}
+
+/// Constat 8 : des faits d'hôte invalides n'empoisonnent jamais une décision
+/// de bout en bout : le candidat est écarté avec un motif nommé.
+#[test]
+fn des_faits_invalides_sont_ecartes_avec_un_motif_nomme() {
+    let mut bad_price = cand("a", "m1", false);
+    bad_price.price = Some(this_harness::routing::Price {
+        input_per_mtok: f64::NAN,
+        output_per_mtok: 1.0,
+    });
+    bad_price.cost_basis = CostBasis::Priced;
+    let world = World::new(vec![bad_price, cand("b", "m2", false)]);
+    world.learning.set_arms(vec![ArmStats::fresh(
+        ArmKey::new(GENERAL, "b", "m2"),
+        f64::INFINITY,
+        1.0,
+    )]);
+    // Le seul candidat sain a un bras infini : personne d'éligible, repli.
+    let router = TurnRouter::new(world.spec("a", "m1", 1).auto());
+    let routed = run(router.route(text("hello")));
+    assert_eq!(routed.why, RouteWhy::NoCandidate);
+    let codes: Vec<_> = routed
+        .decision
+        .as_ref()
+        .unwrap()
+        .alternatives
+        .iter()
+        .map(|a| a.rejected.as_ref().unwrap().code())
+        .collect();
+    assert_eq!(codes, vec!["invalid_price", "invalid_arm"]);
 }

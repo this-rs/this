@@ -2,10 +2,22 @@
 //! latence et une pression de quota normalisés, avec une exploration
 //! epsilon-gloutonne bornée.
 //!
-//! Pur et déterministe : pour un `(candidats, bras, réglages, graine)` donné le
-//! résultat est toujours le même, donc une décision se rejoue. L'échantillonneur
-//! est un petit gamma de Marsaglia-Tsang à graine ; rien ici ne lit une horloge
-//! ni une source de hasard globale — la graine est **injectée**.
+//! Pur et déterministe : pour un `(candidats, bras, réglages, graine)` donné, **à
+//! plateforme égale**, le résultat est toujours le même, donc une décision se
+//! rejoue. L'échantillonneur est un petit gamma de Marsaglia-Tsang à graine ; rien
+//! ici ne lit une horloge ni une source de hasard globale — la graine est
+//! **injectée**.
+//!
+//! **Ce que la promesse n'est PAS** : « même graine, même décision, natif ↔ wasm ».
+//! `ln`, `cos`, `powf`, `sqrt` n'ont pas de précision garantie d'une plateforme
+//! (d'une `libm`) à l'autre : deux plateformes peuvent différer au dernier bit d'un
+//! tirage, et un cas serré (écart de notes sous ce bruit) peut alors tomber de
+//! l'autre côté. Conséquence pour un rejeu : rejouer une décision **persistée** sur
+//! une autre plateforme que celle qui l'a prise ne doit jamais *corriger* son
+//! choix — le choix enregistré (`Decision::chosen`, `Decision::used`) fait foi, et
+//! le recalcul ne sert qu'à comparer les notes, avec une tolérance (≥ 1e-9). Un
+//! rejeu bit à bit exige la même plateforme, ou des fonctions mathématiques
+//! déterministes fournies par l'hôte — ce que ce lot ne fait pas.
 //!
 //! Les bras ([`ArmStats`]) sont l'interface par laquelle l'apprentissage se
 //! branchera : ce lot les LIT (vides, la note retombe sur l'a priori), il ne les
@@ -13,7 +25,7 @@
 //!
 //! Portage ligne à ligne de PO : `src/chat/provider/cognitive/scorer.rs`
 //! (mêmes constantes, même ordre des tirages), pour qu'une même graine donne la
-//! même décision des deux côtés.
+//! même décision des deux côtés, à plateforme égale.
 
 use std::collections::HashMap;
 

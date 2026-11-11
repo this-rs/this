@@ -211,21 +211,21 @@ port ; **plus tard** = lot suivant.
 | 2 | Détecteur d'intention bilingue | `routing/signature.rs:113` | **porté** (mêmes mots-clés, même priorité) |
 | 3 | Signatures de tâche, délégation, sous-agent | — | **plus tard** (lot 5) |
 | 4 | `ModelFacts` | `routing/candidate.rs:116` (`Candidate`, `Capabilities`) | **porté** ; `allowed_for_project` → `allowed`, préfixe distant → `remote` (D3) ; `reasoning` ajouté, informatif |
-| 5 | Filtres 1–8 et leur ordre | `routing/candidate.rs:267` | **porté** ; plus le filtre 0 `sentinel` (D1) |
-| 6 | `QuotaRegistry` (horloge, fenêtres, retenues) | port `QuotaView` `routing/candidate.rs:349` ; `MemoryQuota` `:376` | **hôte** : c'est lui qui a l'horloge |
+| 5 | Filtres 1–8 et leur ordre | `routing/candidate.rs:278` | **porté** ; plus le filtre 0 `sentinel` (D1) |
+| 6 | `QuotaRegistry` (horloge, fenêtres, retenues) | port `QuotaView` `routing/candidate.rs:368` ; `MemoryQuota` `:376` | **hôte** : c'est lui qui a l'horloge |
 | 7 | `HealthCache`, sondes de capacité | — | **hôte** (E/S, horloge) : l'hôte remplit `healthy` et `capabilities` |
 | 8 | Catalogue vivant (`claude_code_facts`) | — | **hôte** : il remplit `context_window` / `window_unknown` |
-| 9 | Scoreur de Thompson | `routing/scorer.rs:305` | **porté** ligne à ligne ; `p_top1` reste au lot d'apprentissage (D5) |
-| 10 | `decide_with` (hystérésis, tour stable, motif) | `routing/decide.rs:280` | **porté** ; l'identifiant est un `u128` injecté, sans UUID ni date (D4) |
+| 9 | Scoreur de Thompson | `routing/scorer.rs:317` | **porté** ligne à ligne ; `p_top1` reste au lot d'apprentissage (D5) |
+| 10 | `decide_with` (hystérésis, tour stable, motif) | `routing/decide.rs:311` | **porté** ; l'identifiant est un `u128` injecté, sans UUID ni date (D4) |
 | 11 | `is_applied` | `routing/decide.rs:35` | **porté** |
 | 12 | Modes des réglages et de la conversation, étape | `routing/mode.rs` | **porté** ; `parse` lit aussi les mots de l'écran |
 | 13 | Validation et stockage des réglages (`/api/chat/routing`, projet > global) | — | **hôte** |
-| 14 | Liste de la personne (`auto_models`) : la règle | `routing/router.rs:427` | **porté** |
+| 14 | Liste de la personne (`auto_models`) : la règle | `routing/router.rs:463` | **porté** |
 | 15 | Liste de la personne : le document, l'API | — | **hôte** |
-| 16 | `TurnRouter` : droits, pool, gardes, repli | `routing/router.rs:363`, `route` `:585` | **repensé** : une seule décision par message, sans relais de session (D6) |
-| 17 | `reroute`, `mark_manual` | `routing/router.rs:485`, `:535` | **porté** |
+| 16 | `TurnRouter` : droits, pool, gardes, repli | `routing/router.rs:399`, `route` `:634` | **repensé** : une seule décision par message, sans relais de session (D6) |
+| 17 | `reroute`, `mark_manual` | `routing/router.rs:522`, `:574` | **porté** |
 | 18 | `model_for_images` (décider avant l'envoi) | dans `route` : `needs_images` + garde « aveugle » | **repensé** : la décision précède déjà la requête, il n'y a pas de second chemin |
-| 19 | `plan_provider_move` + relais | gardes dans `route` `routing/router.rs:697-713` | **repensé** (D6) |
+| 19 | `plan_provider_move` + relais | gardes dans `route` `verdict` `routing/router.rs:826` | **repensé** (D6) |
 | 20 | `model_after_limit` | — | **plus tard** (lot 3) |
 | 21 | Ouverture (`resolve_provider_choice_for` : rôles, alias, politique, repli du parent) | — | **hôte** : le harnais n'ouvre pas de session ; il reçoit la paire de départ |
 | 22 | Sentinelle `auto` | `routing/candidate.rs:23`, `Route::of` `routing/router.rs:56` | **repensé** : garanti par construction (D1) |
@@ -233,10 +233,11 @@ port ; **plus tard** = lot suivant.
 | 24 | Récompense, rétrogradation, rejeu, rapport | — | **plus tard** (lot 2) |
 | 25 | Segmentation de la conversation, sujets | — | **plus tard** (lot 4) |
 | 26 | Décision de compaction | — | **plus tard** (lot 5) |
-| 27 | Délai de 2 s sur le décideur | — | **plus tard** (lot 3) : les ports du lot 1 ne sont pas bornés |
-| 28 | `ChatEvent::ModelChanged` | `Event::Routed` `src/event.rs:135` | **repensé** : un événement par message, avec le pourquoi |
-| 29 | Paire portée jusqu'au moteur | `Request::model` / `provider` `src/wire.rs:278-284` | **nouveau** : le harnais n'avait pas de modèle |
-| 30 | Transport qui honore la paire (`this-llm-providers`, page web) | — | **plus tard** (lot 3) |
+| 27 | Délai de 2 s sur le décideur (`DECIDE_TIMEOUT`, `agent_hooks.rs:598`) | `ROUTER_TIMEOUT_MS` `src/session.rs`, `cut` + `race` | **repensé** : la borne passe par `Clock::sleep` de l'hôte, jamais une horloge du crate ; repli `timed_out` ; l'annulation coupe aussi |
+| 28 | `ChatEvent::ModelChanged` | `Event::Routed` `src/event.rs:140` | **repensé** : un événement par message, avec le pourquoi |
+| 29 | Paire portée jusqu'au moteur | `Request::model` / `provider` `src/wire.rs` | **nouveau** : le harnais n'avait pas de modèle |
+| 30 | Savoir si le moteur sert la paire | `Transport::honors_route` (faux par défaut), `Event::Routed.advisory`, `Learning::settle(served: Option)` | **nouveau** : une décision que rien n'honore est dite consultative |
+| 31 | Les transports réels lisent la paire (`this-llm-providers`, page web) | — | **plus tard** (lot 3) : il leur suffira de déclarer `honors_route` |
 
 ---
 
@@ -265,17 +266,50 @@ port ; **plus tard** = lot suivant.
   modèle » (dans la session) et « déplacer la conversation » (relais), parce qu'une
   session est liée à un fournisseur. Le harnais tient le fil : il prend **une** décision
   sur l'ensemble des candidats, et garde les protections de PO contre l'oscillation
-  entre fournisseurs. Conséquences : (a) un pool coché sur un seul autre fournisseur
-  route vers lui, là où PO refuse la demande (`routing_pool_other_provider`) ; (b) pas
-  d'attente « le modèle se change-t-il à chaud » (`set_model_live`) ; (c) la garde
-  « changement de direction » de la segmentation n'existe pas encore (lot 4) : après un
-  changement de fournisseur, le tour suivant reste toujours chez lui, sauf image
-  illisible.
+  entre fournisseurs. Conséquences, toutes traitées dans le code et prouvées par un test :
+  (a) un pool coché sur un seul autre fournisseur route vers lui, là où PO refuse la
+  demande (`routing_pool_other_provider`) ; (b) pas d'attente « le modèle se change-t-il à
+  chaud » (`set_model_live`) ; (c) la garde « changement de direction » de la
+  segmentation n'existe pas encore (lot 4) : après un changement de fournisseur, le tour
+  suivant reste toujours chez lui, sauf image illisible ;
+  (d) **la garde d'exploration** (« un tirage d'exploration ne change jamais de
+  fournisseur ») ne protège que si la paire en vigueur est elle-même éligible. Hors du
+  pool coché ou de la liste de la personne, elle n'a rien à protéger : le tour part sur
+  le meilleur candidat non exploratoire (la décision est refaite à ε = 0, même graine),
+  jamais sur un modèle qu'on n'a pas le droit de choisir ; (e) **l'ouverture sur la
+  sentinelle** (`model: auto`) n'a pas de paire à quitter : son premier choix n'est
+  ni un changement de fournisseur ni soumis aux gardes qui le protègent (PO : la décision
+  d'ouverture est hors de ces gardes, `agent_hooks.rs:777-826`) ; (f) **les images du
+  fil** : PO ne regarde que le message du tour (`set_turn_input`, `agent_hooks.rs:863`),
+  car le moteur de la session garde son historique et `model_for_images` ne décide que
+  pour le tour. Ici le harnais renvoie tout le fil à chaque tour : le besoin d'images est
+  celui du fil (transcript, compaction non déduite). Au pire trop prudent — une image
+  que la compaction a retirée interdit encore les modèles sans vision —, jamais aveugle.
 - **D7 — `needs_tools` vient de l'hôte** (`RouterSpec::needs_tools`, vrai par défaut
   comme PO), pas de `Toolbox::specs()` : un transport de la famille A déclare ses
   outils lui-même, la boîte peut être vide alors que le tour en appelle.
 - **D8 — un fournisseur imposé a son propre code de motif** (`provider_imposed`), là où
   PO ne demande simplement aucune décision de fournisseur.
+- **D9 — les faits de l'hôte sont validés à l'entrée.** PO les lit dans ses propres
+  magasins ; ici ils viennent d'un hôte quelconque. Un prix `NaN`, infini ou négatif
+  écarte la paire (`invalid_price`) ; un bras stocké qui n'est pas un postérieur
+  (`alpha` / `beta` nul, négatif, infini, `NaN`, coût non fini) l'écarte aussi
+  (`invalid_arm`) ; les poids et le taux d'exploration non finis reprennent leur
+  défaut. Sans cela : une note `NaN` classée en tête par `total_cmp`, un tirage gamma
+  qui ne rend jamais. L'identifiant de décision sort en **chaîne** (un `u128` ne survit
+  pas à un `Number` JavaScript).
+- **D10 — « même graine, même décision » vaut à plateforme égale.** `ln`, `cos`,
+  `powf` n'ont pas de précision garantie d'une plateforme à l'autre : natif et wasm
+  peuvent différer au dernier bit d'un tirage. Un rejeu d'une décision persistée sur
+  une autre plateforme ne doit jamais corriger son choix (`chosen` / `used` font foi) ;
+  il compare les notes avec une tolérance. Un rejeu bit à bit demande la même
+  plateforme, ou des fonctions mathématiques déterministes fournies par l'hôte (hors de
+  ce lot).
+- **D11 — la décision se prend en deux temps, et le réglage de la personne gagne.**
+  PO tient son routeur sous verrou. Ici les ports (candidats, bras) sont asynchrones :
+  l'état n'est copié qu'avant l'attente et réécrit d'un bloc après, sous un compteur
+  de génération. Un réglage à la main ou un menu qui arrive pendant l'attente gagne
+  toujours (`superseded`) : la décision est jetée, la paire de la personne reste.
 
 ---
 
@@ -294,8 +328,9 @@ Chacun est livrable seul.
    et de décisions (IndexedDB dans la page, base côté serveur) et une horloge pour les
    horodater.*
 3. **Les transports qui honorent la paire.** `this-llm-providers` et le transport de la
-   page lisent `Request::provider()` / `model()` ; bascule après un refus de quota sur
-   un modèle (`model_after_limit`) ; borne de temps sur les ports via `Clock`. *Côté
+   page lisent `Request::provider()` / `model()` **et déclarent `Transport::honors_route`**
+   (c'est la seule chose qui sépare une décision consultative d'une décision servie) ;
+   bascule après un refus de quota sur un modèle (`model_after_limit`). *Côté
    hôte : un `PoolSource` réel (catalogue des modèles, capacités, santé) et un
    `QuotaView` nourri par les refus des moteurs.*
 4. **La segmentation de la conversation.** Frontières de sujet et de classe, qui
@@ -308,3 +343,24 @@ Chacun est livrable seul.
    leur validation, le menu auto / mixed / strict de la page, l'affichage de
    `Event::Routed` et des alternatives rejetées. *Côté hôte : stockage par personne et
    droits (seule la personne écrit sa liste).*
+
+---
+
+## 6. Contrat des ports de l'hôte
+
+Le cœur est pur ; tout ce qui sort de lui passe par un port, et chaque port a un contrat.
+
+| Port | Ce que l'hôte garantit | Ce que le harnais garantit |
+|---|---|---|
+| `Transport::honors_route` | `true` seulement s'il lit `Request::provider()` / `model()` et parle au moteur nommé | tant que c'est faux : `Event::Routed.advisory = true`, `Learning::settle(served = None)` |
+| `PoolSource::pool` | rend les candidats vivants (santé, consentement, quotas déjà appliqués) | borné à 2 s (`ROUTER_TIMEOUT_MS`) sur le `Clock` de l'hôte ; au-delà, le tour part sur la paire en vigueur (`timed_out`) ; coupé par l'annulation |
+| `Learning::arms`, `hints` | rend des postérieurs valides | un bras invalide écarte sa paire (`invalid_arm`), jamais une boucle ni un `NaN` |
+| `Learning::record` | au mieux : peut être perdu | appelé une fois par décision, avec `used` (la paire du tour) ; `applied` dit si le choix est la paire du tour |
+| `Learning::settle` | traite un identifiant inconnu comme un no-op | au plus un par décision ; borné à 2 s, ne retient ni `Stopped` ni `busy` ; `Stop::Interrupted` + `served = None` pour un tour abandonné, déclaré au tour suivant |
+| `Seeds::next_id` | un `u128` par décision | l'identifiant est la graine ; sérialisé en chaîne |
+| `QuotaView` | une échéance passée n'est plus rendue | — |
+
+**Limite connue.** Sans minuteur (`Clock::sleep` rend `None`, une page qui n'en a pas
+injecté), la borne de 2 s n'existe pas : seule l'annulation coupe `route`, et un
+`settle` qui pend retient `Stopped`. C'est la limite que porte déjà `Recorder`
+(`RECORDER_TIMEOUT_MS`) ; un hôte wasm doit injecter une horloge avec `Harness::with_clock`.
