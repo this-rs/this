@@ -17,6 +17,13 @@ use super::signature::TurnSignature;
 /// Jetons de sortie supposés pour l'estimation du coût d'un tour médian.
 const TURN_OUTPUT_TOKENS: f64 = 2_000.0;
 
+/// Plus haut prix accepté, en USD par million de jetons. Au-delà, le prix est tenu
+/// pour une donnée corrompue (`invalid_price`) : un prix fini mais démesuré ferait
+/// déborder le coût estimé (`inf / inf = NaN` dans la normalisation). Le modèle le
+/// plus cher du marché coûte quelques centaines d'USD : la borne laisse trois ordres
+/// de grandeur de marge.
+pub const MAX_PRICE_PER_MTOK: f64 = 1_000_000.0;
+
 /// `auto` est une sentinelle (« laisse le harnais choisir »), **pas** un nom de
 /// modèle : transmis tel quel à un moteur, il est rejeté. Insensible à la
 /// casse, espaces ignorés. Une chaîne vide n'est pas un modèle non plus.
@@ -185,12 +192,13 @@ impl Candidate {
 /// Pourquoi une paire n'est pas éligible.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "reason", rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum RejectReason {
     /// `auto` (ou vide) n'est pas un nom de modèle : jamais un candidat.
     /// Ajout de this-rs : PO traite la sentinelle à l'ouverture, pas dans le filtre.
     Sentinel,
     /// Le prix donné par l'hôte n'est pas un nombre utilisable (`NaN`, infini,
-    /// négatif) : la paire est écartée plutôt que notée sur une valeur qui
+    /// négatif, au-delà de [`MAX_PRICE_PER_MTOK`]) : la paire est écartée plutôt que notée sur une valeur qui
     /// empoisonnerait le classement. Ajout de this-rs.
     InvalidPrice,
     /// Le bras stocké de cette paire n'est pas un postérieur (`alpha` ou `beta`
@@ -198,6 +206,9 @@ pub enum RejectReason {
     /// magasin de l'hôte est à réparer. Posé par la décision, pas par le filtre.
     /// Ajout de this-rs.
     InvalidArm,
+    /// La note de la paire n'est pas un nombre fini malgré des faits valides (un
+    /// coût mesuré démesuré, par exemple) : écartée plutôt que classée. Ajout de this-rs.
+    NotScorable,
     /// Une machine est choisie par une personne, jamais par le routeur.
     Remote,
     /// L'hôte n'autorise pas cette instance.
@@ -233,6 +244,7 @@ impl RejectReason {
             Self::Sentinel => "sentinel",
             Self::InvalidPrice => "invalid_price",
             Self::InvalidArm => "invalid_arm",
+            Self::NotScorable => "not_scorable",
             Self::Remote => "remote",
             Self::NotAllowed => "not_allowed",
             Self::QuotaExhausted { .. } => "quota_exhausted",
@@ -282,7 +294,7 @@ fn check(signature: &TurnSignature, facts: &Candidate) -> Option<RejectReason> {
     // Les faits viennent de l'hôte : un prix qui n'est pas un nombre ne doit ni
     // passer le filtre de budget par accident, ni donner une note `NaN`.
     if let Some(price) = facts.price {
-        let usable = |v: f64| v.is_finite() && v >= 0.0;
+        let usable = |v: f64| v.is_finite() && (0.0..=MAX_PRICE_PER_MTOK).contains(&v);
         if !usable(price.input_per_mtok) || !usable(price.output_per_mtok) {
             return Some(RejectReason::InvalidPrice);
         }

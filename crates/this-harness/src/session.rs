@@ -405,11 +405,16 @@ async fn race<T, G>(work: impl Future<Output = T>, guard: impl Future<Output = G
 /// enregistrement d'une décision, fin de tour) : deux secondes d'horloge du
 /// harnais, comme PO (`DECIDE_TIMEOUT`, `agent_hooks.rs:598`).
 ///
-/// À l'expiration, `route` se replie sur la paire en vigueur ([`crate::routing::RouteWhy::TimedOut`]) et
-/// `settle` est abandonné : un port qui ne répond jamais ne retient ni le tour, ni
-/// `Stopped`, ni `busy`. **Limite** (la même que [`RECORDER_TIMEOUT_MS`]) : sans
-/// minuteur (`Clock::sleep` rend `None`, une page qui n'en a pas injecté) la borne
-/// de temps n'existe pas ; seule l'annulation coupe `route`.
+/// À l'expiration, `route` se replie sur la paire en vigueur
+/// ([`crate::routing::RouteWhy::TimedOut`]), `record` et `settle` sont abandonnés :
+/// un port qui ne répond jamais ne retient ni le tour, ni `Stopped`, ni `busy`.
+///
+/// L'annulation coupe `route` et `record` **tout de suite, avec ou sans minuteur**
+/// (elle réveille l'attente). **Limite** (la même que [`RECORDER_TIMEOUT_MS`]) :
+/// sans minuteur (`Clock::sleep` rend `None`, une page qui n'en a pas injecté), la
+/// borne de TEMPS n'existe pas — un port qui pend retient alors le tour jusqu'à
+/// l'annulation, et un `settle` qui pend (non coupé par l'annulation, puisqu'un
+/// run annulé doit être rendu lui aussi) retient `Stopped`.
 pub const ROUTER_TIMEOUT_MS: u64 = 2_000;
 
 /// Le délai accordé à un appel de [`Recorder`] : deux secondes d'horloge du harnais.
@@ -462,24 +467,52 @@ enum Cut {
 }
 
 /// La veille d'un appel au routeur : rend dès que `ms` d'horloge sont écoulées
-/// (`limit`) ou que l'annulation est vue (`cancel`, relue à chaque pas).
+/// ([`Cut::Timeout`]) ou dès que l'annulation est posée ([`Cut::Cancelled`]).
+///
+/// L'annulation **réveille** (`Cancel::cancelled`) : elle coupe tout de suite,
+/// avec ou sans minuteur. Le temps, lui, n'existe que si l'hôte a un minuteur
+/// (`Clock::sleep` rend `Some`), avec une granularité d'au plus `WATCH_TICK_MS`.
 async fn cut(clock: &dyn Clock, ms: u64, cancel: Option<&Cancel>) -> Cut {
-    let end = clock.now_ms() + ms as f64;
-    loop {
-        if cancel.is_some_and(Cancel::is_cancelled) {
-            return Cut::Cancelled;
+    let timer = async {
+        let end = clock.now_ms() + ms as f64;
+        loop {
+            let left = (end - clock.now_ms()).max(0.0) as u64;
+            if left == 0 {
+                return Cut::Timeout;
+            }
+            match clock.sleep(left.min(WATCH_TICK_MS)) {
+                Some(sleep) => sleep.await,
+                // Pas de minuteur : pas de borne de temps. L'annulation, elle, coupe
+                // quand même : elle réveille (`Cancel::cancelled`).
+                None => return std::future::pending().await,
+            }
+            // Un minuteur qui rend tout de suite sans que l'heure avance ferait
+            // tourner cette boucle sans jamais rendre la main au travail : un pas
+            // cédé par tour.
+            yield_now().await;
         }
-        let left = (end - clock.now_ms()).max(0.0) as u64;
-        if left == 0 {
-            return Cut::Timeout;
-        }
-        match clock.sleep(left.min(WATCH_TICK_MS)) {
-            Some(sleep) => sleep.await,
-            // Pas de minuteur : seule l'annulation peut couper, et elle se relit au
-            // prochain réveil du travail lui-même.
-            None => return std::future::pending().await,
-        }
+    };
+    match cancel {
+        None => timer.await,
+        Some(cancel) => match race(cancel.cancelled(), timer).await {
+            Ok(()) => Cut::Cancelled,
+            Err(cut) => cut,
+        },
     }
+}
+
+/// Rend la main une fois à l'exécuteur, en se réveillant aussitôt.
+fn yield_now() -> impl Future<Output = ()> {
+    let mut yielded = false;
+    std::future::poll_fn(move |cx| {
+        if yielded {
+            Poll::Ready(())
+        } else {
+            yielded = true;
+            cx.waker().wake_by_ref();
+            Poll::Pending
+        }
+    })
 }
 
 /// Attend `ms`, mais rend dès que l'annulation est vue : vrai si l'attente a
@@ -1180,6 +1213,9 @@ impl Harness {
             // d'un message qui réussit ne laisse pas son code périmé à `Stopped` ni à
             // l'apprentissage.
             code = None;
+            // Un tour n'est servi que si une requête est vraiment partie : un objectif
+            // annulé avant son premier appel au moteur n'a servi aucune paire.
+            let mut sent = false;
             self.push(Message::user_with_images(
                 first.text.clone(),
                 first.images.clone(),
@@ -1364,6 +1400,7 @@ impl Harness {
                         },
                         INTERRUPT_GRACE_MS,
                     );
+                    sent = true;
                     let issue = race(transport.stream(&request, &cancel, delta), guard).await;
 
                     // Une panne passagère se rejoue, mais seulement si le tour
@@ -1621,7 +1658,7 @@ impl Harness {
                     // Bornée : un apprentissage qui pend ne retient ni `Stopped`,
                     // ni `busy`. Pas coupée par l'annulation : un run annulé est
                     // lui aussi rendu (`Cancelled`, jamais une récompense).
-                    let honored = transport.honors_route();
+                    let honored = transport.honors_route() && sent;
                     let settle = router.settle(&ending, code.as_deref(), honored);
                     let _ = race(settle, cut(clock.as_ref(), ROUTER_TIMEOUT_MS, None)).await;
                 }
@@ -1810,10 +1847,12 @@ impl Harness {
         let has_images =
             !first.images.is_empty() || transcript.iter().any(|m| !m.images().is_empty());
         let clock = self.clock.clone();
+        let honored = self.transport.honors_route();
         let routed = {
             let work = router.route(crate::routing::TurnInput {
                 text: &first.text,
                 has_images,
+                honored,
                 hints: crate::routing::ContextHints {
                     history_tokens: history as u64,
                     tool_schema_tokens: (schemas / 4) as u64,
@@ -1837,8 +1876,15 @@ impl Harness {
                 .map(|d| d.reason.clone())
                 .unwrap_or_default(),
             mode: router.mode().map(|m| m.as_str().to_string()),
-            advisory: !self.transport.honors_route(),
+            advisory: !honored,
         });
+        // La décision est enregistrée APRÈS que l'état du routeur a été réécrit et
+        // l'événement émis : un `record` qui pend ou qu'on coupe ne peut plus rien
+        // changer au tour (il est au mieux perdu, comme le dit le contrat de `Learning`).
+        if let Some(decision) = &routed.decision {
+            let record = router.record(decision);
+            let _ = race(record, cut(clock.as_ref(), ROUTER_TIMEOUT_MS, Some(cancel))).await;
+        }
         Some(routed.route)
     }
 
