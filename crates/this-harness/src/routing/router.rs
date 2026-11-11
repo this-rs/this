@@ -407,6 +407,13 @@ struct Open {
     before: Option<Before>,
     /// La génération des réglages de la personne au moment du changement : un
     /// réglage fait depuis (même sur la même paire) n'est jamais annulé par le retour.
+    ///
+    /// Tout réglage compte, y compris ceux qui ne touchent pas la paire
+    /// ([`TurnRouter::set_auto_models`], [`TurnRouter::follow_settings`]) : une liste
+    /// Auto modifiée pendant le tour laisse alors en vigueur une paire jamais
+    /// atteinte. C'est voulu, et cohérent avec [`RouteWhy::Superseded`] dans
+    /// [`TurnRouter::route`] : après un réglage de la personne, le routeur ne réécrit
+    /// plus rien de lui-même, et le message suivant redécide sous ce réglage.
     generation: u64,
 }
 
@@ -1013,9 +1020,15 @@ impl TurnRouter {
     /// range parmi les abandonnées ([`TurnRouter::repair`]) — jamais une décision
     /// perdue en silence.
     pub async fn settle(&self, stop: &Stop, code: Option<&str>, honored: bool) {
-        let open = {
+        // Seuls l'identifiant, la paire et la génération sont lus : `before` n'est
+        // jamais copié hors de l'état (il y est consommé une fois, juste dessous).
+        let (id, pick) = {
             let mut state = self.state.borrow_mut();
-            let Some(open) = state.open.clone() else {
+            let Some((id, pick, generation)) = state
+                .open
+                .as_ref()
+                .map(|o| (o.id, o.pick.clone(), o.generation))
+            else {
                 return;
             };
             // La paire décidée n'a jamais été atteinte : l'état servi revient à l'avant
@@ -1025,7 +1038,7 @@ impl TurnRouter {
             // et jamais par-dessus un réglage de la personne fait depuis (génération).
             if !honored
                 && let Some(before) = state.open.as_mut().and_then(|o| o.before.take())
-                && state.generation == open.generation
+                && state.generation == generation
             {
                 state.provider = before.provider;
                 state.model = before.model;
@@ -1033,12 +1046,12 @@ impl TurnRouter {
                 state.last_change_class = before.last_change_class;
                 state.last_move_turn = before.last_move_turn;
             }
-            open
+            (id, pick)
         };
-        let served = honored.then_some(&open.pick);
-        self.learning.settle(open.id, served, stop, code).await;
+        let served = honored.then_some(&pick);
+        self.learning.settle(id, served, stop, code).await;
         let mut state = self.state.borrow_mut();
-        if state.open.as_ref().is_some_and(|o| o.id == open.id) {
+        if state.open.as_ref().is_some_and(|o| o.id == id) {
             state.open = None;
         }
     }
