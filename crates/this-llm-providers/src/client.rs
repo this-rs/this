@@ -15,6 +15,8 @@ use crate::images::{
     without_images,
 };
 use crate::model::{ContextFit, ModelInfo, estimate_tokens, fit, parse_models};
+#[cfg(not(target_arch = "wasm32"))]
+use crate::probe::{MAX_PROBE_CONCURRENCY, ProbeOptions, ProbeVerdict, redact, verdict_of_status};
 use crate::secret::Secret;
 
 /// What the chat template adds around a conversation, estimated once per call.
@@ -594,6 +596,202 @@ impl ProviderClient {
             pricing: self.config.pricing,
             reservation,
         })
+    }
+}
+
+/// A probe in flight (`Send`: a host runs the whole batch on a multi-threaded runtime), polled by [`ProviderClient::probe_all_with`].
+#[cfg(not(target_arch = "wasm32"))]
+type Probing<'a> = std::pin::Pin<Box<dyn std::future::Future<Output = ProbeVerdict> + Send + 'a>>;
+
+#[cfg(not(target_arch = "wasm32"))]
+impl ProviderClient {
+    /// Sends ONE minimal message to `model` and says what became of it. Never fails: every
+    /// outcome, a refused key and an unplugged engine included, is a [`ProbeVerdict`].
+    ///
+    /// Waits [`crate::DEFAULT_PROBE_TIMEOUT`] (10 s) for an answer. `with_tools` adds a second
+    /// request, with a tool on offer, to learn whether the model calls tools.
+    ///
+    /// A probe does not go through the budget: it is not a turn, it reserves nothing and
+    /// settles nothing, so asking about 84 models does not eat the day's ceiling. It is not
+    /// free for the engine all the same (one request, or two with tools, per model): a host
+    /// runs it on demand, never in the background. The verdict's text never holds the key.
+    pub async fn probe(&self, model: &str, with_tools: bool) -> ProbeVerdict {
+        self.probe_with(model, &ProbeOptions::default().with_tools(with_tools))
+            .await
+    }
+
+    /// [`Self::probe`] with its options (the delay, notably).
+    pub async fn probe_with(&self, model: &str, options: &ProbeOptions) -> ProbeVerdict {
+        let plain = json!({
+            "model": model,
+            "messages": [{ "role": "user", "content": "Réponds seulement : ok" }],
+            "max_tokens": 16,
+        });
+        let started = std::time::Instant::now();
+        if let Err(verdict) = self.probe_request(&plain, options).await {
+            return verdict;
+        }
+        let ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        let tools = if options.with_tools {
+            self.probe_tools(model, options).await
+        } else {
+            None
+        };
+        ProbeVerdict::Answers { ms, tools }
+    }
+
+    /// Whether the model calls the tool it is offered; `None` when the second request could
+    /// not settle it (mute, unreachable): the model did answer, so that is not a failure.
+    async fn probe_tools(&self, model: &str, options: &ProbeOptions) -> Option<bool> {
+        let body = json!({
+            "model": model,
+            "messages": [{ "role": "user",
+                "content": "Lis le module « courses » avec ton outil." }],
+            "max_tokens": 64,
+            "tools": [{
+                "type": "function",
+                "function": {
+                    "name": "lire_module",
+                    "description": "Lit un module installé par son nom.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": { "nom": { "type": "string", "description": "nom du module" } },
+                        "required": ["nom"],
+                    },
+                },
+            }],
+            "tool_choice": "auto",
+        });
+        match self.probe_request(&body, options).await {
+            Ok(value) => Some(
+                value
+                    .pointer("/choices/0/message/tool_calls")
+                    .and_then(Value::as_array)
+                    .is_some_and(|calls| !calls.is_empty()),
+            ),
+            // An engine that refuses the tools field (400) says the model has none.
+            Err(ProbeVerdict::Refused {
+                reason: crate::probe::Refusal::Other,
+                ..
+            }) => Some(false),
+            Err(_) => None,
+        }
+    }
+
+    /// One non-streamed request under the probe delay: the JSON on a 200, the verdict otherwise.
+    async fn probe_request(
+        &self,
+        body: &Value,
+        options: &ProbeOptions,
+    ) -> Result<Value, ProbeVerdict> {
+        let started = std::time::Instant::now();
+        let after_ms = || u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        let secret = self.secret.as_ref().map(Secret::expose);
+        let unreachable = |error: &reqwest::Error| ProbeVerdict::Unreachable {
+            detail: redact(&cause_chain(error), secret),
+        };
+        let sent = self
+            .authorize(
+                self.http
+                    .post(self.url("chat/completions"))
+                    .timeout(options.timeout)
+                    .json(body),
+            )
+            .send()
+            .await;
+        let response = match sent {
+            Ok(response) => response,
+            Err(error) if error.is_timeout() => {
+                return Err(ProbeVerdict::Mute {
+                    after_ms: after_ms(),
+                });
+            }
+            Err(error) => return Err(unreachable(&error)),
+        };
+        let status = response.status();
+        let text = match response.text().await {
+            Ok(text) => text,
+            Err(error) if error.is_timeout() => {
+                return Err(ProbeVerdict::Mute {
+                    after_ms: after_ms(),
+                });
+            }
+            Err(error) => return Err(unreachable(&error)),
+        };
+        if !status.is_success() {
+            return Err(verdict_of_status(status.as_u16(), &text, secret));
+        }
+        // A 200 is an answer; a body that does not read is still one (`Null`).
+        Ok(serde_json::from_str(&text).unwrap_or(Value::Null))
+    }
+
+    /// Probes every model, at most `concurrency` at a time (never more than
+    /// [`MAX_PROBE_CONCURRENCY`], never fewer than one), and returns the verdicts in the
+    /// order of `models`. Dropping the future abandons every probe still in flight.
+    pub async fn probe_all(
+        &self,
+        models: &[String],
+        with_tools: bool,
+        concurrency: usize,
+    ) -> Vec<ProbeVerdict> {
+        self.probe_all_with(
+            models,
+            &ProbeOptions::default().with_tools(with_tools),
+            concurrency,
+        )
+        .await
+    }
+
+    /// [`Self::probe_all`] with its options.
+    pub async fn probe_all_with(
+        &self,
+        models: &[String],
+        options: &ProbeOptions,
+        concurrency: usize,
+    ) -> Vec<ProbeVerdict> {
+        use std::task::Poll;
+
+        let limit = concurrency.clamp(1, MAX_PROBE_CONCURRENCY);
+        let mut verdicts: Vec<Option<ProbeVerdict>> = vec![None; models.len()];
+        let mut next = 0;
+        // No spawn, no extra crate: the probes are polled together from this one future,
+        // so dropping it drops them (and closes their sockets).
+        let mut running: Vec<(usize, Probing<'_>)> = Vec::new();
+        std::future::poll_fn(|cx| {
+            loop {
+                while running.len() < limit && next < models.len() {
+                    let model = models[next].as_str();
+                    running.push((next, Box::pin(self.probe_with(model, options))));
+                    next += 1;
+                }
+                if running.is_empty() {
+                    return Poll::Ready(());
+                }
+                let mut finished = false;
+                let mut slot = 0;
+                while slot < running.len() {
+                    if let Poll::Ready(verdict) = running[slot].1.as_mut().poll(cx) {
+                        let (index, _) = running.swap_remove(slot);
+                        verdicts[index] = Some(verdict);
+                        finished = true;
+                    } else {
+                        slot += 1;
+                    }
+                }
+                if !finished {
+                    return Poll::Pending;
+                }
+            }
+        })
+        .await;
+        verdicts
+            .into_iter()
+            .map(|verdict| {
+                verdict.unwrap_or(ProbeVerdict::Unreachable {
+                    detail: String::new(),
+                })
+            })
+            .collect()
     }
 }
 

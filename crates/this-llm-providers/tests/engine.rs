@@ -7,15 +7,20 @@
 #![cfg(feature = "http")]
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 use this_llm::{Completion, CredentialRef, Preset};
 use this_llm_providers::{
-    Budget, ChatRequest, Clock, ErrorKind, Finish, Hub, MemoryStore, ProviderConfig, ProviderError,
-    ProviderId, Secrets, TurnRequest,
+    Budget, ChatRequest, Clock, ErrorKind, Finish, Hub, MemoryStore, ProbeOptions, ProbeVerdict,
+    ProviderConfig, ProviderError, ProviderId, Refusal, Secrets, TurnRequest,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
+
+static IN_FLIGHT: AtomicUsize = AtomicUsize::new(0);
+static MAX_IN_FLIGHT: AtomicUsize = AtomicUsize::new(0);
 
 struct FixedClock(u64);
 
@@ -54,6 +59,17 @@ async fn engine(listener: TcpListener) {
                 }
             }
             let request = String::from_utf8_lossy(&raw).to_string();
+            if request.contains("\"model\":\"mute\"") {
+                // Accepts, reads, and says nothing: the socket stays open.
+                tokio::time::sleep(Duration::from_secs(60)).await;
+                return;
+            }
+            if request.contains("\"model\":\"slow-") {
+                let now = IN_FLIGHT.fetch_add(1, Ordering::SeqCst) + 1;
+                MAX_IN_FLIGHT.fetch_max(now, Ordering::SeqCst);
+                tokio::time::sleep(Duration::from_millis(150)).await;
+                IN_FLIGHT.fetch_sub(1, Ordering::SeqCst);
+            }
             let (status, content_type, body) = route(&request);
             let response = format!(
                 "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
@@ -98,6 +114,9 @@ fn route(request: &str) -> (&'static str, &'static str, String) {
         );
     }
     if request.starts_with("POST /v1/chat/completions") {
+        if let Some(answer) = probe_route(request) {
+            return answer;
+        }
         if !request.contains("\"model\":\"qwen-test\"") {
             return (
                 "400 Bad Request",
@@ -171,6 +190,62 @@ fn route(request: &str) -> (&'static str, &'static str, String) {
         "application/json",
         json!({"error": "route"}).to_string(),
     )
+}
+
+/// The bearer token the request carried.
+fn bearer(request: &str) -> String {
+    request
+        .lines()
+        .find_map(|line| {
+            let lower = line.to_ascii_lowercase();
+            lower
+                .starts_with("authorization: bearer ")
+                .then(|| line["authorization: bearer ".len()..].trim().to_string())
+        })
+        .unwrap_or_default()
+}
+
+fn probe_route(request: &str) -> Option<(&'static str, &'static str, String)> {
+    let model = [
+        "absent", "plain", "toolful", "k401", "k429", "s503", "slow-",
+    ]
+    .into_iter()
+    .find(|name| request.contains(&format!("\"model\":\"{name}")))?;
+    let ok = |message: Value| {
+        (
+            "200 OK",
+            "application/json",
+            json!({"choices": [{"message": message, "finish_reason": "stop"}]}).to_string(),
+        )
+    };
+    Some(match model {
+        "absent" => (
+            "404 Not Found",
+            "application/json",
+            json!({"status": 404, "title": "Not Found",
+                   "detail": "Function 'f-1234': Not found for account 'ACCT-SECRET-77'"})
+            .to_string(),
+        ),
+        "toolful" if request.contains("\"tools\"") => ok(json!({"role": "assistant",
+            "content": null, "tool_calls": [{"id": "c1", "type": "function",
+            "function": {"name": "lire_module", "arguments": "{\"nom\":\"courses\"}"}}]})),
+        "plain" | "toolful" | "slow-" => ok(json!({"role": "assistant", "content": "ok"})),
+        "k401" => (
+            "401 Unauthorized",
+            "application/json",
+            json!({"error": {"message": format!("clé refusée : {}", bearer(request))}}).to_string(),
+        ),
+        "k429" => (
+            "429 Too Many Requests",
+            "application/json",
+            json!({"error": "trop vite"}).to_string(),
+        ),
+        _ => (
+            "503 Service Unavailable",
+            "application/json",
+            json!({"error": "en panne"}).to_string(),
+        ),
+    })
 }
 
 /// Starts the engine and returns the base URL a provider should point at.
@@ -562,4 +637,194 @@ async fn a_transport_failure_says_why_it_failed() {
         message.to_ascii_lowercase().contains("refused") || message.contains("refusé"),
         "la cause doit être dite, pas seulement « error sending request » : {message}"
     );
+}
+
+// ---- Probes: what one real request says about a model ---------------------------------
+
+const KEY: &str = "nvapi-TESTKEY-do-not-leak-0123456789";
+
+fn keyed_client(
+    base: &str,
+    mutate: impl FnOnce(&mut ProviderConfig),
+) -> this_llm_providers::ProviderClient {
+    let mut config = provider(base, Budget::default());
+    config.credential = CredentialRef::Vault("k".to_string());
+    mutate(&mut config);
+    let hub = Hub::open(
+        MemoryStore::default(),
+        Secrets::with_vault(|_| Some(KEY.to_string())),
+        FixedClock(20_000),
+    )
+    .unwrap();
+    hub.upsert(config.clone()).unwrap();
+    hub.client(&local()).expect("client")
+}
+
+fn quick() -> ProbeOptions {
+    ProbeOptions {
+        with_tools: false,
+        timeout: Duration::from_millis(600),
+    }
+}
+
+#[tokio::test]
+async fn a_model_the_account_lacks_is_not_in_account_and_its_account_id_is_masked() {
+    let client = keyed_client(&start_engine().await, |_| {});
+    match client.probe_with("absent", &quick()).await {
+        ProbeVerdict::NotInAccount { detail } => {
+            assert!(detail.contains("Not found for account"), "{detail}");
+            assert!(!detail.contains("ACCT-SECRET-77"), "{detail}");
+        }
+        other => panic!("attendu NotInAccount, obtenu {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn a_model_that_answers_says_how_long_it_took() {
+    let client = keyed_client(&start_engine().await, |_| {});
+    match client.probe_with("plain", &quick()).await {
+        ProbeVerdict::Answers { ms, tools } => {
+            assert!(ms < 600, "{ms}");
+            assert_eq!(tools, None, "les outils n'ont pas été demandés");
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn the_tool_question_tells_a_model_that_calls_tools_from_one_that_does_not() {
+    let client = keyed_client(&start_engine().await, |_| {});
+    let options = quick().with_tools(true);
+    assert!(matches!(
+        client.probe_with("toolful", &options).await,
+        ProbeVerdict::Answers {
+            tools: Some(true),
+            ..
+        }
+    ));
+    assert!(matches!(
+        client.probe_with("plain", &options).await,
+        ProbeVerdict::Answers {
+            tools: Some(false),
+            ..
+        }
+    ));
+}
+
+#[tokio::test]
+async fn a_model_that_never_answers_is_mute_after_the_probe_delay() {
+    let client = keyed_client(&start_engine().await, |_| {});
+    let started = Instant::now();
+    match client.probe_with("mute", &quick()).await {
+        ProbeVerdict::Mute { after_ms } => assert!((500..2_000).contains(&after_ms), "{after_ms}"),
+        other => panic!("attendu Mute, obtenu {other:?}"),
+    }
+    assert!(started.elapsed() < Duration::from_secs(3));
+}
+
+#[tokio::test]
+async fn a_refusal_says_whether_it_is_the_key_the_rate_or_the_server() {
+    let client = keyed_client(&start_engine().await, |_| {});
+    let reason = |verdict: ProbeVerdict| match verdict {
+        ProbeVerdict::Refused {
+            status,
+            reason,
+            detail,
+        } => {
+            assert!(!detail.contains(KEY), "la clé fuit : {detail}");
+            (status, reason)
+        }
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(
+        reason(client.probe_with("k401", &quick()).await),
+        (401, Refusal::Key)
+    );
+    assert_eq!(
+        reason(client.probe_with("k429", &quick()).await),
+        (429, Refusal::RateLimit)
+    );
+    assert_eq!(
+        reason(client.probe_with("s503", &quick()).await),
+        (503, Refusal::Server)
+    );
+}
+
+#[tokio::test]
+async fn an_engine_that_is_not_there_is_unreachable_not_an_error() {
+    // A port that was free a moment ago and is closed now.
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}/v1", listener.local_addr().unwrap());
+    drop(listener);
+    let client = keyed_client(&base, |_| {});
+    match client.probe_with("plain", &quick()).await {
+        ProbeVerdict::Unreachable { detail } => assert!(!detail.contains(KEY), "{detail}"),
+        other => panic!("{other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn a_probe_does_not_touch_the_daily_budget() {
+    let base = start_engine().await;
+    let hub = hub_with(provider(&base, one_call_a_day()), 20_000);
+    let client = hub.client(&local()).expect("client");
+    for _ in 0..5 {
+        assert!(client.probe_with("plain", &quick()).await.answers());
+    }
+    assert_eq!(hub.usage_today(&local()).tokens(), 0);
+}
+
+#[tokio::test]
+async fn probe_all_keeps_the_order_and_never_runs_more_than_six_at_once() {
+    let client = keyed_client(&start_engine().await, |_| {});
+    let mut models: Vec<String> = (0..14).map(|n| format!("slow-{n}")).collect();
+    models.insert(3, "absent".to_string());
+    models.insert(9, "k429".to_string());
+    let verdicts = client.probe_all_with(&models, &quick(), 50).await;
+    assert_eq!(verdicts.len(), models.len());
+    assert!(matches!(verdicts[3], ProbeVerdict::NotInAccount { .. }));
+    assert!(matches!(
+        verdicts[9],
+        ProbeVerdict::Refused { status: 429, .. }
+    ));
+    assert!(
+        verdicts
+            .iter()
+            .enumerate()
+            .all(|(n, v)| n == 3 || n == 9 || v.answers())
+    );
+    let seen = MAX_IN_FLIGHT.load(Ordering::SeqCst);
+    assert!(
+        (2..=6).contains(&seen),
+        "au plus 6 en vol (demandé 50), vu {seen}"
+    );
+}
+
+#[tokio::test]
+async fn probe_all_is_cancellable_by_dropping_the_future() {
+    let client = keyed_client(&start_engine().await, |_| {});
+    let models = vec!["mute".to_string(); 10];
+    let started = Instant::now();
+    let slow = ProbeOptions {
+        with_tools: false,
+        timeout: Duration::from_secs(30),
+    };
+    let outcome = tokio::time::timeout(
+        Duration::from_millis(300),
+        client.probe_all_with(&models, &slow, 6),
+    )
+    .await;
+    assert!(outcome.is_err(), "le futur doit rester en attente");
+    assert!(started.elapsed() < Duration::from_secs(2));
+}
+
+/// A host (a Tauri command, a spawned task) needs the batch to be `Send`.
+#[tokio::test]
+async fn the_probe_futures_can_be_sent_to_another_thread() {
+    let client = keyed_client(&start_engine().await, |_| {});
+    let models = vec!["plain".to_string()];
+    let verdicts = tokio::spawn(async move { client.probe_all(&models, false, 6).await })
+        .await
+        .unwrap();
+    assert!(verdicts[0].answers());
 }
