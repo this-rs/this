@@ -101,6 +101,7 @@ impl DecideRequest {
 
 /// Ce que le routeur répond — et ce que l'hôte peut persister, appliqué ou non.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct Decision {
     /// L'identifiant de la décision : c'est aussi sa graine. Sérialisé en
     /// **chaîne** : un `u128` ne survit pas à un `Number` JavaScript.
@@ -125,8 +126,10 @@ pub struct Decision {
     pub applied: bool,
     /// La paire sur laquelle le tour part **réellement** (l'équivalent du champ
     /// `used` de PO, `decision.rs:187`) : le choix quand il est appliqué, sinon la
-    /// paire en vigueur. `None` : la décision n'a pas encore été confrontée à
-    /// l'état d'un routeur (sortie brute de [`decide`]).
+    /// paire en vigueur. `None` quand personne ne le sait : sortie brute de
+    /// [`decide`] (pas encore confrontée à un routeur), décision consultative (le
+    /// transport n'honore pas la paire et sert son propre modèle), ou session encore
+    /// sur la sentinelle `auto`. Jamais la sentinelle elle-même.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub used: Option<Pick>,
     pub mode: ProviderRoutingMode,
@@ -134,8 +137,9 @@ pub struct Decision {
     pub turn_index: Option<u32>,
 }
 
-/// Sérialise un `u128` en chaîne décimale ; relit une chaîne (ou un entier
-/// qui tient dans un `u64`, forme d'avant).
+/// Sérialise un `u128` en chaîne décimale, et ne relit qu'une chaîne. Pas de forme
+/// numérique de repli : un nombre JSON au-delà de 2^53 a déjà perdu sa précision
+/// avant d'arriver ici, et une forme « chaîne ou nombre » exigerait `deserialize_any`.
 mod id_string {
     use serde::{Deserialize, Deserializer, Serializer};
 
@@ -144,16 +148,12 @@ mod id_string {
     }
 
     pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<u128, D::Error> {
-        #[derive(Deserialize)]
-        #[serde(untagged)]
-        enum Id {
-            Text(String),
-            Number(u64),
-        }
-        match Id::deserialize(deserializer)? {
-            Id::Text(text) => text.parse().map_err(serde::de::Error::custom),
-            Id::Number(n) => Ok(u128::from(n)),
-        }
+        // Une chaîne, et seulement une chaîne : `String::deserialize` passe par
+        // `deserialize_string`, que les formats non auto-descriptifs (bincode,
+        // postcard) savent lire — pas de `deserialize_any`.
+        String::deserialize(deserializer)?
+            .parse()
+            .map_err(serde::de::Error::custom)
     }
 }
 
@@ -367,14 +367,11 @@ fn decide_free(
     // boucler le tirage ou classer une note `NaN` en tête : la paire est écartée,
     // avec un motif nommé, et le reste décide.
     let class = signature.arm_key();
+    let stored = scorer::arms_of_class(arms, &class);
     let (valid, broken): (Vec<Candidate>, Vec<Candidate>) =
         filtered.eligible.into_iter().partition(|facts| {
-            arms.iter()
-                .find(|arm| {
-                    arm.key.class == class
-                        && arm.key.provider_id == facts.provider_id
-                        && arm.key.model == facts.model
-                })
+            stored
+                .get(&(facts.provider_id.as_str(), facts.model.as_str()))
                 .is_none_or(|arm| {
                     let posterior = |v: f64| v.is_finite() && v > 0.0;
                     posterior(arm.alpha) && posterior(arm.beta) && arm.cost_sum_usd.is_finite()
@@ -420,6 +417,25 @@ fn decide_free(
         score_settings,
         scorer::seed_of(id),
     );
+    // Des faits valides peuvent encore donner une note non finie (un coût mesuré
+    // démesuré) : la paire est écartée, jamais classée sur un `NaN`.
+    let (finite, unscorable): (Vec<Scored>, Vec<Scored>) =
+        scored.into_iter().partition(|s| s.utility.is_finite());
+    scored = finite;
+    let unscorable: Vec<Alternative> = unscorable
+        .into_iter()
+        .map(|s| Alternative {
+            pick: s.candidate.pick(),
+            score: None,
+            rejected: Some(RejectReason::NotScorable),
+        })
+        .collect();
+    if scored.is_empty() {
+        decision.reason = NO_CANDIDATE.into();
+        rejected(&mut decision);
+        decision.alternatives.extend(unscorable);
+        return decision;
+    }
     // Hystérésis : la paire en vigueur reste, sauf si un challenger est
     // nettement meilleur — par son tirage, ou, sur un tour stable, par sa
     // moyenne (une borne qui ne dépend pas du bruit des tirages).
@@ -461,6 +477,7 @@ fn decide_free(
         })
         .collect();
     rejected(&mut decision);
+    decision.alternatives.extend(unscorable);
     let scores: Vec<f64> = decision
         .alternatives
         .iter()
@@ -1008,17 +1025,124 @@ mod revue {
     #[test]
     fn un_bras_infini_ne_fait_jamais_boucler() {
         let req = request(vec![facts("bad", 1.0), facts("good", 1.0)]);
+        // Chaque cas séparément, sur plusieurs graines, et la PREUVE est le motif :
+        // la paire est écartée (`invalid_arm`), pas battue par chance au tirage.
+        // Seul `∞` faisait boucler le tirage ; `NaN`, `-3` et `(0, 0)` passaient le
+        // tirage (bornés par `max(1e-3)`) mais empoisonnaient la moyenne (`NaN`,
+        // ou > 1 : `-3 / -2 = 1,5`) que lisent l'hystérésis d'un tour stable et le motif.
         for (alpha, beta) in [
             (f64::INFINITY, 1.0),
             (1.0, f64::INFINITY),
             (f64::NAN, 1.0),
+            (1.0, f64::NAN),
             (-3.0, 1.0),
             (0.0, 0.0),
+            (0.0, 5.0),
         ] {
-            let arm = ArmStats::fresh(ArmKey::new("chat.general", "bad", "m"), alpha, beta);
-            let d = decide(7, &req, &[arm], &PriorHints::new());
-            assert_eq!(d.chosen, Some(Pick::new("good", "m")), "{alpha}/{beta}");
+            for id in 0..40u128 {
+                let arm = ArmStats::fresh(ArmKey::new("chat.general", "bad", "m"), alpha, beta);
+                let d = decide(id, &req, &[arm], &PriorHints::new());
+                assert_eq!(
+                    d.chosen,
+                    Some(Pick::new("good", "m")),
+                    "{alpha}/{beta} graine {id}"
+                );
+                let bad = d
+                    .alternatives
+                    .iter()
+                    .find(|a| a.pick.provider_id == "bad")
+                    .unwrap();
+                assert_eq!(
+                    bad.rejected,
+                    Some(RejectReason::InvalidArm),
+                    "{alpha}/{beta}"
+                );
+            }
         }
+        // Un postérieur valide, même extrême, reste un candidat.
+        let arm = ArmStats::fresh(ArmKey::new("chat.general", "bad", "m"), 1e-3, 1e6);
+        let d = decide(1, &req, &[arm], &PriorHints::new());
+        assert!(d.alternatives.iter().all(|a| a.rejected.is_none()));
+    }
+
+    /// Revue de #251, M3 : une note non finie malgré des faits valides est
+    /// écartée (`not_scorable`), jamais classée en tête. Deux coûts mesurés au
+    /// maximum des `f64` : leur médiane (qui comble un coût inconnu) déborde.
+    #[test]
+    fn une_note_non_finie_est_ecartee() {
+        let mut unpriced = facts("unpriced", 1.0);
+        unpriced.price = None;
+        let req = request(vec![facts("a", 1.0), facts("b", 1.0), unpriced]);
+        let measured = |provider: &str| ArmStats {
+            n: 1,
+            cost_sum_usd: f64::MAX,
+            cost_n: 1,
+            ..ArmStats::fresh(ArmKey::new("chat.general", provider, "m"), 2.0, 2.0)
+        };
+        for id in 0..40u128 {
+            let d = decide(
+                id,
+                &req,
+                &[measured("a"), measured("b")],
+                &PriorHints::new(),
+            );
+            assert!(d.score.is_some_and(f64::is_finite), "graine {id}");
+            assert!(
+                d.alternatives
+                    .iter()
+                    .all(|a| a.score.is_none_or(f64::is_finite))
+            );
+            let unpriced = d
+                .alternatives
+                .iter()
+                .find(|a| a.pick.provider_id == "unpriced")
+                .unwrap();
+            assert_eq!(unpriced.rejected, Some(RejectReason::NotScorable));
+        }
+    }
+
+    /// Revue de #251, M3 : un prix fini mais démesuré est une donnée corrompue.
+    #[test]
+    fn un_prix_demesure_est_ecarte() {
+        let req = request(vec![facts("huge", 1e300), facts("good", 1.0)]);
+        let d = decide(1, &req, &[], &PriorHints::new());
+        assert_eq!(d.chosen, Some(Pick::new("good", "m")));
+        assert_eq!(
+            d.alternatives
+                .iter()
+                .find(|a| a.pick.provider_id == "huge")
+                .unwrap()
+                .rejected,
+            Some(RejectReason::InvalidPrice)
+        );
+    }
+
+    /// Revue de #251, M7 : l'identifiant ne se relit QUE depuis une chaîne, par
+    /// `deserialize_string` (lisible par un format non auto-descriptif).
+    #[test]
+    fn l_identifiant_ne_se_relit_que_depuis_une_chaine() {
+        use serde::de::IntoDeserializer;
+        use serde::de::value::Error;
+        let id = u128::MAX - 7;
+        let back: u128 = super::id_string::deserialize(
+            IntoDeserializer::<Error>::into_deserializer(id.to_string()),
+        )
+        .unwrap();
+        assert_eq!(back, id);
+        let number: Result<u128, Error> =
+            super::id_string::deserialize(IntoDeserializer::<Error>::into_deserializer(42u64));
+        assert!(number.is_err(), "un nombre n'est pas un identifiant");
+        let json = serde_json::to_value(decide(
+            id,
+            &request(vec![facts("good", 1.0)]),
+            &[],
+            &PriorHints::new(),
+        ))
+        .unwrap();
+        let mut as_number = json.clone();
+        as_number["id"] = serde_json::json!(42);
+        assert!(serde_json::from_value::<Decision>(as_number).is_err());
+        assert_eq!(serde_json::from_value::<Decision>(json).unwrap().id, id);
     }
 
     /// `u128` ne survit pas à un `Number` JavaScript : l'identifiant sort en chaîne.

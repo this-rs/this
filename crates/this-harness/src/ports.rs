@@ -27,26 +27,58 @@ pub type Delta = Rc<dyn Fn(&str)>;
 
 /// Le drapeau d'annulation, partagé entre l'interface et le tour en cours.
 ///
-/// Un `bool` dans un `Rc<Cell>` suffit : la boucle est sur un seul fil. Un
-/// transport qui peut vraiment interrompre (couper une connexion) le consulte
-/// lui-même ; sinon, le harnais s'arrête à la frontière suivante et le dit.
+/// Un drapeau dans un `Rc` suffit : la boucle est sur un seul fil. Un transport
+/// qui peut vraiment interrompre (couper une connexion) le consulte lui-même ;
+/// sinon, le harnais s'arrête à la frontière suivante et le dit.
+///
+/// L'annulation **réveille** : une attente du harnais sur [`Cancel::cancelled`]
+/// est relancée dès [`Cancel::cancel`], même sans aucun minuteur (une page wasm
+/// qui n'en a pas injecté). Sans réveil, une future suspendue sur un port qui ne
+/// répond jamais ne relirait le drapeau… jamais.
 #[derive(Clone, Default)]
-pub struct Cancel(Rc<Cell<bool>>);
+pub struct Cancel(Rc<CancelState>);
+
+#[derive(Default)]
+struct CancelState {
+    flag: Cell<bool>,
+    wakers: RefCell<Vec<std::task::Waker>>,
+}
 
 impl Cancel {
     pub fn new() -> Self {
         Self::default()
     }
+    /// Pose le drapeau et réveille toutes les attentes de [`Cancel::cancelled`].
     pub fn cancel(&self) {
-        self.0.set(true);
+        self.0.flag.set(true);
+        let wakers = std::mem::take(&mut *self.0.wakers.borrow_mut());
+        for waker in wakers {
+            waker.wake();
+        }
     }
     pub fn is_cancelled(&self) -> bool {
-        self.0.get()
+        self.0.flag.get()
     }
     /// Consommé en **fin** de run (jamais au début) : une annulation ne vaut que pour le run
     /// qui la voit, et une annulation arrivée entre deux runs est vue dès le premier tour du suivant.
     pub fn reset(&self) {
-        self.0.set(false);
+        self.0.flag.set(false);
+        self.0.wakers.borrow_mut().clear();
+    }
+    /// Une future qui rend dès que l'annulation est posée — immédiatement si elle
+    /// l'est déjà. Elle n'a besoin d'aucun minuteur : `cancel` la réveille.
+    pub fn cancelled(&self) -> impl std::future::Future<Output = ()> + 'static {
+        let state = self.0.clone();
+        std::future::poll_fn(move |cx| {
+            if state.flag.get() {
+                return std::task::Poll::Ready(());
+            }
+            let mut wakers = state.wakers.borrow_mut();
+            if !wakers.iter().any(|w| w.will_wake(cx.waker())) {
+                wakers.push(cx.waker().clone());
+            }
+            std::task::Poll::Pending
+        })
     }
 }
 

@@ -34,6 +34,9 @@ pub struct Pending {
 /// Ce qui sort du harnais, dans l'ordre où ça arrive.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
+/// Non exhaustif : un nouveau genre d'événement est un ajout, pas une rupture —
+/// un consommateur qui fait un `match` garde un bras `_`.
+#[non_exhaustive]
 pub enum Event {
     /// Un message tenu vient d'entrer dans la conversation.
     User { text: String },
@@ -157,7 +160,7 @@ pub enum Event {
         mode: Option<String>,
         /// La décision est **consultative** : le transport ne déclare pas honorer la
         /// paire ([`crate::Transport::honors_route`] faux), il sert son modèle à lui.
-        /// Une interface ne doit alors pas afficher « servi par <paire> », et la fin du
+        /// Une interface ne doit alors pas afficher « servi par telle paire », et la fin du
         /// tour n'est pas rendue à l'apprentissage comme servie par elle. Absent : faux.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         advisory: bool,
