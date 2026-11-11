@@ -267,7 +267,7 @@ mod tests {
 
     fn view(name: &str, surface: Surface, replaces: Option<&str>) -> ViewDesc {
         ViewDesc {
- live: None,
+            live: None,
             name: name.into(),
             surface,
             title: None,
