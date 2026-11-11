@@ -17,7 +17,7 @@ use std::rc::Rc;
 use async_trait::async_trait;
 use this_agent::Stop;
 
-use super::candidate::{self, Candidate, Pick, Slot, is_auto_model};
+use super::candidate::{self, Candidate, Pick, Slot, is_auto_model, same_model, same_pair};
 use super::decide::{DecideRequest, Decision, HYSTERESIS_MARGIN, decide};
 use super::mode::{
     ConversationRoutingMode, LearningStage, PoolEntry, ProviderRoutingMode, RoutingSettings,
@@ -406,7 +406,10 @@ struct State {
     last_move_turn: Option<u32>,
     /// La dernière décision appliquée, et la paire qui a servi : ce que
     /// [`TurnRouter::settle`] rend à l'apprentissage.
-    open: Option<(u128, Pick)>,
+    /// La troisième valeur dit que la décision est **abandonnée** : son tour n'a
+    /// pas reçu de fin, et seule une réparation (`Interrupted`) peut la clore — jamais
+    /// la fin d'un objectif suivant.
+    open: Option<(u128, Pick, bool)>,
     /// Compteur de réglages de la personne (menu, main, liste) : une décision
     /// qui a attendu un port ne réécrit l'état que si rien n'a changé entre-temps.
     generation: u64,
@@ -454,22 +457,6 @@ fn settings_for(routing: &RoutingSettings, apply: bool) -> RoutingSettings {
         settings.stage = LearningStage::Shadow;
     }
     settings
-}
-
-/// Deux identifiants nomment-ils le même modèle ? Le suffixe de fenêtre
-/// (`[1m]`) et la casse ne font pas partie du nom.
-fn same_model(a: &str, b: &str) -> bool {
-    fn base(id: &str) -> &str {
-        let id = id.trim();
-        id.strip_suffix("[1m]").unwrap_or(id).trim_end()
-    }
-    base(a).eq_ignore_ascii_case(base(b))
-}
-
-/// Deux paires sont-elles la même ? Même instance, et même modèle au sens de
-/// [`same_model`] (suffixe `[1m]` et casse ignorés).
-fn same_pair(a: &Pick, b: &Pick) -> bool {
-    a.provider_id == b.provider_id && same_model(&a.model, &b.model)
 }
 
 /// La paire en vigueur, si c'en est une : jamais la sentinelle (`auto`, vide).
@@ -666,11 +653,23 @@ impl TurnRouter {
     pub async fn route(&self, turn: TurnInput<'_>) -> Routed {
         // Un tour appliqué dont la fin n'est jamais venue (future lâchée, page
         // suspendue) est abandonné : dit explicitement, jamais nourri.
-        let abandoned = self.state.borrow_mut().open.take();
-        if let Some((id, _)) = abandoned {
+        // La décision n'est vidée qu'APRÈS le retour de `settle` : si celui-ci est coupé
+        // à son tour, elle reste ouverte et sera redite au message suivant.
+        let abandoned = {
+            let mut state = self.state.borrow_mut();
+            if let Some(open) = state.open.as_mut() {
+                open.2 = true;
+            }
+            state.open.clone()
+        };
+        if let Some((id, _, _)) = abandoned {
             self.learning
                 .settle(id, None, &Stop::Interrupted, None)
                 .await;
+            let mut state = self.state.borrow_mut();
+            if state.open.as_ref().is_some_and(|(open, _, _)| *open == id) {
+                state.open = None;
+            }
         }
         let (choice, manual, current, index, held_turn, held_class, last_move, generation) = {
             let mut state = self.state.borrow_mut();
@@ -818,17 +817,40 @@ impl TurnRouter {
                 // La personne a réglé la conversation pendant l'attente (menu, main,
                 // liste Auto) : son réglage gagne, la décision n'écrit rien.
                 decision.applied = false;
-                decision.used = real_pair(&state.provider, &state.model);
+                decision.used = if turn.honored {
+                    real_pair(&state.provider, &state.model)
+                } else {
+                    None
+                };
                 Routed {
                     route: Route::of(&state.provider, &state.model),
                     changed: false,
                     why: RouteWhy::Superseded,
                     decision: Some(decision),
                 }
+            } else if !turn.honored {
+                // Consultatif : le transport sert SON modèle. Le choix est rendu comme
+                // conseil (la requête le porte, l'événement le dit `advisory`), mais
+                // l'état SERVI ne bouge pas : ni paire en vigueur, ni garde « pas deux
+                // changements de fournisseur de suite », ni décision ouverte — rien de
+                // tout cela n'a eu lieu.
+                decision.applied = false;
+                decision.used = None;
+                let advice = decision.chosen.clone().filter(|_| apply);
+                let route = match &advice {
+                    Some(pick) => Route::of(&pick.provider_id, &pick.model),
+                    None => Route::of(&state.provider, &state.model),
+                };
+                Routed {
+                    route,
+                    changed: false,
+                    why,
+                    decision: Some(decision),
+                }
             } else {
                 let mut changed = false;
                 if let (true, Some(pick)) = (apply, decision.chosen.clone()) {
-                    state.open = Some((decision.id, pick.clone()));
+                    state.open = Some((decision.id, pick.clone(), false));
                     if !same_pair(&pick, &current) {
                         let moves = has_pair && pick.provider_id != current.provider_id;
                         state.provider = pick.provider_id.clone();
@@ -844,18 +866,11 @@ impl TurnRouter {
                 // Ce que le tour fait vraiment : la décision le dit, pour que
                 // l'apprentissage ne prenne jamais pour servie une paire qui ne
                 // l'a pas été (exploration refusée, écart sous la marge, étape
-                // consultative, transport qui n'honore pas la paire).
-                if turn.honored {
-                    let used = real_pair(&state.provider, &state.model);
-                    decision.applied = apply
-                        && matches!((&decision.chosen, &used), (Some(c), Some(u)) if same_pair(c, u));
-                    decision.used = used;
-                } else {
-                    // Le transport sert SON modèle : personne ne sait lequel, et le
-                    // choix du routeur n'a rien appliqué.
-                    decision.applied = false;
-                    decision.used = None;
-                }
+                // consultative).
+                let used = real_pair(&state.provider, &state.model);
+                decision.applied = apply
+                    && matches!((&decision.chosen, &used), (Some(c), Some(u)) if same_pair(c, u));
+                decision.used = used;
                 Routed {
                     route: Route::of(&state.provider, &state.model),
                     changed,
@@ -911,7 +926,7 @@ impl TurnRouter {
                 decision
                     .alternatives
                     .iter()
-                    .find(|a| a.pick == *wanted && a.rejected.is_none())
+                    .find(|a| same_pair(&a.pick, wanted) && a.rejected.is_none())
                     .and_then(|a| a.score)
             };
             if let (Some(best), Some(now)) = (decision.score, score_of(current))
@@ -948,12 +963,19 @@ impl TurnRouter {
     /// (borne de temps, future lâchée) la laisse ouverte, et le tour suivant la
     /// déclare [`Stop::Interrupted`] — jamais une décision perdue en silence.
     pub async fn settle(&self, stop: &Stop, code: Option<&str>, honored: bool) {
-        let open = self.state.borrow().open.clone();
-        if let Some((id, pair)) = open {
+        // Une décision abandonnée (son tour n'a pas reçu de fin, un `route` l'a
+        // marquée) n'est pas la fin de CET objectif : elle attend sa réparation.
+        let open = self
+            .state
+            .borrow()
+            .open
+            .clone()
+            .filter(|(_, _, abandoned)| !abandoned);
+        if let Some((id, pair, _)) = open {
             let served = honored.then_some(&pair);
             self.learning.settle(id, served, stop, code).await;
             let mut state = self.state.borrow_mut();
-            if state.open.as_ref().is_some_and(|(open, _)| *open == id) {
+            if state.open.as_ref().is_some_and(|(open, _, _)| *open == id) {
                 state.open = None;
             }
         }
@@ -1005,6 +1027,7 @@ pub struct MemoryLearning {
     hints: RefCell<PriorHints>,
     decisions: RefCell<Vec<Decision>>,
     settled: RefCell<Vec<Settled>>,
+    duplicates: Cell<u32>,
 }
 
 impl MemoryLearning {
@@ -1028,6 +1051,11 @@ impl MemoryLearning {
     /// Les fins de tour reçues, dans l'ordre.
     pub fn settled(&self) -> Vec<Settled> {
         self.settled.borrow().clone()
+    }
+
+    /// Les fins reçues pour un identifiant qui en avait déjà une : ignorées.
+    pub fn duplicates(&self) -> u32 {
+        self.duplicates.get()
     }
 }
 
@@ -1057,7 +1085,15 @@ impl Learning for MemoryLearning {
         stop: &Stop,
         code: Option<&str>,
     ) {
-        self.settled.borrow_mut().push(Settled {
+        // Le contrat de `Learning::settle` : la PREMIÈRE fin reçue pour un identifiant
+        // fait foi, les suivantes sont ignorées (et comptées, pour que les tests voient
+        // un doublon).
+        let mut settled = self.settled.borrow_mut();
+        if settled.iter().any(|s| s.decision_id == decision_id) {
+            self.duplicates.set(self.duplicates.get() + 1);
+            return;
+        }
+        settled.push(Settled {
             decision_id,
             served: served.cloned(),
             stop: stop.clone(),

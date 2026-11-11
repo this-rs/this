@@ -11,7 +11,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::candidate::{self, Candidate, Pick, RejectReason, Slot};
+use super::candidate::{self, Candidate, Pick, RejectReason, Slot, same_pair};
 use super::mode::{LearningStage, MAX_EXPLORATION_EPSILON, ProviderRoutingMode, RoutingSettings};
 use super::scorer::{self, ArmStats, PriorHints, Scored};
 use super::signature::{Role, TurnSignature};
@@ -139,7 +139,15 @@ pub struct Decision {
 
 /// Sérialise un `u128` en chaîne décimale, et ne relit qu'une chaîne. Pas de forme
 /// numérique de repli : un nombre JSON au-delà de 2^53 a déjà perdu sa précision
-/// avant d'arriver ici, et une forme « chaîne ou nombre » exigerait `deserialize_any`.
+/// avant d'arriver ici (un `Number` JavaScript), et l'accepter en silence rendrait
+/// un identifiant faux.
+///
+/// **Format de persistance d'une [`Decision`] : JSON** (ou tout format
+/// auto-descriptif). `RejectReason` est étiqueté en interne (`{"reason": "no_tools"}`)
+/// et `Decision.used` est omis quand il est vide : ces deux choix exigent
+/// `deserialize_any`, que bincode ou postcard ne savent pas faire. C'est voulu : la
+/// forme JSON est celle que lisent l'interface et le journal de PO (`d.json`), et la
+/// garder vaut mieux qu'une compatibilité binaire que rien ne demande.
 mod id_string {
     use serde::{Deserialize, Deserializer, Serializer};
 
@@ -148,9 +156,7 @@ mod id_string {
     }
 
     pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<u128, D::Error> {
-        // Une chaîne, et seulement une chaîne : `String::deserialize` passe par
-        // `deserialize_string`, que les formats non auto-descriptifs (bincode,
-        // postcard) savent lire — pas de `deserialize_any`.
+        // Une chaîne, et seulement une chaîne : un nombre est refusé.
         String::deserialize(deserializer)?
             .parse()
             .map_err(serde::de::Error::custom)
@@ -449,7 +455,9 @@ fn decide_free(
     let mut kept = false;
     if !scored[0].explored
         && let Some(current) = &request.current
-        && let Some(index) = scored.iter().position(|s| s.candidate.pick() == *current)
+        && let Some(index) = scored
+            .iter()
+            .position(|s| same_pair(&s.candidate.pick(), current))
         && index > 0
     {
         let margin = hysteresis_margin(&scored, index, settings, request.steady);
@@ -1118,7 +1126,7 @@ mod revue {
     }
 
     /// Revue de #251, M7 : l'identifiant ne se relit QUE depuis une chaîne, par
-    /// `deserialize_string` (lisible par un format non auto-descriptif).
+    /// `String::deserialize` : un nombre est refusé, jamais lu en silence.
     #[test]
     fn l_identifiant_ne_se_relit_que_depuis_une_chaine() {
         use serde::de::IntoDeserializer;
@@ -1143,6 +1151,36 @@ mod revue {
         as_number["id"] = serde_json::json!(42);
         assert!(serde_json::from_value::<Decision>(as_number).is_err());
         assert_eq!(serde_json::from_value::<Decision>(json).unwrap().id, id);
+    }
+
+    /// Relecture de #252, M4 : l'hystérésis reconnaît la paire en vigueur sous sa
+    /// variante de fenêtre (`m` contre `m[1m]` dans le pool).
+    #[test]
+    fn l_hysteresis_reconnait_la_paire_sous_sa_variante() {
+        let mut wide = facts("a", 1.0);
+        wide.model = "m[1m]".into();
+        let mut req = request(vec![wide, facts("b", 1.0)]);
+        req.current = Some(Pick::new("a", "m"));
+        let warm = |provider: &str, model: &str, alpha: f64, beta: f64| ArmStats {
+            n: 2_000,
+            ..ArmStats::fresh(ArmKey::new("chat.general", provider, model), alpha, beta)
+        };
+        let arms = [
+            warm("a", "m[1m]", 1_000.0, 1_000.0),
+            warm("b", "m", 1_100.0, 900.0),
+        ];
+        let mut kept = 0;
+        for id in 0..100u128 {
+            let d = decide(id, &req, &arms, &PriorHints::new());
+            assert_eq!(
+                d.chosen,
+                Some(Pick::new("a", "m[1m]")),
+                "graine {id} : {}",
+                d.reason
+            );
+            kept += usize::from(d.reason.contains("kept"));
+        }
+        assert!(kept > 50, "le challenger mène et la paire tient : {kept}");
     }
 
     /// `u128` ne survit pas à un `Number` JavaScript : l'identifiant sort en chaîne.

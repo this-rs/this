@@ -1458,12 +1458,10 @@ fn un_transport_qui_n_honore_pas_la_paire_rend_la_decision_consultative() {
         unreachable!()
     };
     assert_eq!(provider, "b", "ce que le routeur a décidé");
-    assert!(*changed);
+    assert!(!*changed, "l'état servi ne bouge pas en consultatif");
     assert!(*advisory, "mais personne ne l'honore");
-    let settled = world.learning.settled();
-    assert_eq!(settled.len(), 1);
-    assert_eq!(settled[0].served, None, "aucun bras nourri");
-    assert_eq!(settled[0].stop, Stop::Done);
+    // Aucune décision n'a été servie : aucune fin n'est rendue, aucun bras nourri.
+    assert!(world.learning.settled().is_empty());
 }
 
 /// Constat 1 (forme sur le fil) : `advisory` s'écrit seulement quand il est vrai.
@@ -1767,7 +1765,6 @@ fn un_ecart_sous_la_marge_ne_change_pas_de_fournisseur() {
             assert_eq!(d.used, Some(Pick::new("a", "m2")));
         }
     }
-    eprintln!("under_margin : held = {held} sur 800 graines");
     assert!(held > 5, "le cas existe : {held}");
 }
 
@@ -1996,4 +1993,194 @@ fn un_settle_coupe_est_declare_interrompu_au_message_suivant() {
         "puis la fin du second objectif : {settled:?}"
     );
     assert_eq!(settled[1].stop, Stop::Done);
+}
+
+// ── 10. Relecture de #252 ───────────────────────────────────────────────────
+
+/// A2 : en consultatif, le conseil part dans la requête et l'événement, mais
+/// l'état SERVI ne bouge pas : pas de paire en vigueur changée, pas de garde
+/// « pas deux changements de fournisseur de suite » au tour suivant.
+#[test]
+fn un_tour_consultatif_ne_deplace_pas_l_etat_servi() {
+    let world = World::new(three_providers());
+    world.prefer(("b", "m2"), &[("a", "m1"), ("c", "m3")]);
+    let router = TurnRouter::new(world.spec("a", "m1", 1).auto());
+    let deaf = |message| TurnInput {
+        honored: false,
+        ..text(message)
+    };
+    let first = run(router.route(deaf("hello")));
+    assert_eq!(pair(&first), on("b", "m2"), "le conseil");
+    assert!(!first.changed);
+    assert_eq!(
+        router.in_force(),
+        Pick::new("a", "m1"),
+        "rien n'a été servi"
+    );
+    let d = first.decision.as_ref().unwrap();
+    assert!(!d.applied);
+    assert_eq!(d.used, None);
+    // Le tour suivant n'est pas tenu par la garde de fournisseur.
+    world.prefer(("c", "m3"), &[("a", "m1"), ("b", "m2")]);
+    let next = run(router.route(deaf("pourquoi ça plante ?")));
+    assert!(
+        !reason(&next).contains(AFTER_PROVIDER_MOVE),
+        "{}",
+        reason(&next)
+    );
+    assert_eq!(looked_at(&next).len(), 3);
+    // Aucune décision ouverte : la fin ne nourrit rien.
+    run(router.settle(&Stop::Done, None, false));
+    assert!(world.learning.settled().is_empty());
+}
+
+/// A2 : `Superseded` en consultatif ne déclare aucune paire dans `used`.
+#[test]
+fn superseded_en_consultatif_n_a_pas_de_paire_dans_used() {
+    let world = World::new(three_providers());
+    world.prefer(("b", "m2"), &[("a", "m1"), ("c", "m3")]);
+    let meddler = Rc::new(Meddler {
+        pool: three_providers(),
+        router: RefCell::new(None),
+    });
+    let mut spec = world.spec("a", "m1", 1).auto();
+    spec.pool = meddler.clone();
+    let router = Rc::new(TurnRouter::new(spec));
+    *meddler.router.borrow_mut() = Some(router.clone());
+    let routed = run(router.route(TurnInput {
+        honored: false,
+        ..text("hello")
+    }));
+    *meddler.router.borrow_mut() = None;
+    assert_eq!(routed.why, RouteWhy::Superseded);
+    assert_eq!(routed.decision.as_ref().unwrap().used, None);
+}
+
+/// A3 : le `settle(Interrupted)` qui répare un tour abandonné peut être coupé à
+/// son tour. La décision reste ouverte, et elle est redite au message suivant.
+#[test]
+fn un_settle_de_reparation_coupe_n_efface_pas_la_decision() {
+    let world = World::new(three_providers());
+    world.prefer(("b", "m2"), &[("a", "m1"), ("c", "m3")]);
+    // Deux `settle` pendent : la fin du 1er objectif, puis sa réparation au 2e.
+    let learning = Rc::new(StuckLearning::new(world.learning.clone(), 2, false));
+    let router = Rc::new(TurnRouter::new(
+        world.spec("a", "m1", 1).auto().learning(learning),
+    ));
+    let (harness, journal) = build(
+        script(vec![]),
+        router,
+        Some(Rc::new(Fast(std::cell::Cell::new(0.0)))),
+    );
+    for message in ["hello", "encore", "et encore"] {
+        assert_eq!(run(harness.send(message)), Running::Ran(Stop::Done));
+    }
+    let first = world.learning.decisions()[0].id;
+    let settled = world.learning.settled();
+    assert_eq!(settled[0].decision_id, first, "{settled:?}");
+    assert_eq!(settled[0].stop, Stop::Interrupted);
+    // Le 2e message a attendu la réparation jusqu'à sa borne : il est parti en repli.
+    let whys: Vec<String> = routed_events(&journal)
+        .into_iter()
+        .map(|e| match e {
+            Event::Routed { why, .. } => why,
+            _ => unreachable!(),
+        })
+        .collect();
+    assert_eq!(whys[1], "timed_out", "{whys:?}");
+}
+
+/// Une horloge figée dont `sleep` rend tout de suite : l'heure n'avance jamais.
+struct Frozen;
+
+impl this_harness::Clock for Frozen {
+    fn now_ms(&self) -> f64 {
+        0.0
+    }
+    fn sleep(&self, _ms: u64) -> Option<this_harness::Sleep> {
+        Some(Box::pin(async {}))
+    }
+}
+
+/// Un pool qui répond au bout de quelques sondages (il se réveille lui-même).
+struct AfterPolls(std::cell::Cell<u32>);
+
+#[async_trait(?Send)]
+impl this_harness::routing::PoolSource for AfterPolls {
+    async fn pool(&self) -> Vec<Candidate> {
+        yields(self.0.get()).await;
+        three_providers()
+    }
+}
+
+/// M2 (relecture #252) : avec une horloge figée dont `sleep` rend tout de
+/// suite, la veille n'atteint jamais l'échéance — mais elle cède la main à
+/// chaque pas : un port qui répond au bout de quelques sondages répond, le
+/// tour part. Avant le correctif, la veille tournait dans un seul sondage et
+/// ne rendait jamais la main.
+#[test]
+fn une_horloge_figee_ne_gele_pas_le_routeur() {
+    let world = World::new(three_providers());
+    world.prefer(("b", "m2"), &[("a", "m1"), ("c", "m3")]);
+    let mut spec = world.spec("a", "m1", 1).auto();
+    spec.pool = Rc::new(AfterPolls(std::cell::Cell::new(5)));
+    let router = Rc::new(TurnRouter::new(spec));
+    let transport = script(vec![]);
+    let (harness, journal) = build(transport.clone(), router, Some(Rc::new(Frozen)));
+    assert_eq!(run(harness.send("hello")), Running::Ran(Stop::Done));
+    let events = routed_events(&journal);
+    let Event::Routed { why, .. } = &events[0] else {
+        unreachable!()
+    };
+    assert_eq!(why, "routed");
+    assert_eq!(transport.seen.borrow()[0].provider(), Some("b"));
+}
+
+/// M5 (relecture #252) : le double en mémoire respecte le contrat — seule la
+/// première fin reçue pour un identifiant compte.
+#[test]
+fn le_double_garde_la_premiere_fin_par_decision() {
+    use this_harness::routing::Learning;
+    let learning = MemoryLearning::new();
+    let pair = Pick::new("a", "m");
+    run(learning.settle(7, None, &Stop::Interrupted, None));
+    run(learning.settle(7, Some(&pair), &Stop::Done, None));
+    let settled = learning.settled();
+    assert_eq!(settled.len(), 1);
+    assert_eq!(settled[0].stop, Stop::Interrupted);
+    assert_eq!(learning.duplicates(), 1);
+}
+
+/// Un moteur jamais joint : `Unreachable` avant toute émission.
+struct Unreachable;
+
+#[async_trait(?Send)]
+impl Transport for Unreachable {
+    async fn stream(&self, _r: &Request, _c: &Cancel, _d: Delta) -> Result<Reply, Failure> {
+        Err(Failure::unreachable("connexion refusée"))
+    }
+    fn honors_route(&self) -> bool {
+        true
+    }
+}
+
+/// M9 (relecture #252) : un transport qui n'a jamais joint le moteur n'a servi
+/// aucune paire ; un refus du moteur (`Http`), lui, a servi (test
+/// `settle_sur_echec_et_sur_annulation`).
+#[test]
+fn un_moteur_jamais_joint_n_a_servi_aucune_paire() {
+    let world = World::new(three_providers());
+    world.prefer(("b", "m2"), &[("a", "m1"), ("c", "m3")]);
+    let router = Rc::new(TurnRouter::new(world.spec("a", "m1", 1).auto()));
+    let (harness, _) = build(Rc::new(Unreachable), router, None);
+    run(harness.send("hello"));
+    let settled = world.learning.settled();
+    assert_eq!(settled.len(), 1);
+    assert!(
+        matches!(settled[0].stop, Stop::Failed(_)),
+        "{:?}",
+        settled[0]
+    );
+    assert_eq!(settled[0].code.as_deref(), Some("unreachable"));
+    assert_eq!(settled[0].served, None);
 }

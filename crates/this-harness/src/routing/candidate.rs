@@ -41,6 +41,22 @@ pub struct Pick {
     pub model: String,
 }
 
+/// Deux identifiants nomment-ils le même modèle ? Le suffixe de fenêtre
+/// (`[1m]`) et la casse ne font pas partie du nom.
+pub(crate) fn same_model(a: &str, b: &str) -> bool {
+    fn base(id: &str) -> &str {
+        let id = id.trim();
+        id.strip_suffix("[1m]").unwrap_or(id).trim_end()
+    }
+    base(a).eq_ignore_ascii_case(base(b))
+}
+
+/// Deux paires sont-elles la même ? Même instance, et même modèle au sens de
+/// [`same_model`] (suffixe `[1m]` et casse ignorés).
+pub(crate) fn same_pair(a: &Pick, b: &Pick) -> bool {
+    a.provider_id == b.provider_id && same_model(&a.model, &b.model)
+}
+
 impl Pick {
     pub fn new(provider_id: impl Into<String>, model: impl Into<String>) -> Self {
         Self {

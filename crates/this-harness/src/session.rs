@@ -1213,9 +1213,12 @@ impl Harness {
             // d'un message qui réussit ne laisse pas son code périmé à `Stopped` ni à
             // l'apprentissage.
             code = None;
-            // Un tour n'est servi que si une requête est vraiment partie : un objectif
-            // annulé avant son premier appel au moteur n'a servi aucune paire.
-            let mut sent = false;
+            // Un tour n'est « servi » que si le moteur a RÉPONDU : un morceau émis
+            // (même vide : un signe de vie), une réponse rendue, ou un refus du moteur
+            // (`Http`, `Provider`…). Un objectif annulé avant tout appel, ou un
+            // transport qui n'a jamais joint le moteur (`Unreachable`), n'a servi
+            // aucune paire.
+            let answered = Rc::new(Cell::new(false));
             self.push(Message::user_with_images(
                 first.text.clone(),
                 first.images.clone(),
@@ -1355,11 +1358,13 @@ impl Harness {
                     let signs = Signs::new(clock.now_ms());
                     let delta: Delta = {
                         let gathered = gathered.clone();
+                        let answered = answered.clone();
                         let out = self.out.clone();
                         let cancel = cancel.clone();
                         let signs = signs.clone();
                         let clock = clock.clone();
                         Rc::new(move |text: &str| {
+                            answered.set(true);
                             // TOUT appel est un signe de vie, y compris un morceau
                             // vide : c'est ainsi qu'un transport dit « le moteur
                             // parle » quand il écrit un appel d'outil ou raisonne
@@ -1400,8 +1405,20 @@ impl Harness {
                         },
                         INTERRUPT_GRACE_MS,
                     );
-                    sent = true;
                     let issue = race(transport.stream(&request, &cancel, delta), guard).await;
+                    // Le moteur a répondu, même par un refus (`Http`, `Provider`) ou une
+                    // réponse coupée : la paire a servi, et sa faute éventuelle se compte.
+                    // Une connexion jamais établie (`Unreachable`) ou une annulation
+                    // (`Aborted`) ne la fait pas servir.
+                    if match &issue {
+                        Ok(Ok(_)) => true,
+                        Ok(Err(failure)) => {
+                            !matches!(failure.code, Code::Unreachable | Code::Aborted)
+                        }
+                        Err(_) => false,
+                    } {
+                        answered.set(true);
+                    }
 
                     // Une panne passagère se rejoue, mais seulement si le tour
                     // n'a rien montré et qu'aucun outil n'a tourné DANS CE
@@ -1658,7 +1675,7 @@ impl Harness {
                     // Bornée : un apprentissage qui pend ne retient ni `Stopped`,
                     // ni `busy`. Pas coupée par l'annulation : un run annulé est
                     // lui aussi rendu (`Cancelled`, jamais une récompense).
-                    let honored = transport.honors_route() && sent;
+                    let honored = transport.honors_route() && answered.get();
                     let settle = router.settle(&ending, code.as_deref(), honored);
                     let _ = race(settle, cut(clock.as_ref(), ROUTER_TIMEOUT_MS, None)).await;
                 }
@@ -2402,9 +2419,14 @@ impl Handle {
     /// run arrête CE run ; le drapeau est remis à zéro en fin de run (ou à son abandon), pas
     /// au début, pour que le run suivant reparte proprement.
     pub fn interrupt(&self) {
-        let s = self.state.borrow();
-        if s.busy {
-            s.cancel.cancel();
+        // L'emprunt est relâché AVANT `cancel` : `cancel` réveille des futures, et un
+        // exécuteur qui les sonde sur-le-champ relirait l'état encore emprunté.
+        let cancel = {
+            let s = self.state.borrow();
+            s.busy.then(|| s.cancel.clone())
+        };
+        if let Some(cancel) = cancel {
+            cancel.cancel();
         }
     }
 
