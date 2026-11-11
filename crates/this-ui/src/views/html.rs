@@ -171,6 +171,11 @@ pub fn intent_from_message(module: &ModuleDescriptor, message: &Value) -> Result
     Ok(intent)
 }
 
+/// La ligne de journal d'une intention refusée : ce que l'hôte écrit, jamais exécute.
+pub fn refusal_line(why: &str) -> String {
+    format!("html : intention ignorée ({why})")
+}
+
 /// Le nœud `html` : monte la page, ou dit pourquoi il ne le fait pas.
 pub fn render_html(ctx: Ctx, path: &str, height: Option<u32>) -> AnyView {
     let full = ctx
@@ -308,9 +313,7 @@ fn mount(ctx: Ctx, host: HtmlHost, full: String, height: u32) -> AnyView {
                 Some("this:intent") => {
                     match ctx.module.try_with_value(|m| intent_from_message(m, &msg)) {
                         Some(Ok(intent)) => ctx.on_intent.run(intent),
-                        Some(Err(why)) => {
-                            render::log_refusal(&format!("html : intention ignorée ({why})"))
-                        }
+                        Some(Err(why)) => render::log_refusal(&refusal_line(&why)),
                         None => {}
                     }
                 }
