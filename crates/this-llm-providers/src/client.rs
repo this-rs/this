@@ -548,11 +548,29 @@ impl ProviderClient {
     pub async fn open_turn(&self, request: TurnRequest) -> Result<Turn, ProviderError> {
         let (model, max_output, reservation, messages) = self.prepare(&request).await?;
         let body = self.body(&model, messages, &request, max_output, true);
-        let response = self
+        // The headers of a streamed answer arrive within seconds on a healthy engine. A model
+        // that is listed but not served accepts the request and never opens: bounded here, by
+        // the OPENING delay, while `read_timeout` (the silence delay) keeps guarding a stream
+        // that has begun.
+        let sending = self
             .authorize(self.http.post(self.url("chat/completions")).json(&body))
-            .send()
-            .await
-            .map_err(transport)?;
+            .send();
+        let open = self.config.open_timeout();
+        let never_opened = || {
+            ProviderError::Timeout(format!(
+                "{} · {model} : aucune réponse à l'ouverture en {} s",
+                self.config.label,
+                open.as_secs()
+            ))
+        };
+        let response = match tokio::time::timeout(open, sending).await {
+            Ok(Ok(response)) => response,
+            // reqwest's own read timeout can win the race when the silence limit is the
+            // shorter one: before any header, that is the same failure.
+            Ok(Err(error)) if error.is_timeout() => return Err(never_opened()),
+            Ok(Err(error)) => return Err(transport(error)),
+            Err(_) => return Err(never_opened()),
+        };
         if !response.status().is_success() {
             let code = response.status().as_u16();
             let text = response.text().await.unwrap_or_default();
