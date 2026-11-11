@@ -46,12 +46,16 @@ pub const DEFAULT_HEIGHT: u32 = 320;
 /// la vue.
 pub const MAX_BYTES: usize = 8 * 1024 * 1024;
 
+/// La lecture d'un fichier : les octets, ou rien s'il n'existe pas.
+pub type ReadFuture = std::pin::Pin<Box<dyn std::future::Future<Output = Option<Vec<u8>>>>>;
+
 /// Ce que l'hôte fournit (par le contexte Leptos) pour monter une page : lire un fichier du
 /// VFS, dire le thème et la langue. Sans lui, le nœud `html` dit pourquoi il est vide.
 #[derive(Clone, Copy)]
 pub struct HtmlHost {
     /// Lit les octets d'un fichier du VFS (chemin complet `/modules/<nom>/<version>/…`).
-    pub read: Callback<String, Option<Vec<u8>>>,
+    /// Asynchrone : le VFS d'une app l'est.
+    pub read: Callback<String, ReadFuture>,
     /// Le thème courant, tel que l'hôte le nomme (`light`, `dark`).
     pub theme: Signal<String>,
     /// La langue courante (`fr`, `en`).
@@ -193,28 +197,48 @@ fn mount(ctx: Ctx, host: HtmlHost, full: String, height: u32) -> AnyView {
     use wasm_bindgen::JsCast;
     use wasm_bindgen::closure::Closure;
 
-    let Some(bytes) = host.read.run(full.clone()) else {
-        return render::fallback_public(&format!("html : fichier introuvable ({full})"));
-    };
-    if bytes.len() > MAX_BYTES {
-        return render::fallback_public(&format!(
-            "html : {full} fait {} octets, la limite est {MAX_BYTES}",
-            bytes.len()
-        ));
+    // L'état du montage : rien (lecture en cours), l'URL du Blob, ou la raison d'un refus.
+    let state = RwSignal::new(None::<Result<String, String>>);
+    let created = StoredValue::new_local(None::<String>);
+    {
+        let full = full.clone();
+        let read = host.read.run(full.clone());
+        wasm_bindgen_futures::spawn_local(async move {
+            let verdict = match read.await {
+                None => Err(format!("fichier introuvable ({full})")),
+                Some(bytes) if bytes.len() > MAX_BYTES => Err(format!(
+                    "{full} fait {} octets, la limite est {MAX_BYTES}",
+                    bytes.len()
+                )),
+                Some(bytes) => {
+                    let parts = js_sys::Array::new();
+                    parts.push(&js_sys::Uint8Array::from(bytes.as_slice()));
+                    let opts = web_sys::BlobPropertyBag::new();
+                    opts.set_type(content_type(&full));
+                    web_sys::Blob::new_with_u8_array_sequence_and_options(&parts, &opts)
+                        .and_then(|b| web_sys::Url::create_object_url_with_blob(&b))
+                        .map_err(|_| "impossible de créer le Blob".to_owned())
+                }
+            };
+            if let Ok(url) = &verdict {
+                // `try_set` rend `Some(valeur)` quand le signal est déjà démonté : personne
+                // ne révoquera cette URL, on le fait ici.
+                match state.try_set(Some(verdict.clone())) {
+                    Some(_) => {
+                        let _ = web_sys::Url::revoke_object_url(url);
+                    }
+                    None => created.set_value(Some(url.clone())),
+                }
+            } else {
+                let _ = state.try_set(Some(verdict));
+            }
+        });
     }
-    let parts = js_sys::Array::new();
-    parts.push(&js_sys::Uint8Array::from(bytes.as_slice()));
-    let opts = web_sys::BlobPropertyBag::new();
-    opts.set_type(content_type(&full));
-    let url = web_sys::Blob::new_with_u8_array_sequence_and_options(&parts, &opts)
-        .and_then(|b| web_sys::Url::create_object_url_with_blob(&b));
-    let Ok(url) = url else {
-        return render::fallback_public("html : impossible de créer le Blob");
-    };
     // Révoqué au démontage : pas de fuite.
-    let to_revoke = url.clone();
     on_cleanup(move || {
-        let _ = web_sys::Url::revoke_object_url(&to_revoke);
+        if let Some(Some(url)) = created.try_get_value() {
+            let _ = web_sys::Url::revoke_object_url(&url);
+        }
     });
 
     let frame = NodeRef::<leptos::html::Iframe>::new();
@@ -231,6 +255,7 @@ fn mount(ctx: Ctx, host: HtmlHost, full: String, height: u32) -> AnyView {
         })
         .flatten()
         .unwrap_or_default();
+    let entities = StoredValue::new(entities);
     let tall = RwSignal::new(height);
 
     let post = move || {
@@ -238,9 +263,9 @@ fn mount(ctx: Ctx, host: HtmlHost, full: String, height: u32) -> AnyView {
         let Some(win) = el.content_window() else {
             return;
         };
-        let msg = ctx
-            .data
-            .with(|s| data_message(s, &entities, &host.theme.get(), &host.locale.get()));
+        let msg = ctx.data.with(|s| {
+            entities.with_value(|e| data_message(s, e, &host.theme.get(), &host.locale.get()))
+        });
         if let Ok(js) = js_sys::JSON::parse(&msg.to_string()) {
             let _ = win.post_message(&js, "*");
         }
@@ -313,15 +338,22 @@ fn mount(ctx: Ctx, host: HtmlHost, full: String, height: u32) -> AnyView {
     listener.forget();
 
     view! {
-        <iframe
-            node_ref=frame
-            class="vw-html"
-            sandbox=SANDBOX
-            src=url
-            title=full
-            style=move || format!("width:100%;border:0;height:{}px", tall.get())
-            on:load=move |_| {}
-        ></iframe>
+        {move || match state.get() {
+            None => view! { <div class="vw-html-loading" role="status">"Chargement…"</div> }.into_any(),
+            Some(Err(why)) => render::fallback_public(&format!("html : {why}")),
+            Some(Ok(url)) => view! {
+                <iframe
+                    node_ref=frame
+                    class="vw-html"
+                    sandbox=SANDBOX
+                    src=url
+                    title=full.clone()
+                    on:load=move |_| post()
+                    style=move || format!("width:100%;border:0;height:{}px", tall.get())
+                ></iframe>
+            }
+            .into_any(),
+        }}
     }
     .into_any()
 }
