@@ -3385,6 +3385,7 @@ mod tests {
 
     fn view_desc(look: Option<this_descriptor::views::Look>) -> ViewDesc {
         ViewDesc {
+ live: None,
             name: "invoices".into(),
             surface: Surface::Main,
             title: None,

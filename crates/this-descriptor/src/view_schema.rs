@@ -369,12 +369,18 @@ fn view_object() -> ObjectSchema {
             )
             .refers("view"),
             opt("look", "object:Look", "Declared appearance: closed choices, no CSS."),
+            opt(
+                "live",
+                "object:Live",
+                "Polling cadence: the host re-reads this view's rows while it is shown. Polling, NOT push.",
+            ),
             req("root", "node", "The tree."),
         ],
         json!({"name": "invoices", "root": {"type": "stack", "children": []}}),
         json!({
             "name": "invoices", "surface": "panel", "title": "Invoices", "replaces": "old_invoices",
             "look": {"accent": "primary", "layout": "grid", "transition": "fade"},
+            "live": {"every_secs": 30},
             "root": {"type": "stack", "children": []}
         }),
     )
@@ -1371,6 +1377,17 @@ fn objects() -> Vec<ObjectSchema> {
             json!({"label": "Open", "hint": "Pick one", "action": "go"}),
         ),
         object(
+            "Live",
+            "A view that refreshes by POLLING (not push): the host re-reads its rows every `every_secs` seconds, only while the view is shown and the app is in the foreground. Refused on a `header`.",
+            vec![req(
+                "every_secs",
+                "integer",
+                "Seconds between two reads, 5 to 3600.",
+            )],
+            json!({"every_secs": 30}),
+            json!({"every_secs": 30}),
+        ),
+        object(
             "Look",
             "Declared appearance. Closed choices; the host styles them.",
             vec![
@@ -2363,6 +2380,7 @@ mod tests {
             "SettingsSection" => go::<crate::views::SettingsSection>(v),
             "SettingsItem" => go::<crate::views::SettingsItem>(v),
             "Look" => go::<Look>(v),
+            "Live" => go::<crate::views::Live>(v),
             "FormField" => go::<crate::views::FormField>(v),
             "SortSpec" => go::<crate::query::SortSpec>(v),
             "DataGrant" => go::<crate::views::DataGrant>(v),
@@ -2588,6 +2606,7 @@ mod tests {
                 "SettingsSection" => err_of::<crate::views::SettingsSection>(probe),
                 "SettingsItem" => err_of::<crate::views::SettingsItem>(probe),
                 "Look" => err_of::<Look>(probe),
+                "Live" => err_of::<crate::views::Live>(probe),
                 "FormField" => err_of::<crate::views::FormField>(probe),
                 "ProgramArg" => err_of::<crate::views::ProgramArg>(probe),
                 "Column" => err_of::<crate::views::Column>(probe),

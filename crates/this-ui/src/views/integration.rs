@@ -293,6 +293,7 @@ fn a_reference_input_in_a_form_is_read_from_the_declared_field_type() {
 fn a_chat_thread_is_one_message_brick_per_message_in_order() {
     let keys = ["m1", "m2", "m3"];
     let thread = ViewDesc {
+ live: None,
         name: "fil".into(),
         surface: Surface::Chat,
         title: None,
@@ -357,6 +358,7 @@ fn a_chat_thread_is_one_message_brick_per_message_in_order() {
 #[test]
 fn a_chat_thread_is_one_message_brick_on_the_open_conversation() {
     let thread = ViewDesc {
+ live: None,
         name: "fil".into(),
         surface: Surface::Chat,
         title: None,
@@ -432,6 +434,7 @@ fn a_module_cannot_observe_a_secret_value() {
 
     // 2. Debug of the view and of the intent.
     let view = ViewDesc {
+ live: None,
         name: "providers".into(),
         surface: Surface::Main,
         title: None,
