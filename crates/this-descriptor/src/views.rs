@@ -156,8 +156,33 @@ pub struct ViewDesc {
     pub replaces: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub look: Option<Look>,
+    /// Une vue VIVANTE : l'hôte rafraîchit ses lignes à cette cadence tant qu'elle est affichée.
+    /// Absent = comportement inchangé (rafraîchie sur écriture, jamais par minuterie).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub live: Option<Live>,
     /// L'arbre dessiné.
     pub root: Node,
+}
+
+/// Borne basse de [`Live::every_secs`].
+pub const LIVE_MIN_SECS: u32 = 5;
+/// Borne haute de [`Live::every_secs`].
+pub const LIVE_MAX_SECS: u32 = 3600;
+
+/// La cadence d'une vue vivante : `{ "every_secs": 30 }`.
+///
+/// **C'est un SONDAGE, pas du push.** L'hôte relit les lignes de la vue toutes les
+/// `every_secs` secondes, seulement quand elle est affichée et que l'app est au premier plan,
+/// sans chevaucher deux lectures ; un échec est journalisé et la cadence continue.
+///
+/// Pour du VRAI temps réel il faudrait : un flux (SSE/WebSocket) côté hôte, un port `Watch`
+/// dans le framework, et un serveur qui émet. Rien de cela n'existe : le graphe est local, la
+/// forge est HTTP ponctuelle, aucun module n'émet de flux. `live` ne doit donc jamais être lu
+/// comme une promesse de push.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Live {
+    pub every_secs: u32,
 }
 
 /// Un nœud de l'arbre : un conteneur, ou une feuille qui porte une brique.
@@ -176,6 +201,32 @@ pub enum Node {
     Modal { title: String, children: Vec<Node> },
     /// Une feuille : une brique.
     Leaf { brick: Box<Brick> },
+    /// Une page web que le MODULE livre : un fichier de son dossier VFS, montée par l'hôte
+    /// dans une iframe sandboxée (sans `allow-same-origin`).
+    ///
+    /// C'est la porte ILLIMITÉE de l'interface : tout ce que les briques ne disent pas, le
+    /// module l'écrit en HTML/CSS/JS. Le prix : plus de thème imposé, plus de contraste
+    /// vérifié, plus de cible tactile de 44 px — et un intérieur que l'hôte ne peut pas
+    /// mesurer. Le pont est explicite : l'hôte envoie `{type:"this:data", rows, theme,
+    /// locale}`, la page renvoie `{type:"this:intent", …}`, validé comme une intention.
+    ///
+    /// `path` est relatif au module : `ui/index.html`, ou le chemin complet
+    /// `/modules/<nom>/<version>/ui/index.html`. Hors du module, `..`, extension autre que
+    /// `.html`/`.htm` (un `.svg` est refusé : il peut porter ses propres scripts), ou
+    /// placement dans un `header` : refusés, nommément.
+    Html {
+        path: String,
+        /// Hauteur en px. Absente = hauteur intrinsèque ; l'hôte borne à
+        /// [`HTML_MAX_HEIGHT`].
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        height: Option<u32>,
+        /// Les données que la page demande, EXPLICITEMENT : au plus [`HTML_DATA_MAX_GRANTS`]
+        /// demandes, une par entité. Sans elles, la page ne reçoit que ce que les AUTRES
+        /// nœuds de la vue lisent — donc rien si elle est seule. Avec elles, `rows` porte
+        /// exactement ces entités, filtrées et projetées : voir [`DataGrant`].
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        data: Vec<DataGrant>,
+    },
     /// « Montre `child` seulement si » : une condition de visibilité posée sur UN nœud — une
     /// brique, ou un groupe entier.
     ///
@@ -196,6 +247,175 @@ pub enum Node {
         filter: FilterExpr,
         child: Box<Node>,
     },
+}
+
+/// Une demande de données d'un nœud [`Node::Html`] : ce que la page lira dans `rows`.
+///
+/// ```json
+/// {"entity":"tache","filter":{"cmp":{"field":"fait","op":"eq","value":false}},
+///  "fields":["titre","fait"],"limit":200}
+/// ```
+///
+/// - `entity` (requis) : une entité du module, ou d'un module qu'il requiert ;
+/// - `filter` : la forme d'un filtre de liste ([`FilterExpr`]) ;
+/// - `fields` : les champs DÉCLARÉS envoyés. Absent = tous les champs déclarés de l'entité,
+///   jamais les champs de base (`id`, dates…) ;
+/// - `limit` : 1..=[`HTML_DATA_MAX_LIMIT`], défaut [`HTML_DATA_DEFAULT_LIMIT`].
+///
+/// C'est la frontière de sécurité de la page : ce qui n'est pas demandé ici ne franchit pas
+/// l'iframe.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DataGrant {
+    pub entity: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filter: Option<FilterExpr>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fields: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u32>,
+}
+
+/// Le nombre maximal de demandes de données d'un nœud [`Node::Html`].
+pub const HTML_DATA_MAX_GRANTS: usize = 5;
+/// La limite de lignes d'une demande qui n'en dit pas.
+pub const HTML_DATA_DEFAULT_LIMIT: u32 = 200;
+/// La limite de lignes la plus haute qu'une demande puisse porter.
+pub const HTML_DATA_MAX_LIMIT: u32 = 1000;
+
+impl DataGrant {
+    /// La limite effective : celle de la demande, ou le défaut, **bornée** à
+    /// `1..=`[`HTML_DATA_MAX_LIMIT`] (un descripteur qui aurait contourné la validation ne
+    /// sort pas du cadre).
+    pub fn effective_limit(&self) -> usize {
+        self.limit
+            .unwrap_or(HTML_DATA_DEFAULT_LIMIT)
+            .clamp(1, HTML_DATA_MAX_LIMIT) as usize
+    }
+}
+
+/// La hauteur maximale d'un nœud [`Node::Html`], en px.
+pub const HTML_MAX_HEIGHT: u32 = 2000;
+
+/// Les extensions qu'un nœud [`Node::Html`] accepte de servir. Un `.svg` n'y est pas : il
+/// peut porter ses propres scripts et références externes qu'un `<meta>` CSP ne couvre pas —
+/// il est refusé nommément (`html_svg_refused`) et se sert comme image, pas comme page.
+pub const HTML_EXTENSIONS: [&str; 2] = [".html", ".htm"];
+
+/// Résout le `path` d'un nœud `html` contre le dossier du module `<name>@<version>` :
+/// `Ok(chemin VFS complet)` ou `Err(raison, message)`.
+pub fn html_resolve(
+    name: &str,
+    version: &str,
+    path: &str,
+) -> Result<String, (&'static str, String)> {
+    if path.trim().is_empty() {
+        return Err((
+            "html_path_empty",
+            "an `html` node must name the file it serves, e.g. `ui/index.html`".into(),
+        ));
+    }
+    let racine = format!("/modules/{name}/{version}/");
+    let relatif = if let Some(r) = path.strip_prefix(&racine) {
+        r
+    } else if path.starts_with('/') {
+        return Err((
+            "html_path_outside_module",
+            format!(
+                "`{path}` is outside this module; an `html` file lives under `{racine}`. \
+                 Use a path relative to the module, e.g. `ui/index.html`"
+            ),
+        ));
+    } else {
+        path
+    };
+    if relatif.is_empty()
+        || relatif
+            .split('/')
+            .any(|seg| seg == ".." || seg == "." || seg.is_empty() || seg.contains('\\'))
+    {
+        return Err((
+            "html_path_outside_module",
+            format!(
+                "`{path}` climbs out of the module (`..`) or is not a clean relative path; \
+                 name a file inside the module folder"
+            ),
+        ));
+    }
+    let bas = relatif.to_ascii_lowercase();
+    if bas.ends_with(".svg") {
+        return Err((
+            "html_svg_refused",
+            format!(
+                "`{path}` is an SVG: it can carry its own scripts and external references, \
+                 and a <meta> CSP does not apply in an SVG document; serve it as an image, \
+                 not as an `html` page"
+            ),
+        ));
+    }
+    if !HTML_EXTENSIONS.iter().any(|e| bas.ends_with(e)) {
+        return Err((
+            "html_extension_refused",
+            format!(
+                "`{path}` is not servable: an `html` node serves only {}",
+                HTML_EXTENSIONS.join(", ")
+            ),
+        ));
+    }
+    Ok(format!("{racine}{relatif}"))
+}
+
+/// Résout le `path` d'une source d'image contre le dossier du module `<name>@<version>` :
+/// `Ok(chemin VFS complet)` ou `Err(raison, message)`. Une URL distante (`http(s)://`, `//`)
+/// est refusée avant tout : aucune requête réseau ne doit sortir d'une vue.
+pub fn image_resolve(
+    name: &str,
+    version: &str,
+    path: &str,
+) -> Result<String, (&'static str, String)> {
+    let path = path.trim();
+    if path.is_empty() {
+        return Err((
+            "image_vfs_outside_module",
+            "an image `vfs` must name the file it serves, e.g. `assets/logo.png`".into(),
+        ));
+    }
+    // Une URL distante n'est pas un chemin de module : elle fuiterait une requête.
+    let bas = path.to_ascii_lowercase();
+    if bas.starts_with("http://") || bas.starts_with("https://") || path.starts_with("//") {
+        return Err((
+            "image_remote_refused",
+            format!(
+                "`{path}` is a remote URL; an image serves a module file or a data URL,                  never a network request"
+            ),
+        ));
+    }
+    let racine = format!("/modules/{name}/{version}/");
+    let relatif = if let Some(r) = path.strip_prefix(&racine) {
+        r
+    } else if path.starts_with('/') {
+        return Err((
+            "image_vfs_outside_module",
+            format!(
+                "`{path}` is outside this module; an image file lives under `{racine}`.                  Use a path relative to the module, e.g. `assets/logo.png`"
+            ),
+        ));
+    } else {
+        path
+    };
+    if relatif.is_empty()
+        || relatif
+            .split('/')
+            .any(|seg| seg == ".." || seg == "." || seg.is_empty() || seg.contains('\\'))
+    {
+        return Err((
+            "image_vfs_outside_module",
+            format!(
+                "`{path}` climbs out of the module (`..`) or is not a clean relative path;                  name a file inside the module folder"
+            ),
+        ));
+    }
+    Ok(format!("{racine}{relatif}"))
 }
 
 /// Un onglet de [`Node::Tabs`].
@@ -226,6 +446,22 @@ pub enum Brick {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         filter: Option<FilterExpr>,
         field: String,
+    },
+    /// Un graph borné : une série numérique, UN point par ligne du filtre (dans l'ordre de la
+    /// lecture), dessinée en SVG en ligne aux couleurs du thème. `kind` : `bar` ou `line`
+    /// (rien d'autre : deux formes qui se dessinent proprement). `field` doit être déclaré
+    /// numérique. `height` : [`CHART_HEIGHT_DEFAULT`] par défaut, `80..=400`.
+    Chart {
+        entity: String,
+        field: String,
+        kind: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        filter: Option<FilterExpr>,
+        /// Le titre du graph : petit, au-dessus.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        label: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        height: Option<u32>,
     },
     /// Un bouton qui déclenche une action déclarée par le module.
     Button {
@@ -533,6 +769,32 @@ pub enum Brick {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         columns: Vec<Column>,
     },
+    /// Une image : un fichier du module, ou une data URL lue dans une ligne.
+    ///
+    /// Deux sources, et jamais un réseau :
+    /// - `"source": {"vfs": "assets/logo.png"}` : un fichier du module, résolu dans son
+    ///   dossier (refusé s'il en sort) ; l'hôte lit les octets et fabrique une data URL (ou
+    ///   un Blob URL révoqué au démontage) ;
+    /// - `"source": {"entity": "produit", "field": "photo"}` : le champ d'une ligne porte
+    ///   une **data URL** (`data:image/png;base64,…`). Jamais une URL distante : le réseau
+    ///   est interdit aux vues, et une image distante fuiterait une requête
+    ///   (`image_remote_refused`).
+    ///
+    /// `alt` est requis (une image sans texte alternatif est refusée nommément) ; `height`
+    /// est borné `24..=600` ; `fit` est `cover` (défaut) ou `contain`.
+    Image {
+        /// La source : un fichier du module, ou une data URL lue dans une ligne. Exactement
+        /// une des deux (`image_source_missing` si aucune, `image_source_ambiguous` si les deux).
+        source: ImageSource,
+        /// Le texte alternatif. Requis : une image sans `alt` est un refus nommé.
+        alt: String,
+        /// Hauteur en px, bornée `24..=600`. Absente = hauteur intrinsèque.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        height: Option<u32>,
+        /// `cover` (défaut) ou `contain`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        fit: Option<ImageFit>,
+    },
 }
 
 impl Brick {
@@ -546,8 +808,10 @@ impl Brick {
             | Brick::Settings { .. }
             | Brick::Secret { .. } => None,
             Brick::Indicator { entity, .. } => entity.as_deref(),
+            Brick::Image { source, .. } => source.entity.as_deref(),
             Brick::Text { entity, .. }
             | Brick::Caption { entity, .. }
+            | Brick::Chart { entity, .. }
             | Brick::Button { entity, .. }
             | Brick::Relation { entity, .. }
             | Brick::List { entity, .. }
@@ -567,6 +831,40 @@ impl Brick {
         }
     }
 }
+
+/// La source d'une [`Brick::Image`] : un fichier du module, ou une data URL lue dans une
+/// ligne. Exactement une des deux — jamais les deux, jamais aucune, jamais une URL distante.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ImageSource {
+    /// Le chemin du fichier, relatif au module : `assets/logo.png`, ou le chemin complet
+    /// `/modules/<nom>/<version>/assets/logo.png`. Un `..`, un chemin absolu hors du module,
+    /// une URL (`http(s)://`, `//`) sont refusés nommément.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vfs: Option<String>,
+    /// L'entité dont la première ligne porte la data URL. Exige `field`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entity: Option<String>,
+    /// Le champ qui porte la data URL. Exige `entity`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub field: Option<String>,
+}
+
+/// Comment une [`Brick::Image`] remplit son cadre.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ImageFit {
+    /// Recouvre le cadre, quitte à rogner (défaut).
+    #[default]
+    Cover,
+    /// Entre entière dans le cadre, sans rogner.
+    Contain,
+}
+
+/// Hauteur minimale d'une image, en px.
+pub const IMAGE_HEIGHT_MIN: u32 = 24;
+/// Hauteur maximale d'une image, en px.
+pub const IMAGE_HEIGHT_MAX: u32 = 600;
 
 /// Une section d'un écran de réglages.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -588,6 +886,15 @@ pub struct SettingsItem {
     /// Une action de ce module, qui n'exige aucune ligne.
     pub action: String,
 }
+
+/// Les formes d'un [`Brick::Chart`].
+pub const CHART_KINDS: [&str; 2] = ["bar", "line"];
+/// Hauteur par défaut d'un graph, en px.
+pub const CHART_HEIGHT_DEFAULT: u32 = 120;
+/// Hauteur minimale d'un graph, en px.
+pub const CHART_HEIGHT_MIN: u32 = 80;
+/// Hauteur maximale d'un graph, en px.
+pub const CHART_HEIGHT_MAX: u32 = 400;
 
 /// Ton d'une bannière.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -1520,6 +1827,7 @@ impl<'a> Checks<'a> {
         let mut briques = Vec::new();
         let mut structure = Vec::new();
         let mut conditions = Vec::new();
+        let mut htmls = Vec::new();
         collecte(
             &format!("{p}.root"),
             &v.root,
@@ -1527,7 +1835,46 @@ impl<'a> Checks<'a> {
             &mut briques,
             &mut structure,
             &mut conditions,
+            &mut htmls,
         );
+        if let Some(live) = v.live {
+            if v.surface == Surface::Header {
+                self.push(
+                    "live_on_header",
+                    format!("{p}.live"),
+                    "a header is a thin bar and does not justify a timer; drop `live` or move the view to `main`, `sidebar` or `panel`",
+                );
+            }
+            if live.every_secs < LIVE_MIN_SECS {
+                self.push(
+                    "live_interval_too_small",
+                    format!("{p}.live.every_secs"),
+                    format!("`every_secs` is {} ; the minimum is {LIVE_MIN_SECS} (this is polling, not push)", live.every_secs),
+                );
+            } else if live.every_secs > LIVE_MAX_SECS {
+                self.push(
+                    "live_interval_too_large",
+                    format!("{p}.live.every_secs"),
+                    format!(
+                        "`every_secs` is {} ; the maximum is {LIVE_MAX_SECS}",
+                        live.every_secs
+                    ),
+                );
+            }
+        }
+        for (chemin, path, data) in htmls {
+            self.html_data(&chemin, data);
+            if v.surface == Surface::Header {
+                self.push(
+                    "html_in_header",
+                    &chemin,
+                    "a header is a thin bar and cannot host an iframe; move the view to the `main`, `sidebar` or `panel` surface",
+                );
+            }
+            if let Err((raison, msg)) = html_resolve(&self.m.name, &self.m.version, path) {
+                self.push(raison, format!("{chemin}.path"), msg);
+            }
+        }
         for (chemin, raison, msg) in structure {
             self.push(raison, chemin, msg);
         }
@@ -1536,6 +1883,85 @@ impl<'a> Checks<'a> {
         }
         for (chemin, b) in briques {
             self.brick(&chemin, b, v.surface);
+        }
+    }
+
+    /// Les demandes de données d'un nœud `html` : au plus cinq, une par entité, chaque
+    /// entité connue (du module ou de ses requêtes), chaque champ déclaré, une limite dans
+    /// les bornes. Tout refus nomme la demande.
+    fn html_data(&mut self, chemin: &str, data: &[DataGrant]) {
+        if data.len() > HTML_DATA_MAX_GRANTS {
+            self.push(
+                "html_data_too_many",
+                format!("{chemin}.data"),
+                format!(
+                    "{} data requests, the most an `html` node may ask is {HTML_DATA_MAX_GRANTS}; \
+                     merge them or split the page",
+                    data.len()
+                ),
+            );
+        }
+        let mut vues = BTreeSet::new();
+        for (i, g) in data.iter().enumerate() {
+            let p = format!("{chemin}.data[{i}]");
+            if !self.entity_ref(
+                "html_data_entity_unknown",
+                &format!("{p}.entity"),
+                &g.entity,
+            ) {
+                continue;
+            }
+            if !vues.insert(g.entity.as_str()) {
+                self.push(
+                    "html_data_entity_twice",
+                    format!("{p}.entity"),
+                    format!(
+                        "`{}` is requested twice: `rows` is keyed by entity, one request each",
+                        g.entity
+                    ),
+                );
+            }
+            let declares: BTreeSet<String> = self
+                .entities
+                .get(g.entity.as_str())
+                .map(|e| e.fields.iter().map(|f| f.name.clone()).collect())
+                .unwrap_or_default();
+            for (j, f) in g.fields.iter().flatten().enumerate() {
+                if !declares.contains(f) {
+                    let msg = unknown_msg(
+                        f,
+                        &format!("a declared field of `{}`", g.entity),
+                        declares.iter().map(String::as_str),
+                        "Only declared fields cross into the page, never base fields.",
+                    );
+                    self.push("html_data_field_unknown", format!("{p}.fields[{j}]"), msg);
+                }
+            }
+            if let Some(filtre) = &g.filter {
+                let lis = self.readable(&g.entity);
+                let mut lus = Vec::new();
+                chemins_du_filtre(filtre, &mut lus);
+                for c in lus {
+                    if !c.contains('.') && !lis.contains(c) {
+                        let msg = unknown_msg(
+                            c,
+                            &format!("a field of `{}`", g.entity),
+                            lis.iter().map(String::as_str),
+                            "Declare the field or fix the name.",
+                        );
+                        self.push("html_data_field_unknown", format!("{p}.filter"), msg);
+                    }
+                }
+            }
+            if let Some(l) = g.limit
+                && !(1..=HTML_DATA_MAX_LIMIT).contains(&l)
+            {
+                self.push(
+                    "html_data_limit_out_of_range",
+                    format!("{p}.limit"),
+                    format!("limit {l} is outside 1..={HTML_DATA_MAX_LIMIT}"),
+                );
+            }
         }
     }
 
@@ -1706,6 +2132,22 @@ impl<'a> Checks<'a> {
                     );
                 }
             }
+            Brick::Chart {
+                entity,
+                field,
+                kind,
+                label,
+                height,
+                ..
+            } => {
+                if !self.entity_ref("chart_entity_unknown", &format!("{chemin}.entity"), entity) {
+                    return;
+                }
+                let lis = self.readable(entity);
+                self.reads(chemin, entity, &lis, &lectures(b));
+                self.chart(chemin, entity, field, kind, label.as_deref(), *height);
+            }
+            Brick::Image { .. } => self.image(chemin, b),
             _ => self.data_brick(chemin, b),
         }
     }
@@ -2020,6 +2462,148 @@ impl<'a> Checks<'a> {
         }
     }
 
+    /// Un graph : une forme connue, un champ DÉCLARÉ numérique (un texte n'est pas une série),
+    /// une hauteur dans la plage. Tout est refusé ici, avant qu'un rendu existe.
+    fn chart(
+        &mut self,
+        chemin: &str,
+        entite: &str,
+        champ: &str,
+        kind: &str,
+        label: Option<&str>,
+        height: Option<u32>,
+    ) {
+        if !CHART_KINDS.contains(&kind) {
+            self.push(
+                "chart_kind_unknown",
+                format!("{chemin}.kind"),
+                unknown_msg(
+                    kind,
+                    "a chart kind",
+                    CHART_KINDS.iter().copied(),
+                    "Use `bar` or `line`.",
+                ),
+            );
+        }
+        let numerique = self.entities.get(entite).is_some_and(|e| {
+            e.fields.iter().any(|f| {
+                f.name == champ
+                    && matches!(
+                        f.ty,
+                        FieldType::I32
+                            | FieldType::I64
+                            | FieldType::U32
+                            | FieldType::U64
+                            | FieldType::F32
+                            | FieldType::F64
+                            | FieldType::Decimal { .. }
+                    )
+            })
+        });
+        // Un champ inconnu est déjà dit par `view_field_unknown` : ne pas le redire.
+        if !numerique && (champ.contains('.') || self.readable(entite).contains(champ)) {
+            self.push(
+                "chart_field_not_numeric",
+                format!("{chemin}.field"),
+                format!(
+                    "`{champ}` is not a declared numeric field of `{entite}`; a chart plots \
+                     i32, i64, u32, u64, f32, f64 or decimal fields, one point per row"
+                ),
+            );
+        }
+        if let Some(h) = height
+            && !(CHART_HEIGHT_MIN..=CHART_HEIGHT_MAX).contains(&h)
+        {
+            self.push(
+                "chart_height_out_of_range",
+                format!("{chemin}.height"),
+                format!("height {h} is outside {CHART_HEIGHT_MIN}..={CHART_HEIGHT_MAX}"),
+            );
+        }
+        self.label_ref(&format!("{chemin}.label"), label);
+    }
+
+    /// Une image : exactement UNE source, un texte alternatif, une hauteur dans la plage, et
+    /// — pour un fichier — un chemin dans le module, jamais une URL distante.
+    fn image(&mut self, chemin: &str, b: &Brick) {
+        let Brick::Image {
+            source,
+            alt,
+            height,
+            ..
+        } = b
+        else {
+            return;
+        };
+        let vfs = source.vfs.as_deref();
+        let a_entite = source.entity.is_some();
+        let a_champ = source.field.is_some();
+        // Exactement une source : ni les deux, ni aucune.
+        match (vfs.is_some(), a_entite || a_champ) {
+            (true, true) => self.push(
+                "image_source_ambiguous",
+                format!("{chemin}.source"),
+                "an image has ONE source: either `source.vfs` (a module file) or                  `source.entity`+`source.field` (a data URL), not both",
+            ),
+            (false, false) => self.push(
+                "image_source_missing",
+                format!("{chemin}.source"),
+                "an image needs a source: `source.vfs` (a module file) or                  `source.entity`+`source.field` (a data URL)",
+            ),
+            _ => {}
+        }
+        // Le texte alternatif est requis : une image muette n'existe pas pour un lecteur.
+        if alt.trim().is_empty() {
+            self.push(
+                "image_alt_missing",
+                format!("{chemin}.alt"),
+                "an image must carry a non-empty `alt`: what the person should hear when it                  cannot load",
+            );
+        }
+        if let Some(h) = height
+            && !(IMAGE_HEIGHT_MIN..=IMAGE_HEIGHT_MAX).contains(h)
+        {
+            self.push(
+                "image_height_out_of_range",
+                format!("{chemin}.height"),
+                format!("height {h} is outside {IMAGE_HEIGHT_MIN}..={IMAGE_HEIGHT_MAX}"),
+            );
+        }
+        match (vfs, source.entity.as_deref(), source.field.as_deref()) {
+            // Un fichier du module : le chemin doit rester dedans, et n'être jamais une URL.
+            (Some(chemin_vfs), _, _) => {
+                if let Err((raison, msg)) = image_resolve(&self.m.name, &self.m.version, chemin_vfs)
+                {
+                    self.push(raison, format!("{chemin}.source.vfs"), msg);
+                }
+            }
+            // Une data URL lue dans une ligne : l'entité et le champ sont déclarés.
+            (None, Some(e), Some(f)) => {
+                if !self.entity_ref(
+                    "view_entity_unknown",
+                    &format!("{chemin}.source.entity"),
+                    e,
+                ) {
+                    return;
+                }
+                let lis = self.readable(e);
+                self.reads(&format!("{chemin}.source.field"), e, &lis, &[f]);
+            }
+            // Une moitié de source : ni un fichier, ni une ligne complète.
+            (None, Some(_), None) => self.push(
+                "image_source_missing",
+                format!("{chemin}.source.field"),
+                "an image reading a row needs both `source.entity` and `source.field`:                  `source.field` is missing",
+            ),
+            (None, None, Some(_)) => self.push(
+                "image_source_missing",
+                format!("{chemin}.source.entity"),
+                "an image reading a row needs both `source.entity` and `source.field`:                  `source.entity` is missing",
+            ),
+            (None, None, None) => {}
+        }
+    }
+
     /// Vérifie que chaque champ lu existe ; un chemin pointé (`target.name`) est validé ailleurs.
     fn reads(&mut self, chemin: &str, entite: &str, lis: &BTreeSet<String>, lus: &[&str]) {
         for c in lus {
@@ -2097,6 +2681,7 @@ fn lectures(b: &Brick) -> Vec<&str> {
     match b {
         Brick::Text { field, filter, .. }
         | Brick::Caption { field, filter, .. }
+        | Brick::Chart { field, filter, .. }
         | Brick::Field { field, filter, .. }
         | Brick::ToolStep { field, filter, .. }
         | Brick::CodeBlock { field, filter, .. }
@@ -2198,13 +2783,17 @@ fn lectures(b: &Brick) -> Vec<&str> {
         | Brick::CapabilityRequest { .. }
         | Brick::Settings { .. }
         | Brick::Composer { .. }
-        | Brick::Secret { .. } => {}
+        | Brick::Secret { .. }
+        | Brick::Image { .. } => {}
     }
     v
 }
 
 /// Un problème de structure : `(chemin, raison, message)`.
 type StructureIssue = (String, &'static str, String);
+
+/// Un nœud `html` : le chemin du nœud, son fichier, ses demandes de données.
+type HtmlRef<'a> = (String, &'a str, &'a [DataGrant]);
 
 /// Une condition `when` : le chemin du nœud, l'entité lue, le filtre.
 type ConditionRef<'a> = (String, &'a str, &'a FilterExpr);
@@ -2218,6 +2807,7 @@ fn collecte<'a>(
     out: &mut Vec<(String, &'a Brick)>,
     structure: &mut Vec<StructureIssue>,
     conditions: &mut Vec<ConditionRef<'a>>,
+    htmls: &mut Vec<HtmlRef<'a>>,
 ) {
     if profondeur > MAX_VIEW_DEPTH {
         structure.push((
@@ -2242,6 +2832,7 @@ fn collecte<'a>(
                     out,
                     structure,
                     conditions,
+                    htmls,
                 );
             }
         }
@@ -2258,6 +2849,7 @@ fn collecte<'a>(
                 out,
                 structure,
                 conditions,
+                htmls,
             );
         }
         Node::Tabs { tabs } => {
@@ -2295,10 +2887,12 @@ fn collecte<'a>(
                         out,
                         structure,
                         conditions,
+                        htmls,
                     );
                 }
             }
         }
+        Node::Html { path, data, .. } => htmls.push((chemin.to_string(), path.as_str(), data)),
         Node::Leaf { brick } => out.push((format!("{chemin}.brick"), brick.as_ref())),
     }
 }
@@ -2349,6 +2943,7 @@ mod tests {
 
     fn view(name: &str, root: Node) -> ViewDesc {
         ViewDesc {
+            live: None,
             name: name.into(),
             surface: Surface::Main,
             title: None,
@@ -2575,10 +3170,12 @@ mod tests {
         // Header : une vue d'en-tête avec un compteur est valide.
         let mut m = module();
         m.views.push(ViewDesc {
+            live: None,
             surface: Surface::Header,
             ..leaf_view("count", r#"{"type":"metrics","entity":"invoice"}"#)
         });
         m.views.push(ViewDesc {
+            live: None,
             surface: Surface::Panel,
             ..leaf_view("thread", r#"{"type":"chat","entity":"conversation"}"#)
         });
@@ -2643,6 +3240,49 @@ mod tests {
             r##"{"name":"x","look":{"accent":"#ff00ff"},"root":{"type":"stack","children":[]}}"##
         )
         .is_err());
+    }
+
+    fn module_live(every_secs: u32, surface: Surface) -> ModuleDescriptor {
+        let mut m = module();
+        let mut v = view("x", Node::Stack { children: vec![] });
+        v.surface = surface;
+        v.live = Some(Live { every_secs });
+        m.views.push(v);
+        m
+    }
+
+    #[test]
+    fn a_live_view_is_declared_as_polling_and_round_trips() {
+        assert_stable::<ViewDesc>(
+            r#"{"name":"x","live":{"every_secs":30},"root":{"type":"stack","children":[]}}"#,
+        );
+        let sans: ViewDesc =
+            serde_json::from_str(r#"{"name":"x","root":{"type":"stack","children":[]}}"#).unwrap();
+        assert_eq!(sans.live, None);
+        assert!(!serde_json::to_string(&sans).unwrap().contains("live"));
+        assert!(
+            serde_json::from_str::<ViewDesc>(
+                r#"{"name":"x","live":{"every_secs":30,"push":true},"root":{"type":"stack","children":[]}}"#
+            )
+            .is_err()
+        );
+        for n in [LIVE_MIN_SECS, 30, LIVE_MAX_SECS] {
+            assert!(codes(&module_live(n, Surface::Main)).is_empty(), "{n}");
+        }
+    }
+
+    #[test]
+    fn a_live_view_refuses_a_bad_interval_and_a_header() {
+        assert_refused(&module_live(0, Surface::Main), "live_interval_too_small");
+        assert_refused(
+            &module_live(LIVE_MIN_SECS - 1, Surface::Main),
+            "live_interval_too_small",
+        );
+        assert_refused(
+            &module_live(LIVE_MAX_SECS + 1, Surface::Main),
+            "live_interval_too_large",
+        );
+        assert_refused(&module_live(30, Surface::Header), "live_on_header");
     }
 
     #[test]
@@ -3012,6 +3652,7 @@ mod tests {
             m.actions.push(serde_json::from_str(a).unwrap());
         }
         m.views.push(ViewDesc {
+            live: None,
             surface: Surface::Chat,
             ..leaf_view("saisie", brique)
         });
@@ -3086,6 +3727,7 @@ mod tests {
     fn check_refuses_a_big_brick_in_a_header() {
         let mut m = module();
         m.views.push(ViewDesc {
+            live: None,
             surface: Surface::Header,
             ..leaf_view("x", r#"{"type":"chat","entity":"conversation"}"#)
         });
@@ -3361,6 +4003,7 @@ mod tests {
     fn check_refuses_a_view_replacing_an_unknown_view() {
         let mut m = module();
         m.views.push(ViewDesc {
+            live: None,
             replaces: Some("ghost".into()),
             ..leaf_view("new_list", r#"{"type":"metrics","entity":"invoice"}"#)
         });
@@ -3371,6 +4014,7 @@ mod tests {
     fn check_refuses_a_view_replacing_itself() {
         let mut m = module();
         m.views.push(ViewDesc {
+            live: None,
             replaces: Some("x".into()),
             ..leaf_view("x", r#"{"type":"metrics","entity":"invoice"}"#)
         });
@@ -3383,10 +4027,12 @@ mod tests {
         m.views
             .push(leaf_view("old", r#"{"type":"metrics","entity":"invoice"}"#));
         m.views.push(ViewDesc {
+            live: None,
             replaces: Some("old".into()),
             ..leaf_view("a", r#"{"type":"metrics","entity":"invoice"}"#)
         });
         m.views.push(ViewDesc {
+            live: None,
             replaces: Some("old".into()),
             ..leaf_view("b", r#"{"type":"metrics","entity":"invoice"}"#)
         });
@@ -3397,10 +4043,12 @@ mod tests {
     fn check_refuses_a_replacement_cycle() {
         let mut m = module();
         m.views.push(ViewDesc {
+            live: None,
             replaces: Some("b".into()),
             ..leaf_view("a", r#"{"type":"metrics","entity":"invoice"}"#)
         });
         m.views.push(ViewDesc {
+            live: None,
             replaces: Some("a".into()),
             ..leaf_view("b", r#"{"type":"metrics","entity":"invoice"}"#)
         });
@@ -3413,10 +4061,12 @@ mod tests {
         m.views
             .push(leaf_view("v1", r#"{"type":"metrics","entity":"invoice"}"#));
         m.views.push(ViewDesc {
+            live: None,
             replaces: Some("v1".into()),
             ..leaf_view("v2", r#"{"type":"metrics","entity":"invoice"}"#)
         });
         m.views.push(ViewDesc {
+            live: None,
             replaces: Some("v2".into()),
             ..leaf_view("v3", r#"{"type":"metrics","entity":"invoice"}"#)
         });
@@ -3589,6 +4239,336 @@ mod tests {
         );
     }
 
+    fn html_data(data: Vec<DataGrant>) -> ModuleDescriptor {
+        let mut m = module();
+        m.views.push(view(
+            "x",
+            Node::Html {
+                path: "ui/index.html".into(),
+                height: None,
+                data,
+            },
+        ));
+        m
+    }
+
+    fn grant(entity: &str) -> DataGrant {
+        DataGrant {
+            entity: entity.into(),
+            filter: None,
+            fields: None,
+            limit: None,
+        }
+    }
+
+    #[test]
+    fn html_data_roundtrips_in_its_documented_shape() {
+        let json = r#"{"type":"html","path":"ui/index.html","data":[{"entity":"invoice","filter":{"cmp":{"field":"amount","op":"eq","value":"1"}},"fields":["titre"],"limit":200}]}"#;
+        let n: Node = serde_json::from_str(json).unwrap();
+        let Node::Html { data, .. } = &n else {
+            panic!("html")
+        };
+        assert_eq!(data.len(), 1);
+        assert_eq!(data[0].fields.as_deref(), Some(&["titre".to_string()][..]));
+        assert_eq!(
+            serde_json::to_value(&n).unwrap(),
+            serde_json::from_str::<serde_json::Value>(json).unwrap()
+        );
+        assert!(
+            html_data(vec![grant("invoice")])
+                .check(&CustomRegistry::default(), CheckProfile::Compiled)
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn html_data_refusals_are_named() {
+        assert_refused(&html_data(vec![grant("ghost")]), "html_data_entity_unknown");
+        // Un champ non déclaré, y compris un champ de base.
+        for champ in ["nope", "id"] {
+            assert_refused(
+                &html_data(vec![DataGrant {
+                    fields: Some(vec![champ.into()]),
+                    ..grant("invoice")
+                }]),
+                "html_data_field_unknown",
+            );
+        }
+        let filtre: FilterExpr =
+            serde_json::from_str(r#"{"cmp":{"field":"nope","op":"eq","value":1}}"#).unwrap();
+        assert_refused(
+            &html_data(vec![DataGrant {
+                filter: Some(filtre),
+                ..grant("invoice")
+            }]),
+            "html_data_field_unknown",
+        );
+        for l in [0, HTML_DATA_MAX_LIMIT + 1] {
+            assert_refused(
+                &html_data(vec![DataGrant {
+                    limit: Some(l),
+                    ..grant("invoice")
+                }]),
+                "html_data_limit_out_of_range",
+            );
+        }
+        assert_refused(
+            &html_data(vec![grant("invoice"), grant("invoice")]),
+            "html_data_entity_twice",
+        );
+        let six: Vec<DataGrant> = (0..=HTML_DATA_MAX_GRANTS)
+            .map(|_| grant("invoice"))
+            .collect();
+        assert!(codes(&html_data(six)).contains(&"this.descriptor.html_data_too_many".to_string()));
+    }
+
+    #[test]
+    fn an_html_data_entity_must_belong_to_the_module_or_one_it_requires() {
+        let mut socle = ModuleDescriptor::new("socle", "1.0.0");
+        socle.entities.push(EntityDesc::new("tache"));
+        let mut menu = html_data(vec![grant("tache")]);
+        // Hors du module et de ses requêtes : refusé.
+        let refus = issues_with_required(&menu, &[&socle, &menu]);
+        assert!(refus.iter().any(|(r, ..)| *r == "html_data_entity_unknown"));
+        menu.requires.push(crate::module::ModuleReq {
+            name: "socle".into(),
+            version: "*".into(),
+            optional: false,
+        });
+        assert!(
+            issues_with_required(&menu, &[&socle, &menu])
+                .iter()
+                .all(|(r, ..)| !r.starts_with("html_data"))
+        );
+    }
+
+    #[test]
+    fn the_effective_limit_is_defaulted_and_clamped() {
+        assert_eq!(grant("a").effective_limit(), 200);
+        let g = |l| DataGrant {
+            limit: Some(l),
+            ..grant("a")
+        };
+        assert_eq!(g(50).effective_limit(), 50);
+        assert_eq!(g(5000).effective_limit(), 1000);
+        assert_eq!(g(0).effective_limit(), 1);
+    }
+
+    /// Un module dont `invoice` porte un entier (`qty`) en plus des deux textes.
+    fn module_with_qty() -> ModuleDescriptor {
+        let mut m = module();
+        m.entities[0]
+            .fields
+            .push(FieldDesc::new("qty", FieldType::I32));
+        m
+    }
+
+    fn chart_module(brick: &str) -> ModuleDescriptor {
+        let mut m = module_with_qty();
+        m.views.push(leaf_view("x", brick));
+        m
+    }
+
+    #[test]
+    fn chart_roundtrips_and_a_valid_one_passes() {
+        let json = r#"{"type":"chart","entity":"invoice","field":"qty","kind":"line","label":"Quantités","height":160}"#;
+        assert_stable::<Brick>(json);
+        let minimal = r#"{"type":"chart","entity":"invoice","field":"qty","kind":"bar"}"#;
+        assert_stable::<Brick>(minimal);
+        assert_eq!(
+            serde_json::to_value(brick(minimal)).unwrap(),
+            serde_json::json!({"type":"chart","entity":"invoice","field":"qty","kind":"bar"})
+        );
+        for ok in [json, minimal] {
+            assert!(
+                chart_module(ok)
+                    .check(&CustomRegistry::default(), CheckProfile::Compiled)
+                    .is_ok(),
+                "{ok}"
+            );
+        }
+        // Les bornes de hauteur sont incluses.
+        for h in [80, 400] {
+            let b = format!(
+                r#"{{"type":"chart","entity":"invoice","field":"qty","kind":"bar","height":{h}}}"#
+            );
+            assert!(
+                chart_module(&b)
+                    .check(&CustomRegistry::default(), CheckProfile::Compiled)
+                    .is_ok(),
+                "{h}"
+            );
+        }
+    }
+
+    #[test]
+    fn chart_names_its_five_refusals() {
+        assert_refused(
+            &chart_module(r#"{"type":"chart","entity":"invoice","field":"qty","kind":"pie"}"#),
+            "chart_kind_unknown",
+        );
+        // Un texte n'est pas une série.
+        assert_refused(
+            &chart_module(r#"{"type":"chart","entity":"invoice","field":"titre","kind":"bar"}"#),
+            "chart_field_not_numeric",
+        );
+        for h in [79, 401] {
+            let b = format!(
+                r#"{{"type":"chart","entity":"invoice","field":"qty","kind":"bar","height":{h}}}"#
+            );
+            assert_refused(&chart_module(&b), "chart_height_out_of_range");
+        }
+        assert_refused(
+            &chart_module(r#"{"type":"chart","entity":"ghost","field":"qty","kind":"bar"}"#),
+            "chart_entity_unknown",
+        );
+        // Placement : pas dans un `header`.
+        let mut m = module_with_qty();
+        m.views.push(ViewDesc {
+            live: None,
+            surface: Surface::Header,
+            ..leaf_view(
+                "x",
+                r#"{"type":"chart","entity":"invoice","field":"qty","kind":"bar"}"#,
+            )
+        });
+        assert_refused(&m, "surface_brick_refused");
+    }
+
+    #[test]
+    fn html_node_roundtrips_and_names_its_five_refusals() {
+        let n: Node =
+            serde_json::from_str(r#"{"type":"html","path":"ui/index.html","height":320}"#).unwrap();
+        assert_eq!(
+            n,
+            Node::Html {
+                path: "ui/index.html".into(),
+                height: Some(320),
+                data: vec![]
+            }
+        );
+        assert_eq!(
+            serde_json::to_value(&n).unwrap(),
+            serde_json::json!({"type":"html","path":"ui/index.html","height":320})
+        );
+        let sans: Node = serde_json::from_str(r#"{"type":"html","path":"ui/a.svg"}"#).unwrap();
+        assert_eq!(
+            serde_json::to_value(&sans).unwrap(),
+            serde_json::json!({"type":"html","path":"ui/a.svg"})
+        );
+        let racine = |p: &str| {
+            let mut m = module();
+            m.views.push(view(
+                "x",
+                Node::Html {
+                    path: p.into(),
+                    height: None,
+                    data: vec![],
+                },
+            ));
+            m
+        };
+        // Acceptés : relatif, et chemin complet du module.
+        for ok in ["ui/index.html", "/modules/billing/1.0.0/ui/index.htm"] {
+            assert!(
+                racine(ok)
+                    .check(&CustomRegistry::default(), CheckProfile::Compiled)
+                    .is_ok(),
+                "{ok}"
+            );
+        }
+        assert_refused(&racine(""), "html_path_empty");
+        assert_refused(&racine("   "), "html_path_empty");
+        assert_refused(&racine("../../etc/passwd.html"), "html_path_outside_module");
+        assert_refused(&racine("ui/../../x.html"), "html_path_outside_module");
+        assert_refused(&racine("/etc/passwd.html"), "html_path_outside_module");
+        assert_refused(
+            &racine("/modules/autre/1.0.0/ui/index.html"),
+            "html_path_outside_module",
+        );
+        assert_refused(&racine("ui/app.js"), "html_extension_refused");
+        assert_refused(&racine("ui/index"), "html_extension_refused");
+        assert_refused(&racine("ui/logo.svg"), "html_svg_refused");
+        assert_refused(&racine("a/b.SVG"), "html_svg_refused");
+        let mut h = racine("ui/index.html");
+        h.views[0].surface = Surface::Header;
+        assert_refused(&h, "html_in_header");
+    }
+
+    #[test]
+    fn image_roundtrips_and_names_its_six_refusals() {
+        // Un fichier du module, puis une data URL lue dans une ligne.
+        assert_stable::<Brick>(
+            r#"{"type":"image","source":{"vfs":"assets/logo.png"},"alt":"Logo"}"#,
+        );
+        assert_stable::<Brick>(
+            r#"{"type":"image","source":{"vfs":"assets/logo.png"},"alt":"Logo","height":160,"fit":"contain"}"#,
+        );
+        assert_stable::<Brick>(
+            r#"{"type":"image","source":{"entity":"invoice","field":"titre"},"alt":"Photo"}"#,
+        );
+        let racine = |brick: &str| {
+            let mut m = module();
+            m.views.push(leaf_view("x", brick));
+            m
+        };
+        // Acceptés : fichier propre, data URL, chemin complet du module, bornes de hauteur.
+        for ok in [
+            r#"{"type":"image","source":{"vfs":"assets/logo.png"},"alt":"Logo"}"#,
+            r#"{"type":"image","source":{"entity":"invoice","field":"titre"},"alt":"Photo"}"#,
+            r#"{"type":"image","source":{"vfs":"/modules/billing/1.0.0/assets/logo.png"},"alt":"Logo","height":600}"#,
+            r#"{"type":"image","source":{"vfs":"assets/logo.png"},"alt":"Logo","height":24}"#,
+        ] {
+            assert!(
+                racine(ok)
+                    .check(&CustomRegistry::default(), CheckProfile::Compiled)
+                    .is_ok(),
+                "{ok}"
+            );
+        }
+        // Les six refus, nommément.
+        assert_refused(
+            &racine(r#"{"type":"image","source":{},"alt":"Logo"}"#),
+            "image_source_missing",
+        );
+        assert_refused(
+            &racine(
+                r#"{"type":"image","source":{"vfs":"a.png","entity":"invoice","field":"titre"},"alt":"L"}"#,
+            ),
+            "image_source_ambiguous",
+        );
+        assert_refused(
+            &racine(r#"{"type":"image","source":{"vfs":"a.png"},"alt":""}"#),
+            "image_alt_missing",
+        );
+        for h in [23, 601] {
+            let b =
+                format!(r#"{{"type":"image","source":{{"vfs":"a.png"}},"alt":"L","height":{h}}}"#);
+            assert_refused(&racine(&b), "image_height_out_of_range");
+        }
+        assert_refused(
+            &racine(r#"{"type":"image","source":{"vfs":"../../secret.png"},"alt":"L"}"#),
+            "image_vfs_outside_module",
+        );
+        assert_refused(
+            &racine(r#"{"type":"image","source":{"vfs":"https://evil.example/x.png"},"alt":"L"}"#),
+            "image_remote_refused",
+        );
+        assert_refused(
+            &racine(r#"{"type":"image","source":{"vfs":"//evil.example/x.png"},"alt":"L"}"#),
+            "image_remote_refused",
+        );
+        // Un chemin d'un AUTRE module est refusé, comme pour `html`.
+        assert_refused(
+            &racine(r#"{"type":"image","source":{"vfs":"/modules/autre/1.0.0/a.png"},"alt":"L"}"#),
+            "image_vfs_outside_module",
+        );
+        // Placement : pas dans un header.
+        let mut h = racine(r#"{"type":"image","source":{"vfs":"a.png"},"alt":"L"}"#);
+        h.views[0].surface = Surface::Header;
+        assert_refused(&h, "surface_brick_refused");
+    }
+
     #[test]
     fn duplicate_form_fields_tabs_and_action_fields_are_refused() {
         let mut m = module();
@@ -3680,6 +4660,7 @@ mod tests {
         let mut m = module();
         for (n, t) in [("a", "b"), ("b", "c"), ("c", "a")] {
             m.views.push(ViewDesc {
+                live: None,
                 replaces: Some(t.into()),
                 ..leaf_view(n, r#"{"type":"metrics","entity":"invoice"}"#)
             });
@@ -3696,6 +4677,7 @@ mod tests {
         let mut m = module();
         for (n, t) in [("tail", "a"), ("a", "b"), ("b", "a")] {
             m.views.push(ViewDesc {
+                live: None,
                 replaces: Some(t.into()),
                 ..leaf_view(n, r#"{"type":"metrics","entity":"invoice"}"#)
             });

@@ -29,7 +29,9 @@ use wasm_bindgen::JsCast;
 
 use crate::design::{self, Tone as DesignTone};
 use crate::model::Kind as FieldKind;
+use crate::views::chart;
 use crate::views::data::{self, Feed, Reading, Snapshot};
+use crate::views::image;
 use crate::views::intent::{FieldValue, Intent, LinkOp, SecretValue, Values};
 use crate::views::markdown;
 use crate::views::placement;
@@ -151,6 +153,7 @@ pub fn render_node(ctx: Ctx, node: &Node) -> AnyView {
         Node::Drawer { label, children } => drawer(ctx, label, children),
         Node::Modal { title, children } => modal(ctx, title, children),
         Node::Leaf { brick } => render_brick(ctx, brick),
+        Node::Html { path, height, data } => super::html::render_html(ctx, path, *height, data),
         Node::When {
             entity,
             filter,
@@ -193,9 +196,18 @@ fn conditional(ctx: Ctx, entity: &str, filter: &FilterExpr, child: &Node) -> Any
 }
 
 /// Name a refusal in the host's log: the browser console on the device, stderr elsewhere.
-fn log_refusal(message: &str) {
+pub(crate) fn log_refusal(message: &str) {
     #[cfg(target_arch = "wasm32")]
     web_sys::console::warn_1(&message.into());
+    #[cfg(not(target_arch = "wasm32"))]
+    eprintln!("this-ui: {message}");
+}
+
+/// A line in the host's log: the browser console on the device, stderr elsewhere.
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+pub(crate) fn log_line(message: &str) {
+    #[cfg(target_arch = "wasm32")]
+    web_sys::console::log_1(&message.into());
     #[cfg(not(target_arch = "wasm32"))]
     eprintln!("this-ui: {message}");
 }
@@ -433,6 +445,10 @@ fn empty_tile(ctx: Ctx, entity: &str, message: &str) -> AnyView {
 }
 
 /// A readable fallback: what the renderer could not draw, said in words.
+pub(crate) fn fallback_public(what: &str) -> AnyView {
+    fallback(what)
+}
+
 fn fallback(what: &str) -> AnyView {
     view! {
         <div class=class::UNRENDERED role="note">
@@ -446,7 +462,7 @@ fn fallback(what: &str) -> AnyView {
 /// The tile for any reading that is not rows. The `Rows` arm is unreachable by construction
 /// — it returns a fallback instead of panicking, because a renderer never takes the screen
 /// hostage for a mistake.
-fn tile_for(ctx: Ctx, entity: &str, reading: &Reading<'_>, when_empty: &str) -> AnyView {
+pub(crate) fn tile_for(ctx: Ctx, entity: &str, reading: &Reading<'_>, when_empty: &str) -> AnyView {
     match reading {
         Reading::Loading => loading_tile(),
         Reading::Empty => empty_tile(ctx, entity, when_empty),
@@ -495,6 +511,22 @@ pub fn render_brick(ctx: Ctx, brick: &Brick) -> AnyView {
         } => value_brick(ctx, entity, filter.as_ref(), field, |value| {
             view! { <small class=class::CAPTION>{value}</small> }.into_any()
         }),
+        Brick::Chart {
+            entity,
+            field,
+            kind,
+            filter,
+            label,
+            height,
+        } => chart(
+            ctx,
+            entity,
+            filter.as_ref(),
+            field,
+            kind,
+            label.as_deref(),
+            *height,
+        ),
         Brick::Button {
             entity,
             filter,
@@ -657,6 +689,7 @@ pub fn render_brick(ctx: Ctx, brick: &Brick) -> AnyView {
             run,
             columns,
         } => program(ctx, entity, filter.as_ref(), args, *run, columns),
+        Brick::Image { .. } => image::render_image(ctx, brick),
         other => fallback(&describe_brick(other)),
     }
 }
@@ -950,7 +983,7 @@ fn action_intent(
 }
 
 /// The intent a declared action means: pure, so it is measured without a reactive owner.
-fn intent_of(
+pub(crate) fn intent_of(
     declared: Option<Action>,
     name: &str,
     entity: Option<&str>,
@@ -1098,6 +1131,7 @@ impl ComposerSpec {
                 .flat_map(|tab| tab.children.iter())
                 .find_map(Self::find),
             Node::When { child, .. } => Self::find(child),
+            Node::Html { .. } => None,
         }
     }
 }
@@ -1110,7 +1144,7 @@ pub fn without_composer(node: &Node) -> Option<Node> {
         |children: &[Node]| -> Vec<Node> { children.iter().filter_map(without_composer).collect() };
     let kept = match node {
         Node::Leaf { brick } if matches!(brick.as_ref(), Brick::Composer { .. }) => return None,
-        Node::Leaf { .. } => return Some(node.clone()),
+        Node::Leaf { .. } | Node::Html { .. } => return Some(node.clone()),
         Node::Stack { children } => Node::Stack {
             children: keep(children),
         },
@@ -1150,7 +1184,7 @@ pub fn without_composer(node: &Node) -> Option<Node> {
         | Node::Drawer { children, .. }
         | Node::Modal { children, .. } => children.is_empty(),
         Node::Tabs { tabs } => tabs.iter().all(|tab| tab.children.is_empty()),
-        Node::Leaf { .. } | Node::When { .. } => false,
+        Node::Leaf { .. } | Node::When { .. } | Node::Html { .. } => false,
     };
     (!empty).then_some(kept)
 }
@@ -2272,6 +2306,53 @@ fn chat(ctx: Ctx, entity: &str, filter: Option<&FilterExpr>) -> AnyView {
     .into_any()
 }
 
+/// L'état du fil, sans emprunt au `Snapshot` : ce que la fenêtre décide, déjà rangé. Le
+/// `Memo` qui le porte ne notifie le fil que quand CET état change — un message qui change
+/// en place (son contenu, son journal) garde les mêmes ids et ne reconstruit pas le fil.
+#[derive(Clone, Debug, PartialEq)]
+enum FilEtat {
+    Lignes { ids: Vec<String>, hidden: usize },
+    Vide,
+    Chargement,
+    Echec(String),
+    Refuse(String),
+    Inconnu,
+}
+
+/// Les champs qu'une bulle lit sur sa ligne, résolus UNE fois sur le module puis relus sur
+/// chaque ligne sans repasser par le descripteur.
+#[derive(Clone, Debug, PartialEq)]
+struct ChampsBulle {
+    content: String,
+    author: Option<String>,
+    role: Option<String>,
+    state: Option<String>,
+    steps: Option<String>,
+}
+
+/// Une bulle dessinée pour UNE ligne, mémorisée par son `id` : tant que la ligne ne change
+/// pas, le `Memo` rend la même valeur et le rendu de la bulle ne s'exécute pas, même si une
+/// AUTRE ligne du fil a changé. C'est la frontière qui rend le fil « par ligne ».
+fn bubble_ligne(
+    ctx: Ctx,
+    entity: String,
+    id: String,
+    champs: ChampsBulle,
+    markdown: bool,
+) -> AnyView {
+    let ligne = Memo::new(move |_| {
+        let snapshot = ctx.data.get();
+        ligne_en_bulle(&snapshot, &entity, &id, &champs, markdown)
+    });
+    view! {
+        {move || match ligne.get() {
+            Some(row) => bubble(row),
+            None => ().into_any(),
+        }}
+    }
+    .into_any()
+}
+
 /// Une bulle par ligne lue : son auteur, son contenu, et les étapes d'outil que la ligne
 /// porte. Filtrée sur une ligne, c'est UN message ; filtrée sur la conversation ouverte
 /// (`{"$context": "conversation"}`), c'est le fil, dans l'ordre des lignes.
@@ -2296,32 +2377,38 @@ fn message(
 ) -> AnyView {
     let entity = entity.to_owned();
     let filter = filter.cloned();
-    let content = display_field(
-        ctx.module,
-        &entity,
-        &["contenu", "content", "text", "body", "message"],
-    );
-    // Pas de repli pour ceux-ci : une brique qui lit un rôle ne doit pas lire le contenu
-    // parce qu'elle n'a pas trouvé de rôle. `display_field` a un repli, et c'est ce qu'il
-    // faut pour un CONTENU (quelque chose plutôt que rien) ; pas pour un rôle.
-    let author = named_field(
-        ctx.module,
-        &entity,
-        &["auteur", "author", "sender", "from", "nom", "name"],
-    );
-    let role = named_field(ctx.module, &entity, &["role", "kind", "type"]);
-    let state = named_field(ctx.module, &entity, &["etat", "state", "status"]);
-    let steps = named_field(
-        ctx.module,
-        &entity,
-        &["journal", "etapes", "steps", "outils", "tools"],
-    );
+    // Pas de repli pour un rôle, un état, un auteur : une brique qui lit un rôle ne doit pas
+    // lire le contenu parce qu'elle n'a pas trouvé de rôle. `display_field` a un repli, et
+    // c'est ce qu'il faut pour un CONTENU (quelque chose plutôt que rien) ; pas pour le reste.
+    let champs = ChampsBulle {
+        content: display_field(
+            ctx.module,
+            &entity,
+            &["contenu", "content", "text", "body", "message"],
+        ),
+        author: named_field(
+            ctx.module,
+            &entity,
+            &["auteur", "author", "sender", "from", "nom", "name"],
+        ),
+        role: named_field(ctx.module, &entity, &["role", "kind", "type"]),
+        state: named_field(ctx.module, &entity, &["etat", "state", "status"]),
+        steps: named_field(
+            ctx.module,
+            &entity,
+            &["journal", "etapes", "steps", "outils", "tools"],
+        ),
+    };
     let window = page_size.map(|size| size as usize).unwrap_or(0);
     let fenetre = RwSignal::new(window);
 
-    let log = move || {
+    // Les ids à dessiner, dans l'ordre du fil. Un message qui change EN PLACE ne change pas
+    // cette liste : le `Memo` rend la même valeur et le fil ne se reconstruit pas. Seule la
+    // fenêtre (`fenetre`) ou l'arrivée/départ d'une ligne la fait changer.
+    let entite = entity.clone();
+    let fenetre_ouverte = Memo::new(move |_| {
         let snapshot = ctx.data.get();
-        match data::read(&snapshot, &entity, filter.as_ref(), &[], 0, None) {
+        match data::read(&snapshot, &entite, filter.as_ref(), &[], 0, None) {
             Reading::Rows(rows) => {
                 let total = rows.rows.len();
                 let (hidden, _) = if window == 0 {
@@ -2329,62 +2416,49 @@ fn message(
                 } else {
                     thread_window(total, fenetre.get())
                 };
-                let bubbles = rows.rows[hidden..]
+                let ids = rows.rows[hidden..]
                     .iter()
-                    .map(|row| {
-                        let text = data::display(data::value_of(row, &content));
-                        let who =
-                            author
-                                .as_deref()
-                                .and_then(|field| match data::value_of(row, field) {
-                                    None | Some(Value::Null) => None,
-                                    Some(Value::String(s)) if s.is_empty() => None,
-                                    Some(value) => Some(data::display(Some(value))),
-                                });
-                        let role_value = role
-                            .as_deref()
-                            .map(|field| data::value_of(row, field))
-                            .and_then(|value| value.and_then(Value::as_str).map(str::to_owned))
-                            .unwrap_or_default();
-                        let state_value = state
-                            .as_deref()
-                            .map(|field| data::value_of(row, field))
-                            .and_then(|value| value.and_then(Value::as_str).map(str::to_owned))
-                            .unwrap_or_default();
-                        let entries = steps
-                            .as_deref()
-                            .and_then(|field| data::value_of(row, field))
-                            .map(step_entries)
-                            .unwrap_or_default();
-                        bubble(row_view(
-                            &role_value,
-                            &state_value,
-                            who,
-                            &text,
-                            markdown,
-                            &entries,
-                        ))
-                    })
-                    .collect_view();
-                let older = (hidden > 0).then(|| {
-                    let label = format!("{} · {hidden} {}", text::OLDER, text::OLDER_HIDDEN);
-                    let pas = window.max(1);
-                    view! {
-                        <button class=class::OLDER on:click=move |_| {
-                            fenetre.update(|seen| *seen += pas);
-                        }>{label}</button>
-                    }
-                });
-                view! {
-                    <div class=class::CHAT>
-                        {older}
-                        <div class=class::CHAT_LOG>{bubbles}</div>
-                    </div>
-                }
-                .into_any()
+                    .filter_map(|row| data::value_of(row, "id").and_then(Value::as_str))
+                    .map(str::to_owned)
+                    .collect();
+                FilEtat::Lignes { ids, hidden }
             }
-            other => tile_for(ctx, &entity, &other, text::NOTHING),
+            Reading::Empty => FilEtat::Vide,
+            Reading::Loading => FilEtat::Chargement,
+            Reading::Failed(why) => FilEtat::Echec(why.to_owned()),
+            Reading::Denied(why) => FilEtat::Refuse(why.to_owned()),
+            Reading::Unknown => FilEtat::Inconnu,
         }
+    });
+
+    let log = move || match fenetre_ouverte.get() {
+        FilEtat::Lignes { ids, hidden } => {
+            let older = (hidden > 0).then(|| {
+                let label = format!("{} · {hidden} {}", text::OLDER, text::OLDER_HIDDEN);
+                let pas = window.max(1);
+                view! {
+                    <button class=class::OLDER on:click=move |_| {
+                        fenetre.update(|seen| *seen += pas);
+                    }>{label}</button>
+                }
+            });
+            let bubbles = ids
+                .into_iter()
+                .map(|id| bubble_ligne(ctx, entity.clone(), id, champs.clone(), markdown))
+                .collect_view();
+            view! {
+                <div class=class::CHAT>
+                    {older}
+                    <div class=class::CHAT_LOG>{bubbles}</div>
+                </div>
+            }
+            .into_any()
+        }
+        FilEtat::Vide => empty_tile(ctx, &entity, text::NOTHING),
+        FilEtat::Chargement => loading_tile(),
+        FilEtat::Echec(why) => failed_tile(ctx, &entity, &why),
+        FilEtat::Refuse(why) => denied_tile(ctx, &entity, &why),
+        FilEtat::Inconnu => missing_tile(&entity),
     };
     view! { {log} }.into_any()
 }
@@ -2405,7 +2479,9 @@ pub fn thread_window(total: usize, window: usize) -> (usize, usize) {
     (hidden, total - hidden)
 }
 
-/// Un message prêt à dessiner : ce que la ligne porte, déjà trié.
+/// Un message prêt à dessiner : ce que la ligne porte, déjà trié. `PartialEq` est ce qui
+/// permet au `Memo` d'une bulle de ne pas redessiner quand une AUTRE ligne change.
+#[derive(Clone, Debug, PartialEq)]
 struct RowView {
     role: String,
     state: String,
@@ -2431,6 +2507,54 @@ fn row_view(
         markdown,
         entries: entries.to_vec(),
     }
+}
+
+/// Ce qu'une ligne devient quand on la dessine seule : elle ne lit QUE sa ligne (par `id`),
+/// pas le feed. C'est la frontière qui permet à une bulle de changer sans redessiner les
+/// autres : le `Memo` qui l'appelle ne rend une valeur nouvelle que si CETTE ligne a changé.
+fn ligne_en_bulle(
+    snapshot: &Snapshot,
+    entity: &str,
+    id: &str,
+    champs: &ChampsBulle,
+    markdown: bool,
+) -> Option<RowView> {
+    let row = snapshot.ligne(entity, id)?;
+    let text = data::display(data::value_of(row, &champs.content));
+    let who = champs
+        .author
+        .as_deref()
+        .and_then(|field| match data::value_of(row, field) {
+            None | Some(Value::Null) => None,
+            Some(Value::String(s)) if s.is_empty() => None,
+            Some(value) => Some(data::display(Some(value))),
+        });
+    let role_value = champs
+        .role
+        .as_deref()
+        .map(|field| data::value_of(row, field))
+        .and_then(|value| value.and_then(Value::as_str).map(str::to_owned))
+        .unwrap_or_default();
+    let state_value = champs
+        .state
+        .as_deref()
+        .map(|field| data::value_of(row, field))
+        .and_then(|value| value.and_then(Value::as_str).map(str::to_owned))
+        .unwrap_or_default();
+    let entries = champs
+        .steps
+        .as_deref()
+        .and_then(|field| data::value_of(row, field))
+        .map(step_entries)
+        .unwrap_or_default();
+    Some(row_view(
+        &role_value,
+        &state_value,
+        who,
+        &text,
+        markdown,
+        &entries,
+    ))
 }
 
 /// Une entrée du journal d'une bulle : une étape d'outil, une phrase du tour, un avis.
@@ -3056,6 +3180,71 @@ fn queue(
     .into_any()
 }
 
+/// A bounded chart: one point per row of the reading, in read order. Rows whose field holds
+/// no number are skipped; if none holds one, the state says so instead of an empty frame.
+fn chart(
+    ctx: Ctx,
+    entity: &str,
+    filter: Option<&FilterExpr>,
+    field: &str,
+    kind: &str,
+    label: Option<&str>,
+    height: Option<u32>,
+) -> AnyView {
+    let entity = entity.to_owned();
+    let filter = filter.cloned();
+    let field = field.to_owned();
+    let kind = kind.to_owned();
+    let label = label.map(str::to_owned);
+    (move || {
+        let snapshot = ctx.data.get();
+        let reading = data::read(&snapshot, &entity, filter.as_ref(), &[], 0, None);
+        let values: Vec<f64> = match &reading {
+            Reading::Rows(rows) => rows
+                .rows
+                .iter()
+                .filter_map(|row| match data::value_of(row, &field) {
+                    Some(Value::Number(n)) => n.as_f64(),
+                    Some(Value::String(s)) => s.parse::<f64>().ok(),
+                    _ => None,
+                })
+                .collect(),
+            _ => Vec::new(),
+        };
+        // The container always says how many points it drew and which field it plots, even
+        // when that is none: a measuring host (`apercu`) must see an empty chart.
+        let points = values.len().to_string();
+        if values.is_empty() {
+            let why = match reading {
+                Reading::Rows(_) => text::CHART_NO_NUMBER,
+                _ => text::CHART_NO_ROW,
+            };
+            let body = match reading {
+                Reading::Rows(_) | Reading::Empty => empty_tile(ctx, &entity, why),
+                other => tile_for(ctx, &entity, &other, why),
+            };
+            return view! {
+                <div class=class::CHART data-chart-points=points data-chart-field=field.clone()>
+                    {body}
+                </div>
+            }
+            .into_any();
+        }
+        let drawn = chart::draw(&kind, &values, height, label.as_deref());
+        let title = label
+            .clone()
+            .map(|t| view! { <p class=class::CHART_TITLE>{t}</p> });
+        view! {
+            <div class=class::CHART data-chart-points=points data-chart-field=field.clone()>
+                {title}
+                <div class=class::CHART_SCROLL inner_html=drawn.svg></div>
+            </div>
+        }
+        .into_any()
+    })
+    .into_any()
+}
+
 fn metrics(ctx: Ctx, entity: &str, filter: Option<&FilterExpr>, field: Option<&str>) -> AnyView {
     let entity = entity.to_owned();
     let filter = filter.cloned();
@@ -3196,6 +3385,7 @@ mod tests {
 
     fn view_desc(look: Option<this_descriptor::views::Look>) -> ViewDesc {
         ViewDesc {
+            live: None,
             name: "invoices".into(),
             surface: Surface::Main,
             title: None,
@@ -3676,6 +3866,7 @@ mod tests_fil {
     //! de fil montre, ce qu'un avis annonce, ce qu'une carte de question propose.
     use super::*;
     use serde_json::json;
+    use std::sync::Arc;
 
     // ---- le champ d'une entité d'un module requis --------------------------------------
 
@@ -4144,6 +4335,120 @@ mod tests_fil {
                 .iter()
                 .any(|code| code.ends_with("view_field_unknown")),
             "{codes:?}"
+        );
+    }
+
+    // ---- le fil par ligne ---------------------------------------------------------------
+
+    /// Les champs d'une entité `message` : `contenu` porte le texte, `role` porte l'auteur.
+    fn champs_message() -> ChampsBulle {
+        ChampsBulle {
+            content: "contenu".into(),
+            author: None,
+            role: Some("role".into()),
+            state: None,
+            steps: None,
+        }
+    }
+
+    /// Une bulle ne lit QUE sa ligne : les champs extraits viennent de la ligne dont on
+    /// donne l'`id`, jamais d'une autre, et une ligne absente ne dessine rien.
+    #[test]
+    fn une_bulle_ne_lit_que_sa_ligne() {
+        let snapshot = Snapshot::new().with(
+            "message",
+            Feed::Ready(vec![
+                json!({"id": "m1", "contenu": "premier", "role": "utilisateur"}),
+                json!({"id": "m2", "contenu": "deuxième", "role": "module"}),
+            ]),
+        );
+        let champs = champs_message();
+        let bulle = ligne_en_bulle(&snapshot, "message", "m2", &champs, false).expect("m2 existe");
+        assert_eq!(bulle.text, "deuxième");
+        assert_eq!(bulle.role, "module");
+        // Une ligne absente : rien, pas la première ligne du feed.
+        assert!(ligne_en_bulle(&snapshot, "message", "absent", &champs, false).is_none());
+    }
+
+    /// Un fil se lit ligne par ligne : une ligne qui change ne redessine qu'ELLE. C'est la
+    /// propriété que le `Memo` par `id` de `bubble_ligne` garantit, mesurée sur le vrai
+    /// moteur réactif (sans DOM) : trois lignes, on change la deuxième, seul son rendu
+    /// s'exécute.
+    #[test]
+    fn une_ligne_qui_change_ne_redessine_que_sa_bulle() {
+        let owner = Owner::new();
+        owner.set();
+
+        let champs = champs_message();
+        let lignes = vec![
+            json!({"id": "m1", "contenu": "premier", "role": "utilisateur"}),
+            json!({"id": "m2", "contenu": "deuxième", "role": "module"}),
+            json!({"id": "m3", "contenu": "troisième", "role": "module"}),
+        ];
+        let data = RwSignal::new(Snapshot::new().with("message", Feed::Ready(lignes.clone())));
+
+        // Ce que `bubble_ligne` fait : un `Memo` par ligne (la lecture de la bulle), et une
+        // fermeture de rendu qui compte chacune de ses exécutions — c'est elle qui reflète
+        // le travail du DOM (redessiner la bulle).
+        let rendus: Vec<(String, Arc<AtomicUsize>, Memo<Option<RowView>>)> = ["m1", "m2", "m3"]
+            .iter()
+            .map(|id| {
+                let id = id.to_string();
+                let ligne = Memo::new({
+                    let id = id.clone();
+                    let champs = champs.clone();
+                    move |_| {
+                        let snapshot = data.get();
+                        ligne_en_bulle(&snapshot, "message", &id, &champs, false)
+                    }
+                });
+                let compteur = Arc::new(AtomicUsize::new(0));
+                let rendu = Memo::new({
+                    let compteur = Arc::clone(&compteur);
+                    move |_| {
+                        compteur.fetch_add(1, Ordering::SeqCst);
+                        ligne.get()
+                    }
+                });
+                (id, compteur, rendu)
+            })
+            .collect();
+
+        // Premier rendu : chaque bulle se dessine exactement une fois. `get_untracked` : le
+        // harnais de test lit, il n'est pas lui-même un abonné réactif.
+        for (_, compteur, rendu) in &rendus {
+            let _ = rendu.get_untracked();
+            assert_eq!(
+                compteur.load(Ordering::SeqCst),
+                1,
+                "le premier rendu dessine chaque bulle une fois"
+            );
+        }
+
+        // On modifie UN message : m2 change, m1 et m3 restent identiques.
+        let mut lignes2 = lignes.clone();
+        lignes2[1] = json!({"id": "m2", "contenu": "deuxième (modifié)", "role": "module"});
+        data.set(Snapshot::new().with("message", Feed::Ready(lignes2)));
+
+        // Le fil relit chaque bulle : seul m2 doit avoir changé, donc seul son rendu se
+        // réexécute.
+        for (id, compteur, rendu) in &rendus {
+            let _ = rendu.get_untracked();
+            let n = compteur.load(Ordering::SeqCst);
+            if id == "m2" {
+                assert_eq!(n, 2, "m2 a changé, son rendu se réexécute");
+            } else {
+                assert_eq!(n, 1, "{id} n'a pas changé, son rendu ne se réexécute pas");
+            }
+        }
+
+        // La ligne lue est bien la nouvelle (lecture sans suivi : c'est un constat, pas un
+        // rendu).
+        assert_eq!(
+            data.get_untracked()
+                .ligne("message", "m2")
+                .and_then(|row| row.get("contenu")),
+            Some(&json!("deuxième (modifié)"))
         );
     }
 }

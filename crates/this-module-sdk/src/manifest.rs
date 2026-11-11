@@ -126,6 +126,10 @@ pub struct Field {
     pub validators: Vec<Validator>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub transforms: Vec<Transform>,
+    /// Triable par l'hôte et la vue liste (`Brick::List.sort`). Pilote aussi le tri de
+    /// `handle(list)` : rendre un champ triable ne touche que le descripteur, pas le code.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub sortable: bool,
 }
 
 impl Field {
@@ -137,6 +141,7 @@ impl Field {
             default: None,
             validators: vec![],
             transforms: vec![],
+            sortable: false,
         }
     }
     pub fn string(name: impl Into<String>) -> Self {
@@ -163,6 +168,10 @@ impl Field {
     }
     pub fn transform(mut self, t: Transform) -> Self {
         self.transforms.push(t);
+        self
+    }
+    pub fn sortable(mut self) -> Self {
+        self.sortable = true;
         self
     }
 }

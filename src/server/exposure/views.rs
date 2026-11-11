@@ -257,6 +257,8 @@ fn collect_entities(node: &Node, out: &mut BTreeSet<String>) {
                 collect_entities(child, out);
             }
         }
+        // Une page livrée par le module ne nomme aucune entité : rien à ajouter.
+        Node::Html { .. } => {}
         Node::Leaf { brick } => {
             if let Some(entity) = brick_entity(brick) {
                 out.insert(entity.to_string());

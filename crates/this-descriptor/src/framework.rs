@@ -613,6 +613,8 @@ pub fn descriptor() -> ModuleDescriptor {
         },
         custom: vec![],
         runtime: None,
+        programs: vec![],
+        jobs: vec![],
     }
 }
 
