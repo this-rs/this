@@ -1409,10 +1409,12 @@ impl Harness {
                     // Le moteur a répondu, même par un refus (`Http`, `Provider`) ou une
                     // réponse coupée ou illisible : la paire a servi, et sa faute éventuelle
                     // se compte. Rien n'est venu — connexion jamais établie (`Unreachable`),
-                    // délai d'ouverture (`Timeout` : le délai de SILENCE est `Watch::Silent`,
-                    // qui arrive forcément après un premier morceau, donc `answered` est
-                    // déjà vrai), annulation (`Aborted`) — : elle n'a pas servi. Un morceau
-                    // reçu avant la panne compte déjà, par `delta`.
+                    // délai d'ouverture du transport (`Timeout`), annulation (`Aborted`) — :
+                    // elle n'a pas servi. Le délai de SILENCE du harnais (`Watch::Silent`,
+                    // `Err(_)` ici) peut tomber sans aucun morceau — `Signs::new` arme la
+                    // vie au début du tour — et ne sert pas non plus. Dans tous ces cas, un
+                    // morceau reçu AVANT la panne a déjà posé `answered` par `delta` : c'est
+                    // lui, pas le code de panne, qui dit si le moteur a parlé.
                     if match &issue {
                         Ok(Ok(_)) => true,
                         Ok(Err(failure)) => !matches!(

@@ -405,6 +405,9 @@ struct Open {
     /// Ce que le tour a quitté, quand il a changé de paire : si le moteur n'est
     /// jamais joint, on y revient ([`TurnRouter::settle`]).
     before: Option<Before>,
+    /// La génération des réglages de la personne au moment du changement : un
+    /// réglage fait depuis (même sur la même paire) n'est jamais annulé par le retour.
+    generation: u64,
 }
 
 /// L'état servi d'avant un changement de paire.
@@ -903,6 +906,7 @@ impl TurnRouter {
                         id: decision.id,
                         pick,
                         before,
+                        generation: state.generation,
                     });
                 }
                 // Ce que le tour fait vraiment : la décision le dit, pour que
@@ -1009,25 +1013,33 @@ impl TurnRouter {
     /// range parmi les abandonnées ([`TurnRouter::repair`]) — jamais une décision
     /// perdue en silence.
     pub async fn settle(&self, stop: &Stop, code: Option<&str>, honored: bool) {
-        let open = self.state.borrow().open.clone();
-        if let Some(open) = open {
-            let served = honored.then_some(&open.pick);
-            self.learning.settle(open.id, served, stop, code).await;
+        let open = {
             let mut state = self.state.borrow_mut();
-            if state.open.as_ref().is_some_and(|o| o.id == open.id) {
-                state.open = None;
-                if !honored
-                    && let Some(before) = open.before
-                    && state.provider == open.pick.provider_id
-                    && state.model == open.pick.model
-                {
-                    state.provider = before.provider;
-                    state.model = before.model;
-                    state.last_change_turn = before.last_change_turn;
-                    state.last_change_class = before.last_change_class;
-                    state.last_move_turn = before.last_move_turn;
-                }
+            let Some(open) = state.open.clone() else {
+                return;
+            };
+            // La paire décidée n'a jamais été atteinte : l'état servi revient à l'avant
+            // du changement, AVANT d'attendre l'apprentissage — cette restauration ne
+            // dépend pas de sa réponse, et un `settle` coupé la perdrait pour toujours
+            // (re-relecture de #254, constat A). Une seule fois (`before` est consommé),
+            // et jamais par-dessus un réglage de la personne fait depuis (génération).
+            if !honored
+                && let Some(before) = state.open.as_mut().and_then(|o| o.before.take())
+                && state.generation == open.generation
+            {
+                state.provider = before.provider;
+                state.model = before.model;
+                state.last_change_turn = before.last_change_turn;
+                state.last_change_class = before.last_change_class;
+                state.last_move_turn = before.last_move_turn;
             }
+            open
+        };
+        let served = honored.then_some(&open.pick);
+        self.learning.settle(open.id, served, stop, code).await;
+        let mut state = self.state.borrow_mut();
+        if state.open.as_ref().is_some_and(|o| o.id == open.id) {
+            state.open = None;
         }
     }
 
@@ -1042,9 +1054,10 @@ impl TurnRouter {
     ///
     /// Appelée par le harnais **après** la décision du message, dans sa propre
     /// borne : une réparation qui pend ne retarde ni ne coupe le routage. Chaque
-    /// appel compte une tentative ; après [`REPAIR_ATTEMPTS`], la décision est
-    /// lâchée (l'apprentissage ne saura jamais sa fin — il est en panne, et Auto
-    /// continue sans lui).
+    /// appel compte une tentative ; une décision dont [`REPAIR_ATTEMPTS`] tentatives
+    /// ont été coupées est lâchée **à l'appel suivant**, sans nouvel appel à
+    /// l'apprentissage (donc au 4e message : il ne saura jamais sa fin — il est en
+    /// panne, et Auto continue sans lui).
     pub async fn repair(&self) -> bool {
         let next = {
             let mut state = self.state.borrow_mut();

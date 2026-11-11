@@ -2422,3 +2422,66 @@ fn un_modele_coche_retient_sa_variante_de_fenetre() {
     assert_eq!(looked_at(&routed), vec![Pick::new("a", "m[1m]")]);
     assert!(reason(&routed).contains(NARROWED_BY_PERSON));
 }
+
+// ── 12. Re-relecture de #254 ────────────────────────────────────────────────
+
+/// Constat A : la restauration de la paire d'avant ne dépend pas de la réponse
+/// de l'apprentissage. Moteur jamais joint ET `settle` coupé : l'état servi
+/// revient quand même à `a/m1`, et le message suivant ne garde pas `b/m2`.
+#[test]
+fn une_paire_jamais_atteinte_est_oubliee_meme_si_l_apprentissage_pend() {
+    let world = World::new(three_providers());
+    world.prefer(("b", "m2"), &[("a", "m1"), ("c", "m3")]);
+    let learning = Rc::new(StuckLearning::new(world.learning.clone(), u32::MAX, false));
+    let router = Rc::new(TurnRouter::new(
+        world.spec("a", "m1", 1).auto().learning(learning),
+    ));
+    let (harness, _) = build(
+        Rc::new(Unreachable),
+        router.clone(),
+        Some(Rc::new(Fast(std::cell::Cell::new(0.0)))),
+    );
+    run(harness.send("hello"));
+    assert_eq!(router.in_force(), Pick::new("a", "m1"));
+    world.prefer(("c", "m3"), &[("a", "m1"), ("b", "m2")]);
+    let next = run(router.route(text("pourquoi ça plante ?")));
+    assert_eq!(pair(&next), on("c", "m3"));
+    assert!(!reason(&next).contains("kept"), "{}", reason(&next));
+}
+
+/// Un moteur injoignable qui, pendant le tour, voit la personne régler à la
+/// main la MÊME paire que celle décidée.
+struct UnreachableButSetByHand(RefCell<Option<Rc<TurnRouter>>>);
+
+#[async_trait(?Send)]
+impl Transport for UnreachableButSetByHand {
+    async fn stream(&self, _r: &Request, _c: &Cancel, _d: Delta) -> Result<Reply, Failure> {
+        if let Some(router) = self.0.borrow().as_ref() {
+            router.set_by_hand("b", "m2");
+        }
+        Err(Failure::unreachable("connexion refusée"))
+    }
+    fn honors_route(&self) -> bool {
+        true
+    }
+}
+
+/// Constat F : un réglage de la personne fait pendant le tour n'est jamais
+/// annulé par l'oubli d'une paire jamais atteinte, même si c'est la même paire.
+#[test]
+fn l_oubli_d_une_paire_jamais_atteinte_n_annule_pas_un_reglage_a_la_main() {
+    let world = World::new(three_providers());
+    world.prefer(("b", "m2"), &[("a", "m1"), ("c", "m3")]);
+    let router = Rc::new(TurnRouter::new(world.spec("a", "m1", 1).auto()));
+    let transport = Rc::new(UnreachableButSetByHand(RefCell::new(None)));
+    let (harness, _) = build(transport.clone(), router.clone(), None);
+    *transport.0.borrow_mut() = Some(router.clone());
+    run(harness.send("hello"));
+    *transport.0.borrow_mut() = None;
+    assert_eq!(
+        router.in_force(),
+        Pick::new("b", "m2"),
+        "le réglage de la personne tient"
+    );
+    assert_eq!(run(router.route(text("hello"))).why, RouteWhy::Manual);
+}
