@@ -70,6 +70,51 @@ pub trait Transport {
         cancel: &Cancel,
         delta: Delta,
     ) -> Result<Reply, Failure>;
+
+    /// Un transport de la **famille A** (le moteur exécute les outils pendant
+    /// `stream`) reçoit la porte du run avant le flux : c'est par elle qu'il
+    /// consulte `gate` et journalise ses `ToolUse`/`ToolResult` hors-bande.
+    ///
+    /// Un transport qui n'exécute pas les outils lui-même l'ignore (défaut) :
+    /// rien ne change, le harnais continue de passer par `run_tool`.
+    ///
+    /// La porte ne porte pas `Toolbox::specs()` : dans ce mode, la surface est
+    /// déclarée au moteur par le transport lui-même (MCP, `--allowedTools`…),
+    /// pas par le Toolbox — voir [`Permission`].
+    fn set_permission(&self, _permission: Rc<dyn Permission>) {}
+}
+
+/// La porte du run, rendue à un transport de la famille A.
+///
+/// `run_tool` (dans la boucle) est ce qui applique trois choses à un appel
+/// d'outil : la déclaration (`Toolbox::specs()`), l'autorisation (`gate`) et le
+/// journal (`Recorder`). Un moteur qui exécute l'outil **pendant** `stream`
+/// n'atteint jamais `run_tool` : sans cette porte, les trois sont contournés.
+///
+/// La porte rend au transport, hors-bande :
+/// - la **décision d'autorisation** ([`Permission::allows`]) : la même que
+///   `gate`, avec le même motif de refus — le transport la renvoie au moteur
+///   (permission refusée), il ne se contente pas de la noter ;
+/// - la **journalisation** ([`Permission::record`]) : un `ToolUse`/`ToolResult`
+///   du flux devient la même [`Step`](this_agent::Step) que `run_tool` en
+///   produirait, poussée au `Recorder` du run en cours.
+///
+/// La **déclaration** n'y figure pas, et c'est une décision écrite : dans ce
+/// mode, la surface est déclarée au moteur par le transport (MCP,
+/// `--allowedTools`…), pas par `Toolbox::specs()`. Le transport ignore donc
+/// `Request::tools()` **explicitement** — jamais « par oubli » : un état où
+/// `specs()` existerait sans effet est interdit (décision `famille-a-specs-ignorees`).
+#[async_trait(?Send)]
+pub trait Permission {
+    /// La même décision que `gate` : `Ok(())` si `tool` peut partir, sinon le
+    /// motif du refus — à renvoyer au moteur, pas seulement à enregistrer.
+    fn allows(&self, tool: &str) -> Result<(), String>;
+
+    /// Journalise un appel venu du flux, avec la même forme d'étape que
+    /// `run_tool` : `outcome` (refus, échec, empreinte compris) devient une
+    /// [`Step`](this_agent::Step) poussée au `Recorder` sous l'identité du run
+    /// en cours. `ms` est la durée mesurée de l'appel (comme dans `run_tool`).
+    async fn record(&self, call: &ToolCall, ms: u64, outcome: &Outcome);
 }
 
 /// Ce que le harnais peut faire faire au noyau de l’application.
