@@ -109,7 +109,7 @@ pub fn rewrite_served(path: &str, bytes: Vec<u8>) -> Result<Vec<u8>, (&'static s
             format!("`{path}` n'est pas du texte UTF-8 ; un nœud `html` ne sert que du HTML"),
         )
     })?;
-    Ok(inject_csp(&html).into_bytes())
+    Ok(inject_link_guard(&inject_csp(&html)).into_bytes())
 }
 
 /// Injecte la politique de l'hôte (intersectée avec celle du module) dans le HTML : dans le
@@ -119,6 +119,68 @@ pub fn inject_csp(html: &str) -> String {
     let (stripped, module_policy) = strip_csp_metas(html);
     let policy = intersect_policies(&module_policy);
     inject_meta(&stripped, &csp_meta(&policy))
+}
+
+/// La garde de navigation : un `<script>` en phase de capture sur `window`, posé AVANT tout
+/// script du module. `navigate-to` n'est pas appliqué par les navigateurs et le sandbox ne
+/// bloque pas l'auto-navigation d'un lien : un `<a href="https://…?d=…">` cliqué ferait
+/// partir la donnée dans l'URL. La garde ferme ce dernier chemin : les ancres internes
+/// (`#…`), les `blob:` et les pages `data:text/html` restent libres — navigation DANS la page.
+const LINK_GUARD: &str = r#"<script>addEventListener('click', function (e) {
+  var a = e.target && e.target.closest && e.target.closest('a[href]');
+  if (!a) return;
+  var h = a.getAttribute('href') || '';
+  if (h.startsWith('#') || h.startsWith('blob:') || h.startsWith('data:text/html')) return;
+  e.preventDefault(); e.stopImmediatePropagation();
+  parent.postMessage({type:'this:intent', kind:'link_refused', href:h.slice(0,120)}, '*');
+}, true);</script>"#;
+
+/// Décide si un `href` est un lien sortant que l'hôte bloque — la traduction Rust exacte de
+/// la condition de [`LINK_GUARD`]. Les ancres internes (`#…`), les `blob:` et les pages
+/// `data:text/html` restent libres ; tout le reste est un chemin de sortie.
+pub fn blocks_link(href: &str) -> bool {
+    !href.starts_with('#') && !href.starts_with("blob:") && !href.starts_with("data:text/html")
+}
+
+/// La ligne de journal d'un lien sortant bloqué par la garde. `href` est déjà tronqué côté
+/// page (`slice(0,120)`) : c'est le début d'URL, jamais la donnée entière.
+pub fn link_refused_line(href: &str) -> String {
+    format!("html : lien sortant refusé — {href}")
+}
+
+/// Injecte la garde de navigation dans le HTML : posée AVANT le premier `<script>` du module
+/// (un script qui s'exécute avant la garde pourrait la neutraliser), sinon dans le `<head>`
+/// (ou après le doctype, sinon en tête) comme la CSP.
+pub fn inject_link_guard(html: &str) -> String {
+    match first_script_index(html) {
+        Some(at) => splice(html, at, LINK_GUARD),
+        None => inject_meta(html, LINK_GUARD),
+    }
+}
+
+/// L'index du `<` du premier `<script>` réel de la page, en sautant les commentaires. `None`
+/// si la page n'en porte pas.
+fn first_script_index(html: &str) -> Option<usize> {
+    let lower = html.to_ascii_lowercase();
+    let mut i = 0;
+    while i < html.len() {
+        let rel = lower[i..].find('<')?;
+        let lt = i + rel;
+        if lower[lt..].starts_with("<!--") {
+            let off = lower[lt + 4..].find("-->")?;
+            i = lt + 4 + off + 3;
+            continue;
+        }
+        let after = &lower[lt + 1..];
+        let name_end = after
+            .find(|c: char| c.is_ascii_whitespace() || c == '>' || c == '/')
+            .unwrap_or(after.len());
+        if &after[..name_end] == "script" {
+            return Some(lt);
+        }
+        i = close_of_tag(html, lt)?;
+    }
+    None
 }
 
 /// Une directive d'une politique : `default-src` → `'none'`.
@@ -629,10 +691,18 @@ fn mount(ctx: Ctx, host: HtmlHost, full: String, height: u32) -> AnyView {
             };
             match msg.get("type").and_then(Value::as_str) {
                 Some("this:intent") => {
-                    match ctx.module.try_with_value(|m| intent_from_message(m, &msg)) {
-                        Some(Ok(intent)) => ctx.on_intent.run(intent),
-                        Some(Err(why)) => render::log_refusal(&refusal_line(&why)),
-                        None => {}
+                    // Un lien sortant, bloqué par la garde : ce n'est pas une action du
+                    // module, on le journalise nommément au lieu de le rejeter comme
+                    // « genre inconnu ».
+                    if msg.get("kind").and_then(Value::as_str) == Some("link_refused") {
+                        let href = msg.get("href").and_then(Value::as_str).unwrap_or("");
+                        render::log_refusal(&link_refused_line(href));
+                    } else {
+                        match ctx.module.try_with_value(|m| intent_from_message(m, &msg)) {
+                            Some(Ok(intent)) => ctx.on_intent.run(intent),
+                            Some(Err(why)) => render::log_refusal(&refusal_line(&why)),
+                            None => {}
+                        }
                     }
                 }
                 Some("this:height") => {
@@ -861,5 +931,69 @@ mod tests {
             line,
             "html : compteur/ecran — CSP imposée (default-src 'none')"
         );
+    }
+
+    #[test]
+    fn the_link_guard_is_injected_before_the_first_module_script() {
+        let served = rewrite_served(
+            "ui/index.html",
+            "<!doctype html><html><head><title>x</title></head><body>             <a href='https://exfil.example/?d=secret'>partir</a>             <script>let module_script = 1;</script></body></html>"
+                .as_bytes()
+                .to_vec(),
+        )
+        .expect("servi");
+        let html = String::from_utf8(served).expect("utf8");
+        // La CSP est toujours là (on ne l'a pas cassée en réécrivant le HTML).
+        assert!(html.contains("default-src 'none'"), "{html}");
+        assert!(html.contains("connect-src 'none'"), "{html}");
+        // La garde est en phase de capture…
+        assert!(
+            LINK_GUARD.contains("addEventListener('click'"),
+            "{LINK_GUARD}"
+        );
+        assert!(LINK_GUARD.contains("}, true)"), "{LINK_GUARD}");
+        // …et précède le premier script du module.
+        let guard = html.find(LINK_GUARD).expect("garde");
+        let script = html.find("module_script").expect("script du module");
+        assert!(
+            guard < script,
+            "la garde ({guard}) doit précéder le script du module ({script}) : {html}"
+        );
+    }
+
+    #[test]
+    fn internal_anchors_and_blob_links_are_not_blocked() {
+        // La liberté de navigation DANS la page est intacte.
+        assert!(!blocks_link("#section"));
+        assert!(!blocks_link("#"));
+        assert!(!blocks_link("blob:http://opaque/abc"));
+        assert!(!blocks_link("data:text/html,<p>page interne</p>"));
+    }
+
+    #[test]
+    fn an_outgoing_link_is_blocked_and_names_its_href() {
+        assert!(blocks_link("https://exfil.example/?d=secret"));
+        assert!(blocks_link("http://x/"));
+        assert!(blocks_link("//exfil.example/?d=secret"));
+        assert!(blocks_link("mailto:a@b.c"));
+        let line = link_refused_line("https://exfil.example/?d=sec");
+        assert_eq!(
+            line,
+            "html : lien sortant refusé — https://exfil.example/?d=sec"
+        );
+    }
+
+    #[test]
+    fn a_page_without_script_still_gets_the_guard() {
+        let served = rewrite_served(
+            "ui/index.html",
+            "<!doctype html><html><head><title>x</title></head><body><p>hi</p></body></html>"
+                .as_bytes()
+                .to_vec(),
+        )
+        .expect("servi");
+        let html = String::from_utf8(served).expect("utf8");
+        assert!(html.contains("link_refused"), "{html}");
+        assert!(html.contains("default-src 'none'"), "{html}");
     }
 }
