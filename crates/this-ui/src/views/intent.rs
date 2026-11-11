@@ -209,6 +209,35 @@ pub enum Intent {
     },
 }
 
+/// D'où vient une intention : d'un geste sur une brique que l'hôte a dessinée, ou du script
+/// d'une page que le module a livrée (`Node::Html`).
+///
+/// La différence compte : une brique ne s'active que par un geste de la personne sur un
+/// contrôle que l'hôte a rendu ; le script d'une page émet ce qu'il veut, quand il veut,
+/// sans que personne n'ait rien touché.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Origin {
+    /// Un geste de la personne sur une brique rendue par l'hôte.
+    Brick,
+    /// Un message du script d'une page, arrivé par le pont `postMessage`.
+    Page,
+}
+
+/// Une intention et son origine.
+///
+/// C'est une ENVELOPPE, pas un champ de plus sur chaque variante d'[`Intent`] : l'origine
+/// est une propriété du chemin d'arrivée, pas du contenu. L'intention d'une page reste ainsi
+/// égale (`==`) à celle qu'une brique aurait produite pour la même action déclarée, les
+/// hôtes qui filtrent sur `Intent` ne changent pas, et aucun constructeur d'intention n'a à
+/// choisir une origine qu'il ne connaît pas.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Emitted {
+    /// Ce qui est demandé.
+    pub intent: Intent,
+    /// Par quel chemin la demande est arrivée.
+    pub origin: Origin,
+}
+
 impl Intent {
     /// Does this intent reach the code of a module? Only [`Intent::Invoke`] does (and the
     /// host-side intents that map onto an action of the module's own). A typed secret

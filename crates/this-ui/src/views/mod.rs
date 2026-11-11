@@ -54,9 +54,13 @@ pub mod style;
 pub mod text;
 
 pub use data::{Feed, Feeds, Reading, Rows, Snapshot};
-pub use html::{HtmlHost, intent_from_message, refusal_line};
+pub use html::{
+    Admission, Demand, GateAnswer, GateFuture, GateRequest, HtmlHost, KindClass, RateWindow,
+    Reason, Refusal, admit, intent_from_message, page_demand, refusal_line, refused_message,
+    result_message, settle,
+};
 pub use image::{ImageHost, clamped_height, content_type_of, object_fit, src_of_value};
-pub use intent::{FieldValue, Intent, LinkOp, SecretValue, Values};
+pub use intent::{Emitted, FieldValue, Intent, LinkOp, Origin, SecretValue, Values};
 pub use placement::{Frame, Hidden, Portfolio, SURFACES};
 pub use render::{
     ComposerSpec, Ctx, StepEntry, annonce, composer, composer_actions, composer_intent,
