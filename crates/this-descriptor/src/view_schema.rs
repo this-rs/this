@@ -2012,8 +2012,13 @@ fn rules() -> Vec<RuleSchema> {
         ),
         rule(
             "html_data_field_unknown",
-            "An `html` data request names a field the entity does not declare (base fields cannot be requested).",
-            "Name declared fields only.",
+            "An `html` data request names a field the entity does not declare.",
+            "Name declared fields only (or `id`, to target a row).",
+        ),
+        rule(
+            "html_data_field_reserved",
+            "An `html` data request asks for a base field other than `id` (created_at, updated_at, deleted_at).",
+            "Only `id` may be requested among base fields: it lets the page target a row.",
         ),
         rule(
             "html_data_limit_out_of_range",
@@ -3214,6 +3219,12 @@ mod tests {
                 "html_data_entity_twice",
                 with_view(
                     json!({"type":"html","path":"ui/index.html","data":[{"entity":"invoice"},{"entity":"invoice"}]}),
+                ),
+            ),
+            (
+                "html_data_field_reserved",
+                with_view(
+                    json!({"type":"html","path":"ui/index.html","data":[{"entity":"invoice","fields":["created_at"]}]}),
                 ),
             ),
             (
