@@ -1018,6 +1018,33 @@ fn bricks() -> Vec<VariantSchema> {
                    "columns": [{"name": "total", "source": {"op": "sum", "field": "amount"}}]}),
             false,
         ),
+        brick_v(
+            "image",
+            "An image: a module file, or a data URL read from a row. NEVER a remote URL — the \
+             network is forbidden to views. `source.vfs` names a file of the module (resolved \
+             inside it, refused if it climbs out); `source.entity` + `source.field` read a data \
+             URL from the first row. `alt` is required; `height` is 24..=600; `fit` is cover \
+             (default) or contain. Not for a header.",
+            vec![
+                req(
+                    "source",
+                    "object:ImageSource",
+                    "The source: a module file ({\"vfs\": \"assets/logo.png\"}), or a row's data \
+                     URL ({\"entity\": \"produit\", \"field\": \"photo\"}). Exactly one.",
+                ),
+                req(
+                    "alt",
+                    "string",
+                    "The alternative text. Required: an image without `alt` is refused.",
+                ),
+                opt("height", "integer", "Height in px, 24..=600. Absent = intrinsic."),
+                opt("fit", "enum:ImageFit", "How it fills its frame: cover (default) or contain."),
+            ],
+            json!({"type": "image", "source": {"vfs": "assets/logo.png"}, "alt": "Logo"}),
+            json!({"type": "image", "source": {"vfs": "assets/logo.png"}, "alt": "Logo",
+                   "height": 160, "fit": "contain"}),
+            false,
+        ),
     ]
 }
 
@@ -1437,6 +1464,34 @@ fn objects() -> Vec<ObjectSchema> {
             json!({"name": "n", "source": {"op": "count"}}),
             json!({"name": "total", "source": {"op": "sum", "field": "amount"}}),
         ),
+        object(
+            "ImageSource",
+            "The source of an image: a module file (`vfs`, a path relative to the module or its \
+             full `/modules/<name>/<version>/…` path — a `..`, an absolute path outside the \
+             module, or a remote URL is refused), or a row's data URL (`entity` + `field`, both \
+             required together). Exactly one of the two.",
+            vec![
+                opt(
+                    "vfs",
+                    "string",
+                    "The file path, relative to the module, e.g. `assets/logo.png`.",
+                ),
+                opt(
+                    "entity",
+                    "string",
+                    "The entity whose first row carries the data URL. Needs `field`.",
+                )
+                .refers("entity"),
+                opt(
+                    "field",
+                    "string",
+                    "The field holding the data URL. Needs `entity`.",
+                )
+                .refers("field"),
+            ],
+            json!({}),
+            json!({"vfs": "assets/logo.png", "entity": "produit", "field": "photo"}),
+        ),
     ]
 }
 
@@ -1552,6 +1607,15 @@ fn enums() -> Vec<EnumSchema> {
             &[
                 ("manual", "On demand, by a button or a tool."),
                 ("on_change", "On every change of the rows read."),
+            ],
+        ),
+        enum_s(
+            "ImageFit",
+            "How an image fills its frame.",
+            Some("cover"),
+            &[
+                ("cover", "Fill the frame, cropping if needed."),
+                ("contain", "Fit inside the frame, without cropping."),
             ],
         ),
         enum_s(
@@ -1768,6 +1832,36 @@ fn rules() -> Vec<RuleSchema> {
             "chart_entity_unknown",
             "A chart names an entity the module does not declare.",
             "Declare the entity in `entities` or fix the name.",
+        ),
+        rule(
+            "image_source_missing",
+            "An image declares neither `source.vfs` nor a complete `entity`+`field`.",
+            "Give it one source: `source.vfs` for a module file, or `entity`+`field` for a data URL.",
+        ),
+        rule(
+            "image_source_ambiguous",
+            "An image declares BOTH `source.vfs` and `entity`/`field`.",
+            "Keep one source: a module file, or a row's data URL — not both.",
+        ),
+        rule(
+            "image_alt_missing",
+            "An image has no `alt` (or an empty one).",
+            "Write the alternative text: what the person should hear when the image cannot load.",
+        ),
+        rule(
+            "image_height_out_of_range",
+            "An image `height` is outside 24..=600.",
+            "Pick a height between 24 and 600 px, or remove it for the intrinsic height.",
+        ),
+        rule(
+            "image_vfs_outside_module",
+            "An image `source.vfs` is empty, absolute outside the module folder, or climbs out with `..`.",
+            "Use a path relative to the module, e.g. `assets/logo.png`.",
+        ),
+        rule(
+            "image_remote_refused",
+            "An image `source.vfs` is a remote URL (`http(s)://` or `//`).",
+            "Serve a module file, or read a data URL from a field — never a network request.",
         ),
         rule(
             "composer_placeholder_empty",
@@ -2103,7 +2197,11 @@ fn coverage() -> Vec<CoverageEntry> {
             &[],
             "NOT covered: no `date` or enum-select control in `Input`; `text` stands in.",
         ),
-        cover("image / media", &[], "NOT covered: no media brick."),
+        cover(
+            "image / media",
+            &["brick:image"],
+            "A module file (`source.vfs`), or a data URL read from a row (`entity`+`field`).              Never a remote URL: the network is forbidden to views.",
+        ),
     ]
 }
 
@@ -2232,8 +2330,8 @@ mod tests {
     use crate::link::LinkDesc;
     use crate::module::ModuleDescriptor;
     use crate::views::{
-        Accent, AgentOp, ArgKind, Click, ColumnSource, DeviceCapability, Grant, HostSurface, Input,
-        Layout, Look, RelationMode, Run, Signal, Surface, Tone, Transition,
+        Accent, AgentOp, ArgKind, Click, ColumnSource, DeviceCapability, Grant, HostSurface,
+        ImageFit, Input, Layout, Look, RelationMode, Run, Signal, Surface, Tone, Transition,
     };
     use std::collections::BTreeSet;
 
@@ -2270,6 +2368,7 @@ mod tests {
             "DataGrant" => go::<crate::views::DataGrant>(v),
             "ProgramArg" => go::<crate::views::ProgramArg>(v),
             "Column" => go::<crate::views::Column>(v),
+            "ImageSource" => go::<crate::views::ImageSource>(v),
             other => Err(format!("test bug: no type for `{other}`")),
         }
     }
@@ -2413,6 +2512,7 @@ mod tests {
             ("Signal", err_of::<Signal>(json!("__nope__"))),
             ("Input", err_of::<Input>(json!("__nope__"))),
             ("RelationMode", err_of::<RelationMode>(json!("__nope__"))),
+            ("ImageFit", err_of::<ImageFit>(json!("__nope__"))),
             ("ArgKind", err_of::<ArgKind>(json!("__nope__"))),
             ("Run", err_of::<Run>(json!("__nope__"))),
             ("AgentOp", err_of::<AgentOp>(json!("__nope__"))),
@@ -2492,6 +2592,7 @@ mod tests {
                 "ProgramArg" => err_of::<crate::views::ProgramArg>(probe),
                 "Column" => err_of::<crate::views::Column>(probe),
                 "DataGrant" => err_of::<crate::views::DataGrant>(probe),
+                "ImageSource" => err_of::<crate::views::ImageSource>(probe),
                 other => panic!("test bug: object `{other}`"),
             };
             assert_eq!(
@@ -2708,6 +2809,7 @@ mod tests {
                     "Signal" => rt::<Signal>(&v),
                     "Input" => rt::<Input>(&v),
                     "RelationMode" => rt::<RelationMode>(&v),
+                    "ImageFit" => rt::<ImageFit>(&v),
                     "ArgKind" => rt::<ArgKind>(&v),
                     "Run" => rt::<Run>(&v),
                     "AgentOp" => rt::<AgentOp>(&v),
@@ -3135,6 +3237,40 @@ mod tests {
                 "chart_entity_unknown",
                 with_view(leaf(
                     r#"{"type":"chart","entity":"ghost","field":"amount","kind":"bar"}"#,
+                )),
+            ),
+            (
+                "image_source_missing",
+                with_view(leaf(r#"{"type":"image","source":{},"alt":"Logo"}"#)),
+            ),
+            (
+                "image_source_ambiguous",
+                with_view(leaf(
+                    r#"{"type":"image","source":{"vfs":"assets/logo.png","entity":"invoice","field":"amount"},"alt":"Logo"}"#,
+                )),
+            ),
+            (
+                "image_alt_missing",
+                with_view(leaf(
+                    r#"{"type":"image","source":{"vfs":"assets/logo.png"},"alt":"  "}"#,
+                )),
+            ),
+            (
+                "image_height_out_of_range",
+                with_view(leaf(
+                    r#"{"type":"image","source":{"vfs":"assets/logo.png"},"alt":"Logo","height":700}"#,
+                )),
+            ),
+            (
+                "image_vfs_outside_module",
+                with_view(leaf(
+                    r#"{"type":"image","source":{"vfs":"../../secret.png"},"alt":"Logo"}"#,
+                )),
+            ),
+            (
+                "image_remote_refused",
+                with_view(leaf(
+                    r#"{"type":"image","source":{"vfs":"https://evil.example/x.png"},"alt":"Logo"}"#,
                 )),
             ),
             ("view_too_deep", with_view(deep)),

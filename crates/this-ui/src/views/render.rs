@@ -31,6 +31,7 @@ use crate::design::{self, Tone as DesignTone};
 use crate::model::Kind as FieldKind;
 use crate::views::chart;
 use crate::views::data::{self, Feed, Reading, Snapshot};
+use crate::views::image;
 use crate::views::intent::{FieldValue, Intent, LinkOp, SecretValue, Values};
 use crate::views::markdown;
 use crate::views::placement;
@@ -461,7 +462,7 @@ fn fallback(what: &str) -> AnyView {
 /// The tile for any reading that is not rows. The `Rows` arm is unreachable by construction
 /// — it returns a fallback instead of panicking, because a renderer never takes the screen
 /// hostage for a mistake.
-fn tile_for(ctx: Ctx, entity: &str, reading: &Reading<'_>, when_empty: &str) -> AnyView {
+pub(crate) fn tile_for(ctx: Ctx, entity: &str, reading: &Reading<'_>, when_empty: &str) -> AnyView {
     match reading {
         Reading::Loading => loading_tile(),
         Reading::Empty => empty_tile(ctx, entity, when_empty),
@@ -688,6 +689,7 @@ pub fn render_brick(ctx: Ctx, brick: &Brick) -> AnyView {
             run,
             columns,
         } => program(ctx, entity, filter.as_ref(), args, *run, columns),
+        Brick::Image { .. } => image::render_image(ctx, brick),
         other => fallback(&describe_brick(other)),
     }
 }

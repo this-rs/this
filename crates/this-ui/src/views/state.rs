@@ -137,7 +137,8 @@ fn filter_of(brick: &Brick) -> Option<&this_descriptor::FilterExpr> {
         | Brick::CapabilityRequest { .. }
         | Brick::Composer { .. }
         | Brick::Settings { .. }
-        | Brick::Secret { .. } => None,
+        | Brick::Secret { .. }
+        | Brick::Image { .. } => None,
     }
 }
 

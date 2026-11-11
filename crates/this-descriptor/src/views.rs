@@ -340,6 +340,59 @@ pub fn html_resolve(
     Ok(format!("{racine}{relatif}"))
 }
 
+/// Résout le `path` d'une source d'image contre le dossier du module `<name>@<version>` :
+/// `Ok(chemin VFS complet)` ou `Err(raison, message)`. Une URL distante (`http(s)://`, `//`)
+/// est refusée avant tout : aucune requête réseau ne doit sortir d'une vue.
+pub fn image_resolve(
+    name: &str,
+    version: &str,
+    path: &str,
+) -> Result<String, (&'static str, String)> {
+    let path = path.trim();
+    if path.is_empty() {
+        return Err((
+            "image_vfs_outside_module",
+            "an image `vfs` must name the file it serves, e.g. `assets/logo.png`".into(),
+        ));
+    }
+    // Une URL distante n'est pas un chemin de module : elle fuiterait une requête.
+    let bas = path.to_ascii_lowercase();
+    if bas.starts_with("http://") || bas.starts_with("https://") || path.starts_with("//") {
+        return Err((
+            "image_remote_refused",
+            format!(
+                "`{path}` is a remote URL; an image serves a module file or a data URL,                  never a network request"
+            ),
+        ));
+    }
+    let racine = format!("/modules/{name}/{version}/");
+    let relatif = if let Some(r) = path.strip_prefix(&racine) {
+        r
+    } else if path.starts_with('/') {
+        return Err((
+            "image_vfs_outside_module",
+            format!(
+                "`{path}` is outside this module; an image file lives under `{racine}`.                  Use a path relative to the module, e.g. `assets/logo.png`"
+            ),
+        ));
+    } else {
+        path
+    };
+    if relatif.is_empty()
+        || relatif
+            .split('/')
+            .any(|seg| seg == ".." || seg == "." || seg.is_empty() || seg.contains('\\'))
+    {
+        return Err((
+            "image_vfs_outside_module",
+            format!(
+                "`{path}` climbs out of the module (`..`) or is not a clean relative path;                  name a file inside the module folder"
+            ),
+        ));
+    }
+    Ok(format!("{racine}{relatif}"))
+}
+
 /// Un onglet de [`Node::Tabs`].
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -691,6 +744,32 @@ pub enum Brick {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         columns: Vec<Column>,
     },
+    /// Une image : un fichier du module, ou une data URL lue dans une ligne.
+    ///
+    /// Deux sources, et jamais un réseau :
+    /// - `"source": {"vfs": "assets/logo.png"}` : un fichier du module, résolu dans son
+    ///   dossier (refusé s'il en sort) ; l'hôte lit les octets et fabrique une data URL (ou
+    ///   un Blob URL révoqué au démontage) ;
+    /// - `"source": {"entity": "produit", "field": "photo"}` : le champ d'une ligne porte
+    ///   une **data URL** (`data:image/png;base64,…`). Jamais une URL distante : le réseau
+    ///   est interdit aux vues, et une image distante fuiterait une requête
+    ///   (`image_remote_refused`).
+    ///
+    /// `alt` est requis (une image sans texte alternatif est refusée nommément) ; `height`
+    /// est borné `24..=600` ; `fit` est `cover` (défaut) ou `contain`.
+    Image {
+        /// La source : un fichier du module, ou une data URL lue dans une ligne. Exactement
+        /// une des deux (`image_source_missing` si aucune, `image_source_ambiguous` si les deux).
+        source: ImageSource,
+        /// Le texte alternatif. Requis : une image sans `alt` est un refus nommé.
+        alt: String,
+        /// Hauteur en px, bornée `24..=600`. Absente = hauteur intrinsèque.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        height: Option<u32>,
+        /// `cover` (défaut) ou `contain`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        fit: Option<ImageFit>,
+    },
 }
 
 impl Brick {
@@ -704,6 +783,7 @@ impl Brick {
             | Brick::Settings { .. }
             | Brick::Secret { .. } => None,
             Brick::Indicator { entity, .. } => entity.as_deref(),
+            Brick::Image { source, .. } => source.entity.as_deref(),
             Brick::Text { entity, .. }
             | Brick::Caption { entity, .. }
             | Brick::Chart { entity, .. }
@@ -726,6 +806,40 @@ impl Brick {
         }
     }
 }
+
+/// La source d'une [`Brick::Image`] : un fichier du module, ou une data URL lue dans une
+/// ligne. Exactement une des deux — jamais les deux, jamais aucune, jamais une URL distante.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ImageSource {
+    /// Le chemin du fichier, relatif au module : `assets/logo.png`, ou le chemin complet
+    /// `/modules/<nom>/<version>/assets/logo.png`. Un `..`, un chemin absolu hors du module,
+    /// une URL (`http(s)://`, `//`) sont refusés nommément.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vfs: Option<String>,
+    /// L'entité dont la première ligne porte la data URL. Exige `field`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entity: Option<String>,
+    /// Le champ qui porte la data URL. Exige `entity`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub field: Option<String>,
+}
+
+/// Comment une [`Brick::Image`] remplit son cadre.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ImageFit {
+    /// Recouvre le cadre, quitte à rogner (défaut).
+    #[default]
+    Cover,
+    /// Entre entière dans le cadre, sans rogner.
+    Contain,
+}
+
+/// Hauteur minimale d'une image, en px.
+pub const IMAGE_HEIGHT_MIN: u32 = 24;
+/// Hauteur maximale d'une image, en px.
+pub const IMAGE_HEIGHT_MAX: u32 = 600;
 
 /// Une section d'un écran de réglages.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1983,6 +2097,7 @@ impl<'a> Checks<'a> {
                 self.reads(chemin, entity, &lis, &lectures(b));
                 self.chart(chemin, entity, field, kind, label.as_deref(), *height);
             }
+            Brick::Image { .. } => self.image(chemin, b),
             _ => self.data_brick(chemin, b),
         }
     }
@@ -2358,6 +2473,87 @@ impl<'a> Checks<'a> {
         self.label_ref(&format!("{chemin}.label"), label);
     }
 
+    /// Une image : exactement UNE source, un texte alternatif, une hauteur dans la plage, et
+    /// — pour un fichier — un chemin dans le module, jamais une URL distante.
+    fn image(&mut self, chemin: &str, b: &Brick) {
+        let Brick::Image {
+            source,
+            alt,
+            height,
+            ..
+        } = b
+        else {
+            return;
+        };
+        let vfs = source.vfs.as_deref();
+        let a_entite = source.entity.is_some();
+        let a_champ = source.field.is_some();
+        // Exactement une source : ni les deux, ni aucune.
+        match (vfs.is_some(), a_entite || a_champ) {
+            (true, true) => self.push(
+                "image_source_ambiguous",
+                format!("{chemin}.source"),
+                "an image has ONE source: either `source.vfs` (a module file) or                  `source.entity`+`source.field` (a data URL), not both",
+            ),
+            (false, false) => self.push(
+                "image_source_missing",
+                format!("{chemin}.source"),
+                "an image needs a source: `source.vfs` (a module file) or                  `source.entity`+`source.field` (a data URL)",
+            ),
+            _ => {}
+        }
+        // Le texte alternatif est requis : une image muette n'existe pas pour un lecteur.
+        if alt.trim().is_empty() {
+            self.push(
+                "image_alt_missing",
+                format!("{chemin}.alt"),
+                "an image must carry a non-empty `alt`: what the person should hear when it                  cannot load",
+            );
+        }
+        if let Some(h) = height
+            && !(IMAGE_HEIGHT_MIN..=IMAGE_HEIGHT_MAX).contains(h)
+        {
+            self.push(
+                "image_height_out_of_range",
+                format!("{chemin}.height"),
+                format!("height {h} is outside {IMAGE_HEIGHT_MIN}..={IMAGE_HEIGHT_MAX}"),
+            );
+        }
+        match (vfs, source.entity.as_deref(), source.field.as_deref()) {
+            // Un fichier du module : le chemin doit rester dedans, et n'être jamais une URL.
+            (Some(chemin_vfs), _, _) => {
+                if let Err((raison, msg)) = image_resolve(&self.m.name, &self.m.version, chemin_vfs)
+                {
+                    self.push(raison, format!("{chemin}.source.vfs"), msg);
+                }
+            }
+            // Une data URL lue dans une ligne : l'entité et le champ sont déclarés.
+            (None, Some(e), Some(f)) => {
+                if !self.entity_ref(
+                    "view_entity_unknown",
+                    &format!("{chemin}.source.entity"),
+                    e,
+                ) {
+                    return;
+                }
+                let lis = self.readable(e);
+                self.reads(&format!("{chemin}.source.field"), e, &lis, &[f]);
+            }
+            // Une moitié de source : ni un fichier, ni une ligne complète.
+            (None, Some(_), None) => self.push(
+                "image_source_missing",
+                format!("{chemin}.source.field"),
+                "an image reading a row needs both `source.entity` and `source.field`:                  `source.field` is missing",
+            ),
+            (None, None, Some(_)) => self.push(
+                "image_source_missing",
+                format!("{chemin}.source.entity"),
+                "an image reading a row needs both `source.entity` and `source.field`:                  `source.entity` is missing",
+            ),
+            (None, None, None) => {}
+        }
+    }
+
     /// Vérifie que chaque champ lu existe ; un chemin pointé (`target.name`) est validé ailleurs.
     fn reads(&mut self, chemin: &str, entite: &str, lis: &BTreeSet<String>, lus: &[&str]) {
         for c in lus {
@@ -2537,7 +2733,8 @@ fn lectures(b: &Brick) -> Vec<&str> {
         | Brick::CapabilityRequest { .. }
         | Brick::Settings { .. }
         | Brick::Composer { .. }
-        | Brick::Secret { .. } => {}
+        | Brick::Secret { .. }
+        | Brick::Image { .. } => {}
     }
     v
 }
@@ -4189,6 +4386,80 @@ mod tests {
         let mut h = racine("ui/index.html");
         h.views[0].surface = Surface::Header;
         assert_refused(&h, "html_in_header");
+    }
+
+    #[test]
+    fn image_roundtrips_and_names_its_six_refusals() {
+        // Un fichier du module, puis une data URL lue dans une ligne.
+        assert_stable::<Brick>(
+            r#"{"type":"image","source":{"vfs":"assets/logo.png"},"alt":"Logo"}"#,
+        );
+        assert_stable::<Brick>(
+            r#"{"type":"image","source":{"vfs":"assets/logo.png"},"alt":"Logo","height":160,"fit":"contain"}"#,
+        );
+        assert_stable::<Brick>(
+            r#"{"type":"image","source":{"entity":"invoice","field":"titre"},"alt":"Photo"}"#,
+        );
+        let racine = |brick: &str| {
+            let mut m = module();
+            m.views.push(leaf_view("x", brick));
+            m
+        };
+        // Acceptés : fichier propre, data URL, chemin complet du module, bornes de hauteur.
+        for ok in [
+            r#"{"type":"image","source":{"vfs":"assets/logo.png"},"alt":"Logo"}"#,
+            r#"{"type":"image","source":{"entity":"invoice","field":"titre"},"alt":"Photo"}"#,
+            r#"{"type":"image","source":{"vfs":"/modules/billing/1.0.0/assets/logo.png"},"alt":"Logo","height":600}"#,
+            r#"{"type":"image","source":{"vfs":"assets/logo.png"},"alt":"Logo","height":24}"#,
+        ] {
+            assert!(
+                racine(ok)
+                    .check(&CustomRegistry::default(), CheckProfile::Compiled)
+                    .is_ok(),
+                "{ok}"
+            );
+        }
+        // Les six refus, nommément.
+        assert_refused(
+            &racine(r#"{"type":"image","source":{},"alt":"Logo"}"#),
+            "image_source_missing",
+        );
+        assert_refused(
+            &racine(
+                r#"{"type":"image","source":{"vfs":"a.png","entity":"invoice","field":"titre"},"alt":"L"}"#,
+            ),
+            "image_source_ambiguous",
+        );
+        assert_refused(
+            &racine(r#"{"type":"image","source":{"vfs":"a.png"},"alt":""}"#),
+            "image_alt_missing",
+        );
+        for h in [23, 601] {
+            let b =
+                format!(r#"{{"type":"image","source":{{"vfs":"a.png"}},"alt":"L","height":{h}}}"#);
+            assert_refused(&racine(&b), "image_height_out_of_range");
+        }
+        assert_refused(
+            &racine(r#"{"type":"image","source":{"vfs":"../../secret.png"},"alt":"L"}"#),
+            "image_vfs_outside_module",
+        );
+        assert_refused(
+            &racine(r#"{"type":"image","source":{"vfs":"https://evil.example/x.png"},"alt":"L"}"#),
+            "image_remote_refused",
+        );
+        assert_refused(
+            &racine(r#"{"type":"image","source":{"vfs":"//evil.example/x.png"},"alt":"L"}"#),
+            "image_remote_refused",
+        );
+        // Un chemin d'un AUTRE module est refusé, comme pour `html`.
+        assert_refused(
+            &racine(r#"{"type":"image","source":{"vfs":"/modules/autre/1.0.0/a.png"},"alt":"L"}"#),
+            "image_vfs_outside_module",
+        );
+        // Placement : pas dans un header.
+        let mut h = racine(r#"{"type":"image","source":{"vfs":"a.png"},"alt":"L"}"#);
+        h.views[0].surface = Surface::Header;
+        assert_refused(&h, "surface_brick_refused");
     }
 
     #[test]
