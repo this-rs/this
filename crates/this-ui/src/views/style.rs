@@ -394,9 +394,16 @@ pub const CSS: &str = r#"
   color: inherit; cursor: pointer; }
 .vw-confirm { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 
-.vw-banner { display: flex; gap: 8px; align-items: flex-start; margin: 0; padding: 10px 12px;
-  border-radius: 10px; border: 1px solid var(--vw-line, rgba(0,0,0,.12));
+.vw-banner { display: flex; flex-wrap: wrap; gap: 8px; align-items: flex-start; margin: 0;
+  padding: 10px 12px; border-radius: 10px; border: 1px solid var(--vw-line, rgba(0,0,0,.12));
   color: var(--vw-ink); }
+/* Le texte d'un avis cède la place, son bouton jamais. `.vw-btn` porte `min-width: 44px`,
+   qui REMPLACE le `min-width: auto` d'un enfant flex : sans la règle du bouton, un avis long
+   le comprimait à 44 px et son libellé sortait du cadre (mesuré à 390 px : « Continuer »
+   dépassait de 19 px, « Configurer » de 44 px). Le texte se replie sur une base de 14em :
+   quand elle ne tient plus à côté du bouton (320 px), le bouton passe dessous, à droite. */
+.vw-banner > span { flex: 1 1 14em; min-width: 0; overflow-wrap: anywhere; white-space: pre-line; }
+.vw-banner > .vw-btn { flex: 0 0 auto; margin-left: auto; white-space: nowrap; }
 /* Les tons se pilotent par variables : une couleur claire codée en dur donnait un pavé
    blanc au texte pâle sur un thème sombre (mesuré sur l'appareil : « 28 messages ·
    ~2718 jetons » illisible). Les valeurs de repli restent celles d'un thème clair. */
@@ -697,6 +704,31 @@ mod tests {
             rule_of(CSS, ".vw-icon-btn")
                 .unwrap_or_default()
                 .contains("min-width: 44px")
+        );
+    }
+
+    /// Le bouton d'un avis garde la largeur de son libellé : c'est le texte qui se replie.
+    #[test]
+    fn le_bouton_d_un_avis_ne_se_comprime_pas_sous_son_libelle() {
+        let bouton = rule_of(CSS, ".vw-banner > .vw-btn").unwrap_or_default();
+        for attendu in ["flex: 0 0 auto", "white-space: nowrap"] {
+            assert!(
+                bouton.contains(attendu),
+                "bouton d'avis sans `{attendu}`: {bouton}"
+            );
+        }
+        let texte = rule_of(CSS, ".vw-banner > span").unwrap_or_default();
+        for attendu in ["min-width: 0", "overflow-wrap: anywhere"] {
+            assert!(
+                texte.contains(attendu),
+                "texte d'avis sans `{attendu}`: {texte}"
+            );
+        }
+        assert!(
+            rule_of(CSS, ".vw-banner")
+                .unwrap_or_default()
+                .contains("flex-wrap: wrap"),
+            "à 320 px le bouton doit pouvoir passer sous le texte"
         );
     }
 
