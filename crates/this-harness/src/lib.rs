@@ -58,6 +58,7 @@ mod event;
 mod mcp;
 mod ports;
 mod recall;
+pub mod routing;
 mod search;
 mod session;
 mod wire;
