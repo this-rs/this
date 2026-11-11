@@ -1,0 +1,18 @@
+[package]
+name = "this-module-note"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "Module this : le domaine de connaissance de Project Orchestrator (note, rfc), CRUD générique piloté par le descripteur. Second domaine, pour prouver que plan-store se généralise."
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+this-module-sdk = { path = "../this-module-sdk" }
+serde_json = "1.0"
+
+[dev-dependencies]
+this-descriptor = { path = "../this-descriptor" }
+plan-store = { path = "../plan-store" }
+serde_json = "1.0"
