@@ -770,6 +770,9 @@ pub struct Harness {
     clock: Rc<dyn Clock>,
     /// Le contexte éphémère de chaque tour : aucun par défaut.
     turn_context: Option<Rc<dyn TurnContext>>,
+    /// Le routeur du mode Auto : aucun par défaut, et alors rien ne change
+    /// (voir [`Harness::with_router`]).
+    router: Option<Rc<crate::routing::TurnRouter>>,
     /// Les autorisations d'outils. `None` : le harnais ne fait RIEN respecter
     /// (voir [`Harness::with_grants`]).
     grants: Option<this_agent::substrate::Grants>,
@@ -797,6 +800,7 @@ impl Harness {
             policy: Rc::new(DefaultPolicy),
             clock: Rc::new(SystemClock),
             turn_context: None,
+            router: None,
             grants: None,
             compactor: None,
             recorder: Rc::new(Recorders::new()),
@@ -985,6 +989,27 @@ impl Harness {
         self
     }
 
+    /// Branche le routeur du **mode Auto** (voir [`crate::routing`]).
+    ///
+    /// À chaque message tenu qui ouvre un objectif, le routeur dit sur quelle
+    /// paire (fournisseur, modèle) il part ; tous les tours de cet objectif
+    /// portent cette paire ([`Request::model`], [`Request::provider`]) et un
+    /// [`Event::Routed`] dit laquelle et pourquoi. La décision se prend par
+    /// message, pas par appel au modèle : un objectif ne change pas de modèle au
+    /// milieu de ses outils.
+    ///
+    /// Sans routeur (le défaut), rien de tout cela n'existe : la requête ne
+    /// porte aucune paire, aucun événement de plus ne sort, et le transport
+    /// choisit son modèle comme il l'a toujours fait.
+    ///
+    /// L'hôte garde une poignée sur le routeur pour changer le mode en cours de
+    /// conversation ([`crate::routing::TurnRouter::reroute`]) : le changement
+    /// vaut dès le message suivant.
+    pub fn with_router(mut self, router: Rc<crate::routing::TurnRouter>) -> Self {
+        self.router = Some(router);
+        self
+    }
+
     /// La poignée de commande : c'est tout ce que l'interface doit garder.
     pub fn handle(&self) -> Handle {
         Handle {
@@ -1126,6 +1151,9 @@ impl Harness {
             }
 
             let limits = self.with(|s| s.limits.clone());
+            // Mode Auto : la paire de cet objectif, décidée une fois, sur le message
+            // qui l'ouvre. Sans routeur, `None` : la requête ne porte rien.
+            let route = self.route(&first, toolbox.as_ref(), &limits).await;
             // L'identité du run, stable pour toutes ses étapes.
             let run_id = self.with(|s| {
                 s.run_seq += 1;
@@ -1202,7 +1230,10 @@ impl Harness {
                 // Le contexte du tour est recalculé ici, à chaque tour : il
                 // dépend de la conversation telle qu'elle est maintenant.
                 let context = self.turn_context().await;
-                let request = self.request(toolbox.as_ref(), context).await;
+                let request = self
+                    .request(toolbox.as_ref(), context)
+                    .await
+                    .with_route(route.clone());
                 // Un fil que le moteur refuserait (id vide, appel en double,
                 // réponse orpheline) s'arrête ICI, nommé et typé, au lieu de
                 // partir chez le moteur et de revenir en 400 opaque. La
@@ -1537,6 +1568,14 @@ impl Harness {
                 }
             }
             verdict = Some(verdict_of(&run.borrow(), &run.borrow().inconnues));
+            // Mode Auto : la fin de l'objectif est rendue à l'apprentissage, pour la
+            // décision qui l'a servi. L'emprunt du run est relâché avant l'attente.
+            if let Some(router) = &self.router {
+                let ending = run.borrow().stop.clone();
+                if let Some(ending) = ending {
+                    router.settle(&ending, code.as_deref()).await;
+                }
+            }
             // Le run qui a posé `stop` est retenu (déplacé, jamais cloné) pour l'annonce
             // finale : `run` et `run_id` ne survivent pas à l'objectif.
             if run.borrow().stop.is_some() {
@@ -1684,6 +1723,52 @@ impl Harness {
     /// cours de run, comme pour le routage de `Toolboxes`).
     fn gate(&self, toolbox: &dyn Toolbox, tool: &str) -> Option<String> {
         gate_decision(self.grants.as_ref(), &toolbox.declarations(), tool).err()
+    }
+
+    /// La paire sur laquelle l'objectif ouvert par `first` part, quand un routeur
+    /// est branché — et l'événement qui le dit. `None` sans routeur.
+    async fn route(
+        &self,
+        first: &Pending,
+        toolbox: &dyn Toolbox,
+        limits: &Limits,
+    ) -> Option<crate::routing::Route> {
+        let router = self.router.clone()?;
+        // Ce que le tour emportera : le fil (borné par le budget de contexte, la
+        // requête ne dépassera pas) et les schémas d'outils. Estimation, pas mesure.
+        let history = crate::context::estimate_tokens(&self.transcript());
+        let history = limits.context_budget.map_or(history, |b| history.min(b));
+        let schemas: usize = toolbox
+            .specs()
+            .iter()
+            .map(|spec| {
+                spec.name.len() + spec.description.len() + spec.parameters.to_string().len()
+            })
+            .sum();
+        let routed = router
+            .route(crate::routing::TurnInput {
+                text: &first.text,
+                has_images: !first.images.is_empty(),
+                hints: crate::routing::ContextHints {
+                    history_tokens: history as u64,
+                    tool_schema_tokens: (schemas / 4) as u64,
+                    budget_remaining_usd: None,
+                },
+            })
+            .await;
+        self.out.emit(Event::Routed {
+            provider: routed.route.provider().to_string(),
+            model: routed.route.model().map(str::to_string),
+            changed: routed.changed,
+            why: routed.why.code().to_string(),
+            reason: routed
+                .decision
+                .as_ref()
+                .map(|d| d.reason.clone())
+                .unwrap_or_default(),
+            mode: router.mode().map(|m| m.as_str().to_string()),
+        });
+        Some(routed.route)
     }
 
     /// Ce que le hook de contexte rend pour ce tour. L'état n'est pas emprunté

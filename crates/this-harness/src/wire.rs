@@ -213,6 +213,9 @@ pub struct Request {
     system: String,
     messages: Vec<Message>,
     tools: Vec<ToolSpec>,
+    /// La paire choisie pour ce tour par le routeur (mode Auto). `None` : aucun
+    /// routeur n'est branché, le transport choisit comme il l'a toujours fait.
+    route: Option<crate::routing::Route>,
 }
 
 impl Request {
@@ -221,7 +224,14 @@ impl Request {
             system,
             messages,
             tools,
+            route: None,
         }
+    }
+
+    /// Pose la paire du tour (voir [`crate::Harness::with_router`]).
+    pub(crate) fn with_route(mut self, route: Option<crate::routing::Route>) -> Self {
+        self.route = route;
+        self
     }
 
     /// Ajoute le contexte éphémère d'un tour : un `Message::system` juste avant
@@ -258,6 +268,21 @@ impl Request {
 
     pub fn tools(&self) -> &[ToolSpec] {
         &self.tools
+    }
+
+    /// Le modèle sur lequel ce tour doit partir, quand un routeur l'a choisi.
+    ///
+    /// `None` : rien n'est imposé, le transport garde son modèle. Jamais la
+    /// sentinelle `auto` — ce n'est pas un nom de modèle, un moteur la rejette —
+    /// et c'est garanti par construction ([`crate::routing::Route`]).
+    pub fn model(&self) -> Option<&str> {
+        self.route.as_ref().and_then(crate::routing::Route::model)
+    }
+
+    /// L'instance de fournisseur sur laquelle ce tour doit partir, quand un
+    /// routeur l'a choisie. `None` : aucun routeur n'est branché.
+    pub fn provider(&self) -> Option<&str> {
+        self.route.as_ref().map(crate::routing::Route::provider)
     }
 
     /// Rien à envoyer : pas même un message utilisateur.
