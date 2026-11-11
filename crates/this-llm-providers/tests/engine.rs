@@ -205,9 +205,20 @@ fn bearer(request: &str) -> String {
         .unwrap_or_default()
 }
 
+/// Combien de fois « forgetful » a reçu la question des outils (un seul test s'en sert).
+static FORGETFUL_ASKED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
 fn probe_route(request: &str) -> Option<(&'static str, &'static str, String)> {
     let model = [
-        "absent", "plain", "toolful", "k401", "k429", "s503", "slow-",
+        "absent",
+        "plain",
+        "toolful",
+        "forgetful",
+        "truncated",
+        "k401",
+        "k429",
+        "s503",
+        "slow-",
     ]
     .into_iter()
     .find(|name| request.contains(&format!("\"model\":\"{name}")))?;
@@ -226,10 +237,30 @@ fn probe_route(request: &str) -> Option<(&'static str, &'static str, String)> {
                    "detail": "Function 'f-1234': Not found for account 'ACCT-SECRET-77'"})
             .to_string(),
         ),
+        // Un modèle qui raisonne : coupé par la limite avant d'avoir choisi (finish_reason length).
+        "truncated" if request.contains("\"tools\"") => (
+            "200 OK",
+            "application/json",
+            json!({"choices": [{"message": {"role": "assistant", "content": null},
+                                "finish_reason": "length"}]})
+            .to_string(),
+        ),
+        // Un modèle qui oublie l'outil au premier essai, puis l'appelle.
+        "forgetful" if request.contains("\"tools\"") => {
+            if FORGETFUL_ASKED.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                ok(json!({"role": "assistant", "content": "voici le module"}))
+            } else {
+                ok(json!({"role": "assistant",
+                    "content": null, "tool_calls": [{"id": "c1", "type": "function",
+                    "function": {"name": "lire_module", "arguments": "{\"nom\":\"courses\"}"}}]}))
+            }
+        }
         "toolful" if request.contains("\"tools\"") => ok(json!({"role": "assistant",
             "content": null, "tool_calls": [{"id": "c1", "type": "function",
             "function": {"name": "lire_module", "arguments": "{\"nom\":\"courses\"}"}}]})),
-        "plain" | "toolful" | "slow-" => ok(json!({"role": "assistant", "content": "ok"})),
+        "plain" | "toolful" | "forgetful" | "truncated" | "slow-" => {
+            ok(json!({"role": "assistant", "content": "ok"}))
+        }
         "k401" => (
             "401 Unauthorized",
             "application/json",
@@ -709,6 +740,34 @@ async fn the_tool_question_tells_a_model_that_calls_tools_from_one_that_does_not
             ..
         }
     ));
+}
+
+#[tokio::test]
+async fn a_tool_answer_cut_by_the_limit_is_not_a_model_without_tools() {
+    // Mesuré sur NVIDIA NIM : un modèle qui raisonne, avec peu de jetons, s'arrête en
+    // `length` avant son appel d'outil. Ce n'est pas « sans outils » : c'est « indéterminé ».
+    let client = keyed_client(&start_engine().await, |_| {});
+    match client
+        .probe_with("truncated", &quick().with_tools(true))
+        .await
+    {
+        ProbeVerdict::Answers { tools, .. } => assert_eq!(tools, None),
+        other => panic!("attendu Answers, obtenu {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn a_model_that_forgot_the_tool_once_is_asked_again_before_the_verdict() {
+    let client = keyed_client(&start_engine().await, |_| {});
+    match client
+        .probe_with("forgetful", &quick().with_tools(true))
+        .await
+    {
+        ProbeVerdict::Answers { tools, .. } => {
+            assert_eq!(tools, Some(true), "le second essai appelle l'outil")
+        }
+        other => panic!("attendu Answers, obtenu {other:?}"),
+    }
 }
 
 #[tokio::test]

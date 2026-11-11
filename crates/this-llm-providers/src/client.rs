@@ -17,6 +17,12 @@ use crate::images::{
 use crate::model::{ContextFit, ModelInfo, estimate_tokens, fit, parse_models};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::probe::{MAX_PROBE_CONCURRENCY, ProbeOptions, ProbeVerdict, redact, verdict_of_status};
+
+/// Room the tool question gives a model to think and then call: a reasoning model needs
+/// well over 64 tokens before its call (measured: 130 for `nemotron-3-nano-omni`).
+const PROBE_TOOLS_MAX_TOKENS: u32 = 512;
+/// A model that answered without calling the tool is asked this many times in all.
+const PROBE_TOOLS_ATTEMPTS: u32 = 2;
 use crate::secret::Secret;
 
 /// What the chat template adds around a conversation, estimated once per call.
@@ -640,14 +646,22 @@ impl ProviderClient {
         ProbeVerdict::Answers { ms, tools }
     }
 
-    /// Whether the model calls the tool it is offered; `None` when the second request could
-    /// not settle it (mute, unreachable): the model did answer, so that is not a failure.
+    /// Whether the model calls the tool it is offered. `None` when the question could not be
+    /// settled: the model did answer, so that is not a failure, but it says nothing about
+    /// tools (mute, unreachable, or an answer cut by the limit before the model chose).
+    ///
+    /// Measured on NVIDIA NIM (11/11/2026): a reasoning model spends its first tokens thinking,
+    /// so with `max_tokens` 64 it stops with `finish_reason: length` BEFORE the tool call
+    /// (`nemotron-3-nano-omni`: 64 tokens used, no call; 256 tokens: call). A cut answer is not
+    /// "no tools". And one sample can miss (`diffusiongemma` once answered in plain text), so a
+    /// model that answered WITHOUT calling the tool is asked a second time before the verdict
+    /// is `Some(false)`.
     async fn probe_tools(&self, model: &str, options: &ProbeOptions) -> Option<bool> {
         let body = json!({
             "model": model,
             "messages": [{ "role": "user",
                 "content": "Lis le module « courses » avec ton outil." }],
-            "max_tokens": 64,
+            "max_tokens": PROBE_TOOLS_MAX_TOKENS,
             "tools": [{
                 "type": "function",
                 "function": {
@@ -662,20 +676,35 @@ impl ProviderClient {
             }],
             "tool_choice": "auto",
         });
-        match self.probe_request(&body, options).await {
-            Ok(value) => Some(
-                value
-                    .pointer("/choices/0/message/tool_calls")
-                    .and_then(Value::as_array)
-                    .is_some_and(|calls| !calls.is_empty()),
-            ),
-            // An engine that refuses the tools field (400) says the model has none.
-            Err(ProbeVerdict::Refused {
-                reason: crate::probe::Refusal::Other,
-                ..
-            }) => Some(false),
-            Err(_) => None,
+        for _attempt in 0..PROBE_TOOLS_ATTEMPTS {
+            match self.probe_request(&body, options).await {
+                Ok(value) => {
+                    if value
+                        .pointer("/choices/0/message/tool_calls")
+                        .and_then(Value::as_array)
+                        .is_some_and(|calls| !calls.is_empty())
+                    {
+                        return Some(true);
+                    }
+                    // Cut by the limit: the model had not finished choosing. Not an answer.
+                    if value
+                        .pointer("/choices/0/finish_reason")
+                        .and_then(Value::as_str)
+                        == Some("length")
+                    {
+                        return None;
+                    }
+                    // Answered in words, no call: ask once more before concluding.
+                }
+                // An engine that refuses the tools field (400) says the model has none.
+                Err(ProbeVerdict::Refused {
+                    reason: crate::probe::Refusal::Other,
+                    ..
+                }) => return Some(false),
+                Err(_) => return None,
+            }
         }
+        Some(false)
     }
 
     /// One non-streamed request under the probe delay: the JSON on a 200, the verdict otherwise.
