@@ -118,6 +118,8 @@ pub mod class {
     pub const QUEUE_INDEX: &str = "vw-queue-index";
     pub const CODE: &str = "vw-code";
     pub const RESULT: &str = "vw-result";
+    pub const IMAGE: &str = "vw-image";
+    pub const IMAGE_UNAVAILABLE: &str = "vw-image-unavailable";
     pub const CAPABILITY: &str = "vw-capability";
     pub const CAPABILITY_ACTIONS: &str = "vw-capability-actions";
     pub const PROGRAM: &str = "vw-program";
@@ -250,6 +252,8 @@ pub const ALL: &[&str] = &[
     class::QUEUE_INDEX,
     class::CODE,
     class::RESULT,
+    class::IMAGE,
+    class::IMAGE_UNAVAILABLE,
     class::CAPABILITY,
     class::CAPABILITY_ACTIONS,
     class::PROGRAM,
@@ -531,6 +535,10 @@ pub const CSS: &str = r#"
   background: var(--vw-code-bg, rgba(0,0,0,.05)); font: 13px/1.5 ui-monospace, monospace; }
 .vw-result { margin: 0; padding: 12px; border-radius: 10px; overflow-x: auto; white-space: pre-wrap;
   border: 1px solid var(--vw-line, rgba(0,0,0,.10)); font: 13px/1.5 ui-monospace, monospace; }
+.vw-image { display: block; max-width: 100%; border-radius: 10px; }
+.vw-image-unavailable { display: flex; align-items: center; justify-content: center; min-height: 64px;
+  padding: 12px; border-radius: 10px; color: var(--vw-muted, rgba(0,0,0,.55));
+  border: 1px dashed var(--vw-line, rgba(0,0,0,.16)); }
 .vw-capability { display: flex; flex-direction: column; gap: 8px; padding: 12px; border-radius: 12px;
   border: 1px solid var(--vw-line, rgba(0,0,0,.12)); background: var(--vw-card, #fff); }
 .vw-capability-actions { display: flex; gap: 8px; flex-wrap: wrap; }

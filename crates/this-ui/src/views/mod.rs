@@ -42,6 +42,7 @@
 pub mod chart;
 pub mod data;
 pub mod html;
+pub mod image;
 #[cfg(test)]
 mod integration;
 pub mod intent;
@@ -54,6 +55,7 @@ pub mod text;
 
 pub use data::{Feed, Feeds, Reading, Rows, Snapshot};
 pub use html::{HtmlHost, intent_from_message, refusal_line};
+pub use image::{ImageHost, clamped_height, content_type_of, object_fit, src_of_value};
 pub use intent::{FieldValue, Intent, LinkOp, SecretValue, Values};
 pub use placement::{Frame, Hidden, Portfolio, SURFACES};
 pub use render::{
