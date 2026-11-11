@@ -2951,8 +2951,12 @@ fn tool_item(tool: StepEntry) -> AnyView {
                 }
             });
             let detail = (!resume.is_empty()).then(|| {
-                let short: String = resume.chars().take(400).collect();
-                view! { <span class=class::STEP_RESUME>{short}</span> }
+                // Un résultat JSON ne se lit pas : il se résume (« 3 champs : compile, enabled,
+                // module — … »), et le brut reste en infobulle. Mesuré dans l'Atelier :
+                // `{"compile":{"vfs":"indisponible…` en clair sous un outil.
+                let short = resume_lisible(&resume);
+                let brut: String = resume.chars().take(600).collect();
+                view! { <span class=class::STEP_RESUME title=brut>{short}</span> }
             });
             view! {
                 <li class=class::STEP data-etat=kind.slug()>
@@ -2967,6 +2971,46 @@ fn tool_item(tool: StepEntry) -> AnyView {
         }
         _ => ().into_any(),
     }
+}
+
+/// Le résumé lisible d'un résultat d'outil : un texte reste un texte (400 caractères au plus) ;
+/// un objet JSON devient « N champs : a, b, c — premier texte » ; un tableau, « N éléments ».
+pub fn resume_lisible(resume: &str) -> String {
+    let brut = resume.trim();
+    let json = brut
+        .starts_with(['{', '['])
+        .then(|| serde_json::from_str::<serde_json::Value>(brut).ok())
+        .flatten();
+    let texte = match json {
+        Some(serde_json::Value::Object(map)) => {
+            let cles: Vec<&str> = map.keys().map(String::as_str).take(6).collect();
+            let apercu = map
+                .values()
+                .find_map(|v| v.as_str().filter(|t| !t.trim().is_empty()))
+                .map(|t| t.trim().chars().take(80).collect::<String>());
+            let mut ligne = format!(
+                "{} champ{} : {}{}",
+                map.len(),
+                if map.len() > 1 { "s" } else { "" },
+                cles.join(", "),
+                if map.len() > cles.len() { ", …" } else { "" }
+            );
+            if let Some(apercu) = apercu {
+                ligne.push_str(" — ");
+                ligne.push_str(&apercu);
+            }
+            ligne
+        }
+        Some(serde_json::Value::Array(items)) => {
+            format!(
+                "{} élément{}",
+                items.len(),
+                if items.len() > 1 { "s" } else { "" }
+            )
+        }
+        _ => brut.to_string(),
+    };
+    texte.chars().take(400).collect()
 }
 
 /// Un groupe d'outils : un CADRE, replié sur une ligne qui dit combien, lesquels, comment
@@ -3582,6 +3626,24 @@ mod tests {
     //! themselves need a browser; these do not.
 
     use super::*;
+
+    #[test]
+    fn un_resultat_json_se_resume_et_un_texte_reste_un_texte() {
+        assert_eq!(
+            super::resume_lisible(
+                r#"{"compile":{"vfs":"indisponible"},"enabled":true,"module":"courses"}"#
+            ),
+            "3 champs : compile, enabled, module — courses"
+        );
+        assert_eq!(super::resume_lisible("[1, 2, 3]"), "3 éléments");
+        assert_eq!(super::resume_lisible("[]"), "0 élément");
+        assert_eq!(
+            super::resume_lisible("7 module(s) installés — atelier 0.19.0"),
+            "7 module(s) installés — atelier 0.19.0"
+        );
+        assert_eq!(super::resume_lisible("{pas du json"), "{pas du json");
+        assert_eq!(super::resume_lisible(&"x".repeat(500)).chars().count(), 400);
+    }
     use serde_json::json;
     use this_descriptor::views::HostSurface;
 
