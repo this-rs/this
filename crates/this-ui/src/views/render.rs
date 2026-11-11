@@ -3196,34 +3196,49 @@ fn chart(
     let label = label.map(str::to_owned);
     (move || {
         let snapshot = ctx.data.get();
-        match data::read(&snapshot, &entity, filter.as_ref(), &[], 0, None) {
-            Reading::Rows(rows) => {
-                let values: Vec<f64> = rows
-                    .rows
-                    .iter()
-                    .filter_map(|row| match data::value_of(row, &field) {
-                        Some(Value::Number(n)) => n.as_f64(),
-                        Some(Value::String(s)) => s.parse::<f64>().ok(),
-                        _ => None,
-                    })
-                    .collect();
-                if values.is_empty() {
-                    return empty_tile(ctx, &entity, text::CHART_NO_NUMBER);
-                }
-                let drawn = chart::draw(&kind, &values, height, label.as_deref());
-                let title = label
-                    .clone()
-                    .map(|t| view! { <p class=class::CHART_TITLE>{t}</p> });
-                view! {
-                    <div class=class::CHART>
-                        {title}
-                        <div class=class::CHART_SCROLL inner_html=drawn.svg></div>
-                    </div>
-                }
-                .into_any()
+        let reading = data::read(&snapshot, &entity, filter.as_ref(), &[], 0, None);
+        let values: Vec<f64> = match &reading {
+            Reading::Rows(rows) => rows
+                .rows
+                .iter()
+                .filter_map(|row| match data::value_of(row, &field) {
+                    Some(Value::Number(n)) => n.as_f64(),
+                    Some(Value::String(s)) => s.parse::<f64>().ok(),
+                    _ => None,
+                })
+                .collect(),
+            _ => Vec::new(),
+        };
+        // The container always says how many points it drew and which field it plots, even
+        // when that is none: a measuring host (`apercu`) must see an empty chart.
+        let points = values.len().to_string();
+        if values.is_empty() {
+            let why = match reading {
+                Reading::Rows(_) => text::CHART_NO_NUMBER,
+                _ => text::CHART_NO_ROW,
+            };
+            let body = match reading {
+                Reading::Rows(_) | Reading::Empty => empty_tile(ctx, &entity, why),
+                other => tile_for(ctx, &entity, &other, why),
+            };
+            return view! {
+                <div class=class::CHART data-chart-points=points data-chart-field=field.clone()>
+                    {body}
+                </div>
             }
-            other => tile_for(ctx, &entity, &other, text::CHART_NO_ROW),
+            .into_any();
         }
+        let drawn = chart::draw(&kind, &values, height, label.as_deref());
+        let title = label
+            .clone()
+            .map(|t| view! { <p class=class::CHART_TITLE>{t}</p> });
+        view! {
+            <div class=class::CHART data-chart-points=points data-chart-field=field.clone()>
+                {title}
+                <div class=class::CHART_SCROLL inner_html=drawn.svg></div>
+            </div>
+        }
+        .into_any()
     })
     .into_any()
 }
