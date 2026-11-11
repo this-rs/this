@@ -4320,15 +4320,13 @@ mod tests {
     fn html_data_refusals_are_named() {
         assert_refused(&html_data(vec![grant("ghost")]), "html_data_entity_unknown");
         // Un champ non déclaré ; un champ de base autre que `id` a son propre refus.
-        for champ in ["nope"] {
-            assert_refused(
-                &html_data(vec![DataGrant {
-                    fields: Some(vec![champ.into()]),
-                    ..grant("invoice")
-                }]),
-                "html_data_field_unknown",
-            );
-        }
+        assert_refused(
+            &html_data(vec![DataGrant {
+                fields: Some(vec!["nope".into()]),
+                ..grant("invoice")
+            }]),
+            "html_data_field_unknown",
+        );
         assert_refused(
             &html_data(vec![DataGrant {
                 fields: Some(vec!["created_at".into()]),
