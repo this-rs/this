@@ -41,7 +41,11 @@ pub struct Cancel(Rc<CancelState>);
 #[derive(Default)]
 struct CancelState {
     flag: Cell<bool>,
-    wakers: RefCell<Vec<std::task::Waker>>,
+    /// Un réveil par future [`Cancelled`] vivante, rangé sous son numéro : un
+    /// exécuteur qui fabrique un réveil neuf à chaque sondage ne fait pas grossir
+    /// la liste, il remplace le sien. Borné par le nombre d'attentes en cours.
+    wakers: RefCell<Vec<(u64, std::task::Waker)>>,
+    next_slot: Cell<u64>,
 }
 
 impl Cancel {
@@ -52,7 +56,7 @@ impl Cancel {
     pub fn cancel(&self) {
         self.0.flag.set(true);
         let wakers = std::mem::take(&mut *self.0.wakers.borrow_mut());
-        for waker in wakers {
+        for (_, waker) in wakers {
             waker.wake();
         }
     }
@@ -67,18 +71,49 @@ impl Cancel {
     }
     /// Une future qui rend dès que l'annulation est posée — immédiatement si elle
     /// l'est déjà. Elle n'a besoin d'aucun minuteur : `cancel` la réveille.
-    pub fn cancelled(&self) -> impl std::future::Future<Output = ()> + 'static {
-        let state = self.0.clone();
-        std::future::poll_fn(move |cx| {
-            if state.flag.get() {
-                return std::task::Poll::Ready(());
-            }
-            let mut wakers = state.wakers.borrow_mut();
-            if !wakers.iter().any(|w| w.will_wake(cx.waker())) {
-                wakers.push(cx.waker().clone());
-            }
-            std::task::Poll::Pending
-        })
+    pub fn cancelled(&self) -> Cancelled {
+        let slot = self.0.next_slot.get();
+        self.0.next_slot.set(slot.wrapping_add(1));
+        Cancelled {
+            state: self.0.clone(),
+            slot,
+        }
+    }
+}
+
+/// L'attente d'une annulation (voir [`Cancel::cancelled`]). Elle tient un seul
+/// réveil, le dernier avec lequel elle a été sondée, et le retire quand elle
+/// est lâchée.
+pub struct Cancelled {
+    state: Rc<CancelState>,
+    slot: u64,
+}
+
+impl std::future::Future for Cancelled {
+    type Output = ();
+
+    fn poll(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<()> {
+        if self.state.flag.get() {
+            return std::task::Poll::Ready(());
+        }
+        let mut wakers = self.state.wakers.borrow_mut();
+        match wakers.iter_mut().find(|(slot, _)| *slot == self.slot) {
+            Some((_, waker)) => waker.clone_from(cx.waker()),
+            None => wakers.push((self.slot, cx.waker().clone())),
+        }
+        std::task::Poll::Pending
+    }
+}
+
+impl Drop for Cancelled {
+    fn drop(&mut self) {
+        self.state
+            .wakers
+            .borrow_mut()
+            .retain(|(slot, _)| *slot != self.slot);
     }
 }
 
@@ -121,8 +156,8 @@ pub trait Transport {
     /// pas sert son modèle à lui.
     ///
     /// Tant que c'est faux, la décision du routeur est **consultative** :
-    /// [`crate::Event::Routed`] porte `advisory: true`, et la fin du tour n'est pas
-    /// rendue à l'apprentissage comme servie par la paire décidée (un bras ne
+    /// [`crate::Event::Routed`] porte `advisory: true`, l'état servi du routeur ne
+    /// bouge pas, et la fin du tour n'est pas rendue à l'apprentissage (un bras ne
     /// se nourrit pas d'un tour qu'il n'a pas servi).
     fn honors_route(&self) -> bool {
         false
@@ -497,5 +532,85 @@ mod tests_vus {
                 .failed
                 .is_some()
         );
+    }
+}
+
+#[cfg(test)]
+mod tests_cancel {
+    //! Relecture de #254, constat 9 : les réveils ne s'accumulent pas.
+    use super::*;
+    use std::future::Future;
+    use std::pin::pin;
+    use std::sync::Arc;
+    use std::task::{Context, Poll, Wake, Waker};
+
+    struct Flag(std::sync::atomic::AtomicBool);
+
+    impl Wake for Flag {
+        fn wake(self: Arc<Self>) {
+            self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    /// Un réveil neuf à chaque appel, comme un exécuteur qui ne les réutilise pas.
+    fn fresh() -> (Arc<Flag>, Waker) {
+        let flag = Arc::new(Flag(std::sync::atomic::AtomicBool::new(false)));
+        (flag.clone(), Waker::from(flag))
+    }
+
+    #[test]
+    fn une_attente_ne_garde_qu_un_reveil_quel_que_soit_le_nombre_de_sondages() {
+        let cancel = Cancel::new();
+        let mut waiting = pin!(cancel.cancelled());
+        let mut last = None;
+        for _ in 0..1_000 {
+            let (flag, waker) = fresh();
+            assert!(
+                waiting
+                    .as_mut()
+                    .poll(&mut Context::from_waker(&waker))
+                    .is_pending()
+            );
+            last = Some(flag);
+        }
+        assert_eq!(
+            cancel.0.wakers.borrow().len(),
+            1,
+            "un réveil par attente vivante"
+        );
+        // Deux attentes : deux réveils, pas plus.
+        let mut other = pin!(cancel.cancelled());
+        let (other_flag, waker) = fresh();
+        assert!(
+            other
+                .as_mut()
+                .poll(&mut Context::from_waker(&waker))
+                .is_pending()
+        );
+        assert_eq!(cancel.0.wakers.borrow().len(), 2);
+        // L'annulation réveille le DERNIER réveil de chaque attente.
+        cancel.cancel();
+        assert!(last.unwrap().0.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(other_flag.0.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(matches!(
+            waiting.as_mut().poll(&mut Context::from_waker(&fresh().1)),
+            Poll::Ready(())
+        ));
+    }
+
+    #[test]
+    fn une_attente_lachee_retire_son_reveil() {
+        let cancel = Cancel::new();
+        {
+            let mut waiting = pin!(cancel.cancelled());
+            assert!(
+                waiting
+                    .as_mut()
+                    .poll(&mut Context::from_waker(&fresh().1))
+                    .is_pending()
+            );
+            assert_eq!(cancel.0.wakers.borrow().len(), 1);
+        }
+        assert!(cancel.0.wakers.borrow().is_empty());
     }
 }

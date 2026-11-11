@@ -1066,8 +1066,8 @@ impl Harness {
     ///
     /// **Un transport qui ne lit pas la paire ne la sert pas.** Tant qu'il ne
     /// déclare pas [`Transport::honors_route`], la décision est consultative :
-    /// l'événement porte `advisory: true`, et la fin du tour est rendue à
-    /// l'apprentissage sans paire servie. Les appels au routeur sont bornés
+    /// l'événement porte `advisory: true`, rien n'est ouvert chez le routeur et la
+    /// fin du tour n'est pas rendue à l'apprentissage. Les appels au routeur sont bornés
     /// ([`ROUTER_TIMEOUT_MS`]) et coupés par l'annulation. La décision se prend par
     /// message, pas par appel au modèle : un objectif ne change pas de modèle au
     /// milieu de ses outils.
@@ -1407,14 +1407,18 @@ impl Harness {
                     );
                     let issue = race(transport.stream(&request, &cancel, delta), guard).await;
                     // Le moteur a répondu, même par un refus (`Http`, `Provider`) ou une
-                    // réponse coupée : la paire a servi, et sa faute éventuelle se compte.
-                    // Une connexion jamais établie (`Unreachable`) ou une annulation
-                    // (`Aborted`) ne la fait pas servir.
+                    // réponse coupée ou illisible : la paire a servi, et sa faute éventuelle
+                    // se compte. Rien n'est venu — connexion jamais établie (`Unreachable`),
+                    // délai d'ouverture (`Timeout` : le délai de SILENCE est `Watch::Silent`,
+                    // qui arrive forcément après un premier morceau, donc `answered` est
+                    // déjà vrai), annulation (`Aborted`) — : elle n'a pas servi. Un morceau
+                    // reçu avant la panne compte déjà, par `delta`.
                     if match &issue {
                         Ok(Ok(_)) => true,
-                        Ok(Err(failure)) => {
-                            !matches!(failure.code, Code::Unreachable | Code::Aborted)
-                        }
+                        Ok(Err(failure)) => !matches!(
+                            failure.code,
+                            Code::Unreachable | Code::Aborted | Code::Timeout
+                        ),
                         Err(_) => false,
                     } {
                         answered.set(true);
@@ -1901,6 +1905,14 @@ impl Harness {
         if let Some(decision) = &routed.decision {
             let record = router.record(decision);
             let _ = race(record, cut(clock.as_ref(), ROUTER_TIMEOUT_MS, Some(cancel))).await;
+        }
+        // Une décision abandonnée (son `settle` a été coupé) est réparée APRÈS la
+        // décision de ce message, dans sa propre borne : au pire 2 s de plus sur ce
+        // message, jamais un routage coupé. Une par message ; un apprentissage qui pend
+        // durablement est lâché après `REPAIR_ATTEMPTS` tentatives.
+        if router.needs_repair() {
+            let repair = router.repair();
+            let _ = race(repair, cut(clock.as_ref(), ROUTER_TIMEOUT_MS, Some(cancel))).await;
         }
         Some(routed.route)
     }

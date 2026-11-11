@@ -1613,8 +1613,11 @@ fn un_tour_abandonne_est_declare_au_tour_suivant() {
     let router = Rc::new(TurnRouter::new(world.spec("a", "m1", 1).auto()));
     let first = run(routed_and_recorded(&router, text("hello")));
     assert!(first.changed);
-    // Le tour est abandonné ici : aucun `settle`. Le tour suivant le dit.
+    // Le tour est abandonné ici : aucun `settle`. Le tour suivant le range, et la
+    // réparation (que le harnais appelle après la décision) le dit.
     let _ = run(router.route(text("hello")));
+    assert!(router.needs_repair());
+    assert!(!run(router.repair()), "plus rien à réparer");
     let settled = world.learning.settled();
     assert_eq!(settled.len(), 1, "{settled:?}");
     assert_eq!(settled[0].decision_id, world.learning.decisions()[0].id);
@@ -1671,6 +1674,10 @@ fn settle_sur_echec_et_sur_annulation() {
     let settled = world.learning.settled();
     assert_eq!(settled.len(), 1);
     assert_eq!(settled[0].stop, Stop::Cancelled);
+    assert_eq!(
+        settled[0].served, None,
+        "annulé avant toute réponse : rien n'a servi"
+    );
 }
 
 /// Constat 5c : sur `exploration_never_moves`, la décision enregistrée dit
@@ -2056,8 +2063,10 @@ fn superseded_en_consultatif_n_a_pas_de_paire_dans_used() {
     assert_eq!(routed.decision.as_ref().unwrap().used, None);
 }
 
-/// A3 : le `settle(Interrupted)` qui répare un tour abandonné peut être coupé à
-/// son tour. La décision reste ouverte, et elle est redite au message suivant.
+/// A3 (relecture de #252) puis constat 1 (relecture de #254) : le
+/// `settle(Interrupted)` qui répare un tour abandonné peut être coupé à son tour.
+/// La décision reste abandonnée et la réparation est retentée au message
+/// suivant — SANS coûter sa décision à ce message.
 #[test]
 fn un_settle_de_reparation_coupe_n_efface_pas_la_decision() {
     let world = World::new(three_providers());
@@ -2077,9 +2086,15 @@ fn un_settle_de_reparation_coupe_n_efface_pas_la_decision() {
     }
     let first = world.learning.decisions()[0].id;
     let settled = world.learning.settled();
-    assert_eq!(settled[0].decision_id, first, "{settled:?}");
-    assert_eq!(settled[0].stop, Stop::Interrupted);
-    // Le 2e message a attendu la réparation jusqu'à sa borne : il est parti en repli.
+    // Réparée au 3e message (la 1re réparation, au 2e, a été coupée) : jamais perdue.
+    let repaired = settled
+        .iter()
+        .find(|s| s.decision_id == first)
+        .expect("la décision abandonnée est dite");
+    assert_eq!(repaired.stop, Stop::Interrupted);
+    assert_eq!(repaired.served, None);
+    assert_eq!(settled.len(), 3, "{settled:?}");
+    // Aucun message n'a payé la réparation de sa décision.
     let whys: Vec<String> = routed_events(&journal)
         .into_iter()
         .map(|e| match e {
@@ -2087,17 +2102,25 @@ fn un_settle_de_reparation_coupe_n_efface_pas_la_decision() {
             _ => unreachable!(),
         })
         .collect();
-    assert_eq!(whys[1], "timed_out", "{whys:?}");
+    assert!(whys.iter().all(|w| w != "timed_out"), "{whys:?}");
 }
 
 /// Une horloge figée dont `sleep` rend tout de suite : l'heure n'avance jamais.
-struct Frozen;
+/// Elle compte ses `sleep` et PANIQUE au-delà d'une borne : une veille qui
+/// tourne sans céder la main échoue ainsi proprement, au lieu de bloquer le test.
+struct Frozen(std::cell::Cell<u32>);
 
 impl this_harness::Clock for Frozen {
     fn now_ms(&self) -> f64 {
         0.0
     }
     fn sleep(&self, _ms: u64) -> Option<this_harness::Sleep> {
+        self.0.set(self.0.get() + 1);
+        assert!(
+            self.0.get() < 10_000,
+            "la veille tourne sans céder la main : {} sleeps",
+            self.0.get()
+        );
         Some(Box::pin(async {}))
     }
 }
@@ -2126,7 +2149,11 @@ fn une_horloge_figee_ne_gele_pas_le_routeur() {
     spec.pool = Rc::new(AfterPolls(std::cell::Cell::new(5)));
     let router = Rc::new(TurnRouter::new(spec));
     let transport = script(vec![]);
-    let (harness, journal) = build(transport.clone(), router, Some(Rc::new(Frozen)));
+    let (harness, journal) = build(
+        transport.clone(),
+        router,
+        Some(Rc::new(Frozen(std::cell::Cell::new(0)))),
+    );
     assert_eq!(run(harness.send("hello")), Running::Ran(Stop::Done));
     let events = routed_events(&journal);
     let Event::Routed { why, .. } = &events[0] else {
@@ -2183,4 +2210,215 @@ fn un_moteur_jamais_joint_n_a_servi_aucune_paire() {
     );
     assert_eq!(settled[0].code.as_deref(), Some("unreachable"));
     assert_eq!(settled[0].served, None);
+}
+
+// ── 11. Relecture de #254 ───────────────────────────────────────────────────
+
+/// Constat 1 : un apprentissage dont `settle` pend DURABLEMENT n'éteint pas
+/// Auto. La réparation a sa propre borne, après la décision : chaque message
+/// est encore décidé. Avant le correctif, dès le 2e message `route` attendait
+/// la réparation dans la borne de la décision, tombait en `timed_out`, et plus
+/// aucun message n'était décidé.
+#[test]
+fn un_apprentissage_qui_pend_toujours_n_eteint_pas_auto() {
+    let world = World::new(three_providers());
+    world.prefer(("b", "m2"), &[("a", "m1"), ("c", "m3")]);
+    let learning = Rc::new(StuckLearning::new(world.learning.clone(), u32::MAX, false));
+    let router = Rc::new(TurnRouter::new(
+        world.spec("a", "m1", 1).auto().learning(learning),
+    ));
+    let transport = script(vec![]);
+    let (harness, journal) = build(
+        transport.clone(),
+        router.clone(),
+        Some(Rc::new(Fast(std::cell::Cell::new(0.0)))),
+    );
+    for message in ["hello", "encore", "et encore"] {
+        assert_eq!(run(harness.send(message)), Running::Ran(Stop::Done));
+    }
+    let whys: Vec<String> = routed_events(&journal)
+        .into_iter()
+        .map(|e| match e {
+            Event::Routed { why, .. } => why,
+            _ => unreachable!(),
+        })
+        .collect();
+    assert_eq!(whys.len(), 3);
+    assert!(
+        whys.iter().all(|w| w != "timed_out"),
+        "chaque message est décidé : {whys:?}"
+    );
+    assert_eq!(whys[2], "kept", "{whys:?}");
+    assert_eq!(router.in_force(), Pick::new("b", "m2"));
+    assert_eq!(
+        world.learning.decisions().len(),
+        3,
+        "trois décisions enregistrées"
+    );
+}
+
+/// Constat 1 : une décision abandonnée est lâchée après `REPAIR_ATTEMPTS`
+/// réparations coupées — l'apprentissage en panne ne retient rien pour toujours.
+#[test]
+fn une_decision_abandonnee_est_lachee_apres_n_reparations() {
+    use futures::FutureExt;
+    use this_harness::routing::REPAIR_ATTEMPTS;
+    let world = World::new(three_providers());
+    world.prefer(("b", "m2"), &[("a", "m1"), ("c", "m3")]);
+    let learning = Rc::new(StuckLearning::new(world.learning.clone(), u32::MAX, false));
+    let router = TurnRouter::new(world.spec("a", "m1", 1).auto().learning(learning));
+    assert!(run(router.route(text("hello"))).changed);
+    assert!(
+        !router.needs_repair(),
+        "la décision est ouverte, pas abandonnée"
+    );
+    // Son `settle` ne vient jamais ; le message suivant l'abandonne.
+    let _ = run(router.route(text("encore")));
+    assert!(router.needs_repair());
+    for attempt in 1..=REPAIR_ATTEMPTS {
+        // Une réparation sondée une fois puis lâchée : coupée par sa borne.
+        assert_eq!(
+            router.repair().now_or_never(),
+            None,
+            "tentative {attempt} pend"
+        );
+        assert!(router.needs_repair());
+    }
+    // La tentative de trop : la décision est lâchée sans appel à l'apprentissage.
+    assert_eq!(router.repair().now_or_never(), Some(false));
+    assert!(!router.needs_repair());
+    assert!(world.learning.settled().is_empty());
+}
+
+/// Constat 4 : « décidé » n'est pas « servi ». Le moteur n'a jamais été joint :
+/// la paire décidée est oubliée, l'état servi revient à ce qu'il était — et
+/// l'hystérésis du message suivant ne la favorise pas.
+#[test]
+fn une_paire_jamais_atteinte_est_oubliee() {
+    let world = World::new(three_providers());
+    world.prefer(("b", "m2"), &[("a", "m1"), ("c", "m3")]);
+    let router = Rc::new(TurnRouter::new(world.spec("a", "m1", 1).auto()));
+    let (harness, _) = build(Rc::new(Unreachable), router.clone(), None);
+    run(harness.send("hello"));
+    assert_eq!(
+        router.in_force(),
+        Pick::new("a", "m1"),
+        "b/m2 décidée, jamais atteinte : oubliée"
+    );
+    // Le message suivant repart de a/m1 : `c` devient le préféré, et aucune garde
+    // de fournisseur (il n'y a pas eu de changement) ne l'empêche.
+    world.prefer(("c", "m3"), &[("a", "m1"), ("b", "m2")]);
+    let next = run(router.route(text("pourquoi ça plante ?")));
+    assert_eq!(pair(&next), on("c", "m3"));
+    assert!(!reason(&next).contains(AFTER_PROVIDER_MOVE));
+    let d = next.decision.as_ref().unwrap();
+    assert!(
+        !d.reason.contains("kept"),
+        "aucune paire fantôme en vigueur : {}",
+        d.reason
+    );
+}
+
+/// Un moteur qui échoue d'un code donné, sans rien émettre.
+struct FailsWith(this_harness::Code);
+
+#[async_trait(?Send)]
+impl Transport for FailsWith {
+    async fn stream(&self, _r: &Request, _c: &Cancel, _d: Delta) -> Result<Reply, Failure> {
+        Err(Failure::new(self.0, "rien n'est venu"))
+    }
+    fn honors_route(&self) -> bool {
+        true
+    }
+}
+
+/// Constat 3 : un délai d'OUVERTURE (`Timeout` sans aucun morceau) n'a servi
+/// aucune paire, comme `Unreachable` ; un refus du moteur (`Http`) a servi.
+#[test]
+fn un_delai_d_ouverture_n_a_servi_aucune_paire() {
+    use this_harness::Code;
+    for (code, served) in [
+        (Code::Timeout, None),
+        (Code::Unreachable, None),
+        (Code::Http, Some(Pick::new("b", "m2"))),
+        (Code::Provider, Some(Pick::new("b", "m2"))),
+        (Code::Unreadable, Some(Pick::new("b", "m2"))),
+    ] {
+        let world = World::new(three_providers());
+        world.prefer(("b", "m2"), &[("a", "m1"), ("c", "m3")]);
+        let router = Rc::new(TurnRouter::new(world.spec("a", "m1", 1).auto()));
+        // Horloge de test : `Timeout` est une panne passagère, rejouée avec un délai.
+        let (harness, _) = build(
+            Rc::new(FailsWith(code)),
+            router,
+            Some(Rc::new(Fast(std::cell::Cell::new(0.0)))),
+        );
+        run(harness.send("hello"));
+        let settled = world.learning.settled();
+        assert_eq!(settled.len(), 1, "{code:?}");
+        assert_eq!(settled[0].served, served, "{code:?}");
+    }
+}
+
+/// Un moteur qui répond d'un coup, sans jamais appeler `delta`.
+struct Silent;
+
+#[async_trait(?Send)]
+impl Transport for Silent {
+    async fn stream(&self, _r: &Request, _c: &Cancel, _d: Delta) -> Result<Reply, Failure> {
+        Ok(Reply {
+            text: "fini".to_string(),
+            calls: vec![],
+            finish: Finish::Stop,
+        })
+    }
+    fn honors_route(&self) -> bool {
+        true
+    }
+}
+
+/// Constat 6 : une réponse rendue sans aucun morceau émis a servi quand même.
+#[test]
+fn une_reponse_sans_morceau_a_servi() {
+    let world = World::new(three_providers());
+    world.prefer(("b", "m2"), &[("a", "m1"), ("c", "m3")]);
+    let router = Rc::new(TurnRouter::new(world.spec("a", "m1", 1).auto()));
+    let (harness, _) = build(Rc::new(Silent), router, None);
+    assert_eq!(run(harness.send("hello")), Running::Ran(Stop::Done));
+    let settled = world.learning.settled();
+    assert_eq!(settled.len(), 1);
+    assert_eq!(settled[0].served, Some(Pick::new("b", "m2")));
+}
+
+/// Constat 7 : `m` coché retient `m[1m]` du pool, pour le pool de la
+/// conversation comme pour la liste de la personne.
+#[test]
+fn un_modele_coche_retient_sa_variante_de_fenetre() {
+    let pool = || vec![cand("a", "m[1m]", false), cand("b", "x", false)];
+    // Pool coché (mixed).
+    let world = World::new(pool());
+    world.prefer(("a", "m[1m]"), &[("b", "x")]);
+    let router = TurnRouter::new(
+        world
+            .spec("b", "x", 1)
+            .ticked(vec![entry("a", "m"), entry("b", "x")]),
+    );
+    let routed = run(router.route(text("hello")));
+    assert_eq!(
+        looked_at(&routed),
+        vec![Pick::new("a", "m[1m]"), Pick::new("b", "x")]
+    );
+    assert_eq!(pair(&routed), on("a", "m[1m]"));
+    // Liste de la personne (Auto).
+    let world = World::new(pool());
+    world.prefer(("a", "m[1m]"), &[("b", "x")]);
+    let router = TurnRouter::new(
+        world
+            .spec("b", "x", 1)
+            .auto()
+            .auto_models(vec![entry("a", "m")]),
+    );
+    let routed = run(router.route(text("hello")));
+    assert_eq!(looked_at(&routed), vec![Pick::new("a", "m[1m]")]);
+    assert!(reason(&routed).contains(NARROWED_BY_PERSON));
 }

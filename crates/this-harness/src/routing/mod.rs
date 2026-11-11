@@ -54,9 +54,9 @@ pub use mode::{
 };
 pub use router::{
     AFTER_PROVIDER_MOVE, EmptyPool, Learning, MemoryLearning, MemoryPool, Menu, NARROWED_BY_PERSON,
-    NoLearning, PERSON_LIST_UNAVAILABLE, PROVIDER_IMPOSED, PoolSource, Route, RouteWhy, Routed,
-    RouterSpec, SAME_CLASS_NO_EXPLORE, Seeds, SequenceSeeds, Settled, TurnInput, TurnRouter,
-    restrict_to_person_list,
+    NoLearning, PERSON_LIST_UNAVAILABLE, PROVIDER_IMPOSED, PoolSource, REPAIR_ATTEMPTS, Route,
+    RouteWhy, Routed, RouterSpec, SAME_CLASS_NO_EXPLORE, Seeds, SequenceSeeds, Settled, TurnInput,
+    TurnRouter, restrict_to_person_list,
 };
 pub use scorer::{
     ALIAS_DEEP, ALIAS_FAST, ArmKey, ArmStats, PriorHints, Scored, arm_key_of, beta_draw, prior_for,

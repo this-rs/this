@@ -182,7 +182,7 @@ Une session PO est liée à **un** fournisseur. Donc deux chemins :
   ne rendait rien : la `Request` portait la consigne, le fil et les outils
   (`crates/this-harness/src/wire.rs:212`), et c'est le `Transport` de l'hôte qui
   choisissait son modèle, seul.
-- **Abstraction de fournisseur** : `Transport` (`src/ports.rs:60`), `?Send`, un flux par
+- **Abstraction de fournisseur** : `Transport` (`src/ports.rs:92`), `?Send`, un flux par
   tour. Pas de capacités déclarées côté harnais. Côté `this-llm` : `Provider`
   (base, modèle, référence de secret, `crates/this-llm/src/lib.rs:185`) ; côté
   `this-llm-providers` : `ModelInfo { id, context_window, max_output_tokens }`
@@ -384,11 +384,11 @@ Le cœur est pur ; tout ce qui sort de lui passe par un port, et chaque port a u
 
 | Port | Ce que l'hôte garantit | Ce que le harnais garantit |
 |---|---|---|
-| `Transport::honors_route` | `true` seulement s'il lit `Request::provider()` / `model()` et parle au moteur nommé | tant que c'est faux : `Event::Routed.advisory = true` et `changed = false`, décision enregistrée `applied: false`, `used: None` (même `superseded`), l'état servi ne bouge pas (paire en vigueur, garde de fournisseur, décision ouverte), et aucun `settle` n'en découle |
+| `Transport::honors_route` | `true` seulement s'il lit `Request::provider()` / `model()` et parle au moteur nommé | tant que c'est faux : `Event::Routed.advisory = true` et `changed = false`, décision enregistrée `applied: false`, `used: None` (même `superseded`), l'état servi ne bouge pas (paire en vigueur, garde de fournisseur), rien n'est ouvert chez le routeur et aucune fin n'est rendue à l'apprentissage |
 | `PoolSource::pool` | rend les candidats vivants (santé, consentement, quotas déjà appliqués) | borné à 2 s (`ROUTER_TIMEOUT_MS`) sur le `Clock` de l'hôte ; au-delà, le tour part sur la paire en vigueur (`timed_out`) ; **coupé par l'annulation, avec ou sans minuteur** (`Cancel` réveille son attente) |
 | `Learning::arms`, `hints` | rend des postérieurs valides | un bras invalide écarte sa paire (`invalid_arm`), jamais une boucle ni un `NaN` |
 | `Learning::record` | au mieux : peut être perdu | appelé une fois par décision, APRÈS que l'état a été réécrit et `Event::Routed` émis ; borné et annulable ; `used` = la paire du tour (`None` si inconnue : consultative, ou sentinelle — jamais `auto`), `applied` vrai seulement si le choix est cette paire |
-| `Learning::settle` | traite un identifiant inconnu comme un no-op ; garde la **première** fin reçue pour un identifiant | borné à 2 s, ne retient ni `Stopped` ni `busy` (avec minuteur) ; `served = Some` seulement si le transport honore la paire ET que le moteur a répondu (morceau, réponse, ou refus du moteur ; pas `Unreachable` ni une annulation) ; la décision reste ouverte tant que `settle` n'a pas rendu : un `settle` coupé, ou un tour abandonné, est redit au tour suivant en `Stop::Interrupted`, `served = None` — et une décision abandonnée n'est jamais close par la fin d'un objectif suivant ; la réparation elle-même, si elle est coupée, est retentée au message d'après |
+| `Learning::settle` | traite un identifiant inconnu comme un no-op ; garde la **première** fin reçue pour un identifiant | borné à 2 s, ne retient ni `Stopped` ni `busy` (avec minuteur) ; `served = Some` seulement si le transport honore la paire ET que le moteur a répondu (morceau, réponse, ou refus du moteur ; pas `Unreachable`, ni `Timeout` d'ouverture, ni une annulation avant toute réponse) ; si le moteur n'a jamais été joint, la paire **décidée mais jamais atteinte** est oubliée (l'état servi revient à l'avant du changement, comme `forget_change` chez PO) ; la décision reste ouverte tant que `settle` n'a pas rendu : un `settle` coupé la range parmi les abandonnées, réparées **après** la décision du message suivant, dans leur propre borne (`TurnRouter::repair`, une par message, `Stop::Interrupted`, `served = None`), et lâchées après `REPAIR_ATTEMPTS` (3) tentatives coupées — un apprentissage en panne coûte au plus 2 s par message et n'éteint jamais Auto |
 | `Seeds::next_id` | un `u128` par décision | l'identifiant est la graine ; sérialisé en chaîne |
 | `QuotaView` | une échéance passée n'est plus rendue | — |
 
