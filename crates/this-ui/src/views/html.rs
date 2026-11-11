@@ -29,10 +29,10 @@
 use std::collections::BTreeSet;
 
 use leptos::prelude::*;
-use serde_json::{json, Map, Value};
-use this_descriptor::engine::query::matches;
-use this_descriptor::views::{html_resolve, DataGrant, Node, HTML_DATA_MAX_LIMIT};
+use serde_json::{Map, Value, json};
 use this_descriptor::ModuleDescriptor;
+use this_descriptor::engine::query::matches;
+use this_descriptor::views::{DataGrant, HTML_DATA_MAX_LIMIT, Node, html_resolve};
 
 use crate::views::data::Snapshot;
 use crate::views::intent::{FieldValue, Intent, Values};
@@ -681,8 +681,8 @@ fn mount(_ctx: Ctx, _host: HtmlHost, full: String, _height: u32, _data: Vec<Data
 
 #[cfg(target_arch = "wasm32")]
 fn mount(ctx: Ctx, host: HtmlHost, full: String, height: u32, data: Vec<DataGrant>) -> AnyView {
-    use wasm_bindgen::closure::Closure;
     use wasm_bindgen::JsCast;
+    use wasm_bindgen::closure::Closure;
 
     // L'état du montage : rien (lecture en cours), l'URL du Blob, ou la raison d'un refus.
     let state = RwSignal::new(None::<Result<String, String>>);
