@@ -79,6 +79,8 @@ pub mod class {
     pub const TOGGLE: &str = "vw-toggle";
     pub const FILE: &str = "vw-file";
     pub const HINT: &str = "vw-hint";
+    /// A field whose control is a switch: label left, switch right, one tappable row.
+    pub const FIELD_TOGGLE: &str = "vw-field-toggle";
 
     pub const RELATION: &str = "vw-relation";
     pub const RELATION_ITEM: &str = "vw-relation-item";
@@ -209,6 +211,7 @@ pub const ALL: &[&str] = &[
     class::CARD_VALUE,
     class::FORM,
     class::FIELD,
+    class::FIELD_TOGGLE,
     class::LABEL,
     class::INPUT,
     class::TEXTAREA,
@@ -443,7 +446,9 @@ pub const CSS: &str = r#"
 .vw-list-row-click { display: flex; flex-direction: column; align-items: flex-start; gap: 2px;
   width: 100%; min-height: 44px; padding: 0; text-align: left; border: 0; background: none;
   color: inherit; font: inherit; cursor: pointer; }
-.vw-list-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.vw-list-actions { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 8px; align-items: center;
+  width: 100%; align-self: stretch; }
+.vw-list-actions .vw-btn { width: 100%; padding: 0 8px; }
 .vw-list-label { font-weight: 600; }
 .vw-list-sub { font-size: 13px; opacity: .72; }
 .vw-pager { display: flex; gap: 8px; align-items: center; }
@@ -465,7 +470,17 @@ pub const CSS: &str = r#"
   color: inherit; font: inherit; }
 .vw-textarea { min-height: 88px; padding: 10px 12px; border-radius: 10px; font: inherit;
   border: 1px solid var(--vw-line, rgba(0,0,0,.16)); background: var(--vw-card, #fff); color: inherit; }
-.vw-toggle { min-height: 44px; min-width: 44px; }
+.vw-field-toggle { flex-direction: row; align-items: center; justify-content: space-between; gap: 12px;
+  min-height: 44px; cursor: pointer; }
+.vw-field-toggle .vw-label { font-size: 15px; font-weight: 500; flex: 1; min-width: 0; }
+.vw-toggle { appearance: none; -webkit-appearance: none; flex: none; margin: 0; cursor: pointer;
+  width: 51px; height: 31px; min-width: 51px; min-height: 31px; border-radius: 16px; position: relative;
+  background: var(--vw-line, rgba(0,0,0,.2)); transition: background .2s ease; }
+.vw-toggle::after { content: ""; position: absolute; top: 2px; left: 2px; width: 27px; height: 27px;
+  border-radius: 50%; background: #fff; box-shadow: 0 2px 4px rgba(0,0,0,.3); transition: transform .2s ease; }
+.vw-toggle:checked { background: var(--vw-accent, #34c759); }
+.vw-toggle:checked::after { transform: translateX(20px); }
+.vw-toggle:disabled { opacity: .5; cursor: default; }
 .vw-input[readonly], .vw-textarea[readonly] { opacity: .7; }
 
 .vw-relation { display: flex; flex-direction: column; gap: 8px; }
@@ -741,7 +756,8 @@ mod tests {
             ".vw-file",
             ".vw-search",
             ".vw-queue-item",
-            ".vw-toggle",
+            // The switch itself is 31 px (the system's size); its ROW is the 44 px target.
+            ".vw-field-toggle",
             ".vw-relation-item",
         ] {
             let block = rule_of(CSS, selector);
