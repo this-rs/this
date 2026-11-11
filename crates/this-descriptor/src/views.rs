@@ -588,6 +588,8 @@ pub enum Brick {
         submit: Option<String>,
     },
     /// Un champ éditable. `input` choisit le contrôle ; `target` est l'entité d'une référence.
+    /// `label` : le libellé affiché ; absent, c'est le nom du champ humanisé (`fin_de_travail`
+    /// → « Fin de travail »), qui ne sait porter ni apostrophe ni accent.
     Field {
         entity: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -597,6 +599,8 @@ pub enum Brick {
         input: Input,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         target: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        label: Option<String>,
     },
     /// Une relation entre entités : affichée ou éditable, à travers un lien déclaré.
     Relation {

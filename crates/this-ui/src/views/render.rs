@@ -586,6 +586,7 @@ pub fn render_brick(ctx: Ctx, brick: &Brick) -> AnyView {
             field,
             input,
             target,
+            label,
         } => field_brick(
             ctx,
             entity,
@@ -593,6 +594,7 @@ pub fn render_brick(ctx: Ctx, brick: &Brick) -> AnyView {
             field,
             *input,
             target.as_deref(),
+            label.as_deref(),
         ),
         Brick::Relation {
             entity,
@@ -1652,13 +1654,21 @@ fn control(
         }
         .into_any(),
         Control::Toggle => {
+            // A switch row: the label on the left, the switch on the right, the whole row
+            // tappable (44 px). A bare checkbox under its label was the system's default,
+            // not a design (measured on the Atelier's notifications screen, 11/11/2026).
             let checked = matches!(initial, FieldValue::Flag(true));
-            view! {
-                <input class=class::TOGGLE type="checkbox" id=id.clone() checked=checked
-                    disabled=read_only
-                    on:change=move |ev| set(FieldValue::Flag(event_target_checked(&ev))) />
+            return view! {
+                <label class=format!("{} {}", class::FIELD, class::FIELD_TOGGLE) for=id.clone()
+                    title=name.clone()>
+                    <span class=class::LABEL>{label}</span>
+                    <input class=class::TOGGLE type="checkbox" role="switch" id=id.clone()
+                        checked=checked disabled=read_only
+                        on:change=move |ev| set(FieldValue::Flag(event_target_checked(&ev))) />
+                    {hint}
+                </label>
             }
-            .into_any()
+            .into_any();
         }
         Control::Choice(variants) => {
             let current = text_of(&initial);
@@ -2067,6 +2077,7 @@ fn form(
     .into_any()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn field_brick(
     ctx: Ctx,
     entity: &str,
@@ -2074,6 +2085,7 @@ fn field_brick(
     field: &str,
     input: Input,
     target: Option<&str>,
+    label: Option<&str>,
 ) -> AnyView {
     let id = next_id("vw-field");
     let entity = entity.to_owned();
@@ -2082,7 +2094,10 @@ fn field_brick(
     let row = data::first(&snapshot, &entity, filter.as_ref());
     let initial = value_from(row, field);
     let signal = RwSignal::new(initial.clone());
-    let label = placement::humanise(field);
+    // The declared label first: a field name cannot carry an apostrophe or an accent.
+    let label = label
+        .map(str::to_owned)
+        .unwrap_or_else(|| placement::humanise(field));
     let commit_entity = entity.clone();
     let commit_filter = filter.clone();
     let commit_field = field.to_owned();

@@ -704,10 +704,15 @@ fn bricks() -> Vec<VariantSchema> {
                     "The entity a `reference` points to. Only with `reference`.",
                 )
                 .refers("entity"),
+                opt(
+                    "label",
+                    "string",
+                    "The label shown. Absent: the field name humanised (no apostrophe, no accent).",
+                ),
             ],
             json!({"type": "field", "entity": "invoice", "field": "titre"}),
             json!({"type": "field", "entity": "invoice", "filter": f, "field": "titre",
-                   "input": "reference", "target": "conversation"}),
+                   "input": "reference", "target": "conversation", "label": "Titre"}),
             false,
         ),
         brick_v(
