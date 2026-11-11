@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **`replaces` peut viser la vue d'un module requis** (`this-descriptor`). Une vue remplace désormais, par son nom nu (la forme que l'hôte résout déjà), une vue d'un module listé dans `requires[]` — vérifié par `check_with_required` / `views::issues_with_required` quand les modules requis sont fournis. Refus nommés : `view_replaces_module_not_required`, `view_replaces_not_in_required`, `view_replaces_ambiguous`, `view_replaces_surface_mismatch` ; `view_replaced_twice` et `view_replaces_cycle` voient aussi les vues des modules requis. Vérifié seul (`check`), un tel `replaces` reste refusé (`view_target_unknown`, dont le message nomme les modules requis non fournis). Aucune signature publique ne change ; un test différentiel prouve que le verdict de tout descripteur sans `replaces` inter-modules est identique.
 - **`crates/` — the contracts and the frontend of an app, inside the framework.** Seven crates an application no longer rewrites:
   - `this-descriptor` — the serializable module descriptor shared by `this-rs`, `this-cli` and wasm32 fronts: types, validation, query filters, policies, errors, i18n.
   - `this-platform` — the platform shell contract: form factor, window chrome, device cutouts, lifecycle decisions, device capabilities. Pure — no Tauri, no DOM.

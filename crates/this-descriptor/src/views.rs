@@ -150,8 +150,25 @@ pub struct ViewDesc {
     /// Le titre de la section, quand l'hôte en affiche un.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
-    /// Le nom d'une vue de ce module que celle-ci remplace : l'hôte n'affiche que la
-    /// remplaçante. Doit désigner une vue existante, différente de soi, remplacée une seule fois.
+    /// Le nom de la vue que celle-ci remplace : l'hôte n'affiche que la remplaçante.
+    ///
+    /// La cible est un **nom de vue nu** (pas de `module.vue`, pas de champ `module`) : c'est
+    /// ainsi que l'hôte la résout, toutes vues confondues. Elle désigne, dans cet ordre :
+    ///
+    /// 1. une vue **de ce module** — différente de soi, remplacée une seule fois, sans cycle ;
+    /// 2. sinon une vue d'un module que celui-ci **requiert directement** (`requires[]`) :
+    ///    c'est ainsi qu'un module prend la place d'une zone dessinée par un autre. La
+    ///    remplaçante doit alors être sur la **même surface** que la vue remplacée, et le nom
+    ///    ne doit exister que dans **un seul** module requis.
+    ///
+    /// Le cas 2 ne se vérifie qu'avec les descripteurs des modules requis
+    /// ([`issues_with_required`], `ModuleDescriptor::check_with_required`). Sans eux
+    /// ([`issues`], `check`), la cible reste refusée (`view_target_unknown`) : une vue qu'on
+    /// ne peut pas voir n'est jamais acceptée de confiance.
+    ///
+    /// Ce que le contrat ne peut PAS décider : deux modules qui ne se requièrent pas l'un
+    /// l'autre et remplacent la même vue ne se voient pas. C'est à l'hôte de trancher (le
+    /// premier dans son ordre de modules gagne, et il le dit).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub replaces: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1314,10 +1331,37 @@ pub(crate) fn required_modules<'a>(
 /// `known` may hold every module of the host, `m` itself included: only the transitive
 /// `requires` of `m` are read, and an entity `m` declares itself wins over a required one.
 /// [`issues`] is unchanged: it knows the module alone.
+///
+/// # `replaces` across modules
+///
+/// A view may also replace (`replaces`) a view of a module `m` requires **directly**. The
+/// target stays a bare view name, the form the host resolves; a view of `m` itself wins over
+/// a required one. Refusals, each with its own reason:
+///
+/// - `view_replaces_module_not_required`: the name is a view of a module in `known` that `m`
+///   does not list in `requires[]` (a transitive requirement is not enough: a module does not
+///   take the place of a view it does not say it depends on, as for `navigate`);
+/// - `view_replaces_not_in_required`: every required module is in `known` and none has it;
+/// - `view_replaces_ambiguous`: more than one required module has a view of that name;
+/// - `view_replaces_surface_mismatch`: the two views are not on the same surface;
+/// - `view_replaced_twice`: two views of `m` replace it, or a view of a provided required
+///   module already does;
+/// - `view_replaces_cycle`: the chain, followed through the provided required modules, comes
+///   back to the view;
+/// - `view_target_unknown`: the name is not a view of `m` and a required module is missing
+///   from `known` (always the case with [`issues`]): what cannot be seen is refused, never
+///   accepted on trust — the policy already applied to the entity of a required module.
+///
+/// Whether `m` is accepted depends only on `m` and on the modules it requires directly; the
+/// other modules of `known` only turn a refusal into a more precise one. What is therefore
+/// NOT decidable here: two modules that do not require each other and replace the same view
+/// do not see each other. The host arbitrates (first in its module order wins, with a
+/// warning).
 pub fn issues_with_required(m: &ModuleDescriptor, known: &[&ModuleDescriptor]) -> Vec<Issue> {
     let required = required_modules(m, known);
     let vues: Vec<&ViewDesc> = m.views.iter().collect();
     let mut c = Checks::new(m, vues);
+    c.ailleurs = Ailleurs::of(m, known);
     for dep in required {
         for e in &dep.entities {
             c.entities.entry(e.name.as_str()).or_insert(e);
@@ -1503,7 +1547,61 @@ struct Checks<'a> {
     views: BTreeSet<&'a str>,
     /// The views being checked, in order (a merged list for a render).
     vues: Vec<&'a ViewDesc>,
+    /// The other modules, as far as `replaces` may look. Empty when the module is checked alone.
+    ailleurs: Ailleurs<'a>,
     out: Vec<(&'static str, String, String)>,
+}
+
+/// The modules around the one being checked, sorted by what `replaces` may do with them.
+#[derive(Default)]
+struct Ailleurs<'a> {
+    /// The modules listed in `requires[]` (directly) whose descriptor was provided, in
+    /// `requires` order. A view of theirs may be replaced.
+    requis: Vec<&'a ModuleDescriptor>,
+    /// The names listed in `requires[]` whose descriptor was NOT provided: their views cannot
+    /// be verified, so nothing of theirs is accepted.
+    absents: Vec<&'a str>,
+    /// The provided modules that are not directly required: only read to say "require it".
+    autres: Vec<&'a ModuleDescriptor>,
+}
+
+impl<'a> Ailleurs<'a> {
+    fn of(m: &'a ModuleDescriptor, known: &[&'a ModuleDescriptor]) -> Self {
+        let mut a = Self::default();
+        let mut vus: BTreeSet<&str> = BTreeSet::new();
+        for r in &m.requires {
+            let nom = r.name.as_str();
+            if nom == m.name || !vus.insert(nom) {
+                continue;
+            }
+            match known.iter().find(|k| k.name == nom) {
+                Some(k) => a.requis.push(k),
+                None => a.absents.push(nom),
+            }
+        }
+        a.autres = known
+            .iter()
+            .copied()
+            .filter(|k| k.name != m.name && !vus.contains(k.name.as_str()))
+            .collect();
+        a
+    }
+
+    /// The first view named `nom` of each provided required module that has one.
+    fn requises(&self, nom: &str) -> Vec<(&'a ModuleDescriptor, &'a ViewDesc)> {
+        self.requis
+            .iter()
+            .filter_map(|d| d.views.iter().find(|v| v.name == nom).map(|v| (*d, v)))
+            .collect()
+    }
+}
+
+/// The wire name of a surface (`sidebar`, `main`...), for a message.
+fn surface_name(s: Surface) -> String {
+    serde_json::to_value(s)
+        .ok()
+        .and_then(|v| v.as_str().map(str::to_owned))
+        .unwrap_or_else(|| format!("{s:?}").to_lowercase())
 }
 
 impl<'a> Checks<'a> {
@@ -1515,6 +1613,8 @@ impl<'a> Checks<'a> {
             operations: BTreeMap::new(),
             views: vues.iter().map(|v| v.name.as_str()).collect(),
             vues,
+            // Alone until told otherwise: every required module is absent.
+            ailleurs: Ailleurs::of(m, &[]),
             out: Vec::new(),
         }
     }
@@ -2671,12 +2771,7 @@ impl<'a> Checks<'a> {
                 );
                 continue;
             }
-            if !self.views.contains(cible) {
-                self.push(
-                    "view_target_unknown",
-                    &p,
-                    format!("`{cible}` is not a view of this module"),
-                );
+            if !self.views.contains(cible) && !self.replaces_required(&p, v, cible) {
                 continue;
             }
             if remplacees.insert(cible, v.name.as_str()).is_some() {
@@ -2687,6 +2782,16 @@ impl<'a> Checks<'a> {
                 );
             }
             suivant.insert(v.name.as_str(), cible);
+        }
+        // The chains of the provided required modules, so that a cycle through them is seen.
+        // A name this module declares is its own view: a required view of that name is not
+        // on the chain. Unreachable unless a view above replaces a required view.
+        for w in self.ailleurs.requis.iter().flat_map(|d| d.views.iter()) {
+            if let Some(t) = w.replaces.as_deref()
+                && !self.views.contains(w.name.as_str())
+            {
+                suivant.entry(w.name.as_str()).or_insert(t);
+            }
         }
         for (i, v) in vues.iter().copied().enumerate() {
             let mut courant = v.name.as_str();
@@ -2705,6 +2810,143 @@ impl<'a> Checks<'a> {
                 }
                 courant = n;
             }
+        }
+    }
+}
+
+impl<'a> Checks<'a> {
+    /// `replaces` names `cible`, which is not a view of this module: is it a view of a module
+    /// this one requires, that `v` may replace? `false` = refused here, with its reason.
+    fn replaces_required(&mut self, p: &str, v: &ViewDesc, cible: &str) -> bool {
+        let candidates = self.ailleurs.requises(cible);
+        let (dep, vue) = match candidates.as_slice() {
+            [seul] => *seul,
+            [] => {
+                self.replaces_nowhere(p, cible);
+                return false;
+            }
+            plusieurs => {
+                let modules: Vec<&str> = plusieurs.iter().map(|(d, _)| d.name.as_str()).collect();
+                self.push(
+                    "view_replaces_ambiguous",
+                    p,
+                    format!(
+                        "`{cible}` is a view of several required modules ({}): the host \
+                         resolves `replaces` by view name alone and would hide all of them. \
+                         Require only the module whose view you replace.",
+                        modules.join(", ")
+                    ),
+                );
+                return false;
+            }
+        };
+        if vue.surface != v.surface {
+            let (ici, la) = (surface_name(v.surface), surface_name(vue.surface));
+            self.push(
+                "view_replaces_surface_mismatch",
+                p,
+                format!(
+                    "`{}` is on surface `{ici}` but `{cible}` (module `{}`) is on `{la}`: a \
+                     view takes the place of a view of the same surface. Set `surface` to \
+                     `{la}`, or replace a view drawn on `{ici}`.",
+                    v.name, dep.name
+                ),
+            );
+            return false;
+        }
+        let rival = self.ailleurs.requis.iter().find_map(|d| {
+            d.views
+                .iter()
+                .find(|w| w.replaces.as_deref() == Some(cible) && w.name != cible)
+                .map(|w| (d.name.as_str(), w.name.as_str()))
+        });
+        if let Some((module, nom)) = rival {
+            self.push(
+                "view_replaced_twice",
+                p,
+                format!(
+                    "`{cible}` (module `{}`) is already replaced by `{nom}` of module \
+                     `{module}`: replace `{nom}` instead, or drop `replaces`.",
+                    dep.name
+                ),
+            );
+            return false;
+        }
+        true
+    }
+
+    /// No provided required module has a view `cible`: say why, as precisely as is known.
+    fn replaces_nowhere(&mut self, p: &str, cible: &str) {
+        let ailleurs = &self.ailleurs;
+        let proprietaire = ailleurs
+            .autres
+            .iter()
+            .find(|d| d.views.iter().any(|v| v.name == cible))
+            .map(|d| d.name.as_str());
+        if let Some(module) = proprietaire {
+            let msg = format!(
+                "`{cible}` is a view of module `{module}`, which this module does not require{}. \
+                 Declare `{module}` in `requires[]` to replace its view, or fix the name.",
+                match self.m.requires.is_empty() {
+                    true => String::new(),
+                    false => format!(
+                        " (required: {})",
+                        self.m
+                            .requires
+                            .iter()
+                            .map(|r| r.name.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ),
+                }
+            );
+            self.push("view_replaces_module_not_required", p, msg);
+        } else if !ailleurs.absents.is_empty() {
+            let msg = format!(
+                "`{cible}` is not a view of this module, and the required module(s) {} were \
+                 not provided to this check, so their views cannot be verified. Check the \
+                 module together with the modules it requires, or fix the name.",
+                ailleurs
+                    .absents
+                    .iter()
+                    .map(|n| format!("`{n}`"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+            self.push("view_target_unknown", p, msg);
+        } else if !ailleurs.requis.is_empty() {
+            let vues: Vec<String> = ailleurs
+                .requis
+                .iter()
+                .map(|d| {
+                    let noms: Vec<&str> = d.views.iter().map(|v| v.name.as_str()).collect();
+                    match noms.is_empty() {
+                        true => format!("`{}` declares no view", d.name),
+                        false => format!("`{}` declares: {}", d.name, noms.join(", ")),
+                    }
+                })
+                .collect();
+            let candidats = self.views.iter().copied().chain(
+                ailleurs
+                    .requis
+                    .iter()
+                    .flat_map(|d| d.views.iter().map(|v| v.name.as_str())),
+            );
+            let proche = closest(cible, candidats)
+                .map(|c| format!(" Did you mean `{c}`?"))
+                .unwrap_or_default();
+            let msg = format!(
+                "`{cible}` is neither a view of this module nor of a module it requires ({}).{proche} \
+                 Fix the name, or require the module that declares that view.",
+                vues.join("; ")
+            );
+            self.push("view_replaces_not_in_required", p, msg);
+        } else {
+            self.push(
+                "view_target_unknown",
+                p,
+                format!("`{cible}` is not a view of this module"),
+            );
         }
     }
 }
@@ -2946,7 +3188,11 @@ fn chemins_du_filtre<'a>(f: &'a FilterExpr, out: &mut Vec<&'a str>) {
 }
 
 #[cfg(test)]
+pub(crate) mod reference;
+
+#[cfg(test)]
 mod tests {
+    use super::reference::issues_with_required_before;
     use super::*;
     use crate::check::CheckProfile;
     use crate::custom::CustomRegistry;
@@ -3067,6 +3313,276 @@ mod tests {
         let menu = liste_de("conversation", &["milieu"]);
         assert!(issues_with_required(&menu, &[&socle, &milieu, &menu]).is_empty());
         assert!(issues_with_required(&menu, &[&socle_cyclique, &milieu, &menu]).is_empty());
+    }
+
+    // ---------- `replaces` vers la vue d'un module requis ----------
+
+    fn requiert(m: &mut ModuleDescriptor, noms: &[&str]) {
+        m.requires = noms
+            .iter()
+            .map(|n| crate::module::ModuleReq {
+                name: n.to_string(),
+                version: "*".into(),
+                optional: false,
+            })
+            .collect();
+    }
+
+    fn vue_sur(nom: &str, surface: Surface, remplace: Option<&str>) -> ViewDesc {
+        ViewDesc {
+            surface,
+            replaces: remplace.map(str::to_owned),
+            ..view(
+                nom,
+                Node::Stack {
+                    children: Vec::new(),
+                },
+            )
+        }
+    }
+
+    /// Un module de zone : une vue `nom_vue` sur `surface`.
+    fn zone(module: &str, nom_vue: &str, surface: Surface) -> ModuleDescriptor {
+        let mut z = ModuleDescriptor::new(module, "1.0.0");
+        z.views.push(vue_sur(nom_vue, surface, None));
+        z
+    }
+
+    /// Un module tiers dont la vue `mon_menu` (sidebar) remplace `cible`.
+    fn tiers(cible: &str, requis: &[&str]) -> ModuleDescriptor {
+        let mut m = ModuleDescriptor::new("tiers", "1.0.0");
+        requiert(&mut m, requis);
+        m.views
+            .push(vue_sur("mon_menu", Surface::Sidebar, Some(cible)));
+        m
+    }
+
+    fn un_seul_refus(refus: &[Issue], raison: &str) -> String {
+        assert_eq!(refus.len(), 1, "{refus:?}");
+        let (r, chemin, message) = &refus[0];
+        assert_eq!(*r, raison, "{refus:?}");
+        assert_eq!(chemin, "views[0].replaces");
+        message.clone()
+    }
+
+    #[test]
+    fn une_vue_remplace_la_vue_d_un_module_requis() {
+        let menu = zone("atelier_menu", "menu", Surface::Sidebar);
+        let entete = zone("atelier_entete", "entete", Surface::Header);
+        let m = tiers("menu", &["atelier_menu"]);
+        assert_eq!(issues_with_required(&m, &[&menu, &entete, &m]), vec![]);
+        assert_eq!(issues_with_required(&m, &[&menu]), vec![]);
+    }
+
+    #[test]
+    fn sans_les_modules_requis_la_cible_reste_refusee_et_le_message_dit_pourquoi() {
+        let m = tiers("menu", &["atelier_menu"]);
+        // `issues` seul, et `known` vide : même politique que pour l'entité d'un module requis
+        // non fourni — refusé, jamais accepté de confiance.
+        for refus in [issues(&m), issues_with_required(&m, &[])] {
+            let message = un_seul_refus(&refus, "view_target_unknown");
+            assert!(
+                message.contains("`atelier_menu`") && message.contains("not provided"),
+                "{message}"
+            );
+        }
+        assert_refused(&m, "view_target_unknown");
+    }
+
+    #[test]
+    fn la_vue_d_un_module_connu_mais_non_requis_est_refusee_et_le_module_est_nomme() {
+        let menu = zone("atelier_menu", "menu", Surface::Sidebar);
+        let entete = zone("atelier_entete", "entete", Surface::Header);
+        // Aucun `requires`.
+        let m = tiers("menu", &[]);
+        let message = un_seul_refus(
+            &issues_with_required(&m, &[&menu, &m]),
+            "view_replaces_module_not_required",
+        );
+        assert!(
+            message.contains("`atelier_menu`") && message.contains("requires[]"),
+            "{message}"
+        );
+        // Un autre module est requis, pas celui de la vue.
+        let m = tiers("menu", &["atelier_entete"]);
+        let message = un_seul_refus(
+            &issues_with_required(&m, &[&menu, &entete, &m]),
+            "view_replaces_module_not_required",
+        );
+        assert!(message.contains("required: atelier_entete"), "{message}");
+    }
+
+    #[test]
+    fn un_requis_transitif_ne_suffit_pas_pour_remplacer() {
+        let menu = zone("atelier_menu", "menu", Surface::Sidebar);
+        let mut milieu = ModuleDescriptor::new("milieu", "1.0.0");
+        requiert(&mut milieu, &["atelier_menu"]);
+        let m = tiers("menu", &["milieu"]);
+        un_seul_refus(
+            &issues_with_required(&m, &[&menu, &milieu, &m]),
+            "view_replaces_module_not_required",
+        );
+    }
+
+    #[test]
+    fn un_module_requis_qui_n_a_pas_la_vue_est_un_refus_a_part() {
+        let menu = zone("atelier_menu", "menu", Surface::Sidebar);
+        let m = tiers("menus", &["atelier_menu"]);
+        let message = un_seul_refus(
+            &issues_with_required(&m, &[&menu, &m]),
+            "view_replaces_not_in_required",
+        );
+        assert!(
+            message.contains("`atelier_menu` declares: menu")
+                && message.contains("Did you mean `menu`?"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn un_requis_absent_parmi_plusieurs_garde_le_refus_prudent() {
+        let menu = zone("atelier_menu", "menu", Surface::Sidebar);
+        let m = tiers("entete", &["atelier_menu", "atelier_entete"]);
+        let message = un_seul_refus(
+            &issues_with_required(&m, &[&menu, &m]),
+            "view_target_unknown",
+        );
+        assert!(
+            message.contains("`atelier_entete`") && !message.contains("`atelier_menu`"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn la_remplacante_doit_etre_sur_la_surface_de_la_vue_requise() {
+        let entete = zone("atelier_entete", "entete", Surface::Header);
+        let m = tiers("entete", &["atelier_entete"]);
+        let message = un_seul_refus(
+            &issues_with_required(&m, &[&entete, &m]),
+            "view_replaces_surface_mismatch",
+        );
+        assert!(
+            message.contains("`sidebar`") && message.contains("`header`"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn la_surface_n_est_pas_verifiee_entre_deux_vues_du_meme_module() {
+        // La règle de surface n'existait pas en intra-module : elle n'y est pas ajoutée.
+        let mut m = ModuleDescriptor::new("solo", "1.0.0");
+        m.views.push(vue_sur("ancienne", Surface::Header, None));
+        m.views
+            .push(vue_sur("nouvelle", Surface::Sidebar, Some("ancienne")));
+        assert_eq!(issues(&m), vec![]);
+    }
+
+    #[test]
+    fn un_nom_porte_par_deux_modules_requis_est_ambigu() {
+        let a = zone("zone_a", "menu", Surface::Sidebar);
+        let b = zone("zone_b", "menu", Surface::Sidebar);
+        let m = tiers("menu", &["zone_a", "zone_b"]);
+        let message = un_seul_refus(
+            &issues_with_required(&m, &[&a, &b, &m]),
+            "view_replaces_ambiguous",
+        );
+        assert!(message.contains("zone_a, zone_b"), "{message}");
+    }
+
+    #[test]
+    fn la_vue_du_module_gagne_sur_la_vue_requise_de_meme_nom() {
+        let menu = zone("atelier_menu", "menu", Surface::Header);
+        let mut m = tiers("menu", &["atelier_menu"]);
+        m.views.push(vue_sur("menu", Surface::Main, None));
+        // `menu` est la vue du module : ni surface comparée, ni module requis consulté.
+        assert_eq!(issues_with_required(&m, &[&menu, &m]), vec![]);
+    }
+
+    #[test]
+    fn deux_vues_du_module_qui_remplacent_la_meme_vue_requise_sont_refusees() {
+        let menu = zone("atelier_menu", "menu", Surface::Sidebar);
+        let mut m = tiers("menu", &["atelier_menu"]);
+        m.views
+            .push(vue_sur("autre_menu", Surface::Sidebar, Some("menu")));
+        let refus = issues_with_required(&m, &[&menu, &m]);
+        assert_eq!(refus.len(), 1, "{refus:?}");
+        assert_eq!(refus[0].0, "view_replaced_twice");
+        assert_eq!(refus[0].1, "views[1].replaces");
+    }
+
+    #[test]
+    fn une_vue_requise_deja_remplacee_par_un_module_requis_est_refusee() {
+        let mut menu = zone("atelier_menu", "menu", Surface::Sidebar);
+        menu.views
+            .push(vue_sur("menu_v2", Surface::Sidebar, Some("menu")));
+        let m = tiers("menu", &["atelier_menu"]);
+        let message = un_seul_refus(
+            &issues_with_required(&m, &[&menu, &m]),
+            "view_replaced_twice",
+        );
+        assert!(message.contains("`menu_v2`"), "{message}");
+        // La bonne cible : la remplaçante en place.
+        let m = tiers("menu_v2", &["atelier_menu"]);
+        assert_eq!(issues_with_required(&m, &[&menu, &m]), vec![]);
+    }
+
+    #[test]
+    fn un_module_tiers_non_requis_qui_remplace_la_meme_vue_n_est_pas_vu() {
+        // Indécidable au contrat : `rival` et `tiers` ne se requièrent pas. L'hôte tranche.
+        let menu = zone("atelier_menu", "menu", Surface::Sidebar);
+        let mut rival = tiers("menu", &["atelier_menu"]);
+        rival.name = "rival".into();
+        let m = tiers("menu", &["atelier_menu"]);
+        assert_eq!(issues_with_required(&m, &[&menu, &rival, &m]), vec![]);
+        assert_eq!(issues_with_required(&rival, &[&menu, &rival, &m]), vec![]);
+    }
+
+    #[test]
+    fn un_cycle_qui_passe_par_un_module_requis_est_refuse() {
+        // `atelier_menu.menu` remplace `mon_menu` (le nom, tel que l'hôte le résout), et
+        // `tiers.mon_menu` remplace `menu` : l'hôte ne montrerait aucune des deux.
+        let mut menu = zone("atelier_menu", "menu", Surface::Sidebar);
+        menu.views[0].replaces = Some("mon_menu".into());
+        let m = tiers("menu", &["atelier_menu"]);
+        un_seul_refus(
+            &issues_with_required(&m, &[&menu, &m]),
+            "view_replaces_cycle",
+        );
+    }
+
+    #[test]
+    fn la_chaine_d_un_module_requis_ne_cree_pas_de_cycle_entre_vues_du_module() {
+        // `socle.b` remplace `a` ; ici `a` remplace `b`, deux vues DU module : pas de cycle.
+        let mut socle = zone("socle", "b", Surface::Main);
+        socle.views[0].replaces = Some("a".into());
+        let mut m = ModuleDescriptor::new("solo", "1.0.0");
+        requiert(&mut m, &["socle"]);
+        m.views.push(vue_sur("a", Surface::Main, Some("b")));
+        m.views.push(vue_sur("b", Surface::Main, None));
+        assert_eq!(issues_with_required(&m, &[&socle, &m]), vec![]);
+        assert_eq!(issues_with_required_before(&m, &[&socle, &m]), vec![]);
+    }
+
+    #[test]
+    fn se_remplacer_soi_meme_reste_refuse_meme_si_un_requis_porte_ce_nom() {
+        let menu = zone("atelier_menu", "mon_menu", Surface::Sidebar);
+        let m = tiers("mon_menu", &["atelier_menu"]);
+        un_seul_refus(
+            &issues_with_required(&m, &[&menu, &m]),
+            "view_replaces_self",
+        );
+    }
+
+    #[test]
+    fn check_with_required_rend_les_memes_refus_et_check_seul_reste_ferme() {
+        let menu = zone("atelier_menu", "menu", Surface::Sidebar);
+        let m = tiers("menu", &["atelier_menu"]);
+        let reg = CustomRegistry::default();
+        assert!(
+            m.check_with_required(&reg, CheckProfile::Compiled, &[&menu, &m])
+                .is_ok()
+        );
+        assert!(m.check(&reg, CheckProfile::Compiled).is_err());
     }
 
     fn leaf_view(name: &str, json: &str) -> ViewDesc {
