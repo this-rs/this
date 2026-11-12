@@ -103,6 +103,64 @@ pub struct ObrainStore {
     lease_authority: RwLock<Option<crate::storage::writer_lease::AuthorityKind>>,
 }
 
+/// Premier mot-clé d'écriture d'une requête, hors littéraux et commentaires.
+fn mot_d_ecriture(query: &str) -> Option<&'static str> {
+    const MOTS: [&str; 13] = [
+        "CREATE", "MERGE", "DELETE", "DETACH", "SET", "REMOVE", "INSERT", "LOAD", "DROP", "ALTER",
+        "CALL", "COPY", "TRUNCATE",
+    ];
+    let mut nu = String::with_capacity(query.len());
+    let mut quote: Option<char> = None;
+    let mut chars = query.chars().peekable();
+    while let Some(c) = chars.next() {
+        match quote {
+            Some(q) => {
+                if c == '\\' {
+                    chars.next();
+                } else if c == q {
+                    quote = None;
+                }
+                nu.push(' ');
+            }
+            None if c == '\'' || c == '"' || c == '`' => {
+                quote = Some(c);
+                nu.push(' ');
+            }
+            None if c == '/' && chars.peek() == Some(&'/') => {
+                for d in chars.by_ref() {
+                    if d == '\n' {
+                        break;
+                    }
+                }
+                nu.push(' ');
+            }
+            None => nu.push(c),
+        }
+    }
+    nu.split(|c: char| !(c.is_alphanumeric() || c == '_'))
+        .find_map(|mot| MOTS.iter().find(|m| mot.eq_ignore_ascii_case(m)).copied())
+}
+
+/// Valeur obrain → JSON lisible (les types sans équivalent JSON passent en texte).
+fn valeur_json(v: &ObrainValue) -> serde_json::Value {
+    use serde_json::Value as J;
+    match v {
+        ObrainValue::Null => J::Null,
+        ObrainValue::Bool(b) => J::Bool(*b),
+        ObrainValue::Int64(i) => J::from(*i),
+        ObrainValue::Float64(f) => serde_json::Number::from_f64(*f).map_or(J::Null, J::Number),
+        ObrainValue::String(s) => J::String(s.to_string()),
+        ObrainValue::List(l) => J::Array(l.iter().map(valeur_json).collect()),
+        ObrainValue::Map(m) => J::Object(
+            m.iter()
+                .map(|(k, v)| (k.as_str().to_string(), valeur_json(v)))
+                .collect(),
+        ),
+        ObrainValue::Vector(x) => J::Array(x.iter().map(|f| J::from(*f)).collect()),
+        autre => J::String(autre.to_string()),
+    }
+}
+
 /// Compteur d'instances volatiles — monotone, pour que deux stores en mémoire
 /// ne partagent jamais une identité de shard.
 fn next_volatile_id() -> u64 {
@@ -216,6 +274,57 @@ impl ObrainStore {
             session.use_graph(&space);
         }
         session
+    }
+
+    /// Exécute une requête **en lecture seule** (GQL ou Cypher) sur le store.
+    ///
+    /// La session est celle de [`ObrainStore::session`] (donc dans l'espace
+    /// actif), puis `Session::execute_language(query, lang, None)`
+    /// (`obrain-engine/src/session/mod.rs:3463`).
+    ///
+    /// * `lang` : `"gql"` ou `"cypher"` (insensible à la casse) ; vide = `gql`.
+    /// * Toute requête d'écriture (CREATE, MERGE, DELETE, DETACH, SET, REMOVE,
+    ///   INSERT, LOAD, DROP, ALTER…) est refusée **avant** exécution.
+    /// * Le résultat est tronqué à `limit` lignes ; `truncated` le dit.
+    ///
+    /// Forme rendue : `{"columns": [...], "rows": [[...]], "row_count": n,
+    /// "truncated": bool}`.
+    ///
+    /// # Errors
+    /// Langage inconnu, requête d'écriture, ou erreur de parse/exécution obrain.
+    pub fn execute_query(
+        &self,
+        lang: &str,
+        query: &str,
+        limit: usize,
+    ) -> anyhow::Result<serde_json::Value> {
+        let lang = match lang.trim().to_ascii_lowercase().as_str() {
+            "" | "gql" => "gql",
+            "cypher" => "cypher",
+            autre => return Err(anyhow!("langage inconnu : « {autre} » (gql ou cypher)")),
+        };
+        if let Some(mot) = mot_d_ecriture(query) {
+            return Err(anyhow!(
+                "écriture refusée : cet outil est en lecture seule ({mot})"
+            ));
+        }
+        let session = self.session();
+        let result = session
+            .execute_language(query, lang, None)
+            .map_err(|e| anyhow!("requête {lang} invalide ou en échec : {e}"))?;
+        let total = result.rows.len();
+        let rows: Vec<serde_json::Value> = result
+            .rows
+            .iter()
+            .take(limit)
+            .map(|row| serde_json::Value::Array(row.iter().map(valeur_json).collect()))
+            .collect();
+        Ok(serde_json::json!({
+            "columns": result.columns,
+            "row_count": rows.len(),
+            "truncated": total > rows.len(),
+            "rows": rows,
+        }))
     }
 
     /// L'espace actif, cloné (le verrou n'est pas tenu pendant l'usage).
@@ -1239,6 +1348,59 @@ mod tests {
     use crate::core::entity::Entity;
     use crate::core::field::FieldValue;
     use chrono::{DateTime, Utc};
+
+    // -----------------------------------------------------------------------
+    // execute_query — lecture seule
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn execute_query_lit_en_gql() {
+        let store = ObrainStore::new_in_memory();
+        store
+            .session()
+            .execute("INSERT (:Mw {nom: 'a'}), (:Mw {nom: 'b'}), (:Mw {nom: 'c'})")
+            .expect("amorce");
+        let r = store
+            .execute_query("", "MATCH (n:Mw) RETURN n.nom AS nom", 2)
+            .expect("lecture");
+        assert_eq!(r["columns"][0], "nom");
+        assert_eq!(r["row_count"], 2);
+        assert_eq!(r["truncated"], true);
+        let r = store
+            .execute_query("cypher", "MATCH (n:Mw) RETURN n.nom AS nom", 10)
+            .expect("cypher");
+        assert_eq!(r["row_count"], 3);
+        assert_eq!(r["truncated"], false);
+    }
+
+    #[test]
+    fn execute_query_refuse_l_ecriture() {
+        let store = ObrainStore::new_in_memory();
+        for q in [
+            "CREATE (:X {a: 1})",
+            "MATCH (n) DETACH DELETE n",
+            "MATCH (n) SET n.a = 1",
+            "INSERT (:X)",
+            "match (n) remove n.a",
+        ] {
+            let e = store.execute_query("gql", q, 10).expect_err(q);
+            assert!(e.to_string().contains("écriture refusée"), "{q}: {e}");
+        }
+        // un mot-clé dans un littéral n'est pas une écriture
+        assert!(mot_d_ecriture("MATCH (n) WHERE n.t = 'CREATE me' RETURN n").is_none());
+        assert!(mot_d_ecriture("MATCH (n) RETURN n // SET x").is_none());
+    }
+
+    #[test]
+    fn execute_query_invalide_est_lisible() {
+        let store = ObrainStore::new_in_memory();
+        let e = store
+            .execute_query("gql", "MATCH (n RETURN", 10)
+            .expect_err("parse");
+        assert!(e.to_string().contains("invalide"), "{e}");
+        let e = store.execute_query("sparql", "x", 10).expect_err("lang");
+        assert!(e.to_string().contains("langage inconnu"), "{e}");
+    }
 
     // -----------------------------------------------------------------------
     // Test entity for ObrainDataService tests
