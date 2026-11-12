@@ -292,6 +292,7 @@ impl ObrainStore {
     ///
     /// # Errors
     /// Langage inconnu, requête d'écriture, ou erreur de parse/exécution obrain.
+    #[cfg(feature = "obrain-query")]
     pub fn execute_query(
         &self,
         lang: &str,
@@ -1354,6 +1355,7 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
+    #[cfg(feature = "obrain-query")]
     fn execute_query_lit_en_gql() {
         let store = ObrainStore::new_in_memory();
         store
@@ -1374,6 +1376,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "obrain-query")]
     fn execute_query_refuse_l_ecriture() {
         let store = ObrainStore::new_in_memory();
         for q in [
@@ -1392,6 +1395,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "obrain-query")]
     fn execute_query_invalide_est_lisible() {
         let store = ObrainStore::new_in_memory();
         let e = store

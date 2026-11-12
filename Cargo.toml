@@ -121,7 +121,7 @@ indexmap = "2.13.0"
 #      `obrain-adapters::plugins::algorithms` est sous ce cfg).
 # Le dispatch générique des procédures `CALL` en dépend aussi (cf.
 # `cognitive-full = [..., "algos"]` dans obrain-engine).
-obrain-engine = { version = "0.0.1", path = "../../obrain/obrain-db/crates/obrain-engine", optional = true, features = ["algos", "gql", "cypher"] }
+obrain-engine = { version = "0.0.1", path = "../../obrain/obrain-db/crates/obrain-engine", optional = true, features = ["algos"] }
 obrain-common = { version = "0.0.1", path = "../../obrain/obrain-db/crates/obrain-common", optional = true }
 obrain-core = { version = "0.0.1", path = "../../obrain/obrain-db/crates/obrain-core", optional = true, default-features = false }
 # `obrain-substrate` doit être une dépendance DIRECTE (et non transitive via
@@ -218,6 +218,7 @@ obrain = ["dep:obrain-engine", "dep:obrain-common", "dep:obrain-core", "dep:obra
 # Alias conservé pour compatibilité, mais le relief cognitif n'est PAS branché :
 # `core::events::CognitiveSignal` est un vocabulaire propre à this-rs, et le
 # moteur cognitif d'obrain (`obrain-cognitive`) n'est pas une dépendance.
+obrain-query = ["obrain", "obrain-engine/gql", "obrain-engine/cypher"]
 obrain-cognitive = ["obrain"]
 # vite-rs based SPA frontend hosting (this::server::frontend). Not part of
 # `all` because it needs the local vite-rs checkout (path dep), like obrain.
