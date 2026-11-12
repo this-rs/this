@@ -1,0 +1,23 @@
+[package]
+name = "banc-appareil"
+version = "0.0.1"
+edition = "2021"
+publish = false
+description = "Hôte minimal du banc d'essai du pont d'appareil : mesure le contrat sur un iPhone réel"
+
+# Hors du workspace racine, comme `this-device-tauri` : Tauri tire GTK/WebKit sous Linux.
+[workspace]
+
+[lib]
+name = "banc_appareil_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+serde_json = "1"
+# La feature `banc` : c'est le seul but de cette app. `default-features = false` n'est pas
+# possible ici (le plugin n'en a pas d'utiles), on nomme donc la feature explicitement.
+tauri-plugin-this-device = { path = "../../crates/this-device-tauri", features = ["banc"] }

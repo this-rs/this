@@ -1,0 +1,501 @@
+//! Le banc d'essai du pont : ce que l'appareil **devant soi** sait vraiment faire.
+//!
+//! Le contrat dit ce que le pont devrait savoir faire ; la carte du framework dit ce qu'il
+//! annonce. Aucun des deux ne dit ce qui **répond** sur un iPhone donné, dans un build donné.
+//! Mesuré le 13/11/2026 : `device_selftest` rendait un tableau vert des vingt et une capacités
+//! parce qu'il ne lisait que des états de permission, et `faceIdConfirm` échouait en `internal`
+//! sur une clé d'argument absente. Un voyant vert sur un chemin, un pont cassé sur l'autre.
+//!
+//! Ce module comble ce trou. Il ne décide rien (pas de consentement ici : ce n'est pas une
+//! requête de module, c'est un diagnostic demandé par la personne qui tient l'appareil), il ne
+//! touche à rien tout seul (la coquille l'appelle explicitement), et il range chaque méthode
+//! selon ce qu'elle ferait si on l'appelait :
+//!
+//! - [`Nature::Lecture`] — lit un état ou une donnée. Le banc l'appelle.
+//! - [`Nature::Permission`] — afficherait une demande système. Le banc ne l'appelle pas : la
+//!   question doit être posée par un geste, pas par un diagnostic.
+//! - [`Nature::Interactif`] — ouvrirait un sélecteur, l'appareil photo, une feuille de partage,
+//!   une session NFC. **Mesuré le 13/11/2026** : appelé sans main devant l'écran, il ne rend
+//!   jamais la main non plus — l'app entière reste suspendue sur l'attente.
+//! - [`Nature::Ecriture`] — modifierait une donnée de la personne, ou en créerait une.
+//!
+//! Le banc est donc **complet dans son plan** (chaque méthode du contrat y figure) et
+//! **prudent dans son exécution** (seules les lectures sont appelées). Ce qu'il n'exerce pas, il
+//! le dit, au lieu de le compter comme réussi.
+//!
+//! Compilé seulement avec la feature `banc` : ce n'est pas une surface de production.
+
+use serde_json::{Value, json};
+use this_platform::capability::Capability;
+use this_platform::device_bridge::{
+    METHODS, PermissionState, Request, capability_of, complete_args, status_method,
+};
+
+/// Ce qu'une méthode ferait si on l'appelait, et donc si le banc peut l'appeler.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Nature {
+    Lecture,
+    Permission,
+    Interactif,
+    Ecriture,
+}
+
+impl Nature {
+    /// Le nom de fil de la nature, pour le rapport.
+    pub fn wire(self) -> &'static str {
+        match self {
+            Nature::Lecture => "lecture",
+            Nature::Permission => "permission",
+            Nature::Interactif => "interactif",
+            Nature::Ecriture => "ecriture",
+        }
+    }
+
+    /// Seules les lectures sont exercées sans personne devant l'écran.
+    pub fn executable(self) -> bool {
+        self == Nature::Lecture
+    }
+}
+
+/// L'état d'une méthode après l'avoir appelée, ou la raison de ne pas l'avoir fait.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Etat {
+    /// L'appareil a répondu autre chose qu'un refus.
+    Repondu,
+    /// La personne n'a pas accordé cette capacité (au module, ou au système).
+    RefuseAutorisation,
+    /// Le pont a refusé avant le natif : un argument requis manque.
+    RefuseArgument,
+    /// Le matériel ou le système ne sait pas faire ça ici.
+    Indisponible,
+    /// La méthode n'existe pas sur cette plateforme.
+    NonSupporte,
+    /// Le pont a échoué : c'est un défaut, pas une réponse de l'appareil.
+    Panne,
+    /// Le natif n'a pas répondu dans la borne.
+    Delai,
+    /// Le banc ne l'a pas appelée, par choix (voir [`Nature`]).
+    NonExerce,
+}
+
+impl Etat {
+    pub fn wire(self) -> &'static str {
+        match self {
+            Etat::Repondu => "repondu",
+            Etat::RefuseAutorisation => "refuse_autorisation",
+            Etat::RefuseArgument => "refuse_argument",
+            Etat::Indisponible => "indisponible",
+            Etat::NonSupporte => "non_supporte",
+            Etat::Panne => "panne",
+            Etat::Delai => "delai",
+            Etat::NonExerce => "non_exerce",
+        }
+    }
+
+    /// Un état qui demande une correction du pont, par opposition à une réponse honnête de
+    /// l'appareil. C'est la seule colonne qui doit rester vide sur un appareil sain.
+    pub fn is_defect(self) -> bool {
+        matches!(self, Etat::Panne | Etat::Delai | Etat::RefuseArgument)
+    }
+}
+
+/// La nature d'une méthode du contrat.
+///
+/// La règle est lisible : ce qui **montre** quelque chose à la personne (une question, un
+/// sélecteur, une caméra) n'est pas une lecture ; ce qui **change** une donnée non plus. Tout le
+/// reste est une lecture, et c'est ce que le banc exerce.
+pub fn nature(method: &str) -> Nature {
+    match method {
+        // Demandes système : elles affichent une boîte de dialogue.
+        "captureRequest"
+        | "locationRequest"
+        | "healthRequest"
+        | "contactsRequest"
+        | "photosRequest"
+        | "calendarRequest"
+        | "speechRequest"
+        | "motionActivityRequest"
+        | "notificationsRequest" => Nature::Permission,
+        // Sélecteurs, caméra, micro, partage, NFC, Face ID : ils attendent un geste.
+        "photosPick"
+        | "filesPick"
+        | "shareText"
+        | "shareItem"
+        | "nfcReadOnce"
+        | "nfcWrite"
+        | "faceIdConfirm"
+        | "cameraCapturePhoto"
+        | "cameraRecordVideo"
+        | "microphoneStart"
+        | "locationStreamStart" => Nature::Interactif,
+        // `locationSample` ouvre une session de localisation : si la permission n'est pas
+        // encore accordée, c'est iOS qui pose la question. La capacité `location` n'a pas de
+        // méthode d'état (`status_method` rend `None`), donc rien ne protégerait l'appel — et
+        // le banc laisserait une boîte de dialogue sur l'écran de quelqu'un.
+        "locationSample" => Nature::Permission,
+        // Écritures, ou appels qui n'ont de sens qu'avec un périphérique déjà choisi.
+        "microphoneStop"
+        | "locationStreamStop"
+        | "clipboardWrite"
+        | "filesWrite"
+        | "contactsCreate"
+        | "calendarCreateEvent"
+        | "calendarUpdateEvent"
+        | "calendarDeleteEvent"
+        | "notificationsPost"
+        | "notificationsCancel"
+        | "notificationsSchedule"
+        | "liveActivityStart"
+        | "liveActivityUpdate"
+        | "liveActivityEnd"
+        | "bluetoothConnect"
+        | "bluetoothDisconnect"
+        | "bluetoothWrite"
+        | "bluetoothSubscribe"
+        | "bluetoothRead"
+        | "bluetoothNotifications"
+        | "bluetoothServices"
+        | "localNetworkResolve"
+        | "speechTranscribeFile" => Nature::Ecriture,
+        // `status`, `…Status`, `…List`, `…Sample`, `…Browse`, `…Recent`, `…Pending`,
+        // `gyroscopeSample`, `bluetoothScan`, les six lectures d'état système : rien ne s'affiche,
+        // rien ne change.
+        _ => Nature::Lecture,
+    }
+}
+
+/// Un cas du plan : une méthode, ses arguments complets, et ce qu'elle ferait.
+#[derive(Clone, Debug)]
+pub struct Cas {
+    pub method: &'static str,
+    pub args: Value,
+    pub nature: Nature,
+}
+
+/// Le plan complet : **toutes** les méthodes du contrat, dans l'ordre de [`METHODS`].
+///
+/// Les arguments sont ceux que le pont remplirait lui-même pour un appelant qui n'en donne
+/// aucun — c'est exactement la situation d'un agent qui découvre l'outil.
+/// `status` n'est pas du plan des **familles** : c'est `Request::Status`, et il est balayé
+/// capacité par capacité par [`capacites`]. Le mettre ici l'enverrait en `Request::Call`, où il
+/// n'a pas de capacité dérivable, et le pont le refuserait `not_supported` — un faux défaut.
+pub fn plan(now_ms: f64) -> Vec<Cas> {
+    METHODS
+        .iter()
+        .filter(|method| **method != "status")
+        .map(|method| Cas {
+            method,
+            args: complete_args(method, &json!({}), now_ms),
+            nature: nature(method),
+        })
+        .collect()
+}
+
+/// Les vingt et une capacités du catalogue : leur état de permission, tel que le système le
+/// donne sans rien demander à personne.
+pub fn capacites() -> Vec<Capability> {
+    Capability::ALL.to_vec()
+}
+
+/// Comment lire une réponse du pont.
+///
+/// Une erreur est une réponse : le pont ne rejette pas. Donc tout ce qui compte est dans
+/// l'objet — et un `code` y est toujours la raison.
+pub fn etat(reply: &Value) -> Etat {
+    if let Some(code) = reply.get("code").and_then(Value::as_str) {
+        return match code {
+            "not_authorized" => Etat::RefuseAutorisation,
+            "missing_argument" => Etat::RefuseArgument,
+            "not_supported" => Etat::NonSupporte,
+            "unavailable" | "unsupported" => Etat::Indisponible,
+            "timeout" => Etat::Delai,
+            // `internal` et les codes de famille qu'on ne connaît pas encore : le pont a
+            // échoué. Les confondre avec une réponse de l'appareil est ce qui a laissé
+            // `faceIdConfirm` cassé une journée entière.
+            _ => Etat::Panne,
+        };
+    }
+    // `Reply::Status` d'une capacité sans état : `unsupported` est un état, pas une panne.
+    if reply.get("state").and_then(Value::as_str) == Some("unsupported") {
+        return Etat::NonSupporte;
+    }
+    Etat::Repondu
+}
+
+/// La requête d'un cas, telle que la coquille l'enverra.
+pub fn request(case: &Cas) -> Request {
+    Request::Call {
+        method: case.method.to_string(),
+        args: case.args.clone(),
+    }
+}
+
+/// Le rapport complet : l'état des capacités, ce que chaque méthode a répondu, et les défauts.
+///
+/// **Rien de ce que l'appareil rend n'est recopié ici** : ni un contact, ni une photo, ni un
+/// texte du presse-papiers. Un diagnostic qui recopierait la donnée de la personne dans un
+/// fichier serait exactement ce que la porte de consentement existe pour empêcher.
+pub async fn balayer<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> Value {
+    let capacites = balayer_capacites(app).await;
+    let methodes = balayer_methodes(app, &capacites).await;
+    let systeme = balayer_systeme(app).await;
+
+    let mut compte: std::collections::BTreeMap<String, u32> = std::collections::BTreeMap::new();
+    for entree in &methodes {
+        let etat = entree["etat"].as_str().unwrap_or("?").to_string();
+        *compte.entry(etat).or_default() += 1;
+    }
+    let defauts: Vec<Value> = methodes
+        .iter()
+        .filter(|entree| {
+            entree["etat"]
+                .as_str()
+                .and_then(est_defaut)
+                .unwrap_or(false)
+        })
+        .cloned()
+        .collect();
+
+    json!({
+        "kind": "banc",
+        "capacites": capacites,
+        "methodes": methodes,
+        "systeme": systeme,
+        "compte": compte,
+        "defauts": defauts,
+    })
+}
+
+/// Les états qui demandent une correction du pont, par leur nom de fil.
+fn est_defaut(nom: &str) -> Option<bool> {
+    [
+        Etat::Repondu,
+        Etat::RefuseAutorisation,
+        Etat::RefuseArgument,
+        Etat::Indisponible,
+        Etat::NonSupporte,
+        Etat::Panne,
+        Etat::Delai,
+        Etat::NonExerce,
+    ]
+    .into_iter()
+    .find(|etat| etat.wire() == nom)
+    .map(Etat::is_defect)
+}
+
+/// L'état de chaque capacité du catalogue. Aucune de ces lectures ne demande rien : c'est le
+/// seul chemin qui ne peut pas laisser de question sur l'écran.
+async fn balayer_capacites<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> Vec<Value> {
+    let mut out = Vec::new();
+    for capability in capacites() {
+        let reply = crate::answer(app, &Request::Status { capability }).await;
+        let etat = reply
+            .get("state")
+            .and_then(|state| serde_json::from_value::<PermissionState>(state.clone()).ok())
+            .unwrap_or(PermissionState::Unsupported);
+        out.push(json!({
+            "capacite": serde_json::to_value(capability).unwrap_or(Value::Null),
+            "etat": serde_json::to_value(etat).unwrap_or(Value::Null),
+        }));
+    }
+    out
+}
+
+/// Chaque méthode du plan, et l'appel réel pour celles qui sont exécutables.
+async fn balayer_methodes<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    capacites: &[Value],
+) -> Vec<Value> {
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duree| duree.as_millis() as f64)
+        .unwrap_or(0.0);
+    let mut out = Vec::new();
+    for case in plan(now_ms) {
+        let mut entree = json!({
+            "methode": case.method,
+            "nature": case.nature.wire(),
+            "etat": Etat::NonExerce.wire(),
+        });
+        if !case.nature.executable() {
+            out.push(entree);
+            continue;
+        }
+        // Une lecture de donnée personnelle poserait la question système si elle n'est pas
+        // accordée. On lit d'abord l'état — qui ne demande rien — et on n'appelle que si la
+        // réponse est déjà là. Un diagnostic ne doit pas se transformer en formulaire.
+        if let Some(capability) = capability_of(case.method, &case.args)
+            && status_method(capability).is_some_and(|method| method != case.method)
+        {
+            let wire = serde_json::to_value(capability).unwrap_or(Value::Null);
+            let state = capacites
+                .iter()
+                .find(|entree| entree["capacite"] == wire)
+                .and_then(|entree| entree["etat"].as_str())
+                .unwrap_or("unsupported")
+                .to_string();
+            if !matches!(state.as_str(), "granted" | "limited") {
+                let etat = match state.as_str() {
+                    "denied" => Etat::RefuseAutorisation,
+                    "prompt" => Etat::NonExerce,
+                    _ => Etat::NonSupporte,
+                };
+                entree["etat"] = json!(etat.wire());
+                entree["attente"] = json!(state);
+                out.push(entree);
+                continue;
+            }
+        }
+        let debut = std::time::Instant::now();
+        let reply = crate::answer(app, &request(&case)).await;
+        entree["etat"] = json!(etat(&reply).wire());
+        entree["ms"] = json!(debut.elapsed().as_millis() as u64);
+        if let Some(code) = reply.get("code").and_then(Value::as_str) {
+            entree["code"] = json!(code);
+        }
+        if let Some(kind) = reply.get("kind").and_then(Value::as_str) {
+            entree["forme"] = json!(kind);
+        }
+        out.push(entree);
+    }
+    out
+}
+
+/// Les six lectures d'état système : sans consentement, sans question, et pourtant capables de
+/// répondre `internal` sur un appareil où elles ne sont pas liées.
+async fn balayer_systeme<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> Vec<Value> {
+    let mut out = Vec::new();
+    for method in crate::SYSTEM_METHODS {
+        let reply = crate::system_state(app, method).await;
+        out.push(json!({
+            "methode": method,
+            "etat": etat(&reply).wire(),
+            "forme": reply.get("kind").and_then(Value::as_str),
+        }));
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeSet;
+
+    use super::*;
+
+    /// Le plan nomme CHAQUE méthode du contrat, une fois. Une méthode oubliée est une méthode
+    /// dont personne ne saura jamais si elle répond.
+    ///
+    /// `status` est la seule exception, et elle est nommée : il n'est pas une famille mais
+    /// `Request::Status`, balayé capacité par capacité (`balayer_capacites`), et l'appeler par
+    /// `Request::Call` n'aurait pas de capacité dérivable.
+    #[test]
+    fn the_plan_names_every_method_of_the_contract_once() {
+        let plan = plan(1_760_000_000_000.0);
+        let named: BTreeSet<&str> = plan.iter().map(|case| case.method).collect();
+        assert_eq!(named.len(), plan.len(), "une méthode est nommée deux fois");
+        for method in METHODS.iter().filter(|method| **method != "status") {
+            assert!(named.contains(method), "{method} absente du plan");
+        }
+        assert_eq!(named.len(), METHODS.len() - 1);
+        assert!(
+            !named.contains("status"),
+            "status n'est pas une méthode de famille"
+        );
+    }
+
+    /// Le banc n'exerce que des lectures : tout ce qui ouvre une question, un sélecteur ou une
+    /// écriture est déclaré mais pas appelé.
+    #[test]
+    fn only_reads_are_exercised() {
+        for case in plan(0.0) {
+            if case.nature.executable() {
+                assert_eq!(case.nature, Nature::Lecture, "{}", case.method);
+            }
+        }
+        // Et les cas qui ont un effet ne sont pas classés lecture par distraction.
+        for method in [
+            "faceIdConfirm",
+            "photosPick",
+            "notificationsPost",
+            "captureRequest",
+            "cameraCapturePhoto",
+        ] {
+            assert!(
+                !nature(method).executable(),
+                "{method} ne doit pas être exercée"
+            );
+        }
+    }
+
+    /// Un état de permission est une lecture : la lire ne demande rien à personne, donc le banc
+    /// peut le faire — et c'est ce qui distingue un appareil sans capteur d'un pont cassé.
+    #[test]
+    fn reading_a_permission_state_is_a_read() {
+        for method in [
+            "status",
+            "captureStatus",
+            "contactsStatus",
+            "photosStatus",
+            "calendarStatus",
+            "healthStatus",
+            "faceIdStatus",
+            "speechStatus",
+            "nfcStatus",
+            "localNetworkStatus",
+            "motionActivityStatus",
+            "notificationsStatus",
+            "liveActivityStatus",
+        ] {
+            assert_eq!(nature(method), Nature::Lecture, "{method}");
+        }
+    }
+
+    /// Le classement d'une réponse : `internal` est un défaut, `not_authorized` et `unsupported`
+    /// sont des réponses.
+    #[test]
+    fn an_internal_error_is_a_defect_and_a_refusal_is_an_answer() {
+        assert_eq!(
+            etat(&json!({"kind":"error","code":"internal"})),
+            Etat::Panne
+        );
+        assert_eq!(etat(&json!({"kind":"error","code":"timeout"})), Etat::Delai);
+        assert_eq!(
+            etat(&json!({"kind":"error","code":"not_authorized"})),
+            Etat::RefuseAutorisation
+        );
+        assert_eq!(
+            etat(&json!({"kind":"error","code":"missing_argument"})),
+            Etat::RefuseArgument
+        );
+        assert_eq!(
+            etat(&json!({"kind":"error","code":"unsupported"})),
+            Etat::Indisponible
+        );
+        assert_eq!(
+            etat(&json!({"kind":"status","state":"unsupported"})),
+            Etat::NonSupporte
+        );
+        assert_eq!(
+            etat(&json!({"kind":"status","state":"granted"})),
+            Etat::Repondu
+        );
+        assert_eq!(
+            etat(&json!({"kind":"contacts","contacts":[]})),
+            Etat::Repondu
+        );
+        assert!(Etat::Panne.is_defect());
+        assert!(!Etat::RefuseAutorisation.is_defect());
+        assert!(!Etat::NonSupporte.is_defect());
+    }
+
+    /// Le défaut mesuré le 13/11/2026, tel que le banc doit le voir : un refus d'argument est un
+    /// défaut du pont (l'appelant ne peut pas le corriger sans savoir), pas une réponse.
+    #[test]
+    fn a_missing_argument_is_reported_as_a_defect() {
+        assert!(Etat::RefuseArgument.is_defect());
+        assert_eq!(
+            etat(&json!({"kind":"error","code":"missing_argument","missing":["reason"]})),
+            Etat::RefuseArgument
+        );
+    }
+}

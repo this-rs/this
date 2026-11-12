@@ -45,6 +45,12 @@ pub mod consent;
 pub mod families;
 pub mod wire;
 
+/// Le banc d'essai : ce que l'appareil devant soi sait vraiment faire. Compilé seulement avec
+/// la feature `banc`, parce que ce n'est pas une surface de production — c'est un diagnostic
+/// qu'un hôte demande, pas un module. Voir `src/banc.rs`.
+#[cfg(feature = "banc")]
+pub mod banc;
+
 #[cfg(target_os = "ios")]
 use tauri::plugin::PluginHandle;
 
@@ -171,6 +177,12 @@ pub const STREAMS: &[&str] = &["orientation", "battery"];
 /// Les sélecteurs natifs des flux : départ (avec un canal) et arrêt.
 pub const STREAM_METHODS: &[&str] = &["streamStart", "streamStop"];
 
+/// Les sélecteurs de **diagnostic** : ils ne lisent ni n'écrivent aucune donnée de la personne,
+/// et ils existent pour interroger le pont lui-même. `listCommands` dit quelles familles sont
+/// réellement liées dans le binaire — ce que le contrat ne peut pas promettre, puisque c'est
+/// l'éditeur de liens qui décide.
+pub const DIAGNOSTIC_METHODS: &[&str] = &["listCommands"];
+
 /// Démarre un flux de [`STREAMS`]. `on_sample` reçoit chaque échantillon natif, tel quel
 /// (`{"kind":"orientation","angle":…}`, `{"kind":"battery","level":…,"state":…}`) : un
 /// échantillon initial tout de suite, puis un par notification du système. L'appelant le
@@ -266,13 +278,21 @@ async fn call_native<R: Runtime>(app: &AppHandle<R>, method: &str, args: &Value)
         .map(|d| d.as_millis() as f64)
         .unwrap_or(0.0);
     let completed = this_platform::device_bridge::complete_args(method, args, now_ms);
-    if let Some(manquant) = this_platform::device_bridge::missing_args(method, &completed) {
+    let manquants = this_platform::device_bridge::missing_args(method, &completed);
+    if !manquants.is_empty() {
         note(&format!(
-            "call {method} : argument `{manquant}` requis et absent"
+            "call {method} : argument(s) requis et absent(s) : {}",
+            manquants.join(", ")
         ));
         // Code dédié : `internal` laissait l'agent conclure à une panne du pont alors qu'il
-        // manquait un argument qu'il peut fournir lui-même.
-        return json!({ "kind": "error", "code": "missing_argument" });
+        // manquait un argument qu'il peut fournir lui-même. La liste est dans la RÉPONSE, pas
+        // seulement dans le journal : c'est le seul endroit que l'appelant lit, et un message
+        // qu'il faut aller chercher dans un fichier ne sert à personne.
+        return json!({
+            "kind": "error",
+            "code": "missing_argument",
+            "missing": manquants,
+        });
     }
     let args = &completed;
     if this_platform::device_bridge::capability_of(method, args).is_none() {

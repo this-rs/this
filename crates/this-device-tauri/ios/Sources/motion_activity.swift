@@ -262,3 +262,12 @@ extension ThisDevicePlugin {
 enum MotionDistanceSession {
   static var active: Set<ObjectIdentifier> = []
 }
+
+/// Ancre de l'éditeur de liens — voir `ThisDevicePlugin.famillesAncrees`.
+///
+/// Un `#selector(Foo.bar)` ne produit pas une référence au SYMBOLE de `bar` : il produit une
+/// chaîne. Le dead-strip retire donc l'objet entier, et le pont répond « No command bar found
+/// for plugin this-device ». Mesuré le 13/11/2026 sur un iPhone 16 Pro : dix-huit méthodes de
+/// familles compilaient, étaient listées dans `famillesLiees`, et étaient **absentes du binaire**.
+/// Référencer une CLASSE de ce fichier garde son objet — donc ses méthodes.
+final class FamilleMotionActivity: NSObject {}

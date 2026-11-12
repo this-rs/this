@@ -1,0 +1,27 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "BancAppareil",
+  "version": "0.0.1",
+  "identifier": "dev.thisrs.bancappareil",
+  "build": {
+    "frontendDist": "dist"
+  },
+  "app": {
+    "withGlobalTauri": false,
+    "windows": [
+      {
+        "title": "Banc appareil",
+        "width": 320,
+        "height": 240
+      }
+    ]
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": ["icons/icon.png"],
+    "iOS": {
+      "developmentTeam": "YHCD3HX4Q9"
+    }
+  }
+}

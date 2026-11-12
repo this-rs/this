@@ -22,51 +22,63 @@ struct BluetoothScanArgs: Decodable {
 }
 
 class ThisDevicePlugin: Plugin {
-  /// Prises de référence sur les méthodes des familles, pour forcer l'éditeur de liens à
-  /// garder leur fichier objet.
+  /// Les classes qui gardent vivantes les méthodes des familles.
   ///
-  /// Mesuré le 06/11 : `captureStatus:`, `clipboardRead:`, `faceIdStatus:` et
-  /// `locationSample:` sont présents dans `libapp.a` et **absents du binaire final**. Ce sont
-  /// des méthodes `@objc` sur une extension, que rien n'appelle statiquement : le dead-strip
-  /// supprime l'objet entier, et le pont répond « No command … found for plugin this-device ».
-  /// La caméra, le micro, le presse-papiers, Face ID et la localisation étaient donc
-  /// inaccessibles alors que leur code compilait.
+  /// **Un `#selector(...)` ne fait pas ce travail.** Il produit une CHAÎNE, pas une référence au
+  /// symbole de la méthode : le dead-strip retire donc l'objet entier, et le pont répond
+  /// « No command … found for plugin this-device ». C'était le mécanisme précédent
+  /// (`famillesLiees`), et il ne gardait rien — mesuré le 13/11/2026 sur un iPhone 16 Pro : les
+  /// dix-huit fichiers de famille étaient présents dans `libapp.a`, leurs sélecteurs étaient bien
+  /// dans le binaire (comme chaînes), et dix-huit méthodes répondaient « No command ». La caméra,
+  /// les contacts, la photothèque, le calendrier, HealthKit, Face ID, la parole, le NFC, le
+  /// réseau local, l'activité motrice, les notifications, la Live Activity, le presse-papiers, la
+  /// localisation et les six lectures d'état système étaient **injoignables**.
   ///
-  /// Une référence par fichier suffit. Elle est volontairement portée par une propriété
-  /// stockée, initialisée avec l'instance : un global `let` serait lui-même paresseux et
-  /// pourrait être retiré.
-  private let famillesLiees: [Selector]
+  /// Ce qui marche : référencer une CLASSE de chaque fichier. Le lien garde l'objet qui la
+  /// définit, donc toutes les méthodes qu'il contient. Chaque fichier de famille porte donc une
+  /// `Famille<Nom>` vide, et cette liste est la seule raison de sa présence.
+  ///
+  /// La liste est lue par `listCommands` — un vrai usage, donc l'optimiseur ne peut pas la
+  /// retirer — et `tests/swift_parity.rs` vérifie qu'aucun fichier de famille n'en manque.
+  static let famillesAncrees: [AnyObject.Type] = [
+    FamilleBluetooth.self,
+    FamilleCalendar.self,
+    FamilleCameraMic.self,
+    FamilleClipboardShare.self,
+    FamilleContacts.self,
+    FamilleFaceId.self,
+    FamilleFiles.self,
+    FamilleHealth.self,
+    FamilleLiveActivity.self,
+    FamilleLocalNetwork.self,
+    FamilleLocation.self,
+    FamilleMotionActivity.self,
+    FamilleNfc.self,
+    FamilleNotifications.self,
+    FamillePhotos.self,
+    FamilleSpeech.self,
+    FamilleStreams.self,
+    FamilleSystemState.self,
+  ]
 
   override init() {
-    famillesLiees = [
-      #selector(ThisDevicePlugin.captureStatus(_:)),
-      #selector(ThisDevicePlugin.captureRequest(_:)),
-      #selector(ThisDevicePlugin.liveActivityStatus(_:)),
-      #selector(ThisDevicePlugin.clipboardRead(_:)),
-      #selector(ThisDevicePlugin.clipboardWrite(_:)),
-      #selector(ThisDevicePlugin.shareText(_:)),
-      #selector(ThisDevicePlugin.faceIdStatus(_:)),
-      #selector(ThisDevicePlugin.faceIdConfirm(_:)),
-      #selector(ThisDevicePlugin.locationRequest(_:)),
-      #selector(ThisDevicePlugin.locationSample(_:)),
-      // Bluetooth au-delà du scan : le moteur est dans `BluetoothCentral.swift`, les
-      // sélecteurs dans `Bluetooth.swift` (en extension). Sans cette référence, le dead-strip
-      // les retire — c'est exactement le défaut mesuré ci-dessus sur quatre autres fichiers.
-      #selector(ThisDevicePlugin.bluetoothConnect(_:)),
-      // État système : lectures passives, sans consentement. Sans ces références, le
-      // dead-strip retire le fichier `system_state.swift` entier — même défaut mesuré
-      // le 06/11 sur caméra, presse-papiers, Face ID et localisation.
-      #selector(ThisDevicePlugin.deviceInfo(_:)),
-      #selector(ThisDevicePlugin.batteryLevel(_:)),
-      #selector(ThisDevicePlugin.networkState(_:)),
-      #selector(ThisDevicePlugin.locale(_:)),
-      #selector(ThisDevicePlugin.screenState(_:)),
-      #selector(ThisDevicePlugin.volume(_:)),
-      // Flux d'état système (`streams.swift`) : même défaut de dead-strip sans référence.
-      #selector(ThisDevicePlugin.streamStart(_:)),
-      #selector(ThisDevicePlugin.streamStop(_:)),
-    ]
     super.init()
+    // Force la lecture de la liste au moment où l'instance est construite : une constante
+    // statique peut rester paresseuse, et une liste jamais lue ne garde rien vivant.
+    _ = ThisDevicePlugin.famillesAncrees.count
+  }
+
+  /// Les familles réellement liées dans ce binaire. Diagnostic, pas un appel de famille : il
+  /// passe autour du contrat exprès, parce que le contrat est ce dont on doute.
+  ///
+  /// Sans cette méthode, `this_device_tauri::commands()` échouait toujours : il appelait
+  /// `listCommands`, qui n'existait pas côté natif.
+  @objc public func listCommands(_ invoke: Invoke) {
+    invoke.resolve([
+      "kind": "commands",
+      "plugin": "this-device",
+      "familles": ThisDevicePlugin.famillesAncrees.map { NSStringFromClass($0) },
+    ] as JsonObject)
   }
 
   /// The permission state of a capability, read without prompting the person.

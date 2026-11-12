@@ -19,6 +19,12 @@ links = "tauri-plugin-this-device"
 name = "this_device_tauri"
 path = "src/lib.rs"
 
+[features]
+# Le banc d'essai du pont (`src/banc.rs`) : balaie tout le contrat sur l'appareil devant soi
+# et rend un rapport. Hors production par construction — un hôte qui veut mesurer l'active.
+default = []
+banc = []
+
 [dependencies]
 this-platform = { path = "../this-platform" }
 # No default features: on desktop and Linux, Tauri's default webview stack (WebKitGTK) is not

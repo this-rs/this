@@ -347,6 +347,44 @@ impl HostLimits {
     pub fn entries(&self) -> &[(String, String)] {
         &self.unavailable
     }
+
+    /// Ce qu'un **appareil** a répondu quand on le lui a demandé.
+    ///
+    /// Prend le rapport du banc d'essai du pont (`tauri-plugin-this-device`, feature `banc`) et
+    /// en tire les limites du build : une capacité dont l'état mesuré est `unsupported` n'existe
+    /// pas sur cet appareil, et l'agent doit le lire au lieu de promettre.
+    ///
+    /// Pourquoi c'est ici et pas chez l'hôte : la forme du rapport est celle du contrat
+    /// (`device_bridge`), donc sa lecture aussi. Un hôte qui écrirait cette conversion lui-même
+    /// la réécrirait à chaque hôte, avec les mêmes clés devinées.
+    ///
+    /// **Un état de permission n'est pas une limite.** `denied` et `prompt` sont des décisions
+    /// de la personne, réversibles dans les Réglages : les déclarer « indisponibles » ferait
+    /// disparaître une capacité parce qu'on a répondu « plus tard » une fois. Seul
+    /// `unsupported` — le matériel ou le système ne sait pas — est une limite.
+    pub fn from_bench(report: &serde_json::Value) -> Self {
+        let mut limits = Self::new();
+        let Some(entries) = report.get("capacites").and_then(|value| value.as_array()) else {
+            return limits;
+        };
+        for entry in entries {
+            let (Some(capability), Some("unsupported")) = (
+                entry.get("capacite").and_then(|value| value.as_str()),
+                entry.get("etat").and_then(|value| value.as_str()),
+            ) else {
+                continue;
+            };
+            // L'identifiant de la carte est `device.<nom de fil>`, comme partout ailleurs.
+            let id = format!("device.{capability}");
+            if !limits.unavailable.iter().any(|(known, _)| *known == id) {
+                limits = limits.unavailable(
+                    &id,
+                    "l'appareil ne fournit pas cette capacité (mesuré par le banc du pont)",
+                );
+            }
+        }
+        limits
+    }
 }
 
 /// Le budget en caractères dans lequel la carte d'un appareil doit tenir.
@@ -1239,6 +1277,64 @@ mod tests {
         assert_eq!(carte.capability("modules").unwrap().status, Status::Live);
         assert_eq!(carte.slot("boot").unwrap().status, Status::Missing);
         assert_eq!(carte.slot("module.screen").unwrap().status, Status::Live);
+    }
+
+    /// Le rapport du banc devient les limites du build : c'est le seul chemin où ce que
+    /// l'appareil a **répondu** arrive dans la carte que lit l'agent, sans qu'un développeur
+    /// recopie une liste à la main.
+    #[test]
+    fn ce_que_l_appareil_a_repondu_devient_les_limites_du_build() {
+        let rapport = serde_json::json!({
+            "kind": "banc",
+            "capacites": [
+                {"capacite": "health", "etat": "unsupported"},
+                {"capacite": "nfc", "etat": "unsupported"},
+                {"capacite": "contacts", "etat": "granted"},
+                // Une décision de la personne n'est PAS une limite : elle se change dans les
+                // Réglages, et la carte ne doit pas effacer la capacité pour autant.
+                {"capacite": "photos", "etat": "denied"},
+                {"capacite": "calendar", "etat": "prompt"}
+            ]
+        });
+        let limites = HostLimits::from_bench(&rapport);
+        assert_eq!(limites.entries().len(), 2, "{:?}", limites.entries());
+        let carte = surface().with_limits(&limites);
+        for id in ["device.health", "device.nfc"] {
+            assert_eq!(
+                carte.capability(id).unwrap().status,
+                Status::Missing,
+                "{id}"
+            );
+        }
+        for id in ["device.contacts", "device.photos", "device.calendar"] {
+            assert_eq!(carte.capability(id).unwrap().status, Status::Live, "{id}");
+        }
+    }
+
+    /// Un rapport absent, vide ou d'une autre forme ne déclare rien : une mesure qu'on ne sait
+    /// pas lire ne doit pas se traduire par « tout est indisponible ».
+    #[test]
+    fn un_rapport_illisible_ne_declare_aucune_limite() {
+        for rapport in [
+            serde_json::json!({}),
+            serde_json::json!({"capacites": []}),
+            serde_json::json!({"capacites": "oui"}),
+        ] {
+            assert!(HostLimits::from_bench(&rapport).is_empty(), "{rapport}");
+        }
+    }
+
+    /// Deux fois la même capacité dans le rapport (deux passages, deux versions du banc) ne
+    /// produit qu'une entrée : la carte n'a pas à répéter une raison.
+    #[test]
+    fn une_capacite_absente_deux_fois_ne_declare_qu_une_limite() {
+        let rapport = serde_json::json!({
+            "capacites": [
+                {"capacite": "nfc", "etat": "unsupported"},
+                {"capacite": "nfc", "etat": "unsupported"}
+            ]
+        });
+        assert_eq!(HostLimits::from_bench(&rapport).entries().len(), 1);
     }
 
     #[test]
