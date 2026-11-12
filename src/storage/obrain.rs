@@ -218,6 +218,66 @@ impl ObrainStore {
         session
     }
 
+    /// Exécute une requête en **lecture seule** et rend un JSON.
+    ///
+    /// # GQL toujours, Cypher si le consommateur l'active
+    ///
+    /// Dans `obrain-engine`, `gql` est **toujours** compilé
+    /// (`default = ["gql", …]`, et `gql = []` est sans effet) ; `cypher`, lui,
+    /// est **opt-in** (`obrain-engine/cypher`). Ce crate ne nomme donc aucune
+    /// feature de langue dans son manifeste : il fonctionne avec une dépendance
+    /// `obrain-engine` par défaut. Un consommateur qui active `cypher` (par
+    /// exemple via `obrain-engine/full`, car `full → languages → cypher`) peut
+    /// passer `lang = "cypher"` et sera servi ; sans cette feature, obrain rend
+    /// une erreur de « langue inconnue », remontée telle quelle.
+    ///
+    /// # Lecture seule
+    ///
+    /// Toute requête portant un mot-clé d'écriture (CREATE, MERGE, DELETE,
+    /// DETACH, SET, REMOVE, INSERT, LOAD, DROP, ALTER, CALL, COPY, TRUNCATE)
+    /// est refusée **avant** exécution. Un mot-clé dans un littéral ou dans un
+    /// commentaire `//` ne compte pas.
+    ///
+    /// # Forme rendue
+    ///
+    /// `{"columns": [...], "rows": [[...]], "row_count": n, "truncated": bool}`.
+    ///
+    /// # Errors
+    ///
+    /// Langue inconnue, requête d'écriture, ou erreur de parse/exécution obrain.
+    pub fn execute_query(
+        &self,
+        lang: &str,
+        query: &str,
+        limit: usize,
+    ) -> anyhow::Result<serde_json::Value> {
+        let lang = match lang.trim().to_ascii_lowercase().as_str() {
+            "" | "gql" => "gql",
+            "cypher" => "cypher",
+            autre => anyhow::bail!("langage inconnu : « {autre} » (gql ou cypher)"),
+        };
+        if let Some(mot) = mot_d_ecriture(query) {
+            anyhow::bail!("écriture refusée : cette requête est en lecture seule ({mot})");
+        }
+        let result = self
+            .session()
+            .execute_language(query, lang, None)
+            .map_err(|e| anyhow::anyhow!("requête {lang} invalide ou en échec : {e}"))?;
+        let total = result.rows.len();
+        let rows: Vec<serde_json::Value> = result
+            .rows
+            .iter()
+            .take(limit)
+            .map(|row| serde_json::Value::Array(row.iter().map(valeur_json).collect()))
+            .collect();
+        Ok(serde_json::json!({
+            "columns": result.columns,
+            "row_count": rows.len(),
+            "truncated": total > rows.len(),
+            "rows": rows,
+        }))
+    }
+
     /// L'espace actif, cloné (le verrou n'est pas tenu pendant l'usage).
     fn space_snapshot(&self) -> Option<String> {
         self.space.read().ok().and_then(|s| s.clone())
@@ -1230,6 +1290,68 @@ impl LinkService for ObrainLinkService {
         }
 
         Ok(())
+    }
+}
+
+/// Le premier mot-clé d'écriture de la requête, s'il y en a un.
+///
+/// Les littéraux (`'…'`, `"…"`, `` `…` ``) et les commentaires `//` sont
+/// remplacés par des espaces avant l'analyse : `MATCH (n) WHERE n.t = 'CREATE
+/// me' RETURN n` n'est pas une écriture, et `MATCH (n) RETURN n // SET x` non
+/// plus.
+fn mot_d_ecriture(query: &str) -> Option<&'static str> {
+    const MOTS: [&str; 13] = [
+        "CREATE", "MERGE", "DELETE", "DETACH", "SET", "REMOVE", "INSERT", "LOAD", "DROP", "ALTER",
+        "CALL", "COPY", "TRUNCATE",
+    ];
+    let mut nu = String::with_capacity(query.len());
+    let mut quote: Option<char> = None;
+    let mut chars = query.chars().peekable();
+    while let Some(c) = chars.next() {
+        match quote {
+            Some(q) => {
+                if c == '\\' {
+                    chars.next();
+                } else if c == q {
+                    quote = None;
+                }
+                nu.push(' ');
+            }
+            None if c == '\'' || c == '"' || c == '`' => {
+                quote = Some(c);
+                nu.push(' ');
+            }
+            None if c == '/' && chars.peek() == Some(&'/') => {
+                for cc in chars.by_ref() {
+                    nu.push(' ');
+                    if cc == '\n' {
+                        break;
+                    }
+                }
+            }
+            None => nu.push(c.to_ascii_uppercase()),
+        }
+    }
+    let mots: Vec<&str> = nu.split_whitespace().collect();
+    MOTS.into_iter().find(|m| mots.contains(m))
+}
+
+/// Convertit une valeur obrain en JSON.
+fn valeur_json(v: &ObrainValue) -> serde_json::Value {
+    use serde_json::Value as J;
+    match v {
+        ObrainValue::Null => J::Null,
+        ObrainValue::Bool(b) => J::Bool(*b),
+        ObrainValue::Int64(i) => J::from(*i),
+        ObrainValue::Float64(f) => serde_json::Number::from_f64(*f).map_or(J::Null, J::Number),
+        ObrainValue::String(s) => J::String(s.to_string()),
+        ObrainValue::List(l) => J::Array(l.iter().map(valeur_json).collect()),
+        ObrainValue::Map(m) => J::Object(
+            m.iter()
+                .map(|(k, v)| (k.as_str().to_string(), valeur_json(v)))
+                .collect(),
+        ),
+        autre => J::String(autre.to_string()),
     }
 }
 
@@ -2483,5 +2605,85 @@ mod tests {
         );
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+}
+
+#[cfg(test)]
+mod query_tests {
+    use super::*;
+
+    fn amorce() -> std::sync::Arc<ObrainStore> {
+        let store = ObrainStore::new_in_memory();
+        store
+            .session()
+            .execute("INSERT (:Mw {nom: 'a'}), (:Mw {nom: 'b'}), (:Mw {nom: 'c'})")
+            .expect("amorce");
+        store
+    }
+
+    #[test]
+    fn execute_query_lit_en_gql_et_tronque() {
+        let store = amorce();
+        let r = store
+            .execute_query("", "MATCH (n:Mw) RETURN n.nom AS nom", 2)
+            .expect("lecture");
+        assert_eq!(r["columns"][0], "nom");
+        assert_eq!(r["row_count"], 2);
+        assert_eq!(r["truncated"], true);
+        let r = store
+            .execute_query("gql", "MATCH (n:Mw) RETURN n.nom AS nom", 10)
+            .expect("lecture complète");
+        assert_eq!(r["row_count"], 3);
+        assert_eq!(r["truncated"], false);
+    }
+
+    #[test]
+    fn execute_query_refuse_les_ecritures() {
+        let store = amorce();
+        for q in [
+            "CREATE (:X {a: 1})",
+            "MATCH (n) DETACH DELETE n",
+            "MATCH (n) SET n.a = 1",
+            "INSERT (:X)",
+            "match (n) remove n.a",
+            "CALL obrain.hybrid_search('Doc')",
+        ] {
+            let e = store.execute_query("gql", q, 10).expect_err(q);
+            assert!(e.to_string().contains("écriture refusée"), "{q} → {e}");
+        }
+    }
+
+    #[test]
+    fn un_mot_cle_dans_un_litteral_ou_un_commentaire_n_est_pas_une_ecriture() {
+        // Niveau filtre : ni un littéral ni un commentaire ne comptent.
+        assert!(mot_d_ecriture("MATCH (n) WHERE n.t = 'CREATE me' RETURN n").is_none());
+        assert!(mot_d_ecriture("MATCH (n) RETURN n // SET x").is_none());
+        assert_eq!(mot_d_ecriture("MATCH (n) SET n.a = 1"), Some("SET"));
+
+        // Niveau requête : un littéral porteur d'un mot-clé s'exécute.
+        // Mesuré : GQL lui-même refuse `//` (syntax error) — un commentaire dans
+        // la requête est une erreur de syntaxe obrain, jamais un refus d'écriture.
+        let store = amorce();
+        assert!(
+            store
+                .execute_query(
+                    "gql",
+                    "MATCH (n) WHERE n.nom = 'CREATE' RETURN n.nom AS nom",
+                    5
+                )
+                .is_ok(),
+            "un littéral n'est pas une écriture"
+        );
+    }
+
+    #[test]
+    fn langue_inconnue_et_requete_invalide_sont_lisibles() {
+        let store = amorce();
+        let e = store.execute_query("sparql", "x", 10).expect_err("langue");
+        assert!(e.to_string().contains("langage inconnu"), "{e}");
+        let e = store
+            .execute_query("gql", "MATCH (n RETURN", 10)
+            .expect_err("parse");
+        assert!(e.to_string().contains("invalide"), "{e}");
     }
 }
