@@ -518,7 +518,11 @@ impl ProviderClient {
         }
         if stream {
             body["stream"] = json!(true);
-            body["stream_options"] = json!({ "include_usage": true });
+            // Pas de `stream_options` : c'est un champ optionnel (l'usage en fin de flux)
+            // que plusieurs endpoints OpenAI-compat REFUSENT — NVIDIA NIM le rejette, ce qui
+            // faisait échouer le CHAT alors que `/v1/models` marchait (cf. bug « Crush envoie
+            // un paramètre non supporté à NIM »). On perd l'usage du stream, on garde la
+            // compatibilité.
         }
         if self.config.preset.is_local() {
             // Understood by vLLM and llama.cpp for Qwen-style models; ignored elsewhere.
