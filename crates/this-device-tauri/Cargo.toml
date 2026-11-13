@@ -30,11 +30,11 @@ this-platform = { path = "../this-platform" }
 # No default features: on desktop and Linux, Tauri's default webview stack (WebKitGTK) is not
 # pulled in. The iOS webview backend is enabled below.
 #
-# Ce que cela ne dit PAS : GTK 3 reste requis. Mesuré le 13/11/2026 en compilant ce crate sur
-# Ubuntu — `tauri` tire `glib-sys`/`gobject-sys`/`gio-sys` PUIS `gdk-3.0`/`atk` même sans
-# features, et le build s'arrête là. `libgtk-3-dev` suffit (le job `device_linux` de la CI
-# l'installe) ; WebKitGTK, lui, n'est pas nécessaire — c'est la pile webview, et elle seule,
-# que l'absence de features par défaut évite.
+# Ce que cela ne dit PAS, et qui était faux ici jusqu'au 13/11/2026 : sur Linux, compiler ce
+# crate réclame GLib, GTK 3 ET WebKitGTK. Mesuré en trois passes sur Ubuntu — `tauri` tire
+# `glib-sys`/`gobject-sys`/`gio-sys`, puis `gdk-3.0`/`atk`, puis `libsoup-3.0`. Les features
+# par défaut ne changent rien à cela : elles gouvernent la pile webview de Tauri, pas les
+# bibliothèques système qu'elle lie. Le job `device_linux` de la CI installe les quatre paquets.
 tauri = { version = "2.12", default-features = false }
 # `timeout` autour de l'appel natif : un plugin muet ne doit pas bloquer un tour.
 tokio = { version = "1", features = ["time"] }
