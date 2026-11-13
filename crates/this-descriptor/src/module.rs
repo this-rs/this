@@ -6,6 +6,7 @@ use crate::error::{ContractError, ErrorCode, ErrorDesc};
 use crate::framework::codes;
 use crate::i18n::I18nDecl;
 use crate::link::LinkDesc;
+use crate::perm::PermDesc;
 use crate::runtime::RuntimeDesc;
 use crate::views::ViewDesc;
 use serde::{Deserialize, Serialize};
@@ -61,6 +62,13 @@ pub struct ModuleDescriptor {
     /// derived with `crate::wami::statements`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime: Option<RuntimeDesc>,
+    /// What the module may do, per operation: the ONE declaration of its capabilities
+    /// (one vocabulary, no second manifest). Keys are standard operations or dotted
+    /// business operation names (`invoice.pay`); an operation left out is `Deny` for
+    /// business operations. `None` = nothing declared (descriptors written before this
+    /// field read unchanged).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub perm: Option<PermDesc>,
     /// Noms des programmes embarqués que le module expose (les sources vivent hors
     /// descripteur, dans le document du module). Un job référence un programme par ce nom.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -211,6 +219,7 @@ impl ModuleDescriptor {
             i18n: I18nDecl::default(),
             custom: vec![],
             runtime: None,
+            perm: None,
             programs: vec![],
             jobs: vec![],
         }
