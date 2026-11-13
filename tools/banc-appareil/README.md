@@ -103,6 +103,20 @@ dire ce qu'il n'a pas mesuré plutôt que de le compter comme bon.
 - **aucune donnée recopiée** : ni contact, ni photo, ni texte du presse-papiers.
   Le rapport ne garde que la nature, l'état, le code et la durée.
 
+## L'appeler depuis n'importe quel hôte
+
+Le balayage et l'écriture du rapport vivent dans le pont, pas dans cette app :
+
+```rust
+// feature `banc` du plugin activée dans l'hôte
+let rapport = this_device_tauri::banc::mesurer_et_ecrire(&app).await;
+// → Documents/banc.json (+ banc.log), et le rapport en mémoire
+```
+
+Cette app de deux cents lignes ne fait plus qu'appeler cette fonction dans `setup` : elle
+n'existe que pour donner un binaire à installer. Un hôte qui a déjà une app n'a **rien** à
+réécrire — c'est ce qui rend la mesure possible depuis l'Atelier.
+
 ## Après la mesure : ce que l'hôte en fait
 
 `this_agent::surface::HostLimits::from_bench(&rapport)` transforme le rapport en
