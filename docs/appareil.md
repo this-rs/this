@@ -567,6 +567,40 @@ afficher « 1 défaut » sur un pont sain. Deux corrections :
 Après quoi `defauts` est vide sur un pont sain, et la colonne veut de nouveau dire quelque
 chose.
 
+### Le banc sur macOS — mesuré pour la première fois le 13/11/2026
+
+L'app du banc se construit aussi pour le bureau (`cargo tauri build --debug --bundles app`),
+et le même `THIS_DEVICE_BANC=1` produit le rapport. Sur le Mac de développement :
+
+```text
+defauts =
+notifications = prompt      camera = prompt        microphone = prompt
+location = prompt           contacts = prompt      photos = prompt
+calendar = prompt           speech = prompt        bluetooth = prompt
+local_network = granted     clipboard/share/photos_pick/files_pick = sans_etat
+live_activity · health · nfc · gyroscope · motion_activity · face_id = unsupported
+localNetworkBrowse = repondu (5 351 ms)   filesRead = refus (invalid_bookmark)
+```
+
+Les cinq `unsupported` sont honnêtes : un Mac n'a ni Live Activity, ni HealthKit, ni NFC, ni
+podomètre, et n'a pas de Face ID (Touch ID n'est pas une biométrie « appareil » au sens du
+contrat — `faceIdStatus` répond quand même, par le chemin Touch ID).
+
+**Le piège, et il tue le processus** : lancé **hors bundle** (le binaire nu dans
+`target/debug/`), le banc meurt sur
+
+```text
+*** Terminating app due to uncaught exception 'NSInternalInconsistencyException',
+    reason: 'bundleProxyForCurrentProcess is nil'
+```
+
+`ThisDeviceMacOS.notificationsStatus` appelle `UNUserNotificationCenter.currentNotificationCenter()`
+depuis un fil du pool tokio ; sans bundle, UserNotifications lève une exception Objective-C, et
+**une exception ObjC n'est pas rattrapable depuis Rust** — `catch_unwind` ne voit rien, le
+processus est terminé. Mesuré : le même binaire, empaqueté en `.app`, rend son rapport
+normalement. Deux conséquences : pour mesurer macOS il faut une app empaquetée, et un hôte qui
+appellerait ce chemin depuis un processus non empaqueté mourrait sans trace Rust.
+
 ### Et ce que le banc a coûté à l'hôte pour y arriver
 
 Une app qui ajoute le pont doit régler deux choses que le gabarit Tauri n'écrit
