@@ -458,9 +458,40 @@ Trois simulateurs (iPhone 16 Pro / iOS 18.6, iPhone 17 Pro / iOS 26.0, iPhone 17
 - les lectures de données personnelles sont `non_exerce` tant que la permission
   est `prompt` — sur un appareil réel, c'est la personne qui la donne.
 
+Et sur l'**iPhone 16 Pro Max** (iOS 26, build `release`, appareil déverrouillé) :
+
+```text
+defauts = filesRead
+panne   = 0
+face_id = granted        location = prompt      location_always = prompt
+bluetooth = prompt       nfc = unsupported      live_activity = granted
+clipboard · share · photos_pick · files_pick = sans_etat
+```
+
+`nfc = unsupported` est honnête : ce build-là n'a pas l'entitlement NFC (profil
+générique). `sans_etat` est la marque des capacités qui n'ont pas de permission
+système — un sélecteur, le presse-papiers, la feuille de partage.
+
 Le même banc sur un iPhone physique demande l'appareil **déverrouillé** :
 `devicectl` refuse de lancer une app sur un écran verrouillé
 (`FBSOpenApplicationErrorDomain error 7`).
+
+### Et ce que le banc a coûté à l'hôte pour y arriver
+
+Une app qui ajoute le pont doit régler deux choses que le gabarit Tauri n'écrit
+pas, et que rien ne signale avant le premier lancement sur un iPhone réel :
+
+```yaml
+ALWAYS_EMBED_SWIFT_STANDARD_LIBRARIES: true   # sinon : Library not loaded: libswiftCore.dylib
+IPHONEOS_DEPLOYMENT_TARGET: "15.0"            # sinon : objets Rust en 15.0 liés en 14.0
+```
+
+Sans la première, l'app s'installe, se lance et meurt avant le premier écran
+(`dyld: Library not loaded: @rpath/libswiftCore.dylib`), en debug **comme** en
+release. L'Atelier porte la ligne depuis le 08/11 ; le banc l'a retrouvée par un
+plantage. `tools/banc-appareil/preparer.sh` les écrit, et `cargo tauri ios build`
+ne les applique qu'après un `xcodegen generate` — le build ne régénère pas le
+projet depuis `project.yml`.
 
 ## Limites connues
 
