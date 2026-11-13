@@ -19,7 +19,7 @@ mod cadrage;
 mod tls;
 
 use std::future::Future;
-use std::net::SocketAddr;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
@@ -88,15 +88,34 @@ pub enum TransportError {
 
 /// Le flux des messages reçus par un serveur : un `(expéditeur, verdict)` par
 /// message admis, refusé, ignoré ou déjà-vu.
+///
+/// Un flux peut couvrir **plusieurs endpoints** ([`ecouter_complet_sur`]) : un par
+/// adresse locale, tous derrière la même porte. Le lâcher les ferme tous.
 pub struct Flux {
     rx: mpsc::UnboundedReceiver<(DeviceId, Verdict)>,
-    local: SocketAddr,
-    endpoint: quinn::Endpoint,
+    /// Les adresses effectivement liées, dans l'ordre demandé (une par endpoint).
+    locales: Vec<SocketAddr>,
+    /// Les adresses demandées qui n'ont pas pu être liées, avec la raison.
+    echecs: Vec<(SocketAddr, String)>,
+    endpoints: Vec<quinn::Endpoint>,
 }
 
 impl Flux {
+    /// L'adresse du premier endpoint lié (le seul pour [`ecouter`],
+    /// [`ecouter_avec_appairage`] et [`ecouter_complet`]).
     pub fn local_addr(&self) -> SocketAddr {
-        self.local
+        self.locales[0]
+    }
+
+    /// Toutes les adresses qui écoutent, une par endpoint (ports résolus).
+    pub fn adresses(&self) -> Vec<SocketAddr> {
+        self.locales.clone()
+    }
+
+    /// Les adresses demandées qui n'ont pas pu être liées (déjà prises, interface
+    /// tombée…), avec la raison. Vide si toutes écoutent.
+    pub fn echecs(&self) -> &[(SocketAddr, String)] {
+        &self.echecs
     }
 
     /// Le prochain verdict, ou `None` quand le serveur est fermé.
@@ -107,10 +126,11 @@ impl Flux {
 
 impl Drop for Flux {
     fn drop(&mut self) {
-        // Ferme l'endpoint : la boucle d'acceptation se termine et les
+        // Ferme chaque endpoint : les boucles d'acceptation se terminent et les
         // connexions en cours sont coupées — aucune tâche ne traîne.
-        self.endpoint
-            .close(quinn::VarInt::from_u32(0), b"serveur ferme");
+        for endpoint in &self.endpoints {
+            endpoint.close(quinn::VarInt::from_u32(0), b"serveur ferme");
+        }
     }
 }
 
@@ -125,7 +145,7 @@ pub async fn ecouter(
     peers: Peers,
     limits: Limits,
 ) -> Result<Flux, TransportError> {
-    ecouter_interne(adresse, identite, peers, limits, None, None).await
+    ecouter_interne(&[adresse], identite, peers, limits, None, None).await
 }
 
 /// Comme [`ecouter`], et accepte en plus les demandes d'appairage (ALPN
@@ -160,7 +180,7 @@ pub async fn ecouter_avec_appairage(
         tx,
     )?;
     let flux = ecouter_interne(
-        adresse,
+        &[adresse],
         identite,
         peers,
         limits,
@@ -195,7 +215,7 @@ pub async fn ecouter_complet(
     repondeur: Repondeur,
 ) -> Result<(Flux, mpsc::Receiver<AppairageEnCours>), TransportError> {
     ecouter_complet_avec_delai(
-        adresse,
+        &[adresse],
         identite,
         peers,
         limits,
@@ -207,10 +227,91 @@ pub async fn ecouter_complet(
     .await
 }
 
+/// Comme [`ecouter_complet`], sur **plusieurs adresses locales** : un endpoint
+/// QUIC par adresse, chacun lié exactement à elle, tous derrière **une seule
+/// porte**.
+///
+/// Pourquoi : un endpoint lié à `0.0.0.0` répond avec l'adresse source que choisit
+/// la table de routage, pas avec l'adresse que le client a appelée. Sur un hôte
+/// qui a deux interfaces dans le même sous-réseau, la réponse peut partir de
+/// l'autre adresse ; le client QUIC la jette et finit en délai dépassé. Un
+/// endpoint lié à l'adresse appelée répond depuis elle.
+///
+/// - Tous les endpoints partagent la même [`Gate`] (même mémoire anti-rejeu : un
+///   message rejoué vers une autre adresse est `DejaVu`, le répondeur n'est pas
+///   rappelé), le même registre `peers`, le même [`Flux`] et la même file de
+///   demandes d'appairage.
+/// - Une adresse qui ne se lie pas ne fait pas échouer les autres : elle est
+///   rapportée par [`Flux::echecs`]. [`Flux::adresses`] donne celles qui écoutent.
+///   Erreur seulement si **aucune** ne se lie (ou si `adresses` est vide).
+/// - Un port `0` est résolu par endpoint (chaque adresse peut recevoir un port
+///   différent) : en production, passer un port fixe.
+/// - Lâcher le [`Flux`] ferme tous les endpoints.
+///
+/// Voir [`adresses_d_ecoute`] pour choisir les adresses.
+pub async fn ecouter_complet_sur(
+    adresses: &[SocketAddr],
+    identite: &Identite,
+    peers: Peers,
+    limits: Limits,
+    role_par_defaut: AnchorKeyRole,
+    delai: Duration,
+    repondeur: Repondeur,
+) -> Result<(Flux, mpsc::Receiver<AppairageEnCours>), TransportError> {
+    ecouter_complet_avec_delai(
+        adresses,
+        identite,
+        peers,
+        limits,
+        role_par_defaut,
+        delai,
+        repondeur,
+        DELAI_REPONSE,
+    )
+    .await
+}
+
+/// Les adresses d'écoute à passer à [`ecouter_complet_sur`], à partir des
+/// adresses des interfaces locales (énumérées par l'appelant). Pure, sans I/O.
+///
+/// - Garde l'IPv4 qui n'est ni loopback, ni lien-local (169.254/16), ni
+///   non spécifiée, ni multicast, ni broadcast.
+/// - Ajoute **toujours** `127.0.0.1` (boucle locale : tests, sondes).
+/// - Dédoublonne, en gardant l'ordre de première apparition.
+///
+/// L'IPv6 est écarté en v1 : les adresses éphémères / de confidentialité et la
+/// portée (`%en0`) des adresses lien-local demandent un traitement à part ; le
+/// maillage local passe aujourd'hui par l'IPv4.
+pub fn adresses_d_ecoute(locales: &[IpAddr], port: u16) -> Vec<SocketAddr> {
+    let mut retenues: Vec<SocketAddr> = Vec::new();
+    let candidates = locales
+        .iter()
+        .filter_map(|ip| match ip {
+            IpAddr::V4(v4)
+                if !v4.is_loopback()
+                    && !v4.is_link_local()
+                    && !v4.is_unspecified()
+                    && !v4.is_multicast()
+                    && !v4.is_broadcast() =>
+            {
+                Some(*v4)
+            }
+            _ => None,
+        })
+        .chain(std::iter::once(Ipv4Addr::LOCALHOST));
+    for v4 in candidates {
+        let adresse = SocketAddr::new(IpAddr::V4(v4), port);
+        if !retenues.contains(&adresse) {
+            retenues.push(adresse);
+        }
+    }
+    retenues
+}
+
 /// [`ecouter_complet`] avec un délai de réponse choisi (tests).
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn ecouter_complet_avec_delai(
-    adresse: SocketAddr,
+    adresses: &[SocketAddr],
     identite: &Identite,
     peers: Peers,
     limits: Limits,
@@ -228,7 +329,7 @@ pub(crate) async fn ecouter_complet_avec_delai(
         tx,
     )?;
     let flux = ecouter_interne(
-        adresse,
+        adresses,
         identite,
         peers,
         limits,
@@ -250,7 +351,7 @@ struct Service {
 }
 
 async fn ecouter_interne(
-    adresse: SocketAddr,
+    adresses: &[SocketAddr],
     identite: &Identite,
     peers: Peers,
     limits: Limits,
@@ -258,23 +359,78 @@ async fn ecouter_interne(
     service: Option<Service>,
 ) -> Result<Flux, TransportError> {
     let ceiling = limits.ceiling();
+    // UNE porte pour tous les endpoints : la mémoire anti-rejeu et le registre
+    // sont communs à toutes les adresses d'écoute.
     let gate = Arc::new(Mutex::new(Gate::new(peers, limits)));
-
     let server_config = tls::quic_server(tls::config_serveur(identite, repondeur.is_some())?)?;
-    let endpoint = quinn::Endpoint::server(server_config, adresse)
-        .map_err(|e| TransportError::Connexion(e.to_string()))?;
-    let local = endpoint
-        .local_addr()
-        .map_err(|e| TransportError::Connexion(e.to_string()))?;
+
+    let mut endpoints = Vec::with_capacity(adresses.len());
+    let mut locales = Vec::with_capacity(adresses.len());
+    let mut echecs = Vec::new();
+    for &adresse in adresses {
+        let lie = quinn::Endpoint::server(server_config.clone(), adresse).and_then(|endpoint| {
+            let local = endpoint.local_addr()?;
+            Ok((endpoint, local))
+        });
+        match lie {
+            Ok((endpoint, local)) => {
+                endpoints.push(endpoint);
+                locales.push(local);
+            }
+            Err(e) => echecs.push((adresse, e.to_string())),
+        }
+    }
+    if endpoints.is_empty() {
+        return Err(TransportError::Connexion(match echecs.as_slice() {
+            [] => "aucune adresse d'écoute".to_owned(),
+            // Une seule adresse demandée : l'erreur telle quelle (comportement
+            // historique d'`ecouter`).
+            [(_, e)] => e.clone(),
+            plusieurs => format!(
+                "aucune adresse d'écoute n'a pu être liée : {}",
+                plusieurs
+                    .iter()
+                    .map(|(a, e)| format!("{a} ({e})"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        }));
+    }
 
     let (tx, rx) = mpsc::unbounded_channel();
-    let accept_endpoint = endpoint.clone();
-    let accept_gate = gate.clone();
-    let accept_tx = tx.clone();
+    for endpoint in &endpoints {
+        accepter(
+            endpoint.clone(),
+            gate.clone(),
+            tx.clone(),
+            ceiling,
+            repondeur.clone(),
+            service.clone(),
+        );
+    }
+
+    Ok(Flux {
+        rx,
+        locales,
+        echecs,
+        endpoints,
+    })
+}
+
+/// La boucle d'acceptation d'un endpoint : chaque connexion est aiguillée par
+/// son ALPN, vers l'appairage ou vers la porte partagée.
+fn accepter(
+    endpoint: quinn::Endpoint,
+    gate: Arc<Mutex<Gate>>,
+    tx: mpsc::UnboundedSender<(DeviceId, Verdict)>,
+    ceiling: usize,
+    repondeur: Option<Arc<appairage::RepondeurAppairage>>,
+    service: Option<Service>,
+) {
     tokio::spawn(async move {
-        while let Some(incoming) = accept_endpoint.accept().await {
-            let gate = accept_gate.clone();
-            let tx = accept_tx.clone();
+        while let Some(incoming) = endpoint.accept().await {
+            let gate = gate.clone();
+            let tx = tx.clone();
             let repondeur = repondeur.clone();
             let service = service.clone();
             tokio::spawn(async move {
@@ -300,12 +456,6 @@ async fn ecouter_interne(
             });
         }
     });
-
-    Ok(Flux {
-        rx,
-        local,
-        endpoint,
-    })
 }
 
 /// Envoie `message` au serveur `adresse`, en présentant `identite` (le client)
@@ -1279,7 +1429,7 @@ mod tests {
             })
         });
         let (serveur, _rx) = ecouter_complet_avec_delai(
-            "127.0.0.1:0".parse().unwrap(),
+            &["127.0.0.1:0".parse().unwrap()],
             &serveur_id(),
             registre_ab(),
             Limits::default(),
@@ -1359,5 +1509,259 @@ mod tests {
             .unwrap();
         assert_eq!(de, dev(BOB));
         assert_eq!(recu, Verdict::Admis(m));
+    }
+
+    // ---- Plusieurs adresses d'écoute, une seule porte ----
+    //
+    // 127.0.0.2 ne se lie pas sous macOS (seul 127.0.0.1 est sur lo0) : les deux
+    // endpoints sont donc sur 127.0.0.1, à deux PORTS différents. Ça prouve le
+    // partage de la porte, de l'anti-rejeu, du registre et de la file d'appairage.
+
+    /// Deux endpoints sur 127.0.0.1 (ports éphémères distincts).
+    fn deux_locales() -> [SocketAddr; 2] {
+        [
+            "127.0.0.1:0".parse().unwrap(),
+            "127.0.0.1:0".parse().unwrap(),
+        ]
+    }
+
+    async fn serveur_sur(
+        adresses: &[SocketAddr],
+        peers: Peers,
+        repondeur: Repondeur,
+    ) -> Result<(Flux, mpsc::Receiver<AppairageEnCours>), TransportError> {
+        ecouter_complet_sur(
+            adresses,
+            &serveur_id(),
+            peers,
+            Limits::default(),
+            AnchorKeyRole::Shared,
+            DELAI,
+            repondeur,
+        )
+        .await
+    }
+
+    // Le même message envoyé aux deux adresses : `Admis` puis `DejaVu`, et le
+    // répondeur n'est appelé qu'une fois (anti-rejeu commun).
+    #[tokio::test]
+    async fn m1_rejeu_vers_l_autre_adresse_est_deja_vu() {
+        let compteur = Arc::new(AtomicUsize::new(0));
+        let (mut serveur, _rx) = serveur_sur(
+            &deux_locales(),
+            registre_ab(),
+            compteur_repondeur(compteur.clone(), echo),
+        )
+        .await
+        .unwrap();
+        let adresses = serveur.adresses();
+        assert_eq!(adresses.len(), 2);
+        assert_ne!(adresses[0], adresses[1], "deux endpoints distincts");
+        assert!(serveur.echecs().is_empty());
+        assert_eq!(serveur.local_addr(), adresses[0]);
+
+        let m = appel(&cle(1), ALICE, 90);
+        let (v1, r1) = appeler(
+            adresses[0],
+            &identite(1, ALICE),
+            &epingle_serveur(),
+            &m,
+            DELAI,
+        )
+        .await
+        .unwrap();
+        assert_eq!(v1, Verdict::Admis(m.clone()));
+        assert!(r1.is_some());
+
+        let (v2, r2) = appeler(
+            adresses[1],
+            &identite(1, ALICE),
+            &epingle_serveur(),
+            &m,
+            DELAI,
+        )
+        .await
+        .unwrap();
+        assert_eq!(v2, Verdict::DejaVu(m.id));
+        assert_eq!(r2, None, "un déjà-vu ne porte pas de réponse");
+        assert_eq!(
+            compteur.load(Ordering::SeqCst),
+            1,
+            "répondeur appelé une fois"
+        );
+
+        // Un seul flux pour les deux endpoints.
+        let (_, a) = avec_delai(DELAI, serveur.prochain())
+            .await
+            .flatten()
+            .unwrap();
+        let (_, b) = avec_delai(DELAI, serveur.prochain())
+            .await
+            .flatten()
+            .unwrap();
+        assert_eq!(a, Verdict::Admis(m.clone()));
+        assert_eq!(b, Verdict::DejaVu(m.id));
+    }
+
+    // Appairage par un endpoint, puis appel normal par l'autre : admis (registre
+    // et file d'appairage communs).
+    #[tokio::test]
+    async fn m2_appairage_par_l_un_appel_par_l_autre() {
+        let peers = Peers::new();
+        let compteur = Arc::new(AtomicUsize::new(0));
+        let (mut serveur, mut rx) = serveur_sur(
+            &deux_locales(),
+            peers.clone(),
+            compteur_repondeur(compteur.clone(), echo),
+        )
+        .await
+        .unwrap();
+        let adresses = serveur.adresses();
+
+        let id_client = DeviceId::de_cle(&cle(2).verifying_key());
+        let client = Identite::de_cle(&cle(2), &id_client).unwrap();
+        let i = appairer_vers(adresses[0], &client, AnchorKeyRole::Shared, DELAI)
+            .await
+            .expect("appairage lancé");
+        let r = avec_delai(DELAI, rx.recv())
+            .await
+            .flatten()
+            .expect("demande remontée");
+        assert_eq!(i.code(), r.code());
+        let (ai, ar) = tokio::join!(i.decider(true), r.decider(true));
+        let (ai, ar) = (ai.unwrap(), ar.unwrap());
+        assert_eq!(ar.id, id_client);
+        ar.inscrire(&peers);
+
+        let m = appel(&cle(2), id_client.as_str(), 91);
+        let (verdict, reponse) = appeler(adresses[1], &client, &Epingle::cle(&ai.key), &m, DELAI)
+            .await
+            .unwrap();
+        assert_eq!(verdict, Verdict::Admis(m.clone()));
+        assert!(reponse.is_some());
+        assert_eq!(compteur.load(Ordering::SeqCst), 1);
+        let (de, recu) = avec_delai(DELAI, serveur.prochain())
+            .await
+            .flatten()
+            .unwrap();
+        assert_eq!(de, id_client);
+        assert_eq!(recu, Verdict::Admis(m));
+    }
+
+    // Une adresse déjà prise n'empêche pas les autres : elle est rapportée.
+    #[tokio::test]
+    async fn m3_une_adresse_impossible_n_empeche_pas_les_autres() {
+        let occupant = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        let prise = occupant.local_addr().unwrap();
+        let compteur = Arc::new(AtomicUsize::new(0));
+        let (serveur, _rx) = serveur_sur(
+            &[prise, "127.0.0.1:0".parse().unwrap()],
+            registre_ab(),
+            compteur_repondeur(compteur.clone(), echo),
+        )
+        .await
+        .unwrap();
+        let adresses = serveur.adresses();
+        assert_eq!(adresses.len(), 1);
+        assert_ne!(adresses[0], prise);
+        assert_eq!(serveur.local_addr(), adresses[0]);
+        let echecs = serveur.echecs();
+        assert_eq!(echecs.len(), 1);
+        assert_eq!(echecs[0].0, prise);
+
+        let m = appel(&cle(1), ALICE, 92);
+        let (verdict, _) = appeler(
+            adresses[0],
+            &identite(1, ALICE),
+            &epingle_serveur(),
+            &m,
+            DELAI,
+        )
+        .await
+        .unwrap();
+        assert_eq!(verdict, Verdict::Admis(m));
+        drop(occupant);
+    }
+
+    // Aucune adresse liable (ou aucune adresse) : erreur.
+    #[tokio::test]
+    async fn m4_aucune_adresse_liable_est_une_erreur() {
+        let occupant = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        let prise = occupant.local_addr().unwrap();
+        let rien = || compteur_repondeur(Arc::new(AtomicUsize::new(0)), echo);
+
+        let une = serveur_sur(&[prise], registre_ab(), rien()).await;
+        assert!(matches!(une, Err(TransportError::Connexion(_))));
+        let deux = serveur_sur(&[prise, prise], registre_ab(), rien()).await;
+        match deux {
+            Err(TransportError::Connexion(e)) => assert!(e.contains(&prise.to_string()), "{e}"),
+            Err(e) => panic!("attendu Connexion, reçu {e:?}"),
+            Ok(_) => panic!("attendu une erreur"),
+        }
+        let vide = serveur_sur(&[], registre_ab(), rien()).await;
+        assert!(matches!(vide, Err(TransportError::Connexion(_))));
+        drop(occupant);
+    }
+
+    // Lâcher le flux ferme tous les endpoints.
+    #[tokio::test]
+    async fn m5_lacher_le_flux_ferme_tous_les_endpoints() {
+        let (serveur, _rx) = serveur_sur(
+            &deux_locales(),
+            registre_ab(),
+            compteur_repondeur(Arc::new(AtomicUsize::new(0)), echo),
+        )
+        .await
+        .unwrap();
+        let adresses = serveur.adresses();
+        drop(serveur);
+        for (n, adresse) in adresses.into_iter().enumerate() {
+            let m = appel(&cle(1), ALICE, 93 + n as u128);
+            let r = appeler(
+                adresse,
+                &identite(1, ALICE),
+                &epingle_serveur(),
+                &m,
+                Duration::from_secs(2),
+            )
+            .await;
+            assert!(r.is_err(), "{adresse} répond encore : {r:?}");
+        }
+    }
+
+    #[test]
+    fn m6_adresses_d_ecoute_filtre_ajoute_la_boucle_et_dedoublonne() {
+        let ip = |s: &str| -> IpAddr { s.parse().unwrap() };
+        let sa = |s: &str| -> SocketAddr { s.parse().unwrap() };
+        let locales = [
+            ip("192.168.1.54"),
+            ip("192.168.1.8"),
+            ip("169.254.12.3"),
+            ip("127.0.0.1"),
+            ip("127.0.0.2"),
+            ip("0.0.0.0"),
+            ip("224.0.0.251"),
+            ip("255.255.255.255"),
+            ip("fe80::1"),
+            ip("2a01:cb00::1"),
+            ip("::1"),
+            ip("192.168.1.54"),
+            ip("10.0.0.7"),
+        ];
+        assert_eq!(
+            adresses_d_ecoute(&locales, 47821),
+            vec![
+                sa("192.168.1.54:47821"),
+                sa("192.168.1.8:47821"),
+                sa("10.0.0.7:47821"),
+                sa("127.0.0.1:47821"),
+            ]
+        );
+        // Rien d'utilisable : la boucle locale seule.
+        assert_eq!(adresses_d_ecoute(&[], 9), vec![sa("127.0.0.1:9")]);
+        assert_eq!(
+            adresses_d_ecoute(&[ip("127.0.0.1"), ip("169.254.1.1")], 9),
+            vec![sa("127.0.0.1:9")]
+        );
     }
 }
