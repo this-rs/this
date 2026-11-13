@@ -253,6 +253,7 @@ pub async fn ecouter_complet(
         delai,
         repondeur,
         DELAI_REPONSE,
+        None,
     )
     .await
 }
@@ -288,6 +289,35 @@ pub async fn ecouter_complet_sur(
     delai: Duration,
     repondeur: Repondeur,
 ) -> Result<(Flux, mpsc::Receiver<AppairageEnCours>), TransportError> {
+    ecouter_complet_sur_et_jetons(
+        adresses,
+        identite,
+        peers,
+        limits,
+        role_par_defaut,
+        delai,
+        repondeur,
+        None,
+    )
+    .await
+}
+
+/// Comme [`ecouter_complet_sur`], avec le registre des jetons d'invitation du QR.
+///
+/// Le registre va jusqu'au répondeur d'appairage : tant qu'un QR est affiché
+/// (au moins un jeton vivant), une demande entrante doit présenter ce jeton.
+/// Voir [`ecouter_avec_appairage_et_jetons`].
+#[allow(clippy::too_many_arguments)]
+pub async fn ecouter_complet_sur_et_jetons(
+    adresses: &[SocketAddr],
+    identite: &Identite,
+    peers: Peers,
+    limits: Limits,
+    role_par_defaut: AnchorKeyRole,
+    delai: Duration,
+    repondeur: Repondeur,
+    jetons: Option<Arc<Jetons>>,
+) -> Result<(Flux, mpsc::Receiver<AppairageEnCours>), TransportError> {
     ecouter_complet_avec_delai(
         adresses,
         identite,
@@ -297,6 +327,7 @@ pub async fn ecouter_complet_sur(
         delai,
         repondeur,
         DELAI_REPONSE,
+        jetons,
     )
     .await
 }
@@ -349,6 +380,7 @@ pub(crate) async fn ecouter_complet_avec_delai(
     delai: Duration,
     repondeur: Repondeur,
     delai_reponse: Duration,
+    jetons: Option<Arc<Jetons>>,
 ) -> Result<(Flux, mpsc::Receiver<AppairageEnCours>), TransportError> {
     let (tx, rx) = mpsc::channel(CAPACITE_DEMANDES);
     let appairage = appairage::RepondeurAppairage::nouveau(
@@ -357,7 +389,7 @@ pub(crate) async fn ecouter_complet_avec_delai(
         role_par_defaut,
         delai,
         tx,
-        None,
+        jetons,
     )?;
     let flux = ecouter_interne(
         adresses,
@@ -1468,6 +1500,7 @@ mod tests {
             DELAI,
             lent,
             Duration::from_millis(200),
+            None,
         )
         .await
         .unwrap();
