@@ -2,4 +2,3 @@
 /gen
 /target
 /TXT
-export RUSTUP_HOME=/Users/triviere/.rustup CARGO_HOME=/Users/triviere/.cargo HOME=/Users/triviere && rustfmt --edition 2024 --check tools/banc-appareil/src/*.rs crates/this-device-tauri/src/banc.rs crates/this-device-tauri/tests/args_parity.rs crates/this-platform/src/device_bridge.rs crates/this-agent/src/surface.rs crates/this-device-tauri/src/lib.rs 2>&1 | head -20; echo "=== fmt check fini ==="
