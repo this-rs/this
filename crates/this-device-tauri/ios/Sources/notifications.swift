@@ -16,12 +16,12 @@ enum NotificationStatus {
   /// The permission state in the contract's words (`PermissionState`).
   static func name(_ status: UNAuthorizationStatus) -> String {
     switch status {
-    case .authorized, .provisional: return "granted"
-    case .denied: return "denied"
+    case .authorized, .provisional: return Etat.granted.fil
+    case .denied: return Etat.denied.fil
     // Not asked yet. `.ephemeral` (App Clips, iOS 14+) and any future case fall here too: the
     // target is iOS 13, so `.ephemeral` cannot be named without an availability check.
-    case .notDetermined: return "prompt"
-    default: return "prompt"
+    case .notDetermined: return Etat.prompt.fil
+    default: return Etat.prompt.fil
     }
   }
 
@@ -84,7 +84,7 @@ extension ThisDevicePlugin {
     let center = UNUserNotificationCenter.current()
     center.getNotificationSettings { settings in
       let state = NotificationStatus.name(settings.authorizationStatus)
-      guard state == "granted" else {
+      guard state == Etat.granted.fil else {
         DispatchQueue.main.async { invoke.resolve(Reply.error(code: ReplyCode.notAuthorized)) }
         return
       }
@@ -169,7 +169,7 @@ extension ThisDevicePlugin {
     let center = UNUserNotificationCenter.current()
     center.getNotificationSettings { settings in
       let state = NotificationStatus.name(settings.authorizationStatus)
-      guard state == "granted" else {
+      guard state == Etat.granted.fil else {
         DispatchQueue.main.async { invoke.resolve(Reply.error(code: ReplyCode.notAuthorized)) }
         return
       }

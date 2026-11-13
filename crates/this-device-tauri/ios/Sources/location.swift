@@ -34,7 +34,7 @@ enum LocationPermission {
   /// The state of a location capability, read without prompting the person. A capability that
   /// is not a location one is `unsupported`.
   static func state(capability: String) -> String {
-    guard handles(capability) else { return "unsupported" }
+    guard handles(capability) else { return Etat.unsupported.fil }
     return name(current(), capability: capability)
   }
 
@@ -51,15 +51,15 @@ enum LocationPermission {
   static func name(_ status: CLAuthorizationStatus, capability: String) -> String {
     switch status {
     case .authorizedAlways:
-      return "granted"
+      return Etat.granted.fil
     case .authorizedWhenInUse:
-      return capability == "location_always" ? "prompt" : "granted"
+      return capability == "location_always" ? Etat.prompt.fil : Etat.granted.fil
     case .denied, .restricted:
-      return "denied"
+      return Etat.denied.fil
     case .notDetermined:
-      return "prompt"
+      return Etat.prompt.fil
     @unknown default:
-      return "prompt"
+      return Etat.prompt.fil
     }
   }
 }
@@ -95,7 +95,7 @@ extension ThisDevicePlugin {
   @objc public func locationRequest(_ invoke: Invoke) throws {
     let args = try invoke.parseArgs(LocationArgs.self)
     guard LocationPermission.handles(args.capability) else {
-      invoke.resolve(Reply.status(state: "unsupported"))
+      invoke.resolve(Reply.status(state: Etat.unsupported.fil))
       return
     }
     LocationRequestSession.run(invoke, capability: args.capability)

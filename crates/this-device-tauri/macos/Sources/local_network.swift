@@ -20,14 +20,14 @@ enum MacLocalNetwork {
 
     /// macOS has no local network permission: always granted.
     static func currentState() -> String {
-        return "granted"
+        return Etat.granted.fil
     }
 
     // MARK: - Commands
 
     /// Status: always granted on macOS (no permission dialog).
     static func status() -> String {
-        return statusReply(state: "granted")
+        return statusReply(state: Etat.granted.fil)
     }
 
     /// One Bonjour browse of a type in the closed list, for a few seconds.

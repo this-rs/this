@@ -76,7 +76,7 @@ extension ThisDevicePlugin {
   /// system asks when the first session begins.
   @objc public func nfcStatus(_ invoke: Invoke) {
     invoke.resolve(
-      NfcReply.status(state: NFCNDEFReaderSession.readingAvailable ? "granted" : "unsupported"))
+      NfcReply.status(state: NFCNDEFReaderSession.readingAvailable ? Etat.granted.fil : Etat.unsupported.fil))
   }
 
   /// One NDEF read, bounded by `timeout_ms` (clamped to the native range below).

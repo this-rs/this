@@ -37,7 +37,7 @@ enum MacLocation {
     static func state(_ args: [String: Any]) -> String {
         let capability = args["capability"] as? String ?? "location"
         guard capability == "location" || capability == "location_always" else {
-            return statusReply(state: "unsupported")
+            return statusReply(state: Etat.unsupported.fil)
         }
         return statusReply(state: permissionName(currentAuth(), capability: capability))
     }
@@ -47,7 +47,7 @@ enum MacLocation {
     static func request(_ args: [String: Any]) -> String {
         let capability = args["capability"] as? String ?? "location"
         guard capability == "location" || capability == "location_always" else {
-            return statusReply(state: "unsupported")
+            return statusReply(state: Etat.unsupported.fil)
         }
 
         let current = currentAuth()
@@ -108,15 +108,15 @@ enum MacLocation {
     static func permissionName(_ status: CLAuthorizationStatus, capability: String) -> String {
         switch status {
         case .authorizedAlways:
-            return "granted"
+            return Etat.granted.fil
         case .authorizedWhenInUse:
-            return capability == "location_always" ? "prompt" : "granted"
+            return capability == "location_always" ? Etat.prompt.fil : Etat.granted.fil
         case .denied, .restricted:
-            return "denied"
+            return Etat.denied.fil
         case .notDetermined:
-            return "prompt"
+            return Etat.prompt.fil
         @unknown default:
-            return "prompt"
+            return Etat.prompt.fil
         }
     }
 }

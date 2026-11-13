@@ -15,10 +15,10 @@ enum MacNotifications {
     /// The permission state in the contract's words.
     static func stateName(_ status: UNAuthorizationStatus) -> String {
         switch status {
-        case .authorized, .provisional: return "granted"
-        case .denied: return "denied"
-        case .notDetermined: return "prompt"
-        @unknown default: return "prompt"
+        case .authorized, .provisional: return Etat.granted.fil
+        case .denied: return Etat.denied.fil
+        case .notDetermined: return Etat.prompt.fil
+        @unknown default: return Etat.prompt.fil
         }
     }
 
@@ -70,7 +70,7 @@ enum MacNotifications {
             let center = UNUserNotificationCenter.current()
             center.getNotificationSettings { settings in
                 let state = stateName(settings.authorizationStatus)
-                guard state == "granted" else {
+                guard state == Etat.granted.fil else {
                     done(errorReply(code: ReplyCode.notAuthorized))
                     return
                 }
@@ -144,7 +144,7 @@ enum MacNotifications {
             let center = UNUserNotificationCenter.current()
             center.getNotificationSettings { settings in
                 let state = stateName(settings.authorizationStatus)
-                guard state == "granted" else {
+                guard state == Etat.granted.fil else {
                     done(errorReply(code: ReplyCode.notAuthorized))
                     return
                 }

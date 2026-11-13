@@ -16,9 +16,9 @@ extension ThisDevicePlugin {
       // `false` covers both "the person turned them off" and "the app lacks the Info.plist
       // flag": ActivityKit does not tell the two apart, so both are `denied`.
       let enabled = ActivityAuthorizationInfo().areActivitiesEnabled
-      invoke.resolve(Reply.status(state: enabled ? "granted" : "denied"))
+      invoke.resolve(Reply.status(state: enabled ? Etat.granted.fil : Etat.denied.fil))
     } else {
-      invoke.resolve(Reply.status(state: "unsupported"))
+      invoke.resolve(Reply.status(state: Etat.unsupported.fil))
     }
   }
 }
