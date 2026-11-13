@@ -579,7 +579,10 @@ jobs:
           cd crates/this-device-tauri/ios/Sources
           # `grep -L` : les fichiers SANS `import Tauri`. Les sélecteurs `@objc` (qui
           # importent Tauri) ne peuvent être vérifiés que par un build d'app complet.
-          files=$(grep -L "import Tauri" *.swift | tr '\n' ' ')
+          # `Commun/` porte ce que plusieurs fichiers partagent (`Etat`) : `*.swift` ne
+          # descend pas dans les sous-dossiers, il faut le nommer, sinon un fichier
+          # qui s'en sert est vérifié sans sa définition (#273).
+          files="$(grep -L "import Tauri" *.swift | tr '\n' ' ') $(ls Commun/*.swift | tr '\n' ' ')"
           echo "fichiers vérifiés : $files"
           # shellcheck disable=SC2086
           xcrun --sdk iphoneos swiftc -typecheck -target arm64-apple-ios17.0 $files
