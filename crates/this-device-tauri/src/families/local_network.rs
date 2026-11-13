@@ -146,13 +146,21 @@ pub struct UnadvertiseArgs {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum LocalNetworkReply {
-    Status { state: PermissionState },
-    Services { services: Vec<LocalService> },
+    Status {
+        state: PermissionState,
+    },
+    Services {
+        services: Vec<LocalService>,
+    },
     /// The service is announced. `name` is the instance name actually published.
-    Advertised { name: String },
+    Advertised {
+        name: String,
+    },
     /// The announcement is withdrawn (or there was none: stopping is idempotent).
     Unadvertised,
-    Error { code: LocalNetworkError },
+    Error {
+        code: LocalNetworkError,
+    },
 }
 
 #[cfg(test)]
@@ -351,10 +359,20 @@ mod advertise_tests {
 
     #[test]
     fn only_the_atelier_type_may_be_announced() {
-        for bad in ["_http._tcp", "_ssh._tcp", "_atelier._udp", "_ATELIER._tcp", ""] {
+        for bad in [
+            "_http._tcp",
+            "_ssh._tcp",
+            "_atelier._udp",
+            "_ATELIER._tcp",
+            "",
+        ] {
             let mut a = args();
             a.service_type = bad.into();
-            assert_eq!(checked_advertise(&a), Err(LocalNetworkError::Unsupported), "{bad:?}");
+            assert_eq!(
+                checked_advertise(&a),
+                Err(LocalNetworkError::Unsupported),
+                "{bad:?}"
+            );
         }
     }
 
@@ -406,7 +424,10 @@ mod advertise_tests {
             let j = format!(
                 r#"{{"service_type":"_atelier._tcp","port":1,"id":"a","proto":"1","role":"r",{extra}}}"#
             );
-            assert!(serde_json::from_str::<AdvertiseArgs>(&j).is_err(), "{extra}");
+            assert!(
+                serde_json::from_str::<AdvertiseArgs>(&j).is_err(),
+                "{extra}"
+            );
         }
     }
 
@@ -414,9 +435,17 @@ mod advertise_tests {
     fn the_advertise_answers_decode_and_unknown_fields_are_not_guessed() {
         let r: LocalNetworkReply =
             serde_json::from_str(r#"{"kind":"advertised","name":"Atelier-a1b2c3d4"}"#).unwrap();
-        assert_eq!(r, LocalNetworkReply::Advertised { name: "Atelier-a1b2c3d4".into() });
+        assert_eq!(
+            r,
+            LocalNetworkReply::Advertised {
+                name: "Atelier-a1b2c3d4".into()
+            }
+        );
         let r: LocalNetworkReply = serde_json::from_str(r#"{"kind":"unadvertised"}"#).unwrap();
         assert_eq!(r, LocalNetworkReply::Unadvertised);
-        assert!(serde_json::from_str::<UnadvertiseArgs>(r#"{"service_type":"_atelier._tcp","x":1}"#).is_err());
+        assert!(
+            serde_json::from_str::<UnadvertiseArgs>(r#"{"service_type":"_atelier._tcp","x":1}"#)
+                .is_err()
+        );
     }
 }
