@@ -18,3 +18,7 @@ serde_json = { version = "1.0", features = ["raw_value"] }
 uuid = { version = "1.10", features = ["serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 thiserror = "2.0"
+# Le SAS est un HMAC-SHA256 : primitives pures, sans I/O, déjà dans l'arbre
+# (ed25519-dalek tire sha2 pour SHA-512, hkdf tire hmac) — aucun code natif ajouté.
+sha2 = { version = "0.10", default-features = false }
+hmac = { version = "0.12", default-features = false }

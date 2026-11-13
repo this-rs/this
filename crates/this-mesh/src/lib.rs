@@ -7,11 +7,13 @@
 //! `de` = expéditeur → clé connue / révoquée → type connu → signature → rejeu.
 //! La charge n'est jamais lue avant que la taille, l'identité et le type soient bons.
 
+mod appairage;
 mod envelope;
 mod gate;
 mod limits;
 mod peers;
 
+pub use appairage::{Admission, Appairage, Rencontre, SAS_DIGITS, SAS_DOMAIN, SasAttendu, sas};
 pub use envelope::{DeviceId, MESH_VERSION, Message, MessageType, SIGNING_DOMAIN, SignError};
 pub use gate::{Gate, JournalEntry, Raison, Verdict};
 pub use limits::Limits;
