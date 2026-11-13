@@ -154,21 +154,23 @@ fn the_status_capabilities_are_exactly_the_ones_the_match_handles() {
         panic!("le corps de `status` est introuvable");
     };
     // Les quatre capacités que ce backend peut interroger ; les autres tombent dans `_`.
+    // `Capability` n'implémente pas `Ord` — on compare donc des noms de fil, pas des variantes.
     let connues = [
         (Capability::Gyroscope, "Capability::Gyroscope =>"),
         (Capability::Bluetooth, "Capability::Bluetooth =>"),
         (Capability::Camera, "Capability::Camera =>"),
         (Capability::Microphone, "Capability::Microphone =>"),
     ];
-    let lues: BTreeSet<Capability> = connues
+    let lues: BTreeSet<String> = connues
         .iter()
         .filter(|(_, bras)| corps.contains(*bras))
-        .map(|(capability, _)| *capability)
+        .map(|(capability, _)| wire(*capability))
         .collect();
-    let declarees: BTreeSet<Capability> = STATUS_CAPABILITIES
+    let declarees: BTreeSet<String> = STATUS_CAPABILITIES
         .iter()
         .copied()
         .filter(|capability| connues.iter().any(|(connue, _)| connue == capability))
+        .map(wire)
         .collect();
     assert_eq!(
         lues, declarees,
