@@ -60,10 +60,15 @@ pub enum MessageType {
     EspaceSync,
     AgentPropose,
     AgentRepond,
+    /// Appel d'un service du pair : le pair répond dans l'accusé (voir
+    /// `transport::appeler`).
+    ServiceAppel,
+    /// Réponse d'un service, quand elle voyage comme un message à part entière.
+    ServiceReponse,
 }
 
 impl MessageType {
-    pub const ALL: [MessageType; 7] = [
+    pub const ALL: [MessageType; 9] = [
         Self::AppairageSas,
         Self::GrantDemande,
         Self::GrantReponse,
@@ -71,6 +76,8 @@ impl MessageType {
         Self::EspaceSync,
         Self::AgentPropose,
         Self::AgentRepond,
+        Self::ServiceAppel,
+        Self::ServiceReponse,
     ];
     /// Nom sur le fil.
     pub fn wire(self) -> &'static str {
@@ -82,6 +89,8 @@ impl MessageType {
             Self::EspaceSync => "espace.sync",
             Self::AgentPropose => "agent.propose",
             Self::AgentRepond => "agent.repond",
+            Self::ServiceAppel => "service.appel",
+            Self::ServiceReponse => "service.reponse",
         }
     }
     /// `None` pour un type inconnu.

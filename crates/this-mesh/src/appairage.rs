@@ -10,6 +10,7 @@ use crate::{DeviceId, Peers};
 use chrono::Utc;
 use ed25519_dalek::VerifyingKey;
 use hmac::{Hmac, Mac};
+use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use this_vfs::layout::AnchorKeyRole;
 
@@ -148,10 +149,53 @@ impl SasAttendu {
     }
 }
 
+/// Le lien entre deux appareils appairés, choisi **des deux côtés**.
+///
+/// - [`Lien::Moi`] : deux appareils de la même personne (rôle `Ownership`) ;
+/// - [`Lien::Autre`] : l'appareil de quelqu'un d'autre (rôle `Shared`).
+///
+/// Sur le fil : `"moi"` / `"autre"`. Le lien final ne vaut `Moi` que si les DEUX
+/// côtés ont dit `moi` ([`Lien::combiner`]) : un côté seul ne peut jamais
+/// s'octroyer la propriété. Par défaut (champ absent, pair plus ancien) : `Autre`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Lien {
+    /// Mes deux appareils.
+    Moi,
+    /// L'appareil de quelqu'un d'autre.
+    #[default]
+    Autre,
+}
+
+impl Lien {
+    /// Le lien final d'un appairage : `Moi` si et seulement si les deux côtés ont
+    /// dit `Moi`, sinon `Autre`. Symétrique.
+    pub fn combiner(self, autre: Lien) -> Lien {
+        if self == Lien::Moi && autre == Lien::Moi {
+            Lien::Moi
+        } else {
+            Lien::Autre
+        }
+    }
+
+    /// Le rôle inscrit au registre : `Moi` → `Ownership`, `Autre` → `Shared`.
+    pub fn role(self) -> AnchorKeyRole {
+        match self {
+            Lien::Moi => AnchorKeyRole::Ownership,
+            Lien::Autre => AnchorKeyRole::Shared,
+        }
+    }
+}
+
 /// L'inscription produite par un appairage complet, **avant toute écriture**.
 ///
 /// Cette valeur ne touche pas le registre ; [`Admission::inscrire`] est le seul point
 /// qui l'écrit, et elle n'existe qu'une fois les deux confirmations acquises.
+///
+/// Le lien ([`Lien`]) n'est pas un champ à part : il est porté par `role`, qui en
+/// découle exactement (`Moi` ⇔ `Ownership`) — voir [`Admission::lien`]. Ainsi un
+/// appelant qui construit `Admission { id, key, role }` reste valide, et le lien
+/// ne peut jamais contredire le rôle inscrit.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Admission {
     pub id: DeviceId,
@@ -160,6 +204,21 @@ pub struct Admission {
 }
 
 impl Admission {
+    /// Le lien de cet appairage, lu sur le rôle : `Ownership` → [`Lien::Moi`],
+    /// tout autre rôle → [`Lien::Autre`].
+    pub fn lien(&self) -> Lien {
+        match self.role {
+            AnchorKeyRole::Ownership => Lien::Moi,
+            _ => Lien::Autre,
+        }
+    }
+
+    /// Fixe le lien : le rôle en découle ([`Lien::role`]).
+    pub fn avec_lien(mut self, lien: Lien) -> Self {
+        self.role = lien.role();
+        self
+    }
+
     /// Écrit le pair au registre, `Active`, au moment présent. Le registre est un
     /// handle partagé ([`Peers::admit`] prend `&self`) : l'inscription est vue
     /// aussitôt par tous ses clones (listener, porte).
@@ -325,6 +384,27 @@ mod tests {
         assert_eq!(peers.len(), 1);
         assert_eq!(peers.state(&id), Some(AnchorKeyState::Active));
         assert_eq!(peers.role(&id), Some(AnchorKeyRole::Shared));
+    }
+
+    #[test]
+    fn lien_moi_seulement_si_les_deux_disent_moi() {
+        assert_eq!(Lien::Moi.combiner(Lien::Moi), Lien::Moi);
+        assert_eq!(Lien::Moi.combiner(Lien::Autre), Lien::Autre);
+        assert_eq!(Lien::Autre.combiner(Lien::Moi), Lien::Autre);
+        assert_eq!(Lien::Autre.combiner(Lien::Autre), Lien::Autre);
+        assert_eq!(Lien::default(), Lien::Autre);
+        assert_eq!(Lien::Moi.role(), AnchorKeyRole::Ownership);
+        assert_eq!(Lien::Autre.role(), AnchorKeyRole::Shared);
+        assert_eq!(serde_json::to_string(&Lien::Moi).unwrap(), r#""moi""#);
+        assert_eq!(serde_json::to_string(&Lien::Autre).unwrap(), r#""autre""#);
+        let a = Admission {
+            id: dev("device-aaaaaaaa"),
+            key: key(2),
+            role: AnchorKeyRole::Shared,
+        };
+        assert_eq!(a.lien(), Lien::Autre);
+        let a = a.avec_lien(Lien::Moi);
+        assert_eq!((a.lien(), a.role), (Lien::Moi, AnchorKeyRole::Ownership));
     }
 
     #[test]

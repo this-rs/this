@@ -15,7 +15,9 @@ mod peers;
 #[cfg(feature = "transport")]
 pub mod transport;
 
-pub use appairage::{Admission, Appairage, Rencontre, SAS_DIGITS, SAS_DOMAIN, SasAttendu, sas};
+pub use appairage::{
+    Admission, Appairage, Lien, Rencontre, SAS_DIGITS, SAS_DOMAIN, SasAttendu, sas,
+};
 pub use envelope::{DeviceId, MESH_VERSION, Message, MessageType, SIGNING_DOMAIN, SignError};
 pub use gate::{Gate, JournalEntry, Raison, Verdict};
 pub use limits::Limits;

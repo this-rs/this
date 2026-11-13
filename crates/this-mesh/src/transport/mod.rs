@@ -9,17 +9,24 @@
 //! L'appairage par le réseau ([`appairer_vers`], [`ecouter_avec_appairage`]) passe
 //! par un ALPN dédié ([`ALPN_APPAIRAGE`]) sur le même port : une connexion
 //! d'appairage ne touche jamais la porte ni le flux des messages.
+//!
+//! Un pair peut **répondre** : [`ecouter_complet`] prend un [`Repondeur`], appelé
+//! pour chaque message admis par la porte (et seulement ceux-là) ; sa réponse
+//! voyage dans l'accusé, que [`appeler`] rend au client.
 
 mod appairage;
 mod cadrage;
 mod tls;
 
+use std::future::Future;
 use std::net::SocketAddr;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
 use ed25519_dalek::VerifyingKey;
 use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
 use this_vfs::layout::{AnchorKeyRole, AnchorKeyState};
 use tokio::sync::{Mutex, Notify, mpsc};
 
@@ -39,7 +46,29 @@ pub const ALPN: &[u8] = b"this-mesh/1";
 pub const ALPN_APPAIRAGE: &[u8] = b"this-mesh-pair/1";
 
 /// Plafond du verdict renvoyé au client (petit objet JSON, jamais un message).
+/// C'est le plafond de lecture d'[`envoyer`] : une réponse de service n'y tient
+/// pas, il faut [`appeler`].
 const ACK_CEILING: usize = 4096;
+
+/// Délai accordé au [`Repondeur`] côté serveur (un moteur lent doit pouvoir
+/// répondre). Passé ce délai, l'accusé part **sans** réponse.
+pub const DELAI_REPONSE: Duration = Duration::from_secs(300);
+
+/// Taille maximale d'une réponse de service, en octets de JSON sérialisé. Au-delà,
+/// la réponse est remplacée par `{"erreur":"reponse_trop_grosse"}`.
+pub const PLAFOND_REPONSE: usize = 4 * 1024 * 1024;
+
+/// Marge de l'accusé autour de la réponse (`{"v":"admis","reponse":…}`).
+const MARGE_ACCUSE: usize = 4096;
+
+/// Ce qui répond aux messages admis : reçoit l'expéditeur authentifié et le
+/// message admis, rend éventuellement une valeur à mettre dans l'accusé.
+///
+/// N'est appelé que pour un verdict [`Verdict::Admis`] : jamais pour un refusé,
+/// un ignoré ni un déjà-vu (une opération n'est pas rejouée).
+pub type Repondeur = Arc<
+    dyn Fn(DeviceId, Message) -> Pin<Box<dyn Future<Output = Option<Value>> + Send>> + Send + Sync,
+>;
 
 #[derive(Debug, thiserror::Error)]
 pub enum TransportError {
@@ -96,7 +125,7 @@ pub async fn ecouter(
     peers: Peers,
     limits: Limits,
 ) -> Result<Flux, TransportError> {
-    ecouter_interne(adresse, identite, peers, limits, None).await
+    ecouter_interne(adresse, identite, peers, limits, None, None).await
 }
 
 /// Comme [`ecouter`], et accepte en plus les demandes d'appairage (ALPN
@@ -105,9 +134,11 @@ pub async fn ecouter(
 /// Chaque demande dont l'engagement-révélation a abouti remonte sur le récepteur
 /// comme un [`AppairageEnCours`] (code affiché, décision locale attendue). Le
 /// récepteur est borné à [`CAPACITE_DEMANDES`] : une demande qui ne tient pas est
-/// fermée aussitôt, jamais mise en file. `role_par_defaut` est le rôle porté par
-/// l'[`crate::Admission`] rendue (l'appelant peut le changer avant de l'inscrire) ;
-/// `delai` borne chaque appairage de bout en bout.
+/// fermée aussitôt, jamais mise en file. `role_par_defaut` n'est plus
+/// qu'**indicatif** (gardé pour la compatibilité) : le rôle de l'[`crate::Admission`]
+/// rendue découle du [`crate::Lien`] choisi des deux côtés
+/// ([`AppairageEnCours::decider_avec_lien`]). `delai` borne chaque appairage de
+/// bout en bout.
 ///
 /// Une clé **révoquée** qui demande l'appairage est fermée d'office, sans remonter.
 /// Une clé **active** peut se ré-appairer : l'admission reprend son identifiant et
@@ -121,10 +152,101 @@ pub async fn ecouter_avec_appairage(
     delai: Duration,
 ) -> Result<(Flux, mpsc::Receiver<AppairageEnCours>), TransportError> {
     let (tx, rx) = mpsc::channel(CAPACITE_DEMANDES);
-    let repondeur =
-        appairage::Repondeur::nouveau(identite, peers.clone(), role_par_defaut, delai, tx)?;
-    let flux = ecouter_interne(adresse, identite, peers, limits, Some(Arc::new(repondeur))).await?;
+    let repondeur = appairage::RepondeurAppairage::nouveau(
+        identite,
+        peers.clone(),
+        role_par_defaut,
+        delai,
+        tx,
+    )?;
+    let flux = ecouter_interne(
+        adresse,
+        identite,
+        peers,
+        limits,
+        Some(Arc::new(repondeur)),
+        None,
+    )
+    .await?;
     Ok((flux, rx))
+}
+
+/// Comme [`ecouter_avec_appairage`], et chaque message **admis** par la porte est
+/// passé à `repondeur` ; sa réponse (`Some`) part dans l'accusé, lu par [`appeler`].
+///
+/// - Seuls les messages admis appellent le répondeur : jamais un refusé, un
+///   ignoré ni un déjà-vu (un rejeu n'exécute pas deux fois une opération).
+/// - Le verdict part dans le [`Flux`] comme avec [`ecouter`], **avant** l'appel au
+///   répondeur : un répondeur lent ne retarde pas le flux.
+/// - Aucun verrou de la porte n'est tenu pendant l'attente du répondeur.
+/// - Le répondeur a [`DELAI_REPONSE`] ; passé ce délai, l'accusé part sans réponse.
+///   Une réponse de plus de [`PLAFOND_REPONSE`] octets devient
+///   `{"erreur":"reponse_trop_grosse"}`.
+/// - Une révocation de l'expéditeur pendant l'attente coupe la session sans accusé.
+/// - Les messages d'une même connexion sont traités un à un : un appel lent
+///   retarde les suivants **de cette connexion** (pas ceux des autres pairs).
+pub async fn ecouter_complet(
+    adresse: SocketAddr,
+    identite: &Identite,
+    peers: Peers,
+    limits: Limits,
+    role_par_defaut: AnchorKeyRole,
+    delai: Duration,
+    repondeur: Repondeur,
+) -> Result<(Flux, mpsc::Receiver<AppairageEnCours>), TransportError> {
+    ecouter_complet_avec_delai(
+        adresse,
+        identite,
+        peers,
+        limits,
+        role_par_defaut,
+        delai,
+        repondeur,
+        DELAI_REPONSE,
+    )
+    .await
+}
+
+/// [`ecouter_complet`] avec un délai de réponse choisi (tests).
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn ecouter_complet_avec_delai(
+    adresse: SocketAddr,
+    identite: &Identite,
+    peers: Peers,
+    limits: Limits,
+    role_par_defaut: AnchorKeyRole,
+    delai: Duration,
+    repondeur: Repondeur,
+    delai_reponse: Duration,
+) -> Result<(Flux, mpsc::Receiver<AppairageEnCours>), TransportError> {
+    let (tx, rx) = mpsc::channel(CAPACITE_DEMANDES);
+    let appairage = appairage::RepondeurAppairage::nouveau(
+        identite,
+        peers.clone(),
+        role_par_defaut,
+        delai,
+        tx,
+    )?;
+    let flux = ecouter_interne(
+        adresse,
+        identite,
+        peers,
+        limits,
+        Some(Arc::new(appairage)),
+        Some(Service {
+            repondeur,
+            delai: delai_reponse,
+        }),
+    )
+    .await?;
+    Ok((flux, rx))
+}
+
+/// Le répondeur de service d'un serveur et son délai.
+#[derive(Clone)]
+struct Service {
+    repondeur: Repondeur,
+    delai: Duration,
 }
 
 async fn ecouter_interne(
@@ -132,7 +254,8 @@ async fn ecouter_interne(
     identite: &Identite,
     peers: Peers,
     limits: Limits,
-    repondeur: Option<Arc<appairage::Repondeur>>,
+    repondeur: Option<Arc<appairage::RepondeurAppairage>>,
+    service: Option<Service>,
 ) -> Result<Flux, TransportError> {
     let ceiling = limits.ceiling();
     let gate = Arc::new(Mutex::new(Gate::new(peers, limits)));
@@ -153,6 +276,7 @@ async fn ecouter_interne(
             let gate = accept_gate.clone();
             let tx = accept_tx.clone();
             let repondeur = repondeur.clone();
+            let service = service.clone();
             tokio::spawn(async move {
                 let Ok(connection) = incoming.await else {
                     return;
@@ -168,7 +292,7 @@ async fn ecouter_interne(
                     }
                     return;
                 }
-                if let Err(e) = gerer_connexion(connection, gate, tx, ceiling).await {
+                if let Err(e) = gerer_connexion(connection, gate, tx, ceiling, service).await {
                     // La raison d'un refus est déjà rendue au flux (et au client) ;
                     // ici on ne garde que la trace de la fermeture.
                     let _ = e;
@@ -192,6 +316,44 @@ pub async fn envoyer(
     epingle: &Epingle,
     message: &Message,
 ) -> Result<Verdict, TransportError> {
+    let (ack, _endpoint) = echanger(adresse, identite, epingle, message, ACK_CEILING).await?;
+    verdict_du_ack(&ack, message)
+}
+
+/// Comme [`envoyer`], et rend aussi la réponse du pair (le `reponse` de l'accusé,
+/// voir [`ecouter_complet`]). L'accusé est lu jusqu'à [`PLAFOND_REPONSE`] plus une
+/// marge. `delai` borne toute l'opération (connexion, envoi, attente de la
+/// réponse) : au-delà, `Err(TransportError::Connexion("délai dépassé"))`.
+///
+/// `None` en réponse : le pair n'a rien répondu, n'a pas de répondeur, ou son
+/// répondeur a dépassé son délai. Un déjà-vu ne porte jamais de réponse.
+pub async fn appeler(
+    adresse: SocketAddr,
+    identite: &Identite,
+    epingle: &Epingle,
+    message: &Message,
+    delai: Duration,
+) -> Result<(Verdict, Option<Value>), TransportError> {
+    let plafond = PLAFOND_REPONSE + MARGE_ACCUSE;
+    let (ack, _endpoint) = tokio::time::timeout(
+        delai,
+        echanger(adresse, identite, epingle, message, plafond),
+    )
+    .await
+    .map_err(|_| TransportError::Connexion("délai dépassé".into()))??;
+    let verdict = verdict_du_ack(&ack, message)?;
+    Ok((verdict, ack.reponse))
+}
+
+/// Une connexion, un message, un accusé lu sous `plafond`. L'endpoint est rendu
+/// pour vivre jusqu'à la lecture du verdict.
+async fn echanger(
+    adresse: SocketAddr,
+    identite: &Identite,
+    epingle: &Epingle,
+    message: &Message,
+    plafond: usize,
+) -> Result<(Ack, quinn::Endpoint), TransportError> {
     let mut endpoint = quinn::Endpoint::client("0.0.0.0:0".parse().expect("adresse valide"))
         .map_err(|e| TransportError::Connexion(e.to_string()))?;
     endpoint.set_default_client_config(tls::quic_client(tls::config_client(identite, epingle)?)?);
@@ -212,10 +374,10 @@ pub async fn envoyer(
     send.finish()
         .map_err(|e| TransportError::Connexion(e.to_string()))?;
 
-    let ack = cadrage::lire(&mut recv, ACK_CEILING).await?;
+    let ack = cadrage::lire(&mut recv, plafond).await?;
     let ack: Ack = serde_json::from_slice(&ack)
         .map_err(|e| TransportError::Connexion(format!("verdict illisible : {e}")))?;
-    verdict_du_ack(&ack, message)
+    Ok((ack, endpoint))
 }
 
 /// Gère une connexion : authentifie le pair par sa clé épinglée, contrôle la
@@ -225,6 +387,7 @@ async fn gerer_connexion(
     gate: Arc<Mutex<Gate>>,
     tx: mpsc::UnboundedSender<(DeviceId, Verdict)>,
     ceiling: usize,
+    service: Option<Service>,
 ) -> Result<(), TransportError> {
     // 1. Identité authentifiée par le canal : la clé publique du certificat client.
     let cle = cle_du_pair(&connection)?;
@@ -286,6 +449,8 @@ async fn gerer_connexion(
             }
         };
 
+        // Le verrou de la porte ne vit que dans ce bloc : il est relâché avant
+        // tout appel au répondeur.
         let (expediteur, verdict) = match &lien {
             Some((id, _)) => {
                 let mut gate = gate.lock().await;
@@ -300,13 +465,31 @@ async fn gerer_connexion(
             }
         };
 
-        let ack = ack_du_verdict(&verdict);
-        let ack_bytes = serde_json::to_vec(&ack).expect("verdict serialise");
+        let mut ack = ack_du_verdict(&verdict);
         let refuse = matches!(verdict, Verdict::Refuse(_));
+        // Le message admis à passer au répondeur (seulement `Admis`).
+        let appel = match (&service, &verdict) {
+            (Some(service), Verdict::Admis(m)) => Some((service.clone(), m.clone())),
+            _ => None,
+        };
+        let _ = tx.send((expediteur.clone(), verdict));
+        if let Some((service, message)) = appel {
+            let attente =
+                tokio::time::timeout(service.delai, (service.repondeur)(expediteur, message));
+            ack.reponse = tokio::select! {
+                biased;
+                () = coupure.notified() => {
+                    // Révoqué pendant l'appel : la session tombe, sans accusé.
+                    connection.close(quinn::VarInt::from_u32(1), b"cle revoquee");
+                    return Ok(());
+                }
+                reponse = attente => reponse.ok().flatten().map(plafonner_reponse),
+            };
+        }
+        let ack_bytes = serde_json::to_vec(&ack).expect("verdict serialise");
         if cadrage::ecrire(&mut send, &ack_bytes).await.is_ok() {
             let _ = send.finish();
         }
-        let _ = tx.send((expediteur, verdict));
         if refuse {
             // Refuse ferme la connexion. L'acquittement (et la raison) est déjà
             // écrit et le flux fini ; on attend (borné) que le pair ferme pour
@@ -319,6 +502,15 @@ async fn gerer_connexion(
     }
 
     Ok(())
+}
+
+/// Une réponse plus grosse que [`PLAFOND_REPONSE`] (JSON sérialisé) est remplacée
+/// par `{"erreur":"reponse_trop_grosse"}`.
+fn plafonner_reponse(reponse: Value) -> Value {
+    match serde_json::to_vec(&reponse) {
+        Ok(octets) if octets.len() <= PLAFOND_REPONSE => reponse,
+        _ => json!({"erreur": "reponse_trop_grosse"}),
+    }
 }
 
 /// Résout l'identifiant de la clé du canal et arme la coupure de sa session.
@@ -399,6 +591,9 @@ struct Ack {
     type_: Option<String>,
     #[serde(default)]
     raison: Option<String>,
+    /// La réponse du répondeur de service, pour un message admis.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    reponse: Option<Value>,
 }
 
 fn ack_du_verdict(v: &Verdict) -> Ack {
@@ -408,24 +603,28 @@ fn ack_du_verdict(v: &Verdict) -> Ack {
             id: None,
             type_: None,
             raison: None,
+            reponse: None,
         },
         Verdict::DejaVu(id) => Ack {
             v: "deja-vu".into(),
             id: Some(id.to_string()),
             type_: None,
             raison: None,
+            reponse: None,
         },
         Verdict::Ignore(t) => Ack {
             v: "ignore".into(),
             id: None,
             type_: Some(t.clone()),
             raison: None,
+            reponse: None,
         },
         Verdict::Refuse(r) => Ack {
             v: "refuse".into(),
             id: None,
             type_: None,
             raison: Some(r.to_string()),
+            reponse: None,
         },
     }
 }
@@ -891,5 +1090,274 @@ mod tests {
         .await;
         let mx = message(&cle(9), "device-99999999", ALICE, 50);
         assert_eq!(envoyer_sur(&conn_x, &mx).await, "refuse");
+    }
+
+    // ---- Appel de service : un pair répond dans l'accusé ----
+
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// Un répondeur qui compte ses appels et rend `f(expéditeur, message)`.
+    fn compteur_repondeur(
+        compteur: Arc<AtomicUsize>,
+        f: fn(&DeviceId, &Message) -> Option<Value>,
+    ) -> Repondeur {
+        Arc::new(move |de, m| {
+            compteur.fetch_add(1, Ordering::SeqCst);
+            let r = f(&de, &m);
+            Box::pin(async move { r })
+        })
+    }
+
+    /// Un écho : `{"de", "charge"}`.
+    fn echo(de: &DeviceId, m: &Message) -> Option<Value> {
+        Some(json!({"de": de.as_str(), "charge": m.charge}))
+    }
+
+    /// Serveur `ecouter_complet` (clé [3]) avec alice et bob admis.
+    async fn serveur_complet(repondeur: Repondeur) -> Flux {
+        ecouter_complet(
+            "127.0.0.1:0".parse().unwrap(),
+            &serveur_id(),
+            registre_ab(),
+            Limits::default(),
+            AnchorKeyRole::Shared,
+            DELAI,
+            repondeur,
+        )
+        .await
+        .unwrap()
+        .0
+    }
+
+    fn appel(k: &SigningKey, de: &str, id: u128) -> Message {
+        Message::signed(
+            k,
+            Uuid::from_u128(id),
+            dev(de),
+            dev("device-cccccccc"),
+            MessageType::ServiceAppel,
+            1,
+            json!({"service":"echo","x":1}),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn les_types_de_service_ont_leur_nom_sur_le_fil() {
+        assert_eq!(MessageType::ServiceAppel.wire(), "service.appel");
+        assert_eq!(MessageType::ServiceReponse.wire(), "service.reponse");
+        assert_eq!(
+            MessageType::from_wire("service.appel"),
+            Some(MessageType::ServiceAppel)
+        );
+        assert_eq!(
+            MessageType::from_wire("service.reponse"),
+            Some(MessageType::ServiceReponse)
+        );
+        assert!(MessageType::ALL.contains(&MessageType::ServiceAppel));
+        assert!(MessageType::ALL.contains(&MessageType::ServiceReponse));
+        // L'accusé sans réponse garde exactement sa forme d'avant.
+        let ack = serde_json::to_string(&ack_du_verdict(&Verdict::DejaVu(Uuid::nil()))).unwrap();
+        assert!(!ack.contains("reponse"), "{ack}");
+    }
+
+    // Un `service.appel` admis reçoit la réponse du répondeur ; le verdict part
+    // aussi dans le flux.
+    #[tokio::test]
+    async fn s1_service_appel_admis_recoit_la_reponse() {
+        let compteur = Arc::new(AtomicUsize::new(0));
+        let mut serveur = serveur_complet(compteur_repondeur(compteur.clone(), echo)).await;
+        let m = appel(&cle(1), ALICE, 60);
+        let (verdict, reponse) = appeler(
+            serveur.local_addr(),
+            &identite(1, ALICE),
+            &epingle_serveur(),
+            &m,
+            DELAI,
+        )
+        .await
+        .unwrap();
+        assert_eq!(verdict, Verdict::Admis(m.clone()));
+        assert_eq!(
+            reponse,
+            Some(json!({"de": ALICE, "charge": {"service":"echo","x":1}}))
+        );
+        assert_eq!(compteur.load(Ordering::SeqCst), 1);
+        let (de, recu) = avec_delai(DELAI, serveur.prochain())
+            .await
+            .flatten()
+            .unwrap();
+        assert_eq!(de, dev(ALICE));
+        assert_eq!(recu, Verdict::Admis(m));
+    }
+
+    // Une clé inconnue : refusée par la porte, le répondeur n'est jamais appelé,
+    // aucune réponse.
+    #[tokio::test]
+    async fn s2_cle_inconnue_n_appelle_jamais_le_repondeur() {
+        let compteur = Arc::new(AtomicUsize::new(0));
+        let mut serveur = serveur_complet(compteur_repondeur(compteur.clone(), echo)).await;
+        let m = appel(&cle(9), "device-99999999", 61);
+        let resultat = appeler(
+            serveur.local_addr(),
+            &identite(9, "device-99999999"),
+            &epingle_serveur(),
+            &m,
+            DELAI,
+        )
+        .await;
+        assert!(
+            matches!(resultat, Err(TransportError::Refuse(_))),
+            "{resultat:?}"
+        );
+        let (_, recu) = avec_delai(DELAI, serveur.prochain())
+            .await
+            .flatten()
+            .unwrap();
+        assert_eq!(
+            recu,
+            Verdict::Refuse(Raison::CleInconnue("device-99999999".into()))
+        );
+        assert_eq!(compteur.load(Ordering::SeqCst), 0);
+    }
+
+    // Un rejeu (même id) : déjà-vu, sans réponse, et le répondeur n'est appelé
+    // qu'une fois.
+    #[tokio::test]
+    async fn s3_rejeu_n_appelle_pas_deux_fois_le_repondeur() {
+        let compteur = Arc::new(AtomicUsize::new(0));
+        let serveur = serveur_complet(compteur_repondeur(compteur.clone(), echo)).await;
+        let m = appel(&cle(1), ALICE, 62);
+        let cible = (serveur.local_addr(), identite(1, ALICE), epingle_serveur());
+        let (v1, r1) = appeler(cible.0, &cible.1, &cible.2, &m, DELAI)
+            .await
+            .unwrap();
+        assert_eq!(v1, Verdict::Admis(m.clone()));
+        assert!(r1.is_some());
+        let (v2, r2) = appeler(cible.0, &cible.1, &cible.2, &m, DELAI)
+            .await
+            .unwrap();
+        assert_eq!(v2, Verdict::DejaVu(Uuid::from_u128(62)));
+        assert_eq!(r2, None);
+        assert_eq!(compteur.load(Ordering::SeqCst), 1);
+    }
+
+    // Une réponse au-delà de `PLAFOND_REPONSE` est remplacée par une erreur.
+    #[tokio::test]
+    async fn s4_reponse_trop_grosse_est_remplacee() {
+        let compteur = Arc::new(AtomicUsize::new(0));
+        let serveur = serveur_complet(compteur_repondeur(compteur.clone(), |_, _| {
+            Some(json!("x".repeat(PLAFOND_REPONSE)))
+        }))
+        .await;
+        let m = appel(&cle(1), ALICE, 63);
+        let (verdict, reponse) = appeler(
+            serveur.local_addr(),
+            &identite(1, ALICE),
+            &epingle_serveur(),
+            &m,
+            DELAI,
+        )
+        .await
+        .unwrap();
+        assert_eq!(verdict, Verdict::Admis(m));
+        assert_eq!(reponse, Some(json!({"erreur": "reponse_trop_grosse"})));
+        // Juste sous le plafond : la réponse passe intacte (`appeler` la lit).
+        assert_eq!(
+            plafonner_reponse(json!("x".repeat(PLAFOND_REPONSE - 2))),
+            json!("x".repeat(PLAFOND_REPONSE - 2))
+        );
+    }
+
+    // Un répondeur qui dépasse son délai : l'accusé part sans réponse, en temps borné.
+    #[tokio::test]
+    async fn s5_repondeur_en_retard_l_accuse_arrive_sans_reponse() {
+        let lent: Repondeur = Arc::new(|_, _| {
+            Box::pin(async {
+                tokio::time::sleep(Duration::from_secs(30)).await;
+                Some(json!("trop tard"))
+            })
+        });
+        let (serveur, _rx) = ecouter_complet_avec_delai(
+            "127.0.0.1:0".parse().unwrap(),
+            &serveur_id(),
+            registre_ab(),
+            Limits::default(),
+            AnchorKeyRole::Shared,
+            DELAI,
+            lent,
+            Duration::from_millis(200),
+        )
+        .await
+        .unwrap();
+        let m = appel(&cle(1), ALICE, 64);
+        let debut = std::time::Instant::now();
+        let (verdict, reponse) = appeler(
+            serveur.local_addr(),
+            &identite(1, ALICE),
+            &epingle_serveur(),
+            &m,
+            DELAI,
+        )
+        .await
+        .unwrap();
+        assert_eq!(verdict, Verdict::Admis(m));
+        assert_eq!(reponse, None);
+        assert!(
+            debut.elapsed() < Duration::from_secs(3),
+            "{:?}",
+            debut.elapsed()
+        );
+    }
+
+    // `appeler` borne toute l'opération : un pair qui ne répond pas à temps donne
+    // `Connexion("délai dépassé")`.
+    #[tokio::test]
+    async fn s6_appeler_rend_delai_depasse() {
+        let lent: Repondeur = Arc::new(|_, _| {
+            Box::pin(async {
+                tokio::time::sleep(Duration::from_secs(30)).await;
+                None
+            })
+        });
+        let serveur = serveur_complet(lent).await;
+        let m = appel(&cle(1), ALICE, 65);
+        let resultat = appeler(
+            serveur.local_addr(),
+            &identite(1, ALICE),
+            &epingle_serveur(),
+            &m,
+            Duration::from_millis(500),
+        )
+        .await;
+        match resultat {
+            Err(TransportError::Connexion(raison)) => assert_eq!(raison, "délai dépassé"),
+            autre => panic!("attendu délai dépassé, reçu {autre:?}"),
+        }
+    }
+
+    // `envoyer` vers `ecouter_complet` marche toujours : verdict rendu, réponse
+    // ignorée, flux alimenté.
+    #[tokio::test]
+    async fn s7_envoyer_vers_ecouter_complet_marche_toujours() {
+        let compteur = Arc::new(AtomicUsize::new(0));
+        let mut serveur = serveur_complet(compteur_repondeur(compteur.clone(), echo)).await;
+        let m = message(&cle(2), BOB, ALICE, 66);
+        let verdict = envoyer(
+            serveur.local_addr(),
+            &identite(2, BOB),
+            &epingle_serveur(),
+            &m,
+        )
+        .await
+        .unwrap();
+        assert_eq!(verdict, Verdict::Admis(m.clone()));
+        assert_eq!(compteur.load(Ordering::SeqCst), 1);
+        let (de, recu) = avec_delai(DELAI, serveur.prochain())
+            .await
+            .flatten()
+            .unwrap();
+        assert_eq!(de, dev(BOB));
+        assert_eq!(recu, Verdict::Admis(m));
     }
 }

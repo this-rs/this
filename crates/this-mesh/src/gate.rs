@@ -386,6 +386,35 @@ mod tests {
     }
 
     #[test]
+    fn service_appel_a_son_plafond_d_un_mio() {
+        let l = Limits::default();
+        assert_eq!(l.max_for(MessageType::ServiceAppel), 1024 * 1024);
+        assert_eq!(l.max_for(MessageType::ServiceReponse), 1024 * 1024);
+        assert_eq!(l.ceiling(), 1024 * 1024);
+        let (mut g, k, alice, bob) = setup();
+        let charge = json!({"x": "y".repeat(512 * 1024)});
+        let gros = |kind, id| {
+            Message::signed(
+                &k,
+                Uuid::from_u128(id),
+                alice.clone(),
+                bob.clone(),
+                kind,
+                1,
+                charge.clone(),
+            )
+            .unwrap()
+        };
+        // 512 Kio : admis en `service.appel`, refusé en `espace.op` (64 Kio).
+        let appel = gros(MessageType::ServiceAppel, 1);
+        assert_eq!(g.admettre(&alice, &appel.to_bytes()), Verdict::Admis(appel));
+        assert!(matches!(
+            g.admettre(&alice, &gros(MessageType::EspaceOp, 2).to_bytes()),
+            Verdict::Refuse(Raison::TropGros { .. })
+        ));
+    }
+
+    #[test]
     fn device_id_shape() {
         assert!(DeviceId::parse("device-0123abcd").is_some());
         for bad in [

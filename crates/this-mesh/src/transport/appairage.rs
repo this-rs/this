@@ -12,7 +12,7 @@
 //!                                        ◀──  tire nR ; nonce nR   (après l'engagement)
 //!   revele nI                            ──▶  vérifie h, sinon abandon
 //!   code = sas(moi, pair, nI ‖ nR)            code = sas(moi, pair, nI ‖ nR)
-//!   confirme | refuse                    ◀─▶  confirme | refuse
+//!   confirme{lien} | refuse              ◀─▶  confirme{lien} | refuse
 //! ```
 //!
 //! `D` est [`ENGAGEMENT_DOMAIN`]. L'engagement fige nI avant que R ne choisisse
@@ -26,6 +26,15 @@
 //! L'[`Admission`] n'est rendue que si la décision locale ET celle du pair sont
 //! « oui », dans le délai. Le transport n'écrit jamais au registre : l'appelant
 //! inscrit l'admission ([`Admission::inscrire`]).
+//!
+//! # Le lien
+//!
+//! Chaque « oui » porte le [`Lien`] choisi de ce côté :
+//! `{"t":"confirme","lien":"moi"|"autre"}`. Le lien final ne vaut [`Lien::Moi`]
+//! que si les deux côtés ont dit `moi` ([`Lien::combiner`]), et il fixe le rôle de
+//! l'admission (`Moi` → `Ownership`, `Autre` → `Shared`). Un `confirme` sans
+//! champ `lien` (pair plus ancien) vaut `autre` ; un pair ancien qui reçoit le
+//! champ `lien` l'ignore (variante unitaire d'une énumération étiquetée).
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -41,7 +50,7 @@ use tokio::time::{Instant, timeout_at};
 
 use super::{ALPN_APPAIRAGE, CadrageError, Identite, TransportError, alpn_negocie, cadrage, tls};
 use crate::envelope::{from_hex, to_hex};
-use crate::{Admission, DeviceId, Peers, Rencontre, SasAttendu};
+use crate::{Admission, DeviceId, Lien, Peers, Rencontre, SasAttendu};
 
 /// Préfixe de domaine de l'engagement : `SHA256(ENGAGEMENT_DOMAIN ‖ nI)`.
 pub const ENGAGEMENT_DOMAIN: &[u8] = b"this-mesh/pair/commit/v1";
@@ -76,8 +85,11 @@ pub(super) enum Echange {
     Nonce { n: String },
     /// I → R : nI en hex, à comparer à l'engagement.
     Revele { n: String },
-    /// Décision humaine : oui.
-    Confirme,
+    /// Décision humaine : oui, avec le lien choisi de ce côté (absent = `autre`).
+    Confirme {
+        #[serde(default)]
+        lien: Lien,
+    },
     /// Décision humaine : non.
     Refuse,
 }
@@ -94,6 +106,10 @@ pub(super) fn engagement(n: &[u8]) -> [u8; 32] {
 ///
 /// Lâché sans [`AppairageEnCours::decider`], il ferme sa connexion : le pair voit
 /// un abandon et rien n'est écrit d'aucun côté.
+///
+/// Le rôle passé à [`appairer_vers`] ou à `ecouter_avec_appairage` est conservé
+/// ici mais n'est plus qu'**indicatif** : le rôle de l'admission découle du
+/// [`Lien`] final (voir [`AppairageEnCours::decider_avec_lien`]).
 pub struct AppairageEnCours {
     sas: SasAttendu,
     pair_id: DeviceId,
@@ -137,13 +153,35 @@ impl AppairageEnCours {
         self.pair_cle
     }
 
+    /// Le rôle passé à l'ouverture de l'appairage. **Indicatif** : le rôle de
+    /// l'admission découle du lien final.
+    pub fn role_indicatif(&self) -> AnchorKeyRole {
+        self.role
+    }
+
     /// Envoie la décision locale, attend celle du pair. `Ok(Admission)` seulement
     /// si les deux disent oui avant l'échéance ; un refus (local ou du pair), un
     /// abandon ou le délai dépassé rendent une erreur, et rien n'est écrit.
-    pub async fn decider(mut self, accepte: bool) -> Result<Admission, TransportError> {
+    ///
+    /// Équivaut à [`AppairageEnCours::decider_avec_lien`] avec [`Lien::Autre`] :
+    /// l'admission porte le rôle `Shared`.
+    pub async fn decider(self, accepte: bool) -> Result<Admission, TransportError> {
+        self.decider_avec_lien(accepte, Lien::Autre).await
+    }
+
+    /// Comme [`AppairageEnCours::decider`], en envoyant le [`Lien`] choisi ici.
+    ///
+    /// Le lien final vaut [`Lien::Moi`] si et seulement si le pair a lui aussi
+    /// envoyé `moi` ; sinon [`Lien::Autre`]. Le rôle de l'admission en découle et
+    /// l'emporte sur le rôle (indicatif) passé à l'ouverture de l'appairage.
+    pub async fn decider_avec_lien(
+        mut self,
+        accepte: bool,
+        lien: Lien,
+    ) -> Result<Admission, TransportError> {
         let echeance = self.echeance;
         let mot = if accepte {
-            Echange::Confirme
+            Echange::Confirme { lien }
         } else {
             Echange::Refuse
         };
@@ -163,8 +201,8 @@ impl AppairageEnCours {
             return Err(abandon_du_pair(e));
         }
 
-        match lire(&mut self.recv, echeance).await {
-            Ok(Echange::Confirme) => {}
+        let lien_du_pair = match lire(&mut self.recv, echeance).await {
+            Ok(Echange::Confirme { lien }) => lien,
             Ok(Echange::Refuse) => {
                 self.fermer(CODE_REFUS, b"refus");
                 return Err(TransportError::Refuse(
@@ -181,7 +219,7 @@ impl AppairageEnCours {
                 self.fermer(CODE_ABANDON, b"abandon");
                 return Err(abandon_du_pair(e));
             }
-        }
+        };
 
         // Notre confirmation doit être reçue avant la fermeture : attente bornée
         // de son acquittement (le pair a peut-être déjà fermé, c'est sans effet).
@@ -198,11 +236,12 @@ impl AppairageEnCours {
 
         self.sas.confirmer_local();
         self.sas.confirmer_pair();
-        let mut admission = self
+        // Le lien final (et donc le rôle) l'emporte sur le rôle indicatif.
+        let admission = self
             .sas
             .appairer()
-            .ok_or_else(|| TransportError::Refuse("appairage incomplet".into()))?;
-        admission.role = self.role;
+            .ok_or_else(|| TransportError::Refuse("appairage incomplet".into()))?
+            .avec_lien(lien.combiner(lien_du_pair));
         self.fermer(CODE_APPAIRE, b"appaire");
         Ok(admission)
     }
@@ -226,8 +265,10 @@ impl Drop for AppairageEnCours {
 /// Côté initiateur : se connecte à `adresse` en ALPN d'appairage, mène
 /// l'engagement-révélation et rend l'appairage dont le code est affiché.
 ///
-/// `role` est le rôle que j'attribue au pair (porté par l'[`Admission`]) ;
-/// `delai` borne tout l'appairage, décision du pair comprise.
+/// `role` est **indicatif** (gardé pour la compatibilité, lisible par
+/// [`AppairageEnCours::role_indicatif`]) : le rôle porté par l'[`Admission`]
+/// découle du [`Lien`] choisi des deux côtés. `delai` borne tout l'appairage,
+/// décision du pair comprise.
 pub async fn appairer_vers(
     adresse: SocketAddr,
     identite: &Identite,
@@ -312,7 +353,7 @@ pub async fn appairer_vers(
 }
 
 /// Ce que le serveur sait pour répondre aux demandes d'appairage.
-pub(super) struct Repondeur {
+pub(super) struct RepondeurAppairage {
     moi: VerifyingKey,
     provider: Arc<CryptoProvider>,
     peers: Peers,
@@ -321,7 +362,7 @@ pub(super) struct Repondeur {
     tx: mpsc::Sender<AppairageEnCours>,
 }
 
-impl Repondeur {
+impl RepondeurAppairage {
     pub(super) fn nouveau(
         identite: &Identite,
         peers: Peers,
@@ -344,7 +385,7 @@ impl Repondeur {
 /// puis la remonte à l'appelant. Ne touche ni la porte ni le flux des messages.
 pub(super) async fn repondre(
     connexion: quinn::Connection,
-    r: &Repondeur,
+    r: &RepondeurAppairage,
 ) -> Result<(), TransportError> {
     let echeance = Instant::now() + r.delai;
 
@@ -913,6 +954,7 @@ mod tests {
     }
 
     // Ré-appairage d'une clé active : même identifiant, rôle mis à jour à l'inscription.
+    // Le rôle découle du lien (moi + moi → Ownership), pas de `role_par_defaut`.
     #[tokio::test]
     async fn re_appairage_d_une_cle_active_garde_l_identifiant() {
         let peers = Peers::new();
@@ -930,7 +972,11 @@ mod tests {
         .unwrap();
         let (i, r) = deux_cotes(flux.local_addr(), &mut rx, DELAI).await;
         assert_eq!(r.pair(), &ancien);
-        let (ai, ar) = tokio::join!(i.decider(true), r.decider(true));
+        assert_eq!(r.role_indicatif(), AnchorKeyRole::Ownership);
+        let (ai, ar) = tokio::join!(
+            i.decider_avec_lien(true, Lien::Moi),
+            r.decider_avec_lien(true, Lien::Moi)
+        );
         ai.unwrap();
         let ar = ar.unwrap();
         assert_eq!(ar.role, AnchorKeyRole::Ownership);
@@ -942,7 +988,14 @@ mod tests {
     #[test]
     fn les_messages_ont_la_forme_attendue_sur_le_fil() {
         let s = |m: &Echange| serde_json::to_string(m).unwrap();
-        assert_eq!(s(&Echange::Confirme), r#"{"t":"confirme"}"#);
+        assert_eq!(
+            s(&Echange::Confirme { lien: Lien::Moi }),
+            r#"{"t":"confirme","lien":"moi"}"#
+        );
+        assert_eq!(
+            s(&Echange::Confirme { lien: Lien::Autre }),
+            r#"{"t":"confirme","lien":"autre"}"#
+        );
         assert_eq!(s(&Echange::Refuse), r#"{"t":"refuse"}"#);
         assert_eq!(
             s(&Echange::Engage { h: "ab".into() }),
@@ -956,6 +1009,175 @@ mod tests {
             s(&Echange::Revele { n: "ef".into() }),
             r#"{"t":"revele","n":"ef"}"#
         );
+    }
+
+    // Compatibilité du fil dans les deux sens : un `confirme` sans `lien` (pair
+    // ancien) se lit `autre`, et un pair ancien lit notre `confirme` en ignorant
+    // le champ `lien`.
+    #[test]
+    fn confirme_reste_compatible_avec_un_pair_ancien() {
+        let lu: Echange = serde_json::from_str(r#"{"t":"confirme"}"#).unwrap();
+        assert_eq!(lu, Echange::Confirme { lien: Lien::Autre });
+        let lu: Echange = serde_json::from_str(r#"{"t":"confirme","lien":"moi"}"#).unwrap();
+        assert_eq!(lu, Echange::Confirme { lien: Lien::Moi });
+
+        // L'énumération telle qu'elle était avant le lien.
+        #[derive(Debug, Deserialize, PartialEq)]
+        #[serde(tag = "t", rename_all = "lowercase")]
+        enum Ancien {
+            Confirme,
+            Refuse,
+        }
+        let nouveau = serde_json::to_string(&Echange::Confirme { lien: Lien::Moi }).unwrap();
+        assert_eq!(
+            serde_json::from_str::<Ancien>(&nouveau).unwrap(),
+            Ancien::Confirme
+        );
+        let refus = serde_json::to_string(&Echange::Refuse).unwrap();
+        assert_eq!(
+            serde_json::from_str::<Ancien>(&refus).unwrap(),
+            Ancien::Refuse
+        );
+    }
+
+    // ---- Le lien « moi » / « autre », choisi des deux côtés ----
+
+    /// I et R décident avec leurs liens ; rend les deux admissions.
+    async fn deux_liens(lien_i: Lien, lien_r: Lien) -> (Admission, Admission) {
+        let (flux, mut rx) = repondeur(Peers::new(), DELAI).await;
+        let (i, r) = deux_cotes(flux.local_addr(), &mut rx, DELAI).await;
+        let (ai, ar) = tokio::join!(
+            i.decider_avec_lien(true, lien_i),
+            r.decider_avec_lien(true, lien_r)
+        );
+        (ai.unwrap(), ar.unwrap())
+    }
+
+    #[tokio::test]
+    async fn lien_moi_et_moi_donne_moi_et_ownership_des_deux_cotes() {
+        let (ai, ar) = deux_liens(Lien::Moi, Lien::Moi).await;
+        for a in [&ai, &ar] {
+            assert_eq!(a.lien(), Lien::Moi);
+            assert_eq!(a.role, AnchorKeyRole::Ownership);
+        }
+        // L'inscription porte le rôle du lien.
+        let peers = Peers::new();
+        ar.inscrire(&peers);
+        assert_eq!(peers.role(&id(2)), Some(AnchorKeyRole::Ownership));
+    }
+
+    #[tokio::test]
+    async fn lien_moi_et_autre_donne_autre_des_deux_cotes() {
+        let (ai, ar) = deux_liens(Lien::Moi, Lien::Autre).await;
+        for a in [&ai, &ar] {
+            assert_eq!(a.lien(), Lien::Autre);
+            assert_eq!(a.role, AnchorKeyRole::Shared);
+        }
+    }
+
+    #[tokio::test]
+    async fn lien_autre_et_moi_donne_autre_des_deux_cotes() {
+        let (ai, ar) = deux_liens(Lien::Autre, Lien::Moi).await;
+        for a in [&ai, &ar] {
+            assert_eq!(a.lien(), Lien::Autre);
+            assert_eq!(a.role, AnchorKeyRole::Shared);
+        }
+    }
+
+    /// Un initiateur écrit à la main : engagement, nonce, révélation conformes ;
+    /// rend le flux pour la suite (la décision, écrite à la main elle aussi).
+    async fn initiateur_manuel(
+        adresse: SocketAddr,
+    ) -> (
+        quinn::Endpoint,
+        quinn::Connection,
+        quinn::SendStream,
+        quinn::RecvStream,
+    ) {
+        let echeance = Instant::now() + DELAI;
+        let mut endpoint = quinn::Endpoint::client("0.0.0.0:0".parse().unwrap()).unwrap();
+        endpoint.set_default_client_config(
+            tls::quic_client(tls::config_client_appairage(&identite(2)).unwrap()).unwrap(),
+        );
+        let connexion = endpoint
+            .connect(adresse, "this-mesh.local")
+            .unwrap()
+            .await
+            .unwrap();
+        let (mut send, mut recv) = connexion.open_bi().await.unwrap();
+        let n_i = [5u8; 32];
+        ecrire(
+            &mut send,
+            &Echange::Engage {
+                h: to_hex(&engagement(&n_i)),
+            },
+            echeance,
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            lire(&mut recv, echeance).await.unwrap(),
+            Echange::Nonce { .. }
+        ));
+        ecrire(&mut send, &Echange::Revele { n: to_hex(&n_i) }, echeance)
+            .await
+            .unwrap();
+        (endpoint, connexion, send, recv)
+    }
+
+    // Un client ancien (ou tricheur) envoie `{"t":"confirme"}` sans lien : même si
+    // R dit « moi », le lien final est `autre` (Shared).
+    #[tokio::test]
+    async fn un_confirme_sans_lien_donne_autre() {
+        let (flux, mut rx) = repondeur(Peers::new(), DELAI).await;
+        let (_endpoint, _connexion, mut send, mut recv) =
+            initiateur_manuel(flux.local_addr()).await;
+        let r = tokio::time::timeout(DELAI, rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        cadrage::ecrire(&mut send, br#"{"t":"confirme"}"#)
+            .await
+            .unwrap();
+        let (ar, octets) = tokio::join!(
+            r.decider_avec_lien(true, Lien::Moi),
+            cadrage::lire(&mut recv, PLAFOND)
+        );
+        let ar = ar.unwrap();
+        assert_eq!(ar.lien(), Lien::Autre);
+        assert_eq!(ar.role, AnchorKeyRole::Shared);
+        // Ce que R a mis sur le fil : son « moi », explicite.
+        assert_eq!(octets.unwrap(), br#"{"t":"confirme","lien":"moi"}"#);
+    }
+
+    // `decider(true)` équivaut à `decider_avec_lien(true, Autre)` : sur le fil comme
+    // dans l'admission, même face à un pair qui dit « moi ».
+    #[tokio::test]
+    async fn decider_true_equivaut_a_autre() {
+        let (ai, ar) = {
+            let (flux, mut rx) = repondeur(Peers::new(), DELAI).await;
+            let (i, r) = deux_cotes(flux.local_addr(), &mut rx, DELAI).await;
+            let (ai, ar) = tokio::join!(i.decider(true), r.decider_avec_lien(true, Lien::Moi));
+            (ai.unwrap(), ar.unwrap())
+        };
+        for a in [&ai, &ar] {
+            assert_eq!(a.lien(), Lien::Autre);
+            assert_eq!(a.role, AnchorKeyRole::Shared);
+        }
+
+        let (flux, mut rx) = repondeur(Peers::new(), DELAI).await;
+        let (_endpoint, _connexion, mut send, mut recv) =
+            initiateur_manuel(flux.local_addr()).await;
+        let r = tokio::time::timeout(DELAI, rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        cadrage::ecrire(&mut send, br#"{"t":"confirme","lien":"moi"}"#)
+            .await
+            .unwrap();
+        let (ar, octets) = tokio::join!(r.decider(true), cadrage::lire(&mut recv, PLAFOND));
+        assert_eq!(ar.unwrap().lien(), Lien::Autre);
+        assert_eq!(octets.unwrap(), br#"{"t":"confirme","lien":"autre"}"#);
     }
 
     #[test]
