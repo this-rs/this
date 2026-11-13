@@ -449,6 +449,49 @@ mesuré en « indisponible sur ce build » : ce qui se lit absent **sort de la c
 D'où la règle jumelle côté banc — une capacité sans permission système (sélecteur, presse-papiers,
 partage) n'est pas `unsupported` mais `sans_etat`, et `from_bench` l'ignore.
 
+## Ce que « commun » voudrait dire entre iOS et macOS — et ce que la mesure en dit
+
+Les deux implémentations natives se ressemblent : dix fichiers portent le même nom des deux
+côtés. Mesuré le 13/11/2026 (Jaccard sur les lignes non vides, hors commentaires) :
+
+| Fichier | iOS | macOS | lignes communes | Jaccard |
+|---|---|---|---|---|
+| `location.swift` | 225 | 187 | 105 | 34 % |
+| `contacts.swift` | 140 | 108 | 57 | 30 % |
+| `calendar.swift` | 159 | 143 | 61 | 25 % |
+| `speech.swift` | 91 | 66 | 29 | 23 % |
+| `bluetooth.swift` | 168 | 370 | 72 | 15 % |
+| `photos.swift` | 220 | 208 | 54 | 14 % |
+| `camera_mic.swift` | 151 | 292 | 56 | 14 % |
+| `notifications.swift` | 90 | 46 | 16 | 13 % |
+| `files.swift` | 157 | 106 | 28 | 12 % |
+| `local_network.swift` | 217 | 160 | 36 | 11 % |
+
+**Mais aucune déclaration n'est identique octet pour octet** entre les deux arbres : le
+recouvrement est *sémantique*, avec des divergences réelles (champs présents d'un côté
+seulement, découpage différent des mêmes types). Ce n'est donc pas une extraction mécanique —
+c'est une réconciliation, déclaration par déclaration, et chaque divergence doit être tranchée
+en connaissance de cause.
+
+Ce qui **est** identique et vérifiable : le vocabulaire d'état du contrat —
+`"granted"`, `"prompt"`, `"denied"`, `"limited"`, `"unsupported"`. Il est écrit à la main
+**102 fois côté iOS et 93 fois côté macOS**. C'est le seul endroit où une faute de frappe change
+le sens d'une réponse, et c'est exactement la classe du défaut Face ID (un `state` absent, lu
+`unsupported` par le pont). Un type unique, `enum Etat: String`, le supprimerait.
+
+### Les trois formes possibles, et ce qu'elles coûtent
+
+| Forme | Ce que c'est | Le prix |
+|---|---|---|
+| **Paquet SPM `Famille`** | un paquet local dont dépendent `ios/Package.swift` et macOS | l'`xcodegen` de Tauri doit résoudre une dépendance de chemin ; à vérifier sur une app réelle |
+| **Paquet unique à trois cibles** | `Common`, `Ios`, `Macos` dans un seul manifeste | change `ios_path` dans `build.rs` et la façon dont Tauri fabrique le projet Xcode |
+| **Fichier unique dans `ios/Sources/`** | `build.rs` ajoute `ios/Sources/Commun/*.swift` à sa liste `swiftc` | macOS lit un fichier rangé côté iOS — laid, mais **aucun** changement d'empaquetage |
+
+La troisième est la moins risquée et la plus rapide : `build.rs` compile déjà macOS à partir
+d'une liste de fichiers explicite, donc y ajouter un répertoire ne touche ni SPM ni Xcode. C'est
+par là qu'il faut commencer, ne serait-ce que pour le vocabulaire d'état, avant d'envisager de
+déplacer des familles entières.
+
 ## Le banc : mesurer l'appareil, pas le promettre
 
 `this-device-tauri` porte une feature `banc` (`src/banc.rs`) et
@@ -566,6 +609,40 @@ afficher « 1 défaut » sur un pont sain. Deux corrections :
 
 Après quoi `defauts` est vide sur un pont sain, et la colonne veut de nouveau dire quelque
 chose.
+
+### Le banc sur macOS — mesuré pour la première fois le 13/11/2026
+
+L'app du banc se construit aussi pour le bureau (`cargo tauri build --debug --bundles app`),
+et le même `THIS_DEVICE_BANC=1` produit le rapport. Sur le Mac de développement :
+
+```text
+defauts =
+notifications = prompt      camera = prompt        microphone = prompt
+location = prompt           contacts = prompt      photos = prompt
+calendar = prompt           speech = prompt        bluetooth = prompt
+local_network = granted     clipboard/share/photos_pick/files_pick = sans_etat
+live_activity · health · nfc · gyroscope · motion_activity · face_id = unsupported
+localNetworkBrowse = repondu (5 351 ms)   filesRead = refus (invalid_bookmark)
+```
+
+Les cinq `unsupported` sont honnêtes : un Mac n'a ni Live Activity, ni HealthKit, ni NFC, ni
+podomètre, et n'a pas de Face ID (Touch ID n'est pas une biométrie « appareil » au sens du
+contrat — `faceIdStatus` répond quand même, par le chemin Touch ID).
+
+**Le piège, et il tue le processus** : lancé **hors bundle** (le binaire nu dans
+`target/debug/`), le banc meurt sur
+
+```text
+*** Terminating app due to uncaught exception 'NSInternalInconsistencyException',
+    reason: 'bundleProxyForCurrentProcess is nil'
+```
+
+`ThisDeviceMacOS.notificationsStatus` appelle `UNUserNotificationCenter.currentNotificationCenter()`
+depuis un fil du pool tokio ; sans bundle, UserNotifications lève une exception Objective-C, et
+**une exception ObjC n'est pas rattrapable depuis Rust** — `catch_unwind` ne voit rien, le
+processus est terminé. Mesuré : le même binaire, empaqueté en `.app`, rend son rapport
+normalement. Deux conséquences : pour mesurer macOS il faut une app empaquetée, et un hôte qui
+appellerait ce chemin depuis un processus non empaqueté mourrait sans trace Rust.
 
 ### Et ce que le banc a coûté à l'hôte pour y arriver
 
