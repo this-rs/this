@@ -115,11 +115,13 @@ pub fn status_json(state: PermissionState) -> Value {
 /// C'est la seule déclaration de la surface Linux ; `tests/linux_surface.rs` la tient contre
 /// deux choses à la fois :
 ///
-/// 1. le **dispatch lui-même** — pour chaque méthode de `METHODS`, `call` doit répondre
-///    `not_supported` si et seulement si elle n'est pas ici (mesuré en l'appelant, pas en
-///    relisant le `match`) ;
+/// 1. le **dispatch lui-même** — les motifs du `match` de `call` doivent être exactement cette
+///    liste plus `REFUSED` (lu dans la source : une réponse d'exécution dépend du matériel) ;
 /// 2. la **carte du framework** — une entrée `device.*` qui nomme `Linux` ne peut citer que
 ///    des méthodes de cette liste.
+///
+/// `status` n'y figure pas : ce n'est pas une méthode de famille mais `Request::Status`, et sa
+/// surface est `STATUS_CAPABILITIES`, juste en dessous.
 ///
 /// Écrite à la main, donc elle peut mentir — d'où les deux contrôles. Ce qui n'y est pas
 /// (connexion Bluetooth, capture photo/vidéo, contacts, calendrier, santé, NFC, Face ID,
@@ -128,7 +130,6 @@ pub fn status_json(state: PermissionState) -> Value {
 pub const SUPPORTED: &[&str] = &[
     // BlueZ (bus système) : l'état de la permission et le scan. La connexion, la lecture d'une
     // caractéristique et l'écriture ne sont pas branchées.
-    "status",
     "bluetoothState",
     "bluetoothScan",
     // Le portail XDG : l'ÉTAT de la caméra et du micro, et la demande — qui, sous Linux,
@@ -140,6 +141,34 @@ pub const SUPPORTED: &[&str] = &[
     "locationSample",
     // `sysfs` / IIO : un échantillon de gyroscope.
     "gyroscopeSample",
+];
+
+/// Les méthodes **routées uniquement pour dire non**.
+///
+/// `call` les connaît — il ne rend pas `not_supported` — mais elles répondent `unsupported` :
+/// la capture photo/vidéo, l'enregistrement micro, le podomètre (pas de coprocesseur de
+/// mouvement sur un bureau) et la connexion Bluetooth et ses suivantes.
+///
+/// La distinction compte pour la carte : une méthode qui répond `unsupported` n'est pas une
+/// capacité qu'on annonce. Elle est ici pour que `tests/linux_surface.rs` puisse vérifier que
+/// **tout ce qui est routé est soit servi, soit refusé exprès** — sans quoi une méthode routée
+/// par distraction échapperait à la carte sans que personne ne le sache.
+pub const REFUSED: &[&str] = &[
+    "cameraCapturePhoto",
+    "cameraRecordVideo",
+    "microphoneStart",
+    "microphoneStop",
+    "motionActivityStatus",
+    "motionActivityRequest",
+    // La famille Bluetooth au-delà du scan : `m if m.starts_with("bluetooth")`. Les deux
+    // servies (`bluetoothState`, `bluetoothScan`) sont dans `SUPPORTED` et traitées avant.
+    "bluetoothConnect",
+    "bluetoothDisconnect",
+    "bluetoothServices",
+    "bluetoothRead",
+    "bluetoothWrite",
+    "bluetoothSubscribe",
+    "bluetoothNotifications",
 ];
 
 /// Les capacités dont ce backend sait lire l'**état** (`Request::Status`). Les autres
