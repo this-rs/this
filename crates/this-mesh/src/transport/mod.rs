@@ -30,10 +30,12 @@ use serde_json::{Value, json};
 use this_vfs::layout::{AnchorKeyRole, AnchorKeyState};
 use tokio::sync::{Mutex, Notify, mpsc};
 
+use crate::invitation::Jetons;
 use crate::{DeviceId, Gate, Limits, Message, Peers, Raison, Surveillance, Verdict};
 
 pub use appairage::{
-    AppairageEnCours, CAPACITE_DEMANDES, DELAI_APPAIRAGE, ENGAGEMENT_DOMAIN, appairer_vers,
+    AppairageEnCours, Attente, CAPACITE_DEMANDES, DELAI_APPAIRAGE, ENGAGEMENT_DOMAIN,
+    appairer_vers, appairer_vers_avec,
 };
 pub use cadrage::CadrageError;
 pub use tls::{Epingle, Identite};
@@ -171,6 +173,33 @@ pub async fn ecouter_avec_appairage(
     role_par_defaut: AnchorKeyRole,
     delai: Duration,
 ) -> Result<(Flux, mpsc::Receiver<AppairageEnCours>), TransportError> {
+    ecouter_avec_appairage_et_jetons(
+        adresse,
+        identite,
+        peers,
+        limits,
+        role_par_defaut,
+        delai,
+        None,
+    )
+    .await
+}
+
+/// Comme [`ecouter_avec_appairage`], avec le registre des jetons d'invitation.
+///
+/// Quand un QR est affiché (au moins un jeton vivant dans `jetons`), un appairage
+/// entrant doit présenter ce jeton : c'est la contrepartie du fait que l'écran, à
+/// ce moment-là, montre quelque chose que seule une caméra peut lire. Registre
+/// vide ou absent : l'appairage de proximité (SAS seul) reste ouvert.
+pub async fn ecouter_avec_appairage_et_jetons(
+    adresse: SocketAddr,
+    identite: &Identite,
+    peers: Peers,
+    limits: Limits,
+    role_par_defaut: AnchorKeyRole,
+    delai: Duration,
+    jetons: Option<Arc<Jetons>>,
+) -> Result<(Flux, mpsc::Receiver<AppairageEnCours>), TransportError> {
     let (tx, rx) = mpsc::channel(CAPACITE_DEMANDES);
     let repondeur = appairage::RepondeurAppairage::nouveau(
         identite,
@@ -178,6 +207,7 @@ pub async fn ecouter_avec_appairage(
         role_par_defaut,
         delai,
         tx,
+        jetons,
     )?;
     let flux = ecouter_interne(
         &[adresse],
@@ -223,6 +253,7 @@ pub async fn ecouter_complet(
         delai,
         repondeur,
         DELAI_REPONSE,
+        None,
     )
     .await
 }
@@ -258,6 +289,35 @@ pub async fn ecouter_complet_sur(
     delai: Duration,
     repondeur: Repondeur,
 ) -> Result<(Flux, mpsc::Receiver<AppairageEnCours>), TransportError> {
+    ecouter_complet_sur_et_jetons(
+        adresses,
+        identite,
+        peers,
+        limits,
+        role_par_defaut,
+        delai,
+        repondeur,
+        None,
+    )
+    .await
+}
+
+/// Comme [`ecouter_complet_sur`], avec le registre des jetons d'invitation du QR.
+///
+/// Le registre va jusqu'au répondeur d'appairage : tant qu'un QR est affiché
+/// (au moins un jeton vivant), une demande entrante doit présenter ce jeton.
+/// Voir [`ecouter_avec_appairage_et_jetons`].
+#[allow(clippy::too_many_arguments)]
+pub async fn ecouter_complet_sur_et_jetons(
+    adresses: &[SocketAddr],
+    identite: &Identite,
+    peers: Peers,
+    limits: Limits,
+    role_par_defaut: AnchorKeyRole,
+    delai: Duration,
+    repondeur: Repondeur,
+    jetons: Option<Arc<Jetons>>,
+) -> Result<(Flux, mpsc::Receiver<AppairageEnCours>), TransportError> {
     ecouter_complet_avec_delai(
         adresses,
         identite,
@@ -267,6 +327,7 @@ pub async fn ecouter_complet_sur(
         delai,
         repondeur,
         DELAI_REPONSE,
+        jetons,
     )
     .await
 }
@@ -319,6 +380,7 @@ pub(crate) async fn ecouter_complet_avec_delai(
     delai: Duration,
     repondeur: Repondeur,
     delai_reponse: Duration,
+    jetons: Option<Arc<Jetons>>,
 ) -> Result<(Flux, mpsc::Receiver<AppairageEnCours>), TransportError> {
     let (tx, rx) = mpsc::channel(CAPACITE_DEMANDES);
     let appairage = appairage::RepondeurAppairage::nouveau(
@@ -327,6 +389,7 @@ pub(crate) async fn ecouter_complet_avec_delai(
         role_par_defaut,
         delai,
         tx,
+        jetons,
     )?;
     let flux = ecouter_interne(
         adresses,
@@ -1437,6 +1500,7 @@ mod tests {
             DELAI,
             lent,
             Duration::from_millis(200),
+            None,
         )
         .await
         .unwrap();
