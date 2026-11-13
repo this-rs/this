@@ -70,7 +70,9 @@ pub use module::{
     CompiledEntity, DESCRIPTOR_FORMAT, DescriptorSet, JobDesc, ModuleDescriptor, ModuleReq,
     OperationDesc,
 };
-pub use perm::{Operation, PermDesc, PolicyExpr, PrincipalView};
+pub use perm::{
+    Operation, PermDesc, PolicyExpr, PrincipalView, Sujet, autorise, autorise_op, roles_de,
+};
 pub use query::{
     CONTEXT_REF, Context, FilterExpr, FilterOp, Page, Query, QuerySchema, SortDir, SortSpec,
     Untyped,
