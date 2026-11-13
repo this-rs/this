@@ -700,14 +700,15 @@ pub fn surface() -> Surface {
                 &[Ios, Ipados, Macos],
                 Status::Live,
             ),
-            // Planifier et lire les attentes : iOS seulement pour l'instant (le pont macOS ne
-            // connaît que poster et retirer, `macos/Sources/notifications.swift`).
             Capability::new(
                 "device.notifications.schedule",
                 Tier::Shell,
                 "PLANIFIER une notification (1 s à 30 jours) et lire celles qui attendent",
                 Some("notificationsSchedule / notificationsPending"),
-                &[Ios, Ipados],
+                // macOS depuis le 13/11/2026 : UserNotifications offre le déclencheur de temps
+                // et la liste des attentes, les mêmes API que sur iOS. La carte ne le disait pas
+                // parce que le pont ne les routait pas.
+                &[Ios, Ipados, Macos],
                 Status::Live,
             ),
             Capability::new(
