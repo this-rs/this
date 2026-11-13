@@ -33,11 +33,11 @@ enum MacContacts {
     static func currentState() -> String {
         let status = CNContactStore.authorizationStatus(for: .contacts)
         switch status {
-        case .authorized:    return "granted"
-        case .denied:        return "denied"
-        case .restricted:    return "denied"
-        case .notDetermined: return "prompt"
-        default:             return "prompt"
+        case .authorized:    return Etat.granted.fil
+        case .denied:        return Etat.denied.fil
+        case .restricted:    return Etat.denied.fil
+        case .notDetermined: return Etat.prompt.fil
+        default:             return Etat.prompt.fil
         }
     }
 
