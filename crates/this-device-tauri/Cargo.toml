@@ -29,6 +29,11 @@ banc = []
 this-platform = { path = "../this-platform" }
 # No default features: on desktop and Linux, Tauri's default webview stack (WebKitGTK) is not
 # pulled in. The iOS webview backend is enabled below.
+#
+# Ce que cela ne dit PAS : GLib reste requis. Mesuré le 13/11/2026 en compilant ce crate sur
+# Ubuntu : `tauri` tire `glib-sys`/`gobject-sys`/`gio-sys` même sans features, et le build
+# s'arrête sur `gobject-2.0` introuvable. `libglib2.0-dev` suffit (le job `device_linux` de la
+# CI l'installe) ; WebKitGTK, lui, n'est pas nécessaire.
 tauri = { version = "2.12", default-features = false }
 # `timeout` autour de l'appel natif : un plugin muet ne doit pas bloquer un tour.
 tokio = { version = "1", features = ["time"] }

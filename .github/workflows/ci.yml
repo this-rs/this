@@ -616,10 +616,16 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      # Pas de WebKitGTK à installer : le crate dépend de `tauri` sans ses features par
-      # défaut, précisément pour que Linux n'ait pas à tirer la pile webview (voir son
-      # Cargo.toml). `zbus` est du Rust pur. Si ce job réclame un paquet système un jour,
-      # c'est que cette promesse a été cassée.
+      # `tauri` tire les bindings GLib MÊME sans ses features par défaut : mesuré le
+      # 13/11/2026, le build s'arrête sur `gobject-2.0` puis `gio-2.0` introuvables. Le
+      # commentaire du Cargo.toml disait que Linux n'avait besoin de rien — il parlait de
+      # WebKitGTK, et c'était vrai de WebKit seulement. GLib, lui, est nécessaire.
+      # Deux paquets, une vingtaine de secondes ; WebKitGTK reste dehors.
+      - name: En-têtes GLib (le seul paquet système que le crate réclame)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libglib2.0-dev pkg-config
+
       - name: Contrat, familles, backend Linux et parités
         run: |
           set -euo pipefail
