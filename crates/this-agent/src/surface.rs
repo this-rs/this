@@ -715,7 +715,7 @@ pub fn surface() -> Surface {
                 Tier::Shell,
                 "caméra : état de la permission et demande ; la capture est sous device.camera.capture",
                 Some("captureStatus / captureRequest"),
-                &[Ios, Ipados, Macos],
+                &[Ios, Ipados, Macos, Linux],
                 Status::Live,
             ),
             Capability::new(
@@ -723,7 +723,7 @@ pub fn surface() -> Surface {
                 Tier::Shell,
                 "microphone : état de la permission et demande ; l'enregistrement est sous device.microphone.record",
                 Some("captureStatus / captureRequest"),
-                &[Ios, Ipados, Macos],
+                &[Ios, Ipados, Macos, Linux],
                 Status::Live,
             ),
             // Le rattachement est porté par le préfixe : `device.camera.capture` est un aspect
@@ -760,6 +760,17 @@ pub fn surface() -> Surface {
                 // `unsupported` pour une capacité que l'appareil a.
                 Some("locationStatus / locationRequest / locationSample"),
                 &[Ios, Ipados, Macos],
+                Status::Live,
+            ),
+            // Ce que Linux sait de la localisation : la position, sans l'ÉTAT (GeoClue2 n'a pas
+            // d'autorisation à lire, il en a une à demander) ni flux. Une entrée à part plutôt
+            // qu'ajouter Linux à `device.location`, qui promet `locationStatus`.
+            Capability::new(
+                "device.location.fix",
+                Tier::Shell,
+                "demander l'autorisation et lire une position ponctuelle (sans état ni flux)",
+                Some("locationRequest / locationSample"),
+                &[Linux],
                 Status::Live,
             ),
             // Le flux de positions : iOS seulement (le pont macOS n'a que le point).
@@ -889,7 +900,7 @@ pub fn surface() -> Surface {
                 Tier::Shell,
                 "Bluetooth : état de la permission et SCAN des appareils à portée",
                 Some("status / bluetoothScan"),
-                &[Ios, Ipados, Macos],
+                &[Ios, Ipados, Macos, Linux],
                 Status::Live,
             ),
             Capability::new(
@@ -910,7 +921,7 @@ pub fn surface() -> Surface {
                 Tier::Shell,
                 "un échantillon du gyroscope (aucun flux continu)",
                 Some("status / gyroscopeSample"),
-                &[Ios, Ipados],
+                &[Ios, Ipados, Linux],
                 Status::Live,
             ),
             Capability::new(
@@ -1586,12 +1597,10 @@ mod tests {
         // Un vide n'est pas une réponse : l'agent doit pouvoir distinguer « pas de pont ici »
         // de « je ne sais pas ». Mesuré le 08/11/2026 : la carte d'un Android ne nommait
         // aucune capacité d'appareil, sans un mot pour dire que c'était voulu.
-        for plateforme in [
-            Platform::Android,
-            Platform::Windows,
-            Platform::Linux,
-            Platform::Web,
-        ] {
+        // Linux n'y est plus depuis le 13/11/2026 : son backend porte le scan Bluetooth, l'état
+        // de la caméra et du micro, le gyroscope et la position ponctuelle. Il a son propre
+        // contrôle, juste après.
+        for plateforme in [Platform::Android, Platform::Windows, Platform::Web] {
             let texte = surface().describe_for(plateforme, usize::MAX);
             assert!(
                 texte.contains("device\\n") || texte.contains("· device "),
@@ -1611,6 +1620,42 @@ mod tests {
                 );
             }
         }
+        // Linux a un pont PARTIEL, et c'est ce qu'il doit dire : le scan mais pas la connexion,
+        // l'état de la caméra mais pas la capture, la position mais ni l'état ni le flux.
+        //
+        // Le contrôle porte sur les ENTRÉES, pas sur le texte rendu : la description de
+        // `device.camera` dit « la capture est sous device.camera.capture », donc chercher ce
+        // nom dans la prose trouve toujours quelque chose — et ne prouve rien.
+        let linux = surface().for_platform(Platform::Linux);
+        for attendu in [
+            "device.bluetooth",
+            "device.camera",
+            "device.microphone",
+            "device.gyroscope",
+            "device.location.fix",
+        ] {
+            assert_eq!(
+                linux.capability(attendu).map(|entry| entry.status),
+                Some(Status::Live),
+                "Linux ne nomme pas {attendu}, que son backend porte"
+            );
+        }
+        for interdit in [
+            "device.bluetooth.connect",
+            "device.camera.capture",
+            "device.camera.video",
+            "device.location.stream",
+            "device.location",
+            "device.contacts",
+            "device.calendar",
+        ] {
+            assert_ne!(
+                linux.capability(interdit).map(|entry| entry.status),
+                Some(Status::Live),
+                "Linux annonce {interdit}, que son backend ne porte pas"
+            );
+        }
+
         // iOS, lui, les annonce toutes.
         let ios = surface().describe_for(Platform::Ios, usize::MAX);
         assert!(ios.contains("device.bluetooth"));
@@ -1794,7 +1839,10 @@ mod couverture {
         assert_eq!(livres + attendus, carte.capabilities.len());
         // Le compte est exact, pas « au moins » : une capacité ajoutée ou retirée sans le
         // dire se voit ici, avant que la carte ne mente à l'agent.
-        assert_eq!(livres, 54, "nombre de capacités Live");
+        // 55 depuis que Linux nomme ce qu'il porte (scan Bluetooth, état caméra/micro,
+        // gyroscope, position ponctuelle) : quatre entrées gagnent `Linux`, une naît
+        // (`device.location.fix`). Une entrée ajoutée sans le dire se voit ici.
+        assert_eq!(livres, 55, "nombre de capacités Live");
         assert_eq!(attendus, 32, "nombre de capacités Missing");
         // Aucun identifiant en double : un module ne doit jamais hésiter entre deux entrées.
         let mut vus = std::collections::BTreeSet::new();

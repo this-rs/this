@@ -110,6 +110,47 @@ pub fn status_json(state: PermissionState) -> Value {
     json!({ "kind": "status", "state": state })
 }
 
+/// **Ce que ce backend porte réellement du contrat**, et rien de plus.
+///
+/// C'est la seule déclaration de la surface Linux ; `tests/linux_surface.rs` la tient contre
+/// deux choses à la fois :
+///
+/// 1. le **dispatch lui-même** — pour chaque méthode de `METHODS`, `call` doit répondre
+///    `not_supported` si et seulement si elle n'est pas ici (mesuré en l'appelant, pas en
+///    relisant le `match`) ;
+/// 2. la **carte du framework** — une entrée `device.*` qui nomme `Linux` ne peut citer que
+///    des méthodes de cette liste.
+///
+/// Écrite à la main, donc elle peut mentir — d'où les deux contrôles. Ce qui n'y est pas
+/// (connexion Bluetooth, capture photo/vidéo, contacts, calendrier, santé, NFC, Face ID,
+/// parole, notifications, Live Activity, presse-papiers, partage, réseau local) répond
+/// `not_supported`, et la carte ne l'annonce pas sur Linux.
+pub const SUPPORTED: &[&str] = &[
+    // BlueZ (bus système) : l'état de la permission et le scan. La connexion, la lecture d'une
+    // caractéristique et l'écriture ne sont pas branchées.
+    "status",
+    "bluetoothState",
+    "bluetoothScan",
+    // Le portail XDG : l'ÉTAT de la caméra et du micro, et la demande — qui, sous Linux,
+    // n'ouvre aucun dialogue : elle rend l'état réel.
+    "captureStatus",
+    "captureRequest",
+    // GeoClue2 : la demande d'autorisation et la position ponctuelle. Pas de flux.
+    "locationRequest",
+    "locationSample",
+    // `sysfs` / IIO : un échantillon de gyroscope.
+    "gyroscopeSample",
+];
+
+/// Les capacités dont ce backend sait lire l'**état** (`Request::Status`). Les autres
+/// répondent `unsupported` — ce n'est pas la même chose qu'une méthode non portée.
+pub const STATUS_CAPABILITIES: &[Capability] = &[
+    Capability::Gyroscope,
+    Capability::Bluetooth,
+    Capability::Camera,
+    Capability::Microphone,
+];
+
 /// L'état de permission d'une capacité, pour `Request::Status` (gyroscope, Bluetooth, et la
 /// caméra / micro qu'un appelant demanderait par ce chemin). Tout le reste : `unsupported`.
 pub async fn status(capability: Capability) -> Reply {
