@@ -295,6 +295,13 @@ local vert pour cette seule raison.
 stable du jour, et deux rustfmt séparés de quelques mois ne rangent pas les `use` de la même
 façon. Si le hook réclame un fichier que tu viens de formater, `rustup update stable`.
 
+**Et la version de clippy, autant.** Une nouvelle règle arrive à chaque stable, et elle peut
+rougir `main` sans qu'aucun contrôle local ne le dise : mesuré le 13/11/2026, `needless_bool`
+apparu en 1.100 alors que la machine était en 1.97.1 — la CI était rouge, le hook vert. Le
+remède est le même (`rustup update stable`), ou, pour ne pas déplacer la toolchain des autres
+sessions, une installation à côté : `rustup toolchain install 1.100.0 --profile minimal
+--component clippy` puis `cargo +1.100.0 clippy …`.
+
 ### Plusieurs sessions, une seule copie de travail
 
 Ce dépôt se construit souvent avec deux agents (ou plus) sur le **même** répertoire et la même
