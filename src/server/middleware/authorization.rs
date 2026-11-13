@@ -746,20 +746,21 @@ impl Authorization {
     ///
     /// The scope fallback keys on this, not on the verdict: "cannot decide" from a wired engine is
     /// a refusal, "nothing to decide with" is the OIDC case.
+    // `clippy::needless_bool` propose `self.wami.is_some()`, qui jetterait `self.iam` : la
+    // fonction teste DEUX moteurs derrière `#[cfg]`, et la suggestion n'en garde qu'un. Le
+    // `allow` est la seule écriture qui reste couvrrable : un `bool` par moteur avec un repli
+    // `#[cfg(not(…))]` ajoute des lignes que la CI ne compile jamais, donc jamais couvertes.
+    #[allow(clippy::needless_bool)]
     fn iam_wired(&self) -> bool {
-        // Un `bool` par moteur, puis un OU. La forme « if … { return true } … false » est
-        // signalée par `clippy::needless_bool` depuis Rust 1.100, et sa suggestion
-        // (`self.wami.is_some()`) jetterait le second moteur : la réécrire est la seule
-        // façon de garder les deux. Mesuré avec le clippy de la CI (`+1.100.0`).
         #[cfg(feature = "wami")]
-        let wami = self.wami.is_some();
-        #[cfg(not(feature = "wami"))]
-        let wami = false;
+        if self.wami.is_some() {
+            return true;
+        }
         #[cfg(feature = "obrain")]
-        let obrain = self.iam.is_some();
-        #[cfg(not(feature = "obrain"))]
-        let obrain = false;
-        wami || obrain
+        if self.iam.is_some() {
+            return true;
+        }
+        false
     }
 
     /// La décision **matérialisée** autorise-t-elle cette permission ?

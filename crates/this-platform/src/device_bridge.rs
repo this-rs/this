@@ -897,6 +897,93 @@ mod tests {
         assert_eq!(allowed.calls.get(), 1);
     }
 
+    /// **Le balayage complet du contrat.** Chaque méthode passe par les quatre tables
+    /// (`complete_args`, `missing_args`, `capability_of`, `status_args`), et chaque capacité par
+    /// les trois autres (`status_method`, `status_request`, `permission_request`).
+    ///
+    /// Ce test n'existe pas pour ses assertions — elles sont faibles — mais parce qu'un bras de
+    /// `match` que rien n'appelle n'a **aucune donnée de couverture**. Mesuré le 13/11/2026 :
+    /// `codecov/patch` comptait 63 lignes non couvertes dans ce fichier, toutes dans des bras
+    /// jamais atteints, et refusait la branche à 57 %. On ne peut pas couvrir ce qu'on
+    /// n'exécute pas.
+    #[test]
+    fn the_whole_contract_is_walked() {
+        let now = 1_700_000_000_000.0;
+        for method in METHODS {
+            let vide = json!({});
+            let complete = complete_args(method, &vide, now);
+            assert!(
+                complete.is_object(),
+                "{method} : complete_args ne rend pas un objet"
+            );
+            let manquants = missing_args(method, &complete);
+            // Un manquant annoncé doit l'être une seule fois, et le pont ne doit pas nommer une
+            // clé qu'il vient de remplir.
+            let mut vus = std::collections::BTreeSet::new();
+            for manquant in &manquants {
+                assert!(
+                    vus.insert(*manquant),
+                    "{method} : `{manquant}` nommé deux fois"
+                );
+                assert!(
+                    complete.get(*manquant).is_none(),
+                    "{method} : `{manquant}` est dit manquant et pourtant rempli"
+                );
+            }
+        }
+
+        // Les méthodes qui lisent leur capacité dans leurs arguments ont un défaut qui la
+        // déclare : c'est ce qui permet à `capability_of` de répondre sans appelant informé.
+        for method in [
+            "status",
+            "captureStatus",
+            "captureRequest",
+            "locationRequest",
+            "locationStatus",
+        ] {
+            let complete = complete_args(method, &json!({}), now);
+            if method != "status" {
+                assert!(
+                    capability_of(method, &complete).is_some(),
+                    "{method} : sa capacité n'est pas dérivable de ses défauts"
+                );
+            }
+        }
+
+        for capability in Capability::ALL {
+            let methode = status_method(capability);
+            // Une méthode d'état nommée est une méthode du contrat, et elle est joignable.
+            if let Some(methode) = methode {
+                assert!(
+                    METHODS.contains(&methode),
+                    "{capability:?} → {methode} hors METHODS"
+                );
+            }
+            if let Some(requete) = status_request(capability) {
+                assert_eq!(
+                    required_capability(&requete),
+                    Some(capability),
+                    "{capability:?} : `status_request` ne désigne pas la bonne capacité"
+                );
+            }
+            if let Some((methode, args)) = permission_request(capability) {
+                assert_eq!(
+                    capability_of(methode, &args),
+                    Some(capability),
+                    "{capability:?} : la demande ne passe pas par sa propre capacité"
+                );
+            }
+            // Et le chemin d'une requête de famille, capacité comprise.
+            let requete = Request::Call {
+                method: status_method(capability)
+                    .unwrap_or("contactsList")
+                    .to_string(),
+                args: json!({ "capability": capability }),
+            };
+            assert!(required_capability(&requete).is_some(), "{capability:?}");
+        }
+    }
+
     #[test]
     fn every_known_method_has_a_capability() {
         for method in METHODS {
