@@ -50,7 +50,31 @@ des 4 premiers octets de la clé publique.
 
 Ce n'est **qu'une étiquette** (`envelope.rs`) : la confiance vient de la clé
 enregistrée sous cet identifiant dans le registre, jamais de la forme du nom.
-Quatre octets ne sont pas une preuve (voir § Points ouverts).
+Quatre octets ne sont pas une preuve : une clé dont l'identifiant est celui
+d'un appareil connu se fabrique en 2³² essais. Le format ne change pas (des
+identifiants sont déjà stockés) ; c'est le registre qui interdit l'usurpation.
+
+### Le registre n'écrase jamais une clé
+
+Un identifiant qui porte une clé, **active ou révoquée**, n'en portera jamais
+une autre. Réécrire la **même** clé (ré-appairage) reste permis : le rôle et la
+date sont mis à jour, la clé redevient `Active`, l'adresse connue est gardée.
+
+- `Peers::try_admit(id, key, role, added_at) -> Result<(), PeerError>` refuse
+  une clé différente sous un identifiant pris : `PeerError::IdentifiantPris`,
+  registre intact.
+- `Peers::admit` (signature inchangée) ne peut plus écraser : sur une clé
+  différente, il **n'écrit rien** et consigne l'identifiant dans
+  `Peers::ecrasements_refuses()` (au plus 64, `JOURNAL_ECRASEMENTS`). Il ne
+  panique pas, même en debug : le cas se déclenche à distance, et une panique
+  donnerait à l'attaquant de quoi abattre l'application.
+- `Admission::inscrire_verifie(&Peers) -> Result<(), PeerError>` est
+  l'inscription à utiliser ; `Admission::inscrire` passe par `admit` (rien
+  d'écrasé, mais le refus est silencieux pour l'appelant).
+- `Peers::from_keys` / `Peers::from_json` refusent un registre persisté qui
+  porte deux clés différentes sous un même identifiant (`IdentifiantPris`).
+- `Peers::verifier_libre(id, key)` dit, sans rien écrire, si l'écriture serait
+  refusée : l'appairage s'en sert (§ Appairage).
 
 ### Le certificat dont la clé publique EST la clé d'appareil
 
@@ -159,7 +183,8 @@ sont acquises (`SasAttendu::appairer` rend `None` sinon). Côté transport,
 pair, et ne rend `Ok(Admission)` que si les deux disent oui avant l'échéance.
 
 - Le transport **n'écrit jamais** au registre : l'appelant appelle
-  `Admission::inscrire`.
+  `Admission::inscrire_verifie` (ou `Admission::inscrire`, qui n'écrase pas
+  non plus mais tait le refus).
 - Un `AppairageEnCours` lâché sans décision ferme sa connexion : le pair voit un
   abandon, rien n'est écrit d'aucun côté.
 - Le délai par défaut est de 120 s (`DELAI_APPAIRAGE`), de la connexion à la
@@ -170,6 +195,13 @@ pair, et ne rend `Ok(Admission)` que si les deux disent oui avant l'échéance.
 - Une clé **révoquée** qui demande l'appairage est fermée d'office ; la
   révocation est revérifiée au moment de la décision. Une clé **active** peut
   se ré-appairer sous son identifiant.
+- **Collision d'identifiant** : si la clé TLS du pair n'est pas au registre
+  mais que l'identifiant qui en dérive (`DeviceId::de_cle`) y porte déjà une
+  **autre** clé, active ou révoquée, le répondeur ferme la connexion
+  (`CODE_COLLISION`, 15) **avant tout nonce**, donc avant que le code ne
+  s'affiche ; c'est revérifié à la décision. Ce cas n'est jamais légitime.
+  L'initiateur (`appairer_vers`) n'a pas de registre : chez lui, c'est
+  `Admission::inscrire_verifie` qui refuse l'écriture.
 - On ne s'appaire pas avec soi-même (clé du pair = ma clé : refus).
 
 ### Le lien `moi` / `autre`
@@ -200,8 +232,10 @@ Tout message a la même forme (`Message`, `envelope.rs`) :
 ```
 
 - `v` vaut `MESH_VERSION` (1) ; une autre version est refusée.
-- `horloge` est un compteur logique de l'émetteur, **pas** un horodatage. La
-  porte ne le vérifie pas.
+- `horloge` est fixée par l'émetteur ; l'Atelier y met des millisecondes
+  depuis l'epoch, croissantes (`horloge = (horloge + 1).max(maintenant_ms())`).
+  La porte ne la contrôle que si `Limits::fraicheur_max_ms` est posé (§
+  L'anti-rejeu).
 - `signature` : Ed25519 (64 octets en hexadécimal) sur les **octets signés** :
   `SIGNING_DOMAIN` (`b"this-mesh/v1\n"`) suivi du JSON canonique de
   `{a, charge, de, horloge, id, type, v}`. Tout est signé sauf la signature,
@@ -269,6 +303,9 @@ avant que la taille, l'identité et le type soient bons :
 6. **Signature** : c'est seulement ici que la charge est décodée, remise en
    forme canonique et vérifiée.
 7. **Rejeu** : un `id` déjà vu est acquitté sans être rejoué.
+8. **Fraîcheur** (si `Limits::fraicheur_max_ms` est posé) : un message nouveau
+   dont l'`horloge` s'écarte de plus de `fraicheur_max_ms` de l'heure locale
+   est refusé.
 
 | Verdict | Sens | Sur le fil (accusé) |
 |---|---|---|
@@ -280,13 +317,35 @@ avant que la taille, l'identité et le type soient bons :
 Les raisons de refus (`Raison`) : `TropGros`, `Illisible`, `VersionInconnue`,
 `DeNeCorrespondPas`, `CleInconnue`, `CleRevoquee`, `SignatureInvalide`,
 `ChargeNonCanonique`. Un refus ferme la connexion après l'envoi de l'accusé.
+Le refus de fraîcheur réutilise `Illisible` (texte « horloge hors de la
+fenêtre de fraîcheur : écart … ms > … ms ») : l'Atelier fait un `match`
+exhaustif sur `Raison`, une variante de plus le casserait.
 
 ### L'anti-rejeu
 
 La porte retient les `id` des messages **admis** : au plus 4096
 (`Limits::seen_ids`), les plus anciens sortent. L'idempotence ne s'applique
 qu'à un message authentique, sinon un inconnu pourrait « brûler » un `id`. La
-mémoire est en RAM : voir § Limites connues.
+mémoire est en RAM, donc perdue au redémarrage.
+
+La **fraîcheur** borne ce que cette perte coûte. Avec
+`Limits::fraicheur_max_ms = Some(f)`, un message nouveau n'est admis que si
+`|horloge − maintenant| ≤ f`, dans un sens comme dans l'autre : il n'est
+admissible que pendant une fenêtre de `2·f`. Passé cette fenêtre, un message
+capturé est refusé, après un redémarrage comme après `seen_ids` messages plus
+récents. Un `id` déjà en mémoire reste `DejaVu` (acquitté) ; un message refusé
+pour fraîcheur n'entre pas en mémoire. `Gate::admettre` lit l'heure système
+(seulement si le champ est posé) ; `Gate::admettre_a(expediteur, octets,
+maintenant_ms)` la reçoit de l'appelant.
+
+- Par défaut `fraicheur_max_ms` vaut `None` : aucun contrôle, l'ancien
+  comportement.
+- Pour couvrir la fenêtre, `seen_ids` doit retenir tous les messages admis en
+  `2·f`.
+- Valeur recommandée pour l'Atelier : `f` = 10 min (`Some(600_000)`), fenêtre de
+  20 min ; avec `seen_ids` = 4096 (défaut), cela tient jusqu'à ~3,4 messages
+  admis par seconde en moyenne. Les horloges des appareils doivent s'accorder à
+  mieux que `f`.
 
 ### Le registre partagé et la révocation
 
@@ -474,9 +533,13 @@ comportement (`un_pair_autre_sans_role_n_a_que_les_services_authentifies`).
   adresse. Une adresse qui apparaît après l'ouverture (changement de réseau)
   n'écoute pas tant qu'on ne rouvre pas.
 - **L'anti-rejeu est en mémoire et borné** : 4096 `id` (`Limits::seen_ids`),
-  perdus au redémarrage. Un message capturé peut être réadmis après un
-  redémarrage du récepteur, ou après 4096 messages plus récents. `horloge`
-  n'est pas vérifiée.
+  perdus au redémarrage. Sans `Limits::fraicheur_max_ms` (défaut `None`), un
+  message capturé peut être réadmis après un redémarrage du récepteur, ou
+  après 4096 messages plus récents. Avec la fraîcheur posée, ce risque se
+  réduit à la fenêtre `2·fraicheur_max_ms` : un message capturé il y a moins
+  de `fraicheur_max_ms` peut encore être rejoué juste après un redémarrage, ou
+  si plus de `seen_ids` messages arrivent dans la fenêtre. La fraîcheur suppose
+  des horloges d'appareils à peu près à l'heure.
 - **Un message par connexion** côté client (`envoyer`, `appeler`) : une
   poignée de main TLS par message.
 
@@ -484,11 +547,12 @@ comportement (`un_pair_autre_sans_role_n_a_que_les_services_authentifies`).
 
 Lus dans le code, pas encore tranchés :
 
-- `DeviceId::de_cle` ne garde que 4 octets de la clé, et `Peers::admit`
-  **remplace** une fiche existante sous le même identifiant. Un appairage dont
-  la clé a le même préfixe qu'un pair déjà inscrit écraserait sa fiche à
-  l'inscription (`Admission::inscrire`). Il faut une confirmation humaine, mais
-  le préfixe se trouve par force brute.
+- `DeviceId::de_cle` ne garde que 4 octets de la clé : l'usurpation est
+  fermée (§ Le registre n'écrase jamais une clé), mais une collision reste un
+  **déni** : un attaquant qui a fabriqué une clé au même identifiant qu'un
+  appareil pas encore appairé chez moi l'empêche ensuite de s'appairer (son
+  identifiant est pris). Il faut pour cela que l'attaquant ait été appairé
+  d'abord, donc un « oui » humain.
 - La porte vérifie la signature de `a` (le destinataire), mais ne compare pas
   `a` à l'identifiant local.
 

@@ -15,7 +15,16 @@ pub enum PeerError {
     BadId(String),
     #[error("clé publique invalide pour {0}")]
     BadKey(String),
+    /// L'identifiant porte déjà une **autre** clé (active ou révoquée) : l'écrire
+    /// remplacerait cette clé et lui volerait ce qui est rattaché à l'identifiant.
+    /// Jamais légitime : [`DeviceId::de_cle`] ne garde que 4 octets de la clé, une
+    /// collision se fabrique par force brute (2³² essais).
+    #[error("l'identifiant {0} porte déjà une autre clé : écrasement refusé")]
+    IdentifiantPris(String),
 }
+
+/// Nombre d'écrasements refusés retenus par [`Peers::ecrasements_refuses`].
+pub const JOURNAL_ECRASEMENTS: usize = 64;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Peer {
@@ -37,6 +46,9 @@ struct Inner {
     /// Abonnés à la révocation, par identifiant, avec un numéro pour se désabonner.
     rappels: BTreeMap<String, Vec<(u64, Rappel)>>,
     prochain: u64,
+    /// Identifiants dont un écrasement par une autre clé a été refusé par
+    /// [`Peers::admit`] (les plus anciens sortent au-delà de [`JOURNAL_ECRASEMENTS`]).
+    ecrasements: std::collections::VecDeque<DeviceId>,
 }
 
 /// Registre des pairs : identifiant → clé publique, état, rôle, date, adresse.
@@ -107,8 +119,20 @@ impl Peers {
         Self::default()
     }
 
-    /// Admet (ou remplace) une clé, `Active`. L'adresse déjà connue est conservée
-    /// si le pair existait ; un nouveau pair n'en a pas (voir [`Peers::definir_adresse`]).
+    /// Admet une clé, `Active`, sous `id`. **N'écrase jamais une autre clé** :
+    /// si `id` porte déjà une clé différente (active ou révoquée), rien n'est
+    /// écrit et l'identifiant est consigné dans [`Peers::ecrasements_refuses`].
+    /// Réécrire la **même** clé (ré-appairage) met à jour le rôle et la date, la
+    /// réactive, et garde l'adresse connue ; un nouveau pair n'a pas d'adresse
+    /// (voir [`Peers::definir_adresse`]).
+    ///
+    /// Préférer [`Peers::try_admit`], qui rend le refus à l'appelant.
+    ///
+    /// Pourquoi ne rien faire plutôt que paniquer (même en debug) : le refus est
+    /// déclenchable à distance (un pair qui fabrique une clé dont l'identifiant
+    /// collisionne et se fait appairer). Paniquer donnerait à ce pair un moyen
+    /// d'abattre l'application ; écraser lui donnerait les droits de la victime.
+    /// Ne rien écrire est la seule issue qui ne lui donne rien.
     pub fn admit(
         &self,
         id: &DeviceId,
@@ -116,8 +140,33 @@ impl Peers {
         role: AnchorKeyRole,
         added_at: DateTime<Utc>,
     ) {
+        if self.try_admit(id, key, role, added_at).is_err() {
+            let mut g = ecrire(&self.inner);
+            if g.ecrasements.len() >= JOURNAL_ECRASEMENTS {
+                g.ecrasements.pop_front();
+            }
+            g.ecrasements.push_back(id.clone());
+        }
+    }
+
+    /// Comme [`Peers::admit`], mais rend le refus :
+    /// [`PeerError::IdentifiantPris`] si `id` porte déjà une clé **différente**,
+    /// active ou révoquée. Le registre reste alors intact.
+    pub fn try_admit(
+        &self,
+        id: &DeviceId,
+        key: VerifyingKey,
+        role: AnchorKeyRole,
+        added_at: DateTime<Utc>,
+    ) -> Result<(), PeerError> {
         let mut g = ecrire(&self.inner);
-        let adresse = g.peers.get(id.as_str()).and_then(|p| p.adresse);
+        let adresse = match g.peers.get(id.as_str()) {
+            Some(p) if p.key != key => {
+                return Err(PeerError::IdentifiantPris(id.as_str().to_owned()));
+            }
+            Some(p) => p.adresse,
+            None => None,
+        };
         g.peers.insert(
             id.as_str().to_owned(),
             Peer {
@@ -128,6 +177,24 @@ impl Peers {
                 adresse,
             },
         );
+        Ok(())
+    }
+
+    /// `Err(PeerError::IdentifiantPris)` si `id` porte déjà une clé différente de
+    /// `key` : l'écrire serait refusé. Ne modifie rien. Sert à l'appairage à
+    /// refuser une collision **avant** d'afficher le code.
+    pub fn verifier_libre(&self, id: &DeviceId, key: &VerifyingKey) -> Result<(), PeerError> {
+        match lire(&self.inner).peers.get(id.as_str()) {
+            Some(p) if p.key != *key => Err(PeerError::IdentifiantPris(id.as_str().to_owned())),
+            _ => Ok(()),
+        }
+    }
+
+    /// Les identifiants dont [`Peers::admit`] a refusé l'écrasement par une autre
+    /// clé, du plus ancien au plus récent ([`JOURNAL_ECRASEMENTS`] au plus). Un
+    /// élément ici est le signe d'une tentative d'usurpation (ou d'un bogue).
+    pub fn ecrasements_refuses(&self) -> Vec<DeviceId> {
+        lire(&self.inner).ecrasements.iter().cloned().collect()
     }
 
     /// Révoque une clé : effet immédiat sur tous les clones, et coupure de **ses**
@@ -246,7 +313,7 @@ impl Peers {
     pub fn from_keys(keys: &[AnchorKey]) -> Result<Self, PeerError> {
         let mut peers = BTreeMap::new();
         for k in keys {
-            peers.insert(k.key_id.clone(), peer_de_cle(k, None)?);
+            inserer_sans_ecraser(&mut peers, &k.key_id, peer_de_cle(k, None)?)?;
         }
         Ok(Self {
             inner: Arc::new(RwLock::new(Inner {
@@ -284,7 +351,7 @@ impl Peers {
             serde_json::from_str(s).map_err(|e| PeerError::BadKey(e.to_string()))?;
         let mut peers = BTreeMap::new();
         for f in &fiches {
-            peers.insert(f.cle.key_id.clone(), peer_de_cle(&f.cle, f.adresse)?);
+            inserer_sans_ecraser(&mut peers, &f.cle.key_id, peer_de_cle(&f.cle, f.adresse)?)?;
         }
         Ok(Self {
             inner: Arc::new(RwLock::new(Inner {
@@ -302,6 +369,23 @@ struct FicheJson {
     cle: AnchorKey,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     adresse: Option<SocketAddr>,
+}
+
+/// Rechargement : une fiche en double sous le même identifiant avec une **autre**
+/// clé est refusée (la dernière ne remplace pas la première en silence). Un
+/// doublon exact (même clé) garde la dernière fiche, comme avant.
+fn inserer_sans_ecraser(
+    peers: &mut BTreeMap<String, Peer>,
+    id: &str,
+    peer: Peer,
+) -> Result<(), PeerError> {
+    if let Some(deja) = peers.get(id)
+        && deja.key != peer.key
+    {
+        return Err(PeerError::IdentifiantPris(id.to_owned()));
+    }
+    peers.insert(id.to_owned(), peer);
+    Ok(())
 }
 
 fn peer_de_cle(k: &AnchorKey, adresse: Option<SocketAddr>) -> Result<Peer, PeerError> {
@@ -438,6 +522,88 @@ mod tests {
         );
         peers.revoke(&dev("device-aaaaaaaa"));
         assert_eq!(compte.load(Ordering::SeqCst), 1, "désabonné : plus d'appel");
+    }
+
+    // Collision fabriquée : deux clés différentes sous le même identifiant (on
+    // pose l'identifiant à la main, sans chercher une vraie collision de 4 octets).
+    #[test]
+    fn une_autre_cle_sous_un_identifiant_pris_est_refusee_et_la_premiere_reste() {
+        let peers = Peers::new();
+        let lea = dev("device-aaaaaaaa");
+        let t0 = Utc::now();
+        peers
+            .try_admit(&lea, cle(1), AnchorKeyRole::Ownership, t0)
+            .unwrap();
+        peers.definir_adresse(&lea, "192.0.2.1:4433".parse().unwrap());
+        let avant = peers.get(&lea).unwrap();
+
+        // try_admit : refus explicite.
+        assert_eq!(
+            peers.try_admit(&lea, cle(2), AnchorKeyRole::Shared, Utc::now()),
+            Err(PeerError::IdentifiantPris(lea.to_string()))
+        );
+        assert_eq!(
+            peers.verifier_libre(&lea, &cle(2)),
+            Err(PeerError::IdentifiantPris(lea.to_string()))
+        );
+        assert_eq!(peers.verifier_libre(&lea, &cle(1)), Ok(()));
+        // admit : ne fait rien, consigne l'identifiant.
+        peers.admit(&lea, cle(2), AnchorKeyRole::Shared, Utc::now());
+        assert_eq!(
+            peers.get(&lea).unwrap(),
+            avant,
+            "la première fiche est intacte"
+        );
+        assert_eq!(peers.id_de_cle(&cle(2)), None);
+        assert_eq!(peers.ecrasements_refuses(), vec![lea.clone()]);
+
+        // Révoquée : toujours prise.
+        assert!(peers.revoke(&lea));
+        assert!(
+            peers
+                .try_admit(&lea, cle(2), AnchorKeyRole::Shared, Utc::now())
+                .is_err()
+        );
+        assert_eq!(peers.state(&lea), Some(AnchorKeyState::Revoked));
+        assert_eq!(peers.get(&lea).unwrap().key, cle(1));
+    }
+
+    #[test]
+    fn la_meme_cle_reinscrite_avec_un_autre_role_passe() {
+        let peers = Peers::new();
+        let lea = dev("device-aaaaaaaa");
+        peers
+            .try_admit(&lea, cle(1), AnchorKeyRole::Shared, Utc::now())
+            .unwrap();
+        let adresse: SocketAddr = "192.0.2.1:4433".parse().unwrap();
+        peers.definir_adresse(&lea, adresse);
+        peers
+            .try_admit(&lea, cle(1), AnchorKeyRole::Ownership, Utc::now())
+            .unwrap();
+        assert_eq!(peers.role(&lea), Some(AnchorKeyRole::Ownership));
+        assert_eq!(peers.adresse_de(&lea), Some(adresse));
+        assert!(peers.ecrasements_refuses().is_empty());
+    }
+
+    #[test]
+    fn un_registre_persiste_avec_deux_cles_sous_un_identifiant_est_refuse() {
+        let peers = Peers::new();
+        peers.admit(
+            &dev("device-aaaaaaaa"),
+            cle(1),
+            AnchorKeyRole::Shared,
+            Utc::now(),
+        );
+        let mut cles = peers.to_keys();
+        let mut autre = cles[0].clone();
+        autre.public_key = to_hex(cle(2).as_bytes());
+        cles.push(autre);
+        assert_eq!(
+            Peers::from_keys(&cles).unwrap_err(),
+            PeerError::IdentifiantPris("device-aaaaaaaa".into())
+        );
+        let json = serde_json::to_string(&cles).unwrap();
+        assert!(Peers::from_json(&json).is_err());
     }
 
     #[test]

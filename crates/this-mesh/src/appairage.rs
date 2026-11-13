@@ -6,7 +6,7 @@
 //! ET la confirmation du pair sont acquises. Une confirmation seule ne prouve rien :
 //! c'est précisément ce qu'un homme du milieu ne peut pas produire.
 
-use crate::{DeviceId, Peers};
+use crate::{DeviceId, PeerError, Peers};
 use chrono::Utc;
 use ed25519_dalek::VerifyingKey;
 use hmac::{Hmac, Mac};
@@ -222,8 +222,22 @@ impl Admission {
     /// Écrit le pair au registre, `Active`, au moment présent. Le registre est un
     /// handle partagé ([`Peers::admit`] prend `&self`) : l'inscription est vue
     /// aussitôt par tous ses clones (listener, porte).
+    ///
+    /// **Préférer [`Admission::inscrire_verifie`]**, qui rend le refus. Celle-ci
+    /// n'écrase jamais une autre clé : si `id` porte déjà une clé différente
+    /// (collision d'identifiant), elle n'écrit **rien** et le refus n'est visible
+    /// que dans [`Peers::ecrasements_refuses`] — l'appelant croirait à tort que
+    /// le pair est inscrit.
     pub fn inscrire(&self, peers: &Peers) {
         peers.admit(&self.id, self.key, self.role, Utc::now());
+    }
+
+    /// Écrit le pair au registre comme [`Admission::inscrire`], mais rend
+    /// [`PeerError::IdentifiantPris`] si `id` porte déjà une **autre** clé
+    /// (active ou révoquée) ; le registre reste alors intact. Réinscrire la même
+    /// clé (ré-appairage) réussit et met à jour le rôle.
+    pub fn inscrire_verifie(&self, peers: &Peers) -> Result<(), PeerError> {
+        peers.try_admit(&self.id, self.key, self.role, Utc::now())
     }
 }
 
@@ -383,6 +397,38 @@ mod tests {
         admission.inscrire(&peers);
         assert_eq!(peers.len(), 1);
         assert_eq!(peers.state(&id), Some(AnchorKeyState::Active));
+        assert_eq!(peers.role(&id), Some(AnchorKeyRole::Shared));
+    }
+
+    // Collision d'identifiant : une autre clé sous l'identifiant déjà inscrit.
+    #[test]
+    fn inscrire_n_ecrase_jamais_une_autre_cle() {
+        let peers = Peers::new();
+        let id = dev("device-aaaaaaaa");
+        let lea = Admission {
+            id: id.clone(),
+            key: key(2),
+            role: AnchorKeyRole::Ownership,
+        };
+        lea.inscrire_verifie(&peers).unwrap();
+        let intrus = Admission {
+            id: id.clone(),
+            key: key(3),
+            role: AnchorKeyRole::Shared,
+        };
+        assert_eq!(
+            intrus.inscrire_verifie(&peers),
+            Err(PeerError::IdentifiantPris(id.to_string()))
+        );
+        intrus.inscrire(&peers);
+        assert_eq!(peers.id_de_cle(&key(2)), Some(id.clone()));
+        assert_eq!(peers.id_de_cle(&key(3)), None);
+        assert_eq!(peers.role(&id), Some(AnchorKeyRole::Ownership));
+        assert_eq!(peers.ecrasements_refuses(), vec![id.clone()]);
+
+        // La même clé, autre rôle : passe (ré-appairage).
+        let reappairage = lea.avec_lien(Lien::Autre);
+        reappairage.inscrire_verifie(&peers).unwrap();
         assert_eq!(peers.role(&id), Some(AnchorKeyRole::Shared));
     }
 

@@ -31,6 +31,25 @@ pub struct Limits {
     pub seen_ids: usize,
     /// Taille du journal des messages ignorés.
     pub journal: usize,
+    /// Fraîcheur : écart maximal, en millisecondes, entre l'`horloge` d'un message
+    /// (millisecondes depuis l'epoch, comme l'application la produit) et l'heure
+    /// locale, **dans un sens comme dans l'autre**. Au-delà, la porte refuse
+    /// ([`crate::Raison::Illisible`], texte « horloge hors de la fenêtre de
+    /// fraîcheur »).
+    ///
+    /// `None` (par défaut) : aucun contrôle, l'ancien comportement — l'anti-rejeu
+    /// ne repose alors que sur la mémoire [`Limits::seen_ids`], perdue au
+    /// redémarrage. Avec `Some(f)`, un message capturé ne redevient admissible
+    /// ni après un redémarrage ni après `seen_ids` messages plus récents **une
+    /// fois sa fenêtre passée** : il n'est accepté que tant que l'heure locale
+    /// est dans `[horloge − f, horloge + f]`, une fenêtre de `2·f`.
+    ///
+    /// Pour que la fenêtre soit couverte, `seen_ids` doit retenir tous les
+    /// messages admis en `2·f`. Recommandation pour l'application : `f` = 10 min
+    /// (`Some(600_000)`), soit une fenêtre de 20 min ; avec `seen_ids` = 4096
+    /// (défaut), cela couvre jusqu'à ~3,4 messages admis par seconde en moyenne.
+    /// Les horloges des appareils doivent s'accorder à mieux que `f` près.
+    pub fraicheur_max_ms: Option<u64>,
 }
 
 impl Default for Limits {
@@ -47,6 +66,7 @@ impl Default for Limits {
             service_reponse: 1024 * 1024,
             seen_ids: 4096,
             journal: 256,
+            fraicheur_max_ms: None,
         }
     }
 }

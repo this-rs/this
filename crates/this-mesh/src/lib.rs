@@ -21,4 +21,4 @@ pub use appairage::{
 pub use envelope::{DeviceId, MESH_VERSION, Message, MessageType, SIGNING_DOMAIN, SignError};
 pub use gate::{Gate, JournalEntry, Raison, Verdict};
 pub use limits::Limits;
-pub use peers::{PeerError, Peers, Surveillance};
+pub use peers::{JOURNAL_ECRASEMENTS, PeerError, Peers, Surveillance};

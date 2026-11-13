@@ -25,7 +25,17 @@
 //!
 //! L'[`Admission`] n'est rendue que si la décision locale ET celle du pair sont
 //! « oui », dans le délai. Le transport n'écrit jamais au registre : l'appelant
-//! inscrit l'admission ([`Admission::inscrire`]).
+//! inscrit l'admission ([`Admission::inscrire_verifie`]).
+//!
+//! # Collision d'identifiant
+//!
+//! [`DeviceId::de_cle`] ne garde que 4 octets de la clé : une clé dont
+//! l'identifiant est celui d'un appareil connu se fabrique en 2³² essais. Le
+//! répondeur refuse donc, **avant tout nonce** (donc avant le code), une clé dont
+//! l'identifiant dérivé est déjà porté par une autre clé du registre, active ou
+//! révoquée (fermeture `CODE_COLLISION`), et le revérifie à la décision.
+//! L'initiateur n'a pas de registre ([`appairer_vers`]) : chez lui, c'est
+//! [`Admission::inscrire_verifie`] qui refuse l'écriture.
 //!
 //! # Le lien
 //!
@@ -74,6 +84,8 @@ const CODE_ABANDON: u32 = 11;
 const CODE_PROTOCOLE: u32 = 12;
 const CODE_REVOQUEE: u32 = 13;
 const CODE_FILE_PLEINE: u32 = 14;
+/// La clé du pair donne un identifiant déjà porté par une autre clé du registre.
+const CODE_COLLISION: u32 = 15;
 
 /// Un message de l'appairage sur le fil : `{"t":"engage","h":…}`, etc.
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -232,6 +244,14 @@ impl AppairageEnCours {
         {
             self.fermer(CODE_REVOQUEE, b"cle revoquee");
             return Err(TransportError::Refuse(format!("clé révoquée : {id}")));
+        }
+        // Côté répondeur : une autre clé inscrite sous cet identifiant pendant
+        // l'appairage l'emporte aussi (l'inscription serait refusée).
+        if let Some(peers) = &self.peers
+            && let Err(e) = peers.verifier_libre(&self.pair_id, &self.pair_cle)
+        {
+            self.fermer(CODE_COLLISION, b"collision");
+            return Err(TransportError::Refuse(format!("appairage : {e}")));
         }
 
         self.sas.confirmer_local();
@@ -404,6 +424,13 @@ pub(super) async fn repondre(
         Some(id) => id,
         None => DeviceId::de_cle(&pair_cle),
     };
+    // Collision : l'identifiant dérivé de cette clé est déjà porté par une AUTRE
+    // clé (active ou révoquée). Jamais légitime (une clé connue a été trouvée
+    // ci-dessus par `id_de_cle`) : refusé avant tout nonce, donc avant le code.
+    if let Err(e) = r.peers.verifier_libre(&pair_id, &pair_cle) {
+        connexion.close(quinn::VarInt::from_u32(CODE_COLLISION), b"collision");
+        return Err(TransportError::Refuse(format!("appairage : {e}")));
+    }
 
     let (mut send, mut recv) = match timeout_at(echeance, connexion.accept_bi()).await {
         Ok(Ok(flux)) => flux,
@@ -782,37 +809,42 @@ mod tests {
     }
 
     // (5) Délai dépassé : un côté ne décide jamais, l'autre échoue en temps borné.
+    //
+    // L'amorce (connexion, engagement, nonces) se fait avec `DELAI` : la charge
+    // de la machine ne peut pas la faire échouer. Puis on ramène l'échéance du
+    // côté testé à `court` à partir de maintenant : c'est elle, et elle seule,
+    // qui doit faire échouer la décision, avec l'erreur « délai dépassé », pas
+    // avant `court` et bien avant que l'autre côté (échéance `DELAI`) ne lâche.
     #[tokio::test]
     async fn p5_delai_depasse_l_autre_cote_echoue_en_temps_borne() {
         let court = Duration::from_millis(300);
-        let (flux, mut rx) = repondeur(Peers::new(), court).await;
+        let (flux, mut rx) = repondeur(Peers::new(), DELAI).await;
+        let attendu = delai_depasse().to_string();
 
         // R ne décide jamais : I échoue.
-        let (i, r) = deux_cotes(flux.local_addr(), &mut rx, court).await;
+        let (mut i, r) = deux_cotes(flux.local_addr(), &mut rx, DELAI).await;
         let debut = std::time::Instant::now();
+        i.echeance = Instant::now() + court;
         let ai = tokio::time::timeout(DELAI, i.decider(true))
             .await
             .expect("I aurait dû échouer avant 5 s");
-        assert!(ai.is_err(), "{ai:?}");
-        assert!(
-            debut.elapsed() < Duration::from_secs(2),
-            "{:?}",
-            debut.elapsed()
-        );
+        let ecoule = debut.elapsed();
+        assert_eq!(ai.unwrap_err().to_string(), attendu);
+        assert!(ecoule >= court, "{ecoule:?}");
+        assert!(ecoule < Duration::from_secs(2), "{ecoule:?}");
         drop(r);
 
         // I ne décide jamais : R échoue.
-        let (i, r) = deux_cotes(flux.local_addr(), &mut rx, court).await;
+        let (i, mut r) = deux_cotes(flux.local_addr(), &mut rx, DELAI).await;
         let debut = std::time::Instant::now();
+        r.echeance = Instant::now() + court;
         let ar = tokio::time::timeout(DELAI, r.decider(true))
             .await
             .expect("R aurait dû échouer avant 5 s");
-        assert!(ar.is_err(), "{ar:?}");
-        assert!(
-            debut.elapsed() < Duration::from_secs(2),
-            "{:?}",
-            debut.elapsed()
-        );
+        let ecoule = debut.elapsed();
+        assert_eq!(ar.unwrap_err().to_string(), attendu);
+        assert!(ecoule >= court, "{ecoule:?}");
+        assert!(ecoule < Duration::from_secs(2), "{ecoule:?}");
         drop(i);
     }
 
@@ -834,6 +866,50 @@ mod tests {
         assert!(resultat.is_err(), "{resultat:?}");
         assert!(aucune_demande(&mut rx).await);
         assert_eq!(peers.state(&id(2)), Some(AnchorKeyState::Revoked));
+    }
+
+    // (6 bis) Collision d'identifiant : la clé de I donne un identifiant déjà
+    // porté par une AUTRE clé du registre de R (fabriquée ici en posant la clé 9
+    // sous l'identifiant dérivé de la clé 2). R refuse avant tout nonce, donc
+    // avant le code : I n'obtient pas d'appairage, aucune demande ne remonte, et
+    // la fiche d'origine est intacte.
+    #[tokio::test]
+    async fn p6_bis_collision_d_identifiant_refusee_avant_le_code() {
+        let peers = Peers::new();
+        peers
+            .try_admit(&id(2), vk(9), AnchorKeyRole::Ownership, Utc::now())
+            .unwrap();
+        let (flux, mut rx) = repondeur(peers.clone(), DELAI).await;
+
+        let resultat = appairer_vers(
+            flux.local_addr(),
+            &identite(2),
+            AnchorKeyRole::Shared,
+            DELAI,
+        )
+        .await;
+        assert!(
+            resultat.is_err(),
+            "aucun code ne doit s'afficher : {resultat:?}"
+        );
+        assert!(aucune_demande(&mut rx).await);
+        assert_eq!(peers.len(), 1);
+        assert_eq!(peers.id_de_cle(&vk(9)), Some(id(2)));
+        assert_eq!(peers.id_de_cle(&vk(2)), None);
+        assert_eq!(peers.role(&id(2)), Some(AnchorKeyRole::Ownership));
+
+        // Même refus si la fiche d'origine est révoquée.
+        assert!(peers.revoke(&id(2)));
+        let resultat = appairer_vers(
+            flux.local_addr(),
+            &identite(2),
+            AnchorKeyRole::Shared,
+            DELAI,
+        )
+        .await;
+        assert!(resultat.is_err(), "{resultat:?}");
+        assert!(aucune_demande(&mut rx).await);
+        assert_eq!(peers.id_de_cle(&vk(9)), Some(id(2)));
     }
 
     // (7) Une connexion `this-mesh/1` d'une clé inconnue ne crée jamais de demande :
