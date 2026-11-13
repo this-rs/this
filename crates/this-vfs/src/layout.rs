@@ -93,6 +93,43 @@ pub struct ManifestBody<'a> {
     pub created: &'a DateTime<Utc>,
 }
 
+/// Lifecycle state of one key of a trust anchor.
+///
+/// The anchor only ever answers « does this manifest come from a source we
+/// admit ». It never carries what that source may do; [`AnchorKeyRole`] is the
+/// only extra provenance it keeps, and verification consults the state alone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AnchorKeyState {
+    /// The key may authenticate a manifest.
+    Active,
+    /// The key is known but no longer admitted: same verdict as an unknown key,
+    /// only distinguishable so a host can tell « revoked » from « never seen ».
+    Revoked,
+}
+
+/// Provenance of one key of a trust anchor. Informational: verification never
+/// reads it (see [`AnchorKeyState`]); it never authorizes behaviour.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AnchorKeyRole {
+    /// The host's own key.
+    Ownership,
+    /// A paired peer's key.
+    Shared,
+}
+
+/// One key of a trust anchor, in the shape it is persisted or shared between two
+/// hosts. The verification side lives in `this` (it holds a parsed
+/// `VerifyingKey`); this is its serializable twin — the public key as hex.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AnchorKey {
+    pub key_id: String,
+    /// Ed25519 public key, 32 bytes, lower-case hex.
+    pub public_key: String,
+    pub state: AnchorKeyState,
+    pub added_at: DateTime<Utc>,
+    pub role: AnchorKeyRole,
+}
+
 impl Manifest {
     /// The bytes covered by the signature: the canonical [`ManifestBody`] of this
     /// record. Any `signature` it carries is ignored.
@@ -113,6 +150,24 @@ impl Manifest {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn anchor_key_round_trips_through_json() {
+        let key = AnchorKey {
+            key_id: "device-0102030405060708".into(),
+            public_key: "ab".repeat(32),
+            state: AnchorKeyState::Active,
+            added_at: DateTime::parse_from_rfc3339("2026-01-01T00:00:00Z")
+                .unwrap()
+                .with_timezone(&Utc),
+            role: AnchorKeyRole::Ownership,
+        };
+        let json = serde_json::to_string(&key).unwrap();
+        let back: AnchorKey = serde_json::from_str(&json).unwrap();
+        assert_eq!(key, back);
+        assert_eq!(back.state, AnchorKeyState::Active);
+        assert_eq!(back.role, AnchorKeyRole::Ownership);
+    }
 
     #[test]
     fn signing_bytes_format_is_pinned() {

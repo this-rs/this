@@ -62,20 +62,43 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 #[cfg(feature = "module-signing")]
 use this_vfs::layout::SignatureBlock;
+// The anchor's key entries are shared with the client (`this-vfs`) and the app:
+// re-export the record shape so callers import it from one path.
+#[cfg(feature = "module-signing")]
+pub use this_vfs::layout::{AnchorKey, AnchorKeyRole, AnchorKeyState};
 use this_vfs::layout::{
     DESCRIPTOR_FILE, MANIFEST_FILE, MANIFEST_FORMAT, MAX_ASSET_BYTES, Manifest, YANKED_DIR,
 };
 
+/// One key a host admits, with its lifecycle state.
+///
+/// Verification consults `state` alone (`Active` admits; `Revoked` and absent
+/// refuse with the same stable verdict). `role` and `added_at` are provenance
+/// only: the anchor says « this code comes from a source we admit », never
+/// « this code may do this or that ».
+#[cfg(feature = "module-signing")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TrustedKey {
+    pub key: ed25519_dalek::VerifyingKey,
+    pub state: AnchorKeyState,
+    pub added_at: DateTime<Utc>,
+    pub role: AnchorKeyRole,
+}
+
 /// The keys a host accepts for stored modules.
 ///
 /// Fail-closed by construction: a store that has an anchor refuses a manifest
-/// that carries no signature, and one signed by an unknown key. A store with no
-/// anchor behaves as before — integrity against the manifest, not
+/// that carries no signature, and one signed by an unknown or revoked key. A
+/// store with no anchor behaves as before — integrity against the manifest, not
 /// authentication of it.
+///
+/// An anchor holds a *set* of keys: the host's own, plus one per paired peer.
+/// Revocation is a live mutation, not a cache — calling [`TrustAnchor::revoke`]
+/// affects the very next verification, no restart.
 #[cfg(feature = "module-signing")]
 #[derive(Debug, Clone, Default)]
 pub struct TrustAnchor {
-    keys: BTreeMap<String, ed25519_dalek::VerifyingKey>,
+    keys: BTreeMap<String, TrustedKey>,
 }
 
 #[cfg(feature = "module-signing")]
@@ -85,7 +108,7 @@ impl TrustAnchor {
     }
 
     /// Trust a key given as a SubjectPublicKeyInfo PEM (the format
-    /// `openssl genpkey`/`this sign` produce).
+    /// `openssl genpkey`/`this sign` produce). Added `active`, role `ownership`.
     pub fn insert_pem(
         &mut self,
         key_id: impl Into<String>,
@@ -96,14 +119,100 @@ impl TrustAnchor {
             ContractError::framework(codes::MODULE_UNTRUSTED_KEY)
                 .with_param("reason", e.to_string())
         })?;
-        self.keys.insert(key_id.into(), key);
+        self.keys.insert(
+            key_id.into(),
+            TrustedKey {
+                key,
+                state: AnchorKeyState::Active,
+                added_at: Utc::now(),
+                role: AnchorKeyRole::Ownership,
+            },
+        );
         Ok(())
     }
 
     /// Trust an already-parsed key (tests, or a host that reads keys from its own
-    /// configuration store).
+    /// configuration store). Backward-compatible shorthand for the host's own
+    /// key: added `active`, role `ownership`.
     pub fn insert(&mut self, key_id: impl Into<String>, key: ed25519_dalek::VerifyingKey) {
-        self.keys.insert(key_id.into(), key);
+        self.keys.insert(
+            key_id.into(),
+            TrustedKey {
+                key,
+                state: AnchorKeyState::Active,
+                added_at: Utc::now(),
+                role: AnchorKeyRole::Ownership,
+            },
+        );
+    }
+
+    /// Trust a paired peer's key: added `active`, role `shared`.
+    pub fn insert_peer(&mut self, key_id: impl Into<String>, key: ed25519_dalek::VerifyingKey) {
+        self.keys.insert(
+            key_id.into(),
+            TrustedKey {
+                key,
+                state: AnchorKeyState::Active,
+                added_at: Utc::now(),
+                role: AnchorKeyRole::Shared,
+            },
+        );
+    }
+
+    /// Full control over an entry: its state, its role, and the moment it was
+    /// added. Used to reload a persisted anchor without losing `added_at`.
+    pub fn insert_trusted(
+        &mut self,
+        key_id: impl Into<String>,
+        key: ed25519_dalek::VerifyingKey,
+        state: AnchorKeyState,
+        role: AnchorKeyRole,
+        added_at: DateTime<Utc>,
+    ) {
+        self.keys.insert(
+            key_id.into(),
+            TrustedKey {
+                key,
+                state,
+                added_at,
+                role,
+            },
+        );
+    }
+
+    /// Revoke a key. It stays *known* (so a host can tell « revoked » from
+    /// « never seen ») but no longer authenticates. Applies to the next
+    /// verification: the anchor is a live field, not an immutable cache.
+    ///
+    /// Returns `false` when the key is absent.
+    pub fn revoke(&mut self, key_id: &str) -> bool {
+        match self.keys.get_mut(key_id) {
+            Some(entry) => {
+                entry.state = AnchorKeyState::Revoked;
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// The entry for a key id, whatever its state.
+    pub fn get(&self, key_id: &str) -> Option<&TrustedKey> {
+        self.keys.get(key_id)
+    }
+
+    /// The anchor's keys as their serializable records, for persistence or to
+    /// share the trust set with a peer.
+    pub fn list(&self) -> Vec<AnchorKey> {
+        self.keys
+            .iter()
+            .map(|(id, entry)| AnchorKey {
+                key_id: id.clone(),
+                public_key: hex_key(&entry.key),
+                state: entry.state,
+                added_at: entry.added_at,
+                role: entry.role,
+            })
+            .collect()
     }
 
     /// Is this anchor empty? An empty anchor is a misconfiguration, not a policy:
@@ -111,6 +220,16 @@ impl TrustAnchor {
     pub fn is_empty(&self) -> bool {
         self.keys.is_empty()
     }
+}
+
+/// Lower-case hex of an Ed25519 public key (32 bytes).
+#[cfg(feature = "module-signing")]
+fn hex_key(key: &ed25519_dalek::VerifyingKey) -> String {
+    let mut s = String::with_capacity(64);
+    for b in &key.to_bytes()[..] {
+        s.push_str(&format!("{b:02x}"));
+    }
+    s
 }
 
 /// One stored version of a module.
@@ -268,6 +387,16 @@ impl VfsModuleStore {
         self
     }
 
+    /// Revoke a key of the trust anchor, live: the very next verification sees it
+    /// as refused, no restart and no rebuild. Returns `false` when the store has
+    /// no anchor or the key is absent.
+    #[cfg(feature = "module-signing")]
+    pub fn revoke_key(&mut self, key_id: &str) -> bool {
+        self.trust
+            .as_mut()
+            .is_some_and(|anchor| anchor.revoke(key_id))
+    }
+
     /// Registry of the host's custom validators / transforms / types (the one `check`
     /// must see, at put AND at get).
     pub fn with_registry(mut self, registry: Arc<CustomRegistry>) -> Self {
@@ -401,11 +530,22 @@ impl VfsModuleStore {
                 .with_param("path", path.as_str())
                 .with_param("module", format!("{}@{}", m.name, m.version)));
         };
-        let Some(key) = anchor.keys.get(&sig.key_id) else {
+        let Some(entry) = anchor.keys.get(&sig.key_id) else {
             return Err(ContractError::framework(codes::MODULE_UNTRUSTED_KEY)
                 .with_param("path", path.as_str())
-                .with_param("key_id", sig.key_id.clone()));
+                .with_param("key_id", sig.key_id.clone())
+                .with_param("state", "unknown"));
         };
+        // A revoked key stays known but no longer admits anything: same stable
+        // verdict as an unknown key, distinguished here so a host can tell the two
+        // apart without a second code.
+        if entry.state == AnchorKeyState::Revoked {
+            return Err(ContractError::framework(codes::MODULE_UNTRUSTED_KEY)
+                .with_param("path", path.as_str())
+                .with_param("key_id", sig.key_id.clone())
+                .with_param("state", "revoked"));
+        }
+        let key = &entry.key;
         let bytes = m.signing_bytes();
         use base64::Engine as _;
         let raw = base64::engine::general_purpose::STANDARD
@@ -1976,5 +2116,139 @@ mod signing_tests {
             "billing",
             "a host that declares no anchor keeps integrity-only behaviour"
         );
+    }
+
+    /// A store signed by an arbitrary key (here, a peer), under a chosen key id.
+    async fn store_signed_by(key_id: &str, key: SigningKey) -> (Arc<InMemoryVfs>, VfsModuleStore) {
+        let vfs = Arc::new(InMemoryVfs::new());
+        let writer = VfsModuleStore::new(vfs.clone()).with_signing_key(key_id, key);
+        writer
+            .put(&descriptor(), &[])
+            .await
+            .expect("put signed module");
+        (vfs, writer)
+    }
+
+    /// The mission's core: a module signed by a paired peer must be admitted once
+    /// that peer's key is in the anchor, `active`.
+    #[tokio::test]
+    async fn an_active_peer_key_is_admitted() {
+        let peer = SigningKey::from_bytes(&[42u8; 32]);
+        let peer_vk = peer.verifying_key();
+        let (vfs, _) = store_signed_by("peer-42", peer).await;
+
+        let mut anchor = TrustAnchor::new();
+        anchor.insert_peer("peer-42", peer_vk);
+        let entry = anchor.get("peer-42").expect("peer present");
+        assert_eq!(entry.role, AnchorKeyRole::Shared);
+        assert_eq!(entry.state, AnchorKeyState::Active);
+
+        let reader = VfsModuleStore::new(vfs).with_trust_anchor(anchor);
+        let loaded = reader
+            .get("billing", None)
+            .await
+            .expect("active peer admitted");
+        assert_eq!(loaded.name, "billing");
+    }
+
+    /// A revoked peer key stays known but no longer admits anything: the stable
+    /// `untrusted_key` verdict, distinguished by `state = "revoked"`.
+    #[tokio::test]
+    async fn a_revoked_peer_key_is_refused_as_untrusted() {
+        let peer = SigningKey::from_bytes(&[42u8; 32]);
+        let peer_vk = peer.verifying_key();
+        let (vfs, _) = store_signed_by("peer-42", peer).await;
+
+        let mut anchor = TrustAnchor::new();
+        anchor.insert_peer("peer-42", peer_vk);
+        assert!(anchor.revoke("peer-42"));
+
+        let reader = VfsModuleStore::new(vfs).with_trust_anchor(anchor);
+        let err = reader
+            .get("billing", None)
+            .await
+            .expect_err("revoked peer refused");
+        assert_eq!(err.code, codes::MODULE_UNTRUSTED_KEY.into());
+        assert_eq!(
+            err.params.get("state").and_then(|v| v.as_str()),
+            Some("revoked"),
+            "revocation is distinguishable from an unknown key"
+        );
+    }
+
+    /// An unknown key id — even one a peer actually signed with — is refused with
+    /// the same stable verdict, marked `state = "unknown"`.
+    #[tokio::test]
+    async fn a_peer_signed_by_an_unknown_key_is_refused() {
+        let peer = SigningKey::from_bytes(&[42u8; 32]);
+        let (vfs, _) = store_signed_by("peer-42", peer).await;
+
+        let mut anchor = TrustAnchor::new();
+        anchor.insert_peer(
+            "peer-other",
+            SigningKey::from_bytes(&[43u8; 32]).verifying_key(),
+        );
+        let reader = VfsModuleStore::new(vfs).with_trust_anchor(anchor);
+
+        let err = reader
+            .get("billing", None)
+            .await
+            .expect_err("unknown peer refused");
+        assert_eq!(err.code, codes::MODULE_UNTRUSTED_KEY.into());
+        assert_eq!(
+            err.params.get("state").and_then(|v| v.as_str()),
+            Some("unknown")
+        );
+    }
+
+    /// Revocation is a live mutation of the anchor, not a cache: the store that
+    /// already admitted a peer refuses the same peer once `revoke_key` runs.
+    #[tokio::test]
+    async fn revocation_applies_without_restart_or_rebuild() {
+        let peer = SigningKey::from_bytes(&[42u8; 32]);
+        let peer_vk = peer.verifying_key();
+        let (vfs, _) = store_signed_by("peer-42", peer).await;
+
+        let mut anchor = TrustAnchor::new();
+        anchor.insert_peer("peer-42", peer_vk);
+        let mut reader = VfsModuleStore::new(vfs).with_trust_anchor(anchor);
+
+        assert_eq!(
+            reader.get("billing", None).await.expect("active peer").name,
+            "billing"
+        );
+
+        assert!(reader.revoke_key("peer-42"));
+        let err = reader
+            .get("billing", None)
+            .await
+            .expect_err("revoked, same store, no restart");
+        assert_eq!(err.code, codes::MODULE_UNTRUSTED_KEY.into());
+    }
+
+    /// The anchor's serializable list (state, role, added_at) is the shape a host
+    /// persists and shares: `insert_trusted` → `list` preserves every field.
+    #[test]
+    fn anchor_key_list_round_trips_state_role_and_date() {
+        let peer = SigningKey::from_bytes(&[42u8; 32]);
+        let added = Utc::now();
+
+        let mut anchor = TrustAnchor::new();
+        anchor.insert_trusted(
+            "peer-42",
+            peer.verifying_key(),
+            AnchorKeyState::Revoked,
+            AnchorKeyRole::Shared,
+            added,
+        );
+
+        let records = anchor.list();
+        assert_eq!(records.len(), 1);
+        let rec = &records[0];
+        assert_eq!(rec.key_id, "peer-42");
+        assert_eq!(rec.state, AnchorKeyState::Revoked);
+        assert_eq!(rec.role, AnchorKeyRole::Shared);
+        assert_eq!(rec.added_at, added);
+        assert_eq!(rec.public_key.len(), 64, "32 octets en hex");
     }
 }
