@@ -98,6 +98,21 @@ fn ecrire(rapport: &serde_json::Value) {
             ));
         }
     }
+    if let Some(ecritures) = rapport.get("ecritures").and_then(|v| v.as_array()) {
+        for entree in ecritures {
+            journal.push_str(&format!(
+                "ecriture {} [{}] = {}{}\n",
+                entree["methode"].as_str().unwrap_or("—"),
+                entree["groupe"].as_str().unwrap_or("—"),
+                entree["etat"].as_str().unwrap_or("?"),
+                entree
+                    .get("code")
+                    .and_then(|v| v.as_str())
+                    .map(|code| format!(" ({code})"))
+                    .unwrap_or_default(),
+            ));
+        }
+    }
     journal.push_str(&format!(
         "defauts = {}\n",
         rapport

@@ -62,10 +62,16 @@ Les états d'une méthode :
 | `refuse_autorisation` | la capacité n'est pas accordée | non |
 | `indisponible` | le matériel ou le système ne sait pas faire | non |
 | `non_supporte` | la méthode n'existe pas ici | non |
-| `refuse_argument` | le pont a refusé avant le natif, un argument manque | **oui** |
+| `refuse_argument` | le pont a refusé avant le natif, en nommant la clé | non |
+| `refus` | la famille a refusé avec SON mot (`unknown_activity`, `too_large`…) | non |
 | `panne` | le pont a échoué (`internal`) | **oui** |
 | `delai` | le natif n'a pas répondu dans la borne | **oui** |
-| `non_exerce` | le banc ne l'a pas appelée (permission, geste, écriture) | non |
+| `non_exerce` | le banc ne l'a pas appelée (permission, geste) | non |
+
+`refuse_argument` n'est pas un défaut : le banc appelle chaque méthode **sans argument**,
+comme un agent qui découvre l'outil ; `contactsSearch` sans `query` doit donc être refusé.
+Seuls `panne` et `delai` accusent le pont — un pont sain donne `defauts =` vide.
+
 
 `non_exerce` est une réponse honnête, pas un succès déguisé : le banc préfère
 dire ce qu'il n'a pas mesuré plutôt que de le compter comme bon.
@@ -84,3 +90,39 @@ dire ce qu'il n'a pas mesuré plutôt que de le compter comme bon.
 limites du build : une capacité mesurée `unsupported` passe en `Missing` dans la
 carte que lit l'agent, avec sa raison. Un `denied` n'est **pas** une limite — la
 personne peut changer d'avis dans les Réglages.
+
+## La passe d'écriture, opt-in
+
+Une lecture se mesure sans rien changer. Une **écriture** crée un objet sur l'appareil, donc
+elle ne part pas sans qu'on la demande :
+
+```sh
+SIMCTL_CHILD_THIS_DEVICE_BANC_ECRITURES=sures     # un fichier, une notification, une Live Activity
+SIMCTL_CHILD_THIS_DEVICE_BANC_ECRITURES=visibles  # + un contact, un événement de calendrier
+```
+
+`sures` ne touche à rien de la personne : le fichier va dans le conteneur de l'app, la
+notification est planifiée dans une heure **et retirée tout de suite**, la Live Activity est
+terminée dans la foulée. `visibles` crée un vrai contact (« Banc Appareil ») et un vrai
+événement — le contrat n'a pas de `contactsDelete`, donc **le contact reste**.
+
+Chaque cas de `ecritures()` dit sa suite : écrire, vérifier, effacer (`notificationsPending`
+puis `notificationsCancel`, `liveActivityUpdate` puis `liveActivityEnd`).
+
+## Accorder les permissions d'un simulateur (aucune boîte de dialogue)
+
+Sans cela, toute lecture de donnée personnelle est `non_exerce` — le banc ne pose pas la
+question, c'est la règle. `simctl privacy` la donne à sa place, **après l'installation** (une
+réinstallation efface les entrées TCC) :
+
+```sh
+xcrun simctl install <udid> BancAppareil.app
+for s in contacts contacts-limited calendar photos photos-add microphone motion location location-always; do
+  xcrun simctl privacy <udid> grant "$s" dev.thisrs.bancappareil
+done
+```
+
+Mesuré : `contacts` et `calendar` passent `granted` et `contactsList`, `calendarEvents`,
+`calendarCalendars` répondent ; `photos` et `location` sont restés `prompt` sur les
+simulateurs iOS 18.6 et 26 — `simctl` ne les a pas accordés, et le banc le dit au lieu de
+le masquer.

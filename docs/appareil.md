@@ -476,6 +476,46 @@ Le même banc sur un iPhone physique demande l'appareil **déverrouillé** :
 `devicectl` refuse de lancer une app sur un écran verrouillé
 (`FBSOpenApplicationErrorDomain error 7`).
 
+### Les écritures, exercées aussi
+
+Une lecture se mesure sans rien changer ; une écriture, non. Le banc les exerce donc sur
+demande (`THIS_DEVICE_BANC_ECRITURES`), avec un nettoyage là où le contrat en offre un. Mesuré
+sur un simulateur iPhone 16 Pro / iOS 18.6, permissions accordées par `simctl privacy` :
+
+```text
+defauts =
+ecriture filesWrite              [sures]    = repondu
+ecriture notificationsSchedule   [sures]    = not_authorized   (permission système non accordée)
+ecriture notificationsPending    [sures]    = repondu
+ecriture notificationsCancel     [sures]    = repondu
+ecriture liveActivityStart       [sures]    = unavailable      (le simulateur n'en a pas)
+ecriture contactsCreate          [visibles] = repondu
+ecriture contactsSearch          [visibles] = repondu          (le contact est bien là)
+ecriture calendarCreateEvent     [visibles] = repondu
+```
+
+Et les lectures que la permission débloquait : `contactsList` (12 ms), `calendarEvents`
+(17 ms), `calendarCalendars` (4 ms) — trois chemins qui n'avaient jamais été exercés.
+
+### Ce que cette passe a corrigé dans le banc lui-même
+
+`liveActivityUpdate` sans titre répondait `titre_absent` **après un aller-retour**, alors que
+`LiveActivityArgs` déclare tous ses champs facultatifs : le contrat ne réclamait rien, le natif
+exigeait tout. `missing_args` nomme maintenant ce que le natif exige —
+`liveActivityStart` → `titre`, `liveActivityUpdate` → `id` + `titre`, `liveActivityEnd` → `id`.
+
+Et le banc se trompait sur ce qu'est un défaut. Il comptait `refuse_argument` comme une panne
+du pont : `filesRead` (qui ne peut pas se lire sans le `bookmark` d'un sélecteur) faisait donc
+afficher « 1 défaut » sur un pont sain. Deux corrections :
+
+- `refuse_argument` est le pont qui fait son travail — il a refusé **avant** le natif, en
+  nommant la clé. Ce n'est pas un défaut ;
+- un code de famille (`unknown_activity`, `too_large`…) est une **réponse**, pas une panne :
+  il a son propre état, `refus`. Seuls `internal` et `timeout` accusent le pont.
+
+Après quoi `defauts` est vide sur un pont sain, et la colonne veut de nouveau dire quelque
+chose.
+
 ### Et ce que le banc a coûté à l'hôte pour y arriver
 
 Une app qui ajoute le pont doit régler deux choses que le gabarit Tauri n'écrit

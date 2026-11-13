@@ -543,6 +543,13 @@ pub fn missing_args(method: &str, args: &Value) -> Vec<&'static str> {
         "notificationsPost" => &["title", "id"],
         "notificationsSchedule" => &["title", "id", "in_ms"],
         "notificationsCancel" => &["id"],
+        // Ces trois-là décodent des champs FACULTATIFS, mais le natif les exige à l'exécution et
+        // refuse par un mot (`titre_absent`, `id_absent`). Mesuré le 13/11/2026 : un
+        // `liveActivityUpdate {id}` nu répondait `titre_absent` après un aller-retour au lieu
+        // d'un refus nommé côté pont.
+        "liveActivityStart" => &["titre"],
+        "liveActivityUpdate" => &["id", "titre"],
+        "liveActivityEnd" => &["id"],
         // La phrase que le système montre à la personne pour confirmer : elle vient de l'appelant.
         // En inventer une serait mettre dans la bouche de l'app un motif qu'elle n'a pas écrit.
         "faceIdConfirm" => &["reason"],
@@ -1076,6 +1083,28 @@ mod tests {
         assert_eq!(
             missing_args("notificationsCancel", &serde_json::json!({})),
             vec!["id"]
+        );
+    }
+
+    /// Les Live Activities décodent des champs FACULTATIFS mais en exigent deux à l'exécution :
+    /// le titre pour créer ou mettre à jour, l'identifiant pour viser. Sans cette liste, le pont
+    /// laissait partir un appel incomplet et c'est le natif qui refusait, après un aller-retour.
+    /// Mesuré le 13/11/2026 : `liveActivityUpdate {id}` → `titre_absent`.
+    #[test]
+    fn a_live_activity_names_what_the_native_requires() {
+        let vide = serde_json::json!({});
+        assert_eq!(missing_args("liveActivityStart", &vide), vec!["titre"]);
+        assert_eq!(
+            missing_args("liveActivityUpdate", &vide),
+            vec!["id", "titre"]
+        );
+        assert_eq!(missing_args("liveActivityEnd", &vide), vec!["id"]);
+        assert!(
+            missing_args(
+                "liveActivityUpdate",
+                &serde_json::json!({ "id": "x", "titre": "courses" })
+            )
+            .is_empty()
         );
     }
 

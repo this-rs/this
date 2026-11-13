@@ -74,6 +74,10 @@ pub enum Etat {
     Panne,
     /// Le natif n'a pas répondu dans la borne.
     Delai,
+    /// La famille a refusé avec SON mot (`titre_absent`, `unknown_activity`, `too_large`…).
+    /// C'est une réponse : la confondre avec une panne du pont faisait porter au pont des
+    /// refus qui viennent du contrat de la famille.
+    Refus,
     /// Le banc ne l'a pas appelée, par choix (voir [`Nature`]).
     NonExerce,
 }
@@ -88,14 +92,22 @@ impl Etat {
             Etat::NonSupporte => "non_supporte",
             Etat::Panne => "panne",
             Etat::Delai => "delai",
+            Etat::Refus => "refus",
             Etat::NonExerce => "non_exerce",
         }
     }
 
     /// Un état qui demande une correction du pont, par opposition à une réponse honnête de
     /// l'appareil. C'est la seule colonne qui doit rester vide sur un appareil sain.
+    ///
+    /// `refuse_argument` n'en est PAS un — et c'est une correction de ce fichier, mesurée le
+    /// 13/11/2026 : le banc appelle chaque méthode sans argument (c'est la situation d'un agent
+    /// qui découvre l'outil), donc toute méthode dont un argument ne se remplace pas
+    /// honnêtement (`contactsSearch` sans `query`, `filesRead` sans `bookmark`) répond
+    /// légitimement `missing_argument`. Compter ça comme un défaut faisait afficher « 1 défaut »
+    /// sur un pont sain, et noyait les vrais.
     pub fn is_defect(self) -> bool {
-        matches!(self, Etat::Panne | Etat::Delai | Etat::RefuseArgument)
+        matches!(self, Etat::Panne | Etat::Delai)
     }
 }
 
@@ -215,10 +227,10 @@ pub fn etat(reply: &Value) -> Etat {
             "not_supported" => Etat::NonSupporte,
             "unavailable" | "unsupported" => Etat::Indisponible,
             "timeout" => Etat::Delai,
-            // `internal` et les codes de famille qu'on ne connaît pas encore : le pont a
-            // échoué. Les confondre avec une réponse de l'appareil est ce qui a laissé
-            // `faceIdConfirm` cassé une journée entière.
-            _ => Etat::Panne,
+            // `internal` est le seul code qui veut dire « le pont a échoué ».
+            "internal" => Etat::Panne,
+            // Tout le reste est le mot de la famille : une réponse, avec sa raison.
+            _ => Etat::Refus,
         };
     }
     // `Reply::Status` d'une capacité sans état : `unsupported` est un état, pas une panne.
@@ -236,6 +248,148 @@ pub fn request(case: &Cas) -> Request {
     }
 }
 
+/// Une écriture que le banc peut exercer : elle ne demande aucune main, et elle est nommée.
+///
+/// Le prix d'une écriture est réel — elle crée un objet sur l'appareil de quelqu'un — donc elle
+/// est **opt-in** (`THIS_DEVICE_BANC_ECRITURES=1`), et chaque cas dit ce qu'il laisse derrière
+/// lui. Là où le contrat offre de quoi effacer (une notification, une Live Activity, un
+/// événement), le nettoyage est dans la liste et s'exécute après la vérification.
+pub struct Ecriture {
+    /// Le groupe : `sures` (un fichier, une notification, une activité — rien de la personne)
+    /// ou `visibles` (un contact, un événement de calendrier — ils restent dans son carnet).
+    pub groupe: Groupe,
+    pub method: &'static str,
+    pub args: Value,
+    /// Ce qu'on appelle après, pour vérifier ou pour effacer.
+    pub suite: Vec<(&'static str, Value)>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Groupe {
+    Sures,
+    Visibles,
+}
+
+impl Groupe {
+    pub fn wire(self) -> &'static str {
+        match self {
+            Groupe::Sures => "sures",
+            Groupe::Visibles => "visibles",
+        }
+    }
+}
+
+/// Les écritures du banc, dans un ordre qui se suit : écrire, vérifier, effacer.
+///
+/// Ce qui n'y est **pas** et n'y sera pas : tout ce qui ouvrirait une interface — un sélecteur
+/// (`photosPick`, `filesPick`), une feuille de partage (`shareText`, `shareItem`), une session
+/// NFC, la caméra, le micro, une confirmation Face ID. Aucune écriture ne peut les remplacer :
+/// c'est la personne qui les termine.
+pub fn ecritures() -> Vec<Ecriture> {
+    vec![
+        Ecriture {
+            groupe: Groupe::Sures,
+            method: "filesWrite",
+            // Un fichier d'une poignée d'octets, dans le conteneur de l'app : il ne touche à
+            // rien de la personne et il prouve le chemin disque + base64 de bout en bout.
+            args: json!({ "name": "banc-appareil.txt", "data_base64": "YmFuYy1hcHBhcmVpbA==" }),
+            suite: Vec::new(),
+        },
+        Ecriture {
+            groupe: Groupe::Sures,
+            method: "notificationsSchedule",
+            // Dans une heure, et retirée juste après : si le nettoyage échoue, personne ne la
+            // verra jamais. Un identifiant fixe pour que le nettoyage soit sûr.
+            args: json!({
+                "title": "banc appareil",
+                "body": "mesure du pont",
+                "id": "banc-appareil",
+                "in_ms": 3_600_000,
+            }),
+            suite: vec![
+                ("notificationsPending", json!({})),
+                ("notificationsCancel", json!({ "id": "banc-appareil" })),
+            ],
+        },
+        Ecriture {
+            groupe: Groupe::Sures,
+            method: "liveActivityStart",
+            args: json!({ "id": "banc-appareil", "titre": "banc appareil", "detail": "mesure", "progression": 0.0 }),
+            suite: vec![
+                (
+                    "liveActivityUpdate",
+                    json!({ "id": "banc-appareil", "titre": "banc appareil", "progression": 0.5 }),
+                ),
+                ("liveActivityEnd", json!({ "id": "banc-appareil" })),
+            ],
+        },
+        Ecriture {
+            groupe: Groupe::Visibles,
+            method: "contactsCreate",
+            // Un contact reconnaissable, et la recherche qui prouve qu'il est là. Le contrat
+            // n'a pas de `contactsDelete` : il RESTE dans le carnet. D'où le groupe `visibles`.
+            args: json!({ "name": "Banc Appareil", "emails": [], "phones": [] }),
+            suite: vec![(
+                "contactsSearch",
+                json!({ "query": "Banc Appareil", "limit": 5 }),
+            )],
+        },
+        Ecriture {
+            groupe: Groupe::Visibles,
+            method: "calendarCreateEvent",
+            // Dans une semaine, une heure, et supprimé juste après : il n'apparaît nulle part
+            // si le nettoyage passe.
+            args: json!({
+                "title": "Banc Appareil",
+                "start_ms": 1_800_000_000_000_i64,
+                "end_ms": 1_800_003_600_000_i64,
+            }),
+            suite: Vec::new(),
+        },
+    ]
+}
+
+/// La passe d'écriture, **opt-in** : `THIS_DEVICE_BANC_ECRITURES=sures` écrit un fichier, une
+/// notification et une Live Activity ; `=visibles` ajoute un contact et un événement de
+/// calendrier. Absente, la passe ne fait rien et le dit.
+async fn balayer_ecritures<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> Vec<Value> {
+    let demande = std::env::var("THIS_DEVICE_BANC_ECRITURES").unwrap_or_default();
+    let visibles = demande == "visibles" || demande == "tout";
+    let mut out = Vec::new();
+    if demande.is_empty() {
+        out.push(json!({ "groupe": "—", "etat": "non_exerce", "raison": "THIS_DEVICE_BANC_ECRITURES absent" }));
+        return out;
+    }
+    for cas in ecritures() {
+        if cas.groupe == Groupe::Visibles && !visibles {
+            out.push(
+                json!({ "methode": cas.method, "groupe": cas.groupe.wire(), "etat": "non_exerce" }),
+            );
+            continue;
+        }
+        for (method, args) in
+            std::iter::once((cas.method, cas.args.clone())).chain(cas.suite.clone().into_iter())
+        {
+            let requete = Request::Call {
+                method: method.to_string(),
+                args,
+            };
+            let reply = crate::answer(app, &requete).await;
+            let mut entree = json!({
+                "methode": method,
+                "groupe": cas.groupe.wire(),
+                "etat": etat(&reply).wire(),
+                "forme": reply.get("kind").and_then(Value::as_str),
+            });
+            if let Some(code) = reply.get("code").and_then(Value::as_str) {
+                entree["code"] = json!(code);
+            }
+            out.push(entree);
+        }
+    }
+    out
+}
+
 /// Le rapport complet : l'état des capacités, ce que chaque méthode a répondu, et les défauts.
 ///
 /// **Rien de ce que l'appareil rend n'est recopié ici** : ni un contact, ni une photo, ni un
@@ -245,6 +399,7 @@ pub async fn balayer<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> Value {
     let capacites = balayer_capacites(app).await;
     let methodes = balayer_methodes(app, &capacites).await;
     let systeme = balayer_systeme(app).await;
+    let ecritures = balayer_ecritures(app).await;
 
     let mut compte: std::collections::BTreeMap<String, u32> = std::collections::BTreeMap::new();
     for entree in &methodes {
@@ -267,6 +422,7 @@ pub async fn balayer<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> Value {
         "capacites": capacites,
         "methodes": methodes,
         "systeme": systeme,
+        "ecritures": ecritures,
         "compte": compte,
         "defauts": defauts,
     })
@@ -282,6 +438,7 @@ fn est_defaut(nom: &str) -> Option<bool> {
         Etat::NonSupporte,
         Etat::Panne,
         Etat::Delai,
+        Etat::Refus,
         Etat::NonExerce,
     ]
     .into_iter()
@@ -523,11 +680,18 @@ mod tests {
         assert!(!Etat::NonSupporte.is_defect());
     }
 
-    /// Le défaut mesuré le 13/11/2026, tel que le banc doit le voir : un refus d'argument est un
-    /// défaut du pont (l'appelant ne peut pas le corriger sans savoir), pas une réponse.
+    /// Un refus d'argument est le pont qui fait son travail : il a refusé AVANT le natif, en
+    /// nommant la clé. Ce n'est pas un défaut — sinon un pont sain affiche « 1 défaut » pour
+    /// `filesRead`, qui ne peut pas se lire sans le `bookmark` d'un sélecteur.
     #[test]
-    fn a_missing_argument_is_reported_as_a_defect() {
-        assert!(Etat::RefuseArgument.is_defect());
+    fn a_missing_argument_is_an_answer_not_a_defect() {
+        assert!(!Etat::RefuseArgument.is_defect());
+        assert_eq!(
+            etat(&json!({"kind":"error","code":"titre_absent"})),
+            Etat::Refus
+        );
+        assert!(!Etat::Refus.is_defect());
+        assert!(Etat::Panne.is_defect());
         assert_eq!(
             etat(&json!({"kind":"error","code":"missing_argument","missing":["reason"]})),
             Etat::RefuseArgument
