@@ -149,7 +149,7 @@ extension ThisDevicePlugin {
   /// The photo library permission, read without prompting the person.
   @objc public func photosStatus(_ invoke: Invoke) {
     guard #available(iOS 14, *) else {
-      invoke.resolve(PhotosReply.status(state: "unsupported"))
+      invoke.resolve(PhotosReply.status(state: Etat.unsupported.fil))
       return
     }
     invoke.resolve(PhotosReply.status(state: PhotoLibraryState.name(
@@ -159,7 +159,7 @@ extension ThisDevicePlugin {
   /// Asks the person for the whole photo library (read/write access level, as PhotoKit names it).
   @objc public func photosRequest(_ invoke: Invoke) {
     guard #available(iOS 14, *) else {
-      invoke.resolve(PhotosReply.status(state: "unsupported"))
+      invoke.resolve(PhotosReply.status(state: Etat.unsupported.fil))
       return
     }
     // iOS ends the app at the request when the usage text is missing: refuse instead.
@@ -179,12 +179,12 @@ extension ThisDevicePlugin {
 enum PhotoLibraryState {
   static func name(_ status: PHAuthorizationStatus) -> String {
     switch status {
-    case .authorized: return "granted"
-    case .limited: return "limited"
-    case .denied, .restricted: return "denied"
+    case .authorized: return Etat.granted.fil
+    case .limited: return Etat.limited.fil
+    case .denied, .restricted: return Etat.denied.fil
     // Not asked yet: the system asks when the app requests access.
-    case .notDetermined: return "prompt"
-    @unknown default: return "prompt"
+    case .notDetermined: return Etat.prompt.fil
+    @unknown default: return Etat.prompt.fil
     }
   }
 }

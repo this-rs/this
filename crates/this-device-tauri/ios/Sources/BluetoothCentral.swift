@@ -143,7 +143,7 @@ final class BluetoothCentral: NSObject {
     case .poweredOn: return "powered_on"
     case .poweredOff: return "powered_off"
     case .unauthorized: return "unauthorized"
-    case .unsupported: return "unsupported"
+    case .unsupported: return Etat.unsupported.fil
     case .resetting: return "resetting"
     case .unknown: return "unknown"
     @unknown default: return "unknown"

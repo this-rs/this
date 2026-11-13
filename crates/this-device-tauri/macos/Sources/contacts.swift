@@ -64,7 +64,7 @@ enum MacContacts {
         guard (limitMin...limitMax).contains(limit) else {
             return errorReply(code: ReplyCode.internalError)
         }
-        guard currentState() == "granted" else {
+        guard currentState() == Etat.granted.fil else {
             return errorReply(code: ReplyCode.notAuthorized)
         }
 
@@ -98,7 +98,7 @@ enum MacContacts {
               !id.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             return errorReply(code: ReplyCode.internalError)
         }
-        guard currentState() == "granted" else {
+        guard currentState() == Etat.granted.fil else {
             return errorReply(code: ReplyCode.notAuthorized)
         }
         do {
@@ -119,7 +119,7 @@ enum MacContacts {
               !raw.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             return errorReply(code: ReplyCode.internalError)
         }
-        guard currentState() == "granted" else {
+        guard currentState() == Etat.granted.fil else {
             return errorReply(code: ReplyCode.notAuthorized)
         }
         let query = raw.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -142,7 +142,7 @@ enum MacContacts {
         guard !name.isEmpty else {
             return errorReply(code: ReplyCode.internalError)
         }
-        guard currentState() == "granted" else {
+        guard currentState() == Etat.granted.fil else {
             return errorReply(code: ReplyCode.notAuthorized)
         }
         let emails = (args["emails"] as? [String]) ?? []
