@@ -61,13 +61,13 @@ fileprivate enum ContactsBridge {
   /// silently be a subset, so it counts as denied.
   static func state(_ status: CNAuthorizationStatus) -> String {
     if #available(iOS 18.0, *), status == .limited {
-      return "denied"
+      return Etat.denied.fil
     }
     switch status {
-    case .authorized: return "granted"
-    case .denied, .restricted: return "denied"
-    case .notDetermined: return "prompt"
-    default: return "prompt"
+    case .authorized: return Etat.granted.fil
+    case .denied, .restricted: return Etat.denied.fil
+    case .notDetermined: return Etat.prompt.fil
+    default: return Etat.prompt.fil
     }
   }
 
