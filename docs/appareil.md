@@ -270,15 +270,19 @@ avez oublié :
 ## Vérifier
 
 ```sh
-# Contrat, familles, parités (carte ↔ pont ↔ Swift) : une seconde, sans appareil
-cd crates/tauri-plugin-this-device && cargo test
+# Contrat, familles, parités (carte ↔ pont ↔ Swift ↔ arguments) : une seconde, sans appareil.
+# `--features banc` ajoute les tests du banc. Ces deux commandes tournent en CI, sur le job
+# macOS : le crate est hors workspace, donc `cargo test --workspace` ne le voyait pas.
+cd crates/this-device-tauri && cargo test --features banc
 
-# Le SEUL contrôle qui compile le Swift iOS
+# Le SEUL contrôle qui compile le Swift iOS (les sélecteurs `@objc` importent Tauri)
 cargo tauri ios build --target aarch64        # ~4 min, avec le vrai HOME
 
-# Un raccourci pour les moteurs seulement (fichiers sans `import Tauri`)
+# Un raccourci pour les moteurs seulement (fichiers sans `import Tauri`), celui de la CI
 xcrun --sdk iphoneos swiftc -typecheck -target arm64-apple-ios17.0 \
   ios/Sources/{BluetoothCentral,CameraCapture,AudioRecorder,Reply}.swift
+
+# Mesurer un appareil : voir `tools/banc-appareil` et sa section plus bas
 ```
 
 Trois pièges mesurés, qui font croire que tout va bien :
@@ -293,7 +297,7 @@ Trois pièges mesurés, qui font croire que tout va bien :
   de formatage de la CI, et il porte sur **tous les fichiers suivis** — pas
   seulement les membres du workspace.
 
-## Deux défauts mesurés sur un appareil, et les contrôles qui les tiennent fermés
+## Quatre défauts mesurés sur un appareil, et les contrôles qui les tiennent fermés
 
 Le 13/11/2026, deux pannes vivaient dans `main` alors que **tous les tests
 passaient** et que `device_selftest` rendait un tableau vert des vingt et une
