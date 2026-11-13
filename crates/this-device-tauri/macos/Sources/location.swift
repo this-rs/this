@@ -252,3 +252,145 @@ private final class LocationSampleSession: NSObject, CLLocationManagerDelegate {
         semaphore.signal()
     }
 }
+
+// MARK: - The stream of positions
+//
+// A port of the stream half of `ios/Sources/location.swift`. `locationSample` gives one point;
+// a point does not say where one is going. The manager stays alive between calls, keeps the
+// positions in a bounded buffer, and the caller re-reads them. A position is personal data:
+// nothing here logs one.
+
+private struct StreamFixOut: Encodable {
+    let lat: Double
+    let lon: Double
+    let accuracy_m: Double
+    let ts_ms: Int64
+}
+
+private struct StreamingReply: Encodable {
+    let kind = "streaming"
+    let accuracy: String
+    let distance_filter_m: Double
+}
+
+private struct StoppedReply: Encodable {
+    let kind = "stopped"
+    let fixes: Int
+}
+
+private struct FixesReply: Encodable {
+    let kind = "fixes"
+    let fixes: [StreamFixOut]
+}
+
+/// The stream, kept for the life of the app: a `CLLocationManager` released stops delivering.
+private final class MacLocationStream: NSObject, CLLocationManagerDelegate {
+    static let shared = MacLocationStream()
+    static let ringMax = 200
+
+    private let manager = CLLocationManager()
+    private var fixes: [StreamFixOut] = []
+    private(set) var running = false
+
+    override init() {
+        super.init()
+        manager.delegate = self
+        manager.desiredAccuracy = kCLLocationAccuracyHundredMeters
+    }
+
+    static func accuracy(_ name: String) -> CLLocationAccuracy? {
+        switch name {
+        case "three_kilometers": return kCLLocationAccuracyThreeKilometers
+        case "hundred_meters": return kCLLocationAccuracyHundredMeters
+        case "ten_meters": return kCLLocationAccuracyNearestTenMeters
+        case "best": return kCLLocationAccuracyBest
+        case "best_for_navigation": return kCLLocationAccuracyBestForNavigation
+        default: return nil
+        }
+    }
+
+    func start(name: String, distanceFilter: Double) -> Bool {
+        guard let accuracy = Self.accuracy(name) else { return false }
+        manager.desiredAccuracy = accuracy
+        manager.distanceFilter = distanceFilter
+        running = true
+        manager.startUpdatingLocation()
+        return true
+    }
+
+    func stop() -> Int {
+        manager.stopUpdatingLocation()
+        running = false
+        return fixes.count
+    }
+
+    func recent(sinceMs: Int64) -> [StreamFixOut] {
+        fixes.filter { $0.ts_ms >= sinceMs }
+    }
+
+    func locationManager(_ manager: CLLocationManager, didUpdateLocations locations: [CLLocation]) {
+        for location in locations {
+            fixes.append(
+                StreamFixOut(
+                    lat: location.coordinate.latitude,
+                    lon: location.coordinate.longitude,
+                    accuracy_m: location.horizontalAccuracy,
+                    ts_ms: Int64((location.timestamp.timeIntervalSince1970 * 1000).rounded())
+                )
+            )
+        }
+        if fixes.count > Self.ringMax {
+            fixes.removeFirst(fixes.count - Self.ringMax)
+        }
+    }
+
+    /// The authorization in force: a stream that may not read must not be announced as started.
+    ///
+    /// On macOS there is no "when in use" versus "always" distinction: `.authorizedAlways` is
+    /// the only granted state (`CLAuthorizationStatus.authorizedWhenInUse` does not exist on
+    /// macOS, `@available(macOS, unavailable)`), and the deprecated `.authorized` is its alias.
+    static func authorized() -> Bool {
+        return MacLocation.currentAuth() == .authorizedAlways
+    }
+}
+
+// MARK: - Stream commands (called from dispatch.swift)
+
+extension MacLocation {
+    /// `locationStreamStart` — Args: `{"accuracy": "ten_meters", "distance_filter_m": 1}`.
+    static func streamStart(_ args: [String: Any]) -> String {
+        guard MacLocationStream.authorized() else {
+            return errorReply(code: ReplyCode.notAuthorized)
+        }
+        let accuracy = (args["accuracy"] as? String) ?? "ten_meters"
+        let distanceFilter = number(args["distance_filter_m"]) ?? 1
+        return onMainSync {
+            guard MacLocationStream.shared.start(name: accuracy, distanceFilter: distanceFilter) else {
+                return errorReply(code: ReplyCode.internalError)
+            }
+            return encodeJson(StreamingReply(accuracy: accuracy, distance_filter_m: distanceFilter))
+        }
+    }
+
+    /// `locationStreamStop` — Args: `{}`. Stopping a stream that is not running is not an error.
+    static func streamStop(_ args: [String: Any]) -> String {
+        return onMainSync {
+            encodeJson(StoppedReply(fixes: MacLocationStream.shared.stop()))
+        }
+    }
+
+    /// `locationRecent` — Args: `{"since_ms": ...}`. Empty means "nothing new", not a failure.
+    static func recent(_ args: [String: Any]) -> String {
+        let sinceMs = (number(args["since_ms"])).map { Int64($0) } ?? 0
+        return onMainSync {
+            encodeJson(FixesReply(fixes: MacLocationStream.shared.recent(sinceMs: sinceMs)))
+        }
+    }
+}
+
+/// A JSON number read as `Double`, whether the decoder handed back an `Int` or a `Double`.
+private func number(_ value: Any?) -> Double? {
+    if let double = value as? Double { return double }
+    if let int = value as? Int { return Double(int) }
+    return nil
+}
