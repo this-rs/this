@@ -746,6 +746,11 @@ impl Authorization {
     ///
     /// The scope fallback keys on this, not on the verdict: "cannot decide" from a wired engine is
     /// a refusal, "nothing to decide with" is the OIDC case.
+    // `clippy::needless_bool` propose `self.wami.is_some()`, qui jetterait `self.iam` : la
+    // fonction teste DEUX moteurs derrière `#[cfg]`, et la suggestion n'en garde qu'un. Le
+    // `allow` est la seule écriture qui reste couvrrable : un `bool` par moteur avec un repli
+    // `#[cfg(not(…))]` ajoute des lignes que la CI ne compile jamais, donc jamais couvertes.
+    #[allow(clippy::needless_bool)]
     fn iam_wired(&self) -> bool {
         #[cfg(feature = "wami")]
         if self.wami.is_some() {

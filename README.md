@@ -769,7 +769,7 @@ Entity (Base Trait)
 
 `crates/` holds the contracts and the frontend of a this-rs app, so an
 application does not rewrite them. Four are members of the root workspace and
-build with `cargo build`. Three keep their own workspace, because they target
+build with `cargo build`. Four keep their own workspace, because they target
 `wasm32` (or Tauri) and a backend that needs none of it must not compile them.
 
 | Crate | What it is | Built as |
@@ -781,13 +781,21 @@ build with `cargo build`. Three keep their own workspace, because they target
 | `this-ui` | The Leptos components of an app: splash, panel, settings, window chrome, notices. Consumed by a wasm front | own workspace, `wasm32` |
 | `this-client-web` | The wasm client of a this-rs server's protocols: gRPC-Web framing, minimal protobuf, unary calls and server streams | own workspace, `wasm32` |
 | `this-shell-tauri` | The Tauri 2 plugin that connects an app's window, Dock and lifecycle to the `this-platform` decisions | own workspace, Tauri (needs GTK on Linux) |
+| `this-device-tauri` | The device bridge: one contract for the 21 capabilities (camera, contacts, calendar, HealthKit, NFC, Bluetooth, location…), a fail-closed consent gate, and a bench that measures them on a real iPhone — `tools/banc-appareil` | own workspace, Tauri (Apple only) |
 
 The three crates with their own workspace are built from their own directory:
 
 ```bash
 cd crates/this-ui && cargo test                                   # host tests
 cd crates/this-client-web && cargo check --target wasm32-unknown-unknown
+cd crates/this-device-tauri && cargo test --features banc          # contract, families, parities
 ```
+
+The device bridge is the one crate whose *native* half no host test can reach: its
+Swift sources are only compiled by a real app build, and only a device says what
+actually answers. Hence `tools/banc-appareil`, a 200-line host that walks the whole
+contract on the phone it runs on and writes `Documents/banc.json` — see
+[`docs/appareil.md`](docs/appareil.md).
 
 ### Macro System
 

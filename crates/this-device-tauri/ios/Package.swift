@@ -8,9 +8,20 @@ let package = Package(
   name: "tauri-plugin-this-device",
   platforms: [
     .macOS(.v10_13),
-    // Le code utilise `authorizationStatus` (iOS 14+) et d'autres API du même âge : une
-    // déclaration en v13 ne compilait plus. L'app hôte, elle, cible iOS 17.
-    .iOS(.v14),
+    // iOS 15, et non 14 : le code utilise `authorizationStatus` (iOS 14+) et d'autres API du
+    // même âge, mais ce n'est pas le code qui fixe la borne basse, c'est la chaîne d'outils.
+    // Mesuré le 13/11/2026 avec Xcode 26.2 : les objets du crate Rust sont compilés pour iOS
+    // 15.0, et un hôte qui annonce 14.0 se lie en 14.0 —
+    //   « object file … was built for newer 'iOS-simulator' version (15.0) than being linked
+    //     (14.0) ».
+    // Une app qui déclare 14.0 peut donc s'installer sur un iPhone resté en iOS 14 et échouer
+    // au lien. La borne basse réelle du crate est iOS 15 : elle est dite ici, une fois.
+    //
+    // En toutes lettres, et non `.v15` : ce manifeste reste en swift-tools 5.3 pour ne pas
+    // imposer une version d'outils à l'hôte, et les constantes `.vNN` n'y existent qu'au-delà
+    // de `.v14`. Mesuré (13/11/2026) : `.v15` fait échouer la compilation du manifeste —
+    // « 'v15' is unavailable » — et le build iOS entier avec.
+    .iOS("15.0"),
   ],
   products: [
     .library(

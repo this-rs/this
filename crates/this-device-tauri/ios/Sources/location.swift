@@ -101,6 +101,21 @@ extension ThisDevicePlugin {
     LocationRequestSession.run(invoke, capability: args.capability)
   }
 
+  /// The state of a location capability, read without prompting the person.
+  ///
+  /// Il manquait, et son absence n'était pas neutre : `device_bridge::status_method` n'avait
+  /// aucune méthode à nommer pour `location` et rendait `None`, donc `Request::Status` répondait
+  /// `unsupported` — un iPhone avec la localisation se lisait « pas de localisation ». Mesuré
+  /// le 13/11/2026 sur un iPhone 16 Pro Max : `capacite location = unsupported`.
+  ///
+  /// `location` est `granted` en « pendant l'utilisation » comme en « toujours » ;
+  /// `location_always` ne l'est qu'en « toujours », et reste `prompt` autrement — demander de
+  /// nouveau peut l'obtenir.
+  @objc public func locationStatus(_ invoke: Invoke) throws {
+    let args = try invoke.parseArgs(LocationArgs.self)
+    invoke.resolve(Reply.status(state: LocationPermission.state(capability: args.capability)))
+  }
+
   /// One position fix: a single location, with the accuracy in meters and the time in Unix ms.
   @objc public func locationSample(_ invoke: Invoke) {
     LocationSampleSession.run(invoke)
@@ -445,3 +460,12 @@ extension ThisDevicePlugin {
     invoke.resolve(FixesReply(fixes: LocationStream.shared.recent(sinceMs: args.sinceMs)))
   }
 }
+
+/// Ancre de l'éditeur de liens — voir `ThisDevicePlugin.famillesAncrees`.
+///
+/// Un `#selector(Foo.bar)` ne produit pas une référence au SYMBOLE de `bar` : il produit une
+/// chaîne. Le dead-strip retire donc l'objet entier, et le pont répond « No command bar found
+/// for plugin this-device ». Mesuré le 13/11/2026 sur un iPhone 16 Pro : dix-huit méthodes de
+/// familles compilaient, étaient listées dans `famillesLiees`, et étaient **absentes du binaire**.
+/// Référencer une CLASSE de ce fichier garde son objet — donc ses méthodes.
+final class FamilleLocation: NSObject {}

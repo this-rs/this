@@ -19,6 +19,12 @@ links = "tauri-plugin-this-device"
 name = "this_device_tauri"
 path = "src/lib.rs"
 
+[features]
+# Le banc d'essai du pont (`src/banc.rs`) : balaie tout le contrat sur l'appareil devant soi
+# et rend un rapport. Hors production par construction — un hôte qui veut mesurer l'active.
+default = []
+banc = []
+
 [dependencies]
 this-platform = { path = "../this-platform" }
 # No default features: on desktop and Linux, Tauri's default webview stack (WebKitGTK) is not
@@ -44,3 +50,11 @@ default-features = false
 
 [target.'cfg(target_os = "macos")'.dependencies]
 libc = "0.2"
+
+# Linux : le pont parle aux services du bureau par D-Bus (BlueZ pour le Bluetooth, GeoClue2 pour la
+# position, le portail XDG pour caméra et micro en sandbox). zbus est du Rust pur : pas de
+# libdbus, donc pas de pkg-config. La feature `tokio` aligne son exécuteur sur celui de Tauri.
+[target.'cfg(target_os = "linux")'.dependencies]
+zbus = { version = "5", default-features = false, features = ["tokio"] }
+# L'exécuteur des tests purs et des attentes bornées (`rt` : `Builder`, `time` : `sleep`).
+tokio = { version = "1", features = ["rt", "time"] }

@@ -45,15 +45,25 @@ pub mod consent;
 pub mod families;
 pub mod wire;
 
+/// Le banc d'essai : ce que l'appareil devant soi sait vraiment faire. Compilé seulement avec
+/// la feature `banc`, parce que ce n'est pas une surface de production — c'est un diagnostic
+/// qu'un hôte demande, pas un module. Voir `src/banc.rs`.
+#[cfg(feature = "banc")]
+pub mod banc;
+
 #[cfg(target_os = "ios")]
 use tauri::plugin::PluginHandle;
 
 #[cfg(target_os = "macos")]
 mod macos;
 
+/// Le backend Linux : BlueZ, GeoClue2, V4L2/portail XDG, IIO. Voir `src/linux/mod.rs`.
+#[cfg(target_os = "linux")]
+mod linux;
+
 /// Combien de temps on attend le natif avant de répondre `timeout`. Un capteur peut être
 /// lent, mais une promesse qui ne se résout jamais bloque le tour de l'agent entier.
-#[cfg(target_os = "ios")]
+#[cfg(any(target_os = "ios", target_os = "linux"))]
 const NATIVE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 // The Swift entry point, defined in `ios/Sources/ThisDevicePlugin.swift`.
@@ -171,6 +181,12 @@ pub const STREAMS: &[&str] = &["orientation", "battery"];
 /// Les sélecteurs natifs des flux : départ (avec un canal) et arrêt.
 pub const STREAM_METHODS: &[&str] = &["streamStart", "streamStop"];
 
+/// Les sélecteurs de **diagnostic** : ils ne lisent ni n'écrivent aucune donnée de la personne,
+/// et ils existent pour interroger le pont lui-même. `listCommands` dit quelles familles sont
+/// réellement liées dans le binaire — ce que le contrat ne peut pas promettre, puisque c'est
+/// l'éditeur de liens qui décide.
+pub const DIAGNOSTIC_METHODS: &[&str] = &["listCommands"];
+
 /// Démarre un flux de [`STREAMS`]. `on_sample` reçoit chaque échantillon natif, tel quel
 /// (`{"kind":"orientation","angle":…}`, `{"kind":"battery","level":…,"state":…}`) : un
 /// échantillon initial tout de suite, puis un par notification du système. L'appelant le
@@ -266,13 +282,21 @@ async fn call_native<R: Runtime>(app: &AppHandle<R>, method: &str, args: &Value)
         .map(|d| d.as_millis() as f64)
         .unwrap_or(0.0);
     let completed = this_platform::device_bridge::complete_args(method, args, now_ms);
-    if let Some(manquant) = this_platform::device_bridge::missing_args(method, &completed) {
+    let manquants = this_platform::device_bridge::missing_args(method, &completed);
+    if !manquants.is_empty() {
         note(&format!(
-            "call {method} : argument `{manquant}` requis et absent"
+            "call {method} : argument(s) requis et absent(s) : {}",
+            manquants.join(", ")
         ));
         // Code dédié : `internal` laissait l'agent conclure à une panne du pont alors qu'il
-        // manquait un argument qu'il peut fournir lui-même.
-        return json!({ "kind": "error", "code": "missing_argument" });
+        // manquait un argument qu'il peut fournir lui-même. La liste est dans la RÉPONSE, pas
+        // seulement dans le journal : c'est le seul endroit que l'appelant lit, et un message
+        // qu'il faut aller chercher dans un fichier ne sert à personne.
+        return json!({
+            "kind": "error",
+            "code": "missing_argument",
+            "missing": manquants,
+        });
     }
     let args = &completed;
     if this_platform::device_bridge::capability_of(method, args).is_none() {
@@ -344,8 +368,19 @@ async fn call_native<R: Runtime>(_app: &AppHandle<R>, method: &str, args: &Value
     }
 }
 
-/// Off iOS and macOS there is no device: a family call is refused as unsupported.
-#[cfg(not(any(target_os = "ios", target_os = "macos")))]
+/// On Linux the backend talks to the desktop's services (D-Bus) and to `sysfs`. Every
+/// step is bounded on its own; `NATIVE_TIMEOUT` is the last net, so a silent daemon is a
+/// `timeout` answer and never a pending promise.
+#[cfg(target_os = "linux")]
+async fn call_native<R: Runtime>(_app: &AppHandle<R>, method: &str, args: &Value) -> Value {
+    match tokio::time::timeout(NATIVE_TIMEOUT, linux::call(method, args)).await {
+        Ok(value) => value,
+        Err(_) => json!({ "kind": "error", "code": "timeout" }),
+    }
+}
+
+/// Off iOS, macOS and Linux there is no device: a family call is refused as unsupported.
+#[cfg(not(any(target_os = "ios", target_os = "macos", target_os = "linux")))]
 async fn call_native<R: Runtime>(_app: &AppHandle<R>, _method: &str, _args: &Value) -> Value {
     json!({ "kind": "error", "code": "not_supported" })
 }
@@ -539,8 +574,34 @@ pub async fn perform<R: Runtime>(_app: &AppHandle<R>, request: &Request) -> Repl
     }
 }
 
-/// Off iOS and macOS there is no device: every request is refused as unsupported.
-#[cfg(not(any(target_os = "ios", target_os = "macos")))]
+/// On Linux the pilot primitives are answered by [`linux`]: the permission state, the
+/// gyroscope (IIO) and a bounded Bluetooth scan (BlueZ). Family calls go through
+/// [`call_native`] (via [`answer`]).
+#[cfg(target_os = "linux")]
+pub async fn perform<R: Runtime>(_app: &AppHandle<R>, request: &Request) -> Reply {
+    match request {
+        Request::Status { capability } => linux::status(*capability).await,
+        Request::GyroscopeSample => linux::motion::gyroscope_sample().await,
+        // Not wrapped in `NATIVE_TIMEOUT`: a scan lasts what it was asked to (up to 30 s). It is
+        // bounded by construction instead: see `linux::bluetooth`.
+        Request::BluetoothScan {
+            duration_ms,
+            services,
+        } => {
+            let (duration_ms, services) = match wire::scan_args(*duration_ms, services) {
+                Ok(args) => args,
+                Err(refusal) => return refusal,
+            };
+            linux::bluetooth::scan(duration_ms, &services).await
+        }
+        Request::Call { .. } => Reply::Error {
+            code: DeviceError::NotSupported,
+        },
+    }
+}
+
+/// Off iOS, macOS and Linux there is no device: every request is refused as unsupported.
+#[cfg(not(any(target_os = "ios", target_os = "macos", target_os = "linux")))]
 pub async fn perform<R: Runtime>(_app: &AppHandle<R>, request: &Request) -> Reply {
     match request {
         Request::Status { .. } => Reply::Status {

@@ -28,10 +28,20 @@ func macos_device_call(
     // ── Camera & Microphone (AVFoundation) ──────────────────────────
     case "captureStatus":   result = MacCameraMic.status(args)
     case "captureRequest":  result = MacCameraMic.request(args)
+    case "cameraCapturePhoto": result = MacCameraMic.capturePhoto(args)
+    case "cameraRecordVideo":  result = MacCameraMic.recordVideo(args)
+    case "microphoneStart":    result = MacCameraMic.microphoneStart(args)
+    case "microphoneStop":     result = MacCameraMic.microphoneStop(args)
 
     // ── Location (CoreLocation) ─────────────────────────────────────
+    // L'ÉTAT de la permission, sans rien demander : le même besoin que sur iOS, et la carte
+    // l'annonce désormais sur macOS aussi.
+    case "locationStatus":   result = MacLocation.state(args)
     case "locationRequest":  result = MacLocation.request(args)
     case "locationSample":   result = MacLocation.sample(args)
+    case "locationStreamStart": result = MacLocation.streamStart(args)
+    case "locationStreamStop":  result = MacLocation.streamStop(args)
+    case "locationRecent":      result = MacLocation.recent(args)
 
     // ── Contacts (Contacts framework) ───────────────────────────────
     case "contactsStatus":  result = MacContacts.status()
@@ -52,6 +62,14 @@ func macos_device_call(
 
     // ── Bluetooth (CoreBluetooth) ───────────────────────────────────
     case "bluetoothScan":   result = MacBluetooth.scan(args)
+    case "bluetoothState":          result = MacBluetooth.radioState()
+    case "bluetoothConnect":        result = MacBluetooth.connect(args)
+    case "bluetoothDisconnect":     result = MacBluetooth.disconnect(args)
+    case "bluetoothServices":       result = MacBluetooth.services(args)
+    case "bluetoothRead":           result = MacBluetooth.read(args)
+    case "bluetoothWrite":          result = MacBluetooth.write(args)
+    case "bluetoothSubscribe":      result = MacBluetooth.subscribe(args)
+    case "bluetoothNotifications":  result = MacBluetooth.notifications(args)
 
     // ── Biometrics / Touch ID (LocalAuthentication) ─────────────────
     case "faceIdStatus":    result = MacBiometrics.status()

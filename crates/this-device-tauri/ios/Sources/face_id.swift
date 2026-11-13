@@ -43,18 +43,29 @@ private func isValidFaceIdReason(_ reason: String) -> Bool {
 
 extension ThisDevicePlugin {
   /// The biometry available, read without prompting the person: `face_id`, `touch_id`, `none`.
-  /// Answers `{"kind":"face_id_biometry","biometry":...}`.
+  /// Answers `{"kind":"face_id_biometry","state":…,"biometry":…}`.
+  ///
+  /// `state` n'est pas décoratif : c'est **le seul champ que lit le pont** pour
+  /// `Request::Status { FaceId }` (`device_bridge::status_request` → `perform`, qui lit la clé
+  /// `state`). Mesuré le 13/11/2026 sur un iPhone 16 Pro Max : `state` manquait, `perform`
+  /// retombait sur `Unsupported`, et la carte comme l'agent annonçaient « Face ID : pas sur cet
+  /// appareil » sur un téléphone qui en a un. `granted` = biométrie utilisable maintenant ;
+  /// `unsupported` = pas de matériel, pas d'enrôlement, ou verrouillage après redémarrage.
+  /// `biometry` reste ce qui distingue Face ID de Touch ID.
   @objc public func faceIdStatus(_ invoke: Invoke) {
     let context = LAContext()
     var error: NSError?
     guard context.canEvaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, error: &error) else {
       // Not enrolled, locked out, or no biometry: no biometry is usable right now.
-      let payload: JsonObject = ["kind": "face_id_biometry", "biometry": "none"]
+      let payload: JsonObject = [
+        "kind": "face_id_biometry", "state": "unsupported", "biometry": "none",
+      ]
       invoke.resolve(payload)
       return
     }
     let payload: JsonObject = [
       "kind": "face_id_biometry",
+      "state": "granted",
       "biometry": faceIdBiometryName(context.biometryType),
     ]
     invoke.resolve(payload)
@@ -94,3 +105,12 @@ extension ThisDevicePlugin {
     }
   }
 }
+
+/// Ancre de l'éditeur de liens — voir `ThisDevicePlugin.famillesAncrees`.
+///
+/// Un `#selector(Foo.bar)` ne produit pas une référence au SYMBOLE de `bar` : il produit une
+/// chaîne. Le dead-strip retire donc l'objet entier, et le pont répond « No command bar found
+/// for plugin this-device ». Mesuré le 13/11/2026 sur un iPhone 16 Pro : dix-huit méthodes de
+/// familles compilaient, étaient listées dans `famillesLiees`, et étaient **absentes du binaire**.
+/// Référencer une CLASSE de ce fichier garde son objet — donc ses méthodes.
+final class FamilleFaceId: NSObject {}

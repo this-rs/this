@@ -59,9 +59,9 @@ la carte le dit, et un test le vérifie contre `macos/Sources/dispatch.swift`.
 | | `cameraCapturePhoto` `cameraRecordVideo` | oui | — |
 | `microphone` | `captureStatus` `captureRequest` | oui | oui |
 | | `microphoneStart` `microphoneStop` | oui | — |
-| `location` | `locationRequest` `locationSample` | oui | oui |
+| `location` | `locationStatus` `locationRequest` `locationSample` | oui | oui |
 | | `locationStreamStart` `locationStreamStop` `locationRecent` | oui | — |
-| `location_always` | `locationRequest` | oui | — |
+| `location_always` | `locationStatus` `locationRequest` | oui | — |
 | `clipboard` | `clipboardRead` `clipboardWrite` (texte) | oui | oui |
 | | idem, mais **lien et image** (4 Mio au plus) | oui | — |
 | `share` | `shareText` | oui | oui |
@@ -87,7 +87,7 @@ la carte le dit, et un test le vérifie contre `macos/Sources/dispatch.swift`.
 | `local_network` | `localNetworkStatus` `localNetworkBrowse` | oui | oui |
 | | `localNetworkResolve` | oui | — |
 
-Soixante-seize méthodes, et **deux formes de « non »** qu'il ne faut pas
+Soixante-dix-sept méthodes, et **deux formes de « non »** qu'il ne faut pas
 confondre : une méthode absente de la plateforme (`not_supported`), et une
 capacité non accordée (`not_authorized`).
 
@@ -270,15 +270,19 @@ avez oublié :
 ## Vérifier
 
 ```sh
-# Contrat, familles, parités (carte ↔ pont ↔ Swift) : une seconde, sans appareil
-cd crates/tauri-plugin-this-device && cargo test
+# Contrat, familles, parités (carte ↔ pont ↔ Swift ↔ arguments) : une seconde, sans appareil.
+# `--features banc` ajoute les tests du banc. Ces deux commandes tournent en CI, sur le job
+# macOS : le crate est hors workspace, donc `cargo test --workspace` ne le voyait pas.
+cd crates/this-device-tauri && cargo test --features banc
 
-# Le SEUL contrôle qui compile le Swift iOS
+# Le SEUL contrôle qui compile le Swift iOS (les sélecteurs `@objc` importent Tauri)
 cargo tauri ios build --target aarch64        # ~4 min, avec le vrai HOME
 
-# Un raccourci pour les moteurs seulement (fichiers sans `import Tauri`)
+# Un raccourci pour les moteurs seulement (fichiers sans `import Tauri`), celui de la CI
 xcrun --sdk iphoneos swiftc -typecheck -target arm64-apple-ios17.0 \
   ios/Sources/{BluetoothCentral,CameraCapture,AudioRecorder,Reply}.swift
+
+# Mesurer un appareil : voir `tools/banc-appareil` et sa section plus bas
 ```
 
 Trois pièges mesurés, qui font croire que tout va bien :
@@ -293,10 +297,261 @@ Trois pièges mesurés, qui font croire que tout va bien :
   de formatage de la CI, et il porte sur **tous les fichiers suivis** — pas
   seulement les membres du workspace.
 
+## Quatre défauts mesurés sur un appareil, et les contrôles qui les tiennent fermés
+
+Le 13/11/2026, deux pannes vivaient dans `main` alors que **tous les tests
+passaient** et que `device_selftest` rendait un tableau vert des vingt et une
+capacités. Les deux méritent d'être racontées, parce qu'aucune des deux ne se
+voit depuis le code.
+
+### 1. Un `#selector` ne garde pas une méthode : il produit une chaîne
+
+`ThisDevicePlugin.famillesLiees` listait des `#selector(ThisDevicePlugin.captureStatus(_:))`
+« pour forcer l'éditeur de liens à garder le fichier objet ». **Ça ne marche
+pas.** `#selector` compile en un nom de sélecteur — une chaîne — pas en une
+référence au symbole de la méthode. Le dead-strip retire donc l'objet entier, et
+le pont répond :
+
+```text
+No command captureStatus found for plugin this-device
+```
+
+Mesuré sur un iPhone 16 Pro, avec le banc (§ Le banc) : **dix-huit méthodes** de
+familles — caméra, micro, contacts, photothèque, fichiers, calendrier, santé,
+Face ID, parole, NFC, réseau local, activité motrice, notifications, Live
+Activity, presse-papiers, localisation, état système, flux — étaient présentes
+dans `libapp.a`, leurs sélecteurs étaient bien dans le binaire **comme chaînes**,
+et elles répondaient toutes « No command ». L'Atelier, lui, fonctionnait : son
+`project.yml` passe `-ObjC`, qui garde tout. C'est-à-dire que le pont dépendait
+d'un drapeau que l'hôte devait deviner.
+
+**Le remède est local** : chaque fichier de famille porte une
+`final class Famille<Nom>: NSObject {}` vide, et `ThisDevicePlugin.famillesAncrees`
+référence ces classes. Référencer une **classe** garde l'objet qui la définit,
+donc toutes ses méthodes. La liste est lue par `listCommands` — un vrai usage,
+donc l'optimiseur ne peut pas la retirer — et trois règles la vérifient dans
+`tests/swift_parity.rs` :
+
+1. chaque fichier qui déclare un `@objc public func` porte son ancre ;
+2. chaque ancre est listée dans `famillesAncrees` ;
+3. la liste ne nomme aucune ancre qui n'existe pas.
+
+Après le remède, sur le même appareil : **zéro** « No command ».
+
+### 2. Un argument requis par le décodeur natif, absent du pont
+
+`faceIdConfirm` répondait, sur l'iPhone :
+
+```text
+DecodingError.keyNotFound: Key 'reason' not found in keyed decoding container
+```
+
+Le décodeur Swift est strict — c'est correct — et le pont traduit cet échec en
+`internal`, un code qui accuse le pont alors qu'un argument manquait. L'appelant,
+lui, n'avait aucun moyen de deviner `reason`.
+
+Le défaut n'était pas seul : `tests/args_parity.rs` en a trouvé **vingt** de la
+même famille (`notificationsPost` sans `id` ni `title`, `calendarCreateEvent`
+sans `start_ms`/`end_ms`, `filesWrite` sans `data_base64`, `speechTranscribeFile`
+sans `locale`…). Le test lit les sources Swift réelles, extrait de chaque
+`Decodable` les clés **non optionnelles sans valeur par défaut**, et exige pour
+chacune :
+
+- soit `complete_args` la remplit d'un défaut honnête ;
+- soit `missing_args` la **nomme**.
+
+`missing_args` rend maintenant **tous** les manquants, pas le premier : découvrir
+la signature de `bluetoothWrite` une clé à la fois coûtait trois allers-retours.
+Et la réponse du pont les porte (`{"code":"missing_argument","missing":[…]}`
+au lieu du seul code), parce que le journal n'est pas ce que l'appelant lit.
+
+Ce qui n'a **pas** de défaut honnête reste nommé, jamais inventé : un `reason` de
+Face ID s'affiche à la personne ; un identifiant de notification ne se devine pas
+puisque la réponse ne le rend pas.
+
+### 3. La borne basse était fausse : iOS 14 annoncé, iOS 15 requis
+
+Avec Xcode 26.2, les objets du crate Rust sont compilés pour iOS 15.0 ; un hôte
+qui annonce 14.0 se lie en 14.0 et le lieur le dit :
+
+```text
+object file … was built for newer 'iOS-simulator' version (15.0) than being linked (14.0)
+```
+
+`ios/Package.swift` déclare donc `.iOS(.v15)`. C'est la borne réelle du crate.
+
+### 4. Deux capacités que l'appareil AVAIT se lisaient absentes
+
+Mesuré sur un iPhone 16 Pro Max, banc à l'appui : `capacite face_id = unsupported` et
+`capacite location = unsupported`, sur un téléphone qui a les deux.
+
+**Face ID.** `faceIdStatus` répondait `{"kind":"face_id_biometry","biometry":…}`. Or le pont ne
+lit qu'une clé pour un état : `state` (`perform`, branche `Request::Status`). Un natif qui répond
+une autre forme n'est pas une erreur — c'est un `unsupported` silencieux. La méthode rend
+maintenant `state` **et** `biometry`, et `tests/swift_parity.rs` exige, pour chaque méthode que
+`status_method` nomme, qu'elle écrive `state` (ou construise une réponse typée dont le champ
+s'appelle `state`, ou délègue à un lecteur qui rend un `Reply`).
+
+**Localisation.** `status_method` rendait `None` pour `location` et `location_always` : le pont
+répondait donc `unsupported`, alors qu'iOS donne `authorizationStatus` sans rien demander. La
+méthode `locationStatus` manquait — elle existe maintenant, sur iOS **et** macOS, et
+`capability_of` lit sa capacité dans ses arguments comme `captureStatus`.
+
+Ces deux-là comptent double, parce que `HostLimits::from_bench` transforme un `unsupported`
+mesuré en « indisponible sur ce build » : ce qui se lit absent **sort de la carte de l'agent**.
+D'où la règle jumelle côté banc — une capacité sans permission système (sélecteur, presse-papiers,
+partage) n'est pas `unsupported` mais `sans_etat`, et `from_bench` l'ignore.
+
+## Le banc : mesurer l'appareil, pas le promettre
+
+`this-device-tauri` porte une feature `banc` (`src/banc.rs`) et
+`tools/banc-appareil` une app hôte de deux cents lignes qui n'existe que pour
+elle. Ensemble ils répondent à la seule question que ni le contrat ni la carte ne
+traitent : **sur cet appareil-ci, qu'est-ce qui répond vraiment ?**
+
+```sh
+cd tools/banc-appareil
+cargo tauri ios build --target aarch64-sim --debug
+xcrun simctl install <udid> gen/apple/build/arm64-sim/BancAppareil.app
+SIMCTL_CHILD_THIS_DEVICE_BANC=1 xcrun simctl launch <udid> dev.thisrs.bancappareil
+# le rapport : <conteneur>/Documents/banc.json (+ banc.log, une ligne par méthode)
+```
+
+Sur un iPhone physique, `devicectl` fait la même chose :
+
+```sh
+cargo tauri ios build --target aarch64 --debug
+xcrun devicectl device install app --device <udid> <archive>/BancAppareil.app
+xcrun devicectl device process launch --device <udid> \
+  -e '{"THIS_DEVICE_BANC":"1"}' dev.thisrs.bancappareil
+```
+
+### Ce que le banc exerce, et ce qu'il refuse d'exercer
+
+Chaque méthode du contrat figure au plan, rangée par `Nature` :
+
+| Nature | Exemple | Le banc l'appelle ? |
+|---|---|---|
+| `lecture` | `contactsStatus`, `photosList`, `bluetoothState` | oui, si la permission est **déjà** accordée |
+| `permission` | `captureRequest`, `locationRequest` | non : une question se pose par un geste |
+| `interactif` | `photosPick`, `nfcReadOnce`, `faceIdConfirm` | non |
+| `ecriture` | `contactsCreate`, `notificationsPost` | non |
+
+Deux règles rendent la mesure sûre sur l'appareil de quelqu'un :
+
+1. **Aucune boîte de dialogue.** Avant d'appeler une lecture, le banc lit l'état
+   de la capacité (`Request::Status`, qui ne demande rien) et ne lit la donnée
+   que si la réponse est déjà là. Sans cela, `photosList` sur une app neuve
+   ouvrirait la question de la photothèque — un diagnostic qui se transforme en
+   formulaire.
+2. **Rien de ce que l'appareil rend n'est recopié.** Ni contact, ni photo, ni
+   texte du presse-papiers : le rapport ne garde que la nature, l'état, le code
+   et la durée.
+
+### Ce qu'il a donné, le 13/11/2026
+
+Trois simulateurs (iPhone 16 Pro / iOS 18.6, iPhone 17 Pro / iOS 26.0, iPhone 17
+/ iOS 26.2), build `--debug` :
+
+- **zéro** `panne` après le remède des ancres (contre 15 sur le même build
+  avant) ;
+- un seul défaut restant, et c'est une réponse honnête : `filesRead` sans
+  `bookmark` → `missing_argument` ;
+- `captureStatus`, `nfcStatus`, `motionActivityStatus` et `gyroscopeSample`
+  répondent `unsupported` : le simulateur n'a ni caméra, ni NFC, ni podomètre ;
+- les lectures de données personnelles sont `non_exerce` tant que la permission
+  est `prompt` — sur un appareil réel, c'est la personne qui la donne.
+
+Et sur l'**iPhone 16 Pro Max** (iOS 26, build `release`, appareil déverrouillé) :
+
+```text
+defauts = filesRead
+panne   = 0
+face_id = granted        location = prompt      location_always = prompt
+bluetooth = prompt       nfc = unsupported      live_activity = granted
+clipboard · share · photos_pick · files_pick = sans_etat
+```
+
+`nfc = unsupported` est honnête : ce build-là n'a pas l'entitlement NFC (profil
+générique). `sans_etat` est la marque des capacités qui n'ont pas de permission
+système — un sélecteur, le presse-papiers, la feuille de partage.
+
+Le même banc sur un iPhone physique demande l'appareil **déverrouillé** :
+`devicectl` refuse de lancer une app sur un écran verrouillé
+(`FBSOpenApplicationErrorDomain error 7`).
+
+### Les écritures, exercées aussi
+
+Une lecture se mesure sans rien changer ; une écriture, non. Le banc les exerce donc sur
+demande (`THIS_DEVICE_BANC_ECRITURES`), avec un nettoyage là où le contrat en offre un. Mesuré
+sur un simulateur iPhone 16 Pro / iOS 18.6, permissions accordées par `simctl privacy` :
+
+```text
+defauts =
+ecriture filesWrite              [sures]    = repondu
+ecriture notificationsSchedule   [sures]    = not_authorized   (permission système non accordée)
+ecriture notificationsPending    [sures]    = repondu
+ecriture notificationsCancel     [sures]    = repondu
+ecriture liveActivityStart       [sures]    = unavailable      (le simulateur n'en a pas)
+ecriture contactsCreate          [visibles] = repondu
+ecriture contactsSearch          [visibles] = repondu          (le contact est bien là)
+ecriture calendarCreateEvent     [visibles] = repondu
+```
+
+Et les lectures que la permission débloquait : `contactsList` (12 ms), `calendarEvents`
+(17 ms), `calendarCalendars` (4 ms) — trois chemins qui n'avaient jamais été exercés.
+
+### Ce que cette passe a corrigé dans le banc lui-même
+
+`liveActivityUpdate` sans titre répondait `titre_absent` **après un aller-retour**, alors que
+`LiveActivityArgs` déclare tous ses champs facultatifs : le contrat ne réclamait rien, le natif
+exigeait tout. `missing_args` nomme maintenant ce que le natif exige —
+`liveActivityStart` → `titre`, `liveActivityUpdate` → `id` + `titre`, `liveActivityEnd` → `id`.
+
+Et le banc se trompait sur ce qu'est un défaut. Il comptait `refuse_argument` comme une panne
+du pont : `filesRead` (qui ne peut pas se lire sans le `bookmark` d'un sélecteur) faisait donc
+afficher « 1 défaut » sur un pont sain. Deux corrections :
+
+- `refuse_argument` est le pont qui fait son travail — il a refusé **avant** le natif, en
+  nommant la clé. Ce n'est pas un défaut ;
+- un code de famille (`unknown_activity`, `too_large`…) est une **réponse**, pas une panne :
+  il a son propre état, `refus`. Seuls `internal` et `timeout` accusent le pont.
+
+Après quoi `defauts` est vide sur un pont sain, et la colonne veut de nouveau dire quelque
+chose.
+
+### Et ce que le banc a coûté à l'hôte pour y arriver
+
+Une app qui ajoute le pont doit régler deux choses que le gabarit Tauri n'écrit
+pas, et que rien ne signale avant le premier lancement sur un iPhone réel :
+
+```yaml
+ALWAYS_EMBED_SWIFT_STANDARD_LIBRARIES: true   # sinon : Library not loaded: libswiftCore.dylib
+IPHONEOS_DEPLOYMENT_TARGET: "15.0"            # sinon : objets Rust en 15.0 liés en 14.0
+```
+
+Sans la première, l'app s'installe, se lance et meurt avant le premier écran
+(`dyld: Library not loaded: @rpath/libswiftCore.dylib`), en debug **comme** en
+release. L'Atelier porte la ligne depuis le 08/11 ; le banc l'a retrouvée par un
+plantage. `tools/banc-appareil/preparer.sh` les écrit, et `cargo tauri ios build`
+ne les applique qu'après un `xcodegen generate` — le build ne régénère pas le
+projet depuis `project.yml`.
+
 ## Limites connues
 
-Rien de ce pont n'a été exercé sur un appareil au moment de l'écrire : les
-tests couvrent le contrat, les bornes, les formes de réponse et les parités, pas
-le comportement des frameworks Apple. Une connexion Bluetooth réelle, une photo
-de 1280 px, un contact créé, une étiquette NFC écrite : chacun reste à mesurer
-avec un téléphone devant soi.
+Ce qui reste à mesurer avec un téléphone devant soi, après le banc :
+
+- **les écritures** : un contact créé, un événement de calendrier, une
+  notification planifiée, un fichier écrit. Le banc les déclare `non_exerce` par
+  construction ;
+- **les méthodes interactives** : `photosPick`, `filesPick`, `shareText`,
+  `nfcReadOnce`/`nfcWrite`, `faceIdConfirm`, la capture photo et vidéo, la
+  session micro. Elles demandent une main ;
+- **Bluetooth au-delà du scan** : `bluetoothConnect` et ses suivantes veulent un
+  périphérique réel en face ;
+- **HealthKit et NFC** : le profil de signature de l'hôte porte ou ne porte pas
+  l'entitlement ; sans lui, `unavailable` quel que soit le code (voir plus haut).
+
+Le reste — les états de permission, les six lectures d'état système, les flux
+d'orientation et de batterie, le scan Bluetooth, le presse-papiers en lecture et
+`locationRecent` — est exercé par le banc, et le rapport est le seul juge.

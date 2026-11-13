@@ -22,13 +22,27 @@ private let speechTimeoutSeconds: Double = 120
 
 fileprivate struct SpeechTranscribeArgs: Decodable {
   let path: String
-  let locale: String
-  let maxSeconds: Int
+  /// Langue de la reconnaissance. Facultative : quand l'appelant ne la nomme pas, c'est celle de
+  /// l'appareil — et lui seul la connaît. La rendre obligatoire obligeait un appelant qui ne
+  /// connaît pas la signature à demander la langue par un autre appel, puis à retenter ; ou à
+  /// deviner « fr-FR », ce qui transcrit en français un mémo dicté en anglais.
+  let locale: String?
+  /// Plafond d'écoute. Facultatif : le pont le remplit (`SPEECH_SECONDS_MAX`) ; ce repli ne
+  /// sert qu'à un appel qui contournerait le contrat.
+  let maxSeconds: Int?
 
   private enum CodingKeys: String, CodingKey {
     case path, locale
     case maxSeconds = "max_seconds"
   }
+}
+
+/// La langue de reconnaissance : celle qu'on demande, sinon celle de l'appareil.
+fileprivate func speechLocale(_ asked: String?) -> Locale {
+  guard let asked = asked?.trimmingCharacters(in: .whitespaces), !asked.isEmpty else {
+    return Locale.current
+  }
+  return Locale(identifier: asked)
 }
 
 /// The speech permission in the contract's words (`PermissionState`).
@@ -100,7 +114,7 @@ final class SpeechTranscription {
   fileprivate static func run(_ invoke: Invoke, args: SpeechTranscribeArgs) {
     // The Rust side has already checked the bounds; they are repeated here so the native side
     // never trusts the caller alone.
-    let maxSeconds = min(max(args.maxSeconds, 1), speechSecondsCeiling)
+    let maxSeconds = min(max(args.maxSeconds ?? speechSecondsCeiling, 1), speechSecondsCeiling)
 
     guard isInsideAppContainer(args.path) else {
       invoke.resolve(speechRefusal("unreadable"))
@@ -111,7 +125,7 @@ final class SpeechTranscription {
       return
     }
     guard
-      let recognizer = SFSpeechRecognizer(locale: Locale(identifier: args.locale)),
+      let recognizer = SFSpeechRecognizer(locale: speechLocale(args.locale)),
       recognizer.supportsOnDeviceRecognition
     else {
       invoke.resolve(speechRefusal("unsupported"))
@@ -163,3 +177,12 @@ final class SpeechTranscription {
     SpeechTranscription.active[ObjectIdentifier(self)] = nil
   }
 }
+
+/// Ancre de l'éditeur de liens — voir `ThisDevicePlugin.famillesAncrees`.
+///
+/// Un `#selector(Foo.bar)` ne produit pas une référence au SYMBOLE de `bar` : il produit une
+/// chaîne. Le dead-strip retire donc l'objet entier, et le pont répond « No command bar found
+/// for plugin this-device ». Mesuré le 13/11/2026 sur un iPhone 16 Pro : dix-huit méthodes de
+/// familles compilaient, étaient listées dans `famillesLiees`, et étaient **absentes du binaire**.
+/// Référencer une CLASSE de ce fichier garde son objet — donc ses méthodes.
+final class FamilleSpeech: NSObject {}

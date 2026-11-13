@@ -212,8 +212,17 @@ jobs:
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
+      # ÉPINGLÉ à 1.99.1, et ce n'est pas une préférence : avec rustc 1.100.0 (stable du
+      # 09/11/2026), `cargo-llvm-cov` — 0.9.1, la dernière — rend **0,00 % pour tous les
+      # fichiers**. Les tests tournent et passent, leurs profils ne sont pas collectés.
+      #   Mesuré le 13/11/2026 sur `this-platform` seul, mêmes tests :
+      #     1.97.1 → 96,35 %   1.98.1 → 96,35 %   1.99.1 → 96,35 %   1.100.0 → 0,00 %
+      # Conséquence en CI : `codecov/patch` refusait toute PR touchant un fichier mesuré,
+      # avec des chiffres qui ne mesuraient plus rien (le peu de couverture restant venait
+      # des binaires d'AUTRES crates qui lient le fichier). Désépingler dès que
+      # cargo-llvm-cov sait lire les profils de 1.100 — c'est la seule chose à faire.
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.99.1
         with:
           # Un test de cette suite compile un module en wasm32 pour vérifier ses exports
           # (`render` présent seulement si le module nomme une fonction de rendu). Sans
@@ -252,6 +261,17 @@ jobs:
         # compilé, ses lignes n'ont aucune donnée de couverture, et `codecov/patch`
         # les compte comme non couvertes. On ne peut pas couvrir ce qu'on ne compile pas.
         run: cargo llvm-cov --features all,wami,this-module-harness/wasmi --workspace --lcov --output-path lcov.info -- --test-threads=1
+
+      # Le rapport lui-même, pour pouvoir répondre à « pourquoi cette ligne est-elle dite non
+      # couverte ? » sans relancer la CI. Mesuré le 13/11/2026 : `codecov/patch` accusait 77
+      # lignes dans un fichier que la mesure locale donnait entièrement couvert, et rien dans
+      # le dépôt ne permettait de comparer les deux jeux de données.
+      - name: Upload lcov (diagnostic)
+        uses: actions/upload-artifact@v4
+        with:
+          name: lcov
+          path: lcov.info
+          retention-days: 7
 
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v7
@@ -563,6 +583,20 @@ jobs:
           echo "fichiers vérifiés : $files"
           # shellcheck disable=SC2086
           xcrun --sdk iphoneos swiftc -typecheck -target arm64-apple-ios17.0 $files
+
+      # Le crate du pont est HORS workspace (Tauri tire GTK sous Linux), donc
+      # `cargo test --workspace` ne le voyait pas : ses garde-fous — la parité des
+      # arguments, les ancres de l'éditeur de liens, le `state` des méthodes d'état,
+      # la parité carte ↔ pont ↔ Swift — ne tournaient NULLE PART. Mesuré le
+      # 13/11/2026 : trois défauts vivaient dans `main` avec une CI verte.
+      #
+      # macOS, pas Linux : le backend `src/linux/` du pont ne se compile qu'avec les
+      # services d'un bureau Linux, et ce crate est fait pour Apple.
+      - name: Contrat, familles et parités (sans appareil)
+        run: |
+          set -euo pipefail
+          cd crates/this-device-tauri
+          cargo test --features banc
 
   # Les crates wasm-only portent leur propre `[workspace]`, donc ils sont absents
   # de `cargo check --workspace` : aucun job ne les compilait. Cinq crates — dont

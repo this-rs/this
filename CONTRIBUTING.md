@@ -295,6 +295,33 @@ local vert pour cette seule raison.
 stable du jour, et deux rustfmt séparés de quelques mois ne rangent pas les `use` de la même
 façon. Si le hook réclame un fichier que tu viens de formater, `rustup update stable`.
 
+**Et la version de clippy, autant.** Une nouvelle règle arrive à chaque stable, et elle peut
+rougir `main` sans qu'aucun contrôle local ne le dise : mesuré le 13/11/2026, `needless_bool`
+apparu en 1.100 alors que la machine était en 1.97.1 — la CI était rouge, le hook vert. Le
+remède est le même (`rustup update stable`), ou, pour ne pas déplacer la toolchain des autres
+sessions, une installation à côté : `rustup toolchain install 1.100.0 --profile minimal
+--component clippy` puis `cargo +1.100.0 clippy …`.
+
+### Plusieurs sessions, une seule copie de travail
+
+Ce dépôt se construit souvent avec deux agents (ou plus) sur le **même** répertoire et la même
+branche. Ce n'est pas un problème tant que trois règles sont tenues — chacune vient d'un incident
+mesuré le 13/11/2026 :
+
+1. **`git add -A` est interdit.** Une session a committé l'avancement non commité d'une autre :
+   un `mod linux;` sans son répertoire, et trente secondes plus tard un test rouge sur un commit
+   qui avait l'air propre. On stage **par nom de fichier**, et pour un fichier partagé on ne
+   stage que ses propres hunks (`git show HEAD:… > /tmp/f`, on édite, `git hash-object -w`,
+   `git update-index --cacheinfo 100644,<sha>,<chemin>` — la copie de travail ne bouge pas).
+2. **Compiler le commit, pas la copie de travail.** Après un commit partiel, la copie contient
+   des choses qui ne sont pas dans le commit. `git worktree add ../_wt-verif <sha>` puis
+   `cargo test` dans ce worktree ; c'est le seul contrôle qui dit si la branche tient.
+3. **`--force-with-lease`, jamais `--force`, et seulement sur son propre sommet.** Réécrire un
+   commit déjà poussé que l'autre session a repris casse son travail sans qu'elle le voie.
+
+Deux corollaires : le hook de pre-push est le garde-fou **commun** (il ne vérifie que ce que la
+branche touche), et un worktree par session reste plus sûr qu'un `git checkout` partagé.
+
 ### Testing
 
 - Write unit tests for all new functionality

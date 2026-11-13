@@ -238,6 +238,10 @@ pub const METHODS: &[&str] = &[
     // Résoudre un service trouvé par un browse : sans ça, un nom ne dit pas où se connecter.
     "localNetworkResolve",
     "locationRequest",
+    // L'ÉTAT de la permission, qui manquait : sans lui, `status_method` rendait `None` pour
+    // `location` et le pont répondait `unsupported` — un iPhone avec la localisation se lisait
+    // « pas de localisation » (mesuré le 13/11/2026 sur un iPhone 16 Pro Max).
+    "locationStatus",
     "locationSample",
     // Le flux : une position ponctuelle ne dit pas où l'on va. Démarrer / arrêter / relire,
     // plutôt qu'une boucle de l'appelant qui redemanderait un point toutes les secondes.
@@ -262,7 +266,7 @@ pub fn capability_of(method: &str, args: &Value) -> Option<Capability> {
         // One native method, two capabilities: the argument says which. `locationRequest`
         // belongs here too — it asks for in-use OR always, and gating it on `Location` alone
         // would let a module get the background permission by naming the foreground one.
-        "status" | "captureStatus" | "captureRequest" | "locationRequest" => {
+        "status" | "captureStatus" | "captureRequest" | "locationRequest" | "locationStatus" => {
             return declared_capability(args);
         }
         "gyroscopeSample" => Capability::Gyroscope,
@@ -334,7 +338,9 @@ fn declared_capability(args: &Value) -> Option<Capability> {
 /// health permission", only per-type answers.
 pub fn status_args(method: &str, capability: Capability) -> Value {
     match method {
-        "status" | "captureStatus" => serde_json::json!({ "capability": capability }),
+        "status" | "captureStatus" | "locationStatus" => {
+            serde_json::json!({ "capability": capability })
+        }
         "healthStatus" => serde_json::json!({ "quantity": "step_count" }),
         _ => serde_json::json!({}),
     }
@@ -421,11 +427,12 @@ pub fn complete_args(method: &str, args: &Value, now_ms: f64) -> Value {
         "photosRead" => serde_json::json!({ "max_px": 1280 }),
         "filesPick" => serde_json::json!({ "max": 5 }),
         "nfcReadOnce" => serde_json::json!({ "timeout_ms": 15_000 }),
-        // Health is per type: `step_count` is the most common, and `healthStatus` already
-        // takes that default.
-        // `window_ms` en plus de `quantity` : mesuré, health le réclame aussi. 24 h est le
-        // maximum que la famille accepte (`WINDOW_MS_MAX`).
-        "healthStatus" | "healthQuantitySample" => {
+        // Health is per type: `step_count` is the most common, so it is the default question.
+        // Les deux sélecteurs ne décodent PAS les mêmes arguments (`HealthStatusArgs` ne lit que
+        // `quantity`) : leur donner le même objet ajoutait deux clés que le natif n'ouvre pas,
+        // et un défaut que personne ne lit finit par faire croire à un contrat qui n'existe pas.
+        "healthStatus" => serde_json::json!({ "quantity": "step_count" }),
+        "healthQuantitySample" => {
             // Trois champs, tous mesurés : `quantity`, `window_ms` (24 h, le maximum de la
             // famille) et `limit` (le plus grand que la famille accepte sans tronquer).
             serde_json::json!({ "quantity": "step_count", "window_ms": 86_400_000, "limit": 10 })
@@ -445,6 +452,7 @@ pub fn complete_args(method: &str, args: &Value, now_ms: f64) -> Value {
         // Camera and location carry their name in their arguments: without it the capability
         // is not even derivable, and the bridge answers `not_supported`.
         "captureRequest" | "captureStatus" => serde_json::json!({ "capability": "camera" }),
+        "locationStatus" => serde_json::json!({ "capability": "location" }),
         // 1280 px et une qualité honnête : assez pour lire un document photographié, assez
         // petit pour traverser le pont sans le saturer.
         "cameraCapturePhoto" => serde_json::json!({ "max_px": 1280, "quality": 0.8 }),
@@ -470,7 +478,16 @@ pub fn complete_args(method: &str, args: &Value, now_ms: f64) -> Value {
         }
         // Une heure de recul : ce qu'on veut dire par « où je suis passé » sans le préciser.
         "locationRecent" => serde_json::json!({ "since_ms": (now_ms - 3600.0 * 1000.0) as i64 }),
-        "localNetworkResolve" => serde_json::json!({ "timeout_ms": 5_000 }),
+        // Le même type de service que celui que `localNetworkBrowse` cherche par défaut : résoudre
+        // un nom sans dire dans quel type le chercher ne pouvait aboutir que par hasard.
+        "localNetworkResolve" => {
+            serde_json::json!({ "service_type": "_http._tcp", "timeout_ms": 5_000 })
+        }
+        // Le plafond de la famille (`SPEECH_SECONDS_MAX`) : une minute de parole. Le natif retombe
+        // sur la langue de l'appareil quand l'appelant ne la nomme pas — lui seul la connaît.
+        "speechTranscribeFile" => serde_json::json!({ "max_seconds": 60 }),
+        // Un corps de notification peut être vide ; le titre, non (il est ce que la personne lit).
+        "notificationsPost" | "notificationsSchedule" => serde_json::json!({ "body": "" }),
         // Le meme delai qu'une lecture : une session NFC qui ne voit rien doit rendre la main.
         "nfcWrite" => serde_json::json!({ "timeout_ms": 15_000 }),
         // 30 jours de séances, 20 au plus.
@@ -491,8 +508,18 @@ pub fn complete_args(method: &str, args: &Value, now_ms: f64) -> Value {
 }
 
 /// The arguments no default can honestly replace: a text to share, a file to transcribe, a
-/// bookmark to open, a row to create. `None` means the call is complete.
-pub fn missing_args(method: &str, args: &Value) -> Option<&'static str> {
+/// bookmark to open, a row to create. Empty means the call is complete.
+///
+/// **Tous** les manquants sont rendus, pas seulement le premier. Rendre un seul obligeait
+/// l'appelant à découvrir la signature une erreur à la fois : `bluetoothWrite` nommait `id`,
+/// puis `characteristic`, puis `data_base64` — trois allers-retours pour une seule écriture. Et
+/// deux clés requises par le décodeur natif n'étaient nommées NULLE PART (`data_base64` d'une
+/// écriture de fichier, `start_ms`/`end_ms` d'un événement) : elles répondaient `internal`, ce
+/// que l'appelant ne peut pas distinguer d'une panne du pont.
+///
+/// Cette liste est vérifiée contre les sources Swift réelles par `tests/args_parity.rs` : une
+/// clé que le `Decodable` natif exige sans défaut ici fait échouer la CI.
+pub fn missing_args(method: &str, args: &Value) -> Vec<&'static str> {
     let required: &[&'static str] = match method {
         "shareText" => &["text"],
         "speechTranscribeFile" => &["path"],
@@ -510,8 +537,22 @@ pub fn missing_args(method: &str, args: &Value) -> Option<&'static str> {
         "contactsCreate" => &["name"],
         "calendarUpdateEvent" | "calendarDeleteEvent" => &["id"],
         "photosRead" => &["id"],
-        // Un rappel sans texte ni délai n'est pas un rappel.
-        "notificationsSchedule" => &["title", "in_ms"],
+        // Un rappel sans texte ni délai n'est pas un rappel. L'identifiant non plus ne se devine
+        // pas : la réponse ne le rend pas, donc un identifiant inventé par le pont serait perdu,
+        // et le rappel deviendrait impossible à retirer.
+        "notificationsPost" => &["title", "id"],
+        "notificationsSchedule" => &["title", "id", "in_ms"],
+        "notificationsCancel" => &["id"],
+        // Ces trois-là décodent des champs FACULTATIFS, mais le natif les exige à l'exécution et
+        // refuse par un mot (`titre_absent`, `id_absent`). Mesuré le 13/11/2026 : un
+        // `liveActivityUpdate {id}` nu répondait `titre_absent` après un aller-retour au lieu
+        // d'un refus nommé côté pont.
+        "liveActivityStart" => &["titre"],
+        "liveActivityUpdate" => &["id", "titre"],
+        "liveActivityEnd" => &["id"],
+        // La phrase que le système montre à la personne pour confirmer : elle vient de l'appelant.
+        // En inventer une serait mettre dans la bouche de l'app un motif qu'elle n'a pas écrit.
+        "faceIdConfirm" => &["reason"],
         "filesWrite" => &["name", "data_base64"],
         "bluetoothRead" | "bluetoothSubscribe" | "bluetoothNotifications" => {
             &["id", "characteristic"]
@@ -521,8 +562,9 @@ pub fn missing_args(method: &str, args: &Value) -> Option<&'static str> {
     };
     required
         .iter()
-        .find(|key| args.get(**key).is_none())
         .copied()
+        .filter(|key| args.get(*key).is_none())
+        .collect()
 }
 
 /// The native method that reports the permission state of `capability`, if one exists.
@@ -547,13 +589,16 @@ pub fn status_method(capability: Capability) -> Option<&'static str> {
         Capability::Nfc => "nfcStatus",
         Capability::LocalNetwork => "localNetworkStatus",
         Capability::MotionActivity => "motionActivityStatus",
-        // No state to read: the person decides at each use, so there is nothing to ask.
+        // `location` et `location_always` ont un état, et il se lit sans rien demander
+        // (`authorizationStatus`) : leur absence ici faisait répondre `unsupported` à une
+        // capacité que l'appareil a.
+        Capability::Location | Capability::LocationAlways => "locationStatus",
+        // No state to read: a picker, the clipboard and a share sheet have no permission of
+        // their own — the person decides at each use, so there is nothing to ask.
         Capability::PhotosPick
         | Capability::FilesPick
         | Capability::Clipboard
-        | Capability::Share
-        | Capability::Location
-        | Capability::LocationAlways => return None,
+        | Capability::Share => return None,
     })
 }
 
@@ -852,12 +897,106 @@ mod tests {
         assert_eq!(allowed.calls.get(), 1);
     }
 
+    /// **Le balayage complet du contrat.** Chaque méthode passe par les quatre tables
+    /// (`complete_args`, `missing_args`, `capability_of`, `status_args`), et chaque capacité par
+    /// les trois autres (`status_method`, `status_request`, `permission_request`).
+    ///
+    /// Ce test n'existe pas pour ses assertions — elles sont faibles — mais parce qu'un bras de
+    /// `match` que rien n'appelle n'a **aucune donnée de couverture**. Mesuré le 13/11/2026 :
+    /// `codecov/patch` comptait 63 lignes non couvertes dans ce fichier, toutes dans des bras
+    /// jamais atteints, et refusait la branche à 57 %. On ne peut pas couvrir ce qu'on
+    /// n'exécute pas.
+    #[test]
+    fn the_whole_contract_is_walked() {
+        let now = 1_700_000_000_000.0;
+        for method in METHODS {
+            let vide = json!({});
+            let complete = complete_args(method, &vide, now);
+            assert!(
+                complete.is_object(),
+                "{method} : complete_args ne rend pas un objet"
+            );
+            let manquants = missing_args(method, &complete);
+            // Un manquant annoncé doit l'être une seule fois, et le pont ne doit pas nommer une
+            // clé qu'il vient de remplir.
+            let mut vus = std::collections::BTreeSet::new();
+            for manquant in &manquants {
+                assert!(
+                    vus.insert(*manquant),
+                    "{method} : `{manquant}` nommé deux fois"
+                );
+                assert!(
+                    complete.get(*manquant).is_none(),
+                    "{method} : `{manquant}` est dit manquant et pourtant rempli"
+                );
+            }
+        }
+
+        // Les méthodes qui lisent leur capacité dans leurs arguments ont un défaut qui la
+        // déclare : c'est ce qui permet à `capability_of` de répondre sans appelant informé.
+        for method in [
+            "status",
+            "captureStatus",
+            "captureRequest",
+            "locationRequest",
+            "locationStatus",
+        ] {
+            let complete = complete_args(method, &json!({}), now);
+            if method != "status" {
+                assert!(
+                    capability_of(method, &complete).is_some(),
+                    "{method} : sa capacité n'est pas dérivable de ses défauts"
+                );
+            }
+        }
+
+        for capability in Capability::ALL {
+            let methode = status_method(capability);
+            // Une méthode d'état nommée est une méthode du contrat, et elle est joignable.
+            if let Some(methode) = methode {
+                assert!(
+                    METHODS.contains(&methode),
+                    "{capability:?} → {methode} hors METHODS"
+                );
+            }
+            if let Some(requete) = status_request(capability) {
+                assert_eq!(
+                    required_capability(&requete),
+                    Some(capability),
+                    "{capability:?} : `status_request` ne désigne pas la bonne capacité"
+                );
+            }
+            if let Some((methode, args)) = permission_request(capability) {
+                assert_eq!(
+                    capability_of(methode, &args),
+                    Some(capability),
+                    "{capability:?} : la demande ne passe pas par sa propre capacité"
+                );
+            }
+            // Et le chemin d'une requête de famille, capacité comprise.
+            let requete = Request::Call {
+                method: status_method(capability)
+                    .unwrap_or("contactsList")
+                    .to_string(),
+                args: json!({ "capability": capability }),
+            };
+            assert!(required_capability(&requete).is_some(), "{capability:?}");
+        }
+    }
+
     #[test]
     fn every_known_method_has_a_capability() {
         for method in METHODS {
+            // Quatre méthodes lisent leur capacité DANS leurs arguments : elles ont besoin d'un
+            // exemple, pas d'un objet vide. La liste est la même que celle de `capability_of`,
+            // et un oubli ici se voit comme un faux échec — d'où le commentaire jumeau là-bas.
             let args = if matches!(
                 *method,
-                "status" | "captureStatus" | "captureRequest" | "locationRequest"
+                "status"
+                    | "captureStatus"
+                    | "captureRequest"
+                    | "locationRequest"
+                    | "locationStatus"
             ) {
                 json!({"capability": "camera"})
             } else {
@@ -960,15 +1099,114 @@ mod tests {
     #[test]
     fn the_arguments_no_default_can_replace_are_named() {
         let vide = serde_json::json!({});
-        assert_eq!(missing_args("shareText", &vide), Some("text"));
-        assert_eq!(missing_args("speechTranscribeFile", &vide), Some("path"));
-        assert_eq!(missing_args("filesRead", &vide), Some("bookmark"));
-        assert_eq!(missing_args("calendarCreateEvent", &vide), Some("title"));
-        assert_eq!(missing_args("contactsList", &vide), None);
+        assert_eq!(missing_args("shareText", &vide), vec!["text"]);
+        assert_eq!(missing_args("speechTranscribeFile", &vide), vec!["path"]);
+        assert_eq!(missing_args("filesRead", &vide), vec!["bookmark"]);
         assert_eq!(
-            missing_args("shareText", &serde_json::json!({ "text": "bonjour" })),
-            None
+            missing_args("calendarCreateEvent", &vide),
+            vec!["title", "start_ms", "end_ms"]
         );
+        assert_eq!(missing_args("contactsList", &vide), Vec::<&str>::new());
+        assert!(missing_args("shareText", &serde_json::json!({ "text": "bonjour" })).is_empty());
+    }
+
+    /// Tous les manquants d'un coup, pas le premier : une écriture Bluetooth en demande trois,
+    /// et les découvrir un par un coûtait trois allers-retours avec l'appareil.
+    #[test]
+    fn every_missing_argument_is_named_at_once() {
+        let vide = serde_json::json!({});
+        assert_eq!(
+            missing_args("bluetoothWrite", &vide),
+            vec!["id", "characteristic", "data_base64"]
+        );
+        // Fournir le premier rend les suivants, sans perdre celui qui est déjà là.
+        assert_eq!(
+            missing_args("bluetoothWrite", &serde_json::json!({ "id": "abc" })),
+            vec!["characteristic", "data_base64"]
+        );
+        assert!(
+            missing_args(
+                "bluetoothWrite",
+                &serde_json::json!({ "id": "abc", "characteristic": "2a37", "data_base64": "AA==" })
+            )
+            .is_empty()
+        );
+    }
+
+    /// Le défaut mesuré sur l'iPhone le 13/11/2026 : `faceIdConfirm` répondait `internal` faute
+    /// de `reason`, et l'appelant n'avait aucun moyen de savoir ce qui manquait.
+    #[test]
+    fn the_face_id_reason_is_never_invented_it_is_named() {
+        assert_eq!(
+            missing_args("faceIdConfirm", &serde_json::json!({})),
+            vec!["reason"]
+        );
+        assert!(
+            missing_args(
+                "faceIdConfirm",
+                &serde_json::json!({ "reason": "publier la note" })
+            )
+            .is_empty()
+        );
+    }
+
+    /// Un corps vide est honnête (« rien à dire de plus »), un titre ne l'est pas : c'est la
+    /// seule chose que la personne lit. L'identifiant, lui, ne se devine pas : la réponse ne le
+    /// rend pas, donc un identifiant inventé serait un rappel qu'on ne peut plus retirer.
+    #[test]
+    fn a_notification_gets_an_empty_body_but_never_an_invented_title_or_id() {
+        let now = 1_700_000_000_000.0;
+        let args = complete_args("notificationsPost", &serde_json::json!({}), now);
+        assert_eq!(args["body"], "");
+        assert_eq!(
+            missing_args("notificationsPost", &args),
+            vec!["title", "id"]
+        );
+        let args = complete_args("notificationsSchedule", &serde_json::json!({}), now);
+        assert_eq!(
+            missing_args("notificationsSchedule", &args),
+            vec!["title", "id", "in_ms"]
+        );
+        assert_eq!(
+            missing_args("notificationsCancel", &serde_json::json!({})),
+            vec!["id"]
+        );
+    }
+
+    /// Les Live Activities décodent des champs FACULTATIFS mais en exigent deux à l'exécution :
+    /// le titre pour créer ou mettre à jour, l'identifiant pour viser. Sans cette liste, le pont
+    /// laissait partir un appel incomplet et c'est le natif qui refusait, après un aller-retour.
+    /// Mesuré le 13/11/2026 : `liveActivityUpdate {id}` → `titre_absent`.
+    #[test]
+    fn a_live_activity_names_what_the_native_requires() {
+        let vide = serde_json::json!({});
+        assert_eq!(missing_args("liveActivityStart", &vide), vec!["titre"]);
+        assert_eq!(
+            missing_args("liveActivityUpdate", &vide),
+            vec!["id", "titre"]
+        );
+        assert_eq!(missing_args("liveActivityEnd", &vide), vec!["id"]);
+        assert!(
+            missing_args(
+                "liveActivityUpdate",
+                &serde_json::json!({ "id": "x", "titre": "courses" })
+            )
+            .is_empty()
+        );
+    }
+
+    /// Ce que le pont peut remplir lui-même sans rien inventer : une langue se lit sur
+    /// l'appareil (côté natif), une durée d'écoute a un plafond de famille, et un nom de service
+    /// a le même défaut que celui que la recherche utilise.
+    #[test]
+    fn what_the_bridge_can_fill_it_fills() {
+        let now = 1_700_000_000_000.0;
+        let args = complete_args("speechTranscribeFile", &serde_json::json!({}), now);
+        assert_eq!(args["max_seconds"], 60);
+        assert_eq!(missing_args("speechTranscribeFile", &args), vec!["path"]);
+        let args = complete_args("localNetworkResolve", &serde_json::json!({}), now);
+        assert_eq!(args["service_type"], "_http._tcp");
+        assert_eq!(missing_args("localNetworkResolve", &args), vec!["name"]);
     }
 
     #[test]
@@ -1242,7 +1480,10 @@ mod tests {
             ("notificationsSchedule", "title"),
             ("localNetworkResolve", "name"),
         ] {
-            assert_eq!(missing_args(method, &json!({})), Some(missing), "{method}");
+            assert!(
+                missing_args(method, &json!({})).contains(&missing),
+                "{method} doit nommer {missing}"
+            );
         }
     }
 

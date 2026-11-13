@@ -5,7 +5,8 @@
 // at runtime. Post shows a notification at once (no schedule, no trigger); Cancel withdraws one.
 //
 // Answers are `Reply` values (see Reply.swift). The completion handlers of UNUserNotificationCenter
-// run on an arbitrary queue, so every answer is hopped onto the main queue before `resolve`.
+// run on an arbitrary queue. The STATUS READ answers from that queue directly (see
+// `NotificationStatus.read`); the other methods still hop onto the main queue before `resolve`.
 
 import Foundation
 import Tauri
@@ -24,11 +25,18 @@ enum NotificationStatus {
     }
   }
 
-  /// Reads the current settings and answers the state through `answer`, on the main queue.
+  /// Reads the current settings and answers the state through `answer`, from the queue the system
+  /// calls back on.
+  ///
+  /// No hop onto the main queue, on purpose: a status read is passive and `Invoke.resolve` is safe
+  /// from any queue (contacts and the other families resolve straight from their completion
+  /// handlers). A `DispatchQueue.main.async` here made the answer depend on the main queue being
+  /// free; measured on a device, a direct `notificationsStatus` call then never answered while the
+  /// same read through the autotest did. Every other status method (`captureStatus`,
+  /// `contactsStatus`...) already answers without the main queue; this one now does too.
   static func read(_ answer: @escaping (Reply) -> Void) {
     UNUserNotificationCenter.current().getNotificationSettings { settings in
-      let reply = Reply.status(state: name(settings.authorizationStatus))
-      DispatchQueue.main.async { answer(reply) }
+      answer(Reply.status(state: name(settings.authorizationStatus)))
     }
   }
 }
@@ -205,3 +213,12 @@ extension ThisDevicePlugin {
     }
   }
 }
+
+/// Ancre de l'éditeur de liens — voir `ThisDevicePlugin.famillesAncrees`.
+///
+/// Un `#selector(Foo.bar)` ne produit pas une référence au SYMBOLE de `bar` : il produit une
+/// chaîne. Le dead-strip retire donc l'objet entier, et le pont répond « No command bar found
+/// for plugin this-device ». Mesuré le 13/11/2026 sur un iPhone 16 Pro : dix-huit méthodes de
+/// familles compilaient, étaient listées dans `famillesLiees`, et étaient **absentes du binaire**.
+/// Référencer une CLASSE de ce fichier garde son objet — donc ses méthodes.
+final class FamilleNotifications: NSObject {}

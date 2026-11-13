@@ -1,0 +1,4 @@
+# Le projet Xcode et la feature `banc` se régénèrent : `cargo tauri ios init --ci` les écrit.
+/gen
+/target
+/TXT
