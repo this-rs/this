@@ -46,7 +46,7 @@ pièces et le modèle reçoit sa taille et son sha ; un audio ou une vidéo
 deviennent un **fichier** dans le conteneur de l'app, et c'est son chemin qui
 circule.
 
-## Les vingt et une capacités
+## Les 21 capacités
 
 `iOS` = iPhone et iPad. Un tiret veut dire « pas annoncé sur cette plateforme » —
 la carte le dit, et un test le vérifie contre `macos/Sources/dispatch.swift`.
@@ -87,7 +87,7 @@ la carte le dit, et un test le vérifie contre `macos/Sources/dispatch.swift`.
 | `local_network` | `localNetworkStatus` `localNetworkBrowse` | oui | oui |
 | | `localNetworkResolve` | oui | — |
 
-Soixante-dix-sept méthodes, et **deux formes de « non »** qu'il ne faut pas
+**77 méthodes**, et **deux formes de « non »** qu'il ne faut pas
 confondre : une méthode absente de la plateforme (`not_supported`), et une
 capacité non accordée (`not_authorized`).
 

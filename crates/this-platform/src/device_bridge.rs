@@ -984,6 +984,41 @@ mod tests {
         }
     }
 
+    /// **La documentation dit le même compte que le code.**
+    ///
+    /// `docs/appareil.md` annonce « 79 méthodes » et « 21 capacités ». Ces deux nombres ont
+    /// déjà dérivé : mesuré le 13/11/2026, le document disait soixante-dix-sept alors que le
+    /// contrat en portait soixante-dix-neuf — deux méthodes ajoutées (dont `locationStatus`)
+    /// sans que la phrase qui les compte bouge.
+    ///
+    /// Un nombre écrit à la main dans une phrase ne se met pas à jour tout seul ; ce test le
+    /// fait au moins échouer quand il ment.
+    ///
+    /// `Capability::ALL` porte déjà son compte dans son type (`[Capability; 21]`) : ajouter une
+    /// capacité ne compile pas sans le changer. C'est la seule des deux moitiés qui se garde
+    /// toute seule, et c'est pour ça que la phrase peut encore se tromper.
+    #[test]
+    fn the_document_counts_the_same_methods_and_capabilities_as_the_code() {
+        let chemin =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/appareil.md");
+        let Ok(document) = std::fs::read_to_string(&chemin) else {
+            eprintln!("docs/appareil.md introuvable : comptes non vérifiés");
+            return;
+        };
+        let methodes = format!("{} méthodes", METHODS.len());
+        assert!(
+            document.contains(&methodes),
+            "le document ne dit pas « {methodes} » ({} méthodes dans METHODS)",
+            METHODS.len()
+        );
+        let capacites = format!("{} capacités", Capability::ALL.len());
+        assert!(
+            document.contains(&capacites),
+            "le document ne dit pas « {capacites} » ({} dans Capability::ALL)",
+            Capability::ALL.len()
+        );
+    }
+
     #[test]
     fn every_known_method_has_a_capability() {
         for method in METHODS {
