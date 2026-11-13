@@ -58,14 +58,14 @@ extension ThisDevicePlugin {
     guard context.canEvaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, error: &error) else {
       // Not enrolled, locked out, or no biometry: no biometry is usable right now.
       let payload: JsonObject = [
-        "kind": "face_id_biometry", "state": "unsupported", "biometry": "none",
+        "kind": "face_id_biometry", "state": Etat.unsupported.fil, "biometry": "none",
       ]
       invoke.resolve(payload)
       return
     }
     let payload: JsonObject = [
       "kind": "face_id_biometry",
-      "state": "granted",
+      "state": Etat.granted.fil,
       "biometry": faceIdBiometryName(context.biometryType),
     ]
     invoke.resolve(payload)
@@ -97,7 +97,7 @@ extension ThisDevicePlugin {
       DispatchQueue.main.async {
         // Keeps the context alive until the system has answered.
         withExtendedLifetime(context) {
-          let verdict = success ? "granted" : "not_authorized"
+          let verdict = success ? Etat.granted.fil : "not_authorized"
           let payload: JsonObject = ["kind": "face_id", "verdict": verdict]
           invoke.resolve(payload)
         }

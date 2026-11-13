@@ -31,13 +31,13 @@ struct CaptureArgs: Decodable {
 enum CaptureStatus {
   /// The state of the camera: `unsupported` without a camera, otherwise the authorization.
   static func camera() -> String {
-    guard AVCaptureDevice.default(for: .video) != nil else { return "unsupported" }
+    guard AVCaptureDevice.default(for: .video) != nil else { return Etat.unsupported.fil }
     return name(AVCaptureDevice.authorizationStatus(for: .video))
   }
 
   /// The state of the microphone: `unsupported` without a microphone, otherwise the authorization.
   static func microphone() -> String {
-    guard AVCaptureDevice.default(for: .audio) != nil else { return "unsupported" }
+    guard AVCaptureDevice.default(for: .audio) != nil else { return Etat.unsupported.fil }
     return name(AVCaptureDevice.authorizationStatus(for: .audio))
   }
 
@@ -51,11 +51,11 @@ enum CaptureStatus {
   /// AVFoundation's authorization, as the contract names it.
   static func name(_ authorization: AVAuthorizationStatus) -> String {
     switch authorization {
-    case .authorized: return "granted"
-    case .denied, .restricted: return "denied"
+    case .authorized: return Etat.granted.fil
+    case .denied, .restricted: return Etat.denied.fil
     // Not asked yet: the system asks the first time the capability is requested.
-    case .notDetermined: return "prompt"
-    @unknown default: return "prompt"
+    case .notDetermined: return Etat.prompt.fil
+    @unknown default: return Etat.prompt.fil
     }
   }
 
@@ -63,8 +63,8 @@ enum CaptureStatus {
   /// answered, the system does not prompt again and answers at once. Without hardware, the
   /// answer is `unsupported` and nothing is asked.
   static func request(_ capability: CaptureCapability, _ invoke: Invoke) {
-    guard state(capability) != "unsupported" else {
-      invoke.resolve(Reply.status(state: "unsupported"))
+    guard state(capability) != Etat.unsupported.fil else {
+      invoke.resolve(Reply.status(state: Etat.unsupported.fil))
       return
     }
     AVCaptureDevice.requestAccess(for: capability.mediaType) { _ in
@@ -87,7 +87,7 @@ extension ThisDevicePlugin {
     let args = try invoke.parseArgs(CaptureArgs.self)
     guard let capability = CaptureCapability(rawValue: args.capability) else {
       // Not a capability of this family: the bridge cannot tell, so it says so.
-      invoke.resolve(Reply.status(state: "unsupported"))
+      invoke.resolve(Reply.status(state: Etat.unsupported.fil))
       return
     }
     invoke.resolve(Reply.status(state: CaptureStatus.state(capability)))

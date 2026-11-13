@@ -85,6 +85,10 @@ func macos_device_call(
     case "notificationsRequest": result = MacNotifications.request()
     case "notificationsPost":    result = MacNotifications.post(args)
     case "notificationsCancel":  result = MacNotifications.cancel(args)
+    // Planifier et lire les attentes : UserNotifications offre les mêmes API que sur iOS
+    // (`UNTimeIntervalNotificationTrigger`, `getPendingNotificationRequests`).
+    case "notificationsSchedule": result = MacNotifications.schedule(args)
+    case "notificationsPending":  result = MacNotifications.pending()
 
     // ── Clipboard (AppKit / NSPasteboard) ───────────────────────────
     case "clipboardRead":   result = MacClipboard.read()
@@ -115,7 +119,7 @@ func macos_device_call(
 
     // ── Live Activity (not available on macOS) ──────────────────────
     case "liveActivityStatus":
-        result = statusReply(state: "unsupported")
+        result = statusReply(state: Etat.unsupported.fil)
 
     // ── NFC (not available on macOS) ────────────────────────────────
     case "nfcStatus", "nfcReadOnce":
@@ -159,14 +163,14 @@ func macos_device_status(_ capabilityPtr: UnsafePointer<CChar>) -> UnsafeMutable
 
     // No permission needed on macOS
     case "clipboard", "share", "photos_pick", "files_pick":
-        state = "granted"
+        state = Etat.granted.fil
 
     // Not available on macOS
     case "gyroscope", "motion_activity", "health", "nfc", "live_activity":
-        state = "unsupported"
+        state = Etat.unsupported.fil
 
     default:
-        state = "unsupported"
+        state = Etat.unsupported.fil
     }
 
     return jsonResult(statusReply(state: state))

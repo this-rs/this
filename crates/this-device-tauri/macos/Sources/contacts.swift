@@ -33,11 +33,11 @@ enum MacContacts {
     static func currentState() -> String {
         let status = CNContactStore.authorizationStatus(for: .contacts)
         switch status {
-        case .authorized:    return "granted"
-        case .denied:        return "denied"
-        case .restricted:    return "denied"
-        case .notDetermined: return "prompt"
-        default:             return "prompt"
+        case .authorized:    return Etat.granted.fil
+        case .denied:        return Etat.denied.fil
+        case .restricted:    return Etat.denied.fil
+        case .notDetermined: return Etat.prompt.fil
+        default:             return Etat.prompt.fil
         }
     }
 
@@ -64,7 +64,7 @@ enum MacContacts {
         guard (limitMin...limitMax).contains(limit) else {
             return errorReply(code: ReplyCode.internalError)
         }
-        guard currentState() == "granted" else {
+        guard currentState() == Etat.granted.fil else {
             return errorReply(code: ReplyCode.notAuthorized)
         }
 
@@ -98,7 +98,7 @@ enum MacContacts {
               !id.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             return errorReply(code: ReplyCode.internalError)
         }
-        guard currentState() == "granted" else {
+        guard currentState() == Etat.granted.fil else {
             return errorReply(code: ReplyCode.notAuthorized)
         }
         do {
@@ -119,7 +119,7 @@ enum MacContacts {
               !raw.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             return errorReply(code: ReplyCode.internalError)
         }
-        guard currentState() == "granted" else {
+        guard currentState() == Etat.granted.fil else {
             return errorReply(code: ReplyCode.notAuthorized)
         }
         let query = raw.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -142,7 +142,7 @@ enum MacContacts {
         guard !name.isEmpty else {
             return errorReply(code: ReplyCode.internalError)
         }
-        guard currentState() == "granted" else {
+        guard currentState() == Etat.granted.fil else {
             return errorReply(code: ReplyCode.notAuthorized)
         }
         let emails = (args["emails"] as? [String]) ?? []

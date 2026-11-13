@@ -23,13 +23,26 @@ fn compile_macos_swift() {
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
     let swift_dir = manifest_dir.join("macos").join("Sources");
 
-    // Collect all Swift source files.
-    let swift_files: Vec<PathBuf> = std::fs::read_dir(&swift_dir)
+    // Collect all Swift source files — ceux de macOS, puis ceux que les DEUX plateformes
+    // compilent. `ios/Sources/Commun/` est le vocabulaire d'état, une seule copie : côté iOS il
+    // est dans le paquet SPM (`path: "Sources"`, sous-répertoires compris), côté macOS c'est
+    // cette liste qui l'inclut. Mesuré le 13/11/2026 : c'est le seul moyen d'avoir du commun
+    // sans toucher à SPM ni au projet Xcode de l'hôte.
+    let commun_dir = manifest_dir.join("ios").join("Sources").join("Commun");
+    let mut swift_files: Vec<PathBuf> = std::fs::read_dir(&swift_dir)
         .unwrap_or_else(|e| panic!("cannot read {}: {e}", swift_dir.display()))
         .filter_map(|e| e.ok())
         .map(|e| e.path())
         .filter(|p| p.extension().is_some_and(|ext| ext == "swift"))
         .collect();
+    if let Ok(commun) = std::fs::read_dir(&commun_dir) {
+        swift_files.extend(
+            commun
+                .filter_map(|e| e.ok())
+                .map(|e| e.path())
+                .filter(|p| p.extension().is_some_and(|ext| ext == "swift")),
+        );
+    }
 
     if swift_files.is_empty() {
         return;

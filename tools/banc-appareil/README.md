@@ -103,12 +103,53 @@ dire ce qu'il n'a pas mesuré plutôt que de le compter comme bon.
 - **aucune donnée recopiée** : ni contact, ni photo, ni texte du presse-papiers.
   Le rapport ne garde que la nature, l'état, le code et la durée.
 
-## Après la mesure
+## L'appeler depuis n'importe quel hôte
+
+Le balayage et l'écriture du rapport vivent dans le pont, pas dans cette app :
+
+```rust
+// feature `banc` du plugin activée dans l'hôte
+let rapport = this_device_tauri::banc::mesurer_et_ecrire(&app).await;
+// → Documents/banc.json (+ banc.log), et le rapport en mémoire
+```
+
+Cette app de deux cents lignes ne fait plus qu'appeler cette fonction dans `setup` : elle
+n'existe que pour donner un binaire à installer. Un hôte qui a déjà une app n'a **rien** à
+réécrire — c'est ce qui rend la mesure possible depuis l'Atelier.
+
+## Après la mesure : ce que l'hôte en fait
 
 `this_agent::surface::HostLimits::from_bench(&rapport)` transforme le rapport en
 limites du build : une capacité mesurée `unsupported` passe en `Missing` dans la
 carte que lit l'agent, avec sa raison. Un `denied` n'est **pas** une limite — la
 personne peut changer d'avis dans les Réglages.
+
+Un hôte a **deux choses** à dire, et `and` les réunit. Ce qu'il sait de son propre
+build vient en premier (sa raison est plus précise), ce que l'appareil a répondu
+complète :
+
+```rust
+pub fn limites_de_ce_build() -> HostLimits {
+    // Ce que l'hôte sait : son profil de signature, ses droits, ses choix.
+    let declarees = HostLimits::new()
+        .unavailable("device.health", "profil de signature sans l'entitlement HealthKit")
+        .unavailable("device.nfc", "profil de signature sans l'entitlement NFC Tag Reading");
+    // Ce que l'appareil a répondu, s'il a été mesuré sur CET appareil.
+    match rapport_du_banc() {
+        Some(rapport) => declarees.and(&HostLimits::from_bench(&rapport)),
+        None => declarees,
+    }
+}
+```
+
+Une limite déclarée deux fois garde la raison de l'hôte : « profil de signature
+sans l'entitlement HealthKit » se lit mieux que « l'appareil ne fournit pas cette
+capacité ». Et **remplacer** l'une par l'autre perdrait la moitié de la vérité —
+l'Atelier est signé avec un profil wildcard *et* tourne sur des appareils qui n'ont
+pas tous un podomètre.
+
+Le rapport doit venir de **cet** appareil : il est daté par construction, et un
+rapport d'un autre modèle annoncerait des manques qui n'existent pas ici.
 
 ## La passe d'écriture, opt-in
 

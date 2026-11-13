@@ -29,11 +29,11 @@ enum MacPhotos {
     /// The photo library permission in the contract's words.
     static func stateName(_ status: PHAuthorizationStatus) -> String {
         switch status {
-        case .authorized: return "granted"
-        case .limited: return "limited"
-        case .denied, .restricted: return "denied"
-        case .notDetermined: return "prompt"
-        @unknown default: return "prompt"
+        case .authorized: return Etat.granted.fil
+        case .limited: return Etat.limited.fil
+        case .denied, .restricted: return Etat.denied.fil
+        case .notDetermined: return Etat.prompt.fil
+        @unknown default: return Etat.prompt.fil
         }
     }
 
