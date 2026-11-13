@@ -81,6 +81,18 @@ impl Peers {
         self.peers.get(id.as_str())
     }
 
+    /// L'identifiant dont la clé publique est exactement `cle`, quel que soit
+    /// l'état. Sert au transport à relier la clé authentifiée par le canal TLS
+    /// à l'identifiant attendu par [`crate::Gate`]. La clé est supposée unique :
+    /// un même identifiant ne peut pas porter deux clés, et l'appairage n'inscrit
+    /// une clé que sous un identifiant.
+    pub fn id_de_cle(&self, cle: &VerifyingKey) -> Option<DeviceId> {
+        self.peers
+            .iter()
+            .find(|(_, p)| p.key == *cle)
+            .map(|(id, _)| DeviceId::parse(id).expect("identifiant du registre toujours valide"))
+    }
+
     pub fn len(&self) -> usize {
         self.peers.len()
     }

@@ -22,3 +22,18 @@ thiserror = "2.0"
 # (ed25519-dalek tire sha2 pour SHA-512, hkdf tire hmac) — aucun code natif ajouté.
 sha2 = { version = "0.10", default-features = false }
 hmac = { version = "0.12", default-features = false }
+
+# --- Transport QUIC (feature `transport`, éteinte par défaut) ---
+# La crate reste pure et sans I/O sans cette feature (utilisable en wasm).
+# Le repli mesuré (iroh ne compile pas pour iOS) : quinn 0.11 + rustls 0.23
+# (provider `ring`, sans aws-lc-rs qui exige cmake/nasm) + tokio, certificat
+# Ed25519 auto-signé épinglé par la clé d'appareil. rcgen dérive le certificat
+# de la même clé Ed25519 que les signatures de messages.
+quinn = { version = "0.11", default-features = false, features = ["rustls-ring", "runtime-tokio", "log"], optional = true }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"], optional = true }
+tokio = { version = "1", default-features = false, features = ["rt", "net", "time", "sync", "io-util", "macros"], optional = true }
+rcgen = { version = "0.13", default-features = false, features = ["ring"], optional = true }
+
+[features]
+default = []
+transport = ["dep:quinn", "dep:rustls", "dep:tokio", "dep:rcgen"]
