@@ -207,7 +207,7 @@ mod tests {
     fn setup() -> (Gate, SigningKey, DeviceId, DeviceId) {
         let (alice, bob) = (dev("device-aaaaaaaa"), dev("device-bbbbbbbb"));
         let k = key(1);
-        let mut peers = Peers::new();
+        let peers = Peers::new();
         peers.admit(&alice, k.verifying_key(), AnchorKeyRole::Shared, Utc::now());
         (Gate::new(peers, Limits::default()), k, alice, bob)
     }
@@ -235,7 +235,7 @@ mod tests {
     fn b_resigned_under_another_de_is_refused() {
         let (mut g, k, alice, bob) = setup();
         // bob (clé connue, mais l'attaquant n'a que la signature d'alice) : on change `de`.
-        let mut peers = g.peers().clone();
+        let peers = g.peers().clone();
         peers.admit(
             &bob,
             key(2).verifying_key(),

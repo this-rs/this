@@ -19,4 +19,4 @@ pub use appairage::{Admission, Appairage, Rencontre, SAS_DIGITS, SAS_DOMAIN, Sas
 pub use envelope::{DeviceId, MESH_VERSION, Message, MessageType, SIGNING_DOMAIN, SignError};
 pub use gate::{Gate, JournalEntry, Raison, Verdict};
 pub use limits::Limits;
-pub use peers::{PeerError, Peers};
+pub use peers::{PeerError, Peers, Surveillance};

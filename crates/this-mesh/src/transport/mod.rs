@@ -16,9 +16,9 @@ use std::time::Duration;
 use ed25519_dalek::VerifyingKey;
 use serde::{Deserialize, Serialize};
 use this_vfs::layout::AnchorKeyState;
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::{Mutex, Notify, mpsc};
 
-use crate::{DeviceId, Gate, Limits, Message, Peers, Raison, Verdict};
+use crate::{DeviceId, Gate, Limits, Message, Peers, Raison, Surveillance, Verdict};
 
 pub use cadrage::CadrageError;
 pub use tls::{Epingle, Identite};
@@ -169,31 +169,47 @@ async fn gerer_connexion(
     let cle = cle_du_pair(&connection)?;
     let vk = VerifyingKey::from_bytes(&cle).map_err(|e| TransportError::Identite(e.to_string()))?;
 
-    // 2. L'identifiant connu pour cette clé, et la coupure à la révocation à
-    // l'acceptation : une clé révoquée n'établit rien. Une clé **inconnue**
-    // n'est pas refusée ici : la porte la refuse au premier message avec
-    // `CleInconnue` (ce qui garde intacte la protection contre le rejeu).
-    let expediteur_connu = {
-        let gate = gate.lock().await;
-        match gate.peers().id_de_cle(&vk) {
-            Some(id) => {
-                if gate.peers().state(&id) != Some(AnchorKeyState::Active) {
-                    connection.close(quinn::VarInt::from_u32(1), b"cle revoquee");
-                    return Err(TransportError::Refuse(format!("clé révoquée : {id}")));
-                }
-                Some(id)
-            }
-            None => None,
+    // 2. Coupure ciblée : `coupure` est réveillée si, et seulement si, la clé
+    // de CETTE session est révoquée. Une clé inconnue n'est pas refusée ici : la
+    // porte la refuse au message avec `CleInconnue` (la mémoire anti-rejeu reste
+    // intacte), et la session la reconnaît dès qu'elle est admise.
+    let coupure = Arc::new(Notify::new());
+    let mut lien = match resoudre(&gate, &vk, &coupure).await {
+        Ok(lien) => lien,
+        Err(id) => {
+            connection.close(quinn::VarInt::from_u32(1), b"cle revoquee");
+            return Err(TransportError::Refuse(format!("clé révoquée : {id}")));
         }
     };
 
-    // 3. Boucle des messages : cadrage, porte, verdict rendu tel quel.
+    // 3. Boucle des messages : attente du flux (interruptible par la coupure),
+    // cadrage, porte, verdict rendu tel quel.
     loop {
-        let (mut send, mut recv) = match connection.accept_bi().await {
+        let flux = tokio::select! {
+            biased;
+            () = coupure.notified() => {
+                // Révocation de cette clé : seule cette session tombe.
+                connection.close(quinn::VarInt::from_u32(1), b"cle revoquee");
+                return Ok(());
+            }
+            flux = connection.accept_bi() => flux,
+        };
+        let (mut send, mut recv) = match flux {
             Ok(stream) => stream,
             // Fermeture propre ou erreur : fin de la connexion.
             Err(_) => break,
         };
+
+        // Clé pas encore admise à l'ouverture de la session : on la relit ici.
+        if lien.is_none() {
+            lien = match resoudre(&gate, &vk, &coupure).await {
+                Ok(lien) => lien,
+                Err(id) => {
+                    connection.close(quinn::VarInt::from_u32(1), b"cle revoquee");
+                    return Err(TransportError::Refuse(format!("clé révoquée : {id}")));
+                }
+            };
+        }
 
         let octets = match cadrage::lire(&mut recv, ceiling).await {
             Ok(o) => o,
@@ -209,8 +225,8 @@ async fn gerer_connexion(
             }
         };
 
-        let (expediteur, verdict) = match &expediteur_connu {
-            Some(id) => {
+        let (expediteur, verdict) = match &lien {
+            Some((id, _)) => {
                 let mut gate = gate.lock().await;
                 let verdict = gate.admettre(id, &octets);
                 (id.clone(), verdict)
@@ -242,6 +258,33 @@ async fn gerer_connexion(
     }
 
     Ok(())
+}
+
+/// Résout l'identifiant de la clé du canal et arme la coupure de sa session.
+///
+/// - `Ok(None)` : clé inconnue (la porte refusera les messages).
+/// - `Ok(Some((id, surveillance)))` : clé active ; tant que `surveillance` vit,
+///   une révocation de `id` réveille `coupure`.
+/// - `Err(id)` : clé connue mais révoquée.
+///
+/// L'abonnement est pris **avant** le contrôle d'état : une révocation survenue
+/// entre les deux ne peut pas passer inaperçue.
+async fn resoudre(
+    gate: &Mutex<Gate>,
+    vk: &VerifyingKey,
+    coupure: &Arc<Notify>,
+) -> Result<Option<(DeviceId, Surveillance)>, DeviceId> {
+    let gate = gate.lock().await;
+    let peers = gate.peers();
+    let Some(id) = peers.id_de_cle(vk) else {
+        return Ok(None);
+    };
+    let reveil = coupure.clone();
+    let surveillance = peers.surveiller_revocation(&id, move || reveil.notify_one());
+    if peers.state(&id) != Some(AnchorKeyState::Active) {
+        return Err(id);
+    }
+    Ok(Some((id, surveillance)))
 }
 
 /// L'`de` annoncé dans l'enveloppe, sans décoder la charge : sert de raison à
@@ -372,7 +415,7 @@ mod tests {
 
     /// Registre avec `alice` Active (rôle Shared), clé `[1;32]`.
     fn registre_alice() -> Peers {
-        let mut peers = Peers::new();
+        let peers = Peers::new();
         peers.admit(
             &dev("device-aaaaaaaa"),
             cle(1).verifying_key(),
@@ -567,7 +610,7 @@ mod tests {
     // Révocation à l'acceptation : une clé révoquée n'établit pas de connexion.
     #[tokio::test]
     async fn une_cle_revoquee_n_etablit_pas_de_connexion() {
-        let mut peers = registre_alice();
+        let peers = registre_alice();
         // Alice est connue puis révoquée.
         peers.revoke(&dev("device-aaaaaaaa"));
         let mut serveur = ecouter(
@@ -591,5 +634,192 @@ mod tests {
                 .flatten()
                 .is_none()
         );
+    }
+    // ---- Registre partagé et coupure ciblée (même listener, jamais redémarré) ----
+
+    fn serveur_id() -> Identite {
+        identite(3, "device-cccccccc")
+    }
+    fn epingle_serveur() -> Epingle {
+        epingle(3)
+    }
+    const ALICE: &str = "device-aaaaaaaa";
+    const BOB: &str = "device-bbbbbbbb";
+
+    /// Registre à deux pairs : alice (clé [1]) et bob (clé [2]), tous deux Active.
+    fn registre_ab() -> Peers {
+        let peers = Peers::new();
+        peers.admit(
+            &dev(ALICE),
+            cle(1).verifying_key(),
+            AnchorKeyRole::Shared,
+            Utc::now(),
+        );
+        peers.admit(
+            &dev(BOB),
+            cle(2).verifying_key(),
+            AnchorKeyRole::Shared,
+            Utc::now(),
+        );
+        peers
+    }
+
+    /// Session cliente gardée ouverte : l'endpoint doit vivre avec la connexion.
+    async fn session(
+        adresse: SocketAddr,
+        id: &Identite,
+        epingle: &Epingle,
+    ) -> (quinn::Endpoint, quinn::Connection) {
+        let mut endpoint = quinn::Endpoint::client("0.0.0.0:0".parse().unwrap()).unwrap();
+        endpoint.set_default_client_config(
+            tls::quic_client(tls::config_client(id, epingle).unwrap()).unwrap(),
+        );
+        let connection = endpoint
+            .connect(adresse, "this-mesh.local")
+            .unwrap()
+            .await
+            .unwrap();
+        (endpoint, connection)
+    }
+
+    /// Un message sur une session déjà ouverte ; rend le `v` du verdict.
+    async fn envoyer_sur(connection: &quinn::Connection, m: &Message) -> String {
+        let (mut send, mut recv) = connection.open_bi().await.unwrap();
+        cadrage::ecrire(&mut send, &m.to_bytes()).await.unwrap();
+        send.finish().unwrap();
+        let octets = cadrage::lire(&mut recv, ACK_CEILING).await.unwrap();
+        serde_json::from_slice::<Ack>(&octets).unwrap().v
+    }
+
+    // (a) Un pair ajouté PENDANT que le listener tourne est admis, sans redémarrer.
+    #[tokio::test]
+    async fn a_pair_ajoute_pendant_l_ecoute_est_admis_sans_redemarrer() {
+        let peers = registre_alice();
+        let serveur = ecouter(
+            "127.0.0.1:0".parse().unwrap(),
+            &serveur_id(),
+            peers.clone(),
+            Limits::default(),
+        )
+        .await
+        .unwrap();
+        let adresse = serveur.local_addr();
+
+        // Bob n'est pas encore admis : la porte le refuse.
+        let avant = message(&cle(2), BOB, ALICE, 20);
+        let refus = envoyer(adresse, &identite(2, BOB), &epingle_serveur(), &avant).await;
+        assert!(matches!(refus, Err(TransportError::Refuse(_))));
+
+        // Admission par un autre clone du même registre, listener en marche.
+        peers.admit(
+            &dev(BOB),
+            cle(2).verifying_key(),
+            AnchorKeyRole::Shared,
+            Utc::now(),
+        );
+        let m = message(&cle(2), BOB, ALICE, 21);
+        let verdict = envoyer(adresse, &identite(2, BOB), &epingle_serveur(), &m).await;
+        assert_eq!(verdict.unwrap(), Verdict::Admis(m));
+        assert_eq!(
+            serveur.local_addr(),
+            adresse,
+            "même listener, jamais rouvert"
+        );
+    }
+
+    // (b) Révoquer A coupe SA session, laisse celle de B ouverte, et B reste admis.
+    #[tokio::test]
+    async fn b_revoquer_a_coupe_sa_session_et_laisse_celle_de_b() {
+        let peers = registre_ab();
+        let serveur = ecouter(
+            "127.0.0.1:0".parse().unwrap(),
+            &serveur_id(),
+            peers.clone(),
+            Limits::default(),
+        )
+        .await
+        .unwrap();
+        let adresse = serveur.local_addr();
+        let (_ea, conn_a) = session(adresse, &identite(1, ALICE), &epingle_serveur()).await;
+        let (_eb, conn_b) = session(adresse, &identite(2, BOB), &epingle_serveur()).await;
+
+        assert_eq!(
+            envoyer_sur(&conn_a, &message(&cle(1), ALICE, BOB, 30)).await,
+            "admis"
+        );
+        assert_eq!(
+            envoyer_sur(&conn_b, &message(&cle(2), BOB, ALICE, 31)).await,
+            "admis"
+        );
+
+        assert!(peers.revoke(&dev(ALICE)));
+
+        // Session de A : fermée par le serveur. Session de B : toujours ouverte.
+        assert!(
+            avec_delai(DELAI, conn_a.closed()).await.is_some(),
+            "la session de A aurait dû tomber"
+        );
+        assert!(
+            conn_b.close_reason().is_none(),
+            "la session de B aurait dû rester ouverte"
+        );
+        assert_eq!(
+            envoyer_sur(&conn_b, &message(&cle(2), BOB, ALICE, 32)).await,
+            "admis"
+        );
+
+        // A, revenu par une nouvelle connexion, est refusé.
+        let revenu = message(&cle(1), ALICE, BOB, 33);
+        assert!(
+            envoyer(adresse, &identite(1, ALICE), &epingle_serveur(), &revenu)
+                .await
+                .is_err()
+        );
+        assert_eq!(serveur.local_addr(), adresse);
+    }
+
+    // (c) Après la révocation de A, la mémoire anti-rejeu de B est intacte.
+    #[tokio::test]
+    async fn c_apres_revocation_la_memoire_anti_rejeu_est_intacte() {
+        let peers = registre_ab();
+        let serveur = ecouter(
+            "127.0.0.1:0".parse().unwrap(),
+            &serveur_id(),
+            peers.clone(),
+            Limits::default(),
+        )
+        .await
+        .unwrap();
+        let (_eb, conn_b) =
+            session(serveur.local_addr(), &identite(2, BOB), &epingle_serveur()).await;
+        let m = message(&cle(2), BOB, ALICE, 40);
+        assert_eq!(envoyer_sur(&conn_b, &m).await, "admis");
+
+        assert!(peers.revoke(&dev(ALICE)));
+
+        // Le même `id`, rejoué par B après la révocation de A : acquitté, pas rejoué.
+        assert_eq!(envoyer_sur(&conn_b, &m).await, "deja-vu");
+    }
+
+    // (e) Une clé jamais admise reste refusée, même sur une session ouverte.
+    #[tokio::test]
+    async fn e_cle_inconnue_reste_refusee_sur_une_session_ouverte() {
+        let peers = registre_ab();
+        let serveur = ecouter(
+            "127.0.0.1:0".parse().unwrap(),
+            &serveur_id(),
+            peers,
+            Limits::default(),
+        )
+        .await
+        .unwrap();
+        let (_ex, conn_x) = session(
+            serveur.local_addr(),
+            &identite(9, "device-99999999"),
+            &epingle_serveur(),
+        )
+        .await;
+        let mx = message(&cle(9), "device-99999999", ALICE, 50);
+        assert_eq!(envoyer_sur(&conn_x, &mx).await, "refuse");
     }
 }
