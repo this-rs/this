@@ -48,6 +48,25 @@ un écran verrouillé (`FBSOpenApplicationErrorDomain error 7`). Et il faut que 
 profil de signature connaisse l'appareil — le `developmentTeam` est dans
 `tauri.conf.json`.
 
+## Sur macOS
+
+Le même binaire, empaqueté. **L'app empaquetée est obligatoire**, et c'est mesuré :
+
+```sh
+cargo tauri build --debug --bundles app
+THIS_DEVICE_BANC=1 target/debug/bundle/macos/BancAppareil.app/Contents/MacOS/banc-appareil
+# → ~/Documents/banc.json et ~/Documents/banc.log
+```
+
+Lancé **hors bundle** (`./target/debug/banc-appareil`), il meurt avant le premier mot :
+`UNUserNotificationCenter.currentNotificationCenter()` lève une exception **Objective-C** depuis
+un fil du pool tokio, et une exception ObjC n'est pas rattrapable depuis Rust —
+`*** Terminating app due to uncaught exception 'NSInternalInconsistencyException',
+reason: 'bundleProxyForCurrentProcess is nil'`. Le même binaire, empaqueté, rend son rapport.
+
+Pour ne rien écrire dans le vrai `~/Documents`, lancer avec
+`HOME=/tmp/banc-macos` (créer `Documents/` dans ce répertoire avant).
+
 ## Lire le rapport
 
 `banc.json` porte quatre sections : `capacites` (l'état de chacune, lu sans rien
