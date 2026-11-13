@@ -1,0 +1,20 @@
+[package]
+name = "this-mesh"
+version = "0.0.1"
+edition = "2024"
+authors = ["Riviere Théotime <t@ffs.holdings>"]
+license = "MIT OR Apache-2.0"
+description = "Mesh protocol layer, transport-independent: message envelope, deterministic signed bytes, peer registry and admission gate. No network I/O."
+repository = "https://github.com/this-rs/this"
+publish = false
+
+[dependencies]
+# Le vocabulaire des clés (Active/Revoked, Ownership/Shared, AnchorKey) existe déjà
+# dans le contrat VFS, pur et wasm32-safe : on le réutilise, on n'en crée pas un second.
+this-vfs = { version = "0.0.1", path = "../this-vfs" }
+ed25519-dalek = { version = "2", default-features = false, features = ["std"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = { version = "1.0", features = ["raw_value"] }
+uuid = { version = "1.10", features = ["serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+thiserror = "2.0"
