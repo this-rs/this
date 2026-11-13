@@ -598,6 +598,42 @@ jobs:
           cd crates/this-device-tauri
           cargo test --features banc
 
+  # Le backend Linux du pont d'appareil ne se compile QUE sous Linux : sur le job macOS
+  # (`swift_ios`), `src/linux/` est `cfg`-éteint, et `cargo test --workspace` ne voit pas le
+  # crate (il est hors workspace). Ses 3 000 lignes et ses 54 tests ne tournaient donc nulle
+  # part — mesuré le 13/11/2026 : la branche qui a livré ce backend est passée en CI sans
+  # qu'un seul de ses tests ne s'exécute, et `codecov/patch` le comptait comme non couvert.
+  device_linux:
+    # Skipped when the change is documentation-only (see `changes`).
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    name: Pont d'appareil (Linux)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      # Ce que `tauri` réclame sur Linux, mesuré le 13/11/2026 en trois passes : GLib
+      # (`gobject-2.0`, `gio-2.0`), puis GTK 3 (`gdk-3.0`, `atk`), puis WebKitGTK
+      # (`libsoup-3.0`). Les features par défaut n'y changent rien : `default-features = false`
+      # évite la pile webview de *Tauri*, pas les bibliothèques système qu'elle lie. Le
+      # commentaire du Cargo.toml affirmait que Linux n'avait besoin de rien — c'était faux,
+      # et ce job est ce qui l'a dit.
+      - name: En-têtes GTK 3 + WebKitGTK (ce que `tauri` réclame sur Linux)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev pkg-config
+
+      - name: Contrat, familles, backend Linux et parités
+        run: |
+          set -euo pipefail
+          cd crates/this-device-tauri
+          cargo test --features banc
+
   # Les crates wasm-only portent leur propre `[workspace]`, donc ils sont absents
   # de `cargo check --workspace` : aucun job ne les compilait. Cinq crates — dont
   # l'interface Leptos et le client des protocoles — pouvaient cesser de compiler
@@ -753,7 +789,7 @@ jobs:
   gate:
     name: CI gate
     if: always()
-    needs: [changes, test, coverage, fmt, clippy, examples, security_audit, docs, cross-platform, wasm_crates, wasm32_harness, obrain, swift_ios]
+    needs: [changes, test, coverage, fmt, clippy, examples, security_audit, docs, cross-platform, wasm_crates, wasm32_harness, obrain, swift_ios, device_linux]
     runs-on: ubuntu-latest
     steps:
       - name: Nothing failed, nothing was cancelled

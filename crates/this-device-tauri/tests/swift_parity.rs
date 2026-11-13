@@ -246,6 +246,14 @@ fn every_family_file_is_anchored_even_if_nothing_references_its_methods() {
     );
 
     // Et l'inverse : une ancre listée qui n'existe nulle part serait une référence morte.
+    //
+    // La comparaison se fait sur les noms DÉJÀ dérivés des fichiers, pas en reconstruisant un
+    // chemin : la première version faisait `dir.join("<nom>.swift")`, ce qui ne marchait que sur
+    // un système de fichiers insensible à la casse (macOS). Sur Linux, `bluetooth.swift` ne
+    // trouve pas `Bluetooth.swift`, et le test échouait — mesuré au premier passage du job
+    // `device_linux`, le 13/11/2026.
+    let attendues: std::collections::BTreeSet<&str> =
+        attendues.iter().map(String::as_str).collect();
     for ligne in plugin.lines() {
         let ligne = ligne.trim();
         let Some(nom) = ligne.strip_suffix(".self,") else {
@@ -254,23 +262,9 @@ fn every_family_file_is_anchored_even_if_nothing_references_its_methods() {
         if !nom.starts_with("Famille") {
             continue;
         }
-        let fichier = nom
-            .trim_start_matches("Famille")
-            .chars()
-            .enumerate()
-            .flat_map(|(index, c)| {
-                if index > 0 && c.is_uppercase() {
-                    vec!['_', c.to_lowercase().next().unwrap_or(c)]
-                } else {
-                    vec![c.to_lowercase().next().unwrap_or(c)]
-                }
-            })
-            .collect::<String>();
-        let existe = dir.join(format!("{fichier}.swift")).exists()
-            || dir.join(format!("{}.swift", nom.to_lowercase())).exists();
         assert!(
-            existe,
-            "{nom} est listée dans famillesAncrees et ne correspond à aucun fichier"
+            attendues.contains(nom),
+            "{nom} est listée dans famillesAncrees et aucun fichier de famille ne la définit"
         );
     }
 }
