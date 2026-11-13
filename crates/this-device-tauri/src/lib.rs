@@ -58,8 +58,12 @@ use tauri::plugin::PluginHandle;
 mod macos;
 
 /// Le backend Linux : BlueZ, GeoClue2, V4L2/portail XDG, IIO. Voir `src/linux/mod.rs`.
+///
+/// Public parce que sa **déclaration de surface** (`SUPPORTED`, `STATUS_CAPABILITIES`) est ce
+/// que `tests/linux_surface.rs` confronte au dispatch et à la carte. Un module privé rendait
+/// ces deux listes inatteignables depuis les tests — et `dead_code` s'en plaignait déjà.
 #[cfg(target_os = "linux")]
-mod linux;
+pub mod linux;
 
 /// Combien de temps on attend le natif avant de répondre `timeout`. Un capteur peut être
 /// lent, mais une promesse qui ne se résout jamais bloque le tour de l'agent entier.

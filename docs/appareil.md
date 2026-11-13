@@ -151,12 +151,30 @@ Deux conséquences qu'il ne faut pas confondre : une méthode non portée répon
 sait pas interroger répond `unsupported`. Aucune des deux n'est un refus de la
 personne.
 
-**La carte ne nomme pas encore Linux.** Ses entrées portent `Ios`, `Ipados`,
-`Macos` et un `command` unique pour les trois : y ajouter `Linux` annoncerait des
-méthodes que ce backend ne porte pas (`bluetoothConnect`, la capture, les
-contacts). Le modèle actuel ne sait pas dire « telle méthode, telle plateforme » —
-c'est ce qu'il faudra ajouter avant de l'annoncer, et pas avant : promettre est le
-défaut que ce document existe pour éviter.
+**La carte nomme Linux là où il porte quelque chose, et seulement là.** Depuis le
+13/11/2026 : `device.bluetooth` (scan, pas connexion), `device.camera` et
+`device.microphone` (état et demande, pas capture), `device.gyroscope`, et une
+entrée à part `device.location.fix` (la position, sans l'état ni le flux). Ces
+quatre entrées portent la plateforme `Linux` en plus des autres, et la cinquième
+n'existe que pour elle.
+
+Ce que le modèle ne sait toujours pas dire : une même entrée ne peut pas promettre
+`bluetoothConnect` sur iOS et le taire sur Linux. D'où les entrées d'aspect
+(`device.bluetooth.connect`, `device.location.fix`) plutôt qu'un ajout de
+plateforme à une entrée trop large — c'est le découpage que la carte pratique
+depuis le début pour macOS, appliqué à Linux.
+
+Deux contrôles tiennent cette déclaration, dans `tests/linux_surface.rs` (ils
+tournent dans le job `device_linux`) :
+
+1. `linux::SUPPORTED` est confrontée au **dispatch lui-même** : pour chaque
+   méthode du contrat, `call` doit refuser exactement celles qui n'y sont pas ;
+2. une entrée de la carte qui nomme `Linux` ne peut citer que des méthodes de
+   `SUPPORTED` — et `status` que pour les quatre capacités dont le backend lit
+   l'état (`linux::STATUS_CAPABILITIES`).
+
+Écrite à la main, `SUPPORTED` pourrait mentir ; ces deux règles le lui interdisent,
+et la seconde dit aussi au framework ce qu'il a le droit d'annoncer.
 
 Ce tableau n'est pas une feuille de route : c'est ce qu'un pont devrait faire,
 système par système, pour que les mêmes méthodes veuillent dire la même chose.
