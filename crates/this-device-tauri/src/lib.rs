@@ -57,9 +57,13 @@ use tauri::plugin::PluginHandle;
 #[cfg(target_os = "macos")]
 mod macos;
 
+/// Le backend Linux : BlueZ, GeoClue2, V4L2/portail XDG, IIO. Voir `src/linux/mod.rs`.
+#[cfg(target_os = "linux")]
+mod linux;
+
 /// Combien de temps on attend le natif avant de répondre `timeout`. Un capteur peut être
 /// lent, mais une promesse qui ne se résout jamais bloque le tour de l'agent entier.
-#[cfg(target_os = "ios")]
+#[cfg(any(target_os = "ios", target_os = "linux"))]
 const NATIVE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 // The Swift entry point, defined in `ios/Sources/ThisDevicePlugin.swift`.
@@ -364,8 +368,19 @@ async fn call_native<R: Runtime>(_app: &AppHandle<R>, method: &str, args: &Value
     }
 }
 
-/// Off iOS and macOS there is no device: a family call is refused as unsupported.
-#[cfg(not(any(target_os = "ios", target_os = "macos")))]
+/// On Linux the backend talks to the desktop's services (D-Bus) and to `sysfs`. Every
+/// step is bounded on its own; `NATIVE_TIMEOUT` is the last net, so a silent daemon is a
+/// `timeout` answer and never a pending promise.
+#[cfg(target_os = "linux")]
+async fn call_native<R: Runtime>(_app: &AppHandle<R>, method: &str, args: &Value) -> Value {
+    match tokio::time::timeout(NATIVE_TIMEOUT, linux::call(method, args)).await {
+        Ok(value) => value,
+        Err(_) => json!({ "kind": "error", "code": "timeout" }),
+    }
+}
+
+/// Off iOS, macOS and Linux there is no device: a family call is refused as unsupported.
+#[cfg(not(any(target_os = "ios", target_os = "macos", target_os = "linux")))]
 async fn call_native<R: Runtime>(_app: &AppHandle<R>, _method: &str, _args: &Value) -> Value {
     json!({ "kind": "error", "code": "not_supported" })
 }
@@ -559,8 +574,34 @@ pub async fn perform<R: Runtime>(_app: &AppHandle<R>, request: &Request) -> Repl
     }
 }
 
-/// Off iOS and macOS there is no device: every request is refused as unsupported.
-#[cfg(not(any(target_os = "ios", target_os = "macos")))]
+/// On Linux the pilot primitives are answered by [`linux`]: the permission state, the
+/// gyroscope (IIO) and a bounded Bluetooth scan (BlueZ). Family calls go through
+/// [`call_native`] (via [`answer`]).
+#[cfg(target_os = "linux")]
+pub async fn perform<R: Runtime>(_app: &AppHandle<R>, request: &Request) -> Reply {
+    match request {
+        Request::Status { capability } => linux::status(*capability).await,
+        Request::GyroscopeSample => linux::motion::gyroscope_sample().await,
+        // Not wrapped in `NATIVE_TIMEOUT`: a scan lasts what it was asked to (up to 30 s). It is
+        // bounded by construction instead: see `linux::bluetooth`.
+        Request::BluetoothScan {
+            duration_ms,
+            services,
+        } => {
+            let (duration_ms, services) = match wire::scan_args(*duration_ms, services) {
+                Ok(args) => args,
+                Err(refusal) => return refusal,
+            };
+            linux::bluetooth::scan(duration_ms, &services).await
+        }
+        Request::Call { .. } => Reply::Error {
+            code: DeviceError::NotSupported,
+        },
+    }
+}
+
+/// Off iOS, macOS and Linux there is no device: every request is refused as unsupported.
+#[cfg(not(any(target_os = "ios", target_os = "macos", target_os = "linux")))]
 pub async fn perform<R: Runtime>(_app: &AppHandle<R>, request: &Request) -> Reply {
     match request {
         Request::Status { .. } => Reply::Status {
