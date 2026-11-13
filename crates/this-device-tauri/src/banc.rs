@@ -368,7 +368,7 @@ async fn balayer_ecritures<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> Vec<
             continue;
         }
         for (method, args) in
-            std::iter::once((cas.method, cas.args.clone())).chain(cas.suite.clone().into_iter())
+            std::iter::once((cas.method, cas.args.clone())).chain(cas.suite.clone())
         {
             let requete = Request::Call {
                 method: method.to_string(),
