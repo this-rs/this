@@ -124,10 +124,39 @@ jamais la phrase lue.
 
 ## Les autres systèmes
 
-Le pont n'existe que pour iOS, iPadOS et une partie de macOS. Sur Android,
-Windows, Linux et le Web, la carte ne nomme **aucune** capacité d'appareil — et
-depuis le 08/11/2026 elle le **dit** (`device`, en `Missing`) au lieu de laisser
-un vide que l'agent prendrait pour une ignorance.
+Le pont existe pour iOS, iPadOS, une partie de macOS et, depuis le 13/11/2026,
+une partie de Linux. Sur Android, Windows et le Web, la carte ne nomme **aucune**
+capacité d'appareil — et depuis le 08/11/2026 elle le **dit** (`device`, en
+`Missing`) au lieu de laisser un vide que l'agent prendrait pour une ignorance.
+
+### Ce que le backend Linux couvre exactement
+
+Il parle aux services du bureau au lieu d'API système : BlueZ sur le bus système,
+GeoClue2, `sysfs`/IIO pour le gyroscope, et le portail XDG pour la capture.
+Mesuré le 13/11/2026, et c'est ce que le job `device_linux` compile et teste :
+
+| Méthode | Linux | Comment |
+|---|---|---|
+| `captureStatus` `captureRequest` | oui | état réel, jamais un `granted` inventé — Linux n'a pas de dialogue à ouvrir depuis ce processus |
+| `bluetoothState` `bluetoothScan` | oui | BlueZ (`org.bluez`, ObjectManager) |
+| `bluetoothConnect` et suivantes | **non** | `BluetoothReply::Error { NotSupported }` |
+| `locationRequest` `locationSample` | oui | GeoClue2 |
+| `gyroscopeSample`, `status(gyroscope)` | oui | `/sys/bus/iio/devices/iio:deviceN` |
+| `cameraCapturePhoto` `cameraRecordVideo` `microphoneStart` `microphoneStop` | **non** | la capture elle-même n'est pas branchée ; seul l'état l'est |
+| `motionActivityStatus` `motionActivityRequest` | non | `unsupported` : pas de podomètre sur un bureau |
+| tout le reste | **non** | `NotSupported` |
+
+Deux conséquences qu'il ne faut pas confondre : une méthode non portée répond
+`not_supported` (l'agent doit changer d'approche), et une capacité que le pont ne
+sait pas interroger répond `unsupported`. Aucune des deux n'est un refus de la
+personne.
+
+**La carte ne nomme pas encore Linux.** Ses entrées portent `Ios`, `Ipados`,
+`Macos` et un `command` unique pour les trois : y ajouter `Linux` annoncerait des
+méthodes que ce backend ne porte pas (`bluetoothConnect`, la capture, les
+contacts). Le modèle actuel ne sait pas dire « telle méthode, telle plateforme » —
+c'est ce qu'il faudra ajouter avant de l'annoncer, et pas avant : promettre est le
+défaut que ce document existe pour éviter.
 
 Ce tableau n'est pas une feuille de route : c'est ce qu'un pont devrait faire,
 système par système, pour que les mêmes méthodes veuillent dire la même chose.
