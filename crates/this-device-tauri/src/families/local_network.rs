@@ -127,10 +127,10 @@ pub fn checked_advertise(args: &AdvertiseArgs) -> Result<&AdvertiseArgs, LocalNe
             return Err(LocalNetworkError::Internal);
         }
     }
-    if let Some(name) = &args.name {
-        if !is_txt_token(name) || looks_like_ipv4(name) {
-            return Err(LocalNetworkError::Internal);
-        }
+    if let Some(name) = &args.name
+        && (!is_txt_token(name) || looks_like_ipv4(name))
+    {
+        return Err(LocalNetworkError::Internal);
     }
     Ok(args)
 }
