@@ -69,6 +69,10 @@ pub use this_vfs::layout::{AnchorKey, AnchorKeyRole, AnchorKeyState};
 use this_vfs::layout::{
     DESCRIPTOR_FILE, MANIFEST_FILE, MANIFEST_FORMAT, MAX_ASSET_BYTES, Manifest, YANKED_DIR,
 };
+// Le format de paquet (export/import) vit aussi dans `this-vfs` : un paquet écrit
+// par une page est lisible (et vérifiable) par un hôte qui n'a jamais vu ce client.
+#[cfg(feature = "module-signing")]
+use this_vfs::layout::{ModulePackage, PACKAGE_FORMAT, package_path_allowed};
 
 /// One key a host admits, with its lifecycle state.
 ///
@@ -307,6 +311,25 @@ fn integrity(path: &VfsPath, what: &str) -> ContractError {
 fn json<T: Serialize>(v: &T) -> Result<Vec<u8>, ContractError> {
     serde_json::to_vec_pretty(v)
         .map_err(|e| ContractError::framework(codes::INTERNAL).with_param("reason", e.to_string()))
+}
+
+/// Sign a manifest with a key, in place. Ed25519 as used here (RFC 8032) is
+/// deterministic: signing the same bytes twice with the same key gives the same
+/// signature, which is what makes an exported package reproducible byte for byte.
+#[cfg(feature = "module-signing")]
+fn signed_manifest(
+    mut manifest: Manifest,
+    key_id: &str,
+    key: &ed25519_dalek::SigningKey,
+) -> Manifest {
+    use base64::Engine as _;
+    use ed25519_dalek::Signer as _;
+    let signature = key.sign(&manifest.signing_bytes());
+    manifest.signature = Some(SignatureBlock {
+        key_id: key_id.to_string(),
+        signature: base64::engine::general_purpose::STANDARD.encode(signature.to_bytes()),
+    });
+    manifest
 }
 
 /// `ModuleStore` over a `Vfs`.
@@ -1008,6 +1031,228 @@ impl VfsModuleStore {
             return Err(VfsError::NotFound(dir).into());
         };
         self.read_verified(&dir, &m, &format!("assets/{rel}")).await
+    }
+
+    /// Export one stored version as a signed, portable [`ModulePackage`]: the
+    /// competency a host can share without sharing data.
+    ///
+    /// The package carries exactly `descriptor.json` and `assets/**`, authenticated
+    /// by a manifest signed with this store's signing key (the author). `i18n/**`
+    /// and everything else is left out: a competency is what a module *does*, not
+    /// its localized texts — and user data never lived in `/modules` to begin with.
+    ///
+    /// Deterministic: the same stored content exports to the same bytes. The order
+    /// of the maps is a `BTreeMap`, the serialization is compact JSON, the `created`
+    /// timestamp is the stored commit time (not `now()`), and the signature is
+    /// RFC 8032 Ed25519 (no randomness). Two exports differ only if the content does.
+    #[cfg(feature = "module-signing")]
+    pub async fn export_module(&self, name: &str, version: &str) -> Result<Vec<u8>, ContractError> {
+        let dir = self.version_dir(name, version)?;
+        let Some(m) = self.manifest(name, version).await? else {
+            return Err(VfsError::NotFound(dir).into());
+        };
+        let mut files: BTreeMap<String, String> = BTreeMap::new();
+        let mut etags: BTreeMap<String, String> = BTreeMap::new();
+        for rel in m.files.keys() {
+            if !package_path_allowed(rel) {
+                continue; // i18n stays local; the competency is descriptor + assets.
+            }
+            let bytes = self
+                .read_verified(&dir, &m, rel)
+                .await?
+                .ok_or_else(|| integrity(&dir, "manifest lists a missing file"))?;
+            use base64::Engine as _;
+            files.insert(
+                rel.clone(),
+                base64::engine::general_purpose::STANDARD.encode(&bytes),
+            );
+            etags.insert(rel.clone(), super::etag_of(&bytes));
+        }
+        if !files.contains_key(DESCRIPTOR_FILE) {
+            return Err(integrity(
+                &dir,
+                "descriptor.json is missing from the stored version",
+            ));
+        }
+        let Some((key_id, key)) = self.signing.as_ref() else {
+            return Err(ContractError::framework(codes::MODULE_UNSIGNED)
+                .with_param("module", format!("{name}@{version}"))
+                .with_param("reason", "export requires the author's signing key"));
+        };
+        // A fresh manifest over exactly the shipped files, signed by the author. The
+        // stored `created` is preserved, not replaced by `now()`: it is the version's
+        // commit time and the thing that keeps two exports of the same content equal.
+        let manifest = signed_manifest(
+            Manifest {
+                format: MANIFEST_FORMAT,
+                name: m.name.clone(),
+                version: m.version.clone(),
+                files: etags,
+                created: m.created,
+                signature: None,
+            },
+            key_id,
+            key,
+        );
+        let pkg = ModulePackage {
+            format: PACKAGE_FORMAT,
+            manifest,
+            files,
+        };
+        serde_json::to_vec(&pkg).map_err(|e| {
+            ContractError::framework(codes::INTERNAL).with_param("reason", e.to_string())
+        })
+    }
+
+    /// Import a package produced by [`export_module`](Self::export_module) (or any
+    /// conforming writer), after authenticating it against the trust anchor.
+    ///
+    /// The order of the controls is the point: the path allowlist and the signature
+    /// run BEFORE anything is written, so a package is either fully trusted or not
+    /// imported at all — a byte of user data, an unknown or revoked key, or a file
+    /// whose content does not hash to the signed etag all leave the store untouched.
+    #[cfg(feature = "module-signing")]
+    pub async fn import_module(&self, bytes: &[u8]) -> Result<VfsMeta, ContractError> {
+        let pkg: ModulePackage = serde_json::from_slice(bytes).map_err(|e| {
+            ContractError::framework(codes::MODULE_FORMAT_UNSUPPORTED)
+                .with_param("reason", format!("not a module package: {e}"))
+        })?;
+        if pkg.format != PACKAGE_FORMAT {
+            return Err(ContractError::framework(codes::MODULE_FORMAT_UNSUPPORTED)
+                .with_param("format", pkg.format)
+                .with_param("reason", "unknown package format"));
+        }
+        let name = pkg.manifest.name.clone();
+        let version = pkg.manifest.version.clone();
+        let dir = self.version_dir(&name, &version)?;
+        let manifest_path = Self::rel(&dir, MANIFEST_FILE)?;
+
+        // 1. Refuse user data: every shipped path must be descriptor.json or
+        //    assets/**. Data (rows, lines) never lives in /modules — verify it here
+        //    instead of assuming the separation held upstream.
+        for rel in pkg.files.keys() {
+            if !package_path_allowed(rel) {
+                return Err(ContractError::framework(codes::MODULE_FORMAT_UNSUPPORTED)
+                    .with_param("path", rel.clone())
+                    .with_param("reason", "file outside descriptor.json and assets/**"));
+            }
+        }
+        // 2. The manifest and the shipped files must describe exactly the same set:
+        //    no dangling etag, no unlisted file, no stray path in the manifest.
+        for rel in pkg.manifest.files.keys() {
+            if !package_path_allowed(rel) {
+                return Err(ContractError::framework(codes::MODULE_FORMAT_UNSUPPORTED)
+                    .with_param("path", rel.clone())
+                    .with_param(
+                        "reason",
+                        "manifest lists a file outside descriptor.json and assets/**",
+                    ));
+            }
+            if !pkg.files.contains_key(rel) {
+                return Err(ContractError::framework(codes::MODULE_FORMAT_UNSUPPORTED)
+                    .with_param("path", rel.clone())
+                    .with_param("reason", "manifest lists a file the package does not carry"));
+            }
+        }
+        for rel in pkg.files.keys() {
+            if !pkg.manifest.files.contains_key(rel) {
+                return Err(ContractError::framework(codes::MODULE_FORMAT_UNSUPPORTED)
+                    .with_param("path", rel.clone())
+                    .with_param(
+                        "reason",
+                        "package carries a file the manifest does not list",
+                    ));
+            }
+        }
+        if !pkg.files.contains_key(DESCRIPTOR_FILE) {
+            return Err(ContractError::framework(codes::MODULE_FORMAT_UNSUPPORTED)
+                .with_param("path", DESCRIPTOR_FILE)
+                .with_param("reason", "a package must carry descriptor.json"));
+        }
+
+        // 3. Authenticate the manifest against the anchor. This is the same verdict
+        //    as `get`: unknown or revoked key -> `untrusted_key`, bad signature ->
+        //    `bad_signature`, unsigned (anchor declared) -> `unsigned`.
+        self.verify_manifest(&manifest_path, &pkg.manifest)?;
+
+        // 4. Integrity: every shipped byte must hash to the signed etag.
+        use base64::Engine as _;
+        let mut written: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+        for (rel, b64) in &pkg.files {
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(b64)
+                .map_err(|e| {
+                    ContractError::framework(codes::MODULE_BAD_SIGNATURE)
+                        .with_param("path", rel.clone())
+                        .with_param("reason", format!("not base64: {e}"))
+                })?;
+            if pkg.manifest.files.get(rel) != Some(&super::etag_of(&bytes)) {
+                return Err(integrity(
+                    &Self::rel(&dir, rel)?,
+                    "etag differs from the manifest",
+                ));
+            }
+            written.insert(rel.clone(), bytes);
+        }
+
+        // 5. The descriptor must parse and identify the module. The receiver re-runs
+        //    the full descriptor check at `get` (with its own registry and profile),
+        //    so this is structural identity, not a policy verdict.
+        let desc_bytes = written.get(DESCRIPTOR_FILE).expect("descriptor present");
+        let desc_path = Self::rel(&dir, DESCRIPTOR_FILE)?;
+        let desc_text = std::str::from_utf8(desc_bytes)
+            .map_err(|_| integrity(&desc_path, "descriptor is not UTF-8"))?;
+        let desc = ModuleDescriptor::from_json(desc_text)?;
+        if desc.name != name || desc.version != version {
+            return Err(ContractError::framework(codes::MODULE_IDENTITY_MISMATCH)
+                .with_param("path", dir.as_str())
+                .with_param("found", format!("{}@{}", desc.name, desc.version)));
+        }
+        // Fail-closed code, exactly like `put`: a package carrying executable code
+        // into a store with no anchor is refused (nothing can authenticate it).
+        if !self.anchor_declared() && written.keys().any(|rel| is_code_asset(rel)) {
+            return Err(ContractError::framework(codes::MODULE_UNSIGNED)
+                .with_param("module", format!("{name}@{version}"))
+                .with_param("reason", "module with code, no trust anchor declared"));
+        }
+
+        // 6. Commit under the write lock: immutable versions, atomic visibility,
+        //    manifest last (IfNoneMatch), exactly the discipline of `put`.
+        let _g = self.write_lock.lock().await;
+        if let Some(existing) = self.manifest(&name, &version).await? {
+            if existing.files == pkg.manifest.files {
+                return self
+                    .vfs
+                    .stat(&manifest_path)
+                    .await?
+                    .ok_or_else(|| integrity(&manifest_path, "manifest vanished"));
+            }
+            return Err(immutable(&dir));
+        }
+        for f in self.files_below(&dir).await? {
+            match self.vfs.delete(&f, Precondition::None).await {
+                Ok(()) | Err(VfsError::NotFound(_)) => {}
+                Err(e) => return Err(e.into()),
+            }
+        }
+        for (rel, content) in &written {
+            self.vfs
+                .write(&Self::rel(&dir, rel)?, content, Precondition::None)
+                .await?;
+        }
+        match self
+            .vfs
+            .write(
+                &manifest_path,
+                &json(&pkg.manifest)?,
+                Precondition::IfNoneMatch,
+            )
+            .await
+        {
+            Ok(meta) => Ok(meta),
+            Err(VfsError::PreconditionFailed { .. }) => Err(immutable(&dir)),
+            Err(e) => Err(e.into()),
+        }
     }
 
     async fn files_below(&self, dir: &VfsPath) -> Result<Vec<VfsPath>, ContractError> {
@@ -2250,5 +2495,167 @@ mod signing_tests {
         assert_eq!(rec.role, AnchorKeyRole::Shared);
         assert_eq!(rec.added_at, added);
         assert_eq!(rec.public_key.len(), 64, "32 octets en hex");
+    }
+
+    // ---------- le paquet portable : export, import, et ce qu'il refuse ----------
+
+    /// (a) Ce que l'un exporte, un hôte vierge l'importe, et le module installé
+    /// vérifie sous la clé de l'auteur (devenue clé de pair). L'export est
+    /// déterministe : le même contenu deux fois → les mêmes octets.
+    #[tokio::test]
+    async fn export_then_import_installs_a_module_that_verifies() {
+        let author = signing_key();
+        let src_vfs = Arc::new(InMemoryVfs::new());
+        // Un module à CODE exige une ancre chez celui qui l'écrit (fail-closed) ; la
+        // clé de l'auteur y est la sienne. Chez le lecteur, elle deviendra un pair.
+        let mut writer_anchor = TrustAnchor::new();
+        writer_anchor.insert("author", author.verifying_key());
+        let writer = VfsModuleStore::new(src_vfs)
+            .with_signing_key("author", author.clone())
+            .with_trust_anchor(writer_anchor);
+        writer
+            .put_with_assets(&descriptor(), &[], &[("program.wasm", b"\0asm\x01")])
+            .await
+            .expect("put competency with code");
+
+        let pkg = writer
+            .export_module("billing", "0.0.1")
+            .await
+            .expect("export");
+        let pkg_again = writer
+            .export_module("billing", "0.0.1")
+            .await
+            .expect("export again");
+        assert_eq!(pkg, pkg_again, "l'export est déterministe");
+
+        let dst_vfs = Arc::new(InMemoryVfs::new());
+        let mut anchor = TrustAnchor::new();
+        anchor.insert_peer("author", author.verifying_key());
+        let reader = VfsModuleStore::new(dst_vfs).with_trust_anchor(anchor);
+        reader
+            .import_module(&pkg)
+            .await
+            .expect("import signed by an active peer");
+
+        let loaded = reader.get("billing", None).await.expect("verified on get");
+        assert_eq!(loaded.name, "billing");
+        assert_eq!(
+            reader
+                .code("billing", "0.0.1")
+                .await
+                .expect("code asset")
+                .expect("code present"),
+            b"\0asm\x01"
+        );
+    }
+
+    /// (b) Un paquet signé par une clé que l'ancre ne connaît pas est refusé,
+    /// sans rien écrire, avec le même verdict que la vérification de manifeste.
+    #[tokio::test]
+    async fn import_signed_by_an_unknown_key_is_refused() {
+        let peer = SigningKey::from_bytes(&[11u8; 32]);
+        let src_vfs = Arc::new(InMemoryVfs::new());
+        let writer = VfsModuleStore::new(src_vfs).with_signing_key("peer-11", peer);
+        writer.put(&descriptor(), &[]).await.expect("put");
+        let pkg = writer
+            .export_module("billing", "0.0.1")
+            .await
+            .expect("export");
+
+        let dst_vfs = Arc::new(InMemoryVfs::new());
+        let mut anchor = TrustAnchor::new();
+        anchor.insert_peer(
+            "peer-other",
+            SigningKey::from_bytes(&[12u8; 32]).verifying_key(),
+        );
+        let reader = VfsModuleStore::new(dst_vfs).with_trust_anchor(anchor);
+        let err = reader
+            .import_module(&pkg)
+            .await
+            .expect_err("unknown signer must be refused");
+        assert_eq!(err.code, codes::MODULE_UNTRUSTED_KEY.into());
+        assert_eq!(
+            err.params.get("state").and_then(|v| v.as_str()),
+            Some("unknown")
+        );
+        assert!(reader.list().await.unwrap().is_empty(), "nothing written");
+    }
+
+    /// (c) Un paquet signé par une clé révoquée est refusé, distingué d'une clé
+    /// inconnue par `state = "revoked"`, et rien n'est écrit.
+    #[tokio::test]
+    async fn import_signed_by_a_revoked_key_is_refused() {
+        let peer = SigningKey::from_bytes(&[13u8; 32]);
+        let src_vfs = Arc::new(InMemoryVfs::new());
+        let writer = VfsModuleStore::new(src_vfs).with_signing_key("peer-13", peer.clone());
+        writer.put(&descriptor(), &[]).await.expect("put");
+        let pkg = writer
+            .export_module("billing", "0.0.1")
+            .await
+            .expect("export");
+
+        let dst_vfs = Arc::new(InMemoryVfs::new());
+        let mut anchor = TrustAnchor::new();
+        anchor.insert_peer("peer-13", peer.verifying_key());
+        assert!(anchor.revoke("peer-13"));
+        let reader = VfsModuleStore::new(dst_vfs).with_trust_anchor(anchor);
+        let err = reader
+            .import_module(&pkg)
+            .await
+            .expect_err("revoked signer must be refused");
+        assert_eq!(err.code, codes::MODULE_UNTRUSTED_KEY.into());
+        assert_eq!(
+            err.params.get("state").and_then(|v| v.as_str()),
+            Some("revoked")
+        );
+        assert!(reader.list().await.unwrap().is_empty(), "nothing written");
+    }
+
+    /// (d) Même un paquet *correctement signé* qui embarque une donnée utilisateur
+    /// est refusé, en nommant le chemin fautif — la signature ne blanchit pas la
+    /// donnée, seule la liste blanche des chemins compte.
+    #[tokio::test]
+    async fn a_package_containing_user_data_is_refused_naming_the_path() {
+        use base64::Engine as _;
+
+        let author = signing_key();
+        let src_vfs = Arc::new(InMemoryVfs::new());
+        let writer = VfsModuleStore::new(src_vfs).with_signing_key("author", author.clone());
+        writer.put(&descriptor(), &[]).await.expect("put");
+        let pkg_bytes = writer
+            .export_module("billing", "0.0.1")
+            .await
+            .expect("export");
+
+        // Injecte une ligne utilisateur dans un vrai paquet et re-signe : la signature
+        // est valide, seule la liste blanche des chemins peut refuser.
+        let mut pkg: ModulePackage = serde_json::from_slice(&pkg_bytes).unwrap();
+        let leak = br#"[{"user":"alice","note":"secret"}]"#;
+        pkg.files.insert(
+            "rows/leaks.json".to_string(),
+            base64::engine::general_purpose::STANDARD.encode(leak),
+        );
+        pkg.manifest.files.insert(
+            "rows/leaks.json".to_string(),
+            crate::storage::vfs::etag_of(leak),
+        );
+        pkg.manifest = signed_manifest(pkg.manifest, "author", &author);
+        let pkg_bytes = serde_json::to_vec(&pkg).unwrap();
+
+        let dst_vfs = Arc::new(InMemoryVfs::new());
+        let mut anchor = TrustAnchor::new();
+        anchor.insert_peer("author", author.verifying_key());
+        let reader = VfsModuleStore::new(dst_vfs).with_trust_anchor(anchor);
+        let err = reader
+            .import_module(&pkg_bytes)
+            .await
+            .expect_err("user data must be refused");
+        assert_eq!(err.code, codes::MODULE_FORMAT_UNSUPPORTED.into());
+        assert_eq!(
+            err.params.get("path").and_then(|v| v.as_str()),
+            Some("rows/leaks.json"),
+            "le chemin fautif est nommé : {err:?}"
+        );
+        assert!(reader.list().await.unwrap().is_empty(), "nothing written");
     }
 }

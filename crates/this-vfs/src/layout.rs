@@ -147,6 +147,48 @@ impl Manifest {
     }
 }
 
+/// Version of the portable package format itself.
+pub const PACKAGE_FORMAT: u32 = 1;
+
+/// A portable, signed package of ONE module version: the competency a host can
+/// share without sharing data.
+///
+/// ```text
+/// ModulePackage {
+///   format: u32,
+///   manifest: Manifest,                 // signed by the author, files = etags below
+///   files: BTreeMap<String, String>,    // path under the version dir -> base64 content
+/// }
+/// ```
+///
+/// A package carries exactly `descriptor.json` and `assets/**`, plus the signed
+/// manifest that authenticates them. Nothing else — no `i18n/**`, no `rows/**`, no
+/// line. That is what lets a competency cross a device boundary without carrying
+/// a single byte of user data: data lives in the graph, never in `/modules`.
+///
+/// Chosen container: one self-contained JSON document. It needs no new dependency
+/// (serde + serde_json are already here), its byte form is deterministic (sorted
+/// `BTreeMap`, compact JSON, base64 of the stored files), and it is verifiable end
+/// to end: the manifest signs the etags, the etags bind the shipped bytes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModulePackage {
+    pub format: u32,
+    pub manifest: Manifest,
+    /// Path relative to the version directory -> content, base64 (standard
+    /// alphabet, padded). Sorted because it is a `BTreeMap`: two exports of the
+    /// same content are byte-identical.
+    pub files: BTreeMap<String, String>,
+}
+
+/// Is `rel` a path a package may carry? Exactly `descriptor.json` or `assets/**`.
+///
+/// This is the only gate between a package and the store: a path that fails it —
+/// `i18n/x.json`, `rows/x`, a stray `manifest.json`, anything — is refused at
+/// import, naming the path, before a single byte is written.
+pub fn package_path_allowed(rel: &str) -> bool {
+    rel == DESCRIPTOR_FILE || rel.starts_with("assets/")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -167,6 +209,24 @@ mod tests {
         assert_eq!(key, back);
         assert_eq!(back.state, AnchorKeyState::Active);
         assert_eq!(back.role, AnchorKeyRole::Ownership);
+    }
+
+    #[test]
+    fn package_path_allowlist_is_exactly_descriptor_and_assets() {
+        for ok in ["descriptor.json", "assets/program.wasm", "assets/a/b.json"] {
+            assert!(package_path_allowed(ok), "{ok}");
+        }
+        for bad in [
+            "manifest.json",
+            "i18n/fr.json",
+            "rows/x",
+            "rows/",
+            "descriptor.json/extra",
+            "asset/x",
+            "",
+        ] {
+            assert!(!package_path_allowed(bad), "{bad}");
+        }
     }
 
     #[test]
