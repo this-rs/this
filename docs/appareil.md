@@ -85,9 +85,10 @@ la carte le dit, et un test le vérifie contre `macos/Sources/dispatch.swift`.
 | `speech` | `speechStatus` `speechRequest` `speechTranscribeFile` | oui | oui |
 | `nfc` | `nfcStatus` `nfcReadOnce` `nfcWrite` | oui | — |
 | `local_network` | `localNetworkStatus` `localNetworkBrowse` | oui | oui |
-| | `localNetworkResolve` | oui | — |
+| | `localNetworkResolve` | oui | oui |
+| | `localNetworkAdvertise` `localNetworkUnadvertise` | oui | oui |
 
-**77 méthodes**, et **deux formes de « non »** qu'il ne faut pas
+**79 méthodes**, et **deux formes de « non »** qu'il ne faut pas
 confondre : une méthode absente de la plateforme (`not_supported`), et une
 capacité non accordée (`not_authorized`).
 

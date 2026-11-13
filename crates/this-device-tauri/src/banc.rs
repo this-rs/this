@@ -174,6 +174,10 @@ pub fn nature(method: &str) -> Nature {
         | "bluetoothNotifications"
         | "bluetoothServices"
         | "localNetworkResolve"
+        // Annoncer sa présence sur le réseau modifie ce que les autres voient : c'est une
+        // écriture, pas une lecture. Le banc ne l'appelle donc pas.
+        | "localNetworkAdvertise"
+        | "localNetworkUnadvertise"
         | "speechTranscribeFile" => Nature::Ecriture,
         // `status`, `…Status`, `…List`, `…Sample`, `…Browse`, `…Recent`, `…Pending`,
         // `gyroscopeSample`, `bluetoothScan`, les six lectures d'état système : rien ne s'affiche,

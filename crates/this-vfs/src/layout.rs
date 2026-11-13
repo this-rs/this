@@ -93,6 +93,43 @@ pub struct ManifestBody<'a> {
     pub created: &'a DateTime<Utc>,
 }
 
+/// Lifecycle state of one key of a trust anchor.
+///
+/// The anchor only ever answers « does this manifest come from a source we
+/// admit ». It never carries what that source may do; [`AnchorKeyRole`] is the
+/// only extra provenance it keeps, and verification consults the state alone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AnchorKeyState {
+    /// The key may authenticate a manifest.
+    Active,
+    /// The key is known but no longer admitted: same verdict as an unknown key,
+    /// only distinguishable so a host can tell « revoked » from « never seen ».
+    Revoked,
+}
+
+/// Provenance of one key of a trust anchor. Informational: verification never
+/// reads it (see [`AnchorKeyState`]); it never authorizes behaviour.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AnchorKeyRole {
+    /// The host's own key.
+    Ownership,
+    /// A paired peer's key.
+    Shared,
+}
+
+/// One key of a trust anchor, in the shape it is persisted or shared between two
+/// hosts. The verification side lives in `this` (it holds a parsed
+/// `VerifyingKey`); this is its serializable twin — the public key as hex.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AnchorKey {
+    pub key_id: String,
+    /// Ed25519 public key, 32 bytes, lower-case hex.
+    pub public_key: String,
+    pub state: AnchorKeyState,
+    pub added_at: DateTime<Utc>,
+    pub role: AnchorKeyRole,
+}
+
 impl Manifest {
     /// The bytes covered by the signature: the canonical [`ManifestBody`] of this
     /// record. Any `signature` it carries is ignored.
@@ -110,9 +147,87 @@ impl Manifest {
     }
 }
 
+/// Version of the portable package format itself.
+pub const PACKAGE_FORMAT: u32 = 1;
+
+/// A portable, signed package of ONE module version: the competency a host can
+/// share without sharing data.
+///
+/// ```text
+/// ModulePackage {
+///   format: u32,
+///   manifest: Manifest,                 // signed by the author, files = etags below
+///   files: BTreeMap<String, String>,    // path under the version dir -> base64 content
+/// }
+/// ```
+///
+/// A package carries exactly `descriptor.json` and `assets/**`, plus the signed
+/// manifest that authenticates them. Nothing else — no `i18n/**`, no `rows/**`, no
+/// line. That is what lets a competency cross a device boundary without carrying
+/// a single byte of user data: data lives in the graph, never in `/modules`.
+///
+/// Chosen container: one self-contained JSON document. It needs no new dependency
+/// (serde + serde_json are already here), its byte form is deterministic (sorted
+/// `BTreeMap`, compact JSON, base64 of the stored files), and it is verifiable end
+/// to end: the manifest signs the etags, the etags bind the shipped bytes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModulePackage {
+    pub format: u32,
+    pub manifest: Manifest,
+    /// Path relative to the version directory -> content, base64 (standard
+    /// alphabet, padded). Sorted because it is a `BTreeMap`: two exports of the
+    /// same content are byte-identical.
+    pub files: BTreeMap<String, String>,
+}
+
+/// Is `rel` a path a package may carry? Exactly `descriptor.json` or `assets/**`.
+///
+/// This is the only gate between a package and the store: a path that fails it —
+/// `i18n/x.json`, `rows/x`, a stray `manifest.json`, anything — is refused at
+/// import, naming the path, before a single byte is written.
+pub fn package_path_allowed(rel: &str) -> bool {
+    rel == DESCRIPTOR_FILE || rel.starts_with("assets/")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn anchor_key_round_trips_through_json() {
+        let key = AnchorKey {
+            key_id: "device-0102030405060708".into(),
+            public_key: "ab".repeat(32),
+            state: AnchorKeyState::Active,
+            added_at: DateTime::parse_from_rfc3339("2026-01-01T00:00:00Z")
+                .unwrap()
+                .with_timezone(&Utc),
+            role: AnchorKeyRole::Ownership,
+        };
+        let json = serde_json::to_string(&key).unwrap();
+        let back: AnchorKey = serde_json::from_str(&json).unwrap();
+        assert_eq!(key, back);
+        assert_eq!(back.state, AnchorKeyState::Active);
+        assert_eq!(back.role, AnchorKeyRole::Ownership);
+    }
+
+    #[test]
+    fn package_path_allowlist_is_exactly_descriptor_and_assets() {
+        for ok in ["descriptor.json", "assets/program.wasm", "assets/a/b.json"] {
+            assert!(package_path_allowed(ok), "{ok}");
+        }
+        for bad in [
+            "manifest.json",
+            "i18n/fr.json",
+            "rows/x",
+            "rows/",
+            "descriptor.json/extra",
+            "asset/x",
+            "",
+        ] {
+            assert!(!package_path_allowed(bad), "{bad}");
+        }
+    }
 
     #[test]
     fn signing_bytes_format_is_pinned() {

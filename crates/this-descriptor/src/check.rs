@@ -208,6 +208,22 @@ impl ModuleDescriptor {
         if let Some(r) = &self.runtime {
             check_runtime(&mut c, r, profile);
         }
+        if let Some(p) = &self.perm {
+            for op in p.ops.keys() {
+                if let Operation::Custom(name) = op {
+                    let ok = name.contains('.') && name.split('.').all(is_identifier);
+                    if !ok {
+                        c.push(
+                            "perm_operation",
+                            format!("perm.{name}"),
+                            format!(
+                                "business operation `{name}` must be a non-empty dotted name like `invoice.pay`"
+                            ),
+                        );
+                    }
+                }
+            }
+        }
         if !is_identifier(&self.name) {
             c.push(
                 "invalid_name",
@@ -773,6 +789,49 @@ mod tests {
             codes.iter().any(|c| c == "this.descriptor.public_refused"),
             "public doit rester refusé en local : {codes:?}"
         );
+    }
+
+    #[test]
+    fn perm_block_is_read_from_json() {
+        let json = r#"{"format":1,"name":"billing","version":"1.0.0",
+            "perm":{"invoice.pay":"authenticated","list":"authenticated"}}"#;
+        let m = ModuleDescriptor::from_json(json).expect("descripteur valide");
+        let perm = m.perm.as_ref().expect("perm present");
+        assert_eq!(
+            perm.ops.get(&Operation::Custom("invoice.pay".into())),
+            Some(&crate::perm::PolicyExpr::Authenticated)
+        );
+        assert_eq!(perm.ops.len(), 2);
+        assert!(m.check(&reg(), CheckProfile::Compiled).is_ok());
+        let back = ModuleDescriptor::from_json(&m.to_json_pretty()).unwrap();
+        assert_eq!(back, m);
+    }
+
+    #[test]
+    fn descriptor_without_perm_reads_as_before() {
+        let json = r#"{"format":1,"name":"billing","version":"1.0.0"}"#;
+        let m = ModuleDescriptor::from_json(json).unwrap();
+        assert_eq!(m.perm, None);
+        assert!(!m.to_json_pretty().contains("perm"));
+    }
+
+    #[test]
+    fn malformed_custom_operation_in_perm_is_refused() {
+        for bad in ["", "pay", "invoice..pay", "Invoice.pay", ".pay"] {
+            let mut m = ModuleDescriptor::new("billing", "1.0.0");
+            let mut p = PermDesc::default();
+            p.ops
+                .insert(Operation::Custom(bad.into()), crate::perm::PolicyExpr::Deny);
+            m.perm = Some(p);
+            let codes = codes_of(m.check(&reg(), CheckProfile::Compiled));
+            assert!(
+                codes.iter().any(|c| c == "this.descriptor.perm_operation"),
+                "`{bad}` should be refused, got {codes:?}"
+            );
+        }
+        // And a malformed name in JSON never even deserializes.
+        let json = r#"{"format":1,"name":"billing","version":"1.0.0","perm":{"pay":"deny"}}"#;
+        assert!(ModuleDescriptor::from_json(json).is_err());
     }
 
     #[test]
