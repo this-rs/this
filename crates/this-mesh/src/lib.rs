@@ -10,6 +10,7 @@
 mod appairage;
 mod envelope;
 mod gate;
+mod invitation;
 mod limits;
 mod peers;
 #[cfg(feature = "transport")]
@@ -20,5 +21,9 @@ pub use appairage::{
 };
 pub use envelope::{DeviceId, MESH_VERSION, Message, MessageType, SIGNING_DOMAIN, SignError};
 pub use gate::{Gate, JournalEntry, Raison, Verdict};
+pub use invitation::{
+    CAPACITE_JETONS, Invitation, InvitationError, Jetons, RefusJeton, SCHEMA, SECS_JETON,
+    TAILLE_JETON,
+};
 pub use limits::Limits;
 pub use peers::{JOURNAL_ECRASEMENTS, PeerError, Peers, Surveillance};
