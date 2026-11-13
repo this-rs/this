@@ -29,6 +29,19 @@ enum MacLocation {
         return permissionName(currentAuth(), capability: "location")
     }
 
+    /// L'état d'une capacité de localisation nommée, dans la forme du contrat.
+    ///
+    /// `currentState()` ne sait lire que `location` ; `locationStatus` reçoit la capacité dans
+    /// ses arguments, comme `captureStatus`. Sans ce sélecteur, la carte promet `locationStatus`
+    /// sur macOS et `dispatch.swift` ne le connaît pas — ce que `surface_parity` refuse.
+    static func state(_ args: [String: Any]) -> String {
+        let capability = args["capability"] as? String ?? "location"
+        guard capability == "location" || capability == "location_always" else {
+            return statusReply(state: "unsupported")
+        }
+        return statusReply(state: permissionName(currentAuth(), capability: capability))
+    }
+
     /// Ask the person for location permission. Args: `{"capability": "location"|"location_always"}`.
     /// Blocks until the person answers or the timeout fires.
     static func request(_ args: [String: Any]) -> String {

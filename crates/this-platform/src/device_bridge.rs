@@ -238,6 +238,10 @@ pub const METHODS: &[&str] = &[
     // Résoudre un service trouvé par un browse : sans ça, un nom ne dit pas où se connecter.
     "localNetworkResolve",
     "locationRequest",
+    // L'ÉTAT de la permission, qui manquait : sans lui, `status_method` rendait `None` pour
+    // `location` et le pont répondait `unsupported` — un iPhone avec la localisation se lisait
+    // « pas de localisation » (mesuré le 13/11/2026 sur un iPhone 16 Pro Max).
+    "locationStatus",
     "locationSample",
     // Le flux : une position ponctuelle ne dit pas où l'on va. Démarrer / arrêter / relire,
     // plutôt qu'une boucle de l'appelant qui redemanderait un point toutes les secondes.
@@ -262,7 +266,7 @@ pub fn capability_of(method: &str, args: &Value) -> Option<Capability> {
         // One native method, two capabilities: the argument says which. `locationRequest`
         // belongs here too — it asks for in-use OR always, and gating it on `Location` alone
         // would let a module get the background permission by naming the foreground one.
-        "status" | "captureStatus" | "captureRequest" | "locationRequest" => {
+        "status" | "captureStatus" | "captureRequest" | "locationRequest" | "locationStatus" => {
             return declared_capability(args);
         }
         "gyroscopeSample" => Capability::Gyroscope,
@@ -334,7 +338,9 @@ fn declared_capability(args: &Value) -> Option<Capability> {
 /// health permission", only per-type answers.
 pub fn status_args(method: &str, capability: Capability) -> Value {
     match method {
-        "status" | "captureStatus" => serde_json::json!({ "capability": capability }),
+        "status" | "captureStatus" | "locationStatus" => {
+            serde_json::json!({ "capability": capability })
+        }
         "healthStatus" => serde_json::json!({ "quantity": "step_count" }),
         _ => serde_json::json!({}),
     }
@@ -446,6 +452,7 @@ pub fn complete_args(method: &str, args: &Value, now_ms: f64) -> Value {
         // Camera and location carry their name in their arguments: without it the capability
         // is not even derivable, and the bridge answers `not_supported`.
         "captureRequest" | "captureStatus" => serde_json::json!({ "capability": "camera" }),
+        "locationStatus" => serde_json::json!({ "capability": "location" }),
         // 1280 px et une qualité honnête : assez pour lire un document photographié, assez
         // petit pour traverser le pont sans le saturer.
         "cameraCapturePhoto" => serde_json::json!({ "max_px": 1280, "quality": 0.8 }),
@@ -575,13 +582,16 @@ pub fn status_method(capability: Capability) -> Option<&'static str> {
         Capability::Nfc => "nfcStatus",
         Capability::LocalNetwork => "localNetworkStatus",
         Capability::MotionActivity => "motionActivityStatus",
-        // No state to read: the person decides at each use, so there is nothing to ask.
+        // `location` et `location_always` ont un état, et il se lit sans rien demander
+        // (`authorizationStatus`) : leur absence ici faisait répondre `unsupported` à une
+        // capacité que l'appareil a.
+        Capability::Location | Capability::LocationAlways => "locationStatus",
+        // No state to read: a picker, the clipboard and a share sheet have no permission of
+        // their own — the person decides at each use, so there is nothing to ask.
         Capability::PhotosPick
         | Capability::FilesPick
         | Capability::Clipboard
-        | Capability::Share
-        | Capability::Location
-        | Capability::LocationAlways => return None,
+        | Capability::Share => return None,
     })
 }
 
@@ -883,9 +893,16 @@ mod tests {
     #[test]
     fn every_known_method_has_a_capability() {
         for method in METHODS {
+            // Quatre méthodes lisent leur capacité DANS leurs arguments : elles ont besoin d'un
+            // exemple, pas d'un objet vide. La liste est la même que celle de `capability_of`,
+            // et un oubli ici se voit comme un faux échec — d'où le commentaire jumeau là-bas.
             let args = if matches!(
                 *method,
-                "status" | "captureStatus" | "captureRequest" | "locationRequest"
+                "status"
+                    | "captureStatus"
+                    | "captureRequest"
+                    | "locationRequest"
+                    | "locationStatus"
             ) {
                 json!({"capability": "camera"})
             } else {

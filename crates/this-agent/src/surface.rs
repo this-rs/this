@@ -755,8 +755,10 @@ pub fn surface() -> Surface {
             Capability::new(
                 "device.location",
                 Tier::Shell,
-                "position ponctuelle, et demande d'autorisation",
-                Some("locationRequest / locationSample"),
+                "état de la permission, demande d'autorisation, position ponctuelle",
+                // `locationStatus` : l'ÉTAT, qui manquait — sans lui le pont répondait
+                // `unsupported` pour une capacité que l'appareil a.
+                Some("locationStatus / locationRequest / locationSample"),
                 &[Ios, Ipados, Macos],
                 Status::Live,
             ),
@@ -773,7 +775,7 @@ pub fn surface() -> Surface {
                 "device.location_always",
                 Tier::Shell,
                 "localisation en arrière-plan",
-                Some("locationRequest"),
+                Some("locationStatus / locationRequest"),
                 &[Ios, Ipados],
                 Status::Live,
             ),

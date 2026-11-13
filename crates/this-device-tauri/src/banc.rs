@@ -127,12 +127,18 @@ pub fn nature(method: &str) -> Nature {
         | "cameraCapturePhoto"
         | "cameraRecordVideo"
         | "microphoneStart"
-        | "locationStreamStart" => Nature::Interactif,
-        // `locationSample` ouvre une session de localisation : si la permission n'est pas
-        // encore accordée, c'est iOS qui pose la question. La capacité `location` n'a pas de
-        // méthode d'état (`status_method` rend `None`), donc rien ne protégerait l'appel — et
-        // le banc laisserait une boîte de dialogue sur l'écran de quelqu'un.
-        "locationSample" => Nature::Permission,
+        | "locationStreamStart"
+        // `clipboardRead` LIT, mais depuis iOS 16 il peut afficher la demande de collage du
+        // système — un geste, donc. Mesuré le 13/11/2026 : réponse en 6 ms sur iOS 18.6, et
+        // **délai de 10 002 ms** sur les deux simulateurs iOS 26 (la boîte attendait une main).
+        // Sur l'iPhone, 4 172 ms : la personne avait déjà répondu une fois. Le classer lecture
+        // laissait une boîte de dialogue sur l'écran de quelqu'un à chaque balayage.
+        | "clipboardRead" => Nature::Interactif,
+        // `locationSample` n'est PAS listée : depuis que `locationStatus` existe
+        // (`status_method(Location) = Some("locationStatus")`), la règle générale du balayage
+        // s'applique — le banc lit l'état d'abord, et n'appelle la position que si la permission
+        // est déjà accordée. C'est un cas où ajouter une méthode d'état rend une autre méthode
+        // mesurable : sans elle, l'appel aurait posé la question sur l'écran de quelqu'un.
         // Écritures, ou appels qui n'ont de sens qu'avec un périphérique déjà choisi.
         "microphoneStop"
         | "locationStreamStop"
@@ -288,6 +294,17 @@ fn est_defaut(nom: &str) -> Option<bool> {
 async fn balayer_capacites<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> Vec<Value> {
     let mut out = Vec::new();
     for capability in capacites() {
+        // « Aucun état à lire » n'est pas « absente ». Un sélecteur, le presse-papiers et la
+        // feuille de partage n'ont pas de permission système : `perform` répond `unsupported`
+        // pour eux, et recopier ce mot ferait déclarer `device.photos_pick` indisponible sur
+        // TOUS les appareils (c'est ce que `HostLimits::from_bench` en ferait).
+        if status_method(capability).is_none() {
+            out.push(json!({
+                "capacite": serde_json::to_value(capability).unwrap_or(Value::Null),
+                "etat": "sans_etat",
+            }));
+            continue;
+        }
         let reply = crate::answer(app, &Request::Status { capability }).await;
         let etat = reply
             .get("state")
@@ -427,6 +444,24 @@ mod tests {
         }
     }
 
+    /// La lecture de `notificationsStatus` ne saute pas sur la file principale : sa réponse ne
+    /// doit dépendre de rien d'autre que du callback du système. Mesuré sur un appareil : un appel
+    /// direct ne répondait jamais (garde-temps de 300 s) alors que la même lecture par l'autotest
+    /// rendait `prompt`. Les autres lectures d'état répondent sans file principale.
+    #[test]
+    fn the_notification_status_read_does_not_hop_to_the_main_queue() {
+        let source = include_str!("../ios/Sources/notifications.swift");
+        let debut = source
+            .find("static func read(")
+            .expect("NotificationStatus.read existe");
+        let corps = &source[debut..];
+        let fin = corps.find("\n  }\n").expect("fin de read");
+        assert!(
+            !corps[..fin].contains("DispatchQueue.main"),
+            "NotificationStatus.read ne doit pas dépendre de la file principale"
+        );
+    }
+
     /// Un état de permission est une lecture : la lire ne demande rien à personne, donc le banc
     /// peut le faire — et c'est ce qui distingue un appareil sans capteur d'un pont cassé.
     #[test]
@@ -496,6 +531,46 @@ mod tests {
         assert_eq!(
             etat(&json!({"kind":"error","code":"missing_argument","missing":["reason"]})),
             Etat::RefuseArgument
+        );
+    }
+
+    /// « Aucun état à lire » n'est pas « absente » : les capacités sans permission système ne
+    /// doivent jamais sortir `unsupported`, sinon `HostLimits::from_bench` les retirerait de la
+    /// carte de l'agent sur tous les appareils.
+    #[test]
+    fn a_capability_without_a_state_is_not_reported_absent() {
+        for capability in capacites() {
+            if status_method(capability).is_some() {
+                continue;
+            }
+            assert!(
+                matches!(
+                    capability,
+                    Capability::PhotosPick
+                        | Capability::FilesPick
+                        | Capability::Clipboard
+                        | Capability::Share
+                ),
+                "{capability:?} n'a pas de méthode d'état et n'est pas un sélecteur : à vérifier"
+            );
+        }
+    }
+
+    /// `location` avait ce défaut : aucune méthode d'état, donc `unsupported` sur un iPhone qui
+    /// a la localisation. Il a maintenant une méthode, et elle lit sa capacité dans ses
+    /// arguments comme `captureStatus`.
+    #[test]
+    fn every_location_capability_has_a_state_to_read() {
+        for capability in [Capability::Location, Capability::LocationAlways] {
+            assert_eq!(
+                status_method(capability),
+                Some("locationStatus"),
+                "{capability:?}"
+            );
+        }
+        assert_eq!(
+            capability_of("locationStatus", &json!({"capability": "location_always"})),
+            Some(Capability::LocationAlways)
         );
     }
 }

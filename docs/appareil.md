@@ -59,9 +59,9 @@ la carte le dit, et un test le vérifie contre `macos/Sources/dispatch.swift`.
 | | `cameraCapturePhoto` `cameraRecordVideo` | oui | — |
 | `microphone` | `captureStatus` `captureRequest` | oui | oui |
 | | `microphoneStart` `microphoneStop` | oui | — |
-| `location` | `locationRequest` `locationSample` | oui | oui |
+| `location` | `locationStatus` `locationRequest` `locationSample` | oui | oui |
 | | `locationStreamStart` `locationStreamStop` `locationRecent` | oui | — |
-| `location_always` | `locationRequest` | oui | — |
+| `location_always` | `locationStatus` `locationRequest` | oui | — |
 | `clipboard` | `clipboardRead` `clipboardWrite` (texte) | oui | oui |
 | | idem, mais **lien et image** (4 Mio au plus) | oui | — |
 | `share` | `shareText` | oui | oui |
@@ -87,7 +87,7 @@ la carte le dit, et un test le vérifie contre `macos/Sources/dispatch.swift`.
 | `local_network` | `localNetworkStatus` `localNetworkBrowse` | oui | oui |
 | | `localNetworkResolve` | oui | — |
 
-Soixante-seize méthodes, et **deux formes de « non »** qu'il ne faut pas
+Soixante-dix-sept méthodes, et **deux formes de « non »** qu'il ne faut pas
 confondre : une méthode absente de la plateforme (`not_supported`), et une
 capacité non accordée (`not_authorized`).
 
@@ -376,6 +376,28 @@ object file … was built for newer 'iOS-simulator' version (15.0) than being li
 
 `ios/Package.swift` déclare donc `.iOS(.v15)`. C'est la borne réelle du crate.
 
+### 4. Deux capacités que l'appareil AVAIT se lisaient absentes
+
+Mesuré sur un iPhone 16 Pro Max, banc à l'appui : `capacite face_id = unsupported` et
+`capacite location = unsupported`, sur un téléphone qui a les deux.
+
+**Face ID.** `faceIdStatus` répondait `{"kind":"face_id_biometry","biometry":…}`. Or le pont ne
+lit qu'une clé pour un état : `state` (`perform`, branche `Request::Status`). Un natif qui répond
+une autre forme n'est pas une erreur — c'est un `unsupported` silencieux. La méthode rend
+maintenant `state` **et** `biometry`, et `tests/swift_parity.rs` exige, pour chaque méthode que
+`status_method` nomme, qu'elle écrive `state` (ou construise une réponse typée dont le champ
+s'appelle `state`, ou délègue à un lecteur qui rend un `Reply`).
+
+**Localisation.** `status_method` rendait `None` pour `location` et `location_always` : le pont
+répondait donc `unsupported`, alors qu'iOS donne `authorizationStatus` sans rien demander. La
+méthode `locationStatus` manquait — elle existe maintenant, sur iOS **et** macOS, et
+`capability_of` lit sa capacité dans ses arguments comme `captureStatus`.
+
+Ces deux-là comptent double, parce que `HostLimits::from_bench` transforme un `unsupported`
+mesuré en « indisponible sur ce build » : ce qui se lit absent **sort de la carte de l'agent**.
+D'où la règle jumelle côté banc — une capacité sans permission système (sélecteur, presse-papiers,
+partage) n'est pas `unsupported` mais `sans_etat`, et `from_bench` l'ignore.
+
 ## Le banc : mesurer l'appareil, pas le promettre
 
 `this-device-tauri` porte une feature `banc` (`src/banc.rs`) et
@@ -402,7 +424,7 @@ xcrun devicectl device process launch --device <udid> \
 
 ### Ce que le banc exerce, et ce qu'il refuse d'exercer
 
-Chaque méthode du contrat figure au plan, rangée par [`Nature`] :
+Chaque méthode du contrat figure au plan, rangée par `Nature` :
 
 | Nature | Exemple | Le banc l'appelle ? |
 |---|---|---|

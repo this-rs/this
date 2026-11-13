@@ -19,7 +19,7 @@ désinstalle sans toucher aux données de personne.
 ## Lancer sur un simulateur
 
 ```sh
-cargo tauri ios init --ci          # une fois : écrit gen/apple
+./preparer.sh                      # une fois : gabarit Tauri + les 3 réglages Xcode manquants
 cargo tauri ios build --target aarch64-sim --debug
 xcrun simctl install <udid> gen/apple/build/arm64-sim/BancAppareil.app
 SIMCTL_CHILD_THIS_DEVICE_BANC=1 xcrun simctl launch <udid> dev.thisrs.bancappareil
@@ -29,8 +29,11 @@ xcrun simctl get_app_container <udid> dev.thisrs.bancappareil data
 
 ## Lancer sur un iPhone
 
+`./preparer.sh` est **obligatoire** ici : sans lui, l'app se lance et meurt aussitôt
+(« Library not loaded: @rpath/libswiftCore.dylib »). Voir l'en-tête du script.
+
 ```sh
-cargo tauri ios build --target aarch64 --debug
+cargo tauri ios build --target aarch64
 xcrun devicectl device install app --device <udid> \
   gen/apple/build/banc-appareil_iOS.xcarchive/Products/Applications/BancAppareil.app
 xcrun devicectl device process launch --device <udid> \

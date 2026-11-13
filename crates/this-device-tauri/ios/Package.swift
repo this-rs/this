@@ -16,7 +16,12 @@ let package = Package(
     //     (14.0) ».
     // Une app qui déclare 14.0 peut donc s'installer sur un iPhone resté en iOS 14 et échouer
     // au lien. La borne basse réelle du crate est iOS 15 : elle est dite ici, une fois.
-    .iOS(.v15),
+    //
+    // En toutes lettres, et non `.v15` : ce manifeste reste en swift-tools 5.3 pour ne pas
+    // imposer une version d'outils à l'hôte, et les constantes `.vNN` n'y existent qu'au-delà
+    // de `.v14`. Mesuré (13/11/2026) : `.v15` fait échouer la compilation du manifeste —
+    // « 'v15' is unavailable » — et le build iOS entier avec.
+    .iOS("15.0"),
   ],
   products: [
     .library(

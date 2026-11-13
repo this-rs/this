@@ -30,6 +30,9 @@ func macos_device_call(
     case "captureRequest":  result = MacCameraMic.request(args)
 
     // ── Location (CoreLocation) ─────────────────────────────────────
+    // L'ÉTAT de la permission, sans rien demander : le même besoin que sur iOS, et la carte
+    // l'annonce désormais sur macOS aussi.
+    case "locationStatus":   result = MacLocation.state(args)
     case "locationRequest":  result = MacLocation.request(args)
     case "locationSample":   result = MacLocation.sample(args)
 

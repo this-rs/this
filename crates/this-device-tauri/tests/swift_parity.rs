@@ -106,7 +106,7 @@ fn every_native_selector_derives_a_capability() {
         }
         let args = if matches!(
             method.as_str(),
-            "status" | "captureStatus" | "captureRequest" | "locationRequest"
+            "status" | "captureStatus" | "captureRequest" | "locationRequest" | "locationStatus"
         ) {
             json!({ "capability": "camera" })
         } else {
@@ -273,4 +273,87 @@ fn every_family_file_is_anchored_even_if_nothing_references_its_methods() {
             "{nom} est listée dans famillesAncrees et ne correspond à aucun fichier"
         );
     }
+}
+
+/// **Le pont ne lit qu'un champ d'une réponse d'état : `state`.**
+///
+/// `perform` (branche `Request::Status`) appelle la méthode d'état de la capacité et lit
+/// `reply["state"]`. Un natif qui répond une autre forme — `faceIdStatus` répondait
+/// `{"kind":"face_id_biometry","biometry":…}` — n'est pas une erreur : c'est un `unsupported`
+/// silencieux. Mesuré le 13/11/2026 sur un iPhone 16 Pro Max, qui a un Face ID et se l'entendait
+/// dire « pas sur cet appareil ».
+///
+/// Trois formes sont acceptées pour une méthode d'état, et trois seulement :
+///
+/// 1. elle écrit la clé (`"state"`) ;
+/// 2. elle construit une réponse typée dont le champ s'appelle `state` — `Reply.status(state:)`,
+///    `PhotosReply.status(state:)`… : le nom de la clé est alors décidé par le type, une fois ;
+/// 3. elle délègue à un lecteur qui rend un `Reply` (le seul cas : `notificationsStatus`).
+///
+/// `status` lui-même est hors règle : il répond `Reply`, dont le champ est déjà `state`.
+#[test]
+fn every_status_method_answers_the_state_the_bridge_reads() {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("ios/Sources");
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        eprintln!("ios/Sources illisible : états non vérifiés");
+        return;
+    };
+    let mut sources = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("swift") {
+            continue;
+        }
+        if let Ok(text) = std::fs::read_to_string(&path) {
+            sources.push(text);
+        }
+    }
+
+    let mut fautives = Vec::new();
+    let mut verifiees = 0usize;
+    for capability in this_platform::capability::Capability::ALL {
+        let Some(method) = this_platform::device_bridge::status_method(capability) else {
+            continue;
+        };
+        if method == "status" {
+            continue;
+        }
+        let Some((body, file)) = method_body(&sources, method) else {
+            fautives.push(format!("{method} : corps introuvable dans ios/Sources"));
+            continue;
+        };
+        verifiees += 1;
+        let ecrit_la_cle = body.contains("state");
+        let delegue_a_un_reply =
+            body.contains("invoke.resolve($0)") && file.contains("Reply.status(state:");
+        if !(ecrit_la_cle || delegue_a_un_reply) {
+            fautives.push(format!(
+                "{method} ne rend pas `state` : le pont lira `unsupported` pour {capability:?}"
+            ));
+        }
+    }
+    assert!(
+        verifiees >= 10,
+        "seulement {verifiees} méthode(s) d'état trouvée(s) : l'extraction est cassée"
+    );
+    assert!(fautives.is_empty(), "\n  {}\n", fautives.join("\n  "));
+}
+
+/// Le corps d'un `@objc public func <nom>(…)` — jusqu'au `@objc public func` suivant — et le
+/// fichier qui le contient (une méthode peut déléguer à un lecteur défini plus haut dans le
+/// même fichier : c'est là qu'on voit si ce lecteur rend un `state`).
+fn method_body<'a>(sources: &'a [String], name: &str) -> Option<(String, &'a String)> {
+    let needle = format!("@objc public func {name}(");
+    for text in sources {
+        let Some(start) = text.find(&needle) else {
+            continue;
+        };
+        let rest = &text[start..];
+        let end = rest[1..]
+            .find("@objc public func ")
+            .map(|index| index + 1)
+            .unwrap_or(rest.len());
+        return Some((rest[..end].to_string(), text));
+    }
+    None
 }

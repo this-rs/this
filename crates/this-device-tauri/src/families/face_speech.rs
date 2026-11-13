@@ -58,11 +58,26 @@ pub enum SpeechRefusal {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum FaceSpeechReply {
-    FaceIdBiometry { biometry: Biometry },
-    FaceId { verdict: FaceIdVerdict },
-    SpeechStatus { state: PermissionState },
-    SpeechTranscript { text: String },
-    SpeechRefused { code: SpeechRefusal },
+    /// `state` est ce que lit le pont pour `Request::Status { FaceId }`. Il est arrivé APRÈS
+    /// `biometry` (mesuré le 13/11/2026 : sans lui, `faceIdStatus` se lisait toujours
+    /// `unsupported`) et reste facultatif pour qu'un natif plus ancien décode encore.
+    FaceIdBiometry {
+        #[serde(default)]
+        state: Option<this_platform::device_bridge::PermissionState>,
+        biometry: Biometry,
+    },
+    FaceId {
+        verdict: FaceIdVerdict,
+    },
+    SpeechStatus {
+        state: PermissionState,
+    },
+    SpeechTranscript {
+        text: String,
+    },
+    SpeechRefused {
+        code: SpeechRefusal,
+    },
 }
 
 /// An argument refused before the native side is touched.
@@ -133,7 +148,10 @@ mod tests {
             let reply: FaceSpeechReply = serde_json::from_str(&json).unwrap();
             assert_eq!(
                 reply,
-                FaceSpeechReply::FaceIdBiometry { biometry },
+                FaceSpeechReply::FaceIdBiometry {
+                    state: None,
+                    biometry
+                },
                 "{wire}"
             );
         }
@@ -297,5 +315,33 @@ mod tests {
         assert_eq!(check_seconds(61), Err(Invalid::Seconds));
         assert_eq!(check_seconds(SPEECH_SECONDS_MIN), Ok(SPEECH_SECONDS_MIN));
         assert_eq!(check_seconds(SPEECH_SECONDS_MAX), Ok(SPEECH_SECONDS_MAX));
+    }
+
+    /// Le champ que le pont lit. Sans lui, une capacité que l'appareil a se lit `unsupported` :
+    /// c'est exactement ce qui est arrivé à Face ID sur un iPhone 16 Pro Max (13/11/2026).
+    #[test]
+    fn a_biometry_answer_carries_the_state_the_bridge_reads() {
+        let reply: FaceSpeechReply = serde_json::from_str(
+            r#"{"kind":"face_id_biometry","state":"granted","biometry":"face_id"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            reply,
+            FaceSpeechReply::FaceIdBiometry {
+                state: Some(this_platform::device_bridge::PermissionState::Granted),
+                biometry: Biometry::FaceId,
+            }
+        );
+        let absent: FaceSpeechReply = serde_json::from_str(
+            r#"{"kind":"face_id_biometry","state":"unsupported","biometry":"none"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            absent,
+            FaceSpeechReply::FaceIdBiometry {
+                state: Some(this_platform::device_bridge::PermissionState::Unsupported),
+                biometry: Biometry::NoBiometry,
+            }
+        );
     }
 }
