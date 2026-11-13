@@ -85,6 +85,10 @@ func macos_device_call(
     case "notificationsRequest": result = MacNotifications.request()
     case "notificationsPost":    result = MacNotifications.post(args)
     case "notificationsCancel":  result = MacNotifications.cancel(args)
+    // Planifier et lire les attentes : UserNotifications offre les mêmes API que sur iOS
+    // (`UNTimeIntervalNotificationTrigger`, `getPendingNotificationRequests`).
+    case "notificationsSchedule": result = MacNotifications.schedule(args)
+    case "notificationsPending":  result = MacNotifications.pending()
 
     // ── Clipboard (AppKit / NSPasteboard) ───────────────────────────
     case "clipboardRead":   result = MacClipboard.read()
