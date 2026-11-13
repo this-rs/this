@@ -212,8 +212,17 @@ jobs:
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
+      # ÉPINGLÉ à 1.99.1, et ce n'est pas une préférence : avec rustc 1.100.0 (stable du
+      # 09/11/2026), `cargo-llvm-cov` — 0.9.1, la dernière — rend **0,00 % pour tous les
+      # fichiers**. Les tests tournent et passent, leurs profils ne sont pas collectés.
+      #   Mesuré le 13/11/2026 sur `this-platform` seul, mêmes tests :
+      #     1.97.1 → 96,35 %   1.98.1 → 96,35 %   1.99.1 → 96,35 %   1.100.0 → 0,00 %
+      # Conséquence en CI : `codecov/patch` refusait toute PR touchant un fichier mesuré,
+      # avec des chiffres qui ne mesuraient plus rien (le peu de couverture restant venait
+      # des binaires d'AUTRES crates qui lient le fichier). Désépingler dès que
+      # cargo-llvm-cov sait lire les profils de 1.100 — c'est la seule chose à faire.
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.99.1
         with:
           # Un test de cette suite compile un module en wasm32 pour vérifier ses exports
           # (`render` présent seulement si le module nomme une fonction de rendu). Sans
