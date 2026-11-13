@@ -5,7 +5,12 @@
 //! certificat Ed25519 auto-signé épinglé par la clé d'appareil (voir
 //! [`tls`]). Chaque message est cadré (longueur 4 octets big-endian puis octets),
 //! et la longueur annoncée est refusée avant lecture si elle dépasse le plafond.
+//!
+//! L'appairage par le réseau ([`appairer_vers`], [`ecouter_avec_appairage`]) passe
+//! par un ALPN dédié ([`ALPN_APPAIRAGE`]) sur le même port : une connexion
+//! d'appairage ne touche jamais la porte ni le flux des messages.
 
+mod appairage;
 mod cadrage;
 mod tls;
 
@@ -15,16 +20,23 @@ use std::time::Duration;
 
 use ed25519_dalek::VerifyingKey;
 use serde::{Deserialize, Serialize};
-use this_vfs::layout::AnchorKeyState;
+use this_vfs::layout::{AnchorKeyRole, AnchorKeyState};
 use tokio::sync::{Mutex, Notify, mpsc};
 
 use crate::{DeviceId, Gate, Limits, Message, Peers, Raison, Surveillance, Verdict};
 
+pub use appairage::{
+    AppairageEnCours, CAPACITE_DEMANDES, DELAI_APPAIRAGE, ENGAGEMENT_DOMAIN, appairer_vers,
+};
 pub use cadrage::CadrageError;
 pub use tls::{Epingle, Identite};
 
 /// Protocole d'application négocié en ALPN : empêche la confusion de protocole.
 pub const ALPN: &[u8] = b"this-mesh/1";
+
+/// ALPN de l'appairage : distinct de [`ALPN`], négocié sur le même port. Le
+/// serveur aiguille sur l'ALPN négocié ; seul le client d'appairage l'offre.
+pub const ALPN_APPAIRAGE: &[u8] = b"this-mesh-pair/1";
 
 /// Plafond du verdict renvoyé au client (petit objet JSON, jamais un message).
 const ACK_CEILING: usize = 4096;
@@ -84,10 +96,48 @@ pub async fn ecouter(
     peers: Peers,
     limits: Limits,
 ) -> Result<Flux, TransportError> {
+    ecouter_interne(adresse, identite, peers, limits, None).await
+}
+
+/// Comme [`ecouter`], et accepte en plus les demandes d'appairage (ALPN
+/// [`ALPN_APPAIRAGE`]) sur le même port.
+///
+/// Chaque demande dont l'engagement-révélation a abouti remonte sur le récepteur
+/// comme un [`AppairageEnCours`] (code affiché, décision locale attendue). Le
+/// récepteur est borné à [`CAPACITE_DEMANDES`] : une demande qui ne tient pas est
+/// fermée aussitôt, jamais mise en file. `role_par_defaut` est le rôle porté par
+/// l'[`crate::Admission`] rendue (l'appelant peut le changer avant de l'inscrire) ;
+/// `delai` borne chaque appairage de bout en bout.
+///
+/// Une clé **révoquée** qui demande l'appairage est fermée d'office, sans remonter.
+/// Une clé **active** peut se ré-appairer : l'admission reprend son identifiant et
+/// l'inscription met à jour son rôle.
+pub async fn ecouter_avec_appairage(
+    adresse: SocketAddr,
+    identite: &Identite,
+    peers: Peers,
+    limits: Limits,
+    role_par_defaut: AnchorKeyRole,
+    delai: Duration,
+) -> Result<(Flux, mpsc::Receiver<AppairageEnCours>), TransportError> {
+    let (tx, rx) = mpsc::channel(CAPACITE_DEMANDES);
+    let repondeur =
+        appairage::Repondeur::nouveau(identite, peers.clone(), role_par_defaut, delai, tx)?;
+    let flux = ecouter_interne(adresse, identite, peers, limits, Some(Arc::new(repondeur))).await?;
+    Ok((flux, rx))
+}
+
+async fn ecouter_interne(
+    adresse: SocketAddr,
+    identite: &Identite,
+    peers: Peers,
+    limits: Limits,
+    repondeur: Option<Arc<appairage::Repondeur>>,
+) -> Result<Flux, TransportError> {
     let ceiling = limits.ceiling();
     let gate = Arc::new(Mutex::new(Gate::new(peers, limits)));
 
-    let server_config = tls::quic_server(tls::config_serveur(identite)?)?;
+    let server_config = tls::quic_server(tls::config_serveur(identite, repondeur.is_some())?)?;
     let endpoint = quinn::Endpoint::server(server_config, adresse)
         .map_err(|e| TransportError::Connexion(e.to_string()))?;
     let local = endpoint
@@ -102,8 +152,23 @@ pub async fn ecouter(
         while let Some(incoming) = accept_endpoint.accept().await {
             let gate = accept_gate.clone();
             let tx = accept_tx.clone();
+            let repondeur = repondeur.clone();
             tokio::spawn(async move {
-                if let Err(e) = gerer_connexion(incoming, gate, tx, ceiling).await {
+                let Ok(connection) = incoming.await else {
+                    return;
+                };
+                // Aiguillage par l'ALPN négocié, jamais par un message : une
+                // connexion d'appairage ne voit ni la porte ni le flux.
+                if alpn_negocie(&connection).as_deref() == Some(ALPN_APPAIRAGE) {
+                    match repondeur {
+                        Some(r) => {
+                            let _ = appairage::repondre(connection, &r).await;
+                        }
+                        None => connection.close(quinn::VarInt::from_u32(6), b"appairage ferme"),
+                    }
+                    return;
+                }
+                if let Err(e) = gerer_connexion(connection, gate, tx, ceiling).await {
                     // La raison d'un refus est déjà rendue au flux (et au client) ;
                     // ici on ne garde que la trace de la fermeture.
                     let _ = e;
@@ -156,15 +221,11 @@ pub async fn envoyer(
 /// Gère une connexion : authentifie le pair par sa clé épinglée, contrôle la
 /// révocation à l'acceptation, puis admet chaque message cadré.
 async fn gerer_connexion(
-    incoming: quinn::Incoming,
+    connection: quinn::Connection,
     gate: Arc<Mutex<Gate>>,
     tx: mpsc::UnboundedSender<(DeviceId, Verdict)>,
     ceiling: usize,
 ) -> Result<(), TransportError> {
-    let connection = incoming
-        .await
-        .map_err(|e| TransportError::Connexion(e.to_string()))?;
-
     // 1. Identité authentifiée par le canal : la clé publique du certificat client.
     let cle = cle_du_pair(&connection)?;
     let vk = VerifyingKey::from_bytes(&cle).map_err(|e| TransportError::Identite(e.to_string()))?;
@@ -298,6 +359,15 @@ fn de_annonce(octets: &[u8]) -> String {
     serde_json::from_slice::<Entete<'_>>(octets)
         .map(|e| e.de.to_owned())
         .unwrap_or_default()
+}
+
+/// L'ALPN négocié par la poignée de main de `connection`, s'il y en a un.
+fn alpn_negocie(connection: &quinn::Connection) -> Option<Vec<u8>> {
+    connection
+        .handshake_data()?
+        .downcast::<quinn::crypto::rustls::HandshakeData>()
+        .ok()?
+        .protocol
 }
 
 /// La clé publique Ed25519 authentifiée par le canal pour ce pair.

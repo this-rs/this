@@ -29,6 +29,19 @@ impl DeviceId {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+
+    /// L'identifiant dérivé d'une clé publique : `device-` suivi des 4 premiers
+    /// octets de la clé en hexadécimal minuscule. C'est la dérivation que
+    /// l'application applique déjà (`id_maillage`) ; elle sert au transport à
+    /// nommer un pair qu'il ne connaît encore que par sa clé (appairage). Reste
+    /// une étiquette : la confiance vient de la clé enregistrée, pas de ce nom.
+    pub fn de_cle(cle: &VerifyingKey) -> Self {
+        let mut id = String::from("device-");
+        for octet in &cle.as_bytes()[..4] {
+            id.push_str(&format!("{octet:02x}"));
+        }
+        Self(id)
+    }
 }
 
 impl fmt::Display for DeviceId {

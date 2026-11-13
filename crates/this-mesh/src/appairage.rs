@@ -160,8 +160,10 @@ pub struct Admission {
 }
 
 impl Admission {
-    /// Écrit le pair au registre, `Active`, au moment présent.
-    pub fn inscrire(&self, peers: &mut Peers) {
+    /// Écrit le pair au registre, `Active`, au moment présent. Le registre est un
+    /// handle partagé ([`Peers::admit`] prend `&self`) : l'inscription est vue
+    /// aussitôt par tous ses clones (listener, porte).
+    pub fn inscrire(&self, peers: &Peers) {
         peers.admit(&self.id, self.key, self.role, Utc::now());
     }
 }
@@ -308,7 +310,7 @@ mod tests {
 
     #[test]
     fn f_deux_confirmations_inscrivent_le_pair() {
-        let mut peers = Peers::new();
+        let peers = Peers::new();
         let id = dev("device-aaaaaaaa");
         let mut sas_attendu =
             Rencontre::nouvelle(key(1), id.clone(), key(2), b"nonce".to_vec()).afficher();
@@ -319,7 +321,7 @@ mod tests {
         let admission = sas_attendu.appairer().unwrap();
         assert_eq!(admission.id, id);
         assert_eq!(admission.role, AnchorKeyRole::Shared);
-        admission.inscrire(&mut peers);
+        admission.inscrire(&peers);
         assert_eq!(peers.len(), 1);
         assert_eq!(peers.state(&id), Some(AnchorKeyState::Active));
         assert_eq!(peers.role(&id), Some(AnchorKeyRole::Shared));
