@@ -132,7 +132,14 @@ impl Epingle {
 /// `identite`, exige un certificat client et n'accepte que des clés Ed25519
 /// bien formées. La décision « clé connue / révoquée » revient à la
 /// [`crate::Gate`] (source unique), pas au vérificateur TLS.
-pub(crate) fn config_serveur(identite: &Identite) -> Result<ServerConfig, TransportError> {
+///
+/// Avec `appairage`, le serveur négocie aussi l'ALPN d'appairage
+/// ([`crate::transport::ALPN_APPAIRAGE`]) sur le même port ; l'aiguillage se fait
+/// ensuite sur l'ALPN négocié, jamais sur le contenu d'un message.
+pub(crate) fn config_serveur(
+    identite: &Identite,
+    appairage: bool,
+) -> Result<ServerConfig, TransportError> {
     let mut cfg = ServerConfig::builder_with_provider(identite.provider())
         .with_protocol_versions(&[&rustls::version::TLS13])
         .map_err(|e| TransportError::Identite(e.to_string()))?
@@ -142,6 +149,10 @@ pub(crate) fn config_serveur(identite: &Identite) -> Result<ServerConfig, Transp
         .with_single_cert(vec![identite.cert()], identite.key())
         .map_err(|e| TransportError::Identite(e.to_string()))?;
     cfg.alpn_protocols = vec![crate::transport::ALPN.to_vec()];
+    if appairage {
+        cfg.alpn_protocols
+            .push(crate::transport::ALPN_APPAIRAGE.to_vec());
+    }
     Ok(cfg)
 }
 
@@ -163,6 +174,47 @@ pub(crate) fn config_client(
         .map_err(|e| TransportError::Identite(e.to_string()))?;
     cfg.alpn_protocols = vec![crate::transport::ALPN.to_vec()];
     Ok(cfg)
+}
+
+/// Construit la configuration TLS du **client en mode appairage** : la clé du
+/// serveur n'est pas encore connue, donc rien n'est épinglé ; tout certificat
+/// Ed25519 bien formé est accepté et la signature TLS 1.3 de la poignée de main
+/// est vérifiée avec sa clé (preuve de détention de la clé privée). La clé ainsi
+/// obtenue n'est qu'une **candidate** : elle n'entre au registre qu'après le SAS
+/// et les deux confirmations.
+///
+/// # Pourquoi ce vérificateur ne peut pas servir à `this-mesh/1`
+///
+/// [`VerifierAppairage`] est privé à ce module et n'est construit qu'ici, et
+/// cette fonction fixe l'ALPN à la **seule** valeur d'appairage. rustls refuse
+/// côté client un ALPN choisi par le serveur qui n'a pas été offert
+/// (`SelectedUnofferedApplicationProtocol`) et, en QUIC, une poignée de main
+/// sans ALPN (`NoApplicationProtocol`) : une connexion bâtie sur cette
+/// configuration ne peut donc aboutir qu'en `this-mesh-pair/1`. Le client
+/// normal ([`config_client`], utilisé par `envoyer`) garde son épinglage.
+pub(crate) fn config_client_appairage(identite: &Identite) -> Result<ClientConfig, TransportError> {
+    let mut cfg = ClientConfig::builder_with_provider(identite.provider())
+        .with_protocol_versions(&[&rustls::version::TLS13])
+        .map_err(|e| TransportError::Identite(e.to_string()))?
+        .dangerous()
+        .with_custom_certificate_verifier(Arc::new(VerifierAppairage {
+            provider: identite.provider(),
+        }))
+        .with_client_auth_cert(vec![identite.cert()], identite.key())
+        .map_err(|e| TransportError::Identite(e.to_string()))?;
+    cfg.alpn_protocols = vec![crate::transport::ALPN_APPAIRAGE.to_vec()];
+    Ok(cfg)
+}
+
+/// 32 octets aléatoires tirés du générateur du fournisseur cryptographique (ring) :
+/// aucune dépendance ajoutée, le même générateur que la poignée de main TLS.
+pub(crate) fn aleatoire_32(provider: &CryptoProvider) -> Result<[u8; 32], TransportError> {
+    let mut octets = [0u8; 32];
+    provider
+        .secure_random
+        .fill(&mut octets)
+        .map_err(|_| TransportError::Identite("générateur aléatoire indisponible".into()))?;
+    Ok(octets)
 }
 
 /// Vérificateur côté client : n'accepte que le certificat dont la clé publique
@@ -191,6 +243,60 @@ impl ServerCertVerifier for VerifierServeur {
                 "épinglage : la clé du certificat ne correspond pas à l'empreinte attendue".into(),
             ))
         }
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        _message: &[u8],
+        _cert: &CertificateDer<'_>,
+        _dss: &DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, Error> {
+        Err(Error::General("TLS 1.2 est désactivé".into()))
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, Error> {
+        verify_tls13_signature(
+            message,
+            cert,
+            dss,
+            &self.provider.signature_verification_algorithms,
+        )
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        self.provider
+            .signature_verification_algorithms
+            .supported_schemes()
+    }
+}
+
+/// Vérificateur côté client **en mode appairage** : accepte tout certificat
+/// dont la SPKI est une clé Ed25519 bien formée (même parseur, OID exigé), sans
+/// épingler — la clé n'est pas encore connue. La signature TLS 1.3 de la poignée
+/// de main reste vérifiée avec cette clé, comme dans [`VerifierServeur`]. Voir
+/// [`config_client_appairage`] pour la restriction à l'ALPN d'appairage.
+#[derive(Debug)]
+struct VerifierAppairage {
+    provider: Arc<CryptoProvider>,
+}
+
+impl ServerCertVerifier for VerifierAppairage {
+    fn verify_server_cert(
+        &self,
+        end_entity: &CertificateDer<'_>,
+        _intermediates: &[CertificateDer<'_>],
+        _server_name: &rustls::pki_types::ServerName<'_>,
+        _ocsp_response: &[u8],
+        _now: rustls::pki_types::UnixTime,
+    ) -> Result<rustls::client::danger::ServerCertVerified, Error> {
+        cle_ed25519_du_cert(end_entity.as_ref())
+            .map_err(|e| Error::General(format!("appairage : {e}")))?;
+        Ok(rustls::client::danger::ServerCertVerified::assertion())
     }
 
     fn verify_tls12_signature(

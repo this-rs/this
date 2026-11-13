@@ -92,9 +92,32 @@ impl Gate {
     }
 
     /// Ordre : taille → enveloppe → `de` = expéditeur → clé connue/révoquée → type
-    /// connu → signature → rejeu. L'idempotence ne s'applique qu'à un message
-    /// authentique : sinon un inconnu pourrait « brûler » un `id`.
+    /// connu → signature → rejeu → fraîcheur. L'idempotence ne s'applique qu'à un
+    /// message authentique : sinon un inconnu pourrait « brûler » un `id`.
+    ///
+    /// La fraîcheur ([`Limits::fraicheur_max_ms`]) est contrôlée contre l'heure
+    /// système, lue seulement quand elle est activée.
     pub fn admettre(&mut self, expediteur: &DeviceId, octets: &[u8]) -> Verdict {
+        let maintenant_ms = match self.limits.fraicheur_max_ms {
+            Some(_) => u64::try_from(chrono::Utc::now().timestamp_millis()).unwrap_or(0),
+            None => 0,
+        };
+        self.admettre_a(expediteur, octets, maintenant_ms)
+    }
+
+    /// Comme [`Gate::admettre`], l'heure locale (millisecondes depuis l'epoch)
+    /// étant fournie par l'appelant. `maintenant_ms` n'est lu que si
+    /// [`Limits::fraicheur_max_ms`] vaut `Some`.
+    ///
+    /// Fraîcheur : un message déjà vu reste `DejaVu` (acquitté, pas rejoué) ; un
+    /// message **nouveau** dont `|horloge − maintenant_ms| > fraicheur_max_ms` est
+    /// refusé sans entrer dans la mémoire anti-rejeu.
+    pub fn admettre_a(
+        &mut self,
+        expediteur: &DeviceId,
+        octets: &[u8],
+        maintenant_ms: u64,
+    ) -> Verdict {
         // 1. Taille, avant tout décodage : plafond global, puis plafond du type.
         let ceiling = self.limits.ceiling();
         if octets.len() > ceiling {
@@ -170,6 +193,16 @@ impl Gate {
         if self.seen.contains(&wire.id) {
             return Verdict::DejaVu(wire.id);
         }
+        // 8. Fraîcheur : `Raison` est énumérée de façon exhaustive par ses
+        // utilisateurs ; on réutilise `Illisible` avec un texte qui dit la cause.
+        if let Some(f) = self.limits.fraicheur_max_ms {
+            let ecart = wire.horloge.abs_diff(maintenant_ms);
+            if ecart > f {
+                return Verdict::Refuse(Raison::Illisible(format!(
+                    "horloge hors de la fenêtre de fraîcheur : écart {ecart} ms > {f} ms"
+                )));
+            }
+        }
         if self.order.len() >= self.limits.seen_ids
             && let Some(old) = self.order.pop_front()
         {
@@ -207,7 +240,7 @@ mod tests {
     fn setup() -> (Gate, SigningKey, DeviceId, DeviceId) {
         let (alice, bob) = (dev("device-aaaaaaaa"), dev("device-bbbbbbbb"));
         let k = key(1);
-        let mut peers = Peers::new();
+        let peers = Peers::new();
         peers.admit(&alice, k.verifying_key(), AnchorKeyRole::Shared, Utc::now());
         (Gate::new(peers, Limits::default()), k, alice, bob)
     }
@@ -235,7 +268,7 @@ mod tests {
     fn b_resigned_under_another_de_is_refused() {
         let (mut g, k, alice, bob) = setup();
         // bob (clé connue, mais l'attaquant n'a que la signature d'alice) : on change `de`.
-        let mut peers = g.peers().clone();
+        let peers = g.peers().clone();
         peers.admit(
             &bob,
             key(2).verifying_key(),
@@ -383,6 +416,132 @@ mod tests {
             back.role(&dev("device-eeeeeeee")),
             Some(AnchorKeyRole::Ownership)
         );
+    }
+
+    #[test]
+    fn service_appel_a_son_plafond_d_un_mio() {
+        let l = Limits::default();
+        assert_eq!(l.max_for(MessageType::ServiceAppel), 1024 * 1024);
+        assert_eq!(l.max_for(MessageType::ServiceReponse), 1024 * 1024);
+        assert_eq!(l.ceiling(), 1024 * 1024);
+        let (mut g, k, alice, bob) = setup();
+        let charge = json!({"x": "y".repeat(512 * 1024)});
+        let gros = |kind, id| {
+            Message::signed(
+                &k,
+                Uuid::from_u128(id),
+                alice.clone(),
+                bob.clone(),
+                kind,
+                1,
+                charge.clone(),
+            )
+            .unwrap()
+        };
+        // 512 Kio : admis en `service.appel`, refusé en `espace.op` (64 Kio).
+        let appel = gros(MessageType::ServiceAppel, 1);
+        assert_eq!(g.admettre(&alice, &appel.to_bytes()), Verdict::Admis(appel));
+        assert!(matches!(
+            g.admettre(&alice, &gros(MessageType::EspaceOp, 2).to_bytes()),
+            Verdict::Refuse(Raison::TropGros { .. })
+        ));
+    }
+
+    fn msg_a(k: &SigningKey, de: &DeviceId, a: &DeviceId, id: u128, horloge: u64) -> Message {
+        Message::signed(
+            k,
+            Uuid::from_u128(id),
+            de.clone(),
+            a.clone(),
+            MessageType::EspaceOp,
+            horloge,
+            json!({"liste":"courses","op":"add","n":3}),
+        )
+        .unwrap()
+    }
+
+    fn porte_fraiche(f: Option<u64>) -> (Gate, SigningKey, DeviceId, DeviceId) {
+        let (g, k, alice, bob) = setup();
+        let limits = Limits {
+            fraicheur_max_ms: f,
+            ..Limits::default()
+        };
+        (Gate::new(g.peers().clone(), limits), k, alice, bob)
+    }
+
+    const MAINTENANT: u64 = 1_800_000_000_000;
+    const DIX_MIN: u64 = 600_000;
+
+    fn est_hors_fenetre(v: &Verdict) -> bool {
+        matches!(v, Verdict::Refuse(Raison::Illisible(t)) if t.contains("fraîcheur"))
+    }
+
+    #[test]
+    fn fraicheur_message_trop_vieux_refuse() {
+        let (mut g, k, alice, bob) = porte_fraiche(Some(DIX_MIN));
+        let m = msg_a(&k, &alice, &bob, 1, MAINTENANT - DIX_MIN - 1);
+        let v = g.admettre_a(&alice, &m.to_bytes(), MAINTENANT);
+        assert!(est_hors_fenetre(&v), "{v:?}");
+        // Refusé : n'entre pas dans la mémoire anti-rejeu.
+        assert!(g.seen.is_empty());
+        // Pile à la limite : admis.
+        let m = msg_a(&k, &alice, &bob, 2, MAINTENANT - DIX_MIN);
+        assert_eq!(
+            g.admettre_a(&alice, &m.to_bytes(), MAINTENANT),
+            Verdict::Admis(m)
+        );
+    }
+
+    #[test]
+    fn fraicheur_message_trop_dans_le_futur_refuse() {
+        let (mut g, k, alice, bob) = porte_fraiche(Some(DIX_MIN));
+        let m = msg_a(&k, &alice, &bob, 1, MAINTENANT + DIX_MIN + 1);
+        let v = g.admettre_a(&alice, &m.to_bytes(), MAINTENANT);
+        assert!(est_hors_fenetre(&v), "{v:?}");
+        let m = msg_a(&k, &alice, &bob, 2, MAINTENANT + DIX_MIN);
+        assert_eq!(
+            g.admettre_a(&alice, &m.to_bytes(), MAINTENANT),
+            Verdict::Admis(m)
+        );
+    }
+
+    #[test]
+    fn fraicheur_message_frais_passe_et_rejeu_apres_redemarrage_refuse() {
+        let (mut g, k, alice, bob) = porte_fraiche(Some(DIX_MIN));
+        let m = msg_a(&k, &alice, &bob, 1, MAINTENANT - 1_000);
+        assert_eq!(
+            g.admettre_a(&alice, &m.to_bytes(), MAINTENANT),
+            Verdict::Admis(m.clone())
+        );
+        // Déjà vu dans la fenêtre : acquitté, pas rejoué.
+        assert_eq!(
+            g.admettre_a(&alice, &m.to_bytes(), MAINTENANT + 1),
+            Verdict::DejaVu(m.id)
+        );
+        // « Redémarrage » : porte neuve, mémoire vide. Hors fenêtre, le message
+        // capturé est refusé.
+        let (mut neuve, ..) = porte_fraiche(Some(DIX_MIN));
+        let v = neuve.admettre_a(&alice, &m.to_bytes(), MAINTENANT + DIX_MIN);
+        assert!(est_hors_fenetre(&v), "{v:?}");
+        // Par l'API qui lit l'heure système : un message daté de maintenant passe.
+        let now = u64::try_from(Utc::now().timestamp_millis()).unwrap();
+        let m = msg_a(&k, &alice, &bob, 3, now);
+        assert_eq!(neuve.admettre(&alice, &m.to_bytes()), Verdict::Admis(m));
+    }
+
+    #[test]
+    fn fraicheur_none_garde_l_ancien_comportement() {
+        let (mut g, k, alice, bob) = porte_fraiche(None);
+        assert_eq!(Limits::default().fraicheur_max_ms, None);
+        // Horloge 1 (comme les autres tests) et horloge maximale : admis.
+        for (n, h) in [(1u128, 1u64), (2, u64::MAX)] {
+            let m = msg_a(&k, &alice, &bob, n, h);
+            assert_eq!(g.admettre(&alice, &m.to_bytes()), Verdict::Admis(m.clone()));
+            assert_eq!(
+                g.admettre_a(&alice, &m.to_bytes(), MAINTENANT),
+                Verdict::DejaVu(m.id)
+            );
+        }
     }
 
     #[test]

@@ -825,7 +825,8 @@ contract on the phone it runs on and writes `Documents/banc.json` — see
 
 ### 🏗️ Architecture
 - **[Modules & harness](docs/modules-et-harnais.md)** - 🆕 what a module can extend today (pages, views, tools…) and what it cannot
-- **[Device bridge](docs/appareil.md)** - 🆕 76 device methods (camera, Bluetooth, contacts, NFC…) behind one consent gate, and the card the agent reads
+- **[Device bridge](docs/appareil.md)** - 🆕 79 device methods (camera, Bluetooth, contacts, NFC…) behind one consent gate, and the card the agent reads
+- **[Device mesh](docs/maillage.md)** - 🆕 devices that talk without a server: identity by key, pairing by short code, signed messages, service calls, rights
 - **[Architecture](docs/architecture/ARCHITECTURE.md)** - Technical deep dive
 - **[ServerBuilder](docs/architecture/SERVER_BUILDER_IMPLEMENTATION.md)** - Auto-routing details
 - **[GraphQL Implementation](docs/architecture/GRAPHQL_IMPLEMENTATION.md)** - 🆕 Custom executor design

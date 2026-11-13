@@ -29,6 +29,19 @@ impl DeviceId {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+
+    /// L'identifiant dérivé d'une clé publique : `device-` suivi des 4 premiers
+    /// octets de la clé en hexadécimal minuscule. C'est la dérivation que
+    /// l'application applique déjà (`id_maillage`) ; elle sert au transport à
+    /// nommer un pair qu'il ne connaît encore que par sa clé (appairage). Reste
+    /// une étiquette : la confiance vient de la clé enregistrée, pas de ce nom.
+    pub fn de_cle(cle: &VerifyingKey) -> Self {
+        let mut id = String::from("device-");
+        for octet in &cle.as_bytes()[..4] {
+            id.push_str(&format!("{octet:02x}"));
+        }
+        Self(id)
+    }
 }
 
 impl fmt::Display for DeviceId {
@@ -47,10 +60,15 @@ pub enum MessageType {
     EspaceSync,
     AgentPropose,
     AgentRepond,
+    /// Appel d'un service du pair : le pair répond dans l'accusé (voir
+    /// `transport::appeler`).
+    ServiceAppel,
+    /// Réponse d'un service, quand elle voyage comme un message à part entière.
+    ServiceReponse,
 }
 
 impl MessageType {
-    pub const ALL: [MessageType; 7] = [
+    pub const ALL: [MessageType; 9] = [
         Self::AppairageSas,
         Self::GrantDemande,
         Self::GrantReponse,
@@ -58,6 +76,8 @@ impl MessageType {
         Self::EspaceSync,
         Self::AgentPropose,
         Self::AgentRepond,
+        Self::ServiceAppel,
+        Self::ServiceReponse,
     ];
     /// Nom sur le fil.
     pub fn wire(self) -> &'static str {
@@ -69,6 +89,8 @@ impl MessageType {
             Self::EspaceSync => "espace.sync",
             Self::AgentPropose => "agent.propose",
             Self::AgentRepond => "agent.repond",
+            Self::ServiceAppel => "service.appel",
+            Self::ServiceReponse => "service.reponse",
         }
     }
     /// `None` pour un type inconnu.

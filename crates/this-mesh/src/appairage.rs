@@ -6,10 +6,11 @@
 //! ET la confirmation du pair sont acquises. Une confirmation seule ne prouve rien :
 //! c'est précisément ce qu'un homme du milieu ne peut pas produire.
 
-use crate::{DeviceId, Peers};
+use crate::{DeviceId, PeerError, Peers};
 use chrono::Utc;
 use ed25519_dalek::VerifyingKey;
 use hmac::{Hmac, Mac};
+use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use this_vfs::layout::AnchorKeyRole;
 
@@ -148,10 +149,53 @@ impl SasAttendu {
     }
 }
 
+/// Le lien entre deux appareils appairés, choisi **des deux côtés**.
+///
+/// - [`Lien::Moi`] : deux appareils de la même personne (rôle `Ownership`) ;
+/// - [`Lien::Autre`] : l'appareil de quelqu'un d'autre (rôle `Shared`).
+///
+/// Sur le fil : `"moi"` / `"autre"`. Le lien final ne vaut `Moi` que si les DEUX
+/// côtés ont dit `moi` ([`Lien::combiner`]) : un côté seul ne peut jamais
+/// s'octroyer la propriété. Par défaut (champ absent, pair plus ancien) : `Autre`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Lien {
+    /// Mes deux appareils.
+    Moi,
+    /// L'appareil de quelqu'un d'autre.
+    #[default]
+    Autre,
+}
+
+impl Lien {
+    /// Le lien final d'un appairage : `Moi` si et seulement si les deux côtés ont
+    /// dit `Moi`, sinon `Autre`. Symétrique.
+    pub fn combiner(self, autre: Lien) -> Lien {
+        if self == Lien::Moi && autre == Lien::Moi {
+            Lien::Moi
+        } else {
+            Lien::Autre
+        }
+    }
+
+    /// Le rôle inscrit au registre : `Moi` → `Ownership`, `Autre` → `Shared`.
+    pub fn role(self) -> AnchorKeyRole {
+        match self {
+            Lien::Moi => AnchorKeyRole::Ownership,
+            Lien::Autre => AnchorKeyRole::Shared,
+        }
+    }
+}
+
 /// L'inscription produite par un appairage complet, **avant toute écriture**.
 ///
 /// Cette valeur ne touche pas le registre ; [`Admission::inscrire`] est le seul point
 /// qui l'écrit, et elle n'existe qu'une fois les deux confirmations acquises.
+///
+/// Le lien ([`Lien`]) n'est pas un champ à part : il est porté par `role`, qui en
+/// découle exactement (`Moi` ⇔ `Ownership`) — voir [`Admission::lien`]. Ainsi un
+/// appelant qui construit `Admission { id, key, role }` reste valide, et le lien
+/// ne peut jamais contredire le rôle inscrit.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Admission {
     pub id: DeviceId,
@@ -160,9 +204,40 @@ pub struct Admission {
 }
 
 impl Admission {
-    /// Écrit le pair au registre, `Active`, au moment présent.
-    pub fn inscrire(&self, peers: &mut Peers) {
+    /// Le lien de cet appairage, lu sur le rôle : `Ownership` → [`Lien::Moi`],
+    /// tout autre rôle → [`Lien::Autre`].
+    pub fn lien(&self) -> Lien {
+        match self.role {
+            AnchorKeyRole::Ownership => Lien::Moi,
+            _ => Lien::Autre,
+        }
+    }
+
+    /// Fixe le lien : le rôle en découle ([`Lien::role`]).
+    pub fn avec_lien(mut self, lien: Lien) -> Self {
+        self.role = lien.role();
+        self
+    }
+
+    /// Écrit le pair au registre, `Active`, au moment présent. Le registre est un
+    /// handle partagé ([`Peers::admit`] prend `&self`) : l'inscription est vue
+    /// aussitôt par tous ses clones (listener, porte).
+    ///
+    /// **Préférer [`Admission::inscrire_verifie`]**, qui rend le refus. Celle-ci
+    /// n'écrase jamais une autre clé : si `id` porte déjà une clé différente
+    /// (collision d'identifiant), elle n'écrit **rien** et le refus n'est visible
+    /// que dans [`Peers::ecrasements_refuses`] — l'appelant croirait à tort que
+    /// le pair est inscrit.
+    pub fn inscrire(&self, peers: &Peers) {
         peers.admit(&self.id, self.key, self.role, Utc::now());
+    }
+
+    /// Écrit le pair au registre comme [`Admission::inscrire`], mais rend
+    /// [`PeerError::IdentifiantPris`] si `id` porte déjà une **autre** clé
+    /// (active ou révoquée) ; le registre reste alors intact. Réinscrire la même
+    /// clé (ré-appairage) réussit et met à jour le rôle.
+    pub fn inscrire_verifie(&self, peers: &Peers) -> Result<(), PeerError> {
+        peers.try_admit(&self.id, self.key, self.role, Utc::now())
     }
 }
 
@@ -308,7 +383,7 @@ mod tests {
 
     #[test]
     fn f_deux_confirmations_inscrivent_le_pair() {
-        let mut peers = Peers::new();
+        let peers = Peers::new();
         let id = dev("device-aaaaaaaa");
         let mut sas_attendu =
             Rencontre::nouvelle(key(1), id.clone(), key(2), b"nonce".to_vec()).afficher();
@@ -319,10 +394,63 @@ mod tests {
         let admission = sas_attendu.appairer().unwrap();
         assert_eq!(admission.id, id);
         assert_eq!(admission.role, AnchorKeyRole::Shared);
-        admission.inscrire(&mut peers);
+        admission.inscrire(&peers);
         assert_eq!(peers.len(), 1);
         assert_eq!(peers.state(&id), Some(AnchorKeyState::Active));
         assert_eq!(peers.role(&id), Some(AnchorKeyRole::Shared));
+    }
+
+    // Collision d'identifiant : une autre clé sous l'identifiant déjà inscrit.
+    #[test]
+    fn inscrire_n_ecrase_jamais_une_autre_cle() {
+        let peers = Peers::new();
+        let id = dev("device-aaaaaaaa");
+        let lea = Admission {
+            id: id.clone(),
+            key: key(2),
+            role: AnchorKeyRole::Ownership,
+        };
+        lea.inscrire_verifie(&peers).unwrap();
+        let intrus = Admission {
+            id: id.clone(),
+            key: key(3),
+            role: AnchorKeyRole::Shared,
+        };
+        assert_eq!(
+            intrus.inscrire_verifie(&peers),
+            Err(PeerError::IdentifiantPris(id.to_string()))
+        );
+        intrus.inscrire(&peers);
+        assert_eq!(peers.id_de_cle(&key(2)), Some(id.clone()));
+        assert_eq!(peers.id_de_cle(&key(3)), None);
+        assert_eq!(peers.role(&id), Some(AnchorKeyRole::Ownership));
+        assert_eq!(peers.ecrasements_refuses(), vec![id.clone()]);
+
+        // La même clé, autre rôle : passe (ré-appairage).
+        let reappairage = lea.avec_lien(Lien::Autre);
+        reappairage.inscrire_verifie(&peers).unwrap();
+        assert_eq!(peers.role(&id), Some(AnchorKeyRole::Shared));
+    }
+
+    #[test]
+    fn lien_moi_seulement_si_les_deux_disent_moi() {
+        assert_eq!(Lien::Moi.combiner(Lien::Moi), Lien::Moi);
+        assert_eq!(Lien::Moi.combiner(Lien::Autre), Lien::Autre);
+        assert_eq!(Lien::Autre.combiner(Lien::Moi), Lien::Autre);
+        assert_eq!(Lien::Autre.combiner(Lien::Autre), Lien::Autre);
+        assert_eq!(Lien::default(), Lien::Autre);
+        assert_eq!(Lien::Moi.role(), AnchorKeyRole::Ownership);
+        assert_eq!(Lien::Autre.role(), AnchorKeyRole::Shared);
+        assert_eq!(serde_json::to_string(&Lien::Moi).unwrap(), r#""moi""#);
+        assert_eq!(serde_json::to_string(&Lien::Autre).unwrap(), r#""autre""#);
+        let a = Admission {
+            id: dev("device-aaaaaaaa"),
+            key: key(2),
+            role: AnchorKeyRole::Shared,
+        };
+        assert_eq!(a.lien(), Lien::Autre);
+        let a = a.avec_lien(Lien::Moi);
+        assert_eq!((a.lien(), a.role), (Lien::Moi, AnchorKeyRole::Ownership));
     }
 
     #[test]
