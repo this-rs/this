@@ -109,6 +109,9 @@ func macos_device_call(
     // ── Local Network (Network / NWBrowser) ─────────────────────────
     case "localNetworkStatus": result = MacLocalNetwork.status()
     case "localNetworkBrowse": result = MacLocalNetwork.browse(args)
+    case "localNetworkResolve": result = MacLocalNetwork.resolve(args)
+    case "localNetworkAdvertise": result = MacLocalNetwork.advertise(args)
+    case "localNetworkUnadvertise": result = MacLocalNetwork.unadvertise(args)
 
     // ── Live Activity (not available on macOS) ──────────────────────
     case "liveActivityStatus":

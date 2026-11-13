@@ -24,7 +24,15 @@ import Tauri
 enum LocalNetworkServiceTypes {
   /// The only service types a browse may name. Mirrors `SERVICE_TYPES` in
   /// families/local_network.rs: change both together, and both must match NSBonjourServices.
-  static let allowed: [String] = ["_http._tcp"]
+  static let allowed: [String] = ["_http._tcp", "_atelier._tcp"]
+
+  /// The only types an announcement may use: the Atelier's own, never `_http._tcp` (that would
+  /// pose as a web server). Mirrors `ADVERTISE_TYPES` in families/local_network.rs.
+  static let advertisable: [String] = ["_atelier._tcp"]
+
+  static func isAdvertisable(_ serviceType: String) -> Bool {
+    advertisable.contains(serviceType)
+  }
 
   static func isAllowed(_ serviceType: String) -> Bool {
     allowed.contains(serviceType)
@@ -302,6 +310,167 @@ extension ThisDevicePlugin {
       serviceType: args.serviceType,
       timeoutSeconds: Double(max(1_000, min(args.timeoutMs, 15_000))) / 1000
     )
+  }
+}
+
+// ---- Publier le service ----------------------------------------------------------------
+//
+// Un Atelier s'annonce sous `_atelier._tcp` avec un TXT de trois champs : `id`, `proto`, `role`.
+// Jamais d'adresse (le système publie l'hôte lui-même), jamais de nom de personne, jamais de
+// secret : les champs sont validés ici sur le même alphabet fermé que côté Rust
+// (`checked_advertise` dans families/local_network.rs), donc un appel natif direct ne peut pas
+// y glisser autre chose. Le port est celui du serveur que l'Atelier fait déjà tourner : on
+// annonce, on n'écoute pas. Une seule annonce à la fois par type ; une nouvelle remplace l'ancienne.
+
+private struct AdvertiseArgs: Decodable {
+  let serviceType: String
+  let port: Int
+  let id: String
+  let proto: String
+  let role: String
+  let name: String?
+
+  private enum CodingKeys: String, CodingKey {
+    case serviceType = "service_type"
+    case port, id, proto, role, name
+  }
+}
+
+private struct UnadvertiseArgs: Decodable {
+  let serviceType: String
+
+  private enum CodingKeys: String, CodingKey {
+    case serviceType = "service_type"
+  }
+}
+
+private struct AdvertisedReply: Encodable {
+  let kind = "advertised"
+  let name: String
+}
+
+private struct UnadvertisedReply: Encodable {
+  let kind = "unadvertised"
+}
+
+enum LocalNetworkTxt {
+  static let maxLen = 48
+
+  /// 1...48 caractères de `[A-Za-z0-9._-]` : rien de libre n'y tient (ni nom, ni espace, ni `:`).
+  static func isToken(_ value: String) -> Bool {
+    guard !value.isEmpty, value.utf8.count <= maxLen else { return false }
+    let ok = value.unicodeScalars.allSatisfy {
+      ($0.isASCII && CharacterSet.alphanumerics.contains($0)) || $0 == "." || $0 == "_" || $0 == "-"
+    }
+    if !ok { return false }
+    // Un littéral IPv4 (chiffres et trois points) n'est jamais un champ valide.
+    let ipv4 = value.allSatisfy { $0.isASCII && ($0.isNumber || $0 == ".") }
+      && value.filter { $0 == "." }.count == 3
+    return !ipv4
+  }
+}
+
+/// L'annonce en cours. `NetService` ne se retient pas lui-même : on la garde ici.
+final class LocalNetworkAdvert: NSObject, NetServiceDelegate {
+  private static var current: [String: LocalNetworkAdvert] = [:]
+
+  private let service: NetService
+  private var invoke: Invoke?
+
+  private init(service: NetService, invoke: Invoke) {
+    self.service = service
+    self.invoke = invoke
+    super.init()
+  }
+
+  static func run(
+    _ invoke: Invoke, serviceType: String, name: String, port: Int, txt: [String: Data]
+  ) {
+    current[serviceType]?.withdraw()
+    let service = NetService(domain: "local.", type: serviceType, name: name, port: Int32(port))
+    service.setTXTRecord(NetService.data(fromTXTRecord: txt))
+    let advert = LocalNetworkAdvert(service: service, invoke: invoke)
+    current[serviceType] = advert
+    service.delegate = advert
+    service.publish()
+  }
+
+  static func stop(serviceType: String) {
+    current[serviceType]?.withdraw()
+    current[serviceType] = nil
+  }
+
+  private func withdraw() {
+    service.stop()
+    service.delegate = nil
+  }
+
+  private func answer(_ reply: Encodable) {
+    guard let invoke = invoke else { return }
+    self.invoke = nil
+    DispatchQueue.main.async { invoke.resolve(reply) }
+  }
+
+  func netServiceDidPublish(_ sender: NetService) {
+    answer(AdvertisedReply(name: sender.name))
+  }
+
+  func netService(_ sender: NetService, didNotPublish errorDict: [String: NSNumber]) {
+    // NSNetServicesError : -72008 (NoAuth) quand le type n'est pas dans NSBonjourServices ou que
+    // la permission réseau local est refusée ; le reste est un réseau qui ne répond pas.
+    let code = errorDict[NetService.errorCode]?.intValue ?? 0
+    for (type, advert) in LocalNetworkAdvert.current where advert === self {
+      LocalNetworkAdvert.current[type] = nil
+    }
+    withdraw()
+    answer(Reply.error(code: code == -72008 ? "not_authorized" : "unavailable"))
+  }
+}
+
+extension ThisDevicePlugin {
+  /// Annonce cet Atelier sur le réseau local : `_atelier._tcp`, TXT `{id, proto, role}`.
+  /// Répond `advertised` (avec le nom publié) ou une erreur.
+  @objc public func localNetworkAdvertise(_ invoke: Invoke) {
+    guard let args = try? invoke.parseArgs(AdvertiseArgs.self) else {
+      invoke.resolve(Reply.error(code: "internal"))
+      return
+    }
+    guard LocalNetworkServiceTypes.isAdvertisable(args.serviceType) else {
+      invoke.resolve(Reply.error(code: "unsupported"))
+      return
+    }
+    guard (1...65535).contains(args.port),
+      [args.id, args.proto, args.role].allSatisfy(LocalNetworkTxt.isToken),
+      args.name.map(LocalNetworkTxt.isToken) ?? true
+    else {
+      invoke.resolve(Reply.error(code: "internal"))
+      return
+    }
+    let name = args.name ?? "Atelier-" + String(args.id.prefix(8))
+    LocalNetworkAdvert.run(
+      invoke,
+      serviceType: args.serviceType,
+      name: name,
+      port: args.port,
+      txt: [
+        "id": Data(args.id.utf8),
+        "proto": Data(args.proto.utf8),
+        "role": Data(args.role.utf8),
+      ])
+  }
+
+  /// Retire l'annonce. Idempotent : sans annonce en cours, répond quand même `unadvertised`.
+  @objc public func localNetworkUnadvertise(_ invoke: Invoke) {
+    guard let args = try? invoke.parseArgs(UnadvertiseArgs.self) else {
+      invoke.resolve(Reply.error(code: "internal"))
+      return
+    }
+    guard LocalNetworkServiceTypes.isAdvertisable(args.serviceType) else {
+      invoke.resolve(Reply.error(code: "unsupported"))
+      return
+    }
+    LocalNetworkAdvert.stop(serviceType: args.serviceType)
+    invoke.resolve(UnadvertisedReply())
   }
 }
 

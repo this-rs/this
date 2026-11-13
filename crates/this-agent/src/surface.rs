@@ -993,18 +993,26 @@ pub fn surface() -> Surface {
             Capability::new(
                 "device.local_network",
                 Tier::Shell,
-                "voir les services Bonjour du réseau local (_http._tcp)",
-                Some("localNetworkStatus / localNetworkBrowse"),
+                // Deux types de service : `_http._tcp` pour voir, `_atelier._tcp` pour être vu.
+                // S'annoncer est une écriture sur le réseau (le banc ne l'appelle pas), mais elle
+                // reste sous la même capacité : c'est le même réseau local, la même permission.
+                "voir les services Bonjour du réseau local, et s'annoncer sous _atelier._tcp",
+                Some(
+                    "localNetworkStatus / localNetworkBrowse / localNetworkAdvertise \
+                     / localNetworkUnadvertise",
+                ),
                 &[Ios, Ipados, Macos],
                 Status::Live,
             ),
-            // Résoudre un service en hôte et port : iOS seulement (le pont macOS ne l'a pas).
+            // Résoudre un service en hôte et port. Longtemps iOS seulement : le pont macOS ne
+            // l'avait pas, et la carte le disait. Il l'a depuis le 13/11/2026
+            // (`macos/Sources/dispatch.swift`), donc les deux plateformes le servent.
             Capability::new(
                 "device.local_network.resolve",
                 Tier::Shell,
                 "résoudre un service trouvé en hôte et port",
                 Some("localNetworkResolve"),
-                &[Ios, Ipados],
+                &[Ios, Ipados, Macos],
                 Status::Live,
             ),
             // ---- étage coquille : le matériel et le système PAS ENCORE LIVRÉS

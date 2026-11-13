@@ -237,6 +237,11 @@ pub const METHODS: &[&str] = &[
     "localNetworkBrowse",
     // Résoudre un service trouvé par un browse : sans ça, un nom ne dit pas où se connecter.
     "localNetworkResolve",
+    // S'annoncer : une découverte qui ne publie rien ne peut pas être trouvée. Deux méthodes,
+    // une qui annonce et une qui retire — un service laissé annoncé après le départ de l'app
+    // ferait croire à un Atelier qui n'est plus là.
+    "localNetworkAdvertise",
+    "localNetworkUnadvertise",
     "locationRequest",
     // L'ÉTAT de la permission, qui manquait : sans lui, `status_method` rendait `None` pour
     // `location` et le pont répondait `unsupported` — un iPhone avec la localisation se lisait
@@ -311,9 +316,11 @@ pub fn capability_of(method: &str, args: &Value) -> Option<Capability> {
         "faceIdStatus" | "faceIdConfirm" => Capability::FaceId,
         "speechStatus" | "speechRequest" | "speechTranscribeFile" => Capability::Speech,
         "nfcStatus" | "nfcReadOnce" | "nfcWrite" => Capability::Nfc,
-        "localNetworkStatus" | "localNetworkBrowse" | "localNetworkResolve" => {
-            Capability::LocalNetwork
-        }
+        "localNetworkStatus"
+        | "localNetworkBrowse"
+        | "localNetworkResolve"
+        | "localNetworkAdvertise"
+        | "localNetworkUnadvertise" => Capability::LocalNetwork,
         "locationSample" | "locationStreamStart" | "locationStreamStop" | "locationRecent" => {
             Capability::Location
         }
@@ -531,6 +538,11 @@ pub fn missing_args(method: &str, args: &Value) -> Vec<&'static str> {
         "bluetoothConnect" | "bluetoothDisconnect" | "bluetoothServices" => &["id"],
         "contactsGet" => &["id"],
         "localNetworkResolve" => &["name"],
+        // S'annoncer engage : le type de service, le port du serveur, et l'identité publiée dans
+        // le TXT. Rien de tout cela ne se devine — un défaut ici annoncerait un service au nom
+        // d'un autre, ou sur un port que personne n'écoute.
+        "localNetworkAdvertise" => &["service_type", "port", "id", "proto", "role"],
+        "localNetworkUnadvertise" => &["service_type"],
         "nfcWrite" => &["text"],
         "contactsSearch" => &["query"],
         // Sans nom, un contact créé est une fiche vide : le nom est le minimum qui a un sens.
