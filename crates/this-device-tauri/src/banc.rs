@@ -394,6 +394,105 @@ async fn balayer_ecritures<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> Vec<
     out
 }
 
+/// **Mesurer, écrire, et rendre** — ce qu'un hôte appelle pour que la mesure serve à quelque
+/// chose.
+///
+/// `balayer` rend le rapport en mémoire ; sans un endroit où le poser, un hôte doit réécrire la
+/// sérialisation, le nom des fichiers et le journal — c'est-à-dire refaire ce module. Cette
+/// fonction fait les trois, et c'est elle que l'app du banc appelle déjà.
+///
+/// Elle écrit **à côté du pont**, dans le conteneur de l'app (`$HOME/Documents`) :
+///
+/// - `banc.json` — le rapport complet, celui que `HostLimits::from_bench` lit ;
+/// - `banc.log` — une ligne par capacité et par méthode, pour un humain pressé.
+///
+/// Rien de ce que l'appareil a rendu n'y est recopié (ni contact, ni photo, ni texte) : le
+/// rapport ne garde que nature, état, code et durée. Voir la règle dans [`balayer`].
+///
+/// Un échec d'écriture ne fait pas échouer la mesure : le rapport est rendu quand même, et
+/// l'appelant décide.
+pub async fn mesurer_et_ecrire<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> Value {
+    let rapport = balayer(app).await;
+    ecrire(&rapport);
+    rapport
+}
+
+/// Où le rapport et son journal atterrissent, si `$HOME/Documents` existe.
+const RAPPORT: &str = "Documents/banc.json";
+const JOURNAL: &str = "Documents/banc.log";
+
+/// Écrit le rapport et son journal. Un échec est silencieux : la mesure, elle, a eu lieu.
+fn ecrire(rapport: &Value) {
+    let Ok(home) = std::env::var("HOME") else {
+        return;
+    };
+    let racine = std::path::Path::new(&home);
+    let _ = std::fs::create_dir_all(racine.join("Documents"));
+    let _ = std::fs::write(
+        racine.join(RAPPORT),
+        serde_json::to_string_pretty(rapport).unwrap_or_default(),
+    );
+
+    let mut journal = String::new();
+    if let Some(capacites) = rapport.get("capacites").and_then(|v| v.as_array()) {
+        for entree in capacites {
+            journal.push_str(&format!(
+                "capacite {} = {}\n",
+                entree["capacite"].as_str().unwrap_or("?"),
+                entree["etat"].as_str().unwrap_or("?")
+            ));
+        }
+    }
+    if let Some(methodes) = rapport.get("methodes").and_then(|v| v.as_array()) {
+        for entree in methodes {
+            journal.push_str(&format!(
+                "methode {} [{}] = {}{}{}\n",
+                entree["methode"].as_str().unwrap_or("?"),
+                entree["nature"].as_str().unwrap_or("?"),
+                entree["etat"].as_str().unwrap_or("?"),
+                entree
+                    .get("code")
+                    .and_then(|v| v.as_str())
+                    .map(|code| format!(" ({code})"))
+                    .unwrap_or_default(),
+                entree
+                    .get("ms")
+                    .and_then(|v| v.as_u64())
+                    .map(|ms| format!(" {ms}ms"))
+                    .unwrap_or_default(),
+            ));
+        }
+    }
+    if let Some(ecritures) = rapport.get("ecritures").and_then(|v| v.as_array()) {
+        for entree in ecritures {
+            journal.push_str(&format!(
+                "ecriture {} [{}] = {}{}\n",
+                entree["methode"].as_str().unwrap_or("—"),
+                entree["groupe"].as_str().unwrap_or("—"),
+                entree["etat"].as_str().unwrap_or("?"),
+                entree
+                    .get("code")
+                    .and_then(|v| v.as_str())
+                    .map(|code| format!(" ({code})"))
+                    .unwrap_or_default(),
+            ));
+        }
+    }
+    journal.push_str(&format!(
+        "defauts = {}\n",
+        rapport
+            .get("defauts")
+            .and_then(|v| v.as_array())
+            .map(|defauts| defauts
+                .iter()
+                .map(|entree| entree["methode"].as_str().unwrap_or("?"))
+                .collect::<Vec<_>>()
+                .join(","))
+            .unwrap_or_default()
+    ));
+    let _ = std::fs::write(racine.join(JOURNAL), journal);
+}
+
 /// Le rapport complet : l'état des capacités, ce que chaque méthode a répondu, et les défauts.
 ///
 /// **Rien de ce que l'appareil rend n'est recopié ici** : ni un contact, ni une photo, ni un
