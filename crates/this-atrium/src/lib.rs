@@ -113,6 +113,8 @@ pub enum Erreur {
     SignatureInvalide,
     #[error("collision : l'identifiant de compte est déjà porté par une autre clé")]
     CollisionCompte,
+    #[error("collision : l'identifiant d'appareil est déjà porté par une autre clé")]
+    CollisionAppareil,
 }
 
 impl Registre {
@@ -156,6 +158,22 @@ impl Registre {
         cle_appareil: VerifyingKey,
         signature: &[u8],
     ) -> Result<DeviceId, Erreur> {
+        let id = DeviceId::de_cle(&cle_appareil);
+        self.enregistrer_sous(compte, id, cle_appareil, signature)
+    }
+
+    /// Le cœur de [`Registre::enregistrer`], identifiant fourni : vérifie la signature, puis
+    /// refuse une **collision d'identifiant** (une clé DIFFÉRENTE sous une `DeviceId` déjà
+    /// prise), sinon insère. Une collision des 4 premiers octets (~2^32, atteignable) ne doit
+    /// JAMAIS écraser l'appareil légitime. Idempotent pour la même clé. `pub(crate)` pour que
+    /// les tests éprouvent la collision sans fabriquer 2^32 clés.
+    pub(crate) fn enregistrer_sous(
+        &mut self,
+        compte: &AccountId,
+        id: DeviceId,
+        cle_appareil: VerifyingKey,
+        signature: &[u8],
+    ) -> Result<DeviceId, Erreur> {
         let signature = Signature::from_slice(signature).map_err(|_| Erreur::SignatureInvalide)?;
 
         let mut message = Vec::with_capacity(DOMAINE_APPAREIL.len() + 32);
@@ -168,7 +186,13 @@ impl Registre {
             .verify_strict(&message, &signature)
             .map_err(|_| Erreur::SignatureInvalide)?;
 
-        let id = DeviceId::de_cle(&cle_appareil);
+        if let Some(existant) = compte_enr.appareils.get(&id) {
+            if existant.cle != cle_appareil {
+                return Err(Erreur::CollisionAppareil);
+            }
+            return Ok(id);
+        }
+
         let appareil = Appareil {
             cle: cle_appareil,
             etat: Etat::Actif,
@@ -261,6 +285,40 @@ mod tests {
         registre
             .enregistrer(compte, cle_appareil.verifying_key(), &signature.to_bytes())
             .unwrap()
+    }
+
+    #[test]
+    fn la_collision_de_device_id_n_ecrase_pas() {
+        let cle_compte = SigningKey::from_bytes(&[7u8; 32]);
+        let mut registre = Registre::nouveau();
+        let compte = registre.inscrire(cle_compte.verifying_key()).unwrap();
+
+        // A s'enregistre normalement.
+        let cle_a = SigningKey::from_bytes(&[1u8; 32]);
+        let id_a = enregistrer_appareil(&mut registre, &compte, &cle_compte, &cle_a);
+
+        // B est une clé DIFFÉRENTE, correctement signée, présentée sous l'id de A
+        // (simule une collision des 4 premiers octets) : refusée, pas d'écrasement.
+        let cle_b = SigningKey::from_bytes(&[2u8; 32]);
+        let mut message = Vec::new();
+        message.extend_from_slice(DOMAINE_APPAREIL);
+        message.extend_from_slice(&cle_b.verifying_key().to_bytes());
+        let signature_b = cle_compte.sign(&message);
+
+        assert_eq!(
+            registre.enregistrer_sous(
+                &compte,
+                id_a.clone(),
+                cle_b.verifying_key(),
+                &signature_b.to_bytes()
+            ),
+            Err(Erreur::CollisionAppareil)
+        );
+        // A est intact.
+        assert_eq!(
+            registre.annuaire(&compte).unwrap(),
+            vec![(id_a, cle_a.verifying_key())]
+        );
     }
 
     #[test]
