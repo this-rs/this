@@ -1832,7 +1832,11 @@ impl Harness {
     /// Avec, l'effet déclaré est relu à CHAQUE appel (un module peut être installé en
     /// cours de run, comme pour le routage de `Toolboxes`).
     fn gate(&self, toolbox: &dyn Toolbox, tool: &str) -> Option<String> {
-        gate_decision(self.grants.as_ref(), &toolbox.declarations(), tool).err()
+        // Les autorisations de l'outillage passent devant : elles suivent les outils qui
+        // apparaissent en cours de session (voir `Toolbox::grants`).
+        let dynamiques = toolbox.grants();
+        let effectives = dynamiques.as_ref().or(self.grants.as_ref());
+        gate_decision(effectives, &toolbox.declarations(), tool).err()
     }
 
     /// La paire sur laquelle l'objectif ouvert par `first` part, quand un routeur
@@ -2102,7 +2106,9 @@ struct RunPorts {
 #[async_trait(?Send)]
 impl Permission for RunPorts {
     fn allows(&self, tool: &str) -> Result<(), String> {
-        gate_decision(self.grants.as_ref(), &self.toolbox.declarations(), tool)
+        let dynamiques = self.toolbox.grants();
+        let effectives = dynamiques.as_ref().or(self.grants.as_ref());
+        gate_decision(effectives, &self.toolbox.declarations(), tool)
     }
 
     async fn record(&self, call: &ToolCall, ms: u64, outcome: &Outcome) {
