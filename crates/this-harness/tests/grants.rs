@@ -279,7 +279,7 @@ fn l_outillage_autorise_sans_qu_on_appelle_with_grants() {
         calls: Cell::new(0),
         grants: RefCell::new(grants),
     });
-    let (mut harness, log) = harnais_adroits(tools.clone(), None);
+    let (harness, log) = harnais_adroits(tools.clone(), None);
     futures::executor::block_on(harness.send("go"));
     assert_eq!(
         tools.calls.get(),
@@ -299,7 +299,7 @@ fn l_outillage_prime_sur_les_autorisations_figees() {
         calls: Cell::new(0),
         grants: RefCell::new(Grants::new()),
     });
-    let (mut harness, log) = harnais_adroits(tools.clone(), Some(statique));
+    let (harness, log) = harnais_adroits(tools.clone(), Some(statique));
     futures::executor::block_on(harness.send("go"));
     assert_eq!(tools.calls.get(), 0);
     assert!(result_of(&log.borrow()).0);
@@ -316,7 +316,7 @@ fn un_outil_qui_apparait_en_cours_de_session_n_est_pas_refuse() {
     });
     let log = Rc::new(RefCell::new(Vec::new()));
     let sink = log.clone();
-    let mut harness = Harness::new(
+    let harness = Harness::new(
         "sys",
         Limits {
             max_relances: 0,
