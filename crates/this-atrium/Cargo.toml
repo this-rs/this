@@ -1,0 +1,16 @@
+[package]
+name = "this-atrium"
+version = "0.0.1"
+edition = "2024"
+authors = ["Riviere Théotime <t@ffs.holdings>"]
+license = "MIT OR Apache-2.0"
+description = "Socle du service Atrium : registre de comptes et d'appareils, en Rust pur (aucune I/O réseau)."
+repository = "https://github.com/this-rs/this"
+publish = false
+
+[dependencies]
+ed25519-dalek = { version = "2", default-features = false, features = ["std"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+sha2 = "0.10"
