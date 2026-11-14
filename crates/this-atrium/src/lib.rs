@@ -14,6 +14,9 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fmt;
 
+pub mod presence;
+pub mod relais;
+
 /// Préfixe de domaine des octets signés lors de l'enregistrement d'un appareil : une
 /// signature d'appareil ne vaut rien ailleurs (compte, espace, manifeste…). La signature
 /// demandée est celle, par la clé de compte, de `DOMAINE_APPAREIL || clé_publique_appareil`.
@@ -115,6 +118,8 @@ pub enum Erreur {
     CollisionCompte,
     #[error("collision : l'identifiant d'appareil est déjà porté par une autre clé")]
     CollisionAppareil,
+    #[error("quota de relais dépassé")]
+    QuotaDepasse,
 }
 
 impl Registre {
