@@ -4,23 +4,45 @@
 //! Durci pour un exposé sur Internet :
 //! - écoute sur une IP choisie (`--bind`, défaut `127.0.0.1`) ;
 //! - limite de débit par IP source (jeton, 30/min) ;
-//! - bornes mémoire (comptes, appareils par compte) ;
+//! - bornes mémoire (comptes, appareils par compte, boîtes du relais) ;
 //! - `/annuaire` authentifié (signature d'appelant), restreint au même compte ou à un
-//!   compte ayant reçu une autorisation signée (`POST/DELETE /autoriser`, `GET /grants`).
+//!   compte ayant reçu une autorisation signée (`POST/DELETE /autoriser`, `GET /grants`) ;
+//! - `/relais` : store-and-forward **opaque** — le serveur ne lit jamais les octets qu'il
+//!   transporte, il les compte (quota horaire par compte émetteur) et les met en boîte.
 
 use ed25519_dalek::{Signature, VerifyingKey};
 use serde_json::{Value, json};
-use std::collections::HashMap;
+use sha2::{Digest, Sha256};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use this_atrium::Etat as EtatAppareil;
 use this_atrium::autorisations::{Autorisation, Autorisations, Portee};
 use this_atrium::presence::Presence;
+use this_atrium::relais::{Quota, Relais};
 use this_atrium::{AccountId, DeviceId, Registre};
 use tiny_http::{Header, Method, Response, Server};
 
-/// Domaine des octets signés pour une requête authentifiée (`/annuaire`, futur `/relais`).
+/// Domaine des octets signés pour une requête authentifiée (`/annuaire`, `/relais`).
 const DOMAINE_REQUETE: &[u8] = b"this-atrium/v1/req\n";
+
+/// Domaine des octets signés d'un dépôt au relais : `DOMAINE_RELAIS || de \n a \n
+/// sha256(octets) \n maintenant_ms`, signé par la clé de l'appareil `de`. À domaine séparé,
+/// cette signature ne vaut ni pour un enregistrement d'appareil, ni pour une requête.
+const DOMAINE_RELAIS: &[u8] = b"this-atrium/v1/relais\n";
+
+/// Capacité d'autorisation qui ouvre le relais : le destinataire l'accorde à l'émetteur.
+const CAPACITE_RELAIS: &str = "relais";
+
+/// Quota du relais : 10 Mo par heure et par compte émetteur (fenêtre glissante).
+const QUOTA_RELAIS: Quota = Quota {
+    octets_par_heure: 10_000_000,
+};
+
+/// Borne d'une boîte : au plus 50 messages…
+const MAX_BOITE_MESSAGES: usize = 50;
+/// …et au plus 1 Mio en attente, par appareil destinataire.
+const MAX_BOITE_OCTETS: usize = 1_048_576;
 
 /// Fenêtre d'horloge acceptée pour l'horodatage d'un appelant, en millisecondes.
 const FENETRE_HORLOGE_MS: u64 = 60_000;
@@ -131,6 +153,11 @@ struct EtatServeur {
     autorisations: Autorisations,
     limites: Limite,
     nonces: Nonces,
+    /// Les compteurs de quota du relais, par compte émetteur.
+    relais: Relais,
+    /// Les boîtes du relais, par appareil destinataire : les octets en attente, tels quels.
+    /// Le serveur ne les interprète jamais — il ne fait que les garder.
+    boites: BTreeMap<DeviceId, VecDeque<Vec<u8>>>,
 }
 
 impl EtatServeur {
@@ -141,6 +168,8 @@ impl EtatServeur {
             autorisations: Autorisations::default(),
             limites: Limite::nouveau(),
             nonces: Nonces::nouveau(),
+            relais: Relais::default(),
+            boites: BTreeMap::new(),
         }
     }
 }
@@ -250,6 +279,26 @@ fn message_requete(methode: &str, url: &str, ts_decimal: &str, nonce_octets: &[u
     m
 }
 
+/// La matière signée d'un dépôt au relais :
+/// `DOMAINE_RELAIS || de || "\n" || a || "\n" || sha256(octets) (32 octets bruts) ||
+/// "\n" || maintenant_ms`.
+///
+/// Les octets relayés n'entrent dans la signature que **hachés** : le relais hache sans lire,
+/// et rien de leur contenu ne peut être inféré de la matière signée.
+fn message_relais(de: &DeviceId, a: &DeviceId, octets: &[u8], maintenant: u64) -> Vec<u8> {
+    let mut m =
+        Vec::with_capacity(DOMAINE_RELAIS.len() + de.as_str().len() + a.as_str().len() + 56);
+    m.extend_from_slice(DOMAINE_RELAIS);
+    m.extend_from_slice(de.as_str().as_bytes());
+    m.push(b'\n');
+    m.extend_from_slice(a.as_str().as_bytes());
+    m.push(b'\n');
+    m.extend_from_slice(&Sha256::digest(octets));
+    m.push(b'\n');
+    m.extend_from_slice(maintenant.to_string().as_bytes());
+    m
+}
+
 fn en_tete<'a>(en_tetes: &'a [(String, String)], nom: &str) -> Option<&'a str> {
     en_tetes
         .iter()
@@ -257,7 +306,7 @@ fn en_tete<'a>(en_tetes: &'a [(String, String)], nom: &str) -> Option<&'a str> {
         .map(|(_, v)| v.as_str())
 }
 
-/// Authentifie l'appelant d'une requête (`/annuaire`, futur `/relais`) et rend son compte.
+/// Authentifie l'appelant d'une requête (`/annuaire`, `/relais`, `/grants`) et rend son compte.
 ///
 /// Vérifie, dans l'ordre : les quatre en-têtes requis, l'horloge (`|now - ts| <= 60 s`),
 /// le nonce (jamais vu dans la fenêtre), l'appareil appelant **Actif** dans le registre, et
@@ -457,6 +506,140 @@ fn repondre(
                 Some(a) => (200, json!({ "adresse": a }).to_string()),
                 None => (404, "{}".into()),
             }
+        }
+        ("POST", "/relais") => {
+            let (de, a, octets, ms, signature) = match corps_json(corps).and_then(|v| {
+                let de: DeviceId = serde_json::from_value(Value::String(texte(&v, "de")?))
+                    .map_err(|e| e.to_string())?;
+                let a: DeviceId = serde_json::from_value(Value::String(texte(&v, "a")?))
+                    .map_err(|e| e.to_string())?;
+                let octets = hex::decode(texte(&v, "octets_hex")?)
+                    .map_err(|_| "« octets_hex » n'est pas de l'hexadécimal".to_string())?;
+                Ok((
+                    de,
+                    a,
+                    octets,
+                    entier(&v, "maintenant_ms")?,
+                    signature_de(&v)?,
+                ))
+            }) {
+                Ok(t) => t,
+                Err(e) => return erreur(e),
+            };
+
+            // Une boîte ne peut de toute façon pas tenir plus que sa borne : refus avant
+            // tout travail cryptographique sur un corps démesuré.
+            if octets.len() > MAX_BOITE_OCTETS {
+                return (503, json!({ "erreur": "message trop gros" }).to_string());
+            }
+
+            let maintenant = maintenant_ms();
+            if maintenant.abs_diff(ms) > FENETRE_HORLOGE_MS {
+                return non_authentifie();
+            }
+
+            // L'émetteur doit être un appareil **Actif** du registre.
+            let mut cle_emetteur: Option<VerifyingKey> = None;
+            let mut compte_emetteur: Option<AccountId> = None;
+            for (cid, compte) in &g.registre.comptes {
+                if let Some(ap) = compte.appareils.get(&de)
+                    && ap.etat == EtatAppareil::Actif
+                {
+                    cle_emetteur = Some(ap.cle);
+                    compte_emetteur = Some(cid.clone());
+                    break;
+                }
+            }
+            let (Some(cle), Some(compte_de)) = (cle_emetteur, compte_emetteur) else {
+                return non_authentifie();
+            };
+
+            let Ok(signature) = Signature::from_slice(&signature) else {
+                return erreur("signature du relais invalide");
+            };
+            if cle
+                .verify_strict(&message_relais(&de, &a, &octets, ms), &signature)
+                .is_err()
+            {
+                return erreur("signature du relais invalide");
+            }
+
+            // Le destinataire doit exister ; son compte est celui qui peut autoriser.
+            let compte_a = g
+                .registre
+                .comptes
+                .iter()
+                .find_map(|(cid, c)| c.appareils.contains_key(&a).then(|| cid.clone()));
+            let Some(compte_a) = compte_a else {
+                return (403, json!({ "erreur": "non autorisé" }).to_string());
+            };
+
+            // Même compte, ou le destinataire a accordé à l'émetteur la capacité « relais ».
+            let permis = compte_a == compte_de
+                || g.autorisations.est_autorise(
+                    &compte_a,
+                    &compte_de,
+                    CAPACITE_RELAIS,
+                    &a,
+                    maintenant,
+                );
+            if !permis {
+                return (403, json!({ "erreur": "non autorisé" }).to_string());
+            }
+
+            // Les bornes de la boîte d'abord : un refus ne doit rien coûter au quota.
+            let deja: usize = g
+                .boites
+                .get(&a)
+                .map(|b| b.iter().map(Vec::len).sum())
+                .unwrap_or(0);
+            let pleine = g
+                .boites
+                .get(&a)
+                .is_some_and(|b| b.len() >= MAX_BOITE_MESSAGES)
+                || deja.saturating_add(octets.len()) > MAX_BOITE_OCTETS;
+            if pleine {
+                return (
+                    503,
+                    json!({ "erreur": "boîte du destinataire pleine" }).to_string(),
+                );
+            }
+
+            if g.relais
+                .transmettre(&compte_de, maintenant, octets.len(), &QUOTA_RELAIS)
+                .is_err()
+            {
+                return (
+                    429,
+                    json!({ "erreur": "quota de relais dépassé" }).to_string(),
+                );
+            }
+
+            g.boites.entry(a).or_default().push_back(octets);
+            (200, "{}".into())
+        }
+        ("GET", "/relais") => {
+            if let Err(r) = verifier_appelant(&mut g, "GET", url, en_tetes) {
+                return r;
+            }
+            // L'appareil authentifié est le destinataire : il ne lit que SA boîte.
+            let Some(appareil) = en_tete(en_tetes, "X-Atrium-Device") else {
+                return non_authentifie();
+            };
+            let Ok(appareil) =
+                serde_json::from_value::<DeviceId>(Value::String(appareil.to_string()))
+            else {
+                return erreur("appareil invalide");
+            };
+            let messages: Vec<String> = g
+                .boites
+                .remove(&appareil)
+                .map(|b| b.into_iter().map(hex::encode).collect())
+                .unwrap_or_default();
+            if messages.is_empty() {
+                return (204, String::new());
+            }
+            (200, json!({ "messages": messages }).to_string())
         }
         ("POST", "/autoriser") | ("DELETE", "/autoriser") => {
             let x = match corps_json(corps).and_then(|v| autorisation_de(&v)) {
@@ -933,5 +1116,232 @@ mod tests {
         let (s, _) = repondre(&etat, "POST", "/autoriser", &corps, "1.2.3.4", &[]);
         assert_eq!(s, 400);
         assert!(etat.lock().unwrap().autorisations.octroyees.is_empty());
+    }
+
+    // ---- Relais opaque ----
+
+    /// Le décor du relais : compte A (a1, a2) et compte B (b1).
+    struct SceneRelais {
+        etat: Etat,
+        a1: DeviceId,
+        a2: DeviceId,
+        b1: DeviceId,
+        cle_a: SigningKey,
+        cle_a1: SigningKey,
+        cle_a2: SigningKey,
+        cle_b1: SigningKey,
+        compte_b: AccountId,
+        ms: u64,
+    }
+
+    fn scene_relais() -> SceneRelais {
+        let etat = etat_frais();
+        let (cle_a, cle_b) = (cle(7), cle(8));
+        let (cle_a1, cle_a2, cle_b1) = (cle(1), cle(2), cle(3));
+        let (a1, a2, b1, compte_b) = {
+            let mut g = etat.lock().unwrap();
+            let compte_a = inscrire_compte(&mut g, &cle_a);
+            let compte_b = inscrire_compte(&mut g, &cle_b);
+            let a1 = enregistrer_appareil(&mut g, &compte_a, &cle_a, &cle_a1);
+            let a2 = enregistrer_appareil(&mut g, &compte_a, &cle_a, &cle_a2);
+            let b1 = enregistrer_appareil(&mut g, &compte_b, &cle_b, &cle_b1);
+            (a1, a2, b1, compte_b)
+        };
+        SceneRelais {
+            etat,
+            a1,
+            a2,
+            b1,
+            cle_a,
+            cle_a1,
+            cle_a2,
+            cle_b1,
+            compte_b,
+            ms: maintenant_ms(),
+        }
+    }
+
+    /// Le corps d'un dépôt au relais, signé par la clé de l'appareil émetteur.
+    fn corps_relais(
+        cle_emetteur: &SigningKey,
+        de: &DeviceId,
+        a: &DeviceId,
+        octets: &[u8],
+        ms: u64,
+    ) -> String {
+        let signature = cle_emetteur.sign(&message_relais(de, a, octets, ms));
+        json!({
+            "de": de.as_str(),
+            "a": a.as_str(),
+            "octets_hex": hex::encode(octets),
+            "maintenant_ms": ms,
+            "signature": hex::encode(signature.to_bytes()),
+        })
+        .to_string()
+    }
+
+    /// Une autorisation de capacité « relais », signée par le compte `de`.
+    fn corps_autorisation_relais(de: &SigningKey, a: &AccountId) -> String {
+        let mut x = Autorisation {
+            de: AccountId::de_cle(&de.verifying_key()),
+            a: a.clone(),
+            capacite: CAPACITE_RELAIS.into(),
+            portee: Portee::Tous,
+            cree_ms: 1,
+            expire_ms: None,
+            signature: vec![],
+        };
+        x.signature = de.sign(&x.octets_signes()).to_bytes().to_vec();
+        json!({
+            "de": x.de, "a": x.a, "capacite": x.capacite, "portee": x.portee,
+            "cree_ms": x.cree_ms, "expire_ms": null,
+            "signature": hex::encode(&x.signature),
+        })
+        .to_string()
+    }
+
+    /// Lit la boîte de `appareil` (GET /relais signé) et rend les octets bruts reçus.
+    fn lire_relais(
+        etat: &Etat,
+        appareil: &DeviceId,
+        cle: &SigningKey,
+        ip: &str,
+        nonce: u8,
+    ) -> (u16, Vec<Vec<u8>>) {
+        let h = en_tetes_appelant(appareil, maintenant_ms(), &[nonce; 16], cle, "/relais");
+        let (statut, corps) = repondre(etat, "GET", "/relais", "", ip, &h);
+        if statut != 200 {
+            return (statut, Vec::new());
+        }
+        let v: Value = serde_json::from_str(&corps).unwrap();
+        let messages = v["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| hex::decode(m.as_str().unwrap()).unwrap())
+            .collect();
+        (statut, messages)
+    }
+
+    #[test]
+    fn relais_meme_compte_octets_identiques() {
+        let sc = scene_relais();
+        let octets: Vec<u8> = (0..4_096usize).map(|i| (i % 251) as u8).collect();
+
+        let corps = corps_relais(&sc.cle_a1, &sc.a1, &sc.a2, &octets, sc.ms);
+        let (s, c) = repondre(&sc.etat, "POST", "/relais", &corps, "203.0.113.1", &[]);
+        assert_eq!(s, 200, "{c}");
+
+        // a2 lit SA boîte : les octets sont rendus tels quels, à l'octet près.
+        let (s, messages) = lire_relais(&sc.etat, &sc.a2, &sc.cle_a2, "203.0.113.2", 0x11);
+        assert_eq!(s, 200);
+        assert_eq!(messages, vec![octets]);
+
+        // La boîte a été vidée : une seconde lecture ne rend rien.
+        let (s, messages) = lire_relais(&sc.etat, &sc.a2, &sc.cle_a2, "203.0.113.2", 0x12);
+        assert_eq!(s, 204);
+        assert!(messages.is_empty());
+    }
+
+    #[test]
+    fn relais_sans_autorisation_403() {
+        let sc = scene_relais();
+        let octets = b"pour un autre compte".to_vec();
+        let corps = corps_relais(&sc.cle_b1, &sc.b1, &sc.a2, &octets, sc.ms);
+        let (s, _) = repondre(&sc.etat, "POST", "/relais", &corps, "203.0.113.3", &[]);
+        assert_eq!(s, 403);
+
+        // Rien n'a été mis en boîte.
+        let (s, _) = lire_relais(&sc.etat, &sc.a2, &sc.cle_a2, "203.0.113.4", 0x20);
+        assert_eq!(s, 204);
+    }
+
+    #[test]
+    fn relais_apres_autorisation_ok() {
+        let sc = scene_relais();
+
+        // A (le destinataire) accorde à B (l'émetteur) la capacité « relais ».
+        let corps = corps_autorisation_relais(&sc.cle_a, &sc.compte_b);
+        let (s, c) = repondre(&sc.etat, "POST", "/autoriser", &corps, "203.0.113.5", &[]);
+        assert_eq!(s, 200, "{c}");
+
+        let octets = b"de B vers A, autorise".to_vec();
+        let corps = corps_relais(&sc.cle_b1, &sc.b1, &sc.a2, &octets, sc.ms);
+        let (s, c) = repondre(&sc.etat, "POST", "/relais", &corps, "203.0.113.6", &[]);
+        assert_eq!(s, 200, "{c}");
+
+        let (s, messages) = lire_relais(&sc.etat, &sc.a2, &sc.cle_a2, "203.0.113.7", 0x33);
+        assert_eq!(s, 200);
+        assert_eq!(messages, vec![octets]);
+    }
+
+    #[test]
+    fn relais_quota_429() {
+        let etat = etat_frais();
+        let cle_compte = cle(7);
+        let cle_emetteur = cle(1);
+        let (emetteur, cibles) = {
+            let mut g = etat.lock().unwrap();
+            let compte = inscrire_compte(&mut g, &cle_compte);
+            let emetteur = enregistrer_appareil(&mut g, &compte, &cle_compte, &cle_emetteur);
+            // Une boîte ne tient qu'1 Mio : le quota de 10 Mo se mesure donc sur plusieurs
+            // destinataires du même compte émetteur.
+            let cibles: Vec<DeviceId> = (0..11u8)
+                .map(|i| {
+                    let cle_cible = SigningKey::from_bytes(&[100 + i; 32]);
+                    enregistrer_appareil(&mut g, &compte, &cle_compte, &cle_cible)
+                })
+                .collect();
+            (emetteur, cibles)
+        };
+
+        let octets = vec![0xA5u8; 1_000_000];
+        let mut statuts = Vec::new();
+        for (i, cible) in cibles.iter().enumerate() {
+            let corps = corps_relais(&cle_emetteur, &emetteur, cible, &octets, maintenant_ms());
+            let ip = format!("198.51.100.{i}");
+            // Une IP par envoi : ce test porte sur le quota, pas sur la limite de débit.
+            let (s, c) = repondre(&etat, "POST", "/relais", &corps, &ip, &[]);
+            statuts.push((s, c));
+        }
+        for (i, (s, c)) in statuts.iter().enumerate().take(10) {
+            assert_eq!(*s, 200, "envoi {i} : {c}");
+        }
+        assert_eq!(statuts[10].0, 429, "corps : {}", statuts[10].1);
+    }
+
+    #[test]
+    fn relais_signature_fausse_400() {
+        let sc = scene_relais();
+        let octets = b"octets signes par un autre".to_vec();
+        let mut corps: Value =
+            serde_json::from_str(&corps_relais(&sc.cle_a1, &sc.a1, &sc.a2, &octets, sc.ms))
+                .unwrap();
+        let mut sig = hex::decode(corps["signature"].as_str().unwrap()).unwrap();
+        sig[0] ^= 0xff;
+        corps["signature"] = Value::String(hex::encode(sig));
+
+        let (s, _) = repondre(
+            &sc.etat,
+            "POST",
+            "/relais",
+            &corps.to_string(),
+            "203.0.113.8",
+            &[],
+        );
+        assert_eq!(s, 400);
+
+        // Rien n'a été mis en boîte, et le quota n'a pas bougé.
+        let (s, _) = lire_relais(&sc.etat, &sc.a2, &sc.cle_a2, "203.0.113.9", 0x40);
+        assert_eq!(s, 204);
+    }
+
+    #[test]
+    fn relais_horloge_hors_fenetre_401() {
+        let sc = scene_relais();
+        let octets = b"trop tard".to_vec();
+        let corps = corps_relais(&sc.cle_a1, &sc.a1, &sc.a2, &octets, sc.ms - 61_000);
+        let (s, _) = repondre(&sc.etat, "POST", "/relais", &corps, "203.0.113.10", &[]);
+        assert_eq!(s, 401);
     }
 }
