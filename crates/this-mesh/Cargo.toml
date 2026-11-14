@@ -40,3 +40,5 @@ transport = ["dep:quinn", "dep:rustls", "dep:tokio", "dep:rcgen"]
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+# Annonce Bonjour (mDNS) du nœud headless de l'exemple `node`, en Rust pur.
+mdns-sd = "0.13"

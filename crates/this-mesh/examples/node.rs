@@ -11,12 +11,13 @@
 //! travers sa porte : c'est la preuve que l'appairage ouvre bien sur du trafic.
 
 use std::io::{Read, Write};
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use ed25519_dalek::{SigningKey, VerifyingKey};
+use mdns_sd::{ServiceDaemon, ServiceInfo};
 use serde_json::json;
 use this_mesh::transport::{self, AppairageEnCours, Epingle, Identite};
 use this_mesh::{DeviceId, Limits, Message, MessageType, Peers, Raison, Verdict};
@@ -179,6 +180,41 @@ async fn envoyer_message(
     }
 }
 
+/// L'IP LAN primaire : celle que le noyau choisirait pour sortir (aucun paquet
+/// n'est émis, `connect` sur UDP ne fait que choisir la route).
+fn ip_lan() -> Option<IpAddr> {
+    let sock = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
+    sock.connect("8.8.8.8:80").ok()?;
+    sock.local_addr().ok().map(|a| a.ip())
+}
+
+/// Annonce `_atelier._tcp.local.` en mDNS ; le démon doit rester vivant.
+fn annoncer(id: &DeviceId, ecoute: SocketAddr) -> Option<ServiceDaemon> {
+    let ip = ip_lan().or_else(|| (!ecoute.ip().is_unspecified()).then(|| ecoute.ip()))?;
+    let hote = std::process::Command::new("hostname")
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .map(|h| h.trim().trim_end_matches(".local").to_string())
+        .filter(|h| !h.is_empty())
+        .unwrap_or_else(|| "atelier-node".into());
+    let instance = format!("Atelier-{id}");
+    let props = [("id", id.to_string())];
+    let info = ServiceInfo::new(
+        "_atelier._tcp.local.",
+        &instance,
+        &format!("{hote}.local."),
+        ip,
+        ecoute.port(),
+        &props[..],
+    )
+    .ok()?;
+    let demon = ServiceDaemon::new().ok()?;
+    demon.register(info).ok()?;
+    println!("ANNONCE _atelier._tcp {instance} {ip}:{}", ecoute.port());
+    Some(demon)
+}
+
 fn usage() -> ! {
     eprintln!("usage : node listen|pair <ip:port> <fichier-cle> [--oui] [--send]");
     std::process::exit(2)
@@ -217,6 +253,8 @@ async fn main() {
             .await
             .expect("écoute");
             println!("ECOUTE {}", flux.local_addr());
+            // Vivant jusqu'à la fin de la boucle : le lâcher retire l'annonce.
+            let _annonce = annoncer(&id, flux.local_addr());
             loop {
                 tokio::select! {
                     Some(demande) = demandes.recv() => { traiter(demande, oui, &peers, None).await; }
