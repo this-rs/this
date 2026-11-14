@@ -8,6 +8,7 @@
 //! La charge n'est jamais lue avant que la taille, l'identité et le type soient bons.
 
 mod appairage;
+mod crdt;
 mod envelope;
 mod gate;
 mod invitation;
@@ -19,6 +20,7 @@ pub mod transport;
 pub use appairage::{
     Admission, Appairage, Lien, Rencontre, SAS_DIGITS, SAS_DOMAIN, SasAttendu, sas,
 };
+pub use crdt::{Estampille, Ligne, Liste, Operation};
 pub use envelope::{DeviceId, MESH_VERSION, Message, MessageType, SIGNING_DOMAIN, SignError};
 pub use gate::{Gate, JournalEntry, Raison, Verdict};
 pub use invitation::{
