@@ -15,7 +15,9 @@ use std::collections::BTreeMap;
 use std::fmt;
 
 pub mod presence;
+pub mod profil;
 pub mod relais;
+pub mod themes;
 
 /// Préfixe de domaine des octets signés lors de l'enregistrement d'un appareil : une
 /// signature d'appareil ne vaut rien ailleurs (compte, espace, manifeste…). La signature
