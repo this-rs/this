@@ -507,6 +507,50 @@ fn repondre(
                 None => (404, "{}".into()),
             }
         }
+        ("GET", "/appareils") => {
+            let compte = match verifier_appelant(&mut g, "GET", url, en_tetes) {
+                Ok(c) => c,
+                Err(r) => return r,
+            };
+            let Some(cible) = requete_param(requete, "compte") else {
+                return erreur("paramètre « compte » manquant");
+            };
+            let Ok(compte_cible) =
+                serde_json::from_value::<AccountId>(Value::String(cible.to_string()))
+            else {
+                return erreur("compte invalide");
+            };
+            let Some(ms) = requete_param(requete, "maintenant_ms").and_then(|s| s.parse().ok())
+            else {
+                return erreur("paramètre « maintenant_ms » manquant ou invalide");
+            };
+
+            // Les appareils encore Actifs du compte cible (les révoqués sont exclus).
+            let appareils = match g.registre.annuaire(&compte_cible) {
+                Ok(a) => a,
+                Err(_) => return erreur("compte inconnu"),
+            };
+
+            // Même compte, ou une autorisation « annuaire » accordée par le compte cible à
+            // l'appelant. Une portée `tous` couvre n'importe lequel des appareils, donc elle
+            // suffit pour la liste entière ; une portée `Appareil(x)` ne couvre que l'appareil
+            // `x` du compte. On teste donc chaque appareil : `tous` (ou l'un de ses appareils)
+            // suffit, ce qui évite de déléguer la décision à un appareil « représentatif ».
+            let permis = compte_cible == compte
+                || appareils.iter().any(|(id, _)| {
+                    g.autorisations
+                        .est_autorise(&compte_cible, &compte, "annuaire", id, ms)
+                });
+            if !permis {
+                return (403, json!({ "erreur": "hors de votre compte" }).to_string());
+            }
+
+            let liste: Vec<Value> = appareils
+                .iter()
+                .map(|(id, _)| json!({ "id": id, "adresse": g.presence.joindre(id, ms) }))
+                .collect();
+            (200, json!({ "appareils": liste }).to_string())
+        }
         ("POST", "/relais") => {
             let (de, a, octets, ms, signature) = match corps_json(corps).and_then(|v| {
                 let de: DeviceId = serde_json::from_value(Value::String(texte(&v, "de")?))
@@ -1116,6 +1160,136 @@ mod tests {
         let (s, _) = repondre(&etat, "POST", "/autoriser", &corps, "1.2.3.4", &[]);
         assert_eq!(s, 400);
         assert!(etat.lock().unwrap().autorisations.octroyees.is_empty());
+    }
+
+    // ---- /appareils (lister les appareils d'un compte) ----
+
+    /// Compte A (a1, a2) et compte B (b1), sans présence. Rend tout ce qu'il faut
+    /// pour signer et interroger `/appareils`.
+    struct SceneAppareils {
+        etat: Etat,
+        compte_a: AccountId,
+        compte_b: AccountId,
+        a1: DeviceId,
+        a2: DeviceId,
+        b1: DeviceId,
+        cle_a: SigningKey,
+        cle_a1: SigningKey,
+        cle_b1: SigningKey,
+    }
+
+    fn scene_appareils() -> SceneAppareils {
+        let etat = etat_frais();
+        let (cle_a, cle_b) = (cle(7), cle(8));
+        let (cle_a1, cle_a2, cle_b1) = (cle(1), cle(2), cle(3));
+        let (compte_a, compte_b, a1, a2, b1) = {
+            let mut g = etat.lock().unwrap();
+            let ca = inscrire_compte(&mut g, &cle_a);
+            let cb = inscrire_compte(&mut g, &cle_b);
+            let a1 = enregistrer_appareil(&mut g, &ca, &cle_a, &cle_a1);
+            let a2 = enregistrer_appareil(&mut g, &ca, &cle_a, &cle_a2);
+            let b1 = enregistrer_appareil(&mut g, &cb, &cle_b, &cle_b1);
+            (ca, cb, a1, a2, b1)
+        };
+        SceneAppareils {
+            etat,
+            compte_a,
+            compte_b,
+            a1,
+            a2,
+            b1,
+            cle_a,
+            cle_a1,
+            cle_b1,
+        }
+    }
+
+    #[test]
+    fn appareils_meme_compte_liste() {
+        let sc = scene_appareils();
+        // a1 publie une présence : son adresse apparaît, l'autre appareil reste null.
+        let ms = maintenant_ms();
+        let duree = 60_000;
+        let expire = ms + duree;
+        {
+            let mut g = sc.etat.lock().unwrap();
+            let sig = signe_presence(&sc.cle_a1, "198.51.100.7:47821", expire, &sc.a1);
+            let inner = &mut *g;
+            inner
+                .presence
+                .publier(
+                    &inner.registre,
+                    &sc.compte_a,
+                    &sc.a1,
+                    "198.51.100.7:47821",
+                    duree,
+                    ms,
+                    &sig,
+                )
+                .unwrap();
+        }
+
+        let url = format!(
+            "/appareils?compte={}&maintenant_ms={}",
+            sc.compte_a.as_str(),
+            ms
+        );
+        let h = en_tetes_appelant(&sc.a1, maintenant_ms(), &[7u8; 16], &sc.cle_a1, &url);
+        let (s, c) = repondre(&sc.etat, "GET", &url, "", "1.2.3.4", &h);
+        assert_eq!(s, 200, "{c}");
+        let v: Value = serde_json::from_str(&c).unwrap();
+        let appareils = v["appareils"].as_array().unwrap();
+        assert_eq!(appareils.len(), 2, "{c}");
+        let mut ids = Vec::new();
+        let mut adresses = Vec::new();
+        for x in appareils {
+            ids.push(x["id"].as_str().unwrap());
+            adresses.push(x["adresse"].as_str());
+        }
+        assert!(ids.contains(&sc.a1.as_str()), "{c}");
+        assert!(ids.contains(&sc.a2.as_str()), "{c}");
+        assert!(adresses.contains(&Some("198.51.100.7:47821")), "{c}");
+        assert!(adresses.contains(&None), "{c}");
+    }
+
+    #[test]
+    fn appareils_autre_compte_403() {
+        let sc = scene_appareils();
+        let url = format!(
+            "/appareils?compte={}&maintenant_ms={}",
+            sc.compte_a.as_str(),
+            maintenant_ms()
+        );
+        let h = en_tetes_appelant(&sc.b1, maintenant_ms(), &[8u8; 16], &sc.cle_b1, &url);
+        let (s, _) = repondre(&sc.etat, "GET", &url, "", "1.2.3.4", &h);
+        assert_eq!(s, 403);
+    }
+
+    #[test]
+    fn appareils_apres_autorisation_200() {
+        let sc = scene_appareils();
+        let corps = corps_autorisation(&sc.cle_a, &sc.compte_b, Portee::Tous, false);
+        let (s, c) = repondre(&sc.etat, "POST", "/autoriser", &corps, "1.2.3.4", &[]);
+        assert_eq!(s, 200, "{c}");
+
+        let url = format!(
+            "/appareils?compte={}&maintenant_ms={}",
+            sc.compte_a.as_str(),
+            maintenant_ms()
+        );
+        let h = en_tetes_appelant(&sc.b1, maintenant_ms(), &[9u8; 16], &sc.cle_b1, &url);
+        let (s, c) = repondre(&sc.etat, "GET", &url, "", "1.2.3.4", &h);
+        assert_eq!(s, 200, "{c}");
+        let v: Value = serde_json::from_str(&c).unwrap();
+        let ids: Vec<&str> = v["appareils"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|x| x["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(ids.len(), 2, "{c}");
+        assert!(ids.contains(&sc.a1.as_str()), "{c}");
+        assert!(ids.contains(&sc.a2.as_str()), "{c}");
     }
 
     // ---- Relais opaque ----
