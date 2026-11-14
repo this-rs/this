@@ -37,3 +37,6 @@ rcgen = { version = "0.13", default-features = false, features = ["ring"], optio
 [features]
 default = []
 transport = ["dep:quinn", "dep:rustls", "dep:tokio", "dep:rcgen"]
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
