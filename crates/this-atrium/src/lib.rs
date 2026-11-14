@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fmt;
 
+pub mod autorisations;
 pub mod presence;
 pub mod profil;
 pub mod relais;

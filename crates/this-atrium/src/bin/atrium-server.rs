@@ -5,7 +5,8 @@
 //! - écoute sur une IP choisie (`--bind`, défaut `127.0.0.1`) ;
 //! - limite de débit par IP source (jeton, 30/min) ;
 //! - bornes mémoire (comptes, appareils par compte) ;
-//! - `/annuaire` authentifié (signature d'appelant) et restreint au même compte.
+//! - `/annuaire` authentifié (signature d'appelant), restreint au même compte ou à un
+//!   compte ayant reçu une autorisation signée (`POST/DELETE /autoriser`, `GET /grants`).
 
 use ed25519_dalek::{Signature, VerifyingKey};
 use serde_json::{Value, json};
@@ -13,6 +14,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use this_atrium::Etat as EtatAppareil;
+use this_atrium::autorisations::{Autorisation, Autorisations, Portee};
 use this_atrium::presence::Presence;
 use this_atrium::{AccountId, DeviceId, Registre};
 use tiny_http::{Header, Method, Response, Server};
@@ -37,6 +39,7 @@ const MAX_NONCES: usize = 100_000;
 /// Bornes mémoire.
 const MAX_COMPTES: usize = 100_000;
 const MAX_APPAREILS: usize = 64;
+const MAX_AUTORISATIONS: usize = 10_000;
 
 /// Une réponse HTTP : `(statut, corps)`.
 type Reponse = (u16, String);
@@ -125,6 +128,7 @@ impl Nonces {
 struct EtatServeur {
     registre: Registre,
     presence: Presence,
+    autorisations: Autorisations,
     limites: Limite,
     nonces: Nonces,
 }
@@ -134,6 +138,7 @@ impl EtatServeur {
         Self {
             registre: Registre::nouveau(),
             presence: Presence::default(),
+            autorisations: Autorisations::default(),
             limites: Limite::nouveau(),
             nonces: Nonces::nouveau(),
         }
@@ -177,6 +182,32 @@ fn entier(v: &Value, champ: &str) -> Result<u64, String> {
     v.get(champ)
         .and_then(Value::as_u64)
         .ok_or(format!("champ « {champ} » manquant ou invalide"))
+}
+
+/// Décode le corps de `/autoriser` en [`Autorisation`] (signature en 128 hexadécimaux).
+fn autorisation_de(v: &Value) -> Result<Autorisation, String> {
+    let compte = |champ: &str| -> Result<AccountId, String> {
+        serde_json::from_value(Value::String(texte(v, champ)?)).map_err(|e| e.to_string())
+    };
+    let portee: Portee = serde_json::from_value(
+        v.get("portee")
+            .cloned()
+            .ok_or("champ « portee » manquant")?,
+    )
+    .map_err(|e| format!("« portee » invalide : {e}"))?;
+    let expire_ms = match v.get("expire_ms") {
+        None | Some(Value::Null) => None,
+        Some(e) => Some(e.as_u64().ok_or("« expire_ms » invalide")?),
+    };
+    Ok(Autorisation {
+        de: compte("de")?,
+        a: compte("a")?,
+        capacite: texte(v, "capacite")?,
+        portee,
+        cree_ms: entier(v, "cree_ms")?,
+        expire_ms,
+        signature: signature_de(v)?,
+    })
 }
 
 fn requete_param<'a>(requete: &'a str, nom: &str) -> Option<&'a str> {
@@ -400,19 +431,89 @@ fn repondre(
             else {
                 return erreur("paramètre « maintenant_ms » manquant ou invalide");
             };
-            let appartient = g
+            let compte_cible = g
                 .registre
                 .comptes
-                .get(&compte)
-                .map(|c| c.appareils.contains_key(&appareil_id))
-                .unwrap_or(false);
-            if !appartient {
+                .iter()
+                .find(|(_, c)| c.appareils.contains_key(&appareil_id))
+                .map(|(id, _)| id.clone());
+            let permis = match compte_cible {
+                Some(cible) => {
+                    cible == compte
+                        || g.autorisations.est_autorise(
+                            &cible,
+                            &compte,
+                            "annuaire",
+                            &appareil_id,
+                            maintenant_ms(),
+                        )
+                }
+                None => false,
+            };
+            if !permis {
                 return (403, json!({ "erreur": "hors de votre compte" }).to_string());
             }
             match g.presence.joindre(&appareil_id, ms) {
                 Some(a) => (200, json!({ "adresse": a }).to_string()),
                 None => (404, "{}".into()),
             }
+        }
+        ("POST", "/autoriser") | ("DELETE", "/autoriser") => {
+            let x = match corps_json(corps).and_then(|v| autorisation_de(&v)) {
+                Ok(x) => x,
+                Err(e) => return erreur(e),
+            };
+            let Some(cle_de) = g.registre.comptes.get(&x.de).map(|c| c.cle) else {
+                return (403, json!({ "erreur": "compte inconnu" }).to_string());
+            };
+            if methode == "POST" {
+                let deja = g.autorisations.octroyees.iter().any(|o| {
+                    o.de == x.de && o.a == x.a && o.capacite == x.capacite && o.portee == x.portee
+                });
+                if !deja && g.autorisations.octroyees.len() >= MAX_AUTORISATIONS {
+                    return (503, json!({ "erreur": "capacité atteinte" }).to_string());
+                }
+                match g.autorisations.octroyer(x, &cle_de) {
+                    Ok(()) => (200, "{}".into()),
+                    Err(e) => erreur(e),
+                }
+            } else {
+                match g.autorisations.retirer(&x, &cle_de) {
+                    Ok(()) => (200, "{}".into()),
+                    Err(e) => erreur(e),
+                }
+            }
+        }
+        ("GET", "/grants") => {
+            let compte = match verifier_appelant(&mut g, "GET", url, en_tetes) {
+                Ok(c) => c,
+                Err(r) => return r,
+            };
+            let vue = |x: &Autorisation| {
+                json!({
+                    "de": x.de, "a": x.a, "capacite": x.capacite, "portee": x.portee,
+                    "cree_ms": x.cree_ms, "expire_ms": x.expire_ms,
+                    "signature": hex::encode(&x.signature),
+                })
+            };
+            let octroyees: Vec<Value> = g
+                .autorisations
+                .octroyees
+                .iter()
+                .filter(|x| x.de == compte)
+                .map(vue)
+                .collect();
+            let recues: Vec<Value> = g
+                .autorisations
+                .octroyees
+                .iter()
+                .filter(|x| x.a == compte)
+                .map(vue)
+                .collect();
+            (
+                200,
+                json!({ "octroyees": octroyees, "recues": recues }).to_string(),
+            )
         }
         _ => erreur("requête inconnue"),
     }
@@ -424,6 +525,7 @@ fn servir(server: Server, etat: Etat, max: Option<usize>) {
         let methode = match req.method() {
             Method::Get => "GET",
             Method::Post => "POST",
+            Method::Delete => "DELETE",
             _ => "AUTRE",
         };
         let url = req.url().to_string();
@@ -716,5 +818,120 @@ mod tests {
 
         let (statut, _) = repondre(&etat, "POST", "/appareil", &corps, "1.2.3.4", &[]);
         assert_eq!(statut, 503);
+    }
+
+    fn corps_autorisation(
+        de: &SigningKey,
+        a: &AccountId,
+        portee: Portee,
+        corrompre: bool,
+    ) -> String {
+        let mut x = Autorisation {
+            de: AccountId::de_cle(&de.verifying_key()),
+            a: a.clone(),
+            capacite: "annuaire".into(),
+            portee,
+            cree_ms: 1,
+            expire_ms: None,
+            signature: vec![],
+        };
+        let mut sig = de.sign(&x.octets_signes()).to_bytes().to_vec();
+        if corrompre {
+            sig[0] ^= 0xff;
+        }
+        x.signature = sig;
+        json!({
+            "de": x.de, "a": x.a, "capacite": x.capacite, "portee": x.portee,
+            "cree_ms": x.cree_ms, "expire_ms": null,
+            "signature": hex::encode(&x.signature),
+        })
+        .to_string()
+    }
+
+    /// Compte A (a1 publie une adresse) et compte B (b1). Rend (etat, a1, b1, cle_a, cle_b1, compte_b, ms).
+    fn scene() -> (
+        Etat,
+        DeviceId,
+        DeviceId,
+        SigningKey,
+        SigningKey,
+        AccountId,
+        u64,
+    ) {
+        let etat = etat_frais();
+        let (cle_a, cle_b) = (cle(7), cle(8));
+        let (cle_a1, cle_a2, cle_b1) = (cle(1), cle(2), cle(3));
+        let ms = maintenant_ms();
+        let (a1, b1, compte_b) = {
+            let mut g = etat.lock().unwrap();
+            let ca = inscrire_compte(&mut g, &cle_a);
+            let cb = inscrire_compte(&mut g, &cle_b);
+            let a1 = enregistrer_appareil(&mut g, &ca, &cle_a, &cle_a1);
+            enregistrer_appareil(&mut g, &ca, &cle_a, &cle_a2);
+            let b1 = enregistrer_appareil(&mut g, &cb, &cle_b, &cle_b1);
+            let sig = signe_presence(&cle_a1, "192.0.2.10:9000", ms + 60_000, &a1);
+            let inner = &mut *g;
+            inner
+                .presence
+                .publier(
+                    &inner.registre,
+                    &ca,
+                    &a1,
+                    "192.0.2.10:9000",
+                    60_000,
+                    ms,
+                    &sig,
+                )
+                .unwrap();
+            (a1, b1, cb)
+        };
+        (etat, a1, b1, cle_a, cle_b1, compte_b, ms)
+    }
+
+    #[test]
+    fn annuaire_apres_autorisation_200() {
+        let (etat, a1, b1, cle_a, cle_b1, compte_b, ms) = scene();
+        let corps = corps_autorisation(&cle_a, &compte_b, Portee::Tous, false);
+        let (s, c) = repondre(&etat, "POST", "/autoriser", &corps, "1.2.3.4", &[]);
+        assert_eq!(s, 200, "{c}");
+
+        let url = format!("/annuaire?appareil={}&maintenant_ms={}", a1.as_str(), ms);
+        let h = en_tetes_appelant(&b1, maintenant_ms(), &[4u8; 16], &cle_b1, &url);
+        let (s, c) = repondre(&etat, "GET", &url, "", "1.2.3.4", &h);
+        assert_eq!(s, 200, "{c}");
+        assert!(c.contains("192.0.2.10:9000"), "{c}");
+
+        // /grants : B voit l'autorisation reçue.
+        let h = en_tetes_appelant(&b1, maintenant_ms(), &[5u8; 16], &cle_b1, "/grants");
+        let (s, c) = repondre(&etat, "GET", "/grants", "", "1.2.3.4", &h);
+        assert_eq!(s, 200, "{c}");
+        let v: Value = serde_json::from_str(&c).unwrap();
+        assert_eq!(v["recues"].as_array().unwrap().len(), 1);
+        assert!(v["octroyees"].as_array().unwrap().is_empty());
+
+        // DELETE retire le droit.
+        let (s, _) = repondre(&etat, "DELETE", "/autoriser", &corps, "1.2.3.4", &[]);
+        assert_eq!(s, 200);
+        let h = en_tetes_appelant(&b1, maintenant_ms(), &[6u8; 16], &cle_b1, &url);
+        let (s, _) = repondre(&etat, "GET", &url, "", "1.2.3.4", &h);
+        assert_eq!(s, 403);
+    }
+
+    #[test]
+    fn annuaire_sans_autorisation_403() {
+        let (etat, a1, b1, _cle_a, cle_b1, _cb, ms) = scene();
+        let url = format!("/annuaire?appareil={}&maintenant_ms={}", a1.as_str(), ms);
+        let h = en_tetes_appelant(&b1, maintenant_ms(), &[4u8; 16], &cle_b1, &url);
+        let (s, _) = repondre(&etat, "GET", &url, "", "1.2.3.4", &h);
+        assert_eq!(s, 403);
+    }
+
+    #[test]
+    fn autoriser_signature_fausse_400() {
+        let (etat, _a1, _b1, cle_a, _cle_b1, compte_b, _ms) = scene();
+        let corps = corps_autorisation(&cle_a, &compte_b, Portee::Tous, true);
+        let (s, _) = repondre(&etat, "POST", "/autoriser", &corps, "1.2.3.4", &[]);
+        assert_eq!(s, 400);
+        assert!(etat.lock().unwrap().autorisations.octroyees.is_empty());
     }
 }
