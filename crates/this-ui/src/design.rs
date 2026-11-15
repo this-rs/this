@@ -84,7 +84,7 @@ pub fn kpi(label: &str, value: String, hint: String) -> AnyView {
 
 /// Une section vide : on dit ce qui manque, pas seulement qu'il n'y a rien.
 pub fn empty(message: impl Into<String>) -> AnyView {
-    view! { <p class="empty">{message.into()}</p> }.into_any()
+    view! { <p class="vw-empty">{message.into()}</p> }.into_any()
 }
 
 /// Les variantes d'un bouton. Un enum, pas une chaîne : `Btn::Primry` ne compile pas.
