@@ -132,6 +132,11 @@ pub mod class {
     pub const COLUMN: &str = "vw-column";
     pub const CONFIRM: &str = "vw-confirm";
 
+    /// Barre de navigation basse persistante d'une app native (onglets bas).
+    pub const TABBAR: &str = "vw-tabbar";
+    pub const TABBAR_ITEM: &str = "vw-tabbar-item";
+    pub const TABBAR_ICO: &str = "vw-tabbar-ico";
+
     pub const STATE: &str = "vw-state";
     pub const LOADING: &str = "vw-loading";
     pub const SKELETON: &str = "vw-skeleton";
@@ -153,10 +158,38 @@ pub mod class {
     pub const TRANSITION_NONE: &str = "vw-transition-none";
     pub const TRANSITION_FADE: &str = "vw-transition-fade";
     pub const TRANSITION_SLIDE: &str = "vw-transition-slide";
+    pub const BTN_PRIMARY: &str = "vw-btn--primary";
+    pub const BTN_SECONDARY: &str = "vw-btn--secondary";
+    pub const BTN_GHOST: &str = "vw-btn--ghost";
+    pub const BTN_DANGER: &str = "vw-btn--danger";
+    pub const CELLS: &str = "vw-cells";
+    pub const CELL: &str = "vw-cell";
+    pub const CELL_LEADING: &str = "vw-cell-leading";
+    pub const CELL_MAIN: &str = "vw-cell-main";
+    pub const CELL_TITLE: &str = "vw-cell-title";
+    pub const CELL_SUB: &str = "vw-cell-sub";
+    pub const CELL_TRAILING: &str = "vw-cell-trailing";
+    pub const SECTION: &str = "vw-section";
+    pub const SECTION_TITLE: &str = "vw-section-title";
+    pub const FIELD_LABEL: &str = "vw-field-label";
 }
 
 /// Every class the renderer draws. Must mirror [`class`].
 pub const ALL: &[&str] = &[
+    class::BTN_PRIMARY,
+    class::BTN_SECONDARY,
+    class::BTN_GHOST,
+    class::BTN_DANGER,
+    class::CELLS,
+    class::CELL,
+    class::CELL_LEADING,
+    class::CELL_MAIN,
+    class::CELL_TITLE,
+    class::CELL_SUB,
+    class::CELL_TRAILING,
+    class::SECTION,
+    class::SECTION_TITLE,
+    class::FIELD_LABEL,
     class::SURFACE,
     class::SIDEBAR,
     class::HEADER,
@@ -268,6 +301,9 @@ pub const ALL: &[&str] = &[
     class::COLUMNS,
     class::COLUMN,
     class::CONFIRM,
+    class::TABBAR,
+    class::TABBAR_ITEM,
+    class::TABBAR_ICO,
     class::STATE,
     class::LOADING,
     class::SKELETON,
@@ -671,6 +707,20 @@ pub const CSS: &str = r#"
 .vw-field input, .vw-field select { background: var(--vw-card, #fff);
   border: 1px solid var(--vw-line, rgba(0,0,0,.16)); border-radius: 10px; min-height: 44px;
   padding: 0 10px; font: inherit; color: inherit; min-width: 0; width: 100%; }
+
+/* Barre de navigation basse persistante (tab bar native). Posée en bas, toujours
+   visible ; les entrées sont des boutons égaux qui s'étirent, l'icône au-dessus du
+   libellé. `env(safe-area-inset-bottom)` libère la zone de l'indicateur d'accueil
+   sur iPhone : c'est la barre, pas le contenu, qui la réserve. */
+.vw-tabbar { position: fixed; left: 0; right: 0; bottom: 0; display: flex; height: 56px;
+  padding-bottom: env(safe-area-inset-bottom); background: var(--vw-card, #fff);
+  border-top: 1px solid var(--vw-line, #ddd); z-index: 60; }
+.vw-tabbar-item { flex: 1 1 0; min-width: 0; display: flex; flex-direction: column;
+  align-items: center; justify-content: center; gap: 2px; min-height: 56px; border: 0;
+  background: transparent; color: var(--vw-muted, #666); font: inherit; font-size: .72em;
+  cursor: pointer; }
+.vw-tabbar-item.is-active { color: var(--vw-accent, #4f46e5); }
+.vw-tabbar-item .vw-tabbar-ico { font-size: 1.15em; line-height: 1; }
 "#;
 
 #[cfg(test)]
