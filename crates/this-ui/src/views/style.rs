@@ -643,6 +643,34 @@ pub const CSS: &str = r#"
   .vw-row { flex-direction: column; align-items: stretch; }
   .vw-layout-grid { grid-template-columns: 1fr; }
 }
+/* Design system natif : variantes de bouton, liste de cellules, section, champ.
+   La liste du contrat de vues occupe déjà `.vw-list*` : celle des primitives s'appelle
+   `.vw-cells` / `.vw-cell*` pour ne pas écraser les vues existantes. */
+.vw-btn--primary { background: var(--vw-accent, #4f46e5); border-color: var(--vw-accent, #4f46e5); color: #fff; }
+.vw-btn--secondary { background: var(--vw-card, #fff); border: 1px solid var(--vw-line, rgba(0,0,0,.16)); color: inherit; }
+.vw-btn--ghost { background: transparent; border-color: transparent;
+  color: var(--vw-muted, color-mix(in srgb, currentColor 60%, transparent)); }
+.vw-btn--ghost:hover { color: inherit; }
+.vw-btn--danger { background: var(--vw-danger, #b91c1c); border-color: var(--vw-danger, #b91c1c); color: #fff; }
+.vw-cells { border: 1px solid var(--vw-line, rgba(0,0,0,.16)); border-radius: 12px;
+  background: var(--vw-card, #fff); overflow: hidden; }
+.vw-cell { display: grid; grid-template-columns: auto 1fr auto; gap: 12px; min-height: 48px;
+  padding: 10px 12px; align-items: center; border-bottom: 1px solid var(--vw-line, rgba(0,0,0,.16)); }
+.vw-cell:last-child { border-bottom: 0; }
+.vw-cell-leading { display: flex; align-items: center; }
+.vw-cell-main { min-width: 0; }
+.vw-cell-title { font-weight: 500; }
+.vw-cell-sub { font-size: .8em; line-height: 1.3; white-space: nowrap; overflow: hidden;
+  text-overflow: ellipsis; color: var(--vw-muted, color-mix(in srgb, currentColor 60%, transparent)); }
+.vw-cell-trailing { display: flex; align-items: center; gap: 8px; }
+.vw-section { margin-top: 16px; }
+.vw-section-title { margin: 0 0 8px; text-align: start; font-size: .8em; text-transform: uppercase;
+  letter-spacing: .04em; color: var(--vw-muted, color-mix(in srgb, currentColor 60%, transparent)); }
+.vw-field-label { font-size: .8em; line-height: 1.3;
+  color: var(--vw-muted, color-mix(in srgb, currentColor 60%, transparent)); }
+.vw-field input, .vw-field select { background: var(--vw-card, #fff);
+  border: 1px solid var(--vw-line, rgba(0,0,0,.16)); border-radius: 10px; min-height: 44px;
+  padding: 0 10px; font: inherit; color: inherit; min-width: 0; width: 100%; }
 "#;
 
 #[cfg(test)]

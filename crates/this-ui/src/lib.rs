@@ -41,7 +41,7 @@ pub mod views;
 pub use app_mode::behave_like_app;
 pub use browser::{Cell, Column, EntityTable, Row};
 pub use chrome::{drag_region, install_chrome, use_chrome};
-pub use design::{Tone, badge, empty, kpi, meter};
+pub use design::{Btn, Tone, badge, empty, kpi, meter, row, section};
 pub use device::BrowserDevice;
 pub use lifecycle::{is_online, on_resume};
 pub use model::{Entity, Field, Kind, Link, Module, count, money_f};

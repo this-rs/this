@@ -86,3 +86,56 @@ pub fn kpi(label: &str, value: String, hint: String) -> AnyView {
 pub fn empty(message: impl Into<String>) -> AnyView {
     view! { <p class="empty">{message.into()}</p> }.into_any()
 }
+
+/// Les variantes d'un bouton. Un enum, pas une chaîne : `Btn::Primry` ne compile pas.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Btn {
+    Primary,
+    Secondary,
+    Ghost,
+    Danger,
+}
+
+impl Btn {
+    /// Classes CSS complètes (`vw-btn vw-btn--primary`, …).
+    pub fn class(self) -> &'static str {
+        match self {
+            Btn::Primary => "vw-btn vw-btn--primary",
+            Btn::Secondary => "vw-btn vw-btn--secondary",
+            Btn::Ghost => "vw-btn vw-btn--ghost",
+            Btn::Danger => "vw-btn vw-btn--danger",
+        }
+    }
+}
+
+/// Une cellule de liste : élément de tête, titre, sous-titre, éléments de queue.
+/// À poser dans un conteneur `.vw-cells`.
+pub fn row<L: IntoView, T: IntoView, S: IntoView, R: IntoView>(
+    leading: L,
+    titre: T,
+    sous: S,
+    trailing: R,
+) -> AnyView {
+    view! {
+        <div class="vw-cell">
+            <div class="vw-cell-leading">{leading}</div>
+            <div class="vw-cell-main">
+                <div class="vw-cell-title">{titre}</div>
+                <div class="vw-cell-sub">{sous}</div>
+            </div>
+            <div class="vw-cell-trailing">{trailing}</div>
+        </div>
+    }
+    .into_any()
+}
+
+/// Une section titrée.
+pub fn section<T: IntoView>(titre: &str, contenu: T) -> AnyView {
+    view! {
+        <section class="vw-section">
+            <h3 class="vw-section-title">{titre.to_string()}</h3>
+            {contenu}
+        </section>
+    }
+    .into_any()
+}
