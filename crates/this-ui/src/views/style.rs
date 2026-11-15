@@ -36,6 +36,9 @@ pub mod class {
     pub const MODAL_BODY: &str = "vw-modal-body";
     pub const MODAL_LAYER: &str = "vw-modal-layer";
     pub const MODAL_BACKDROP: &str = "vw-modal-backdrop";
+    pub const DIALOG_BACKDROP: &str = "vw-dialog-backdrop";
+    pub const DIALOG: &str = "vw-dialog";
+    pub const DIALOG_HEAD: &str = "vw-dialog-head";
 
     pub const TEXT: &str = "vw-text";
     pub const CAPTION: &str = "vw-caption";
@@ -212,6 +215,9 @@ pub const ALL: &[&str] = &[
     class::MODAL_BODY,
     class::MODAL_LAYER,
     class::MODAL_BACKDROP,
+    class::DIALOG_BACKDROP,
+    class::DIALOG,
+    class::DIALOG_HEAD,
     class::TEXT,
     class::CAPTION,
     class::CHART,
@@ -418,6 +424,17 @@ pub const CSS: &str = r#"
 .vw-modal-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .vw-modal-head h3 { margin: 0; font: 600 15px/1.3 inherit; }
 .vw-modal-body { display: flex; flex-direction: column; gap: 12px; }
+.vw-dialog-backdrop { position: fixed; inset: 0; z-index: 1000; display: flex;
+  align-items: center; justify-content: center; padding: 16px; box-sizing: border-box;
+  background: var(--vw-backdrop, rgba(0,0,0,.5)); }
+.vw-dialog { box-sizing: border-box; width: 100%; max-width: 560px; min-width: 0; max-height: 90vh;
+  overflow: auto; display: flex; flex-direction: column; gap: 12px; padding: 16px;
+  border: 1px solid var(--vw-line, rgba(0,0,0,.12)); border-radius: 14px;
+  background: var(--vw-card, #fff); color: var(--vw-ink, #16181d);
+  box-shadow: 0 18px 48px rgba(0,0,0,.18); }
+.vw-dialog > * { min-width: 0; }
+.vw-dialog-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.vw-dialog-head h2 { margin: 0; font: 600 16px/1.3 inherit; }
 
 .vw-text { font: inherit; }
 .vw-caption { display: block; margin: 0; padding: 0; border: 0; background: none;
