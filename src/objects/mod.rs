@@ -3,7 +3,7 @@
 //! Indépendante des backends d'entités (`storage`). Toute clé est préfixée par
 //! `tenants/<tenant>/` et ne peut pas en sortir (`..` et `/` initial refusés).
 
-use bytes::Bytes;
+pub use bytes::Bytes;
 use futures::TryStreamExt;
 use object_store::{ObjectStore, path::Path};
 use std::sync::Arc;
