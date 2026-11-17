@@ -5,6 +5,7 @@
 
 pub use bytes::Bytes;
 use futures::TryStreamExt;
+pub use object_store::signer::Signer;
 use object_store::{ObjectStore, path::Path};
 use std::sync::Arc;
 use tokio::sync::broadcast;
@@ -52,8 +53,14 @@ fn maintenant_ms() -> i64 {
 #[derive(Clone)]
 pub struct Objets {
     store: Arc<dyn ObjectStore>,
+    /// Le signataire d'URL (S3/Azure/GCP), quand le store le permet. Le natif
+    /// l'utilise pour des URLs présignées ; un store local n'en a pas.
+    signer: Option<Arc<dyn Signer>>,
     diffusion: broadcast::Sender<EvenementObjet>,
 }
+
+pub mod televersement;
+pub use televersement::Televersement;
 
 fn verifier_tenant(tenant: &str) -> Result<(), String> {
     if tenant.is_empty() || tenant.contains('/') || tenant == ".." || tenant == "." {
@@ -85,7 +92,27 @@ pub fn chemin(tenant: &str, cle: &str) -> Result<Path, String> {
 impl Objets {
     pub fn new(store: Arc<dyn ObjectStore>) -> Self {
         let (diffusion, _) = broadcast::channel(CAPACITE_EVENEMENTS);
-        Self { store, diffusion }
+        Self {
+            store,
+            signer: None,
+            diffusion,
+        }
+    }
+
+    /// Comme [`Objets::new`], mais avec le **signataire** du même store S3 —
+    /// l'hôte peut alors obtenir des URLs présignées (`signataire()` + `chemin`).
+    pub fn avec_signature(store: Arc<dyn ObjectStore>, signer: Arc<dyn Signer>) -> Self {
+        let (diffusion, _) = broadcast::channel(CAPACITE_EVENEMENTS);
+        Self {
+            store,
+            signer: Some(signer),
+            diffusion,
+        }
+    }
+
+    /// Le signataire, si le store en a un (S3/Azure/GCP). `None` en local/mémoire.
+    pub fn signataire(&self) -> Option<Arc<dyn Signer>> {
+        self.signer.clone()
     }
 
     /// Un espace rangé sur le **disque local**, sous `dir`.
@@ -197,6 +224,23 @@ impl Objets {
             Err(e) => Err(format!("existence de {cle} : {e}")),
         }
     }
+
+    /// Démarre un téléversement **multipart** de `cle`. On pousse des parties
+    /// (`Televersement::partie`), puis `finir` scelle — ou `annuler` libère.
+    pub async fn televerser(&self, tenant: &str, cle: &str) -> Result<Televersement, String> {
+        let p = chemin(tenant, cle)?;
+        let inner = self
+            .store
+            .put_multipart(&p)
+            .await
+            .map_err(|e| format!("début de téléversement de {cle} : {e}"))?;
+        Ok(Televersement::nouveau(
+            inner,
+            self.diffusion.clone(),
+            tenant.to_string(),
+            cle.to_string(),
+        ))
+    }
 }
 
 #[cfg(test)]
@@ -277,6 +321,31 @@ mod tests {
         assert_eq!(&o.lire("alice", "a/b.txt").await.unwrap()[..], b"x");
         assert!(o.existe("alice", "a/b.txt").await.unwrap());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn televersement_multipart_reconstitue_l_objet() {
+        let o = Objets::new(Arc::new(InMemory::new()) as Arc<dyn ObjectStore>);
+        let mut rx = o.abonner();
+        let mut t = o.televerser("alice", "gros.bin").await.unwrap();
+        t.partie(Bytes::from_static(b"aaa")).await.unwrap();
+        t.partie(Bytes::from_static(b"bbb")).await.unwrap();
+        assert_eq!(t.octets_ecrits(), 6);
+        t.finir().await.unwrap();
+        assert_eq!(&o.lire("alice", "gros.bin").await.unwrap()[..], b"aaabbb");
+        let e = rx.recv().await.unwrap();
+        assert_eq!(e.genre, GenreObjet::Ecrit);
+        assert_eq!(e.taille, 6);
+        assert_eq!(e.cle, "gros.bin");
+    }
+
+    #[tokio::test]
+    async fn televersement_annule_n_ecrit_rien() {
+        let o = Objets::new(Arc::new(InMemory::new()) as Arc<dyn ObjectStore>);
+        let mut t = o.televerser("alice", "jete.bin").await.unwrap();
+        t.partie(Bytes::from_static(b"x")).await.unwrap();
+        t.annuler().await.unwrap();
+        assert!(!o.existe("alice", "jete.bin").await.unwrap());
     }
 }
 

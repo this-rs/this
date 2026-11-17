@@ -37,7 +37,7 @@ tokio = { version = "1.40", features = ["full"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
 async-trait = "0.1"
 futures = "0.3"
-object_store = { version = "0.11", optional = true }
+object_store = { version = "0.11", optional = true, features = ["cloud"] }
 bytes = { version = "1", optional = true }
 
 # Web framework
