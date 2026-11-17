@@ -39,6 +39,14 @@ pub enum GenreObjet {
     Supprime,
 }
 
+/// L'accès visé par une URL présignée.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GenreUrl {
+    Lire,
+    Ecrire,
+    Supprimer,
+}
+
 /// Combien d'événements non lus un abonné lent peut accumuler avant de perdre
 /// les plus anciens : un abonné lent ne bloque jamais une écriture.
 const CAPACITE_EVENEMENTS: usize = 256;
@@ -277,6 +285,40 @@ impl Objets {
     }
 }
 
+#[cfg(feature = "presign")]
+impl Objets {
+    /// Une URL **présignée** pour `cle` : un tiers sans identifiants S3 peut
+    /// lire/écrire/supprimer pendant `secs`. Rend `Err` si le store ne signe pas
+    /// (local/mémoire) — un presign exige un backend cloud.
+    ///
+    /// POURQUOI une feature : `object_store` pin `reqwest 0.12` pour signer, et
+    /// l'hôte a souvent `reqwest 0.13`. Sans `presign`, aucune des deux piles
+    /// n'est dupliquée ; avec, l'app choisit de payer la seconde.
+    pub async fn url_presignee(
+        &self,
+        genre: GenreUrl,
+        tenant: &str,
+        cle: &str,
+        secs: u64,
+    ) -> Result<String, String> {
+        let signer = self
+            .signer
+            .as_ref()
+            .ok_or_else(|| "ce store ne signe pas (local/mémoire)".to_string())?;
+        let p = chemin(tenant, cle)?;
+        let method = match genre {
+            GenreUrl::Lire => reqwest_presign::Method::GET,
+            GenreUrl::Ecrire => reqwest_presign::Method::PUT,
+            GenreUrl::Supprimer => reqwest_presign::Method::DELETE,
+        };
+        let url = signer
+            .signed_url(method, &p, std::time::Duration::from_secs(secs))
+            .await
+            .map_err(|e| format!("presign de « {cle} » : {e}"))?;
+        Ok(url.to_string())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -398,6 +440,15 @@ mod tests {
         assert_eq!(total as usize, contenu.len());
         assert_eq!(o.lire("alice", "gros.bin").await.unwrap().to_vec(), contenu);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(feature = "presign")]
+    #[tokio::test]
+    async fn presign_refuse_sans_signataire() {
+        let o = Objets::new(Arc::new(InMemory::new()) as Arc<dyn ObjectStore>);
+        let r = o.url_presignee(GenreUrl::Lire, "alice", "x.json", 60).await;
+        let e = r.expect_err("un store local ne signe pas");
+        assert!(e.contains("ne signe pas"), "{e}");
     }
 }
 
