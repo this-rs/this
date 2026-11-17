@@ -143,8 +143,8 @@ obrain-reactive = { version = "0.0.1", path = "../../obrain/obrain-db/crates/obr
 
 # vite-rs — Vite-like static/dev frontend serving reused by the `frontend`
 # feature (dev loop + AI bridge + static file rules + guaranteed cache
-# freshness). Local checkout: ~/projects/vite-rs (github this-rs/vite-rs).
-this-vite = { version = "0.0.1", path = "../../vite-rs", optional = true }
+# freshness). Figé sur un commit public (this-rs/vite-rs@dcf233c) : plus de chemin local.
+this-vite = { version = "0.0.1", git = "https://github.com/this-rs/vite-rs", rev = "dcf233cd154ed7416338c9141736ff9efa19f199", optional = true }
 
 # WAMI — `version` + `git` + `rev` : le hash fixe le code pendant le développement, la `version`
 # est ce que cargo résout à la PUBLICATION (`path` et `git` sont retirés du manifeste empaqueté).
@@ -220,7 +220,7 @@ obrain = ["dep:obrain-engine", "dep:obrain-common", "dep:obrain-core", "dep:obra
 # moteur cognitif d'obrain (`obrain-cognitive`) n'est pas une dépendance.
 obrain-cognitive = ["obrain"]
 # vite-rs based SPA frontend hosting (this::server::frontend). Not part of
-# `all` because it needs the local vite-rs checkout (path dep), like obrain.
+# `all` because it is an optional dependency (frontend feature).
 frontend = ["dep:this-vite"]
 all = ["in-memory", "dynamodb", "postgres", "mongodb_backend", "neo4j", "scylladb", "mysql", "lmdb", "graphql", "grpc", "websocket", "push", "module-signing", "oidc"]
 
