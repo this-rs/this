@@ -16,11 +16,12 @@
 //! l'appelant le demande ; le flux d'événements (créé/modifié/supprimé) se
 //! branche côté hôte sur le même `Objets` (voir `events`), pas ici.
 
-use super::Objets;
+use super::{EvenementObjet, GenreObjet, Objets};
 use async_trait::async_trait;
 use bytes::Bytes;
 use serde_json::{Value, json};
 use this_harness::{Cancel, Declaration, Outcome, ToolCall, ToolSpec, Toolbox};
+use tokio::sync::broadcast;
 
 /// Surface d'outils « objets » pour un compte donné.
 #[derive(Clone)]
@@ -81,6 +82,30 @@ impl ObjetsToolbox {
         Self {
             objets,
             tenant: tenant.into(),
+        }
+    }
+
+    /// S'abonner au flux des changements (écrit / supprimé) de l'espace.
+    ///
+    /// À brancher dans la boucle de l'hôte : chaque événement reçu peut devenir
+    /// un [`super::EvenementObjet`] rendu par [`Self::indice`], injecté dans le
+    /// contexte du harnais ou consommé par un module.
+    pub fn abonner(&self) -> broadcast::Receiver<EvenementObjet> {
+        self.objets.abonner()
+    }
+
+    /// Un événement rendu en une ligne lisible pour le contexte du harnais.
+    pub fn indice(e: &EvenementObjet) -> String {
+        match e.genre {
+            GenreObjet::Ecrit => {
+                format!(
+                    "objet écrit : {} ({} o) [tenant {}]",
+                    e.cle, e.taille, e.tenant
+                )
+            }
+            GenreObjet::Supprime => {
+                format!("objet supprimé : {} [tenant {}]", e.cle, e.tenant)
+            }
         }
     }
 
@@ -461,5 +486,28 @@ mod tests {
                 "déclaration manquante : {outil}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn un_evenement_est_emis_a_l_ecriture_et_a_la_suppression() {
+        let b = boite();
+        let mut rx = b.abonner();
+        b.executer(&appel(
+            "objets_ecrire",
+            json!({"cle":"graphes/g.json","contenu":"{\"n\":2}"}),
+        ))
+        .await;
+        let e = rx.recv().await.expect("un événement d'écriture");
+        assert_eq!(e.genre, GenreObjet::Ecrit);
+        assert_eq!(e.cle, "graphes/g.json");
+        assert_eq!(e.tenant, "alice");
+        assert!(ObjetsToolbox::indice(&e).contains("écrit"));
+
+        b.executer(&appel("objets_supprimer", json!({"cle":"graphes/g.json"})))
+            .await;
+        let e2 = rx.recv().await.expect("un événement de suppression");
+        assert_eq!(e2.genre, GenreObjet::Supprime);
+        assert_eq!(e2.cle, "graphes/g.json");
+        assert!(ObjetsToolbox::indice(&e2).contains("supprimé"));
     }
 }

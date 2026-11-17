@@ -7,6 +7,7 @@ use bytes::Bytes;
 use futures::TryStreamExt;
 use object_store::{ObjectStore, path::Path};
 use std::sync::Arc;
+use tokio::sync::broadcast;
 
 /// Une entrée listée : clé relative au tenant.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -17,9 +18,41 @@ pub struct Entree {
     pub modifie_ms: i64,
 }
 
+/// Ce qui est arrivé à un objet de l'espace.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EvenementObjet {
+    pub tenant: String,
+    /// Clé sans le préfixe `tenants/<tenant>/`.
+    pub cle: String,
+    pub genre: GenreObjet,
+    /// Taille en octets (0 pour une suppression).
+    pub taille: u64,
+    /// Date de l'événement (ms depuis l'époque).
+    pub a_ms: i64,
+}
+
+/// La nature d'un changement.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GenreObjet {
+    Ecrit,
+    Supprime,
+}
+
+/// Combien d'événements non lus un abonné lent peut accumuler avant de perdre
+/// les plus anciens : un abonné lent ne bloque jamais une écriture.
+const CAPACITE_EVENEMENTS: usize = 256;
+
+fn maintenant_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
 #[derive(Clone)]
 pub struct Objets {
     store: Arc<dyn ObjectStore>,
+    diffusion: broadcast::Sender<EvenementObjet>,
 }
 
 fn verifier_tenant(tenant: &str) -> Result<(), String> {
@@ -51,16 +84,34 @@ pub fn chemin(tenant: &str, cle: &str) -> Result<Path, String> {
 
 impl Objets {
     pub fn new(store: Arc<dyn ObjectStore>) -> Self {
-        Self { store }
+        let (diffusion, _) = broadcast::channel(CAPACITE_EVENEMENTS);
+        Self { store, diffusion }
+    }
+
+    /// S'abonner au flux des changements de l'espace (écrit / supprimé).
+    ///
+    /// Chaque abonné reçoit **tous** les tenants : c'est à lui de filtrer par
+    /// `tenant`. Un message émis avant l'abonnement n'est pas rejoué (diffusion
+    /// « à partir de maintenant »).
+    pub fn abonner(&self) -> broadcast::Receiver<EvenementObjet> {
+        self.diffusion.subscribe()
     }
 
     pub async fn ecrire(&self, tenant: &str, cle: &str, octets: Bytes) -> Result<(), String> {
         let p = chemin(tenant, cle)?;
+        let taille = octets.len() as u64;
         self.store
             .put(&p, octets.into())
             .await
-            .map(|_| ())
-            .map_err(|e| format!("écriture de {cle} : {e}"))
+            .map_err(|e| format!("écriture de {cle} : {e}"))?;
+        let _ = self.diffusion.send(EvenementObjet {
+            tenant: tenant.to_string(),
+            cle: cle.to_string(),
+            genre: GenreObjet::Ecrit,
+            taille,
+            a_ms: maintenant_ms(),
+        });
+        Ok(())
     }
 
     pub async fn lire(&self, tenant: &str, cle: &str) -> Result<Bytes, String> {
@@ -112,7 +163,15 @@ impl Objets {
         self.store
             .delete(&p)
             .await
-            .map_err(|e| format!("suppression de {cle} : {e}"))
+            .map_err(|e| format!("suppression de {cle} : {e}"))?;
+        let _ = self.diffusion.send(EvenementObjet {
+            tenant: tenant.to_string(),
+            cle: cle.to_string(),
+            genre: GenreObjet::Supprime,
+            taille: 0,
+            a_ms: maintenant_ms(),
+        });
+        Ok(())
     }
 
     pub async fn existe(&self, tenant: &str, cle: &str) -> Result<bool, String> {
