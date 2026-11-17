@@ -192,3 +192,6 @@ mod tests {
         assert!(!o.existe("t", "k").await.unwrap());
     }
 }
+
+#[cfg(feature = "objects-toolbox")]
+pub mod toolbox;

@@ -206,6 +206,7 @@ proxy = ["dep:reqwest"]
 websocket = []
 # Couche objets (S3/MinIO/local via object_store), isolée par tenant. Indépendante des backends d'entités.
 objects = ["dep:object_store", "dep:bytes"]
+objects-toolbox = ["objects", "dep:this-harness"]
 wami = ["dep:jsonwebtoken", "dep:ed25519-dalek", "dep:base64", "dep:argon2", "dep:wami", "dep:wami-core", "dep:wami-condition"]
 # Validation des jetons d'un OpenID Provider externe, côté resource server (ADR D11) :
 # découverte, JWKS avec sélection par `kid` et rotation. Aucun émetteur embarqué.
