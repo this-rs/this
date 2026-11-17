@@ -88,6 +88,17 @@ impl Objets {
         Self { store, diffusion }
     }
 
+    /// Un espace rangé sur le **disque local**, sous `dir`.
+    ///
+    /// Même API, même isolement par tenant — utile quand il n'y a pas de S3
+    /// (le poste, l'appareil). Le natif peut l'utiliser sans config réseau ;
+    /// S3 reste un autre `ObjectStore` passé à [`Objets::new`].
+    pub fn local(dir: impl AsRef<std::path::Path>) -> Result<Self, String> {
+        let store = object_store::local::LocalFileSystem::new_with_prefix(dir)
+            .map_err(|e| format!("dossier objets invalide : {e}"))?;
+        Ok(Self::new(Arc::new(store)))
+    }
+
     /// S'abonner au flux des changements de l'espace (écrit / supprimé).
     ///
     /// Chaque abonné reçoit **tous** les tenants : c'est à lui de filtrer par
