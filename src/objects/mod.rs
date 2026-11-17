@@ -241,6 +241,40 @@ impl Objets {
             cle.to_string(),
         ))
     }
+
+    /// Téléverse un **fichier** par parties (multipart). Chaque partie fait
+    /// `taille_part` octets (défaut 8 Mio, minimum 5 Mio comme S3). Rend le
+    /// nombre d'octets envoyés. C'est le chemin d'un gros fichier sur mobile :
+    /// rien n'est chargé d'un coup, la mémoire reste bornée à une partie.
+    pub async fn televerser_chemin(
+        &self,
+        tenant: &str,
+        cle: &str,
+        chemin: impl AsRef<std::path::Path>,
+        taille_part: Option<usize>,
+    ) -> Result<u64, String> {
+        use tokio::io::AsyncReadExt;
+        let chemin = chemin.as_ref();
+        let part = taille_part.unwrap_or(8 * 1024 * 1024).max(5 * 1024 * 1024);
+        let mut fichier = tokio::fs::File::open(chemin)
+            .await
+            .map_err(|e| format!("ouverture de {} : {e}", chemin.display()))?;
+        let mut tel = self.televerser(tenant, cle).await?;
+        let mut tampon = vec![0u8; part];
+        loop {
+            let n = fichier
+                .read(&mut tampon)
+                .await
+                .map_err(|e| format!("lecture de {} : {e}", chemin.display()))?;
+            if n == 0 {
+                break;
+            }
+            tel.partie(Bytes::copy_from_slice(&tampon[..n])).await?;
+        }
+        let total = tel.octets_ecrits();
+        tel.finir().await?;
+        Ok(total)
+    }
 }
 
 #[cfg(test)]
@@ -346,6 +380,24 @@ mod tests {
         t.partie(Bytes::from_static(b"x")).await.unwrap();
         t.annuler().await.unwrap();
         assert!(!o.existe("alice", "jete.bin").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn televerser_chemin_envoie_un_fichier_par_parties() {
+        let dir = std::env::temp_dir().join(format!("objets-tel-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("f.bin");
+        let contenu: Vec<u8> = (0..6 * 1024 * 1024).map(|i| (i % 251) as u8).collect();
+        std::fs::write(&f, &contenu).unwrap();
+        let o = Objets::local(dir.join("store")).unwrap();
+        let total = o
+            .televerser_chemin("alice", "gros.bin", &f, Some(5 * 1024 * 1024))
+            .await
+            .unwrap();
+        assert_eq!(total as usize, contenu.len());
+        assert_eq!(o.lire("alice", "gros.bin").await.unwrap().to_vec(), contenu);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 
