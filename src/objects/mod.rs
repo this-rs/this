@@ -94,6 +94,10 @@ impl Objets {
     /// (le poste, l'appareil). Le natif peut l'utiliser sans config réseau ;
     /// S3 reste un autre `ObjectStore` passé à [`Objets::new`].
     pub fn local(dir: impl AsRef<std::path::Path>) -> Result<Self, String> {
+        let dir = dir.as_ref();
+        // `LocalFileSystem` exige une racine existante (il la canonicalise).
+        std::fs::create_dir_all(dir)
+            .map_err(|e| format!("dossier objets {} : {e}", dir.display()))?;
         let store = object_store::local::LocalFileSystem::new_with_prefix(dir)
             .map_err(|e| format!("dossier objets invalide : {e}"))?;
         Ok(Self::new(Arc::new(store)))
