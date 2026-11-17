@@ -211,6 +211,8 @@ objects = ["dep:object_store", "dep:bytes"]
 objects-toolbox = ["objects", "dep:this-harness"]
 # URLs présignées (S3/Azure/GCP) : ajoute reqwest 0.12, aligné sur object_store.
 presign = ["objects", "dep:reqwest_presign"]
+# Bucket S3/MinIO : ajoute le backend AWS d'object_store (AmazonS3).
+s3 = ["objects", "object_store/aws"]
 wami = ["dep:jsonwebtoken", "dep:ed25519-dalek", "dep:base64", "dep:argon2", "dep:wami", "dep:wami-core", "dep:wami-condition"]
 # Validation des jetons d'un OpenID Provider externe, côté resource server (ADR D11) :
 # découverte, JWKS avec sélection par `kid` et rotation. Aucun émetteur embarqué.

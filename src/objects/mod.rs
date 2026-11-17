@@ -285,6 +285,34 @@ impl Objets {
     }
 }
 
+#[cfg(feature = "s3")]
+impl Objets {
+    /// Un espace rangé dans un **bucket S3/**MinIO** (ou compatible). Même API et même
+    /// isolement par tenant que le local. `endpoint` vide : AWS par défaut.
+    pub fn s3(
+        bucket: &str,
+        endpoint: &str,
+        region: &str,
+        access: &str,
+        secret: &str,
+    ) -> Result<Self, String> {
+        use object_store::aws::AmazonS3Builder;
+        let mut b = AmazonS3Builder::new()
+            .with_bucket_name(bucket)
+            .with_access_key_id(access)
+            .with_secret_access_key(secret)
+            .with_allow_http(true);
+        if !region.trim().is_empty() {
+            b = b.with_region(region);
+        }
+        if !endpoint.trim().is_empty() {
+            b = b.with_endpoint(endpoint);
+        }
+        let store = b.build().map_err(|e| format!("configuration S3 : {e}"))?;
+        Ok(Self::new(Arc::new(store)))
+    }
+}
+
 #[cfg(feature = "presign")]
 impl Objets {
     /// Une URL **présignée** pour `cle` : un tiers sans identifiants S3 peut
