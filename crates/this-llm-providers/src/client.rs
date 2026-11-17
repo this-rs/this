@@ -40,7 +40,7 @@ pub struct ChatRequest {
     pub user: String,
     /// Overrides the provider's `budget.max_output_tokens` for this call.
     pub max_output_tokens: Option<u32>,
-    pub temperature: f32,
+    pub temperature: Option<f32>,
 }
 
 impl ChatRequest {
@@ -49,7 +49,7 @@ impl ChatRequest {
             system: system.into(),
             user: user.into(),
             max_output_tokens: None,
-            temperature: 0.0,
+            temperature: None,
         }
     }
 }
@@ -74,7 +74,7 @@ pub struct TurnRequest {
     pub tools: Option<Value>,
     /// Overrides the provider's `budget.max_output_tokens` for this turn.
     pub max_output_tokens: Option<u32>,
-    pub temperature: f32,
+    pub temperature: Option<f32>,
     /// The model of THIS turn, when a router decided one (`Route::model`): it replaces the
     /// provider's configured model, and only for this turn. `None`: the configuration rules.
     pub model: Option<String>,
@@ -86,7 +86,7 @@ impl TurnRequest {
             messages,
             tools: None,
             max_output_tokens: None,
-            temperature: 0.0,
+            temperature: None,
             model: None,
         }
     }
@@ -509,9 +509,14 @@ impl ProviderClient {
         let mut body = json!({
             "model": model,
             "messages": messages,
-            "temperature": request.temperature,
             "max_tokens": max_output,
         });
+        // La température n'est envoyée QUE si l'appelant la fixe. Certains moteurs
+        // (SubQ) imposent `temperature = 1` et refusent toute autre valeur ; omise,
+        // l'API applique son défaut au lieu d'un 400.
+        if let Some(t) = request.temperature {
+            body["temperature"] = json!(t);
+        }
         if let Some(tools) = &request.tools {
             body["tools"] = tools.clone();
             body["tool_choice"] = json!("auto");
