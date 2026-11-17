@@ -529,10 +529,12 @@ impl ProviderClient {
             // un paramètre non supporté à NIM »). On perd l'usage du stream, on garde la
             // compatibilité.
         }
-        if self.config.preset.is_local() {
-            // Understood by vLLM and llama.cpp for Qwen-style models; ignored elsewhere.
-            // Not sent to hosted providers, which refuse unknown fields.
-            body["chat_template_kwargs"] = json!({ "enable_thinking": self.config.thinking });
+        // On n'envoie `enable_thinking` que pour ACTIVER la réflexion. L'envoyer à
+        // `false` casse les moteurs qui ne peuvent pas la désactiver (SubQ : « Thinking
+        // cannot be disabled for this model »). Par défaut (thinking = false) on
+        // n'envoie rien — le moteur applique son propre défaut.
+        if self.config.preset.is_local() && self.config.thinking {
+            body["chat_template_kwargs"] = json!({ "enable_thinking": true });
         }
         body
     }
