@@ -261,6 +261,19 @@ mod tests {
         o.supprimer("t", "k").await.unwrap();
         assert!(!o.existe("t", "k").await.unwrap());
     }
+
+    #[tokio::test]
+    async fn local_range_sur_le_disque() {
+        let dir = std::env::temp_dir().join(format!("objets-local-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let o = Objets::local(&dir).expect("store local");
+        o.ecrire("alice", "a/b.txt", bytes::Bytes::from_static(b"x"))
+            .await
+            .unwrap();
+        assert_eq!(&o.lire("alice", "a/b.txt").await.unwrap()[..], b"x");
+        assert!(o.existe("alice", "a/b.txt").await.unwrap());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
 
 #[cfg(feature = "objects-toolbox")]
