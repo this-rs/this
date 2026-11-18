@@ -309,7 +309,11 @@ impl Objets {
             b = b.with_endpoint(endpoint);
         }
         let store = b.build().map_err(|e| format!("configuration S3 : {e}"))?;
-        Ok(Self::new(Arc::new(store)))
+        // Le store S3 signe aussi : URLs présignées disponibles (feature `presign`).
+        Ok(Self::avec_signature(
+            Arc::new(store.clone()),
+            Arc::new(store),
+        ))
     }
 }
 
