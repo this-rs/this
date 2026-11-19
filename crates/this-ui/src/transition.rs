@@ -1,21 +1,48 @@
 //! Transitions d'écran — **partie du framework**, pas un style recollé par écran.
 //!
 //! Un changement de vue (navigation) devient une transition logique : l'appelant
-//! enveloppe son changement d'état dans [`naviguer`], le navigateur anime la sortie
-//! et l'entrée via la View Transitions API. Le visuel est fourni par les règles
+//! enveloppe son changement d'état dans [`naviguer`] (fondu doux) ou
+//! [`naviguer_sens`] (glissement directionnel, façon navigation iOS). Le navigateur
+//! anime via la View Transitions API ; le visuel est fourni par les règles
 //! `::view-transition-*` de [`crate::views::style`] — partagé par toutes les apps.
 
-/// Exécute `redessiner` dans une transition de vue si le navigateur la supporte
-/// (`document.startViewTransition`), sinon exécute simplement l'action (repli).
-///
-/// ```ignore
-/// naviguer(move || open.set(Some("espace".to_string())));
-/// ```
+/// Sens d'une transition directionnelle : on entre dans un écran, ou on en revient.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Sens {
+    /// On avance (vers un sous-écran) : la nouvelle vue glisse depuis la droite.
+    Avant,
+    /// On revient : la vue glisse depuis la gauche.
+    Arriere,
+}
+
+impl Sens {
+    fn attribut(self) -> &'static str {
+        match self {
+            Sens::Avant => "avant",
+            Sens::Arriere => "arriere",
+        }
+    }
+}
+
+/// Transition neutre (fondu doux) autour d'une navigation.
 pub fn naviguer(redessiner: impl FnOnce() + 'static) {
+    appliquer(redessiner, None);
+}
+
+/// Transition **directionnelle** : le sens donne le glissement (avancer / revenir).
+pub fn naviguer_sens(redessiner: impl FnOnce() + 'static, sens: Sens) {
+    appliquer(redessiner, Some(sens));
+}
+
+fn appliquer(redessiner: impl FnOnce() + 'static, sens: Option<Sens>) {
     #[cfg(target_arch = "wasm32")]
     {
         use wasm_bindgen::JsCast;
         if let Some(doc) = web_sys::window().and_then(|w| w.document()) {
+            if let Some(racine) = doc.document_element() {
+                let _ =
+                    racine.set_attribute("data-sens", sens.map(Sens::attribut).unwrap_or("neutre"));
+            }
             if let Ok(vt) = js_sys::Reflect::get(
                 &doc,
                 &wasm_bindgen::JsValue::from_str("startViewTransition"),

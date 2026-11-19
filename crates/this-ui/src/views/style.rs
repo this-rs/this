@@ -745,6 +745,14 @@ pub const CSS: &str = r#"
 @keyframes vw-vtx-in  { from { opacity: 0; transform: translateY(10px) scale(.995); } }
 ::view-transition-old(root) { animation: vw-vtx-out 160ms cubic-bezier(.4,0,.2,1) both; }
 ::view-transition-new(root) { animation: vw-vtx-in 220ms cubic-bezier(.4,0,.2,1) both; }
+html[data-sens="avant"] ::view-transition-old(root) { animation: vw-vtx-push-out 220ms cubic-bezier(.4,0,.2,1) both; }
+html[data-sens="avant"] ::view-transition-new(root) { animation: vw-vtx-push-in 260ms cubic-bezier(.4,0,.2,1) both; }
+html[data-sens="arriere"] ::view-transition-old(root) { animation: vw-vtx-pop-out 220ms cubic-bezier(.4,0,.2,1) both; }
+html[data-sens="arriere"] ::view-transition-new(root) { animation: vw-vtx-pop-in 260ms cubic-bezier(.4,0,.2,1) both; }
+@keyframes vw-vtx-push-in  { from { opacity: .35; transform: translateX(26%); } }
+@keyframes vw-vtx-push-out { to   { opacity: .35; transform: translateX(-18%); } }
+@keyframes vw-vtx-pop-in   { from { opacity: .35; transform: translateX(-18%); } }
+@keyframes vw-vtx-pop-out  { to   { opacity: .35; transform: translateX(26%); } }
 "#;
 
 #[cfg(test)]
