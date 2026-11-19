@@ -16,6 +16,8 @@ pub enum Sens {
 }
 
 impl Sens {
+    /// N'est appelée que dans le chemin wasm ; en natif elle serait « unused ».
+    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
     fn attribut(self) -> &'static str {
         match self {
             Sens::Avant => "avant",
