@@ -738,6 +738,13 @@ pub const CSS: &str = r#"
   cursor: pointer; }
 .vw-tabbar-item.is-active { color: var(--vw-accent, #4f46e5); }
 .vw-tabbar-item .vw-tabbar-ico { font-size: 1.15em; line-height: 1; }
+
+/* Transitions d'écran (View Transitions API) — partagées par toutes les apps
+   qui utilisent ce framework. L'hôte appelle `transition::naviguer(...)`. */
+@keyframes vw-vtx-out { to { opacity: 0; transform: translateY(-6px) scale(.995); } }
+@keyframes vw-vtx-in  { from { opacity: 0; transform: translateY(10px) scale(.995); } }
+::view-transition-old(root) { animation: vw-vtx-out 160ms cubic-bezier(.4,0,.2,1) both; }
+::view-transition-new(root) { animation: vw-vtx-in 220ms cubic-bezier(.4,0,.2,1) both; }
 "#;
 
 #[cfg(test)]
@@ -862,11 +869,9 @@ mod tests {
                 "{selector} lacks a 44px target: {block}"
             );
         }
-        assert!(
-            rule_of(CSS, ".vw-icon-btn")
-                .unwrap_or_default()
-                .contains("min-width: 44px")
-        );
+        assert!(rule_of(CSS, ".vw-icon-btn")
+            .unwrap_or_default()
+            .contains("min-width: 44px"));
     }
 
     /// Le bouton d'un avis garde la largeur de son libellé : c'est le texte qui se replie.
