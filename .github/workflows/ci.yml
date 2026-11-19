@@ -222,7 +222,7 @@ jobs:
       # des binaires d'AUTRES crates qui lient le fichier). Désépingler dès que
       # cargo-llvm-cov sait lire les profils de 1.100 — c'est la seule chose à faire.
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@1.99.1
+        uses: dtolnay/rust-toolchain@1.120.0
         with:
           # Un test de cette suite compile un module en wasm32 pour vérifier ses exports
           # (`render` présent seulement si le module nomme une fonction de rendu). Sans
