@@ -20,6 +20,15 @@ pub enum ProviderError {
     Disabled(String),
     /// A remote provider resolved to no key.
     MissingSecret(String),
+    /// Le provider est configuré avec une session (`session:nom`) que l'hôte ne détient
+    /// pas encore : la personne ne s'est pas connectée, ou la session a été révoquée.
+    /// L'hôte ouvre le flux de connexion, puis réessaie.
+    SessionMissing(String),
+    /// La session existe mais est dépensée. L'hôte la renouvelle, puis réessaie — une fois :
+    /// une boucle de renouvellement sur un jeton révoqué ne finirait jamais.
+    SessionExpired(String),
+    /// Aucune source de session n'est branchée sur cet hôte (cible sans flux de connexion).
+    SessionUnavailable(String),
     /// The prompt and the reserved output do not fit the window.
     Context {
         needed: u32,
@@ -67,6 +76,17 @@ impl fmt::Display for ProviderError {
             Self::Budget(error) => write!(formatter, "{error}"),
             Self::NotFound(id) => write!(formatter, "aucun provider `{id}`"),
             Self::Disabled(id) => write!(formatter, "le provider `{id}` est désactivé"),
+            Self::SessionMissing(nom) => write!(
+                formatter,
+                "session absente : `{nom}` — la personne ne s'est pas connectée, ou la session a été révoquée"
+            ),
+            Self::SessionExpired(nom) => write!(
+                formatter,
+                "session expirée : `{nom}` — à renouveler avant de réessayer"
+            ),
+            Self::SessionUnavailable(nom) => {
+                write!(formatter, "session non résolvable ici : `{nom}`")
+            }
             Self::MissingSecret(id) => write!(
                 formatter,
                 "le provider `{id}` n'a pas de clé résolue ; vérifie sa référence de credential"
@@ -158,6 +178,12 @@ impl ProviderError {
             }
             Self::StreamCut => ErrorKind::Truncated,
             Self::Parse(_) => ErrorKind::Unreadable,
+            // Une session absente, expirée ou non résolvable n'est pas une panne : c'est
+            // un état que l'hôte sait corriger (ouvrir le flux, renouveler, brancher une
+            // source). Il ne doit donc pas être classé comme une erreur d'infrastructure.
+            Self::SessionMissing(_) | Self::SessionExpired(_) | Self::SessionUnavailable(_) => {
+                ErrorKind::Provider
+            }
             Self::Config(_)
             | Self::Store(_)
             | Self::Secret(_)
