@@ -55,24 +55,24 @@ pub mod text;
 
 pub use data::{Feed, Feeds, Reading, Rows, Snapshot};
 pub use html::{
-    admit, intent_from_message, page_demand, refusal_line, refused_message, result_message, settle,
     Admission, Demand, GateAnswer, GateFuture, GateRequest, HtmlHost, KindClass, RateWindow,
-    Reason, Refusal,
+    Reason, Refusal, admit, intent_from_message, page_demand, refusal_line, refused_message,
+    result_message, settle,
 };
-pub use image::{clamped_height, content_type_of, object_fit, src_of_value, ImageHost};
+pub use image::{ImageHost, clamped_height, content_type_of, object_fit, src_of_value};
 pub use intent::{Emitted, FieldValue, Intent, LinkOp, Origin, SecretValue, Values};
 pub use placement::{Frame, Hidden, Portfolio, SURFACES};
 pub use render::{
-    annonce, composer, composer_actions, composer_intent, render_brick, render_node, render_view,
-    settings_intent, step_entries, thread_hidden, thread_window, without_composer, ComposerSpec,
-    Ctx, StepEntry, StepKind,
+    ComposerSpec, Ctx, StepEntry, StepKind, annonce, composer, composer_actions, composer_intent,
+    render_brick, render_node, render_view, settings_intent, step_entries, thread_hidden,
+    thread_window, without_composer,
 };
 pub use state::ViewState;
 pub use style::CSS;
 
 use leptos::prelude::*;
-use this_descriptor::views::{Surface, ViewDesc};
 use this_descriptor::ModuleDescriptor;
+use this_descriptor::views::{Surface, ViewDesc};
 
 use crate::views::placement::frame;
 use crate::views::style::class;

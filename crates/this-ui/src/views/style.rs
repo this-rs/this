@@ -869,9 +869,11 @@ mod tests {
                 "{selector} lacks a 44px target: {block}"
             );
         }
-        assert!(rule_of(CSS, ".vw-icon-btn")
-            .unwrap_or_default()
-            .contains("min-width: 44px"));
+        assert!(
+            rule_of(CSS, ".vw-icon-btn")
+                .unwrap_or_default()
+                .contains("min-width: 44px")
+        );
     }
 
     /// Le bouton d'un avis garde la largeur de son libellé : c'est le texte qui se replie.

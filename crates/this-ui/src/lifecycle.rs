@@ -10,8 +10,8 @@
 //! Toutes trois appellent le même `on_resume`. La décision (resynchroniser ? rouvrir le flux ?)
 //! appartient à `this_platform::resume_plan` : ce module ne fait que dire « c'est un retour ».
 
-use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
+use wasm_bindgen::prelude::*;
 
 fn get(target: &JsValue, key: &str) -> Option<JsValue> {
     js_sys::Reflect::get(target, &JsValue::from_str(key))

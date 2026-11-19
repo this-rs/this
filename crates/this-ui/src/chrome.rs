@@ -18,9 +18,9 @@
 //! chaque `chrome://changed` de la coquille.
 
 use leptos::prelude::*;
-use this_app::chrome::{layout, ChromeEnv, ChromeLayout, Insets, Platform, Size, WindowState};
-use wasm_bindgen::prelude::*;
+use this_app::chrome::{ChromeEnv, ChromeLayout, Insets, Platform, Size, WindowState, layout};
 use wasm_bindgen::JsCast;
+use wasm_bindgen::prelude::*;
 
 const PROBE_ID: &str = "chrome-safe-area-probe";
 const CHANGED: &str = "shell://event";
@@ -210,7 +210,7 @@ fn decode(value: &JsValue) -> Option<ChromeEnv> {
 /// d'ailleurs est avalé — sans être annulé pour les boutons de fenêtre, qui
 /// doivent agir dans ce clic-là.
 fn guard_first_click(root: web_sys::Element, win: web_sys::Window) {
-    use wasm_bindgen::{closure::Closure, JsCast};
+    use wasm_bindgen::{JsCast, closure::Closure};
 
     const MARK: &str = "data-first-click";
 
@@ -321,7 +321,7 @@ fn publish_controls() {
 /// seule façon d'avoir le comportement de macOS, où les feux d'une fenêtre
 /// inactive se rallument au survol.
 fn listen_pointer(root: web_sys::Element) {
-    use wasm_bindgen::{closure::Closure, JsCast, JsValue};
+    use wasm_bindgen::{JsCast, JsValue, closure::Closure};
 
     let Ok(tauri) = js_sys::Reflect::get(&js_sys::global(), &JsValue::from_str("__TAURI__")) else {
         return;
@@ -355,7 +355,7 @@ fn listen_pointer(root: web_sys::Element) {
 /// elle, les feux restent colorés alors que l'app est en arrière-plan, et le
 /// survol ne rend rien puisqu'il n'y a rien à rendre.
 fn watch_activation(root: web_sys::Element) {
-    use wasm_bindgen::{closure::Closure, JsCast, JsValue};
+    use wasm_bindgen::{JsCast, JsValue, closure::Closure};
 
     let Ok(tauri) = js_sys::Reflect::get(&js_sys::global(), &JsValue::from_str("__TAURI__")) else {
         return;
