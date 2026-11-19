@@ -71,6 +71,13 @@ pub enum CredentialRef {
     Env(String),
     /// A name in the host's vault.
     Vault(String),
+    /// A **session** the host obtained through a sign-in flow (OAuth/OIDC), not a static
+    /// key. It carries what no key carries: an expiry, and therefore a need to be renewed.
+    ///
+    /// The reference names the session; the host owns the tokens and the endpoint that
+    /// renews them. The framework refuses to call a token endpoint it was never given a
+    /// `client_id` for — naming the state and acting on it are two different jobs.
+    Session(String),
 }
 
 impl CredentialRef {
@@ -97,6 +104,13 @@ impl CredentialRef {
                 Ok(Self::Vault(name.to_string()))
             };
         }
+        if let Some(name) = text.strip_prefix("session:") {
+            return if name.is_empty() {
+                Err(CredentialError::Empty)
+            } else {
+                Ok(Self::Session(name.to_string()))
+            };
+        }
         Err(CredentialError::RawValue)
     }
 
@@ -106,6 +120,7 @@ impl CredentialRef {
             Self::None => "none".to_string(),
             Self::Env(name) => format!("env:{name}"),
             Self::Vault(name) => format!("vault:{name}"),
+            Self::Session(name) => format!("session:{name}"),
         }
     }
 }

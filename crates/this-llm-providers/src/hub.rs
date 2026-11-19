@@ -16,6 +16,10 @@ pub struct Hub {
     #[cfg_attr(not(feature = "http"), allow(dead_code))]
     secrets: Arc<dyn SecretResolver>,
     clock: Arc<dyn Clock>,
+    /// Rendu par l'hôte quand il a un flux de connexion. `None` : un provider configuré en
+    /// `session:` répond `SessionUnavailable` au lieu de faire semblant.
+    #[cfg_attr(not(feature = "http"), allow(dead_code))]
+    sessions: Option<Arc<dyn crate::SessionSource>>,
     ledger: Arc<Mutex<Ledger>>,
     state: Mutex<Snapshot>,
 }
@@ -36,6 +40,7 @@ impl Hub {
             store: Box::new(store),
             secrets: Arc::new(secrets),
             clock: Arc::new(clock),
+            sessions: None,
             ledger: Arc::new(Mutex::new(Ledger::default())),
             state: Mutex::new(snapshot),
         })
@@ -116,6 +121,12 @@ impl Hub {
         Ok(())
     }
 
+    /// Branche la source de sessions de l'hôte (le flux de connexion qu'il a exécuté).
+    pub fn with_sessions(mut self, sessions: Arc<dyn crate::SessionSource>) -> Self {
+        self.sessions = Some(sessions);
+        self
+    }
+
     /// What `id` has consumed today, reservations included.
     pub fn usage_today(&self, id: &ProviderId) -> Usage {
         lock(&self.ledger).spent(id, self.clock.day())
@@ -130,7 +141,24 @@ impl Hub {
         if !config.enabled {
             return Err(ProviderError::Disabled(id.to_string()));
         }
-        let secret = self.secrets.resolve(&config.credential)?;
+        // Une clé ne change jamais ; une session si. C'est la seule différence qui compte
+        // ici, et elle décide de tout ce qui suit.
+        let secret = match &config.credential {
+            this_llm::CredentialRef::Session(nom) => {
+                let Some(source) = self.sessions.as_ref() else {
+                    return Err(ProviderError::SessionUnavailable(nom.clone()));
+                };
+                let session = source
+                    .session(nom)
+                    .map_err(|_| ProviderError::SessionMissing(nom.clone()))?
+                    .ok_or_else(|| ProviderError::SessionMissing(nom.clone()))?;
+                if !session.usable(self.clock.now_ms()) {
+                    return Err(ProviderError::SessionExpired(nom.clone()));
+                }
+                Some(session.access().clone())
+            }
+            autre => self.secrets.resolve(autre)?,
+        };
         if !config.preset.is_local() && secret.is_none() {
             return Err(ProviderError::MissingSecret(id.to_string()));
         }
@@ -249,5 +277,70 @@ mod tests {
             .err()
             .expect("pas de client sans clé");
         assert!(matches!(error, ProviderError::Secret(_)));
+    }
+
+    /// Une session n'est pas une clé : trois états, trois erreurs nommées, aucune panne.
+    /// L'hôte sait quoi faire de chacune — ouvrir le flux, renouveler, ou brancher une
+    /// source — et c'est pour ça qu'elles ne se confondent pas avec `Secret`.
+    #[cfg(feature = "http")]
+    #[test]
+    fn une_session_absente_ou_expiree_est_dite_sans_etre_une_panne() {
+        use crate::{Session, SessionError, SessionSource};
+        use std::sync::Arc;
+
+        // `Session` ne se clone pas (le jeton ne se duplique pas) : la source en fabrique
+        // une à chaque appel, à partir de ce qu'elle décrit.
+        struct Source(Option<i64>);
+        impl SessionSource for Source {
+            fn session(&self, _nom: &str) -> Result<Option<Session>, SessionError> {
+                Ok(self.0.map(|expiration| {
+                    Session::new(crate::Secret::new("jeton"), None, Some(expiration))
+                }))
+            }
+        }
+
+        let identifiant = ProviderId::new("openai-perso").unwrap();
+        let provider = ProviderConfig::new(
+            identifiant.clone(),
+            "OpenAI (mon compte)",
+            Preset::OpenAi,
+            CredentialRef::Session("chatgpt".into()),
+        );
+
+        // 1. Aucune source branchée : l'hôte ne sait pas faire de flux de connexion ici.
+        let sans_source = hub();
+        sans_source.upsert(provider.clone()).unwrap();
+        let error = sans_source
+            .client(&identifiant)
+            .err()
+            .expect("pas de session");
+        assert!(
+            matches!(error, ProviderError::SessionUnavailable(_)),
+            "{error:?}"
+        );
+
+        // 2. La source existe mais ne détient rien : la personne ne s'est pas connectée.
+        let vide = hub().with_sessions(Arc::new(Source(None)));
+        vide.upsert(provider.clone()).unwrap();
+        let error = vide.client(&identifiant).err().expect("pas de session");
+        assert!(
+            matches!(error, ProviderError::SessionMissing(_)),
+            "{error:?}"
+        );
+
+        // 3. La session existe mais est dépensée : à renouveler, puis à réessayer.
+        let maintenant = crate::SystemClock.now_ms();
+        let expire = hub().with_sessions(Arc::new(Source(Some(maintenant - 1))));
+        expire.upsert(provider.clone()).unwrap();
+        let error = expire.client(&identifiant).err().expect("session expirée");
+        assert!(
+            matches!(error, ProviderError::SessionExpired(_)),
+            "{error:?}"
+        );
+
+        // 4. Et une session vivante donne un client : c'est le seul cas qui doit marcher.
+        let vivant = hub().with_sessions(Arc::new(Source(Some(maintenant + 3_600_000))));
+        vivant.upsert(provider).unwrap();
+        assert!(vivant.client(&identifiant).is_ok());
     }
 }
