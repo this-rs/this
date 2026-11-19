@@ -11,7 +11,7 @@
 //! clamp, fit, content type, the refusal of a remote URL) are testable without a browser.
 
 use leptos::prelude::*;
-use this_descriptor::views::{Brick, IMAGE_HEIGHT_MAX, IMAGE_HEIGHT_MIN, ImageFit, image_resolve};
+use this_descriptor::views::{image_resolve, Brick, ImageFit, IMAGE_HEIGHT_MAX, IMAGE_HEIGHT_MIN};
 
 use crate::views::data;
 use crate::views::render::{self, Ctx};

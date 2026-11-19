@@ -13,8 +13,8 @@
 //!
 //! Everything in this module is pure: no DOM, no reaction, no data.
 
-use this_descriptor::ModuleDescriptor;
 use this_descriptor::views::{Brick, Node, Surface, ViewDesc};
+use this_descriptor::ModuleDescriptor;
 
 use crate::views::text;
 

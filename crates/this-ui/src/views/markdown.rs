@@ -245,7 +245,11 @@ fn cellules(ligne: &str) -> Option<Vec<String>> {
     if nu.ends_with('|') {
         out.pop();
     }
-    if out.is_empty() { None } else { Some(out) }
+    if out.is_empty() {
+        None
+    } else {
+        Some(out)
+    }
 }
 
 /// Les alignements d'une ligne de séparation (`|---|:--:|--:|`), ou `None` si
@@ -272,7 +276,11 @@ fn alignements(ligne: &str) -> Option<Vec<Alignement>> {
             (false, false) => Alignement::Defaut,
         });
     }
-    if out.is_empty() { None } else { Some(out) }
+    if out.is_empty() {
+        None
+    } else {
+        Some(out)
+    }
 }
 
 /// Échappe le HTML d'un texte : c'est fait avant tout le reste, donc rien de

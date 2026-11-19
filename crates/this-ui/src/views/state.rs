@@ -550,7 +550,7 @@ mod tests {
 
     #[test]
     fn the_verdicts_of_a_condition_name_their_cause() {
-        use crate::views::data::{Condition, condition};
+        use crate::views::data::{condition, Condition};
         let f = this_descriptor::FilterExpr::Cmp {
             field: "connected".into(),
             op: this_descriptor::FilterOp::Eq,
