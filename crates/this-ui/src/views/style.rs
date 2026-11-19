@@ -753,6 +753,46 @@ html[data-sens="arriere"] ::view-transition-new(root) { animation: vw-vtx-pop-in
 @keyframes vw-vtx-push-out { to   { opacity: .35; transform: translateX(-18%); } }
 @keyframes vw-vtx-pop-in   { from { opacity: .35; transform: translateX(-18%); } }
 @keyframes vw-vtx-pop-out  { to   { opacity: .35; transform: translateX(26%); } }
+
+/* =============================================================
+   Motion & finition (framework) — press feedback, focus clavier,
+   modales safe-area + entrée animée, interrupteur, reduced-motion.
+   Bloc final : gagne en cascade sur les règles ci-dessus.
+   ============================================================= */
+.vw-btn, .vw-list-row-click {
+  transition: transform 90ms cubic-bezier(.4,0,.2,1), background-color 140ms,
+    border-color 140ms, opacity 140ms;
+}
+.vw-btn:active, .vw-list-row-click:active { transform: scale(.98); }
+.vw-btn:focus-visible, .vw-list-row-click:focus-visible, .vw-toggle:focus-visible,
+.vw-modal :focus-visible { outline: 2px solid var(--vw-accent, #4f46e5); outline-offset: 2px; }
+
+/* Modales : zones sûres (encoche / home indicator) + entrée animée. */
+.vw-modal-layer { padding: calc(16px + env(safe-area-inset-top)) calc(16px + env(safe-area-inset-right))
+  calc(16px + env(safe-area-inset-bottom)) calc(16px + env(safe-area-inset-left)); }
+.vw-dialog-backdrop { padding: calc(16px + env(safe-area-inset-top)) 0 calc(16px + env(safe-area-inset-bottom)) 0; }
+.vw-modal-layer:not([hidden]) .vw-modal-backdrop { animation: vw-fade 160ms both; }
+.vw-modal-layer:not([hidden]) .vw-modal { animation: vw-pop 200ms cubic-bezier(.4,0,.2,1) both; }
+@keyframes vw-fade { from { opacity: 0; } to { opacity: 1; } }
+@keyframes vw-pop { from { opacity: 0; transform: translateY(8px) scale(.98); } to { opacity: 1; transform: none; } }
+
+/* Interrupteur (au niveau framework) : glissière 52x32, knob animé, accent. */
+.vw-field-toggle { min-height: 44px; }
+.vw-toggle { width: 52px; height: 32px; border-radius: 999px;
+  background: var(--vw-line, #d1d5db); transition: background-color 160ms cubic-bezier(.4,0,.2,1); }
+.vw-toggle::after { width: 26px; height: 26px; top: 2px; left: 2px; background: #fff;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, .35); transition: transform 160ms cubic-bezier(.4,0,.2,1); }
+.vw-toggle:checked { background: var(--vw-accent, #34c759); }
+.vw-toggle:checked::after { transform: translateX(20px); }
+
+/* prefers-reduced-motion : on coupe transitions et animations. */
+@media (prefers-reduced-motion: reduce) {
+  ::view-transition-group(*), ::view-transition-old(root), ::view-transition-new(root) { animation: none !important; }
+  .vw-btn, .vw-list-row-click, .vw-toggle, .vw-toggle::after,
+  .vw-modal-layer .vw-modal, .vw-modal-layer .vw-modal-backdrop {
+    animation: none !important; transition: none !important;
+  }
+}
 "#;
 
 #[cfg(test)]
