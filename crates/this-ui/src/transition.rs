@@ -36,6 +36,7 @@ pub fn naviguer_sens(redessiner: impl FnOnce() + 'static, sens: Sens) {
     appliquer(redessiner, Some(sens));
 }
 
+#[allow(unused_variables)] // `sens` n'est lu que dans le chemin wasm
 fn appliquer(redessiner: impl FnOnce() + 'static, sens: Option<Sens>) {
     #[cfg(target_arch = "wasm32")]
     {
