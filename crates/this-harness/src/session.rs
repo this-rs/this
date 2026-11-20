@@ -1949,23 +1949,43 @@ impl Harness {
         let messages = match budget {
             None => messages,
             Some(budget) => {
+                // Le coût fixe ajouté APRÈS le fit — la consigne système et le
+                // contexte éphémère, l'un et l'autre un `Message::System` dans le
+                // fil — est réservé avant de choisir l'historique. Sans cette
+                // réserve, `fit` ramenait le transcript seul sous le budget, et la
+                // requête assemblée (`Request::thread`) le dépassait d'autant, en
+                // silence. Les schémas d'outils ne sont PAS réservés : ils ne font
+                // pas partie du fil, et ce budget compte les jetons du fil — un
+                // hôte aux outils très nombreux règle `context_budget` en
+                // conséquence.
+                let reserve = cout_fixe(&system, context.as_deref());
+                let budget_effectif = budget.saturating_sub(reserve);
                 // D'abord résumer ce qui serait jeté ; en cas d'échec, `fit` seul.
-                if let Some(compacted) = self.compact(&messages, budget).await {
+                // `compact` et `fit` reçoivent le MÊME budget effectif : leurs
+                // frontières de découpe restent cohérentes.
+                if let Some(compacted) = self.compact(&messages, budget_effectif).await {
                     messages = compacted;
                 }
-                let fitted = crate::context::fit(&messages, budget);
+                let fitted = crate::context::fit(&messages, budget_effectif);
+                // Le dépassement se lit sur le fil TEL QU'ENVOYÉ (coût fixe
+                // compris), pas sur le transcript seul : c'est lui que le moteur
+                // verra. Un fil dont les éléments protégés dépassent à eux seuls
+                // le budget est signalé, jamais tronqué en silence.
+                let total = reserve.saturating_add(crate::context::estimate_tokens(&fitted.kept));
+                let over_budget = total > budget;
+                let excess = total.saturating_sub(budget);
                 // Un oubli se dit, toujours : c'est la différence entre un
                 // modèle qui a la mémoire courte et un modèle qui invente.
                 // Même quand RIEN n'a été retiré : un fil réduit à la seule
                 // question épinglée peut encore dépasser le budget
                 // (`over_budget`), et un dépassement sans retrait était
                 // silencieux — on le dit aussi.
-                if !fitted.dropped.is_empty() || fitted.dropped.over_budget {
+                if !fitted.dropped.is_empty() || over_budget {
                     self.out.emit(Event::Trimmed {
                         messages: fitted.dropped.messages,
                         tokens: fitted.dropped.tokens,
-                        over_budget: fitted.dropped.over_budget,
-                        excess: fitted.dropped.excess,
+                        over_budget,
+                        excess,
                     });
                 }
                 fitted.kept
@@ -2067,6 +2087,23 @@ impl Harness {
         }
         first
     }
+}
+
+/// Le coût fixe d'un tour, hors historique : la consigne système et le contexte
+/// éphémère, s'ils sont présents. C'est exactement ce que `Request::thread`
+/// ajoutera en tête du transcript (un `Message::System` chacun), donc la même
+/// estimation ([`crate::context::estimate_tokens`]) vaut pour les deux.
+fn cout_fixe(system: &str, contexte: Option<&str>) -> usize {
+    let systeme = if system.trim().is_empty() {
+        0
+    } else {
+        crate::context::estimate_tokens(&[Message::system(system)])
+    };
+    let contexte = contexte
+        .filter(|c| !c.trim().is_empty())
+        .map(|c| crate::context::estimate_tokens(&[Message::system(c)]))
+        .unwrap_or(0);
+    systeme.saturating_add(contexte)
 }
 
 /// La décision d'autorisation, isolée : la même porte pour `run_tool` (hors
