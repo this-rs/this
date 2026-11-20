@@ -1313,11 +1313,25 @@ impl Harness {
                 //    de la grâce d'annulation, avec des relances bornées.
                 // Le contexte du tour est recalculé ici, à chaque tour : il
                 // dépend de la conversation telle qu'elle est maintenant.
-                let context = self.turn_context().await;
+                let context = self.turn_context(&cancel).await;
                 let request = self
-                    .request(toolbox.as_ref(), context)
+                    .request(toolbox.as_ref(), context, &cancel)
                     .await
                     .with_route(route.clone());
+                // Un port de préparation (hook de contexte, compacteur) coupé par
+                // l'annulation : le run s'arrête ICI, avant que le transport ne
+                // soit lancé. L'annulation se distingue d'un échec de compaction,
+                // qui garde son repli sur `fit` (le compacteur rend `None` et le
+                // tour continue).
+                if cancel.is_cancelled() {
+                    self.out.emit(Event::Hint {
+                        text: "interrompu pendant la préparation du tour (contexte ou compaction)"
+                            .to_string(),
+                        kind: HintKind::Interrupted,
+                    });
+                    stop = Some(run.borrow_mut().finish(Stop::Interrupted));
+                    break 'turns;
+                }
                 // Un fil que le moteur refuserait (id vide, appel en double,
                 // réponse orpheline) s'arrête ICI, nommé et typé, au lieu de
                 // partir chez le moteur et de revenir en 400 opaque. La
@@ -1925,10 +1939,20 @@ impl Harness {
 
     /// Ce que le hook de contexte rend pour ce tour. L'état n'est pas emprunté
     /// pendant l'attente : le transcript est copié d'abord.
-    async fn turn_context(&self) -> Option<String> {
+    ///
+    /// L'attente est bornée ([`ROUTER_TIMEOUT_MS`]) et coupée par l'annulation :
+    /// un hook qui ne rend jamais la main ne retient plus le run. Sur coupure, le
+    /// contexte est simplement absent — l'annulation est relue par l'appelant, qui
+    /// n'appellera jamais le transport.
+    async fn turn_context(&self, cancel: &Cancel) -> Option<String> {
         let hook = self.turn_context.clone()?;
         let transcript = self.transcript();
-        hook.before_turn(&transcript).await
+        race(
+            hook.before_turn(&transcript),
+            cut(self.clock.as_ref(), ROUTER_TIMEOUT_MS, Some(cancel)),
+        )
+        .await
+        .unwrap_or_default()
     }
 
     /// La requête du tour : le transcript, plus le contexte éphémère s'il y en
@@ -1938,7 +1962,12 @@ impl Harness {
     /// Le fit se fait ICI et pas dans `Request` : c'est le harnais qui porte la
     /// borne (elle vient de `Limits`), et un transport qui devrait la respecter
     /// lui-même serait un transport qu'on ne peut pas brancher deux fois.
-    async fn request(&self, toolbox: &dyn Toolbox, context: Option<String>) -> Request {
+    async fn request(
+        &self,
+        toolbox: &dyn Toolbox,
+        context: Option<String>,
+        cancel: &Cancel,
+    ) -> Request {
         let (system, mut messages, budget) = self.with(|s| {
             (
                 s.system.clone(),
@@ -1963,7 +1992,7 @@ impl Harness {
                 // D'abord résumer ce qui serait jeté ; en cas d'échec, `fit` seul.
                 // `compact` et `fit` reçoivent le MÊME budget effectif : leurs
                 // frontières de découpe restent cohérentes.
-                if let Some(compacted) = self.compact(&messages, budget_effectif).await {
+                if let Some(compacted) = self.compact(&messages, budget_effectif, cancel).await {
                     messages = compacted;
                 }
                 let fitted = crate::context::fit(&messages, budget_effectif);
@@ -1998,7 +2027,12 @@ impl Harness {
     /// [`Harness::with_compactor`]). `Some(fil)` : le fil compacté, déjà écrit dans le
     /// transcript et annoncé par [`Event::Compacted`]. `None` : rien à compacter, ou
     /// repli — l'appelant applique alors `fit` au fil d'origine.
-    async fn compact(&self, messages: &[Message], budget: usize) -> Option<Vec<Message>> {
+    async fn compact(
+        &self,
+        messages: &[Message],
+        budget: usize,
+        cancel: &Cancel,
+    ) -> Option<Vec<Message>> {
         let compactor = self.compactor.clone()?;
         let removal = crate::context::removable(messages, budget);
         let first = *removal.indices.first()?;
@@ -2007,9 +2041,18 @@ impl Harness {
             .iter()
             .map(|&i| messages[i].clone())
             .collect();
-        let summary = match compactor.compact(&anciens).await {
-            Ok(message) => message,
-            Err(_) => return None,
+        // L'appel au compacteur est borné ([`ROUTER_TIMEOUT_MS`]) et coupé par
+        // l'annulation. Échec du compacteur, délai dépassé et annulation tombent
+        // tous sur le repli (`None` → `fit` seul) ; l'annulation, elle, est relue
+        // par l'appelant, qui n'appellera jamais le transport.
+        let summary = match race(
+            compactor.compact(&anciens),
+            cut(self.clock.as_ref(), ROUTER_TIMEOUT_MS, Some(cancel)),
+        )
+        .await
+        {
+            Ok(Ok(message)) => message,
+            Ok(Err(_)) | Err(_) => return None,
         };
         // Le résumé est rangé au rôle utilisateur et synthétique : un `User` non
         // synthétique, placé après la vraie question, serait épinglé à sa place.
