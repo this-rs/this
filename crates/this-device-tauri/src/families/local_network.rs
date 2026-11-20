@@ -368,7 +368,14 @@ mod resolve_tests {
             assert!(host_is_local(ok), "{ok} doit être accepté");
         }
         // Publics, ou nom DNS ordinaire (il peut pointer n'importe où).
-        for bad in ["8.8.8.8", "172.32.0.1", "1.1.1.1", "2001:4860::8888", "example.com", ""] {
+        for bad in [
+            "8.8.8.8",
+            "172.32.0.1",
+            "1.1.1.1",
+            "2001:4860::8888",
+            "example.com",
+            "",
+        ] {
             assert!(!host_is_local(bad), "{bad:?} doit être refusé");
         }
     }
