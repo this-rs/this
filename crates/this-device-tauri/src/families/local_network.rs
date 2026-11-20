@@ -315,6 +315,30 @@ pub fn clamp_resolve_timeout(timeout_ms: u32) -> u32 {
     timeout_ms.clamp(1_000, 15_000)
 }
 
+/// `true` si l'hôte résolu reste sur le réseau local : une adresse privée, de boucle locale ou
+/// de liaison locale (IPv4 RFC 1918 / 127/8 / 169.254/16 ; IPv6 `::1`, `fe80::/10`, `fc00::/7`),
+/// ou un nom `.local` (mDNS). Une IP publique, ou un nom DNS ordinaire, est refusé.
+pub fn host_is_local(host: &str) -> bool {
+    // Un nom FQDN (`macbook.local.`) : le point final ne compte pas.
+    let nom = host.strip_suffix('.').unwrap_or(host);
+    if nom.ends_with(".local") {
+        return true;
+    }
+    match nom.parse::<std::net::IpAddr>() {
+        Ok(std::net::IpAddr::V4(v4)) => v4.is_private() || v4.is_loopback() || v4.is_link_local(),
+        Ok(std::net::IpAddr::V6(v6)) => {
+            if let Some(v4) = v6.to_ipv4_mapped() {
+                return v4.is_private() || v4.is_loopback() || v4.is_link_local();
+            }
+            let premier = v6.segments()[0];
+            v6.is_loopback()
+                || (premier & 0xffc0) == 0xfe80 // fe80::/10, liaison locale
+                || (premier & 0xfe00) == 0xfc00 // fc00::/7, ULA
+        }
+        Err(_) => false,
+    }
+}
+
 #[cfg(test)]
 mod resolve_tests {
     use super::*;
@@ -324,6 +348,29 @@ mod resolve_tests {
         assert_eq!(clamp_resolve_timeout(1), 1_000);
         assert_eq!(clamp_resolve_timeout(5_000), 5_000);
         assert_eq!(clamp_resolve_timeout(99_000), 15_000);
+    }
+
+    #[test]
+    fn a_resolved_host_stays_on_the_local_network() {
+        // Local : privé, boucle locale, liaison locale, ULA, nom mDNS.
+        for ok in [
+            "macbook.local.",
+            "iphone.local",
+            "192.168.1.20",
+            "10.0.0.5",
+            "172.16.4.1",
+            "169.254.10.1",
+            "127.0.0.1",
+            "::1",
+            "fe80::1",
+            "fd12:3456::1",
+        ] {
+            assert!(host_is_local(ok), "{ok} doit être accepté");
+        }
+        // Publics, ou nom DNS ordinaire (il peut pointer n'importe où).
+        for bad in ["8.8.8.8", "172.32.0.1", "1.1.1.1", "2001:4860::8888", "example.com", ""] {
+            assert!(!host_is_local(bad), "{bad:?} doit être refusé");
+        }
     }
 
     #[test]
