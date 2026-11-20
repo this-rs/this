@@ -1954,9 +1954,13 @@ impl Harness {
                     messages = compacted;
                 }
                 let fitted = crate::context::fit(&messages, budget);
-                if !fitted.dropped.is_empty() {
-                    // Un oubli se dit, toujours : c'est la différence entre un
-                    // modèle qui a la mémoire courte et un modèle qui invente.
+                // Un oubli se dit, toujours : c'est la différence entre un
+                // modèle qui a la mémoire courte et un modèle qui invente.
+                // Même quand RIEN n'a été retiré : un fil réduit à la seule
+                // question épinglée peut encore dépasser le budget
+                // (`over_budget`), et un dépassement sans retrait était
+                // silencieux — on le dit aussi.
+                if !fitted.dropped.is_empty() || fitted.dropped.over_budget {
                     self.out.emit(Event::Trimmed {
                         messages: fitted.dropped.messages,
                         tokens: fitted.dropped.tokens,

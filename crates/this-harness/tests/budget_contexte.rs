@@ -1,8 +1,16 @@
 //! La borne de contexte : un fil trop long est rogné par les plus anciens,
 //! jamais au milieu d'un appel d'outil, et jamais sans le dire.
 
+use std::cell::RefCell;
+use std::rc::Rc;
+
+use async_trait::async_trait;
 use serde_json::json;
-use this_harness::{Message, ToolCall, estimate_tokens, fit};
+
+use this_harness::{
+    Cancel, Delta, Event, Failure, Finish, Harness, Limits, Message, Outcome, Reply, Request,
+    ToolCall, ToolSpec, Toolbox, Transport, estimate_tokens, fit,
+};
 
 fn appel(id: &str) -> ToolCall {
     ToolCall {
@@ -206,5 +214,72 @@ fn sans_question_la_derniere_relance_est_gardee() {
         r.kept.iter().any(|m| m.is_synthetic()),
         "mieux que rien : la relance reste : {:?}",
         r.kept
+    );
+}
+
+// ===== Borne branchée dans la boucle (Harness) =====
+
+/// Un transport qui répond « fait » et garde le fil qu'on lui a envoyé.
+struct Repond(RefCell<Vec<Vec<Message>>>);
+
+#[async_trait(?Send)]
+impl Transport for Repond {
+    async fn stream(&self, request: &Request, _: &Cancel, _: Delta) -> Result<Reply, Failure> {
+        self.0.borrow_mut().push(request.thread());
+        Ok(Reply {
+            text: "fait".into(),
+            calls: vec![],
+            finish: Finish::Stop,
+        })
+    }
+}
+
+/// Un outillage sans aucun outil : la borne de contexte n'a rien à y voir.
+struct Rien;
+
+#[async_trait(?Send)]
+impl Toolbox for Rien {
+    fn specs(&self) -> Vec<ToolSpec> {
+        vec![]
+    }
+    async fn call(&self, _: &ToolCall) -> Outcome {
+        Outcome::ok(String::new())
+    }
+}
+
+/// #293 : un dépassement SANS retrait se dit aussi. `fit` épingle le dernier
+/// message utilisateur par contrat : un fil réduit à une seule question de
+/// 4000 caractères dépasse le budget sans qu'aucun message ne soit retiré
+/// (`dropped.messages == 0`). Le signal `Trimmed` devait pourtant partir.
+#[test]
+fn un_depassement_sans_retrait_se_dit_aussi() {
+    let log: Rc<RefCell<Vec<Event>>> = Rc::default();
+    let journal = log.clone();
+    let harness = Harness::new(
+        "consigne",
+        Limits {
+            context_budget: Some(100),
+            ..Limits::default()
+        },
+        Rc::new(Repond(RefCell::new(Vec::new()))),
+        Rc::new(Rien),
+        move |event| journal.borrow_mut().push(event),
+    );
+
+    let _ = futures::executor::block_on(harness.send(gros('a', 4000)));
+
+    let signale = log.borrow().iter().any(|event| {
+        matches!(
+            event,
+            Event::Trimmed {
+                over_budget: true,
+                excess,
+                ..
+            } if *excess > 0
+        )
+    });
+    assert!(
+        signale,
+        "un fil qui dépasse le budget sans retrait doit être signalé, pas silencieux"
     );
 }
