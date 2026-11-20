@@ -425,6 +425,19 @@ pub const ROUTER_TIMEOUT_MS: u64 = 2_000;
 /// muet ne doit pas figer l'agent.
 pub const RECORDER_TIMEOUT_MS: u64 = 2_000;
 
+/// Le délai accordé à la PRÉPARATION d'un tour : le hook de contexte
+/// ([`Harness::with_turn_context`]) et le compacteur ([`Harness::with_compactor`]).
+///
+/// Distinct de [`ROUTER_TIMEOUT_MS`] à dessein, comme [`RECORDER_TIMEOUT_MS`] :
+/// une décision de routage est locale et doit tomber en deux secondes, alors
+/// qu'une compaction **résume le fil** — souvent en appelant le modèle. Borner
+/// la compaction aux deux secondes du routeur la rendrait toujours expirée :
+/// elle retomberait sur `fit`, qui JETTE l'historique au lieu de le résumer, et
+/// la compaction serait désactivée sans que rien ne le dise. Une minute est la
+/// générosité de [`TOOL_TIMEOUT_MS`] pour une raison voisine : le travail peut
+/// être un aller-retour réseau légitime.
+pub const PREPARATION_TIMEOUT_MS: u64 = 60_000;
+
 /// Un appel au [`Recorder`], isolé : une **panique** est avalée, un **blocage** est borné
 /// par [`RECORDER_TIMEOUT_MS`] sur l'horloge du harnais.
 ///
@@ -1940,19 +1953,34 @@ impl Harness {
     /// Ce que le hook de contexte rend pour ce tour. L'état n'est pas emprunté
     /// pendant l'attente : le transcript est copié d'abord.
     ///
-    /// L'attente est bornée ([`ROUTER_TIMEOUT_MS`]) et coupée par l'annulation :
-    /// un hook qui ne rend jamais la main ne retient plus le run. Sur coupure, le
-    /// contexte est simplement absent — l'annulation est relue par l'appelant, qui
-    /// n'appellera jamais le transport.
+    /// L'attente est bornée ([`PREPARATION_TIMEOUT_MS`]) et coupée par
+    /// l'annulation : un hook qui ne rend jamais la main ne retient plus le run.
+    /// Sur annulation, l'appelant l'annonce et arrête le run avant le transport.
+    /// Sur DÉLAI dépassé, le tour continue sans le contexte — et ça se dit
+    /// ([`Event::Hint`]) : le hook porte la mémoire du tour, et la perdre en
+    /// silence serait exactement l'oubli muet que `Trimmed` existe pour éviter.
     async fn turn_context(&self, cancel: &Cancel) -> Option<String> {
         let hook = self.turn_context.clone()?;
         let transcript = self.transcript();
-        race(
+        match race(
             hook.before_turn(&transcript),
-            cut(self.clock.as_ref(), ROUTER_TIMEOUT_MS, Some(cancel)),
+            cut(self.clock.as_ref(), PREPARATION_TIMEOUT_MS, Some(cancel)),
         )
         .await
-        .unwrap_or_default()
+        {
+            Ok(context) => context,
+            // Coupé par l'annulation : l'appelant le dit et arrête le run.
+            Err(_) if cancel.is_cancelled() => None,
+            Err(_) => {
+                self.out.emit(Event::Hint {
+                    text: format!(
+                        "contexte du tour perdu : le hook n'a pas rendu la main en {PREPARATION_TIMEOUT_MS} ms"
+                    ),
+                    kind: HintKind::Other,
+                });
+                None
+            }
+        }
     }
 
     /// La requête du tour : le transcript, plus le contexte éphémère s'il y en
@@ -2041,18 +2069,31 @@ impl Harness {
             .iter()
             .map(|&i| messages[i].clone())
             .collect();
-        // L'appel au compacteur est borné ([`ROUTER_TIMEOUT_MS`]) et coupé par
-        // l'annulation. Échec du compacteur, délai dépassé et annulation tombent
-        // tous sur le repli (`None` → `fit` seul) ; l'annulation, elle, est relue
-        // par l'appelant, qui n'appellera jamais le transport.
+        // L'appel au compacteur est borné ([`PREPARATION_TIMEOUT_MS`] : résumer
+        // le fil est un appel au modèle, pas une décision locale) et coupé par
+        // l'annulation. Échec du compacteur : repli silencieux (`None` → `fit`
+        // seul), le tour continue — c'est le contrat du repli. L'annulation, elle,
+        // est relue par l'appelant, qui n'appellera jamais le transport.
         let summary = match race(
             compactor.compact(&anciens),
-            cut(self.clock.as_ref(), ROUTER_TIMEOUT_MS, Some(cancel)),
+            cut(self.clock.as_ref(), PREPARATION_TIMEOUT_MS, Some(cancel)),
         )
         .await
         {
             Ok(Ok(message)) => message,
-            Ok(Err(_)) | Err(_) => return None,
+            Ok(Err(_)) => return None,
+            Err(_) if cancel.is_cancelled() => return None,
+            // Un délai dépassé n'est pas un échec du compacteur : c'est une
+            // compaction qui n'a pas eu le temps. On le dit, puis on replie.
+            Err(_) => {
+                self.out.emit(Event::Hint {
+                    text: format!(
+                        "compaction abandonnée : le compacteur n'a pas rendu la main en {PREPARATION_TIMEOUT_MS} ms, repli sur le rognage"
+                    ),
+                    kind: HintKind::Other,
+                });
+                return None;
+            }
         };
         // Le résumé est rangé au rôle utilisateur et synthétique : un `User` non
         // synthétique, placé après la vraie question, serait épinglé à sa place.

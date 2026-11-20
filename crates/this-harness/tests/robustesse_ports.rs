@@ -361,3 +361,51 @@ fn le_compacteur_pendu_sans_interruption_se_replie_sur_fit() {
         "le transport doit être appelé une seule fois (repli sur fit)"
     );
 }
+
+/// Un hook de contexte qui ne rend jamais la main, SANS annulation : le tour
+/// continue sans son contexte — mais il le DIT.
+///
+/// Le hook porte la mémoire du tour (notes, rappels, sections de contexte). La
+/// perdre en silence serait exactement l'oubli muet que `Trimmed` existe pour
+/// éviter : un run qui répond sans sa mémoire et sans le signaler est un run qui
+/// invente. La borne existe pour ne pas pendre ; le signal existe pour que la
+/// borne ne mente pas sur ce qu'elle a coûté.
+#[test]
+fn le_contexte_de_tour_perdu_se_dit() {
+    let appels = Rc::new(Compte(RefCell::new(0)));
+    let log: Journal = Rc::default();
+    let journal = log.clone();
+    let harness = Harness::new(
+        "consigne",
+        Limits::default(),
+        appels.clone(),
+        Rc::new(Rien),
+        move |e| journal.borrow_mut().push(e),
+    )
+    .with_clock(Rc::new(Horloge::default()))
+    .with_turn_context(Rc::new(ContextePendu));
+    harness.seed(vec![Message::user("question")]);
+
+    let mut fut = Box::pin(harness.send("suite"));
+    assert_eq!(
+        poll_for(&mut fut, POLLS),
+        Some(Running::Ran(Stop::Done)),
+        "le délai dépassé n'arrête pas le run : le tour continue sans le contexte"
+    );
+    assert_eq!(
+        *appels.0.borrow(),
+        1,
+        "le transport est appelé une fois : le tour a bien eu lieu"
+    );
+    let dits = log
+        .borrow()
+        .iter()
+        .filter(
+            |e| matches!(e, Event::Hint { text, .. } if text.contains("contexte du tour perdu")),
+        )
+        .count();
+    assert_eq!(
+        dits, 1,
+        "le contexte perdu doit être annoncé une fois — ni zéro (silence) ni deux"
+    );
+}
