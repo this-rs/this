@@ -1761,6 +1761,7 @@ impl Harness {
     ///   dépassé », jamais un succès, et l'appel n'est jamais laissé sans
     ///   réponse dans le fil. Le booléen dit si l'appel a été abandonné après
     ///   la grâce d'annulation.
+    #[allow(clippy::too_many_arguments)]
     async fn run_tool(
         &self,
         toolbox: &dyn Toolbox,
