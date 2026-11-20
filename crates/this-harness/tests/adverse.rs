@@ -446,6 +446,120 @@ fn s3_outil_invente_hors_specs_est_refuse_par_le_harnais() {
     assert_ne!(stop, Running::Ran(Stop::Done));
 }
 
+/// Une toolbox dont la liste bouge pendant le tour : un module installé pendant le flux
+/// ajoute son outil à `specs()` après que la requête du tour a été servie.
+struct Late {
+    names: RefCell<Vec<&'static str>>,
+    used: RefCell<Vec<String>>,
+}
+
+#[async_trait(?Send)]
+impl Toolbox for Late {
+    fn specs(&self) -> Vec<ToolSpec> {
+        self.names
+            .borrow()
+            .iter()
+            .map(|name| ToolSpec {
+                name: name.to_string(),
+                description: format!("outil {name}"),
+                parameters: json!({"type": "object"}),
+            })
+            .collect()
+    }
+    async fn call(&self, call: &ToolCall) -> Outcome {
+        self.used.borrow_mut().push(call.name.clone());
+        Outcome::ok("exécuté")
+    }
+}
+
+/// Un moteur qui, pendant son flux, installe `delete_everything` dans la toolbox, puis
+/// réclame cet outil. Il consigne ce qu'il a effectivement offert au tour.
+struct InstallDuringStream {
+    late: Rc<Late>,
+    offered: RefCell<Vec<Vec<String>>>,
+    acts: RefCell<VecDeque<Act>>,
+}
+
+#[async_trait(?Send)]
+impl Transport for InstallDuringStream {
+    async fn stream(
+        &self,
+        request: &Request,
+        _cancel: &Cancel,
+        delta: Delta,
+    ) -> Result<Reply, Failure> {
+        self.offered
+            .borrow_mut()
+            .push(request.tools().iter().map(|s| s.name.clone()).collect());
+        self.late.names.borrow_mut().push("delete_everything");
+        let reply = match self.acts.borrow_mut().pop_front() {
+            Some(Act::Reply(reply)) => reply,
+            _ => Reply {
+                text: "C'est fait.".to_string(),
+                calls: vec![],
+                finish: Finish::Stop,
+            },
+        };
+        for morceau in reply.text.split_inclusive(' ') {
+            delta(morceau);
+        }
+        Ok(reply)
+    }
+}
+
+/// Un outil déclaré dans `specs()` au moment de l'appel, mais NON offert ce tour-là, n'est
+/// jamais exécuté : le harnais le refuse lui-même, sans atteindre la toolbox.
+#[test]
+fn s3_outil_declare_mais_non_offert_ce_tour_est_refuse_sans_execution() {
+    let late = Rc::new(Late {
+        names: RefCell::new(vec!["install_module"]),
+        used: RefCell::new(Vec::new()),
+    });
+    let transport = Rc::new(InstallDuringStream {
+        late: late.clone(),
+        offered: RefCell::new(Vec::new()),
+        acts: RefCell::new(VecDeque::from(vec![
+            calls("delete_everything", "x1"),
+            says("C'est fait."),
+        ])),
+    });
+    let clock = Rc::new(FakeClock::default());
+    let log: Log = Rc::new(RefCell::new(Vec::new()));
+    let seen = log.clone();
+    let harness = Harness::new(
+        "tu es l'atelier",
+        Limits::default(),
+        transport.clone(),
+        late.clone(),
+        move |event| seen.borrow_mut().push(event),
+    )
+    .with_clock(clock.clone());
+    let b = Bench {
+        harness,
+        log,
+        clock,
+    };
+
+    let stop = run(b.harness.send("nettoie"));
+
+    assert_eq!(
+        transport.offered.borrow()[0],
+        vec!["install_module".to_string()],
+        "précondition : seul install_module a été offert à ce tour"
+    );
+    assert!(
+        late.used.borrow().is_empty(),
+        "l'outil non offert ne doit jamais être exécuté : {:?}",
+        late.used.borrow()
+    );
+    assert_eq!(
+        b.tool_results(),
+        vec![("delete_everything".to_string(), true)],
+        "l'appel non offert est refusé"
+    );
+    assert_ne!(stop, Running::Ran(Stop::Done));
+}
+
 #[test]
 fn s3_une_ecriture_sans_rapport_ne_blanchit_pas_un_refus() {
     let model = Model::new(vec![
