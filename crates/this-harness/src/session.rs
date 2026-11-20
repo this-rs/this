@@ -30,7 +30,7 @@ use async_trait::async_trait;
 use crate::event::{Event, HintKind, Outcome, Pending, Snapshot};
 use crate::ports::{Cancel, Compactor, Delta, Permission, Recorder, Recorders, Toolbox, Transport};
 use crate::wire::{
-    Code, Failure, Finish, ImagePart, Message, Reply, Request, ThreadDefect, ToolCall,
+    Code, Failure, Finish, ImagePart, Message, Reply, Request, ThreadDefect, ToolCall, ToolSpec,
 };
 use this_agent::evidence::Verdict;
 use this_agent::{Decision, DefaultPolicy, Goal, Policy, Run, Step, Stop};
@@ -1318,6 +1318,9 @@ impl Harness {
                     .request(toolbox.as_ref(), context)
                     .await
                     .with_route(route.clone());
+                // Les outils OFFERTS à ce tour : ceux de la requête que le moteur reçoit
+                // (relances comprises). C'est l'autorité pour déclarer un appel.
+                let offered = request.tools().to_vec();
                 // Un fil que le moteur refuserait (id vide, appel en double,
                 // réponse orpheline) s'arrête ICI, nommé et typé, au lieu de
                 // partir chez le moteur et de revenir en 400 opaque. La
@@ -1596,7 +1599,15 @@ impl Harness {
                         continue;
                     }
                     let (outcome, dropped) = self
-                        .run_tool(toolbox.as_ref(), call, &run_id, &run, &cancel, &limits)
+                        .run_tool(
+                            toolbox.as_ref(),
+                            &offered,
+                            call,
+                            &run_id,
+                            &run,
+                            &cancel,
+                            &limits,
+                        )
                         .await;
                     if let Some(why) = dropped {
                         // Abandonné ne veut pas dire « pas fait » : l'étape
@@ -1740,18 +1751,21 @@ impl Harness {
     /// Un appel d'outil, sous garde.
     ///
     /// Deux gardes, les mêmes que pour le flux du modèle :
-    /// - le **nom** est confronté à `toolbox.specs()` avant tout appel : un
-    ///   outil inventé par le modèle est refusé par le harnais lui-même, sans
-    ///   qu'une toolbox naïve (qui répondrait « ok » à tout) l'exécute ;
+    /// - le **nom** est confronté aux outils OFFERTS à ce tour (`offered`, ceux de la
+    ///   requête servie) avant tout appel : un outil inventé par le modèle, ou annoncé
+    ///   par la toolbox seulement après la requête, est refusé par le harnais lui-même,
+    ///   sans qu'une toolbox naïve (qui répondrait « ok » à tout) l'exécute ;
     /// - l'appel **court contre l'annulation** (avec la même grâce que le flux)
     ///   et contre le plafond [`Limits::tool_timeout_ms`]. Un outil qui ne rend
     ///   jamais la main est abandonné ; le modèle lit « annulé » ou « délai
     ///   dépassé », jamais un succès, et l'appel n'est jamais laissé sans
     ///   réponse dans le fil. Le booléen dit si l'appel a été abandonné après
     ///   la grâce d'annulation.
+    #[allow(clippy::too_many_arguments)]
     async fn run_tool(
         &self,
         toolbox: &dyn Toolbox,
+        offered: &[ToolSpec],
         call: &ToolCall,
         run_id: &str,
         run: &RefCell<Run>,
@@ -1764,7 +1778,7 @@ impl Harness {
             input: call.arguments.clone(),
         });
         let started = self.clock.now_ms();
-        let declared = toolbox.specs().iter().any(|spec| spec.name == call.name);
+        let declared = offered.iter().any(|spec| spec.name == call.name);
         let mut abandoned = None;
         let outcome = if !declared {
             unknown_tool(&call.name)
@@ -2119,10 +2133,11 @@ impl Permission for RunPorts {
     }
 }
 
-/// Le résultat d'un appel à un outil absent de `toolbox.specs()`.
+/// Le résultat d'un appel à un outil absent des outils offerts à ce tour.
 ///
-/// Refusé par le harnais, sans appeler la toolbox : le modèle a inventé un nom,
-/// et une toolbox qui ne filtre pas l'exécuterait quand même.
+/// Refusé par le harnais, sans appeler la toolbox : le modèle a inventé un nom, ou
+/// réclame un outil que la toolbox n'annonçait pas encore à ce tour, et une toolbox
+/// qui ne filtre pas l'exécuterait quand même.
 fn unknown_tool(name: &str) -> Outcome {
     Outcome::refused(
         format!("refusé : l'outil n'existe pas : « {name} ». N'appelle que les outils déclarés."),
