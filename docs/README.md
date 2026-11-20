@@ -123,6 +123,24 @@ docs/
     └── ENTITY_FOLDERS_STRUCTURE.md
 ```
 
+### Contrats du harnais (`crates/this-harness`)
+
+Ces documents ne décrivent pas une API : ils **qualifient** ce que le harnais
+garantit, avec la preuve (`fichier:ligne` ou nom de test) à chaque ligne, et la
+liste de ce qui n'est **pas** qualifié. Un chemin sans preuve y est écrit
+« non qualifié », jamais présenté comme acquis.
+
+| Document | Question à laquelle il répond | Ticket |
+|---|---|---|
+| [harnais-mode-auto.md](harnais-mode-auto.md) | Ce que le mode Auto décide, et les lots laissés à l'hôte | — |
+| [modules-et-harnais.md](modules-et-harnais.md) | Comment un module exposé devient un outil du harnais | — |
+| [harnais-reprise-durable.md](harnais-reprise-durable.md) | Journal best-effort ou reprise durable : qui possède quoi, ce qui manque | #284 |
+| [harnais-garanties-runtime.md](harnais-garanties-runtime.md) | Ce qui est **exécuté** en natif/WASM, et ce qui n'est que compilé | #285 |
+| [harnais-contrat-evenements.md](harnais-contrat-evenements.md) | Enveloppe d'événements, curseur, attentes humaines | #286 |
+| [harnais-autorisations.md](harnais-autorisations.md) | Qui détient chaque autorité, et où le contenu du modèle ne peut pas la produire | #287 |
+| [harnais-capacites-moteurs.md](harnais-capacites-moteurs.md) | Matrice par capacité, et « routé » ≠ « servi » | #288 |
+| [harnais-contexte-cognitif.md](harnais-contexte-cognitif.md) | Provenance du contexte : ce que le cœur porte, ce que l'hôte doit porter | #290 |
+
 ## 🔗 Useful Links
 
 - [Main README](../README.md)
