@@ -26,6 +26,7 @@
 use crate::{Message, ToolCall};
 use async_trait::async_trait;
 use serde_json::Value;
+use this_agent::cite::{Provenance, SeenLedger};
 
 /// Extensions reconnues pour un chemin de fichier.
 pub const EXTENSIONS: &[&str] = &[
@@ -236,6 +237,22 @@ fn paths(text: &str, index: usize, out: &mut Anchors) {
 /// la question de l'utilisateur), cite les ids, dit les introuvables, et dit
 /// ce qu'il a coupé.
 pub async fn rappel(anchors: &Anchors, recall: &dyn Recall) -> Option<Message> {
+    rappel_avec(anchors, recall, None).await
+}
+
+/// [`rappel`], avec le registre des ids vus (décision #290 : un registre par
+/// session, règle stricte).
+///
+/// Ce que cela change : une citation que l'agent n'a jamais **lue** directement
+/// — parue seulement dans une donnée non fiable — le dit sur sa ligne. Le fait
+/// du graphe reste rendu (il est daté et attribué, la règle du module ne bouge
+/// pas), mais l'extrait qui le prétendait n'est plus présenté comme une lecture.
+/// C'est [`classify`](this_agent::cite::classify) appliqué au message de rappel.
+pub async fn rappel_avec(
+    anchors: &Anchors,
+    recall: &dyn Recall,
+    vus: Option<&SeenLedger>,
+) -> Option<Message> {
     if anchors.is_empty() {
         return None;
     }
@@ -273,6 +290,20 @@ pub async fn rappel(anchors: &Anchors, recall: &dyn Recall) -> Option<Message> {
                 c.id, c.kind, c.message, c.excerpt
             ),
         };
+        // La marque de provenance : une citation jamais lue ne se présente pas
+        // comme une preuve, même quand le graphe la connaît.
+        // `None` = le registre ne suis pas cette sorte : il ne dit rien, on ne
+        // marque rien. Seul ce qu'il SAIT (cité, ou jamais paru) porte la marque.
+        let non_lu = match vus.and_then(|l| l.provenance_token(&c.id)) {
+            Some(Provenance::Quoted) | Some(Provenance::Never) => {
+                // Le saut de ligne FINAL compte : sans lui, l'entrée suivante se
+                // collerait à la marque et un lecteur ligne à ligne l'attribuerait
+                // à la mauvaise entité.
+                "    [CITÉ SEULEMENT — jamais lu directement]\n"
+            }
+            _ => "",
+        };
+        let line = format!("{line}{non_lu}");
         if body.chars().count() + line.chars().count() > MAX_CHARS {
             body.push_str(&format!(
                 "[coupé : {} entité(s) citée(s) non rendue(s) (borne de taille)]\n",

@@ -67,13 +67,13 @@ pub use context::{Dropped, Fitted, Removal, estimate_tokens, fit, removable};
 pub use embed::{
     Embed, EmbedError, EmbeddingModel, SansEmbed, vecteur_dense, vectoriser, verifier,
 };
-pub use event::{Event, HintKind, Outcome, Pending, Snapshot};
+pub use event::{Event, EventWire, HintKind, Outcome, Pending, Snapshot, UnknownEvent};
 pub use mcp::{McpLink, McpServer, McpToolbox};
 pub use ports::{
     Cancel, Cancelled, Compactor, Delta, Permission, Recorder, Recorders, Toolbox, Toolboxes,
     Transport,
 };
-pub use recall::{Anchors, Citation, Fact, Recall, anchors, rappel};
+pub use recall::{Anchors, Citation, Fact, Recall, anchors, rappel, rappel_avec};
 pub use search::{SearchHit, SearchLink, SearchToolbox};
 pub use session::{
     CONTEXT_BUDGET, Clock, Handle, Harness, INTERRUPT_GRACE_MS, KEEP_ALIVE, Limits, MAX_RETRIES,

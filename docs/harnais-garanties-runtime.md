@@ -124,9 +124,9 @@ dépendance tokio (`crates/this-harness/Cargo.toml:32-36` ne liste que `futures`
 qu'un serveur *pourrait* y envelopper la boucle (`ports.rs:122-125`) : **aucun test ne
 vérifie cet hébergement serveur sous `LocalSet`**.
 
-Aucun fichier de test n'est gaté `#[cfg(target_arch = "wasm32")]`, et `wasm-bindgen-test`
-n'apparaît nulle part dans le crate (grep nul). La conséquence est nette : la suite
-comportementale du harnais n'est **jamais exécutée dans un navigateur**.
+Une tranche minimale de cette suite (5 scénarios, `tests/commun/mod.rs`) est désormais
+aussi exécutée dans un navigateur par `tests/navigateur.rs` (`wasm-bindgen-test`, voir
+§5) ; le reste de la suite (le gros des 280 tests) reste natif seulement.
 
 La seule exception à « tout est natif » est un test **unitaire** natif-only dans
 `session.rs` : `un_reveil_qui_panique_ne_tue_pas_le_minuteur` (`session.rs:3186`),
@@ -146,7 +146,7 @@ tourne en wasm de toute façon).
 | Tests **unitaires** du crate (dont le minuteur natif) | natif (Linux, macOS, Windows) | `ci.yml:132` `cargo test --lib …` ; `ci.yml:553` `cargo test --lib --features all,wami` (cross-platform) |
 | Compilation **wasm32** du harnais | **seulement compilée** (jamais exécutée) | `ci.yml:688` `cargo check -p this-agent -p this-harness --target wasm32-unknown-unknown` ; `ci.yml:734` `cargo check -p this-harness --target wasm32-unknown-unknown --no-default-features` ; lint de liste noire `ci.yml:92` (`scripts/lint-harness-portability.rs`, qui bannit `std::process`, `std::fs`, `std::net`, `std::thread`, `std::time::SystemTime`… `lint-harness-portability.rs:22-33`) |
 | Tests d'intégration sur **macOS/Windows** | **absents** (Linux seulement) | `ci.yml:556-557` `if: runner.os == 'Linux'` avant `cargo test … --test '*'` ; sur macOS/Windows seul `--lib` tourne (`ci.yml:553`) |
-| Exécution dans un **navigateur** (`wasm-pack test`, `wasm-bindgen-test`) | **nulle part** | grep nul de `wasm-pack`/`wasm-bindgen-test` dans `ci.yml` ; la mention wasm32 du job `coverage` (`ci.yml:227-230`) installe seulement la cible pour un test qui compile un module en wasm, pas pour exécuter le harnais |
+| Exécution dans un **navigateur** (`wasm-bindgen-test`) | **5 scénarios partagés** (job `wasm32_browser`) | `tests/navigateur.rs` ; scénarios dans `tests/commun/mod.rs`, aussi appelés en natif par `robustesse.rs`. Voir §5 pour ce que cela prouve et ne prouve pas |
 
 ### 2.3 Ce qui n'est couvert nulle part
 
@@ -169,6 +169,41 @@ tourne en wasm de toute façon).
 | d | `panic=abort` et outils synchrones bloquants : frontière d'isolation **ou** documentés non couverts | **preuve (documentés non couverts) ; frontière limitée** | Documenté : `ports.rs:320-322` (boucle synchrone infinie non bornable, `panic=abort` non rattrapable) et `session.rs:430-434` (idem pour l'enregistreur). Frontière d'isolation par `catch_unwind` **testée** : `residus.rs::a_part_whose_specs_panic_does_not_block_the_others`, `robustesse.rs::un_outil_qui_panique_ne_laisse_pas_un_fil_invalide`. Mais il n'existe **aucune** frontière réelle pour `panic=abort` ni pour la boucle synchrone : c'est de la documentation, pas une isolation. |
 | e | Temps monotone distingué des dates civiles + horloge simulée en tests | **manque (monotone/civil) ; preuve (horloge simulée)** | Horloge simulée : `FakeClock` injectée par `with_clock`, testée partout (`garde.rs:35-60`, `adverse.rs:35-60`, `declarations.rs:22-45`…). Distinction monotone/civil : **non faite proprement**. `now_ms()` est une horloge **civile** (epoch) sur les deux cibles — `SystemTime::now().duration_since(UNIX_EPOCH)` en natif (`lib.rs:106-112`), `js_sys::Date::now()` en wasm (`lib.rs:101-104`) — et c'est elle qui sert à **toute** la comptabilité temporelle (`clock.now_ms()` aux `session.rs:812, 1174, 1270, 1346, 1379, 1713, 1802`). Le temps **monotone** (`std::time::Instant`) n'existe que pour les échéances de `sleep` du fil natif (`session.rs:35, 67`) ; il n'est pas exposé par `Clock`. Un saut d'horloge (NTP, DST) fausse donc budget/silence/plafonds. |
 | f | Arrêt effectif des processus enfants côté adaptateur natif | **manque** | Aucun adaptateur de processus enfant dans le crate : grep `child\|process\|spawn\|kill` sur `src/` ne trouve que le fil du minuteur (`session.rs:194`) et le thread de test (`session.rs:3204`). Le harnais ne fait aucune I/O (`lib.rs:1-11`) : la future se termine, mais rien ne garantit qu'un sous-processus lancé par un outil de l'hôte est tué. |
+
+---
+
+## 5. Ce que la suite navigateur prouve / ne prouve pas
+
+Les scénarios de `crates/this-harness/tests/commun/mod.rs` sont écrits une fois ; ils
+sont exécutés en natif par `tests/robustesse.rs` (`#[test]`) et dans Chrome headless par
+`tests/navigateur.rs` (`#[wasm_bindgen_test]`, `run_in_browser`). Lancement local :
+`wasm-pack test --headless --chrome crates/this-harness -- --test navigateur`. En CI :
+job `wasm32_browser`.
+
+Les cinq scénarios : transport muet en boucle borné par les tours ; mille appels d'outils
+dans un tour, fil valide ; `interrupt` avant un run sans empoisonner le suivant ;
+interruption pendant un outil puis nouveau `send` (nouvelle requête après arrêt) ; run
+lâché pendant un `Recorder::stopped` suspendu (horloge sans minuteur).
+
+**Prouvé** : la logique de la boucle (arrêt nommé, un seul `Stopped`, place rendue,
+drapeau d'annulation remis à zéro, fil valide) s'exécute et donne le même résultat une
+fois compilée en wasm32 et pilotée dans un navigateur, avec un exécuteur à sondage borné.
+
+**Non prouvé** (ne pas le déduire de la suite navigateur) :
+
+- **Aucun minuteur réel** : les scénarios utilisent une horloge factice ou `NoTimer`
+  (`sleep` rend `None`). Les chiens de garde temporels (silence, sans-progrès, plafond
+  d'outil, budget) et `RECORDER_TIMEOUT_MS` ne sont pas exercés dans le navigateur ; un
+  hôte qui branche `setTimeout` via `with_clock` n'est pas testé.
+- **Pas de `panic=abort`** ni de rattrapage de panique : `catch_unwind` n'existe pas sur
+  wasm32 (une panique y est fatale), donc les scénarios d'isolation par panique
+  (`un_outil_qui_panique…`, `un_puits_qui_panique…`) restent natifs seulement.
+- **Pas d'arrêt de processus enfants** : le harnais n'en lance aucun ; la case (f) de
+  l'issue reste non couverte, natif seulement par nature.
+- **Pas de fermeture de page** en cours de run, ni d'hébergement sous `LocalSet`.
+- Seulement 5 scénarios sur les 280 tests : le reste de la suite (mode Auto, gardes,
+  `settle` suspendu de `mode_auto.rs`, etc.) n'est pas encore partagé.
+- Un seul navigateur (Chrome) ; ni Firefox ni Safari.
 
 ---
 

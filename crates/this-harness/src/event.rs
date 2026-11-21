@@ -247,12 +247,121 @@ impl Event {
     }
 }
 
+/// Les `type` que cette version sait décoder.
+///
+/// C'est la contrepartie de [`Event::name`] : un type absent d'ici est rangé en
+/// [`UnknownEvent`] au lieu d'être refusé. Un test fait l'aller-retour sur une
+/// instance de **chaque** variante — une variante ajoutée sans son nom ici ne
+/// peut donc pas passer.
+const TYPES_CONNUS: &[&str] = &[
+    "user",
+    "pending",
+    "hint",
+    "turn",
+    "delta",
+    "tool_use",
+    "tool_result",
+    "spoke",
+    "trimmed",
+    "compacted",
+    "routed",
+    "stopped",
+];
+
+/// Un événement écrit par une version **plus récente** : son `type` n'est pas
+/// connu ici, et rien n'est inventé — ni succès, ni fin, ni autorisation.
+#[derive(Clone, Debug, PartialEq)]
+pub struct UnknownEvent {
+    /// Le `type` d'origine, tel que le fil le portait.
+    pub type_name: String,
+    /// Le JSON d'origine, **intact**. Le relayer rend ce qui est arrivé.
+    pub raw: Value,
+}
+
+/// Un événement lu sur le fil : connu, décodé **strictement**, ou d'une version
+/// future, **conservé tel quel**.
+///
+/// C'est la décision §3 de `docs/harnais-contrat-evenements.md` : lire dans
+/// `Value`, dispatcher sur `type`, ranger l'inconnu avec son payload brut.
+/// `serde_json::from_str::<Event>` seul ne peut pas le faire : `#[serde(other)]`
+/// exige une variante **unitaire**, donc `Event::Unknown` ne porte ni le `type`
+/// d'origine ni le payload, et un hôte qui relaie un inconnu le ré-écrirait en
+/// `{"type":"Unknown"}` — l'information serait perdue en chemin.
+///
+/// Ce que ce type ne fait **pas** : il n'invente ni `seq`, ni curseur, ni
+/// `session_id` (décision §3 : l'identité et le curseur viennent de l'hôte, une
+/// seconde numérotation serait une seconde source de vérité).
+#[derive(Clone, Debug, PartialEq)]
+pub enum EventWire {
+    /// Un `type` connu, décodé strictement : un payload incomplet est une
+    /// **erreur**, jamais un inconnu.
+    Known(Event),
+    /// Un `type` inconnu, conservé avec son payload.
+    Unknown(UnknownEvent),
+}
+
+impl EventWire {
+    /// L'événement connu, quand il l'est.
+    pub fn known(&self) -> Option<&Event> {
+        match self {
+            Self::Known(event) => Some(event),
+            Self::Unknown(_) => None,
+        }
+    }
+
+    /// Prend l'événement connu, et rend l'inconnu au besoin.
+    pub fn into_known(self) -> Result<Event, UnknownEvent> {
+        match self {
+            Self::Known(event) => Ok(event),
+            Self::Unknown(inconnu) => Err(inconnu),
+        }
+    }
+}
+
+impl Serialize for EventWire {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self {
+            // Un événement d'une version future repart **tel qu'il est arrivé** :
+            // c'est ce qui permet à un hôte de le relayer sans le déformer.
+            Self::Unknown(inconnu) => inconnu.raw.serialize(serializer),
+            Self::Known(event) => event.serialize(serializer),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for EventWire {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let raw = Value::deserialize(deserializer)?;
+        // Sans `type` textuel, l'événement n'est ni connu ni futur : il est
+        // illisible, et le dire vaut mieux que le ranger quelque part.
+        let Some(type_name) = raw.get("type").and_then(Value::as_str).map(str::to_owned) else {
+            return Err(serde::de::Error::custom(
+                "événement sans `type` textuel : ni connu, ni futur — illisible",
+            ));
+        };
+        if !TYPES_CONNUS.contains(&type_name.as_str()) {
+            return Ok(Self::Unknown(UnknownEvent { type_name, raw }));
+        }
+        // Type connu : décodage strict. Un payload incomplet est une ERREUR —
+        // le ranger en inconnu inventerait un succès et effacerait le défaut.
+        serde_json::from_value::<Event>(raw)
+            .map(Self::Known)
+            .map_err(serde::de::Error::custom)
+    }
+}
+
 /// L'état du harnais, sérialisable : ce qu'il faut pour reprendre après une
 /// fermeture d'app.
 ///
 /// La file d'attente en fait partie : un message tapé juste avant que
 /// l'application soit suspendue ne doit pas disparaître avec la page.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+/// Un état de conversation à reprendre après une fermeture.
+///
+/// **Il n'est PAS authentifié par construction** : c'est un type désérialisable,
+/// un fichier importé, une autre personne ou un pair réseau peut l'avoir forgé.
+/// C'est pourquoi la reprise est **conservatrice par défaut** (`restore` ne rend
+/// rien preuve) et que la confiance est explicite (`restore_trusted`).
 pub struct Snapshot {
     #[serde(default = "one")]
     pub version: u32,
@@ -435,5 +544,164 @@ mod tests {
         ));
         let proven: Verdict = serde_json::from_str("\"Proven\"").unwrap();
         assert_eq!(proven, Verdict::Proven);
+    }
+
+    /// Une instance de **chaque** variante connue : la liste `TYPES_CONNUS` et le
+    /// décodage strict sont vérifiés ensemble, pas sur un échantillon.
+    fn une_de_chaque() -> Vec<Event> {
+        vec![
+            Event::User { text: "u".into() },
+            Event::Pending {
+                messages: vec![crate::event::Pending {
+                    id: 7,
+                    text: "tenu".into(),
+                    at_ms: 1_000.0,
+                    images: Vec::new(),
+                }],
+            },
+            Event::Hint {
+                text: "h".into(),
+                kind: HintKind::Retry,
+            },
+            Event::Turn { index: 3 },
+            Event::Delta { text: "d".into() },
+            Event::ToolUse {
+                id: "t1".into(),
+                tool: "read_file".into(),
+                input: serde_json::json!({"path": "a.txt"}),
+            },
+            Event::ToolResult {
+                id: "t1".into(),
+                tool: "read_file".into(),
+                text: "contenu".into(),
+                refused: false,
+                failed: false,
+                failure: None,
+                unchanged: false,
+                before: String::new(),
+                after: String::new(),
+                ms: 12,
+            },
+            Event::Spoke { text: "s".into() },
+            Event::Trimmed {
+                messages: 2,
+                tokens: 300,
+                over_budget: false,
+                excess: 0,
+            },
+            Event::Compacted {
+                messages: 4,
+                tokens: 900,
+                summary_tokens: 120,
+            },
+            Event::Routed {
+                provider: "local".into(),
+                model: Some("petit".into()),
+                changed: true,
+                why: "routed".into(),
+                reason: String::new(),
+                mode: None,
+                advisory: false,
+            },
+            Event::Stopped {
+                stop: Stop::Done,
+                text: "fini".into(),
+                turns: 2,
+                ms: 500,
+                code: None,
+                verdict: None,
+            },
+        ]
+    }
+
+    #[test]
+    fn chaque_type_connu_se_relit_comme_connu_et_identique() {
+        // Deux choses d'un coup : le nom de chaque variante est bien dans
+        // `TYPES_CONNUS` (sinon elle serait rangée en inconnu), et le décodage
+        // d'un type connu rend exactement l'événement d'origine.
+        for event in une_de_chaque() {
+            assert!(
+                TYPES_CONNUS.contains(&event.name()),
+                "« {} » manque dans TYPES_CONNUS : il serait pris pour un type futur",
+                event.name()
+            );
+            let brut = serde_json::to_value(&event).unwrap();
+            match serde_json::from_value::<EventWire>(brut).unwrap() {
+                EventWire::Known(relu) => assert_eq!(relu, event, "{}", event.name()),
+                EventWire::Unknown(inconnu) => panic!(
+                    "« {} » pris pour un type futur ({})",
+                    event.name(),
+                    inconnu.type_name
+                ),
+            }
+        }
+    }
+
+    #[test]
+    fn un_evenement_futur_garde_son_type_et_son_payload_intact() {
+        // Le cas du ticket : un hôte plus récent écrit un type que cette version
+        // ne connaît pas. Rien ne doit être perdu — ni le type, ni les champs.
+        let brut = r#"{"type":"budget_projete","restant":42,"detail":{"outils":["a","b"]}}"#;
+        let lu: EventWire = serde_json::from_str(brut).unwrap();
+        let inconnu = match lu {
+            EventWire::Unknown(inconnu) => inconnu,
+            EventWire::Known(event) => panic!("« {} » n'est pas connu d'ici", event.name()),
+        };
+        assert_eq!(inconnu.type_name, "budget_projete");
+        assert_eq!(inconnu.raw.get("restant").and_then(Value::as_i64), Some(42));
+
+        // Relayé, il repart avec SON type et TOUS ses champs : jamais
+        // `{"type":"Unknown"}`, qui est exactement ce que #301 laissait passer.
+        let relaye = serde_json::to_value(EventWire::Unknown(inconnu)).unwrap();
+        assert_eq!(relaye, serde_json::from_str::<Value>(brut).unwrap());
+        assert_eq!(
+            relaye.get("type").and_then(Value::as_str),
+            Some("budget_projete"),
+            "le relais ne doit pas réécrire le type"
+        );
+    }
+
+    #[test]
+    fn un_evenement_futur_relaye_se_relit_a_l_identique() {
+        // Deux relais valent un : l'enveloppe est stable, elle ne s'appauvrit pas.
+        let brut = serde_json::json!({"type":"inconnu_de_demain","n":1});
+        let premier = serde_json::from_value::<EventWire>(brut.clone()).unwrap();
+        let relaye = serde_json::to_value(&premier).unwrap();
+        let second = serde_json::from_value::<EventWire>(relaye).unwrap();
+        assert_eq!(premier, second);
+    }
+
+    #[test]
+    fn un_type_connu_au_payload_incomplet_est_une_erreur_pas_un_inconnu() {
+        // « delta » sans `text` n'est pas un événement futur : c'est un événement
+        // cassé. Le ranger en inconnu inventerait un succès et perdrait le défaut.
+        let err = serde_json::from_str::<EventWire>(r#"{"type":"delta"}"#).unwrap_err();
+        assert!(
+            err.to_string().contains("text"),
+            "l'erreur doit nommer le champ manquant : {err}"
+        );
+    }
+
+    #[test]
+    fn un_evenement_sans_type_textuel_est_refuse() {
+        for brut in [r#"{"pas":"de type"}"#, r#"{"type":42}"#, r#"{"type":null}"#] {
+            assert!(
+                serde_json::from_str::<EventWire>(brut).is_err(),
+                "« {brut} » n'est ni connu ni futur : il doit être refusé"
+            );
+        }
+    }
+
+    #[test]
+    fn une_forme_relayee_par_une_version_precedente_reste_lisible() {
+        // #301 écrivait `{"type":"Unknown"}` (variante unitaire). Un hôte qui
+        // relaie encore cette forme ne casse pas la lecture : elle est inconnue,
+        // donc conservée — le comportement est le même, en plus fidèle.
+        match serde_json::from_str::<EventWire>(r#"{"type":"Unknown"}"#).unwrap() {
+            EventWire::Unknown(inconnu) => assert_eq!(inconnu.type_name, "Unknown"),
+            EventWire::Known(event) => {
+                panic!("« unknown » n'est pas un type connu : {}", event.name())
+            }
+        }
     }
 }

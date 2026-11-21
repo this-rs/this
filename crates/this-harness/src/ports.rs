@@ -240,6 +240,11 @@ pub trait Toolbox {
     /// Par défaut `None` : un outillage qui ne tient pas de registre n'en
     /// partage pas. Une implémentation qui en tient un doit rendre LE SIEN,
     /// pas une copie — c'est le partage qui fait la garantie.
+    ///
+    /// **Un registre par SESSION** : le harnais ne le crée pas, il lit celui de
+    /// l'outillage. Deux harnais construits sur le même `Rc<dyn Toolbox>`
+    /// partagent donc le registre, et un `restore`/`seed` l'écrase. Un hôte qui
+    /// veut un registre par session construit un outillage par session.
     fn vus(&self) -> Option<Rc<RefCell<SeenLedger>>> {
         None
     }
@@ -368,6 +373,16 @@ impl Toolbox for Toolboxes {
                     .filter(move |x| proprietaire.get(&x.tool) == Some(&i))
             })
             .collect()
+    }
+
+    /// Le registre de la **première** part qui en tient un — même règle que
+    /// l'annonce, les déclarations et l'appel : le premier qui expose gagne.
+    ///
+    /// Sans ça, la composition qui sert les vrais hôtes rendrait `None` (le
+    /// défaut du trait) et toute la provenance resterait **inerte en
+    /// production**, alors que chaque part tiendrait son registre.
+    fn vus(&self) -> Option<Rc<RefCell<SeenLedger>>> {
+        self.parts.iter().find_map(|part| part.vus())
     }
 
     async fn call(&self, call: &ToolCall) -> Outcome {
