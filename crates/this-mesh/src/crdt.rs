@@ -293,6 +293,54 @@ impl Liste {
     }
 }
 
+// ── Pont vers le fil : `espace.op` et `espace.sync` ────────────────────────
+//
+// Le CRDT (`Liste`, `Operation`) DÉCIDE ; les messages TRANSPORTENT. Ces
+// fonctions fixent le format de charge de deux types de message du maillage :
+// `espace.op` porte une opération, `espace.sync` un état complet, toujours
+// accompagnés de l'identifiant de la liste. Aucune I/O : des aller-retours
+// `serde_json::Value` purs, que l'appelant met dans `Message::charge`.
+
+/// Longueur maximale d'un identifiant de liste sur le fil.
+pub const LISTE_ID_MAX: usize = 128;
+
+fn liste_id_valide(id: &str) -> bool {
+    !id.is_empty() && id.len() <= LISTE_ID_MAX && !id.bytes().any(|b| b == 0)
+}
+
+/// Charge d'un message `espace.op` : `{ "liste": "<id>", "operation": <Operation> }`.
+pub fn operation_vers_charge(liste: &str, op: &Operation) -> serde_json::Value {
+    serde_json::json!({ "liste": liste, "operation": op })
+}
+
+/// Relit `(liste, opération)` d'une charge `espace.op`. `None` si le format ne
+/// correspond pas : liste absente/vide/trop longue, ou opération inconnue. Une
+/// opération reçue hors format n'est jamais appliquée.
+pub fn operation_depuis_charge(charge: &serde_json::Value) -> Option<(String, Operation)> {
+    let liste = charge.get("liste")?.as_str()?.to_owned();
+    if !liste_id_valide(&liste) {
+        return None;
+    }
+    let op: Operation = serde_json::from_value(charge.get("operation")?.clone()).ok()?;
+    Some((liste, op))
+}
+
+/// Charge d'un message `espace.sync` : `{ "liste": "<id>", "etat": <Liste> }`.
+pub fn liste_vers_charge(liste: &str, l: &Liste) -> serde_json::Value {
+    serde_json::json!({ "liste": liste, "etat": l })
+}
+
+/// Relit `(liste, état)` d'une charge `espace.sync`. `None` si le format ne
+/// correspond pas ou si l'état n'est pas une liste valide.
+pub fn liste_depuis_charge(charge: &serde_json::Value) -> Option<(String, Liste)> {
+    let liste = charge.get("liste")?.as_str()?.to_owned();
+    if !liste_id_valide(&liste) {
+        return None;
+    }
+    let l: Liste = serde_json::from_value(charge.get("etat")?.clone()).ok()?;
+    Some((liste, l))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -538,5 +586,74 @@ mod tests {
         reunion.fusionner(&b);
         assert_eq!(reunion.len(), 1);
         assert_eq!(reunion.lignes()[0].texte, "pain");
+    }
+}
+
+#[cfg(test)]
+mod tests_pont {
+    use super::*;
+
+    fn ajouter(id: &str, texte: &str, horloge: u64, app: &str) -> Operation {
+        Operation::Ajouter {
+            id: id.into(),
+            texte: texte.into(),
+            est: Estampille::nouvelle(horloge, app),
+        }
+    }
+
+    #[test]
+    fn une_operation_fait_l_aller_retour_par_la_charge() {
+        let op = ajouter("pain", "pain", 3, "appareil-a");
+        let charge = operation_vers_charge("courses", &op);
+        let (liste, relu) = operation_depuis_charge(&charge).expect("relu");
+        assert_eq!(liste, "courses");
+        assert_eq!(relu, op, "l'opération doit survivre intacte au voyage");
+    }
+
+    #[test]
+    fn un_etat_fait_l_aller_retour_par_la_charge() {
+        let mut l = Liste::nouvelle();
+        l.appliquer(&ajouter("pain", "pain", 1, "a"));
+        let charge = liste_vers_charge("courses", &l);
+        let (liste, relu) = liste_depuis_charge(&charge).expect("relu");
+        assert_eq!(liste, "courses");
+        assert_eq!(relu.lignes().len(), 1);
+        assert_eq!(relu.lignes()[0].texte, "pain");
+    }
+
+    #[test]
+    fn une_charge_mal_formee_est_refusee() {
+        use serde_json::json;
+        assert!(operation_depuis_charge(&json!({"operation": {"op": "zzz"}})).is_none());
+        assert!(operation_depuis_charge(&json!({"liste": "", "operation": {}})).is_none());
+        assert!(
+            operation_depuis_charge(&json!({"liste": "c", "operation": {"op": "zzz"}})).is_none()
+        );
+        assert!(operation_depuis_charge(&json!({"liste": "c"})).is_none());
+        let longue = "x".repeat(LISTE_ID_MAX + 1);
+        assert!(operation_depuis_charge(&json!({"liste": longue, "operation": {}})).is_none());
+        assert!(liste_depuis_charge(&json!({"liste": "c"})).is_none());
+        assert!(liste_depuis_charge(&json!({"liste": "c", "etat": 42})).is_none());
+    }
+
+    #[test]
+    fn une_liste_voyagee_puis_relue_fusionne_encore() {
+        let mut a = Liste::nouvelle();
+        a.appliquer(&ajouter("pain", "pain", 1, "a"));
+        let mut b = Liste::nouvelle();
+        b.appliquer(&ajouter("lait", "lait", 2, "appareil-b"));
+
+        let charge = liste_vers_charge("courses", &b);
+        let (_, b_relu) = liste_depuis_charge(&charge).expect("relu");
+        a.fusionner(&b_relu);
+
+        let textes: Vec<String> = a.lignes().into_iter().map(|l| l.texte).collect();
+        assert!(textes.contains(&"pain".to_string()));
+        assert!(textes.contains(&"lait".to_string()));
+        assert_eq!(
+            textes.len(),
+            2,
+            "les deux ajouts hors ligne survivent à la fusion"
+        );
     }
 }
