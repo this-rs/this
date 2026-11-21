@@ -1,0 +1,194 @@
+//! Raccordement RÉEL à un moteur, opt-in (this#288, case C5 de
+//! `docs/harnais-capacites-moteurs.md`).
+//!
+//! Ces tests ne tournent que si `THIS_RACCORDEMENT=deepseek` est posé ; sans lui, chacun
+//! dit qu'il est sauté et passe. La clé n'est JAMAIS dans le dépôt ni dans une fixture : elle
+//! est lue dans la variable `DEEPSEEK_API_KEY` par la référence `CredentialRef::Env` — le
+//! chemin de production —, typiquement injectée par un coffre :
+//!
+//! ```text
+//! THIS_RACCORDEMENT=deepseek orchestrator secret exec -e DEEPSEEK_API_KEY=deepseek-api-key -- \
+//!   cargo test -p this-llm-providers --test raccordement_reel -- --test-threads=1 --nocapture
+//! ```
+//!
+//! Ce qu'ils prouvent, et que les doublures ne prouvent pas : le moteur réel rend du texte,
+//! un USAGE réel (des jetons comptés par le moteur, pas estimés), un appel d'outil
+//! structuré, et une clé refusée est classée comme une réponse du moteur (`Http(401)`),
+//! jamais comme une panne réseau. Chaque test imprime une ligne `RACCORDEMENT …` pour le
+//! rapport daté ; aucune ne contient de secret.
+
+use serde_json::json;
+use this_llm::{CredentialRef, Preset};
+use this_llm_providers::{
+    ChatRequest, Clock, ErrorKind, Finish, Hub, MemoryStore, ProviderConfig, ProviderError,
+    ProviderId, Secrets, TurnRequest,
+};
+
+const VARIABLE_DE_CLE: &str = "DEEPSEEK_API_KEY";
+
+struct Jour;
+
+impl Clock for Jour {
+    fn day(&self) -> u64 {
+        0
+    }
+}
+
+/// Vrai si le raccordement est demandé. Sinon, le test le dit et passe.
+fn demande(nom: &str) -> bool {
+    let actif = std::env::var("THIS_RACCORDEMENT").as_deref() == Ok("deepseek");
+    if !actif {
+        eprintln!("{nom} : sauté (THIS_RACCORDEMENT=deepseek non posé)");
+    }
+    actif
+}
+
+fn deepseek(variable: &str) -> ProviderConfig {
+    ProviderConfig::new(
+        ProviderId::new("deepseek").unwrap(),
+        "DeepSeek",
+        Preset::DeepSeek,
+        CredentialRef::Env(variable.to_string()),
+    )
+}
+
+fn client(config: ProviderConfig) -> this_llm_providers::ProviderClient {
+    let hub = Hub::open(MemoryStore::default(), Secrets::env_only(), Jour).unwrap();
+    hub.upsert(config.clone()).unwrap();
+    hub.set_active(Some(&config.id)).unwrap();
+    hub.client(&config.id).expect("client")
+}
+
+#[tokio::test]
+async fn le_moteur_reel_rend_du_texte_et_un_usage_compte_par_lui() {
+    if !demande("texte+usage") {
+        return;
+    }
+    assert!(
+        std::env::var(VARIABLE_DE_CLE).is_ok_and(|v| !v.is_empty()),
+        "THIS_RACCORDEMENT est posé mais {VARIABLE_DE_CLE} est vide : injecte-la par le coffre"
+    );
+    let mut requete = ChatRequest::new("Tu réponds en un mot.", "Réponds exactement : pong");
+    // Un plafond large : un modèle qui raisonne dépense ses jetons de sortie AVANT le texte
+    // (voir le test suivant).
+    requete.max_output_tokens = Some(1024);
+    let reponse = client(deepseek(VARIABLE_DE_CLE))
+        .chat(requete)
+        .await
+        .expect("le moteur répond");
+    println!(
+        "RACCORDEMENT texte+usage : modèle={} entrée={} sortie={} tronqué={} texte={:?}",
+        reponse.model,
+        reponse.usage.input_tokens,
+        reponse.usage.output_tokens,
+        reponse.truncated,
+        reponse.text
+    );
+    assert!(!reponse.text.trim().is_empty(), "du texte");
+    assert!(!reponse.model.is_empty(), "le modèle servi est nommé");
+    assert!(
+        reponse.usage.input_tokens > 0 && reponse.usage.output_tokens > 0,
+        "un usage réel, compté par le moteur : {:?}",
+        reponse.usage
+    );
+}
+
+#[tokio::test]
+async fn un_plafond_epuise_par_le_raisonnement_se_dit_tronque_pas_fini() {
+    // MESURÉ le 21/11/2026 : `deepseek-flash` sous un plafond de 16 jetons rend un texte
+    // VIDE — les jetons de sortie partent dans le raisonnement. Un hôte qui lirait « texte
+    // vide, pas d'erreur » comme une réponse finie afficherait une bulle muette. La garantie
+    // à tenir : `truncated` le dit.
+    if !demande("plafond épuisé") {
+        return;
+    }
+    let mut requete = ChatRequest::new("Tu réponds en un mot.", "Réponds exactement : pong");
+    requete.max_output_tokens = Some(16);
+    let reponse = client(deepseek(VARIABLE_DE_CLE))
+        .chat(requete)
+        .await
+        .expect("le moteur répond");
+    println!(
+        "RACCORDEMENT plafond épuisé : modèle={} sortie={} tronqué={} texte={:?}",
+        reponse.model, reponse.usage.output_tokens, reponse.truncated, reponse.text
+    );
+    if reponse.text.trim().is_empty() {
+        assert!(
+            reponse.truncated,
+            "un texte vide sous plafond doit se dire tronqué : {reponse:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn le_moteur_reel_rend_un_appel_d_outil_structure() {
+    if !demande("outil") {
+        return;
+    }
+    let messages = json!([
+        {"role": "system", "content": "Tu n'écris pas de texte : tu appelles l'outil demandé."},
+        {"role": "user", "content": "Appelle l'outil ping avec cible=\"atelier\"."}
+    ]);
+    let outils = json!([{
+        "type": "function",
+        "function": {
+            "name": "ping",
+            "description": "Envoie un ping.",
+            "parameters": {
+                "type": "object",
+                "properties": {"cible": {"type": "string"}},
+                "required": ["cible"]
+            }
+        }
+    }]);
+    let mut tour = TurnRequest::new(messages).with_tools(outils);
+    tour.max_output_tokens = Some(64);
+    let reponse = client(deepseek(VARIABLE_DE_CLE))
+        .send_turn(tour)
+        .await
+        .expect("le moteur répond");
+    let noms: Vec<String> = reponse
+        .tool_calls
+        .iter()
+        .filter_map(|c| c.pointer("/function/name")?.as_str().map(str::to_string))
+        .collect();
+    println!(
+        "RACCORDEMENT outil : modèle={} fin={} appels={noms:?}",
+        reponse.model,
+        reponse.finish.as_str()
+    );
+    assert_eq!(reponse.finish, Finish::ToolCalls, "{reponse:?}");
+    assert_eq!(noms, vec!["ping".to_string()]);
+    let arguments = reponse.tool_calls[0]
+        .pointer("/function/arguments")
+        .and_then(|a| a.as_str())
+        .and_then(|a| serde_json::from_str::<serde_json::Value>(a).ok())
+        .expect("des arguments JSON");
+    assert_eq!(arguments["cible"], "atelier", "{arguments}");
+}
+
+#[tokio::test]
+async fn une_cle_refusee_est_une_reponse_du_moteur_pas_une_panne_reseau() {
+    if !demande("clé refusée") {
+        return;
+    }
+    // Une clé fausse, posée pour ce seul processus : le moteur la refuse.
+    const FAUSSE: &str = "THIS_RACCORDEMENT_CLE_FAUSSE";
+    // SAFETY: tests lancés avec --test-threads=1 (voir l'en-tête) ; aucune autre lecture
+    // de cette variable.
+    unsafe { std::env::set_var(FAUSSE, "sk-0000000000000000000000000000000") };
+    let erreur = client(deepseek(FAUSSE))
+        .chat(ChatRequest::new("sys", "bonjour"))
+        .await
+        .expect_err("une clé fausse est refusée");
+    println!("RACCORDEMENT clé refusée : kind={:?}", erreur.kind());
+    assert!(
+        matches!(erreur, ProviderError::Status { .. }),
+        "le moteur a répondu un statut : {erreur:?}"
+    );
+    assert_eq!(erreur.kind(), ErrorKind::Http(401), "{erreur:?}");
+    assert!(
+        !matches!(erreur.kind(), ErrorKind::Unreachable | ErrorKind::Timeout),
+        "un refus d'authentification n'est pas une panne réseau"
+    );
+}
