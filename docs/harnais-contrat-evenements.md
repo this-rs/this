@@ -129,6 +129,10 @@ Décisions, tranchées explicitement :
   refusé), et un objet à **deux** clés `type` est refusé — changement observable : la lecture
   par `Value` gardait la dernière en silence. Un JSON ambigu sur le champ qui décide du genre
   n'est ni connu ni futur.
+  **Effet de bord de `raw_value`** (feature unifiée dans tout le binaire) : un objet dont la
+  première clé est `$serde_json::private::RawValue` est relu, en `Value`, comme le JSON que porte
+  cette clé (mesuré sur `ToolCall.arguments`) ; il était déjà actif partout où `this-mesh` est
+  lié. Un filtre sur le texte avant parse ne doit donc pas tenir lieu de contrôle.
   **Limite** : cela ne vaut QUE pour un type entièrement inconnu. Un type **connu** auquel une
   version future ajoute un champ est décodé en `Event` et le champ ajouté est perdu au relais.
   `Event::Unknown` (variante unitaire de #301) reste pour la
