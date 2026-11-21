@@ -136,7 +136,7 @@ Trois points de coupe précis à écrire, dans cet ordre de valeur :
    reprise doit lire `load_run` (`src/storage/harness_graph.rs:453`) et refuser de
    rejouer.
 
-**Preuve** : `crates/this-harness/tests/reprise_crash.rs`. Un sous-processus (le binaire
+**Preuve** : `tests/reprise_crash.rs` (crate racine, feature `obrain`). Un sous-processus (le binaire
 de test ré-invoqué sur `enfant`) pilote un vrai `Harness` branché sur le vrai journal
 (`HostRecorder` → `HarnessGraph` → `ObrainStore` sur disque), puis meurt par
 `std::process::abort()` (le parent exige SIGABRT) ; le parent rouvre le magasin dans un
@@ -162,8 +162,13 @@ seul outil, un seul processus écrivain ; pas de crash pendant le commit lui-mê
 (`commit_wal`), pas de coupure d'alimentation (SIGABRT ne perd pas le cache de l'OS). (4) Le
 `Snapshot` (fil + file) n'a toujours pas de stockage disque : la ligne 3 de la matrice reste
 « hôte, entièrement ». (5) Les tests ne tournent qu'en `cfg(unix)` pour la vérification du
-signal. Coût : `this-harness` a désormais une dev-dépendance (cycle permis) vers le crate
-racine avec la feature `obrain`, donc `cargo test -p this-harness` compile obrain.
+signal. (6) **Ces tests ne tournent PAS en CI aujourd'hui** : le journal durable vit dans le
+crate racine et le magasin est obrain, dont le dépôt est privé ; le job `obrain` ne s'active
+que si le secret `OBRAIN_TOKEN` est défini, sinon il n'émet qu'un avertissement. Ils se
+lancent en local : `cargo test --features obrain --test reprise_crash`. Placés d'abord dans
+`this-harness` avec une dev-dépendance vers le crate racine, ils cassaient Clippy et
+Coverage (les crates `obrain-*` y sont des stubs, d'où `unresolved import obrain_common::types`)
+et auraient cassé la suite navigateur de #285 : la dev-dépendance a été retirée.
 
 ### (c) Un effet non idempotent au résultat inconnu n'est pas rejoué aveuglément — **preuve existante**
 

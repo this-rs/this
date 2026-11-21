@@ -14,8 +14,11 @@
 //! aveuglément (case (c), déjà prouvée : `un_outil_abandonne_a_un_effet_inconnu_pas_un_echec_prouve`
 //! et `une_etape_abandonnee_n_arrete_pas_le_run_en_echec`, `src/session.rs`).
 
-// Natif seulement : sous-processus, `abort()` et magasin obrain sur disque n'existent pas en wasm32.
-#![cfg(not(target_arch = "wasm32"))]
+// Feature `obrain` : le journal durable (`HarnessGraph`, `HostRecorder`) vit dans le crate
+// racine et le magasin est obrain. SANS la feature, ce fichier est vide.
+// ATTENTION : le job CI `obrain` n'est pas actif sans le secret OBRAIN_TOKEN (dépôt privé),
+// donc ce test ne tourne aujourd'hui qu'en local : `cargo test --features obrain --test reprise_crash`.
+#![cfg(feature = "obrain")]
 
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};

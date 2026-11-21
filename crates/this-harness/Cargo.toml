@@ -34,14 +34,3 @@ js-sys = "0.3"
 futures = "0.3"
 # Only to prove that the failure families of a provider are codes this harness knows.
 this-llm-providers = { path = "../this-llm-providers", default-features = false }
-
-# Les tests de crash (`tests/reprise_crash.rs`) rouvrent un VRAI magasin obrain sur
-# disque après la mort d'un sous-processus : le journal durable est dans le crate
-# racine (`HarnessGraph`, `HostRecorder`), pas ici. Cycle de dev-dépendance : permis
-# par cargo (le crate racine dépend de celui-ci derrière la feature `obrain`), sans
-# effet sur le crate publié.
-# Natif seulement : obrain ne se compile pas en wasm32, et la suite navigateur
-# (`tests/navigateur.rs`) construit ce crate pour cette cible.
-[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
-tempfile = "3"
-this-rs = { path = "../..", default-features = false, features = ["obrain"] }
