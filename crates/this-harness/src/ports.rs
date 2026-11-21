@@ -240,6 +240,11 @@ pub trait Toolbox {
     /// Par défaut `None` : un outillage qui ne tient pas de registre n'en
     /// partage pas. Une implémentation qui en tient un doit rendre LE SIEN,
     /// pas une copie — c'est le partage qui fait la garantie.
+    ///
+    /// **Un registre par SESSION** : le harnais ne le crée pas, il lit celui de
+    /// l'outillage. Deux harnais construits sur le même `Rc<dyn Toolbox>`
+    /// partagent donc le registre, et un `restore`/`seed` l'écrase. Un hôte qui
+    /// veut un registre par session construit un outillage par session.
     fn vus(&self) -> Option<Rc<RefCell<SeenLedger>>> {
         None
     }

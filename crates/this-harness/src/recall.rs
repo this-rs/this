@@ -292,7 +292,9 @@ pub async fn rappel_avec(
         };
         // La marque de provenance : une citation jamais lue ne se présente pas
         // comme une preuve, même quand le graphe la connaît.
-        let non_lu = match vus.map(|l| l.provenance_token(&c.id)) {
+        // `None` = le registre ne suis pas cette sorte : il ne dit rien, on ne
+        // marque rien. Seul ce qu'il SAIT (cité, ou jamais paru) porte la marque.
+        let non_lu = match vus.and_then(|l| l.provenance_token(&c.id)) {
             Some(Provenance::Quoted) | Some(Provenance::Never) => {
                 // Le saut de ligne FINAL compte : sans lui, l'entrée suivante se
                 // collerait à la marque et un lecteur ligne à ligne l'attribuerait

@@ -555,12 +555,18 @@ impl SeenLedger {
     /// La provenance d'un jeton `#kind:id`, **par sa forme textuelle**.
     ///
     /// Même règle que [`provenance`](Self::provenance) : `Direct` seulement si
-    /// l'id a été LU hors donnée non fiable. Un texte qui n'est pas exactement un
-    /// jeton est `Never` — on ne devine pas.
-    pub fn provenance_token(&self, token: &str) -> Provenance {
+    /// l'id a été LU hors donnée non fiable.
+    ///
+    /// `None` quand le jeton n'est pas lisible **ou** quand sa sorte n'est pas
+    /// suivie par ce registre (seules les uuids et les modules le sont). Ce n'est
+    /// pas la même chose que [`Provenance::Never`] : `Never` dit « suivi, jamais
+    /// paru » — le rappel peut alors l'annoncer ; `None` dit « ce registre ne
+    /// sait rien de cette sorte », et on ne l'annonce pas. Confondre les deux
+    /// ferait écrire « jamais lu » sur un id dont on ne sait rien.
+    pub fn provenance_token(&self, token: &str) -> Option<Provenance> {
         match token_at(token, 0) {
-            Some((r, fin)) if fin == token.len() => self.provenance(&r),
-            _ => Provenance::Never,
+            Some((r, fin)) if fin == token.len() => Some(self.provenance(&r)),
+            _ => None,
         }
     }
 

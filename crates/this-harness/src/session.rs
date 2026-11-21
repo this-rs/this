@@ -1131,7 +1131,12 @@ impl Harness {
 
     /// Reprend une conversation déjà commencée.
     pub fn seed(&self, transcript: Vec<Message>) {
-        self.with(|s| s.transcript = transcript);
+        self.handle().seed(transcript);
+    }
+
+    /// [`Self::seed`] pour un transcript **non authentifié**.
+    pub fn seed_untrusted(&self, transcript: Vec<Message>) {
+        self.handle().seed_untrusted(transcript);
     }
 
     pub fn snapshot(&self) -> Snapshot {
@@ -1139,8 +1144,16 @@ impl Harness {
     }
 
     /// Remet un état sauvegardé en place — la file d'attente comprise.
+    ///
+    /// **Le snapshot est cru** : voir [`Handle::restore`].
     pub fn restore(&self, snapshot: Snapshot) {
         self.handle().restore(snapshot);
+    }
+
+    /// [`Self::restore`] pour un snapshot **non authentifié** : rien n'y devient
+    /// une preuve (voir [`Handle::restore_untrusted`]).
+    pub fn restore_untrusted(&self, snapshot: Snapshot) {
+        self.handle().restore_untrusted(snapshot);
     }
 
     /// Le message entre dans la conversation et l'agent travaille jusqu'à
@@ -2485,6 +2498,21 @@ pub fn out_hash(text: &str) -> String {
 /// Le nombre maximal de messages tenus en file.
 const MAX_PENDING: usize = 1000;
 
+/// La confiance accordée à un transcript qu'on remet en place.
+///
+/// Ce n'est pas une politesse : c'est la seule chose qui empêche un transcript
+/// venu d'ailleurs de **blanchir** un id. Un `Message::Tool` forgé, imprimant un
+/// id hors conteneur, suffit à faire d'une citation une preuve si on le relit
+/// comme une lecture.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Confiance {
+    /// Le transcript vient de NOUS (notre snapshot, notre sauvegarde).
+    Notre,
+    /// Le transcript vient d'AILLEURS (fichier importé, autre personne, pair) :
+    /// rien n'y est une preuve, tout ce qu'il porte est seulement **cité**.
+    Importee,
+}
+
 /// La poignée que l'interface garde : elle commande sans attendre la fin d'un
 /// tour.
 #[derive(Clone)]
@@ -2648,7 +2676,43 @@ impl Handle {
 
     /// Remplace la conversation que le modèle verra : reprise d'une session
     /// sauvegardée, ou nouvelle conversation.
+    /// Rebâtit le registre partagé depuis un transcript, selon la confiance.
+    ///
+    /// `Importee` range tout en **cité** : c'est le refus conservateur demandé
+    /// pour un transcript dont on ne peut pas prouver l'origine.
+    fn rebatir_registre(&self, transcript: &[Message], confiance: Confiance) {
+        let Some(registre) = &self.vus else {
+            return;
+        };
+        let mut registre = registre.borrow_mut();
+        *registre = SeenLedger::new();
+        for message in transcript {
+            if let Message::Tool { content, .. } = message {
+                match confiance {
+                    Confiance::Notre => registre.observe(content),
+                    Confiance::Importee => registre.observe_quoted(content),
+                }
+            }
+        }
+    }
+
+    /// Remplace la conversation (reprise d'une session sauvegardée).
+    ///
+    /// Le registre **suit** la conversation : le laisser tel quel ferait survivre
+    /// les lectures de l'ancienne dans la nouvelle — une fuite croisée entre deux
+    /// conversations du même harnais.
     pub fn seed(&self, transcript: Vec<Message>) {
+        self.seed_avec(transcript, Confiance::Notre)
+    }
+
+    /// [`Self::seed`] pour un transcript **non authentifié** (voir
+    /// [`Self::restore_untrusted`]).
+    pub fn seed_untrusted(&self, transcript: Vec<Message>) {
+        self.seed_avec(transcript, Confiance::Importee)
+    }
+
+    fn seed_avec(&self, transcript: Vec<Message>, confiance: Confiance) {
+        self.rebatir_registre(&transcript, confiance);
         self.state.borrow_mut().transcript = transcript;
     }
 
@@ -2664,7 +2728,28 @@ impl Handle {
         }
     }
 
+    /// Remet un état sauvegardé en place — la file d'attente comprise.
+    ///
+    /// **Le snapshot est CRU.** C'est un acte de confiance : il vient de l'hôte.
+    /// Ses résultats d'outils sont donc relus, et un id qu'ils impriment hors
+    /// conteneur redevient une lecture directe. Un snapshot venu d'**ailleurs**
+    /// (fichier importé, autre personne, pair réseau) doit passer par
+    /// [`Self::restore_untrusted`] : sinon il suffit d'y écrire un résultat
+    /// d'outil pour blanchir n'importe quel id.
     pub fn restore(&self, snapshot: Snapshot) {
+        self.restore_avec(snapshot, Confiance::Notre)
+    }
+
+    /// [`Self::restore`] pour un snapshot **non authentifié**.
+    ///
+    /// Rien n'y devient une preuve : tout ce que le transcript rejoue est rangé
+    /// **cité**, jamais lu. La conversation est reprise, mais le harnais ne
+    /// prétendra pas avoir lu ce qu'un transcript venu d'ailleurs affirme.
+    pub fn restore_untrusted(&self, snapshot: Snapshot) {
+        self.restore_avec(snapshot, Confiance::Importee)
+    }
+
+    fn restore_avec(&self, snapshot: Snapshot, confiance: Confiance) {
         if self.state.borrow().busy {
             // Remplacer le fil sous une boucle qui tourne lui faisait pousser des réponses
             // d'outil sans leur appel : refusé, et dit.
@@ -2714,15 +2799,7 @@ impl Handle {
             // d'outils par un résumé, donc les lectures directes qu'ils portaient ne
             // sont plus dans le fil et redeviennent « jamais vu ». C'est du fail-closed
             // (on perd une preuve, on n'en invente pas), et c'est assumé.
-            if let Some(registre) = &self.vus {
-                let mut registre = registre.borrow_mut();
-                *registre = SeenLedger::new();
-                for message in state.transcript.iter() {
-                    if let Message::Tool { content, .. } = message {
-                        registre.observe(content);
-                    }
-                }
-            }
+            self.rebatir_registre(&state.transcript, confiance);
         }
         self.emit_pending();
     }
