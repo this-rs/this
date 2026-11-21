@@ -353,21 +353,48 @@ impl Serialize for EventWire {
     }
 }
 
+/// Lit l'objet d'un événement et rend la valeur de son champ `type` (s'il existe). Exige un
+/// objet : toute autre forme JSON est refusée par `deserialize_map`.
+struct TeteVisitor;
+
+impl<'de> serde::de::Visitor<'de> for TeteVisitor {
+    type Value = Option<Value>;
+
+    fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.write_str("un événement, c'est-à-dire un objet JSON")
+    }
+
+    fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+        let mut type_name = None;
+        while let Some(cle) = map.next_key::<String>()? {
+            if cle == "type" {
+                if type_name.is_some() {
+                    return Err(serde::de::Error::duplicate_field("type"));
+                }
+                type_name = Some(map.next_value::<Value>()?);
+            } else {
+                map.next_value::<serde::de::IgnoredAny>()?;
+            }
+        }
+        Ok(type_name)
+    }
+}
+
 impl<'de> Deserialize<'de> for EventWire {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         // Le flux est lu UNE fois, sans être décodé : `RawValue` garde les octets d'origine.
         let raw: Box<serde_json::value::RawValue> = Deserialize::deserialize(deserializer)?;
-        // Seul le champ `type` est lu : le reste n'est pas inspecté pour trancher.
-        #[derive(Deserialize)]
-        struct Tete {
-            #[serde(rename = "type")]
-            type_name: Option<serde_json::Value>,
-        }
-        let tete: Tete = serde_json::from_str(raw.get()).map_err(serde::de::Error::custom)?;
+        // Seul le champ `type` est lu, et seulement depuis un OBJET : `serde_json` accepte une
+        // séquence là où un `struct` est attendu (`["futur"]` passerait pour `type = futur`).
+        // Le visiteur exige `visit_map` ; le reste des valeurs est ignoré sans être décodé.
+        let type_brut = serde::Deserializer::deserialize_map(
+            &mut serde_json::Deserializer::from_str(raw.get()),
+            TeteVisitor,
+        )
+        .map_err(serde::de::Error::custom)?;
         // Sans `type` textuel, l'événement n'est ni connu ni futur : il est
         // illisible, et le dire vaut mieux que le ranger quelque part.
-        let Some(type_name) = tete
-            .type_name
+        let Some(type_name) = type_brut
             .as_ref()
             .and_then(Value::as_str)
             .map(str::to_owned)
@@ -672,6 +699,28 @@ mod tests {
                 ),
             }
         }
+    }
+
+    /// Seul un objet est un événement. `serde_json` accepte une séquence pour un `struct` :
+    /// `["futur"]` ne doit ni devenir `type = futur`, ni passer pour un inconnu.
+    #[test]
+    fn un_tableau_ou_un_scalaire_ne_sont_pas_des_evenements() {
+        for refuse in [
+            r#"["futur"]"#,
+            r#"["futur",1]"#,
+            "[]",
+            "42",
+            r#""texte""#,
+            "null",
+        ] {
+            assert!(
+                serde_json::from_str::<EventWire>(refuse).is_err(),
+                "{refuse} doit être refusé, pas lu comme un événement"
+            );
+        }
+        // Un objet sans `type` textuel reste refusé, un objet avec `type` passe.
+        assert!(serde_json::from_str::<EventWire>(r#"{"type":1}"#).is_err());
+        assert!(serde_json::from_str::<EventWire>(r#"{"type":"futur"}"#).is_ok());
     }
 
     /// Les bornes que la doc annonce, fixées : l'égalité est textuelle, et seuls les espaces
