@@ -669,3 +669,95 @@ fn une_declaration_dans_un_conteneur_reste_citee() {
         q()
     );
 }
+
+// ---- Le second site d'observation : un moteur qui exécute SES outils (famille A) --------
+
+/// Un moteur de la famille A : ses outils tournent dans son flux, il rend compte au harnais
+/// par `Permission::record` — le chemin qui ne passe pas par la boucle d'outils du harnais.
+struct MoteurFamilleA {
+    permission: RefCell<Option<Rc<dyn this_harness::Permission>>>,
+}
+
+#[async_trait(?Send)]
+impl Transport for MoteurFamilleA {
+    fn set_permission(&self, permission: Rc<dyn this_harness::Permission>) {
+        *self.permission.borrow_mut() = Some(permission);
+    }
+
+    async fn stream(&self, _: &Request, _: &Cancel, _: Delta) -> Result<Reply, Failure> {
+        let permission = self.permission.borrow().clone().expect("porte posée");
+        let appel = |id: &str| ToolCall {
+            id: id.into(),
+            name: "lire".into(),
+            arguments: json!({}),
+        };
+        // Lu pour de bon : l'hôte déclare LU.
+        permission
+            .record(
+                &appel("a"),
+                0,
+                &Outcome::ok(format!("lu #note:{LU}")).reading(format!("#note:{LU}")),
+            )
+            .await;
+        // Un id seulement répété dans le texte : aucune déclaration.
+        permission
+            .record(
+                &appel("b"),
+                0,
+                &Outcome::ok(format!("oublié #note:{FORGE}")),
+            )
+            .await;
+        // Un refus, même déclaré, ne lit rien.
+        permission
+            .record(
+                &appel("c"),
+                0,
+                &Outcome::refused(format!("refusé : #note:{REFUSE}"), "non")
+                    .reading(format!("#note:{REFUSE}")),
+            )
+            .await;
+        Ok(Reply {
+            text: "fini".into(),
+            calls: vec![],
+            finish: Finish::Stop,
+        })
+    }
+}
+
+const REFUSE: &str = "66666666-6666-4666-8666-666666666666";
+
+#[test]
+fn un_moteur_qui_execute_ses_outils_suit_le_meme_contrat_de_lecture() {
+    let registre: Rc<RefCell<SeenLedger>> = Rc::default();
+    let harnais = Harness::new(
+        "consigne",
+        Limits {
+            max_relances: 0,
+            ..Limits::default()
+        },
+        Rc::new(MoteurFamilleA {
+            permission: RefCell::new(None),
+        }),
+        Rc::new(Outils {
+            registre: registre.clone(),
+        }),
+        |_| {},
+    );
+    run(harnais.send("lis"));
+    let r = registre.borrow();
+    assert_eq!(
+        r.provenance_token(&format!("#note:{LU}")),
+        d(),
+        "la lecture déclarée"
+    );
+    assert_eq!(
+        r.provenance_token(&format!("#note:{FORGE}")),
+        q(),
+        "sans déclaration, un id du texte n'est que cité"
+    );
+    assert_eq!(
+        r.provenance_token(&format!("#note:{REFUSE}")),
+        q(),
+        "un refus ne lit rien, même déclaré"
+    );
+}

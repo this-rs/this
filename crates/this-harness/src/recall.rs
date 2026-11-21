@@ -36,6 +36,14 @@ pub const EXTENSIONS: &[&str] = &[
 ];
 /// Longueur maximale (caractères) d'une commande retenue.
 pub const COMMAND_MAX: usize = 200;
+/// Longueur maximale (caractères) de la SORTE d'un id cité (`#<sorte>:<uuid>`).
+///
+/// La sorte vient du texte cité, donc d'un attaquant : elle est écrite en clair dans le
+/// rappel (`- #<sorte>:<uuid> (<sorte>)`). Une sorte plus longue n'est pas une sorte, c'est
+/// une phrase : l'id n'est pas une ancre.
+pub const KIND_MAX: usize = 24;
+/// Longueur maximale (caractères) d'un chemin retenu : au-delà, ce n'est pas un chemin.
+pub const PATH_MAX: usize = 200;
 /// Nombre maximal d'entités interrogées et rendues.
 pub const MAX_ENTITIES: usize = 40;
 /// Nombre maximal de chemins / commandes rendus.
@@ -178,7 +186,7 @@ fn ids(text: &str, index: usize, out: &mut Anchors) {
             .bytes()
             .take_while(|b| b.is_ascii_lowercase() || *b == b'_')
             .count();
-        if kind_len == 0 || rest.as_bytes().get(kind_len) != Some(&b':') {
+        if kind_len == 0 || kind_len > KIND_MAX || rest.as_bytes().get(kind_len) != Some(&b':') {
             continue;
         }
         let Some(uuid) = rest.get(kind_len + 1..kind_len + 37) else {
@@ -212,6 +220,7 @@ fn paths(text: &str, index: usize, out: &mut Anchors) {
         if tok.is_empty()
             || tok.contains("://")
             || tok.starts_with("//")
+            || tok.len() > PATH_MAX
             || !tok
                 .chars()
                 .all(|c| c.is_ascii_alphanumeric() || "_./~-".contains(c))
