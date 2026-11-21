@@ -375,3 +375,22 @@ est vrai (même à `messages: 0`) rend le dépassement visible sans inventer une
    qu'elle protège n'existe pas** (`embed.rs:104-114` contre l'absence de tout stockage
    dans le crate) — ce qui est le bon ordre, mais il faut le dire pour qu'un hôte ne
    croie pas la réindexation fournie.
+
+## Le contrat de lecture : `Outcome::observable` (#290)
+
+Le harnais ne peut pas deviner, depuis le texte qu'un outil rend au modèle, ce que cet
+outil a réellement fait lire. Un texte **cloisonné** cache la vraie lecture ; un texte **en
+clair** peut seulement répéter les arguments du modèle (« oublié #note:X », « refusé : rien
+sous #note:X ») — le modèle fabrique alors lui-même la preuve qu'il cite.
+
+Donc, depuis ce contrat :
+
+- le texte d'un résultat n'est **jamais** une preuve : ses ids sont seulement *cités* ;
+- une lecture directe n'existe que par `Outcome::observable` (`Outcome::reading(..)`), que
+  **l'hôte** remplit avec les ids qu'il a lui-même vus dans une réponse d'outil réussie —
+  jamais avec du texte tiers ni avec les arguments du modèle ;
+- un résultat **refusé** ou **échoué** ne lit rien, déclaration ou non ;
+- une déclaration passe par `SeenLedger::observe` : un id placé dans un conteneur
+  `<untrusted_data>` reste cité, la déclaration ne contourne pas ce jugement.
+
+Un hôte qui ne déclare rien reste sûr, mais plus faible : tout est « cité seulement ».

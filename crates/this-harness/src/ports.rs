@@ -241,6 +241,11 @@ pub trait Toolbox {
     /// partage pas. Une implémentation qui en tient un doit rendre LE SIEN,
     /// pas une copie — c'est le partage qui fait la garantie.
     ///
+    /// **Ce que le harnais y inscrit** : le texte de chaque résultat, seulement
+    /// CITÉ ; et, pour un appel réussi, ce que l'outil déclare avoir fait lire par
+    /// `Outcome::observable`, en lecture directe. Un outil qui ne déclare rien ne
+    /// prouve rien : c'est le défaut sûr.
+    ///
     /// **Un registre par SESSION** : le harnais ne le crée pas, il lit celui de
     /// l'outillage. Deux harnais construits sur le même `Rc<dyn Toolbox>`
     /// partagent donc le registre, et un `restore`/`seed` l'écrase. Un hôte qui
