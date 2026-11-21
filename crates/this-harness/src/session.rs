@@ -1595,6 +1595,24 @@ impl Harness {
                     break 'turns;
                 }
 
+                // Un transport peut REJOUER un appel : la même réponse livrée deux
+                // fois, donc deux appels de même id. Sans cette garde, l'effet est
+                // produit DEUX fois (installer, écrire, envoyer), et le défaut ne se
+                // voit qu'au tour SUIVANT, quand `check_thread` refuse le fil
+                // (`DuplicateCallId`) — trop tard : l'effet est déjà là, en double.
+                // Un rejeu ne se devine pas en silence : il se refuse en le nommant.
+                // La garde est AVANT l'empilement : un `Assistant` avec deux appels
+                // sans réponse laisserait un fil que le moteur refuserait.
+                let mut demandes = std::collections::HashSet::new();
+                if let Some(doublon) = reply.calls.iter().find(|c| !demandes.insert(c.id.as_str()))
+                {
+                    let raison = format!(
+                        "appel rejoué : l'id « {} » a déjà été demandé dans ce tour",
+                        doublon.id
+                    );
+                    stop = Some(run.borrow_mut().finish(Stop::Failed(raison)));
+                    break 'turns;
+                }
                 self.push(Message::Assistant {
                     content: text.clone(),
                     calls: reply.calls.clone(),

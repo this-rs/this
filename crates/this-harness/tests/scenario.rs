@@ -1151,3 +1151,55 @@ fn un_fil_invalide_s_arrete_nomme_sans_partir_chez_le_moteur() {
     // Le transport n'a jamais été appelé : l'arrêt a eu lieu AVANT l'envoi.
     assert!(transport.seen.borrow().is_empty());
 }
+
+#[test]
+fn un_transport_qui_rejoue_le_meme_appel_ne_produit_pas_l_effet_deux_fois() {
+    // Ce qu'un transport livre quand il reprend après une coupure : la même
+    // réponse, avec le même identifiant d'appel, DEUX fois. L'effet ne doit pas
+    // être produit deux fois — sinon un rejeu réseau installe deux fois.
+    //
+    // Le défaut mesuré avant correctif : l'outil était appelé deux fois
+    // (`["install_module", "install_module"]`) et le fil n'était refusé qu'au
+    // tour SUIVANT, par `check_thread` (`DuplicateCallId`) — trop tard, l'effet
+    // était déjà là, en double.
+    //
+    // Le refus est TOTAL, et c'est voulu : devant une réponse rejouée, on ne
+    // sait pas laquelle des deux occurrences est l'originale, et l'idempotence
+    // d'un outil n'est pas acquise. Zéro effet et un échec nommé valent mieux
+    // qu'un effet dupliqué qu'on ne saurait pas défaire.
+    let transport = Script::new(vec![
+        Reply {
+            text: String::new(),
+            calls: vec![call("a1"), call("a1")],
+            finish: Finish::Tools,
+        },
+        Reply {
+            text: "fini".into(),
+            calls: vec![],
+            finish: Finish::Stop,
+        },
+    ]);
+    let tools = Tools::new(|_| Outcome::ok("module installé").observed("v1", "v2"));
+    let (harness, _, log) = build(transport, tools.clone(), Limits::default());
+
+    run(harness.send("installe"));
+
+    assert!(
+        tools.used.borrow().is_empty(),
+        "aucun effet ne doit être produit sur une réponse rejouée (reçu : {:?})",
+        tools.used.borrow()
+    );
+    // Un rejeu ne se devine pas en silence : le run dit qu'il a refusé.
+    match stop_of(&log) {
+        Stop::Failed(raison) => assert!(
+            raison.contains("rejoué") && raison.contains("a1"),
+            "le refus doit nommer l'appel rejoué : {raison}"
+        ),
+        autre => panic!("un appel rejoué doit arrêter le run en le disant, pas {autre:?}"),
+    }
+    // Et le fil reste valide : aucun appel sans réponse n'a été empilé.
+    assert!(
+        Message::check_thread(&harness.transcript()).is_ok(),
+        "le fil ne doit pas rester invalide après le refus"
+    );
+}
