@@ -2,13 +2,23 @@ name: CI
 
 on:
   push:
-    branches: [ main, develop ]
+    # `reseau-maille` est une branche d'INTÉGRATION : les PR y sont fusionnées
+    # avant d'aller sur `main`. Elle n'était déclenchée nulle part, donc ses PR
+    # étaient fusionnées sans une seule vérification. Constaté le 21/11/2026 :
+    # `cargo test -p this-mesh` ne compilait pas sur cette branche (exemple `node`
+    # sans la feature `time`, `transport` derrière une feature) — `cargo check`
+    # passait, `cargo test` non, et rien ne le voyait.
+    branches: [ main, develop, reseau-maille ]
     paths-ignore:
       - '**/*.md'
       - 'docs/**'
       - '**/*.mmd'
   pull_request:
-    branches: [ main, develop ]
+    # Sans cette ligne, une PR vers `reseau-maille` ne déclenche AUCUN job : le
+    # filtre `branches` de `pull_request` porte sur la base, pas sur la tête. La
+    # vérification doit précéder la fusion sur la branche d'intégration, pas la
+    # suivre.
+    branches: [ main, develop, reseau-maille ]
 
 env:
   CARGO_TERM_COLOR: always
