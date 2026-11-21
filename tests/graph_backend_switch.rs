@@ -17,9 +17,13 @@
 //!    IAM) — volontairement **hors** du trait, parce qu'obrain ne les a pas :
 //!    un consommateur qui n'en a pas besoin ne doit jamais avoir à les
 //!    connaître ;
-//! 3. **la frontière opérationnelle** — c'est le bail qui ferme le trou
-//!    intra-processus d'obrain (deux `open()` du même répertoire réussissent),
-//!    et c'est le branchement clé en main qui l'arme par défaut.
+//! 3. **la frontière opérationnelle** — le trou intra-processus d'obrain (deux
+//!    `open()` du même répertoire réussissaient) est désormais fermé **par
+//!    obrain lui-même** (depuis 2026-11-01) : un processus n'ouvre plus qu'un
+//!    seul `ObrainDB` inscriptible par base. Le bail de `this` reste un
+//!    **second filet** — diagnostic « qui détient le bail » et arbitrage
+//!    cross-processus — et c'est le branchement clé en main qui l'arme par
+//!    défaut.
 //!
 //! # Note d'accès
 //!
@@ -28,6 +32,12 @@
 //! accessibles depuis `tests/` (Cargo passe `--extern` pour toute dépendance
 //! activée, dépendance normale comme de développement). Ce fichier le prouve
 //! par l'usage — c'est une information décisive pour la suite du chantier.
+//!
+//! Depuis la mise à jour d'obrain (commit `dcba1fab`, 2026-11-01), un même
+//! processus n'ouvre plus qu'un seul `ObrainDB` inscriptible par base : le
+//! second `open()` du même répertoire est refusé par obrain lui-même, avec un
+//! message qui nomme la cause (« already open … one writable »). Les tests des
+//! sections 5 et 8 verrouillent ce comportement.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -542,14 +552,18 @@ fn writes_through_the_facade_are_visible_through_raw_obrain() {
 // ---------------------------------------------------------------------------
 //
 // ⚠️ Constat de méthode, qui vaut pour tout ce fichier : dans CE processus,
-// une « réouverture » (`ObrainStore::open` du même répertoire) n'en est pas une.
-// obrain partage le substrat par répertoire **à l'intérieur du processus** (le
-// verrou de fichier existant est rendu, cf. `storage/writer_lease.rs`), donc le
-// second store voit l'état vivant du premier — y compris ses écritures NON
-// commitées (mesuré, cf. `a_second_in_process_open_sees_uncommitted_writes`).
+// une « réouverture » (`ObrainStore::open` du même répertoire, **après `drop`**
+// du premier) n'en est pas une. obrain réutilise le substrat déjà ouvert dans
+// le processus, donc le store rouvert voit l'état vivant de l'ancien — y
+// compris ses écritures NON commitées (mesuré, cf.
+// `an_uncommitted_write_survives_a_reopen_in_process_so_commit_is_not_observable_here`).
 // Conséquence directe : la durabilité de `commit()` n'est PAS observable in
-// processus. Les deux tests qui suivent disent chacun une moitié honnête, et le
-// troisième porte le défaut.
+// processus. Les deux tests qui suivent disent chacun une moitié honnête.
+//
+// À ne plus confondre avec l'ancien trou intra-processus : depuis obrain
+// 2026-11-01, un SECOND `open()` **concurrent** (le premier toujours vivant) est
+// refusé par obrain lui-même — voir la section 8. Ici, la réouverture n'arrive
+// qu'après `drop`, donc elle est seule à détenir l'ouverture.
 
 /// Avec `commit()`, l'écriture est présente au store suivant — la moitié
 /// vérifiable de la promesse.
@@ -639,19 +653,16 @@ fn an_uncommitted_write_survives_a_reopen_in_process_so_commit_is_not_observable
     );
 }
 
-/// **La propriété observée, verrouillée telle quelle** — et c'est elle qui
-/// justifie le bail d'écriture.
+/// **Le trou, désormais fermé par obrain.**
 ///
-/// Un second `ObrainStore::open(dir)` du même répertoire, dans le même
-/// processus, **voit les écritures non commitées du premier**. Deux « stores »
-/// distincts sur le même répertoire ne sont donc pas isolés : ils partagent un
-/// état vivant. Un consommateur qui croit ouvrir deux fois la même base pour la
-/// lire en parallèle lit en réalité la même instance mutable.
-///
-/// C'est exactement le trou que `enable_write_fencing_with` ferme (section 8) :
-/// à défaut d'un verrou d'écriture, obrain laisse faire.
+/// Auparavant, un second `ObrainStore::open(dir)` du même répertoire, dans le
+/// même processus, **voyait les écritures non commitées du premier** (substrat
+/// partagé intra-processus). Depuis obrain 2026-11-01, ce second `open()` est
+/// refusé : il ne peut plus y avoir deux écrivains du même répertoire dans le
+/// même processus, donc l'état non commité n'est plus partageable par une
+/// seconde ouverture. Ce test verrouille la **nouvelle** réalité.
 #[test]
-fn a_second_in_process_open_sees_uncommitted_writes_of_the_first() {
+fn a_second_in_process_open_is_refused_so_uncommitted_state_cannot_be_shared() {
     let dir = tempfile::tempdir().expect("répertoire temporaire");
 
     let premier = ObrainStore::open(dir.path()).expect("premier open");
@@ -662,46 +673,28 @@ fn a_second_in_process_open_sees_uncommitted_writes_of_the_first() {
     );
     // Toujours AUCUN commit.
 
-    let second = ObrainStore::open(dir.path()).expect("second open");
-    let b2: &dyn GraphBackend = second.as_ref();
-    assert_eq!(
-        compte(b2),
-        1,
-        "le second store du même répertoire voit l'écriture non commitée du premier \
-         (substrat partagé intra-processus, comportement d'obrain)"
-    );
-    assert_eq!(
-        b2.nodes_by_label("Page")
-            .into_iter()
-            .filter_map(|id| b2.node_property(id, "qualified_name"))
-            .filter_map(|v| v.as_str().map(str::to_string))
-            .collect::<Vec<String>>(),
-        vec!["vu-par-le-voisin".to_string()],
-        "et il voit jusqu'à la propriété non commitée"
+    // La SEULE ouverture inscriptible est déjà prise : le second `open()` est
+    // refusé par obrain, et avec lui toute possibilité de partager l'état non
+    // commité via une seconde vue du même répertoire.
+    let refus = match ObrainStore::open(dir.path()) {
+        Ok(_) => panic!(
+            "défaut : un second écrivain du même répertoire doit être refusé — \
+             le partage d'état non commité ne peut plus se produire"
+        ),
+        Err(e) => e,
+    };
+    let message = format!("{refus}");
+    assert!(
+        message.contains("already open") || message.contains("one writable"),
+        "le refus d'obrain doit nommer sa cause, vu : {message}"
     );
 
-    // Et la réciproque, qui précise la nature du partage : le second store est
-    // une PHOTOGRAPHIE prise à son ouverture. Il ne suit PAS les écritures
-    // ultérieures du premier, même commitées.
-    b1.create_node(&["Page"], vec![("qualified_name", Value::from("apres"))]);
-    b1.commit().expect("commit");
+    // L'unique écrivain, lui, voit toujours ses propres écritures non commitées :
+    // c'est l'état vivant du SEUL store, pas un partage entre deux.
     assert_eq!(
-        compte(b2),
+        compte(b1),
         1,
-        "un store déjà ouvert ne suit pas les écritures postérieures de son voisin, \
-         même commitées : `commit()` ne se propage pas à un store déjà ouvert"
-    );
-
-    // Un TROISIÈME store, ouvert après l'écriture commitée, la voit — ce qui
-    // montre que l'écriture est bien là, et que c'est la vue du second qui est
-    // figée, pas l'écriture qui serait perdue.
-    let troisieme = ObrainStore::open(dir.path()).expect("troisième open");
-    let b3: &dyn GraphBackend = troisieme.as_ref();
-    assert_eq!(
-        compte(b3),
-        2,
-        "un store ouvert APRÈS l'écriture commitée la voit : l'écriture existe, \
-         c'est la vue du store déjà ouvert qui ne se rafraîchit pas"
+        "l'écriture non commitée est visible par son auteur, comme attendu"
     );
 }
 
@@ -876,94 +869,74 @@ fn the_one_call_wiring_arms_the_write_lease_by_default() {
     );
 }
 
-/// Un **second écrivain** sur le même répertoire doit être refusé, et le
-/// message doit dire pourquoi (fencing / bail) — un refus muet serait
-/// indiagnosticable en production.
+/// Un **second écrivain** sur le même répertoire est désormais refusé **par
+/// obrain lui-même** : le second `open()` échoue avant même que le bail de
+/// `this` n'entre en jeu, et le message doit nommer sa cause — un refus muet
+/// serait indiagnosticable en production.
 #[test]
-fn a_second_writer_on_the_same_directory_is_refused_with_a_lease_message() {
+fn a_second_writer_on_the_same_directory_is_refused_by_obrain_intra_process() {
     let dir = tempfile::tempdir().expect("répertoire temporaire");
 
     let premier = ObrainStore::open(dir.path()).expect("premier open");
-    let _host = ServerBuilder::new()
-        .with_link_service(ObrainLinkService::new(premier.clone()))
-        .with_obrain_store(premier.clone())
-        .build_host()
-        .expect("le premier écrivain doit être accepté");
-    assert!(premier.lease_info().is_some());
+    assert!(
+        !premier.is_read_only(),
+        "le premier store doit être inscriptible"
+    );
 
-    // Le SECOND `open` réussit : c'est le comportement d'obrain (verrou
-    // partagé intra-processus). C'est précisément le trou que le bail ferme.
-    let second = ObrainStore::open(dir.path())
-        .expect("obrain permet le second open — c'est le trou constaté");
-
-    let resultat = ServerBuilder::new()
-        .with_link_service(ObrainLinkService::new(second.clone()))
-        .with_obrain_store(second.clone())
-        .build_host();
-
-    let erreur = match resultat {
+    // Le second `open()` du même répertoire échoue DÉSORMAIS : obrain ne tolère
+    // qu'un seul `ObrainDB` inscriptible par base et par processus. C'est
+    // l'ancien trou intra-processus que le bail de `this` fermait — obrain l'a
+    // fermé lui-même, donc le bail n'entre même pas en jeu ici.
+    let refus = match ObrainStore::open(dir.path()) {
         Ok(_) => panic!(
-            "défaut : un second écrivain sur le même répertoire a été accepté — \
-             le bail n'a pas arbitré"
+            "défaut : un second écrivain sur le même répertoire ne doit plus pouvoir \
+             s'ouvrir dans le même processus — obrain refuse lui-même"
         ),
         Err(e) => e,
     };
-    let message = format!("{erreur}");
+    let message = format!("{refus}");
     assert!(
-        message.contains("fencing") || message.contains("bail"),
-        "le refus doit nommer sa cause (fencing/bail), vu : {message}"
-    );
-    let shard_attendu = premier.shard_id().expect("shard du premier").key();
-    assert!(
-        message.contains(&shard_attendu),
-        "le refus doit nommer le shard en cause ({shard_attendu}), vu : {message}"
-    );
-    assert!(
-        message.contains("without_write_fencing"),
-        "le refus doit porter son remède (le désarmement explicite), vu : {message}"
-    );
-    assert!(
-        second.lease_info().is_none(),
-        "un build refusé ne doit laisser aucun bail armé sur le store refusé"
+        message.contains("already open") && message.contains("one writable"),
+        "le refus doit nommer sa cause (already open / one writable), vu : {message}"
     );
 }
 
-/// Avec `.without_write_fencing()`, le second build **réussit** : l'arbitrage
-/// est rendu à l'exploitant, sciemment.
+/// Désarmer le fencing de `this` ne rend PAS possible un second écrivain
+/// intra-processus : c'est obrain qui refuse, et il le refuse au moment même de
+/// l'`open()`, avant tout arbitrage de `this`. `.without_write_fencing()` garde
+/// un sens pour le cross-processus, mais il ne rouvre pas le trou que ce test
+/// croyait pouvoir rouvrir.
 #[test]
-fn disarming_write_fencing_lets_a_second_writer_build() {
+fn disarming_write_fencing_does_not_reopen_the_hole_obrain_closed() {
     let dir = tempfile::tempdir().expect("répertoire temporaire");
 
+    // Premier écrivain, branché SANS fencing : aucun bail n'est armé, donc si
+    // le refus venait du bail de `this`, le second `open()` passerait.
     let premier = ObrainStore::open(dir.path()).expect("premier open");
     let _host = ServerBuilder::new()
         .with_link_service(ObrainLinkService::new(premier.clone()))
         .with_obrain_store(premier.clone())
-        .build_host()
-        .expect("le premier écrivain doit être accepté");
-
-    let second = ObrainStore::open(dir.path()).expect("second open");
-
-    // Sans désarmement : refusé (le cas du test précédent, revérifié ici pour
-    // que le test porte sa propre prémisse).
-    let refuse = ServerBuilder::new()
-        .with_link_service(ObrainLinkService::new(second.clone()))
-        .with_obrain_store(second.clone())
-        .build_host();
-    assert!(
-        refuse.is_err(),
-        "prémisse : sans désarmement, le second écrivain est refusé"
-    );
-
-    // Avec désarmement : accepté.
-    let _host2 = ServerBuilder::new()
-        .with_link_service(ObrainLinkService::new(second.clone()))
-        .with_obrain_store(second.clone())
         .without_write_fencing()
         .build_host()
-        .expect("`.without_write_fencing()` doit rendre le second build possible");
+        .expect("le premier écrivain, sans fencing, doit se brancher");
     assert!(
-        second.lease_info().is_none(),
-        "un store dont le fencing est désarmé ne doit porter aucun bail"
+        premier.lease_info().is_none(),
+        "prémisse : sans fencing, aucun bail n'est armé sur le premier store"
+    );
+
+    // Le second `open()` échoue quand même : c'est obrain qui refuse, pas le
+    // fencing de `this`.
+    let refus = match ObrainStore::open(dir.path()) {
+        Ok(_) => panic!(
+            "défaut : même sans fencing côté this, obrain refuse le second \
+             écrivain intra-processus"
+        ),
+        Err(e) => e,
+    };
+    let message = format!("{refus}");
+    assert!(
+        message.contains("already open") && message.contains("one writable"),
+        "le refus doit venir d'obrain et nommer sa cause, vu : {message}"
     );
 }
 
@@ -1000,57 +973,45 @@ fn a_read_only_store_is_wired_without_any_lease() {
 }
 
 // ---------------------------------------------------------------------------
-// 8. Verrou intra-processus — la propriété qui a motivé le bail
+// 8. Bail d'écriture — une seule ouverture, armer / libérer / reprendre
 // ---------------------------------------------------------------------------
 
-/// **Le trou que this-rs ferme.**
+/// **Ce qui reste vrai après qu'obrain a fermé le trou intra-processus.**
 ///
-/// Deux `ObrainStore::open()` du **même** répertoire réussissent tous les deux
-/// (comportement d'obrain : la part de verrou existante est rendue au lieu
-/// d'être refusée). Mais un seul des deux peut **armer un bail** : le second
-/// reçoit une erreur de verrou refusé. C'est exactement la différence entre
-/// « obrain laisse faire » et « this-rs refuse ».
+/// Une SEULE ouverture en écriture est possible : obrain refuse le second
+/// `open()` (depuis 2026-11-01). Sur cette unique ouverture, le bail de `this`
+/// s'arme, se libère et se reprend avec une époque **strictement croissante** —
+/// c'est le fencing monotone qui périme l'écrivain précédent, et qui reste le
+/// filet cross-processus.
 #[test]
-fn two_in_process_opens_succeed_but_only_one_can_arm_the_lease() {
+fn only_one_writable_open_succeeds_and_it_can_arm_the_lease() {
     let dir = tempfile::tempdir().expect("répertoire temporaire");
     let authority = FileAuthority::new(dir.path());
 
     let premier = ObrainStore::open(dir.path()).expect("premier open");
-    let second = ObrainStore::open(dir.path())
-        .expect("second open : obrain le permet — c'est le trou intra-processus");
-
-    // Deux stores distincts, sur le même répertoire.
-    assert_ne!(
-        premier.shard_id().expect("shard du premier").key(),
-        String::new(),
-        "un store sur disque doit avoir un shard nommable"
-    );
-    assert_eq!(
-        premier.shard_id().expect("shard 1").key(),
-        second.shard_id().expect("shard 2").key(),
-        "les deux stores visent le MÊME shard : c'est ce qui rend le bail décisif"
+    assert!(
+        !premier.is_read_only(),
+        "le premier store doit être inscriptible"
     );
 
-    // Le premier arme son bail.
-    let epoch_premier = premier
-        .enable_write_fencing_with(&authority)
-        .expect("le premier écrivain doit pouvoir armer son bail");
-    assert_eq!(epoch_premier, 1, "premier bail : époque 1");
-    assert!(premier.lease_info().is_some());
-
-    // Le second est REFUSÉ, dans le même processus.
-    let refus = second.enable_write_fencing_with(&authority).expect_err(
-        "défaut : le second store du même répertoire ne doit PAS pouvoir armer un bail",
-    );
+    // Une SEULE ouverture en écriture est possible : le second `open()` est
+    // refusé par obrain (un `ObrainDB` inscriptible par base et par processus).
+    let refus = match ObrainStore::open(dir.path()) {
+        Ok(_) => panic!("défaut : le second `open()` en écriture doit être refusé par obrain"),
+        Err(e) => e,
+    };
     let message = format!("{refus}");
     assert!(
-        message.contains("verrou") || message.contains("lock") || message.contains("bail"),
-        "l'erreur doit nommer le verrou de bail, vu : {message}"
+        message.contains("already open") || message.contains("one writable"),
+        "le refus d'obrain doit nommer sa cause, vu : {message}"
     );
-    assert!(
-        second.lease_info().is_none(),
-        "un store dont l'armement a échoué ne doit porter aucun bail"
-    );
+
+    // Le bail de `this` s'arme sur la SEULE ouverture inscriptible.
+    let epoch_premier = premier
+        .enable_write_fencing_with(&authority)
+        .expect("la seule ouverture inscriptible doit pouvoir armer son bail");
+    assert_eq!(epoch_premier, 1, "premier bail : époque 1");
+    assert!(premier.lease_info().is_some(), "le bail doit être armé");
 
     // Après libération, le bail est reprenable — et l'époque progresse : c'est
     // le fencing monotone, celui qui périme l'écrivain précédent.
@@ -1060,12 +1021,12 @@ fn two_in_process_opens_succeed_but_only_one_can_arm_the_lease() {
         "`release_write_fencing` doit rendre le bail"
     );
 
-    let epoch_second = second
+    let epoch_repris = premier
         .enable_write_fencing_with(&authority)
         .expect("après libération, le bail doit être reprenable");
     assert!(
-        epoch_second > epoch_premier,
+        epoch_repris > epoch_premier,
         "l'époque doit être STRICTEMENT croissante (vue : {epoch_premier} puis \
-         {epoch_second}) — sinon un writer périmé repasserait pour le titulaire"
+         {epoch_repris}) — sinon un writer périmé repasserait pour le titulaire"
     );
 }
