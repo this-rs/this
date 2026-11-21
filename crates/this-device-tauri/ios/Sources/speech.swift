@@ -48,11 +48,11 @@ fileprivate func speechLocale(_ asked: String?) -> Locale {
 /// The speech permission in the contract's words (`PermissionState`).
 private func speechStateName(_ status: SFSpeechRecognizerAuthorizationStatus) -> String {
   switch status {
-  case .authorized: return "granted"
-  case .denied, .restricted: return "denied"
-  case .notDetermined: return "prompt"
+  case .authorized: return Etat.granted.fil
+  case .denied, .restricted: return Etat.denied.fil
+  case .notDetermined: return Etat.prompt.fil
   // A state the system adds later is not known to be allowed: fail closed.
-  @unknown default: return "denied"
+  @unknown default: return Etat.denied.fil
   }
 }
 

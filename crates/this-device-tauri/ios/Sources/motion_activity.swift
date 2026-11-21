@@ -45,11 +45,11 @@ enum MotionStepsReply: Encodable {
 enum MotionAuthorization {
   static func name(_ status: CMAuthorizationStatus) -> String {
     switch status {
-    case .authorized: return "granted"
-    case .denied, .restricted: return "denied"
+    case .authorized: return Etat.granted.fil
+    case .denied, .restricted: return Etat.denied.fil
     // Not asked yet: the system asks the first time the motion data is read.
-    case .notDetermined: return "prompt"
-    @unknown default: return "prompt"
+    case .notDetermined: return Etat.prompt.fil
+    @unknown default: return Etat.prompt.fil
     }
   }
 }
@@ -59,7 +59,7 @@ extension ThisDevicePlugin {
   /// hardware has no activity manager (simulator, some iPads).
   @objc public func motionActivityStatus(_ invoke: Invoke) {
     guard CMMotionActivityManager.isActivityAvailable() else {
-      invoke.resolve(Reply.status(state: "unsupported"))
+      invoke.resolve(Reply.status(state: Etat.unsupported.fil))
       return
     }
     invoke.resolve(
@@ -99,7 +99,7 @@ final class MotionActivityRequest {
   /// Called on the main thread.
   static func run(_ invoke: Invoke) {
     guard CMMotionActivityManager.isActivityAvailable() else {
-      invoke.resolve(Reply.status(state: "unsupported"))
+      invoke.resolve(Reply.status(state: Etat.unsupported.fil))
       return
     }
     let request = MotionActivityRequest(invoke)

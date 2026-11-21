@@ -79,3 +79,126 @@ Les features optionnelles ajoutent deux voisins :
 ```
 
 La CI compense cette disposition dans chaque job (`this-cli/.github/workflows/ci.yml` place `this-rs/this` à `../this` ; `this-examples` utilise l'action composite `./.github/actions/this-dep`). Ce document est la version lisible de cette connaissance, qui n'existait que dans les workflows.
+
+## Clone propre : ce qui marche, ce qui casse (mesuré le 20/11/2026)
+
+Mesuré depuis un clone neuf placé dans un répertoire dont les voisins `../..`
+**n'existent pas** (ni `obrain/`, ni `vite-rs`). Toutes les commandes en premier
+plan, chronométrées.
+
+> **Portée de la mesure.** Le clone a été pris sur `main` à `08b0178`. Entre ce
+> commit et `origin/main` (`bd387e8`), `Cargo.toml` ne change que les trois
+> lignes WAMI : `git diff 08b0178 bd387e8 -- Cargo.toml` ne touche **aucune**
+> ligne `path =`. La conclusion sur les dépendances de chemin vaut donc pour la
+> pointe. Les versions WAMI, elles, ont été **re-vérifiées sur crates.io** après
+> ce changement (tableau plus bas).
+
+### Tableau des commandes
+
+| Commande (dans le clone) | Verdict | Code | Temps | Note |
+|---|---|---|---|---|
+| `cargo metadata --no-deps` | **échec** | 101 | 0,05 s | manifeste non résolu |
+| `cargo metadata --format-version 1` | **échec** | 101 | 0,30 s | échoue avant le registry |
+| `cargo check -p this-harness` | **échec** | 101 | 0,22 s | le « cœur portable » n'y échappe pas |
+| `bash .github/create-local-dep-stubs.sh` | OK | 0 | 3,1 s | 6 stubs obrain + 1 stub vite + clone wami |
+| `cargo metadata --no-deps` (après stubs) | OK | 0 | 0,08 s | 19 membres résolus |
+| `cargo check -p this-harness` (après stubs) | OK | 0 | 34 s | |
+| `cargo check -p this-rs` (défaut) | OK | 0 | 38 s | in-memory seul |
+| `cargo check --workspace` (défaut) | OK | 0 | 1 m 54 s | reprise ; un build concurrent occupait la machine, le temps à froid n'est pas chiffré |
+| `cargo check -p this-rs --features obrain` | **échec** | 101 | 2 m 36 s | 98 erreurs : les stubs sont vides d'API |
+| `cargo package -p this-harness --list` | OK | 0 | 2,1 s | 41 fichiers |
+| `cargo package -p this-harness --no-verify --allow-dirty` | **échec** | 101 | 2,9 s | `no matching package named this-agent found` |
+
+L'erreur du clone nu, telle quelle :
+
+```
+error: failed to load manifest for workspace member `…/this/.`
+Caused by:
+  failed to load manifest for dependency `obrain-adapters`
+Caused by:
+  failed to read `…/obrain/obrain-db/crates/obrain-adapters/Cargo.toml`
+Caused by:
+  No such file or directory (os error 2)
+```
+
+**Pourquoi.** Cargo lit les manifestes des dépendances `path` **même quand elles
+sont `optional = true`** : `optional` décide de ce qui est COMPILÉ, pas de ce qui
+est RÉSOLU. D'où le paradoxe mesuré : un build qui ne concerne pas obrain
+(`-p this-harness`) échoue à cause d'obrain.
+
+### Prérequis non publiés (crates.io, re-vérifié le 20/11/2026)
+
+| Dépendance | Déclarée dans `Cargo.toml` | Sur crates.io | Statut |
+|---|---|---|---|
+| `this-descriptor` | 0.0.1 | 0.0.1 | publié |
+| `this-vite` | 0.0.1 | 0.0.1 | publié |
+| `obrain-engine`, `-common`, `-core`, `-substrate`, `-adapters`, `-reactive` | 0.0.1 (path) | absents | à publier (feature `obrain`) |
+| `this-agent` | 0.0.1 (path) | absent | à publier |
+| `this-llm` | 0.0.1 (path) | absent | à publier |
+| `this-harness` | 0.0.1 (path) | absent | à publier |
+| `wami` | **0.21** (git `a4e1070`) | 0.18.0 | version manquante |
+| `wami-core` | **0.21** (git `a4e1070`) | 0.19.0 | version manquante |
+| `wami-condition` | **0.18.3** (git `a4e1070`) | 0.18.0 | version manquante |
+
+`cargo package` échoue sur `this-harness` ainsi :
+
+```
+error: failed to prepare local package for uploading
+Caused by:
+  no matching package named `this-agent` found
+  location searched: crates.io index
+```
+
+`--no-verify` saute la recompilation mais **pas** le contrôle du registry : la
+`version` d'un `path` doit exister sur crates.io pour que le paquet soit
+préparable. `this-agent`, puis `this-llm` (deux `path` de `this-harness`), sont
+les deux absents qui bloquent ; l'ordre de publication est donc
+`this-llm` → `this-agent` → `this-harness`.
+
+### Chemin de build minimal reproductible
+
+```sh
+git clone <this> this && cd this
+bash .github/create-local-dep-stubs.sh   # stubs obrain + vite, clone wami (réseau, ~75 Mo)
+cargo check -p this-harness              # le cœur portable
+cargo check --workspace                  # défaut (in-memory)
+```
+
+Le script crée exactement six stubs `obrain-*` (un `Cargo.toml` 0.0.1 + un
+`src/lib.rs` vide), un stub `this-vite`, et un clone `--depth 1` de `Lsh0x/wami`.
+
+### Publié pour la distribution, `path` pour le développement
+
+- **Distribution** : `this-descriptor 0.0.1` et `this-vite 0.0.1` sont sur
+  crates.io ; toutes les autres dépendances viennent du registry. Le manifeste
+  les déclare en `version + path`, forme correcte : `cargo publish` retire le
+  `path` et garde la `version`.
+- **Développement seulement** : les six `obrain-*` (feature `obrain`) et
+  `this-vite` (feature `frontend`). Les stubs ne servent qu'à **charger le
+  manifeste** ; leur API est vide — mesuré : `cargo check -p this-rs --features
+  obrain` rend 98 erreurs (`SubstrateStore`, `GraphStoreMut` introuvables). La CI
+  le sait déjà : elle emploie `--features all,wami`, jamais `--all-features`,
+  pour ne pas compiler ce chemin sur stubs.
+- **`wami`** : `git + rev` en développement, `version` seule à la publication ;
+  0.21 / 0.21 / 0.18.3 ne sont pas encore sur crates.io.
+
+### Piège de mesure (il a faussé la première tentative)
+
+`/tmp/obrain` est un **lien symbolique préexistant** vers le checkout obrain. Un
+clone posé à `/tmp/<x>/this` voit donc `../../obrain` se résoudre et échoue sur
+`this-vite` au lieu d'`obrain-adapters` : les six dépendances obrain passent sans
+que rien ne le signale. **Toute validation de clone propre doit se faire dans un
+sous-répertoire dont les voisins n'existent pas**, sinon elle mesure un faux
+positif partiel.
+
+### Manques restants (non qualifiés)
+
+- Le build **réel** de `obrain` et `frontend` avec les vrais checkouts : seule la
+  rupture sur stubs vides est mesurée.
+- Le build `--features wami` (fetch git) : non mesuré.
+- `cargo check --workspace` **à froid** : non chiffré de façon fiable.
+- La dev-dependency `this-llm-providers` de `this-harness` est déclarée en `path`
+  **sans** `version` : constatée dans le manifeste, bloquante une fois
+  `this-agent`/`this-llm` publiés, non atteinte par la mesure.
+- Matrice OS/architecture, artefacts, sommes de contrôle, installation,
+  démarrage, mise à jour et retour arrière : rien de tout cela n'est mesuré ici.

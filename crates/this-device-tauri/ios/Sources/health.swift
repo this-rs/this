@@ -133,7 +133,7 @@ extension ThisDevicePlugin {
   @objc public func healthStatus(_ invoke: Invoke) throws {
     let args = try invoke.parseArgs(HealthStatusArgs.self)
     guard HKHealthStore.isHealthDataAvailable() else {
-      invoke.resolve(Reply.status(state: "unsupported"))
+      invoke.resolve(Reply.status(state: Etat.unsupported.fil))
       return
     }
     guard let quantity = HealthQuantity(rawValue: args.quantity) else {
@@ -143,7 +143,7 @@ extension ThisDevicePlugin {
     // The write (share) status of the type is read for the record only: for a read type it
     // says nothing about what the person allowed, so it does not change the answer.
     _ = HealthKitSession.store.authorizationStatus(for: quantity.type)
-    invoke.resolve(Reply.status(state: "prompt"))
+    invoke.resolve(Reply.status(state: Etat.prompt.fil))
   }
 
   /// Asks read access for the listed types, and shows the permission sheet when iOS has not
@@ -174,7 +174,7 @@ extension ThisDevicePlugin {
         }
         // The sheet was answered, or had been: iOS does not say which, and never says `granted`
         // for a read. An empty samples answer is how a missing permission shows up.
-        invoke.resolve(Reply.status(state: "prompt"))
+        invoke.resolve(Reply.status(state: Etat.prompt.fil))
       }
     }
   }

@@ -87,6 +87,12 @@ impl SecretResolver for Secrets {
                 .filter(|value| !value.is_empty())
                 .map(|value| Some(Secret::new(value)))
                 .ok_or_else(|| SecretError::Missing(format!("env:{name}"))),
+            // Une session n'est pas un secret rangé : elle a été obtenue par un flux, et
+            // elle expire. Ce résolveur ne sait pas la rendre — le dire vaut mieux que
+            // répondre `None`, qui ferait croire à un module local.
+            CredentialRef::Session(name) => Err(SecretError::Unavailable(format!(
+                "session:{name} (aucune source de session branchée ici)"
+            ))),
             CredentialRef::Vault(name) => match &self.vault {
                 None => Err(SecretError::Unavailable(format!("vault:{name}"))),
                 Some(lookup) => lookup(name)

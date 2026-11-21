@@ -1,14 +1,21 @@
 //! Les ports mis en erreur : `Toolboxes`, `Cancel`, `Recorders`.
 
 use std::cell::{Cell, RefCell};
+use std::future::Future;
+use std::pin::Pin;
 use std::rc::Rc;
+use std::task::{Context, Poll, Waker};
 
 use async_trait::async_trait;
 use futures::executor::block_on;
 use serde_json::json;
 
 use this_agent::{Run, Step, Stop};
-use this_harness::{Cancel, Outcome, Recorder, ToolCall, ToolSpec, Toolbox, Toolboxes};
+use this_harness::{
+    Cancel, Clock, Compactor, Delta, Event, Failure, Finish, Harness, Limits, Message, Outcome,
+    Recorder, Reply, Request, Running, Sleep, ToolCall, ToolSpec, Toolbox, Toolboxes, Transport,
+    TurnContext,
+};
 
 fn spec(name: &str) -> ToolSpec {
     ToolSpec {
@@ -145,4 +152,260 @@ fn les_enregistreurs_sont_appeles_dans_l_ordre_d_ajout() {
     block_on(rs.step("r", &run, &Step::tool("t", 1)));
     block_on(rs.stopped("r", &run, &Stop::Done));
     assert_eq!(*log.borrow(), vec!["a:r", "b:r", "a:stop:r", "b:stop:r"]);
+}
+
+// ===== Ports de préparation pendus : `turn_context` et `compact` (#291) =====
+
+const POLLS: usize = 2000;
+
+/// Pilote une future avec un nombre de sondages borné : `Some(sortie)` quand
+/// elle rend, `None` si elle n'a pas rendu dans les `n` sondages — au lieu de
+/// pendre indéfiniment sur un `block_on` (le cas rouge doit échouer, pas geler).
+fn poll_for<F: Future>(fut: &mut Pin<Box<F>>, n: usize) -> Option<F::Output> {
+    let mut cx = Context::from_waker(Waker::noop());
+    for _ in 0..n {
+        if let Poll::Ready(out) = fut.as_mut().poll(&mut cx) {
+            return Some(out);
+        }
+    }
+    None
+}
+
+/// Une horloge de test : `sleep` avance le temps et rend la main une fois.
+#[derive(Default)]
+struct Horloge {
+    now: Cell<f64>,
+}
+struct Cede(bool);
+impl Future for Cede {
+    type Output = ();
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+        if self.0 {
+            Poll::Ready(())
+        } else {
+            self.0 = true;
+            cx.waker().wake_by_ref();
+            Poll::Pending
+        }
+    }
+}
+impl Clock for Horloge {
+    fn now_ms(&self) -> f64 {
+        self.now.get()
+    }
+    fn sleep(&self, ms: u64) -> Option<Sleep> {
+        self.now.set(self.now.get() + ms as f64);
+        Some(Box::pin(Cede(false)))
+    }
+}
+
+/// Un transport qui compte ses appels et répond « fait » (fin normale).
+struct Compte(RefCell<usize>);
+#[async_trait(?Send)]
+impl Transport for Compte {
+    async fn stream(&self, _: &Request, _: &Cancel, _: Delta) -> Result<Reply, Failure> {
+        *self.0.borrow_mut() += 1;
+        Ok(Reply {
+            text: "fait".into(),
+            calls: vec![],
+            finish: Finish::Stop,
+        })
+    }
+}
+
+/// Un outillage vide.
+struct Rien;
+#[async_trait(?Send)]
+impl Toolbox for Rien {
+    fn specs(&self) -> Vec<ToolSpec> {
+        vec![]
+    }
+    async fn call(&self, _: &ToolCall) -> Outcome {
+        Outcome::ok(String::new())
+    }
+}
+
+/// Un hook de contexte qui ne rend jamais la main.
+struct ContextePendu;
+#[async_trait(?Send)]
+impl TurnContext for ContextePendu {
+    async fn before_turn(&self, _: &[Message]) -> Option<String> {
+        std::future::pending().await
+    }
+}
+
+/// Un compacteur qui ne rend jamais la main.
+struct CompacteurPendu;
+#[async_trait(?Send)]
+impl Compactor for CompacteurPendu {
+    async fn compact(&self, _: &[Message]) -> Result<Message, Failure> {
+        std::future::pending().await
+    }
+}
+
+type Journal = Rc<RefCell<Vec<Event>>>;
+
+fn arrets(log: &Journal) -> Vec<Stop> {
+    log.borrow()
+        .iter()
+        .filter_map(|e| match e {
+            Event::Stopped { stop, .. } => Some(stop.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// #291 : un hook de contexte qui ne rend jamais la main ne doit pas retenir le
+/// run après `interrupt()`. Le transport n'est jamais lancé.
+#[test]
+fn le_contexte_de_tour_pendu_n_retient_pas_l_interruption() {
+    let appels = Rc::new(Compte(RefCell::new(0)));
+    let log: Journal = Rc::default();
+    let journal = log.clone();
+    let harness = Harness::new(
+        "consigne",
+        Limits::default(),
+        appels.clone(),
+        Rc::new(Rien),
+        move |e| journal.borrow_mut().push(e),
+    )
+    .with_clock(Rc::new(Horloge::default()))
+    .with_turn_context(Rc::new(ContextePendu));
+    let handle = harness.handle();
+
+    let mut fut = Box::pin(harness.send("question"));
+    assert!(
+        poll_for(&mut fut, 2).is_none(),
+        "le run a fini seul : le hook n'a pas été atteint ou n'est pas pendant"
+    );
+    handle.interrupt();
+    let fini = poll_for(&mut fut, POLLS);
+    assert!(fini.is_some(), "le run ne se termine pas après interrupt()");
+    assert_eq!(fini, Some(Running::Ran(Stop::Interrupted)));
+    assert!(!handle.busy(), "busy doit retomber");
+    assert_eq!(arrets(&log), vec![Stop::Interrupted], "un seul Stopped");
+    assert_eq!(
+        *appels.0.borrow(),
+        0,
+        "le transport ne doit jamais être appelé"
+    );
+}
+
+/// #291 : un compacteur qui ne rend jamais la main ne doit pas retenir le run
+/// après `interrupt()` — même avec de quoi compacter. Le transport n'est jamais lancé.
+#[test]
+fn le_compacteur_pendu_n_retient_pas_l_interruption() {
+    let appels = Rc::new(Compte(RefCell::new(0)));
+    let log: Journal = Rc::default();
+    let journal = log.clone();
+    let harness = Harness::new(
+        "consigne",
+        Limits {
+            context_budget: Some(100),
+            ..Limits::default()
+        },
+        appels.clone(),
+        Rc::new(Rien),
+        move |e| journal.borrow_mut().push(e),
+    )
+    .with_clock(Rc::new(Horloge::default()))
+    .with_compactor(Rc::new(CompacteurPendu));
+    // De quoi retirer : le vieux message dépasse le budget effectif.
+    harness.seed(vec![Message::user("a".repeat(400))]);
+    let handle = harness.handle();
+
+    let mut fut = Box::pin(harness.send("question"));
+    assert!(
+        poll_for(&mut fut, 2).is_none(),
+        "le run a fini seul : le compacteur n'a pas été atteint ou n'est pas pendant"
+    );
+    handle.interrupt();
+    let fini = poll_for(&mut fut, POLLS);
+    assert!(fini.is_some(), "le run ne se termine pas après interrupt()");
+    assert_eq!(fini, Some(Running::Ran(Stop::Interrupted)));
+    assert!(!handle.busy());
+    assert_eq!(arrets(&log), vec![Stop::Interrupted]);
+    assert_eq!(
+        *appels.0.borrow(),
+        0,
+        "le transport ne doit jamais être appelé"
+    );
+}
+
+/// #291 : un compacteur pendu SANS interruption est borné par l'horloge : passé
+/// le délai, on se replie sur `fit` et le tour part quand même (le transport est appelé).
+#[test]
+fn le_compacteur_pendu_sans_interruption_se_replie_sur_fit() {
+    let appels = Rc::new(Compte(RefCell::new(0)));
+    let harness = Harness::new(
+        "consigne",
+        Limits {
+            context_budget: Some(100),
+            ..Limits::default()
+        },
+        appels.clone(),
+        Rc::new(Rien),
+        |_| {},
+    )
+    .with_clock(Rc::new(Horloge::default()))
+    .with_compactor(Rc::new(CompacteurPendu));
+    harness.seed(vec![Message::user("a".repeat(400))]);
+
+    let mut fut = Box::pin(harness.send("question"));
+    let fini = poll_for(&mut fut, POLLS);
+    assert!(fini.is_some(), "le run doit se replier sur fit et finir");
+    assert_eq!(fini, Some(Running::Ran(Stop::Done)));
+    assert_eq!(
+        *appels.0.borrow(),
+        1,
+        "le transport doit être appelé une seule fois (repli sur fit)"
+    );
+}
+
+/// Un hook de contexte qui ne rend jamais la main, SANS annulation : le tour
+/// continue sans son contexte — mais il le DIT.
+///
+/// Le hook porte la mémoire du tour (notes, rappels, sections de contexte). La
+/// perdre en silence serait exactement l'oubli muet que `Trimmed` existe pour
+/// éviter : un run qui répond sans sa mémoire et sans le signaler est un run qui
+/// invente. La borne existe pour ne pas pendre ; le signal existe pour que la
+/// borne ne mente pas sur ce qu'elle a coûté.
+#[test]
+fn le_contexte_de_tour_perdu_se_dit() {
+    let appels = Rc::new(Compte(RefCell::new(0)));
+    let log: Journal = Rc::default();
+    let journal = log.clone();
+    let harness = Harness::new(
+        "consigne",
+        Limits::default(),
+        appels.clone(),
+        Rc::new(Rien),
+        move |e| journal.borrow_mut().push(e),
+    )
+    .with_clock(Rc::new(Horloge::default()))
+    .with_turn_context(Rc::new(ContextePendu));
+    harness.seed(vec![Message::user("question")]);
+
+    let mut fut = Box::pin(harness.send("suite"));
+    assert_eq!(
+        poll_for(&mut fut, POLLS),
+        Some(Running::Ran(Stop::Done)),
+        "le délai dépassé n'arrête pas le run : le tour continue sans le contexte"
+    );
+    assert_eq!(
+        *appels.0.borrow(),
+        1,
+        "le transport est appelé une fois : le tour a bien eu lieu"
+    );
+    let dits = log
+        .borrow()
+        .iter()
+        .filter(
+            |e| matches!(e, Event::Hint { text, .. } if text.contains("contexte du tour perdu")),
+        )
+        .count();
+    assert_eq!(
+        dits, 1,
+        "le contexte perdu doit être annoncé une fois — ni zéro (silence) ni deux"
+    );
 }

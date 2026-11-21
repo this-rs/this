@@ -28,17 +28,17 @@ enum MacBluetooth {
         if #available(macOS 10.15, *) {
             switch CBManager.authorization {
             case .allowedAlways:
-                return "granted"
+                return Etat.granted.fil
             case .denied, .restricted:
-                return "denied"
+                return Etat.denied.fil
             case .notDetermined:
-                return "prompt"
+                return Etat.prompt.fil
             @unknown default:
-                return "prompt"
+                return Etat.prompt.fil
             }
         }
         // Before macOS 10.15, Bluetooth had no permission model.
-        return "granted"
+        return Etat.granted.fil
     }
 
     /// One-shot BLE scan. Args: `{"duration_ms": 3000, "services": ["180d"]}`.
@@ -338,7 +338,7 @@ private final class MacBluetoothCentral: NSObject, CBCentralManagerDelegate, CBP
         case .poweredOn: return "powered_on"
         case .poweredOff: return "powered_off"
         case .unauthorized: return "unauthorized"
-        case .unsupported: return "unsupported"
+        case .unsupported: return Etat.unsupported.fil
         case .resetting: return "resetting"
         case .unknown: return "unknown"
         @unknown default: return "unknown"

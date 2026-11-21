@@ -160,7 +160,7 @@ final class LocalNetworkBrowse {
       .sorted { ($0.name, $0.serviceType) < ($1.name, $1.serviceType) }
     // Services found are the proof that the permission is granted.
     if !services.isEmpty {
-      LocalNetworkRecord.remember("granted")
+      LocalNetworkRecord.remember(Etat.granted.fil)
     }
     finish(ServicesReply(services: services))
   }
@@ -169,7 +169,7 @@ final class LocalNetworkBrowse {
   /// a radio or network that cannot answer now.
   private func refused(_ error: NWError) {
     if case let .dns(code) = error, code == LocalNetworkBrowse.policyDeniedCode {
-      LocalNetworkRecord.remember("denied")
+      LocalNetworkRecord.remember(Etat.denied.fil)
       finish(Reply.error(code: "not_authorized"))
     } else {
       finish(Reply.error(code: "unavailable"))
@@ -193,9 +193,9 @@ extension ThisDevicePlugin {
   @objc public func localNetworkStatus(_ invoke: Invoke) {
     let state: String
     switch LocalNetworkRecord.last {
-    case "granted"?: state = "granted"
-    case "denied"?: state = "denied"
-    default: state = "prompt"
+    case Etat.granted.fil?: state = Etat.granted.fil
+    case Etat.denied.fil?: state = Etat.denied.fil
+    default: state = Etat.prompt.fil
     }
     invoke.resolve(Reply.status(state: state))
   }

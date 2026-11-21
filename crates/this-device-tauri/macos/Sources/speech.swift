@@ -27,10 +27,10 @@ enum MacSpeech {
 
     private static func authName(_ status: SFSpeechRecognizerAuthorizationStatus) -> String {
         switch status {
-        case .authorized:          return "granted"
-        case .denied, .restricted: return "denied"
-        case .notDetermined:       return "prompt"
-        @unknown default:          return "denied"
+        case .authorized:          return Etat.granted.fil
+        case .denied, .restricted: return Etat.denied.fil
+        case .notDetermined:       return Etat.prompt.fil
+        @unknown default:          return Etat.denied.fil
         }
     }
 

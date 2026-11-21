@@ -216,6 +216,20 @@ pub trait Toolbox {
         Vec::new()
     }
 
+    /// Les autorisations que cet outillage tient **à jour**, ou `None` (défaut).
+    ///
+    /// POURQUOI ce crochet, à côté de [`Toolbox::declarations`] : les outils d'un hôte
+    /// peuvent apparaître APRÈS la construction du harnais — un module installé pendant
+    /// la session en ajoute. Un ensemble figé par [`Harness::with_grants`] les
+    /// refuserait tous, et le refus serait juste en forme, faux en fait.
+    ///
+    /// Quand il rend `Some`, cet ensemble fait foi **à chaque appel** et remplace celui
+    /// de `with_grants` : un hôte qui le tient à jour est la meilleure source. Quand il
+    /// rend `None`, `with_grants` décide, comme avant.
+    fn grants(&self) -> Option<this_agent::substrate::Grants> {
+        None
+    }
+
     /// Le registre des ids que cet outillage a fait PARAÎTRE.
     ///
     /// Le contexte du tour s'en sert pour que les ids qu'il montre au modèle

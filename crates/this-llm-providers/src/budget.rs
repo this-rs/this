@@ -14,6 +14,15 @@ use crate::config::{ProviderConfig, ProviderId};
 /// wasm, where `SystemTime::now` is not available: the page gives the day.
 pub trait Clock: Send + Sync {
     fn day(&self) -> u64;
+
+    /// Milliseconds since the Unix epoch, or `0` when the host cannot tell the time.
+    ///
+    /// Provided with a conservative default so an existing clock keeps compiling: a session
+    /// whose age cannot be measured is sent anyway and the engine decides. Refusing on an
+    /// unknown clock would make a clock-less host unusable, for no gain.
+    fn now_ms(&self) -> i64 {
+        0
+    }
 }
 
 /// The machine's clock. Native targets only: `SystemTime::now` panics on
@@ -22,6 +31,13 @@ pub trait Clock: Send + Sync {
 pub struct SystemClock;
 
 impl Clock for SystemClock {
+    fn now_ms(&self) -> i64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duree| duree.as_millis() as i64)
+            .unwrap_or(0)
+    }
+
     fn day(&self) -> u64 {
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)

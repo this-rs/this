@@ -54,7 +54,7 @@ la carte le dit, et un test le vérifie contre `macos/Sources/dispatch.swift`.
 | Capacité | Méthodes | iOS | macOS |
 |---|---|---|---|
 | `notifications` | `notificationsStatus` `notificationsRequest` `notificationsPost` `notificationsCancel` | oui | oui |
-| | `notificationsSchedule` `notificationsPending` | oui | — |
+| | `notificationsSchedule` `notificationsPending` | oui | oui |
 | `camera` | `captureStatus` `captureRequest` | oui | oui |
 | | `cameraCapturePhoto` `cameraRecordVideo` | oui | — |
 | `microphone` | `captureStatus` `captureRequest` | oui | oui |

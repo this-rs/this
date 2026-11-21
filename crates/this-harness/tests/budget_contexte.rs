@@ -1,8 +1,16 @@
 //! La borne de contexte : un fil trop long est rogné par les plus anciens,
 //! jamais au milieu d'un appel d'outil, et jamais sans le dire.
 
+use std::cell::RefCell;
+use std::rc::Rc;
+
+use async_trait::async_trait;
 use serde_json::json;
-use this_harness::{Message, ToolCall, estimate_tokens, fit};
+
+use this_harness::{
+    Cancel, Delta, Event, Failure, Finish, Harness, Limits, Message, Outcome, Reply, Request,
+    ToolCall, ToolSpec, Toolbox, Transport, TurnContext, estimate_tokens, fit,
+};
 
 fn appel(id: &str) -> ToolCall {
     ToolCall {
@@ -206,5 +214,205 @@ fn sans_question_la_derniere_relance_est_gardee() {
         r.kept.iter().any(|m| m.is_synthetic()),
         "mieux que rien : la relance reste : {:?}",
         r.kept
+    );
+}
+
+// ===== Borne branchée dans la boucle (Harness) =====
+
+/// Un transport qui répond « fait » et garde le fil qu'on lui a envoyé.
+struct Repond(RefCell<Vec<Vec<Message>>>);
+
+#[async_trait(?Send)]
+impl Transport for Repond {
+    async fn stream(&self, request: &Request, _: &Cancel, _: Delta) -> Result<Reply, Failure> {
+        self.0.borrow_mut().push(request.thread());
+        Ok(Reply {
+            text: "fait".into(),
+            calls: vec![],
+            finish: Finish::Stop,
+        })
+    }
+}
+
+/// Un outillage sans aucun outil : la borne de contexte n'a rien à y voir.
+struct Rien;
+
+#[async_trait(?Send)]
+impl Toolbox for Rien {
+    fn specs(&self) -> Vec<ToolSpec> {
+        vec![]
+    }
+    async fn call(&self, _: &ToolCall) -> Outcome {
+        Outcome::ok(String::new())
+    }
+}
+
+/// #293 : un dépassement SANS retrait se dit aussi. `fit` épingle le dernier
+/// message utilisateur par contrat : un fil réduit à une seule question de
+/// 4000 caractères dépasse le budget sans qu'aucun message ne soit retiré
+/// (`dropped.messages == 0`). Le signal `Trimmed` devait pourtant partir.
+#[test]
+fn un_depassement_sans_retrait_se_dit_aussi() {
+    let log: Rc<RefCell<Vec<Event>>> = Rc::default();
+    let journal = log.clone();
+    let harness = Harness::new(
+        "consigne",
+        Limits {
+            context_budget: Some(100),
+            ..Limits::default()
+        },
+        Rc::new(Repond(RefCell::new(Vec::new()))),
+        Rc::new(Rien),
+        move |event| journal.borrow_mut().push(event),
+    );
+
+    let _ = futures::executor::block_on(harness.send(gros('a', 4000)));
+
+    let signale = log.borrow().iter().any(|event| {
+        matches!(
+            event,
+            Event::Trimmed {
+                over_budget: true,
+                excess,
+                ..
+            } if *excess > 0
+        )
+    });
+    assert!(
+        signale,
+        "un fil qui dépasse le budget sans retrait doit être signalé, pas silencieux"
+    );
+}
+
+/// Un contexte de tour figé : il rend toujours le même texte.
+struct Contexte(String);
+
+#[async_trait(?Send)]
+impl TurnContext for Contexte {
+    async fn before_turn(&self, _: &[Message]) -> Option<String> {
+        Some(self.0.clone())
+    }
+}
+
+/// #292 : le coût fixe ajouté APRÈS le fit (consigne système, contexte éphémère)
+/// n'était pas réservé. Une consigne qui dépasse à elle seule le budget doit être
+/// signalée, jamais tronquée en silence.
+#[test]
+fn un_systeme_qui_depasse_le_budget_se_dit_sans_etre_tronque() {
+    let systeme = gros('s', 4000);
+    let vus = Rc::new(Repond(RefCell::new(Vec::new())));
+    let log: Rc<RefCell<Vec<Event>>> = Rc::default();
+    let journal = log.clone();
+    let harness = Harness::new(
+        systeme.clone(),
+        Limits {
+            context_budget: Some(100),
+            ..Limits::default()
+        },
+        vus.clone(),
+        Rc::new(Rien),
+        move |event| journal.borrow_mut().push(event),
+    );
+
+    let _ = futures::executor::block_on(harness.send("question"));
+
+    let dit = log.borrow().iter().any(|event| {
+        matches!(
+            event,
+            Event::Trimmed {
+                over_budget: true,
+                excess,
+                ..
+            } if *excess > 0
+        )
+    });
+    assert!(
+        dit,
+        "un système qui dépasse à lui seul le budget doit être signalé, pas silencieux"
+    );
+
+    let fil = vus.0.borrow();
+    let dernier = fil.last().expect("au moins un tour");
+    assert!(
+        dernier
+            .iter()
+            .any(|m| matches!(m, Message::System { content } if content == &systeme)),
+        "la consigne système ne doit pas être tronquée en silence"
+    );
+}
+
+/// #292 : même chose pour le contexte éphémère du tour, inséré après le fit.
+#[test]
+fn un_contexte_de_tour_qui_depasse_le_budget_se_dit_sans_etre_tronque() {
+    let contexte = gros('c', 4000);
+    let vus = Rc::new(Repond(RefCell::new(Vec::new())));
+    let log: Rc<RefCell<Vec<Event>>> = Rc::default();
+    let journal = log.clone();
+    let harness = Harness::new(
+        "consigne",
+        Limits {
+            context_budget: Some(100),
+            ..Limits::default()
+        },
+        vus.clone(),
+        Rc::new(Rien),
+        move |event| journal.borrow_mut().push(event),
+    )
+    .with_turn_context(Rc::new(Contexte(contexte.clone())));
+
+    let _ = futures::executor::block_on(harness.send("question"));
+
+    let dit = log.borrow().iter().any(|event| {
+        matches!(
+            event,
+            Event::Trimmed {
+                over_budget: true,
+                excess,
+                ..
+            } if *excess > 0
+        )
+    });
+    assert!(
+        dit,
+        "un contexte de tour qui dépasse à lui seul le budget doit être signalé"
+    );
+
+    let fil = vus.0.borrow();
+    let dernier = fil.last().expect("au moins un tour");
+    assert!(
+        dernier
+            .iter()
+            .any(|m| matches!(m, Message::System { content } if content == &contexte)),
+        "le contexte de tour ne doit pas être tronqué en silence"
+    );
+}
+
+/// #292 : le coût fixe est RÉSERVÉ avant de choisir l'historique. Ici la consigne
+/// coûte 84 jetons (320 caractères) sur un budget de 100 : il ne reste que 16 jetons
+/// d'historique, donc le vieux message (29 jetons) doit sortir, alors que le fit au
+/// budget plein l'aurait gardé et aurait envoyé un fil de 119 jetons.
+#[test]
+fn le_cout_fixe_est_reserve_avant_de_choisir_l_historique() {
+    let vus = Rc::new(Repond(RefCell::new(Vec::new())));
+    let harness = Harness::new(
+        gros('s', 320),
+        Limits {
+            context_budget: Some(100),
+            ..Limits::default()
+        },
+        vus.clone(),
+        Rc::new(Rien),
+        |_| {},
+    );
+    harness.seed(vec![Message::user(gros('a', 100))]);
+
+    let _ = futures::executor::block_on(harness.send("question"));
+
+    let fil = vus.0.borrow();
+    let dernier = fil.last().expect("au moins un tour");
+    assert!(
+        estimate_tokens(dernier) <= 100,
+        "le coût fixe doit être réservé : le fil envoyé fait {} jetons",
+        estimate_tokens(dernier)
     );
 }

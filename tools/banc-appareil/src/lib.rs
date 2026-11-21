@@ -12,11 +12,6 @@
 //! Le déclenchement est un **environnement**, pas un bouton : `devicectl device process launch
 //! -e '{"THIS_DEVICE_BANC":"1"}'` — un balayage ne part jamais tout seul.
 
-/// Où le rapport est écrit, dans le conteneur de l'app : `Documents/banc.json` et un journal
-/// ligne à ligne dans `Documents/banc.log`.
-const RAPPORT: &str = "Documents/banc.json";
-const JOURNAL: &str = "Documents/banc.log";
-
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -29,8 +24,15 @@ pub fn run() {
             // Hors du fil de démarrage : le balayage prend des secondes (un scan Bluetooth en
             // dure trois), et une fenêtre qui ne s'affiche pas se lit comme un plantage.
             std::thread::spawn(move || {
+                // Le rapport est écrit par le pont lui-même ; on le lit du retour pour le
+                // journal de l'app, et rien de plus.
                 let rapport = tauri::async_runtime::block_on(tauri_device_banc(&handle));
-                ecrire(&rapport);
+                let defauts = rapport
+                    .get("defauts")
+                    .and_then(|v| v.as_array())
+                    .map(|d| d.len())
+                    .unwrap_or(0);
+                eprintln!("banc : {defauts} defaut(s)");
             });
             Ok(())
         })
@@ -45,85 +47,16 @@ fn tauri_device_plugin() -> tauri::plugin::TauriPlugin<tauri::Wry> {
 }
 
 /// Le balayage. Séparé pour que `setup` reste lisible, et pour que la version hors appareil
-/// (bureau, CI) ne tire pas le module `banc`, qui n'y a pas de sens.
+/// (bureau sans app, CI) ne tire pas le module `banc`, qui n'y a pas de sens.
 #[cfg(any(target_os = "ios", target_os = "macos"))]
 async fn tauri_device_banc<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> serde_json::Value {
-    this_device_tauri::banc::balayer(app).await
+    // `mesurer_et_ecrire` écrit `Documents/banc.json` et `banc.log` à côté du pont, et rend le
+    // rapport. L'app n'a plus à connaître ni la sérialisation, ni les noms de fichiers : c'est
+    // ce qui permet à n'importe quel hôte d'appeler la même chose en une ligne.
+    this_device_tauri::banc::mesurer_et_ecrire(app).await
 }
 
 #[cfg(not(any(target_os = "ios", target_os = "macos")))]
 async fn tauri_device_banc<R: tauri::Runtime>(_app: &tauri::AppHandle<R>) -> serde_json::Value {
     serde_json::json!({ "kind": "banc", "erreur": "aucun appareil sur cette plateforme" })
-}
-
-/// Écrit le rapport et son journal. Un échec d'écriture ne doit pas tuer l'app : il est dit.
-fn ecrire(rapport: &serde_json::Value) {
-    let Ok(home) = std::env::var("HOME") else {
-        return;
-    };
-    let racine = std::path::Path::new(&home);
-    let _ = std::fs::create_dir_all(racine.join("Documents"));
-    let _ = std::fs::write(
-        racine.join(RAPPORT),
-        serde_json::to_string_pretty(rapport).unwrap_or_default(),
-    );
-
-    let mut journal = String::new();
-    if let Some(capacites) = rapport.get("capacites").and_then(|v| v.as_array()) {
-        for entree in capacites {
-            journal.push_str(&format!(
-                "capacite {} = {}\n",
-                entree["capacite"].as_str().unwrap_or("?"),
-                entree["etat"].as_str().unwrap_or("?")
-            ));
-        }
-    }
-    if let Some(methodes) = rapport.get("methodes").and_then(|v| v.as_array()) {
-        for entree in methodes {
-            journal.push_str(&format!(
-                "methode {} [{}] = {}{}{}\n",
-                entree["methode"].as_str().unwrap_or("?"),
-                entree["nature"].as_str().unwrap_or("?"),
-                entree["etat"].as_str().unwrap_or("?"),
-                entree
-                    .get("code")
-                    .and_then(|v| v.as_str())
-                    .map(|code| format!(" ({code})"))
-                    .unwrap_or_default(),
-                entree
-                    .get("ms")
-                    .and_then(|v| v.as_u64())
-                    .map(|ms| format!(" {ms}ms"))
-                    .unwrap_or_default(),
-            ));
-        }
-    }
-    if let Some(ecritures) = rapport.get("ecritures").and_then(|v| v.as_array()) {
-        for entree in ecritures {
-            journal.push_str(&format!(
-                "ecriture {} [{}] = {}{}\n",
-                entree["methode"].as_str().unwrap_or("—"),
-                entree["groupe"].as_str().unwrap_or("—"),
-                entree["etat"].as_str().unwrap_or("?"),
-                entree
-                    .get("code")
-                    .and_then(|v| v.as_str())
-                    .map(|code| format!(" ({code})"))
-                    .unwrap_or_default(),
-            ));
-        }
-    }
-    journal.push_str(&format!(
-        "defauts = {}\n",
-        rapport
-            .get("defauts")
-            .and_then(|v| v.as_array())
-            .map(|d| d
-                .iter()
-                .map(|entree| entree["methode"].as_str().unwrap_or("?"))
-                .collect::<Vec<_>>()
-                .join(","))
-            .unwrap_or_default()
-    ));
-    let _ = std::fs::write(racine.join(JOURNAL), journal);
 }

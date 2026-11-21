@@ -267,7 +267,7 @@ jobs:
       # lignes dans un fichier que la mesure locale donnait entièrement couvert, et rien dans
       # le dépôt ne permettait de comparer les deux jeux de données.
       - name: Upload lcov (diagnostic)
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: lcov
           path: lcov.info
@@ -511,6 +511,9 @@ jobs:
     if: needs.changes.outputs.code == 'true'
     name: Cross Platform Check
     runs-on: ${{ matrix.os }}
+    # Une ceinture explicite : le délai par défaut ne dit rien, et une annulation se
+    # confond avec un échec dans l'interface.
+    timeout-minutes: 30
     strategy:
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
@@ -529,6 +532,17 @@ jobs:
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
+
+      # Sans cache, ce job dépasse la quinzaine de minutes sur macOS — et comme le workflow
+      # annule le run en cours quand une nouvelle exécution démarre sur la même ref
+      # (`concurrency: cancel-in-progress`), c'est TOUJOURS lui qui se fait couper :
+      # mesuré sur `main` le 17/11 (14:56:08 → 15:11:23, annulé) et sur la PR #282
+      # (17:58:23 → 18:13:24, annulé). Le contrôle macOS ne protégeait donc rien.
+      # Le cache est la vraie correction ; le délai reste une ceinture.
+      - name: Cache Rust
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: cross-platform-${{ matrix.os }}
 
       - name: Build
         run: cargo build --features all,wami
@@ -579,7 +593,10 @@ jobs:
           cd crates/this-device-tauri/ios/Sources
           # `grep -L` : les fichiers SANS `import Tauri`. Les sélecteurs `@objc` (qui
           # importent Tauri) ne peuvent être vérifiés que par un build d'app complet.
-          files=$(grep -L "import Tauri" *.swift | tr '\n' ' ')
+          # `Commun/` porte ce que plusieurs fichiers partagent (`Etat`) : `*.swift` ne
+          # descend pas dans les sous-dossiers, il faut le nommer, sinon un fichier
+          # qui s'en sert est vérifié sans sa définition (#273).
+          files="$(grep -L "import Tauri" *.swift | tr '\n' ' ') $(ls Commun/*.swift | tr '\n' ' ')"
           echo "fichiers vérifiés : $files"
           # shellcheck disable=SC2086
           xcrun --sdk iphoneos swiftc -typecheck -target arm64-apple-ios17.0 $files
