@@ -16,7 +16,8 @@
 //! Ce qu'ils prouvent, et que les doublures ne prouvent pas : le moteur réel rend du texte,
 //! un USAGE réel (des jetons comptés par le moteur, pas estimés), un appel d'outil
 //! structuré, et une clé refusée est classée comme une réponse du moteur (`Http(401)`),
-//! jamais comme une panne réseau. Chaque test imprime une ligne `RACCORDEMENT …` pour le
+//! jamais comme une panne réseau, et le modèle DEMANDÉ est le modèle SERVI (routé ≠ servi, au
+//! niveau du client : c'est ce qui sépare une décision de routage consultative d'une servie). Chaque test imprime une ligne `RACCORDEMENT …` pour le
 //! rapport daté ; aucune ne contient de secret.
 
 use serde_json::json;
@@ -196,5 +197,54 @@ async fn une_cle_refusee_est_une_reponse_du_moteur_pas_une_panne_reseau() {
     assert!(
         !matches!(erreur.kind(), ErrorKind::Unreachable | ErrorKind::Timeout),
         "un refus d'authentification n'est pas une panne réseau"
+    );
+}
+
+#[tokio::test]
+#[ignore = "raccordement réel : THIS_RACCORDEMENT=deepseek et --ignored"]
+async fn le_modele_demande_est_le_modele_servi() {
+    if !demande("modèle servi") {
+        return;
+    }
+    let client = client(deepseek(VARIABLE_DE_CLE));
+    // Les modèles que le moteur annonce : on en demande DEUX, et chacun doit répondre sous son
+    // nom. Un client qui ignorerait `TurnRequest::model` servirait toujours le défaut.
+    let annonces: Vec<String> = client
+        .list_models()
+        .await
+        .expect("le moteur annonce ses modèles")
+        .into_iter()
+        .map(|m| m.id)
+        .collect();
+    println!("RACCORDEMENT modèles annoncés : {annonces:?}");
+    assert!(
+        annonces.len() >= 2,
+        "il faut deux modèles pour distinguer : {annonces:?}"
+    );
+    let mut servis = Vec::new();
+    for demande in annonces.iter().take(2) {
+        let mut tour = TurnRequest::new(json!([
+            {"role": "user", "content": "Réponds exactement : pong"}
+        ]))
+        .with_model(Some(demande));
+        tour.max_output_tokens = Some(1024);
+        let reponse = client.send_turn(tour).await.expect("le moteur répond");
+        println!(
+            "RACCORDEMENT modèle servi : demandé={demande} servi={}",
+            reponse.model
+        );
+        servis.push((demande.clone(), reponse.model));
+    }
+    for (demande, servi) in &servis {
+        assert!(
+            servi == demande
+                || servi.starts_with(demande.as_str())
+                || demande.starts_with(servi.as_str()),
+            "demandé {demande}, servi {servi}"
+        );
+    }
+    assert_ne!(
+        servis[0].1, servis[1].1,
+        "deux modèles demandés, deux modèles servis : {servis:?}"
     );
 }
