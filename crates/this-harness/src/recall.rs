@@ -173,6 +173,22 @@ fn truncate(s: &str, max: usize) -> String {
     }
 }
 
+/// Une citation construite par `anchors()` a toujours la forme `#kind:uuid` ; un `Anchors` bâti à la
+/// main (champs publics) peut porter n'importe quoi. Seule la forme exacte passe en clair.
+fn id_bien_forme(c: &Citation) -> bool {
+    let Some(rest) = c.id.strip_prefix('#') else {
+        return false;
+    };
+    let Some((kind, uuid)) = rest.split_once(':') else {
+        return false;
+    };
+    !kind.is_empty()
+        && kind.len() <= KIND_MAX
+        && kind.bytes().all(|b| b.is_ascii_lowercase() || b == b'_')
+        && kind == c.kind
+        && is_uuid(uuid)
+}
+
 fn is_uuid(s: &str) -> bool {
     let parts: Vec<&str> = s.split('-').collect();
     parts.len() == 5
@@ -315,7 +331,11 @@ async fn rappel_impl(
     let facts = if shown.is_empty() {
         Vec::new()
     } else {
-        let asked: Vec<String> = shown.iter().map(|c| c.id.clone()).collect();
+        let asked: Vec<String> = shown
+            .iter()
+            .filter(|c| id_bien_forme(c))
+            .map(|c| c.id.clone())
+            .collect();
         recall.recall(&asked).await
     };
 
@@ -329,10 +349,27 @@ async fn rappel_impl(
         body.push_str(&format!("\nEntités citées ({}) :\n", anchors.cited.len()));
     }
     for (n, c) in shown.iter().enumerate() {
-        let line = match facts.iter().find(|f| f.id == c.id) {
+        // Forme exacte : en clair. Sinon (Anchors forgé) : copie tierce, enveloppée.
+        let bien_forme = id_bien_forme(c);
+        let id_vu = if bien_forme {
+            c.id.clone()
+        } else {
+            copie(&truncate(&one_line(&c.id), SOURCE_MAX))
+        };
+        let kind_vu = if bien_forme {
+            c.kind.clone()
+        } else {
+            copie(&truncate(&one_line(&c.kind), KIND_MAX))
+        };
+        let trouve = if bien_forme {
+            facts.iter().find(|f| f.id == c.id)
+        } else {
+            None
+        };
+        let line = match trouve {
             Some(f) => format!(
                 "- {} ({}) — graphe : {} [source : {}, au : {}]\n    conversation (message {}) : « {} »\n",
-                c.id,
+                id_vu,
                 copie(&truncate(&one_line(&f.kind), KIND_MAX)),
                 copie(&truncate(&one_line(&f.fact), FACT_MAX)),
                 copie(&truncate(&one_line(&f.source), SOURCE_MAX)),
@@ -342,8 +379,8 @@ async fn rappel_impl(
             ),
             None => format!(
                 "- {} ({}) — INTROUVABLE dans le graphe (cité au message {} : « {} ») : id inventé, supprimé, ou hors de portée — à ne pas tenir pour acquis.\n",
-                c.id,
-                c.kind,
+                id_vu,
+                kind_vu,
                 c.message,
                 copie(&one_line(&c.excerpt))
             ),
@@ -352,7 +389,10 @@ async fn rappel_impl(
         // comme une preuve, même quand le graphe la connaît.
         // `None` = le registre ne suis pas cette sorte : il ne dit rien, on ne
         // marque rien. Seul ce qu'il SAIT (cité, ou jamais paru) porte la marque.
-        let non_lu = match vus.and_then(|l| l.provenance_token(&c.id)) {
+        let non_lu = match vus
+            .filter(|_| bien_forme)
+            .and_then(|l| l.provenance_token(&c.id))
+        {
             Some(Provenance::Quoted) | Some(Provenance::Never) => {
                 // Le saut de ligne FINAL compte : sans lui, l'entrée suivante se
                 // collerait à la marque et un lecteur ligne à ligne l'attribuerait

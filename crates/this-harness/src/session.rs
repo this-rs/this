@@ -2761,6 +2761,12 @@ impl Handle {
     /// modèle en clair (le texte les simule) n'a pas de raison de l'appeler : la
     /// reprise par défaut, conservatrice, lui convient et ne trompe jamais.
     ///
+    /// **L'intégrité ne donne pas la FIDÉLITÉ de provenance.** Même un snapshot signé et
+    /// intact ne porte que le texte : une simple *citation* y devient `Direct` au redémarrage,
+    /// sans `Outcome::observable` pour l'attester. `restore_trusted` n'est donc pas couvert par
+    /// la garantie « cité ≠ lu » ; seule la voie par défaut (conservatrice) la tient. Persister
+    /// et restaurer la provenance elle-même est un chantier distinct, non fait.
+    ///
     /// **« Connaître l'origine » ne suffit pas : il faut que le stockage soit
     /// protégé en INTÉGRITÉ.** Un fichier sur disque, un `localStorage`, une
     /// IndexedDB ou une ligne de base que d'autres codes peuvent réécrire ne

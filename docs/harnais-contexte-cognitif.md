@@ -394,3 +394,16 @@ Donc, depuis ce contrat :
   `<untrusted_data>` reste cité, la déclaration ne contourne pas ce jugement.
 
 Un hôte qui ne déclare rien reste sûr, mais plus faible : tout est « cité seulement ».
+
+Limites assumées de ce contrat :
+
+- **`restore_trusted` / `seed_trusted` sont hors garantie.** L'intégrité d'un snapshot n'en
+  garantit pas la fidélité de provenance : le fil ne porte que le texte, donc une citation peut
+  y redevenir « lue directement » au redémarrage. Seule la reprise par défaut est conservatrice.
+- **`Outcome` a gagné un champ public (`observable`)** : un littéral `Outcome { .. }` écrit hors
+  de ce dépôt cesse de compiler (rupture de source). Passer par `Outcome::reading(..)` /
+  `Outcome::unchanged()` ou `..Default`. Les dépôts sondés n'en contiennent pas ; cela ne prouve
+  rien pour les autres consommateurs.
+- **`rappel_cloisonne` accepte des `Anchors` publics.** Une citation dont l'`id` n'a pas la forme
+  exacte `#kind:uuid` (ou dont le `kind` diffère) n'est ni interrogée au graphe ni marquée par
+  le registre : elle est rendue comme copie tierce enveloppée.
