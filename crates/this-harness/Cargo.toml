@@ -33,4 +33,4 @@ js-sys = "0.3"
 # Only for `block_on` in tests: the crate itself brings no runtime.
 futures = "0.3"
 # Only to prove that the failure families of a provider are codes this harness knows.
-this-llm-providers = { path = "../this-llm-providers", default-features = false }
+this-llm-providers = { version = "0.0.1", path = "../this-llm-providers", default-features = false }
