@@ -349,11 +349,19 @@ impl Grants {
     /// et ce refus est **collant** : appliqué après la lecture de tous les nœuds, il ne
     /// dépend pas de leur ordre et un autre nœud du même outil ne le remplace pas.
     ///
+    /// C'est un contrôle de **cohérence**, pas d'**intégrité** : rien n'est signé. Un
+    /// écrivain qui réécrit `_tool`, `_granted` **et** `_data` ensemble, de façon
+    /// cohérente, est accepté. Ce contrôle attrape une copie qui a divergé (migration,
+    /// édition manuelle, outil d'administration) ; il n'arrête pas quelqu'un qui a le
+    /// droit d'écrire.
+    ///
     /// Ce que cela NE couvre PAS : une colonne **absente** ne contredit rien (un nœud
-    /// plus ancien ne perd pas ses droits sur une absence — et une colonne non textuelle
-    /// est relue comme absente par `AgentSubstrate::grants`) ; `_uuid` et `_source` ne
-    /// sont pas comparés (`_source` n'entre pas dans la décision) ; deux nœuds cohérents
-    /// pour le même outil se départagent toujours par l'ordre de lecture (`put`).
+    /// plus ancien ne perd pas ses droits sur une absence) ; `_uuid`, `_agent` et
+    /// `_source` ne sont pas comparés (`_source` n'entre pas dans la décision, `_agent`
+    /// est un filtre de lecture) ; deux nœuds cohérents pour le même outil se départagent
+    /// toujours par l'ordre de lecture (`put`). Une colonne présente sous une forme non
+    /// textuelle (un booléen écrit par une migration) n'est **pas** relue comme absente :
+    /// l'adaptateur substrat la compare sous sa forme texte, donc sa contradiction se voit.
     pub fn from_nodes(nodes: &[Node]) -> Result<Self, String> {
         let mut grants = Grants::new();
         let mut refus = Vec::new();
@@ -634,5 +642,61 @@ mod tests {
         grants.put(Grant::granted("read_file", "user"));
         let back = Grants::from_nodes(&grants.nodes("atelier").unwrap()).unwrap();
         assert!(back.allows("read_file").is_allowed());
+    }
+
+    #[test]
+    fn un_refus_d_incoherence_survit_a_une_reecriture_avec_son_motif() {
+        // Le refus rendu par la relecture n'est pas un état transitoire : réécrit,
+        // il redevient un grant ordinaire — cohérent cette fois — et se relit comme
+        // un refus, avec le même motif. C'est ce qui rend le refus « durable ».
+        let mut grants = Grants::new();
+        grants.put(Grant::granted("run_program", "user"));
+        let mut nodes = grants.nodes("atelier").unwrap();
+        forcer(&mut nodes[0], "_granted", "false");
+
+        let refuse = Grants::from_nodes(&nodes).unwrap();
+        let motif = match refuse.allows("run_program") {
+            Verdict::Refuse(motif) => motif,
+            Verdict::Allow => panic!("une colonne qui contredit `_data` ne restaure pas le droit"),
+        };
+
+        // Seconde écriture : `_granted` et `_data` sont désormais d'accord.
+        let reecrit = refuse.nodes("atelier").unwrap();
+        let relu = Grants::from_nodes(&reecrit).unwrap();
+        match relu.allows("run_program") {
+            Verdict::Refuse(m) => assert_eq!(m, motif, "le motif doit survivre à la réécriture"),
+            Verdict::Allow => panic!("un refus réécrit ne redevient pas un accord"),
+        }
+    }
+
+    #[test]
+    fn un_nom_divergent_ne_prend_pas_le_droit_d_un_noeud_sain_de_l_autre_outil() {
+        // Le nœud abîmé désigne « run_program » par sa COLONNE ; un autre nœud, sain
+        // et accordé, porte le même outil. Lu avant ou après, le refus doit tenir :
+        // sinon l'ordre de lecture déciderait d'une autorisation.
+        let abime = {
+            let mut g = Grants::new();
+            g.put(Grant::granted("read_file", "user"));
+            let mut n = g.nodes("atelier").unwrap().remove(0);
+            forcer(&mut n, "_tool", "run_program");
+            n
+        };
+        let sain = {
+            let mut g = Grants::new();
+            g.put(Grant::granted("run_program", "user"));
+            g.nodes("atelier").unwrap().remove(0)
+        };
+
+        for ordre in [vec![abime.clone(), sain.clone()], vec![sain, abime]] {
+            let back = Grants::from_nodes(&ordre).unwrap();
+            assert!(
+                !back.allows("run_program").is_allowed(),
+                "un nom divergent ne prend pas le droit d'un nœud sain, quel que soit l'ordre"
+            );
+            assert!(
+                !back.allows("read_file").is_allowed(),
+                "et il ne garde pas non plus le sien"
+            );
+        }
     }
 }
