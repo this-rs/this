@@ -27,7 +27,7 @@ use std::task::Poll;
 
 use async_trait::async_trait;
 
-use crate::event::{Event, HintKind, Outcome, Pending, Snapshot};
+use crate::event::{Event, HintKind, Outcome, Pending, SNAPSHOT_VERSION, Snapshot};
 use crate::ports::{Cancel, Compactor, Delta, Permission, Recorder, Recorders, Toolbox, Transport};
 use crate::wire::{
     Code, Failure, Finish, ImagePart, Message, Reply, Request, ThreadDefect, ToolCall, ToolSpec,
@@ -2620,7 +2620,7 @@ impl Handle {
             (state.transcript.clone(), state.pending.clone())
         };
         Snapshot {
-            version: 1,
+            version: SNAPSHOT_VERSION,
             transcript,
             pending,
         }
@@ -2633,6 +2633,22 @@ impl Handle {
             self.out.emit(Event::Hint {
                 kind: HintKind::Other,
                 text: "restore ignoré : un run tourne, le fil ne peut pas être remplacé.".into(),
+            });
+            return;
+        }
+        if snapshot.version != SNAPSHOT_VERSION {
+            // Un snapshot d'une version plus récente que celle que ce harnais sait relire :
+            // refusé et dit, avant toute mutation. Le format est versionné par
+            // `SNAPSHOT_VERSION` (event.rs) ; le jour où il change, c'est ici que se
+            // décide quoi faire des versions anciennes — pour l'instant, on refuse, on
+            // n'applique jamais un état qu'on ne comprend pas.
+            self.out.emit(Event::Hint {
+                kind: HintKind::Other,
+                text: format!(
+                    "restore refusé : version de snapshot {} inconnue (ce harnais relit la version {}).",
+                    snapshot.version,
+                    SNAPSHOT_VERSION
+                ),
             });
             return;
         }

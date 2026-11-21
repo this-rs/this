@@ -224,6 +224,33 @@ fn restore_pendant_un_run_ne_corrompt_pas_le_fil() {
     );
 }
 
+/// FAILLE : `restore` acceptait un `Snapshot` de version inconnue et l'appliquait
+/// sans un mot. Un format plus récent est refusé (et le dit), jamais appliqué.
+#[test]
+fn un_snapshot_de_version_inconnue_est_refuse_avec_un_motif() {
+    let (h, log) = harness(Limits::default(), transport(vec![]), ok_tools());
+    let hd = h.handle();
+    hd.enqueue("avant");
+    let mut futur = hd.snapshot();
+    futur.version = 999;
+    futur.pending.clear();
+    hd.restore(futur);
+    assert_eq!(
+        hd.pending().len(),
+        1,
+        "un format inconnu ne touche pas à l'état en place"
+    );
+    assert_eq!(hd.pending()[0].text, "avant");
+    assert!(
+        log.borrow()
+            .iter()
+            .any(|e| matches!(e, Event::Hint { text, .. }
+                if text.contains("restore") && text.contains("999"))),
+        "le refus se dit et nomme la version : {:?}",
+        log.borrow()
+    );
+}
+
 struct NoTimer;
 impl Clock for NoTimer {
     fn now_ms(&self) -> f64 {
