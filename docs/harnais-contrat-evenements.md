@@ -103,8 +103,19 @@ Décisions, tranchées explicitement :
   perdrait l'information) et jamais « refuser nommément » (un hôte ancien face à un cœur
   plus récent casserait). Concrètement : lire dans `serde_json::Value`, dispatcher sur
   `type`, et ranger l'inconnu. `HintKind` et `Verdict` montrent déjà cette philosophie
-  (`event.rs:204`, `un_verdict_inconnu_se_lit_unknown`) ; il reste à l'étendre à l'enum
-  `Event` entière — c'est un manque de couverture, pas une faille à corriger à chaud.
+  (`event.rs:204`, `un_verdict_inconnu_se_lit_unknown`).
+  **Écrit depuis** : `EventWire` / `UnknownEvent` (`crates/this-harness/src/event.rs`),
+  l'enveloppe de **lecture** du fil. Un `type` connu y est décodé **strictement** — un
+  payload incomplet est une **erreur**, pas un inconnu, parce que ranger un événement cassé
+  en inconnu inventerait un succès et effacerait le défaut. Un `type` inconnu est conservé
+  avec son `type_name` et son JSON **brut** : le relayer rend exactement ce qui est arrivé,
+  jamais `{"type":"Unknown"}`. `Event::Unknown` (variante unitaire de #301) reste pour la
+  lecture directe en `Event` ; `EventWire` est la forme **sans perte** qui manquait.
+  Preuves : `chaque_type_connu_se_relit_comme_connu_et_identique` (aller-retour sur une
+  instance de chaque variante, et garde de la liste des types connus),
+  `un_evenement_futur_garde_son_type_et_son_payload_intact`,
+  `un_type_connu_au_payload_incomplet_est_une_erreur_pas_un_inconnu`,
+  `une_forme_relayee_par_une_version_precedente_reste_lisible`.
 
 ## 4. Scénarios d'acceptation
 
@@ -118,5 +129,7 @@ Décisions, tranchées explicitement :
 | S6 | Distinction entre acquittement d'outil et réponse humaine | **preuve existante** | `ToolResult` porte `refused`/`failed`/`unchanged`/`before`/`after` (`event.rs:76-100`), un refus ≠ une erreur (`event.rs:81-86`) ; un résultat en échec porte sa cause : `un_tool_result_en_echec_porte_sa_cause` (`scenario.rs:1092`) ; les relances du harnais sont marquées `synthetic` (`wire.rs`), distinctes d'une question humaine : `synthetic_is_additive_on_the_wire` (`wire.rs` module tests) ; la réponse humaine est `User`/`Pending`, jamais un `ToolResult`. |
 
 Bilan des scénarios : **5 « preuve existante »** (S1, S3, S4, S5, S6), **1 « manque »** (S2,
-hors du crate). Les manques d'enveloppe — version d'événement, curseur, lecture
-indulgente d'un `type` inconnu — sont décidés en §3 et restent à écrire chez l'hôte.
+hors du crate). Parmi les manques d'enveloppe de §3, la **lecture indulgente d'un `type`
+inconnu** est désormais écrite dans le cœur (`EventWire`, §3). La **version d'événement** et
+le **curseur** restent à l'hôte, par décision (§3) : le cœur n'ouvre pas une seconde
+numérotation à côté de celle de l'hôte.
