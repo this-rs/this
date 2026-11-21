@@ -9,7 +9,9 @@
 //! chemin de production —, typiquement injectée par un coffre :
 //!
 //! ```text
-//! THIS_RACCORDEMENT=deepseek orchestrator secret exec -e DEEPSEEK_API_KEY=deepseek-api-key -- \
+//! THIS_RACCORDEMENT=deepseek \
+//! THIS_RACCORDEMENT_CLE_FAUSSE=sk-0000000000000000000000000000000 \
+//!   orchestrator secret exec -e DEEPSEEK_API_KEY=deepseek-api-key -- \
 //!   cargo test -p this-llm-providers --test raccordement_reel -- --ignored --test-threads=1 --nocapture
 //! ```
 //!
@@ -21,14 +23,11 @@
 //! et n'expose pas encore le modèle servi : c'est le manque C5 (`docs/harnais-capacites-moteurs.md`).
 //! Chaque test imprime une ligne `RACCORDEMENT …` pour le rapport daté ; aucune ne contient de secret.
 //!
-//! La clé refusée est un fixture : elle est posée dans l'environnement AVANT le lancement, jamais
-//! par le test (pas de `set_var` en cours de processus, qui serait une course avec les autres
-//! threads) :
-//!
-//! ```text
-//! THIS_RACCORDEMENT_CLE_FAUSSE=sk-0000000000000000000000000000000 THIS_RACCORDEMENT=deepseek \
-//!   cargo test -p this-llm-providers --test raccordement_reel -- --ignored --test-threads=1
-//! ```
+//! La vraie clé vient du coffre (`DEEPSEEK_API_KEY`, jamais écrite). La clé FAUSSE
+//! (`THIS_RACCORDEMENT_CLE_FAUSSE`, une fixture sans valeur) est posée dans l'environnement AVANT
+//! le lancement, jamais par le test : un `set_var` en cours de processus serait une course avec les
+//! autres threads. La commande ci-dessus pose les deux ; sans la fausse, le test de clé refusée
+//! échoue en le disant.
 
 use serde_json::json;
 use this_llm::{CredentialRef, Preset};
