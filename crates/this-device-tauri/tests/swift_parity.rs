@@ -430,3 +430,61 @@ fn l_etat_swift_dit_les_memes_mots_que_le_contrat() {
         "le vocabulaire Swift et `PermissionState` ne disent pas les mêmes mots"
     );
 }
+
+/// Hors d'un bundle `.app`, `UNUserNotificationCenter.current()` lève une exception
+/// Objective-C (`bundleProxyForCurrentProcess is nil`) que Rust ne rattrape pas : le processus
+/// meurt. Un binaire lancé directement (`cargo run`, un banc d'essai) n'a pas de bundle. Mesuré le
+/// 21/11/2026 : l'Atelier plantait à son auto-test.
+///
+/// Chaque fonction de `MacNotifications` qui touche le centre doit donc COMMENCER par la garde
+/// `centreDisponible`. Ce test lit les sources : un point d'entrée ajouté plus tard sans garde le
+/// fait échouer.
+#[test]
+fn every_macos_notification_entry_point_is_guarded_against_a_missing_bundle() {
+    let path =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("macos/Sources/notifications.swift");
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        eprintln!("notifications.swift absent : test sauté");
+        return;
+    };
+    assert!(
+        text.contains("static var centreDisponible"),
+        "la garde `centreDisponible` doit exister"
+    );
+    let lines: Vec<&str> = text.lines().collect();
+    let mut checked = 0;
+    for (i, line) in lines.iter().enumerate() {
+        let t = line.trim_start();
+        let Some(rest) = t.strip_prefix("static func ") else {
+            continue;
+        };
+        let name: String = rest
+            .chars()
+            .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+            .collect();
+        // Le corps de la fonction : jusqu'à la prochaine `static func` ou la fin du fichier.
+        let end = lines[i + 1..]
+            .iter()
+            .position(|l| l.trim_start().starts_with("static func "))
+            .map_or(lines.len(), |n| i + 1 + n);
+        let body = lines[i + 1..end].join("\n");
+        if !body.contains("UNUserNotificationCenter.current()") {
+            continue; // `stateName` : une table de mots, sans centre.
+        }
+        checked += 1;
+        let first = lines[i + 1..end]
+            .iter()
+            .map(|l| l.trim())
+            .find(|l| !l.is_empty() && !l.starts_with("//"))
+            .unwrap_or("");
+        assert!(
+            first.starts_with("guard centreDisponible"),
+            "`{name}` touche UNUserNotificationCenter sans commencer par `guard centreDisponible` \
+             (première instruction : `{first}`) — hors bundle, le processus mourrait"
+        );
+    }
+    assert!(
+        checked >= 7,
+        "les sept points d'entrée de MacNotifications doivent être vérifiés, pas {checked}"
+    );
+}
