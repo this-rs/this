@@ -44,6 +44,10 @@ pub const COMMAND_MAX: usize = 200;
 pub const KIND_MAX: usize = 24;
 /// Longueur maximale (caractères) d'un chemin retenu : au-delà, ce n'est pas un chemin.
 pub const PATH_MAX: usize = 200;
+/// Longueur maximale (caractères) de la source ou de la date d'un fait, et du nom d'un outil :
+/// ce sont des COPIES (d'un hôte, du modèle), jamais des mots du harnais.
+pub const SOURCE_MAX: usize = 80;
+pub const TOOL_NAME_MAX: usize = 64;
 /// Nombre maximal d'entités interrogées et rendues.
 pub const MAX_ENTITIES: usize = 40;
 /// Nombre maximal de chemins / commandes rendus.
@@ -329,10 +333,10 @@ async fn rappel_impl(
             Some(f) => format!(
                 "- {} ({}) — graphe : {} [source : {}, au : {}]\n    conversation (message {}) : « {} »\n",
                 c.id,
-                f.kind,
+                copie(&truncate(&one_line(&f.kind), KIND_MAX)),
                 copie(&truncate(&one_line(&f.fact), FACT_MAX)),
-                one_line(&f.source),
-                one_line(&f.as_of),
+                copie(&truncate(&one_line(&f.source), SOURCE_MAX)),
+                copie(&truncate(&one_line(&f.as_of), SOURCE_MAX)),
                 c.message,
                 copie(&one_line(&c.excerpt))
             ),
@@ -382,7 +386,10 @@ async fn rappel_impl(
     list(
         &mut body,
         "Outils appelés",
-        anchors.tools.iter().map(|(n, k)| format!("{n}×{k}")),
+        anchors
+            .tools
+            .iter()
+            .map(|(n, k)| format!("{}×{k}", copie(&truncate(&one_line(n), TOOL_NAME_MAX)))),
     );
     list(
         &mut body,
