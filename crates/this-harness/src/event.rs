@@ -181,6 +181,19 @@ pub enum Event {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         verdict: Option<Verdict>,
     },
+    /// Un événement écrit par un hôte plus récent, dont le `type` n'est pas connu
+    /// de cette version.
+    ///
+    /// Décision #286, §3 « La décision d'enveloppe / Comportement face à un
+    /// événement futur » : conserver (jamais ignorer en silence, jamais refuser
+    /// nommément). `#[serde(other)]` fait retomber ici tout `type` inconnu, de
+    /// sorte qu'un hôte ancien face à un cœur plus récent ne casse pas la lecture.
+    ///
+    /// Variante **unitaire** : `#[serde(other)]` ne porte pas le payload brut, il
+    /// signale seulement « ceci existait et n'est pas reconnu » — le `type`
+    /// d'origine n'est donc pas conservé, contrairement à `HintKind::Other`.
+    #[serde(other)]
+    Unknown,
 }
 
 /// Le genre d'un [`Event::Hint`].
@@ -229,6 +242,7 @@ impl Event {
             Self::Compacted { .. } => "compacted",
             Self::Routed { .. } => "routed",
             Self::Stopped { .. } => "stopped",
+            Self::Unknown => "unknown",
         }
     }
 }
@@ -345,6 +359,31 @@ mod tests {
             Event::Hint {
                 text: "t".to_string(),
                 kind: HintKind::Retry
+            }
+        );
+    }
+
+    /// Un `type` d'événement inconnu (écrit par un hôte plus récent) ne fait pas
+    /// rejeter la lecture : la convention « additif, ignorable » des commentaires de
+    /// `Compacted`/`Routed` exige un lecteur indulgent. Décision #286 §3.
+    #[test]
+    fn un_type_d_evenement_inconnu_ne_fait_pas_echouer_la_lecture() {
+        let lu: Event = serde_json::from_str(r#"{"type":"futur_inconnu","n":7}"#)
+            .expect("un type d'événement plus récent ne fait pas rejeter la lecture");
+        // Résultat explicite, jamais un succès inventé : ce n'est aucun événement connu.
+        assert!(matches!(lu, Event::Unknown), "{lu:?}");
+        assert_eq!(lu.name(), "unknown");
+    }
+
+    /// Non-régression : un type connu se lit exactement comme avant l'ajout du repli
+    /// `Unknown` — le repli ne déforme pas les événements connus.
+    #[test]
+    fn un_type_d_evenement_connu_se_lit_comme_avant() {
+        let lu: Event = serde_json::from_str(r#"{"type":"user","text":"salut"}"#).unwrap();
+        assert_eq!(
+            lu,
+            Event::User {
+                text: "salut".into()
             }
         );
     }
