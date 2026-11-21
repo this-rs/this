@@ -402,6 +402,18 @@ fn container_slices(text: &str) -> Vec<(&str, bool)> {
     while let Some(at) = rest.find(&open) {
         let after_id = &rest[at + open.len()..];
         let Some(quote) = after_id.find('"') else {
+            // Balise ouvrante MALFORMÉE : le nonce n'a pas de guillemet fermant.
+            // La frontière est alors ambiguë, et une frontière ambiguë ne peut
+            // pas produire de lecture DIRECTE : le seul défaut grave ici serait
+            // une promotion. Tout ce qui suit est donc traité comme non fiable,
+            // et le préfixe reste ce qu'il était.
+            //
+            // Mesuré avant correction : `<untrusted_data id="N {ID}` rendait
+            // `{ID}` **direct** — un id écrit après une ouvrante forgée devenait
+            // une preuve.
+            out.push((&rest[..at], false));
+            out.push((&rest[at..], true));
+            rest = "";
             break;
         };
         let nonce = &after_id[..quote];

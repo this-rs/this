@@ -319,3 +319,54 @@ fn deux_harnais_sur_le_meme_outillage_partagent_le_registre_et_restore_l_efface(
         "restore rebâtit depuis SON fil : le registre partagé est écrasé"
     );
 }
+
+#[test]
+fn de_la_note_hostile_au_message_de_rappel_en_passant_par_une_reprise() {
+    // La chaîne COMPLÈTE, sur un transcript rechargé : une note hostile écrit un
+    // id, le harnais le range comme cité, la reprise le reconstruit tel quel, et
+    // le message de rappel le présente comme « jamais lu » — tandis que l'id
+    // réellement imprimé par l'outil reste une lecture.
+    let (avant, registre_avant) = build();
+    run(avant.send("lis"));
+    assert_eq!(
+        registre_avant
+            .borrow()
+            .provenance_token(&format!("#note:{FORGE}")),
+        Provenance::Quoted,
+        "à chaud, l'id de la note hostile est déjà cité"
+    );
+    let sauve = avant.snapshot();
+
+    let (apres, registre_apres) = build();
+    apres.restore(sauve);
+
+    let fil = apres.transcript();
+    let a = anchors(&fil);
+    let registre = registre_apres.borrow();
+    let message = run(rappel_avec(&a, &DeuxFaits, Some(&registre))).expect("un rappel");
+    let texte = message.text();
+    let lignes: Vec<&str> = texte.lines().collect();
+
+    let entree = |id: &str| {
+        let prefixe = format!("- #note:{id}");
+        lignes
+            .iter()
+            .position(|l| l.trim_start().starts_with(&prefixe))
+            .unwrap_or_else(|| panic!("aucune entrée pour {id} : {texte}"))
+    };
+    let i_lu = entree(LU);
+    let i_forge = entree(FORGE);
+    assert!(i_lu < i_forge);
+    assert!(
+        !lignes[i_lu..i_forge]
+            .iter()
+            .any(|l| l.contains("CITÉ SEULEMENT")),
+        "la lecture directe n'est pas marquée : {texte}"
+    );
+    assert!(
+        lignes[i_forge..]
+            .iter()
+            .any(|l| l.contains("CITÉ SEULEMENT")),
+        "l'id de la note hostile doit être marqué après la reprise : {texte}"
+    );
+}
