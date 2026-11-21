@@ -103,8 +103,8 @@ Décisions, tranchées explicitement :
   échoue sur un `type` inconnu. La décision est donc : **conserver en `Unknown`** (garder
   le payload brut et le `type`, avancer le curseur), jamais « ignorer en silence » (on
   perdrait l'information) et jamais « refuser nommément » (un hôte ancien face à un cœur
-  plus récent casserait). Concrètement : lire dans `serde_json::Value`, dispatcher sur
-  `type`, et ranger l'inconnu. `HintKind` et `Verdict` montrent déjà cette philosophie
+  plus récent casserait). Concrètement : lire le fil sans le décoder (`RawValue`), dispatcher
+  sur `type`, et ranger l'inconnu. `HintKind` et `Verdict` montrent déjà cette philosophie
   (`event.rs:204`, `un_verdict_inconnu_se_lit_unknown`).
   **Écrit depuis** : `EventWire` / `UnknownEvent` (`crates/this-harness/src/event.rs`),
   l'enveloppe de **lecture** du fil. Un `type` connu y est décodé **strictement** — un
@@ -116,6 +116,15 @@ Décisions, tranchées explicitement :
   `0.10`, et l'ordre des clés sortent tels qu'ils sont entrés. (Une première version lisait un
   `serde_json::Value`, qui arrondissait les grands nombres et rejetait `1e400` : mesuré à la
   revue du 21/11/2026, `un_inconnu_relaye_garde_les_octets_exacts_meme_pour_les_grands_nombres`.)
+  **Portée de « octet pour octet »** : un relais JSON direct (`from_str`/`from_slice`/
+  `from_reader` → `to_string`/`to_writer`). Non couverts : les espaces hors de la valeur
+  (retirés ; ceux de l'intérieur restent), toute conversion intermédiaire via `Value`
+  (`from_value`/`to_value` repassent par l'arrondi), et les sérialiseurs non JSON.
+  **Rupture** : `UnknownEvent.raw` est public et passe de `Value` à `Box<RawValue>` — un
+  consommateur qui le construit ou l'inspecte doit lire `raw.get()` ; l'égalité de deux inconnus
+  devient textuelle (même ordre de clés, mêmes octets). Aucun consommateur hors de
+  `this-harness` dans les dépôts sondés (this, atelier, this-cli, this-examples, website) ; cela
+  ne prouve rien pour les autres.
   **Limite** : cela ne vaut QUE pour un type entièrement inconnu. Un type **connu** auquel une
   version future ajoute un champ est décodé en `Event` et le champ ajouté est perdu au relais.
   `Event::Unknown` (variante unitaire de #301) reste pour la

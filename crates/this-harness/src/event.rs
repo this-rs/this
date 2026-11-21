@@ -278,16 +278,26 @@ pub struct UnknownEvent {
     /// des grands nombres (`18446744073709551616`, décimaux précis), ni réécriture (`1E2`,
     /// `0.10`), ni réordonnancement des clés. Relayer rend exactement ce qui est arrivé.
     ///
-    /// (Avant : `serde_json::Value`, qui passait tout nombre hors `u64`/`i64` par un flottant
-    /// et rejetait `1e400` — relevé par une revue indépendante le 21/11/2026.)
+    /// **Portée exacte** : vrai pour un relais JSON direct (`serde_json::from_str`/`from_slice`/
+    /// `from_reader` → `to_string`/`to_writer`). Les espaces **hors** de la valeur (avant `{`,
+    /// après `}`) ne sont pas gardés ; ceux de l'intérieur le sont. Toute conversion via `Value`
+    /// (`from_value`, `to_value`) repasse par l'arrondi, et un sérialiseur non JSON ne voit pas
+    /// ces octets : là, rien n'est garanti.
+    ///
+    /// **Rupture de source** (avant : `serde_json::Value`, qui passait tout nombre hors
+    /// `u64`/`i64` par un flottant et rejetait `1e400` — relevé par une revue indépendante le
+    /// 21/11/2026) : un consommateur qui construit ce champ ou l'inspecte comme une `Value` doit
+    /// passer par `raw.get()` + `serde_json::from_str`. Et l'égalité devient **textuelle** :
+    /// `{"a":1,"b":2}` ≠ `{"b":2,"a":1}`.
     pub raw: Box<serde_json::value::RawValue>,
 }
 
 /// Un événement lu sur le fil : connu, décodé **strictement**, ou d'une version
 /// future, **conservé tel quel**.
 ///
-/// C'est la décision §3 de `docs/harnais-contrat-evenements.md` : lire dans
-/// `Value`, dispatcher sur `type`, ranger l'inconnu avec son payload brut.
+/// C'est la décision §3 de `docs/harnais-contrat-evenements.md` : lire le fil
+/// **sans le décoder** (`RawValue`), dispatcher sur `type`, ranger l'inconnu avec
+/// ses octets d'origine ; un `type` connu est décodé strictement depuis ces octets.
 /// `serde_json::from_str::<Event>` seul ne peut pas le faire : `#[serde(other)]`
 /// exige une variante **unitaire**, donc `Event::Unknown` ne porte ni le `type`
 /// d'origine ni le payload, et un hôte qui relaie un inconnu le ré-écrirait en
@@ -662,6 +672,23 @@ mod tests {
                 ),
             }
         }
+    }
+
+    /// Les bornes que la doc annonce, fixées : l'égalité est textuelle, et seuls les espaces
+    /// hors de la valeur sont perdus.
+    #[test]
+    fn la_conservation_brute_a_les_bornes_que_la_doc_dit() {
+        let lire = |s: &str| serde_json::from_str::<EventWire>(s).unwrap();
+        assert_ne!(
+            lire(r#"{"type":"futur","a":1,"b":2}"#),
+            lire(r#"{"type":"futur","b":2,"a":1}"#),
+            "égalité textuelle : l'ordre des clés compte"
+        );
+        let relaye = serde_json::to_string(&lire("  {\"type\" : \"futur\",\n \"n\":1}  ")).unwrap();
+        assert_eq!(
+            relaye, "{\"type\" : \"futur\",\n \"n\":1}",
+            "dedans gardé, dehors retiré"
+        );
     }
 
     /// Mesuré le 21/11/2026 : avec `serde_json::Value`, un inconnu relayé perdait ces cas.
