@@ -71,6 +71,19 @@ pub const HOST: &[HostFn] = &[
         params: &[Type::Str, Type::Str],
         returns: Type::Unit,
     },
+    // `espace_lire(clé)` : lit un objet de l'espace de la personne (consentement
+    // « lire l'espace » au nom du module). Le texte est UTF-8.
+    HostFn {
+        name: "espace_lire",
+        params: &[Type::Str],
+        returns: Type::Str,
+    },
+    // `espace_emit(clé)` : verse le contenu de l'objet dans les effets, borné.
+    HostFn {
+        name: "espace_emit",
+        params: &[Type::Str],
+        returns: Type::Unit,
+    },
 ];
 
 /// Les primitives qu'un **navigateur** sait fournir à un module compilé en wasm :

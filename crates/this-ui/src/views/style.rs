@@ -36,6 +36,9 @@ pub mod class {
     pub const MODAL_BODY: &str = "vw-modal-body";
     pub const MODAL_LAYER: &str = "vw-modal-layer";
     pub const MODAL_BACKDROP: &str = "vw-modal-backdrop";
+    pub const DIALOG_BACKDROP: &str = "vw-dialog-backdrop";
+    pub const DIALOG: &str = "vw-dialog";
+    pub const DIALOG_HEAD: &str = "vw-dialog-head";
 
     pub const TEXT: &str = "vw-text";
     pub const CAPTION: &str = "vw-caption";
@@ -132,6 +135,11 @@ pub mod class {
     pub const COLUMN: &str = "vw-column";
     pub const CONFIRM: &str = "vw-confirm";
 
+    /// Barre de navigation basse persistante d'une app native (onglets bas).
+    pub const TABBAR: &str = "vw-tabbar";
+    pub const TABBAR_ITEM: &str = "vw-tabbar-item";
+    pub const TABBAR_ICO: &str = "vw-tabbar-ico";
+
     pub const STATE: &str = "vw-state";
     pub const LOADING: &str = "vw-loading";
     pub const SKELETON: &str = "vw-skeleton";
@@ -153,10 +161,38 @@ pub mod class {
     pub const TRANSITION_NONE: &str = "vw-transition-none";
     pub const TRANSITION_FADE: &str = "vw-transition-fade";
     pub const TRANSITION_SLIDE: &str = "vw-transition-slide";
+    pub const BTN_PRIMARY: &str = "vw-btn--primary";
+    pub const BTN_SECONDARY: &str = "vw-btn--secondary";
+    pub const BTN_GHOST: &str = "vw-btn--ghost";
+    pub const BTN_DANGER: &str = "vw-btn--danger";
+    pub const CELLS: &str = "vw-cells";
+    pub const CELL: &str = "vw-cell";
+    pub const CELL_LEADING: &str = "vw-cell-leading";
+    pub const CELL_MAIN: &str = "vw-cell-main";
+    pub const CELL_TITLE: &str = "vw-cell-title";
+    pub const CELL_SUB: &str = "vw-cell-sub";
+    pub const CELL_TRAILING: &str = "vw-cell-trailing";
+    pub const SECTION: &str = "vw-section";
+    pub const SECTION_TITLE: &str = "vw-section-title";
+    pub const FIELD_LABEL: &str = "vw-field-label";
 }
 
 /// Every class the renderer draws. Must mirror [`class`].
 pub const ALL: &[&str] = &[
+    class::BTN_PRIMARY,
+    class::BTN_SECONDARY,
+    class::BTN_GHOST,
+    class::BTN_DANGER,
+    class::CELLS,
+    class::CELL,
+    class::CELL_LEADING,
+    class::CELL_MAIN,
+    class::CELL_TITLE,
+    class::CELL_SUB,
+    class::CELL_TRAILING,
+    class::SECTION,
+    class::SECTION_TITLE,
+    class::FIELD_LABEL,
     class::SURFACE,
     class::SIDEBAR,
     class::HEADER,
@@ -179,6 +215,9 @@ pub const ALL: &[&str] = &[
     class::MODAL_BODY,
     class::MODAL_LAYER,
     class::MODAL_BACKDROP,
+    class::DIALOG_BACKDROP,
+    class::DIALOG,
+    class::DIALOG_HEAD,
     class::TEXT,
     class::CAPTION,
     class::CHART,
@@ -268,6 +307,9 @@ pub const ALL: &[&str] = &[
     class::COLUMNS,
     class::COLUMN,
     class::CONFIRM,
+    class::TABBAR,
+    class::TABBAR_ITEM,
+    class::TABBAR_ICO,
     class::STATE,
     class::LOADING,
     class::SKELETON,
@@ -382,6 +424,17 @@ pub const CSS: &str = r#"
 .vw-modal-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .vw-modal-head h3 { margin: 0; font: 600 15px/1.3 inherit; }
 .vw-modal-body { display: flex; flex-direction: column; gap: 12px; }
+.vw-dialog-backdrop { position: fixed; inset: 0; z-index: 1000; display: flex;
+  align-items: center; justify-content: center; padding: 16px; box-sizing: border-box;
+  background: var(--vw-backdrop, rgba(0,0,0,.5)); }
+.vw-dialog { box-sizing: border-box; width: 100%; max-width: 560px; min-width: 0; max-height: 90vh;
+  overflow: auto; display: flex; flex-direction: column; gap: 12px; padding: 16px;
+  border: 1px solid var(--vw-line, rgba(0,0,0,.12)); border-radius: 14px;
+  background: var(--vw-card, #fff); color: var(--vw-ink, #16181d);
+  box-shadow: 0 18px 48px rgba(0,0,0,.18); }
+.vw-dialog > * { min-width: 0; }
+.vw-dialog-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.vw-dialog-head h2 { margin: 0; font: 600 16px/1.3 inherit; }
 
 .vw-text { font: inherit; }
 .vw-caption { display: block; margin: 0; padding: 0; border: 0; background: none;
@@ -642,6 +695,103 @@ pub const CSS: &str = r#"
 @media (max-width: 700px) {
   .vw-row { flex-direction: column; align-items: stretch; }
   .vw-layout-grid { grid-template-columns: 1fr; }
+}
+/* Design system natif : variantes de bouton, liste de cellules, section, champ.
+   La liste du contrat de vues occupe déjà `.vw-list*` : celle des primitives s'appelle
+   `.vw-cells` / `.vw-cell*` pour ne pas écraser les vues existantes. */
+.vw-btn--primary { background: var(--vw-accent, #4f46e5); border-color: var(--vw-accent, #4f46e5); color: #fff; }
+.vw-btn--secondary { background: var(--vw-card, #fff); border: 1px solid var(--vw-line, rgba(0,0,0,.16)); color: inherit; }
+.vw-btn--ghost { background: transparent; border-color: transparent;
+  color: var(--vw-muted, color-mix(in srgb, currentColor 60%, transparent)); }
+.vw-btn--ghost:hover { color: inherit; }
+.vw-btn--danger { background: var(--vw-danger, #b91c1c); border-color: var(--vw-danger, #b91c1c); color: #fff; }
+.vw-cells { border: 1px solid var(--vw-line, rgba(0,0,0,.16)); border-radius: 12px;
+  background: var(--vw-card, #fff); overflow: hidden; }
+.vw-cell { display: grid; grid-template-columns: auto 1fr auto; gap: 12px; min-height: 48px;
+  padding: 10px 12px; align-items: center; border-bottom: 1px solid var(--vw-line, rgba(0,0,0,.16)); }
+.vw-cell:last-child { border-bottom: 0; }
+.vw-cell-leading { display: flex; align-items: center; }
+.vw-cell-main { min-width: 0; }
+.vw-cell-title { font-weight: 500; }
+.vw-cell-sub { font-size: .8em; line-height: 1.3; white-space: nowrap; overflow: hidden;
+  text-overflow: ellipsis; color: var(--vw-muted, color-mix(in srgb, currentColor 60%, transparent)); }
+.vw-cell-trailing { display: flex; align-items: center; gap: 8px; }
+.vw-section { margin-top: 16px; }
+.vw-section-title { margin: 0 0 8px; text-align: start; font-size: .8em; text-transform: uppercase;
+  letter-spacing: .04em; color: var(--vw-muted, color-mix(in srgb, currentColor 60%, transparent)); }
+.vw-field-label { font-size: .8em; line-height: 1.3;
+  color: var(--vw-muted, color-mix(in srgb, currentColor 60%, transparent)); }
+.vw-field input, .vw-field select { background: var(--vw-card, #fff);
+  border: 1px solid var(--vw-line, rgba(0,0,0,.16)); border-radius: 10px; min-height: 44px;
+  padding: 0 10px; font: inherit; color: inherit; min-width: 0; width: 100%; }
+
+/* Barre de navigation basse persistante (tab bar native). Posée en bas, toujours
+   visible ; les entrées sont des boutons égaux qui s'étirent, l'icône au-dessus du
+   libellé. `env(safe-area-inset-bottom)` libère la zone de l'indicateur d'accueil
+   sur iPhone : c'est la barre, pas le contenu, qui la réserve. */
+.vw-tabbar { position: fixed; left: 0; right: 0; bottom: 0; display: flex; height: 56px;
+  padding-bottom: env(safe-area-inset-bottom); background: var(--vw-card, #fff);
+  border-top: 1px solid var(--vw-line, #ddd); z-index: 60; }
+.vw-tabbar-item { flex: 1 1 0; min-width: 0; display: flex; flex-direction: column;
+  align-items: center; justify-content: center; gap: 2px; min-height: 56px; border: 0;
+  background: transparent; color: var(--vw-muted, #666); font: inherit; font-size: .72em;
+  cursor: pointer; }
+.vw-tabbar-item.is-active { color: var(--vw-accent, #4f46e5); }
+.vw-tabbar-item .vw-tabbar-ico { font-size: 1.15em; line-height: 1; }
+
+/* Transitions d'écran (View Transitions API) — partagées par toutes les apps
+   qui utilisent ce framework. L'hôte appelle `transition::naviguer(...)`. */
+@keyframes vw-vtx-out { to { opacity: 0; transform: translateY(-6px) scale(.995); } }
+@keyframes vw-vtx-in  { from { opacity: 0; transform: translateY(10px) scale(.995); } }
+::view-transition-old(root) { animation: vw-vtx-out 160ms cubic-bezier(.4,0,.2,1) both; }
+::view-transition-new(root) { animation: vw-vtx-in 220ms cubic-bezier(.4,0,.2,1) both; }
+html[data-sens="avant"] ::view-transition-old(root) { animation: vw-vtx-push-out 220ms cubic-bezier(.4,0,.2,1) both; }
+html[data-sens="avant"] ::view-transition-new(root) { animation: vw-vtx-push-in 260ms cubic-bezier(.4,0,.2,1) both; }
+html[data-sens="arriere"] ::view-transition-old(root) { animation: vw-vtx-pop-out 220ms cubic-bezier(.4,0,.2,1) both; }
+html[data-sens="arriere"] ::view-transition-new(root) { animation: vw-vtx-pop-in 260ms cubic-bezier(.4,0,.2,1) both; }
+@keyframes vw-vtx-push-in  { from { opacity: .35; transform: translateX(26%); } }
+@keyframes vw-vtx-push-out { to   { opacity: .35; transform: translateX(-18%); } }
+@keyframes vw-vtx-pop-in   { from { opacity: .35; transform: translateX(-18%); } }
+@keyframes vw-vtx-pop-out  { to   { opacity: .35; transform: translateX(26%); } }
+
+/* =============================================================
+   Motion & finition (framework) — press feedback, focus clavier,
+   modales safe-area + entrée animée, interrupteur, reduced-motion.
+   Bloc final : gagne en cascade sur les règles ci-dessus.
+   ============================================================= */
+.vw-btn, .vw-list-row-click {
+  transition: transform 90ms cubic-bezier(.4,0,.2,1), background-color 140ms,
+    border-color 140ms, opacity 140ms;
+}
+.vw-btn:active, .vw-list-row-click:active { transform: scale(.98); }
+.vw-btn:focus-visible, .vw-list-row-click:focus-visible, .vw-toggle:focus-visible,
+.vw-modal :focus-visible { outline: 2px solid var(--vw-accent, #4f46e5); outline-offset: 2px; }
+
+/* Modales : zones sûres (encoche / home indicator) + entrée animée. */
+.vw-modal-layer { padding: calc(16px + env(safe-area-inset-top)) calc(16px + env(safe-area-inset-right))
+  calc(16px + env(safe-area-inset-bottom)) calc(16px + env(safe-area-inset-left)); }
+.vw-dialog-backdrop { padding: calc(16px + env(safe-area-inset-top)) 0 calc(16px + env(safe-area-inset-bottom)) 0; }
+.vw-modal-layer:not([hidden]) .vw-modal-backdrop { animation: vw-fade 160ms both; }
+.vw-modal-layer:not([hidden]) .vw-modal { animation: vw-pop 200ms cubic-bezier(.4,0,.2,1) both; }
+@keyframes vw-fade { from { opacity: 0; } to { opacity: 1; } }
+@keyframes vw-pop { from { opacity: 0; transform: translateY(8px) scale(.98); } to { opacity: 1; transform: none; } }
+
+/* Interrupteur (au niveau framework) : glissière 52x32, knob animé, accent. */
+.vw-field-toggle { min-height: 44px; }
+.vw-toggle { width: 52px; height: 32px; border-radius: 999px;
+  background: var(--vw-line, #d1d5db); transition: background-color 160ms cubic-bezier(.4,0,.2,1); }
+.vw-toggle::after { width: 26px; height: 26px; top: 2px; left: 2px; background: #fff;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, .35); transition: transform 160ms cubic-bezier(.4,0,.2,1); }
+.vw-toggle:checked { background: var(--vw-accent, #34c759); }
+.vw-toggle:checked::after { transform: translateX(20px); }
+
+/* prefers-reduced-motion : on coupe transitions et animations. */
+@media (prefers-reduced-motion: reduce) {
+  ::view-transition-group(*), ::view-transition-old(root), ::view-transition-new(root) { animation: none !important; }
+  .vw-btn, .vw-list-row-click, .vw-toggle, .vw-toggle::after,
+  .vw-modal-layer .vw-modal, .vw-modal-layer .vw-modal-backdrop {
+    animation: none !important; transition: none !important;
+  }
 }
 "#;
 

@@ -68,6 +68,9 @@ pub mod events;
 #[cfg(feature = "obrain")]
 pub mod graph;
 pub mod links;
+/// Couche objets (blobs S3/MinIO/local) préfixée par tenant.
+#[cfg(feature = "objects")]
+pub mod objects;
 pub mod server;
 pub mod storage;
 pub mod ui;

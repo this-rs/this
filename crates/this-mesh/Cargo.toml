@@ -37,3 +37,18 @@ rcgen = { version = "0.13", default-features = false, features = ["ring"], optio
 [features]
 default = []
 transport = ["dep:quinn", "dep:rustls", "dep:tokio", "dep:rcgen"]
+
+[dev-dependencies]
+# `time` : l'exemple `node` attend entre deux envois (`tokio::time::sleep`) ; sans
+# la feature, `cargo test` — qui construit les exemples — échoue à la compilation
+# alors que le binaire, lui, marchait. DÉFAUT constaté en fusionnant `main` dans
+# `reseau-maille` le 21/11 : la branche ne compilait pas sous `cargo test`.
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
+# Annonce Bonjour (mDNS) du nœud headless de l'exemple `node`, en Rust pur.
+mdns-sd = "0.13"
+
+# L'exemple `node` parle le transport QUIC : il exige la feature, au lieu de
+# casser le build par défaut d'un paquet qui n'a pas à connaître le réseau.
+[[example]]
+name = "node"
+required-features = ["transport"]

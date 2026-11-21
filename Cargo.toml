@@ -11,7 +11,7 @@ categories = ["web-programming", "web-programming::http-server", "database"]
 readme = "README.md"
 
 [workspace]
-members = [".", "crates/this-agent", "crates/this-descriptor", "crates/this-platform", "crates/this-app", "crates/this-module-lang", "crates/this-vfs", "crates/this-module-harness", "crates/this-llm", "crates/this-llm-providers", "crates/this-harness", "crates/this-documents", "crates/this-module-sdk", "crates/this-module-sdk/examples/taches", "crates/this-module-sdk/examples/compteur", "crates/this-module-plan", "crates/plan-store", "crates/this-forge", "crates/this-mesh"]
+members = [".", "crates/this-agent", "crates/this-descriptor", "crates/this-platform", "crates/this-app", "crates/this-module-lang", "crates/this-vfs", "crates/this-module-harness", "crates/this-llm", "crates/this-llm-providers", "crates/this-harness", "crates/this-documents", "crates/this-module-sdk", "crates/this-module-sdk/examples/taches", "crates/this-module-sdk/examples/compteur", "crates/this-module-plan", "crates/plan-store", "crates/this-forge", "crates/this-mesh", "crates/this-atrium"]
 resolver = "3"
 
 [dependencies]
@@ -37,6 +37,8 @@ tokio = { version = "1.40", features = ["full"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
 async-trait = "0.1"
 futures = "0.3"
+object_store = { version = "0.14", optional = true, features = ["cloud-base"] }
+bytes = { version = "1", optional = true }
 
 # Web framework
 axum = { version = "0.8", features = ["macros", "ws"] }
@@ -202,6 +204,13 @@ powerdns = ["dep:reqwest"]
 # this-gateway) : un « service » derrière la porte, avec ses refus explicites.
 proxy = ["dep:reqwest"]
 websocket = []
+# Couche objets (S3/MinIO/local via object_store), isolée par tenant. Indépendante des backends d'entités.
+objects = ["dep:object_store", "dep:bytes"]
+objects-toolbox = ["objects", "dep:this-harness"]
+# URLs présignées (S3/Azure/GCP) : ajoute reqwest 0.13, aligné sur object_store 0.14.
+presign = ["objects", "dep:reqwest"]
+# Bucket S3/MinIO : ajoute le backend AWS d'object_store (AmazonS3).
+s3 = ["objects", "object_store/aws"]
 wami = ["dep:jsonwebtoken", "dep:ed25519-dalek", "dep:base64", "dep:argon2", "dep:wami", "dep:wami-core", "dep:wami-condition"]
 # Validation des jetons d'un OpenID Provider externe, côté resource server (ADR D11) :
 # découverte, JWKS avec sélection par `kid` et rotation. Aucun émetteur embarqué.
