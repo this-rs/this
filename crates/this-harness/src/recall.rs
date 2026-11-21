@@ -294,7 +294,10 @@ pub async fn rappel_avec(
         // comme une preuve, même quand le graphe la connaît.
         let non_lu = match vus.map(|l| l.provenance_token(&c.id)) {
             Some(Provenance::Quoted) | Some(Provenance::Never) => {
-                "\n    [CITÉ SEULEMENT — jamais lu directement : cet id n'a paru que dans une donnée non fiable]"
+                // Le saut de ligne FINAL compte : sans lui, l'entrée suivante se
+                // collerait à la marque et un lecteur ligne à ligne l'attribuerait
+                // à la mauvaise entité.
+                "    [CITÉ SEULEMENT — jamais lu directement]\n"
             }
             _ => "",
         };

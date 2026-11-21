@@ -845,6 +845,18 @@ impl Drop for BusyGuard {
 pub struct Harness {
     transport: Rc<dyn Transport>,
     toolbox: Rc<dyn Toolbox>,
+    /// Le registre PARTAGÉ des ids vus, **capturé une fois** à la construction
+    /// (`Toolbox::vus`).
+    ///
+    /// Il appartient à l'**outillage**, pas au harnais : deux harnais construits
+    /// sur le MÊME `Rc<dyn Toolbox>` partagent donc le registre, et un `restore`
+    /// dans l'un efface ce que l'autre avait lu. Un hôte qui veut un registre
+    /// par session construit un outillage par session — c'est la contrepartie
+    /// de « le harnais ne le crée pas ». Le capturer ici plutôt que de rappeler `vus()` à chaque
+    /// résultat d'outil évite qu'un outillage qui rendrait un `Rc` neuf à chaque
+    /// appel remplisse un registre que personne ne relit : le trait exige « le
+    /// sien », et le harnais le lit comme tel.
+    vus: Option<Rc<RefCell<SeenLedger>>>,
     /// La politique du run. `DefaultPolicy` par défaut : les règles du crate ne
     /// changent pas parce qu'un hôte en branche une autre.
     policy: Rc<dyn Policy>,
@@ -878,6 +890,7 @@ impl Harness {
     ) -> Self {
         Self {
             transport,
+            vus: toolbox.vus(),
             toolbox,
             policy: Rc::new(DefaultPolicy),
             clock: Rc::new(SystemClock),
@@ -1103,7 +1116,7 @@ impl Harness {
         Handle {
             state: self.state.clone(),
             out: self.out.clone(),
-            vus: self.toolbox.vus(),
+            vus: self.vus.clone(),
         }
     }
 
@@ -1274,6 +1287,7 @@ impl Harness {
             transport.set_permission(Rc::new(RunPorts {
                 grants: self.grants.clone(),
                 toolbox: toolbox.clone(),
+                vus: self.vus.clone(),
                 run: run.clone(),
                 run_id: run_id.clone(),
                 recorder: self.recorder.clone(),
@@ -1651,7 +1665,7 @@ impl Harness {
                     // le gardera, ce qui le rend reconstruisible à la reprise.
                     // `observe` distingue lui-même les conteneurs `<untrusted_data>` :
                     // un id qu'une note hostile a écrit reste CITÉ, jamais lu.
-                    if let Some(registre) = self.toolbox.vus() {
+                    if let Some(registre) = &self.vus {
                         registre.borrow_mut().observe(&outcome.text);
                     }
                     self.push(Message::tool(call.id.clone(), outcome.text.clone()));
@@ -2246,6 +2260,10 @@ fn gate_decision(
 struct RunPorts {
     grants: Option<this_agent::substrate::Grants>,
     toolbox: Rc<dyn Toolbox>,
+    /// Le même registre que la boucle : un transport de la famille A exécute
+    /// SES outils pendant le flux, donc c'est ici — pas dans `pump` — que leurs
+    /// résultats entrent dans le registre.
+    vus: Option<Rc<RefCell<SeenLedger>>>,
     run: Rc<RefCell<Run>>,
     run_id: String,
     recorder: Rc<dyn Recorder>,
@@ -2261,6 +2279,12 @@ impl Permission for RunPorts {
     }
 
     async fn record(&self, call: &ToolCall, ms: u64, outcome: &Outcome) {
+        // Famille A : l'outil a tourné dans le flux du transport, pas dans la
+        // boucle — son résultat doit quand même entrer dans le registre, sinon
+        // tout ce qu'un moteur interne exécute resterait « jamais lu ».
+        if let Some(registre) = &self.vus {
+            registre.borrow_mut().observe(&outcome.text);
+        }
         let step = step_of(&call.name, ms, outcome);
         self.run.borrow_mut().record(step);
         let snapshot = self.run.borrow().clone();
@@ -2686,6 +2710,10 @@ impl Handle {
             // qui n'est pas prouvable par le texte n'est PAS inventé : un nom de module
             // appris par `observe_module` ne laisse aucune trace dans le fil, donc il
             // redevient « jamais vu » après une reprise — limite dite, pas contournée.
+            // Deuxième limite, du même ordre : une COMPACTION a remplacé des messages
+            // d'outils par un résumé, donc les lectures directes qu'ils portaient ne
+            // sont plus dans le fil et redeviennent « jamais vu ». C'est du fail-closed
+            // (on perd une preuve, on n'en invente pas), et c'est assumé.
             if let Some(registre) = &self.vus {
                 let mut registre = registre.borrow_mut();
                 *registre = SeenLedger::new();

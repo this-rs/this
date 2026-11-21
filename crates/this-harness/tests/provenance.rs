@@ -204,21 +204,118 @@ fn le_rappel_marque_une_citation_jamais_lue() {
     let message = run(rappel_avec(&a, &DeuxFaits, Some(&l))).expect("un rappel");
     let texte = message.text();
 
-    let ligne_lu = texte
-        .lines()
-        .find(|l| l.contains(LU))
-        .expect("la ligne du id lu");
+    let lignes: Vec<&str> = texte.lines().collect();
+    // La ligne d'ENTRÉE, pas la citation d'extrait : l'extrait du message
+    // contient les deux ids, donc `contains` désignerait la mauvaise ligne.
+    let rang = |aiguille: &str| {
+        let prefixe = format!("- #note:{aiguille}");
+        lignes
+            .iter()
+            .position(|l| l.trim_start().starts_with(&prefixe))
+            .unwrap_or_else(|| panic!("aucune entrée « {prefixe} » : {texte}"))
+    };
+
+    // La marque appartient au BLOC de l'entrée forgée (l'entrée s'étend sur la
+    // ligne de fait ET celle de l'extrait), et à elle seule.
+    let i_lu = rang(LU);
+    let i_forge = rang(FORGE);
+    assert!(i_lu < i_forge, "ordre d'apparition : {texte}");
+
+    let bloc_lu = &lignes[i_lu..i_forge];
     assert!(
-        !ligne_lu.contains("CITÉ SEULEMENT"),
-        "une lecture directe n'est pas marquée : {ligne_lu}"
+        !bloc_lu.iter().any(|l| l.contains("CITÉ SEULEMENT")),
+        "une lecture directe ne se marque pas : {bloc_lu:?}"
     );
-    let ligne_forge = texte
-        .lines()
-        .find(|l| l.contains(FORGE))
-        .expect("la ligne du id forgé");
+    let bloc_forge = &lignes[i_forge..];
     assert!(
-        texte.contains("CITÉ SEULEMENT"),
-        "la citation jamais lue doit être marquée : {texte}"
+        bloc_forge.iter().any(|l| l.contains("CITÉ SEULEMENT")),
+        "la citation jamais lue doit être marquée : {bloc_forge:?}"
     );
-    assert!(ligne_forge.contains(FORGE));
+    // Une seule marque dans tout le message : une mutation qui marquerait tout,
+    // ou la mauvaise entrée, échoue ici.
+    assert_eq!(
+        lignes
+            .iter()
+            .filter(|l| l.contains("CITÉ SEULEMENT"))
+            .count(),
+        1,
+        "{texte}"
+    );
+}
+
+/// Un outillage qui ne tient **pas** de registre (le défaut du trait).
+struct SansRegistre;
+
+#[async_trait(?Send)]
+impl Toolbox for SansRegistre {
+    fn specs(&self) -> Vec<ToolSpec> {
+        vec![ToolSpec {
+            name: "autre".into(),
+            description: "autre".into(),
+            parameters: json!({"type": "object"}),
+        }]
+    }
+    async fn call(&self, _: &ToolCall) -> Outcome {
+        Outcome::ok("rien")
+    }
+}
+
+#[test]
+fn la_composition_partage_le_registre_de_la_premiere_part_qui_en_tient_un() {
+    // Défaut trouvé en revue : `Toolboxes` ne surchargeait pas `vus()`, donc la
+    // composition qui sert les VRAIS hôtes rendait `None` et toute la provenance
+    // restait inerte en production. Même règle que l'annonce, les déclarations et
+    // l'appel : la première part qui expose gagne.
+    let registre: Rc<RefCell<SeenLedger>> = Rc::default();
+    let compose = this_harness::Toolboxes::new()
+        .with(Rc::new(SansRegistre))
+        .with(Rc::new(Outils {
+            registre: registre.clone(),
+        }));
+    let vu = compose.vus().expect("la composition en tient un");
+    assert!(
+        Rc::ptr_eq(&vu, &registre),
+        "c'est LE registre de la part qui en tient un, pas une copie"
+    );
+}
+
+#[test]
+fn deux_harnais_sur_le_meme_outillage_partagent_le_registre_et_restore_l_efface() {
+    // Limite ASSUMÉE de la décision « registre par session, pas créé par le
+    // harnais » : le registre appartient à l'OUTILLAGE. L'hôte doit donc
+    // construire un outillage par session ; s'il en partage un, les sessions
+    // partagent le registre — et `restore` l'efface pour les deux.
+    let registre: Rc<RefCell<SeenLedger>> = Rc::default();
+    let outils: Rc<dyn Toolbox> = Rc::new(Outils {
+        registre: registre.clone(),
+    });
+    let monter = || {
+        Harness::new(
+            "consigne",
+            Limits {
+                max_relances: 0,
+                ..Limits::default()
+            },
+            Rc::new(AsksOnce {
+                asked: Cell::new(false),
+            }),
+            outils.clone(),
+            |_| {},
+        )
+    };
+    let a = monter();
+    let b = monter();
+    run(a.send("lis"));
+    assert_eq!(
+        registre.borrow().provenance_token(&format!("#note:{LU}")),
+        Provenance::Direct,
+        "les deux harnais voient le même registre : c'est la limite"
+    );
+    // Et une reprise dans l'une efface ce que l'autre avait lu.
+    b.restore(b.snapshot());
+    assert_eq!(
+        registre.borrow().provenance_token(&format!("#note:{LU}")),
+        Provenance::Never,
+        "restore rebâtit depuis SON fil : le registre partagé est écrasé"
+    );
 }

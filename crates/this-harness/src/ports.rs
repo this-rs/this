@@ -370,6 +370,16 @@ impl Toolbox for Toolboxes {
             .collect()
     }
 
+    /// Le registre de la **première** part qui en tient un — même règle que
+    /// l'annonce, les déclarations et l'appel : le premier qui expose gagne.
+    ///
+    /// Sans ça, la composition qui sert les vrais hôtes rendrait `None` (le
+    /// défaut du trait) et toute la provenance resterait **inerte en
+    /// production**, alors que chaque part tiendrait son registre.
+    fn vus(&self) -> Option<Rc<RefCell<SeenLedger>>> {
+        self.parts.iter().find_map(|part| part.vus())
+    }
+
     async fn call(&self, call: &ToolCall) -> Outcome {
         // Le premier qui déclare l’outil l’exécute : deux modules qui
         // exposeraient le même nom ne se disputent pas l’appel, l’ordre de
