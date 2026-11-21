@@ -253,13 +253,19 @@ async fn le_modele_servi_est_celui_que_le_moteur_dit_pas_celui_qu_on_a_demande()
         println!("RACCORDEMENT moteur : demandé={demande} DIT={dit}");
         dits.push((demande.clone(), dit));
     }
-    // Chaque modèle servi est celui que le moteur nomme dans SA réponse, et ils diffèrent.
+    // Chaque modèle servi est celui que le moteur nomme dans SA réponse : égalité STRICTE, non
+    // vide. Un alias n'est admis que s'il est déclaré ici, explicitement (aucun connu à ce jour) ;
+    // un `starts_with` accepterait la chaîne vide et tout préfixe.
+    const ALIAS: &[(&str, &str)] = &[];
     for (demande, dit) in &dits {
         assert!(
-            dit == demande
-                || dit.starts_with(demande.as_str())
-                || demande.starts_with(dit.as_str()),
-            "demandé {demande}, le moteur dit {dit}"
+            !dit.is_empty(),
+            "le moteur nomme un modèle (demandé {demande})"
+        );
+        let alias = ALIAS.iter().any(|(a, b)| a == demande && b == dit);
+        assert!(
+            dit == demande || alias,
+            "demandé {demande}, le moteur dit {dit} (ni égal, ni alias déclaré)"
         );
     }
     assert_ne!(
