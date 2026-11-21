@@ -200,15 +200,41 @@ async fn une_cle_refusee_est_une_reponse_du_moteur_pas_une_panne_reseau() {
     );
 }
 
+/// Le modèle que le MOTEUR dit avoir exécuté, lu dans le champ `model` de SA réponse.
+///
+/// `TurnReply::model` ne prouve rien : le client y recopie le modèle DEMANDÉ (`prepare` →
+/// `model`), pas celui de la réponse. Une première version de ce test comparait donc le modèle
+/// demandé à lui-même (tautologique, relevé par une revue indépendante le 21/11/2026). Ici, appel
+/// `chat/completions` direct, le JSON brut du moteur est lu.
+async fn modele_dit_par_le_moteur(demande: &str) -> String {
+    let cle = std::env::var(VARIABLE_DE_CLE).expect("clé injectée par le coffre");
+    let reponse: serde_json::Value = reqwest::Client::new()
+        .post("https://api.deepseek.com/chat/completions")
+        .bearer_auth(cle)
+        .json(&json!({
+            "model": demande,
+            "messages": [{"role": "user", "content": "Réponds exactement : pong"}],
+            "max_tokens": 1024,
+        }))
+        .send()
+        .await
+        .expect("le moteur répond")
+        .json()
+        .await
+        .expect("JSON");
+    reponse["model"]
+        .as_str()
+        .unwrap_or_else(|| panic!("la réponse du moteur n'a pas de champ model : {reponse}"))
+        .to_string()
+}
+
 #[tokio::test]
 #[ignore = "raccordement réel : THIS_RACCORDEMENT=deepseek et --ignored"]
-async fn le_modele_demande_est_le_modele_servi() {
-    if !demande("modèle servi") {
+async fn le_modele_servi_est_celui_que_le_moteur_dit_pas_celui_qu_on_a_demande() {
+    if !demande("modèle servi par le moteur") {
         return;
     }
     let client = client(deepseek(VARIABLE_DE_CLE));
-    // Les modèles que le moteur annonce : on en demande DEUX, et chacun doit répondre sous son
-    // nom. Un client qui ignorerait `TurnRequest::model` servirait toujours le défaut.
     let annonces: Vec<String> = client
         .list_models()
         .await
@@ -221,30 +247,23 @@ async fn le_modele_demande_est_le_modele_servi() {
         annonces.len() >= 2,
         "il faut deux modèles pour distinguer : {annonces:?}"
     );
-    let mut servis = Vec::new();
+    let mut dits = Vec::new();
     for demande in annonces.iter().take(2) {
-        let mut tour = TurnRequest::new(json!([
-            {"role": "user", "content": "Réponds exactement : pong"}
-        ]))
-        .with_model(Some(demande));
-        tour.max_output_tokens = Some(1024);
-        let reponse = client.send_turn(tour).await.expect("le moteur répond");
-        println!(
-            "RACCORDEMENT modèle servi : demandé={demande} servi={}",
-            reponse.model
-        );
-        servis.push((demande.clone(), reponse.model));
+        let dit = modele_dit_par_le_moteur(demande).await;
+        println!("RACCORDEMENT moteur : demandé={demande} DIT={dit}");
+        dits.push((demande.clone(), dit));
     }
-    for (demande, servi) in &servis {
+    // Chaque modèle servi est celui que le moteur nomme dans SA réponse, et ils diffèrent.
+    for (demande, dit) in &dits {
         assert!(
-            servi == demande
-                || servi.starts_with(demande.as_str())
-                || demande.starts_with(servi.as_str()),
-            "demandé {demande}, servi {servi}"
+            dit == demande
+                || dit.starts_with(demande.as_str())
+                || demande.starts_with(dit.as_str()),
+            "demandé {demande}, le moteur dit {dit}"
         );
     }
     assert_ne!(
-        servis[0].1, servis[1].1,
-        "deux modèles demandés, deux modèles servis : {servis:?}"
+        dits[0].1, dits[1].1,
+        "deux modèles demandés, deux modèles dits : {dits:?}"
     );
 }
