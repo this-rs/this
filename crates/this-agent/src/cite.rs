@@ -540,6 +540,18 @@ impl SeenLedger {
         self.provenance(r) == Provenance::Direct
     }
 
+    /// La provenance d'un jeton `#kind:id`, **par sa forme textuelle**.
+    ///
+    /// Même règle que [`provenance`](Self::provenance) : `Direct` seulement si
+    /// l'id a été LU hors donnée non fiable. Un texte qui n'est pas exactement un
+    /// jeton est `Never` — on ne devine pas.
+    pub fn provenance_token(&self, token: &str) -> Provenance {
+        match token_at(token, 0) {
+            Some((r, fin)) if fin == token.len() => self.provenance(&r),
+            _ => Provenance::Never,
+        }
+    }
+
     /// Rien n'a été observé, pas même cité.
     pub fn is_empty(&self) -> bool {
         self.uuids.is_empty()

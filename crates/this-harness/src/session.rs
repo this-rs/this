@@ -32,6 +32,7 @@ use crate::ports::{Cancel, Compactor, Delta, Permission, Recorder, Recorders, To
 use crate::wire::{
     Code, Failure, Finish, ImagePart, Message, Reply, Request, ThreadDefect, ToolCall, ToolSpec,
 };
+use this_agent::cite::SeenLedger;
 use this_agent::evidence::Verdict;
 use this_agent::{Decision, DefaultPolicy, Goal, Policy, Run, Step, Stop};
 
@@ -1102,6 +1103,7 @@ impl Harness {
         Handle {
             state: self.state.clone(),
             out: self.out.clone(),
+            vus: self.toolbox.vus(),
         }
     }
 
@@ -1643,6 +1645,14 @@ impl Harness {
                         let index = run.borrow().steps.len().saturating_sub(1);
                         run.borrow_mut().effet_inconnu(index);
                         abandoned |= matches!(why, Watch::Abandoned(_));
+                    }
+                    // Le registre PARTAGÉ des ids vus (`Toolbox::vus`) voit le
+                    // résultat tel que le modèle le lira — donc tel que le transcript
+                    // le gardera, ce qui le rend reconstruisible à la reprise.
+                    // `observe` distingue lui-même les conteneurs `<untrusted_data>` :
+                    // un id qu'une note hostile a écrit reste CITÉ, jamais lu.
+                    if let Some(registre) = self.toolbox.vus() {
+                        registre.borrow_mut().observe(&outcome.text);
                     }
                     self.push(Message::tool(call.id.clone(), outcome.text.clone()));
                 }
@@ -2457,6 +2467,10 @@ const MAX_PENDING: usize = 1000;
 pub struct Handle {
     state: Shared<State>,
     out: Out,
+    /// Le registre PARTAGÉ des ids vus (`Toolbox::vus`), capturé une fois : le
+    /// harnais le remplit à chaque résultat d'outil, et le rebâtit au `restore`.
+    /// `None` : l'outillage ne tient pas de registre, rien ne change.
+    vus: Option<Rc<RefCell<SeenLedger>>>,
 }
 
 impl Handle {
@@ -2666,6 +2680,21 @@ impl Handle {
                 .unwrap_or(0)
                 + 1;
             state.next_id = state.next_id.max(next);
+            // Le registre des ids vus est un état de SESSION, pas du `Snapshot` : on le
+            // rebâtit en rejouant les résultats d'outils du fil, avec la MÊME règle qu'à
+            // la lecture (`observe` distingue lui-même les conteneurs non fiables). Ce
+            // qui n'est pas prouvable par le texte n'est PAS inventé : un nom de module
+            // appris par `observe_module` ne laisse aucune trace dans le fil, donc il
+            // redevient « jamais vu » après une reprise — limite dite, pas contournée.
+            if let Some(registre) = &self.vus {
+                let mut registre = registre.borrow_mut();
+                *registre = SeenLedger::new();
+                for message in state.transcript.iter() {
+                    if let Message::Tool { content, .. } = message {
+                        registre.observe(content);
+                    }
+                }
+            }
         }
         self.emit_pending();
     }
