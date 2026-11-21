@@ -749,6 +749,41 @@ jobs:
       - name: Compile this-llm-providers for wasm32
         run: cargo check -p this-llm-providers --target wasm32-unknown-unknown
 
+  # La suite comportementale PARTAGÉE (`crates/this-harness/tests/commun`) EXÉCUTÉE dans
+  # Chrome headless : `wasm32_harness` ci-dessus ne fait que compiler. Même filtre de chemins.
+  # Le runner doit avoir la version EXACTE de `wasm-bindgen` du Cargo.lock, sinon il refuse.
+  wasm32_browser:
+    needs: changes
+    if: needs.changes.outputs.harness == 'true'
+    name: Harness browser (wasm-bindgen-test)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Create local dep stubs
+        run: bash .github/create-local-dep-stubs.sh
+
+      - name: Install wasm-bindgen runner matching Cargo.lock
+        run: |
+          version=$(awk '/^name = "wasm-bindgen"$/ {getline; gsub(/[^0-9.]/, "", $3); print $3; exit}' Cargo.lock)
+          echo "wasm-bindgen $version"
+          cargo install wasm-bindgen-cli --version "$version" --locked
+
+      - name: Run the shared suite in headless Chrome
+        env:
+          CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER: wasm-bindgen-test-runner
+          WASM_BINDGEN_TEST_TIMEOUT: "120"
+        run: |
+          # chromedriver et Chrome sont préinstallés sur ubuntu-latest (CHROMEWEBDRIVER).
+          export CHROMEDRIVER="$CHROMEWEBDRIVER/chromedriver"
+          cargo test -p this-harness --target wasm32-unknown-unknown --test navigateur
+
   # Le backend obrain est le seul dont les dépendances ne sont pas sur crates.io :
   # `Cargo.toml` les déclare par PATH (`../../obrain/obrain-db/crates/...`). Deux
   # conséquences qu'aucun job ne couvrait :
@@ -816,7 +851,7 @@ jobs:
   gate:
     name: CI gate
     if: always()
-    needs: [changes, test, coverage, fmt, clippy, examples, security_audit, docs, cross-platform, wasm_crates, wasm32_harness, obrain, swift_ios, device_linux]
+    needs: [changes, test, coverage, fmt, clippy, examples, security_audit, docs, cross-platform, wasm_crates, wasm32_harness, wasm32_browser, obrain, swift_ios, device_linux]
     runs-on: ubuntu-latest
     steps:
       - name: Nothing failed, nothing was cancelled
