@@ -39,6 +39,8 @@ pub const SAME_CLASS_NO_EXPLORE: &str = "same_class_no_explore";
 pub const AFTER_PROVIDER_MOVE: &str = "after_provider_move";
 /// Suffixe de motif d'un tour dont le fournisseur est imposé.
 pub const PROVIDER_IMPOSED: &str = "provider_imposed";
+/// Suffixe de motif d'un repli après le refus du quota d'un modèle.
+pub const AFTER_QUOTA_LIMIT: &str = "after_quota_limit";
 
 /// La paire sur laquelle un tour part, telle qu'elle sort vers un transport.
 ///
@@ -232,6 +234,9 @@ pub enum RouteWhy {
     /// Un port de l'hôte (candidats, apprentissage) n'a pas répondu à temps :
     /// repli sur la paire en vigueur.
     TimedOut,
+    /// Le moteur a refusé parce que le quota du MODÈLE était épuisé : le tour repart sur
+    /// un autre modèle de la même instance ([`TurnRouter::after_limit`]).
+    QuotaFallback,
 }
 
 impl RouteWhy {
@@ -250,6 +255,7 @@ impl RouteWhy {
             Self::UnderMargin => "under_margin",
             Self::Superseded => "superseded",
             Self::TimedOut => "timed_out",
+            Self::QuotaFallback => "quota_fallback",
         }
     }
 }
@@ -1002,6 +1008,111 @@ impl TurnRouter {
     /// compteur de tours).
     pub fn fallback(&self, why: RouteWhy) -> Routed {
         self.stay(why, None)
+    }
+
+    /// Après le refus d'un quota **de modèle** : un autre modèle de la MÊME instance, pour
+    /// ce tour seulement (C2 de #288 ; `model_after_limit` de PO, `agent_hooks.rs:1667`).
+    ///
+    /// Ce n'est pas un second routage. Rien n'est écrit dans l'état du routeur (ni paire en
+    /// vigueur, ni compteur de tours, ni décision ouverte), rien n'est enregistré, aucun
+    /// tirage d'exploration : la décision rendue est **déterministe** et jetable. L'hôte
+    /// apprend le refus par son propre `QuotaView` ; le message suivant décide donc
+    /// normalement, sans ce modèle.
+    ///
+    /// `refused` liste les paires déjà refusées pendant ce message (la première
+    /// comprise) : chacune est exclue, ce qui borne la chaîne — jamais de boucle de quotas.
+    /// Rend `None` (et l'appelant garde l'échec) quand :
+    /// - le transport n'honore pas la route : une décision consultative n'est pas servie ;
+    /// - la conversation n'est pas routée, ou son modèle est imposé / réglé à la main : la
+    ///   personne a choisi, aucun repli ne contourne ce choix ;
+    /// - l'étape n'applique pas les décisions (`shadow`, `advisory`) ;
+    /// - aucun autre modèle de la même instance n'est éligible.
+    ///
+    /// Seul le refus d'un MODÈLE donne un repli : un compte épuisé refuserait aussi tout autre
+    /// modèle de l'instance (l'appelant ne l'appelle pas pour ce motif). Changer de
+    /// fournisseur dans le même tour n'est pas fait ici : il passerait par la garde « jamais
+    /// deux changements de fournisseur de suite », que ce chemin ne tient pas.
+    pub async fn after_limit(
+        &self,
+        turn: TurnInput<'_>,
+        refused: &[Pick],
+        resets_at_ms: Option<u64>,
+    ) -> Option<Routed> {
+        let last = refused.last()?;
+        if !turn.honored {
+            return None;
+        }
+        let (choice, manual, generation) = {
+            let state = self.state.borrow();
+            (state.choice.clone(), state.manual, state.generation)
+        };
+        let rights = rights_of(&choice, manual);
+        if !rights.routes || !rights.auto {
+            return None;
+        }
+        let mut signature = TurnSignature::from_chat(turn.text, turn.has_images, turn.hints);
+        signature.needs_tools = self.needs_tools;
+        signature.role = self.role;
+        let class = signature.arm_key();
+
+        let mut pool = self.pool.pool().await;
+        if let Some(entries) = &choice.pool {
+            pool.retain(|facts| listed(entries, facts));
+        }
+        if let (None, Some(list)) = (&choice.pool, &choice.auto_models)
+            && choice.routing.mode == ProviderRoutingMode::Full
+        {
+            let _ = restrict_to_person_list(&mut pool, list, &signature);
+        }
+        // Chaque paire refusée est retenue le temps de ce message, comme le ferait le
+        // `QuotaView` de l'hôte une fois mis à jour. L'échéance, quand le moteur la dit.
+        for facts in &mut pool {
+            if refused
+                .iter()
+                .any(|p| p.provider_id == facts.provider_id && same_model(&p.model, &facts.model))
+            {
+                facts.quota_exhausted = Some(candidate::QuotaExhaustion {
+                    resets_at_ms: resets_at_ms.unwrap_or(u64::MAX),
+                    window: Some(format!("model:{}", facts.model)),
+                });
+            }
+        }
+        let mut settings = settings_for(&choice.routing, rights.auto);
+        if choice.pool.is_some() {
+            settings.mode = ProviderRoutingMode::Full;
+        }
+        // Déterministe : pas de tirage, pas d'hystérésis (la paire en vigueur vient de refuser).
+        settings.exploration_epsilon = 0.0;
+        let mut request = DecideRequest::new(signature, settings, pool);
+        request.restrict_provider = Some(last.provider_id.clone());
+        request.steady = true;
+        request.narrowed.push(AFTER_QUOTA_LIMIT);
+
+        let arms = self.learning.arms(&class).await;
+        let hints = self.learning.hints();
+        let id = self.seeds.next_id();
+        let decision = decide(id, &request, &arms, &hints);
+        // La personne a réglé la conversation pendant l'attente : son réglage gagne.
+        if self.state.borrow().generation != generation {
+            return None;
+        }
+        // Une étape qui n'applique pas (`shadow`) ne sert pas non plus un repli.
+        if !decision.applied {
+            return None;
+        }
+        let chosen = decision.chosen.clone()?;
+        let already_refused = refused
+            .iter()
+            .any(|p| p.provider_id == chosen.provider_id && same_model(&p.model, &chosen.model));
+        if already_refused || chosen.provider_id != last.provider_id {
+            return None;
+        }
+        Some(Routed {
+            route: Route::of(&chosen.provider_id, &chosen.model),
+            changed: true,
+            why: RouteWhy::QuotaFallback,
+            decision: Some(decision),
+        })
     }
 
     /// Le tour s'est terminé : sa fin est rendue à l'apprentissage, pour la

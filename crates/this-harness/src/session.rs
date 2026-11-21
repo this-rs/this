@@ -93,6 +93,12 @@ pub const MAX_RETRIES: u32 = 3;
 /// Première attente avant une relance ; elle double à chaque tentative.
 pub const RETRY_BACKOFF_MS: u64 = 1_000;
 
+/// Combien de modèles refusés pour quota un MESSAGE peut enchaîner avant de rendre l'échec.
+///
+/// Le repli ne rejoue que l'appel au modèle (jamais un outil), et chaque modèle refusé est
+/// exclu du suivant : la chaîne est donc finie, et ne peut pas devenir une boucle de quotas.
+pub const MAX_QUOTA_FALLBACKS: usize = 2;
+
 /// Le pas du chien de garde : le drapeau d'annulation est un simple `Cell`,
 /// il se lit, il ne prévient pas.
 const WATCH_TICK_MS: u64 = 1_000;
@@ -553,7 +559,16 @@ async fn pause(clock: &dyn Clock, ms: u64, cancel: &Cancel) -> bool {
 }
 
 /// Une panne passagère : la limite de débit (429) ou un délai dépassé.
+///
+/// Un quota DIT épuisé par le transport (`Failure::quota`) n'est pas passager : rejouer le
+/// même modèle contre un quota épuisé ne peut pas réussir et ajoute de la pression (une
+/// boucle de quotas, interdite par C2 de #288). Il passe par le repli de modèle, ou il est
+/// rendu tel quel. Un 429 NON qualifié reste rejoué comme avant : rien ne dit que c'est un
+/// quota.
 fn transient(failure: &Failure) -> bool {
+    if failure.quota.is_some() {
+        return false;
+    }
     failure.code == Code::Timeout || failure.status == Some(429)
 }
 
@@ -1250,7 +1265,11 @@ impl Harness {
             let limits = self.with(|s| s.limits.clone());
             // Mode Auto : la paire de cet objectif, décidée une fois, sur le message
             // qui l'ouvre. Sans routeur, `None` : la requête ne porte rien.
-            let route = self.route(&first, toolbox.as_ref(), &limits, &cancel).await;
+            let mut route = self.route(&first, toolbox.as_ref(), &limits, &cancel).await;
+            // Les paires que le moteur a refusées pour quota PENDANT ce message (C2 de #288).
+            let mut quota_refused: Vec<crate::routing::Pick> = Vec::new();
+            // Vrai dès qu'un repli a RÉELLEMENT servi une autre paire que celle décidée.
+            let mut quota_fell_back = false;
             // L'identité du run, stable pour toutes ses étapes.
             let run_id = self.with(|s| {
                 s.run_seq += 1;
@@ -1327,7 +1346,7 @@ impl Harness {
                 // Le contexte du tour est recalculé ici, à chaque tour : il
                 // dépend de la conversation telle qu'elle est maintenant.
                 let context = self.turn_context(&cancel).await;
-                let request = self
+                let mut request = self
                     .request(toolbox.as_ref(), context, &cancel)
                     .await
                     .with_route(route.clone());
@@ -1454,6 +1473,48 @@ impl Harness {
                         Err(_) => false,
                     } {
                         answered.set(true);
+                    }
+
+                    // Quota d'un MODÈLE épuisé (dit par le transport, jamais deviné) : le tour
+                    // repart sur un autre modèle de la même instance — mais sous la garde du
+                    // rejeu ci-dessous : rien montré, aucun outil joué DANS CE TOUR. On ne
+                    // rejoue que l'appel au modèle, jamais un effet.
+                    if let Ok(Err(failure)) = &issue
+                        && let Some(quota) = failure.quota
+                        && quota.scope == crate::wire::QuotaScope::Model
+                        && !failure.is_aborted()
+                        && !cancel.is_cancelled()
+                        && gathered.borrow().is_empty()
+                        && run.borrow().steps.len() == steps_at_turn
+                        && quota_refused.len() < MAX_QUOTA_FALLBACKS
+                        && let Some(current) = route.clone()
+                        && let Some(model) = current.model().map(str::to_string)
+                        && let Some(fallback) = self
+                            .quota_fallback(
+                                &first,
+                                toolbox.as_ref(),
+                                &limits,
+                                &cancel,
+                                &mut quota_refused,
+                                crate::routing::Pick::new(current.provider(), &model),
+                                quota.resets_at_ms,
+                                transport.honors_route(),
+                            )
+                            .await
+                    {
+                        self.out.emit(Event::Hint {
+                            kind: HintKind::Retry,
+                            text: format!(
+                                "Quota épuisé pour le modèle {model} : le tour repart sur {} (même instance). Seul l'appel au modèle est rejoué.",
+                                fallback.model().unwrap_or("le modèle par défaut")
+                            ),
+                        });
+                        request = request.with_route(Some(fallback.clone()));
+                        route = Some(fallback);
+                        quota_fell_back = true;
+                        // Un nouveau modèle, une nouvelle série de pannes passagères.
+                        tentative = 0;
+                        continue;
                     }
 
                     // Une panne passagère se rejoue, mais seulement si le tour
@@ -1719,7 +1780,10 @@ impl Harness {
                     // Bornée : un apprentissage qui pend ne retient ni `Stopped`,
                     // ni `busy`. Pas coupée par l'annulation : un run annulé est
                     // lui aussi rendu (`Cancelled`, jamais une récompense).
-                    let honored = transport.honors_route() && answered.get();
+                    // Un repli sur quota a servi une AUTRE paire que celle décidée : l'attribuer
+                    // à la décision créditerait au modèle qui a refusé un succès obtenu
+                    // ailleurs. On n'apprend pas sur ce qui n'a pas servi.
+                    let honored = transport.honors_route() && answered.get() && !quota_fell_back;
                     let settle = router.settle(&ending, code.as_deref(), honored);
                     let _ = race(settle, cut(clock.as_ref(), ROUTER_TIMEOUT_MS, None)).await;
                 }
@@ -1894,26 +1958,7 @@ impl Harness {
         cancel: &Cancel,
     ) -> Option<crate::routing::Route> {
         let router = self.router.clone()?;
-        let transcript = self.transcript();
-        // Ce que le tour emportera : le fil (borné par le budget de contexte, la
-        // requête ne dépassera pas) et les schémas d'outils. Estimation, pas mesure.
-        let history = crate::context::estimate_tokens(&transcript);
-        let history = limits.context_budget.map_or(history, |b| history.min(b));
-        let schemas: usize = toolbox
-            .specs()
-            .iter()
-            .map(|spec| {
-                spec.name.len() + spec.description.len() + spec.parameters.to_string().len()
-            })
-            .sum();
-        // Le besoin d'images est celui du fil que le transport enverra : un tour
-        // de texte qui suit une image la porte encore dans l'historique. PO ne
-        // regarde que le message du tour (`set_turn_input`, `agent_hooks.rs:863`,
-        // parce que le moteur de la session garde son historique) ; ici le harnais
-        // renvoie tout le fil à chaque tour, donc il compte tout le fil — au pire
-        // trop prudent (une image que la compaction a retirée), jamais aveugle.
-        let has_images =
-            !first.images.is_empty() || transcript.iter().any(|m| !m.images().is_empty());
+        let (has_images, hints) = self.turn_signals(first, toolbox, limits);
         let clock = self.clock.clone();
         let honored = self.transport.honors_route();
         let routed = {
@@ -1921,11 +1966,7 @@ impl Harness {
                 text: &first.text,
                 has_images,
                 honored,
-                hints: crate::routing::ContextHints {
-                    history_tokens: history as u64,
-                    tool_schema_tokens: (schemas / 4) as u64,
-                    budget_remaining_usd: None,
-                },
+                hints,
             });
             match race(work, cut(clock.as_ref(), ROUTER_TIMEOUT_MS, Some(cancel))).await {
                 Ok(routed) => routed,
@@ -1961,6 +2002,100 @@ impl Harness {
             let repair = router.repair();
             let _ = race(repair, cut(clock.as_ref(), ROUTER_TIMEOUT_MS, Some(cancel))).await;
         }
+        Some(routed.route)
+    }
+
+    /// Ce que le routeur sait du tour : le besoin d'images et le poids du contexte.
+    ///
+    /// Partagé par la décision d'ouverture ([`Self::route`]) et le repli sur quota
+    /// ([`Self::quota_fallback`]) : les deux décident sur les mêmes signaux.
+    fn turn_signals(
+        &self,
+        first: &Pending,
+        toolbox: &dyn Toolbox,
+        limits: &Limits,
+    ) -> (bool, crate::routing::ContextHints) {
+        let transcript = self.transcript();
+        // Ce que le tour emportera : le fil (borné par le budget de contexte, la
+        // requête ne dépassera pas) et les schémas d'outils. Estimation, pas mesure.
+        let history = crate::context::estimate_tokens(&transcript);
+        let history = limits.context_budget.map_or(history, |b| history.min(b));
+        let schemas: usize = toolbox
+            .specs()
+            .iter()
+            .map(|spec| {
+                spec.name.len() + spec.description.len() + spec.parameters.to_string().len()
+            })
+            .sum();
+        // Le besoin d'images est celui du fil que le transport enverra : un tour
+        // de texte qui suit une image la porte encore dans l'historique. PO ne
+        // regarde que le message du tour (`set_turn_input`, `agent_hooks.rs:863`,
+        // parce que le moteur de la session garde son historique) ; ici le harnais
+        // renvoie tout le fil à chaque tour, donc il compte tout le fil — au pire
+        // trop prudent (une image que la compaction a retirée), jamais aveugle.
+        let has_images =
+            !first.images.is_empty() || transcript.iter().any(|m| !m.images().is_empty());
+        (
+            has_images,
+            crate::routing::ContextHints {
+                history_tokens: history as u64,
+                tool_schema_tokens: (schemas / 4) as u64,
+                budget_remaining_usd: None,
+            },
+        )
+    }
+
+    /// Après le refus d'un quota de MODÈLE : la route du repli, ou `None` (l'échec reste).
+    ///
+    /// `refused` reçoit la paire qui vient de refuser avant l'appel au routeur, pour que la
+    /// chaîne soit bornée par [`MAX_QUOTA_FALLBACKS`] et que chaque modèle ne soit tenté
+    /// qu'une fois. L'appel est borné dans le temps et coupé par l'annulation, comme la
+    /// décision d'ouverture. Rien n'est enregistré à l'apprentissage ; le repli se dit par
+    /// `Event::Routed` (`why: quota_fallback`).
+    #[allow(clippy::too_many_arguments)]
+    async fn quota_fallback(
+        &self,
+        first: &Pending,
+        toolbox: &dyn Toolbox,
+        limits: &Limits,
+        cancel: &Cancel,
+        refused: &mut Vec<crate::routing::Pick>,
+        just_refused: crate::routing::Pick,
+        resets_at_ms: Option<u64>,
+        honored: bool,
+    ) -> Option<crate::routing::Route> {
+        let router = self.router.clone()?;
+        refused.push(just_refused);
+        let (has_images, hints) = self.turn_signals(first, toolbox, limits);
+        let work = router.after_limit(
+            crate::routing::TurnInput {
+                text: &first.text,
+                has_images,
+                honored,
+                hints,
+            },
+            refused,
+            resets_at_ms,
+        );
+        let routed = race(
+            work,
+            cut(self.clock.as_ref(), ROUTER_TIMEOUT_MS, Some(cancel)),
+        )
+        .await
+        .ok()??;
+        self.out.emit(Event::Routed {
+            provider: routed.route.provider().to_string(),
+            model: routed.route.model().map(str::to_string),
+            changed: true,
+            why: routed.why.code().to_string(),
+            reason: routed
+                .decision
+                .as_ref()
+                .map(|d| d.reason.clone())
+                .unwrap_or_default(),
+            mode: router.mode().map(|m| m.as_str().to_string()),
+            advisory: false,
+        });
         Some(routed.route)
     }
 
