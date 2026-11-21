@@ -248,8 +248,16 @@ pub struct Snapshot {
     pub pending: Vec<Pending>,
 }
 
+/// La version du format de [`Snapshot`] que ce harnais sait relire.
+///
+/// Écrite par `Handle::snapshot`, relue par `Handle::restore` — qui refuse une
+/// version inconnue au lieu d'appliquer un état qu'il ne comprend pas. Le jour
+/// où le format change, c'est **ici et ici seulement** que la version se déclare ;
+/// `restore` décide alors quoi faire des versions plus anciennes.
+pub const SNAPSHOT_VERSION: u32 = 1;
+
 fn one() -> u32 {
-    1
+    SNAPSHOT_VERSION
 }
 
 impl Snapshot {
