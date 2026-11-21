@@ -6,7 +6,7 @@
 pub use bytes::Bytes;
 use futures::TryStreamExt;
 pub use object_store::signer::Signer;
-use object_store::{ObjectStore, path::Path};
+use object_store::{ObjectStore, ObjectStoreExt, path::Path};
 use std::sync::Arc;
 use tokio::sync::broadcast;
 
@@ -339,9 +339,9 @@ impl Objets {
             .ok_or_else(|| "ce store ne signe pas (local/mémoire)".to_string())?;
         let p = chemin(tenant, cle)?;
         let method = match genre {
-            GenreUrl::Lire => reqwest_presign::Method::GET,
-            GenreUrl::Ecrire => reqwest_presign::Method::PUT,
-            GenreUrl::Supprimer => reqwest_presign::Method::DELETE,
+            GenreUrl::Lire => reqwest::Method::GET,
+            GenreUrl::Ecrire => reqwest::Method::PUT,
+            GenreUrl::Supprimer => reqwest::Method::DELETE,
         };
         let url = signer
             .signed_url(method, &p, std::time::Duration::from_secs(secs))

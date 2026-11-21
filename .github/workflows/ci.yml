@@ -436,9 +436,6 @@ jobs:
 
       - name: Run security audit
         # Ignore known unfixable transitive advisories (all pending upstream fixes):
-        # RUSTSEC-2026-0192: ttf-parser unmaintained (no fixed upgrade) via
-        #   pdf_oxide -> taffy -> ttf-parser, pulled by this-documents. Warning only,
-        #   no vulnerability; re-check when pdf_oxide moves off it.
         # RUSTSEC-2023-0071: RSA Marvin Attack (rsa via sqlx-mysql)
         # RUSTSEC-2024-0384, 0436, 0449: transitive deps
         # RUSTSEC-2025-0012: backoff, 0111: tokio-tar, 0134, 0141: bincode
@@ -471,7 +468,6 @@ jobs:
           --ignore RUSTSEC-2026-0382
           --ignore RUSTSEC-2026-0387
           --ignore RUSTSEC-2026-0459
-          --ignore RUSTSEC-2026-0192
 
   # Vérification de la documentation
   docs:
