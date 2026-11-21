@@ -3,8 +3,10 @@
 //! consulté par le rappel. Règle stricte : une citation parue seulement dans une
 //! donnée non fiable n'est **jamais** une preuve.
 //!
-//! Et une règle de confiance : un transcript **non authentifié** ne blanchit
-//! rien — c'est `restore_untrusted` / `seed_untrusted`.
+//! Et une règle de confiance : **`restore`/`seed` sont conservateurs par défaut**
+//! (rien n'y devient une preuve). La confiance est explicite : `restore_trusted`
+//! / `seed_trusted`. Un transcript venu d'ailleurs ne blanchit donc jamais rien,
+//! sauf si l'hôte choisit nommément de lui faire confiance.
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -143,7 +145,7 @@ fn une_reprise_rebatit_ce_que_le_texte_prouve_et_rien_de_plus() {
         registre_apres.borrow().is_empty(),
         "le harnais neuf part vide"
     );
-    apres.restore(sauve);
+    apres.restore_trusted(sauve);
 
     let l = registre_apres.borrow();
     assert_eq!(l.provenance_token(&format!("#note:{LU}")), d());
@@ -170,7 +172,7 @@ fn un_snapshot_traverse_le_json_sans_perdre_la_provenance() {
     let relu: Snapshot = serde_json::from_str(&json).expect("et se relit");
 
     let (apres, registre) = build();
-    apres.restore(relu);
+    apres.restore_trusted(relu);
     let l = registre.borrow();
     assert_eq!(l.provenance_token(&format!("#note:{LU}")), d());
     assert_eq!(l.provenance_token(&format!("#note:{FORGE}")), q());
@@ -188,31 +190,41 @@ fn snapshot_forge(harness: &Harness) -> Snapshot {
 }
 
 #[test]
-fn un_snapshot_forge_ne_blanchit_pas_par_la_reprise_en_quarantaine() {
+fn un_snapshot_forge_ne_blanchit_pas_sauf_par_la_voie_privilegiee_explicite() {
     let (temoin, _) = build();
     let forge = snapshot_forge(&temoin);
 
-    // La voie de confiance : le snapshot est cru, l'id devient une lecture. C'est
-    // le comportement DOCUMENTÉ — et la raison d'être de la variante ci-dessous.
+    // Le DÉFAUT est conservateur : `restore` ne rend rien preuve. C'est ce qui
+    // protège un hôte qui importe un snapshot venu d'ailleurs sans y penser.
+    let (defaut, registre_defaut) = build();
+    defaut.restore(forge.clone());
+    assert_eq!(
+        registre_defaut
+            .borrow()
+            .provenance_token(&format!("#note:{FORGE}")),
+        q(),
+        "restore par défaut ne blanchit jamais un id"
+    );
+
+    // La voie privilégiée est EXPLICITE et nommée : on déclare connaître l'origine.
     let (cru, registre_cru) = build();
-    cru.restore(forge.clone());
+    cru.restore_trusted(forge.clone());
     assert_eq!(
         registre_cru
             .borrow()
             .provenance_token(&format!("#note:{FORGE}")),
         d(),
-        "un snapshot cru est cru : c'est écrit dans la doc de restore"
+        "restore_trusted est un choix explicite, pas un défaut"
     );
 
-    // La voie de quarantaine : rien ne devient une preuve.
-    let (quarantaine, registre_q) = build();
-    quarantaine.restore_untrusted(forge);
+    // Et l'alias conservateur reste équivalent au défaut.
+    let (alias, registre_alias) = build();
+    alias.restore_untrusted(forge);
     assert_eq!(
-        registre_q
+        registre_alias
             .borrow()
             .provenance_token(&format!("#note:{FORGE}")),
-        q(),
-        "un snapshot non authentifié ne blanchit JAMAIS un id"
+        q()
     );
 }
 
@@ -234,8 +246,15 @@ fn seed_rebat_le_registre_et_ne_fuit_pas_entre_deux_conversations() {
         registre.borrow()
     );
 
-    // Et une conversation importée n'apporte que des citations.
-    harnais.seed_untrusted(vec![Message::tool("c1", format!("noté #note:{FORGE}"))]);
+    // La voie privilégiée relit les résultats d'outils d'un transcript À SOI.
+    harnais.seed_trusted(vec![Message::tool("c1", format!("noté #note:{LU}"))]);
+    assert_eq!(
+        registre.borrow().provenance_token(&format!("#note:{LU}")),
+        d()
+    );
+
+    // Le défaut, lui, ne rend rien preuve — même pour un transcript qui le tente.
+    harnais.seed(vec![Message::tool("c1", format!("noté #note:{FORGE}"))]);
     assert_eq!(
         registre
             .borrow()
@@ -390,7 +409,7 @@ fn de_la_note_hostile_au_message_de_rappel_en_passant_par_une_reprise() {
     let sauve = avant.snapshot();
 
     let (apres, registre) = build();
-    apres.restore(sauve);
+    apres.restore_trusted(sauve);
 
     let fil = apres.transcript();
     let a = anchors(&fil);
@@ -401,5 +420,20 @@ fn de_la_note_hostile_au_message_de_rappel_en_passant_par_une_reprise() {
     assert!(
         !marquee(texte, LU),
         "la lecture directe ne l'est pas : {texte}"
+    );
+}
+
+#[test]
+fn le_rappel_ne_marque_pas_un_jeton_de_sorte_non_suivie() {
+    // `#plan_run:` n'est pas une sorte que le registre suit : `provenance_token`
+    // rend `None`, donc le rappel ne doit RIEN affirmer. Confondre `None` et
+    // `Never` écrirait « jamais lu » sur un id dont on ne sait rien.
+    let l = SeenLedger::new(); // vide : aucun id suivi
+    let a: Anchors = anchors(&[Message::user(format!("#plan_run:{FORGE}"))]);
+    let message = run(rappel_avec(&a, &DeuxFaits, Some(&l))).expect("un rappel");
+    assert!(
+        !message.text().contains("CITÉ SEULEMENT"),
+        "un jeton de sorte non suivie ne se marque pas : {}",
+        message.text()
     );
 }

@@ -1134,7 +1134,12 @@ impl Harness {
         self.handle().seed(transcript);
     }
 
-    /// [`Self::seed`] pour un transcript **non authentifié**.
+    /// [`Self::seed`] pour un transcript dont on connaît l'origine.
+    pub fn seed_trusted(&self, transcript: Vec<Message>) {
+        self.handle().seed_trusted(transcript);
+    }
+
+    /// [`Self::seed`] : alias conservateur, rien n'y devient une preuve.
     pub fn seed_untrusted(&self, transcript: Vec<Message>) {
         self.handle().seed_untrusted(transcript);
     }
@@ -1145,13 +1150,18 @@ impl Harness {
 
     /// Remet un état sauvegardé en place — la file d'attente comprise.
     ///
-    /// **Le snapshot est cru** : voir [`Handle::restore`].
+    /// **Conservateur par défaut** : voir [`Handle::restore`].
     pub fn restore(&self, snapshot: Snapshot) {
         self.handle().restore(snapshot);
     }
 
-    /// [`Self::restore`] pour un snapshot **non authentifié** : rien n'y devient
-    /// une preuve (voir [`Handle::restore_untrusted`]).
+    /// [`Self::restore`] pour un snapshot dont on connaît l'origine : la voie
+    /// privilégiée, explicite (voir [`Handle::restore_trusted`]).
+    pub fn restore_trusted(&self, snapshot: Snapshot) {
+        self.handle().restore_trusted(snapshot);
+    }
+
+    /// [`Self::restore`] : alias conservateur, rien n'y devient une preuve.
     pub fn restore_untrusted(&self, snapshot: Snapshot) {
         self.handle().restore_untrusted(snapshot);
     }
@@ -2701,17 +2711,33 @@ impl Handle {
     /// Le registre **suit** la conversation : le laisser tel quel ferait survivre
     /// les lectures de l'ancienne dans la nouvelle — une fuite croisée entre deux
     /// conversations du même harnais.
+    ///
+    /// **Conservateur par défaut** : rien n'y devient une preuve (voir
+    /// [`Self::restore`]). Pour votre propre transcript, [`Self::seed_trusted`].
     pub fn seed(&self, transcript: Vec<Message>) {
+        self.seed_avec(transcript, Confiance::Importee)
+    }
+
+    /// [`Self::seed`] pour un transcript dont on connaît l'origine : les lectures
+    /// d'outils y sont relues (voie privilégiée, explicite).
+    pub fn seed_trusted(&self, transcript: Vec<Message>) {
         self.seed_avec(transcript, Confiance::Notre)
     }
 
-    /// [`Self::seed`] pour un transcript **non authentifié** (voir
-    /// [`Self::restore_untrusted`]).
+    /// [`Self::seed`] : alias conservateur, conservé pour l'intention de nom.
     pub fn seed_untrusted(&self, transcript: Vec<Message>) {
         self.seed_avec(transcript, Confiance::Importee)
     }
 
     fn seed_avec(&self, transcript: Vec<Message>, confiance: Confiance) {
+        if self.state.borrow().busy {
+            self.out.emit(Event::Hint {
+                kind: HintKind::Other,
+                text: "seed ignoré : un run tourne, la conversation ne peut pas être remplacée."
+                    .into(),
+            });
+            return;
+        }
         self.rebatir_registre(&transcript, confiance);
         self.state.borrow_mut().transcript = transcript;
     }
@@ -2730,21 +2756,28 @@ impl Handle {
 
     /// Remet un état sauvegardé en place — la file d'attente comprise.
     ///
-    /// **Le snapshot est CRU.** C'est un acte de confiance : il vient de l'hôte.
-    /// Ses résultats d'outils sont donc relus, et un id qu'ils impriment hors
-    /// conteneur redevient une lecture directe. Un snapshot venu d'**ailleurs**
-    /// (fichier importé, autre personne, pair réseau) doit passer par
-    /// [`Self::restore_untrusted`] : sinon il suffit d'y écrire un résultat
-    /// d'outil pour blanchir n'importe quel id.
+    /// **Conservateur par défaut** : rien n'y devient une preuve. Le registre est
+    /// rebâti en **cité**, jamais en lu, parce qu'un `Snapshot` est un type
+    /// désérialisable qu'un fichier importé, une autre personne ou un pair réseau
+    /// peut avoir forgé : y écrire un résultat d'outil suffirait à blanchir un id.
+    /// Pour votre **propre** snapshot, dont vous connaissez l'origine, appelez
+    /// [`Self::restore_trusted`] — c'est un choix explicite, jamais un défaut.
     pub fn restore(&self, snapshot: Snapshot) {
+        self.restore_avec(snapshot, Confiance::Importee)
+    }
+
+    /// [`Self::restore`] pour un snapshot dont on connaît l'origine (notre propre
+    /// sauvegarde). Les résultats d'outils sont alors relus : un id qu'ils
+    /// impriment hors conteneur redevient une lecture directe.
+    ///
+    /// C'est la voie PRIVILÉGIÉE, volontairement plus longue à écrire : la
+    /// confiance ne doit jamais être le chemin le plus court.
+    pub fn restore_trusted(&self, snapshot: Snapshot) {
         self.restore_avec(snapshot, Confiance::Notre)
     }
 
-    /// [`Self::restore`] pour un snapshot **non authentifié**.
-    ///
-    /// Rien n'y devient une preuve : tout ce que le transcript rejoue est rangé
-    /// **cité**, jamais lu. La conversation est reprise, mais le harnais ne
-    /// prétendra pas avoir lu ce qu'un transcript venu d'ailleurs affirme.
+    /// [`Self::restore`] : alias conservateur, conservé pour l'intention de nom
+    /// (« untrusted »), tout aussi sûr que le défaut.
     pub fn restore_untrusted(&self, snapshot: Snapshot) {
         self.restore_avec(snapshot, Confiance::Importee)
     }

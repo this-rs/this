@@ -253,10 +253,12 @@ impl Event {
 /// La file d'attente en fait partie : un message tapé juste avant que
 /// l'application soit suspendue ne doit pas disparaître avec la page.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-/// **Il est CRU par le harnais.** Un `Snapshot` est un acte de confiance : ses
-/// résultats d'outils sont relus à la reprise, donc un id qu'ils impriment hors
-/// conteneur redevient une lecture directe. Un snapshot importé (fichier, autre
-/// personne, pair réseau) doit passer par `restore_untrusted`.
+/// Un état de conversation à reprendre après une fermeture.
+///
+/// **Il n'est PAS authentifié par construction** : c'est un type désérialisable,
+/// un fichier importé, une autre personne ou un pair réseau peut l'avoir forgé.
+/// C'est pourquoi la reprise est **conservatrice par défaut** (`restore` ne rend
+/// rien preuve) et que la confiance est explicite (`restore_trusted`).
 pub struct Snapshot {
     #[serde(default = "one")]
     pub version: u32,
