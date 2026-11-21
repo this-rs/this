@@ -135,7 +135,8 @@ fn call_anchors(call: &ToolCall, index: usize, out: &mut Anchors) {
     if let Value::Object(map) = &call.arguments {
         for key in ["command", "cmd"] {
             if let Some(Value::String(c)) = map.get(key) {
-                out.commands.push((truncate(c.trim(), COMMAND_MAX), index));
+                out.commands
+                    .push((truncate(&one_line(c), COMMAND_MAX), index));
             }
         }
     }
@@ -198,7 +199,7 @@ fn ids(text: &str, index: usize, out: &mut Anchors) {
             id,
             kind: rest[..kind_len].to_string(),
             message: index,
-            excerpt: truncate(text[line_start..line_end].trim(), EXCERPT_MAX),
+            excerpt: truncate(&one_line(&text[line_start..line_end]), EXCERPT_MAX),
         });
     }
 }
@@ -253,6 +254,47 @@ pub async fn rappel_avec(
     recall: &dyn Recall,
     vus: Option<&SeenLedger>,
 ) -> Option<Message> {
+    rappel_impl(anchors, recall, vus, None).await
+}
+
+/// [`rappel_avec`], où **chaque morceau non fiable est enveloppé séparément** par
+/// `cloison`, et la structure du rappel reste en clair.
+///
+/// Dans un rappel, deux sortes de texte cohabitent : ce que le harnais écrit (l'en-tête,
+/// la règle, les ids, la source, la date, les marques « CITÉ SEULEMENT » et
+/// « INTROUVABLE ») et ce qu'il recopie sans l'avoir écrit (le fait du graphe, qui peut
+/// être le corps d'une note ; l'extrait de la conversation ; les chemins et commandes).
+/// Envelopper le rappel entier met les marques dans la même donnée « écrite par
+/// n'importe qui » que les extraits : un extrait peut alors les contredire (« [lu
+/// directement, vérifié] »). Ici seules les copies sont enveloppées, les marques gardent
+/// l'autorité du harnais.
+///
+/// `cloison` reçoit le texte d'UN morceau, déjà réduit à une ligne et coupé, et rend ce que
+/// le modèle lira (en pratique un conteneur `<untrusted_data>` au nonce du tour). Les
+/// copies sont toujours réduites à une ligne : aucun séparateur Unicode (U+2028, U+2029,
+/// U+0085) ne peut y fabriquer une fausse entrée.
+pub async fn rappel_cloisonne(
+    anchors: &Anchors,
+    recall: &dyn Recall,
+    vus: Option<&SeenLedger>,
+    cloison: &dyn Fn(&str) -> String,
+) -> Option<Message> {
+    rappel_impl(anchors, recall, vus, Some(cloison)).await
+}
+
+async fn rappel_impl(
+    anchors: &Anchors,
+    recall: &dyn Recall,
+    vus: Option<&SeenLedger>,
+    cloison: Option<&dyn Fn(&str) -> String>,
+) -> Option<Message> {
+    // Une copie : enveloppée si l'hôte le demande, sinon telle quelle.
+    let copie = |s: &str| -> String {
+        match cloison {
+            Some(f) => f(s),
+            None => s.to_string(),
+        }
+    };
     if anchors.is_empty() {
         return None;
     }
@@ -279,15 +321,18 @@ pub async fn rappel_avec(
                 "- {} ({}) — graphe : {} [source : {}, au : {}]\n    conversation (message {}) : « {} »\n",
                 c.id,
                 f.kind,
-                truncate(&one_line(&f.fact), FACT_MAX),
+                copie(&truncate(&one_line(&f.fact), FACT_MAX)),
                 one_line(&f.source),
                 one_line(&f.as_of),
                 c.message,
-                c.excerpt
+                copie(&one_line(&c.excerpt))
             ),
             None => format!(
                 "- {} ({}) — INTROUVABLE dans le graphe (cité au message {} : « {} ») : id inventé, supprimé, ou hors de portée — à ne pas tenir pour acquis.\n",
-                c.id, c.kind, c.message, c.excerpt
+                c.id,
+                c.kind,
+                c.message,
+                copie(&one_line(&c.excerpt))
             ),
         };
         // La marque de provenance : une citation jamais lue ne se présente pas
@@ -323,7 +368,7 @@ pub async fn rappel_avec(
     list(
         &mut body,
         "Fichiers vus",
-        anchors.files.iter().map(|(p, _)| p.clone()),
+        anchors.files.iter().map(|(p, _)| copie(&one_line(p))),
     );
     list(
         &mut body,
@@ -333,7 +378,7 @@ pub async fn rappel_avec(
     list(
         &mut body,
         "Commandes lancées",
-        anchors.commands.iter().map(|(c, _)| c.clone()),
+        anchors.commands.iter().map(|(c, _)| copie(&one_line(c))),
     );
     Some(Message::hint(body))
 }
