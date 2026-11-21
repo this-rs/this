@@ -137,21 +137,21 @@ enum CalendarAccess {
 
   /// The permission state, read without prompting. Below iOS 17: `unsupported`.
   static func statusName() -> String {
-    guard #available(iOS 17.0, *) else { return "unsupported" }
+    guard #available(iOS 17.0, *) else { return Etat.unsupported.fil }
     switch EKEventStore.authorizationStatus(for: .event) {
     case .fullAccess:
-      return "granted"
+      return Etat.granted.fil
     // Legacy value, given to a binary built before iOS 17: it grants full access.
     case .authorized:
-      return "granted"
+      return Etat.granted.fil
     // Write-only can create events but cannot read them: a read is refused, so the whole
     // capability reports `denied`. This is a decision, see the report.
     case .writeOnly, .denied, .restricted:
-      return "denied"
+      return Etat.denied.fil
     case .notDetermined:
-      return "prompt"
+      return Etat.prompt.fil
     @unknown default:
-      return "prompt"
+      return Etat.prompt.fil
     }
   }
 }
@@ -165,7 +165,7 @@ extension ThisDevicePlugin {
   /// Asks for full access to events. The answer is the state the person chose.
   @objc public func calendarRequest(_ invoke: Invoke) {
     guard #available(iOS 17.0, *) else {
-      invoke.resolve(Reply.status(state: "unsupported"))
+      invoke.resolve(Reply.status(state: Etat.unsupported.fil))
       return
     }
     CalendarAccess.store.requestFullAccessToEvents { _, _ in
@@ -186,7 +186,7 @@ extension ThisDevicePlugin {
       invoke.resolve(Reply.error(code: CalendarCode.internalError))
       return
     }
-    guard CalendarAccess.statusName() == "granted" else {
+    guard CalendarAccess.statusName() == Etat.granted.fil else {
       invoke.resolve(Reply.error(code: ReplyCode.notAuthorized))
       return
     }
@@ -226,7 +226,7 @@ extension ThisDevicePlugin {
       invoke.resolve(Reply.error(code: CalendarCode.internalError))
       return
     }
-    guard CalendarAccess.statusName() == "granted" else {
+    guard CalendarAccess.statusName() == Etat.granted.fil else {
       invoke.resolve(Reply.error(code: ReplyCode.notAuthorized))
       return
     }
@@ -301,7 +301,7 @@ extension ThisDevicePlugin {
       invoke.resolve(Reply.error(code: CalendarCode.notSupported))
       return
     }
-    guard CalendarAccess.statusName() == "granted" else {
+    guard CalendarAccess.statusName() == Etat.granted.fil else {
       invoke.resolve(Reply.error(code: ReplyCode.notAuthorized))
       return
     }
@@ -322,7 +322,7 @@ extension ThisDevicePlugin {
       invoke.resolve(Reply.error(code: CalendarCode.notSupported))
       return
     }
-    guard CalendarAccess.statusName() == "granted" else {
+    guard CalendarAccess.statusName() == Etat.granted.fil else {
       invoke.resolve(Reply.error(code: ReplyCode.notAuthorized))
       return
     }
@@ -380,7 +380,7 @@ extension ThisDevicePlugin {
       invoke.resolve(Reply.error(code: CalendarCode.notSupported))
       return
     }
-    guard CalendarAccess.statusName() == "granted" else {
+    guard CalendarAccess.statusName() == Etat.granted.fil else {
       invoke.resolve(Reply.error(code: ReplyCode.notAuthorized))
       return
     }

@@ -23,11 +23,11 @@ enum MacBiometrics {
         let context = LAContext()
         var error: NSError?
         guard context.canEvaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, error: &error) else {
-            return "unsupported"
+            return Etat.unsupported.fil
         }
         // If biometry is available, report as granted (the capability is present).
         // The actual "granted/denied" is per-evaluation, not per-permission.
-        return "granted"
+        return Etat.granted.fil
     }
 
     private static func biometryName(_ type: LABiometryType) -> String {
@@ -75,7 +75,7 @@ enum MacBiometrics {
             ) { success, _ in
                 // Keep the context alive until the system has answered.
                 withExtendedLifetime(context) {
-                    let verdict = success ? "granted" : "not_authorized"
+                    let verdict = success ? Etat.granted.fil : "not_authorized"
                     done(encodeDictJson(["kind": "face_id", "verdict": verdict]))
                 }
             }

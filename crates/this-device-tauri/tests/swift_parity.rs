@@ -351,3 +351,82 @@ fn method_body<'a>(sources: &'a [String], name: &str) -> Option<(String, &'a Str
     }
     None
 }
+
+/// **Le vocabulaire d'état est écrit une fois, et c'est le même que celui du contrat.**
+///
+/// `ios/Sources/Commun/Etat.swift` est compilé par les DEUX arbres : côté iOS il appartient au
+/// paquet SPM (`path: "Sources"` inclut les sous-répertoires), côté macOS `build.rs` l'ajoute à
+/// sa liste `swiftc`. C'est le premier morceau vraiment commun du pont — et la seule façon d'en
+/// avoir un sans toucher à l'empaquetage de l'hôte.
+///
+/// Sa raison d'être est le défaut du 13/11/2026 : `faceIdStatus` ne rendait pas `state`, et le
+/// pont lisait `unsupported` sur un appareil qui a un Face ID. Les cinq mots étaient écrits à la
+/// main 195 fois ; une faute de frappe y changeait un sens sans rien signaler.
+///
+/// Ce contrôle tient les deux bouts : le fichier existe, et ses cas sont EXACTEMENT les noms de
+/// fil de `PermissionState`. Renommer une variante en Rust sans toucher au Swift échoue ici, et
+/// l'inverse aussi.
+#[test]
+fn l_etat_swift_dit_les_memes_mots_que_le_contrat() {
+    let racine = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let Ok(etat) = std::fs::read_to_string(racine.join("ios/Sources/Commun/Etat.swift")) else {
+        panic!("ios/Sources/Commun/Etat.swift a disparu : le vocabulaire n'est plus commun");
+    };
+    let Ok(contrat) = std::fs::read_to_string(racine.join("../this-platform/src/device_bridge.rs"))
+    else {
+        eprintln!("device_bridge.rs introuvable : vocabulaire non vérifié");
+        return;
+    };
+
+    // Côté Swift : les `case` du seul enum déclaré.
+    let mut mots_swift: Vec<String> = Vec::new();
+    for ligne in etat.lines() {
+        let ligne = ligne.trim();
+        if let Some(reste) = ligne.strip_prefix("case ") {
+            // `case granted` — un cas par ligne dans ce fichier, et c'est voulu.
+            mots_swift.push(reste.trim().to_string());
+        }
+    }
+    assert!(
+        !mots_swift.is_empty(),
+        "aucun `case` trouvé dans Etat.swift : la forme du fichier a changé"
+    );
+
+    // Côté Rust : les variantes de `PermissionState`, en snake_case (`rename_all`).
+    let debut = contrat
+        .find("pub enum PermissionState {")
+        .expect("PermissionState a disparu du contrat");
+    let corps = &contrat[debut..];
+    let fin = corps
+        .find("\n}")
+        .expect("fin de PermissionState introuvable");
+    let mut mots_rust: Vec<String> = Vec::new();
+    for ligne in corps[..fin].lines().skip(1) {
+        let ligne = ligne.trim();
+        if ligne.starts_with("//") || ligne.is_empty() {
+            continue;
+        }
+        let Some(variante) = ligne.strip_suffix(',') else {
+            continue;
+        };
+        let snake: String = variante
+            .chars()
+            .enumerate()
+            .flat_map(|(index, c)| {
+                if index > 0 && c.is_uppercase() {
+                    vec!['_', c.to_lowercase().next().unwrap_or(c)]
+                } else {
+                    vec![c.to_lowercase().next().unwrap_or(c)]
+                }
+            })
+            .collect();
+        mots_rust.push(snake);
+    }
+
+    mots_swift.sort();
+    mots_rust.sort();
+    assert_eq!(
+        mots_swift, mots_rust,
+        "le vocabulaire Swift et `PermissionState` ne disent pas les mêmes mots"
+    );
+}

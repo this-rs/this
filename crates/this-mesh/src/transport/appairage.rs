@@ -60,6 +60,7 @@ use tokio::time::{Instant, timeout_at};
 
 use super::{ALPN_APPAIRAGE, CadrageError, Identite, TransportError, alpn_negocie, cadrage, tls};
 use crate::envelope::{from_hex, to_hex};
+use crate::invitation::Jetons;
 use crate::{Admission, DeviceId, Lien, Peers, Rencontre, SasAttendu};
 
 /// Préfixe de domaine de l'engagement : `SHA256(ENGAGEMENT_DOMAIN ‖ nI)`.
@@ -86,13 +87,26 @@ const CODE_REVOQUEE: u32 = 13;
 const CODE_FILE_PLEINE: u32 = 14;
 /// La clé du pair donne un identifiant déjà porté par une autre clé du registre.
 const CODE_COLLISION: u32 = 15;
+/// Le jeton de l'invitation est inconnu, déjà consommé, révoqué, périmé — ou absent
+/// alors que l'écran affiche un QR.
+const CODE_JETON: u32 = 16;
+/// L'appareil joint n'est pas celui dont le QR portait la clé.
+const CODE_CLE: u32 = 17;
 
 /// Un message de l'appairage sur le fil : `{"t":"engage","h":…}`, etc.
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "t", rename_all = "lowercase")]
 pub(super) enum Echange {
-    /// I → R : engagement sur nI (hex du SHA-256).
-    Engage { h: String },
+    /// I → R : engagement sur nI (hex du SHA-256), et le jeton de l'invitation
+    /// quand l'appelant en a un (`atelier://appairer`, donc un QR scanné).
+    Engage {
+        h: String,
+        /// Absent (et non `null`) quand il n'y a pas d'invitation : la forme d'un
+        /// appairage de proximité ne bouge pas, donc un pair d'une version voisine
+        /// continue de se comprendre.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        j: Option<String>,
+    },
     /// R → I : nR en hex, envoyé seulement après l'engagement.
     Nonce { n: String },
     /// I → R : nI en hex, à comparer à l'engagement.
@@ -295,6 +309,30 @@ pub async fn appairer_vers(
     role: AnchorKeyRole,
     delai: Duration,
 ) -> Result<AppairageEnCours, TransportError> {
+    appairer_vers_avec(adresse, identite, role, delai, Attente::default()).await
+}
+
+/// Ce que l'invitation d'un QR ajoute à un appairage : la clé attendue, et le jeton.
+///
+/// La clé est celle que l'écran d'en face a montrée. Elle est **épinglée** : si la
+/// poignée de main en présente une autre, on refuse avant tout code, parce qu'un
+/// intermédiaire tient deux canaux — donc présente sa propre clé des deux côtés.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Attente<'a> {
+    /// La clé publique annoncée par le QR. `None` : appairage de proximité, sans QR.
+    pub cle: Option<&'a VerifyingKey>,
+    /// Le jeton à usage unique annoncé par le QR.
+    pub jeton: Option<&'a str>,
+}
+
+/// Comme [`appairer_vers`], avec la clé attendue et le jeton d'une invitation.
+pub async fn appairer_vers_avec(
+    adresse: SocketAddr,
+    identite: &Identite,
+    role: AnchorKeyRole,
+    delai: Duration,
+    attente: Attente<'_>,
+) -> Result<AppairageEnCours, TransportError> {
     let echeance = Instant::now() + delai;
     let locale: SocketAddr = if adresse.is_ipv6() {
         "[::]:0".parse().expect("adresse valide")
@@ -325,6 +363,19 @@ pub async fn appairer_vers(
 
     let moi = cle_locale(identite)?;
     let pair_cle = cle_verifiante(&connexion)?;
+    // La clé épinglée se vérifie AVANT le moindre nonce : un homme du milieu tient
+    // deux canaux, donc présente sa clé aux deux bouts. Comparer plus tard laisserait
+    // un code s'afficher, et c'est l'humain qui devrait le voir — ici, la machine le dit.
+    if let Some(attendue) = attente.cle
+        && attendue != &pair_cle
+    {
+        connexion.close(quinn::VarInt::from_u32(CODE_CLE), b"cle-inattendue");
+        return Err(TransportError::Refuse(
+            "appairage : l'appareil joint ne présente pas la clé du QR — \
+             un intermédiaire s'est peut-être glissé entre les deux"
+                .into(),
+        ));
+    }
     if pair_cle == moi {
         connexion.close(quinn::VarInt::from_u32(CODE_PROTOCOLE), b"soi-meme");
         return Err(TransportError::Refuse("appairage avec soi-même".into()));
@@ -338,7 +389,15 @@ pub async fn appairer_vers(
     // 1. Engagement sur nI.
     let n_i = tls::aleatoire_32(&identite.provider())?;
     let h = to_hex(&engagement(&n_i));
-    ecrire(&mut send, &Echange::Engage { h }, echeance).await?;
+    ecrire(
+        &mut send,
+        &Echange::Engage {
+            h,
+            j: attente.jeton.map(str::to_owned),
+        },
+        echeance,
+    )
+    .await?;
 
     // 2. nR, choisi par R sans connaître nI.
     let n_r = match lire(&mut recv, echeance).await? {
@@ -380,6 +439,10 @@ pub(super) struct RepondeurAppairage {
     role: AnchorKeyRole,
     delai: Duration,
     tx: mpsc::Sender<AppairageEnCours>,
+    /// Les jetons des invitations affichées. `None` : aucun QR n'est montré, donc
+    /// l'appairage de proximité (SAS seul) reste ouvert. `Some` avec au moins un
+    /// jeton vivant : l'écran montre un QR, et seule une invitation vue peut entrer.
+    jetons: Option<Arc<Jetons>>,
 }
 
 impl RepondeurAppairage {
@@ -389,6 +452,7 @@ impl RepondeurAppairage {
         role: AnchorKeyRole,
         delai: Duration,
         tx: mpsc::Sender<AppairageEnCours>,
+        jetons: Option<Arc<Jetons>>,
     ) -> Result<Self, TransportError> {
         Ok(Self {
             moi: cle_locale(identite)?,
@@ -397,6 +461,7 @@ impl RepondeurAppairage {
             role,
             delai,
             tx,
+            jetons,
         })
     }
 }
@@ -444,7 +509,34 @@ pub(super) async fn repondre(
     let resultat = async {
         // 1. Engagement de I, avant tout nonce de notre part.
         let h = match lire(&mut recv, echeance).await? {
-            Echange::Engage { h } => nonce_de_hex(&h)?,
+            Echange::Engage { h, j } => {
+                // Le jeton est le droit d'entrer que l'écran a donné. Il se vérifie
+                // ici, avant que le moindre nonce ne sorte : un jeton rejoué, périmé
+                // ou révoqué n'apprend rien de nous, pas même le début d'un code.
+                if let Some(jetons) = r.jetons.as_ref() {
+                    let maintenant = chrono::Utc::now();
+                    match j.as_deref() {
+                        Some(jeton) => {
+                            if let Err(refus) = jetons.consommer(jeton, maintenant) {
+                                connexion.close(quinn::VarInt::from_u32(CODE_JETON), b"jeton");
+                                return Err(TransportError::Refuse(format!("appairage : {refus}")));
+                            }
+                        }
+                        // Pas de jeton alors qu'un QR est affiché : c'est exactement
+                        // l'appairage « à l'aveugle » que le QR existe pour empêcher.
+                        None if jetons.vivants(maintenant) > 0 => {
+                            connexion.close(quinn::VarInt::from_u32(CODE_JETON), b"jeton");
+                            return Err(TransportError::Refuse(
+                                "appairage : un QR est affiché, le jeton de l'invitation \
+                                 est requis"
+                                    .into(),
+                            ));
+                        }
+                        None => {}
+                    }
+                }
+                nonce_de_hex(&h)?
+            }
             autre => {
                 return Err(TransportError::Connexion(format!(
                     "appairage : engagement attendu, reçu {autre:?}"
@@ -781,6 +873,7 @@ mod tests {
             &mut send,
             &Echange::Engage {
                 h: to_hex(&engagement(&engage)),
+                j: None,
             },
             echeance,
         )
@@ -1074,8 +1167,20 @@ mod tests {
         );
         assert_eq!(s(&Echange::Refuse), r#"{"t":"refuse"}"#);
         assert_eq!(
-            s(&Echange::Engage { h: "ab".into() }),
+            s(&Echange::Engage {
+                h: "ab".into(),
+                j: None
+            }),
             r#"{"t":"engage","h":"ab"}"#
+        );
+        // Un jeton voyage dans le même message : c'est lui qui prouve que l'écran
+        // d'en face a été vu, et non deviné.
+        assert_eq!(
+            s(&Echange::Engage {
+                h: "ab".into(),
+                j: Some("cd".into())
+            }),
+            r#"{"t":"engage","h":"ab","j":"cd"}"#
         );
         assert_eq!(
             s(&Echange::Nonce { n: "cd".into() }),
@@ -1186,6 +1291,7 @@ mod tests {
             &mut send,
             &Echange::Engage {
                 h: to_hex(&engagement(&n_i)),
+                j: None,
             },
             echeance,
         )
@@ -1268,5 +1374,170 @@ mod tests {
         );
         assert_eq!(DeviceId::de_cle(&k).as_str(), attendu);
         assert!(DeviceId::parse(&attendu).is_some());
+    }
+    // ---------------------------------------------------------------------
+    // Appairage par QR : la clé attendue voyage par l'écran, et le jeton ne
+    // vaut qu'une fois. Ces quatre tests sont les critères d'acceptation de la
+    // tâche B6, mesurés sur une vraie poignée de main (boucle locale, QUIC).
+    // ---------------------------------------------------------------------
+
+    /// Un jeton de test : 32 caractères hexadécimaux, comme celui que le noyau tire.
+    fn jeton(n: u8) -> String {
+        format!("{n:02x}").repeat(crate::invitation::TAILLE_JETON / 2)
+    }
+
+    fn dans(secondes: i64) -> chrono::DateTime<Utc> {
+        Utc::now() + chrono::Duration::seconds(secondes)
+    }
+
+    /// R (clé [1]) écoute avec le registre de jetons du QR.
+    async fn repondeur_avec_jetons(
+        jetons: Arc<Jetons>,
+    ) -> (super::super::Flux, mpsc::Receiver<AppairageEnCours>) {
+        super::super::ecouter_avec_appairage_et_jetons(
+            local(),
+            &identite(1),
+            Peers::new(),
+            Limits::default(),
+            AnchorKeyRole::Shared,
+            DELAI,
+            Some(jetons),
+        )
+        .await
+        .unwrap()
+    }
+
+    // (Q1) Un QR affiché ferme l'appairage à l'aveugle : sans jeton, rien ne remonte.
+    // Et le jeton, lui, ouvre — une fois.
+    #[tokio::test]
+    async fn q1_un_qr_affiche_exige_le_jeton_et_ne_le_consomme_qu_une_fois() {
+        let jetons = Arc::new(Jetons::nouveau());
+        let j = jeton(1);
+        jetons.emettre(&j, dans(60)).unwrap();
+        let (flux, mut rx) = repondeur_avec_jetons(jetons.clone()).await;
+        let adresse = flux.local_addr();
+
+        // Sans jeton : refusé, et aucune demande n'atteint l'écran.
+        let sans = appairer_vers_avec(
+            adresse,
+            &identite(2),
+            AnchorKeyRole::Shared,
+            DELAI,
+            Attente::default(),
+        )
+        .await;
+        assert!(
+            sans.is_err(),
+            "un appareil qui n'a pas vu l'écran ne doit pas ouvrir un appairage"
+        );
+        assert!(aucune_demande(&mut rx).await);
+        assert_eq!(
+            jetons.vivants(Utc::now()),
+            1,
+            "le refus ne consomme pas le jeton"
+        );
+
+        // Avec le jeton : les deux côtés voient le même code.
+        let i = appairer_vers_avec(
+            adresse,
+            &identite(2),
+            AnchorKeyRole::Shared,
+            DELAI,
+            Attente {
+                cle: Some(&vk(1)),
+                jeton: Some(&j),
+            },
+        )
+        .await
+        .expect("un jeton valide ouvre l'appairage");
+        let r = tokio::time::timeout(DELAI, rx.recv())
+            .await
+            .expect("aucune demande remontée")
+            .expect("récepteur fermé");
+        assert_eq!(i.code(), r.code());
+        assert_eq!(i.cle_pair(), vk(1), "la clé épinglée est bien celle du QR");
+
+        // Le même jeton ne sert pas deux fois.
+        let rejoue = appairer_vers_avec(
+            adresse,
+            &identite(2),
+            AnchorKeyRole::Shared,
+            DELAI,
+            Attente {
+                cle: Some(&vk(1)),
+                jeton: Some(&j),
+            },
+        )
+        .await;
+        assert!(rejoue.is_err(), "un jeton rejoué ne doit rien ouvrir");
+        drop(i);
+        drop(r);
+        assert!(aucune_demande(&mut rx).await);
+    }
+
+    // (Q2) La clé épinglée : si l'appareil joint n'est pas celui du QR, le refus
+    // tombe AVANT tout code. C'est la propriété que le SAS seul ne donne pas —
+    // un homme du milieu tient deux canaux, donc présente sa clé aux deux bouts.
+    #[tokio::test]
+    async fn q2_une_cle_qui_n_est_pas_celle_du_qr_est_refusee_avant_le_code() {
+        let (flux, mut rx) = repondeur(Peers::new(), DELAI).await;
+        let autre = vk(9); // la clé qu'un intermédiaire présenterait
+        let e = appairer_vers_avec(
+            flux.local_addr(),
+            &identite(2),
+            AnchorKeyRole::Shared,
+            DELAI,
+            Attente {
+                cle: Some(&autre),
+                jeton: None,
+            },
+        )
+        .await;
+        match e {
+            Err(TransportError::Refuse(m)) => {
+                assert!(m.contains("clé du QR"), "message inattendu : {m}")
+            }
+            Err(autre) => panic!("refus attendu, reçu {autre:?}"),
+            Ok(_) => panic!("un appairage a été ouvert malgré une clé étrangère"),
+        }
+        assert!(
+            aucune_demande(&mut rx).await,
+            "l'écran d'en face ne doit rien voir du tout"
+        );
+    }
+
+    // (Q3) Un jeton périmé est refusé — et le refus ne dit pas où joindre ensuite.
+    #[tokio::test]
+    async fn q3_un_jeton_perime_est_refuse() {
+        let jetons = Arc::new(Jetons::nouveau());
+        let j = jeton(3);
+        jetons.emettre(&j, dans(-1)).unwrap(); // émis, déjà échu
+        let (flux, mut rx) = repondeur_avec_jetons(jetons.clone()).await;
+
+        let e = appairer_vers_avec(
+            flux.local_addr(),
+            &identite(2),
+            AnchorKeyRole::Shared,
+            DELAI,
+            Attente {
+                cle: Some(&vk(1)),
+                jeton: Some(&j),
+            },
+        )
+        .await;
+        assert!(e.is_err(), "un jeton périmé ne doit rien ouvrir");
+        assert!(aucune_demande(&mut rx).await);
+    }
+
+    // (Q4) Écran fermé (aucun jeton vivant) : l'appairage de proximité reste ouvert.
+    // Le QR n'ajoute pas une condition au chemin existant, il en retire une.
+    #[tokio::test]
+    async fn q4_ecran_ferme_l_appairage_de_proximite_reste_ouvert() {
+        let jetons = Arc::new(Jetons::nouveau());
+        jetons.emettre(&jeton(4), dans(60)).unwrap();
+        assert_eq!(jetons.revoquer_tout(), 1, "l'écran s'est fermé");
+        let (flux, mut rx) = repondeur_avec_jetons(jetons).await;
+        let (i, r) = deux_cotes(flux.local_addr(), &mut rx, DELAI).await;
+        assert_eq!(i.code(), r.code());
     }
 }

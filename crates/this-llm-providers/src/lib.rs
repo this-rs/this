@@ -47,6 +47,7 @@ pub mod images;
 mod model;
 mod probe;
 mod secret;
+mod session;
 mod store;
 
 #[cfg(feature = "http")]
@@ -61,6 +62,7 @@ pub use probe::{
     DEFAULT_PROBE_TIMEOUT, MAX_PROBE_CONCURRENCY, ProbeOptions, ProbeVerdict, Refusal,
 };
 pub use secret::{Secret, SecretError, SecretResolver, Secrets};
+pub use session::{Session, SessionError, SessionSource};
 pub use store::{JsonFileStore, MemoryStore, ProviderStore, Snapshot, StoreError};
 
 #[cfg(all(feature = "http", not(target_arch = "wasm32")))]

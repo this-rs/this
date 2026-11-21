@@ -32,19 +32,19 @@ enum MacCalendar {
         let status = EKEventStore.authorizationStatus(for: .event)
         if #available(macOS 14.0, *) {
             switch status {
-            case .fullAccess:                   return "granted"
-            case .authorized:                   return "granted"  // legacy pre-macOS 14
-            case .writeOnly, .denied, .restricted: return "denied"
-            case .notDetermined:                return "prompt"
-            @unknown default:                   return "prompt"
+            case .fullAccess:                   return Etat.granted.fil
+            case .authorized:                   return Etat.granted.fil  // legacy pre-macOS 14
+            case .writeOnly, .denied, .restricted: return Etat.denied.fil
+            case .notDetermined:                return Etat.prompt.fil
+            @unknown default:                   return Etat.prompt.fil
             }
         } else {
             switch status {
-            case .authorized:    return "granted"
-            case .denied:        return "denied"
-            case .restricted:    return "denied"
-            case .notDetermined: return "prompt"
-            @unknown default:    return "prompt"
+            case .authorized:    return Etat.granted.fil
+            case .denied:        return Etat.denied.fil
+            case .restricted:    return Etat.denied.fil
+            case .notDetermined: return Etat.prompt.fil
+            @unknown default:    return Etat.prompt.fil
             }
         }
     }
@@ -80,7 +80,7 @@ enum MacCalendar {
         guard isValidCalendarWindow(startMs: startMs, endMs: endMs) else {
             return errorReply(code: ReplyCode.internalError)
         }
-        guard currentState() == "granted" else {
+        guard currentState() == Etat.granted.fil else {
             return errorReply(code: ReplyCode.notAuthorized)
         }
 
@@ -113,7 +113,7 @@ enum MacCalendar {
         guard !overflow, span > 0 else {
             return errorReply(code: ReplyCode.internalError)
         }
-        guard currentState() == "granted" else {
+        guard currentState() == Etat.granted.fil else {
             return errorReply(code: ReplyCode.notAuthorized)
         }
         guard let calendar = store.defaultCalendarForNewEvents else {
@@ -137,7 +137,7 @@ enum MacCalendar {
 
     /// `calendarCalendars` — every event calendar, with its write permission.
     static func calendars() -> String {
-        guard currentState() == "granted" else {
+        guard currentState() == Etat.granted.fil else {
             return errorReply(code: ReplyCode.notAuthorized)
         }
         let list = store.calendars(for: .event).map {
@@ -155,7 +155,7 @@ enum MacCalendar {
         guard let id = args["id"] as? String, !id.isEmpty else {
             return errorReply(code: ReplyCode.internalError)
         }
-        guard currentState() == "granted" else {
+        guard currentState() == Etat.granted.fil else {
             return errorReply(code: ReplyCode.notAuthorized)
         }
         guard let event = store.event(withIdentifier: id) else {
@@ -209,7 +209,7 @@ enum MacCalendar {
         guard let id = args["id"] as? String, !id.isEmpty else {
             return errorReply(code: ReplyCode.internalError)
         }
-        guard currentState() == "granted" else {
+        guard currentState() == Etat.granted.fil else {
             return errorReply(code: ReplyCode.notAuthorized)
         }
         guard let event = store.event(withIdentifier: id) else {

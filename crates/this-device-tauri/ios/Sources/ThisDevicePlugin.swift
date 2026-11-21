@@ -88,12 +88,12 @@ class ThisDevicePlugin: Plugin {
     case "gyroscope":
       // No permission exists for raw gyroscope data: the state is whether the hardware is there.
       let available = CMMotionManager().isGyroAvailable
-      invoke.resolve(Reply.status(state: available ? "granted" : "unsupported"))
+      invoke.resolve(Reply.status(state: available ? Etat.granted.fil : Etat.unsupported.fil))
     case "bluetooth":
       invoke.resolve(Reply.status(state: BluetoothStatus.name(BluetoothScan.authorization())))
     default:
       // Not a bridged capability: the bridge cannot tell, so it says so.
-      invoke.resolve(Reply.status(state: "unsupported"))
+      invoke.resolve(Reply.status(state: Etat.unsupported.fil))
     }
   }
 
@@ -111,11 +111,11 @@ class ThisDevicePlugin: Plugin {
 enum BluetoothStatus {
   static func name(_ authorization: CBManagerAuthorization?) -> String {
     switch authorization {
-    case .allowedAlways?: return "granted"
-    case .denied?, .restricted?: return "denied"
+    case .allowedAlways?: return Etat.granted.fil
+    case .denied?, .restricted?: return Etat.denied.fil
     // Not asked yet, or unknown before iOS 13.1: the system asks the first time it is used.
-    case .notDetermined?, nil: return "prompt"
-    @unknown default: return "prompt"
+    case .notDetermined?, nil: return Etat.prompt.fil
+    @unknown default: return Etat.prompt.fil
     }
   }
 }

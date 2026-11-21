@@ -186,3 +186,194 @@ fn une_composition_du_graphe_porte_les_quatre_bornes() {
     assert_eq!(l.no_progress_ms, d.no_progress_ms);
     assert_eq!(l.tool_timeout_ms, d.tool_timeout_ms);
 }
+
+// ---------------------------------------------------------------------------------------
+// Les autorisations tenues par l'OUTILLAGE (`Toolbox::grants`).
+//
+// POURQUOI : un hôte dont les outils apparaissent en cours de session (un module installé
+// après la construction du harnais) ne peut pas figer ses autorisations à la construction.
+// Un ensemble figé les refuserait tous — juste en forme, faux en fait.
+// ---------------------------------------------------------------------------------------
+
+/// Le même outillage, mais qui tient ses autorisations à jour et les rend au harnais.
+struct ToolsADroits {
+    calls: Cell<u32>,
+    grants: RefCell<Grants>,
+}
+
+#[async_trait(?Send)]
+impl Toolbox for ToolsADroits {
+    fn specs(&self) -> Vec<ToolSpec> {
+        ["declared_tool", "ghost_tool"]
+            .into_iter()
+            .map(|name| ToolSpec {
+                name: name.into(),
+                description: name.into(),
+                parameters: json!({"type": "object"}),
+            })
+            .collect()
+    }
+    fn declarations(&self) -> Vec<Declaration> {
+        vec![Declaration::writes("declared_tool")]
+    }
+    fn grants(&self) -> Option<Grants> {
+        Some(self.grants.borrow().clone())
+    }
+    async fn call(&self, _: &ToolCall) -> Outcome {
+        self.calls.set(self.calls.get() + 1);
+        Outcome::ok("exécuté")
+    }
+}
+
+/// Un moteur qui redemande l'outil à CHAQUE tour : le cas d'un run relancé après une
+/// installation de module.
+struct AsksToujours {
+    tool: &'static str,
+}
+
+#[async_trait(?Send)]
+impl Transport for AsksToujours {
+    async fn stream(&self, _: &Request, _: &Cancel, _: Delta) -> Result<Reply, Failure> {
+        Ok(Reply {
+            text: String::new(),
+            calls: vec![ToolCall {
+                id: "c1".into(),
+                name: self.tool.into(),
+                arguments: json!({}),
+            }],
+            finish: Finish::Tools,
+        })
+    }
+}
+
+fn harnais_adroits(
+    tools: Rc<ToolsADroits>,
+    statique: Option<Grants>,
+) -> (Harness, Rc<RefCell<Vec<Event>>>) {
+    let log = Rc::new(RefCell::new(Vec::new()));
+    let sink = log.clone();
+    let mut harness = Harness::new(
+        "sys",
+        Limits {
+            max_relances: 0,
+            ..Limits::default()
+        },
+        Rc::new(AsksOnce {
+            tool: "declared_tool",
+            asked: Cell::new(false),
+        }),
+        tools,
+        move |e| sink.borrow_mut().push(e),
+    );
+    if let Some(grants) = statique {
+        harness = harness.with_grants(grants);
+    }
+    (harness, log)
+}
+
+#[test]
+fn l_outillage_autorise_sans_qu_on_appelle_with_grants() {
+    let mut grants = Grants::new();
+    grants.put(Grant::granted("declared_tool", "app"));
+    let tools = Rc::new(ToolsADroits {
+        calls: Cell::new(0),
+        grants: RefCell::new(grants),
+    });
+    let (harness, log) = harnais_adroits(tools.clone(), None);
+    futures::executor::block_on(harness.send("go"));
+    assert_eq!(
+        tools.calls.get(),
+        1,
+        "la porte doit être active par l'outillage seul"
+    );
+    assert!(!result_of(&log.borrow()).0);
+}
+
+#[test]
+fn l_outillage_prime_sur_les_autorisations_figees() {
+    // Le statique autorise ; l'outillage, lui, a retiré le droit. C'est le plus récent qui
+    // vaut — sinon un module désinstallé garderait son droit jusqu'au redémarrage.
+    let mut statique = Grants::new();
+    statique.put(Grant::granted("declared_tool", "app"));
+    let tools = Rc::new(ToolsADroits {
+        calls: Cell::new(0),
+        grants: RefCell::new(Grants::new()),
+    });
+    let (harness, log) = harnais_adroits(tools.clone(), Some(statique));
+    futures::executor::block_on(harness.send("go"));
+    assert_eq!(tools.calls.get(), 0);
+    assert!(result_of(&log.borrow()).0);
+}
+
+#[test]
+fn un_outil_qui_apparait_en_cours_de_session_n_est_pas_refuse() {
+    // Le cas mesuré d'un module installé pendant la session : refusé au premier tour
+    // (aucun droit), puis exécuté dès que l'outillage en pose un — sans reconstruire le
+    // harnais.
+    let tools = Rc::new(ToolsADroits {
+        calls: Cell::new(0),
+        grants: RefCell::new(Grants::new()),
+    });
+    let log = Rc::new(RefCell::new(Vec::new()));
+    let sink = log.clone();
+    let harness = Harness::new(
+        "sys",
+        Limits {
+            max_relances: 0,
+            ..Limits::default()
+        },
+        Rc::new(AsksToujours {
+            tool: "declared_tool",
+        }),
+        tools.clone(),
+        move |e| sink.borrow_mut().push(e),
+    );
+    futures::executor::block_on(harness.send("go"));
+    assert_eq!(tools.calls.get(), 0, "sans droit, rien ne part");
+    assert!(result_of(&log.borrow()).0);
+
+    tools
+        .grants
+        .borrow_mut()
+        .put(Grant::granted("declared_tool", "module installé"));
+    log.borrow_mut().clear();
+    futures::executor::block_on(harness.send("go"));
+    // Le moteur redemande à chaque tour : ce qui compte est qu'il soit servi, pas le compte.
+    assert!(
+        tools.calls.get() > 0,
+        "le droit posé après coup doit être vu"
+    );
+    assert!(!result_of(&log.borrow()).0);
+}
+
+#[test]
+fn un_outil_sans_declaration_reste_refuse_meme_autorise_par_l_outillage() {
+    let mut grants = Grants::new();
+    grants.put(Grant::granted("ghost_tool", "app"));
+    let tools = Rc::new(ToolsADroits {
+        calls: Cell::new(0),
+        grants: RefCell::new(grants),
+    });
+    let log = Rc::new(RefCell::new(Vec::new()));
+    let sink = log.clone();
+    let mut harness = Harness::new(
+        "sys",
+        Limits {
+            max_relances: 0,
+            ..Limits::default()
+        },
+        Rc::new(AsksOnce {
+            tool: "ghost_tool",
+            asked: Cell::new(false),
+        }),
+        tools.clone(),
+        move |e| sink.borrow_mut().push(e),
+    );
+    let _ = &mut harness;
+    futures::executor::block_on(harness.send("go"));
+    assert_eq!(tools.calls.get(), 0);
+    assert!(
+        result_of(&log.borrow()).0,
+        "une déclaration manquante ne vaut pas un droit"
+    );
+}

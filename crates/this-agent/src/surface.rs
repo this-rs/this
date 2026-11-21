@@ -348,6 +348,28 @@ impl HostLimits {
         &self.unavailable
     }
 
+    /// Réunit deux déclarations de limites : celle de l'hôte, écrite à la main, et celle que
+    /// l'appareil a **répondue**.
+    ///
+    /// L'ordre est celui de l'appel : ce que l'hôte sait de son propre build d'abord, ce que la
+    /// mesure a trouvé ensuite. Un identifiant déjà déclaré garde sa première raison — celle de
+    /// l'hôte est plus précise (« profil de signature sans l'entitlement HealthKit ») que celle
+    /// du banc (« l'appareil ne fournit pas cette capacité »), et c'est celle-là qu'un humain
+    /// doit lire.
+    ///
+    /// Pourquoi une fusion et pas un remplacement : un hôte a les deux à dire. L'Atelier déclare
+    /// `device.health` et `device.nfc` à cause de son profil de signature, et l'appareil peut en
+    /// plus ne pas avoir de podomètre. Remplacer l'une par l'autre perdrait la moitié de la
+    /// vérité.
+    pub fn and(mut self, autre: &HostLimits) -> Self {
+        for (id, raison) in &autre.unavailable {
+            if !self.unavailable.iter().any(|(connu, _)| connu == id) {
+                self.unavailable.push((id.clone(), raison.clone()));
+            }
+        }
+        self
+    }
+
     /// Ce qu'un **appareil** a répondu quand on le lui a demandé.
     ///
     /// Prend le rapport du banc d'essai du pont (`tauri-plugin-this-device`, feature `banc`) et
@@ -700,14 +722,15 @@ pub fn surface() -> Surface {
                 &[Ios, Ipados, Macos],
                 Status::Live,
             ),
-            // Planifier et lire les attentes : iOS seulement pour l'instant (le pont macOS ne
-            // connaît que poster et retirer, `macos/Sources/notifications.swift`).
             Capability::new(
                 "device.notifications.schedule",
                 Tier::Shell,
                 "PLANIFIER une notification (1 s à 30 jours) et lire celles qui attendent",
                 Some("notificationsSchedule / notificationsPending"),
-                &[Ios, Ipados],
+                // macOS depuis le 13/11/2026 : UserNotifications offre le déclencheur de temps
+                // et la liste des attentes, les mêmes API que sur iOS. La carte ne le disait pas
+                // parce que le pont ne les routait pas.
+                &[Ios, Ipados, Macos],
                 Status::Live,
             ),
             Capability::new(
@@ -1334,6 +1357,59 @@ mod tests {
 
     /// Un rapport absent, vide ou d'une autre forme ne déclare rien : une mesure qu'on ne sait
     /// pas lire ne doit pas se traduire par « tout est indisponible ».
+    /// Les deux sources de limites se réunissent sans se perdre : celle de l'hôte reste en
+    /// tête avec sa raison, celle de la mesure complète.
+    #[test]
+    fn les_limites_de_l_hote_et_celles_de_l_appareil_s_additionnent() {
+        let hote = HostLimits::new()
+            .unavailable(
+                "device.health",
+                "profil de signature sans l'entitlement HealthKit",
+            )
+            .unavailable(
+                "device.nfc",
+                "profil de signature sans l'entitlement NFC Tag Reading",
+            );
+        let rapport = serde_json::json!({
+            "capacites": [
+                // Déjà déclarée par l'hôte : la raison de l'hôte gagne.
+                {"capacite": "health", "etat": "unsupported"},
+                // Nouvelle : c'est l'appareil qui la révèle.
+                {"capacite": "motion_activity", "etat": "unsupported"}
+            ]
+        });
+        let fusion = hote.and(&HostLimits::from_bench(&rapport));
+        let ids: Vec<&str> = fusion.entries().iter().map(|(id, _)| id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec!["device.health", "device.nfc", "device.motion_activity"]
+        );
+        assert_eq!(
+            fusion.entries()[0].1,
+            "profil de signature sans l'entitlement HealthKit",
+            "la raison de l'hôte doit rester, pas celle du banc"
+        );
+        let carte = surface().with_limits(&fusion);
+        for id in ["device.health", "device.nfc", "device.motion_activity"] {
+            assert_eq!(
+                carte.capability(id).unwrap().status,
+                Status::Missing,
+                "{id}"
+            );
+        }
+    }
+
+    /// Fusionner avec une déclaration vide ne change rien, et deux fois la même limite ne se
+    /// duplique pas.
+    #[test]
+    fn une_fusion_ne_duplique_jamais_une_limite() {
+        let seule = HostLimits::new().unavailable("device.nfc", "pas d'entitlement");
+        assert_eq!(seule.clone().and(&HostLimits::new()).entries().len(), 1);
+        let deux_fois = seule.clone().and(&seule);
+        assert_eq!(deux_fois.entries().len(), 1);
+        assert_eq!(deux_fois.entries()[0].1, "pas d'entitlement");
+    }
+
     #[test]
     fn un_rapport_illisible_ne_declare_aucune_limite() {
         for rapport in [
