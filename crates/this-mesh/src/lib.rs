@@ -20,7 +20,10 @@ pub mod transport;
 pub use appairage::{
     Admission, Appairage, Lien, Rencontre, SAS_DIGITS, SAS_DOMAIN, SasAttendu, sas,
 };
-pub use crdt::{Estampille, Ligne, Liste, Operation};
+pub use crdt::{
+    Estampille, LISTE_ID_MAX, Ligne, Liste, Operation, liste_depuis_charge, liste_vers_charge,
+    operation_depuis_charge, operation_vers_charge,
+};
 pub use envelope::{DeviceId, MESH_VERSION, Message, MessageType, SIGNING_DOMAIN, SignError};
 pub use gate::{Gate, JournalEntry, Raison, Verdict};
 pub use invitation::{
