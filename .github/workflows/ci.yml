@@ -771,7 +771,10 @@ jobs:
 
       - name: Install wasm-bindgen runner matching Cargo.lock
         run: |
+          # Cargo.lock n'est pas versionné : on le résout d'abord, sinon il n'y a rien à lire.
+          cargo generate-lockfile
           version=$(awk '/^name = "wasm-bindgen"$/ {getline; gsub(/[^0-9.]/, "", $3); print $3; exit}' Cargo.lock)
+          test -n "$version" || { echo "wasm-bindgen absent du lock" >&2; exit 1; }
           echo "wasm-bindgen $version"
           cargo install wasm-bindgen-cli --version "$version" --locked
 
