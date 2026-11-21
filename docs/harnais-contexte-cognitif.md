@@ -200,10 +200,15 @@ aggravants mesurables :
    résumé est un message utilisateur ordinaire, sans en-tête. Le modèle lit une
    paraphrase comme un fait de la conversation.
 
-**Non prouvé, pour la reprise** : rien ne rattache le fil restauré à un registre — un
-`Snapshot` ne porte pas de `SeenLedger` (`event.rs:242-249`), donc après un
-redémarrage tous les ids du fil redeviennent « jamais vus » et l'inverse est vrai
-aussi : rien ne dit qu'un texte du fil a été cloisonné.
+**Pour la reprise (#290)** : un `Snapshot` ne porte toujours pas de `SeenLedger`, mais
+le harnais **rebâtit** le registre depuis le fil à chaque `restore` / `seed` (remis à
+zéro, puis rejeu des résultats d'outils). Par défaut la reprise est **conservatrice** :
+un id imprimé par un résultat d'outil restauré redevient « **cité** », jamais « lu » —
+un snapshot n'est pas authentifié par construction. `restore_trusted` / `seed_trusted`
+le relisent comme une lecture directe, et ne conviennent qu'à un stockage protégé en
+intégrité. Conséquence assumée : après une reprise par défaut, les vraies lectures du
+fil précédent portent la marque « cité seulement » dans le rappel tant qu'elles ne sont
+pas relues.
 
 ### (d) Suppression/révocation et changement de projet invalident ; pas de mémoire croisée entre personnes — **manque**
 

@@ -2720,6 +2720,13 @@ impl Handle {
 
     /// [`Self::seed`] pour un transcript dont on connaît l'origine : les lectures
     /// d'outils y sont relues (voie privilégiée, explicite).
+    ///
+    /// **« Connaître l'origine » ne suffit pas : il faut que le stockage soit
+    /// protégé en INTÉGRITÉ.** Un fichier sur disque, un `localStorage`, une
+    /// IndexedDB ou une ligne de base que d'autres codes peuvent réécrire ne
+    /// qualifient pas — c'est exactement là qu'un snapshot se forge. Sans
+    /// signature ou MAC vérifiés à la relecture, prenez la voie par défaut : le
+    /// pire qu'elle coûte est une lecture à refaire.
     pub fn seed_trusted(&self, transcript: Vec<Message>) {
         self.seed_avec(transcript, Confiance::Notre)
     }
@@ -2729,6 +2736,10 @@ impl Handle {
         self.seed_avec(transcript, Confiance::Importee)
     }
 
+    /// Pendant un run, `seed*` comme `restore*` ne remplacent RIEN : ils émettent
+    /// un `Event::Hint` et rendent la main. L'API ne rend pas d'erreur (elle rend
+    /// `()`) : un hôte qui doit savoir si le fil a changé lit [`Self::busy`]
+    /// avant, ou écoute l'indication.
     fn seed_avec(&self, transcript: Vec<Message>, confiance: Confiance) {
         if self.state.borrow().busy {
             self.out.emit(Event::Hint {
@@ -2772,6 +2783,13 @@ impl Handle {
     ///
     /// C'est la voie PRIVILÉGIÉE, volontairement plus longue à écrire : la
     /// confiance ne doit jamais être le chemin le plus court.
+    ///
+    /// **« Connaître l'origine » ne suffit pas : il faut que le stockage soit
+    /// protégé en INTÉGRITÉ.** Un fichier sur disque, un `localStorage`, une
+    /// IndexedDB ou une ligne de base que d'autres codes peuvent réécrire ne
+    /// qualifient pas — c'est exactement là qu'un snapshot se forge. Sans
+    /// signature ou MAC vérifiés à la relecture, prenez la voie par défaut : le
+    /// pire qu'elle coûte est une lecture à refaire.
     pub fn restore_trusted(&self, snapshot: Snapshot) {
         self.restore_avec(snapshot, Confiance::Notre)
     }

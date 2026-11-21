@@ -371,6 +371,12 @@ pub fn neutralize_value(value: &mut serde_json::Value) {
 /// fermante portant le **même** nonce ; sans elle, il court jusqu'à la fin du
 /// texte. Une fausse balise dans un texte hostile ne peut donc que rétrograder
 /// des ids (direct → cité), jamais promouvoir un id cité.
+///
+/// **`Deserialize` est un acte de confiance totale.** Un registre relu d'un JSON
+/// rend `Direct` tout ce que le JSON nomme, sans passer par aucune voie
+/// `_trusted` du harnais. Ne persistez pas un registre hors d'un stockage
+/// protégé en intégrité ; pour reprendre une conversation, rebâtissez-le depuis
+/// le fil (`restore` / `seed`, conservateurs par défaut).
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SeenLedger {
     uuids: BTreeSet<String>,
