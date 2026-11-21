@@ -7,6 +7,7 @@
 //! `de` = expéditeur → clé connue / révoquée → type connu → signature → rejeu.
 //! La charge n'est jamais lue avant que la taille, l'identité et le type soient bons.
 
+mod agent_etat;
 mod appairage;
 mod crdt;
 mod envelope;
@@ -17,6 +18,7 @@ mod peers;
 #[cfg(feature = "transport")]
 pub mod transport;
 
+pub use agent_etat::{Etat, Geste, Negociation, Refus};
 pub use appairage::{
     Admission, Appairage, Lien, Rencontre, SAS_DIGITS, SAS_DOMAIN, SasAttendu, sas,
 };
