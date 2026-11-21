@@ -328,14 +328,16 @@ async fn rappel_impl(
         return None;
     }
     let shown = &anchors.cited[..anchors.cited.len().min(MAX_ENTITIES)];
-    let facts = if shown.is_empty() {
+    // Seules les citations de forme exacte sont interrogées. Si aucune ne l'est, l'hôte n'est pas
+    // appelé du tout : il n'y a rien à demander, et un appel à vide serait un appel quand même.
+    let asked: Vec<String> = shown
+        .iter()
+        .filter(|c| id_bien_forme(c))
+        .map(|c| c.id.clone())
+        .collect();
+    let facts = if asked.is_empty() {
         Vec::new()
     } else {
-        let asked: Vec<String> = shown
-            .iter()
-            .filter(|c| id_bien_forme(c))
-            .map(|c| c.id.clone())
-            .collect();
         recall.recall(&asked).await
     };
 

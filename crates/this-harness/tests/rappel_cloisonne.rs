@@ -411,12 +411,17 @@ fn des_ancres_forgees_a_la_main_ne_sortent_jamais_en_clair() {
 }
 
 /// Un hôte qui note chaque id qu'on lui demande.
-struct HoteEspion(std::cell::RefCell<Vec<String>>);
+#[derive(Default)]
+struct HoteEspion {
+    ids: std::cell::RefCell<Vec<String>>,
+    appels: std::cell::Cell<usize>,
+}
 
 #[async_trait(?Send)]
 impl Recall for HoteEspion {
     async fn recall(&self, ids: &[String]) -> Vec<Fact> {
-        self.0.borrow_mut().extend(ids.iter().cloned());
+        self.appels.set(self.appels.get() + 1);
+        self.ids.borrow_mut().extend(ids.iter().cloned());
         Vec::new()
     }
 }
@@ -438,16 +443,21 @@ fn une_citation_invalide_n_est_ni_interrogee_ni_marquee_ni_dite_introuvable() {
     };
     let mut vus = SeenLedger::new();
     vus.observe_quoted(&id);
-    let hote = HoteEspion(Default::default());
+    let hote = HoteEspion::default();
     let message = run(rappel_cloisonne(&forge, &hote, Some(&vus), &|s| {
         format!("⟦{s}⟧")
     }))
     .expect("un rappel");
     let texte = message.text();
+    assert_eq!(
+        hote.appels.get(),
+        0,
+        "aucune citation valide : l'hôte n'est pas appelé du tout"
+    );
     assert!(
-        hote.0.borrow().is_empty(),
+        hote.ids.borrow().is_empty(),
         "interrogé : {:?}",
-        hote.0.borrow()
+        hote.ids.borrow()
     );
     assert!(
         texte.contains("citation invalide, non interrogée"),
