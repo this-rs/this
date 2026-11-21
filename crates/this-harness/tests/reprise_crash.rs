@@ -14,6 +14,9 @@
 //! aveuglément (case (c), déjà prouvée : `un_outil_abandonne_a_un_effet_inconnu_pas_un_echec_prouve`
 //! et `une_etape_abandonnee_n_arrete_pas_le_run_en_echec`, `src/session.rs`).
 
+// Natif seulement : sous-processus, `abort()` et magasin obrain sur disque n'existent pas en wasm32.
+#![cfg(not(target_arch = "wasm32"))]
+
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
