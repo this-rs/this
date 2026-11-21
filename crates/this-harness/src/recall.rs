@@ -377,6 +377,13 @@ async fn rappel_impl(
                 c.message,
                 copie(&one_line(&c.excerpt))
             ),
+            None if !bien_forme => format!(
+                "- {} ({}) — citation invalide, non interrogée (cité au message {} : « {} ») : ni id ni sorte exacts — à ne pas tenir pour acquis.\n",
+                id_vu,
+                kind_vu,
+                c.message,
+                copie(&one_line(&c.excerpt))
+            ),
             None => format!(
                 "- {} ({}) — INTROUVABLE dans le graphe (cité au message {} : « {} ») : id inventé, supprimé, ou hors de portée — à ne pas tenir pour acquis.\n",
                 id_vu,

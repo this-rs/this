@@ -1156,7 +1156,9 @@ impl Harness {
     }
 
     /// [`Self::restore`] pour un snapshot dont on connaît l'origine : la voie
-    /// privilégiée, explicite (voir [`Handle::restore_trusted`]).
+    /// privilégiée, explicite (voir [`Handle::restore_trusted`]). **Hors de la garantie
+    /// « cité ≠ lu »** : une citation y redevient `Direct` (l'intégrité n'est pas la fidélité de
+    /// provenance).
     pub fn restore_trusted(&self, snapshot: Snapshot) {
         self.handle().restore_trusted(snapshot);
     }
@@ -2843,6 +2845,12 @@ impl Handle {
     /// qualifient pas — c'est exactement là qu'un snapshot se forge. Sans
     /// signature ou MAC vérifiés à la relecture, prenez la voie par défaut : le
     /// pire qu'elle coûte est une lecture à refaire.
+    ///
+    /// **L'intégrité ne donne pas la FIDÉLITÉ de provenance.** Même un snapshot signé et
+    /// intact ne porte que le texte : une simple *citation* y devient `Direct` au redémarrage,
+    /// sans `Outcome::observable` pour l'attester. Cette méthode est donc HORS de la garantie
+    /// « cité ≠ lu » ; seule [`Self::restore`] la tient. Persister et restaurer la provenance
+    /// elle-même n'est pas fait.
     pub fn restore_trusted(&self, snapshot: Snapshot) {
         self.restore_avec(snapshot, Confiance::Notre)
     }

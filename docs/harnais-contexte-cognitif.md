@@ -406,4 +406,4 @@ Limites assumées de ce contrat :
   rien pour les autres consommateurs.
 - **`rappel_cloisonne` accepte des `Anchors` publics.** Une citation dont l'`id` n'a pas la forme
   exacte `#kind:uuid` (ou dont le `kind` diffère) n'est ni interrogée au graphe ni marquée par
-  le registre : elle est rendue comme copie tierce enveloppée.
+  le registre : elle est rendue comme copie tierce enveloppée, sous le libellé « citation invalide, non interrogée » (et non « INTROUVABLE dans le graphe », qui suppose une interrogation).

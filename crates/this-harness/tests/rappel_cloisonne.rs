@@ -409,3 +409,50 @@ fn des_ancres_forgees_a_la_main_ne_sortent_jamais_en_clair() {
         message.text()
     );
 }
+
+/// Un hôte qui note chaque id qu'on lui demande.
+struct HoteEspion(std::cell::RefCell<Vec<String>>);
+
+#[async_trait(?Send)]
+impl Recall for HoteEspion {
+    async fn recall(&self, ids: &[String]) -> Vec<Fact> {
+        self.0.borrow_mut().extend(ids.iter().cloned());
+        Vec::new()
+    }
+}
+
+#[test]
+fn une_citation_invalide_n_est_ni_interrogee_ni_marquee_ni_dite_introuvable() {
+    use this_harness::{Anchors, Citation};
+    // Même id qu'un vrai, mais une sorte qui ne correspond pas : forgée à la main. Le registre
+    // connaît cet id (cité) : une marque par id seul la ferait paraître « CITÉ SEULEMENT ».
+    let id = format!("#note:{REEL}");
+    let forge = Anchors {
+        cited: vec![Citation {
+            id: id.clone(),
+            kind: "task".into(),
+            message: 0,
+            excerpt: "x".into(),
+        }],
+        ..Anchors::default()
+    };
+    let mut vus = SeenLedger::new();
+    vus.observe_quoted(&id);
+    let hote = HoteEspion(Default::default());
+    let message = run(rappel_cloisonne(&forge, &hote, Some(&vus), &|s| {
+        format!("⟦{s}⟧")
+    }))
+    .expect("un rappel");
+    let texte = message.text();
+    assert!(
+        hote.0.borrow().is_empty(),
+        "interrogé : {:?}",
+        hote.0.borrow()
+    );
+    assert!(
+        texte.contains("citation invalide, non interrogée"),
+        "{texte}"
+    );
+    assert!(!texte.contains("INTROUVABLE"), "{texte}");
+    assert!(!texte.contains("CITÉ SEULEMENT"), "{texte}");
+}
