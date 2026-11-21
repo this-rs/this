@@ -718,6 +718,11 @@ mod tests {
                 "{refuse} doit être refusé, pas lu comme un événement"
             );
         }
+        // Deux clés `type` : refusé. (Avant : la lecture par `Value` gardait la dernière.)
+        assert!(
+            serde_json::from_str::<EventWire>(r#"{"type":"text","type":"futur"}"#).is_err(),
+            "un `type` dupliqué est ambigu : refusé"
+        );
         // Un objet sans `type` textuel reste refusé, un objet avec `type` passe.
         assert!(serde_json::from_str::<EventWire>(r#"{"type":1}"#).is_err());
         assert!(serde_json::from_str::<EventWire>(r#"{"type":"futur"}"#).is_ok());

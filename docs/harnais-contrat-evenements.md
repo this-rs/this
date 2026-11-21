@@ -125,6 +125,10 @@ Décisions, tranchées explicitement :
   devient textuelle (même ordre de clés, mêmes octets). Aucun consommateur hors de
   `this-harness` dans les dépôts sondés (this, atelier, this-cli, this-examples, website) ; cela
   ne prouve rien pour les autres.
+  **Forme exigée** : seul un objet JSON est un événement (un tableau ou un scalaire est
+  refusé), et un objet à **deux** clés `type` est refusé — changement observable : la lecture
+  par `Value` gardait la dernière en silence. Un JSON ambigu sur le champ qui décide du genre
+  n'est ni connu ni futur.
   **Limite** : cela ne vaut QUE pour un type entièrement inconnu. Un type **connu** auquel une
   version future ajoute un champ est décodé en `Event` et le champ ajouté est perdu au relais.
   `Event::Unknown` (variante unitaire de #301) reste pour la
