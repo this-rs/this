@@ -343,13 +343,51 @@ impl Grants {
         self.grants.iter().map(|grant| grant.node(agent)).collect()
     }
 
+    /// Relit les autorisations. Un nœud porte le fait en trois copies : les colonnes
+    /// `_tool` et `_granted` (ce qu'on interroge) et `_data` (ce qu'on relit). Si une
+    /// colonne **présente** contredit `_data`, le nœud devient un refus qui dit pourquoi,
+    /// et ce refus est **collant** : appliqué après la lecture de tous les nœuds, il ne
+    /// dépend pas de leur ordre et un autre nœud du même outil ne le remplace pas.
+    ///
+    /// Ce que cela NE couvre PAS : une colonne **absente** ne contredit rien (un nœud
+    /// plus ancien ne perd pas ses droits sur une absence — et une colonne non textuelle
+    /// est relue comme absente par `AgentSubstrate::grants`) ; `_uuid` et `_source` ne
+    /// sont pas comparés (`_source` n'entre pas dans la décision) ; deux nœuds cohérents
+    /// pour le même outil se départagent toujours par l'ordre de lecture (`put`).
     pub fn from_nodes(nodes: &[Node]) -> Result<Self, String> {
         let mut grants = Grants::new();
+        let mut refus = Vec::new();
         for node in nodes.iter().filter(|node| node.label == GRANT) {
             let data = node.get("_data").ok_or("autorisation sans _data")?;
             let grant: Grant =
                 serde_json::from_str(data).map_err(|e| format!("autorisation illisible: {e}"))?;
-            grants.put(grant);
+
+            let colonne_granted = node.get("_granted");
+            let colonne_tool = node.get("_tool");
+            let granted_diverge = colonne_granted.is_some_and(|v| v != grant.granted.to_string());
+            let tool_diverge = colonne_tool.is_some_and(|v| v != grant.tool);
+
+            if !granted_diverge && !tool_diverge {
+                grants.put(grant);
+                continue;
+            }
+            let raison = format!(
+                "autorisation incohérente : `_tool`={:?} `_granted`={:?} contredisent `_data` \
+                 (outil {:?}, accordé={}) — refusé par prudence",
+                colonne_tool.unwrap_or("∅"),
+                colonne_granted.unwrap_or("∅"),
+                grant.tool,
+                grant.granted
+            );
+            // Un nom divergent ne donne le droit ni à l'un ni à l'autre.
+            if let Some(autre) = colonne_tool.filter(|_| tool_diverge) {
+                refus.push(Grant::refused(autre, grant.source.clone(), raison.clone()));
+            }
+            refus.push(Grant::refused(grant.tool, grant.source, raison));
+        }
+        // Appliqués en dernier : un accord lu après (doublon, autre ordre) ne les efface pas.
+        for refus in refus {
+            grants.put(refus);
         }
         Ok(grants)
     }
@@ -484,5 +522,117 @@ mod tests {
         assert!(back.allows("prompt_agent").is_allowed());
         assert!(!back.allows("index_repository").is_allowed());
         assert!(!back.allows("inconnu").is_allowed());
+    }
+
+    /// Remplace une propriété d'un nœud (simule un autre écrivain, une édition
+    /// manuelle ou une migration : tout ce qui n'est pas `save_grants`).
+    fn forcer(node: &mut Node, key: &str, value: &str) {
+        let slot = node
+            .props
+            .iter_mut()
+            .find(|(k, _)| k == key)
+            .expect("la propriété existe");
+        slot.1 = value.to_string();
+    }
+
+    #[test]
+    fn une_colonne_granted_qui_contredit_le_json_ne_restaure_pas_l_outil_comme_accorde() {
+        // Un grant est écrit deux fois : `_granted` (la colonne qu'on interroge) et
+        // `_data` (le JSON qu'on relit). Si elles divergent, la relecture ne doit
+        // JAMAIS trancher en faveur de « accordé » : le défaut serait un retrait
+        // visible dans le graphe, ignoré à la reprise.
+        let mut grants = Grants::new();
+        grants.put(Grant::granted("run_program", "user"));
+        let mut nodes = grants.nodes("atelier").unwrap();
+        forcer(&mut nodes[0], "_granted", "false");
+
+        let back = Grants::from_nodes(&nodes).unwrap();
+        match back.allows("run_program") {
+            Verdict::Refuse(raison) => assert!(
+                raison.contains("incohérent"),
+                "le refus doit dire pourquoi : {raison}"
+            ),
+            Verdict::Allow => {
+                panic!("`_granted`=false contredit `_data` : l'outil ne doit pas passer")
+            }
+        }
+    }
+
+    #[test]
+    fn un_nom_d_outil_qui_contredit_le_json_ne_donne_pas_le_droit_a_l_autre() {
+        // `_tool` est la clé d'indexation ; `_data.tool` ce qui est appliqué. Une
+        // divergence ne doit accorder ni l'un ni l'autre — et le dire : sans refus
+        // EXPLICITE, « run_program » serait refusé par défaut, ce qui ne prouve rien.
+        let mut grants = Grants::new();
+        grants.put(Grant::granted("read_file", "user"));
+        let mut nodes = grants.nodes("atelier").unwrap();
+        forcer(&mut nodes[0], "_tool", "run_program");
+
+        let back = Grants::from_nodes(&nodes).unwrap();
+        for outil in ["read_file", "run_program"] {
+            let grant = back
+                .grants
+                .iter()
+                .find(|g| g.tool == outil)
+                .unwrap_or_else(|| panic!("« {outil} » doit porter un refus explicite"));
+            assert!(!grant.granted);
+            assert!(grant.reason.as_deref().unwrap().contains("incohérent"));
+        }
+    }
+
+    #[test]
+    fn une_colonne_granted_true_sur_un_json_refuse_n_eleve_pas_le_droit() {
+        // L'élévation, pas seulement la révocation : `_data` dit refusé, la colonne dit accordé.
+        let mut grants = Grants::new();
+        grants.put(Grant::refused(
+            "run_program",
+            "descriptor",
+            "module non signé",
+        ));
+        let mut nodes = grants.nodes("atelier").unwrap();
+        forcer(&mut nodes[0], "_granted", "true");
+
+        let back = Grants::from_nodes(&nodes).unwrap();
+        assert!(!back.allows("run_program").is_allowed());
+    }
+
+    #[test]
+    fn le_refus_d_incoherence_ne_depend_pas_de_l_ordre_des_noeuds() {
+        // Un autre nœud, sain et accordé, pour le même outil : il ne doit pas effacer
+        // le refus, qu'il soit lu avant ou après.
+        let mut sain = Grants::new();
+        sain.put(Grant::granted("run_program", "user"));
+        let sain = sain.nodes("atelier").unwrap().remove(0);
+        let mut abime = sain.clone();
+        forcer(&mut abime, "_granted", "false");
+
+        for ordre in [vec![abime.clone(), sain.clone()], vec![sain, abime]] {
+            let back = Grants::from_nodes(&ordre).unwrap();
+            assert!(
+                !back.allows("run_program").is_allowed(),
+                "le refus d'incohérence est collant, quel que soit l'ordre de lecture"
+            );
+        }
+    }
+
+    #[test]
+    fn une_colonne_absente_ne_contredit_rien() {
+        // Limite ASSUMÉE et épinglée : un nœud sans `_granted` garde ce que dit `_data`.
+        let mut grants = Grants::new();
+        grants.put(Grant::granted("read_file", "user"));
+        let mut nodes = grants.nodes("atelier").unwrap();
+        nodes[0].props.retain(|(k, _)| k != "_granted");
+
+        let back = Grants::from_nodes(&nodes).unwrap();
+        assert!(back.allows("read_file").is_allowed());
+    }
+
+    #[test]
+    fn des_colonnes_coherentes_restent_accordees() {
+        // Contre-épreuve : la vérification ne doit pas révoquer un grant sain.
+        let mut grants = Grants::new();
+        grants.put(Grant::granted("read_file", "user"));
+        let back = Grants::from_nodes(&grants.nodes("atelier").unwrap()).unwrap();
+        assert!(back.allows("read_file").is_allowed());
     }
 }
