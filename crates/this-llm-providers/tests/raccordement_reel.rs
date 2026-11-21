@@ -1,14 +1,16 @@
 //! Raccordement RÉEL à un moteur, opt-in (this#288, case C5 de
 //! `docs/harnais-capacites-moteurs.md`).
 //!
-//! Ces tests ne tournent que si `THIS_RACCORDEMENT=deepseek` est posé ; sans lui, chacun
-//! dit qu'il est sauté et passe. La clé n'est JAMAIS dans le dépôt ni dans une fixture : elle
+//! Ces tests sont `#[ignore]` : une suite ordinaire (la CI) les compte comme IGNORÉS, jamais
+//! comme réussis sans avoir rien fait. Ils ne tournent qu'avec `--ignored` ET
+//! `THIS_RACCORDEMENT=deepseek` ; lancés par `--ignored` sans la variable, chacun dit qu'il
+//! est sauté. La clé n'est JAMAIS dans le dépôt ni dans une fixture : elle
 //! est lue dans la variable `DEEPSEEK_API_KEY` par la référence `CredentialRef::Env` — le
 //! chemin de production —, typiquement injectée par un coffre :
 //!
 //! ```text
 //! THIS_RACCORDEMENT=deepseek orchestrator secret exec -e DEEPSEEK_API_KEY=deepseek-api-key -- \
-//!   cargo test -p this-llm-providers --test raccordement_reel -- --test-threads=1 --nocapture
+//!   cargo test -p this-llm-providers --test raccordement_reel -- --ignored --test-threads=1 --nocapture
 //! ```
 //!
 //! Ce qu'ils prouvent, et que les doublures ne prouvent pas : le moteur réel rend du texte,
@@ -60,6 +62,7 @@ fn client(config: ProviderConfig) -> this_llm_providers::ProviderClient {
 }
 
 #[tokio::test]
+#[ignore = "raccordement réel : THIS_RACCORDEMENT=deepseek et --ignored"]
 async fn le_moteur_reel_rend_du_texte_et_un_usage_compte_par_lui() {
     if !demande("texte+usage") {
         return;
@@ -94,6 +97,7 @@ async fn le_moteur_reel_rend_du_texte_et_un_usage_compte_par_lui() {
 }
 
 #[tokio::test]
+#[ignore = "raccordement réel : THIS_RACCORDEMENT=deepseek et --ignored"]
 async fn un_plafond_epuise_par_le_raisonnement_se_dit_tronque_pas_fini() {
     // MESURÉ le 21/11/2026 : `deepseek-flash` sous un plafond de 16 jetons rend un texte
     // VIDE — les jetons de sortie partent dans le raisonnement. Un hôte qui lirait « texte
@@ -121,6 +125,7 @@ async fn un_plafond_epuise_par_le_raisonnement_se_dit_tronque_pas_fini() {
 }
 
 #[tokio::test]
+#[ignore = "raccordement réel : THIS_RACCORDEMENT=deepseek et --ignored"]
 async fn le_moteur_reel_rend_un_appel_d_outil_structure() {
     if !demande("outil") {
         return;
@@ -168,6 +173,7 @@ async fn le_moteur_reel_rend_un_appel_d_outil_structure() {
 }
 
 #[tokio::test]
+#[ignore = "raccordement réel : THIS_RACCORDEMENT=deepseek et --ignored"]
 async fn une_cle_refusee_est_une_reponse_du_moteur_pas_une_panne_reseau() {
     if !demande("clé refusée") {
         return;
