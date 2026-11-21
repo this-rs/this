@@ -150,12 +150,12 @@ this-vite = { version = "0.0.1", path = "../../vite-rs", optional = true }
 
 # WAMI — `version` + `git` + `rev` : le hash fixe le code pendant le développement, la `version`
 # est ce que cargo résout à la PUBLICATION (`path` et `git` sont retirés du manifeste empaqueté).
-# Donc publier `this-rs` exige que wami 0.19 / wami-core 0.20 / wami-condition 0.18.1 soient sur
+# Donc publier `this-rs` exige que wami 0.21 / wami-core 0.21 / wami-condition 0.18.3 soient sur
 # crates.io. Tant qu'elles n'y sont pas, `cargo package` échoue : c'est voulu, pas un oubli.
 # Feature-gated : n'affecte PAS le build par défaut (feature `wami`).
-wami = { version = "0.19", git = "https://github.com/Lsh0x/wami.git", rev = "5663db071a56285abd8c10219009964a569733bf", optional = true }
-wami-core = { version = "0.20", git = "https://github.com/Lsh0x/wami.git", rev = "5663db071a56285abd8c10219009964a569733bf", optional = true }
-wami-condition = { version = "0.18.1", git = "https://github.com/Lsh0x/wami.git", rev = "5663db071a56285abd8c10219009964a569733bf", optional = true }
+wami = { version = "0.21", git = "https://github.com/Lsh0x/wami.git", rev = "a4e107071c07b14e0d5fb41e5ce1f0470d58fba5", optional = true }
+wami-core = { version = "0.21", git = "https://github.com/Lsh0x/wami.git", rev = "a4e107071c07b14e0d5fb41e5ce1f0470d58fba5", optional = true }
+wami-condition = { version = "0.18.3", git = "https://github.com/Lsh0x/wami.git", rev = "a4e107071c07b14e0d5fb41e5ce1f0470d58fba5", optional = true }
 
 # WAMI auth (optional, feature-gated)
 jsonwebtoken = { version = "9", optional = true }

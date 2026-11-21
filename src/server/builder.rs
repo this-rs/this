@@ -263,9 +263,13 @@ impl ServerBuilder {
     /// **N'arme pas** le bail d'écriture sur le store obrain.
     ///
     /// Par défaut, attacher un store inscriptible prend un bail exclusif : un
-    /// second écrivain (dans un autre processus **ou dans celui-ci**) est
-    /// refusé, au lieu de corrompre le WAL en silence. Désarmer cet appel rend
-    /// l'arbitrage à l'exploitant — à ne faire que sciemment.
+    /// second écrivain (dans un autre processus) est refusé, au lieu de
+    /// corrompre le WAL en silence. Depuis obrain 2026-11-01, un second
+    /// `open()` en écriture du même répertoire est déjà refusé par obrain
+    /// lui-même (« one writable ObrainDB per base and per process ») :
+    /// désarmer ce bail ne rouvre **pas** ce trou intra-processus. L'appel rend
+    /// seulement l'arbitrage cross-processus à l'exploitant — à ne faire que
+    /// sciemment.
     ///
     /// Un store ouvert en **lecture seule** n'arme jamais de bail : il n'écrit
     /// pas, donc il n'a rien à arbitrer.
@@ -1251,7 +1255,7 @@ impl ServerBuilder {
                             ),
                             Err(e) => {
                                 return Err(anyhow::anyhow!(
-                                    "write fencing refused on {}: {e}. Un autre écrivain détient                                      le bail (autre processus, ou ce processus). Utiliser                                      `.without_write_fencing()` pour l'assumer explicitement.",
+                                    "write fencing refused on {}: {e}. Un autre écrivain détient le bail (autre processus). Utiliser `.without_write_fencing()` pour l'assumer explicitement.",
                                     shard.key()
                                 ));
                             }

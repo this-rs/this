@@ -202,3 +202,26 @@ positif partiel.
   `this-agent`/`this-llm` publiés, non atteinte par la mesure.
 - Matrice OS/architecture, artefacts, sommes de contrôle, installation,
   démarrage, mise à jour et retour arrière : rien de tout cela n'est mesuré ici.
+
+## Disposition des dossiers : les checkouts frères (bootstrap)
+
+`this/Cargo.toml` référence deux dépôts **voisins** par `path`, pour deux features optionnelles :
+
+| Feature | Dépendances | Chemin attendu (depuis `this/`) |
+|---|---|---|
+| `obrain` | `obrain-engine`, `obrain-core`, `obrain-substrate`, … | `../../obrain/obrain-db/crates/…` |
+| `frontend` | `this-vite` | `../../vite-rs` |
+
+Un build **par défaut** n'en a pas besoin. Mais `--features obrain` / `--features frontend` échoue si les dossiers manquent — mesuré le 21/11 : `cargo metadata --features obrain` depuis un clone sans voisins rend **code 101**, « failed to load manifest for dependency `this-vite` ».
+
+**`scripts/bootstrap-dev.sh`** clone ces deux dépôts aux SHAs épinglés, dans la disposition attendue, à côté de `this/` :
+
+- `obrain` → `../obrain/obrain-db/` (dépôt `obrain-db/obrain`) ;
+- `vite-rs` → `../vite-rs/` (dépôt `this-rs/vite-rs`).
+
+Il est **idempotent**, ne touche **jamais** un checkout présent à un autre SHA (une copie de travail peut être en cours — `--force` pour aligner), et n'écrit **aucun chemin personnel**. Les épingles sont des **SHA complets** (un SHA abrégé échoue au `git fetch --depth 1`), surchargeables par `OBRAIN_REV` / `VITE_REV` :
+
+- obrain `f0d6e132666d34d63824a46ad2a5119416b0afb4`
+- vite-rs `dcf233cd154ed7416338c9141736ff9efa19f199`
+
+Cela couvre le premier critère de #289 (« build depuis un répertoire temporaire sans checkouts frères, par un bootstrap documenté et SHAs épinglés »). La matrice OS/architecture, les artefacts, sommes de contrôle et l'installation/mise à jour/retour arrière restent hors de ce document.
