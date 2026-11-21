@@ -1649,6 +1649,12 @@ impl Harness {
                         "appel rejoué : l'id « {} » a déjà été demandé dans ce tour",
                         doublon.id
                     );
+                    // Le texte a déjà été montré : le conserver sans les appels
+                    // refusés pour que la reprise voie ce que l'utilisateur a lu.
+                    self.push(Message::Assistant {
+                        content: text.clone(),
+                        calls: Vec::new(),
+                    });
                     stop = Some(run.borrow_mut().finish(Stop::Failed(raison)));
                     break 'turns;
                 }

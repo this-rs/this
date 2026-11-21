@@ -1169,7 +1169,7 @@ fn un_transport_qui_rejoue_le_meme_appel_ne_produit_pas_l_effet_deux_fois() {
     // qu'un effet dupliqué qu'on ne saurait pas défaire.
     let transport = Script::new(vec![
         Reply {
-            text: String::new(),
+            text: "Je prépare l'installation.".into(),
             calls: vec![call("a1"), call("a1")],
             finish: Finish::Tools,
         },
@@ -1180,7 +1180,7 @@ fn un_transport_qui_rejoue_le_meme_appel_ne_produit_pas_l_effet_deux_fois() {
         },
     ]);
     let tools = Tools::new(|_| Outcome::ok("module installé").observed("v1", "v2"));
-    let (harness, _, log) = build(transport, tools.clone(), Limits::default());
+    let (harness, _, log) = build(transport.clone(), tools.clone(), Limits::default());
 
     run(harness.send("installe"));
 
@@ -1201,5 +1201,31 @@ fn un_transport_qui_rejoue_le_meme_appel_ne_produit_pas_l_effet_deux_fois() {
     assert!(
         Message::check_thread(&harness.transcript()).is_ok(),
         "le fil ne doit pas rester invalide après le refus"
+    );
+    let texte = "Je prépare l'installation.";
+    assert!(
+        log.borrow()
+            .iter()
+            .any(|event| matches!(event, Event::Spoke { text } if text == texte))
+    );
+    assert!(
+        harness.transcript().iter().any(|message| matches!(message,
+            Message::Assistant { content, calls } if content == texte && calls.is_empty()
+        )),
+        "le texte montré doit rester dans le fil sans les appels refusés"
+    );
+
+    run(harness.send("continue"));
+    let requests = transport.seen.borrow();
+    assert_eq!(
+        requests.len(),
+        2,
+        "le tour suivant doit atteindre le moteur"
+    );
+    assert!(
+        requests[1].thread().iter().any(|message| matches!(message,
+            Message::Assistant { content, calls } if content == texte && calls.is_empty()
+        )),
+        "le tour suivant doit voir le texte déjà montré"
     );
 }
