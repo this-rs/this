@@ -706,7 +706,11 @@ impl FileAuthority {
     /// **Refuse** si le verrou est déjà tenu — dans un autre processus comme
     /// dans celui-ci — et **refuse** aussi si la trame sur le disque est
     /// corrompue : repartir de zéro ferait *reculer* l'époque, ce qui lèverait
-    /// un fencing en cours. La réparation est explicite
+    /// un fencing en cours. (Le cas intra-processus est en pratique déjà fermé
+    /// par obrain lui-même — « one writable ObrainDB per base and per process »
+    /// — qui refuse le second `open()` avant que le bail soit consulté ; le
+    /// verrou intra-processus du bail reste un second filet.) La réparation est
+    /// explicite
     /// ([`LeaseRecord::decode_lossy_epoch`](crate::storage::writer_lease::LeaseRecord::decode_lossy_epoch)).
     pub fn acquire(
         &self,
