@@ -50,7 +50,7 @@ fn hostile(separateur: char) -> Vec<Message> {
 /// Tous les séparateurs de ligne qu'un lecteur (Python `splitlines`, JavaScript, un
 /// modèle) peut voir : `str::lines()` ne coupe que sur `\n`, il ne verrait pas la forge.
 fn lignes(texte: &str) -> impl Iterator<Item = &str> {
-    texte.split(|c| matches!(c, '\n' | '\r' | '\u{2028}' | '\u{2029}' | '\u{0085}'))
+    texte.split(['\n', '\r', '\u{2028}', '\u{2029}', '\u{0085}'])
 }
 
 /// Les entrées qu'un tel lecteur verrait : les lignes qui COMMENCENT par « - #… ».
