@@ -274,12 +274,14 @@ const TYPES_CONNUS: &[&str] = &[
 pub struct UnknownEvent {
     /// Le `type` d'origine, tel que le fil le portait.
     pub type_name: String,
-    /// Le JSON d'origine, relu en `serde_json::Value`. Le relayer rend le même `type` et les
-    /// mêmes champs, mais **pas les mêmes octets** : un nombre que `Value` ne représente pas
-    /// (au-delà de `u64`/`i64`, décimal plus précis qu'un `f64`) peut changer de valeur, et
-    /// l'écriture des nombres ou l'ordre des clés peut changer selon les features `serde_json`
-    /// unifiées dans le binaire. Voir `docs/harnais-contrat-evenements.md` §3.
-    pub raw: Value,
+    /// Le JSON de l'objet, **exactement tel qu'il est arrivé** (sans les espaces qui l'entourent),
+    /// quand il a été lu par [`EventWire::from_json_str`]. C'est le seul relais exact :
+    /// [`EventWire::to_json_exact`]. Lu par le `Deserialize` générique, qui ne voit pas le texte,
+    /// il vaut la forme canonique de `raw`.
+    pub texte: String,
+    /// La vue en `serde_json::Value`, pour l'INSPECTION seulement. `None` quand un nombre n'y tient
+    /// pas (au-delà de `f64`, ou `1e400`) : le `type` et le texte restent lisibles et exacts.
+    pub raw: Option<Value>,
 }
 
 /// Un événement lu sur le fil : connu, décodé **strictement**, ou d'une version
@@ -325,10 +327,16 @@ impl EventWire {
 impl Serialize for EventWire {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         match self {
-            // Un événement d'une version future repart avec son `type` et ses champs (pas son
-            // texte d'origine : voir la limite de `UnknownEvent::raw`) : un hôte peut le
-            // relayer sans en faire un `{"type":"Unknown"}`.
-            Self::Unknown(inconnu) => inconnu.raw.serialize(serializer),
+            // Par serde, un inconnu repart par sa vue `Value` (lossy : voir `to_json_exact` pour
+            // le texte exact). Sans vue (nombre hors de `Value`), c'est une ERREUR nommée, jamais un
+            // relais silencieusement déformé.
+            Self::Unknown(inconnu) => match &inconnu.raw {
+                Some(raw) => raw.serialize(serializer),
+                None => Err(serde::ser::Error::custom(
+                    "événement inconnu dont un nombre n'est pas représentable par Value : \
+                     utiliser EventWire::to_json_exact",
+                )),
+            },
             Self::Known(event) => event.serialize(serializer),
         }
     }
@@ -345,13 +353,65 @@ impl<'de> Deserialize<'de> for EventWire {
             ));
         };
         if !TYPES_CONNUS.contains(&type_name.as_str()) {
-            return Ok(Self::Unknown(UnknownEvent { type_name, raw }));
+            let texte = raw.to_string();
+            return Ok(Self::Unknown(UnknownEvent {
+                type_name,
+                texte,
+                raw: Some(raw),
+            }));
         }
         // Type connu : décodage strict. Un payload incomplet est une ERREUR —
         // le ranger en inconnu inventerait un succès et effacerait le défaut.
         serde_json::from_value::<Event>(raw)
             .map(Self::Known)
             .map_err(serde::de::Error::custom)
+    }
+}
+
+/// Le `type` seul d'un objet, lu SANS décoder les autres valeurs (`IgnoredAny` ne convertit aucun
+/// nombre : un `1e400` ailleurs dans l'objet ne fait pas échouer la lecture du `type`).
+#[derive(Deserialize)]
+struct SeulType {
+    #[serde(rename = "type")]
+    type_name: Option<String>,
+}
+
+impl EventWire {
+    /// Lit UN événement depuis son texte JSON, en gardant le texte EXACT d'un inconnu.
+    ///
+    /// Ne passe PAS par `Value` pour le relais : un nombre hors de `f64` ne fait donc pas échouer
+    /// la lecture d'un inconnu, et n'est pas arrondi dans [`UnknownEvent::texte`]. Un `type`
+    /// dupliqué ou non textuel est refusé. Un type connu est décodé strictement, comme partout.
+    pub fn from_json_str(texte: &str) -> Result<Self, serde_json::Error> {
+        let exact = texte.trim_matches(|c: char| matches!(c, ' ' | '\t' | '\n' | '\r'));
+        // Un événement est un OBJET : `serde_json` accepte une séquence là où un `struct` est
+        // attendu (`["futur"]` passerait pour `type = futur`). On le refuse avant tout.
+        if !exact.starts_with('{') {
+            return Err(serde::de::Error::custom("un événement est un objet JSON"));
+        }
+        let seul: SeulType = serde_json::from_str(exact)?;
+        let Some(type_name) = seul.type_name else {
+            return Err(serde::de::Error::custom(
+                "événement sans `type` textuel : ni connu, ni futur — illisible",
+            ));
+        };
+        if !TYPES_CONNUS.contains(&type_name.as_str()) {
+            return Ok(Self::Unknown(UnknownEvent {
+                type_name,
+                texte: exact.to_string(),
+                raw: serde_json::from_str::<Value>(exact).ok(),
+            }));
+        }
+        serde_json::from_str::<Event>(exact).map(Self::Known)
+    }
+
+    /// Le JSON de cet événement. Pour un inconnu lu par [`Self::from_json_str`], ce sont les octets
+    /// reçus (sans les espaces qui entourent l'objet). Pour un connu, sa forme sérialisée.
+    pub fn to_json_exact(&self) -> Result<String, serde_json::Error> {
+        match self {
+            Self::Unknown(inconnu) => Ok(inconnu.texte.clone()),
+            Self::Known(event) => serde_json::to_string(event),
+        }
     }
 }
 
@@ -653,7 +713,14 @@ mod tests {
             EventWire::Known(event) => panic!("« {} » n'est pas connu d'ici", event.name()),
         };
         assert_eq!(inconnu.type_name, "budget_projete");
-        assert_eq!(inconnu.raw.get("restant").and_then(Value::as_i64), Some(42));
+        assert_eq!(
+            inconnu
+                .raw
+                .as_ref()
+                .and_then(|v| v.get("restant"))
+                .and_then(Value::as_i64),
+            Some(42)
+        );
 
         // Relayé, il repart avec SON type et TOUS ses champs : jamais
         // `{"type":"Unknown"}`, qui est exactement ce que #301 laissait passer.
