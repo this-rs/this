@@ -242,3 +242,50 @@ fn is_approved_strict_accepte_un_document_entierement_digeste() {
     let (d, trusted) = approuve(doc_avec_digests(), "theo");
     assert_eq!(d.is_approved_strict(&trusted), Verdict::Allow);
 }
+
+/// Revue de #324 : la map `approval.digests` que `is_approved` compare vit dans `self.approval`,
+/// le champ du DOCUMENT. Elle est hors empreinte (`fingerprint()` retire `approval`) et jamais
+/// confrontée à `trusted.digests`. Ce test fixe cet état : la map n'est PAS authentifiée par
+/// l'hôte. La vider côté document, ou faire diverger `trusted.digests`, ne change pas le verdict.
+/// (Politique à décider : la rendre probante en comparant `trusted.digests`, ou la retirer.)
+#[test]
+fn la_map_digests_de_l_approbation_n_est_pas_authentifiee_par_l_hote() {
+    let (mut d, mut trusted) = approuve(doc_avec_digests(), "ops");
+    assert_eq!(d.is_approved(&trusted), Verdict::Allow, "ligne de base");
+
+    // Le document vide sa propre map : l'empreinte ne bouge pas, le verdict non plus.
+    d.approval.as_mut().unwrap().digests.clear();
+    assert_eq!(
+        d.fingerprint(),
+        trusted[0].fingerprint,
+        "approval est hors empreinte"
+    );
+    assert_eq!(
+        d.is_approved(&trusted),
+        Verdict::Allow,
+        "la map du document est une affirmation : la vider ne coûte rien"
+    );
+
+    // L'hôte, lui, tient d'autres digests : ils ne sont jamais lus.
+    trusted[0].digests.insert("pol".into(), "AUTRE".into());
+    assert_eq!(
+        d.is_approved(&trusted),
+        Verdict::Allow,
+        "trusted.digests n'est pas comparé"
+    );
+}
+
+/// Ce qui épingle réellement le contenu DÉCLARÉ : `slot.digest`, qui entre dans l'empreinte
+/// approuvée par l'hôte. Même avec la map du document vidée (contrôle de map inopérant), changer
+/// un digest d'emplacement change l'empreinte et fait refuser.
+#[test]
+fn c_est_le_digest_de_l_emplacement_dans_l_empreinte_qui_epingle_le_contenu_declare() {
+    let (mut d, trusted) = approuve(doc_avec_digests(), "ops");
+    d.approval.as_mut().unwrap().digests.clear();
+    d.slots[0].digest = Some("republie".into());
+    let m = motif(d.is_approved(&trusted));
+    assert!(
+        m.contains("a changé depuis l'approbation"),
+        "refusé par l'empreinte, pas par la map : {m}"
+    );
+}

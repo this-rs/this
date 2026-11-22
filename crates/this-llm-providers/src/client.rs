@@ -272,7 +272,7 @@ impl ProviderClient {
         secret: Option<Secret>,
         ledger: Arc<Mutex<Ledger>>,
         clock: Arc<dyn Clock>,
-    ) -> Self {
+    ) -> Result<Self, ProviderError> {
         // On a native target the client carries the configured timeout. In a browser
         // the page's own network stack decides, and reqwest offers no timeout there.
         //
@@ -290,14 +290,31 @@ impl ProviderClient {
                 .connect_timeout(silence.min(std::time::Duration::from_secs(CONNECT_TIMEOUT_SECS)))
                 .read_timeout(silence)
         };
-        let http = builder.build().unwrap_or_else(|_| reqwest::Client::new());
-        Self {
+        // `http` + secret : la validation a exigé une IP loopback LITTÉRALE. Il reste deux façons
+        // pour le Bearer de quitter la machine malgré elle : un proxy d'environnement (HTTP_PROXY,
+        // ALL_PROXY) et une redirection (302 vers un autre hôte). Les deux sont coupées ici.
+        //
+        // Natif seulement : en wasm, `reqwest` n'expose ni `no_proxy` ni `redirect` (le navigateur
+        // décide), et c'est pourquoi `ProviderConfig::validate` y refuse TOUJOURS `http` + credential
+        // — ce chemin n'y est donc jamais atteint avec un secret.
+        #[cfg(not(target_arch = "wasm32"))]
+        let builder = if config.base_url.starts_with("http://") && secret.is_some() {
+            builder
+                .no_proxy()
+                .redirect(reqwest::redirect::Policy::none())
+        } else {
+            builder
+        };
+        let http = builder
+            .build()
+            .map_err(|error| ProviderError::Transport(format!("client HTTP : {error}")))?;
+        Ok(Self {
             config,
             secret,
             http,
             ledger,
             clock,
-        }
+        })
     }
 
     pub fn config(&self) -> &ProviderConfig {

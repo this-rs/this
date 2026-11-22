@@ -196,7 +196,15 @@ impl AgentSubstrate {
             }
             let mut props = Vec::new();
             for key in ["_uuid", "_agent", "_tool", "_granted", "_source", "_data"] {
-                if let Some(value) = node.get_property(key).and_then(|v| v.as_str()) {
+                // La colonne est comparée sous sa FORME TEXTE, quelle que soit sa
+                // forme stockée. `.as_str()` seul la perdait quand elle n'était pas
+                // une chaîne : un `_granted` écrit en booléen par une migration
+                // (le type naturel) était relu comme ABSENT, donc ne contredisait
+                // rien, et l'outil restait accordé — le défaut exact que la relecture
+                // de `Grants::from_nodes` corrige. `Display` rend « false » pour
+                // `Bool(false)` et le texte brut pour `String`, donc la contradiction
+                // se voit au lieu de disparaître.
+                if let Some(value) = node.get_property(key) {
                     props.push((key.to_string(), value.to_string()));
                 }
             }
@@ -332,6 +340,48 @@ mod tests {
         match back.allows("jamais_vu") {
             Verdict::Refuse(raison) => assert!(raison.contains("jamais_vu")),
             Verdict::Allow => panic!("fail-closed"),
+        }
+        drop(substrate);
+        drop(store);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn une_colonne_granted_ecrite_en_booleen_ne_restaure_pas_le_droit() {
+        // Une migration écrit `_granted` avec le type naturel du substrat (un
+        // booléen), pas avec la chaîne que pose `Grant::node`. Lue par `.as_str()`
+        // seule, cette colonne passait pour ABSENTE : la relecture restaurait alors
+        // le droit, alors que la colonne dit « révoqué ». Le scénario est celui du
+        // défaut, avec un écrivain qui ne fait rien d'autre que migrer.
+        let dir = temp_dir("colonne_bool");
+        let store = ObrainStore::open(&dir).unwrap();
+        let substrate = AgentSubstrate::new(Arc::clone(&store));
+
+        let mut grants = Grants::new();
+        grants.put(Grant::granted("run_program", "user"));
+        substrate.save_grants("atelier", &grants).unwrap();
+
+        // L'écrivain externe : la colonne devient un vrai booléen `false`.
+        let graph = substrate.graph();
+        let mut change = false;
+        for node_id in graph.nodes_by_label(GRANT) {
+            let Some(node) = graph.get_node(node_id) else {
+                continue;
+            };
+            if node.get_property("_tool").and_then(|v| v.as_str()) == Some("run_program") {
+                graph.set_node_property(node_id, "_granted", ObrainValue::Bool(false));
+                change = true;
+            }
+        }
+        assert!(change, "le nœud de l'autorisation doit exister");
+        store.commit_wal().unwrap();
+
+        match substrate.grants("atelier").unwrap().allows("run_program") {
+            Verdict::Refuse(raison) => assert!(
+                raison.contains("incohérent"),
+                "le refus doit nommer la contradiction : {raison}"
+            ),
+            Verdict::Allow => panic!("un `_granted` booléen révoqué ne rend pas le droit"),
         }
         drop(substrate);
         drop(store);

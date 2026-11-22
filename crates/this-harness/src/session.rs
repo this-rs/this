@@ -32,6 +32,7 @@ use crate::ports::{Cancel, Compactor, Delta, Permission, Recorder, Recorders, To
 use crate::wire::{
     Code, Failure, Finish, ImagePart, Message, Reply, Request, ThreadDefect, ToolCall, ToolSpec,
 };
+use this_agent::cite::SeenLedger;
 use this_agent::evidence::Verdict;
 use this_agent::{Decision, DefaultPolicy, Goal, Policy, Run, Step, Stop};
 
@@ -92,6 +93,12 @@ pub const MAX_RETRIES: u32 = 3;
 
 /// Première attente avant une relance ; elle double à chaque tentative.
 pub const RETRY_BACKOFF_MS: u64 = 1_000;
+
+/// Combien de modèles refusés pour quota un MESSAGE peut enchaîner avant de rendre l'échec.
+///
+/// Le repli ne rejoue que l'appel au modèle (jamais un outil), et chaque modèle refusé est
+/// exclu du suivant : la chaîne est donc finie, et ne peut pas devenir une boucle de quotas.
+pub const MAX_QUOTA_FALLBACKS: usize = 2;
 
 /// Le pas du chien de garde : le drapeau d'annulation est un simple `Cell`,
 /// il se lit, il ne prévient pas.
@@ -553,7 +560,16 @@ async fn pause(clock: &dyn Clock, ms: u64, cancel: &Cancel) -> bool {
 }
 
 /// Une panne passagère : la limite de débit (429) ou un délai dépassé.
+///
+/// Un quota DIT épuisé par le transport (`Failure::quota`) n'est pas passager : rejouer le
+/// même modèle contre un quota épuisé ne peut pas réussir et ajoute de la pression (une
+/// boucle de quotas, interdite par C2 de #288). Il passe par le repli de modèle, ou il est
+/// rendu tel quel. Un 429 NON qualifié reste rejoué comme avant : rien ne dit que c'est un
+/// quota.
 fn transient(failure: &Failure) -> bool {
+    if failure.quota.is_some() {
+        return false;
+    }
     failure.code == Code::Timeout || failure.status == Some(429)
 }
 
@@ -844,6 +860,18 @@ impl Drop for BusyGuard {
 pub struct Harness {
     transport: Rc<dyn Transport>,
     toolbox: Rc<dyn Toolbox>,
+    /// Le registre PARTAGÉ des ids vus, **capturé une fois** à la construction
+    /// (`Toolbox::vus`).
+    ///
+    /// Il appartient à l'**outillage**, pas au harnais : deux harnais construits
+    /// sur le MÊME `Rc<dyn Toolbox>` partagent donc le registre, et un `restore`
+    /// dans l'un efface ce que l'autre avait lu. Un hôte qui veut un registre
+    /// par session construit un outillage par session — c'est la contrepartie
+    /// de « le harnais ne le crée pas ». Le capturer ici plutôt que de rappeler `vus()` à chaque
+    /// résultat d'outil évite qu'un outillage qui rendrait un `Rc` neuf à chaque
+    /// appel remplisse un registre que personne ne relit : le trait exige « le
+    /// sien », et le harnais le lit comme tel.
+    vus: Option<Rc<RefCell<SeenLedger>>>,
     /// La politique du run. `DefaultPolicy` par défaut : les règles du crate ne
     /// changent pas parce qu'un hôte en branche une autre.
     policy: Rc<dyn Policy>,
@@ -877,6 +905,7 @@ impl Harness {
     ) -> Self {
         Self {
             transport,
+            vus: toolbox.vus(),
             toolbox,
             policy: Rc::new(DefaultPolicy),
             clock: Rc::new(SystemClock),
@@ -1102,6 +1131,7 @@ impl Harness {
         Handle {
             state: self.state.clone(),
             out: self.out.clone(),
+            vus: self.vus.clone(),
         }
     }
 
@@ -1116,7 +1146,17 @@ impl Harness {
 
     /// Reprend une conversation déjà commencée.
     pub fn seed(&self, transcript: Vec<Message>) {
-        self.with(|s| s.transcript = transcript);
+        self.handle().seed(transcript);
+    }
+
+    /// [`Self::seed`] pour un transcript dont on connaît l'origine.
+    pub fn seed_trusted(&self, transcript: Vec<Message>) {
+        self.handle().seed_trusted(transcript);
+    }
+
+    /// [`Self::seed`] : alias conservateur, rien n'y devient une preuve.
+    pub fn seed_untrusted(&self, transcript: Vec<Message>) {
+        self.handle().seed_untrusted(transcript);
     }
 
     pub fn snapshot(&self) -> Snapshot {
@@ -1124,8 +1164,23 @@ impl Harness {
     }
 
     /// Remet un état sauvegardé en place — la file d'attente comprise.
+    ///
+    /// **Conservateur par défaut** : voir [`Handle::restore`].
     pub fn restore(&self, snapshot: Snapshot) {
         self.handle().restore(snapshot);
+    }
+
+    /// [`Self::restore`] pour un snapshot dont on connaît l'origine : la voie
+    /// privilégiée, explicite (voir [`Handle::restore_trusted`]). **Hors de la garantie
+    /// « cité ≠ lu »** : une citation y redevient `Direct` (l'intégrité n'est pas la fidélité de
+    /// provenance).
+    pub fn restore_trusted(&self, snapshot: Snapshot) {
+        self.handle().restore_trusted(snapshot);
+    }
+
+    /// [`Self::restore`] : alias conservateur, rien n'y devient une preuve.
+    pub fn restore_untrusted(&self, snapshot: Snapshot) {
+        self.handle().restore_untrusted(snapshot);
     }
 
     /// Le message entre dans la conversation et l'agent travaille jusqu'à
@@ -1250,7 +1305,15 @@ impl Harness {
             let limits = self.with(|s| s.limits.clone());
             // Mode Auto : la paire de cet objectif, décidée une fois, sur le message
             // qui l'ouvre. Sans routeur, `None` : la requête ne porte rien.
-            let route = self.route(&first, toolbox.as_ref(), &limits, &cancel).await;
+            let mut route = self.route(&first, toolbox.as_ref(), &limits, &cancel).await;
+            // Les paires que le moteur a refusées pour quota PENDANT ce message (C2 de #288).
+            let mut quota_refused: Vec<crate::routing::Pick> = Vec::new();
+            // Vrai dès qu'un repli a RÉELLEMENT servi une autre paire que celle décidée.
+            let mut quota_fell_back = false;
+            // Vrai dès que la paire DÉCIDÉE a servi un tour (texte, réponse, appel d'outil, refus
+            // non qualifié) avant tout repli : elle a été atteinte, l'état ne doit pas revenir à
+            // l'avant du changement, même si un repli termine l'objectif (revue de #321).
+            let mut decided_served = false;
             // L'identité du run, stable pour toutes ses étapes.
             let run_id = self.with(|s| {
                 s.run_seq += 1;
@@ -1272,6 +1335,7 @@ impl Harness {
             transport.set_permission(Rc::new(RunPorts {
                 grants: self.grants.clone(),
                 toolbox: toolbox.clone(),
+                vus: self.vus.clone(),
                 run: run.clone(),
                 run_id: run_id.clone(),
                 recorder: self.recorder.clone(),
@@ -1327,7 +1391,7 @@ impl Harness {
                 // Le contexte du tour est recalculé ici, à chaque tour : il
                 // dépend de la conversation telle qu'elle est maintenant.
                 let context = self.turn_context(&cancel).await;
-                let request = self
+                let mut request = self
                     .request(toolbox.as_ref(), context, &cancel)
                     .await
                     .with_route(route.clone());
@@ -1386,15 +1450,19 @@ impl Harness {
                     // Les derniers signes du flux : un tour qui commence en est
                     // un, chaque morceau reçu en est un.
                     let signs = Signs::new(clock.now_ms());
+                    // Le moteur a-t-il parlé PENDANT CE TOUR (un morceau, même vide) ?
+                    let parle = Rc::new(Cell::new(false));
                     let delta: Delta = {
                         let gathered = gathered.clone();
                         let answered = answered.clone();
+                        let parle = parle.clone();
                         let out = self.out.clone();
                         let cancel = cancel.clone();
                         let signs = signs.clone();
                         let clock = clock.clone();
                         Rc::new(move |text: &str| {
                             answered.set(true);
+                            parle.set(true);
                             // TOUT appel est un signe de vie, y compris un morceau
                             // vide : c'est ainsi qu'un transport dit « le moteur
                             // parle » quand il écrit un appel d'outil ou raisonne
@@ -1445,15 +1513,65 @@ impl Harness {
                     // vie au début du tour — et ne sert pas non plus. Dans tous ces cas, un
                     // morceau reçu AVANT la panne a déjà posé `answered` par `delta` : c'est
                     // lui, pas le code de panne, qui dit si le moteur a parlé.
-                    if match &issue {
+                    let repondu = match &issue {
                         Ok(Ok(_)) => true,
                         Ok(Err(failure)) => !matches!(
                             failure.code,
                             Code::Unreachable | Code::Aborted | Code::Timeout
                         ),
                         Err(_) => false,
-                    } {
+                    };
+                    if repondu {
                         answered.set(true);
+                    }
+                    // La paire décidée a SERVI ce tour : elle a parlé, ou répondu autre chose
+                    // qu'un refus de quota qualifié (celui-là déclenche le repli : il n'a rien servi).
+                    let refus_de_quota = matches!(&issue, Ok(Err(f)) if f.quota.is_some());
+                    if !quota_fell_back && (parle.get() || (repondu && !refus_de_quota)) {
+                        decided_served = true;
+                    }
+
+                    // Quota d'un MODÈLE épuisé (dit par le transport, jamais deviné) : le tour
+                    // repart sur un autre modèle de la même instance — mais sous la garde du
+                    // rejeu ci-dessous : rien montré, aucun outil joué DANS CE TOUR. On ne
+                    // rejoue que l'appel au modèle, jamais un effet.
+                    if let Ok(Err(failure)) = &issue
+                        && let Some(quota) = failure.quota
+                        && quota.scope == crate::wire::QuotaScope::Model
+                        && !failure.is_aborted()
+                        && !cancel.is_cancelled()
+                        && gathered.borrow().is_empty()
+                        && run.borrow().steps.len() == steps_at_turn
+                        && quota_refused.len() < MAX_QUOTA_FALLBACKS
+                        && let Some(current) = route.clone()
+                        && let Some(model) = current.model().map(str::to_string)
+                        && let Some(fallback) = self
+                            .quota_fallback(
+                                &first,
+                                toolbox.as_ref(),
+                                &limits,
+                                &cancel,
+                                &mut quota_refused,
+                                crate::routing::Pick::new(current.provider(), &model),
+                                quota.resets_at_ms,
+                                transport.honors_route(),
+                                deadline.map(|(at, _)| at),
+                            )
+                            .await
+                    {
+                        self.out.emit(Event::Hint {
+                            kind: HintKind::Retry,
+                            text: format!(
+                                "Quota épuisé pour le modèle {model} : le tour repart sur {} (même instance). Seul l'appel au modèle est rejoué.",
+                                fallback.model().unwrap_or("le modèle par défaut")
+                            ),
+                        });
+                        request = request.with_route(Some(fallback.clone()));
+                        route = Some(fallback);
+                        quota_fell_back = true;
+                        // Un nouveau modèle, une nouvelle série de pannes passagères.
+                        tentative = 0;
+                        continue;
                     }
 
                     // Une panne passagère se rejoue, mais seulement si le tour
@@ -1595,6 +1713,24 @@ impl Harness {
                     break 'turns;
                 }
 
+                // Un transport peut REJOUER un appel : la même réponse livrée deux
+                // fois, donc deux appels de même id. Sans cette garde, l'effet est
+                // produit DEUX fois (installer, écrire, envoyer), et le défaut ne se
+                // voit qu'au tour SUIVANT, quand `check_thread` refuse le fil
+                // (`DuplicateCallId`) — trop tard : l'effet est déjà là, en double.
+                // Un rejeu ne se devine pas en silence : il se refuse en le nommant.
+                // La garde est AVANT l'empilement : un `Assistant` avec deux appels
+                // sans réponse laisserait un fil que le moteur refuserait.
+                let mut demandes = std::collections::HashSet::new();
+                if let Some(doublon) = reply.calls.iter().find(|c| !demandes.insert(c.id.as_str()))
+                {
+                    let raison = format!(
+                        "appel rejoué : l'id « {} » a déjà été demandé dans ce tour",
+                        doublon.id
+                    );
+                    stop = Some(run.borrow_mut().finish(Stop::Failed(raison)));
+                    break 'turns;
+                }
                 self.push(Message::Assistant {
                     content: text.clone(),
                     calls: reply.calls.clone(),
@@ -1643,6 +1779,14 @@ impl Harness {
                         let index = run.borrow().steps.len().saturating_sub(1);
                         run.borrow_mut().effet_inconnu(index);
                         abandoned |= matches!(why, Watch::Abandoned(_));
+                    }
+                    // Le registre PARTAGÉ des ids vus (`Toolbox::vus`) voit le
+                    // résultat tel que le modèle le lira — donc tel que le transcript
+                    // le gardera, ce qui le rend reconstruisible à la reprise.
+                    // `observe` distingue lui-même les conteneurs `<untrusted_data>` :
+                    // un id qu'une note hostile a écrit reste CITÉ, jamais lu.
+                    if let Some(registre) = &self.vus {
+                        observe_outcome(&mut registre.borrow_mut(), &outcome);
                     }
                     self.push(Message::tool(call.id.clone(), outcome.text.clone()));
                 }
@@ -1719,8 +1863,17 @@ impl Harness {
                     // Bornée : un apprentissage qui pend ne retient ni `Stopped`,
                     // ni `busy`. Pas coupée par l'annulation : un run annulé est
                     // lui aussi rendu (`Cancelled`, jamais une récompense).
-                    let honored = transport.honors_route() && answered.get();
-                    let settle = router.settle(&ending, code.as_deref(), honored);
+                    // Un repli sur quota a servi une AUTRE paire que celle décidée : l'attribuer
+                    // à la décision créditerait au modèle qui a refusé un succès obtenu
+                    // ailleurs. On n'apprend pas sur ce qui n'a pas servi.
+                    // Deux signaux distincts (revue de #321) : la paire décidée a-t-elle été
+                    // ATTEINTE (l'état reste sur elle) ? et la fin lui est-elle ATTRIBUÉE (la
+                    // récompense) ? Un repli sépare les deux : la paire décidée peut avoir servi
+                    // ses premiers tours sans que la fin de l'objectif soit la sienne.
+                    let honors = transport.honors_route() && answered.get();
+                    let reached = honors && (!quota_fell_back || decided_served);
+                    let credited = honors && !quota_fell_back;
+                    let settle = router.settle_served(&ending, code.as_deref(), reached, credited);
                     let _ = race(settle, cut(clock.as_ref(), ROUTER_TIMEOUT_MS, None)).await;
                 }
             }
@@ -1894,26 +2047,7 @@ impl Harness {
         cancel: &Cancel,
     ) -> Option<crate::routing::Route> {
         let router = self.router.clone()?;
-        let transcript = self.transcript();
-        // Ce que le tour emportera : le fil (borné par le budget de contexte, la
-        // requête ne dépassera pas) et les schémas d'outils. Estimation, pas mesure.
-        let history = crate::context::estimate_tokens(&transcript);
-        let history = limits.context_budget.map_or(history, |b| history.min(b));
-        let schemas: usize = toolbox
-            .specs()
-            .iter()
-            .map(|spec| {
-                spec.name.len() + spec.description.len() + spec.parameters.to_string().len()
-            })
-            .sum();
-        // Le besoin d'images est celui du fil que le transport enverra : un tour
-        // de texte qui suit une image la porte encore dans l'historique. PO ne
-        // regarde que le message du tour (`set_turn_input`, `agent_hooks.rs:863`,
-        // parce que le moteur de la session garde son historique) ; ici le harnais
-        // renvoie tout le fil à chaque tour, donc il compte tout le fil — au pire
-        // trop prudent (une image que la compaction a retirée), jamais aveugle.
-        let has_images =
-            !first.images.is_empty() || transcript.iter().any(|m| !m.images().is_empty());
+        let (has_images, hints) = self.turn_signals(first, toolbox, limits);
         let clock = self.clock.clone();
         let honored = self.transport.honors_route();
         let routed = {
@@ -1921,11 +2055,7 @@ impl Harness {
                 text: &first.text,
                 has_images,
                 honored,
-                hints: crate::routing::ContextHints {
-                    history_tokens: history as u64,
-                    tool_schema_tokens: (schemas / 4) as u64,
-                    budget_remaining_usd: None,
-                },
+                hints,
             });
             match race(work, cut(clock.as_ref(), ROUTER_TIMEOUT_MS, Some(cancel))).await {
                 Ok(routed) => routed,
@@ -1961,6 +2091,111 @@ impl Harness {
             let repair = router.repair();
             let _ = race(repair, cut(clock.as_ref(), ROUTER_TIMEOUT_MS, Some(cancel))).await;
         }
+        Some(routed.route)
+    }
+
+    /// Ce que le routeur sait du tour : le besoin d'images et le poids du contexte.
+    ///
+    /// Partagé par la décision d'ouverture ([`Self::route`]) et le repli sur quota
+    /// ([`Self::quota_fallback`]) : les deux décident sur les mêmes signaux.
+    fn turn_signals(
+        &self,
+        first: &Pending,
+        toolbox: &dyn Toolbox,
+        limits: &Limits,
+    ) -> (bool, crate::routing::ContextHints) {
+        let transcript = self.transcript();
+        // Ce que le tour emportera : le fil (borné par le budget de contexte, la
+        // requête ne dépassera pas) et les schémas d'outils. Estimation, pas mesure.
+        let history = crate::context::estimate_tokens(&transcript);
+        let history = limits.context_budget.map_or(history, |b| history.min(b));
+        let schemas: usize = toolbox
+            .specs()
+            .iter()
+            .map(|spec| {
+                spec.name.len() + spec.description.len() + spec.parameters.to_string().len()
+            })
+            .sum();
+        // Le besoin d'images est celui du fil que le transport enverra : un tour
+        // de texte qui suit une image la porte encore dans l'historique. PO ne
+        // regarde que le message du tour (`set_turn_input`, `agent_hooks.rs:863`,
+        // parce que le moteur de la session garde son historique) ; ici le harnais
+        // renvoie tout le fil à chaque tour, donc il compte tout le fil — au pire
+        // trop prudent (une image que la compaction a retirée), jamais aveugle.
+        let has_images =
+            !first.images.is_empty() || transcript.iter().any(|m| !m.images().is_empty());
+        (
+            has_images,
+            crate::routing::ContextHints {
+                history_tokens: history as u64,
+                tool_schema_tokens: (schemas / 4) as u64,
+                budget_remaining_usd: None,
+            },
+        )
+    }
+
+    /// Après le refus d'un quota de MODÈLE : la route du repli, ou `None` (l'échec reste).
+    ///
+    /// `refused` reçoit la paire qui vient de refuser avant l'appel au routeur, pour que la
+    /// chaîne soit bornée par [`MAX_QUOTA_FALLBACKS`] et que chaque modèle ne soit tenté
+    /// qu'une fois. L'appel est borné dans le temps et coupé par l'annulation, comme la
+    /// décision d'ouverture. Rien n'est enregistré à l'apprentissage ; le repli se dit par
+    /// `Event::Routed` (`why: quota_fallback`).
+    #[allow(clippy::too_many_arguments)]
+    async fn quota_fallback(
+        &self,
+        first: &Pending,
+        toolbox: &dyn Toolbox,
+        limits: &Limits,
+        cancel: &Cancel,
+        refused: &mut Vec<crate::routing::Pick>,
+        just_refused: crate::routing::Pick,
+        resets_at_ms: Option<u64>,
+        honored: bool,
+        deadline_ms: Option<f64>,
+    ) -> Option<crate::routing::Route> {
+        let router = self.router.clone()?;
+        refused.push(just_refused);
+        // L'échéance du run est une borne DURE : un repli qui se décide après elle ne doit pas
+        // relancer un transport ni un outil. Le temps restant borne la sélection elle-même.
+        if deadline_ms.is_some_and(|at| self.clock.now_ms() >= at) {
+            return None;
+        }
+        let (has_images, hints) = self.turn_signals(first, toolbox, limits);
+        let work = router.after_limit(
+            crate::routing::TurnInput {
+                text: &first.text,
+                has_images,
+                honored,
+                hints,
+            },
+            refused,
+            resets_at_ms,
+        );
+        // Le plus court de : le délai du routeur et le temps qui reste avant l'échéance du run.
+        let restant = deadline_ms
+            .map(|at| (at - self.clock.now_ms()).max(0.0) as u64)
+            .unwrap_or(u64::MAX);
+        let borne = ROUTER_TIMEOUT_MS.min(restant);
+        let routed = race(work, cut(self.clock.as_ref(), borne, Some(cancel)))
+            .await
+            .ok()??;
+        // Recontrôle APRÈS la sélection : le pool a pu répondre au-delà de l'échéance (la course
+        // sonde d'abord le travail). Un choix tardif est écarté, jamais appliqué.
+        if deadline_ms.is_some_and(|at| self.clock.now_ms() >= at) {
+            return None;
+        }
+        self.out.emit(Event::Routed {
+            provider: routed.route.provider().to_string(),
+            model: routed.route.model().map(str::to_string),
+            // Dit « une autre paire que celle qui a refusé », pas un changement d'état du routeur
+            // (le repli n'y écrit rien) : voir la doc de `Event::Routed::changed`.
+            changed: true,
+            why: routed.why.code().to_string(),
+            reason: routed.reason,
+            mode: router.mode().map(|m| m.as_str().to_string()),
+            advisory: false,
+        });
         Some(routed.route)
     }
 
@@ -2236,6 +2471,10 @@ fn gate_decision(
 struct RunPorts {
     grants: Option<this_agent::substrate::Grants>,
     toolbox: Rc<dyn Toolbox>,
+    /// Le même registre que la boucle : un transport de la famille A exécute
+    /// SES outils pendant le flux, donc c'est ici — pas dans `pump` — que leurs
+    /// résultats entrent dans le registre.
+    vus: Option<Rc<RefCell<SeenLedger>>>,
     run: Rc<RefCell<Run>>,
     run_id: String,
     recorder: Rc<dyn Recorder>,
@@ -2251,6 +2490,12 @@ impl Permission for RunPorts {
     }
 
     async fn record(&self, call: &ToolCall, ms: u64, outcome: &Outcome) {
+        // Famille A : l'outil a tourné dans le flux du transport, pas dans la
+        // boucle — son résultat doit quand même entrer dans le registre, sinon
+        // tout ce qu'un moteur interne exécute resterait « jamais lu ».
+        if let Some(registre) = &self.vus {
+            observe_outcome(&mut registre.borrow_mut(), outcome);
+        }
         let step = step_of(&call.name, ms, outcome);
         self.run.borrow_mut().record(step);
         let snapshot = self.run.borrow().clone();
@@ -2448,8 +2693,38 @@ pub fn out_hash(text: &str) -> String {
         .collect()
 }
 
+/// Ce que le registre retient d'un résultat d'outil (décision #290).
+///
+/// Le texte du modèle n'est **jamais** une preuve de lecture : il est seulement cité.
+/// Une lecture directe n'existe que par `Outcome::observable`, que l'hôte remplit, et
+/// seulement pour un appel réussi — un refus ou un échec ne lit rien.
+fn observe_outcome(registre: &mut SeenLedger, outcome: &Outcome) {
+    registre.observe_quoted(&outcome.text);
+    if outcome.refused.is_none()
+        && outcome.failed.is_none()
+        && let Some(lu) = &outcome.observable
+    {
+        registre.observe(lu);
+    }
+}
+
 /// Le nombre maximal de messages tenus en file.
 const MAX_PENDING: usize = 1000;
+
+/// La confiance accordée à un transcript qu'on remet en place.
+///
+/// Ce n'est pas une politesse : c'est la seule chose qui empêche un transcript
+/// venu d'ailleurs de **blanchir** un id. Un `Message::Tool` forgé, imprimant un
+/// id hors conteneur, suffit à faire d'une citation une preuve si on le relit
+/// comme une lecture.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Confiance {
+    /// Le transcript vient de NOUS (notre snapshot, notre sauvegarde).
+    Notre,
+    /// Le transcript vient d'AILLEURS (fichier importé, autre personne, pair) :
+    /// rien n'y est une preuve, tout ce qu'il porte est seulement **cité**.
+    Importee,
+}
 
 /// La poignée que l'interface garde : elle commande sans attendre la fin d'un
 /// tour.
@@ -2457,6 +2732,10 @@ const MAX_PENDING: usize = 1000;
 pub struct Handle {
     state: Shared<State>,
     out: Out,
+    /// Le registre PARTAGÉ des ids vus (`Toolbox::vus`), capturé une fois : le
+    /// harnais le remplit à chaque résultat d'outil, et le rebâtit au `restore`.
+    /// `None` : l'outillage ne tient pas de registre, rien ne change.
+    vus: Option<Rc<RefCell<SeenLedger>>>,
 }
 
 impl Handle {
@@ -2610,7 +2889,83 @@ impl Handle {
 
     /// Remplace la conversation que le modèle verra : reprise d'une session
     /// sauvegardée, ou nouvelle conversation.
+    /// Rebâtit le registre partagé depuis un transcript, selon la confiance.
+    ///
+    /// `Importee` range tout en **cité** : c'est le refus conservateur demandé
+    /// pour un transcript dont on ne peut pas prouver l'origine.
+    fn rebatir_registre(&self, transcript: &[Message], confiance: Confiance) {
+        let Some(registre) = &self.vus else {
+            return;
+        };
+        let mut registre = registre.borrow_mut();
+        *registre = SeenLedger::new();
+        for message in transcript {
+            if let Message::Tool { content, .. } = message {
+                match confiance {
+                    Confiance::Notre => registre.observe(content),
+                    Confiance::Importee => registre.observe_quoted(content),
+                }
+            }
+        }
+    }
+
+    /// Remplace la conversation (reprise d'une session sauvegardée).
+    ///
+    /// Le registre **suit** la conversation : le laisser tel quel ferait survivre
+    /// les lectures de l'ancienne dans la nouvelle — une fuite croisée entre deux
+    /// conversations du même harnais.
+    ///
+    /// **Conservateur par défaut** : rien n'y devient une preuve (voir
+    /// [`Self::restore`]). Pour votre propre transcript, [`Self::seed_trusted`].
     pub fn seed(&self, transcript: Vec<Message>) {
+        self.seed_avec(transcript, Confiance::Importee)
+    }
+
+    /// [`Self::seed`] pour un transcript dont on connaît l'origine : les lectures
+    /// d'outils y sont relues (voie privilégiée, explicite).
+    ///
+    /// **Le fil ne porte que le texte du modèle**, pas `Outcome::observable` : relire
+    /// un transcript ne retrouve donc que ce que ce texte montre en clair, ce qui ne
+    /// vaut pas la déclaration que l'hôte avait faite pendant le run. Un hôte qui
+    /// cloisonne ses lectures (le texte les cache) ou qui répète les arguments du
+    /// modèle en clair (le texte les simule) n'a pas de raison de l'appeler : la
+    /// reprise par défaut, conservatrice, lui convient et ne trompe jamais.
+    ///
+    /// **L'intégrité ne donne pas la FIDÉLITÉ de provenance.** Même un snapshot signé et
+    /// intact ne porte que le texte : une simple *citation* y devient `Direct` au redémarrage,
+    /// sans `Outcome::observable` pour l'attester. `restore_trusted` n'est donc pas couvert par
+    /// la garantie « cité ≠ lu » ; seule la voie par défaut (conservatrice) la tient. Persister
+    /// et restaurer la provenance elle-même est un chantier distinct, non fait.
+    ///
+    /// **« Connaître l'origine » ne suffit pas : il faut que le stockage soit
+    /// protégé en INTÉGRITÉ.** Un fichier sur disque, un `localStorage`, une
+    /// IndexedDB ou une ligne de base que d'autres codes peuvent réécrire ne
+    /// qualifient pas — c'est exactement là qu'un snapshot se forge. Sans
+    /// signature ou MAC vérifiés à la relecture, prenez la voie par défaut : le
+    /// pire qu'elle coûte est une lecture à refaire.
+    pub fn seed_trusted(&self, transcript: Vec<Message>) {
+        self.seed_avec(transcript, Confiance::Notre)
+    }
+
+    /// [`Self::seed`] : alias conservateur, conservé pour l'intention de nom.
+    pub fn seed_untrusted(&self, transcript: Vec<Message>) {
+        self.seed_avec(transcript, Confiance::Importee)
+    }
+
+    /// Pendant un run, `seed*` comme `restore*` ne remplacent RIEN : ils émettent
+    /// un `Event::Hint` et rendent la main. L'API ne rend pas d'erreur (elle rend
+    /// `()`) : un hôte qui doit savoir si le fil a changé lit [`Self::busy`]
+    /// avant, ou écoute l'indication.
+    fn seed_avec(&self, transcript: Vec<Message>, confiance: Confiance) {
+        if self.state.borrow().busy {
+            self.out.emit(Event::Hint {
+                kind: HintKind::Other,
+                text: "seed ignoré : un run tourne, la conversation ne peut pas être remplacée."
+                    .into(),
+            });
+            return;
+        }
+        self.rebatir_registre(&transcript, confiance);
         self.state.borrow_mut().transcript = transcript;
     }
 
@@ -2626,7 +2981,55 @@ impl Handle {
         }
     }
 
+    /// Remet un état sauvegardé en place — la file d'attente comprise.
+    ///
+    /// **Conservateur par défaut** : rien n'y devient une preuve. Le registre est
+    /// rebâti en **cité**, jamais en lu, parce qu'un `Snapshot` est un type
+    /// désérialisable qu'un fichier importé, une autre personne ou un pair réseau
+    /// peut avoir forgé : y écrire un résultat d'outil suffirait à blanchir un id.
+    /// Pour votre **propre** snapshot, dont vous connaissez l'origine, appelez
+    /// [`Self::restore_trusted`] — c'est un choix explicite, jamais un défaut.
     pub fn restore(&self, snapshot: Snapshot) {
+        self.restore_avec(snapshot, Confiance::Importee)
+    }
+
+    /// [`Self::restore`] pour un snapshot dont on connaît l'origine (notre propre
+    /// sauvegarde). Les résultats d'outils sont alors relus : un id qu'ils
+    /// impriment hors conteneur redevient une lecture directe.
+    ///
+    /// C'est la voie PRIVILÉGIÉE, volontairement plus longue à écrire : la
+    /// confiance ne doit jamais être le chemin le plus court.
+    ///
+    /// **Le fil ne porte que le texte du modèle**, pas `Outcome::observable` : relire
+    /// un transcript ne retrouve donc que ce que ce texte montre en clair, ce qui ne
+    /// vaut pas la déclaration que l'hôte avait faite pendant le run. Un hôte qui
+    /// cloisonne ses lectures (le texte les cache) ou qui répète les arguments du
+    /// modèle en clair (le texte les simule) n'a pas de raison de l'appeler : la
+    /// reprise par défaut, conservatrice, lui convient et ne trompe jamais.
+    ///
+    /// **« Connaître l'origine » ne suffit pas : il faut que le stockage soit
+    /// protégé en INTÉGRITÉ.** Un fichier sur disque, un `localStorage`, une
+    /// IndexedDB ou une ligne de base que d'autres codes peuvent réécrire ne
+    /// qualifient pas — c'est exactement là qu'un snapshot se forge. Sans
+    /// signature ou MAC vérifiés à la relecture, prenez la voie par défaut : le
+    /// pire qu'elle coûte est une lecture à refaire.
+    ///
+    /// **L'intégrité ne donne pas la FIDÉLITÉ de provenance.** Même un snapshot signé et
+    /// intact ne porte que le texte : une simple *citation* y devient `Direct` au redémarrage,
+    /// sans `Outcome::observable` pour l'attester. Cette méthode est donc HORS de la garantie
+    /// « cité ≠ lu » ; seule [`Self::restore`] la tient. Persister et restaurer la provenance
+    /// elle-même n'est pas fait.
+    pub fn restore_trusted(&self, snapshot: Snapshot) {
+        self.restore_avec(snapshot, Confiance::Notre)
+    }
+
+    /// [`Self::restore`] : alias conservateur, conservé pour l'intention de nom
+    /// (« untrusted »), tout aussi sûr que le défaut.
+    pub fn restore_untrusted(&self, snapshot: Snapshot) {
+        self.restore_avec(snapshot, Confiance::Importee)
+    }
+
+    fn restore_avec(&self, snapshot: Snapshot, confiance: Confiance) {
         if self.state.borrow().busy {
             // Remplacer le fil sous une boucle qui tourne lui faisait pousser des réponses
             // d'outil sans leur appel : refusé, et dit.
@@ -2666,6 +3069,17 @@ impl Handle {
                 .unwrap_or(0)
                 + 1;
             state.next_id = state.next_id.max(next);
+            // Le registre des ids vus est un état de SESSION, pas du `Snapshot` : on le
+            // rebâtit en rejouant les résultats d'outils du fil, avec la MÊME règle qu'à
+            // la lecture (`observe` distingue lui-même les conteneurs non fiables). Ce
+            // qui n'est pas prouvable par le texte n'est PAS inventé : un nom de module
+            // appris par `observe_module` ne laisse aucune trace dans le fil, donc il
+            // redevient « jamais vu » après une reprise — limite dite, pas contournée.
+            // Deuxième limite, du même ordre : une COMPACTION a remplacé des messages
+            // d'outils par un résumé, donc les lectures directes qu'ils portaient ne
+            // sont plus dans le fil et redeviennent « jamais vu ». C'est du fail-closed
+            // (on perd une preuve, on n'en invente pas), et c'est assumé.
+            self.rebatir_registre(&state.transcript, confiance);
         }
         self.emit_pending();
     }

@@ -2485,3 +2485,1114 @@ fn l_oubli_d_une_paire_jamais_atteinte_n_annule_pas_un_reglage_a_la_main() {
     );
     assert_eq!(run(router.route(text("hello"))).why, RouteWhy::Manual);
 }
+
+// ── C2 de #288 : le repli après le refus du quota d'un MODÈLE ──────────────────
+//
+// Contrat : le transport DIT que le quota d'un modèle est épuisé (`Failure::quota`) ; le
+// tour repart alors sur un autre modèle de la MÊME instance, une seule fois par modèle,
+// borné, sans rejouer un outil, sans écrire dans le routeur, sans apprendre sur ce qui n'a
+// pas servi. Rien n'est jamais deviné d'un 429.
+
+use this_harness::QuotaScope;
+
+/// Un moteur dont certains modèles refusent pour quota (ou pour un 429 ordinaire), qui note
+/// chaque paire demandée, et qui peut d'abord appeler un outil.
+struct Quotas {
+    /// `(modèle, portée)` : refuse avec un quota qualifié.
+    refuse: Vec<(&'static str, QuotaScope)>,
+    /// Modèles qui refusent par un 429 NON qualifié (rien ne dit que c'est un quota).
+    plat: Vec<&'static str>,
+    honore: bool,
+    outil_d_abord: bool,
+    /// Le moteur montre un début de texte AVANT de refuser : rejouer doublerait ce texte.
+    texte_avant_refus: bool,
+    appels: RefCell<Vec<String>>,
+    servis: std::cell::Cell<u32>,
+}
+
+impl Quotas {
+    fn new(refuse: Vec<(&'static str, QuotaScope)>) -> Rc<Self> {
+        Rc::new(Self {
+            refuse,
+            plat: Vec::new(),
+            honore: true,
+            outil_d_abord: false,
+            texte_avant_refus: false,
+            appels: RefCell::new(Vec::new()),
+            servis: std::cell::Cell::new(0),
+        })
+    }
+    fn paires(&self) -> Vec<String> {
+        self.appels.borrow().clone()
+    }
+}
+
+#[async_trait(?Send)]
+impl Transport for Quotas {
+    async fn stream(
+        &self,
+        request: &Request,
+        _cancel: &Cancel,
+        delta: Delta,
+    ) -> Result<Reply, Failure> {
+        let modele = request.model().unwrap_or("?").to_string();
+        self.appels
+            .borrow_mut()
+            .push(format!("{}/{}", request.provider().unwrap_or("?"), modele));
+        if let Some((_, scope)) = self.refuse.iter().find(|(m, _)| *m == modele) {
+            if self.texte_avant_refus {
+                delta("Je commence par");
+            }
+            return Err(Failure::quota_exhausted(*scope, Some(9_999_999)));
+        }
+        if self.plat.iter().any(|m| *m == modele) {
+            return Err(Failure::http(429));
+        }
+        self.servis.set(self.servis.get() + 1);
+        if self.outil_d_abord && self.servis.get() == 1 {
+            return Ok(asks_a_tool());
+        }
+        delta("fini");
+        Ok(Reply {
+            text: "fini".to_string(),
+            calls: vec![],
+            finish: Finish::Stop,
+        })
+    }
+
+    fn honors_route(&self) -> bool {
+        self.honore
+    }
+}
+
+/// Un outil qui compte ses appels : la preuve qu'un effet n'est jamais rejoué.
+struct Compte(Rc<std::cell::Cell<u32>>);
+
+#[async_trait(?Send)]
+impl Toolbox for Compte {
+    fn specs(&self) -> Vec<ToolSpec> {
+        vec![ToolSpec {
+            name: "lire".to_string(),
+            description: "lit".to_string(),
+            parameters: json!({"type": "object"}),
+        }]
+    }
+    async fn call(&self, _call: &ToolCall) -> Outcome {
+        self.0.set(self.0.get() + 1);
+        Outcome::ok("lu")
+    }
+}
+
+fn harnais_quota(
+    transport: Rc<Quotas>,
+    router: Rc<TurnRouter>,
+) -> (Harness, Journal, Rc<std::cell::Cell<u32>>) {
+    let journal: Journal = Rc::new(RefCell::new(Vec::new()));
+    let sink = journal.clone();
+    let effets = Rc::new(std::cell::Cell::new(0));
+    let harness = Harness::new(
+        "tu es l'atelier",
+        Limits::default(),
+        transport,
+        Rc::new(Compte(effets.clone())),
+        move |event| sink.borrow_mut().push(event),
+    )
+    .with_router(router)
+    // Une horloge qui n'attend pas : un 429 rejoué ne fait pas dormir la suite.
+    .with_clock(Rc::new(Fast(std::cell::Cell::new(0.0))));
+    (harness, journal, effets)
+}
+
+/// a/m1 est préféré ; a/m2 et a/m3 sont ses alternatives de la même instance ; b/x est
+/// ailleurs et ne doit jamais servir de repli de modèle.
+fn monde_quota() -> World {
+    let world = World::new(vec![
+        cand("a", "m1", false),
+        cand("a", "m2", false),
+        cand("a", "m3", false),
+        cand("b", "x", false),
+    ]);
+    world.prefer(("a", "m1"), &[("a", "m2"), ("a", "m3"), ("b", "x")]);
+    world
+}
+
+fn routes_dites(journal: &Journal) -> Vec<(String, Option<String>, String, bool)> {
+    routed_events(journal)
+        .into_iter()
+        .filter_map(|e| match e {
+            Event::Routed {
+                provider,
+                model,
+                why,
+                advisory,
+                ..
+            } => Some((provider, model, why, advisory)),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn un_refus_de_quota_de_modele_repart_sur_un_autre_modele_de_la_meme_instance() {
+    let world = monde_quota();
+    let router = Rc::new(TurnRouter::new(world.spec("a", "m1", 1).auto()));
+    let moteur = Quotas::new(vec![("m1", QuotaScope::Model)]);
+    let (harness, journal, _) = harnais_quota(moteur.clone(), router.clone());
+
+    assert_eq!(run(harness.send("hello")), Running::Ran(Stop::Done));
+
+    let paires = moteur.paires();
+    assert_eq!(paires.len(), 2, "un refus, un repli : {paires:?}");
+    assert_eq!(paires[0], "a/m1");
+    assert!(
+        paires[1] == "a/m2" || paires[1] == "a/m3",
+        "même instance, jamais b/x : {paires:?}"
+    );
+    let dites = routes_dites(&journal);
+    assert_eq!(
+        dites.len(),
+        2,
+        "la décision d'ouverture, puis le repli : {dites:?}"
+    );
+    assert_eq!(dites[1].0, "a");
+    assert_eq!(dites[1].2, "quota_fallback");
+    assert!(!dites[1].3, "le repli est servi, pas consultatif");
+    // Une seule décision enregistrée : le repli n'est pas un second routage.
+    assert_eq!(world.learning.decisions().len(), 1);
+    // On n'apprend pas sur ce qui n'a pas servi : rien n'est attribué à la paire décidée.
+    let settled = world.learning.settled();
+    assert_eq!(settled.len(), 1);
+    assert_eq!(
+        settled[0].served, None,
+        "un repli n'est pas la paire décidée"
+    );
+}
+
+#[test]
+fn un_compte_epuise_ne_declenche_aucun_repli_de_modele() {
+    // Tout modèle de l'instance refuserait aussi : la chaîne ne tourne pas à vide.
+    let world = monde_quota();
+    let router = Rc::new(TurnRouter::new(world.spec("a", "m1", 1).auto()));
+    let moteur = Quotas::new(vec![("m1", QuotaScope::Account)]);
+    let (harness, journal, _) = harnais_quota(moteur.clone(), router);
+
+    assert!(matches!(
+        run(harness.send("hello")),
+        Running::Ran(Stop::Failed(_))
+    ));
+    assert_eq!(moteur.paires(), vec!["a/m1".to_string()]);
+    assert_eq!(routes_dites(&journal).len(), 1, "aucun Routed de repli");
+}
+
+#[test]
+fn un_429_non_qualifie_n_est_jamais_pris_pour_un_quota() {
+    let world = monde_quota();
+    let router = Rc::new(TurnRouter::new(world.spec("a", "m1", 1).auto()));
+    let moteur = Rc::new(Quotas {
+        plat: vec!["m1"],
+        ..Rc::try_unwrap(Quotas::new(vec![]))
+            .ok()
+            .expect("seul propriétaire")
+    });
+    let (harness, _, _) = harnais_quota(moteur.clone(), router);
+
+    // 429 ordinaire : c'est (peut-être) transitoire ou autre chose — pas de bascule de
+    // modèle sur une supposition.
+    let _ = run(harness.send("hello"));
+    assert!(
+        moteur.paires().iter().all(|p| p == "a/m1"),
+        "aucun repli sur un 429 nu : {:?}",
+        moteur.paires()
+    );
+}
+
+#[test]
+fn un_modele_impose_ou_regle_a_la_main_n_est_jamais_remplace() {
+    for cas in ["impose", "main"] {
+        let world = monde_quota();
+        let mut spec = world.spec("a", "m1", 1).auto();
+        spec.explicit_model = cas == "impose";
+        let router = Rc::new(TurnRouter::new(spec));
+        if cas == "main" {
+            router.set_by_hand("a", "m1");
+        }
+        let moteur = Quotas::new(vec![("m1", QuotaScope::Model)]);
+        let (harness, _, _) = harnais_quota(moteur.clone(), router);
+
+        let _ = run(harness.send("hello"));
+        assert_eq!(
+            moteur.paires(),
+            vec!["a/m1".to_string()],
+            "{cas} : la personne a choisi, aucun repli ne contourne ce choix"
+        );
+    }
+}
+
+#[test]
+fn la_chaine_de_replis_est_bornee_et_ne_tente_jamais_deux_fois_un_modele() {
+    // Tous les modèles de l'instance refusent : on s'arrête, on ne boucle pas.
+    let world = monde_quota();
+    let router = Rc::new(TurnRouter::new(world.spec("a", "m1", 1).auto()));
+    let moteur = Quotas::new(vec![
+        ("m1", QuotaScope::Model),
+        ("m2", QuotaScope::Model),
+        ("m3", QuotaScope::Model),
+    ]);
+    let (harness, _, _) = harnais_quota(moteur.clone(), router);
+
+    assert!(matches!(
+        run(harness.send("hello")),
+        Running::Ran(Stop::Failed(_))
+    ));
+    let paires = moteur.paires();
+    assert!(
+        paires.len() <= 1 + this_harness::MAX_QUOTA_FALLBACKS,
+        "borné : {paires:?}"
+    );
+    let mut vues = paires.clone();
+    vues.sort();
+    vues.dedup();
+    assert_eq!(
+        vues.len(),
+        paires.len(),
+        "jamais deux fois le même : {paires:?}"
+    );
+    assert!(paires.iter().all(|p| p.starts_with("a/")), "{paires:?}");
+}
+
+#[test]
+fn un_transport_consultatif_n_a_pas_de_repli() {
+    // Il ne lit pas la paire : le « modèle de repli » ne serait pas servi, il serait inventé.
+    let world = monde_quota();
+    let router = Rc::new(TurnRouter::new(world.spec("a", "m1", 1).auto()));
+    let moteur = Rc::new(Quotas {
+        honore: false,
+        ..Rc::try_unwrap(Quotas::new(vec![("m1", QuotaScope::Model)]))
+            .ok()
+            .expect("seul propriétaire")
+    });
+    let (harness, _, _) = harnais_quota(moteur.clone(), router);
+    let _ = run(harness.send("hello"));
+    assert_eq!(moteur.paires().len(), 1, "{:?}", moteur.paires());
+}
+
+#[test]
+fn un_repli_ne_rejoue_jamais_un_outil() {
+    // Tour 1 : le modèle préféré appelle un outil (un effet). Tour 2 : son quota est épuisé
+    // juste avant sa réponse. Le repli rejoue l'APPEL AU MODÈLE, jamais l'outil.
+    let world = monde_quota();
+    let router = Rc::new(TurnRouter::new(world.spec("a", "m1", 1).auto()));
+    let moteur = Rc::new(Quotas {
+        outil_d_abord: true,
+        refuse: Vec::new(),
+        ..Rc::try_unwrap(Quotas::new(vec![]))
+            .ok()
+            .expect("seul propriétaire")
+    });
+    // Après le premier service (l'outil), m1 refuse : modèle préféré épuisé au tour 2.
+    struct ApresLOutil(Rc<Quotas>);
+    #[async_trait(?Send)]
+    impl Transport for ApresLOutil {
+        async fn stream(
+            &self,
+            request: &Request,
+            cancel: &Cancel,
+            delta: Delta,
+        ) -> Result<Reply, Failure> {
+            if self.0.servis.get() >= 1 && request.model() == Some("m1") {
+                self.0
+                    .appels
+                    .borrow_mut()
+                    .push(format!("{}/m1", request.provider().unwrap_or("?")));
+                return Err(Failure::quota_exhausted(QuotaScope::Model, None));
+            }
+            self.0.stream(request, cancel, delta).await
+        }
+        fn honors_route(&self) -> bool {
+            true
+        }
+    }
+    let journal: Journal = Rc::new(RefCell::new(Vec::new()));
+    let sink = journal.clone();
+    let effets = Rc::new(std::cell::Cell::new(0));
+    let harness = Harness::new(
+        "tu es l'atelier",
+        Limits::default(),
+        Rc::new(ApresLOutil(moteur.clone())),
+        Rc::new(Compte(effets.clone())),
+        move |event| sink.borrow_mut().push(event),
+    )
+    .with_router(router);
+
+    assert_eq!(run(harness.send("hello")), Running::Ran(Stop::Done));
+    assert_eq!(
+        effets.get(),
+        1,
+        "l'outil a tourné UNE fois, pas une de plus"
+    );
+    let paires = moteur.paires();
+    assert_eq!(paires[0], "a/m1");
+    assert!(
+        paires.iter().skip(1).any(|p| p == "a/m2" || p == "a/m3"),
+        "le tour 2 a basculé : {paires:?}"
+    );
+}
+
+#[test]
+fn sans_autre_modele_eligible_l_echec_reste_et_rien_n_est_invente() {
+    let world = World::new(vec![cand("a", "m1", false), cand("b", "x", false)]);
+    world.prefer(("a", "m1"), &[("b", "x")]);
+    let router = Rc::new(TurnRouter::new(world.spec("a", "m1", 1).auto()));
+    let moteur = Quotas::new(vec![("m1", QuotaScope::Model)]);
+    let (harness, _, _) = harnais_quota(moteur.clone(), router);
+
+    assert!(matches!(
+        run(harness.send("hello")),
+        Running::Ran(Stop::Failed(_))
+    ));
+    // b/x est une AUTRE instance : jamais un repli de modèle.
+    assert_eq!(moteur.paires(), vec!["a/m1".to_string()]);
+}
+
+#[test]
+fn after_limit_n_ecrit_rien_dans_le_routeur() {
+    let world = monde_quota();
+    let router = TurnRouter::new(world.spec("a", "m1", 1).auto());
+    let en_vigueur = router.in_force();
+    let avant = world.learning.decisions().len();
+
+    let routed = run(router.after_limit(
+        TurnInput {
+            honored: true,
+            ..text("hello")
+        },
+        &[Pick::new("a", "m1")],
+        None,
+    ))
+    .expect("un autre modèle de la même instance");
+    assert_eq!(routed.route.provider(), "a");
+    assert_ne!(routed.route.model(), Some("m1"));
+    assert_eq!(routed.why, RouteWhy::QuotaFallback);
+
+    assert_eq!(
+        router.in_force(),
+        en_vigueur,
+        "la paire en vigueur ne bouge pas"
+    );
+    assert_eq!(
+        world.learning.decisions().len(),
+        avant,
+        "rien n'est enregistré"
+    );
+    // Et deux appels rendent la même chose : déterministe, aucun tirage.
+    let encore = run(router.after_limit(
+        TurnInput {
+            honored: true,
+            ..text("hello")
+        },
+        &[Pick::new("a", "m1")],
+        None,
+    ))
+    .unwrap();
+    assert_eq!(encore.route, routed.route);
+}
+
+#[test]
+fn after_limit_egalite_est_stable_et_ne_consomme_pas_de_graine() {
+    use std::cell::Cell;
+    use this_harness::routing::Seeds;
+
+    struct CountSeeds(Cell<u128>);
+    impl Seeds for CountSeeds {
+        fn next_id(&self) -> u128 {
+            let id = self.0.get();
+            self.0.set(id + 1);
+            id
+        }
+    }
+
+    // Deux remplaçants rigoureusement égaux : le nom départage, pas un tirage.
+    let world = World::new(vec![
+        cand("a", "m1", false),
+        cand("a", "m3", false),
+        cand("a", "m2", false),
+    ]);
+    let seeds = Rc::new(CountSeeds(Cell::new(0)));
+    let mut spec = world.spec("a", "m1", 1).auto();
+    spec.seeds = seeds.clone();
+    let router = TurnRouter::new(spec);
+    for _ in 0..10 {
+        let routed = run(router.after_limit(text("hello"), &[Pick::new("a", "m1")], None))
+            .expect("un repli éligible");
+        assert_eq!(routed.route.model(), Some("m2"));
+        assert!(routed.reason.contains("after_quota_limit"));
+    }
+    assert_eq!(seeds.0.get(), 0, "aucune graine consommée par le repli");
+    let _ = run(router.route(text("hello")));
+    assert_eq!(
+        seeds.0.get(),
+        1,
+        "le routage normal garde sa première graine"
+    );
+}
+
+#[test]
+fn after_limit_classe_les_posterieurs_extremes_sans_debordement() {
+    let world = World::new(vec![
+        cand("a", "m1", false),
+        cand("a", "m2", false),
+        cand("a", "m3", false),
+    ]);
+    let max = f64::MAX;
+    world.learning.set_arms(vec![
+        ArmStats::fresh(ArmKey::new(GENERAL, "a", "m2"), max, max),
+        ArmStats::fresh(ArmKey::new(GENERAL, "a", "m3"), max, max / 2.0),
+    ]);
+    let router = TurnRouter::new(world.spec("a", "m1", 1).auto());
+    let routed = run(router.after_limit(text("hello"), &[Pick::new("a", "m1")], None))
+        .expect("un repli éligible");
+    assert_eq!(routed.route.model(), Some("m3"), "2/3 > 1/2");
+}
+
+#[test]
+fn un_texte_deja_montre_interdit_le_repli() {
+    // Le moteur a déjà écrit « Je commence par… » puis refuse : repartir sur un autre modèle
+    // ferait relire un début de réponse que la personne a déjà vu. La garde du rejeu tient.
+    let world = monde_quota();
+    let router = Rc::new(TurnRouter::new(world.spec("a", "m1", 1).auto()));
+    let moteur = Rc::new(Quotas {
+        texte_avant_refus: true,
+        ..Rc::try_unwrap(Quotas::new(vec![("m1", QuotaScope::Model)]))
+            .ok()
+            .expect("seul propriétaire")
+    });
+    let (harness, _, _) = harnais_quota(moteur.clone(), router);
+    assert!(matches!(
+        run(harness.send("hello")),
+        Running::Ran(Stop::Failed(_))
+    ));
+    assert_eq!(
+        moteur.paires(),
+        vec!["a/m1".to_string()],
+        "aucun repli après du texte montré"
+    );
+}
+
+#[test]
+fn le_repli_ne_sort_jamais_de_l_instance_meme_quand_un_autre_fournisseur_est_meilleur() {
+    // Cas qui départage : b/x est NETTEMENT meilleur que a/m2 et a/m3, et a/m1 (préféré) est
+    // refusé. Un repli qui ne se limiterait pas à l'instance choisirait b/x. Un quota de
+    // modèle ne dit rien d'un autre fournisseur : le changer en cours de tour passerait par
+    // des gardes (jamais deux changements de fournisseur de suite) que ce chemin ne tient pas.
+    let world = monde_quota();
+    let mut bras = Vec::new();
+    for classe in [GENERAL, DEBUG] {
+        bras.push(arm(classe, "a", "m1", true));
+        bras.push(arm(classe, "b", "x", true));
+        bras.push(arm(classe, "a", "m2", false));
+        bras.push(arm(classe, "a", "m3", false));
+    }
+    world.learning.set_arms(bras);
+    let router = Rc::new(TurnRouter::new(world.spec("a", "m1", 1).auto()));
+    let moteur = Quotas::new(vec![("m1", QuotaScope::Model)]);
+    let (harness, _, _) = harnais_quota(moteur.clone(), router);
+
+    assert_eq!(run(harness.send("hello")), Running::Ran(Stop::Done));
+    let paires = moteur.paires();
+    assert_eq!(paires.len(), 2, "{paires:?}");
+    assert!(paires[1].starts_with("a/"), "jamais b/x : {paires:?}");
+}
+
+/// Revue de #321 : le filtre de liste de la personne s'appliquait AVANT le marquage des paires
+/// refusées. Liste = a/m1 seul ; a/m1 vient d'être refusé mais le `QuotaView` n'est pas encore à
+/// jour : le filtre réduisait le pool à m1 (encore « utilisable » à ses yeux), puis le marquage
+/// l'écartait → `None`, alors que a/m2 et a/m3 restaient disponibles. Le contrat du filtre dit
+/// pourtant : si rien de listé ne passe les contraintes, le pool reste entier.
+#[test]
+fn after_limit_une_liste_reduite_a_la_paire_refusee_ne_bloque_pas_le_repli() {
+    let world = monde_quota(); // QuotaView : aucune paire marquée épuisée.
+    let router = TurnRouter::new(
+        world
+            .spec("a", "m1", 1)
+            .auto()
+            .auto_models(vec![entry("a", "m1")]),
+    );
+    let routed = run(router.after_limit(
+        TurnInput {
+            honored: true,
+            ..text("hello")
+        },
+        &[Pick::new("a", "m1")],
+        None,
+    ))
+    .expect(
+        "la liste ne contient que la paire refusée : le pool entier reprend, a/m2 ou a/m3 servent",
+    );
+    assert_eq!(routed.route.provider(), "a");
+    assert_ne!(routed.route.model(), Some("m1"));
+    assert_eq!(routed.why, RouteWhy::QuotaFallback);
+}
+
+/// Le pendant : quand une AUTRE paire listée de la même instance reste éligible, la liste est
+/// respectée — le repli est a/m2 (listé), jamais a/m3 (hors liste), même si m3 est libre.
+#[test]
+fn after_limit_respecte_la_liste_quand_une_autre_paire_listee_reste_eligible() {
+    let world = monde_quota();
+    let router = TurnRouter::new(
+        world
+            .spec("a", "m1", 1)
+            .auto()
+            .auto_models(vec![entry("a", "m1"), entry("a", "m2")]),
+    );
+    let routed = run(router.after_limit(
+        TurnInput {
+            honored: true,
+            ..text("hello")
+        },
+        &[Pick::new("a", "m1")],
+        None,
+    ))
+    .expect("a/m2 est listé et éligible");
+    assert_eq!(routed.route.provider(), "a");
+    assert_eq!(
+        routed.route.model(),
+        Some("m2"),
+        "la liste reste respectée : pas m3"
+    );
+}
+
+/// Revue de #321, second cas : la liste contient une paire d'une AUTRE instance, éligible.
+/// Liste = [a/m1, b/x] ; a/m1 refusé ; b/x éligible ; a/m2 libre hors liste. Le filtre de liste
+/// voyait b/x « utilisable » et réduisait le pool à [a/m1 (épuisé), b/x] ; puis la contrainte
+/// « même instance » (`restrict_provider = a`) excluait b/x → `None`, malgré a/m2. La contrainte
+/// d'instance est une contrainte dure du repli : elle doit s'appliquer AVANT de juger la liste.
+#[test]
+fn after_limit_une_autre_instance_listee_ne_fait_pas_perdre_le_repli_de_la_meme_instance() {
+    let world = monde_quota();
+    let router = TurnRouter::new(
+        world
+            .spec("a", "m1", 1)
+            .auto()
+            .auto_models(vec![entry("a", "m1"), entry("b", "x")]),
+    );
+    let routed = run(router.after_limit(
+        TurnInput {
+            honored: true,
+            ..text("hello")
+        },
+        &[Pick::new("a", "m1")],
+        None,
+    ))
+    .expect("rien de listé ne peut servir le repli sur a : le pool entier reprend, a/m2 ou a/m3");
+    assert_eq!(routed.route.provider(), "a", "jamais une autre instance");
+    assert_ne!(routed.route.model(), Some("m1"));
+}
+
+/// Le pendant : avec une autre paire a/* listée ET éligible, la liste reste respectée (a/m2, pas
+/// m3), et la paire b/x listée n'y change rien.
+#[test]
+fn after_limit_prefere_la_paire_listee_de_la_meme_instance_meme_si_une_autre_instance_est_listee() {
+    let world = monde_quota();
+    let router = TurnRouter::new(world.spec("a", "m1", 1).auto().auto_models(vec![
+        entry("a", "m1"),
+        entry("a", "m2"),
+        entry("b", "x"),
+    ]));
+    let routed = run(router.after_limit(
+        TurnInput {
+            honored: true,
+            ..text("hello")
+        },
+        &[Pick::new("a", "m1")],
+        None,
+    ))
+    .expect("a/m2 est listé et éligible");
+    assert_eq!(routed.route.provider(), "a");
+    assert_eq!(
+        routed.route.model(),
+        Some("m2"),
+        "la liste reste respectée : pas m3"
+    );
+}
+
+// ---- Revue de #321 : « servi » (état) et « crédité » (récompense) ne sont pas la même chose ----
+
+/// Ce que répond un modèle, appel après appel.
+#[derive(Clone, Copy, Debug)]
+enum Rep {
+    Outil,
+    Fini,
+    Quota,
+    Injoignable,
+}
+
+/// Un moteur scénarisé PAR MODÈLE : chaque appel consomme la réponse suivante du modèle demandé
+/// (la dernière se répète).
+struct Scenario {
+    scripts: RefCell<Vec<(&'static str, VecDeque<Rep>)>>,
+    appels: RefCell<Vec<String>>,
+    /// Temps partagé avancé par chaque réponse (0 : pas d'horloge partagée).
+    temps: Option<(Rc<std::cell::Cell<f64>>, f64)>,
+}
+
+impl Scenario {
+    fn new(scripts: Vec<(&'static str, Vec<Rep>)>) -> Rc<Self> {
+        Rc::new(Self {
+            scripts: RefCell::new(
+                scripts
+                    .into_iter()
+                    .map(|(m, r)| (m, r.into_iter().collect()))
+                    .collect(),
+            ),
+            appels: RefCell::new(Vec::new()),
+            temps: None,
+        })
+    }
+    fn avec_temps(mut self: Rc<Self>, temps: Rc<std::cell::Cell<f64>>, ms: f64) -> Rc<Self> {
+        Rc::get_mut(&mut self).expect("seul propriétaire").temps = Some((temps, ms));
+        self
+    }
+    fn paires(&self) -> Vec<String> {
+        self.appels.borrow().clone()
+    }
+}
+
+#[async_trait(?Send)]
+impl Transport for Scenario {
+    async fn stream(
+        &self,
+        request: &Request,
+        _cancel: &Cancel,
+        delta: Delta,
+    ) -> Result<Reply, Failure> {
+        let modele = request.model().unwrap_or("?").to_string();
+        self.appels
+            .borrow_mut()
+            .push(format!("{}/{}", request.provider().unwrap_or("?"), modele));
+        let rep = {
+            let mut scripts = self.scripts.borrow_mut();
+            let file = &mut scripts
+                .iter_mut()
+                .find(|(m, _)| *m == modele)
+                .unwrap_or_else(|| panic!("aucun script pour {modele}"))
+                .1;
+            if file.len() > 1 {
+                file.pop_front().unwrap()
+            } else {
+                *file.front().unwrap()
+            }
+        };
+        if let Some((temps, ms)) = &self.temps {
+            temps.set(temps.get() + ms);
+        }
+        match rep {
+            Rep::Outil => Ok(asks_a_tool()),
+            Rep::Fini => {
+                delta("fini");
+                Ok(Reply {
+                    text: "fini".to_string(),
+                    calls: vec![],
+                    finish: Finish::Stop,
+                })
+            }
+            Rep::Quota => Err(Failure::quota_exhausted(QuotaScope::Model, Some(9_999_999))),
+            Rep::Injoignable => Err(Failure::unreachable("jamais joint")),
+        }
+    }
+
+    fn honors_route(&self) -> bool {
+        true
+    }
+}
+
+fn harnais_scenario(
+    transport: Rc<Scenario>,
+    router: Rc<TurnRouter>,
+) -> (Harness, Rc<std::cell::Cell<u32>>) {
+    let effets = Rc::new(std::cell::Cell::new(0));
+    let harness = Harness::new(
+        "tu es l'atelier",
+        Limits::default(),
+        transport,
+        Rc::new(Compte(effets.clone())),
+        |_| {},
+    )
+    .with_router(router)
+    .with_clock(Rc::new(Fast(std::cell::Cell::new(0.0))));
+    (harness, effets)
+}
+
+/// Le cas relevé : la conversation était sur b/x, le routeur change pour a/m1 ; a/m1 SERT un tour
+/// (il appelle un outil, l'outil tourne), puis refuse son quota au tour suivant ; le repli a/m2
+/// conclut. a/m1 a été atteint et a servi : l'état ne revient PAS à b/x. Mais le résultat de
+/// l'objectif mêle deux paires : aucune récompense n'est attribuée à a/m1.
+#[test]
+fn un_repli_apres_quota_ne_restaure_pas_l_avant_quand_la_paire_decidee_a_servi() {
+    let world = monde_quota();
+    let router = Rc::new(TurnRouter::new(world.spec("b", "x", 1).auto()));
+    let moteur = Scenario::new(vec![
+        ("m1", vec![Rep::Outil, Rep::Quota]),
+        ("m2", vec![Rep::Fini]),
+        ("m3", vec![Rep::Fini]),
+    ]);
+    let (harness, effets) = harnais_scenario(moteur.clone(), router.clone());
+
+    assert_eq!(run(harness.send("hello")), Running::Ran(Stop::Done));
+    let paires = moteur.paires();
+    assert_eq!(
+        paires[0], "a/m1",
+        "un changement b/x -> a/m1 a été décidé : {paires:?}"
+    );
+    assert_eq!(effets.get(), 1, "l'outil a tourné une fois, jamais rejoué");
+    assert_eq!(
+        router.in_force(),
+        Pick::new("a", "m1"),
+        "a/m1 a servi : l'état ne revient pas à b/x"
+    );
+    let settled = world.learning.settled();
+    assert_eq!(settled.len(), 1);
+    assert_eq!(
+        settled[0].served, None,
+        "objectif mixte : aucun crédit à a/m1"
+    );
+}
+
+/// Même chose, mais le repli ne répond JAMAIS : a/m1 a servi, l'état reste a/m1, aucun crédit.
+#[test]
+fn un_repli_qui_ne_repond_jamais_ne_restaure_pas_l_avant_non_plus() {
+    let world = monde_quota();
+    let router = Rc::new(TurnRouter::new(world.spec("b", "x", 1).auto()));
+    let moteur = Scenario::new(vec![
+        ("m1", vec![Rep::Outil, Rep::Quota]),
+        ("m2", vec![Rep::Injoignable]),
+        ("m3", vec![Rep::Injoignable]),
+    ]);
+    let (harness, effets) = harnais_scenario(moteur.clone(), router.clone());
+
+    let fin = run(harness.send("hello"));
+    assert!(matches!(fin, Running::Ran(Stop::Failed(_))), "{fin:?}");
+    assert_eq!(moteur.paires()[0], "a/m1");
+    assert_eq!(effets.get(), 1);
+    assert_eq!(
+        router.in_force(),
+        Pick::new("a", "m1"),
+        "a/m1 a servi avant le refus"
+    );
+    assert_eq!(world.learning.settled()[0].served, None);
+}
+
+/// Le pendant, comportement conservé : la paire décidée n'a RIEN servi (elle refuse son quota dès
+/// le premier appel) ; le repli conclut. La paire décidée n'a jamais été « servie » : l'état revient
+/// à l'avant du changement, comme pour une paire jamais atteinte.
+#[test]
+fn une_paire_decidee_qui_refuse_d_entree_laisse_l_etat_revenir_a_l_avant() {
+    let world = monde_quota();
+    let router = Rc::new(TurnRouter::new(world.spec("b", "x", 1).auto()));
+    let moteur = Scenario::new(vec![
+        ("m1", vec![Rep::Quota]),
+        ("m2", vec![Rep::Fini]),
+        ("m3", vec![Rep::Fini]),
+    ]);
+    let (harness, _) = harnais_scenario(moteur.clone(), router.clone());
+
+    assert_eq!(run(harness.send("hello")), Running::Ran(Stop::Done));
+    assert_eq!(moteur.paires()[0], "a/m1");
+    assert_eq!(
+        router.in_force(),
+        Pick::new("b", "x"),
+        "a/m1 n'a rien servi"
+    );
+    assert_eq!(world.learning.settled()[0].served, None);
+}
+
+// ---- Revue de #321 (3e) : le repli respecte l'échéance du run ----
+
+/// Une horloge partagée : le pool l'avance quand on le lit (il répond APRÈS l'échéance), le
+/// `sleep` avance aussi (les délais ne bloquent pas). Le temps ne revient jamais en arrière.
+#[derive(Clone)]
+struct Temps(Rc<std::cell::Cell<f64>>);
+
+impl this_harness::Clock for Temps {
+    fn now_ms(&self) -> f64 {
+        self.0.get()
+    }
+    fn sleep(&self, ms: u64) -> Option<this_harness::Sleep> {
+        self.0.set(self.0.get() + ms as f64);
+        Some(Box::pin(async {}))
+    }
+}
+
+/// Un pool qui prend `coute_ms` à répondre : il avance l'horloge partagée, puis rend ses paires.
+struct PoolLent {
+    temps: Rc<std::cell::Cell<f64>>,
+    coute_ms: f64,
+    paires: Vec<Candidate>,
+    lectures: std::cell::Cell<u32>,
+}
+
+#[async_trait(?Send)]
+impl this_harness::routing::PoolSource for PoolLent {
+    async fn pool(&self) -> Vec<Candidate> {
+        self.lectures.set(self.lectures.get() + 1);
+        self.temps.set(self.temps.get() + self.coute_ms);
+        self.paires.clone()
+    }
+}
+
+/// Une horloge pour le test : `Temps` partagé, injecté dans le harnais.
+fn harnais_budget(
+    transport: Rc<Scenario>,
+    router: Rc<TurnRouter>,
+    temps: Temps,
+    budget_ms: u64,
+) -> (Harness, Rc<std::cell::Cell<u32>>) {
+    let effets = Rc::new(std::cell::Cell::new(0));
+    let limits = Limits {
+        budget_ms: Some(budget_ms),
+        ..Limits::default()
+    };
+    let harness = Harness::new(
+        "tu es l'atelier",
+        limits,
+        transport,
+        Rc::new(Compte(effets.clone())),
+        |_| {},
+    )
+    .with_router(router)
+    .with_clock(Rc::new(temps));
+    (harness, effets)
+}
+
+/// Le cas relevé : première sélection immédiate (a/m1 décidé), a/m1 refuse son quota, puis la
+/// SECONDE lecture du pool (celle du repli) répond après l'échéance du run. Le repli ne doit ni
+/// relancer le transport, ni appeler un outil : le run s'arrête sur son budget, avec zéro appel de
+/// plus et zéro effet de plus.
+#[test]
+fn un_repli_qui_arrive_apres_l_echeance_ne_relance_ni_transport_ni_outil() {
+    let temps = Temps(Rc::new(std::cell::Cell::new(0.0)));
+    // Pool : la sélection (lecture unique d'after_limit) coûte 10 s, au-delà du budget de 5 s.
+    // La première décision d'ouverture est déjà faite : le pool ne ralentit qu'APRÈS le refus.
+    let pool = Rc::new(PoolLent {
+        temps: temps.0.clone(),
+        coute_ms: 10_000.0,
+        paires: vec![
+            cand("a", "m1", false),
+            cand("a", "m2", false),
+            cand("b", "x", false),
+        ],
+        lectures: std::cell::Cell::new(0),
+    });
+    let mut learning_pool = pool;
+    let world = monde_quota();
+    let spec = RouterSpec::new(
+        learning_pool.clone(),
+        Rc::new(SequenceSeeds::from(1)),
+        "b",
+        "x",
+    )
+    .learning(world.learning.clone())
+    .settings(quiet())
+    .auto();
+    let router = Rc::new(TurnRouter::new(spec));
+    let moteur = Scenario::new(vec![
+        ("m1", vec![Rep::Quota]),
+        ("m2", vec![Rep::Fini]),
+        ("x", vec![Rep::Fini]),
+    ]);
+    let (harness, effets) = harnais_budget(moteur.clone(), router, temps.clone(), 5_000);
+    let fin = run(harness.send("hello"));
+    let _ = &mut learning_pool;
+    // Le refus de quota de a/m1 a eu lieu AVANT l'échéance : le run finit donc sur ce refus, pas sur
+    // le budget. Ce qui compte : aucun appel de plus, aucun effet, aucun transport relancé.
+    let appels = moteur.paires();
+    assert!(matches!(fin, Running::Ran(Stop::Failed(_))), "{fin:?}");
+    assert_eq!(
+        appels,
+        vec!["a/m1".to_string()],
+        "aucun repli tardif, aucun appel de plus"
+    );
+    assert_eq!(effets.get(), 0, "aucun effet d'outil");
+}
+
+/// Le cas que la garde AVANT protège : l'échéance est DÉJÀ passée au moment du refus de quota.
+/// Aucune sélection ne doit alors partir, même si le pool répondrait instantanément.
+#[test]
+fn un_repli_n_est_pas_cherche_quand_l_echeance_est_deja_passee() {
+    let temps = Temps(Rc::new(std::cell::Cell::new(0.0)));
+    let pool = Rc::new(PoolLent {
+        temps: temps.0.clone(),
+        coute_ms: 0.0,
+        paires: vec![
+            cand("a", "m1", false),
+            cand("a", "m2", false),
+            cand("b", "x", false),
+        ],
+        lectures: std::cell::Cell::new(0),
+    });
+    let world = monde_quota();
+    let spec = RouterSpec::new(pool.clone(), Rc::new(SequenceSeeds::from(1)), "b", "x")
+        .learning(world.learning.clone())
+        .settings(quiet())
+        .auto();
+    let router = Rc::new(TurnRouter::new(spec));
+    // Chaque réponse coûte 3 s : après l'outil (3 s), le refus arrive à 6 s, au-delà du budget de 5 s.
+    let moteur = Scenario::new(vec![
+        ("m1", vec![Rep::Outil, Rep::Quota]),
+        ("m2", vec![Rep::Fini]),
+        ("x", vec![Rep::Fini]),
+    ])
+    .avec_temps(temps.0.clone(), 3_000.0);
+    let (harness, effets) = harnais_budget(moteur.clone(), router, temps.clone(), 5_000);
+    let fin = run(harness.send("hello"));
+    let appels = moteur.paires();
+    // Le refus arrive après l'échéance : aucun repli ne part. Le run finit sur ce refus.
+    assert!(
+        matches!(fin, Running::Ran(Stop::Failed(_))),
+        "{fin:?} ; appels {appels:?}"
+    );
+    assert_eq!(
+        appels,
+        vec!["a/m1".to_string(), "a/m1".to_string()],
+        "aucun repli après l'échéance"
+    );
+    assert_eq!(
+        effets.get(),
+        1,
+        "l'outil du premier tour a tourné une fois, rien d'autre"
+    );
+}
+
+// ---- Revue de #321 (4e) : toute la liste échoue au SCORING, pas au filtre ----
+
+/// Un bras stocké qui n'est pas un postérieur (alpha nul) : `decide` l'écarte en `InvalidArm`.
+fn bras_invalide(class: &str, provider: &str, model: &str) -> ArmStats {
+    ArmStats {
+        n: 10,
+        ..ArmStats::fresh(ArmKey::new(class, provider, model), 0.0, 1.0)
+    }
+}
+
+/// Liste = [a/m2] ; a/m1 refusé ; le bras de a/m2 est invalide ; a/m3 est valide hors liste. Le
+/// filtre de liste garde m2 (il passe les contraintes dures), puis le scoring l'écarte : `None`,
+/// alors que a/m3 peut servir. Le contrat du réglage (« Auto ne bloque jamais une conversation à
+/// cause de cette liste ») s'applique aussi quand toute la liste échoue au scoring.
+#[test]
+fn after_limit_elargit_quand_toute_la_liste_echoue_au_scoring() {
+    let world = monde_quota();
+    let mut arms = vec![
+        bras_invalide(GENERAL, "a", "m2"),
+        bras_invalide(DEBUG, "a", "m2"),
+    ];
+    arms.push(arm(GENERAL, "a", "m3", true));
+    world.learning.set_arms(arms);
+    let router = TurnRouter::new(
+        world
+            .spec("a", "m1", 1)
+            .auto()
+            .auto_models(vec![entry("a", "m2")]),
+    );
+    let routed = run(router.after_limit(
+        TurnInput {
+            honored: true,
+            ..text("hello")
+        },
+        &[Pick::new("a", "m1")],
+        None,
+    ))
+    .expect("la seule paire listée a un bras invalide : le pool de l'instance reprend, a/m3 sert");
+    assert_eq!(routed.route.provider(), "a");
+    assert_eq!(routed.route.model(), Some("m3"));
+    assert!(
+        routed.reason.contains(PERSON_LIST_UNAVAILABLE),
+        "l'élargissement est dit : {}",
+        routed.reason
+    );
+}
+
+/// Le pendant : une paire listée VALIDE reste préférée, même si une autre paire listée a un bras
+/// invalide et qu'un modèle hors liste est meilleur.
+#[test]
+fn after_limit_garde_la_paire_listee_valide_meme_si_une_autre_listee_est_invalide() {
+    let world = World::new(vec![
+        cand("a", "m1", false),
+        cand("a", "m2", false),
+        cand("a", "m3", false),
+        cand("a", "m4", false),
+    ]);
+    world.learning.set_arms(vec![
+        bras_invalide(GENERAL, "a", "m2"),
+        arm(GENERAL, "a", "m3", false), // listé, valide, médiocre
+        arm(GENERAL, "a", "m4", true),  // hors liste, excellent
+    ]);
+    let router = TurnRouter::new(
+        world
+            .spec("a", "m1", 1)
+            .auto()
+            .auto_models(vec![entry("a", "m2"), entry("a", "m3")]),
+    );
+    let routed = run(router.after_limit(
+        TurnInput {
+            honored: true,
+            ..text("hello")
+        },
+        &[Pick::new("a", "m1")],
+        None,
+    ))
+    .expect("a/m3 est listé et valide");
+    assert_eq!(
+        routed.route.model(),
+        Some("m3"),
+        "la liste reste respectée : pas m4"
+    );
+}
+
+// ---- Précision de revue (#321) : le même décalage filtre/scoring existe dans route() ----
+
+/// Chemin ORDINAIRE (`route`), liste [a/m2] dont le bras est invalide, a/m3 valide hors liste.
+/// Constat mesuré (revue de #321) : la paire en vigueur HORS liste (a/m3) est retenue, avec la
+/// liste élargie au pool — pas de défaut. Le fixe pour qu'un changement soit voulu.
+#[test]
+fn route_ordinaire_elargit_quand_la_paire_en_vigueur_est_hors_liste() {
+    let world = World::new(vec![cand("a", "m2", false), cand("a", "m3", false)]);
+    world.learning.set_arms(vec![
+        bras_invalide(GENERAL, "a", "m2"),
+        arm(GENERAL, "a", "m3", true),
+    ]);
+    let router = TurnRouter::new(
+        world
+            .spec("a", "m3", 1)
+            .auto()
+            .auto_models(vec![entry("a", "m2")]),
+    );
+    let routed = run(router.route(text("hello")));
+    assert_eq!(pair(&routed), on("a", "m3"));
+    assert!(
+        reason(&routed).contains("no_candidate; narrowed: auto_models"),
+        "constat : la liste est élargie au pool : {}",
+        reason(&routed)
+    );
+}
+
+/// Même liste, paire en vigueur LISTÉE et INVALIDE (a/m2) : `route` la retient. Le défaut analogue
+/// à celui de `after_limit` existe donc côté rétention de la paire en vigueur. Test qui le fixe :
+/// un changement de ce comportement doit être une décision, pas une dérive.
+#[test]
+fn route_ordinaire_retient_la_paire_en_vigueur_listee_mais_invalide() {
+    let world = World::new(vec![cand("a", "m2", false), cand("a", "m3", false)]);
+    world.learning.set_arms(vec![
+        bras_invalide(GENERAL, "a", "m2"),
+        arm(GENERAL, "a", "m3", true),
+    ]);
+    let router = TurnRouter::new(
+        world
+            .spec("a", "m2", 1)
+            .auto()
+            .auto_models(vec![entry("a", "m2")]),
+    );
+    let routed = run(router.route(text("hello")));
+    assert_eq!(
+        pair(&routed),
+        on("a", "m2"),
+        "constat : la paire invalide est retenue"
+    );
+}

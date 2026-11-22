@@ -100,7 +100,7 @@ impl ArmStats {
 
     /// Moyenne du postérieur Beta.
     pub fn mean(&self) -> f64 {
-        self.alpha / (self.alpha + self.beta)
+        posterior_mean(self.alpha, self.beta)
     }
 
     /// Coût marginal moyen connu par observation, `None` s'il n'a jamais été connu.
@@ -111,6 +111,19 @@ impl ArmStats {
     /// Durée moyenne par observation, `None` si elle n'a jamais été connue.
     pub fn mean_latency_ms(&self) -> Option<f64> {
         (self.latency_n > 0).then(|| self.latency_sum_ms as f64 / self.latency_n as f64)
+    }
+}
+
+/// Moyenne d'un postérieur positif et fini sans déborder `alpha + beta`.
+pub(crate) fn posterior_mean(alpha: f64, beta: f64) -> f64 {
+    if !alpha.is_finite() || !beta.is_finite() || alpha <= 0.0 || beta <= 0.0 {
+        return alpha / (alpha + beta);
+    }
+    if alpha >= beta {
+        1.0 / (1.0 + beta / alpha)
+    } else {
+        let ratio = alpha / beta;
+        ratio / (1.0 + ratio)
     }
 }
 
@@ -322,6 +335,28 @@ pub fn score(
     settings: &RoutingSettings,
     seed: u64,
 ) -> Vec<Scored> {
+    score_impl(signature, candidates, arms, hints, settings, Some(seed))
+}
+
+/// Note les bras par leur moyenne postérieure, sans tirage ni exploration.
+pub(crate) fn score_mean(
+    signature: &TurnSignature,
+    candidates: &[Candidate],
+    arms: &[ArmStats],
+    hints: &PriorHints,
+    settings: &RoutingSettings,
+) -> Vec<Scored> {
+    score_impl(signature, candidates, arms, hints, settings, None)
+}
+
+fn score_impl(
+    signature: &TurnSignature,
+    candidates: &[Candidate],
+    arms: &[ArmStats],
+    hints: &PriorHints,
+    settings: &RoutingSettings,
+    seed: Option<u64>,
+) -> Vec<Scored> {
     if candidates.is_empty() {
         return Vec::new();
     }
@@ -363,8 +398,13 @@ pub fn score(
                 }
             };
             // Graine par l'identité du bras, pas par sa position.
-            let arm_seed = seed ^ stable_hash(&[&class, &facts.provider_id, &facts.model]);
-            let draw = beta_draw(alpha, beta, arm_seed);
+            let draw = match seed {
+                Some(seed) => {
+                    let arm_seed = seed ^ stable_hash(&[&class, &facts.provider_id, &facts.model]);
+                    beta_draw(alpha, beta, arm_seed)
+                }
+                None => posterior_mean(alpha, beta),
+            };
             let quota_norm = quota_penalty(facts.quota_utilization);
             let utility = draw
                 - settings.cost_weight * cost_norm[i]
@@ -396,16 +436,18 @@ pub fn score(
 
     // Exploration : avec la probabilité epsilon (jamais au-dessus du plafond
     // dur), prendre une paire tirée uniformément à la place de la meilleure.
-    let epsilon = settings
-        .exploration_epsilon
-        .clamp(0.0, MAX_EXPLORATION_EPSILON);
-    let mut rng = Rng::new(seed ^ 0xA5A5_A5A5_5A5A_5A5A);
-    let fires = rng.uniform() < epsilon;
-    let pick = (rng.uniform() * scored.len() as f64) as usize;
-    if fires && scored.len() > 1 {
-        let mut explored = scored.remove(pick.min(scored.len() - 1));
-        explored.explored = true;
-        scored.insert(0, explored);
+    if let Some(seed) = seed {
+        let epsilon = settings
+            .exploration_epsilon
+            .clamp(0.0, MAX_EXPLORATION_EPSILON);
+        let mut rng = Rng::new(seed ^ 0xA5A5_A5A5_5A5A_5A5A);
+        let fires = rng.uniform() < epsilon;
+        let pick = (rng.uniform() * scored.len() as f64) as usize;
+        if fires && scored.len() > 1 {
+            let mut explored = scored.remove(pick.min(scored.len() - 1));
+            explored.explored = true;
+            scored.insert(0, explored);
+        }
     }
     scored
 }
@@ -483,6 +525,20 @@ mod tests {
         RoutingSettings {
             exploration_epsilon: epsilon,
             ..RoutingSettings::default()
+        }
+    }
+
+    #[test]
+    fn score_mean_utilise_les_moyennes_sans_tirage_meme_avec_exploration_reglee() {
+        let sig = TurnSignature::from_chat("hello", false, ContextHints::default());
+        let candidates = vec![facts("a", "m3", None), facts("a", "m2", None)];
+        let scores = score_mean(&sig, &candidates, &[], &PriorHints::new(), &settings(1.0));
+        assert_eq!(scores.len(), 2);
+        assert_eq!(scores[0].candidate.model, "m2");
+        for score in scores {
+            assert_eq!(score.draw, 0.5);
+            assert_eq!(score.utility, 0.5);
+            assert!(!score.explored);
         }
     }
 

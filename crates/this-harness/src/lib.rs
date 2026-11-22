@@ -67,22 +67,23 @@ pub use context::{Dropped, Fitted, Removal, estimate_tokens, fit, removable};
 pub use embed::{
     Embed, EmbedError, EmbeddingModel, SansEmbed, vecteur_dense, vectoriser, verifier,
 };
-pub use event::{Event, HintKind, Outcome, Pending, Snapshot};
+pub use event::{Event, EventWire, HintKind, Outcome, Pending, Snapshot, UnknownEvent};
 pub use mcp::{McpLink, McpServer, McpToolbox};
 pub use ports::{
-    Cancel, Cancelled, Compactor, Delta, Permission, Recorder, Recorders, Toolbox, Toolboxes,
-    Transport,
+    Besoin, Cancel, Cancelled, Compactor, Delta, Isolation, Permission, ProfilRuntime, Recorder,
+    Recorders, Refus, Toolbox, Toolboxes, Transport,
 };
-pub use recall::{Anchors, Citation, Fact, Recall, anchors, rappel};
+pub use recall::{Anchors, Citation, Fact, Recall, anchors, rappel, rappel_avec, rappel_cloisonne};
 pub use search::{SearchHit, SearchLink, SearchToolbox};
 pub use session::{
-    CONTEXT_BUDGET, Clock, Handle, Harness, INTERRUPT_GRACE_MS, KEEP_ALIVE, Limits, MAX_RETRIES,
-    NO_PROGRESS_MS, RECORDER_TIMEOUT_MS, RETRY_BACKOFF_MS, ROUTER_TIMEOUT_MS, Running, SILENCE_MS,
-    Shared, Sleep, SystemClock, TOOL_TIMEOUT_MS, TurnContext, out_hash,
+    CONTEXT_BUDGET, Clock, Handle, Harness, INTERRUPT_GRACE_MS, KEEP_ALIVE, Limits,
+    MAX_QUOTA_FALLBACKS, MAX_RETRIES, NO_PROGRESS_MS, RECORDER_TIMEOUT_MS, RETRY_BACKOFF_MS,
+    ROUTER_TIMEOUT_MS, Running, SILENCE_MS, Shared, Sleep, SystemClock, TOOL_TIMEOUT_MS,
+    TurnContext, out_hash,
 };
 pub use wire::{
-    Code, Failure, Finish, ImagePart, ImageSource, Message, Reply, Request, ThreadDefect, ToolCall,
-    ToolSpec,
+    Code, Failure, Finish, ImagePart, ImageSource, Message, QuotaRefusal, QuotaScope, Reply,
+    Request, ThreadDefect, ToolCall, ToolSpec,
 };
 
 /// Le verdict que porte `Event::Stopped`.

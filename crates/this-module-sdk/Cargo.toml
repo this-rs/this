@@ -15,4 +15,4 @@ serde_json = "1.0"
 [dev-dependencies]
 # Test de conformité seulement : le JSON des constructeurs est relu par les vrais types du
 # contrat. Une dev-dependency d'un crate chemin n'entre pas dans la résolution de la forge.
-this-descriptor = { path = "../this-descriptor" }
+this-descriptor = { version = "0.0.1", path = "../this-descriptor" }

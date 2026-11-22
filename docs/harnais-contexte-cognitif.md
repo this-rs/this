@@ -200,10 +200,15 @@ aggravants mesurables :
    résumé est un message utilisateur ordinaire, sans en-tête. Le modèle lit une
    paraphrase comme un fait de la conversation.
 
-**Non prouvé, pour la reprise** : rien ne rattache le fil restauré à un registre — un
-`Snapshot` ne porte pas de `SeenLedger` (`event.rs:242-249`), donc après un
-redémarrage tous les ids du fil redeviennent « jamais vus » et l'inverse est vrai
-aussi : rien ne dit qu'un texte du fil a été cloisonné.
+**Pour la reprise (#290)** : un `Snapshot` ne porte toujours pas de `SeenLedger`, mais
+le harnais **rebâtit** le registre depuis le fil à chaque `restore` / `seed` (remis à
+zéro, puis rejeu des résultats d'outils). Par défaut la reprise est **conservatrice** :
+un id imprimé par un résultat d'outil restauré redevient « **cité** », jamais « lu » —
+un snapshot n'est pas authentifié par construction. `restore_trusted` / `seed_trusted`
+le relisent comme une lecture directe, et ne conviennent qu'à un stockage protégé en
+intégrité. Conséquence assumée : après une reprise par défaut, les vraies lectures du
+fil précédent portent la marque « cité seulement » dans le rappel tant qu'elles ne sont
+pas relues.
 
 ### (d) Suppression/révocation et changement de projet invalident ; pas de mémoire croisée entre personnes — **manque**
 
@@ -370,3 +375,35 @@ est vrai (même à `messages: 0`) rend le dépassement visible sans inventer une
    qu'elle protège n'existe pas** (`embed.rs:104-114` contre l'absence de tout stockage
    dans le crate) — ce qui est le bon ordre, mais il faut le dire pour qu'un hôte ne
    croie pas la réindexation fournie.
+
+## Le contrat de lecture : `Outcome::observable` (#290)
+
+Le harnais ne peut pas deviner, depuis le texte qu'un outil rend au modèle, ce que cet
+outil a réellement fait lire. Un texte **cloisonné** cache la vraie lecture ; un texte **en
+clair** peut seulement répéter les arguments du modèle (« oublié #note:X », « refusé : rien
+sous #note:X ») — le modèle fabrique alors lui-même la preuve qu'il cite.
+
+Donc, depuis ce contrat :
+
+- le texte d'un résultat n'est **jamais** une preuve : ses ids sont seulement *cités* ;
+- une lecture directe n'existe que par `Outcome::observable` (`Outcome::reading(..)`), que
+  **l'hôte** remplit avec les ids qu'il a lui-même vus dans une réponse d'outil réussie —
+  jamais avec du texte tiers ni avec les arguments du modèle ;
+- un résultat **refusé** ou **échoué** ne lit rien, déclaration ou non ;
+- une déclaration passe par `SeenLedger::observe` : un id placé dans un conteneur
+  `<untrusted_data>` reste cité, la déclaration ne contourne pas ce jugement.
+
+Un hôte qui ne déclare rien reste sûr, mais plus faible : tout est « cité seulement ».
+
+Limites assumées de ce contrat :
+
+- **`restore_trusted` / `seed_trusted` sont hors garantie.** L'intégrité d'un snapshot n'en
+  garantit pas la fidélité de provenance : le fil ne porte que le texte, donc une citation peut
+  y redevenir « lue directement » au redémarrage. Seule la reprise par défaut est conservatrice.
+- **`Outcome` a gagné un champ public (`observable`)** : un littéral `Outcome { .. }` écrit hors
+  de ce dépôt cesse de compiler (rupture de source). Passer par `Outcome::reading(..)` /
+  `Outcome::unchanged()` ou `..Default`. Les dépôts sondés n'en contiennent pas ; cela ne prouve
+  rien pour les autres consommateurs.
+- **`rappel_cloisonne` accepte des `Anchors` publics.** Une citation dont l'`id` n'a pas la forme
+  exacte `#kind:uuid` (ou dont le `kind` diffère) n'est ni interrogée au graphe ni marquée par
+  le registre : elle est rendue comme copie tierce enveloppée, sous le libellé « citation invalide, non interrogée » (et non « INTROUVABLE dans le graphe », qui suppose une interrogation).

@@ -94,7 +94,7 @@ exemple un test qui vérifie que `Snapshot` reste à trois champs tant que la re
 prétend pas plus, ou un test de `Recorder` défaillant qui nomme explicitement « perdu,
 assumé » (`session.rs:420-426` porte cette phrase, aucun test ne l'épingle).
 
-### (b) Crash avant l'effet / après l'effet avant acquittement / après checkpoint, reprise sur processus neuf et store réel — **manque**
+### (b) Crash avant l'effet / après l'effet avant acquittement / après checkpoint, reprise sur processus neuf et store réel — **preuve** (partielle)
 
 Ce qui existe :
 
@@ -135,6 +135,40 @@ Trois points de coupe précis à écrire, dans cet ordre de valeur :
 3. **après checkpoint** : le store contient l'étape, `_stop` vaut encore `running` ; la
    reprise doit lire `load_run` (`src/storage/harness_graph.rs:453`) et refuser de
    rejouer.
+
+**Preuve** : `tests/reprise_crash.rs` (crate racine, feature `obrain`). Un sous-processus (le binaire
+de test ré-invoqué sur `enfant`) pilote un vrai `Harness` branché sur le vrai journal
+(`HostRecorder` → `HarnessGraph` → `ObrainStore` sur disque), puis meurt par
+`std::process::abort()` (le parent exige SIGABRT) ; le parent rouvre le magasin dans un
+tempdir et relit. Chaque test a été vu rouge sous mutation de la garantie qu'il vérifie.
+
+| Cas | Test | Ce qu'il fige — et rien de plus |
+|---|---|---|
+| avant l'effet | `crash_avant_l_effet_ni_journal_ni_monde_rejouer_est_sans_risque` | journal sans run, effet absent du monde |
+| après l'effet, avant acquittement | `crash_apres_l_effet_avant_l_acquittement_le_journal_ne_sait_pas` | l'effet a eu lieu, le journal est **identique** au cas précédent : la reprise ne peut pas savoir que l'effet a été tenté. C'est la limite (pas d'intention écrite avant l'appel) ; le test l'épingle, il ne la comble pas |
+| après checkpoint | `crash_apres_checkpoint_l_etape_est_relue_et_le_run_n_est_pas_fini` | l'étape commitée se relit (effet accompli, ni refus ni échec), le run n'a pas d'arrêt (`running`) |
+
+La matrice est épinglée par `tests/matrice_snapshot.rs`
+(`snapshot_reste_a_trois_champs_tant_que_la_matrice_le_dit`) : destructuring exhaustif de
+`Snapshot`, un quatrième champ ne compile plus.
+
+Cas « effet de résultat inconnu non rejoué » : case (c), pas dupliqué.
+
+**Reste non couvert** : (1) le remède du cas « après l'effet » (journaliser une intention
+avant l'appel) n'existe pas : seule la limite est prouvée. (2) Aucun test ne fait **agir**
+une reprise : l'hôte n'a pas de logique de reprise de run, les tests prouvent ce que le
+journal donne à lire, pas une décision de rejeu. (3) Un seul point de coupe par cas, un
+seul outil, un seul processus écrivain ; pas de crash pendant le commit lui-même
+(`commit_wal`), pas de coupure d'alimentation (SIGABRT ne perd pas le cache de l'OS). (4) Le
+`Snapshot` (fil + file) n'a toujours pas de stockage disque : la ligne 3 de la matrice reste
+« hôte, entièrement ». (5) Les tests ne tournent qu'en `cfg(unix)` pour la vérification du
+signal. (6) **Ces tests ne tournent PAS en CI aujourd'hui** : le journal durable vit dans le
+crate racine et le magasin est obrain, dont le dépôt est privé ; le job `obrain` ne s'active
+que si le secret `OBRAIN_TOKEN` est défini, sinon il n'émet qu'un avertissement. Ils se
+lancent en local : `cargo test --features obrain --test reprise_crash`. Placés d'abord dans
+`this-harness` avec une dev-dépendance vers le crate racine, ils cassaient Clippy et
+Coverage (les crates `obrain-*` y sont des stubs, d'où `unresolved import obrain_common::types`)
+et auraient cassé la suite navigateur de #285 : la dev-dépendance a été retirée.
 
 ### (c) Un effet non idempotent au résultat inconnu n'est pas rejoué aveuglément — **preuve existante**
 
