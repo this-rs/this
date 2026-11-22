@@ -73,7 +73,7 @@ pub use ports::{
     Besoin, Cancel, Cancelled, Compactor, Delta, Isolation, Permission, ProfilRuntime, Recorder,
     Recorders, Refus, Toolbox, Toolboxes, Transport,
 };
-pub use recall::{Anchors, Citation, Fact, Recall, anchors, rappel, rappel_avec};
+pub use recall::{Anchors, Citation, Fact, Recall, anchors, rappel, rappel_avec, rappel_cloisonne};
 pub use search::{SearchHit, SearchLink, SearchToolbox};
 pub use session::{
     CONTEXT_BUDGET, Clock, Handle, Harness, INTERRUPT_GRACE_MS, KEEP_ALIVE, Limits, MAX_RETRIES,

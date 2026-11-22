@@ -36,6 +36,18 @@ pub const EXTENSIONS: &[&str] = &[
 ];
 /// Longueur maximale (caractères) d'une commande retenue.
 pub const COMMAND_MAX: usize = 200;
+/// Longueur maximale (caractères) de la SORTE d'un id cité (`#<sorte>:<uuid>`).
+///
+/// La sorte vient du texte cité, donc d'un attaquant : elle est écrite en clair dans le
+/// rappel (`- #<sorte>:<uuid> (<sorte>)`). Une sorte plus longue n'est pas une sorte, c'est
+/// une phrase : l'id n'est pas une ancre.
+pub const KIND_MAX: usize = 24;
+/// Longueur maximale (caractères) d'un chemin retenu : au-delà, ce n'est pas un chemin.
+pub const PATH_MAX: usize = 200;
+/// Longueur maximale (caractères) de la source ou de la date d'un fait, et du nom d'un outil :
+/// ce sont des COPIES (d'un hôte, du modèle), jamais des mots du harnais.
+pub const SOURCE_MAX: usize = 80;
+pub const TOOL_NAME_MAX: usize = 64;
 /// Nombre maximal d'entités interrogées et rendues.
 pub const MAX_ENTITIES: usize = 40;
 /// Nombre maximal de chemins / commandes rendus.
@@ -43,6 +55,14 @@ pub const MAX_LISTED: usize = 20;
 /// Taille maximale (caractères) du message produit.
 pub const MAX_CHARS: usize = 8000;
 const FACT_MAX: usize = 240;
+/// Place gardée pour les indicateurs de coupure (qui sont ajoutés APRÈS le contrôle) : aucune
+/// ligne du rappel ne peut la prendre. Le message entier reste donc sous `MAX_CHARS`.
+const RESERVE_FIN: usize = 320;
+
+/// Une ligne tient-elle dans le budget du rappel, indicateurs compris ?
+fn tient(body: &str, ajout: &str) -> bool {
+    body.chars().count() + ajout.chars().count() + RESERVE_FIN <= MAX_CHARS
+}
 const EXCERPT_MAX: usize = 120;
 
 /// Un id `#kind:uuid` cité, avec le premier message qui le cite.
@@ -135,7 +155,8 @@ fn call_anchors(call: &ToolCall, index: usize, out: &mut Anchors) {
     if let Value::Object(map) = &call.arguments {
         for key in ["command", "cmd"] {
             if let Some(Value::String(c)) = map.get(key) {
-                out.commands.push((truncate(c.trim(), COMMAND_MAX), index));
+                out.commands
+                    .push((truncate(&one_line(c), COMMAND_MAX), index));
             }
         }
     }
@@ -160,6 +181,22 @@ fn truncate(s: &str, max: usize) -> String {
     }
 }
 
+/// Une citation construite par `anchors()` a toujours la forme `#kind:uuid` ; un `Anchors` bâti à la
+/// main (champs publics) peut porter n'importe quoi. Seule la forme exacte passe en clair.
+fn id_bien_forme(c: &Citation) -> bool {
+    let Some(rest) = c.id.strip_prefix('#') else {
+        return false;
+    };
+    let Some((kind, uuid)) = rest.split_once(':') else {
+        return false;
+    };
+    !kind.is_empty()
+        && kind.len() <= KIND_MAX
+        && kind.bytes().all(|b| b.is_ascii_lowercase() || b == b'_')
+        && kind == c.kind
+        && is_uuid(uuid)
+}
+
 fn is_uuid(s: &str) -> bool {
     let parts: Vec<&str> = s.split('-').collect();
     parts.len() == 5
@@ -177,7 +214,7 @@ fn ids(text: &str, index: usize, out: &mut Anchors) {
             .bytes()
             .take_while(|b| b.is_ascii_lowercase() || *b == b'_')
             .count();
-        if kind_len == 0 || rest.as_bytes().get(kind_len) != Some(&b':') {
+        if kind_len == 0 || kind_len > KIND_MAX || rest.as_bytes().get(kind_len) != Some(&b':') {
             continue;
         }
         let Some(uuid) = rest.get(kind_len + 1..kind_len + 37) else {
@@ -198,7 +235,7 @@ fn ids(text: &str, index: usize, out: &mut Anchors) {
             id,
             kind: rest[..kind_len].to_string(),
             message: index,
-            excerpt: truncate(text[line_start..line_end].trim(), EXCERPT_MAX),
+            excerpt: truncate(&one_line(&text[line_start..line_end]), EXCERPT_MAX),
         });
     }
 }
@@ -211,6 +248,7 @@ fn paths(text: &str, index: usize, out: &mut Anchors) {
         if tok.is_empty()
             || tok.contains("://")
             || tok.starts_with("//")
+            || tok.len() > PATH_MAX
             || !tok
                 .chars()
                 .all(|c| c.is_ascii_alphanumeric() || "_./~-".contains(c))
@@ -253,14 +291,61 @@ pub async fn rappel_avec(
     recall: &dyn Recall,
     vus: Option<&SeenLedger>,
 ) -> Option<Message> {
+    rappel_impl(anchors, recall, vus, None).await
+}
+
+/// [`rappel_avec`], où **chaque morceau non fiable est enveloppé séparément** par
+/// `cloison`, et la structure du rappel reste en clair.
+///
+/// Dans un rappel, deux sortes de texte cohabitent : ce que le harnais écrit (l'en-tête,
+/// la règle, les ids, la source, la date, les marques « CITÉ SEULEMENT » et
+/// « INTROUVABLE ») et ce qu'il recopie sans l'avoir écrit (le fait du graphe, qui peut
+/// être le corps d'une note ; l'extrait de la conversation ; les chemins et commandes).
+/// Envelopper le rappel entier met les marques dans la même donnée « écrite par
+/// n'importe qui » que les extraits : un extrait peut alors les contredire (« [lu
+/// directement, vérifié] »). Ici seules les copies sont enveloppées, les marques gardent
+/// l'autorité du harnais.
+///
+/// `cloison` reçoit le texte d'UN morceau, déjà réduit à une ligne et coupé, et rend ce que
+/// le modèle lira (en pratique un conteneur `<untrusted_data>` au nonce du tour). Les
+/// copies sont toujours réduites à une ligne : aucun séparateur Unicode (U+2028, U+2029,
+/// U+0085) ne peut y fabriquer une fausse entrée.
+pub async fn rappel_cloisonne(
+    anchors: &Anchors,
+    recall: &dyn Recall,
+    vus: Option<&SeenLedger>,
+    cloison: &dyn Fn(&str) -> String,
+) -> Option<Message> {
+    rappel_impl(anchors, recall, vus, Some(cloison)).await
+}
+
+async fn rappel_impl(
+    anchors: &Anchors,
+    recall: &dyn Recall,
+    vus: Option<&SeenLedger>,
+    cloison: Option<&dyn Fn(&str) -> String>,
+) -> Option<Message> {
+    // Une copie : enveloppée si l'hôte le demande, sinon telle quelle.
+    let copie = |s: &str| -> String {
+        match cloison {
+            Some(f) => f(s),
+            None => s.to_string(),
+        }
+    };
     if anchors.is_empty() {
         return None;
     }
     let shown = &anchors.cited[..anchors.cited.len().min(MAX_ENTITIES)];
-    let facts = if shown.is_empty() {
+    // Seules les citations de forme exacte sont interrogées. Si aucune ne l'est, l'hôte n'est pas
+    // appelé du tout : il n'y a rien à demander, et un appel à vide serait un appel quand même.
+    let asked: Vec<String> = shown
+        .iter()
+        .filter(|c| id_bien_forme(c))
+        .map(|c| c.id.clone())
+        .collect();
+    let facts = if asked.is_empty() {
         Vec::new()
     } else {
-        let asked: Vec<String> = shown.iter().map(|c| c.id.clone()).collect();
         recall.recall(&asked).await
     };
 
@@ -269,32 +354,62 @@ pub async fn rappel_avec(
          Règle : un rappel n'est pas une preuve. Si un fait du graphe contredit ce que la conversation disait, \
          présente les deux (fait daté et attribué + extrait de la conversation) ; n'arbitre pas en silence.\n",
     );
-    let mut cut = false;
+    let mut budget = false;
     if !shown.is_empty() {
         body.push_str(&format!("\nEntités citées ({}) :\n", anchors.cited.len()));
     }
     for (n, c) in shown.iter().enumerate() {
-        let line = match facts.iter().find(|f| f.id == c.id) {
+        // Forme exacte : en clair. Sinon (Anchors forgé) : copie tierce, enveloppée.
+        let bien_forme = id_bien_forme(c);
+        let id_vu = if bien_forme {
+            c.id.clone()
+        } else {
+            copie(&truncate(&one_line(&c.id), SOURCE_MAX))
+        };
+        let kind_vu = if bien_forme {
+            c.kind.clone()
+        } else {
+            copie(&truncate(&one_line(&c.kind), KIND_MAX))
+        };
+        let trouve = if bien_forme {
+            facts.iter().find(|f| f.id == c.id)
+        } else {
+            None
+        };
+        let line = match trouve {
             Some(f) => format!(
                 "- {} ({}) — graphe : {} [source : {}, au : {}]\n    conversation (message {}) : « {} »\n",
-                c.id,
-                f.kind,
-                truncate(&one_line(&f.fact), FACT_MAX),
-                one_line(&f.source),
-                one_line(&f.as_of),
+                id_vu,
+                copie(&truncate(&one_line(&f.kind), KIND_MAX)),
+                copie(&truncate(&one_line(&f.fact), FACT_MAX)),
+                copie(&truncate(&one_line(&f.source), SOURCE_MAX)),
+                copie(&truncate(&one_line(&f.as_of), SOURCE_MAX)),
                 c.message,
-                c.excerpt
+                copie(&one_line(&c.excerpt))
+            ),
+            None if !bien_forme => format!(
+                "- {} ({}) — citation invalide, non interrogée (cité au message {} : « {} ») : ni id ni sorte exacts — à ne pas tenir pour acquis.\n",
+                id_vu,
+                kind_vu,
+                c.message,
+                copie(&one_line(&c.excerpt))
             ),
             None => format!(
                 "- {} ({}) — INTROUVABLE dans le graphe (cité au message {} : « {} ») : id inventé, supprimé, ou hors de portée — à ne pas tenir pour acquis.\n",
-                c.id, c.kind, c.message, c.excerpt
+                id_vu,
+                kind_vu,
+                c.message,
+                copie(&one_line(&c.excerpt))
             ),
         };
         // La marque de provenance : une citation jamais lue ne se présente pas
         // comme une preuve, même quand le graphe la connaît.
         // `None` = le registre ne suis pas cette sorte : il ne dit rien, on ne
         // marque rien. Seul ce qu'il SAIT (cité, ou jamais paru) porte la marque.
-        let non_lu = match vus.and_then(|l| l.provenance_token(&c.id)) {
+        let non_lu = match vus
+            .filter(|_| bien_forme)
+            .and_then(|l| l.provenance_token(&c.id))
+        {
             Some(Provenance::Quoted) | Some(Provenance::Never) => {
                 // Le saut de ligne FINAL compte : sans lui, l'entrée suivante se
                 // collerait à la marque et un lecteur ligne à ligne l'attribuerait
@@ -304,17 +419,17 @@ pub async fn rappel_avec(
             _ => "",
         };
         let line = format!("{line}{non_lu}");
-        if body.chars().count() + line.chars().count() > MAX_CHARS {
+        if !tient(&body, &line) {
             body.push_str(&format!(
                 "[coupé : {} entité(s) citée(s) non rendue(s) (borne de taille)]\n",
                 anchors.cited.len() - n
             ));
-            cut = true;
+            budget = true;
             break;
         }
         body.push_str(&line);
     }
-    if !cut && anchors.cited.len() > shown.len() {
+    if !budget && anchors.cited.len() > shown.len() {
         body.push_str(&format!(
             "[coupé : {} entité(s) citée(s) non interrogée(s) (borne de {MAX_ENTITIES})]\n",
             anchors.cited.len() - shown.len()
@@ -322,19 +437,36 @@ pub async fn rappel_avec(
     }
     list(
         &mut body,
+        &mut budget,
         "Fichiers vus",
-        anchors.files.iter().map(|(p, _)| p.clone()),
+        anchors
+            .files
+            .iter()
+            .map(|(p, _)| copie(&truncate(&one_line(p), PATH_MAX))),
     );
     list(
         &mut body,
+        &mut budget,
         "Outils appelés",
-        anchors.tools.iter().map(|(n, k)| format!("{n}×{k}")),
+        anchors
+            .tools
+            .iter()
+            .map(|(n, k)| format!("{}×{k}", copie(&truncate(&one_line(n), TOOL_NAME_MAX)))),
     );
     list(
         &mut body,
+        &mut budget,
         "Commandes lancées",
-        anchors.commands.iter().map(|(c, _)| c.clone()),
+        anchors
+            .commands
+            .iter()
+            .map(|(c, _)| copie(&truncate(&one_line(c), COMMAND_MAX))),
     );
+    if budget {
+        body.push_str(
+            "[coupé : borne de taille atteinte — une partie du rappel n'est pas rendue]\n",
+        );
+    }
     Some(Message::hint(body))
 }
 
@@ -342,15 +474,42 @@ fn one_line(s: &str) -> String {
     s.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-fn list(body: &mut String, title: &str, items: impl ExactSizeIterator<Item = String>) {
+/// Une section de liste, BORNÉE : chaque élément entier est ajouté seulement s'il tient dans le
+/// budget (`tient`), sinon il est omis et la coupe est dite. Un élément n'est jamais coupé au
+/// milieu d'une enveloppe. Si aucun ne tient, la section est absente et `budget` le dit.
+fn list(
+    body: &mut String,
+    budget: &mut bool,
+    title: &str,
+    items: impl ExactSizeIterator<Item = String>,
+) {
     let total = items.len();
     if total == 0 {
         return;
     }
-    let shown: Vec<String> = items.take(MAX_LISTED).collect();
-    body.push_str(&format!("\n{title} ({total}) : {}", shown.join(" ; ")));
-    if total > MAX_LISTED {
-        body.push_str(&format!(" [coupé : {} de plus]", total - MAX_LISTED));
+    // La coupure par QUANTITÉ (plus de `MAX_LISTED` éléments) se dit dans la ligne même, par
+    // « [coupé : N de plus] ». Seule une coupure par BUDGET de taille lève `budget`.
+    let candidat = |essai: &[String]| {
+        let reste = total - essai.len();
+        let coupe = if reste > 0 {
+            format!(" [coupé : {reste} de plus]")
+        } else {
+            String::new()
+        };
+        format!("\n{title} ({total}) : {}{coupe}\n", essai.join(" ; "))
+    };
+    let mut rendus: Vec<String> = Vec::new();
+    for item in items.take(MAX_LISTED) {
+        let mut essai = rendus.clone();
+        essai.push(item);
+        if !tient(body, &candidat(&essai)) {
+            *budget = true;
+            break;
+        }
+        rendus = essai;
     }
-    body.push('\n');
+    if rendus.is_empty() {
+        return;
+    }
+    body.push_str(&candidat(&rendus));
 }

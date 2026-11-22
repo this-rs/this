@@ -1156,7 +1156,9 @@ impl Harness {
     }
 
     /// [`Self::restore`] pour un snapshot dont on connaît l'origine : la voie
-    /// privilégiée, explicite (voir [`Handle::restore_trusted`]).
+    /// privilégiée, explicite (voir [`Handle::restore_trusted`]). **Hors de la garantie
+    /// « cité ≠ lu »** : une citation y redevient `Direct` (l'intégrité n'est pas la fidélité de
+    /// provenance).
     pub fn restore_trusted(&self, snapshot: Snapshot) {
         self.handle().restore_trusted(snapshot);
     }
@@ -1713,7 +1715,7 @@ impl Harness {
                     // `observe` distingue lui-même les conteneurs `<untrusted_data>` :
                     // un id qu'une note hostile a écrit reste CITÉ, jamais lu.
                     if let Some(registre) = &self.vus {
-                        registre.borrow_mut().observe(&outcome.text);
+                        observe_outcome(&mut registre.borrow_mut(), &outcome);
                     }
                     self.push(Message::tool(call.id.clone(), outcome.text.clone()));
                 }
@@ -2330,7 +2332,7 @@ impl Permission for RunPorts {
         // boucle — son résultat doit quand même entrer dans le registre, sinon
         // tout ce qu'un moteur interne exécute resterait « jamais lu ».
         if let Some(registre) = &self.vus {
-            registre.borrow_mut().observe(&outcome.text);
+            observe_outcome(&mut registre.borrow_mut(), outcome);
         }
         let step = step_of(&call.name, ms, outcome);
         self.run.borrow_mut().record(step);
@@ -2527,6 +2529,21 @@ pub fn out_hash(text: &str) -> String {
         .iter()
         .map(|b| format!("{b:02x}"))
         .collect()
+}
+
+/// Ce que le registre retient d'un résultat d'outil (décision #290).
+///
+/// Le texte du modèle n'est **jamais** une preuve de lecture : il est seulement cité.
+/// Une lecture directe n'existe que par `Outcome::observable`, que l'hôte remplit, et
+/// seulement pour un appel réussi — un refus ou un échec ne lit rien.
+fn observe_outcome(registre: &mut SeenLedger, outcome: &Outcome) {
+    registre.observe_quoted(&outcome.text);
+    if outcome.refused.is_none()
+        && outcome.failed.is_none()
+        && let Some(lu) = &outcome.observable
+    {
+        registre.observe(lu);
+    }
 }
 
 /// Le nombre maximal de messages tenus en file.
@@ -2745,6 +2762,19 @@ impl Handle {
     /// [`Self::seed`] pour un transcript dont on connaît l'origine : les lectures
     /// d'outils y sont relues (voie privilégiée, explicite).
     ///
+    /// **Le fil ne porte que le texte du modèle**, pas `Outcome::observable` : relire
+    /// un transcript ne retrouve donc que ce que ce texte montre en clair, ce qui ne
+    /// vaut pas la déclaration que l'hôte avait faite pendant le run. Un hôte qui
+    /// cloisonne ses lectures (le texte les cache) ou qui répète les arguments du
+    /// modèle en clair (le texte les simule) n'a pas de raison de l'appeler : la
+    /// reprise par défaut, conservatrice, lui convient et ne trompe jamais.
+    ///
+    /// **L'intégrité ne donne pas la FIDÉLITÉ de provenance.** Même un snapshot signé et
+    /// intact ne porte que le texte : une simple *citation* y devient `Direct` au redémarrage,
+    /// sans `Outcome::observable` pour l'attester. `restore_trusted` n'est donc pas couvert par
+    /// la garantie « cité ≠ lu » ; seule la voie par défaut (conservatrice) la tient. Persister
+    /// et restaurer la provenance elle-même est un chantier distinct, non fait.
+    ///
     /// **« Connaître l'origine » ne suffit pas : il faut que le stockage soit
     /// protégé en INTÉGRITÉ.** Un fichier sur disque, un `localStorage`, une
     /// IndexedDB ou une ligne de base que d'autres codes peuvent réécrire ne
@@ -2808,12 +2838,25 @@ impl Handle {
     /// C'est la voie PRIVILÉGIÉE, volontairement plus longue à écrire : la
     /// confiance ne doit jamais être le chemin le plus court.
     ///
+    /// **Le fil ne porte que le texte du modèle**, pas `Outcome::observable` : relire
+    /// un transcript ne retrouve donc que ce que ce texte montre en clair, ce qui ne
+    /// vaut pas la déclaration que l'hôte avait faite pendant le run. Un hôte qui
+    /// cloisonne ses lectures (le texte les cache) ou qui répète les arguments du
+    /// modèle en clair (le texte les simule) n'a pas de raison de l'appeler : la
+    /// reprise par défaut, conservatrice, lui convient et ne trompe jamais.
+    ///
     /// **« Connaître l'origine » ne suffit pas : il faut que le stockage soit
     /// protégé en INTÉGRITÉ.** Un fichier sur disque, un `localStorage`, une
     /// IndexedDB ou une ligne de base que d'autres codes peuvent réécrire ne
     /// qualifient pas — c'est exactement là qu'un snapshot se forge. Sans
     /// signature ou MAC vérifiés à la relecture, prenez la voie par défaut : le
     /// pire qu'elle coûte est une lecture à refaire.
+    ///
+    /// **L'intégrité ne donne pas la FIDÉLITÉ de provenance.** Même un snapshot signé et
+    /// intact ne porte que le texte : une simple *citation* y devient `Direct` au redémarrage,
+    /// sans `Outcome::observable` pour l'attester. Cette méthode est donc HORS de la garantie
+    /// « cité ≠ lu » ; seule [`Self::restore`] la tient. Persister et restaurer la provenance
+    /// elle-même n'est pas fait.
     pub fn restore_trusted(&self, snapshot: Snapshot) {
         self.restore_avec(snapshot, Confiance::Notre)
     }
