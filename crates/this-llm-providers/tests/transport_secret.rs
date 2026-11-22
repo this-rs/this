@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use this_llm_providers::{
     Clock, CredentialRef, Hub, MemoryStore, Preset, ProviderConfig, ProviderError, ProviderId,
-    Secret, SecretError, SecretResolver, Snapshot, StoreError,
+    ProviderStore, Secret, SecretError, SecretResolver, Snapshot, StoreError,
 };
 
 struct Jour;
@@ -101,4 +101,33 @@ fn le_lan_sans_secret_s_ouvre_toujours() {
         )],
     });
     assert!(Hub::open(store, Espion::default(), Jour).is_ok());
+}
+
+/// Un `ProviderStore` PERSONNALISÉ (base, API, fichier d'une autre version…) qui ne valide rien :
+/// `JsonFileStore` valide à la lecture, mais ce contrat-là n'impose rien à un store tiers.
+struct StoreSansValidation(Snapshot);
+
+impl ProviderStore for StoreSansValidation {
+    fn load(&self) -> Result<Snapshot, StoreError> {
+        Ok(self.0.clone())
+    }
+    fn save(&self, _: &Snapshot) -> Result<(), StoreError> {
+        Ok(())
+    }
+}
+
+#[test]
+fn un_store_personnalise_qui_ne_valide_rien_n_ouvre_pas_une_configuration_interdite() {
+    for (preset, url) in CAS {
+        let espion = Espion::default();
+        let store = StoreSansValidation(Snapshot {
+            active: None,
+            providers: vec![interdite(preset, CredentialRef::Vault("k".into()), url)],
+        });
+        assert!(
+            Hub::open(store, espion.clone(), Jour).is_err(),
+            "{preset:?} + {url}"
+        );
+        assert_eq!(espion.0.load(Ordering::SeqCst), 0, "aucun secret résolu");
+    }
 }
