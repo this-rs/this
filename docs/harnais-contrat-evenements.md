@@ -154,8 +154,9 @@ Décisions, tranchées explicitement :
 | S5 | Client lent et rétention du journal | **preuve existante** | file bornée à `MAX_PENDING` (1000) et `Pending` cumulé borné : `dix_mille_messages_en_file` (`robustesse.rs:448`) ; sortie d'outil de 10 Mo bornée : `une_sortie_d_outil_de_10_mo` (`robustesse.rs:473`) ; 1000 appels dans un tour restent rangés : `mille_appels_dans_un_tour_restent_ranges` (`robustesse.rs:343`) ; enregistreur lent borné : `a_silent_recorder_delays_the_run_by_a_bounded_time` (`residus.rs:172`). *Note* : la **rétention** du journal est le choix de l'hôte (`Recorder` pousse, ne stocke pas — `ports.rs:406-431`). |
 | S6 | Distinction entre acquittement d'outil et réponse humaine | **preuve existante** | `ToolResult` porte `refused`/`failed`/`unchanged`/`before`/`after` (`event.rs:76-100`), un refus ≠ une erreur (`event.rs:81-86`) ; un résultat en échec porte sa cause : `un_tool_result_en_echec_porte_sa_cause` (`scenario.rs:1092`) ; les relances du harnais sont marquées `synthetic` (`wire.rs`), distinctes d'une question humaine : `synthetic_is_additive_on_the_wire` (`wire.rs` module tests) ; la réponse humaine est `User`/`Pending`, jamais un `ToolResult`. |
 
-Bilan des scénarios : **5 « preuve existante »** (S1, S3, S4, S5, S6), **1 « manque »** (S2,
-hors du crate). Parmi les manques d'enveloppe de §3, la **lecture indulgente d'un `type`
+Bilan des scénarios : **4 « preuve existante »** (S3, S4, S5, S6), **1 « partiel »** (S1 :
+appairage et refus d'un id dupliqué dans une même réponse, mais aucune reconnexion réelle ni
+déduplication entre messages), **1 « manque »** (S2, hors du crate). Parmi les manques d'enveloppe de §3, la **lecture indulgente d'un `type`
 inconnu** est désormais écrite dans le cœur (`EventWire`, §3). La **version d'événement** et
 le **curseur** restent à l'hôte, par décision (§3) : le cœur n'ouvre pas une seconde
 numérotation à côté de celle de l'hôte.
