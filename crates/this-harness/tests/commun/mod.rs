@@ -236,7 +236,7 @@ pub fn un_transport_muet_en_boucle_est_borne() {
         "un transport muet n'est ni un succès ni un budget : c'est un échec nommé"
     );
     // Le nombre EXACT, relevé puis compté d'après le code : le tour muet initial (1), puis une
-    // relance par `Limits::default().max_relances` (3 : `session.rs`, copié dans la politique à
+    // relance par `Limits::default().max_relances` (3 : `session.rs`, copié dans le `Run` à
     // chaque envoi), puis au 4e tour muet le compteur de relances est épuisé et le run s'arrête.
     // Soit 1 + 3 = 4, et non 3 : la politique propre de `this-agent` accorde 2 relances, mais le
     // harnais la remplace par `Limits::max_relances`. Une borne `<=` laissait passer une

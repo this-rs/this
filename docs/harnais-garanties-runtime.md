@@ -182,7 +182,7 @@ Chrome et un chromedriver compatible :
 `CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER=wasm-bindgen-test-runner cargo test -p this-harness --target wasm32-unknown-unknown --test navigateur`.
 Configurer `CHROMEDRIVER` si nécessaire. En CI : job `wasm32_browser`.
 
-Les cinq scénarios : transport muet en boucle borné par les tours ; mille appels d'outils
+Les cinq scénarios : transport muet en boucle borné par `max_relances` (1 tour muet + 3 relances = 4 tours, puis un échec nommé) ; mille appels d'outils
 dans un tour, fil valide ; `interrupt` avant un run sans empoisonner le suivant ;
 interruption pendant un outil puis nouveau `send` (nouvelle requête après arrêt) ; run
 lâché pendant un `Recorder::stopped` suspendu (horloge sans minuteur).

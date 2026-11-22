@@ -1653,9 +1653,8 @@ impl Harness {
                     );
                     // Le texte a déjà été montré : le conserver sans les appels
                     // refusés pour que la reprise voie ce que l'utilisateur a lu.
-                    // Rien n'a été montré : rien n'est empilé (même garde que le
-                    // chemin d'interruption) — un `Assistant` vide sans appel n'est
-                    // pas un message.
+                    // Sur ce chemin de rejeu, un texte vide sans appel n'a rien à dire : rien
+                    // n'est empilé. (Les autres chemins gardent leur comportement propre.)
                     if !text.trim().is_empty() {
                         self.push(Message::Assistant {
                             content: text.clone(),
