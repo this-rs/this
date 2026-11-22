@@ -55,6 +55,14 @@ pub const MAX_LISTED: usize = 20;
 /// Taille maximale (caractères) du message produit.
 pub const MAX_CHARS: usize = 8000;
 const FACT_MAX: usize = 240;
+/// Place gardée pour les indicateurs de coupure (qui sont ajoutés APRÈS le contrôle) : aucune
+/// ligne du rappel ne peut la prendre. Le message entier reste donc sous `MAX_CHARS`.
+const RESERVE_FIN: usize = 320;
+
+/// Une ligne tient-elle dans le budget du rappel, indicateurs compris ?
+fn tient(body: &str, ajout: &str) -> bool {
+    body.chars().count() + ajout.chars().count() + RESERVE_FIN <= MAX_CHARS
+}
 const EXCERPT_MAX: usize = 120;
 
 /// Un id `#kind:uuid` cité, avec le premier message qui le cite.
@@ -411,7 +419,7 @@ async fn rappel_impl(
             _ => "",
         };
         let line = format!("{line}{non_lu}");
-        if body.chars().count() + line.chars().count() > MAX_CHARS {
+        if !tient(&body, &line) {
             body.push_str(&format!(
                 "[coupé : {} entité(s) citée(s) non rendue(s) (borne de taille)]\n",
                 anchors.cited.len() - n
@@ -429,11 +437,16 @@ async fn rappel_impl(
     }
     list(
         &mut body,
+        &mut cut,
         "Fichiers vus",
-        anchors.files.iter().map(|(p, _)| copie(&one_line(p))),
+        anchors
+            .files
+            .iter()
+            .map(|(p, _)| copie(&truncate(&one_line(p), PATH_MAX))),
     );
     list(
         &mut body,
+        &mut cut,
         "Outils appelés",
         anchors
             .tools
@@ -442,9 +455,18 @@ async fn rappel_impl(
     );
     list(
         &mut body,
+        &mut cut,
         "Commandes lancées",
-        anchors.commands.iter().map(|(c, _)| copie(&one_line(c))),
+        anchors
+            .commands
+            .iter()
+            .map(|(c, _)| copie(&truncate(&one_line(c), COMMAND_MAX))),
     );
+    if cut {
+        body.push_str(
+            "[coupé : borne de taille atteinte — une partie du rappel n'est pas rendue]\n",
+        );
+    }
     Some(Message::hint(body))
 }
 
@@ -452,15 +474,43 @@ fn one_line(s: &str) -> String {
     s.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-fn list(body: &mut String, title: &str, items: impl ExactSizeIterator<Item = String>) {
+/// Une section de liste, BORNÉE : chaque élément entier est ajouté seulement s'il tient dans le
+/// budget (`tient`), sinon il est omis et la coupe est dite. Un élément n'est jamais coupé au
+/// milieu d'une enveloppe. Si aucun ne tient, la section est absente et `cut` le dit.
+fn list(
+    body: &mut String,
+    cut: &mut bool,
+    title: &str,
+    items: impl ExactSizeIterator<Item = String>,
+) {
     let total = items.len();
     if total == 0 {
         return;
     }
-    let shown: Vec<String> = items.take(MAX_LISTED).collect();
-    body.push_str(&format!("\n{title} ({total}) : {}", shown.join(" ; ")));
-    if total > MAX_LISTED {
-        body.push_str(&format!(" [coupé : {} de plus]", total - MAX_LISTED));
+    let candidat = |essai: &[String]| {
+        let reste = total - essai.len();
+        let coupe = if reste > 0 {
+            format!(" [coupé : {reste} de plus]")
+        } else {
+            String::new()
+        };
+        format!("\n{title} ({total}) : {}{coupe}\n", essai.join(" ; "))
+    };
+    let mut rendus: Vec<String> = Vec::new();
+    for item in items.take(MAX_LISTED) {
+        let mut essai = rendus.clone();
+        essai.push(item);
+        if !tient(body, &candidat(&essai)) {
+            break;
+        }
+        rendus = essai;
     }
-    body.push('\n');
+    if rendus.is_empty() {
+        *cut = true;
+        return;
+    }
+    body.push_str(&candidat(&rendus));
+    if rendus.len() < total {
+        *cut = true;
+    }
 }

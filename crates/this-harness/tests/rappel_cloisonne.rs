@@ -466,3 +466,86 @@ fn une_citation_invalide_n_est_ni_interrogee_ni_marquee_ni_dite_introuvable() {
     assert!(!texte.contains("INTROUVABLE"), "{texte}");
     assert!(!texte.contains("CITÉ SEULEMENT"), "{texte}");
 }
+
+/// Une borne de TAILLE du message entier : même avec des ancres au maximum de chaque liste, le
+/// rappel reste sous `MAX_CHARS` (8000), et chaque enveloppe reste fermée (rien n'est coupé au
+/// milieu d'un conteneur).
+#[test]
+fn le_message_entier_reste_sous_sa_borne_de_taille() {
+    use this_harness::{Anchors, Citation};
+    const BORNE: usize = 8000;
+    let long = |prefixe: &str, n: usize| format!("{prefixe}{}", "x".repeat(n));
+    let anchors = Anchors {
+        cited: (0..40)
+            .map(|i| Citation {
+                id: format!("#note:{:08x}-1111-4111-8111-111111111111", i),
+                kind: "note".into(),
+                message: i,
+                excerpt: long("extrait ", 200),
+            })
+            .collect(),
+        files: (0..60)
+            .map(|i| (long(&format!("/f{i}/"), 400), i))
+            .collect(),
+        tools: (0..60)
+            .map(|i| (long(&format!("outil{i}_"), 200), 1))
+            .collect(),
+        commands: (0..60)
+            .map(|i| (long(&format!("cmd{i} "), 400), i))
+            .collect(),
+    };
+    let message = run(rappel_cloisonne(&anchors, &HoteHostile, None, &|s| {
+        format!("⟦{s}⟧")
+    }))
+    .expect("un rappel");
+    let texte = message.text();
+    let taille = texte.chars().count();
+    assert!(
+        taille <= BORNE,
+        "message de {taille} caractères, borne {BORNE} (ancres : 40 entités, 60 fichiers, 60 outils, 60 commandes)"
+    );
+    assert_eq!(
+        texte.matches('⟦').count(),
+        texte.matches('⟧').count(),
+        "une enveloppe est coupée en deux"
+    );
+}
+
+/// Le même bornage, par le chemin RÉEL : des tours dont les arguments citent beaucoup de chemins,
+/// de commandes et d'outils longs, passés par `anchors()` puis `rappel_cloisonne`.
+#[test]
+fn le_rappel_d_une_vraie_conversation_reste_sous_la_borne() {
+    let mut fil = Vec::new();
+    for i in 0..60 {
+        let chemin = format!("/projets/{i}/{}", "d".repeat(300));
+        let commande = format!("ls {}", "c".repeat(300));
+        fil.push(Message::Assistant {
+            content: String::new(),
+            calls: vec![this_harness::ToolCall {
+                id: format!("c{i}"),
+                name: format!("outil_{i}_{}", "n".repeat(120)),
+                arguments: serde_json::json!({"path": chemin, "command": commande}),
+            }],
+        });
+        fil.push(Message::tool(
+            format!("c{i}"),
+            format!("lu #note:{:08x}-1111-4111-8111-111111111111", i),
+        ));
+    }
+    let ancres = anchors(&fil);
+    let message = run(rappel_cloisonne(&ancres, &HoteHostile, None, &|s| {
+        format!("⟦{s}⟧")
+    }))
+    .expect("un rappel");
+    let texte = message.text();
+    assert!(
+        texte.chars().count() <= 8000,
+        "rappel réel de {} caractères, borne 8000",
+        texte.chars().count()
+    );
+    assert_eq!(
+        texte.matches('⟦').count(),
+        texte.matches('⟧').count(),
+        "enveloppe coupée"
+    );
+}
