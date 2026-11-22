@@ -33,7 +33,7 @@ js-sys = "0.3"
 # Only for `block_on` in tests: the crate itself brings no runtime.
 futures = "0.3"
 # Only to prove that the failure families of a provider are codes this harness knows.
-this-llm-providers = { path = "../this-llm-providers", default-features = false }
+this-llm-providers = { version = "0.0.1", path = "../this-llm-providers", default-features = false }
 
 # Seulement pour exécuter la suite partagée (`tests/navigateur.rs`) dans un navigateur :
 # le natif n'en tire rien. La version suit `wasm-bindgen` résolu dans le workspace (0.2.130) ;

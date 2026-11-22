@@ -118,13 +118,17 @@ Décisions, tranchées explicitement :
     (`raw_value`, `preserve_order`, `arbitrary_precision`) : il tient quelles que soient les
     features unifiées dans le binaire.
   - **Ce qui est REFUSÉ, nommément** (et jamais relayé déformé) : tout ce que `serde_json::Value`
-    refuse. Concrètement : un nombre hors de `f64` (`1e400`), un surrogate UTF-16 isolé
+    refuse. Concrètement : un nombre hors de `f64` (`1e400` ; si la feature `arbitrary_precision`
+    est unifiée dans le binaire, `Value` le garde et le relais le rend alors exactement — dans les
+    deux cas, jamais arrondi en silence), un surrogate UTF-16 isolé
     (`"\ud800"`), une profondeur au-delà de la limite de `serde_json`, un événement qui n'est pas un
     objet, un `type` dupliqué ou non textuel. Un relais qui transmettait ces textes ferait refuser
     le même événement par un autre lecteur serde. Tests : `ce_que_value_refuse_est_refuse_nommement`,
     `un_type_duplique_ou_non_textuel_est_refuse`, `une_sequence_ou_un_scalaire_ne_sont_pas_des_evenements`.
   - **Chemin `serde` générique** (`serde_json::from_str::<EventWire>`) : il passe par `Value` et
-    refuse les mêmes cas ; sa forme relayée est la forme canonique de `Value`, pas le texte reçu.
+    refuse les mêmes cas ; sa forme relayée est la forme canonique de `Value`, pas le texte reçu
+    (mesuré avec `arbitrary_precision` : `1e400` → `1e+400`, `1E2` → `1e+2`, clés triées hors
+    `preserve_order`).
     Un hôte qui relaie le texte exact doit utiliser `from_json_str`.
   - La vue `UnknownEvent::raw` (`Value`) représente exactement le texte relayé : elle est là pour
     l'**inspection**. Un `Deserialize` ou une conversion via `Value` peut changer les nombres ; le

@@ -44,8 +44,17 @@ fn la_vue_value_est_celle_du_texte() {
 
 #[test]
 fn ce_que_value_refuse_est_refuse_nommement() {
-    // Nombre hors de f64 : refusé, jamais gardé ni arrondi en silence.
-    assert!(EventWire::from_json_str(r#"{"type":"futur","x":1e400}"#).is_err());
+    // Nombre hors de f64 : jamais arrondi en silence. Sans `arbitrary_precision`, `Value` le
+    // refuse, donc il est refusé ; avec (feature unifiée par un autre crate), `Value` le garde, et
+    // le relais le rend alors EXACTEMENT. Les deux sont honnêtes ; une valeur déformée ne l'est pas.
+    let hors = r#"{"type":"futur","x":1e400}"#;
+    if let Ok(lu) = EventWire::from_json_str(hors) {
+        assert_eq!(
+            lu.to_json_exact().unwrap(),
+            hors,
+            "accepté, donc relayé exactement"
+        );
+    }
     // Surrogate UTF-16 isolé : refusé par Value, donc refusé ici (un autre lecteur le refuserait).
     assert!(EventWire::from_json_str(r#"{"type":"futur","x":"\ud800"}"#).is_err());
     // Profondeur au-delà de la limite de serde_json.
@@ -77,7 +86,15 @@ fn un_type_connu_au_payload_incomplet_est_une_erreur() {
 
 #[test]
 fn le_chemin_serde_generique_refuse_les_memes_cas() {
-    assert!(serde_json::from_str::<EventWire>(r#"{"type":"futur","x":1e400}"#).is_err());
+    // Refusé ; ou, avec `arbitrary_precision`, accepté avec sa VALEUR gardée mais son écriture
+    // normalisée (mesuré : `1e400` → `1e+400`). Le texte reçu, lui, ne sort que par `to_json_exact`.
+    if let Ok(lu) = serde_json::from_str::<EventWire>(r#"{"type":"futur","x":1e400}"#) {
+        let relaye = serde_json::to_string(&lu).unwrap();
+        assert!(
+            relaye.contains("e+400") || relaye.contains("e400"),
+            "accepté, donc l'exposant est gardé (pas d'arrondi en infini ou en null) : {relaye}"
+        );
+    }
     let dans = r#"{"type":"futur","n":42}"#;
     let EventWire::Unknown(u) = serde_json::from_str::<EventWire>(dans).unwrap() else {
         panic!("inconnu attendu")
