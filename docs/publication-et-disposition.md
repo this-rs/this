@@ -155,6 +155,41 @@ préparable. `this-agent`, puis `this-llm` (deux `path` de `this-harness`), sont
 les deux absents qui bloquent ; l'ordre de publication est donc
 `this-llm` → `this-agent` → `this-harness`.
 
+### Le vérificateur de prérequis (mesuré le 21/11/2026)
+
+`scripts/verifier-publication.py` (lecture seule, hors réseau : `cargo metadata --no-deps`)
+vérifie la règle que cargo applique **au paquetage** et que le développement ne montre
+jamais — un paquet publiable ne peut pas dépendre d'un crate par `path` **sans** `version`
+(« all dependencies must have a version specified when packaging »). Il calcule aussi
+l'ordre de publication depuis le graphe, pour qu'il ne vieillisse pas dans un document.
+
+Il a trouvé **trois** manifestes fautifs, pas un :
+
+| Manifeste | Dépendance | Genre | Effet |
+|---|---|---|---|
+| `crates/this-harness` | `this-llm-providers` | dev | bloquant une fois la chaîne publiée |
+| `crates/this-module-sdk` | `this-descriptor` | dev | **bloquait déjà** (le crate est publié en 0.0.1) |
+| `crates/this-app` | `this-platform` | normal | bloquant dès que `this-app` est publié |
+
+Les trois sont corrigés par `version = "0.0.1"` (le `path` reste : il gagne en
+développement). Preuve que le correctif débloque quelque chose de **réel** et pas
+seulement le vérificateur : `this-module-sdk`, dont toutes les autres dépendances sont
+publiées, **paquette maintenant** —
+
+```
+Packaged 17 files, 95.5KiB (26.2KiB compressed)
+```
+
+alors qu'il échouait sur la règle ci-dessus. `this-harness`, lui, ne bloque plus que sur
+`this-agent` absent de crates.io : c'est la chaîne de publication, donc une décision, pas
+un défaut de manifeste.
+
+Fermeture exacte de `this-harness` dans le workspace (calculée, pas recopiée) :
+`this-agent` et `this-llm` (aucune dépendance de workspace) → `this-llm-providers` (dépend
+de `this-llm`) → `this-harness`. Aucun ne dépend de `this-descriptor`, contrairement à ce
+que laisserait croire l'ordre à quatre de la section « Ordre de publication », qui concerne
+`this-cli`.
+
 ### Chemin de build minimal reproductible
 
 ```sh
@@ -197,9 +232,10 @@ positif partiel.
   rupture sur stubs vides est mesurée.
 - Le build `--features wami` (fetch git) : non mesuré.
 - `cargo check --workspace` **à froid** : non chiffré de façon fiable.
-- La dev-dependency `this-llm-providers` de `this-harness` est déclarée en `path`
-  **sans** `version` : constatée dans le manifeste, bloquante une fois
-  `this-agent`/`this-llm` publiés, non atteinte par la mesure.
+- ~~La dev-dependency `this-llm-providers` de `this-harness` est déclarée en `path`
+  **sans** `version`~~ — **corrigé le 21/11/2026**, avec **deux** autres du même genre
+  que la mesure de cette page n'avait pas vues (voir « Le vérificateur de prérequis »
+  ci-dessus).
 - Matrice OS/architecture, artefacts, sommes de contrôle, installation,
   démarrage, mise à jour et retour arrière : rien de tout cela n'est mesuré ici.
 
