@@ -2188,6 +2188,8 @@ impl Harness {
         self.out.emit(Event::Routed {
             provider: routed.route.provider().to_string(),
             model: routed.route.model().map(str::to_string),
+            // Dit « une autre paire que celle qui a refusé », pas un changement d'état du routeur
+            // (le repli n'y écrit rien) : voir la doc de `Event::Routed::changed`.
             changed: true,
             why: routed.why.code().to_string(),
             reason: routed.reason,

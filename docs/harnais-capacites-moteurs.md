@@ -64,13 +64,13 @@ points où le code vérifie (ou non) que la paire atteinte est bien celle annonc
 | C4 | Auth expirée / coffre verrouillé distincts d'une panne réseau | **preuve existante (avec réserve)** | `ProviderError` distingue `SessionMissing`/`SessionExpired`/`SessionUnavailable` et `Secret`/`MissingSecret` (`this-llm-providers/src/error.rs:26-44`), et les range délibérément **hors** de l'infrastructure : `ErrorKind::Provider`, pas `Unreachable` (`error.rs:182-196`) ; chaque famille est un `Code` du harnais (`tests/codes.rs:12`). **Réserve** : à la frontière `Code`, `SessionExpired` et `Secret` s'effondrent tous deux en `Code::Provider` (`error.rs:184-196`) — le cœur ne les distingue **pas l'un de l'autre**, seulement d'une panne réseau (`Unreachable`/`Timeout`). |
 | C5 | Faux transports versionnés + tests de raccordement réels opt-in | **manque** | les faux transports de test ne portent **pas** de version (`tests/mode_auto.rs`, `scenario.rs`, `gardes.rs`…) ; il n'existe **aucun** test de raccordement réel (opt-in ou non) — aucun `impl Transport` hors tests, aucun `honors_route` en production. À écrire : un contrat « un transport qui déclare `honors_route` doit lire `Request::model`/`provider` », et un test opt-in qui branche `this-llm-providers` sur une instance réelle. |
 
-Bilan des cases : **3 « preuve existante »** (C1, C3, C4 avec réserve), **2 « manque »** (C2, C5).
+Bilan des cases : **3 « preuve existante »** (C1, C3, C4 avec réserve), **1 « partiel »** (C2 : repli de modèle fait, repli de provider non fait), **1 « manque »** (C5).
 
 ## 4. Ce que l'inventaire a actualisé par rapport à `docs/harnais-mode-auto.md`
 
 Le document de mode Auto reste exact sur le fond. Trois points sont précisés ici, pas
 démentis : (1) le filtre de quota est **déjà qualifié** (`QuotaExhausted`/`QuotaExhaustedModel`),
-mais le **repli** `model_after_limit` est toujours « plus tard », donc C2 est un manque ;
+et le **repli de modèle** `model_after_limit` est fait (repli de provider : non), donc C2 est partiel ;
 (2) `honors_route` n'a toujours **aucune** implémentation de production, ce qui rend toute
 décision Auto consultative en montage réel — le tableau d'écart le dit déjà (ligne 31) ;
 (3) « usage réel (tokens) » n'est une capacité **d'aucun** des deux camps : le cœur estime,
