@@ -274,7 +274,11 @@ const TYPES_CONNUS: &[&str] = &[
 pub struct UnknownEvent {
     /// Le `type` d'origine, tel que le fil le portait.
     pub type_name: String,
-    /// Le JSON d'origine, **intact**. Le relayer rend ce qui est arrivé.
+    /// Le JSON d'origine, relu en `serde_json::Value` : une vue d'**inspection**, **avec perte**.
+    /// `Value` accepte et arrondit un entier au-delà de `u64`/`i64` (mesuré : `18446744073709551617`
+    /// → `1.8446744073709552e+19`), réécrit les nombres et, selon les features `serde_json`
+    /// unifiées dans le binaire, peut trier les clés. Pour relayer le texte EXACT d'un inconnu,
+    /// passer par [`EventJson`].
     pub raw: Value,
 }
 
@@ -321,8 +325,9 @@ impl EventWire {
 impl Serialize for EventWire {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         match self {
-            // Un événement d'une version future repart **tel qu'il est arrivé** :
-            // c'est ce qui permet à un hôte de le relayer sans le déformer.
+            // Un inconnu repart par sa vue `Value` : avec son `type` et ses champs, jamais
+            // `{"type":"Unknown"}`, mais avec la perte de `UnknownEvent::raw` (nombres, clés).
+            // Le texte exact d'un inconnu ne sort que par `EventJson::to_json`.
             Self::Unknown(inconnu) => inconnu.raw.serialize(serializer),
             Self::Known(event) => event.serialize(serializer),
         }
