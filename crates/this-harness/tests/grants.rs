@@ -377,3 +377,83 @@ fn un_outil_sans_declaration_reste_refuse_meme_autorise_par_l_outillage() {
         "une déclaration manquante ne vaut pas un droit"
     );
 }
+
+#[test]
+fn une_reprise_n_importe_pas_une_permission_accorde() {
+    // `Snapshot` est un état de CONVERSATION : il ne porte ni `grants` ni
+    // approbation. Reprendre une conversation qui a tourné quand l'outil était
+    // ACCORDÉ ne doit donc pas rendre le droit à un harnais qui le RÉVOQUE —
+    // sinon la reprise serait une porte d'escalade : on sauvegarde, on révoque,
+    // on reprend, on récupère le droit.
+    //
+    // C'est la case (d) de #284 : « permission périmée non restaurée comme accordée ».
+    let tools_avant = Rc::new(Tools {
+        calls: Cell::new(0),
+    });
+    let log_avant = Rc::new(RefCell::new(Vec::new()));
+    let sink = log_avant.clone();
+    let mut avant = Harness::new(
+        "sys",
+        Limits {
+            max_relances: 0,
+            ..Limits::default()
+        },
+        Rc::new(AsksOnce {
+            tool: "declared_tool",
+            asked: Cell::new(false),
+        }),
+        tools_avant.clone(),
+        move |e| sink.borrow_mut().push(e),
+    );
+    let mut accordes = Grants::new();
+    accordes.put(Grant::granted("declared_tool", "user"));
+    avant = avant.with_grants(accordes);
+    futures::executor::block_on(avant.send("go"));
+    assert_eq!(
+        tools_avant.calls.get(),
+        1,
+        "témoin : accordé, l'outil tourne bien une fois"
+    );
+    let sauve = avant.snapshot();
+
+    // Le harnais d'après : même conversation, mais l'outil est RÉVOQUÉ.
+    let tools_apres = Rc::new(Tools {
+        calls: Cell::new(0),
+    });
+    let log_apres = Rc::new(RefCell::new(Vec::new()));
+    let sink = log_apres.clone();
+    let mut apres = Harness::new(
+        "sys",
+        Limits {
+            max_relances: 0,
+            ..Limits::default()
+        },
+        Rc::new(AsksOnce {
+            tool: "declared_tool",
+            asked: Cell::new(false),
+        }),
+        tools_apres.clone(),
+        move |e| sink.borrow_mut().push(e),
+    );
+    let mut revoques = Grants::new();
+    revoques.put(Grant::refused(
+        "declared_tool",
+        "descriptor",
+        "module non signé",
+    ));
+    apres = apres.with_grants(revoques);
+    apres.restore(sauve);
+
+    futures::executor::block_on(apres.send("encore"));
+
+    assert_eq!(
+        tools_apres.calls.get(),
+        0,
+        "la reprise ne rend pas un droit révoqué : la doublure ne doit jamais être appelée"
+    );
+    let tout = format!("{:?}", log_apres.borrow());
+    assert!(
+        tout.contains("module non signé"),
+        "le refus doit venir de l'autorisation rétablie, pas d'autre chose : {tout}"
+    );
+}

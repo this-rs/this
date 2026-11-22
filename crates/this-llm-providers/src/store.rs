@@ -105,9 +105,14 @@ impl ProviderStore for JsonFileStore {
         let snapshot: Snapshot =
             serde_json::from_str(&text).map_err(|error| StoreError::Format(error.to_string()))?;
         for provider in &snapshot.providers {
-            provider
-                .validate()
-                .map_err(|error| StoreError::Format(format!("`{}` : {error}", provider.id)))?;
+            // Une faute de TRANSPORT seule (`InsecureRemote`) reste visible pour être corrigée : le
+            // hub refuse d'en faire un client. Le fichier n'est pas réécrit. Toute autre faute : refus.
+            match provider.validate() {
+                Ok(()) | Err(crate::ConfigError::InsecureRemote) => {}
+                Err(error) => {
+                    return Err(StoreError::Format(format!("`{}` : {error}", provider.id)));
+                }
+            }
         }
         Ok(snapshot)
     }

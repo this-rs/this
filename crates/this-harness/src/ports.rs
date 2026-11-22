@@ -162,6 +162,130 @@ pub trait Transport {
     fn honors_route(&self) -> bool {
         false
     }
+
+    /// Le **profil d'EXÉCUTION** de cet hôte (voir [`ProfilRuntime`]).
+    ///
+    /// Le défaut est [`ProfilRuntime::minimal`] : **rien** n'est promis (ni délai, ni
+    /// annulation, ni isolation, ni supervision). Un hôte qui tient une garantie doit la
+    /// DÉCLARER — [`ProfilRuntime::natif`] pour une coquille native complète,
+    /// [`ProfilRuntime::wasm_sans_minuteur`] pour une page wasm, ou un profil sur mesure. Un
+    /// défaut « natif » annoncerait un minuteur et une isolation par processus sans preuve,
+    /// exactement ce que #285 interdit.
+    ///
+    /// Ce profil **ne lit pas l'horloge** : `minuteur` décrit ce que l'hôte réalise. L'horloge
+    /// du harnais est injectée à part (`Harness::with_clock`) ; un hôte qui déclare
+    /// `minuteur: true` doit injecter une horloge qui le réalise.
+    fn profil_runtime(&self) -> ProfilRuntime {
+        ProfilRuntime::minimal()
+    }
+}
+
+/// Le profil d'**exécution** d'un hôte : ce qu'il garantit à l'exécution, pas
+/// ce que sa compilation laisse espérer.
+///
+/// Une compilation `wasm32` n'égale pas une exécution native : sans minuteur,
+/// une borne temporelle n'existe pas ; `catch_unwind` ne stoppe ni une boucle
+/// synchrone ni `panic=abort`. Ce type rend ces limites **explicites et
+/// interrogeables** ([`ProfilRuntime::exiger`]), pour qu'un hôte ne puisse pas
+/// annoncer un délai qu'il ne peut pas tenir.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProfilRuntime {
+    /// Un délai/timeout s'applique-t-il **réellement** ? Faux en wasm sans
+    /// minuteur injecté (`Clock::sleep` rend `None`).
+    pub minuteur: bool,
+    /// L'annulation coopérative réveille-t-elle une attente ? Vrai même sans
+    /// minuteur : [`Cancel`] réveille sur son drapeau, pas sur une horloge.
+    pub annulation: bool,
+    /// Ce qui arrête un outil qui boucle ou panique.
+    pub isolation: Isolation,
+    /// Un processus enfant est-il **réellement** arrêté quand on le demande ?
+    pub supervision: bool,
+}
+
+/// Le degré d'isolation d'un outil.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Isolation {
+    /// Rien ne protège : ni panique, ni boucle.
+    Aucune,
+    /// `catch_unwind` : couvre une panique `unwind`, **pas** une boucle
+    /// synchrone ni un `panic=abort`.
+    CatchUnwind,
+    /// Une frontière de processus : l'outil s'arrête vraiment (boucle et
+    /// mémoire comprises).
+    Processus,
+}
+
+/// Ce que le harnais a besoin de garantir pour un run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Besoin {
+    /// Une borne temporelle (budget, timeout) qui doit s'appliquer.
+    Delai,
+    /// Une attente qui doit se réveiller à l'annulation.
+    Annulation,
+    /// Un outil qui peut boucler/paniquer doit être arrêté.
+    IsolationDure,
+    /// Un processus enfant doit être réellement arrêté.
+    Supervision,
+}
+
+/// Pourquoi un profil n'honore pas un besoin. Nommé, pour que le refus soit
+/// diagnosticable — jamais un booléen muet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Refus {
+    SansMinuteur,
+    SansAnnulation,
+    IsolationInsuffisante(Isolation),
+    SansSupervision,
+}
+
+impl ProfilRuntime {
+    /// Le profil qui ne promet RIEN : le défaut d'un transport qui ne se déclare pas.
+    pub fn minimal() -> Self {
+        Self {
+            minuteur: false,
+            annulation: false,
+            isolation: Isolation::Aucune,
+            supervision: false,
+        }
+    }
+
+    /// Le profil d'un hôte natif complet (LocalSet, minuteur, processus).
+    pub fn natif() -> Self {
+        Self {
+            minuteur: true,
+            annulation: true,
+            isolation: Isolation::Processus,
+            supervision: true,
+        }
+    }
+
+    /// Le profil d'une page **wasm sans minuteur injecté** : l'annulation
+    /// réveille (elle ne dépend pas d'une horloge), mais un délai ne s'applique
+    /// pas, et l'isolation est au mieux `catch_unwind`.
+    pub fn wasm_sans_minuteur() -> Self {
+        Self {
+            minuteur: false,
+            annulation: true,
+            isolation: Isolation::CatchUnwind,
+            supervision: false,
+        }
+    }
+
+    /// Ce profil honore-t-il `besoin` ? Sinon, **nomme le manque**. À appeler
+    /// avant de publier un budget, une annulation, une isolation ou une
+    /// supervision : un hôte ne doit JAMAIS annoncer une garantie qu'il ne tient
+    /// pas.
+    pub fn exiger(&self, besoin: Besoin) -> Result<(), Refus> {
+        match besoin {
+            Besoin::Delai if !self.minuteur => Err(Refus::SansMinuteur),
+            Besoin::Annulation if !self.annulation => Err(Refus::SansAnnulation),
+            Besoin::IsolationDure if self.isolation != Isolation::Processus => {
+                Err(Refus::IsolationInsuffisante(self.isolation))
+            }
+            Besoin::Supervision if !self.supervision => Err(Refus::SansSupervision),
+            _ => Ok(()),
+        }
+    }
 }
 
 /// La porte du run, rendue à un transport de la famille A.
@@ -240,6 +364,16 @@ pub trait Toolbox {
     /// Par défaut `None` : un outillage qui ne tient pas de registre n'en
     /// partage pas. Une implémentation qui en tient un doit rendre LE SIEN,
     /// pas une copie — c'est le partage qui fait la garantie.
+    ///
+    /// **Ce que le harnais y inscrit** : le texte de chaque résultat, seulement
+    /// CITÉ ; et, pour un appel réussi, ce que l'outil déclare avoir fait lire par
+    /// `Outcome::observable`, en lecture directe. Un outil qui ne déclare rien ne
+    /// prouve rien : c'est le défaut sûr.
+    ///
+    /// **Un registre par SESSION** : le harnais ne le crée pas, il lit celui de
+    /// l'outillage. Deux harnais construits sur le même `Rc<dyn Toolbox>`
+    /// partagent donc le registre, et un `restore`/`seed` l'écrase. Un hôte qui
+    /// veut un registre par session construit un outillage par session.
     fn vus(&self) -> Option<Rc<RefCell<SeenLedger>>> {
         None
     }
@@ -368,6 +502,16 @@ impl Toolbox for Toolboxes {
                     .filter(move |x| proprietaire.get(&x.tool) == Some(&i))
             })
             .collect()
+    }
+
+    /// Le registre de la **première** part qui en tient un — même règle que
+    /// l'annonce, les déclarations et l'appel : le premier qui expose gagne.
+    ///
+    /// Sans ça, la composition qui sert les vrais hôtes rendrait `None` (le
+    /// défaut du trait) et toute la provenance resterait **inerte en
+    /// production**, alors que chaque part tiendrait son registre.
+    fn vus(&self) -> Option<Rc<RefCell<SeenLedger>>> {
+        self.parts.iter().find_map(|part| part.vus())
     }
 
     async fn call(&self, call: &ToolCall) -> Outcome {
@@ -626,5 +770,62 @@ mod tests_cancel {
             assert_eq!(cancel.0.wakers.borrow().len(), 1);
         }
         assert!(cancel.0.wakers.borrow().is_empty());
+    }
+}
+
+#[cfg(test)]
+mod tests_profil {
+    use super::*;
+
+    #[test]
+    fn le_defaut_ne_promet_rien() {
+        // Le défaut d'un transport qui ne se déclare pas : aucune garantie annoncée.
+        let p = ProfilRuntime::minimal();
+        assert!(!p.minuteur && !p.annulation && !p.supervision);
+        assert_eq!(p.isolation, Isolation::Aucune);
+        for b in [
+            Besoin::Delai,
+            Besoin::Annulation,
+            Besoin::IsolationDure,
+            Besoin::Supervision,
+        ] {
+            assert!(
+                p.exiger(b).is_err(),
+                "{b:?} ne doit pas être tenu par défaut"
+            );
+        }
+    }
+
+    #[test]
+    fn un_hote_natif_honore_tout() {
+        let p = ProfilRuntime::natif();
+        for b in [
+            Besoin::Delai,
+            Besoin::Annulation,
+            Besoin::IsolationDure,
+            Besoin::Supervision,
+        ] {
+            assert_eq!(p.exiger(b), Ok(()), "{b:?}");
+        }
+    }
+
+    #[test]
+    fn une_page_sans_minuteur_refuse_un_delai_mais_garde_lannulation() {
+        let p = ProfilRuntime::wasm_sans_minuteur();
+        // Le cœur de #285 : jamais de délai annoncé mais inapplicable.
+        assert_eq!(p.exiger(Besoin::Delai), Err(Refus::SansMinuteur));
+        // L'annulation réveille SANS horloge : elle reste honnête.
+        assert_eq!(p.exiger(Besoin::Annulation), Ok(()));
+    }
+
+    #[test]
+    fn catch_unwind_ne_vaut_pas_une_isolation_dure() {
+        let p = ProfilRuntime::wasm_sans_minuteur();
+        assert_eq!(
+            p.exiger(Besoin::IsolationDure),
+            Err(Refus::IsolationInsuffisante(Isolation::CatchUnwind)),
+            "catch_unwind ne stoppe ni une boucle synchrone ni panic=abort"
+        );
+        assert_eq!(p.exiger(Besoin::Supervision), Err(Refus::SansSupervision));
     }
 }

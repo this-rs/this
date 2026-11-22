@@ -371,6 +371,12 @@ pub fn neutralize_value(value: &mut serde_json::Value) {
 /// fermante portant le **même** nonce ; sans elle, il court jusqu'à la fin du
 /// texte. Une fausse balise dans un texte hostile ne peut donc que rétrograder
 /// des ids (direct → cité), jamais promouvoir un id cité.
+///
+/// **`Deserialize` est un acte de confiance totale.** Un registre relu d'un JSON
+/// rend `Direct` tout ce que le JSON nomme, sans passer par aucune voie
+/// `_trusted` du harnais. Ne persistez pas un registre hors d'un stockage
+/// protégé en intégrité ; pour reprendre une conversation, rebâtissez-le depuis
+/// le fil (`restore` / `seed`, conservateurs par défaut).
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SeenLedger {
     uuids: BTreeSet<String>,
@@ -402,6 +408,18 @@ fn container_slices(text: &str) -> Vec<(&str, bool)> {
     while let Some(at) = rest.find(&open) {
         let after_id = &rest[at + open.len()..];
         let Some(quote) = after_id.find('"') else {
+            // Balise ouvrante MALFORMÉE : le nonce n'a pas de guillemet fermant.
+            // La frontière est alors ambiguë, et une frontière ambiguë ne peut
+            // pas produire de lecture DIRECTE : le seul défaut grave ici serait
+            // une promotion. Tout ce qui suit est donc traité comme non fiable,
+            // et le préfixe reste ce qu'il était.
+            //
+            // Mesuré avant correction : `<untrusted_data id="N {ID}` rendait
+            // `{ID}` **direct** — un id écrit après une ouvrante forgée devenait
+            // une preuve.
+            out.push((&rest[..at], false));
+            out.push((&rest[at..], true));
+            rest = "";
             break;
         };
         let nonce = &after_id[..quote];
@@ -538,6 +556,24 @@ impl SeenLedger {
     /// par une donnée non fiable ne compte pas (voir [`provenance`](Self::provenance)).
     pub fn has_seen(&self, r: &Ref) -> bool {
         self.provenance(r) == Provenance::Direct
+    }
+
+    /// La provenance d'un jeton `#kind:id`, **par sa forme textuelle**.
+    ///
+    /// Même règle que [`provenance`](Self::provenance) : `Direct` seulement si
+    /// l'id a été LU hors donnée non fiable.
+    ///
+    /// `None` quand le jeton n'est pas lisible **ou** quand sa sorte n'est pas
+    /// suivie par ce registre (seules les uuids et les modules le sont). Ce n'est
+    /// pas la même chose que [`Provenance::Never`] : `Never` dit « suivi, jamais
+    /// paru » — le rappel peut alors l'annoncer ; `None` dit « ce registre ne
+    /// sait rien de cette sorte », et on ne l'annonce pas. Confondre les deux
+    /// ferait écrire « jamais lu » sur un id dont on ne sait rien.
+    pub fn provenance_token(&self, token: &str) -> Option<Provenance> {
+        match token_at(token, 0) {
+            Some((r, fin)) if fin == token.len() => Some(self.provenance(&r)),
+            _ => None,
+        }
     }
 
     /// Rien n'a été observé, pas même cité.

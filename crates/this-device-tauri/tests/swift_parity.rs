@@ -430,3 +430,198 @@ fn l_etat_swift_dit_les_memes_mots_que_le_contrat() {
         "le vocabulaire Swift et `PermissionState` ne disent pas les mêmes mots"
     );
 }
+
+/// Hors d'un bundle `.app`, `UNUserNotificationCenter.current()` lève une exception
+/// Objective-C (`bundleProxyForCurrentProcess is nil`) que Rust ne rattrape pas : le processus
+/// meurt. Un binaire lancé directement (`cargo run`, un banc d'essai) n'a pas de bundle. Mesuré le
+/// 21/11/2026 : l'Atelier plantait à son auto-test.
+///
+/// Chaque fonction de `MacNotifications` qui touche le centre doit donc COMMENCER par la garde
+/// `centreDisponible`.
+///
+/// **Ce que ce test promet, et ce qu'il ne promet pas.** Il est STATIQUE : il lit le texte et
+/// vérifie qu'une garde ouvre chaque fonction qui nomme `UNUserNotificationCenter` (tout
+/// modificateur : `static`, `private static`, `static private`…) et qu'aucune référence au
+/// centre ne traîne hors d'une fonction. Il ne prouve pas que la garde est juste ni que le
+/// processus survit : cela, c'est `les_sept_entrees_de_notification_survivent_hors_bundle`
+/// (macOS seulement, exécution réelle). Un fichier illisible FAIT ÉCHOUER le test.
+#[test]
+fn every_macos_notification_entry_point_is_guarded_against_a_missing_bundle() {
+    let path =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("macos/Sources/notifications.swift");
+    let text = std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("{} illisible : {e}", path.display()));
+    assert!(
+        text.contains("static var centreDisponible"),
+        "la garde `centreDisponible` doit exister"
+    );
+    let lines: Vec<&str> = text.lines().collect();
+    // Retire les modificateurs JUSQU'AU POINT FIXE : `static private func` comme `private static func`.
+    const MODIFICATEURS: [&str; 7] = [
+        "private ",
+        "fileprivate ",
+        "internal ",
+        "public ",
+        "static ",
+        "final ",
+        "@objc ",
+    ];
+    let sans_modificateurs = |l: &str| -> String {
+        let mut cur = l.trim_start();
+        loop {
+            match MODIFICATEURS.iter().find_map(|m| cur.strip_prefix(m)) {
+                Some(r) => cur = r.trim_start(),
+                None => return cur.to_string(),
+            }
+        }
+    };
+    let indent = |l: &str| l.len() - l.trim_start().len();
+    let est_func = |l: &str| sans_modificateurs(l).starts_with("func ");
+    // Un MEMBRE de l'énumération : toute déclaration au niveau d'indentation de la première
+    // fonction (fonction, propriété, type imbriqué). Le corps d'une fonction s'arrête au membre
+    // suivant, pas seulement à la fonction suivante : une propriété qui suit n'y est pas comptée.
+    let niveau = lines
+        .iter()
+        .find(|l| est_func(l))
+        .map(|l| indent(l))
+        .expect("au moins une fonction dans notifications.swift");
+    let est_membre = |l: &str| {
+        if l.trim().is_empty() || indent(l) != niveau {
+            return false;
+        }
+        let d = sans_modificateurs(l);
+        [
+            "func ",
+            "var ",
+            "let ",
+            "init",
+            "enum ",
+            "struct ",
+            "class ",
+            "subscript",
+        ]
+        .iter()
+        .any(|k| d.starts_with(k))
+    };
+    let membres: Vec<usize> = (0..lines.len()).filter(|&i| est_membre(lines[i])).collect();
+    let starts: Vec<usize> = membres
+        .iter()
+        .copied()
+        .filter(|&i| est_func(lines[i]))
+        .collect();
+    let touche_le_centre =
+        |l: &&str| l.contains("UNUserNotificationCenter") && !l.trim_start().starts_with("//");
+    // Aucune référence au centre hors d'une fonction : ni avant la première, ni dans une
+    // propriété ou un type imbriqué entre deux fonctions.
+    for (n, &i) in membres.iter().enumerate() {
+        if est_func(lines[i]) {
+            continue;
+        }
+        let end = membres.get(n + 1).copied().unwrap_or(lines.len());
+        assert!(
+            !lines[i..end].iter().any(touche_le_centre),
+            "le membre `{}` touche UNUserNotificationCenter hors d'une fonction gardée",
+            lines[i].trim()
+        );
+    }
+    let first = membres.first().copied().unwrap_or(lines.len());
+    assert!(
+        !lines[..first].iter().any(touche_le_centre),
+        "une référence à UNUserNotificationCenter précède tout membre"
+    );
+    let mut checked = 0;
+    for &i in &starts {
+        // Le corps : jusqu'au membre suivant, quel qu'il soit.
+        let end = membres
+            .iter()
+            .copied()
+            .find(|&m| m > i)
+            .unwrap_or(lines.len());
+        let body = &lines[i + 1..end];
+        let touche = body.iter().any(touche_le_centre);
+        if !touche {
+            continue; // `stateName`, `entier` : sans centre.
+        }
+        checked += 1;
+        let first = body
+            .iter()
+            .map(|l| l.trim())
+            .find(|l| !l.is_empty() && !l.starts_with("//"))
+            .unwrap_or("");
+        assert!(
+            first.starts_with("guard centreDisponible"),
+            "`{}` touche UNUserNotificationCenter sans commencer par `guard centreDisponible` \
+             (première instruction : `{first}`) — hors bundle, le processus mourrait",
+            lines[i].trim()
+        );
+    }
+    assert!(
+        checked >= 7,
+        "les sept points d'entrée de MacNotifications doivent être vérifiés, pas {checked}"
+    );
+}
+
+/// EXÉCUTION réelle, macOS seulement : compile les sources Swift avec un petit `main` et appelle
+/// les sept points d'entrée de `MacNotifications` dans un binaire SANS bundle. Chacun doit dire
+/// « indisponible » et le processus doit survivre. Sans la garde, `UNUserNotificationCenter.current()`
+/// tue le processus (mesuré : `NSException` non rattrapée).
+///
+/// Limite : c'est un binaire nu, pas l'app `.app` : le chemin AVEC bundle (où la garde laisse
+/// passer) n'est pas exercé ici. `swiftc` absent sur macOS est un échec, pas un saut.
+#[cfg(target_os = "macos")]
+#[test]
+fn les_sept_entrees_de_notification_survivent_hors_bundle() {
+    use std::process::Command;
+    let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let dossier = std::env::temp_dir().join(format!("this-notif-probe-{}", std::process::id()));
+    std::fs::create_dir_all(&dossier).unwrap();
+    let binaire = dossier.join("probe");
+    // Du code de premier niveau n'est permis que dans un fichier nommé `main.swift`.
+    let main_swift = dossier.join("main.swift");
+    std::fs::copy(
+        manifest.join("tests/fixtures/notifications_probe.swift"),
+        &main_swift,
+    )
+    .unwrap();
+
+    let mut sources: Vec<std::path::PathBuf> = Vec::new();
+    for sous in ["macos/Sources", "ios/Sources/Commun"] {
+        if let Ok(rd) = std::fs::read_dir(manifest.join(sous)) {
+            sources.extend(
+                rd.flatten()
+                    .map(|e| e.path())
+                    .filter(|p| p.extension().is_some_and(|x| x == "swift")),
+            );
+        }
+    }
+    let sortie = Command::new("swiftc")
+        .arg("-module-name")
+        .arg("probe")
+        .arg("-o")
+        .arg(&binaire)
+        .arg(&main_swift)
+        .args(&sources)
+        .output()
+        .expect("swiftc doit exister sur macOS");
+    assert!(
+        sortie.status.success(),
+        "compilation Swift : {}",
+        String::from_utf8_lossy(&sortie.stderr)
+    );
+    let run = Command::new(&binaire).output().expect("lancer le binaire");
+    let out = String::from_utf8_lossy(&run.stdout).to_string();
+    let _ = std::fs::remove_dir_all(&dossier);
+    assert!(
+        run.status.success(),
+        "le processus est mort hors bundle (statut {:?}) :\n{out}\n{}",
+        run.status,
+        String::from_utf8_lossy(&run.stderr)
+    );
+    assert!(out.contains("centreDisponible=false"), "{out}");
+    assert!(out.contains("ENTRY currentState -> unsupported"), "{out}");
+    for nom in ["status", "request", "post", "cancel", "schedule", "pending"] {
+        let attendu = format!(r#"ENTRY {nom} -> {{"kind":"error","code":"unavailable"}}"#);
+        assert!(out.contains(&attendu), "{nom} : {out}");
+    }
+    assert!(out.contains("ALIVE"), "{out}");
+}
