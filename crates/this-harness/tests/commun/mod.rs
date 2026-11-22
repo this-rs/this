@@ -246,7 +246,11 @@ pub fn un_transport_muet_en_boucle_est_borne() {
         1 + Limits::default().max_relances,
         "tour muet initial + une relance par `max_relances`, puis l'arrêt (attendu 4)"
     );
-    assert_eq!(Limits::default().max_relances, 3, "le décompte ci-dessus suppose 3 relances");
+    assert_eq!(
+        Limits::default().max_relances,
+        3,
+        "le décompte ci-dessus suppose 3 relances"
+    );
 }
 
 pub fn mille_appels_dans_un_tour_restent_ranges() {
