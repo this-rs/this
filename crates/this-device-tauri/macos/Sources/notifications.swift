@@ -10,6 +10,20 @@ import Foundation
 import UserNotifications
 
 enum MacNotifications {
+    // MARK: - Bundle guard
+
+    /// `UNUserNotificationCenter` n'existe que pour un processus lancé depuis un bundle `.app` :
+    /// `current()` lève sinon une exception Objective-C (`bundleProxyForCurrentProcess is nil`),
+    /// que Rust ne rattrape pas — le processus meurt. Un binaire lancé directement
+    /// (`cargo run`, un banc d'essai, un test) n'a pas de bundle.
+    ///
+    /// Hors bundle, la capacité est dite INDISPONIBLE, jamais un arrêt. Chaque point d'entrée
+    /// public commence par cette garde.
+    static var centreDisponible: Bool {
+        return Bundle.main.bundleIdentifier != nil
+            && Bundle.main.bundleURL.pathExtension == "app"
+    }
+
     // MARK: - Permission state
 
     /// The permission state in the contract's words.
@@ -24,6 +38,7 @@ enum MacNotifications {
 
     /// The current permission state, for `macos_device_status`.
     static func currentState() -> String {
+        guard centreDisponible else { return Etat.unsupported.fil }
         return blockingCall { done in
             UNUserNotificationCenter.current().getNotificationSettings { settings in
                 done(stateName(settings.authorizationStatus))
@@ -35,6 +50,7 @@ enum MacNotifications {
 
     /// The notification permission, read without prompting.
     static func status() -> String {
+        guard centreDisponible else { return errorReply(code: ReplyCode.unavailable) }
         return blockingCall { done in
             UNUserNotificationCenter.current().getNotificationSettings { settings in
                 done(statusReply(state: stateName(settings.authorizationStatus)))
@@ -44,6 +60,7 @@ enum MacNotifications {
 
     /// Asks the person for the notification permission, then answers the resulting state.
     static func request() -> String {
+        guard centreDisponible else { return errorReply(code: ReplyCode.unavailable) }
         return blockingCall(timeout: 120) { done in
             UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound, .badge]) { _, error in
                 if error != nil {
@@ -60,6 +77,7 @@ enum MacNotifications {
     /// Shows a local notification now. Same `id` replaces the previous one.
     /// Not authorized → `not_authorized`. Title and body are never logged.
     static func post(_ args: [String: Any]) -> String {
+        guard centreDisponible else { return errorReply(code: ReplyCode.unavailable) }
         guard let id = args["id"] as? String,
               let title = args["title"] as? String,
               let body = args["body"] as? String else {
@@ -94,6 +112,7 @@ enum MacNotifications {
     /// Withdraws the notification `id`, shown or still pending. Withdrawing one that is not
     /// there is not an error: the goal (it is gone) is met.
     static func cancel(_ args: [String: Any]) -> String {
+        guard centreDisponible else { return errorReply(code: ReplyCode.unavailable) }
         guard let id = args["id"] as? String else {
             return errorReply(code: ReplyCode.internalError)
         }
@@ -129,6 +148,7 @@ enum MacNotifications {
     /// Planifie une notification dans `in_ms` millisecondes. Un identifiant déjà présent
     /// remplace la planification précédente, comme le fait le système.
     static func schedule(_ args: [String: Any]) -> String {
+        guard centreDisponible else { return errorReply(code: ReplyCode.unavailable) }
         guard let id = args["id"] as? String,
               let title = args["title"] as? String,
               let body = args["body"] as? String,
@@ -171,6 +191,7 @@ enum MacNotifications {
     /// Le délai restant vient du déclencheur — c'est lui qui dit « dans combien de temps », et
     /// il n'y a pas d'autre source pour une planification encore en attente.
     static func pending() -> String {
+        guard centreDisponible else { return errorReply(code: ReplyCode.unavailable) }
         return blockingCall { done in
             UNUserNotificationCenter.current().getPendingNotificationRequests { requests in
                 let entries: [[String: Any]] = requests.prefix(ScheduleLimits.pendingMax).map { request in
