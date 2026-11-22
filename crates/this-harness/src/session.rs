@@ -1270,6 +1270,10 @@ impl Harness {
             let mut quota_refused: Vec<crate::routing::Pick> = Vec::new();
             // Vrai dès qu'un repli a RÉELLEMENT servi une autre paire que celle décidée.
             let mut quota_fell_back = false;
+            // Vrai dès que la paire DÉCIDÉE a servi un tour (texte, réponse, appel d'outil, refus
+            // non qualifié) avant tout repli : elle a été atteinte, l'état ne doit pas revenir à
+            // l'avant du changement, même si un repli termine l'objectif (revue de #321).
+            let mut decided_served = false;
             // L'identité du run, stable pour toutes ses étapes.
             let run_id = self.with(|s| {
                 s.run_seq += 1;
@@ -1405,15 +1409,19 @@ impl Harness {
                     // Les derniers signes du flux : un tour qui commence en est
                     // un, chaque morceau reçu en est un.
                     let signs = Signs::new(clock.now_ms());
+                    // Le moteur a-t-il parlé PENDANT CE TOUR (un morceau, même vide) ?
+                    let parle = Rc::new(Cell::new(false));
                     let delta: Delta = {
                         let gathered = gathered.clone();
                         let answered = answered.clone();
+                        let parle = parle.clone();
                         let out = self.out.clone();
                         let cancel = cancel.clone();
                         let signs = signs.clone();
                         let clock = clock.clone();
                         Rc::new(move |text: &str| {
                             answered.set(true);
+                            parle.set(true);
                             // TOUT appel est un signe de vie, y compris un morceau
                             // vide : c'est ainsi qu'un transport dit « le moteur
                             // parle » quand il écrit un appel d'outil ou raisonne
@@ -1464,15 +1472,22 @@ impl Harness {
                     // vie au début du tour — et ne sert pas non plus. Dans tous ces cas, un
                     // morceau reçu AVANT la panne a déjà posé `answered` par `delta` : c'est
                     // lui, pas le code de panne, qui dit si le moteur a parlé.
-                    if match &issue {
+                    let repondu = match &issue {
                         Ok(Ok(_)) => true,
                         Ok(Err(failure)) => !matches!(
                             failure.code,
                             Code::Unreachable | Code::Aborted | Code::Timeout
                         ),
                         Err(_) => false,
-                    } {
+                    };
+                    if repondu {
                         answered.set(true);
+                    }
+                    // La paire décidée a SERVI ce tour : elle a parlé, ou répondu autre chose
+                    // qu'un refus de quota qualifié (celui-là déclenche le repli : il n'a rien servi).
+                    let refus_de_quota = matches!(&issue, Ok(Err(f)) if f.quota.is_some());
+                    if !quota_fell_back && (parle.get() || (repondu && !refus_de_quota)) {
+                        decided_served = true;
                     }
 
                     // Quota d'un MODÈLE épuisé (dit par le transport, jamais deviné) : le tour
@@ -1783,8 +1798,14 @@ impl Harness {
                     // Un repli sur quota a servi une AUTRE paire que celle décidée : l'attribuer
                     // à la décision créditerait au modèle qui a refusé un succès obtenu
                     // ailleurs. On n'apprend pas sur ce qui n'a pas servi.
-                    let honored = transport.honors_route() && answered.get() && !quota_fell_back;
-                    let settle = router.settle(&ending, code.as_deref(), honored);
+                    // Deux signaux distincts (revue de #321) : la paire décidée a-t-elle été
+                    // ATTEINTE (l'état reste sur elle) ? et la fin lui est-elle ATTRIBUÉE (la
+                    // récompense) ? Un repli sépare les deux : la paire décidée peut avoir servi
+                    // ses premiers tours sans que la fin de l'objectif soit la sienne.
+                    let honors = transport.honors_route() && answered.get();
+                    let reached = honors && (!quota_fell_back || decided_served);
+                    let credited = honors && !quota_fell_back;
+                    let settle = router.settle_served(&ending, code.as_deref(), reached, credited);
                     let _ = race(settle, cut(clock.as_ref(), ROUTER_TIMEOUT_MS, None)).await;
                 }
             }

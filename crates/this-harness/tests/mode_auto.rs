@@ -3114,3 +3114,183 @@ fn after_limit_prefere_la_paire_listee_de_la_meme_instance_meme_si_une_autre_ins
         "la liste reste respectée : pas m3"
     );
 }
+
+// ---- Revue de #321 : « servi » (état) et « crédité » (récompense) ne sont pas la même chose ----
+
+/// Ce que répond un modèle, appel après appel.
+#[derive(Clone, Copy, Debug)]
+enum Rep {
+    Outil,
+    Fini,
+    Quota,
+    Injoignable,
+}
+
+/// Un moteur scénarisé PAR MODÈLE : chaque appel consomme la réponse suivante du modèle demandé
+/// (la dernière se répète).
+struct Scenario {
+    scripts: RefCell<Vec<(&'static str, VecDeque<Rep>)>>,
+    appels: RefCell<Vec<String>>,
+}
+
+impl Scenario {
+    fn new(scripts: Vec<(&'static str, Vec<Rep>)>) -> Rc<Self> {
+        Rc::new(Self {
+            scripts: RefCell::new(
+                scripts
+                    .into_iter()
+                    .map(|(m, r)| (m, r.into_iter().collect()))
+                    .collect(),
+            ),
+            appels: RefCell::new(Vec::new()),
+        })
+    }
+    fn paires(&self) -> Vec<String> {
+        self.appels.borrow().clone()
+    }
+}
+
+#[async_trait(?Send)]
+impl Transport for Scenario {
+    async fn stream(
+        &self,
+        request: &Request,
+        _cancel: &Cancel,
+        delta: Delta,
+    ) -> Result<Reply, Failure> {
+        let modele = request.model().unwrap_or("?").to_string();
+        self.appels
+            .borrow_mut()
+            .push(format!("{}/{}", request.provider().unwrap_or("?"), modele));
+        let rep = {
+            let mut scripts = self.scripts.borrow_mut();
+            let file = &mut scripts
+                .iter_mut()
+                .find(|(m, _)| *m == modele)
+                .unwrap_or_else(|| panic!("aucun script pour {modele}"))
+                .1;
+            if file.len() > 1 {
+                file.pop_front().unwrap()
+            } else {
+                *file.front().unwrap()
+            }
+        };
+        match rep {
+            Rep::Outil => Ok(asks_a_tool()),
+            Rep::Fini => {
+                delta("fini");
+                Ok(Reply {
+                    text: "fini".to_string(),
+                    calls: vec![],
+                    finish: Finish::Stop,
+                })
+            }
+            Rep::Quota => Err(Failure::quota_exhausted(QuotaScope::Model, Some(9_999_999))),
+            Rep::Injoignable => Err(Failure::unreachable("jamais joint")),
+        }
+    }
+
+    fn honors_route(&self) -> bool {
+        true
+    }
+}
+
+fn harnais_scenario(
+    transport: Rc<Scenario>,
+    router: Rc<TurnRouter>,
+) -> (Harness, Rc<std::cell::Cell<u32>>) {
+    let effets = Rc::new(std::cell::Cell::new(0));
+    let harness = Harness::new(
+        "tu es l'atelier",
+        Limits::default(),
+        transport,
+        Rc::new(Compte(effets.clone())),
+        |_| {},
+    )
+    .with_router(router)
+    .with_clock(Rc::new(Fast(std::cell::Cell::new(0.0))));
+    (harness, effets)
+}
+
+/// Le cas relevé : la conversation était sur b/x, le routeur change pour a/m1 ; a/m1 SERT un tour
+/// (il appelle un outil, l'outil tourne), puis refuse son quota au tour suivant ; le repli a/m2
+/// conclut. a/m1 a été atteint et a servi : l'état ne revient PAS à b/x. Mais le résultat de
+/// l'objectif mêle deux paires : aucune récompense n'est attribuée à a/m1.
+#[test]
+fn un_repli_apres_quota_ne_restaure_pas_l_avant_quand_la_paire_decidee_a_servi() {
+    let world = monde_quota();
+    let router = Rc::new(TurnRouter::new(world.spec("b", "x", 1).auto()));
+    let moteur = Scenario::new(vec![
+        ("m1", vec![Rep::Outil, Rep::Quota]),
+        ("m2", vec![Rep::Fini]),
+        ("m3", vec![Rep::Fini]),
+    ]);
+    let (harness, effets) = harnais_scenario(moteur.clone(), router.clone());
+
+    assert_eq!(run(harness.send("hello")), Running::Ran(Stop::Done));
+    let paires = moteur.paires();
+    assert_eq!(
+        paires[0], "a/m1",
+        "un changement b/x -> a/m1 a été décidé : {paires:?}"
+    );
+    assert_eq!(effets.get(), 1, "l'outil a tourné une fois, jamais rejoué");
+    assert_eq!(
+        router.in_force(),
+        Pick::new("a", "m1"),
+        "a/m1 a servi : l'état ne revient pas à b/x"
+    );
+    let settled = world.learning.settled();
+    assert_eq!(settled.len(), 1);
+    assert_eq!(
+        settled[0].served, None,
+        "objectif mixte : aucun crédit à a/m1"
+    );
+}
+
+/// Même chose, mais le repli ne répond JAMAIS : a/m1 a servi, l'état reste a/m1, aucun crédit.
+#[test]
+fn un_repli_qui_ne_repond_jamais_ne_restaure_pas_l_avant_non_plus() {
+    let world = monde_quota();
+    let router = Rc::new(TurnRouter::new(world.spec("b", "x", 1).auto()));
+    let moteur = Scenario::new(vec![
+        ("m1", vec![Rep::Outil, Rep::Quota]),
+        ("m2", vec![Rep::Injoignable]),
+        ("m3", vec![Rep::Injoignable]),
+    ]);
+    let (harness, effets) = harnais_scenario(moteur.clone(), router.clone());
+
+    let fin = run(harness.send("hello"));
+    assert!(matches!(fin, Running::Ran(Stop::Failed(_))), "{fin:?}");
+    assert_eq!(moteur.paires()[0], "a/m1");
+    assert_eq!(effets.get(), 1);
+    assert_eq!(
+        router.in_force(),
+        Pick::new("a", "m1"),
+        "a/m1 a servi avant le refus"
+    );
+    assert_eq!(world.learning.settled()[0].served, None);
+}
+
+/// Le pendant, comportement conservé : la paire décidée n'a RIEN servi (elle refuse son quota dès
+/// le premier appel) ; le repli conclut. La paire décidée n'a jamais été « servie » : l'état revient
+/// à l'avant du changement, comme pour une paire jamais atteinte.
+#[test]
+fn une_paire_decidee_qui_refuse_d_entree_laisse_l_etat_revenir_a_l_avant() {
+    let world = monde_quota();
+    let router = Rc::new(TurnRouter::new(world.spec("b", "x", 1).auto()));
+    let moteur = Scenario::new(vec![
+        ("m1", vec![Rep::Quota]),
+        ("m2", vec![Rep::Fini]),
+        ("m3", vec![Rep::Fini]),
+    ]);
+    let (harness, _) = harnais_scenario(moteur.clone(), router.clone());
+
+    assert_eq!(run(harness.send("hello")), Running::Ran(Stop::Done));
+    assert_eq!(moteur.paires()[0], "a/m1");
+    assert_eq!(
+        router.in_force(),
+        Pick::new("b", "x"),
+        "a/m1 n'a rien servi"
+    );
+    assert_eq!(world.learning.settled()[0].served, None);
+}

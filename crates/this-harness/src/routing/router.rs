@@ -1152,6 +1152,26 @@ impl TurnRouter {
     /// range parmi les abandonnées ([`TurnRouter::repair`]) — jamais une décision
     /// perdue en silence.
     pub async fn settle(&self, stop: &Stop, code: Option<&str>, honored: bool) {
+        self.settle_served(stop, code, honored, honored).await
+    }
+
+    /// [`Self::settle`] avec deux signaux distincts, que le repli après quota sépare :
+    ///
+    /// - `reached` : la paire décidée a été **atteinte et a servi** au moins un tour. Faux, l'état
+    ///   revient à l'avant du changement (paire et garde-fous) ; vrai, il reste sur la paire décidée.
+    /// - `credited` : la fin de l'objectif est **attribuée** à la paire décidée (récompense). Un
+    ///   objectif terminé par une autre paire (repli après quota) n'est pas crédité, même si la paire
+    ///   décidée a servi ses premiers tours : le résultat mêle deux paires.
+    ///
+    /// `credited` sans `reached` n'a pas de sens : il est ramené à faux.
+    pub async fn settle_served(
+        &self,
+        stop: &Stop,
+        code: Option<&str>,
+        reached: bool,
+        credited: bool,
+    ) {
+        let credited = credited && reached;
         // Seuls l'identifiant, la paire et la génération sont lus : `before` n'est
         // jamais copié hors de l'état (il y est consommé une fois, juste dessous).
         let (id, pick) = {
@@ -1168,7 +1188,7 @@ impl TurnRouter {
             // dépend pas de sa réponse, et un `settle` coupé la perdrait pour toujours
             // (re-relecture de #254, constat A). Une seule fois (`before` est consommé),
             // et jamais par-dessus un réglage de la personne fait depuis (génération).
-            if !honored
+            if !reached
                 && let Some(before) = state.open.as_mut().and_then(|o| o.before.take())
                 && state.generation == generation
             {
@@ -1180,7 +1200,7 @@ impl TurnRouter {
             }
             (id, pick)
         };
-        let served = honored.then_some(&pick);
+        let served = credited.then_some(&pick);
         self.learning.settle(id, served, stop, code).await;
         let mut state = self.state.borrow_mut();
         if state.open.as_ref().is_some_and(|o| o.id == id) {
