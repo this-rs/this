@@ -172,22 +172,27 @@ pub trait Transport {
     /// défaut « natif » annoncerait un minuteur et une isolation par processus sans preuve,
     /// exactement ce que #285 interdit.
     ///
-    /// Ce profil **ne lit pas l'horloge** : `minuteur` décrit ce que l'hôte réalise. L'horloge
-    /// du harnais est injectée à part (`Harness::with_clock`) ; un hôte qui déclare
-    /// `minuteur: true` doit injecter une horloge qui le réalise.
+    /// **Portée DÉCLARATIVE.** Ce profil dit ce que l'hôte déclare tenir ; le harnais ne le vérifie
+    /// PAS à l'exécution. `exiger` n'est appelé par aucun chemin de production, et la boucle ne refuse
+    /// pas un run dont le minuteur déclaré n'existe pas. Ce profil ne lit pas l'horloge : `minuteur`
+    /// décrit ce que l'hôte réalise, et l'horloge du harnais est injectée à part (`Harness::with_clock`).
+    /// Un hôte qui déclare `minuteur: true` sans injecter d'horloge reçoit `Ok` de `exiger(Delai)`,
+    /// alors que le délai ne s'applique pas. Le raccordement à une vérification réelle (horloge,
+    /// exécution des outils) n'est pas fait.
     fn profil_runtime(&self) -> ProfilRuntime {
         ProfilRuntime::minimal()
     }
 }
 
-/// Le profil d'**exécution** d'un hôte : ce qu'il garantit à l'exécution, pas
-/// ce que sa compilation laisse espérer.
+/// Le profil d'**exécution** qu'un hôte DÉCLARE : ce qu'il affirme tenir à l'exécution,
+/// pas ce que sa compilation laisse espérer.
 ///
-/// Une compilation `wasm32` n'égale pas une exécution native : sans minuteur,
-/// une borne temporelle n'existe pas ; `catch_unwind` ne stoppe ni une boucle
-/// synchrone ni `panic=abort`. Ce type rend ces limites **explicites et
-/// interrogeables** ([`ProfilRuntime::exiger`]), pour qu'un hôte ne puisse pas
-/// annoncer un délai qu'il ne peut pas tenir.
+/// **Déclaratif, pas appliqué.** Ce type rend les limites déclarées **explicites et
+/// interrogeables** ([`ProfilRuntime::exiger`]), mais le harnais ne vérifie pas la déclaration :
+/// `exiger` n'est appelé par aucun chemin de production, et aucun garde ne compare le profil à
+/// la réalité (présence d'une horloge, comportement des outils). Une compilation `wasm32` n'égale
+/// pas une exécution native : sans minuteur, une borne temporelle n'existe pas ; `catch_unwind` ne
+/// stoppe ni une boucle synchrone ni `panic=abort`. Ces limites sont à porter par l'hôte.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ProfilRuntime {
     /// Un délai/timeout s'applique-t-il **réellement** ? Faux en wasm sans
