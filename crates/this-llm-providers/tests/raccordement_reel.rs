@@ -29,6 +29,8 @@
 //! autres threads. La commande ci-dessus pose les deux ; sans la fausse, le test de clé refusée
 //! échoue en le disant.
 
+#![cfg(feature = "http")]
+
 use serde_json::json;
 use this_llm::{CredentialRef, Preset};
 use this_llm_providers::{
@@ -90,7 +92,7 @@ async fn le_moteur_reel_rend_du_texte_et_un_usage_compte_par_lui() {
         .await
         .expect("le moteur répond");
     // `reponse.model` est le modèle DEMANDÉ recopié par le client : ce n'est pas une preuve du
-    // modèle servi (voir le test `le_modele_servi_est_celui_que_le_moteur_dit…`).
+    // modèle servi (voir le test `le_modele_nomme_par_la_reponse_du_moteur_est_egal_au_modele_demande`).
     println!(
         "RACCORDEMENT texte+usage : modèle demandé (recopié)={} entrée={} sortie={} tronqué={} texte={:?}",
         reponse.model,
@@ -247,7 +249,7 @@ async fn modele_dit_par_le_moteur(demande: &str) -> String {
 
 #[tokio::test]
 #[ignore = "raccordement réel : THIS_RACCORDEMENT=deepseek et --ignored"]
-async fn le_modele_servi_est_celui_que_le_moteur_dit_pas_celui_qu_on_a_demande() {
+async fn le_modele_nomme_par_la_reponse_du_moteur_est_egal_au_modele_demande() {
     if !demande("modèle servi par le moteur") {
         return;
     }
