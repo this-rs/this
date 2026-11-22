@@ -3002,3 +3002,61 @@ fn le_repli_ne_sort_jamais_de_l_instance_meme_quand_un_autre_fournisseur_est_mei
     assert_eq!(paires.len(), 2, "{paires:?}");
     assert!(paires[1].starts_with("a/"), "jamais b/x : {paires:?}");
 }
+
+/// Revue de #321 : le filtre de liste de la personne s'appliquait AVANT le marquage des paires
+/// refusées. Liste = a/m1 seul ; a/m1 vient d'être refusé mais le `QuotaView` n'est pas encore à
+/// jour : le filtre réduisait le pool à m1 (encore « utilisable » à ses yeux), puis le marquage
+/// l'écartait → `None`, alors que a/m2 et a/m3 restaient disponibles. Le contrat du filtre dit
+/// pourtant : si rien de listé ne passe les contraintes, le pool reste entier.
+#[test]
+fn after_limit_une_liste_reduite_a_la_paire_refusee_ne_bloque_pas_le_repli() {
+    let world = monde_quota(); // QuotaView : aucune paire marquée épuisée.
+    let router = TurnRouter::new(
+        world
+            .spec("a", "m1", 1)
+            .auto()
+            .auto_models(vec![entry("a", "m1")]),
+    );
+    let routed = run(router.after_limit(
+        TurnInput {
+            honored: true,
+            ..text("hello")
+        },
+        &[Pick::new("a", "m1")],
+        None,
+    ))
+    .expect(
+        "la liste ne contient que la paire refusée : le pool entier reprend, a/m2 ou a/m3 servent",
+    );
+    assert_eq!(routed.route.provider(), "a");
+    assert_ne!(routed.route.model(), Some("m1"));
+    assert_eq!(routed.why, RouteWhy::QuotaFallback);
+}
+
+/// Le pendant : quand une AUTRE paire listée de la même instance reste éligible, la liste est
+/// respectée — le repli est a/m2 (listé), jamais a/m3 (hors liste), même si m3 est libre.
+#[test]
+fn after_limit_respecte_la_liste_quand_une_autre_paire_listee_reste_eligible() {
+    let world = monde_quota();
+    let router = TurnRouter::new(
+        world
+            .spec("a", "m1", 1)
+            .auto()
+            .auto_models(vec![entry("a", "m1"), entry("a", "m2")]),
+    );
+    let routed = run(router.after_limit(
+        TurnInput {
+            honored: true,
+            ..text("hello")
+        },
+        &[Pick::new("a", "m1")],
+        None,
+    ))
+    .expect("a/m2 est listé et éligible");
+    assert_eq!(routed.route.provider(), "a");
+    assert_eq!(
+        routed.route.model(),
+        Some("m2"),
+        "la liste reste respectée : pas m3"
+    );
+}

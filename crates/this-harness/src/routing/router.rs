@@ -1068,14 +1068,11 @@ impl TurnRouter {
         let class = signature.arm_key();
 
         let mut pool = self.pool.pool().await;
-        if let Some(entries) = &choice.pool {
-            pool.retain(|facts| listed(entries, facts));
-        }
-        if let (None, Some(list)) = (&choice.pool, &choice.auto_models)
-            && choice.routing.mode == ProviderRoutingMode::Full
-        {
-            let _ = restrict_to_person_list(&mut pool, list, &signature);
-        }
+        // Le marquage précède le filtre de liste de la personne : ce filtre garde le pool
+        // entier quand rien de listé ne passe les contraintes dures — il doit donc VOIR le
+        // refus. Sinon une liste réduite à la paire refusée réduirait le pool à elle, puis
+        // l'écarterait : `None`, alors qu'un autre modèle de la même instance est libre
+        // (revue de #321, test `after_limit_une_liste_reduite_a_la_paire_refusee_…`).
         // Chaque paire refusée est retenue le temps de ce message, comme le ferait le
         // `QuotaView` de l'hôte une fois mis à jour. L'échéance, quand le moteur la dit.
         for facts in &mut pool {
@@ -1088,6 +1085,14 @@ impl TurnRouter {
                     window: Some(format!("model:{}", facts.model)),
                 });
             }
+        }
+        if let Some(entries) = &choice.pool {
+            pool.retain(|facts| listed(entries, facts));
+        }
+        if let (None, Some(list)) = (&choice.pool, &choice.auto_models)
+            && choice.routing.mode == ProviderRoutingMode::Full
+        {
+            let _ = restrict_to_person_list(&mut pool, list, &signature);
         }
         let mut settings = settings_for(&choice.routing, rights.auto);
         if choice.pool.is_some() {
