@@ -42,8 +42,10 @@ impl fmt::Display for ConfigError {
             Self::CredentialInUrl => formatter.write_str(
                 "l'adresse contient un identifiant (`user:mot-de-passe@`) ; utilise une référence de credential",
             ),
-            Self::InsecureRemote => formatter
-                .write_str("un fournisseur distant doit être en https (sauf localhost)"),
+            Self::InsecureRemote => formatter.write_str(
+                "http hors de cette machine : un secret partirait en clair — utilise https \
+                 (http n'est permis que vers localhost, ou sans aucun credential pour un modèle local)",
+            ),
             Self::MissingCredential => {
                 formatter.write_str("un fournisseur distant exige une référence de credential")
             }
@@ -269,14 +271,21 @@ impl ProviderConfig {
             return Err(ConfigError::BaseUrl("ni requête, ni fragment, ni espace"));
         }
 
-        if !self.preset.is_local() {
-            let loopback = authority.starts_with("localhost") || authority.starts_with("127.0.0.1");
-            if !secure && !loopback {
-                return Err(ConfigError::InsecureRemote);
-            }
-            if self.credential == CredentialRef::None {
-                return Err(ConfigError::MissingCredential);
-            }
+        // L'hôte est PARSÉ, jamais reconnu par préfixe : `localhost.exemple.test` et
+        // `127.0.0.1.evil.com` ne sont pas la machine locale.
+        let loopback = is_loopback(parse_authority(authority)?);
+        // Du texte clair vers une autre machine : un secret y partirait lisible. Vrai pour TOUS les
+        // presets, locaux compris, et pour tous les types de credential. Reste permis : un preset
+        // local en http vers une autre machine du réseau SANS secret (rien à protéger), et tout
+        // en https.
+        if !secure
+            && !loopback
+            && (self.credential != CredentialRef::None || !self.preset.is_local())
+        {
+            return Err(ConfigError::InsecureRemote);
+        }
+        if !self.preset.is_local() && self.credential == CredentialRef::None {
+            return Err(ConfigError::MissingCredential);
         }
 
         if let Some(model) = &self.model
@@ -310,6 +319,74 @@ impl ProviderConfig {
             .open_timeout_secs
             .unwrap_or_else(|| DEFAULT_OPEN_TIMEOUT_SECS.min(self.timeout_secs));
         std::time::Duration::from_secs(secs)
+    }
+}
+
+/// L'hôte d'une autorité `host[:port]` ou `[ipv6][:port]`, validé : jamais de userinfo (refusé en
+/// amont), port vide ou hors `0..=65535` refusé, caractères d'hôte restreints.
+fn parse_authority(authority: &str) -> Result<Host<'_>, ConfigError> {
+    let (host, bracketed, port) = if let Some(rest) = authority.strip_prefix('[') {
+        let end = rest
+            .find(']')
+            .ok_or(ConfigError::BaseUrl("crochet IPv6 non fermé"))?;
+        let after = &rest[end + 1..];
+        let port = if after.is_empty() {
+            None
+        } else {
+            Some(
+                after
+                    .strip_prefix(':')
+                    .ok_or(ConfigError::BaseUrl("après `]`, seul `:port` est permis"))?,
+            )
+        };
+        (&rest[..end], true, port)
+    } else {
+        match authority.rsplit_once(':') {
+            Some((host, port)) => (host, false, Some(port)),
+            None => (authority, false, None),
+        }
+    };
+    if let Some(port) = port
+        && (port.is_empty()
+            || !port.bytes().all(|b| b.is_ascii_digit())
+            || port.parse::<u16>().is_err())
+    {
+        return Err(ConfigError::BaseUrl("port invalide"));
+    }
+    if host.is_empty() {
+        return Err(ConfigError::BaseUrl("hôte manquant"));
+    }
+    if bracketed {
+        let ip: std::net::Ipv6Addr = host
+            .parse()
+            .map_err(|_| ConfigError::BaseUrl("adresse IPv6 invalide"))?;
+        return Ok(Host::V6(ip));
+    }
+    if !host
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_'))
+    {
+        return Err(ConfigError::BaseUrl("caractère interdit dans l'hôte"));
+    }
+    Ok(Host::Name(host))
+}
+
+enum Host<'a> {
+    Name(&'a str),
+    V6(std::net::Ipv6Addr),
+}
+
+/// Cette machine, et seulement elle : `localhost` EXACT, une adresse IPv4 `127.0.0.0/8`, `::1`, ou
+/// son équivalent IPv4-mappé. Aucun préfixe, aucune forme abrégée (`127.1` : refusée, par prudence).
+fn is_loopback(host: Host<'_>) -> bool {
+    match host {
+        Host::V6(ip) => ip.is_loopback() || ip.to_ipv4_mapped().is_some_and(|v4| v4.is_loopback()),
+        Host::Name(name) => {
+            name.eq_ignore_ascii_case("localhost")
+                || name
+                    .parse::<std::net::Ipv4Addr>()
+                    .is_ok_and(|ip| ip.is_loopback())
+        }
     }
 }
 
@@ -516,5 +593,125 @@ mod tests {
         assert!(json.contains("DEEPSEEK_API_KEY"));
         let back: ProviderConfig = serde_json::from_str(&json).expect("relisible");
         assert_eq!(back, config);
+    }
+
+    // ---- Transport : le secret ne part jamais en clair vers une machine qui n'est pas la nôtre ----
+
+    fn avec_url(preset: Preset, credential: CredentialRef, url: &str) -> ProviderConfig {
+        let mut config = ProviderConfig::new(id("p"), "P", preset, credential);
+        config.base_url = url.into();
+        config
+    }
+
+    /// Tous les presets (locaux ET distants) × tous les types de credential portant un secret.
+    fn presets() -> [Preset; 3] {
+        [Preset::OpenAiCompatible, Preset::Ollama, Preset::OpenAi]
+    }
+
+    fn secrets() -> [CredentialRef; 3] {
+        [
+            CredentialRef::Env("K".into()),
+            CredentialRef::Vault("k".into()),
+            CredentialRef::Session("s".into()),
+        ]
+    }
+
+    #[test]
+    fn un_secret_ne_part_jamais_en_http_vers_un_hote_non_loopback() {
+        // Signalement : un preset « local » (OpenAI-compatible, Ollama, vLLM, LM Studio, llama.cpp)
+        // acceptait http://hôte-distant avec un credential, et le client envoyait le Bearer en clair.
+        let hotes = [
+            "http://api.example.com/v1",
+            "http://10.0.0.5:8000/v1", // LAN : pas la machine
+            "http://192.168.1.20/v1",
+            "http://[2001:db8::1]:8080/v1",
+            "http://localhost.exemple.test/v1", // faux préfixe
+            "http://localhost.evil.com:80/v1",
+            "http://127.0.0.1.evil.com/v1", // faux préfixe IPv4
+            "http://localhostx/v1",
+            "http://127.1/v1",        // forme abrégée : refusée par prudence
+            "http://0.0.0.0:8000/v1", // « toutes interfaces », pas loopback
+        ];
+        for preset in presets() {
+            for credential in secrets() {
+                for url in hotes {
+                    let config = avec_url(preset, credential.clone(), url);
+                    assert!(
+                        config.validate().is_err(),
+                        "{preset:?} + {credential:?} + {url} doit être refusé : le secret partirait en clair"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn un_hote_loopback_exact_est_accepte_en_http_pour_tous_les_credentials() {
+        let loopbacks = [
+            "http://localhost/v1",
+            "http://LOCALHOST:11434/v1",
+            "http://127.0.0.1:9000/v1",
+            "http://127.255.255.254/v1",
+            "http://[::1]:8080/v1",
+            "http://[::ffff:127.0.0.1]:8080/v1",
+        ];
+        for preset in presets() {
+            for credential in secrets() {
+                for url in loopbacks {
+                    let config = avec_url(preset, credential.clone(), url);
+                    assert_eq!(
+                        config.validate(),
+                        Ok(()),
+                        "{preset:?} + {credential:?} + {url}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn https_reste_accepte_vers_n_importe_quel_hote() {
+        for preset in presets() {
+            for credential in secrets() {
+                let config = avec_url(preset, credential, "https://api.example.com:8443/v1");
+                assert_eq!(config.validate(), Ok(()));
+            }
+        }
+    }
+
+    #[test]
+    fn le_cas_lan_sans_secret_est_preserve_pour_un_preset_local() {
+        // Un Ollama sur une autre machine du réseau, SANS secret : rien ne part en clair à protéger.
+        for url in ["http://192.168.1.20:11434/v1", "http://nas.local:8080/v1"] {
+            let config = avec_url(Preset::Ollama, CredentialRef::None, url);
+            assert_eq!(config.validate(), Ok(()), "{url}");
+        }
+        // Mais un preset DISTANT exige un credential, donc jamais de http hors loopback.
+        let distant = avec_url(
+            Preset::OpenAi,
+            CredentialRef::Env("K".into()),
+            "http://192.168.1.20/v1",
+        );
+        assert_eq!(distant.validate(), Err(ConfigError::InsecureRemote));
+    }
+
+    #[test]
+    fn userinfo_port_et_hote_mal_formes_sont_refuses() {
+        let mauvaises = [
+            "http://localhost@evil.com/v1", // userinfo : « localhost » n'est pas l'hôte
+            "http://localhost:80@evil.com/v1",
+            "http://evil.com\\@localhost/v1",
+            "http://localhost:/v1", // port vide
+            "http://localhost:abc/v1",
+            "http://localhost:99999/v1", // hors 0-65535
+            "http://[::1/v1",            // crochet non fermé
+            "http://[::1]x/v1",
+            "http://loc alhost/v1",
+            "http://local_host!/v1",
+        ];
+        for url in mauvaises {
+            let config = avec_url(Preset::Ollama, CredentialRef::None, url);
+            assert!(config.validate().is_err(), "{url} doit être refusé");
+        }
     }
 }

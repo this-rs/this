@@ -6,7 +6,7 @@ use crate::budget::{Clock, Ledger, Usage};
 use crate::config::{ProviderConfig, ProviderId};
 use crate::error::ProviderError;
 use crate::secret::SecretResolver;
-use crate::store::{ProviderStore, Snapshot};
+use crate::store::{ProviderStore, Snapshot, StoreError};
 
 /// The providers of one app. Every mutation is validated, then written through the store
 /// before it is reported as done.
@@ -36,6 +36,14 @@ impl Hub {
         clock: impl Clock + 'static,
     ) -> Result<Self, ProviderError> {
         let snapshot = store.load()?;
+        // Un store générique (mémoire, base, fichier d'une autre version) n'est pas forcément passé par
+        // `upsert` : on ne lui fait pas confiance. Une configuration interdite — un secret qui partirait en
+        // clair — arrête l'ouverture, bruyamment, comme le fait `JsonFileStore::load`.
+        for provider in &snapshot.providers {
+            provider
+                .validate()
+                .map_err(|error| StoreError::Format(format!("`{}` : {error}", provider.id)))?;
+        }
         Ok(Self {
             store: Box::new(store),
             secrets: Arc::new(secrets),
@@ -141,6 +149,9 @@ impl Hub {
         if !config.enabled {
             return Err(ProviderError::Disabled(id.to_string()));
         }
+        // AVANT toute résolution de secret : une configuration interdite (secret en clair vers une autre
+        // machine) ne doit même pas lire le secret, encore moins l'envoyer.
+        config.validate()?;
         // Une clé ne change jamais ; une session si. C'est la seule différence qui compte
         // ici, et elle décide de tout ce qui suit.
         let secret = match &config.credential {
@@ -342,5 +353,53 @@ mod tests {
         let vivant = hub().with_sessions(Arc::new(Source(Some(maintenant + 3_600_000))));
         vivant.upsert(provider).unwrap();
         assert!(vivant.client(&identifiant).is_ok());
+    }
+
+    /// `Hub::client` revalide AVANT de résoudre le secret. L'état d'un hub ne peut plus recevoir de
+    /// configuration interdite par `open` ni par `upsert` : on l'y met ici directement (accès interne)
+    /// pour prouver que la dernière garde, celle qui précède la lecture du secret, tient seule.
+    #[cfg(feature = "http")]
+    #[test]
+    fn client_refuse_une_configuration_interdite_avant_de_resoudre_le_secret() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        #[derive(Clone, Default)]
+        struct Espion(Arc<AtomicUsize>);
+        impl crate::SecretResolver for Espion {
+            fn resolve(
+                &self,
+                _: &this_llm::CredentialRef,
+            ) -> Result<Option<crate::Secret>, crate::SecretError> {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Ok(Some(crate::Secret::new("sk-ne-doit-jamais-etre-lu")))
+            }
+        }
+
+        let espion = Espion::default();
+        let hub = Hub::open(MemoryStore::default(), espion.clone(), SystemClock).unwrap();
+        let mut config = ProviderConfig::new(
+            ProviderId::new("p").unwrap(),
+            "P",
+            this_llm::Preset::OpenAiCompatible,
+            this_llm::CredentialRef::Env("K".into()),
+        );
+        config.base_url = "http://api.example.com/v1".into(); // secret en clair vers une autre machine
+        lock(&hub.state).providers.push(config);
+
+        let Err(erreur) = hub.client(&ProviderId::new("p").unwrap()) else {
+            panic!("le client d'une configuration interdite ne doit pas être créé");
+        };
+        assert!(
+            matches!(
+                erreur,
+                ProviderError::Config(crate::ConfigError::InsecureRemote)
+            ),
+            "{erreur:?}"
+        );
+        assert_eq!(
+            espion.0.load(Ordering::SeqCst),
+            0,
+            "le secret n'a pas été résolu"
+        );
     }
 }
