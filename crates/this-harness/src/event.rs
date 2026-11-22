@@ -402,9 +402,29 @@ pub struct Outcome {
     pub before: String,
     /// Empreinte de l'état après l'appel.
     pub after: String,
+    /// Ce que l'HÔTE déclare avoir fait **lire** à l'agent : le seul texte que le
+    /// registre des ids vus ([`Toolbox::vus`](crate::Toolbox::vus)) observe comme
+    /// lecture directe.
+    ///
+    /// **Défaut conservateur : `None`.** Le harnais ne peut pas deviner, depuis
+    /// `text`, ce qu'un outil a réellement lu : un texte échappé ou cloisonné cache
+    /// la vraie lecture, et un texte en clair peut seulement répéter les arguments du
+    /// modèle (« oublié #note:X », « refusé : rien sous #note:X »). Sans cette
+    /// déclaration, tout id de `text` est seulement **cité**. Un résultat refusé ou
+    /// échoué ne lit rien : son `observable` est ignoré.
+    ///
+    /// Un hôte le remplit avec des ids qu'il a lui-même vus dans une réponse
+    /// d'outil réussie — jamais avec du texte tiers ni avec les arguments du modèle.
+    pub observable: Option<String>,
 }
 
 impl Outcome {
+    /// L'hôte déclare ce que cet appel a fait lire (voir [`Outcome::observable`]).
+    pub fn reading(mut self, observable: impl Into<String>) -> Self {
+        self.observable = Some(observable.into());
+        self
+    }
+
     pub fn ok(text: impl Into<String>) -> Self {
         Self {
             text: text.into(),
