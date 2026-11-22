@@ -165,13 +165,18 @@ pub trait Transport {
 
     /// Le **profil d'EXÉCUTION** de cet hôte (voir [`ProfilRuntime`]).
     ///
-    /// Le défaut est [`ProfilRuntime::natif`] : une coquille native avec
-    /// minuteur et isolation de processus. Une page **wasm sans minuteur** DOIT
-    /// le déclarer ([`ProfilRuntime::wasm_sans_minuteur`] ou un profil sur
-    /// mesure), sinon le harnais pourrait annoncer un budget ou une isolation
-    /// que l'hôte ne peut pas tenir — exactement ce que #285 interdit.
+    /// Le défaut est [`ProfilRuntime::minimal`] : **rien** n'est promis (ni délai, ni
+    /// annulation, ni isolation, ni supervision). Un hôte qui tient une garantie doit la
+    /// DÉCLARER — [`ProfilRuntime::natif`] pour une coquille native complète,
+    /// [`ProfilRuntime::wasm_sans_minuteur`] pour une page wasm, ou un profil sur mesure. Un
+    /// défaut « natif » annoncerait un minuteur et une isolation par processus sans preuve,
+    /// exactement ce que #285 interdit.
+    ///
+    /// Ce profil **ne lit pas l'horloge** : `minuteur` décrit ce que l'hôte réalise. L'horloge
+    /// du harnais est injectée à part (`Harness::with_clock`) ; un hôte qui déclare
+    /// `minuteur: true` doit injecter une horloge qui le réalise.
     fn profil_runtime(&self) -> ProfilRuntime {
-        ProfilRuntime::natif()
+        ProfilRuntime::minimal()
     }
 }
 
@@ -234,6 +239,16 @@ pub enum Refus {
 }
 
 impl ProfilRuntime {
+    /// Le profil qui ne promet RIEN : le défaut d'un transport qui ne se déclare pas.
+    pub fn minimal() -> Self {
+        Self {
+            minuteur: false,
+            annulation: false,
+            isolation: Isolation::Aucune,
+            supervision: false,
+        }
+    }
+
     /// Le profil d'un hôte natif complet (LocalSet, minuteur, processus).
     pub fn natif() -> Self {
         Self {
@@ -741,6 +756,25 @@ mod tests_cancel {
 #[cfg(test)]
 mod tests_profil {
     use super::*;
+
+    #[test]
+    fn le_defaut_ne_promet_rien() {
+        // Le défaut d'un transport qui ne se déclare pas : aucune garantie annoncée.
+        let p = ProfilRuntime::minimal();
+        assert!(!p.minuteur && !p.annulation && !p.supervision);
+        assert_eq!(p.isolation, Isolation::Aucune);
+        for b in [
+            Besoin::Delai,
+            Besoin::Annulation,
+            Besoin::IsolationDure,
+            Besoin::Supervision,
+        ] {
+            assert!(
+                p.exiger(b).is_err(),
+                "{b:?} ne doit pas être tenu par défaut"
+            );
+        }
+    }
 
     #[test]
     fn un_hote_natif_honore_tout() {

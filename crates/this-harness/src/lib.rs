@@ -70,8 +70,8 @@ pub use embed::{
 pub use event::{Event, HintKind, Outcome, Pending, Snapshot};
 pub use mcp::{McpLink, McpServer, McpToolbox};
 pub use ports::{
-    Cancel, Cancelled, Compactor, Delta, Permission, Recorder, Recorders, Toolbox, Toolboxes,
-    Transport,
+    Besoin, Cancel, Cancelled, Compactor, Delta, Isolation, Permission, ProfilRuntime, Recorder,
+    Recorders, Refus, Toolbox, Toolboxes, Transport,
 };
 pub use recall::{Anchors, Citation, Fact, Recall, anchors, rappel};
 pub use search::{SearchHit, SearchLink, SearchToolbox};
