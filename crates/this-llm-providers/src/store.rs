@@ -41,6 +41,18 @@ impl fmt::Display for StoreError {
 impl std::error::Error for StoreError {}
 
 /// Reads and writes the whole [`Snapshot`]. Small, so it is always written whole.
+///
+/// # Contract
+///
+/// - `save` is **all or nothing**: when it returns `Ok`, the stored snapshot is the one
+///   passed; when it returns `Err`, the stored snapshot is the one before the call. A store
+///   that can write half a snapshot must not return `Ok` for it.
+/// - A store that cannot honour this (a write that lands and then reports an error, a
+///   network store that times out after committing) is still handled: [`Hub`] re-reads
+///   the store after a failed `save` and adopts what the store holds, so the hub never
+///   serves a configuration that the store does not hold. If the re-read itself fails, the
+///   hub keeps its previous state and returns the save error — then memory and disk may
+///   differ until the next successful write or restart. That case is reported, not hidden.
 pub trait ProviderStore: Send + Sync {
     fn load(&self) -> Result<Snapshot, StoreError>;
     fn save(&self, snapshot: &Snapshot) -> Result<(), StoreError>;
