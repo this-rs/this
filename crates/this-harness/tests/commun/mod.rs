@@ -235,12 +235,18 @@ pub fn un_transport_muet_en_boucle_est_borne() {
         Stop::Failed("le modèle n'a rendu ni texte ni outil".to_string()),
         "un transport muet n'est ni un succès ni un budget : c'est un échec nommé"
     );
-    assert!(
-        arret.1 <= Limits::default().max_tours,
-        "les tours sont bornés par `max_tours` ({}), pas {}",
-        Limits::default().max_tours,
-        arret.1
+    // Le nombre EXACT, relevé puis compté d'après le code : le tour muet initial (1), puis une
+    // relance par `Limits::default().max_relances` (3 : `session.rs`, copié dans la politique à
+    // chaque envoi), puis au 4e tour muet le compteur de relances est épuisé et le run s'arrête.
+    // Soit 1 + 3 = 4, et non 3 : la politique propre de `this-agent` accorde 2 relances, mais le
+    // harnais la remplace par `Limits::max_relances`. Une borne `<=` laissait passer une
+    // mutation qui relancerait une fois de plus ou de moins.
+    assert_eq!(
+        arret.1,
+        1 + Limits::default().max_relances,
+        "tour muet initial + une relance par `max_relances`, puis l'arrêt (attendu 4)"
     );
+    assert_eq!(Limits::default().max_relances, 3, "le décompte ci-dessus suppose 3 relances");
 }
 
 pub fn mille_appels_dans_un_tour_restent_ranges() {

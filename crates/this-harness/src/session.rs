@@ -1653,10 +1653,15 @@ impl Harness {
                     );
                     // Le texte a déjà été montré : le conserver sans les appels
                     // refusés pour que la reprise voie ce que l'utilisateur a lu.
-                    self.push(Message::Assistant {
-                        content: text.clone(),
-                        calls: Vec::new(),
-                    });
+                    // Rien n'a été montré : rien n'est empilé (même garde que le
+                    // chemin d'interruption) — un `Assistant` vide sans appel n'est
+                    // pas un message.
+                    if !text.trim().is_empty() {
+                        self.push(Message::Assistant {
+                            content: text.clone(),
+                            calls: Vec::new(),
+                        });
+                    }
                     stop = Some(run.borrow_mut().finish(Stop::Failed(raison)));
                     break 'turns;
                 }

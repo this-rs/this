@@ -1229,3 +1229,40 @@ fn un_transport_qui_rejoue_le_meme_appel_ne_produit_pas_l_effet_deux_fois() {
         "le tour suivant doit voir le texte déjà montré"
     );
 }
+
+#[test]
+fn un_appel_rejoue_sans_texte_n_empile_pas_d_assistant_vide() {
+    // Le même refus quand le moteur n'a rien dit avant ses appels : rien n'a été
+    // montré, donc rien n'est conservé — pas d'`Assistant` vide dans le fil.
+    let transport = Script::new(vec![
+        Reply {
+            text: String::new(),
+            calls: vec![call("a1"), call("a1")],
+            finish: Finish::Tools,
+        },
+        Reply {
+            text: "fini".into(),
+            calls: vec![],
+            finish: Finish::Stop,
+        },
+    ]);
+    let tools = Tools::new(|_| Outcome::ok("module installé").observed("v1", "v2"));
+    let (harness, _, log) = build(transport, tools.clone(), Limits::default());
+
+    run(harness.send("installe"));
+
+    assert!(tools.used.borrow().is_empty(), "aucun effet");
+    assert!(matches!(stop_of(&log), Stop::Failed(_)));
+    assert!(
+        Message::check_thread(&harness.transcript()).is_ok(),
+        "le fil reste valide"
+    );
+    assert!(
+        !harness
+            .transcript()
+            .iter()
+            .any(|message| matches!(message, Message::Assistant { .. })),
+        "aucun `Assistant` ne doit être empilé quand rien n'a été dit : {:?}",
+        harness.transcript()
+    );
+}

@@ -82,9 +82,16 @@ fn ce_que_value_refuse_est_refuse_nommement() {
     // Hors de f64 : refusé, SAUF si `arbitrary_precision` est unifiée — alors accepté et relayé
     // exactement. Jamais arrondi en silence.
     let hors = r#"{"type":"futur","x":1e400}"#;
-    // Refusé : jamais arrondi. Accepté (`arbitrary_precision`) : relayé tel quel.
-    if let Ok(lu) = EventJson::parse(hors) {
+    // Le même garde que les grands entiers : la feature unifiée décide de l'attendu, et chaque
+    // branche l'affirme (sans lui, un `parse` qui arrondirait en silence passerait).
+    if value_garde_les_grands_entiers() {
+        let lu = EventJson::parse(hors).expect("`arbitrary_precision` unifiée : accepté");
         assert_eq!(lu.to_json().unwrap(), hors, "accepté : relayé tel quel");
+    } else {
+        assert!(
+            EventJson::parse(hors).is_err(),
+            "sans `arbitrary_precision` : refusé, jamais arrondi"
+        );
     }
 }
 
