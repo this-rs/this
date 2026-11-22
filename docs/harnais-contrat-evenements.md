@@ -112,30 +112,33 @@ Décisions, tranchées explicitement :
   en inconnu inventerait un succès et effacerait le défaut. Un `type` inconnu est conservé
   avec son `type_name` et son JSON. **Deux chemins, à ne pas confondre** :
   - **Relais exact** : `EventWire::from_json_str(texte)` puis `to_json_exact()`. L'inconnu garde
-    les **octets reçus** (`UnknownEvent::texte`, sans les espaces qui entourent l'objet) : ordre
-    des clés, espaces intérieurs, `1E2`, `0.10`, `18446744073709551616`, `1e400` ressortent tels
-    qu'ils sont arrivés. Test `le_relais_exact_rend_les_octets_recus`. Ce chemin ne passe PAS par
-    `serde_json::Value` pour le relais, et n'active aucune feature (`raw_value`, `preserve_order`,
-    `arbitrary_precision`) : il tient quelles que soient les features unifiées dans le binaire.
-  - **Chemin `serde` générique** (`serde_json::from_str::<EventWire>`) : il passe par
-    `serde_json::Value`. Il **refuse** nommément un nombre que `Value` ne représente pas (`1e400`,
-    au-delà de `f64`), au lieu de le relayer déformé, et `UnknownEvent::raw` vaut alors `None`.
-    Un hôte qui relaie doit donc utiliser `from_json_str`.
-  - La vue `UnknownEvent::raw` (`Value`) sert à l'**inspection** seulement. Quand elle existe, les
-    valeurs représentables y sont égales ; elle n'est jamais le texte relayé.
-  - **Un `type` dupliqué ou non textuel est refusé** par `from_json_str`. Le chemin générique suit
-    `Value` (le dernier `type` gagne) : les deux ne sont pas identiques sur ce point.
-  - **Un événement est un objet JSON** : un tableau ou un scalaire est refusé (`serde_json`
-    accepte une séquence là où un `struct` est attendu ; garde explicite dans `from_json_str`).
-  - Un `type` **connu** est décodé strictement (un payload incomplet est une erreur). Un type
-    connu auquel une version future ajoute un champ perd ce champ au relais : le relais exact ne
-    couvre que les types INCONNUS. `Event::Unknown` (variante unitaire de #301) reste pour la
-    lecture directe en `Event` ; `EventWire` porte le `type` et le payload d'un inconnu.
-  Le chantier « relais exact » reste **ouvert jusqu'à revue** : la conservation est mesurée et
-  testée, mais pas encore revue indépendamment. La branche `wip/relais-brut-exact` (feature
-  `serde_json/raw_value`) n'est plus la voie retenue : Cargo l'unifie dans tout le binaire et elle
-  change la lecture de `Value` partout (mesuré : un `ToolCall.arguments` dont la première clé est
-  `$serde_json::private::RawValue` est relu comme le JSON qu'elle porte, ou devient une erreur).
+    les **octets reçus** (`UnknownEvent::texte()`, sans les espaces qui entourent l'objet) : ordre
+    des clés, espaces intérieurs, `1E2`, `0.10`, `18446744073709551616` ressortent tels qu'ils sont
+    arrivés. Test `le_relais_exact_rend_les_octets_recus`. Ce chemin n'active aucune feature
+    (`raw_value`, `preserve_order`, `arbitrary_precision`) : il tient quelles que soient les
+    features unifiées dans le binaire.
+  - **Ce qui est REFUSÉ, nommément** (et jamais relayé déformé) : tout ce que `serde_json::Value`
+    refuse. Concrètement : un nombre hors de `f64` (`1e400`), un surrogate UTF-16 isolé
+    (`"\ud800"`), une profondeur au-delà de la limite de `serde_json`, un événement qui n'est pas un
+    objet, un `type` dupliqué ou non textuel. Un relais qui transmettait ces textes ferait refuser
+    le même événement par un autre lecteur serde. Tests : `ce_que_value_refuse_est_refuse_nommement`,
+    `un_type_duplique_ou_non_textuel_est_refuse`, `une_sequence_ou_un_scalaire_ne_sont_pas_des_evenements`.
+  - **Chemin `serde` générique** (`serde_json::from_str::<EventWire>`) : il passe par `Value` et
+    refuse les mêmes cas ; sa forme relayée est la forme canonique de `Value`, pas le texte reçu.
+    Un hôte qui relaie le texte exact doit utiliser `from_json_str`.
+  - La vue `UnknownEvent::raw` (`Value`) représente exactement le texte relayé : elle est là pour
+    l'**inspection**. Un `Deserialize` ou une conversion via `Value` peut changer les nombres ; le
+    texte exact, lui, ne passe jamais par `Value`.
+  - **Taille** : `from_json_str` ne la borne pas ; l'hôte doit borner ce qu'il lit.
+  - Un `type` **connu** est décodé strictement (un payload incomplet est une erreur). Un type connu
+    auquel une version future ajoute un champ perd ce champ au relais : le relais exact ne couvre
+    que les types INCONNUS. `Event::Unknown` (variante unitaire de #301) reste pour la lecture
+    directe en `Event` ; `EventWire` porte le `type` et le payload d'un inconnu.
+  Le chantier « relais exact » reste **ouvert jusqu'à revue indépendante**. La branche
+  `wip/relais-brut-exact` (feature `serde_json/raw_value`) n'est plus la voie retenue : Cargo
+  l'unifie dans tout le binaire et elle change la lecture de `Value` partout (mesuré : un
+  `ToolCall.arguments` dont la première clé est `$serde_json::private::RawValue` est relu comme le
+  JSON qu'elle porte, ou devient une erreur).
   Preuves : `chaque_type_connu_se_relit_comme_connu_et_identique` (aller-retour sur une
   instance de chaque variante, et garde de la liste des types connus),
   `un_evenement_futur_garde_son_type_et_son_payload_intact`,

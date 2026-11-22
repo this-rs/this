@@ -1,21 +1,21 @@
 //! Relais d'un événement inconnu (#314), contrat réel :
-//! - `EventWire::from_json_str` + `to_json_exact` rendent les OCTETS reçus d'un inconnu, sans passer
-//!   par `Value` : un nombre hors de `f64` ne fait échouer ni la lecture, ni le relais ;
-//! - la vue `Value` (`UnknownEvent::raw`) n'est que pour l'inspection, et vaut `None` hors de sa
-//!   plage ;
-//! - le chemin `serde` générique (`from_str::<EventWire>`) passe par `Value` : il rejette ce qui
-//!   n'y tient pas, et ne prétend pas au relais exact.
+//! - `EventWire::from_json_str` lit le texte en entier par `serde_json::Value` (refus nommé de ce
+//!   que `Value` refuse : nombre hors de `f64`, surrogate UTF-16 isolé, profondeur excessive) ;
+//! - `to_json_exact` rend les OCTETS reçus d'un inconnu, sans les espaces qui entourent l'objet ;
+//! - le `Deserialize` générique passe par `Value` et refuse les mêmes cas.
 //!
-//! Aucune feature `serde_json` n'est activée ici : le contrat tient quelles que soient les
-//! features unifiées dans le binaire.
+//! Aucune feature `serde_json` n'est activée : le contrat tient quelles que soient les features
+//! unifiées dans le binaire.
 
 use this_harness::EventWire;
 
-const EXACT: &str = r#"{"z":1,"type":"budget_projete","n":18446744073709551616,"d":0.10,"e":1E2,"x":1e400,"neg":-0,"o":{"b":[2,1],"a":"é\n"}}"#;
+/// Tout ce que `Value` accepte, avec ce qui est facile à perdre : ordre des clés, espaces intérieurs,
+/// nombres au-delà de `u64`, décimaux, exposant majuscule, `-0`, échappements.
+const EXACT: &str = r#"{"z":1,"type":"budget_projete","n":18446744073709551616,"d":0.10,"e":1E2,"neg":-0,"o":{"b":[2,1],"a":"é\né"}}"#;
 
 #[test]
 fn le_relais_exact_rend_les_octets_recus() {
-    let lu = EventWire::from_json_str(EXACT).expect("un inconnu, même hors de Value, se lit");
+    let lu = EventWire::from_json_str(EXACT).expect("ce que Value accepte se lit");
     assert_eq!(
         lu.to_json_exact().unwrap(),
         EXACT,
@@ -30,21 +30,30 @@ fn les_espaces_qui_entourent_l_objet_sont_retires_seulement() {
 }
 
 #[test]
-fn la_vue_value_n_existe_que_dans_sa_plage() {
-    let EventWire::Unknown(hors) = EventWire::from_json_str(EXACT).unwrap() else {
+fn la_vue_value_est_celle_du_texte() {
+    let EventWire::Unknown(u) = EventWire::from_json_str(EXACT).unwrap() else {
         panic!("inconnu attendu")
     };
-    assert_eq!(hors.type_name, "budget_projete");
-    assert!(
-        hors.raw.is_none(),
-        "1e400 n'entre pas dans Value : pas de vue, mais pas d'erreur"
+    assert_eq!(u.type_name, "budget_projete");
+    assert_eq!(
+        u.raw,
+        serde_json::from_str::<serde_json::Value>(EXACT).unwrap()
     );
+    assert_eq!(u.texte(), EXACT);
+}
 
-    let dans = r#"{"type":"futur","n":42,"f":0.5,"l":[1,{"k":"v"}]}"#;
-    let EventWire::Unknown(ok) = EventWire::from_json_str(dans).unwrap() else {
-        panic!("inconnu attendu")
-    };
-    assert_eq!(ok.raw.as_ref().unwrap()["n"], 42);
+#[test]
+fn ce_que_value_refuse_est_refuse_nommement() {
+    // Nombre hors de f64 : refusé, jamais gardé ni arrondi en silence.
+    assert!(EventWire::from_json_str(r#"{"type":"futur","x":1e400}"#).is_err());
+    // Surrogate UTF-16 isolé : refusé par Value, donc refusé ici (un autre lecteur le refuserait).
+    assert!(EventWire::from_json_str(r#"{"type":"futur","x":"\ud800"}"#).is_err());
+    // Profondeur au-delà de la limite de serde_json.
+    let mut profond = String::from(r#"{"type":"futur","x":"#);
+    profond.push_str(&"[".repeat(200));
+    profond.push_str(&"]".repeat(200));
+    profond.push('}');
+    assert!(EventWire::from_json_str(&profond).is_err());
 }
 
 #[test]
@@ -62,33 +71,22 @@ fn une_sequence_ou_un_scalaire_ne_sont_pas_des_evenements() {
 }
 
 #[test]
-fn un_type_connu_passe_par_le_decodage_strict() {
-    let brut = r#"{"type":"stopped"}"#;
-    // Un type connu au payload incomplet est une erreur, jamais un inconnu.
+fn un_type_connu_au_payload_incomplet_est_une_erreur() {
     assert!(EventWire::from_json_str(r#"{"type":"stopped","stop":}"#).is_err());
-    let lu = EventWire::from_json_str(brut);
-    if let Ok(connu @ EventWire::Known(_)) = &lu {
-        assert_eq!(
-            connu.to_json_exact().unwrap(),
-            serde_json::to_string(connu.known().unwrap()).unwrap()
-        );
-    }
 }
 
 #[test]
-fn le_chemin_serde_generique_passe_par_value_et_le_dit() {
-    // Hors de Value : refusé nommément, pas relayé déformé en silence.
-    assert!(serde_json::from_str::<EventWire>(EXACT).is_err());
-    // Dans Value : lu, avec sa vue.
+fn le_chemin_serde_generique_refuse_les_memes_cas() {
+    assert!(serde_json::from_str::<EventWire>(r#"{"type":"futur","x":1e400}"#).is_err());
     let dans = r#"{"type":"futur","n":42}"#;
     let EventWire::Unknown(u) = serde_json::from_str::<EventWire>(dans).unwrap() else {
         panic!("inconnu attendu")
     };
-    assert!(u.raw.is_some());
+    assert_eq!(u.raw["n"], 42);
 }
 
-/// Garde-fou : le manifeste de `this-harness` n'active pas DIRECTEMENT la feature `raw_value`.
-/// Il ne voit pas une activation TRANSITIVE par une autre crate du binaire.
+/// Garde-fou : le manifeste de `this-harness` n'active pas DIRECTEMENT `raw_value`. Il ne voit pas
+/// une activation TRANSITIVE par une autre crate du binaire.
 #[test]
 fn le_manifeste_de_this_harness_n_active_pas_directement_raw_value() {
     let chemin = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");

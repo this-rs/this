@@ -274,14 +274,23 @@ const TYPES_CONNUS: &[&str] = &[
 pub struct UnknownEvent {
     /// Le `type` d'origine, tel que le fil le portait.
     pub type_name: String,
-    /// Le JSON de l'objet, **exactement tel qu'il est arrivé** (sans les espaces qui l'entourent),
-    /// quand il a été lu par [`EventWire::from_json_str`]. C'est le seul relais exact :
-    /// [`EventWire::to_json_exact`]. Lu par le `Deserialize` générique, qui ne voit pas le texte,
-    /// il vaut la forme canonique de `raw`.
-    pub texte: String,
-    /// La vue en `serde_json::Value`, pour l'INSPECTION seulement. `None` quand un nombre n'y tient
-    /// pas (au-delà de `f64`, ou `1e400`) : le `type` et le texte restent lisibles et exacts.
-    pub raw: Option<Value>,
+    /// La vue en `serde_json::Value`, pour l'INSPECTION. Pour un événement lu par
+    /// [`EventWire::from_json_str`], elle représente exactement le texte relayé : les nombres hors
+    /// de `Value` sont refusés à la lecture, jamais arrondis en silence.
+    pub raw: Value,
+    /// Le JSON reçu (sans les espaces qui entourent l'objet). Privé : seul [`EventWire::from_json_str`]
+    /// le remplit, avec un texte que `Value` a accepté ; un consommateur ne peut donc pas fabriquer
+    /// une enveloppe de JSON invalide. Lu par [`Self::texte`].
+    texte: String,
+}
+
+impl UnknownEvent {
+    /// Le JSON reçu, tel qu'il est arrivé (sans les espaces qui entourent l'objet), quand il a été lu
+    /// par [`EventWire::from_json_str`]. Pour un événement lu par le `Deserialize` générique, c'est la
+    /// forme canonique de `raw`.
+    pub fn texte(&self) -> &str {
+        &self.texte
+    }
 }
 
 /// Un événement lu sur le fil : connu, décodé **strictement**, ou d'une version
@@ -327,16 +336,9 @@ impl EventWire {
 impl Serialize for EventWire {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         match self {
-            // Par serde, un inconnu repart par sa vue `Value` (lossy : voir `to_json_exact` pour
-            // le texte exact). Sans vue (nombre hors de `Value`), c'est une ERREUR nommée, jamais un
-            // relais silencieusement déformé.
-            Self::Unknown(inconnu) => match &inconnu.raw {
-                Some(raw) => raw.serialize(serializer),
-                None => Err(serde::ser::Error::custom(
-                    "événement inconnu dont un nombre n'est pas représentable par Value : \
-                     utiliser EventWire::to_json_exact",
-                )),
-            },
+            // Par serde, un inconnu repart par sa vue `Value` (forme canonique). Le texte reçu
+            // exact sort par `to_json_exact`.
+            Self::Unknown(inconnu) => inconnu.raw.serialize(serializer),
             Self::Known(event) => event.serialize(serializer),
         }
     }
@@ -356,8 +358,8 @@ impl<'de> Deserialize<'de> for EventWire {
             let texte = raw.to_string();
             return Ok(Self::Unknown(UnknownEvent {
                 type_name,
+                raw,
                 texte,
-                raw: Some(raw),
             }));
         }
         // Type connu : décodage strict. Un payload incomplet est une ERREUR —
@@ -379,9 +381,11 @@ struct SeulType {
 impl EventWire {
     /// Lit UN événement depuis son texte JSON, en gardant le texte EXACT d'un inconnu.
     ///
-    /// Ne passe PAS par `Value` pour le relais : un nombre hors de `f64` ne fait donc pas échouer
-    /// la lecture d'un inconnu, et n'est pas arrondi dans [`UnknownEvent::texte`]. Un `type`
-    /// dupliqué ou non textuel est refusé. Un type connu est décodé strictement, comme partout.
+    /// Le texte est d'abord lu en entier par `serde_json::Value` : ce qui n'y tient pas est REFUSÉ
+    /// nommément (nombre hors de `f64` comme `1e400`, chaîne UTF-16 isolée, profondeur au-delà de la
+    /// limite de `serde_json`). Ainsi le relais exact ne transmet jamais un texte qu'un autre lecteur
+    /// serde refuserait. Un `type` dupliqué ou non textuel est refusé. Un type connu est décodé
+    /// strictement, comme partout. Taille : bornée par l'hôte (cette fonction ne la limite pas).
     pub fn from_json_str(texte: &str) -> Result<Self, serde_json::Error> {
         let exact = texte.trim_matches(|c: char| matches!(c, ' ' | '\t' | '\n' | '\r'));
         // Un événement est un OBJET : `serde_json` accepte une séquence là où un `struct` est
@@ -389,6 +393,9 @@ impl EventWire {
         if !exact.starts_with('{') {
             return Err(serde::de::Error::custom("un événement est un objet JSON"));
         }
+        // Lecture complète et stricte : c'est elle qui refuse ce qu'un autre lecteur refuserait.
+        let raw: Value = serde_json::from_str(exact)?;
+        // Le `type` seul, pour refuser un doublon ou un type non textuel que `Value` aurait avalé.
         let seul: SeulType = serde_json::from_str(exact)?;
         let Some(type_name) = seul.type_name else {
             return Err(serde::de::Error::custom(
@@ -398,11 +405,11 @@ impl EventWire {
         if !TYPES_CONNUS.contains(&type_name.as_str()) {
             return Ok(Self::Unknown(UnknownEvent {
                 type_name,
+                raw,
                 texte: exact.to_string(),
-                raw: serde_json::from_str::<Value>(exact).ok(),
             }));
         }
-        serde_json::from_str::<Event>(exact).map(Self::Known)
+        serde_json::from_value::<Event>(raw).map(Self::Known)
     }
 
     /// Le JSON de cet événement. Pour un inconnu lu par [`Self::from_json_str`], ce sont les octets
@@ -713,14 +720,7 @@ mod tests {
             EventWire::Known(event) => panic!("« {} » n'est pas connu d'ici", event.name()),
         };
         assert_eq!(inconnu.type_name, "budget_projete");
-        assert_eq!(
-            inconnu
-                .raw
-                .as_ref()
-                .and_then(|v| v.get("restant"))
-                .and_then(Value::as_i64),
-            Some(42)
-        );
+        assert_eq!(inconnu.raw.get("restant").and_then(Value::as_i64), Some(42));
 
         // Relayé, il repart avec SON type et TOUS ses champs : jamais
         // `{"type":"Unknown"}`, qui est exactement ce que #301 laissait passer.
