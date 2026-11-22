@@ -37,12 +37,17 @@ impl Hub {
     ) -> Result<Self, ProviderError> {
         let snapshot = store.load()?;
         // Un store générique (mémoire, base, fichier d'une autre version) n'est pas forcément passé par
-        // `upsert` : on ne lui fait pas confiance. Une configuration interdite — un secret qui partirait en
-        // clair — arrête l'ouverture, bruyamment, comme le fait `JsonFileStore::load`.
+        // `upsert` : on ne lui fait pas confiance. Une configuration dont la seule faute est le
+        // TRANSPORT (`InsecureRemote` : un secret partirait en clair) reste chargée, donc VISIBLE pour
+        // être corrigée dans l'interface — mais `client` la refuse avant de lire le secret, et `upsert`
+        // la refuse. Toute autre faute arrête l'ouverture, bruyamment, comme `JsonFileStore::load`.
         for provider in &snapshot.providers {
-            provider
-                .validate()
-                .map_err(|error| StoreError::Format(format!("`{}` : {error}", provider.id)))?;
+            match provider.validate() {
+                Ok(()) | Err(crate::ConfigError::InsecureRemote) => {}
+                Err(error) => {
+                    return Err(StoreError::Format(format!("`{}` : {error}", provider.id)).into());
+                }
+            }
         }
         Ok(Self {
             store: Box::new(store),
@@ -173,12 +178,12 @@ impl Hub {
         if !config.preset.is_local() && secret.is_none() {
             return Err(ProviderError::MissingSecret(id.to_string()));
         }
-        Ok(crate::ProviderClient::new(
+        crate::ProviderClient::new(
             config,
             secret,
             Arc::clone(&self.ledger),
             Arc::clone(&self.clock),
-        ))
+        )
     }
 
     /// The active provider loses its place when it is removed or disabled.

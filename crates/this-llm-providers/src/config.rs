@@ -43,8 +43,9 @@ impl fmt::Display for ConfigError {
                 "l'adresse contient un identifiant (`user:mot-de-passe@`) ; utilise une référence de credential",
             ),
             Self::InsecureRemote => formatter.write_str(
-                "http hors de cette machine : un secret partirait en clair — utilise https \
-                 (http n'est permis que vers localhost, ou sans aucun credential pour un modèle local)",
+                "http avec un credential : le secret partirait en clair — utilise https, ou une adresse \
+                 loopback LITTÉRALE (127.0.0.1, [::1] ; pas `localhost`, qui est résolu) ; \
+                 jamais depuis une page wasm. Sans credential, un modèle local peut rester en http.",
             ),
             Self::MissingCredential => {
                 formatter.write_str("un fournisseur distant exige une référence de credential")
@@ -278,9 +279,13 @@ impl ProviderConfig {
         // presets, locaux compris, et pour tous les types de credential. Reste permis : un preset
         // local en http vers une autre machine du réseau SANS secret (rien à protéger), et tout
         // en https.
+        // Avec un credential, seule une IP loopback LITTÉRALE garantit la machine : un nom
+        // (`localhost` compris) est résolu — fichier hosts, résolveur — et peut mener ailleurs. Et en
+        // WASM, la page ne contrôle ni proxy ni redirection : `http` + credential y est toujours refusé.
+        let credential = self.credential != CredentialRef::None;
         if !secure
-            && !loopback
-            && (self.credential != CredentialRef::None || !self.preset.is_local())
+            && ((credential && (!loopback || cfg!(target_arch = "wasm32")))
+                || (!credential && !self.preset.is_local() && !loopback))
         {
             return Err(ConfigError::InsecureRemote);
         }
@@ -376,17 +381,15 @@ enum Host<'a> {
     V6(std::net::Ipv6Addr),
 }
 
-/// Cette machine, et seulement elle : `localhost` EXACT, une adresse IPv4 `127.0.0.0/8`, `::1`, ou
-/// son équivalent IPv4-mappé. Aucun préfixe, aucune forme abrégée (`127.1` : refusée, par prudence).
+/// Cette machine, et seulement elle, par une adresse LITTÉRALE : IPv4 `127.0.0.0/8`, `[::1]`, ou
+/// l'IPv4-mappé. Un nom — `localhost` compris — n'est PAS loopback : il est résolu, donc non garanti.
+/// Aucune forme abrégée (`127.1` : refusée, par prudence).
 fn is_loopback(host: Host<'_>) -> bool {
     match host {
         Host::V6(ip) => ip.is_loopback() || ip.to_ipv4_mapped().is_some_and(|v4| v4.is_loopback()),
-        Host::Name(name) => {
-            name.eq_ignore_ascii_case("localhost")
-                || name
-                    .parse::<std::net::Ipv4Addr>()
-                    .is_ok_and(|ip| ip.is_loopback())
-        }
+        Host::Name(name) => name
+            .parse::<std::net::Ipv4Addr>()
+            .is_ok_and(|ip| ip.is_loopback()),
     }
 }
 
@@ -629,6 +632,8 @@ mod tests {
             "http://localhost.evil.com:80/v1",
             "http://127.0.0.1.evil.com/v1", // faux préfixe IPv4
             "http://localhostx/v1",
+            "http://localhost/v1", // un NOM, résolu : pas une garantie
+            "http://LOCALHOST:11434/v1",
             "http://127.1/v1",        // forme abrégée : refusée par prudence
             "http://0.0.0.0:8000/v1", // « toutes interfaces », pas loopback
         ];
@@ -647,9 +652,14 @@ mod tests {
 
     #[test]
     fn un_hote_loopback_exact_est_accepte_en_http_pour_tous_les_credentials() {
+        // Sous wasm, même une IP loopback est refusée avec un credential (ni proxy ni redirection
+        // contrôlables) ; les tests ne tournent pas en wasm, mais l'attendu le dit.
+        let attendu = if cfg!(target_arch = "wasm32") {
+            Err(ConfigError::InsecureRemote)
+        } else {
+            Ok(())
+        };
         let loopbacks = [
-            "http://localhost/v1",
-            "http://LOCALHOST:11434/v1",
             "http://127.0.0.1:9000/v1",
             "http://127.255.255.254/v1",
             "http://[::1]:8080/v1",
@@ -661,7 +671,7 @@ mod tests {
                     let config = avec_url(preset, credential.clone(), url);
                     assert_eq!(
                         config.validate(),
-                        Ok(()),
+                        attendu,
                         "{preset:?} + {credential:?} + {url}"
                     );
                 }
@@ -681,8 +691,14 @@ mod tests {
 
     #[test]
     fn le_cas_lan_sans_secret_est_preserve_pour_un_preset_local() {
-        // Un Ollama sur une autre machine du réseau, SANS secret : rien ne part en clair à protéger.
-        for url in ["http://192.168.1.20:11434/v1", "http://nas.local:8080/v1"] {
+        // Un Ollama sur une autre machine du réseau, ou sur `localhost` en NOM, SANS secret : rien ne
+        // part en clair à protéger. (Les presets locaux par défaut sont `http://localhost:…` sans
+        // credential : ils restent valides.)
+        for url in [
+            "http://192.168.1.20:11434/v1",
+            "http://nas.local:8080/v1",
+            "http://localhost:11434/v1",
+        ] {
             let config = avec_url(Preset::Ollama, CredentialRef::None, url);
             assert_eq!(config.validate(), Ok(()), "{url}");
         }

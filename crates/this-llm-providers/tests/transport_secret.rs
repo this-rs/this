@@ -1,6 +1,7 @@
-//! Un secret ne part jamais en clair vers une machine qui n'est pas la nôtre : ni à l'ouverture d'un
-//! store prérempli, ni à la création d'un client. La configuration interdite est refusée AVANT que le
-//! secret soit résolu, donc a fortiori avant tout envoi.
+//! Un secret ne part jamais en clair vers une machine qui n'est pas la nôtre. Une configuration
+//! interdite venue d'un store (prérempli, personnalisé, ancienne version) reste VISIBLE — pour être
+//! corrigée dans l'interface — mais `Hub::client` la refuse AVANT que le secret soit résolu, donc a
+//! fortiori avant tout envoi ; `Hub::upsert` la refuse aussi. Toute autre faute arrête l'ouverture.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -50,7 +51,8 @@ const CAS: [(Preset, &str); 3] = [
 ];
 
 #[test]
-fn un_store_prerempli_avec_un_secret_en_clair_vers_un_autre_hote_n_ouvre_pas() {
+fn un_store_prerempli_avec_une_config_interdite_s_ouvre_la_montre_et_refuse_le_client_sans_lire_le_secret()
+ {
     for (preset, url) in CAS {
         for credential in [
             CredentialRef::Env("K".into()),
@@ -59,23 +61,44 @@ fn un_store_prerempli_avec_un_secret_en_clair_vers_un_autre_hote_n_ouvre_pas() {
         ] {
             let espion = Espion::default();
             let store = MemoryStore::new(Snapshot {
-                active: None,
+                active: Some(id("p")),
                 providers: vec![interdite(preset, credential.clone(), url)],
             });
-            let Err(erreur) = Hub::open(store, espion.clone(), Jour) else {
-                panic!("{preset:?} + {credential:?} + {url} : le hub ne doit pas s'ouvrir");
+            let hub = Hub::open(store, espion.clone(), Jour).unwrap_or_else(|e| {
+                panic!("{preset:?} + {credential:?} + {url} : ouvert, visible : {e:?}")
+            });
+            assert_eq!(hub.providers().len(), 1, "visible pour être corrigée");
+            let Err(erreur) = hub.client(&id("p")) else {
+                panic!("{preset:?} + {credential:?} + {url} : aucun client ne doit être créé");
             };
             assert!(
-                matches!(erreur, ProviderError::Store(StoreError::Format(_))),
+                matches!(
+                    erreur,
+                    ProviderError::Config(this_llm_providers::ConfigError::InsecureRemote)
+                ),
                 "{erreur:?}"
             );
             assert_eq!(
                 espion.0.load(Ordering::SeqCst),
                 0,
-                "aucun secret résolu à l'ouverture"
+                "le secret n'a jamais été résolu"
             );
         }
     }
+}
+
+#[test]
+fn toute_autre_faute_d_un_store_arrete_l_ouverture() {
+    let mut cassee = interdite(Preset::Ollama, CredentialRef::None, "http://127.0.0.1:1/v1");
+    cassee.timeout_secs = 0; // pas une faute de transport : refus bruyant à l'ouverture
+    let store = MemoryStore::new(Snapshot {
+        active: None,
+        providers: vec![cassee],
+    });
+    assert!(matches!(
+        Hub::open(store, Espion::default(), Jour),
+        Err(ProviderError::Store(StoreError::Format(_)))
+    ));
 }
 
 #[test]
@@ -117,17 +140,16 @@ impl ProviderStore for StoreSansValidation {
 }
 
 #[test]
-fn un_store_personnalise_qui_ne_valide_rien_n_ouvre_pas_une_configuration_interdite() {
+fn un_store_personnalise_qui_ne_valide_rien_est_rattrape_par_le_hub() {
     for (preset, url) in CAS {
         let espion = Espion::default();
         let store = StoreSansValidation(Snapshot {
             active: None,
             providers: vec![interdite(preset, CredentialRef::Vault("k".into()), url)],
         });
-        assert!(
-            Hub::open(store, espion.clone(), Jour).is_err(),
-            "{preset:?} + {url}"
-        );
+        let hub =
+            Hub::open(store, espion.clone(), Jour).expect("ouvert : la faute est de transport");
+        assert!(hub.client(&id("p")).is_err(), "{preset:?} + {url}");
         assert_eq!(espion.0.load(Ordering::SeqCst), 0, "aucun secret résolu");
     }
 }
