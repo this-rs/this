@@ -19,7 +19,7 @@ use async_trait::async_trait;
 use this_agent::Stop;
 
 use super::candidate::{self, Candidate, Pick, Slot, is_auto_model, same_model, same_pair};
-use super::decide::{DecideRequest, Decision, HYSTERESIS_MARGIN, decide};
+use super::decide::{DecideRequest, Decision, HYSTERESIS_MARGIN, decide, decide_after_limit};
 use super::mode::{
     ConversationRoutingMode, LearningStage, PoolEntry, ProviderRoutingMode, RoutingSettings,
     conversation_stage,
@@ -39,6 +39,8 @@ pub const SAME_CLASS_NO_EXPLORE: &str = "same_class_no_explore";
 pub const AFTER_PROVIDER_MOVE: &str = "after_provider_move";
 /// Suffixe de motif d'un tour dont le fournisseur est imposé.
 pub const PROVIDER_IMPOSED: &str = "provider_imposed";
+/// Suffixe de motif d'un repli après le refus du quota d'un modèle.
+pub const AFTER_QUOTA_LIMIT: &str = "after_quota_limit";
 
 /// La paire sur laquelle un tour part, telle qu'elle sort vers un transport.
 ///
@@ -232,6 +234,9 @@ pub enum RouteWhy {
     /// Un port de l'hôte (candidats, apprentissage) n'a pas répondu à temps :
     /// repli sur la paire en vigueur.
     TimedOut,
+    /// Le moteur a refusé parce que le quota du MODÈLE était épuisé : le tour repart sur
+    /// un autre modèle de la même instance ([`TurnRouter::after_limit`]).
+    QuotaFallback,
 }
 
 impl RouteWhy {
@@ -250,6 +255,7 @@ impl RouteWhy {
             Self::UnderMargin => "under_margin",
             Self::Superseded => "superseded",
             Self::TimedOut => "timed_out",
+            Self::QuotaFallback => "quota_fallback",
         }
     }
 }
@@ -264,6 +270,18 @@ pub struct Routed {
     pub why: RouteWhy,
     /// La décision prise, quand il y en a eu une (appliquée ou non).
     pub decision: Option<Decision>,
+}
+
+/// Un repli jetable après quota. Il ne porte aucune décision enregistrable :
+/// son calcul ne doit jamais alimenter l'apprentissage ni consommer d'identifiant.
+#[derive(Debug, Clone)]
+pub struct QuotaFallback {
+    /// Paire retenue pour le rejeu du tour.
+    pub route: Route,
+    /// Motif de routage, toujours [`RouteWhy::QuotaFallback`].
+    pub why: RouteWhy,
+    /// Explication lisible de la sélection.
+    pub reason: String,
 }
 
 /// Ce qu'un tour apporte au routeur.
@@ -1004,6 +1022,136 @@ impl TurnRouter {
         self.stay(why, None)
     }
 
+    /// Après le refus d'un quota **de modèle** : un autre modèle de la MÊME instance, pour
+    /// ce tour seulement (C2 de #288 ; `model_after_limit` de PO, `agent_hooks.rs:1667`).
+    ///
+    /// Ce n'est pas un second routage. Rien n'est écrit dans l'état du routeur (ni paire en
+    /// vigueur, ni compteur de tours, ni décision ouverte), rien n'est enregistré, aucun
+    /// tirage : la sélection est **déterministe** et jetable. Le résultat n'expose aucune
+    /// décision enregistrable. L'hôte apprend le refus par son propre `QuotaView` ; le
+    /// message suivant décide donc normalement, sans ce modèle.
+    ///
+    /// `refused` liste les paires déjà refusées pendant ce message (la première
+    /// comprise) : chacune est exclue, ce qui borne la chaîne — jamais de boucle de quotas.
+    /// Rend `None` (et l'appelant garde l'échec) quand :
+    /// - le transport n'honore pas la route : une décision consultative n'est pas servie ;
+    /// - la conversation n'est pas routée, ou son modèle est imposé / réglé à la main : la
+    ///   personne a choisi, aucun repli ne contourne ce choix ;
+    /// - l'étape n'applique pas les décisions (`shadow`, `advisory`) ;
+    /// - aucun autre modèle de la même instance n'est éligible.
+    ///
+    /// Seul le refus d'un MODÈLE donne un repli : un compte épuisé refuserait aussi tout autre
+    /// modèle de l'instance (l'appelant ne l'appelle pas pour ce motif). Changer de
+    /// fournisseur dans le même tour n'est pas fait ici : il passerait par la garde « jamais
+    /// deux changements de fournisseur de suite », que ce chemin ne tient pas.
+    pub async fn after_limit(
+        &self,
+        turn: TurnInput<'_>,
+        refused: &[Pick],
+        resets_at_ms: Option<u64>,
+    ) -> Option<QuotaFallback> {
+        let last = refused.last()?;
+        if !turn.honored {
+            return None;
+        }
+        let (choice, manual, generation) = {
+            let state = self.state.borrow();
+            (state.choice.clone(), state.manual, state.generation)
+        };
+        let rights = rights_of(&choice, manual);
+        if !rights.routes || !rights.auto {
+            return None;
+        }
+        let mut signature = TurnSignature::from_chat(turn.text, turn.has_images, turn.hints);
+        signature.needs_tools = self.needs_tools;
+        signature.role = self.role;
+        let class = signature.arm_key();
+
+        let mut pool = self.pool.pool().await;
+        // Contrainte dure du repli, appliquée D'ABORD : un repli après quota ne change jamais
+        // d'instance (`restrict_provider` plus bas le redit à la décision). Le filtre de liste
+        // de la personne doit la voir : sinon une paire listée d'une AUTRE instance, éligible,
+        // suffit à réduire le pool à la liste, puis la décision l'exclut → `None`, alors qu'un
+        // modèle de la même instance hors liste est libre (revue de #321, second cas).
+        pool.retain(|facts| facts.provider_id == last.provider_id);
+        // Le marquage précède le filtre de liste de la personne : ce filtre garde le pool
+        // entier quand rien de listé ne passe les contraintes dures — il doit donc VOIR le
+        // refus. Sinon une liste réduite à la paire refusée réduirait le pool à elle, puis
+        // l'écarterait : `None`, alors qu'un autre modèle de la même instance est libre
+        // (revue de #321, test `after_limit_une_liste_reduite_a_la_paire_refusee_…`).
+        // Chaque paire refusée est retenue le temps de ce message, comme le ferait le
+        // `QuotaView` de l'hôte une fois mis à jour. L'échéance, quand le moteur la dit.
+        for facts in &mut pool {
+            if refused
+                .iter()
+                .any(|p| p.provider_id == facts.provider_id && same_model(&p.model, &facts.model))
+            {
+                facts.quota_exhausted = Some(candidate::QuotaExhaustion {
+                    resets_at_ms: resets_at_ms.unwrap_or(u64::MAX),
+                    window: Some(format!("model:{}", facts.model)),
+                });
+            }
+        }
+        if let Some(entries) = &choice.pool {
+            pool.retain(|facts| listed(entries, facts));
+        }
+        // Le pool de l'instance AVANT la liste de la personne, gardé pour l'élargissement : le filtre
+        // de liste ne juge que les contraintes dures ; le scoring peut encore écarter toute la liste
+        // (bras d'apprentissage invalide). La liste ne doit jamais bloquer un repli possible.
+        let mut entier: Option<Vec<Candidate>> = None;
+        if let (None, Some(list)) = (&choice.pool, &choice.auto_models)
+            && choice.routing.mode == ProviderRoutingMode::Full
+        {
+            let avant = pool.clone();
+            if restrict_to_person_list(&mut pool, list, &signature) == NARROWED_BY_PERSON {
+                entier = Some(avant);
+            }
+        }
+        let mut settings = settings_for(&choice.routing, rights.auto);
+        if choice.pool.is_some() {
+            settings.mode = ProviderRoutingMode::Full;
+        }
+        // Déterministe : pas de tirage, pas d'hystérésis (la paire en vigueur vient de refuser).
+        settings.exploration_epsilon = 0.0;
+        let mut request = DecideRequest::new(signature, settings, pool);
+        request.restrict_provider = Some(last.provider_id.clone());
+        request.steady = true;
+        request.narrowed.push(AFTER_QUOTA_LIMIT);
+
+        let arms = self.learning.arms(&class).await;
+        let hints = self.learning.hints();
+        let mut decision = decide_after_limit(&request, &arms, &hints);
+        // Une paire listée valide gagne toujours (première passe). Si la liste entière échoue au
+        // scoring, la décision est rejouée sur le pool entier de l'instance, et le dit.
+        if decision.chosen.is_none()
+            && let Some(entier) = entier
+        {
+            request.pool = entier;
+            request.narrowed.push(PERSON_LIST_UNAVAILABLE);
+            decision = decide_after_limit(&request, &arms, &hints);
+        }
+        // La personne a réglé la conversation pendant l'attente : son réglage gagne.
+        if self.state.borrow().generation != generation {
+            return None;
+        }
+        // Une étape qui n'applique pas (`shadow`) ne sert pas non plus un repli.
+        if !decision.applied {
+            return None;
+        }
+        let chosen = decision.chosen.clone()?;
+        let already_refused = refused
+            .iter()
+            .any(|p| p.provider_id == chosen.provider_id && same_model(&p.model, &chosen.model));
+        if already_refused || chosen.provider_id != last.provider_id {
+            return None;
+        }
+        Some(QuotaFallback {
+            route: Route::of(&chosen.provider_id, &chosen.model),
+            why: RouteWhy::QuotaFallback,
+            reason: decision.reason,
+        })
+    }
+
     /// Le tour s'est terminé : sa fin est rendue à l'apprentissage, pour la
     /// décision appliquée qui l'a servi. Sans décision appliquée, rien n'est dit
     /// (un bras jamais servi n'est jamais nourri).
@@ -1020,6 +1168,26 @@ impl TurnRouter {
     /// range parmi les abandonnées ([`TurnRouter::repair`]) — jamais une décision
     /// perdue en silence.
     pub async fn settle(&self, stop: &Stop, code: Option<&str>, honored: bool) {
+        self.settle_served(stop, code, honored, honored).await
+    }
+
+    /// [`Self::settle`] avec deux signaux distincts, que le repli après quota sépare :
+    ///
+    /// - `reached` : la paire décidée a été **atteinte et a servi** au moins un tour. Faux, l'état
+    ///   revient à l'avant du changement (paire et garde-fous) ; vrai, il reste sur la paire décidée.
+    /// - `credited` : la fin de l'objectif est **attribuée** à la paire décidée (récompense). Un
+    ///   objectif terminé par une autre paire (repli après quota) n'est pas crédité, même si la paire
+    ///   décidée a servi ses premiers tours : le résultat mêle deux paires.
+    ///
+    /// `credited` sans `reached` n'a pas de sens : il est ramené à faux.
+    pub async fn settle_served(
+        &self,
+        stop: &Stop,
+        code: Option<&str>,
+        reached: bool,
+        credited: bool,
+    ) {
+        let credited = credited && reached;
         // Seuls l'identifiant, la paire et la génération sont lus : `before` n'est
         // jamais copié hors de l'état (il y est consommé une fois, juste dessous).
         let (id, pick) = {
@@ -1036,7 +1204,7 @@ impl TurnRouter {
             // dépend pas de sa réponse, et un `settle` coupé la perdrait pour toujours
             // (re-relecture de #254, constat A). Une seule fois (`before` est consommé),
             // et jamais par-dessus un réglage de la personne fait depuis (génération).
-            if !honored
+            if !reached
                 && let Some(before) = state.open.as_mut().and_then(|o| o.before.take())
                 && state.generation == generation
             {
@@ -1048,7 +1216,7 @@ impl TurnRouter {
             }
             (id, pick)
         };
-        let served = honored.then_some(&pick);
+        let served = credited.then_some(&pick);
         self.learning.settle(id, served, stop, code).await;
         let mut state = self.state.borrow_mut();
         if state.open.as_ref().is_some_and(|o| o.id == id) {

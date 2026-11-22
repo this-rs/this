@@ -147,6 +147,12 @@ pub enum Event {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         model: Option<String>,
         /// La paire a changé par rapport au message précédent.
+        ///
+        /// Exception, le repli de quota (`why: quota_fallback`) : `changed` vaut toujours
+        /// `true` et dit « ce tour repart sur une AUTRE paire que celle qui vient de refuser »,
+        /// pas « l'état du routeur a changé » — le repli n'écrit rien dans le routeur (ni paire
+        /// en vigueur, ni décision, ni compteur de tours) ; le message suivant repart de l'état
+        /// d'avant.
         changed: bool,
         /// Code stable de la raison (`routed`, `kept`, `single_candidate`,
         /// `no_candidate`, `recorded_only`, `pinned`, `manual`, `not_routed`,

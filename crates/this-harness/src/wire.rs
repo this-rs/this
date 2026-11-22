@@ -361,6 +361,30 @@ impl Code {
     }
 }
 
+/// Ce que refuse un quota épuisé : un seul modèle de l'instance, ou tout le compte.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QuotaScope {
+    /// Un seul modèle refuse : un autre modèle de la même instance peut servir.
+    Model,
+    /// Le compte entier refuse : tout modèle de l'instance refuserait aussi.
+    Account,
+}
+
+/// Le refus d'un quota, tel que le moteur le dit — jamais deviné par le harnais.
+///
+/// Un transport qui sait distinguer un quota épuisé d'un autre refus (en-têtes de
+/// limite, corps d'erreur du fournisseur) le pose sur [`Failure::quota`]. Sans lui, un
+/// refus de quota reste une panne ordinaire (`Http`, 429…) : le harnais ne bascule JAMAIS
+/// de modèle sur une supposition.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QuotaRefusal {
+    pub scope: QuotaScope,
+    /// L'instant où le quota sert de nouveau (ms depuis l'époque), quand le moteur le dit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resets_at_ms: Option<u64>,
+}
+
 /// Une panne de transport, avec sa famille et sa phrase.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Failure {
@@ -369,6 +393,9 @@ pub struct Failure {
     /// Le statut HTTP, quand il y en a un.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status: Option<u16>,
+    /// Le quota qui refuse, quand le transport sait le dire. `None` : un refus ordinaire.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quota: Option<QuotaRefusal>,
 }
 
 impl Failure {
@@ -377,6 +404,7 @@ impl Failure {
             code,
             message: message.into(),
             status: None,
+            quota: None,
         }
     }
     pub fn http(status: u16) -> Self {
@@ -384,6 +412,22 @@ impl Failure {
             code: Code::Http,
             message: format!("le moteur a répondu {status}"),
             status: Some(status),
+            quota: None,
+        }
+    }
+    /// Le moteur refuse parce qu'un quota est épuisé (voir [`QuotaRefusal`]).
+    pub fn quota_exhausted(scope: QuotaScope, resets_at_ms: Option<u64>) -> Self {
+        Self {
+            code: Code::Http,
+            message: match scope {
+                QuotaScope::Model => "le moteur refuse : quota épuisé pour ce modèle".to_string(),
+                QuotaScope::Account => "le moteur refuse : quota du compte épuisé".to_string(),
+            },
+            status: Some(429),
+            quota: Some(QuotaRefusal {
+                scope,
+                resets_at_ms,
+            }),
         }
     }
     pub fn unreachable(message: impl Into<String>) -> Self {

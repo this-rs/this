@@ -201,7 +201,7 @@ fn reason_of(signature: &TurnSignature, best: &Scored, explored: bool, kept: boo
         None => "cost unknown".to_owned(),
     });
     parts.push(if best.n > 0 {
-        let rate = (best.alpha / (best.alpha + best.beta) * 100.0).round();
+        let rate = (scorer::posterior_mean(best.alpha, best.beta) * 100.0).round();
         format!("{rate:.0}% success over {} runs", best.n)
     } else {
         "no run observed yet".to_owned()
@@ -233,7 +233,7 @@ pub fn utility_of(
     quota_norm: f64,
     settings: &RoutingSettings,
 ) -> f64 {
-    alpha / (alpha + beta)
+    scorer::posterior_mean(alpha, beta)
         - settings.cost_weight * cost_norm
         - settings.latency_weight * latency_norm
         - settings.quota_weight * quota_norm
@@ -320,7 +320,27 @@ pub fn decide(
     arms: &[ArmStats],
     hints: &PriorHints,
 ) -> Decision {
-    let mut decision = decide_free(id, request, arms, hints);
+    decide_with_scoring(id, request, arms, hints, false)
+}
+
+/// Décision jetable après quota : aucune graine ni aucun tirage. L'identifiant 0
+/// n'est pas enregistré ni rendu à l'apprentissage.
+pub(crate) fn decide_after_limit(
+    request: &DecideRequest,
+    arms: &[ArmStats],
+    hints: &PriorHints,
+) -> Decision {
+    decide_with_scoring(0, request, arms, hints, true)
+}
+
+fn decide_with_scoring(
+    id: u128,
+    request: &DecideRequest,
+    arms: &[ArmStats],
+    hints: &PriorHints,
+    mean: bool,
+) -> Decision {
+    let mut decision = decide_free(id, request, arms, hints, mean);
     for code in &request.narrowed {
         decision.reason = format!("{}; narrowed: {code}", decision.reason);
     }
@@ -332,6 +352,7 @@ fn decide_free(
     request: &DecideRequest,
     arms: &[ArmStats],
     hints: &PriorHints,
+    mean: bool,
 ) -> Decision {
     let signature = &request.signature;
     let sanitized = request.settings.sanitized();
@@ -415,14 +436,18 @@ fn decide_free(
     } else {
         settings
     };
-    let mut scored = scorer::score(
-        signature,
-        &filtered.eligible,
-        arms,
-        hints,
-        score_settings,
-        scorer::seed_of(id),
-    );
+    let mut scored = if mean {
+        scorer::score_mean(signature, &filtered.eligible, arms, hints, score_settings)
+    } else {
+        scorer::score(
+            signature,
+            &filtered.eligible,
+            arms,
+            hints,
+            score_settings,
+            scorer::seed_of(id),
+        )
+    };
     // Des faits valides peuvent encore donner une note non finie (un coût mesuré
     // démesuré) : la paire est écartée, jamais classée sur un `NaN`.
     let (finite, unscorable): (Vec<Scored>, Vec<Scored>) =
