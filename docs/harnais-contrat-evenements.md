@@ -110,44 +110,33 @@ Décisions, tranchées explicitement :
   l'enveloppe de **lecture** du fil. Un `type` connu y est décodé **strictement** — un
   payload incomplet est une **erreur**, pas un inconnu, parce que ranger un événement cassé
   en inconnu inventerait un succès et effacerait le défaut. Un `type` inconnu est conservé
-  avec son `type_name` et son JSON. **Deux chemins, à ne pas confondre** :
-  - **Relais exact** : `EventWire::from_json_str(texte)` puis `to_json_exact()`. L'inconnu garde
-    les **octets reçus** (`UnknownEvent::texte()`, sans les espaces qui entourent l'objet) : ordre
-    des clés, espaces intérieurs, `1E2`, `0.10`, `18446744073709551616` ressortent tels qu'ils sont
-    arrivés. Test `le_relais_exact_rend_les_octets_recus`. Ce chemin n'active aucune feature
-    (`raw_value`, `preserve_order`, `arbitrary_precision`) : il tient quelles que soient les
-    features unifiées dans le binaire.
-  - **Ce qui est REFUSÉ, nommément** (et jamais relayé déformé) : tout ce que `serde_json::Value`
-    refuse. Concrètement : un nombre hors de `f64` (`1e400` ; si la feature `arbitrary_precision`
-    est unifiée dans le binaire, `Value` le garde et le relais le rend alors exactement — dans les
-    deux cas, jamais arrondi en silence), un surrogate UTF-16 isolé
-    (`"\ud800"`), une profondeur au-delà de la limite de `serde_json`, un événement qui n'est pas un
-    objet, un `type` dupliqué ou non textuel. Un relais qui transmettait ces textes ferait refuser
-    le même événement par un autre lecteur serde. Tests : `ce_que_value_refuse_est_refuse_nommement`,
-    `un_type_duplique_ou_non_textuel_est_refuse`, `une_sequence_ou_un_scalaire_ne_sont_pas_des_evenements`.
-  - **Chemin `serde` générique** (`serde_json::from_str::<EventWire>`) : il passe par `Value` et
-    refuse les mêmes cas ; sa forme relayée est la forme canonique de `Value`, pas le texte reçu
-    (mesuré avec `arbitrary_precision` : `1e400` → `1e+400`, `1E2` → `1e+2`, clés triées hors
-    `preserve_order`).
-    Un hôte qui relaie le texte exact doit utiliser `from_json_str`.
-  - La vue `UnknownEvent::raw` (`Value`) représente exactement le texte relayé : elle est là pour
-    l'**inspection**. Un `Deserialize` ou une conversion via `Value` peut changer les nombres ; le
-    texte exact, lui, ne passe jamais par `Value`.
-  - **Taille et complexité** : `from_json_str` ne borne ni la taille du texte, ni le nombre de
-    clés ; seule la profondeur l'est, par la limite de `serde_json`. L'hôte doit borner ce qu'il lit.
-  - **Clés dupliquées autres que `type`** : acceptées. Le texte relayé les garde toutes, les deux
-    occurrences ; la vue `raw` (`Value`) ne garde que la dernière. Le texte et la vue ne disent donc
-    pas la même chose pour ce cas ; un hôte qui veut le refuser doit le faire lui-même. Test :
-    `une_cle_dupliquee_autre_que_type_est_relayee_telle_quelle_et_vue_en_value_la_dernier_gagne`.
-  - Un `type` **connu** est décodé strictement (un payload incomplet est une erreur). Un type connu
-    auquel une version future ajoute un champ perd ce champ au relais : le relais exact ne couvre
-    que les types INCONNUS. `Event::Unknown` (variante unitaire de #301) reste pour la lecture
-    directe en `Event` ; `EventWire` porte le `type` et le payload d'un inconnu.
-  Le chantier « relais exact » reste **ouvert jusqu'à revue indépendante**. La branche
-  `wip/relais-brut-exact` (feature `serde_json/raw_value`) n'est plus la voie retenue : Cargo
+  avec son `type_name` et sa vue `Value` (`UnknownEvent::raw`) : le relayer rend le même `type`
+  et les mêmes champs, jamais `{"type":"Unknown"}` — mais **pas les mêmes octets ni toujours les
+  mêmes valeurs** : `Value` accepte et **arrondit** un entier au-delà de `u64`/`i64` (mesuré :
+  `18446744073709551617` → `1.8446744073709552e+19`), réécrit les nombres et peut trier les clés
+  selon les features `serde_json` unifiées. `EventWire` est donc une vue d'**inspection**, pas un
+  relais exact. `UnknownEvent` et `EventWire` sont **inchangés** (champs publics, littéraux
+  externes constructibles).
+  **Relais exact : `EventJson`** (`event.rs`), enveloppe **distincte** de serde, à internes privés
+  (rien n'y est mutable, le texte relayé ne peut pas diverger de ce qui a été validé). `parse`
+  lit d'abord le texte **en entier** par `Value` : ce que `Value` refuse (surrogate UTF-16
+  isolé, profondeur excessive, zéro initial, caractères après l'objet, `1e400` hors `f64` sauf
+  `arbitrary_precision` unifiée) est **refusé nommément**, pour ne jamais relayer un texte qu'un
+  autre lecteur serde refuserait. L'événement doit être un objet (une séquence est refusée par
+  `deserialize_map`) portant **un seul** `type` **textuel** ; un type connu est décodé
+  strictement en `Event` ; un type inconnu garde ses **octets reçus, espaces compris**, et
+  `to_json` les rend tels quels — ordre des clés, clé dupliquée hors `type`, `1E2`, `0.10`,
+  `18446744073709551617`. Mesuré sous quatre jeux de features (`aucune`, `arbitrary_precision`,
+  `preserve_order`+`raw_value`, les trois). `to_wire` donne la vue `EventWire`, **avec perte**,
+  pour l'inspection seulement. **L'hôte doit adopter cette API** pour obtenir la garantie : le
+  chemin serde ordinaire ne la donne pas.
+  **Limites** : la taille n'est pas bornée (l'hôte borne ce qu'il lit) ; un type **connu** auquel
+  une version future ajoute un champ perd ce champ au relais (`Event` ne le connaît pas) ;
+  `Event::Unknown` (variante unitaire de #301) reste pour la lecture directe en `Event`.
+  **Voie écartée** : la feature `serde_json/raw_value` (branche `wip/relais-brut-exact`) — Cargo
   l'unifie dans tout le binaire et elle change la lecture de `Value` partout (mesuré : un
-  `ToolCall.arguments` dont la première clé est `$serde_json::private::RawValue` est relu comme le
-  JSON qu'elle porte, ou devient une erreur).
+  `ToolCall.arguments` dont la première clé est `$serde_json::private::RawValue` est relu comme
+  le JSON qu'elle porte, ou devient une erreur). Chantier **ouvert jusqu'à revue indépendante**.
   Preuves : `chaque_type_connu_se_relit_comme_connu_et_identique` (aller-retour sur une
   instance de chaque variante, et garde de la liste des types connus),
   `un_evenement_futur_garde_son_type_et_son_payload_intact`,

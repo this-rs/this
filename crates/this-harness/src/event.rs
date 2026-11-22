@@ -274,23 +274,8 @@ const TYPES_CONNUS: &[&str] = &[
 pub struct UnknownEvent {
     /// Le `type` d'origine, tel que le fil le portait.
     pub type_name: String,
-    /// La vue en `serde_json::Value`, pour l'INSPECTION. Pour un événement lu par
-    /// [`EventWire::from_json_str`], elle représente exactement le texte relayé : les nombres hors
-    /// de `Value` sont refusés à la lecture, jamais arrondis en silence.
+    /// Le JSON d'origine, **intact**. Le relayer rend ce qui est arrivé.
     pub raw: Value,
-    /// Le JSON reçu (sans les espaces qui entourent l'objet). Privé : seul [`EventWire::from_json_str`]
-    /// le remplit, avec un texte que `Value` a accepté ; un consommateur ne peut donc pas fabriquer
-    /// une enveloppe de JSON invalide. Lu par [`Self::texte`].
-    texte: String,
-}
-
-impl UnknownEvent {
-    /// Le JSON reçu, tel qu'il est arrivé (sans les espaces qui entourent l'objet), quand il a été lu
-    /// par [`EventWire::from_json_str`]. Pour un événement lu par le `Deserialize` générique, c'est la
-    /// forme canonique de `raw`.
-    pub fn texte(&self) -> &str {
-        &self.texte
-    }
 }
 
 /// Un événement lu sur le fil : connu, décodé **strictement**, ou d'une version
@@ -336,8 +321,8 @@ impl EventWire {
 impl Serialize for EventWire {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         match self {
-            // Par serde, un inconnu repart par sa vue `Value` (forme canonique). Le texte reçu
-            // exact sort par `to_json_exact`.
+            // Un événement d'une version future repart **tel qu'il est arrivé** :
+            // c'est ce qui permet à un hôte de le relayer sans le déformer.
             Self::Unknown(inconnu) => inconnu.raw.serialize(serializer),
             Self::Known(event) => event.serialize(serializer),
         }
@@ -355,12 +340,7 @@ impl<'de> Deserialize<'de> for EventWire {
             ));
         };
         if !TYPES_CONNUS.contains(&type_name.as_str()) {
-            let texte = raw.to_string();
-            return Ok(Self::Unknown(UnknownEvent {
-                type_name,
-                raw,
-                texte,
-            }));
+            return Ok(Self::Unknown(UnknownEvent { type_name, raw }));
         }
         // Type connu : décodage strict. Un payload incomplet est une ERREUR —
         // le ranger en inconnu inventerait un succès et effacerait le défaut.
@@ -370,55 +350,125 @@ impl<'de> Deserialize<'de> for EventWire {
     }
 }
 
-/// Le `type` seul d'un objet, lu SANS décoder les autres valeurs (`IgnoredAny` ne convertit aucun
-/// nombre : un `1e400` ailleurs dans l'objet ne fait pas échouer la lecture du `type`).
-#[derive(Deserialize)]
-struct SeulType {
-    #[serde(rename = "type")]
-    type_name: Option<String>,
+/// Un événement lu depuis son **texte JSON**, avec relais **exact** d'un type inconnu.
+///
+/// Enveloppe **distincte** de [`EventWire`] et de serde, à internes privés : rien n'y est
+/// mutable, le texte relayé ne peut donc pas diverger de ce qui a été validé, et aucun
+/// constructeur public n'accepte un JSON invalide. [`UnknownEvent`] et [`EventWire`] sont
+/// inchangés (champs publics, vue `Value`).
+///
+/// Ce que `parse` garantit : le texte est lu **en entier** par `serde_json::Value` d'abord — ce
+/// que `Value` refuse (surrogate UTF-16 isolé, profondeur excessive, zéro initial, caractères
+/// après l'objet, et `1e400` hors de `f64` sauf feature `arbitrary_precision` unifiée) est
+/// **refusé** nommément, pour ne jamais relayer un texte qu'un autre lecteur serde refuserait.
+/// L'événement doit être un **objet** portant **un seul** `type` **textuel**. Un type connu est
+/// décodé strictement en [`Event`] (un payload incomplet est une erreur, et un champ ajouté par
+/// une version future est **perdu** au relais : `Event` ne connaît pas ce champ). Un type inconnu
+/// garde ses **octets reçus**, espaces qui l'entourent compris : `to_json` les rend tels quels.
+///
+/// Ce que `parse` ne garantit **pas** : la taille (l'hôte borne ce qu'il lit) ; et la vue
+/// `Value` ([`Self::to_wire`]) est **avec perte** — `Value` accepte et arrondit un entier au-delà
+/// de `u64`/`i64` (mesuré : `18446744073709551617` → `1.8446744073709552e+19`). Seul `to_json`
+/// est exact.
+#[derive(Clone, Debug, PartialEq)]
+pub struct EventJson {
+    value: EventJsonValue,
 }
 
-impl EventWire {
-    /// Lit UN événement depuis son texte JSON, en gardant le texte EXACT d'un inconnu.
-    ///
-    /// Le texte est d'abord lu en entier par `serde_json::Value` : ce qui n'y tient pas est REFUSÉ
-    /// nommément (nombre hors de `f64` comme `1e400`, chaîne UTF-16 isolée, profondeur au-delà de la
-    /// limite de `serde_json`). Ainsi le relais exact ne transmet jamais un texte qu'un autre lecteur
-    /// serde refuserait. Un `type` dupliqué ou non textuel est refusé. Un type connu est décodé
-    /// strictement, comme partout. Taille : bornée par l'hôte (cette fonction ne la limite pas).
-    pub fn from_json_str(texte: &str) -> Result<Self, serde_json::Error> {
-        let exact = texte.trim_matches(|c: char| matches!(c, ' ' | '\t' | '\n' | '\r'));
-        // Un événement est un OBJET : `serde_json` accepte une séquence là où un `struct` est
-        // attendu (`["futur"]` passerait pour `type = futur`). On le refuse avant tout.
-        if !exact.starts_with('{') {
-            return Err(serde::de::Error::custom("un événement est un objet JSON"));
-        }
+#[derive(Clone, Debug, PartialEq)]
+enum EventJsonValue {
+    Known(Event),
+    Unknown { type_name: String, json: String },
+}
+
+impl EventJson {
+    /// Lit un événement depuis son texte JSON (voir le contrat du type).
+    pub fn parse(json: &str) -> Result<Self, serde_json::Error> {
         // Lecture complète et stricte : c'est elle qui refuse ce qu'un autre lecteur refuserait.
-        let raw: Value = serde_json::from_str(exact)?;
-        // Le `type` seul, pour refuser un doublon ou un type non textuel que `Value` aurait avalé.
-        let seul: SeulType = serde_json::from_str(exact)?;
-        let Some(type_name) = seul.type_name else {
-            return Err(serde::de::Error::custom(
-                "événement sans `type` textuel : ni connu, ni futur — illisible",
-            ));
-        };
-        if !TYPES_CONNUS.contains(&type_name.as_str()) {
-            return Ok(Self::Unknown(UnknownEvent {
+        // Un événement est un OBJET : c'est `TypeName` (ci-dessous, par `deserialize_map`) qui
+        // refuse une séquence ou un scalaire — là où un `struct` serde accepterait `["futur"]`.
+        let _: Value = serde_json::from_str(json)?;
+        // Le `type` seul, sans décoder les autres valeurs ; dupliqué ou non textuel : refusé.
+        let TypeName(type_name) = serde_json::from_str(json)?;
+        let value = if TYPES_CONNUS.contains(&type_name.as_str()) {
+            EventJsonValue::Known(serde_json::from_str(json)?)
+        } else {
+            EventJsonValue::Unknown {
                 type_name,
-                raw,
-                texte: exact.to_string(),
-            }));
-        }
-        serde_json::from_value::<Event>(raw).map(Self::Known)
+                json: json.to_owned(),
+            }
+        };
+        Ok(Self { value })
     }
 
-    /// Le JSON de cet événement. Pour un inconnu lu par [`Self::from_json_str`], ce sont les octets
-    /// reçus (sans les espaces qui entourent l'objet). Pour un connu, sa forme sérialisée.
-    pub fn to_json_exact(&self) -> Result<String, serde_json::Error> {
-        match self {
-            Self::Unknown(inconnu) => Ok(inconnu.texte.clone()),
-            Self::Known(event) => serde_json::to_string(event),
+    /// L'événement connu, si le type est compris par cette version.
+    pub fn known(&self) -> Option<&Event> {
+        match &self.value {
+            EventJsonValue::Known(event) => Some(event),
+            EventJsonValue::Unknown { .. } => None,
         }
+    }
+
+    /// Le type inconnu, s'il s'agit d'un événement d'une version future.
+    pub fn unknown_type(&self) -> Option<&str> {
+        match &self.value {
+            EventJsonValue::Known(_) => None,
+            EventJsonValue::Unknown { type_name, .. } => Some(type_name),
+        }
+    }
+
+    /// Le JSON à relayer : les octets reçus pour un type inconnu, la forme sérialisée pour un
+    /// type connu.
+    pub fn to_json(&self) -> Result<String, serde_json::Error> {
+        match &self.value {
+            EventJsonValue::Known(event) => serde_json::to_string(event),
+            EventJsonValue::Unknown { json, .. } => Ok(json.clone()),
+        }
+    }
+
+    /// La vue [`EventWire`] (via `Value`), pour l'**inspection** : **avec perte** sur les nombres
+    /// hors de `u64`/`i64`/`f64` exact et sur l'ordre des clés. Jamais pour relayer.
+    pub fn to_wire(&self) -> Result<EventWire, serde_json::Error> {
+        match &self.value {
+            EventJsonValue::Known(event) => Ok(EventWire::Known(event.clone())),
+            EventJsonValue::Unknown { json, .. } => serde_json::from_str(json),
+        }
+    }
+}
+
+/// Le `type` d'un objet d'événement, lu seul : les autres valeurs sont ignorées sans être
+/// décodées ; un `type` absent, dupliqué ou non textuel est une erreur ; une séquence est refusée
+/// par `deserialize_map`.
+struct TypeName(String);
+
+impl<'de> Deserialize<'de> for TypeName {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        struct Visitor;
+        impl<'de> serde::de::Visitor<'de> for Visitor {
+            type Value = TypeName;
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("un objet d'événement avec un seul `type` textuel")
+            }
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                mut map: A,
+            ) -> Result<TypeName, A::Error> {
+                let mut name = None;
+                while let Some(key) = map.next_key::<String>()? {
+                    if key == "type" {
+                        if name.is_some() {
+                            return Err(serde::de::Error::duplicate_field("type"));
+                        }
+                        name = Some(map.next_value::<String>()?);
+                    } else {
+                        map.next_value::<serde::de::IgnoredAny>()?;
+                    }
+                }
+                name.map(TypeName)
+                    .ok_or_else(|| serde::de::Error::missing_field("type"))
+            }
+        }
+        d.deserialize_map(Visitor)
     }
 }
 
