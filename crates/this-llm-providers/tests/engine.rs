@@ -126,6 +126,8 @@ fn route(request: &str) -> (&'static str, &'static str, String) {
         }
         let streamed = request.contains("\"stream\":true");
         let tools = request.contains("SCENARIO:tools");
+        // The stand-in serves `qwen-test` but NAMES another model in its answer.
+        let substituted = request.contains("SCENARIO:servi_autre");
         let scenario = if request.contains("SCENARIO:length") {
             "length"
         } else if request.contains("SCENARIO:cut") {
@@ -154,6 +156,15 @@ fn route(request: &str) -> (&'static str, &'static str, String) {
                     usage_chunk(),
                 ],
             };
+            let events: Vec<Value> = events
+                .into_iter()
+                .map(|mut event| {
+                    if substituted {
+                        event["model"] = json!("qwen-servi-autre");
+                    }
+                    event
+                })
+                .collect();
             // A cut stream is sent without its `[DONE]`: the engine simply stops.
             let body = if scenario == "cut" && !tools {
                 events
@@ -175,15 +186,14 @@ fn route(request: &str) -> (&'static str, &'static str, String) {
             json!({"role": "assistant", "content": "bonjour"})
         };
         let finish = if tools { "tool_calls" } else { "stop" };
-        return (
-            "200 OK",
-            "application/json",
-            json!({
-                "choices": [{"message": message, "finish_reason": finish}],
-                "usage": {"prompt_tokens": 10, "completion_tokens": 5}
-            })
-            .to_string(),
-        );
+        let mut answer = json!({
+            "choices": [{"message": message, "finish_reason": finish}],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 5}
+        });
+        if substituted {
+            answer["model"] = json!("qwen-servi-autre");
+        }
+        return ("200 OK", "application/json", answer.to_string());
     }
     (
         "404 Not Found",
@@ -886,4 +896,46 @@ async fn the_probe_futures_can_be_sent_to_another_thread() {
         .await
         .unwrap();
     assert!(verdicts[0].answers());
+}
+
+/// Le modèle servi est celui que le moteur NOMME dans sa réponse, jamais le modèle demandé
+/// (`TurnReply::model` recopie la demande : seul `served` porte la déclaration du moteur).
+#[tokio::test]
+async fn the_served_model_is_the_one_the_engine_names_not_the_one_asked() {
+    let base = start_engine().await;
+    let hub = hub_with(provider(&base, Budget::default()), 20_000);
+    let client = hub.client(&local()).expect("client");
+
+    let reply = client
+        .send_turn(TurnRequest::new(conversation("SCENARIO:servi_autre")))
+        .await
+        .expect("réponse");
+    assert_eq!(reply.model, "qwen-test", "le modèle demandé");
+    assert_eq!(reply.served.as_deref(), Some("qwen-servi-autre"));
+
+    // Une réponse qui ne nomme aucun modèle : `served` reste vide, rien n'est inventé.
+    let reply = client
+        .send_turn(TurnRequest::new(conversation("Dis bonjour.")))
+        .await
+        .expect("réponse");
+    assert_eq!(reply.served, None);
+}
+
+#[tokio::test]
+async fn a_streamed_turn_keeps_the_model_the_engine_names() {
+    let base = start_engine().await;
+    let hub = hub_with(provider(&base, Budget::default()), 20_000);
+    let client = hub.client(&local()).expect("client");
+
+    let mut turn = client
+        .open_turn(TurnRequest::new(conversation("SCENARIO:servi_autre")))
+        .await
+        .expect("tour ouvert");
+    while turn.next().await.expect("morceau").is_some() {}
+    assert_eq!(turn.served(), Some("qwen-servi-autre"));
+    assert_eq!(turn.model(), "qwen-test");
+
+    let reply = turn.complete().expect("tour terminé");
+    assert_eq!(reply.served.as_deref(), Some("qwen-servi-autre"));
+    assert_eq!(reply.model, "qwen-test");
 }
