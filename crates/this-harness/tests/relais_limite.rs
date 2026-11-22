@@ -97,3 +97,21 @@ fn le_manifeste_de_this_harness_n_active_pas_directement_raw_value() {
         "this-harness ne doit pas activer serde_json/raw_value directement"
     );
 }
+
+/// Une clé dupliquée AUTRE que `type` : `serde_json::Value` garde la dernière valeur. Le texte reçu,
+/// lui, est relayé tel quel (les deux occurrences) : la vue `raw` et le texte ne disent pas la même
+/// chose. C'est documenté, et ce test le fige.
+#[test]
+fn une_cle_dupliquee_autre_que_type_est_relayee_telle_quelle_et_vue_en_value_la_dernier_gagne() {
+    let brut = r#"{"type":"futur","a":1,"a":2}"#;
+    let lu = EventWire::from_json_str(brut).expect("une clé dupliquée non-type est acceptée");
+    let EventWire::Unknown(u) = &lu else {
+        panic!("inconnu attendu")
+    };
+    assert_eq!(
+        lu.to_json_exact().unwrap(),
+        brut,
+        "le texte reçu, les deux occurrences"
+    );
+    assert_eq!(u.raw["a"], 2, "la vue Value garde la dernière valeur");
+}

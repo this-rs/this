@@ -129,7 +129,12 @@ Décisions, tranchées explicitement :
   - La vue `UnknownEvent::raw` (`Value`) représente exactement le texte relayé : elle est là pour
     l'**inspection**. Un `Deserialize` ou une conversion via `Value` peut changer les nombres ; le
     texte exact, lui, ne passe jamais par `Value`.
-  - **Taille** : `from_json_str` ne la borne pas ; l'hôte doit borner ce qu'il lit.
+  - **Taille et complexité** : `from_json_str` ne borne ni la taille du texte, ni le nombre de
+    clés ; seule la profondeur l'est, par la limite de `serde_json`. L'hôte doit borner ce qu'il lit.
+  - **Clés dupliquées autres que `type`** : acceptées. Le texte relayé les garde toutes, les deux
+    occurrences ; la vue `raw` (`Value`) ne garde que la dernière. Le texte et la vue ne disent donc
+    pas la même chose pour ce cas ; un hôte qui veut le refuser doit le faire lui-même. Test :
+    `une_cle_dupliquee_autre_que_type_est_relayee_telle_quelle_et_vue_en_value_la_dernier_gagne`.
   - Un `type` **connu** est décodé strictement (un payload incomplet est une erreur). Un type connu
     auquel une version future ajoute un champ perd ce champ au relais : le relais exact ne couvre
     que les types INCONNUS. `Event::Unknown` (variante unitaire de #301) reste pour la lecture
