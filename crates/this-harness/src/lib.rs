@@ -67,7 +67,7 @@ pub use context::{Dropped, Fitted, Removal, estimate_tokens, fit, removable};
 pub use embed::{
     Embed, EmbedError, EmbeddingModel, SansEmbed, vecteur_dense, vectoriser, verifier,
 };
-pub use event::{Event, EventWire, HintKind, Outcome, Pending, Snapshot, UnknownEvent};
+pub use event::{Event, EventJson, EventWire, HintKind, Outcome, Pending, Snapshot, UnknownEvent};
 pub use mcp::{McpLink, McpServer, McpToolbox};
 pub use ports::{
     Besoin, Cancel, Cancelled, Compactor, Delta, Isolation, Permission, ProfilRuntime, Recorder,

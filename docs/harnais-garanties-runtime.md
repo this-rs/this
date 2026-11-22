@@ -163,7 +163,7 @@ tourne en wasm de toute façon).
 
 | # | Case d'acceptation | Verdict | Preuve / manque |
 |---|---|---|---|
-| a | Même suite comportementale en navigateur WASM et en natif `LocalSet` | **manque** | Aucune exécution navigateur (ni `wasm-pack test` ni `wasm-bindgen-test`) ; aucun test `LocalSet`. La suite native tourne en `block_on` monofil (`scenario.rs:129`, `famille_a.rs:126`…), qui est l'analogue `!Send` le plus proche, mais ni navigateur ni serveur ne sont exercés. |
+| a | Même suite comportementale en navigateur WASM et en natif `LocalSet` | **partiel** | Cinq scénarios partagés sont exécutés dans Chrome headless et en natif (voir §5), mais aucun test `LocalSet`. Le reste de la suite native tourne en `block_on` monofil (`scenario.rs:129`, `famille_a.rs:126`…), qui est l'analogue `!Send` le plus proche, sans éprouver l'hébergement serveur. |
 | b | Tests transport muet, Recorder/settle suspendu, interruption, fermeture de page, nouvelle requête après arrêt | **preuve, sauf « fermeture de page »** | transport muet : `garde.rs::un_flux_muet_est_interrompu_en_disant_pourquoi` et `robustesse.rs::un_transport_muet_en_boucle_est_borne` ; Recorder suspendu : `residus.rs::a_silent_recorder_delays_the_run_by_a_bounded_time`, `robustesse.rs::un_run_lache_pendant_l_enregistreur_dit_quand_meme_son_arret` ; settle suspendu : `mode_auto.rs::un_settle_qui_pend_ne_retient_ni_stopped_ni_busy` ; interruption : `scenario.rs::interrupt_arrete_le_run_et_le_dit`, `garde.rs::un_transport_sourd_a_l_annulation_est_abandonne_apres_la_grace` ; nouvelle requête après arrêt : `residus.rs::an_interrupt_between_two_runs_is_ignored_and_does_not_poison_the_next_one`, `scenario.rs::un_message_tenu_part_au_tour_suivant`. **Fermeture de page : manque** — aucun test ne simule la fermeture ; les plus proches sont les futures lâchées (`gardes.rs::une_future_abandonnee_rend_la_place_et_le_dit`, `gardes.rs::une_future_lachee_pendant_un_outil_laisse_un_fil_valide`), qui testent l'abandon de la future, pas la fermeture d'une page. |
 | c | Hôte sans timer : garantie dégradée explicite **ou** refus du profil | **preuve (dégradée explicite), refus absent** | `SystemClock::sleep` rend `None` en wasm (`session.rs:160-163`) ; `Clock::sleep` documente « chiens de garde éteints » (`session.rs:111-113`) ; `docs/harnais-mode-auto.md:401-407` le dit noir sur blanc. Testé par `robustesse.rs::un_run_lache_pendant_l_enregistreur_dit_quand_meme_son_arret` (horloge `NoTimer`) et `mode_auto.rs::l_annulation_coupe_un_routeur_qui_pend` (horloge sans minuteur). **Il n'y a pas de refus du profil** : la dégradation est silencieuse à l'exécution, rien ne signale qu'aucune borne de temps n'est armée. |
 | d | `panic=abort` et outils synchrones bloquants : frontière d'isolation **ou** documentés non couverts | **preuve (documentés non couverts) ; frontière limitée** | Documenté : `ports.rs:320-322` (boucle synchrone infinie non bornable, `panic=abort` non rattrapable) et `session.rs:430-434` (idem pour l'enregistreur). Frontière d'isolation par `catch_unwind` **testée** : `residus.rs::a_part_whose_specs_panic_does_not_block_the_others`, `robustesse.rs::un_outil_qui_panique_ne_laisse_pas_un_fil_invalide`. Mais il n'existe **aucune** frontière réelle pour `panic=abort` ni pour la boucle synchrone : c'est de la documentation, pas une isolation. |
@@ -176,11 +176,13 @@ tourne en wasm de toute façon).
 
 Les scénarios de `crates/this-harness/tests/commun/mod.rs` sont écrits une fois ; ils
 sont exécutés en natif par `tests/robustesse.rs` (`#[test]`) et dans Chrome headless par
-`tests/navigateur.rs` (`#[wasm_bindgen_test]`, `run_in_browser`). Lancement local :
-`wasm-pack test --headless --chrome crates/this-harness -- --test navigateur`. En CI :
-job `wasm32_browser`.
+`tests/navigateur.rs` (`#[wasm_bindgen_test]`, `run_in_browser`). Lancement local avec
+`wasm-bindgen-test-runner` de la version exacte de `wasm-bindgen` du `Cargo.lock`,
+Chrome et un chromedriver compatible :
+`CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER=wasm-bindgen-test-runner cargo test -p this-harness --target wasm32-unknown-unknown --test navigateur`.
+Configurer `CHROMEDRIVER` si nécessaire. En CI : job `wasm32_browser`.
 
-Les cinq scénarios : transport muet en boucle borné par les tours ; mille appels d'outils
+Les cinq scénarios : transport muet en boucle borné par `max_relances` (1 tour muet + 3 relances = 4 tours, puis un échec nommé) ; mille appels d'outils
 dans un tour, fil valide ; `interrupt` avant un run sans empoisonner le suivant ;
 interruption pendant un outil puis nouveau `send` (nouvelle requête après arrêt) ; run
 lâché pendant un `Recorder::stopped` suspendu (horloge sans minuteur).

@@ -91,8 +91,10 @@ Décisions, tranchées explicitement :
   par l'hôte est la seule reprise possible ; le cœur **refuse** `restore` pendant un run
   (`session.rs:2489-2493`, test `restore_pendant_un_run_ne_corrompt_pas_le_fil`,
   `robustesse.rs:206`) : on ne reprend pas un run à mi-course, on relit l'état sauvé.
-- **Déduplication.** Au niveau du fil, elle est déjà garantie (ids monotones, appairage
-  unique). Au niveau du flux, un `seq` d'enveloppe (posé par l'hôte) est nécessaire pour
+- **Déduplication.** Dans un même message assistant, les ids d'appel sont uniques et
+  chaque réponse est appairée à un appel en attente. Le même id peut cependant être
+  réutilisé dans un message assistant ultérieur : le fil ne garantit pas la déduplication
+  entre tours. Au niveau du flux, un `seq` d'enveloppe (posé par l'hôte) est nécessaire pour
   un transport qui livre au moins une fois ; le cœur n'a pas de quoi dédoublonner un
   événement rejoué — et ne prétend pas en avoir.
 - **Comportement face à un événement futur.** La convention du code est « additif,
@@ -108,9 +110,33 @@ Décisions, tranchées explicitement :
   l'enveloppe de **lecture** du fil. Un `type` connu y est décodé **strictement** — un
   payload incomplet est une **erreur**, pas un inconnu, parce que ranger un événement cassé
   en inconnu inventerait un succès et effacerait le défaut. Un `type` inconnu est conservé
-  avec son `type_name` et son JSON **brut** : le relayer rend exactement ce qui est arrivé,
-  jamais `{"type":"Unknown"}`. `Event::Unknown` (variante unitaire de #301) reste pour la
-  lecture directe en `Event` ; `EventWire` est la forme **sans perte** qui manquait.
+  avec son `type_name` et sa vue `Value` (`UnknownEvent::raw`) : le relayer rend le même `type`
+  et les mêmes champs, jamais `{"type":"Unknown"}` — mais **pas les mêmes octets ni toujours les
+  mêmes valeurs** : `Value` accepte et **arrondit** un entier au-delà de `u64`/`i64` (mesuré :
+  `18446744073709551617` → `1.8446744073709552e+19`), réécrit les nombres et peut trier les clés
+  selon les features `serde_json` unifiées. `EventWire` est donc une vue d'**inspection**, pas un
+  relais exact. `UnknownEvent` et `EventWire` sont **inchangés** (champs publics, littéraux
+  externes constructibles).
+  **Relais exact : `EventJson`** (`event.rs`), enveloppe **distincte** de serde, à internes privés
+  (rien n'y est mutable, le texte relayé ne peut pas diverger de ce qui a été validé). `parse`
+  lit d'abord le texte **en entier** par `Value` : ce que `Value` refuse (surrogate UTF-16
+  isolé, profondeur excessive, zéro initial, caractères après l'objet, `1e400` hors `f64` sauf
+  `arbitrary_precision` unifiée) est **refusé nommément**, pour ne jamais relayer un texte qu'un
+  autre lecteur serde refuserait. L'événement doit être un objet (une séquence est refusée par
+  `deserialize_map`) portant **un seul** `type` **textuel** ; un type connu est décodé
+  strictement en `Event` ; un type inconnu garde ses **octets reçus, espaces compris**, et
+  `to_json` les rend tels quels — ordre des clés, clé dupliquée hors `type`, `1E2`, `0.10`,
+  `18446744073709551617`. Mesuré sous quatre jeux de features (`aucune`, `arbitrary_precision`,
+  `preserve_order`+`raw_value`, les trois). `to_wire` donne la vue `EventWire`, **avec perte**,
+  pour l'inspection seulement. **L'hôte doit adopter cette API** pour obtenir la garantie : le
+  chemin serde ordinaire ne la donne pas.
+  **Limites** : la taille n'est pas bornée (l'hôte borne ce qu'il lit) ; un type **connu** auquel
+  une version future ajoute un champ perd ce champ au relais (`Event` ne le connaît pas) ;
+  `Event::Unknown` (variante unitaire de #301) reste pour la lecture directe en `Event`.
+  **Voie écartée** : la feature `serde_json/raw_value` (branche `wip/relais-brut-exact`) — Cargo
+  l'unifie dans tout le binaire et elle change la lecture de `Value` partout (mesuré : un
+  `ToolCall.arguments` dont la première clé est `$serde_json::private::RawValue` est relu comme
+  le JSON qu'elle porte, ou devient une erreur). Chantier **ouvert jusqu'à revue indépendante**.
   Preuves : `chaque_type_connu_se_relit_comme_connu_et_identique` (aller-retour sur une
   instance de chaque variante, et garde de la liste des types connus),
   `un_evenement_futur_garde_son_type_et_son_payload_intact`,
@@ -121,15 +147,16 @@ Décisions, tranchées explicitement :
 
 | # | Scénario | Verdict | Preuve (test exact, fichier:ligne) ou manque |
 |---|---|---|---|
-| S1 | Reconnexion entre `ToolUse` et `ToolResult` sans bulle dupliquée ni `busy` permanent | **preuve existante** | appairage `id` : `un_outil_puis_une_conclusion` (`tests/scenario.rs:135`) ; `busy` retombe après abandon : `une_future_abandonnee_rend_la_place_et_le_dit` (`tests/gardes.rs:144`) ; fil valide après outil abandonné : `une_future_lachee_pendant_un_outil_laisse_un_fil_valide` (`tests/gardes.rs:575`) ; ordre/absence de doublon au puits : `un_puits_reentrant_ne_panique_pas` (`tests/gardes.rs:185`). **Manque corrigé** (PR #315) — et l'inventaire se trompait sur sa nature : il disait « sans test dédié ». Il y a un test (`check_thread_refuses_what_the_engine_would_refuse`, `tests/robustesse_fil.rs:173`) et la garde est **câblée** (`session.rs:1356`). Le défaut était le **lieu** : la garde s'exécute sur le fil sortant, au tour **suivant**, donc après l'effet. Mesuré : un `ToolUse` rejoué dans une réponse exécutait l'outil **deux fois**. Désormais refusé avant tout empilement et tout effet (`Stop::Failed("appel rejoué…")`), avec `check_thread(transcript)` qui reste `Ok`. |
+| S1 | Reconnexion entre `ToolUse` et `ToolResult` sans bulle dupliquée ni `busy` permanent | **partiel** | Appairage `id` : `un_outil_puis_une_conclusion` ; `busy` retombe après abandon : `une_future_abandonnee_rend_la_place_et_le_dit` ; fil valide après outil abandonné : `une_future_lachee_pendant_un_outil_laisse_un_fil_valide`. La PR #315 refuse avant effet deux appels de même id **dans une même réponse** et conserve le texte déjà affiché. Elle ne prouve pas une reconnexion réelle ni la déduplication entre réponses ou tours : `check_thread` réinitialise ses ids vus pour chaque message assistant. |
 | S2 | Rechargement pendant une question/permission : carte reconstruite, réponse corrélée une seule fois | **manque** | Le harnais n'a **pas** de concept de question/permission (`answer_permission` est cité comme *non repris* de PO, `session.rs:6,19`). C'est un contrat d'hôte (Atelier), hors de ce crate. Ce qui existe et s'en rapproche : la file tenue survit au snapshot (`un_etat_sauvegarde_se_repare_et_se_rejoue`, `scenario.rs:489`) et un message livré quitte la file une fois (`un_message_tenu_part_au_tour_suivant`, `scenario.rs:166`). |
 | S3 | `Stopped` terminal, un événement tardif ne réouvre pas le run | **preuve existante** | un seul `Stopped` : `un_run_lache_pendant_l_enregistreur_dit_quand_meme_son_arret` (`robustesse.rs:249`) et `des_bornes_degenerees_se_terminent_en_disant_leur_arret` (`robustesse.rs:274`) ; `busy` rendu **avant** l'annonce (`session.rs:1714-1716`) ; un `delta` après annulation est ignoré (`session.rs:1382-1384`) ; interruption au repos ignorée : `an_interrupt_between_two_runs_is_ignored_and_does_not_poison_the_next_one` (`residus.rs:185`), `interrupt_avant_le_run_n_empoisonne_pas_le_suivant` (`robustesse.rs:365`). |
 | S4 | Snapshot + flux concurrent sans trou ni double application | **preuve existante** (cœur) | `restore` pendant un run est refusé et ne corrompt pas : `restore_pendant_un_run_ne_corrompt_pas_le_fil` (`robustesse.rs:206`) ; ids jamais réutilisés : `restore_ne_fait_pas_reculer_les_identifiants` (`robustesse.rs:191`) ; round-trip de l'état : `un_etat_sauvegarde_se_repare_et_se_rejoue` (`scenario.rs:489`). *Manque* : « sans trou ni double application » au niveau du **flux** suppose un curseur d'enveloppe, absent du cœur (voir §3). |
 | S5 | Client lent et rétention du journal | **preuve existante** | file bornée à `MAX_PENDING` (1000) et `Pending` cumulé borné : `dix_mille_messages_en_file` (`robustesse.rs:448`) ; sortie d'outil de 10 Mo bornée : `une_sortie_d_outil_de_10_mo` (`robustesse.rs:473`) ; 1000 appels dans un tour restent rangés : `mille_appels_dans_un_tour_restent_ranges` (`robustesse.rs:343`) ; enregistreur lent borné : `a_silent_recorder_delays_the_run_by_a_bounded_time` (`residus.rs:172`). *Note* : la **rétention** du journal est le choix de l'hôte (`Recorder` pousse, ne stocke pas — `ports.rs:406-431`). |
 | S6 | Distinction entre acquittement d'outil et réponse humaine | **preuve existante** | `ToolResult` porte `refused`/`failed`/`unchanged`/`before`/`after` (`event.rs:76-100`), un refus ≠ une erreur (`event.rs:81-86`) ; un résultat en échec porte sa cause : `un_tool_result_en_echec_porte_sa_cause` (`scenario.rs:1092`) ; les relances du harnais sont marquées `synthetic` (`wire.rs`), distinctes d'une question humaine : `synthetic_is_additive_on_the_wire` (`wire.rs` module tests) ; la réponse humaine est `User`/`Pending`, jamais un `ToolResult`. |
 
-Bilan des scénarios : **5 « preuve existante »** (S1, S3, S4, S5, S6), **1 « manque »** (S2,
-hors du crate). Parmi les manques d'enveloppe de §3, la **lecture indulgente d'un `type`
+Bilan des scénarios : **4 « preuve existante »** (S3, S4, S5, S6), **1 « partiel »** (S1 :
+appairage et refus d'un id dupliqué dans une même réponse, mais aucune reconnexion réelle ni
+déduplication entre messages), **1 « manque »** (S2, hors du crate). Parmi les manques d'enveloppe de §3, la **lecture indulgente d'un `type`
 inconnu** est désormais écrite dans le cœur (`EventWire`, §3). La **version d'événement** et
 le **curseur** restent à l'hôte, par décision (§3) : le cœur n'ouvre pas une seconde
 numérotation à côté de celle de l'hôte.

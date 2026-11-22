@@ -1,6 +1,7 @@
 //! La suite partagée (`tests/commun`) exécutée DANS un navigateur (wasm32).
 //!
-//! `wasm-pack test --headless --chrome crates/this-harness`. Natif : ce fichier est vide
+//! Exécuter via le runner wasm-bindgen-test comme décrit dans le job `wasm32_browser`.
+//! Natif : ce fichier est vide
 //! (les mêmes scénarios tournent via `tests/robustesse.rs`).
 #![cfg(target_arch = "wasm32")]
 

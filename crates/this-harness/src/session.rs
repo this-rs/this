@@ -1728,6 +1728,16 @@ impl Harness {
                         "appel rejoué : l'id « {} » a déjà été demandé dans ce tour",
                         doublon.id
                     );
+                    // Le texte a déjà été montré : le conserver sans les appels
+                    // refusés pour que la reprise voie ce que l'utilisateur a lu.
+                    // Sur ce chemin de rejeu, un texte vide sans appel n'a rien à dire : rien
+                    // n'est empilé. (Les autres chemins gardent leur comportement propre.)
+                    if !text.trim().is_empty() {
+                        self.push(Message::Assistant {
+                            content: text.clone(),
+                            calls: Vec::new(),
+                        });
+                    }
                     stop = Some(run.borrow_mut().finish(Stop::Failed(raison)));
                     break 'turns;
                 }

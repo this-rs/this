@@ -175,11 +175,12 @@ impl Clock for NoTimer {
     }
 }
 
-pub struct SlowRecorder;
+pub struct SlowRecorder(pub Rc<Cell<bool>>);
 #[async_trait(?Send)]
 impl Recorder for SlowRecorder {
     async fn step(&self, _: &str, _: &Run, _: &Step) {}
     async fn stopped(&self, _: &str, _: &Run, _: &Stop) {
+        self.0.set(true);
         std::future::pending::<()>().await
     }
 }
@@ -187,23 +188,25 @@ impl Recorder for SlowRecorder {
 /// ne disait jamais l'arrêt : un run sans `Stopped`.
 pub fn un_run_lache_pendant_l_enregistreur_dit_quand_meme_son_arret() {
     let (h, log) = harness(Limits::default(), transport(vec![]), ok_tools());
+    let entered = Rc::new(Cell::new(false));
     let h = h
-        .with_recorder(Rc::new(SlowRecorder))
+        .with_recorder(Rc::new(SlowRecorder(entered.clone())))
         .with_clock(Rc::new(NoTimer));
     {
         let mut fut = Box::pin(h.send("go"));
         let mut cx = Context::from_waker(Waker::noop());
         for _ in 0..50 {
-            // Sans minuteur (`NoTimer`), la borne de 2 s de l'enregistreur ne coupe pas : le run
-            // est bien en vol au lâcher. Si un minuteur le terminait avant, la garantie testée
-            // resterait la même (busy rendu, un seul Stopped) quelle que soit la raison d'arrêt.
-            if fut.as_mut().poll(&mut cx).is_ready() {
+            assert!(
+                fut.as_mut().poll(&mut cx).is_pending(),
+                "le run ne doit pas finir avant le lâcher"
+            );
+            if entered.get() {
                 break;
             }
         }
+        assert!(entered.get(), "Recorder::stopped doit avoir été atteint");
     }
-    // Quelle que soit la raison d'arrêt (fin normale avant le lâcher, ou abandon) :
-    // la place est rendue et le run n'est pas resté muet.
+    // Le run a bien été lâché pendant l'attente de Recorder::stopped.
     assert!(!h.handle().busy());
     assert_eq!(stops(&log), 1, "un Stopped exactement");
 }
@@ -216,6 +219,38 @@ pub fn un_transport_muet_en_boucle_est_borne() {
     let (h, log) = harness(Limits::default(), t, ok_tools());
     bounded(h.send("go"));
     assert_eq!(stops(&log), 1);
+    // « Borné » : ce que le test annonçait sans l'affirmer. Le run s'arrête EN ÉCHEC, avec la
+    // raison nommée, et après un nombre fini de tours — pas seulement « il a fini ». Une
+    // mutation qui ferait rendre `Stop::Done` à un tour muet laissait l'ancienne version verte.
+    let arret = log
+        .borrow()
+        .iter()
+        .find_map(|e| match e {
+            Event::Stopped { stop, turns, .. } => Some((stop.clone(), *turns)),
+            _ => None,
+        })
+        .expect("un événement Stopped");
+    assert_eq!(
+        arret.0,
+        Stop::Failed("le modèle n'a rendu ni texte ni outil".to_string()),
+        "un transport muet n'est ni un succès ni un budget : c'est un échec nommé"
+    );
+    // Le nombre EXACT, relevé puis compté d'après le code : le tour muet initial (1), puis une
+    // relance par `Limits::default().max_relances` (3 : `session.rs`, copié dans le `Run` à
+    // chaque envoi), puis au 4e tour muet le compteur de relances est épuisé et le run s'arrête.
+    // Soit 1 + 3 = 4, et non 3 : la politique propre de `this-agent` accorde 2 relances, mais le
+    // harnais la remplace par `Limits::max_relances`. Une borne `<=` laissait passer une
+    // mutation qui relancerait une fois de plus ou de moins.
+    assert_eq!(
+        arret.1,
+        1 + Limits::default().max_relances,
+        "tour muet initial + une relance par `max_relances`, puis l'arrêt (attendu 4)"
+    );
+    assert_eq!(
+        Limits::default().max_relances,
+        3,
+        "le décompte ci-dessus suppose 3 relances"
+    );
 }
 
 pub fn mille_appels_dans_un_tour_restent_ranges() {
@@ -234,7 +269,25 @@ pub fn mille_appels_dans_un_tour_restent_ranges() {
     })]);
     let (h, log) = harness(Limits::default(), t, ok_tools());
     bounded(h.send("go"));
-    assert!(thread_is_valid(&h.transcript()));
+    let thread = h.transcript();
+    assert!(thread_is_valid(&thread));
+    assert_eq!(
+        thread
+            .iter()
+            .map(|m| match m {
+                Message::Assistant { calls, .. } => calls.len(),
+                _ => 0,
+            })
+            .sum::<usize>(),
+        1000
+    );
+    assert_eq!(
+        thread
+            .iter()
+            .filter(|m| matches!(m, Message::Tool { .. }))
+            .count(),
+        1000
+    );
     assert_eq!(stops(&log), 1);
 }
 
@@ -248,18 +301,61 @@ pub fn interrupt_avant_le_run_n_empoisonne_pas_le_suivant() {
 }
 
 pub fn interrupt_pendant_un_outil_puis_nouveau_send() {
-    let hd_cell: Rc<RefCell<Option<this_harness::Handle>>> = Rc::default();
-    let c = hd_cell.clone();
-    let t = transport(vec![Box::new(move |_, _| {
-        c.borrow().as_ref().unwrap().interrupt();
-        Ok(call("c1"))
+    struct PendingTool(Rc<Cell<bool>>);
+    #[async_trait(?Send)]
+    impl Toolbox for PendingTool {
+        fn specs(&self) -> Vec<ToolSpec> {
+            ok_tools().specs()
+        }
+        async fn call(&self, _: &ToolCall) -> Outcome {
+            self.0.set(true);
+            std::future::pending().await
+        }
+    }
+    let entered = Rc::new(Cell::new(false));
+    let t = transport(vec![Box::new(|_, _| {
+        Ok(Reply {
+            text: String::new(),
+            calls: vec![call("c1").calls.remove(0), call("c2").calls.remove(0)],
+            finish: Finish::Tools,
+        })
     })]);
-    let (h, _l) = harness(Limits::default(), t, ok_tools());
-    *hd_cell.borrow_mut() = Some(h.handle());
-    assert!(matches!(
-        bounded(h.send("a")),
-        Running::Ran(Stop::Cancelled)
-    ));
-    assert!(thread_is_valid(&h.transcript()));
+    let h = Harness::new(
+        "sys",
+        Limits::default(),
+        t,
+        Rc::new(PendingTool(entered.clone())),
+        |_| {},
+    )
+    .with_clock(Rc::new(Fake::default()));
+    let hd = h.handle();
+    let mut fut = Box::pin(h.send("a"));
+    let mut cx = Context::from_waker(Waker::noop());
+    for _ in 0..POLLS {
+        assert!(
+            fut.as_mut().poll(&mut cx).is_pending(),
+            "le run ne doit pas finir avant l'interruption"
+        );
+        if entered.get() {
+            break;
+        }
+    }
+    assert!(entered.get(), "l'outil doit être entré avant interruption");
+    hd.interrupt();
+    let result = bounded(fut);
+    assert!(
+        matches!(result, Running::Ran(Stop::Interrupted)),
+        "{result:?}"
+    );
+    let thread = h.transcript();
+    assert!(thread_is_valid(&thread), "{thread:?}");
+    assert_eq!(
+        thread
+            .iter()
+            .filter(|m| matches!(m, Message::Tool { .. }))
+            .count(),
+        2,
+        "les deux appels ont une réponse"
+    );
     assert!(matches!(bounded(h.send("b")), Running::Ran(Stop::Done)));
 }
