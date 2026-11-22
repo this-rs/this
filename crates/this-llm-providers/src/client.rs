@@ -293,6 +293,11 @@ impl ProviderClient {
         // `http` + secret : la validation a exigé une IP loopback LITTÉRALE. Il reste deux façons
         // pour le Bearer de quitter la machine malgré elle : un proxy d'environnement (HTTP_PROXY,
         // ALL_PROXY) et une redirection (302 vers un autre hôte). Les deux sont coupées ici.
+        //
+        // Natif seulement : en wasm, `reqwest` n'expose ni `no_proxy` ni `redirect` (le navigateur
+        // décide), et c'est pourquoi `ProviderConfig::validate` y refuse TOUJOURS `http` + credential
+        // — ce chemin n'y est donc jamais atteint avec un secret.
+        #[cfg(not(target_arch = "wasm32"))]
         let builder = if config.base_url.starts_with("http://") && secret.is_some() {
             builder
                 .no_proxy()
