@@ -126,9 +126,40 @@ fn un_type_connu_est_decode_strictement_et_reserialise() {
 /// relais (`Event` ne le connaît pas). Le relais exact ne couvre que les types inconnus.
 #[test]
 fn un_champ_futur_d_un_type_connu_est_perdu_au_relais() {
-    if let Ok(lu) = EventJson::parse(r#"{"type":"delta","text":"x","futur":1}"#) {
-        assert!(!lu.to_json().unwrap().contains("futur"));
-    }
+    // Un événement VALIDE : le décodage doit réussir (jamais un test qui passe parce que tout échoue).
+    let lu = EventJson::parse(r#"{"type":"delta","text":"x","futur":1}"#)
+        .expect("un type connu avec un champ en plus se décode");
+    assert!(
+        matches!(lu.known(), Some(Event::Delta { .. })),
+        "reste un connu"
+    );
+    assert!(
+        !lu.to_json().unwrap().contains("futur"),
+        "le champ ajouté est perdu"
+    );
+}
+
+/// Aller-retour d'un type connu VALIDE : il doit se relire en un événement connu égal.
+#[test]
+fn un_type_connu_valide_fait_l_aller_retour() {
+    let lu = EventJson::parse(r#"{"type":"delta","text":"salut"}"#).expect("événement valide");
+    let relu = EventJson::parse(&lu.to_json().unwrap()).expect("le relais se relit");
+    assert!(matches!(relu.known(), Some(Event::Delta { .. })));
+    assert_eq!(relu, lu);
+}
+
+/// ÉGALITÉ de `EventJson` : celle des **valeurs retenues**. Pour un inconnu, elle porte sur le
+/// TEXTE reçu, espaces compris : deux événements de même `Value` mais écrits différemment ne sont
+/// PAS égaux (c'est voulu : le relais exact distingue `{"a":1}` de `{ "a":1 }`). Pour un connu,
+/// elle porte sur l'`Event` décodé.
+#[test]
+fn l_egalite_d_event_json_porte_sur_le_texte_d_un_inconnu() {
+    let a = EventJson::parse(r#"{"type":"futur","a":1}"#).unwrap();
+    let b = EventJson::parse(r#"{ "type":"futur", "a":1 }"#).unwrap();
+    assert_ne!(a, b, "même Value, textes différents : inégaux");
+    assert_eq!(a, EventJson::parse(r#"{"type":"futur","a":1}"#).unwrap());
+    // Même Value côté vue, malgré l'inégalité : la vue est avec perte, pas le critère d'égalité.
+    assert_eq!(a.to_wire().unwrap(), b.to_wire().unwrap());
 }
 
 /// `UnknownEvent` est inchangé : un littéral externe compile toujours (pas de rupture de source).

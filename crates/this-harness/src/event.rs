@@ -371,6 +371,10 @@ impl<'de> Deserialize<'de> for EventWire {
 /// une version future est **perdu** au relais : `Event` ne connaît pas ce champ). Un type inconnu
 /// garde ses **octets reçus**, espaces qui l'entourent compris : `to_json` les rend tels quels.
 ///
+/// **Égalité** (`PartialEq` dérivé) : celle des valeurs retenues. Pour un inconnu, elle porte sur le
+/// **texte reçu**, espaces compris — deux événements de même `Value` écrits différemment ne sont
+/// pas égaux, ce qui est voulu pour un relais exact. Pour un connu, sur l'`Event` décodé.
+///
 /// Ce que `parse` ne garantit **pas** : la taille (l'hôte borne ce qu'il lit) ; et la vue
 /// `Value` ([`Self::to_wire`]) est **avec perte** — `Value` accepte et arrondit un entier au-delà
 /// de `u64`/`i64` (mesuré : `18446744073709551617` → `1.8446744073709552e+19`). Seul `to_json`
