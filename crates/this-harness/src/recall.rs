@@ -354,7 +354,7 @@ async fn rappel_impl(
          Règle : un rappel n'est pas une preuve. Si un fait du graphe contredit ce que la conversation disait, \
          présente les deux (fait daté et attribué + extrait de la conversation) ; n'arbitre pas en silence.\n",
     );
-    let mut cut = false;
+    let mut budget = false;
     if !shown.is_empty() {
         body.push_str(&format!("\nEntités citées ({}) :\n", anchors.cited.len()));
     }
@@ -424,12 +424,12 @@ async fn rappel_impl(
                 "[coupé : {} entité(s) citée(s) non rendue(s) (borne de taille)]\n",
                 anchors.cited.len() - n
             ));
-            cut = true;
+            budget = true;
             break;
         }
         body.push_str(&line);
     }
-    if !cut && anchors.cited.len() > shown.len() {
+    if !budget && anchors.cited.len() > shown.len() {
         body.push_str(&format!(
             "[coupé : {} entité(s) citée(s) non interrogée(s) (borne de {MAX_ENTITIES})]\n",
             anchors.cited.len() - shown.len()
@@ -437,7 +437,7 @@ async fn rappel_impl(
     }
     list(
         &mut body,
-        &mut cut,
+        &mut budget,
         "Fichiers vus",
         anchors
             .files
@@ -446,7 +446,7 @@ async fn rappel_impl(
     );
     list(
         &mut body,
-        &mut cut,
+        &mut budget,
         "Outils appelés",
         anchors
             .tools
@@ -455,14 +455,14 @@ async fn rappel_impl(
     );
     list(
         &mut body,
-        &mut cut,
+        &mut budget,
         "Commandes lancées",
         anchors
             .commands
             .iter()
             .map(|(c, _)| copie(&truncate(&one_line(c), COMMAND_MAX))),
     );
-    if cut {
+    if budget {
         body.push_str(
             "[coupé : borne de taille atteinte — une partie du rappel n'est pas rendue]\n",
         );
@@ -476,10 +476,10 @@ fn one_line(s: &str) -> String {
 
 /// Une section de liste, BORNÉE : chaque élément entier est ajouté seulement s'il tient dans le
 /// budget (`tient`), sinon il est omis et la coupe est dite. Un élément n'est jamais coupé au
-/// milieu d'une enveloppe. Si aucun ne tient, la section est absente et `cut` le dit.
+/// milieu d'une enveloppe. Si aucun ne tient, la section est absente et `budget` le dit.
 fn list(
     body: &mut String,
-    cut: &mut bool,
+    budget: &mut bool,
     title: &str,
     items: impl ExactSizeIterator<Item = String>,
 ) {
@@ -487,6 +487,8 @@ fn list(
     if total == 0 {
         return;
     }
+    // La coupure par QUANTITÉ (plus de `MAX_LISTED` éléments) se dit dans la ligne même, par
+    // « [coupé : N de plus] ». Seule une coupure par BUDGET de taille lève `budget`.
     let candidat = |essai: &[String]| {
         let reste = total - essai.len();
         let coupe = if reste > 0 {
@@ -501,16 +503,13 @@ fn list(
         let mut essai = rendus.clone();
         essai.push(item);
         if !tient(body, &candidat(&essai)) {
+            *budget = true;
             break;
         }
         rendus = essai;
     }
     if rendus.is_empty() {
-        *cut = true;
         return;
     }
     body.push_str(&candidat(&rendus));
-    if rendus.len() < total {
-        *cut = true;
-    }
 }

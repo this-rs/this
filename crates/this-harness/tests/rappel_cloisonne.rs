@@ -517,7 +517,8 @@ fn le_message_entier_reste_sous_sa_borne_de_taille() {
 fn le_rappel_d_une_vraie_conversation_reste_sous_la_borne() {
     let mut fil = Vec::new();
     for i in 0..60 {
-        let chemin = format!("/projets/{i}/{}", "d".repeat(300));
+        // Un chemin RETENU par `anchors()` : extension connue, 200 caractères au plus.
+        let chemin = format!("src/module_{i}/{}.rs", "f".repeat(120));
         let commande = format!("ls {}", "c".repeat(300));
         fil.push(Message::Assistant {
             content: String::new(),
@@ -527,17 +528,29 @@ fn le_rappel_d_une_vraie_conversation_reste_sous_la_borne() {
                 arguments: serde_json::json!({"path": chemin, "command": commande}),
             }],
         });
-        fil.push(Message::tool(
-            format!("c{i}"),
-            format!("lu #note:{:08x}-1111-4111-8111-111111111111", i),
-        ));
+        // Pas d'identifiant ici : les entités citées prendraient le budget avant les fichiers.
+        fil.push(Message::tool(format!("c{i}"), "ok"));
     }
     let ancres = anchors(&fil);
+    // Précondition : la liste de fichiers n'est PAS vide, sinon le test ne couvre rien.
+    assert_eq!(
+        ancres.files.len(),
+        60,
+        "anchors() doit retenir les 60 chemins .rs"
+    );
     let message = run(rappel_cloisonne(&ancres, &HoteHostile, None, &|s| {
         format!("⟦{s}⟧")
     }))
     .expect("un rappel");
     let texte = message.text();
+    assert!(
+        texte.contains("Fichiers vus (60)"),
+        "la liste de fichiers est rendue : {texte}"
+    );
+    assert!(
+        texte.contains("borne de taille atteinte"),
+        "60 fichiers, 60 outils, 60 commandes ne tiennent pas : la coupe par budget est dite"
+    );
     assert!(
         texte.chars().count() <= 8000,
         "rappel réel de {} caractères, borne 8000",
@@ -547,5 +560,30 @@ fn le_rappel_d_une_vraie_conversation_reste_sous_la_borne() {
         texte.matches('⟦').count(),
         texte.matches('⟧').count(),
         "enveloppe coupée"
+    );
+}
+
+/// Coupure par QUANTITÉ seule (25 éléments courts, plus que `MAX_LISTED`) : le rappel dit « de
+/// plus », mais ne prétend PAS avoir atteint une borne de taille.
+#[test]
+fn une_coupe_par_quantite_ne_se_dit_pas_borne_de_taille() {
+    use this_harness::Anchors;
+    let anchors = Anchors {
+        files: (0..25).map(|i| (format!("src/m{i}.rs"), i)).collect(),
+        ..Anchors::default()
+    };
+    let message = run(rappel_cloisonne(&anchors, &HoteHostile, None, &|s| {
+        format!("⟦{s}⟧")
+    }))
+    .expect("un rappel");
+    let texte = message.text();
+    assert!(texte.contains("Fichiers vus (25)"), "{texte}");
+    assert!(
+        texte.contains("[coupé : 5 de plus]"),
+        "la coupe par quantité est dite : {texte}"
+    );
+    assert!(
+        !texte.contains("borne de taille atteinte"),
+        "une coupe par quantité n'est pas une borne de taille : {texte}"
     );
 }
