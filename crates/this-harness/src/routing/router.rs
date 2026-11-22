@@ -1095,10 +1095,17 @@ impl TurnRouter {
         if let Some(entries) = &choice.pool {
             pool.retain(|facts| listed(entries, facts));
         }
+        // Le pool de l'instance AVANT la liste de la personne, gardé pour l'élargissement : le filtre
+        // de liste ne juge que les contraintes dures ; le scoring peut encore écarter toute la liste
+        // (bras d'apprentissage invalide). La liste ne doit jamais bloquer un repli possible.
+        let mut entier: Option<Vec<Candidate>> = None;
         if let (None, Some(list)) = (&choice.pool, &choice.auto_models)
             && choice.routing.mode == ProviderRoutingMode::Full
         {
-            let _ = restrict_to_person_list(&mut pool, list, &signature);
+            let avant = pool.clone();
+            if restrict_to_person_list(&mut pool, list, &signature) == NARROWED_BY_PERSON {
+                entier = Some(avant);
+            }
         }
         let mut settings = settings_for(&choice.routing, rights.auto);
         if choice.pool.is_some() {
@@ -1113,7 +1120,16 @@ impl TurnRouter {
 
         let arms = self.learning.arms(&class).await;
         let hints = self.learning.hints();
-        let decision = decide_after_limit(&request, &arms, &hints);
+        let mut decision = decide_after_limit(&request, &arms, &hints);
+        // Une paire listée valide gagne toujours (première passe). Si la liste entière échoue au
+        // scoring, la décision est rejouée sur le pool entier de l'instance, et le dit.
+        if decision.chosen.is_none()
+            && let Some(entier) = entier
+        {
+            request.pool = entier;
+            request.narrowed.push(PERSON_LIST_UNAVAILABLE);
+            decision = decide_after_limit(&request, &arms, &hints);
+        }
         // La personne a réglé la conversation pendant l'attente : son réglage gagne.
         if self.state.borrow().generation != generation {
             return None;

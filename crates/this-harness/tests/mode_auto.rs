@@ -3461,3 +3461,87 @@ fn un_repli_n_est_pas_cherche_quand_l_echeance_est_deja_passee() {
         "l'outil du premier tour a tourné une fois, rien d'autre"
     );
 }
+
+// ---- Revue de #321 (4e) : toute la liste échoue au SCORING, pas au filtre ----
+
+/// Un bras stocké qui n'est pas un postérieur (alpha nul) : `decide` l'écarte en `InvalidArm`.
+fn bras_invalide(class: &str, provider: &str, model: &str) -> ArmStats {
+    ArmStats {
+        n: 10,
+        ..ArmStats::fresh(ArmKey::new(class, provider, model), 0.0, 1.0)
+    }
+}
+
+/// Liste = [a/m2] ; a/m1 refusé ; le bras de a/m2 est invalide ; a/m3 est valide hors liste. Le
+/// filtre de liste garde m2 (il passe les contraintes dures), puis le scoring l'écarte : `None`,
+/// alors que a/m3 peut servir. Le contrat du réglage (« Auto ne bloque jamais une conversation à
+/// cause de cette liste ») s'applique aussi quand toute la liste échoue au scoring.
+#[test]
+fn after_limit_elargit_quand_toute_la_liste_echoue_au_scoring() {
+    let world = monde_quota();
+    let mut arms = vec![
+        bras_invalide(GENERAL, "a", "m2"),
+        bras_invalide(DEBUG, "a", "m2"),
+    ];
+    arms.push(arm(GENERAL, "a", "m3", true));
+    world.learning.set_arms(arms);
+    let router = TurnRouter::new(
+        world
+            .spec("a", "m1", 1)
+            .auto()
+            .auto_models(vec![entry("a", "m2")]),
+    );
+    let routed = run(router.after_limit(
+        TurnInput {
+            honored: true,
+            ..text("hello")
+        },
+        &[Pick::new("a", "m1")],
+        None,
+    ))
+    .expect("la seule paire listée a un bras invalide : le pool de l'instance reprend, a/m3 sert");
+    assert_eq!(routed.route.provider(), "a");
+    assert_eq!(routed.route.model(), Some("m3"));
+    assert!(
+        routed.reason.contains(PERSON_LIST_UNAVAILABLE),
+        "l'élargissement est dit : {}",
+        routed.reason
+    );
+}
+
+/// Le pendant : une paire listée VALIDE reste préférée, même si une autre paire listée a un bras
+/// invalide et qu'un modèle hors liste est meilleur.
+#[test]
+fn after_limit_garde_la_paire_listee_valide_meme_si_une_autre_listee_est_invalide() {
+    let world = World::new(vec![
+        cand("a", "m1", false),
+        cand("a", "m2", false),
+        cand("a", "m3", false),
+        cand("a", "m4", false),
+    ]);
+    world.learning.set_arms(vec![
+        bras_invalide(GENERAL, "a", "m2"),
+        arm(GENERAL, "a", "m3", false), // listé, valide, médiocre
+        arm(GENERAL, "a", "m4", true),  // hors liste, excellent
+    ]);
+    let router = TurnRouter::new(
+        world
+            .spec("a", "m1", 1)
+            .auto()
+            .auto_models(vec![entry("a", "m2"), entry("a", "m3")]),
+    );
+    let routed = run(router.after_limit(
+        TurnInput {
+            honored: true,
+            ..text("hello")
+        },
+        &[Pick::new("a", "m1")],
+        None,
+    ))
+    .expect("a/m3 est listé et valide");
+    assert_eq!(
+        routed.route.model(),
+        Some("m3"),
+        "la liste reste respectée : pas m4"
+    );
+}
