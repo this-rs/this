@@ -76,13 +76,14 @@ pub use ports::{
 pub use recall::{Anchors, Citation, Fact, Recall, anchors, rappel, rappel_avec, rappel_cloisonne};
 pub use search::{SearchHit, SearchLink, SearchToolbox};
 pub use session::{
-    CONTEXT_BUDGET, Clock, Handle, Harness, INTERRUPT_GRACE_MS, KEEP_ALIVE, Limits, MAX_RETRIES,
-    NO_PROGRESS_MS, RECORDER_TIMEOUT_MS, RETRY_BACKOFF_MS, ROUTER_TIMEOUT_MS, Running, SILENCE_MS,
-    Shared, Sleep, SystemClock, TOOL_TIMEOUT_MS, TurnContext, out_hash,
+    CONTEXT_BUDGET, Clock, Handle, Harness, INTERRUPT_GRACE_MS, KEEP_ALIVE, Limits,
+    MAX_QUOTA_FALLBACKS, MAX_RETRIES, NO_PROGRESS_MS, RECORDER_TIMEOUT_MS, RETRY_BACKOFF_MS,
+    ROUTER_TIMEOUT_MS, Running, SILENCE_MS, Shared, Sleep, SystemClock, TOOL_TIMEOUT_MS,
+    TurnContext, out_hash,
 };
 pub use wire::{
-    Code, Failure, Finish, ImagePart, ImageSource, Message, Reply, Request, ThreadDefect, ToolCall,
-    ToolSpec,
+    Code, Failure, Finish, ImagePart, ImageSource, Message, QuotaRefusal, QuotaScope, Reply,
+    Request, ThreadDefect, ToolCall, ToolSpec,
 };
 
 /// Le verdict que porte `Event::Stopped`.
