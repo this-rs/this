@@ -199,7 +199,8 @@ impl Objets {
                 let loc = m.location.to_string();
                 Entree {
                     cle: loc.strip_prefix(&retire).unwrap_or(&loc).to_string(),
-                    taille: m.size as u64,
+                    // `ObjectMeta::size` est déjà un `u64` (object_store ≥ 0.12) : pas de cast.
+                    taille: m.size,
                     modifie_ms: m.last_modified.timestamp_millis(),
                 }
             })
