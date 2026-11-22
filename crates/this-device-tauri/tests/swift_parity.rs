@@ -456,43 +456,89 @@ fn every_macos_notification_entry_point_is_guarded_against_a_missing_bundle() {
         "la garde `centreDisponible` doit exister"
     );
     let lines: Vec<&str> = text.lines().collect();
-    // Une déclaration de fonction : `func ` précédé, au plus, de modificateurs.
-    let est_func = |l: &str| {
-        let t = l.trim_start();
-        let sans = [
-            "private ",
-            "fileprivate ",
-            "internal ",
-            "public ",
-            "static ",
-            "final ",
+    // Retire les modificateurs JUSQU'AU POINT FIXE : `static private func` comme `private static func`.
+    const MODIFICATEURS: [&str; 7] = [
+        "private ",
+        "fileprivate ",
+        "internal ",
+        "public ",
+        "static ",
+        "final ",
+        "@objc ",
+    ];
+    let sans_modificateurs = |l: &str| -> String {
+        let mut cur = l.trim_start();
+        loop {
+            match MODIFICATEURS.iter().find_map(|m| cur.strip_prefix(m)) {
+                Some(r) => cur = r.trim_start(),
+                None => return cur.to_string(),
+            }
+        }
+    };
+    let indent = |l: &str| l.len() - l.trim_start().len();
+    let est_func = |l: &str| sans_modificateurs(l).starts_with("func ");
+    // Un MEMBRE de l'énumération : toute déclaration au niveau d'indentation de la première
+    // fonction (fonction, propriété, type imbriqué). Le corps d'une fonction s'arrête au membre
+    // suivant, pas seulement à la fonction suivante : une propriété qui suit n'y est pas comptée.
+    let niveau = lines
+        .iter()
+        .find(|l| est_func(l))
+        .map(|l| indent(l))
+        .expect("au moins une fonction dans notifications.swift");
+    let est_membre = |l: &str| {
+        if l.trim().is_empty() || indent(l) != niveau {
+            return false;
+        }
+        let d = sans_modificateurs(l);
+        [
+            "func ",
+            "var ",
+            "let ",
+            "init",
+            "enum ",
+            "struct ",
+            "class ",
+            "subscript",
         ]
         .iter()
-        .fold(t, |acc, m| {
-            let mut cur = acc;
-            while let Some(r) = cur.strip_prefix(m) {
-                cur = r;
-            }
-            cur
-        });
-        sans.starts_with("func ")
+        .any(|k| d.starts_with(k))
     };
-    let starts: Vec<usize> = (0..lines.len()).filter(|&i| est_func(lines[i])).collect();
-    // Aucune référence au centre avant la première fonction (une propriété, un `let` global).
-    let first = starts.first().copied().unwrap_or(lines.len());
+    let membres: Vec<usize> = (0..lines.len()).filter(|&i| est_membre(lines[i])).collect();
+    let starts: Vec<usize> = membres
+        .iter()
+        .copied()
+        .filter(|&i| est_func(lines[i]))
+        .collect();
+    let touche_le_centre =
+        |l: &&str| l.contains("UNUserNotificationCenter") && !l.trim_start().starts_with("//");
+    // Aucune référence au centre hors d'une fonction : ni avant la première, ni dans une
+    // propriété ou un type imbriqué entre deux fonctions.
+    for (n, &i) in membres.iter().enumerate() {
+        if est_func(lines[i]) {
+            continue;
+        }
+        let end = membres.get(n + 1).copied().unwrap_or(lines.len());
+        assert!(
+            !lines[i..end].iter().any(touche_le_centre),
+            "le membre `{}` touche UNUserNotificationCenter hors d'une fonction gardée",
+            lines[i].trim()
+        );
+    }
+    let first = membres.first().copied().unwrap_or(lines.len());
     assert!(
-        !lines[..first]
-            .iter()
-            .any(|l| l.contains("UNUserNotificationCenter") && !l.trim_start().starts_with("//")),
-        "une référence à UNUserNotificationCenter hors de toute fonction n'est pas gardée"
+        !lines[..first].iter().any(touche_le_centre),
+        "une référence à UNUserNotificationCenter précède tout membre"
     );
     let mut checked = 0;
-    for (n, &i) in starts.iter().enumerate() {
-        let end = starts.get(n + 1).copied().unwrap_or(lines.len());
-        let body = &lines[i + 1..end];
-        let touche = body
+    for &i in &starts {
+        // Le corps : jusqu'au membre suivant, quel qu'il soit.
+        let end = membres
             .iter()
-            .any(|l| l.contains("UNUserNotificationCenter") && !l.trim_start().starts_with("//"));
+            .copied()
+            .find(|&m| m > i)
+            .unwrap_or(lines.len());
+        let body = &lines[i + 1..end];
+        let touche = body.iter().any(touche_le_centre);
         if !touche {
             continue; // `stateName`, `entier` : sans centre.
         }
