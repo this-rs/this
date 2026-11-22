@@ -11,7 +11,7 @@ categories = ["development-tools"]
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
-serde_json = { version = "1", features = ["raw_value"] }
+serde_json = "1"
 # The decisions of the loop are a separate, pure crate: this one adds the
 # effects (the model call, the tools, the events) around them.
 this-agent = { version = "0.0.1", path = "../this-agent" }

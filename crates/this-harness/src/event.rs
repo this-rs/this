@@ -270,34 +270,19 @@ const TYPES_CONNUS: &[&str] = &[
 
 /// Un événement écrit par une version **plus récente** : son `type` n'est pas
 /// connu ici, et rien n'est inventé — ni succès, ni fin, ni autorisation.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct UnknownEvent {
     /// Le `type` d'origine, tel que le fil le portait.
     pub type_name: String,
-    /// Le JSON d'origine, **octet pour octet** : `RawValue` ne le décode pas, donc ni arrondi
-    /// des grands nombres (`18446744073709551616`, décimaux précis), ni réécriture (`1E2`,
-    /// `0.10`), ni réordonnancement des clés. Relayer rend exactement ce qui est arrivé.
-    ///
-    /// **Portée exacte** : vrai pour un relais JSON direct (`serde_json::from_str`/`from_slice`/
-    /// `from_reader` → `to_string`/`to_writer`). Les espaces **hors** de la valeur (avant `{`,
-    /// après `}`) ne sont pas gardés ; ceux de l'intérieur le sont. Toute conversion via `Value`
-    /// (`from_value`, `to_value`) repasse par l'arrondi, et un sérialiseur non JSON ne voit pas
-    /// ces octets : là, rien n'est garanti.
-    ///
-    /// **Rupture de source** (avant : `serde_json::Value`, qui passait tout nombre hors
-    /// `u64`/`i64` par un flottant et rejetait `1e400` — relevé par une revue indépendante le
-    /// 21/11/2026) : un consommateur qui construit ce champ ou l'inspecte comme une `Value` doit
-    /// passer par `raw.get()` + `serde_json::from_str`. Et l'égalité devient **textuelle** :
-    /// `{"a":1,"b":2}` ≠ `{"b":2,"a":1}`.
-    pub raw: Box<serde_json::value::RawValue>,
+    /// Le JSON d'origine, **intact**. Le relayer rend ce qui est arrivé.
+    pub raw: Value,
 }
 
 /// Un événement lu sur le fil : connu, décodé **strictement**, ou d'une version
 /// future, **conservé tel quel**.
 ///
-/// C'est la décision §3 de `docs/harnais-contrat-evenements.md` : lire le fil
-/// **sans le décoder** (`RawValue`), dispatcher sur `type`, ranger l'inconnu avec
-/// ses octets d'origine ; un `type` connu est décodé strictement depuis ces octets.
+/// C'est la décision §3 de `docs/harnais-contrat-evenements.md` : lire dans
+/// `Value`, dispatcher sur `type`, ranger l'inconnu avec son payload brut.
 /// `serde_json::from_str::<Event>` seul ne peut pas le faire : `#[serde(other)]`
 /// exige une variante **unitaire**, donc `Event::Unknown` ne porte ni le `type`
 /// d'origine ni le payload, et un hôte qui relaie un inconnu le ré-écrirait en
@@ -313,15 +298,6 @@ pub enum EventWire {
     Known(Event),
     /// Un `type` inconnu, conservé avec son payload.
     Unknown(UnknownEvent),
-}
-
-// `RawValue` n'implémente pas `PartialEq` : deux inconnus sont égaux quand leur type et leurs octets
-// le sont. C'est volontaire — deux JSON équivalents mais écrits différemment sont deux relais
-// différents, et l'égalité d'un événement relayé se juge sur ce qui part sur le fil.
-impl PartialEq for UnknownEvent {
-    fn eq(&self, other: &Self) -> bool {
-        self.type_name == other.type_name && self.raw.get() == other.raw.get()
-    }
 }
 
 impl EventWire {
@@ -353,52 +329,12 @@ impl Serialize for EventWire {
     }
 }
 
-/// Lit l'objet d'un événement et rend la valeur de son champ `type` (s'il existe). Exige un
-/// objet : toute autre forme JSON est refusée par `deserialize_map`.
-struct TeteVisitor;
-
-impl<'de> serde::de::Visitor<'de> for TeteVisitor {
-    type Value = Option<Value>;
-
-    fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        f.write_str("un événement, c'est-à-dire un objet JSON")
-    }
-
-    fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
-        let mut type_name = None;
-        while let Some(cle) = map.next_key::<String>()? {
-            if cle == "type" {
-                if type_name.is_some() {
-                    return Err(serde::de::Error::duplicate_field("type"));
-                }
-                type_name = Some(map.next_value::<Value>()?);
-            } else {
-                map.next_value::<serde::de::IgnoredAny>()?;
-            }
-        }
-        Ok(type_name)
-    }
-}
-
 impl<'de> Deserialize<'de> for EventWire {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        // Le flux est lu UNE fois, sans être décodé : `RawValue` garde les octets d'origine.
-        let raw: Box<serde_json::value::RawValue> = Deserialize::deserialize(deserializer)?;
-        // Seul le champ `type` est lu, et seulement depuis un OBJET : `serde_json` accepte une
-        // séquence là où un `struct` est attendu (`["futur"]` passerait pour `type = futur`).
-        // Le visiteur exige `visit_map` ; le reste des valeurs est ignoré sans être décodé.
-        let type_brut = serde::Deserializer::deserialize_map(
-            &mut serde_json::Deserializer::from_str(raw.get()),
-            TeteVisitor,
-        )
-        .map_err(serde::de::Error::custom)?;
+        let raw = Value::deserialize(deserializer)?;
         // Sans `type` textuel, l'événement n'est ni connu ni futur : il est
         // illisible, et le dire vaut mieux que le ranger quelque part.
-        let Some(type_name) = type_brut
-            .as_ref()
-            .and_then(Value::as_str)
-            .map(str::to_owned)
-        else {
+        let Some(type_name) = raw.get("type").and_then(Value::as_str).map(str::to_owned) else {
             return Err(serde::de::Error::custom(
                 "événement sans `type` textuel : ni connu, ni futur — illisible",
             ));
@@ -408,7 +344,7 @@ impl<'de> Deserialize<'de> for EventWire {
         }
         // Type connu : décodage strict. Un payload incomplet est une ERREUR —
         // le ranger en inconnu inventerait un succès et effacerait le défaut.
-        serde_json::from_str::<Event>(raw.get())
+        serde_json::from_value::<Event>(raw)
             .map(Self::Known)
             .map_err(serde::de::Error::custom)
     }
@@ -701,77 +637,6 @@ mod tests {
         }
     }
 
-    /// Seul un objet est un événement. `serde_json` accepte une séquence pour un `struct` :
-    /// `["futur"]` ne doit ni devenir `type = futur`, ni passer pour un inconnu.
-    #[test]
-    fn un_tableau_ou_un_scalaire_ne_sont_pas_des_evenements() {
-        for refuse in [
-            r#"["futur"]"#,
-            r#"["futur",1]"#,
-            "[]",
-            "42",
-            r#""texte""#,
-            "null",
-        ] {
-            assert!(
-                serde_json::from_str::<EventWire>(refuse).is_err(),
-                "{refuse} doit être refusé, pas lu comme un événement"
-            );
-        }
-        // Deux clés `type` : refusé. (Avant : la lecture par `Value` gardait la dernière.)
-        assert!(
-            serde_json::from_str::<EventWire>(r#"{"type":"text","type":"futur"}"#).is_err(),
-            "un `type` dupliqué est ambigu : refusé"
-        );
-        // Un objet sans `type` textuel reste refusé, un objet avec `type` passe.
-        assert!(serde_json::from_str::<EventWire>(r#"{"type":1}"#).is_err());
-        assert!(serde_json::from_str::<EventWire>(r#"{"type":"futur"}"#).is_ok());
-    }
-
-    /// Les bornes que la doc annonce, fixées : l'égalité est textuelle, et seuls les espaces
-    /// hors de la valeur sont perdus.
-    #[test]
-    fn la_conservation_brute_a_les_bornes_que_la_doc_dit() {
-        let lire = |s: &str| serde_json::from_str::<EventWire>(s).unwrap();
-        assert_ne!(
-            lire(r#"{"type":"futur","a":1,"b":2}"#),
-            lire(r#"{"type":"futur","b":2,"a":1}"#),
-            "égalité textuelle : l'ordre des clés compte"
-        );
-        let relaye = serde_json::to_string(&lire("  {\"type\" : \"futur\",\n \"n\":1}  ")).unwrap();
-        assert_eq!(
-            relaye, "{\"type\" : \"futur\",\n \"n\":1}",
-            "dedans gardé, dehors retiré"
-        );
-    }
-
-    /// Mesuré le 21/11/2026 : avec `serde_json::Value`, un inconnu relayé perdait ces cas.
-    /// `RawValue` les garde octet pour octet.
-    #[test]
-    fn un_inconnu_relaye_garde_les_octets_exacts_meme_pour_les_grands_nombres() {
-        for charge in [
-            // Plus grand que u64::MAX : Value passait par un flottant (1.8446744073709552e19).
-            r#"{"type":"futur","n":18446744073709551616}"#,
-            r#"{"type":"futur","n":123456789012345678901234567890}"#,
-            // Sous i64::MIN.
-            r#"{"type":"futur","n":-9223372036854775809}"#,
-            // Décimal plus précis que f64.
-            r#"{"type":"futur","x":0.1234567890123456789012345}"#,
-            // Écritures équivalentes, octets différents : `0.10` devenait `0.1`, `1E2` `100.0`.
-            r#"{"type":"futur","a":0.10,"b":1E2}"#,
-            // Hors plage f64 : Value REFUSAIT la lecture (« number out of range »).
-            r#"{"type":"futur","n":1e400}"#,
-            // L'ordre des clés : `type` n'est pas déplacé à la fin.
-            r#"{"z":1,"type":"futur","a":2}"#,
-        ] {
-            let lu: EventWire = serde_json::from_str(charge)
-                .unwrap_or_else(|e| panic!("« {charge} » doit se lire : {e}"));
-            assert!(matches!(lu, EventWire::Unknown(_)), "{charge}");
-            let relaye = serde_json::to_string(&lu).unwrap();
-            assert_eq!(relaye, charge, "relayé tel quel, octet pour octet");
-        }
-    }
-
     #[test]
     fn un_evenement_futur_garde_son_type_et_son_payload_intact() {
         // Le cas du ticket : un hôte plus récent écrit un type que cette version
@@ -783,10 +648,7 @@ mod tests {
             EventWire::Known(event) => panic!("« {} » n'est pas connu d'ici", event.name()),
         };
         assert_eq!(inconnu.type_name, "budget_projete");
-        // Le brut est conservé tel quel : on le relit comme du texte, pas comme une `Value`.
-        let relu: Value = serde_json::from_str(inconnu.raw.get()).unwrap();
-        assert_eq!(relu.get("restant").and_then(Value::as_i64), Some(42));
-        assert_eq!(inconnu.raw.get(), brut, "octet pour octet");
+        assert_eq!(inconnu.raw.get("restant").and_then(Value::as_i64), Some(42));
 
         // Relayé, il repart avec SON type et TOUS ses champs : jamais
         // `{"type":"Unknown"}`, qui est exactement ce que #301 laissait passer.

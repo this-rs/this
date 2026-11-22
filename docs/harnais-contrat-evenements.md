@@ -103,38 +103,28 @@ Décisions, tranchées explicitement :
   échoue sur un `type` inconnu. La décision est donc : **conserver en `Unknown`** (garder
   le payload brut et le `type`, avancer le curseur), jamais « ignorer en silence » (on
   perdrait l'information) et jamais « refuser nommément » (un hôte ancien face à un cœur
-  plus récent casserait). Concrètement : lire le fil sans le décoder (`RawValue`), dispatcher
-  sur `type`, et ranger l'inconnu. `HintKind` et `Verdict` montrent déjà cette philosophie
+  plus récent casserait). Concrètement : lire dans `serde_json::Value`, dispatcher sur
+  `type`, et ranger l'inconnu. `HintKind` et `Verdict` montrent déjà cette philosophie
   (`event.rs:204`, `un_verdict_inconnu_se_lit_unknown`).
   **Écrit depuis** : `EventWire` / `UnknownEvent` (`crates/this-harness/src/event.rs`),
   l'enveloppe de **lecture** du fil. Un `type` connu y est décodé **strictement** — un
   payload incomplet est une **erreur**, pas un inconnu, parce que ranger un événement cassé
   en inconnu inventerait un succès et effacerait le défaut. Un `type` inconnu est conservé
   avec son `type_name` et son JSON **brut** : le relayer rend exactement ce qui est arrivé,
-  jamais `{"type":"Unknown"}`. **« Brut » veut dire octet pour octet** : le JSON d'un inconnu
-  est gardé en `RawValue`, donc les entiers au-delà de `u64`, les décimaux précis, `1E2` ou
-  `0.10`, et l'ordre des clés sortent tels qu'ils sont entrés. (Une première version lisait un
-  `serde_json::Value`, qui arrondissait les grands nombres et rejetait `1e400` : mesuré à la
-  revue du 21/11/2026, `un_inconnu_relaye_garde_les_octets_exacts_meme_pour_les_grands_nombres`.)
-  **Portée de « octet pour octet »** : un relais JSON direct (`from_str`/`from_slice`/
-  `from_reader` → `to_string`/`to_writer`). Non couverts : les espaces hors de la valeur
-  (retirés ; ceux de l'intérieur restent), toute conversion intermédiaire via `Value`
-  (`from_value`/`to_value` repassent par l'arrondi), et les sérialiseurs non JSON.
-  **Rupture** : `UnknownEvent.raw` est public et passe de `Value` à `Box<RawValue>` — un
-  consommateur qui le construit ou l'inspecte doit lire `raw.get()` ; l'égalité de deux inconnus
-  devient textuelle (même ordre de clés, mêmes octets). Aucun consommateur hors de
-  `this-harness` dans les dépôts sondés (this, atelier, this-cli, this-examples, website) ; cela
-  ne prouve rien pour les autres.
-  **Forme exigée** : seul un objet JSON est un événement (un tableau ou un scalaire est
-  refusé), et un objet à **deux** clés `type` est refusé — changement observable : la lecture
-  par `Value` gardait la dernière en silence. Un JSON ambigu sur le champ qui décide du genre
-  n'est ni connu ni futur.
-  **Effet de bord de `raw_value`** (feature unifiée dans tout le binaire) : un objet dont la
-  première clé est `$serde_json::private::RawValue` est relu, en `Value`, comme le JSON que porte
-  cette clé (mesuré sur `ToolCall.arguments`) ; il était déjà actif partout où `this-mesh` est
-  lié. Un filtre sur le texte avant parse ne doit donc pas tenir lieu de contrôle.
-  **Limite** : cela ne vaut QUE pour un type entièrement inconnu. Un type **connu** auquel une
-  version future ajoute un champ est décodé en `Event` et le champ ajouté est perdu au relais.
+  jamais `{"type":"Unknown"}`.
+  **Limite connue (#314) : « brut » ne veut PAS dire octet pour octet.** Le payload est gardé
+  en `serde_json::Value`. Mesuré le 22/11/2026 (`tests/relais_limite.rs`) : un entier au-delà
+  de `u64` sort en flottant (`18446744073709551616` → `1.8446744073709552e+19`), `0.10` sort
+  `0.1`, `1E2` sort `100.0`, les clés sortent triées, et `1e400` est **refusé** à la lecture.
+  Le sens JSON est gardé pour tout le reste ; un hôte qui doit relayer à l'octet près ne doit
+  pas compter sur `EventWire`. La conservation exacte est un chantier distinct
+  (branche `wip/relais-brut-exact`) : la faire par la feature `serde_json/raw_value` a été
+  écartée, car Cargo l'unifie dans tout le binaire et elle change alors la lecture de
+  `Value` partout — mesuré : un `ToolCall.arguments` dont la première clé est
+  `$serde_json::private::RawValue` est relu comme le JSON que porte cette clé, ou devient une
+  erreur. Une API JSON explicite qui garde le texte sans cette feature reste à écrire.
+  **Autre limite** : un type **connu** auquel une version future ajoute un champ est décodé
+  en `Event` et le champ ajouté est perdu au relais.
   `Event::Unknown` (variante unitaire de #301) reste pour la
   lecture directe en `Event` ; `EventWire` est la forme **sans perte** qui manquait.
   Preuves : `chaque_type_connu_se_relit_comme_connu_et_identique` (aller-retour sur une
