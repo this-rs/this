@@ -10,6 +10,12 @@ use crate::store::{ProviderStore, Snapshot, StoreError};
 
 /// The providers of one app. Every mutation is validated, then written through the store
 /// before it is reported as done.
+///
+/// **Single writer.** One `Hub` owns its store's content in memory, and its lock serialises
+/// the calls made on THAT instance only. Two `Hub`s opened on the same store (two processes,
+/// or two `open` calls in one process) each keep their own memory: the last write wins and
+/// the other's changes are lost on the next save. A host must open ONE hub per store; the
+/// store itself is not locked against a second writer.
 pub struct Hub {
     store: Box<dyn ProviderStore>,
     /// Only a client resolves keys: without the `http` feature nothing reads it.
@@ -86,52 +92,52 @@ impl Hub {
     /// Adds a provider, or replaces the one with the same identifier.
     pub fn upsert(&self, config: ProviderConfig) -> Result<(), ProviderError> {
         config.validate()?;
-        let mut state = lock(&self.state);
-        match state
-            .providers
-            .iter_mut()
-            .find(|provider| provider.id == config.id)
-        {
-            Some(slot) => *slot = config,
-            None => state.providers.push(config),
-        }
-        Self::drop_stale_active(&mut state);
-        self.store.save(&state)?;
-        Ok(())
+        self.commit(|next| {
+            match next
+                .providers
+                .iter_mut()
+                .find(|provider| provider.id == config.id)
+            {
+                Some(slot) => *slot = config,
+                None => next.providers.push(config),
+            }
+            Self::drop_stale_active(next);
+            Ok(())
+        })
     }
 
     /// Removes a provider. If it was active, nothing is active afterwards.
     pub fn remove(&self, id: &ProviderId) -> Result<(), ProviderError> {
-        let mut state = lock(&self.state);
-        let before = state.providers.len();
-        state.providers.retain(|provider| &provider.id != id);
-        if state.providers.len() == before {
-            return Err(ProviderError::NotFound(id.to_string()));
-        }
-        Self::drop_stale_active(&mut state);
-        self.store.save(&state)?;
-        Ok(())
+        self.commit(|next| {
+            let before = next.providers.len();
+            next.providers.retain(|provider| &provider.id != id);
+            if next.providers.len() == before {
+                return Err(ProviderError::NotFound(id.to_string()));
+            }
+            Self::drop_stale_active(next);
+            Ok(())
+        })
     }
 
     /// Chooses the active provider, or none. Only an existing, enabled provider can be chosen.
     pub fn set_active(&self, id: Option<&ProviderId>) -> Result<(), ProviderError> {
-        let mut state = lock(&self.state);
-        match id {
-            None => state.active = None,
-            Some(id) => {
-                let provider = state
-                    .providers
-                    .iter()
-                    .find(|provider| &provider.id == id)
-                    .ok_or_else(|| ProviderError::NotFound(id.to_string()))?;
-                if !provider.enabled {
-                    return Err(ProviderError::Disabled(id.to_string()));
+        self.commit(|next| {
+            match id {
+                None => next.active = None,
+                Some(id) => {
+                    let provider = next
+                        .providers
+                        .iter()
+                        .find(|provider| &provider.id == id)
+                        .ok_or_else(|| ProviderError::NotFound(id.to_string()))?;
+                    if !provider.enabled {
+                        return Err(ProviderError::Disabled(id.to_string()));
+                    }
+                    next.active = Some(id.clone());
                 }
-                state.active = Some(id.clone());
             }
-        }
-        self.store.save(&state)?;
-        Ok(())
+            Ok(())
+        })
     }
 
     /// Branche la source de sessions de l'hôte (le flux de connexion qu'il a exécuté).
@@ -186,6 +192,38 @@ impl Hub {
         )
     }
 
+    /// Applies a change transactionally: `change` edits a COPY of the state, the copy is
+    /// saved, and only a successful save makes it the hub's state.
+    ///
+    /// - A refused change (validation, unknown id) leaves everything untouched.
+    /// - A save that returns `Ok` adopts the copy.
+    /// - A save that returns `Err` does NOT trust the store's word: the store is re-read and
+    ///   its content is adopted, because what the hub serves must be what the store holds —
+    ///   even when the store wrote and then failed. If the re-read fails too, the previous
+    ///   state is kept and the save error is returned (see [`ProviderStore`]).
+    ///
+    /// The lock is held throughout, so two calls on THIS hub cannot interleave.
+    fn commit(
+        &self,
+        change: impl FnOnce(&mut Snapshot) -> Result<(), ProviderError>,
+    ) -> Result<(), ProviderError> {
+        let mut state = lock(&self.state);
+        let mut next = state.clone();
+        change(&mut next)?;
+        match self.store.save(&next) {
+            Ok(()) => {
+                *state = next;
+                Ok(())
+            }
+            Err(error) => {
+                if let Ok(stored) = self.store.load() {
+                    *state = stored;
+                }
+                Err(error.into())
+            }
+        }
+    }
+
     /// The active provider loses its place when it is removed or disabled.
     fn drop_stale_active(state: &mut Snapshot) {
         let keeps = state.active.as_ref().is_some_and(|id| {
@@ -210,6 +248,129 @@ mod tests {
 
     fn hub() -> Hub {
         Hub::open(MemoryStore::default(), Secrets::env_only(), SystemClock).unwrap()
+    }
+
+    /// A store that persists like `MemoryStore` until `fail` is set, then refuses every
+    /// save — and keeps the last snapshot it accepted, so a test can read "the disk".
+    #[derive(Clone, Default)]
+    struct FlakyStore {
+        disk: Arc<Mutex<Snapshot>>,
+        fail: Arc<std::sync::atomic::AtomicBool>,
+        /// The write lands, then the store reports an error (a store that does not honour
+        /// the all-or-nothing contract).
+        write_then_fail: Arc<std::sync::atomic::AtomicBool>,
+        /// The re-read after a failed save also fails.
+        unreadable: Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    impl FlakyStore {
+        fn failing(&self, on: bool) {
+            self.fail.store(on, std::sync::atomic::Ordering::SeqCst);
+        }
+        fn write_then_failing(&self, on: bool) {
+            self.write_then_fail
+                .store(on, std::sync::atomic::Ordering::SeqCst);
+        }
+        fn unreadable(&self, on: bool) {
+            self.unreadable
+                .store(on, std::sync::atomic::Ordering::SeqCst);
+        }
+        fn disk(&self) -> Snapshot {
+            lock(&self.disk).clone()
+        }
+    }
+
+    impl ProviderStore for FlakyStore {
+        fn load(&self) -> Result<Snapshot, crate::store::StoreError> {
+            if self.unreadable.load(std::sync::atomic::Ordering::SeqCst) {
+                return Err(crate::store::StoreError::Io("lecture impossible".into()));
+            }
+            Ok(self.disk())
+        }
+        fn save(&self, snapshot: &Snapshot) -> Result<(), crate::store::StoreError> {
+            if self.fail.load(std::sync::atomic::Ordering::SeqCst) {
+                return Err(crate::store::StoreError::Io("disque plein".into()));
+            }
+            *lock(&self.disk) = snapshot.clone();
+            if self
+                .write_then_fail
+                .load(std::sync::atomic::Ordering::SeqCst)
+            {
+                return Err(crate::store::StoreError::Io(
+                    "réponse perdue après écriture".into(),
+                ));
+            }
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_store_that_writes_then_fails_is_resynchronised_from_its_content() {
+        // The contract says this cannot happen; the hub must still serve what the store holds.
+        let store = FlakyStore::default();
+        let hub = Hub::open(store.clone(), Secrets::env_only(), SystemClock).unwrap();
+        hub.upsert(vllm("a")).unwrap();
+        store.write_then_failing(true);
+        assert!(hub.upsert(vllm("b")).is_err());
+        // The write DID land: the store holds "b", so the hub serves "b" too.
+        assert_eq!(store.disk().providers.len(), 2);
+        assert_eq!(hub.providers(), store.disk().providers);
+        store.write_then_failing(false);
+        hub.upsert(vllm("c")).unwrap();
+        assert_eq!(hub.providers(), store.disk().providers);
+    }
+
+    #[test]
+    fn when_the_store_cannot_be_re_read_the_previous_state_is_kept_and_the_error_says_so() {
+        let store = FlakyStore::default();
+        let hub = Hub::open(store.clone(), Secrets::env_only(), SystemClock).unwrap();
+        hub.upsert(vllm("a")).unwrap();
+        let before = hub.providers();
+        store.failing(true);
+        store.unreadable(true);
+        let error = hub.upsert(vllm("b")).unwrap_err().to_string();
+        assert!(error.contains("disque plein"), "{error}");
+        assert_eq!(hub.providers(), before);
+        store.failing(false);
+        store.unreadable(false);
+        hub.upsert(vllm("b")).unwrap();
+        assert_eq!(hub.providers(), store.disk().providers);
+    }
+
+    #[test]
+    fn a_failed_save_leaves_the_hub_as_it_was() {
+        let store = FlakyStore::default();
+        let hub = Hub::open(store.clone(), Secrets::env_only(), SystemClock).unwrap();
+        hub.upsert(vllm("a")).unwrap();
+        hub.upsert(vllm("b")).unwrap();
+        hub.set_active(Some(&ProviderId::new("a").unwrap()))
+            .unwrap();
+        let before = (hub.providers(), hub.active().map(|p| p.id));
+        let disk_before = store.disk();
+        store.failing(true);
+
+        // upsert: a changed label AND a disable that would clear the active provider.
+        let mut changed = vllm("a");
+        changed.label = "renamed".into();
+        changed.enabled = false;
+        assert!(hub.upsert(changed).is_err());
+        // upsert of a new provider.
+        assert!(hub.upsert(vllm("c")).is_err());
+        // remove, and set_active.
+        assert!(hub.remove(&ProviderId::new("a").unwrap()).is_err());
+        assert!(
+            hub.set_active(Some(&ProviderId::new("b").unwrap()))
+                .is_err()
+        );
+        assert!(hub.set_active(None).is_err());
+
+        assert_eq!((hub.providers(), hub.active().map(|p| p.id)), before);
+        assert_eq!(store.disk(), disk_before);
+
+        // The store recovers: the same change now goes through, memory and disk agree.
+        store.failing(false);
+        hub.upsert(vllm("c")).unwrap();
+        assert_eq!(hub.providers(), store.disk().providers);
     }
 
     fn vllm(id: &str) -> ProviderConfig {
