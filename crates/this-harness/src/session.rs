@@ -2088,11 +2088,7 @@ impl Harness {
             model: routed.route.model().map(str::to_string),
             changed: true,
             why: routed.why.code().to_string(),
-            reason: routed
-                .decision
-                .as_ref()
-                .map(|d| d.reason.clone())
-                .unwrap_or_default(),
+            reason: routed.reason,
             mode: router.mode().map(|m| m.as_str().to_string()),
             advisory: false,
         });

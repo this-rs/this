@@ -19,7 +19,7 @@ use async_trait::async_trait;
 use this_agent::Stop;
 
 use super::candidate::{self, Candidate, Pick, Slot, is_auto_model, same_model, same_pair};
-use super::decide::{DecideRequest, Decision, HYSTERESIS_MARGIN, decide};
+use super::decide::{DecideRequest, Decision, HYSTERESIS_MARGIN, decide, decide_after_limit};
 use super::mode::{
     ConversationRoutingMode, LearningStage, PoolEntry, ProviderRoutingMode, RoutingSettings,
     conversation_stage,
@@ -270,6 +270,18 @@ pub struct Routed {
     pub why: RouteWhy,
     /// La décision prise, quand il y en a eu une (appliquée ou non).
     pub decision: Option<Decision>,
+}
+
+/// Un repli jetable après quota. Il ne porte aucune décision enregistrable :
+/// son calcul ne doit jamais alimenter l'apprentissage ni consommer d'identifiant.
+#[derive(Debug, Clone)]
+pub struct QuotaFallback {
+    /// Paire retenue pour le rejeu du tour.
+    pub route: Route,
+    /// Motif de routage, toujours [`RouteWhy::QuotaFallback`].
+    pub why: RouteWhy,
+    /// Explication lisible de la sélection.
+    pub reason: String,
 }
 
 /// Ce qu'un tour apporte au routeur.
@@ -1015,9 +1027,9 @@ impl TurnRouter {
     ///
     /// Ce n'est pas un second routage. Rien n'est écrit dans l'état du routeur (ni paire en
     /// vigueur, ni compteur de tours, ni décision ouverte), rien n'est enregistré, aucun
-    /// tirage d'exploration : la décision rendue est **déterministe** et jetable. L'hôte
-    /// apprend le refus par son propre `QuotaView` ; le message suivant décide donc
-    /// normalement, sans ce modèle.
+    /// tirage : la sélection est **déterministe** et jetable. Le résultat n'expose aucune
+    /// décision enregistrable. L'hôte apprend le refus par son propre `QuotaView` ; le
+    /// message suivant décide donc normalement, sans ce modèle.
     ///
     /// `refused` liste les paires déjà refusées pendant ce message (la première
     /// comprise) : chacune est exclue, ce qui borne la chaîne — jamais de boucle de quotas.
@@ -1037,7 +1049,7 @@ impl TurnRouter {
         turn: TurnInput<'_>,
         refused: &[Pick],
         resets_at_ms: Option<u64>,
-    ) -> Option<Routed> {
+    ) -> Option<QuotaFallback> {
         let last = refused.last()?;
         if !turn.honored {
             return None;
@@ -1090,8 +1102,7 @@ impl TurnRouter {
 
         let arms = self.learning.arms(&class).await;
         let hints = self.learning.hints();
-        let id = self.seeds.next_id();
-        let decision = decide(id, &request, &arms, &hints);
+        let decision = decide_after_limit(&request, &arms, &hints);
         // La personne a réglé la conversation pendant l'attente : son réglage gagne.
         if self.state.borrow().generation != generation {
             return None;
@@ -1107,11 +1118,10 @@ impl TurnRouter {
         if already_refused || chosen.provider_id != last.provider_id {
             return None;
         }
-        Some(Routed {
+        Some(QuotaFallback {
             route: Route::of(&chosen.provider_id, &chosen.model),
-            changed: true,
             why: RouteWhy::QuotaFallback,
-            decision: Some(decision),
+            reason: decision.reason,
         })
     }
 

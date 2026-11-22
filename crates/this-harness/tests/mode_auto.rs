@@ -2898,6 +2898,63 @@ fn after_limit_n_ecrit_rien_dans_le_routeur() {
 }
 
 #[test]
+fn after_limit_egalite_est_stable_et_ne_consomme_pas_de_graine() {
+    use std::cell::Cell;
+    use this_harness::routing::Seeds;
+
+    struct CountSeeds(Cell<u128>);
+    impl Seeds for CountSeeds {
+        fn next_id(&self) -> u128 {
+            let id = self.0.get();
+            self.0.set(id + 1);
+            id
+        }
+    }
+
+    // Deux remplaçants rigoureusement égaux : le nom départage, pas un tirage.
+    let world = World::new(vec![
+        cand("a", "m1", false),
+        cand("a", "m3", false),
+        cand("a", "m2", false),
+    ]);
+    let seeds = Rc::new(CountSeeds(Cell::new(0)));
+    let mut spec = world.spec("a", "m1", 1).auto();
+    spec.seeds = seeds.clone();
+    let router = TurnRouter::new(spec);
+    for _ in 0..10 {
+        let routed = run(router.after_limit(text("hello"), &[Pick::new("a", "m1")], None))
+            .expect("un repli éligible");
+        assert_eq!(routed.route.model(), Some("m2"));
+        assert!(routed.reason.contains("after_quota_limit"));
+    }
+    assert_eq!(seeds.0.get(), 0, "aucune graine consommée par le repli");
+    let _ = run(router.route(text("hello")));
+    assert_eq!(
+        seeds.0.get(),
+        1,
+        "le routage normal garde sa première graine"
+    );
+}
+
+#[test]
+fn after_limit_classe_les_posterieurs_extremes_sans_debordement() {
+    let world = World::new(vec![
+        cand("a", "m1", false),
+        cand("a", "m2", false),
+        cand("a", "m3", false),
+    ]);
+    let max = f64::MAX;
+    world.learning.set_arms(vec![
+        ArmStats::fresh(ArmKey::new(GENERAL, "a", "m2"), max, max),
+        ArmStats::fresh(ArmKey::new(GENERAL, "a", "m3"), max, max / 2.0),
+    ]);
+    let router = TurnRouter::new(world.spec("a", "m1", 1).auto());
+    let routed = run(router.after_limit(text("hello"), &[Pick::new("a", "m1")], None))
+        .expect("un repli éligible");
+    assert_eq!(routed.route.model(), Some("m3"), "2/3 > 1/2");
+}
+
+#[test]
 fn un_texte_deja_montre_interdit_le_repli() {
     // Le moteur a déjà écrit « Je commence par… » puis refuse : repartir sur un autre modèle
     // ferait relire un début de réponse que la personne a déjà vu. La garde du rejeu tient.
