@@ -184,6 +184,9 @@ tempfile = "3"
 ed25519-dalek = { version = "2", features = ["pkcs8", "pem", "rand_core"] }
 wat = "1.263.0"
 base64 = "0.22"
+# Contrat DynamoDB : client vers DynamoDB Local (conteneur), feature `dynamodb`.
+aws-config = { version = "1", features = ["behavior-version-latest"] }
+aws-credential-types = "1"
 
 [features]
 default = ["in-memory"]
