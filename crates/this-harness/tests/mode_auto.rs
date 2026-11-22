@@ -3545,3 +3545,54 @@ fn after_limit_garde_la_paire_listee_valide_meme_si_une_autre_listee_est_invalid
         "la liste reste respectée : pas m4"
     );
 }
+
+// ---- Précision de revue (#321) : le même décalage filtre/scoring existe dans route() ----
+
+/// Chemin ORDINAIRE (`route`), liste [a/m2] dont le bras est invalide, a/m3 valide hors liste.
+/// Constat mesuré (revue de #321) : la paire en vigueur HORS liste (a/m3) est retenue, avec la
+/// liste élargie au pool — pas de défaut. Le fixe pour qu'un changement soit voulu.
+#[test]
+fn route_ordinaire_elargit_quand_la_paire_en_vigueur_est_hors_liste() {
+    let world = World::new(vec![cand("a", "m2", false), cand("a", "m3", false)]);
+    world.learning.set_arms(vec![
+        bras_invalide(GENERAL, "a", "m2"),
+        arm(GENERAL, "a", "m3", true),
+    ]);
+    let router = TurnRouter::new(
+        world
+            .spec("a", "m3", 1)
+            .auto()
+            .auto_models(vec![entry("a", "m2")]),
+    );
+    let routed = run(router.route(text("hello")));
+    assert_eq!(pair(&routed), on("a", "m3"));
+    assert!(
+        reason(&routed).contains("no_candidate; narrowed: auto_models"),
+        "constat : la liste est élargie au pool : {}",
+        reason(&routed)
+    );
+}
+
+/// Même liste, paire en vigueur LISTÉE et INVALIDE (a/m2) : `route` la retient. Le défaut analogue
+/// à celui de `after_limit` existe donc côté rétention de la paire en vigueur. Test qui le fixe :
+/// un changement de ce comportement doit être une décision, pas une dérive.
+#[test]
+fn route_ordinaire_retient_la_paire_en_vigueur_listee_mais_invalide() {
+    let world = World::new(vec![cand("a", "m2", false), cand("a", "m3", false)]);
+    world.learning.set_arms(vec![
+        bras_invalide(GENERAL, "a", "m2"),
+        arm(GENERAL, "a", "m3", true),
+    ]);
+    let router = TurnRouter::new(
+        world
+            .spec("a", "m2", 1)
+            .auto()
+            .auto_models(vec![entry("a", "m2")]),
+    );
+    let routed = run(router.route(text("hello")));
+    assert_eq!(
+        pair(&routed),
+        on("a", "m2"),
+        "constat : la paire invalide est retenue"
+    );
+}
