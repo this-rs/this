@@ -1514,6 +1514,7 @@ impl Harness {
                                 crate::routing::Pick::new(current.provider(), &model),
                                 quota.resets_at_ms,
                                 transport.honors_route(),
+                                deadline.map(|(at, _)| at),
                             )
                             .await
                     {
@@ -2084,9 +2085,15 @@ impl Harness {
         just_refused: crate::routing::Pick,
         resets_at_ms: Option<u64>,
         honored: bool,
+        deadline_ms: Option<f64>,
     ) -> Option<crate::routing::Route> {
         let router = self.router.clone()?;
         refused.push(just_refused);
+        // L'échéance du run est une borne DURE : un repli qui se décide après elle ne doit pas
+        // relancer un transport ni un outil. Le temps restant borne la sélection elle-même.
+        if deadline_ms.is_some_and(|at| self.clock.now_ms() >= at) {
+            return None;
+        }
         let (has_images, hints) = self.turn_signals(first, toolbox, limits);
         let work = router.after_limit(
             crate::routing::TurnInput {
@@ -2098,12 +2105,19 @@ impl Harness {
             refused,
             resets_at_ms,
         );
-        let routed = race(
-            work,
-            cut(self.clock.as_ref(), ROUTER_TIMEOUT_MS, Some(cancel)),
-        )
-        .await
-        .ok()??;
+        // Le plus court de : le délai du routeur et le temps qui reste avant l'échéance du run.
+        let restant = deadline_ms
+            .map(|at| (at - self.clock.now_ms()).max(0.0) as u64)
+            .unwrap_or(u64::MAX);
+        let borne = ROUTER_TIMEOUT_MS.min(restant);
+        let routed = race(work, cut(self.clock.as_ref(), borne, Some(cancel)))
+            .await
+            .ok()??;
+        // Recontrôle APRÈS la sélection : le pool a pu répondre au-delà de l'échéance (la course
+        // sonde d'abord le travail). Un choix tardif est écarté, jamais appliqué.
+        if deadline_ms.is_some_and(|at| self.clock.now_ms() >= at) {
+            return None;
+        }
         self.out.emit(Event::Routed {
             provider: routed.route.provider().to_string(),
             model: routed.route.model().map(str::to_string),

@@ -3131,6 +3131,8 @@ enum Rep {
 struct Scenario {
     scripts: RefCell<Vec<(&'static str, VecDeque<Rep>)>>,
     appels: RefCell<Vec<String>>,
+    /// Temps partagé avancé par chaque réponse (0 : pas d'horloge partagée).
+    temps: Option<(Rc<std::cell::Cell<f64>>, f64)>,
 }
 
 impl Scenario {
@@ -3143,7 +3145,12 @@ impl Scenario {
                     .collect(),
             ),
             appels: RefCell::new(Vec::new()),
+            temps: None,
         })
+    }
+    fn avec_temps(mut self: Rc<Self>, temps: Rc<std::cell::Cell<f64>>, ms: f64) -> Rc<Self> {
+        Rc::get_mut(&mut self).expect("seul propriétaire").temps = Some((temps, ms));
+        self
     }
     fn paires(&self) -> Vec<String> {
         self.appels.borrow().clone()
@@ -3175,6 +3182,9 @@ impl Transport for Scenario {
                 *file.front().unwrap()
             }
         };
+        if let Some((temps, ms)) = &self.temps {
+            temps.set(temps.get() + ms);
+        }
         match rep {
             Rep::Outil => Ok(asks_a_tool()),
             Rep::Fini => {
@@ -3293,4 +3303,161 @@ fn une_paire_decidee_qui_refuse_d_entree_laisse_l_etat_revenir_a_l_avant() {
         "a/m1 n'a rien servi"
     );
     assert_eq!(world.learning.settled()[0].served, None);
+}
+
+// ---- Revue de #321 (3e) : le repli respecte l'échéance du run ----
+
+/// Une horloge partagée : le pool l'avance quand on le lit (il répond APRÈS l'échéance), le
+/// `sleep` avance aussi (les délais ne bloquent pas). Le temps ne revient jamais en arrière.
+#[derive(Clone)]
+struct Temps(Rc<std::cell::Cell<f64>>);
+
+impl this_harness::Clock for Temps {
+    fn now_ms(&self) -> f64 {
+        self.0.get()
+    }
+    fn sleep(&self, ms: u64) -> Option<this_harness::Sleep> {
+        self.0.set(self.0.get() + ms as f64);
+        Some(Box::pin(async {}))
+    }
+}
+
+/// Un pool qui prend `coute_ms` à répondre : il avance l'horloge partagée, puis rend ses paires.
+struct PoolLent {
+    temps: Rc<std::cell::Cell<f64>>,
+    coute_ms: f64,
+    paires: Vec<Candidate>,
+    lectures: std::cell::Cell<u32>,
+}
+
+#[async_trait(?Send)]
+impl this_harness::routing::PoolSource for PoolLent {
+    async fn pool(&self) -> Vec<Candidate> {
+        self.lectures.set(self.lectures.get() + 1);
+        self.temps.set(self.temps.get() + self.coute_ms);
+        self.paires.clone()
+    }
+}
+
+/// Une horloge pour le test : `Temps` partagé, injecté dans le harnais.
+fn harnais_budget(
+    transport: Rc<Scenario>,
+    router: Rc<TurnRouter>,
+    temps: Temps,
+    budget_ms: u64,
+) -> (Harness, Rc<std::cell::Cell<u32>>) {
+    let effets = Rc::new(std::cell::Cell::new(0));
+    let limits = Limits {
+        budget_ms: Some(budget_ms),
+        ..Limits::default()
+    };
+    let harness = Harness::new(
+        "tu es l'atelier",
+        limits,
+        transport,
+        Rc::new(Compte(effets.clone())),
+        |_| {},
+    )
+    .with_router(router)
+    .with_clock(Rc::new(temps));
+    (harness, effets)
+}
+
+/// Le cas relevé : première sélection immédiate (a/m1 décidé), a/m1 refuse son quota, puis la
+/// SECONDE lecture du pool (celle du repli) répond après l'échéance du run. Le repli ne doit ni
+/// relancer le transport, ni appeler un outil : le run s'arrête sur son budget, avec zéro appel de
+/// plus et zéro effet de plus.
+#[test]
+fn un_repli_qui_arrive_apres_l_echeance_ne_relance_ni_transport_ni_outil() {
+    let temps = Temps(Rc::new(std::cell::Cell::new(0.0)));
+    // Pool : la sélection (lecture unique d'after_limit) coûte 10 s, au-delà du budget de 5 s.
+    // La première décision d'ouverture est déjà faite : le pool ne ralentit qu'APRÈS le refus.
+    let pool = Rc::new(PoolLent {
+        temps: temps.0.clone(),
+        coute_ms: 10_000.0,
+        paires: vec![
+            cand("a", "m1", false),
+            cand("a", "m2", false),
+            cand("b", "x", false),
+        ],
+        lectures: std::cell::Cell::new(0),
+    });
+    let mut learning_pool = pool;
+    let world = monde_quota();
+    let spec = RouterSpec::new(
+        learning_pool.clone(),
+        Rc::new(SequenceSeeds::from(1)),
+        "b",
+        "x",
+    )
+    .learning(world.learning.clone())
+    .settings(quiet())
+    .auto();
+    let router = Rc::new(TurnRouter::new(spec));
+    let moteur = Scenario::new(vec![
+        ("m1", vec![Rep::Quota]),
+        ("m2", vec![Rep::Fini]),
+        ("x", vec![Rep::Fini]),
+    ]);
+    let (harness, effets) = harnais_budget(moteur.clone(), router, temps.clone(), 5_000);
+    let fin = run(harness.send("hello"));
+    let _ = &mut learning_pool;
+    // Le refus de quota de a/m1 a eu lieu AVANT l'échéance : le run finit donc sur ce refus, pas sur
+    // le budget. Ce qui compte : aucun appel de plus, aucun effet, aucun transport relancé.
+    let appels = moteur.paires();
+    assert!(matches!(fin, Running::Ran(Stop::Failed(_))), "{fin:?}");
+    assert_eq!(
+        appels,
+        vec!["a/m1".to_string()],
+        "aucun repli tardif, aucun appel de plus"
+    );
+    assert_eq!(effets.get(), 0, "aucun effet d'outil");
+}
+
+/// Le cas que la garde AVANT protège : l'échéance est DÉJÀ passée au moment du refus de quota.
+/// Aucune sélection ne doit alors partir, même si le pool répondrait instantanément.
+#[test]
+fn un_repli_n_est_pas_cherche_quand_l_echeance_est_deja_passee() {
+    let temps = Temps(Rc::new(std::cell::Cell::new(0.0)));
+    let pool = Rc::new(PoolLent {
+        temps: temps.0.clone(),
+        coute_ms: 0.0,
+        paires: vec![
+            cand("a", "m1", false),
+            cand("a", "m2", false),
+            cand("b", "x", false),
+        ],
+        lectures: std::cell::Cell::new(0),
+    });
+    let world = monde_quota();
+    let spec = RouterSpec::new(pool.clone(), Rc::new(SequenceSeeds::from(1)), "b", "x")
+        .learning(world.learning.clone())
+        .settings(quiet())
+        .auto();
+    let router = Rc::new(TurnRouter::new(spec));
+    // Chaque réponse coûte 3 s : après l'outil (3 s), le refus arrive à 6 s, au-delà du budget de 5 s.
+    let moteur = Scenario::new(vec![
+        ("m1", vec![Rep::Outil, Rep::Quota]),
+        ("m2", vec![Rep::Fini]),
+        ("x", vec![Rep::Fini]),
+    ])
+    .avec_temps(temps.0.clone(), 3_000.0);
+    let (harness, effets) = harnais_budget(moteur.clone(), router, temps.clone(), 5_000);
+    let fin = run(harness.send("hello"));
+    let appels = moteur.paires();
+    // Le refus arrive après l'échéance : aucun repli ne part. Le run finit sur ce refus.
+    assert!(
+        matches!(fin, Running::Ran(Stop::Failed(_))),
+        "{fin:?} ; appels {appels:?}"
+    );
+    assert_eq!(
+        appels,
+        vec!["a/m1".to_string(), "a/m1".to_string()],
+        "aucun repli après l'échéance"
+    );
+    assert_eq!(
+        effets.get(),
+        1,
+        "l'outil du premier tour a tourné une fois, rien d'autre"
+    );
 }
