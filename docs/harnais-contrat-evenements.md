@@ -110,14 +110,20 @@ Décisions, tranchées explicitement :
   l'enveloppe de **lecture** du fil. Un `type` connu y est décodé **strictement** — un
   payload incomplet est une **erreur**, pas un inconnu, parce que ranger un événement cassé
   en inconnu inventerait un succès et effacerait le défaut. Un `type` inconnu est conservé
-  avec son `type_name` et son JSON **brut** : le relayer rend exactement ce qui est arrivé,
-  jamais `{"type":"Unknown"}`.
-  **Limite connue (#314) : « brut » ne veut PAS dire octet pour octet.** Le payload est gardé
-  en `serde_json::Value`. Mesuré le 22/11/2026 (`tests/relais_limite.rs`) : un entier au-delà
-  de `u64` sort en flottant (`18446744073709551616` → `1.8446744073709552e+19`), `0.10` sort
-  `0.1`, `1E2` sort `100.0`, les clés sortent triées, et `1e400` est **refusé** à la lecture.
-  Le sens JSON est gardé pour tout le reste ; un hôte qui doit relayer à l'octet près ne doit
-  pas compter sur `EventWire`. La conservation exacte est un chantier distinct
+  avec son `type_name` et son payload relu en `Value` : le relayer rend le même `type` et
+  les mêmes champs, jamais `{"type":"Unknown"}` — mais pas forcément les mêmes valeurs
+  numériques (voir la limite ci-dessous).
+  **Limite connue (#314) : ni les octets, ni toujours les valeurs.** Le payload est gardé en
+  `serde_json::Value`. Garanti (test `une_valeur_representable_survit_au_relais`) : un
+  payload dont chaque nombre est représentable par `Value` (entier dans `u64`/`i64`, flottant
+  exact en `f64`) ressort **égal en `Value`**. Non garanti : un nombre au-delà change de
+  **valeur** — mesuré le 22/11/2026 dans le graphe isolé de `this-harness` (sans
+  `preserve_order` ni `arbitrary_precision`), `18446744073709551616` ressort
+  `1.8446744073709552e+19`, `0.10` → `0.1`, `1E2` → `100.0`, les clés ressortent triées et
+  `1e400` est **refusé** à la lecture. Ces trois derniers points dépendent des features
+  `serde_json` unifiées dans le binaire : ils ne sont pas figés par un test. Un hôte qui
+  doit relayer à l'octet près, ou des nombres hors de ces plages, ne doit pas compter sur
+  `EventWire`. La conservation exacte est un chantier distinct
   (branche `wip/relais-brut-exact`) : la faire par la feature `serde_json/raw_value` a été
   écartée, car Cargo l'unifie dans tout le binaire et elle change alors la lecture de
   `Value` partout — mesuré : un `ToolCall.arguments` dont la première clé est
@@ -126,7 +132,8 @@ Décisions, tranchées explicitement :
   **Autre limite** : un type **connu** auquel une version future ajoute un champ est décodé
   en `Event` et le champ ajouté est perdu au relais.
   `Event::Unknown` (variante unitaire de #301) reste pour la
-  lecture directe en `Event` ; `EventWire` est la forme **sans perte** qui manquait.
+  lecture directe en `Event` ; `EventWire` est la forme qui manquait pour ne pas perdre le
+  `type` ni le payload d'un inconnu (aux limites numériques près, ci-dessus).
   Preuves : `chaque_type_connu_se_relit_comme_connu_et_identique` (aller-retour sur une
   instance de chaque variante, et garde de la liste des types connus),
   `un_evenement_futur_garde_son_type_et_son_payload_intact`,

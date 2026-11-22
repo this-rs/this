@@ -274,7 +274,11 @@ const TYPES_CONNUS: &[&str] = &[
 pub struct UnknownEvent {
     /// Le `type` d'origine, tel que le fil le portait.
     pub type_name: String,
-    /// Le JSON d'origine, **intact**. Le relayer rend ce qui est arrivé.
+    /// Le JSON d'origine, relu en `serde_json::Value`. Le relayer rend le même `type` et les
+    /// mêmes champs, mais **pas les mêmes octets** : un nombre que `Value` ne représente pas
+    /// (au-delà de `u64`/`i64`, décimal plus précis qu'un `f64`) peut changer de valeur, et
+    /// l'écriture des nombres ou l'ordre des clés peut changer selon les features `serde_json`
+    /// unifiées dans le binaire. Voir `docs/harnais-contrat-evenements.md` §3.
     pub raw: Value,
 }
 
@@ -321,8 +325,9 @@ impl EventWire {
 impl Serialize for EventWire {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         match self {
-            // Un événement d'une version future repart **tel qu'il est arrivé** :
-            // c'est ce qui permet à un hôte de le relayer sans le déformer.
+            // Un événement d'une version future repart avec son `type` et ses champs (pas son
+            // texte d'origine : voir la limite de `UnknownEvent::raw`) : un hôte peut le
+            // relayer sans en faire un `{"type":"Unknown"}`.
             Self::Unknown(inconnu) => inconnu.raw.serialize(serializer),
             Self::Known(event) => event.serialize(serializer),
         }
