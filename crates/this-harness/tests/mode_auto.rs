@@ -3060,3 +3060,57 @@ fn after_limit_respecte_la_liste_quand_une_autre_paire_listee_reste_eligible() {
         "la liste reste respectée : pas m3"
     );
 }
+
+/// Revue de #321, second cas : la liste contient une paire d'une AUTRE instance, éligible.
+/// Liste = [a/m1, b/x] ; a/m1 refusé ; b/x éligible ; a/m2 libre hors liste. Le filtre de liste
+/// voyait b/x « utilisable » et réduisait le pool à [a/m1 (épuisé), b/x] ; puis la contrainte
+/// « même instance » (`restrict_provider = a`) excluait b/x → `None`, malgré a/m2. La contrainte
+/// d'instance est une contrainte dure du repli : elle doit s'appliquer AVANT de juger la liste.
+#[test]
+fn after_limit_une_autre_instance_listee_ne_fait_pas_perdre_le_repli_de_la_meme_instance() {
+    let world = monde_quota();
+    let router = TurnRouter::new(
+        world
+            .spec("a", "m1", 1)
+            .auto()
+            .auto_models(vec![entry("a", "m1"), entry("b", "x")]),
+    );
+    let routed = run(router.after_limit(
+        TurnInput {
+            honored: true,
+            ..text("hello")
+        },
+        &[Pick::new("a", "m1")],
+        None,
+    ))
+    .expect("rien de listé ne peut servir le repli sur a : le pool entier reprend, a/m2 ou a/m3");
+    assert_eq!(routed.route.provider(), "a", "jamais une autre instance");
+    assert_ne!(routed.route.model(), Some("m1"));
+}
+
+/// Le pendant : avec une autre paire a/* listée ET éligible, la liste reste respectée (a/m2, pas
+/// m3), et la paire b/x listée n'y change rien.
+#[test]
+fn after_limit_prefere_la_paire_listee_de_la_meme_instance_meme_si_une_autre_instance_est_listee() {
+    let world = monde_quota();
+    let router = TurnRouter::new(world.spec("a", "m1", 1).auto().auto_models(vec![
+        entry("a", "m1"),
+        entry("a", "m2"),
+        entry("b", "x"),
+    ]));
+    let routed = run(router.after_limit(
+        TurnInput {
+            honored: true,
+            ..text("hello")
+        },
+        &[Pick::new("a", "m1")],
+        None,
+    ))
+    .expect("a/m2 est listé et éligible");
+    assert_eq!(routed.route.provider(), "a");
+    assert_eq!(
+        routed.route.model(),
+        Some("m2"),
+        "la liste reste respectée : pas m3"
+    );
+}

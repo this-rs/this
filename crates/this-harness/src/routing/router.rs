@@ -1068,6 +1068,12 @@ impl TurnRouter {
         let class = signature.arm_key();
 
         let mut pool = self.pool.pool().await;
+        // Contrainte dure du repli, appliquée D'ABORD : un repli après quota ne change jamais
+        // d'instance (`restrict_provider` plus bas le redit à la décision). Le filtre de liste
+        // de la personne doit la voir : sinon une paire listée d'une AUTRE instance, éligible,
+        // suffit à réduire le pool à la liste, puis la décision l'exclut → `None`, alors qu'un
+        // modèle de la même instance hors liste est libre (revue de #321, second cas).
+        pool.retain(|facts| facts.provider_id == last.provider_id);
         // Le marquage précède le filtre de liste de la personne : ce filtre garde le pool
         // entier quand rien de listé ne passe les contraintes dures — il doit donc VOIR le
         // refus. Sinon une liste réduite à la paire refusée réduirait le pool à elle, puis
