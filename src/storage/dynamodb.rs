@@ -6,6 +6,24 @@ use async_trait::async_trait;
 use aws_sdk_dynamodb::Client as DynamoDBClient;
 use aws_sdk_dynamodb::types::AttributeValue;
 use std::collections::HashMap;
+
+/// Un attribut `N` DynamoDB rendu en JSON, SANS passer par `f64` : un entier reste entier.
+///
+/// Avant, tout nombre était converti en flottant (`30` devenait `30.0`), donc un champ `i64`
+/// ne se relisait plus (« invalid type: floating point `30.0`, expected i64 »), et un entier
+/// au-delà de 2⁵³ perdait sa précision. Un `NaN` ou un infini n'a pas de forme JSON : refusé.
+fn nombre_json(n: &str) -> Option<serde_json::Value> {
+    if let Ok(entier) = n.parse::<i64>() {
+        return Some(serde_json::Value::Number(entier.into()));
+    }
+    if let Ok(entier) = n.parse::<u64>() {
+        return Some(serde_json::Value::Number(entier.into()));
+    }
+    n.parse::<f64>()
+        .ok()
+        .and_then(serde_json::Number::from_f64)
+        .map(serde_json::Value::Number)
+}
 use uuid::Uuid;
 
 /// DynamoDB implementation of DataService
@@ -201,11 +219,8 @@ impl<T: Data + serde::Serialize + for<'de> serde::Deserialize<'de>> DynamoDBData
                     json.insert(key.clone(), serde_json::Value::String(s.clone()));
                 }
                 AttributeValue::N(n) => {
-                    if let Ok(num) = n.parse::<f64>() {
-                        json.insert(
-                            key.clone(),
-                            serde_json::Value::Number(serde_json::Number::from_f64(num).unwrap()),
-                        );
+                    if let Some(num) = nombre_json(n) {
+                        json.insert(key.clone(), num);
                     }
                 }
                 AttributeValue::Bool(b) => {
@@ -289,17 +304,38 @@ impl<T: Data + serde::Serialize + for<'de> serde::Deserialize<'de>> DataService<
         Ok(entities)
     }
 
-    async fn update(&self, _id: &Uuid, entity: T) -> Result<T> {
+    async fn update(&self, id: &Uuid, entity: T) -> Result<T> {
+        // Une mise à jour ne crée pas : sans cette condition, `put_item` ÉCRIT un élément
+        // inexistant (upsert), et « mettre à jour un inconnu » réussit (mesuré par le contrat).
+        // Et l'identifiant écrit doit être celui qu'on désigne : on ne déplace pas une entité.
+        if entity.id() != *id {
+            anyhow::bail!(
+                "identifiant incohérent : l'entité porte {}, la mise à jour vise {id}",
+                entity.id()
+            );
+        }
         let item = self.entity_to_item(&entity).await?;
 
-        self.client
+        let resultat = self
+            .client
             .put_item()
             .table_name(&self.table_name)
             .set_item(Some(item))
+            .condition_expression("attribute_exists(#id)")
+            .expression_attribute_names("#id", "id")
             .send()
-            .await?;
-
-        Ok(entity)
+            .await;
+        match resultat {
+            Ok(_) => Ok(entity),
+            Err(erreur)
+                if erreur
+                    .as_service_error()
+                    .is_some_and(|e| e.is_conditional_check_failed_exception()) =>
+            {
+                anyhow::bail!("Entity not found")
+            }
+            Err(erreur) => Err(erreur.into()),
+        }
     }
 
     async fn delete(&self, id: &Uuid) -> Result<()> {
@@ -317,12 +353,26 @@ impl<T: Data + serde::Serialize + for<'de> serde::Deserialize<'de>> DataService<
 
     async fn search(&self, field: &str, value: &str) -> Result<Vec<T>> {
         // Use scan with filter for general search
+        // La valeur arrive en texte. Un champ peut être stocké en chaîne, en nombre ou en
+        // booléen : on cherche sous chaque forme que la valeur peut avoir. Le nom du champ passe
+        // par `#f` (pas d'interpolation : un nom réservé ou inhabituel reste un nom).
+        let mut filtre = vec!["#f = :s".to_string()];
+        let mut valeurs = HashMap::from([(":s".to_string(), AttributeValue::S(value.to_string()))]);
+        if value.parse::<f64>().is_ok() {
+            filtre.push("#f = :n".to_string());
+            valeurs.insert(":n".to_string(), AttributeValue::N(value.to_string()));
+        }
+        if value == "true" || value == "false" {
+            filtre.push("#f = :b".to_string());
+            valeurs.insert(":b".to_string(), AttributeValue::Bool(value == "true"));
+        }
         let result = self
             .client
             .scan()
             .table_name(&self.table_name)
-            .filter_expression(format!("{} = :value", field))
-            .expression_attribute_values(":value", AttributeValue::S(value.to_string()))
+            .expression_attribute_names("#f", field)
+            .filter_expression(filtre.join(" OR "))
+            .set_expression_attribute_values(Some(valeurs))
             .send()
             .await?;
 
@@ -507,11 +557,8 @@ impl DynamoDBLinkService {
                     }
                 }
                 AttributeValue::N(n) => {
-                    if let Ok(num) = n.parse::<f64>() {
-                        json.insert(
-                            key.clone(),
-                            serde_json::Value::Number(serde_json::Number::from_f64(num).unwrap()),
-                        );
+                    if let Some(num) = nombre_json(n) {
+                        json.insert(key.clone(), num);
                     }
                 }
                 AttributeValue::Bool(b) => {
