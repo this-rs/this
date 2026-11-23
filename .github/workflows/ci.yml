@@ -270,7 +270,10 @@ jobs:
         # `this-module-harness/wasmi` : sans cette feature, l'exécuteur n'est pas
         # compilé, ses lignes n'ont aucune donnée de couverture, et `codecov/patch`
         # les compte comme non couvertes. On ne peut pas couvrir ce qu'on ne compile pas.
-        run: cargo llvm-cov --features all,wami,this-module-harness/wasmi --workspace --lcov --output-path lcov.info -- --test-threads=1
+        # `this-harness/providers` : le transport adossé à `this-llm-providers` et ses tests
+        # contre un moteur simulé (`tests/transport_moteur_simule.rs`). Sans cette feature,
+        # ce code n'est compilé que par clippy et jamais EXÉCUTÉ en CI.
+        run: cargo llvm-cov --features all,wami,this-module-harness/wasmi,this-harness/providers --workspace --lcov --output-path lcov.info -- --test-threads=1
 
       # Le rapport lui-même, pour pouvoir répondre à « pourquoi cette ligne est-elle dite non
       # couverte ? » sans relancer la CI. Mesuré le 13/11/2026 : `codecov/patch` accusait 77
