@@ -64,6 +64,15 @@
 - 📖 **EpisodeLearned** — Learned behavioral sequences
 - 🌉 **CognitiveNotificationBridge** — Subscribes to EventBus, evaluates thresholds, routes to SinkRegistry
 
+### 🤖 Agent Harness
+- 🔁 **Run loop** — An agent is a *run*: an objective, turns, observed steps and a named stop reason, not a bare `for` loop (`this-harness`)
+- 🔌 **Pluggable ports** — The loop owns no network, tools or storage: the host supplies a `Transport` (the model), a `Toolbox` (the actions) and receives an event stream
+- ✋ **Interruptible and explicit** — Messages queued during a run are held for the next turn; `interrupt` stops the run and says so (`Stopped { Cancelled }`), never silently
+- 🛡️ **Honest stops** — A truncated reply, a refusal, a silent turn or an exhausted budget is never mistaken for a conclusion; every end emits an `Event::Stopped`
+- 🧭 **Mode Auto** — A conversation may hand the choice of provider and model to a router that learns from outcomes (in progress)
+- 🧩 **Modules & harness** — Declarative modules can add tools and pages; what they cannot yet extend is documented in [Modules & harness](docs/modules-et-harnais.md)
+- Lives in the workspace `crates/` (`this-harness`, `this-agent`, `this-llm`, `this-llm-providers`, `this-module-lang`, `this-module-harness`), built for native and wasm, and consumed by the Atelier app
+
 ### 🔐 Authentication & Authorization
 - 🔑 **WAMI Auth STS** — Built-in JWT authentication with Ed25519 key pairs
 - 🚀 **Bootstrap Mode** — Auto-generates keys at startup for zero-config development
@@ -900,6 +909,13 @@ this-rs eliminates **repetitive routing and relationship boilerplate** while mai
 - ❌ Simple CRUD APIs (< 5 entities)
 - ❌ Maximum performance critical paths (framework adds overhead)
 - ❌ Learning projects (start with Axum first)
+
+### 🆕 What's New in v0.0.10 (unreleased)
+
+- 🤖 **Agent harness** — `this-harness` runs an agent as a named run with turns, a stop reason and an event stream; a run can be interrupted, and queued messages are kept for the next turn
+- 🧭 **Harness profiles, honest by default** — `Transport::profil_runtime` promises nothing by default; a host declares what it actually enforces
+- 🧩 **Shared contracts in `crates/`** — `this-descriptor`, `this-platform`, `this-app`, `this-module-lang`, `this-ui`, `this-client-web`, `this-shell-tauri` are shared contracts for apps and wasm fronts
+- ⚠️ **Breaking changes in the harness API** — see the `Unreleased` section of [CHANGELOG.md](CHANGELOG.md) before upgrading from a pre-release build
 
 ### 🆕 What's New in v0.0.9
 
