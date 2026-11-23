@@ -58,6 +58,26 @@ async fn moteur(listener: TcpListener) {
                 }
             }
             let requete = String::from_utf8_lossy(&brut).to_string();
+            if requete.contains("SCENARIO:lent") {
+                // Un flux LENT : dix morceaux espacés de 150 ms, écrits au fil de l'eau. Un client
+                // qui coupe voit le moteur s'arrêter d'écrire ; le flux complet dure ~1,5 s.
+                let entete = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n";
+                if socket.write_all(entete.as_bytes()).await.is_err() {
+                    return;
+                }
+                for i in 0..10 {
+                    let evenement = delta("qwen-test", &format!("p{i} "), None);
+                    let ligne = format!("data: {evenement}\n\n");
+                    if socket.write_all(ligne.as_bytes()).await.is_err() {
+                        return;
+                    }
+                    let _ = socket.flush().await;
+                    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+                }
+                let _ = socket.write_all(b"data: [DONE]\n\n").await;
+                let _ = socket.shutdown().await;
+                return;
+            }
             let (statut, type_contenu, corps) = route(&requete);
             let reponse = format!(
                 "HTTP/1.1 {statut}\r\nContent-Type: {type_contenu}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{corps}",
@@ -411,4 +431,102 @@ fn le_moteur_simule_declare_son_dialecte_et_sa_derniere_validation_reelle() {
         "SHA de this attendu : {}",
         champs[3]
     );
+}
+
+// ── L'annulation en plein flux (#288, « interruption ») ────────────────────────
+
+/// Enveloppe `ProviderTransport` : après le PREMIER morceau reçu, demande l'interruption du tour
+/// (comme le fait le transport `Cancels` des tests de `mode_auto`). Le harnais ne voit que les
+/// morceaux, pas le moteur : c'est donc le transport qui coupe.
+struct Interrompt {
+    inner: ProviderTransport,
+    handle: Rc<RefCell<Option<this_harness::Handle>>>,
+    coupe: Rc<std::cell::Cell<bool>>,
+}
+
+#[async_trait(?Send)]
+impl Transport for Interrompt {
+    async fn stream(
+        &self,
+        request: &Request,
+        cancel: &Cancel,
+        delta: Delta,
+    ) -> Result<Reply, Failure> {
+        let handle = self.handle.clone();
+        let coupe = self.coupe.clone();
+        let relais: Delta = Rc::new(move |morceau: &str| {
+            delta(morceau);
+            if !coupe.get() {
+                coupe.set(true);
+                if let Some(h) = handle.borrow().as_ref() {
+                    h.interrupt();
+                }
+            }
+        });
+        self.inner.stream(request, cancel, relais).await
+    }
+
+    fn honors_route(&self) -> bool {
+        true
+    }
+}
+
+fn interrompt(base: &str) -> (Rc<Interrompt>, Rc<RefCell<Option<this_harness::Handle>>>) {
+    let handle = Rc::new(RefCell::new(None));
+    let transport = Rc::new(Interrompt {
+        inner: ProviderTransport::new(client(base, "qwen-test")),
+        handle: handle.clone(),
+        coupe: Rc::new(std::cell::Cell::new(false)),
+    });
+    (transport, handle)
+}
+
+/// Contrôle : sans annulation, le flux lent va jusqu'au bout. Sans ce témoin, « l'annulation a
+/// coupé » ne prouverait rien (un flux déjà court aurait fini de lui-même).
+#[tokio::test]
+async fn le_flux_lent_sans_annulation_va_jusqu_au_bout() {
+    let base = demarre_moteur().await;
+    let transport = temoin(client(&base, "qwen-test"));
+    let (harness, journal) = harness(transport, Rc::new(SansOutil));
+
+    let debut = std::time::Instant::now();
+    let issue = harness.send("SCENARIO:lent").await;
+    let duree = debut.elapsed();
+    let (stop, _, code) = stopped(&journal);
+    assert_eq!(issue, Running::Ran(Stop::Done), "{stop:?} {code:?}");
+    assert_eq!(deltas(&journal).len(), 10, "dix morceaux attendus");
+    assert!(
+        duree >= std::time::Duration::from_millis(1200),
+        "flux trop court : {duree:?}"
+    );
+}
+
+/// L'interruption en plein flux : le tour s'arrête, le moteur n'écrit plus (le client a coupé),
+/// et l'attente totale est bien inférieure à celle du flux complet.
+#[tokio::test]
+async fn une_annulation_en_plein_flux_coupe_le_tour_et_le_moteur() {
+    let base = demarre_moteur().await;
+    let (transport, handle) = interrompt(&base);
+    let (harness, journal) = harness(transport, Rc::new(SansOutil));
+    *handle.borrow_mut() = Some(harness.handle());
+
+    let debut = std::time::Instant::now();
+    let issue = harness.send("SCENARIO:lent").await;
+    let duree = debut.elapsed();
+    let (stop, _, code) = stopped(&journal);
+    let morceaux = deltas(&journal).len();
+
+    assert!(
+        matches!(issue, Running::Ran(Stop::Interrupted | Stop::Cancelled)),
+        "{issue:?} {stop:?} {code:?}"
+    );
+    assert!(
+        (1..10).contains(&morceaux),
+        "morceaux reçus avant coupure : {morceaux}"
+    );
+    assert!(
+        duree < std::time::Duration::from_millis(1000),
+        "le flux complet dure ~1,5 s ; coupé il doit finir avant : {duree:?}"
+    );
+    eprintln!("ANNULATION en flux : {morceaux}/10 morceaux reçus, arrêt {stop:?} en {duree:?}");
 }
