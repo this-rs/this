@@ -86,7 +86,7 @@ pub use session::{
 };
 pub use wire::{
     Code, Failure, Finish, ImagePart, ImageSource, Message, QuotaRefusal, QuotaScope, Reply,
-    Request, ThreadDefect, ToolCall, ToolSpec,
+    Request, ThreadDefect, ToolCall, ToolSpec, served_matches,
 };
 
 /// Le verdict que porte `Event::Stopped`.

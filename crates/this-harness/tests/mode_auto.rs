@@ -3683,3 +3683,19 @@ fn une_reponse_qui_nomme_le_modele_demande_rend_la_paire_atteinte() {
     assert_eq!(settled.len(), 1);
     assert_eq!(settled[0].served, Some(Pick::new("b", "m2")));
 }
+
+/// Un moteur qui nomme un INSTANTANÉ daté du modèle demandé (`m2-2024-08-06` pour `m2`) sert bien
+/// la paire : c'est ainsi que les moteurs résolvent un alias, et l'apprentissage ne doit pas en
+/// être rendu muet.
+#[test]
+fn une_reponse_qui_nomme_un_instantane_du_modele_demande_rend_la_paire_atteinte() {
+    let world = World::new(three_providers());
+    world.prefer(("b", "m2"), &[("a", "m1"), ("c", "m3")]);
+    let router = Rc::new(TurnRouter::new(world.spec("a", "m1", 1).auto()));
+    let (harness, _) = build(Rc::new(Nomme(Some("m2-2024-08-06"))), router, None);
+    assert_eq!(run(harness.send("hello")), Running::Ran(Stop::Done));
+
+    let settled = world.learning.settled();
+    assert_eq!(settled.len(), 1);
+    assert_eq!(settled[0].served, Some(Pick::new("b", "m2")));
+}
