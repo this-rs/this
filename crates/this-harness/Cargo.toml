@@ -26,6 +26,13 @@ sha2 = "0.10"
 # The clock the target actually has. A page has `Date.now`, a shell has the
 # system clock; asking either one for the other's API is a compile error, so
 # the dependency is per-target.
+# Le transport `ProviderTransport` (feature `providers`) : le client seul, HTTP à part.
+this-llm-providers = { version = "0.0.1", path = "../this-llm-providers", default-features = false, optional = true }
+
+[features]
+# Le transport adossé à `this-llm-providers` (client HTTP). Absent du wasm.
+providers = ["dep:this-llm-providers", "this-llm-providers/http"]
+
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 js-sys = "0.3"
 

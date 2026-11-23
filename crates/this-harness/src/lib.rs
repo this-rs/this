@@ -58,6 +58,8 @@ mod event;
 mod mcp;
 mod openai;
 mod ports;
+#[cfg(all(feature = "providers", not(target_arch = "wasm32")))]
+pub mod providers;
 mod recall;
 pub mod routing;
 mod search;
