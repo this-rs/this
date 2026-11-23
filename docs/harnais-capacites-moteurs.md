@@ -39,15 +39,15 @@ La matrice du §1 dit ce que le cœur garantit et ce que le transport doit fourn
 | **Modèle servi nommé** | **mesuré** : le moteur nomme `deepseek-flash`, ce nom arrive dans `Reply::served` | **mesuré** : un moteur qui nomme un autre modèle le dit au harnais | non mesuré |
 | **Clé refusée** | **mesuré** : `Stop::Failed`, code `http` (401), jamais `unreachable` | **mesuré** : statut 400 → `http` ; moteur injoignable → `unreachable`, rien servi | non mesuré |
 | **Usage réel (tokens)** | **mesuré côté client** : 45 jetons en entrée, 35 en sortie (21/11/2026) ; le cœur **ne le remonte pas** (`Reply` sans usage) | non applicable | non mesuré |
-| **Interruption en plein flux** | **non mesuré** sur un moteur réel | **mesuré** : coupure après le 1ᵉʳ morceau sur 10, `Cancelled` en 1,4 ms | non mesuré |
-| **Reprise après coupure** | **non mesuré** sur un moteur réel | **mesuré** : le message suivant aboutit sur le même harnais | non mesuré |
+| **Interruption en plein flux** | **mesuré** (23/11/2026, `raccordement_transport.rs`) : coupure après 19 morceaux de texte réel, arrêt `Cancelled` en 1,7 s | **mesuré** : coupure après le 1ᵉʳ morceau sur 10, `Cancelled` en 1,4 ms | non mesuré |
+| **Reprise après coupure** | **mesuré** (23/11/2026) : après la coupure, le message suivant aboutit (`stop=Done`, `pong`) | **mesuré** : le message suivant aboutit sur le même harnais | non mesuré |
 | **Images** | **non mesuré** (un modèle capable de vision reste à choisir) | **mesuré** : l'image jointe arrive au moteur sous forme `image_url` ; le simulé vérifie la **présence**, pas la lecture | non mesuré |
 | **Fenêtre de contexte** | **non mesuré** | non mesuré | non mesuré |
 | **Changement de modèle à chaud** | **non mesuré** sur un moteur réel (routeur testé avec des doublures de scénario) | non mesuré | non mesuré |
 | **Quota rendu par le transport** | **non fait** : un 429 reste `Http(429)`, le harnais ne devine pas | non applicable | non fait |
 | **Permissions (famille A)** | non applicable : `ProviderTransport` n'exécute pas les outils, le harnais le fait | non applicable | non mesuré |
 
-**Lecture.** Le seul moteur réel mesuré est DeepSeek, et sur quatre capacités seulement (streaming, outil, modèle servi, clé refusée) plus l'usage côté client. L'interruption, la reprise et les images sont prouvées **dans la mécanique** mais pas sur un fournisseur : un vrai moteur peut couper un flux autrement, ou refuser une image. Pour combler une case « non mesuré », il faut une exécution réelle datée (moteur, modèle, date UTC, SHA), pas un test de plus sur le simulé.
+**Lecture.** Le seul moteur réel mesuré est DeepSeek, sur six capacités (streaming, outil, modèle servi, clé refusée, interruption en plein texte, reprise) plus l'usage côté client. Les images restent prouvées **dans la mécanique** seulement, pas sur un fournisseur : un vrai moteur peut couper un flux autrement, ou refuser une image. Pour combler une case « non mesuré », il faut une exécution réelle datée (moteur, modèle, date UTC, SHA), pas un test de plus sur le simulé.
 
 ## 2. « Routé ≠ servi »
 
