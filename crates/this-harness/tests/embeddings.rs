@@ -187,6 +187,24 @@ fn une_revision_declaree_ne_se_melange_pas_avec_une_non_declaree() {
     );
 }
 
+/// Le message de refus est ce que l'hôte verra : il nomme les DEUX estampilles, avec leur
+/// révision, et dit « non déclarée » quand elle manque (jamais une chaîne vide).
+#[test]
+fn le_refus_d_espace_nomme_les_deux_estampilles_avec_leur_revision() {
+    let err = verifier_espace(&revision("rev-b"), &estampille(3)).unwrap_err();
+    let message = err.to_string();
+    assert!(
+        message.contains("rev-b"),
+        "révision attendue nommée : {message}"
+    );
+    assert!(
+        message.contains("révision non déclarée"),
+        "l'absence de révision est dite : {message}"
+    );
+    assert!(message.contains("bge-m3"), "le nom du modèle : {message}");
+    assert!(message.contains("3 dim."), "la dimension : {message}");
+}
+
 #[test]
 fn deux_estampilles_identiques_sont_compatibles() {
     assert_eq!(
