@@ -52,6 +52,8 @@
 //! handle.interrupt();                               // ou arrêté, et dit
 //! ```
 
+mod catalogue;
+mod catalogue_toolbox;
 mod context;
 mod embed;
 mod event;
@@ -66,6 +68,15 @@ mod search;
 mod session;
 mod wire;
 
+pub use catalogue::{
+    Catalog, CatalogError, CatalogHit, MAX_DESCRIPTION_CHARS, MAX_NAME_CHARS, MAX_STEPS, MAX_TOOLS,
+    MAX_VERSIONS, RecipeStep, SIMILAR_MIN, ToolChange, ToolDef, ToolDraft, ToolRecord, ToolStats,
+    ToolStatus, Usage, render_args, validate_args,
+};
+pub use catalogue_toolbox::{
+    AUTHOR, AUTO_LOAD, CatalogStore, CatalogToolbox, DEFAULT_FIND_LIMIT, DEFAULT_MAX_LOADED, FIND,
+    PREFIX,
+};
 pub use context::{Dropped, Fitted, Removal, estimate_tokens, fit, removable};
 pub use embed::{
     Embed, EmbedError, EmbeddingModel, SansEmbed, vecteur_dense, vectoriser, verifier,

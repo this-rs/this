@@ -140,6 +140,7 @@ liste de ce qui n'est **pas** qualifié. Un chemin sans preuve y est écrit
 | [harnais-autorisations.md](harnais-autorisations.md) | Qui détient chaque autorité, et où le contenu du modèle ne peut pas la produire | #287 |
 | [harnais-capacites-moteurs.md](harnais-capacites-moteurs.md) | Matrice par capacité, et « routé » ≠ « servi » | #288 |
 | [harnais-contexte-cognitif.md](harnais-contexte-cognitif.md) | Provenance du contexte : ce que le cœur porte, ce que l'hôte doit porter | #290 |
+| [harnais-catalogue-outils.md](harnais-catalogue-outils.md) | Un agent qui construit, retrouve, versionne et renforce ses outils — sans les recréer à tout va | — |
 
 ## 🔗 Useful Links
 
