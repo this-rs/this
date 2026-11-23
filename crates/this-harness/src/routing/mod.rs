@@ -30,6 +30,7 @@
 //! tableau d'écart et les divergences assumées sont dans
 //! `docs/harnais-mode-auto.md`.
 
+mod availability;
 mod candidate;
 mod decide;
 mod mode;
@@ -37,10 +38,11 @@ mod router;
 mod scorer;
 mod signature;
 
+pub use availability::{Availability, Gone, Standing};
 pub use candidate::{
     Candidate, Capabilities, CostBasis, Filtered, MAX_PRICE_PER_MTOK, MemoryQuota, Pick, Price,
-    QuotaExhaustion, QuotaView, RejectReason, Rejected, Slot, UnknownWindow, apply_quota, filter,
-    is_auto_model,
+    QuotaExhaustion, QuotaView, RejectReason, Rejected, Slot, Unavailable, UnknownWindow,
+    apply_quota, filter, is_auto_model,
 };
 pub use decide::{
     Alternative, DecideRequest, Decision, HYSTERESIS_MARGIN, HYSTERESIS_WARMUP, NO_CANDIDATE,
@@ -53,10 +55,11 @@ pub use mode::{
     conversation_stage, pool_spans_providers,
 };
 pub use router::{
-    AFTER_PROVIDER_MOVE, AFTER_QUOTA_LIMIT, EmptyPool, Learning, MemoryLearning, MemoryPool, Menu,
-    NARROWED_BY_PERSON, NoLearning, PERSON_LIST_UNAVAILABLE, PROVIDER_IMPOSED, PoolSource,
-    QuotaFallback, REPAIR_ATTEMPTS, Route, RouteWhy, Routed, RouterSpec, SAME_CLASS_NO_EXPLORE,
-    Seeds, SequenceSeeds, Settled, TurnInput, TurnRouter, restrict_to_person_list,
+    AFTER_PROVIDER_MOVE, AFTER_QUOTA_LIMIT, AFTER_UNAVAILABLE, EmptyPool, Learning, MemoryLearning,
+    MemoryPool, Menu, NARROWED_BY_PERSON, NoLearning, PERSON_LIST_UNAVAILABLE, PROVIDER_IMPOSED,
+    PoolSource, QuotaFallback, REPAIR_ATTEMPTS, Route, RouteWhy, Routed, RouterSpec,
+    SAME_CLASS_NO_EXPLORE, Seeds, SequenceSeeds, Settled, TurnInput, TurnRouter,
+    restrict_to_person_list,
 };
 pub use scorer::{
     ALIAS_DEEP, ALIAS_FAST, ArmKey, ArmStats, PriorHints, Scored, arm_key_of, beta_draw, prior_for,

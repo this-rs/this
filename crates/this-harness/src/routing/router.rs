@@ -18,7 +18,10 @@ use std::rc::Rc;
 use async_trait::async_trait;
 use this_agent::Stop;
 
-use super::candidate::{self, Candidate, Pick, Slot, is_auto_model, same_model, same_pair};
+use super::availability::Availability;
+use super::candidate::{
+    self, Candidate, Pick, Slot, Unavailable, is_auto_model, same_model, same_pair,
+};
 use super::decide::{DecideRequest, Decision, HYSTERESIS_MARGIN, decide, decide_after_limit};
 use super::mode::{
     ConversationRoutingMode, LearningStage, PoolEntry, ProviderRoutingMode, RoutingSettings,
@@ -41,6 +44,9 @@ pub const AFTER_PROVIDER_MOVE: &str = "after_provider_move";
 pub const PROVIDER_IMPOSED: &str = "provider_imposed";
 /// Suffixe de motif d'un repli après le refus du quota d'un modèle.
 pub const AFTER_QUOTA_LIMIT: &str = "after_quota_limit";
+
+/// Le repli après l'indisponibilité d'un modèle (hors quota) : le motif dit pourquoi le pool a été réduit.
+pub const AFTER_UNAVAILABLE: &str = "after_unavailable";
 
 /// La paire sur laquelle un tour part, telle qu'elle sort vers un transport.
 ///
@@ -237,6 +243,9 @@ pub enum RouteWhy {
     /// Le moteur a refusé parce que le quota du MODÈLE était épuisé : le tour repart sur
     /// un autre modèle de la même instance ([`TurnRouter::after_limit`]).
     QuotaFallback,
+    /// Le moteur a refusé CE modèle (inconnu de lui, serveur en erreur, silence) : le tour
+    /// repart sur un autre modèle de la même instance ([`TurnRouter::after_unavailable`]).
+    UnavailableFallback,
 }
 
 impl RouteWhy {
@@ -256,6 +265,7 @@ impl RouteWhy {
             Self::Superseded => "superseded",
             Self::TimedOut => "timed_out",
             Self::QuotaFallback => "quota_fallback",
+            Self::UnavailableFallback => "unavailable_fallback",
         }
     }
 }
@@ -278,7 +288,7 @@ pub struct Routed {
 pub struct QuotaFallback {
     /// Paire retenue pour le rejeu du tour.
     pub route: Route,
-    /// Motif de routage, toujours [`RouteWhy::QuotaFallback`].
+    /// Motif de routage : [`RouteWhy::QuotaFallback`] ou [`RouteWhy::UnavailableFallback`].
     pub why: RouteWhy,
     /// Explication lisible de la sélection.
     pub reason: String,
@@ -325,6 +335,10 @@ pub struct RouterSpec {
     pub needs_tools: bool,
     /// Qui parle.
     pub role: Role,
+    /// La mémoire des modèles que le moteur a refusés. `None` : le routeur en tient une à lui
+    /// (propre à cette conversation) ; une mémoire PARTAGÉE entre les routeurs de l'hôte fait
+    /// qu'un modèle refusé dans une conversation l'est pour toutes.
+    pub availability: Option<Rc<Availability>>,
 }
 
 impl RouterSpec {
@@ -349,7 +363,14 @@ impl RouterSpec {
             provider_imposed: false,
             needs_tools: true,
             role: Role::Pilot,
+            availability: None,
         }
+    }
+
+    /// Partage la mémoire d'indisponibilité de l'hôte avec ce routeur.
+    pub fn with_availability(mut self, availability: Rc<Availability>) -> Self {
+        self.availability = Some(availability);
+        self
     }
 
     /// La conversation est en Auto (`full`).
@@ -483,6 +504,7 @@ pub struct TurnRouter {
     seeds: Rc<dyn Seeds>,
     needs_tools: bool,
     role: Role,
+    availability: Rc<Availability>,
     state: RefCell<State>,
 }
 
@@ -569,6 +591,9 @@ impl TurnRouter {
             seeds: spec.seeds,
             needs_tools: spec.needs_tools,
             role: spec.role,
+            availability: spec
+                .availability
+                .unwrap_or_else(|| Rc::new(Availability::new())),
             state: RefCell::new(State {
                 choice: Choice {
                     routing,
@@ -592,6 +617,20 @@ impl TurnRouter {
                 generation: 0,
             }),
         }
+    }
+
+    /// La mémoire des modèles que le moteur a refusés : le harnais y inscrit ce qu'un tour
+    /// apprend ; l'hôte la lit pour l'afficher, la remettre, ou la garder d'un lancement à l'autre.
+    pub fn availability(&self) -> &Rc<Availability> {
+        &self.availability
+    }
+
+    /// Le pool de l'hôte, annoté de ce que la mémoire sait : un modèle que le moteur vient de
+    /// refuser n'est pas éligible, et le motif de rejet le dit.
+    async fn current_pool(&self) -> Vec<Candidate> {
+        let mut pool = self.pool.pool().await;
+        self.availability.annotate(&mut pool);
+        pool
     }
 
     /// Le menu de la conversation change **en cours de route** : Auto, un
@@ -761,7 +800,7 @@ impl TurnRouter {
         signature.role = self.role;
         let class = signature.arm_key();
 
-        let mut pool = self.pool.pool().await;
+        let mut pool = self.current_pool().await;
         if let Some(entries) = &choice.pool {
             pool.retain(|facts| listed(entries, facts));
         }
@@ -1050,6 +1089,56 @@ impl TurnRouter {
         refused: &[Pick],
         resets_at_ms: Option<u64>,
     ) -> Option<QuotaFallback> {
+        self.fall_back(
+            turn,
+            refused,
+            RouteWhy::QuotaFallback,
+            AFTER_QUOTA_LIMIT,
+            &|facts: &mut Candidate| {
+                facts.quota_exhausted = Some(candidate::QuotaExhaustion {
+                    resets_at_ms: resets_at_ms.unwrap_or(u64::MAX),
+                    window: Some(format!("model:{}", facts.model)),
+                });
+            },
+        )
+        .await
+    }
+
+    /// Le repli après l'indisponibilité d'UN modèle (inconnu du moteur, serveur en erreur, silence) :
+    /// même règle que [`Self::after_limit`] — même instance, jamais un modèle déjà refusé, jamais
+    /// un choix de la personne contourné, une chaîne bornée par l'appelant — le motif change
+    /// ([`RouteWhy::UnavailableFallback`]), et le modèle refusé est marqué indisponible (et non
+    /// épuisé) dans le pool de la décision.
+    pub async fn after_unavailable(
+        &self,
+        turn: TurnInput<'_>,
+        refused: &[Pick],
+    ) -> Option<QuotaFallback> {
+        self.fall_back(
+            turn,
+            refused,
+            RouteWhy::UnavailableFallback,
+            AFTER_UNAVAILABLE,
+            &|facts: &mut Candidate| {
+                facts.unavailable = Some(Unavailable {
+                    complete: false,
+                    reason: "refused this turn".to_string(),
+                });
+            },
+        )
+        .await
+    }
+
+    /// Le corps commun des replis : `mark` pose sur chaque paire déjà refusée pendant ce message
+    /// le fait qui la rend inéligible ; la décision est ensuite déterministe et jetable.
+    async fn fall_back(
+        &self,
+        turn: TurnInput<'_>,
+        refused: &[Pick],
+        why: RouteWhy,
+        narrowed: &'static str,
+        mark: &dyn Fn(&mut Candidate),
+    ) -> Option<QuotaFallback> {
         let last = refused.last()?;
         if !turn.honored {
             return None;
@@ -1067,7 +1156,7 @@ impl TurnRouter {
         signature.role = self.role;
         let class = signature.arm_key();
 
-        let mut pool = self.pool.pool().await;
+        let mut pool = self.current_pool().await;
         // Contrainte dure du repli, appliquée D'ABORD : un repli après quota ne change jamais
         // d'instance (`restrict_provider` plus bas le redit à la décision). Le filtre de liste
         // de la personne doit la voir : sinon une paire listée d'une AUTRE instance, éligible,
@@ -1086,10 +1175,7 @@ impl TurnRouter {
                 .iter()
                 .any(|p| p.provider_id == facts.provider_id && same_model(&p.model, &facts.model))
             {
-                facts.quota_exhausted = Some(candidate::QuotaExhaustion {
-                    resets_at_ms: resets_at_ms.unwrap_or(u64::MAX),
-                    window: Some(format!("model:{}", facts.model)),
-                });
+                mark(facts);
             }
         }
         if let Some(entries) = &choice.pool {
@@ -1116,7 +1202,7 @@ impl TurnRouter {
         let mut request = DecideRequest::new(signature, settings, pool);
         request.restrict_provider = Some(last.provider_id.clone());
         request.steady = true;
-        request.narrowed.push(AFTER_QUOTA_LIMIT);
+        request.narrowed.push(narrowed);
 
         let arms = self.learning.arms(&class).await;
         let hints = self.learning.hints();
@@ -1147,7 +1233,7 @@ impl TurnRouter {
         }
         Some(QuotaFallback {
             route: Route::of(&chosen.provider_id, &chosen.model),
-            why: RouteWhy::QuotaFallback,
+            why,
             reason: decision.reason,
         })
     }
