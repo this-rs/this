@@ -69,6 +69,7 @@ mod wire;
 pub use context::{Dropped, Fitted, Removal, estimate_tokens, fit, removable};
 pub use embed::{
     Embed, EmbedError, EmbeddingModel, SansEmbed, vecteur_dense, vectoriser, verifier,
+    verifier_espace,
 };
 pub use event::{Event, EventJson, EventWire, HintKind, Outcome, Pending, Snapshot, UnknownEvent};
 pub use mcp::{McpLink, McpServer, McpToolbox};
