@@ -227,6 +227,7 @@ impl Transport for Repond {
     async fn stream(&self, request: &Request, _: &Cancel, _: Delta) -> Result<Reply, Failure> {
         self.0.borrow_mut().push(request.thread());
         Ok(Reply {
+            served: None,
             text: "fait".into(),
             calls: vec![],
             finish: Finish::Stop,

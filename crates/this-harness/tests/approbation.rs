@@ -26,6 +26,7 @@ impl Transport for Engine {
     async fn stream(&self, _: &Request, _: &Cancel, _: Delta) -> Result<Reply, Failure> {
         self.streams.set(self.streams.get() + 1);
         Ok(Reply {
+            served: None,
             text: "fini".into(),
             calls: vec![],
             finish: Finish::Stop,

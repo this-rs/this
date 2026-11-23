@@ -319,6 +319,10 @@ pub struct Reply {
     pub text: String,
     pub calls: Vec<ToolCall>,
     pub finish: Finish,
+    /// Le modèle que le moteur NOMME dans sa réponse (#288, routé ≠ servi). Il doit être celui
+    /// que CETTE tentative a demandé pour que la paire routée soit réputée atteinte. `None` : la
+    /// réponse n'en nomme aucun, et le harnais n'apprend alors rien de ce tour.
+    pub served: Option<String>,
 }
 
 /// La famille d'une panne de transport. Un code se commute, un message se lit.

@@ -30,12 +30,14 @@ impl Transport for AsksOnce {
     async fn stream(&self, _: &Request, _: &Cancel, _: Delta) -> Result<Reply, Failure> {
         if self.asked.replace(true) {
             return Ok(Reply {
+                served: None,
                 text: "fini".into(),
                 calls: vec![],
                 finish: Finish::Stop,
             });
         }
         Ok(Reply {
+            served: None,
             text: String::new(),
             calls: vec![ToolCall {
                 id: "c1".into(),
@@ -235,6 +237,7 @@ struct AsksToujours {
 impl Transport for AsksToujours {
     async fn stream(&self, _: &Request, _: &Cancel, _: Delta) -> Result<Reply, Failure> {
         Ok(Reply {
+            served: None,
             text: String::new(),
             calls: vec![ToolCall {
                 id: "c1".into(),
