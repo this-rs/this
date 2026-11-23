@@ -14,15 +14,13 @@ Méthode : lecture de `event.rs` en entier, des points d'émission dans
 - `Event` est un enum serde **taggé** `type`, `rename_all = "snake_case"`, et marqué
   `#[non_exhaustive]` (`crates/this-harness/src/event.rs:36,39`).
 - `#[non_exhaustive]` protège le `match` Rust (il force un bras `_` chez le consommateur) ;
-  il ne change **rien** à la désérialisation. Avec `#[serde(tag = "type")]`, une variante
-  `type` inconnue fait échouer `serde_json::from_str::<Event>` (erreur `unknown variant`).
-  `Event` n'a **aucune** variante de repli `#[serde(other)]`, contrairement à
-  `HintKind::Other` (`event.rs:204`, `#[serde(other)]`) et à `Verdict::Unknown`
-  (test `un_verdict_inconnu_se_lit_unknown`, `event.rs` module tests). Le repli par genre
-  d'indice est même explicite : `kind_or_other` (`event.rs:268`) et le test
-  `un_genre_nul_absent_ou_inconnu_vaut_other`. **Il n'y a pas d'équivalent pour l'enum
-  `Event`** : ce constat est confirmé, et aucun test ne couvre la lecture d'un `type`
-  d'événement inconnu (manque, voir §4).
+  il ne change **rien** à la désérialisation. `Event` a une variante de repli
+  `#[serde(other)] Unknown` (`event.rs`, ajoutée par #301) : un `type` inconnu se lit donc
+  **sans erreur**, comme `HintKind::Other` et `Verdict::Unknown`. Ce repli est **lossy** :
+  c'est une variante unitaire, le nom du `type` et le payload sont perdus. Une lecture fidèle
+  passe par `UnknownEvent` / `EventJson` (§3), pas par `Event`.
+  Constat corrigé le 23/11/2026 : la version précédente affirmait l'absence de repli, ce qui
+  était faux ; un test (`event.rs`, tests du module) le verrouille désormais.
 - Les événements bruts ne portent **ni `session_id`, ni `run_id`, ni `seq`** : un
   `grep` sur `crates/this-harness/src/` ne trouve aucun de ces champs dans les variantes
   d'`Event`. L'identité et l'ordre existent ailleurs (voir §3) : `Handle::generation()`
@@ -100,7 +98,7 @@ Décisions, tranchées explicitement :
 - **Comportement face à un événement futur.** La convention du code est « additif,
   ignorable » (doc `event.rs:125-130` pour `Compacted`, `event.rs:143-149` pour `Routed`).
   Mais elle ne tient qu'avec un lecteur **indulgent** : `serde_json::from_str::<Event>`
-  échoue sur un `type` inconnu. La décision est donc : **conserver en `Unknown`** (garder
+  ne garde pas le `type` inconnu (repli `Event::Unknown`, sans payload). La décision est donc : **conserver en `Unknown`** (garder
   le payload brut et le `type`, avancer le curseur), jamais « ignorer en silence » (on
   perdrait l'information) et jamais « refuser nommément » (un hôte ancien face à un cœur
   plus récent casserait). Concrètement : lire dans `serde_json::Value`, dispatcher sur
