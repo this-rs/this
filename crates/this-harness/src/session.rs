@@ -1314,6 +1314,8 @@ impl Harness {
             // non qualifié) avant tout repli : elle a été atteinte, l'état ne doit pas revenir à
             // l'avant du changement, même si un repli termine l'objectif (revue de #321).
             let mut decided_served = false;
+            // Le moteur a-t-il NOMMÉ, dans sa dernière réponse, le modèle demandé ? (#288)
+            let mut confirmed = false;
             // L'identité du run, stable pour toutes ses étapes.
             let run_id = self.with(|s| {
                 s.run_seq += 1;
@@ -1513,6 +1515,15 @@ impl Harness {
                     // vie au début du tour — et ne sert pas non plus. Dans tous ces cas, un
                     // morceau reçu AVANT la panne a déjà posé `answered` par `delta` : c'est
                     // lui, pas le code de panne, qui dit si le moteur a parlé.
+                    // Routé ≠ servi (#288) : une RÉPONSE réussie doit nommer le modèle que CETTE
+                    // tentative a demandé ; un autre nom, ou aucun, ne réputera pas la paire atteinte.
+                    // Une panne n'a pas de réponse à vérifier : elle garde la règle d'avant.
+                    confirmed = match &issue {
+                        Ok(Ok(reply)) => request
+                            .model()
+                            .is_some_and(|asked| reply.served.as_deref() == Some(asked)),
+                        _ => true,
+                    };
                     let repondu = match &issue {
                         Ok(Ok(_)) => true,
                         Ok(Err(failure)) => !matches!(
@@ -1527,7 +1538,10 @@ impl Harness {
                     // La paire décidée a SERVI ce tour : elle a parlé, ou répondu autre chose
                     // qu'un refus de quota qualifié (celui-là déclenche le repli : il n'a rien servi).
                     let refus_de_quota = matches!(&issue, Ok(Err(f)) if f.quota.is_some());
-                    if !quota_fell_back && (parle.get() || (repondu && !refus_de_quota)) {
+                    if !quota_fell_back
+                        && confirmed
+                        && (parle.get() || (repondu && !refus_de_quota))
+                    {
                         decided_served = true;
                     }
 
@@ -1881,8 +1895,13 @@ impl Harness {
                     // récompense) ? Un repli sépare les deux : la paire décidée peut avoir servi
                     // ses premiers tours sans que la fin de l'objectif soit la sienne.
                     let honors = transport.honors_route() && answered.get();
-                    let reached = honors && (!quota_fell_back || decided_served);
-                    let credited = honors && !quota_fell_back;
+                    let reached = honors
+                        && (if quota_fell_back {
+                            decided_served
+                        } else {
+                            confirmed
+                        });
+                    let credited = honors && !quota_fell_back && confirmed;
                     let settle = router.settle_served(&ending, code.as_deref(), reached, credited);
                     let _ = race(settle, cut(clock.as_ref(), ROUTER_TIMEOUT_MS, None)).await;
                 }
@@ -3358,6 +3377,7 @@ mod tests {
                 .pop_front()
                 .unwrap_or(Acte::Dit("fini"));
             let avec_appel = Reply {
+                served: None,
                 text: String::new(),
                 calls: vec![appel()],
                 finish: Finish::Tools,
@@ -3376,6 +3396,7 @@ mod tests {
                         delta("");
                     }
                     Ok(Reply {
+                        served: None,
                         text: "fini".to_string(),
                         calls: vec![],
                         finish: Finish::Stop,
@@ -3387,6 +3408,7 @@ mod tests {
                         delta(KEEP_ALIVE);
                     }
                     Ok(Reply {
+                        served: None,
                         text: "fini".to_string(),
                         calls: vec![],
                         finish: Finish::Stop,
@@ -3397,6 +3419,7 @@ mod tests {
                 Acte::Dit(texte) => {
                     delta(texte);
                     Ok(Reply {
+                        served: None,
                         text: texte.to_string(),
                         calls: vec![],
                         finish: Finish::Stop,

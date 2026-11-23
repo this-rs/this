@@ -132,6 +132,7 @@ impl Transport for LachePuisRepond {
             std::future::pending::<Result<Reply, Failure>>().await
         } else {
             Ok(Reply {
+                served: None,
                 text: "fini".into(),
                 calls: vec![],
                 finish: Finish::Stop,
@@ -188,6 +189,7 @@ fn un_puits_reentrant_ne_panique_pas() {
     impl Transport for Conclut {
         async fn stream(&self, _: &Request, _: &Cancel, _: Delta) -> Result<Reply, Failure> {
             Ok(Reply {
+                served: None,
                 text: "fini".into(),
                 calls: vec![],
                 finish: Finish::Stop,
@@ -247,6 +249,7 @@ impl Transport for Lent {
         self.appels.set(self.appels.get() + 1);
         std::thread::sleep(std::time::Duration::from_millis(self.duree_ms));
         Ok(Reply {
+            served: None,
             text: String::new(),
             calls: vec![ToolCall {
                 id: "a1".into(),
@@ -314,6 +317,7 @@ impl Transport for ToujoursContinue {
         self.appels.set(self.appels.get() + 1);
         UnTourDeMain(false).await;
         Ok(Reply {
+            served: None,
             text: String::new(),
             calls: vec![],
             finish: Finish::Stop,
@@ -374,6 +378,7 @@ fn l_annulation_atteint_les_outils() {
     impl Transport for Demande {
         async fn stream(&self, _: &Request, _: &Cancel, _: Delta) -> Result<Reply, Failure> {
             Ok(Reply {
+                served: None,
                 text: String::new(),
                 calls: vec![ToolCall {
                     id: "a1".into(),
@@ -515,6 +520,7 @@ impl Transport for DemandeUnOutilPuisConclut {
         self.0.set(n + 1);
         if n == 0 {
             Ok(Reply {
+                served: None,
                 text: String::new(),
                 calls: vec![ToolCall {
                     id: "c1".into(),
@@ -525,6 +531,7 @@ impl Transport for DemandeUnOutilPuisConclut {
             })
         } else {
             Ok(Reply {
+                served: None,
                 text: "fini".into(),
                 calls: vec![],
                 finish: Finish::Stop,

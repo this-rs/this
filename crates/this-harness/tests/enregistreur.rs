@@ -26,6 +26,7 @@ impl Transport for Engine {
         };
         Ok(if n == 1 {
             Reply {
+                served: None,
                 text: String::new(),
                 calls: vec![ToolCall {
                     id: "t1".into(),
@@ -36,6 +37,7 @@ impl Transport for Engine {
             }
         } else {
             Reply {
+                served: None,
                 text: "fini".into(),
                 calls: vec![],
                 finish: Finish::Stop,

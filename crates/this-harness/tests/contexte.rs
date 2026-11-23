@@ -28,6 +28,7 @@ impl Transport for Script {
     ) -> Result<Reply, Failure> {
         self.seen.borrow_mut().push(request.clone());
         let reply = self.replies.borrow_mut().pop_front().unwrap_or(Reply {
+            served: None,
             text: "fini".to_string(),
             calls: vec![],
             finish: Finish::Stop,
@@ -155,6 +156,7 @@ fn contexte_none_ne_change_rien() {
 #[test]
 fn contexte_recalcule_a_chaque_tour() {
     let transport = script(vec![Reply {
+        served: None,
         text: String::new(),
         calls: vec![ToolCall {
             id: "a1".to_string(),

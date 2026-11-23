@@ -70,6 +70,7 @@ pub struct Scripted {
 }
 pub fn say(text: &str) -> Reply {
     Reply {
+        served: None,
         text: text.into(),
         calls: vec![],
         finish: Finish::Stop,
@@ -77,6 +78,7 @@ pub fn say(text: &str) -> Reply {
 }
 pub fn call(id: &str) -> Reply {
     Reply {
+        served: None,
         text: String::new(),
         calls: vec![ToolCall {
             id: id.into(),
@@ -256,6 +258,7 @@ pub fn un_transport_muet_en_boucle_est_borne() {
 pub fn mille_appels_dans_un_tour_restent_ranges() {
     let t = transport(vec![Box::new(|_, _| {
         Ok(Reply {
+            served: None,
             text: String::new(),
             calls: (0..1000)
                 .map(|i| ToolCall {
@@ -315,6 +318,7 @@ pub fn interrupt_pendant_un_outil_puis_nouveau_send() {
     let entered = Rc::new(Cell::new(false));
     let t = transport(vec![Box::new(|_, _| {
         Ok(Reply {
+            served: None,
             text: String::new(),
             calls: vec![call("c1").calls.remove(0), call("c2").calls.remove(0)],
             finish: Finish::Tools,

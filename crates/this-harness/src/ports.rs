@@ -154,6 +154,9 @@ pub trait Transport {
     /// pour le tour — lit-il [`Request::model`] et [`Request::provider`] pour
     /// parler au bon moteur ? Faux par défaut : un transport qui ne le déclare
     /// pas sert son modèle à lui.
+    /// Et le déclarer ne suffit pas : la réponse doit NOMMER le modèle servi (`Reply::served`)
+    /// égal à celui demandé pour que la paire soit réputée atteinte. Une réponse qui n'en nomme
+    /// aucun, ou un autre, n'apprend rien au routeur (#288, routé ≠ servi).
     ///
     /// Tant que c'est faux, la décision du routeur est **consultative** :
     /// [`crate::Event::Routed`] porte `advisory: true`, l'état servi du routeur ne

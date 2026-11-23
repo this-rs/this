@@ -103,6 +103,7 @@ impl Script {
 
 fn demande() -> Reply {
     Reply {
+        served: None,
         text: String::new(),
         calls: vec![ToolCall {
             id: "c1".into(),
@@ -115,6 +116,7 @@ fn demande() -> Reply {
 
 fn fini() -> Reply {
     Reply {
+        served: None,
         text: "fini".into(),
         calls: vec![],
         finish: Finish::Stop,
