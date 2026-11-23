@@ -1578,9 +1578,13 @@ impl Harness {
                         }
                         _ => None,
                     };
+                    // Seule une paire SERVIE se note. Un transport qui n'honore pas la route
+                    // sert sa propre paire : noter la paire conseillée punirait un modèle
+                    // jamais joint (#288).
                     if let Some(router) = &self.router
                         && let Some(current) = &route
                         && let Some(model) = current.model()
+                        && transport.honors_route()
                     {
                         let pick = crate::routing::Pick::new(current.provider(), model);
                         router.availability().advance(clock.now_ms());

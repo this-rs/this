@@ -4093,3 +4093,53 @@ fn un_quota_de_modele_est_aussi_retenu_pour_le_message_suivant() {
         moteur.paires()
     );
 }
+
+/// Un moteur qui ignore la route demandée (`honors_route = false`) : il sert SA paire,
+/// pas celle que le routeur a conseillée. Même panne que [`Pannes`].
+struct SansRoute(Rc<Pannes>);
+
+#[async_trait(?Send)]
+impl Transport for SansRoute {
+    async fn stream(
+        &self,
+        request: &Request,
+        cancel: &Cancel,
+        delta: Delta,
+    ) -> Result<Reply, Failure> {
+        self.0.stream(request, cancel, delta).await
+    }
+
+    fn honors_route(&self) -> bool {
+        false
+    }
+}
+
+/// #288 : la santé des fournisseurs ne se note que sur la paire que le moteur a SERVIE.
+/// Un moteur qui ignore la route et tombe en panne ne doit pas faire passer la paire
+/// conseillée (jamais servie) pour indisponible.
+#[test]
+fn un_moteur_qui_ignore_la_route_ne_marque_pas_la_paire_conseillee() {
+    let (_, router) = routeur_a();
+    let moteur = Pannes::new(vec![("m1", Failure::http(503))]);
+    let transport = Rc::new(SansRoute(moteur.clone()));
+    let journal: Journal = Rc::new(RefCell::new(Vec::new()));
+    let sink = journal.clone();
+    let harness = Harness::new(
+        "tu es l'atelier",
+        Limits::default(),
+        transport,
+        Rc::new(Compte(Rc::new(std::cell::Cell::new(0)))),
+        move |event| sink.borrow_mut().push(event),
+    )
+    .with_router(router.clone())
+    .with_clock(Rc::new(Fast(std::cell::Cell::new(0.0))));
+
+    // Le tour échoue (503 sans repli) : on ne juge pas son issue ici, seulement la note.
+    let _ = run(harness.send("premier"));
+
+    assert!(
+        router.availability().standing().is_empty(),
+        "paire conseillée non servie : rien à retenir contre elle : {:?}",
+        router.availability().standing()
+    );
+}
