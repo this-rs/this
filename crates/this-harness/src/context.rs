@@ -209,6 +209,35 @@ pub fn removable(messages: &[Message], budget: usize) -> Removal {
     removal
 }
 
+/// Jetons attendus pour le texte d'un résumé (hors enveloppe). Un résumé plus gros
+/// que cela n'est pas refusé d'avance : la garde de refit de la compaction le
+/// rejette s'il ne tient plus, et le tour replie sur le rognage.
+pub const RESUME_ATTENDU_TOKENS: usize = 128;
+
+/// Jetons à réserver, avant d'appeler le compacteur, pour le résumé qu'il rendra.
+///
+/// Le résumé revient enfermé dans un conteneur `<untrusted_data>` : c'est un
+/// surcoût **constant**, mesuré et non codé en dur — on enveloppe un corps vide
+/// avec le même `wrap_with` et le même `nonce` que le résumé réel, puis on
+/// compte ce message comme [`fit`] le comptera. S'y ajoute
+/// [`RESUME_ATTENDU_TOKENS`] pour le texte lui-même.
+///
+/// POURQUOI réserver : [`removable`] ne retire qu'assez pour que le fil restant
+/// tienne. La place laissée est arbitraire ; un résumé enveloppé qui dépasse
+/// cette place est écarté par `fit` (il est le plus ancien). Sans réserve, la
+/// compaction échoue dès que la marge est plus petite que l'enveloppe.
+pub fn reserve_resume(nonce: &str) -> usize {
+    let enveloppe = this_agent::untrusted::wrap_with(nonce, usize::MAX, "compaction", &[], "");
+    estimate_tokens(&[Message::user(enveloppe)]).saturating_add(RESUME_ATTENDU_TOKENS)
+}
+
+/// [`removable`] avec la place du résumé réservée ([`reserve_resume`]) : ce qui
+/// est résumé est un peu plus que ce que [`fit`] jetterait, voulu. Un tour de
+/// plus part dans le résumé pour que celui-ci tienne après enveloppe.
+pub fn removable_avec_resume(messages: &[Message], budget: usize, nonce: &str) -> Removal {
+    removable(messages, budget.saturating_sub(reserve_resume(nonce)))
+}
+
 /// Les messages que [`fit`] retirerait, et ce qu'ils coûtent.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Removal {
