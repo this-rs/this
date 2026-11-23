@@ -137,6 +137,13 @@ pub enum Event {
     /// n'est réellement servie que si le transport l'honore
     /// ([`crate::Transport::honors_route`]) ; sinon `advisory` vaut `true`.
     ///
+    /// Le modèle que le moteur déclare AVOIR servi (#288). Émis à chaque réponse qui en nomme
+    /// un, avec OU sans routeur : c'est un fait sur le moteur, pas une sortie du routeur. Il
+    /// reste identique entre les deux modes (contrat de `mode_auto`). Distinct du modèle demandé.
+    Served {
+        /// Le nom tel que le moteur le déclare.
+        served: String,
+    },
     /// Émis une fois par message tenu, **seulement** quand un routeur est branché
     /// (`Harness::with_router`) : sans routeur, aucun événement de plus. Additif :
     /// un client qui ne connaît pas ce type l'ignore.
@@ -247,6 +254,7 @@ impl Event {
             Self::Trimmed { .. } => "trimmed",
             Self::Compacted { .. } => "compacted",
             Self::Routed { .. } => "routed",
+            Self::Served { .. } => "served",
             Self::Stopped { .. } => "stopped",
             Self::Unknown => "unknown",
         }
@@ -270,6 +278,7 @@ const TYPES_CONNUS: &[&str] = &[
     "spoke",
     "trimmed",
     "compacted",
+    "served",
     "routed",
     "stopped",
 ];

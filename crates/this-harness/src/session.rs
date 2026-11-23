@@ -1538,6 +1538,15 @@ impl Harness {
                         }),
                         _ => true,
                     };
+                    // #288 : le modèle que le moteur déclare avoir servi est dit à l'hôte, même
+                    // quand il diffère du demandé (il n'est jamais deviné, seulement relayé).
+                    if let Ok(Ok(reply)) = &issue
+                        && let Some(served) = &reply.served
+                    {
+                        self.out.emit(Event::Served {
+                            served: served.clone(),
+                        });
+                    }
                     let repondu = match &issue {
                         Ok(Ok(_)) => true,
                         Ok(Err(failure)) => !matches!(
