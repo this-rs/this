@@ -25,6 +25,7 @@ impl Transport for Grossit {
         let id = format!("a{}", fil.len());
         self.0.borrow_mut().push(fil);
         Ok(Reply {
+            served: None,
             text: String::new(),
             calls: vec![ToolCall {
                 id,

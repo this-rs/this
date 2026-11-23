@@ -59,6 +59,7 @@ impl Transport for Script {
             delta(morceau);
         }
         Ok(Reply {
+            served: None,
             text: tour.texte.to_string(),
             calls: tour.appels,
             finish: tour.finish,

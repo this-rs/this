@@ -104,6 +104,7 @@ impl Toolbox for Tools {
 
 fn dit(text: &str) -> Reply {
     Reply {
+        served: None,
         text: text.to_string(),
         calls: vec![],
         finish: Finish::Stop,
@@ -112,6 +113,7 @@ fn dit(text: &str) -> Reply {
 
 fn appelle(id: &str) -> Reply {
     Reply {
+        served: None,
         text: String::new(),
         calls: vec![ToolCall {
             id: id.to_string(),

@@ -771,12 +771,17 @@ impl Transport for Script {
     ) -> Result<Reply, Failure> {
         self.seen.borrow_mut().push(request.clone());
         let reply = self.replies.borrow_mut().pop_front().unwrap_or(Reply {
+            served: None,
             text: "fini".to_string(),
             calls: vec![],
             finish: Finish::Stop,
         });
         delta(&reply.text);
-        Ok(reply)
+        // Il nomme le modèle qu'il a servi : c'est ce que le harnais vérifie (#288).
+        Ok(Reply {
+            served: request.model().map(str::to_owned),
+            ..reply
+        })
     }
 
     // Ce faux moteur lit la paire : il simule un transport qui honore le routeur.
@@ -822,6 +827,7 @@ fn harnais(transport: Rc<Script>, router: Option<Rc<TurnRouter>>) -> (Harness, J
 
 fn asks_a_tool() -> Reply {
     Reply {
+        served: None,
         text: String::new(),
         calls: vec![ToolCall {
             id: "a1".to_string(),
@@ -1279,6 +1285,7 @@ impl Transport for FailsOnce {
         }
         delta("fini");
         Ok(Reply {
+            served: _request.model().map(str::to_owned),
             text: "fini".to_string(),
             calls: vec![],
             finish: Finish::Stop,
@@ -2367,6 +2374,7 @@ struct Silent;
 impl Transport for Silent {
     async fn stream(&self, _r: &Request, _c: &Cancel, _d: Delta) -> Result<Reply, Failure> {
         Ok(Reply {
+            served: _r.model().map(str::to_owned),
             text: "fini".to_string(),
             calls: vec![],
             finish: Finish::Stop,
@@ -2550,10 +2558,18 @@ impl Transport for Quotas {
         }
         self.servis.set(self.servis.get() + 1);
         if self.outil_d_abord && self.servis.get() == 1 {
-            return Ok(asks_a_tool());
+            return Ok(Reply {
+                served: request.model().map(str::to_owned),
+                ..asks_a_tool()
+            });
         }
         delta("fini");
         Ok(Reply {
+            served: if self.honore {
+                request.model().map(str::to_owned)
+            } else {
+                None
+            },
             text: "fini".to_string(),
             calls: vec![],
             finish: Finish::Stop,
@@ -3186,10 +3202,14 @@ impl Transport for Scenario {
             temps.set(temps.get() + ms);
         }
         match rep {
-            Rep::Outil => Ok(asks_a_tool()),
+            Rep::Outil => Ok(Reply {
+                served: request.model().map(str::to_owned),
+                ..asks_a_tool()
+            }),
             Rep::Fini => {
                 delta("fini");
                 Ok(Reply {
+                    served: request.model().map(str::to_owned),
                     text: "fini".to_string(),
                     calls: vec![],
                     finish: Finish::Stop,
@@ -3595,4 +3615,71 @@ fn route_ordinaire_retient_la_paire_en_vigueur_listee_mais_invalide() {
         on("a", "m2"),
         "constat : la paire invalide est retenue"
     );
+}
+
+/// Un moteur qui HONORE la paire et nomme `nomme` dans sa réponse (#288, routé ≠ servi) :
+/// le modèle demandé, un autre, ou aucun.
+struct Nomme(Option<&'static str>);
+
+#[async_trait(?Send)]
+impl Transport for Nomme {
+    async fn stream(&self, _r: &Request, _c: &Cancel, delta: Delta) -> Result<Reply, Failure> {
+        delta("fini");
+        Ok(Reply {
+            served: self.0.map(str::to_owned),
+            text: "fini".to_string(),
+            calls: vec![],
+            finish: Finish::Stop,
+        })
+    }
+
+    fn honors_route(&self) -> bool {
+        true
+    }
+}
+
+/// Une réponse qui nomme un AUTRE modèle que celui demandé ne rend pas la paire atteinte :
+/// le harnais n'apprend pas sur un modèle qui n'a pas servi.
+#[test]
+fn une_reponse_qui_nomme_un_autre_modele_ne_rend_pas_la_paire_atteinte() {
+    let world = World::new(three_providers());
+    world.prefer(("b", "m2"), &[("a", "m1"), ("c", "m3")]);
+    let router = Rc::new(TurnRouter::new(world.spec("a", "m1", 1).auto()));
+    let (harness, _) = build(Rc::new(Nomme(Some("autre-modele"))), router, None);
+    assert_eq!(run(harness.send("hello")), Running::Ran(Stop::Done));
+
+    let settled = world.learning.settled();
+    assert_eq!(settled.len(), 1);
+    assert_eq!(settled[0].served, None, "le moteur a servi autre chose");
+}
+
+/// Une réponse qui ne nomme aucun modèle ne réputé pas la paire atteinte non plus.
+#[test]
+fn une_reponse_sans_nom_de_modele_ne_rend_pas_la_paire_atteinte() {
+    let world = World::new(three_providers());
+    world.prefer(("b", "m2"), &[("a", "m1"), ("c", "m3")]);
+    let router = Rc::new(TurnRouter::new(world.spec("a", "m1", 1).auto()));
+    let (harness, _) = build(Rc::new(Nomme(None)), router, None);
+    assert_eq!(run(harness.send("hello")), Running::Ran(Stop::Done));
+
+    let settled = world.learning.settled();
+    assert_eq!(settled.len(), 1);
+    assert_eq!(
+        settled[0].served, None,
+        "rien n'a été nommé : rien n'est appris"
+    );
+}
+
+/// Témoin : le moteur nomme le modèle demandé, la paire est bien atteinte.
+#[test]
+fn une_reponse_qui_nomme_le_modele_demande_rend_la_paire_atteinte() {
+    let world = World::new(three_providers());
+    world.prefer(("b", "m2"), &[("a", "m1"), ("c", "m3")]);
+    let router = Rc::new(TurnRouter::new(world.spec("a", "m1", 1).auto()));
+    let (harness, _) = build(Rc::new(Nomme(Some("m2"))), router, None);
+    assert_eq!(run(harness.send("hello")), Running::Ran(Stop::Done));
+
+    let settled = world.learning.settled();
+    assert_eq!(settled.len(), 1);
+    assert_eq!(settled[0].served, Some(Pick::new("b", "m2")));
 }
