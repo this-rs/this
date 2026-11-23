@@ -888,9 +888,12 @@ fn sans_routeur_la_requete_ne_porte_rien_et_aucun_evenement_de_plus_ne_sort() {
     };
     assert_eq!(threads(&bare), threads(&auto));
     assert_eq!(bare_transcript, auto_transcript);
+    // `served` (#288) n'existe que si la requête NOMME un modèle : le routeur en fournit un,
+    // le run nu non. C'est le moteur qui le déclare, pas le routeur qui l'invente : on
+    // l'exclut de la comparaison comme `routed`, et seulement lui.
     let without_routed: Vec<_> = names(&auto_journal)
         .into_iter()
-        .filter(|n| *n != "routed")
+        .filter(|n| *n != "routed" && *n != "served")
         .collect();
     assert_eq!(names(&bare_journal), without_routed);
 }
