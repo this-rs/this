@@ -48,7 +48,7 @@ this-llm-providers = { version = "0.0.1", path = "../this-llm-providers", defaul
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
 # Seulement pour le raccordement réel opt-in (`tests/raccordement_transport.rs`) : le client
 # HTTP exige un runtime. La bibliothèque elle-même n'en apporte aucun.
-tokio = { version = "1", features = ["rt", "macros"] }
+tokio = { version = "1", features = ["rt", "macros", "net", "io-util"] }
 
 [target.'cfg(target_arch = "wasm32")'.dev-dependencies]
 wasm-bindgen-test = "0.3.80"
