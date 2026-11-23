@@ -58,7 +58,7 @@ async fn moteur(listener: TcpListener) {
                 }
             }
             let requete = String::from_utf8_lossy(&brut).to_string();
-            if requete.contains("SCENARIO:lent") {
+            if dernier_utilisateur(&requete).contains("SCENARIO:lent") {
                 // Un flux LENT : dix morceaux espacés de 150 ms, écrits au fil de l'eau. Un client
                 // qui coupe voit le moteur s'arrêter d'écrire ; le flux complet dure ~1,5 s.
                 let entete = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n";
@@ -87,6 +87,21 @@ async fn moteur(listener: TcpListener) {
             let _ = socket.shutdown().await;
         });
     }
+}
+
+/// Le texte du DERNIER message utilisateur de la requête. Un scénario se décide sur le tour
+/// en cours, pas sur l'historique : sinon un marqueur resterait actif pour toujours.
+fn dernier_utilisateur(requete: &str) -> &str {
+    // `serde_json` trie les clés : `content` peut précéder `role`. On prend donc l'OBJET entier
+    // qui porte le dernier `"role":"user"`, de son `{` à son `}`.
+    let Some(position) = requete.rfind("\"role\":\"user\"") else {
+        return "";
+    };
+    let debut = requete[..position].rfind('{').unwrap_or(0);
+    let fin = requete[position..]
+        .find('}')
+        .map_or(requete.len(), |i| position + i + 1);
+    &requete[debut..fin]
 }
 
 fn trouve(meule: &[u8], aiguille: &[u8]) -> Option<usize> {
@@ -582,4 +597,32 @@ async fn sans_image_le_moteur_ne_recoit_aucun_image_url() {
         text, "image_absente",
         "un message sans image ne doit rien porter"
     );
+}
+
+/// La reprise (#288) : après une coupure en plein flux, le message SUIVANT passe par le même
+/// transport et le même harnais, et le moteur répond normalement. Une coupure n'empoisonne pas
+/// le tour suivant (ni l'état, ni la connexion, ni la réservation de budget).
+#[tokio::test]
+async fn apres_une_coupure_le_message_suivant_aboutit_sur_le_meme_harnais() {
+    let base = demarre_moteur().await;
+    let (transport, handle) = interrompt(&base);
+    let (harness, journal) = harness(transport, Rc::new(SansOutil));
+    *handle.borrow_mut() = Some(harness.handle());
+
+    let coupe = harness.send("SCENARIO:lent").await;
+    assert!(
+        matches!(coupe, Running::Ran(Stop::Interrupted | Stop::Cancelled)),
+        "{coupe:?}"
+    );
+
+    // Le message suivant : le moteur n'est plus coupé (le relais ne coupe qu'une fois).
+    journal.borrow_mut().clear();
+    let suite = harness.send("Dis bonjour.").await;
+    let (stop, text, code) = stopped(&journal);
+    assert_eq!(
+        suite,
+        Running::Ran(Stop::Done),
+        "{stop:?} {code:?} {text:?}"
+    );
+    assert_eq!(text, "Bonjour", "le tour suivant doit aboutir");
 }
