@@ -267,10 +267,21 @@ impl ProfilRuntime {
     /// réveille (elle ne dépend pas d'une horloge), mais un délai ne s'applique
     /// pas, et l'isolation est au mieux `catch_unwind`.
     pub fn wasm_sans_minuteur() -> Self {
+        Self::wasm_sans_minuteur_avec(cfg!(panic = "unwind"))
+    }
+
+    /// [`ProfilRuntime::wasm_sans_minuteur`] selon que la panique est rattrapable.
+    /// Sur wasm32 (`panic = "abort"`), `catch_unwind` ne protège rien : l'isolation
+    /// est alors `Aucune`, pas `CatchUnwind`.
+    fn wasm_sans_minuteur_avec(panique_rattrapable: bool) -> Self {
         Self {
             minuteur: false,
             annulation: true,
-            isolation: Isolation::CatchUnwind,
+            isolation: if panique_rattrapable {
+                Isolation::CatchUnwind
+            } else {
+                Isolation::Aucune
+            },
             supervision: false,
         }
     }
@@ -831,5 +842,25 @@ mod tests_profil {
             "catch_unwind ne stoppe ni une boucle synchrone ni panic=abort"
         );
         assert_eq!(p.exiger(Besoin::Supervision), Err(Refus::SansSupervision));
+    }
+}
+
+#[cfg(test)]
+mod profil_isolation_tests {
+    use super::*;
+
+    /// Sur une cible où la panique n'est pas rattrapable (wasm32 `panic=abort`),
+    /// `catch_unwind` ne protège rien : le profil ne doit PAS l'annoncer.
+    #[test]
+    fn wasm_sans_minuteur_n_annonce_pas_catch_unwind_si_la_panique_n_est_pas_rattrapable() {
+        let p = ProfilRuntime::wasm_sans_minuteur_avec(false);
+        assert_eq!(p.isolation, Isolation::Aucune);
+    }
+
+    /// Témoin : avec une panique rattrapable, `catch_unwind` reste annoncé.
+    #[test]
+    fn wasm_sans_minuteur_garde_catch_unwind_si_la_panique_est_rattrapable() {
+        let p = ProfilRuntime::wasm_sans_minuteur_avec(true);
+        assert_eq!(p.isolation, Isolation::CatchUnwind);
     }
 }
