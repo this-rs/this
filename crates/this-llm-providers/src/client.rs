@@ -144,8 +144,21 @@ pub struct TurnReply {
     /// Tool calls as the engine wrote them (`id`, `type`, `function{name,arguments}`).
     pub tool_calls: Vec<Value>,
     pub finish: Finish,
+    /// The model that was ASKED for this turn (the routed or configured one).
     pub model: String,
+    /// The model the ENGINE names in its own answer, when it names one. Not the model asked:
+    /// that is [`Self::model`]. `None` when the answer names no model: nothing is inferred.
+    pub served: Option<String>,
     pub usage: Usage,
+}
+
+/// The model the engine names in its own answer (`model` of the response), when it names one.
+fn served_of(value: &Value) -> Option<String> {
+    value
+        .get("model")
+        .and_then(Value::as_str)
+        .filter(|name| !name.is_empty())
+        .map(str::to_owned)
 }
 
 /// A client for one provider. Holds its key; never shows it.
@@ -615,12 +628,14 @@ impl ProviderClient {
             None => Finish::Stop,
         };
         let usage = usage_of(&value, reservation.reserved, self.config.pricing);
+        let served = served_of(&value);
 
         let reply = TurnReply {
             content,
             tool_calls,
             finish,
             model,
+            served,
             usage,
         };
         reservation.settle(usage);
@@ -678,6 +693,7 @@ impl ProviderClient {
             last_progress: std::time::Instant::now(),
             no_progress: Turn::NO_PROGRESS_LIMIT,
             reported: None,
+            served: None,
             model,
             pricing: self.config.pricing,
             reservation,
@@ -927,6 +943,8 @@ pub struct Turn {
     no_progress: std::time::Duration,
     reported: Option<Value>,
     model: String,
+    /// The model the engine names in its stream (first event that names one).
+    served: Option<String>,
     pricing: Option<Pricing>,
     reservation: Reservation,
 }
@@ -964,6 +982,11 @@ impl Turn {
     /// The model the engine runs this turn on.
     pub fn model(&self) -> &str {
         &self.model
+    }
+
+    /// The model the engine names in its stream, once an event has named one.
+    pub fn served(&self) -> Option<&str> {
+        self.served.as_deref()
     }
 
     /// The text received so far, for showing what arrived before a failure.
@@ -1055,6 +1078,7 @@ impl Turn {
             tool_calls: self.calls.clone(),
             finish,
             model: self.model.clone(),
+            served: self.served.clone(),
             usage,
         };
         self.reservation.settle(usage);
@@ -1085,6 +1109,9 @@ impl Turn {
             let Ok(value) = serde_json::from_str::<Value>(data) else {
                 continue;
             };
+            if self.served.is_none() {
+                self.served = served_of(&value);
+            }
             // An event that parses is progress, whatever it carries: text, a tool call
             // fragment, reasoning, usage. A `:` comment never reaches this line.
             self.progress = true;
