@@ -483,3 +483,126 @@ fn cas4_consentement_revoque_ne_repart_ni_au_nouveau_tour_ni_au_nouveau_moteur()
 // délégation. Le seul mot « sous-agents » figure dans un commentaire de module
 // (`session.rs`), pas dans du code. Un test pour un enfant serait fabriqué ; il n'est
 // donc pas écrit.
+
+// ---- Cas 3 bis : grant DYNAMIQUE retiré entre annonce et appel (#287, manque nommé) ----
+//
+// `cas3` joue le retrait d'une DÉCLARATION. Le retrait d'un GRANT passe par une autre
+// source : `Toolbox::grants()`, relu à CHAQUE appel et prioritaire sur `with_grants`.
+// Ce cas est le seul qui la fait varier pendant le tour ; sans lui, une porte qui
+// ignorerait `Toolbox::grants()` passerait toute la suite au vert.
+
+/// Outillage dont les grants dynamiques viennent d'un ensemble que le moteur peut
+/// modifier pendant le tour. Les effets restent comptés par l'`Outil` enveloppé.
+struct OutilGrantsDynamiques {
+    outil: Rc<Outil>,
+    grants: Rc<RefCell<Grants>>,
+}
+
+#[async_trait(?Send)]
+impl Toolbox for OutilGrantsDynamiques {
+    fn specs(&self) -> Vec<ToolSpec> {
+        self.outil.specs()
+    }
+    fn declarations(&self) -> Vec<Declaration> {
+        self.outil.declarations()
+    }
+    fn grants(&self) -> Option<Grants> {
+        Some(self.grants.borrow().clone())
+    }
+    async fn call(&self, call: &ToolCall) -> Outcome {
+        self.outil.call(call).await
+    }
+    async fn call_with_cancel(&self, call: &ToolCall, cancel: &Cancel) -> Outcome {
+        self.outil.call_with_cancel(call, cancel).await
+    }
+}
+
+/// Un moteur qui annonce l'outil, retire son grant dynamique, puis réclame l'outil.
+struct RetireGrantApresAnnonce {
+    grants: Rc<RefCell<Grants>>,
+    /// `false` pour le témoin : même scénario, sans le retrait.
+    retire: bool,
+    demande_faite: Cell<bool>,
+}
+
+#[async_trait(?Send)]
+impl Transport for RetireGrantApresAnnonce {
+    async fn stream(&self, _: &Request, _: &Cancel, _: Delta) -> Result<Reply, Failure> {
+        if self.demande_faite.replace(true) {
+            return Ok(fini());
+        }
+        if self.retire {
+            self.grants
+                .borrow_mut()
+                .put(Grant::refused(OUTIL, "user", "consentement retiré"));
+        }
+        Ok(demande())
+    }
+}
+
+#[test]
+fn cas3_bis_grant_dynamique_retire_entre_annonce_et_appel_est_refuse() {
+    let outil = Outil::new();
+    let grants = Rc::new(RefCell::new({
+        let mut g = Grants::new();
+        g.put(Grant::granted(OUTIL, "user"));
+        g
+    }));
+    let moteur = Rc::new(RetireGrantApresAnnonce {
+        grants: grants.clone(),
+        retire: true,
+        demande_faite: Cell::new(false),
+    });
+    let log = Rc::new(RefCell::new(Vec::new()));
+    let sink = log.clone();
+    let toolbox = Rc::new(OutilGrantsDynamiques {
+        outil: outil.clone(),
+        grants: grants.clone(),
+    });
+    let harness = Harness::new(
+        "sys",
+        Limits {
+            max_relances: 0,
+            ..Limits::default()
+        },
+        moteur,
+        toolbox,
+        move |e| sink.borrow_mut().push(e),
+    );
+
+    futures::executor::block_on(harness.send("écris"));
+
+    assert_eq!(
+        outil.effets.get(),
+        0,
+        "grant dynamique retiré avant l'appel : l'outil ne s'exécute pas"
+    );
+    assert!(
+        refus_de_la_boucle(&log.borrow()).is_some(),
+        "le refus est émis"
+    );
+}
+
+/// Témoin : même montage, grant dynamique jamais retiré → l'outil s'exécute. Le refus
+/// précédent vient donc du retrait, pas d'un défaut de la mise en scène.
+#[test]
+fn cas3_bis_temoin_grant_dynamique_intact_l_outil_est_execute() {
+    let outil = Outil::new();
+    let grants = Rc::new(RefCell::new({
+        let mut g = Grants::new();
+        g.put(Grant::granted(OUTIL, "user"));
+        g
+    }));
+    let moteur = Rc::new(RetireGrantApresAnnonce {
+        grants: grants.clone(),
+        retire: false,
+        demande_faite: Cell::new(false),
+    });
+    let toolbox = Rc::new(OutilGrantsDynamiques {
+        outil: outil.clone(),
+        grants,
+    });
+    let harness = Harness::new("sys", Limits::default(), moteur, toolbox, |_| {});
+    futures::executor::block_on(harness.send("écris"));
+    assert_eq!(outil.effets.get(), 1, "sans retrait, l'outil s'exécute");
+}
