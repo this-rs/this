@@ -6,6 +6,7 @@ use std::rc::Rc;
 use futures::executor::block_on;
 use this_harness::{
     Embed, EmbedError, EmbeddingModel, SansEmbed, vecteur_dense, vectoriser, verifier,
+    verifier_espace,
 };
 
 /// Un double : estampille configurable, compteur d'appels, résultat scripté.
@@ -54,6 +55,7 @@ fn une_mauvaise_dimension_est_refusee_nomment() {
         modele: Some(EmbeddingModel {
             nom: "bge-m3".into(),
             dimension: 384,
+            revision: None,
         }),
         appels: Rc::new(Cell::new(0)),
         resultat: Ok(vec![taille(256)]),
@@ -86,6 +88,7 @@ fn une_erreur_est_propagee_pas_avalee() {
         modele: Some(EmbeddingModel {
             nom: "bge-m3".into(),
             dimension: 384,
+            revision: None,
         }),
         appels: Rc::new(Cell::new(0)),
         resultat: Err(EmbedError::Failed("le moteur ne répond pas".into())),
@@ -124,6 +127,7 @@ fn un_vecteur_de_bonne_dimension_passe() {
         modele: Some(EmbeddingModel {
             nom: "bge-m3".into(),
             dimension: 3,
+            revision: None,
         }),
         appels: Rc::new(Cell::new(0)),
         resultat: Ok(vec![taille(3), taille(3)]),
@@ -139,7 +143,75 @@ fn estampille(dimension: usize) -> EmbeddingModel {
     EmbeddingModel {
         nom: "bge-m3".into(),
         dimension,
+        revision: None,
     }
+}
+
+fn revision(nom_revision: &str) -> EmbeddingModel {
+    EmbeddingModel {
+        nom: "bge-m3".into(),
+        dimension: 3,
+        revision: Some(nom_revision.into()),
+    }
+}
+
+// ---- deux révisions d'un même modèle : même nom, même dimension, poids
+//      différents. Ce sont deux espaces incomparables.
+
+#[test]
+fn un_vecteur_de_la_revision_a_est_refuse_sous_la_revision_b() {
+    let a = revision("rev-a");
+    let b = revision("rev-b");
+    // Un vecteur produit sous A passe le contrôle de dimension de A...
+    let double = Double {
+        modele: Some(a.clone()),
+        appels: Rc::new(Cell::new(0)),
+        resultat: Ok(vec![taille(3)]),
+    };
+    let produits = block_on(vectoriser(&double, &["a".into()])).unwrap();
+    assert_eq!(produits.len(), 1);
+    // ...mais comparé sous B (même nom, même dimension) il doit être refusé.
+    match verifier_espace(&b, &a) {
+        Err(EmbedError::Espace { .. }) => {}
+        other => panic!("attendu un refus d'espace (révisions différentes), reçu {other:?}"),
+    }
+}
+
+#[test]
+fn une_revision_declaree_ne_se_melange_pas_avec_une_non_declaree() {
+    let sans = estampille(3);
+    let avec = revision("rev-a");
+    assert!(
+        verifier_espace(&avec, &sans).is_err(),
+        "une révision déclarée et une absence de révision ne prouvent pas le même espace"
+    );
+}
+
+/// Le message de refus est ce que l'hôte verra : il nomme les DEUX estampilles, avec leur
+/// révision, et dit « non déclarée » quand elle manque (jamais une chaîne vide).
+#[test]
+fn le_refus_d_espace_nomme_les_deux_estampilles_avec_leur_revision() {
+    let err = verifier_espace(&revision("rev-b"), &estampille(3)).unwrap_err();
+    let message = err.to_string();
+    assert!(
+        message.contains("rev-b"),
+        "révision attendue nommée : {message}"
+    );
+    assert!(
+        message.contains("révision non déclarée"),
+        "l'absence de révision est dite : {message}"
+    );
+    assert!(message.contains("bge-m3"), "le nom du modèle : {message}");
+    assert!(message.contains("3 dim."), "la dimension : {message}");
+}
+
+#[test]
+fn deux_estampilles_identiques_sont_compatibles() {
+    assert_eq!(
+        verifier_espace(&revision("rev-a"), &revision("rev-a")),
+        Ok(())
+    );
+    assert_eq!(verifier_espace(&estampille(3), &estampille(3)), Ok(()));
 }
 
 #[test]

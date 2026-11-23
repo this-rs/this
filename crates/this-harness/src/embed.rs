@@ -24,6 +24,21 @@ use async_trait::async_trait;
 pub struct EmbeddingModel {
     pub nom: String,
     pub dimension: usize,
+    /// La révision (tag ou digest) des poids. `None` = non déclarée.
+    pub revision: Option<String>,
+}
+
+impl EmbeddingModel {
+    /// Une description lisible de l'estampille, pour les messages d'erreur.
+    fn decrire(&self) -> String {
+        match &self.revision {
+            Some(rev) => format!("{} ({} dim., révision {rev})", self.nom, self.dimension),
+            None => format!(
+                "{} ({} dim., révision non déclarée)",
+                self.nom, self.dimension
+            ),
+        }
+    }
 }
 
 /// La raison pour laquelle un embedding n'a pas eu lieu.
@@ -37,6 +52,12 @@ pub enum EmbedError {
     /// L'implémentation a échoué (réseau, modèle…) : la raison est propagée,
     /// pas avalée.
     Failed(String),
+    /// Deux estampilles de même nom et même dimension, mais de révision différente (ou
+    /// déclarée contre non déclarée) : espaces incomparables, jamais mélangés.
+    Espace {
+        attendue: EmbeddingModel,
+        recue: EmbeddingModel,
+    },
 }
 
 impl std::fmt::Display for EmbedError {
@@ -48,6 +69,12 @@ impl std::fmt::Display for EmbedError {
                 "l'implémentation a annoncé {attendue} dimension(s) mais a rendu un vecteur de {recue} dimension(s)"
             ),
             Self::Failed(raison) => write!(f, "embedding : {raison}"),
+            Self::Espace { attendue, recue } => write!(
+                f,
+                "espaces d'embedding incomparables : {} contre {}",
+                attendue.decrire(),
+                recue.decrire()
+            ),
         }
     }
 }
@@ -87,6 +114,32 @@ impl Embed for SansEmbed {
     async fn embed(&self, _textes: &[String]) -> Result<Vec<Vec<f32>>, EmbedError> {
         Err(EmbedError::Unsupported)
     }
+}
+
+/// La règle d'espace : deux estampilles sont compatibles si et seulement si elles
+/// sont égales en tout point — nom, dimension **et révision**. Deux révisions d'un
+/// même modèle (même nom, même dimension, poids différents) sont donc refusées
+/// nommément, et une révision déclarée n'est pas tenue pour égale à une absence de
+/// révision : sans preuve d'identité, pas de comparaison.
+///
+/// Un modèle sans révision (`None`) se compare à un autre modèle sans révision
+/// exactement comme avant l'ajout du champ.
+///
+/// **Contrat d'hôte, pas garde automatique** : [`vectoriser`] ne l'applique pas, car le
+/// harnais ne détient pas l'estampille des vecteurs déjà stockés. L'hôte qui compare des
+/// vecteurs entre eux (index, migration) l'appelle avec l'estampille stockée et celle du
+/// producteur courant.
+pub fn verifier_espace(
+    attendue: &EmbeddingModel,
+    produit: &EmbeddingModel,
+) -> Result<(), EmbedError> {
+    if attendue == produit {
+        return Ok(());
+    }
+    Err(EmbedError::Espace {
+        attendue: attendue.clone(),
+        recue: produit.clone(),
+    })
 }
 
 /// La règle de dimension, en fonction **pure** : chaque vecteur du lot doit avoir la
