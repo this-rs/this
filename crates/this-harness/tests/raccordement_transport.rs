@@ -42,6 +42,21 @@ use this_llm_providers::{
 const VARIABLE_DE_CLE: &str = "DEEPSEEK_API_KEY";
 /// Le modèle demandé explicitement : le moteur doit le NOMMER dans sa réponse.
 const MODELE: &str = "deepseek-flash";
+/// Le dialecte éprouvé ici — le même que déclare le moteur simulé (`transport_moteur_simule.rs`,
+/// `DIALECTE`). Une exécution réussie de ce fichier met à jour `VALIDE_CONTRE` là-bas.
+const DIALECTE: &str = "openai/chat-completions+sse";
+
+/// Le SHA de `this` au moment de la mesure, pour le rapport daté ; `inconnu` hors d'un dépôt.
+fn sha_courant() -> String {
+    std::process::Command::new("git")
+        .args(["rev-parse", "--short", "HEAD"])
+        .output()
+        .ok()
+        .filter(|sortie| sortie.status.success())
+        .map(|sortie| String::from_utf8_lossy(&sortie.stdout).trim().to_string())
+        .filter(|sha| !sha.is_empty())
+        .unwrap_or_else(|| "inconnu".to_string())
+}
 
 struct Jour;
 
@@ -211,8 +226,9 @@ async fn le_harnais_recoit_le_texte_du_moteur_reel_et_le_modele_qu_il_nomme() {
         Some(MODELE),
         "le moteur nomme un autre modèle"
     );
+    let sha = sha_courant();
     eprintln!(
-        "RACCORDEMENT transport texte+servi : stop=Done, servi={:?}, texte={text:?}",
+        "RACCORDEMENT transport texte+servi [{DIALECTE} · this {sha}] : stop=Done, servi={:?}, texte={text:?}",
         servis[0]
     );
 }
@@ -268,8 +284,9 @@ async fn le_harnais_execute_l_outil_demande_par_le_moteur_reel() {
         servis.iter().all(|s| s.as_deref() == Some(MODELE)),
         "{servis:?}"
     );
+    let sha = sha_courant();
     eprintln!(
-        "RACCORDEMENT transport outil : stop=Done, tours={}, arguments={}, texte={text:?}",
+        "RACCORDEMENT transport outil [{DIALECTE} · this {sha}] : stop=Done, tours={}, arguments={}, texte={text:?}",
         servis.len(),
         appels[0].arguments
     );
@@ -294,5 +311,8 @@ async fn une_cle_refusee_arrete_le_run_en_panne_http_pas_reseau() {
     let (stop, _, code) = stopped(&journal);
     assert!(matches!(issue, Running::Ran(Stop::Failed(_))), "{issue:?}");
     assert_eq!(code.as_deref(), Some("http"), "{stop:?}");
-    eprintln!("RACCORDEMENT transport clé refusée : stop={stop:?}, code={code:?}");
+    let sha = sha_courant();
+    eprintln!(
+        "RACCORDEMENT transport clé refusée [{DIALECTE} · this {sha}] : stop={stop:?}, code={code:?}"
+    );
 }

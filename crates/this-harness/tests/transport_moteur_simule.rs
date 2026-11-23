@@ -384,3 +384,31 @@ async fn un_moteur_injoignable_est_une_panne_unreachable() {
     assert_eq!(code.as_deref(), Some("unreachable"), "{stop:?}");
     assert!(transport.servis.borrow().is_empty(), "rien n'a été servi");
 }
+
+// ── La doublure est versionnée (#288, C5) ───────────────────────────────────
+
+/// Le dialecte que ce moteur simulé imite. Une doublure n'est contrôlée que si l'on sait DE
+/// QUOI elle est la doublure.
+pub const DIALECTE: &str = "openai/chat-completions+sse";
+
+/// La dernière exécution RÉELLE qui a confirmé que ce dialecte est bien celui d'un vrai
+/// moteur : `moteur · modèle · date UTC · SHA de this`. Toute exécution réussie de
+/// `tests/raccordement_transport.rs` (opt-in) la met à jour ; une date qui vieillit se lit.
+pub const VALIDE_CONTRE: &str = "deepseek · deepseek-flash · 2026-11-23T01:52Z · this 5898000 (même code que 26e73d7, rebasé sur main)";
+
+#[test]
+fn le_moteur_simule_declare_son_dialecte_et_sa_derniere_validation_reelle() {
+    assert_eq!(DIALECTE, "openai/chat-completions+sse");
+    let champs: Vec<&str> = VALIDE_CONTRE.split(" · ").collect();
+    assert_eq!(champs.len(), 4, "{VALIDE_CONTRE}");
+    assert!(
+        champs[2].contains('T') && champs[2].ends_with('Z'),
+        "date UTC attendue : {}",
+        champs[2]
+    );
+    assert!(
+        champs[3].starts_with("this "),
+        "SHA de this attendu : {}",
+        champs[3]
+    );
+}
