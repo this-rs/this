@@ -453,7 +453,7 @@ pub const PREPARATION_TIMEOUT_MS: u64 = 60_000;
 /// un enregistreur qui bloque le fil *sans jamais rendre la main au poll* (calcul
 /// synchrone infini) ne peut être borné par aucun minuteur coopératif ; et en
 /// `panic = "abort"` (wasm32), la panique n'est pas rattrapable.
-async fn guarded(clock: &dyn Clock, call: impl Future<Output = ()>) {
+async fn guarded(clock: &dyn Clock, call: impl Future<Output = ()>) -> Guarded {
     let mut call = Box::pin(call);
     // Le minuteur n'est armé qu'au premier `Pending` : un enregistreur qui rend tout de suite
     // (le cas courant) ne coûte aucun minuteur.
@@ -464,8 +464,10 @@ async fn guarded(clock: &dyn Clock, call: impl Future<Output = ()>) {
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| call.as_mut().poll(cx)));
         match polled {
             Ok(Poll::Pending) => {}
-            // Rendu, ou paniqué : dans les deux cas le run continue.
-            Ok(Poll::Ready(())) | Err(_) => return Poll::Ready(()),
+            // Rendu, ou paniqué : dans les deux cas le run continue, mais l'hôte doit
+            // pouvoir savoir que le pas a été perdu (voir [`signal_lost`]).
+            Ok(Poll::Ready(())) => return Poll::Ready(Guarded::Done),
+            Err(_) => return Poll::Ready(Guarded::Panicked),
         }
         if !armed {
             armed = true;
@@ -474,11 +476,37 @@ async fn guarded(clock: &dyn Clock, call: impl Future<Output = ()>) {
         if let Some(deadline) = deadline.as_mut()
             && deadline.as_mut().poll(cx).is_ready()
         {
-            return Poll::Ready(());
+            return Poll::Ready(Guarded::TimedOut);
         }
         Poll::Pending
     })
     .await
+}
+
+/// Ce qu'il est advenu d'un appel gardé au [`Recorder`].
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Guarded {
+    /// L'appel a rendu la main.
+    Done,
+    /// L'enregistreur a paniqué : le pas est perdu.
+    Panicked,
+    /// L'enregistreur a dépassé [`RECORDER_TIMEOUT_MS`] : le pas est perdu.
+    TimedOut,
+}
+
+/// Dit à l'hôte qu'un pas de journal a été abandonné (#284). Ne fait rien si l'appel a
+/// abouti. Le journal reste best-effort : ce signal ne change pas l'issue du run, il
+/// empêche seulement de croire le journal complet.
+fn signal_lost(out: &Out, what: &str, issue: Guarded) {
+    let why = match issue {
+        Guarded::Done => return,
+        Guarded::Panicked => "panique de l'enregistreur".to_string(),
+        Guarded::TimedOut => format!("délai de {RECORDER_TIMEOUT_MS} ms dépassé"),
+    };
+    out.emit(Event::Hint {
+        text: format!("journal : perte d'{what} ({why})"),
+        kind: HintKind::Unrecorded,
+    });
 }
 
 /// Pourquoi un appel au routeur a été coupé.
@@ -1352,6 +1380,7 @@ impl Harness {
                 run_id: run_id.clone(),
                 recorder: self.recorder.clone(),
                 clock: clock.clone(),
+                out: self.out.clone(),
             }));
             // Le budget se compte en temps HORLOGE depuis ici : temps du modèle compris. Ne
             // compter que la durée des outils laissait un flux de signes de vie tourner une
@@ -2069,11 +2098,12 @@ impl Harness {
         });
         if let Some((run_id, run)) = &closed {
             let snapshot = run.borrow().clone();
-            guarded(
+            let issue = guarded(
                 clock.as_ref(),
                 self.recorder.stopped(run_id, &snapshot, &stop),
             )
             .await;
+            signal_lost(&self.out, "arrêt", issue);
         }
         if let Some(finale) = garde.finale.take() {
             self.out.emit(finale);
@@ -2164,11 +2194,12 @@ impl Harness {
         run.borrow_mut().record(step_of(&call.name, ms, &outcome));
         let snapshot = run.borrow().clone();
         if let Some(step) = snapshot.steps.last() {
-            guarded(
+            let issue = guarded(
                 self.clock.as_ref(),
                 self.recorder.step(run_id, &snapshot, step),
             )
             .await;
+            signal_lost(&self.out, "étape", issue);
         }
         (outcome, abandoned)
     }
@@ -2639,6 +2670,7 @@ struct RunPorts {
     run_id: String,
     recorder: Rc<dyn Recorder>,
     clock: Rc<dyn Clock>,
+    out: Out,
 }
 
 #[async_trait(?Send)]
@@ -2660,11 +2692,12 @@ impl Permission for RunPorts {
         self.run.borrow_mut().record(step);
         let snapshot = self.run.borrow().clone();
         if let Some(step) = snapshot.steps.last() {
-            guarded(
+            let issue = guarded(
                 self.clock.as_ref(),
                 self.recorder.step(&self.run_id, &snapshot, step),
             )
             .await;
+            signal_lost(&self.out, "étape", issue);
         }
     }
 }
