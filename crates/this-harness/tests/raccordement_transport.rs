@@ -316,3 +316,100 @@ async fn une_cle_refusee_arrete_le_run_en_panne_http_pas_reseau() {
         "RACCORDEMENT transport clé refusée [{DIALECTE} · this {sha}] : stop={stop:?}, code={code:?}"
     );
 }
+
+/// Enveloppe `ProviderTransport` : après le PREMIER morceau reçu, demande l'interruption du tour.
+struct Coupe {
+    inner: ProviderTransport,
+    handle: Rc<RefCell<Option<this_harness::Handle>>>,
+    coupe: Rc<std::cell::Cell<bool>>,
+}
+
+#[async_trait(?Send)]
+impl Transport for Coupe {
+    async fn stream(
+        &self,
+        request: &Request,
+        cancel: &Cancel,
+        delta: Delta,
+    ) -> Result<Reply, Failure> {
+        let handle = self.handle.clone();
+        let coupe = self.coupe.clone();
+        // Couper seulement après VINGT caractères de texte réel : un morceau vide ou un signe de
+        // vie ne compte pas, sinon la coupure tomberait avant tout texte visible.
+        let vus = Rc::new(std::cell::Cell::new(0usize));
+        let relais: Delta = Rc::new(move |morceau: &str| {
+            delta(morceau);
+            vus.set(vus.get() + morceau.chars().count());
+            if !coupe.get() && vus.get() >= 20 {
+                coupe.set(true);
+                if let Some(h) = handle.borrow().as_ref() {
+                    h.interrupt();
+                }
+            }
+        });
+        self.inner.stream(request, cancel, relais).await
+    }
+
+    fn honors_route(&self) -> bool {
+        true
+    }
+}
+
+/// Interruption puis reprise sur le moteur RÉEL : un tour long est coupé après le premier morceau,
+/// puis le message suivant passe par le même harnais et le même transport.
+#[tokio::test]
+#[ignore = "raccordement réel : THIS_RACCORDEMENT=deepseek et --ignored"]
+async fn le_moteur_reel_coupe_en_plein_flux_et_le_message_suivant_aboutit() {
+    if !demande("interruption+reprise") {
+        return;
+    }
+    let handle = Rc::new(RefCell::new(None));
+    let transport = Rc::new(Coupe {
+        inner: ProviderTransport::new(client(VARIABLE_DE_CLE)),
+        handle: handle.clone(),
+        coupe: Rc::new(std::cell::Cell::new(false)),
+    });
+    let (harness, journal) = harness("Tu es précis.", transport, Rc::new(SansOutil));
+    *handle.borrow_mut() = Some(harness.handle());
+
+    // Un tour LONG : sans coupure il produirait plusieurs centaines de jetons.
+    let debut = std::time::Instant::now();
+    let coupe = harness
+        .send("Compte de 1 à 300, un nombre par ligne, sans aucun autre texte.")
+        .await;
+    let duree = debut.elapsed();
+    let (stop, texte, code) = stopped(&journal);
+    let recus = journal
+        .borrow()
+        .iter()
+        .filter(|e| matches!(e, Event::Delta { text } if !text.is_empty()))
+        .count();
+    assert!(
+        recus >= 1,
+        "aucun texte n'a été reçu avant la coupure : la coupure n'est pas en plein flux"
+    );
+    assert!(
+        matches!(coupe, Running::Ran(Stop::Interrupted | Stop::Cancelled)),
+        "{coupe:?} {stop:?} {code:?} {texte:?}"
+    );
+    let sha = sha_courant();
+    eprintln!(
+        "RACCORDEMENT transport interruption [{DIALECTE} · this {sha}] : arrêt {stop:?} en {duree:?}, {recus} morceau(x) de texte reçu(s) avant la coupure"
+    );
+
+    // La reprise : le message SUIVANT passe par le même harnais, le même transport, le même moteur.
+    journal.borrow_mut().clear();
+    let suite = harness
+        .send("Réponds exactement « pong », sans autre mot.")
+        .await;
+    let (stop, texte, code) = stopped(&journal);
+    assert_eq!(
+        suite,
+        Running::Ran(Stop::Done),
+        "{stop:?} {code:?} {texte:?}"
+    );
+    assert!(texte.to_lowercase().contains("pong"), "{texte:?}");
+    eprintln!(
+        "RACCORDEMENT transport reprise [{DIALECTE} · this {sha}] : stop=Done, texte={texte:?}"
+    );
+}
