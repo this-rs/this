@@ -320,9 +320,42 @@ pub struct Reply {
     pub calls: Vec<ToolCall>,
     pub finish: Finish,
     /// Le modèle que le moteur NOMME dans sa réponse (#288, routé ≠ servi). Il doit être celui
-    /// que CETTE tentative a demandé pour que la paire routée soit réputée atteinte. `None` : la
-    /// réponse n'en nomme aucun, et le harnais n'apprend alors rien de ce tour.
+    /// que CETTE tentative a demandé — ou un instantané de celui-ci, voir [`served_matches`] —
+    /// pour que la paire routée soit réputée atteinte. `None` : la réponse n'en nomme aucun, et le
+    /// harnais n'apprend alors rien de ce tour.
     pub served: Option<String>,
+}
+
+/// Le modèle que le moteur a NOMMÉ est-il celui qu'on lui a demandé ?
+///
+/// Vrai pour le même nom, ou pour le nom demandé suivi d'un suffixe d'**instantané** purement
+/// numérique — séparateur `-`, `:` ou `@`, puis des chiffres, points et tirets commençant par un
+/// chiffre : `gpt-4o` → `gpt-4o-2024-08-06`, `deepseek-v3` → `deepseek-v3-0324`. Les moteurs
+/// résolvent un alias en instantané daté et renvoient CE nom ; une égalité stricte rendrait
+/// l'apprentissage muet sur eux, sans signal.
+///
+/// Faux pour tout le reste, et c'est voulu : un suffixe alphabétique (`-mini`, `:7b`, `-turbo`)
+/// nomme un AUTRE modèle ; un alias servi pour un instantané demandé est un écart (la personne a
+/// demandé une version précise) ; un nom vide ne prouve rien.
+pub fn served_matches(asked: &str, served: &str) -> bool {
+    if asked.is_empty() || served.is_empty() {
+        return false;
+    }
+    if asked == served {
+        return true;
+    }
+    let Some(rest) = served.strip_prefix(asked) else {
+        return false;
+    };
+    let mut chars = rest.chars();
+    if !matches!(chars.next(), Some('-' | ':' | '@')) {
+        return false;
+    }
+    let suffix = chars.as_str();
+    suffix.starts_with(|c: char| c.is_ascii_digit())
+        && suffix
+            .chars()
+            .all(|c| c.is_ascii_digit() || c == '.' || c == '-')
 }
 
 /// La famille d'une panne de transport. Un code se commute, un message se lit.
@@ -544,5 +577,56 @@ mod tests {
         let back: Message = serde_json::from_value(written).unwrap();
         assert_eq!(back, message);
         assert_eq!(back.text(), "regarde");
+    }
+}
+
+#[cfg(test)]
+mod served_matches_tests {
+    use super::served_matches;
+
+    #[test]
+    fn le_meme_nom_ou_un_instantane_numerique_du_nom_demande() {
+        assert!(served_matches("m2", "m2"));
+        assert!(served_matches("gpt-4o", "gpt-4o-2024-08-06"));
+        assert!(served_matches("deepseek-v3", "deepseek-v3-0324"));
+        assert!(served_matches(
+            "claude-sonnet-4-5",
+            "claude-sonnet-4-5-20250929"
+        ));
+        assert!(served_matches("modele", "modele:2"));
+        assert!(served_matches("modele", "modele@1.2.3"));
+    }
+
+    #[test]
+    fn un_autre_modele_ou_un_suffixe_non_numerique_ne_passe_pas() {
+        assert!(!served_matches("gpt-4o", "gpt-4o-mini"), "un autre modèle");
+        assert!(
+            !served_matches("qwen", "qwen:7b"),
+            "une taille, pas un instantané"
+        );
+        assert!(!served_matches("llama", "llama3"), "sans séparateur");
+        assert!(!served_matches("m2", "m1"));
+        assert!(!served_matches("m2", "autre-modele"));
+    }
+
+    #[test]
+    fn un_alias_servi_pour_un_instantane_demande_est_un_ecart() {
+        assert!(!served_matches("gpt-4o-2024-08-06", "gpt-4o"));
+    }
+
+    #[test]
+    fn les_bords_vides_ou_mal_formes_ne_prouvent_rien() {
+        assert!(!served_matches("", ""));
+        assert!(!served_matches("m2", ""));
+        assert!(!served_matches("", "m2"));
+        assert!(!served_matches("m2", "m2-"), "suffixe vide");
+        assert!(
+            !served_matches("m2", "m2-.1"),
+            "doit commencer par un chiffre"
+        );
+        assert!(
+            !served_matches("m2", "m2-2024-08-06x"),
+            "lettre dans le suffixe"
+        );
     }
 }

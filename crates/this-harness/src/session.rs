@@ -1516,12 +1516,16 @@ impl Harness {
                     // morceau reçu AVANT la panne a déjà posé `answered` par `delta` : c'est
                     // lui, pas le code de panne, qui dit si le moteur a parlé.
                     // Routé ≠ servi (#288) : une RÉPONSE réussie doit nommer le modèle que CETTE
-                    // tentative a demandé ; un autre nom, ou aucun, ne réputera pas la paire atteinte.
-                    // Une panne n'a pas de réponse à vérifier : elle garde la règle d'avant.
+                    // tentative a demandé — ou un instantané daté de celui-ci (`served_matches`) ;
+                    // un autre nom, ou aucun, ne réputera pas la paire atteinte. Une panne n'a pas
+                    // de réponse à vérifier : elle garde la règle d'avant.
                     confirmed = match &issue {
-                        Ok(Ok(reply)) => request
-                            .model()
-                            .is_some_and(|asked| reply.served.as_deref() == Some(asked)),
+                        Ok(Ok(reply)) => request.model().is_some_and(|asked| {
+                            reply
+                                .served
+                                .as_deref()
+                                .is_some_and(|served| crate::wire::served_matches(asked, served))
+                        }),
                         _ => true,
                     };
                     let repondu = match &issue {
