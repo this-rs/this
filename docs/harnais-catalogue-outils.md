@@ -92,9 +92,9 @@ vide, puis un **autre** harnais sur le catalogue rangé, la même demande sur un
 | Condition | Session 1 (vide) | Session 2 (catalogue relu) |
 |---|---|---|
 | Sans index, 1 passe | cherche → crée → utilise | **ne cherche pas**, refait à la main |
-| Avec index, 3 passes sur 3 | cherche, crée, utilise (l'ordre varie d'une passe à l'autre) | **cherche → réutilise**, 0 outil créé en plus |
+| Avec index, 4 passes sur 4 (la 4e sur l'arbre publié) | cherche, crée, utilise (l'ordre varie d'une passe à l'autre) | **cherche → réutilise**, 0 outil créé en plus |
 
-Ce que cela **ne prouve pas** : un seul modèle, un seul scénario, 3 passes avec l'index et 1
+Ce que cela **ne prouve pas** : un seul modèle, un seul scénario, 4 passes avec l'index et 1
 sans — un échantillon à confirmer, pas une statistique. Le comportement n'est donc **pas
 asserté** (il est stochastique) ; seuls les invariants de **sûreté** le sont (aucun appel hors
 de l'hôte, aucun doublon de recette au catalogue). Il imprime des lignes
