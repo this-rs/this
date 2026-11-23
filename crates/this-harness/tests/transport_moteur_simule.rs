@@ -151,6 +151,14 @@ fn route(requete: &str) -> (&'static str, &'static str, String) {
             ]}, "finish_reason": null}]}),
             json!({"model": nom, "choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}]}),
         ]
+    } else if requete.contains("SCENARIO:image") {
+        // Le moteur répond à la présence d'une image : `image_url` dans le corps reçu.
+        let vue = if requete.contains("image_url") {
+            "image_url_vue"
+        } else {
+            "image_absente"
+        };
+        vec![delta(nom, vue, Some("stop"))]
     } else {
         vec![delta(nom, "Bon", None), delta(nom, "jour", Some("stop"))]
     };
@@ -529,4 +537,49 @@ async fn une_annulation_en_plein_flux_coupe_le_tour_et_le_moteur() {
         "le flux complet dure ~1,5 s ; coupé il doit finir avant : {duree:?}"
     );
     eprintln!("ANNULATION en flux : {morceaux}/10 morceaux reçus, arrêt {stop:?} en {duree:?}");
+}
+
+// ── Les images jointes (#288, « images/documents ») ────────────────────────────
+
+/// Une image jointe au message part vers le moteur sous forme `image_url` : le moteur la VOIT.
+/// Contrôle : sans image, le même scénario répond « image_absente ».
+#[tokio::test]
+async fn une_image_jointe_arrive_au_moteur_sous_forme_image_url() {
+    let base = demarre_moteur().await;
+    let transport = temoin(client(&base, "qwen-test"));
+    let (harness, journal) = harness(transport, Rc::new(SansOutil));
+
+    let image = this_harness::ImagePart::new(
+        "image/png",
+        this_harness::ImageSource::Base64("iVBORw0KGgo=".into()),
+    );
+    let issue = harness
+        .send_with_images("SCENARIO:image décris-la", vec![image])
+        .await;
+    let (stop, text, code) = stopped(&journal);
+    assert_eq!(
+        issue,
+        Running::Ran(Stop::Done),
+        "{stop:?} {code:?} {text:?}"
+    );
+    assert_eq!(text, "image_url_vue", "le moteur n'a pas reçu l'image");
+}
+
+#[tokio::test]
+async fn sans_image_le_moteur_ne_recoit_aucun_image_url() {
+    let base = demarre_moteur().await;
+    let transport = temoin(client(&base, "qwen-test"));
+    let (harness, journal) = harness(transport, Rc::new(SansOutil));
+
+    let issue = harness.send("SCENARIO:image décris-la").await;
+    let (stop, text, code) = stopped(&journal);
+    assert_eq!(
+        issue,
+        Running::Ran(Stop::Done),
+        "{stop:?} {code:?} {text:?}"
+    );
+    assert_eq!(
+        text, "image_absente",
+        "un message sans image ne doit rien porter"
+    );
 }
