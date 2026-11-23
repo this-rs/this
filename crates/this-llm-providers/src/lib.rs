@@ -57,7 +57,9 @@ pub use budget::{BudgetError, Clock, Ledger, SystemClock, Usage};
 pub use config::{Budget, ConfigError, Pricing, ProviderConfig, ProviderId};
 pub use error::{ErrorKind, ProviderError};
 pub use hub::Hub;
-pub use model::{ContextFit, ModelInfo, ParseError, estimate_tokens, fit, parse_models};
+pub use model::{
+    ContextFit, ModelInfo, NextPage, ParseError, estimate_tokens, fit, next_page, parse_models,
+};
 pub use probe::{
     DEFAULT_PROBE_TIMEOUT, MAX_PROBE_CONCURRENCY, ProbeOptions, ProbeVerdict, Refusal,
 };
