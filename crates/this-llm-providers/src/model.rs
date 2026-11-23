@@ -42,6 +42,58 @@ pub fn parse_models(body: &Value) -> Result<Vec<ModelInfo>, ParseError> {
     Ok(items.iter().filter_map(model_from).collect())
 }
 
+/// How an engine says "there is more": a cursor to send back, or a link to follow.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NextPage {
+    /// A query parameter to add to the same request (`after_id=…`, `pageToken=…`).
+    Cursor { param: &'static str, value: String },
+    /// An absolute link the engine gave. The caller follows it only on the engine's own origin.
+    Link(String),
+}
+
+/// Reads the pagination of a `/models` answer, whichever dialect the engine speaks. `None`:
+/// the answer is the last page (or the engine does not paginate, which is most of them).
+///
+/// - `nextPageToken` (Google, Fireworks) → `pageToken`; `next_page_token` (Cohere…) → `page_token`;
+/// - `has_more: true` + `last_id` (Anthropic) → `after_id`;
+/// - a `next` link (`next`, `links.next`, `pagination.next`, `paging.next`).
+///
+/// An empty token or a `has_more` without `last_id` is NOT a next page: asking again would
+/// return the same page.
+pub fn next_page(body: &Value) -> Option<NextPage> {
+    let text = |value: Option<&Value>| {
+        value
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+            .map(str::to_string)
+    };
+    for (key, param) in [
+        ("nextPageToken", "pageToken"),
+        ("next_page_token", "page_token"),
+    ] {
+        if let Some(value) = text(body.get(key)) {
+            return Some(NextPage::Cursor { param, value });
+        }
+    }
+    if body.get("has_more").and_then(Value::as_bool) == Some(true)
+        && let Some(value) = text(body.get("last_id"))
+    {
+        return Some(NextPage::Cursor {
+            param: "after_id",
+            value,
+        });
+    }
+    for pointer in ["/next", "/links/next", "/pagination/next", "/paging/next"] {
+        if let Some(url) = text(body.pointer(pointer))
+            && (url.starts_with("http://") || url.starts_with("https://"))
+        {
+            return Some(NextPage::Link(url));
+        }
+    }
+    None
+}
+
 fn model_from(item: &Value) -> Option<ModelInfo> {
     let id = ["id", "model", "name"]
         .iter()
@@ -187,5 +239,49 @@ mod tests {
                 window: 300
             }
         );
+    }
+
+    #[test]
+    fn next_page_lit_chaque_dialecte() {
+        assert_eq!(
+            next_page(&json!({"data": [], "has_more": true, "last_id": "m9"})),
+            Some(NextPage::Cursor {
+                param: "after_id",
+                value: "m9".into()
+            })
+        );
+        assert_eq!(
+            next_page(&json!({"models": [], "nextPageToken": "abc"})),
+            Some(NextPage::Cursor {
+                param: "pageToken",
+                value: "abc".into()
+            })
+        );
+        assert_eq!(
+            next_page(&json!({"models": [], "next_page_token": "xyz"})),
+            Some(NextPage::Cursor {
+                param: "page_token",
+                value: "xyz".into()
+            })
+        );
+        assert_eq!(
+            next_page(&json!({"data": [], "links": {"next": "https://h/v1/models?p=2"}})),
+            Some(NextPage::Link("https://h/v1/models?p=2".into()))
+        );
+    }
+
+    #[test]
+    fn next_page_ne_rend_rien_quand_il_n_y_a_pas_de_page_suivante() {
+        // Dernière page, jeton vide, `has_more` sans `last_id` : redemander rendrait la même page.
+        assert_eq!(next_page(&json!({"data": []})), None);
+        assert_eq!(
+            next_page(&json!({"data": [], "has_more": false, "last_id": "m"})),
+            None
+        );
+        assert_eq!(next_page(&json!({"data": [], "has_more": true})), None);
+        assert_eq!(next_page(&json!({"nextPageToken": "  "})), None);
+        // Un lien relatif ou d'un autre schéma n'est pas suivi.
+        assert_eq!(next_page(&json!({"next": "/v1/models?p=2"})), None);
+        assert_eq!(next_page(&json!({"next": null})), None);
     }
 }

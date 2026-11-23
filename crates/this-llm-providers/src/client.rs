@@ -14,7 +14,9 @@ use crate::images::{
     IMAGE_TOKENS_ESTIMATE, count_images, error_message, refuses_images, render_openai,
     without_images,
 };
-use crate::model::{ContextFit, ModelInfo, estimate_tokens, fit, parse_models};
+use crate::model::{
+    ContextFit, ModelInfo, NextPage, estimate_tokens, fit, next_page, parse_models,
+};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::probe::{MAX_PROBE_CONCURRENCY, ProbeOptions, ProbeVerdict, redact, verdict_of_status};
 
@@ -153,6 +155,10 @@ pub struct TurnReply {
 }
 
 /// The model the engine names in its own answer (`model` of the response), when it names one.
+/// How many pages of `/models` one listing walks at most. Real catalogues are a few pages;
+/// the bound is for an engine whose cursor never ends.
+const MAX_MODEL_PAGES: usize = 50;
+
 fn served_of(value: &Value) -> Option<String> {
     value
         .get("model")
@@ -363,15 +369,66 @@ impl ProviderClient {
         }
     }
 
-    /// The models the engine announces. Fails when the engine does not answer.
+    /// The models the engine announces, ALL pages of them. Fails when the engine does not
+    /// answer; a later page that fails fails the whole list, because a partial catalogue
+    /// reads as a complete one.
+    ///
+    /// Three guards keep the walk finite and safe: at most [`MAX_MODEL_PAGES`] pages; a page
+    /// that adds no new id, or that repeats the cursor just used, ends it (an engine that
+    /// ignores the cursor would otherwise answer the same page every time); and a `next` link
+    /// is followed only on the engine's own origin — the key must not go anywhere else.
     pub async fn list_models(&self) -> Result<Vec<ModelInfo>, ProviderError> {
-        let response = self
-            .authorize(self.http.get(self.url("models")))
-            .send()
-            .await
-            .map_err(transport)?;
-        let body = read_json(response, 0).await?;
-        Ok(parse_models(&body)?)
+        let mut models: Vec<ModelInfo> = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        let mut next: Option<NextPage> = None;
+        for _ in 0..MAX_MODEL_PAGES {
+            let request = match &next {
+                None => self.http.get(self.url("models")),
+                Some(NextPage::Cursor { param, value }) => {
+                    let mut url = reqwest::Url::parse(&self.url("models")).map_err(|error| {
+                        ProviderError::Parse(format!("adresse du catalogue invalide : {error}"))
+                    })?;
+                    url.query_pairs_mut().append_pair(param, value);
+                    self.http.get(url)
+                }
+                Some(NextPage::Link(link)) => self.http.get(link),
+            };
+            let response = self.authorize(request).send().await.map_err(transport)?;
+            let body = read_json(response, 0).await?;
+            let before = models.len();
+            for model in parse_models(&body)? {
+                if seen.insert(model.id.clone()) {
+                    models.push(model);
+                }
+            }
+            let following = next_page(&body);
+            let progressed = models.len() > before;
+            match following {
+                Some(page)
+                    if progressed && Some(&page) != next.as_ref() && self.may_follow(&page) =>
+                {
+                    next = Some(page);
+                }
+                _ => break,
+            }
+        }
+        Ok(models)
+    }
+
+    /// A cursor goes back to the same endpoint; a link only if it stays on the engine's origin.
+    fn may_follow(&self, page: &NextPage) -> bool {
+        match page {
+            NextPage::Cursor { .. } => true,
+            NextPage::Link(link) => {
+                match (
+                    reqwest::Url::parse(link),
+                    reqwest::Url::parse(self.config.normalized_base_url()),
+                ) {
+                    (Ok(link), Ok(base)) => link.origin() == base.origin(),
+                    _ => false,
+                }
+            }
+        }
     }
 
     /// `/models`, bounded by the OPENING delay. Here the catalogue only serves the window of
