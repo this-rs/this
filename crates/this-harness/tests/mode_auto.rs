@@ -3699,3 +3699,397 @@ fn une_reponse_qui_nomme_un_instantane_du_modele_demande_rend_la_paire_atteinte(
     assert_eq!(settled.len(), 1);
     assert_eq!(settled[0].served, Some(Pick::new("b", "m2")));
 }
+
+// ── Un modèle refusé n'est pas la panne du tour : repli de modèle + mémoire ───────────────
+//
+// Contrat : quand le moteur refuse UN modèle — il ne le connaît pas (404), il est en erreur
+// (5xx), il se tait — le tour repart sur un autre modèle de la MÊME instance, et la paire
+// refusée est retenue : le message suivant ne retombe pas dessus. Passagère, elle revient
+// d'elle-même ; complète (le moteur ne connaît pas ce modèle), elle reste de côté jusqu'à ce
+// qu'on la remette. Jamais un autre fournisseur, jamais un choix de la personne contourné,
+// jamais un outil rejoué, jamais un texte déjà montré redoublé.
+
+use this_harness::{Code, TEMPORARY_UNAVAILABLE_MS};
+
+/// Un moteur dont certains modèles échouent d'une panne donnée, ou ne répondent jamais.
+struct Pannes {
+    /// `(modèle, panne)`. Modifiable entre deux messages : un modèle « revient ».
+    pannes: RefCell<Vec<(&'static str, Failure)>>,
+    /// Modèles qui acceptent la requête et ne disent plus rien.
+    muets: Vec<&'static str>,
+    /// Le moteur montre un début de texte AVANT de refuser : rejouer le doublerait.
+    texte_avant: bool,
+    appels: RefCell<Vec<String>>,
+}
+
+impl Pannes {
+    fn new(pannes: Vec<(&'static str, Failure)>) -> Rc<Self> {
+        Rc::new(Self {
+            pannes: RefCell::new(pannes),
+            muets: Vec::new(),
+            texte_avant: false,
+            appels: RefCell::new(Vec::new()),
+        })
+    }
+    fn paires(&self) -> Vec<String> {
+        self.appels.borrow().clone()
+    }
+    fn reparer(&self) {
+        self.pannes.borrow_mut().clear();
+    }
+}
+
+#[async_trait(?Send)]
+impl Transport for Pannes {
+    async fn stream(
+        &self,
+        request: &Request,
+        _cancel: &Cancel,
+        delta: Delta,
+    ) -> Result<Reply, Failure> {
+        let modele = request.model().unwrap_or("?").to_string();
+        self.appels
+            .borrow_mut()
+            .push(format!("{}/{}", request.provider().unwrap_or("?"), modele));
+        let panne = self
+            .pannes
+            .borrow()
+            .iter()
+            .find(|(m, _)| *m == modele)
+            .map(|(_, f)| f.clone());
+        if let Some(failure) = panne {
+            if self.texte_avant {
+                delta("Je commence par");
+            }
+            return Err(failure);
+        }
+        if self.muets.iter().any(|m| *m == modele) {
+            std::future::pending::<()>().await;
+        }
+        delta("fini");
+        Ok(Reply {
+            served: request.model().map(str::to_owned),
+            text: "fini".to_string(),
+            calls: vec![],
+            finish: Finish::Stop,
+        })
+    }
+
+    fn honors_route(&self) -> bool {
+        true
+    }
+}
+
+fn harnais_pannes(
+    transport: Rc<Pannes>,
+    router: Rc<TurnRouter>,
+    limits: Limits,
+) -> (Harness, Journal) {
+    let journal: Journal = Rc::new(RefCell::new(Vec::new()));
+    let sink = journal.clone();
+    let harness = Harness::new(
+        "tu es l'atelier",
+        limits,
+        transport,
+        Rc::new(Compte(Rc::new(std::cell::Cell::new(0)))),
+        move |event| sink.borrow_mut().push(event),
+    )
+    .with_router(router)
+    .with_clock(Rc::new(Fast(std::cell::Cell::new(0.0))));
+    (harness, journal)
+}
+
+fn routeur_a() -> (World, Rc<TurnRouter>) {
+    let world = monde_quota();
+    let router = Rc::new(TurnRouter::new(world.spec("a", "m1", 1).auto()));
+    (world, router)
+}
+
+fn hints(journal: &Journal) -> Vec<String> {
+    journal
+        .borrow()
+        .iter()
+        .filter_map(|e| match e {
+            Event::Hint { text, .. } => Some(text.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn un_modele_inconnu_du_moteur_repart_sur_un_autre_modele_de_la_meme_instance() {
+    let (_, router) = routeur_a();
+    let moteur = Pannes::new(vec![("m1", Failure::http(404))]);
+    let (harness, journal) = harnais_pannes(moteur.clone(), router, Limits::default());
+
+    assert_eq!(run(harness.send("hello")), Running::Ran(Stop::Done));
+
+    let paires = moteur.paires();
+    assert_eq!(paires.len(), 2, "un refus, un repli : {paires:?}");
+    assert_eq!(paires[0], "a/m1");
+    assert!(
+        paires[1] == "a/m2" || paires[1] == "a/m3",
+        "même instance, jamais b/x : {paires:?}"
+    );
+    let dites = routes_dites(&journal);
+    assert_eq!(dites.len(), 2, "l'ouverture, puis le repli : {dites:?}");
+    assert_eq!(dites[1].2, "unavailable_fallback");
+    assert!(
+        hints(&journal)
+            .iter()
+            .any(|h| h.contains("m1") && h.contains("http 404")),
+        "le repli se dit, avec la raison : {:?}",
+        hints(&journal)
+    );
+}
+
+#[test]
+fn un_serveur_en_erreur_repart_ailleurs_et_le_message_suivant_ne_retombe_pas_dessus() {
+    let (_, router) = routeur_a();
+    let moteur = Pannes::new(vec![("m1", Failure::http(503))]);
+    let (harness, _) = harnais_pannes(moteur.clone(), router.clone(), Limits::default());
+
+    assert_eq!(run(harness.send("premier")), Running::Ran(Stop::Done));
+    assert_eq!(run(harness.send("second")), Running::Ran(Stop::Done));
+
+    let paires = moteur.paires();
+    assert_eq!(
+        paires.iter().filter(|p| *p == "a/m1").count(),
+        1,
+        "m1 n'est demandé qu'au premier message : le second ne retombe pas dessus : {paires:?}"
+    );
+    assert_eq!(
+        paires.len(),
+        3,
+        "m1, repli, puis le second sur un autre : {paires:?}"
+    );
+    let en_memoire = router.availability().standing();
+    assert_eq!(en_memoire.len(), 1);
+    assert_eq!(en_memoire[0].pick, Pick::new("a", "m1"));
+    assert!(!en_memoire[0].complete, "un 503 est passager");
+}
+
+#[test]
+fn une_indisponibilite_passagere_expire_et_le_modele_est_reessaye() {
+    let (_, router) = routeur_a();
+    let moteur = Pannes::new(vec![("m1", Failure::http(503))]);
+    let (harness, _) = harnais_pannes(moteur.clone(), router.clone(), Limits::default());
+    assert_eq!(run(harness.send("premier")), Running::Ran(Stop::Done));
+
+    // Le serveur est revenu ; le délai passe.
+    moteur.reparer();
+    router
+        .availability()
+        .advance(TEMPORARY_UNAVAILABLE_MS as f64 + 1.0);
+    assert_eq!(run(harness.send("second")), Running::Ran(Stop::Done));
+
+    let paires = moteur.paires();
+    assert_eq!(
+        paires.last().map(String::as_str),
+        Some("a/m1"),
+        "échue, la paire préférée est réessayée : {paires:?}"
+    );
+    assert!(router.availability().standing().is_empty());
+}
+
+#[test]
+fn un_modele_inconnu_du_moteur_ne_revient_pas_avec_le_temps_mais_se_remet() {
+    let (_, router) = routeur_a();
+    let moteur = Pannes::new(vec![("m1", Failure::http(404))]);
+    let (harness, _) = harnais_pannes(moteur.clone(), router.clone(), Limits::default());
+    assert_eq!(run(harness.send("premier")), Running::Ran(Stop::Done));
+
+    router.availability().advance(10_000_000_000.0);
+    assert_eq!(run(harness.send("second")), Running::Ran(Stop::Done));
+    assert_eq!(
+        moteur.paires().iter().filter(|p| *p == "a/m1").count(),
+        1,
+        "un modèle que le moteur ne connaît pas ne revient pas d'un délai : {:?}",
+        moteur.paires()
+    );
+
+    // La personne (ou l'hôte, réglages changés) le remet : il est de nouveau préféré.
+    moteur.reparer();
+    assert!(router.availability().clear(&Pick::new("a", "m1")));
+    assert_eq!(run(harness.send("troisième")), Running::Ran(Stop::Done));
+    assert_eq!(moteur.paires().last().map(String::as_str), Some("a/m1"));
+}
+
+#[test]
+fn un_tour_qui_sert_remet_le_modele_retenu() {
+    let (_, router) = routeur_a();
+    let moteur = Pannes::new(vec![("m1", Failure::http(503))]);
+    let (harness, _) = harnais_pannes(moteur.clone(), router.clone(), Limits::default());
+    assert_eq!(run(harness.send("premier")), Running::Ran(Stop::Done));
+    assert_eq!(router.availability().standing().len(), 1);
+
+    // La personne choisit m1 à la main, et il sert : plus rien ne le dit refusé.
+    moteur.reparer();
+    router.set_by_hand("a", "m1");
+    assert_eq!(run(harness.send("second")), Running::Ran(Stop::Done));
+    assert_eq!(moteur.paires().last().map(String::as_str), Some("a/m1"));
+    assert!(
+        router.availability().standing().is_empty(),
+        "m1 a servi : {:?}",
+        router.availability().standing()
+    );
+}
+
+#[test]
+fn une_panne_qui_n_est_pas_celle_du_modele_ne_change_pas_de_modele() {
+    // La clé, la requête, le compte, un moteur injoignable, une limite de débit nue : un autre
+    // modèle de la même instance ne ferait pas mieux, ou rien ne dit que c'est le modèle.
+    let cas: Vec<(&str, Failure)> = vec![
+        ("401", Failure::http(401)),
+        ("403", Failure::http(403)),
+        ("400", Failure::http(400)),
+        ("injoignable", Failure::new(Code::Unreachable, "dns")),
+        (
+            "compte épuisé",
+            Failure::quota_exhausted(QuotaScope::Account, None),
+        ),
+    ];
+    for (nom, panne) in cas {
+        let (_, router) = routeur_a();
+        let moteur = Pannes::new(vec![("m1", panne)]);
+        let (harness, _) = harnais_pannes(moteur.clone(), router.clone(), Limits::default());
+
+        assert!(
+            matches!(run(harness.send("hello")), Running::Ran(Stop::Failed(_))),
+            "{nom} : l'échec est rendu"
+        );
+        assert_eq!(
+            moteur.paires(),
+            vec!["a/m1".to_string()],
+            "{nom} : aucun repli"
+        );
+        assert!(
+            router.availability().standing().is_empty(),
+            "{nom} : rien n'est retenu"
+        );
+    }
+}
+
+#[test]
+fn un_modele_refuse_ne_remplace_jamais_un_choix_de_la_personne() {
+    for cas in ["impose", "main"] {
+        let world = monde_quota();
+        let mut spec = world.spec("a", "m1", 1).auto();
+        spec.explicit_model = cas == "impose";
+        let router = Rc::new(TurnRouter::new(spec));
+        if cas == "main" {
+            router.set_by_hand("a", "m1");
+        }
+        let moteur = Pannes::new(vec![("m1", Failure::http(404))]);
+        let (harness, _) = harnais_pannes(moteur.clone(), router, Limits::default());
+
+        let _ = run(harness.send("hello"));
+        assert_eq!(
+            moteur.paires(),
+            vec!["a/m1".to_string()],
+            "{cas} : la personne a choisi, aucun repli ne contourne ce choix"
+        );
+    }
+}
+
+#[test]
+fn la_chaine_est_bornee_et_ne_sort_jamais_de_l_instance() {
+    // Tous les modèles de `a` sont inconnus du moteur ; `b/x` serait pourtant le meilleur recours.
+    let (_, router) = routeur_a();
+    let moteur = Pannes::new(vec![
+        ("m1", Failure::http(404)),
+        ("m2", Failure::http(404)),
+        ("m3", Failure::http(404)),
+    ]);
+    let (harness, _) = harnais_pannes(moteur.clone(), router, Limits::default());
+
+    assert!(matches!(
+        run(harness.send("hello")),
+        Running::Ran(Stop::Failed(_))
+    ));
+    let paires = moteur.paires();
+    assert!(
+        paires.iter().all(|p| p.starts_with("a/")),
+        "jamais b/x : {paires:?}"
+    );
+    assert!(paires.len() <= 3, "bornée : {paires:?}");
+    let mut uniques = paires.clone();
+    uniques.sort();
+    uniques.dedup();
+    assert_eq!(
+        uniques.len(),
+        paires.len(),
+        "jamais deux fois le même : {paires:?}"
+    );
+}
+
+#[test]
+fn un_texte_deja_montre_interdit_le_repli_d_un_modele_indisponible() {
+    let (_, router) = routeur_a();
+    let moteur = Rc::new(Pannes {
+        texte_avant: true,
+        ..Rc::try_unwrap(Pannes::new(vec![("m1", Failure::http(503))]))
+            .ok()
+            .expect("seul propriétaire")
+    });
+    let (harness, _) = harnais_pannes(moteur.clone(), router.clone(), Limits::default());
+
+    let _ = run(harness.send("hello"));
+    assert_eq!(
+        moteur.paires(),
+        vec!["a/m1".to_string()],
+        "rejouer doublerait le texte déjà lu : {:?}",
+        moteur.paires()
+    );
+    // Mais le modèle est retenu : le message suivant ne retombe pas dessus.
+    assert_eq!(router.availability().standing().len(), 1);
+}
+
+#[test]
+fn le_silence_d_un_modele_repart_ailleurs_et_le_retient() {
+    let (_, router) = routeur_a();
+    let moteur = Rc::new(Pannes {
+        muets: vec!["m1"],
+        ..Rc::try_unwrap(Pannes::new(vec![]))
+            .ok()
+            .expect("seul propriétaire")
+    });
+    let limits = Limits {
+        silence_ms: Some(1_000),
+        ..Limits::default()
+    };
+    let (harness, _) = harnais_pannes(moteur.clone(), router.clone(), limits);
+
+    assert_eq!(run(harness.send("hello")), Running::Ran(Stop::Done));
+
+    let paires = moteur.paires();
+    assert_eq!(paires[0], "a/m1");
+    assert!(
+        paires[1] == "a/m2" || paires[1] == "a/m3",
+        "le modèle muet est quitté pour un autre de la même instance : {paires:?}"
+    );
+    let en_memoire = router.availability().standing();
+    assert_eq!(en_memoire[0].pick, Pick::new("a", "m1"));
+    assert_eq!(en_memoire[0].reason, "silence");
+}
+
+#[test]
+fn un_quota_de_modele_est_aussi_retenu_pour_le_message_suivant() {
+    // Le repli sur quota existait déjà ; la mémoire s'y ajoute : sans l'hôte, rien ne retenait
+    // le modèle épuisé, et chaque message retombait dessus.
+    let (_, router) = routeur_a();
+    let moteur = Pannes::new(vec![(
+        "m1",
+        Failure::quota_exhausted(QuotaScope::Model, Some(9_999_999)),
+    )]);
+    let (harness, _) = harnais_pannes(moteur.clone(), router.clone(), Limits::default());
+
+    assert_eq!(run(harness.send("premier")), Running::Ran(Stop::Done));
+    assert_eq!(run(harness.send("second")), Running::Ran(Stop::Done));
+    assert_eq!(
+        moteur.paires().iter().filter(|p| *p == "a/m1").count(),
+        1,
+        "{:?}",
+        moteur.paires()
+    );
+}

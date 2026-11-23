@@ -85,8 +85,9 @@ pub use session::{
     TurnContext, out_hash,
 };
 pub use wire::{
-    Code, Failure, Finish, ImagePart, ImageSource, Message, QuotaRefusal, QuotaScope, Reply,
-    Request, ThreadDefect, ToolCall, ToolSpec, served_matches,
+    Code, Failure, Finish, ImagePart, ImageSource, Message, ModelDown, QUOTA_UNAVAILABLE_MS,
+    QuotaRefusal, QuotaScope, Reply, Request, TEMPORARY_UNAVAILABLE_MS, ThreadDefect, ToolCall,
+    ToolSpec, Unavailability, served_matches,
 };
 
 /// Le verdict que porte `Event::Stopped`.

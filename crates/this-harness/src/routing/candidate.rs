@@ -134,6 +134,18 @@ pub struct QuotaExhaustion {
     pub window: Option<String>,
 }
 
+/// UN modèle ne sert pas pour l'instant : posé par la mémoire d'indisponibilité
+/// ([`crate::routing::Availability`]) ou par l'hôte. Ni la santé de l'instance ([`Candidate::healthy`])
+/// ni un quota : le moteur a répondu, et a dit non à ce modèle.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Unavailable {
+    /// Complète : le moteur ne connaît pas ce modèle, aucun délai ne le fera revenir. Faux :
+    /// passagère, le modèle revient quand la mémoire l'oublie.
+    pub complete: bool,
+    /// Code court et stable (`http 404`, `http 503`, `timeout`, `quota`).
+    pub reason: String,
+}
+
 /// Ce qui est su d'un modèle d'une instance, au moment de décider.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Candidate {
@@ -158,6 +170,9 @@ pub struct Candidate {
     /// Le compte refuse jusqu'à cet instant. Pas de la santé : un compte épuisé
     /// répond, et dit non.
     pub quota_exhausted: Option<QuotaExhaustion>,
+    /// Le moteur a refusé CE modèle, passagèrement ou pour de bon. `None` : rien n'en est su.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unavailable: Option<Unavailable>,
     /// À quel point la fenêtre la plus pleine de l'instance l'est (`0.0..=1.0`).
     /// Préférence douce du scoreur : `None` est « personne n'a mesuré », jamais « vide ».
     pub quota_utilization: Option<f64>,
@@ -181,6 +196,7 @@ impl Candidate {
             allowed: true,
             remote: false,
             quota_exhausted: None,
+            unavailable: None,
             quota_utilization: None,
         }
     }
@@ -239,6 +255,9 @@ pub enum RejectReason {
     /// UN modèle de l'instance refuse jusqu'à `resets_at_ms` : les autres
     /// modèles de l'instance restent éligibles.
     QuotaExhaustedModel { resets_at_ms: u64, model: String },
+    /// Le moteur a refusé CE modèle (inconnu de lui, serveur en erreur, silence) : un autre modèle
+    /// de la même instance peut servir. `complete` : il ne reviendra pas de lui-même.
+    Unavailable { complete: bool, cause: String },
     /// L'instance est en panne maintenant.
     Unhealthy,
     /// Le tour a besoin d'outils et le modèle ne sait pas les appeler.
@@ -265,6 +284,7 @@ impl RejectReason {
             Self::NotAllowed => "not_allowed",
             Self::QuotaExhausted { .. } => "quota_exhausted",
             Self::QuotaExhaustedModel { .. } => "quota_exhausted_model",
+            Self::Unavailable { .. } => "unavailable",
             Self::Unhealthy => "unhealthy",
             Self::NoTools => "no_tools",
             Self::ContextTooSmall { .. } => "context_too_small",
@@ -336,6 +356,13 @@ fn check(signature: &TurnSignature, facts: &Candidate) -> Option<RejectReason> {
         return Some(RejectReason::QuotaExhausted {
             resets_at_ms: quota.resets_at_ms,
             window: quota.window.clone(),
+        });
+    }
+    // Avant la santé : l'instance est saine, c'est CE modèle que le moteur a refusé.
+    if let Some(unavailable) = &facts.unavailable {
+        return Some(RejectReason::Unavailable {
+            complete: unavailable.complete,
+            cause: unavailable.reason.clone(),
         });
     }
     if facts.healthy == Some(false) {

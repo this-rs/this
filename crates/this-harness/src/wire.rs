@@ -422,6 +422,34 @@ pub struct QuotaRefusal {
     pub resets_at_ms: Option<u64>,
 }
 
+/// Combien de temps un modèle passagèrement indisponible (serveur en erreur, silence) est laissé
+/// de côté avant d'être réessayé.
+pub const TEMPORARY_UNAVAILABLE_MS: u64 = 120_000;
+
+/// Combien de temps un modèle dont le quota est épuisé est laissé de côté. Plus long qu'une
+/// panne : un quota ne revient pas en quelques secondes, et le rejouer coûte un refus de plus.
+pub const QUOTA_UNAVAILABLE_MS: u64 = 600_000;
+
+/// Pourquoi, et pour combien de temps, UN modèle ne sert plus.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Unavailability {
+    /// Passagère : le modèle est laissé de côté `cooldown_ms`, puis réessayé.
+    Temporary { cooldown_ms: u64 },
+    /// Complète : le moteur ne connaît pas (ou plus) ce modèle. Il reste de côté jusqu'à ce qu'on
+    /// le remette (réglage de l'instance changé, catalogue qui le ré-annonce, geste de la personne)
+    /// — aucun délai ne le fera revenir d'un modèle qui n'existe pas.
+    Complete,
+}
+
+/// Une panne lue comme l'indisponibilité d'UN modèle : sa durée et sa raison courte.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ModelDown {
+    pub kind: Unavailability,
+    /// Un code court et stable (`http 404`, `http 503`, `timeout`, `quota`), jamais le texte du
+    /// moteur : il va dans les journaux et l'interface.
+    pub reason: String,
+}
+
 /// Une panne de transport, avec sa famille et sa phrase.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Failure {
@@ -482,6 +510,50 @@ impl Failure {
     /// Vrai quand l'utilisateur a demandé l'arrêt : ce n'est pas un échec.
     pub fn is_aborted(&self) -> bool {
         self.code == Code::Aborted
+    }
+
+    /// Cette panne dit-elle qu'UN modèle ne sert pas, alors qu'un autre modèle de la même instance
+    /// le pourrait ? Lu des faits que le transport énonce, jamais d'une supposition :
+    ///
+    /// - un quota de MODÈLE dit épuisé → passager (long) ;
+    /// - `404` / `410` : le moteur ne connaît pas ce modèle → complète ;
+    /// - un `5xx` ou un délai dépassé → passager.
+    ///
+    /// Tout le reste rend `None` : une annulation, un quota de COMPTE (tout modèle de l'instance
+    /// refuserait), `401`/`403` (la clé, pas le modèle), `400` (la requête, pas le modèle), un `429`
+    /// nu (limite de débit ou quota, rien ne le dit), un moteur injoignable (l'instance, pas le
+    /// modèle), une réponse coupée ou illisible.
+    pub fn model_down(&self) -> Option<ModelDown> {
+        if self.is_aborted() {
+            return None;
+        }
+        if let Some(quota) = self.quota {
+            return (quota.scope == QuotaScope::Model).then(|| ModelDown {
+                kind: Unavailability::Temporary {
+                    cooldown_ms: QUOTA_UNAVAILABLE_MS,
+                },
+                reason: "quota".to_string(),
+            });
+        }
+        match (self.code, self.status) {
+            (Code::Http, Some(status @ (404 | 410))) => Some(ModelDown {
+                kind: Unavailability::Complete,
+                reason: format!("http {status}"),
+            }),
+            (Code::Http, Some(status)) if (500..=599).contains(&status) => Some(ModelDown {
+                kind: Unavailability::Temporary {
+                    cooldown_ms: TEMPORARY_UNAVAILABLE_MS,
+                },
+                reason: format!("http {status}"),
+            }),
+            (Code::Timeout, _) => Some(ModelDown {
+                kind: Unavailability::Temporary {
+                    cooldown_ms: TEMPORARY_UNAVAILABLE_MS,
+                },
+                reason: "timeout".to_string(),
+            }),
+            _ => None,
+        }
     }
 }
 
@@ -577,6 +649,69 @@ mod tests {
         let back: Message = serde_json::from_value(written).unwrap();
         assert_eq!(back, message);
         assert_eq!(back.text(), "regarde");
+    }
+
+    // ── model_down : une panne qui dit « CE modèle ne sert pas » ──────────────────────
+
+    #[test]
+    fn model_down_lit_ce_que_le_transport_enonce() {
+        let temporaire = |ms, raison: &str| {
+            Some(ModelDown {
+                kind: Unavailability::Temporary { cooldown_ms: ms },
+                reason: raison.to_string(),
+            })
+        };
+        // Un modèle que le moteur ne connaît pas : complet.
+        assert_eq!(
+            Failure::http(404).model_down(),
+            Some(ModelDown {
+                kind: Unavailability::Complete,
+                reason: "http 404".to_string()
+            })
+        );
+        assert_eq!(
+            Failure::http(410).model_down().map(|d| d.kind),
+            Some(Unavailability::Complete)
+        );
+        // Un serveur en erreur, un délai : passagers.
+        for status in [500, 502, 503, 504, 529] {
+            assert_eq!(
+                Failure::http(status).model_down(),
+                temporaire(TEMPORARY_UNAVAILABLE_MS, &format!("http {status}"))
+            );
+        }
+        assert_eq!(
+            Failure::new(Code::Timeout, "silence").model_down(),
+            temporaire(TEMPORARY_UNAVAILABLE_MS, "timeout")
+        );
+        // Un quota de MODÈLE : passager, plus long.
+        assert_eq!(
+            Failure::quota_exhausted(QuotaScope::Model, None).model_down(),
+            temporaire(QUOTA_UNAVAILABLE_MS, "quota")
+        );
+    }
+
+    #[test]
+    fn model_down_ne_dit_rien_de_ce_qui_n_est_pas_la_faute_du_modele() {
+        // Le compte entier, la clé, la requête, une limite de débit nue, un moteur injoignable,
+        // une réponse coupée ou illisible, un arrêt demandé : aucun autre modèle ne ferait mieux
+        // (ou rien ne dit que c'est le modèle).
+        let rien = [
+            Failure::quota_exhausted(QuotaScope::Account, None),
+            Failure::http(401),
+            Failure::http(403),
+            Failure::http(400),
+            Failure::http(422),
+            Failure::http(429),
+            Failure::new(Code::Unreachable, "dns"),
+            Failure::new(Code::Truncated, "flux coupé"),
+            Failure::new(Code::Unreadable, "illisible"),
+            Failure::new(Code::Aborted, "arrêt"),
+            Failure::new(Code::Provider, "refus"),
+        ];
+        for failure in rien {
+            assert_eq!(failure.model_down(), None, "{failure:?}");
+        }
     }
 }
 

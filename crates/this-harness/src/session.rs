@@ -94,7 +94,8 @@ pub const MAX_RETRIES: u32 = 3;
 /// Première attente avant une relance ; elle double à chaque tentative.
 pub const RETRY_BACKOFF_MS: u64 = 1_000;
 
-/// Combien de modèles refusés pour quota un MESSAGE peut enchaîner avant de rendre l'échec.
+/// Combien de modèles refusés (quota, ou indisponibles : inconnus du moteur, serveur en erreur, silence)
+/// un MESSAGE peut enchaîner avant de rendre l'échec.
 ///
 /// Le repli ne rejoue que l'appel au modèle (jamais un outil), et chaque modèle refusé est
 /// exclu du suivant : la chaîne est donc finie, et ne peut pas devenir une boucle de quotas.
@@ -557,6 +558,15 @@ async fn pause(clock: &dyn Clock, ms: u64, cancel: &Cancel) -> bool {
             None => return cancel.is_cancelled(),
         }
     }
+}
+
+/// Pourquoi un tour cherche un autre modèle de la même instance.
+#[derive(Clone, Copy)]
+enum FallbackCause {
+    /// Le moteur dit le quota de ce modèle épuisé.
+    Quota { resets_at_ms: Option<u64> },
+    /// Le moteur refuse ce modèle (inconnu, serveur en erreur) ou ne dit rien (silence).
+    Unavailable,
 }
 
 /// Une panne passagère : la limite de débit (429) ou un délai dépassé.
@@ -1549,6 +1559,40 @@ impl Harness {
                         decided_served = true;
                     }
 
+                    // Ce que ce tour dit de la paire qui l'a servi : le moteur a refusé CE modèle
+                    // (inconnu, serveur en erreur, quota du modèle) ou n'a rien dit (silence). Lu
+                    // des faits du transport ([`Failure::model_down`]), jamais d'une supposition. Retenu
+                    // AVANT de chercher un repli : le message suivant ne retombera pas dessus, que le
+                    // repli de CE tour ait réussi ou non. Un tour qui a servi remet la paire.
+                    let down = match &issue {
+                        Ok(Err(failure)) => failure.model_down(),
+                        Err(Watch::Silent(_) | Watch::Stalled(_))
+                            if gathered.borrow().is_empty() =>
+                        {
+                            Some(crate::wire::ModelDown {
+                                kind: crate::wire::Unavailability::Temporary {
+                                    cooldown_ms: crate::wire::TEMPORARY_UNAVAILABLE_MS,
+                                },
+                                reason: "silence".to_string(),
+                            })
+                        }
+                        _ => None,
+                    };
+                    if let Some(router) = &self.router
+                        && let Some(current) = &route
+                        && let Some(model) = current.model()
+                    {
+                        let pick = crate::routing::Pick::new(current.provider(), model);
+                        router.availability().advance(clock.now_ms());
+                        match &down {
+                            Some(down) => router.availability().mark(&pick, down),
+                            None if confirmed && matches!(&issue, Ok(Ok(_))) => {
+                                router.availability().served(&pick);
+                            }
+                            None => {}
+                        }
+                    }
+
                     // Quota d'un MODÈLE épuisé (dit par le transport, jamais deviné) : le tour
                     // repart sur un autre modèle de la même instance — mais sous la garde du
                     // rejeu ci-dessous : rien montré, aucun outil joué DANS CE TOUR. On ne
@@ -1571,7 +1615,9 @@ impl Harness {
                                 &cancel,
                                 &mut quota_refused,
                                 crate::routing::Pick::new(current.provider(), &model),
-                                quota.resets_at_ms,
+                                FallbackCause::Quota {
+                                    resets_at_ms: quota.resets_at_ms,
+                                },
                                 transport.honors_route(),
                                 deadline.map(|(at, _)| at),
                             )
@@ -1617,6 +1663,50 @@ impl Harness {
                         if pause(clock.as_ref(), wait, &cancel).await {
                             break Ok(Err(Failure::aborted()));
                         }
+                        continue;
+                    }
+
+                    // Le moteur refuse CE modèle (inconnu de lui, serveur en erreur, délai dépassé après
+                    // les relances) ou se tait : ce n'est pas la panne du tour. Il repart sur un autre
+                    // modèle de la même instance — jamais un autre fournisseur (décision du 23/11 sur C2 :
+                    // changer d'entreprise en cours de tour engage la confidentialité et le budget) —,
+                    // sous la même garde de rejeu : rien montré, aucun outil joué DANS CE TOUR. Un quota
+                    // de modèle est déjà traité plus haut. Le modèle refusé est déjà en mémoire.
+                    if let Some(down) = &down
+                        && !matches!(&issue, Ok(Err(failure)) if failure.quota.is_some())
+                        && !cancel.is_cancelled()
+                        && gathered.borrow().is_empty()
+                        && run.borrow().steps.len() == steps_at_turn
+                        && quota_refused.len() < MAX_QUOTA_FALLBACKS
+                        && let Some(current) = route.clone()
+                        && let Some(model) = current.model().map(str::to_string)
+                        && let Some(fallback) = self
+                            .quota_fallback(
+                                &first,
+                                toolbox.as_ref(),
+                                &limits,
+                                &cancel,
+                                &mut quota_refused,
+                                crate::routing::Pick::new(current.provider(), &model),
+                                FallbackCause::Unavailable,
+                                transport.honors_route(),
+                                deadline.map(|(at, _)| at),
+                            )
+                            .await
+                    {
+                        self.out.emit(Event::Hint {
+                            kind: HintKind::Retry,
+                            text: format!(
+                                "Le modèle {model} est indisponible ({}) : le tour repart sur {} (même instance). Seul l'appel au modèle est rejoué.",
+                                down.reason,
+                                fallback.model().unwrap_or("le modèle par défaut")
+                            ),
+                        });
+                        request = request.with_route(Some(fallback.clone()));
+                        route = Some(fallback);
+                        quota_fell_back = true;
+                        // Un nouveau modèle, une nouvelle série de pannes passagères.
+                        tentative = 0;
                         continue;
                     }
                     break issue;
@@ -2080,6 +2170,8 @@ impl Harness {
         cancel: &Cancel,
     ) -> Option<crate::routing::Route> {
         let router = self.router.clone()?;
+        // La mémoire des modèles refusés n'a pas d'horloge : c'est la nôtre, avant chaque décision.
+        router.availability().advance(self.clock.now_ms());
         let (has_images, hints) = self.turn_signals(first, toolbox, limits);
         let clock = self.clock.clone();
         let honored = self.transport.honors_route();
@@ -2183,11 +2275,12 @@ impl Harness {
         cancel: &Cancel,
         refused: &mut Vec<crate::routing::Pick>,
         just_refused: crate::routing::Pick,
-        resets_at_ms: Option<u64>,
+        cause: FallbackCause,
         honored: bool,
         deadline_ms: Option<f64>,
     ) -> Option<crate::routing::Route> {
         let router = self.router.clone()?;
+        router.availability().advance(self.clock.now_ms());
         refused.push(just_refused);
         // L'échéance du run est une borne DURE : un repli qui se décide après elle ne doit pas
         // relancer un transport ni un outil. Le temps restant borne la sélection elle-même.
@@ -2195,16 +2288,20 @@ impl Harness {
             return None;
         }
         let (has_images, hints) = self.turn_signals(first, toolbox, limits);
-        let work = router.after_limit(
-            crate::routing::TurnInput {
-                text: &first.text,
-                has_images,
-                honored,
-                hints,
-            },
-            refused,
-            resets_at_ms,
-        );
+        let turn = crate::routing::TurnInput {
+            text: &first.text,
+            has_images,
+            honored,
+            hints,
+        };
+        let work = async {
+            match cause {
+                FallbackCause::Quota { resets_at_ms } => {
+                    router.after_limit(turn, refused, resets_at_ms).await
+                }
+                FallbackCause::Unavailable => router.after_unavailable(turn, refused).await,
+            }
+        };
         // Le plus court de : le délai du routeur et le temps qui reste avant l'échéance du run.
         let restant = deadline_ms
             .map(|at| (at - self.clock.now_ms()).max(0.0) as u64)
