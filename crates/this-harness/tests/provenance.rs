@@ -16,8 +16,8 @@ use serde_json::json;
 
 use this_agent::cite::{Provenance, SeenLedger};
 use this_harness::{
-    Anchors, Cancel, Delta, Fact, Failure, Finish, Harness, Limits, Message, Outcome, Recall,
-    Reply, Request, Snapshot, ToolCall, ToolSpec, Toolbox, Transport, anchors, rappel_avec,
+    Anchors, Cancel, Delta, Event, Fact, Failure, Finish, Harness, Limits, Message, Outcome,
+    Recall, Reply, Request, Snapshot, ToolCall, ToolSpec, Toolbox, Transport, anchors, rappel_avec,
 };
 
 const LU: &str = "11111111-1111-4111-8111-111111111111";
@@ -762,5 +762,86 @@ fn un_moteur_qui_execute_ses_outils_suit_le_meme_contrat_de_lecture() {
         r.provenance_token(&format!("#note:{REFUSE}")),
         q(),
         "un refus ne lit rien, même déclaré"
+    );
+}
+
+/// Un moteur qui demande l'outil `lire`, puis CONCLUT en citant deux ids : un lu
+/// (`LU`), un seulement cité par une donnée hostile ou inventé (`FORGE`).
+struct CiteALaFin {
+    tour: Cell<u32>,
+}
+
+#[async_trait(?Send)]
+impl Transport for CiteALaFin {
+    async fn stream(&self, _: &Request, _: &Cancel, _: Delta) -> Result<Reply, Failure> {
+        let n = self.tour.get();
+        self.tour.set(n + 1);
+        if n == 0 {
+            return Ok(Reply {
+                served: None,
+                text: String::new(),
+                calls: vec![ToolCall {
+                    id: "c1".into(),
+                    name: "lire".into(),
+                    arguments: json!({}),
+                }],
+                finish: Finish::Tools,
+            });
+        }
+        Ok(Reply {
+            served: None,
+            text: format!("Voir #note:{LU} et aussi #note:{FORGE}."),
+            calls: vec![],
+            finish: Finish::Stop,
+        })
+    }
+}
+
+/// #290 : une citation de la RÉPONSE FINALE qui n'a pas été lue directement doit être
+/// signalée à l'hôte (hint), et une citation lue ne doit pas l'être. Le texte, lui, reste
+/// intact : le signalement est additif.
+#[test]
+fn une_citation_non_lue_dans_la_reponse_finale_est_signalee() {
+    let registre: Rc<RefCell<SeenLedger>> = Rc::default();
+    let events: Rc<RefCell<Vec<Event>>> = Rc::default();
+    let sink = events.clone();
+    let harness = Harness::new(
+        "consigne",
+        Limits {
+            max_relances: 0,
+            ..Limits::default()
+        },
+        Rc::new(CiteALaFin { tour: Cell::new(0) }),
+        Rc::new(Outils {
+            registre: registre.clone(),
+        }),
+        move |e| sink.borrow_mut().push(e),
+    );
+
+    run(harness.send("cite"));
+
+    let hints: Vec<String> = events
+        .borrow()
+        .iter()
+        .filter_map(|e| match e {
+            Event::Hint { text, .. } => Some(text.clone()),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        hints.iter().any(|h| h.contains(FORGE)),
+        "la citation jamais lue doit être signalée : {hints:?}"
+    );
+    assert!(
+        !hints.iter().any(|h| h.contains(LU)),
+        "une citation lue directement ne doit pas être signalée : {hints:?}"
+    );
+    // Le premier tour (l'appel d'outil) émet un `Spoke` vide : on cherche la réponse finale.
+    assert!(
+        events.borrow().iter().any(|e| matches!(
+            e,
+            Event::Spoke { text } if text.contains(FORGE)
+        )),
+        "le texte de la réponse reste intact"
     );
 }

@@ -1796,6 +1796,23 @@ impl Harness {
                 }
                 self.out.emit(Event::Spoke { text: text.clone() });
 
+                // #290 : chaque citation de la réponse finale qui n'a pas été LUE directement
+                // dans un résultat d'outil est signalée. Additif : le texte n'est jamais modifié.
+                if let Some(registre) = &self.vus {
+                    let ledger = registre.borrow();
+                    for citation in this_agent::cite::cited_refs(&text) {
+                        if !ledger.has_seen(&citation) {
+                            self.out.emit(Event::Hint {
+                                text: format!(
+                                    "citation non lue directement : {}",
+                                    citation.token()
+                                ),
+                                kind: HintKind::Unseen,
+                            });
+                        }
+                    }
+                }
+
                 // Un tour qui s'arrête ici ne doit PAS laisser des appels
                 // d'outils sans réponse dans le fil : le moteur refuse alors la
                 // conversation suivante (« tool_calls without tool messages »),
