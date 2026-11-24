@@ -225,6 +225,10 @@ pub enum HintKind {
     Refused,
     /// Toute autre consigne (action sans effet, tour muet…), et tout genre
     /// inconnu d'un message plus récent.
+    /// Un pas de journal (étape ou arrêt) a été ABANDONNÉ : l'enregistreur a paniqué ou a
+    /// dépassé son délai (#284). Le run continue (le journal reste best-effort) ; ce signal
+    /// dit seulement que le journal n'est pas complet.
+    Unrecorded,
     /// Une citation de la réponse finale n'a jamais été lue directement dans un
     /// résultat d'outil (#290). Le texte n'est pas modifié : c'est un signalement.
     Unseen,
