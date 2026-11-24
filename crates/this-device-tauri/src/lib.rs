@@ -191,6 +191,12 @@ pub const STREAM_METHODS: &[&str] = &["streamStart", "streamStop"];
 /// l'éditeur de liens qui décide.
 pub const DIAGNOSTIC_METHODS: &[&str] = &["listCommands"];
 
+/// Commandes de cycle de vie appelées **directement** par des fonctions Rust
+/// ([`begin_background_task`], [`end_background_task`]) — ni famille consentie, ni lecture
+/// d'état : elles n'ont pas de `capability_of`, mais elles sont joignables par ces fonctions.
+/// `tests/swift_parity.rs` les compte comme atteignables et ne leur demande pas de capacité.
+pub const LIFECYCLE_METHODS: &[&str] = &["beginBackgroundTask", "endBackgroundTask"];
+
 /// Démarre un flux de [`STREAMS`]. `on_sample` reçoit chaque échantillon natif, tel quel
 /// (`{"kind":"orientation","angle":…}`, `{"kind":"battery","level":…,"state":…}`) : un
 /// échantillon initial tout de suite, puis un par notification du système. L'appelant le
