@@ -40,6 +40,8 @@ pub mod tenant_scoped;
 /// (NATIF-J4, RFC principal-natif-v2 §5.1).
 #[cfg(feature = "obrain")]
 pub mod tenantcat;
+#[cfg(feature = "obrain")]
+pub mod tool_graph;
 /// Virtual file system and module store (interfaces; module descriptor RFC §3.8).
 pub mod vfs;
 /// Bail d'écriture et jeton de fencing — l'unicité de l'écrivain, **imposée**.
@@ -68,6 +70,8 @@ pub use self::obrain::{ObrainDataService, ObrainLinkService, ObrainStore};
 pub use self::obrain_facade::GraphBackend;
 #[cfg(feature = "obrain")]
 pub use self::obrain_identity::{IdentityReport, LabelReport};
+#[cfg(feature = "obrain")]
+pub use self::tool_graph::ToolGraph;
 #[cfg(feature = "dynamodb")]
 pub use dynamodb::{DynamoDBDataService, DynamoDBLinkService};
 pub use in_memory::{InMemoryDataService, InMemoryLinkService};
