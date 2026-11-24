@@ -527,6 +527,11 @@ pub struct Snapshot {
     pub transcript: Vec<crate::wire::Message>,
     #[serde(default)]
     pub pending: Vec<Pending>,
+    /// Les outils dont le consentement a été RETIRÉ au moment de la sauvegarde (#287). Un
+    /// snapshot ne porte que des révocations, jamais des octrois : restaurer ne peut rien
+    /// accorder. Absent (vide) dans les snapshots d'avant ce champ, qui restent lisibles.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub revoked: Vec<String>,
 }
 
 /// La version du format de [`Snapshot`] que ce harnais sait relire.

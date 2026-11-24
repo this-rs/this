@@ -942,8 +942,9 @@ pub struct Harness {
     /// (voir [`Harness::with_router`]).
     router: Option<Rc<crate::routing::TurnRouter>>,
     /// Les autorisations d'outils. `None` : le harnais ne fait RIEN respecter
-    /// (voir [`Harness::with_grants`]).
-    grants: Option<this_agent::substrate::Grants>,
+    /// (voir [`Harness::with_grants`]). Partagé entre les poignées, comme `state` : une
+    /// révocation faite sur l'une vaut pour toutes (#287).
+    grants: Shared<Option<this_agent::substrate::Grants>>,
     /// Le compacteur, s'il y en a un : aucun par défaut, donc la borne de contexte jette
     /// (voir [`Harness::with_compactor`]).
     compactor: Option<Rc<dyn Compactor>>,
@@ -970,7 +971,7 @@ impl Harness {
             clock: Rc::new(SystemClock),
             turn_context: None,
             router: None,
-            grants: None,
+            grants: Rc::new(RefCell::new(None)),
             compactor: None,
             recorder: Rc::new(Recorders::new()),
             state: Rc::new(RefCell::new(State {
@@ -1059,8 +1060,8 @@ impl Harness {
     /// [`Grants::allows`](this_agent::substrate::Grants::allows) ne permet pas l'est aussi,
     /// avec le motif de l'autorisation. Le refus est un `Outcome::refused` ordinaire :
     /// le même événement, la même `Step`, la même relance que tout autre refus.
-    pub fn with_grants(mut self, grants: this_agent::substrate::Grants) -> Self {
-        self.grants = Some(grants);
+    pub fn with_grants(self, grants: this_agent::substrate::Grants) -> Self {
+        *self.grants.borrow_mut() = Some(grants);
         self
     }
 
@@ -1219,14 +1220,30 @@ impl Harness {
     }
 
     pub fn snapshot(&self) -> Snapshot {
-        self.handle().snapshot()
+        let mut sauve = self.handle().snapshot();
+        sauve.revoked = self.revoquees();
+        sauve
+    }
+
+    /// Retire ou remplace les autorisations installées (#287). Une révocation
+    /// (`Grant::refused`) vaut pour le PROCHAIN appel à la porte de la boucle, et se
+    /// sauvegarde dans le [`Snapshot`] : elle survit donc à un redémarrage.
+    ///
+    /// Limite : un transport qui exécute ses outils lui-même (famille A) garde la copie
+    /// prise au démarrage de son run ; une révocation faite pendant ce run ne l'atteint pas
+    /// avant le run suivant.
+    pub fn set_grants(&self, grants: this_agent::substrate::Grants) {
+        *self.grants.borrow_mut() = Some(grants);
     }
 
     /// Remet un état sauvegardé en place — la file d'attente comprise.
     ///
-    /// **Conservateur par défaut** : voir [`Handle::restore`].
+    /// **Conservateur par défaut** : voir [`Handle::restore`]. Les révocations du snapshot
+    /// sont appliquées, mais seulement comme REFUS : une restauration ne peut rien accorder.
     pub fn restore(&self, snapshot: Snapshot) {
+        let revoquees = snapshot.revoked.clone();
         self.handle().restore(snapshot);
+        self.appliquer_revocations(&revoquees);
     }
 
     /// [`Self::restore`] pour un snapshot dont on connaît l'origine : la voie
@@ -1234,12 +1251,67 @@ impl Harness {
     /// « cité ≠ lu »** : une citation y redevient `Direct` (l'intégrité n'est pas la fidélité de
     /// provenance).
     pub fn restore_trusted(&self, snapshot: Snapshot) {
+        let revoquees = snapshot.revoked.clone();
         self.handle().restore_trusted(snapshot);
+        self.appliquer_revocations(&revoquees);
     }
 
     /// [`Self::restore`] : alias conservateur, rien n'y devient une preuve.
     pub fn restore_untrusted(&self, snapshot: Snapshot) {
+        let revoquees = snapshot.revoked.clone();
         self.handle().restore_untrusted(snapshot);
+        self.appliquer_revocations(&revoquees);
+    }
+
+    /// Les outils dont le consentement installé est refusé, triés (#287).
+    fn revoquees(&self) -> Vec<String> {
+        let installees = self.grants.borrow();
+        let Some(installees) = installees.as_ref() else {
+            return Vec::new();
+        };
+        let mut noms: Vec<String> = installees
+            .grants
+            .iter()
+            .filter(|g| {
+                matches!(
+                    installees.allows(&g.tool),
+                    this_agent::substrate::Verdict::Refuse(_)
+                )
+            })
+            .map(|g| g.tool.clone())
+            .collect();
+        noms.sort();
+        noms.dedup();
+        noms
+    }
+
+    /// Applique des révocations restaurées : un refus, jamais un octroi (#287).
+    fn appliquer_revocations(&self, noms: &[String]) {
+        if noms.is_empty() {
+            return;
+        }
+        let mut installees = self.grants.borrow_mut();
+        match installees.as_mut() {
+            Some(installees) => {
+                for nom in noms {
+                    installees.put(this_agent::substrate::Grant::refused(
+                        nom.clone(),
+                        "snapshot",
+                        "révoqué avant l'arrêt",
+                    ));
+                }
+            }
+            None => {
+                // Aucun grant installé : rien n'est vérifié (contrat de `with_grants`). Installer
+                // seulement ces refus fermerait tout le reste, ce qui changerait le comportement de
+                // l'hôte. On le dit donc à l'hôte, au lieu d'appliquer en silence.
+                drop(installees);
+                self.handle().out.emit(Event::Hint {
+                    kind: HintKind::Other,
+                    text: "révocation restaurée non appliquée : aucune autorisation installée sur cet hôte. Installez les grants avant de restaurer.".into(),
+                });
+            }
+        }
     }
 
     /// Le message entre dans la conversation et l'agent travaille jusqu'à
@@ -1411,7 +1483,7 @@ impl Harness {
             // `run_tool`, hors-bande. Un transport qui n'exécute pas les outils
             // lui-même l'ignore (`Transport::set_permission` est un défaut no-op).
             transport.set_permission(Rc::new(RunPorts {
-                grants: self.grants.clone(),
+                grants: self.grants.borrow().clone(),
                 toolbox: toolbox.clone(),
                 vus: self.vus.clone(),
                 run: run.clone(),
@@ -2251,7 +2323,8 @@ impl Harness {
         // Les autorisations de l'outillage passent devant : elles suivent les outils qui
         // apparaissent en cours de session (voir `Toolbox::grants`).
         let dynamiques = toolbox.grants();
-        let effectives = dynamiques.as_ref().or(self.grants.as_ref());
+        let installees = self.grants.borrow();
+        let effectives = dynamiques.as_ref().or(installees.as_ref());
         gate_decision(effectives, &toolbox.declarations(), tool).err()
     }
 
@@ -3234,6 +3307,8 @@ impl Handle {
             version: SNAPSHOT_VERSION,
             transcript,
             pending,
+            // Les révocations sont ajoutées par `Harness::snapshot`, qui détient les grants.
+            revoked: Vec::new(),
         }
     }
 
