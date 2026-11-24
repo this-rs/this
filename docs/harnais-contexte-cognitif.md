@@ -11,7 +11,10 @@ possède, ce qu'elles portent comme provenance, version, périmètre, budget et 
 Puis il tranche les sept cases du ticket #290, et nomme la frontière entre le cœur
 (`this-harness`, `this-agent`) et l'hôte.
 
-Mesuré le 20/11/2026 sur `origin/main` `bd387e8` (copie de travail `docs/harness-contrats`).
+Mesuré le 20/11/2026 sur `origin/main` `bd387e8` (copie de travail `docs/harness-contrats`),
+**re-vérifié le 24/11/2026** sur `787a988` (branche `fix/290-contexte-cognitif`) : le §6
+donne le verdict daté de chaque case après les PR #318, #347, #350, #353, #359, #361,
+#362, #363 et après ce que cette branche ajoute.
 
 **Note de cadrage, pas un bug.** `Cargo.toml:218-221` documente que la feature
 `obrain-cognitive` est un **alias de compatibilité** : le relief cognitif n'est pas
@@ -63,7 +66,7 @@ même précision.
 test dans `this-harness` ni `this-agent`. Elles n'arrivent au modèle que de deux
 façons, et les deux sont des **hôtes** : soit comme texte non fiable dans un
 `<untrusted_data>` (une note lue), soit comme fait étiqueté par le port `Recall`
-(`recall.rs:79-91`), qui ne transporte qu'un `id`, un `label`, une `source` et une
+(`recall.rs:102-115`), qui ne transporte qu'un `id`, un `label`, une `source` et une
 date — **pas** le corps de la note, **pas** son statut, **pas** son projet. Un hôte qui
 veut distinguer une note « confirmée » d'une note « invalidée » doit donc le mettre dans
 le `label` ou refuser de la rendre : le contrat du port ne le prévoit pas. C'est écrit
@@ -407,3 +410,60 @@ Limites assumées de ce contrat :
 - **`rappel_cloisonne` accepte des `Anchors` publics.** Une citation dont l'`id` n'a pas la forme
   exacte `#kind:uuid` (ou dont le `kind` diffère) n'est ni interrogée au graphe ni marquée par
   le registre : elle est rendue comme copie tierce enveloppée, sous le libellé « citation invalide, non interrogée » (et non « INTROUVABLE dans le graphe », qui suppose une interrogation).
+
+---
+
+## 6. Re-vérification datée — 24/11/2026, base `787a988`
+
+Chaque case est re-jugée sur le code de cette branche, avec un **test nommé** ou un
+`fichier:ligne` à l'appui. « Prouvé » veut dire : un test échoue si la garantie tombe
+(vérifié par mutation). « Manque » nomme exactement ce qui n'est pas écrit, et chez qui.
+
+| Case | Verdict au 24/11 | Preuve (test ou `fichier:ligne`) | Ce qui manque encore, et à qui |
+|---|---|---|---|
+| **(a)** tableau des familles | **produit** (document), **partiellement épinglé** (tests) | §1 ci-dessus et `docs/harnais-inventaire-contexte.md` §2 ; invariants testés : `les_lecons_sont_stables_et_versionnees` (`crates/this-agent/src/playbook.rs:214-221`), `le_perimetre_survit_a_un_aller_retour_json` (`cite.rs`, tests) | Le tableau n'est **pas** vérifié par un test qui échouerait sur une dérive : ajouter un champ de périmètre à `Fact` (`recall.rs:102-115`) ne ferait tomber aucun test. Cœur, si on veut que le tableau reste vrai ; effort faible, valeur faible. |
+| **(b)** registre partagé, citation jamais vue ≠ preuve | **la règle est prouvée, le partage n'a toujours AUCUN consommateur en production** | `rappel_avec` marque (`recall.rs:407-421`) ; `s5_citation_d_une_note_reelle_jamais_vue_est_unseen` (`tests/adverse.rs:707`) ; bout en bout note hostile → reprise → rappel : `de_la_note_hostile_au_message_de_rappel_en_passant_par_une_reprise` (`tests/provenance.rs:523-543`) ; `le_rappel_ne_marque_pas_un_jeton_de_sorte_non_suivie` (`tests/provenance.rs:546`) | `grep "rappel_avec(" crates/*/src` ne rend **que** `recall.rs` (déclaration) : aucun hôte de production n'appelle le rappel, donc la règle de provenance n'a encore **aucun effet visible**. Hôte (PO/Atelier), pas le cœur. |
+| **(c)** texte non fiable après compaction et reprise | **prouvé** pour la compaction et la reprise (c'était le manque du 20/11) | résumé enfermé, rôle utilisateur **et** assistant : `session.rs:2787-2813` ; `le_resume_reste_enferme_apres_compaction_et_reprise` (`tests/compaction.rs:425`) ; conteneurs adverses : `tests/conteneurs.rs` (9 tests) ; un résumé n'est plus épinglé comme la question (`Message::User { synthetic: true }` → `context.rs:293-302` ne le retient pas) | Rien pour la garantie elle-même. Le **marquage « avec perte » côté modèle** reste partiel — voir (f). |
+| **(d)** révocation, changement de projet, mémoire entre deux personnes | **prouvé pour la seule pièce que le cœur détienne** (le registre des ids lus) ; **manque** pour le contenu | `Perimetre` (`cite.rs:375-391`) et `Invalidation` (`cite.rs:398-409`) + `SeenLedger::marquer_perimetre` (`cite.rs:677-707`) + `revoquer` (`cite.rs:710-731`) ; `Harness::perimetre` (`session.rs:1238`), refus d'écrire dans un registre étranger (`session.rs:3243-3269`), reprise dans le périmètre (`session.rs:3465-3497`) ; tests `deux_personnes_ne_partagent_pas_les_lectures`, `changer_de_projet_invalide_les_lectures_et_le_rappel_le_dit`, `une_revocation_d_acces_retire_la_preuve`, `la_reprise_rebatit_le_registre_dans_le_perimetre_de_la_session` (`tests/perimetre.rs`, 5 tests) | Le cœur **ne détient aucun contenu** : il ne peut pas supprimer une note, une décision ni un vecteur (il ne fait aucune entrée/sortie, `lib.rs:7-8`). Contrat d'hôte au §6.1. Le périmètre n'est pas dans `Snapshot` (`event.rs:536-548`) : l'hôte le redéclare à la reprise. |
+| **(e)** migration d'embeddings | **la règle est prouvée, la migration n'existe pas — et ne doit pas exister ici** | `verifier_espace` (`embed.rs:132`) et `verifier` (`embed.rs:157`) ; `un_vecteur_de_la_revision_a_est_refuse_sous_la_revision_b`, `une_revision_declaree_ne_se_melange_pas_avec_une_non_declaree`, `vectoriser_applique_la_regle_du_lot_entier` (`tests/embeddings.rs:162,181,257`) | Aucun stockage dans le crate (`embed.rs:1-18`) : « préserve modèle/dimension » est un contrat d'hôte (table `(id, modele, dimension, revision, vecteur)` + refus à l'insertion). Inchangé depuis le 20/11. |
+| **(f)** budget mesuré (schémas d'outils, pièces jointes), résumé signalé, pas de double injection | **prouvé pour le budget et la double injection** ; **partiel** pour le résumé | budget : `estimate_tools_tokens` (`context.rs:91`) + `estimate_request_tokens` (`context.rs:114`) comptés dans la réserve (`session.rs:2693-2694`) ; tests `le_budget_compte_les_schemas_d_outils`, `un_depassement_annonce_est_le_depassement_mesure`, `le_contexte_du_tour_et_la_consigne_ne_sont_injectes_qu_une_fois` (`tests/budget_requete.rs`) ; pièces jointes `COUT_IMAGE` (`context.rs:34`) ; pas de double injection `tests/contexte.rs:110-136` | Le résumé est signalé **à l'interface** (avec ses chiffres : `event.rs:125-137`) et **attribué** au modèle (`source="compaction"`, `untrusted.rs:399-430`), mais aucune phrase ne dit au modèle qu'il est **avec perte** : la seule marque est l'attribut `source`. Cœur, si on le veut : un en-tête hors conteneur, comme `relaunch_reason` le fait pour un motif d'outil (`session.rs:3130-3145`). |
+| **(g)** propriétés persistées vs dérivées, inventoriées séparément | **produit** (document) et cohérent avec le code | §3 (g) ci-dessus ; nouveau : `SeenLedger.perimetre` est un état de **session** (ni `Snapshot`, ni magasin), et `Invalidation` est un compte rendu, jamais persisté | Le cas ambigu du 20/11 (résumé dérivé → persisté) **n'existe plus** : le résumé porte `synthetic: true` **et** un conteneur, et `planifier` ne l'épingle pas. Reste : une réouverture n'est testée que par `la_reprise_rebatit_le_registre_dans_le_perimetre_de_la_session`, pas pour chaque propriété dérivée. |
+
+### 6.1 Le contrat d'hôte de la case (d), tel que le code le contraint
+
+Le cœur tient le registre et refuse ; il ne peut pas tenir le contenu. Ce qu'un hôte doit
+faire, et que le cœur ne peut pas faire à sa place :
+
+1. **Déclarer le périmètre** avant le premier tour : `harness.perimetre(Perimetre::nouveau(qui, projet))`.
+   Sans cette ligne, rien n'est garanti — et un registre **déclaré** refuse même d'être
+   écrit par une session qui ne déclare rien (`session.rs:3253-3257`), ce qui est le
+   défaut sûr : une session muette ne peut pas prouver qu'elle est la bonne personne.
+2. **Déclarer une nouvelle fois** au changement de projet ou de personne. C'est ce qui
+   vide le registre et rend l'invalidation mesurable (`Invalidation::Vide { lectures, citations }`).
+3. **Révoquer** les ids d'un accès retiré : `registre.revoquer(&[…])`. Le registre ne
+   détient aucun contenu, donc c'est tout ce qu'il peut faire : l'id redevient « jamais
+   vu », et le rappel le dit. Le magasin (notes, décisions, vecteurs) est à l'hôte.
+4. **Filtrer le graphe** : `Recall::recall(&[ids])` (`recall.rs:119-121`) et `Embed`
+   (`embed.rs:93-101`) ne portent **ni personne ni projet** — un fait d'un autre projet ne
+   peut être écarté **que** par l'hôte, avant de le rendre. C'est le manque de fond de la
+   case (d), et il est structurel : ajouter un périmètre à ces deux ports est un
+   changement de contrat d'hôte, qui n'a pas été fait ici sans décision explicite
+   (voir le commentaire de revue du 21/11 sur #290, options A1/A2/A3 et B1/B2/B3).
+
+### 6.2 Ce que cette branche change, et ce qu'elle ne change pas
+
+Ajouté (`this-agent`, `this-harness`) : `Perimetre`, `Invalidation`,
+`SeenLedger::{pour, perimetre, marquer_perimetre, revoquer}`, `Harness::perimetre`,
+`Harness::perimetre_actuel`, `Handle::perimetre_actuel`, `estimate_tools_tokens`,
+`estimate_request_tokens`. Rien n'est renommé, aucune signature existante ne change :
+un hôte qui n'appelle rien de tout cela garde exactement le comportement d'avant
+(`une_session_sans_perimetre_declare_garde_le_comportement_d_avant`).
+
+Changé dans le budget : les schémas d'outils entrent dans la réserve. Une session qui
+était « sous budget » avec une surface d'outils large voit maintenant `Trimmed` se
+déclencher plus tôt — c'est le but (mesuré : 45 % d'un budget de 3 000 partaient hors du
+compte pour 10 outils).
+
+Ce qui reste à l'hôte, sans changement : les six familles de contenu et leur cycle de vie,
+`Compactor`, `Recall`, `Embed`, le stockage des vecteurs, l'injection de `PREAMBLE`
+(`untrusted.rs:55-59`, aucun appelant dans le dépôt), et le contenu d'un périmètre.

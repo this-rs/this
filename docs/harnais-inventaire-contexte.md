@@ -46,6 +46,9 @@ il compte des messages.
 
 ## 4. Provenance : ce que le cœur garantit
 
+> **Mis à jour le 24/11/2026** (branche `fix/290-contexte-cognitif`, base `787a988`). Les
+> points de cette section restent vrais ; ce qui a changé est ajouté à la fin.
+
 - Une citation `#kind:id` n'est **lue** que si elle a paru dans un résultat d'outil hors
   conteneur `<untrusted_data>` (`SeenLedger`, `cite.rs`). Un id seulement cité par une
   donnée non fiable n'est jamais présenté comme lu (`Provenance::Quoted`).
@@ -53,25 +56,51 @@ il compte des messages.
 - Le résumé de compaction est enfermé en donnée non fiable, rôle utilisateur comme
   assistant (#353, #359), et reste enfermé après reprise (test `le_resume_reste_enferme_apres_compaction_et_reprise`).
 - Un texte non fiable **reste** non fiable : il ne devient ni consigne système ni permission.
+- Le budget de contexte se mesure sur la **requête envoyée** : fil (consigne système
+  comprise, `context::estimate_tokens`) **plus** les schémas d'outils
+  (`context::estimate_tools_tokens`) — les deux réunis par
+  `context::estimate_request_tokens`, et réservés avant le `fit` (`session.rs`,
+  `Harness::request`). Une pièce jointe coûte un forfait (`COUT_IMAGE`), compté par
+  message. Toute coupe et tout dépassement sont annoncés (`Event::Trimmed`), et le
+  dépassement annoncé est celui que le moteur voit (`tests/budget_requete.rs`).
+- Un **périmètre** peut être déclaré (`Harness::perimetre`, `Perimetre::nouveau(qui,
+  projet)`). Il ne change pas ce que le cœur transporte : il borne **le registre des ids
+  lus**. Un changement de personne ou de projet vide les lectures de l'ancien
+  (`SeenLedger::marquer_perimetre`) ; un registre déclaré refuse les écritures d'une
+  session qui déclare un autre périmètre ; une révocation d'accès s'applique par
+  `SeenLedger::revoquer` (l'id redevient « jamais vu », donc « cité seulement » dans le
+  rappel). Un hôte qui ne déclare rien garde le comportement d'avant.
 
 ## 5. Ce que le cœur NE garantit PAS (à la charge de l'hôte)
 
-- **Périmètre utilisateur/projet** : le cœur ne porte aucun identifiant d'utilisateur ni de
-  projet. Un fait d'un autre projet ne peut être écarté que par l'hôte, avant `recall`.
-- **Révocation d'accès et changement de projet** : invalider les faits concernés est un
-  acte de l'hôte. Le cœur ne sait rien de l'accès d'une personne.
+- **Périmètre utilisateur/projet** : les ports `Recall` (`recall.rs`, `recall(&[ids])`) et
+  `Embed` (`embed.rs`, `embed(&[String])`) ne portent **ni** identifiant d'utilisateur **ni**
+  projet : un fait d'un autre projet ne peut être écarté que par l'hôte, avant `recall`.
+  Le périmètre déclaré au harnais borne le registre des ids lus, **pas** le contenu venu du
+  graphe — le cœur n'en détient aucun, donc il ne peut rien supprimer.
+- **Révocation d'accès et changement de projet** : le cœur invalide **la preuve** (le
+  registre des ids lus), jamais le contenu. Supprimer une note, une décision ou un
+  vecteur est un acte de l'hôte, qui seul détient le magasin. Le contrat exact (quatre
+  gestes) est écrit dans `docs/harnais-contexte-cognitif.md` §6.1.
 - **Fraîcheur** : aucune politique dans le cœur. `as_of` est une date, pas un seuil ; l'hôte
   décide ce qui est trop vieux pour être rappelé.
 - **Version des sources** : un `Fact` n'a pas de révision. Une note corrigée après coup
   rend un fait différent sous le même `id` : seul l'hôte peut le dire.
 - **Migration d'embeddings** : le cœur refuse le mélange d'espaces (`verifier_espace`,
-  #350), mais ne réindexe rien : c'est l'hôte qui stocke les vecteurs.
+  #350), mais ne réindexe rien : c'est l'hôte qui stocke les vecteurs — donc l'hôte qui
+  migre, avec une table `(id, modele, dimension, revision, vecteur)` et un refus à
+  l'insertion d'une estampille différente.
 
 ## 6. Ce qui reste ouvert pour la parité PO
 
 - Un scénario **identique** dans PO et dans un hôte minimal (même registre, même refus
-  d'une citation jamais vue). Il n'est pas fait ici : il exige les deux hôtes.
-- Un **budget mesuré** avec schémas d'outils et pièces jointes : les plafonds ci-dessus sont
-  codés, pas mesurés sur un tour réel.
+  d'une citation jamais vue). Il n'est pas fait ici : il exige les deux hôtes. Constat
+  mesuré le 24/11 : `grep "rappel_avec(" crates/*/src` ne rend que la déclaration —
+  **aucun** hôte de production n'appelle le rappel, donc cette parité n'est pas seulement
+  non testée, elle est hors de portée sans ce câblage.
+- ~~Un budget mesuré avec schémas d'outils et pièces jointes~~ : **fait** le 24/11
+  (`crates/this-harness/tests/budget_requete.rs`). Mesure avant correction : 10 outils
+  ≈ 1 370 jetons, requête de 3 704 jetons pour un budget de 3 000.
 - L'inventaire des **propriétés cognitives** persistées et dérivées, séparément : le cœur ne
-  persiste aucune propriété cognitive ; elles vivent dans l'hôte.
+  persiste aucune propriété cognitive ; elles vivent dans l'hôte. Le périmètre déclaré est
+  un état de **session** (ni `Snapshot`, ni magasin) : à la reprise, l'hôte le redéclare.

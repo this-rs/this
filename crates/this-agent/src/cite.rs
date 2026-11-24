@@ -193,6 +193,19 @@ fn token_at(text: &str, hash: usize) -> Option<(Ref, usize)> {
     }
 }
 
+/// L'id visé par un jeton de révocation : `#kind:uuid`, `#module:nom`, ou un uuid nu.
+///
+/// Rend `(est_un_uuid, id normalisé)` — la même distinction que
+/// [`SeenLedger::observe`] fait entre les deux ensembles.
+fn cible(token: &str) -> Option<(bool, String)> {
+    if let Some((r, fin)) = token_at(token, 0)
+        && fin == token.len()
+    {
+        return Some((r.kind.is_uuid(), r.id));
+    }
+    normalize_uuid(token).map(|id| (true, id))
+}
+
 /// Longueur du nom de module en tête de `s`, s'il respecte
 /// `^[a-z][a-z0-9_]{0,63}$`. Le contrôle de ce qui suit est fait par l'appelant.
 fn module_name_len(s: &str) -> Option<usize> {
@@ -342,6 +355,56 @@ pub fn neutralize_value(value: &mut serde_json::Value) {
 }
 
 // ---------------------------------------------------------------------------
+// Le périmètre : à qui et à quel projet une mémoire appartient
+// ---------------------------------------------------------------------------
+
+/// Dans quel périmètre une mémoire vaut : **qui** est devant l'écran, et **sur quel
+/// projet** cette personne travaille.
+///
+/// Le cœur **n'interprète jamais** ces deux identifiants : ce sont des chaînes opaques
+/// choisies par l'hôte (login, id de tenant, identifiant de projet local…). Il les
+/// **compare**, et cela suffit pour que deux mémoires de périmètres différents ne se
+/// confondent pas.
+///
+/// POURQUOI ce type existe : sans périmètre déclaré, un registre partagé par deux
+/// sessions (un hôte qui construit un `Rc<dyn Toolbox>` pour deux personnes, ou qui
+/// change de projet sans redémarrer) présente les lectures de l'une comme des preuves
+/// pour l'autre. Le registre ne peut pas le deviner : quelqu'un doit DÉCLARER le
+/// périmètre. C'est l'hôte (`Harness::perimetre` côté harnais), et c'est pourquoi le
+/// défaut — aucun périmètre déclaré — garde exactement le comportement d'avant.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Perimetre {
+    /// Qui est devant l'écran.
+    pub personne: String,
+    /// Sur quel projet cette personne travaille.
+    pub projet: String,
+}
+
+impl Perimetre {
+    pub fn nouveau(personne: impl Into<String>, projet: impl Into<String>) -> Self {
+        Self {
+            personne: personne.into(),
+            projet: projet.into(),
+        }
+    }
+}
+
+/// Ce qu'une déclaration de périmètre a invalidé.
+///
+/// Le compte est rendu (et non seulement appliqué) pour qu'un hôte puisse le dire à la
+/// personne devant l'écran : une mémoire qui disparaît en silence se lit comme une
+/// perte de données, pas comme une révocation.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "invalidation", rename_all = "snake_case")]
+pub enum Invalidation {
+    /// Le registre était déjà dans ce périmètre (ou n'en avait pas) : rien n'est oublié.
+    #[default]
+    Aucune,
+    /// Le périmètre a changé : tout ce que l'ancien avait lu ou cité est oublié.
+    Vide { lectures: usize, citations: usize },
+}
+
+// ---------------------------------------------------------------------------
 // Le registre des ids vus
 // ---------------------------------------------------------------------------
 
@@ -379,6 +442,10 @@ pub fn neutralize_value(value: &mut serde_json::Value) {
 /// le fil (`restore` / `seed`, conservateurs par défaut).
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SeenLedger {
+    /// Le périmètre déclaré (voir [`Perimetre`]). `None` : aucun — le registre ne
+    /// répond alors de rien, et c'est le comportement d'avant le périmètre.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    perimetre: Option<Perimetre>,
     uuids: BTreeSet<String>,
     modules: BTreeSet<String>,
     /// Ids parus seulement dans une donnée non fiable (jamais dans `uuids`/`modules`).
@@ -574,6 +641,90 @@ impl SeenLedger {
             Some((r, fin)) if fin == token.len() => Some(self.provenance(&r)),
             _ => None,
         }
+    }
+
+    /// Un registre neuf **déclaré** dans un périmètre : c'est la forme à utiliser pour
+    /// ouvrir une session. Un registre déclaré ne peut pas changer de périmètre en
+    /// silence (voir [`SeenLedger::marquer_perimetre`]).
+    pub fn pour(perimetre: Perimetre) -> Self {
+        Self {
+            perimetre: Some(perimetre),
+            ..Self::default()
+        }
+    }
+
+    /// Le périmètre déclaré, s'il y en a un.
+    pub fn perimetre(&self) -> Option<&Perimetre> {
+        self.perimetre.as_ref()
+    }
+
+    /// Déclare le périmètre, et **invalide** les lectures d'un autre.
+    ///
+    /// - même périmètre : rien ne bouge ([`Invalidation::Aucune`]) ;
+    /// - périmètre différent : **toutes** les lectures et citations de l'ancien sont
+    ///   oubliées, et le compte est rendu ;
+    /// - registre sans périmètre déclaré : il l'adopte, sans rien oublier. C'est un
+    ///   **acte de confiance** de l'hôte, du même ordre que `Deserialize` : un registre
+    ///   venu d'une version antérieure, ou d'un autre périmètre, n'est pas
+    ///   distinguable. Un hôte qui relit un registre persisté doit donc le déclarer
+    ///   lui-même ([`SeenLedger::pour`]) avant de l'employer.
+    ///
+    /// La règle est celle du ticket #290, case (d) : un changement de projet — et à
+    /// plus forte raison de personne — invalide ce que l'ancien périmètre avait lu.
+    /// Le registre ne peut pas savoir *pourquoi* le périmètre change (révocation,
+    /// bascule de projet, autre personne au clavier) ; il sait seulement qu'il ne vaut
+    /// plus.
+    pub fn marquer_perimetre(&mut self, perimetre: Perimetre) -> Invalidation {
+        match self.perimetre.as_ref() {
+            Some(actuel) if *actuel == perimetre => Invalidation::Aucune,
+            Some(_) => {
+                let invalidation = Invalidation::Vide {
+                    lectures: self.uuids.len().saturating_add(self.modules.len()),
+                    citations: self
+                        .quoted_uuids
+                        .len()
+                        .saturating_add(self.quoted_modules.len()),
+                };
+                *self = SeenLedger::pour(perimetre);
+                invalidation
+            }
+            None => {
+                self.perimetre = Some(perimetre);
+                Invalidation::Aucune
+            }
+        }
+    }
+
+    /// Oublie des ids : ce qu'une **révocation d'accès** exige (carte (d) du ticket
+    /// #290).
+    ///
+    /// Un id oublié redevient [`Provenance::Never`] : le rappel le marquera « cité
+    /// seulement », et la preuve de citation ne pourra plus s'en servir. C'est tout ce
+    /// que le registre peut faire d'une révocation — il ne détient aucun contenu, donc
+    /// il n'a rien d'autre à supprimer (le magasin de l'hôte, lui, décide de ce qu'il
+    /// rend encore).
+    ///
+    /// Formes acceptées : `#kind:uuid`, `#module:nom` (comme
+    /// [`provenance_token`](Self::provenance_token)), ou un uuid **nu**. Rend le nombre
+    /// d'ids effectivement oubliés (0 pour un id jamais paru : ce n'est pas une erreur).
+    pub fn revoquer(&mut self, tokens: &[String]) -> usize {
+        let mut oublies = 0;
+        for token in tokens {
+            let Some((est_uuid, id)) = cible(token) else {
+                continue;
+            };
+            let (directs, cites) = if est_uuid {
+                (&mut self.uuids, &mut self.quoted_uuids)
+            } else {
+                (&mut self.modules, &mut self.quoted_modules)
+            };
+            let a = directs.remove(&id);
+            let b = cites.remove(&id);
+            if a || b {
+                oublies += 1;
+            }
+        }
+        oublies
     }
 
     /// Rien n'a été observé, pas même cité.
@@ -1180,5 +1331,124 @@ mod tests {
         let l: SeenLedger =
             serde_json::from_value(json!({"uuids": [ID], "modules": ["journal"]})).unwrap();
         assert!(l.has_seen(&note(ID)));
+    }
+
+    // ---- Le périmètre (carte (d) de #290) --------------------------------
+
+    fn perimetre(personne: &str, projet: &str) -> Perimetre {
+        Perimetre::nouveau(personne, projet)
+    }
+
+    #[test]
+    fn un_changement_de_projet_oublie_ce_que_l_ancien_avait_lu() {
+        let mut l = SeenLedger::pour(perimetre("alice", "projet-a"));
+        l.observe(&format!("noté {ID}"));
+        l.observe_quoted(&format!("cité {ID2}"));
+        assert!(l.has_seen(&note(ID)));
+
+        let invalidation = l.marquer_perimetre(perimetre("alice", "projet-b"));
+        assert_eq!(
+            invalidation,
+            Invalidation::Vide {
+                lectures: 1,
+                citations: 1
+            },
+            "le compte rendu doit dire ce qui a été oublié"
+        );
+        assert_eq!(l.provenance(&note(ID)), Provenance::Never);
+        assert_eq!(l.provenance(&note(ID2)), Provenance::Never);
+        assert_eq!(l.perimetre(), Some(&perimetre("alice", "projet-b")));
+    }
+
+    #[test]
+    fn redeclarer_le_meme_perimetre_n_oublie_rien() {
+        let mut l = SeenLedger::pour(perimetre("alice", "projet-a"));
+        l.observe(&format!("noté {ID}"));
+        assert_eq!(
+            l.marquer_perimetre(perimetre("alice", "projet-a")),
+            Invalidation::Aucune
+        );
+        assert!(
+            l.has_seen(&note(ID)),
+            "une session qui se redéclare ne perd pas sa preuve"
+        );
+    }
+
+    #[test]
+    fn un_changement_de_personne_oublie_aussi_les_lectures() {
+        // Même projet, autre personne : la mémoire ne traverse pas non plus.
+        let mut l = SeenLedger::pour(perimetre("alice", "projet-a"));
+        l.observe(&format!("noté {ID}"));
+        let invalidation = l.marquer_perimetre(perimetre("bob", "projet-a"));
+        assert!(matches!(
+            invalidation,
+            Invalidation::Vide { lectures: 1, .. }
+        ));
+        assert_eq!(l.provenance(&note(ID)), Provenance::Never);
+    }
+
+    #[test]
+    fn un_registre_sans_perimetre_adopte_celui_qu_on_lui_donne() {
+        // Comportement d'avant : un registre non déclaré continue de fonctionner.
+        let mut l = SeenLedger::new();
+        l.observe(&format!("noté {ID}"));
+        assert_eq!(
+            l.marquer_perimetre(perimetre("alice", "projet-a")),
+            Invalidation::Aucune
+        );
+        assert!(l.has_seen(&note(ID)));
+        assert_eq!(l.perimetre(), Some(&perimetre("alice", "projet-a")));
+    }
+
+    #[test]
+    fn une_revocation_retire_la_preuve() {
+        let mut l = SeenLedger::pour(perimetre("alice", "projet-a"));
+        l.observe(&format!("noté {ID} et #module:journal"));
+        l.observe_quoted(&format!("cité {ID2}"));
+        assert!(l.has_seen(&note(ID)));
+
+        // Les trois formes acceptées : le jeton, la forme nue, et le module.
+        let oublies = l.revoquer(&[
+            format!("#note:{ID}"),
+            ID2.to_string(),
+            "#module:journal".to_string(),
+            // Un id jamais paru n'est pas une erreur : il n'y avait rien à oublier.
+            format!("#note:{}", "ffffffff-ffff-4fff-8fff-ffffffffffff"),
+        ]);
+        assert_eq!(
+            oublies, 3,
+            "les trois ids parus sont oubliés, pas le quatrième"
+        );
+        assert_eq!(l.provenance(&note(ID)), Provenance::Never);
+        assert_eq!(l.provenance(&note(ID2)), Provenance::Never);
+        assert!(
+            l.is_empty(),
+            "après révocation de tout ce qu'il portait, le registre est vide"
+        );
+    }
+
+    #[test]
+    fn une_revocation_ne_touche_pas_les_autres_ids() {
+        let mut l = SeenLedger::pour(perimetre("alice", "projet-a"));
+        l.observe(&format!("noté {ID} et {ID2}"));
+        assert_eq!(l.revoquer(&[format!("#note:{ID}")]), 1);
+        assert_eq!(l.provenance(&note(ID)), Provenance::Never);
+        assert_eq!(
+            l.provenance(&note(ID2)),
+            Provenance::Direct,
+            "révoquer un id ne révoque pas la session"
+        );
+    }
+
+    #[test]
+    fn le_perimetre_survit_a_un_aller_retour_json() {
+        let l = SeenLedger::pour(perimetre("alice", "projet-a"));
+        let json = serde_json::to_value(&l).unwrap();
+        assert_eq!(
+            json.get("perimetre").and_then(|p| p.get("projet")),
+            Some(&json!("projet-a"))
+        );
+        let relu: SeenLedger = serde_json::from_value(json).unwrap();
+        assert_eq!(relu.perimetre(), Some(&perimetre("alice", "projet-a")));
     }
 }
