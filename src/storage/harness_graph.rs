@@ -435,6 +435,7 @@ impl HarnessGraph {
                     ("_stop".to_string(), String::new()),
                     ("_tours".to_string(), String::new()),
                     ("_data".to_string(), String::new()),
+                    ("_origin".to_string(), String::new()),
                 ],
             })
             .ok_or_else(|| anyhow!("run {run_id} inconnu : record_run d'abord"))?;
@@ -459,6 +460,15 @@ impl HarnessGraph {
                 slot.1 = value;
             } else {
                 head.props.push((key.to_string(), value));
+            }
+        }
+        // Un run matérialisé par une INTENTION (append_step_live sans aucune étape
+        // confirmée) n'a pas d'empreinte d'origine : la première étape confirmée la
+        // pose ici. Sans cela, la détection de collision (`slot_for`) ne verrait
+        // jamais ce run, et un second run de même id et même but l'écraserait.
+        if !head.props.iter().any(|(k, _)| k == "_origin") {
+            if let Some(origin) = Self::origin_of(run) {
+                head.props.push(("_origin".to_string(), origin));
             }
         }
         self.upsert(&head)?;

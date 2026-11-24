@@ -651,6 +651,22 @@ pub trait Recorder {
     /// la main sans rien reconstruire.
     async fn step(&self, run_id: &str, run: &Run, step: &Step);
 
+    /// Un appel d'outil va être TENTÉ : son résultat est encore **inconnu**.
+    ///
+    /// Écrite AVANT l'exécution de l'outil (contrairement à [`Self::step`], qui
+    /// n'arrive qu'après). C'est la seule trace durable qu'un arrêt brutal entre
+    /// l'intention et le résultat peut laisser : sans elle, un effet produit puis
+    /// perdu ne laisse rien dans le journal. `step` porte `inconnu = true` — une
+    /// reprise qui la relit sait que l'effet n'est ni accompli ni échoué, et ne
+    /// doit ni conclure ni rejouer.
+    ///
+    /// Comme [`Self::step`], c'est **au mieux** : un échec n'interrompt jamais le
+    /// run, et aucune promesse de durabilité ne repose sur ce succès. Le défaut
+    /// est de ne rien faire : un enregistreur qui n'écrit pas l'intention garde
+    /// exactement le comportement d'avant (la fenêtre aveugle demeure). Écrire
+    /// l'intention est un choix d'hôte, pas une obligation du cœur portable.
+    async fn intention(&self, _run_id: &str, _run: &Run, _step: &Step) {}
+
     /// Le run s'est arrêté — `run.stop` vaut déjà `stop` (la boucle a appelé
     /// `Run::finish`). Après cela, plus aucune étape n'arrive pour ce `run_id`.
     async fn stopped(&self, run_id: &str, run: &Run, stop: &Stop);
@@ -698,6 +714,12 @@ impl Recorder for Recorders {
     async fn step(&self, run_id: &str, run: &Run, step: &Step) {
         for part in &self.parts {
             part.step(run_id, run, step).await;
+        }
+    }
+
+    async fn intention(&self, run_id: &str, run: &Run, step: &Step) {
+        for part in &self.parts {
+            part.intention(run_id, run, step).await;
         }
     }
 

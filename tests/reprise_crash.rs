@@ -136,6 +136,9 @@ impl Recorder for MeurtApres {
             std::process::abort();
         }
     }
+    async fn intention(&self, run_id: &str, run: &Run, step: &Step) {
+        self.reel.intention(run_id, run, step).await;
+    }
     async fn stopped(&self, run_id: &str, run: &Run, stop: &Stop) {
         self.reel.stopped(run_id, run, stop).await;
     }
@@ -202,33 +205,57 @@ fn lignes_d_effet(dir: &Path) -> usize {
     std::fs::read_to_string(effet(dir)).map_or(0, |s| s.lines().count())
 }
 
-#[test]
-fn crash_avant_l_effet_ni_journal_ni_monde_rejouer_est_sans_risque() {
-    let (dir, run) = crash_a(AVANT_EFFET);
-    assert!(
-        run.is_none(),
-        "aucune étape : le journal ne connaît pas ce run"
+/// La seule étape du journal relu : présente, et NON acquittée. C'est l'intention
+/// écrite avant l'appel (`inconnu = true`), la trace que la fenêtre aveugle des
+/// effets laisse désormais dans le journal durable.
+fn etape_inconnue(run: &Option<Run>) -> Step {
+    let run = run
+        .as_ref()
+        .expect("l'intention a été journalisée : le run se relit");
+    assert_eq!(
+        run.steps.len(),
+        1,
+        "une seule étape (l'intention), aucun résultat acquitté"
     );
+    let etape = run.steps[0].clone();
+    assert!(
+        etape.inconnu,
+        "l'étape dit « résultat inconnu », pas « accompli » : {etape:?}"
+    );
+    assert!(
+        !this_agent::graph::step_ok(&etape),
+        "une étape inconnue n'est pas un accomplissement"
+    );
+    assert!(
+        run.stop.is_none(),
+        "run interrompu, pas terminé : {:?}",
+        run.stop
+    );
+    etape
+}
+
+#[test]
+fn crash_avant_l_effet_l_intention_est_journalisee_et_le_resultat_inconnu() {
+    let (dir, run) = crash_a(AVANT_EFFET);
     assert_eq!(
         lignes_d_effet(dir.path()),
         0,
         "l'outil n'a rien fait au monde"
     );
+    let etape = etape_inconnue(&run);
+    assert_eq!(etape.tool, "ecrire");
 }
 
 #[test]
-fn crash_apres_l_effet_avant_l_acquittement_le_journal_ne_sait_pas() {
+fn crash_apres_l_effet_avant_l_acquittement_l_intention_dit_que_le_resultat_est_inconnu() {
     let (dir, run) = crash_a(APRES_EFFET);
     // Le monde a changé…
     assert_eq!(lignes_d_effet(dir.path()), 1, "l'effet a eu lieu");
-    // …et le journal est indiscernable du cas « avant l'effet » : ni run, ni étape. La
-    // reprise ne peut donc PAS savoir que l'effet a été tenté (le cœur n'écrit pas
-    // d'intention avant l'appel : docs/harnais-reprise-durable.md §2(b), point 2). Ce test
-    // épingle cette limite connue, il ne prétend pas la combler.
-    assert!(
-        run.is_none(),
-        "le journal ne dit rien de l'effet : la reprise l'ignore"
-    );
+    // …et, à la différence de la limite ancienne, le journal SAIT qu'un effet a été
+    // TENTÉ : l'intention écrite avant l'appel laisse une étape « résultat inconnu ».
+    // Une reprise qui relit ce journal sait qu'il ne faut ni conclure ni rejouer.
+    let etape = etape_inconnue(&run);
+    assert_eq!(etape.tool, "ecrire");
 }
 
 #[test]
@@ -240,8 +267,8 @@ fn crash_apres_checkpoint_l_etape_est_relue_et_le_run_n_est_pas_fini() {
     let etape = &run.steps[0];
     assert_eq!(etape.tool, "ecrire");
     assert!(
-        !etape.refused && etape.failure.is_none(),
-        "l'étape dit : effet accompli"
+        !etape.refused && etape.failure.is_none() && !etape.inconnu,
+        "l'étape dit : effet accompli (acquitté, pas une intention)"
     );
     // Le run n'a pas dit son arrêt (`_stop` = "running") : la reprise sait qu'il a été
     // interrompu, et que l'étape 0 est faite — elle ne doit pas la refaire.

@@ -2403,6 +2403,25 @@ impl Harness {
             // Refusé AVANT exécution : `call_with_cancel` n'est pas appelé.
             Outcome::refused(format!("outil non autorisé : {}", call.name), motif)
         } else {
+            // L'intention est journalisée AVANT l'appel : un arrêt brutal entre
+            // ici et l'acquittement (le `recorder.step` de la fin) laisse une
+            // étape `inconnu = true` dans le journal durable. Sans elle, un
+            // effet produit puis perdu n'a aucune trace (docs/harnais-reprise-durable.md §2(b)).
+            {
+                let snapshot = run.borrow().clone();
+                let index = snapshot.steps.len() as u32;
+                let mut intention = Step::tool(call.name.clone(), 0)
+                    .resume("résultat inconnu : l'appel n'a pas été acquitté");
+                intention.index = index;
+                intention.at_ms = snapshot.ecoule_ms;
+                intention.inconnu = true;
+                let issue = guarded(
+                    self.clock.as_ref(),
+                    self.recorder.intention(run_id, &snapshot, &intention),
+                )
+                .await;
+                signal_lost(&self.out, "intention", issue);
+            }
             // Un outil n'émet rien pendant qu'il travaille : son « dernier
             // signe de vie » reste son départ, et la garde de silence devient
             // un plafond sur la durée totale de l'appel.
@@ -4411,6 +4430,28 @@ mod tests {
             &Outcome::failed("délai", "délai dépassé (30 s)"),
         ));
         assert_eq!(verdict_of(&run, &[1]), Verdict::Failed);
+    }
+
+    /// Une intention journalisée (étape `inconnu = true`, écrite AVANT l'appel puis
+    /// jamais acquittée) est un effet inconnu même SANS marquage `Run::inconnues` :
+    /// le verdict ne conclut ni réussite ni échec. C'est le pendant, au niveau du
+    /// verdict, de la fenêtre aveugle des effets (#284).
+    #[test]
+    fn une_etape_d_intention_ne_conclut_pas_le_verdict() {
+        let mut run = Run::new(Goal::new("installe"), 5);
+        let mut etape = step_of(
+            "write_module",
+            1,
+            &Outcome::failed("délai", "délai dépassé (30 s)"),
+        );
+        etape.inconnu = true;
+        run.record(etape);
+        assert!(run.est_inconnue(&run.steps[0]), "l'étape se dit inconnue");
+        assert_eq!(
+            run.verdict(),
+            Verdict::Unverified,
+            "sans `inconnu`, cette étape conclurait à un échec (test précédent)"
+        );
     }
 
     /// Un réveil qui panique ne tue pas le minuteur partagé : l'échéance
