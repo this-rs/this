@@ -210,8 +210,13 @@ pub enum Event {
 }
 
 /// Le genre d'un [`Event::Hint`].
+///
+/// `#[non_exhaustive]` : la liste GRANDIT (deux genres ajoutés en novembre 2026). Un
+/// consommateur doit garder un bras `_` ; sans cet attribut, chaque ajout cassait la
+/// compilation des `match` exhaustifs en aval (mesuré sur l'Atelier, `vue_preuves.rs`).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum HintKind {
     /// Le rappel de la décision : le récit du modèle n'est pas prouvé par les
     /// étapes (en-tête `evidence::RAPPEL`).
