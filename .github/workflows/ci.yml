@@ -19,6 +19,10 @@ on:
     # vérification doit précéder la fusion sur la branche d'intégration, pas la
     # suivre.
     branches: [ main, develop, reseau-maille ]
+    # `labeled` est indispensable aux deux labels ci-dessous : la condition lit les
+    # étiquettes de l'ÉVÉNEMENT, pas l'état courant de la PR. Sans ce type, poser
+    # `run-full-matrix` après un push ne déclenche rien — mesuré sur la PR #374.
+    types: [opened, synchronize, reopened, labeled]
 
 env:
   CARGO_TERM_COLOR: always
@@ -45,6 +49,12 @@ jobs:
     outputs:
       code: ${{ steps.filter.outputs.code }}
       harness: ${{ steps.filter.outputs.harness }}
+      # Jambes à RETIRER de la matrice sur une PR (JSON, consommé par `exclude`).
+      # Le contexte `matrix` n'existe pas dans un `if` de job — actionlint le dit —
+      # donc c'est `exclude` qui filtre, pas une condition.
+      exclude_legs: ${{ steps.filter.outputs.exclude_legs }}
+      exclude_os: ${{ steps.filter.outputs.exclude_os }}
+      swift: ${{ steps.filter.outputs.swift }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -53,6 +63,23 @@ jobs:
       - name: Did anything other than documentation change?
         id: filter
         run: |
+          # PARCOURS RAPIDE SUR PR (mesuré le 24/11/2026) : cinq PR ouvertes ensemble
+          # ont produit huit runs en file et des runs bloqués quarante minutes, avec
+          # ZÉRO échec — le goulot était le nombre de jobs, dont un lanceur macOS rare.
+          # Sur une PR : jambe `stable` seule, ubuntu seul, pas de Swift. Tout revient
+          # sur main/develop/reseau-maille, et sur une PR qui porte `run-full-matrix`.
+          full="${{ contains(github.event.pull_request.labels.*.name, 'run-full-matrix') }}"
+          if [ "${{ github.event_name }}" = "pull_request" ] && [ "$full" != "true" ]; then
+            { echo 'exclude_legs=[{"rust":"beta"},{"rust":"nightly"}]'
+              echo 'exclude_os=[{"os":"windows-latest"},{"os":"macos-latest"}]'
+              echo "swift=false"; } >> "$GITHUB_OUTPUT"
+            echo "parcours rapide (PR) : stable + ubuntu, sans Swift"
+          else
+            { echo 'exclude_legs=[]'
+              echo 'exclude_os=[]'
+              echo "swift=true"; } >> "$GITHUB_OUTPUT"
+            echo "matrice complète"
+          fi
           base="${{ github.event.pull_request.base.sha || github.event.before }}"
           if [ -z "$base" ] || ! git cat-file -e "$base^{commit}" 2>/dev/null; then
             echo "no base commit to diff against: assume code changed"
@@ -83,6 +110,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # `exclude` retire une jambe par SOUS-ENSEMBLE de clés : {"rust":"beta"} suffit.
+        exclude: ${{ fromJSON(needs.changes.outputs.exclude_legs) }}
         include:
           - rust: stable
             features: all,wami
@@ -531,6 +560,7 @@ jobs:
     strategy:
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
+        exclude: ${{ fromJSON(needs.changes.outputs.exclude_os) }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
@@ -590,7 +620,9 @@ jobs:
   swift_ios:
     # Skipped when the change is documentation-only (see `changes`).
     needs: changes
-    if: needs.changes.outputs.code == 'true'
+    # macOS pur, et le lanceur macOS est la ressource la plus rare : sur une PR il ne
+    # tourne que si la PR porte `run-full-matrix`. Il reste systématique sur main.
+    if: needs.changes.outputs.code == 'true' && needs.changes.outputs.swift == 'true'
     name: Swift (moteurs iOS)
     runs-on: macos-latest
     steps:
@@ -829,6 +861,21 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
+      # #289 : le dépôt doit se RÉSOUDRE sans checkout frère. `git archive HEAD`
+      # exporte exactement le contenu d'un clone (ni .git, ni fichiers non suivis) ;
+      # dans ce répertoire, les voisins `../..` n'existent pas. `cargo metadata
+      # --no-deps` ne résout AUCUNE dépendance et n'a donc pas besoin du réseau : il
+      # échoue si un manifeste pointe encore vers un chemin extérieur. Le script
+      # `scripts/verifier-clone-propre.sh` fait plus (il compile), mais il n'était
+      # lancé par personne ; cette étape garde la propriété à chaque PR.
+      - name: Le dépôt se résout sans checkout frère (#289)
+        run: |
+          set -euo pipefail
+          tmp="$(mktemp -d)"
+          git archive HEAD | tar -x -C "$tmp"
+          ( cd "$tmp" && cargo metadata --no-deps --format-version 1 > /dev/null )
+          echo "resolution OK hors arborescence ($(find "$tmp" -type f | wc -l) fichiers)"
+
       # Compile la feature obrain contre le VRAI moteur (pas une doublure vide) :
       # c'est ce que `cargo check` par défaut ne voit pas, et ce que la CI ne
       # compilait pas (le job était gaté sur un jeton absent).
@@ -865,10 +912,41 @@ jobs:
       - name: Check the frontend feature compiles (pinned git dep)
         run: cargo check -p this-rs --features frontend
 
+  # #373 : la CI compile `--features all,wami` ; le hook pre-push du dépôt compile
+  # `--all-features`. Le second périmètre est PLUS LARGE — un défaut peut donc vivre
+  # sur `main` sans qu'aucun job ne le voie. Mesuré le 24/11/2026 : `Reply::usage`
+  # manquant dans tests/reprise_crash.rs, découvert 40 minutes plus tard quand une
+  # AUTRE branche a vu son push refusé par le hook.
+  all_features:
+    name: All features (post-merge)
+    needs: changes
+    # `run-all-features` est lu dans l'ÉVÉNEMENT (d'où `labeled` dans les types).
+    if: needs.changes.outputs.code == 'true' && (github.event_name == 'push' || contains(github.event.pull_request.labels.*.name, 'run-all-features'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+      - name: Install protoc
+        uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      # Exactement la commande du hook pre-push : si elle est verte ici, aucun push ne
+      # sera refusé pour cette raison, et `main` compile pour qui construit tout.
+      - name: clippy --all-features (le périmètre du hook pre-push)
+        run: cargo clippy -p this-rs --lib --tests --all-features -- -D warnings
+
   gate:
     name: CI gate
     if: always()
-    needs: [changes, test, coverage, fmt, clippy, examples, security_audit, docs, cross-platform, wasm_crates, wasm32_harness, wasm32_browser, obrain, frontend, swift_ios, device_linux]
+    needs: [changes, test, coverage, fmt, clippy, examples, security_audit, docs, cross-platform, wasm_crates, wasm32_harness, wasm32_browser, obrain, frontend, swift_ios, device_linux, all_features]
     runs-on: ubuntu-latest
     steps:
       - name: Nothing failed, nothing was cancelled
