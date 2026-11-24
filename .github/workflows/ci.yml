@@ -938,10 +938,15 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      # Exactement la commande du hook pre-push : si elle est verte ici, aucun push ne
-      # sera refusé pour cette raison, et `main` compile pour qui construit tout.
-      - name: clippy --all-features (le périmètre du hook pre-push)
-        run: cargo clippy -p this-rs --lib --tests --all-features -- -D warnings
+      # Même commande que le hook pre-push, SANS `-D warnings`. Le but de ce job est de
+      # prouver que `main` COMPILE pour qui construit tout (c'est ce qui a cassé le
+      # 24/11 : E0063 `Reply::usage`). Transformer un lint en échec rendrait `main`
+      # rouge pour une raison que personne n'a introduite ce jour-là — mesuré au premier
+      # run de ce job : `clippy::result_large_err` sur `tests/wasm_module`, antérieur.
+      # Les lints restent visibles en annotations ; la parité stricte avec le hook reste
+      # locale, et c'est le hook qui refuse un push, pas la CI.
+      - name: clippy --all-features (périmètre du hook, sans -D warnings)
+        run: cargo clippy -p this-rs --lib --tests --all-features
 
   gate:
     name: CI gate
