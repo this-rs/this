@@ -51,8 +51,8 @@ use this_agent::substrate::{Grant, Grants, Verdict};
 use this_agent::untrusted;
 
 use crate::catalogue::{
-    Catalog, CatalogError, RecipeStep, ToolChange, ToolDef, ToolDraft, ToolRecord, Usage, clip,
-    render_args, validate_args,
+    Catalog, CatalogError, RecipeStep, ToolChange, ToolDraft, ToolRecord, Usage, clip, render_args,
+    validate_args,
 };
 use crate::event::Outcome;
 use crate::ports::{Cancel, Toolbox};
@@ -88,23 +88,26 @@ const SPEC_DESCRIPTION_CHARS: usize = 300;
 /// sans payer sa description.
 pub const INDEX_NAMES: usize = 12;
 
-/// Où l'hôte range le catalogue. Le crate ne fait aucune entrée/sortie.
-///
-/// `save` reçoit l'état ENTIER. Pour une création, une édition, un retour ou un retrait,
-/// un échec **annule** l'opération (rien ne change en mémoire). Pour un simple compteur
-/// d'usage, l'échec est ignoré : le renforcement est un avis, pas une vérité à protéger. Un
-/// hôte qui écrit cher peut regrouper les appels.
-pub trait CatalogStore {
-    fn save(&self, json: &str) -> Result<(), String>;
+/// L'état que les méthodes synchrones de la boîte lisent.
+#[derive(Default)]
+struct Cache {
+    /// Noms chargés, du moins récemment utilisé au plus récent.
+    loaded: Vec<String>,
+    /// Les enregistrements des outils chargés.
+    records: HashMap<String, ToolRecord>,
+    /// L'index de `tools_find` : les noms les plus récents, et le nombre d'outils actifs.
+    index: Vec<(String, u64)>,
+    active: usize,
 }
 
 /// La boîte à outils de l'hôte, plus le catalogue de ce que l'agent a construit.
 pub struct CatalogToolbox {
     inner: Rc<dyn Toolbox>,
-    catalog: RefCell<Catalog>,
-    store: Option<Rc<dyn CatalogStore>>,
-    /// Noms chargés, du moins récemment utilisé au plus récent.
-    loaded: RefCell<Vec<String>>,
+    catalog: Catalog,
+    /// Ce que les méthodes SYNCHRONES du `Toolbox` (`specs`, `declarations`, `grants`) lisent :
+    /// le dépôt est asynchrone, une page wasm ne peut pas l'attendre ici. Le cache est rafraîchi
+    /// à chaque opération asynchrone (chercher, créer, éditer, appeler).
+    cache: RefCell<Cache>,
     max_loaded: usize,
     /// Un nonce par boîte, pas par tour : la liste d'outils est le PRÉFIXE du prompt, et un
     /// nonce neuf à chaque tour casserait le cache du fournisseur. Tiré au hasard à la
@@ -115,19 +118,59 @@ pub struct CatalogToolbox {
 }
 
 impl CatalogToolbox {
-    pub fn new(
-        inner: Rc<dyn Toolbox>,
-        catalog: Catalog,
-        store: Option<Rc<dyn CatalogStore>>,
-    ) -> Self {
+    /// `catalog` porte son dépôt : c'est lui qui range les outils (le graphe de l'hôte), la
+    /// boîte n'a aucune persistance propre.
+    pub fn new(inner: Rc<dyn Toolbox>, catalog: Catalog) -> Self {
         Self {
             inner,
-            catalog: RefCell::new(catalog),
-            store,
-            loaded: RefCell::new(Vec::new()),
+            catalog,
+            cache: RefCell::new(Cache::default()),
             max_loaded: DEFAULT_MAX_LOADED,
             nonce: untrusted::fresh_nonce(),
             base_grants: None,
+        }
+    }
+
+    /// Comme [`CatalogToolbox::new`], puis lit l'index du catalogue : c'est lui que `specs()`
+    /// annonce dès le premier tour. Avec `new` seul, l'index est vide jusqu'au premier
+    /// [`CatalogToolbox::refresh`].
+    pub async fn open(inner: Rc<dyn Toolbox>, catalog: Catalog) -> Self {
+        let toolbox = Self::new(inner, catalog);
+        toolbox.refresh().await;
+        toolbox
+    }
+
+    /// Relit l'index du catalogue et les outils chargés (une autre session a pu les changer).
+    pub async fn refresh(&self) {
+        // Une lecture qui échoue laisse le cache tel qu'il est : mieux vaut annoncer l'état
+        // d'avant que d'effacer des outils parce que le stockage a eu un hoquet.
+        let (Ok(active), Ok(index)) = (
+            self.catalog.active_len().await,
+            self.catalog.recent(INDEX_NAMES).await,
+        ) else {
+            return;
+        };
+        let names = self.cache.borrow().loaded.clone();
+        let mut fresh: Vec<(String, Option<ToolRecord>)> = Vec::new();
+        for name in names {
+            match self.catalog.get(&name).await {
+                Ok(record) => fresh.push((name, record)),
+                Err(_) => return,
+            }
+        }
+        let mut cache = self.cache.borrow_mut();
+        cache.active = active;
+        cache.index = index;
+        for (name, record) in fresh {
+            match record.filter(ToolRecord::is_active) {
+                Some(r) => {
+                    cache.records.insert(name, r);
+                }
+                None => {
+                    cache.records.remove(&name);
+                    cache.loaded.retain(|n| n != &name);
+                }
+            }
         }
     }
 
@@ -144,32 +187,57 @@ impl CatalogToolbox {
         self
     }
 
-    /// Le catalogue entier, tel qu'il serait rangé.
-    pub fn catalog_json(&self) -> String {
-        self.catalog.borrow().to_json()
-    }
-
-    /// Une copie du catalogue.
+    /// Le catalogue (un clone : il partage le même dépôt).
     pub fn catalog(&self) -> Catalog {
-        self.catalog.borrow().clone()
+        self.catalog.clone()
     }
 
     /// Les noms actuellement annoncés (du moins récent au plus récent).
     pub fn loaded(&self) -> Vec<String> {
-        self.loaded.borrow().clone()
+        self.cache.borrow().loaded.clone()
     }
 
-    fn load(&self, name: &str) {
-        let mut loaded = self.loaded.borrow_mut();
-        loaded.retain(|n| n != name);
-        loaded.push(name.to_string());
-        while loaded.len() > self.max_loaded {
-            loaded.remove(0);
+    /// Charge `record` : il sera annoncé, donc appelable. Le moins récemment utilisé sort
+    /// quand le plafond est atteint ; un outil retiré se décharge.
+    fn remember(&self, record: ToolRecord) {
+        let mut cache = self.cache.borrow_mut();
+        let name = record.name.clone();
+        cache.loaded.retain(|n| n != &name);
+        if !record.is_active() {
+            cache.records.remove(&name);
+            return;
+        }
+        cache.records.insert(name.clone(), record);
+        cache.loaded.push(name);
+        while cache.loaded.len() > self.max_loaded {
+            let out = cache.loaded.remove(0);
+            cache.records.remove(&out);
         }
     }
 
+    /// Charge l'outil `name` depuis le dépôt, s'il existe et est actif.
+    async fn load(&self, name: &str) {
+        if let Ok(Some(record)) = self.catalog.get(name).await {
+            self.remember(record);
+        }
+    }
+
+    /// Les enregistrements ACTIFS des outils chargés (au plus `max_loaded`), du moins récent au
+    /// plus récent, tels que le cache les tient. Seuls ces outils peuvent atteindre le gate :
+    /// le harnais refuse tout outil non offert à ce tour.
+    fn loaded_records(&self) -> Vec<ToolRecord> {
+        let cache = self.cache.borrow();
+        cache
+            .loaded
+            .iter()
+            .filter_map(|name| cache.records.get(name).cloned())
+            .collect()
+    }
+
     fn unload(&self, name: &str) {
-        self.loaded.borrow_mut().retain(|n| n != name);
+        let mut cache = self.cache.borrow_mut();
+        cache.loaded.retain(|n| n != name);
+        cache.records.remove(name);
     }
 
     /// Le contrôle des étapes : un outil que l'hôte offre, et qui n'est pas du catalogue.
@@ -201,15 +269,10 @@ impl CatalogToolbox {
              se répète. search{query} charge les meilleurs ; show{name,version?} montre la \
              recette ; history{name} les versions.",
         );
-        let catalog = self.catalog.borrow();
-        let mut names: Vec<(&str, u64)> = catalog
-            .active()
-            .map(|r| (r.name.as_str(), r.current().seq))
-            .collect();
-        if !names.is_empty() {
-            names.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
-            let total = names.len();
-            let shown: Vec<&str> = names.iter().take(INDEX_NAMES).map(|(n, _)| *n).collect();
+        let cache = self.cache.borrow();
+        let total = cache.active;
+        if total > 0 {
+            let shown: Vec<&str> = cache.index.iter().map(|(n, _)| n.as_str()).collect();
             let more = if total > shown.len() {
                 format!(" … et {} autres", total - shown.len())
             } else {
@@ -259,77 +322,64 @@ impl CatalogToolbox {
         }
     }
 
-    /// Applique `op` sur une COPIE, la range, et ne la fait vivre qu'après. Rend la valeur et
-    /// l'empreinte avant/après, ou le refus déjà mis en `Outcome`.
-    fn mutate<T>(
-        &self,
-        op: impl FnOnce(&mut Catalog) -> Result<T, CatalogError>,
-    ) -> Result<(T, String, String), Box<Outcome>> {
-        let before = self.catalog.borrow().clone();
-        let mut next = before.clone();
-        let value = match op(&mut next) {
-            Ok(v) => v,
-            Err(e) => return Err(Box::new(Outcome::refused(e.to_string(), e.code()))),
-        };
-        let json = next.to_json();
-        if let Some(store) = &self.store
-            && let Err(why) = store.save(&json)
-        {
-            return Err(Box::new(Outcome::failed(
-                format!("rien n'a changé : le catalogue n'a pas pu être enregistré ({why})"),
-                format!("catalogue non enregistré : {why}"),
-            )));
+    /// L'empreinte de l'enregistrement `name` (ce que `Outcome::observed` compare pour dire
+    /// « rien n'a changé »), ou « absent ».
+    async fn fingerprint(&self, name: &str) -> String {
+        match self.catalog.get(name).await {
+            Ok(Some(r)) => out_hash(&serde_json::to_string(&r).unwrap_or_default()),
+            Ok(None) => "absent".to_string(),
+            Err(_) => "illisible".to_string(),
         }
-        let fingerprints = (out_hash(&before.to_json()), out_hash(&json));
-        *self.catalog.borrow_mut() = next;
-        Ok((value, fingerprints.0, fingerprints.1))
     }
 
-    /// La version courante de `name`, si l'outil existe ET est actif.
-    fn active_def(&self, name: &str) -> Option<ToolDef> {
-        self.catalog
-            .borrow()
-            .get(name)
-            .filter(|r| r.is_active())
-            .map(|r| r.current().clone())
+    /// Met un résultat du catalogue en `Outcome` quand il est refusé. L'atomicité est celle du
+    /// dépôt : le catalogue calcule l'enregistrement entier puis l'écrit en un seul `put`. Un
+    /// refus de règle est un `refused` ; un refus du STOCKAGE est un `failed` (ce n'est pas la
+    /// faute du modèle) et rien n'a changé.
+    fn refusal<T>(result: Result<T, CatalogError>) -> Result<T, Box<Outcome>> {
+        result.map_err(|e| {
+            Box::new(match e {
+                CatalogError::Storage(_) => {
+                    Outcome::failed(e.to_string(), format!("catalogue : {e}"))
+                }
+                _ => Outcome::refused(e.to_string(), e.code()),
+            })
+        })
     }
 
-    fn reinforce(&self, name: &str, version: u32, usage: Usage) {
-        let json = {
-            let mut catalog = self.catalog.borrow_mut();
-            catalog.record_use(name, version, usage);
-            catalog.to_json()
-        };
-        if let Some(store) = &self.store {
-            let _ = store.save(&json);
-        }
+    /// L'enregistrement de `name`, si l'outil existe ET est actif.
+    async fn active_record(&self, name: &str) -> Result<Option<ToolRecord>, CatalogError> {
+        Ok(self.catalog.get(name).await?.filter(ToolRecord::is_active))
+    }
+
+    async fn reinforce(&self, name: &str, version: u32, usage: Usage) {
+        // Au mieux : le renforcement est un avis (voir `Catalog::record_use`).
+        self.catalog.record_use(name, version, usage).await;
     }
 
     // ----- tools_find -------------------------------------------------------------
 
-    fn find(&self, args: &Value) -> Outcome {
+    async fn find(&self, args: &Value) -> Outcome {
         match arg_str(args, "action") {
-            Some("search") => self.find_search(args),
-            Some("show") => self.find_show(args),
-            Some("history") => self.find_history(args),
+            Some("search") => self.find_search(args).await,
+            Some("show") => self.find_show(args).await,
+            Some("history") => self.find_history(args).await,
             _ => bad_args("action : search, show ou history"),
         }
     }
 
-    fn find_search(&self, args: &Value) -> Outcome {
+    async fn find_search(&self, args: &Value) -> Outcome {
         let Some(query) = arg_str(args, "query").filter(|q| !q.trim().is_empty()) else {
             return bad_args("search demande `query`");
         };
         let limit = arg_u32(args, "limit")
             .map_or(DEFAULT_FIND_LIMIT, |n| n as usize)
             .clamp(1, MAX_FIND_LIMIT);
-        let (hits, active) = {
-            let catalog = self.catalog.borrow();
-            (
-                catalog.search(&clip(query, 512), limit),
-                catalog.active().count(),
-            )
+        let hits = match Self::refusal(self.catalog.search(&clip(query, 512), limit).await) {
+            Ok(hits) => hits,
+            Err(outcome) => return *outcome,
         };
+        let active = self.catalog.active_len().await.unwrap_or(0);
         if hits.is_empty() {
             return Outcome::ok(format!(
                 "Aucun outil ne correspond ({active} actif(s) au catalogue). Essaie d'autres \
@@ -357,7 +407,7 @@ impl CatalogToolbox {
         }
         let loaded_now = hits.len().min(AUTO_LOAD);
         for hit in hits.iter().take(AUTO_LOAD) {
-            self.load(&hit.name);
+            self.load(&hit.name).await;
         }
         Outcome::ok(format!(
             "{} outil(s) trouvé(s) ; les {loaded_now} premiers sont chargés, appelle-les par \
@@ -367,14 +417,17 @@ impl CatalogToolbox {
         ))
     }
 
-    fn find_show(&self, args: &Value) -> Outcome {
+    async fn find_show(&self, args: &Value) -> Outcome {
         let Some(name) = arg_str(args, "name") else {
             return bad_args("show demande `name`");
         };
-        let catalog = self.catalog.borrow();
-        let Some(record) = catalog.get(name) else {
-            let e = CatalogError::Unknown(name.to_string());
-            return Outcome::refused(e.to_string(), e.code());
+        let record = match Self::refusal(self.catalog.get(name).await) {
+            Ok(Some(record)) => record,
+            Ok(None) => {
+                let e = CatalogError::Unknown(name.to_string());
+                return Outcome::refused(e.to_string(), e.code());
+            }
+            Err(outcome) => return *outcome,
         };
         let wanted = arg_u32(args, "version").unwrap_or(record.current().version);
         let Some(def) = record.version(wanted) else {
@@ -401,9 +454,8 @@ impl CatalogToolbox {
             },
         }))
         .unwrap_or_default();
-        drop(catalog);
         if active {
-            self.load(name);
+            self.remember(record.clone());
         }
         Outcome::ok(untrusted::wrap(
             "catalogue",
@@ -412,14 +464,17 @@ impl CatalogToolbox {
         ))
     }
 
-    fn find_history(&self, args: &Value) -> Outcome {
+    async fn find_history(&self, args: &Value) -> Outcome {
         let Some(name) = arg_str(args, "name") else {
             return bad_args("history demande `name`");
         };
-        let catalog = self.catalog.borrow();
-        let Some(record) = catalog.get(name) else {
-            let e = CatalogError::Unknown(name.to_string());
-            return Outcome::refused(e.to_string(), e.code());
+        let record = match Self::refusal(self.catalog.get(name).await) {
+            Ok(Some(record)) => record,
+            Ok(None) => {
+                let e = CatalogError::Unknown(name.to_string());
+                return Outcome::refused(e.to_string(), e.code());
+            }
+            Err(outcome) => return *outcome,
         };
         let mut body = String::new();
         for def in record.versions.iter().rev() {
@@ -463,17 +518,17 @@ impl CatalogToolbox {
 
     // ----- tools_author -----------------------------------------------------------
 
-    fn author(&self, args: &Value) -> Outcome {
+    async fn author(&self, args: &Value) -> Outcome {
         match arg_str(args, "action") {
-            Some("create") => self.author_create(args),
-            Some("edit") => self.author_edit(args),
-            Some("rollback") => self.author_rollback(args),
-            Some("retire") => self.author_retire(args),
+            Some("create") => self.author_create(args).await,
+            Some("edit") => self.author_edit(args).await,
+            Some("rollback") => self.author_rollback(args).await,
+            Some("retire") => self.author_retire(args).await,
             _ => bad_args("action : create, edit, rollback ou retire"),
         }
     }
 
-    fn author_create(&self, args: &Value) -> Outcome {
+    async fn author_create(&self, args: &Value) -> Outcome {
         let draft = match draft_from(args) {
             Ok(d) => d,
             Err(why) => return bad_args(&why),
@@ -490,9 +545,12 @@ impl CatalogToolbox {
             ));
         }
         let check = self.step_check();
-        match self.mutate(|c| c.create(draft, &check)) {
-            Ok((version, before, after)) => {
-                self.load(&name);
+        let before = self.fingerprint(&name).await;
+        match Self::refusal(self.catalog.create(draft, &check).await) {
+            Ok(version) => {
+                self.load(&name).await;
+                self.refresh().await;
+                let after = self.fingerprint(&name).await;
                 Outcome::ok(format!(
                     "Créé {PREFIX}{name} v{version}. Il est chargé : appelle-le par son nom au \
                      tour suivant."
@@ -503,7 +561,7 @@ impl CatalogToolbox {
         }
     }
 
-    fn author_edit(&self, args: &Value) -> Outcome {
+    async fn author_edit(&self, args: &Value) -> Outcome {
         let Some(name) = arg_str(args, "name") else {
             return bad_args("edit demande `name`");
         };
@@ -515,16 +573,19 @@ impl CatalogToolbox {
             Err(why) => return bad_args(&why),
         };
         let check = self.step_check();
-        match self.mutate(|c| c.edit(name, expected, change, &check)) {
-            Ok((version, before, after)) => {
-                self.load(name);
+        let before = self.fingerprint(name).await;
+        match Self::refusal(self.catalog.edit(name, expected, change, &check).await) {
+            Ok(version) => {
+                self.load(name).await;
+                self.refresh().await;
+                let after = self.fingerprint(name).await;
                 Outcome::ok(format!("{PREFIX}{name} est en v{version}.")).observed(before, after)
             }
             Err(outcome) => *outcome,
         }
     }
 
-    fn author_rollback(&self, args: &Value) -> Outcome {
+    async fn author_rollback(&self, args: &Value) -> Outcome {
         let Some(name) = arg_str(args, "name") else {
             return bad_args("rollback demande `name`");
         };
@@ -535,9 +596,12 @@ impl CatalogToolbox {
             return bad_args("rollback demande `to_version` et `expected_version`");
         };
         let check = self.step_check();
-        match self.mutate(|c| c.rollback(name, to, expected, &check)) {
-            Ok((version, before, after)) => {
-                self.load(name);
+        let before = self.fingerprint(name).await;
+        match Self::refusal(self.catalog.rollback(name, to, expected, &check).await) {
+            Ok(version) => {
+                self.load(name).await;
+                self.refresh().await;
+                let after = self.fingerprint(name).await;
                 Outcome::ok(format!(
                     "{PREFIX}{name} est en v{version} (copie de la v{to})."
                 ))
@@ -547,7 +611,7 @@ impl CatalogToolbox {
         }
     }
 
-    fn author_retire(&self, args: &Value) -> Outcome {
+    async fn author_retire(&self, args: &Value) -> Outcome {
         let Some(name) = arg_str(args, "name") else {
             return bad_args("retire demande `name`");
         };
@@ -555,9 +619,12 @@ impl CatalogToolbox {
             return bad_args("retire demande `reason`");
         };
         let replaced_by = arg_str(args, "replaced_by");
-        match self.mutate(|c| c.retire(name, reason, replaced_by)) {
-            Ok(((), before, after)) => {
+        let before = self.fingerprint(name).await;
+        match Self::refusal(self.catalog.retire(name, reason, replaced_by).await) {
+            Ok(()) => {
                 self.unload(name);
+                self.refresh().await;
+                let after = self.fingerprint(name).await;
                 Outcome::ok(format!("{PREFIX}{name} est retiré.")).observed(before, after)
             }
             Err(outcome) => *outcome,
@@ -570,14 +637,15 @@ impl CatalogToolbox {
         &self,
         call: &ToolCall,
         name: &str,
-        def: ToolDef,
+        record: ToolRecord,
         cancel: &Cancel,
     ) -> Outcome {
+        let def = record.current().clone();
         // Une erreur d'arguments est celle du MODÈLE : elle ne compte pas contre l'outil.
         if let Err(why) = validate_args(&def.parameters, &call.arguments) {
             return Outcome::refused(format!("arguments invalides : {why}"), why);
         }
-        self.load(name);
+        self.remember(record);
         let total = def.steps.len();
         let mut trace = String::new();
         let (mut before, mut after) = (String::new(), String::new());
@@ -585,7 +653,7 @@ impl CatalogToolbox {
         for (i, step) in def.steps.iter().enumerate() {
             let n = i + 1;
             if cancel.is_cancelled() {
-                self.reinforce(name, def.version, Usage::Failed);
+                self.reinforce(name, def.version, Usage::Failed).await;
                 return Outcome::failed(
                     format!("{trace}Annulé avant l'étape {n}/{total}."),
                     "annulé",
@@ -594,7 +662,7 @@ impl CatalogToolbox {
             let args = match render_args(&step.args, &call.arguments) {
                 Ok(a) => a,
                 Err(why) => {
-                    self.reinforce(name, def.version, Usage::Failed);
+                    self.reinforce(name, def.version, Usage::Failed).await;
                     return Outcome::failed(
                         format!("{trace}Étape {n}/{total} : {why}."),
                         format!("étape {n} : {why}"),
@@ -616,7 +684,7 @@ impl CatalogToolbox {
                 String::new()
             };
             if let Some(motif) = &out.refused {
-                self.reinforce(name, def.version, Usage::Refused);
+                self.reinforce(name, def.version, Usage::Refused).await;
                 return Outcome::refused(
                     format!(
                         "{}Étape {n}/{total} « {} » refusée : {motif}. Les suivantes n'ont pas \
@@ -628,7 +696,7 @@ impl CatalogToolbox {
                 );
             }
             if let Some(cause) = &out.failed {
-                self.reinforce(name, def.version, Usage::Failed);
+                self.reinforce(name, def.version, Usage::Failed).await;
                 return Outcome::failed(
                     format!(
                         "{}Étape {n}/{total} « {} » a échoué : {cause}. Les suivantes n'ont pas \
@@ -649,7 +717,7 @@ impl CatalogToolbox {
                 read.push(observable.clone());
             }
         }
-        self.reinforce(name, def.version, Usage::Ok);
+        self.reinforce(name, def.version, Usage::Ok).await;
         let mut result =
             Outcome::ok(clip(trace.trim_end(), MAX_RESULT_CHARS)).observed(before, after);
         if !read.is_empty() {
@@ -771,11 +839,8 @@ impl Toolbox for CatalogToolbox {
         let mut specs = self.inner.specs();
         specs.push(self.find_spec());
         specs.push(author_spec());
-        let catalog = self.catalog.borrow();
-        for name in self.loaded.borrow().iter() {
-            if let Some(record) = catalog.get(name).filter(|r| r.is_active()) {
-                specs.push(self.custom_spec(record));
-            }
+        for record in self.loaded_records() {
+            specs.push(self.custom_spec(&record));
         }
         specs
     }
@@ -789,7 +854,9 @@ impl Toolbox for CatalogToolbox {
         declarations.push(Declaration::new(FIND, Effect::Read));
         // L'agent écrit pour lui-même : jamais une preuve d'action sur le monde.
         declarations.push(Declaration::new(AUTHOR, Effect::Note));
-        for record in self.catalog.borrow().active() {
+        // Seuls les outils CHARGÉS peuvent atteindre le gate : le harnais refuse tout outil non
+        // offert à ce tour. Énumérer le catalogue entier serait O(N) à chaque décision.
+        for record in self.loaded_records() {
             // Une étape sans déclaration vaut `Write` : une déclaration manquante ne vaut
             // pas un droit, et ne doit jamais faire passer une recette pour une lecture.
             let effect = record
@@ -813,7 +880,7 @@ impl Toolbox for CatalogToolbox {
                 grants.put(Grant::granted(meta, "catalogue"));
             }
         }
-        for record in self.catalog.borrow().active() {
+        for record in self.loaded_records() {
             let name = format!("{PREFIX}{}", record.name);
             let refused =
                 record
@@ -846,22 +913,24 @@ impl Toolbox for CatalogToolbox {
 
     async fn call_with_cancel(&self, call: &ToolCall, cancel: &Cancel) -> Outcome {
         match call.name.as_str() {
-            FIND => self.find(&call.arguments),
-            AUTHOR => self.author(&call.arguments),
+            FIND => self.find(&call.arguments).await,
+            AUTHOR => self.author(&call.arguments).await,
             name => match name.strip_prefix(PREFIX) {
-                Some(tool) => match self.active_def(tool) {
-                    Some(def) => self.run_recipe(call, tool, def, cancel).await,
+                Some(tool) => match Self::refusal(self.active_record(tool).await) {
+                    Ok(Some(record)) => self.run_recipe(call, tool, record, cancel).await,
                     // Le préfixe est réservé : un `custom_…` qui n'est pas un outil actif n'est
                     // JAMAIS transmis à l'hôte (il le prendrait pour un de ses noms), sauf si
                     // l'hôte l'offre lui-même.
-                    None if !self.inner.specs().iter().any(|s| s.name == name) => {
-                        let e = match self.catalog.borrow().get(tool) {
-                            Some(_) => CatalogError::Retired(tool.to_string()),
-                            None => CatalogError::Unknown(tool.to_string()),
+                    Ok(None) if !self.inner.specs().iter().any(|s| s.name == name) => {
+                        let e = match self.catalog.get(tool).await {
+                            Ok(Some(_)) => CatalogError::Retired(tool.to_string()),
+                            _ => CatalogError::Unknown(tool.to_string()),
                         };
                         Outcome::refused(e.to_string(), e.code())
                     }
-                    None => self.inner.call_with_cancel(call, cancel).await,
+                    Ok(None) => self.inner.call_with_cancel(call, cancel).await,
+                    // Le stockage n'a pas pu dire si l'outil existe : on ne devine pas.
+                    Err(outcome) => *outcome,
                 },
                 None => self.inner.call_with_cancel(call, cancel).await,
             },

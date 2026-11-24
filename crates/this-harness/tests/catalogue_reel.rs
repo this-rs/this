@@ -31,8 +31,8 @@ use this_agent::evidence::Declaration;
 use this_agent::untrusted::PREAMBLE;
 use this_harness::providers::ProviderTransport;
 use this_harness::{
-    AUTHOR, Catalog, CatalogStore, CatalogToolbox, Event, FIND, Harness, Limits, Outcome, PREFIX,
-    ToolCall, ToolSpec, Toolbox,
+    AUTHOR, Catalog, CatalogToolbox, Event, FIND, Harness, Limits, Outcome, PREFIX, ToolCall,
+    ToolSpec, Toolbox,
 };
 use this_llm::{CredentialRef, Preset};
 use this_llm_providers::{
@@ -118,15 +118,6 @@ impl Toolbox for Hote {
     }
 }
 
-#[derive(Default)]
-struct Range(RefCell<Option<String>>);
-impl CatalogStore for Range {
-    fn save(&self, json: &str) -> Result<(), String> {
-        *self.0.borrow_mut() = Some(json.to_string());
-        Ok(())
-    }
-}
-
 struct Session {
     outils: Vec<(String, bool)>,
     arret: String,
@@ -188,23 +179,24 @@ fn decrire(label: &str, s: &Session) {
     );
 }
 
-fn invariants(hote: &Hote, catalogue: &Catalog) {
+async fn invariants(hote: &Hote, catalogue: &Catalog) {
     // Aucune étape hors de l'hôte : l'hôte n'a vu que ses deux outils.
     let permis: HashSet<&str> = ["task_list", "note_add"].into();
     for (nom, _) in hote.appels.borrow().iter() {
         assert!(permis.contains(nom.as_str()), "appel hors hôte : {nom}");
     }
-    // Aucune paire d'outils ACTIFS de même recette.
-    let recettes: Vec<String> = catalogue
-        .active()
-        .map(|r| serde_json::to_string(&r.current().steps).unwrap())
-        .collect();
-    let uniques: HashSet<&String> = recettes.iter().collect();
-    assert_eq!(
-        recettes.len(),
-        uniques.len(),
-        "doublon de recette : {recettes:?}"
-    );
+    // Aucune paire d'outils ACTIFS de même recette : le dépôt doit retrouver chaque empreinte
+    // sur UN seul nom.
+    for (nom, _) in catalogue.recent(usize::MAX).await.unwrap() {
+        let record = catalogue.get(&nom).await.unwrap().expect("outil listé");
+        let hash = &record.current().steps_hash;
+        let autre = catalogue
+            .repo()
+            .active_with_steps(hash, Some(&nom))
+            .await
+            .unwrap();
+        assert!(autre.is_none(), "doublon de recette : {nom} et {autre:?}");
+    }
 }
 
 #[tokio::test]
@@ -214,14 +206,11 @@ async fn un_vrai_modele_cherche_avant_de_creer_et_reutilise_au_lieu_de_recreer()
         return;
     }
     let hote = Rc::new(Hote::default());
-    let range = Rc::new(Range::default());
+    // Le catalogue (son dépôt) est LA mémoire : deux sessions successives s'ouvrent dessus.
+    let catalogue = Catalog::new();
 
     // Session 1 : catalogue vide. On voit ce que le modèle construit.
-    let tb = Rc::new(CatalogToolbox::new(
-        hote.clone(),
-        Catalog::new(),
-        Some(range.clone()),
-    ));
+    let tb = Rc::new(CatalogToolbox::open(hote.clone(), catalogue.clone()).await);
     let s1 = jouer(
         tb,
         "Consulte le plan alpha avec task_list, puis note avec note_add que tu l'as consulté. \
@@ -230,32 +219,29 @@ async fn un_vrai_modele_cherche_avant_de_creer_et_reutilise_au_lieu_de_recreer()
     )
     .await;
     decrire("session 1 (catalogue vide)", &s1);
-    let apres_1 = Catalog::from_json(range.0.borrow().as_deref().unwrap_or("{\"format\":1}"))
-        .expect("le catalogue rangé se relit");
-    let crees_1 = apres_1.active().count();
+    let crees_1 = catalogue.active_len().await.unwrap();
     println!("RACCORDEMENT catalogue session 1 : {crees_1} outil(s) au catalogue");
-    invariants(&hote, &apres_1);
+    invariants(&hote, &catalogue).await;
 
-    // Session 2 : un AUTRE harnais, le même catalogue rangé, rien de chargé. La demande est
-    // la même sur un autre plan : un modèle qui se souvient de chercher réutilise.
-    let tb2 = Rc::new(CatalogToolbox::new(
-        hote.clone(),
-        apres_1.clone(),
-        Some(range.clone()),
-    ));
+    // Session 2 : un AUTRE harnais sur le même catalogue, rien de chargé. La demande est la
+    // même sur un autre plan : un modèle qui se souvient de chercher réutilise.
+    let tb2 = Rc::new(CatalogToolbox::open(hote.clone(), catalogue.clone()).await);
     let s2 = jouer(
         tb2,
         "Même chose pour le plan beta : consulte-le avec task_list puis note que tu l'as consulté.",
     )
     .await;
     decrire("session 2 (catalogue relu)", &s2);
-    let apres_2 = Catalog::from_json(range.0.borrow().as_deref().unwrap()).unwrap();
-    let crees_2 = apres_2.active().count().saturating_sub(crees_1);
+    let crees_2 = catalogue
+        .active_len()
+        .await
+        .unwrap()
+        .saturating_sub(crees_1);
     let a_cherche = s2.outils.iter().any(|(t, _)| t == FIND);
     let a_reutilise = s2.outils.iter().any(|(t, r)| t.starts_with(PREFIX) && !*r);
     println!(
         "RACCORDEMENT catalogue session 2 : a cherché={a_cherche} a réutilisé={a_reutilise} \
          outils créés en plus={crees_2}"
     );
-    invariants(&hote, &apres_2);
+    invariants(&hote, &catalogue).await;
 }

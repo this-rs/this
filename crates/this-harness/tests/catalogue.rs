@@ -18,8 +18,9 @@ use serde_json::{Value, json};
 use this_agent::evidence::{Declaration, Effect};
 use this_agent::substrate::{Grant, Grants};
 use this_harness::{
-    AUTHOR, Cancel, Catalog, CatalogStore, CatalogToolbox, Delta, Event, FIND, Failure, Finish,
-    Harness, Limits, Outcome, PREFIX, Reply, Request, ToolCall, ToolSpec, Toolbox, Transport,
+    AUTHOR, Cancel, Catalog, CatalogToolbox, Delta, Event, FIND, Failure, Finish, Harness, Limits,
+    MemRepo, Outcome, PREFIX, Reply, Request, ToolCall, ToolRecord, ToolRepo, ToolSpec, Toolbox,
+    Transport,
 };
 
 // ----- l'hôte : ses outils, ses refus, son journal d'appels -------------------------
@@ -89,21 +90,64 @@ impl Toolbox for Host {
     }
 }
 
-/// Un stockage en mémoire qui peut tomber en panne.
+/// Un dépôt en mémoire dont l'ÉCRITURE peut tomber en panne : le stockage de l'hôte refuse.
 #[derive(Default)]
-struct Mem {
-    saved: RefCell<Vec<String>>,
+struct FailingRepo {
+    inner: MemRepo,
     broken: Cell<bool>,
 }
 
-impl CatalogStore for Mem {
-    fn save(&self, json: &str) -> Result<(), String> {
+#[async_trait(?Send)]
+impl ToolRepo for FailingRepo {
+    async fn get(&self, name: &str) -> Result<Option<ToolRecord>, String> {
+        self.inner.get(name).await
+    }
+    async fn put(&self, record: &ToolRecord) -> Result<(), String> {
         if self.broken.get() {
             return Err("disque plein".into());
         }
-        self.saved.borrow_mut().push(json.to_string());
-        Ok(())
+        self.inner.put(record).await
     }
+    async fn len(&self) -> Result<usize, String> {
+        self.inner.len().await
+    }
+    async fn active_len(&self) -> Result<usize, String> {
+        self.inner.active_len().await
+    }
+    async fn active_with_steps(
+        &self,
+        hash: &str,
+        except: Option<&str>,
+    ) -> Result<Option<String>, String> {
+        self.inner.active_with_steps(hash, except).await
+    }
+    async fn candidates(&self, query: &str, k: usize) -> Result<Vec<String>, String> {
+        self.inner.candidates(query, k).await
+    }
+    async fn recent(&self, n: usize) -> Result<Vec<(String, u64)>, String> {
+        self.inner.recent(n).await
+    }
+    async fn tick(&self) -> Result<u64, String> {
+        self.inner.tick().await
+    }
+}
+
+/// Ouvre la boîte sur `catalog` en lisant l'index (ce que `specs()` annonce dès le premier tour).
+fn open_tb(host: Rc<Host>, catalog: Catalog) -> CatalogToolbox {
+    block_on(CatalogToolbox::open(host, catalog))
+}
+
+/// L'enregistrement d'un outil, lu dans le dépôt de la boîte.
+fn rec(tb: &CatalogToolbox, name: &str) -> Option<ToolRecord> {
+    block_on(tb.catalog().get(name)).unwrap()
+}
+
+fn n_tools(tb: &CatalogToolbox) -> usize {
+    block_on(tb.catalog().len()).unwrap()
+}
+
+fn no_tools(tb: &CatalogToolbox) -> bool {
+    block_on(tb.catalog().is_empty()).unwrap()
 }
 
 fn call(name: &str, arguments: Value) -> ToolCall {
@@ -142,7 +186,7 @@ fn two_steps() -> Value {
 }
 
 fn toolbox(host: &Rc<Host>) -> CatalogToolbox {
-    CatalogToolbox::new(host.clone(), Catalog::new(), None)
+    open_tb(host.clone(), Catalog::new())
 }
 
 fn custom_names(tb: &CatalogToolbox) -> Vec<String> {
@@ -310,11 +354,7 @@ fn la_recherche_trouve_charge_les_meilleurs_et_enferme_ses_resultats() {
         json!([{"tool": "danger_run", "args": {"plan": "{{plan}}"}}]),
     );
     // Un outil jamais chargé : on repart d'un catalogue relu, rien n'est annoncé.
-    let tb = CatalogToolbox::new(
-        host.clone(),
-        Catalog::from_json(&tb.catalog_json()).unwrap(),
-        None,
-    );
+    let tb = open_tb(host.clone(), tb.catalog());
     assert!(custom_names(&tb).is_empty());
     let out = run(&tb, FIND, json!({"action": "search", "query": "plan vu"}));
     assert!(out.refused.is_none(), "{out:?}");
@@ -415,7 +455,7 @@ fn une_etape_en_echec_arrete_la_recette_et_compte_un_echec() {
     let out = run(&tb, "custom_vue_du_plan", json!({"plan": "p"}));
     assert!(out.failed.is_some() && out.refused.is_none(), "{out:?}");
     assert_eq!(host.names(), ["task_list"]);
-    let stats = tb.catalog().get("vue_du_plan").unwrap().current().stats;
+    let stats = rec(&tb, "vue_du_plan").unwrap().current().stats;
     assert_eq!((stats.uses, stats.failed, stats.ok), (1, 1, 0));
 }
 
@@ -438,15 +478,7 @@ fn des_arguments_invalides_ne_touchent_pas_l_hote_et_ne_comptent_pas_contre_l_ou
         assert!(out.refused.is_some(), "{bad}: {out:?}");
     }
     assert!(host.calls().is_empty(), "l'hôte n'a pas été appelé");
-    assert_eq!(
-        tb.catalog()
-            .get("vue_du_plan")
-            .unwrap()
-            .current()
-            .stats
-            .uses,
-        0
-    );
+    assert_eq!(rec(&tb, "vue_du_plan").unwrap().current().stats.uses, 0);
 }
 
 #[test]
@@ -461,7 +493,7 @@ fn un_succes_se_compte_et_remonte_dans_la_recherche() {
     );
     run(&tb, "custom_vue_du_plan", json!({"plan": "p"}));
     run(&tb, "custom_vue_du_plan", json!({"plan": "q"}));
-    let stats = tb.catalog().get("vue_du_plan").unwrap().current().stats;
+    let stats = rec(&tb, "vue_du_plan").unwrap().current().stats;
     assert_eq!((stats.uses, stats.ok), (2, 2));
     let out = run(&tb, FIND, json!({"action": "search", "query": "plan"}));
     assert!(out.text.contains("2 appel(s)"), "{}", out.text);
@@ -480,7 +512,7 @@ fn une_etape_ne_peut_viser_ni_le_catalogue_ni_un_outil_que_l_hote_n_offre_pas() 
         );
         assert!(out.refused.is_some(), "{tool} : {out:?}");
     }
-    assert!(tb.catalog().is_empty());
+    assert!(no_tools(&tb));
 }
 
 #[test]
@@ -508,7 +540,7 @@ fn une_etape_visant_le_catalogue_est_refusee_meme_si_l_hote_offre_ce_nom() {
             out.text
         );
     }
-    assert!(tb.catalog().is_empty());
+    assert!(no_tools(&tb));
 }
 
 /// La description de `tools_find` telle que le modèle la lit.
@@ -682,7 +714,7 @@ fn un_nom_deja_porte_par_l_hote_sous_le_prefixe_reserve_ne_peut_pas_etre_cree() 
     );
     assert!(out.refused.is_some(), "{out:?}");
     assert!(out.text.contains("outil de l'hôte"), "{}", out.text);
-    assert!(tb.catalog().is_empty());
+    assert!(no_tools(&tb));
 }
 
 #[test]
@@ -704,15 +736,7 @@ fn une_recette_annulee_ne_part_pas_et_le_dit() {
         host.calls().is_empty(),
         "annulé avant la première étape : rien ne part"
     );
-    assert_eq!(
-        tb.catalog()
-            .get("vue_du_plan")
-            .unwrap()
-            .current()
-            .stats
-            .failed,
-        1
-    );
+    assert_eq!(rec(&tb, "vue_du_plan").unwrap().current().stats.failed, 1);
 }
 
 #[test]
@@ -742,7 +766,7 @@ fn creer_un_nom_pris_ou_un_doublon_est_refuse_par_la_boite() {
         Some("duplicate"),
         "{same_steps:?}"
     );
-    assert_eq!(tb.catalog().len(), 1);
+    assert_eq!(n_tools(&tb), 1);
 }
 
 #[test]
@@ -800,11 +824,7 @@ fn editer_montrer_revenir_et_retirer_par_les_meta_outils() {
         "{back:?}"
     );
     assert_eq!(
-        tb.catalog()
-            .get("vue_du_plan")
-            .unwrap()
-            .current()
-            .description,
+        rec(&tb, "vue_du_plan").unwrap().current().description,
         "Liste le plan puis note qu'il a été vu"
     );
     // retire → plus annoncé, plus appelable, plus cherché.
@@ -850,25 +870,25 @@ fn un_arguments_de_meta_outil_mal_formes_sont_refuses_sans_rien_changer() {
         let out = run(&tb, tool, args.clone());
         assert!(out.refused.is_some(), "{tool} {args} : {out:?}");
     }
-    assert!(tb.catalog().is_empty());
+    assert!(no_tools(&tb));
 }
 
 #[test]
-fn un_echec_du_stockage_annule_l_operation_et_ne_change_rien_en_memoire() {
+fn un_echec_du_stockage_annule_l_operation_et_ne_change_rien() {
     let host = Host::new();
-    let store = Rc::new(Mem::default());
-    let tb = CatalogToolbox::new(host.clone(), Catalog::new(), Some(store.clone()));
-    store.broken.set(true);
+    let repo = Rc::new(FailingRepo::default());
+    let tb = open_tb(host.clone(), Catalog::with_repo(repo.clone()));
+    repo.broken.set(true);
     let out = create(
         &tb,
         "vue_du_plan",
         "Liste le plan puis note qu'il a été vu",
         two_steps(),
     );
-    assert!(out.failed.is_some(), "{out:?}");
+    assert!(out.failed.is_some() && out.refused.is_none(), "{out:?}");
     assert!(out.text.contains("rien n'a changé"), "{}", out.text);
-    assert!(tb.catalog().is_empty() && custom_names(&tb).is_empty());
-    store.broken.set(false);
+    assert!(no_tools(&tb) && custom_names(&tb).is_empty());
+    repo.broken.set(false);
     let out = create(
         &tb,
         "vue_du_plan",
@@ -876,14 +896,32 @@ fn un_echec_du_stockage_annule_l_operation_et_ne_change_rien_en_memoire() {
         two_steps(),
     );
     assert!(out.failed.is_none() && out.refused.is_none(), "{out:?}");
-    assert_eq!(tb.catalog().len(), 1);
+    assert_eq!(n_tools(&tb), 1);
+    // Une ÉDITION et un RETRAIT qui tombent ne changent rien non plus.
+    repo.broken.set(true);
+    let edit = run(
+        &tb,
+        AUTHOR,
+        json!({"action": "edit", "name": "vue_du_plan", "expected_version": 1,
+               "description": "Liste le plan, version deux"}),
+    );
+    assert!(edit.failed.is_some(), "{edit:?}");
+    let retire = run(
+        &tb,
+        AUTHOR,
+        json!({"action": "retire", "name": "vue_du_plan", "reason": "obsolète"}),
+    );
+    assert!(retire.failed.is_some(), "{retire:?}");
+    let record = rec(&tb, "vue_du_plan").unwrap();
+    assert!(record.is_active() && record.current().version == 1);
 }
 
 #[test]
-fn le_catalogue_se_range_et_se_relit_avec_ses_compteurs() {
+fn deux_boites_sur_le_meme_depot_voient_les_memes_outils_et_leurs_compteurs() {
+    // Le dépôt est LA source de vérité : une autre session qui s'ouvre dessus retrouve l'outil
+    // et son renforcement, sans rien relire d'un état sérialisé.
     let host = Host::new();
-    let store = Rc::new(Mem::default());
-    let tb = CatalogToolbox::new(host.clone(), Catalog::new(), Some(store.clone()));
+    let tb = toolbox(&host);
     create(
         &tb,
         "vue_du_plan",
@@ -891,15 +929,17 @@ fn le_catalogue_se_range_et_se_relit_avec_ses_compteurs() {
         two_steps(),
     );
     run(&tb, "custom_vue_du_plan", json!({"plan": "p"}));
-    let saved = store.saved.borrow().last().cloned().expect("rangé");
-    // Une autre session relit l'état rangé : l'outil et son renforcement y sont.
-    let reread = CatalogToolbox::new(host.clone(), Catalog::from_json(&saved).unwrap(), None);
-    let stats = reread.catalog().get("vue_du_plan").unwrap().current().stats;
+    let other = open_tb(host.clone(), tb.catalog());
+    assert!(
+        custom_names(&other).is_empty(),
+        "rien n'est chargé dans la seconde"
+    );
+    let stats = rec(&other, "vue_du_plan").unwrap().current().stats;
     assert_eq!((stats.uses, stats.ok), (1, 1));
-    let out = run(&reread, FIND, json!({"action": "search", "query": "plan"}));
+    let out = run(&other, FIND, json!({"action": "search", "query": "plan"}));
     assert!(out.text.contains("custom_vue_du_plan"), "{}", out.text);
     assert!(
-        run(&reread, "custom_vue_du_plan", json!({"plan": "z"}))
+        run(&other, "custom_vue_du_plan", json!({"plan": "z"}))
             .refused
             .is_none()
     );
@@ -964,7 +1004,7 @@ fn un_outil_d_auteur_n_est_accorde_que_si_toutes_ses_etapes_le_sont() {
     let mut base = Grants::new();
     base.put(Grant::granted("task_list", "user"));
     base.put(Grant::refused("note_add", "user", "écriture interdite ici"));
-    let tb = CatalogToolbox::new(host.clone(), Catalog::new(), None).with_base_grants(base);
+    let tb = open_tb(host.clone(), Catalog::new()).with_base_grants(base);
     create(
         &tb,
         "vue_du_plan",
@@ -990,7 +1030,7 @@ fn un_outil_d_auteur_n_est_accorde_que_si_toutes_ses_etapes_le_sont() {
     assert!(grants.allows(FIND).is_allowed() && grants.allows(AUTHOR).is_allowed());
     let mut strict = Grants::new();
     strict.put(Grant::refused(AUTHOR, "user", "pas d'auteur ici"));
-    let tb = CatalogToolbox::new(host, Catalog::new(), None).with_base_grants(strict);
+    let tb = open_tb(host, Catalog::new()).with_base_grants(strict);
     assert!(!tb.grants().unwrap().allows(AUTHOR).is_allowed());
 }
 
@@ -1004,7 +1044,7 @@ fn sans_autorisations_la_boite_n_en_impose_aucune() {
 #[test]
 fn le_gain_de_jetons_est_mesure_et_la_surface_reste_constante() {
     let host = Host::new();
-    let eager = CatalogToolbox::new(host.clone(), Catalog::new(), None).with_max_loaded(100);
+    let eager = open_tb(host.clone(), Catalog::new()).with_max_loaded(100);
     for i in 0..40 {
         let steps = json!([
             {"tool": "task_list", "args": {"plan": "{{plan}}", "n": i}},
@@ -1021,11 +1061,7 @@ fn le_gain_de_jetons_est_mesure_et_la_surface_reste_constante() {
     let base = bytes(&host.specs());
     let eager_extra = bytes(&eager.specs()) - base;
     // Même catalogue, rien de chargé : c'est ce que le modèle paie au début d'une session.
-    let lazy = CatalogToolbox::new(
-        host.clone(),
-        Catalog::from_json(&eager.catalog_json()).unwrap(),
-        None,
-    );
+    let lazy = open_tb(host.clone(), eager.catalog());
     let lazy_extra = bytes(&lazy.specs()) - base;
     println!(
         "jetons de liste d'outils, 40 outils d'auteur : tout annoncer = {eager_extra} octets, \
@@ -1042,13 +1078,13 @@ fn le_gain_de_jetons_est_mesure_et_la_surface_reste_constante() {
     );
     // Elle grandit au plus de l'INDEX (douze noms), puis plus du tout : 40 outils ou 60, le
     // départ coûte pareil (au chiffre du compteur près). 60 suffit : l'index est plafonné à douze.
-    let empty = CatalogToolbox::new(host.clone(), Catalog::new(), None);
+    let empty = open_tb(host.clone(), Catalog::new());
     let index_cost = bytes(&lazy.specs()) - bytes(&empty.specs());
     assert!(
         index_cost < 900,
         "l'index doit rester borné : {index_cost} octets pour 40 outils"
     );
-    let big = CatalogToolbox::new(host.clone(), Catalog::new(), None).with_max_loaded(1);
+    let big = open_tb(host.clone(), Catalog::new()).with_max_loaded(1);
     for i in 0..60 {
         let steps = json!([{"tool": "task_list", "args": {"plan": "{{plan}}", "n": i}}]);
         let out = create(
@@ -1059,7 +1095,7 @@ fn le_gain_de_jetons_est_mesure_et_la_surface_reste_constante() {
         );
         assert!(out.refused.is_none(), "{i}: {out:?}");
     }
-    let fresh = CatalogToolbox::new(host, Catalog::from_json(&big.catalog_json()).unwrap(), None);
+    let fresh = open_tb(host, big.catalog());
     let (small, large) = (bytes(&lazy.specs()), bytes(&fresh.specs()));
     println!("surface de départ : 40 outils = {small} octets, 60 outils = {large} octets");
     assert!(
@@ -1206,8 +1242,7 @@ fn la_chaine_complete_cherche_cree_reutilise_edite_et_revient() {
         ["task_list", "note_add", "task_list", "note_add"]
     );
     // Et l'historique complet est là : v1, v2, puis v3 = copie de v1.
-    let catalog = tb.catalog();
-    let record = catalog.get("vue_du_plan").unwrap();
+    let record = rec(&tb, "vue_du_plan").unwrap();
     assert_eq!(record.versions.len(), 3);
     assert_eq!(record.current().note, "retour à la v1");
     assert_eq!(record.version(1).unwrap().stats.ok, 1);
@@ -1226,11 +1261,7 @@ fn appeler_un_outil_d_auteur_non_charge_est_refuse_par_le_harnais_sans_toucher_l
         "Liste le plan puis note qu'il a été vu",
         two_steps(),
     );
-    let tb = Rc::new(CatalogToolbox::new(
-        host.clone(),
-        Catalog::from_json(&seeded.catalog_json()).unwrap(),
-        None,
-    ));
+    let tb = Rc::new(open_tb(host.clone(), seeded.catalog()));
     let run = drive(
         tb,
         None,
@@ -1251,11 +1282,7 @@ fn un_outil_cherche_puis_appele_au_tour_suivant_fonctionne() {
         "Liste le plan puis note qu'il a été vu",
         two_steps(),
     );
-    let tb = Rc::new(CatalogToolbox::new(
-        host.clone(),
-        Catalog::from_json(&seeded.catalog_json()).unwrap(),
-        None,
-    ));
+    let tb = Rc::new(open_tb(host.clone(), seeded.catalog()));
     let run = drive(
         tb,
         None,
@@ -1280,9 +1307,7 @@ fn le_gate_refuse_un_outil_d_auteur_dont_une_etape_n_est_pas_accordee_sans_rien_
     let mut base = Grants::new();
     base.put(Grant::granted("task_list", "user"));
     base.put(Grant::refused("note_add", "user", "écriture interdite ici"));
-    let tb = Rc::new(
-        CatalogToolbox::new(host.clone(), Catalog::new(), None).with_base_grants(base.clone()),
-    );
+    let tb = Rc::new(open_tb(host.clone(), Catalog::new()).with_base_grants(base.clone()));
     let run = drive(
         tb,
         Some(base),
@@ -1342,9 +1367,7 @@ fn un_outil_d_auteur_qui_ecrit_est_gate_comme_une_ecriture() {
     let mut base = Grants::new();
     base.put(Grant::granted("task_list", "user"));
     base.put(Grant::granted("note_add", "user"));
-    let tb = Rc::new(
-        CatalogToolbox::new(host.clone(), Catalog::new(), None).with_base_grants(base.clone()),
-    );
+    let tb = Rc::new(open_tb(host.clone(), Catalog::new()).with_base_grants(base.clone()));
     let run = drive(
         tb,
         Some(base),

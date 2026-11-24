@@ -54,6 +54,7 @@
 
 mod catalogue;
 mod catalogue_toolbox;
+pub mod conformance;
 mod context;
 mod embed;
 mod event;
@@ -70,12 +71,11 @@ mod wire;
 
 pub use catalogue::{
     Catalog, CatalogError, CatalogHit, MAX_DESCRIPTION_CHARS, MAX_NAME_CHARS, MAX_STEPS, MAX_TOOLS,
-    MAX_VERSIONS, RecipeStep, SIMILAR_MIN, ToolChange, ToolDef, ToolDraft, ToolRecord, ToolStats,
-    ToolStatus, Usage, render_args, validate_args,
+    MAX_VERSIONS, MemRepo, RecipeStep, SIMILAR_MIN, ToolChange, ToolDef, ToolDraft, ToolRecord,
+    ToolRepo, ToolStats, ToolStatus, Usage, render_args, steps_hash, validate_args,
 };
 pub use catalogue_toolbox::{
-    AUTHOR, AUTO_LOAD, CatalogStore, CatalogToolbox, DEFAULT_FIND_LIMIT, DEFAULT_MAX_LOADED, FIND,
-    PREFIX,
+    AUTHOR, AUTO_LOAD, CatalogToolbox, DEFAULT_FIND_LIMIT, DEFAULT_MAX_LOADED, FIND, PREFIX,
 };
 pub use context::{Dropped, Fitted, Removal, estimate_tokens, fit, removable};
 pub use embed::{
