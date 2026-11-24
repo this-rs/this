@@ -2568,10 +2568,22 @@ impl Harness {
                 images,
                 synthetic: true,
             },
+            // Le résumé d'assistant est enfermé comme celui d'utilisateur (#290) : il résume des
+            // tours anciens, donc des textes de tiers possibles. Le rôle reste celui que rend le
+            // compacteur ; seul le contenu change.
             Message::Assistant { content, calls }
                 if calls.is_empty() && !content.trim().is_empty() =>
             {
-                Message::Assistant { content, calls }
+                Message::Assistant {
+                    content: this_agent::untrusted::wrap_with(
+                        &nonce,
+                        usize::MAX,
+                        "compaction",
+                        &[],
+                        &content,
+                    ),
+                    calls,
+                }
             }
             _ => return None,
         };
