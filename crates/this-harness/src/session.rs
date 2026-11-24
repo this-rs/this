@@ -945,6 +945,9 @@ pub struct Harness {
     /// (voir [`Harness::with_grants`]). Partagé entre les poignées, comme `state` : une
     /// révocation faite sur l'une vaut pour toutes (#287).
     grants: Shared<Option<this_agent::substrate::Grants>>,
+    /// Les demandes de permission en attente de la personne (#286). En mémoire : elles
+    /// ne vont pas dans le `Snapshot` (une demande restée sans réponse est à reposer).
+    asks: Shared<Asks>,
     /// Le compacteur, s'il y en a un : aucun par défaut, donc la borne de contexte jette
     /// (voir [`Harness::with_compactor`]).
     compactor: Option<Rc<dyn Compactor>>,
@@ -972,6 +975,7 @@ impl Harness {
             turn_context: None,
             router: None,
             grants: Rc::new(RefCell::new(None)),
+            asks: Rc::new(RefCell::new(Asks::default())),
             compactor: None,
             recorder: Rc::new(Recorders::new()),
             state: Rc::new(RefCell::new(State {
@@ -1236,6 +1240,46 @@ impl Harness {
         *self.grants.borrow_mut() = Some(grants);
     }
 
+    /// Les demandes de permission qui attendent la personne : `(id, outil)` (#286).
+    pub fn pending_permissions(&self) -> Vec<(u64, String)> {
+        self.asks
+            .borrow()
+            .pending
+            .iter()
+            .map(|p| (p.id, p.tool.clone()))
+            .collect()
+    }
+
+    /// Répond à une demande de permission (#286). Rend `false` si l'id est inconnu : rien
+    /// n'est alors appliqué. Une réponse installe le grant pour les appels SUIVANTS ; l'appel
+    /// déjà refusé ne repart pas.
+    pub fn answer_permission(&self, id: u64, granted: bool) -> bool {
+        let tool = {
+            let mut asks = self.asks.borrow_mut();
+            let Some(pos) = asks.pending.iter().position(|p| p.id == id) else {
+                return false;
+            };
+            asks.pending.remove(pos).tool
+        };
+        {
+            let mut installees = self.grants.borrow_mut();
+            let grants = installees.get_or_insert_with(this_agent::substrate::Grants::new);
+            grants.put(if granted {
+                this_agent::substrate::Grant::granted(tool.clone(), "personne")
+            } else {
+                this_agent::substrate::Grant::refused(
+                    tool.clone(),
+                    "personne",
+                    "refusé par la personne",
+                )
+            });
+        }
+        self.handle()
+            .out
+            .emit(Event::PermissionAnswered { id, tool, granted });
+        true
+    }
+
     /// Remet un état sauvegardé en place — la file d'attente comprise.
     ///
     /// **Conservateur par défaut** : voir [`Handle::restore`]. Les révocations du snapshot
@@ -1491,6 +1535,7 @@ impl Harness {
                 recorder: self.recorder.clone(),
                 clock: clock.clone(),
                 out: self.out.clone(),
+                asks: self.asks.clone(),
             }));
             // Le budget se compte en temps HORLOGE depuis ici : temps du modèle compris. Ne
             // compter que la durée des outils laissait un flux de signes de vie tourner une
@@ -2325,7 +2370,14 @@ impl Harness {
         let dynamiques = toolbox.grants();
         let installees = self.grants.borrow();
         let effectives = dynamiques.as_ref().or(installees.as_ref());
-        gate_decision(effectives, &toolbox.declarations(), tool).err()
+        let declarations = toolbox.declarations();
+        if demande_necessaire(effectives, &declarations, tool) {
+            let id = demander(&self.asks, &self.handle().out, tool);
+            return Some(format!(
+                "aucune autorisation pour « {tool} » : permission en attente de la personne (demande {id})"
+            ));
+        }
+        gate_decision(effectives, &declarations, tool).err()
     }
 
     /// La paire sur laquelle l'objectif ouvert par `first` part, quand un routeur
@@ -2772,6 +2824,52 @@ fn cout_fixe(system: &str, contexte: Option<&str>) -> usize {
 ///
 /// `Ok(())` : l'outil peut partir. `Err(motif)` : le refus, exactement ce que
 /// [`Harness::gate`] transforme en `Outcome::refused`.
+/// Les demandes de permission en attente (#286), avec le compteur d'identifiants.
+#[derive(Default)]
+struct Asks {
+    next: u64,
+    pending: Vec<PermissionAsk>,
+}
+
+/// Une demande en attente : un outil déclaré, sans aucun grant, que la personne doit trancher.
+struct PermissionAsk {
+    id: u64,
+    tool: String,
+}
+
+/// Faut-il DEMANDER plutôt que refuser ? Seulement quand l'outil est déclaré et qu'AUCUN grant
+/// ne le concerne. Un refus explicite (`Grant::refused`) ne redemande jamais : la décision
+/// de la personne est respectée.
+fn demande_necessaire(
+    grants: Option<&this_agent::substrate::Grants>,
+    declarations: &[this_agent::evidence::Declaration],
+    tool: &str,
+) -> bool {
+    grants.is_some_and(|g| {
+        declarations.iter().any(|d| d.tool == tool) && !g.grants.iter().any(|x| x.tool == tool)
+    })
+}
+
+/// Enregistre une demande pour `tool` (ou réutilise celle qui attend déjà) et l'émet.
+fn demander(asks: &Shared<Asks>, out: &Out, tool: &str) -> u64 {
+    let mut a = asks.borrow_mut();
+    if let Some(existante) = a.pending.iter().find(|p| p.tool == tool) {
+        return existante.id;
+    }
+    a.next += 1;
+    let id = a.next;
+    a.pending.push(PermissionAsk {
+        id,
+        tool: tool.to_string(),
+    });
+    drop(a);
+    out.emit(Event::PermissionRequest {
+        id,
+        tool: tool.to_string(),
+    });
+    id
+}
+
 fn gate_decision(
     grants: Option<&this_agent::substrate::Grants>,
     declarations: &[this_agent::evidence::Declaration],
@@ -2807,6 +2905,7 @@ struct RunPorts {
     recorder: Rc<dyn Recorder>,
     clock: Rc<dyn Clock>,
     out: Out,
+    asks: Shared<Asks>,
 }
 
 #[async_trait(?Send)]
@@ -2814,7 +2913,14 @@ impl Permission for RunPorts {
     fn allows(&self, tool: &str) -> Result<(), String> {
         let dynamiques = self.toolbox.grants();
         let effectives = dynamiques.as_ref().or(self.grants.as_ref());
-        gate_decision(effectives, &self.toolbox.declarations(), tool)
+        let declarations = self.toolbox.declarations();
+        if demande_necessaire(effectives, &declarations, tool) {
+            let id = demander(&self.asks, &self.out, tool);
+            return Err(format!(
+                "aucune autorisation pour « {tool} » : permission en attente de la personne (demande {id})"
+            ));
+        }
+        gate_decision(effectives, &declarations, tool)
     }
 
     async fn record(&self, call: &ToolCall, ms: u64, outcome: &Outcome) {
