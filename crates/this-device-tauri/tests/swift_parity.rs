@@ -11,7 +11,7 @@
 use std::collections::BTreeSet;
 
 use serde_json::json;
-use this_device_tauri::{DIAGNOSTIC_METHODS, STREAM_METHODS, SYSTEM_METHODS};
+use this_device_tauri::{DIAGNOSTIC_METHODS, LIFECYCLE_METHODS, STREAM_METHODS, SYSTEM_METHODS};
 use this_platform::device_bridge::{METHODS, capability_of};
 
 /// Every `@objc public func <name>` declared by the plugin's Swift sources.
@@ -62,6 +62,7 @@ fn every_native_selector_is_reachable_through_the_contract() {
         .chain(SYSTEM_METHODS.iter().copied())
         .chain(STREAM_METHODS.iter().copied())
         .chain(DIAGNOSTIC_METHODS.iter().copied())
+        .chain(LIFECYCLE_METHODS.iter().copied())
         .collect();
     let unreachable: Vec<&String> = swift
         .iter()
@@ -101,6 +102,7 @@ fn every_native_selector_derives_a_capability() {
         if SYSTEM_METHODS.contains(&method.as_str())
             || STREAM_METHODS.contains(&method.as_str())
             || DIAGNOSTIC_METHODS.contains(&method.as_str())
+            || LIFECYCLE_METHODS.contains(&method.as_str())
         {
             continue;
         }

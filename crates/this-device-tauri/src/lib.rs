@@ -191,6 +191,12 @@ pub const STREAM_METHODS: &[&str] = &["streamStart", "streamStop"];
 /// l'éditeur de liens qui décide.
 pub const DIAGNOSTIC_METHODS: &[&str] = &["listCommands"];
 
+/// Commandes de cycle de vie appelées **directement** par des fonctions Rust
+/// ([`begin_background_task`], [`end_background_task`]) — ni famille consentie, ni lecture
+/// d'état : elles n'ont pas de `capability_of`, mais elles sont joignables par ces fonctions.
+/// `tests/swift_parity.rs` les compte comme atteignables et ne leur demande pas de capacité.
+pub const LIFECYCLE_METHODS: &[&str] = &["beginBackgroundTask", "endBackgroundTask"];
+
 /// Démarre un flux de [`STREAMS`]. `on_sample` reçoit chaque échantillon natif, tel quel
 /// (`{"kind":"orientation","angle":…}`, `{"kind":"battery","level":…,"state":…}`) : un
 /// échantillon initial tout de suite, puis un par notification du système. L'appelant le
@@ -647,6 +653,39 @@ async fn bluetooth_scan<R: Runtime>(
     )
     .await
 }
+
+/// Garde le processus iOS vivant le temps d'un tour : sans cela, mettre l'app en
+/// arrière-plan suspend le processus et coupe la réponse en cours. Le délai est celui
+/// qu'iOS accorde (de l'ordre de 30 s) ; un tour plus long est interrompu à l'expiration.
+/// No-op hors iOS : un bureau ne suspend pas le processus de cette façon.
+#[cfg(target_os = "ios")]
+pub async fn begin_background_task<R: Runtime>(app: &AppHandle<R>) {
+    let Some(plugin) = app.try_state::<ThisDevice<R>>() else {
+        return;
+    };
+    let _ = plugin
+        .handle
+        .run_mobile_plugin_async::<Value>("beginBackgroundTask", json!({}))
+        .await;
+}
+
+#[cfg(not(target_os = "ios"))]
+pub async fn begin_background_task<R: Runtime>(_app: &AppHandle<R>) {}
+
+/// Fin du jeton posé par [`begin_background_task`]. Appeler sans jeton est sans effet.
+#[cfg(target_os = "ios")]
+pub async fn end_background_task<R: Runtime>(app: &AppHandle<R>) {
+    let Some(plugin) = app.try_state::<ThisDevice<R>>() else {
+        return;
+    };
+    let _ = plugin
+        .handle
+        .run_mobile_plugin_async::<Value>("endBackgroundTask", json!({}))
+        .await;
+}
+
+#[cfg(not(target_os = "ios"))]
+pub async fn end_background_task<R: Runtime>(_app: &AppHandle<R>) {}
 
 #[cfg(test)]
 mod tests {
