@@ -136,8 +136,9 @@ jobs:
           path: target
           key: ${{ runner.os }}-cargo-build-target-${{ matrix.rust }}-${{ hashFiles('**/Cargo.lock') }}
 
-      # Use --features all,wami (not --all-features) because obrain and
-      # frontend depend on local path checkouts not available on CI.
+      # Use --features all,wami (not --all-features): `frontend` is not part of
+      # `all` by design, and `obrain`/`frontend` are git deps whose compile is
+      # covered by the dedicated `obrain` and `frontend` jobs.
       - name: Run unit tests
         run: cargo test --lib --features ${{ matrix.features }} --verbose
 
@@ -815,49 +816,59 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v7
 
-      # `obrain-db/obrain` est PRIVÉ (mesuré le 06/11/2026 : `gh api` → private=true).
-      # Un clone anonyme échoue donc (« could not read Username »). Deux issues, et
-      # une seule honnête : avec un jeton, on couvre vraiment ; sans jeton, on le DIT
-      # au lieu de laisser croire que la feature est testée. Le job reste vert dans
-      # les deux cas, mais l'avertissement est visible dans l'onglet Actions.
-      - name: Checkout obrain-db (private, needs OBRAIN_TOKEN)
-        id: engine
-        env:
-          OBRAIN_TOKEN: ${{ secrets.OBRAIN_TOKEN }}
-        run: |
-          set -euo pipefail
-          DEP="$(cd "$GITHUB_WORKSPACE/../.." && pwd)/obrain/obrain-db"
-          if [ -z "${OBRAIN_TOKEN:-}" ]; then
-            echo "engine=false" >> "$GITHUB_OUTPUT"
-            echo "::warning title=Obrain Backend non couvert::obrain-db/obrain est privé et le secret OBRAIN_TOKEN n'est pas défini. La feature \`obrain\` n'est donc PAS compilée ni testée ici — ajouter un PAT en lecture sur obrain-db/obrain sous le nom OBRAIN_TOKEN active ce job."
-            exit 0
-          fi
-          rm -rf "$DEP"
-          mkdir -p "$(dirname "$DEP")"
-          git clone --depth 1 "https://x-access-token:${OBRAIN_TOKEN}@github.com/obrain-db/obrain.git" "$DEP"
-          echo "obrain engine at $DEP ($(git -C "$DEP" rev-parse --short HEAD))"
-          echo "engine=true" >> "$GITHUB_OUTPUT"
-
+      # obrain est une dépendance git épinglée (Cargo.toml, rev f0d6e132…, dépôt
+      # PUBLIC) : cargo la récupère comme n'importe quel crate. Plus de checkout
+      # frère ni de secret OBRAIN_TOKEN — avant le passage en git (#289/#357), ce
+      # job clonait un dépôt privé sous jeton dans $GITHUB_WORKSPACE/../.. et
+      # n'exécutait RIEN quand le jeton manquait.
       - name: Install protoc
-        if: steps.engine.outputs.engine == 'true'
         uses: arduino/setup-protoc@v3
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Install Rust toolchain
-        if: steps.engine.outputs.engine == 'true'
         uses: dtolnay/rust-toolchain@stable
 
+      # Compile la feature obrain contre le VRAI moteur (pas une doublure vide) :
+      # c'est ce que `cargo check` par défaut ne voit pas, et ce que la CI ne
+      # compilait pas (le job était gaté sur un jeton absent).
+      - name: Check the obrain feature compiles (pinned git dep)
+        run: cargo check -p this-rs --features obrain
+
+      # Teste le backend obrain contre un vrai store embarqué (in-process).
       - name: Test the obrain backend against a real store
-        if: steps.engine.outputs.engine == 'true'
         run: |
           # `::` en fin de scalaire simple fait de la ligne une clé pour YAML : bloc.
-          cargo test --features obrain --lib storage::
+          cargo test -p this-rs --features obrain --lib storage::
+
+  frontend:
+    # Skipped when the change is documentation-only (see `changes`).
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    name: Frontend Backend
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      # this-vite est une dépendance git épinglée (Cargo.toml, rev dcf233cd…, dépôt
+      # public this-rs/vite-rs) : cargo la récupère. La feature `frontend` n'est PAS
+      # dans `all` (Cargo.toml), donc aucun autre job ne la compile.
+      - name: Install protoc
+        uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Check the frontend feature compiles (pinned git dep)
+        run: cargo check -p this-rs --features frontend
 
   gate:
     name: CI gate
     if: always()
-    needs: [changes, test, coverage, fmt, clippy, examples, security_audit, docs, cross-platform, wasm_crates, wasm32_harness, wasm32_browser, obrain, swift_ios, device_linux]
+    needs: [changes, test, coverage, fmt, clippy, examples, security_audit, docs, cross-platform, wasm_crates, wasm32_harness, wasm32_browser, obrain, frontend, swift_ios, device_linux]
     runs-on: ubuntu-latest
     steps:
       - name: Nothing failed, nothing was cancelled
