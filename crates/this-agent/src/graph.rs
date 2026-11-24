@@ -357,7 +357,7 @@ pub fn step_output(step: &Step) -> &str {
 
 /// L'étape a-t-elle réussi ? Ni refusée, ni échouée.
 pub fn step_ok(step: &Step) -> bool {
-    !step.refused && step.failure.is_none()
+    !step.refused && step.failure.is_none() && !step.inconnu
 }
 
 /// Le début de la sortie, borné à [`OUT_EXCERPT_CHARS`] caractères (jamais

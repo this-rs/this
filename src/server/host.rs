@@ -849,6 +849,18 @@ impl this_harness::Recorder for HostRecorder {
         }));
     }
 
+    async fn intention(&self, run_id: &str, run: &this_agent::Run, step: &this_agent::Step) {
+        // Même contrat best-effort que `step` : l'intention (écrite AVANT l'appel)
+        // comble la fenêtre aveugle des effets, sans jamais être une promesse de
+        // durabilité — un échec ici est avalé comme un échec d'étape, le run continue.
+        // Le même chemin que `step` (`append_step_live`) matérialise le run au
+        // premier passage et réécrit la même étape (même `_uuid = run#index`) quand
+        // le résultat est acquitté : pas de doublon.
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.0.append_step_live(run, run_id, step)
+        }));
+    }
+
     async fn stopped(&self, run_id: &str, run: &this_agent::Run, _stop: &this_agent::Stop) {
         // `run.stop` vaut déjà `stop` (la boucle a appelé `Run::finish`) :
         // `record_run` fige la fin ; réécrire les étapes déjà posées est un

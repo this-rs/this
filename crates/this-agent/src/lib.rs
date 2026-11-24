@@ -112,6 +112,12 @@ pub struct Step {
     pub at_ms: u64,
     #[serde(default)]
     pub failure: Option<String>,
+    /// L'effet est **inconnu** : l'appel a été TENTÉ (l'intention a été journalisée
+    /// avant l'exécution) mais son résultat n'a pas été acquitté avant un arrêt
+    /// brutal. Ce n'est ni un accomplissement, ni un refus, ni un échec : une
+    /// reprise qui relit cette étape ne doit ni conclure, ni rejouer à l'aveugle.
+    #[serde(default)]
+    pub inconnu: bool,
     /// Empreinte de l'état avant et après : c'est l'**observation**, pas la
     /// parole de l'outil. Deux empreintes égales = rien n'a bougé.
     #[serde(default)]
@@ -137,6 +143,7 @@ impl Step {
             index: 0,
             at_ms: 0,
             failure: None,
+            inconnu: false,
             before: String::new(),
             after: String::new(),
             resume: String::new(),
@@ -308,9 +315,11 @@ impl Run {
         }
     }
 
-    /// L'étape a-t-elle un effet inconnu ?
+    /// L'étape a-t-elle un effet inconnu ? Soit l'étape le dit elle-même
+    /// ([`Step::inconnu`], une intention journalisée jamais acquittée), soit le
+    /// run l'a marquée après abandon ([`Run::effet_inconnu`]).
     pub fn est_inconnue(&self, etape: &Step) -> bool {
-        self.inconnues.contains(&(etape.index as usize))
+        etape.inconnu || self.inconnues.contains(&(etape.index as usize))
     }
 
     /// Les étapes dont l'effet est connu : ce que la décision confronte au récit.

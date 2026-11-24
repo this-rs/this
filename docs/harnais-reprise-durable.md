@@ -53,7 +53,7 @@ implémentation de ce dépôt écrit sur disque et le relit après réouverture.
 | **Observation / télémétrie** — ce que l'interface lit pendant le run | `Event` (`crates/this-harness/src/event.rs:40-184`), émis par `Out::emit` dans une file en mémoire vidée vers un puits **synchrone** (`session.rs:681-699`) ; un puits qui panique tue le run, pas le harnais (`session.rs:655-657`) | **Au mieux** : rien n'est écrit, rien n'est relu ; la file est en mémoire et non bornée (`session.rs:659-661`) | **Hôte** (le puits). Le cœur ne persiste aucun événement (`session.rs:18-19`) |
 | **Journal des étapes** — la trace durable du même run | Port `Recorder` (`ports.rs:422-432`), poussé par la boucle après chaque appel (`session.rs:1817-1825`) et à l'arrêt (`session.rs:1726-1733`) ; implémentation réelle : `HostRecorder` (`src/server/host.rs:827-860`) → `HarnessGraph::append_step_live` (`src/storage/harness_graph.rs:397`) et `record_run` (`:358`), nœuds `_run`/`_step` du graphe obrain | **Durable** (sous la feature `obrain`), un commit par étape (~35 ms médian, `src/storage/harness_graph.rs:27-33`), et relisible : `load_run` (`:453`), `load_runs` (`:459`) | **Hôte** (this-rs, `src/storage/harness_graph.rs`) — mais le **cœur** décide quand pousser, et le contrat est explicitement « au mieux » (`ports.rs:414-420`) |
 | **État indispensable à la reprise** — le fil et la file | `State` (`session.rs:630-641`) → `Snapshot { version, transcript, pending, revoked }` (`event.rs`), produit par `Handle::snapshot` (`session.rs:2477-2487`), remis par `Handle::restore` (`session.rs:2489-2515`) | **Au mieux, et même pas poussé** : le harnais n'écrit rien ; **aucune implémentation de stockage de `Snapshot` n'existe dans ce dépôt** (`grep -rn "Snapshot" src/` ne rend que des homonymes d'autres modules). Le seul test de reprise remplit une seconde instance en mémoire (`tests/scenario.rs:489`) | **Hôte**, entièrement. Ce que le `Snapshot` ne porte pas : `busy`, `generation`, `cancel`, `run_seq` (`session.rs:630-641` contre `2477-2487`), le `Run` lui-même (étapes, effets inconnus, arrêt), le registre des ids vus, l'état du routeur |
-| **Effets externes** — ce que les outils ont fait au monde | `Outcome.before` / `after` (`event.rs:270-273`, `unchanged()` `:305-308`), `Step` (`crates/this-agent/src/lib.rs:99-128`), `Run.steps` (`:202`), `effet_inconnu` (`:302-314`) ; l'outil lui-même est appelé par le port (`ports.rs:247-260`) | **Au mieux** : aucun enregistrement transactionnel. La boucle émet `ToolUse` **avant** l'appel (`session.rs:1761-1765`) mais n'écrit l'étape qu'**après** (`session.rs:1817-1825`) : entre les deux, aucun état durable ne dit qu'un effet a été tenté. Le seul marqueur est le nœud de run resté `_stop: "running"` (`crates/this-agent/src/graph.rs:335`, `src/storage/harness_graph.rs:435`) | **Hôte** pour l'effet (l'outil est à lui), **cœur** pour la qualification de l'effet (`effet_inconnu`, `verdict_of` `session.rs:2289-2296`) |
+| **Effets externes** — ce que les outils ont fait au monde | `Outcome.before` / `after` (`event.rs:270-273`, `unchanged()` `:305-308`), `Step` (`crates/this-agent/src/lib.rs:99-128`), `Run.steps` (`:202`), `effet_inconnu` (`:302-314`) ; l'outil lui-même est appelé par le port (`ports.rs:247-260`) | **Au mieux** : aucun enregistrement transactionnel, mais la fenêtre aveugle est désormais couverte — la boucle écrit l'INTENTION (`Recorder::intention`, une étape `inconnu = true`) **avant** l'appel, et l'étape acquittée **après** (`session.rs`) : entre les deux, un état durable dit qu'un effet a été TENTÉ, sans en conclure le résultat. Le nœud de run resté `_stop: "running"` (`crates/this-agent/src/graph.rs:335`, `src/storage/harness_graph.rs:435`) en est le second marqueur | **Hôte** pour l'effet (l'outil est à lui), **cœur** pour la qualification de l'effet (`effet_inconnu`, `verdict_of` `session.rs:2289-2296`) |
 | **Permissions humaines en attente** — « l'agent demande, la personne répond » | **Une file en mémoire (#286).** Un outil déclaré SANS aucun grant ouvre une demande (`PermissionRequest`, `session.rs` `demander`) ; l'appel est refusé pour ce tour. `Harness::answer_permission(id, oui/non)` installe le grant pour les appels SUIVANTS ; un id inconnu est rejeté. Un refus explicite ne redemande jamais. `Permission` (`ports.rs`) reste une décision synchrone ; `Approval` ne porte que des compositions. | **Non persisté, volontairement** : la file n'entre pas dans le `Snapshot` (ce serait rouvrir la matrice). Une demande restée sans réponse à l'arrêt est reposée au prochain appel. Une réponse, elle, vit dans les grants de l'hôte, qui les persiste comme le reste de ses autorisations | **Cœur fait pour la file ; hôte pour la persistance des réponses** (la révocation, elle, survit : #287) |
 
 ### Ce que la cinquième ligne dit du contrat
@@ -128,8 +128,9 @@ Trois points de coupe précis à écrire, dans cet ordre de valeur :
 2. **après l'effet, avant acquittement** : l'outil a écrit, le processus meurt avant
    `session.rs:1817` — le store ne contient **aucune** étape (`ToolUse` n'est qu'un
    événement, `session.rs:1761`), donc la reprise ne peut pas savoir que l'effet a été
-   tenté. C'est le cas qui manque le plus, et le seul remède possible est un
-   enregistrement **avant** l'appel (« intention ») que le cœur ne fait pas ;
+   tenté. C'est le cas qui manquait le plus, et le remède — un enregistrement
+   **avant** l'appel (« intention ») — est désormais porté par le cœur
+   (`Recorder::intention`, écrite avant l'appel, `session.rs`) ;
 3. **après checkpoint** : le store contient l'étape, `_stop` vaut encore `running` ; la
    reprise doit lire `load_run` (`src/storage/harness_graph.rs:453`) et refuser de
    rejouer.
@@ -142,9 +143,9 @@ tempdir et relit. Chaque test a été vu rouge sous mutation de la garantie qu'i
 
 | Cas | Test | Ce qu'il fige — et rien de plus |
 |---|---|---|
-| avant l'effet | `crash_avant_l_effet_ni_journal_ni_monde_rejouer_est_sans_risque` | journal sans run, effet absent du monde |
-| après l'effet, avant acquittement | `crash_apres_l_effet_avant_l_acquittement_le_journal_ne_sait_pas` | l'effet a eu lieu, le journal est **identique** au cas précédent : la reprise ne peut pas savoir que l'effet a été tenté. C'est la limite (pas d'intention écrite avant l'appel) ; le test l'épingle, il ne la comble pas |
-| après checkpoint | `crash_apres_checkpoint_l_etape_est_relue_et_le_run_n_est_pas_fini` | l'étape commitée se relit (effet accompli, ni refus ni échec), le run n'a pas d'arrêt (`running`) |
+| avant l'effet | `crash_avant_l_effet_l_intention_est_journalisee_et_le_resultat_inconnu` | l'intention (étape `inconnu = true`) est dans le journal, l'effet est absent du monde |
+| après l'effet, avant acquittement | `crash_apres_l_effet_avant_l_acquittement_l_intention_dit_que_le_resultat_est_inconnu` | l'effet a eu lieu, le journal porte l'intention `inconnu` : la reprise SAIT qu'un effet a été tenté, et ne conclut ni ne rejoue |
+| après checkpoint | `crash_apres_checkpoint_l_etape_est_relue_et_le_run_n_est_pas_fini` | l'étape commitée se relit (effet accompli, ni refus ni échec, `inconnu` = false), le run n'a pas d'arrêt (`running`) |
 
 La matrice est épinglée par `tests/matrice_snapshot.rs`
 (`snapshot_reste_a_trois_champs_tant_que_la_matrice_le_dit`) : destructuring exhaustif de
@@ -152,8 +153,10 @@ La matrice est épinglée par `tests/matrice_snapshot.rs`
 
 Cas « effet de résultat inconnu non rejoué » : case (c), pas dupliqué.
 
-**Reste non couvert** : (1) le remède du cas « après l'effet » (journaliser une intention
-avant l'appel) n'existe pas : seule la limite est prouvée. (2) Aucun test ne fait **agir**
+**Reste non couvert** : (1) la fenêtre aveugle est comblée au niveau du journal
+(`Recorder::intention` écrit l'intention avant l'appel, épinglée par `tests/reprise_crash.rs`
+et `tests/intention.rs`) — mais aucun test ne fait **agir** une reprise sur ce journal.
+(2) Aucun test ne fait **agir**
 une reprise : l'hôte n'a pas de logique de reprise de run, les tests prouvent ce que le
 journal donne à lire, pas une décision de rejeu. (3) Un seul point de coupe par cas, un
 seul outil, un seul processus écrivain ; pas de crash pendant le commit lui-même
@@ -187,9 +190,10 @@ Trois preuves, à trois niveaux :
 
 Résidu, qui n'invalide pas la case mais borne sa portée : la non-répétition est
 **locale au processus**. Un outil non idempotent dont l'effet est inconnu au moment
-d'un crash ne laisse aucune trace (voir (b), point 2), et `Run.inconnues` n'est pas
-dans le `Snapshot` : la reprise repart d'un run neuf. La règle tenue est « le harnais
-ne rejoue pas », pas « personne ne peut rejouer ».
+d'un crash laisse désormais une trace dans le journal durable (l'intention `inconnu`,
+voir (b), point 2), mais `Run.inconnues` n'est pas dans le `Snapshot` : la reprise en
+mémoire repart d'un run neuf. La règle tenue est « le harnais ne rejoue pas », pas
+« personne ne peut rejouer » — à l'hôte de lire le journal et de ne pas rejouer.
 
 ### (d) File utilisateur conservée, permission périmée non restaurée comme accordée, versions futures refusées avec motif — **manque**
 
@@ -375,8 +379,8 @@ et chacune contredirait un choix déjà fait et mesuré.
    l'appel (`session.rs:1761-1765`) et n'écrit l'étape qu'après (`session.rs:1817-1825`).
    Un crash entre les deux ne laisse **aucune** trace durable d'un effet pourtant
    peut-être produit : c'est exactement le cas « après l'effet avant acquittement » de
-   la case (b), et il ne se répare pas par un test — il demande une écriture d'intention
-   avant l'appel, que le cœur ne fait pas.
+   la case (b). Il ne se réparait pas par un test : il demandait une écriture d'intention
+   avant l'appel, désormais portée par le cœur (`Recorder::intention`, `session.rs`).
 3. **`Snapshot.version` est un champ mort.** Écrit (`session.rs:2483`, `event.rs:243`)
    et jamais lu (`session.rs:2489-2515`). La case (d) « versions futures refusées avec
    motif » est donc un manque d'une dizaine de lignes, pas un chantier — et c'est le
