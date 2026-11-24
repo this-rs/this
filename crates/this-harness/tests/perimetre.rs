@@ -65,6 +65,8 @@ struct ChaqueFois;
 impl Transport for ChaqueFois {
     async fn stream(&self, _: &Request, _: &Cancel, _: Delta) -> Result<Reply, Failure> {
         Ok(Reply {
+            // Ce faux moteur ne mesure rien : `usage` reste `None` (voir #288).
+            usage: None,
             served: None,
             text: String::new(),
             calls: vec![ToolCall {

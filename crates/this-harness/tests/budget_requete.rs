@@ -52,6 +52,8 @@ impl Transport for Vu {
     async fn stream(&self, request: &Request, _: &Cancel, _: Delta) -> Result<Reply, Failure> {
         self.0.borrow_mut().push(request.clone());
         Ok(Reply {
+            // Ce faux transport ne mesure rien : `usage` reste `None` (voir #288).
+            usage: None,
             served: None,
             text: "fini".into(),
             calls: vec![],
