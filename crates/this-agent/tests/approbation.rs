@@ -289,3 +289,21 @@ fn c_est_le_digest_de_l_emplacement_dans_l_empreinte_qui_epingle_le_contenu_decl
         "refusé par l'empreinte, pas par la map : {m}"
     );
 }
+
+/// #287 : la RÉVOCATION d'un approbateur. Une composition approuvée est acceptée tant que
+/// l'hôte fait confiance à l'approbateur ; dès que la liste `trusted` le retire, la MÊME
+/// composition, inchangée, est refusée. La confiance vit chez l'hôte, pas dans le document.
+#[test]
+fn retirer_un_approbateur_de_la_liste_de_l_hote_revoque_son_approbation() {
+    let (d, trusted) = approuve(doc(), "theo");
+    assert!(
+        matches!(d.is_approved(&trusted), Verdict::Allow),
+        "témoin : tant que l'approbateur est de confiance, la composition est acceptée"
+    );
+    // L'hôte retire l'approbateur. Le document n'a pas bougé d'un octet.
+    let revoquee: Vec<Approval> = Vec::new();
+    assert!(
+        motif(d.is_approved(&revoquee)).contains("inconnu"),
+        "révoquée : la même composition est refusée, nommément"
+    );
+}
