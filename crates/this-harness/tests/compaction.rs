@@ -28,6 +28,7 @@ impl Transport for Engine {
     async fn stream(&self, request: &Request, _: &Cancel, _: Delta) -> Result<Reply, Failure> {
         self.seen.borrow_mut().push(request.thread());
         Ok(Reply {
+            usage: None,
             served: None,
             text: "fini".into(),
             calls: vec![],

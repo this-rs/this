@@ -45,6 +45,7 @@ impl Transport for EngineFamilleA {
         self.gate_consulte.set(true);
         match permission.allows(&call.name) {
             Ok(()) => Ok(Reply {
+                usage: None,
                 served: None,
                 text: String::new(),
                 calls: vec![call],
@@ -188,6 +189,7 @@ fn un_outil_autorise_est_journalise_hors_bande_sans_rejeu() {
             permission.record(&call, 3, &Outcome::ok("lu")).await;
             self.rejoue.set(true);
             Ok(Reply {
+                usage: None,
                 served: None,
                 text: "fini".into(),
                 calls: vec![],

@@ -93,6 +93,7 @@ impl Engine {
 
 fn reply(text: &str) -> Reply {
     Reply {
+        usage: None,
         served: None,
         text: text.to_string(),
         calls: vec![],
@@ -442,6 +443,7 @@ fn une_panne_au_tour_suivant_un_outil_est_relancee_sans_rejouer_l_outil() {
         clock.clone(),
         vec![
             Act::Reply(Reply {
+                usage: None,
                 served: None,
                 text: String::new(),
                 calls: vec![ToolCall {
@@ -552,6 +554,7 @@ impl Toolbox for Hanging {
 
 fn install_call() -> Act {
     Act::Reply(Reply {
+        usage: None,
         served: None,
         text: String::new(),
         calls: vec![ToolCall {

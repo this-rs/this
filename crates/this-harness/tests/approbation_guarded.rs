@@ -32,6 +32,7 @@ impl Transport for Engine {
         self.streams.set(n + 1);
         if n == 0 {
             return Ok(Reply {
+                usage: None,
                 served: None,
                 text: String::new(),
                 calls: vec![ToolCall {
@@ -43,6 +44,7 @@ impl Transport for Engine {
             });
         }
         Ok(Reply {
+            usage: None,
             served: None,
             text: "fini".into(),
             calls: vec![],

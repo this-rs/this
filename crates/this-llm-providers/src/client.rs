@@ -152,6 +152,10 @@ pub struct TurnReply {
     /// that is [`Self::model`]. `None` when the answer names no model: nothing is inferred.
     pub served: Option<String>,
     pub usage: Usage,
+    /// True when `usage` is a MEASUREMENT reported by the engine, false when it is the reserved
+    /// estimate the client fell back to because the engine reported none. A host that must not
+    /// pass an estimate off as a measurement reads this flag, not just `usage`.
+    pub usage_measured: bool,
 }
 
 /// The model the engine names in its own answer (`model` of the response), when it names one.
@@ -684,6 +688,7 @@ impl ProviderClient {
             None if !tool_calls.is_empty() => Finish::ToolCalls,
             None => Finish::Stop,
         };
+        let usage_measured = value.get("usage").is_some_and(|usage| !usage.is_null());
         let usage = usage_of(&value, reservation.reserved, self.config.pricing);
         let served = served_of(&value);
 
@@ -694,6 +699,7 @@ impl ProviderClient {
             model,
             served,
             usage,
+            usage_measured,
         };
         reservation.settle(usage);
         Ok(reply)
@@ -1121,6 +1127,7 @@ impl Turn {
             return Err(ProviderError::Parse("tour non terminé".to_string()));
         }
         let fallback = self.reservation.reserved;
+        let usage_measured = self.reported.is_some();
         let usage = match &self.reported {
             Some(reported) => usage_of(&json!({ "usage": reported }), fallback, self.pricing),
             None => fallback,
@@ -1137,6 +1144,7 @@ impl Turn {
             model: self.model.clone(),
             served: self.served.clone(),
             usage,
+            usage_measured,
         };
         self.reservation.settle(usage);
         Ok(reply)

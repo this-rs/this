@@ -28,6 +28,7 @@ impl Transport for Moteur {
         self.0.set(self.0.get() + 1);
         Ok(if self.0.get() % 2 == 1 {
             Reply {
+                usage: None,
                 served: None,
                 text: String::new(),
                 calls: vec![ToolCall {
@@ -39,6 +40,7 @@ impl Transport for Moteur {
             }
         } else {
             Reply {
+                usage: None,
                 served: None,
                 text: "fini".into(),
                 calls: vec![],
@@ -193,6 +195,7 @@ impl Transport for MoteurInterne {
         };
         permission.record(&call, 2, &Outcome::ok("ok")).await;
         Ok(Reply {
+            usage: None,
             served: None,
             text: "fini".into(),
             calls: vec![],

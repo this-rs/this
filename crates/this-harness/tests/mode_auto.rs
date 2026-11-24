@@ -771,6 +771,7 @@ impl Transport for Script {
     ) -> Result<Reply, Failure> {
         self.seen.borrow_mut().push(request.clone());
         let reply = self.replies.borrow_mut().pop_front().unwrap_or(Reply {
+            usage: None,
             served: None,
             text: "fini".to_string(),
             calls: vec![],
@@ -779,6 +780,7 @@ impl Transport for Script {
         delta(&reply.text);
         // Il nomme le modèle qu'il a servi : c'est ce que le harnais vérifie (#288).
         Ok(Reply {
+            usage: None,
             served: request.model().map(str::to_owned),
             ..reply
         })
@@ -827,6 +829,7 @@ fn harnais(transport: Rc<Script>, router: Option<Rc<TurnRouter>>) -> (Harness, J
 
 fn asks_a_tool() -> Reply {
     Reply {
+        usage: None,
         served: None,
         text: String::new(),
         calls: vec![ToolCall {
@@ -1288,6 +1291,7 @@ impl Transport for FailsOnce {
         }
         delta("fini");
         Ok(Reply {
+            usage: None,
             served: _request.model().map(str::to_owned),
             text: "fini".to_string(),
             calls: vec![],
@@ -2377,6 +2381,7 @@ struct Silent;
 impl Transport for Silent {
     async fn stream(&self, _r: &Request, _c: &Cancel, _d: Delta) -> Result<Reply, Failure> {
         Ok(Reply {
+            usage: None,
             served: _r.model().map(str::to_owned),
             text: "fini".to_string(),
             calls: vec![],
@@ -2562,12 +2567,14 @@ impl Transport for Quotas {
         self.servis.set(self.servis.get() + 1);
         if self.outil_d_abord && self.servis.get() == 1 {
             return Ok(Reply {
+                usage: None,
                 served: request.model().map(str::to_owned),
                 ..asks_a_tool()
             });
         }
         delta("fini");
         Ok(Reply {
+            usage: None,
             served: if self.honore {
                 request.model().map(str::to_owned)
             } else {
@@ -3206,12 +3213,14 @@ impl Transport for Scenario {
         }
         match rep {
             Rep::Outil => Ok(Reply {
+                usage: None,
                 served: request.model().map(str::to_owned),
                 ..asks_a_tool()
             }),
             Rep::Fini => {
                 delta("fini");
                 Ok(Reply {
+                    usage: None,
                     served: request.model().map(str::to_owned),
                     text: "fini".to_string(),
                     calls: vec![],
@@ -3629,6 +3638,7 @@ impl Transport for Nomme {
     async fn stream(&self, _r: &Request, _c: &Cancel, delta: Delta) -> Result<Reply, Failure> {
         delta("fini");
         Ok(Reply {
+            usage: None,
             served: self.0.map(str::to_owned),
             text: "fini".to_string(),
             calls: vec![],
@@ -3771,6 +3781,7 @@ impl Transport for Pannes {
         }
         delta("fini");
         Ok(Reply {
+            usage: None,
             served: request.model().map(str::to_owned),
             text: "fini".to_string(),
             calls: vec![],

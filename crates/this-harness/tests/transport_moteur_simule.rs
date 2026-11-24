@@ -20,7 +20,7 @@ use serde_json::{Value, json};
 use this_harness::providers::ProviderTransport;
 use this_harness::{
     Cancel, Delta, Event, Failure, Harness, Limits, Outcome, Reply, Request, Running, Stop,
-    ToolCall, ToolSpec, Toolbox, Transport,
+    TokenUsage, ToolCall, ToolSpec, Toolbox, Transport,
 };
 use this_llm::{CredentialRef, Preset};
 use this_llm_providers::{
@@ -126,6 +126,21 @@ fn delta(nom: &str, texte: &str, fin: Option<&str>) -> Value {
     })
 }
 
+/// L'usage que le moteur simulé déclare pour un tour de texte : une **mesure**, jamais une
+/// estimation. Deux valeurs fixes, pour que le test les relise exactement.
+const USAGE_PROMPT: u64 = 45;
+const USAGE_COMPLETION: u64 = 35;
+
+/// L'événement final du flux : le dialecte OpenAI met l'usage dans le dernier morceau, avec le
+/// `finish_reason` et un `delta` vide.
+fn usage_event(nom: &str, prompt: u64, completion: u64) -> Value {
+    json!({
+        "model": nom,
+        "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+        "usage": {"prompt_tokens": prompt, "completion_tokens": completion}
+    })
+}
+
 fn route(requete: &str) -> (&'static str, &'static str, String) {
     if requete.starts_with("GET /v1/models") {
         return (
@@ -175,7 +190,11 @@ fn route(requete: &str) -> (&'static str, &'static str, String) {
         };
         vec![delta(nom, vue, Some("stop"))]
     } else {
-        vec![delta(nom, "Bon", None), delta(nom, "jour", Some("stop"))]
+        vec![
+            delta(nom, "Bon", None),
+            delta(nom, "jour", None),
+            usage_event(nom, USAGE_PROMPT, USAGE_COMPLETION),
+        ]
     };
     ("200 OK", "text/event-stream", sse(&evenements))
 }
@@ -216,6 +235,7 @@ fn client(base_url: &str, modele: &str) -> ProviderClient {
 struct Temoin {
     inner: ProviderTransport,
     servis: RefCell<Vec<Option<String>>>,
+    usages: RefCell<Vec<Option<TokenUsage>>>,
 }
 
 #[async_trait(?Send)]
@@ -229,6 +249,7 @@ impl Transport for Temoin {
         let issue = self.inner.stream(request, cancel, delta).await;
         if let Ok(reply) = &issue {
             self.servis.borrow_mut().push(reply.served.clone());
+            self.usages.borrow_mut().push(reply.usage);
         }
         issue
     }
@@ -242,6 +263,7 @@ fn temoin(client: ProviderClient) -> Rc<Temoin> {
     Rc::new(Temoin {
         inner: ProviderTransport::new(client),
         servis: RefCell::new(Vec::new()),
+        usages: RefCell::new(Vec::new()),
     })
 }
 
@@ -340,6 +362,40 @@ async fn le_flux_du_moteur_arrive_au_harnais_avec_le_modele_nomme() {
         transport.servis.borrow().as_slice(),
         &[Some("qwen-test".to_string())]
     );
+}
+
+/// L'usage MESURÉ que le moteur déclare arrive au harnais : d'abord dans `Reply::usage` du
+/// transport, puis dans `Event::Usage` pour l'hôte. Le nombre n'est jamais une estimation.
+#[tokio::test]
+async fn l_usage_mesure_du_moteur_arrive_au_harnais() {
+    let base = demarre_moteur().await;
+    let transport = temoin(client(&base, "qwen-test"));
+    let (harness, journal) = harness(transport.clone(), Rc::new(SansOutil));
+
+    let issue = harness.send("Dis bonjour.").await;
+    assert_eq!(issue, Running::Ran(Stop::Done), "{:?}", stopped(&journal));
+
+    // La réponse du transport porte l'usage mesuré.
+    assert_eq!(
+        transport.usages.borrow().as_slice(),
+        &[Some(TokenUsage {
+            prompt_tokens: USAGE_PROMPT,
+            completion_tokens: USAGE_COMPLETION,
+        })]
+    );
+    // Et l'hôte le reçoit comme événement.
+    let usages: Vec<(u64, u64)> = journal
+        .borrow()
+        .iter()
+        .filter_map(|e| match e {
+            Event::Usage {
+                prompt_tokens,
+                completion_tokens,
+            } => Some((*prompt_tokens, *completion_tokens)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(usages, vec![(USAGE_PROMPT, USAGE_COMPLETION)]);
 }
 
 /// Routé ≠ servi : quand le moteur nomme un AUTRE modèle que celui demandé, c'est cet autre

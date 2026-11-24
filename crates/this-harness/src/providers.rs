@@ -17,7 +17,7 @@ use this_llm_providers::{
 };
 
 use crate::ports::{Cancel, Delta, Transport};
-use crate::wire::{Code, Failure, Finish, Reply, Request, ToolCall};
+use crate::wire::{Code, Failure, Finish, Reply, Request, TokenUsage, ToolCall};
 
 /// Un transport qui parle au moteur par le client de `this-llm-providers`.
 pub struct ProviderTransport {
@@ -75,11 +75,19 @@ fn reply_of(reply: TurnReply) -> Result<Reply, Failure> {
         .iter()
         .map(call_of)
         .collect::<Result<Vec<_>, _>>()?;
+    // L'usage n'est remonté que MESURÉ : quand le client le tient de la réponse du moteur,
+    // pas de l'estimation réservée (`usage_measured`). Un transport qui ne mesure rien — ou un
+    // moteur qui ne déclare rien — laisse `usage` absent : jamais un zéro inventé (#288).
+    let usage = reply.usage_measured.then_some(TokenUsage {
+        prompt_tokens: reply.usage.input_tokens,
+        completion_tokens: reply.usage.output_tokens,
+    });
     Ok(Reply {
         text: reply.content,
         calls,
         finish: finish_of(&reply.finish),
         served: reply.served,
+        usage,
     })
 }
 
@@ -147,13 +155,30 @@ mod tests {
         finish: LlmFinish,
         served: Option<&str>,
     ) -> TurnReply {
+        turn_mesure(content, tool_calls, finish, served, false, 0, 0)
+    }
+
+    fn turn_mesure(
+        content: &str,
+        tool_calls: Vec<Value>,
+        finish: LlmFinish,
+        served: Option<&str>,
+        usage_measured: bool,
+        input: u64,
+        output: u64,
+    ) -> TurnReply {
         TurnReply {
             content: content.to_string(),
             tool_calls,
             finish,
             model: "demande".to_string(),
             served: served.map(str::to_owned),
-            usage: Default::default(),
+            usage: this_llm_providers::Usage {
+                input_tokens: input,
+                output_tokens: output,
+                cost_micros: 0,
+            },
+            usage_measured,
         }
     }
 
@@ -170,6 +195,44 @@ mod tests {
     fn une_reponse_sans_modele_nomme_reste_sans_modele_servi() {
         let reply = reply_of(turn("ok", vec![], LlmFinish::Stop, None)).expect("réponse");
         assert_eq!(reply.served, None);
+    }
+
+    #[test]
+    fn la_reponse_propage_l_usage_mesure() {
+        let reply = reply_of(turn_mesure(
+            "bonjour",
+            vec![],
+            LlmFinish::Stop,
+            Some("m2"),
+            true,
+            45,
+            35,
+        ))
+        .expect("réponse");
+        assert_eq!(
+            reply.usage,
+            Some(TokenUsage {
+                prompt_tokens: 45,
+                completion_tokens: 35,
+            })
+        );
+    }
+
+    #[test]
+    fn une_reponse_sans_usage_mesure_ne_declare_aucun_usage() {
+        // Un usage non mesuré est l'estimation réservée du client : la déguiser en mesure
+        // inventerait un compte que le moteur n'a pas fait. `usage` reste absent.
+        let reply = reply_of(turn_mesure(
+            "bonjour",
+            vec![],
+            LlmFinish::Stop,
+            None,
+            false,
+            1000,
+            0,
+        ))
+        .expect("réponse");
+        assert_eq!(reply.usage, None);
     }
 
     #[test]

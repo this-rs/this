@@ -21,33 +21,33 @@ de `crates/this-harness/tests/`, et recoupement avec `docs/harnais-mode-auto.md`
 | **Reprise** | `Snapshot`/`restore`/`seed` ; `restore` refusé pendant un run ; ids jamais réutilisés | persister/relire le `Snapshot` | `un_etat_sauvegarde_se_repare_et_se_rejoue` (`scenario.rs:489`) ; `restore_ne_fait_pas_reculer_les_identifiants` / `restore_pendant_un_run_ne_corrompt_pas_le_fil` (`robustesse.rs:191,206`) | **qualifié (borné)** — pas de curseur d'événement (cf. §3 du document #286) |
 | **Images / documents** | images : `Message.images` (`ImagePart`), `Capabilities.images`, filtre `NoImages`, garde « aveugle » du routeur | résoudre la source de l'image et la traduire dans le dialecte du moteur (`wire.rs` : la source dit OÙ, pas comment envoyer) | images : `les_images_d_un_message_arrivent_au_transport_a_chaque_tour` (`scenario.rs:945`) ; `a_user_message_with_images_round_trips_and_names_its_sources` (`wire.rs:474`) ; `les_images_demandent_un_modele_qui_les_lit` (`candidate.rs:623`). documents : **non qualifié** — aucun concept de document dans le cœur | **images : qualifié / documents : non qualifié** |
 | **Fenêtre de contexte** | `Limits::context_budget` (défaut `CONTEXT_BUDGET = 120_000`, `session.rs:88`), `fit`/`estimate_tokens`, événements `Trimmed`/`Compacted` | rien (l'estimation est interne) ; un hôte qui connaît la vraie fenêtre la fixe via `Limits` | `cjk_text_is_not_estimated_at_a_quarter_token_per_char` / `fit_extreme_budgets` (`robustesse_fil.rs:34,74`) ; `check_thread_refuses_what_the_engine_would_refuse` (`robustesse_fil.rs:173`) | **qualifié** (estimation, jamais mesure — `context.rs:1-20`) |
-| **Usage réel (tokens)** | rien : `Reply { text, calls, finish }` ne porte **aucun** champ d'usage (`wire.rs:318`) ; `estimate_tokens` est une estimation, pas une mesure | rendre l'usage réel (prompt/completion) s'il doit être compté | **aucun test** — la mesure n'existe pas dans le cœur | **non qualifié** |
+| **Usage réel (tokens)** | `Reply::usage` (`wire.rs`) porte l'usage **MESURÉ** que le moteur déclare — `TokenUsage { prompt_tokens, completion_tokens }`, remonté à l'hôte en `Event::Usage` ; `estimate_tokens` reste une estimation à part, jamais déguisée en mesure | rendre l'usage réel (prompt/completion) **quand il est mesuré**, et ne rien déclarer sinon — pas de zéro inventé, pas d'estimation déguisée | `la_reponse_propage_l_usage_mesure` et `une_reponse_sans_usage_mesure_ne_declare_aucun_usage` (`providers.rs`) ; `l_usage_mesure_du_moteur_arrive_au_harnais` (`transport_moteur_simule.rs`) | **qualifié (mesuré, propagé) — 24/11/2026** |
 | **Changement de modèle à chaud** | la paire choisie sort par `Request::model`/`provider` (`wire.rs`) et ne vaut **qu'à partir du tour suivant** ; `Route` écarte la sentinelle `auto` par construction | lire `Request::provider()`/`model()` **et déclarer `honors_route = true`** | `un_modele_ou_un_fournisseur_impose_ne_bouge_pas_jusqu_a_ce_qu_auto_soit_rechoisi` (`mode_auto.rs:379`) ; `auto_ne_sort_jamais_vers_un_fournisseur` (`mode_auto.rs:996`) | **non qualifié** (pas de `set_model_live` ; `docs/harnais-mode-auto.md` D6(b)) |
 
 ## 1 bis. Matrice par moteur — ce qui est MESURÉ, où et quand
 
 La matrice du §1 dit ce que le cœur garantit et ce que le transport doit fournir. Celle-ci dit, **moteur par moteur**, ce qui a été mesuré. Trois colonnes, qu'il ne faut pas confondre :
 
-- **Moteur réel** : DeepSeek (`deepseek-flash`) par `ProviderTransport`, test opt-in `crates/this-harness/tests/raccordement_transport.rs` (clé du coffre, `--ignored`), mesuré le 23/11/2026 à 01:52Z ; l'usage vient de `crates/this-llm-providers/tests/raccordement_reel.rs` (21/11/2026).
+- **Moteur réel** : DeepSeek (`deepseek-flash`) par `ProviderTransport`, test opt-in `crates/this-harness/tests/raccordement_transport.rs` (clé du coffre, `--ignored`). Streaming, outil, modèle servi et clé refusée : mesurés le 23/11/2026 à 01:52Z, SHA `df2a8fc` ; interruption et reprise : 23/11/2026, SHA `2dc31c8`. L'usage côté client vient de `crates/this-llm-providers/tests/raccordement_reel.rs` (21/11/2026, SHA `4b93a8d`).
 - **Moteur simulé** : une vraie socket locale au dialecte OpenAI-compatible, `crates/this-harness/tests/transport_moteur_simule.rs`, exécuté à chaque CI. Il prouve la **mécanique** (le harnais, le transport et le client se parlent comme prévu), pas le comportement d'un fournisseur.
 - **Autres moteurs** : aucun n'a été mesuré. Une case « non mesuré » n'est pas « non supporté ».
 
 | Capacité | DeepSeek (réel) | Moteur simulé (CI) | Autres moteurs |
 |---|---|---|---|
-| **Streaming** | **mesuré** : le texte arrive par `Event::Delta` | **mesuré** : « Bon », « jour » en deux morceaux | non mesuré |
-| **Appel d'outil** | **mesuré** : `ping`, arguments `{"cible":"atelier"}` relus en JSON, exécuté par le harnais, 2 tours | **mesuré** : appel fragmenté sur deux événements, recollé et exécuté | non mesuré |
-| **Modèle servi nommé** | **mesuré** : le moteur nomme `deepseek-flash`, ce nom arrive dans `Reply::served` | **mesuré** : un moteur qui nomme un autre modèle le dit au harnais | non mesuré |
-| **Clé refusée** | **mesuré** : `Stop::Failed`, code `http` (401), jamais `unreachable` | **mesuré** : statut 400 → `http` ; moteur injoignable → `unreachable`, rien servi | non mesuré |
-| **Usage réel (tokens)** | **mesuré côté client** : 45 jetons en entrée, 35 en sortie (21/11/2026) ; le cœur **ne le remonte pas** (`Reply` sans usage) | non applicable | non mesuré |
-| **Interruption en plein flux** | **mesuré** (23/11/2026, `raccordement_transport.rs`) : coupure après 19 morceaux de texte réel, arrêt `Cancelled` en 1,7 s | **mesuré** : coupure après le 1ᵉʳ morceau sur 10, `Cancelled` en 1,4 ms | non mesuré |
-| **Reprise après coupure** | **mesuré** (23/11/2026) : après la coupure, le message suivant aboutit (`stop=Done`, `pong`) | **mesuré** : le message suivant aboutit sur le même harnais | non mesuré |
+| **Streaming** | **mesuré** (`deepseek-flash`, 23/11/2026, SHA `df2a8fc`) : le texte arrive par `Event::Delta` | **mesuré** : « Bon », « jour » en deux morceaux | non mesuré |
+| **Appel d'outil** | **mesuré** (`deepseek-flash`, 23/11/2026, SHA `df2a8fc`) : `ping`, arguments `{"cible":"atelier"}` relus en JSON, exécuté par le harnais, 2 tours | **mesuré** : appel fragmenté sur deux événements, recollé et exécuté | non mesuré |
+| **Modèle servi nommé** | **mesuré** (`deepseek-flash`, 23/11/2026, SHA `df2a8fc`) : le moteur nomme `deepseek-flash`, ce nom arrive dans `Reply::served` | **mesuré** : un moteur qui nomme un autre modèle le dit au harnais | non mesuré |
+| **Clé refusée** | **mesuré** (`deepseek-flash`, 23/11/2026, SHA `df2a8fc`) : `Stop::Failed`, code `http` (401), jamais `unreachable` | **mesuré** : statut 400 → `http` ; moteur injoignable → `unreachable`, rien servi | non mesuré |
+| **Usage réel (tokens)** | **mesuré côté client** : 45 en entrée, 35 en sortie (`deepseek-flash`, 21/11/2026, SHA `4b93a8d`) ; le cœur le **remonte désormais** (`Reply::usage` → `Event::Usage`), prouvé sur le moteur **simulé** en CI — **non remesuré de bout en bout sur un moteur réel** | **mesuré** : le simulé déclare 45/35, relus dans `Reply::usage` puis `Event::Usage` | non mesuré |
+| **Interruption en plein flux** | **mesuré** (`deepseek-flash`, 23/11/2026, SHA `2dc31c8`, `raccordement_transport.rs`) : coupure après 19 morceaux de texte réel, arrêt `Cancelled` en 1,7 s | **mesuré** : coupure après le 1ᵉʳ morceau sur 10, `Cancelled` en 1,4 ms | non mesuré |
+| **Reprise après coupure** | **mesuré** (`deepseek-flash`, 23/11/2026, SHA `2dc31c8`) : après la coupure, le message suivant aboutit (`stop=Done`, `pong`) | **mesuré** : le message suivant aboutit sur le même harnais | non mesuré |
 | **Images** | **non mesuré** (un modèle capable de vision reste à choisir) | **mesuré** : l'image jointe arrive au moteur sous forme `image_url` ; le simulé vérifie la **présence**, pas la lecture | non mesuré |
 | **Fenêtre de contexte** | **non mesuré** | non mesuré | non mesuré |
 | **Changement de modèle à chaud** | **non mesuré** sur un moteur réel (routeur testé avec des doublures de scénario) | non mesuré | non mesuré |
 | **Quota rendu par le transport** | **non fait** : un 429 reste `Http(429)`, le harnais ne devine pas | non applicable | non fait |
 | **Permissions (famille A)** | non applicable : `ProviderTransport` n'exécute pas les outils, le harnais le fait | non applicable | non mesuré |
 
-**Lecture.** Le seul moteur réel mesuré est DeepSeek, sur six capacités (streaming, outil, modèle servi, clé refusée, interruption en plein texte, reprise) plus l'usage côté client. Les images restent prouvées **dans la mécanique** seulement, pas sur un fournisseur : un vrai moteur peut couper un flux autrement, ou refuser une image. Pour combler une case « non mesuré », il faut une exécution réelle datée (moteur, modèle, date UTC, SHA), pas un test de plus sur le simulé.
+**Lecture.** Le seul moteur réel mesuré est DeepSeek, sur six capacités (streaming, outil, modèle servi, clé refusée, interruption en plein texte, reprise) plus l'usage côté client. L'usage mesuré est désormais **remonté par le cœur** (`Reply::usage` → `Event::Usage`, 24/11/2026) — prouvé sur le moteur simulé en CI, et non remesuré de bout en bout sur un moteur réel. Les images restent prouvées **dans la mécanique** seulement, pas sur un fournisseur : un vrai moteur peut couper un flux autrement, ou refuser une image. Pour combler une case « non mesuré », il faut une exécution réelle datée (moteur, modèle, date UTC, SHA), pas un test de plus sur le simulé.
 
 ## 2. « Routé ≠ servi »
 
@@ -88,6 +88,17 @@ points où le code vérifie (ou non) que la paire atteinte est bien celle annonc
 
 ## 3. Cases d'acceptation du ticket
 
+Les huit cases d'acceptation du ticket (#288) sont couvertes ainsi, sur cette branche :
+
+1. **Matrice par moteur** → §1 et §1 bis (chaque case « mesuré » porte moteur · modèle · date UTC · SHA, 24/11/2026).
+2. **Capacité inconnue ≠ supportée** → C1.
+3. **Routé ≠ servi** → §2.
+4. **Un seul moteur fournit mémoire/plans/reprise ; zéro candidat ne contourne aucun consentement** → **non inventorié explicitement ici** : la mémoire (`recall`), la compaction (`Compactor`) et la reprise (`Snapshot`/`restore`) sont des ports **uniques** du cœur, pas des candidats routés, et le consentement est relu à **chaque** appel d'outil (`grants.rs`) indépendamment de la route — mais aucun test ne l'épingle comme une seule garantie nommée. Manque nommé, à combler.
+5. **Épuisement modèle puis provider** → C2.
+6. **Réglage manuel pendant une décision asynchrone** → C3.
+7. **Auth expirée / coffre verrouillé distincts d'une panne réseau** → C4.
+8. **Faux transports versionnés + raccordements réels opt-in** → C5.
+
 | # | Case | Verdict | Preuve ou manque |
 |---|---|---|---|
 | C1 | Capacité inconnue ≠ « supportée », et erreur nommée pour fonction indisponible | **preuve existante** | la fenêtre inconnue est un rejet typé `WindowUnknown` (jamais supposée) et les capacités manquantes sont `NoTools`/`NoImages` (`candidate.rs:245-251,306-368`) ; un outil inventé est refusé nommément sans appeler la toolbox : `unknown_tool` (`session.rs:2132`) et `un_outil_non_declare_est_refuse_et_jamais_appele` (`grants.rs:115`) ; un outil MCP non déclaré est refusé sans toucher le lien (`mcp.rs`, `call_with_cancel`) ; `des_faits_invalides_sont_ecartes_avec_un_motif_nomme` (`mode_auto.rs:1781`) |
@@ -107,7 +118,8 @@ et le **repli de modèle** `model_after_limit` est fait (repli de provider : tra
 (feature `providers`) ; une décision Auto n'est consultative qu'avec un autre transport, et la paire
 n'est réputée atteinte que si le moteur **nomme** le modèle demandé (`Reply::served`) ;
 (3) « usage réel (tokens) » : le client `this-llm-providers` le **rend** (`TurnReply::usage`,
-mesuré sur un moteur réel le 21/11/2026, voir C5) ; c'est le cœur qui le **perd** — `Reply`
-n'a pas de champ d'usage, donc un `impl Transport` d'hôte ne peut pas le remonter et le cœur
-estime. Le manque est à la frontière `Reply`, pas chez le moteur — le document de mode Auto ne
-le listait pas explicitement.
+mesuré sur un moteur réel le 21/11/2026, voir C5). Depuis le 24/11/2026, le cœur ne le **perd**
+plus : `Reply::usage` (`TokenUsage { prompt_tokens, completion_tokens }`) le porte, `ProviderTransport`
+le remplit seulement quand le client le tient du moteur (`TurnReply::usage_measured` — jamais une
+estimation déguisée en mesure), et `Event::Usage` le dit à l'hôte. Le manque est comblé à la
+frontière `Reply`.

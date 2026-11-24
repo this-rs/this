@@ -144,6 +144,16 @@ pub enum Event {
         /// Le nom tel que le moteur le déclare.
         served: String,
     },
+    /// L'usage réel que le moteur a DÉCLARÉ pour ce tour (prompt et complétion). Mesuré par le
+    /// moteur, jamais une estimation du harnais ([`crate::estimate_tokens`] reste à part) :
+    /// un transport qui ne mesure rien — ou un moteur qui ne déclare rien — n'émet pas cet
+    /// événement. Son absence n'est pas zéro (#288).
+    Usage {
+        /// Jetons du prompt, comptés par le moteur.
+        prompt_tokens: u64,
+        /// Jetons de la complétion, comptés par le moteur.
+        completion_tokens: u64,
+    },
     /// Émis une fois par message tenu, **seulement** quand un routeur est branché
     /// (`Harness::with_router`) : sans routeur, aucun événement de plus. Additif :
     /// un client qui ne connaît pas ce type l'ignore.
@@ -276,6 +286,7 @@ impl Event {
             Self::Compacted { .. } => "compacted",
             Self::Routed { .. } => "routed",
             Self::Served { .. } => "served",
+            Self::Usage { .. } => "usage",
             Self::PermissionRequest { .. } => "permission_request",
             Self::PermissionAnswered { .. } => "permission_answered",
             Self::Stopped { .. } => "stopped",
@@ -302,6 +313,7 @@ const TYPES_CONNUS: &[&str] = &[
     "trimmed",
     "compacted",
     "served",
+    "usage",
     "routed",
     "permission_request",
     "permission_answered",
@@ -798,6 +810,10 @@ mod tests {
                 reason: String::new(),
                 mode: None,
                 advisory: false,
+            },
+            Event::Usage {
+                prompt_tokens: 45,
+                completion_tokens: 35,
             },
             Event::Stopped {
                 stop: Stop::Done,

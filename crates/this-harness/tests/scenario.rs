@@ -43,6 +43,7 @@ impl Transport for Script {
     ) -> Result<Reply, Failure> {
         self.seen.borrow_mut().push(request.clone());
         let reply = self.replies.borrow_mut().pop_front().unwrap_or(Reply {
+            usage: None,
             served: None,
             text: "fini".to_string(),
             calls: vec![],
@@ -136,12 +137,14 @@ fn run<F: std::future::Future>(future: F) -> F::Output {
 fn un_outil_puis_une_conclusion() {
     let transport = Script::new(vec![
         Reply {
+            usage: None,
             served: None,
             text: String::new(),
             calls: vec![call("a1")],
             finish: Finish::Tools,
         },
         Reply {
+            usage: None,
             served: None,
             text: "c'est installé".into(),
             calls: vec![],
@@ -170,18 +173,21 @@ fn un_message_tenu_part_au_tour_suivant() {
     // L'utilisateur écrit PENDANT que l'outil tourne.
     let transport = Script::new(vec![
         Reply {
+            usage: None,
             served: None,
             text: String::new(),
             calls: vec![call("a1")],
             finish: Finish::Tools,
         },
         Reply {
+            usage: None,
             served: None,
             text: "terminé".into(),
             calls: vec![],
             finish: Finish::Stop,
         },
         Reply {
+            usage: None,
             served: None,
             text: "et voilà la suite".into(),
             calls: vec![],
@@ -228,12 +234,14 @@ fn un_message_tenu_part_au_tour_suivant() {
 fn interrupt_arrete_le_run_et_le_dit() {
     let transport = Script::new(vec![
         Reply {
+            usage: None,
             served: None,
             text: String::new(),
             calls: vec![call("a1")],
             finish: Finish::Tools,
         },
         Reply {
+            usage: None,
             served: None,
             text: "je n'aurais pas dû parler".into(),
             calls: vec![],
@@ -261,12 +269,14 @@ fn interrupt_arrete_le_run_et_le_dit() {
 fn un_refus_relance_avec_le_motif() {
     let transport = Script::new(vec![
         Reply {
+            usage: None,
             served: None,
             text: String::new(),
             calls: vec![call("a1")],
             finish: Finish::Tools,
         },
         Reply {
+            usage: None,
             served: None,
             text: "je m'arrête là".into(),
             calls: vec![],
@@ -304,12 +314,14 @@ fn un_refus_relance_avec_le_motif() {
 fn un_echec_d_outil_relance_avec_la_cause() {
     let transport = Script::new(vec![
         Reply {
+            usage: None,
             served: None,
             text: String::new(),
             calls: vec![call("a1")],
             finish: Finish::Tools,
         },
         Reply {
+            usage: None,
             served: None,
             text: "je m'arrête là".into(),
             calls: vec![],
@@ -367,6 +379,7 @@ fn un_echec_d_outil_relance_avec_la_cause() {
 #[test]
 fn une_reponse_tronquee_n_est_pas_une_conclusion() {
     let transport = Script::new(vec![Reply {
+        usage: None,
         served: None,
         text: "voilà ce que j'ai écrit".into(),
         calls: vec![],
@@ -385,6 +398,7 @@ fn une_reponse_tronquee_n_est_pas_une_conclusion() {
 #[test]
 fn un_tour_muet_relance_puis_echoue_en_le_disant() {
     let vide = Reply {
+        usage: None,
         served: None,
         text: String::new(),
         calls: vec![],
@@ -417,18 +431,21 @@ fn un_tour_muet_relance_puis_echoue_en_le_disant() {
 fn une_action_sans_effet_n_est_pas_un_progres() {
     let transport = Script::new(vec![
         Reply {
+            usage: None,
             served: None,
             text: String::new(),
             calls: vec![call("a1")],
             finish: Finish::Tools,
         },
         Reply {
+            usage: None,
             served: None,
             text: "c'est fait".into(),
             calls: vec![],
             finish: Finish::Stop,
         },
         Reply {
+            usage: None,
             served: None,
             text: "vraiment fait".into(),
             calls: vec![],
@@ -455,6 +472,7 @@ fn une_action_sans_effet_n_est_pas_un_progres() {
 #[test]
 fn le_budget_de_tours_s_arrete_en_le_disant() {
     let tour = Reply {
+        usage: None,
         served: None,
         text: String::new(),
         calls: vec![call("a1")],
@@ -542,6 +560,7 @@ fn un_etat_sauvegarde_se_repare_et_se_rejoue() {
 #[test]
 fn le_flux_arrive_morceau_par_morceau() {
     let transport = Script::new(vec![Reply {
+        usage: None,
         served: None,
         text: "un deux trois".into(),
         calls: vec![],
@@ -606,6 +625,7 @@ fn la_consigne_systeme_part_toujours_avec_le_fil() {
     // l'envoyait. Le modèle tournait sans brief — sans la liste de ses outils.
     // `Request` n'expose plus que `thread()`, qui la met en tête.
     let transport = Script::new(vec![Reply {
+        usage: None,
         served: None,
         text: "fini".into(),
         calls: vec![],
@@ -641,6 +661,7 @@ fn un_tour_coupe_ne_laisse_pas_d_appel_sans_reponse() {
     // rend le fil invalide : le moteur refuse la conversation suivante. C'est
     // le genre de détail qui casse tout *après* la coupure.
     let transport = Script::new(vec![Reply {
+        usage: None,
         served: None,
         text: "je vais installer".into(),
         calls: vec![call("a1")],
@@ -713,12 +734,14 @@ fn une_politique_branchee_change_l_issue_du_run() {
     let script = || {
         Script::new(vec![
             Reply {
+                usage: None,
                 served: None,
                 text: String::new(),
                 calls: vec![call("a1")],
                 finish: Finish::Tools,
             },
             Reply {
+                usage: None,
                 served: None,
                 text: "je m'arrête là".into(),
                 calls: vec![],
@@ -918,12 +941,14 @@ fn un_harness_compose_depuis_le_graphe_porte_son_brief_et_ses_bornes() {
 
     let script = Script::new(vec![
         Reply {
+            usage: None,
             served: None,
             text: String::new(),
             calls: vec![call("a1")],
             finish: Finish::Tools,
         },
         Reply {
+            usage: None,
             served: None,
             text: String::new(),
             calls: vec![call("a2")],
@@ -973,12 +998,14 @@ fn les_images_d_un_message_arrivent_au_transport_a_chaque_tour() {
     // doit y être les deux fois — elle fait partie de la conversation, pas du clic.
     let transport = Script::new(vec![
         Reply {
+            usage: None,
             served: None,
             text: String::new(),
             calls: vec![call("a1")],
             finish: Finish::Tools,
         },
         Reply {
+            usage: None,
             served: None,
             text: "vu".into(),
             calls: vec![],
@@ -1034,6 +1061,7 @@ fn hints_of(log: &Log) -> Vec<String> {
 
 fn dit(text: &str) -> Reply {
     Reply {
+        usage: None,
         served: None,
         text: text.into(),
         calls: vec![],
@@ -1043,6 +1071,7 @@ fn dit(text: &str) -> Reply {
 
 fn appelle(id: &str) -> Reply {
     Reply {
+        usage: None,
         served: None,
         text: String::new(),
         calls: vec![call(id)],
@@ -1198,12 +1227,14 @@ fn un_transport_qui_rejoue_le_meme_appel_ne_produit_pas_l_effet_deux_fois() {
     // qu'un effet dupliqué qu'on ne saurait pas défaire.
     let transport = Script::new(vec![
         Reply {
+            usage: None,
             served: None,
             text: "Je prépare l'installation.".into(),
             calls: vec![call("a1"), call("a1")],
             finish: Finish::Tools,
         },
         Reply {
+            usage: None,
             served: None,
             text: "fini".into(),
             calls: vec![],
@@ -1267,12 +1298,14 @@ fn un_appel_rejoue_sans_texte_n_empile_pas_d_assistant_vide() {
     // montré, donc rien n'est conservé — pas d'`Assistant` vide dans le fil.
     let transport = Script::new(vec![
         Reply {
+            usage: None,
             served: None,
             text: String::new(),
             calls: vec![call("a1"), call("a1")],
             finish: Finish::Tools,
         },
         Reply {
+            usage: None,
             served: None,
             text: "fini".into(),
             calls: vec![],

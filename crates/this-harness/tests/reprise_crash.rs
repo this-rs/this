@@ -28,6 +28,7 @@ impl Transport for Espion {
     async fn stream(&self, request: &Request, _: &Cancel, _: Delta) -> Result<Reply, Failure> {
         self.fils.borrow_mut().push(request.thread());
         Ok(Reply {
+            usage: None,
             served: None,
             text: "ok".into(),
             calls: vec![],

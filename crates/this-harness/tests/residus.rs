@@ -33,6 +33,7 @@ impl Transport for Engine {
         self.0.set(self.0.get() + 1);
         Ok(if self.0.get() % 2 == 1 {
             Reply {
+                usage: None,
                 served: None,
                 text: String::new(),
                 calls: vec![ToolCall {
@@ -44,6 +45,7 @@ impl Transport for Engine {
             }
         } else {
             Reply {
+                usage: None,
                 served: None,
                 text: "fini".into(),
                 calls: vec![],
