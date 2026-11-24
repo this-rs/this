@@ -71,12 +71,14 @@ Les manifestes se résolvent par chemin relatif. La disposition attendue sur le 
 └── this-examples/     # path = ../this
 ```
 
-Les features optionnelles ajoutent deux voisins :
+La feature optionnelle `obrain` ajoute un voisin :
 
 ```
 <parent>/../obrain/obrain-db/   # obrain-engine, -core, -common, -substrate, -adapters, -reactive
-<parent>/../vite-rs/          # this-vite (préférer la version publiée pour un usage externe)
 ```
+
+La feature `frontend` n'en ajoute **plus** : `this-vite` est une dépendance git épinglée
+(`this-rs/vite-rs`, dépôt public), récupérée par cargo comme n'importe quel crate.
 
 La CI compense cette disposition dans chaque job (`this-cli/.github/workflows/ci.yml` place `this-rs/this` à `../this` ; `this-examples` utilise l'action composite `./.github/actions/this-dep`). Ce document est la version lisible de cette connaissance, qui n'existait que dans les workflows.
 
@@ -241,23 +243,30 @@ positif partiel.
 
 ## Disposition des dossiers : les checkouts frères (bootstrap)
 
-`this/Cargo.toml` référence deux dépôts **voisins** par `path`, pour deux features optionnelles :
+`this/Cargo.toml` référence un dépôt **voisin** par `path`, pour la feature optionnelle `obrain` :
 
-| Feature | Dépendances | Chemin attendu (depuis `this/`) |
+| Feature | Dépendances | Où |
 |---|---|---|
-| `obrain` | `obrain-engine`, `obrain-core`, `obrain-substrate`, … | `../../obrain/obrain-db/crates/…` |
-| `frontend` | `this-vite` | `../../vite-rs` |
+| `obrain` | `obrain-engine`, `obrain-core`, `obrain-substrate`, … | `../../obrain/obrain-db/crates/…` (checkout frère) |
+| `frontend` | `this-vite` | dépendance **git épinglée** (`this-rs/vite-rs`), aucun checkout |
 
-Un build **par défaut** n'en a pas besoin. Mais `--features obrain` / `--features frontend` échoue si les dossiers manquent — mesuré le 21/11 : `cargo metadata --features obrain` depuis un clone sans voisins rend **code 101**, « failed to load manifest for dependency `this-vite` ».
+Un build **par défaut** n'a besoin d'aucun voisin. `--features obrain` échoue si le dossier d'obrain manque — mesuré le 21/11 : `cargo metadata --features obrain` depuis un clone sans voisins rend **code 101**. `--features frontend` n'a plus ce défaut depuis que `this-vite` est épinglé par `git` + `rev` (même motif que WAMI : le hash fixe le code, la `version` est celle résolue à la publication).
 
-**`scripts/bootstrap-dev.sh`** clone ces deux dépôts aux SHAs épinglés, dans la disposition attendue, à côté de `this/` :
+Pour travailler sur vite-rs **en local** sans toucher le manifeste, dans `.cargo/config.toml` :
 
-- `obrain` → `../obrain/obrain-db/` (dépôt `obrain-db/obrain`) ;
-- `vite-rs` → `../vite-rs/` (dépôt `this-rs/vite-rs`).
+```toml
+[patch."https://github.com/this-rs/vite-rs.git"]
+this-vite = { path = "../../vite-rs" }
+```
 
-Il est **idempotent**, ne touche **jamais** un checkout présent à un autre SHA (une copie de travail peut être en cours — `--force` pour aligner), et n'écrit **aucun chemin personnel**. Les épingles sont des **SHA complets** (un SHA abrégé échoue au `git fetch --depth 1`), surchargeables par `OBRAIN_REV` / `VITE_REV` :
+**`scripts/bootstrap-dev.sh`** clone `obrain` au SHA épinglé, dans la disposition attendue, à côté de `this/` :
+
+- `obrain` → `../obrain/obrain-db/` (dépôt `obrain-db/obrain`).
+
+Il est **idempotent**, ne touche **jamais** un checkout présent à un autre SHA (une copie de travail peut être en cours — `--force` pour aligner), et n'écrit **aucun chemin personnel**. Les épingles sont des **SHA complets** (un SHA abrégé échoue au `git fetch --depth 1`), surchargeables par `OBRAIN_REV` :
 
 - obrain `f0d6e132666d34d63824a46ad2a5119416b0afb4`
-- vite-rs `dcf233cd154ed7416338c9141736ff9efa19f199`
+
+`vite-rs` n'est plus cloné : son SHA `dcf233cd154ed7416338c9141736ff9efa19f199` est épinglé dans `Cargo.toml` (`rev`).
 
 Cela couvre le premier critère de #289 (« build depuis un répertoire temporaire sans checkouts frères, par un bootstrap documenté et SHAs épinglés »). La matrice OS/architecture, les artefacts, sommes de contrôle et l'installation/mise à jour/retour arrière restent hors de ce document.

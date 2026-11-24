@@ -1,23 +1,24 @@
 #!/usr/bin/env bash
 # bootstrap-dev.sh — prépare les checkouts FRÈRES que `this` exige pour ses
-# features optionnelles `obrain` et `frontend` (issue #289).
+# feature optionnelle `obrain` (issue #289).
 #
-# `this/Cargo.toml` référence deux dépôts voisins par `path` :
+# `this/Cargo.toml` référence le dépôt voisin obrain par `path` :
 #     obrain-engine = { path = "../../obrain/obrain-db/crates/obrain-engine", … }
-#     this-vite     = { path = "../../vite-rs", … }
-# Ils sont OPTIONNELS : un build par défaut n'en a pas besoin. Mais
-# `--features obrain` / `--features frontend` échoue si les dossiers sont
-# absents. Ce script les clone aux SHAs épinglés, dans la disposition attendue :
+# Il est OPTIONNEL : un build par défaut n'en a pas besoin. Mais `--features obrain`
+# échoue si le dossier est absent. Ce script le clone au SHA épinglé, dans la
+# disposition attendue :
 #     <parent>/obrain/obrain-db/…     (dépôt obrain-db/obrain)
-#     <parent>/vite-rs/               (dépôt this-rs/vite-rs)
 # où <parent> est DEUX niveaux au-dessus de `this/` : le dossier qui CONTIENT
-# `this-rs/` (donc `this`), `obrain/` et `vite-rs/` côte à côte — c'est ce que dit
-# le `../../` du manifeste.
+# `this-rs/` (donc `this`) et `obrain/` côte à côte — c'est ce que dit le `../../`
+# du manifeste.
+#
+# vite-rs n'est PLUS un checkout frère : `this-vite` est une dépendance git épinglée
+# (Cargo.toml), cargo la récupère seul. Rien à cloner pour la feature `frontend`.
 #
 # Usage :
 #     scripts/bootstrap-dev.sh                 # clone ce qui manque
 #     scripts/bootstrap-dev.sh --force         # aligne aussi sur le SHA épinglé
-#     OBRAIN_REV=<sha complet> VITE_REV=<sha complet> scripts/bootstrap-dev.sh
+#     OBRAIN_REV=<sha complet> scripts/bootstrap-dev.sh
 #
 # Ce script ne touche JAMAIS un checkout présent : s'il existe à un autre SHA,
 # il le signale (une copie de travail peut être en cours) et ne l'écrase que
@@ -28,15 +29,13 @@ THIS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PARENT="$(cd "$THIS_DIR/../.." && pwd)"
 
 OBRAIN_REV="${OBRAIN_REV:-f0d6e132666d34d63824a46ad2a5119416b0afb4}"
-VITE_REV="${VITE_REV:-dcf233cd154ed7416338c9141736ff9efa19f199}"
 OBRAIN_URL="${OBRAIN_URL:-https://github.com/obrain-db/obrain.git}"
-VITE_URL="${VITE_URL:-https://github.com/this-rs/vite-rs.git}"
 
 FORCE=0
 for a in "$@"; do
   case "$a" in
     --force) FORCE=1 ;;
-    -h|--help) sed -n '2,26p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,25p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "argument inconnu : $a" >&2; exit 2 ;;
   esac
 done
@@ -73,9 +72,7 @@ prepare() {
 
 echo "Bootstrap des checkouts frères de this (parent : $PARENT)"
 prepare "$PARENT/obrain/obrain-db" "$OBRAIN_URL" "$OBRAIN_REV" "obrain   "
-prepare "$PARENT/vite-rs"         "$VITE_URL"   "$VITE_REV"   "vite-rs  "
 echo
 echo "Terminé. Construire avec les features optionnelles :"
 echo "  cargo build --features obrain"
-echo "  cargo build --features frontend"
-echo "Un build par défaut n'a besoin d'aucun de ces dossiers."
+echo "Un build par défaut n'a besoin d'aucun de ces dossiers ; la feature frontend n'en a plus besoin non plus."

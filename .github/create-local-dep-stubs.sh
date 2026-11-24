@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # CI helper for local path dependencies.
 #
-# - obrain-* and vite-rs: minimal STUBS, so cargo can resolve Cargo.toml. Their
-#   features are never activated in CI (--features all,wami, not --all-features).
+# - obrain-*: minimal STUBS, so cargo can resolve Cargo.toml. Their features are never
+#   activated in CI (--features all,wami, not --all-features).
+# - vite-rs: NO stub any more. `this-vite` is a pinned git dependency of the public
+#   this-rs/vite-rs repository (Cargo.toml), fetched by cargo like any other crate.
 # - wami (Lsh0x/wami, followed on `main`, ADR D3): a REAL shallow clone, because
 #   the `wami` feature IS tested in CI and a stub cannot provide its API.
 
@@ -34,20 +36,6 @@ EOF
     echo "  stub: $crate"
   fi
 done
-
-# vite-rs (public, but local checkout in dev)
-VITE_DIR="$REPO_ROOT/../vite-rs"
-if [ ! -d "$VITE_DIR" ]; then
-  mkdir -p "$VITE_DIR/src"
-  cat > "$VITE_DIR/Cargo.toml" <<EOF
-[package]
-name = "this-vite"
-version = "0.0.1"
-edition = "2021"
-EOF
-  touch "$VITE_DIR/src/lib.rs"
-  echo "  stub: this-vite"
-fi
 
 # wami (public, followed on main; local worktree in dev at ../../obrain/wami-main)
 # REPO_ROOT is the repository's PARENT (see above): Cargo.toml's `../../obrain/wami-main`
