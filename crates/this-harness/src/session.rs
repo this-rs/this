@@ -834,17 +834,7 @@ impl BusyGuard {
         let Ok(mut state) = self.state.try_borrow_mut() else {
             return;
         };
-        let mut ouverts: Vec<String> = Vec::new();
-        for message in &state.transcript {
-            match message {
-                Message::Assistant { calls, .. } => {
-                    ouverts.extend(calls.iter().map(|call| call.id.clone()));
-                }
-                Message::Tool { id, .. } => ouverts.retain(|ouvert| ouvert != id),
-                _ => {}
-            }
-        }
-        for id in ouverts {
+        for id in appels_ouverts(&state.transcript) {
             state.transcript.push(Message::tool(
                 id,
                 "interrompu : le run a été abandonné avant la réponse de l'outil",
@@ -852,6 +842,26 @@ impl BusyGuard {
         }
     }
 }
+
+/// Les ids des appels d'outil restés SANS réponse dans ce fil, dans l'ordre où ils ont
+/// été demandés. Un appel ouvert est un fil que le moteur refuserait.
+fn appels_ouverts(transcript: &[Message]) -> Vec<String> {
+    let mut ouverts: Vec<String> = Vec::new();
+    for message in transcript {
+        match message {
+            Message::Assistant { calls, .. } => {
+                ouverts.extend(calls.iter().map(|call| call.id.clone()));
+            }
+            Message::Tool { id, .. } => ouverts.retain(|ouvert| ouvert != id),
+            _ => {}
+        }
+    }
+    ouverts
+}
+
+/// La réponse donnée à un appel d'outil qu'un crash a laissé sans réponse (#284). Elle ne
+/// dit PAS que l'outil a échoué : l'effet a peut-être eu lieu, et rien ne le prouve.
+const EFFET_INCONNU_APRES_CRASH: &str = "interrompu : le processus s'est arrêté avant la réponse de l'outil. L'effet est inconnu : il a peut-être eu lieu, ne le rejoue pas sans confirmation.";
 
 impl Drop for BusyGuard {
     fn drop(&mut self) {
@@ -3195,6 +3205,12 @@ impl Handle {
     /// peut avoir forgé : y écrire un résultat d'outil suffirait à blanchir un id.
     /// Pour votre **propre** snapshot, dont vous connaissez l'origine, appelez
     /// [`Self::restore_trusted`] — c'est un choix explicite, jamais un défaut.
+    ///
+    /// **Un appel d'outil resté sans réponse est refermé** (#284), pour les deux voies : le
+    /// processus qui l'avait lancé est mort, aucun run ne le finira, et un fil qui garde
+    /// un appel ouvert est refusé par le moteur. La réponse ajoutée dit que l'effet est
+    /// **inconnu** (il a peut-être eu lieu) : l'outil n'est jamais rejoué, et un `Hint`
+    /// de genre [`HintKind::Interrupted`] le dit à l'hôte.
     pub fn restore(&self, snapshot: Snapshot) {
         self.restore_avec(snapshot, Confiance::Importee)
     }
@@ -3261,9 +3277,21 @@ impl Handle {
             });
             return;
         }
+        let repares;
         {
             let mut state = self.state.borrow_mut();
             state.transcript = snapshot.transcript;
+            // Un appel d'outil resté sans réponse dans un fil RESTAURÉ n'a plus de run pour
+            // le finir : le processus qui l'avait lancé est mort. Le laisser ouvert enverrait
+            // au moteur un fil qu'il refuse ; le rejouer referait peut-être un effet déjà
+            // produit. On le ferme avec une réponse qui dit que l'effet est INCONNU (#284).
+            let ouverts = appels_ouverts(&state.transcript);
+            repares = ouverts.len();
+            for id in ouverts {
+                state
+                    .transcript
+                    .push(Message::tool(id, EFFET_INCONNU_APRES_CRASH));
+            }
             state.pending = snapshot.pending;
             // Les identifiants ne reculent jamais : une interface qui garde l'id d'un message
             // disparu retirerait sinon un AUTRE message réutilisant ce numéro.
@@ -3286,6 +3314,14 @@ impl Handle {
             // sont plus dans le fil et redeviennent « jamais vu ». C'est du fail-closed
             // (on perd une preuve, on n'en invente pas), et c'est assumé.
             self.rebatir_registre(&state.transcript, confiance);
+        }
+        if repares > 0 {
+            self.out.emit(Event::Hint {
+                kind: HintKind::Interrupted,
+                text: format!(
+                    "reprise : {repares} appel(s) d'outil sans réponse dans le fil restauré — effet inconnu, non rejoué."
+                ),
+            });
         }
         self.emit_pending();
     }
