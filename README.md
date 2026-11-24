@@ -47,7 +47,7 @@
 - **MySQL** — Traditional relational backend
 - **DynamoDB** — AWS serverless storage
 - **LMDB** — Embedded key-value store (zero-copy reads)
-- **Obrain** — Cognitive graph database with hybrid intelligence; the backend now couples with the this-rs/obrain engine checkout and records durable per-mutation WAL commits. **Not installable on its own:** the `obrain` feature uses path dependencies on a sibling `obrain/obrain-db` checkout (`Cargo.toml`, `../../obrain/obrain-db/crates/...`). From a clean clone, run `scripts/bootstrap-dev.sh` (pinned SHAs) to fetch the sibling checkouts, then `cargo build --features obrain`
+- **Obrain** — Cognitive graph database with hybrid intelligence; the backend records durable per-mutation WAL commits. The `obrain` feature is a **pinned git dependency** (`Cargo.toml`, `obrain-db/obrain` @ rev `f0d6e132…`), fetched by cargo like any other crate — no sibling checkout. Build with `cargo build --features obrain`.
 
 ### 📣 Event System
 - 🔔 **EventBus** — Built-in non-blocking broadcast on all CRUD operations
@@ -869,7 +869,7 @@ contract on the phone it runs on and writes `Documents/banc.json` — see
 ✅ **Custom Auth Resolvers** — Reusable authorization closures (`resolver:name` in YAML)  
 ✅ **Multi-Tenant** — Opt-in tenant isolation per entity  
 ✅ **GDPR Erasure** — One-call cascade delete across entities and links  
-✅ **9 Storage Backends** — In-Memory, PostgreSQL, MongoDB, Neo4j, ScyllaDB, MySQL, DynamoDB, LMDB, Obrain (Obrain needs a sibling `obrain/obrain-db` engine checkout — run `scripts/bootstrap-dev.sh`, see above)  
+✅ **9 Storage Backends** — In-Memory, PostgreSQL, MongoDB, Neo4j, ScyllaDB, MySQL, DynamoDB, LMDB, Obrain (a pinned git dependency — no sibling checkout needed)  
 ✅ **Cognitive Signals** — Anomaly detection, co-change tracking, threshold-based routing  
 ✅ **Event Flows** — Declarative pipelines with webhooks, push notifications, and SSE  
 ✅ **Notifications** — In-app NotificationStore with read/unread tracking  
