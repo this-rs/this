@@ -49,11 +49,12 @@ jobs:
     outputs:
       code: ${{ steps.filter.outputs.code }}
       harness: ${{ steps.filter.outputs.harness }}
-      # Jambes à RETIRER de la matrice sur une PR (JSON, consommé par `exclude`).
-      # Le contexte `matrix` n'existe pas dans un `if` de job — actionlint le dit —
-      # donc c'est `exclude` qui filtre, pas une condition.
-      exclude_legs: ${{ steps.filter.outputs.exclude_legs }}
-      exclude_os: ${{ steps.filter.outputs.exclude_os }}
+      # Listes de jambes, calculées UNE fois ici : `matrix` n'existe pas dans un `if`
+      # de job (actionlint le dit), et `exclude` appliqué à une matrice `include`-only
+      # n'a produit AUCUNE jambe au premier essai (job absent du run, gate en échec).
+      # Une liste explicite ne peut pas se comporter autrement que ce qu'elle dit.
+      test_legs: ${{ steps.filter.outputs.test_legs }}
+      platforms: ${{ steps.filter.outputs.platforms }}
       swift: ${{ steps.filter.outputs.swift }}
     steps:
       - uses: actions/checkout@v7
@@ -70,13 +71,13 @@ jobs:
           # sur main/develop/reseau-maille, et sur une PR qui porte `run-full-matrix`.
           full="${{ contains(github.event.pull_request.labels.*.name, 'run-full-matrix') }}"
           if [ "${{ github.event_name }}" = "pull_request" ] && [ "$full" != "true" ]; then
-            { echo 'exclude_legs=[{"rust":"beta"},{"rust":"nightly"}]'
-              echo 'exclude_os=[{"os":"windows-latest"},{"os":"macos-latest"}]'
+            { echo 'test_legs=[{"rust":"stable","features":"all,wami"}]'
+              echo 'platforms=["ubuntu-latest"]'
               echo "swift=false"; } >> "$GITHUB_OUTPUT"
             echo "parcours rapide (PR) : stable + ubuntu, sans Swift"
           else
-            { echo 'exclude_legs=[]'
-              echo 'exclude_os=[]'
+            { echo 'test_legs=[{"rust":"stable","features":"all,wami"},{"rust":"beta","features":"all,wami"},{"rust":"nightly","features":"in-memory,websocket,push,module-signing,oidc,wami"}]'
+              echo 'platforms=["ubuntu-latest","windows-latest","macos-latest"]'
               echo "swift=true"; } >> "$GITHUB_OUTPUT"
             echo "matrice complète"
           fi
@@ -110,13 +111,16 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # `exclude` retire une jambe par SOUS-ENSEMBLE de clés : {"rust":"beta"} suffit.
-        exclude: ${{ fromJSON(needs.changes.outputs.exclude_legs) }}
-        include:
-          - rust: stable
-            features: all,wami
-          - rust: beta
-            features: all,wami
+        # La liste des jambes est calculée dans `changes` : trois sur main/develop/
+        # reseau-maille et sur une PR étiquetée `run-full-matrix`, une seule (`stable`)
+        # sur une PR ordinaire. Le commentaire ci-dessous décrit la jambe `nightly`
+        # pour la liste complète.
+        include: ${{ fromJSON(needs.changes.outputs.test_legs) }}
+        # Décommenté quand la liste complète est utilisée :
+          # - rust: stable
+          #   features: all,wami
+          # - rust: beta
+          #   features: all,wami
           # Nightly answers ONE question: does OUR code compile and pass on tomorrow's
           # compiler? It cannot answer the full-matrix question, because several third
           # party async crates do not build on it today:
@@ -128,8 +132,8 @@ jobs:
           # This set covers everything written here (storage core, websocket, push,
           # signed modules, OIDC, WAMI) and nothing that does not compile. If a real
           # nightly regression appears in our code, this leg goes red and says so.
-          - rust: nightly
-            features: in-memory,websocket,push,module-signing,oidc,wami
+          # (La jambe elle-même est dans la liste calculée par `changes` :
+          #  rust=nightly, features=in-memory,websocket,push,module-signing,oidc,wami.)
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
@@ -559,8 +563,7 @@ jobs:
     timeout-minutes: 30
     strategy:
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
-        exclude: ${{ fromJSON(needs.changes.outputs.exclude_os) }}
+        os: ${{ fromJSON(needs.changes.outputs.platforms) }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
