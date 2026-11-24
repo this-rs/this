@@ -339,6 +339,50 @@ impl Grants {
         }
     }
 
+    /// L'INTERSECTION avec un **plafond** : `self` est ce que le parent accorde,
+    /// `demande` ce que l'enfant réclame. Le résultat ne peut **jamais** accorder un
+    /// outil que le plafond refuse — c'est la primitive qui rend exécutable la règle
+    /// « l'enfant ne dépasse jamais l'enveloppe du parent » (#375), au lieu de la
+    /// laisser à la discipline de l'hôte.
+    ///
+    /// Ce qui est refusé par le plafond sort **refusé**, avec la raison du plafond
+    /// quand il en a une : un enfant qui demande `shell` à un parent qui ne le porte
+    /// pas reçoit un refus nommé, pas un silence. Une demande déjà refusée reste
+    /// refusée telle quelle.
+    pub fn intersect(&self, demande: &Grants) -> Grants {
+        let mut out = Grants::new();
+        for d in &demande.grants {
+            let plafond = self.grants.iter().find(|g| g.tool == d.tool);
+            out.grants.push(match (d.granted, plafond) {
+                // Déjà refusé côté enfant : on garde le refus tel quel.
+                (false, _) => d.clone(),
+                // Le SEUL cas qui accorde : accordé des deux côtés.
+                (true, Some(p)) if p.granted => d.clone(),
+                // Accordé par l'enfant, retiré par le plafond : le refus porte la raison
+                // du plafond, parce que c'est elle qui explique la décision.
+                (true, Some(p)) => Grant::refused(
+                    d.tool.clone(),
+                    d.source.clone(),
+                    format!(
+                        "refusé par le plafond : {}",
+                        p.reason.clone().unwrap_or_else(|| format!(
+                            "« {} » y est explicitement retiré",
+                            d.tool
+                        ))
+                    ),
+                ),
+                // Accordé par l'enfant, absent du plafond : l'absence est un refus
+                // (fail-closed), et le motif le dit sans ambiguïté.
+                (true, None) => Grant::refused(
+                    d.tool.clone(),
+                    d.source.clone(),
+                    format!("refusé par le plafond : « {} » n'y figure pas", d.tool),
+                ),
+            });
+        }
+        out
+    }
+
     pub fn nodes(&self, agent: &str) -> Result<Vec<Node>, String> {
         self.grants.iter().map(|grant| grant.node(agent)).collect()
     }
