@@ -114,7 +114,12 @@ pub use this_agent::evidence::{Declaration, Effect};
 /// besoin de `Stop` et de `Step` pour lire ce que le harnais raconte.
 pub use this_agent::{Decision, DefaultPolicy, Goal, Policy, Run, Step, Stop};
 
-/// L'heure du target qui exécute vraiment le code.
+/// L'heure CIVILE du target qui exécute vraiment le code (epoch, en ms).
+///
+/// C'est l'heure des DATES : un événement horodaté, une échéance à comparer au
+/// mur. Elle n'est **pas** une horloge de mesure : un saut (NTP, DST) la fait
+/// bondir ou reculer. Pour mesurer un délai (budget, silence, plafonds), le
+/// harnais passe par [`Clock::now_mono_ms`], jamais par cette fonction.
 ///
 /// Une page a `Date.now`, une coquille a l'horloge système. Demander l'une à
 /// l'autre est une erreur de compilation — d'où deux implémentations et pas
@@ -130,4 +135,26 @@ pub fn now_ms() -> f64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|duree| duree.as_secs_f64() * 1000.0)
         .unwrap_or(0.0)
+}
+
+/// L'heure MONOTONE du target, en millisecondes : pour MESURER un délai, jamais
+/// pour dater. Insensible aux sauts de l'horloge civile (NTP, DST) : elle ne
+/// recule pas et ne bondit pas.
+///
+/// En natif, `Instant` — qui n'a pas d'époque, donc on compte depuis le premier
+/// appel du processus. La valeur n'a de sens que comparée à elle-même. En wasm,
+/// sans `web_sys` (le crate n'en dépend pas), le mieux disponible est
+/// `Date.now()` (civile) : l'hôte qui veut un vrai monotone injecte
+/// `performance.now()` par [`Harness::with_clock`].
+#[cfg(not(target_arch = "wasm32"))]
+pub fn mono_now_ms() -> f64 {
+    use std::sync::OnceLock;
+    static BASE: OnceLock<std::time::Instant> = OnceLock::new();
+    let base = *BASE.get_or_init(std::time::Instant::now);
+    base.elapsed().as_secs_f64() * 1000.0
+}
+
+#[cfg(target_arch = "wasm32")]
+pub fn mono_now_ms() -> f64 {
+    js_sys::Date::now()
 }
