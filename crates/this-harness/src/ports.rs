@@ -577,6 +577,27 @@ impl Toolbox for Toolboxes {
 /// l'implémentation (l'hôte) qui avale ses propres erreurs ; le harnais, lui,
 /// n'a même pas la possibilité d'en voir une. La composition [`Recorders`]
 /// pousse chaque événement à toutes les parts, sans s'arrêter si l'une échoue.
+///
+/// # Le MASQUE n'est pas dans ce port — c'est un contrat, pas un oubli
+///
+/// La boucle pousse la [`Step`](this_agent::Step) **telle que l'outil l'a
+/// produite**, empreintes et extraits compris. Ce crate ne masque rien : il ne
+/// fait aucune I/O, ne connaît aucune table de motifs, et ne peut donc pas
+/// garantir qu'un secret recopié dans un résultat d'outil ne sera pas écrit.
+///
+/// **Le masquage appartient à l'implémentation** (`this_agent::masque` dans
+/// l'application), qui l'applique au point d'écriture. Ce n'est pas une couche
+/// qu'on peut oublier en silence : c'est un choix de l'hôte, et il doit être
+/// VISIBLE. Deux moyens de le rendre visible, l'un ou l'autre selon l'hôte :
+///
+/// - exposer un booléen d'état (dans this-rs :
+///   `HarnessGraph::masque_installe`) qu'un hôte, un test ou un diagnostic peut
+///   interroger — un journal sans masque se constate, il ne se devine pas ;
+/// - écrire son propre `Recorder` : il assume alors le contrat entier, masque compris.
+///
+/// Conséquence à retenir, et elle est de sécurité : **un `Recorder` sans masque
+/// écrit ce que l'outil a rendu**, y compris un secret. Un hôte qui branche un
+/// `Recorder` doit pouvoir répondre à « le masque est-il installé ? ».
 #[async_trait(?Send)]
 pub trait Recorder {
     /// Une étape vient d'être mesurée. `run` la porte déjà : la boucle a appelé
@@ -596,6 +617,11 @@ pub trait Recorder {
 /// Même composition que [`Toolboxes`] : chaque événement est poussé à toutes
 /// les parts, dans l'ordre d'ajout. Une part qui échoue n'arrête pas les
 /// autres — elle n'a de toute façon rien à rendre (voir [`Recorder`]).
+///
+/// **Le masque est celui de chaque part, pas de la composition** : `Recorders`
+/// ne masque rien (voir « Le MASQUE n'est pas dans ce port »). Composer un
+/// journal masqué et un export brut est donc possible — et c'est à l'hôte de
+/// savoir lequel des deux il branche.
 #[derive(Default)]
 pub struct Recorders {
     parts: Vec<Rc<dyn Recorder>>,
