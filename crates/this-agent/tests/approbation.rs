@@ -325,3 +325,24 @@ fn retirer_un_approbateur_de_la_liste_de_l_hote_revoque_son_approbation() {
         "révoquée : la même composition est refusée, nommément"
     );
 }
+
+/// La branche symétrique de la précédente : l'hôte a épinglé un contenu, et le document
+/// n'en déclare plus. Ce n'est pas « rien à vérifier », c'est **l'épingle qui a disparu** :
+/// le refus le dit et nomme l'emplacement, avant même de parler d'empreinte.
+#[test]
+fn un_emplacement_qui_a_perdu_son_digest_depuis_l_approbation_est_refuse_et_nomme() {
+    let (mut d, trusted) = approuve(doc_avec_digests(), "ops");
+    assert_eq!(d.is_approved(&trusted), Verdict::Allow, "ligne de base");
+
+    // `guard` n'est plus épinglé côté document, alors que l'hôte l'a enregistré.
+    d.slots[1].digest = None;
+    let m = motif(d.is_approved(&trusted));
+    assert!(
+        m.contains("guard:gard@1.0.0"),
+        "le refus nomme l'emplacement qui a perdu son digest : {m}"
+    );
+    assert!(
+        m.contains("a perdu son digest"),
+        "le motif dit que l'épingle a disparu, pas que le contenu a bougé : {m}"
+    );
+}
