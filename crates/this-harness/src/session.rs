@@ -2502,7 +2502,10 @@ impl Harness {
         cancel: &Cancel,
     ) -> Option<Vec<Message>> {
         let compactor = self.compactor.clone()?;
-        let removal = crate::context::removable(messages, budget);
+        // Le nonce est tiré une fois : sa taille entre dans la réserve, et le même
+        // sert à enfermer le résumé (voir [`crate::context::reserve_resume`]).
+        let nonce = self.clock.nonce();
+        let removal = crate::context::removable_avec_resume(messages, budget, &nonce);
         let first = *removal.indices.first()?;
         let anciens: Vec<Message> = removal
             .indices
@@ -2537,11 +2540,21 @@ impl Harness {
         };
         // Le résumé est rangé au rôle utilisateur et synthétique : un `User` non
         // synthétique, placé après la vraie question, serait épinglé à sa place.
+        // Il résume des tours anciens, donc des textes de tiers possibles : une
+        // consigne qui a survécu à la summarisation doit rester une donnée, d'où
+        // le conteneur (même convention que [`enclose_motif`]). Pas de plafond de
+        // taille ici : la garde `summary_tokens >= removal.tokens` ci-dessous borne déjà.
         let summary = match summary {
             Message::User {
                 content, images, ..
             } if !content.trim().is_empty() => Message::User {
-                content,
+                content: this_agent::untrusted::wrap_with(
+                    &nonce,
+                    usize::MAX,
+                    "compaction",
+                    &[],
+                    &content,
+                ),
                 images,
                 synthetic: true,
             },
