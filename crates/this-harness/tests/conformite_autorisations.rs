@@ -865,25 +865,48 @@ fn cas3_quater_temoin_famille_a_sans_revocation_execute() {
     assert_eq!(outil.effets.get(), 1);
 }
 
-// ---- Cas 5 : la COMPOSITION `Toolboxes` — ce qu'elle ne porte pas -----------
+// ---- Cas 5 : la COMPOSITION `Toolboxes` — les droits suivent la PROPRIÉTÉ de l'outil ----
 //
-// Mesuré le 24/11/2026 sur `787a988` : `impl Toolbox for Toolboxes` définit `specs`,
-// `declarations`, `vus`, `call`, `call_with_cancel` — mais PAS `grants()`. La
-// composition rend donc le défaut du trait (`None`), et les droits dynamiques tenus
-// par une part n'atteignent JAMAIS la porte.
+// Mesuré le 24/11/2026 sur `787a988` : `impl Toolbox for Toolboxes` définissait `specs`,
+// `declarations`, `vus`, `call`, `call_with_cancel` — mais PAS `grants()`. La composition
+// rendait donc le défaut du trait (`None`), et les droits tenus par une part n'atteignaient
+// JAMAIS la porte : un outil RÉVOQUÉ par sa part était refusé seul (effets 0) et exécuté
+// composé (effets 1). Une révocation qui disparaît est un octroi.
 //
-// C'est un MANQUE NOMMÉ (chemin non qualifié), pas une vulnérabilité démontrée : il
-// faut un hôte qui fasse reposer toute son autorité sur `Toolbox::grants` ET qui
-// compose, sans `with_grants`. Le correctif est d'une ligne — transmettre, comme
-// `vus()` le fait déjà avec le même argument — mais il change QUI décide dans un hôte
-// composé (les droits d'une part remplaceraient alors ceux de `with_grants`), donc
-// RFC d'abord : voir `docs/harnais-autorisations.md`, case (c).
+// RÈGLE APPLIQUÉE (décision du 24/11/2026, `docs/harnais-autorisations.md` §4) : la
+// composition porte les droits de chaque part POUR SES PROPRES OUTILS SEULEMENT, le
+// propriétaire d'un nom étant la première part qui l'expose — la règle déjà en vigueur
+// pour `specs`, les `declarations` et le routage de l'appel. Aucune part ne peut donc
+// accorder ni révoquer un outil qu'une autre exécute. « La première gagne » serait un
+// choix arbitraire (l'ordre de composition) là où la propriété de l'outil ne l'est pas.
 
 fn outillage_qui_refuse(grants: Rc<RefCell<Grants>>) -> Rc<OutilGrantsDynamiques> {
     Rc::new(OutilGrantsDynamiques {
         outil: Outil::new(),
         grants,
     })
+}
+
+/// Une part qui n'expose AUCUN outil mais qui porte des droits : elle ne doit rien pouvoir
+/// ressusciter, et c'est le cas qui distingue « filtrer par propriété » d'un simple `put`.
+struct MuetteQuiAccorde {
+    grants: Rc<RefCell<Grants>>,
+}
+
+#[async_trait(?Send)]
+impl Toolbox for MuetteQuiAccorde {
+    fn specs(&self) -> Vec<ToolSpec> {
+        Vec::new()
+    }
+    fn grants(&self) -> Option<Grants> {
+        Some(self.grants.borrow().clone())
+    }
+    async fn call(&self, _: &ToolCall) -> Outcome {
+        Outcome::refused("muette", "cette part n'expose aucun outil")
+    }
+    async fn call_with_cancel(&self, call: &ToolCall, _: &Cancel) -> Outcome {
+        self.call(call).await
+    }
 }
 
 #[test]
@@ -909,8 +932,9 @@ fn cas5_un_outillage_seul_porte_ses_grants_dynamiques() {
     );
 }
 
+/// LE TROU MESURÉ, refermé : la révocation d'une part survit à la composition.
 #[test]
-fn cas5_compose_le_meme_outillage_perd_ses_grants_manque_nomme() {
+fn cas5_compose_l_outillage_ne_perd_pas_sa_revocation() {
     let grants = Rc::new(RefCell::new(Grants::new()));
     grants
         .borrow_mut()
@@ -928,9 +952,71 @@ fn cas5_compose_le_meme_outillage_perd_ses_grants_manque_nomme() {
     futures::executor::block_on(harnais.send("écris"));
     assert_eq!(
         outil.effets.get(),
-        1,
-        "MESURE DU MANQUE : le même outillage exécute une fois composé, parce que \
-         `Toolboxes` ne transmet pas `grants()`. Ce test tombera le jour où la \
-         composition les portera — c'est attendu, voir docs/harnais-autorisations.md"
+        0,
+        "composé, l'outil reste refusé : la révocation portée par sa part doit atteindre \
+         la porte. Effets 1 = le refus a disparu en entrant dans la composition"
+    );
+}
+
+/// Une part ne décide que de SES outils : accorder celui d'une autre n'a aucun effet.
+#[test]
+fn cas5_une_part_ne_peut_pas_accorder_l_outil_d_une_autre() {
+    // La première part expose et RÉVOQUE `ecrire` : elle en est propriétaire.
+    let refus = Rc::new(RefCell::new(Grants::new()));
+    refus
+        .borrow_mut()
+        .put(Grant::refused(OUTIL, "user", "consentement retiré"));
+    let proprietaire = outillage_qui_refuse(refus);
+    let outil = proprietaire.outil.clone();
+    // La seconde porte un OCTROI du même nom : il ne doit rien ressusciter.
+    let octroi = Rc::new(RefCell::new(Grants::new()));
+    octroi.borrow_mut().put(Grant::granted(OUTIL, "user"));
+    let usurpateur = outillage_qui_refuse(octroi);
+    let composes = Rc::new(Toolboxes::new().with(proprietaire).with(usurpateur));
+    let harnais = Harness::new(
+        "sys",
+        Limits::default(),
+        Script::new(vec![demande(), fini()]),
+        composes,
+        |_| {},
+    );
+    futures::executor::block_on(harnais.send("écris"));
+    assert_eq!(
+        outil.effets.get(),
+        0,
+        "l'octroi d'une part non propriétaire de l'outil n'a aucun effet : sinon, \
+         n'importe quel module ajouté à la composition pourrait rouvrir un outil révoqué"
+    );
+}
+
+/// Même chose, sans même prétendre exposer l'outil : un `put` naïf le ressusciterait.
+#[test]
+fn cas5_une_part_qui_n_expose_rien_ne_ressuscite_aucun_droit() {
+    let refus = Rc::new(RefCell::new(Grants::new()));
+    refus
+        .borrow_mut()
+        .put(Grant::refused(OUTIL, "user", "consentement retiré"));
+    let proprietaire = outillage_qui_refuse(refus);
+    let outil = proprietaire.outil.clone();
+    let muette = Rc::new(MuetteQuiAccorde {
+        grants: Rc::new(RefCell::new({
+            let mut g = Grants::new();
+            g.put(Grant::granted(OUTIL, "user"));
+            g
+        })),
+    });
+    let composes = Rc::new(Toolboxes::new().with(proprietaire).with(muette));
+    let harnais = Harness::new(
+        "sys",
+        Limits::default(),
+        Script::new(vec![demande(), fini()]),
+        composes,
+        |_| {},
+    );
+    futures::executor::block_on(harnais.send("écris"));
+    assert_eq!(
+        outil.effets.get(),
+        0,
+        "une part qui n'expose aucun outil ne peut accorder aucun droit"
     );
 }

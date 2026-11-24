@@ -529,6 +529,51 @@ impl Toolbox for Toolboxes {
         self.parts.iter().find_map(|part| part.vus())
     }
 
+    /// Les droits que la composition porte, **par propriété de l'outil** (#287).
+    ///
+    /// POURQUOI cette méthode existe alors que le défaut du trait (`None`) est plus simple :
+    /// `None` ne veut pas dire « rien à vérifier » dans un hôte qui a des droits installés —
+    /// il veut dire que la composition n'en porte aucun, et le harnais retombe alors sur
+    /// `with_grants`, ou sur rien du tout. Mesuré le 24/11/2026 : un outillage qui RÉVOQUE
+    /// un de ses outils perdait sa révocation en entrant dans une composition — le même
+    /// outil était refusé seul (effets 0) et exécuté composé (effets 1). Une révocation qui
+    /// disparaît est un octroi.
+    ///
+    /// RÈGLE : la composition ne retient les droits d'une part que pour les outils que
+    /// CETTE part exécute — le propriétaire d'un nom étant, comme pour `specs`,
+    /// `declarations` et l'appel, la **première part qui l'expose**. Aucune part ne peut
+    /// donc accorder ni révoquer un outil qu'une autre exécute : elle ne dépasse pas son
+    /// domaine. Ni « la première gagne » ni source désignée à la construction : ce serait un
+    /// choix arbitraire (l'ordre de composition, ou un index que `push` périme), alors que la
+    /// propriété de l'outil est déjà la règle du routage.
+    ///
+    /// Si aucune part n'expose de droits : `None`, et `with_grants` décide comme avant. Si
+    /// une part en expose mais qu'aucun ne vise ses outils, la composition rend `Some` vide :
+    /// tout est refusé (défaut fermé), jamais « tout est permis ».
+    fn grants(&self) -> Option<this_agent::substrate::Grants> {
+        let mut proprietaire: std::collections::HashMap<String, usize> =
+            std::collections::HashMap::new();
+        for (i, part) in self.parts.iter().enumerate() {
+            for spec in part_specs(part) {
+                proprietaire.entry(spec.name).or_insert(i);
+            }
+        }
+        let mut droits = this_agent::substrate::Grants::new();
+        let mut une_part_en_porte = false;
+        for (i, part) in self.parts.iter().enumerate() {
+            let Some(siens) = part.grants() else {
+                continue;
+            };
+            une_part_en_porte = true;
+            for grant in siens.grants {
+                if proprietaire.get(&grant.tool) == Some(&i) {
+                    droits.put(grant);
+                }
+            }
+        }
+        une_part_en_porte.then_some(droits)
+    }
+
     async fn call(&self, call: &ToolCall) -> Outcome {
         // Le premier qui déclare l’outil l’exécute : deux modules qui
         // exposeraient le même nom ne se disputent pas l’appel, l’ordre de
