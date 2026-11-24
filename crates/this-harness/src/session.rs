@@ -32,7 +32,7 @@ use crate::ports::{Cancel, Compactor, Delta, Permission, Recorder, Recorders, To
 use crate::wire::{
     Code, Failure, Finish, ImagePart, Message, Reply, Request, ThreadDefect, ToolCall, ToolSpec,
 };
-use this_agent::cite::SeenLedger;
+use this_agent::cite::{Invalidation, Perimetre, SeenLedger};
 use this_agent::evidence::Verdict;
 use this_agent::{Decision, DefaultPolicy, Goal, Policy, Run, Step, Stop};
 
@@ -716,6 +716,10 @@ struct State {
     cancel: Cancel,
     /// Le compteur d'objectifs ouverts : source des `run_id` (`run-1`, `run-2`, …).
     run_seq: u64,
+    /// Le périmètre déclaré de cette session (#290, carte (d)) : qui, et sur quel
+    /// projet. `None` : personne ne l'a déclaré, et le registre des ids vus ne répond
+    /// alors de rien — c'est le comportement d'avant.
+    perimetre: Option<Perimetre>,
 }
 
 /// La sortie d'événements, dans sa propre cellule.
@@ -919,6 +923,10 @@ impl Drop for BusyGuard {
 pub struct Harness {
     transport: Rc<dyn Transport>,
     toolbox: Rc<dyn Toolbox>,
+    /// « Ce refus a déjà été dit » : le registre d'un autre périmètre refuse les
+    /// écritures (voir [`observer_outcome_dans`]), et le dire à chaque résultat d'outil
+    /// noierait le fil.
+    refus_registre: Rc<Cell<bool>>,
     /// Le registre PARTAGÉ des ids vus, **capturé une fois** à la construction
     /// (`Toolbox::vus`).
     ///
@@ -968,6 +976,7 @@ impl Harness {
     ) -> Self {
         Self {
             transport,
+            refus_registre: Rc::new(Cell::new(false)),
             vus: toolbox.vus(),
             toolbox,
             policy: Rc::new(DefaultPolicy),
@@ -988,6 +997,7 @@ impl Harness {
                 generation: 0,
                 cancel: Cancel::new(),
                 run_seq: 0,
+                perimetre: None,
             })),
             out: Out::new(Box::new(sink)),
         }
@@ -1201,6 +1211,63 @@ impl Harness {
 
     fn with<R>(&self, f: impl FnOnce(&mut State) -> R) -> R {
         f(&mut self.state.borrow_mut())
+    }
+
+    /// Déclare le périmètre de la session — **qui** est devant l'écran et **sur quel
+    /// projet** — et invalide ce qui appartenait à un autre (#290, carte (d)).
+    ///
+    /// Le harnais ne devine ni la personne ni le projet : ils viennent de l'hôte, et il
+    /// ne les interprète pas (voir [`Perimetre`]). Ce qu'il en fait :
+    ///
+    /// 1. le registre des identifiants lus (`Toolbox::vus`) est **vidé** si son
+    ///    périmètre déclaré change : un id lu sous le projet A ne reste pas une preuve
+    ///    sous le projet B, et la lecture d'une personne ne devient pas celle d'une
+    ///    autre ;
+    /// 2. un résultat d'outil reçu dans un registre déclaré d'un AUTRE périmètre n'y est
+    ///    pas écrit, et le refus est dit une fois à l'interface
+    ///    ([`Event::Hint`]) ;
+    /// 3. la reprise (`restore`/`seed`) rebâtit le registre **dans** ce périmètre.
+    ///
+    /// Ce que le harnais ne peut PAS faire, et qui reste à l'hôte : supprimer le contenu
+    /// lui-même (notes, décisions, vecteurs). Il ne le détient pas — voir
+    /// `docs/harnais-contexte-cognitif.md` §3 (d).
+    ///
+    /// Rend ce qui a été invalidé, pour que l'interface puisse le dire au lieu de
+    /// laisser croire à une perte de mémoire. Une session qui se déclare dans le même
+    /// périmètre n'oublie rien ([`Invalidation::Aucune`]).
+    ///
+    /// **À appeler hors d'un run.** Un run en cours a capturé le périmètre qu'il a reçu
+    /// au départ (voir `RunPorts`) : déclarer un périmètre neuf pendant ce run ne le lui
+    /// apprend pas, et ses résultats d'outils seront refusés (le refus est dit) jusqu'au
+    /// run suivant.
+    pub fn perimetre(&self, perimetre: Perimetre) -> Invalidation {
+        self.with(|s| s.perimetre = Some(perimetre.clone()));
+        let Some(registre) = &self.vus else {
+            return Invalidation::Aucune;
+        };
+        let mut registre = registre.borrow_mut();
+        let invalidation = registre.marquer_perimetre(perimetre);
+        // Le refus a été dit pour l'ancien périmètre : la nouvelle déclaration ouvre un
+        // droit neuf, et un refus futur doit pouvoir se dire à nouveau.
+        self.refus_registre.set(false);
+        invalidation
+    }
+
+    /// Le périmètre déclaré de cette session, s'il y en a un.
+    pub fn perimetre_actuel(&self) -> Option<Perimetre> {
+        self.with(|s| s.perimetre.clone())
+    }
+
+    /// Enregistre un résultat d'outil dans le registre partagé, dans le périmètre déclaré
+    /// de la session (voir [`observer_outcome_dans`]).
+    fn enregistrer_registre(&self, outcome: &Outcome) {
+        let Some(registre) = &self.vus else {
+            return;
+        };
+        let perimetre = self.perimetre_actuel();
+        if !observer_outcome_dans(&mut registre.borrow_mut(), perimetre.as_ref(), outcome) {
+            signaler_registre_etranger(&self.out, &self.refus_registre);
+        }
     }
 
     /// La conversation telle que le modèle la verra (pour la sauvegarder).
@@ -1536,6 +1603,8 @@ impl Harness {
                 clock: clock.clone(),
                 out: self.out.clone(),
                 asks: self.asks.clone(),
+                perimetre: self.perimetre_actuel(),
+                refus_registre: self.refus_registre.clone(),
             }));
             // Le budget se compte en temps HORLOGE depuis ici : temps du modèle compris. Ne
             // compter que la durée des outils laissait un flux de signes de vie tourner une
@@ -2128,9 +2197,7 @@ impl Harness {
                     // le gardera, ce qui le rend reconstruisible à la reprise.
                     // `observe` distingue lui-même les conteneurs `<untrusted_data>` :
                     // un id qu'une note hostile a écrit reste CITÉ, jamais lu.
-                    if let Some(registre) = &self.vus {
-                        observe_outcome(&mut registre.borrow_mut(), &outcome);
-                    }
+                    self.enregistrer_registre(&outcome);
                     self.push(Message::tool(call.id.clone(), outcome.text.clone()));
                 }
 
@@ -2928,6 +2995,12 @@ struct RunPorts {
     clock: Rc<dyn Clock>,
     out: Out,
     asks: Shared<Asks>,
+    /// Le périmètre de la session au moment du run (#290) : un registre déclaré dans
+    /// un autre périmètre ne reçoit rien (voir [`observer_outcome_dans`]).
+    perimetre: Option<Perimetre>,
+    /// Le refus d'écrire dans un registre étranger se dit **une fois** : un run
+    /// appellerait sinon l'outil dix fois et dirait dix fois la même chose.
+    refus_registre: Rc<Cell<bool>>,
 }
 
 #[async_trait(?Send)]
@@ -2949,8 +3022,10 @@ impl Permission for RunPorts {
         // Famille A : l'outil a tourné dans le flux du transport, pas dans la
         // boucle — son résultat doit quand même entrer dans le registre, sinon
         // tout ce qu'un moteur interne exécute resterait « jamais lu ».
-        if let Some(registre) = &self.vus {
-            observe_outcome(&mut registre.borrow_mut(), outcome);
+        if let Some(registre) = &self.vus
+            && !observer_outcome_dans(&mut registre.borrow_mut(), self.perimetre.as_ref(), outcome)
+        {
+            signaler_registre_etranger(&self.out, &self.refus_registre);
         }
         let step = step_of(&call.name, ms, outcome);
         self.run.borrow_mut().record(step);
@@ -3165,6 +3240,51 @@ fn observe_outcome(registre: &mut SeenLedger, outcome: &Outcome) {
     }
 }
 
+/// Enregistre un résultat d'outil dans un registre **borné à un périmètre** (#290,
+/// carte (d)).
+///
+/// Rend `false` — et n'écrit **rien** — quand le registre est déclaré dans un
+/// périmètre et que la session en déclare un autre. C'est le cas d'un hôte qui tient
+/// UN outillage (donc UN registre) pour deux personnes, ou qui bascule de projet sans
+/// rouvrir de session : sans ce refus, les lectures d'une personne deviendraient les
+/// preuves de l'autre, et rien dans le fil ne le montrerait.
+///
+/// Le refus est asymétrique à dessein :
+/// - registre **non déclaré** : il accepte (comportement d'avant #290 — un hôte qui ne
+///   déclare rien ne gagne rien, mais ne perd rien) ;
+/// - registre **déclaré** : la session doit déclarer le **même** périmètre
+///   ([`Harness::perimetre`]). Un harnais muet devant un registre déclaré n'écrit pas :
+///   il ne peut pas prouver qu'il est la même personne, et « je ne sais pas » ne vaut
+///   pas « c'est elle ».
+fn observer_outcome_dans(
+    registre: &mut SeenLedger,
+    perimetre: Option<&Perimetre>,
+    outcome: &Outcome,
+) -> bool {
+    if let Some(sien) = registre.perimetre()
+        && perimetre != Some(sien)
+    {
+        return false;
+    }
+    observe_outcome(registre, outcome);
+    true
+}
+
+/// Le refus d'écrire dans le registre d'un autre périmètre, dit **une fois** par
+/// session : c'est un fait d'installation, pas un événement de tour.
+fn signaler_registre_etranger(out: &Out, deja: &Rc<Cell<bool>>) {
+    if deja.replace(true) {
+        return;
+    }
+    out.emit(Event::Hint {
+        text: "le registre des identifiants lus appartient à un autre périmètre (autre \
+               personne ou autre projet) : cette session n'y enregistre rien, et ses \
+               citations resteront « cité seulement »"
+            .to_string(),
+        kind: HintKind::Other,
+    });
+}
+
 /// Le nombre maximal de messages tenus en file.
 const MAX_PENDING: usize = 1000;
 
@@ -3340,6 +3460,12 @@ impl Handle {
         self.state.borrow().cancel.is_cancelled()
     }
 
+    /// Le périmètre déclaré de cette session (#290), s'il y en a un. Déclaration :
+    /// [`Harness::perimetre`].
+    pub fn perimetre_actuel(&self) -> Option<Perimetre> {
+        self.state.borrow().perimetre.clone()
+    }
+
     pub fn transcript(&self) -> Vec<Message> {
         self.state.borrow().transcript.clone()
     }
@@ -3350,12 +3476,27 @@ impl Handle {
     ///
     /// `Importee` range tout en **cité** : c'est le refus conservateur demandé
     /// pour un transcript dont on ne peut pas prouver l'origine.
-    fn rebatir_registre(&self, transcript: &[Message], confiance: Confiance) {
+    /// `perimetre` est passé par l'appelant : `restore` tient déjà l'emprunt de l'état,
+    /// et le relire ici le ferait paniquer (mesuré : `RefCell already mutably borrowed`).
+    fn rebatir_registre(
+        &self,
+        transcript: &[Message],
+        confiance: Confiance,
+        perimetre_session: Option<Perimetre>,
+    ) {
         let Some(registre) = &self.vus else {
             return;
         };
         let mut registre = registre.borrow_mut();
-        *registre = SeenLedger::new();
+        // Le registre rebâti naît DANS le périmètre de la session : le périmètre de la
+        // session fait foi, et à défaut on garde celui que le registre portait déjà. Un
+        // registre neuf non déclaré laisserait la porte ouverte à une session qui n'a
+        // rien déclaré (voir `observer_outcome_dans`).
+        let perimetre = perimetre_session.or_else(|| registre.perimetre().cloned());
+        *registre = match perimetre {
+            Some(perimetre) => SeenLedger::pour(perimetre),
+            None => SeenLedger::new(),
+        };
         for message in transcript {
             if let Message::Tool { content, .. } = message {
                 match confiance {
@@ -3422,7 +3563,8 @@ impl Handle {
             });
             return;
         }
-        self.rebatir_registre(&transcript, confiance);
+        let perimetre = self.state.borrow().perimetre.clone();
+        self.rebatir_registre(&transcript, confiance, perimetre);
         self.state.borrow_mut().transcript = transcript;
     }
 
@@ -3556,7 +3698,8 @@ impl Handle {
             // d'outils par un résumé, donc les lectures directes qu'ils portaient ne
             // sont plus dans le fil et redeviennent « jamais vu ». C'est du fail-closed
             // (on perd une preuve, on n'en invente pas), et c'est assumé.
-            self.rebatir_registre(&state.transcript, confiance);
+            let perimetre = state.perimetre.clone();
+            self.rebatir_registre(&state.transcript, confiance, perimetre);
         }
         if repares > 0 {
             self.out.emit(Event::Hint {

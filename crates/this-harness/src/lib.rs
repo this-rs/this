@@ -106,6 +106,7 @@ pub use wire::{
 };
 
 /// Le verdict que porte `Event::Stopped`.
+pub use this_agent::cite::{Invalidation, Perimetre};
 pub use this_agent::evidence::Verdict;
 /// Ce qu'un hôte déclare de ses outils ([`Toolbox::declarations`]).
 pub use this_agent::evidence::{Declaration, Effect};
