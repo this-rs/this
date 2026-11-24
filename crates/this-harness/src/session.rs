@@ -114,8 +114,22 @@ pub type Sleep = Pin<Box<dyn Future<Output = ()>>>;
 /// que seul l'hôte connaît (`setTimeout` dans une page, un fil ou tokio dans
 /// un binaire). Injectable pour les tests, qui font avancer le temps à la main.
 pub trait Clock {
-    /// Maintenant, en millisecondes.
+    /// Maintenant, en millisecondes — horloge CIVILE (epoch) : pour DATER un
+    /// événement, jamais pour mesurer un délai. Un saut d'horloge (NTP, DST)
+    /// peut la faire bondir ou reculer.
     fn now_ms(&self) -> f64;
+
+    /// Maintenant sur une horloge MONOTONE, en millisecondes : pour MESURER un
+    /// délai et tenir des bornes (budget, silence, plafonds). Insensible aux
+    /// sauts de l'horloge civile : elle ne recule pas et ne bondit pas.
+    ///
+    /// Défaut : [`Clock::now_ms`] — les horloges existantes (tests, hôtes)
+    /// compilent sans changement. Un hôte qui peut distinguer les deux la
+    /// surcharge (natif : `Instant` ; wasm : `performance.now()`).
+    fn now_mono_ms(&self) -> f64 {
+        self.now_ms()
+    }
+
     /// Une attente de `ms`, ou `None` si ce target ne sait pas attendre : les
     /// chiens de garde sont alors éteints et les relances partent sans délai.
     fn sleep(&self, ms: u64) -> Option<Sleep>;
@@ -165,6 +179,10 @@ pub struct SystemClock;
 impl Clock for SystemClock {
     fn now_ms(&self) -> f64 {
         crate::now_ms()
+    }
+
+    fn now_mono_ms(&self) -> f64 {
+        crate::mono_now_ms()
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -363,7 +381,7 @@ async fn watch(
 ) -> Watch {
     let mut cancelled_at: Option<f64> = None;
     loop {
-        let now = clock.now_ms();
+        let now = clock.now_mono_ms();
         let left = if cancel.is_cancelled() {
             let since = *cancelled_at.get_or_insert(now);
             let waited = (now - since).max(0.0) as u64;
@@ -534,9 +552,9 @@ enum Cut {
 /// (`Clock::sleep` rend `Some`), avec une granularité d'au plus `WATCH_TICK_MS`.
 async fn cut(clock: &dyn Clock, ms: u64, cancel: Option<&Cancel>) -> Cut {
     let timer = async {
-        let end = clock.now_ms() + ms as f64;
+        let end = clock.now_mono_ms() + ms as f64;
         loop {
-            let left = (end - clock.now_ms()).max(0.0) as u64;
+            let left = (end - clock.now_mono_ms()).max(0.0) as u64;
             if left == 0 {
                 return Cut::Timeout;
             }
@@ -582,12 +600,12 @@ fn yield_now() -> impl Future<Output = ()> {
 /// est relue à chaque pas de [`WATCH_TICK_MS`]. Une relance annulée rend donc
 /// la main en une seconde au plus, et non à la fin de son attente (jusqu'à 4 s).
 async fn pause(clock: &dyn Clock, ms: u64, cancel: &Cancel) -> bool {
-    let end = clock.now_ms() + ms as f64;
+    let end = clock.now_mono_ms() + ms as f64;
     loop {
         if cancel.is_cancelled() {
             return true;
         }
-        let left = (end - clock.now_ms()).max(0.0) as u64;
+        let left = (end - clock.now_mono_ms()).max(0.0) as u64;
         if left == 0 {
             return false;
         }
@@ -630,7 +648,7 @@ pub struct Limits {
     /// Nombre de relances accordées après un refus ou un silence.
     pub max_relances: u32,
     /// Budget de temps du run, en millisecondes (`None` : pas de borne). Compté en temps
-    /// HORLOGE, du début du run à maintenant, temps du modèle compris : la garde du flux
+    /// MONOTONE, du début du run à maintenant, temps du modèle compris : la garde du flux
     /// coupe le tour à l'échéance, et la décision entre deux tours le relit.
     pub budget_ms: Option<u64>,
     /// Silence toléré sur le flux d'un tour, en millisecondes : passé ce délai
@@ -901,7 +919,7 @@ impl Drop for BusyGuard {
         if self.armed && !std::thread::panicking() {
             // Run lâché : l'annulation qui visait ce run meurt avec lui.
             self.state.borrow().cancel.reset();
-            let ms = (self.clock.now_ms() - self.started).max(0.0) as u64;
+            let ms = (self.clock.now_mono_ms() - self.started).max(0.0) as u64;
             self.out.emit(Event::Stopped {
                 stop: Stop::Interrupted,
                 text: String::new(),
@@ -1498,7 +1516,7 @@ impl Harness {
     /// ouvert (file vide) — rien n'a tourné, donc rien n'est « terminé ».
     async fn pump(&self) -> Option<Stop> {
         let clock = self.clock.clone();
-        let started = clock.now_ms();
+        let started = clock.now_mono_ms();
         // Pas de `reset` ici : `interrupt` ne pose le drapeau que pendant un run (`busy`), donc
         // rien d'obsolète n'attend. Le drapeau est consommé en fin de run, ou à l'abandon
         // (`BusyGuard`) : une annulation pendant ce run ne vise que lui.
@@ -1606,15 +1624,15 @@ impl Harness {
                 perimetre: self.perimetre_actuel(),
                 refus_registre: self.refus_registre.clone(),
             }));
-            // Le budget se compte en temps HORLOGE depuis ici : temps du modèle compris. Ne
+            // Le budget se compte en temps MONOTONE depuis ici : temps du modèle compris. Ne
             // compter que la durée des outils laissait un flux de signes de vie tourner une
             // heure (revue V20). L'échéance arme la garde du flux ; la décision la relit.
-            let run_started = clock.now_ms();
+            let run_started = clock.now_mono_ms();
             let deadline = limits
                 .budget_ms
                 .map(|budget| (run_started + budget as f64, budget));
             let horloge = |run: &mut Run| {
-                let ecoule = (clock.now_ms() - run_started).max(0.0) as u64;
+                let ecoule = (clock.now_mono_ms() - run_started).max(0.0) as u64;
                 run.ecoule_ms = run.ecoule_ms.max(ecoule);
             };
 
@@ -1697,12 +1715,12 @@ impl Harness {
                     stop = Some(run.borrow_mut().finish(Stop::Failed(raison)));
                     break 'turns;
                 }
-                // Le temps du TOUR est de l'horloge murale : mesuré autour du
+                // Le temps du TOUR est MONOTONE : mesuré autour du
                 // transport, relances comprises, et ajouté au run AVANT la
                 // décision. Sans ça, un modèle lent et des outils instantanés
                 // n'avançaient jamais le budget (mesuré : 40 appels au modèle
                 // pour un budget de 10 ms qui ne protégeait rien).
-                let turn_started = clock.now_ms();
+                let turn_started = clock.now_mono_ms();
                 let gathered = Rc::new(RefCell::new(String::new()));
                 // Les étapes de l'objectif au début de CE tour : un outil joué
                 // à un tour précédent n'est pas rejoué par la relance de
@@ -1714,7 +1732,7 @@ impl Harness {
                 let issue: Result<Result<Reply, Failure>, Watch> = loop {
                     // Les derniers signes du flux : un tour qui commence en est
                     // un, chaque morceau reçu en est un.
-                    let signs = Signs::new(clock.now_ms());
+                    let signs = Signs::new(clock.now_mono_ms());
                     // Le moteur a-t-il parlé PENDANT CE TOUR (un morceau, même vide) ?
                     let parle = Rc::new(Cell::new(false));
                     let delta: Delta = {
@@ -1739,7 +1757,7 @@ impl Harness {
                             // [`KEEP_ALIVE`] (commentaire `:`) ne réarme que la garde
                             // de silence. Des commentaires à l'infini ne tiennent plus
                             // le tour ouvert au-delà de `no_progress_ms`.
-                            let now = clock.now_ms();
+                            let now = clock.now_mono_ms();
                             signs.life.set(now);
                             if text == KEEP_ALIVE {
                                 return;
@@ -1860,7 +1878,7 @@ impl Harness {
                         && transport.honors_route()
                     {
                         let pick = crate::routing::Pick::new(current.provider(), model);
-                        router.availability().advance(clock.now_ms());
+                        router.availability().advance(clock.now_mono_ms());
                         match &down {
                             Some(down) => router.availability().mark(&pick, down),
                             None if confirmed && matches!(&issue, Ok(Ok(_))) => {
@@ -1989,7 +2007,7 @@ impl Harness {
                     break issue;
                 };
                 run.borrow_mut()
-                    .add_elapsed((clock.now_ms() - turn_started).max(0.0) as u64);
+                    .add_elapsed((clock.now_mono_ms() - turn_started).max(0.0) as u64);
 
                 let reply = match issue {
                     Ok(Ok(reply)) => reply,
@@ -2316,7 +2334,7 @@ impl Harness {
             garde.disarm();
             return None;
         };
-        let ms = (clock.now_ms() - started).max(0.0) as u64;
+        let ms = (clock.now_mono_ms() - started).max(0.0) as u64;
         // La place est rendue AVANT l'annonce : un puits qui relit `busy()` sur
         // `Stopped` voit déjà le run terminé.
         self.with(|s| s.busy = false);
@@ -2373,7 +2391,7 @@ impl Harness {
             tool: call.name.clone(),
             input: call.arguments.clone(),
         });
-        let started = self.clock.now_ms();
+        let started = self.clock.now_mono_ms();
         let declared = offered.iter().any(|spec| spec.name == call.name);
         let mut abandoned = None;
         let outcome = if !declared {
@@ -2409,7 +2427,7 @@ impl Harness {
                 }
             }
         };
-        let ms = (self.clock.now_ms() - started).max(0.0) as u64;
+        let ms = (self.clock.now_mono_ms() - started).max(0.0) as u64;
 
         self.out.emit(Event::ToolResult {
             id: call.id.clone(),
@@ -2473,7 +2491,7 @@ impl Harness {
     ) -> Option<crate::routing::Route> {
         let router = self.router.clone()?;
         // La mémoire des modèles refusés n'a pas d'horloge : c'est la nôtre, avant chaque décision.
-        router.availability().advance(self.clock.now_ms());
+        router.availability().advance(self.clock.now_mono_ms());
         let (has_images, hints) = self.turn_signals(first, toolbox, limits);
         let clock = self.clock.clone();
         let honored = self.transport.honors_route();
@@ -2582,11 +2600,11 @@ impl Harness {
         deadline_ms: Option<f64>,
     ) -> Option<crate::routing::Route> {
         let router = self.router.clone()?;
-        router.availability().advance(self.clock.now_ms());
+        router.availability().advance(self.clock.now_mono_ms());
         refused.push(just_refused);
         // L'échéance du run est une borne DURE : un repli qui se décide après elle ne doit pas
         // relancer un transport ni un outil. Le temps restant borne la sélection elle-même.
-        if deadline_ms.is_some_and(|at| self.clock.now_ms() >= at) {
+        if deadline_ms.is_some_and(|at| self.clock.now_mono_ms() >= at) {
             return None;
         }
         let (has_images, hints) = self.turn_signals(first, toolbox, limits);
@@ -2606,7 +2624,7 @@ impl Harness {
         };
         // Le plus court de : le délai du routeur et le temps qui reste avant l'échéance du run.
         let restant = deadline_ms
-            .map(|at| (at - self.clock.now_ms()).max(0.0) as u64)
+            .map(|at| (at - self.clock.now_mono_ms()).max(0.0) as u64)
             .unwrap_or(u64::MAX);
         let borne = ROUTER_TIMEOUT_MS.min(restant);
         let routed = race(work, cut(self.clock.as_ref(), borne, Some(cancel)))
@@ -2614,7 +2632,7 @@ impl Harness {
             .ok()??;
         // Recontrôle APRÈS la sélection : le pool a pu répondre au-delà de l'échéance (la course
         // sonde d'abord le travail). Un choix tardif est écarté, jamais appliqué.
-        if deadline_ms.is_some_and(|at| self.clock.now_ms() >= at) {
+        if deadline_ms.is_some_and(|at| self.clock.now_mono_ms() >= at) {
             return None;
         }
         self.out.emit(Event::Routed {
