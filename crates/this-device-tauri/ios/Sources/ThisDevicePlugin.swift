@@ -6,6 +6,7 @@ import CoreBluetooth
 import CoreMotion
 import Foundation
 import Tauri
+import UIKit
 
 struct StatusArgs: Decodable {
   let capability: String
@@ -104,6 +105,31 @@ class ThisDevicePlugin: Plugin {
   @objc public func bluetoothScan(_ invoke: Invoke) throws {
     let args = try invoke.parseArgs(BluetoothScanArgs.self)
     BluetoothScan.run(invoke, durationMs: args.durationMs, services: args.services)
+  }
+
+  /// Jeton d'arrière-plan du tour en cours. Les deux commandes se le partagent.
+  static var tourBackgroundTask: UIBackgroundTaskIdentifier = .invalid
+
+  @objc public func beginBackgroundTask(_ invoke: Invoke) {
+    if Self.tourBackgroundTask != .invalid {
+      invoke.resolve(["ok": true] as JsonObject)
+      return
+    }
+    Self.tourBackgroundTask = UIApplication.shared.beginBackgroundTask(withName: "tour") {
+      if Self.tourBackgroundTask != .invalid {
+        UIApplication.shared.endBackgroundTask(Self.tourBackgroundTask)
+        Self.tourBackgroundTask = .invalid
+      }
+    }
+    invoke.resolve(["ok": true] as JsonObject)
+  }
+
+  @objc public func endBackgroundTask(_ invoke: Invoke) {
+    if Self.tourBackgroundTask != .invalid {
+      UIApplication.shared.endBackgroundTask(Self.tourBackgroundTask)
+      Self.tourBackgroundTask = .invalid
+    }
+    invoke.resolve(["ok": true] as JsonObject)
   }
 }
 
