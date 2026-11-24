@@ -65,6 +65,8 @@ impl Transport for Moteur {
         };
         Ok(if n == 1 {
             Reply {
+                // Ce faux moteur ne mesure rien : `usage` reste `None` (voir #288).
+                usage: None,
                 served: None,
                 text: String::new(),
                 calls: vec![ToolCall {
@@ -76,6 +78,7 @@ impl Transport for Moteur {
             }
         } else {
             Reply {
+                usage: None,
                 served: None,
                 text: "fini".into(),
                 calls: vec![],
