@@ -13,7 +13,7 @@ use serde_json::json;
 
 use this_agent::evidence::Declaration;
 use this_agent::graph::HarnessDoc;
-use this_agent::substrate::{Grant, Grants};
+use this_agent::substrate::{Grant, Grants, Verdict};
 use this_harness::{
     Cancel, Delta, Event, Failure, Finish, Harness, Limits, Outcome, Reply, Request, ToolCall,
     ToolSpec, Toolbox, Transport,
@@ -462,4 +462,42 @@ fn une_reprise_n_importe_pas_une_permission_accorde() {
         tout.contains("module non signé"),
         "le refus doit venir de l'autorisation rétablie, pas d'autre chose : {tout}"
     );
+}
+
+/// #375 : « l'enfant ne dépasse jamais l'enveloppe du parent » n'était qu'une intention.
+/// `Grants::intersect` la rend exécutable : le résultat ne peut pas accorder ce que le
+/// plafond refuse, et le refus DIT pourquoi — plafond qui retire, ou plafond qui ignore.
+#[test]
+fn le_plafond_ne_laisse_jamais_passer_plus_que_lui() {
+    let mut plafond = Grants::new();
+    plafond.put(Grant::granted("lire", "hote"));
+    plafond.put(Grant::refused("ecrire", "hote", "retiré par la personne"));
+
+    let mut demande = Grants::new();
+    demande.put(Grant::granted("lire", "enfant"));
+    demande.put(Grant::granted("ecrire", "enfant"));
+    demande.put(Grant::granted("shell", "enfant"));
+
+    let enfant = plafond.intersect(&demande);
+
+    assert!(
+        matches!(enfant.allows("lire"), Verdict::Allow),
+        "l'accordé des deux côtés passe"
+    );
+    match enfant.allows("ecrire") {
+        Verdict::Refuse(m) => assert!(
+            m.contains("retiré par la personne"),
+            "le motif cite le plafond : {m}"
+        ),
+        v => panic!("l'outil retiré par le plafond doit être refusé, or {v:?}"),
+    }
+    match enfant.allows("shell") {
+        Verdict::Refuse(m) => assert!(
+            m.contains("n'y figure pas"),
+            "l'absence est un refus nommé : {m}"
+        ),
+        v => panic!("un outil absent du plafond ne peut pas être accordé, or {v:?}"),
+    }
+    // Et l'intersection ne fabrique aucun droit : rien de plus que ce que le plafond porte.
+    assert_eq!(enfant.grants.len(), 3, "un grant par demande, aucun ajout");
 }
