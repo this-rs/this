@@ -206,6 +206,7 @@ impl Transport for Compte {
     async fn stream(&self, _: &Request, _: &Cancel, _: Delta) -> Result<Reply, Failure> {
         *self.0.borrow_mut() += 1;
         Ok(Reply {
+            usage: None,
             served: None,
             text: "fait".into(),
             calls: vec![],

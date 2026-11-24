@@ -24,6 +24,7 @@ impl Transport for Demande {
     async fn stream(&self, request: &Request, _: &Cancel, _: Delta) -> Result<Reply, Failure> {
         if matches!(request.thread().last(), Some(Message::Tool { .. })) {
             return Ok(Reply {
+                usage: None,
                 served: None,
                 text: "fini".into(),
                 calls: vec![],
@@ -31,6 +32,7 @@ impl Transport for Demande {
             });
         }
         Ok(Reply {
+            usage: None,
             served: None,
             text: String::new(),
             calls: vec![ToolCall {

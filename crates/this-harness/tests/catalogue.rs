@@ -1121,6 +1121,7 @@ impl Transport for Script {
             .borrow_mut()
             .push(request.tools().iter().map(|t| t.name.clone()).collect());
         Ok(self.replies.borrow_mut().pop_front().unwrap_or(Reply {
+            usage: None,
             served: None,
             text: "fini".into(),
             calls: vec![],
@@ -1131,6 +1132,7 @@ impl Transport for Script {
 
 fn asks(name: &str, arguments: Value) -> Reply {
     Reply {
+        usage: None,
         served: None,
         text: String::new(),
         calls: vec![call(name, arguments)],

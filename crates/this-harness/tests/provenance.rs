@@ -32,6 +32,7 @@ impl Transport for AsksOnce {
     async fn stream(&self, _: &Request, _: &Cancel, _: Delta) -> Result<Reply, Failure> {
         if self.asked.replace(true) {
             return Ok(Reply {
+                usage: None,
                 served: None,
                 text: "fini".into(),
                 calls: vec![],
@@ -39,6 +40,7 @@ impl Transport for AsksOnce {
             });
         }
         Ok(Reply {
+            usage: None,
             served: None,
             text: String::new(),
             calls: vec![ToolCall {
@@ -719,6 +721,7 @@ impl Transport for MoteurFamilleA {
             )
             .await;
         Ok(Reply {
+            usage: None,
             served: None,
             text: "fini".into(),
             calls: vec![],
@@ -778,6 +781,7 @@ impl Transport for CiteALaFin {
         self.tour.set(n + 1);
         if n == 0 {
             return Ok(Reply {
+                usage: None,
                 served: None,
                 text: String::new(),
                 calls: vec![ToolCall {
@@ -789,6 +793,7 @@ impl Transport for CiteALaFin {
             });
         }
         Ok(Reply {
+            usage: None,
             served: None,
             text: format!("Voir #note:{LU} et aussi #note:{FORGE}."),
             calls: vec![],

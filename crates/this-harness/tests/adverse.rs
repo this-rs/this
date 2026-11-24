@@ -93,6 +93,7 @@ impl Model {
 
 fn says(text: &str) -> Act {
     Act::Reply(Reply {
+        usage: None,
         served: None,
         text: text.to_string(),
         calls: vec![],
@@ -102,6 +103,7 @@ fn says(text: &str) -> Act {
 
 fn calls(name: &str, id: &str) -> Act {
     Act::Reply(Reply {
+        usage: None,
         served: None,
         text: String::new(),
         calls: vec![ToolCall {
@@ -497,6 +499,7 @@ impl Transport for InstallDuringStream {
         let reply = match self.acts.borrow_mut().pop_front() {
             Some(Act::Reply(reply)) => reply,
             _ => Reply {
+                usage: None,
                 served: None,
                 text: "C'est fait.".to_string(),
                 calls: vec![],

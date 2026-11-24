@@ -22,6 +22,7 @@ impl Transport for Sert {
     async fn stream(&self, _: &Request, _: &Cancel, _: Delta) -> Result<Reply, Failure> {
         if self.fait.replace(true) {
             return Ok(Reply {
+                usage: None,
                 served: None,
                 text: String::new(),
                 calls: vec![],
@@ -29,6 +30,7 @@ impl Transport for Sert {
             });
         }
         Ok(Reply {
+            usage: None,
             served: self.served.map(str::to_string),
             text: "ok".into(),
             calls: vec![],

@@ -55,6 +55,7 @@ struct Model {
 
 fn says(text: &str) -> Reply {
     Reply {
+        usage: None,
         served: None,
         text: text.to_string(),
         calls: vec![],
@@ -64,6 +65,7 @@ fn says(text: &str) -> Reply {
 
 fn calls(name: &str, id: &str) -> Reply {
     Reply {
+        usage: None,
         served: None,
         text: String::new(),
         calls: vec![ToolCall {

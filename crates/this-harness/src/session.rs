@@ -1731,6 +1731,17 @@ impl Harness {
                             served: served.clone(),
                         });
                     }
+                    // #288 : l'usage MESURÉ que le moteur a déclaré est dit à l'hôte, jamais une
+                    // estimation. Un transport qui ne mesure rien n'a pas de `reply.usage` : rien
+                    // n'est émis, et l'absence n'est pas un zéro.
+                    if let Ok(Ok(reply)) = &issue
+                        && let Some(usage) = reply.usage
+                    {
+                        self.out.emit(Event::Usage {
+                            prompt_tokens: usage.prompt_tokens,
+                            completion_tokens: usage.completion_tokens,
+                        });
+                    }
                     let repondu = match &issue {
                         Ok(Ok(_)) => true,
                         Ok(Err(failure)) => !matches!(
@@ -3811,6 +3822,7 @@ mod tests {
                 .pop_front()
                 .unwrap_or(Acte::Dit("fini"));
             let avec_appel = Reply {
+                usage: None,
                 served: None,
                 text: String::new(),
                 calls: vec![appel()],
@@ -3830,6 +3842,7 @@ mod tests {
                         delta("");
                     }
                     Ok(Reply {
+                        usage: None,
                         served: None,
                         text: "fini".to_string(),
                         calls: vec![],
@@ -3842,6 +3855,7 @@ mod tests {
                         delta(KEEP_ALIVE);
                     }
                     Ok(Reply {
+                        usage: None,
                         served: None,
                         text: "fini".to_string(),
                         calls: vec![],
@@ -3853,6 +3867,7 @@ mod tests {
                 Acte::Dit(texte) => {
                     delta(texte);
                     Ok(Reply {
+                        usage: None,
                         served: None,
                         text: texte.to_string(),
                         calls: vec![],

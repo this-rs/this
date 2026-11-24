@@ -313,6 +313,20 @@ pub enum Finish {
     Aborted,
 }
 
+/// L'usage de jetons que le moteur a DÉCLARÉ pour un tour — une **mesure**, pas une estimation.
+///
+/// Distinct de [`crate::estimate_tokens`], qui estime sans que le moteur ne parle : ici les
+/// deux nombres viennent de la réponse du moteur lui-même (`prompt_tokens` / `completion_tokens`
+/// du dialecte OpenAI-compatible). Un transport qui ne mesure rien ne construit **jamais** ce
+/// type : son absence est une absence, pas un zéro inventé ni une estimation déguisée.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct TokenUsage {
+    /// Jetons du prompt, comptés par le moteur.
+    pub prompt_tokens: u64,
+    /// Jetons de la complétion, comptés par le moteur.
+    pub completion_tokens: u64,
+}
+
 /// Ce que le moteur a répondu pour un tour.
 #[derive(Clone, Debug, PartialEq, Default)]
 pub struct Reply {
@@ -324,6 +338,10 @@ pub struct Reply {
     /// pour que la paire routée soit réputée atteinte. `None` : la réponse n'en nomme aucun, et le
     /// harnais n'apprend alors rien de ce tour.
     pub served: Option<String>,
+    /// L'usage réel que le moteur a déclaré (prompt / complétion), quand le transport le remonte.
+    /// `None` : soit le transport ne mesure rien, soit le moteur n'a rien déclaré — jamais une
+    /// estimation déguisée en mesure (#288).
+    pub usage: Option<TokenUsage>,
 }
 
 /// Le modèle que le moteur a NOMMÉ est-il celui qu'on lui a demandé ?

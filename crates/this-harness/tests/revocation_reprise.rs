@@ -33,6 +33,7 @@ impl Transport for Demande {
     async fn stream(&self, _: &Request, _: &Cancel, _: Delta) -> Result<Reply, Failure> {
         if self.fait.replace(true) {
             return Ok(Reply {
+                usage: None,
                 served: None,
                 text: "fini".into(),
                 calls: vec![],
@@ -40,6 +41,7 @@ impl Transport for Demande {
             });
         }
         Ok(Reply {
+            usage: None,
             served: None,
             text: String::new(),
             calls: vec![ToolCall {

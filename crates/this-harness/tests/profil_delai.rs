@@ -23,6 +23,7 @@ struct Repond;
 impl Transport for Repond {
     async fn stream(&self, _: &Request, _: &Cancel, _: Delta) -> Result<Reply, Failure> {
         Ok(Reply {
+            usage: None,
             served: None,
             text: "ok".into(),
             calls: vec![],
