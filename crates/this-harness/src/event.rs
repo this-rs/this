@@ -647,6 +647,441 @@ impl Outcome {
     }
 }
 
+/// La version du schéma de [`EventEnvelope`]. Distincte de [`SNAPSHOT_VERSION`] : celle-ci
+/// versionne l'état sauvegardé ([`Snapshot`]), pas le flux d'événements.
+pub const ENVELOPE_VERSION: u32 = 1;
+
+/// L'enveloppe réseau commune : version, identité de run, curseur, et l'événement.
+///
+/// Décision #286 §3 « La décision d'enveloppe » : ne pas inventer une seconde numérotation.
+/// L'identité du run est [`crate::Handle::generation()`] (monotone par `claim`, donc par run) ; le
+/// `seq` est le curseur **dans** le run, posé par l'hôte à l'émission, monotone. Le cœur
+/// n'émet aucun de ces champs : l'hôte les ajoute au bord, et PO comme les autres hôtes
+/// partagent ce même contrat.
+///
+/// L'événement est un [`EventJson`] : un type inconnu (écrit par un hôte plus récent) garde son
+/// `type` et son payload — jamais un succès inventé. [`Self::to_json`] relaye l'événement
+/// inconnu **octet pour octet** ; [`Self::parse`] relit l'événement via `Value` (mêmes limites
+/// que [`EventWire`] sur les nombres hors `u64`/`i64` et l'ordre des clés). Un hôte qui doit
+/// relayer exactement ne re-sérialise pas une enveloppe reçue : il relaie les octets reçus.
+#[derive(Clone, Debug, PartialEq)]
+pub struct EventEnvelope {
+    pub version: u32,
+    pub generation: u64,
+    pub seq: u64,
+    pub event: EventJson,
+}
+
+impl EventEnvelope {
+    /// Une enveloppe au schéma courant, autour d'un événement déjà lu.
+    pub fn new(generation: u64, seq: u64, event: EventJson) -> Self {
+        Self {
+            version: ENVELOPE_VERSION,
+            generation,
+            seq,
+            event,
+        }
+    }
+
+    /// L'événement porté.
+    pub fn event(&self) -> &EventJson {
+        &self.event
+    }
+
+    /// Vrai si l'événement est l'arrêt du run ([`Event::Stopped`]). Un type inconnu ne l'est
+    /// **jamais** : ne pas savoir si c'est un arrêt n'est pas un arrêt, et un hôte ancien ne doit
+    /// pas clore le run sur un événement qu'il ne comprend pas.
+    pub fn is_stopped(&self) -> bool {
+        matches!(self.event.known(), Some(Event::Stopped { .. }))
+    }
+
+    /// Vrai si l'événement est d'un type inconnu de cette version (événement futur).
+    pub fn is_unknown(&self) -> bool {
+        self.event.unknown_type().is_some()
+    }
+
+    /// Lit une enveloppe depuis son texte JSON :
+    /// `{"version":…,"generation":…,"seq":…,"event":…}`.
+    ///
+    /// `version` absent vaut [`ENVELOPE_VERSION`] (un émetteur d'avant le champ reste lisible) ;
+    /// une version **plus récente** est refusée nommément ([`EnvelopeError::Version`]) — on ne
+    /// devine pas le schéma qu'on ne connaît pas. `generation`, `seq` et `event` sont requis.
+    pub fn parse(json: &str) -> Result<Self, EnvelopeError> {
+        let value: Value =
+            serde_json::from_str(json).map_err(|e| EnvelopeError::Json(e.to_string()))?;
+        let object = value
+            .as_object()
+            .ok_or_else(|| EnvelopeError::Json("l'enveloppe n'est pas un objet JSON".into()))?;
+
+        let version = match object.get("version") {
+            None => ENVELOPE_VERSION,
+            Some(Value::Number(n)) => n
+                .as_u64()
+                .and_then(|v| u32::try_from(v).ok())
+                .ok_or_else(|| EnvelopeError::Champ("« version » doit être un entier".into()))?,
+            Some(_) => return Err(EnvelopeError::Champ("« version » doit être un nombre".into())),
+        };
+        if version > ENVELOPE_VERSION {
+            return Err(EnvelopeError::Version {
+                vue: version,
+                connue: ENVELOPE_VERSION,
+            });
+        }
+
+        let generation = match object.get("generation") {
+            Some(Value::Number(n)) => n
+                .as_u64()
+                .ok_or_else(|| EnvelopeError::Champ("« generation » doit être un entier".into()))?,
+            _ => return Err(EnvelopeError::Champ("« generation » est requis".into())),
+        };
+        let seq = match object.get("seq") {
+            Some(Value::Number(n)) => n
+                .as_u64()
+                .ok_or_else(|| EnvelopeError::Champ("« seq » doit être un entier".into()))?,
+            _ => return Err(EnvelopeError::Champ("« seq » est requis".into())),
+        };
+        let event = match object.get("event") {
+            Some(ev) => {
+                let texte =
+                    serde_json::to_string(ev).map_err(|e| EnvelopeError::Json(e.to_string()))?;
+                EventJson::parse(&texte).map_err(|e| EnvelopeError::Evenement(e.to_string()))?
+            }
+            None => return Err(EnvelopeError::Champ("« event » est requis".into())),
+        };
+
+        Ok(Self {
+            version,
+            generation,
+            seq,
+            event,
+        })
+    }
+
+    /// Le JSON à relayer. Pour un événement inconnu, les octets reçus sont rendus tels quels
+    /// (espaces et nombres compris) ; pour un événement connu, sa forme sérialisée canonique.
+    pub fn to_json(&self) -> Result<String, serde_json::Error> {
+        let event = self.event.to_json()?;
+        let mut out = String::with_capacity(event.len() + 48);
+        out.push_str("{\"version\":");
+        out.push_str(&self.version.to_string());
+        out.push_str(",\"generation\":");
+        out.push_str(&self.generation.to_string());
+        out.push_str(",\"seq\":");
+        out.push_str(&self.seq.to_string());
+        out.push_str(",\"event\":");
+        out.push_str(&event);
+        out.push('}');
+        Ok(out)
+    }
+}
+
+/// Pourquoi une enveloppe est illisible, dit **nommément** — jamais un succès inventé.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum EnvelopeError {
+    /// Le texte n'est pas un JSON lisible, ou pas un objet.
+    Json(String),
+    /// Un champ de l'enveloppe est absent ou du mauvais type.
+    Champ(String),
+    /// La version de l'enveloppe est plus récente que celle connue ici.
+    Version { vue: u32, connue: u32 },
+    /// L'événement embarqué n'est pas un événement lisible.
+    Evenement(String),
+}
+
+impl std::fmt::Display for EnvelopeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Json(m) => write!(f, "enveloppe illisible : {m}"),
+            Self::Champ(m) => write!(f, "champ d'enveloppe : {m}"),
+            Self::Version { vue, connue } => write!(
+                f,
+                "version d'enveloppe {vue} plus récente que la version connue {connue}"
+            ),
+            Self::Evenement(m) => write!(f, "événement d'enveloppe illisible : {m}"),
+        }
+    }
+}
+
+impl std::error::Error for EnvelopeError {}
+
+/// Ce qu'a fait le rejoueur d'un événement enveloppé.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Application {
+    /// Appliqué : événement nouveau du run courant, le curseur a avancé.
+    Applied,
+    /// Déjà vu (même `(generation, seq)`) : ignoré, le curseur n'avance pas.
+    Duplicate,
+    /// D'un run antérieur (`generation` plus petite) : ignoré, ne réouvre pas le run.
+    Stale,
+    /// Après [`Event::Stopped`] : le run est clos, l'événement tardif ne le réouvre pas.
+    AfterStop,
+}
+
+/// Le rejoueur du flux d'enveloppes : il tient le curseur `(generation, seq)`, dédoublonne, et
+/// applique la règle « [`Event::Stopped`] est terminal ». C'est la brique de reprise par curseur
+/// du ticket #286, partagée par PO et les autres hôtes : une seconde numérotation n'est pas
+/// ouverte, le cœur ne la fournit pas, l'hôte la tient ici.
+///
+/// Il ne juge **jamais** un événement inconnu comme un succès ou un arrêt : un inconnu avance le
+/// curseur (`Application::Applied`) et laisse le run ouvert, parce qu'on ne sait pas ce qu'il
+/// clôt. Le succès et l'arrêt sont des faits d'un événement **connu** (`Event::Stopped`), rien
+/// d'autre.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct EventStream {
+    generation: Option<u64>,
+    last_seq: Option<u64>,
+    stopped: bool,
+}
+
+impl EventStream {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Le run courant, s'il y en a un.
+    pub fn generation(&self) -> Option<u64> {
+        self.generation
+    }
+
+    /// Le curseur `(generation, seq)` du dernier événement appliqué.
+    pub fn cursor(&self) -> Option<(u64, u64)> {
+        self.generation.zip(self.last_seq)
+    }
+
+    /// Vrai si le run courant a reçu son [`Event::Stopped`] (terminal).
+    pub fn stopped(&self) -> bool {
+        self.stopped
+    }
+
+    /// Consomme une enveloppe et dit ce qui en a été fait. Voir [`Application`].
+    pub fn apply(&mut self, env: &EventEnvelope) -> Application {
+        match self.generation {
+            None => {
+                self.generation = Some(env.generation);
+                self.last_seq = Some(env.seq);
+                self.stopped = env.is_stopped();
+                Application::Applied
+            }
+            Some(g) if env.generation < g => Application::Stale,
+            Some(g) if env.generation > g => {
+                // Un nouveau run remplace le précédent : il repart ouvert.
+                self.generation = Some(env.generation);
+                self.last_seq = Some(env.seq);
+                self.stopped = env.is_stopped();
+                Application::Applied
+            }
+            Some(_) => {
+                if self.stopped {
+                    return Application::AfterStop;
+                }
+                let last = self.last_seq.expect("posé avec generation");
+                if env.seq <= last {
+                    return Application::Duplicate;
+                }
+                self.last_seq = Some(env.seq);
+                self.stopped = env.is_stopped();
+                Application::Applied
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests_enveloppe {
+    use super::*;
+
+    fn enveloppe(generation: u64, seq: u64, json: &str) -> EventEnvelope {
+        EventEnvelope::new(generation, seq, EventJson::parse(json).expect("événement lisible"))
+    }
+
+    fn enveloppe_stopped(generation: u64, seq: u64) -> EventEnvelope {
+        let json = serde_json::to_string(&Event::Stopped {
+            stop: Stop::Done,
+            text: "fini".into(),
+            turns: 1,
+            ms: 0,
+            code: None,
+            verdict: None,
+        })
+        .unwrap();
+        enveloppe(generation, seq, &json)
+    }
+
+    #[test]
+    fn une_enveloppe_connue_fait_l_aller_retour() {
+        let env = enveloppe(3, 7, r#"{"type":"delta","text":"salut"}"#);
+        let json = env.to_json().unwrap();
+        assert_eq!(
+            json,
+            r#"{"version":1,"generation":3,"seq":7,"event":{"type":"delta","text":"salut"}}"#
+        );
+        let relu = EventEnvelope::parse(&json).unwrap();
+        assert_eq!(relu, env, "une enveloppe connue se relit à l'identique");
+        assert!(!relu.is_unknown());
+        assert!(!relu.is_stopped());
+    }
+
+    #[test]
+    fn la_version_de_l_enveloppe_est_sa_propre_constante() {
+        // Deux compteurs distincts (le flux vs l'état sauvegardé) : même valeur aujourd'hui,
+        // mais deux champs indépendants — changer l'un ne change pas l'autre.
+        assert_eq!(ENVELOPE_VERSION, 1);
+        let snapshot = Snapshot {
+            version: 2,
+            ..Snapshot::default()
+        };
+        let env = EventEnvelope::new(
+            1,
+            0,
+            EventJson::parse(r#"{"type":"delta","text":"x"}"#).unwrap(),
+        );
+        assert_eq!(snapshot.version, 2);
+        assert_eq!(
+            env.version, ENVELOPE_VERSION,
+            "la version de l'enveloppe ne suit pas celle du snapshot"
+        );
+    }
+
+    #[test]
+    fn une_version_d_enveloppe_future_est_refusee_nommement() {
+        let err = EventEnvelope::parse(
+            r#"{"version":2,"generation":1,"seq":0,"event":{"type":"delta","text":"x"}}"#,
+        )
+        .unwrap_err();
+        assert_eq!(
+            err,
+            EnvelopeError::Version {
+                vue: 2,
+                connue: 1
+            }
+        );
+    }
+
+    #[test]
+    fn un_champ_manquant_ou_mal_type_est_refuse_nommement() {
+        let par_defaut = r#"{"generation":1,"seq":0,"event":{"type":"delta","text":"x"}}"#;
+        let env = EventEnvelope::parse(par_defaut).unwrap();
+        assert_eq!(env.version, ENVELOPE_VERSION, "version absente vaut le défaut");
+
+        for brut in [
+            r#"{"seq":0,"event":{"type":"delta","text":"x"}}"#,
+            r#"{"generation":1,"event":{"type":"delta","text":"x"}}"#,
+            r#"{"generation":1,"seq":0}"#,
+            r#"{"generation":"un","seq":0,"event":{"type":"delta","text":"x"}}"#,
+        ] {
+            let err = EventEnvelope::parse(brut).unwrap_err();
+            assert!(matches!(err, EnvelopeError::Champ(_)), "{brut} → {err:?}");
+        }
+    }
+
+    #[test]
+    fn un_curseur_avance_de_facon_monotone() {
+        let mut flux = EventStream::new();
+        for seq in [0u64, 1, 2, 5] {
+            let env = enveloppe(3, seq, r#"{"type":"delta","text":"x"}"#);
+            assert_eq!(flux.apply(&env), Application::Applied, "seq {seq}");
+            assert_eq!(flux.cursor(), Some((3, seq)), "le curseur avance avec seq");
+        }
+    }
+
+    #[test]
+    fn un_doublon_n_est_applique_qu_une_fois() {
+        let mut flux = EventStream::new();
+        let env = enveloppe(3, 4, r#"{"type":"delta","text":"x"}"#);
+        assert_eq!(flux.apply(&env), Application::Applied);
+        assert_eq!(flux.apply(&env), Application::Duplicate, "même (generation, seq)");
+        assert_eq!(flux.cursor(), Some((3, 4)), "le doublon ne fait pas avancer le curseur");
+    }
+
+    #[test]
+    fn un_evenement_futur_avance_le_curseur_sans_marquer_l_arret_ni_un_succes() {
+        let mut flux = EventStream::new();
+        let env = enveloppe(9, 1, r#"{"type":"budget_projete","restant":42}"#);
+        assert!(env.is_unknown(), "le type est inconnu de cette version");
+        assert!(!env.is_stopped(), "un inconnu n'est jamais un arrêt");
+        assert_eq!(flux.apply(&env), Application::Applied);
+        assert_eq!(flux.cursor(), Some((9, 1)), "l'inconnu avance le curseur");
+        assert!(!flux.stopped(), "un inconnu ne clôt pas le run");
+    }
+
+    #[test]
+    fn un_evenement_futur_relaye_par_une_enveloppe_garde_type_et_payload() {
+        // `to_json` relaye l'inconnu octet pour octet — espaces compris — jamais
+        // `{"type":"Unknown"}` (le défaut que #301 laissait passer).
+        let brut = r#"{"type":"futur","x": 1}"#;
+        let env = EventEnvelope::new(5, 2, EventJson::parse(brut).unwrap());
+        assert_eq!(
+            env.to_json().unwrap(),
+            r#"{"version":1,"generation":5,"seq":2,"event":{"type":"futur","x": 1}}"#
+        );
+        // Relu, il reste un inconnu avec son type et son payload (fidélité `Value`).
+        let relu = EventEnvelope::parse(&env.to_json().unwrap()).unwrap();
+        assert!(relu.is_unknown());
+        assert_eq!(relu.event().unknown_type(), Some("futur"));
+        assert!(!relu.is_stopped(), "relu, il n'est toujours pas un arrêt");
+        let texte = relu.event().to_json().unwrap();
+        assert!(texte.contains("futur") && texte.contains("x"), "{texte}");
+    }
+
+    #[test]
+    fn stopped_est_terminal_et_un_evenement_tardif_ne_reouvre_pas_le_run() {
+        let mut flux = EventStream::new();
+        assert_eq!(
+            flux.apply(&enveloppe(4, 0, r#"{"type":"delta","text":"x"}"#)),
+            Application::Applied
+        );
+        assert_eq!(flux.apply(&enveloppe_stopped(4, 1)), Application::Applied);
+        assert!(flux.stopped(), "Stopped est terminal pour le run 4");
+        // Un événement tardif du même run, après l'arrêt, ne réouvre rien.
+        let tardif = enveloppe(4, 2, r#"{"type":"delta","text":"tardif"}"#);
+        assert_eq!(flux.apply(&tardif), Application::AfterStop);
+        assert_eq!(flux.cursor(), Some((4, 1)), "le curseur n'avance pas après l'arrêt");
+        assert!(flux.stopped(), "le run reste clos");
+    }
+
+    #[test]
+    fn un_evenement_d_un_ancien_run_est_ignore_sans_reouvrir() {
+        let mut flux = EventStream::new();
+        assert_eq!(
+            flux.apply(&enveloppe(1, 0, r#"{"type":"delta","text":"a"}"#)),
+            Application::Applied
+        );
+        assert_eq!(flux.apply(&enveloppe_stopped(1, 1)), Application::Applied);
+        // Un nouveau run (generation 2) repart ouvert.
+        assert_eq!(
+            flux.apply(&enveloppe(2, 0, r#"{"type":"delta","text":"b"}"#)),
+            Application::Applied
+        );
+        assert!(!flux.stopped(), "le nouveau run repart ouvert");
+        // Un événement tardif de l'ancien run n'y revient pas.
+        let ancien = enveloppe(1, 2, r#"{"type":"delta","text":"retard"}"#);
+        assert_eq!(flux.apply(&ancien), Application::Stale);
+        assert_eq!(flux.cursor(), Some((2, 0)), "le curseur reste sur le run courant");
+    }
+
+    #[test]
+    fn une_reconnexion_entre_tooluse_et_toolresult_ne_duplique_pas_la_bulle() {
+        // Le transport livre ToolUse, coupe, puis rejoue ToolUse avant ToolResult : le doublon
+        // est ignoré (aucune bulle dupliquée) et le résultat s'applique une seule fois.
+        let mut flux = EventStream::new();
+        let usage = enveloppe(
+            3,
+            0,
+            r#"{"type":"tool_use","id":"a1","tool":"lire","input":{"p":"x"}}"#,
+        );
+        assert_eq!(flux.apply(&usage), Application::Applied);
+        // Rejeu du même ToolUse après reconnexion.
+        assert_eq!(flux.apply(&usage), Application::Duplicate, "pas de bulle dupliquée");
+        let resultat = enveloppe(
+            3,
+            1,
+            r#"{"type":"tool_result","id":"a1","tool":"lire","text":"ok","refused":false,"failed":false,"unchanged":false,"before":"","after":"","ms":1}"#,
+        );
+        assert_eq!(flux.apply(&resultat), Application::Applied);
+        assert_eq!(flux.cursor(), Some((3, 1)), "le résultat corrèle l'appel, une seule fois");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

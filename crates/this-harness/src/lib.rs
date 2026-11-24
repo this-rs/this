@@ -85,7 +85,7 @@ pub use embed::{
     Embed, EmbedError, EmbeddingModel, SansEmbed, vecteur_dense, vectoriser, verifier,
     verifier_espace,
 };
-pub use event::{Event, EventJson, EventWire, HintKind, Outcome, Pending, Snapshot, UnknownEvent};
+pub use event::{Application, EnvelopeError, EventEnvelope, EventStream, Event, EventJson, EventWire, HintKind, Outcome, Pending, Snapshot, UnknownEvent, ENVELOPE_VERSION};
 pub use mcp::{McpLink, McpServer, McpToolbox};
 pub use ports::{
     Besoin, Cancel, Cancelled, Compactor, Delta, Isolation, Permission, ProfilRuntime, Recorder,

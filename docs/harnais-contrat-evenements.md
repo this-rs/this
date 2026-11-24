@@ -141,6 +141,17 @@ Décisions, tranchées explicitement :
   `un_type_connu_au_payload_incomplet_est_une_erreur_pas_un_inconnu`,
   `une_forme_relayee_par_une_version_precedente_reste_lisible`.
 
+  **Enveloppe écrite depuis : `EventEnvelope` + `EventStream`** (`event.rs`), l'enveloppe réseau
+  version/identité/curseur décidée ci-dessus, désormais un type du crate — le contrat partagé par
+  PO et les autres hôtes, pas une seconde numérotation du cœur. `EventEnvelope` porte `version`
+  (schéma à elle, `ENVELOPE_VERSION`, distincte de `Snapshot.version`), `generation` (l'identité
+  de run, réutilisée de `Handle::generation()`), `seq` (le curseur dans le run, posé par l'hôte)
+  et un `EventJson` (un inconnu reste donc relayé octet pour octet par `to_json`). `EventStream::apply`
+  tient le curseur, dédoublonne (`Duplicate`), ignore un run antérieur (`Stale`), refuse de réouvrir
+  après `Stopped` (`AfterStop`), et ne juge jamais un inconnu comme un succès ni un arrêt.
+  Preuves : les 11 tests de `tests_enveloppe` (aller-retour, curseur monotone, doublon, événement
+  futur conservé, `Stopped` terminal, ancien run ignoré, reconnexion ToolUse/ToolResult).
+
 ## 4. Scénarios d'acceptation
 
 | # | Scénario | Verdict | Preuve (test exact, fichier:ligne) ou manque |
