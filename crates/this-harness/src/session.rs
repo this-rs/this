@@ -1297,12 +1297,13 @@ impl Harness {
     }
 
     /// Retire ou remplace les autorisations installées (#287). Une révocation
-    /// (`Grant::refused`) vaut pour le PROCHAIN appel à la porte de la boucle, et se
+    /// (`Grant::refused`) vaut pour le PROCHAIN appel à la porte — celle de la boucle comme
+    /// celle d'un transport de la famille A, qui lit cet état à chaque `allows` — et se
     /// sauvegarde dans le [`Snapshot`] : elle survit donc à un redémarrage.
     ///
-    /// Limite : un transport qui exécute ses outils lui-même (famille A) garde la copie
-    /// prise au démarrage de son run ; une révocation faite pendant ce run ne l'atteint pas
-    /// avant le run suivant.
+    /// Une révocation faite PENDANT le flux d'un moteur famille A l'atteint au prochain
+    /// appel d'outil du même run (avant #287, cette porte gardait la copie prise au
+    /// démarrage du run et ne la voyait qu'au run suivant).
     pub fn set_grants(&self, grants: this_agent::substrate::Grants) {
         *self.grants.borrow_mut() = Some(grants);
     }
@@ -1594,7 +1595,9 @@ impl Harness {
             // `run_tool`, hors-bande. Un transport qui n'exécute pas les outils
             // lui-même l'ignore (`Transport::set_permission` est un défaut no-op).
             transport.set_permission(Rc::new(RunPorts {
-                grants: self.grants.borrow().clone(),
+                // L'ÉTAT, pas une copie : une révocation faite pendant le flux doit
+                // atteindre cette porte au prochain appel (même règle que `gate`).
+                grants: self.grants.clone(),
                 toolbox: toolbox.clone(),
                 vus: self.vus.clone(),
                 run: run.clone(),
@@ -2983,7 +2986,10 @@ fn gate_decision(
 /// La porte qu'un transport de la famille A reçoit pendant le flux : la même
 /// décision que [`Harness::gate`], et la même journalisation que `run_tool`.
 struct RunPorts {
-    grants: Option<this_agent::substrate::Grants>,
+    /// Le MÊME état que le harnais : relu à chaque `allows`, jamais recopié au
+    /// démarrage du run. Une copie rendait la porte du flux aveugle aux révocations
+    /// faites pendant le flux — la boucle, elle, les voyait (case b de #287).
+    grants: Shared<Option<this_agent::substrate::Grants>>,
     toolbox: Rc<dyn Toolbox>,
     /// Le même registre que la boucle : un transport de la famille A exécute
     /// SES outils pendant le flux, donc c'est ici — pas dans `pump` — que leurs
@@ -3007,7 +3013,11 @@ struct RunPorts {
 impl Permission for RunPorts {
     fn allows(&self, tool: &str) -> Result<(), String> {
         let dynamiques = self.toolbox.grants();
-        let effectives = dynamiques.as_ref().or(self.grants.as_ref());
+        // Recopié hors du `RefCell` avant toute émission : un hôte qui répond à une
+        // demande de permission depuis le rappel d'événement écrit dans ce même
+        // `RefCell`, et garder l'emprunt le ferait paniquer.
+        let installees = self.grants.borrow().clone();
+        let effectives = dynamiques.as_ref().or(installees.as_ref());
         let declarations = self.toolbox.declarations();
         if demande_necessaire(effectives, &declarations, tool) {
             let id = demander(&self.asks, &self.out, tool);
