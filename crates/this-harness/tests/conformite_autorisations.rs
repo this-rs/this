@@ -909,6 +909,28 @@ impl Toolbox for MuetteQuiAccorde {
     }
 }
 
+/// Une part qui expose l'outil et ne porte AUCUN droit (le défaut du trait) : elle ne doit
+/// pas rendre « rien n'est vérifié » à une composition où une autre part accorde hors domaine.
+struct OutilSansDroits {
+    outil: Rc<Outil>,
+}
+
+#[async_trait(?Send)]
+impl Toolbox for OutilSansDroits {
+    fn specs(&self) -> Vec<ToolSpec> {
+        self.outil.specs()
+    }
+    fn declarations(&self) -> Vec<Declaration> {
+        self.outil.declarations()
+    }
+    async fn call(&self, call: &ToolCall) -> Outcome {
+        self.outil.call(call).await
+    }
+    async fn call_with_cancel(&self, call: &ToolCall, cancel: &Cancel) -> Outcome {
+        self.outil.call_with_cancel(call, cancel).await
+    }
+}
+
 #[test]
 fn cas5_un_outillage_seul_porte_ses_grants_dynamiques() {
     let grants = Rc::new(RefCell::new(Grants::new()));
@@ -1018,5 +1040,41 @@ fn cas5_une_part_qui_n_expose_rien_ne_ressuscite_aucun_droit() {
         outil.effets.get(),
         0,
         "une part qui n'expose aucun outil ne peut accorder aucun droit"
+    );
+}
+
+/// Le défaut fermé : des droits qui ne visent que les outils d'une AUTRE part laissent la
+/// composition fermée (`Some` vide), jamais « rien n'est vérifié » (`None`, qui ouvrirait tout).
+#[test]
+fn cas5_des_droits_hors_domaine_laissent_la_composition_fermee() {
+    let sans_droits = Rc::new(OutilSansDroits {
+        outil: Outil::new(),
+    });
+    let outil = sans_droits.outil.clone();
+    let muette = Rc::new(MuetteQuiAccorde {
+        grants: Rc::new(RefCell::new({
+            let mut g = Grants::new();
+            g.put(Grant::granted(OUTIL, "user"));
+            g
+        })),
+    });
+    let composes = Rc::new(
+        Toolboxes::new()
+            .with(sans_droits as Rc<dyn Toolbox>)
+            .with(muette as Rc<dyn Toolbox>),
+    );
+    let harnais = Harness::new(
+        "sys",
+        Limits::default(),
+        Script::new(vec![demande(), fini()]),
+        composes,
+        |_| {},
+    );
+    futures::executor::block_on(harnais.send("écris"));
+    assert_eq!(
+        outil.effets.get(),
+        0,
+        "un droit hors domaine ne doit pas se transformer en « aucun droit vérifié » : \
+         la composition rend une liste VIDE (tout refusé), pas `None` (tout permis)"
     );
 }
