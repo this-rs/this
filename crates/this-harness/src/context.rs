@@ -22,7 +22,7 @@
 //! caractère ; un budget doit donc garder une marge sous la limite réelle du
 //! moteur.
 
-use crate::wire::Message;
+use crate::wire::{Message, Request, ToolSpec};
 
 /// Caractères par jeton supposés (texte courant latin).
 const CHARS_PAR_JETON: usize = 4;
@@ -32,6 +32,9 @@ const COUT_MESSAGE: usize = 4;
 const COUT_APPEL: usize = 4;
 /// Forfait par image : leur coût réel dépend de la taille, que l'on ne lit pas.
 const COUT_IMAGE: usize = 1000;
+/// Coût fixe d'un outil présenté au modèle : nom, description et schéma sont
+/// encadrés par le protocole, et un schéma vide n'est pas gratuit.
+const COUT_OUTIL: usize = 4;
 
 /// DÉFAUT corrigé : tout caractère comptait un quart de jeton. Le CJK, les emoji et
 /// l'écriture non latine coûtent environ un jeton PAR caractère : 4 000 idéogrammes
@@ -71,6 +74,45 @@ pub fn estimate_tokens(messages: &[Message]) -> usize {
         .iter()
         .map(cout_message)
         .fold(0usize, usize::saturating_add)
+}
+
+/// Coût estimé d'une **surface d'outils** : ce que les schémas ajoutent à chaque
+/// requête, et que le fil ne contient pas.
+///
+/// POURQUOI cette estimation existe : `fit` ne voit que des messages. Or un tour
+/// envoie aussi `Toolbox::specs()` (`wire.rs`), et une surface large pèse plus
+/// qu'une conversation courte. Tant que ce coût n'était nulle part, le harnais
+/// pouvait annoncer « sous budget » une requête plus grosse que la fenêtre du
+/// moteur — mesuré : 10 outils ≈ 1 370 jetons, soit 45 % d'un budget de 3 000
+/// pris hors du compte (`tests/budget_requete.rs`).
+///
+/// Même heuristique que le texte : ≈ 4 caractères par jeton ASCII, un jeton par
+/// caractère non ASCII, plus un coût fixe par outil (les délimiteurs du protocole).
+pub fn estimate_tools_tokens(specs: &[ToolSpec]) -> usize {
+    specs
+        .iter()
+        .map(|outil| {
+            // Le schéma est sérialisé comme le transport l'écrira : le compte ne
+            // doit pas dépendre de la forme en mémoire.
+            let corps = format!(
+                "{}{}{}",
+                outil.name,
+                outil.description,
+                outil.parameters.to_string()
+            );
+            COUT_OUTIL.saturating_add(jetons_texte(&corps))
+        })
+        .fold(0usize, usize::saturating_add)
+}
+
+/// Coût estimé de la **requête envoyée** : le fil tel que le moteur le lit
+/// ([`Request::thread`] : consigne système comprise) **plus** les schémas d'outils.
+///
+/// C'est le chiffre que `context_budget` doit borner, et celui qu'un test doit
+/// mesurer pour dire quelque chose du tour réel. L'appeler sur la requête d'un
+/// transport est la façon honnête de vérifier « la borne a mordu ».
+pub fn estimate_request_tokens(request: &Request) -> usize {
+    estimate_tokens(&request.thread()).saturating_add(estimate_tools_tokens(request.tools()))
 }
 
 /// Ce qu'un ajustement a retiré, et s'il a dû dépasser le budget.

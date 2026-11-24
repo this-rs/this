@@ -2617,19 +2617,30 @@ impl Harness {
                 s.limits.context_budget,
             )
         });
+        // Une seule lecture de la surface : ce qui est compté est exactement ce qui
+        // part. Deux appels pourraient rendre deux surfaces (un outillage qui
+        // découvre ses outils à la première lecture) — le compte et l'envoi
+        // divergeraient alors en silence.
+        let specs = toolbox.specs();
         let messages = match budget {
             None => messages,
             Some(budget) => {
-                // Le coût fixe ajouté APRÈS le fit — la consigne système et le
+                // Le coût fixe ajouté APRÈS le fit — la consigne système, le
                 // contexte éphémère, l'un et l'autre un `Message::System` dans le
-                // fil — est réservé avant de choisir l'historique. Sans cette
+                // fil, ET les schémas d'outils, qui ne sont pas des messages du
+                // tout — est réservé avant de choisir l'historique. Sans cette
                 // réserve, `fit` ramenait le transcript seul sous le budget, et la
-                // requête assemblée (`Request::thread`) le dépassait d'autant, en
-                // silence. Les schémas d'outils ne sont PAS réservés : ils ne font
-                // pas partie du fil, et ce budget compte les jetons du fil — un
-                // hôte aux outils très nombreux règle `context_budget` en
-                // conséquence.
-                let reserve = cout_fixe(&system, context.as_deref());
+                // requête assemblée (`Request::thread` + `Request::tools`) le
+                // dépassait d'autant, en silence.
+                //
+                // Les schémas étaient explicitement EXCLUS jusqu'ici (mesuré :
+                // 10 outils ≈ 1 370 jetons, soit 45 % d'un budget de 3 000 partis
+                // hors du compte, `tests/budget_requete.rs`). Un budget qui ne
+                // compte pas ce que le moteur reçoit n'est pas un budget : c'est un
+                // espoir. Un hôte qui veut garder son fil plus long baisse sa surface
+                // d'outils ou monte `context_budget` — il voit le chiffre.
+                let reserve = cout_fixe(&system, context.as_deref())
+                    .saturating_add(crate::context::estimate_tools_tokens(&specs));
                 let budget_effectif = budget.saturating_sub(reserve);
                 // D'abord résumer ce qui serait jeté ; en cas d'échec, `fit` seul.
                 // `compact` et `fit` reçoivent le MÊME budget effectif : leurs
@@ -2662,7 +2673,7 @@ impl Harness {
                 fitted.kept
             }
         };
-        Request::new(system, messages, toolbox.specs()).with_context(context)
+        Request::new(system, messages, specs).with_context(context)
     }
 
     /// Tente de résumer ce que `fit` retirerait de `messages` (voir

@@ -77,7 +77,10 @@ pub use catalogue::{
 pub use catalogue_toolbox::{
     AUTHOR, AUTO_LOAD, CatalogToolbox, DEFAULT_FIND_LIMIT, DEFAULT_MAX_LOADED, FIND, PREFIX,
 };
-pub use context::{Dropped, Fitted, Removal, estimate_tokens, fit, removable};
+pub use context::{
+    Dropped, Fitted, Removal, estimate_request_tokens, estimate_tokens, estimate_tools_tokens, fit,
+    removable,
+};
 pub use embed::{
     Embed, EmbedError, EmbeddingModel, SansEmbed, vecteur_dense, vectoriser, verifier,
     verifier_espace,
