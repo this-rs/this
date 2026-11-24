@@ -719,7 +719,11 @@ impl EventEnvelope {
                 .as_u64()
                 .and_then(|v| u32::try_from(v).ok())
                 .ok_or_else(|| EnvelopeError::Champ("« version » doit être un entier".into()))?,
-            Some(_) => return Err(EnvelopeError::Champ("« version » doit être un nombre".into())),
+            Some(_) => {
+                return Err(EnvelopeError::Champ(
+                    "« version » doit être un nombre".into(),
+                ));
+            }
         };
         if version > ENVELOPE_VERSION {
             return Err(EnvelopeError::Version {
@@ -891,7 +895,11 @@ mod tests_enveloppe {
     use super::*;
 
     fn enveloppe(generation: u64, seq: u64, json: &str) -> EventEnvelope {
-        EventEnvelope::new(generation, seq, EventJson::parse(json).expect("événement lisible"))
+        EventEnvelope::new(
+            generation,
+            seq,
+            EventJson::parse(json).expect("événement lisible"),
+        )
     }
 
     fn enveloppe_stopped(generation: u64, seq: u64) -> EventEnvelope {
@@ -948,20 +956,17 @@ mod tests_enveloppe {
             r#"{"version":2,"generation":1,"seq":0,"event":{"type":"delta","text":"x"}}"#,
         )
         .unwrap_err();
-        assert_eq!(
-            err,
-            EnvelopeError::Version {
-                vue: 2,
-                connue: 1
-            }
-        );
+        assert_eq!(err, EnvelopeError::Version { vue: 2, connue: 1 });
     }
 
     #[test]
     fn un_champ_manquant_ou_mal_type_est_refuse_nommement() {
         let par_defaut = r#"{"generation":1,"seq":0,"event":{"type":"delta","text":"x"}}"#;
         let env = EventEnvelope::parse(par_defaut).unwrap();
-        assert_eq!(env.version, ENVELOPE_VERSION, "version absente vaut le défaut");
+        assert_eq!(
+            env.version, ENVELOPE_VERSION,
+            "version absente vaut le défaut"
+        );
 
         for brut in [
             r#"{"seq":0,"event":{"type":"delta","text":"x"}}"#,
@@ -989,8 +994,16 @@ mod tests_enveloppe {
         let mut flux = EventStream::new();
         let env = enveloppe(3, 4, r#"{"type":"delta","text":"x"}"#);
         assert_eq!(flux.apply(&env), Application::Applied);
-        assert_eq!(flux.apply(&env), Application::Duplicate, "même (generation, seq)");
-        assert_eq!(flux.cursor(), Some((3, 4)), "le doublon ne fait pas avancer le curseur");
+        assert_eq!(
+            flux.apply(&env),
+            Application::Duplicate,
+            "même (generation, seq)"
+        );
+        assert_eq!(
+            flux.cursor(),
+            Some((3, 4)),
+            "le doublon ne fait pas avancer le curseur"
+        );
     }
 
     #[test]
@@ -1035,7 +1048,11 @@ mod tests_enveloppe {
         // Un événement tardif du même run, après l'arrêt, ne réouvre rien.
         let tardif = enveloppe(4, 2, r#"{"type":"delta","text":"tardif"}"#);
         assert_eq!(flux.apply(&tardif), Application::AfterStop);
-        assert_eq!(flux.cursor(), Some((4, 1)), "le curseur n'avance pas après l'arrêt");
+        assert_eq!(
+            flux.cursor(),
+            Some((4, 1)),
+            "le curseur n'avance pas après l'arrêt"
+        );
         assert!(flux.stopped(), "le run reste clos");
     }
 
@@ -1056,7 +1073,11 @@ mod tests_enveloppe {
         // Un événement tardif de l'ancien run n'y revient pas.
         let ancien = enveloppe(1, 2, r#"{"type":"delta","text":"retard"}"#);
         assert_eq!(flux.apply(&ancien), Application::Stale);
-        assert_eq!(flux.cursor(), Some((2, 0)), "le curseur reste sur le run courant");
+        assert_eq!(
+            flux.cursor(),
+            Some((2, 0)),
+            "le curseur reste sur le run courant"
+        );
     }
 
     #[test]
@@ -1071,14 +1092,22 @@ mod tests_enveloppe {
         );
         assert_eq!(flux.apply(&usage), Application::Applied);
         // Rejeu du même ToolUse après reconnexion.
-        assert_eq!(flux.apply(&usage), Application::Duplicate, "pas de bulle dupliquée");
+        assert_eq!(
+            flux.apply(&usage),
+            Application::Duplicate,
+            "pas de bulle dupliquée"
+        );
         let resultat = enveloppe(
             3,
             1,
             r#"{"type":"tool_result","id":"a1","tool":"lire","text":"ok","refused":false,"failed":false,"unchanged":false,"before":"","after":"","ms":1}"#,
         );
         assert_eq!(flux.apply(&resultat), Application::Applied);
-        assert_eq!(flux.cursor(), Some((3, 1)), "le résultat corrèle l'appel, une seule fois");
+        assert_eq!(
+            flux.cursor(),
+            Some((3, 1)),
+            "le résultat corrèle l'appel, une seule fois"
+        );
     }
 }
 
