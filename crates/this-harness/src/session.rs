@@ -120,6 +120,13 @@ pub trait Clock {
     /// chiens de garde sont alors éteints et les relances partent sans délai.
     fn sleep(&self, ms: u64) -> Option<Sleep>;
 
+    /// Le délai (silence, budget) s'applique-t-il RÉELLEMENT sur cette horloge (#285) ?
+    /// Vrai par défaut ; une horloge sans minuteur doit le dire, sinon le harnais annoncerait
+    /// un délai qu'il ne peut pas tenir.
+    fn has_timer(&self) -> bool {
+        true
+    }
+
     /// Un nonce frais pour cloisonner un texte d'outil recopié dans un indice
     /// du harnais (motif de refus, cause d'échec), 32 hex attendus.
     ///
@@ -168,6 +175,10 @@ impl Clock for SystemClock {
     #[cfg(target_arch = "wasm32")]
     fn sleep(&self, _ms: u64) -> Option<Sleep> {
         None
+    }
+
+    fn has_timer(&self) -> bool {
+        cfg!(not(target_arch = "wasm32"))
     }
 }
 
@@ -1248,6 +1259,23 @@ impl Harness {
         self.handle().enqueue_with_images(text, images);
         if !self.claim() {
             return Running::Queued;
+        }
+        // #285 : le profil de CET hôte est confronté au besoin « délai ». Sans minuteur, le
+        // délai ne peut pas être tenu : on le DIT à l'hôte, et le run continue (garantie
+        // dégradée explicite, décision enregistrée) — jamais « délai annoncé mais inapplicable ».
+        let profil = crate::ports::ProfilRuntime {
+            minuteur: self.clock.has_timer(),
+            annulation: true,
+            isolation: crate::ports::Isolation::Aucune,
+            supervision: false,
+        };
+        if let Err(refus) = profil.exiger(crate::ports::Besoin::Delai) {
+            self.out.emit(Event::Hint {
+                kind: HintKind::Other,
+                text: format!(
+                    "délai non appliqué ({refus:?}) : cet hôte n'a pas de minuteur, le run n'a pas de borne temporelle."
+                ),
+            });
         }
         match self.pump().await {
             Some(stop) => Running::Ran(stop),
