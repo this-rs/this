@@ -71,11 +71,8 @@ Les manifestes se résolvent par chemin relatif. La disposition attendue sur le 
 └── this-examples/     # path = ../this
 ```
 
-La feature optionnelle `obrain` ajoute un voisin :
-
-```
-<parent>/../obrain/obrain-db/   # obrain-engine, -core, -common, -substrate, -adapters, -reactive
-```
+La feature optionnelle `obrain` n'ajoute **plus** de voisin : les six crates `obrain-*` sont des
+dépendances git épinglées (`obrain-db/obrain`, rev `f0d6e132…`), récupérées par cargo.
 
 La feature `frontend` n'en ajoute **plus** : `this-vite` est une dépendance git épinglée
 (`this-rs/vite-rs`, dépôt public), récupérée par cargo comme n'importe quel crate.
@@ -241,32 +238,34 @@ positif partiel.
 - Matrice OS/architecture, artefacts, sommes de contrôle, installation,
   démarrage, mise à jour et retour arrière : rien de tout cela n'est mesuré ici.
 
-## Disposition des dossiers : les checkouts frères (bootstrap)
+## Disposition des dossiers : plus aucun checkout frère
 
-`this/Cargo.toml` référence un dépôt **voisin** par `path`, pour la feature optionnelle `obrain` :
+Depuis que `obrain` et `vite-rs` sont des dépendances **git épinglées** (rev), `this/Cargo.toml`
+ne référence plus aucun dépôt voisin par `path`. Il n'y a donc rien à cloner ni à disposer.
 
-| Feature | Dépendances | Où |
+| Feature | Dépendances | Source |
 |---|---|---|
-| `obrain` | `obrain-engine`, `obrain-core`, `obrain-substrate`, … | `../../obrain/obrain-db/crates/…` (checkout frère) |
-| `frontend` | `this-vite` | dépendance **git épinglée** (`this-rs/vite-rs`), aucun checkout |
+| `obrain` | `obrain-engine`, `obrain-core`, `obrain-substrate`, … | git `obrain-db/obrain` @ `f0d6e132666d34d63824a46ad2a5119416b0afb4` |
+| `frontend` | `this-vite` | git `this-rs/vite-rs` @ `dcf233cd154ed7416338c9141736ff9efa19f199` |
 
-Un build **par défaut** n'a besoin d'aucun voisin. `--features obrain` échoue si le dossier d'obrain manque — mesuré le 21/11 : `cargo metadata --features obrain` depuis un clone sans voisins rend **code 101**. `--features frontend` n'a plus ce défaut depuis que `this-vite` est épinglé par `git` + `rev` (même motif que WAMI : le hash fixe le code, la `version` est celle résolue à la publication).
+**Preuve** (clone propre, aucun dossier voisin, 24/11/2026) : `cargo metadata` réussit ;
+`cargo check --features obrain` compile les six crates récupérées sur GitHub au rev épinglé ;
+`cargo check --features frontend` compile `this-vite` au rev épinglé, et `frontend_surface` passe (4/4).
 
-Pour travailler sur vite-rs **en local** sans toucher le manifeste, dans `.cargo/config.toml` :
+**Conséquence assumée** : cargo a besoin du réseau (GitHub) pour résoudre le manifeste, même avec
+les features éteintes, dès qu'un lockfile manque. Les dépôts sont publics.
+
+**Développer obrain ou vite-rs en local** sans toucher le manifeste, dans `.cargo/config.toml` :
 
 ```toml
+[patch."https://github.com/obrain-db/obrain"]
+obrain-engine = { path = "../obrain/obrain-db/crates/obrain-engine" }
+# … idem pour les autres crates obrain-* utilisées
+
 [patch."https://github.com/this-rs/vite-rs.git"]
-this-vite = { path = "../../vite-rs" }
+this-vite = { path = "../vite-rs" }
 ```
 
-**`scripts/bootstrap-dev.sh`** clone `obrain` au SHA épinglé, dans la disposition attendue, à côté de `this/` :
-
-- `obrain` → `../obrain/obrain-db/` (dépôt `obrain-db/obrain`).
-
-Il est **idempotent**, ne touche **jamais** un checkout présent à un autre SHA (une copie de travail peut être en cours — `--force` pour aligner), et n'écrit **aucun chemin personnel**. Les épingles sont des **SHA complets** (un SHA abrégé échoue au `git fetch --depth 1`), surchargeables par `OBRAIN_REV` :
-
-- obrain `f0d6e132666d34d63824a46ad2a5119416b0afb4`
-
-`vite-rs` n'est plus cloné : son SHA `dcf233cd154ed7416338c9141736ff9efa19f199` est épinglé dans `Cargo.toml` (`rev`).
-
-Cela couvre le premier critère de #289 (« build depuis un répertoire temporaire sans checkouts frères, par un bootstrap documenté et SHAs épinglés »). La matrice OS/architecture, les artefacts, sommes de contrôle et l'installation/mise à jour/retour arrière restent hors de ce document.
+**Publication** : les six `obrain-*` ne sont **pas sur crates.io** : `cargo package` / `publish` refusent
+de publier `this` tant qu'elles n'y sont pas. C'est inchangé par le passage en git (le registre
+reste la contrainte) ; `release.yml` exclut `obrain` pour cette raison.

@@ -684,8 +684,8 @@ jobs:
           targets: wasm32-unknown-unknown
 
       # Ce job ne chargeait jusqu’ici que des crates à `[workspace]` propre, donc jamais
-      # le manifeste racine. Le manifeste racine, lui, tire `../../obrain/…` et
-      # `../../vite-rs`, absents du runner : mêmes doublures que tous les autres jobs.
+      # le manifeste racine. obrain et vite-rs y sont désormais des dépendances git
+      # ÉPINGLÉES (rev) : cargo les récupère, aucune doublure ni checkout frère.
       - name: Create local dep stubs
         run: bash .github/create-local-dep-stubs.sh
 
@@ -791,7 +791,7 @@ jobs:
           cargo test -p this-harness --target wasm32-unknown-unknown --test navigateur
 
   # Le backend obrain est le seul dont les dépendances ne sont pas sur crates.io :
-  # `Cargo.toml` les déclare par PATH (`../../obrain/obrain-db/crates/...`). Deux
+  # `Cargo.toml` les déclare par GIT épinglé (rev) — plus par PATH. Deux
   # conséquences qu'aucun job ne couvrait :
   #   - `release.yml` EXCLUT `obrain` du feature-powerset
   #     (`--exclude-features all,frontend,obrain,obrain-cognitive`) et la suite de

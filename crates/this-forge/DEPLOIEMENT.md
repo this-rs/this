@@ -26,8 +26,8 @@ Pas de redirection de port, pas de tunnel : joignable depuis le LAN uniquement.
 rsync -a --delete --exclude target/ --exclude .git/ <worktree>/ ffs-n2:forge/src/
 
 # 1. sur n2 : la copie de build ne doit pas dépendre de dépôts voisins absents
-#    (le Cargo.toml racine déclare des dépendances optionnelles par chemin hors dépôt :
-#    ../../obrain, ../../vite-rs — cargo les charge même feature éteinte). On les retire
+#    (le Cargo.toml racine déclare obrain et vite-rs en dépendances git optionnelles :
+#    cargo les résout — donc les récupère — même feature éteinte). On les retire
 #    de la COPIE, jamais du dépôt :
 cd ~/forge/src && sh crates/this-forge/deploy-strip-obrain.sh .
 
