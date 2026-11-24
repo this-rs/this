@@ -243,35 +243,49 @@ fn is_approved_strict_accepte_un_document_entierement_digeste() {
     assert_eq!(d.is_approved_strict(&trusted), Verdict::Allow);
 }
 
-/// Revue de #324 : la map `approval.digests` que `is_approved` compare vit dans `self.approval`,
-/// le champ du DOCUMENT. Elle est hors empreinte (`fingerprint()` retire `approval`) et jamais
-/// confrontée à `trusted.digests`. Ce test fixe cet état : la map n'est PAS authentifiée par
-/// l'hôte. La vider côté document, ou faire diverger `trusted.digests`, ne change pas le verdict.
-/// (Politique à décider : la rendre probante en comparant `trusted.digests`, ou la retirer.)
+/// #287 (case e), POLITIQUE TRANCHÉE : l'autorité sur le CONTENU est l'enregistrement de
+/// l'hôte (`trusted.digests`), pas la map `approval.digests` du document. Celle-ci vit hors
+/// empreinte et n'est écrite par personne de fiable : la lire comme une preuve, c'était laisser
+/// le document décider de ce qui est épinglé. Ce test la remplace : ce que l'hôte a enregistré
+/// fait foi, et une divergence est refusée en nommant l'emplacement.
+///
+/// (Antérieur à #287 : `la_map_digests_de_l_approbation_n_est_pas_authentifiee_par_l_hote`,
+/// qui fixait le manque — voir `docs/harnais-autorisations.md`, décision de la case (e).)
 #[test]
-fn la_map_digests_de_l_approbation_n_est_pas_authentifiee_par_l_hote() {
-    let (mut d, mut trusted) = approuve(doc_avec_digests(), "ops");
+fn un_contenu_qui_ne_correspond_pas_a_l_enregistrement_de_l_hote_est_refuse_et_nomme() {
+    let (d, mut trusted) = approuve(doc_avec_digests(), "ops");
     assert_eq!(d.is_approved(&trusted), Verdict::Allow, "ligne de base");
 
-    // Le document vide sa propre map : l'empreinte ne bouge pas, le verdict non plus.
+    // L'hôte a enregistré un AUTRE contenu pour `pol` : les deux ne peuvent pas être vrais.
+    trusted[0].digests.insert("pol".into(), "AUTRE".into());
+    let m = motif(d.is_approved(&trusted));
+    assert!(
+        m.contains("policy:pol@1.0.0"),
+        "le refus nomme l'emplacement : {m}"
+    );
+    assert!(
+        m.contains("a changé depuis l'approbation"),
+        "le motif dit que le CONTENU a bougé : {m}"
+    );
+}
+
+/// Le pendant : vider la map du document ne retire pas l'épingle, parce qu'elle n'est plus
+/// la source. L'empreinte approuvée (qui porte `slot.digest`) et `trusted.digests` suffisent.
+#[test]
+fn vider_la_map_du_document_ne_retire_pas_l_epingle_de_contenu() {
+    let (mut d, trusted) = approuve(doc_avec_digests(), "ops");
     d.approval.as_mut().unwrap().digests.clear();
     assert_eq!(
-        d.fingerprint(),
-        trusted[0].fingerprint,
-        "approval est hors empreinte"
-    );
-    assert_eq!(
         d.is_approved(&trusted),
         Verdict::Allow,
-        "la map du document est une affirmation : la vider ne coûte rien"
+        "vider la map du document ne change pas le verdict : elle n'est pas la source"
     );
-
-    // L'hôte, lui, tient d'autres digests : ils ne sont jamais lus.
-    trusted[0].digests.insert("pol".into(), "AUTRE".into());
-    assert_eq!(
-        d.is_approved(&trusted),
-        Verdict::Allow,
-        "trusted.digests n'est pas comparé"
+    // Le contenu déclaré bouge quand même : c'est l'hôte qui le voit, et il le nomme.
+    d.slots[0].digest = Some("republie".into());
+    let m = motif(d.is_approved(&trusted));
+    assert!(
+        m.contains("policy:pol@1.0.0"),
+        "l'emplacement est nommé par l'enregistrement de l'hôte : {m}"
     );
 }
 
@@ -280,8 +294,12 @@ fn la_map_digests_de_l_approbation_n_est_pas_authentifiee_par_l_hote() {
 /// un digest d'emplacement change l'empreinte et fait refuser.
 #[test]
 fn c_est_le_digest_de_l_emplacement_dans_l_empreinte_qui_epingle_le_contenu_declare() {
-    let (mut d, trusted) = approuve(doc_avec_digests(), "ops");
+    let (mut d, mut trusted) = approuve(doc_avec_digests(), "ops");
+    // Ni la map du document, NI l'enregistrement de l'hôte : seul `slot.digest`, dans
+    // l'empreinte approuvée, peut encore refuser. Sinon ce test passerait par le contrôle
+    // de contenu (#287) et ne prouverait plus ce que son nom annonce.
     d.approval.as_mut().unwrap().digests.clear();
+    trusted[0].digests.clear();
     d.slots[0].digest = Some("republie".into());
     let m = motif(d.is_approved(&trusted));
     assert!(
@@ -305,5 +323,26 @@ fn retirer_un_approbateur_de_la_liste_de_l_hote_revoque_son_approbation() {
     assert!(
         motif(d.is_approved(&revoquee)).contains("inconnu"),
         "révoquée : la même composition est refusée, nommément"
+    );
+}
+
+/// La branche symétrique de la précédente : l'hôte a épinglé un contenu, et le document
+/// n'en déclare plus. Ce n'est pas « rien à vérifier », c'est **l'épingle qui a disparu** :
+/// le refus le dit et nomme l'emplacement, avant même de parler d'empreinte.
+#[test]
+fn un_emplacement_qui_a_perdu_son_digest_depuis_l_approbation_est_refuse_et_nomme() {
+    let (mut d, trusted) = approuve(doc_avec_digests(), "ops");
+    assert_eq!(d.is_approved(&trusted), Verdict::Allow, "ligne de base");
+
+    // `guard` n'est plus épinglé côté document, alors que l'hôte l'a enregistré.
+    d.slots[1].digest = None;
+    let m = motif(d.is_approved(&trusted));
+    assert!(
+        m.contains("guard:gard@1.0.0"),
+        "le refus nomme l'emplacement qui a perdu son digest : {m}"
+    );
+    assert!(
+        m.contains("a perdu son digest"),
+        "le motif dit que l'épingle a disparu, pas que le contenu a bougé : {m}"
     );
 }

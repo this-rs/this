@@ -69,6 +69,10 @@ pub struct HarnessGraph {
 }
 
 impl HarnessGraph {
+    /// Un journal sur `store`, **sans masque** : ce qui est écrit est ce que l'outil a
+    /// rendu. Un hôte qui écrit des runs d'agent veut presque toujours
+    /// [`HarnessGraph::with_masque`] (c'est ce que fait `ServerHost::harness_journal`) ;
+    /// l'état est interrogeable par [`HarnessGraph::masque_installe`].
     pub fn new(store: Arc<ObrainStore>) -> Self {
         Self {
             store,
@@ -84,6 +88,18 @@ impl HarnessGraph {
     pub fn with_masque(mut self, masque: impl Fn(&str) -> String + Send + Sync + 'static) -> Self {
         self.masque = Some(Arc::new(masque));
         self
+    }
+
+    /// Un masque est-il installé sur ce journal ? (#287, case f)
+    ///
+    /// [`HarnessGraph::new`] n'en installe AUCUN : un journal construit sans
+    /// [`HarnessGraph::with_masque`] écrit les textes d'un run **tels quels**, secrets
+    /// compris. C'est un choix de l'hôte, pas un défaut du port d'enregistrement (le
+    /// harnais pousse les étapes sans masquer, voir `this_harness::Recorder`). Cette
+    /// méthode existe pour que le choix soit CONSTATABLE au lieu d'être silencieux :
+    /// `ServerHost::harness_journal` rend `true`, un `HarnessGraph::new` rend `false`.
+    pub fn masque_installe(&self) -> bool {
+        self.masque.is_some()
     }
 
     fn graph(&self) -> Arc<dyn GraphStoreMut> {

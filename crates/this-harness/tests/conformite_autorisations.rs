@@ -11,7 +11,7 @@
 
 use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
-use std::rc::Rc;
+use std::rc::{Rc, Weak};
 
 use async_trait::async_trait;
 use serde_json::json;
@@ -19,7 +19,7 @@ use serde_json::json;
 use this_agent::substrate::{Grant, Grants};
 use this_harness::{
     Cancel, Declaration, Delta, Event, Failure, Finish, Harness, Limits, Outcome, Permission,
-    Recorder, Reply, Request, Run, Step, Stop, ToolCall, ToolSpec, Toolbox, Transport,
+    Recorder, Reply, Request, Run, Step, Stop, ToolCall, ToolSpec, Toolbox, Toolboxes, Transport,
 };
 
 const OUTIL: &str = "ecrire";
@@ -607,4 +607,474 @@ fn cas3_bis_temoin_grant_dynamique_intact_l_outil_est_execute() {
     let harness = Harness::new("sys", Limits::default(), moteur, toolbox, |_| {});
     futures::executor::block_on(harness.send("écris"));
     assert_eq!(outil.effets.get(), 1, "sans retrait, l'outil s'exécute");
+}
+
+// ---- Cas 3 ter : GRANT INSTALLÉ retiré entre l'annonce et l'appel -----------
+//
+// `cas3` retire une DÉCLARATION, `cas3_bis` un grant DYNAMIQUE (`Toolbox::grants`).
+// Reste la troisième source d'autorité : les grants INSTALLÉS par l'hôte
+// (`with_grants`), qu'une révocation atteint par `set_grants` — le chemin par lequel
+// une autre partie prenante peut retirer un consentement PENDANT le tour.
+
+/// Un moteur qui annonce l'outil, puis retire le grant installé par l'hôte
+/// (`set_grants`), puis réclame l'outil. Le harnais lui est donné en `Weak` : le
+/// moteur existe avant le harnais qui le possède (pas de cycle).
+struct RetireGrantInstalleApresAnnonce {
+    harnais: RefCell<Option<Weak<Harness>>>,
+    /// `false` pour le témoin : même scénario, sans la révocation.
+    retire: bool,
+    annonce: RefCell<Vec<String>>,
+    demande_faite: Cell<bool>,
+}
+
+impl RetireGrantInstalleApresAnnonce {
+    fn new(retire: bool) -> Rc<Self> {
+        Rc::new(Self {
+            harnais: RefCell::new(None),
+            retire,
+            annonce: RefCell::new(Vec::new()),
+            demande_faite: Cell::new(false),
+        })
+    }
+
+    /// Le consentement retiré, poussé par l'hôte au harnais vivant.
+    fn revoquer(&self) {
+        let harnais = self
+            .harnais
+            .borrow()
+            .as_ref()
+            .and_then(Weak::upgrade)
+            .expect("le harnais est posé avant le tour");
+        let mut revoque = Grants::new();
+        revoque.put(Grant::refused(OUTIL, "user", "consentement retiré"));
+        harnais.set_grants(revoque);
+    }
+}
+
+#[async_trait(?Send)]
+impl Transport for RetireGrantInstalleApresAnnonce {
+    async fn stream(&self, request: &Request, _: &Cancel, _: Delta) -> Result<Reply, Failure> {
+        if self.demande_faite.replace(true) {
+            return Ok(fini());
+        }
+        *self.annonce.borrow_mut() = request.tools().iter().map(|s| s.name.clone()).collect();
+        // La révocation tombe entre l'annonce (ci-dessus) et l'appel (la boucle).
+        if self.retire {
+            self.revoquer();
+        }
+        Ok(demande())
+    }
+}
+
+fn harnais_avec_moteur_qui_revoque(
+    moteur: &Rc<RetireGrantInstalleApresAnnonce>,
+    outil: &Rc<Outil>,
+    log: Rc<RefCell<Vec<Event>>>,
+) -> Rc<Harness> {
+    let sink = log;
+    let mut grants = Grants::new();
+    grants.put(Grant::granted(OUTIL, "user"));
+    let harnais = Rc::new(
+        Harness::new(
+            "sys",
+            Limits {
+                max_relances: 0,
+                ..Limits::default()
+            },
+            moteur.clone(),
+            outil.clone(),
+            move |e| sink.borrow_mut().push(e),
+        )
+        .with_grants(grants),
+    );
+    *moteur.harnais.borrow_mut() = Some(Rc::downgrade(&harnais));
+    harnais
+}
+
+#[test]
+fn cas3_ter_grant_installe_retire_entre_annonce_et_appel_est_refuse() {
+    let outil = Outil::new();
+    let moteur = RetireGrantInstalleApresAnnonce::new(true);
+    let log = Rc::new(RefCell::new(Vec::new()));
+    let harnais = harnais_avec_moteur_qui_revoque(&moteur, &outil, log.clone());
+
+    futures::executor::block_on(harnais.send("écris"));
+
+    assert_eq!(
+        *moteur.annonce.borrow(),
+        vec![OUTIL.to_string()],
+        "précondition : l'outil a bien été annoncé au tour"
+    );
+    assert_eq!(
+        outil.effets.get(),
+        0,
+        "grant installé retiré avant l'appel : l'outil ne s'exécute pas"
+    );
+    assert!(
+        refus_de_la_boucle(&log.borrow()).is_some(),
+        "le refus est émis"
+    );
+}
+
+/// Témoin : sans la révocation, le même montage exécute l'outil.
+#[test]
+fn cas3_ter_temoin_grant_installe_intact_l_outil_est_execute() {
+    let outil = Outil::new();
+    let moteur = RetireGrantInstalleApresAnnonce::new(false);
+    let harnais =
+        harnais_avec_moteur_qui_revoque(&moteur, &outil, Rc::new(RefCell::new(Vec::new())));
+    futures::executor::block_on(harnais.send("écris"));
+    assert_eq!(outil.effets.get(), 1, "sans révocation, l'outil s'exécute");
+}
+
+// ---- Cas 3 quater : famille A — la porte du run lit-elle les grants VIVANTS ? --
+//
+// La même révocation, mais l'outil est exécuté par le MOTEUR pendant `stream`. La
+// porte qu'il reçoit (`Permission`) doit rendre le même refus que la boucle (case b
+// du cahier) : une révocation faite pendant le flux doit l'atteindre, pas attendre
+// le run suivant.
+
+/// Un transport de la famille A qui annonce, révoque, PUIS interroge la porte.
+struct MoteurInterneQuiRevoquePendantLeFlux {
+    harnais: RefCell<Option<Weak<Harness>>>,
+    outil: Rc<Outil>,
+    retire: bool,
+    permission: RefCell<Option<Rc<dyn Permission>>>,
+    motif: RefCell<Option<String>>,
+    annonce: RefCell<Vec<String>>,
+    asked: Cell<bool>,
+}
+
+impl MoteurInterneQuiRevoquePendantLeFlux {
+    fn new(retire: bool, outil: Rc<Outil>) -> Rc<Self> {
+        Rc::new(Self {
+            harnais: RefCell::new(None),
+            outil,
+            retire,
+            permission: RefCell::new(None),
+            motif: RefCell::new(None),
+            annonce: RefCell::new(Vec::new()),
+            asked: Cell::new(false),
+        })
+    }
+}
+
+#[async_trait(?Send)]
+impl Transport for MoteurInterneQuiRevoquePendantLeFlux {
+    fn set_permission(&self, permission: Rc<dyn Permission>) {
+        *self.permission.borrow_mut() = Some(permission);
+    }
+
+    async fn stream(&self, request: &Request, _: &Cancel, _: Delta) -> Result<Reply, Failure> {
+        if self.asked.replace(true) {
+            return Ok(fini());
+        }
+        *self.annonce.borrow_mut() = request.tools().iter().map(|s| s.name.clone()).collect();
+        if self.retire {
+            let harnais = self
+                .harnais
+                .borrow()
+                .as_ref()
+                .and_then(Weak::upgrade)
+                .expect("le harnais est posé avant le tour");
+            let mut revoque = Grants::new();
+            revoque.put(Grant::refused(OUTIL, "user", "consentement retiré"));
+            harnais.set_grants(revoque);
+        }
+        let permission = self
+            .permission
+            .borrow()
+            .clone()
+            .expect("porte posée avant le flux");
+        let call = ToolCall {
+            id: "t1".into(),
+            name: OUTIL.into(),
+            arguments: json!({}),
+        };
+        match permission.allows(&call.name) {
+            Ok(()) => {
+                let outcome = self.outil.call(&call).await;
+                permission.record(&call, 2, &outcome).await;
+            }
+            Err(motif) => {
+                *self.motif.borrow_mut() = Some(motif.clone());
+                let outcome =
+                    Outcome::refused(format!("outil non autorisé : {}", call.name), motif);
+                permission.record(&call, 0, &outcome).await;
+            }
+        }
+        Ok(fini())
+    }
+}
+
+fn harnais_avec_moteur_interne(
+    moteur: &Rc<MoteurInterneQuiRevoquePendantLeFlux>,
+    outil: &Rc<Outil>,
+    log: Rc<RefCell<Vec<Event>>>,
+) -> Rc<Harness> {
+    let mut grants = Grants::new();
+    grants.put(Grant::granted(OUTIL, "user"));
+    let harnais = Rc::new(
+        Harness::new(
+            "sys",
+            Limits::default(),
+            moteur.clone(),
+            outil.clone(),
+            move |e| log.borrow_mut().push(e),
+        )
+        .with_grants(grants),
+    );
+    *moteur.harnais.borrow_mut() = Some(Rc::downgrade(&harnais));
+    harnais
+}
+
+#[test]
+fn cas3_quater_famille_a_voit_une_revocation_faite_pendant_son_flux() {
+    let outil = Outil::new();
+    let moteur = MoteurInterneQuiRevoquePendantLeFlux::new(true, outil.clone());
+    let log = Rc::new(RefCell::new(Vec::new()));
+    let harnais = harnais_avec_moteur_interne(&moteur, &outil, log.clone());
+
+    futures::executor::block_on(harnais.send("écris"));
+
+    assert_eq!(
+        *moteur.annonce.borrow(),
+        vec![OUTIL.to_string()],
+        "précondition : l'outil a bien été annoncé au tour"
+    );
+    assert_eq!(
+        outil.effets.get(),
+        0,
+        "la porte du flux doit voir la révocation faite pendant le flux : \
+         elle ne peut pas rendre un accord que la boucle refuse au même instant"
+    );
+    let motif = moteur.motif.borrow().clone().unwrap_or_default();
+    assert!(
+        motif.contains("consentement retiré"),
+        "le refus rendu au moteur porte le motif de l'hôte : {motif}"
+    );
+}
+
+/// Témoin : sans la révocation, le moteur exécute et l'effet a lieu.
+#[test]
+fn cas3_quater_temoin_famille_a_sans_revocation_execute() {
+    let outil = Outil::new();
+    let moteur = MoteurInterneQuiRevoquePendantLeFlux::new(false, outil.clone());
+    let harnais = harnais_avec_moteur_interne(&moteur, &outil, Rc::new(RefCell::new(Vec::new())));
+    futures::executor::block_on(harnais.send("écris"));
+    assert_eq!(outil.effets.get(), 1);
+}
+
+// ---- Cas 5 : la COMPOSITION `Toolboxes` — les droits suivent la PROPRIÉTÉ de l'outil ----
+//
+// Mesuré le 24/11/2026 sur `787a988` : `impl Toolbox for Toolboxes` définissait `specs`,
+// `declarations`, `vus`, `call`, `call_with_cancel` — mais PAS `grants()`. La composition
+// rendait donc le défaut du trait (`None`), et les droits tenus par une part n'atteignaient
+// JAMAIS la porte : un outil RÉVOQUÉ par sa part était refusé seul (effets 0) et exécuté
+// composé (effets 1). Une révocation qui disparaît est un octroi.
+//
+// RÈGLE APPLIQUÉE (décision du 24/11/2026, `docs/harnais-autorisations.md` §4) : la
+// composition porte les droits de chaque part POUR SES PROPRES OUTILS SEULEMENT, le
+// propriétaire d'un nom étant la première part qui l'expose — la règle déjà en vigueur
+// pour `specs`, les `declarations` et le routage de l'appel. Aucune part ne peut donc
+// accorder ni révoquer un outil qu'une autre exécute. « La première gagne » serait un
+// choix arbitraire (l'ordre de composition) là où la propriété de l'outil ne l'est pas.
+
+fn outillage_qui_refuse(grants: Rc<RefCell<Grants>>) -> Rc<OutilGrantsDynamiques> {
+    Rc::new(OutilGrantsDynamiques {
+        outil: Outil::new(),
+        grants,
+    })
+}
+
+/// Une part qui n'expose AUCUN outil mais qui porte des droits : elle ne doit rien pouvoir
+/// ressusciter, et c'est le cas qui distingue « filtrer par propriété » d'un simple `put`.
+struct MuetteQuiAccorde {
+    grants: Rc<RefCell<Grants>>,
+}
+
+#[async_trait(?Send)]
+impl Toolbox for MuetteQuiAccorde {
+    fn specs(&self) -> Vec<ToolSpec> {
+        Vec::new()
+    }
+    fn grants(&self) -> Option<Grants> {
+        Some(self.grants.borrow().clone())
+    }
+    async fn call(&self, _: &ToolCall) -> Outcome {
+        Outcome::refused("muette", "cette part n'expose aucun outil")
+    }
+    async fn call_with_cancel(&self, call: &ToolCall, _: &Cancel) -> Outcome {
+        self.call(call).await
+    }
+}
+
+/// Une part qui expose l'outil et ne porte AUCUN droit (le défaut du trait) : elle ne doit
+/// pas rendre « rien n'est vérifié » à une composition où une autre part accorde hors domaine.
+struct OutilSansDroits {
+    outil: Rc<Outil>,
+}
+
+#[async_trait(?Send)]
+impl Toolbox for OutilSansDroits {
+    fn specs(&self) -> Vec<ToolSpec> {
+        self.outil.specs()
+    }
+    fn declarations(&self) -> Vec<Declaration> {
+        self.outil.declarations()
+    }
+    async fn call(&self, call: &ToolCall) -> Outcome {
+        self.outil.call(call).await
+    }
+    async fn call_with_cancel(&self, call: &ToolCall, cancel: &Cancel) -> Outcome {
+        self.outil.call_with_cancel(call, cancel).await
+    }
+}
+
+#[test]
+fn cas5_un_outillage_seul_porte_ses_grants_dynamiques() {
+    let grants = Rc::new(RefCell::new(Grants::new()));
+    grants
+        .borrow_mut()
+        .put(Grant::refused(OUTIL, "user", "consentement retiré"));
+    let outillage = outillage_qui_refuse(grants);
+    let outil = outillage.outil.clone();
+    let harnais = Harness::new(
+        "sys",
+        Limits::default(),
+        Script::new(vec![demande(), fini()]),
+        outillage,
+        |_| {},
+    );
+    futures::executor::block_on(harnais.send("écris"));
+    assert_eq!(
+        outil.effets.get(),
+        0,
+        "témoin : seul, l'outillage fait foi et le refus tient"
+    );
+}
+
+/// LE TROU MESURÉ, refermé : la révocation d'une part survit à la composition.
+#[test]
+fn cas5_compose_l_outillage_ne_perd_pas_sa_revocation() {
+    let grants = Rc::new(RefCell::new(Grants::new()));
+    grants
+        .borrow_mut()
+        .put(Grant::refused(OUTIL, "user", "consentement retiré"));
+    let outillage = outillage_qui_refuse(grants);
+    let outil = outillage.outil.clone();
+    let composes = Rc::new(Toolboxes::new().with(outillage));
+    let harnais = Harness::new(
+        "sys",
+        Limits::default(),
+        Script::new(vec![demande(), fini()]),
+        composes,
+        |_| {},
+    );
+    futures::executor::block_on(harnais.send("écris"));
+    assert_eq!(
+        outil.effets.get(),
+        0,
+        "composé, l'outil reste refusé : la révocation portée par sa part doit atteindre \
+         la porte. Effets 1 = le refus a disparu en entrant dans la composition"
+    );
+}
+
+/// Une part ne décide que de SES outils : accorder celui d'une autre n'a aucun effet.
+#[test]
+fn cas5_une_part_ne_peut_pas_accorder_l_outil_d_une_autre() {
+    // La première part expose et RÉVOQUE `ecrire` : elle en est propriétaire.
+    let refus = Rc::new(RefCell::new(Grants::new()));
+    refus
+        .borrow_mut()
+        .put(Grant::refused(OUTIL, "user", "consentement retiré"));
+    let proprietaire = outillage_qui_refuse(refus);
+    let outil = proprietaire.outil.clone();
+    // La seconde porte un OCTROI du même nom : il ne doit rien ressusciter.
+    let octroi = Rc::new(RefCell::new(Grants::new()));
+    octroi.borrow_mut().put(Grant::granted(OUTIL, "user"));
+    let usurpateur = outillage_qui_refuse(octroi);
+    let composes = Rc::new(Toolboxes::new().with(proprietaire).with(usurpateur));
+    let harnais = Harness::new(
+        "sys",
+        Limits::default(),
+        Script::new(vec![demande(), fini()]),
+        composes,
+        |_| {},
+    );
+    futures::executor::block_on(harnais.send("écris"));
+    assert_eq!(
+        outil.effets.get(),
+        0,
+        "l'octroi d'une part non propriétaire de l'outil n'a aucun effet : sinon, \
+         n'importe quel module ajouté à la composition pourrait rouvrir un outil révoqué"
+    );
+}
+
+/// Même chose, sans même prétendre exposer l'outil : un `put` naïf le ressusciterait.
+#[test]
+fn cas5_une_part_qui_n_expose_rien_ne_ressuscite_aucun_droit() {
+    let refus = Rc::new(RefCell::new(Grants::new()));
+    refus
+        .borrow_mut()
+        .put(Grant::refused(OUTIL, "user", "consentement retiré"));
+    let proprietaire = outillage_qui_refuse(refus);
+    let outil = proprietaire.outil.clone();
+    let muette = Rc::new(MuetteQuiAccorde {
+        grants: Rc::new(RefCell::new({
+            let mut g = Grants::new();
+            g.put(Grant::granted(OUTIL, "user"));
+            g
+        })),
+    });
+    let composes = Rc::new(Toolboxes::new().with(proprietaire).with(muette));
+    let harnais = Harness::new(
+        "sys",
+        Limits::default(),
+        Script::new(vec![demande(), fini()]),
+        composes,
+        |_| {},
+    );
+    futures::executor::block_on(harnais.send("écris"));
+    assert_eq!(
+        outil.effets.get(),
+        0,
+        "une part qui n'expose aucun outil ne peut accorder aucun droit"
+    );
+}
+
+/// Le défaut fermé : des droits qui ne visent que les outils d'une AUTRE part laissent la
+/// composition fermée (`Some` vide), jamais « rien n'est vérifié » (`None`, qui ouvrirait tout).
+#[test]
+fn cas5_des_droits_hors_domaine_laissent_la_composition_fermee() {
+    let sans_droits = Rc::new(OutilSansDroits {
+        outil: Outil::new(),
+    });
+    let outil = sans_droits.outil.clone();
+    let muette = Rc::new(MuetteQuiAccorde {
+        grants: Rc::new(RefCell::new({
+            let mut g = Grants::new();
+            g.put(Grant::granted(OUTIL, "user"));
+            g
+        })),
+    });
+    let composes = Rc::new(
+        Toolboxes::new()
+            .with(sans_droits as Rc<dyn Toolbox>)
+            .with(muette as Rc<dyn Toolbox>),
+    );
+    let harnais = Harness::new(
+        "sys",
+        Limits::default(),
+        Script::new(vec![demande(), fini()]),
+        composes,
+        |_| {},
+    );
+    futures::executor::block_on(harnais.send("écris"));
+    assert_eq!(
+        outil.effets.get(),
+        0,
+        "un droit hors domaine ne doit pas se transformer en « aucun droit vérifié » : \
+         la composition rend une liste VIDE (tout refusé), pas `None` (tout permis)"
+    );
 }

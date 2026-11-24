@@ -529,6 +529,51 @@ impl Toolbox for Toolboxes {
         self.parts.iter().find_map(|part| part.vus())
     }
 
+    /// Les droits que la composition porte, **par propriété de l'outil** (#287).
+    ///
+    /// POURQUOI cette méthode existe alors que le défaut du trait (`None`) est plus simple :
+    /// `None` ne veut pas dire « rien à vérifier » dans un hôte qui a des droits installés —
+    /// il veut dire que la composition n'en porte aucun, et le harnais retombe alors sur
+    /// `with_grants`, ou sur rien du tout. Mesuré le 24/11/2026 : un outillage qui RÉVOQUE
+    /// un de ses outils perdait sa révocation en entrant dans une composition — le même
+    /// outil était refusé seul (effets 0) et exécuté composé (effets 1). Une révocation qui
+    /// disparaît est un octroi.
+    ///
+    /// RÈGLE : la composition ne retient les droits d'une part que pour les outils que
+    /// CETTE part exécute — le propriétaire d'un nom étant, comme pour `specs`,
+    /// `declarations` et l'appel, la **première part qui l'expose**. Aucune part ne peut
+    /// donc accorder ni révoquer un outil qu'une autre exécute : elle ne dépasse pas son
+    /// domaine. Ni « la première gagne » ni source désignée à la construction : ce serait un
+    /// choix arbitraire (l'ordre de composition, ou un index que `push` périme), alors que la
+    /// propriété de l'outil est déjà la règle du routage.
+    ///
+    /// Si aucune part n'expose de droits : `None`, et `with_grants` décide comme avant. Si
+    /// une part en expose mais qu'aucun ne vise ses outils, la composition rend `Some` vide :
+    /// tout est refusé (défaut fermé), jamais « tout est permis ».
+    fn grants(&self) -> Option<this_agent::substrate::Grants> {
+        let mut proprietaire: std::collections::HashMap<String, usize> =
+            std::collections::HashMap::new();
+        for (i, part) in self.parts.iter().enumerate() {
+            for spec in part_specs(part) {
+                proprietaire.entry(spec.name).or_insert(i);
+            }
+        }
+        let mut droits = this_agent::substrate::Grants::new();
+        let mut une_part_en_porte = false;
+        for (i, part) in self.parts.iter().enumerate() {
+            let Some(siens) = part.grants() else {
+                continue;
+            };
+            une_part_en_porte = true;
+            for grant in siens.grants {
+                if proprietaire.get(&grant.tool) == Some(&i) {
+                    droits.put(grant);
+                }
+            }
+        }
+        une_part_en_porte.then_some(droits)
+    }
+
     async fn call(&self, call: &ToolCall) -> Outcome {
         // Le premier qui déclare l’outil l’exécute : deux modules qui
         // exposeraient le même nom ne se disputent pas l’appel, l’ordre de
@@ -577,6 +622,27 @@ impl Toolbox for Toolboxes {
 /// l'implémentation (l'hôte) qui avale ses propres erreurs ; le harnais, lui,
 /// n'a même pas la possibilité d'en voir une. La composition [`Recorders`]
 /// pousse chaque événement à toutes les parts, sans s'arrêter si l'une échoue.
+///
+/// # Le MASQUE n'est pas dans ce port — c'est un contrat, pas un oubli
+///
+/// La boucle pousse la [`Step`](this_agent::Step) **telle que l'outil l'a
+/// produite**, empreintes et extraits compris. Ce crate ne masque rien : il ne
+/// fait aucune I/O, ne connaît aucune table de motifs, et ne peut donc pas
+/// garantir qu'un secret recopié dans un résultat d'outil ne sera pas écrit.
+///
+/// **Le masquage appartient à l'implémentation** (`this_agent::masque` dans
+/// l'application), qui l'applique au point d'écriture. Ce n'est pas une couche
+/// qu'on peut oublier en silence : c'est un choix de l'hôte, et il doit être
+/// VISIBLE. Deux moyens de le rendre visible, l'un ou l'autre selon l'hôte :
+///
+/// - exposer un booléen d'état (dans this-rs :
+///   `HarnessGraph::masque_installe`) qu'un hôte, un test ou un diagnostic peut
+///   interroger — un journal sans masque se constate, il ne se devine pas ;
+/// - écrire son propre `Recorder` : il assume alors le contrat entier, masque compris.
+///
+/// Conséquence à retenir, et elle est de sécurité : **un `Recorder` sans masque
+/// écrit ce que l'outil a rendu**, y compris un secret. Un hôte qui branche un
+/// `Recorder` doit pouvoir répondre à « le masque est-il installé ? ».
 #[async_trait(?Send)]
 pub trait Recorder {
     /// Une étape vient d'être mesurée. `run` la porte déjà : la boucle a appelé
@@ -596,6 +662,11 @@ pub trait Recorder {
 /// Même composition que [`Toolboxes`] : chaque événement est poussé à toutes
 /// les parts, dans l'ordre d'ajout. Une part qui échoue n'arrête pas les
 /// autres — elle n'a de toute façon rien à rendre (voir [`Recorder`]).
+///
+/// **Le masque est celui de chaque part, pas de la composition** : `Recorders`
+/// ne masque rien (voir « Le MASQUE n'est pas dans ce port »). Composer un
+/// journal masqué et un export brut est donc possible — et c'est à l'hôte de
+/// savoir lequel des deux il branche.
 #[derive(Default)]
 pub struct Recorders {
     parts: Vec<Rc<dyn Recorder>>,
