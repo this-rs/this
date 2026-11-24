@@ -180,6 +180,15 @@ pub enum Event {
         advisory: bool,
     },
     /// Le run s'est arrêté, et il dit pourquoi.
+    /// L'agent a demandé un outil déclaré mais SANS aucun grant : la personne doit répondre
+    /// (#286). L'appel est refusé pour ce tour ; une réponse vaut pour les appels suivants.
+    PermissionRequest { id: u64, tool: String },
+    /// La personne a répondu à une demande de permission (#286).
+    PermissionAnswered {
+        id: u64,
+        tool: String,
+        granted: bool,
+    },
     Stopped {
         stop: Stop,
         /// Le dernier texte que le modèle a écrit.
@@ -267,6 +276,8 @@ impl Event {
             Self::Compacted { .. } => "compacted",
             Self::Routed { .. } => "routed",
             Self::Served { .. } => "served",
+            Self::PermissionRequest { .. } => "permission_request",
+            Self::PermissionAnswered { .. } => "permission_answered",
             Self::Stopped { .. } => "stopped",
             Self::Unknown => "unknown",
         }
@@ -292,6 +303,8 @@ const TYPES_CONNUS: &[&str] = &[
     "compacted",
     "served",
     "routed",
+    "permission_request",
+    "permission_answered",
     "stopped",
 ];
 
