@@ -238,6 +238,11 @@ impl ObrainStore {
     /// est refusée **avant** exécution. Un mot-clé dans un littéral ou dans un
     /// commentaire `//` ne compte pas.
     ///
+    /// **Seule exception** : `CALL obrain.spatial.nearest(…)` et
+    /// `CALL obrain.spatial.within(…)` — les deux lectures d'index spatial
+    /// d'obrain, qui n'écrivent rien. Tout autre `CALL` est refusé, y compris
+    /// un `CALL` spatial suivi d'une écriture.
+    ///
     /// # Forme rendue
     ///
     /// `{"columns": [...], "rows": [[...]], "row_count": n, "truncated": bool}`.
@@ -257,7 +262,12 @@ impl ObrainStore {
             autre => anyhow::bail!("langage inconnu : « {autre} » (gql ou cypher)"),
         };
         if let Some(mot) = mot_d_ecriture(query) {
-            anyhow::bail!("écriture refusée : cette requête est en lecture seule ({mot})");
+            // **Une exception, nommée** : les deux procédures spatiales sont des
+            // lectures pures et obrain ne les expose que par `CALL` (voir
+            // [`CALLS_SPATIAUX_EN_LECTURE`]). Tout autre `CALL` reste refusé.
+            if !(mot == "CALL" && call_spatial_en_lecture(query)) {
+                anyhow::bail!("écriture refusée : cette requête est en lecture seule ({mot})");
+            }
         }
         let result = self
             .session()
@@ -1293,17 +1303,30 @@ impl LinkService for ObrainLinkService {
     }
 }
 
-/// Le premier mot-clé d'écriture de la requête, s'il y en a un.
+/// Les mots-clés qui rendent une requête non-lisible.
+const MOTS_ECRITURE: [&str; 13] = [
+    "CREATE", "MERGE", "DELETE", "DETACH", "SET", "REMOVE", "INSERT", "LOAD", "DROP", "ALTER",
+    "CALL", "COPY", "TRUNCATE",
+];
+
+/// Les `CALL` admis en lecture : **les deux procédures spatiales d'obrain**.
 ///
-/// Les littéraux (`'…'`, `"…"`, `` `…` ``) et les commentaires `//` sont
-/// remplacés par des espaces avant l'analyse : `MATCH (n) WHERE n.t = 'CREATE
-/// me' RETURN n` n'est pas une écriture, et `MATCH (n) RETURN n // SET x` non
-/// plus.
-fn mot_d_ecriture(query: &str) -> Option<&'static str> {
-    const MOTS: [&str; 13] = [
-        "CREATE", "MERGE", "DELETE", "DETACH", "SET", "REMOVE", "INSERT", "LOAD", "DROP", "ALTER",
-        "CALL", "COPY", "TRUNCATE",
-    ];
+/// Pourquoi une exception, et pourquoi celle-là seulement : obrain n'expose
+/// l'index spatial (`create_spatial_index`, `spatial_knn`, `spatial_search`)
+/// QUE par `CALL obrain.spatial.nearest|within`
+/// (`obrain-engine/src/database/spatial_procedure.rs:909-925`), et ces deux
+/// procédures ne font que lire — aucune écriture, aucun état modifié. Les
+/// refuser fermerait la seule porte vers une capacité de lecture du moteur ;
+/// les admettre en bloc (`CALL` autorisé) ouvrirait, elles, toutes les
+/// procédures d'algorithmes, dont certaines écrivent (projections, index).
+///
+/// Le nom est comparé **exactement**, en majuscules, après retrait des
+/// littéraux et commentaires : `obrain.spatial.nearestx` est refusé.
+const CALLS_SPATIAUX_EN_LECTURE: [&str; 2] = ["OBRAIN.SPATIAL.NEAREST", "OBRAIN.SPATIAL.WITHIN"];
+
+/// La requête, mise à plat pour l'analyse : littéraux et commentaires remplacés
+/// par des espaces, tout en majuscules.
+fn normaliser_requete(query: &str) -> String {
     let mut nu = String::with_capacity(query.len());
     let mut quote: Option<char> = None;
     let mut chars = query.chars().peekable();
@@ -1332,8 +1355,43 @@ fn mot_d_ecriture(query: &str) -> Option<&'static str> {
             None => nu.push(c.to_ascii_uppercase()),
         }
     }
+    nu
+}
+
+/// Le premier mot-clé d'écriture de la requête, s'il y en a un.
+///
+/// Les littéraux (`'…'`, `"…"`, `` `…` ``) et les commentaires `//` sont
+/// remplacés par des espaces avant l'analyse : `MATCH (n) WHERE n.t = 'CREATE
+/// me' RETURN n` n'est pas une écriture, et `MATCH (n) RETURN n // SET x` non
+/// plus.
+fn mot_d_ecriture(query: &str) -> Option<&'static str> {
+    let nu = normaliser_requete(query);
     let mots: Vec<&str> = nu.split_whitespace().collect();
-    MOTS.into_iter().find(|m| mots.contains(m))
+    MOTS_ECRITURE.into_iter().find(|m| mots.contains(m))
+}
+
+/// La requête est-elle **un seul** `CALL` d'une procédure spatiale de lecture ?
+///
+/// Trois conditions, toutes nécessaires : le premier mot est `CALL`, le nom de
+/// procédure est exactement l'un de [`CALLS_SPATIAUX_EN_LECTURE`], et le reste
+/// de la requête (arguments compris) ne porte aucun mot-clé d'écriture. Un
+/// `CALL` n'est donc **pas** un blanc-seing : `CALL obrain.spatial.nearest(…)
+/// SET n.x = 1` reste refusé.
+fn call_spatial_en_lecture(query: &str) -> bool {
+    let nu = normaliser_requete(query);
+    let mut mots = nu.split_whitespace();
+    if mots.next() != Some("CALL") {
+        return false;
+    }
+    let Some(nom) = mots.next() else {
+        return false;
+    };
+    // Le `(` colle au nom quand la requête n'a pas d'espace : `nearest('idx',…)`.
+    if !CALLS_SPATIAUX_EN_LECTURE.contains(&nom.trim_end_matches('(')) {
+        return false;
+    }
+    let reste: Vec<&str> = mots.collect();
+    mot_d_ecriture(&reste.join(" ")).is_none()
 }
 
 /// Convertit une valeur obrain en JSON.
@@ -2651,6 +2709,53 @@ mod query_tests {
             let e = store.execute_query("gql", q, 10).expect_err(q);
             assert!(e.to_string().contains("écriture refusée"), "{q} → {e}");
         }
+    }
+
+    /// Les deux `CALL` spatiaux passent le filtre ; **aucun autre** ne passe.
+    #[test]
+    fn seuls_les_deux_call_spatiaux_sont_admis_en_lecture() {
+        // Admis : la forme exacte, casse et espaces variables.
+        assert!(call_spatial_en_lecture(
+            "CALL obrain.spatial.nearest('idx', 2.35, 48.85, 3)"
+        ));
+        assert!(call_spatial_en_lecture(
+            "call obrain.spatial.within('idx',2.35,48.85,500.0)"
+        ));
+        assert!(call_spatial_en_lecture(
+            "CALL obrain.spatial.within ('idx', 1.0, 2.0, 5.0)"
+        ));
+
+        // Refusés : nom voisin, troncature, autre procédure, écriture après le
+        // CALL, second CALL.
+        assert!(!call_spatial_en_lecture(
+            "CALL obrain.spatial.nearestx('idx', 1.0, 2.0, 3)"
+        ));
+        assert!(!call_spatial_en_lecture("CALL obrain.spatial"));
+        assert!(!call_spatial_en_lecture("CALL obrain.pagerank()"));
+        assert!(!call_spatial_en_lecture(
+            "CALL obrain.spatial.nearest('idx', 1.0, 2.0, 3) SET n.a = 1"
+        ));
+        assert!(!call_spatial_en_lecture(
+            "CALL obrain.spatial.nearest('idx', 1.0, 2.0, 3) CALL obrain.pagerank()"
+        ));
+    }
+
+    /// Un `CALL` spatial n'est **pas** refusé comme une écriture : l'erreur,
+    /// quand il y en a une, vient du moteur (index absent), pas du filtre.
+    #[test]
+    fn un_call_spatial_n_est_pas_refuse_comme_une_ecriture() {
+        let store = amorce();
+        let e = store
+            .execute_query(
+                "gql",
+                "CALL obrain.spatial.nearest('absent', 2.35, 48.85, 3)",
+                10,
+            )
+            .expect_err("sans index spatial, le moteur doit refuser");
+        assert!(
+            !e.to_string().contains("écriture refusée"),
+            "le CALL spatial doit atteindre le moteur, pas le filtre : {e}"
+        );
     }
 
     #[test]

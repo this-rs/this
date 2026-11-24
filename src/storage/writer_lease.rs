@@ -2,13 +2,32 @@
 //!
 //! # Pourquoi ce module existe
 //!
-//! Obrain garantit un seul écrivain par store **par convention d'appelant**
-//! (`OBRAIN_WRITE=1`), pas par le verrou : son RFC (`docs/rfc/substrate/multi-writer.md`)
-//! l'écrit noir sur blanc — deux `open_shared_write` sur le même store *« ne se
-//! refusent pas — ils corrompraient le WAL »*. Et le trou n'est pas seulement
-//! inter-processus : dans **un même processus**, deux `ObrainDB::open()` du même
-//! répertoire réussissent tous les deux (`obrain-substrate/src/file.rs:179-207` :
-//! si une part de verrou existe déjà, elle est *retournée*).
+//! **Ré-ancré le 25/11/2026 (obrain fd7c951c).** La version antérieure de ce
+//! paragraphe citait « le RFC `docs/rfc/substrate/multi-writer.md` » et la
+//! convention `OBRAIN_WRITE=1` : **ni l'un ni l'autre n'existe dans obrain**
+//! (vérifié au pin f0d6e132 comme au HEAD : `docs/rfc/substrate/` ne contient
+//! que format-spec, migration-audit, props-page-classes, tier-persistence,
+//! wal-spec). La conclusion — this-rs impose UN écrivain — n'a pas changé, mais
+//! sa raison est désormais **la durabilité**, pas l'absence de verrou.
+//!
+//! Ce qu'obrain garantit aujourd'hui (MP-3 `8e4f4811`, MP-3b `b8ee6f87`,
+//! `docs/LIMITES-v0.0.1.md` lignes « Écriture partagée ») : curseurs de pages de
+//! propriétés et de tas devenus des mots partagés (`substrate.alloc`,
+//! `fetch_add`), verrou d'entité inter-processus, et refus d'un second
+//! `ObrainDB` inscriptible **dans le même processus** (`open_substrate_inner`).
+//! Ce qui reste **hors garantie**, et que ce bail protège :
+//!
+//! - en écriture PARTAGÉE, un écrivain **ne rejoue pas** : une valeur longue ou
+//!   un vecteur acquittés puis `kill -9` avant flush sont perdus ;
+//! - il ne déclare aucune valeur d'avant et **ne restaure pas** une transaction
+//!   en vol ;
+//! - l'arène des blobs s'écrase entre deux écrivains vivants ;
+//! - pas d'isolation : un lecteur vivant peut voir une page au milieu d'un ajout.
+//!
+//! Or `tests/reprise_crash.rs` promet exactement le contraire. Un écrivain
+//! **exclusif** est donc ce qui rend la reprise vraie ; le fencing ci-dessous le
+//! rend **applicable** (un écrivain périmé est refusé, pas silencieusement
+//! accepté).
 //!
 //! this-rs doit donc **imposer** l'unicité. Deux pièces, et deux seulement :
 //!

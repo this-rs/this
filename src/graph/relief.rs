@@ -254,6 +254,14 @@ pub struct StoreRelief {
     pub property_keys: Vec<String>,
     /// Les index déclarés.
     pub indexes: Vec<IndexRelief>,
+    /// Les index **spatiaux** nommés (`nom`, `label`, `propriété`).
+    ///
+    /// Lu au catalogue durable du moteur (`ObrainDB::spatial_index_names`) :
+    /// c'est ce qui rend `CALL obrain.spatial.nearest|within` utilisable, et
+    /// un client qui découvre la surface d'appel a besoin de savoir sur quoi.
+    /// Liste vide = aucun index spatial déclaré (ce n'est pas une erreur).
+    #[serde(default)]
+    pub spatial_indexes: Vec<SpatialIndexRelief>,
     /// Provenance : **introspecté** quand le moteur répond, sinon absent.
     pub origin: Origin,
     /// Labels **masqués** par le périmètre de lecture du demandeur.
@@ -262,6 +270,9 @@ pub struct StoreRelief {
     /// Types d'arêtes **masqués** par ce périmètre.
     #[serde(default)]
     pub hidden_edge_types: usize,
+    /// Index spatiaux **masqués** par ce périmètre (leur label n'est pas lisible).
+    #[serde(default)]
+    pub hidden_spatial_indexes: usize,
 }
 
 /// Un nom et son compte.
@@ -284,6 +295,18 @@ pub struct IndexRelief {
     pub target: String,
     /// Est-il unique ?
     pub unique: bool,
+}
+
+/// **Un index spatial nommé.** `CALL obrain.spatial.nearest('nom', …)` désigne
+/// l'index par ce nom.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpatialIndexRelief {
+    /// Le nom de l'index — ce que prend la procédure en premier argument.
+    pub name: String,
+    /// Le label indexé.
+    pub label: String,
+    /// La propriété qui porte les coordonnées.
+    pub property: String,
 }
 
 /// **Comment brancher un moteur d'inférence sur cette base.**
@@ -404,6 +427,15 @@ fn describe_inference() -> InferenceRelief {
                     .to_string(),
                 purpose: "recalculer un identifiant de façon indépendante".to_string(),
             },
+            InferenceRead {
+                path: "/graph/partition?resolution=1.0&max=50000".to_string(),
+                returns: "la partition du graphe actif et son certificat : coupe, volume et \
+                          conductance par communauté"
+                    .to_string(),
+                purpose: "savoir si un « groupe » est réellement séparé, ou seulement dense — \
+                          le modularity seul ne le dit pas"
+                    .to_string(),
+            },
         ],
         limits: vec![
             "`depth` ≤ 32, `limit` ≤ 1000 par niveau (les valeurs hors bornes sont ramenées)"
@@ -499,6 +531,27 @@ fn describe_store_scoped(store: &ObrainStore, scope: &ReadScope) -> StoreRelief 
         })
         .collect();
 
+    // Les index spatiaux : lus au catalogue durable, déjà triés par nom par le
+    // moteur. C'est une lecture d'index (O(nb index)), pas un balayage.
+    let mut spatial_indexes: Vec<SpatialIndexRelief> = store
+        .db()
+        .spatial_index_names()
+        .into_iter()
+        .map(|(name, label, property)| SpatialIndexRelief {
+            name,
+            label,
+            property,
+        })
+        .collect();
+    // Un label non lisible ne s'annonce pas, même par son index — et il est
+    // **compté** comme les autres masquages.
+    let mut hidden_spatial_indexes = 0usize;
+    if !scope.is_unrestricted() {
+        let avant = spatial_indexes.len();
+        spatial_indexes.retain(|i| scope.may_read_node(&i.label));
+        hidden_spatial_indexes = avant - spatial_indexes.len();
+    }
+
     StoreRelief {
         nodes: active.node_count(),
         edges: active.edge_count(),
@@ -506,9 +559,11 @@ fn describe_store_scoped(store: &ObrainStore, scope: &ReadScope) -> StoreRelief 
         edge_types,
         property_keys,
         indexes,
+        spatial_indexes,
         origin: Origin::Introspected,
         hidden_labels,
         hidden_edge_types,
+        hidden_spatial_indexes,
     }
 }
 
@@ -997,6 +1052,118 @@ fn describe_lease(store: &ObrainStore) -> LeaseRelief {
     }
 }
 
+/// Plafond par défaut du nombre de nœuds pour juger une partition.
+///
+/// `leiden` puis `conductances` lisent le graphe entier : c'est un balayage
+/// O(n + m), pas une lecture d'index. La borne est donc explicite, et son
+/// dépassement est un **refus nommé**, jamais une requête qui pend.
+pub const PARTITION_MAX_NODES: usize = 50_000;
+
+/// Résolution par défaut de `leiden` (celle du moteur).
+pub const PARTITION_DEFAULT_RESOLUTION: f64 = 1.0;
+
+/// **Le juge d'une partition** : un certificat par communauté.
+///
+/// obrain rend `conductances()` et `CertificatConductance`
+/// (`obrain-adapters/src/plugins/algorithms/community.rs:169-199`) : coupe,
+/// volume, et conductance dans `[0, 1]`. Pourquoi ce n'est pas redondant avec
+/// le modularity : le modularity récompense la densité interne **à l'échelle du
+/// graphe entier** et peut masquer un découpage médiocre. La conductance d'une
+/// communauté, elle, dit sa **séparation** (`coupe / min(volume, volume_total −
+/// volume)`), et vaut `None` — jamais `0` — quand le dénominateur est nul, parce
+/// qu'un zéro ferait croire à un groupe parfaitement isolé.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PartitionRelief {
+    /// Nœuds du graphe au moment du calcul.
+    pub nodes: usize,
+    /// Résolution demandée à `leiden`.
+    pub resolution: f64,
+    /// Modularité de la partition — l'avis du partionneur sur lui-même.
+    pub modularity: f64,
+    /// Nombre de communautés trouvées.
+    pub num_communities: usize,
+    /// Un certificat par communauté, trié par identifiant.
+    pub communities: Vec<CommunityCertificate>,
+    /// La borne appliquée (pour qu'un client sache ce qu'il peut demander).
+    pub max_nodes: usize,
+    /// Comment lire ces nombres.
+    pub notes: Vec<String>,
+}
+
+/// Le certificat d'**une** communauté.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CommunityCertificate {
+    /// Identifiant rendu par le partionneur.
+    pub community: u64,
+    /// Nombre de nœuds du groupe.
+    pub size: usize,
+    /// Arêtes sortant du groupe.
+    pub cut: u64,
+    /// Somme des degrés des nœuds du groupe (vol(S)).
+    pub volume: u64,
+    /// `cut / min(volume, volume_total − volume)` — `None` si le dénominateur
+    /// est nul (groupe = graphe entier).
+    pub conductance: Option<f64>,
+}
+
+impl PartitionRelief {
+    /// Calcule la partition du graphe actif et son certificat.
+    ///
+    /// # Errors
+    ///
+    /// Le graphe dépasse `max_nodes` : le refus nomme le nombre observé, la
+    /// borne, et la raison (balayage complet, pas une lecture d'index).
+    pub fn describe(
+        store: &ObrainStore,
+        resolution: f64,
+        max_nodes: usize,
+    ) -> anyhow::Result<Self> {
+        let active = store.active_store();
+        let nodes = active.node_count();
+        if nodes > max_nodes {
+            anyhow::bail!(
+                "partition refusée : {nodes} nœuds dépassent la borne de {max_nodes} \
+                 (`max`) — cette lecture balaie le graphe (O(n + m)), elle ne lit pas un \
+                 index. Restreindre le graphe, ou relever `max` en connaissance de cause."
+            );
+        }
+        let graphe: &dyn obrain_core::graph::GraphStore = &*active;
+        let partition = obrain_adapters::plugins::algorithms::leiden(graphe, resolution, 1.0);
+        let mut communities: Vec<CommunityCertificate> =
+            obrain_adapters::plugins::algorithms::conductances(graphe, &partition.communities)
+                .into_iter()
+                .map(|c| CommunityCertificate {
+                    community: c.communaute,
+                    size: c.taille,
+                    cut: c.coupe,
+                    volume: c.volume,
+                    conductance: c.conductance,
+                })
+                .collect();
+        communities.sort_by_key(|c| c.community);
+
+        Ok(Self {
+            nodes,
+            resolution,
+            modularity: partition.modularity,
+            num_communities: partition.num_communities,
+            communities,
+            max_nodes,
+            notes: vec![
+                "Partition calculée par `leiden(resolution, gamma = 1.0)`, puis jugée par \
+                 `conductances()` : `coupe / min(volume, volume_total - volume)`, graphe lu \
+                 NON orienté et NON pondéré (comme le partionneur)."
+                    .to_string(),
+                "`conductance: null` = dénominateur nul, c'est-à-dire groupe égal au graphe \
+                 entier : ce n'est PAS une conductance nulle."
+                    .to_string(),
+                "Coût : O(n + m) — cette lecture est un balayage, contrairement à /graph."
+                    .to_string(),
+            ],
+        })
+    }
+}
+
 impl Relief {
     /// Décrit le relief du store.
     ///
@@ -1023,12 +1190,17 @@ impl Relief {
         // Les procédures : introspection pure. `registre()` n'existe que sous
         // la feature `algos` d'obrain-engine, donc une liste non vide EST la
         // preuve que cette feature est compilée.
-        let procedures: Vec<ProcedureSpec> = obrain_engine::procedures::registre()
+        let mut procedures: Vec<ProcedureSpec> = obrain_engine::procedures::registre()
             .list()
             .into_iter()
             .map(ProcedureSpec::from_info)
             .collect();
         let registry_available = !procedures.is_empty();
+        // Les deux procédures spatiales **ne sont pas** dans ce registre : le
+        // moteur les annonce seulement dans `CALL obrain.procedures()`. Les
+        // joindre ici est ce qui rend la surface d'appel vraie (voir
+        // [`procedures_spatiales`]).
+        procedures.extend(procedures_spatiales());
 
         if !registry_available {
             notes.push(
@@ -1055,6 +1227,15 @@ impl Relief {
         notes.push(
             "Les arguments de procédure non littéraux sont ignorés sans erreur par \
              obrain (voir traps)."
+                .to_string(),
+        );
+        notes.push(
+            "`obrain.spatial.nearest` et `obrain.spatial.within` sont joints au registre \
+             depuis `spatial_procedure::lignes_procedures()` : `registre().list()` ne les \
+             contient pas (obrain-engine/src/procedures.rs:389), donc s'en tenir au \
+             registre publierait une surface d'appel incomplète. Les quatre arguments \
+             sont exigés, sans valeur par défaut. Ils ne lisent que l'index spatial — \
+             `execute_query` les admet, tout autre `CALL` reste refusé."
                 .to_string(),
         );
 
@@ -1274,6 +1455,81 @@ impl Relief {
     pub fn procedure(&self, name: &str) -> Option<&ProcedureSpec> {
         self.procedures.iter().find(|p| p.name == name)
     }
+}
+
+/// **Les deux procédures spatiales**, introspectées depuis obrain.
+///
+/// # Pourquoi elles ne viennent pas du registre
+///
+/// `registre().list()` ne les connaît pas : obrain les ajoute **à la réponse**
+/// de `CALL obrain.procedures()` (`obrain-engine/src/procedures.rs:389`, qui
+/// fusionne `database::spatial_procedure::lignes_procedures()`), parce que
+/// l'index spatial est toujours compilé et n'est pas un algorithme du registre.
+/// Lire le registre seul publierait donc une surface d'appel **fausse** : un
+/// client ne verrait pas `obrain.spatial.nearest`, et conclurait que la base ne
+/// sait pas répondre à « les k plus proches ».
+///
+/// On lit donc la **même source** que la réponse du moteur, et le résultat est
+/// [`Origin::Introspected`] — parce qu'il l'est.
+fn procedures_spatiales() -> Vec<ProcedureSpec> {
+    obrain_engine::database::spatial_procedure::lignes_procedures()
+        .iter()
+        .filter_map(|ligne| ligne_spatiale(ligne))
+        .collect()
+}
+
+/// Une ligne de `lignes_procedures()` → une spec publiable.
+///
+/// Forme d'une ligne : `[nom, description, "index_name (String), lon (Float64),
+/// lat (Float64), k (Int64)", "node, distance"]`. Les quatre arguments sont
+/// **exigés** par la procédure (`try_execute_spatial_procedure` refuse un
+/// nombre d'arguments différent de 4, sans valeur par défaut) : c'est pour cela
+/// que `required` vaut `true` ici, et non par convention.
+fn ligne_spatiale(ligne: &[obrain_common::types::Value]) -> Option<ProcedureSpec> {
+    if ligne.len() < 4 {
+        return None;
+    }
+    let texte = |v: &obrain_common::types::Value| v.to_string();
+    let name = texte(&ligne[0]);
+    if name.is_empty() {
+        return None;
+    }
+    let parameters = ligne[2]
+        .to_string()
+        .split(',')
+        .filter_map(|brut| {
+            let brut = brut.trim();
+            let (nom, kind) = brut.split_once('(')?;
+            let kind = kind.trim_end_matches(')').trim().to_ascii_lowercase();
+            Some(ParameterSpec {
+                name: nom.trim().to_string(),
+                kind: match kind.as_str() {
+                    "float64" | "float" => "float".to_string(),
+                    "int64" | "integer" | "int" => "integer".to_string(),
+                    "boolean" | "bool" => "boolean".to_string(),
+                    autre => autre.to_string(),
+                },
+                required: true,
+                default: None,
+                description: String::new(),
+            })
+        })
+        .collect();
+    let output_columns = ligne[3]
+        .to_string()
+        .split(',')
+        .map(|c| c.trim().to_string())
+        .filter(|c| !c.is_empty())
+        .collect();
+
+    Some(ProcedureSpec {
+        name,
+        description: texte(&ligne[1]),
+        parameters,
+        output_columns,
+        origin: Origin::Introspected,
+        warnings: Vec::new(),
+    })
 }
 
 impl ProcedureSpec {
@@ -1505,6 +1761,123 @@ mod tests {
         );
     }
 
+    /// Les deux procédures spatiales sont publiées — et le registre, lui, ne
+    /// les connaît pas : c'est ce fait qui a commandé de les joindre ici.
+    #[test]
+    fn les_procedures_spatiales_sont_publiees_et_absentes_du_registre() {
+        let store = ObrainStore::new_in_memory();
+        let relief = Relief::describe(&store, ReliefOptions::default());
+
+        for nom in ["obrain.spatial.nearest", "obrain.spatial.within"] {
+            let p = relief
+                .procedure(nom)
+                .unwrap_or_else(|| panic!("{nom} doit être publiée"));
+            assert_eq!(p.output_columns, vec!["node", "distance"], "{nom}");
+            assert_eq!(p.parameters.len(), 4, "{nom} exige quatre arguments");
+            assert!(
+                p.parameters.iter().all(|p| p.required),
+                "{nom} : les quatre arguments sont exigés (pas de défaut côté moteur)"
+            );
+            assert_eq!(p.origin, Origin::Introspected, "{nom} est introspectée");
+        }
+        assert_eq!(
+            relief
+                .procedure("obrain.spatial.nearest")
+                .map(|p| p.parameters[3].kind.clone()),
+            Some("integer".to_string()),
+            "`k` est un Int64 côté moteur"
+        );
+        assert_eq!(
+            relief
+                .procedure("obrain.spatial.within")
+                .map(|p| p.parameters[3].name.clone()),
+            Some("rayon_m".to_string())
+        );
+
+        // Le fait qui justifie la jointure : le registre ne les liste pas. Si
+        // cette assertion casse, obrain a changé de source et la jointure
+        // devient un doublon — c'est à relire, pas à supprimer d'office.
+        assert!(
+            !obrain_engine::procedures::registre()
+                .list()
+                .iter()
+                .any(|p| p.name.starts_with("obrain.spatial")),
+            "le registre s'est mis à lister les procédures spatiales : relire d'où vient la surface"
+        );
+    }
+
+    /// Les index spatiaux déclarés sont publiés — nom, label, propriété — et
+    /// leur absence est un fait (`[]`), pas une erreur.
+    #[test]
+    fn les_index_spatiaux_sont_publies() {
+        let store = ObrainStore::new_in_memory();
+        assert!(
+            Relief::describe(&store, ReliefOptions::default())
+                .store
+                .spatial_indexes
+                .is_empty(),
+            "un store sans index spatial publie une liste vide"
+        );
+
+        // Un index spatial exige un substrat : on ouvre une base sur disque.
+        let dir =
+            std::env::temp_dir().join(format!("this_obrain_spatial_{}", uuid::Uuid::new_v4()));
+        let store = ObrainStore::open(&dir).expect("store sur disque");
+        store
+            .db()
+            .create_named_spatial_index("villes", "Lieu", "position")
+            .expect("l'index spatial nommé doit se créer");
+
+        let relief = Relief::describe(&store, ReliefOptions::default());
+        let entry = relief
+            .store
+            .spatial_indexes
+            .iter()
+            .find(|i| i.name == "villes")
+            .expect("l'index spatial nommé doit être publié");
+        assert_eq!(entry.label, "Lieu");
+        assert_eq!(entry.property, "position");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Deux cliques de 4 reliées par une arête : deux communautés, chacune de
+    /// conductance **1/13** — la mesure qui dit la séparation, là où le
+    /// modularity ne dit que la densité.
+    #[test]
+    fn le_certificat_de_partition_mesure_la_separation() {
+        let store = ObrainStore::new_in_memory();
+        let session = store.db().session();
+        let ids: Vec<_> = (0..8).map(|_| session.create_node(&["N"])).collect();
+        for debut in [0usize, 4] {
+            for i in debut..debut + 4 {
+                for j in i + 1..debut + 4 {
+                    session.create_edge(ids[i], ids[j], "LIEN");
+                }
+            }
+        }
+        // Une seule arête entre les deux cliques : la coupe vaut 1 de chaque côté.
+        session.create_edge(ids[0], ids[4], "PONT");
+
+        let p = PartitionRelief::describe(&store, 1.0, PARTITION_MAX_NODES).expect("partition");
+        assert_eq!(p.nodes, 8);
+        assert_eq!(p.num_communities, 2, "deux cliques = deux communautés");
+        assert_eq!(p.communities.len(), 2);
+        for c in &p.communities {
+            assert_eq!(c.size, 4, "chaque communauté porte quatre nœuds");
+            assert_eq!(c.cut, 1, "une seule arête sort de la clique");
+            assert_eq!(c.volume, 13, "vol(S) = 2x6 arêtes internes + la coupe");
+            let gamma = c.conductance.expect("dénominateur non nul : vol(V) = 26");
+            assert!(
+                (gamma - 1.0 / 13.0).abs() < 1e-9,
+                "conductance attendue 1/13, reçue {gamma}"
+            );
+        }
+
+        // La borne est un REFUS nommé, jamais une requête qui pend.
+        let e = PartitionRelief::describe(&store, 1.0, 4).expect_err("au-delà de la borne");
+        assert!(e.to_string().contains("borne"), "{e}");
+    }
+
     /// Aucune liste de procédures n'est tenue à la main : elle vient du
     /// registre. Si cette assertion échoue, c'est que la feature `algos`
     /// d'obrain-engine n'est plus compilée (voir Cargo.toml).
@@ -1514,10 +1887,11 @@ mod tests {
         let relief = Relief::describe(&store, ReliefOptions::default());
 
         let engine_registry = obrain_engine::procedures::registre().list().len();
+        let spatial = obrain_engine::database::spatial_procedure::lignes_procedures().len();
         assert_eq!(
             relief.procedures.len(),
-            engine_registry,
-            "le relief doit refléter exactement le registre du moteur"
+            engine_registry + spatial,
+            "le relief = le registre + les procédures spatiales, que le registre ignore"
         );
         assert!(
             relief.engine.registry_available,
