@@ -92,14 +92,9 @@ pub fn estimate_tools_tokens(specs: &[ToolSpec]) -> usize {
     specs
         .iter()
         .map(|outil| {
-            // Le schéma est sérialisé comme le transport l'écrira : le compte ne
-            // doit pas dépendre de la forme en mémoire.
-            let corps = format!(
-                "{}{}{}",
-                outil.name,
-                outil.description,
-                outil.parameters.to_string()
-            );
+            // `Value` s'affiche en JSON compact — exactement la forme que le transport
+            // écrit : le compte ne dépend pas de la représentation en mémoire.
+            let corps = format!("{}{}{}", outil.name, outil.description, outil.parameters);
             COUT_OUTIL.saturating_add(jetons_texte(&corps))
         })
         .fold(0usize, usize::saturating_add)
