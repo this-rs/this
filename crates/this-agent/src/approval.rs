@@ -14,7 +14,9 @@
 //! - [`HarnessDoc::fingerprint`] : SHA-256 d'une forme **canonique** de la composition
 //!   (clés triées, aucun espace), `approval` exclue — sinon approuver changerait
 //!   l'empreinte approuvée.
-//! - [`Approval`] : *qui*, *quand*, et *l'empreinte de ce qui a été approuvé*.
+//! - [`Approval`] : *qui*, *quand*, et *l'empreinte de ce qui a été approuvé*, plus les
+//!   digests de contenu épinglés — **seule la copie que l'hôte tient dans `trusted` fait
+//!   foi** ; celle que le document écrit dans `approval` est une affirmation (#287, e).
 //!   C'est l'empreinte qui rend l'approbation non transférable : modifier la
 //!   composition après coup l'invalide mécaniquement. Une approbation peut en plus
 //!   épingler le **contenu** de chaque module (`digests`) : elle est alors plus
@@ -60,6 +62,11 @@ use crate::substrate::Verdict;
 /// dont le contenu a bougé, en nommant l'emplacement. Absent (ou vide) :
 /// approbation de référence, compatible avec les documents d'hier. Ce champ ne
 /// change pas l'empreinte : il est porté par `approval`, exclue de l'empreinte.
+///
+/// **Ce champ est une SOURCE DE PREUVE quand il est porté par la liste `trusted` de
+/// l'hôte** (l'enregistrement de ce qu'il a approuvé). Le même champ porté par le
+/// `approval` du DOCUMENT ne l'est pas : le document s'écrit sa propre affirmation,
+/// hors empreinte, et `is_approved` ne le lit plus pour décider (#287, case e).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Approval {
     pub by: String,
@@ -125,11 +132,13 @@ impl HarnessDoc {
     /// Cette composition est-elle approuvée par quelqu'un que l'hôte connaît ?
     ///
     /// `trusted` est la liste de l'hôte : les approbations qu'il a lui-même
-    /// enregistrées. Le refus dit *lequel des deux a bougé* :
+    /// enregistrées — c'est elle qui porte la vérité sur le CONTENU (`digests`) comme
+    /// sur la composition (`fingerprint`). Le refus dit *lequel des deux a bougé* :
     ///
     /// 1. pas d'`approval` dans le document → refusé ;
-    /// 2. un emplacement dont le digest de contenu ne correspond plus à celui
-    ///    approuvé → **le contenu** d'un module a changé, l'emplacement est nommé ;
+    /// 2. un emplacement dont le digest de contenu ne correspond plus à celui que
+    ///    l'hôte a enregistré → **le contenu** d'un module a changé, l'emplacement est
+    ///    nommé ;
     /// 3. l'empreinte approuvée n'est plus celle du document → **le document** a
     ///    changé depuis l'approbation ;
     /// 4. aucun approbateur de ce nom chez l'hôte → approbateur inconnu ;
@@ -139,31 +148,41 @@ impl HarnessDoc {
         let Some(approval) = &self.approval else {
             return Verdict::Refuse("aucune approbation : composition non approuvée".into());
         };
-        // Le contenu d'abord : si l'approbation a épinglé des digests, un module
-        // republié sous la même version est nommé ici, précisément. L'empreinte
-        // couvre déjà le digest (elle hache le JSON canonique) — mais elle ne dit
-        // pas *lequel* des emplacements a bougé ; ce contrôle le dit.
-        for slot in &self.slots {
-            match (slot.digest.as_deref(), approval.digests.get(&slot.module)) {
-                (Some(actuel), Some(attendu)) if actuel != attendu.as_str() => {
-                    return Verdict::Refuse(format!(
-                        "le contenu de l'emplacement {}:{}@{} a changé depuis \
-                         l'approbation (digest {actuel}, approuvé {attendu})",
-                        slot.kind.as_str(),
-                        slot.module,
-                        slot.version
-                    ));
+        // Le contenu d'abord : si l'hôte a épinglé des digests, un module republié sous
+        // la même version est nommé ici, précisément. L'empreinte couvre déjà le digest
+        // (elle hache le JSON canonique) — mais elle ne dit pas *lequel* des emplacements
+        // a bougé ; ce contrôle le dit.
+        //
+        // D'OÙ VIENNENT les digests comparés (#287, case e) : de la liste `trusted`, donc
+        // de l'HÔTE. La map `approval.digests` du document vivait hors empreinte et
+        // n'était confrontée à rien : la vider suffisait à désarmer ce contrôle, et la
+        // faire diverger ne coûtait qu'un refus. Ce n'était donc pas une preuve, et elle
+        // n'est plus lue ici. Conséquence assumée : un hôte qui garderait PLUSIEURS
+        // approbations du même approbateur avec des digests différents (une par version
+        // de module) verrait un refus — fail-closed, et le motif nomme l'emplacement.
+        for t in trusted.iter().filter(|t| t.by == approval.by) {
+            for slot in &self.slots {
+                match (slot.digest.as_deref(), t.digests.get(&slot.module)) {
+                    (Some(actuel), Some(attendu)) if actuel != attendu.as_str() => {
+                        return Verdict::Refuse(format!(
+                            "le contenu de l'emplacement {}:{}@{} a changé depuis \
+                             l'approbation (digest {actuel}, approuvé {attendu})",
+                            slot.kind.as_str(),
+                            slot.module,
+                            slot.version
+                        ));
+                    }
+                    (None, Some(attendu)) => {
+                        return Verdict::Refuse(format!(
+                            "l'emplacement {}:{}@{} a perdu son digest de contenu depuis \
+                             l'approbation (approuvé {attendu})",
+                            slot.kind.as_str(),
+                            slot.module,
+                            slot.version
+                        ));
+                    }
+                    _ => {}
                 }
-                (None, Some(attendu)) => {
-                    return Verdict::Refuse(format!(
-                        "l'emplacement {}:{}@{} a perdu son digest de contenu depuis \
-                         l'approbation (approuvé {attendu})",
-                        slot.kind.as_str(),
-                        slot.module,
-                        slot.version
-                    ));
-                }
-                _ => {}
             }
         }
         let actuelle = self.fingerprint();
