@@ -393,4 +393,31 @@ mod tests {
         assert_eq!(c.uncertainty, Uncertainty::Unknown);
         assert_eq!(c.class.as_str(), CLASSE_INCONNUE);
     }
+
+    #[test]
+    fn la_projection_quantifiee_peut_collisionner_sans_etre_une_identite() {
+        // v1 et v2 sont ORTHOGONAUX, donc des représentations distinctes.
+        let v1 = vec![0.1f32, 0.0];
+        let v2 = vec![0.0f32, 0.1];
+        assert_eq!(cosinus(&v1, &v2), Some(0.0), "orthogonaux, pas identiques");
+        // Mais à quantification=1, leurs composantes s'arrondissent pareil (0.1 → 0) :
+        // la projection quantifiée est IDENTIQUE. C'est une collision d'indice, pas une
+        // identité logique — deux connaissances distinctes ne doivent PAS fusionner.
+        assert_eq!(
+            poignee_de_projection(&v1, 1),
+            poignee_de_projection(&v2, 1),
+            "collision de projection : la poignée n'est pas une identité"
+        );
+    }
+
+    #[test]
+    fn la_saturation_i64_des_grandes_amplitudes_ne_cree_pas_d_identite() {
+        // Une amplitude énorme quantifiée sature le `as i64` (débordement vers la valeur
+        // extrême) : la poignée qui en sort n'a aucun sens comme identité. On vérifie
+        // seulement qu'elle reste une poignée (Some), jamais une identité de connaissance.
+        let grande = vec![f32::MAX, 0.0];
+        let poignee = poignee_de_projection(&grande, 1);
+        assert!(poignee.is_some());
+        assert!(poignee.unwrap().as_str().starts_with("repr."));
+    }
 }
