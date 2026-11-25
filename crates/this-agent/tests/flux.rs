@@ -79,7 +79,7 @@ fn below_ne_se_declenche_qu_une_fois_en_franchissant_vers_le_bas() {
         let reveil = d.pousser(batterie(t, 0.19)).unwrap();
         assert!(reveil.is_empty(), "rester sous le seuil ne réveille pas");
     }
-    let livres = evenements(d.lire(id).unwrap());
+    let livres = evenements(d.read(id).unwrap());
     assert_eq!(niveaux(&livres), vec![0.19], "un seul événement livré");
 }
 
@@ -101,7 +101,7 @@ fn below_se_rearme_apres_etre_remonte_au_dessus() {
         d.pousser(batterie(0, niveau)).unwrap();
     }
     // Deux franchissements vers le bas : 0,19 puis 0,10. Pas 0,18 (déjà dessous).
-    let livres = evenements(d.lire(id).unwrap());
+    let livres = evenements(d.read(id).unwrap());
     assert_eq!(niveaux(&livres), vec![0.19, 0.10]);
 }
 
@@ -119,7 +119,7 @@ fn premier_echantillon_deja_du_bon_cote_se_declenche() {
         )
         .unwrap();
     d.pousser(batterie(0, 0.05)).unwrap();
-    assert_eq!(niveaux(&evenements(d.lire(id).unwrap())), vec![0.05]);
+    assert_eq!(niveaux(&evenements(d.read(id).unwrap())), vec![0.05]);
 }
 
 #[test]
@@ -138,7 +138,7 @@ fn above_suit_le_meme_principe_vers_le_haut() {
     for niveau in [0.70, 0.85, 0.90, 0.79, 0.81] {
         d.pousser(batterie(0, niveau)).unwrap();
     }
-    assert_eq!(niveaux(&evenements(d.lire(id).unwrap())), vec![0.85, 0.81]);
+    assert_eq!(niveaux(&evenements(d.read(id).unwrap())), vec![0.85, 0.81]);
 }
 
 #[test]
@@ -181,8 +181,8 @@ fn equals_et_exit_suivent_une_zone() {
     d.pousser(zone(2, "maison")).unwrap();
     d.pousser(zone(3, "dehors")).unwrap();
 
-    let entrees = evenements(d.lire(entree).unwrap());
-    let sorties = evenements(d.lire(sortie).unwrap());
+    let entrees = evenements(d.read(entree).unwrap());
+    let sorties = evenements(d.read(sortie).unwrap());
     assert_eq!(entrees.len(), 1, "une entrée, pas une par position");
     assert_eq!(sorties.len(), 1, "une sortie");
     assert_eq!(sorties[0].at_ms, 3);
@@ -201,7 +201,7 @@ fn changed_ne_se_declenche_pas_au_premier_echantillon() {
         )
         .unwrap();
     d.pousser(batterie(0, 0.5)).unwrap();
-    assert!(d.lire(id).unwrap().is_empty());
+    assert!(d.read(id).unwrap().is_empty());
 }
 
 // ----------------------------------------------------------------- cadence
@@ -222,7 +222,7 @@ fn throttled_ne_laisse_passer_qu_un_evenement_par_seconde() {
     for at in [0, 100, 999, 1000, 1500, 2001] {
         d.pousser(batterie(at, 0.5)).unwrap();
     }
-    let livres = evenements(d.lire(id).unwrap());
+    let livres = evenements(d.read(id).unwrap());
     let instants: Vec<u64> = livres.iter().map(|e| e.at_ms).collect();
     assert_eq!(instants, vec![0, 1000, 2001]);
 }
@@ -236,7 +236,7 @@ fn sans_filtre_on_recoit_tout() {
     for at in 0..10 {
         d.pousser(batterie(at, 0.5)).unwrap();
     }
-    assert_eq!(evenements(d.lire(id).unwrap()).len(), 10);
+    assert_eq!(evenements(d.read(id).unwrap()).len(), 10);
 }
 
 // ------------------------------------------------------------------- pertes
@@ -257,7 +257,7 @@ fn la_perte_remonte_en_tete_quand_la_file_est_pleine() {
     for (at, niveau) in [(0, 0.1), (1, 0.2), (2, 0.3)] {
         d.pousser(batterie(at, niveau)).unwrap();
     }
-    let sortie = d.lire(id).unwrap();
+    let sortie = d.read(id).unwrap();
     assert_eq!(
         sortie[0],
         Livraison::Perdus {
@@ -269,7 +269,7 @@ fn la_perte_remonte_en_tete_quand_la_file_est_pleine() {
     // La file garde les plus récents : on a évincé le plus ancien.
     assert_eq!(niveaux(&evenements(sortie)), vec![0.2, 0.3]);
     // Le compteur se remet à zéro à la lecture suivante.
-    assert!(d.lire(id).unwrap().is_empty());
+    assert!(d.read(id).unwrap().is_empty());
 }
 
 #[test]
@@ -293,7 +293,7 @@ fn un_evenement_non_voulu_n_est_pas_une_perte() {
         d.pousser(batterie(0, niveau)).unwrap();
     }
     assert!(
-        d.lire(id).unwrap().is_empty(),
+        d.read(id).unwrap().is_empty(),
         "rien de voulu, donc rien de perdu"
     );
 }
@@ -310,7 +310,7 @@ fn liberer_un_module_coupe_ses_abonnements_et_les_reveils() {
     assert_eq!(d.liberer_module("parti"), 1);
     assert_eq!(d.abonnements_actifs(), 0);
     assert!(d.pousser(batterie(0, 0.5)).unwrap().is_empty());
-    assert!(d.lire(id).is_none(), "un abonnement libéré n'existe plus");
+    assert!(d.read(id).is_none(), "un abonnement libéré n'existe plus");
 }
 
 #[test]
@@ -391,7 +391,7 @@ fn un_evenement_mal_forme_est_refuse_sans_toucher_aux_abonnements() {
         Err(Refus::ValeurNonFinie { .. })
     ));
 
-    assert!(d.lire(id).unwrap().is_empty(), "rien n'a été livré");
+    assert!(d.read(id).unwrap().is_empty(), "rien n'a été livré");
 }
 
 #[test]
@@ -509,7 +509,7 @@ fn le_pont_alimente_le_diffuseur_et_le_seuil_franchit_une_fois() {
         d.pousser(ev).unwrap();
     }
     let niveaux: Vec<u64> = d
-        .lire(bas)
+        .read(bas)
         .unwrap()
         .into_iter()
         .filter_map(|l| match l {

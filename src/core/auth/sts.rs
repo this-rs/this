@@ -235,7 +235,7 @@ impl StsService {
     /// Rend `true` si l'annuaire a été installé, `false` s'il y en avait déjà un
     /// (l'appelant peut alors le DIRE, plutôt que de croire avoir branché).
     #[must_use]
-    pub fn set_annuaire(&self, annuaire: Arc<dyn AnnuaireVerification>) -> bool {
+    pub fn set_directory(&self, annuaire: Arc<dyn AnnuaireVerification>) -> bool {
         self.annuaire.set(annuaire).is_ok()
     }
 
@@ -600,7 +600,7 @@ mod tests {
         // était déjà posé — auquel cas celui-ci serait ignoré en silence, et le
         // test mesurerait l'ancien. Le constat est donc exigé ici.
         assert!(
-            sts.set_annuaire(Arc::new(AnnuaireJouet { tenant, user })),
+            sts.set_directory(Arc::new(AnnuaireJouet { tenant, user })),
             "l'annuaire du test doit être celui qui fait foi (aucun autre n'était posé)"
         );
 

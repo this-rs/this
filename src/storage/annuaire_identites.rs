@@ -115,7 +115,7 @@ impl AnnuaireIdentites {
     }
 
     /// Le nombre d'identités connues.
-    pub fn compte(&self) -> usize {
+    pub fn count(&self) -> usize {
         self.index.read().map(|i| i.len()).unwrap_or(0)
     }
 
@@ -160,7 +160,7 @@ impl AnnuaireIdentites {
         tenant_id: Uuid,
         roles: Vec<String>,
     ) -> Result<Utilisateur> {
-        self.ajouter_avec_id(username, mot_de_passe, Uuid::new_v4(), tenant_id, roles)
+        self.add_with_id(username, mot_de_passe, Uuid::new_v4(), tenant_id, roles)
     }
 
     /// ── LA MÊME CHOSE, AVEC UN `user_id` DÉJÀ CONNU (2026-09-20) ────────────
@@ -177,7 +177,7 @@ impl AnnuaireIdentites {
     /// # Erreurs
     ///
     /// Comme [`Self::ajouter`] : champs vides, ou utilisateur déjà présent.
-    pub fn ajouter_avec_id(
+    pub fn add_with_id(
         &self,
         username: &str,
         mot_de_passe: &str,
@@ -241,7 +241,7 @@ impl AnnuaireIdentites {
     }
 
     /// Remplace le mot de passe (re-hache, persiste, commit).
-    pub fn changer_mot_de_passe(&self, username: &str, nouveau: &str) -> Result<()> {
+    pub fn change_password(&self, username: &str, nouveau: &str) -> Result<()> {
         if nouveau.is_empty() {
             bail!("le nouveau mot de passe ne peut pas être vide");
         }
@@ -435,7 +435,7 @@ mod tests {
         annuaire
             .ajouter("carol", "ancien", Uuid::new_v4(), vec![])
             .unwrap();
-        annuaire.changer_mot_de_passe("carol", "nouveau").unwrap();
+        annuaire.change_password("carol", "nouveau").unwrap();
         assert!(annuaire.verifier("carol", "ancien").unwrap().is_none());
         assert!(annuaire.verifier("carol", "nouveau").unwrap().is_some());
 
@@ -457,7 +457,7 @@ mod tests {
         } // drop → verrou relâché, WAL committé
 
         let rouvert = AnnuaireIdentites::ouvrir(&chemin).expect("réouverture");
-        assert_eq!(rouvert.compte(), 1);
+        assert_eq!(rouvert.count(), 1);
         let u = rouvert
             .verifier("durable", "mdp-durable")
             .unwrap()

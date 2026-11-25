@@ -10,7 +10,7 @@
 use crate::core::auth::sts::{
     LoginCredentials, RefreshRequest, RevokeRequest, StsClaims, StsService,
 };
-use crate::server::middleware::auth::{COOKIE_JETON, jeton_de_la_requete};
+use crate::server::middleware::auth::{TOKEN_COOKIE, request_token};
 use axum::{
     Json, Router,
     extract::State,
@@ -22,7 +22,7 @@ use jsonwebtoken::{Algorithm, Validation};
 use std::sync::Arc;
 
 /// Le nom du cookie — un seul, partagé avec la couche d'authentification.
-pub use crate::server::middleware::auth::COOKIE_JETON as COOKIE_NAME;
+pub use crate::server::middleware::auth::TOKEN_COOKIE as COOKIE_NAME;
 
 /// Shared state for the STS auth routes
 pub struct StsState {
@@ -78,7 +78,7 @@ fn cookie_de_session(jeton: &str, duree_secs: i64, requete: &HeaderMap) -> Heade
         .and_then(|v| v.to_str().ok())
         .is_some_and(|proto| proto.eq_ignore_ascii_case("https"));
     let mut cookie =
-        format!("{COOKIE_JETON}={jeton}; Path=/; HttpOnly; SameSite=Lax; Max-Age={duree_secs}");
+        format!("{TOKEN_COOKIE}={jeton}; Path=/; HttpOnly; SameSite=Lax; Max-Age={duree_secs}");
     if en_https {
         cookie.push_str("; Secure");
     }
@@ -157,7 +157,7 @@ pub async fn revoke_handler(
 /// requête vient de la porte. Le projet rattaché ne doit donc être joignable
 /// **que** par elle ; exposé en direct, il accepte des en-têtes forgés.
 pub async fn verify_handler(State(state): State<Arc<StsState>>, headers: HeaderMap) -> Response {
-    let Some(token) = jeton_de_la_requete(&headers) else {
+    let Some(token) = request_token(&headers) else {
         return refusal("missing_token");
     };
 

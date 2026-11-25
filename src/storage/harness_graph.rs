@@ -98,7 +98,7 @@ impl HarnessGraph {
     /// harnais pousse les étapes sans masquer, voir `this_harness::Recorder`). Cette
     /// méthode existe pour que le choix soit CONSTATABLE au lieu d'être silencieux :
     /// `ServerHost::harness_journal` rend `true`, un `HarnessGraph::new` rend `false`.
-    pub fn masque_installe(&self) -> bool {
+    pub fn is_mask_installed(&self) -> bool {
         self.masque.is_some()
     }
 

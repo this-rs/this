@@ -841,8 +841,8 @@ impl HostRecorder {
     }
 
     /// Le masque est-il installé sur le journal de cet enregistreur ?
-    pub fn masque_installe(&self) -> bool {
-        self.0.masque_installe()
+    pub fn is_mask_installed(&self) -> bool {
+        self.0.is_mask_installed()
     }
 }
 

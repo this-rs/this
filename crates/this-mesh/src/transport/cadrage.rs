@@ -16,7 +16,7 @@ pub enum CadrageError {
 }
 
 /// Écrit `octets` préfixé de sa longueur sur 4 octets big-endian.
-pub async fn ecrire<S: AsyncWrite + Unpin>(s: &mut S, octets: &[u8]) -> std::io::Result<()> {
+pub async fn write<S: AsyncWrite + Unpin>(s: &mut S, octets: &[u8]) -> std::io::Result<()> {
     let len = octets.len() as u32;
     s.write_all(&len.to_be_bytes()).await?;
     s.write_all(octets).await?;
@@ -25,7 +25,7 @@ pub async fn ecrire<S: AsyncWrite + Unpin>(s: &mut S, octets: &[u8]) -> std::io:
 
 /// Lit un message cadré. La longueur est refusée **avant lecture** du corps si
 /// elle dépasse `ceiling`.
-pub async fn lire<S: AsyncRead + Unpin>(
+pub async fn read<S: AsyncRead + Unpin>(
     s: &mut S,
     ceiling: usize,
 ) -> Result<Vec<u8>, CadrageError> {
@@ -55,7 +55,7 @@ mod tests {
         // Annonce u32::MAX octets — aucun tampon de cette taille ne doit être
         // alloué : `lire` rend avant le `vec![0; len]`.
         client.write_all(&u32::MAX.to_be_bytes()).await.unwrap();
-        let err = lire(&mut serveur, 1024).await.unwrap_err();
+        let err = read(&mut serveur, 1024).await.unwrap_err();
         match err {
             CadrageError::TropGros { taille, max } => {
                 assert_eq!(taille, u32::MAX as usize);
@@ -70,8 +70,8 @@ mod tests {
     async fn un_message_dans_les_limites_est_relu_a_l_identique() {
         let (mut client, mut serveur) = duplex(1024);
         let corps = b"un message du maillage".to_vec();
-        ecrire(&mut client, &corps).await.unwrap();
-        let relu = lire(&mut serveur, 1024).await.unwrap();
+        write(&mut client, &corps).await.unwrap();
+        let relu = read(&mut serveur, 1024).await.unwrap();
         assert_eq!(relu, corps);
     }
 }

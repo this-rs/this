@@ -521,7 +521,7 @@ struct Abonnement {
 /// Le diffuseur : le catalogue, et les abonnements vivants.
 ///
 /// Sans horloge ni thread. L'hôte appelle [`Diffuseur::pousser`] à chaque
-/// événement, lit les réveils qu'il renvoie, puis [`Diffuseur::lire`].
+/// événement, lit les réveils qu'il renvoie, puis [`Diffuseur::read`].
 #[derive(Debug)]
 pub struct Diffuseur {
     catalogue: Vec<Stream>,
@@ -632,7 +632,7 @@ impl Diffuseur {
 
     /// Lit ce qui est en attente. Le compte de pertes, s'il y en a, vient en tête
     /// et se remet à zéro. `None` si l'abonnement n'existe plus (libéré).
-    pub fn lire(&mut self, id: AbonnementId) -> Option<Vec<Livraison>> {
+    pub fn read(&mut self, id: AbonnementId) -> Option<Vec<Livraison>> {
         let ab = self.abonnements.iter_mut().find(|a| a.id == id)?;
         let mut sortie = Vec::new();
         if ab.perdus > 0 {

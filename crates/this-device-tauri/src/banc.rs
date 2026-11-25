@@ -413,7 +413,7 @@ async fn balayer_ecritures<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> Vec<
 /// l'appelant décide.
 pub async fn mesurer_et_ecrire<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> Value {
     let rapport = balayer(app).await;
-    ecrire(&rapport);
+    write_report(&rapport);
     rapport
 }
 
@@ -422,7 +422,7 @@ const RAPPORT: &str = "Documents/banc.json";
 const JOURNAL: &str = "Documents/banc.log";
 
 /// Écrit le rapport et son journal. Un échec est silencieux : la mesure, elle, a eu lieu.
-fn ecrire(rapport: &Value) {
+fn write_report(rapport: &Value) {
     let Ok(home) = std::env::var("HOME") else {
         return;
     };

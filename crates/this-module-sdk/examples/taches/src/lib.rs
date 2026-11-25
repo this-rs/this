@@ -29,7 +29,7 @@ impl Module for Taches {
         match req.op {
             Op::Create => creer(&req),
             Op::Update => modifier(&req),
-            Op::Get => lire(&req),
+            Op::Get => read(&req),
             Op::List => lister(&req),
             Op::Delete => supprimer(&req),
             Op::Call => match req.name.as_deref() {
@@ -108,7 +108,7 @@ fn modifier(req: &Request) -> Response {
     Response::ok(ligne.clone()).effect(Effect::put(ENTITE, ligne))
 }
 
-fn lire(req: &Request) -> Response {
+fn read(req: &Request) -> Response {
     let id = req.input.get("id").and_then(Value::as_str).unwrap_or("");
     match req.row(id) {
         Some(l) => Response::ok(l.clone()),

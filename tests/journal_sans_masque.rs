@@ -62,12 +62,12 @@ async fn un_recorder_sans_masque_ecrit_tel_quel_et_la_garde_le_dit() {
     let store = magasin("this_jm_sans");
     let journal = HarnessGraph::new(Arc::clone(&store));
     assert!(
-        !journal.masque_installe(),
+        !journal.is_mask_installed(),
         "HarnessGraph::new n'installe aucun masque : le choix doit être constatable"
     );
     let recorder = HostRecorder::new(journal);
     assert!(
-        !recorder.masque_installe(),
+        !recorder.is_mask_installed(),
         "le constat traverse le Recorder de l'hôte : rien n'est masqué en sous-main"
     );
 
@@ -103,7 +103,7 @@ async fn le_chemin_de_l_hote_masque_et_le_dit() {
         .unwrap();
     let recorder = host.harness_recorder().expect("un magasin est attaché");
     assert!(
-        recorder.masque_installe(),
+        recorder.is_mask_installed(),
         "le chemin de l'hôte (harness_recorder) passe par harness_journal et masque"
     );
 
