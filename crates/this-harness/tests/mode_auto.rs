@@ -99,14 +99,12 @@ impl World {
         .settings(quiet())
     }
 
-    /// `winner` gagne nettement, pour les classes « general » et « debug ».
+    /// `winner` gagne nettement, pour la classe cognitive de ces tests.
     fn prefer(&self, winner: (&str, &str), losers: &[(&str, &str)]) {
         let mut arms = Vec::new();
-        for class in [CLASSE] {
-            arms.push(arm(class, winner.0, winner.1, true));
-            for (provider, model) in losers {
-                arms.push(arm(class, provider, model, false));
-            }
+        arms.push(arm(CLASSE, winner.0, winner.1, true));
+        for (provider, model) in losers {
+            arms.push(arm(CLASSE, provider, model, false));
         }
         self.learning.set_arms(arms);
     }
@@ -3093,12 +3091,10 @@ fn le_repli_ne_sort_jamais_de_l_instance_meme_quand_un_autre_fournisseur_est_mei
     // des gardes (jamais deux changements de fournisseur de suite) que ce chemin ne tient pas.
     let world = monde_quota();
     let mut bras = Vec::new();
-    for classe in [CLASSE] {
-        bras.push(arm(classe, "a", "m1", true));
-        bras.push(arm(classe, "b", "x", true));
-        bras.push(arm(classe, "a", "m2", false));
-        bras.push(arm(classe, "a", "m3", false));
-    }
+    bras.push(arm(CLASSE, "a", "m1", true));
+    bras.push(arm(CLASSE, "b", "x", true));
+    bras.push(arm(CLASSE, "a", "m2", false));
+    bras.push(arm(CLASSE, "a", "m3", false));
     world.learning.set_arms(bras);
     let router = Rc::new(TurnRouter::new(world.spec("a", "m1", 1).auto()));
     let moteur = Quotas::new(vec![("m1", QuotaScope::Model)]);
