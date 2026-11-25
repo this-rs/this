@@ -1,29 +1,29 @@
-# Banc d'observation cognitive obrain (validateur this-harness)
-
-Rejoue les suites de durabilité d'obrain en mode NON observé et OBSERVÉ, sur
-une révision donnée, pour trancher « l'observation interfère-t-elle avec le
-WAL/checkpoint/leases/récupération ? ».
+# Banc de validation durabilité/cognition obrain (validateur this-harness)
 
 ## Usage
 
 ```sh
-bench/obrain/bench-observation.sh <rev> <étiquette>
+bench/obrain/run.sh --repo <clone obrain> --rev <sha|ref> --artifacts <dir> [--forced]
 ```
 
-`<rev>` est un commit/réf du dépôt obrain-db ; le script `git checkout` dessus,
-compile puis exécute 7 suites et écrit le log dans `/tmp/bench-<étiquette>.log`.
+`--forced` dérive les 5 suites historiques en variantes **observées**
+(`open_substrate_observed` / `new_in_memory_observed`), **assertions inchangées**.
 
-## Suites
+## Ce que le script garantit
 
-- NON observé (features `wal,cypher,vector-index`) :
-  `durabilite_commit_kill9`, `ecriture_multi_processus`, `wal_recovery`,
-  `vector_dimension_native`, `vector_coherence_ecritures`.
-- OBSERVÉ (feature `cognitive`) :
-  `durabilite_cognitive_observee_kill9`, `cognitive_wiring_test`.
+| Exigence | Comment |
+|---|---|
+| dépôt source explicite | `--repo`, jamais deviné ; refuse un chemin non-git |
+| SHA complet avant campagne | `git rev-parse --verify "$REV^{commit}"`, écrit dans `contexte.txt` |
+| worktree isolé | `git worktree add --detach` ; **aucun `git checkout`** sur un dépôt partagé |
+| artefacts uniques | `<artifacts>/{resume.txt,commands.txt,contexte.txt,generated/,*.log}` |
+| tests réellement exécutés | `test result:` parsé ; **0 test exécuté = suite en échec** |
+| code de sortie global | non nul si une suite inattendue échoue |
+| nettoyage | `trap` : `git worktree remove --force`, fichiers générés retirés |
+| variantes vérifiées | `cmp -s` source/variante : une transformation sans effet **échoue** ; le diff est conservé dans `generated/` |
+| portable | POSIX `sh`, pas de chemin `$HOME` codé, `cargo` requis dans le `PATH` |
 
-## Limite connue
+## Révisions et résultats
 
-Les 5 suites historiques tournent ici en mode NON observé (l'observation est
-opt-in par ouverture `open_substrate_observed`). La matrice complète « avec
-observation forcée » est un chantier séparé (tâche « Terminer la matrice
-transactionnelle »).
+Chaque campagne est attachée au SHA qu'elle a testé — voir `RESULTS.md`.
+Un passage sur une nouvelle révision est une **nouvelle** mesure.
