@@ -1,0 +1,295 @@
+//! **Représentation cognitive d'un tour — sans dictionnaire de mots-clés.**
+//!
+//! Invariant de conception : *aucune liste de mots, aucune expression régulière,
+//! aucune règle lexicale ne décide de ce qu'une demande veut dire*. Un lexique est
+//! un codage de langue, de domaine et de formulation ; il exclut par construction
+//! tout ce qui n'a pas été écrit dedans (autres langues, paraphrases sans mot commun,
+//! multimodal, domaines inédits).
+//!
+//! Ce module ne fournit que des **structures** : une représentation extensible, un
+//! port d'encodage optionnel, et une règle de décision qui opère sur des **vecteurs
+//! et des prototypes appris** — jamais sur des chaînes de caractères.
+//!
+//! ```text
+//! perception → représentation → contextualisation → rappel → composition
+//!            → décision → exécution → observation → apprentissage
+//! ```
+//!
+//! Ce fichier couvre `représentation` et la règle `rappel → décision`. Les autres
+//! étages vivent là où ils existent déjà (rappel : `recall`, décision : `routing`,
+//! observation/apprentissage : `Learning`).
+//!
+//! ## Amorçage (pas de dépendance à un fournisseur)
+//!
+//! Si aucun encodeur n'est configuré, ou si aucun prototype n'est mémorisé, la
+//! classification rend [`Uncertainty::Unknown`] et la classe
+//! [`CLASSE_INCONNUE`]. C'est un état **explicite** : le routeur continue alors avec
+//! sa politique neutre (capacités, disponibilité, contraintes objectives). Il n'y a
+//! **aucun retour silencieux** à un mécanisme lexical — il n'en existe plus.
+
+/// Ce qu'un tour apporte comme modalités.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Modalities {
+    pub text: bool,
+    pub images: bool,
+    pub documents: bool,
+}
+
+impl Modalities {
+    /// Les modalités d'un tour de conversation.
+    pub fn of_turn(has_text: bool, has_images: bool) -> Self {
+        Self {
+            text: has_text,
+            images: has_images,
+            documents: false,
+        }
+    }
+}
+
+/// Ce que le système sait de sa propre compréhension.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Uncertainty {
+    /// La représentation est proche d'un prototype connu.
+    Established(f32),
+    /// Elle n'est proche d'aucun prototype : une classe a été formée.
+    Formed(f32),
+    /// Aucune représentation disponible : on ne sait pas.
+    Unknown,
+}
+
+impl Uncertainty {
+    /// Vrai quand la décision repose sur une représentation qui existe.
+    pub fn grounded(self) -> bool {
+        !matches!(self, Uncertainty::Unknown)
+    }
+}
+
+/// Contraintes objectives du tour — aucune n'est sémantique.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Constraints {
+    pub context_need_tokens: u64,
+    pub budget_remaining_usd: Option<f64>,
+    pub needs_tools: bool,
+    pub needs_images: bool,
+    pub attempt: u32,
+}
+
+/// La représentation d'une tâche.
+///
+/// `embedding` vient de la couche perception (un encodeur configuré) ; `goals` est
+/// ce que l'appelant a **déclaré**, jamais ce qu'un lexique a deviné.
+#[derive(Clone, Debug, Default)]
+pub struct TaskRepr {
+    pub embedding: Option<Vec<f32>>,
+    pub modalities: Modalities,
+    pub constraints: Constraints,
+    pub goals: Vec<String>,
+}
+
+impl TaskRepr {
+    /// Une représentation sans vecteur : le cas d'amorçage.
+    pub fn sans_encodeur(modalities: Modalities, constraints: Constraints) -> Self {
+        Self {
+            embedding: None,
+            modalities,
+            constraints,
+            goals: Vec::new(),
+        }
+    }
+}
+
+/// Port d'encodage sémantique.
+///
+/// Le harness **n'impose aucun fournisseur** : pas d'implémentation par défaut, pas
+/// de repli lexical. Une implémentation peut appeler un modèle local, un service
+/// distant, ou Obrain ; elle rend `None` quand elle ne peut pas encoder, et le
+/// système le dit (`Uncertainty::Unknown`).
+pub trait SemanticEncoder {
+    /// Le vecteur du texte, ou `None` si l'encodage n'est pas disponible.
+    fn encode(&self, text: &str) -> Option<Vec<f32>>;
+}
+
+/// Une classe **apprise**. Son nom est opaque : il ne décrit pas un domaine.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct LearnedClass(pub String);
+
+impl LearnedClass {
+    /// Classe de l'incertitude — la seule qui soit nommée dans le code.
+    pub fn inconnue() -> Self {
+        Self(CLASSE_INCONNUE.to_string())
+    }
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// Nom de la classe rendue quand aucune représentation n'est disponible.
+pub const CLASSE_INCONNUE: &str = "repr.unknown";
+
+/// Un prototype mémorisé : un vecteur, et la classe qu'il désigne.
+#[derive(Clone, Debug)]
+pub struct Prototype {
+    pub class: LearnedClass,
+    pub vector: Vec<f32>,
+}
+
+/// Le résultat d'une classification, avec son incertitude explicite.
+#[derive(Clone, Debug)]
+pub struct Classification {
+    pub class: LearnedClass,
+    pub uncertainty: Uncertainty,
+    /// Le prototype le plus proche, s'il y en a un.
+    pub nearest: Option<LearnedClass>,
+    pub similarity: Option<f32>,
+}
+
+impl Classification {
+    /// La seule classification qui ne repose sur aucune représentation.
+    pub fn inconnue() -> Self {
+        Self {
+            class: LearnedClass::inconnue(),
+            uncertainty: Uncertainty::Unknown,
+            nearest: None,
+            similarity: None,
+        }
+    }
+}
+
+/// Similarité cosinus. Zéro si un vecteur est nul — jamais `NaN`.
+pub fn cosinus(a: &[f32], b: &[f32]) -> f32 {
+    if a.len() != b.len() || a.is_empty() {
+        return 0.0;
+    }
+    let (mut dot, mut na, mut nb) = (0.0f32, 0.0f32, 0.0f32);
+    for (x, y) in a.iter().zip(b.iter()) {
+        dot += x * y;
+        na += x * x;
+        nb += y * y;
+    }
+    if na == 0.0 || nb == 0.0 {
+        return 0.0;
+    }
+    dot / (na.sqrt() * nb.sqrt())
+}
+
+/// Identité **dérivée de la représentation**, pas du texte.
+///
+/// Deux formulations de la même demande (autre langue, autres mots) qui produisent
+/// le même vecteur tombent dans la même identité ; deux textes identiques avec des
+/// vecteurs différents n'y tombent pas.
+pub fn identite(vector: &[f32], quantification: u32) -> LearnedClass {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for x in vector {
+        let q = (x * quantification as f32).round() as i64;
+        for b in q.to_le_bytes() {
+            h ^= b as u64;
+            h = h.wrapping_mul(0x0100_0000_01b3);
+        }
+    }
+    LearnedClass(format!("repr.{h:016x}"))
+}
+
+/// Classe la représentation contre les prototypes mémorisés.
+///
+/// * pas de vecteur → [`Uncertainty::Unknown`], classe [`CLASSE_INCONNUE`] ;
+/// * vecteur proche d'un prototype (`similarité ≥ seuil`) → la classe du prototype ;
+/// * vecteur sans prototype assez proche → **formation** d'une nouvelle classe, dont
+///   le nom est l'identité du vecteur. Aucun code métier n'est modifié : la
+///   structure naît de la représentation.
+pub fn classer(
+    repr: &TaskRepr,
+    prototypes: &[Prototype],
+    seuil: f32,
+    quantification: u32,
+) -> Classification {
+    let Some(vector) = repr.embedding.as_ref() else {
+        return Classification::inconnue();
+    };
+    let mut meilleur: Option<(f32, &Prototype)> = None;
+    for p in prototypes {
+        let s = cosinus(vector, &p.vector);
+        if meilleur.map(|(m, _)| s > m).unwrap_or(true) {
+            meilleur = Some((s, p));
+        }
+    }
+    match meilleur {
+        Some((s, p)) if s >= seuil => Classification {
+            class: p.class.clone(),
+            uncertainty: Uncertainty::Established(s),
+            nearest: Some(p.class.clone()),
+            similarity: Some(s),
+        },
+        Some((s, p)) => Classification {
+            class: identite(vector, quantification),
+            uncertainty: Uncertainty::Formed(s),
+            nearest: Some(p.class.clone()),
+            similarity: Some(s),
+        },
+        None => Classification {
+            class: identite(vector, quantification),
+            uncertainty: Uncertainty::Formed(0.0),
+            nearest: None,
+            similarity: None,
+        },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn repr(v: Vec<f32>) -> TaskRepr {
+        TaskRepr {
+            embedding: Some(v),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn sans_vecteur_l_incertitude_est_explicite() {
+        let r = TaskRepr::sans_encodeur(Modalities::of_turn(true, false), Constraints::default());
+        let c = classer(&r, &[], 0.9, 1000);
+        assert_eq!(c.uncertainty, Uncertainty::Unknown);
+        assert_eq!(c.class.as_str(), CLASSE_INCONNUE);
+        assert!(!c.uncertainty.grounded());
+    }
+
+    #[test]
+    fn un_vecteur_proche_rejoint_le_prototype_meme_sans_mot_commun() {
+        let p = Prototype {
+            class: LearnedClass("repr.a1".into()),
+            vector: vec![1.0, 0.0, 0.0],
+        };
+        // Représentation quasi identique : aucun mot n'entre dans la décision.
+        let c = classer(&repr(vec![0.98, 0.19, 0.0]), &[p], 0.9, 1000);
+        assert_eq!(c.class.as_str(), "repr.a1");
+        assert!(matches!(c.uncertainty, Uncertainty::Established(_)));
+    }
+
+    #[test]
+    fn un_vecteur_eloigne_forme_une_classe_nouvelle() {
+        let p = Prototype {
+            class: LearnedClass("repr.a1".into()),
+            vector: vec![1.0, 0.0, 0.0],
+        };
+        let c = classer(&repr(vec![0.0, 1.0, 0.0]), &[p], 0.9, 1000);
+        assert_ne!(c.class.as_str(), "repr.a1");
+        assert!(c.class.as_str().starts_with("repr."));
+        assert!(matches!(c.uncertainty, Uncertainty::Formed(_)));
+    }
+
+    #[test]
+    fn l_identite_vient_du_vecteur_pas_du_texte() {
+        let a = identite(&[0.1, 0.2, 0.3], 1000);
+        let b = identite(&[0.1, 0.2, 0.3], 1000);
+        let c = identite(&[0.1, 0.2, 0.4], 1000);
+        assert_eq!(a, b);
+        assert_ne!(a, c);
+    }
+
+    #[test]
+    fn la_similarite_ne_deborde_pas() {
+        assert_eq!(cosinus(&[0.0, 0.0], &[1.0, 0.0]), 0.0);
+        assert_eq!(cosinus(&[1.0], &[1.0, 0.0]), 0.0, "dimensions différentes");
+    }
+}

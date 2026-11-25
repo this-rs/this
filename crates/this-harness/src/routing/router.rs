@@ -102,6 +102,22 @@ pub trait Learning {
         Vec::new()
     }
 
+    /// La classe **cognitive** d'une représentation.
+    ///
+    /// C'est ici que la mémoire décide de la structure : un apprenant qui tient des
+    /// prototypes dans Obrain les compare à `repr.embedding` et rend une classe
+    /// apprise. Sans mémoire, ou sans représentation, la réponse est explicitement
+    /// [`Classification::inconnue`] — et le routeur suit sa politique neutre.
+    ///
+    /// Aucun lexique n'intervient : la méthode ne reçoit que des vecteurs, des
+    /// modalités et des contraintes.
+    async fn classify(
+        &self,
+        _repr: &crate::cognition::TaskRepr,
+    ) -> crate::cognition::Classification {
+        crate::cognition::Classification::inconnue()
+    }
+
     /// Les alias déclarés, lus comme un a priori.
     fn hints(&self) -> PriorHints {
         PriorHints::new()
@@ -335,6 +351,9 @@ pub struct RouterSpec {
     pub needs_tools: bool,
     /// Qui parle.
     pub role: Role,
+    /// La couche perception : encodeur sémantique, s'il y en a un de configuré.
+    /// `None` : aucune représentation vectorielle n'est disponible pour ce routeur.
+    pub encoder: Option<Rc<dyn crate::cognition::SemanticEncoder>>,
     /// La mémoire des modèles que le moteur a refusés. `None` : le routeur en tient une à lui
     /// (propre à cette conversation) ; une mémoire PARTAGÉE entre les routeurs de l'hôte fait
     /// qu'un modèle refusé dans une conversation l'est pour toutes.
@@ -363,6 +382,7 @@ impl RouterSpec {
             provider_imposed: false,
             needs_tools: true,
             role: Role::Pilot,
+            encoder: None,
             availability: None,
         }
     }
@@ -403,6 +423,12 @@ impl RouterSpec {
 
     pub fn settings(mut self, settings: RoutingSettings) -> Self {
         self.settings = settings;
+        self
+    }
+
+    /// Configure la couche perception : un encodeur sémantique.
+    pub fn encoder(mut self, encoder: Rc<dyn crate::cognition::SemanticEncoder>) -> Self {
+        self.encoder = Some(encoder);
         self
     }
 
@@ -500,6 +526,8 @@ struct State {
 /// Le routeur d'UNE conversation.
 pub struct TurnRouter {
     pool: Rc<dyn PoolSource>,
+    /// La couche perception (aucune par défaut : pas de dépendance à un fournisseur).
+    encoder: Option<Rc<dyn crate::cognition::SemanticEncoder>>,
     learning: Rc<dyn Learning>,
     seeds: Rc<dyn Seeds>,
     needs_tools: bool,
@@ -578,6 +606,7 @@ pub fn restrict_to_person_list(
 
 impl TurnRouter {
     pub fn new(spec: RouterSpec) -> Self {
+        let encoder = spec.encoder.clone();
         let pool = (spec.routing_pool.len() > 1).then_some(spec.routing_pool);
         let routes = spec.mode == Some(ConversationRoutingMode::Full) || pool.is_some();
         let mut routing = spec.settings.clone();
@@ -587,6 +616,7 @@ impl TurnRouter {
         routing.stage = conversation_stage(spec.settings.stage, routes);
         Self {
             pool: spec.pool,
+            encoder,
             learning: spec.learning,
             seeds: spec.seeds,
             needs_tools: spec.needs_tools,
@@ -753,6 +783,33 @@ impl TurnRouter {
     /// Cette future peut être lâchée à tout moment (le harnais la borne dans le
     /// temps et la coupe sur annulation, voir [`TurnRouter::fallback`]) : l'état
     /// n'est réécrit qu'en un seul bloc, sans attente au milieu.
+    /// Construit la représentation d'un tour : modalités, contraintes objectives,
+    /// et le vecteur de l'encodeur s'il y en a un. Aucune lecture lexicale.
+    fn representation(
+        &self,
+        text: &str,
+        has_images: bool,
+        signature: &TurnSignature,
+    ) -> crate::cognition::TaskRepr {
+        let embedding = self
+            .encoder
+            .as_ref()
+            .and_then(|e| e.encode(text))
+            .filter(|v| !v.is_empty());
+        crate::cognition::TaskRepr {
+            embedding,
+            modalities: crate::cognition::Modalities::of_turn(!text.is_empty(), has_images),
+            constraints: crate::cognition::Constraints {
+                context_need_tokens: signature.context_need_tokens,
+                budget_remaining_usd: signature.budget_remaining_usd,
+                needs_tools: signature.needs_tools,
+                needs_images: signature.needs_images,
+                attempt: signature.attempt,
+            },
+            goals: Vec::new(),
+        }
+    }
+
     pub async fn route(&self, turn: TurnInput<'_>) -> Routed {
         // Un tour appliqué dont la fin n'est jamais venue (future lâchée, page
         // suspendue, `settle` coupé) est abandonné : rangé pour être dit à
@@ -798,7 +855,10 @@ impl TurnRouter {
         let mut signature = TurnSignature::from_chat(turn.text, turn.has_images, turn.hints);
         signature.needs_tools = self.needs_tools;
         signature.role = self.role;
-        let class = signature.arm_key();
+        // La classe vient de la REPRÉSENTATION (vecteur + prototypes appris), jamais
+        // du texte : aucun lexique n'est consulté ici.
+        let repr = self.representation(turn.text, turn.has_images, &signature);
+        let class = self.learning.classify(&repr).await.class.0;
 
         let mut pool = self.current_pool().await;
         if let Some(entries) = &choice.pool {

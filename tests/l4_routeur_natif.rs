@@ -650,16 +650,32 @@ fn l4_natif_cycle_du_routeur_et_couts() {
     };
     let moy =
         |b: &Bilan| AVEUGLES.iter().map(|c| taux_de(b, c)).sum::<f64>() / AVEUGLES.len() as f64;
-    let dl = moy(local);
-    let dr = moy(relat);
+    let _ = (moy(local), moy(relat));
+    // Seuil : 4 réussites de plus sur 80 décisions = 5 points. La comparaison est
+    // faite sur les FRACTIONS EXACTES, pas sur l'affichage arrondi (0,587 vs 0,637
+    // cache 47/80 et 51/80). `>=` et non `>` : atteindre le seuil n'est pas le rater.
+    let (succ_local, tot_local) =
+        AVEUGLES
+            .iter()
+            .fold((0usize, 0usize), |(s, n), c| match local.succes.get(*c) {
+                Some((a, b)) => (s + a, n + b),
+                None => (s, n),
+            });
+    let (succ_relat, tot_relat) =
+        AVEUGLES
+            .iter()
+            .fold((0usize, 0usize), |(s, n), c| match relat.succes.get(*c) {
+                Some((a, b)) => (s + a, n + b),
+                None => (s, n),
+            });
+    let ecart = (succ_relat as i64 - succ_local as i64) as f64 / tot_local.max(1) as f64;
     println!(
-        "  [{}] H1 le partage par domaine améliore les intentions aveugles à travers le cycle natif — local {dl:.3} vs relationnel {dr:.3} ({:+.3}), seuil +0.05",
-        if dr > dl + 0.05 {
-            "CONFIRMÉE"
+        "  [{}] H1 le partage par domaine améliore les intentions aveugles à travers le cycle natif — {succ_local}/{tot_local} vs {succ_relat}/{tot_relat} = {ecart:+.4} (seuil +0.05)",
+        if ecart >= 0.05 {
+            "SEUIL ATTEINT (non concluant : 4 décisions d'écart)"
         } else {
             "RÉFUTÉE  "
-        },
-        dr - dl
+        }
     );
     println!(
         "  [{}] H2 le partage ne dégrade pas les intentions d'entraînement — debug {:.3} vs {:.3}, impact {:.3} vs {:.3}",

@@ -54,6 +54,7 @@
 
 mod catalogue;
 mod catalogue_toolbox;
+pub mod cognition;
 pub mod conformance;
 mod context;
 mod embed;

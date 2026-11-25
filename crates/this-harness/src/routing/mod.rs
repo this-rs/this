@@ -67,5 +67,5 @@ pub use scorer::{
 };
 pub use signature::{
     ChatIntent, ContextHints, MAX_CONTEXT_TOKENS, MIN_CONTEXT_TOKENS, Role, TaskClass,
-    TurnSignature, detect_intent,
+    TurnSignature,
 };
