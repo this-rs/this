@@ -11,12 +11,19 @@ use async_trait::async_trait;
 use futures::executor::block_on;
 use this_agent::Stop;
 use this_harness::routing::{
-    ArmKey, ArmStats, Capabilities, CostBasis, Decision, Learning, MemoryPool, Pick,
-    PriorHints, RouterSpec, RoutingSettings, SequenceSeeds, TurnRouter, TurnInput,
+    ArmKey, ArmStats, Capabilities, CostBasis, Decision, Learning, MemoryLearning, MemoryPool,
+    Pick, PriorHints, RouterSpec, RoutingSettings, SequenceSeeds, TurnInput, TurnRouter,
 };
 
 fn run<F: std::future::Future<Output = T>, T>(f: F) -> T {
     block_on(f)
+}
+
+fn bras_neutres() -> Vec<ArmStats> {
+    vec![
+        ArmStats::fresh(ArmKey::new("chat.general", "a", "m1"), 1.0, 1.0),
+        ArmStats::fresh(ArmKey::new("chat.general", "b", "m2"), 1.0, 1.0),
+    ]
 }
 
 fn cand(provider: &str, model: &str, images: bool) -> this_harness::routing::Candidate {
@@ -64,7 +71,12 @@ impl Appris {
 #[async_trait(?Send)]
 impl Learning for Appris {
     async fn arms(&self, class: &str) -> Vec<ArmStats> {
-        self.bras.lock().unwrap().get(class).cloned().unwrap_or_default()
+        self.bras
+            .lock()
+            .unwrap()
+            .get(class)
+            .cloned()
+            .unwrap_or_default()
     }
 
     fn hints(&self) -> PriorHints {
@@ -73,7 +85,10 @@ impl Learning for Appris {
 
     async fn record(&self, d: &Decision) {
         if d.used.is_some() {
-            self.en_cours.lock().unwrap().insert(d.id, d.signature.arm_key());
+            self.en_cours
+                .lock()
+                .unwrap()
+                .insert(d.id, d.signature.arm_key());
         }
     }
 
@@ -84,7 +99,17 @@ impl Learning for Appris {
         let Some(p) = served else {
             return; // moteur jamais joint : aucun bras nourri (contrat)
         };
-        let succes = matches!(stop, Stop::Done);
+        // Récompense/pénalité STRICTES : Done → alpha+1 ; Failed → beta+1 ;
+        // tout le reste (Interrupted, Budget, Refused, Cancelled) = résultat inconnu,
+        // donc AUCUN bras nourri.
+        let (delta_alpha, delta_beta) = match stop {
+            Stop::Done => (1.0, 0.0),
+            Stop::Failed(_) => (0.0, 1.0),
+            _ => (0.0, 0.0),
+        };
+        if delta_alpha == 0.0 && delta_beta == 0.0 {
+            return;
+        }
         let mut m = self.bras.lock().unwrap();
         let v = m.entry(class.clone()).or_default();
         match v
@@ -93,14 +118,11 @@ impl Learning for Appris {
         {
             Some(a) => {
                 a.n += 1;
-                if succes {
-                    a.alpha += 1.0;
-                } else {
-                    a.beta += 1.0;
-                }
+                a.alpha += delta_alpha;
+                a.beta += delta_beta;
             }
             None => {
-                let (alpha, beta) = if succes { (2.0, 1.0) } else { (1.0, 2.0) };
+                let (alpha, beta) = (1.0 + delta_alpha, 1.0 + delta_beta);
                 v.push(ArmStats::fresh(
                     ArmKey::new(class, p.provider_id.clone(), p.model.clone()),
                     alpha,
@@ -142,10 +164,17 @@ fn campagne(learning: Rc<dyn Learning>, graine: u128, n: usize) -> (usize, usize
             honored: true,
         }));
         if premiere {
-            println!("premier tour : why={:?} changed={} decision présente={}", routed.why, routed.changed, routed.decision.is_some());
+            println!(
+                "premier tour : why={:?} changed={} decision présente={}",
+                routed.why,
+                routed.changed,
+                routed.decision.is_some()
+            );
             premiere = false;
         }
-        let Some(d) = routed.decision.clone() else { continue };
+        let Some(d) = routed.decision.clone() else {
+            continue;
+        };
         let Some(used) = d.used.clone() else { continue };
 
         rng = rng
@@ -180,6 +209,16 @@ fn l2_depasse_aucun_apprentissage_sur_la_fiabilite_transport() {
         let temoin = Rc::new(this_harness::routing::NoLearning);
         let (s0, a0) = campagne(temoin, graine, 400);
 
+        // L1 = MemoryLearning : journalise, ne révise pas. Doit ~= L0 (aucun apprentissage).
+        let ml = MemoryLearning::new();
+        ml.set_arms(bras_neutres());
+        let (s1, a1) = campagne(Rc::new(ml), graine, 400);
+        println!("  L1 journalise : succès={s1:3} a/m1={a1:3}");
+        assert_eq!(
+            s1, s0,
+            "L1 (journalise) doit ~= L0 (aucun apprentissage), graine {graine}"
+        );
+
         // Regret = tours joués sur le mauvais candidat (b/m2) : 400 - sur_a.
         let regret2 = 400 - a2;
         let regret0 = 400 - a0;
@@ -195,7 +234,6 @@ fn l2_depasse_aucun_apprentissage_sur_la_fiabilite_transport() {
         );
     }
 }
-
 
 /// **Contrôle élémentaire d'une seule boucle** : décision produite, paire sélectionnée,
 /// `record` appelé, observation indépendante, `settle` appelé, `ArmStats` modifiés,
@@ -216,7 +254,7 @@ fn une_seule_boucle_fermee() {
         exploration_epsilon: 0.0,
         ..Default::default()
     });
-    let mut routeur = TurnRouter::new(spec);
+    let routeur = TurnRouter::new(spec);
 
     // 1. une décision est réellement produite
     let routed = run(routeur.route(TurnInput {
@@ -225,7 +263,10 @@ fn une_seule_boucle_fermee() {
         hints: Default::default(),
         honored: true,
     }));
-    let d = routed.decision.clone().expect("une décision doit être produite");
+    let d = routed
+        .decision
+        .clone()
+        .expect("une décision doit être produite");
     let used = d.used.clone().expect("une paire doit être sélectionnée");
 
     // 2. record puis observation indépendante (échec synthétique) puis settle
@@ -249,4 +290,127 @@ fn une_seule_boucle_fermee() {
     //    si l'autre est resté neutre — on vérifie seulement que la lecture a lieu.
     let apres = run(appris.arms("chat.general"));
     assert_eq!(apres.len(), 2, "les deux bras sont toujours là");
+}
+
+// ── Contrat fonctionnel, déterministe ─────────────────────────────────────────
+
+/// Un `settle` sans `record` correspondant ne nourrit AUCUN bras.
+#[test]
+fn settle_sans_record_est_un_no_op() {
+    let appris = Appris::new();
+    run(appris.settle(999_999, None, &Stop::Done, None));
+    let bras = run(appris.arms("chat.general"));
+    assert!(
+        bras.iter()
+            .all(|a| a.n == 0 && a.alpha == 1.0 && a.beta == 1.0)
+    );
+}
+
+/// Un `settle` avec `served = None` (moteur jamais joint) ne nourrit AUCUN bras,
+/// même après un `record` valide.
+#[test]
+fn moteur_jamais_joint_ne_nourrit_aucun_bras() {
+    let appris = Appris::new();
+    let pool = vec![cand("a", "m1", true), cand("b", "m2", true)];
+    let spec = RouterSpec::new(
+        Rc::new(MemoryPool::new(pool)),
+        Rc::new(SequenceSeeds::from(1u128)),
+        "a".to_string(),
+        "m1".to_string(),
+    )
+    .learning(Rc::new(Appris::new()))
+    .auto()
+    .settings(RoutingSettings {
+        exploration_epsilon: 0.0,
+        ..Default::default()
+    });
+    let routeur = TurnRouter::new(spec);
+    let routed = run(routeur.route(TurnInput {
+        text: "hello",
+        has_images: false,
+        hints: Default::default(),
+        honored: true,
+    }));
+    let d = routed.decision.clone().unwrap();
+    run(appris.record(&d));
+    run(appris.settle(d.id, None, &Stop::Done, None));
+    let bras = run(appris.arms("chat.general"));
+    assert!(bras.iter().all(|a| a.n == 0));
+}
+
+/// Un `settle` dupliqué ne nourrit qu'une fois (idempotence par identifiant).
+#[test]
+fn settle_duplique_ne_nourrit_qu_une_fois() {
+    let appris = Appris::new();
+    let pool = vec![cand("a", "m1", true), cand("b", "m2", true)];
+    let spec = RouterSpec::new(
+        Rc::new(MemoryPool::new(pool)),
+        Rc::new(SequenceSeeds::from(1u128)),
+        "a".to_string(),
+        "m1".to_string(),
+    )
+    .learning(Rc::new(Appris::new()))
+    .auto()
+    .settings(RoutingSettings {
+        exploration_epsilon: 0.0,
+        ..Default::default()
+    });
+    let routeur = TurnRouter::new(spec);
+    let routed = run(routeur.route(TurnInput {
+        text: "hello",
+        has_images: false,
+        hints: Default::default(),
+        honored: true,
+    }));
+    let d = routed.decision.clone().unwrap();
+    let used = d.used.clone().unwrap();
+    run(appris.record(&d));
+    run(appris.settle(d.id, Some(&used), &Stop::Done, None));
+    run(appris.settle(d.id, Some(&used), &Stop::Done, None)); // rejeu
+    let bras = run(appris.arms("chat.general"));
+    let servi = bras
+        .iter()
+        .find(|a| a.key.provider_id == used.provider_id && a.key.model == used.model)
+        .unwrap();
+    assert_eq!(servi.n, 1, "un rejeu ne doit pas nourrir deux fois");
+}
+
+/// Une interruption n'est jamais une récompense.
+#[test]
+fn interruption_ne_recompense_pas() {
+    let appris = Appris::new();
+    let pool = vec![cand("a", "m1", true), cand("b", "m2", true)];
+    let spec = RouterSpec::new(
+        Rc::new(MemoryPool::new(pool)),
+        Rc::new(SequenceSeeds::from(1u128)),
+        "a".to_string(),
+        "m1".to_string(),
+    )
+    .learning(Rc::new(Appris::new()))
+    .auto()
+    .settings(RoutingSettings {
+        exploration_epsilon: 0.0,
+        ..Default::default()
+    });
+    let routeur = TurnRouter::new(spec);
+    let routed = run(routeur.route(TurnInput {
+        text: "hello",
+        has_images: false,
+        hints: Default::default(),
+        honored: true,
+    }));
+    let d = routed.decision.clone().unwrap();
+    let used = d.used.clone().unwrap();
+    run(appris.record(&d));
+    run(appris.settle(d.id, Some(&used), &Stop::Interrupted, None));
+    let bras = run(appris.arms("chat.general"));
+    let servi = bras
+        .iter()
+        .find(|a| a.key.provider_id == used.provider_id && a.key.model == used.model)
+        .unwrap();
+    assert_eq!(servi.alpha, 1.0, "aucune récompense après interruption");
+    assert_eq!(
+        servi.beta, 1.0,
+        "aucune pénalité non plus : résultat inconnu"
+    );
 }
