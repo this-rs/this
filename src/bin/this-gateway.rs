@@ -2934,7 +2934,7 @@ async fn main() -> anyhow::Result<()> {
     // ── STS : émission, adossée à l'annuaire (le store fait foi) ──
     let mut sts = StsService::new(&priv_pem, args.issuer.clone())?;
     sts.set_access_ttl_secs(900);
-    // `set_annuaire` pose l'annuaire UNE fois et rend `false` si un autre était
+    // `set_directory` pose l'annuaire UNE fois et rend `false` si un autre était
     // déjà posé — auquel cas le nouveau serait ignoré en SILENCE, et la
     // passerelle authentifierait contre un annuaire qui n'est pas le sien. Sur
     // un service qui vient d'être créé, `false` veut donc dire que cette

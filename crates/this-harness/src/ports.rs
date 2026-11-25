@@ -636,7 +636,7 @@ impl Toolbox for Toolboxes {
 /// VISIBLE. Deux moyens de le rendre visible, l'un ou l'autre selon l'hôte :
 ///
 /// - exposer un booléen d'état (dans this-rs :
-///   `HarnessGraph::masque_installe`) qu'un hôte, un test ou un diagnostic peut
+///   `HarnessGraph::is_mask_installed`) qu'un hôte, un test ou un diagnostic peut
 ///   interroger — un journal sans masque se constate, il ne se devine pas ;
 /// - écrire son propre `Recorder` : il assume alors le contrat entier, masque compris.
 ///

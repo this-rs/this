@@ -72,7 +72,7 @@ impl HarnessGraph {
     /// Un journal sur `store`, **sans masque** : ce qui est écrit est ce que l'outil a
     /// rendu. Un hôte qui écrit des runs d'agent veut presque toujours
     /// [`HarnessGraph::with_masque`] (c'est ce que fait `ServerHost::harness_journal`) ;
-    /// l'état est interrogeable par [`HarnessGraph::masque_installe`].
+    /// l'état est interrogeable par [`HarnessGraph::is_mask_installed`].
     pub fn new(store: Arc<ObrainStore>) -> Self {
         Self {
             store,
