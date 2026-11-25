@@ -352,10 +352,7 @@ impl Learning for ApprisObrain {
         let mut c = self.compteurs.lock().unwrap();
         if d.used.is_some() {
             c.decisions += 1;
-            self.en_cours
-                .lock()
-                .unwrap()
-                .insert(d.id, d.signature.arm_key());
+            self.en_cours.lock().unwrap().insert(d.id, d.class_key());
         } else {
             c.consultatives += 1;
         }
@@ -648,10 +645,7 @@ impl Learning for ApprisMemoire {
     async fn record(&self, d: &Decision) {
         if d.used.is_some() {
             *self.decisions.lock().unwrap() += 1;
-            self.en_cours
-                .lock()
-                .unwrap()
-                .insert(d.id, d.signature.arm_key());
+            self.en_cours.lock().unwrap().insert(d.id, d.class_key());
         }
     }
 

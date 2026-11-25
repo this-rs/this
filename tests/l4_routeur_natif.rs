@@ -25,11 +25,11 @@
 //! 3. L'attribution : le nombre de `settle` RÉELLEMENT reçus par l'apprentissage,
 //!    compté dans l'apprentissage, pas dans le conducteur.
 
-use std::cell::{Cell, RefCell};
+use std::cell::Cell;
 use std::collections::HashMap;
 use std::rc::Rc;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
@@ -37,7 +37,7 @@ use obrain_common::types::Value;
 use this::storage::obrain::ObrainStore;
 use this_agent::Stop;
 use this_harness::routing::{
-    ArmKey, ArmStats, Capabilities, CostBasis, Learning, MemoryPool, Pick, RouterSpec,
+    ArmKey, ArmStats, Capabilities, CostBasis, Decision, Learning, MemoryPool, Pick, RouterSpec,
     RoutingSettings, SequenceSeeds, TurnInput, TurnRouter,
 };
 
@@ -357,39 +357,29 @@ fn bras_pour(classe: &str, table: &HashMap<String, (f64, f64)>) -> Vec<ArmStats>
         .collect()
 }
 
-thread_local! {
-    /// Classe du tour EN COURS : `settle` reçoit l'identifiant du ROUTEUR, qui ne
-    /// porte pas la classe. Le conducteur est séquentiel (route → record → settle).
-    static CLASSE_COURANTE: RefCell<Option<String>> = const { RefCell::new(None) };
-}
-
-fn retenir_classe(classe: &str) {
-    CLASSE_COURANTE.with(|c| *c.borrow_mut() = Some(classe.to_string()));
-}
-
-fn classe_courante() -> Option<String> {
-    CLASSE_COURANTE.with(|c| c.borrow().clone())
-}
-
 // ── Les deux apprenants ────────────────────────────────────────────────────
 
 /// Aucun partage : chaque classe n'apprend que d'elle-même.
 struct LocalSeul {
     store: Arc<ObrainStore>,
     couts: Rc<Couts>,
+    /// `decision_id → classe` : l'attribution vient de la DÉCISION (portée par
+    /// `Decision::class_key()` via `record`), pas d'un thread-local qui suit la
+    /// dernière classe consultée par `arms`.
+    en_cours: Mutex<HashMap<u128, String>>,
 }
 
 /// Partage par domaine, lu dans le graphe Obrain.
 struct Relationnel {
     store: Arc<ObrainStore>,
     couts: Rc<Couts>,
+    en_cours: Mutex<HashMap<u128, String>>,
 }
 
 #[async_trait(?Send)]
 impl Learning for LocalSeul {
     async fn arms(&self, classe: &str) -> Vec<ArmStats> {
         let t0 = Instant::now();
-        retenir_classe(classe);
         self.couts.appels_arms.fetch_add(1, Ordering::Relaxed);
         let observations = lire_observations(&self.store, &self.couts);
         let table = agreger(&observations, &[classe.to_string()]);
@@ -397,12 +387,16 @@ impl Learning for LocalSeul {
         self.couts.ajouter(&self.couts.duree_arms, t0.elapsed());
         bras
     }
+    async fn record(&self, d: &Decision) {
+        if d.used.is_some() {
+            self.en_cours.lock().unwrap().insert(d.id, d.class_key());
+        }
+    }
     async fn settle(&self, id: u128, served: Option<&Pick>, stop: &Stop, _code: Option<&str>) {
         let t0 = Instant::now();
         self.couts.settle_recus.fetch_add(1, Ordering::Relaxed);
-        if let Some(p) = served
-            && let Some(c) = classe_courante()
-        {
+        let classe = self.en_cours.lock().unwrap().remove(&id);
+        if let (Some(p), Some(c)) = (served, classe) {
             let ok = matches!(stop, Stop::Done);
             self.couts
                 .observations_ecrites
@@ -425,7 +419,6 @@ impl Learning for LocalSeul {
 impl Learning for Relationnel {
     async fn arms(&self, classe: &str) -> Vec<ArmStats> {
         let t0 = Instant::now();
-        retenir_classe(classe);
         self.couts.appels_arms.fetch_add(1, Ordering::Relaxed);
         let mut classes = soeurs(&self.store, &self.couts, classe);
         if !classes.iter().any(|c| c == classe) {
@@ -437,12 +430,16 @@ impl Learning for Relationnel {
         self.couts.ajouter(&self.couts.duree_arms, t0.elapsed());
         bras
     }
+    async fn record(&self, d: &Decision) {
+        if d.used.is_some() {
+            self.en_cours.lock().unwrap().insert(d.id, d.class_key());
+        }
+    }
     async fn settle(&self, id: u128, served: Option<&Pick>, stop: &Stop, _code: Option<&str>) {
         let t0 = Instant::now();
         self.couts.settle_recus.fetch_add(1, Ordering::Relaxed);
-        if let Some(p) = served
-            && let Some(c) = classe_courante()
-        {
+        let classe = self.en_cours.lock().unwrap().remove(&id);
+        if let (Some(p), Some(c)) = (served, classe) {
             let ok = matches!(stop, Stop::Done);
             self.couts
                 .observations_ecrites
@@ -572,11 +569,13 @@ fn l4_natif_cycle_du_routeur_et_couts() {
             Rc::new(Relationnel {
                 store: store.clone(),
                 couts: couts.clone(),
+                en_cours: Mutex::new(HashMap::new()),
             })
         } else {
             Rc::new(LocalSeul {
                 store: store.clone(),
                 couts: couts.clone(),
+                en_cours: Mutex::new(HashMap::new()),
             })
         };
         let bilan = jouer(learning, couts.clone());
