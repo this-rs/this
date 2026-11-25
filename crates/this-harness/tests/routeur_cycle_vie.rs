@@ -140,6 +140,18 @@ fn identifie_nommement_les_decisions_jamais_reglees() {
         regles.len()
     );
 
+    // Ensembles : aucun doublon, tout réglé ⊆ enregistré, jamais-réglées calculées.
+    let mut ids: Vec<u128> = tours.iter().map(|t| t.id).collect();
+    ids.sort_unstable();
+    let mut ids_uniques = ids.clone();
+    ids_uniques.dedup();
+    assert_eq!(ids, ids_uniques, "aucun identifiant de décision en double");
+    assert_eq!(
+        records.len(),
+        tours.len(),
+        "record doit avoir reçu chaque décision exactement une fois"
+    );
+
     let mut jamais: Vec<&Tour> = tours.iter().filter(|t| !regles.contains(&t.id)).collect();
     println!("décisions JAMAIS réglées : {}", jamais.len());
     for t in &jamais {
@@ -168,5 +180,93 @@ fn identifie_nommement_les_decisions_jamais_reglees() {
     // confirmer ou réfuter par ce test, pas à supposer).
     let appliquees_jamais = jamais.iter().filter(|t| t.applied).count();
     println!("parmi les jamais réglées : {appliquees_jamais} étaient APPLIQUÉES");
+    // L'invariant qui compte : aucune décision APPLIQUÉE ne reste sans règlement.
+    assert_eq!(
+        appliquees_jamais, 0,
+        "une décision appliquée doit avoir une issue (règlement ou réparation)"
+    );
+    // `used.is_some()` n'est PAS `applied` : les jamais-réglées portent bien `used`.
+    assert!(
+        jamais.iter().all(|t| t.used.is_some()),
+        "les décisions non appliquées portent quand même une paire `used`"
+    );
     jamais.clear();
+}
+
+/// `repair` : une décision laissée OUVERTE (deux décisions sans règlement de la
+/// première) part en `abandoned`, puis `repair` la dit à l'apprentissage en
+/// `Stop::Interrupted` SANS paire servie — donc sans récompense ni pénalité.
+#[test]
+fn repair_regle_une_decision_abandonnee_sans_recompense() {
+    #[derive(Default)]
+    struct T {
+        settles: Mutex<Vec<(u128, bool, String)>>,
+    } // (id, served_présent, stop)
+    #[async_trait(?Send)]
+    impl Learning for T {
+        async fn arms(&self, _c: &str) -> Vec<ArmStats> {
+            Vec::new()
+        }
+        fn hints(&self) -> PriorHints {
+            PriorHints::new()
+        }
+        async fn settle(&self, id: u128, served: Option<&Pick>, stop: &Stop, _c: Option<&str>) {
+            self.settles
+                .lock()
+                .unwrap()
+                .push((id, served.is_some(), format!("{stop:?}")));
+        }
+    }
+    let t = Rc::new(T::default());
+    let spec = RouterSpec::new(
+        Rc::new(MemoryPool::new(vec![cand("a", "m1"), cand("b", "m2")])),
+        Rc::new(SequenceSeeds::from(3u128)),
+        "a".to_string(),
+        "m1".to_string(),
+    )
+    .learning(t.clone())
+    .auto()
+    .settings(RoutingSettings {
+        exploration_epsilon: 0.1,
+        ..Default::default()
+    });
+    let routeur = TurnRouter::new(spec);
+
+    // Deux décisions consécutives SANS régler la première => elle est abandonnée.
+    let mut ouverte: Option<u128> = None;
+    for _ in 0..2 {
+        let routed = run(routeur.route(TurnInput {
+            text: "hello",
+            has_images: false,
+            hints: Default::default(),
+            honored: true,
+        }));
+        if let Some(d) = routed.decision.clone() {
+            run(routeur.record(&d));
+            if ouverte.is_none() {
+                ouverte = Some(d.id);
+            }
+        }
+    }
+    println!("needs_repair = {}", routeur.needs_repair());
+    assert!(
+        routeur.needs_repair(),
+        "une décision ouverte non réglée doit être abandonnée"
+    );
+
+    let reste = run(routeur.repair());
+    let reglages = t.settles.lock().unwrap().clone();
+    println!("réglages après repair : {reglages:?} ; reste = {reste}");
+    assert_eq!(reglages.len(), 1, "repair règle UNE décision");
+    let (id, servi, stop) = &reglages[0];
+    assert_eq!(
+        Some(*id),
+        ouverte,
+        "c'est bien la décision abandonnée qui est réglée"
+    );
+    assert!(!*servi, "repair ne fournit AUCUNE paire servie");
+    assert!(
+        stop.contains("Interrupted"),
+        "repair dit Interrupted, pas une réussite"
+    );
 }
