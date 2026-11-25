@@ -2566,7 +2566,7 @@ fn ligne_en_bulle(
     champs: &ChampsBulle,
     markdown: bool,
 ) -> Option<RowView> {
-    let row = snapshot.ligne(entity, id)?;
+    let row = snapshot.row(entity, id)?;
     let text = contenu_de_bulle(data::value_of(row, &champs.content));
     let who = champs
         .author
@@ -4848,7 +4848,7 @@ mod tests_fil {
         // rendu).
         assert_eq!(
             data.get_untracked()
-                .ligne("message", "m2")
+                .row("message", "m2")
                 .and_then(|row| row.get("contenu")),
             Some(&json!("deuxième (modifié)"))
         );

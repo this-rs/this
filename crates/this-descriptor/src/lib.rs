@@ -71,7 +71,7 @@ pub use module::{
     OperationDesc,
 };
 pub use perm::{
-    Operation, PermDesc, PolicyExpr, PrincipalView, Sujet, autorise, autorise_op, roles_de,
+    Operation, PermDesc, PolicyExpr, PrincipalView, Subject, allows, allows_op, roles_of,
 };
 pub use query::{
     CONTEXT_REF, Context, FilterExpr, FilterOp, Page, Query, QuerySchema, SortDir, SortSpec,
