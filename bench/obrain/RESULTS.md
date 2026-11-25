@@ -45,3 +45,46 @@ thread-local clé par `TransactionId` ; aucun verrou ajouté.
 
 **Non couvert** : `kill -9` + récupération avec l'oracle corrigé, concurrence sur
 un même WAL, group commit, changement d'ancre après checkpoint, multi-graphes.
+
+
+## Campagne avortée du 25/11 (à ne pas comptabiliser comme échecs d'obrain)
+
+`run.sh` v1, `--rev 2c4654a --forced`, artefacts `/tmp/campagne-2c4654a` :
+
+- `durabilite_commit_kill9` **8/8, 2,02 s** (configuration `--features wal` SEULE) → résultat conservé ;
+- les 11 autres suites : `cd: /tmp/campagne-2c4654a/wt: No such file or directory`.
+
+Le worktree de campagne a été supprimé en cours d'exécution par le `trap ... EXIT INT TERM`
+du script v1 ; les suites suivantes ont tourné sur un répertoire absent. **Aucun de ces
+11 échecs ne dit quoi que ce soit du moteur obrain.**
+
+## Banc v2 — auto-contrôles vérifiés sans compiler obrain
+
+`bench/obrain/selftest.sh` (faux `cargo`, faux dépôt git) : **14 contrôles, 0 échec**.
+
+| Contrôle | Vérifié |
+|---|---|
+| campagne en échec | exit 1 |
+| suite réussie / échec partiel / échec total | classés séparément |
+| zéro test exécuté | distingué d'un échec |
+| erreur de compilation | distinguée de « 0 test » |
+| compteurs | `passed=13 failed=4 ignored=0 filtered_out=5` |
+| commande journalisée | `--test-threads 1` compris, 7 lignes |
+| collision de répertoire d'artefacts | **refusée** (exit 3) |
+| interruption TERM | **exit 130**, artefacts conservés, worktree nettoyé |
+| variantes observées | comptage des ouvertures réécrites, diff conservé |
+
+Trois de mes attentes initiales étaient fausses (`passed=8`, 1 commande, « 5 ouvertures ») :
+c'est l'auto-contrôle qui les a corrigées, pas le script. Un banc dont on n'a pas testé
+les propres erreurs ne prouve rien.
+
+## Configuration : ne pas confondre les campagnes
+
+| Campagne | Features |
+|---|---|
+| 1re campagne (non observée) | `wal,cypher,vector-index` **jointes** pour les 5 suites |
+| observation forcée | features propres à chaque suite **+ `cognitive`** |
+| banc v2 | features séparées par suite — **configuration distincte**, pas une reproduction |
+
+Toute comparaison doit donc nommer sa configuration, et les features effectivement résolues
+(y compris par défaut) sont journalisées dans `contexte.txt`.
