@@ -32,8 +32,27 @@ impl Unique {
     }
 }
 
+/// Issue d'une tentative d'écriture — trois cas qu'il ne faut pas confondre.
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+enum Issue {
+    /// L'événement a été écrit (commit rendu).
+    Ecrite,
+    /// Déduplication : l'événement existait déjà, RIEN n'a été écrit. Certain.
+    RefuseeAvantEcriture,
+    /// La transaction a échoué : impossible de savoir si elle a laissé une trace.
+    ErreurPersistance,
+    /// La lecture de déduplication elle-même a échoué : on ne sait rien.
+    Indetermine,
+}
+
 /// Écrit UNE observation, avec déduplication par identité stable.
-/// Rend `true` si l'événement a été écrit, `false` s'il existait déjà (rejeu).
+///
+/// ⚠️ **Ce n'est pas une garantie d'exactement-une-fois.** La séquence
+/// lire-puis-écrire n'est pas atomique : deux écrivains simultanés, ou un arrêt
+/// brutal entre la lecture et le commit, peuvent produire zéro ou deux écritures.
+/// Ce que ce test démontre est un **rejeu séquentiel** sur un seul écrivain, ce qui
+/// est le périmètre déclaré du harness. Une garantie réelle demanderait une
+/// contrainte d'unicité (ou un upsert transactionnel) côté Obrain.
 fn enregistrer_observation(
     store: &Arc<ObrainStore>,
     scope: &str,
@@ -42,29 +61,26 @@ fn enregistrer_observation(
     provider: &str,
     modele: &str,
     favorable: bool,
-) -> bool {
+) -> Issue {
     // Identité STABLE et SCOPÉE : ni la graine de décision ni l'ordre d'exécution ne
     // suffisent ; le périmètre (scope) fait partie de la clé.
     let evenement = format!("{scope}/{decision}");
-    let existe = store
-        .execute_query(
-            "gql",
-            &format!(
-                "MATCH (o:observation) WHERE o.evenement = '{evenement}' RETURN o.evenement AS e"
-            ),
-            1,
-        )
-        // La réponse est un OBJET {columns, rows} : c'est `rows` qu'il faut lire,
-        // pas `as_array()` sur l'objet (qui rendrait toujours « absent »).
-        .map(|r| {
-            r.get("rows")
-                .and_then(|v| v.as_array())
-                .map(|a| !a.is_empty())
-                .unwrap_or(false)
-        })
-        .unwrap_or(false);
+    // La réponse est un OBJET {columns, rows} : c'est `rows` qu'il faut lire, pas
+    // `as_array()` sur l'objet (qui rendrait toujours « absent »). Une erreur de
+    // lecture n'est PAS « absent » : elle rend l'issue INDÉTERMINÉE.
+    let existe = match store.execute_query(
+        "gql",
+        &format!("MATCH (o:observation) WHERE o.evenement = '{evenement}' RETURN o.evenement AS e"),
+        1,
+    ) {
+        Ok(r) => match r.get("rows").and_then(|v| v.as_array()) {
+            Some(a) => !a.is_empty(),
+            None => return Issue::Indetermine,
+        },
+        Err(_) => return Issue::Indetermine,
+    };
     if existe {
-        return false;
+        return Issue::RefuseeAvantEcriture;
     }
     let mut s = store.db().session();
     s.begin_transaction().expect("begin");
@@ -76,8 +92,11 @@ fn enregistrer_observation(
     s.set_node_property(n, "provider", Value::String(provider.into()));
     s.set_node_property(n, "modele", Value::String(modele.into()));
     s.set_node_property(n, "favorable", Value::Bool(favorable));
-    s.commit().expect("commit");
-    true
+    match s.commit() {
+        Ok(()) => Issue::Ecrite,
+        // Échec au commit : la trace existe peut-être. On ne prétend rien.
+        Err(_) => Issue::ErreurPersistance,
+    }
 }
 
 /// **Projection** Alpha/Beta/n recalculée depuis les événements (pas stockée).
@@ -93,35 +112,44 @@ fn projeter(store: &Arc<ObrainStore>, scope: &str) -> Vec<(String, String, u32, 
     let colonnes: Vec<String> = r
         .get("columns")
         .and_then(|c| c.as_array())
-        .map(|a| {
-            a.iter()
-                .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                .collect()
-        })
-        .unwrap_or_default();
-    let ip = colonnes.iter().position(|c| c == "p").unwrap_or(0);
-    let im = colonnes.iter().position(|c| c == "m").unwrap_or(1);
-    let ifav = colonnes.iter().position(|c| c == "f").unwrap_or(2);
+        .expect("réponse sans 'columns' : la projection n'est pas exploitable")
+        .iter()
+        .map(|v| v.as_str().expect("colonne non textuelle").to_string())
+        .collect();
+    let idx = |nom: &str| {
+        colonnes
+            .iter()
+            .position(|c| c == nom)
+            .unwrap_or_else(|| panic!("colonne '{nom}' absente de la projection : {colonnes:?}"))
+    };
+    let (ip, im, ifav) = (idx("p"), idx("m"), idx("f"));
 
-    let mut table: std::collections::BTreeMap<(String, String), (u32, u32, u32)> =
-        Default::default();
-    for ligne in r
+    let rows = r
         .get("rows")
         .and_then(|v| v.as_array())
-        .cloned()
-        .unwrap_or_default()
-    {
+        .expect("réponse sans 'rows' : la projection n'est pas exploitable");
+    assert!(
+        rows.len() < 1000,
+        "projection possiblement TRONQUÉE : {} lignes pour une limite de 1000",
+        rows.len()
+    );
+    let mut table: std::collections::BTreeMap<(String, String), (u32, u32, u32)> =
+        Default::default();
+    for ligne in rows {
         let p = ligne
             .get(ip)
             .and_then(|v| v.as_str())
-            .unwrap_or_default()
+            .expect("colonne 'p' non textuelle")
             .to_string();
         let m = ligne
             .get(im)
             .and_then(|v| v.as_str())
-            .unwrap_or_default()
+            .expect("colonne 'm' non textuelle")
             .to_string();
-        let f = ligne.get(ifav).and_then(|v| v.as_bool()).unwrap_or(false);
+        let f = ligne
+            .get(ifav)
+            .and_then(|v| v.as_bool())
+            .expect("colonne 'f' non booléenne");
         let e = table.entry((p, m)).or_insert((1, 1, 0)); // a priori neutre 1/1
         e.2 += 1;
         if f {
@@ -145,24 +173,16 @@ fn l3_decision_observations_projection_fermeture_reouverture_rejeu() {
     // 1+2+3. une décision, une observation favorable, une défavorable distincte
     {
         let store = ObrainStore::open(&d).expect("ouverture");
-        assert!(enregistrer_observation(
-            &store,
-            scope,
-            "dec-1",
-            "chat.general",
-            "a",
-            "m1",
-            true
-        ));
-        assert!(enregistrer_observation(
-            &store,
-            scope,
-            "dec-2",
-            "chat.general",
-            "b",
-            "m2",
-            false
-        ));
+        assert_eq!(
+            enregistrer_observation(&store, scope, "dec-1", "chat.general", "a", "m1", true),
+            Issue::Ecrite,
+            "première écriture de dec-1 : commit rendu"
+        );
+        assert_eq!(
+            enregistrer_observation(&store, scope, "dec-2", "chat.general", "b", "m2", false),
+            Issue::Ecrite,
+            "première écriture de dec-2 : commit rendu"
+        );
         // 4. projection
         attendu = projeter(&store, scope);
         assert_eq!(attendu.len(), 2, "deux bras observés");
@@ -186,9 +206,10 @@ fn l3_decision_observations_projection_fermeture_reouverture_rejeu() {
         // C'est le cas que l'étape 8 ne mesure pas : là, la réouverture a eu lieu.
         // L'identité de l'événement est stable, le doublon est donc refusé sans
         // redémarrage, et la projection recalculée ne bouge pas.
-        assert!(
-            !enregistrer_observation(&store, scope, "dec-1", "chat.general", "a", "m1", true),
-            "même session : le doublon est refusé"
+        assert_eq!(
+            enregistrer_observation(&store, scope, "dec-1", "chat.general", "a", "m1", true),
+            Issue::RefuseeAvantEcriture,
+            "même session : le doublon est refusé AVANT toute écriture (cas certain)"
         );
         assert_eq!(
             projeter(&store, scope),
@@ -208,9 +229,10 @@ fn l3_decision_observations_projection_fermeture_reouverture_rejeu() {
     );
 
     // 9. rejeu d'une observation déjà enregistrée : aucun double comptage
-    assert!(
-        !enregistrer_observation(&store, scope, "dec-1", "chat.general", "a", "m1", true),
-        "le rejeu doit être refusé (identité stable)"
+    assert_eq!(
+        enregistrer_observation(&store, scope, "dec-1", "chat.general", "a", "m1", true),
+        Issue::RefuseeAvantEcriture,
+        "le rejeu doit être refusé (identité stable) — rejeu SÉQUENTIEL, pas exactement-une-fois"
     );
     assert_eq!(
         projeter(&store, scope),
