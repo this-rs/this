@@ -158,51 +158,59 @@ fn campagne(learning: Rc<dyn Learning>, graine: u128, n: usize) -> (usize, usize
     });
     let routeur = TurnRouter::new(spec);
 
+    // Résultats POTENTIELS pré-générés, indexés par (tour, candidat) : l'issue d'une
+    // paire ne dépend PAS de la stratégie qui la choisit. Candidat 0 = a/m1 (80 %),
+    // candidat 1 = b/m2 (20 %).
     let mut rng = graine as u64;
-    let mut premiere = true;
+    let mut tirage: Vec<[bool; 2]> = Vec::with_capacity(n);
+    for _ in 0..n {
+        let mut ligne = [false, false];
+        for (c, case) in ligne.iter_mut().enumerate() {
+            rng = rng
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            let taux = if c == 0 { 80u64 } else { 20u64 };
+            *case = (rng % 100) < taux;
+        }
+        tirage.push(ligne);
+    }
+
     let mut succes = 0usize;
     let mut sur_a = 0usize;
 
-    for _ in 0..n {
+    for ligne in tirage.iter() {
         let routed = run(routeur.route(TurnInput {
             text: "hello",
             has_images: false,
             hints: Default::default(),
             honored: true,
         }));
-        if premiere {
-            println!(
-                "premier tour : why={:?} changed={} decision présente={}",
-                routed.why,
-                routed.changed,
-                routed.decision.is_some()
-            );
-            premiere = false;
-        }
         let Some(d) = routed.decision.clone() else {
             continue;
         };
         let Some(used) = d.used.clone() else { continue };
 
-        rng = rng
-            .wrapping_mul(6364136223846793005)
-            .wrapping_add(1442695040888963407);
-        let taux = if used.model == "m1" { 80u64 } else { 20u64 };
-        let ok = (rng % 100) < taux;
+        let idx = if used.provider_id == "a" {
+            0usize
+        } else {
+            1usize
+        };
+        let ok = ligne[idx];
         if ok {
             succes += 1;
         }
-        if used.provider_id == "a" {
+        if idx == 0 {
             sur_a += 1;
         }
 
-        run(learning.record(&d));
+        // VRAI cycle du routeur : route → record → observation → settle.
+        run(routeur.record(&d));
         let stop = if ok {
             Stop::Done
         } else {
             Stop::Failed("transport".to_string())
         };
-        run(learning.settle(d.id, Some(&used), &stop, None));
+        run(routeur.settle(&stop, None, true));
     }
     (succes, sur_a)
 }
@@ -231,11 +239,13 @@ fn l2_depasse_aucun_apprentissage_sur_la_fiabilite_transport() {
         );
 
         // Regret = tours joués sur le mauvais candidat (b/m2) : 400 - sur_a.
-        let regret2 = 400 - a2;
-        let regret0 = 400 - a0;
+        let sous2 = 400 - a2;
+        let sous0 = 400 - a0;
         println!(
-            "graine {graine:3} | L2 succès={s2:3} a/m1={a2:3} regret={regret2:3} | \
-             témoin succès={s0:3} a/m1={a0:3} regret={regret0:3}"
+            "graine {graine:3} | L2 succès={s2:3} a/m1={a2:3} sous-optimaux={sous2:3} regret_espéré={:6.1} | \
+             témoin succès={s0:3} a/m1={a0:3} sous-optimaux={sous0:3} regret_espéré={:6.1}",
+            0.6 * sous2 as f64,
+            0.6 * sous0 as f64
         );
         // On n'exige pas que L2 gagne sur CHAQUE graine : on rapporte, et on vérifie
         // seulement qu'il n'est pas systématiquement battu.
