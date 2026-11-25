@@ -19,6 +19,8 @@
 //!   C — import en lot contre écrivain unitaire sur la même entité (#386) ;
 //!   D — entité créée par un pair APRÈS notre ouverture (#387) ;
 //!   E — arène des blobs, deux écrivains vivants (MP-3c, limite connue).
+//!   F — ARÊTE créée par un pair après notre ouverture : le pendant de D côté
+//!       zone des arêtes (ce que #398 annonce symétrique mais non mesuré).
 //!
 //! Chaque exécution est bornée (drapeaux de départ, délais d'attente, garde de
 //! profondeur) et nettoie ses répertoires temporaires (`tempfile::tempdir`).
@@ -30,7 +32,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
-use obrain_common::types::{NodeId, PropertyKey, Value};
+use obrain_common::types::{EdgeId, NodeId, PropertyKey, Value};
 use obrain_engine::{GraphStore, ObrainDB};
 
 const ROLE: &str = "SONDE_ROLE";
@@ -390,6 +392,49 @@ fn role_e(dir: &Path, variante: &str) {
     }
 }
 
+/// F — une ARÊTE créée par un pair APRÈS notre ouverture : le pendant du
+/// scénario D côté zone des **arêtes**. #398 (correctif de #387) annonce ce côté
+/// « symétrique mais aucun test inter-processus de bout en bout » — c'est
+/// exactement ce que cette variante mesure.
+fn role_f(dir: &Path, variante: &str) {
+    match variante {
+        "nous" => {
+            let db = ObrainDB::open_shared_write(dir).expect("open_shared_write (F nous)");
+            let fichier = PathBuf::from(env_obligatoire("SONDE_ID"));
+            annoncer("PRET");
+            attendre_fichier(&fichier, "l'id de l'arête créée par le pair");
+            let arete: u64 = std::fs::read_to_string(&fichier)
+                .expect("lire l'id d'arête")
+                .trim()
+                .parse()
+                .expect("id d'arête valide");
+            let vu = db.get_edge(EdgeId(arete)).is_some();
+            db.set_edge_property(
+                EdgeId(arete),
+                "cle_du_pair",
+                Value::String("ecrite_par_nous".into()),
+            );
+            let lu = db
+                .substrate_handle()
+                .and_then(|s| s.get_edge_property(EdgeId(arete), &PropertyKey::new("cle_du_pair")))
+                .is_some();
+            annoncer(&format!("VU {} LU {}", vu as u8, lu as u8));
+            db.close().expect("close (F nous)");
+        }
+        "pair" => {
+            let db = ObrainDB::open_shared_write(dir).expect("open_shared_write (F pair)");
+            let a = db.create_node(&["Sonde"]);
+            let b = db.create_node(&["Sonde"]);
+            let arete = db.create_edge(a, b, "Sonde");
+            let fichier = PathBuf::from(env_obligatoire("SONDE_ID"));
+            std::fs::write(&fichier, arete.0.to_string()).expect("écrire l'id d'arête");
+            db.close().expect("close (F pair)");
+            annoncer("FINI");
+        }
+        autre => panic!("variante F inconnue : {autre}"),
+    }
+}
+
 fn jouer_role(r: &str) {
     let dir = PathBuf::from(env_obligatoire(DIR));
     match r {
@@ -403,6 +448,8 @@ fn jouer_role(r: &str) {
         "d_pair" => role_d(&dir, "pair"),
         "e_b" => role_e(&dir, "e_b"),
         "e_lit" => role_e(&dir, "e_lit"),
+        "f_nous" => role_f(&dir, "nous"),
+        "f_pair" => role_f(&dir, "pair"),
         autre => panic!("rôle inconnu : {autre}"),
     }
 }
@@ -700,6 +747,43 @@ fn scenario_d() {
     );
 }
 
+fn scenario_f() {
+    let td = tempfile::tempdir().expect("tempdir F");
+    let dir = td.path().join("store-f");
+    creer_base(&dir);
+    let fichier = td.path().join("id-f.txt");
+
+    let mut nous = Enfant::lancer(
+        "f_nous",
+        &dir,
+        &[("SONDE_ID", fichier.display().to_string())],
+    );
+    nous.attendre_ligne("PRET");
+    let mut pair = Enfant::lancer(
+        "f_pair",
+        &dir,
+        &[("SONDE_ID", fichier.display().to_string())],
+    );
+    pair.attendre_ligne("FINI");
+    pair.terminer();
+    let vu_lu = nous.attendre_ligne("VU ");
+    nous.terminer();
+
+    let arete: u64 = std::fs::read_to_string(&fichier)
+        .expect("id-f")
+        .trim()
+        .parse()
+        .expect("id d'arête");
+    let db = ObrainDB::open(&dir).expect("réouverture exclusive (F)");
+    let sub = db.substrate_handle().expect("substrate_handle (F)");
+    let cle = sub.get_edge_property(EdgeId(arete), &PropertyKey::new("cle_du_pair"));
+    db.close().expect("close (F)");
+    println!(
+        "[F] arête du pair vue par l'écrivain antérieur + écriture relue par lui : {vu_lu} | \
+         après réouverture exclusive, 'cle_du_pair'={cle:?}"
+    );
+}
+
 fn scenario_e() {
     let td = tempfile::tempdir().expect("tempdir E");
     let dir = td.path().join("store-e");
@@ -773,5 +857,6 @@ fn sonde_multi_ecrivain() {
     scenario_c();
     scenario_d();
     scenario_e();
+    scenario_f();
     println!("=== FIN ({} s) ===", t0.elapsed().as_secs_f32());
 }

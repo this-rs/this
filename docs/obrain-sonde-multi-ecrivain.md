@@ -35,6 +35,7 @@ et coordonne les écrivains par lignes sur stdout et fichiers-drapeaux. Durée b
 | **MP-3b** — MÊME entité, verrou inter-processus | garantie partielle : 0 perte (47/240 avant correctif → 0 après) | `0/240` clés perdues | **tenue** |
 | **#386** — import en lot contre écrivain unitaire, même entité | corrigé (commit `e5936671`, présent au pin) | `0/240` clés perdues, chaîne préexistante intacte | **tenue (corrigé)** |
 | **#387** — entité créée par un pair APRÈS notre ouverture | invisible + écriture no-op silencieuse (ligne 18, borne b, « non mesurée ») | nœud non vu (`VU 0`), écriture relue absente (`LU 0`), absente après réouverture | **limite confirmée (mesurée)** |
+| **#387 côté ARÊTES** — arête créée par un pair APRÈS notre ouverture | même famille, jamais mesurée (ni par la doc, ni par #398 : « symétrique mais aucun test inter-processus ») | arête non vue (`VU 0`), écriture relue absente (`LU 0`), absente après réouverture | **limite confirmée (mesurée)** |
 | **Arène des blobs** — deux écrivains vivants, séquentiel | limite connue : le second écrase les octets du premier (ligne 21) | B corrompu, relu comme le préfixe de A | **limite confirmée** |
 | **Vecteurs** — deux écrivains + `kill -9` | rejoués par l'écrivain EXCLUSIF à la réouverture (ligne 23) | `0/400` perdus ou faux | **tenue** (réouverture exclusive) |
 
@@ -136,7 +137,40 @@ antérieur appelle `set_node_property(id_du_pair, "cle", …)` — l'appel retou
 normalement mais rien n'est écrit (vérifié : `get_node_property` rend `None` dans le
 processus antérieur comme après réouverture exclusive).
 
-## Corps d'issue prêt à poster
+### F — arête créée par un pair APRÈS notre ouverture (#387, côté ARÊTES)
+
+Pendant exact du scénario D, côté zone des **arêtes** : « nous » ouvre d'abord, le pair
+crée deux nœuds et une arête puis ferme, « nous » écrit une propriété sur l'arête.
+
+```
+[F] arête du pair vue par l'écrivain antérieur + écriture relue par lui : 0 LU 0
+    après réouverture exclusive, 'cle_du_pair'=None
+```
+
+- **Même défaut que D, mesuré** : l'arête du pair est invisible (`VU 0`), l'écriture
+  dessus est un no-op silencieux (`LU 0`), et rien ne subsiste après réouverture.
+- C'était le trou **explicitement non couvert** par le correctif #398 (« les arêtes :
+  le code est symétrique mais aucun test inter-processus de bout en bout ne couvre la
+  reprojection de la zone d'arêtes »). Cette variante le couvre.
+
+## Suite donnée (25/11/2026)
+
+L'issue #387 **existait déjà**, et une PR ouverte la corrige — donc **aucune issue
+n'a été créée** : la mesure a été versée aux deux fils existants.
+
+| Rev | D (nœud) | F (arête) |
+|---|---|---|
+| `99e53f21` (pin de this-rs) | `LU 0`, `cle_du_pair = None` | `LU 0`, `cle_du_pair = None` |
+| `83c647c8` (tête de la PR #398) | `LU 1`, `cle_du_pair = Some("ecrite_par_nous")` | `LU 1`, `cle_du_pair = Some("ecrite_par_nous")` |
+
+`VU` reste `0` dans les quatre cas : la VISIBILITÉ du pair n'est pas corrigée (c'est le
+non-objectif assumé de #398, les scans restant bornés par le miroir périmé). Ce qui
+change, c'est la fin du no-op silencieux — sur les nœuds **et** sur les arêtes.
+
+- obrain#387 : [`issuecomment-7148983447`](https://github.com/obrain-db/obrain/issues/387#issuecomment-7148983447)
+- obrain#398 : [`issuecomment-7148984945`](https://github.com/obrain-db/obrain/pull/398#issuecomment-7148984945)
+
+## Corps d'issue (rédigé avant de savoir que #387 existait — conservé tel quel)
 
 > **Titre** : `open_shared_write` : une écriture sur une entité créée par un pair
 > après notre ouverture est un no-op SILENCIEUX (#387 confirmé mesuré)
