@@ -182,11 +182,24 @@ fn l3_decision_observations_projection_fermeture_reouverture_rejeu() {
             Some((1, 2, 1)),
             "b/m2 : a priori 1/1 + un échec"
         );
+        // 5. rejeu DANS LA MÊME SESSION — store encore ouvert, aucun redémarrage.
+        // C'est le cas que l'étape 8 ne mesure pas : là, la réouverture a eu lieu.
+        // L'identité de l'événement est stable, le doublon est donc refusé sans
+        // redémarrage, et la projection recalculée ne bouge pas.
+        assert!(
+            !enregistrer_observation(&store, scope, "dec-1", "chat.general", "a", "m1", true),
+            "même session : le doublon est refusé"
+        );
+        assert_eq!(
+            projeter(&store, scope),
+            attendu,
+            "un rejeu dans la même session ne change pas la projection"
+        );
         store.commit_wal().expect("flush");
-        // 5. fermeture
+        // 6. fermeture
     }
 
-    // 6+7. réouverture + reconstruction EXACTE
+    // 7+8. réouverture + reconstruction EXACTE
     let store = ObrainStore::open(&d).expect("réouverture");
     let apres = projeter(&store, scope);
     assert_eq!(
@@ -194,7 +207,7 @@ fn l3_decision_observations_projection_fermeture_reouverture_rejeu() {
         "les statistiques doivent être reconstruites à l'identique"
     );
 
-    // 8. rejeu d'une observation déjà enregistrée : aucun double comptage
+    // 9. rejeu d'une observation déjà enregistrée : aucun double comptage
     assert!(
         !enregistrer_observation(&store, scope, "dec-1", "chat.general", "a", "m1", true),
         "le rejeu doit être refusé (identité stable)"
