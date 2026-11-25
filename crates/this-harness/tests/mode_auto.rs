@@ -3090,11 +3090,12 @@ fn le_repli_ne_sort_jamais_de_l_instance_meme_quand_un_autre_fournisseur_est_mei
     // modèle ne dit rien d'un autre fournisseur : le changer en cours de tour passerait par
     // des gardes (jamais deux changements de fournisseur de suite) que ce chemin ne tient pas.
     let world = monde_quota();
-    let mut bras = Vec::new();
-    bras.push(arm(CLASSE, "a", "m1", true));
-    bras.push(arm(CLASSE, "b", "x", true));
-    bras.push(arm(CLASSE, "a", "m2", false));
-    bras.push(arm(CLASSE, "a", "m3", false));
+    let bras = vec![
+        arm(CLASSE, "a", "m1", true),
+        arm(CLASSE, "b", "x", true),
+        arm(CLASSE, "a", "m2", false),
+        arm(CLASSE, "a", "m3", false),
+    ];
     world.learning.set_arms(bras);
     let router = Rc::new(TurnRouter::new(world.spec("a", "m1", 1).auto()));
     let moteur = Quotas::new(vec![("m1", QuotaScope::Model)]);
