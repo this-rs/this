@@ -466,10 +466,10 @@ impl HarnessGraph {
         // confirmée) n'a pas d'empreinte d'origine : la première étape confirmée la
         // pose ici. Sans cela, la détection de collision (`slot_for`) ne verrait
         // jamais ce run, et un second run de même id et même but l'écraserait.
-        if !head.props.iter().any(|(k, _)| k == "_origin") {
-            if let Some(origin) = Self::origin_of(run) {
-                head.props.push(("_origin".to_string(), origin));
-            }
+        if !head.props.iter().any(|(k, _)| k == "_origin")
+            && let Some(origin) = Self::origin_of(run)
+        {
+            head.props.push(("_origin".to_string(), origin));
         }
         self.upsert(&head)?;
         self.store.commit_wal()

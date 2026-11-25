@@ -8,6 +8,7 @@
 //! | `GET /graph` | le document complet ([`Relief`]) — `?counts=true` ajoute les compteurs de simplexes (balayage complet, opt-in) |
 //! | `GET /graph/procedures` | la surface d'appel : procédures introspectées + familles déclarées + pièges |
 //! | `GET /graph/spaces` | l'espace actif et les espaces connus |
+//! | `GET /graph/partition` | la partition du graphe actif **et son certificat** (conductance par communauté) — balayage O(n + m), borné par `?max=` |
 //!
 //! Aucune de ces routes n'écrit, et aucune ne rend d'erreur pour un fait
 //! simplement indisponible : c'est le contrat du document (cf. `relief.rs`).
@@ -28,7 +29,10 @@ use serde_json::json;
 use uuid::Uuid;
 
 use crate::core::identity::{IdentityRegistry, MotiveSpec};
-use crate::graph::relief::{FamilySpec, ProcedureSpec, Relief, ReliefOptions, Trap};
+use crate::graph::relief::{
+    FamilySpec, PARTITION_DEFAULT_RESOLUTION, PARTITION_MAX_NODES, PartitionRelief, ProcedureSpec,
+    Relief, ReliefOptions, Trap,
+};
 use crate::storage::ObrainStore;
 use crate::storage::obrain_identity::IdentityReport;
 
@@ -109,6 +113,9 @@ pub fn graph_routes(state: GraphState) -> Router {
         // **La vue multi-échelle** : descendre d'un groupe à ses sous-groupes,
         // niveau par niveau, sans jamais charger tout le graphe.
         .route("/graph/hierarchy/{id}", get(hierarchy_handler))
+        // **Le juge d'une partition** : conductance par communauté, opt-in et
+        // borné (c'est un balayage, pas une lecture d'index).
+        .route("/graph/partition", get(partition_handler))
         .with_state(state)
 }
 
@@ -159,6 +166,48 @@ async fn procedures_handler(State(state): State<GraphState>) -> Response {
 async fn spaces_handler(State(state): State<GraphState>) -> Response {
     match describe(state.store, ReliefOptions::default()).await {
         Ok(relief) => Json(relief.space).into_response(),
+        Err(e) => join_error(e),
+    }
+}
+
+/// Paramètres de `GET /graph/partition`.
+#[derive(Debug, Deserialize)]
+struct PartitionQuery {
+    /// Résolution passée à `leiden`.
+    #[serde(default = "resolution_par_defaut")]
+    resolution: f64,
+    /// Borne de nœuds — au-delà, la lecture est REFUSÉE en nommant la borne.
+    #[serde(default = "max_par_defaut")]
+    max: usize,
+}
+
+fn resolution_par_defaut() -> f64 {
+    PARTITION_DEFAULT_RESOLUTION
+}
+
+fn max_par_defaut() -> usize {
+    PARTITION_MAX_NODES
+}
+
+/// `GET /graph/partition` — la partition du graphe actif et **son certificat**.
+///
+/// Contrairement aux autres lectures de ce module, celle-ci **balaie** le
+/// graphe : elle calcule une partition (`leiden`) puis la juge
+/// (`conductances`). Elle est donc opt-in, bornée, et son dépassement est un
+/// refus nommé — jamais une requête qui pend.
+async fn partition_handler(
+    State(state): State<GraphState>,
+    Query(q): Query<PartitionQuery>,
+) -> Response {
+    let resolution = q.resolution;
+    let max = q.max;
+    match tokio::task::spawn_blocking(move || {
+        PartitionRelief::describe(&state.store, resolution, max)
+    })
+    .await
+    {
+        Ok(Ok(partition)) => Json(partition).into_response(),
+        Ok(Err(e)) => envelope(StatusCode::BAD_REQUEST, json!({ "error": e.to_string() })),
         Err(e) => join_error(e),
     }
 }
