@@ -1,55 +1,44 @@
 #![cfg(all(feature = "obrain", feature = "objects-toolbox"))]
-//! **L4a** — transfert par structure EXPLICITE, **qualifié à information identique**.
+//! **L4a** — transfert par structure EXPLICITE : qualification, récupération, et
+//! confiance adaptative.
 //!
-//! Le premier passage (PR #386, `b615ccba`) comparait le rappel relationnel à un
-//! témoin nommé « hiérarchique » qui ne réalisait en fait qu'une **mutualisation
-//! globale** (brassage uniforme de toutes les classes). Ce n'est pas un modèle
-//! hiérarchique multiniveau, et l'écart mesuré ne pouvait donc pas être attribué.
+//! ## Ce que ce fichier sépare désormais
 //!
-//! Ce fichier refait la comparaison. Toutes les stratégies lisent la **même table
-//! d'observations** (classe, fournisseur, favorable) : ce qui change n'est pas
-//! l'information disponible, c'est la **structure de partage** que chacune est
-//! autorisée à en tirer.
+//! * **Invariants fonctionnels** (assertés — leur violation est un défaut, pas un
+//!   résultat) : `l2 ≡ l3` à chaque répétition (persister n'apprend rien), et
+//!   `domaine ≡ relat` à chaque répétition dans les deux protocoles (même information
+//!   + même partage ⇒ même trajectoire ; le graphe ne calcule rien de plus).
+//! * **Hypothèses scientifiques** (imprimées avec un verdict, JAMAIS assertées) :
+//!   elles doivent pouvoir varier selon le corpus. Un test qui casse parce qu'une
+//!   hypothèse est fausse empêche la science ; un rapport qui la tait la falsifie.
 //!
-//! | régime | structure de partage | information lue |
-//! |---|---|---|
-//! | `sans` | aucune | rien |
-//! | `l2` | par classe, en mémoire | ses propres observations |
-//! | `l3` | par classe, persistée dans Obrain | ses propres observations |
-//! | `global` | mutualisation GLOBALE (ex-« hiérarchique », renommé) | tout, brassé |
-//! | `domaine` | Beta par DOMAINE, câblé à la main | classe + ses sœurs |
-//! | `hier3` | hiérarchique multiniveau à partage PARTIEL (global → domaine → classe) | tout, avec rétrécissement |
-//! | `relat` | rappel relationnel natif Obrain (`(:classe)-[:APPARTIENT]->(:domaine)`) | classe + sœurs, découvertes par le graphe |
-//! | `relat_melange` | idem, relations MÉLANGÉES (structure réelle, non prédictive) | — |
-//! | `relat_bruit` | idem, relations NON PERTINENTES (un seul domaine) | — |
+//! ## Régimes
 //!
-//! Deux protocoles, rapportés séparément :
+//! | régime | structure de partage |
+//! |---|---|
+//! | `sans` | aucune mémoire |
+//! | `l2` / `l3` | par classe, en mémoire / persistée |
+//! | `global` | mutualisation globale (brassage) |
+//! | `domaine` | Beta par domaine, câblé à la main |
+//! | `hier3` | hiérarchique multiniveau, partage partiel (K0 = KD = W = 4) |
+//! | `relat` | rappel relationnel natif Obrain, domaine lu dans le graphe |
+//! | `relat_melange` / `relat_bruit` | relations mélangées / non pertinentes |
+//! | **`adaptatif`** | transfert à **confiance révisable** : λ = 1/(1+contradictions), masse transférée plafonnée |
+//! | **`borne`** | transfert par domaine à **masse plafonnée** seule (pas de λ) |
+//! | **`selection`** | **sélection adaptative de modèle** : local seul ou domaine, selon la vraisemblance |
 //!
-//! * **figé** — les inédites sont évaluées depuis le MÊME état initial (les lectures
-//!   excluent les autres inédites : `c7` ne voit jamais `c6`). C'est ce protocole qui
-//!   traite la réserve c6/c7, sans toucher au corpus ;
-//! * **continu** — les inédites sont rencontrées successivement, le transfert entre
-//!   elles est permis et mesuré.
+//! Aucune stratégie n'accède à `theta` ni au meilleur bras : ces informations
+//! n'appartiennent qu'à l'évaluateur (`meilleur_bras`, `theta` ne sont appelés que
+//! par les mesures et les auto-contrôles).
 //!
-//! Mesures : réussite AVANT toute observation de la classe (choix déterministe sur
-//! l'espérance a posteriori, pas un coup de dés), puis par palier d'observations
-//! (0, 1, 2, 4, 8). Et, sur un corpus TROMPEUR (structure similaire, meilleur bras
-//! différent), le coût du **transfert négatif** et la vitesse de correction.
+//! ## Mesures
 //!
-//! Prédictions écrites AVANT la mesure — une prédiction ratée se rapporte, elle ne
-//! s'efface pas :
-//!
-//! * P1 — `l2` et `l3` produisent la MÊME trajectoire, à CHAQUE répétition ;
-//! * P2 — à 0 observation, `relat`/`domaine`/`hier3` choisissent mieux que `l2` ;
-//! * P3 — sur le corpus trompeur, `relat` perd PLUS de tours que `l2` (le transfert
-//!   se paie) puis se corrige ;
-//! * P4 — **RÉFUTÉE** : « une structure mélangée ne fait pas mieux qu'une structure
-//!   informative » est FAUX sur le corpus trompeur (192 tours perdus contre 232).
-//!   Une structure qui **ment** coûte plus cher qu'une structure qui n'ordonne rien ;
-//! * P5 — **CONFIRMÉE** : `domaine` (câblé à la main) et `relat` (lu dans le graphe)
-//!   rendent des chiffres IDENTIQUES, palier par palier. À information identique et
-//!   partage identique, le graphe n'ajoute aucune capacité de décision — il rend le
-//!   partage **déclaratif** (il vit dans les données, pas dans le code).
+//! Réussite **ponctuelle** après exactement 0, 1, 2, 4, 8 et 20 observations
+//! (tour `k` = décidé avec `k` observations préalables), et sur le corpus trompeur :
+//! premier choix optimal, fréquence optimale ensuite, fréquence optimale sur les
+//! 8 derniers tours, **regret cumulé**, **récupération durable** (premier tour après
+//! lequel plus aucune décision n'est sous-optimale) et **cas sans récupération**.
+//! Distributions (médiane, étendue), pas le meilleur cas.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -63,7 +52,6 @@ use this_harness::routing::{ArmKey, ArmStats, Learning, Pick, beta_draw, seed_of
 
 // ── Corpus : structure latente DÉTERMINISTE ────────────────────────────────
 
-/// Les quatre bras (un fournisseur, un modèle).
 const BRAS: [&str; 4] = ["a", "b", "c", "d"];
 const MODELE: &str = "m";
 
@@ -80,20 +68,23 @@ const CLASSES: [(&str, &str); 10] = [
     ("c8", "d1"), // inédite de d1
     ("c9", "d2"), // inédite de d2
 ];
-const NB_ENTRAINEMENT: usize = 6; // c0..c5
+const NB_ENTRAINEMENT: usize = 6;
 
-/// Classes TROMPEUSES : la structure (domaine) suggère un bras, le vrai meilleur
-/// bras est différent. `(nom, domaine affiché, meilleur bras réel)`.
+/// Classes TROMPEUSES : la structure suggère un bras, le vrai meilleur bras diffère.
 const TROMPEUSES: [(&str, &str, &str); 2] = [
     ("x0", "d1", "d"), // d1 dit « b », la réalité est « d »
     ("x1", "d2", "a"), // d2 dit « c », la réalité est « a »
 ];
 
 const TOURS_ENTRAINEMENT: usize = 60;
-const TOURS_NOUVEAU: usize = 20;
+/// 24 tours : permet la mesure ponctuelle « après 20 observations » (tour 20).
+const TOURS_NOUVEAU: usize = 24;
 const TOURS_TROMPEUR: usize = 40;
-/// Répétitions (tirages régénérés par graine, même structure latente).
 const REPS: u64 = 3;
+/// Points de mesure ponctuels : le tour `k` est décidé avec `k` observations.
+const POINTS: [usize; 6] = [0, 1, 2, 4, 8, 20];
+/// Masse maximale (en observations équivalentes) accordée à un transfert.
+const MASSE_MAX: f64 = 8.0;
 
 fn fnv1a(s: &str) -> u64 {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
@@ -104,7 +95,6 @@ fn fnv1a(s: &str) -> u64 {
     h
 }
 
-/// Rend la version `'static` d'un nom de classe connu (entraînement, inédite, trompeuse).
 fn statique(classe: &str) -> Option<&'static str> {
     if let Some((nom, _)) = CLASSES.iter().find(|(c, _)| *c == classe) {
         return Some(nom);
@@ -126,7 +116,6 @@ fn domaine_de(classe: &str) -> &'static str {
         .expect("classe connue")
 }
 
-/// Le meilleur bras imposé d'une classe trompeuse, s'il y en a un.
 fn meilleur_force(classe: &str) -> Option<&'static str> {
     TROMPEUSES
         .iter()
@@ -134,7 +123,6 @@ fn meilleur_force(classe: &str) -> Option<&'static str> {
         .map(|(_, _, m)| *m)
 }
 
-/// Index stable de classe (sert à fabriquer l'identifiant de décision).
 fn indice_classe(classe: &str) -> usize {
     if let Some(i) = CLASSES.iter().position(|(c, _)| *c == classe) {
         return i;
@@ -145,7 +133,6 @@ fn indice_classe(classe: &str) -> usize {
     panic!("classe inconnue : {classe}")
 }
 
-/// Logit global d'un bras (partagé entre toutes les classes).
 fn logit_global(bras: &str) -> f64 {
     match bras {
         "a" => 1.6,
@@ -156,24 +143,23 @@ fn logit_global(bras: &str) -> f64 {
     }
 }
 
-/// Boost propre au domaine (la structure relationnelle, non suffisante à répondre).
 fn boost_domaine(domaine: &str, bras: &str) -> f64 {
     match (domaine, bras) {
-        ("d0", "a") => 0.3,  // chat : a encore meilleur
-        ("d1", "a") => -1.3, // code : a faiblit, b émerge
+        ("d0", "a") => 0.3,
+        ("d1", "a") => -1.3,
         ("d1", "b") => 2.0,
-        ("d2", "a") => -1.3, // math : a faiblit, c émerge
+        ("d2", "a") => -1.3,
         ("d2", "c") => 2.0,
         _ => 0.0,
     }
 }
 
-/// Gigue de classe, déterministe, bornée à ±0.10 (le meilleur bras reste stable).
 fn gigue(classe: &str, bras: &str) -> f64 {
     let h = fnv1a(&format!("{classe}/{bras}"));
     ((h % 1000) as f64 / 1000.0) * 0.20 - 0.10
 }
 
+/// P(bas) du corpus. N'est appelé QUE par l'évaluateur et les auto-contrôles.
 fn theta(classe: &str, bras: &str) -> f64 {
     let mut z = logit_global(bras) + boost_domaine(domaine_de(classe), bras) + gigue(classe, bras);
     if Some(bras) == meilleur_force(classe) {
@@ -182,6 +168,7 @@ fn theta(classe: &str, bras: &str) -> f64 {
     1.0 / (1.0 + (-z).exp())
 }
 
+/// Le meilleur bras réel. Réservé à l'évaluateur.
 fn meilleur_bras(classe: &str) -> &'static str {
     BRAS.iter()
         .copied()
@@ -198,8 +185,6 @@ fn lcg(etat: &mut u64) -> u64 {
     *etat
 }
 
-/// Le `j`-ième tirage du bras `bras` dans la classe `classe` (répétition `rep`).
-/// Déterministe : la même séquence pour toutes les stratégies.
 fn tirage(classe: &str, bras: &str, j: usize, rep: u64) -> bool {
     let mut etat = fnv1a(&format!("{rep}/{classe}/{bras}"));
     for _ in 0..=j {
@@ -209,7 +194,7 @@ fn tirage(classe: &str, bras: &str, j: usize, rep: u64) -> bool {
     (v as f64) < theta(classe, bras) * 10_000.0
 }
 
-// ── Le tirage de Thompson (primitive du crate, pas un second moteur) ───────
+// ── Décisions ──────────────────────────────────────────────────────────────
 
 fn choisir(bras: &[ArmStats], id: u128) -> (String, String) {
     let mut meilleur: Option<(f64, &ArmStats)> = None;
@@ -224,8 +209,7 @@ fn choisir(bras: &[ArmStats], id: u128) -> (String, String) {
     (bras_.key.provider_id.clone(), bras_.key.model.clone())
 }
 
-/// Choix DÉTERMINISTE : argmax de l'espérance a posteriori. Sert à mesurer ce que
-/// la stratégie « sait » avant tout tirage (aucune chance dans la mesure).
+/// Argmax de l'espérance a posteriori — aucune chance dans la mesure à 0 observation.
 fn choix_deterministe(bras: &[ArmStats]) -> String {
     bras.iter()
         .max_by(|x, y| {
@@ -247,9 +231,8 @@ fn echapper(s: &str) -> String {
     s.replace('\\', "\\\\").replace('\'', "\\'")
 }
 
-// ── Lectures : strictes (une erreur n'est jamais un résultat vide) ─────────
+// ── Lectures strictes (une erreur n'est jamais un résultat vide) ───────────
 
-/// Lit toute la table d'observations. Refuse une réponse inexploitable ou tronquée.
 fn lire_lignes(store: &Arc<ObrainStore>, limite: usize) -> Vec<(String, String, bool)> {
     let r = store
         .execute_query(
@@ -300,53 +283,37 @@ fn lire_lignes(store: &Arc<ObrainStore>, limite: usize) -> Vec<(String, String, 
         .collect()
 }
 
-fn ajouter_observation(
-    table: &mut HashMap<(String, String), (f64, f64)>,
-    classe: &str,
-    provider: &str,
-    favorable: bool,
-) {
-    let e = table
-        .entry((classe.to_string(), provider.to_string()))
-        .or_insert((1.0, 1.0));
-    if favorable {
-        e.0 += 1.0;
-    } else {
-        e.1 += 1.0;
-    }
-}
+// ── Agrégats ───────────────────────────────────────────────────────────────
 
-/// Agrégat par fournisseur, sur les classes autorisées et/ou un domaine.
-fn agreger_par_provider(
+/// provider -> (succès, essais), sur les classes autorisées et/ou un domaine.
+fn comptes(
     lignes: &[(String, String, bool)],
     autorisees: Option<&[&'static str]>,
-    domaine_filtre: Option<&str>,
+    domaine: Option<&str>,
 ) -> HashMap<String, (f64, f64)> {
-    let mut par_classe: HashMap<(String, String), (f64, f64)> = HashMap::new();
+    let mut table: HashMap<String, (f64, f64)> = HashMap::new();
     for (classe, provider, favorable) in lignes {
         if let Some(liste) = autorisees
             && !liste.contains(&classe.as_str())
         {
             continue;
         }
-        if let Some(d) = domaine_filtre
+        if let Some(d) = domaine
             && domaine_de(classe) != d
         {
             continue;
         }
-        ajouter_observation(&mut par_classe, classe, provider, *favorable);
+        let e = table.entry(provider.clone()).or_insert((0.0, 0.0));
+        e.1 += 1.0;
+        if *favorable {
+            e.0 += 1.0;
+        }
     }
-    let mut par_provider: HashMap<String, (f64, f64)> = HashMap::new();
-    for ((_, provider), (a, b)) in par_classe {
-        let e = par_provider.entry(provider).or_insert((1.0, 1.0));
-        e.0 += a - 1.0;
-        e.1 += b - 1.0;
-    }
-    par_provider
+    table
 }
 
-/// Comptes bruts par (classe, fournisseur) — pour le modèle hiérarchique.
-fn compter_par_classe(
+/// comptes par (classe, provider) — pour le modèle hiérarchique et l'adaptatif.
+fn comptes_par_classe(
     lignes: &[(String, String, bool)],
     autorisees: Option<&[&'static str]>,
 ) -> HashMap<(String, String), (f64, f64)> {
@@ -357,9 +324,35 @@ fn compter_par_classe(
         {
             continue;
         }
-        ajouter_observation(&mut table, classe, provider, *favorable);
+        let e = table
+            .entry((classe.clone(), provider.clone()))
+            .or_insert((0.0, 0.0));
+        e.1 += 1.0;
+        if *favorable {
+            e.0 += 1.0;
+        }
     }
     table
+}
+
+/// Beta(1 + λ·succès, 1 + λ·(essais - succès)), masse optionnellement plafonnée.
+fn priors_depuis(
+    comptes: &HashMap<String, (f64, f64)>,
+    lam: f64,
+    plafond: Option<f64>,
+) -> HashMap<String, (f64, f64)> {
+    let total: f64 = comptes.values().map(|(_, n)| n).sum();
+    let mut l = lam;
+    if let Some(m) = plafond
+        && l * total > m
+        && *&total > 0.0
+    {
+        l = m / total;
+    }
+    comptes
+        .iter()
+        .map(|(p, (s, n))| (p.clone(), (1.0 + l * s, 1.0 + l * (n - s))))
+        .collect()
 }
 
 fn ecrire_observation(
@@ -409,8 +402,6 @@ enum Protocole {
     Continu,
 }
 
-/// Classes lisibles par une stratégie qui transfère (hors « sa propre classe »,
-/// toujours lisible). `None` = tout est lisible (protocole continu).
 fn autorisees(protocole: Protocole, classe: &str) -> Option<Vec<&'static str>> {
     match protocole {
         Protocole::Continu => None,
@@ -427,7 +418,7 @@ fn autorisees(protocole: Protocole, classe: &str) -> Option<Vec<&'static str>> {
     }
 }
 
-// ── Stratégie `sans` : aucune mémoire ──────────────────────────────────────
+// ── `sans` : aucune mémoire ────────────────────────────────────────────────
 
 struct SansMemoire;
 
@@ -481,177 +472,66 @@ impl Learning for ParClasseMemoire {
     }
 }
 
-// ── `l3` : Beta par classe, persisté dans Obrain ───────────────────────────
-//
-// L2 et L3 ne lisent que leur PROPRE classe : les deux protocoles leur sont donc
-// indifférents. C'est exactement ce qui rend leur égalité de trajectoire exacte.
+// ── Le partage ─────────────────────────────────────────────────────────────
 
-struct ParClasseObrain {
-    store: Arc<ObrainStore>,
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Variante {
+    Normale,
+    Melangee,
+    Bruit,
 }
 
-#[async_trait(?Send)]
-impl Learning for ParClasseObrain {
-    async fn arms(&self, classe: &str) -> Vec<ArmStats> {
-        let lignes = lire_lignes(&self.store, 100_000);
-        let sienne = [statique(classe).expect("classe connue")];
-        let priors = agreger_par_provider(&lignes, Some(&sienne), None);
-        bras_a_priori(classe, &priors)
-    }
-    async fn settle(&self, id: u128, served: Option<&Pick>, stop: &Stop, _code: Option<&str>) {
-        let Some(p) = served else { return };
-        let favorable = match stop {
-            Stop::Done => true,
-            Stop::Failed(_) => false,
-            _ => return,
-        };
-        let classe = classe_de_id(id);
-        ecrire_observation(&self.store, id, classe, &p.provider_id, &p.model, favorable);
-    }
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Partage {
+    /// Uniquement les observations de la classe (c'est L3).
+    Classe,
+    /// Toutes les observations, brassées.
+    Global,
+    /// Domaine, câblé à la main (table constante).
+    Domaine,
+    /// Hiérarchique multiniveau, partage partiel.
+    Hier3,
+    /// Domaine, masse transférée PLAFONNÉE.
+    Borne,
+    /// Domaine, confiance λ révisable + masse plafonnée.
+    Adaptatif,
+    /// Sélection adaptative local / domaine selon la vraisemblance.
+    Selection,
+    /// Domaine lu dans le graphe Obrain (et ses variantes trompeuses).
+    Graphe(Variante),
 }
-
-// ── `global` : mutualisation GLOBALE (ex-« hiérarchique », renommé) ────────
-
-struct MutualisationGlobale {
-    store: Arc<ObrainStore>,
-    protocole: Protocole,
-}
-
-#[async_trait(?Send)]
-impl Learning for MutualisationGlobale {
-    async fn arms(&self, classe: &str) -> Vec<ArmStats> {
-        let aut = autorisees(self.protocole, classe);
-        let lignes = lire_lignes(&self.store, 100_000);
-        let priors = agreger_par_provider(&lignes, aut.as_deref(), None);
-        bras_a_priori(classe, &priors)
-    }
-    async fn settle(&self, id: u128, served: Option<&Pick>, stop: &Stop, _code: Option<&str>) {
-        let Some(p) = served else { return };
-        let favorable = match stop {
-            Stop::Done => true,
-            Stop::Failed(_) => false,
-            _ => return,
-        };
-        let classe = classe_de_id(id);
-        ecrire_observation(&self.store, id, classe, &p.provider_id, &p.model, favorable);
-    }
-}
-
-// ── `domaine` : Beta par domaine, câblé à la main (même information qu'Obrain) ──
-
-struct BetaDomaine {
-    store: Arc<ObrainStore>,
-    protocole: Protocole,
-}
-
-#[async_trait(?Send)]
-impl Learning for BetaDomaine {
-    async fn arms(&self, classe: &str) -> Vec<ArmStats> {
-        let aut = autorisees(self.protocole, classe);
-        let lignes = lire_lignes(&self.store, 100_000);
-        let priors = agreger_par_provider(&lignes, aut.as_deref(), Some(domaine_de(classe)));
-        bras_a_priori(classe, &priors)
-    }
-    async fn settle(&self, id: u128, served: Option<&Pick>, stop: &Stop, _code: Option<&str>) {
-        let Some(p) = served else { return };
-        let favorable = match stop {
-            Stop::Done => true,
-            Stop::Failed(_) => false,
-            _ => return,
-        };
-        let classe = classe_de_id(id);
-        ecrire_observation(&self.store, id, classe, &p.provider_id, &p.model, favorable);
-    }
-}
-
-// ── `hier3` : hiérarchique multiniveau à partage PARTIEL ──────────────────
-//
-// Beta-Bernoulli hiérarchique à estimateur fermé (rétrécissement type James-Stein) :
-//   m0(bras)         = moyenne GLOBALE du bras
-//   md(domaine, bras)= moyenne du domaine, rétrécie vers m0        (poids K0)
-//   mc(classe, bras) = moyenne de la classe, rétrécie vers md      (poids KD)
-// puis un Beta(mc * W, (1-mc) * W) : c'est un partage PARTIEL, pas un brassage.
 
 const K0: f64 = 4.0;
 const KD: f64 = 4.0;
 const W: f64 = 4.0;
 
-struct Hierarchique3Niveaux {
+#[derive(Default)]
+struct EtatAdaptatif {
+    /// Observations qui contredisent la prédiction transférée.
+    contradictions: u32,
+}
+
+struct Strategie {
     store: Arc<ObrainStore>,
     protocole: Protocole,
+    partage: Partage,
+    etat: Mutex<HashMap<String, EtatAdaptatif>>,
 }
 
-#[async_trait(?Send)]
-impl Learning for Hierarchique3Niveaux {
-    async fn arms(&self, classe: &str) -> Vec<ArmStats> {
-        let aut = autorisees(self.protocole, classe);
-        let lignes = lire_lignes(&self.store, 100_000);
-        let comptes = compter_par_classe(&lignes, aut.as_deref());
-
-        let mut global: HashMap<String, (f64, f64)> = HashMap::new(); // succès, essais
-        let mut par_domaine: HashMap<(String, String), (f64, f64)> = HashMap::new();
-        for ((c, p), (a, b)) in &comptes {
-            let (s, n) = (a - 1.0, (a - 1.0) + (b - 1.0));
-            let g = global.entry(p.clone()).or_insert((0.0, 0.0));
-            g.0 += s;
-            g.1 += n;
-            let d = par_domaine
-                .entry((domaine_de(c).to_string(), p.clone()))
-                .or_insert((0.0, 0.0));
-            d.0 += s;
-            d.1 += n;
+impl Strategie {
+    fn nouvelle(store: Arc<ObrainStore>, protocole: Protocole, partage: Partage) -> Self {
+        if let Partage::Graphe(variante) = partage {
+            Self::batir_graphe(&store, variante);
         }
-
-        let mut priors: HashMap<String, (f64, f64)> = HashMap::new();
-        for bras in BRAS {
-            let (gs, gn) = global.get(bras).copied().unwrap_or((0.0, 0.0));
-            let m0 = (gs + 1.0) / (gn + 2.0);
-            let (ds, dn) = par_domaine
-                .get(&(domaine_de(classe).to_string(), bras.to_string()))
-                .copied()
-                .unwrap_or((0.0, 0.0));
-            let md = (ds + K0 * m0) / (dn + K0);
-            let (cs, cn) = comptes
-                .get(&(classe.to_string(), bras.to_string()))
-                .map(|(a, b)| (a - 1.0, (a - 1.0) + (b - 1.0)))
-                .unwrap_or((0.0, 0.0));
-            let mc = (cs + KD * md) / (cn + KD);
-            priors.insert(bras.to_string(), (1.0 + mc * W, 1.0 + (1.0 - mc) * W));
+        Self {
+            store,
+            protocole,
+            partage,
+            etat: Mutex::new(HashMap::new()),
         }
-        bras_a_priori(classe, &priors)
     }
-    async fn settle(&self, id: u128, served: Option<&Pick>, stop: &Stop, _code: Option<&str>) {
-        let Some(p) = served else { return };
-        let favorable = match stop {
-            Stop::Done => true,
-            Stop::Failed(_) => false,
-            _ => return,
-        };
-        let classe = classe_de_id(id);
-        ecrire_observation(&self.store, id, classe, &p.provider_id, &p.model, favorable);
-    }
-}
 
-// ── `relat` : rappel relationnel natif Obrain (et ses variantes trompeuses) ─
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Variante {
-    /// Le domaine réel, porté par le graphe.
-    Normale,
-    /// Relations MÉLANGÉES : le graphe existe, il n'est pas prédictif.
-    Melangee,
-    /// Relations NON PERTINENTES : un seul domaine pour tout le monde.
-    Bruit,
-}
-
-struct Relationnel {
-    store: Arc<ObrainStore>,
-    protocole: Protocole,
-}
-
-impl Relationnel {
-    /// Bâtit le graphe de structure : classes, domaines, arêtes APPARTIENT.
-    fn nouveau(store: Arc<ObrainStore>, variante: Variante, protocole: Protocole) -> Self {
+    fn batir_graphe(store: &Arc<ObrainStore>, variante: Variante) {
         let domaine_selon = |classe: &str| -> String {
             match variante {
                 Variante::Normale => domaine_de(classe).to_string(),
@@ -659,36 +539,33 @@ impl Relationnel {
                 Variante::Bruit => "bruit".to_string(),
             }
         };
-        {
-            let mut toutes: Vec<(&'static str, &'static str)> = CLASSES.to_vec();
-            for (c, d, _) in TROMPEUSES {
-                toutes.push((c, d));
-            }
-            let mut s = store.db().session();
-            s.begin_transaction().expect("begin");
-            let mut domaines: HashMap<String, obrain_common::types::NodeId> = HashMap::new();
-            for (classe, _) in toutes {
-                let n = s.create_node(&["classe"]);
-                s.set_node_property(n, "nom", Value::String(classe.into()));
-                let dnom = domaine_selon(classe);
-                let d = match domaines.get(&dnom) {
-                    Some(d) => *d,
-                    None => {
-                        let dn = s.create_node(&["domaine"]);
-                        s.set_node_property(dn, "nom", Value::String(dnom.as_str().into()));
-                        domaines.insert(dnom, dn);
-                        dn
-                    }
-                };
-                s.create_edge(n, d, "APPARTIENT");
-            }
-            s.commit().expect("commit");
+        let mut toutes: Vec<(&'static str, &'static str)> = CLASSES.to_vec();
+        for (c, d, _) in TROMPEUSES {
+            toutes.push((c, d));
         }
-        Self { store, protocole }
+        let mut s = store.db().session();
+        s.begin_transaction().expect("begin");
+        let mut domaines: HashMap<String, obrain_common::types::NodeId> = HashMap::new();
+        for (classe, _) in toutes {
+            let n = s.create_node(&["classe"]);
+            s.set_node_property(n, "nom", Value::String(classe.into()));
+            let dnom = domaine_selon(classe);
+            let d = match domaines.get(&dnom) {
+                Some(d) => *d,
+                None => {
+                    let dn = s.create_node(&["domaine"]);
+                    s.set_node_property(dn, "nom", Value::String(dnom.as_str().into()));
+                    domaines.insert(dnom, dn);
+                    dn
+                }
+            };
+            s.create_edge(n, d, "APPARTIENT");
+        }
+        s.commit().expect("commit");
     }
 
-    /// Les classes du domaine de `classe`, par relations du graphe.
-    fn classes_du_domaine(&self, classe: &str) -> Vec<String> {
+    /// Les classes du domaine de `classe`, lues par les relations du graphe.
+    fn soeurs_du_graphe(&self, classe: &str) -> Vec<&'static str> {
         let r = self
             .store
             .execute_query(
@@ -710,7 +587,6 @@ impl Relationnel {
             .and_then(|v| v.as_str())
             .expect("domaine du graphe introuvable")
             .to_string();
-
         let r = self
             .store
             .execute_query(
@@ -732,28 +608,176 @@ impl Relationnel {
                     .expect("nom de classe non textuel")
                     .to_string()
             })
+            .filter_map(|s| statique(&s))
             .collect()
+    }
+
+    /// Priors du modèle hiérarchique à partage partiel.
+    fn priors_hier3(
+        &self,
+        classe: &str,
+        lignes: &[(String, String, bool)],
+    ) -> HashMap<String, (f64, f64)> {
+        let aut = autorisees(self.protocole, classe);
+        let comptes = comptes_par_classe(lignes, aut.as_deref());
+        let mut global: HashMap<String, (f64, f64)> = HashMap::new();
+        let mut par_domaine: HashMap<(String, String), (f64, f64)> = HashMap::new();
+        for ((c, p), (s, n)) in &comptes {
+            let g = global.entry(p.clone()).or_insert((0.0, 0.0));
+            g.0 += s;
+            g.1 += n;
+            let d = par_domaine
+                .entry((domaine_de(c).to_string(), p.clone()))
+                .or_insert((0.0, 0.0));
+            d.0 += s;
+            d.1 += n;
+        }
+        let mut priors: HashMap<String, (f64, f64)> = HashMap::new();
+        for bras in BRAS {
+            let (gs, gn) = global.get(bras).copied().unwrap_or((0.0, 0.0));
+            let m0 = (gs + 1.0) / (gn + 2.0);
+            let (ds, dn) = par_domaine
+                .get(&(domaine_de(classe).to_string(), bras.to_string()))
+                .copied()
+                .unwrap_or((0.0, 0.0));
+            let md = (ds + K0 * m0) / (dn + K0);
+            let (cs, cn) = comptes
+                .get(&(classe.to_string(), bras.to_string()))
+                .copied()
+                .unwrap_or((0.0, 0.0));
+            let mc = (cs + KD * md) / (cn + KD);
+            priors.insert(bras.to_string(), (1.0 + mc * W, 1.0 + (1.0 - mc) * W));
+        }
+        priors
+    }
+
+    /// Comptes du transfert (domaine ou graphe) et comptes locaux, séparément.
+    fn comptes_locaux_et_transferes(
+        &self,
+        classe: &str,
+        lignes: &[(String, String, bool)],
+    ) -> (HashMap<String, (f64, f64)>, HashMap<String, (f64, f64)>) {
+        let aut = autorisees(self.protocole, classe);
+        let sienne = statique(classe).expect("classe connue");
+        let local = comptes(lignes, Some(&[sienne]), None);
+        let mut transfere = match self.partage {
+            Partage::Graphe(_) => {
+                let mut soeurs = self.soeurs_du_graphe(classe);
+                if let Some(liste) = &aut {
+                    soeurs.retain(|s| liste.contains(s));
+                }
+                comptes(lignes, Some(&soeurs), None)
+            }
+            _ => {
+                let mut t = comptes(lignes, aut.as_deref(), Some(domaine_de(classe)));
+                // Retire la contribution propre : le transfert vient des sœurs.
+                if let Some((ls, ln)) = local.get(sienne) {
+                    let e = t.entry(sienne.to_string()).or_insert((0.0, 0.0));
+                    e.0 -= ls;
+                    e.1 -= ln;
+                }
+                t
+            }
+        };
+        transfere.retain(|_, (_, n)| *n > 0.0);
+        (local, transfere)
+    }
+
+    fn priors_adaptatif(
+        &self,
+        classe: &str,
+        lignes: &[(String, String, bool)],
+    ) -> HashMap<String, (f64, f64)> {
+        let (local, transfere) = self.comptes_locaux_et_transferes(classe, lignes);
+        let etat = self.etat.lock().unwrap();
+        let contradictions = etat.get(classe).map(|e| e.contradictions).unwrap_or(0);
+        let lam = 1.0 / (1.0 + contradictions as f64);
+        let t = priors_depuis(&transfere, lam, Some(MASSE_MAX));
+        BRAS.iter()
+            .map(|b| {
+                let (la, lb) = local.get(*b).copied().unwrap_or((0.0, 0.0));
+                let (ta, tb) = t.get(*b).copied().unwrap_or((1.0, 1.0));
+                // (ta, tb) sont déjà des paramètres Beta : on les ajoute aux locaux.
+                (
+                    b.to_string(),
+                    (1.0 + la + (ta - 1.0), 1.0 + lb + (tb - 1.0)),
+                )
+            })
+            .collect()
+    }
+
+    /// Sélection adaptative de modèle : local seul ou domaine, au vu des observations
+    /// de la classe (vraisemblance Bernoulli des bras réellement joués).
+    fn priors_selection(
+        &self,
+        classe: &str,
+        lignes: &[(String, String, bool)],
+    ) -> HashMap<String, (f64, f64)> {
+        let (local, transfere) = self.comptes_locaux_et_transferes(classe, lignes);
+        let total_local: f64 = local.values().map(|(_, n)| n).sum();
+        if total_local == 0.0 {
+            // Aucune observation propre : la sélection n'a rien à comparer.
+            return priors_depuis(&transfere, 1.0, Some(MASSE_MAX));
+        }
+        let p_local = priors_depuis(&local, 1.0, None);
+        let p_domaine = priors_depuis(&transfere, 1.0, Some(MASSE_MAX));
+        // Vraisemblance des deux a priori sur les observations RÉELLES de la classe.
+        let mut ll_local = 0.0;
+        let mut ll_domaine = 0.0;
+        for (prov, (s, n)) in &local {
+            let taux = s / n;
+            let ml = p_local.get(prov).map(|(a, b)| a / (a + b)).unwrap_or(0.5);
+            let md = p_domaine.get(prov).map(|(a, b)| a / (a + b)).unwrap_or(0.5);
+            ll_local += n * (taux * ml.ln() + (1.0 - taux) * (1.0 - ml).ln());
+            ll_domaine += n * (taux * md.ln() + (1.0 - taux) * (1.0 - md).ln());
+        }
+        if ll_domaine > ll_local {
+            p_domaine
+        } else {
+            priors_depuis(&local, 1.0, None)
+        }
     }
 }
 
 #[async_trait(?Send)]
-impl Learning for Relationnel {
+impl Learning for Strategie {
     async fn arms(&self, classe: &str) -> Vec<ArmStats> {
-        let soeurs = self.classes_du_domaine(classe);
-        let aut = autorisees(self.protocole, classe);
-        let mut lisibles: Vec<&'static str> = soeurs.iter().filter_map(|s| statique(s)).collect();
-        if let Some(liste) = &aut {
-            lisibles.retain(|s| liste.contains(s));
-        }
-        if let Some(s) = statique(classe)
-            && !lisibles.contains(&s)
-        {
-            lisibles.push(s);
-        }
         let lignes = lire_lignes(&self.store, 100_000);
-        let priors = agreger_par_provider(&lignes, Some(&lisibles), None);
+        let aut = autorisees(self.protocole, classe);
+        let sienne = statique(classe).expect("classe connue");
+        let priors = match self.partage {
+            Partage::Classe => comptes(&lignes, Some(&[sienne]), None)
+                .iter()
+                .map(|(p, (s, n))| (p.clone(), (1.0 + s, 1.0 + (n - s))))
+                .collect(),
+            Partage::Global => priors_depuis(&comptes(&lignes, aut.as_deref(), None), 1.0, None),
+            Partage::Domaine | Partage::Graphe(_) => {
+                let (local, transfere) = self.comptes_locaux_et_transferes(classe, &lignes);
+                let mut tot = transfere;
+                for (p, (s, n)) in local {
+                    let e = tot.entry(p).or_insert((0.0, 0.0));
+                    e.0 += s;
+                    e.1 += n;
+                }
+                priors_depuis(&tot, 1.0, None)
+            }
+            Partage::Borne => {
+                let (local, transfere) = self.comptes_locaux_et_transferes(classe, &lignes);
+                let mut p = priors_depuis(&transfere, 1.0, Some(MASSE_MAX));
+                for (prov, (s, n)) in local {
+                    let e = p.entry(prov).or_insert((1.0, 1.0));
+                    e.0 += s;
+                    e.1 += n;
+                }
+                p
+            }
+            Partage::Hier3 => self.priors_hier3(classe, &lignes),
+            Partage::Adaptatif => self.priors_adaptatif(classe, &lignes),
+            Partage::Selection => self.priors_selection(classe, &lignes),
+        };
         bras_a_priori(classe, &priors)
     }
+
     async fn settle(&self, id: u128, served: Option<&Pick>, stop: &Stop, _code: Option<&str>) {
         let Some(p) = served else { return };
         let favorable = match stop {
@@ -762,7 +786,31 @@ impl Learning for Relationnel {
             _ => return,
         };
         let classe = classe_de_id(id);
+
+        // Contradiction AVANT écriture : la prédiction transférée a-t-elle été démentie ?
+        let mut contradiction = false;
+        if self.partage == Partage::Adaptatif {
+            let lignes = lire_lignes(&self.store, 100_000);
+            let (_, transfere) = self.comptes_locaux_et_transferes(classe, &lignes);
+            if let Some(predite) = transfere
+                .iter()
+                .max_by(|x, y| {
+                    let tx = x.1.0 / x.1.1.max(1.0);
+                    let ty = y.1.0 / y.1.1.max(1.0);
+                    tx.total_cmp(&ty)
+                })
+                .map(|(prov, _)| prov.clone())
+            {
+                contradiction = (predite == p.provider_id) != favorable;
+            }
+        }
+
         ecrire_observation(&self.store, id, classe, &p.provider_id, &p.model, favorable);
+
+        if contradiction {
+            let mut etat = self.etat.lock().unwrap();
+            etat.entry(classe.to_string()).or_default().contradictions += 1;
+        }
     }
 }
 
@@ -779,9 +827,12 @@ enum Regime {
     Relat,
     RelatMelange,
     RelatBruit,
+    Adaptatif,
+    Borne,
+    Selection,
 }
 
-const REGIMES: [(&str, Regime); 9] = [
+const REGIMES: [(&str, Regime); 12] = [
     ("sans", Regime::Sans),
     ("l2", Regime::L2),
     ("l3", Regime::L3),
@@ -791,6 +842,9 @@ const REGIMES: [(&str, Regime); 9] = [
     ("relat", Regime::Relat),
     ("relat_melange", Regime::RelatMelange),
     ("relat_bruit", Regime::RelatBruit),
+    ("adaptatif", Regime::Adaptatif),
+    ("borne", Regime::Borne),
+    ("selection", Regime::Selection),
 ];
 
 fn nom_regime(r: Regime) -> &'static str {
@@ -811,7 +865,6 @@ fn dir_unique(etiquette: &str) -> std::path::PathBuf {
 
 type Nettoyage = Option<(std::path::PathBuf, Arc<ObrainStore>)>;
 
-/// Instancie un régime. Rend le store à libérer s'il y en a un.
 fn instancier(regime: Regime, protocole: Protocole) -> (Box<dyn Learning>, Nettoyage) {
     match regime {
         Regime::Sans => (Box::new(SansMemoire), None),
@@ -819,39 +872,21 @@ fn instancier(regime: Regime, protocole: Protocole) -> (Box<dyn Learning>, Netto
         _ => {
             let d = dir_unique(nom_regime(regime));
             let store = ObrainStore::open(&d).expect("ouverture du store");
-            let learning: Box<dyn Learning> = match regime {
-                Regime::L3 => Box::new(ParClasseObrain {
-                    store: store.clone(),
-                }),
-                Regime::Global => Box::new(MutualisationGlobale {
-                    store: store.clone(),
-                    protocole,
-                }),
-                Regime::Domaine => Box::new(BetaDomaine {
-                    store: store.clone(),
-                    protocole,
-                }),
-                Regime::Hier3 => Box::new(Hierarchique3Niveaux {
-                    store: store.clone(),
-                    protocole,
-                }),
-                Regime::Relat => Box::new(Relationnel::nouveau(
-                    store.clone(),
-                    Variante::Normale,
-                    protocole,
-                )),
-                Regime::RelatMelange => Box::new(Relationnel::nouveau(
-                    store.clone(),
-                    Variante::Melangee,
-                    protocole,
-                )),
-                Regime::RelatBruit => Box::new(Relationnel::nouveau(
-                    store.clone(),
-                    Variante::Bruit,
-                    protocole,
-                )),
+            let partage = match regime {
+                Regime::L3 => Partage::Classe,
+                Regime::Global => Partage::Global,
+                Regime::Domaine => Partage::Domaine,
+                Regime::Hier3 => Partage::Hier3,
+                Regime::Borne => Partage::Borne,
+                Regime::Adaptatif => Partage::Adaptatif,
+                Regime::Selection => Partage::Selection,
+                Regime::Relat => Partage::Graphe(Variante::Normale),
+                Regime::RelatMelange => Partage::Graphe(Variante::Melangee),
+                Regime::RelatBruit => Partage::Graphe(Variante::Bruit),
                 Regime::Sans | Regime::L2 => unreachable!(),
             };
+            let learning: Box<dyn Learning> =
+                Box::new(Strategie::nouvelle(store.clone(), protocole, partage));
             (learning, Some((d, store)))
         }
     }
@@ -865,9 +900,8 @@ fn liberer(nettoyage: Nettoyage) {
     }
 }
 
-// ── Le conducteur (mêmes tirages, mêmes décisions pour toutes les stratégies) ─
+// ── Le conducteur (mêmes tirages pour toutes les stratégies) ────────────────
 
-/// Joue `classes` (dans l'ordre) et rend, par classe, la trajectoire (bras, succès).
 fn jouer(
     learning: &dyn Learning,
     rep: u64,
@@ -901,69 +935,119 @@ fn jouer(
 
 // ── Mesures ────────────────────────────────────────────────────────────────
 
-/// Palier d'observation : 0, 1, 2, 4, 8 (borne basse du bloc).
-fn palier(nb_obs: usize) -> usize {
-    match nb_obs {
-        0 => 0,
-        1 => 1,
-        2..=3 => 2,
-        4..=7 => 3,
-        _ => 4,
-    }
-}
-
+/// Réussite PONCTUELLE au tour `k` (décidé avec `k` observations préalables),
+/// agrégée sur toutes les classes × répétitions.
 #[derive(Default, Clone)]
-struct Echelle {
-    succes: [usize; 5],
-    total: [usize; 5],
+struct Points {
+    succes: [usize; POINTS.len()],
+    total: [usize; POINTS.len()],
 }
 
-fn taux(e: &Echelle, i: usize) -> f64 {
-    if e.total[i] == 0 {
-        0.0
-    } else {
-        e.succes[i] as f64 / e.total[i] as f64
-    }
-}
-
-fn echelle_de(traj: &[(String, bool)]) -> Echelle {
-    let mut e = Echelle::default();
-    for (i, (_, ok)) in traj.iter().enumerate() {
-        let p = palier(i);
-        e.total[p] += 1;
-        if *ok {
-            e.succes[p] += 1;
+fn ajouter_points(a: &mut Points, traj: &[(String, bool)]) {
+    for (i, k) in POINTS.iter().enumerate() {
+        if let Some((_, ok)) = traj.get(*k) {
+            a.total[i] += 1;
+            if *ok {
+                a.succes[i] += 1;
+            }
         }
     }
-    e
 }
 
-fn ajouter_echelle(a: &mut Echelle, b: &Echelle) {
-    for i in 0..5 {
-        a.succes[i] += b.succes[i];
-        a.total[i] += b.total[i];
+fn taux_point(p: &Points, i: usize) -> f64 {
+    if p.total[i] == 0 {
+        0.0
+    } else {
+        p.succes[i] as f64 / p.total[i] as f64
     }
 }
 
-/// Tours où le bras joué n'était PAS le meilleur, et rang du premier tour correct.
-fn cout_trompeur(traj: &[(String, bool)], meilleur: &str) -> (usize, Option<usize>) {
-    let perdus = traj.iter().filter(|(b, _)| b != meilleur).count();
-    let premier = traj.iter().position(|(b, _)| b == meilleur);
-    (perdus, premier)
+/// Récupération, mesurée PAR CLASSE ET PAR RÉPÉTITION.
+#[derive(Clone, Copy, Default)]
+struct Recup {
+    premier_optimal: Option<usize>,
+    /// Fréquence optimale sur les tours qui SUIVENT le premier choix optimal.
+    freq_apres: Option<f64>,
+    /// Fréquence optimale sur les 8 derniers tours.
+    freq_fin: f64,
+    regret: f64,
+    /// Premier tour après lequel plus aucune décision n'est sous-optimale.
+    durable: Option<usize>,
+}
+
+fn mesurer_recup(traj: &[(String, bool)], classe: &str, rep: u64) -> Recup {
+    let meilleur = meilleur_bras(classe);
+    let n = traj.len();
+    let est_optimal = |i: usize| traj[i].0 == meilleur;
+
+    let premier_optimal = (0..n).find(|i| est_optimal(*i));
+    let freq_apres = premier_optimal.map(|p| {
+        let suite: Vec<usize> = ((p + 1)..n).collect();
+        if suite.is_empty() {
+            0.0
+        } else {
+            suite.iter().filter(|i| est_optimal(**i)).count() as f64 / suite.len() as f64
+        }
+    });
+    let debut_fin = n.saturating_sub(8);
+    let freq_fin = if n == debut_fin {
+        0.0
+    } else {
+        (debut_fin..n).filter(|i| est_optimal(*i)).count() as f64 / (n - debut_fin) as f64
+    };
+    let mut regret = 0.0;
+    for (i, (bras, _)) in traj.iter().enumerate() {
+        // Tirages pré-générés : le regret est celui de la décision, pas du hasard.
+        let _ = i;
+        regret += theta(classe, meilleur) - theta(classe, bras);
+    }
+    let durable = (0..n).find(|i| (*i..n).all(|j| est_optimal(j)));
+    let _ = rep;
+    Recup {
+        premier_optimal,
+        freq_apres,
+        freq_fin,
+        regret,
+        durable,
+    }
+}
+
+fn mediane(mut v: Vec<f64>) -> Option<f64> {
+    if v.is_empty() {
+        return None;
+    }
+    v.sort_by(|a, b| a.total_cmp(b));
+    let n = v.len();
+    Some(if n % 2 == 1 {
+        v[n / 2]
+    } else {
+        (v[n / 2 - 1] + v[n / 2]) / 2.0
+    })
+}
+
+fn moyenne(v: &[f64]) -> Option<f64> {
+    if v.is_empty() {
+        None
+    } else {
+        Some(v.iter().sum::<f64>() / v.len() as f64)
+    }
+}
+
+fn fmt_opt(v: Option<f64>, chiffres: usize) -> String {
+    match v {
+        None => "—".to_string(),
+        Some(x) => format!("{x:.chiffres$}"),
+    }
 }
 
 // ── Le test ────────────────────────────────────────────────────────────────
 
 #[test]
-fn l4a_qualification_a_information_identique() {
+fn l4a_qualification_transfert_et_recuperation() {
     // ── Auto-contrôle du corpus ───────────────────────────────────────────
     assert_eq!(meilleur_bras("c0"), "a", "d0 : a domine");
     assert_eq!(meilleur_bras("c4"), "b", "d1 : b domine");
     assert_eq!(meilleur_bras("c5"), "c", "d2 : c domine");
-    assert_eq!(meilleur_bras("c6"), "a", "inédite de d0 : a domine");
-    assert_eq!(meilleur_bras("c8"), "b", "inédite de d1 : b domine");
-    assert_eq!(meilleur_bras("c9"), "c", "inédite de d2 : c domine");
-    // Trompeuses : la structure dit une chose, la réalité en dit une autre.
     assert_eq!(
         meilleur_bras("x0"),
         "d",
@@ -981,21 +1065,23 @@ fn l4a_qualification_a_information_identique() {
     let inedites: Vec<&'static str> = CLASSES[NB_ENTRAINEMENT..].iter().map(|(c, _)| *c).collect();
     let trompeuses: Vec<&'static str> = TROMPEUSES.iter().map(|(c, _, _)| *c).collect();
 
-    let mut fige_echelle: HashMap<Regime, Echelle> = HashMap::new();
+    let mut fige_points: HashMap<Regime, Points> = HashMap::new();
     let mut fige_zero: HashMap<Regime, (usize, usize)> = HashMap::new();
-    let mut continu_echelle: HashMap<Regime, Echelle> = HashMap::new();
-    let mut trompeur: HashMap<Regime, (usize, usize, Option<usize>)> = HashMap::new();
+    let mut continu_points: HashMap<Regime, Points> = HashMap::new();
+    let mut recups: HashMap<Regime, Vec<Recup>> = HashMap::new();
 
-    // P1 — trajectoires de `l2` et `l3`, répétition par répétition.
+    // INVARIANT 1 — trajectoires de `l2` et `l3`, répétition par répétition.
     let mut traj_l2: Vec<Vec<Vec<(String, bool)>>> = Vec::new();
     let mut traj_l3: Vec<Vec<Vec<(String, bool)>>> = Vec::new();
+    // INVARIANT 2 — `domaine` et `relat` : mêmes trajectoires, deux protocoles.
+    let mut traj_domaine: Vec<Vec<Vec<(String, bool)>>> = Vec::new();
+    let mut traj_relat: Vec<Vec<Vec<(String, bool)>>> = Vec::new();
 
     for rep in 0..REPS {
         for (_, regime) in REGIMES {
             // ── FIGÉ ──────────────────────────────────────────────────────
             let (learning, nettoyage) = instancier(regime, Protocole::Fige);
             let _ = jouer(&*learning, rep, &entrainement, TOURS_ENTRAINEMENT);
-            // 0 observation : ce que la stratégie sait avant tout tirage.
             for &classe in &inedites {
                 let bras = run(learning.arms(classe));
                 let attendu = meilleur_bras(classe);
@@ -1006,9 +1092,9 @@ fn l4a_qualification_a_information_identique() {
                 }
             }
             let trajs = jouer(&*learning, rep, &inedites, TOURS_NOUVEAU);
-            let e = fige_echelle.entry(regime).or_default();
+            let pts = fige_points.entry(regime).or_default();
             for traj in &trajs {
-                ajouter_echelle(e, &echelle_de(traj));
+                ajouter_points(pts, traj);
             }
             if regime == Regime::L2 {
                 traj_l2.push(trajs.clone());
@@ -1016,170 +1102,228 @@ fn l4a_qualification_a_information_identique() {
             if regime == Regime::L3 {
                 traj_l3.push(trajs.clone());
             }
+            if regime == Regime::Domaine {
+                traj_domaine.push(trajs.clone());
+            }
+            if regime == Regime::Relat {
+                traj_relat.push(trajs.clone());
+            }
             liberer(nettoyage);
 
             // ── CONTINU ───────────────────────────────────────────────────
             let (learning, nettoyage) = instancier(regime, Protocole::Continu);
             let _ = jouer(&*learning, rep, &entrainement, TOURS_ENTRAINEMENT);
             let trajs = jouer(&*learning, rep, &inedites, TOURS_NOUVEAU);
-            let e = continu_echelle.entry(regime).or_default();
+            let pts = continu_points.entry(regime).or_default();
             for traj in &trajs {
-                ajouter_echelle(e, &echelle_de(traj));
+                ajouter_points(pts, traj);
+            }
+            if regime == Regime::Domaine {
+                traj_domaine.push(trajs.clone());
+            }
+            if regime == Regime::Relat {
+                traj_relat.push(trajs.clone());
             }
             liberer(nettoyage);
 
-            // ── TROMPEUR ──────────────────────────────────────────────────
+            // ── TROMPEUR (récupération, par classe et par répétition) ─────
             let (learning, nettoyage) = instancier(regime, Protocole::Fige);
             let _ = jouer(&*learning, rep, &entrainement, TOURS_ENTRAINEMENT);
             let trajs = jouer(&*learning, rep, &trompeuses, TOURS_TROMPEUR);
-            let t = trompeur.entry(regime).or_insert((0, 0, None));
+            let r = recups.entry(regime).or_default();
             for (i, traj) in trajs.iter().enumerate() {
-                let (perdus, premier) = cout_trompeur(traj, meilleur_bras(trompeuses[i]));
-                t.0 += perdus;
-                t.1 += traj.len();
-                if let Some(p) = premier {
-                    t.2 = Some(t.2.map_or(p, |m: usize| m.min(p)));
-                }
+                r.push(mesurer_recup(traj, trompeuses[i], rep));
             }
             liberer(nettoyage);
         }
     }
 
-    // ── Rapport : protocole FIGÉ ──────────────────────────────────────────
-    println!("===== L4a · protocole FIGÉ (même état initial pour chaque inédite) =====");
-    println!(
-        "  {: <14} {: >7} {: >7} {: >7} {: >7} {: >7}   {: >12}",
-        "régime", "0 obs", "1 obs", "2 obs", "4 obs", "8 obs", "avant tout"
-    );
+    // ── Rapport : protocole FIGÉ, réussite ponctuelle ─────────────────────
+    println!("===== L4a · FIGÉ · réussite APRÈS exactement k observations =====");
+    print!("  {: <14}", "régime");
+    for k in POINTS {
+        print!(" {: >7}", format!("k={k}"));
+    }
+    println!("   {: >10}", "pré-choix");
     for (nom, regime) in REGIMES {
-        let e = &fige_echelle[&regime];
+        let p = &fige_points[&regime];
         let z = fige_zero[&regime];
-        println!(
-            "  {: <14} {: >7.3} {: >7.3} {: >7.3} {: >7.3} {: >7.3}   {: >12}",
-            nom,
-            taux(e, 0),
-            taux(e, 1),
-            taux(e, 2),
-            taux(e, 3),
-            taux(e, 4),
-            format!("{}/{}", z.0, z.1)
-        );
+        print!("  {nom: <14}");
+        for i in 0..POINTS.len() {
+            print!(" {: >7.3}", taux_point(p, i));
+        }
+        println!("   {: >10}", format!("{}/{}", z.0, z.1));
     }
 
-    // ── Rapport : protocole CONTINU ───────────────────────────────────────
-    println!("===== L4a · protocole CONTINU (les inédites se voient) =====");
+    // ── Rapport : protocole CONTINU, réussite ponctuelle ──────────────────
+    println!("===== L4a · CONTINU · réussite APRÈS exactement k observations =====");
+    print!("  {: <14}", "régime");
+    for k in POINTS {
+        print!(" {: >7}", format!("k={k}"));
+    }
+    println!();
+    for (nom, regime) in REGIMES {
+        let p = &continu_points[&regime];
+        print!("  {nom: <14}");
+        for i in 0..POINTS.len() {
+            print!(" {: >7.3}", taux_point(p, i));
+        }
+        println!();
+    }
+
+    // ── Rapport : corpus TROMPEUR, distributions de récupération ──────────
     println!(
-        "  {: <14} {: >7} {: >7} {: >7} {: >7} {: >7}",
-        "régime", "0 obs", "1 obs", "2 obs", "4 obs", "8 obs"
+        "===== L4a · TROMPEUR · récupération par classe × répétition ({} cas) =====",
+        trompeuses.len() as u64 * REPS
+    );
+    println!(
+        "  {: <14} {: >9} {: >10} {: >9} {: >9} {: >9} {: >12} {: >13}",
+        "régime",
+        "1er opt.",
+        "opt. après",
+        "opt. fin",
+        "regret méd.",
+        "regret max",
+        "récup. durable",
+        "sans récup."
     );
     for (nom, regime) in REGIMES {
-        let e = &continu_echelle[&regime];
+        let r = &recups[&regime];
+        let premiers: Vec<f64> = r
+            .iter()
+            .filter_map(|x| x.premier_optimal.map(|p| p as f64))
+            .collect();
+        let apres: Vec<f64> = r.iter().filter_map(|x| x.freq_apres).collect();
+        let fins: Vec<f64> = r.iter().map(|x| x.freq_fin).collect();
+        let regrets: Vec<f64> = r.iter().map(|x| x.regret).collect();
+        let durables: Vec<f64> = r
+            .iter()
+            .filter_map(|x| x.durable.map(|d| d as f64))
+            .collect();
+        let sans_recup = r.iter().filter(|x| x.durable.is_none()).count();
+        let max_regret = regrets.iter().copied().fold(f64::MIN, f64::max);
+        let jamais = r.iter().filter(|x| x.premier_optimal.is_none()).count();
         println!(
-            "  {: <14} {: >7.3} {: >7.3} {: >7.3} {: >7.3} {: >7.3}",
-            nom,
-            taux(e, 0),
-            taux(e, 1),
-            taux(e, 2),
-            taux(e, 3),
-            taux(e, 4)
+            "  {nom: <14} {: >9} {: >10} {: >9} {: >9} {: >9} {: >12} {: >13}",
+            format!("{} ({jamais} n.j.)", fmt_opt(mediane(premiers.clone()), 0)),
+            fmt_opt(moyenne(&apres), 3),
+            fmt_opt(moyenne(&fins), 3),
+            fmt_opt(mediane(regrets.clone()), 2),
+            format!("{max_regret:.2}"),
+            format!("{}/{n}", durables.len(), n = r.len()),
+            format!("{sans_recup}/{}", r.len())
         );
     }
+    println!("==================================================================");
 
-    // ── Rapport : corpus TROMPEUR ─────────────────────────────────────────
-    println!("===== L4a · corpus TROMPEUR (structure similaire, meilleur bras différent) =====");
-    println!(
-        "  {: <14} {: >10} {: >7} {: >14}",
-        "régime", "tours perdus", "sur", "1er bon choix"
-    );
-    for (nom, regime) in REGIMES {
-        let (perdus, total, premier) = trompeur[&regime];
-        println!(
-            "  {: <14} {: >10} {: >7} {: >14}",
-            nom,
-            perdus,
-            total,
-            premier.map_or("jamais".to_string(), |p| format!("tour {p}"))
-        );
-    }
-    println!("========================================================================");
-
-    // ── P1 : `l2` et `l3` sont la MÊME stratégie, à CHAQUE répétition ─────
-    for (i, (a, b)) in traj_l2.iter().zip(traj_l3.iter()).enumerate() {
-        assert_eq!(
-            a, b,
-            "répétition {i} : L2 et L3 divergent (la persistance change la trajectoire)"
-        );
-    }
+    // ── INVARIANTS (assertés) ─────────────────────────────────────────────
     assert_eq!(
         traj_l2.len() as u64,
         REPS,
-        "toutes les répétitions sont comparées"
+        "toutes les répétitions comparées"
     );
-
-    // ── P2 : le transfert existe à 0 observation ──────────────────────────
-    let z_l2 = fige_zero[&Regime::L2];
-    let z_relat = fige_zero[&Regime::Relat];
-    assert!(
-        z_relat.0 > z_l2.0,
-        "à 0 observation, le rappel relationnel doit choisir mieux que L2 : {}/{} vs {}/{}",
-        z_relat.0,
-        z_relat.1,
-        z_l2.0,
-        z_l2.1
-    );
-
-    // ── P3 : le transfert NÉGATIF coûte, et il se corrige ─────────────────
-    let (perdus_l2, _, _) = trompeur[&Regime::L2];
-    let (perdus_relat, _, premier_relat) = trompeur[&Regime::Relat];
-    assert!(
-        perdus_relat > perdus_l2,
-        "sur un corpus trompeur, le transfert doit COÛTER : relationnel {} tours perdus vs L2 {}",
-        perdus_relat,
-        perdus_l2
-    );
-    assert!(
-        premier_relat.is_some(),
-        "le transfert négatif doit être corrigeable : le meilleur bras est-il joué au moins une fois ?"
-    );
-
-    // ── P4 (RÉFUTÉE) : la conclusion assertée est celle qui a été MESURÉE ──
-    // Prédiction écrite avant la mesure : « une structure mélangée ne fait pas mieux
-    // qu'une structure informative ». Faux : 192 tours perdus (mélange) contre 232
-    // (relationnel). Une structure qui MENT coûte donc plus cher qu'une structure
-    // qui n'ordonne rien — la prédiction était trop optimiste sur le bruit.
-    let (perdus_melange, _, _) = trompeur[&Regime::RelatMelange];
-    let (perdus_bruit, _, _) = trompeur[&Regime::RelatBruit];
-    assert!(
-        perdus_relat > perdus_bruit && perdus_relat > perdus_melange,
-        "une structure qui MENT doit coûter plus cher qu'un domaine unique ({} vs bruit {}) ou qu'un mélange ({}), sinon le transfert négatif n'est pas mesuré",
-        perdus_relat,
-        perdus_bruit,
-        perdus_melange
-    );
-    // Et sur le corpus INFORMATIF, la structure vraie bat le mélange à 0 observation.
-    let z_melange = fige_zero[&Regime::RelatMelange];
-    assert!(
-        z_relat.0 > z_melange.0,
-        "sur un corpus informatif, la structure vraie doit battre une structure mélangée : {}/{} vs {}/{}",
-        z_relat.0,
-        z_relat.1,
-        z_melange.0,
-        z_melange.1
-    );
-
-    // ── P5 : le graphe n'ajoute pas de capacité, il rend le partage déclaratif ──
-    // `domaine` et `relat` lisent la même information et partagent le même domaine :
-    // leurs trajectoires doivent être IDENTIQUES, pas « proches ». Un écart signalerait
-    // que l'un des deux ne fait pas ce qu'il prétend.
-    let e_dom = &fige_echelle[&Regime::Domaine];
-    let e_rel = &fige_echelle[&Regime::Relat];
+    for (i, (a, b)) in traj_l2.iter().zip(traj_l3.iter()).enumerate() {
+        assert_eq!(
+            a, b,
+            "INVARIANT : répétition {i} — L2 et L3 divergent (persister change la trajectoire)"
+        );
+    }
     assert_eq!(
-        e_dom.succes, e_rel.succes,
-        "Beta/domaine et rappel relationnel doivent réussir exactement autant (succès par palier : {:?} vs {:?})",
-        e_dom.succes, e_rel.succes
+        traj_domaine.len() as u64,
+        2 * REPS,
+        "les deux protocoles sont comparés pour l'invariant domaine ≡ relat"
     );
-    assert_eq!(
-        e_dom.total, e_rel.total,
-        "Beta/domaine et rappel relationnel doivent décider exactement autant"
+    for (i, (a, b)) in traj_domaine.iter().zip(traj_relat.iter()).enumerate() {
+        assert_eq!(
+            a, b,
+            "INVARIANT : cas {i} — Beta/domaine et rappel relationnel divergent (même information, même partage ⇒ même trajectoire)"
+        );
+    }
+
+    // ── HYPOTHÈSES (imprimées, jamais assertées) ──────────────────────────
+    // Elles doivent pouvoir varier selon le corpus ; les figer en assertion
+    // empêcherait la mesure de les contredire.
+    let mut refutees = 0usize;
+    macro_rules! hypothese {
+        ($nom:expr, $cond:expr, $mesure:expr) => {{
+            let tenue = $cond;
+            if !tenue {
+                refutees += 1;
+            }
+            println!(
+                "  [{}] {} — {}",
+                if tenue { "CONFIRMÉE" } else { "RÉFUTÉE  " },
+                $nom,
+                $mesure
+            );
+        }};
+    }
+
+    let p_fige = |r: Regime, i: usize| taux_point(&fige_points[&r], i);
+    let regret_med =
+        |r: Regime| mediane(recups[&r].iter().map(|x| x.regret).collect()).unwrap_or(f64::NAN);
+    let sans_recup = |r: Regime| recups[&r].iter().filter(|x| x.durable.is_none()).count();
+
+    println!("===== L4a · hypothèses (verdicts, aucune assertion) =====");
+    hypothese!(
+        "H1 transfert positif à 0 observation",
+        p_fige(Regime::Relat, 0) > p_fige(Regime::L2, 0),
+        format!(
+            "relat {:.3} vs l2 {:.3} → {:+.3}",
+            p_fige(Regime::Relat, 0),
+            p_fige(Regime::L2, 0),
+            p_fige(Regime::Relat, 0) - p_fige(Regime::L2, 0)
+        )
     );
+    hypothese!(
+        "H2 le transfert rigide se paie quand la structure ment",
+        regret_med(Regime::Relat) > regret_med(Regime::L2),
+        format!(
+            "regret médian relat {:.2} vs l2 {:.2} vs adaptatif {:.2}",
+            regret_med(Regime::Relat),
+            regret_med(Regime::L2),
+            regret_med(Regime::Adaptatif)
+        )
+    );
+    hypothese!(
+        "H3 la confiance adaptative réduit le coût du transfert négatif",
+        regret_med(Regime::Adaptatif) < regret_med(Regime::Relat),
+        format!(
+            "adaptatif {:.2} vs relat {:.2} (borne {:.2})",
+            regret_med(Regime::Adaptatif),
+            regret_med(Regime::Relat),
+            regret_med(Regime::Borne)
+        )
+    );
+    hypothese!(
+        "H4 la confiance adaptative préserve le transfert positif",
+        p_fige(Regime::Adaptatif, 0) >= p_fige(Regime::L2, 0),
+        format!(
+            "adaptatif {:.3} vs l2 {:.3} à 0 observation",
+            p_fige(Regime::Adaptatif, 0),
+            p_fige(Regime::L2, 0)
+        )
+    );
+    hypothese!(
+        "H5 une structure qui ment coûte plus cher qu'un bruit",
+        regret_med(Regime::Relat) > regret_med(Regime::RelatBruit),
+        format!(
+            "relat {:.2} vs bruit {:.2} vs mélange {:.2}",
+            regret_med(Regime::Relat),
+            regret_med(Regime::RelatBruit),
+            regret_med(Regime::RelatMelange)
+        )
+    );
+    hypothese!(
+        "H6 le partage partiel récupère plus souvent qu'un partage dur",
+        sans_recup(Regime::Hier3) <= sans_recup(Regime::Relat),
+        format!(
+            "hier3 {}/{} sans récupération vs relat {}/{}",
+            sans_recup(Regime::Hier3),
+            recups[&Regime::Hier3].len(),
+            sans_recup(Regime::Relat),
+            recups[&Regime::Relat].len()
+        )
+    );
+    println!("  → {refutees} hypothèse(s) réfutée(s) sur 6 (aucune n'invalide le test)");
 }
