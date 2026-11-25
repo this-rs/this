@@ -498,7 +498,7 @@ pub struct PrincipalView<'a> {
 ///
 /// Un rôle qui n'apparaît que sous un `Not` y figure aussi : il est nommé par le service,
 /// même si l'accorder RETIRE un droit.
-pub fn roles_de(perm: &PermDesc) -> BTreeSet<String> {
+pub fn roles_of(perm: &PermDesc) -> BTreeSet<String> {
     let mut out = BTreeSet::new();
     for expr in perm.ops.values() {
         expr.walk(&mut |e| {
@@ -512,7 +512,7 @@ pub fn roles_de(perm: &PermDesc) -> BTreeSet<String> {
 
 /// L'appelant, vu par le maillage : sans identité de service, sans admin, sans résolveur.
 #[derive(Debug, Clone, Copy)]
-pub struct Sujet<'a> {
+pub struct Subject<'a> {
     /// L'appelant est le propriétaire de la ressource (pour le maillage : un appareil du
     /// lien « moi »).
     pub proprietaire: bool,
@@ -526,13 +526,13 @@ pub struct Sujet<'a> {
 }
 
 /// Environnement du maillage pour [`crate::engine::policy::evaluate`] : les permissions
-/// viennent du sujet, et AUCUN résolveur n'existe.
+/// viennent du subject, et AUCUN résolveur n'existe.
 struct EnvMaillage<'a>(&'a BTreeSet<String>);
 
 impl crate::engine::policy::PolicyEnv for EnvMaillage<'_> {
     /// Le maillage n'a pas de résolveur : `resolver:x` est INÉVALUABLE, donc refusé à la
     /// décision, et `not:resolver:x` l'est aussi (la négation d'un inévaluable reste
-    /// inévaluable). Un hôte qui a des résolveurs ne passe pas par [`autorise`] : il appelle
+    /// inévaluable). Un hôte qui a des résolveurs ne passe pas par [`allows`] : il appelle
     /// [`crate::engine::policy::evaluate`] avec son propre [`crate::engine::policy::PolicyEnv`].
     fn resolver(&self, _: &str) -> Option<bool> {
         None
@@ -562,17 +562,17 @@ fn and_vide_en_deny(expr: &PolicyExpr) -> PolicyExpr {
     }
 }
 
-/// Le `sujet` peut-il ce que garde `expr` ? Décision pure, à deux valeurs : seul un `true`
+/// Le `subject` peut-il ce que garde `expr` ? Décision pure, à deux valeurs : seul un `true`
 /// évaluable accorde. S'appuie sur [`crate::engine::policy::evaluate`] (le moteur commun,
 /// trois valeurs), avec un principal sans service ni admin et un environnement sans résolveur.
 ///
 /// | variante          | résultat                                                        |
 /// |-------------------|-----------------------------------------------------------------|
 /// | `Public`          | vrai                                                            |
-/// | `Authenticated`   | `sujet.authentifie`                                             |
-/// | `Owner`           | `sujet.proprietaire` (n'implique AUCUN rôle)                    |
-/// | `HasRole(rs)`     | un des `rs` est dans `sujet.roles` ; liste vide : faux          |
-/// | `Perm(p)`         | `p` est dans `sujet.perms` (nom exact)                          |
+/// | `Authenticated`   | `subject.authentifie`                                             |
+/// | `Owner`           | `subject.proprietaire` (n'implique AUCUN rôle)                    |
+/// | `HasRole(rs)`     | un des `rs` est dans `subject.roles` ; liste vide : faux          |
+/// | `Perm(p)`         | `p` est dans `subject.perms` (nom exact)                          |
 /// | `Deny`            | faux                                                            |
 /// | `ServiceOnly`     | faux : le maillage n'a pas de service interne                   |
 /// | `AdminOnly`       | faux : le maillage n'a pas d'admin                              |
@@ -590,17 +590,17 @@ fn and_vide_en_deny(expr: &PolicyExpr) -> PolicyExpr {
 /// `not:service_only` accordent TOUT, à tout appelant, même anonyme. Seul `not:resolver:x`
 /// reste refusé, parce qu'un résolveur absent est inévaluable et non faux.
 /// [`PolicyExpr::may_admit_anonymous`] repère ces politiques avant publication.
-pub fn autorise(expr: &PolicyExpr, sujet: &Sujet) -> bool {
-    let roles: Vec<String> = sujet.roles.iter().cloned().collect();
+pub fn allows(expr: &PolicyExpr, subject: &Subject) -> bool {
+    let roles: Vec<String> = subject.roles.iter().cloned().collect();
     let who = PrincipalView {
-        authenticated: sujet.authentifie,
+        authenticated: subject.authentifie,
         user_id: None,
         roles: &roles,
         admin: false,
         service: false,
-        owner: Some(sujet.proprietaire),
+        owner: Some(subject.proprietaire),
     };
-    let env = EnvMaillage(sujet.perms);
+    let env = EnvMaillage(subject.perms);
     if a_un_and_vide(expr) {
         crate::engine::policy::is_allowed(&and_vide_en_deny(expr), &who, &env)
     } else {
@@ -608,11 +608,11 @@ pub fn autorise(expr: &PolicyExpr, sujet: &Sujet) -> bool {
     }
 }
 
-/// [`autorise`] sur la politique DÉCLARÉE de `op`. Une opération absente de `perm` est
+/// [`allows`] sur la politique DÉCLARÉE de `op`. Une opération absente de `perm` est
 /// refusée (refus par défaut) : on n'applique PAS [`PermDesc::default_policy`], qui donnerait
 /// `authenticated` aux opérations standard.
-pub fn autorise_op(perm: &PermDesc, op: &Operation, sujet: &Sujet) -> bool {
-    perm.policy(op).is_some_and(|e| autorise(e, sujet))
+pub fn allows_op(perm: &PermDesc, op: &Operation, subject: &Subject) -> bool {
+    perm.policy(op).is_some_and(|e| allows(e, subject))
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1423,7 +1423,7 @@ mod tests {
     }
 
     #[test]
-    fn roles_de_descend_dans_and_or_not() {
+    fn roles_of_descend_dans_and_or_not() {
         use PolicyExpr::*;
         let mut perm = PermDesc::default();
         perm.ops.insert(
@@ -1433,76 +1433,76 @@ mod tests {
                 Or(vec![role("b"), Not(Box::new(role("c")))]),
             ]),
         );
-        assert_eq!(roles_de(&perm), ens(&["a", "b", "c"]));
+        assert_eq!(roles_of(&perm), ens(&["a", "b", "c"]));
 
         // Union sur toutes les opérations, sans doublon ; une liste `role:x|y` compte pour deux.
         perm.ops
             .insert(Operation::Delete, PolicyExpr::parse("role:a|d").unwrap());
         perm.ops.insert(Operation::List, Public);
-        assert_eq!(roles_de(&perm), ens(&["a", "b", "c", "d"]));
-        assert!(roles_de(&PermDesc::default()).is_empty());
+        assert_eq!(roles_of(&perm), ens(&["a", "b", "c", "d"]));
+        assert!(roles_of(&PermDesc::default()).is_empty());
     }
 
     #[test]
-    fn autorise_chaque_variante() {
+    fn allows_chaque_variante() {
         use PolicyExpr::*;
         let vide = BTreeSet::new();
         let roles = ens(&["lecteur"]);
         let perms = ens(&["liste.exporter"]);
-        let anonyme = Sujet {
+        let anonyme = Subject {
             proprietaire: false,
             authentifie: false,
             roles: &vide,
             perms: &vide,
         };
-        let tout = Sujet {
+        let tout = Subject {
             proprietaire: true,
             authentifie: true,
             roles: &roles,
             perms: &perms,
         };
 
-        assert!(autorise(&Public, &anonyme));
+        assert!(allows(&Public, &anonyme));
 
-        assert!(!autorise(&Authenticated, &anonyme));
-        assert!(autorise(&Authenticated, &tout));
+        assert!(!allows(&Authenticated, &anonyme));
+        assert!(allows(&Authenticated, &tout));
 
-        assert!(!autorise(&Owner, &anonyme));
-        assert!(autorise(&Owner, &tout));
+        assert!(!allows(&Owner, &anonyme));
+        assert!(allows(&Owner, &tout));
 
-        assert!(autorise(&role("lecteur"), &tout));
-        assert!(!autorise(&role("membre"), &tout));
-        assert!(autorise(
+        assert!(allows(&role("lecteur"), &tout));
+        assert!(!allows(&role("membre"), &tout));
+        assert!(allows(
             &HasRole(vec!["membre".into(), "lecteur".into()]),
             &tout
         ));
-        assert!(!autorise(&HasRole(vec![]), &tout), "HasRole vide : faux");
+        assert!(!allows(&HasRole(vec![]), &tout), "HasRole vide : faux");
 
-        assert!(autorise(&Perm("liste.exporter".into()), &tout));
-        assert!(!autorise(&Perm("liste.vider".into()), &tout));
-        assert!(!autorise(&Perm("liste.exporter".into()), &anonyme));
+        assert!(allows(&Perm("liste.exporter".into()), &tout));
+        assert!(!allows(&Perm("liste.vider".into()), &tout));
+        assert!(!allows(&Perm("liste.exporter".into()), &anonyme));
 
-        // Tout ce que le maillage ne connaît pas est refusé, même au sujet le plus fort.
+        // Tout ce que le maillage ne connaît pas est refusé, même au subject le plus fort.
         for e in [Deny, ServiceOnly, AdminOnly, Resolver("x".into())] {
-            assert!(!autorise(&e, &tout), "{e}");
+            assert!(!allows(&e, &tout), "{e}");
         }
 
-        assert!(autorise(&And(vec![Authenticated, Owner]), &tout));
-        assert!(!autorise(&And(vec![Authenticated, Deny]), &tout));
-        assert!(!autorise(&And(vec![]), &tout), "un And vide n'accorde rien");
+        assert!(allows(&And(vec![Authenticated, Owner]), &tout));
+        assert!(!allows(&And(vec![Authenticated, Deny]), &tout));
+        assert!(!allows(&And(vec![]), &tout), "un And vide n'accorde rien");
         assert!(
-            autorise(&Or(vec![Public, And(vec![])]), &anonyme),
+            allows(&Or(vec![Public, And(vec![])]), &anonyme),
             "un And vide imbriqué ne casse pas le reste"
         );
-        assert!(!autorise(&Or(vec![Owner, And(vec![])]), &anonyme));
-        assert!(autorise(&Not(Box::new(And(vec![]))), &anonyme));
+        assert!(!allows(&Or(vec![Owner, And(vec![])]), &anonyme));
+        assert!(allows(&Not(Box::new(And(vec![]))), &anonyme));
 
-        assert!(autorise(&Or(vec![Deny, Owner]), &tout));
-        assert!(!autorise(&Or(vec![Deny, Owner]), &anonyme));
-        assert!(!autorise(&Or(vec![]), &tout), "Or vide : faux");
+        assert!(allows(&Or(vec![Deny, Owner]), &tout));
+        assert!(!allows(&Or(vec![Deny, Owner]), &anonyme));
+        assert!(!allows(&Or(vec![]), &tout), "Or vide : faux");
 
-        assert!(autorise(&Not(Box::new(Owner)), &anonyme));
-        assert!(!autorise(&Not(Box::new(Owner)), &tout));
+        assert!(allows(&Not(Box::new(Owner)), &anonyme));
+        assert!(!allows(&Not(Box::new(Owner)), &tout));
     }
 
     /// PIÈGE documenté : `Not` est une vraie négation. `not:deny` (et `not:admin_only`,
@@ -1511,7 +1511,7 @@ mod tests {
     #[test]
     fn not_deny_accorde_tout_meme_a_un_anonyme() {
         let vide = BTreeSet::new();
-        let anonyme = Sujet {
+        let anonyme = Subject {
             proprietaire: false,
             authentifie: false,
             roles: &vide,
@@ -1519,22 +1519,22 @@ mod tests {
         };
         for s in ["not:deny", "not:admin_only", "not:service_only"] {
             let e = PolicyExpr::parse(s).unwrap();
-            assert!(autorise(&e, &anonyme), "{s}");
+            assert!(allows(&e, &anonyme), "{s}");
             assert!(
                 e.may_admit_anonymous(),
                 "{s} est repérable avant publication"
             );
         }
-        assert!(!autorise(
+        assert!(!allows(
             &PolicyExpr::parse("not:resolver:x").unwrap(),
             &anonyme
         ));
     }
 
     #[test]
-    fn autorise_op_refuse_une_operation_absente() {
+    fn allows_op_refuse_une_operation_absente() {
         let vide = BTreeSet::new();
-        let tout = Sujet {
+        let tout = Subject {
             proprietaire: true,
             authentifie: true,
             roles: &vide,
@@ -1542,10 +1542,10 @@ mod tests {
         };
         let mut perm = PermDesc::default();
         perm.ops.insert(Operation::Get, PolicyExpr::Public);
-        assert!(autorise_op(&perm, &Operation::Get, &tout));
+        assert!(allows_op(&perm, &Operation::Get, &tout));
         // Ni `authenticated` (défaut des opérations standard), ni rien : refus.
-        assert!(!autorise_op(&perm, &Operation::Delete, &tout));
-        assert!(!autorise_op(
+        assert!(!allows_op(&perm, &Operation::Delete, &tout));
+        assert!(!allows_op(
             &perm,
             &Operation::Custom("liste.lire".into()),
             &tout
@@ -1583,25 +1583,25 @@ mod tests {
             perm.ops[&op("liste.lire")],
             PolicyExpr::HasRole(vec!["lecteur".into(), "membre".into()])
         );
-        assert_eq!(roles_de(&perm), ens(&["lecteur", "membre"]));
+        assert_eq!(roles_of(&perm), ens(&["lecteur", "membre"]));
 
         let vide = BTreeSet::new();
         let lecteurs = ens(&["lecteur"]);
         let membres = ens(&["membre"]);
-        let sujet = |proprietaire: bool, roles| Sujet {
+        let subject = |proprietaire: bool, roles| Subject {
             proprietaire,
             authentifie: true,
             roles,
             perms: &vide,
         };
-        let peut = |s: &Sujet, o: &str| autorise_op(&perm, &op(o), s);
+        let peut = |s: &Subject, o: &str| allows_op(&perm, &op(o), s);
 
-        let lecteur = sujet(false, &lecteurs);
+        let lecteur = subject(false, &lecteurs);
         assert!(peut(&lecteur, "liste.lire"));
         assert!(!peut(&lecteur, "liste.ecrire"));
         assert!(!peut(&lecteur, "liste.vider"));
 
-        let membre = sujet(false, &membres);
+        let membre = subject(false, &membres);
         assert!(peut(&membre, "liste.lire"));
         assert!(peut(&membre, "liste.ecrire"));
         assert!(!peut(&membre, "liste.vider"));
@@ -1609,11 +1609,11 @@ mod tests {
         // `owner` n'implique AUCUN rôle : le propriétaire sans rôle vide la liste mais ne la
         // lit pas. Un service qui veut que son propriétaire lise écrit
         // `any(owner, role:lecteur|membre)`.
-        let proprietaire = sujet(true, &vide);
+        let proprietaire = subject(true, &vide);
         assert!(peut(&proprietaire, "liste.vider"));
         assert!(!peut(&proprietaire, "liste.lire"));
         assert!(!peut(&proprietaire, "liste.ecrire"));
         let lire_aussi = PolicyExpr::parse("any(owner, role:lecteur|membre)").unwrap();
-        assert!(autorise(&lire_aussi, &proprietaire));
+        assert!(allows(&lire_aussi, &proprietaire));
     }
 }

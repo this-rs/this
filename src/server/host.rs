@@ -833,7 +833,7 @@ impl HostRecorder {
     /// Ce constructeur ne vérifie RIEN : le masque d'un enregistreur est celui du journal
     /// qu'on lui donne (voir [`crate::storage::HarnessGraph::with_masque`]). Un journal
     /// construit par [`crate::storage::HarnessGraph::new`] écrit donc les textes d'un run
-    /// tels quels — [`HostRecorder::masque_installe`] permet de le constater au lieu de le
+    /// tels quels — [`HostRecorder::is_mask_installed`] permet de le constater au lieu de le
     /// supposer (#287, case f). Le chemin de l'hôte, [`ServerHost::harness_recorder`], passe
     /// par [`ServerHost::harness_journal`] et masque toujours.
     pub fn new(journal: crate::storage::HarnessGraph) -> Self {
@@ -841,8 +841,8 @@ impl HostRecorder {
     }
 
     /// Le masque est-il installé sur le journal de cet enregistreur ?
-    pub fn masque_installe(&self) -> bool {
-        self.0.masque_installe()
+    pub fn is_mask_installed(&self) -> bool {
+        self.0.is_mask_installed()
     }
 }
 

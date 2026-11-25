@@ -5,11 +5,11 @@ use this_module_sdk::{
     Transform, Value, json,
 };
 
-pub struct Taches;
+pub struct Tasks;
 
 const ENTITE: &str = "tache";
 
-impl Module for Taches {
+impl Module for Tasks {
     fn manifest() -> Manifest {
         Manifest::new("taches", "0.1.0")
             .entity(
@@ -29,7 +29,7 @@ impl Module for Taches {
         match req.op {
             Op::Create => creer(&req),
             Op::Update => modifier(&req),
-            Op::Get => lire(&req),
+            Op::Get => read(&req),
             Op::List => lister(&req),
             Op::Delete => supprimer(&req),
             Op::Call => match req.name.as_deref() {
@@ -108,7 +108,7 @@ fn modifier(req: &Request) -> Response {
     Response::ok(ligne.clone()).effect(Effect::put(ENTITE, ligne))
 }
 
-fn lire(req: &Request) -> Response {
+fn read(req: &Request) -> Response {
     let id = req.input.get("id").and_then(Value::as_str).unwrap_or("");
     match req.row(id) {
         Some(l) => Response::ok(l.clone()),
@@ -164,7 +164,7 @@ fn terminer(req: &Request) -> Response {
     Response::ok(ligne.clone()).effect(Effect::put(ENTITE, ligne))
 }
 
-this_module_sdk::export!(Taches);
+this_module_sdk::export!(Tasks);
 
 #[cfg(test)]
 mod tests {
@@ -173,12 +173,12 @@ mod tests {
     use this_module_sdk::rt::run;
 
     fn appel(op: &str, req: Value) -> Value {
-        serde_json::to_value(run::<Taches>(op.as_bytes(), req.to_string().as_bytes())).unwrap()
+        serde_json::to_value(run::<Tasks>(op.as_bytes(), req.to_string().as_bytes())).unwrap()
     }
 
     #[test]
     fn le_manifeste_passe_check_stored() {
-        let json = serde_json::to_string(&Taches::manifest()).unwrap();
+        let json = serde_json::to_string(&Tasks::manifest()).unwrap();
         let d = ModuleDescriptor::from_json(&json).expect("relu par le vrai descripteur");
         d.check(
             &CustomRegistry::default(),

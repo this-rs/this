@@ -20,13 +20,13 @@ use serde::{Deserialize, Serialize};
 use crate::module::ModuleDescriptor;
 use crate::perm::Operation;
 
-/// Un sujet écoutable, dérivé d'une entité déclarée.
+/// Un subject écoutable, dérivé d'une entité déclarée.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EventTopic {
     /// L'entité déclarée (`order`).
     pub entity: String,
-    /// Le nom canonique du sujet : `<module>.<entité>`.
+    /// Le nom canonique du subject : `<module>.<entité>`.
     pub topic: String,
     /// Les opérations qui produisent un événement.
     ///
@@ -55,7 +55,7 @@ impl ModuleDescriptor {
             .collect()
     }
 
-    /// Le sujet d'une entité, s'il est déclaré.
+    /// Le subject d'une entité, s'il est déclaré.
     pub fn topic_of(&self, entity: &str) -> Option<String> {
         self.entities
             .iter()

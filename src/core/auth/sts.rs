@@ -101,7 +101,7 @@ pub struct IdentiteVerifiee {
 
 /// Contrat de vérification d'identités déléguée (chantier STS-PERSISTANT).
 ///
-/// Quand un annuaire est branché sur le STS ([`StsService::set_annuaire`]),
+/// Quand un annuaire est branché sur le STS ([`StsService::set_directory`]),
 /// il devient la **seule** source de vérité du login : l'annuaire en mémoire
 /// historique (comparaison en clair, réservé aux tests) n'est plus consulté.
 /// Implémenté par `storage::annuaire_identites::AnnuaireIdentites` (store
@@ -140,7 +140,7 @@ pub struct StsService {
     /// L'annuaire persisté, quand il est branché : il fait alors foi seul.
     ///
     /// `OnceLock` et non `Option` : il se pose à travers une référence partagée
-    /// (voir `set_annuaire`), une fois, au démarrage.
+    /// (voir `set_directory`), une fois, au démarrage.
     annuaire: std::sync::OnceLock<Arc<dyn AnnuaireVerification>>,
 }
 
@@ -235,7 +235,7 @@ impl StsService {
     /// Rend `true` si l'annuaire a été installé, `false` s'il y en avait déjà un
     /// (l'appelant peut alors le DIRE, plutôt que de croire avoir branché).
     #[must_use]
-    pub fn set_annuaire(&self, annuaire: Arc<dyn AnnuaireVerification>) -> bool {
+    pub fn set_directory(&self, annuaire: Arc<dyn AnnuaireVerification>) -> bool {
         self.annuaire.set(annuaire).is_ok()
     }
 
@@ -251,7 +251,7 @@ impl StsService {
 
     /// Issue a token pair for valid credentials.
     ///
-    /// Avec un annuaire branché ([`Self::set_annuaire`]), c'est lui qui
+    /// Avec un annuaire branché ([`Self::set_directory`]), c'est lui qui
     /// vérifie (argon2id sur store persisté) — l'annuaire en mémoire
     /// ci-dessous ne sert plus qu'aux tests et aux démos sans persistance.
     pub fn login(&self, credentials: &LoginCredentials) -> Result<TokenPair> {
@@ -596,11 +596,11 @@ mod tests {
             Uuid::new_v4(),
             vec![],
         );
-        // `set_annuaire` pose l'annuaire UNE fois : il rend `false` si un autre
+        // `set_directory` pose l'annuaire UNE fois : il rend `false` si un autre
         // était déjà posé — auquel cas celui-ci serait ignoré en silence, et le
         // test mesurerait l'ancien. Le constat est donc exigé ici.
         assert!(
-            sts.set_annuaire(Arc::new(AnnuaireJouet { tenant, user })),
+            sts.set_directory(Arc::new(AnnuaireJouet { tenant, user })),
             "l'annuaire du test doit être celui qui fait foi (aucun autre n'était posé)"
         );
 

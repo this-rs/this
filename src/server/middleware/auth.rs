@@ -34,14 +34,14 @@ use std::sync::Arc;
 ///
 /// Un nom, un seul, partagé par la porte (`/auth/verify`) et par cette couche :
 /// deux noms voudraient dire deux comportements.
-pub const COOKIE_JETON: &str = "this_token";
+pub const TOKEN_COOKIE: &str = "this_token";
 
 /// Le jeton porté par une requête : **l'en-tête d'abord, le cookie ensuite**.
 ///
 /// L'en-tête gagne toujours : une requête qui dit explicitement qui elle est
 /// n'est pas réécrite par un cookie — sinon un cookie périmé pourrait
 /// contredire un jeton frais.
-pub fn jeton_de_la_requete(headers: &HeaderMap) -> Option<String> {
+pub fn request_token(headers: &HeaderMap) -> Option<String> {
     if let Some(value) = headers
         .get(header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
@@ -58,7 +58,7 @@ pub fn jeton_de_la_requete(headers: &HeaderMap) -> Option<String> {
         .flat_map(|cookies| cookies.split(';'))
         .find_map(|cookie| {
             let (name, value) = cookie.split_once('=')?;
-            (name.trim() == COOKIE_JETON && !value.trim().is_empty())
+            (name.trim() == TOKEN_COOKIE && !value.trim().is_empty())
                 .then(|| value.trim().to_string())
         })
 }
@@ -81,7 +81,7 @@ pub fn jeton_de_la_requete(headers: &HeaderMap) -> Option<String> {
 /// qu'elle s'exécute avant l'authentification.
 pub async fn cookie_vers_en_tete(mut request: Request, next: Next) -> Response {
     if !request.headers().contains_key(header::AUTHORIZATION)
-        && let Some(token) = jeton_de_la_requete(request.headers())
+        && let Some(token) = request_token(request.headers())
         && let Ok(value) = HeaderValue::from_str(&format!("Bearer {token}"))
     {
         request.headers_mut().insert(header::AUTHORIZATION, value);

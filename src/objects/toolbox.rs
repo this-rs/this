@@ -88,14 +88,14 @@ impl ObjetsToolbox {
     /// S'abonner au flux des changements (écrit / supprimé) de l'espace.
     ///
     /// À brancher dans la boucle de l'hôte : chaque événement reçu peut devenir
-    /// un [`super::EvenementObjet`] rendu par [`Self::indice`], injecté dans le
+    /// un [`super::EvenementObjet`] rendu par [`Self::describe_event`], injecté dans le
     /// contexte du harnais ou consommé par un module.
     pub fn abonner(&self) -> broadcast::Receiver<EvenementObjet> {
         self.objets.abonner()
     }
 
     /// Un événement rendu en une ligne lisible pour le contexte du harnais.
-    pub fn indice(e: &EvenementObjet) -> String {
+    pub fn describe_event(e: &EvenementObjet) -> String {
         match e.genre {
             GenreObjet::Ecrit => {
                 format!(
@@ -114,7 +114,7 @@ impl ObjetsToolbox {
         match call.name.as_str() {
             "objets_explorer" => self.explorer(call).await,
             "objets_consulter" => self.consulter(call).await,
-            "objets_ecrire" => self.ecrire(call).await,
+            "objets_ecrire" => self.write(call).await,
             "objets_organiser" => self.organiser(call).await,
             "objets_supprimer" => self.supprimer(call).await,
             "objets_representer" => self.representer(call).await,
@@ -155,7 +155,7 @@ impl ObjetsToolbox {
             return Outcome::refused("clé absente".to_string(), "`cle` est requis".to_string());
         };
         let max = arg_u64(call, "max_octets", 4096, 1_000_000);
-        match self.objets.lire(&self.tenant, &cle).await {
+        match self.objets.read(&self.tenant, &cle).await {
             Ok(octets) => Outcome::ok(rendre(&cle, &octets, max)),
             Err(e) => Outcome::failed(
                 format!("objet « {cle} » illisible"),
@@ -164,7 +164,7 @@ impl ObjetsToolbox {
         }
     }
 
-    async fn ecrire(&self, call: &ToolCall) -> Outcome {
+    async fn write(&self, call: &ToolCall) -> Outcome {
         let (Some(cle), Some(contenu)) = (arg_str(call, "cle"), arg_str(call, "contenu")) else {
             return Outcome::refused(
                 "écriture incomplète".to_string(),
@@ -173,7 +173,7 @@ impl ObjetsToolbox {
         };
         let octets = Bytes::from(contenu.into_bytes());
         let taille = octets.len();
-        match self.objets.ecrire(&self.tenant, &cle, octets).await {
+        match self.objets.write(&self.tenant, &cle, octets).await {
             Ok(()) => Outcome::ok(format!("écrit : {cle} ({taille} o)")),
             Err(e) => Outcome::failed(
                 format!("écriture de « {cle} » refusée"),
@@ -190,7 +190,7 @@ impl ObjetsToolbox {
             );
         };
         let deplacer = arg_bool(call, "deplacer");
-        let octets = match self.objets.lire(&self.tenant, &de).await {
+        let octets = match self.objets.read(&self.tenant, &de).await {
             Ok(o) => o,
             Err(e) => {
                 return Outcome::failed(
@@ -199,7 +199,7 @@ impl ObjetsToolbox {
                 );
             }
         };
-        if let Err(e) = self.objets.ecrire(&self.tenant, &vers, octets).await {
+        if let Err(e) = self.objets.write(&self.tenant, &vers, octets).await {
             return Outcome::failed(
                 format!("destination « {vers} » refusée"),
                 format!("écrire « {vers} » : {e}"),
@@ -501,13 +501,13 @@ mod tests {
         assert_eq!(e.genre, GenreObjet::Ecrit);
         assert_eq!(e.cle, "graphes/g.json");
         assert_eq!(e.tenant, "alice");
-        assert!(ObjetsToolbox::indice(&e).contains("écrit"));
+        assert!(ObjetsToolbox::describe_event(&e).contains("écrit"));
 
         b.executer(&appel("objets_supprimer", json!({"cle":"graphes/g.json"})))
             .await;
         let e2 = rx.recv().await.expect("un événement de suppression");
         assert_eq!(e2.genre, GenreObjet::Supprime);
         assert_eq!(e2.cle, "graphes/g.json");
-        assert!(ObjetsToolbox::indice(&e2).contains("supprimé"));
+        assert!(ObjetsToolbox::describe_event(&e2).contains("supprimé"));
     }
 }

@@ -65,7 +65,7 @@ mod tests {
     use super::*;
     use ed25519_dalek::SigningKey;
 
-    fn compte(n: u8) -> AccountId {
+    fn account(n: u8) -> AccountId {
         AccountId::de_cle(&SigningKey::from_bytes(&[n; 32]).verifying_key())
     }
 
@@ -75,7 +75,7 @@ mod tests {
         let quota = Quota {
             octets_par_heure: 100,
         };
-        let c = compte(7);
+        let c = account(7);
         relais.transmettre(&c, 0, 40, &quota).unwrap();
         relais.transmettre(&c, 1_000, 40, &quota).unwrap();
     }
@@ -86,7 +86,7 @@ mod tests {
         let quota = Quota {
             octets_par_heure: 100,
         };
-        let c = compte(7);
+        let c = account(7);
         relais.transmettre(&c, 0, 60, &quota).unwrap();
 
         assert_eq!(
@@ -104,7 +104,7 @@ mod tests {
         let quota = Quota {
             octets_par_heure: 100,
         };
-        let c = compte(7);
+        let c = account(7);
         relais.transmettre(&c, 0, 60, &quota).unwrap();
         assert_eq!(
             relais.transmettre(&c, 1_000, 50, &quota),

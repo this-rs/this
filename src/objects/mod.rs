@@ -88,7 +88,7 @@ fn verifier_segments(cle: &str) -> Result<(), String> {
 }
 
 /// Chemin complet `tenants/<tenant>/<cle>`, garde d'isolation.
-pub fn chemin(tenant: &str, cle: &str) -> Result<Path, String> {
+pub fn object_path(tenant: &str, cle: &str) -> Result<Path, String> {
     verifier_tenant(tenant)?;
     if cle.is_empty() {
         return Err("clé vide".into());
@@ -109,7 +109,7 @@ impl Objets {
 
     /// Comme [`Objets::new`], mais avec le **signataire** du même store S3 —
     /// l'hôte peut alors obtenir des URLs présignées (`signataire()` + `chemin`).
-    pub fn avec_signature(store: Arc<dyn ObjectStore>, signer: Arc<dyn Signer>) -> Self {
+    pub fn with_signer(store: Arc<dyn ObjectStore>, signer: Arc<dyn Signer>) -> Self {
         let (diffusion, _) = broadcast::channel(CAPACITE_EVENEMENTS);
         Self {
             store,
@@ -147,8 +147,8 @@ impl Objets {
         self.diffusion.subscribe()
     }
 
-    pub async fn ecrire(&self, tenant: &str, cle: &str, octets: Bytes) -> Result<(), String> {
-        let p = chemin(tenant, cle)?;
+    pub async fn write(&self, tenant: &str, cle: &str, octets: Bytes) -> Result<(), String> {
+        let p = object_path(tenant, cle)?;
         let taille = octets.len() as u64;
         self.store
             .put(&p, octets.into())
@@ -164,8 +164,8 @@ impl Objets {
         Ok(())
     }
 
-    pub async fn lire(&self, tenant: &str, cle: &str) -> Result<Bytes, String> {
-        let p = chemin(tenant, cle)?;
+    pub async fn read(&self, tenant: &str, cle: &str) -> Result<Bytes, String> {
+        let p = object_path(tenant, cle)?;
         let r = self
             .store
             .get(&p)
@@ -210,7 +210,7 @@ impl Objets {
     }
 
     pub async fn supprimer(&self, tenant: &str, cle: &str) -> Result<(), String> {
-        let p = chemin(tenant, cle)?;
+        let p = object_path(tenant, cle)?;
         self.store
             .delete(&p)
             .await
@@ -226,7 +226,7 @@ impl Objets {
     }
 
     pub async fn existe(&self, tenant: &str, cle: &str) -> Result<bool, String> {
-        let p = chemin(tenant, cle)?;
+        let p = object_path(tenant, cle)?;
         match self.store.head(&p).await {
             Ok(_) => Ok(true),
             Err(object_store::Error::NotFound { .. }) => Ok(false),
@@ -237,7 +237,7 @@ impl Objets {
     /// Démarre un téléversement **multipart** de `cle`. On pousse des parties
     /// (`Televersement::partie`), puis `finir` scelle — ou `annuler` libère.
     pub async fn televerser(&self, tenant: &str, cle: &str) -> Result<Televersement, String> {
-        let p = chemin(tenant, cle)?;
+        let p = object_path(tenant, cle)?;
         let inner = self
             .store
             .put_multipart(&p)
@@ -255,7 +255,7 @@ impl Objets {
     /// `taille_part` octets (défaut 8 Mio, minimum 5 Mio comme S3). Rend le
     /// nombre d'octets envoyés. C'est le chemin d'un gros fichier sur mobile :
     /// rien n'est chargé d'un coup, la mémoire reste bornée à une partie.
-    pub async fn televerser_chemin(
+    pub async fn upload_path(
         &self,
         tenant: &str,
         cle: &str,
@@ -311,10 +311,7 @@ impl Objets {
         }
         let store = b.build().map_err(|e| format!("configuration S3 : {e}"))?;
         // Le store S3 signe aussi : URLs présignées disponibles (feature `presign`).
-        Ok(Self::avec_signature(
-            Arc::new(store.clone()),
-            Arc::new(store),
-        ))
+        Ok(Self::with_signer(Arc::new(store.clone()), Arc::new(store)))
     }
 }
 
@@ -338,7 +335,7 @@ impl Objets {
             .signer
             .as_ref()
             .ok_or_else(|| "ce store ne signe pas (local/mémoire)".to_string())?;
-        let p = chemin(tenant, cle)?;
+        let p = object_path(tenant, cle)?;
         let method = match genre {
             GenreUrl::Lire => reqwest::Method::GET,
             GenreUrl::Ecrire => reqwest::Method::PUT,
@@ -364,11 +361,11 @@ mod tests {
     #[tokio::test]
     async fn ecrire_lire_aller_retour() {
         let o = objets();
-        o.ecrire("t", "a/b.bin", Bytes::from_static(b"\x00\x01salut"))
+        o.write("t", "a/b.bin", Bytes::from_static(b"\x00\x01salut"))
             .await
             .unwrap();
         assert_eq!(
-            o.lire("t", "a/b.bin").await.unwrap().as_ref(),
+            o.read("t", "a/b.bin").await.unwrap().as_ref(),
             b"\x00\x01salut"
         );
     }
@@ -376,22 +373,22 @@ mod tests {
     #[tokio::test]
     async fn isolation_tenant() {
         let o = objets();
-        o.ecrire("A", "x", Bytes::from_static(b"1")).await.unwrap();
+        o.write("A", "x", Bytes::from_static(b"1")).await.unwrap();
         assert!(o.lister("B", "").await.unwrap().is_empty());
-        assert!(o.lire("B", "x").await.is_err());
+        assert!(o.read("B", "x").await.is_err());
         assert!(!o.existe("B", "x").await.unwrap());
     }
 
     #[tokio::test]
     async fn lister_donne_les_cles_relatives() {
         let o = objets();
-        o.ecrire("t", "a/1.txt", Bytes::from_static(b"un"))
+        o.write("t", "a/1.txt", Bytes::from_static(b"un"))
             .await
             .unwrap();
-        o.ecrire("t", "a/2.txt", Bytes::from_static(b"deux"))
+        o.write("t", "a/2.txt", Bytes::from_static(b"deux"))
             .await
             .unwrap();
-        o.ecrire("t", "b/3.txt", Bytes::from_static(b"x"))
+        o.write("t", "b/3.txt", Bytes::from_static(b"x"))
             .await
             .unwrap();
         let l = o.lister("t", "a/").await.unwrap();
@@ -402,18 +399,21 @@ mod tests {
 
     #[test]
     fn cle_avec_dotdot_refusee() {
-        assert!(chemin("t", "../x").is_err());
-        assert!(chemin("t", "a/../x").is_err());
-        assert!(chemin("t", "/x").is_err());
-        assert!(chemin("t", "").is_err());
-        assert!(chemin("", "x").is_err());
-        assert_eq!(chemin("t", "a/x").unwrap().to_string(), "tenants/t/a/x");
+        assert!(object_path("t", "../x").is_err());
+        assert!(object_path("t", "a/../x").is_err());
+        assert!(object_path("t", "/x").is_err());
+        assert!(object_path("t", "").is_err());
+        assert!(object_path("", "x").is_err());
+        assert_eq!(
+            object_path("t", "a/x").unwrap().to_string(),
+            "tenants/t/a/x"
+        );
     }
 
     #[tokio::test]
     async fn supprimer_retire() {
         let o = objets();
-        o.ecrire("t", "k", Bytes::from_static(b"v")).await.unwrap();
+        o.write("t", "k", Bytes::from_static(b"v")).await.unwrap();
         assert!(o.existe("t", "k").await.unwrap());
         o.supprimer("t", "k").await.unwrap();
         assert!(!o.existe("t", "k").await.unwrap());
@@ -424,10 +424,10 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("objets-local-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let o = Objets::local(&dir).expect("store local");
-        o.ecrire("alice", "a/b.txt", bytes::Bytes::from_static(b"x"))
+        o.write("alice", "a/b.txt", bytes::Bytes::from_static(b"x"))
             .await
             .unwrap();
-        assert_eq!(&o.lire("alice", "a/b.txt").await.unwrap()[..], b"x");
+        assert_eq!(&o.read("alice", "a/b.txt").await.unwrap()[..], b"x");
         assert!(o.existe("alice", "a/b.txt").await.unwrap());
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -441,7 +441,7 @@ mod tests {
         t.partie(Bytes::from_static(b"bbb")).await.unwrap();
         assert_eq!(t.octets_ecrits(), 6);
         t.finir().await.unwrap();
-        assert_eq!(&o.lire("alice", "gros.bin").await.unwrap()[..], b"aaabbb");
+        assert_eq!(&o.read("alice", "gros.bin").await.unwrap()[..], b"aaabbb");
         let e = rx.recv().await.unwrap();
         assert_eq!(e.genre, GenreObjet::Ecrit);
         assert_eq!(e.taille, 6);
@@ -467,11 +467,11 @@ mod tests {
         std::fs::write(&f, &contenu).unwrap();
         let o = Objets::local(dir.join("store")).unwrap();
         let total = o
-            .televerser_chemin("alice", "gros.bin", &f, Some(5 * 1024 * 1024))
+            .upload_path("alice", "gros.bin", &f, Some(5 * 1024 * 1024))
             .await
             .unwrap();
         assert_eq!(total as usize, contenu.len());
-        assert_eq!(o.lire("alice", "gros.bin").await.unwrap().to_vec(), contenu);
+        assert_eq!(o.read("alice", "gros.bin").await.unwrap().to_vec(), contenu);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

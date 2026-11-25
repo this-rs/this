@@ -42,7 +42,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use uuid::Uuid;
 
 /// Le nom du fichier catalogue, à la racine du répertoire du store.
-pub const FICHIER_TENANTCAT: &str = "substrate.tenantcat";
+pub const TENANT_CATALOG_FILE: &str = "substrate.tenantcat";
 
 /// La sentinelle A5 du substrat — jamais attribuable.
 const SENTINELLE: u32 = u32::MAX;
@@ -72,7 +72,7 @@ impl CatalogueTenants {
     /// fail-closed : on ne monte pas un store dont on ne sait pas
     /// interpréter les tenants.
     pub fn charger(store_dir: &Path) -> Result<Self> {
-        let chemin = store_dir.join(FICHIER_TENANTCAT);
+        let chemin = store_dir.join(TENANT_CATALOG_FILE);
         if !chemin.exists() {
             return Ok(Self::default());
         }
@@ -149,7 +149,7 @@ impl CatalogueTenants {
     }
 
     /// Le nombre de tenants internés.
-    pub fn compte(&self) -> usize {
+    pub fn count(&self) -> usize {
         self.entrees.len()
     }
 
@@ -180,7 +180,7 @@ impl CatalogueTenants {
             bail!("catalogue plein : le prochain numéro serait la sentinelle A5");
         }
 
-        let chemin = store_dir.join(FICHIER_TENANTCAT);
+        let chemin = store_dir.join(TENANT_CATALOG_FILE);
         let mut f = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
@@ -207,7 +207,7 @@ mod tests {
     fn absent_est_vide() {
         let dir = tempfile::tempdir().unwrap();
         let cat = CatalogueTenants::charger(dir.path()).unwrap();
-        assert_eq!(cat.compte(), 0);
+        assert_eq!(cat.count(), 0);
         assert_eq!(cat.resoudre(&Uuid::new_v4()), None);
     }
 
@@ -238,7 +238,7 @@ mod tests {
     #[test]
     fn zero_et_sentinelle_refuses_au_chargement() {
         let dir = tempfile::tempdir().unwrap();
-        let chemin = dir.path().join(FICHIER_TENANTCAT);
+        let chemin = dir.path().join(TENANT_CATALOG_FILE);
         std::fs::write(&chemin, format!("{}\t0\tpublic-vole\n", Uuid::new_v4())).unwrap();
         assert!(
             CatalogueTenants::charger(dir.path())
@@ -263,7 +263,7 @@ mod tests {
     #[test]
     fn doublons_refuses_au_chargement() {
         let dir = tempfile::tempdir().unwrap();
-        let chemin = dir.path().join(FICHIER_TENANTCAT);
+        let chemin = dir.path().join(TENANT_CATALOG_FILE);
         let u = Uuid::new_v4();
         std::fs::write(&chemin, format!("{u}\t1\tun\n{u}\t2\tdeux\n")).unwrap();
         assert!(
@@ -288,7 +288,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let u = Uuid::new_v4();
         std::fs::write(
-            dir.path().join(FICHIER_TENANTCAT),
+            dir.path().join(TENANT_CATALOG_FILE),
             format!("# catalogue d'essai\n\n{u}\t7\tlibellé avec espaces\n"),
         )
         .unwrap();
@@ -304,7 +304,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let u = Uuid::new_v4();
         std::fs::write(
-            dir.path().join(FICHIER_TENANTCAT),
+            dir.path().join(TENANT_CATALOG_FILE),
             format!("{u}\t41\tancien\n"),
         )
         .unwrap();

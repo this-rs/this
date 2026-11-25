@@ -1772,7 +1772,7 @@ fn administre_utilisateurs(args: &[String]) -> anyhow::Result<()> {
             let (login, nouveau) = spec
                 .split_once(':')
                 .ok_or_else(|| anyhow::anyhow!("user passwd attend login:nouveaumotdepasse"))?;
-            annuaire.changer_mot_de_passe(login, nouveau)?;
+            annuaire.change_password(login, nouveau)?;
             println!("mot de passe de {login} remplace (hash argon2id)");
         }
         _ => usage(),
@@ -1805,7 +1805,7 @@ fn administre_tenantcat(args: &[String]) -> anyhow::Result<()> {
                 entree.uuid,
                 entree.numero,
                 dir,
-                this::storage::tenantcat::FICHIER_TENANTCAT,
+                this::storage::tenantcat::TENANT_CATALOG_FILE,
                 if entree.libelle.is_empty() {
                     "sans libelle"
                 } else {
@@ -1824,7 +1824,7 @@ fn administre_tenantcat(args: &[String]) -> anyhow::Result<()> {
             for e in catalogue.entrees() {
                 println!("{}\t{}\t{}", e.uuid, e.numero, e.libelle);
             }
-            eprintln!("{} tenant(s) interne(s)", catalogue.compte());
+            eprintln!("{} tenant(s) interne(s)", catalogue.count());
         }
         _ => usage(),
     }
@@ -2666,10 +2666,9 @@ async fn admin_passwd(
         return refus_admin();
     }
     let annuaire = etat.annuaire.clone();
-    let resultat = tokio::task::spawn_blocking(move || {
-        annuaire.changer_mot_de_passe(&username, &corps.password)
-    })
-    .await;
+    let resultat =
+        tokio::task::spawn_blocking(move || annuaire.change_password(&username, &corps.password))
+            .await;
     match resultat {
         Ok(Ok(())) => (
             StatusCode::OK,
@@ -2904,7 +2903,7 @@ async fn main() -> anyhow::Result<()> {
     let annuaire = Arc::new(AnnuaireIdentites::ouvrir(&args.identites)?);
     tracing::info!(
         chemin = %args.identites.display(),
-        identites = annuaire.compte(),
+        identites = annuaire.count(),
         "annuaire d'identités ouvert (store obrain dédié, hashes argon2id)"
     );
 
@@ -2935,13 +2934,13 @@ async fn main() -> anyhow::Result<()> {
     // ── STS : émission, adossée à l'annuaire (le store fait foi) ──
     let mut sts = StsService::new(&priv_pem, args.issuer.clone())?;
     sts.set_access_ttl_secs(900);
-    // `set_annuaire` pose l'annuaire UNE fois et rend `false` si un autre était
+    // `set_directory` pose l'annuaire UNE fois et rend `false` si un autre était
     // déjà posé — auquel cas le nouveau serait ignoré en SILENCE, et la
     // passerelle authentifierait contre un annuaire qui n'est pas le sien. Sur
     // un service qui vient d'être créé, `false` veut donc dire que cette
     // supposition est fausse : le taire ferait autorité sur l'ancien.
     anyhow::ensure!(
-        sts.set_annuaire(annuaire.clone()),
+        sts.set_directory(annuaire.clone()),
         "un annuaire est déjà posé sur ce STS : le nouveau serait ignoré en silence"
     );
     let sts_state = Arc::new(StsState {
@@ -3006,7 +3005,7 @@ async fn main() -> anyhow::Result<()> {
             catalogue,
             cache: cache.clone(),
         });
-        let tenants_internes = etat.catalogue.compte();
+        let tenants_internes = etat.catalogue.count();
         let dispatcher = Router::new().fallback(sert_la_vue).with_state(etat);
         app = app.nest(&format!("/stores/{}", decl.nom), dispatcher);
         proprietes.insert(decl.nom.clone(), decl.propriete.clone());

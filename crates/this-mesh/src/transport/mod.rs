@@ -581,13 +581,13 @@ async fn echanger(
         .open_bi()
         .await
         .map_err(|e| TransportError::Connexion(e.to_string()))?;
-    cadrage::ecrire(&mut send, &message.to_bytes())
+    cadrage::write(&mut send, &message.to_bytes())
         .await
         .map_err(CadrageError::from)?;
     send.finish()
         .map_err(|e| TransportError::Connexion(e.to_string()))?;
 
-    let ack = cadrage::lire(&mut recv, plafond).await?;
+    let ack = cadrage::read(&mut recv, plafond).await?;
     let ack: Ack = serde_json::from_slice(&ack)
         .map_err(|e| TransportError::Connexion(format!("verdict illisible : {e}")))?;
     Ok((ack, endpoint))
@@ -648,7 +648,7 @@ async fn gerer_connexion(
             };
         }
 
-        let octets = match cadrage::lire(&mut recv, ceiling).await {
+        let octets = match cadrage::read(&mut recv, ceiling).await {
             Ok(o) => o,
             Err(CadrageError::TropGros { .. }) => {
                 // Un pair annonce une longueur au-delà du plafond : on ferme sans
@@ -700,7 +700,7 @@ async fn gerer_connexion(
             };
         }
         let ack_bytes = serde_json::to_vec(&ack).expect("verdict serialise");
-        if cadrage::ecrire(&mut send, &ack_bytes).await.is_ok() {
+        if cadrage::write(&mut send, &ack_bytes).await.is_ok() {
             let _ = send.finish();
         }
         if refuse {
@@ -1167,9 +1167,9 @@ mod tests {
     /// Un message sur une session déjà ouverte ; rend le `v` du verdict.
     async fn envoyer_sur(connection: &quinn::Connection, m: &Message) -> String {
         let (mut send, mut recv) = connection.open_bi().await.unwrap();
-        cadrage::ecrire(&mut send, &m.to_bytes()).await.unwrap();
+        cadrage::write(&mut send, &m.to_bytes()).await.unwrap();
         send.finish().unwrap();
-        let octets = cadrage::lire(&mut recv, ACK_CEILING).await.unwrap();
+        let octets = cadrage::read(&mut recv, ACK_CEILING).await.unwrap();
         serde_json::from_slice::<Ack>(&octets).unwrap().v
     }
 

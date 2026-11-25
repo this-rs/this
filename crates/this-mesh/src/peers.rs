@@ -93,7 +93,7 @@ pub struct Surveillance {
 impl Drop for Surveillance {
     fn drop(&mut self) {
         if let Some(inner) = self.inner.upgrade() {
-            let mut g = ecrire(&inner);
+            let mut g = write_lock(&inner);
             if let Some(liste) = g.rappels.get_mut(&self.id) {
                 liste.retain(|(n, _)| *n != self.numero);
                 if liste.is_empty() {
@@ -104,13 +104,13 @@ impl Drop for Surveillance {
     }
 }
 
-fn lire(inner: &Arc<RwLock<Inner>>) -> RwLockReadGuard<'_, Inner> {
+fn read_lock(inner: &Arc<RwLock<Inner>>) -> RwLockReadGuard<'_, Inner> {
     // Un verrou empoisonné ne rend pas le registre faux : ses opérations sont
     // atomiques. On reprend l'état plutôt que de paniquer dans la porte.
     inner.read().unwrap_or_else(|e| e.into_inner())
 }
 
-fn ecrire(inner: &Arc<RwLock<Inner>>) -> RwLockWriteGuard<'_, Inner> {
+fn write_lock(inner: &Arc<RwLock<Inner>>) -> RwLockWriteGuard<'_, Inner> {
     inner.write().unwrap_or_else(|e| e.into_inner())
 }
 
@@ -141,7 +141,7 @@ impl Peers {
         added_at: DateTime<Utc>,
     ) {
         if self.try_admit(id, key, role, added_at).is_err() {
-            let mut g = ecrire(&self.inner);
+            let mut g = write_lock(&self.inner);
             if g.ecrasements.len() >= JOURNAL_ECRASEMENTS {
                 g.ecrasements.pop_front();
             }
@@ -159,7 +159,7 @@ impl Peers {
         role: AnchorKeyRole,
         added_at: DateTime<Utc>,
     ) -> Result<(), PeerError> {
-        let mut g = ecrire(&self.inner);
+        let mut g = write_lock(&self.inner);
         let adresse = match g.peers.get(id.as_str()) {
             Some(p) if p.key != key => {
                 return Err(PeerError::IdentifiantPris(id.as_str().to_owned()));
@@ -184,7 +184,7 @@ impl Peers {
     /// `key` : l'écrire serait refusé. Ne modifie rien. Sert à l'appairage à
     /// refuser une collision **avant** d'afficher le code.
     pub fn verifier_libre(&self, id: &DeviceId, key: &VerifyingKey) -> Result<(), PeerError> {
-        match lire(&self.inner).peers.get(id.as_str()) {
+        match read_lock(&self.inner).peers.get(id.as_str()) {
             Some(p) if p.key != *key => Err(PeerError::IdentifiantPris(id.as_str().to_owned())),
             _ => Ok(()),
         }
@@ -194,7 +194,7 @@ impl Peers {
     /// clé, du plus ancien au plus récent ([`JOURNAL_ECRASEMENTS`] au plus). Un
     /// élément ici est le signe d'une tentative d'usurpation (ou d'un bogue).
     pub fn ecrasements_refuses(&self) -> Vec<DeviceId> {
-        lire(&self.inner).ecrasements.iter().cloned().collect()
+        read_lock(&self.inner).ecrasements.iter().cloned().collect()
     }
 
     /// Révoque une clé : effet immédiat sur tous les clones, et coupure de **ses**
@@ -202,7 +202,7 @@ impl Peers {
     /// `false` si le pair est inconnu.
     pub fn revoke(&self, id: &DeviceId) -> bool {
         let rappels: Vec<Rappel> = {
-            let mut g = ecrire(&self.inner);
+            let mut g = write_lock(&self.inner);
             match g.peers.get_mut(id.as_str()) {
                 Some(p) => p.state = AnchorKeyState::Revoked,
                 None => return false,
@@ -227,7 +227,7 @@ impl Peers {
         id: &DeviceId,
         rappel: impl Fn() + Send + Sync + 'static,
     ) -> Surveillance {
-        let mut g = ecrire(&self.inner);
+        let mut g = write_lock(&self.inner);
         let numero = g.prochain;
         g.prochain += 1;
         g.rappels
@@ -243,7 +243,7 @@ impl Peers {
 
     /// Fixe l'adresse où joindre ce pair. `false` si le pair est inconnu.
     pub fn definir_adresse(&self, id: &DeviceId, adresse: SocketAddr) -> bool {
-        match ecrire(&self.inner).peers.get_mut(id.as_str()) {
+        match write_lock(&self.inner).peers.get_mut(id.as_str()) {
             Some(p) => {
                 p.adresse = Some(adresse);
                 true
@@ -254,22 +254,28 @@ impl Peers {
 
     /// L'adresse où joindre ce pair, si elle est connue.
     pub fn adresse_de(&self, id: &DeviceId) -> Option<SocketAddr> {
-        lire(&self.inner)
+        read_lock(&self.inner)
             .peers
             .get(id.as_str())
             .and_then(|p| p.adresse)
     }
 
     pub fn state(&self, id: &DeviceId) -> Option<AnchorKeyState> {
-        lire(&self.inner).peers.get(id.as_str()).map(|p| p.state)
+        read_lock(&self.inner)
+            .peers
+            .get(id.as_str())
+            .map(|p| p.state)
     }
 
     pub fn role(&self, id: &DeviceId) -> Option<AnchorKeyRole> {
-        lire(&self.inner).peers.get(id.as_str()).map(|p| p.role)
+        read_lock(&self.inner)
+            .peers
+            .get(id.as_str())
+            .map(|p| p.role)
     }
 
     pub(crate) fn get(&self, id: &DeviceId) -> Option<Peer> {
-        lire(&self.inner).peers.get(id.as_str()).cloned()
+        read_lock(&self.inner).peers.get(id.as_str()).cloned()
     }
 
     /// L'identifiant dont la clé publique est exactement `cle`, quel que soit
@@ -278,7 +284,7 @@ impl Peers {
     /// un même identifiant ne peut pas porter deux clés, et l'appairage n'inscrit
     /// une clé que sous un identifiant.
     pub fn id_de_cle(&self, cle: &VerifyingKey) -> Option<DeviceId> {
-        lire(&self.inner)
+        read_lock(&self.inner)
             .peers
             .iter()
             .find(|(_, p)| p.key == *cle)
@@ -286,17 +292,17 @@ impl Peers {
     }
 
     pub fn len(&self) -> usize {
-        lire(&self.inner).peers.len()
+        read_lock(&self.inner).peers.len()
     }
 
     pub fn is_empty(&self) -> bool {
-        lire(&self.inner).peers.is_empty()
+        read_lock(&self.inner).peers.is_empty()
     }
 
     /// Forme persistable (celle du contrat VFS), triée par identifiant. L'adresse
     /// n'en fait pas partie : elle est portée par [`Peers::to_json`].
     pub fn to_keys(&self) -> Vec<AnchorKey> {
-        lire(&self.inner)
+        read_lock(&self.inner)
             .peers
             .iter()
             .map(|(id, p)| AnchorKey {
@@ -326,7 +332,7 @@ impl Peers {
     /// JSON du registre : la forme de [`AnchorKey`], plus `adresse` quand elle est connue.
     pub fn to_json(&self) -> String {
         let fiches: Vec<FicheJson> = {
-            let g = lire(&self.inner);
+            let g = read_lock(&self.inner);
             g.peers
                 .iter()
                 .map(|(id, p)| FicheJson {

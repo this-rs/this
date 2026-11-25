@@ -67,7 +67,7 @@ impl Capability {
 }
 
 impl From<Option<bool>> for Capability {
-    /// La règle du framework : seul `Some(true)` autorise ; `None` n'est pas un refus,
+    /// La règle du framework : seul `Some(true)` allows ; `None` n'est pas un refus,
     /// c'est une ignorance, et l'interface doit pouvoir le dire.
     fn from(verdict: Option<bool>) -> Self {
         match verdict {

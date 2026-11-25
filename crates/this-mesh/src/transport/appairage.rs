@@ -211,7 +211,7 @@ impl AppairageEnCours {
         } else {
             Echange::Refuse
         };
-        let envoi = ecrire(&mut self.send, &mot, echeance).await;
+        let envoi = write(&mut self.send, &mot, echeance).await;
         let _ = self.send.finish();
 
         if !accepte {
@@ -227,7 +227,7 @@ impl AppairageEnCours {
             return Err(abandon_du_pair(e));
         }
 
-        let lien_du_pair = match lire(&mut self.recv, echeance).await {
+        let lien_du_pair = match read(&mut self.recv, echeance).await {
             Ok(Echange::Confirme { lien }) => lien,
             Ok(Echange::Refuse) => {
                 self.fermer(CODE_REFUS, b"refus");
@@ -389,7 +389,7 @@ pub async fn appairer_vers_avec(
     // 1. Engagement sur nI.
     let n_i = tls::aleatoire_32(&identite.provider())?;
     let h = to_hex(&engagement(&n_i));
-    ecrire(
+    write(
         &mut send,
         &Echange::Engage {
             h,
@@ -400,7 +400,7 @@ pub async fn appairer_vers_avec(
     .await?;
 
     // 2. nR, choisi par R sans connaître nI.
-    let n_r = match lire(&mut recv, echeance).await? {
+    let n_r = match read(&mut recv, echeance).await? {
         Echange::Nonce { n } => nonce_de_hex(&n)?,
         autre => {
             connexion.close(quinn::VarInt::from_u32(CODE_PROTOCOLE), b"protocole");
@@ -411,7 +411,7 @@ pub async fn appairer_vers_avec(
     };
 
     // 3. Révélation de nI.
-    ecrire(&mut send, &Echange::Revele { n: to_hex(&n_i) }, echeance).await?;
+    write(&mut send, &Echange::Revele { n: to_hex(&n_i) }, echeance).await?;
 
     let pair_id = DeviceId::de_cle(&pair_cle);
     Ok(en_cours(
@@ -508,7 +508,7 @@ pub(super) async fn repondre(
 
     let resultat = async {
         // 1. Engagement de I, avant tout nonce de notre part.
-        let h = match lire(&mut recv, echeance).await? {
+        let h = match read(&mut recv, echeance).await? {
             Echange::Engage { h, j } => {
                 // Le jeton est le droit d'entrer que l'écran a donné. Il se vérifie
                 // ici, avant que le moindre nonce ne sorte : un jeton rejoué, périmé
@@ -545,9 +545,9 @@ pub(super) async fn repondre(
         };
         // 2. Notre nonce.
         let n_r = tls::aleatoire_32(&r.provider)?;
-        ecrire(&mut send, &Echange::Nonce { n: to_hex(&n_r) }, echeance).await?;
+        write(&mut send, &Echange::Nonce { n: to_hex(&n_r) }, echeance).await?;
         // 3. Révélation : doit correspondre à l'engagement.
-        let n_i = match lire(&mut recv, echeance).await? {
+        let n_i = match read(&mut recv, echeance).await? {
             Echange::Revele { n } => nonce_de_hex(&n)?,
             autre => {
                 return Err(TransportError::Connexion(format!(
@@ -674,23 +674,23 @@ fn abandon_du_pair(e: TransportError) -> TransportError {
     }
 }
 
-pub(super) async fn ecrire(
+pub(super) async fn write(
     send: &mut quinn::SendStream,
     m: &Echange,
     echeance: Instant,
 ) -> Result<(), TransportError> {
     let octets = serde_json::to_vec(m).expect("message d'appairage sérialisable");
-    timeout_at(echeance, cadrage::ecrire(send, &octets))
+    timeout_at(echeance, cadrage::write(send, &octets))
         .await
         .map_err(|_| delai_depasse())?
         .map_err(|e| TransportError::Cadrage(CadrageError::Io(e)))
 }
 
-pub(super) async fn lire(
+pub(super) async fn read(
     recv: &mut quinn::RecvStream,
     echeance: Instant,
 ) -> Result<Echange, TransportError> {
-    let octets = timeout_at(echeance, cadrage::lire(recv, PLAFOND))
+    let octets = timeout_at(echeance, cadrage::read(recv, PLAFOND))
         .await
         .map_err(|_| delai_depasse())??;
     serde_json::from_slice(&octets)
@@ -869,7 +869,7 @@ mod tests {
         let (mut send, mut recv) = connexion.open_bi().await.unwrap();
         let engage = [7u8; 32];
         let revele = [8u8; 32];
-        ecrire(
+        write(
             &mut send,
             &Echange::Engage {
                 h: to_hex(&engagement(&engage)),
@@ -880,10 +880,10 @@ mod tests {
         .await
         .unwrap();
         assert!(matches!(
-            lire(&mut recv, echeance).await.unwrap(),
+            read(&mut recv, echeance).await.unwrap(),
             Echange::Nonce { .. }
         ));
-        ecrire(&mut send, &Echange::Revele { n: to_hex(&revele) }, echeance)
+        write(&mut send, &Echange::Revele { n: to_hex(&revele) }, echeance)
             .await
             .unwrap();
 
@@ -897,7 +897,7 @@ mod tests {
             }
             autre => panic!("fermeture inattendue : {autre:?}"),
         }
-        assert!(lire(&mut recv, echeance).await.is_err());
+        assert!(read(&mut recv, echeance).await.is_err());
         assert!(aucune_demande(&mut rx).await);
     }
 
@@ -1287,7 +1287,7 @@ mod tests {
             .unwrap();
         let (mut send, mut recv) = connexion.open_bi().await.unwrap();
         let n_i = [5u8; 32];
-        ecrire(
+        write(
             &mut send,
             &Echange::Engage {
                 h: to_hex(&engagement(&n_i)),
@@ -1298,10 +1298,10 @@ mod tests {
         .await
         .unwrap();
         assert!(matches!(
-            lire(&mut recv, echeance).await.unwrap(),
+            read(&mut recv, echeance).await.unwrap(),
             Echange::Nonce { .. }
         ));
-        ecrire(&mut send, &Echange::Revele { n: to_hex(&n_i) }, echeance)
+        write(&mut send, &Echange::Revele { n: to_hex(&n_i) }, echeance)
             .await
             .unwrap();
         (endpoint, connexion, send, recv)
@@ -1318,12 +1318,12 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        cadrage::ecrire(&mut send, br#"{"t":"confirme"}"#)
+        cadrage::write(&mut send, br#"{"t":"confirme"}"#)
             .await
             .unwrap();
         let (ar, octets) = tokio::join!(
             r.decider_avec_lien(true, Lien::Moi),
-            cadrage::lire(&mut recv, PLAFOND)
+            cadrage::read(&mut recv, PLAFOND)
         );
         let ar = ar.unwrap();
         assert_eq!(ar.lien(), Lien::Autre);
@@ -1354,10 +1354,10 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        cadrage::ecrire(&mut send, br#"{"t":"confirme","lien":"moi"}"#)
+        cadrage::write(&mut send, br#"{"t":"confirme","lien":"moi"}"#)
             .await
             .unwrap();
-        let (ar, octets) = tokio::join!(r.decider(true), cadrage::lire(&mut recv, PLAFOND));
+        let (ar, octets) = tokio::join!(r.decider(true), cadrage::read(&mut recv, PLAFOND));
         assert_eq!(ar.unwrap().lien(), Lien::Autre);
         assert_eq!(octets.unwrap(), br#"{"t":"confirme","lien":"autre"}"#);
     }

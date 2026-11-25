@@ -1375,7 +1375,7 @@ mod tests {
     }
 
     /// Lit la boîte de `appareil` (GET /relais signé) et rend les octets bruts reçus.
-    fn lire_relais(
+    fn read_relay(
         etat: &Etat,
         appareil: &DeviceId,
         cle: &SigningKey,
@@ -1407,12 +1407,12 @@ mod tests {
         assert_eq!(s, 200, "{c}");
 
         // a2 lit SA boîte : les octets sont rendus tels quels, à l'octet près.
-        let (s, messages) = lire_relais(&sc.etat, &sc.a2, &sc.cle_a2, "203.0.113.2", 0x11);
+        let (s, messages) = read_relay(&sc.etat, &sc.a2, &sc.cle_a2, "203.0.113.2", 0x11);
         assert_eq!(s, 200);
         assert_eq!(messages, vec![octets]);
 
         // La boîte a été vidée : une seconde lecture ne rend rien.
-        let (s, messages) = lire_relais(&sc.etat, &sc.a2, &sc.cle_a2, "203.0.113.2", 0x12);
+        let (s, messages) = read_relay(&sc.etat, &sc.a2, &sc.cle_a2, "203.0.113.2", 0x12);
         assert_eq!(s, 204);
         assert!(messages.is_empty());
     }
@@ -1426,7 +1426,7 @@ mod tests {
         assert_eq!(s, 403);
 
         // Rien n'a été mis en boîte.
-        let (s, _) = lire_relais(&sc.etat, &sc.a2, &sc.cle_a2, "203.0.113.4", 0x20);
+        let (s, _) = read_relay(&sc.etat, &sc.a2, &sc.cle_a2, "203.0.113.4", 0x20);
         assert_eq!(s, 204);
     }
 
@@ -1444,7 +1444,7 @@ mod tests {
         let (s, c) = repondre(&sc.etat, "POST", "/relais", &corps, "203.0.113.6", &[]);
         assert_eq!(s, 200, "{c}");
 
-        let (s, messages) = lire_relais(&sc.etat, &sc.a2, &sc.cle_a2, "203.0.113.7", 0x33);
+        let (s, messages) = read_relay(&sc.etat, &sc.a2, &sc.cle_a2, "203.0.113.7", 0x33);
         assert_eq!(s, 200);
         assert_eq!(messages, vec![octets]);
     }
@@ -1506,7 +1506,7 @@ mod tests {
         assert_eq!(s, 400);
 
         // Rien n'a été mis en boîte, et le quota n'a pas bougé.
-        let (s, _) = lire_relais(&sc.etat, &sc.a2, &sc.cle_a2, "203.0.113.9", 0x40);
+        let (s, _) = read_relay(&sc.etat, &sc.a2, &sc.cle_a2, "203.0.113.9", 0x40);
         assert_eq!(s, 204);
     }
 
