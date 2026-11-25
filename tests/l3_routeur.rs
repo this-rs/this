@@ -56,21 +56,79 @@ fn candidat(p: &str, m: &str) -> this_harness::routing::Candidate {
 
 /// Apprenant persistant : écrit une observation par `settle`, relit les
 /// statistiques par projection GQL.
+/// Résultat d'une tentative d'écriture d'observation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+struct Compteurs {
+    creees: u64,
+    rejeux: u64,
+    conflits: u64,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum Ecriture {
+    Creee,
+    RejeuIdentique,
+    Conflit,
+}
+
 struct ApprisObrain {
     store: Arc<ObrainStore>,
     scope: String,
+    /// Identité de SESSION, durable et indépendante des graines d'exploration :
+    /// deux exécutions du même plan produisent des identifiants différents.
+    session: String,
     candidats: Vec<(String, String)>,
     en_cours: Mutex<HashMap<u128, String>>, // decision_id -> classe
+    compteurs: Mutex<Compteurs>,
 }
 
 impl ApprisObrain {
     fn nouveau(store: Arc<ObrainStore>, scope: &str, candidats: Vec<(String, String)>) -> Self {
+        let session = Self::allouer_session(&store, scope);
         Self {
             store,
             scope: scope.to_string(),
+            session,
             candidats,
             en_cours: Mutex::new(HashMap::new()),
+            compteurs: Mutex::new(Compteurs::default()),
         }
+    }
+
+    /// Alloue un numéro de session DURABLE par scope : `max(numero) + 1`.
+    /// L'identité d'un événement ne dépend donc PAS des graines du routeur.
+    fn allouer_session(store: &Arc<ObrainStore>, scope: &str) -> String {
+        let r = store
+            .execute_query(
+                "gql",
+                &format!(
+                    "MATCH (s:session) WHERE s.scope = '{}' RETURN s.numero AS n",
+                    echapper(scope)
+                ),
+                100_000,
+            )
+            .expect("lecture des sessions")
+            .get("rows")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .expect("réponse GQL sans `rows`");
+        let max = r
+            .iter()
+            .filter_map(|l| l.get(0).and_then(|v| v.as_i64()))
+            .max()
+            .unwrap_or(0);
+        let numero = max + 1;
+        let mut s = store.db().session();
+        s.begin_transaction().expect("begin");
+        let n = s.create_node(&["session"]);
+        s.set_node_property(n, "scope", Value::String(scope.into()));
+        s.set_node_property(n, "numero", Value::Int64(numero));
+        s.commit().expect("commit session");
+        numero.to_string()
+    }
+
+    fn compteurs(&self) -> Compteurs {
+        *self.compteurs.lock().unwrap()
     }
 
     fn ecrire_observation(
@@ -80,14 +138,14 @@ impl ApprisObrain {
         provider: &str,
         modele: &str,
         favorable: bool,
-    ) -> bool {
-        let evenement = cle_evenement(&self.scope, decision);
+    ) -> Ecriture {
+        let evenement = cle_evenement(&format!("{}/{}", self.scope, self.session), decision);
         let existe = self
             .store
             .execute_query(
                 "gql",
                 &format!(
-                    "MATCH (o:observation) WHERE o.evenement = '{}' RETURN o.evenement AS e",
+                    "MATCH (o:observation) WHERE o.evenement = '{}' RETURN o.provider AS p, o.modele AS m, o.favorable AS f, o.classe AS c",
                     echapper(&evenement)
                 ),
                 1,
@@ -98,7 +156,36 @@ impl ApprisObrain {
             .map(|a| !a.is_empty())
             .expect("réponse GQL sans `rows` : on ne l'assimile PAS à une absence");
         if existe {
-            return false;
+            // Identifiant déjà présent : comparer le CONTENU pour distinguer un rejeu
+            // identique d'un conflit (même identité, contenu incompatible).
+            let ligne = self
+                .store
+                .execute_query(
+                    "gql",
+                    &format!(
+                        "MATCH (o:observation) WHERE o.evenement = '{}' RETURN o.provider AS p, o.modele AS m, o.favorable AS f, o.classe AS c",
+                        echapper(&evenement)
+                    ),
+                    1,
+                )
+                .expect("relecture de l'observation existante")
+                .get("rows")
+                .and_then(|v| v.as_array())
+                .cloned()
+                .expect("réponse GQL sans `rows`")
+                .into_iter()
+                .next()
+                .expect("ligne attendue");
+            let sp = ligne.get(0).and_then(|v| v.as_str()).unwrap_or_default();
+            let sm = ligne.get(1).and_then(|v| v.as_str()).unwrap_or_default();
+            let sf = ligne.get(2).and_then(|v| v.as_bool()).unwrap_or(false);
+            let sc = ligne.get(3).and_then(|v| v.as_str()).unwrap_or_default();
+            if sp == provider && sm == modele && sf == favorable && sc == classe {
+                self.compteurs.lock().unwrap().rejeux += 1;
+                return Ecriture::RejeuIdentique;
+            }
+            self.compteurs.lock().unwrap().conflits += 1;
+            return Ecriture::Conflit;
         }
         let mut s = self.store.db().session();
         s.begin_transaction().expect("begin");
@@ -110,7 +197,8 @@ impl ApprisObrain {
         s.set_node_property(n, "modele", Value::String(modele.into()));
         s.set_node_property(n, "favorable", Value::Bool(favorable));
         s.commit().expect("commit");
-        true
+        self.compteurs.lock().unwrap().creees += 1;
+        Ecriture::Creee
     }
 
     /// Projection : (classe, provider, model) -> (alpha, beta, n), a priori 1/1.
@@ -218,13 +306,20 @@ impl Learning for ApprisObrain {
             Stop::Failed(_) => false,
             _ => return, // résultat inconnu : aucun bras nourri
         };
-        self.ecrire_observation(
+        match self.ecrire_observation(
             &id.to_string(),
             &classe,
             &p.provider_id,
             &p.model,
             favorable,
-        );
+        ) {
+            Ecriture::Creee | Ecriture::RejeuIdentique => {}
+            Ecriture::Conflit => {
+                // Même identité, contenu différent : ce n'est pas un rejeu, c'est un
+                // conflit. On le voit, on ne l'avale pas.
+                panic!("conflit d'observation : même identité, contenu incompatible");
+            }
+        }
     }
 }
 
@@ -335,14 +430,32 @@ fn l3_routeur_natif_avant_et_apres_reouverture() {
         "les statistiques doivent être reconstruites à l'identique après réouverture"
     );
 
-    // Rejeu d'une observation déjà écrite : refusée, projection inchangée.
+    // Après réouverture, le learner ouvre une NOUVELLE session : réécrire le même
+    // identifiant de décision est une expérience NOUVELLE (pas un rejeu) — c'est la
+    // sémantique voulue, et l'assertion le dit.
     let (c, p, m, ..) = stats_apres[0].clone();
-    let avant_rejeu = relu.projection();
-    assert!(
-        !relu.ecrire_observation(&premier_id, &c, &p, &m, true),
-        "un rejeu doit être refusé"
+    let avant = relu.projection();
+    assert_eq!(
+        relu.ecrire_observation(&premier_id, &c, &p, &m, true),
+        Ecriture::Creee,
+        "session différente => expérience nouvelle"
     );
-    assert_eq!(relu.projection(), avant_rejeu, "aucun double comptage");
+    assert_ne!(relu.projection(), avant, "la nouvelle observation compte");
+
+    // Rejeu VÉRITABLE : même session, même contenu => identique, sans double comptage.
+    let apres = relu.projection();
+    assert_eq!(
+        relu.ecrire_observation(&premier_id, &c, &p, &m, true),
+        Ecriture::RejeuIdentique,
+        "même session + même contenu => rejeu identique"
+    );
+    assert_eq!(relu.projection(), apres, "aucun double comptage");
+    // Conflit : même session, même identité, contenu incompatible.
+    assert_eq!(
+        relu.ecrire_observation(&premier_id, &c, &p, &m, false),
+        Ecriture::Conflit,
+        "même identité + contenu différent => conflit, pas rejeu"
+    );
 
     // Le routeur a bien convergé avant la fermeture.
     assert!(
@@ -451,10 +564,14 @@ fn routeur_pour(learning: Rc<dyn Learning>, graine: u128) -> TurnRouter {
 }
 
 /// Joue `draws` et rend la trajectoire des paires choisies.
-fn jouer(routeur: &TurnRouter, draws: &[[bool; 2]], depart: usize) -> Vec<(String, String)> {
+fn jouer(
+    routeur: &TurnRouter,
+    draws: &[[bool; 2]],
+    depart: usize,
+) -> (Vec<(String, String)>, usize) {
     let mut trajet = Vec::new();
-    for (i, ligne) in draws.iter().enumerate().skip(depart) {
-        let _ = i;
+    let mut decisions = 0usize;
+    for ligne in draws.iter().skip(depart) {
         let routed = executer(routeur.route(TurnInput {
             text: "hello",
             has_images: false,
@@ -469,6 +586,7 @@ fn jouer(routeur: &TurnRouter, draws: &[[bool; 2]], depart: usize) -> Vec<(Strin
         };
         let idx = if used.provider_id == "a" { 0 } else { 1 };
         trajet.push((used.provider_id.clone(), used.model.clone()));
+        decisions += 1;
         executer(routeur.record(&dec));
         let stop = if ligne[idx] {
             Stop::Done
@@ -477,7 +595,7 @@ fn jouer(routeur: &TurnRouter, draws: &[[bool; 2]], depart: usize) -> Vec<(Strin
         };
         executer(routeur.settle(&stop, None, true));
     }
-    trajet
+    (trajet, decisions)
 }
 
 #[test]
@@ -493,7 +611,7 @@ fn l3_continuite_trajectoires_l2_l3_et_coupure() {
         ..Default::default()
     });
     let r2 = routeur_pour(memo.clone(), 7);
-    let trajet_l2 = jouer(&r2, &draws, 0);
+    let (trajet_l2, _d2) = jouer(&r2, &draws, 0);
 
     // L3 continu
     let d1 = base.join("continu");
@@ -504,7 +622,7 @@ fn l3_continuite_trajectoires_l2_l3_et_coupure() {
         vec![("a".into(), "m1".into()), ("b".into(), "m2".into())],
     ));
     let r3 = routeur_pour(l1.clone(), 7);
-    let trajet_l3 = jouer(&r3, &draws, 0);
+    let (trajet_l3, _d3) = jouer(&r3, &draws, 0);
 
     // L3 avec fermeture / réouverture à mi-parcours
     let d2 = base.join("coupe");
@@ -517,7 +635,7 @@ fn l3_continuite_trajectoires_l2_l3_et_coupure() {
             vec![("a".into(), "m1".into()), ("b".into(), "m2".into())],
         ));
         let r = routeur_pour(l.clone(), 7);
-        trajet_coupe = jouer(&r, &draws[..coupe], 0);
+        trajet_coupe = jouer(&r, &draws[..coupe], 0).0;
         s.commit_wal().expect("flush");
     }
     {
@@ -530,7 +648,7 @@ fn l3_continuite_trajectoires_l2_l3_et_coupure() {
         // Le ROUTEUR est recréé (état et graines réinitialisés) : seules les
         // STATISTIQUES persistent. C'est le point que ce test mesure.
         let r = routeur_pour(l.clone(), 7);
-        trajet_coupe.extend(jouer(&r, &draws, coupe));
+        trajet_coupe.extend(jouer(&r, &draws, coupe).0);
         s.commit_wal().expect("flush");
     }
 
@@ -557,4 +675,87 @@ fn l3_continuite_trajectoires_l2_l3_et_coupure() {
     );
 
     let _ = std::fs::remove_dir_all(&base);
+}
+
+/// **Contre-épreuve de reprise** : les observations d'après-réouverture sont-elles
+/// réellement conservées, ou silencieusement prises pour des rejeux ?
+#[test]
+fn l3_reprise_conserve_les_nouvelles_observations() {
+    let d = std::env::temp_dir().join(format!("l3n_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&d);
+    let scope = "conv-reprise";
+    let cands = vec![
+        ("a".to_string(), "m1".to_string()),
+        ("b".to_string(), "m2".to_string()),
+    ];
+    let draws = tirages(3, 80);
+    let coupe = 40;
+
+    let compteurs_avant;
+    let decisions_avant;
+    {
+        let store = ObrainStore::open(&d).expect("ouverture");
+        let l = Rc::new(ApprisObrain::nouveau(store.clone(), scope, cands.clone()));
+        let r = routeur_pour(l.clone(), 3);
+        let (_, d_avant) = jouer(&r, &draws[..coupe], 0);
+        decisions_avant = d_avant;
+        compteurs_avant = l.compteurs();
+        println!(
+            "avant fermeture : créées={} rejeux={} conflits={}",
+            compteurs_avant.creees, compteurs_avant.rejeux, compteurs_avant.conflits
+        );
+        store.commit_wal().expect("flush");
+    }
+    let store = ObrainStore::open(&d).expect("réouverture");
+    let l = Rc::new(ApprisObrain::nouveau(store.clone(), scope, cands.clone()));
+    let r = routeur_pour(l.clone(), 3); // routeur RECRÉÉ (graines réinitialisées)
+    let (_, d_apres) = jouer(&r, &draws, coupe);
+    let decisions_apres = d_apres;
+    let compteurs_apres = l.compteurs();
+    let stats = l.projection();
+    let n_total: u32 = stats.iter().map(|(_, _, _, _, _, n)| *n).sum();
+    store.commit_wal().expect("flush");
+
+    println!(
+        "après reprise : créées={} rejeux={} conflits={} | observations distinctes={} somme_n={}",
+        compteurs_apres.creees,
+        compteurs_apres.rejeux,
+        compteurs_apres.conflits,
+        40 + compteurs_apres.creees,
+        n_total
+    );
+
+    // Deux causes distinctes, à ne pas confondre :
+    //  (a) tous les TOURS ne produisent pas de décision (routeur en `stay`) ;
+    //  (b) toutes les décisions ne produisent pas d'observation (le routeur peut
+    //      appeler settle avec `served = None` : moteur non servi).
+    // L'invariant qui compte pour la reprise est : AUCUNE observation perdue.
+    println!(
+        "tours→décisions : avant {decisions_avant}/{coupe}, après {decisions_apres}/{}",
+        draws.len() - coupe
+    );
+    println!(
+        "décisions→observations : avant {}/{decisions_avant}, après {}/{decisions_apres}",
+        compteurs_avant.creees, compteurs_apres.creees
+    );
+    assert!(
+        compteurs_avant.creees as usize <= decisions_avant,
+        "on ne peut pas créer plus d'observations que de décisions"
+    );
+    assert!(
+        compteurs_apres.creees as usize <= decisions_apres,
+        "idem après reprise"
+    );
+    assert_eq!(
+        compteurs_apres.rejeux, 0,
+        "aucune observation prise pour un rejeu"
+    );
+    assert_eq!(compteurs_apres.conflits, 0, "aucun conflit d'identité");
+    assert_eq!(
+        n_total,
+        compteurs_avant.creees as u32 + compteurs_apres.creees as u32,
+        "somme des n = toutes les observations créées (aucune perdue)"
+    );
+
+    let _ = std::fs::remove_dir_all(&d);
 }
