@@ -47,6 +47,7 @@ fn cand(provider: &str, model: &str, images: bool) -> this_harness::routing::Can
 struct Appris {
     bras: Mutex<HashMap<String, Vec<ArmStats>>>,
     en_cours: Mutex<HashMap<u128, String>>,
+    regles: Mutex<std::collections::HashSet<u128>>,
 }
 
 impl Appris {
@@ -64,6 +65,7 @@ impl Appris {
         Self {
             bras: Mutex::new(bras),
             en_cours: Mutex::new(HashMap::new()),
+            regles: Mutex::new(std::collections::HashSet::new()),
         }
     }
 }
@@ -96,6 +98,11 @@ impl Learning for Appris {
         let Some(class) = self.en_cours.lock().unwrap().remove(&id) else {
             return; // settle sans record : no-op (contrat)
         };
+        // Marque l'identifiant comme réglé : record → settle → record → settle ne
+        // nourrira qu'une fois.
+        if !self.regles.lock().unwrap().insert(id) {
+            return; // déjà réglé : rejeu
+        }
         let Some(p) = served else {
             return; // moteur jamais joint : aucun bras nourri (contrat)
         };
@@ -202,12 +209,16 @@ fn campagne(learning: Rc<dyn Learning>, graine: u128, n: usize) -> (usize, usize
 
 #[test]
 fn l2_depasse_aucun_apprentissage_sur_la_fiabilite_transport() {
+    let mut total2 = 0usize;
+    let mut total0 = 0usize;
     for graine in [1u128, 7, 42, 99] {
         let appris = Rc::new(Appris::new());
         let (s2, a2) = campagne(appris, graine, 400);
+        total2 += s2;
 
         let temoin = Rc::new(this_harness::routing::NoLearning);
         let (s0, a0) = campagne(temoin, graine, 400);
+        total0 += s0;
 
         // L1 = MemoryLearning : journalise, ne révise pas. Doit ~= L0 (aucun apprentissage).
         let ml = MemoryLearning::new();
@@ -228,11 +239,13 @@ fn l2_depasse_aucun_apprentissage_sur_la_fiabilite_transport() {
         );
         // On n'exige pas que L2 gagne sur CHAQUE graine : on rapporte, et on vérifie
         // seulement qu'il n'est pas systématiquement battu.
-        assert!(
-            s2 >= s0,
-            "graine {graine} : L2 {s2} < témoin {s0} (a : {a2} vs {a0})"
-        );
+        // On ne fait pas d'invariant par graine : c'est une mesure STATISTIQUE.
+        // On n'exige rien à l'échelle d'une graine isolée.
     }
+    assert!(
+        total2 > total0,
+        "sur l'ensemble des graines, L2 {total2} ne bat pas le témoin {total0}"
+    );
 }
 
 /// **Contrôle élémentaire d'une seule boucle** : décision produite, paire sélectionnée,
@@ -412,5 +425,50 @@ fn interruption_ne_recompense_pas() {
     assert_eq!(
         servi.beta, 1.0,
         "aucune pénalité non plus : résultat inconnu"
+    );
+}
+
+/// Contre-épreuve d'idempotence : record → settle → record → settle (même id rejoué
+/// après règlement) ne nourrit qu'une fois.
+#[test]
+fn record_settle_record_settle_ne_nourrit_qu_une_fois() {
+    let appris = Appris::new();
+    let pool = vec![cand("a", "m1", true), cand("b", "m2", true)];
+    let spec = RouterSpec::new(
+        Rc::new(MemoryPool::new(pool)),
+        Rc::new(SequenceSeeds::from(1u128)),
+        "a".to_string(),
+        "m1".to_string(),
+    )
+    .learning(Rc::new(Appris::new()))
+    .auto()
+    .settings(RoutingSettings {
+        exploration_epsilon: 0.0,
+        ..Default::default()
+    });
+    let routeur = TurnRouter::new(spec);
+    let routed = run(routeur.route(TurnInput {
+        text: "hello",
+        has_images: false,
+        hints: Default::default(),
+        honored: true,
+    }));
+    let d = routed.decision.clone().unwrap();
+    let used = d.used.clone().unwrap();
+
+    run(appris.record(&d));
+    run(appris.settle(d.id, Some(&used), &Stop::Done, None));
+    run(appris.record(&d)); // rejeu du même identifiant après règlement
+    run(appris.settle(d.id, Some(&used), &Stop::Done, None));
+
+    let bras = run(appris.arms("chat.general"));
+    let servi = bras
+        .iter()
+        .find(|a| a.key.provider_id == used.provider_id && a.key.model == used.model)
+        .unwrap();
+    assert_eq!(
+        servi.n, 1,
+        "record → settle → record → settle ne doit nourrir qu'une fois (n={})",
+        servi.n
     );
 }
