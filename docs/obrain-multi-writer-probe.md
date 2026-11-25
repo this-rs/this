@@ -5,7 +5,7 @@ this-rs** : la sonde appelle `obrain_engine::ObrainDB` directement, sans passer 
 le bail d'écriture de `src/storage/writer_lease.rs` (c'est l'intention — le bail
 interdit deux écrivains, la sonde veut justement ouvrir deux écrivains).
 
-- **Sonde** : `tests/multi_ecrivain_sonde.rs` (ce dépôt).
+- **Sonde** : `tests/multi_writer_probe.rs` (ce dépôt).
 - **obrain épinglé** : `99e53f21bc443ba8eecd0dfc22bbf270fe1fa3af` (rev de `Cargo.toml`).
 - **Clone de référence** : `/Users/triviere/projects/obrain/obrain-db` à `62f650e0`
   (1 commit devant le pin, même API).
@@ -17,12 +17,12 @@ interdit deux écrivains, la sonde veut justement ouvrir deux écrivains).
 
 ```bash
 export RUSTUP_HOME=/Users/triviere/.rustup CARGO_HOME=/Users/triviere/.cargo PATH=/Users/triviere/.cargo/bin:$PATH
-cargo +1.99.1 test -p this-rs --features obrain --test multi_ecrivain_sonde -- --ignored --nocapture
+cargo +1.99.1 test -p this-rs --features obrain --test multi_writer_probe -- --ignored --nocapture
 ```
 
-Le test principal `sonde_multi_ecrivain` est `#[ignore]` (il ne pèse pas sur la suite
+Le test principal `multi_writer_probe` est `#[ignore]` (il ne pèse pas sur la suite
 ordinaire). Il se relance lui-même en sous-processus (`std::env::current_exe()` +
-`--ignored --exact sonde_multi_ecrivain --nocapture`), rôle choisi par `SONDE_ROLE`,
+`--ignored --exact multi_writer_probe --nocapture`), rôle choisi par `SONDE_ROLE`,
 et coordonne les écrivains par lignes sur stdout et fichiers-drapeaux. Durée bornée :
 ~1,6 s par passe, répertoires temporaires `tempfile` nettoyés.
 
@@ -124,11 +124,11 @@ une valeur longue, A ouvre (cache `arena_end`), B écrit 300 octets et ferme, A 
 
 ## Reproduction minimale
 
-Fichier : `tests/multi_ecrivain_sonde.rs` (rôle `d_nous` / `d_pair`, scénario D).
+Fichier : `tests/multi_writer_probe.rs` (rôle `d_nous` / `d_pair`, scénario D).
 Commande unique rejouant tout :
 
 ```bash
-cargo +1.99.1 test -p this-rs --features obrain --test multi_ecrivain_sonde -- --ignored --nocapture
+cargo +1.99.1 test -p this-rs --features obrain --test multi_writer_probe -- --ignored --nocapture
 ```
 
 Le défaut #387 est reproductible en isolant le scénario D : un écrivain ouvre
@@ -186,7 +186,7 @@ change, c'est la fin du no-op silencieux — sur les nœuds **et** sur les arêt
 > assert_eq!(db.get_node_property(NodeId(id), &PropertyKey::new("cle")), None); // silencieux
 > ```
 >
-> **Mesure** (sonde `this-rs/tests/multi_ecrivain_sonde.rs`, scénario D, obrain
+> **Mesure** (sonde `this-rs/tests/multi_writer_probe.rs`, scénario D, obrain
 > `99e53f21`) : `get_node(id)` rend `None` (entité invisible), l'écriture ne lève
 > aucune erreur, et après réouverture EXCLUSIVE la propriété est **absente**
 > (`cle_du_pair = None`). La borne (b) de `docs/LIMITES-v0.0.1.md` (ligne 18) est donc

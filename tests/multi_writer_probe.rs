@@ -5,7 +5,7 @@
 //! lance explicitement :
 //!
 //!     cargo +1.99.1 test -p this-rs --features obrain \
-//!         --test multi_ecrivain_sonde -- --ignored --nocapture
+//!         --test multi_writer_probe -- --ignored --nocapture
 //!
 //! Il se relance LUI-MÊME en sous-processus (rôle choisi par `SONDE_ROLE`) pour
 //! produire de VRAIS écrivains concurrents — pas des threads : les atomiques du
@@ -37,7 +37,7 @@ use obrain_engine::{GraphStore, ObrainDB};
 
 const ROLE: &str = "SONDE_ROLE";
 const DIR: &str = "SONDE_DIR";
-const TEST: &str = "sonde_multi_ecrivain";
+const TEST: &str = "multi_writer_probe";
 
 /// Nœuds par écrivain du scénario A.
 const N_A: u64 = 200;
@@ -45,25 +45,25 @@ const N_A: u64 = 200;
 const K_B: u64 = 120;
 /// Écritures de la clé partagée (scénario B).
 const M_B: u64 = 150;
-/// Clés par variante du scénario C.
+/// Clés par variant du scénario C.
 const K_C: u64 = 120;
 /// Longueur d'une valeur longue : > 256 octets → arène des blobs (`dat`).
-const TAILLE_LONGUE: usize = 600;
+const LONG_VALUE_SIZE: usize = 600;
 
 fn role() -> Option<String> {
     std::env::var(ROLE).ok()
 }
 
-fn env_obligatoire(cle: &str) -> String {
+fn required_env(cle: &str) -> String {
     std::env::var(cle).unwrap_or_else(|_| panic!("{cle} manquant dans l'enfant"))
 }
 
-fn annoncer(ligne: &str) {
+fn announce(ligne: &str) {
     println!("{ligne}");
     std::io::stdout().flush().ok();
 }
 
-fn attendre_fichier(p: &Path, quoi: &str) {
+fn wait_for_file(p: &Path, quoi: &str) {
     let debut = Instant::now();
     while !p.exists() {
         assert!(
@@ -75,18 +75,18 @@ fn attendre_fichier(p: &Path, quoi: &str) {
     }
 }
 
-const DELAI_LIGNE: Duration = Duration::from_secs(120);
+const LINE_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// Un sous-processus relancé depuis ce même binaire de test, avec son stdout
 /// canalisé pour la synchronisation par lignes.
-struct Enfant {
+struct Writer {
     process: Child,
     lignes: std::sync::mpsc::Receiver<String>,
     _lecteur: std::thread::JoinHandle<()>,
 }
 
-impl Enfant {
-    fn lancer(role: &str, dir: &Path, extras: &[(&str, String)]) -> Self {
+impl Writer {
+    fn spawn(role: &str, dir: &Path, extras: &[(&str, String)]) -> Self {
         let moi = std::env::current_exe().expect("current_exe");
         let mut cmd = Command::new(moi);
         cmd.args(["--ignored", "--exact", TEST, "--nocapture"])
@@ -97,10 +97,10 @@ impl Enfant {
             cmd.env(k, v);
         }
         let mut process = cmd.spawn().expect("lancer l'enfant");
-        let sortie = process.stdout.take().expect("stdout de l'enfant");
+        let output = process.stdout.take().expect("stdout de l'enfant");
         let (tx, rx) = std::sync::mpsc::channel();
         let lecteur = std::thread::spawn(move || {
-            for ligne in std::io::BufReader::new(sortie)
+            for ligne in std::io::BufReader::new(output)
                 .lines()
                 .map_while(Result::ok)
             {
@@ -116,16 +116,16 @@ impl Enfant {
         }
     }
 
-    fn attendre_ligne(&mut self, prefixe: &str) -> String {
+    fn wait_for_line(&mut self, prefixe: &str) -> String {
         loop {
-            match self.lignes.recv_timeout(DELAI_LIGNE) {
+            match self.lignes.recv_timeout(LINE_TIMEOUT) {
                 Ok(l) => {
                     if let Some(reste) = l.strip_prefix(prefixe) {
                         return reste.trim().to_string();
                     }
                 }
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                    panic!("enfant muet depuis {DELAI_LIGNE:?} en attendant « {prefixe} »")
+                    panic!("enfant muet depuis {LINE_TIMEOUT:?} en attendant « {prefixe} »")
                 }
                 Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
                     panic!("enfant terminé sans « {prefixe} »")
@@ -136,7 +136,7 @@ impl Enfant {
 
     /// Attend la fin propre, avec une borne : un enfant bloqué sur un verrou
     /// doit échouer, pas figer la sonde.
-    fn terminer(mut self) {
+    fn finish(mut self) {
         let echeance = Instant::now() + Duration::from_secs(120);
         loop {
             if let Some(statut) = self.process.try_wait().expect("try_wait") {
@@ -164,8 +164,8 @@ impl Enfant {
 // Valeurs de mesure
 // ---------------------------------------------------------------------------
 
-fn longue(proprietaire: &str, i: u64) -> String {
-    format!("{proprietaire}:{i}:{}", "x".repeat(TAILLE_LONGUE))
+fn long_value(proprietaire: &str, i: u64) -> String {
+    format!("{proprietaire}:{i}:{}", "x".repeat(LONG_VALUE_SIZE))
 }
 
 fn vecteur(proprietaire: &str, i: u64) -> Vec<f32> {
@@ -181,14 +181,14 @@ fn verifier_vecteur(v: &[f32], proprietaire: &str, i: u64) -> bool {
 
 /// Décode `{proprietaire}:{i}:…` ; `None` si la valeur n'est pas un préfixe
 /// décodable (valeur d'un autre nœud tronquée, corrompue, etc.).
-fn decode_longue(s: &str) -> Option<(String, u64)> {
+fn decode_long(s: &str) -> Option<(String, u64)> {
     let (o, reste) = s.split_once(':')?;
     let (idx, _) = reste.split_once(':')?;
     Some((o.to_string(), idx.parse().ok()?))
 }
 
 /// Parse la ligne « IDS 1,2,3 » d'un enfant.
-fn ids_depuis(ligne: &str) -> Vec<u64> {
+fn ids_from(ligne: &str) -> Vec<u64> {
     ligne
         .split(',')
         .filter(|s| !s.is_empty())
@@ -196,21 +196,25 @@ fn ids_depuis(ligne: &str) -> Vec<u64> {
         .collect()
 }
 
-fn poser_noeud(db: &ObrainDB, proprietaire: &str, i: u64) -> NodeId {
+fn put_node(db: &ObrainDB, proprietaire: &str, i: u64) -> NodeId {
     let id = db.create_node(&["Sonde"]);
     db.set_node_property(id, "_proprietaire", Value::String(proprietaire.into()));
     db.set_node_property(id, "_index", Value::Int64(i as i64));
-    db.set_node_property(id, "_long", Value::String(longue(proprietaire, i).into()));
+    db.set_node_property(
+        id,
+        "_long",
+        Value::String(long_value(proprietaire, i).into()),
+    );
     db.set_node_property(id, "_vec", Value::Vector(vecteur(proprietaire, i).into()));
     id
 }
 
 /// Crée une base neuve, y pose un nœud (dimensionne les zones ET initialise la
 /// colonne blob / la colonne de vecteurs), puis ferme.
-fn creer_base(dir: &Path) {
+fn create_base(dir: &Path) {
     let db = ObrainDB::open(dir).expect("open (créateur exclusif)");
     let id = db.create_node(&["Sonde"]);
-    db.set_node_property(id, "_long", Value::String(longue("init", 0).into()));
+    db.set_node_property(id, "_long", Value::String(long_value("init", 0).into()));
     db.set_node_property(id, "_vec", Value::Vector(vec![0.0f32; 16].into()));
     db.close().expect("close (créateur)");
 }
@@ -225,13 +229,13 @@ fn creer_base(dir: &Path) {
 /// distinguer « page de propriétés écrasée » (MP-3) d'« arène de blobs écrasée ».
 fn role_a(dir: &Path, proprietaire: &str, propre: bool) {
     let db = ObrainDB::open_shared_write(dir).expect("open_shared_write (A)");
-    let n: u64 = env_obligatoire("SONDE_N").parse().expect("SONDE_N");
+    let n: u64 = required_env("SONDE_N").parse().expect("SONDE_N");
     let mut ids = Vec::with_capacity(n as usize);
     for i in 0..n {
-        ids.push(poser_noeud(&db, proprietaire, i).0);
+        ids.push(put_node(&db, proprietaire, i).0);
     }
     let liste = ids.iter().map(u64::to_string).collect::<Vec<_>>().join(",");
-    annoncer(&format!("IDS {liste}"));
+    announce(&format!("IDS {liste}"));
     if propre {
         db.close().expect("close (A propre)");
         return;
@@ -240,7 +244,7 @@ fn role_a(dir: &Path, proprietaire: &str, propre: bool) {
     // tue ce processus au milieu de cette boucle.
     let mut i = n;
     loop {
-        poser_noeud(&db, proprietaire, i);
+        put_node(&db, proprietaire, i);
         i += 1;
         std::thread::sleep(Duration::from_micros(50));
     }
@@ -250,10 +254,10 @@ fn role_a(dir: &Path, proprietaire: &str, propre: bool) {
 /// distinctes + une clé martelée en commun.
 fn role_b(dir: &Path, proprietaire: &str) {
     let db = ObrainDB::open_shared_write(dir).expect("open_shared_write (B)");
-    let noeud: u64 = env_obligatoire("SONDE_NOEUD").parse().expect("SONDE_NOEUD");
-    let k: u64 = env_obligatoire("SONDE_K").parse().expect("SONDE_K");
-    let m: u64 = env_obligatoire("SONDE_M").parse().expect("SONDE_M");
-    let id = NodeId(noeud);
+    let node: u64 = required_env("SONDE_NODE").parse().expect("SONDE_NODE");
+    let k: u64 = required_env("SONDE_K").parse().expect("SONDE_K");
+    let m: u64 = required_env("SONDE_M").parse().expect("SONDE_M");
+    let id = NodeId(node);
     for i in 0..k {
         let cle = format!("{proprietaire}{i}");
         db.set_node_property(
@@ -270,19 +274,19 @@ fn role_b(dir: &Path, proprietaire: &str) {
         );
     }
     db.close().expect("close (B)");
-    annoncer("FINI");
+    announce("FINI");
 }
 
 /// C — import en lot contre écrivain unitaire, même entité (#386). Le départ
-/// est synchronisé par un drapeau pour forcer le recouvrement.
-fn role_c(dir: &Path, variante: &str) {
+/// est synchronisé par un flag pour forcer le recouvrement.
+fn role_c(dir: &Path, variant: &str) {
     let db = ObrainDB::open_shared_write(dir).expect("open_shared_write (C)");
-    let noeud: u64 = env_obligatoire("SONDE_NOEUD").parse().expect("SONDE_NOEUD");
-    let k: u64 = env_obligatoire("SONDE_K").parse().expect("SONDE_K");
-    let go = PathBuf::from(env_obligatoire("SONDE_GO"));
-    annoncer("PRET");
-    attendre_fichier(&go, "le départ du scénario C");
-    match variante {
+    let node: u64 = required_env("SONDE_NODE").parse().expect("SONDE_NODE");
+    let k: u64 = required_env("SONDE_K").parse().expect("SONDE_K");
+    let go = PathBuf::from(required_env("SONDE_GO"));
+    announce("PRET");
+    wait_for_file(&go, "le départ du scénario C");
+    match variant {
         "lot" => {
             let cles: Vec<String> = (0..k).map(|i| format!("L{i}")).collect();
             let vals: Vec<Value> = (0..k)
@@ -293,75 +297,73 @@ fn role_c(dir: &Path, variante: &str) {
                 .zip(vals)
                 .map(|(c, v)| (c.as_str(), v))
                 .collect();
-            db.bulk_import_props(noeud as u32, &[props])
+            db.bulk_import_props(node as u32, &[props])
                 .expect("bulk_import_props (C)");
         }
         "unitaire" => {
             for i in 0..k {
                 let cle = format!("U{i}");
-                db.set_node_property(NodeId(noeud), &cle, Value::String(format!("U-{i}").into()));
+                db.set_node_property(NodeId(node), &cle, Value::String(format!("U-{i}").into()));
             }
         }
-        autre => panic!("variante C inconnue : {autre}"),
+        autre => panic!("variant C inconnue : {autre}"),
     }
     db.close().expect("close (C)");
-    annoncer("FINI");
+    announce("FINI");
 }
 
 /// D — un pair crée une entité APRÈS notre ouverture (#387). « nous » ouvre
 /// d'abord, attend l'id du nœud créé par le pair, mesure s'il le VOIT, puis
 /// écrit dessus.
-fn role_d(dir: &Path, variante: &str) {
-    match variante {
+fn role_d(dir: &Path, variant: &str) {
+    match variant {
         "nous" => {
             let db = ObrainDB::open_shared_write(dir).expect("open_shared_write (D nous)");
-            let id_fichier = PathBuf::from(env_obligatoire("SONDE_ID"));
-            annoncer("PRET");
-            attendre_fichier(&id_fichier, "l'id du nœud créé par le pair");
-            let noeud: u64 = std::fs::read_to_string(&id_fichier)
+            let id_file = PathBuf::from(required_env("SONDE_ID"));
+            announce("PRET");
+            wait_for_file(&id_file, "l'id du nœud créé par le pair");
+            let node: u64 = std::fs::read_to_string(&id_file)
                 .expect("lire l'id")
                 .trim()
                 .parse()
                 .expect("id valide");
-            let vu = db.get_node(NodeId(noeud)).is_some();
+            let vu = db.get_node(NodeId(node)).is_some();
             db.set_node_property(
-                NodeId(noeud),
+                NodeId(node),
                 "cle_du_pair",
                 Value::String("ecrite_par_nous".into()),
             );
             let lu = db
                 .substrate_handle()
-                .and_then(|s| s.get_node_property(NodeId(noeud), &PropertyKey::new("cle_du_pair")))
+                .and_then(|s| s.get_node_property(NodeId(node), &PropertyKey::new("cle_du_pair")))
                 .is_some();
-            annoncer(&format!("VU {} LU {}", vu as u8, lu as u8));
+            announce(&format!("VU {} LU {}", vu as u8, lu as u8));
             db.close().expect("close (D nous)");
         }
         "pair" => {
             let db = ObrainDB::open_shared_write(dir).expect("open_shared_write (D pair)");
             let id = db.create_node(&["Sonde"]);
-            let id_fichier = PathBuf::from(env_obligatoire("SONDE_ID"));
-            std::fs::write(&id_fichier, id.0.to_string()).expect("écrire l'id du nœud");
+            let id_file = PathBuf::from(required_env("SONDE_ID"));
+            std::fs::write(&id_file, id.0.to_string()).expect("écrire l'id du nœud");
             db.close().expect("close (D pair)");
-            annoncer("FINI");
+            announce("FINI");
         }
-        autre => panic!("variante D inconnue : {autre}"),
+        autre => panic!("variant D inconnue : {autre}"),
     }
 }
 
 /// E — arène des blobs : deux écrivains VIVANTS écrivent des valeurs longues.
 /// « e_b » écrit une valeur courte-routée-blob (300 octets) et ferme ; « e_lit »
-/// rouvre et déverse les valeurs longues dans un fichier.
-fn role_e(dir: &Path, variante: &str) {
-    match variante {
+/// rouvre et déverse les valeurs longues dans un file.
+fn role_e(dir: &Path, variant: &str) {
+    match variant {
         "e_b" => {
             let db = ObrainDB::open_shared_write(dir).expect("open_shared_write (E B)");
-            let n: usize = env_obligatoire("SONDE_TAILLE")
-                .parse()
-                .expect("SONDE_TAILLE");
-            let c: char = env_obligatoire("SONDE_CAR").parse().expect("SONDE_CAR");
+            let n: usize = required_env("SONDE_SIZE").parse().expect("SONDE_SIZE");
+            let c: char = required_env("SONDE_CHAR").parse().expect("SONDE_CHAR");
             let id = db.create_node(&["Sonde"]);
             db.set_node_property(id, "corps", Value::String(c.to_string().repeat(n).into()));
-            annoncer(&format!("ID {}", id.0));
+            announce(&format!("ID {}", id.0));
             db.close().expect("close (E B)");
         }
         "e_lit" => {
@@ -371,7 +373,7 @@ fn role_e(dir: &Path, variante: &str) {
             let resultat = db
                 .execute("MATCH (n:Sonde) RETURN id(n), n.corps")
                 .expect("requête (E)");
-            let mut sortie = String::new();
+            let mut output = String::new();
             for ligne in &resultat.rows {
                 let id = match ligne.first() {
                     Some(Value::Int64(i)) => i.to_string(),
@@ -381,62 +383,62 @@ fn role_e(dir: &Path, variante: &str) {
                     Some(Value::String(s)) => s.to_string(),
                     autre => format!("<{autre:?}>"),
                 };
-                sortie.push_str(&format!("{id}\t{corps}\n"));
+                output.push_str(&format!("{id}\t{corps}\n"));
             }
             db.close().expect("close relecture (E)");
-            std::fs::write(dir.parent().expect("parent").join("lecture-e.txt"), sortie)
+            std::fs::write(dir.parent().expect("parent").join("lecture-e.txt"), output)
                 .expect("écrire lecture-e");
-            annoncer("FINI");
+            announce("FINI");
         }
-        autre => panic!("variante E inconnue : {autre}"),
+        autre => panic!("variant E inconnue : {autre}"),
     }
 }
 
 /// F — une ARÊTE créée par un pair APRÈS notre ouverture : le pendant du
 /// scénario D côté zone des **arêtes**. #398 (correctif de #387) annonce ce côté
 /// « symétrique mais aucun test inter-processus de bout en bout » — c'est
-/// exactement ce que cette variante mesure.
-fn role_f(dir: &Path, variante: &str) {
-    match variante {
+/// exactement ce que cette variant mesure.
+fn role_f(dir: &Path, variant: &str) {
+    match variant {
         "nous" => {
             let db = ObrainDB::open_shared_write(dir).expect("open_shared_write (F nous)");
-            let fichier = PathBuf::from(env_obligatoire("SONDE_ID"));
-            annoncer("PRET");
-            attendre_fichier(&fichier, "l'id de l'arête créée par le pair");
-            let arete: u64 = std::fs::read_to_string(&fichier)
+            let file = PathBuf::from(required_env("SONDE_ID"));
+            announce("PRET");
+            wait_for_file(&file, "l'id de l'arête créée par le pair");
+            let edge: u64 = std::fs::read_to_string(&file)
                 .expect("lire l'id d'arête")
                 .trim()
                 .parse()
                 .expect("id d'arête valide");
-            let vu = db.get_edge(EdgeId(arete)).is_some();
+            let vu = db.get_edge(EdgeId(edge)).is_some();
             db.set_edge_property(
-                EdgeId(arete),
+                EdgeId(edge),
                 "cle_du_pair",
                 Value::String("ecrite_par_nous".into()),
             );
             let lu = db
                 .substrate_handle()
-                .and_then(|s| s.get_edge_property(EdgeId(arete), &PropertyKey::new("cle_du_pair")))
+                .and_then(|s| s.get_edge_property(EdgeId(edge), &PropertyKey::new("cle_du_pair")))
                 .is_some();
-            annoncer(&format!("VU {} LU {}", vu as u8, lu as u8));
+            announce(&format!("VU {} LU {}", vu as u8, lu as u8));
             db.close().expect("close (F nous)");
         }
         "pair" => {
             let db = ObrainDB::open_shared_write(dir).expect("open_shared_write (F pair)");
             let a = db.create_node(&["Sonde"]);
             let b = db.create_node(&["Sonde"]);
-            let arete = db.create_edge(a, b, "Sonde");
-            let fichier = PathBuf::from(env_obligatoire("SONDE_ID"));
-            std::fs::write(&fichier, arete.0.to_string()).expect("écrire l'id d'arête");
+            let edge = db.create_edge(a, b, "Sonde");
+            let file = PathBuf::from(required_env("SONDE_ID"));
+            std::fs::write(&file, edge.0.to_string()).expect("écrire l'id d'arête");
             db.close().expect("close (F pair)");
-            annoncer("FINI");
+            announce("FINI");
         }
-        autre => panic!("variante F inconnue : {autre}"),
+        autre => panic!("variant F inconnue : {autre}"),
     }
 }
 
-fn jouer_role(r: &str) {
-    let dir = PathBuf::from(env_obligatoire(DIR));
+fn play_role(r: &str) {
+    let dir = PathBuf::from(required_env(DIR));
     match r {
         "a_a" => role_a(&dir, "A", false),
         "a_b" => role_a(&dir, "B", true),
@@ -461,15 +463,15 @@ fn jouer_role(r: &str) {
 fn scenario_a() {
     let td = tempfile::tempdir().expect("tempdir A");
     let dir = td.path().join("store-a");
-    creer_base(&dir);
+    create_base(&dir);
 
-    let mut a = Enfant::lancer("a_a", &dir, &[("SONDE_N", N_A.to_string())]);
-    let mut b = Enfant::lancer("a_b", &dir, &[("SONDE_N", N_A.to_string())]);
-    let ids_a = ids_depuis(&a.attendre_ligne("IDS "));
-    let ids_b = ids_depuis(&b.attendre_ligne("IDS "));
-    assert_eq!(ids_a.len(), N_A as usize, "A doit annoncer ses {N_A} ids");
-    assert_eq!(ids_b.len(), N_A as usize, "B doit annoncer ses {N_A} ids");
-    b.terminer();
+    let mut a = Writer::spawn("a_a", &dir, &[("SONDE_N", N_A.to_string())]);
+    let mut b = Writer::spawn("a_b", &dir, &[("SONDE_N", N_A.to_string())]);
+    let ids_a = ids_from(&a.wait_for_line("IDS "));
+    let ids_b = ids_from(&b.wait_for_line("IDS "));
+    assert_eq!(ids_a.len(), N_A as usize, "A doit announce ses {N_A} ids");
+    assert_eq!(ids_b.len(), N_A as usize, "B doit announce ses {N_A} ids");
+    b.finish();
     // Tue A pendant qu'il continue d'écrire (boucle sans fin, jamais flushé).
     a.tuer();
 
@@ -478,7 +480,7 @@ fn scenario_a() {
 
     // (propriétaire, ids) → compteurs.
     struct Mesure {
-        noeuds_manquants: i64,
+        nodes_manquants: i64,
         courtes_fausses: i64,
         longues_mauvaises: i64,
         longues_manquantes: i64,
@@ -489,7 +491,7 @@ fn scenario_a() {
     let mut res: Vec<(&str, Mesure)> = Vec::new();
     for (proprietaire, ids) in [("A", &ids_a), ("B", &ids_b)] {
         let mut m = Mesure {
-            noeuds_manquants: 0,
+            nodes_manquants: 0,
             courtes_fausses: 0,
             longues_mauvaises: 0,
             longues_manquantes: 0,
@@ -504,7 +506,7 @@ fn scenario_a() {
             // Nœud absent après la réouverture (record non durable) : tout est
             // compté « manquant », on ne peut rien lire dessus.
             if prop.is_none() || idx.is_none() {
-                m.noeuds_manquants += 1;
+                m.nodes_manquants += 1;
                 continue;
             }
             let attendu_courte = Value::String(proprietaire.into());
@@ -516,7 +518,7 @@ fn scenario_a() {
             }
 
             match sub.get_node_property(nid, &PropertyKey::new("_long")) {
-                Some(Value::String(s)) => match decode_longue(&s) {
+                Some(Value::String(s)) => match decode_long(&s) {
                     Some((o, i)) if o == proprietaire && i == pos as u64 => {}
                     Some((o, i)) => {
                         m.longues_mauvaises += 1;
@@ -554,7 +556,7 @@ fn scenario_a() {
     let mut vecteurs_mauvais = 0i64;
     let mut vecteurs_manquants = 0i64;
     for (_, m) in &res {
-        manquants += m.noeuds_manquants;
+        manquants += m.nodes_manquants;
         courtes_fausses += m.courtes_fausses;
         longues_mauvaises += m.longues_mauvaises;
         longues_manquantes += m.longues_manquantes;
@@ -567,7 +569,7 @@ fn scenario_a() {
         .map(|(p, m)| {
             format!(
                 "{p}:manquants={} courtes_fausses={} longues_mauvaises={} vecteurs_mauvais={}",
-                m.noeuds_manquants, m.courtes_fausses, m.longues_mauvaises, m.vecteurs_mauvais
+                m.nodes_manquants, m.courtes_fausses, m.longues_mauvaises, m.vecteurs_mauvais
             )
         })
         .collect::<Vec<_>>()
@@ -584,38 +586,38 @@ fn scenario_a() {
 fn scenario_b() {
     let td = tempfile::tempdir().expect("tempdir B");
     let dir = td.path().join("store-b");
-    let noeud = {
+    let node = {
         let db = ObrainDB::open(&dir).expect("open (B)");
         let id = db.create_node(&["Sonde"]);
         db.close().expect("close (B)");
         id.0
     };
-    let mut a = Enfant::lancer(
+    let mut a = Writer::spawn(
         "b_a",
         &dir,
         &[
-            ("SONDE_NOEUD", noeud.to_string()),
+            ("SONDE_NODE", node.to_string()),
             ("SONDE_K", K_B.to_string()),
             ("SONDE_M", M_B.to_string()),
         ],
     );
-    let mut b = Enfant::lancer(
+    let mut b = Writer::spawn(
         "b_b",
         &dir,
         &[
-            ("SONDE_NOEUD", noeud.to_string()),
+            ("SONDE_NODE", node.to_string()),
             ("SONDE_K", K_B.to_string()),
             ("SONDE_M", M_B.to_string()),
         ],
     );
-    a.attendre_ligne("FINI");
-    b.attendre_ligne("FINI");
-    a.terminer();
-    b.terminer();
+    a.wait_for_line("FINI");
+    b.wait_for_line("FINI");
+    a.finish();
+    b.finish();
 
     let db = ObrainDB::open(&dir).expect("réouverture exclusive (B)");
     let sub = db.substrate_handle().expect("substrate_handle (B)");
-    let id = NodeId(noeud);
+    let id = NodeId(node);
     let mut pertes = 0i64;
     for proprietaire in ["A", "B"] {
         for i in 0..K_B {
@@ -644,7 +646,7 @@ fn scenario_b() {
 fn scenario_c() {
     let td = tempfile::tempdir().expect("tempdir C");
     let dir = td.path().join("store-c");
-    let noeud = {
+    let node = {
         let db = ObrainDB::open(&dir).expect("open (C)");
         let id = db.create_node(&["Sonde"]);
         db.set_node_property(id, "base", Value::String("presente".into()));
@@ -652,35 +654,35 @@ fn scenario_c() {
         id.0
     };
     let go = td.path().join("go-c");
-    let mut lot = Enfant::lancer(
+    let mut lot = Writer::spawn(
         "c_lot",
         &dir,
         &[
-            ("SONDE_NOEUD", noeud.to_string()),
+            ("SONDE_NODE", node.to_string()),
             ("SONDE_K", K_C.to_string()),
             ("SONDE_GO", go.display().to_string()),
         ],
     );
-    let mut unitaire = Enfant::lancer(
+    let mut unitaire = Writer::spawn(
         "c_unitaire",
         &dir,
         &[
-            ("SONDE_NOEUD", noeud.to_string()),
+            ("SONDE_NODE", node.to_string()),
             ("SONDE_K", K_C.to_string()),
             ("SONDE_GO", go.display().to_string()),
         ],
     );
-    lot.attendre_ligne("PRET");
-    unitaire.attendre_ligne("PRET");
-    std::fs::write(&go, b"go").expect("poser le drapeau (C)");
-    lot.attendre_ligne("FINI");
-    unitaire.attendre_ligne("FINI");
-    lot.terminer();
-    unitaire.terminer();
+    lot.wait_for_line("PRET");
+    unitaire.wait_for_line("PRET");
+    std::fs::write(&go, b"go").expect("poser le flag (C)");
+    lot.wait_for_line("FINI");
+    unitaire.wait_for_line("FINI");
+    lot.finish();
+    unitaire.finish();
 
     let db = ObrainDB::open(&dir).expect("réouverture exclusive (C)");
     let sub = db.substrate_handle().expect("substrate_handle (C)");
-    let id = NodeId(noeud);
+    let id = NodeId(node);
     let mut pertes = 0i64;
     for i in 0..K_C {
         let cle_l = format!("L{i}");
@@ -713,33 +715,33 @@ fn scenario_c() {
 fn scenario_d() {
     let td = tempfile::tempdir().expect("tempdir D");
     let dir = td.path().join("store-d");
-    creer_base(&dir);
-    let id_fichier = td.path().join("id-d.txt");
+    create_base(&dir);
+    let id_file = td.path().join("id-d.txt");
 
-    let mut nous = Enfant::lancer(
+    let mut nous = Writer::spawn(
         "d_nous",
         &dir,
-        &[("SONDE_ID", id_fichier.display().to_string())],
+        &[("SONDE_ID", id_file.display().to_string())],
     );
-    nous.attendre_ligne("PRET");
-    let mut pair = Enfant::lancer(
+    nous.wait_for_line("PRET");
+    let mut pair = Writer::spawn(
         "d_pair",
         &dir,
-        &[("SONDE_ID", id_fichier.display().to_string())],
+        &[("SONDE_ID", id_file.display().to_string())],
     );
-    pair.attendre_ligne("FINI");
-    pair.terminer();
-    let vu_lu = nous.attendre_ligne("VU ");
-    nous.terminer();
+    pair.wait_for_line("FINI");
+    pair.finish();
+    let vu_lu = nous.wait_for_line("VU ");
+    nous.finish();
 
-    let noeud: u64 = std::fs::read_to_string(&id_fichier)
+    let node: u64 = std::fs::read_to_string(&id_file)
         .expect("id-d")
         .trim()
         .parse()
         .expect("id");
     let db = ObrainDB::open(&dir).expect("réouverture exclusive (D)");
     let sub = db.substrate_handle().expect("substrate_handle (D)");
-    let cle = sub.get_node_property(NodeId(noeud), &PropertyKey::new("cle_du_pair"));
+    let cle = sub.get_node_property(NodeId(node), &PropertyKey::new("cle_du_pair"));
     db.close().expect("close (D)");
     println!(
         "[D] pair vu par l'écrivain antérieur + écriture relue par lui : {vu_lu} | \
@@ -750,33 +752,25 @@ fn scenario_d() {
 fn scenario_f() {
     let td = tempfile::tempdir().expect("tempdir F");
     let dir = td.path().join("store-f");
-    creer_base(&dir);
-    let fichier = td.path().join("id-f.txt");
+    create_base(&dir);
+    let file = td.path().join("id-f.txt");
 
-    let mut nous = Enfant::lancer(
-        "f_nous",
-        &dir,
-        &[("SONDE_ID", fichier.display().to_string())],
-    );
-    nous.attendre_ligne("PRET");
-    let mut pair = Enfant::lancer(
-        "f_pair",
-        &dir,
-        &[("SONDE_ID", fichier.display().to_string())],
-    );
-    pair.attendre_ligne("FINI");
-    pair.terminer();
-    let vu_lu = nous.attendre_ligne("VU ");
-    nous.terminer();
+    let mut nous = Writer::spawn("f_nous", &dir, &[("SONDE_ID", file.display().to_string())]);
+    nous.wait_for_line("PRET");
+    let mut pair = Writer::spawn("f_pair", &dir, &[("SONDE_ID", file.display().to_string())]);
+    pair.wait_for_line("FINI");
+    pair.finish();
+    let vu_lu = nous.wait_for_line("VU ");
+    nous.finish();
 
-    let arete: u64 = std::fs::read_to_string(&fichier)
+    let edge: u64 = std::fs::read_to_string(&file)
         .expect("id-f")
         .trim()
         .parse()
         .expect("id d'arête");
     let db = ObrainDB::open(&dir).expect("réouverture exclusive (F)");
     let sub = db.substrate_handle().expect("substrate_handle (F)");
-    let cle = sub.get_edge_property(EdgeId(arete), &PropertyKey::new("cle_du_pair"));
+    let cle = sub.get_edge_property(EdgeId(edge), &PropertyKey::new("cle_du_pair"));
     db.close().expect("close (F)");
     println!(
         "[F] arête du pair vue par l'écrivain antérieur + écriture relue par lui : {vu_lu} | \
@@ -799,16 +793,16 @@ fn scenario_e() {
 
     // A ouvre la base AVANT le pair : son writer de blobs cache `arena_end`.
     let a = ObrainDB::open_shared_write(&dir).expect("A open_shared_write (E)");
-    let mut b = Enfant::lancer(
+    let mut b = Writer::spawn(
         "e_b",
         &dir,
         &[
-            ("SONDE_TAILLE", "300".to_string()),
-            ("SONDE_CAR", "b".to_string()),
+            ("SONDE_SIZE", "300".to_string()),
+            ("SONDE_CHAR", "b".to_string()),
         ],
     );
-    let id_b: u64 = b.attendre_ligne("ID ").parse().expect("id de B");
-    b.terminer();
+    let id_b: u64 = b.wait_for_line("ID ").parse().expect("id de B");
+    b.finish();
     // A écrit à son `arena_end` périmé, par-dessus les octets de B.
     let id_a = {
         let id = a.create_node(&["Sonde"]);
@@ -817,13 +811,13 @@ fn scenario_e() {
     };
     a.close().expect("close A (E)");
 
-    let mut lit = Enfant::lancer("e_lit", &dir, &[]);
-    lit.attendre_ligne("FINI");
-    lit.terminer();
-    let lecture = std::fs::read_to_string(td.path().join("lecture-e.txt")).expect("lecture-e");
+    let mut lit = Writer::spawn("e_lit", &dir, &[]);
+    lit.wait_for_line("FINI");
+    lit.finish();
+    let read = std::fs::read_to_string(td.path().join("lecture-e.txt")).expect("lecture-e");
     let mut corps_a: Option<String> = None;
     let mut corps_b: Option<String> = None;
-    for l in lecture.lines() {
+    for l in read.lines() {
         let mut champs = l.split('\t');
         let i = champs.next().unwrap_or("");
         let v = champs.next().unwrap_or("");
@@ -845,9 +839,9 @@ fn scenario_e() {
 
 #[test]
 #[ignore = "sonde multi-processus : lancer avec --ignored"]
-fn sonde_multi_ecrivain() {
+fn multi_writer_probe() {
     if let Some(r) = role() {
-        jouer_role(&r);
+        play_role(&r);
         return;
     }
     println!("=== SONDE MULTI-ÉCRIVAIN OBRAIN ===");

@@ -261,11 +261,11 @@ impl ObrainStore {
             "cypher" => "cypher",
             autre => anyhow::bail!("langage inconnu : « {autre} » (gql ou cypher)"),
         };
-        if let Some(mot) = mot_d_ecriture(query) {
+        if let Some(mot) = write_keyword(query) {
             // **Une exception, nommée** : les deux procédures spatiales sont des
             // lectures pures et obrain ne les expose que par `CALL` (voir
-            // [`CALLS_SPATIAUX_EN_LECTURE`]). Tout autre `CALL` reste refusé.
-            if !(mot == "CALL" && call_spatial_en_lecture(query)) {
+            // [`READ_ONLY_SPATIAL_CALLS`]). Tout autre `CALL` reste refusé.
+            if !(mot == "CALL" && is_read_only_spatial_call(query)) {
                 anyhow::bail!("écriture refusée : cette requête est en lecture seule ({mot})");
             }
         }
@@ -1304,7 +1304,7 @@ impl LinkService for ObrainLinkService {
 }
 
 /// Les mots-clés qui rendent une requête non-lisible.
-const MOTS_ECRITURE: [&str; 13] = [
+const WRITE_KEYWORDS: [&str; 13] = [
     "CREATE", "MERGE", "DELETE", "DETACH", "SET", "REMOVE", "INSERT", "LOAD", "DROP", "ALTER",
     "CALL", "COPY", "TRUNCATE",
 ];
@@ -1322,11 +1322,11 @@ const MOTS_ECRITURE: [&str; 13] = [
 ///
 /// Le nom est comparé **exactement**, en majuscules, après retrait des
 /// littéraux et commentaires : `obrain.spatial.nearestx` est refusé.
-const CALLS_SPATIAUX_EN_LECTURE: [&str; 2] = ["OBRAIN.SPATIAL.NEAREST", "OBRAIN.SPATIAL.WITHIN"];
+const READ_ONLY_SPATIAL_CALLS: [&str; 2] = ["OBRAIN.SPATIAL.NEAREST", "OBRAIN.SPATIAL.WITHIN"];
 
 /// La requête, mise à plat pour l'analyse : littéraux et commentaires remplacés
 /// par des espaces, tout en majuscules.
-fn normaliser_requete(query: &str) -> String {
+fn normalize_query(query: &str) -> String {
     let mut nu = String::with_capacity(query.len());
     let mut quote: Option<char> = None;
     let mut chars = query.chars().peekable();
@@ -1364,21 +1364,21 @@ fn normaliser_requete(query: &str) -> String {
 /// remplacés par des espaces avant l'analyse : `MATCH (n) WHERE n.t = 'CREATE
 /// me' RETURN n` n'est pas une écriture, et `MATCH (n) RETURN n // SET x` non
 /// plus.
-fn mot_d_ecriture(query: &str) -> Option<&'static str> {
-    let nu = normaliser_requete(query);
+fn write_keyword(query: &str) -> Option<&'static str> {
+    let nu = normalize_query(query);
     let mots: Vec<&str> = nu.split_whitespace().collect();
-    MOTS_ECRITURE.into_iter().find(|m| mots.contains(m))
+    WRITE_KEYWORDS.into_iter().find(|m| mots.contains(m))
 }
 
 /// La requête est-elle **un seul** `CALL` d'une procédure spatiale de lecture ?
 ///
 /// Trois conditions, toutes nécessaires : le premier mot est `CALL`, le nom de
-/// procédure est exactement l'un de [`CALLS_SPATIAUX_EN_LECTURE`], et le reste
+/// procédure est exactement l'un de [`READ_ONLY_SPATIAL_CALLS`], et le reste
 /// de la requête (arguments compris) ne porte aucun mot-clé d'écriture. Un
 /// `CALL` n'est donc **pas** un blanc-seing : `CALL obrain.spatial.nearest(…)
 /// SET n.x = 1` reste refusé.
-fn call_spatial_en_lecture(query: &str) -> bool {
-    let nu = normaliser_requete(query);
+fn is_read_only_spatial_call(query: &str) -> bool {
+    let nu = normalize_query(query);
     let mut mots = nu.split_whitespace();
     if mots.next() != Some("CALL") {
         return false;
@@ -1387,11 +1387,11 @@ fn call_spatial_en_lecture(query: &str) -> bool {
         return false;
     };
     // Le `(` colle au nom quand la requête n'a pas d'espace : `nearest('idx',…)`.
-    if !CALLS_SPATIAUX_EN_LECTURE.contains(&nom.trim_end_matches('(')) {
+    if !READ_ONLY_SPATIAL_CALLS.contains(&nom.trim_end_matches('(')) {
         return false;
     }
     let reste: Vec<&str> = mots.collect();
-    mot_d_ecriture(&reste.join(" ")).is_none()
+    write_keyword(&reste.join(" ")).is_none()
 }
 
 /// Convertit une valeur obrain en JSON.
@@ -2713,29 +2713,29 @@ mod query_tests {
 
     /// Les deux `CALL` spatiaux passent le filtre ; **aucun autre** ne passe.
     #[test]
-    fn seuls_les_deux_call_spatiaux_sont_admis_en_lecture() {
+    fn only_the_two_spatial_calls_are_read_only() {
         // Admis : la forme exacte, casse et espaces variables.
-        assert!(call_spatial_en_lecture(
+        assert!(is_read_only_spatial_call(
             "CALL obrain.spatial.nearest('idx', 2.35, 48.85, 3)"
         ));
-        assert!(call_spatial_en_lecture(
+        assert!(is_read_only_spatial_call(
             "call obrain.spatial.within('idx',2.35,48.85,500.0)"
         ));
-        assert!(call_spatial_en_lecture(
+        assert!(is_read_only_spatial_call(
             "CALL obrain.spatial.within ('idx', 1.0, 2.0, 5.0)"
         ));
 
         // Refusés : nom voisin, troncature, autre procédure, écriture après le
         // CALL, second CALL.
-        assert!(!call_spatial_en_lecture(
+        assert!(!is_read_only_spatial_call(
             "CALL obrain.spatial.nearestx('idx', 1.0, 2.0, 3)"
         ));
-        assert!(!call_spatial_en_lecture("CALL obrain.spatial"));
-        assert!(!call_spatial_en_lecture("CALL obrain.pagerank()"));
-        assert!(!call_spatial_en_lecture(
+        assert!(!is_read_only_spatial_call("CALL obrain.spatial"));
+        assert!(!is_read_only_spatial_call("CALL obrain.pagerank()"));
+        assert!(!is_read_only_spatial_call(
             "CALL obrain.spatial.nearest('idx', 1.0, 2.0, 3) SET n.a = 1"
         ));
-        assert!(!call_spatial_en_lecture(
+        assert!(!is_read_only_spatial_call(
             "CALL obrain.spatial.nearest('idx', 1.0, 2.0, 3) CALL obrain.pagerank()"
         ));
     }
@@ -2743,7 +2743,7 @@ mod query_tests {
     /// Un `CALL` spatial n'est **pas** refusé comme une écriture : l'erreur,
     /// quand il y en a une, vient du moteur (index absent), pas du filtre.
     #[test]
-    fn un_call_spatial_n_est_pas_refuse_comme_une_ecriture() {
+    fn a_spatial_call_is_not_refused_as_a_write() {
         let store = amorce();
         let e = store
             .execute_query(
@@ -2761,9 +2761,9 @@ mod query_tests {
     #[test]
     fn un_mot_cle_dans_un_litteral_ou_un_commentaire_n_est_pas_une_ecriture() {
         // Niveau filtre : ni un littéral ni un commentaire ne comptent.
-        assert!(mot_d_ecriture("MATCH (n) WHERE n.t = 'CREATE me' RETURN n").is_none());
-        assert!(mot_d_ecriture("MATCH (n) RETURN n // SET x").is_none());
-        assert_eq!(mot_d_ecriture("MATCH (n) SET n.a = 1"), Some("SET"));
+        assert!(write_keyword("MATCH (n) WHERE n.t = 'CREATE me' RETURN n").is_none());
+        assert!(write_keyword("MATCH (n) RETURN n // SET x").is_none());
+        assert_eq!(write_keyword("MATCH (n) SET n.a = 1"), Some("SET"));
 
         // Niveau requête : un littéral porteur d'un mot-clé s'exécute.
         // Mesuré : GQL lui-même refuse `//` (syntax error) — un commentaire dans
