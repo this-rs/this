@@ -467,6 +467,10 @@ struct Choice {
 struct Open {
     id: u128,
     pick: Pick,
+    /// La classe cognitive qui a porté la décision initiale. Le repli après quota
+    /// la REUTILISE telle quelle : la mémoire (prototypes) peut évoluer entre
+    /// `route` et le repli, une réévaluation ne rendrait pas la même classe.
+    class: String,
     /// Ce que le tour a quitté, quand il a changé de paire : si le moteur n'est
     /// jamais joint, on y revient ([`TurnRouter::settle`]).
     before: Option<Before>,
@@ -1024,7 +1028,7 @@ impl TurnRouter {
                         state.provider = pick.provider_id.clone();
                         state.model = pick.model.clone();
                         state.last_change_turn = Some(index);
-                        state.last_change_class = Some(class);
+                        state.last_change_class = Some(class.clone());
                         if moves {
                             state.last_move_turn = Some(index);
                         }
@@ -1033,6 +1037,7 @@ impl TurnRouter {
                     state.open = Some(Open {
                         id: decision.id,
                         pick,
+                        class: class.clone(),
                         before,
                         generation: state.generation,
                     });
@@ -1207,9 +1212,14 @@ impl TurnRouter {
         if !turn.honored {
             return None;
         }
-        let (choice, manual, generation) = {
+        let (choice, manual, generation, open_class) = {
             let state = self.state.borrow();
-            (state.choice.clone(), state.manual, state.generation)
+            (
+                state.choice.clone(),
+                state.manual,
+                state.generation,
+                state.open.as_ref().map(|o| o.class.clone()),
+            )
         };
         let rights = rights_of(&choice, manual);
         if !rights.routes || !rights.auto {
@@ -1218,11 +1228,17 @@ impl TurnRouter {
         let mut signature = TurnSignature::from_chat(turn.text, turn.has_images, turn.hints);
         signature.needs_tools = self.needs_tools;
         signature.role = self.role;
-        // Même identité cognitive que le tour initial : la représentation est une
-        // fonction déterministe du tour et de l'encodeur, la classification aussi.
-        // Le repli après quota n'a pas à recalculer une clé lexicale différente.
-        let repr = self.representation(turn.text, turn.has_images, &signature);
-        let class = self.learning.classify(&repr).await.class.0;
+        // Le repli réutilise la classe de la décision initiale (ouverte) : la mémoire
+        // peut évoluer entre `route` et ce repli, une réévaluation ne rendrait pas la
+        // même classe. On ne recalcule que s'il n'y a PAS d'état ouvert (repli sans
+        // décision préalable — cas qui n'existe pas dans le cycle normal).
+        let class = match open_class {
+            Some(class) => class,
+            None => {
+                let repr = self.representation(turn.text, turn.has_images, &signature);
+                self.learning.classify(&repr).await.class.0
+            }
+        };
 
         let mut pool = self.current_pool().await;
         // Contrainte dure du repli, appliquée D'ABORD : un repli après quota ne change jamais

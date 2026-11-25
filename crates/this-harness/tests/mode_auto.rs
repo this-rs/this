@@ -651,6 +651,9 @@ fn un_pool_sans_vision_laisse_la_session_et_le_dit() {
 struct MemoireClassee {
     bras: std::sync::Mutex<std::collections::HashMap<String, Vec<ArmStats>>>,
     classe: RefCell<String>,
+    /// Les classes demandées à `arms` — pour vérifier qu'un repli relit bien la
+    /// classe initiale et ne réévalue pas après évolution de la mémoire.
+    classes_vues: RefCell<Vec<String>>,
 }
 
 impl MemoireClassee {
@@ -660,6 +663,7 @@ impl MemoireClassee {
         Self {
             bras: std::sync::Mutex::new(bras),
             classe: RefCell::new(classe.to_string()),
+            classes_vues: RefCell::new(Vec::new()),
         }
     }
 
@@ -669,6 +673,10 @@ impl MemoireClassee {
             .unwrap()
             .insert(classe.to_string(), bras_pour(classe, prefere, perdants));
         *self.classe.borrow_mut() = classe.to_string();
+    }
+
+    fn vues(&self) -> Vec<String> {
+        self.classes_vues.borrow().clone()
     }
 }
 
@@ -695,6 +703,7 @@ impl Learning for MemoireClassee {
         }
     }
     async fn arms(&self, class: &str) -> Vec<ArmStats> {
+        self.classes_vues.borrow_mut().push(class.to_string());
         self.bras
             .lock()
             .unwrap()
@@ -702,6 +711,61 @@ impl Learning for MemoireClassee {
             .cloned()
             .unwrap_or_default()
     }
+}
+
+/// P0 — conservation de l'identité cognitive pendant le repli : la mémoire
+/// (prototypes) évolue entre `route` et le repli ; le repli doit REUTILISER la
+/// classe de la décision initiale, pas réévaluer (ce qui rendrait une autre classe).
+#[test]
+fn le_repli_reutilise_la_classe_de_la_decision_initiale() {
+    let mem = Rc::new(MemoireClassee::nouvelle(
+        "repr.a",
+        ("a", "m2"),
+        &[("a", "m1")],
+    ));
+    let pool = Rc::new(MemoryPool::new(vec![
+        cand("a", "m1", false),
+        cand("a", "m2", false),
+    ]));
+    let spec = RouterSpec::new(
+        pool,
+        Rc::new(SequenceSeeds::from(7)),
+        "a".to_string(),
+        "m1".to_string(),
+    )
+    .learning(mem.clone())
+    .auto()
+    .settings(RoutingSettings {
+        exploration_epsilon: 0.0,
+        ..RoutingSettings::default()
+    });
+    let router = TurnRouter::new(spec);
+
+    // Décision initiale fondée sur repr.a.
+    let routed = run(router.route(text("hello")));
+    assert_eq!(
+        routed.decision.as_ref().unwrap().cognitive_class.as_deref(),
+        Some("repr.a")
+    );
+
+    // La mémoire évolue : une réévaluation classerait désormais en repr.b.
+    mem.piloter("repr.b", ("a", "m1"), &[("a", "m2")]);
+
+    // Refus de quota sur la paire choisie (a/m2) → repli dans la même instance.
+    let fallback =
+        run(router.after_limit(text("hello"), &[Pick::new("a", "m2")], None)).expect("repli");
+
+    let _ = fallback;
+    // Le repli a consulté la classe INITIALE, jamais la classe réévaluée.
+    let vues = mem.vues();
+    assert!(
+        vues.iter().filter(|c| c.as_str() == "repr.a").count() >= 2,
+        "route puis repli consultent tous deux repr.a : {vues:?}"
+    );
+    assert!(
+        !vues.iter().any(|c| c == "repr.b"),
+        "la mémoire a évolué vers repr.b, mais le repli ne doit pas réévaluer : {vues:?}"
+    );
 }
 
 /// PO `agent_hooks.rs::provider_move_tests::right_after_a_change_a_turn_of_the_same_class_is_decided_without_exploration`

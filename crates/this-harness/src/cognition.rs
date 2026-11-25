@@ -192,11 +192,12 @@ pub fn cosinus(a: &[f32], b: &[f32]) -> Option<f32> {
 /// d'accélération / de rapprochement, jamais une preuve d'identité de la
 /// connaissance, et elle ne garantit aucune stabilité quand l'encodeur change.
 ///
-/// `quantification = 0` effondre toute projection sur la même poignée : cas
-/// dégénéré, documenté par un test, jamais une identité.
-pub fn poignee_de_projection(vector: &[f32], quantification: u32) -> LearnedClass {
+/// `quantification = 0` n'offre aucun signal exploitable : la poignée est
+/// `None`, donc **aucune** classe n'est formée — jamais une classe commune à
+/// toutes les connaissances nouvelles (une fusion interdite).
+pub fn poignee_de_projection(vector: &[f32], quantification: u32) -> Option<LearnedClass> {
     if quantification == 0 {
-        return LearnedClass("repr.poignee-degeneree".to_string());
+        return None;
     }
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
     for x in vector {
@@ -206,7 +207,7 @@ pub fn poignee_de_projection(vector: &[f32], quantification: u32) -> LearnedClas
             h = h.wrapping_mul(0x0100_0000_01b3);
         }
     }
-    LearnedClass(format!("repr.{h:016x}"))
+    Some(LearnedClass(format!("repr.{h:016x}")))
 }
 
 /// Classe la représentation contre les prototypes mémorisés.
@@ -248,18 +249,31 @@ pub fn classer(
             nearest: Some(p.class.clone()),
             similarity: Some(s),
         },
-        Some((s, p)) => Classification {
-            class: poignee_de_projection(vector, quantification),
-            uncertainty: Uncertainty::Formed(s),
-            nearest: Some(p.class.clone()),
-            similarity: Some(s),
-        },
-        None => Classification {
-            class: poignee_de_projection(vector, quantification),
-            uncertainty: Uncertainty::Formed(0.0),
-            nearest: None,
-            similarity: None,
-        },
+        Some((s, p)) => {
+            // Formation d'une nouvelle classe : la poignée est une *proposition* de
+            // rapprochement, pas une identité. Sans poignée (quantification=0),
+            // rien n'est formé : l'incertitude est dite, aucune fusion.
+            let Some(classe) = poignee_de_projection(vector, quantification) else {
+                return Classification::inconnue();
+            };
+            Classification {
+                class: classe,
+                uncertainty: Uncertainty::Formed(s),
+                nearest: Some(p.class.clone()),
+                similarity: Some(s),
+            }
+        }
+        None => {
+            let Some(classe) = poignee_de_projection(vector, quantification) else {
+                return Classification::inconnue();
+            };
+            Classification {
+                class: classe,
+                uncertainty: Uncertainty::Formed(0.0),
+                nearest: None,
+                similarity: None,
+            }
+        }
     }
 }
 
@@ -314,6 +328,9 @@ mod tests {
         let c = poignee_de_projection(&[0.1, 0.2, 0.4], 1000);
         assert_eq!(a, b);
         assert_ne!(a, c);
+        // La poignée est une proposition de rapprochement, jamais une identité :
+        // elle reste un hachage, sujet aux collisions.
+        assert!(a.unwrap().as_str().starts_with("repr."));
     }
 
     #[test]
@@ -366,12 +383,14 @@ mod tests {
     }
 
     #[test]
-    fn quantification_zero_est_degenere_et_documente() {
-        // Deux vecteurs distincts → même poignée dégénérée : ce n'est pas une
-        // identité, c'est un cas limite explicite (jamais deux savoirs distincts).
-        let a = poignee_de_projection(&[0.1, 0.2], 0);
-        let b = poignee_de_projection(&[9.9, 8.8], 0);
-        assert_eq!(a, b);
-        assert_eq!(a.as_str(), "repr.poignee-degeneree");
+    fn quantification_zero_ne_forme_aucune_classe_commune() {
+        // Pas de signal exploitable : aucune poignée, donc AUCUNE classe formée.
+        // Jamais une classe commune qui fusionnerait des connaissances distinctes.
+        assert_eq!(poignee_de_projection(&[0.1, 0.2], 0), None);
+        assert_eq!(poignee_de_projection(&[9.9, 8.8], 0), None);
+        // Et `classer` rend l'inconnu au lieu de former une classe commune.
+        let c = classer(&repr(vec![0.1, 0.2, 0.3]), &[], 0.9, 0);
+        assert_eq!(c.uncertainty, Uncertainty::Unknown);
+        assert_eq!(c.class.as_str(), CLASSE_INCONNUE);
     }
 }
