@@ -158,6 +158,11 @@ fn loader(store: Arc<VfsModuleStore>) -> DefaultModuleLoader {
     DefaultModuleLoader::new().with_plugin("wasm", Arc::new(WasmModuleLoader::new(s)))
 }
 
+// `ContractError` est large (~152 o) et c'est le type public de la façade :
+// on ne le boxe pas depuis un utilitaire de test. Le lint ne se déclenche que
+// sous `--all-features` (feature `wasm-modules`), configuration que la CI ne
+// passe pas à clippy.
+#[allow(clippy::result_large_err)]
 async fn load(l: &DefaultModuleLoader, location: &str) -> Result<ModuleInterface, ContractError> {
     l.load(&ModuleSource::Wasm {
         location: location.to_string(),
