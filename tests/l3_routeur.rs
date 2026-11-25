@@ -18,7 +18,7 @@ use this::storage::obrain::ObrainStore;
 use this_agent::Stop;
 use this_harness::routing::{
     ArmKey, ArmStats, Capabilities, CostBasis, Decision, Learning, MemoryPool, Pick, PriorHints,
-    RouterSpec, RoutingSettings, SequenceSeeds, TurnInput, TurnRouter,
+    RouteWhy, RouterSpec, RoutingSettings, SequenceSeeds, TurnInput, TurnRouter,
 };
 
 fn executer<F: std::future::Future<Output = T>, T>(f: F) -> T {
@@ -74,7 +74,10 @@ struct Compteurs {
     creees: u64,
     rejeux: u64,
     conflits: u64,
-    /// Échec d'écriture (persistance).
+    /// Échec d'écriture (persistance) : le contrôle d'entrée d'écriture a refusé,
+    /// ou la transaction a échoué. **Rien n'a été écrit** — ce n'est pas une
+    /// création, ce n'est pas un rejeu, et la décision ne doit pas disparaître
+    /// silencieusement de la comptabilité.
     erreurs: u64,
 }
 
@@ -83,6 +86,8 @@ enum Ecriture {
     Creee,
     RejeuIdentique,
     Conflit,
+    /// L'écriture a été refusée ou a échoué : comptée en `erreurs`, jamais en `creees`.
+    Erreur,
 }
 
 struct ApprisObrain {
@@ -171,6 +176,15 @@ impl ApprisObrain {
         modele: &str,
         favorable: bool,
     ) -> Ecriture {
+        // **Le contrôle d'entrée d'écriture**, à passer avant d'écrire par nos propres
+        // moyens : c'est l'usage documenté de `ObrainStore::check_write` pour un
+        // écrivain qui n'est pas un service de données. Un écrivain périmé (bail
+        // repris par un autre) est refusé au lieu d'écrire dans son dos.
+        if let Err(refus) = self.store.check_write() {
+            eprintln!("observation NON écrite (écriture refusée) : {refus}");
+            self.compteurs.lock().unwrap().erreurs += 1;
+            return Ecriture::Erreur;
+        }
         let evenement = cle_evenement(&format!("{}/{}", self.scope, self.session), decision);
         let existe = self
             .store
@@ -219,18 +233,33 @@ impl ApprisObrain {
             self.compteurs.lock().unwrap().conflits += 1;
             return Ecriture::Conflit;
         }
-        let mut s = self.store.db().session();
-        s.begin_transaction().expect("begin");
-        let n = s.create_node(&["observation"]);
-        s.set_node_property(n, "evenement", Value::String(evenement.into()));
-        s.set_node_property(n, "scope", Value::String(self.scope.clone().into()));
-        s.set_node_property(n, "classe", Value::String(classe.into()));
-        s.set_node_property(n, "provider", Value::String(provider.into()));
-        s.set_node_property(n, "modele", Value::String(modele.into()));
-        s.set_node_property(n, "favorable", Value::Bool(favorable));
-        s.commit().expect("commit");
-        self.compteurs.lock().unwrap().creees += 1;
-        Ecriture::Creee
+        let ecriture = (|| -> Result<(), String> {
+            let mut s = self.store.db().session();
+            s.begin_transaction()
+                .map_err(|e| format!("begin : {e:?}"))?;
+            let n = s.create_node(&["observation"]);
+            s.set_node_property(n, "evenement", Value::String(evenement.into()));
+            s.set_node_property(n, "scope", Value::String(self.scope.clone().into()));
+            s.set_node_property(n, "classe", Value::String(classe.into()));
+            s.set_node_property(n, "provider", Value::String(provider.into()));
+            s.set_node_property(n, "modele", Value::String(modele.into()));
+            s.set_node_property(n, "favorable", Value::Bool(favorable));
+            s.commit().map_err(|e| format!("commit : {e:?}"))?;
+            Ok(())
+        })();
+        match ecriture {
+            Ok(()) => {
+                self.compteurs.lock().unwrap().creees += 1;
+                Ecriture::Creee
+            }
+            // Une panne de persistance est une DONNÉE, pas un arrêt du monde : elle
+            // est comptée, nommée, et l'observation n'est pas déclarée créée.
+            Err(panne) => {
+                eprintln!("observation NON écrite (échec de transaction) : {panne}");
+                self.compteurs.lock().unwrap().erreurs += 1;
+                Ecriture::Erreur
+            }
+        }
     }
 
     /// Projection : (classe, provider, model) -> (alpha, beta, n), a priori 1/1.
@@ -357,6 +386,10 @@ impl Learning for ApprisObrain {
             favorable,
         ) {
             Ecriture::Creee | Ecriture::RejeuIdentique => {}
+            // La décision EST réglée (le `settle` est arrivé) ; c'est l'écriture qui a
+            // échoué. Elle est comptée en `erreurs`, donc la comptabilité reste
+            // exhaustive, et on ne la maquille ni en création ni en rejeu.
+            Ecriture::Erreur => {}
             Ecriture::Conflit => {
                 // Même identité, contenu différent : ce n'est pas un rejeu, c'est un
                 // conflit. On le voit, on ne l'avale pas.
@@ -421,7 +454,10 @@ fn l3_routeur_natif_avant_et_apres_reouverture() {
             tirage.push(l);
         }
 
-        let mut premier: Option<String> = None;
+        // Première décision réellement APPLIQUÉE (donc première observation
+        // écrite), avec son identité et son contenu : c'est elle qu'on rejouera.
+        // (identifiant, classe, fournisseur, modèle, favorable)
+        let mut premiere: Option<(String, String, String, String, bool)> = None;
         sur_a_avant = {
             let mut n = 0usize;
             for ligne in tirage.iter() {
@@ -442,8 +478,14 @@ fn l3_routeur_natif_avant_et_apres_reouverture() {
                 if idx == 0 {
                     n += 1;
                 }
-                if premier.is_none() {
-                    premier = Some(dec.id.to_string());
+                if premiere.is_none() && dec.applied {
+                    premiere = Some((
+                        dec.id.to_string(),
+                        dec.signature.arm_key(),
+                        used.provider_id.clone(),
+                        used.model.clone(),
+                        ok,
+                    ));
                 }
                 executer(routeur.record(&dec));
                 let stop = if ok {
@@ -455,8 +497,49 @@ fn l3_routeur_natif_avant_et_apres_reouverture() {
             }
             n
         };
-        premier_id = premier.expect("au moins une décision écrite");
+        let (id_p, classe_p, prov_p, mod_p, fav_p) =
+            premiere.expect("au moins une décision appliquée");
+        premier_id = id_p.clone();
+
+        // ── Rejeu dans la SESSION ORIGINALE ──────────────────────────────────
+        // Même store, même apprenant, même routeur, même session durable : on
+        // rejoue une décision DÉJÀ écrite, avec un contenu identique. C'est le cas
+        // que la continuité après fermeture/réouverture ne mesure pas — là, la
+        // session change et tout redevient une expérience nouvelle.
+        let projection_avant_rejeu = appris.projection();
+        let compteurs_avant_rejeu = appris.compteurs();
+        assert_eq!(
+            appris.ecrire_observation(&id_p, &classe_p, &prov_p, &mod_p, fav_p),
+            Ecriture::RejeuIdentique,
+            "même session + même identité + même contenu => rejeu RECONNU"
+        );
+        assert_eq!(
+            appris.projection(),
+            projection_avant_rejeu,
+            "un rejeu ne modifie pas la projection"
+        );
+        let compteurs_rejeu = appris.compteurs();
+        assert_eq!(
+            compteurs_rejeu.rejeux,
+            compteurs_avant_rejeu.rejeux + 1,
+            "le rejeu est compté comme rejeu"
+        );
+        assert_eq!(
+            compteurs_rejeu.creees, compteurs_avant_rejeu.creees,
+            "…et il ne crée rien"
+        );
+        // Même identité, contenu incompatible : ce n'est pas un rejeu.
+        assert_eq!(
+            appris.ecrire_observation(&id_p, &classe_p, &prov_p, &mod_p, !fav_p),
+            Ecriture::Conflit,
+            "même identité + contenu différent => conflit, dans la session aussi"
+        );
+
         stats_avant = appris.projection();
+        assert_eq!(
+            stats_avant, projection_avant_rejeu,
+            "ni le rejeu ni le conflit ne changent la projection"
+        );
         assert!(
             !stats_avant.is_empty(),
             "des observations doivent avoir été écrites"
@@ -521,6 +604,23 @@ struct ApprisMemoire {
     bras: Mutex<HashMap<CleBras, StatsBras>>,
     en_cours: Mutex<HashMap<u128, String>>,
     candidats: Vec<(String, String)>,
+    /// Nombre de décisions effectivement reçues par `record` : la parité des
+    /// statistiques ne se lit pas seulement bras par bras, elle se lit aussi sur
+    /// le flux de décisions qui les a nourries.
+    decisions: Mutex<u64>,
+}
+
+impl ApprisMemoire {
+    /// La table entière, triée — comparable à `ApprisObrain::projection`.
+    fn table(&self) -> Vec<(String, String, String, f64, f64, u64)> {
+        let m = self.bras.lock().unwrap();
+        let mut v: Vec<(String, String, String, f64, f64, u64)> = m
+            .iter()
+            .map(|((c, p, mo), (a, b, n))| (c.clone(), p.clone(), mo.clone(), *a, *b, *n))
+            .collect();
+        v.sort_by(|x, y| (&x.0, &x.1, &x.2).cmp(&(&y.0, &y.1, &y.2)));
+        v
+    }
 }
 
 #[async_trait(?Send)]
@@ -547,6 +647,7 @@ impl Learning for ApprisMemoire {
 
     async fn record(&self, d: &Decision) {
         if d.used.is_some() {
+            *self.decisions.lock().unwrap() += 1;
             self.en_cours
                 .lock()
                 .unwrap()
@@ -606,14 +707,52 @@ fn routeur_pour(learning: Rc<dyn Learning>, graine: u128) -> TurnRouter {
     TurnRouter::new(spec)
 }
 
+/// Ce qu'une moitié du parcours a produit, **décision par décision**.
+///
+/// Le compte des décisions vient du côté ROUTEUR ; la ventilation des non
+/// appliquées vient de la cause qu'il nomme (`RouteWhy`). C'est une source
+/// indépendante du `Compteurs` de l'apprentissage : comparer les deux est la
+/// contre-épreuve qui dit si une décision « non réglée » l'est pour la raison
+/// qu'on croit.
+#[derive(Debug, Default)]
+struct Tour {
+    /// Tours qui ont produit une décision AVEC une paire `used` — exactement ce
+    /// que voit `Learning::record`.
+    decisions: usize,
+    /// Décisions que le routeur a APPLIQUÉES : autant de `settle` qui arriveront
+    /// à l'apprentissage.
+    appliquees: usize,
+    /// Décisions NON appliquées, comptées par cause nommée par le routeur.
+    non_appliquees: std::collections::BTreeMap<&'static str, usize>,
+}
+
+impl Tour {
+    /// Attendu : une décision non appliquée n'ouvre aucune attente, donc son
+    /// `settle` n'atteint jamais l'apprentissage.
+    fn non_reglees_attendues(&self) -> usize {
+        self.decisions - self.appliquees
+    }
+
+    fn ventilation(&self) -> String {
+        if self.non_appliquees.is_empty() {
+            return "aucune".to_string();
+        }
+        self.non_appliquees
+            .iter()
+            .map(|(cause, n)| format!("{cause}={n}"))
+            .collect::<Vec<_>>()
+            .join(" + ")
+    }
+}
+
 /// Joue `draws` et rend la trajectoire des paires choisies.
 fn jouer(
     routeur: &TurnRouter,
     draws: &[[bool; 2]],
     depart: usize,
-) -> (Vec<(String, String)>, usize) {
+) -> (Vec<(String, String)>, Tour) {
     let mut trajet = Vec::new();
-    let mut decisions = 0usize;
+    let mut tour = Tour::default();
     for ligne in draws.iter().skip(depart) {
         let routed = executer(routeur.route(TurnInput {
             text: "hello",
@@ -629,7 +768,12 @@ fn jouer(
         };
         let idx = if used.provider_id == "a" { 0 } else { 1 };
         trajet.push((used.provider_id.clone(), used.model.clone()));
-        decisions += 1;
+        tour.decisions += 1;
+        if dec.applied {
+            tour.appliquees += 1;
+        } else {
+            *tour.non_appliquees.entry(routed.why.code()).or_insert(0) += 1;
+        }
         executer(routeur.record(&dec));
         let stop = if ligne[idx] {
             Stop::Done
@@ -638,7 +782,7 @@ fn jouer(
         };
         executer(routeur.settle(&stop, None, true));
     }
-    (trajet, decisions)
+    (trajet, tour)
 }
 
 #[test]
@@ -654,7 +798,7 @@ fn l3_continuite_trajectoires_l2_l3_et_coupure() {
         ..Default::default()
     });
     let r2 = routeur_pour(memo.clone(), 7);
-    let (trajet_l2, _d2) = jouer(&r2, &draws, 0);
+    let (trajet_l2, tour_l2) = jouer(&r2, &draws, 0);
 
     // L3 continu
     let d1 = base.join("continu");
@@ -665,7 +809,7 @@ fn l3_continuite_trajectoires_l2_l3_et_coupure() {
         vec![("a".into(), "m1".into()), ("b".into(), "m2".into())],
     ));
     let r3 = routeur_pour(l1.clone(), 7);
-    let (trajet_l3, _d3) = jouer(&r3, &draws, 0);
+    let (trajet_l3, tour_l3) = jouer(&r3, &draws, 0);
 
     // L3 avec fermeture / réouverture à mi-parcours
     let d2 = base.join("coupe");
@@ -706,6 +850,82 @@ fn l3_continuite_trajectoires_l2_l3_et_coupure() {
         trajet_l2, trajet_l3,
         "L2 et L3 doivent produire la MÊME trajectoire à graines et tirages identiques"
     );
+
+    // ── Parité des STATISTIQUES, et pas seulement du total ───────────────────
+    // La trajectoire dit qu'ils DÉCIDENT pareil ; elle ne dit pas qu'ils ont
+    // APPRIS pareil. On compare donc la table entière : pour chaque bras
+    // (classe, fournisseur, modèle), Alpha, Beta et n — puis le flux de
+    // décisions qui l'a nourrie.
+    let decisions_l2 = *memo.decisions.lock().unwrap();
+    let decisions_l3 = l1.compteurs().decisions;
+    assert_eq!(
+        decisions_l2, decisions_l3,
+        "L2 et L3 doivent recevoir le même nombre de décisions (reçu par `record`)"
+    );
+
+    let mut table_l2: std::collections::BTreeMap<(String, String, String), (f64, f64, u64)> =
+        Default::default();
+    for (c, p, m, a, b, n) in memo.table() {
+        table_l2.insert((c, p, m), (a, b, n));
+    }
+    let table_l3: std::collections::BTreeMap<(String, String, String), (f64, f64, u64)> = l1
+        .projection()
+        .into_iter()
+        .map(|(c, p, m, a, b, n)| ((c, p, m), (a as f64, b as f64, n as u64)))
+        .collect();
+    assert!(
+        !table_l3.is_empty(),
+        "la projection L3 doit contenir au moins un bras observé"
+    );
+    assert_eq!(
+        table_l2, table_l3,
+        "parité L2/L3 sur TOUS les bras : mêmes Alpha, mêmes Beta, mêmes n"
+    );
+
+    // Les catégories nommées une par une, pour que l'égalité soit lisible et pas
+    // seulement globale.
+    let totaux = |t: &std::collections::BTreeMap<(String, String, String), (f64, f64, u64)>| {
+        t.values()
+            .fold((0.0f64, 0.0f64, 0u64), |(sa, sb, sn), (a, b, n)| {
+                (sa + a, sb + b, sn + n)
+            })
+    };
+    let (alpha_l2, beta_l2, n_l2) = totaux(&table_l2);
+    let (alpha_l3, beta_l3, n_l3) = totaux(&table_l3);
+    println!(
+        "stats — bras={} · Alpha {alpha_l2} vs {alpha_l3} · Beta {beta_l2} vs {beta_l3} · \
+         n {n_l2} vs {n_l3} · décisions {decisions_l2} vs {decisions_l3}",
+        table_l2.len()
+    );
+    assert_eq!(
+        (alpha_l2, beta_l2, n_l2),
+        (alpha_l3, beta_l3, n_l3),
+        "totaux"
+    );
+    // Contrôle interne : chaque bras part de l'a priori neutre 1/1, et chaque
+    // observation réglée ajoute 1 à Alpha (favorable) ou à Beta (défavorable).
+    // Donc Alpha + Beta = 2 × (nombre de bras) + n.
+    let bras = table_l2.len() as f64;
+    assert_eq!(
+        alpha_l2 + beta_l2,
+        2.0 * bras + n_l2 as f64,
+        "a priori 1/1 par bras + un bilan par observation"
+    );
+    // Une décision NON appliquée (exploration refusée) n'ouvre aucune attente :
+    // elle est comptée, mais elle ne nourrit aucun bras. L'écart est donc
+    // exactement le nombre de décisions non réglées, et il doit être le même des
+    // deux côtés.
+    assert_eq!(
+        decisions_l2 as u64 - n_l2,
+        tour_l2.non_reglees_attendues() as u64,
+        "L2 : décisions - observations = décisions non réglées attendues"
+    );
+    assert_eq!(
+        decisions_l3 as u64 - n_l3,
+        tour_l3.non_reglees_attendues() as u64,
+        "L3 : décisions - observations = décisions non réglées attendues"
+    );
+
     // La coupure peut diverger (routeur recréé) : on le rapporte, sans l'exiger.
     let divergences = trajet_coupe
         .iter()
@@ -735,13 +955,13 @@ fn l3_reprise_conserve_les_nouvelles_observations() {
     let coupe = 40;
 
     let compteurs_avant;
-    let decisions_avant;
+    let tour_avant;
     {
         let store = ObrainStore::open(&d).expect("ouverture");
         let l = Rc::new(ApprisObrain::nouveau(store.clone(), scope, cands.clone()));
         let r = routeur_pour(l.clone(), 3);
-        let (_, d_avant) = jouer(&r, &draws[..coupe], 0);
-        decisions_avant = d_avant;
+        let (_, t) = jouer(&r, &draws[..coupe], 0);
+        tour_avant = t;
         compteurs_avant = l.compteurs();
         println!(
             "avant fermeture : créées={} rejeux={} conflits={}",
@@ -752,8 +972,7 @@ fn l3_reprise_conserve_les_nouvelles_observations() {
     let store = ObrainStore::open(&d).expect("réouverture");
     let l = Rc::new(ApprisObrain::nouveau(store.clone(), scope, cands.clone()));
     let r = routeur_pour(l.clone(), 3); // routeur RECRÉÉ (graines réinitialisées)
-    let (_, d_apres) = jouer(&r, &draws, coupe);
-    let decisions_apres = d_apres;
+    let (_, tour_apres) = jouer(&r, &draws, coupe);
     let compteurs_apres = l.compteurs();
     let stats = l.projection();
     let n_total: u32 = stats.iter().map(|(_, _, _, _, _, n)| *n).sum();
@@ -761,21 +980,34 @@ fn l3_reprise_conserve_les_nouvelles_observations() {
     let identites = l.identites_persistees();
     store.commit_wal().expect("flush");
 
+    let creees_total = compteurs_avant.creees as usize + compteurs_apres.creees as usize;
     println!(
         "après reprise : créées={} rejeux={} conflits={} | observations distinctes={} somme_n={}",
         compteurs_apres.creees,
         compteurs_apres.rejeux,
         compteurs_apres.conflits,
-        40 + compteurs_apres.creees,
+        creees_total,
         n_total
     );
+    // La ligne ci-dessus affichait `40 + creees` : 40 est le nombre de TIRAGES de la
+    // première moitié, pas le nombre d'observations qu'elle a créées (34). Le total
+    // annoncé valait donc 74 quand la vérité était 68 — une erreur d'affichage qui
+    // contredisait l'assertion juste en dessous. On somme maintenant les deux
+    // moitiés, et c'est la même valeur que le comptage indépendant.
+    assert_eq!(
+        creees_total, identites,
+        "l'affichage `observations distinctes` doit être le comptage réel"
+    );
 
-    // Deux causes distinctes, à ne pas confondre :
-    //  (a) tous les TOURS ne produisent pas de décision (routeur en `stay`) ;
-    //  (b) toutes les décisions ne produisent pas d'observation (le routeur peut
-    //      appeler settle avec `served = None` : moteur non servi).
-    // L'invariant qui compte pour la reprise est : AUCUNE observation perdue.
-    let bilan = |role: &str, c: &Compteurs, decisions: usize| {
+    // Deux sources INDÉPENDANTES expliquent qu'une décision ne produise pas
+    // d'observation :
+    //  (a) le ROUTEUR ne l'a pas appliquée (`applied == false`) : il n'ouvre
+    //      aucune attente, donc son `settle` n'atteint jamais l'apprentissage ;
+    //  (b) l'apprentissage l'a réglée mais la persistance a échoué (`erreurs`).
+    // Le bilan ci-dessous confronte les deux : ce que le routeur dit avoir
+    // refusé (attendu) doit égaler ce que l'apprentissage n'a jamais réglé
+    // (obtenu), et chaque refus doit avoir une CAUSE NOMMÉE — pas un total.
+    let bilan = |role: &str, c: &Compteurs, tour: &Tour| -> usize {
         let comptabilise = c.id_absent
             + c.served_none
             + c.stop_non_exploitable
@@ -784,9 +1016,10 @@ fn l3_reprise_conserve_les_nouvelles_observations() {
             + c.conflits
             + c.erreurs;
         println!(
-            "{role} : décisions={decisions} consultatives={} | id_absent={} served_none={} \
+            "{role} : décisions={} consultatives={} | id_absent={} served_none={} \
              stop_non_exploitable={} creees={} rejeux={} conflits={} erreurs={} \
              | comptabilisé={comptabilise}",
+            tour.decisions,
             c.consultatives,
             c.id_absent,
             c.served_none,
@@ -796,16 +1029,47 @@ fn l3_reprise_conserve_les_nouvelles_observations() {
             c.conflits,
             c.erreurs
         );
-        let jamais_regles = decisions.saturating_sub(comptabilise as usize);
-        println!("{role} : décisions JAMAIS réglées (settle non reçu) = {jamais_regles}");
+        let jamais_regles = tour.decisions.saturating_sub(comptabilise as usize);
+        let attendu = tour.non_reglees_attendues();
+        println!(
+            "{role} : NON RÉGLÉES obtenu={jamais_regles} attendu={attendu} \
+             | ventilation : {}",
+            tour.ventilation()
+        );
         assert_eq!(
             comptabilise as usize + jamais_regles,
-            decisions,
+            tour.decisions,
             "{role} : la comptabilité doit être exhaustive (réglées + jamais réglées = décisions)"
         );
+        // Le compte obtenu est-il celui que le routeur ANNONCE ?
+        assert_eq!(
+            jamais_regles, attendu,
+            "{role} : l'apprentissage doit ne rien avoir réglé exactement pour les \
+             décisions que le routeur n'a pas appliquées"
+        );
+        // La ventilation couvre-t-elle le compte ? (somme des causes = attendu)
+        assert_eq!(
+            tour.non_appliquees.values().sum::<usize>(),
+            attendu,
+            "{role} : chaque décision non réglée doit tomber dans une cause"
+        );
+        // Et la cause est NOMMÉE : si une autre apparaît, le test le dit au lieu
+        // de la diluer dans un total.
+        assert!(
+            tour.non_appliquees
+                .keys()
+                .all(|cause| *cause == RouteWhy::ExplorationNeverMoves.code()),
+            "{role} : cause non réglée inattendue — {:?}",
+            tour.non_appliquees
+        );
+        jamais_regles
     };
-    bilan("AVANT  ", &compteurs_avant, decisions_avant);
-    bilan("APRÈS  ", &compteurs_apres, decisions_apres);
+    let jamais_avant = bilan("AVANT  ", &compteurs_avant, &tour_avant);
+    let jamais_apres = bilan("APRÈS  ", &compteurs_apres, &tour_apres);
+    println!(
+        "TOTAL décisions non réglées = {jamais_avant} (avant) + {jamais_apres} (après) = {}",
+        jamais_avant + jamais_apres
+    );
     println!("identités persistées (requête indépendante) = {identites}");
 
     // Le comptage indépendant doit égaler les créations comptabilisées.
@@ -815,11 +1079,11 @@ fn l3_reprise_conserve_les_nouvelles_observations() {
         "les identités persistées doivent égaler les observations créées"
     );
     assert!(
-        compteurs_avant.creees as usize <= decisions_avant,
+        compteurs_avant.creees as usize <= tour_avant.decisions,
         "on ne peut pas créer plus d'observations que de décisions"
     );
     assert!(
-        compteurs_apres.creees as usize <= decisions_apres,
+        compteurs_apres.creees as usize <= tour_apres.decisions,
         "idem après reprise"
     );
     assert_eq!(
@@ -833,5 +1097,75 @@ fn l3_reprise_conserve_les_nouvelles_observations() {
         "somme des n = toutes les observations créées (aucune perdue)"
     );
 
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// **Le compteur `erreurs` n'est pas décoratif** : une écriture refusée y atterrit,
+/// n'est comptée ni comme création ni comme rejeu, et ne laisse **rien** dans le
+/// store.
+///
+/// La panne n'est pas simulée : on arme le bail d'écriture du store puis on le
+/// périme (`fence_write_lease_for_test`), exactement comme si un autre écrivain
+/// avait repris le shard. C'est le chemin `ObrainStore::check_write` que doit
+/// passer tout écrivain qui n'est pas un service de données — et l'apprenant en
+/// est un.
+#[test]
+fn l3_echec_d_ecriture_atterrit_dans_erreurs() {
+    use this::storage::writer_lease::FileAuthority;
+
+    let d = std::env::temp_dir().join(format!("l3e_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&d);
+    let store = ObrainStore::open(&d).expect("ouverture");
+    let appris = ApprisObrain::nouveau(
+        store.clone(),
+        "conv-erreurs",
+        vec![("a".to_string(), "m1".to_string())],
+    );
+    let authority = FileAuthority::new(d.as_path());
+    store
+        .enable_write_fencing_with(&authority)
+        .expect("bail d'écriture armé");
+
+    // Témoin : avec le bail, l'écriture passe.
+    assert_eq!(
+        appris.ecrire_observation("dec-temoin", "chat.general", "a", "m1", true),
+        Ecriture::Creee,
+        "le détenteur du bail écrit"
+    );
+
+    // Un autre écrivain a repris le shard : celui-ci est PÉRIMÉ.
+    store.fence_write_lease_for_test(2);
+    assert_eq!(
+        appris.ecrire_observation("dec-refusee", "chat.general", "a", "m1", true),
+        Ecriture::Erreur,
+        "un écrivain périmé n'écrit pas"
+    );
+    let apres_refus = appris.compteurs();
+    assert_eq!(apres_refus.erreurs, 1, "l'échec est compté dans `erreurs`");
+    assert_eq!(
+        apres_refus.creees, 1,
+        "l'échec n'est PAS compté comme une création"
+    );
+    assert_eq!(apres_refus.rejeux, 0, "ni comme un rejeu");
+    assert_eq!(
+        appris.identites_persistees(),
+        1,
+        "le refus n'a laissé aucune identité dans le store"
+    );
+
+    // Le bail est rendu : l'écriture redevient possible. Le compteur n'est pas un
+    // cimetière — un échec passé reste compté, et la tentative rattrapée passe.
+    store.release_write_fencing();
+    assert_eq!(
+        appris.ecrire_observation("dec-refusee", "chat.general", "a", "m1", true),
+        Ecriture::Creee,
+        "bail rendu : la même écriture passe"
+    );
+    let apres_reprise = appris.compteurs();
+    assert_eq!(apres_reprise.erreurs, 1, "l'échec passé reste compté");
+    assert_eq!(apres_reprise.creees, 2, "la tentative rattrapée crée");
+    assert_eq!(appris.identites_persistees(), 2);
+
+    store.commit_wal().expect("flush");
     let _ = std::fs::remove_dir_all(&d);
 }
