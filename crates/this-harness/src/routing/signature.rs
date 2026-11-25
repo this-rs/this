@@ -169,9 +169,10 @@ impl TurnSignature {
 
     /// Un tour de conversation tapé par une personne.
     ///
-    /// L'intention vient du détecteur à mots-clés. La longueur du message
-    /// ajoute au plus deux points de complexité, et le message lui-même au
-    /// besoin de contexte.
+    /// La classe est une métadonnée de compatibilité constante (`General`) : la
+    /// longueur du message ajoute au plus deux points de complexité, et le
+    /// message lui-même au besoin de contexte. Aucune intention n'est déduite du
+    /// texte ici — la structure cognitive vient de `TaskRepr` / `LearnedClass`.
     pub fn from_chat(message: &str, has_images: bool, hints: ContextHints) -> Self {
         // MÉTADONNÉE DE COMPATIBILITÉ UNIQUEMENT. La classe n'est plus déduite du
         // texte : aucun lexique n'intervient dans le chemin cognitif. La structure

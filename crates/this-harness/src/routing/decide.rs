@@ -60,6 +60,11 @@ pub struct Alternative {
 pub struct DecideRequest {
     /// Ce qui est demandé.
     pub signature: TurnSignature,
+    /// La classe **cognitive** à laquelle les bras de cette décision appartiennent,
+    /// issue de [`Learning::classify`]. `None` = repli de compatibilité sur
+    /// [`TurnSignature::arm_key`] (décisions construites hors du routeur, hors du
+    /// cycle `classify → arms → scorer`).
+    pub class: Option<String>,
     /// Les réglages en vigueur.
     pub settings: RoutingSettings,
     /// Toutes les paires utilisables, avec leurs faits.
@@ -87,6 +92,7 @@ impl DecideRequest {
     pub fn new(signature: TurnSignature, settings: RoutingSettings, pool: Vec<Candidate>) -> Self {
         Self {
             signature,
+            class: None,
             settings,
             pool,
             slot: Slot::Automatic,
@@ -96,6 +102,15 @@ impl DecideRequest {
             steady: false,
             narrowed: Vec::new(),
         }
+    }
+
+    /// La clé de classe **effective** : la classe cognitive si elle est présente,
+    /// sinon la clé de compatibilité de la signature. C'est la clé que le scoreur
+    /// doit utiliser pour lire les bras — jamais recalculée ailleurs.
+    pub fn class_key(&self) -> String {
+        self.class
+            .clone()
+            .unwrap_or_else(|| self.signature.arm_key())
     }
 }
 
@@ -135,6 +150,25 @@ pub struct Decision {
     pub mode: ProviderRoutingMode,
     pub stage: LearningStage,
     pub turn_index: Option<u32>,
+    /// La classe cognitive **effective** de la décision (celle que le scoreur a
+    /// réellement lue pour ses bras). `None` uniquement pour les décisions
+    /// construites hors du cycle : `record` peut alors retomber sur
+    /// `signature.arm_key()` (compatibilité). L'apprentissage doit lire CE champ,
+    /// pas recalculer une clé depuis la signature.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cognitive_class: Option<String>,
+}
+
+impl Decision {
+    /// La classe à laquelle l'apprentissage doit attribuer cette décision : la
+    /// classe cognitive si elle a circulé jusqu'ici, sinon la clé de compatibilité
+    /// de la signature. C'est LA source d'attribution de `record` / `settle` — les
+    /// apprenants ne doivent pas recalculer `signature.arm_key()` eux-mêmes.
+    pub fn class_key(&self) -> String {
+        self.cognitive_class
+            .clone()
+            .unwrap_or_else(|| self.signature.arm_key())
+    }
 }
 
 /// Sérialise un `u128` en chaîne décimale, et ne relit qu'une chaîne. Pas de forme
@@ -372,6 +406,7 @@ fn decide_free(
         mode: settings.mode,
         stage: settings.stage,
         turn_index: request.turn_index,
+        cognitive_class: None,
     };
 
     let pool: Vec<Candidate> = request
@@ -393,7 +428,10 @@ fn decide_free(
     // Un bras stocké qui n'est pas un postérieur (infini, `NaN`, nul, négatif) ferait
     // boucler le tirage ou classer une note `NaN` en tête : la paire est écartée,
     // avec un motif nommé, et le reste décide.
-    let class = signature.arm_key();
+    // La classe est CELLE DE LA DÉCISION (cognitive si elle circule, sinon la clé de
+    // compatibilité) — jamais recalculée depuis la signature après `classify`.
+    let class = request.class_key();
+    decision.cognitive_class = Some(class.clone());
     let stored = scorer::arms_of_class(arms, &class);
     let (valid, broken): (Vec<Candidate>, Vec<Candidate>) =
         filtered.eligible.into_iter().partition(|facts| {
@@ -437,10 +475,18 @@ fn decide_free(
         settings
     };
     let mut scored = if mean {
-        scorer::score_mean(signature, &filtered.eligible, arms, hints, score_settings)
+        scorer::score_mean(
+            signature,
+            &class,
+            &filtered.eligible,
+            arms,
+            hints,
+            score_settings,
+        )
     } else {
         scorer::score(
             signature,
+            &class,
             &filtered.eligible,
             arms,
             hints,

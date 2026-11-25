@@ -155,29 +155,49 @@ impl Classification {
     }
 }
 
-/// Similarité cosinus. Zéro si un vecteur est nul — jamais `NaN`.
-pub fn cosinus(a: &[f32], b: &[f32]) -> f32 {
-    if a.len() != b.len() || a.is_empty() {
-        return 0.0;
-    }
-    let (mut dot, mut na, mut nb) = (0.0f32, 0.0f32, 0.0f32);
-    for (x, y) in a.iter().zip(b.iter()) {
-        dot += x * y;
-        na += x * x;
-        nb += y * y;
-    }
-    if na == 0.0 || nb == 0.0 {
-        return 0.0;
-    }
-    dot / (na.sqrt() * nb.sqrt())
+/// Un vecteur est une représentation **valide** s'il est non vide et ne porte
+/// aucun `NaN` ni infini. Une représentation invalide n'est jamais une
+/// connaissance apprise : ni une similarité, ni une identité.
+pub fn vecteur_valide(v: &[f32]) -> bool {
+    !v.is_empty() && v.iter().all(|x| x.is_finite())
 }
 
-/// Identité **dérivée de la représentation**, pas du texte.
+/// Similarité cosinus, ou `None` quand les deux vecteurs ne sont pas
+/// **comparables** (dimensions différentes, ou représentation invalide : vide,
+/// `NaN`, infini).
 ///
-/// Deux formulations de la même demande (autre langue, autres mots) qui produisent
-/// le même vecteur tombent dans la même identité ; deux textes identiques avec des
-/// vecteurs différents n'y tombent pas.
-pub fn identite(vector: &[f32], quantification: u32) -> LearnedClass {
+/// `Some(0.0)` signifie une orthogonalité (ou un vecteur nul) entre deux
+/// représentations valides de même dimension — jamais une incompatibilité.
+/// L'accumulation se fait en `f64` pour ne pas écraser les grandes amplitudes ni
+/// les valeurs sous-normales ; la similarité est ramenée en `f32` en sortie.
+pub fn cosinus(a: &[f32], b: &[f32]) -> Option<f32> {
+    if a.len() != b.len() || !vecteur_valide(a) || !vecteur_valide(b) {
+        return None;
+    }
+    let (mut dot, mut na, mut nb) = (0.0f64, 0.0f64, 0.0f64);
+    for (x, y) in a.iter().zip(b.iter()) {
+        dot += f64::from(*x) * f64::from(*y);
+        na += f64::from(*x) * f64::from(*x);
+        nb += f64::from(*y) * f64::from(*y);
+    }
+    if na == 0.0 || nb == 0.0 {
+        return Some(0.0);
+    }
+    Some((dot / (na.sqrt() * nb.sqrt())) as f32)
+}
+
+/// **Poignée** (handle) dérivée de la projection quantifiée — PAS une identité
+/// logique. Deux structures distinctes peuvent produire la même projection : un
+/// hachage ne prouve rien (Obrain l'a mesuré). Cette poignée n'est qu'une clé
+/// d'accélération / de rapprochement, jamais une preuve d'identité de la
+/// connaissance, et elle ne garantit aucune stabilité quand l'encodeur change.
+///
+/// `quantification = 0` effondre toute projection sur la même poignée : cas
+/// dégénéré, documenté par un test, jamais une identité.
+pub fn poignee_de_projection(vector: &[f32], quantification: u32) -> LearnedClass {
+    if quantification == 0 {
+        return LearnedClass("repr.poignee-degeneree".to_string());
+    }
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
     for x in vector {
         let q = (x * quantification as f32).round() as i64;
@@ -191,11 +211,12 @@ pub fn identite(vector: &[f32], quantification: u32) -> LearnedClass {
 
 /// Classe la représentation contre les prototypes mémorisés.
 ///
-/// * pas de vecteur → [`Uncertainty::Unknown`], classe [`CLASSE_INCONNUE`] ;
+/// * pas de vecteur, ou vecteur **invalide** (`NaN`, infini, vide) →
+///   [`Uncertainty::Unknown`], classe [`CLASSE_INCONNUE`] — rien n'est appris ;
 /// * vecteur proche d'un prototype (`similarité ≥ seuil`) → la classe du prototype ;
 /// * vecteur sans prototype assez proche → **formation** d'une nouvelle classe, dont
-///   le nom est l'identité du vecteur. Aucun code métier n'est modifié : la
-///   structure naît de la représentation.
+///   le nom est une *poignée* de projection (pas une identité logique). Aucun code
+///   métier n'est modifié : la structure naît de la représentation.
 pub fn classer(
     repr: &TaskRepr,
     prototypes: &[Prototype],
@@ -205,9 +226,17 @@ pub fn classer(
     let Some(vector) = repr.embedding.as_ref() else {
         return Classification::inconnue();
     };
+    // Une représentation invalide ne forme rien : l'incertitude est dite.
+    if !vecteur_valide(vector) {
+        return Classification::inconnue();
+    }
     let mut meilleur: Option<(f32, &Prototype)> = None;
     for p in prototypes {
-        let s = cosinus(vector, &p.vector);
+        // Un prototype invalide ou de dimension différente n'est pas comparable :
+        // ignoré, jamais assimilé à une similarité nulle.
+        let Some(s) = cosinus(vector, &p.vector) else {
+            continue;
+        };
         if meilleur.map(|(m, _)| s > m).unwrap_or(true) {
             meilleur = Some((s, p));
         }
@@ -220,13 +249,13 @@ pub fn classer(
             similarity: Some(s),
         },
         Some((s, p)) => Classification {
-            class: identite(vector, quantification),
+            class: poignee_de_projection(vector, quantification),
             uncertainty: Uncertainty::Formed(s),
             nearest: Some(p.class.clone()),
             similarity: Some(s),
         },
         None => Classification {
-            class: identite(vector, quantification),
+            class: poignee_de_projection(vector, quantification),
             uncertainty: Uncertainty::Formed(0.0),
             nearest: None,
             similarity: None,
@@ -279,17 +308,70 @@ mod tests {
     }
 
     #[test]
-    fn l_identite_vient_du_vecteur_pas_du_texte() {
-        let a = identite(&[0.1, 0.2, 0.3], 1000);
-        let b = identite(&[0.1, 0.2, 0.3], 1000);
-        let c = identite(&[0.1, 0.2, 0.4], 1000);
+    fn la_poignee_vient_du_vecteur_pas_du_texte() {
+        let a = poignee_de_projection(&[0.1, 0.2, 0.3], 1000);
+        let b = poignee_de_projection(&[0.1, 0.2, 0.3], 1000);
+        let c = poignee_de_projection(&[0.1, 0.2, 0.4], 1000);
         assert_eq!(a, b);
         assert_ne!(a, c);
     }
 
     #[test]
-    fn la_similarite_ne_deborde_pas() {
-        assert_eq!(cosinus(&[0.0, 0.0], &[1.0, 0.0]), 0.0);
-        assert_eq!(cosinus(&[1.0], &[1.0, 0.0]), 0.0, "dimensions différentes");
+    fn la_similarite_ne_deborde_pas_et_distingue_l_incomparable() {
+        // Vecteur nul valide : similarité nulle ordinaire.
+        assert_eq!(cosinus(&[0.0, 0.0], &[1.0, 0.0]), Some(0.0));
+        // Dimensions différentes : incomparable, PAS une similarité nulle.
+        assert_eq!(cosinus(&[1.0], &[1.0, 0.0]), None, "dimensions différentes");
+        // Vide : incomparable.
+        assert_eq!(cosinus(&[], &[1.0, 0.0]), None);
+    }
+
+    #[test]
+    fn une_representation_invalide_n_est_jamais_apprise() {
+        // NaN, infini, vide : la classification rend l'inconnu, elle ne forme rien.
+        for invalide in [
+            vec![f32::NAN, 0.0],
+            vec![f32::INFINITY, 0.0],
+            vec![f32::NEG_INFINITY, 0.0],
+            vec![],
+        ] {
+            let c = classer(&repr(invalide), &[], 0.9, 1000);
+            assert_eq!(
+                c.uncertainty,
+                Uncertainty::Unknown,
+                "une représentation invalide est inconnue, pas formée"
+            );
+            assert_eq!(c.class.as_str(), CLASSE_INCONNUE);
+        }
+        // Un prototype invalide n'est pas comparable : il ne matche jamais.
+        let p = Prototype {
+            class: LearnedClass("repr.a1".into()),
+            vector: vec![f32::NAN, 0.0],
+        };
+        let c = classer(&repr(vec![1.0, 0.0]), &[p], 0.9, 1000);
+        assert!(matches!(c.uncertainty, Uncertainty::Formed(_)));
+        assert_ne!(c.class.as_str(), "repr.a1");
+    }
+
+    #[test]
+    fn la_similarite_survit_aux_grandes_amplitudes() {
+        // f32 accumulerait un débordement ; f64 ne déborde pas ici.
+        let a = [1e30f32, 1e30f32];
+        let b = [1e30f32, 1e30f32];
+        assert_eq!(cosinus(&a, &b), Some(1.0));
+        // Orthogonalité nette à grande amplitude.
+        let c = [1e30f32, -1e30f32];
+        let s = cosinus(&a, &c).unwrap();
+        assert!(s.abs() < 1e-3, "{s}");
+    }
+
+    #[test]
+    fn quantification_zero_est_degenere_et_documente() {
+        // Deux vecteurs distincts → même poignée dégénérée : ce n'est pas une
+        // identité, c'est un cas limite explicite (jamais deux savoirs distincts).
+        let a = poignee_de_projection(&[0.1, 0.2], 0);
+        let b = poignee_de_projection(&[9.9, 8.8], 0);
+        assert_eq!(a, b);
+        assert_eq!(a.as_str(), "repr.poignee-degeneree");
     }
 }

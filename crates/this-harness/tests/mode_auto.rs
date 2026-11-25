@@ -19,10 +19,10 @@ use serde_json::json;
 
 use this_harness::routing::{
     AFTER_PROVIDER_MOVE, ArmKey, ArmStats, Candidate, Capabilities, ConversationRoutingMode,
-    CostBasis, EmptyPool, LearningStage, MemoryLearning, MemoryPool, Menu, NARROWED_BY_PERSON,
-    NO_CANDIDATE, PERSON_LIST_UNAVAILABLE, PROVIDER_IMPOSED, Pick, PoolEntry, ProviderRoutingMode,
-    RejectReason, RouteWhy, Routed, RouterSpec, RoutingSettings, SAME_CLASS_NO_EXPLORE,
-    SequenceSeeds, TurnInput, TurnRouter, is_auto_model,
+    CostBasis, EmptyPool, Learning, LearningStage, MemoryLearning, MemoryPool, Menu,
+    NARROWED_BY_PERSON, NO_CANDIDATE, PERSON_LIST_UNAVAILABLE, PROVIDER_IMPOSED, Pick, PoolEntry,
+    ProviderRoutingMode, RejectReason, RouteWhy, Routed, RouterSpec, RoutingSettings,
+    SAME_CLASS_NO_EXPLORE, SequenceSeeds, TurnInput, TurnRouter, is_auto_model,
 };
 use this_harness::{
     Cancel, Delta, Event, Failure, Finish, Harness, Limits, Outcome, Reply, Request, Running, Stop,
@@ -67,9 +67,11 @@ fn arm(class: &str, provider: &str, model: &str, wins: bool) -> ArmStats {
     }
 }
 
-/// La classe de « hello » et celle d'une question de débogage.
-const GENERAL: &str = "chat.general";
-const DEBUG: &str = "chat.debug";
+/// La classe cognitive de ces tests de MÉCANIQUE du routeur : `MemoryLearning`
+/// n'a pas d'encodeur, donc `classify` rend l'inconnu (`repr.unknown`). Toutes
+/// les expériences clés sur cette unique classe — la distinction lexicale
+/// `chat.general` / `chat.debug` n'existe plus dans le chemin de décision.
+const CLASSE: &str = "repr.unknown";
 
 struct World {
     pool: Rc<MemoryPool>,
@@ -100,7 +102,7 @@ impl World {
     /// `winner` gagne nettement, pour les classes « general » et « debug ».
     fn prefer(&self, winner: (&str, &str), losers: &[(&str, &str)]) {
         let mut arms = Vec::new();
-        for class in [GENERAL, DEBUG] {
+        for class in [CLASSE] {
             arms.push(arm(class, winner.0, winner.1, true));
             for (provider, model) in losers {
                 arms.push(arm(class, provider, model, false));
@@ -644,25 +646,102 @@ fn un_pool_sans_vision_laisse_la_session_et_le_dit() {
 
 // ── 5. Le routeur : les gardes anti-oscillation ─────────────────────────────
 
+/// Un apprenant de test dont `classify` rend une classe **pilotée par l'appelant** :
+/// il exerce la garde « même classe → stable, autre classe → routé » sans aucune
+/// catégorie lexicale — la classe vient d'un signal extérieur, comme le ferait un
+/// encodeur (deux familles de demandes → deux classes).
+struct MemoireClassee {
+    bras: std::sync::Mutex<std::collections::HashMap<String, Vec<ArmStats>>>,
+    classe: RefCell<String>,
+}
+
+impl MemoireClassee {
+    fn nouvelle(classe: &str, prefere: (&str, &str), perdants: &[(&str, &str)]) -> Self {
+        let mut bras = std::collections::HashMap::new();
+        bras.insert(classe.to_string(), bras_pour(classe, prefere, perdants));
+        Self {
+            bras: std::sync::Mutex::new(bras),
+            classe: RefCell::new(classe.to_string()),
+        }
+    }
+
+    fn piloter(&self, classe: &str, prefere: (&str, &str), perdants: &[(&str, &str)]) {
+        self.bras
+            .lock()
+            .unwrap()
+            .insert(classe.to_string(), bras_pour(classe, prefere, perdants));
+        *self.classe.borrow_mut() = classe.to_string();
+    }
+}
+
+fn bras_pour(classe: &str, prefere: (&str, &str), perdants: &[(&str, &str)]) -> Vec<ArmStats> {
+    let mut v = vec![arm(classe, prefere.0, prefere.1, true)];
+    for (p, m) in perdants {
+        v.push(arm(classe, p, m, false));
+    }
+    v
+}
+
+#[async_trait(?Send)]
+impl Learning for MemoireClassee {
+    async fn classify(
+        &self,
+        _repr: &this_harness::cognition::TaskRepr,
+    ) -> this_harness::cognition::Classification {
+        let classe = self.classe.borrow().clone();
+        this_harness::cognition::Classification {
+            class: this_harness::cognition::LearnedClass(classe.clone()),
+            uncertainty: this_harness::cognition::Uncertainty::Established(1.0),
+            nearest: Some(this_harness::cognition::LearnedClass(classe)),
+            similarity: Some(1.0),
+        }
+    }
+    async fn arms(&self, class: &str) -> Vec<ArmStats> {
+        self.bras
+            .lock()
+            .unwrap()
+            .get(class)
+            .cloned()
+            .unwrap_or_default()
+    }
+}
+
 /// PO `agent_hooks.rs::provider_move_tests::right_after_a_change_a_turn_of_the_same_class_is_decided_without_exploration`
 /// et `right_after_a_change_a_turn_of_another_class_is_routed_on_the_turn`.
 #[test]
 fn juste_apres_un_changement_un_tour_de_meme_classe_est_stable_et_un_autre_non() {
-    let build = || {
-        let world = World::new(vec![cand("a", "m1", false), cand("a", "m2", false)]);
-        world.prefer(("a", "m2"), &[("a", "m1")]);
+    let build = |classe: &str| {
+        let mem = Rc::new(MemoireClassee::nouvelle(
+            classe,
+            ("a", "m2"),
+            &[("a", "m1")],
+        ));
+        let pool = Rc::new(MemoryPool::new(vec![
+            cand("a", "m1", false),
+            cand("a", "m2", false),
+        ]));
         let settings = RoutingSettings {
             exploration_epsilon: 0.25,
             ..RoutingSettings::default()
         };
-        let router = TurnRouter::new(world.spec("a", "m1", 7).settings(settings).auto());
+        let spec = RouterSpec::new(
+            pool,
+            Rc::new(SequenceSeeds::from(7)),
+            "a".to_string(),
+            "m1".to_string(),
+        )
+        .learning(mem.clone())
+        .settings(settings)
+        .auto();
+        let router = TurnRouter::new(spec);
         let first = run(router.route(text("hello")));
         assert!(first.changed, "le tour 0 change de modèle");
-        router
+        (router, mem)
     };
 
     // Même classe au tour suivant : pas d'exploration, et le motif le dit.
-    let same = run(build().route(text("hello again")));
+    let (router, _mem) = build("repr.a");
+    let same = run(router.route(text("hello again")));
     let decision = same.decision.as_ref().unwrap();
     assert_eq!(decision.exploration_epsilon, 0.0);
     assert!(!decision.explored);
@@ -672,10 +751,12 @@ fn juste_apres_un_changement_un_tour_de_meme_classe_est_stable_et_un_autre_non()
             .ends_with(&format!("; narrowed: {SAME_CLASS_NO_EXPLORE}"))
     );
 
-    // Autre classe : routé comme n'importe quel tour.
-    let other = run(build().route(text("pourquoi ça plante ?")));
+    // Autre classe (la représentation change, pas les mots) : routé normalement,
+    // l'exploration est de nouveau possible.
+    let (router, mem) = build("repr.a");
+    mem.piloter("repr.b", ("a", "m1"), &[("a", "m2")]);
+    let other = run(router.route(text("hello again")));
     let decision = other.decision.as_ref().unwrap();
-    assert_eq!(decision.signature.arm_key(), DEBUG);
     assert_eq!(decision.exploration_epsilon, 0.25);
     assert!(!decision.reason.contains("narrowed"), "{}", decision.reason);
 }
@@ -1756,7 +1837,7 @@ fn un_executeur_en_full_advisory_n_est_pas_note_comme_applique() {
 fn un_ecart_sous_la_marge_ne_change_pas_de_fournisseur() {
     let arm_of = |provider: &str, model: &str, alpha: f64, beta: f64, n: u64| ArmStats {
         n,
-        ..ArmStats::fresh(ArmKey::new(GENERAL, provider, model), alpha, beta)
+        ..ArmStats::fresh(ArmKey::new(CLASSE, provider, model), alpha, beta)
     };
     let mut held = 0;
     for seed in 0..800u128 {
@@ -1801,7 +1882,7 @@ fn des_faits_invalides_sont_ecartes_avec_un_motif_nomme() {
     bad_price.cost_basis = CostBasis::Priced;
     let world = World::new(vec![bad_price, cand("b", "m2", false)]);
     world.learning.set_arms(vec![ArmStats::fresh(
-        ArmKey::new(GENERAL, "b", "m2"),
+        ArmKey::new(CLASSE, "b", "m2"),
         f64::INFINITY,
         1.0,
     )]);
@@ -2971,8 +3052,8 @@ fn after_limit_classe_les_posterieurs_extremes_sans_debordement() {
     ]);
     let max = f64::MAX;
     world.learning.set_arms(vec![
-        ArmStats::fresh(ArmKey::new(GENERAL, "a", "m2"), max, max),
-        ArmStats::fresh(ArmKey::new(GENERAL, "a", "m3"), max, max / 2.0),
+        ArmStats::fresh(ArmKey::new(CLASSE, "a", "m2"), max, max),
+        ArmStats::fresh(ArmKey::new(CLASSE, "a", "m3"), max, max / 2.0),
     ]);
     let router = TurnRouter::new(world.spec("a", "m1", 1).auto());
     let routed = run(router.after_limit(text("hello"), &[Pick::new("a", "m1")], None))
@@ -3012,7 +3093,7 @@ fn le_repli_ne_sort_jamais_de_l_instance_meme_quand_un_autre_fournisseur_est_mei
     // des gardes (jamais deux changements de fournisseur de suite) que ce chemin ne tient pas.
     let world = monde_quota();
     let mut bras = Vec::new();
-    for classe in [GENERAL, DEBUG] {
+    for classe in [CLASSE] {
         bras.push(arm(classe, "a", "m1", true));
         bras.push(arm(classe, "b", "x", true));
         bras.push(arm(classe, "a", "m2", false));
@@ -3512,10 +3593,10 @@ fn bras_invalide(class: &str, provider: &str, model: &str) -> ArmStats {
 fn after_limit_elargit_quand_toute_la_liste_echoue_au_scoring() {
     let world = monde_quota();
     let mut arms = vec![
-        bras_invalide(GENERAL, "a", "m2"),
-        bras_invalide(DEBUG, "a", "m2"),
+        bras_invalide(CLASSE, "a", "m2"),
+        bras_invalide(CLASSE, "a", "m2"),
     ];
-    arms.push(arm(GENERAL, "a", "m3", true));
+    arms.push(arm(CLASSE, "a", "m3", true));
     world.learning.set_arms(arms);
     let router = TurnRouter::new(
         world
@@ -3552,9 +3633,9 @@ fn after_limit_garde_la_paire_listee_valide_meme_si_une_autre_listee_est_invalid
         cand("a", "m4", false),
     ]);
     world.learning.set_arms(vec![
-        bras_invalide(GENERAL, "a", "m2"),
-        arm(GENERAL, "a", "m3", false), // listé, valide, médiocre
-        arm(GENERAL, "a", "m4", true),  // hors liste, excellent
+        bras_invalide(CLASSE, "a", "m2"),
+        arm(CLASSE, "a", "m3", false), // listé, valide, médiocre
+        arm(CLASSE, "a", "m4", true),  // hors liste, excellent
     ]);
     let router = TurnRouter::new(
         world
@@ -3587,8 +3668,8 @@ fn after_limit_garde_la_paire_listee_valide_meme_si_une_autre_listee_est_invalid
 fn route_ordinaire_elargit_quand_la_paire_en_vigueur_est_hors_liste() {
     let world = World::new(vec![cand("a", "m2", false), cand("a", "m3", false)]);
     world.learning.set_arms(vec![
-        bras_invalide(GENERAL, "a", "m2"),
-        arm(GENERAL, "a", "m3", true),
+        bras_invalide(CLASSE, "a", "m2"),
+        arm(CLASSE, "a", "m3", true),
     ]);
     let router = TurnRouter::new(
         world
@@ -3612,8 +3693,8 @@ fn route_ordinaire_elargit_quand_la_paire_en_vigueur_est_hors_liste() {
 fn route_ordinaire_retient_la_paire_en_vigueur_listee_mais_invalide() {
     let world = World::new(vec![cand("a", "m2", false), cand("a", "m3", false)]);
     world.learning.set_arms(vec![
-        bras_invalide(GENERAL, "a", "m2"),
-        arm(GENERAL, "a", "m3", true),
+        bras_invalide(CLASSE, "a", "m2"),
+        arm(CLASSE, "a", "m3", true),
     ]);
     let router = TurnRouter::new(
         world

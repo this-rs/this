@@ -189,7 +189,7 @@ fn la_decision_ne_lit_pas_les_mots() {
             .iter()
             .filter(|p| {
                 let s = this_harness::cognition::cosinus(&p.vector, &v(famille, [0.0; 3]));
-                s > 0.9
+                s.unwrap_or(0.0) > 0.9
             })
             .map(|p| p.class.clone())
             .next()
@@ -219,7 +219,10 @@ fn la_decision_ne_lit_pas_les_mots() {
         .read()
         .unwrap()
         .iter()
-        .find(|p| this_harness::cognition::cosinus(&p.vector, &v(FAMILLE_DEBUG, [0.0; 3])) > 0.9)
+        .find(|p| {
+            this_harness::cognition::cosinus(&p.vector, &v(FAMILLE_DEBUG, [0.0; 3])).unwrap_or(0.0)
+                > 0.9
+        })
         .map(|p| p.class.clone())
         .unwrap();
     assert_ne!(
@@ -362,4 +365,169 @@ fn avec_encodeur_la_classe_apprise_remplace_la_metadonnee() {
     }
     let _ = Uncertainty::Unknown;
     let _ = CLASSE_INCONNUE;
+}
+
+/// P0 — contre-épreuve : deux savoirs appris favorisent deux modèles DIFFÉRENTS,
+/// à capacités et contraintes IDENTIQUES. Le scoreur doit lire la classe cognitive
+/// (celle de `classify`), pas `signature.arm_key()` — sinon les bras `repr.*` sont
+/// écartés au profit de la métadonnée `chat.general` et les deux décisions seraient
+/// identiques (départage arbitraire sur l'ordre du pool, fournisseur puis modèle).
+struct EncPolaire;
+
+impl SemanticEncoder for EncPolaire {
+    fn encode(&self, text: &str) -> Option<Vec<f32>> {
+        match text {
+            "demande de la famille A" => Some(vec![1.0, 0.0]),
+            "demande de la famille B" => Some(vec![-1.0, 0.0]),
+            _ => None,
+        }
+    }
+}
+
+/// Deux savoirs : la classe `repr.savoir-a` a appris que `a/m1` réussit, la classe
+/// `repr.savoir-b` que `b/m2` réussit. Les candidats ont exactement les mêmes
+/// capacités et le même coût : seule la représentation change la décision.
+struct DeuxSavoirs {
+    classes_consultees: Mutex<Vec<String>>,
+}
+
+#[async_trait(?Send)]
+impl Learning for DeuxSavoirs {
+    async fn classify(&self, repr: &TaskRepr) -> Classification {
+        let Some(v) = repr.embedding.as_ref() else {
+            return Classification::inconnue();
+        };
+        let classe = if v[0] >= 0.0 {
+            "repr.savoir-a"
+        } else {
+            "repr.savoir-b"
+        };
+        Classification {
+            class: LearnedClass(classe.to_string()),
+            uncertainty: Uncertainty::Established(1.0),
+            nearest: Some(LearnedClass(classe.to_string())),
+            similarity: Some(1.0),
+        }
+    }
+    async fn arms(&self, classe: &str) -> Vec<ArmStats> {
+        self.classes_consultees
+            .lock()
+            .unwrap()
+            .push(classe.to_string());
+        let (fa_a, fa_b) = if classe == "repr.savoir-a" {
+            (10_000.0, 1.0)
+        } else {
+            (1.0, 10_000.0)
+        };
+        let mut arm_a = ArmStats::fresh(
+            this_harness::routing::ArmKey::new(classe, "a", "m1"),
+            1.0,
+            1.0,
+        );
+        arm_a.alpha = fa_a;
+        arm_a.beta = fa_b;
+        let mut arm_b = ArmStats::fresh(
+            this_harness::routing::ArmKey::new(classe, "b", "m2"),
+            1.0,
+            1.0,
+        );
+        arm_b.alpha = fa_b;
+        arm_b.beta = fa_a;
+        vec![arm_a, arm_b]
+    }
+    async fn settle(&self, _id: u128, _served: Option<&Pick>, _stop: &Stop, _code: Option<&str>) {}
+}
+
+#[test]
+fn la_representation_change_la_decision_a_capacites_identiques() {
+    let cand = |p: &str, m: &str| this_harness::routing::Candidate {
+        cost_basis: CostBasis::Subscription,
+        healthy: Some(true),
+        ..this_harness::routing::Candidate::new(
+            p,
+            m,
+            Capabilities {
+                tools: true,
+                images: false,
+                reasoning: false,
+                context_window: Some(200_000),
+            },
+        )
+    };
+    let pool = Rc::new(MemoryPool::new(vec![cand("a", "m1"), cand("b", "m2")]));
+    let savoirs = Rc::new(DeuxSavoirs {
+        classes_consultees: Mutex::new(Vec::new()),
+    });
+    let routeur = TurnRouter::new(
+        RouterSpec::new(
+            pool,
+            Rc::new(SequenceSeeds::from(7)),
+            "a".to_string(),
+            "m1".to_string(),
+        )
+        .learning(savoirs.clone())
+        .encoder(Rc::new(EncPolaire))
+        .auto()
+        .settings(RoutingSettings {
+            exploration_epsilon: 0.0,
+            ..Default::default()
+        }),
+    );
+
+    let choisir = |texte: &str| {
+        futures::executor::block_on(routeur.route(TurnInput {
+            text: texte,
+            has_images: false,
+            hints: Default::default(),
+            honored: true,
+        }))
+    };
+
+    let da = choisir("demande de la famille A");
+    let db = choisir("demande de la famille B");
+
+    let pick_a = da
+        .decision
+        .as_ref()
+        .and_then(|d| d.chosen.clone())
+        .expect("une décision A");
+    let pick_b = db
+        .decision
+        .as_ref()
+        .and_then(|d| d.chosen.clone())
+        .expect("une décision B");
+
+    assert_eq!(
+        (pick_a.provider_id.as_str(), pick_a.model.as_str()),
+        ("a", "m1"),
+        "le savoir A doit faire choisir a/m1"
+    );
+    assert_eq!(
+        (pick_b.provider_id.as_str(), pick_b.model.as_str()),
+        ("b", "m2"),
+        "le savoir B doit faire choisir b/m2"
+    );
+    assert_ne!(
+        pick_a, pick_b,
+        "à capacités et contraintes identiques, seule la représentation change la décision"
+    );
+
+    // La classe cognitive a circulé jusqu'à la décision elle-même.
+    assert_eq!(
+        da.decision.as_ref().unwrap().cognitive_class.as_deref(),
+        Some("repr.savoir-a")
+    );
+    assert_eq!(
+        db.decision.as_ref().unwrap().cognitive_class.as_deref(),
+        Some("repr.savoir-b")
+    );
+
+    // L'apprentissage a été consulté avec les classes cognitives, pas la métadonnée.
+    let vues = savoirs.classes_consultees.lock().unwrap().clone();
+    assert!(vues.iter().any(|c| c == "repr.savoir-a"), "{vues:?}");
+    assert!(vues.iter().any(|c| c == "repr.savoir-b"), "{vues:?}");
+    assert!(
+        vues.iter().all(|c| c.starts_with("repr.")),
+        "aucune catégorie lexicale ne doit atteindre arms() : {vues:?}"
+    );
 }

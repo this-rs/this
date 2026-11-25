@@ -10,10 +10,16 @@ use std::sync::Mutex;
 use async_trait::async_trait;
 use futures::executor::block_on;
 use this_agent::Stop;
+use this_harness::cognition::{Classification, LearnedClass, TaskRepr, Uncertainty};
 use this_harness::routing::{
     ArmKey, ArmStats, Capabilities, CostBasis, Decision, Learning, MemoryLearning, MemoryPool,
     Pick, PriorHints, RouterSpec, RoutingSettings, SequenceSeeds, TurnInput, TurnRouter,
 };
+
+/// La classe cognitive de cette expérience : une seule classe de laboratoire,
+/// nommée explicitement (plus aucune catégorie lexicale `chat.*`). Le port
+/// `classify` la rend, et `record`/`settle` attribuent les observations à elle.
+const CLASSE_L2: &str = "repr.experience-l2";
 
 fn run<F: std::future::Future<Output = T>, T>(f: F) -> T {
     block_on(f)
@@ -21,8 +27,8 @@ fn run<F: std::future::Future<Output = T>, T>(f: F) -> T {
 
 fn bras_neutres() -> Vec<ArmStats> {
     vec![
-        ArmStats::fresh(ArmKey::new("chat.general", "a", "m1"), 1.0, 1.0),
-        ArmStats::fresh(ArmKey::new("chat.general", "b", "m2"), 1.0, 1.0),
+        ArmStats::fresh(ArmKey::new(CLASSE_L2, "a", "m1"), 1.0, 1.0),
+        ArmStats::fresh(ArmKey::new(CLASSE_L2, "b", "m2"), 1.0, 1.0),
     ]
 }
 
@@ -52,14 +58,14 @@ struct Appris {
 
 impl Appris {
     /// Le routeur ne décide que s'il a des bras à comparer : on amorce la classe
-    /// « chat.general » avec les deux candidats à l'a priori neutre (1/1).
+    /// `CLASSE_L2` avec les deux candidats à l'a priori neutre (1/1).
     fn new() -> Self {
         let mut bras = HashMap::new();
         bras.insert(
-            "chat.general".to_string(),
+            CLASSE_L2.to_string(),
             vec![
-                ArmStats::fresh(ArmKey::new("chat.general", "a", "m1"), 1.0, 1.0),
-                ArmStats::fresh(ArmKey::new("chat.general", "b", "m2"), 1.0, 1.0),
+                ArmStats::fresh(ArmKey::new(CLASSE_L2, "a", "m1"), 1.0, 1.0),
+                ArmStats::fresh(ArmKey::new(CLASSE_L2, "b", "m2"), 1.0, 1.0),
             ],
         );
         Self {
@@ -72,6 +78,18 @@ impl Appris {
 
 #[async_trait(?Send)]
 impl Learning for Appris {
+    async fn classify(&self, _repr: &TaskRepr) -> Classification {
+        // Laboratoire à classe unique : pas d'encodeur, une classe fixe. Sans
+        // cette classe, le routeur rendrait `repr.unknown` et l'apprentissage
+        // n'aurait aucune classe où ranger ses observations.
+        Classification {
+            class: LearnedClass(CLASSE_L2.to_string()),
+            uncertainty: Uncertainty::Established(1.0),
+            nearest: Some(LearnedClass(CLASSE_L2.to_string())),
+            similarity: Some(1.0),
+        }
+    }
+
     async fn arms(&self, class: &str) -> Vec<ArmStats> {
         self.bras
             .lock()
@@ -87,10 +105,7 @@ impl Learning for Appris {
 
     async fn record(&self, d: &Decision) {
         if d.used.is_some() {
-            self.en_cours
-                .lock()
-                .unwrap()
-                .insert(d.id, d.signature.arm_key());
+            self.en_cours.lock().unwrap().insert(d.id, d.class_key());
         }
     }
 
@@ -297,7 +312,7 @@ fn une_seule_boucle_fermee() {
     run(routeur.settle(&Stop::Failed("synthétique".to_string()), None, true));
 
     // 3. les ArmStats du bras servi ont bougé (beta +1)
-    let bras = run(appris.arms("chat.general"));
+    let bras = run(appris.arms(CLASSE_L2));
     let servi = bras
         .iter()
         .find(|a| a.key.provider_id == used.provider_id && a.key.model == used.model)
@@ -311,7 +326,7 @@ fn une_seule_boucle_fermee() {
 
     // 4. la statistique est relue : la décision suivante ne peut plus choisir ce bras
     //    si l'autre est resté neutre — on vérifie seulement que la lecture a lieu.
-    let apres = run(appris.arms("chat.general"));
+    let apres = run(appris.arms(CLASSE_L2));
     assert_eq!(apres.len(), 2, "les deux bras sont toujours là");
 }
 
@@ -322,7 +337,7 @@ fn une_seule_boucle_fermee() {
 fn settle_sans_record_est_un_no_op() {
     let appris = Appris::new();
     run(appris.settle(999_999, None, &Stop::Done, None));
-    let bras = run(appris.arms("chat.general"));
+    let bras = run(appris.arms(CLASSE_L2));
     assert!(
         bras.iter()
             .all(|a| a.n == 0 && a.alpha == 1.0 && a.beta == 1.0)
@@ -357,7 +372,7 @@ fn moteur_jamais_joint_ne_nourrit_aucun_bras() {
     let d = routed.decision.clone().unwrap();
     run(appris.record(&d));
     run(appris.settle(d.id, None, &Stop::Done, None));
-    let bras = run(appris.arms("chat.general"));
+    let bras = run(appris.arms(CLASSE_L2));
     assert!(bras.iter().all(|a| a.n == 0));
 }
 
@@ -390,7 +405,7 @@ fn settle_duplique_ne_nourrit_qu_une_fois() {
     run(appris.record(&d));
     run(appris.settle(d.id, Some(&used), &Stop::Done, None));
     run(appris.settle(d.id, Some(&used), &Stop::Done, None)); // rejeu
-    let bras = run(appris.arms("chat.general"));
+    let bras = run(appris.arms(CLASSE_L2));
     let servi = bras
         .iter()
         .find(|a| a.key.provider_id == used.provider_id && a.key.model == used.model)
@@ -426,7 +441,7 @@ fn interruption_ne_recompense_pas() {
     let used = d.used.clone().unwrap();
     run(appris.record(&d));
     run(appris.settle(d.id, Some(&used), &Stop::Interrupted, None));
-    let bras = run(appris.arms("chat.general"));
+    let bras = run(appris.arms(CLASSE_L2));
     let servi = bras
         .iter()
         .find(|a| a.key.provider_id == used.provider_id && a.key.model == used.model)
@@ -471,7 +486,7 @@ fn record_settle_record_settle_ne_nourrit_qu_une_fois() {
     run(appris.record(&d)); // rejeu du même identifiant après règlement
     run(appris.settle(d.id, Some(&used), &Stop::Done, None));
 
-    let bras = run(appris.arms("chat.general"));
+    let bras = run(appris.arms(CLASSE_L2));
     let servi = bras
         .iter()
         .find(|a| a.key.provider_id == used.provider_id && a.key.model == used.model)

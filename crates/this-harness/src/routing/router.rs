@@ -913,6 +913,10 @@ impl TurnRouter {
             settings.mode = ProviderRoutingMode::Full;
         }
         let mut request = DecideRequest::new(signature, settings, pool);
+        // La classe cognitive issue de `classify` circule jusqu'au scoreur : le
+        // scoreur ne la recalcule pas depuis la signature (il lirait `chat.general`
+        // et écarterait les bras `repr.*`).
+        request.class = Some(class.clone());
         request.current = has_pair.then(|| current.clone());
         request.turn_index = Some(index);
         request.narrowed.extend(person);
@@ -1214,7 +1218,11 @@ impl TurnRouter {
         let mut signature = TurnSignature::from_chat(turn.text, turn.has_images, turn.hints);
         signature.needs_tools = self.needs_tools;
         signature.role = self.role;
-        let class = signature.arm_key();
+        // Même identité cognitive que le tour initial : la représentation est une
+        // fonction déterministe du tour et de l'encodeur, la classification aussi.
+        // Le repli après quota n'a pas à recalculer une clé lexicale différente.
+        let repr = self.representation(turn.text, turn.has_images, &signature);
+        let class = self.learning.classify(&repr).await.class.0;
 
         let mut pool = self.current_pool().await;
         // Contrainte dure du repli, appliquée D'ABORD : un repli après quota ne change jamais
@@ -1260,6 +1268,7 @@ impl TurnRouter {
         // Déterministe : pas de tirage, pas d'hystérésis (la paire en vigueur vient de refuser).
         settings.exploration_epsilon = 0.0;
         let mut request = DecideRequest::new(signature, settings, pool);
+        request.class = Some(class.clone());
         request.restrict_provider = Some(last.provider_id.clone());
         request.steady = true;
         request.narrowed.push(narrowed);
