@@ -57,11 +57,25 @@ fn candidat(p: &str, m: &str) -> this_harness::routing::Candidate {
 /// Apprenant persistant : écrit une observation par `settle`, relit les
 /// statistiques par projection GQL.
 /// Résultat d'une tentative d'écriture d'observation.
+/// **Bilan exhaustif par décision** : chaque décision tombe dans EXACTEMENT un seau.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 struct Compteurs {
+    /// `record` appelé avec une paire servie.
+    decisions: u64,
+    /// `record` appelé sans paire (décision consultative).
+    consultatives: u64,
+    /// `settle` reçu sans `record` correspondant (identifiant absent de `en_cours`).
+    id_absent: u64,
+    /// `settle` reçu avec `served = None` (aucun moteur servi).
+    served_none: u64,
+    /// `settle` reçu avec un `Stop` non exploitable (Interrupted, Budget, …).
+    stop_non_exploitable: u64,
+    /// Observation effectivement écrite.
     creees: u64,
     rejeux: u64,
     conflits: u64,
+    /// Échec d'écriture (persistance).
+    erreurs: u64,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -129,6 +143,24 @@ impl ApprisObrain {
 
     fn compteurs(&self) -> Compteurs {
         *self.compteurs.lock().unwrap()
+    }
+
+    /// Compte INDÉPENDANT des identités réellement persistées (requête GQL).
+    fn identites_persistees(&self) -> usize {
+        self.store
+            .execute_query(
+                "gql",
+                &format!(
+                    "MATCH (o:observation) WHERE o.scope = '{}' RETURN o.evenement AS e",
+                    echapper(&self.scope)
+                ),
+                100_000,
+            )
+            .expect("comptage des identités")
+            .get("rows")
+            .and_then(|v| v.as_array())
+            .map(|a| a.len())
+            .expect("réponse GQL sans `rows`")
     }
 
     fn ecrire_observation(
@@ -288,23 +320,34 @@ impl Learning for ApprisObrain {
     }
 
     async fn record(&self, d: &Decision) {
+        let mut c = self.compteurs.lock().unwrap();
         if d.used.is_some() {
+            c.decisions += 1;
             self.en_cours
                 .lock()
                 .unwrap()
                 .insert(d.id, d.signature.arm_key());
+        } else {
+            c.consultatives += 1;
         }
     }
 
     async fn settle(&self, id: u128, served: Option<&Pick>, stop: &Stop, _code: Option<&str>) {
         let Some(classe) = self.en_cours.lock().unwrap().remove(&id) else {
+            self.compteurs.lock().unwrap().id_absent += 1;
             return;
         };
-        let Some(p) = served else { return };
+        let Some(p) = served else {
+            self.compteurs.lock().unwrap().served_none += 1;
+            return;
+        };
         let favorable = match stop {
             Stop::Done => true,
             Stop::Failed(_) => false,
-            _ => return, // résultat inconnu : aucun bras nourri
+            _ => {
+                self.compteurs.lock().unwrap().stop_non_exploitable += 1;
+                return; // résultat inconnu : aucun bras nourri
+            }
         };
         match self.ecrire_observation(
             &id.to_string(),
@@ -714,6 +757,8 @@ fn l3_reprise_conserve_les_nouvelles_observations() {
     let compteurs_apres = l.compteurs();
     let stats = l.projection();
     let n_total: u32 = stats.iter().map(|(_, _, _, _, _, n)| *n).sum();
+    // Comptage INDÉPENDANT des identités persistées (requête GQL, pas la somme des n).
+    let identites = l.identites_persistees();
     store.commit_wal().expect("flush");
 
     println!(
@@ -730,13 +775,44 @@ fn l3_reprise_conserve_les_nouvelles_observations() {
     //  (b) toutes les décisions ne produisent pas d'observation (le routeur peut
     //      appeler settle avec `served = None` : moteur non servi).
     // L'invariant qui compte pour la reprise est : AUCUNE observation perdue.
-    println!(
-        "tours→décisions : avant {decisions_avant}/{coupe}, après {decisions_apres}/{}",
-        draws.len() - coupe
-    );
-    println!(
-        "décisions→observations : avant {}/{decisions_avant}, après {}/{decisions_apres}",
-        compteurs_avant.creees, compteurs_apres.creees
+    let bilan = |role: &str, c: &Compteurs, decisions: usize| {
+        let comptabilise = c.id_absent
+            + c.served_none
+            + c.stop_non_exploitable
+            + c.creees
+            + c.rejeux
+            + c.conflits
+            + c.erreurs;
+        println!(
+            "{role} : décisions={decisions} consultatives={} | id_absent={} served_none={} \
+             stop_non_exploitable={} creees={} rejeux={} conflits={} erreurs={} \
+             | comptabilisé={comptabilise}",
+            c.consultatives,
+            c.id_absent,
+            c.served_none,
+            c.stop_non_exploitable,
+            c.creees,
+            c.rejeux,
+            c.conflits,
+            c.erreurs
+        );
+        let jamais_regles = decisions.saturating_sub(comptabilise as usize);
+        println!("{role} : décisions JAMAIS réglées (settle non reçu) = {jamais_regles}");
+        assert_eq!(
+            comptabilise as usize + jamais_regles,
+            decisions,
+            "{role} : la comptabilité doit être exhaustive (réglées + jamais réglées = décisions)"
+        );
+    };
+    bilan("AVANT  ", &compteurs_avant, decisions_avant);
+    bilan("APRÈS  ", &compteurs_apres, decisions_apres);
+    println!("identités persistées (requête indépendante) = {identites}");
+
+    // Le comptage indépendant doit égaler les créations comptabilisées.
+    assert_eq!(
+        identites,
+        compteurs_avant.creees as usize + compteurs_apres.creees as usize,
+        "les identités persistées doivent égaler les observations créées"
     );
     assert!(
         compteurs_avant.creees as usize <= decisions_avant,
