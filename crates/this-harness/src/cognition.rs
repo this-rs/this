@@ -126,6 +126,33 @@ impl LearnedClass {
 /// Nom de la classe rendue quand aucune représentation n'est disponible.
 pub const CLASSE_INCONNUE: &str = "repr.unknown";
 
+/// **Clé de projection** : un indice de rapprochement (hachage de la projection
+/// quantifiée, sujet aux collisions). Type DISTINCT de [`LearnedClass`] : il
+/// n'identifie jamais une connaissance. Deux représentations distinctes peuvent
+/// partager la même clé de projection ; elles restent deux connaissances
+/// distinctes.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct ProjectionKey(pub String);
+
+impl ProjectionKey {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// Une **proposition de formation** : une représentation sans prototype assez
+/// proche, à enregistrer par une autorité de persistance. Tant qu'elle n'est pas
+/// enregistrée, ce n'est PAS une connaissance constituée (pas d'identité logique).
+#[derive(Clone, Debug)]
+pub struct Formation {
+    /// L'indice de rapprochement — jamais une identité.
+    pub projection: ProjectionKey,
+    /// Le vecteur à mémoriser si la formation est acceptée.
+    pub vector: Vec<f32>,
+    /// La similarité au prototype le plus proche, s'il y en a un.
+    pub similarity: Option<f32>,
+}
+
 /// Un prototype mémorisé : un vecteur, et la classe qu'il désigne.
 #[derive(Clone, Debug)]
 pub struct Prototype {
@@ -134,9 +161,14 @@ pub struct Prototype {
 }
 
 /// Le résultat d'une classification, avec son incertitude explicite.
+///
+/// `class` n'est `Some` que pour une **connaissance constituée** (reconnue).
+/// `formation` porte une **proposition** de nouvelle connaissance, à enregistrer
+/// par l'autorité de persistance ; elle n'a pas encore d'identité.
 #[derive(Clone, Debug)]
 pub struct Classification {
-    pub class: LearnedClass,
+    pub class: Option<LearnedClass>,
+    pub formation: Option<Formation>,
     pub uncertainty: Uncertainty,
     /// Le prototype le plus proche, s'il y en a un.
     pub nearest: Option<LearnedClass>,
@@ -147,11 +179,23 @@ impl Classification {
     /// La seule classification qui ne repose sur aucune représentation.
     pub fn inconnue() -> Self {
         Self {
-            class: LearnedClass::inconnue(),
+            class: None,
+            formation: None,
             uncertainty: Uncertainty::Unknown,
             nearest: None,
             similarity: None,
         }
+    }
+
+    /// La clé de classe effective : la connaissance reconnue, sinon la classe
+    /// neutre d'incertitude (`repr.unknown`). Une formation non enregistrée n'a
+    /// pas d'identité : elle ne sert pas de clé d'apprentissage tant que
+    /// l'autorité de persistance ne l'a pas constituée.
+    pub fn class_key(&self) -> String {
+        self.class
+            .as_ref()
+            .map(|c| c.0.clone())
+            .unwrap_or_else(|| CLASSE_INCONNUE.to_string())
     }
 }
 
@@ -186,16 +230,13 @@ pub fn cosinus(a: &[f32], b: &[f32]) -> Option<f32> {
     Some((dot / (na.sqrt() * nb.sqrt())) as f32)
 }
 
-/// **Poignée** (handle) dérivée de la projection quantifiée — PAS une identité
-/// logique. Deux structures distinctes peuvent produire la même projection : un
-/// hachage ne prouve rien (Obrain l'a mesuré). Cette poignée n'est qu'une clé
-/// d'accélération / de rapprochement, jamais une preuve d'identité de la
-/// connaissance, et elle ne garantit aucune stabilité quand l'encodeur change.
+/// **Clé de projection** : un hachage de la projection quantifiée, utilisé comme
+/// indice de rapprochement. Sujet aux collisions : deux structures distinctes
+/// peuvent produire la même clé (Obrain l'a mesuré). Ce n'est JAMAIS une identité
+/// de connaissance, et rien n'y est stable quand l'encodeur change.
 ///
-/// `quantification = 0` n'offre aucun signal exploitable : la poignée est
-/// `None`, donc **aucune** classe n'est formée — jamais une classe commune à
-/// toutes les connaissances nouvelles (une fusion interdite).
-pub fn poignee_de_projection(vector: &[f32], quantification: u32) -> Option<LearnedClass> {
+/// `quantification = 0` n'offre aucun signal exploitable : la clé est `None`.
+pub fn poignee_de_projection(vector: &[f32], quantification: u32) -> Option<ProjectionKey> {
     if quantification == 0 {
         return None;
     }
@@ -207,17 +248,18 @@ pub fn poignee_de_projection(vector: &[f32], quantification: u32) -> Option<Lear
             h = h.wrapping_mul(0x0100_0000_01b3);
         }
     }
-    Some(LearnedClass(format!("repr.{h:016x}")))
+    Some(ProjectionKey(format!("repr.{h:016x}")))
 }
 
 /// Classe la représentation contre les prototypes mémorisés.
 ///
 /// * pas de vecteur, ou vecteur **invalide** (`NaN`, infini, vide) →
-///   [`Uncertainty::Unknown`], classe [`CLASSE_INCONNUE`] — rien n'est appris ;
-/// * vecteur proche d'un prototype (`similarité ≥ seuil`) → la classe du prototype ;
-/// * vecteur sans prototype assez proche → **formation** d'une nouvelle classe, dont
-///   le nom est une *poignée* de projection (pas une identité logique). Aucun code
-///   métier n'est modifié : la structure naît de la représentation.
+///   [`Uncertainty::Unknown`], `class: None` — rien n'est appris ;
+/// * vecteur proche d'un prototype (`similarité ≥ seuil`) → `class: Some`, la
+///   connaissance constituée ;
+/// * vecteur sans prototype assez proche → `class: None` + `formation: Some`,
+///   une **proposition de formation** (pas une identité). Aucune identité n'est
+///   fabriquée depuis un hachage : l'autorité de persistance enregistre et nomme.
 pub fn classer(
     repr: &TaskRepr,
     prototypes: &[Prototype],
@@ -244,31 +286,39 @@ pub fn classer(
     }
     match meilleur {
         Some((s, p)) if s >= seuil => Classification {
-            class: p.class.clone(),
+            class: Some(p.class.clone()),
+            formation: None,
             uncertainty: Uncertainty::Established(s),
             nearest: Some(p.class.clone()),
             similarity: Some(s),
         },
         Some((s, p)) => {
-            // Formation d'une nouvelle classe : la poignée est une *proposition* de
-            // rapprochement, pas une identité. Sans poignée (quantification=0),
-            // rien n'est formé : l'incertitude est dite, aucune fusion.
-            let Some(classe) = poignee_de_projection(vector, quantification) else {
+            let Some(projection) = poignee_de_projection(vector, quantification) else {
                 return Classification::inconnue();
             };
             Classification {
-                class: classe,
+                class: None,
+                formation: Some(Formation {
+                    projection,
+                    vector: vector.clone(),
+                    similarity: Some(s),
+                }),
                 uncertainty: Uncertainty::Formed(s),
                 nearest: Some(p.class.clone()),
                 similarity: Some(s),
             }
         }
         None => {
-            let Some(classe) = poignee_de_projection(vector, quantification) else {
+            let Some(projection) = poignee_de_projection(vector, quantification) else {
                 return Classification::inconnue();
             };
             Classification {
-                class: classe,
+                class: None,
+                formation: Some(Formation {
+                    projection,
+                    vector: vector.clone(),
+                    similarity: None,
+                }),
                 uncertainty: Uncertainty::Formed(0.0),
                 nearest: None,
                 similarity: None,
@@ -293,7 +343,7 @@ mod tests {
         let r = TaskRepr::sans_encodeur(Modalities::of_turn(true, false), Constraints::default());
         let c = classer(&r, &[], 0.9, 1000);
         assert_eq!(c.uncertainty, Uncertainty::Unknown);
-        assert_eq!(c.class.as_str(), CLASSE_INCONNUE);
+        assert!(c.class.is_none());
         assert!(!c.uncertainty.grounded());
     }
 
@@ -305,7 +355,7 @@ mod tests {
         };
         // Représentation quasi identique : aucun mot n'entre dans la décision.
         let c = classer(&repr(vec![0.98, 0.19, 0.0]), &[p], 0.9, 1000);
-        assert_eq!(c.class.as_str(), "repr.a1");
+        assert_eq!(c.class.as_ref().map(|c| c.as_str()), Some("repr.a1"));
         assert!(matches!(c.uncertainty, Uncertainty::Established(_)));
     }
 
@@ -316,8 +366,12 @@ mod tests {
             vector: vec![1.0, 0.0, 0.0],
         };
         let c = classer(&repr(vec![0.0, 1.0, 0.0]), &[p], 0.9, 1000);
-        assert_ne!(c.class.as_str(), "repr.a1");
-        assert!(c.class.as_str().starts_with("repr."));
+        assert!(
+            c.class.is_none(),
+            "une formation n'a pas d'identité constituée"
+        );
+        let f = c.formation.as_ref().expect("proposition de formation");
+        assert!(f.projection.as_str().starts_with("repr."));
         assert!(matches!(c.uncertainty, Uncertainty::Formed(_)));
     }
 
@@ -358,7 +412,7 @@ mod tests {
                 Uncertainty::Unknown,
                 "une représentation invalide est inconnue, pas formée"
             );
-            assert_eq!(c.class.as_str(), CLASSE_INCONNUE);
+            assert!(c.class.is_none());
         }
         // Un prototype invalide n'est pas comparable : il ne matche jamais.
         let p = Prototype {
@@ -367,7 +421,8 @@ mod tests {
         };
         let c = classer(&repr(vec![1.0, 0.0]), &[p], 0.9, 1000);
         assert!(matches!(c.uncertainty, Uncertainty::Formed(_)));
-        assert_ne!(c.class.as_str(), "repr.a1");
+        assert!(c.class.is_none());
+        assert!(c.formation.is_some());
     }
 
     #[test]
@@ -391,7 +446,7 @@ mod tests {
         // Et `classer` rend l'inconnu au lieu de former une classe commune.
         let c = classer(&repr(vec![0.1, 0.2, 0.3]), &[], 0.9, 0);
         assert_eq!(c.uncertainty, Uncertainty::Unknown);
-        assert_eq!(c.class.as_str(), CLASSE_INCONNUE);
+        assert!(c.class.is_none());
     }
 
     #[test]
@@ -408,6 +463,28 @@ mod tests {
             poignee_de_projection(&v2, 1),
             "collision de projection : la poignée n'est pas une identité"
         );
+    }
+
+    #[test]
+    fn deux_vecteurs_orthogonaux_ne_fusionnent_pas_malgre_la_poignee_commune() {
+        let v1 = vec![0.1f32, 0.0];
+        let v2 = vec![0.0f32, 0.1];
+        // `classer` (fonction pure) : ce sont des PROPOSITIONS de formation, sans
+        // identité constituée — même si leur clé de projection est identique.
+        let c1 = classer(&repr(v1.clone()), &[], 0.9, 1);
+        let c2 = classer(&repr(v2.clone()), &[], 0.9, 1);
+        assert!(c1.class.is_none(), "pas d'identité avant enregistrement");
+        assert!(c2.class.is_none());
+        let f1 = c1.formation.as_ref().expect("proposition 1");
+        let f2 = c2.formation.as_ref().expect("proposition 2");
+        assert_eq!(f1.projection, f2.projection, "collision de projection");
+
+        // L'autorité enregistre chaque proposition avec une identité DISTINCTE :
+        // deux connaissances, malgré la poignée commune.
+        let id1 = LearnedClass("repr.k0".into());
+        let id2 = LearnedClass("repr.k1".into());
+        assert_ne!(id1, id2);
+        let _ = (f1.vector.clone(), f2.vector.clone());
     }
 
     #[test]

@@ -696,7 +696,8 @@ impl Learning for MemoireClassee {
     ) -> this_harness::cognition::Classification {
         let classe = self.classe.borrow().clone();
         this_harness::cognition::Classification {
-            class: this_harness::cognition::LearnedClass(classe.clone()),
+            class: Some(this_harness::cognition::LearnedClass(classe.clone())),
+            formation: None,
             uncertainty: this_harness::cognition::Uncertainty::Established(1.0),
             nearest: Some(this_harness::cognition::LearnedClass(classe)),
             similarity: Some(1.0),

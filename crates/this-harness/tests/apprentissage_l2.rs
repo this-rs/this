@@ -83,7 +83,8 @@ impl Learning for Appris {
         // cette classe, le routeur rendrait `repr.unknown` et l'apprentissage
         // n'aurait aucune classe où ranger ses observations.
         Classification {
-            class: LearnedClass(CLASSE_L2.to_string()),
+            class: Some(LearnedClass(CLASSE_L2.to_string())),
+            formation: None,
             uncertainty: Uncertainty::Established(1.0),
             nearest: Some(LearnedClass(CLASSE_L2.to_string())),
             similarity: Some(1.0),

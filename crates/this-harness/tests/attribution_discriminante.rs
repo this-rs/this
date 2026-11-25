@@ -75,7 +75,8 @@ impl Learning for MemoireDeux {
         let v = repr.embedding.as_ref().map(|e| e[0]).unwrap_or(0.0);
         let classe = if v >= 0.0 { "repr.K1" } else { "repr.K2" };
         Classification {
-            class: LearnedClass(classe.to_string()),
+            class: Some(LearnedClass(classe.to_string())),
+            formation: None,
             uncertainty: Uncertainty::Established(1.0),
             nearest: Some(LearnedClass(classe.to_string())),
             similarity: Some(1.0),

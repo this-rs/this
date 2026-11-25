@@ -862,7 +862,7 @@ impl TurnRouter {
         // La classe vient de la REPRÉSENTATION (vecteur + prototypes appris), jamais
         // du texte : aucun lexique n'est consulté ici.
         let repr = self.representation(turn.text, turn.has_images, &signature);
-        let class = self.learning.classify(&repr).await.class.0;
+        let class = self.learning.classify(&repr).await.class_key();
 
         let mut pool = self.current_pool().await;
         if let Some(entries) = &choice.pool {
@@ -1236,7 +1236,7 @@ impl TurnRouter {
             Some(class) => class,
             None => {
                 let repr = self.representation(turn.text, turn.has_images, &signature);
-                self.learning.classify(&repr).await.class.0
+                self.learning.classify(&repr).await.class_key()
             }
         };
 

@@ -104,18 +104,27 @@ struct MemoirePrototypes {
 impl MemoirePrototypes {
     fn classer(&self, repr: &TaskRepr) -> Classification {
         let c = classer(repr, &self.prototypes.read().unwrap(), 0.9, 1000);
+        if let Some(f) = &c.formation {
+            // L'autorité de persistance : enregistre la proposition avec une
+            // identité logique UNIQUE (pas un hash de projection).
+            let n = self.prototypes.read().unwrap().len();
+            let classe = LearnedClass(format!("repr.k{n}"));
+            self.prototypes.write().unwrap().push(Prototype {
+                class: classe.clone(),
+                vector: f.vector.clone(),
+            });
+            return Classification {
+                class: Some(classe),
+                formation: None,
+                uncertainty: c.uncertainty,
+                nearest: c.nearest,
+                similarity: c.similarity,
+            };
+        }
         if !c.uncertainty.grounded() {
             *self.inconnues.lock().unwrap() += 1;
         }
         c
-    }
-
-    /// Mémorise un prototype (formation d'une classe si elle est nouvelle).
-    fn apprendre(&self, classe: &LearnedClass, vector: &[f32]) {
-        self.prototypes.write().unwrap().push(Prototype {
-            class: classe.clone(),
-            vector: vector.to_vec(),
-        });
     }
 }
 
@@ -159,7 +168,7 @@ fn la_decision_ne_lit_pas_les_mots() {
         };
         let c = memoire.classer(&repr);
         assert!(c.uncertainty.grounded());
-        memoire.apprendre(&c.class, repr.embedding.as_ref().unwrap());
+        assert!(c.class.is_some(), "l'autorité a constitué une identité");
         let _ = famille;
     }
 
@@ -176,7 +185,7 @@ fn la_decision_ne_lit_pas_les_mots() {
             "« {phrase} » n'a pas été classée : {c:?}"
         );
         par_famille
-            .entry(c.class.as_str().to_string())
+            .entry(c.class.as_ref().unwrap().as_str().to_string())
             .or_default()
             .push(phrase.to_string());
 
@@ -195,7 +204,8 @@ fn la_decision_ne_lit_pas_les_mots() {
             .next()
             .expect("un prototype pour la famille");
         assert_eq!(
-            c.class, classe_famille,
+            c.class.as_ref(),
+            Some(&classe_famille),
             "« {phrase} » a été classée {c:?} alors que sa représentation appartient à {classe_famille:?}"
         );
     }
@@ -226,7 +236,8 @@ fn la_decision_ne_lit_pas_les_mots() {
         .map(|p| p.class.clone())
         .unwrap();
     assert_ne!(
-        classe_piege, debug,
+        classe_piege.as_ref(),
+        Some(&debug),
         "un lexique aurait classé cette phrase en débogage à cause du mot « bug »"
     );
 }
@@ -311,7 +322,10 @@ fn avec_encodeur_la_classe_apprise_remplace_la_metadonnee() {
         ..Default::default()
     };
     let c = memoire.classer(&exemple);
-    memoire.apprendre(&c.class, exemple.embedding.as_ref().unwrap());
+    assert!(
+        c.class.is_some(),
+        "l'autorité a constitué une identité pour l'exemple"
+    );
 
     let pool = Rc::new(MemoryPool::new(vec![this_harness::routing::Candidate {
         cost_basis: CostBasis::Subscription,
@@ -403,7 +417,8 @@ impl Learning for DeuxSavoirs {
             "repr.savoir-b"
         };
         Classification {
-            class: LearnedClass(classe.to_string()),
+            class: Some(LearnedClass(classe.to_string())),
+            formation: None,
             uncertainty: Uncertainty::Established(1.0),
             nearest: Some(LearnedClass(classe.to_string())),
             similarity: Some(1.0),
