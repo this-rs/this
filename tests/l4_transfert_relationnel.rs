@@ -285,12 +285,15 @@ fn lire_lignes(store: &Arc<ObrainStore>, limite: usize) -> Vec<(String, String, 
 
 // ── Agrégats ───────────────────────────────────────────────────────────────
 
+/// provider -> (succès, essais).
+type Comptes = HashMap<String, (f64, f64)>;
+
 /// provider -> (succès, essais), sur les classes autorisées et/ou un domaine.
 fn comptes(
     lignes: &[(String, String, bool)],
     autorisees: Option<&[&'static str]>,
     domaine: Option<&str>,
-) -> HashMap<String, (f64, f64)> {
+) -> Comptes {
     let mut table: HashMap<String, (f64, f64)> = HashMap::new();
     for (classe, provider, favorable) in lignes {
         if let Some(liste) = autorisees
@@ -345,7 +348,7 @@ fn priors_depuis(
     let mut l = lam;
     if let Some(m) = plafond
         && l * total > m
-        && *&total > 0.0
+        && total > 0.0
     {
         l = m / total;
     }
@@ -656,7 +659,7 @@ impl Strategie {
         &self,
         classe: &str,
         lignes: &[(String, String, bool)],
-    ) -> (HashMap<String, (f64, f64)>, HashMap<String, (f64, f64)>) {
+    ) -> (Comptes, Comptes) {
         let aut = autorisees(self.protocole, classe);
         let sienne = statique(classe).expect("classe connue");
         let local = comptes(lignes, Some(&[sienne]), None);
@@ -1001,7 +1004,7 @@ fn mesurer_recup(traj: &[(String, bool)], classe: &str, rep: u64) -> Recup {
         let _ = i;
         regret += theta(classe, meilleur) - theta(classe, bras);
     }
-    let durable = (0..n).find(|i| (*i..n).all(|j| est_optimal(j)));
+    let durable = (0..n).find(|i| (*i..n).all(est_optimal));
     let _ = rep;
     Recup {
         premier_optimal,
