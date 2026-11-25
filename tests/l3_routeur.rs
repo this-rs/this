@@ -59,14 +59,16 @@ fn candidat(p: &str, m: &str) -> this_harness::routing::Candidate {
 struct ApprisObrain {
     store: Arc<ObrainStore>,
     scope: String,
+    candidats: Vec<(String, String)>,
     en_cours: Mutex<HashMap<u128, String>>, // decision_id -> classe
 }
 
 impl ApprisObrain {
-    fn nouveau(store: Arc<ObrainStore>, scope: &str) -> Self {
+    fn nouveau(store: Arc<ObrainStore>, scope: &str, candidats: Vec<(String, String)>) -> Self {
         Self {
             store,
             scope: scope.to_string(),
+            candidats,
             en_cours: Mutex::new(HashMap::new()),
         }
     }
@@ -175,11 +177,22 @@ impl ApprisObrain {
 #[async_trait(?Send)]
 impl Learning for ApprisObrain {
     async fn arms(&self, class: &str) -> Vec<ArmStats> {
-        self.projection()
-            .into_iter()
-            .filter(|(c, _, _, _, _, _)| c == class)
-            .map(|(c, p, m, a, b, _n)| ArmStats::fresh(ArmKey::new(c, p, m), a as f64, b as f64))
-            .collect()
+        // Parité avec L2 : TOUS les candidats sont présents, à l'a priori neutre 1/1
+        // s'ils n'ont pas encore été observés. `fresh` met `n = 0` : on restaure le
+        // compteur d'observations effectif depuis la projection.
+        let projection = self.projection();
+        let mut stats: Vec<ArmStats> = Vec::new();
+        for (p, m) in &self.candidats {
+            let (a, b, n) = projection
+                .iter()
+                .find(|(c, pp, mm, _, _, _)| c == class && pp == p && mm == m)
+                .map(|(_, _, _, a, b, n)| (*a as f64, *b as f64, *n as u64))
+                .unwrap_or((1.0, 1.0, 0));
+            let mut st = ArmStats::fresh(ArmKey::new(class, p.clone(), m.clone()), a, b);
+            st.n = n;
+            stats.push(st);
+        }
+        stats
     }
 
     fn hints(&self) -> PriorHints {
@@ -227,13 +240,21 @@ fn l3_routeur_natif_avant_et_apres_reouverture() {
     let d = std::env::temp_dir().join(format!("l3r_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&d);
     let scope = "conv-l3";
+    let candidats: Vec<(String, String)> = vec![
+        ("a".to_string(), "m1".to_string()),
+        ("b".to_string(), "m2".to_string()),
+    ];
 
     let stats_avant;
     let sur_a_avant;
     let premier_id: String;
     {
         let store = ObrainStore::open(&d).expect("ouverture");
-        let appris = Rc::new(ApprisObrain::nouveau(store.clone(), scope));
+        let appris = Rc::new(ApprisObrain::nouveau(
+            store.clone(),
+            scope,
+            candidats.clone(),
+        ));
         let spec = RouterSpec::new(
             Rc::new(MemoryPool::new(vec![
                 candidat("a", "m1"),
@@ -307,7 +328,7 @@ fn l3_routeur_natif_avant_et_apres_reouverture() {
 
     // Réouverture : la projection doit être IDENTIQUE, reconstruite depuis les événements.
     let store2 = ObrainStore::open(&d).expect("réouverture");
-    let relu = ApprisObrain::nouveau(store2.clone(), scope);
+    let relu = ApprisObrain::nouveau(store2.clone(), scope, candidats.clone());
     let stats_apres = relu.projection();
     assert_eq!(
         stats_apres, stats_avant,
@@ -331,4 +352,209 @@ fn l3_routeur_natif_avant_et_apres_reouverture() {
     drop(relu);
     drop(store2);
     let _ = std::fs::remove_dir_all(&d);
+}
+
+// ── Continuité : L2 en mémoire vs L3 continu vs L3 avec coupure ───────────────
+
+/// Témoin L2 : même sémantique Beta, en mémoire seulement.
+type CleBras = (String, String, String);
+type StatsBras = (f64, f64, u64);
+
+#[derive(Default)]
+struct ApprisMemoire {
+    bras: Mutex<HashMap<CleBras, StatsBras>>,
+    en_cours: Mutex<HashMap<u128, String>>,
+    candidats: Vec<(String, String)>,
+}
+
+#[async_trait(?Send)]
+impl Learning for ApprisMemoire {
+    async fn arms(&self, class: &str) -> Vec<ArmStats> {
+        let m = self.bras.lock().unwrap();
+        self.candidats
+            .iter()
+            .map(|(p, mm)| {
+                let (a, b, n) = m
+                    .get(&(class.to_string(), p.clone(), mm.clone()))
+                    .copied()
+                    .unwrap_or((1.0, 1.0, 0));
+                let mut st = ArmStats::fresh(ArmKey::new(class, p.clone(), mm.clone()), a, b);
+                st.n = n;
+                st
+            })
+            .collect()
+    }
+
+    fn hints(&self) -> PriorHints {
+        PriorHints::new()
+    }
+
+    async fn record(&self, d: &Decision) {
+        if d.used.is_some() {
+            self.en_cours
+                .lock()
+                .unwrap()
+                .insert(d.id, d.signature.arm_key());
+        }
+    }
+
+    async fn settle(&self, id: u128, served: Option<&Pick>, stop: &Stop, _c: Option<&str>) {
+        let Some(classe) = self.en_cours.lock().unwrap().remove(&id) else {
+            return;
+        };
+        let Some(p) = served else { return };
+        let (da, db) = match stop {
+            Stop::Done => (1.0, 0.0),
+            Stop::Failed(_) => (0.0, 1.0),
+            _ => return,
+        };
+        let mut m = self.bras.lock().unwrap();
+        let e = m
+            .entry((classe, p.provider_id.clone(), p.model.clone()))
+            .or_insert((1.0, 1.0, 0));
+        e.0 += da;
+        e.1 += db;
+        e.2 += 1;
+    }
+}
+
+fn tirages(graine: u64, n: usize) -> Vec<[bool; 2]> {
+    let mut rng = graine;
+    let mut v = Vec::with_capacity(n);
+    for _ in 0..n {
+        let mut l = [false, false];
+        for (c, case) in l.iter_mut().enumerate() {
+            rng = rng
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            *case = (rng % 100) < if c == 0 { 80 } else { 20 };
+        }
+        v.push(l);
+    }
+    v
+}
+
+fn routeur_pour(learning: Rc<dyn Learning>, graine: u128) -> TurnRouter {
+    let spec = RouterSpec::new(
+        Rc::new(MemoryPool::new(vec![
+            candidat("a", "m1"),
+            candidat("b", "m2"),
+        ])),
+        Rc::new(SequenceSeeds::from(graine)),
+        "a".to_string(),
+        "m1".to_string(),
+    )
+    .learning(learning)
+    .auto()
+    .settings(parametres());
+    TurnRouter::new(spec)
+}
+
+/// Joue `draws` et rend la trajectoire des paires choisies.
+fn jouer(routeur: &TurnRouter, draws: &[[bool; 2]], depart: usize) -> Vec<(String, String)> {
+    let mut trajet = Vec::new();
+    for (i, ligne) in draws.iter().enumerate().skip(depart) {
+        let _ = i;
+        let routed = executer(routeur.route(TurnInput {
+            text: "hello",
+            has_images: false,
+            hints: Default::default(),
+            honored: true,
+        }));
+        let Some(dec) = routed.decision.clone() else {
+            continue;
+        };
+        let Some(used) = dec.used.clone() else {
+            continue;
+        };
+        let idx = if used.provider_id == "a" { 0 } else { 1 };
+        trajet.push((used.provider_id.clone(), used.model.clone()));
+        executer(routeur.record(&dec));
+        let stop = if ligne[idx] {
+            Stop::Done
+        } else {
+            Stop::Failed("transport".to_string())
+        };
+        executer(routeur.settle(&stop, None, true));
+    }
+    trajet
+}
+
+#[test]
+fn l3_continuite_trajectoires_l2_l3_et_coupure() {
+    let base = std::env::temp_dir().join(format!("l3c_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    let draws = tirages(7, 80);
+    let coupe = 40;
+
+    // L2 : témoin en mémoire
+    let memo = Rc::new(ApprisMemoire {
+        candidats: vec![("a".into(), "m1".into()), ("b".into(), "m2".into())],
+        ..Default::default()
+    });
+    let r2 = routeur_pour(memo.clone(), 7);
+    let trajet_l2 = jouer(&r2, &draws, 0);
+
+    // L3 continu
+    let d1 = base.join("continu");
+    let s1 = ObrainStore::open(&d1).expect("ouverture L3");
+    let l1 = Rc::new(ApprisObrain::nouveau(
+        s1.clone(),
+        "conv-cont",
+        vec![("a".into(), "m1".into()), ("b".into(), "m2".into())],
+    ));
+    let r3 = routeur_pour(l1.clone(), 7);
+    let trajet_l3 = jouer(&r3, &draws, 0);
+
+    // L3 avec fermeture / réouverture à mi-parcours
+    let d2 = base.join("coupe");
+    let mut trajet_coupe;
+    {
+        let s = ObrainStore::open(&d2).expect("ouverture coupure");
+        let l = Rc::new(ApprisObrain::nouveau(
+            s.clone(),
+            "conv-coupe",
+            vec![("a".into(), "m1".into()), ("b".into(), "m2".into())],
+        ));
+        let r = routeur_pour(l.clone(), 7);
+        trajet_coupe = jouer(&r, &draws[..coupe], 0);
+        s.commit_wal().expect("flush");
+    }
+    {
+        let s = ObrainStore::open(&d2).expect("réouverture coupure");
+        let l = Rc::new(ApprisObrain::nouveau(
+            s.clone(),
+            "conv-coupe",
+            vec![("a".into(), "m1".into()), ("b".into(), "m2".into())],
+        ));
+        // Le ROUTEUR est recréé (état et graines réinitialisés) : seules les
+        // STATISTIQUES persistent. C'est le point que ce test mesure.
+        let r = routeur_pour(l.clone(), 7);
+        trajet_coupe.extend(jouer(&r, &draws, coupe));
+        s.commit_wal().expect("flush");
+    }
+
+    println!(
+        "trajectoires — L2 {} · L3 {} · coupure {}",
+        trajet_l2.len(),
+        trajet_l3.len(),
+        trajet_coupe.len()
+    );
+    // PARITÉ : L2 en mémoire et L3 persistant doivent décider identiquement.
+    assert_eq!(
+        trajet_l2, trajet_l3,
+        "L2 et L3 doivent produire la MÊME trajectoire à graines et tirages identiques"
+    );
+    // La coupure peut diverger (routeur recréé) : on le rapporte, sans l'exiger.
+    let divergences = trajet_coupe
+        .iter()
+        .zip(trajet_l3.iter())
+        .filter(|(a, b)| a != b)
+        .count();
+    println!(
+        "divergences après coupure : {divergences}/{}",
+        trajet_l3.len()
+    );
+
+    let _ = std::fs::remove_dir_all(&base);
 }
