@@ -1199,8 +1199,8 @@ impl Relief {
         // Les deux procédures spatiales **ne sont pas** dans ce registre : le
         // moteur les annonce seulement dans `CALL obrain.procedures()`. Les
         // joindre ici est ce qui rend la surface d'appel vraie (voir
-        // [`procedures_spatiales`]).
-        procedures.extend(procedures_spatiales());
+        // [`spatial_procedures`]).
+        procedures.extend(spatial_procedures());
 
         if !registry_available {
             notes.push(
@@ -1471,10 +1471,10 @@ impl Relief {
 ///
 /// On lit donc la **même source** que la réponse du moteur, et le résultat est
 /// [`Origin::Introspected`] — parce qu'il l'est.
-fn procedures_spatiales() -> Vec<ProcedureSpec> {
+fn spatial_procedures() -> Vec<ProcedureSpec> {
     obrain_engine::database::spatial_procedure::lignes_procedures()
         .iter()
-        .filter_map(|ligne| ligne_spatiale(ligne))
+        .filter_map(|ligne| spatial_procedure_row(ligne))
         .collect()
 }
 
@@ -1485,7 +1485,7 @@ fn procedures_spatiales() -> Vec<ProcedureSpec> {
 /// **exigés** par la procédure (`try_execute_spatial_procedure` refuse un
 /// nombre d'arguments différent de 4, sans valeur par défaut) : c'est pour cela
 /// que `required` vaut `true` ici, et non par convention.
-fn ligne_spatiale(ligne: &[obrain_common::types::Value]) -> Option<ProcedureSpec> {
+fn spatial_procedure_row(ligne: &[obrain_common::types::Value]) -> Option<ProcedureSpec> {
     if ligne.len() < 4 {
         return None;
     }
@@ -1764,7 +1764,7 @@ mod tests {
     /// Les deux procédures spatiales sont publiées — et le registre, lui, ne
     /// les connaît pas : c'est ce fait qui a commandé de les joindre ici.
     #[test]
-    fn les_procedures_spatiales_sont_publiees_et_absentes_du_registre() {
+    fn spatial_procedures_are_published_and_absent_from_the_registry() {
         let store = ObrainStore::new_in_memory();
         let relief = Relief::describe(&store, ReliefOptions::default());
 
@@ -1809,7 +1809,7 @@ mod tests {
     /// Les index spatiaux déclarés sont publiés — nom, label, propriété — et
     /// leur absence est un fait (`[]`), pas une erreur.
     #[test]
-    fn les_index_spatiaux_sont_publies() {
+    fn spatial_indexes_are_published() {
         let store = ObrainStore::new_in_memory();
         assert!(
             Relief::describe(&store, ReliefOptions::default())
@@ -1844,7 +1844,7 @@ mod tests {
     /// conductance **1/13** — la mesure qui dit la séparation, là où le
     /// modularity ne dit que la densité.
     #[test]
-    fn le_certificat_de_partition_mesure_la_separation() {
+    fn the_partition_certificate_measures_separation() {
         let store = ObrainStore::new_in_memory();
         let session = store.db().session();
         let ids: Vec<_> = (0..8).map(|_| session.create_node(&["N"])).collect();
