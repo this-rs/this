@@ -1,0 +1,8 @@
+# Empreinte de reproductibilité — H3 V2 @ obrain 89d169d7 (commit à venir)
+sha256(Cargo.lock) = 3eb6502836f7fefe898bbe8b02fd43b4ceebb61fc683a49a4ca62b93dd49fe5e
+date = 2026-11-26T11:59:08Z
+obrain rev = 89d169d7d481c59018b712d499b8180c384fd405 (feat/334-contrats-v2)
+obrain-substrate = 0.0.1 ; obrain-common = 0.0.1 ; obrain-core = 0.0.1 ; obrain-engine = 0.0.1 ; obrain-adapters = 0.0.1 ; obrain-reactive = 0.0.1
+# L'ancien test V1 (h3_reference_tentative.rs, API resoudre_effet_historique_par_reference) est
+# SUPPRIMÉ de cette branche : l'API V2 le remplace (resoudre_reference + ReferenceTentative V2).
+# Témoin V1 préservé sur chore/h3-native-ref (af53c2f9 + 04e769c2).
