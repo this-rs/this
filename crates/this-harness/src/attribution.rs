@@ -273,8 +273,8 @@ impl Attribution {
                     return false;
                 }
                 matches!(
-                    self.cycles.get(&id).map(|c| &c.etat),
-                    Some(Etat::EnCours) | Some(Etat::Indetermine)
+                    self.cycles.get(&id).map(|c| (&c.etat, c.generation)),
+                    Some((Etat::EnCours | Etat::Indetermine, g)) if g == tentative.generation
                 )
             }
             RésolutionBackend::Incompatible => {
@@ -283,6 +283,7 @@ impl Attribution {
                 }
                 if let Some(c) = self.cycles.get_mut(&id)
                     && (c.etat == Etat::EnCours || c.etat == Etat::Indetermine)
+                    && c.generation == tentative.generation
                 {
                     c.etat = Etat::Indetermine; // reste observable, non résolu
                 }
@@ -611,5 +612,27 @@ mod tests {
         assert!(a.resoudre(1, t, RésolutionBackend::AbsenceDefinitive));
         assert!(a.abandonner_sans_tentative(1));
         assert_eq!(a.etat(1).unwrap().etat, Etat::Abandonne);
+    }
+    #[test]
+    fn ancienne_generation_presente_incompatible_apres_nouvelle_reservation() {
+        let mut a = Attribution::new();
+        a.record(1, d());
+        a.recevoir(1, obs("a", "m1", Resultat::Succes));
+        let t1 = a.reserver(1).unwrap(); // génération 1
+        a.echec_certain(1, t1); // relâche → Recu
+        let t2 = a.reserver(1).unwrap(); // génération 2
+        // Une ANCIENNE tentative (génération 1) présente un verdict Incompatible :
+        // elle ne doit PAS modifier le cycle de la génération 2.
+        assert!(!a.resoudre(1, t1, RésolutionBackend::Incompatible));
+        assert_eq!(
+            a.etat(1).unwrap().etat,
+            Etat::EnCours,
+            "génération 2 intacte"
+        );
+        // De même pour Indetermine présenté par l'ancienne tentative.
+        assert!(!a.resoudre(1, t1, RésolutionBackend::Indetermine));
+        // La génération 2 se confirme normalement.
+        assert!(a.confirmer(1, t2));
+        assert_eq!(a.etat(1).unwrap().etat, Etat::Confirme);
     }
 }
