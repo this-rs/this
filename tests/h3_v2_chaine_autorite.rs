@@ -108,7 +108,7 @@ fn h3_v2_chaine_nominale_reserver_avant_publication() {
     let reference = ReferenceTentative::from_bytes(&enr.reference_bytes).expect("décodage");
     let res = store2.resoudre_reference(&reference).expect("résolution");
     assert_eq!(
-        reconcilier_chaine(&enr, &reference, &res, ),
+        reconcilier_chaine(&enr, &reference, &res,),
         VerdictChaine::Confirme,
         "l'enregistrement original est confirmé (intégral + canonique + contenu conforme)"
     );
@@ -149,7 +149,10 @@ fn h3_v2_chaine_detecte_cle_amputee() {
             decision_id: 0,
             autorite_consommateur: 0,
             cible: id,
-            effets_attendus: vec![("a".to_string(), Value::Int64(10)), ("b".to_string(), Value::Int64(20))],
+            effets_attendus: vec![
+                ("a".to_string(), Value::Int64(10)),
+                ("b".to_string(), Value::Int64(20)),
+            ],
             reference_bytes: reference.to_bytes(),
         };
         store
@@ -180,7 +183,7 @@ fn h3_v2_chaine_detecte_cle_amputee() {
     );
     // … mais la chaîne d'autorité la refuse.
     assert_eq!(
-        reconcilier_chaine(&enr, &reference, &res, ),
+        reconcilier_chaine(&enr, &reference, &res,),
         VerdictChaine::Incomplet,
         "la chaîne détecte la clé amputée, le stockage ne le peut pas"
     );
@@ -320,7 +323,7 @@ fn h3_v2_chaine_contenu_incompatible() {
         "engagé (historique) intégral"
     );
     assert_eq!(
-        reconcilier_chaine(&enr, &reference, &res, ),
+        reconcilier_chaine(&enr, &reference, &res,),
         VerdictChaine::Incompatible,
         "engagé puis masqué par une valeur différente → contenu incompatible"
     );
@@ -373,7 +376,7 @@ fn h3_v2_chaine_masque_compatible_n_est_pas_incompatible() {
     let reference = ReferenceTentative::from_bytes(&enr.reference_bytes).expect("décodage");
     let res = store2.resoudre_reference(&reference).expect("résolution");
     assert_eq!(
-        reconcilier_chaine(&enr, &reference, &res, ),
+        reconcilier_chaine(&enr, &reference, &res,),
         VerdictChaine::EngageMasqueCompatible,
         "masqué mais contenu conforme : engagé, pas incompatible"
     );
@@ -511,7 +514,7 @@ fn h3_v2_enregistrement_reconstruit_apres_disparition() {
     };
     let res = store2.resoudre_reference(&reference).expect("résolution");
     assert_eq!(
-        reconcilier_chaine(&enr, &reference, &res, ),
+        reconcilier_chaine(&enr, &reference, &res,),
         VerdictChaine::Confirme,
         "l'enregistrement reconstruit après disparition confirme la décision originale"
     );
