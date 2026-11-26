@@ -50,8 +50,13 @@ fn dir(tag: &str) -> std::path::PathBuf {
 /// courante égale à celle de la référence). « Engagé puis masqué » est
 /// `Incompatible`, pas un faux `EffetConfirme`. `Indeterminee` est `Indetermine`,
 /// jamais `AbsenceDefinitive`.
-/// Construit l'enregistrement original minimal pour un cycle, puis DÉLÈGUE la
-/// réconciliation au composant réel `this::reconciliation` (aucune logique locale).
+/// Adaptateur de CYCLE (périmètre DÉCLARÉ) : construit un enregistrement minimal
+/// puis DÉLÈGUE la réconciliation au composant réel `this::reconciliation` (aucune
+/// logique locale). PÉRIMÈTRE : les tests de cycle qualifient l'ORDRE
+/// réservation→publication et le comportement du substrat, PAS la provenance du
+/// record. La constitution AVANT publication (K/génération/autorité depuis la
+/// décision et la réservation réelles) est exercée par le test nominal et par les
+/// tests de chaîne (h3_v2_chaine_autorite.rs), pas par cet adaptateur.
 fn reconcilier(
     store: &SubstrateStore,
     res: &ResolutionTentative,
@@ -107,8 +112,11 @@ fn h3_v2_cycle_harness_reel_nominal() {
     // avant toute écriture durable.
     let tentative = attr.reserver(decision_id).expect("réservation");
 
-    // 2. PRÉPARATION + 3. CONSERVATION DE RÉFÉRENCE (octets persistés AVANT publication).
-    let (reference_bytes, id) = {
+    // 2. PRÉPARATION + 3. CONSERVATION DE RÉFÉRENCE + CONSTITUTION de
+    //    l'enregistrement AVANT publication : K, génération, autorité, cible et
+    //    effets proviennent de la décision et de la réservation réelles — PAS de la
+    //    référence qui sera résolue (pas de circularité).
+    let (reference_bytes, id, enr) = {
         let store = SubstrateStore::create(&chemin).expect("création");
         let id = store.create_node(&["ressource"]);
         store.set_node_property(id, "a", Value::Int64(1));
@@ -118,11 +126,22 @@ fn h3_v2_cycle_harness_reel_nominal() {
             .expect("préparation");
         let reference = prep.reference_tentative();
         let reference_bytes = reference.to_bytes();
+        // L'enregistrement est constitué ICI, depuis la réservation (génération=1)
+        // et la préparation (backend/cible/effets/référence), avant publication.
+        let enr = EnregistrementOriginal {
+            version: ENREGISTREMENT_VERSION,
+            k: "k1".to_string(),
+            backend: reference.auteur(),
+            generation: 1, // première réservation du cycle (reserver → génération 1)
+            cible: id,
+            effets_attendus: vec![("a".to_string(), 10)],
+            reference_bytes: reference_bytes.clone(),
+        };
 
         // 4. PUBLICATION réelle ; 5. PERTE DE RÉPONSE : le verdict n'est pas lu.
         let _verdict = store.publier_si_precondition_intacte(prep).expect("publication");
         store.close().expect("fermeture");
-        (reference_bytes, id)
+        (reference_bytes, id, enr)
     };
 
     // 6. RÉOUVERTURE + RÉSOLUTION (sans republier, depuis les octets conservés).
@@ -131,9 +150,11 @@ fn h3_v2_cycle_harness_reel_nominal() {
     assert_eq!(reference.cible(), id, "la référence vise la bonne cible");
     let res = store2.resoudre_reference(&reference).expect("résolution");
 
-    // 7. RÉCONCILIATION : Integrale + canonique → EffetConfirme.
+    // 7. RÉCONCILIATION contre l'enregistrement constitué AVANT publication
+    //    (pas reconstruit depuis la référence résolue).
     assert_eq!(res.integrite, IntegriteTentative::Integrale);
-    let verdict = reconcilier(&store2, &res, &reference, &[("a", 10)])
+    let verdict = reconcilier_composant(&enr, &reference, &res, &store2)
+        .vers_backend()
         .expect("verdict non ambigu");
     assert!(
         matches!(verdict, RésolutionBackend::EffetConfirme),
