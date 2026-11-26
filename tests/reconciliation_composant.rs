@@ -97,7 +97,7 @@ fn composant_confirme_apres_reouverture() {
     );
     assert!(matches!(
         reconcilier(&enr, &reference, &res, &store2).vers_backend(),
-        this_harness::attribution::RésolutionBackend::EffetConfirme
+        Some(this_harness::attribution::RésolutionBackend::EffetConfirme)
     ));
     store2.close().expect("fermeture 2");
     let _ = std::fs::remove_dir_all(&d);

@@ -14,13 +14,16 @@
 
 #![cfg(feature = "obrain")]
 
-use obrain_common::types::{NodeId, PropertyKey, Value};
-use obrain_core::graph::traits::{GraphStore, GraphStoreMut};
+use obrain_common::types::{NodeId, Value};
+use obrain_core::graph::traits::GraphStoreMut;
 use obrain_substrate::{
-    IntegriteTentative, ModePublication, Precondition, ReferenceTentative, ResolutionTentative,
-    SubstrateStore,
+    IntegriteTentative, ModePublication, Precondition, ReferenceTentative, SubstrateStore,
 };
 use this_harness::attribution::{Attribution, Definition, Observation, Resultat, Tentative};
+use this::reconciliation::{
+    reconcilier as reconcilier_chaine, EnregistrementOriginal, VerdictReconciliation as VerdictChaine,
+    ENREGISTREMENT_VERSION,
+};
 
 fn dir(tag: &str) -> std::path::PathBuf {
     let mut d = std::env::temp_dir();
@@ -33,100 +36,6 @@ fn dir(tag: &str) -> std::path::PathBuf {
             .as_nanos()
     ));
     d
-}
-
-/// L'enregistrement original durable du consommateur — la chaîne d'autorité.
-/// Lie l'identité logique K, l'autorité backend B, la génération, la cible,
-/// l'ensemble ORIGINAL des effets (contenu attendu) et les octets de la référence.
-#[derive(Debug, Clone, PartialEq)]
-struct EnregistrementOriginal {
-    version: u32,
-    k: String,
-    backend: u64,
-    generation: u64,
-    cible: NodeId,
-    effets_attendus: Vec<(String, i64)>,
-    reference_bytes: Vec<u8>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum VerdictChaine {
-    /// Intégral, canonique, contenu conforme → l'effet original est en place.
-    Confirme,
-    /// Intégral (engagé) mais masqué ET contenu courant conforme → pas incompatible.
-    EngageMasqueCompatible,
-    /// Contenu courant incompatible avec l'attendu (masqué par une valeur différente).
-    Incompatible,
-    /// La référence résolue n'est PAS celle de l'enregistrement (substitution).
-    Substitution,
-    /// La liste des effets est incomplète (clé amputée).
-    Incomplet,
-    /// Jamais engagé ou compacté — jamais une absence définitive.
-    Indetermine,
-}
-
-fn lire_i64(store: &SubstrateStore, id: NodeId, cle: &str) -> Option<i64> {
-    store.get_node_property(id, &PropertyKey::new(cle)).and_then(|v| match v {
-        Value::Int64(n) => Some(n),
-        _ => None,
-    })
-}
-
-/// Réconciliation contre l'ENREGISTREMENT ORIGINAL, pas contre le seul résultat.
-fn reconcilier_chaine(
-    enr: &EnregistrementOriginal,
-    reference: &ReferenceTentative,
-    res: &ResolutionTentative,
-    store: &SubstrateStore,
-) -> VerdictChaine {
-    // 1. La liste des effets doit être COMPLÈTE (L1, amputation de clé).
-    let attendus: Vec<&str> = enr.effets_attendus.iter().map(|(k, _)| k.as_str()).collect();
-    if reference.effets() != attendus.as_slice() {
-        return VerdictChaine::Incomplet;
-    }
-    // 2. La référence résolue DOIT être celle de l'enregistrement (L2, substitution).
-    if reference.to_bytes() != enr.reference_bytes {
-        return VerdictChaine::Substitution;
-    }
-    // 3. Cohérence métadonnées ↔ référence : la cible et l'autorité de la référence
-    //    DOIVENT égaler celles de l'enregistrement (sinon provenance étrangère).
-    if reference.cible() != enr.cible || res.cible != enr.cible {
-        return VerdictChaine::Incompatible;
-    }
-    if reference.auteur() != enr.backend {
-        return VerdictChaine::Incompatible;
-    }
-    // 4. L'autorité backend qui résout est conforme.
-    if res.auteur_resolvant != enr.backend {
-        return VerdictChaine::Incompatible;
-    }
-    // 5. Interpréter l'intégrité.
-    match res.integrite {
-        IntegriteTentative::Indeterminee => VerdictChaine::Indetermine,
-        IntegriteTentative::Partielle => VerdictChaine::Incompatible,
-        IntegriteTentative::Integrale => {
-            let tous_canoniques = res.par_cle.iter().all(|e| {
-                e.estampille_courante == Some((enr.backend, reference.horloge()))
-            });
-            // Contenu courant conforme à l'attendu ?
-            let contenu_conforme = enr.effets_attendus.iter().all(|(cle, attendu)| {
-                lire_i64(store, enr.cible, cle) == Some(*attendu)
-            });
-            if tous_canoniques {
-                if contenu_conforme {
-                    VerdictChaine::Confirme
-                } else {
-                    VerdictChaine::Incompatible
-                }
-            } else if contenu_conforme {
-                // Engagé (historique) mais masqué, ET le masque a écrit la même valeur :
-                // ce n'est PAS incompatible.
-                VerdictChaine::EngageMasqueCompatible
-            } else {
-                VerdictChaine::Incompatible
-            }
-        }
-    }
 }
 
 /// Cycle ordonné : `record` → `recevoir` → **`reserver` (génération) AVANT
@@ -166,7 +75,7 @@ fn h3_v2_chaine_nominale_reserver_avant_publication() {
         let reference = prep.reference_tentative();
         let reference_bytes = reference.to_bytes();
         let enr = EnregistrementOriginal {
-            version: 1,
+            version: ENREGISTREMENT_VERSION,
             k: "k1".to_string(),
             backend: reference.auteur(),
             generation: 1, // première génération de cette décision
@@ -215,7 +124,7 @@ fn h3_v2_chaine_detecte_cle_amputee() {
             .expect("préparation");
         let reference = prep.reference_tentative();
         let enr = EnregistrementOriginal {
-            version: 1,
+            version: ENREGISTREMENT_VERSION,
             k: "k1".to_string(),
             backend: reference.auteur(),
             generation: 1,
@@ -270,7 +179,7 @@ fn h3_v2_chaine_detecte_substitution() {
             .expect("préparation");
         let reference = prep.reference_tentative();
         let enr = EnregistrementOriginal {
-            version: 1,
+            version: ENREGISTREMENT_VERSION,
             k: "k1".to_string(),
             backend: reference.auteur(),
             generation: 1,
@@ -327,7 +236,7 @@ fn h3_v2_chaine_contenu_incompatible() {
             .expect("préparation");
         let reference = prep.reference_tentative();
         let enr = EnregistrementOriginal {
-            version: 1,
+            version: ENREGISTREMENT_VERSION,
             k: "k1".to_string(),
             backend: reference.auteur(),
             generation: 1,
@@ -371,7 +280,7 @@ fn h3_v2_chaine_masque_compatible_n_est_pas_incompatible() {
             .expect("préparation");
         let reference = prep.reference_tentative();
         let enr = EnregistrementOriginal {
-            version: 1,
+            version: ENREGISTREMENT_VERSION,
             k: "k1".to_string(),
             backend: reference.auteur(),
             generation: 1,
@@ -483,7 +392,7 @@ fn h3_v2_enregistrement_reconstruit_apres_disparition() {
 
     // 4. Résolution + réconciliation contre l'enregistrement RECONSTRUIT.
     let enr = EnregistrementOriginal {
-        version: 1,
+        version: ENREGISTREMENT_VERSION,
         k: champ("k"),
         backend: champ("backend").parse().expect("backend u64"),
         generation: champ("generation").parse().expect("generation u64"),

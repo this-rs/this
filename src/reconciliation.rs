@@ -58,8 +58,11 @@ pub enum VerdictReconciliation {
     Confirme,
     /// Intégral (engagé) mais masqué ET contenu courant conforme → pas incompatible.
     EngageMasqueCompatible,
-    /// Contenu courant incompatible avec l'attendu, ou provenance incohérente.
+    /// Contenu courant RELU et DIFFÉRENT de l'attendu (incompatibilité de contenu).
     Incompatible,
+    /// Intégrité PARTIELLE : au moins un effet engagé, au moins un non retrouvé.
+    /// N'est PAS une incompatibilité de contenu.
+    Partielle,
     /// La référence résolue n'est pas celle de l'enregistrement (substitution).
     Substitution,
     /// La liste des effets est incomplète (clé amputée).
@@ -69,15 +72,17 @@ pub enum VerdictReconciliation {
 }
 
 impl VerdictReconciliation {
-    /// Projection vers le verdict du backend, consommable par
-    /// `Attribution::resoudre`. `EngageMasqueCompatible` n'est PAS `EffetConfirme`
-    /// (l'effet est engagé mais plus canonique) : il reste `Incompatible` pour le
-    /// cycle, la nuance étant lisible par le consommateur sur le verdict lui-même.
-    pub fn vers_backend(&self) -> RésolutionBackend {
+    /// Projection PARTIELLE vers le verdict du backend. Seuls les cas non ambigus
+    /// sont projetés : `Confirme` → `EffetConfirme`, `Indetermine` → `Indetermine`
+    /// (jamais `AbsenceDefinitive`). Tous les autres (`EngageMasqueCompatible`,
+    /// `Incompatible`, `Partielle`, `Substitution`, `Incomplet`) exigent une DÉCISION
+    /// EXPLICITE du consommateur : les écraser en `Incompatible` détruirait la
+    /// distinction engagement historique / état courant / compatibilité.
+    pub fn vers_backend(&self) -> Option<RésolutionBackend> {
         match self {
-            VerdictReconciliation::Confirme => RésolutionBackend::EffetConfirme,
-            VerdictReconciliation::Indetermine => RésolutionBackend::Indetermine,
-            _ => RésolutionBackend::Incompatible,
+            VerdictReconciliation::Confirme => Some(RésolutionBackend::EffetConfirme),
+            VerdictReconciliation::Indetermine => Some(RésolutionBackend::Indetermine),
+            _ => None,
         }
     }
 }
@@ -237,24 +242,31 @@ pub fn reconcilier(
     // 5. Intégrité + état courant + compatibilité.
     match res.integrite {
         IntegriteTentative::Indeterminee => VerdictReconciliation::Indetermine,
-        IntegriteTentative::Partielle => VerdictReconciliation::Incompatible,
+        IntegriteTentative::Partielle => VerdictReconciliation::Partielle,
         IntegriteTentative::Integrale => {
             let tous_canoniques = res.par_cle.iter().all(|e| {
                 e.estampille_courante == Some((enr.backend, reference.horloge()))
             });
-            let contenu_conforme = enr.effets_attendus.iter().all(|(cle, attendu)| {
-                lire_i64(store, enr.cible, cle) == Some(*attendu)
-            });
-            if tous_canoniques {
-                if contenu_conforme {
-                    VerdictReconciliation::Confirme
-                } else {
-                    VerdictReconciliation::Incompatible
+            // Contenu à TROIS états : conforme / incompatible (valeur relue ≠ attendue)
+            // / illisible (lecture absente ou en erreur — PAS une preuve d'incompatibilité).
+            let mut incompatible = false;
+            let mut illisible = false;
+            for (cle, attendu) in &enr.effets_attendus {
+                match lire_i64(store, enr.cible, cle) {
+                    Some(v) if v == *attendu => {}
+                    Some(_) => incompatible = true,
+                    None => illisible = true,
                 }
-            } else if contenu_conforme {
-                VerdictReconciliation::EngageMasqueCompatible
-            } else {
+            }
+            if incompatible {
                 VerdictReconciliation::Incompatible
+            } else if illisible {
+                // Contenu illisible : ni confirmé, ni incompatible → indéterminé.
+                VerdictReconciliation::Indetermine
+            } else if tous_canoniques {
+                VerdictReconciliation::Confirme
+            } else {
+                VerdictReconciliation::EngageMasqueCompatible
             }
         }
     }
