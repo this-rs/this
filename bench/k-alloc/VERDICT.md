@@ -1,5 +1,6 @@
 # Correction `AutoriteK` — allocation atomique, verrou, domaine
 
+correction    = `33eb9dd1c38e99a1f389adeb817e33456a46a326` (branche `qualif/k-allocation`)
 base auditée  = `a583633faf2a29c8a641cd4723788636dde84d49` (candidat G, `chore/lot-g-convergence-ab`)
 worktree      = `/Users/triviere/projects/this-rs/_wt-k-alloc` (détaché, isolé)
 worktree base = `/Users/triviere/projects/this-rs/_wt-k-base` (détaché, même SHA, témoin seul)
@@ -107,6 +108,26 @@ Voir `final-suites.log` (une exécution, un seul arbre) :
 `k_allocation_atomique` 9 · `k_collision_concurrente` 2 · `k_durable_autorite` 8 ·
 `concurrence_g1g5` · `durabilite_obrr` 15 · `h3_v2_chaine_autorite` 7 ·
 `h3_v2_cycle_harness` 5 · `reconciliation_composant` 2 · lib `autorite_k` 5.
+
+## 5 bis. Commandes et codes de sortie (archivés)
+
+| log | commande | exit |
+|---|---|---|
+| `base-collision.log` | base `_wt-k-base` : `cargo test --features obrain --test k_collision_concurrente` | **101** (2 échecs : collision + doublons) |
+| `fix-collision.log` / `fix-collision-nocapture.log` | worktree corrigé, même commande | **0** |
+| `final-suites.log` | `cargo test --features obrain,objects-toolbox --test k_allocation_atomique --test k_collision_concurrente --test k_durable_autorite --test concurrence_g1g5 --test durabilite_obrr --test h3_v2_chaine_autorite --test h3_v2_cycle_harness --test reconciliation_composant -- --test-threads=1` | **0** |
+| `final-k-suites.log` | après `cargo fmt` + correctif clippy : les 3 suites K | **0** |
+| `final-lib-unit.log` | `cargo test --features obrain,objects-toolbox --lib autorite_k` | **0** (5) |
+| `final-clippy.log` | `cargo clippy --features obrain,objects-toolbox --lib --test k_allocation_atomique --test k_collision_concurrente` | **0**, 0 warning |
+| `fix-lotg-suites.log` | suites Lot G avec la seule feature `obrain` (`concurrence_g1g5` y compile à 0 test) | **0** |
+| `fix-allocation.log` | run INTERMÉDIAIRE, conservé : échec d'une ASSERTION de témoin (`"InvalidData"` au lieu de `"invalid data"` dans le message d'erreur), corrigée — ce n'était pas un défaut du code | 101 puis 0 |
+| `fix-unit-kdurable.log`, `fix-kdurable.log` | runs intermédiaires des suites existantes | 0 |
+
+`cargo fmt --check` : **0** (propre). Diff vs base : `src/autorite_k.rs` seul
+côté production (298+/63-), 2 fichiers de témoins, `bench/k-alloc/`.
+`src/reconciliation.rs` : **aucune modification**.
+`sha256(Cargo.lock)` = `3eb6502836f7fefe898bbe8b02fd43b4ceebb61fc683a49a4ca62b93dd49fe5e`
+— obrain résolu à `89d169d7d481c59018b712d499b8180c384fd405`, comme la base.
 
 ## 6. Registre épistémique
 
