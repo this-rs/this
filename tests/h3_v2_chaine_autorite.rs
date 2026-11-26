@@ -19,11 +19,11 @@ use obrain_core::graph::traits::GraphStoreMut;
 use obrain_substrate::{
     IntegriteTentative, ModePublication, Precondition, ReferenceTentative, SubstrateStore,
 };
-use this_harness::attribution::{Attribution, Definition, Observation, Resultat, Tentative};
 use this::reconciliation::{
-    reconcilier as reconcilier_chaine, EnregistrementOriginal, VerdictReconciliation as VerdictChaine,
-    ENREGISTREMENT_VERSION,
+    ENREGISTREMENT_VERSION, EnregistrementOriginal, VerdictReconciliation as VerdictChaine,
+    reconcilier as reconcilier_chaine,
 };
+use this_harness::attribution::{Attribution, Definition, Observation, Resultat, Tentative};
 
 fn dir(tag: &str) -> std::path::PathBuf {
     let mut d = std::env::temp_dir();
@@ -58,7 +58,11 @@ fn h3_v2_chaine_nominale_reserver_avant_publication() {
     );
     attr.recevoir(
         decision_id,
-        Observation { fournisseur: "a".to_string(), modele: "m1".to_string(), resultat: Resultat::Succes },
+        Observation {
+            fournisseur: "a".to_string(),
+            modele: "m1".to_string(),
+            resultat: Resultat::Succes,
+        },
     );
     // RÉSERVATION AVANT PUBLICATION : la génération est assignée ICI.
     let tentative: Tentative = attr.reserver(decision_id).expect("réservation");
@@ -70,13 +74,18 @@ fn h3_v2_chaine_nominale_reserver_avant_publication() {
         store.set_node_property(id, "a", Value::Int64(1));
         let pre: Precondition = store.capturer_precondition(id, &["a"]).expect("capture");
         let prep = store
-            .preparer_transformation(id, &[("a", Value::Int64(10))], &pre, ModePublication::Strict)
+            .preparer_transformation(
+                id,
+                &[("a", Value::Int64(10))],
+                &pre,
+                ModePublication::Strict,
+            )
             .expect("préparation");
         let reference = prep.reference_tentative();
         let reference_bytes = reference.to_bytes();
         let enr = EnregistrementOriginal {
             version: ENREGISTREMENT_VERSION,
-            k: "k1".to_string(),
+            k: 1,
             backend: reference.auteur(),
             generation: 1,
             decision_id: 0,
@@ -85,7 +94,9 @@ fn h3_v2_chaine_nominale_reserver_avant_publication() {
             effets_attendus: vec![("a".to_string(), 10)],
             reference_bytes,
         };
-        let _verdict = store.publier_si_precondition_intacte(prep).expect("publication");
+        let _verdict = store
+            .publier_si_precondition_intacte(prep)
+            .expect("publication");
         store.close().expect("fermeture");
         enr
     };
@@ -115,7 +126,9 @@ fn h3_v2_chaine_detecte_cle_amputee() {
         let id = store.create_node(&["ressource"]);
         store.set_node_property(id, "a", Value::Int64(1));
         store.set_node_property(id, "b", Value::Int64(2));
-        let pre = store.capturer_precondition(id, &["a", "b"]).expect("capture");
+        let pre = store
+            .capturer_precondition(id, &["a", "b"])
+            .expect("capture");
         let prep = store
             .preparer_transformation(
                 id,
@@ -127,7 +140,7 @@ fn h3_v2_chaine_detecte_cle_amputee() {
         let reference = prep.reference_tentative();
         let enr = EnregistrementOriginal {
             version: ENREGISTREMENT_VERSION,
-            k: "k1".to_string(),
+            k: 1,
             backend: reference.auteur(),
             generation: 1,
             decision_id: 0,
@@ -136,7 +149,9 @@ fn h3_v2_chaine_detecte_cle_amputee() {
             effets_attendus: vec![("a".to_string(), 10), ("b".to_string(), 20)],
             reference_bytes: reference.to_bytes(),
         };
-        store.publier_si_precondition_intacte(prep).expect("publication");
+        store
+            .publier_si_precondition_intacte(prep)
+            .expect("publication");
         store.close().expect("fermeture");
         enr
     };
@@ -155,7 +170,11 @@ fn h3_v2_chaine_detecte_cle_amputee() {
 
     // Le stockage la juge Intégrale (L1)…
     let res = store2.resoudre_reference(&reference).expect("résolution");
-    assert_eq!(res.integrite, IntegriteTentative::Integrale, "L1 reproduite : amputée → Integrale");
+    assert_eq!(
+        res.integrite,
+        IntegriteTentative::Integrale,
+        "L1 reproduite : amputée → Integrale"
+    );
     // … mais la chaîne d'autorité la refuse.
     assert_eq!(
         reconcilier_chaine(&enr, &reference, &res, &store2),
@@ -179,12 +198,17 @@ fn h3_v2_chaine_detecte_substitution() {
         store.set_node_property(id, "a", Value::Int64(1));
         let pre = store.capturer_precondition(id, &["a"]).expect("capture");
         let prep = store
-            .preparer_transformation(id, &[("a", Value::Int64(10))], &pre, ModePublication::Strict)
+            .preparer_transformation(
+                id,
+                &[("a", Value::Int64(10))],
+                &pre,
+                ModePublication::Strict,
+            )
             .expect("préparation");
         let reference = prep.reference_tentative();
         let enr = EnregistrementOriginal {
             version: ENREGISTREMENT_VERSION,
-            k: "k1".to_string(),
+            k: 1,
             backend: reference.auteur(),
             generation: 1,
             decision_id: 0,
@@ -193,7 +217,9 @@ fn h3_v2_chaine_detecte_substitution() {
             effets_attendus: vec![("a".to_string(), 10)],
             reference_bytes: reference.to_bytes(),
         };
-        store.publier_si_precondition_intacte(prep).expect("publication 1");
+        store
+            .publier_si_precondition_intacte(prep)
+            .expect("publication 1");
         store.close().expect("fermeture 1");
         (enr, id)
     };
@@ -203,19 +229,33 @@ fn h3_v2_chaine_detecte_substitution() {
         let store = SubstrateStore::open(&chemin).expect("réouverture");
         let pre = store.capturer_precondition(id, &["a"]).expect("capture 2");
         let prep = store
-            .preparer_transformation(id, &[("a", Value::Int64(99))], &pre, ModePublication::Strict)
+            .preparer_transformation(
+                id,
+                &[("a", Value::Int64(99))],
+                &pre,
+                ModePublication::Strict,
+            )
             .expect("préparation 2");
         let bytes = prep.reference_tentative().to_bytes();
-        store.publier_si_precondition_intacte(prep).expect("publication 2");
+        store
+            .publier_si_precondition_intacte(prep)
+            .expect("publication 2");
         store.close().expect("fermeture 2");
         bytes
     };
 
     let store3 = SubstrateStore::open(&chemin).expect("réouverture 3");
-    let reference_substituee = ReferenceTentative::from_bytes(&autre_reference_bytes).expect("décodage");
-    let res = store3.resoudre_reference(&reference_substituee).expect("résolution");
+    let reference_substituee =
+        ReferenceTentative::from_bytes(&autre_reference_bytes).expect("décodage");
+    let res = store3
+        .resoudre_reference(&reference_substituee)
+        .expect("résolution");
     // Le stockage juge la référence substituée valide (L2)…
-    assert_eq!(res.integrite, IntegriteTentative::Integrale, "L2 reproduite : substituée → Integrale");
+    assert_eq!(
+        res.integrite,
+        IntegriteTentative::Integrale,
+        "L2 reproduite : substituée → Integrale"
+    );
     // … mais la chaîne la refuse car elle n'est PAS celle de l'enregistrement.
     assert_eq!(
         reconcilier_chaine(&enr, &reference_substituee, &res, &store3),
@@ -238,12 +278,17 @@ fn h3_v2_chaine_contenu_incompatible() {
         store.set_node_property(id, "a", Value::Int64(1));
         let pre = store.capturer_precondition(id, &["a"]).expect("capture");
         let prep = store
-            .preparer_transformation(id, &[("a", Value::Int64(10))], &pre, ModePublication::Strict)
+            .preparer_transformation(
+                id,
+                &[("a", Value::Int64(10))],
+                &pre,
+                ModePublication::Strict,
+            )
             .expect("préparation");
         let reference = prep.reference_tentative();
         let enr = EnregistrementOriginal {
             version: ENREGISTREMENT_VERSION,
-            k: "k1".to_string(),
+            k: 1,
             backend: reference.auteur(),
             generation: 1,
             decision_id: 0,
@@ -252,7 +297,9 @@ fn h3_v2_chaine_contenu_incompatible() {
             effets_attendus: vec![("a".to_string(), 10)],
             reference_bytes: reference.to_bytes(),
         };
-        store.publier_si_precondition_intacte(prep).expect("publication");
+        store
+            .publier_si_precondition_intacte(prep)
+            .expect("publication");
         store.close().expect("fermeture");
         (enr, id)
     };
@@ -262,7 +309,11 @@ fn h3_v2_chaine_contenu_incompatible() {
     store2.set_node_property(id, "a", Value::Int64(99));
     let reference = ReferenceTentative::from_bytes(&enr.reference_bytes).expect("décodage");
     let res = store2.resoudre_reference(&reference).expect("résolution");
-    assert_eq!(res.integrite, IntegriteTentative::Integrale, "engagé (historique) intégral");
+    assert_eq!(
+        res.integrite,
+        IntegriteTentative::Integrale,
+        "engagé (historique) intégral"
+    );
     assert_eq!(
         reconcilier_chaine(&enr, &reference, &res, &store2),
         VerdictChaine::Incompatible,
@@ -284,12 +335,17 @@ fn h3_v2_chaine_masque_compatible_n_est_pas_incompatible() {
         store.set_node_property(id, "a", Value::Int64(1));
         let pre = store.capturer_precondition(id, &["a"]).expect("capture");
         let prep = store
-            .preparer_transformation(id, &[("a", Value::Int64(10))], &pre, ModePublication::Strict)
+            .preparer_transformation(
+                id,
+                &[("a", Value::Int64(10))],
+                &pre,
+                ModePublication::Strict,
+            )
             .expect("préparation");
         let reference = prep.reference_tentative();
         let enr = EnregistrementOriginal {
             version: ENREGISTREMENT_VERSION,
-            k: "k1".to_string(),
+            k: 1,
             backend: reference.auteur(),
             generation: 1,
             decision_id: 0,
@@ -298,7 +354,9 @@ fn h3_v2_chaine_masque_compatible_n_est_pas_incompatible() {
             effets_attendus: vec![("a".to_string(), 10)],
             reference_bytes: reference.to_bytes(),
         };
-        store.publier_si_precondition_intacte(prep).expect("publication");
+        store
+            .publier_si_precondition_intacte(prep)
+            .expect("publication");
         store.close().expect("fermeture");
         (enr, id)
     };
@@ -328,14 +386,26 @@ fn h3_v2_deux_tentatives_references_distinctes() {
     store.set_node_property(id, "a", Value::Int64(1));
     let pre = store.capturer_precondition(id, &["a"]).expect("capture");
     let prep1 = store
-        .preparer_transformation(id, &[("a", Value::Int64(10))], &pre, ModePublication::Strict)
+        .preparer_transformation(
+            id,
+            &[("a", Value::Int64(10))],
+            &pre,
+            ModePublication::Strict,
+        )
         .expect("préparation 1");
     let r1 = prep1.reference_tentative();
-    store.publier_si_precondition_intacte(prep1).expect("publication 1");
+    store
+        .publier_si_precondition_intacte(prep1)
+        .expect("publication 1");
 
     let pre2 = store.capturer_precondition(id, &["a"]).expect("capture 2");
     let prep2 = store
-        .preparer_transformation(id, &[("a", Value::Int64(20))], &pre2, ModePublication::Strict)
+        .preparer_transformation(
+            id,
+            &[("a", Value::Int64(20))],
+            &pre2,
+            ModePublication::Strict,
+        )
         .expect("préparation 2");
     let r2 = prep2.reference_tentative();
     assert_ne!(
@@ -344,7 +414,9 @@ fn h3_v2_deux_tentatives_references_distinctes() {
         "deux tentatives = deux références physiques distinctes (pas d'idempotence par contenu)"
     );
     assert_ne!(r1.to_bytes(), r2.to_bytes());
-    store.publier_si_precondition_intacte(prep2).expect("publication 2");
+    store
+        .publier_si_precondition_intacte(prep2)
+        .expect("publication 2");
     store.close().expect("fermeture");
     let _ = std::fs::remove_dir_all(&d);
 }
@@ -367,16 +439,26 @@ fn h3_v2_enregistrement_reconstruit_apres_disparition() {
         store.set_node_property(id, "a", Value::Int64(1));
         let pre: Precondition = store.capturer_precondition(id, &["a"]).expect("capture");
         let prep = store
-            .preparer_transformation(id, &[("a", Value::Int64(10))], &pre, ModePublication::Strict)
+            .preparer_transformation(
+                id,
+                &[("a", Value::Int64(10))],
+                &pre,
+                ModePublication::Strict,
+            )
             .expect("préparation");
         let reference = prep.reference_tentative();
-        let (backend, cible, horloge) = (reference.auteur(), reference.cible().0, reference.horloge());
+        let (backend, cible, horloge) =
+            (reference.auteur(), reference.cible().0, reference.horloge());
         // Référence (octets opaques) sur un fichier binaire.
         std::fs::write(&ref_file, reference.to_bytes()).expect("persistance référence");
         // Métadonnées (K, backend, génération, cible, effets attendus) sur un fichier texte.
-        let meta = format!("k=k1\nbackend={backend}\ngeneration=1\ncible={cible}\nhorloge={horloge}\neffets=a:10\n");
+        let meta = format!(
+            "k=1\nbackend={backend}\ngeneration=1\ncible={cible}\nhorloge={horloge}\neffets=a:10\n"
+        );
         std::fs::write(&rec_file, &meta).expect("persistance enregistrement");
-        store.publier_si_precondition_intacte(prep).expect("publication");
+        store
+            .publier_si_precondition_intacte(prep)
+            .expect("publication");
         store.close().expect("fermeture");
     }
     // 2. DISPARITION du consommateur : tout état RAM est hors de portée.
@@ -391,23 +473,31 @@ fn h3_v2_enregistrement_reconstruit_apres_disparition() {
             .unwrap_or_else(|| panic!("champ {nom} absent de l'enregistrement reconstruit"))
     };
     // Vérifier chaque champ reconstruit contre la décision originale.
-    assert_eq!(champ("k"), "k1", "K reconstruit");
+    assert_eq!(champ("k"), "1", "K reconstruit");
     assert_eq!(champ("generation"), "1", "génération reconstruite");
     assert_eq!(champ("effets"), "a:10", "contenu attendu reconstruit");
 
     let reference = ReferenceTentative::from_bytes(&reference_bytes).expect("décodage");
     // Autorité backend + cible reconstruits doivent égaler ceux de la référence (cohérence durable).
-    assert_eq!(reference.auteur().to_string(), champ("backend"), "autorité backend reconstruite");
-    assert_eq!(reference.cible().0.to_string(), champ("cible"), "cible reconstruite");
+    assert_eq!(
+        reference.auteur().to_string(),
+        champ("backend"),
+        "autorité backend reconstruite"
+    );
+    assert_eq!(
+        reference.cible().0.to_string(),
+        champ("cible"),
+        "cible reconstruite"
+    );
 
     // 4. Résolution + réconciliation contre l'enregistrement RECONSTRUIT.
     let enr = EnregistrementOriginal {
         version: ENREGISTREMENT_VERSION,
-        k: champ("k"),
+        k: champ("k").parse().expect("k u128"),
         backend: champ("backend").parse().expect("backend u64"),
         generation: champ("generation").parse().expect("generation u64"),
-            decision_id: 0,
-            autorite_consommateur: 0,
+        decision_id: 0,
+        autorite_consommateur: 0,
         cible: NodeId(champ("cible").parse().expect("cible u64")),
         effets_attendus: vec![("a".to_string(), 10)],
         reference_bytes: reference.to_bytes(),

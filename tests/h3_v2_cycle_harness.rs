@@ -27,8 +27,13 @@ use obrain_substrate::{
     IntegriteTentative, IssuePublication, ModePublication, Precondition, ReferenceTentative,
     ResolutionEffet, ResolutionTentative, SubstrateStore,
 };
-use this_harness::attribution::{Attribution, Definition, Etat, Observation, Reception, Resultat, RésolutionBackend};
-use this::reconciliation::{reconcilier as reconcilier_composant, EnregistrementOriginal, ENREGISTREMENT_VERSION};
+use this::reconciliation::{
+    ENREGISTREMENT_VERSION, EnregistrementOriginal, IssueResolutionOperation,
+    reconcilier as reconcilier_composant, resoudre_operation,
+};
+use this_harness::attribution::{
+    Attribution, Definition, Etat, Observation, Reception, Resultat, RésolutionBackend,
+};
 
 fn dir(tag: &str) -> std::path::PathBuf {
     let mut d = std::env::temp_dir();
@@ -65,7 +70,7 @@ fn reconcilier(
 ) -> Option<RésolutionBackend> {
     let enr = EnregistrementOriginal {
         version: ENREGISTREMENT_VERSION,
-        k: "op-cycle".to_string(),
+        k: 1,
         backend: reference.auteur(),
         generation: 1,
         decision_id: 0,
@@ -124,7 +129,12 @@ fn h3_v2_cycle_harness_reel_nominal() {
         store.set_node_property(id, "a", Value::Int64(1));
         let pre: Precondition = store.capturer_precondition(id, &["a"]).expect("capture");
         let prep = store
-            .preparer_transformation(id, &[("a", Value::Int64(10))], &pre, ModePublication::Strict)
+            .preparer_transformation(
+                id,
+                &[("a", Value::Int64(10))],
+                &pre,
+                ModePublication::Strict,
+            )
             .expect("préparation");
         let reference = prep.reference_tentative();
         let reference_bytes = reference.to_bytes();
@@ -132,7 +142,7 @@ fn h3_v2_cycle_harness_reel_nominal() {
         // et la préparation (backend/cible/effets/référence), avant publication.
         let enr = EnregistrementOriginal {
             version: ENREGISTREMENT_VERSION,
-            k: "k1".to_string(),
+            k: 1,
             backend: reference.auteur(),
             generation: 1, // première réservation du cycle (reserver → génération 1)
             decision_id,
@@ -143,7 +153,9 @@ fn h3_v2_cycle_harness_reel_nominal() {
         };
 
         // 4. PUBLICATION réelle ; 5. PERTE DE RÉPONSE : le verdict n'est pas lu.
-        let _verdict = store.publier_si_precondition_intacte(prep).expect("publication");
+        let _verdict = store
+            .publier_si_precondition_intacte(prep)
+            .expect("publication");
         store.close().expect("fermeture");
         (reference_bytes, id, enr)
     };
@@ -155,22 +167,24 @@ fn h3_v2_cycle_harness_reel_nominal() {
     let res = store2.resoudre_reference(&reference).expect("résolution");
 
     // 7. RÉCONCILIATION contre l'enregistrement constitué AVANT publication
-    //    (pas reconstruit depuis la référence résolue).
+    //    (pas reconstruit depuis la référence résolue) — via le CHEMIN
+    //    OPÉRATIONNEL : la liaison est vérifiée AVANT toute résolution, la
+    //    réconciliation est celle du composant, la transition est déléguée au
+    //    cycle Attribution (aucun appel de banc, aucune logique locale).
     assert_eq!(res.integrite, IntegriteTentative::Integrale);
-    // Liaison effective : l'enregistrement est confronté à la réservation RÉELLE.
-    assert!(
-        enr.verifier_liaison(&tentative, attr.autorite()),
-        "K/génération/decision_id/autorité consommateur conformes à la réservation"
+    assert_eq!(
+        resoudre_operation(
+            &mut attr,
+            decision_id,
+            tentative,
+            &enr,
+            &reference,
+            &res,
+            &store2
+        ),
+        IssueResolutionOperation::Resolu(true),
+        "liaison conforme + effet engagé ET canonique → confirmé via le chemin opérationnel"
     );
-    let verdict = reconcilier_composant(&enr, &reference, &res, &store2)
-        .vers_backend()
-        .expect("verdict non ambigu");
-    assert!(
-        matches!(verdict, RésolutionBackend::EffetConfirme),
-        "l'effet est engagé ET canonique : confirmé"
-    );
-    // La réconciliation alimente le cycle harness avec la tentative réservée AVANT publication.
-    assert!(attr.resoudre(decision_id, tentative, verdict));
     assert_eq!(attr.etat(decision_id).unwrap().etat, Etat::Confirme);
     store2.close().expect("fermeture 2");
     let _ = std::fs::remove_dir_all(&d);
@@ -188,12 +202,19 @@ fn h3_v2_engage_puis_masque_n_est_pas_effet_confirme() {
         store.set_node_property(id, "a", Value::Int64(1));
         let pre = store.capturer_precondition(id, &["a"]).expect("capture");
         let prep = store
-            .preparer_transformation(id, &[("a", Value::Int64(10))], &pre, ModePublication::Strict)
+            .preparer_transformation(
+                id,
+                &[("a", Value::Int64(10))],
+                &pre,
+                ModePublication::Strict,
+            )
             .expect("préparation");
         let reference = prep.reference_tentative();
         let bytes = reference.to_bytes();
         assert_eq!(
-            store.publier_si_precondition_intacte(prep).expect("publication"),
+            store
+                .publier_si_precondition_intacte(prep)
+                .expect("publication"),
             IssuePublication::PublieIntegrale
         );
         store.close().expect("fermeture");
@@ -238,7 +259,12 @@ fn h3_v2_indetermine_n_est_pas_absence_definitive() {
         store.set_node_property(id, "a", Value::Int64(1));
         let pre = store.capturer_precondition(id, &["a"]).expect("capture");
         let prep = store
-            .preparer_transformation(id, &[("a", Value::Int64(10))], &pre, ModePublication::Strict)
+            .preparer_transformation(
+                id,
+                &[("a", Value::Int64(10))],
+                &pre,
+                ModePublication::Strict,
+            )
             .expect("préparation");
         let bytes = prep.reference_tentative().to_bytes();
         drop(prep); // jamais publiée
@@ -273,10 +299,17 @@ fn h3_v2_reference_forgee_ou_etrangere_indeterminee() {
         store.set_node_property(id, "a", Value::Int64(1));
         let pre = store.capturer_precondition(id, &["a"]).expect("capture");
         let prep = store
-            .preparer_transformation(id, &[("a", Value::Int64(10))], &pre, ModePublication::Strict)
+            .preparer_transformation(
+                id,
+                &[("a", Value::Int64(10))],
+                &pre,
+                ModePublication::Strict,
+            )
             .expect("préparation");
         let bytes = prep.reference_tentative().to_bytes();
-        store.publier_si_precondition_intacte(prep).expect("publication");
+        store
+            .publier_si_precondition_intacte(prep)
+            .expect("publication");
         store.close().expect("fermeture");
         (bytes, id)
     };
@@ -284,7 +317,10 @@ fn h3_v2_reference_forgee_ou_etrangere_indeterminee() {
     // 1. Magic invalide → refus NOMMÉ (pas de panique, pas de décodage silencieux).
     let mut corrompu = reference_bytes.clone();
     corrompu[0] = b'X';
-    assert!(ReferenceTentative::from_bytes(&corrompu).is_err(), "magic invalide refusé");
+    assert!(
+        ReferenceTentative::from_bytes(&corrompu).is_err(),
+        "magic invalide refusé"
+    );
 
     // 2. Référence BIEN FORMÉE mais étrangère (autre base) → Indeterminee.
     let autre_d = dir("autre_base");
@@ -294,7 +330,9 @@ fn h3_v2_reference_forgee_ou_etrangere_indeterminee() {
     store_b.set_node_property(id_b, "a", Value::Int64(1));
     let reference = ReferenceTentative::from_bytes(&reference_bytes).expect("décodage");
     assert_eq!(id, id_b, "même NodeId déterministe de part et d'autre");
-    let res = store_b.resoudre_reference(&reference).expect("résolution B");
+    let res = store_b
+        .resoudre_reference(&reference)
+        .expect("résolution B");
     assert_eq!(
         res.integrite,
         IntegriteTentative::Indeterminee,
@@ -320,7 +358,9 @@ fn h3_v2_multi_effet_granularite_par_cle() {
         let id = store.create_node(&["ressource"]);
         store.set_node_property(id, "a", Value::Int64(1));
         store.set_node_property(id, "b", Value::Int64(2));
-        let pre = store.capturer_precondition(id, &["a", "b"]).expect("capture");
+        let pre = store
+            .capturer_precondition(id, &["a", "b"])
+            .expect("capture");
         let prep = store
             .preparer_transformation(
                 id,
@@ -331,7 +371,9 @@ fn h3_v2_multi_effet_granularite_par_cle() {
             .expect("préparation");
         let bytes = prep.reference_tentative().to_bytes();
         // On publie puis on MASQUE UNE SEULE clé : `b` reste canonique, `a` est masquée.
-        store.publier_si_precondition_intacte(prep).expect("publication");
+        store
+            .publier_si_precondition_intacte(prep)
+            .expect("publication");
         store.set_node_property(id, "a", Value::Int64(99));
         store.close().expect("fermeture");
         bytes
@@ -343,12 +385,22 @@ fn h3_v2_multi_effet_granularite_par_cle() {
     // Les deux effets sont engagés (l'un masqué) → Integrale, pas Partielle :
     // le masquage n'est PAS une absence d'engagement.
     assert_eq!(res.integrite, IntegriteTentative::Integrale);
-    assert_eq!(res.par_cle.len(), 2, "une entrée par clé, jamais un agrégat seul");
+    assert_eq!(
+        res.par_cle.len(),
+        2,
+        "une entrée par clé, jamais un agrégat seul"
+    );
     // `a` masqué (estampille ≠ référence), `b` canonique.
     let a = res.par_cle.iter().find(|e| e.cle == "a").expect("clé a");
     let b = res.par_cle.iter().find(|e| e.cle == "b").expect("clé b");
-    assert_ne!(a.estampille_courante, Some((reference.auteur(), reference.horloge())));
-    assert_eq!(b.estampille_courante, Some((reference.auteur(), reference.horloge())));
+    assert_ne!(
+        a.estampille_courante,
+        Some((reference.auteur(), reference.horloge()))
+    );
+    assert_eq!(
+        b.estampille_courante,
+        Some((reference.auteur(), reference.horloge()))
+    );
     assert!(
         matches!(
             reconcilier(&store2, &res, &reference, &[("a", 10), ("b", 20)]),

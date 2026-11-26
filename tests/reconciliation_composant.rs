@@ -8,8 +8,8 @@ use obrain_common::types::{NodeId, Value};
 use obrain_core::graph::traits::GraphStoreMut;
 use obrain_substrate::{IntegriteTentative, ModePublication, Precondition, SubstrateStore};
 use this::reconciliation::{
-    reconcilier, DecodageEnregistrement, EnregistrementOriginal, VerdictReconciliation,
-    ENREGISTREMENT_VERSION,
+    DecodageEnregistrement, ENREGISTREMENT_VERSION, EnregistrementOriginal, VerdictReconciliation,
+    reconcilier,
 };
 
 fn dir(tag: &str) -> std::path::PathBuf {
@@ -17,7 +17,10 @@ fn dir(tag: &str) -> std::path::PathBuf {
     d.push(format!(
         "reconc_{tag}_{}_{}",
         std::process::id(),
-        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
     ));
     d
 }
@@ -26,7 +29,7 @@ fn dir(tag: &str) -> std::path::PathBuf {
 fn composant_roundtrip_et_refus_version_inconnue() {
     let enr = EnregistrementOriginal {
         version: ENREGISTREMENT_VERSION,
-        k: "op-42".to_string(),
+        k: 42,
         backend: 7,
         generation: 3,
         decision_id: 0,
@@ -68,12 +71,17 @@ fn composant_confirme_apres_reouverture() {
         store.set_node_property(id, "a", Value::Int64(1));
         let pre: Precondition = store.capturer_precondition(id, &["a"]).expect("capture");
         let prep = store
-            .preparer_transformation(id, &[("a", Value::Int64(10))], &pre, ModePublication::Strict)
+            .preparer_transformation(
+                id,
+                &[("a", Value::Int64(10))],
+                &pre,
+                ModePublication::Strict,
+            )
             .expect("préparation");
         let reference = prep.reference_tentative();
         let enr = EnregistrementOriginal {
             version: ENREGISTREMENT_VERSION,
-            k: "op-1".to_string(),
+            k: 1,
             backend: reference.auteur(),
             generation: 1,
             decision_id: 0,
@@ -83,7 +91,9 @@ fn composant_confirme_apres_reouverture() {
             reference_bytes: reference.to_bytes(),
         };
         let octets = enr.encoder();
-        let _verdict = store.publier_si_precondition_intacte(prep).expect("publication");
+        let _verdict = store
+            .publier_si_precondition_intacte(prep)
+            .expect("publication");
         store.close().expect("fermeture");
         (octets, id)
     };
@@ -91,7 +101,8 @@ fn composant_confirme_apres_reouverture() {
     // Réouverture : décoder l'enregistrement, résoudre, réconcilier via le COMPOSANT.
     let store2 = SubstrateStore::open(&chemin).expect("réouverture");
     let enr = EnregistrementOriginal::decoder(&enr_octets).expect("décodage");
-    let reference = obrain_substrate::ReferenceTentative::from_bytes(&enr.reference_bytes).expect("réf");
+    let reference =
+        obrain_substrate::ReferenceTentative::from_bytes(&enr.reference_bytes).expect("réf");
     let res = store2.resoudre_reference(&reference).expect("résolution");
     assert_eq!(res.integrite, IntegriteTentative::Integrale);
     assert_eq!(

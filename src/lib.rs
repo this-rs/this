@@ -56,6 +56,8 @@ pub mod core;
 /// Module descriptor (crate `this-descriptor`): types, pure engines, error table. Shared
 /// with this-cli and wasm32 fronts. See `docs/rfc/module-descriptor.md`.
 pub use this_descriptor as descriptor;
+#[cfg(feature = "obrain")]
+pub mod autorite_k;
 /// Hôte de déploiement piloté par configuration : une structure qu'on déploie,
 /// sur laquelle on rattache des projets qui existent déjà.
 pub mod deploy;
@@ -67,12 +69,12 @@ pub mod events;
 /// Gated behind `obrain` : sans le moteur, il n'y a pas de relief à décrire.
 #[cfg(feature = "obrain")]
 pub mod graph;
-#[cfg(feature = "obrain")]
-pub mod reconciliation;
 pub mod links;
 /// Couche objets (blobs S3/MinIO/local) préfixée par tenant.
 #[cfg(feature = "objects")]
 pub mod objects;
+#[cfg(feature = "obrain")]
+pub mod reconciliation;
 pub mod server;
 pub mod storage;
 pub mod ui;
