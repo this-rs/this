@@ -1,0 +1,75 @@
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+   Compiling this-rs v0.0.10 (/Users/triviere/projects/this-rs/_wt-k-obrr-main)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 10.47s
+     Running tests/k_collision_concurrente.rs (/Users/triviere/projects/this-rs/_wt-k-obrr-target/debug/build/this-rs/4f69e68d300b16f6/out/k_collision_concurrente-4f69e68d300b16f6)
+
+running 2 tests
+test collision_concurrente_interleaving_deterministe ... 
+running 1 test
+
+running 1 test
+test collision_concurrente_interleaving_deterministe ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.03s
+
+test collision_concurrente_interleaving_deterministe ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.05s
+
+FAILED
+test contention_multiprocessus_sans_doublon ... 
+running 1 test
+
+running 1 test
+
+running 1 test
+
+running 1 test
+test contention_multiprocessus_sans_doublon ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.59s
+
+test contention_multiprocessus_sans_doublon ... ok
+test contention_multiprocessus_sans_doublon ... ok
+test result: 
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.59s
+
+ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.59s
+
+test contention_multiprocessus_sans_doublon ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.60s
+
+FAILED
+
+failures:
+
+---- collision_concurrente_interleaving_deterministe stdout ----
+MESURÉ : K(a)=1  K(b)=1  état durable=2
+
+thread 'collision_concurrente_interleaving_deterministe' (221378431) panicked at tests/k_collision_concurrente.rs:157:5:
+assertion `left == right` failed: COLLISION : les deux processus ont publié le même K (1 et 1) ; l'état durable vaut 2 au lieu de 3
+  left: [1, 1]
+ right: [1, 2]
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- contention_multiprocessus_sans_doublon stdout ----
+MESURÉ : 80 K émis, 20 distincts (80 attendus)
+
+thread 'contention_multiprocessus_sans_doublon' (221378436) panicked at tests/k_collision_concurrente.rs:219:5:
+assertion `left == right` failed: DOUBLONS : 20 K seulement sont distincts sur 80 émissions
+  left: 20
+ right: 80
+
+
+failures:
+    collision_concurrente_interleaving_deterministe
+    contention_multiprocessus_sans_doublon
+
+test result: FAILED. 0 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.67s
+
+error: test failed, to rerun pass `--test k_collision_concurrente`
+EXIT=101

@@ -1,0 +1,14 @@
+   Compiling this-rs v0.0.10 (/Users/triviere/projects/this-rs/_wt-k-obrr-main)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 5.61s
+     Running unittests src/lib.rs (/Users/triviere/projects/this-rs/_wt-k-obrr-target/debug/build/this-rs/111ceeda64c92472/out/this-111ceeda64c92472)
+
+running 5 tests
+test autorite_k::tests::compteur_u128_durable_et_monotone ... ok
+test autorite_k::tests::corruption_refusee_pas_de_reinitialisation_silencieuse ... ok
+test autorite_k::tests::deux_instances_meme_processus_n_emettent_jamais_le_meme_k ... ok
+test autorite_k::tests::ordre_mesure_verrou_puis_lecture_puis_persistance_puis_publication ... ok
+test autorite_k::tests::saturation_refusee_sans_repli ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 1111 filtered out; finished in 0.11s
+
+EXIT=0

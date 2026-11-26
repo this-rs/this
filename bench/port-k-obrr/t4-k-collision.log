@@ -1,0 +1,47 @@
+   Compiling this-rs v0.0.10 (/Users/triviere/projects/this-rs/_wt-k-obrr-main)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 4.66s
+     Running tests/k_collision_concurrente.rs (/Users/triviere/projects/this-rs/_wt-k-obrr-target/debug/build/this-rs/4f69e68d300b16f6/out/k_collision_concurrente-4f69e68d300b16f6)
+
+running 2 tests
+test collision_concurrente_interleaving_deterministe ... 
+running 1 test
+
+running 1 test
+test collision_concurrente_interleaving_deterministe ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.08s
+
+test collision_concurrente_interleaving_deterministe ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.09s
+
+ok
+test contention_multiprocessus_sans_doublon ... 
+running 1 test
+
+running 1 test
+
+running 1 test
+
+running 1 test
+test contention_multiprocessus_sans_doublon ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.69s
+
+test contention_multiprocessus_sans_doublon ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.73s
+
+test contention_multiprocessus_sans_doublon ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.75s
+
+test contention_multiprocessus_sans_doublon ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.76s
+
+ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.87s
+
+EXIT=0

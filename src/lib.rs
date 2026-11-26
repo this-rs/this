@@ -51,8 +51,22 @@
 //! user.restore();     // Restore support
 //! ```
 
+/// Autorité d'identité logique K (u128) : allocation atomique interprocessus,
+/// persistance AVANT publication, refus nommés — jamais de réinitialisation
+/// silencieuse.
+///
+/// Volontairement HORS de la feature `obrain` : cette capacité ne dépend d'aucun
+/// type `obrain`, seulement de [`durabilite`]. C'est ce qui la rend portable sur
+/// le pin `7a795370`, contrairement au codec OBRR et à la réconciliation.
+pub mod autorite_k;
 pub mod config;
 pub mod core;
+/// Primitive d'écriture ATOMIQUE et DURABLE d'un fichier d'état (temporaire →
+/// `fsync` → `rename` → `fsync` répertoire). Aucune dépendance `obrain`.
+///
+/// C'est la garantie de persistance dont dépend [`autorite_k`] ; le format OBRR
+/// qui l'utilisait aussi n'est PAS porté (récupération indisponible sur ce pin).
+pub mod durabilite;
 /// Module descriptor (crate `this-descriptor`): types, pure engines, error table. Shared
 /// with this-cli and wasm32 fronts. See `docs/rfc/module-descriptor.md`.
 pub use this_descriptor as descriptor;

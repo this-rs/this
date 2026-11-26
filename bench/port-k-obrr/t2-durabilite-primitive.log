@@ -1,0 +1,12 @@
+   Compiling this-rs v0.0.10 (/Users/triviere/projects/this-rs/_wt-k-obrr-main)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 9.66s
+     Running tests/durabilite_primitive.rs (/Users/triviere/projects/this-rs/_wt-k-obrr-target/debug/build/this-rs/36018dfccea7d649/out/durabilite_primitive-36018dfccea7d649)
+
+running 3 tests
+test ecriture_durable_ordre_observe ... ok
+test la_seconde_ecriture_remplace ... ok
+test temporaire_orphelin_constate_jamais_promu ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+
+EXIT=0
