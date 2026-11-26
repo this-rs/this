@@ -136,12 +136,13 @@ fn effectuer_operation(
     let enr = EnregistrementOriginal {
         version: ENREGISTREMENT_VERSION,
         k: k,
-        backend: reference.auteur(),
+        domaine: "k-durable-test".to_string(),
+        ecrivain: reference.auteur(),
         generation: tentative.generation(),
         decision_id,
         autorite_consommateur: tentative.autorite(),
         cible: reference.cible(),
-        effets_attendus: vec![("a".to_string(), 10)],
+        effets_attendus: vec![("a".to_string(), Value::Int64(10))],
         reference_bytes: reference.to_bytes(),
     };
     if publier {
@@ -176,7 +177,8 @@ fn reconstituer(
     let reconstitue = EnregistrementOriginal {
         version: enr.version,
         k: enr.k, // SAME K — l'identité logique de l'opération est stable
-        backend: enr.backend,
+        domaine: enr.domaine.clone(),
+        ecrivain: enr.ecrivain,
         generation: tentative.generation(), // ré-émise
         decision_id,
         autorite_consommateur: tentative.autorite(), // ré-émise
@@ -217,7 +219,7 @@ fn executer_worker() -> bool {
                 .expect("K_DECISION u128");
             let publier = mode() == "operation_publiee";
             let (enr, k) = effectuer_operation(&d, decision_id, publier);
-            ecrire_atomique(&d.join("record.obrr"), &enr.encoder());
+            ecrire_atomique(&d.join("record.obrr"), &enr.encoder().unwrap());
             std::fs::write(d.join("k.txt"), k.to_string()).expect("écriture k.txt");
         }
         "emettre" => {
@@ -270,8 +272,7 @@ fn scenario_1_meme_operation_apres_redemarrage() {
             tentative,
             &reconstitue,
             &reference,
-            &res,
-            &store
+            &res
         ),
         IssueResolutionOperation::Resolu(true),
         "chemin opérationnel : liaison + réconciliation + résolution"
@@ -315,7 +316,8 @@ fn scenario_2_nouvelle_tentative_apres_refus_certain() {
     let enr1 = EnregistrementOriginal {
         version: ENREGISTREMENT_VERSION,
         k: k,
-        backend: 7,
+        domaine: "k-durable-test".to_string(),
+        ecrivain: 7,
         generation: t1.generation(),
         decision_id,
         autorite_consommateur: t1.autorite(),
@@ -326,7 +328,8 @@ fn scenario_2_nouvelle_tentative_apres_refus_certain() {
     let enr2 = EnregistrementOriginal {
         version: ENREGISTREMENT_VERSION,
         k: k,
-        backend: 7,
+        domaine: "k-durable-test".to_string(),
+        ecrivain: 7,
         generation: t2.generation(),
         decision_id,
         autorite_consommateur: t2.autorite(),
@@ -393,7 +396,7 @@ fn scenario_3_ancienne_tentative_indeterminee() {
 
     // La réconciliation NE transforme PAS l'indétermination en absence définitive.
     assert_eq!(
-        reconcilier(&reconstitue, &reference, &res, &store),
+        reconcilier(&reconstitue, &reference, &res),
         VerdictReconciliation::Indetermine,
         "Indeterminee n'est jamais AbsenceDefinitive"
     );
@@ -406,8 +409,7 @@ fn scenario_3_ancienne_tentative_indeterminee() {
             tentative,
             &reconstitue,
             &reference,
-            &res,
-            &store
+            &res
         ),
         IssueResolutionOperation::Resolu(true),
         "résolution Indetermine acceptée sans transition terminale"
@@ -495,7 +497,8 @@ fn scenario_6_collision_decision_id() {
     let enr_a = EnregistrementOriginal {
         version: ENREGISTREMENT_VERSION,
         k: k1,
-        backend: 7,
+        domaine: "k-durable-test".to_string(),
+        ecrivain: 7,
         generation: ta.generation(),
         decision_id,
         autorite_consommateur: ta.autorite(),
@@ -506,7 +509,8 @@ fn scenario_6_collision_decision_id() {
     let enr_b = EnregistrementOriginal {
         version: ENREGISTREMENT_VERSION,
         k: k2,
-        backend: 7,
+        domaine: "k-durable-test".to_string(),
+        ecrivain: 7,
         generation: tb.generation(),
         decision_id,
         autorite_consommateur: tb.autorite(),
@@ -564,12 +568,13 @@ fn scenario_7_tentative_etrangere_refusee() {
     let enr = EnregistrementOriginal {
         version: ENREGISTREMENT_VERSION,
         k: k_legitime,
-        backend: reference.auteur(),
+        domaine: "k-durable-test".to_string(),
+        ecrivain: reference.auteur(),
         generation: ta.generation(),
         decision_id,
         autorite_consommateur: ta.autorite(),
         cible: reference.cible(),
-        effets_attendus: vec![("a".to_string(), 10)],
+        effets_attendus: vec![("a".to_string(), Value::Int64(10))],
         reference_bytes: reference.to_bytes(),
     };
 
@@ -584,7 +589,7 @@ fn scenario_7_tentative_etrangere_refusee() {
 
     // Le chemin opérationnel refuse la tentative étrangère AVANT toute résolution.
     assert_eq!(
-        resoudre_operation(&mut a, decision_id, tb, &enr, &reference, &res, &store),
+        resoudre_operation(&mut a, decision_id, tb, &enr, &reference, &res),
         IssueResolutionOperation::LiaisonRefusee,
         "tentative étrangère refusée malgré decision_id + génération coïncidents"
     );
@@ -596,7 +601,7 @@ fn scenario_7_tentative_etrangere_refusee() {
 
     // Contrôle POSITIF : la tentative LÉGITIME résout normalement.
     assert_eq!(
-        resoudre_operation(&mut a, decision_id, ta, &enr, &reference, &res, &store),
+        resoudre_operation(&mut a, decision_id, ta, &enr, &reference, &res),
         IssueResolutionOperation::Resolu(true)
     );
     assert_eq!(a.etat(decision_id).expect("cycle").etat, Etat::Confirme);
@@ -640,12 +645,13 @@ fn scenario_8_corruption_valide_k_generation() {
     let enr = EnregistrementOriginal {
         version: ENREGISTREMENT_VERSION,
         k,
-        backend: reference.auteur(),
+        domaine: "k-durable-test".to_string(),
+        ecrivain: reference.auteur(),
         generation: tentative.generation(),
         decision_id,
         autorite_consommateur: tentative.autorite(),
         cible: reference.cible(),
-        effets_attendus: vec![("a".to_string(), 10)],
+        effets_attendus: vec![("a".to_string(), Value::Int64(10))],
         reference_bytes: reference.to_bytes(),
     };
 
@@ -660,8 +666,7 @@ fn scenario_8_corruption_valide_k_generation() {
             tentative,
             &enr_k_vide,
             &reference,
-            &res,
-            &store
+            &res
         ),
         IssueResolutionOperation::LiaisonRefusee,
         "corruption valide de K → liaison refusée"
@@ -681,8 +686,7 @@ fn scenario_8_corruption_valide_k_generation() {
             tentative,
             &enr_gen,
             &reference,
-            &res,
-            &store
+            &res
         ),
         IssueResolutionOperation::LiaisonRefusee,
         "corruption valide de génération → liaison refusée"

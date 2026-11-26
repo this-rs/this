@@ -5,32 +5,68 @@
 //! verdict de réconciliation qui compare la résolution à CET enregistrement (pas au
 //! seul résultat de `resoudre_reference`).
 //!
-//! # Taxonomie préservée (K / F / V / G / E / B)
-//! - **K** : identité logique de l'opération, construite par le consommateur, stable
-//!   entre tentatives d'une même opération. Jamais lisible dans la référence.
+//! # Taxonomie préservée (K / F / V / G / E / D / W)
+//! - **K** : identité logique de l'opération, un **u128** (compatible
+//!   `ObservationId`), construite par le consommateur, stable entre tentatives.
+//!   Jamais lisible dans la référence.
 //! - **F** : empreinte de transformation (`TransformationPrete::empreinte()`) — signature
 //!   de CONTENU, PAS une identité. Ne pas dédupliquer par empreinte.
 //! - **V** : versions des dépendances (hors périmètre de ce module, portées par l'appelant).
 //! - **G** : génération de tentative (`this_harness::attribution::Attribution::reserver`).
 //! - **E** : événement physique engagé — l'estampille `(auteur, horloge)` = writer_id + HLC,
 //!   portée par les octets de la `ReferenceTentative`.
-//! - **B** : autorité backend (writer_id / auteur du store).
+//! - **D** : domaine de stockage (hors-bande) — l'identité de la BASE. N'apparaît
+//!   NULLE PART dans la référence : le consommateur la conserve hors-bande.
+//! - **W** : écrivain (writer_id / auteur du store). PAS un domaine : deux bases
+//!   peuvent partager le même `writer.id` (collision HLC, obrain 62ecd940).
 //!
-//! La référence (E) porte auteur/horloge/cible/effets, mais NI K, NI F, NI V, NI G :
-//! ces quatre relèvent de l'enregistrement du consommateur, et seule la comparaison à
-//! l'enregistrement les vérifie.
+//! La référence (E) porte auteur/horloge/cible/effets, mais NI K, NI F, NI V, NI G,
+//! NI D (domaine de stockage) : ces cinq relèvent de l'enregistrement du consommateur,
+//! et seule la comparaison à l'enregistrement les vérifie. La référence ne constitue
+//! JAMAIS sa propre preuve d'origine : `writer.id` ne discrimine pas les bases.
+//!
+//! # Delta EffetResolu (a5447cc6 → c26824ea)
+//! Le contenu courant des effets est CONSOMMÉ depuis l'observation canonique
+//! `EffetResolu` (même lecture sous le verrou de nœud que `estampille_courante`) —
+//! plus aucune seconde lecture indépendante (`lire_i64` / `get_node_property`).
+//! L'association se fait PAR CLÉ, jamais par position. Les valeurs d'effet sont
+//! encodées TAGGÉES (Int64 / Float64 / Bytes) : aucune conversion arbitraire vers
+//! Int64.
+//!
+//! # Delta collision HLC + état courant (secondaire, 62ecd940 / 6535ddbd / c26824ea)
+//! - Le DOMAINE DE STOCKAGE (`domaine`) est une identité DISTINCTE de l'écrivain
+//!   (`writer_id`), conservée HORS-BANDE : `reconcilier` ne peut PAS la prouver
+//!   depuis la référence (`writer.id` ne discrimine pas les bases — collision HLC).
+//! - L'état courant est lu depuis `EffetResolu.etat_courant` (`EtatPropriete`), qui
+//!   distingue EXPLICITEMENT `Presente` / `Absente` (clé jamais écrite) /
+//!   `Supprimee` (tombstone) / `RessourceInexistante` (nœud mort). Une erreur de
+//!   lecture/corruption ne passe JAMAIS par un état d'absence : elle remonte en
+//!   `Err` via `resoudre_reference` (6535ddbd), jamais convertie en absence.
 
-use obrain_common::types::{NodeId, PropertyKey, Value};
-use obrain_core::graph::traits::GraphStore;
+use std::sync::Arc;
+
+use obrain_common::types::{NodeId, Value};
 use obrain_substrate::{
-    IntegriteTentative, ReferenceTentative, ResolutionTentative, SubstrateStore,
+    EtatPropriete, IntegriteTentative, ReferenceTentative, ResolutionTentative, SubstrateStore,
 };
 use this_harness::attribution::{Attribution, RésolutionBackend, Tentative};
 
 /// Magic des octets d'un enregistrement encodé.
 pub const ENREGISTREMENT_MAGIC: [u8; 4] = *b"OBRR";
 /// Version courante du format d'encodage.
-pub const ENREGISTREMENT_VERSION: u32 = 2;
+///
+/// v5 : K en **u128** (arbitrage K/ObservationId), champ `domaine` (domaine de
+/// stockage hors-bande), `ecrivain` (writer_id, ex-`backend`), effets TAGGÉS
+/// (Int64 / Float64 / Bytes). Les enregistrements v1..=v4 sont refusés
+/// (`VersionInconnue`), jamais réinterprétés.
+pub const ENREGISTREMENT_VERSION: u32 = 5;
+
+/// Balises de type pour l'encodage d'une valeur d'effet. Seuls Int64, Float64 et
+/// Bytes sont représentés : tout autre variant de `Value` est REFUSÉ (jamais
+/// converti ni réduit à Int64).
+const TAG_VALEUR_INT64: u8 = 0x01;
+const TAG_VALEUR_FLOAT64: u8 = 0x02;
+const TAG_VALEUR_BYTES: u8 = 0x03;
 
 /// L'enregistrement original durable du consommateur — la chaîne d'autorité.
 /// Un SEUL bloc cohérent (pas deux fichiers qui peuvent diverger).
@@ -39,8 +75,15 @@ pub struct EnregistrementOriginal {
     pub version: u32,
     /// Identité logique K — u128, compatible `ObservationId` (`from_u128`/`as_u128`).
     pub k: u128,
-    /// Autorité backend B (writer_id du store qui a produit la référence).
-    pub backend: u64,
+    /// Domaine de stockage D — l'identité de la BASE (hors-bande). N'apparaît
+    /// NULLE PART dans la référence : le consommateur la conserve hors-bande.
+    /// `reconcilier` ne la vérifie PAS (indémontrable depuis la référence) :
+    /// la preuve du domaine est la responsabilité du CONSOMMATEUR.
+    pub domaine: String,
+    /// Écrivain W (writer_id / auteur du store qui a produit la référence).
+    /// PAS un domaine de stockage : deux bases peuvent partager le même
+    /// `writer.id` (collision HLC). Ne fusionnez pas les deux identités.
+    pub ecrivain: u64,
     /// Génération de tentative G.
     pub generation: u64,
     /// Identifiant de décision (decision_id) — distinct de K : K est l'identité
@@ -54,7 +97,8 @@ pub struct EnregistrementOriginal {
     /// Cible originale.
     pub cible: NodeId,
     /// Effets attendus (clé + contenu) — fournis par le consommateur, PAS une constante.
-    pub effets_attendus: Vec<(String, i64)>,
+    /// Le contenu est une `Value` (Int64 / Float64 / Bytes), jamais réduit à Int64.
+    pub effets_attendus: Vec<(String, Value)>,
     /// Octets de la `ReferenceTentative` (E) — conservés AVANT publication.
     pub reference_bytes: Vec<u8>,
 }
@@ -97,6 +141,14 @@ impl VerdictReconciliation {
     }
 }
 
+/// Erreur d'encodage d'un enregistrement — nommée, jamais de panique.
+#[derive(Debug, Clone, PartialEq)]
+pub enum EncodageEnregistrement {
+    /// Valeur d'effet d'un type que le format ne représente pas (seuls Int64,
+    /// Float64 et Bytes sont encodés). Refusée, jamais convertie.
+    ValeurNonRepresentable(String),
+}
+
 /// Erreur de décodage d'un enregistrement — nommée, jamais de panique.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DecodageEnregistrement {
@@ -104,6 +156,8 @@ pub enum DecodageEnregistrement {
     Malforme(String),
     /// Version inconnue : l'enregistrement est refusé, pas ignoré.
     VersionInconnue(u32),
+    /// Balise de valeur inconnue : le format ne décode que Int64 / Float64 / Bytes.
+    ValeurNonRepresentable(String),
 }
 
 fn lire_u32_le(o: &[u8], pos: &mut usize) -> Result<u32, DecodageEnregistrement> {
@@ -154,23 +208,97 @@ fn lire_chaine(o: &[u8], pos: &mut usize) -> Result<String, DecodageEnregistreme
         .get(*pos..fin)
         .ok_or_else(|| DecodageEnregistrement::Malforme("troncature chaîne".into()))?;
     *pos = fin;
-    String::from_utf8(t.to_vec())
-        .map_err(|_| DecodageEnregistrement::Malforme("clé non UTF-8".into()))
+    String::from_utf8(t.to_vec()).map_err(|_| DecodageEnregistrement::Malforme("clé non UTF-8".into()))
+}
+
+/// Nom du variant d'une `Value` — pour nommer précisément le type refusé.
+fn nom_variant(v: &Value) -> &'static str {
+    match v {
+        Value::Null => "Null",
+        Value::Bool(_) => "Bool",
+        Value::Int64(_) => "Int64",
+        Value::Float64(_) => "Float64",
+        Value::String(_) => "String",
+        Value::Bytes(_) => "Bytes",
+        Value::Timestamp(_) => "Timestamp",
+        Value::Date(_) => "Date",
+        Value::Time(_) => "Time",
+        Value::Duration(_) => "Duration",
+        Value::ZonedDatetime(_) => "ZonedDatetime",
+        Value::List(_) => "List",
+        Value::Map(_) => "Map",
+        Value::Vector(_) => "Vector",
+        Value::Path { .. } => "Path",
+    }
+}
+
+/// Encode une valeur d'effet TAGGÉE (Int64 / Float64 / Bytes). Tout autre type
+/// est REFUSÉ — jamais converti.
+fn encoder_valeur(v: &Value, out: &mut Vec<u8>) -> Result<(), EncodageEnregistrement> {
+    match v {
+        Value::Int64(n) => {
+            out.push(TAG_VALEUR_INT64);
+            out.extend_from_slice(&n.to_le_bytes());
+        }
+        Value::Float64(f) => {
+            out.push(TAG_VALEUR_FLOAT64);
+            out.extend_from_slice(&f.to_le_bytes());
+        }
+        Value::Bytes(b) => {
+            out.push(TAG_VALEUR_BYTES);
+            out.extend_from_slice(&(b.len() as u32).to_le_bytes());
+            out.extend_from_slice(b);
+        }
+        autre => {
+            return Err(EncodageEnregistrement::ValeurNonRepresentable(
+                nom_variant(autre).to_string(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Décode une valeur d'effet TAGGÉE (Int64 / Float64 / Bytes). Balise inconnue →
+/// refus NOMÉ, jamais de conversion arbitraire.
+fn lire_valeur(o: &[u8], pos: &mut usize) -> Result<Value, DecodageEnregistrement> {
+    let tag = o
+        .get(*pos)
+        .copied()
+        .ok_or_else(|| DecodageEnregistrement::Malforme("troncature balise valeur".into()))?;
+    *pos += 1;
+    match tag {
+        TAG_VALEUR_INT64 => {
+            let n = lire_u64_le(o, pos)?;
+            Ok(Value::Int64(n as i64))
+        }
+        TAG_VALEUR_FLOAT64 => {
+            let bits = lire_u64_le(o, pos)?;
+            Ok(Value::Float64(f64::from_bits(bits)))
+        }
+        TAG_VALEUR_BYTES => {
+            let n = lire_u32_le(o, pos)? as usize;
+            let fin = pos
+                .checked_add(n)
+                .ok_or_else(|| DecodageEnregistrement::Malforme("dépassement bytes".into()))?;
+            let t = o
+                .get(*pos..fin)
+                .ok_or_else(|| DecodageEnregistrement::Malforme("troncature bytes".into()))?;
+            *pos = fin;
+            Ok(Value::Bytes(Arc::from(t)))
+        }
+        autre => Err(DecodageEnregistrement::ValeurNonRepresentable(format!(
+            "balise {autre}"
+        ))),
+    }
 }
 
 impl EnregistrementOriginal {
     /// Liaison effective à la décision et à la réservation RÉELLES : vérifie que
     /// `generation`, `decision_id` et `autorite_consommateur` de l'enregistrement
-    /// correspondent au descripteur de tentative qui l'a produit.
-    ///
-    /// L'autorité consommateur est confrontée à `tentative.autorite()` (l'autorité
-    /// ÉMETTRICE du descripteur), PAS à une valeur passée séparément : une
-    /// tentative étrangère qui coïncide sur `decision_id` + `generation` mais porte
-    /// une autre autorité est REFUSÉE. K n'est PAS lisible dans la référence : sa
-    /// cohérence (même K entre les tentatives d'une même opération, K distinct
-    /// entre opérations indépendantes) est le contrat du CONSOMMATEUR ; ici on ne
-    /// vérifie que sa présence (un K nul — 0, jamais émis — est une corruption
-    /// valide détectée).
+    /// correspondent au descripteur de tentative qui l'a produit. K n'est PAS
+    /// lisible dans la référence : sa cohérence est le contrat du CONSOMMATEUR ;
+    /// ici on ne vérifie que sa présence (un K nul — 0, jamais émis — est une
+    /// corruption valide détectée).
     pub fn verifier_liaison(&self, tentative: &Tentative) -> bool {
         self.generation == tentative.generation()
             && self.decision_id == tentative.decision_id()
@@ -179,14 +307,18 @@ impl EnregistrementOriginal {
     }
 
     /// Encodage versionné en un SEUL bloc cohérent :
-    /// `magic(4) | version(4) | k(16) | backend(8) | generation(8) | cible(8) |
-    /// n_effets(4) | [k_len(4)+k | valeur(8)]*n | ref_len(8) | reference_bytes`.
-    pub fn encoder(&self) -> Vec<u8> {
+    /// `magic(4) | version(4) | k(16) | domaine_len(4)+domaine | ecrivain(8) |
+    /// generation(8) | decision_id(16) | autorite_consommateur(8) | cible(8) |
+    /// n_effets(4) | [cle_len(4)+cle | valeur_tag(1)+payload]*n | ref_len(8) |
+    /// reference_bytes`.
+    pub fn encoder(&self) -> Result<Vec<u8>, EncodageEnregistrement> {
         let mut out = Vec::new();
         out.extend_from_slice(&ENREGISTREMENT_MAGIC);
         out.extend_from_slice(&self.version.to_le_bytes());
         out.extend_from_slice(&self.k.to_le_bytes());
-        out.extend_from_slice(&self.backend.to_le_bytes());
+        out.extend_from_slice(&(self.domaine.len() as u32).to_le_bytes());
+        out.extend_from_slice(self.domaine.as_bytes());
+        out.extend_from_slice(&self.ecrivain.to_le_bytes());
         out.extend_from_slice(&self.generation.to_le_bytes());
         out.extend_from_slice(&self.decision_id.to_le_bytes());
         out.extend_from_slice(&self.autorite_consommateur.to_le_bytes());
@@ -195,15 +327,16 @@ impl EnregistrementOriginal {
         for (cle, val) in &self.effets_attendus {
             out.extend_from_slice(&(cle.len() as u32).to_le_bytes());
             out.extend_from_slice(cle.as_bytes());
-            out.extend_from_slice(&val.to_le_bytes());
+            encoder_valeur(val, &mut out)?;
         }
         out.extend_from_slice(&(self.reference_bytes.len() as u64).to_le_bytes());
         out.extend_from_slice(&self.reference_bytes);
-        out
+        Ok(out)
     }
 
     /// Décodage CONTRÔLÉ : refuse magic invalide, version inconnue, troncature,
-    /// clé non UTF-8, octets excédentaires. Ne panique sur aucune entrée.
+    /// clé non UTF-8, balise de valeur inconnue, octets excédentaires. Ne panique
+    /// sur aucune entrée.
     pub fn decoder(octets: &[u8]) -> Result<Self, DecodageEnregistrement> {
         if octets.len() < 4 {
             return Err(DecodageEnregistrement::Malforme("trop court".into()));
@@ -217,18 +350,19 @@ impl EnregistrementOriginal {
             return Err(DecodageEnregistrement::VersionInconnue(version));
         }
         let k = lire_u128_le(octets, &mut pos)?;
-        let backend = lire_u64_le(octets, &mut pos)?;
+        let domaine = lire_chaine(octets, &mut pos)?;
+        let ecrivain = lire_u64_le(octets, &mut pos)?;
         let generation = lire_u64_le(octets, &mut pos)?;
         let decision_id = lire_u128_le(octets, &mut pos)?;
         let autorite_consommateur = lire_u64_le(octets, &mut pos)?;
         let cible = NodeId(lire_u64_le(octets, &mut pos)?);
         let n = lire_u32_le(octets, &mut pos)? as usize;
-        // Borne AVANT toute allocation : chaque effet occupe au moins 12 octets
-        // (longueur de clé u32 + clé vide + valeur i64). Sans cette borne, un
-        // `n_effets` de 2^32-1 est SYNTAXIQUEMENT valide et fait réserver 128 Gio
-        // — un refus nommé devient un abandon du processus. Mesuré.
+        // Borne AVANT toute allocation : chaque effet occupe au moins 9 octets
+        // (longueur de clé u32 + clé vide + balise + longueur bytes u32). Sans
+        // cette borne, un `n_effets` de 2^32-1 est SYNTAXIQUEMENT valide et fait
+        // réserver une mémoire absurde. Mesuré.
         let reste = octets.len() - pos;
-        if n > reste / 12 {
+        if n > reste / 9 {
             return Err(DecodageEnregistrement::Malforme(format!(
                 "n_effets={n} dépasse les {reste} octets disponibles"
             )));
@@ -236,7 +370,7 @@ impl EnregistrementOriginal {
         let mut effets_attendus = Vec::with_capacity(n);
         for _ in 0..n {
             let cle = lire_chaine(octets, &mut pos)?;
-            let val = lire_u64_le(octets, &mut pos)? as i64;
+            let val = lire_valeur(octets, &mut pos)?;
             effets_attendus.push((cle, val));
         }
         let ref_len = lire_u64_le(octets, &mut pos)? as usize;
@@ -249,14 +383,13 @@ impl EnregistrementOriginal {
             .to_vec();
         pos = fin;
         if pos != octets.len() {
-            return Err(DecodageEnregistrement::Malforme(
-                "octets excédentaires".into(),
-            ));
+            return Err(DecodageEnregistrement::Malforme("octets excédentaires".into()));
         }
         Ok(EnregistrementOriginal {
             version,
             k,
-            backend,
+            domaine,
+            ecrivain,
             generation,
             decision_id,
             autorite_consommateur,
@@ -271,20 +404,20 @@ impl EnregistrementOriginal {
 /// résultat de `resoudre_reference`.
 ///
 /// Ordre des vérifications : complétude des effets (L1, amputation), correspondance
-/// de la référence (L2, substitution), cohérence cible/autorité (métadonnées ↔
-/// référence), autorité résolvante, puis intégrité + état courant + compatibilité.
+/// de la référence (L2, substitution), cohérence cible/écrivain (métadonnées ↔
+/// référence), écrivain résolvant, correspondance résolution ↔ référence PAR CLÉ
+/// (substitution de la résolution), puis intégrité + état courant + compatibilité.
+///
+/// LIMITE (collision HLC, obrain 62ecd940) : cette fonction ne vérifie PAS le
+/// domaine de stockage (`enr.domaine`) — la référence ne le porte pas, `res` non
+/// plus. La preuve du domaine est HORS-BANDE, responsabilité du consommateur.
 pub fn reconcilier(
     enr: &EnregistrementOriginal,
     reference: &ReferenceTentative,
     res: &ResolutionTentative,
-    store: &SubstrateStore,
 ) -> VerdictReconciliation {
     // 1. Complétude des effets (L1).
-    let attendus: Vec<&str> = enr
-        .effets_attendus
-        .iter()
-        .map(|(k, _)| k.as_str())
-        .collect();
+    let attendus: Vec<&str> = enr.effets_attendus.iter().map(|(k, _)| k.as_str()).collect();
     if reference.effets() != attendus.as_slice() {
         return VerdictReconciliation::Incomplet;
     }
@@ -292,18 +425,27 @@ pub fn reconcilier(
     if reference.to_bytes() != enr.reference_bytes {
         return VerdictReconciliation::Substitution;
     }
-    // 3. Cohérence cible / autorité (métadonnées ↔ référence).
+    // 3. Cohérence cible / ÉCRIVAIN (métadonnées ↔ référence). `auteur()` est un
+    //    writer_id (écrivain), PAS un domaine de stockage.
     if reference.cible() != enr.cible || res.cible != enr.cible {
         return VerdictReconciliation::Incompatible;
     }
-    if reference.auteur() != enr.backend {
+    if reference.auteur() != enr.ecrivain {
         return VerdictReconciliation::Incompatible;
     }
-    // 4. Autorité résolvante.
-    if res.auteur_resolvant != enr.backend {
+    // 4. ÉCRIVAIN résolvant (writer_id). Pas une preuve de domaine : deux bases
+    //    peuvent partager le même writer.id (collision HLC).
+    if res.auteur_resolvant != enr.ecrivain {
         return VerdictReconciliation::Incompatible;
     }
-    // 5. Intégrité + état courant + compatibilité.
+    // 5. Correspondance résolution ↔ référence PAR CLÉ : aucune clé manquante,
+    //    supplémentaire ni dupliquée.
+    if !cles_correspondent(reference, res) {
+        return VerdictReconciliation::Substitution;
+    }
+    // 6. Intégrité + état courant + compatibilité. L'état courant est lu depuis
+    //    `EffetResolu.etat_courant` (même observation canonique que
+    //    `estampille_courante`), associé PAR CLÉ.
     match res.integrite {
         IntegriteTentative::Indeterminee => VerdictReconciliation::Indetermine,
         IntegriteTentative::Partielle => VerdictReconciliation::Partielle,
@@ -311,16 +453,31 @@ pub fn reconcilier(
             let tous_canoniques = res
                 .par_cle
                 .iter()
-                .all(|e| e.estampille_courante == Some((enr.backend, reference.horloge())));
-            // Contenu à TROIS états : conforme / incompatible (valeur relue ≠ attendue)
-            // / illisible (lecture absente ou en erreur — PAS une preuve d'incompatibilité).
+                .all(|e| e.estampille_courante == Some((enr.ecrivain, reference.horloge())));
+            // Contenu à TROIS états : conforme / incompatible (valeur courante ≠
+            // attendue, sans conversion de type) / illisible (`Absente` /
+            // `Supprimee` / `RessourceInexistante` — PAS une preuve
+            // d'incompatibilité). Une ERREUR de lecture n'apparaît JAMAIS ici :
+            // elle remonte en `Err` via `resoudre_reference` (6535ddbd).
             let mut incompatible = false;
             let mut illisible = false;
             for (cle, attendu) in &enr.effets_attendus {
-                match lire_i64(store, enr.cible, cle) {
-                    Some(v) if v == *attendu => {}
-                    Some(_) => incompatible = true,
-                    None => illisible = true,
+                // Association PAR CLÉ (pas par position).
+                let effet = res.par_cle.iter().find(|e| &e.cle == cle);
+                match effet.map(|e| &e.etat_courant) {
+                    Some(EtatPropriete::Presente { valeur, .. }) => {
+                        if valeur == attendu {
+                            // conforme
+                        } else {
+                            incompatible = true;
+                        }
+                    }
+                    // Tombstone, clé jamais écrite, ou nœud mort : le contenu
+                    // courant n'est PAS lisible — ni confirmé, ni incompatible.
+                    Some(EtatPropriete::Supprimee(_))
+                    | Some(EtatPropriete::Absente)
+                    | Some(EtatPropriete::RessourceInexistante)
+                    | None => illisible = true,
                 }
             }
             if incompatible {
@@ -335,6 +492,31 @@ pub fn reconcilier(
             }
         }
     }
+}
+
+/// Vérifie que `res.par_cle` correspond à `reference` PAR CLÉ : aucune clé
+/// manquante, supplémentaire ni dupliquée. Une `resoudre_reference(&reference)`
+/// produit exactement une entrée par clé de la référence.
+///
+/// # Contrat Obrain manquant (nommé précisément)
+/// `ResolutionTentative` ne porte NI l'horloge NI aucun identifiant de la
+/// `ReferenceTentative` qu'elle a résolue : elle n'expose que `cible`,
+/// `auteur_resolvant`, `par_cle` et `integrite`. Cette fonction vérifie la
+/// correspondance des CLÉS et des métadonnées, PAS l'identité d'horloge. Aucune
+/// garantie n'est fabriquée au-delà de ce qui est vérifiable.
+fn cles_correspondent(reference: &ReferenceTentative, res: &ResolutionTentative) -> bool {
+    let mut vues: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for e in &res.par_cle {
+        if !vues.insert(e.cle.clone()) {
+            return false; // clé dupliquée
+        }
+    }
+    for cle in reference.effets() {
+        if !vues.remove(cle.as_str()) {
+            return false; // clé manquante
+        }
+    }
+    vues.is_empty() // false si clé supplémentaire
 }
 
 /// Issue du chemin opérationnel de résolution — la vérification de liaison est
@@ -370,26 +552,17 @@ pub fn resoudre_operation(
     enr: &EnregistrementOriginal,
     reference: &ReferenceTentative,
     res: &ResolutionTentative,
-    store: &SubstrateStore,
 ) -> IssueResolutionOperation {
     if !enr.verifier_liaison(&tentative) {
         return IssueResolutionOperation::LiaisonRefusee;
     }
-    let verdict = reconcilier(enr, reference, res, store);
+    let verdict = reconcilier(enr, reference, res);
     match verdict.vers_backend() {
         Some(backend) => IssueResolutionOperation::Resolu(attr.resoudre(id, tentative, backend)),
         None => IssueResolutionOperation::VerdictNuance(verdict),
     }
 }
 
-fn lire_i64(store: &SubstrateStore, id: NodeId, cle: &str) -> Option<i64> {
-    store
-        .get_node_property(id, &PropertyKey::new(cle))
-        .and_then(|v| match v {
-            Value::Int64(n) => Some(n),
-            _ => None,
-        })
-}
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // Durabilité du record : écriture atomique + qualification d'admissibilité
@@ -770,6 +943,13 @@ pub fn qualifier(octets: &[u8], source: &str) -> EtatEnregistrement {
                     octets: octets.to_vec(),
                     provenance,
                     motif: MotifIllisibilite::VersionInconnue(v),
+                })
+            }
+            Err(DecodageEnregistrement::ValeurNonRepresentable(raison)) => {
+                EtatEnregistrement::QuarantaineIllisible(RecordIllisible {
+                    octets: octets.to_vec(),
+                    provenance,
+                    motif: MotifIllisibilite::Malforme(raison),
                 })
             }
         },

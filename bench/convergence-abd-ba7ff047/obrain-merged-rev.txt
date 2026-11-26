@@ -1,0 +1,1 @@
+dabcf91d38a6d779dea674b2f31007112971e5cf merge(substrate): contrat corrigé du secondaire — EffetResolu.etat_courant (lot-d) + identité de domaine indépendante (lot-e)

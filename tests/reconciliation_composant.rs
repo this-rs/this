@@ -30,15 +30,16 @@ fn composant_roundtrip_et_refus_version_inconnue() {
     let enr = EnregistrementOriginal {
         version: ENREGISTREMENT_VERSION,
         k: 42,
-        backend: 7,
+        domaine: "base-test".to_string(),
+        ecrivain: 7,
         generation: 3,
         decision_id: 0,
         autorite_consommateur: 0,
         cible: NodeId(99),
-        effets_attendus: vec![("a".to_string(), 10), ("b".to_string(), 20)],
+        effets_attendus: vec![("a".to_string(), Value::Int64(10)), ("b".to_string(), Value::Int64(20))],
         reference_bytes: vec![0xAB, 0xCD, 0xEF],
     };
-    let octets = enr.encoder();
+    let octets = enr.encoder().expect("encodage");
     let relu = EnregistrementOriginal::decoder(&octets).expect("décodage");
     assert_eq!(relu, enr, "round-trip fidèle du bloc cohérent unique");
 
@@ -82,15 +83,16 @@ fn composant_confirme_apres_reouverture() {
         let enr = EnregistrementOriginal {
             version: ENREGISTREMENT_VERSION,
             k: 1,
-            backend: reference.auteur(),
+            domaine: "base-test".to_string(),
+            ecrivain: reference.auteur(),
             generation: 1,
             decision_id: 0,
             autorite_consommateur: 0,
             cible: id,
-            effets_attendus: vec![("a".to_string(), 10)],
+            effets_attendus: vec![("a".to_string(), Value::Int64(10))],
             reference_bytes: reference.to_bytes(),
         };
-        let octets = enr.encoder();
+        let octets = enr.encoder().expect("encodage");
         let _verdict = store
             .publier_si_precondition_intacte(prep)
             .expect("publication");
@@ -106,12 +108,12 @@ fn composant_confirme_apres_reouverture() {
     let res = store2.resoudre_reference(&reference).expect("résolution");
     assert_eq!(res.integrite, IntegriteTentative::Integrale);
     assert_eq!(
-        reconcilier(&enr, &reference, &res, &store2),
+        reconcilier(&enr, &reference, &res),
         VerdictReconciliation::Confirme,
         "le composant réutilisable confirme après réouverture"
     );
     assert!(matches!(
-        reconcilier(&enr, &reference, &res, &store2).vers_backend(),
+        reconcilier(&enr, &reference, &res).vers_backend(),
         Some(this_harness::attribution::RésolutionBackend::EffetConfirme)
     ));
     store2.close().expect("fermeture 2");

@@ -63,7 +63,7 @@ fn dir(tag: &str) -> std::path::PathBuf {
 /// décision et la réservation réelles) est exercée par le test nominal et par les
 /// tests de chaîne (h3_v2_chaine_autorite.rs), pas par cet adaptateur.
 fn reconcilier(
-    store: &SubstrateStore,
+    _store: &SubstrateStore,
     res: &ResolutionTentative,
     reference: &ReferenceTentative,
     effets: &[(&str, i64)],
@@ -71,15 +71,16 @@ fn reconcilier(
     let enr = EnregistrementOriginal {
         version: ENREGISTREMENT_VERSION,
         k: 1,
-        backend: reference.auteur(),
+        domaine: "cycle-test".to_string(),
+        ecrivain: reference.auteur(),
         generation: 1,
         decision_id: 0,
         autorite_consommateur: 0,
         cible: reference.cible(),
-        effets_attendus: effets.iter().map(|(k, v)| (k.to_string(), *v)).collect(),
+        effets_attendus: effets.iter().map(|(k, v)| (k.to_string(), Value::Int64(*v))).collect(),
         reference_bytes: reference.to_bytes(),
     };
-    reconcilier_composant(&enr, reference, res, store).vers_backend()
+    reconcilier_composant(&enr, reference, res).vers_backend()
 }
 
 /// Cycle nominal : la réconciliation confirme UNIQUEMENT parce que l'effet est
@@ -143,12 +144,13 @@ fn h3_v2_cycle_harness_reel_nominal() {
         let enr = EnregistrementOriginal {
             version: ENREGISTREMENT_VERSION,
             k: 1,
-            backend: reference.auteur(),
+            domaine: "cycle-test".to_string(),
+            ecrivain: reference.auteur(),
             generation: 1, // première réservation du cycle (reserver → génération 1)
             decision_id,
             autorite_consommateur: attr.autorite(),
             cible: id,
-            effets_attendus: vec![("a".to_string(), 10)],
+            effets_attendus: vec![("a".to_string(), Value::Int64(10))],
             reference_bytes: reference_bytes.clone(),
         };
 
@@ -179,8 +181,7 @@ fn h3_v2_cycle_harness_reel_nominal() {
             tentative,
             &enr,
             &reference,
-            &res,
-            &store2
+            &res
         ),
         IssueResolutionOperation::Resolu(true),
         "liaison conforme + effet engagé ET canonique → confirmé via le chemin opérationnel"

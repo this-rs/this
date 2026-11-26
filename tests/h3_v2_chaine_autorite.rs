@@ -86,12 +86,13 @@ fn h3_v2_chaine_nominale_reserver_avant_publication() {
         let enr = EnregistrementOriginal {
             version: ENREGISTREMENT_VERSION,
             k: 1,
-            backend: reference.auteur(),
+            domaine: "chaine-test".to_string(),
+            ecrivain: reference.auteur(),
             generation: 1,
             decision_id: 0,
             autorite_consommateur: 0, // première génération de cette décision
             cible: id,
-            effets_attendus: vec![("a".to_string(), 10)],
+            effets_attendus: vec![("a".to_string(), Value::Int64(10))],
             reference_bytes,
         };
         let _verdict = store
@@ -106,7 +107,7 @@ fn h3_v2_chaine_nominale_reserver_avant_publication() {
     let reference = ReferenceTentative::from_bytes(&enr.reference_bytes).expect("décodage");
     let res = store2.resoudre_reference(&reference).expect("résolution");
     assert_eq!(
-        reconcilier_chaine(&enr, &reference, &res, &store2),
+        reconcilier_chaine(&enr, &reference, &res, ),
         VerdictChaine::Confirme,
         "l'enregistrement original est confirmé (intégral + canonique + contenu conforme)"
     );
@@ -141,12 +142,13 @@ fn h3_v2_chaine_detecte_cle_amputee() {
         let enr = EnregistrementOriginal {
             version: ENREGISTREMENT_VERSION,
             k: 1,
-            backend: reference.auteur(),
+            domaine: "chaine-test".to_string(),
+            ecrivain: reference.auteur(),
             generation: 1,
             decision_id: 0,
             autorite_consommateur: 0,
             cible: id,
-            effets_attendus: vec![("a".to_string(), 10), ("b".to_string(), 20)],
+            effets_attendus: vec![("a".to_string(), Value::Int64(10)), ("b".to_string(), Value::Int64(20))],
             reference_bytes: reference.to_bytes(),
         };
         store
@@ -177,7 +179,7 @@ fn h3_v2_chaine_detecte_cle_amputee() {
     );
     // … mais la chaîne d'autorité la refuse.
     assert_eq!(
-        reconcilier_chaine(&enr, &reference, &res, &store2),
+        reconcilier_chaine(&enr, &reference, &res, ),
         VerdictChaine::Incomplet,
         "la chaîne détecte la clé amputée, le stockage ne le peut pas"
     );
@@ -209,12 +211,13 @@ fn h3_v2_chaine_detecte_substitution() {
         let enr = EnregistrementOriginal {
             version: ENREGISTREMENT_VERSION,
             k: 1,
-            backend: reference.auteur(),
+            domaine: "chaine-test".to_string(),
+            ecrivain: reference.auteur(),
             generation: 1,
             decision_id: 0,
             autorite_consommateur: 0,
             cible: id,
-            effets_attendus: vec![("a".to_string(), 10)],
+            effets_attendus: vec![("a".to_string(), Value::Int64(10))],
             reference_bytes: reference.to_bytes(),
         };
         store
@@ -258,7 +261,7 @@ fn h3_v2_chaine_detecte_substitution() {
     );
     // … mais la chaîne la refuse car elle n'est PAS celle de l'enregistrement.
     assert_eq!(
-        reconcilier_chaine(&enr, &reference_substituee, &res, &store3),
+        reconcilier_chaine(&enr, &reference_substituee, &res),
         VerdictChaine::Substitution,
         "la chaîne détecte la substitution d'une référence authentique"
     );
@@ -289,12 +292,13 @@ fn h3_v2_chaine_contenu_incompatible() {
         let enr = EnregistrementOriginal {
             version: ENREGISTREMENT_VERSION,
             k: 1,
-            backend: reference.auteur(),
+            domaine: "chaine-test".to_string(),
+            ecrivain: reference.auteur(),
             generation: 1,
             decision_id: 0,
             autorite_consommateur: 0,
             cible: id,
-            effets_attendus: vec![("a".to_string(), 10)],
+            effets_attendus: vec![("a".to_string(), Value::Int64(10))],
             reference_bytes: reference.to_bytes(),
         };
         store
@@ -315,7 +319,7 @@ fn h3_v2_chaine_contenu_incompatible() {
         "engagé (historique) intégral"
     );
     assert_eq!(
-        reconcilier_chaine(&enr, &reference, &res, &store2),
+        reconcilier_chaine(&enr, &reference, &res, ),
         VerdictChaine::Incompatible,
         "engagé puis masqué par une valeur différente → contenu incompatible"
     );
@@ -346,12 +350,13 @@ fn h3_v2_chaine_masque_compatible_n_est_pas_incompatible() {
         let enr = EnregistrementOriginal {
             version: ENREGISTREMENT_VERSION,
             k: 1,
-            backend: reference.auteur(),
+            domaine: "chaine-test".to_string(),
+            ecrivain: reference.auteur(),
             generation: 1,
             decision_id: 0,
             autorite_consommateur: 0,
             cible: id,
-            effets_attendus: vec![("a".to_string(), 10)],
+            effets_attendus: vec![("a".to_string(), Value::Int64(10))],
             reference_bytes: reference.to_bytes(),
         };
         store
@@ -367,7 +372,7 @@ fn h3_v2_chaine_masque_compatible_n_est_pas_incompatible() {
     let reference = ReferenceTentative::from_bytes(&enr.reference_bytes).expect("décodage");
     let res = store2.resoudre_reference(&reference).expect("résolution");
     assert_eq!(
-        reconcilier_chaine(&enr, &reference, &res, &store2),
+        reconcilier_chaine(&enr, &reference, &res, ),
         VerdictChaine::EngageMasqueCompatible,
         "masqué mais contenu conforme : engagé, pas incompatible"
     );
@@ -453,7 +458,7 @@ fn h3_v2_enregistrement_reconstruit_apres_disparition() {
         std::fs::write(&ref_file, reference.to_bytes()).expect("persistance référence");
         // Métadonnées (K, backend, génération, cible, effets attendus) sur un fichier texte.
         let meta = format!(
-            "k=1\nbackend={backend}\ngeneration=1\ncible={cible}\nhorloge={horloge}\neffets=a:10\n"
+            "k=1\ndomaine=chaine-test\necrivain={backend}\ngeneration=1\ncible={cible}\nhorloge={horloge}\neffets=a:10\n"
         );
         std::fs::write(&rec_file, &meta).expect("persistance enregistrement");
         store
@@ -481,8 +486,8 @@ fn h3_v2_enregistrement_reconstruit_apres_disparition() {
     // Autorité backend + cible reconstruits doivent égaler ceux de la référence (cohérence durable).
     assert_eq!(
         reference.auteur().to_string(),
-        champ("backend"),
-        "autorité backend reconstruite"
+        champ("ecrivain"),
+        "autorité écrivain reconstruite"
     );
     assert_eq!(
         reference.cible().0.to_string(),
@@ -494,17 +499,18 @@ fn h3_v2_enregistrement_reconstruit_apres_disparition() {
     let enr = EnregistrementOriginal {
         version: ENREGISTREMENT_VERSION,
         k: champ("k").parse().expect("k u128"),
-        backend: champ("backend").parse().expect("backend u64"),
+        domaine: champ("domaine"),
+        ecrivain: champ("ecrivain").parse().expect("ecrivain u64"),
         generation: champ("generation").parse().expect("generation u64"),
         decision_id: 0,
         autorite_consommateur: 0,
         cible: NodeId(champ("cible").parse().expect("cible u64")),
-        effets_attendus: vec![("a".to_string(), 10)],
+        effets_attendus: vec![("a".to_string(), Value::Int64(10))],
         reference_bytes: reference.to_bytes(),
     };
     let res = store2.resoudre_reference(&reference).expect("résolution");
     assert_eq!(
-        reconcilier_chaine(&enr, &reference, &res, &store2),
+        reconcilier_chaine(&enr, &reference, &res, ),
         VerdictChaine::Confirme,
         "l'enregistrement reconstruit après disparition confirme la décision originale"
     );

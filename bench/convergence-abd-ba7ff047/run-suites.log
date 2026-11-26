@@ -1,0 +1,155 @@
+   Compiling this-rs v0.0.10 (/Users/triviere/projects/this-rs/_wt-conv-abd)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 22.46s
+     Running tests/durabilite_obrr.rs (target/debug/build/this-rs/e87e9d344dd4383a/out/durabilite_obrr-e87e9d344dd4383a)
+
+running 15 tests
+test bombe_allocation_refusee_nommement ... ok
+test enfant_autorite ... ok
+test enfant_ecrivain_cycle ... ok
+test enfant_ecrivain_en_boucle ... ok
+test enfant_mort_apres_record_avant_publication ... ok
+test lecture_croisee_v1_v2 ... ok
+test corruptions_syntaxiquement_valides_nommees ... ok
+
+running 1 test
+
+running 1 test
+
+running 1 test
+test ecriture_durable_ordre_observe ... ok
+test autorite_non_durable_collision_interprocessus ... ok
+
+running 1 test
+test enfant_ecrivain_cycle ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 14 filtered out; finished in 0.36s
+
+test operation_indeterminee_obligation_preservee ... ok
+test record_v1_engage_resolu_sans_identite_attestee ... ok
+test record_v1_quarantaine_explicite_non_detruit ... ok
+test restauration_controlee_pas_de_reservation_implicite ... ok
+test reconstruction_interprocessus_independant ... ok
+
+running 1 test
+
+running 1 test
+
+running 1 test
+
+running 1 test
+
+running 1 test
+
+running 1 test
+
+running 1 test
+
+running 1 test
+
+running 1 test
+
+running 1 test
+
+running 1 test
+
+running 1 test
+
+running 1 test
+
+running 1 test
+
+running 1 test
+
+running 1 test
+
+running 1 test
+
+running 1 test
+
+running 1 test
+
+running 1 test
+
+running 1 test
+
+running 1 test
+
+running 1 test
+
+running 1 test
+
+running 1 test
+test interruption_reelle_vs_troncature_artificielle ... ok
+
+test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 21.02s
+
+     Running tests/h3_v2_chaine_autorite.rs (target/debug/build/this-rs/7b64dd85768c9b9e/out/h3_v2_chaine_autorite-7b64dd85768c9b9e)
+
+running 7 tests
+test h3_v2_deux_tentatives_references_distinctes ... ok
+test h3_v2_chaine_detecte_cle_amputee ... ok
+test h3_v2_chaine_nominale_reserver_avant_publication ... ok
+test h3_v2_chaine_contenu_incompatible ... ok
+test h3_v2_chaine_masque_compatible_n_est_pas_incompatible ... ok
+test h3_v2_enregistrement_reconstruit_apres_disparition ... ok
+test h3_v2_chaine_detecte_substitution ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.72s
+
+     Running tests/h3_v2_cycle_harness.rs (target/debug/build/this-rs/76b8ad2ed01815cb/out/h3_v2_cycle_harness-76b8ad2ed01815cb)
+
+running 5 tests
+test h3_v2_engage_puis_masque_n_est_pas_effet_confirme ... ok
+test h3_v2_multi_effet_granularite_par_cle ... ok
+test h3_v2_cycle_harness_reel_nominal ... ok
+test h3_v2_indetermine_n_est_pas_absence_definitive ... ok
+test h3_v2_reference_forgee_ou_etrangere_indeterminee ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.55s
+
+     Running tests/k_durable_autorite.rs (target/debug/build/this-rs/8f6500edb6e6d021/out/k_durable_autorite-8f6500edb6e6d021)
+
+running 8 tests
+
+running 1 test
+
+running 1 test
+
+running 1 test
+test scenario_2_nouvelle_tentative_apres_refus_certain ... ok
+test scenario_4_deux_operations_independantes_contenu_identique ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 7 filtered out; finished in 0.10s
+
+test scenario_5_deux_operations_meme_classe ... ok
+test scenario_6_collision_decision_id ... ok
+
+running 1 test
+test scenario_4_deux_operations_independantes_contenu_identique ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 7 filtered out; finished in 0.03s
+
+test scenario_4_deux_operations_independantes_contenu_identique ... ok
+test scenario_1_meme_operation_apres_redemarrage ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 7 filtered out; finished in 0.41s
+
+test scenario_3_ancienne_tentative_indeterminee ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 7 filtered out; finished in 0.44s
+
+test scenario_8_corruption_valide_k_generation ... ok
+test scenario_7_tentative_etrangere_refusee ... ok
+test scenario_1_meme_operation_apres_redemarrage ... ok
+test scenario_3_ancienne_tentative_indeterminee ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.53s
+
+     Running tests/reconciliation_composant.rs (target/debug/build/this-rs/4a0cf1b7a2c81bda/out/reconciliation_composant-4a0cf1b7a2c81bda)
+
+running 2 tests
+test composant_roundtrip_et_refus_version_inconnue ... ok
+test composant_confirme_apres_reouverture ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.14s
+

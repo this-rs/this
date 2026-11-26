@@ -147,12 +147,13 @@ fn cycle_ecrivain(d: &Path, chemin_record: &Path, k: u128, decision_id: u128) ->
     let enr = EnregistrementOriginal {
         version: ENREGISTREMENT_VERSION,
         k,
-        backend: reference.auteur(),
+        domaine: "durabilite-test".to_string(),
+        ecrivain: reference.auteur(),
         generation: tentative.generation(),
         decision_id: tentative.decision_id(),
         autorite_consommateur: tentative.autorite(),
         cible: reference.cible(),
-        effets_attendus: vec![("a".to_string(), 10)],
+        effets_attendus: vec![("a".to_string(), Value::Int64(10))],
         reference_bytes: reference.to_bytes(),
     };
     assert!(
@@ -161,7 +162,7 @@ fn cycle_ecrivain(d: &Path, chemin_record: &Path, k: u128, decision_id: u128) ->
     );
 
     // La chaîne d'autorité est CONSTITUÉE AVANT publication.
-    ecrire_durable(chemin_record, &enr.encoder()).expect("écriture durable du record");
+    ecrire_durable(chemin_record, &enr.encoder().unwrap()).expect("écriture durable du record");
     let publie = store
         .publier_si_precondition_intacte(prep)
         .expect("publication")
@@ -209,12 +210,13 @@ fn record_v2(k: u128, generation: u64, autorite: u64) -> EnregistrementOriginal 
     EnregistrementOriginal {
         version: ENREGISTREMENT_VERSION,
         k,
-        backend: 7,
+        domaine: "durabilite-test".to_string(),
+        ecrivain: 7,
         generation,
         decision_id: 3,
         autorite_consommateur: autorite,
         cible: NodeId(99),
-        effets_attendus: vec![("a".to_string(), 10)],
+        effets_attendus: vec![("a".to_string(), Value::Int64(10))],
         reference_bytes: vec![0xAB, 0xCD, 0xEF],
     }
 }
@@ -227,7 +229,7 @@ fn record_v2(k: u128, generation: u64, autorite: u64) -> EnregistrementOriginal 
 fn ecriture_durable_ordre_observe() {
     let d = dir("ordre");
     let chemin = d.join("record.obrr");
-    let octets = record_v2(1, 3, 1).encoder();
+    let octets = record_v2(1, 3, 1).encoder().unwrap();
 
     let mut etapes: Vec<EtapeEcriture> = Vec::new();
     ecrire_durable_observe(&chemin, &octets, &mut |e| etapes.push(e)).expect("écriture durable");
@@ -256,7 +258,7 @@ fn ecriture_durable_ordre_observe() {
 
     // Deuxième écriture : même ordre, et l'ancien contenu est REMPLACÉ (le rename
     // remplace, il n'ajoute pas).
-    let octets2 = record_v2(2, 4, 1).encoder();
+    let octets2 = record_v2(2, 4, 1).encoder().unwrap();
     ecrire_durable(&chemin, &octets2).expect("remplacement");
     let relu2 = std::fs::read(&chemin).expect("lecture");
     assert_eq!(empreinte_sha256(&relu2), empreinte_sha256(&octets2));
@@ -295,17 +297,18 @@ fn enfant_ecrivain_en_boucle() {
         let enr = EnregistrementOriginal {
             version: ENREGISTREMENT_VERSION,
             k: 1,
-            backend: 7,
+            domaine: "durabilite-test".to_string(),
+            ecrivain: 7,
             generation: t.generation(),
             decision_id: t.decision_id(),
             autorite_consommateur: t.autorite(),
             cible: NodeId(5),
-            effets_attendus: vec![("a".to_string(), 10)],
+            effets_attendus: vec![("a".to_string(), Value::Int64(10))],
             // Assez gros pour qu'une écriture ne soit pas instantanée : c'est la
             // fenêtre dans laquelle le kill doit tomber.
             reference_bytes: vec![t.generation() as u8; 4 * 1024 * 1024],
         };
-        let octets = enr.encoder();
+        let octets = enr.encoder().unwrap();
         if m == "atomique" {
             ecrire_durable(&chemin, &octets).expect("écriture durable");
         } else {
@@ -414,7 +417,7 @@ fn interruption_reelle_vs_troncature_artificielle() {
     //     de l'écrivain atomique. Elle mesure donc le DÉCODEUR, et c'est tout.
     let d = dir("artificielle");
     let chemin = d.join("record.obrr");
-    let octets = record_v2(1, 1, 1).encoder();
+    let octets = record_v2(1, 1, 1).encoder().unwrap();
     std::fs::write(&chemin, &octets[..octets.len() / 2]).expect("troncature artificielle");
     assert!(
         matches!(
@@ -476,7 +479,7 @@ fn reconstruction_interprocessus_independant() {
     let res = store.resoudre_reference(&reference).expect("résolution");
     assert_eq!(res.integrite, IntegriteTentative::Integrale);
     assert_eq!(
-        reconcilier(&enr, &reference, &res, &store),
+        reconcilier(&enr, &reference, &res),
         VerdictReconciliation::Confirme,
         "le composant réutilisable confirme après reconstruction interprocessus"
     );
@@ -624,7 +627,7 @@ fn restauration_controlee_pas_de_reservation_implicite() {
     let reference = ReferenceTentative::from_bytes(&cycle.enr.reference_bytes).expect("référence");
     let res = store.resoudre_reference(&reference).expect("résolution");
     assert_eq!(
-        reconcilier(&cycle.enr, &reference, &res, &store),
+        reconcilier(&cycle.enr, &reference, &res),
         VerdictReconciliation::Confirme,
         "l'effet est attesté par la base, pas par la mémoire"
     );
@@ -668,16 +671,17 @@ fn enfant_mort_apres_record_avant_publication() {
     let enr = EnregistrementOriginal {
         version: ENREGISTREMENT_VERSION,
         k: 1,
-        backend: reference.auteur(),
+        domaine: "durabilite-test".to_string(),
+        ecrivain: reference.auteur(),
         generation: tentative.generation(),
         decision_id: tentative.decision_id(),
         autorite_consommateur: tentative.autorite(),
         cible: reference.cible(),
-        effets_attendus: vec![("a".to_string(), 10)],
+        effets_attendus: vec![("a".to_string(), Value::Int64(10))],
         reference_bytes: reference.to_bytes(),
     };
     // Le record est CONSTITUÉ…
-    ecrire_durable(&chemin, &enr.encoder()).expect("écriture du record");
+    ecrire_durable(&chemin, &enr.encoder().unwrap()).expect("écriture du record");
     // … puis l'écrivain meurt ABRUPTEMENT : ni publication, ni `close()`, ni
     // résolution. `abort()` ne déroule aucune pile, n'exécute aucun `Drop`.
     std::process::abort();
@@ -708,7 +712,7 @@ fn operation_indeterminee_obligation_preservee() {
     let store = SubstrateStore::open(d.join("kb")).expect("réouverture après mort abrupte");
     let reference = ReferenceTentative::from_bytes(&enr.reference_bytes).expect("référence");
     let res = store.resoudre_reference(&reference).expect("résolution");
-    let verdict = reconcilier(&enr, &reference, &res, &store);
+    let verdict = reconcilier(&enr, &reference, &res);
 
     println!(
         "intégrité après mort abrupte = {:?} ; verdict = {verdict:?}",
@@ -828,18 +832,19 @@ fn record_v1_quarantaine_explicite_non_detruit() {
     let meme_record_en_v2 = EnregistrementOriginal {
         version: ENREGISTREMENT_VERSION,
         k: 1,
-        backend: 7,
+        domaine: "durabilite-test".to_string(),
+        ecrivain: 7,
         generation: 2,
         decision_id: 3,
         autorite_consommateur: 1,
         cible: NodeId(42),
-        effets_attendus: vec![("a".to_string(), 10)],
+        effets_attendus: vec![("a".to_string(), Value::Int64(10))],
         reference_bytes: vec![0xDE, 0xAD, 0xBE, 0xEF],
     };
     assert_eq!(
-        meme_record_en_v2.encoder().len(),
-        legacy.octets.len() + 31,
-        "l'écart V1→V2 est decision_id(16) + autorite_consommateur(8) + K string→u128(7)"
+        meme_record_en_v2.encoder().unwrap().len(),
+        legacy.octets.len() + 51,
+        "l'écart V1→V5 est decision_id(16) + autorite_consommateur(8) + K string→u128(7) + domaine(19) + tag valeur(1)"
     );
 
     // Le FICHIER est intact : le refus n'a rien réécrit, rien supprimé.
@@ -943,7 +948,7 @@ fn record_v1_engage_resolu_sans_identite_attestee() {
 #[test]
 fn lecture_croisee_v1_v2() {
     let v1 = octets_v1("op-croisee", 7, 1, NodeId(42), &[("a", 10)], &[1, 2, 3]);
-    let v2 = record_v2(1, 1, 1).encoder();
+    let v2 = record_v2(1, 1, 1).encoder().unwrap();
 
     let empreinte_v1 = empreinte_sha256(&v1);
     let empreinte_v2 = empreinte_sha256(&v2);
@@ -969,12 +974,12 @@ fn lecture_croisee_v1_v2() {
     assert_eq!(enr.decision_id, 3);
     assert_eq!(enr.autorite_consommateur, 1);
 
-    // V2 → lecteur V1 : REFUSÉ par la version, AVANT tout décalage d'octets.
-    // Sans ce refus, les octets V2 se liraient comme un V1 décalé de 31 octets.
+    // V5 → lecteur V1 : REFUSÉ par la version, AVANT tout décalage d'octets.
+    // Sans ce refus, les octets V5 se liraient comme un V1 décalé de 51 octets.
     assert_eq!(
         decoder_v1(&v2),
-        Err(DecodageEnregistrement::VersionInconnue(2)),
-        "le lecteur V1 refuse un V2 : c'est ce qui rend le bump suffisant"
+        Err(DecodageEnregistrement::VersionInconnue(ENREGISTREMENT_VERSION)),
+        "le lecteur V1 refuse un V5 : c'est ce qui rend le bump suffisant"
     );
 
     // Aucune lecture n'a modifié les octets (elles n'ont pas de `&mut`).
@@ -1014,7 +1019,7 @@ fn corruptions_syntaxiquement_valides_nommees() {
     ];
 
     for (nom, enr) in cas {
-        let octets = enr.encoder();
+        let octets = enr.encoder().unwrap();
         // Le CODEC les accepte : ce sont des octets parfaitement formés. C'est
         // précisément pour cela qu'ils sont dangereux.
         assert!(
