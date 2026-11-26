@@ -28,6 +28,7 @@ use obrain_substrate::{
     ResolutionEffet, ResolutionTentative, SubstrateStore,
 };
 use this_harness::attribution::{Attribution, Definition, Etat, Observation, Reception, Resultat, RésolutionBackend};
+use this::reconciliation::{reconcilier as reconcilier_composant, EnregistrementOriginal, ENREGISTREMENT_VERSION};
 
 fn dir(tag: &str) -> std::path::PathBuf {
     let mut d = std::env::temp_dir();
@@ -49,22 +50,24 @@ fn dir(tag: &str) -> std::path::PathBuf {
 /// courante égale à celle de la référence). « Engagé puis masqué » est
 /// `Incompatible`, pas un faux `EffetConfirme`. `Indeterminee` est `Indetermine`,
 /// jamais `AbsenceDefinitive`.
-fn reconcilier(res: &ResolutionTentative, reference: &ReferenceTentative) -> RésolutionBackend {
-    match res.integrite {
-        IntegriteTentative::Indeterminee => RésolutionBackend::Indetermine,
-        IntegriteTentative::Partielle => RésolutionBackend::Incompatible,
-        IntegriteTentative::Integrale => {
-            let tous_canoniques = res.par_cle.iter().all(|e| {
-                e.estampille_courante == Some((reference.auteur(), reference.horloge()))
-            });
-            if tous_canoniques {
-                RésolutionBackend::EffetConfirme
-            } else {
-                // Engagé (historique) mais masqué (estampille courante ≠ référence).
-                RésolutionBackend::Incompatible
-            }
-        }
-    }
+/// Construit l'enregistrement original minimal pour un cycle, puis DÉLÈGUE la
+/// réconciliation au composant réel `this::reconciliation` (aucune logique locale).
+fn reconcilier(
+    store: &SubstrateStore,
+    res: &ResolutionTentative,
+    reference: &ReferenceTentative,
+    effets: &[(&str, i64)],
+) -> Option<RésolutionBackend> {
+    let enr = EnregistrementOriginal {
+        version: ENREGISTREMENT_VERSION,
+        k: "op-cycle".to_string(),
+        backend: reference.auteur(),
+        generation: 1,
+        cible: reference.cible(),
+        effets_attendus: effets.iter().map(|(k, v)| (k.to_string(), *v)).collect(),
+        reference_bytes: reference.to_bytes(),
+    };
+    reconcilier_composant(&enr, reference, res, store).vers_backend()
 }
 
 /// Cycle nominal : la réconciliation confirme UNIQUEMENT parce que l'effet est
@@ -130,7 +133,8 @@ fn h3_v2_cycle_harness_reel_nominal() {
 
     // 7. RÉCONCILIATION : Integrale + canonique → EffetConfirme.
     assert_eq!(res.integrite, IntegriteTentative::Integrale);
-    let verdict = reconcilier(&res, &reference);
+    let verdict = reconcilier(&store2, &res, &reference, &[("a", 10)])
+        .expect("verdict non ambigu");
     assert!(
         matches!(verdict, RésolutionBackend::EffetConfirme),
         "l'effet est engagé ET canonique : confirmé"
@@ -181,7 +185,10 @@ fn h3_v2_engage_puis_masque_n_est_pas_effet_confirme() {
         "l'estampille courante est celle du masque, pas celle de la tentative"
     );
     assert!(
-        matches!(reconcilier(&res, &reference), RésolutionBackend::Incompatible),
+        matches!(
+            reconcilier(&store2, &res, &reference, &[("a", 10)]),
+            Some(RésolutionBackend::Incompatible)
+        ),
         "engagé puis masqué : PAS un EffetConfirme"
     );
     store2.close().expect("fermeture 2");
@@ -214,7 +221,10 @@ fn h3_v2_indetermine_n_est_pas_absence_definitive() {
     let res = store2.resoudre_reference(&reference).expect("résolution");
     assert_eq!(res.integrite, IntegriteTentative::Indeterminee);
     assert!(
-        matches!(reconcilier(&res, &reference), RésolutionBackend::Indetermine),
+        matches!(
+            reconcilier(&store2, &res, &reference, &[("a", 10)]),
+            Some(RésolutionBackend::Indetermine)
+        ),
         "indéterminé, PAS une absence définitive"
     );
     store2.close().expect("fermeture 2");
@@ -310,7 +320,10 @@ fn h3_v2_multi_effet_granularite_par_cle() {
     assert_ne!(a.estampille_courante, Some((reference.auteur(), reference.horloge())));
     assert_eq!(b.estampille_courante, Some((reference.auteur(), reference.horloge())));
     assert!(
-        matches!(reconcilier(&res, &reference), RésolutionBackend::Incompatible),
+        matches!(
+            reconcilier(&store2, &res, &reference, &[("a", 10), ("b", 20)]),
+            Some(RésolutionBackend::Incompatible)
+        ),
         "un effet masqué parmi deux → pas un EffetConfirme intégral"
     );
     store2.close().expect("fermeture 2");

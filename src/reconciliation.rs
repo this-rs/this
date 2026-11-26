@@ -72,16 +72,18 @@ pub enum VerdictReconciliation {
 }
 
 impl VerdictReconciliation {
-    /// Projection PARTIELLE vers le verdict du backend. Seuls les cas non ambigus
-    /// sont projetés : `Confirme` → `EffetConfirme`, `Indetermine` → `Indetermine`
-    /// (jamais `AbsenceDefinitive`). Tous les autres (`EngageMasqueCompatible`,
-    /// `Incompatible`, `Partielle`, `Substitution`, `Incomplet`) exigent une DÉCISION
-    /// EXPLICITE du consommateur : les écraser en `Incompatible` détruirait la
-    /// distinction engagement historique / état courant / compatibilité.
+    /// Projection PARTIELLE vers le verdict du backend. Les correspondances non
+    /// ambiguës sont projetées : `Confirme` → `EffetConfirme`, `Indetermine` →
+    /// `Indetermine` (jamais `AbsenceDefinitive`), `Incompatible` (contenu relu ≠
+    /// attendu) → `Incompatible`. Les verdicts NUANCÉS (`EngageMasqueCompatible`,
+    /// `Partielle`, `Substitution`, `Incomplet`) renvoient `None` : ils exigent une
+    /// DÉCISION EXPLICITE du consommateur et ne doivent jamais être écrasés en
+    /// `Incompatible` ni en `EffetConfirme`.
     pub fn vers_backend(&self) -> Option<RésolutionBackend> {
         match self {
             VerdictReconciliation::Confirme => Some(RésolutionBackend::EffetConfirme),
             VerdictReconciliation::Indetermine => Some(RésolutionBackend::Indetermine),
+            VerdictReconciliation::Incompatible => Some(RésolutionBackend::Incompatible),
             _ => None,
         }
     }
