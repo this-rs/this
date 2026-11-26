@@ -9,6 +9,7 @@
 
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// La définition d'une décision : ce qui doit rester identique pour un rejeu.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -55,6 +56,9 @@ pub enum Etat {
 /// d'une décision ne peut pas confirmer une autre.
 #[derive(Clone, Copy, Debug)]
 pub struct Tentative {
+    /// Identité de l'autorité émettrice : un descripteur émis par une instance
+    /// d'`Attribution` ne peut pas résoudre un cycle d'une AUTRE instance.
+    autorite: u64,
     decision_id: u128,
     generation: u64,
 }
@@ -64,6 +68,9 @@ pub struct Cycle {
     pub definition: Definition,
     pub observation: Option<Observation>,
     pub etat: Etat,
+    /// Demande d'annulation, ORTHOGONALE à l'état de publication : une annulation
+    /// demandée n'implique pas que l'effet externe n'existe pas.
+    pub annulation_demandee: bool,
     generation: u64,
 }
 
@@ -84,9 +91,33 @@ pub enum Reception {
     Absent,
 }
 
-#[derive(Default)]
+static PROCHAINE_AUTORITE: AtomicU64 = AtomicU64::new(1);
+
+/// Issue du backend pour la résolution d'une publication indéterminée. La
+/// tentative prouve une réservation ; SEULE cette résolution prouve l'effet.
+pub enum RésolutionBackend {
+    /// L'effet est attesté par le backend.
+    EffetConfirme,
+    /// L'absence d'effet est certaine et définitive.
+    AbsenceDefinitive,
+    /// Le backend ne peut pas encore trancher.
+    Indetermine,
+    /// Effet incompatible/conflictuel : l'effet existe mais ne correspond pas.
+    Incompatible,
+}
+
 pub struct Attribution {
     cycles: HashMap<u128, Cycle>,
+    autorite: u64,
+}
+
+impl Default for Attribution {
+    fn default() -> Self {
+        Self {
+            cycles: HashMap::new(),
+            autorite: PROCHAINE_AUTORITE.fetch_add(1, Ordering::Relaxed),
+        }
+    }
 }
 
 impl Attribution {
@@ -101,6 +132,7 @@ impl Attribution {
                     definition,
                     observation: None,
                     etat: Etat::Ouvert,
+                    annulation_demandee: false,
                     generation: 0,
                 });
                 Record::Enregistre
@@ -147,15 +179,22 @@ impl Attribution {
         c.generation = c.generation.checked_add(1)?; // débordement → refus
         c.etat = Etat::EnCours;
         Some(Tentative {
+            autorite: self.autorite,
             decision_id: id,
             generation: c.generation,
         })
     }
 
+    /// Un descripteur est valide pour ce cycle s'il porte la même autorité ET la
+    /// même décision ET la même génération.
+    fn descripteur_valide(&self, id: u128, t: &Tentative) -> bool {
+        t.autorite == self.autorite && t.decision_id == id
+    }
+
     /// Confirme une tentative : le descripteur doit correspondre (décision + génération).
     /// Accepte `EnCours` et `Indetermine` (résolution après issue inconnue).
     pub fn confirmer(&mut self, id: u128, tentative: Tentative) -> bool {
-        if tentative.decision_id != id {
+        if !self.descripteur_valide(id, &tentative) {
             return false;
         }
         match self.cycles.get_mut(&id) {
@@ -173,7 +212,7 @@ impl Attribution {
     /// Échec CERTAIN de la publication : relâche la réservation (ré-publication
     /// autorisée). Accepte `EnCours` et `Indetermine` (le backend a tranché « non écrit »).
     pub fn echec_certain(&mut self, id: u128, tentative: Tentative) -> bool {
-        if tentative.decision_id != id {
+        if !self.descripteur_valide(id, &tentative) {
             return false;
         }
         match self.cycles.get_mut(&id) {
@@ -191,7 +230,7 @@ impl Attribution {
     /// Publication d'issue INCONNUE : `EnCours → Indetermine`. Exige une résolution
     /// (confirmer ou echec_certain auprès du backend), jamais une ré-publication.
     pub fn indetermine(&mut self, id: u128, tentative: Tentative) -> bool {
-        if tentative.decision_id != id {
+        if !self.descripteur_valide(id, &tentative) {
             return false;
         }
         match self.cycles.get_mut(&id) {
@@ -205,7 +244,7 @@ impl Attribution {
 
     /// Abandon résolu d'une tentative (l'écriture est tranchée). Terminal.
     pub fn abandonner(&mut self, id: u128, tentative: Tentative) -> bool {
-        if tentative.decision_id != id {
+        if !self.descripteur_valide(id, &tentative) {
             return false;
         }
         match self.cycles.get_mut(&id) {
@@ -225,6 +264,43 @@ impl Attribution {
         match self.cycles.get_mut(&id) {
             Some(c) if c.etat == Etat::Ouvert || c.etat == Etat::Recu => {
                 c.etat = Etat::Abandonne;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Résout une publication indéterminée selon le verdict du backend.
+    pub fn resoudre(
+        &mut self,
+        id: u128,
+        tentative: Tentative,
+        resolution: RésolutionBackend,
+    ) -> bool {
+        match resolution {
+            RésolutionBackend::EffetConfirme => self.confirmer(id, tentative),
+            RésolutionBackend::AbsenceDefinitive => self.echec_certain(id, tentative),
+            RésolutionBackend::Indetermine => true, // reste Indetermine
+            RésolutionBackend::Incompatible => {
+                if !self.descripteur_valide(id, &tentative) {
+                    return false;
+                }
+                if let Some(c) = self.cycles.get_mut(&id)
+                    && (c.etat == Etat::EnCours || c.etat == Etat::Indetermine)
+                {
+                    c.etat = Etat::Indetermine; // reste observable, non résolu
+                }
+                false
+            }
+        }
+    }
+
+    /// Demande d'annulation (orthogonale à l'état de publication) : n'implique
+    /// pas que l'effet externe n'existe pas.
+    pub fn demander_annulation(&mut self, id: u128) -> bool {
+        match self.cycles.get_mut(&id) {
+            Some(c) if c.etat != Etat::Confirme && c.etat != Etat::Abandonne => {
+                c.annulation_demandee = true;
                 true
             }
             _ => false,
@@ -430,6 +506,64 @@ mod tests {
         assert_eq!(
             a.etat(2).unwrap().observation.as_ref().unwrap().resultat,
             Resultat::Echec
+        );
+    }
+    #[test]
+    fn inter_instance_descripteur_non_transferable() {
+        let mut a = Attribution::new();
+        let mut b = Attribution::new();
+        // Même identifiant de décision dans deux instances indépendantes.
+        a.record(1, d());
+        b.record(1, d());
+        a.recevoir(1, obs("a", "m1", Resultat::Succes));
+        b.recevoir(1, obs("a", "m1", Resultat::Succes));
+        let ta = a.reserver(1).unwrap();
+        let tb = b.reserver(1).unwrap();
+        // Le descripteur de A ne résout PAS B, et inversement.
+        assert!(!b.confirmer(1, ta), "descripteur inter-instance refusé");
+        assert!(!a.confirmer(1, tb), "descripteur inter-instance refusé");
+        assert!(a.confirmer(1, ta));
+        assert!(b.confirmer(1, tb));
+    }
+
+    #[test]
+    fn resoudre_selon_le_verdict_backend() {
+        let mut a = Attribution::new();
+        a.record(1, d());
+        a.recevoir(1, obs("a", "m1", Resultat::Succes));
+        let t = a.reserver(1).unwrap();
+        a.indetermine(1, t);
+        // Résolution positive : l'effet est attesté.
+        assert!(a.resoudre(1, t, RésolutionBackend::EffetConfirme));
+        assert_eq!(a.etat(1).unwrap().etat, Etat::Confirme);
+    }
+
+    #[test]
+    fn resolution_negative_autorise_repubication() {
+        let mut a = Attribution::new();
+        a.record(1, d());
+        a.recevoir(1, obs("a", "m1", Resultat::Succes));
+        let t = a.reserver(1).unwrap();
+        a.indetermine(1, t);
+        assert!(a.resoudre(1, t, RésolutionBackend::AbsenceDefinitive));
+        assert_eq!(a.etat(1).unwrap().etat, Etat::Recu);
+    }
+
+    #[test]
+    fn annulation_demandee_puis_effet_decouvert_reconcilie() {
+        let mut a = Attribution::new();
+        a.record(1, d());
+        a.recevoir(1, obs("a", "m1", Resultat::Succes));
+        let t = a.reserver(1).unwrap();
+        // L'annulation est demandée pendant la publication.
+        assert!(a.demander_annulation(1));
+        assert!(a.etat(1).unwrap().annulation_demandee);
+        // Mais l'effet externe est découvert : il doit être réconcilié, pas masqué.
+        assert!(a.confirmer(1, t));
+        assert_eq!(a.etat(1).unwrap().etat, Etat::Confirme);
+        assert!(
+            a.etat(1).unwrap().observation.is_some(),
+            "l'effet reste observable"
         );
     }
 }
