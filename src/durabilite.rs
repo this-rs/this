@@ -20,7 +20,7 @@
 //! - DURABILITÉ POSIX (par l'ORDRE des opérations) : les octets sont `fsync`és
 //!   AVANT le rename, et l'entrée de répertoire APRÈS. Sans le premier, le rename
 //!   peut précéder les données ; sans le second, le rename lui-même peut être
-//!   perdu. L'ordre est OBSERVABLE ([`ecrire_durable_observe`]), donc vérifié, pas
+//!   perdu. L'ordre est OBSERVABLE (`ecrire_durable_observe`), donc vérifié, pas
 //!   seulement affirmé.
 //! - NON ÉTABLIE : la survie à une coupure d'alimentation. `fsync` en est la
 //!   condition nécessaire ; la preuve exigerait une panne matérielle réelle.
