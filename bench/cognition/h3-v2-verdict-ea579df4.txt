@@ -1,0 +1,18 @@
+# Suite H3 V2 — verdict (obrain 89d169d7, branche chore/h3-native-v2)
+# CORRECTION de portée : les 12 tests correspondent au contenu du commit ea579df4
+# (qui AJOUTE le test de reconstruction durable à 82a35aff), et NON à 82a35aff seul.
+# Les 12 tests H3 ne constituent PAS la suite complète du harness : ce sont les
+# 12 tests ciblés du chantier H3 V2 (5 cycle + 7 chaîne).
+
+date = 2026-11-26
+commit = ea579df4 (et ses ancêtres 82a35aff, 61325417, 04e769c2, af53c2f9)
+obrain = 89d169d7d481c59018b712d499b8180c384fd405 (feat/334-contrats-v2)
+h3_v2_cycle_harness = 5 passed, 0 failed
+h3_v2_chaine_autorite = 7 passed, 0 failed (dont reconstruction durable + cohérence cible/autorité/version)
+TOTAL H3 = 12 passed, 0 failed
+suite complète = NON exécutée ici (seule la compilation --no-run a été vérifiée sur 82a35aff)
+
+# Bornes :
+# - reconstruction depuis 2 fichiers après fermeture PROPRE ≠ disparition réelle du processus.
+# - la durabilité interprocessus complète n'est PAS revendiquée.
+# - K/F/V/G/E/B : voir note (K = identité logique ≠ empreinte F).

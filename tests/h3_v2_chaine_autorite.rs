@@ -40,6 +40,7 @@ fn dir(tag: &str) -> std::path::PathBuf {
 /// l'ensemble ORIGINAL des effets (contenu attendu) et les octets de la référence.
 #[derive(Debug, Clone, PartialEq)]
 struct EnregistrementOriginal {
+    version: u32,
     k: String,
     backend: u64,
     generation: u64,
@@ -87,11 +88,19 @@ fn reconcilier_chaine(
     if reference.to_bytes() != enr.reference_bytes {
         return VerdictChaine::Substitution;
     }
-    // 3. L'autorité backend qui résout est conforme.
+    // 3. Cohérence métadonnées ↔ référence : la cible et l'autorité de la référence
+    //    DOIVENT égaler celles de l'enregistrement (sinon provenance étrangère).
+    if reference.cible() != enr.cible || res.cible != enr.cible {
+        return VerdictChaine::Incompatible;
+    }
+    if reference.auteur() != enr.backend {
+        return VerdictChaine::Incompatible;
+    }
+    // 4. L'autorité backend qui résout est conforme.
     if res.auteur_resolvant != enr.backend {
         return VerdictChaine::Incompatible;
     }
-    // 4. Interpréter l'intégrité.
+    // 5. Interpréter l'intégrité.
     match res.integrite {
         IntegriteTentative::Indeterminee => VerdictChaine::Indetermine,
         IntegriteTentative::Partielle => VerdictChaine::Incompatible,
@@ -157,6 +166,7 @@ fn h3_v2_chaine_nominale_reserver_avant_publication() {
         let reference = prep.reference_tentative();
         let reference_bytes = reference.to_bytes();
         let enr = EnregistrementOriginal {
+            version: 1,
             k: "k1".to_string(),
             backend: reference.auteur(),
             generation: 1, // première génération de cette décision
@@ -205,6 +215,7 @@ fn h3_v2_chaine_detecte_cle_amputee() {
             .expect("préparation");
         let reference = prep.reference_tentative();
         let enr = EnregistrementOriginal {
+            version: 1,
             k: "k1".to_string(),
             backend: reference.auteur(),
             generation: 1,
@@ -259,6 +270,7 @@ fn h3_v2_chaine_detecte_substitution() {
             .expect("préparation");
         let reference = prep.reference_tentative();
         let enr = EnregistrementOriginal {
+            version: 1,
             k: "k1".to_string(),
             backend: reference.auteur(),
             generation: 1,
@@ -315,6 +327,7 @@ fn h3_v2_chaine_contenu_incompatible() {
             .expect("préparation");
         let reference = prep.reference_tentative();
         let enr = EnregistrementOriginal {
+            version: 1,
             k: "k1".to_string(),
             backend: reference.auteur(),
             generation: 1,
@@ -358,6 +371,7 @@ fn h3_v2_chaine_masque_compatible_n_est_pas_incompatible() {
             .expect("préparation");
         let reference = prep.reference_tentative();
         let enr = EnregistrementOriginal {
+            version: 1,
             k: "k1".to_string(),
             backend: reference.auteur(),
             generation: 1,
@@ -469,10 +483,11 @@ fn h3_v2_enregistrement_reconstruit_apres_disparition() {
 
     // 4. Résolution + réconciliation contre l'enregistrement RECONSTRUIT.
     let enr = EnregistrementOriginal {
+        version: 1,
         k: champ("k"),
         backend: champ("backend").parse().expect("backend u64"),
         generation: champ("generation").parse().expect("generation u64"),
-        cible: reference.cible(),
+        cible: NodeId(champ("cible").parse().expect("cible u64")),
         effets_attendus: vec![("a".to_string(), 10)],
         reference_bytes: reference.to_bytes(),
     };
