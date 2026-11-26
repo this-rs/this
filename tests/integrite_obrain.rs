@@ -39,7 +39,7 @@ use obrain_common::types::Value;
 use this::storage::obrain::ObrainStore;
 use this_agent::Stop;
 use this_harness::attribution::{
-    Attribution, Definition, Observation, Reception, Record, Resultat,
+    Attribution, Definition, Observation, Reception, Record, Resultat, RésolutionBackend,
 };
 use this_harness::cognition::{LearnedClass, Prototype, SemanticEncoder, TaskRepr, classer};
 use this_harness::routing::{
@@ -446,8 +446,15 @@ impl Apprenant {
             observation.resultat == Resultat::Succes,
         );
         match ecriture {
-            Ecriture::Creee | Ecriture::RejeuIdentique | Ecriture::Conflit => {
+            Ecriture::Creee | Ecriture::RejeuIdentique => {
+                // Création ou rejeu strictement identique : effet attesté.
                 attr.confirmer(id, tentative);
+            }
+            Ecriture::Conflit => {
+                // Un conflit N'EST PAS une confirmation : l'observation n'est pas
+                // consolidée comme preuve d'apprentissage. On marque l'effet
+                // incompatible (observable, non résolu).
+                attr.resoudre(id, tentative, RésolutionBackend::Incompatible);
             }
             Ecriture::Erreur => {
                 // Échec CERTAIN : ré-publication autorisée.
