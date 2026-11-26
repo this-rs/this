@@ -10,8 +10,9 @@
 //!
 //! La « classe » d'un tour n'est pas libre : c'est `TurnSignature::arm_key()`, donc
 //! `TaskClass::key()` — pour un tour de chat, l'une des **cinq intentions** du
-//! détecteur à mots-clés (`chat.debug`, `chat.explore`, `chat.impact`, `chat.plan`,
-//! `chat.general`). Il n'y a donc pas de « classes inédites » comme dans le banc :
+//! Quatre identités cognitives SYNTHÉTIQUES (`repr.c0..c3`), injectées par un
+//! encodeur déterministe du banc (pas de dictionnaire lexical) : la « classe » d'un
+//! tour vient de sa représentation contrôlée. Il n'y a pas de « classes inédites » :
 //! il y a quatre intentions, deux servent à l'entraînement, deux restent aveugles.
 //!
 //! Le partage par domaine n'est pas connu du routeur : c'est une relation **déclarée**
@@ -36,10 +37,35 @@ use async_trait::async_trait;
 use obrain_common::types::Value;
 use this::storage::obrain::ObrainStore;
 use this_agent::Stop;
+use this_harness::cognition::{
+    Classification, LearnedClass, SemanticEncoder, TaskRepr, Uncertainty,
+};
 use this_harness::routing::{
     ArmKey, ArmStats, Capabilities, CostBasis, Decision, Learning, MemoryPool, Pick, RouterSpec,
     RoutingSettings, SequenceSeeds, TurnInput, TurnRouter,
 };
+
+/// Encodeur DÉTERMINISTE du banc : chaque identité synthétique a son vecteur
+/// one-hot. Ce n'est pas un dictionnaire de mots-clés — le texte complet est
+/// associé à une représentation contrôlée par l'expérience.
+struct EncSynthetique;
+
+impl SemanticEncoder for EncSynthetique {
+    fn encode(&self, text: &str) -> Option<Vec<f32>> {
+        TEXTES.iter().position(|(_, t)| *t == text).map(|i| {
+            let mut v = vec![0.0f32; TEXTES.len()];
+            v[i] = 1.0;
+            v
+        })
+    }
+}
+
+/// Classe d'un vecteur one-hot du banc : l'identité synthétique correspondante.
+fn classe_du_vecteur(repr: &TaskRepr) -> Option<&'static str> {
+    let v = repr.embedding.as_ref()?;
+    let i = v.iter().position(|x| *x > 0.5)?;
+    TEXTES.get(i).map(|(c, _)| *c)
+}
 
 fn executer<F: std::future::Future<Output = T>, T>(f: F) -> T {
     futures::executor::block_on(f)
@@ -76,25 +102,25 @@ fn parametres() -> RoutingSettings {
 const PROVIDERS: [&str; 4] = ["a", "b", "c", "d"];
 const MODELES: [&str; 4] = ["m1", "m2", "m3", "m4"];
 
-/// Textes qui déclenchent chaque intention (détecteur à mots-clés du harness).
+/// Texte synthétique de chaque identité cognitive (lu par l'encodeur du banc).
 const TEXTES: [(&str, &str); 4] = [
-    ("chat.debug", "pourquoi ça échoue avec une erreur ?"),
-    ("chat.explore", "explique comment fonctionne le routage"),
-    ("chat.impact", "change le code existant et relis-le"),
+    ("repr.c0", "pourquoi ça échoue avec une erreur ?"),
+    ("repr.c1", "explique comment fonctionne le routage"),
+    ("repr.c2", "change le code existant et relis-le"),
     (
-        "chat.plan",
+        "repr.c3",
         "implémente une nouvelle fonctionnalité et planifie-la",
     ),
 ];
 
 /// Deux domaines DÉCLARÉS : l'un où `a` domine, l'autre où `b` domine.
 const DOMAINES: [(&str, [&str; 2]); 2] = [
-    ("d0", ["chat.debug", "chat.explore"]),
-    ("d1", ["chat.impact", "chat.plan"]),
+    ("d0", ["repr.c0", "repr.c1"]),
+    ("d1", ["repr.c2", "repr.c3"]),
 ];
 
-const ENTRAINEMENT: [&str; 2] = ["chat.debug", "chat.impact"];
-const AVEUGLES: [&str; 2] = ["chat.explore", "chat.plan"];
+const ENTRAINEMENT: [&str; 2] = ["repr.c0", "repr.c2"];
+const AVEUGLES: [&str; 2] = ["repr.c1", "repr.c3"];
 
 const TOURS_ENTRAINEMENT: usize = 60;
 const TOURS_AVEUGLE: usize = 40;
@@ -378,6 +404,19 @@ struct Relationnel {
 
 #[async_trait(?Send)]
 impl Learning for LocalSeul {
+    async fn classify(&self, repr: &TaskRepr) -> Classification {
+        match classe_du_vecteur(repr) {
+            Some(c) => Classification {
+                class: Some(LearnedClass(c.to_string())),
+                formation: None,
+                uncertainty: Uncertainty::Established(1.0),
+                nearest: Some(LearnedClass(c.to_string())),
+                similarity: Some(1.0),
+            },
+            None => Classification::inconnue(),
+        }
+    }
+
     async fn arms(&self, classe: &str) -> Vec<ArmStats> {
         let t0 = Instant::now();
         self.couts.appels_arms.fetch_add(1, Ordering::Relaxed);
@@ -419,6 +458,19 @@ impl Learning for LocalSeul {
 
 #[async_trait(?Send)]
 impl Learning for Relationnel {
+    async fn classify(&self, repr: &TaskRepr) -> Classification {
+        match classe_du_vecteur(repr) {
+            Some(c) => Classification {
+                class: Some(LearnedClass(c.to_string())),
+                formation: None,
+                uncertainty: Uncertainty::Established(1.0),
+                nearest: Some(LearnedClass(c.to_string())),
+                similarity: Some(1.0),
+            },
+            None => Classification::inconnue(),
+        }
+    }
+
     async fn arms(&self, classe: &str) -> Vec<ArmStats> {
         let t0 = Instant::now();
         self.couts.appels_arms.fetch_add(1, Ordering::Relaxed);
@@ -487,6 +539,7 @@ fn jouer(learning: Rc<dyn Learning>, couts: Rc<Couts>) -> Bilan {
             "m1".to_string(),
         )
         .learning(learning)
+        .encoder(Rc::new(EncSynthetique))
         .auto()
         .settings(parametres()),
     );
@@ -596,7 +649,7 @@ fn l4_natif_cycle_du_routeur_et_couts() {
     println!("===== L4 natif · cycle réel du routeur (route → record → settle) =====");
     println!(
         "  {: <12} {: >12} {: >12} {: >10} {: >9}",
-        "apprenant", "debug(entr.)", "impact(entr.)", "explore", "plan"
+        "apprenant", "c0(entr.)", "c2(entr.)", "c1", "c3"
     );
     for (nom, bilan, _) in &resultats {
         let taux = |c: &str| match bilan.succes.get(c) {
@@ -606,10 +659,10 @@ fn l4_natif_cycle_du_routeur_et_couts() {
         println!(
             "  {: <12} {: >12} {: >12} {: >10} {: >9}",
             nom,
-            taux("chat.debug"),
-            taux("chat.impact"),
-            taux("chat.explore"),
-            taux("chat.plan")
+            taux("repr.c0"),
+            taux("repr.c2"),
+            taux("repr.c1"),
+            taux("repr.c3")
         );
     }
     println!("  --- coûts mesurés ---");
@@ -681,18 +734,18 @@ fn l4_natif_cycle_du_routeur_et_couts() {
         }
     );
     println!(
-        "  [{}] H2 le partage ne dégrade pas les intentions d'entraînement — debug {:.3} vs {:.3}, impact {:.3} vs {:.3}",
-        if taux_de(relat, "chat.debug") + taux_de(relat, "chat.impact")
-            >= taux_de(local, "chat.debug") + taux_de(local, "chat.impact")
+        "  [{}] H2 le partage ne dégrade pas les intentions d'entraînement — c0 {:.3} vs {:.3}, c2 {:.3} vs {:.3}",
+        if taux_de(relat, "repr.c0") + taux_de(relat, "repr.c2")
+            >= taux_de(local, "repr.c0") + taux_de(local, "repr.c2")
         {
             "CONFIRMÉE"
         } else {
             "RÉFUTÉE  "
         },
-        taux_de(local, "chat.debug"),
-        taux_de(relat, "chat.debug"),
-        taux_de(local, "chat.impact"),
-        taux_de(relat, "chat.impact")
+        taux_de(local, "repr.c0"),
+        taux_de(relat, "repr.c0"),
+        taux_de(local, "repr.c2"),
+        taux_de(relat, "repr.c2")
     );
     println!(
         "  [MESURÉ  ] H3 le coût du partage est mesurable — voir requêtes/tour et durées par appel"
