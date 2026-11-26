@@ -1,0 +1,7 @@
+# Verdict — référence COMMUNE (SHA unique)
+commit = c7a25ac5998ea93f530445c2c5eefc4acb5fc2a2
+obrain = 89d169d7d481c59018b712d499b8180c384fd405
+sha256(Cargo.lock) = 3eb6502836f7fefe898bbe8b02fd43b4ceebb61fc683a49a4ca62b93dd49fe5e
+ENREGISTREMENT_VERSION = 2
+commande = cargo test --features obrain,objects-toolbox --test concurrence_g1g5 --test h3_v2_cycle_harness --test h3_v2_chaine_autorite --test reconciliation_composant --test durabilite_obrr ; cargo test -p this-harness --test modele_causal
+résultats = G1-G5 5 | durabilité 6(+1 interpro) | H3 chaîne 7 | H3 cycle 5 | composant 2 | A-2 20 = 45 verts, 0 failed, EXIT=0
