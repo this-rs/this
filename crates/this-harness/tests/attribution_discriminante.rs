@@ -204,18 +204,11 @@ struct SansEnregistrement {
 
 #[async_trait(?Send)]
 impl Learning for SansEnregistrement {
-    async fn classify(&self, _repr: &TaskRepr) -> Classification {
-        Classification {
-            class: None,
-            formation: Some(this_harness::cognition::Formation {
-                projection: this_harness::cognition::ProjectionKey("repr.p".into()),
-                vector: Vec::new(),
-                similarity: None,
-            }),
-            uncertainty: Uncertainty::Formed(0.0),
-            nearest: None,
-            similarity: None,
-        }
+    async fn classify(&self, repr: &TaskRepr) -> Classification {
+        // `classer` RÉEL, sans prototype : toute représentation valide devient une
+        // proposition de formation (`class: None`), jamais une identité constituée.
+        // Deux vecteurs distincts → deux propositions distinctes.
+        this_harness::cognition::classer(repr, &[], 0.9, 1000)
     }
     async fn arms(&self, classe: &str) -> Vec<ArmStats> {
         vec![
@@ -260,15 +253,37 @@ fn deux_formations_non_enregistrees_n_ecrivent_aucune_observation() {
     );
 
     // Deux représentations distinctes (A et B), toutes deux des formations non
-    // enregistrées : route → record → settle.
+    // enregistrées : route → record → settle. On EXIGE les deux décisions, leur
+    // application effective, les appels record et les règlements.
+    let mut propositions = Vec::new();
     for texte in ["A", "B"] {
         let routed = run(routeur.route(tour(texte)));
-        let Some(dec) = routed.decision.clone() else {
-            continue;
+        let dec = routed.decision.clone().expect("décision exigée");
+        assert!(dec.applied, "la décision doit être appliquée ({texte})");
+        assert!(
+            dec.cognitive_class.is_none(),
+            "aucune identité constituée ({texte})"
+        );
+        let repr = TaskRepr {
+            embedding: Enc.encode(texte),
+            ..Default::default()
         };
+        let c = run(mem.classify(&repr));
+        let f = c
+            .formation
+            .as_ref()
+            .expect("proposition de formation produite");
+        propositions.push(f.projection.clone());
         run(routeur.record(&dec));
         run(routeur.settle(&Stop::Done, None, true));
     }
+
+    // Les deux propositions sont réellement DISTINCTES (représentations valides
+    // différentes), pas deux fois la même projection figée.
+    assert_ne!(
+        propositions[0], propositions[1],
+        "deux formations distinctes doivent produire deux projections distinctes"
+    );
 
     // Aucune observation cognitive commune : `class_key()` est None, `record`
     // n'insère rien, `settle` n'écrit rien. Ni repr.unknown, ni chat.general,
@@ -277,5 +292,44 @@ fn deux_formations_non_enregistrees_n_ecrivent_aucune_observation() {
         *mem.ecrites.lock().unwrap(),
         0,
         "aucune observation cognitive commune ne doit être écrite"
+    );
+}
+
+#[test]
+fn controle_positif_une_identite_constituee_ecrit_une_observation() {
+    // Même cycle, mais avec un apprenant qui CONSTITUE une identité : l'observation
+    // doit être écrite. C'est le témoin positif du test précédent.
+    let mem = Rc::new(MemoireDeux::new());
+    let pool = Rc::new(MemoryPool::new(vec![cand("a", "m1"), cand("b", "m2")]));
+    let routeur = TurnRouter::new(
+        RouterSpec::new(
+            pool,
+            Rc::new(SequenceSeeds::from(1)),
+            "a".to_string(),
+            "m1".to_string(),
+        )
+        .learning(mem.clone())
+        .encoder(Rc::new(Enc))
+        .auto()
+        .settings(RoutingSettings {
+            exploration_epsilon: 0.0,
+            ..Default::default()
+        }),
+    );
+
+    let routed = run(routeur.route(tour("A")));
+    let dec = routed.decision.clone().expect("décision");
+    assert!(dec.applied);
+    assert!(
+        dec.cognitive_class.is_some(),
+        "identité constituée attendue"
+    );
+    run(routeur.record(&dec));
+    run(routeur.settle(&Stop::Done, None, true));
+
+    assert_eq!(
+        mem.ecrites.lock().unwrap().len(),
+        1,
+        "une identité constituée doit écrire exactement une observation"
     );
 }
