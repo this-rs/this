@@ -160,14 +160,12 @@ pub struct Decision {
 }
 
 impl Decision {
-    /// La classe à laquelle l'apprentissage doit attribuer cette décision : la
-    /// classe cognitive si elle a circulé jusqu'ici, sinon la clé de compatibilité
-    /// de la signature. C'est LA source d'attribution de `record` / `settle` — les
-    /// apprenants ne doivent pas recalculer `signature.arm_key()` eux-mêmes.
-    pub fn class_key(&self) -> String {
-        self.cognitive_class
-            .clone()
-            .unwrap_or_else(|| self.signature.arm_key())
+    /// L'identité cognitive constituée à laquelle l'apprentissage doit attribuer
+    /// cette décision, si elle existe. `None` = aucune connaissance constituée :
+    /// `record` ne doit RIEN attribuer (jamais un repli sur `signature.arm_key()`,
+    /// qui est une métadonnée de compatibilité, pas une identité).
+    pub fn class_key(&self) -> Option<String> {
+        self.cognitive_class.clone()
     }
 }
 
