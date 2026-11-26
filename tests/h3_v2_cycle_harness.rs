@@ -77,7 +77,10 @@ fn reconcilier(
         decision_id: 0,
         autorite_consommateur: 0,
         cible: reference.cible(),
-        effets_attendus: effets.iter().map(|(k, v)| (k.to_string(), Value::Int64(*v))).collect(),
+        effets_attendus: effets
+            .iter()
+            .map(|(k, v)| (k.to_string(), Value::Int64(*v)))
+            .collect(),
         reference_bytes: reference.to_bytes(),
     };
     reconcilier_composant(&enr, reference, res).vers_backend()
@@ -175,14 +178,7 @@ fn h3_v2_cycle_harness_reel_nominal() {
     //    cycle Attribution (aucun appel de banc, aucune logique locale).
     assert_eq!(res.integrite, IntegriteTentative::Integrale);
     assert_eq!(
-        resoudre_operation(
-            &mut attr,
-            decision_id,
-            tentative,
-            &enr,
-            &reference,
-            &res
-        ),
+        resoudre_operation(&mut attr, decision_id, tentative, &enr, &reference, &res),
         IssueResolutionOperation::Resolu(true),
         "liaison conforme + effet engagé ET canonique → confirmé via le chemin opérationnel"
     );

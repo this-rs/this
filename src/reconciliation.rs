@@ -208,7 +208,8 @@ fn lire_chaine(o: &[u8], pos: &mut usize) -> Result<String, DecodageEnregistreme
         .get(*pos..fin)
         .ok_or_else(|| DecodageEnregistrement::Malforme("troncature chaîne".into()))?;
     *pos = fin;
-    String::from_utf8(t.to_vec()).map_err(|_| DecodageEnregistrement::Malforme("clé non UTF-8".into()))
+    String::from_utf8(t.to_vec())
+        .map_err(|_| DecodageEnregistrement::Malforme("clé non UTF-8".into()))
 }
 
 /// Nom du variant d'une `Value` — pour nommer précisément le type refusé.
@@ -383,7 +384,9 @@ impl EnregistrementOriginal {
             .to_vec();
         pos = fin;
         if pos != octets.len() {
-            return Err(DecodageEnregistrement::Malforme("octets excédentaires".into()));
+            return Err(DecodageEnregistrement::Malforme(
+                "octets excédentaires".into(),
+            ));
         }
         Ok(EnregistrementOriginal {
             version,
@@ -417,7 +420,11 @@ pub fn reconcilier(
     res: &ResolutionTentative,
 ) -> VerdictReconciliation {
     // 1. Complétude des effets (L1).
-    let attendus: Vec<&str> = enr.effets_attendus.iter().map(|(k, _)| k.as_str()).collect();
+    let attendus: Vec<&str> = enr
+        .effets_attendus
+        .iter()
+        .map(|(k, _)| k.as_str())
+        .collect();
     if reference.effets() != attendus.as_slice() {
         return VerdictReconciliation::Incomplet;
     }
@@ -562,7 +569,6 @@ pub fn resoudre_operation(
         None => IssueResolutionOperation::VerdictNuance(verdict),
     }
 }
-
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // Durabilité du record : écriture atomique + qualification d'admissibilité

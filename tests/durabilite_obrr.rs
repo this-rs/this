@@ -978,7 +978,9 @@ fn lecture_croisee_v1_v2() {
     // Sans ce refus, les octets V5 se liraient comme un V1 décalé de 51 octets.
     assert_eq!(
         decoder_v1(&v2),
-        Err(DecodageEnregistrement::VersionInconnue(ENREGISTREMENT_VERSION)),
+        Err(DecodageEnregistrement::VersionInconnue(
+            ENREGISTREMENT_VERSION
+        )),
         "le lecteur V1 refuse un V5 : c'est ce qui rend le bump suffisant"
     );
 
