@@ -124,15 +124,31 @@ const DOMAINES: [(&str, [&str; 2]); 2] = [
     ("d1", ["repr.c2", "repr.c3"]),
 ];
 
+/// Domaines exprimés en CLÉS STABLES (identités expérimentales), pas en noms
+/// cognitifs : la probabilité latente `theta` ne dépend plus du nom de l'identité.
+const DOMAINES_STABLES: [(&str, [&str; 2]); 2] = [("d0", ["k0", "k1"]), ("d1", ["k2", "k3"])];
+
 const ENTRAINEMENT: [&str; 2] = ["repr.c0", "repr.c2"];
 const AVEUGLES: [&str; 2] = ["repr.c1", "repr.c3"];
 
 const TOURS_ENTRAINEMENT: usize = 60;
 const TOURS_AVEUGLE: usize = 40;
 
+/// Clé stable d'une identité cognitive : l'identifiant EXPÉRIMENTAL, indépendant
+/// du nom et de l'ordre. C'est la correspondance externe entre l'identité
+/// cognitive (`repr.c0`) et l'identité expérimentale (`k0`).
+fn cle_stable(classe: &str) -> &'static str {
+    TEXTES
+        .iter()
+        .find(|(_, c, _)| *c == classe)
+        .map(|(k, _, _)| *k)
+        .expect("identité inconnue du banc")
+}
+
 fn domaine_de(classe: &str) -> &'static str {
-    for (d, classes) in DOMAINES {
-        if classes.contains(&classe) {
+    let cle = cle_stable(classe);
+    for (d, cles) in DOMAINES_STABLES {
+        if cles.contains(&cle) {
             return d;
         }
     }
@@ -188,11 +204,7 @@ fn tirage(classe: &str, provider: &str, j: usize, graine: u64) -> bool {
     // latents (indépendants du nom et de la stratégie évaluée).
     // Le tirage est indexé par la CLÉ STABLE de l'identité (indépendante du nom et
     // de l'ordre), pas par sa position ni son nom.
-    let cle = TEXTES
-        .iter()
-        .find(|(_, c, _)| *c == classe)
-        .map(|(k, _, _)| *k)
-        .expect("identité inconnue du banc : ne pas l'assimiler à la première");
+    let cle = cle_stable(classe);
     let mut etat = fnv1a(&format!("{graine}/{cle}/{provider}"));
     for _ in 0..=j {
         lcg(&mut etat);
@@ -786,4 +798,22 @@ fn la_reproduction_est_exacte_sous_la_meme_graine() {
 #[should_panic(expected = "identité inconnue du banc")]
 fn une_identite_inconnue_panique_au_lieu_de_s_assimiler() {
     let _ = tirage("repr.inconnue", "a", 0, 11);
+}
+
+#[test]
+fn la_probabilite_latente_ne_depend_pas_du_nom_de_l_identite() {
+    // theta() est indexée par la clé stable (k0..k3), pas par le nom. Le domaine
+    // d'une identité est donc stable sous renommage (k0 reste d0).
+    assert_eq!(domaine_de("repr.c0"), "d0");
+    assert_eq!(domaine_de("repr.c1"), "d0");
+    assert_eq!(domaine_de("repr.c2"), "d1");
+    assert_eq!(domaine_de("repr.c3"), "d1");
+    // La correspondance identité cognitive → identité expérimentale est externe.
+    assert_eq!(cle_stable("repr.c0"), "k0");
+    assert_eq!(cle_stable("repr.c1"), "k1");
+    assert_eq!(cle_stable("repr.c2"), "k2");
+    assert_eq!(cle_stable("repr.c3"), "k3");
+    // Le tirage d'une même identité est identique quel que soit l'ordre des
+    // stratégies évaluées (il ne dépend que de la clé stable + graine + candidat).
+    assert_eq!(tirage("repr.c0", "a", 0, 11), tirage("repr.c0", "a", 0, 11));
 }
